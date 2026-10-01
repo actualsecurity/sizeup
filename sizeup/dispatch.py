@@ -178,6 +178,12 @@ def parse(text: str) -> Dispatch:
             if len(crosses) == 2:
                 break
         d.cross_street = " and ".join(crosses)
+    elif (roads := [_clean_street(m.group(1)) for m in STREET.finditer(masked)]):
+        # No house number (highways, intersections): the first named road, the next one as the cross.
+        # "Sprain Brook Parkway southbound at the Bronx River Parkway interchange"
+        roads = [r for i, r in enumerate(roads) if r and r not in roads[:i]]
+        d.location = roads[0]
+        d.cross_street = roads[1] if len(roads) > 1 else ""
     else:
         # No street address heard: the clause after the type / "respond to" (place names, intersections).
         start = 0

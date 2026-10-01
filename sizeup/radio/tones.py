@@ -187,9 +187,16 @@ class TonePlan:
         return abs(hz - want) <= self.tolerance * want
 
     def match(self, ev: ToneEvent) -> ToneEvent:
-        names = tuple(dict.fromkeys(c.name for c in self.codes
-                                    if self._near(ev.a_hz, c.a_hz) and self._near(ev.b_hz, c.b_hz)))
-        ev.names = names
+        hits = [c.name for c in self.codes if self._near(ev.a_hz, c.a_hz) and self._near(ev.b_hz, c.b_hz)]
+        # One name per department, from the strongest evidence: heard on the air > listed > estimated.
+        rank = lambda n: 0 if n.endswith(" (heard)") else 2 if n.endswith(" (est.)") else 1
+        base = lambda n: n.removesuffix(" (heard)").removesuffix(" (est.)")
+        best: dict[str, str] = {}
+        for n in hits:
+            b = base(n)
+            if b not in best or rank(n) < rank(best[b]):
+                best[b] = n
+        ev.names = tuple(best.values())
         return ev
 
     def match_all(self, events: Iterable[ToneEvent]) -> list[ToneEvent]:

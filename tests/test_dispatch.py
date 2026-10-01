@@ -63,3 +63,12 @@ def test_real_page_with_bare_engine_numbers():
     assert d.units == ["Ladder 1"] and d.numbers[:2] == [174, 175]   # the app maps 174/175 via the roster
     assert d.incident_type == "Fire alarm" and d.location == "443 terrytown road"
     assert d.cross_street.startswith("manhattan avenue and yellow")
+
+
+def test_real_highway_page_without_house_number():
+    # South 2, 2026-10-01 16:00, tones 496.8/767.4 (Eastchester VAC, voice "EVAC").
+    d = parse("6-2 Control EVAC, one ambulance requested to mutilate to Y onkers, the Springbrook Parkway "
+              "southbound at the Bronx River Parkway interchange, mile marker 0. For a motor vehicle accident "
+              "with injuries, you'll be the third ambulance.")
+    assert d.incident_type == "MVA"
+    assert d.location == "springbrook parkway" and d.cross_street == "bronx river parkway"
