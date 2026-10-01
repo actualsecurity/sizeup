@@ -21,6 +21,10 @@ from typing import Callable
 import numpy as np
 
 NOISE_LABEL = re.compile(r"^[\[(*].*[\])*]$")  # "(static)", "[MUSIC]" — not speech
+# What whisper says about a short burst of noise (a mic click, a squelch tail).
+HALLUCINATIONS = {"thank you", "thanks", "thank you very much", "you", "bye", "okay", "thanks for watching",
+                  "thank you for watching", "so", "oh"}
+SHORT_S = 1.5
 
 
 def wav_bytes(audio: np.ndarray, rate: int = 16000) -> bytes:
@@ -34,15 +38,59 @@ def wav_bytes(audio: np.ndarray, rate: int = 16000) -> bytes:
     return buf.getvalue()
 
 
-def voice_band(audio: np.ndarray, rate: int = 16000) -> np.ndarray:
-    """300-3400 Hz band-pass + normalise: drops FM hiss above the voice and CTCSS below it."""
-    x = audio.astype(np.float64) - float(np.mean(audio))
-    X = np.fft.rfft(x)
+DEEMPH_TAU = 750e-6     # land-mobile NFM de-emphasis (6 dB/octave, corner ~212 Hz)
+TARGET_DBFS = -16.0     # loudness of the speech after processing
+PEAK_LIMIT = 0.9
+
+
+def radio_voice(audio: np.ndarray, rate: int = 16000, deemph: bool = True) -> np.ndarray:
+    """FM discriminator output -> what a radio's speaker plays, at a steady loudness.
+
+    De-emphasis (transmitters pre-emphasise voice), 300-3000 Hz band-pass (drops the CTCSS
+    tone + DC drift below and the FM hiss above, which otherwise dominate the level), then
+    set the *speech* loudness: RMS of the louder half of 20 ms blocks to TARGET_DBFS, with
+    a peak limit. Used for both the clips people play and the audio speech-to-text gets.
+    deemph=False for already-decoded digital voice (P25 calls from trunk-recorder)."""
+    x = audio.astype(np.float64)
+    if len(x) < 64:
+        return x.astype(np.float32)
+    X = np.fft.rfft(x - x.mean())
     f = np.fft.rfftfreq(len(x), 1 / rate)
-    X[(f < 300) | (f > 3400)] = 0
-    y = np.fft.irfft(X, len(x))
-    peak = np.percentile(np.abs(y), 99.5) or 1.0
-    return (y / peak * 0.7).astype(np.float32)
+    if deemph:
+        X = X / (1 + 1j * 2 * np.pi * f * DEEMPH_TAU)
+    # Gentle (raised-cosine) band edges: a brick wall rings audibly on short clips.
+    gain = np.ones_like(f)
+    lo, hi = (f < 300), (f > 3000)
+    gain[f < 200] = 0.0
+    m = (f >= 200) & lo
+    gain[m] = 0.5 - 0.5 * np.cos(np.pi * (f[m] - 200) / 100)
+    gain[f > 3400] = 0.0
+    m = hi & (f <= 3400)
+    gain[m] = 0.5 + 0.5 * np.cos(np.pi * (f[m] - 3000) / 400)
+    y = np.fft.irfft(X * gain, len(x))
+    blk = rate // 50
+    n = len(y) // blk
+    if n >= 2:
+        e = np.sqrt((y[: n * blk].reshape(n, blk) ** 2).mean(axis=1))
+        speech_rms = float(np.sqrt(np.mean(np.sort(e)[n // 2:] ** 2)))
+    else:
+        speech_rms = float(np.sqrt(np.mean(y ** 2)))
+    if speech_rms <= 1e-9:
+        return np.zeros(len(y), np.float32)
+    # Gain from the speech level; clicks (key-up, squelch crash) are soft-clipped instead of
+    # being allowed to turn the whole clip down. Only real speech peaks limit the gain.
+    g = 10 ** (TARGET_DBFS / 20) / speech_rms
+    body = float(np.percentile(np.abs(y), 99.5)) * g
+    if body > PEAK_LIMIT:
+        g *= PEAK_LIMIT / body
+    z = y * g
+    knee = 0.6
+    over = np.abs(z) > knee
+    z[over] = np.sign(z[over]) * (knee + (1 - knee) * np.tanh((np.abs(z[over]) - knee) / (1 - knee)))
+    return z.astype(np.float32)
+
+
+voice_band = radio_voice  # older name
 
 
 class WhisperClient:
@@ -98,7 +146,8 @@ class Transcriber:
             item, audio = self._q.get()
             for attempt in range(3):
                 try:
-                    raw, conf = self.client.transcribe(voice_band(audio), self.prompt(item))
+                    raw, conf = self.client.transcribe(radio_voice(audio, deemph=getattr(item, "fm", True)),
+                                                      self.prompt(item))
                     break
                 except Exception as e:
                     self.last_error = f"{type(e).__name__}: {e}"[:160]
@@ -107,7 +156,9 @@ class Transcriber:
                 item.status = "error"
                 self.on_done(item)
                 continue
-            if not raw or NOISE_LABEL.match(raw):
+            said = re.sub(r"[^a-z0-9 ]", "", raw.lower()).strip()
+            if (not raw or NOISE_LABEL.match(raw) or not said  # "." = squelch tail
+                    or (len(audio) / 16000 < SHORT_S and said in HALLUCINATIONS)):
                 raw, item.status = "", "no_speech"
             else:
                 item.status = "done"

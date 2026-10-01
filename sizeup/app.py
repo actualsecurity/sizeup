@@ -32,7 +32,7 @@ from sizeup.radio.fm import RATE, Channel, NfmReceiver, Segment
 from sizeup.radio.p25 import Call, CallIngest
 from sizeup.radio.page import Page, assemble
 from sizeup.radio.tones import TonePlan
-from sizeup.stt import Transcriber, WhisperClient, wav_bytes
+from sizeup.stt import Transcriber, WhisperClient, radio_voice, wav_bytes
 from sizeup.web.server import WebServer
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -133,8 +133,10 @@ class App:
 
     # -- clips ----------------------------------------------------------------------------------
 
-    def _keep_clip(self, cid: str, audio: np.ndarray) -> None:
-        pcm = (np.clip(audio, -1, 1) * 32767).astype(np.int16)
+    def _keep_clip(self, cid: str, audio: np.ndarray, processed: bool = False) -> None:
+        # Stored as heard through a radio speaker (de-emphasis, voice band, steady loudness),
+        # not the raw discriminator output, which is quiet and dominated by CTCSS + hiss.
+        pcm = (np.clip(audio if processed else radio_voice(audio), -1, 1) * 32767).astype(np.int16)
         with self._lock:
             self.clips[cid] = pcm
             while len(self.clips) > 400:
@@ -186,7 +188,8 @@ class App:
         t = Traffic(call.id, call.label, call.start, call.end, "", status="pending",
                     unit=", ".join(call.units), talkgroup=call.talkgroup)
         if call.audio is not None:
-            self._keep_clip(t.id, call.audio)
+            t.fm = False  # decoded P25 voice: no FM de-emphasis  # type: ignore[attr-defined]
+            self._keep_clip(t.id, radio_voice(call.audio, deemph=False), processed=True)
             self.stt.submit(t, call.audio)
 
     def _transcribed(self, item) -> None:

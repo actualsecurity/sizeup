@@ -69,3 +69,17 @@ def test_voice_only_and_unknown_tones_are_kept():
 
 def test_idle_hiss_never_opens():
     assert run_squelch(hiss(60.0)) == []
+
+
+def test_radio_voice_removes_ctcss_and_hiss_and_sets_loudness():
+    from sizeup.stt import TARGET_DBFS, radio_voice
+    # Measured on real FG1 clips: CTCSS + hiss louder than the voice, speech ~ -30 dBFS.
+    raw = keyed(0.05 * voice_like(3.0)) + 0.05 * rng.standard_normal(RATE * 3)
+    raw[100] = 0.9  # a key-up click must not turn the whole clip down
+    y = radio_voice(raw)
+    spec, f = np.abs(np.fft.rfft(y)), np.fft.rfftfreq(len(y), 1 / RATE)
+    assert spec[np.abs(f - 156.7) < 3].max() < 0.05 * spec.max()          # sub-audible tone gone
+    blk = 320
+    e = np.sqrt((y[: len(y) // blk * blk].reshape(-1, blk) ** 2).mean(axis=1))
+    speech = 20 * np.log10(np.sqrt(np.mean(np.sort(e)[len(e) // 2:] ** 2)))
+    assert abs(speech - TARGET_DBFS) < 1.5 and np.abs(y).max() <= 1.0
