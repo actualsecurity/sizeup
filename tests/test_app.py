@@ -63,3 +63,18 @@ def test_page_opens_incident_and_traffic_attaches(tmp_path):
     assert st["incidents"][0]["id"] == inc.id and st["pages"][0]["dispatch"]["incident_type"] == "Fire alarm"
     page_id = st["pages"][0]["id"]
     assert app.clip(page_id)[:4] == b"RIFF" and app.clip("../etc") is None
+
+
+def test_mic_clicks_are_not_transcribed(tmp_path):
+    # Real FG1 bench: 0.7-0.8 s key-ups with nothing said came back from whisper as "Yes.".
+    app = App(cfg(tmp_path))
+    app._kind = {"FG1": "traffic"}
+    sent = []
+    app.stt.submit = lambda item, audio: sent.append(item)
+    now = time.time()
+    click = (0.2 * np.random.default_rng(2).standard_normal(int(RATE * 0.8))).astype(np.float32)
+    app._segment(Channel(453.0375, "FG1"), Segment(now, now + 0.8, click, 20.0))
+    assert sent == [] and app.state()["loose_traffic"] == []
+    speech = (0.2 * np.random.default_rng(3).standard_normal(int(RATE * 1.4))).astype(np.float32)
+    app._segment(Channel(453.0375, "FG1"), Segment(now + 5, now + 6.4, speech, 20.0))  # "What is it?" was 1.4 s
+    assert len(sent) == 1
