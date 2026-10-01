@@ -67,3 +67,20 @@ def test_plan_matches_within_tolerance():
     assert [e.names for e in ev] == [("Port Chester FD",), ("County all call",)]
     ev = plan.match_all(decode(np.concatenate([tone(1150.0, 1.0), tone(1530.0, 3.0)])))
     assert ev[0].names == ()  # A is 6 % off: someone else's page
+
+
+def test_same_frequency_code_and_county_list():
+    # Larchmont FD / New Rochelle: A = B (A 1 s + B 3 s at one frequency merge into one ~4 s tone).
+    from sizeup.config import load
+    from pathlib import Path
+    ev = decode(np.concatenate([tone(435.1, 1.0), tone(435.1, 3.0), gap(0.5)]))
+    assert len(ev) == 1 and ev[0].kind == "two_tone" and ev[0].a_hz == pytest.approx(435.1, abs=2)
+    assert ev[0].b_hz == pytest.approx(ev[0].a_hz)
+    root = Path(__file__).parent.parent
+    plan = TonePlan(list(load(root / "config.example.toml").tones))
+    assert plan.match(ev[0]).names == ("Larchmont FD", "Peekskill")
+    # Real South 2 pages 2026-10-01: PCFD's code and an estimated-list match; an unlisted pair stays unknown.
+    from sizeup.radio.tones import ToneEvent
+    assert plan.match(ToneEvent("two_tone", 349.1, 311.1, 0, 1)).names == ("Port Chester FD",)
+    assert plan.match(ToneEvent("two_tone", 496.8, 767.4, 0, 1)).names == ("Eastchester VAC (est.)",)
+    assert plan.match(ToneEvent("two_tone", 741.3, 623.7, 0, 1)).names == ()

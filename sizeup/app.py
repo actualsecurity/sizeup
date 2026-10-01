@@ -247,6 +247,11 @@ class App:
             return
         page: Page = item
         d = parse(page.raw) if page.raw else None
+        if d is not None:  # units dispatched name their department ("Engine 61" -> Port Chester FD)
+            for u in d.units:
+                dep = self.cfg.unit_departments.get(u)
+                if dep and dep not in d.departments:
+                    d.departments.append(dep)
         page.dispatch = d.as_dict() if d else None  # type: ignore[attr-defined]
         log(f"{page.label} {page.kind}: {page.raw or '(' + page.status + ')'}")
         if d is None:

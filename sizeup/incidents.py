@@ -53,6 +53,8 @@ class Incident:
     cross_street: str
     time_out: str
     geo: dict | None = None             # {lat, lon, label, kind, confidence}
+    units: list[str] = field(default_factory=list)   # dispatched apparatus, "Engine 61"
+    code: str = ""                      # priority dispatch code, "69-D-6"
     status: str = "active"              # active | closed
     pages: list[str] = field(default_factory=list)
     page_text: list[str] = field(default_factory=list)
@@ -104,6 +106,10 @@ class IncidentStore:
                             setattr(inc, k, getattr(d, k))
                     if inc.incident_type == "Unknown" and d.incident_type != "Unknown":
                         inc.incident_type, inc.category = d.incident_type, d.category
+                    inc.code = inc.code or getattr(d, "code", "")
+                    for u in getattr(d, "units", []):
+                        if u not in inc.units:
+                            inc.units.append(u)
                     if inc.geo is None and d.location:
                         inc.geo = self.geocode(d)
                     for x in depts:
@@ -112,7 +118,8 @@ class IncidentStore:
                     return inc
         inc = Incident(uuid.uuid4().hex[:10], at, at, depts, d.incident_type, d.category, d.location,
                        d.cross_street, d.time_out, self.geocode(d) if d.location else None,
-                       pages=[page_id], page_text=[d.text], page_starts=[at])
+                       pages=[page_id], page_text=[d.text], page_starts=[at],
+                       units=list(getattr(d, "units", [])), code=getattr(d, "code", ""))
         with self._lock:
             self.incidents.append(inc)
         return inc

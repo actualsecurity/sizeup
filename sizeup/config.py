@@ -43,6 +43,7 @@ class Config:
     p25_talkgroups: dict[int, str] = field(default_factory=dict)
     p25_aliases: dict[str, str] = field(default_factory=dict)
     mdc_aliases: dict[str, str] = field(default_factory=dict)   # MDC-1200 unit ID ("0611") -> name
+    unit_departments: dict[str, str] = field(default_factory=dict)  # "Engine 60" -> "Port Chester FD"
     clips_dir: str = ""
     keep_hours: float = 24.0
     home: tuple[float, float, float] = (-73.6640, 41.0130, 13.4)   # lon, lat, zoom
@@ -62,10 +63,10 @@ def load(path: str | Path) -> Config:
         data = tomllib.loads(path.read_text())
     except tomllib.TOMLDecodeError as e:
         raise ConfigError(f"{path}: {e}") from e
-    _take(data, "config", {"station", "web", "radio", "tones", "stt", "p25", "mdc", "storage", "map"})
+    _take(data, "config", {"station", "web", "radio", "tones", "stt", "p25", "mdc", "units", "storage", "map"})
     st = _take(data.get("station", {}), "station", {"id", "name"})
     web = _take(data.get("web", {}), "web", {"host", "port"})
-    radio = _take(data.get("radio", {}), "radio", {"rtl_fm", "channels"})
+    radio = _take(data.get("radio", {}), "radio", {"rtl_fm", "channels", "tones_file"})
     channels = []
     for i, c in enumerate(radio.get("channels", [])):
         _take(c, f"radio.channels[{i}]", {"label", "mhz", "kind", "device", "gain_db", "squelch_db"})
@@ -74,6 +75,19 @@ def load(path: str | Path) -> Config:
         channels.append(ChannelCfg(c["label"], float(c["mhz"]), c.get("kind", "traffic"), c.get("device", ""),
                                    c.get("gain_db", 40.0), float(c.get("squelch_db", 10.0))))
     tones, ours = [], set()
+    tf = radio.get("tones_file", "data/westchester_tones.csv")
+    if tf:
+        tf_path = Path(tf) if Path(tf).is_absolute() else (base / tf)
+        if not tf_path.is_file():
+            tf_path = Path(__file__).resolve().parent.parent / tf   # repo data/ when run from elsewhere
+        if tf_path.is_file():
+            import csv
+            rows = (ln for ln in tf_path.read_text().splitlines() if ln.strip() and not ln.startswith("#"))
+            for r in csv.DictReader(rows):
+                tones.append(ToneCode(r["name"] + (" (est.)" if r.get("estimated") == "1" else ""),
+                                      float(r["a_hz"]), float(r["b_hz"]) if r.get("b_hz") else None))
+        elif "tones_file" in radio:
+            raise ConfigError(f"radio.tones_file: {tf} not found")
     for i, t in enumerate(data.get("tones", [])):
         _take(t, f"tones[{i}]", {"name", "a_hz", "b_hz", "agency", "ours"})
         tones.append(ToneCode(t["name"], float(t["a_hz"]), float(t["b_hz"]) if t.get("b_hz") else None,
@@ -84,6 +98,7 @@ def load(path: str | Path) -> Config:
     p25 = _take(data.get("p25", {}), "p25", {"capture_dir", "talkgroups", "aliases"})
     storage = _take(data.get("storage", {}), "storage", {"clips_dir", "keep_hours"})
     mdc = _take(data.get("mdc", {}), "mdc", {"aliases"})
+    units = _take(data.get("units", {}), "units", {"departments"})
     mp = _take(data.get("map", {}), "map", {"home_lon", "home_lat", "home_zoom"})
     rel = lambda p: str((base / p).resolve()) if p and not Path(p).is_absolute() else p
     return Config(
@@ -97,6 +112,7 @@ def load(path: str | Path) -> Config:
         p25_talkgroups={int(k): v for k, v in p25.get("talkgroups", {"307": "Fire/EMS 15"}).items()},
         p25_aliases={str(k): v for k, v in p25.get("aliases", {}).items()},
         mdc_aliases={str(k).upper(): v for k, v in mdc.get("aliases", {}).items()},
+        unit_departments={str(k).title(): v for k, v in units.get("departments", {}).items()},
         clips_dir=rel(storage.get("clips_dir", "captures/clips")), keep_hours=float(storage.get("keep_hours", 24)),
         home=(float(mp.get("home_lon", -73.6640)), float(mp.get("home_lat", 41.0130)), float(mp.get("home_zoom", 13.4))),
     )

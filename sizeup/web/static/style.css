@@ -189,6 +189,7 @@ h2 {
   white-space: nowrap;
 }
 .chip.dept { --c: #e8e7f8; }
+.chip.unit { --c: #ffb020; }
 .chip.unknown { --c: var(--warn); }
 .chip.live { --c: var(--err); }
 .chips .empty, .who .empty { color: var(--dim); }

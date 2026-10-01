@@ -291,7 +291,7 @@ function renderIncident(inc) {
   show(close, true);
   if (close.dataset.id !== inc.id) { close.dataset.id = inc.id; resetClose(); }
 
-  setText($("#inc-type"), inc.incident_type || "Unknown");
+  setText($("#inc-type"), (inc.incident_type || "Unknown") + (inc.code ? ` · ${inc.code}` : ""));
   const geo = inc.geo;
   const addr = $("#inc-addr");
   if (geo && geo.label) { setText(addr, geo.label); setClass(addr, "inc-addr"); }
@@ -317,9 +317,12 @@ function renderIncident(inc) {
   setText($("#inc-timeout"), inc.time_out || "—");
   tickElapsed();
 
-  syncList($("#inc-depts"), inc.departments || [], {
-    key: (d) => d, sig: (d) => d,
-    make: () => el("span", "chip dept"), fill: (n, d) => setText(n, d),
+  // Departments, then the apparatus dispatched ("Engine 61", "Ladder 31").
+  const who = [...(inc.departments || []).map((d) => ({ k: `d:${d}`, t: d, c: "chip dept" })),
+               ...(inc.units || []).map((u) => ({ k: `u:${u}`, t: u, c: "chip unit" }))];
+  syncList($("#inc-depts"), who, {
+    key: (x) => x.k, sig: (x) => x.k,
+    make: () => el("span", "chip"), fill: (n, x) => { setClass(n, x.c); setText(n, x.t); },
     empty: "Department not identified",
   });
 }

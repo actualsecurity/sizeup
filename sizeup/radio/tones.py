@@ -35,6 +35,7 @@ A_MAX_S = 2.0         # an A tone is at most this long
 B_MIN_S = 0.6         # a B tone is at least this long
 PAIR_GAP_S = 0.35     # B must start within this of A ending
 LONG_TONE_S = 5.0     # a single run this long is a long tone (group / all-call)
+SAME_AB_S = 2.5       # a single run 2.5-5 s is an A=B code (Larchmont 435.1/435.1: A 1 s + B 3 s merge)
 DROPOUT_FRAMES = 1    # a run survives this many non-tonal frames (fades, the A->B switch)
 
 
@@ -154,6 +155,8 @@ class ToneDetector:
         events = self._expire_a(run.start)
         if run.dur >= LONG_TONE_S:
             return events + [ToneEvent("long_tone", run.hz, None, run.start, run.end)]
+        if run.dur >= SAME_AB_S:
+            return events + [ToneEvent("two_tone", run.hz, run.hz, run.start, run.end)]
         if run.dur <= A_MAX_S:
             self._pending_a = run
         return events
@@ -184,7 +187,8 @@ class TonePlan:
         return abs(hz - want) <= self.tolerance * want
 
     def match(self, ev: ToneEvent) -> ToneEvent:
-        names = tuple(c.name for c in self.codes if self._near(ev.a_hz, c.a_hz) and self._near(ev.b_hz, c.b_hz))
+        names = tuple(dict.fromkeys(c.name for c in self.codes
+                                    if self._near(ev.a_hz, c.a_hz) and self._near(ev.b_hz, c.b_hz)))
         ev.names = names
         return ev
 

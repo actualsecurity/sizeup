@@ -24,3 +24,23 @@ def test_spoken_numbers_and_other_types():
 def test_unknown_type_is_not_invented():
     d = parse("Port Chester fire department, 123 Main Street")
     assert d.incident_type == "Unknown" and d.category == "unknown"
+
+
+REAL_PAGE = ("The show 30 Alpha 5 engine 25 42 42 Stratton Road in Regal Drive in Van Eck Drive. The 45-year-old "
+             "female features. 30 Alpha 5 engine 25 42 42 Stratton Road in Regal Drive in Van Eck Drive. The "
+             "45-year-old female features in 32-63.")  # South 2, 2026-10-01 15:32 (large-v3-turbo, indoor antenna)
+
+
+def test_real_south2_page_format():
+    d = parse(REAL_PAGE)
+    assert (d.incident_type, d.category, d.code) == ("Traumatic injury", "ems", "30-A-5")
+    assert d.units == ["Engine 25"]
+    assert d.location == "42 stratton road"                       # "42 42" was the model repeating itself
+    assert d.cross_street == "regal drive and van eck drive"      # "in ... in ..." = the two cross streets
+    assert d.departments == []
+
+
+def test_fire_code_and_units():
+    d = parse("69 Delta 6, Engine 61, Ladder 31, 209 Westchester Avenue, Pearl Street and Gilbert Place")
+    assert d.category == "fire" and d.code == "69-D-6" and d.units == ["Engine 61", "Ladder 31"]
+    assert d.location == "209 westchester avenue" and d.cross_street == "pearl street and gilbert place"

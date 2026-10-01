@@ -1,0 +1,87 @@
+# Westchester County (NY) fire/EMS two-tone paging codes.
+# Source: RadioReference wiki "Westchester County (NY) Fire Tone Outs" (last edited 2025-07-05,
+# "with thanks to NF2G.com"), fetched 2026-10-01. estimated=1: the wiki's "Estimated Tones" table.
+# Heard on South 2, 2026-10-01 15:35: 496.8/767.4 matches Eastchester VAC (estimated 494/768) by tone
+# only; the voice was "Sixty Control, mutual aid to the city of Yonkers..." (user), not a department name.
+name,a_hz,b_hz,estimated
+Ardsley,1031.8,763.3,0
+Archville,951.4,1430.7,0
+Banksville,306,1231.4,0
+Bedford,581.4,796.7,0
+Bedford Hills,2359.8,1079.9,0
+Briarcliff,1893.3,1231.4,0
+Buchanan,1515.8,1031.9,0
+Chappaqua FD,949.5,1779.6,0
+Chappaqua VAC,747.3,408.2,0
+Cortlandt EMS,726.8,903.2,0
+Croton FD,763.3,693.1,0
+Croton EMS,768.1,832.9,0
+Croton Falls,643.0,950.0,0
+Dobbs Ferry,731.3,989.2,0
+Eastchester FD,768.1,768.1,0
+Eastchester EMS,464.1,768.1,0
+Fairview,1199.4,1199.4,0
+Goldens Bridge,689.3,871,0
+Greenville,339.6,321.7,0
+Harrison,1530.0,1232.0,0
+Hartsdale,1600.0,1232.0,0
+Hawthorne,763.3,1574.8,0
+Irvington,1149.7,1122.8,0
+Katonah,2359.8,1231.5,0
+Larchmont FD,435.1,435.1,0
+Larchmont EMS,2091.8,235.1,0
+Mamaroneck Town,521.2,521.2,0
+Mamaroneck Village FD,1005.5,209,0
+Mamaroneck Village EMS,1091.4,435.1,0
+Millwood,2465.0,1082.0,0
+Mohegan,312.6,346.7,0
+Montrose,2271.7,1781.5,0
+Montrose,2255.0,368.5,0
+Mount Kisco,2574.2,1984.6,0
+New Rochelle,328.2,328.2,0
+North White Plains,1231.4,2463,0
+Ossining,617.6,584.9,0
+PCVAC,810.2,1285.8,0
+PCVAC,368.5,445.7,0
+Peekskill,435.1,435.1,0
+Peekskill Volunteer,457.1,435.1,0
+Pelham,602.3,570,0
+Pleasantville,2574.2,1129.7,0
+Pocantico Hills,1742.1,1079.7,0
+Port Chester FD,349.1,311.1,0
+Pound Ridge,602.3,832.9,0
+Purchase,364.9,349.1,0
+Somers,2575.0,1232.0,0
+South Salem,639.3,591,0
+Thornwood,806.3,2634.7,0
+Valhalla,812,397,0
+Verplanck,2361.0,910.0,0
+Verplanck,2361.0,992.0,0
+Verplanck,2361.0,589.7,0
+Vista,1404.0,1232.0,0
+Vista,617.4,634.5,0
+Westchester EMS (45 Medics),832.9,1031.8,0
+West Harrison,349.1,387,0
+Yorktown,2687.1,1232.7,0
+Armonk,2856.0,643.0,1
+Bedford Fire,580,2382,1
+Bedford EMS,580,2382,1
+Chappaqua Fire,2844,1779,1
+Cortlandt VAC,725,2672,1
+Croton EMS,768,2500,1
+Croton Falls,639,2844,1
+Eastchester VAC,494,768,1
+Goldens Bridge,639,871,1
+Hawthorne Fire,168,1575,1
+Hawthorne EMS,763,2855,1
+Irvington Fire,1150,1118,1
+Katonah,1360,1231,1
+Katonah-Bedford Hills VAC,510.5,928.1,1
+Larchmont EMS,2091,435,1
+Mamaroneck Village FD,1005,290,1
+Peekskill Volunteer,471,435,1
+Pound Ridge Fire,602,2495,1
+Purchase,365,1043,1
+Thornwood,2425,2635,1
+Verplanck,2360,2726,1
+West Harrison,1048,387,1

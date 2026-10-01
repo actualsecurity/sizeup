@@ -104,3 +104,19 @@ def test_mdc_unit_id_names_the_talker(tmp_path):
     assert app._units(Segment(0, 1, np.zeros(RATE, np.float32), 20.0, [burst])) == ["Engine 61 Portable 1"]
     app = App(cfg(tmp_path))
     assert app._units(Segment(0, 1, np.zeros(RATE, np.float32), 20.0, [burst])) == ["0611"]  # no alias: the ID
+
+
+def test_page_naming_our_unit_opens_incident_with_unknown_tones(tmp_path):
+    from dataclasses import replace
+    app = App(replace(cfg(tmp_path), unit_departments={"Engine 61": "Port Chester FD"}))
+    app._kind = {"South 2": "paging"}
+    text = "10 Charlie 2, Engine 61, 209 Westchester Avenue, Pearl Street and Gilbert Place"
+    app.stt.client = FakeWhisper({6: text})
+    app.stt.start()
+    audio = np.concatenate([tone(741.3, 1.0), tone(623.7, 3.0), np.zeros(int(0.2 * RATE)), voice(6.0)]).astype(np.float32)
+    now = time.time()
+    app._segment(Channel(470.2, "South 2"), Segment(now, now + len(audio) / RATE, audio, 25.0))
+    assert wait(lambda: app.store.active() is not None)
+    inc = app.store.active()
+    assert inc.departments == ["Port Chester FD"] and inc.incident_type == "Chest pain"
+    assert inc.location == "209 westchester avenue"
