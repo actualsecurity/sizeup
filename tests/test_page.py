@@ -82,7 +82,8 @@ def test_radio_voice_removes_ctcss_and_hiss_and_sets_loudness():
     blk = 320
     e = np.sqrt((y[: len(y) // blk * blk].reshape(-1, blk) ** 2).mean(axis=1))
     db = 20 * np.log10(e + 1e-12)
-    speech = 20 * np.log10(np.sqrt(np.mean(e[db > np.percentile(db, 5) + 8] ** 2)))  # the voice blocks
+    act = e[db > np.percentile(db, 5) + 8]                    # the voice blocks (all, if no pauses)
+    speech = 20 * np.log10(np.sqrt(np.mean((act if len(act) else e) ** 2)))
     assert abs(speech - TARGET_DBFS) < 1.5 and np.abs(y).max() <= 1.0
 
 

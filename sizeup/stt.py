@@ -43,48 +43,44 @@ def wav_bytes(audio: np.ndarray, rate: int = 16000) -> bytes:
 DEEMPH_TAU = 750e-6     # land-mobile NFM de-emphasis (6 dB/octave, corner ~212 Hz)
 TARGET_DBFS = -16.0     # loudness of the speech after processing
 PEAK_LIMIT = 0.9
-NR_FRAME = 512          # noise reduction STFT: 32 ms frames, 50 % overlap (sqrt-Hann, perfect reconstruction)
-NR_OVERSUB = 1.5        # subtract this much of the noise profile (a little extra = no residual whine)
-NR_FLOOR = 0.08         # never cut a bin below -22 dB (deeper cuts sound watery: "musical noise")
+LINE_BAND = (1500.0, 5500.0)   # where the whine lives (FG1 bench: 2.5-5.4 kHz)
+LINE_OVER_DB = 15.0            # a bin this far over its +/-40 Hz neighbourhood is a steady tone
+LINE_HALF_HZ = 5.0             # notch width each side of a tone (voice harmonics move; tones don't)
+BAND_TOP = (3300.0, 3700.0)    # flat to 3.3 kHz, eased off by 3.7 kHz (3.0/3.4 sounded like a tin can)
 
 
-def denoise(y: np.ndarray) -> np.ndarray:
-    """Remove what is steady in the transmission's own dead air: hiss and the whine.
+def notch_lines(X: np.ndarray, f: np.ndarray) -> tuple[np.ndarray, list[float]]:
+    """Notch steady tones out of a whole-clip spectrum.
 
-    FG1 bench: a comb of tones 100 Hz apart (sidebands of the 100 Hz CTCSS on a beat
-    around 3-4 kHz) ran through every transmission, up to +44 dB over its surroundings.
-    The quietest quarter of the clip's frames (after key-up, between words) is the noise
-    profile; each frequency bin is reduced by it (spectral subtraction, smoothed over time).
-    Speech isn't steady, so it stays. Clips too short to have dead air are returned as-is."""
-    n, hop = NR_FRAME, NR_FRAME // 2
-    if len(y) < n * 6:
-        return y
-    win = np.sqrt(np.hanning(n + 1)[:-1])           # sqrt-Hann: analysis * synthesis sums to 1 at 50 %
-    pad = (-(len(y) - n) % hop)
-    x = np.concatenate([np.zeros(hop), y, np.zeros(pad + hop)])
-    idx = np.arange(0, len(x) - n + 1, hop)
-    X = np.fft.rfft(np.stack([x[i:i + n] * win for i in idx]), axis=1)
-    mag = np.abs(X)
-    energy = (mag ** 2).sum(axis=1)
-    quiet = energy <= np.percentile(energy, 25)
-    if quiet.sum() < 4:
-        return y
-    noise = mag[quiet].mean(axis=0)
-    gain = np.maximum(1 - NR_OVERSUB * noise / (mag + 1e-12), NR_FLOOR)
-    k = np.array([0.25, 0.5, 0.25])                  # smooth gains over time: less "musical noise"
-    gain = np.apply_along_axis(lambda g: np.convolve(np.pad(g, 1, mode="edge"), k, "valid"), 0, gain)
-    frames = np.fft.irfft(X * gain, n, axis=1) * win
-    out = np.zeros(len(x))
-    for i, fr in zip(idx, frames):
-        out[i:i + n] += fr
-    return out[hop:hop + len(y)]
+    FG1 bench: a comb of pure tones 100 Hz apart (sidebands of the 100 Hz CTCSS on a beat,
+    2.5-5.4 kHz, the same for the whole transmission) whined through every clip. Over a whole
+    clip each tone is a line a few Hz wide, far above its neighbourhood; speech harmonics move
+    with pitch and smear, so only the tones are cut (+/-5 Hz each). Spectral subtraction was
+    tried first and made the voice sound like a tin can (musical noise, lost top end)."""
+    df = f[1] - f[0] if len(f) > 1 else 1.0
+    mag_db = 20 * np.log10(np.abs(X) + 1e-12)
+    w = max(3, int(40.0 / df))
+    c = np.concatenate([[0.0], np.cumsum(mag_db)])
+    lo = np.clip(np.arange(len(f)) - w, 0, len(f))
+    hi = np.clip(np.arange(len(f)) + w + 1, 0, len(f))
+    baseline = (c[hi] - c[lo]) / (hi - lo)
+    cand = (f >= LINE_BAND[0]) & (f <= LINE_BAND[1]) & (mag_db - baseline > LINE_OVER_DB)
+    lines: list[float] = []
+    gain = np.ones(len(f))
+    for i in np.where(cand)[0]:
+        if mag_db[i] < mag_db[max(0, i - 2):i + 3].max():
+            continue                       # only the peak bin of each line
+        lines.append(float(f[i]))
+        gain[np.abs(f - f[i]) <= LINE_HALF_HZ] = 0.0
+    return X * gain, lines
 
 
 def radio_voice(audio: np.ndarray, rate: int = 16000, deemph: bool = True, nr: bool = True) -> np.ndarray:
     """FM discriminator output -> what a radio's speaker plays, at a steady loudness.
 
-    De-emphasis (transmitters pre-emphasise voice), 300-3000 Hz band-pass (drops the CTCSS
-    tone + DC drift below and the FM hiss above, which otherwise dominate the level), then
+    De-emphasis (transmitters pre-emphasise voice), the whine's steady tones notched out (nr),
+    300-3300 Hz band-pass (drops the CTCSS tone + DC drift below and the FM hiss above, which
+    otherwise dominate the level), then
     set the *speech* loudness: RMS of the louder half of 20 ms blocks to TARGET_DBFS, with
     a peak limit. Used for both the clips people play and the audio speech-to-text gets.
     deemph=False for already-decoded digital voice (P25 calls from trunk-recorder)."""
@@ -95,18 +91,18 @@ def radio_voice(audio: np.ndarray, rate: int = 16000, deemph: bool = True, nr: b
     f = np.fft.rfftfreq(len(x), 1 / rate)
     if deemph:
         X = X / (1 + 1j * 2 * np.pi * f * DEEMPH_TAU)
+    if nr:
+        X, _ = notch_lines(X, f)    # the whine (steady tones), nothing else
     # Gentle (raised-cosine) band edges: a brick wall rings audibly on short clips.
     gain = np.ones_like(f)
-    lo, hi = (f < 300), (f > 3000)
+    t0, t1 = BAND_TOP
     gain[f < 200] = 0.0
-    m = (f >= 200) & lo
+    m = (f >= 200) & (f < 300)
     gain[m] = 0.5 - 0.5 * np.cos(np.pi * (f[m] - 200) / 100)
-    gain[f > 3400] = 0.0
-    m = hi & (f <= 3400)
-    gain[m] = 0.5 + 0.5 * np.cos(np.pi * (f[m] - 3000) / 400)
+    gain[f > t1] = 0.0
+    m = (f > t0) & (f <= t1)
+    gain[m] = 0.5 + 0.5 * np.cos(np.pi * (f[m] - t0) / (t1 - t0))
     y = np.fft.irfft(X * gain, len(x))
-    if nr:
-        y = denoise(y)
     blk = rate // 50
     n = len(y) // blk
     if n >= 3:
