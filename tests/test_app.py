@@ -237,3 +237,16 @@ def test_talkgroup_record_and_main_switches(tmp_path):
     again = App(c)                                                   # choices survive a restart
     assert not again.tg.record(383) and again.tg.main(383)
     assert {r["tg"]: r for r in again.state()["talkgroups"]}[383]["dropped"] == 0
+
+
+def test_talkgroup_counts_survive_a_restart(tmp_path):
+    from dataclasses import replace
+    from sizeup.incidents import Traffic
+    info = {329: {"name": "Fire/EMS 22", "group": "Fire/EMS", "encrypted": False}}
+    c = replace(cfg(tmp_path), p25_dir=str(tmp_path / "p25"), p25_tg_info=info, p25_talkgroups={329: "Fire/EMS 22"})
+    app = App(c)
+    now = time.time()
+    app.store.on_traffic(Traffic("329-a", "Fire/EMS 22", now - 60, now - 58, "7911", talkgroup=329), attach=False)
+    again = App(c)
+    row = {r["tg"]: r for r in again.state()["talkgroups"]}[329]
+    assert row["count"] == 1 and abs(row["last"] - (now - 58)) < 1

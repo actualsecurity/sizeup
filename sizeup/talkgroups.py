@@ -48,6 +48,13 @@ class TalkgroupPrefs:
             if dropped:
                 s["dropped"] += 1
 
+    def seed(self, tg: int, at: float) -> None:
+        """Count a call already in the saved history (so a restart doesn't zero the counts)."""
+        with self._lock:
+            s = self._seen.setdefault(tg, {"count": 0, "last": 0.0, "dropped": 0})
+            s["count"] += 1
+            s["last"] = max(s["last"] or 0.0, at)
+
     def set(self, tg: int, record: bool | None = None, main: bool | None = None) -> None:
         with self._lock:
             p = self._prefs.setdefault(tg, {})

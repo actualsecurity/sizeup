@@ -16,7 +16,12 @@
       "shortName": "westchester",
       "type": "p25",
       "modulation": "qpsk",
-      "control_channels": [476075000, 476112500, 476212500, 476237500],
+      "control_channels": [
+        476075000,
+        476112500,
+        476212500,
+        476237500
+      ],
       "talkgroupsFile": "talkgroups.csv",
       "recordUnknown": true,
       "hideUnknownTalkgroups": true,
@@ -24,5 +29,6 @@
     }
   ],
   "captureDir": "../../captures/p25",
-  "logLevel": "info"
+  "logLevel": "info",
+  "tempDir": "../../captures/p25-tmp"
 }

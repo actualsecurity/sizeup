@@ -1,6 +1,7 @@
 // sizeup browser UI. The server pushes state over SSE once a second; this file
 // renders it: the map (home view, firehouses, the active incident), the incident
-// card, dispatch transcripts, radio traffic, recent pages and history.
+// card, dispatch transcripts, radio traffic (Main talkgroups), traffic on the other
+// talkgroups, the talkgroup manager, recent pages and history.
 //
 // Everything on screen comes from the server. Lists are diffed by id and only
 // changed entries are touched, so the page never blinks, keeps its scroll
@@ -447,12 +448,104 @@ function renderDispatch(inc) {
   });
 }
 
+// ---- talkgroups -------------------------------------------------------------------
+// state.talkgroups is the truth. A toggle shows at once (optimistic) and the pending
+// value is dropped when a push agrees with it, or after a few seconds either way.
+
+const GROUP_ORDER = ["Fire/EMS", "County Police", "DOT", "Hospital", "Operations", "Interop/Events", "OEM", ""];
+const GROUP_COLORS = { "Fire/EMS": "#ff7a59", "County Police": "#6aa8ff", "DOT": "#e8d84a", "Hospital": "#f27ad1",
+                       "Operations": "#7ee07e", "Interop/Events": "#a3a9ff", "OEM": "#ffcf7a", "": "#9aa0b4" };
+const PENDING_MS = 8000;
+const tgPending = new Map();   // tg -> { vals: {record?, main?}, until }
+
+const groupName = (g) => g || "Unknown";
+const groupColor = (g) => GROUP_COLORS[g || ""] || GROUP_COLORS[""];
+
+function talkgroups() {
+  const rows = (ui.state && ui.state.talkgroups) || [];
+  if (!tgPending.size) return rows;
+  return rows.map((r) => {
+    const p = tgPending.get(r.tg);
+    return p ? { ...r, ...p.vals, pending: true } : r;
+  });
+}
+
+function settlePending() {
+  const now = Date.now(), byTg = new Map(((ui.state && ui.state.talkgroups) || []).map((r) => [r.tg, r]));
+  for (const [tg, p] of tgPending) {
+    const r = byTg.get(tg);
+    if (!r || now > p.until || Object.entries(p.vals).every(([k, v]) => r[k] === v)) tgPending.delete(tg);
+  }
+}
+
+// Calls per talkgroup in the lists we were sent, so "heard" is never less than what's on screen.
+function trafficSeen() {
+  const seen = new Map(), ids = new Set();
+  const inc = activeIncident();
+  for (const t of [...((ui.state && ui.state.loose_traffic) || []), ...((inc && inc.traffic) || [])]) {
+    if (t.talkgroup === null || t.talkgroup === undefined || ids.has(t.id)) continue;
+    ids.add(t.id);
+    const s = seen.get(t.talkgroup) || { n: 0, last: 0 };
+    s.n += 1;
+    s.last = Math.max(s.last, t.start || 0);
+    seen.set(t.talkgroup, s);
+  }
+  return seen;
+}
+
+function indexTalkgroups() {
+  const seen = trafficSeen();
+  ui.tgs = talkgroups().map((r) => {
+    const s = seen.get(r.tg);
+    if (!s) return r;
+    return { ...r, count: Math.max(r.count || 0, s.n), last: Math.max(r.last || 0, s.last) || null };
+  });
+  ui.tgIndex = new Map(ui.tgs.map((r) => [r.tg, r]));
+}
+
+// Main traffic: not from a talkgroup (FG1, South 2…), or from a talkgroup marked Main.
+function isMainTraffic(t) {
+  if (t.talkgroup === null || t.talkgroup === undefined) return true;
+  const r = ui.tgIndex && ui.tgIndex.get(t.talkgroup);
+  return !!(r && r.main);
+}
+
+async function setTalkgroup(tg, field, value) {
+  const p = tgPending.get(tg) || { vals: {} };
+  p.vals[field] = value;
+  p.until = Date.now() + PENDING_MS;
+  tgPending.set(tg, p);
+  ui.tgError = null;
+  renderTalkgroupViews();
+  try {
+    const r = await fetch("/api/talkgroup", { method: "POST", headers: { "Content-Type": "application/json" },
+                                              body: JSON.stringify({ tg, [field]: value }) });
+    let j = null;
+    try { j = await r.json(); } catch (_) { /* not JSON */ }
+    if (!r.ok || !j || j.ok === false) throw new Error((j && j.error) || `HTTP ${r.status}`);
+  } catch (err) {
+    const q = tgPending.get(tg);
+    if (q) { delete q.vals[field]; if (!Object.keys(q.vals).length) tgPending.delete(tg); }
+    const row = ui.tgIndex && ui.tgIndex.get(tg);
+    ui.tgError = `Couldn't change ${field === "main" ? "Main" : "Record"} for ${row ? row.name : `TG ${tg}`}: ${err.message}`;
+    console.warn("talkgroup toggle:", err);
+  }
+  renderTalkgroupViews();
+}
+
+function renderTalkgroupViews() {
+  indexTalkgroups();
+  renderTraffic(ui.inc);
+  renderOther(ui.inc);
+  renderTgPanel();
+}
+
 // ---- radio traffic ----------------------------------------------------------------
 
 function renderTraffic(inc) {
   const list = inc ? inc.traffic || [] : (ui.state && ui.state.loose_traffic) || [];
   setText($("#traffic-title"), inc ? "Radio traffic" : "Radio traffic · no active incident");
-  const items = list.slice().sort((a, b) => b.start - a.start);
+  const items = list.filter(isMainTraffic).sort((a, b) => b.start - a.start);
   syncList($("#traffic"), items, {
     key: (t) => t.id,
     sig: (t) => JSON.stringify([t.text, t.status, t.unit, t.talkgroup, t.source, t.end]),
@@ -473,6 +566,292 @@ function renderTraffic(inc) {
         ? "Listening — no traffic" : "No radio is receiving",
   });
 }
+
+// ---- other talkgroups ---------------------------------------------------------------
+// Traffic from talkgroups that aren't Main, one row per talkgroup; collapsed by default.
+// What's open is remembered in this browser.
+
+const OTHER_KEY = "sizeup.other";
+const other = { open: false, tgs: new Set() };
+try {
+  const saved = JSON.parse(localStorage.getItem(OTHER_KEY) || "null");
+  if (saved) { other.open = !!saved.open; other.tgs = new Set((saved.tgs || []).map(String)); }
+} catch (_) { /* no storage: start collapsed */ }
+function saveOther() {
+  try { localStorage.setItem(OTHER_KEY, JSON.stringify({ open: other.open, tgs: [...other.tgs] })); } catch (_) { /* fine */ }
+}
+
+function otherGroups(inc) {
+  const seen = new Set(), by = new Map();
+  for (const t of [...((ui.state && ui.state.loose_traffic) || []), ...((inc && inc.traffic) || [])]) {
+    if (seen.has(t.id) || isMainTraffic(t)) continue;
+    seen.add(t.id);
+    const k = String(t.talkgroup);
+    if (!by.has(k)) {
+      const r = ui.tgIndex.get(t.talkgroup);
+      by.set(k, { key: k, tg: t.talkgroup, row: r || null, name: (r && r.name) || t.source || `TG ${t.talkgroup}`,
+                  group: r ? r.group : "", calls: [] });
+    }
+    by.get(k).calls.push(t);
+  }
+  const groups = [...by.values()];
+  for (const g of groups) {
+    g.calls.sort((a, b) => b.start - a.start);
+    g.last = g.calls[0].start;
+    const newest = g.calls[0];
+    const said = g.calls.find((t) => t.status === "done" && t.text);
+    g.snippet = newest.status === "done" ? (said ? said.text : "(no words)") : STATUS_TEXT[newest.status] || newest.status;
+    g.snippetMuted = !(newest.status === "done" && newest.text);
+  }
+  return groups.sort((a, b) => b.last - a.last);
+}
+
+function callFill(li, t) {
+  const meta = el("div", "meta");
+  meta.append(playButton(t.id, "Play this transmission", t.has_audio), el("span", "t", fmtTime(t.start)));
+  if (t.unit) meta.append(el("b", "unit", t.unit));
+  if (t.end > t.start) meta.append(el("span", "dim dur", `${Math.round(t.end - t.start)} s`));
+  const done = t.status === "done" && t.text;
+  li.replaceChildren(meta, el("div", done ? "txt" : "txt muted",
+    done ? t.text : t.status === "done" ? "(no words)" : STATUS_TEXT[t.status] || t.status));
+}
+
+function renderOther(inc) {
+  if (!ui.state) return;
+  const groups = otherGroups(inc);
+  const n = groups.reduce((s, g) => s + g.calls.length, 0);
+  const sec = $("#other-section"), box = $("#other"), toggle = $("#other-toggle");
+  setText($("#other-sum"), n ? `· ${n} call${n === 1 ? "" : "s"} on ${groups.length} talkgroup${groups.length === 1 ? "" : "s"}`
+                             : "· none heard");
+  setClass(sec, other.open ? "other-section open" : "other-section");
+  if (toggle.getAttribute("aria-expanded") !== String(other.open)) toggle.setAttribute("aria-expanded", String(other.open));
+  show(box, other.open);
+  if (!other.open) return;
+  syncList(box, groups, {
+    key: (g) => g.key,
+    sig: (g) => JSON.stringify([other.tgs.has(g.key), g.name, g.group, g.calls.length, g.last, g.snippet,
+                                g.row && g.row.count, g.row && g.row.record, fmtWhen(g.last),
+                                other.tgs.has(g.key) ? g.calls.map((t) => [t.id, t.status, t.text, t.unit, t.end]) : 0]),
+    make: () => {
+      const li = el("li", "og");
+      const head = el("button", "og-head");
+      head.append(el("span", "caret"), el("b", "og-name"), chip("", null, "og-group"), el("span", "og-n"),
+                  el("span", "spacer"), el("span", "og-last"), el("span", "og-snip"));
+      li.append(head, el("ol", "list og-calls"));
+      return li;
+    },
+    fill: (li, g) => {
+      const open = other.tgs.has(g.key);
+      const [head, calls] = li.children;
+      const [caret, name, grp, num, , last, snip] = head.children;
+      setClass(li, open ? "og open" : "og");
+      head.setAttribute("aria-expanded", String(open));
+      setText(caret, open ? "▾" : "▸");
+      setText(name, g.name);
+      setText(grp, groupName(g.group));
+      grp.style.setProperty("--c", groupColor(g.group));
+      setText(num, `${g.calls.length} call${g.calls.length === 1 ? "" : "s"}`);
+      setText(last, fmtWhen(g.last));
+      setText(snip, g.snippet);
+      setClass(snip, g.snippetMuted ? "og-snip muted" : "og-snip");
+      const bits = [g.tg !== null && g.tg !== undefined ? `TG ${g.tg}` : "", groupName(g.group)];
+      if (g.row) bits.push(`${g.row.count} call${g.row.count === 1 ? "" : "s"} heard`, g.row.record ? "recording" : "not recording");
+      head.title = bits.filter(Boolean).join(" · ") + (open ? "\nTap to hide its calls" : "\nTap to show its calls");
+      show(calls, open);
+      if (open) {
+        syncList(calls, g.calls, {
+          key: (t) => t.id, sig: (t) => JSON.stringify([t.text, t.status, t.unit, t.end]),
+          make: () => el("li"), fill: callFill, empty: "No calls",
+        });
+      } else if (calls.children.length) calls.replaceChildren();
+    },
+    empty: "Nothing heard on other talkgroups yet",
+  });
+}
+
+$("#other-toggle").addEventListener("click", () => {
+  other.open = !other.open;
+  saveOther();
+  renderOther(ui.inc);
+});
+$("#other").addEventListener("click", (e) => {
+  const head = e.target.closest(".og-head");
+  if (!head) return;
+  const k = head.parentElement.dataset.key;
+  if (other.tgs.has(k)) other.tgs.delete(k); else other.tgs.add(k);
+  saveOther();
+  renderOther(ui.inc);
+});
+
+// ---- talkgroup manager ---------------------------------------------------------------
+
+const tgPanel = { open: false, opener: null, confirm: null, confirmTimer: 0 };
+
+function openTgPanel() {
+  tgPanel.open = true;
+  tgPanel.opener = document.activeElement;
+  show($("#tg-overlay"), true);
+  document.body.classList.add("modal");
+  renderTgPanel();
+}
+function closeTgPanel() {
+  tgPanel.open = false;
+  show($("#tg-overlay"), false);
+  document.body.classList.remove("modal");
+  clearConfirm();
+  if (tgPanel.opener && tgPanel.opener.isConnected) tgPanel.opener.focus({ preventScroll: true });
+}
+function clearConfirm() {
+  clearTimeout(tgPanel.confirmTimer);
+  tgPanel.confirm = null;
+}
+
+function heardText(r) {
+  if (!r.count && !r.last) return "not heard yet";
+  const n = `${r.count} call${r.count === 1 ? "" : "s"}`;
+  return r.last ? `${n} · last ${fmtWhen(r.last)}` : n;
+}
+
+function tgMatches(r, words) {
+  if (!words.length) return true;
+  const hay = `${r.name} ${r.tg} ${groupName(r.group)} ${r.main ? "main" : ""} ${r.encrypted ? "encrypted" : ""}`.toLowerCase();
+  return words.every((w) => hay.includes(w));
+}
+
+function setSwitch(b, on, label) {
+  setClass(b, on ? "sw on" : "sw");
+  if (b.getAttribute("aria-checked") !== String(on)) b.setAttribute("aria-checked", String(on));
+  setText(b.lastChild, label);
+}
+
+function renderTgPanel() {
+  if (!tgPanel.open) return;
+  const rows = ui.tgs || [];
+  const words = $("#tg-filter").value.toLowerCase().split(/\s+/).filter(Boolean);
+  const shown = rows.filter((r) => tgMatches(r, words));
+  const main = rows.filter((r) => r.main).length, rec = rows.filter((r) => r.record).length;
+  const enc = rows.filter((r) => r.encrypted).length, heard = rows.filter((r) => r.count).length;
+  setText($("#tg-sum"), rows.length
+    ? `${rows.length} talkgroups · ${main} main · ${rec} recording · ${heard} heard · ${enc} encrypted` +
+      (shown.length !== rows.length ? ` · showing ${shown.length}` : "")
+    : "");
+  const err = $("#tg-error");
+  setText(err, ui.tgError || "");
+  show(err, !!ui.tgError);
+
+  const by = new Map();
+  for (const r of shown) {
+    const g = r.group || "";
+    if (!by.has(g)) by.set(g, []);
+    by.get(g).push(r);
+  }
+  const rank = (g) => { const i = GROUP_ORDER.indexOf(g); return i < 0 ? GROUP_ORDER.length - 1 : i; };
+  const groups = [...by.entries()].sort((a, b) => rank(a[0]) - rank(b[0]) || a[0].localeCompare(b[0]))
+    .map(([g, list]) => ({ g, list: list.slice().sort((a, b) => (b.main - a.main) || ((b.last || 0) - (a.last || 0)) ||
+                                                        a.name.localeCompare(b.name, "en", { numeric: true })) }));
+
+  syncList($("#tg-groups"), groups, {
+    key: (x) => `g:${x.g}`,
+    sig: (x) => JSON.stringify([x.list.map((r) => [r.tg, r.name, r.record, r.main, r.encrypted, r.count, r.last,
+                                                 r.dropped, !!r.pending, fmtWhen(r.last)]),
+                                tgPanel.confirm]),
+    make: () => {
+      const sec = el("section", "tg-group");
+      const h = el("h3", "tg-ghead");
+      h.append(chip("", null, "tg-gchip"), el("span", "dim tg-gcount"));
+      sec.append(h, el("ol", "tg-rows"));
+      return sec;
+    },
+    fill: (sec, x) => {
+      const [h, ol] = sec.children;
+      const [gchip, gcount] = h.children;
+      setText(gchip, groupName(x.g));
+      gchip.style.setProperty("--c", groupColor(x.g));
+      const m = x.list.filter((r) => r.main).length, hd = x.list.filter((r) => r.count).length;
+      setText(gcount, `${x.list.length} talkgroup${x.list.length === 1 ? "" : "s"}` + (m ? ` · ${m} main` : "") +
+                      (hd ? ` · ${hd} heard` : ""));
+      syncList(ol, x.list, {
+        key: (r) => String(r.tg),
+        sig: (r) => JSON.stringify([r.name, r.record, r.main, r.encrypted, r.count, r.last, r.dropped, !!r.pending,
+                                    fmtWhen(r.last), tgPanel.confirm === r.tg]),
+        make: () => {
+          const li = el("li", "tg-row");
+          const id = el("div", "tg-id");
+          id.append(el("span", "tg-mark"), el("b", "tg-name"), el("span", "tg-num"), el("span", "tg-badge", "MAIN"));
+          const info = el("div", "tg-info");
+          info.append(el("span", "tg-heard"), el("span", "tg-note"));
+          const sw = el("div", "tg-sw");
+          for (const f of ["record", "main"]) {
+            const b = el("button", "sw");
+            b.dataset.field = f;
+            b.setAttribute("role", "switch");
+            b.append(el("i", "knob"), el("span", "lbl"));
+            sw.append(b);
+          }
+          li.append(id, info, sw);
+          return li;
+        },
+        fill: (li, r) => {
+          const [id, info, sw] = li.children;
+          const [mark, name, num, badge] = id.children;
+          const [heard, note] = info.children;
+          const confirming = tgPanel.confirm === r.tg;
+          setClass(li, "tg-row" + (r.main ? " main" : "") + (r.encrypted ? " enc" : "") +
+                       (r.record ? "" : " norec") + (r.pending ? " pending" : "") + (confirming ? " confirm" : ""));
+          setText(mark, r.encrypted ? "🔒" : "");
+          show(mark, r.encrypted);
+          setText(name, r.name);
+          setText(num, `TG ${r.tg}`);
+          show(badge, !!r.main);
+          setText(heard, heardText(r));
+          setClass(heard, r.count ? "tg-heard" : "tg-heard dim");
+          let n = "", ncls = "tg-note";
+          if (confirming) { n = "Encrypted: recordings will only be noise. Tap Record again to record anyway."; ncls += " warn"; }
+          else if (r.encrypted) { n = "encrypted — can't be decoded"; ncls += " enc"; }
+          if (r.dropped && !confirming) {
+            n += `${n ? " · " : ""}${r.dropped} dropped (not recorded)`;
+          }
+          setText(note, n);
+          setClass(note, ncls);
+          show(note, !!n);
+          const [recB, mainB] = sw.children;
+          setSwitch(recB, !!r.record, confirming ? "Record?" : "Record");
+          recB.title = r.record ? "Recording: its calls are kept and transcribed. Tap to stop."
+            : r.encrypted ? "Encrypted — can't be decoded. Tap to record anyway."
+            : "Not recording: its calls are dropped on arrival. Tap to record.";
+          setSwitch(mainB, !!r.main, "Main");
+          mainB.title = r.main ? "Main: its traffic shows in Radio traffic and attaches to our incident. Tap to move it to Other talkgroups."
+            : "Tap to make it Main: its traffic goes in Radio traffic and attaches to our incident.";
+        },
+        empty: "",
+      });
+    },
+    empty: rows.length ? "No talkgroup matches the filter" : "The server hasn't sent a talkgroup list",
+  });
+}
+
+$("#tg-open").addEventListener("click", openTgPanel);
+$("#tg-close").addEventListener("click", closeTgPanel);
+$("#tg-overlay").addEventListener("click", (e) => { if (e.target === e.currentTarget) closeTgPanel(); });
+$("#tg-filter").addEventListener("input", renderTgPanel);
+$("#tg-groups").addEventListener("click", (e) => {
+  const b = e.target.closest("button.sw");
+  if (!b) return;
+  const tg = Number(b.closest(".tg-row").dataset.key);
+  const r = ui.tgIndex && ui.tgIndex.get(tg);
+  if (!r) return;
+  const f = b.dataset.field, next = !r[f];
+  if (f === "record" && next && r.encrypted && tgPanel.confirm !== tg) {
+    // Two taps: recording an encrypted talkgroup only stores noise.
+    clearConfirm();
+    tgPanel.confirm = tg;
+    tgPanel.confirmTimer = setTimeout(() => { clearConfirm(); renderTgPanel(); }, 6000);
+    renderTgPanel();
+    return;
+  }
+  clearConfirm();
+  setTalkgroup(tg, f, next);
+});
 
 // ---- recent pages -----------------------------------------------------------------
 
@@ -634,6 +1013,10 @@ $("#zoom-in").addEventListener("click", () => userZoom(() => ui.map.zoomIn()));
 $("#zoom-out").addEventListener("click", () => userZoom(() => ui.map.zoomOut()));
 $("#recenter").addEventListener("click", () => goToTarget(false));
 window.addEventListener("keydown", (e) => {
+  if (tgPanel.open) {
+    if (e.key === "Escape") { e.preventDefault(); closeTgPanel(); }
+    return;
+  }
   if (!ui.map || e.target.closest("input, select, textarea")) return;
   if (e.key === "+" || e.key === "=") userZoom(() => ui.map.zoomIn());
   else if (e.key === "-" || e.key === "_") userZoom(() => ui.map.zoomOut());
@@ -653,12 +1036,16 @@ function onState(data) {
   ui.state = data;
   if (typeof data.time === "number") ui.skew = data.time - Date.now() / 1000;
   ui.inc = activeIncident();
+  settlePending();
+  indexTalkgroups();
   renderConn();
   renderRadios();
   renderSdr();
   renderIncident(ui.inc);
   renderDispatch(ui.inc);
   renderTraffic(ui.inc);
+  renderOther(ui.inc);
+  renderTgPanel();
   renderPages();
   renderHistory(ui.inc);
   renderMap();

@@ -62,6 +62,18 @@
       <ol id="traffic" class="list log"></ol>
     </section>
 
+    <section id="other-section" class="other-section">
+      <div class="sec-head">
+        <button id="other-toggle" class="sec-toggle" aria-expanded="false" aria-controls="other"
+                title="Traffic on talkgroups that aren't marked Main">
+          <span class="caret" aria-hidden="true">▸</span><span class="h2">Other talkgroups</span>
+          <span id="other-sum" class="dim sum"></span>
+        </button>
+        <button id="tg-open" class="tg-open" title="Choose which talkgroups are recorded and which are Main">⚙ Talkgroups</button>
+      </div>
+      <ol id="other" class="list other" hidden></ol>
+    </section>
+
     <section class="pages-section">
       <h2>Recent pages</h2>
       <ol id="pages" class="list pages"></ol>
@@ -73,6 +85,24 @@
     </section>
   </aside>
 </main>
+
+<div id="tg-overlay" class="overlay" hidden>
+  <div class="tg-panel" role="dialog" aria-modal="true" aria-labelledby="tg-title">
+    <div class="tg-head">
+      <h2 id="tg-title" class="tg-title">Talkgroups</h2>
+      <span id="tg-sum" class="dim tg-sum"></span>
+      <span class="spacer"></span>
+      <button id="tg-close" class="tg-close" title="Close (Esc)" aria-label="Close">✕</button>
+    </div>
+    <div class="tg-tools">
+      <input id="tg-filter" class="tg-filter" type="search" placeholder="Filter: name, number or group"
+             autocomplete="off" spellcheck="false" aria-label="Filter talkgroups">
+      <span class="dim tg-legend"><b>Record</b> keeps its calls · <b>Main</b> puts them in Radio traffic and on our incident</span>
+    </div>
+    <div id="tg-error" class="tg-error" hidden></div>
+    <div id="tg-groups" class="tg-groups"></div>
+  </div>
+</div>
 
 <script src="/static/vendor/maplibre-gl.js"></script>
 <script src="/static/map-style.js"></script>

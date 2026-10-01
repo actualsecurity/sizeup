@@ -113,6 +113,9 @@ class App:
         self.tg = TalkgroupPrefs(cfg.p25_tg_info or {k: {"name": v} for k, v in cfg.p25_talkgroups.items()},
                                  set(cfg.p25_incident_talkgroups),
                                  (self.clips_dir.parent / "talkgroups.json") if self.clips_dir else None)
+        for t in list(self.store.loose) + [t for i in self.store.incidents for t in i.traffic]:
+            if t.talkgroup is not None:
+                self.tg.seed(t.talkgroup, t.end)
         self._lock = threading.Lock()
         self._last_tones_only: Page | None = None
         self.receivers = [NfmReceiver(cfg.rtl_fm, c.device, c.gain_db, Channel(c.mhz, c.label),
