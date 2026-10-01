@@ -43,9 +43,44 @@ def wav_bytes(audio: np.ndarray, rate: int = 16000) -> bytes:
 DEEMPH_TAU = 750e-6     # land-mobile NFM de-emphasis (6 dB/octave, corner ~212 Hz)
 TARGET_DBFS = -16.0     # loudness of the speech after processing
 PEAK_LIMIT = 0.9
+NR_FRAME = 512          # noise reduction STFT: 32 ms frames, 50 % overlap (sqrt-Hann, perfect reconstruction)
+NR_OVERSUB = 1.5        # subtract this much of the noise profile (a little extra = no residual whine)
+NR_FLOOR = 0.08         # never cut a bin below -22 dB (deeper cuts sound watery: "musical noise")
 
 
-def radio_voice(audio: np.ndarray, rate: int = 16000, deemph: bool = True) -> np.ndarray:
+def denoise(y: np.ndarray) -> np.ndarray:
+    """Remove what is steady in the transmission's own dead air: hiss and the whine.
+
+    FG1 bench: a comb of tones 100 Hz apart (sidebands of the 100 Hz CTCSS on a beat
+    around 3-4 kHz) ran through every transmission, up to +44 dB over its surroundings.
+    The quietest quarter of the clip's frames (after key-up, between words) is the noise
+    profile; each frequency bin is reduced by it (spectral subtraction, smoothed over time).
+    Speech isn't steady, so it stays. Clips too short to have dead air are returned as-is."""
+    n, hop = NR_FRAME, NR_FRAME // 2
+    if len(y) < n * 6:
+        return y
+    win = np.sqrt(np.hanning(n + 1)[:-1])           # sqrt-Hann: analysis * synthesis sums to 1 at 50 %
+    pad = (-(len(y) - n) % hop)
+    x = np.concatenate([np.zeros(hop), y, np.zeros(pad + hop)])
+    idx = np.arange(0, len(x) - n + 1, hop)
+    X = np.fft.rfft(np.stack([x[i:i + n] * win for i in idx]), axis=1)
+    mag = np.abs(X)
+    energy = (mag ** 2).sum(axis=1)
+    quiet = energy <= np.percentile(energy, 25)
+    if quiet.sum() < 4:
+        return y
+    noise = mag[quiet].mean(axis=0)
+    gain = np.maximum(1 - NR_OVERSUB * noise / (mag + 1e-12), NR_FLOOR)
+    k = np.array([0.25, 0.5, 0.25])                  # smooth gains over time: less "musical noise"
+    gain = np.apply_along_axis(lambda g: np.convolve(np.pad(g, 1, mode="edge"), k, "valid"), 0, gain)
+    frames = np.fft.irfft(X * gain, n, axis=1) * win
+    out = np.zeros(len(x))
+    for i, fr in zip(idx, frames):
+        out[i:i + n] += fr
+    return out[hop:hop + len(y)]
+
+
+def radio_voice(audio: np.ndarray, rate: int = 16000, deemph: bool = True, nr: bool = True) -> np.ndarray:
     """FM discriminator output -> what a radio's speaker plays, at a steady loudness.
 
     De-emphasis (transmitters pre-emphasise voice), 300-3000 Hz band-pass (drops the CTCSS
@@ -70,6 +105,8 @@ def radio_voice(audio: np.ndarray, rate: int = 16000, deemph: bool = True) -> np
     m = hi & (f <= 3400)
     gain[m] = 0.5 + 0.5 * np.cos(np.pi * (f[m] - 3000) / 400)
     y = np.fft.irfft(X * gain, len(x))
+    if nr:
+        y = denoise(y)
     blk = rate // 50
     n = len(y) // blk
     if n >= 3:
@@ -152,7 +189,9 @@ class Transcriber:
             item, audio = self._q.get()
             for attempt in range(3):
                 try:
-                    raw, conf = self.client.transcribe(radio_voice(audio, deemph=getattr(item, "fm", True)),
+                    # No noise reduction for the model: on the FG1 bench it cut the whine 15 dB for listening
+                    # but changed 1 of 4 real transcripts ("Testing one two" -> "Nothing wanted").
+                    raw, conf = self.client.transcribe(radio_voice(audio, deemph=getattr(item, "fm", True), nr=False),
                                                       self.prompt(item))
                     break
                 except Exception as e:

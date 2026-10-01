@@ -81,7 +81,8 @@ def test_radio_voice_removes_ctcss_and_hiss_and_sets_loudness():
     assert spec[np.abs(f - 156.7) < 3].max() < 0.05 * spec.max()          # sub-audible tone gone
     blk = 320
     e = np.sqrt((y[: len(y) // blk * blk].reshape(-1, blk) ** 2).mean(axis=1))
-    speech = 20 * np.log10(np.sqrt(np.mean(np.sort(e)[len(e) // 2:] ** 2)))
+    db = 20 * np.log10(e + 1e-12)
+    speech = 20 * np.log10(np.sqrt(np.mean(e[db > np.percentile(db, 5) + 8] ** 2)))  # the voice blocks
     assert abs(speech - TARGET_DBFS) < 1.5 and np.abs(y).max() <= 1.0
 
 
@@ -105,3 +106,21 @@ def test_segments_are_trimmed_to_the_carrier_and_clicks_have_no_speech():
     assert speech_seconds(click.audio) < 0.15                       # a mic click: dead air only
     assert speech_seconds(speech.audio) > 0.5
     assert len(click.bursts) == 1 and len(speech.bursts) == 1        # the PTT-IDs, kept for decoding
+
+
+def test_noise_reduction_removes_steady_whine_not_speech():
+    from sizeup.stt import radio_voice
+    # FG1 bench: a comb of steady tones 100 Hz apart around 3 kHz ran through every transmission.
+    t = np.arange(RATE * 3) / RATE
+    whine = sum(0.01 * np.sin(2 * np.pi * (2545 + 100 * k) * t) for k in range(8))
+    talk = np.concatenate([np.zeros(int(0.8 * RATE)), 0.1 * voice_like(2.2)])
+    raw = keyed(talk + whine)
+
+    def whine_vs_speech(y):
+        n = 2048
+        spec = np.abs(np.fft.rfft(y[:int(0.7 * RATE)][:n] * np.hanning(n)))   # dead air before speech
+        f = np.fft.rfftfreq(n, 1 / RATE)
+        return 20 * np.log10(spec[(f > 2500) & (f < 3400)].max() + 1e-12)
+
+    off, on = radio_voice(raw, nr=False), radio_voice(raw)
+    assert whine_vs_speech(off) - whine_vs_speech(on) > 12      # speech held at the same loudness
