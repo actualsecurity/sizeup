@@ -1,0 +1,28 @@
+{
+  "ver": 2,
+  "sources": [
+    {
+      "center": 477193750,
+      "rate": 2400000,
+      "error": 0,
+      "gain": 40,
+      "digitalRecorders": 4,
+      "driver": "osmosdr",
+      "device": "rtl=00000001"
+    }
+  ],
+  "systems": [
+    {
+      "shortName": "westchester",
+      "type": "p25",
+      "modulation": "qpsk",
+      "control_channels": [476075000, 476112500, 476212500, 476237500],
+      "talkgroupsFile": "talkgroups.csv",
+      "recordUnknown": false,
+      "hideUnknownTalkgroups": true,
+      "compressWav": false
+    }
+  ],
+  "captureDir": "../../captures/p25",
+  "logLevel": "info"
+}
