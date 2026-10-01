@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>sizeup</title>
+<link rel="stylesheet" href="/static/vendor/maplibre-gl.css">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <span id="station" class="station">sizeup</span>
+  <span id="conn" class="pill warn">connecting…</span>
+  <span id="radios" class="radios"></span>
+  <span class="spacer"></span>
+  <span id="clock" class="clock"><span id="clock-date" class="dim"></span> <b id="clock-local"></b> <span id="clock-z" class="dim"></span></span>
+</header>
+
+<main>
+  <section class="stage">
+    <div id="map"></div>
+    <div class="controls">
+      <button id="zoom-in" title="Zoom in (+)">+</button>
+      <button id="zoom-out" title="Zoom out (−)">−</button>
+      <button id="recenter" title="Back to the incident / home view (c)">⌖</button>
+    </div>
+  </section>
+
+  <aside id="panel">
+    <section id="incident" class="incident none">
+      <div class="inc-head">
+        <h2>Active incident</h2>
+        <span id="inc-status" class="inc-status"></span>
+        <span class="spacer"></span>
+        <button id="inc-close" class="inc-close" hidden title="Close this incident">Close</button>
+      </div>
+      <div id="inc-empty" class="inc-empty">
+        <div class="big dim">No active incident</div>
+        <div id="inc-listening" class="dim"></div>
+      </div>
+      <div id="inc-body" hidden>
+        <div id="inc-type" class="inc-type"></div>
+        <div id="inc-addr" class="inc-addr"></div>
+        <div id="inc-geo-note" class="inc-note" hidden></div>
+        <div id="inc-cross" class="inc-cross"></div>
+        <div class="inc-facts">
+          <span><span class="dim">Time out</span> <b id="inc-timeout"></b></span>
+          <span><span class="dim">Elapsed</span> <b id="inc-elapsed"></b></span>
+        </div>
+        <div id="inc-depts" class="chips"></div>
+      </div>
+    </section>
+
+    <section id="dispatch-section" class="dispatch-section" hidden>
+      <h2>Dispatch</h2>
+      <ol id="dispatch" class="list dispatch"></ol>
+    </section>
+
+    <section class="grow">
+      <h2 id="traffic-title">Radio traffic</h2>
+      <ol id="traffic" class="list log"></ol>
+    </section>
+
+    <section class="pages-section">
+      <h2>Recent pages</h2>
+      <ol id="pages" class="list pages"></ol>
+    </section>
+
+    <section class="history-section">
+      <h2>Earlier incidents</h2>
+      <ol id="history" class="list history"></ol>
+    </section>
+  </aside>
+</main>
+
+<script src="/static/vendor/maplibre-gl.js"></script>
+<script src="/static/map-style.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

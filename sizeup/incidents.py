@@ -56,11 +56,14 @@ class Incident:
     status: str = "active"              # active | closed
     pages: list[str] = field(default_factory=list)
     page_text: list[str] = field(default_factory=list)
+    page_starts: list[float] = field(default_factory=list)   # aligned with pages / page_text
     traffic: list[Traffic] = field(default_factory=list)
 
     def as_dict(self) -> dict:
-        d = {k: v for k, v in self.__dict__.items() if k != "traffic"}
+        d = {k: v for k, v in self.__dict__.items() if k not in ("traffic", "page_starts")}
         d["traffic"] = [t.as_dict() for t in self.traffic[-200:]]
+        d["page_entries"] = [{"id": i, "text": t, "start": s, "label": "South 2"}
+                             for i, t, s in zip(self.pages, self.page_text, self.page_starts)]
         return d
 
 
@@ -94,6 +97,7 @@ class IncidentStore:
                         or (d.incident_type == inc.incident_type and d.incident_type != "Unknown")):
                     inc.pages.append(page_id)
                     inc.page_text.append(d.text)
+                    inc.page_starts.append(at)
                     inc.updated = at
                     for k in ("location", "cross_street", "time_out"):
                         if not getattr(inc, k) and getattr(d, k):
@@ -108,7 +112,7 @@ class IncidentStore:
                     return inc
         inc = Incident(uuid.uuid4().hex[:10], at, at, depts, d.incident_type, d.category, d.location,
                        d.cross_street, d.time_out, self.geocode(d) if d.location else None,
-                       pages=[page_id], page_text=[d.text])
+                       pages=[page_id], page_text=[d.text], page_starts=[at])
         with self._lock:
             self.incidents.append(inc)
         return inc

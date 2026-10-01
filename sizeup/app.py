@@ -222,18 +222,36 @@ class App:
         if self.p25:
             out.append(self.p25.status())
         out.append({"label": "STT", "mhz": None, "state": self.whisper.state, "detail": self.whisper.detail,
-                    "open": False, "quieting_db": None, "restarts": 0})
+                    "open": False, "quieting_db": None, "restarts": 0, "last_heard": None})
         return out
+
+    def has_clip(self, cid: str) -> bool:
+        with self._lock:
+            if cid in self.clips:
+                return True
+        return bool(self.clips_dir and (self.clips_dir / f"{cid}.wav").is_file())
 
     def state(self) -> dict:
         with self._lock:
             pages = [dict(p.as_dict(), dispatch=getattr(p, "dispatch", None)) for p in list(self.pages)[:50]]
-        return {"time": time.time(), "radios": self.radios(), **self.store.state(), "pages": pages}
+        st = {"time": time.time(), "radios": self.radios(), **self.store.state(), "pages": pages}
+        # Tell the display which entries have a recording (so ▶ isn't a dead button).
+        for p in st["pages"]:
+            p["has_audio"] = self.has_clip(p["id"])
+        for t in st["loose_traffic"]:
+            t["has_audio"] = self.has_clip(t["id"])
+        for inc in st["incidents"]:
+            for t in inc["traffic"]:
+                t["has_audio"] = self.has_clip(t["id"])
+            for e in inc["page_entries"]:
+                e["has_audio"] = self.has_clip(e["id"])
+        return st
 
     def scene(self) -> dict:
         fh = json.loads((ROOT / "data" / "firehouses.json").read_text())["firehouses"]
         lon, lat, zoom = self.cfg.home
         return {"station": {"id": self.cfg.station_id, "name": self.cfg.station_name},
+                "timezone": "America/New_York",
                 "home": {"center": [lon, lat], "zoom": zoom}, "incident_zoom": 17.2,
                 "tiles": "https://tiles.openfreemap.org/planet",
                 "glyphs": "https://tiles.openfreemap.org/fonts/{fontstack}/{range}.pbf",

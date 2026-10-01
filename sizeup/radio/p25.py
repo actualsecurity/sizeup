@@ -102,7 +102,8 @@ class CallIngest:
 
     def status(self) -> dict:
         return {"label": "/".join(sorted(set(self.labels.values()))), "mhz": None, "state": self.state,
-                "detail": self.detail, "open": False, "quieting_db": None, "restarts": 0}
+                "detail": self.detail, "open": False, "quieting_db": None, "restarts": 0,
+                "last_heard": self.last_call or None}
 
     def scan(self) -> list[Call]:
         calls = []

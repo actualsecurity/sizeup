@@ -129,6 +129,7 @@ class NfmReceiver:
         self.open_db = open_db
         self.squelch = NoiseSquelch(open_db=open_db)
         self.state, self.detail, self.restarts = "starting", "", 0
+        self.last_heard: float | None = None   # end of the last transmission
         self._stop = threading.Event()
         self._proc: subprocess.Popen | None = None
 
@@ -152,6 +153,7 @@ class NfmReceiver:
         q = self.squelch.quieting_db
         return {"label": self.channel.label, "mhz": self.channel.mhz, "state": self.state,
                 "detail": self.detail, "restarts": self.restarts, "open": self.squelch.open,
+                "last_heard": self.last_heard,
                 "quieting_db": round(q, 1) if q is not None else None}
 
     def _kill(self) -> None:
@@ -211,6 +213,7 @@ class NfmReceiver:
                 buf = buf[need:]
                 seg = self.squelch.feed(frame)
                 if seg is not None:
+                    self.last_heard = seg.end
                     try:
                         self.on_segment(self.channel, seg)
                     except Exception as e:
