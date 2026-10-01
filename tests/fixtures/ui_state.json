@@ -1,0 +1,41 @@
+{
+  "time": 1790000400.0,
+  "_note": "TEST FIXTURE for UI development only. Never served by the real app.",
+  "radios": [
+    {"label": "South 2", "mhz": 470.2, "state": "ok", "detail": "South 2 470.2000", "open": false, "quieting_db": 0.4, "restarts": 0},
+    {"label": "Fire/EMS 15", "mhz": null, "state": "absent", "detail": "P25 receiver not connected", "open": false, "quieting_db": null, "restarts": 0},
+    {"label": "FG1", "mhz": 453.0375, "state": "ok", "detail": "FG1 453.0375", "open": true, "quieting_db": 22.5, "restarts": 0}
+  ],
+  "incidents": [
+    {
+      "id": "inc0001", "opened": 1790000000.0, "updated": 1790000390.0,
+      "departments": ["Port Chester FD"], "incident_type": "Fire alarm", "category": "fire",
+      "location": "209 west chester avenue", "cross_street": "pearl street", "time_out": "14:32",
+      "geo": {"lat": 41.00253, "lon": -73.66692, "label": "209 Westchester Ave, Port Chester", "kind": "address", "confidence": 0.95},
+      "status": "active", "pages": ["pg0001", "pg0002"],
+      "page_text": ["Port Chester Fire Department, respond to an activated fire alarm. 209 West Chester Avenue, cross of Pearl Street, Port Chester. Time out 1432."],
+      "traffic": [
+        {"id": "tr0001", "source": "Fire/EMS 15", "start": 1790000120.0, "end": 1790000124.0, "text": "2391 to 60 Control, responding.", "status": "done", "unit": "2391", "talkgroup": 307},
+        {"id": "tr0002", "source": "Fire/EMS 15", "start": 1790000126.0, "end": 1790000128.5, "text": "60 Control copies, 2391 responding, 1434.", "status": "done", "unit": "60 Control", "talkgroup": 307},
+        {"id": "tr0003", "source": "FG1", "start": 1790000300.0, "end": 1790000306.0, "text": "Engine 60 on location, three story commercial, nothing showing, investigating.", "status": "done", "unit": "", "talkgroup": null}
+      ]
+    },
+    {
+      "id": "inc0000", "opened": 1789990000.0, "updated": 1789993600.0,
+      "departments": ["Rye Brook FD"], "incident_type": "Unknown", "category": "unknown",
+      "location": "", "cross_street": "", "time_out": "11:46", "geo": null,
+      "status": "closed", "pages": ["pg0000"], "page_text": ["Rye Brook fire department ..."], "traffic": []
+    }
+  ],
+  "pages": [
+    {"id": "pg0002", "label": "South 2", "mhz": 470.2, "start": 1790000040.0, "end": 1790000056.0, "kind": "page", "status": "done",
+     "departments": ["Port Chester FD"], "quieting_db": 24.1,
+     "tones": [{"kind": "two_tone", "a_hz": 349.1, "b_hz": 311.1, "names": ["Port Chester FD"]}],
+     "raw": "Port Chester Fire Department, respond to an activated fire alarm. 209 West Chester Avenue, cross of Pearl Street, Port Chester. Time out 1432.", "confidence": 0.86,
+     "dispatch": {"departments": ["Port Chester FD"], "incident_type": "Fire alarm", "category": "fire", "location": "209 west chester avenue", "cross_street": "pearl street", "time_out": "14:32"}},
+    {"id": "pg0003", "label": "South 2", "mhz": 470.2, "start": 1790000200.0, "end": 1790000204.0, "kind": "page", "status": "no_voice",
+     "departments": [], "quieting_db": 19.0,
+     "tones": [{"kind": "two_tone", "a_hz": 669.9, "b_hz": 1092.4, "names": []}], "raw": "", "confidence": null, "dispatch": null}
+  ],
+  "loose_traffic": []
+}

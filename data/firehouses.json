@@ -1,0 +1,10 @@
+{
+  "_source": "Addresses: NERIS (neris.fsri.org FD36119816) and ryebrookny.gov; coordinates: NYS Geocoder, 2026-10-01",
+  "firehouses": [
+    {"name": "PCFD Headquarters", "address": "209 Westchester Ave", "ll": [-73.66692, 41.00253]},
+    {"name": "Washington Park", "address": "464 Westchester Ave", "ll": [-73.67621, 41.00489]},
+    {"name": "South End (Putnam & Mellor)", "address": "51-53 Grace Church St", "ll": [-73.66453, 40.99600]},
+    {"name": "Brooksville Engine & Hose #5", "address": "509 Willett Ave", "ll": [-73.65962, 41.01177]},
+    {"name": "Rye Brook Firehouse", "address": "940 King St", "ll": [-73.67464, 41.03513]}
+  ]
+}

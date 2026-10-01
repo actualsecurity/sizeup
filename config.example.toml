@@ -1,0 +1,59 @@
+# sizeup station config. Copy to config.toml (gitignored) and edit. Unknown keys are rejected.
+
+[station]
+id = "pcfd-hq"
+name = "Port Chester FD Headquarters"
+
+[web]
+host = "127.0.0.1"                 # 0.0.0.0 to serve the firehouse LAN
+port = 8090
+
+[radio]
+rtl_fm = "rtl_fm"                  # the RTL-SDR Blog build for a V4
+
+# One rtl_fm per channel, one dongle each (serials set with `rtl_eeprom -s <serial>`).
+[[radio.channels]]
+label = "South 2"                  # 60 Control fire paging, South Zone simulcast
+mhz = 470.2
+kind = "paging"                    # tones -> pages -> incidents
+device = "fire-page"
+gain_db = 40
+squelch_db = 10                    # FM quieting (dB below the idle hiss) needed to open
+
+[[radio.channels]]
+label = "FG1"                      # PCFD / Rye Brook primary fireground (county list 2024-11-06)
+mhz = 453.0375
+kind = "traffic"                   # transcribed and attached to the active incident
+device = "fire-fg"
+gain_db = 40
+
+# Two-tone codes. UNVERIFIED until heard on the air: every decoded pair is shown with its page
+# so the real codes can be confirmed and named here. `ours = true` = opens incidents.
+[[tones]]
+name = "Port Chester FD"
+a_hz = 349.1                       # RadioReference wiki (2025-07), unverified
+b_hz = 311.1
+agency = "PCFD"
+ours = true
+
+[stt]
+server_binary = "whisper-server"   # whisper.cpp server; the model stays loaded
+model = "models/ggml-large-v3-turbo.bin"
+port = 8179
+threads = 8
+prompt = ""                        # optional vocabulary hint (can make the model insert words: off by default)
+
+[p25]
+# trunk-recorder capture directory (Westchester County P25, South simulcast site). Empty = no P25.
+capture_dir = ""
+talkgroups = { "307" = "Fire/EMS 15", "301" = "60 Control" }
+aliases = {}                       # radio ID -> unit name, e.g. { "2391001" = "2391" }
+
+[storage]
+clips_dir = "captures/clips"
+keep_hours = 24
+
+[map]
+home_lon = -73.6640
+home_lat = 41.0130
+home_zoom = 13.4
