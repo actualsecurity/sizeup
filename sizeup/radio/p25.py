@@ -79,7 +79,8 @@ class CallIngest:
 
     def __init__(self, capture_dir: str | Path, labels: dict[int, str], on_call: Callable[[Call], None],
                  aliases: dict[str, str] | None = None, poll_s: float = 1.0,
-                 on_event: Callable[[str], None] = lambda m: None):
+                 on_event: Callable[[str], None] = lambda m: None, name: str = "P25"):
+        self.name = name  # status label (the header pill), not every talkgroup's name
         self.dir, self.labels, self.on_call = Path(capture_dir), labels, on_call
         self.aliases, self.poll_s, self.on_event = aliases or {}, poll_s, on_event
         self._seen: set[str] = set()
@@ -101,7 +102,7 @@ class CallIngest:
         self._stop.set()
 
     def status(self) -> dict:
-        return {"label": "/".join(sorted(set(self.labels.values()))), "mhz": None, "state": self.state,
+        return {"label": self.name, "mhz": None, "state": self.state,
                 "detail": self.detail, "open": False, "quieting_db": None, "restarts": 0,
                 "last_heard": self.last_call or None}
 

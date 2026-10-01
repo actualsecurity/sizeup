@@ -45,7 +45,7 @@ class Config:
     stt_prompt: str
     p25_dir: str
     p25_talkgroups: dict[int, str] = field(default_factory=dict)
-    p25_incident_talkgroups: frozenset[int] = frozenset({307, 301})  # attach to our incident (others: context)
+    p25_incident_talkgroups: frozenset[int] = frozenset({307, 333})  # attach to our incident (others: context)
     p25_aliases: dict[str, str] = field(default_factory=dict)
     mdc_aliases: dict[str, str] = field(default_factory=dict)   # MDC-1200 unit ID ("0611") -> name
     unit_departments: dict[str, str] = field(default_factory=dict)  # "Engine 60" -> "Port Chester FD"
@@ -145,7 +145,7 @@ def load(path: str | Path) -> Config:
         stt_port=int(stt.get("port", 8179)), stt_threads=int(stt.get("threads", 8)), stt_prompt=stt.get("prompt", ""),
         p25_dir=rel(p25.get("capture_dir", "")),
         p25_talkgroups=p25_tgs,
-        p25_incident_talkgroups=frozenset(int(x) for x in p25.get("incident_talkgroups", [307, 301])),
+        p25_incident_talkgroups=frozenset(int(x) for x in p25.get("incident_talkgroups", [307, 333])),
         p25_aliases={str(k): v for k, v in p25.get("aliases", {}).items()},
         mdc_aliases={str(k).upper(): v for k, v in mdc.get("aliases", {}).items()},
         unit_departments=unit_departments,

@@ -127,7 +127,8 @@ class App:
         self._mode_lock = threading.Lock()
         self.switching = False
         self._kind = {c.label: c.kind for c in cfg.channels}
-        self.p25 = (CallIngest(cfg.p25_dir, cfg.p25_talkgroups, self._call, cfg.p25_aliases, on_event=log)
+        self.p25 = (CallIngest(cfg.p25_dir, cfg.p25_talkgroups, self._call, cfg.p25_aliases, on_event=log,
+                               name=P25_MODE)
                     if cfg.p25_dir else None)
 
     # -- geocoding ------------------------------------------------------------------------------
