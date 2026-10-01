@@ -17,6 +17,11 @@ def write_call(d, name, tg, srcs, rate=8000, seconds=2.0):
         w.writeframes((0.2 * np.sin(np.arange(int(rate * seconds)) / 5) * 32767).astype("<i2").tobytes())
 
 
+def settled(ing):
+    """A call is taken once its WAV size holds still across two polls."""
+    return ing.scan() + ing.scan()
+
+
 def test_scan_keeps_our_talkgroups_resamples_and_names_units(tmp_path):
     day = tmp_path / "westchester" / "2026" / "10" / "1"
     day.mkdir(parents=True)
@@ -25,7 +30,7 @@ def test_scan_keeps_our_talkgroups_resamples_and_names_units(tmp_path):
     write_call(day, "307-1790000000_478187500-call_1", 307, [2391001, 2391001, 6000123])
     write_call(day, "999-1790000001_478187500-call_2", 999, [5])            # a talkgroup not in our list
     (day / "301-1790000002_478312500-call_3.json").write_text(json.dumps({"talkgroup": 301}))  # wav not done yet
-    calls = ing.scan()
+    calls = settled(ing)
     # Every talkgroup is ingested (sizeup decides what to keep); unlisted ones are named "TG n".
     assert sorted(c.label for c in calls) == ["Fire/EMS 15", "TG 999"]
     calls = [c for c in calls if c.talkgroup == 307]
@@ -33,16 +38,32 @@ def test_scan_keeps_our_talkgroups_resamples_and_names_units(tmp_path):
     assert c.units == ["2391", "6000123"] and c.talkgroup == 307
     assert len(c.audio) == 32000 and c.audio.dtype == np.float32   # 2 s at 16 kHz
     write_call(day, "301-1790000002_478312500-call_3", 301, [1])
-    assert [c.label for c in ing.scan()] == ["60 Control"]           # picked up once the wav lands
+    assert [c.label for c in settled(ing)] == ["60 Control"]           # picked up once the wav lands
     assert ing.scan() == []                                          # each call once
 
 
-def test_empty_wav_is_skipped_not_fatal(tmp_path):
-    # trunk-recorder can leave a header-less/zero-length WAV (wave raises EOFError): skip it, keep going.
+def test_wav_still_being_written_is_waited_for(tmp_path):
+    # Seen live: the JSON lands while the WAV is 0 bytes; a moment later it's the full call.
     day = tmp_path / "westchester" / "2026" / "10" / "1"
     day.mkdir(parents=True)
     ing = CallIngest(tmp_path, LABELS, on_call=lambda c: None).prime()
     (day / "307-1.json").write_text(json.dumps({"talkgroup": 307}))
     (day / "307-1.wav").write_bytes(b"")
+    assert ing.scan() == [] and ing.scan() == []          # still empty: wait, don't drop it
+    write_call(day, "307-1", 307, [1])                    # recorder finishes the file
+    assert ing.scan() == []                               # size just changed: one more poll
+    assert [c.label for c in ing.scan()] == ["Fire/EMS 15"]
+
+
+def test_wav_that_never_fills_is_given_up_without_stopping_ingest(tmp_path, monkeypatch):
+    import sizeup.radio.p25 as p25
+    monkeypatch.setattr(p25, "SETTLE_GIVE_UP_S", 0.0)
+    day = tmp_path / "westchester" / "2026" / "10" / "1"
+    day.mkdir(parents=True)
+    events = []
+    ing = CallIngest(tmp_path, LABELS, on_call=lambda c: None, on_event=events.append).prime()
+    (day / "307-1.json").write_text(json.dumps({"talkgroup": 307}))
+    (day / "307-1.wav").write_bytes(b"")
     write_call(day, "307-2", 307, [1])
     assert [c.label for c in ing.scan()] == ["Fire/EMS 15"]
+    assert any("307-1.wav" in e for e in events)

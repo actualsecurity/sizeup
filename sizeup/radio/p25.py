@@ -38,6 +38,10 @@ class Call:
     wav_path: str = ""
 
 
+WAV_HEADER = 44            # bytes; a WAV this size or smaller has no audio yet
+SETTLE_GIVE_UP_S = 60.0
+
+
 def _mtime(p: Path) -> float:
     try:
         return p.stat().st_mtime
@@ -93,6 +97,7 @@ class CallIngest:
         self.dir, self.labels, self.on_call = Path(capture_dir), labels, on_call
         self.aliases, self.poll_s, self.on_event = aliases or {}, poll_s, on_event
         self._seen: set[str] = set()
+        self._pending: dict[str, tuple[float, int]] = {}   # json path -> (first seen, last WAV size)
         self._stop = threading.Event()
         self.state, self.detail, self.last_call = "starting", "", 0.0
 
@@ -116,14 +121,26 @@ class CallIngest:
                 "last_heard": self.last_call or None}
 
     def scan(self) -> list[Call]:
+        """New finished calls. trunk-recorder can publish the JSON before the WAV is fully written
+        (we've read 0-byte WAVs that were 190 KB a moment later), so a call is taken only once its
+        WAV is non-empty and the same size on two polls in a row; give up after SETTLE_GIVE_UP_S."""
         calls = []
+        now = time.time()
         for meta in sorted(self.dir.rglob("*.json"), key=_mtime):
             key = str(meta)
             if key in self._seen:
                 continue
             wav = meta.with_suffix(".wav")
-            if not wav.exists():
-                continue  # audio not finished yet: pick it up next poll
+            try:
+                size = wav.stat().st_size
+            except OSError:
+                continue  # audio not there yet: pick it up next poll
+            first, last_size = self._pending.get(key, (now, -1))
+            settled = size > WAV_HEADER and size == last_size
+            if not settled and now - first < SETTLE_GIVE_UP_S:
+                self._pending[key] = (first, size)
+                continue
+            self._pending.pop(key, None)
             self._seen.add(key)
             call = parse_call(meta, self.labels, self.aliases, record_all=self.record_all)
             if call is None:
@@ -131,7 +148,7 @@ class CallIngest:
             try:
                 call.audio = read_wav_16k(wav)
             except (OSError, ValueError, EOFError, wave.Error) as e:   # EOFError: empty/truncated WAV
-                self.on_event(f"p25: skipped {wav.name}: {e}")
+                self.on_event(f"p25: skipped {wav.name}: {type(e).__name__} {e}")
                 continue
             calls.append(call)
         return calls
