@@ -118,6 +118,12 @@ class App:
         self.shared = bool(cfg.shared_device)
         self.modes = [c.label for c in cfg.channels] + ([P25_MODE] if self.recorder else [])
         self.mode = (cfg.start_mode if cfg.start_mode in self.modes else (self.modes[0] if self.modes else ""))
+        # The last mode picked in the web app wins over start_mode, so a restart doesn't move the dongle.
+        self._mode_file = (Path(cfg.clips_dir).parent / "sdr_mode.txt") if cfg.clips_dir else None
+        if self.shared and self._mode_file and self._mode_file.is_file():
+            saved = self._mode_file.read_text().strip()
+            if saved in self.modes:
+                self.mode = saved
         self._mode_lock = threading.Lock()
         self.switching = False
         self._kind = {c.label: c.kind for c in cfg.channels}
@@ -283,6 +289,7 @@ class App:
     def _transcribed(self, item) -> None:
         if isinstance(item, Traffic):
             item.text = getattr(item, "raw", "")
+            attach = item.talkgroup is None or item.talkgroup in self.cfg.p25_incident_talkgroups
             if item.status == "no_speech":
                 log(f"{item.source}: mic click ({item.end - item.start:.1f} s, no speech) skipped"
                     + (f" · unit {item.unit}" if item.unit else ""))
@@ -292,7 +299,7 @@ class App:
                 return
             if hasattr(item, "raw_audio"):
                 del item.raw_audio
-            self.store.on_traffic(item)
+            self.store.on_traffic(item, attach=attach)
             log(f"{item.source}: {'[' + item.unit + '] ' if item.unit else ''}{item.text or '(' + item.status + ')'}")
             return
         page: Page = item
@@ -368,6 +375,11 @@ class App:
                 time.sleep(SWITCH_PAUSE_S)  # let the dongle go before the next program opens it
                 self.mode = mode
                 self._start_mode(mode)
+                if self._mode_file:
+                    try:
+                        self._mode_file.write_text(mode)
+                    except OSError:
+                        pass
             finally:
                 self.switching = False
         return None

@@ -45,6 +45,7 @@ class Config:
     stt_prompt: str
     p25_dir: str
     p25_talkgroups: dict[int, str] = field(default_factory=dict)
+    p25_incident_talkgroups: frozenset[int] = frozenset({307, 301})  # attach to our incident (others: context)
     p25_aliases: dict[str, str] = field(default_factory=dict)
     mdc_aliases: dict[str, str] = field(default_factory=dict)   # MDC-1200 unit ID ("0611") -> name
     unit_departments: dict[str, str] = field(default_factory=dict)  # "Engine 60" -> "Port Chester FD"
@@ -104,7 +105,17 @@ def load(path: str | Path) -> Config:
         if t.get("ours", False):
             ours.add(t["name"])
     stt = _take(data.get("stt", {}), "stt", {"server_binary", "model", "port", "threads", "prompt"})
-    p25 = _take(data.get("p25", {}), "p25", {"capture_dir", "talkgroups", "aliases", "recorder", "recorder_dir"})
+    p25 = _take(data.get("p25", {}), "p25", {"capture_dir", "talkgroups", "talkgroups_file", "incident_talkgroups",
+                                             "aliases", "recorder", "recorder_dir"})
+    p25_tgs = {int(k): v for k, v in p25.get("talkgroups", {"307": "Fire/EMS 15"}).items()}
+    if p25.get("talkgroups_file"):  # trunk-recorder's talkgroups.csv: one list for both programs
+        import csv
+        tf = Path(p25["talkgroups_file"])
+        tf = tf if tf.is_absolute() else base / tf
+        if not tf.is_file():
+            raise ConfigError(f"p25.talkgroups_file: {tf} not found")
+        for r in csv.DictReader(tf.read_text().splitlines()):
+            p25_tgs[int(r["Decimal"])] = r["Alpha Tag"]
     storage = _take(data.get("storage", {}), "storage", {"clips_dir", "keep_hours"})
     mdc = _take(data.get("mdc", {}), "mdc", {"aliases"})
     units = _take(data.get("units", {}), "units", {"departments", "apparatus_file"})
@@ -133,7 +144,8 @@ def load(path: str | Path) -> Config:
         stt_server=stt.get("server_binary", "whisper-server"), stt_model=rel(stt.get("model", "models/ggml-large-v3-turbo.bin")),
         stt_port=int(stt.get("port", 8179)), stt_threads=int(stt.get("threads", 8)), stt_prompt=stt.get("prompt", ""),
         p25_dir=rel(p25.get("capture_dir", "")),
-        p25_talkgroups={int(k): v for k, v in p25.get("talkgroups", {"307": "Fire/EMS 15"}).items()},
+        p25_talkgroups=p25_tgs,
+        p25_incident_talkgroups=frozenset(int(x) for x in p25.get("incident_talkgroups", [307, 301])),
         p25_aliases={str(k): v for k, v in p25.get("aliases", {}).items()},
         mdc_aliases={str(k).upper(): v for k, v in mdc.get("aliases", {}).items()},
         unit_departments=unit_departments,

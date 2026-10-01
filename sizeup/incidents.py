@@ -187,8 +187,9 @@ class IncidentStore:
         self.save()
         return inc
 
-    def on_traffic(self, t: Traffic) -> Incident | None:
-        inc = self.active()
+    def on_traffic(self, t: Traffic, attach: bool = True) -> Incident | None:
+        """attach=False: context traffic (another battalion's talkgroup) goes to the loose list."""
+        inc = self.active() if attach else None
         with self._lock:
             if inc is not None:
                 inc.traffic.append(t)

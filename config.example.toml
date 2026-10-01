@@ -52,7 +52,8 @@ prompt = ""                        # optional vocabulary hint (can make the mode
 capture_dir = "captures/p25"            # where trunk-recorder writes calls
 recorder = "~/.local/src/trunk-recorder/build/trunk-recorder --config=config.json"
 recorder_dir = "deploy/trunk-recorder"  # its config.json + talkgroups.csv
-talkgroups = { "307" = "Fire/EMS 15", "301" = "60 Control" }
+talkgroups_file = "deploy/trunk-recorder/talkgroups.csv"   # names for all recorded talkgroups
+incident_talkgroups = [307, 301]   # Fire/EMS 15 (Battalion 15) + 60 Control attach to our incident
 aliases = {}                       # radio ID -> unit name, e.g. { "2391001" = "2391" }
 
 [mdc]

@@ -19,7 +19,7 @@
       "control_channels": [476075000, 476112500, 476212500, 476237500],
       "talkgroupsFile": "talkgroups.csv",
       "recordUnknown": false,
-      "hideUnknownTalkgroups": true,
+      "hideUnknownTalkgroups": false,
       "compressWav": false
     }
   ],

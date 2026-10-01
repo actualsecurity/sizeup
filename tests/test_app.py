@@ -168,3 +168,23 @@ def test_one_shared_dongle_switches_between_channels_and_p25(tmp_path, monkeypat
         assert app.set_mode("South 2") is None and app.recorder.state == "off"
     finally:
         app.stop()
+
+
+def test_other_battalions_talkgroups_are_context_not_incident_traffic(tmp_path):
+    # Every fire/EMS talkgroup is recorded; only Fire/EMS 15 (307) + 60 Control (301) join our incident.
+    from dataclasses import replace
+    app = App(replace(cfg(tmp_path), unit_departments={"Engine 61": "Port Chester FD"},
+                      p25_incident_talkgroups=frozenset({307, 301})))
+    app._kind = {"South 2": "paging"}
+    app.stt.client = FakeWhisper({6: "10 Charlie 2, Engine 61, 209 Westchester Avenue", 2: "Engine 61 responding",
+                                  3: "Battalion 10 traffic"})
+    app.stt.start()
+    audio = np.concatenate([tone(349.1, 1.0), tone(311.1, 3.0), np.zeros(int(0.2 * RATE)), voice(6.0)]).astype(np.float32)
+    now = time.time()
+    app._segment(Channel(470.2, "South 2"), Segment(now, now + len(audio) / RATE, audio, 25.0))
+    assert wait(lambda: app.store.active() is not None)
+    app._call(Call("111-x", 111, "Fire/EMS 10", now + 30, now + 33, [], np.zeros(RATE * 3, np.float32)))
+    app._call(Call("307-x", 307, "Fire/EMS 15", now + 40, now + 42, ["2391"], np.zeros(RATE * 2, np.float32)))
+    inc = app.store.active()
+    assert wait(lambda: len(inc.traffic) == 1 and len(app.store.loose) == 1)
+    assert inc.traffic[0].source == "Fire/EMS 15" and app.store.loose[0].source == "Fire/EMS 10"
