@@ -29,6 +29,15 @@ def cfg(tmp_path):
                   "", clips_dir=str(tmp_path / "clips"))
 
 
+def voice(s, seed=0):
+    """Speech stand-in: harmonics with syllable-rate bursts over quiet dead air (carrier up)."""
+    t = np.arange(int(RATE * s)) / RATE
+    ph = 2 * np.pi * np.cumsum(130 + 20 * np.sin(2 * np.pi * 1.1 * t)) / RATE
+    syll = (np.sin(2 * np.pi * 3 * t) > 0.2).astype(float)
+    x = 0.3 * syll * sum(np.sin(k * ph) / k for k in range(1, 12))
+    return (x + 0.003 * np.random.default_rng(seed).standard_normal(len(t))).astype(np.float32)
+
+
 def tone(hz, s):
     return 0.5 * np.sin(2 * np.pi * hz * np.arange(int(RATE * s)) / RATE)
 
@@ -45,14 +54,13 @@ def test_page_opens_incident_and_traffic_attaches(tmp_path):
     app._kind = {"South 2": "paging", "FG1": "traffic"}
     app.stt.client = FakeWhisper({6: PAGE_TEXT, 3: "Engine 60 on location nothing showing", 2: "2391 responding"})
     app.stt.start()
-    voice = 0.3 * np.random.default_rng(0).standard_normal(RATE * 6)
-    audio = np.concatenate([tone(349.1, 1.0), tone(311.1, 3.0), np.zeros(int(0.2 * RATE)), voice]).astype(np.float32)
+    audio = np.concatenate([tone(349.1, 1.0), tone(311.1, 3.0), np.zeros(int(0.2 * RATE)), voice(6.0)]).astype(np.float32)
     now = time.time()
     app._segment(Channel(470.2, "South 2"), Segment(now, now + len(audio) / RATE, audio, 25.0))
     assert wait(lambda: app.store.active() is not None)
     inc = app.store.active()
     assert inc.incident_type == "Fire alarm" and inc.departments == ["Port Chester FD"] and inc.time_out == "14:32"
-    fg = (0.2 * np.random.default_rng(1).standard_normal(RATE * 3)).astype(np.float32)
+    fg = voice(3.0, seed=1)
     app._segment(Channel(453.0375, "FG1"), Segment(now + 60, now + 63, fg, 20.0))
     app._call(Call("307-x-call_1", 307, "Fire/EMS 15", now + 70, now + 72, ["2391"],
                    np.zeros(RATE * 2, np.float32)))
@@ -66,15 +74,15 @@ def test_page_opens_incident_and_traffic_attaches(tmp_path):
 
 
 def test_mic_clicks_are_not_transcribed(tmp_path):
-    # Real FG1 bench: 0.7-0.8 s key-ups with nothing said came back from whisper as "Yes.".
+    # Real FG1 bench: key-ups with nothing said (0.7-1.05 s) came back from whisper as "Yes.".
+    # After squelch trimming a click is carrier with dead air; a short reply has syllables.
     app = App(cfg(tmp_path))
     app._kind = {"FG1": "traffic"}
     sent = []
     app.stt.submit = lambda item, audio: sent.append(item)
     now = time.time()
-    click = (0.2 * np.random.default_rng(2).standard_normal(int(RATE * 0.8))).astype(np.float32)
-    app._segment(Channel(453.0375, "FG1"), Segment(now, now + 0.8, click, 20.0))
+    dead_air = (0.003 * np.random.default_rng(2).standard_normal(int(RATE * 1.05))).astype(np.float32)
+    app._segment(Channel(453.0375, "FG1"), Segment(now, now + 1.05, dead_air, 20.0))
     assert sent == [] and app.state()["loose_traffic"] == []
-    speech = (0.2 * np.random.default_rng(3).standard_normal(int(RATE * 1.4))).astype(np.float32)
-    app._segment(Channel(453.0375, "FG1"), Segment(now + 5, now + 6.4, speech, 20.0))  # "What is it?" was 1.4 s
+    app._segment(Channel(453.0375, "FG1"), Segment(now + 5, now + 5.8, voice(0.8, seed=3), 20.0))  # short "copy"
     assert len(sent) == 1

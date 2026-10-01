@@ -28,7 +28,7 @@ import numpy as np
 from sizeup.config import Config, ConfigError, load
 from sizeup.dispatch import parse
 from sizeup.incidents import IncidentStore, Traffic
-from sizeup.radio.fm import RATE, Channel, NfmReceiver, Segment
+from sizeup.radio.fm import RATE, Channel, NfmReceiver, Segment, speech_seconds
 from sizeup.radio.p25 import Call, CallIngest
 from sizeup.radio.page import Page, assemble
 from sizeup.radio.tones import TonePlan
@@ -37,7 +37,7 @@ from sizeup.web.server import WebServer
 
 ROOT = Path(__file__).resolve().parent.parent
 SPLIT_PAGE_S = 30.0      # voice this soon after a tones-only page for us = that page's voice
-MIC_CLICK_S = 1.0        # shorter transmissions (no tones) are mic clicks: not transcribed
+MIN_SPEECH_S = 0.15      # less sound than this above the dead-air floor (and no tones) = a mic click
 CATEGORIES = {"fire": "#ff4d3d", "ems": "#4da3ff", "rescue": "#ffb020", "hazard": "#c86bff",
               "service": "#3ddc97", "unknown": "#9aa0b4"}
 
@@ -163,10 +163,10 @@ class App:
     def _segment(self, ch: Channel, seg: Segment) -> None:
         paging = self._kind.get(ch.label) == "paging"
         page = assemble(ch.label, ch.mhz, seg, self.plan) if paging else None
-        if seg.end - seg.start < MIC_CLICK_S and not (page and page.tones):
-            # A key-up with nothing said (FG1 bench: clicks 0.7-0.8 s, shortest speech 1.4 s).
-            # Whisper turns these into words ("Yes.", "Thank you."), so they aren't transcribed.
-            log(f"{ch.label}: mic click ({seg.end - seg.start:.1f} s) skipped")
+        if not (page and page.tones) and speech_seconds(seg.audio) < MIN_SPEECH_S:
+            # A key-up with nothing said: carrier, dead air. Whisper turns these into words
+            # ("Yes.", "Thank you."), so they aren't transcribed.
+            log(f"{ch.label}: mic click ({seg.end - seg.start:.1f} s, no speech) skipped")
             return
         if paging:
             self._keep_clip(page.id, seg.audio)

@@ -70,9 +70,13 @@ def radio_voice(audio: np.ndarray, rate: int = 16000, deemph: bool = True) -> np
     y = np.fft.irfft(X * gain, len(x))
     blk = rate // 50
     n = len(y) // blk
-    if n >= 2:
-        e = np.sqrt((y[: n * blk].reshape(n, blk) ** 2).mean(axis=1))
-        speech_rms = float(np.sqrt(np.mean(np.sort(e)[n // 2:] ** 2)))
+    if n >= 3:
+        # Loudness of the speech itself: blocks 8 dB over the clip's dead-air floor (radio clips are
+        # mostly dead air between words; averaging that in would leave the voice too quiet).
+        e = np.sqrt((y[: n * blk].reshape(n, blk) ** 2).mean(axis=1)) + 1e-12
+        db = 20 * np.log10(e)
+        active = e[db > np.percentile(db, 5) + 8]
+        speech_rms = float(np.sqrt(np.mean((active if len(active) else e) ** 2)))
     else:
         speech_rms = float(np.sqrt(np.mean(y ** 2)))
     if speech_rms <= 1e-9:

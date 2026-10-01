@@ -29,23 +29,46 @@ FRAME = RATE // 20             # 50 ms
 HISTORY_FRAMES = 20 * 60       # hiss reference: last minute
 LEARN_FRAMES = 40              # 2 s before the squelch may open
 HANG_FRAMES = 8                # carrier may flicker for 0.4 s inside one transmission
-PREROLL_FRAMES = 3
-MIN_FRAMES = 10                # under 0.5 s of carrier: a mic click (kerchunk), not a transmission
+MIN_FRAMES = 6                 # under 0.3 s of carrier: not worth keeping
+TAIL_FRAMES = 4                # last 0.2 s of carrier = the squelch-tail (reverse) burst: dropped
 MAX_FRAMES = 20 * 120          # split anything over 2 minutes (a long page is ~30-60 s)
 STALL_S = 5.0
 HF_BAND = (4000.0, 7500.0)
+VOICE_BAND = (300.0, 3000.0)
 
 
 @dataclass
 class Segment:
     start: float               # wall clock
     end: float
-    audio: np.ndarray = field(repr=False)  # float32 -1..1, 16 kHz, as demodulated
+    audio: np.ndarray = field(repr=False)  # float32 -1..1, 16 kHz, as demodulated (carrier-up part only)
     quieting_db: float = 0.0   # how far the carrier quieted the hiss (signal quality)
 
 
+def speech_seconds(audio: np.ndarray, rate: int = RATE, margin_db: float = 8.0) -> float:
+    """How much of a transmission has sound in the voice band above its own dead-air floor.
+
+    With the squelch trimmed to the carrier-up part, a mic click is all dead air (carrier, nobody
+    talking): ~0 s. Measured on the FG1 bench: dead air ~-45 dB, voice -28..-40 dB."""
+    blk = rate // 50
+    n = len(audio) // blk
+    if n < 3:
+        return 0.0
+    X = np.fft.rfft(audio[: n * blk].reshape(n, blk) * np.hanning(blk), axis=1)
+    f = np.fft.rfftfreq(blk, 1 / rate)
+    band = (f >= VOICE_BAND[0]) & (f <= VOICE_BAND[1])
+    e = 10 * np.log10((np.abs(X[:, band]) ** 2).mean(axis=1) + 1e-20)
+    floor = np.percentile(e, 5)  # dead air: the pause after key-up / between words is short
+    return float((e > floor + margin_db).sum() * blk / rate)
+
+
 class NoiseSquelch:
-    """Streaming FM noise squelch. feed() 50 ms frames; get finished Segments back."""
+    """Streaming FM noise squelch. feed() 50 ms frames; get finished Segments back.
+
+    A segment is only the part where the carrier is fully up: no hiss before key-up, and not the
+    last 0.2 s either, where radios send the CTCSS reverse burst on PTT release. (On the FG1
+    bench those were the loudest things in every clip, ~25 dB over the voice, and the only
+    content of a mic click.)"""
 
     def __init__(self, open_db: float = 10.0, close_db: float = 6.0,
                  clock: Callable[[], float] = time.time):
@@ -57,8 +80,7 @@ class NoiseSquelch:
         self.hiss = 0.0
         self.open = False
         self._frames: list[np.ndarray] = []
-        self._hf_open: list[float] = []
-        self._pre: deque[np.ndarray] = deque(maxlen=PREROLL_FRAMES)
+        self._qs: list[float] = []
         self._quiet_run = 0
         self._start = 0.0
         self._n = 0
@@ -85,28 +107,26 @@ class NoiseSquelch:
         if not self.open:
             if self._n >= LEARN_FRAMES and q >= self.open_db:
                 self.open = True
-                self._start = self.clock() - (len(self._pre) + 1) * FRAME / RATE
-                self._frames = list(self._pre) + [frame]
-                self._hf_open = [q]
-                self._quiet_run = 0
-            else:
-                self._pre.append(frame)
+                self._start = self.clock() - FRAME / RATE
+                self._frames, self._qs, self._quiet_run = [frame], [q], 0
             return None
         self._frames.append(frame)
-        if q >= self.close_db:
-            self._quiet_run = 0
-            self._hf_open.append(q)
-        else:
-            self._quiet_run += 1
+        self._qs.append(q)
+        self._quiet_run = 0 if q >= self.close_db else self._quiet_run + 1
         if self._quiet_run > HANG_FRAMES or len(self._frames) >= MAX_FRAMES:
-            keep = len(self._frames) - max(0, self._quiet_run - 1)
-            frames, quieting = self._frames[:keep], float(np.median(self._hf_open))
-            self._frames, self._hf_open, self._pre = [], [], deque(maxlen=PREROLL_FRAMES)
+            frames, qs, start = self._frames, self._qs, self._start
+            self._frames, self._qs = [], []
             self.open = False
-            if len(frames) - PREROLL_FRAMES < MIN_FRAMES:
+            # Keep the carrier-up span: first to last frame fully quieted.
+            up = [i for i, v in enumerate(qs) if v >= self.open_db]
+            if not up:
                 return None
-            audio = np.concatenate(frames).astype(np.float32)
-            return Segment(self._start, self._start + len(audio) / RATE, audio, quieting)
+            i0, i1 = up[0], up[-1] - TAIL_FRAMES
+            if i1 - i0 + 1 < MIN_FRAMES:
+                return None
+            audio = np.concatenate(frames[i0:i1 + 1]).astype(np.float32)
+            t0 = start + i0 * FRAME / RATE
+            return Segment(t0, t0 + len(audio) / RATE, audio, float(np.median(qs[i0:i1 + 1])))
         return None
 
 

@@ -83,3 +83,22 @@ def test_radio_voice_removes_ctcss_and_hiss_and_sets_loudness():
     e = np.sqrt((y[: len(y) // blk * blk].reshape(-1, blk) ** 2).mean(axis=1))
     speech = 20 * np.log10(np.sqrt(np.mean(np.sort(e)[len(e) // 2:] ** 2)))
     assert abs(speech - TARGET_DBFS) < 1.5 and np.abs(y).max() <= 1.0
+
+
+def test_segments_are_trimmed_to_the_carrier_and_clicks_have_no_speech():
+    from sizeup.radio.fm import speech_seconds
+    # FG1 bench: the loudest part of every clip was hiss before key-up and the squelch tail.
+    def burst(s=0.18):  # reverse burst on PTT release, carrier still up: a loud voice-band thump
+        t = np.arange(int(RATE * s)) / RATE      # (measured +20 dB voice-band/hiss ratio on FG1)
+        return 0.6 * np.sin(2 * np.pi * 400 * t) * np.exp(-t / 0.08)
+
+    talk = np.concatenate([np.zeros(int(0.3 * RATE)), voice_like(2.0)])   # key up, then talk
+    segs = run_squelch(np.concatenate([hiss(3.0), keyed(np.concatenate([np.zeros(int(0.9 * RATE)), burst()])),
+                                       hiss(1.5), keyed(np.concatenate([talk, burst()])), hiss(1.5)]))
+    assert len(segs) == 2
+    click, speech = segs
+    for s in segs:
+        edge = np.sqrt(np.mean(s.audio[:FRAME] ** 2)), np.sqrt(np.mean(s.audio[-FRAME:] ** 2))
+        assert max(edge) < 0.3, "hiss left at the edges"          # hiss rms is 0.4, speech ~0.25
+    assert speech_seconds(click.audio) < 0.15                       # a mic click: dead air only
+    assert speech_seconds(speech.audio) > 0.5
