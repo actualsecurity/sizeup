@@ -50,6 +50,7 @@ class Config:
     p25_aliases: dict[str, str] = field(default_factory=dict)
     mdc_aliases: dict[str, str] = field(default_factory=dict)   # MDC-1200 unit ID ("0611") -> name
     unit_departments: dict[str, str] = field(default_factory=dict)  # "Engine 60" -> "Port Chester FD"
+    unit_callsigns: dict[str, str] = field(default_factory=dict)    # "2398" -> "2398 Duty Officer"
     shared_device: str = ""      # one dongle for everything (bench): switch channel / P25 in the web app
     start_mode: str = ""         # with shared_device: what the dongle does at startup ("South 2", "FG1", "Fire/EMS 15")
     p25_recorder: str = ""       # trunk-recorder command line, started/stopped by sizeup
@@ -123,7 +124,7 @@ def load(path: str | Path) -> Config:
                                            "encrypted": "E" in (r.get("Mode") or "").upper()}
     storage = _take(data.get("storage", {}), "storage", {"clips_dir", "keep_hours", "audio_keep_hours"})
     mdc = _take(data.get("mdc", {}), "mdc", {"aliases"})
-    units = _take(data.get("units", {}), "units", {"departments", "apparatus_file"})
+    units = _take(data.get("units", {}), "units", {"departments", "apparatus_file", "callsigns"})
     unit_departments: dict[str, str] = {}
     af = units.get("apparatus_file", "data/westchester_apparatus.csv")
     if af:
@@ -139,6 +140,21 @@ def load(path: str | Path) -> Config:
         elif "apparatus_file" in units:
             raise ConfigError(f"units.apparatus_file: {af} not found")
     unit_departments.update({str(k).title(): v for k, v in units.get("departments", {}).items()})
+    # Chief officers by callsign (dept number + rank digit: 2391 = Port Chester's chief). Department from the prefix.
+    dept_numbers: dict[str, str] = {}
+    df = (af_path.parent / "westchester_departments.csv") if af else None
+    if df and df.is_file():
+        import csv
+        rows = (ln for ln in df.read_text().splitlines() if ln.strip() and not ln.startswith("#"))
+        for r in csv.DictReader(rows):
+            if r.get("dept_number"):
+                dept_numbers[r["dept_number"].strip()] = HOME_DEPARTMENTS.get(r["department"], r["department"])
+    unit_callsigns: dict[str, str] = {}
+    for cs, title in units.get("callsigns", {}).items():
+        cs = str(cs).strip()
+        unit_callsigns[cs] = f"{cs} {title}".strip()
+        if cs[:3] in dept_numbers:
+            unit_departments.setdefault(unit_callsigns[cs], dept_numbers[cs[:3]])
     mp = _take(data.get("map", {}), "map", {"home_lon", "home_lat", "home_zoom"})
     rel = lambda p: str((base / p).resolve()) if p and not Path(p).is_absolute() else p
     return Config(
@@ -153,7 +169,7 @@ def load(path: str | Path) -> Config:
         p25_incident_talkgroups=frozenset(int(x) for x in p25.get("incident_talkgroups", [307, 333])),
         p25_aliases={str(k): v for k, v in p25.get("aliases", {}).items()},
         mdc_aliases={str(k).upper(): v for k, v in mdc.get("aliases", {}).items()},
-        unit_departments=unit_departments,
+        unit_departments=unit_departments, unit_callsigns=unit_callsigns,
         shared_device=radio.get("shared_device", ""), start_mode=radio.get("start_mode", ""),
         p25_recorder=p25.get("recorder", ""), p25_recorder_dir=rel(p25.get("recorder_dir", "")),
         clips_dir=rel(storage.get("clips_dir", "captures/clips")), keep_hours=float(storage.get("keep_hours", 24)),

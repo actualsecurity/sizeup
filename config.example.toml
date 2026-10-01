@@ -65,6 +65,9 @@ aliases = {}                       # e.g. { "0611" = "Engine 60" }
 # A page naming one of our units opens an incident even when its tones aren't known yet.
 apparatus_file = "data/westchester_apparatus.csv"
 departments = {}                   # overrides / additions, e.g. { "Engine 65" = "Port Chester FD" }
+# Chief officers by callsign (dept number 239 + rank digit). Shown on P25 talkers ("2398 Duty Officer")
+# and matched in pages, which then count as Port Chester.
+callsigns = { "2391" = "Chief of Department", "2392" = "1st Assistant Chief", "2393" = "2nd Assistant Chief", "2395" = "Immediate Past Chief", "2398" = "Duty Officer" }
 
 [storage]
 clips_dir = "captures/clips"

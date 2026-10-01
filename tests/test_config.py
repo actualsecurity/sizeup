@@ -15,3 +15,9 @@ def test_example_config_loads_county_data():
     assert "Ladder 54" not in u
     assert u["Engine 25"] == "New Rochelle"                          # the 15:32 South 2 page
     assert u["Engine 174"] == u["Ladder 1"] == "Fairview"            # the 15:43 South 2 page
+
+
+def test_callsigns_named_and_belong_to_their_department():
+    c = load(str(Path(__file__).resolve().parent.parent / "config.example.toml"))
+    assert c.unit_callsigns["2398"] == "2398 Duty Officer"
+    assert c.unit_departments["2391 Chief of Department"] == "Port Chester FD"

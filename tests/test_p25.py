@@ -67,3 +67,14 @@ def test_wav_that_never_fills_is_given_up_without_stopping_ingest(tmp_path, monk
     write_call(day, "307-2", 307, [1])
     assert [c.label for c in ing.scan()] == ["Fire/EMS 15"]
     assert any("307-1.wav" in e for e in events)
+
+
+def test_talker_tag_takes_callsign_title(tmp_path):
+    # Over the air the duty officer's radio sends "2398"; config names it.
+    day = tmp_path / "westchester" / "2026" / "10" / "1"
+    day.mkdir(parents=True)
+    meta = {"talkgroup": 307, "srcList": [{"src": 2398001, "tag": "2398"}, {"src": 7077003, "tag": "77M3"}]}
+    (day / "307-5.json").write_text(json.dumps(meta))
+    from sizeup.radio.p25 import parse_call
+    c = parse_call(day / "307-5.json", LABELS, {"2398": "2398 Duty Officer"})
+    assert c.units == ["2398 Duty Officer", "77M3"]

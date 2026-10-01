@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import signal
 import socket
 import subprocess
@@ -139,7 +140,7 @@ class App:
         self._mode_lock = threading.Lock()
         self.switching = False
         self._kind = {c.label: c.kind for c in cfg.channels}
-        self.p25 = (CallIngest(cfg.p25_dir, cfg.p25_talkgroups, self._call, cfg.p25_aliases, on_event=log,
+        self.p25 = (CallIngest(cfg.p25_dir, cfg.p25_talkgroups, self._call, {**cfg.unit_callsigns, **cfg.p25_aliases}, on_event=log,
                                name=P25_MODE)
                     if cfg.p25_dir else None)
 
@@ -360,6 +361,9 @@ class App:
                 u = f"Engine {n}"
                 if u in self.cfg.unit_departments and u not in d.units:
                     d.units.append(u)
+            for cs, name in self.cfg.unit_callsigns.items():  # chiefs by callsign: "2398 respond to ..."
+                if re.search(rf"\b{cs}\b", page.raw or "") and name not in d.units:
+                    d.units.append(name)
             for u in d.units:
                 dep = self.cfg.unit_departments.get(u)
                 if dep and dep not in d.departments:

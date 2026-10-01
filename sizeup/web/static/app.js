@@ -69,6 +69,34 @@ function fmtTime(unix, secs = true) {
   const d = new Date(unix * 1000);
   return secs ? hhmmss(d) : hhmm(d);
 }
+// 60 Control signs every transmission with the time ("... on location, 1939"). A number that reads as a
+// valid HHMM within STAMP_MIN of when it was said is shown as a time badge; anything else (unit numbers
+// like 2398 or 1060, which aren't valid times anyway) stays as spoken.
+const STAMP_MIN = 10;
+// Lookahead so "11-19-39" is tried at "19-39" too, not only at "11-19".
+const STAMP_RE = /\b(?=((\d{1,2})[-:.]?(\d{2}))\b)/g;
+function stampedText(cls, text, start) {
+  const box = el("div", cls);
+  if (!start) { box.textContent = text; return box; }
+  const [h0, m0] = hhmm(new Date(start * 1000)).split(":").map(Number);
+  const said = h0 * 60 + m0;
+  let last = 0;
+  for (const m of text.matchAll(STAMP_RE)) {
+    const h = +m[2], mi = +m[3];
+    if (m.index < last || h > 23 || mi > 59) continue;
+    const d = Math.abs(h * 60 + mi - said);
+    if (Math.min(d, 1440 - d) > STAMP_MIN) continue;
+    box.append(text.slice(last, m.index));
+    const t = `${pad(h)}:${pad(mi)}`;
+    const b = el("span", "stamp", t);
+    b.title = `Time stamp "${m[1]}" = ${t}`;
+    box.append(b);
+    last = m.index + m[1].length;
+  }
+  box.append(text.slice(last));
+  return box;
+}
+
 // "14:32" today, "Sep 30 14:32" otherwise.
 function fmtWhen(unix) {
   if (!unix) return "";
@@ -604,8 +632,8 @@ function renderTraffic(inc) {
       if (t.talkgroup !== null && t.talkgroup !== undefined) meta.append(el("span", "dim", `TG ${t.talkgroup}`));
       if (t.end > t.start) meta.append(el("span", "dim dur", `${Math.round(t.end - t.start)} s`));
       const done = t.status === "done" && t.text;
-      li.replaceChildren(meta, el("div", done ? "txt" : "txt muted",
-        done ? t.text : t.status === "done" ? "(no words)" : STATUS_TEXT[t.status] || t.status));
+      li.replaceChildren(meta, done ? stampedText("txt", t.text, t.start) : el("div", "txt muted",
+        t.status === "done" ? "(no words)" : STATUS_TEXT[t.status] || t.status));
     },
     empty: inc ? "No radio traffic yet"
       : ((ui.state && ui.state.radios) || []).some((r) => r.state === "ok" && r.label !== "STT")
@@ -658,8 +686,8 @@ function callFill(li, t) {
   if (t.unit) meta.append(el("b", "unit", t.unit));
   if (t.end > t.start) meta.append(el("span", "dim dur", `${Math.round(t.end - t.start)} s`));
   const done = t.status === "done" && t.text;
-  li.replaceChildren(meta, el("div", done ? "txt" : "txt muted",
-    done ? t.text : t.status === "done" ? "(no words)" : STATUS_TEXT[t.status] || t.status));
+  li.replaceChildren(meta, done ? stampedText("txt", t.text, t.start) : el("div", "txt muted",
+    t.status === "done" ? "(no words)" : STATUS_TEXT[t.status] || t.status));
 }
 
 function renderOther(inc) {

@@ -541,3 +541,4 @@ body.modal { overflow: hidden; }
 
 .storage { font-size: 0.8em; margin-right: 1em; white-space: nowrap; }
 @media (max-width: 900px) { .storage { display: none; } }
+.stamp { font-variant-numeric: tabular-nums; padding: 0 0.3em; border-radius: 3px; border: 1px solid var(--line, #3a3a55); color: var(--dim, #a9a9c8); font-size: 0.9em; white-space: nowrap; }

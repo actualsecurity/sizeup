@@ -78,7 +78,8 @@ def parse_call(meta_path: Path, labels: dict[int, str], aliases: dict[str, str] 
         src = str(s.get("src", ""))
         if src in ("", "-1", "0"):
             continue
-        name = aliases.get(src) or s.get("tag") or src
+        tag = s.get("tag") or ""
+        name = aliases.get(src) or aliases.get(tag) or tag or src
         if not units or units[-1] != name:
             units.append(name)
     wav = meta_path.with_suffix(".wav")
