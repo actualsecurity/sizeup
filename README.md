@@ -10,6 +10,18 @@ Fire dispatch situational display for Port Chester FD firehouses: the sibling of
 
 See `docs/PLAN.md`.
 
+## Data
+
+`data/gazetteer.sqlite` (offline geocoder, rebuilt with `tools/fetch_addresses.py`; sources,
+licences and fetch dates are in its `meta` table):
+
+- NYS Address Points, Westchester — NYS ITS GIS, CC0
+- TIGER/Line 2025 ADDRFEAT + roads — US Census Bureau, public domain
+- Westchester County community facilities — Westchester County GIS
+- Landmarks © OpenStreetMap contributors, ODbL
+
+Map tiles: OpenFreeMap / OpenMapTiles, © OpenStreetMap contributors.
+
 ```sh
 /opt/homebrew/bin/python3.14 -m venv .venv && .venv/bin/pip install -e '.[dev]'
 .venv/bin/python -m pytest
