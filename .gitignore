@@ -1,0 +1,10 @@
+.claude/worktrees/
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
+*.egg-info/
+captures/
+config.toml
+models/
+cache/

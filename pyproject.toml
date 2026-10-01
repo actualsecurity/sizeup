@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sizeup"
+version = "0.0.1"
+description = "Fire dispatch situational display for Port Chester FD: tones, pages, 60 Control and fireground traffic, transcribed and mapped"
+requires-python = ">=3.11"
+dependencies = ["numpy>=1.26"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.setuptools.packages.find]
+include = ["sizeup*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
