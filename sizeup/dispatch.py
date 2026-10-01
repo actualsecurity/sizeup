@@ -146,6 +146,14 @@ def parse(text: str) -> Dispatch:
         hh, mm = int(m.group(1)), int(m.group(2))
         if hh < 24 and mm < 60:
             d.time_out = f"{hh:02d}:{mm:02d}"
+    if not d.time_out:
+        # 60 Control ends a page with the time out run into other digits: "... ambulate. 153965."
+        # (15:39). Taken only when it is a plausible HHMM.
+        tail = re.search(r"\b(\d{4})\d{0,3}\D*$", t)
+        if tail:
+            hh, mm = int(tail.group(1)[:2]), int(tail.group(1)[2:])
+            if hh < 24 and mm < 60:
+                d.time_out = f"{hh:02d}:{mm:02d}"
     # Address: the first "number + street" that isn't a unit number, code or time.
     masked = UNIT.sub(" , ", t)
     masked = EMD.sub(" , ", masked)

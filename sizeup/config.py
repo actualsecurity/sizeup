@@ -84,7 +84,8 @@ def load(path: str | Path) -> Config:
             import csv
             rows = (ln for ln in tf_path.read_text().splitlines() if ln.strip() and not ln.startswith("#"))
             for r in csv.DictReader(rows):
-                tones.append(ToneCode(r["name"] + (" (est.)" if r.get("estimated") == "1" else ""),
+                tag = {"1": " (est.)", "2": " (heard)"}.get(r.get("estimated", "0"), "")
+                tones.append(ToneCode(r["name"] + tag,
                                       float(r["a_hz"]), float(r["b_hz"]) if r.get("b_hz") else None))
         elif "tones_file" in radio:
             raise ConfigError(f"radio.tones_file: {tf} not found")

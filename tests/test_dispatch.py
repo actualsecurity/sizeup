@@ -44,3 +44,12 @@ def test_fire_code_and_units():
     d = parse("69 Delta 6, Engine 61, Ladder 31, 209 Westchester Avenue, Pearl Street and Gilbert Place")
     assert d.category == "fire" and d.code == "69-D-6" and d.units == ["Engine 61", "Ladder 31"]
     assert d.location == "209 westchester avenue" and d.cross_street == "pearl street and gilbert place"
+
+
+def test_real_mutual_aid_page_with_time_out_at_the_end():
+    # South 2, 2026-10-01 15:40, tones 928.1/810.2 (Scarsdale EMS).
+    d = parse("1612 Scars LMS, mutual aid to Yonkers, 349 Helena Avenue between Alta Vista Drive and Canfield "
+              "Avenue. A female unable to ambulate. Scars LMS, mutual aid to Yon kers, 349 Helena Avenue between "
+              "Alta Vista Drive and Can field Avenue. A female unable to ambulate. 153965.")
+    assert d.incident_type == "Mutual aid" and d.location == "349 helena avenue"
+    assert d.cross_street == "alta vista drive and canfield avenue" and d.time_out == "15:39"

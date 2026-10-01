@@ -3,6 +3,9 @@
 # "with thanks to NF2G.com"), fetched 2026-10-01. estimated=1: the wiki's "Estimated Tones" table.
 # Heard on South 2, 2026-10-01 15:35: 496.8/767.4 matches Eastchester VAC (estimated 494/768) by tone
 # only; the voice was "Sixty Control, mutual aid to the city of Yonkers..." (user), not a department name.
+# estimated=2: learned on the air by sizeup (South 2), with the evidence:
+#   Scarsdale EMS 928.1/810.2 - 2026-10-01 15:40, voice "Scarsdale EMS, mutual aid to Yonkers, 349 Helena Ave"
+#   Scarsdale FD 741.3/623.7 - probable: 15:32 page stacked with Scarsdale EMS, "Engine 25, 42 Stratton Road"
 name,a_hz,b_hz,estimated
 Ardsley,1031.8,763.3,0
 Archville,951.4,1430.7,0
@@ -85,3 +88,5 @@ Purchase,365,1043,1
 Thornwood,2425,2635,1
 Verplanck,2360,2726,1
 West Harrison,1048,387,1
+Scarsdale EMS,928.1,810.2,2
+Scarsdale FD,741.3,623.7,2
