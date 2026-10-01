@@ -272,7 +272,9 @@ function renderIncident(inc) {
     show($("#inc-body"), false);
     show($("#inc-close"), false);
     setText($("#inc-status"), "");
-    const ok = ((ui.state && ui.state.radios) || []).filter((r) => r.state === "ok").map((r) => r.label);
+    // Radios only: the speech-to-text service isn't something we listen on.
+    const ok = ((ui.state && ui.state.radios) || []).filter((r) => r.state === "ok" && r.label !== "STT")
+      .map((r) => r.label);
     setText($("#inc-listening"), ok.length ? `Listening · ${ok.join(" · ")}` : "No radio is receiving");
     const close = $("#inc-close");
     if (close.dataset.id) { close.dataset.id = ""; resetClose(); }
@@ -429,7 +431,9 @@ function renderTraffic(inc) {
       li.replaceChildren(meta, el("div", done ? "txt" : "txt muted",
         done ? t.text : t.status === "done" ? "(no words)" : STATUS_TEXT[t.status] || t.status));
     },
-    empty: inc ? "No radio traffic yet" : "Listening — no traffic",
+    empty: inc ? "No radio traffic yet"
+      : ((ui.state && ui.state.radios) || []).some((r) => r.state === "ok" && r.label !== "STT")
+        ? "Listening — no traffic" : "No radio is receiving",
   });
 }
 
