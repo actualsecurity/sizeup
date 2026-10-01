@@ -270,3 +270,51 @@ def test_whole_talkgroup_section_on_off_persists(tmp_path):
     assert again.tg.record(383) and again.tg.record(385) and not again.tg.record(391)   # encrypted stays off
     assert App(c).tg.record(385)
     assert again.set_talkgroup_group("Nope", record=False) is not None
+
+
+def test_rerun_one_or_all_replaces_text_keeps_history_and_survives_restart(tmp_path):
+    from sizeup.stt import RERUN
+    c = replace(cfg(tmp_path), p25_talkgroups={307: "Fire/EMS 15"})
+    app = App(c)
+    app.stt.client = FakeWhisper({3: "77 Alpha 4 joe evac 1937", 2: "Engine 60 on location"})
+    app.stt.start()
+    now = time.time()
+    a, b = voice(3.0, 1), voice(2.0, 2)
+    app._call(Call("307-a", 307, "Fire/EMS 15", now - 30, now - 27, ["77A4"], a, ""))
+    app._call(Call("307-b", 307, "Fire/EMS 15", now - 10, now - 8, ["E60"], b, ""))
+    assert wait(lambda: len(app.store.loose) == 2 and all(t.status == "done" for t in app.store.loose))
+    assert (tmp_path / "clips" / "307-a.src.wav").is_file()            # STT input kept for re-runs
+
+    # One recording, after the model got better.
+    app.stt.client = FakeWhisper({3: "77 Alpha 4, Sixty Control, 1937", 2: "Engine 60 on location"})
+    assert app.retranscribe(["307-a"]) == 1
+    assert app.retranscribe(["307-a"]) in (0, 1)                        # already queued: not doubled
+    assert wait(lambda: app.state()["rerun"]["pending"] == 0)
+    t = next(t for t in app.store.loose if t.id == "307-a")
+    assert t.text == "77 Alpha 4, Sixty Control, 1937"
+    assert t.history[-1]["text"] == "77 Alpha 4 joe evac 1937" and t.history[-1]["model"] == "m.bin"
+
+    # Everything: the unchanged one gets no history entry.
+    assert app.retranscribe(None) == 2
+    assert wait(lambda: app.state()["rerun"]["pending"] == 0)
+    st = app.state()["rerun"]
+    assert st["total"] == 2 and st["done"] == 2 and st["changed"] == 0
+    b_row = next(t for t in app.store.loose if t.id == "307-b")
+    assert not getattr(b_row, "history", None)
+
+    # The saved history comes back after a restart.
+    app2 = App(c)
+    t2 = next(t for t in app2.store.loose if t.id == "307-a")
+    assert t2.text == "77 Alpha 4, Sixty Control, 1937" and t2.history[-1]["text"] == "77 Alpha 4 joe evac 1937"
+
+
+def test_rerun_waits_behind_live_traffic():
+    import queue
+    from sizeup.stt import LIVE, RERUN, Transcriber
+    tr = Transcriber(client=None, on_done=lambda i: None)
+    tr.submit("rerun-1", np.zeros(1), priority=RERUN)
+    tr.submit("live-1", np.zeros(1))
+    tr.submit("rerun-2", np.zeros(1), priority=RERUN)
+    tr.submit("live-2", np.zeros(1), priority=LIVE)
+    order = [tr._q.get_nowait()[2] for _ in range(4)]
+    assert order == ["live-1", "live-2", "rerun-1", "rerun-2"]

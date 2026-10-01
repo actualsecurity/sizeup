@@ -213,6 +213,31 @@ class IncidentStore:
         self.save()
         return inc
 
+    def retext(self, tid: str, text: str, status: str, confidence: float | None = None,
+               model: str = "", at: float | None = None) -> bool:
+        """A re-run of speech-to-text for one transmission or page: new text in place, the old text
+        kept in `history` (newest last, up to 5) so it can be compared."""
+        at = self.clock() if at is None else at
+        hit = False
+        with self._lock:
+            for t in [t for i in self.incidents for t in i.traffic] + list(self.loose):
+                if t.id != tid:
+                    continue
+                hit = True
+                if t.text != text:
+                    hist = list(getattr(t, "history", None) or [])
+                    hist.append({"text": t.text, "at": at, "model": model})
+                    t.history = hist[-5:]  # type: ignore[attr-defined]
+                t.text, t.status = text, status
+                t.confidence, t.rerun_at = confidence, at  # type: ignore[attr-defined]
+            for inc in self.incidents:
+                for k, pid in enumerate(inc.pages):
+                    if pid == tid and k < len(inc.page_text):
+                        inc.page_text[k], hit = text, True
+        if hit:
+            self.save()
+        return hit
+
     def close(self, incident_id: str) -> bool:
         with self._lock:
             found = next((inc for inc in self.incidents if inc.id == incident_id), None)

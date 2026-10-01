@@ -75,7 +75,7 @@ class Broadcaster:
 def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | None],
                  close_incident: Callable[[str], bool], set_mode: Callable[[str], str | None] | None = None,
                  set_talkgroup: Callable[..., str | None] | None = None,
-                 set_talkgroup_group: Callable[..., str | None] | None = None):
+                 set_talkgroup_group: Callable[..., str | None] | None = None, retranscribe=None):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -140,6 +140,16 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 if err:
                     return self._send(400, json.dumps({"error": err}).encode(), "application/json")
                 return self._send(200, b'{"ok":true}', "application/json")
+            if path == "/api/retranscribe" and retranscribe is not None:
+                # {"ids": ["307-...", ...]} re-runs those; {"all": true} every recording still on disk
+                try:
+                    n = int(self.headers.get("Content-Length") or 0)
+                    body = json.loads(self.rfile.read(min(n, 65536)) or b"{}")
+                    ids = None if body.get("all") else [str(i) for i in body["ids"]][:2000]
+                    queued = retranscribe(ids)
+                except (ValueError, KeyError, TypeError, AttributeError) as e:
+                    return self._send(400, json.dumps({"error": f"bad request: {e}"}).encode(), "application/json")
+                return self._send(200, json.dumps({"queued": queued}).encode(), "application/json")
             if path.startswith("/api/incident/") and path.endswith("/close"):
                 ok = close_incident(path[len("/api/incident/"):-len("/close")])
                 return self._send(200 if ok else 404, b'{"ok":%s}' % (b"true" if ok else b"false"),
@@ -179,11 +189,12 @@ class WebServer:
                  clip: Callable[[str], bytes | None], close_incident: Callable[[str], bool],
                  set_mode: Callable[[str], str | None] | None = None,
                  set_talkgroup: Callable[..., str | None] | None = None,
-                 set_talkgroup_group: Callable[..., str | None] | None = None):
+                 set_talkgroup_group: Callable[..., str | None] | None = None,
+                 retranscribe: Callable[[list[str] | None], int] | None = None):
         self.broadcaster = Broadcaster(state_fn)
         self.httpd = ThreadingHTTPServer((host, port), make_handler(
             json.dumps(scene, separators=(",", ":")).encode(), self.broadcaster, clip, close_incident, set_mode,
-            set_talkgroup, set_talkgroup_group))
+            set_talkgroup, set_talkgroup_group, retranscribe))
         self.httpd.daemon_threads = True
 
     @property

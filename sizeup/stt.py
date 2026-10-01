@@ -8,6 +8,7 @@ incident types) can be passed per request.
 from __future__ import annotations
 
 import io
+import itertools
 import json
 import queue
 import re
@@ -27,6 +28,8 @@ NOISE_LABEL = re.compile(r"^[\[(*].*[\])*]$")  # "(static)", "[MUSIC]" — not s
 HALLUCINATIONS = {"thank you", "thanks", "thank you very much", "yes", "you", "bye", "bye bye", "okay",
                   "ok", "thanks for watching", "thank you for watching", "so", "oh", "the end"}
 SHORT_S = 1.5
+LIVE, RERUN = 0, 1          # queue priority: live traffic is never held up by a re-run batch
+QUEUE_MAX = 2000
 
 
 def wav_bytes(audio: np.ndarray, rate: int = 16000) -> bytes:
@@ -166,15 +169,15 @@ class Transcriber:
     def __init__(self, client: WhisperClient, on_done: Callable[[object], None],
                  prompt: Callable[[object], str] = lambda item: ""):
         self.client, self.on_done, self.prompt = client, on_done, prompt
-        self._q: queue.Queue = queue.Queue(maxsize=200)
+        self._q: queue.PriorityQueue = queue.PriorityQueue()
+        self._seq = itertools.count()
         self.last_error = ""
 
-    def submit(self, item, audio: np.ndarray) -> bool:
-        try:
-            self._q.put_nowait((item, audio))
-            return True
-        except queue.Full:
+    def submit(self, item, audio: np.ndarray, priority: int = LIVE) -> bool:
+        if self._q.qsize() >= QUEUE_MAX:
             return False
+        self._q.put((priority, next(self._seq), item, audio))
+        return True
 
     def start(self) -> Transcriber:
         threading.Thread(target=self._run, name="stt", daemon=True).start()
@@ -182,7 +185,7 @@ class Transcriber:
 
     def _run(self) -> None:
         while True:
-            item, audio = self._q.get()
+            _prio, _n, item, audio = self._q.get()
             for attempt in range(3):
                 try:
                     # No noise reduction for the model: on the FG1 bench it cut the whine 15 dB for listening

@@ -21,7 +21,9 @@ import subprocess
 import sys
 import threading
 import time
+import wave
 from collections import OrderedDict, deque
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -36,7 +38,7 @@ from sizeup.radio.p25 import Call, CallIngest
 from sizeup.radio.recorder import TrunkRecorder
 from sizeup.radio.page import Page, assemble, page_from_dict
 from sizeup.radio.tones import TonePlan
-from sizeup.stt import Transcriber, WhisperClient, radio_voice, wav_bytes
+from sizeup.stt import LIVE, RERUN, Transcriber, WhisperClient, radio_voice, wav_bytes
 from sizeup.talkgroups import TalkgroupPrefs
 from sizeup.web.server import WebServer
 
@@ -94,6 +96,18 @@ class WhisperService:
             self._stop.wait(backoff)
 
 
+
+@dataclass
+class Rerun:
+    """A speech-to-text re-run of a recording already on screen (a transmission or a page)."""
+    id: str
+    kind: str                 # "traffic" | "page"
+    fm: bool                  # FM audio still needs de-emphasis (False for P25 and for saved listening clips)
+    low_energy: bool = False
+    status: str = "pending"
+    raw: str = ""
+    confidence: float | None = None
+
 class App:
     def __init__(self, cfg: Config):
         self.cfg = cfg
@@ -105,6 +119,8 @@ class App:
         self.keep_s = cfg.keep_hours * 3600
         self._lock = threading.Lock()
         self.storage: dict | None = None
+        self._rerun_ids: set[str] = set()
+        self.rerun = {"total": 0, "done": 0, "changed": 0, "failed": 0}
         self.clips: OrderedDict[str, tuple[np.ndarray, float]] = OrderedDict()   # id -> (pcm, saved at)
         self.clips_dir = Path(cfg.clips_dir) if cfg.clips_dir else None
         if self.clips_dir:
@@ -219,7 +235,8 @@ class App:
         if not self.clips_dir:
             return
         try:
-            d = dict(page.as_dict(), dispatch=getattr(page, "dispatch", None))
+            d = dict(page.as_dict(), dispatch=getattr(page, "dispatch", None),
+                     history=getattr(page, "history", None) or [])
             (self.clips_dir / f"{page.id}.page.json").write_text(json.dumps(d))
         except OSError:
             pass
@@ -239,6 +256,17 @@ class App:
                 (self.clips_dir / f"{cid}.wav").write_bytes(wav_bytes(pcm, RATE))
             except OSError:
                 pass
+
+    def _keep_source(self, cid: str, audio: np.ndarray | None) -> None:
+        """The exact audio speech-to-text was given (before the listening filter), kept with the
+        clip for the same time so a re-run sees what the live pass saw."""
+        if not self.clips_dir or audio is None or not len(audio):
+            return
+        try:
+            pcm = (np.clip(audio, -1, 1) * 32767).astype(np.int16)
+            (self.clips_dir / f"{cid}.src.wav").write_bytes(wav_bytes(pcm, RATE))
+        except OSError:
+            pass
 
     def clip(self, cid: str) -> bytes | None:
         if not cid.replace("-", "").replace("_", "").isalnum():
@@ -290,6 +318,7 @@ class App:
                 if page.tones and not names:
                     self._unknown_tones(page)
                 return
+            self._keep_source(page.id, page.voice)
             self.stt.submit(page, page.voice)
         else:
             t = Traffic(f"{ch.label.replace(' ', '')}-{int(seg.start * 1000)}", ch.label, seg.start, seg.end,
@@ -297,6 +326,7 @@ class App:
             t.low_energy = low_energy  # type: ignore[attr-defined]
             t.raw_audio = seg.audio    # type: ignore[attr-defined]  (saved if it turns out to be a click)
             self._keep_clip(t.id, seg.audio)
+            self._keep_source(t.id, seg.audio)
             self.stt.submit(t, seg.audio)
 
     def _unknown_tones(self, page: Page) -> None:
@@ -314,6 +344,7 @@ class App:
         if call.audio is not None:
             t.fm = False  # decoded P25 voice: no FM de-emphasis  # type: ignore[attr-defined]
             self._keep_clip(t.id, radio_voice(call.audio, deemph=False), processed=True)
+            self._keep_source(t.id, call.audio)
             self.stt.submit(t, call.audio)
         self._drop_recorder_files(call)  # sizeup's clip is the one copy kept
 
@@ -354,20 +385,10 @@ class App:
             self.store.on_traffic(item, attach=attach)
             log(f"{item.source}: {'[' + item.unit + '] ' if item.unit else ''}{item.text or '(' + item.status + ')'}")
             return
+        if isinstance(item, Rerun):
+            return self._rerun_done(item)
         page: Page = item
-        d = parse(page.raw) if page.raw else None
-        if d is not None:  # units dispatched name their department ("Engine 61" -> Port Chester FD)
-            for n in d.numbers:  # "174, 175, Ladder 1": engines read without the word, if the roster has them
-                u = f"Engine {n}"
-                if u in self.cfg.unit_departments and u not in d.units:
-                    d.units.append(u)
-            for cs, name in self.cfg.unit_callsigns.items():  # chiefs by callsign: "2398 respond to ..."
-                if re.search(rf"\b{cs}\b", page.raw or "") and name not in d.units:
-                    d.units.append(name)
-            for u in d.units:
-                dep = self.cfg.unit_departments.get(u)
-                if dep and dep not in d.departments:
-                    d.departments.append(dep)
+        d = self._dispatch(page.raw)
         page.dispatch = d.as_dict() if d else None  # type: ignore[attr-defined]
         self._save_page(page)
         log(f"{page.label} {page.kind}: {page.raw or '(' + page.status + ')'}")
@@ -386,6 +407,116 @@ class App:
         if inc:
             where = inc.geo["label"] if inc.geo else (inc.location or "location not found")
             log(f"INCIDENT {inc.incident_type} · {where} · {', '.join(inc.departments)}")
+
+    def _dispatch(self, raw: str):
+        d = parse(raw) if raw else None
+        if d is not None:  # units dispatched name their department ("Engine 61" -> Port Chester FD)
+            for n in d.numbers:  # "174, 175, Ladder 1": engines read without the word, if the roster has them
+                u = f"Engine {n}"
+                if u in self.cfg.unit_departments and u not in d.units:
+                    d.units.append(u)
+            for cs, name in self.cfg.unit_callsigns.items():  # chiefs by callsign: "2398 respond to ..."
+                if re.search(rf"\b{cs}\b", raw) and name not in d.units:
+                    d.units.append(name)
+            for u in d.units:
+                dep = self.cfg.unit_departments.get(u)
+                if dep and dep not in d.departments:
+                    d.departments.append(dep)
+        return d
+
+    # -- speech-to-text re-runs ----------------------------------------------------------------------
+
+    def _read_clip(self, name: str) -> np.ndarray | None:
+        p = self.clips_dir / name if self.clips_dir else None
+        if not p or not p.is_file():
+            return None
+        try:
+            with wave.open(str(p)) as w:
+                if w.getframerate() != RATE or w.getsampwidth() != 2:
+                    return None
+                return np.frombuffer(w.readframes(w.getnframes()), "<i2").astype(np.float32) / 32768.0
+        except (OSError, EOFError, wave.Error):
+            return None
+
+    def _rerun_audio(self, cid: str, fm: bool, voice_offset_s: float = 0.0) -> tuple[np.ndarray, bool] | None:
+        """(audio, needs FM de-emphasis). The saved STT input when there is one; otherwise the saved
+        listening clip (already de-emphasised and filtered; pages: tones cut off by voice_offset_s)."""
+        src = self._read_clip(f"{cid}.src.wav")
+        if src is not None:
+            return src, fm
+        with self._lock:
+            hit = self.clips.get(cid)
+        audio = hit[0].astype(np.float32) / 32768.0 if hit is not None else self._read_clip(f"{cid}.wav")
+        if audio is None:
+            return None
+        return audio[int(voice_offset_s * RATE):], False
+
+    def retranscribe(self, ids: list[str] | None = None) -> int:
+        """Run speech-to-text again on recordings still on disk (ids=None: all of them). Queued
+        behind live traffic; results replace the text and keep the old one in history."""
+        want = set(ids) if ids is not None else None
+        jobs: list[tuple[float, Rerun, np.ndarray]] = []
+        seen: set[str] = set()
+        with self._lock:
+            pages = [p for p in self.pages if p.status != "no_voice"]
+            busy = set(self._rerun_ids)
+        for p in pages:
+            if (want is None or p.id in want) and p.id not in busy and p.id not in seen:
+                got = self._rerun_audio(p.id, True, p.voice_offset_s)
+                if got:
+                    jobs.append((p.start, Rerun(p.id, "page", got[1]), got[0]))
+                    seen.add(p.id)
+        traffic = list(self.store.loose) + [t for i in self.store.incidents for t in i.traffic]
+        for t in traffic:
+            if (want is None or t.id in want) and t.id not in busy and t.id not in seen:
+                got = self._rerun_audio(t.id, getattr(t, "fm", True))
+                if got:
+                    low = speech_seconds(got[0]) < MIN_SPEECH_S  # same mic-click rule as the live pass
+                    jobs.append((t.start, Rerun(t.id, "traffic", got[1], low), got[0]))
+                    seen.add(t.id)
+        jobs.sort(key=lambda j: -j[0])  # newest first: what's on screen updates first
+        with self._lock:
+            if not self._rerun_ids:  # a new batch: restart the progress count
+                self.rerun = {"total": 0, "done": 0, "changed": 0, "failed": 0}
+            n = 0
+            for _start, job, audio in jobs:
+                if self.stt.submit(job, audio, priority=RERUN):
+                    self._rerun_ids.add(job.id)
+                    n += 1
+            self.rerun["total"] += n
+        if n:
+            log(f"speech-to-text re-run: {n} recording(s) queued")
+        return n
+
+    def _rerun_done(self, job: Rerun) -> None:
+        model = Path(self.cfg.stt_model).name
+        text = job.raw if job.status == "done" else ""
+        changed = False
+        if job.status != "error":
+            with self._lock:
+                page = next((p for p in self.pages if p.id == job.id), None)
+            if page is not None:
+                if page.raw != text:
+                    hist = list(getattr(page, "history", None) or [])
+                    hist.append({"text": page.raw, "at": time.time(), "model": model})
+                    page.history = hist[-5:]  # type: ignore[attr-defined]
+                    changed = True
+                page.raw, page.confidence = text, job.confidence
+                page.status = "done" if text else "no_speech"
+                d = self._dispatch(text)
+                page.dispatch = d.as_dict() if d else None  # type: ignore[attr-defined]
+                self._save_page(page)
+            old = next((t.text for t in list(self.store.loose) + [t for i in self.store.incidents for t in i.traffic]
+                        if t.id == job.id), None)
+            changed = changed or (old is not None and old != text)
+            self.store.retext(job.id, text, job.status, job.confidence, model)
+            if changed:
+                log(f"re-run {job.id}: {text or '(no speech)'}")
+        with self._lock:
+            self._rerun_ids.discard(job.id)
+            self.rerun["done"] += 1
+            self.rerun["changed"] += changed
+            self.rerun["failed"] += job.status == "error"
 
     # -- state --------------------------------------------------------------------------------------
 
@@ -499,18 +630,25 @@ class App:
 
     def state(self) -> dict:
         with self._lock:
-            pages = [dict(p.as_dict(), dispatch=getattr(p, "dispatch", None)) for p in list(self.pages)[:50]]
+            pages = [dict(p.as_dict(), dispatch=getattr(p, "dispatch", None), history=getattr(p, "history", None) or [])
+                     for p in list(self.pages)[:50]]
         st = {"time": time.time(), "radios": self.radios(), **self.store.state(), "pages": pages, "sdr": self.sdr(),
               "storage": getattr(self, "storage", None),
+              "rerun": dict(self.rerun, pending=len(self._rerun_ids)),
               "talkgroups": self.tg.state() if self.p25 else []}
         # Tell the display which entries have a recording (so ▶ isn't a dead button).
+        with self._lock:
+            busy = set(self._rerun_ids)
         for p in st["pages"]:
             p["has_audio"] = self.has_clip(p["id"])
+            p["rerun_pending"] = p["id"] in busy
         for t in st["loose_traffic"]:
             t["has_audio"] = self.has_clip(t["id"])
+            t["rerun_pending"] = t["id"] in busy
         for inc in st["incidents"]:
             for t in inc["traffic"]:
                 t["has_audio"] = self.has_clip(t["id"])
+                t["rerun_pending"] = t["id"] in busy
             for e in inc["page_entries"]:
                 e["has_audio"] = self.has_clip(e["id"])
         return st
@@ -565,7 +703,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     app = App(cfg).start()
     server = WebServer(cfg.host, cfg.port, app.scene(), app.state, app.clip, app.store.close, app.set_mode,
-                       app.set_talkgroup, app.set_talkgroup_group)
+                       app.set_talkgroup, app.set_talkgroup_group, app.retranscribe)
     signal.signal(signal.SIGTERM, lambda *_: server.shutdown())
     log(f"sizeup: {cfg.station_name} · {len(cfg.channels)} channel(s)"
         + (f" · P25 {cfg.p25_dir}" if cfg.p25_dir else "") + f" · {server.url}")

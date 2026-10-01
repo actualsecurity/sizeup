@@ -144,6 +144,42 @@ function playButton(id, title, hasAudio = true) {
   return b;
 }
 
+// ↻ next to ▶: run speech-to-text again on that one recording (queued behind live traffic).
+function rerunButton(id, pending, hasAudio = true) {
+  const b = el("button", "rerun", pending ? "…" : "↻");
+  b.dataset.rerun = id;
+  b.disabled = !!pending || hasAudio === false;
+  b.title = pending ? "Re-running speech-to-text…" : "Run speech-to-text again on this recording";
+  return b;
+}
+
+// "re-run" tag on text that changed after a re-run; hover shows what it said before.
+function historyTag(hist) {
+  if (!hist || !hist.length) return null;
+  const tag = el("span", "dim was", "re-run");
+  tag.title = hist.slice().reverse()
+    .map((h) => `Before (${h.model || "?"}, ${fmtTime(h.at, false)}): ${h.text || "(no speech)"}`).join("\n");
+  return tag;
+}
+
+async function retranscribe(body) {
+  try {
+    const r = await fetch("/api/retranscribe", { method: "POST", headers: { "Content-Type": "application/json" },
+                                                 body: JSON.stringify(body) });
+    return r.ok ? (await r.json()).queued : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+document.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-rerun]");
+  if (!b || b.disabled) return;
+  b.disabled = true;
+  setText(b, "…");
+  retranscribe({ ids: [b.dataset.rerun] });   // the next push shows it queued, then the new text
+});
+
 // What a clip's status means, in words (pages and transmissions share these).
 const STATUS_TEXT = {
   pending: "transcribing…",
@@ -288,6 +324,30 @@ function renderSdr() {
   }
 }
 
+// "Re-run all": every recording still on disk goes through speech-to-text again (newest first,
+// behind live traffic). Progress comes back in state.rerun.
+function renderRerun() {
+  const r = ui.state && ui.state.rerun;
+  const b = $("#rerun-all"), msg = $("#rerun-msg");
+  if (!r) return;
+  b.disabled = r.pending > 0 || !!ui.rerunBusy;
+  setText(msg, r.pending > 0 ? `re-running ${r.done} / ${r.total}` + (r.changed ? ` · ${r.changed} changed` : "")
+    : r.total ? `last re-run: ${r.done} done · ${r.changed} changed` + (r.failed ? ` · ${r.failed} failed` : "") : "");
+}
+
+$("#rerun-all").addEventListener("click", async () => {
+  const hours = (ui.state && ui.state.storage && ui.state.storage.audio_hours) || 12;
+  if (!confirm(`Run speech-to-text again on every recording still on disk (last ${hours} h)? ` +
+               "Live traffic is always transcribed first.")) return;
+  ui.rerunBusy = true;
+  renderRerun();
+  const n = await retranscribe({ all: true });
+  ui.rerunBusy = false;
+  if (n === null) setText($("#rerun-msg"), "re-run failed to start");
+  else if (n === 0) setText($("#rerun-msg"), "nothing to re-run");
+  else renderRerun();
+});
+
 // Disk use under captures/, from the cleaner's last pass (every 10 min): size, oldest audio, limits.
 function renderStorage() {
   const st = ui.state && ui.state.storage;
@@ -310,6 +370,7 @@ async function setSdrMode(mode) {
   ui.sdrBusy = true;
   renderSdr();
   renderStorage();
+  renderRerun();
   try {
     await fetch("/api/mode", { method: "POST", headers: { "Content-Type": "application/json" },
                                body: JSON.stringify({ mode }) });
@@ -462,7 +523,8 @@ function renderDispatch(inc) {
   const byId = pagesById();
   let items = (inc.pages || []).map((id) => byId.get(id)).filter(Boolean)
     .sort((a, b) => a.start - b.start)
-    .map((p) => ({ key: p.id, clip: p.id, has: p.has_audio, start: p.start, text: p.raw, status: p.status, label: p.label }));
+    .map((p) => ({ key: p.id, clip: p.id, has: p.has_audio, start: p.start, text: p.raw, status: p.status, label: p.label,
+                   pending: p.rerun_pending, history: p.history }));
   if (!items.length) {
     // The pages fell out of the recent list: the incident carries its own page entries.
     items = (inc.page_entries || []).map((p) => ({ key: p.id, clip: p.id, has: p.has_audio, start: p.start,
@@ -476,13 +538,15 @@ function renderDispatch(inc) {
   }
   syncList($("#dispatch"), items, {
     key: (it) => it.key,
-    sig: (it) => JSON.stringify([it.text, it.status, it.repeat, it.start]),
+    sig: (it) => JSON.stringify([it.text, it.status, it.repeat, it.start, it.pending, (it.history || []).length]),
     make: () => el("li"),
     fill: (li, it) => {
       const meta = el("div", "meta");
-      if (it.clip) meta.append(playButton(it.clip, "Play the page", it.has));
+      if (it.clip) meta.append(playButton(it.clip, "Play the page", it.has), rerunButton(it.clip, it.pending, it.has));
       if (it.start) meta.append(el("span", "t", fmtTime(it.start)));
       if (it.label) meta.append(chip(it.label, sourceColor(it.label), "src"));
+      const was = historyTag(it.history);
+      if (was) meta.append(was);
       if (it.repeat) meta.append(el("span", "dim", "repeat — same as above"));
       li.replaceChildren(meta);
       if (!it.repeat) {
@@ -622,15 +686,18 @@ function renderTraffic(inc) {
   const items = list.filter(isMainTraffic).sort((a, b) => b.start - a.start);
   syncList($("#traffic"), items, {
     key: (t) => t.id,
-    sig: (t) => JSON.stringify([t.text, t.status, t.unit, t.talkgroup, t.source, t.end]),
+    sig: (t) => JSON.stringify([t.text, t.status, t.unit, t.talkgroup, t.source, t.end, t.rerun_pending,
+                                (t.history || []).length]),
     make: () => el("li"),
     fill: (li, t) => {
       const meta = el("div", "meta");
-      meta.append(playButton(t.id, "Play this transmission", t.has_audio), el("span", "t", fmtTime(t.start)),
-                  chip(t.source || "?", sourceColor(t.source), "src"));
+      meta.append(playButton(t.id, "Play this transmission", t.has_audio), rerunButton(t.id, t.rerun_pending, t.has_audio),
+                  el("span", "t", fmtTime(t.start)), chip(t.source || "?", sourceColor(t.source), "src"));
       if (t.unit) meta.append(el("b", "unit", t.unit));
       if (t.talkgroup !== null && t.talkgroup !== undefined) meta.append(el("span", "dim", `TG ${t.talkgroup}`));
       if (t.end > t.start) meta.append(el("span", "dim dur", `${Math.round(t.end - t.start)} s`));
+      const was = historyTag(t.history);
+      if (was) meta.append(was);
       const done = t.status === "done" && t.text;
       li.replaceChildren(meta, done ? stampedText("txt", t.text, t.start) : el("div", "txt muted",
         t.status === "done" ? "(no words)" : STATUS_TEXT[t.status] || t.status));
@@ -682,9 +749,12 @@ function otherGroups(inc) {
 
 function callFill(li, t) {
   const meta = el("div", "meta");
-  meta.append(playButton(t.id, "Play this transmission", t.has_audio), el("span", "t", fmtTime(t.start)));
+  meta.append(playButton(t.id, "Play this transmission", t.has_audio), rerunButton(t.id, t.rerun_pending, t.has_audio),
+              el("span", "t", fmtTime(t.start)));
   if (t.unit) meta.append(el("b", "unit", t.unit));
   if (t.end > t.start) meta.append(el("span", "dim dur", `${Math.round(t.end - t.start)} s`));
+  const was = historyTag(t.history);
+  if (was) meta.append(was);
   const done = t.status === "done" && t.text;
   li.replaceChildren(meta, done ? stampedText("txt", t.text, t.start) : el("div", "txt muted",
     t.status === "done" ? "(no words)" : STATUS_TEXT[t.status] || t.status));
@@ -734,7 +804,8 @@ function renderOther(inc) {
       show(calls, open);
       if (open) {
         syncList(calls, g.calls, {
-          key: (t) => t.id, sig: (t) => JSON.stringify([t.text, t.status, t.unit, t.end]),
+          key: (t) => t.id, sig: (t) => JSON.stringify([t.text, t.status, t.unit, t.end, t.rerun_pending,
+                                                       (t.history || []).length]),
           make: () => el("li"), fill: callFill, empty: "No calls",
         });
       } else if (calls.children.length) calls.replaceChildren();
@@ -956,13 +1027,17 @@ function renderPages() {
   syncList($("#pages"), pages, {
     key: (p) => p.id,
     sig: (p) => JSON.stringify([p.status, p.raw, p.departments, p.tones, p.dispatch && p.dispatch.incident_type,
-                                p.dispatch && p.dispatch.category, p.kind, p.label]),
+                                p.dispatch && p.dispatch.category, p.kind, p.label, p.rerun_pending,
+                                (p.history || []).length]),
     make: () => el("li"),
     fill: (li, p) => {
       const meta = el("div", "meta");
-      meta.append(playButton(p.id, "Play this page", p.has_audio), el("span", "t", fmtTime(p.start)),
-                  chip(p.label || "?", sourceColor(p.label), "src"),
+      meta.append(playButton(p.id, "Play this page", p.has_audio),
+                  rerunButton(p.id, p.rerun_pending, p.has_audio && p.status !== "no_voice"),
+                  el("span", "t", fmtTime(p.start)), chip(p.label || "?", sourceColor(p.label), "src"),
                   el("span", "kind", p.kind === "voice" ? "VOICE" : "PAGE"));
+      const was = historyTag(p.history);
+      if (was) meta.append(was);
       const d = p.dispatch;
       if (d && d.incident_type) {
         const ty = el("span", "ptype", d.incident_type);
@@ -1133,6 +1208,7 @@ function onState(data) {
   renderRadios();
   renderSdr();
   renderStorage();
+  renderRerun();
   renderIncident(ui.inc);
   renderDispatch(ui.inc);
   renderTraffic(ui.inc);

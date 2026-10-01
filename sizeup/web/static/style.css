@@ -542,3 +542,11 @@ body.modal { overflow: hidden; }
 .storage { font-size: 0.8em; margin-right: 1em; white-space: nowrap; }
 @media (max-width: 900px) { .storage { display: none; } }
 .stamp { font-variant-numeric: tabular-nums; padding: 0 0.3em; border-radius: 3px; border: 1px solid var(--line, #3a3a55); color: var(--dim, #a9a9c8); font-size: 0.9em; white-space: nowrap; }
+.rerun { background: none; color: var(--dim); border: 1px solid var(--line); border-radius: 4px; padding: 0 0.45em;
+  font-size: 0.85em; line-height: 1.6; cursor: pointer; }
+.rerun:hover:not(:disabled) { color: var(--text); border-color: var(--dim); }
+.rerun:disabled { opacity: 0.45; cursor: default; }
+.was { font-size: 0.8em; border-bottom: 1px dotted var(--dim); cursor: help; }
+.rerun-msg { font-size: 0.8em; margin-right: 0.4em; }
+.sec-head .spacer { flex: 1; }
+.sec-head h2 { margin-bottom: 0; }
