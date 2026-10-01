@@ -64,8 +64,15 @@ class TrunkRecorder:
                 "open": False, "quieting_db": None, "restarts": self.restarts, "last_heard": None}
 
     def _drain(self, p: subprocess.Popen) -> None:
+        log = None
+        try:  # everything trunk-recorder says, for diagnosis (gitignored)
+            log = open(Path(self.workdir) / "trunk-recorder.log", "a", buffering=1)
+        except OSError:
+            pass
         for raw in iter(p.stdout.readline, b""):
             line = raw.decode(errors="replace").rstrip()
+            if log:
+                log.write(line + "\n")
             if line:
                 self.last_lines.append(line)
                 low = line.lower()
@@ -80,8 +87,11 @@ class TrunkRecorder:
                 self._stop.wait(15)
                 continue
             try:
+                # trunk-recorder runs ffmpeg by name for call audio: make sure Homebrew's bin is on PATH.
+                env = dict(os.environ)
+                env["PATH"] = ":".join(["/opt/homebrew/bin", "/usr/local/bin", env.get("PATH", "")])
                 self._proc = subprocess.Popen(self.argv, cwd=self.workdir, stdout=subprocess.PIPE,
-                                              stderr=subprocess.STDOUT, start_new_session=True)
+                                              stderr=subprocess.STDOUT, start_new_session=True, env=env)
             except OSError as e:
                 self.state, self.detail = "down", f"cannot start trunk-recorder: {e}"
                 self._stop.wait(backoff)
