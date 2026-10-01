@@ -130,6 +130,7 @@ class NfmReceiver:
         self.squelch = NoiseSquelch(open_db=open_db)
         self.state, self.detail, self.restarts = "starting", "", 0
         self.last_heard: float | None = None   # end of the last transmission
+        self._stderr: deque[str] = deque(maxlen=20)
         self._stop = threading.Event()
         self._proc: subprocess.Popen | None = None
 
@@ -168,12 +169,18 @@ class NfmReceiver:
                 except Exception:
                     pass
 
+    def _drain(self, proc: subprocess.Popen) -> None:
+        for line in iter(proc.stderr.readline, b""):
+            self._stderr.append(line.decode(errors="replace").strip())
+
     def _run(self) -> None:
         backoff = 2.0
         while not self._stop.is_set():
+            self._stderr.clear()
             try:
-                self._proc = subprocess.Popen(self.argv(), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                self._proc = subprocess.Popen(self.argv(), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                               start_new_session=True)
+                threading.Thread(target=self._drain, args=(self._proc,), daemon=True).start()
             except OSError as e:
                 self.state, self.detail = "down", f"cannot start rtl_fm: {e}"
                 self._stop.wait(backoff)
@@ -185,9 +192,18 @@ class NfmReceiver:
             self._kill()
             if self._stop.is_set():
                 break
+            err = " ".join(self._stderr)
+            if not got and ("No matching devices" in err or "No supported devices" in err):
+                # Not plugged in (or a different serial): say so, look again every 15 s, stay quiet.
+                self.state, self.detail = "absent", f"dongle '{self.device or 'any'}' not connected"
+                self._stop.wait(15.0)
+                continue
             self.restarts += 1
             self.state = "down"
-            self.detail = "rtl_fm stopped" if got else "no audio from rtl_fm (dongle busy/unplugged?)"
+            if not got and ("usb_claim_interface" in err or "Failed to open" in err):
+                self.detail = f"dongle '{self.device}' busy (in use by another program?)"
+            else:
+                self.detail = "rtl_fm stopped" if got else "no audio from rtl_fm"
             self.on_event(f"{self.channel.label} down: {self.detail}")
             self._stop.wait(2.0 if got else backoff)
             backoff = 2.0 if got else min(backoff * 2, 15)
