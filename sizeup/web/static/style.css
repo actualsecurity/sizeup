@@ -550,3 +550,10 @@ body.modal { overflow: hidden; }
 .rerun-msg { font-size: 0.8em; margin-right: 0.4em; }
 .sec-head .spacer { flex: 1; }
 .sec-head h2 { margin-bottom: 0; }
+
+/* conversation: dispatcher left, units right */
+.list > li.from-dispatch { margin-right: 14%; padding-left: 0.6em; border-left: 3px solid #5aa9ff; }
+.list > li.from-unit { margin-left: 14%; padding-right: 0.6em; border-right: 3px solid var(--ok); text-align: right; }
+.list > li.from-unit .meta { justify-content: flex-end; }
+.list > li.from-dispatch .meta .unit { color: #8cc4ff; }
+.list > li.from-unit .meta .unit { color: #8be3a9; }

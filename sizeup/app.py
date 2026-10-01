@@ -98,6 +98,30 @@ class WhisperService:
 
 
 
+MIN_TURN_S = 0.35   # a key-up shorter than this is a blip: folded into its neighbour, not its own row
+
+
+def split_turns(call: Call) -> list[tuple[str, float, float, str, np.ndarray]]:
+    """(id, start, end, talker, audio) per talker turn; one entry (the call's own id) when one
+    talker or no positions."""
+    audio, n = call.audio, len(call.audio)
+    cuts = [(min(n, int(pos * RATE)), name) for pos, name in call.turns]
+    merged: list[list] = []
+    for i, (a, name) in enumerate(cuts):
+        b = cuts[i + 1][0] if i + 1 < len(cuts) else n
+        if merged and (b - a < MIN_TURN_S * RATE or merged[-1][2] == name):
+            merged[-1][1] = b                                    # blip or same talker: extend previous
+        elif merged and merged[-1][1] - merged[-1][0] < MIN_TURN_S * RATE:
+            merged[-1] = [merged[-1][0], b, name]                # previous was the blip: this talker owns it
+        else:
+            merged.append([a, b, name])
+    if len(merged) < 2:
+        return [(call.id, call.start, call.end, ", ".join(call.units), audio)]
+    merged[0][0] = 0
+    return [(f"{call.id}-t{k}", call.start + a / RATE, call.start + b / RATE, name, audio[a:b])
+            for k, (a, b, name) in enumerate(merged)]
+
+
 @dataclass
 class Rerun:
     """A speech-to-text re-run of a recording already on screen (a transmission or a page)."""
@@ -351,13 +375,15 @@ class App:
             self._drop_recorder_files(call)
             return
         self.tg.seen(call.talkgroup)
-        t = Traffic(call.id, call.label, call.start, call.end, "", status="pending",
-                    unit=", ".join(call.units), talkgroup=call.talkgroup)
         if call.audio is not None:
-            t.fm = False  # decoded P25 voice: no FM de-emphasis  # type: ignore[attr-defined]
-            self._keep_clip(t.id, radio_voice(call.audio, deemph=False), processed=True)
-            self._keep_source(t.id, call.audio)
-            self.stt.submit(t, call.audio)
+            # One row per talker: 60 Control and the unit it's talking to are separate key-ups in the
+            # same call; each piece is transcribed with only its own talker as the hint.
+            for cid, start, end, unit, audio in split_turns(call):
+                t = Traffic(cid, call.label, start, end, "", status="pending", unit=unit, talkgroup=call.talkgroup)
+                t.fm = False  # decoded P25 voice: no FM de-emphasis  # type: ignore[attr-defined]
+                self._keep_clip(t.id, radio_voice(audio, deemph=False), processed=True)
+                self._keep_source(t.id, audio)
+                self.stt.submit(t, audio)
         self._drop_recorder_files(call)  # sizeup's clip is the one copy kept
 
     def _drop_recorder_files(self, call: Call) -> None:

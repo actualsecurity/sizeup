@@ -36,6 +36,7 @@ class Call:
     units: list[str]           # radio IDs (or tags/aliases) in talk order
     audio: np.ndarray | None = field(default=None, repr=False)  # float32 16 kHz
     wav_path: str = ""
+    turns: list[tuple[float, str]] = field(default_factory=list)  # (offset s into audio, talker) per key-up
 
 
 WAV_HEADER = 44            # bytes; a WAV this size or smaller has no audio yet
@@ -73,7 +74,8 @@ def parse_call(meta_path: Path, labels: dict[int, str], aliases: dict[str, str] 
     if not isinstance(tg, int) or (tg not in labels and not record_all):
         return None
     aliases = aliases or {}
-    units = []
+    units: list[str] = []
+    turns: list[tuple[float, str]] = []   # srcList "pos" = where that radio starts in the WAV
     for s in d.get("srcList") or []:
         src = str(s.get("src", ""))
         if src in ("", "-1", "0"):
@@ -82,9 +84,14 @@ def parse_call(meta_path: Path, labels: dict[int, str], aliases: dict[str, str] 
         name = aliases.get(src) or aliases.get(tag) or tag or src
         if not units or units[-1] != name:
             units.append(name)
+        if not turns or turns[-1][1] != name:
+            try:
+                turns.append((max(0.0, float(s.get("pos") or 0.0)), name))
+            except (TypeError, ValueError):
+                pass
     wav = meta_path.with_suffix(".wav")
     return Call(meta_path.stem, int(tg), labels.get(tg) or f"TG {tg}", float(d.get("start_time", 0)),
-                float(d.get("stop_time", d.get("start_time", 0))), units, None, str(wav))
+                float(d.get("stop_time", d.get("start_time", 0))), units, None, str(wav), turns)
 
 
 class CallIngest:

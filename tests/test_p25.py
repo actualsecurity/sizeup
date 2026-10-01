@@ -78,3 +78,15 @@ def test_talker_tag_takes_callsign_title(tmp_path):
     from sizeup.radio.p25 import parse_call
     c = parse_call(day / "307-5.json", LABELS, {"2398": "2398 Duty Officer"})
     assert c.units == ["2398 Duty Officer", "77M3"]
+
+
+def test_turns_follow_srclist_positions(tmp_path):
+    day = tmp_path / "westchester" / "2026" / "10" / "1"
+    day.mkdir(parents=True)
+    meta = {"talkgroup": 307, "srcList": [
+        {"src": 600008, "pos": 0.0, "tag": "60 Ctrl OP 8"}, {"src": 41101, "pos": 5.84, "tag": "45M6"},
+        {"src": 600008, "pos": 11.76, "tag": "60 Ctrl OP 8"}, {"src": -1, "pos": 12.56, "tag": ""}]}
+    (day / "307-9.json").write_text(json.dumps(meta))
+    from sizeup.radio.p25 import parse_call
+    c = parse_call(day / "307-9.json", LABELS)
+    assert c.turns == [(0.0, "60 Ctrl OP 8"), (5.84, "45M6"), (11.76, "60 Ctrl OP 8")]

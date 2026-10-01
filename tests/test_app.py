@@ -337,3 +337,35 @@ def test_talker_prompt_reaches_whisper_only_when_switched_on(tmp_path):
         app._call(Call(f"307-{mode}", 307, "Fire/EMS 15", now, now + 2, ["77A3", "60 Ctrl OP 7"], voice(2.0), ""))
         assert wait(lambda: seen)
         assert seen[0] == want
+
+
+def test_call_is_split_into_one_row_per_talker(tmp_path):
+    from sizeup.app import split_turns
+    now = 1000.0
+    audio = np.arange(13 * RATE, dtype=np.float32)
+    call = Call("307-x", 307, "Fire/EMS 15", now, now + 13, ["60 Ctrl OP 8", "45M6", "60 Ctrl OP 8"], audio, "",
+                [(0.0, "60 Ctrl OP 8"), (5.84, "45M6"), (11.76, "60 Ctrl OP 8"), (12.9, "45M6")])
+    turns = split_turns(call)
+    # The 0.1 s 45M6 blip at the end is folded into the dispatcher's last turn.
+    assert [(cid, unit) for cid, _s, _e, unit, _a in turns] == [
+        ("307-x-t0", "60 Ctrl OP 8"), ("307-x-t1", "45M6"), ("307-x-t2", "60 Ctrl OP 8")]
+    assert turns[1][1] == now + 5.84 and turns[2][4][-1] == audio[-1]
+    assert sum(len(a) for *_x, a in turns) == len(audio)                  # nothing lost, nothing doubled
+    one = Call("307-y", 307, "Fire/EMS 15", now, now + 2, ["77A4"], audio[:2 * RATE], "", [(0.0, "77A4")])
+    assert [t[0] for t in split_turns(one)] == ["307-y"]                    # one talker: the call's own id
+
+    seen = []
+
+    class Spy(FakeWhisper):
+        def transcribe(self, audio, prompt=""):
+            seen.append(prompt)
+            return "words", 0.9
+
+    app = App(replace(cfg(tmp_path), p25_talkgroups={307: "Fire/EMS 15"}, stt_talker_prompt="ids"))
+    app.stt.client = Spy({})
+    app.stt.start()
+    app._call(Call("307-z", 307, "Fire/EMS 15", time.time(), time.time() + 6, ["60 Ctrl OP 6", "77A3"],
+                   np.concatenate([voice(3.0, 1), voice(3.0, 2)]), "", [(0.0, "60 Ctrl OP 6"), (3.0, "77A3")]))
+    assert wait(lambda: len(seen) == 2)
+    assert sorted(seen) == ["60 Control.", "77 Alpha 3."]                   # each piece hinted with its own talker
+    assert sorted(t.unit for t in app.store.loose) == ["60 Ctrl OP 6", "77A3"]

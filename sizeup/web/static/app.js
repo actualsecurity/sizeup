@@ -144,6 +144,16 @@ function playButton(id, title, hasAudio = true) {
   return b;
 }
 
+// Conversation layout: a 60 Control dispatcher on the left, units (77A4, E60, 2398...) on the right.
+// Rows from before calls were split per talker (several talkers on one row) stay full width.
+const DISPATCHER = /\bCtrl\b|\bControl\b/i;
+function speakerSide(li, unit) {
+  const names = (unit || "").split(",").map((x) => x.trim()).filter(Boolean);
+  const disp = names.filter((n) => DISPATCHER.test(n)).length;
+  li.classList.toggle("from-dispatch", names.length > 0 && disp === names.length);
+  li.classList.toggle("from-unit", names.length > 0 && disp === 0);
+}
+
 // ↻ next to ▶: run speech-to-text again on that one recording (queued behind live traffic).
 function rerunButton(id, pending, hasAudio = true) {
   const b = el("button", "rerun", pending ? "…" : "↻");
@@ -690,6 +700,7 @@ function renderTraffic(inc) {
                                 (t.history || []).length]),
     make: () => el("li"),
     fill: (li, t) => {
+      speakerSide(li, t.unit);
       const meta = el("div", "meta");
       meta.append(playButton(t.id, "Play this transmission", t.has_audio), rerunButton(t.id, t.rerun_pending, t.has_audio),
                   el("span", "t", fmtTime(t.start)), chip(t.source || "?", sourceColor(t.source), "src"));
@@ -748,6 +759,7 @@ function otherGroups(inc) {
 }
 
 function callFill(li, t) {
+  speakerSide(li, t.unit);
   const meta = el("div", "meta");
   meta.append(playButton(t.id, "Play this transmission", t.has_audio), rerunButton(t.id, t.rerun_pending, t.has_audio),
               el("span", "t", fmtTime(t.start)));
