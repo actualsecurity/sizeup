@@ -54,9 +54,10 @@ aliases = {}                       # radio ID -> unit name, e.g. { "2391001" = "
 aliases = {}                       # e.g. { "0611" = "Engine 60" }
 
 [units]
-# Apparatus as dispatched -> department. A page naming one of our units opens an incident even
-# when its tones aren't known yet. From the county apparatus list (DES, 2023-04): confirm/edit.
-departments = { "Engine 59" = "Port Chester FD", "Engine 60" = "Port Chester FD", "Engine 61" = "Port Chester FD", "Engine 62" = "Port Chester FD", "Engine 63" = "Port Chester FD", "Engine 64" = "Port Chester FD", "Ladder 31" = "Port Chester FD", "Tower Ladder 2" = "Port Chester FD", "Rescue 40" = "Port Chester FD", "Rescue 41" = "Port Chester FD", "Engine 14" = "Rye Brook FD", "Ladder 54" = "Rye Brook FD" }
+# Apparatus -> department, from the county mutual aid plan roster (2021; data/westchester_apparatus.csv).
+# A page naming one of our units opens an incident even when its tones aren't known yet.
+apparatus_file = "data/westchester_apparatus.csv"
+departments = {}                   # overrides / additions, e.g. { "Engine 65" = "Port Chester FD" }
 
 [storage]
 clips_dir = "captures/clips"

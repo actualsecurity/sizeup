@@ -248,6 +248,10 @@ class App:
         page: Page = item
         d = parse(page.raw) if page.raw else None
         if d is not None:  # units dispatched name their department ("Engine 61" -> Port Chester FD)
+            for n in d.numbers:  # "174, 175, Ladder 1": engines read without the word, if the roster has them
+                u = f"Engine {n}"
+                if u in self.cfg.unit_departments and u not in d.units:
+                    d.units.append(u)
             for u in d.units:
                 dep = self.cfg.unit_departments.get(u)
                 if dep and dep not in d.departments:

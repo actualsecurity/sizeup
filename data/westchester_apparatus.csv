@@ -1,0 +1,674 @@
+# Westchester County (NY) fire apparatus number/plate assignments.
+# Source: Westchester County Fire Mutual Aid Plan, October 7, 2021 (WCDES), Appendix VIII
+#   "Apparatus Number/Plate Assignments" pp.48-55 (scanned images, transcribed by eye) and
+#   "County Response Vehicles" p.56; Car 24/25 from Appendix II p.20. Dept numbers from Appendix III pp.24-25;
+#   battalions from Appendix II pp.19-20. Extracted 2026-10-01. PDF page numbers are 1-based.
+# Numbers are countywide and unique per type (Engine 25 exists once). Rows noted 'RESERVED number' are
+#   numbers held for a department with no apparatus in the 2021 list; 'UNASSIGNED' numbers are omitted.
+#   Notes 'pump/tank' = pump gpm / tank gal; RM/MM = rear-/mid-mount aerial; 'quint (pump)' = aerial with pump.
+# The plan lists no chief-car numbers and no station names/addresses (station column is blank). 2021 data: verify current.
+department,dept_number,battalion,station,unit,unit_type,notes
+Archville,263,12,,Engine 235,engine,
+Archville,263,12,,Engine 236,engine,
+Ardsley,201,14,,Engine 163,engine,RESERVED number (no apparatus listed)
+Ardsley,201,14,,Engine 164,engine,
+Ardsley,201,14,,Engine 165,engine,
+Ardsley,201,14,,Engine 242,engine,antique
+Ardsley,201,14,,Ladder 50,ladder,quint (pump); 100' aerial rear-mount
+Ardsley,201,14,,Tower Ladder 50,tower,RESERVED number (no apparatus listed)
+Armonk,202,16,,Engine 286,engine,
+Armonk,202,16,,Engine 287,engine,
+Armonk,202,16,,Engine 288,engine,
+Armonk,202,16,,Engine 289,engine,RESERVED number (no apparatus listed)
+Armonk,202,16,,Rescue 85,rescue,rescue/pumper
+Armonk,202,16,,Tanker 9,tanker,
+Armonk,202,16,,Mini Attack 6,brush,mini-attack; RESERVED number (no apparatus listed)
+Armonk,202,16,,Marine 24,boat,
+Banksville,258,16,,Engine 157,engine,
+Banksville,258,16,,Engine 158,engine,
+Banksville,258,16,,Engine 159,engine,
+Banksville,258,16,,Engine 220,engine,antique
+Banksville,258,16,,Rescue 7,rescue,medium
+Banksville,258,16,,Tanker 7,tanker,
+Banksville,258,16,,Tanker 17,tanker,
+Banksville,258,16,,Mini Attack 11,brush,mini-attack
+Bedford,204,16,,Engine 107,engine,RESERVED number (no apparatus listed)
+Bedford,204,16,,Engine 108,engine,pump/tank 1750/350 gpm/gal
+Bedford,204,16,,Engine 109,engine,pump/tank 2000/1000 gpm/gal
+Bedford,204,16,,Engine 110,engine,pump/tank 2000/1000 gpm/gal
+Bedford,204,16,,Engine 211,engine,RESERVED number (no apparatus listed)
+Bedford,204,16,,Rescue 44,rescue,heavy
+Bedford,204,16,,Tanker 26,tanker,RESERVED number (no apparatus listed)
+Bedford,204,16,,Mini Attack 7,brush,mini-attack; RESERVED number (no apparatus listed)
+Bedford Hills,203,16,,Engine 196,engine,antique
+Bedford Hills,203,16,,Engine 197,engine,RESERVED number (no apparatus listed)
+Bedford Hills,203,16,,Engine 198,engine,
+Bedford Hills,203,16,,Engine 199,engine,
+Bedford Hills,203,16,,Ladder 57,ladder,RESERVED number (no apparatus listed)
+Bedford Hills,203,16,,Tower Ladder 57,tower,95' aerial mid-mount
+Bedford Hills,203,16,,Rescue 10,rescue,heavy
+Bedford Hills,203,16,,Tanker 5,tanker,
+Bedford Hills,203,16,,Mini Attack 9,brush,mini-attack
+Bedford Hills Correctional Facility,,,,Engine 234,engine,
+Briarcliff Manor,205,12,,Engine 92,engine,pump/tank 1500/500 gpm/gal
+Briarcliff Manor,205,12,,Engine 93,engine,pump/tank 2000/1000 gpm/gal
+Briarcliff Manor,205,12,,Engine 94,engine,pump/tank 2000/500 gpm/gal
+Briarcliff Manor,205,12,,Engine 95,engine,RESERVED number (no apparatus listed)
+Briarcliff Manor,205,12,,Ladder 40,ladder,RESERVED number (no apparatus listed)
+Briarcliff Manor,205,12,,Tower Ladder 40,tower,95' aerial mid-mount
+Briarcliff Manor,205,12,,Rescue 37,rescue,heavy/cascade
+Briarcliff Manor,205,12,,Mini Attack 18,brush,mini-attack; RESERVED number (no apparatus listed)
+Buchanan,255,10,,Engine 160,engine,
+Buchanan,255,10,,Engine 161,engine,
+Buchanan,255,10,,Engine 162,engine,RESERVED number (no apparatus listed)
+Buchanan,255,10,,Rescue 26,rescue,medium
+Buchanan,255,10,,Marine 26,boat,
+Chappaqua,206,16,,Engine 144,engine,
+Chappaqua,206,16,,Engine 145,engine,RESERVED number (no apparatus listed)
+Chappaqua,206,16,,Engine 146,engine,
+Chappaqua,206,16,,Engine 243,engine,RESERVED number (no apparatus listed)
+Chappaqua,206,16,,Ladder 27,ladder,RESERVED number (no apparatus listed)
+Chappaqua,206,16,,Tower Ladder 27,tower,quint (pump); 70' aerial mid-mount
+Chappaqua,206,16,,Rescue 23,rescue,rescue/pumper/cascade
+Continental Village,213,17,,Engine 231,engine,
+Continental Village,213,17,,Engine 232,engine,
+Continental Village,213,17,,Engine 233,engine,RESERVED number (no apparatus listed)
+Continental Village,213,17,,Rescue 39,rescue,heavy/cascade
+Continental Village,213,17,,Tanker 11,tanker,
+Continental Village,213,17,,Mini Attack 4,brush,mini-attack
+Continental Village,213,17,,Marine 6,boat,pump
+Continental Village,213,17,,Marine 8,boat,
+Croton Falls,207,13,,Engine 136,engine,antique
+Croton Falls,207,13,,Engine 147,engine,
+Croton Falls,207,13,,Engine 148,engine,
+Croton Falls,207,13,,Engine 149,engine,
+Croton Falls,207,13,,Ladder 67,ladder,quint (pump); 75' aerial rear-mount
+Croton Falls,207,13,,Tower Ladder 67,tower,RESERVED number (no apparatus listed)
+Croton Falls,207,13,,Rescue 28,rescue,heavy/cascade
+Croton Falls,207,13,,Tanker 8,tanker,
+Croton Falls,207,13,,Tanker 88,tanker,
+Croton Falls,207,13,,Mini Attack 16,brush,mini-attack; RESERVED number (no apparatus listed)
+Croton Falls,207,13,,Mini Attack 17,brush,mini-attack
+Croton Falls,207,13,,Mini Attack 26,brush,mini-attack; RESERVED number (no apparatus listed)
+Croton Falls,207,13,,Marine 28,boat,10' zodiac
+Croton Falls,207,13,,Marine 64,boat,12' zodiac
+Croton-on-Hudson,208,10,,Engine 118,engine,pump/tank 1250/1000 gpm/gal
+Croton-on-Hudson,208,10,,Engine 119,engine,pump/tank 1500/750 gpm/gal
+Croton-on-Hudson,208,10,,Engine 120,engine,pump/tank 2000/1000 gpm/gal
+Croton-on-Hudson,208,10,,Engine 129,engine,RESERVED number (no apparatus listed)
+Croton-on-Hudson,208,10,,Ladder 44,ladder,RESERVED number (no apparatus listed)
+Croton-on-Hudson,208,10,,Tower Ladder 44,tower,quint (pump); 100' aerial rear-mount
+Croton-on-Hudson,208,10,,Rescue 18,rescue,heavy
+Croton-on-Hudson,208,10,,Tanker 10,tanker,
+Croton-on-Hudson,208,10,,Mini Attack 33,brush,mini-attack; RESERVED number (no apparatus listed)
+Croton-on-Hudson,208,10,,Marine 12,boat,pump
+Croton-on-Hudson,208,10,,Marine 32,boat,16' zodiac
+Croton-on-Hudson,208,10,,Marine 52,boat,12' zodiac
+Dobbs Ferry,209,14,,Engine 47,engine,pump/tank 2000/750 gpm/gal
+Dobbs Ferry,209,14,,Engine 48,engine,pump/tank 1500/500 gpm/gal
+Dobbs Ferry,209,14,,Engine 49,engine,pump/tank 1500/750 gpm/gal
+Dobbs Ferry,209,14,,Engine 50,engine,RESERVED number (no apparatus listed)
+Dobbs Ferry,209,14,,Ladder 23,ladder,RESERVED number (no apparatus listed)
+Dobbs Ferry,209,14,,Tower Ladder 23,tower,95' aerial mid-mount
+Eastchester,210,18,,Engine 27,engine,pump/tank 1500/500 gpm/gal
+Eastchester,210,18,,Engine 28,engine,spare; pump/tank 1500/500 gpm/gal
+Eastchester,210,18,,Engine 29,engine,pump/tank 1500/500 gpm/gal
+Eastchester,210,18,,Engine 30,engine,pump/tank 1500/500 gpm/gal
+Eastchester,210,18,,Engine 31,engine,pump/tank 1500/500 gpm/gal
+Eastchester,210,18,,Engine 32,engine,RESERVED number (no apparatus listed)
+Eastchester,210,18,,Ladder 15,ladder,spare; quint (pump); 100' aerial rear-mount
+Eastchester,210,18,,Ladder 16,ladder,107' aerial rear-mount
+Eastchester,210,18,,Ladder 17,ladder,RESERVED number (no apparatus listed)
+Eastchester,210,18,,Tower Ladder 16,tower,RESERVED number (no apparatus listed)
+Eastchester,210,18,,Tower Ladder 17,tower,93' aerial mid-mount
+Eastchester,210,18,,Rescue 5,rescue,RESERVED number (no apparatus listed)
+Eastchester/Scarsdale,210/243,,,Squad 5,squad,hazmat/decon; joint unit
+Eastchester/Scarsdale,210/243,,,SSU 5,other,squad support unit; joint unit
+Elmsford,211,14,,Engine 137,engine,
+Elmsford,211,14,,Engine 237,engine,
+Elmsford,211,14,,Ladder 55,ladder,quint (pump); 75' aerial rear-mount
+Elmsford,211,14,,Tower Ladder 21,tower,quint (pump); 95' aerial mid-mount
+Elmsford,211,14,,Tower Ladder 55,tower,RESERVED number (no apparatus listed)
+Elmsford,211,14,,Marine 46,boat,12' zodiac
+Fairview,212,14,,Engine 173,engine,RESERVED number (no apparatus listed)
+Fairview,212,14,,Engine 174,engine,
+Fairview,212,14,,Engine 175,engine,
+Fairview,212,14,,Engine 176,engine,spare
+Fairview,212,14,,Ladder 1,ladder,tower ladder; 100' aerial mid-mount
+Fairview,212,14,,Rescue 3,rescue,RESERVED number (no apparatus listed)
+Fairview,212,14,,Marine 53,boat,12' zodiac
+Fairview/Greenville/Hartsdale,212/215/217,,,Squad 6,squad,hazmat/decon; joint unit
+Fairview/Greenville/Hartsdale,212/215/217,,,SSU 6,other,squad support unit; joint unit
+Fairview/Greenville/Hartsdale/Scarsdale,212/215/217/243,,,Squad 36,squad,tech rescue; joint unit
+Goldens Bridge,214,13,,Engine 138,engine,
+Goldens Bridge,214,13,,Engine 139,engine,
+Goldens Bridge,214,13,,Engine 140,engine,
+Goldens Bridge,214,13,,Rescue 24,rescue,RESERVED number (no apparatus listed)
+Goldens Bridge,214,13,,Rescue 25,rescue,light/ems
+Goldens Bridge,214,13,,Tanker 1,tanker,
+Goldens Bridge,214,13,,Tanker 21,tanker,RESERVED number (no apparatus listed)
+Goldens Bridge,214,13,,Marine 25,boat,25'
+Grasslands,254,11,,Engine 7,engine,"pump/tank 1500/750 gpm/gal; also listed p.56 as D.E.S./Fire ""Fire Brigade"" (500 gal tank)"
+Grasslands,254,11,,Engine 8,engine,spare; pump/tank 1250/750 gpm/gal
+Grasslands,254,11,,Ladder 7,ladder,"105' aerial rear-mount; also listed p.56 as D.E.S./Fire ""Fire Brigade"" (105 ft)"
+Grasslands,254,11,,Ladder 8,ladder,"spare; quint (pump); 75' aerial rear-mount; also listed p.56 as D.E.S./Fire ""Fire Brigade"" Ladder 8"
+Grasslands,254,11,,Rescue 78,rescue,"RESERVED number (no apparatus listed); p.56 lists D.E.S./Fire ""Fire Brigade: Rescue 78"" as an active vehicle"
+Grasslands,254,11,,Mini Attack 2,brush,mini-attack; RESERVED number (no apparatus listed)
+Greenville,215,18,,Engine 150,engine,spare
+Greenville,215,18,,Engine 151,engine,spare
+Greenville,215,18,,Engine 152,engine,RESERVED number (no apparatus listed)
+Greenville,215,18,,Ladder 4,ladder,quint (pump); 109' aerial rear-mount
+Greenville,215,18,,Ladder 5,ladder,RESERVED number (no apparatus listed)
+Greenville,215,18,,Tower Ladder 4,tower,RESERVED number (no apparatus listed)
+Greenville,215,18,,Rescue 29,rescue,RESERVED number (no apparatus listed)
+Greenville,215,18,,Squad 15,squad,rescue/pumper
+Greenville,215,18,,SSU 15,other,squad support unit
+Harrison,216,15,,Engine 10,engine,pump/tank 2000/750 gpm/gal
+Harrison,216,15,,Engine 11,engine,RESERVED number (no apparatus listed)
+Harrison,216,15,,Engine 12,engine,pump/tank 1500/500 gpm/gal
+Harrison,216,15,,Engine 13,engine,pump/tank 1500/500 gpm/gal
+Harrison,216,15,,Ladder 24,ladder,RESERVED number (no apparatus listed)
+Harrison,216,15,,Tower Ladder 24,tower,95' aerial mid-mount
+Harrison,216,15,,Rescue 19,rescue,light
+Harrison,216,15,,Marine 35,boat,12' zodiac
+Hartsdale,217,14,,Engine 169,engine,
+Hartsdale,217,14,,Engine 170,engine,
+Hartsdale,217,14,,Engine 171,engine,spare
+Hartsdale,217,14,,Engine 172,engine,RESERVED number (no apparatus listed)
+Hartsdale,217,14,,Tower Ladder 15,tower,93' aerial mid-mount
+Hartsdale,217,14,,Tower Ladder 54,tower,RESERVED number (no apparatus listed)
+Hartsdale,217,14,,Rescue 56,rescue,collapse
+Hastings,218,14,,Engine 43,engine,RESERVED number (no apparatus listed)
+Hastings,218,14,,Engine 44,engine,pump/tank 1750/750 gpm/gal
+Hastings,218,14,,Engine 45,engine,pump/tank 1750/750 gpm/gal
+Hastings,218,14,,Engine 46,engine,pump/tank 1750/500 gpm/gal
+Hastings,218,14,,Ladder 22,ladder,tiller; 100' aerial mid-mount
+Hastings,218,14,,Tower Ladder 22,tower,RESERVED number (no apparatus listed)
+Hastings,218,14,,Rescue 100,rescue,heavy
+Hawthorne,219,11,,Engine 154,engine,
+Hawthorne,219,11,,Engine 155,engine,
+Hawthorne,219,11,,Engine 156,engine,RESERVED number (no apparatus listed)
+Hawthorne,219,11,,Ladder 56,ladder,quint (pump); 75' aerial rear-mount
+Hawthorne,219,11,,Tower Ladder 12,tower,RESERVED number (no apparatus listed)
+Hawthorne,219,11,,Tower Ladder 56,tower,RESERVED number (no apparatus listed)
+Hawthorne,219,11,,Rescue 8,rescue,RESERVED number (no apparatus listed)
+Hawthorne,219,11,,Mini Attack 27,brush,mini-attack; RESERVED number (no apparatus listed)
+Irvington,220,14,,Engine 177,engine,
+Irvington,220,14,,Engine 178,engine,
+Irvington,220,14,,Engine 179,engine,RESERVED number (no apparatus listed)
+Irvington,220,14,,Ladder 36,ladder,quint (pump); 110' aerial rear-mount
+Irvington,220,14,,Tower Ladder 36,tower,RESERVED number (no apparatus listed)
+Irvington,220,14,,Rescue 27,rescue,RESERVED number (no apparatus listed)
+Irvington,220,14,,Rescue 49,rescue,heavy/cascade
+Irvington,220,14,,Marine 4,boat,pump
+Irvington,220,14,,Marine 44,boat,14' zodiac
+Katonah,221,16,,Engine 114,engine,antique
+Katonah,221,16,,Engine 115,engine,pump/tank 2000/1000 gpm/gal
+Katonah,221,16,,Engine 116,engine,pump/tank 2000/850 gpm/gal
+Katonah,221,16,,Engine 117,engine,pump/tank 1500/500 gpm/gal
+Katonah,221,16,,Ladder 39,ladder,quint (pump); 75' aerial rear-mount
+Katonah,221,16,,Tower Ladder 39,tower,RESERVED number (no apparatus listed)
+Katonah,221,16,,Rescue 17,rescue,heavy/cascade
+Katonah,221,16,,Tanker 6,tanker,
+Katonah,221,16,,Mini Attack 15,brush,mini-attack; RESERVED number (no apparatus listed)
+Katonah,221,16,,Marine 38,boat,RESERVED number (no apparatus listed)
+Lake Mohegan,226,17,,Engine 250,engine,RESERVED number (no apparatus listed)
+Lake Mohegan,226,17,,Engine 251,engine,antique
+Lake Mohegan,226,17,,Engine 252,engine,
+Lake Mohegan,226,17,,Engine 253,engine,RESERVED number (no apparatus listed)
+Lake Mohegan,226,17,,Engine 254,engine,
+Lake Mohegan,226,17,,Engine 255,engine,
+Lake Mohegan,226,17,,Engine 256,engine,
+Lake Mohegan,226,17,,Engine 257,engine,
+Lake Mohegan,226,17,,Engine 258,engine,
+Lake Mohegan,226,17,,Ladder 10,ladder,quint (pump); 75' aerial rear-mount
+Lake Mohegan,226,17,,Ladder 35,ladder,quint (pump); 105' aerial rear-mount
+Lake Mohegan,226,17,,Tower Ladder 10,tower,RESERVED number (no apparatus listed)
+Lake Mohegan,226,17,,Tower Ladder 35,tower,RESERVED number (no apparatus listed)
+Lake Mohegan,226,17,,Rescue 32,rescue,light/ems
+Lake Mohegan,226,17,,Squad 7,squad,RESERVED number (no apparatus listed)
+Lake Mohegan,226,17,,Marine 37,boat,RESERVED number (no apparatus listed)
+Lake Mohegan,226,17,,SSU 7,other,squad support unit; RESERVED number (no apparatus listed)
+Larchmont,222,15,,Engine 33,engine,pump/tank 1500/750 gpm/gal
+Larchmont,222,15,,Engine 34,engine,pump/tank 1750/500 gpm/gal
+Larchmont,222,15,,Engine 35,engine,pump/tank 1500/500 gpm/gal
+Larchmont,222,15,,Tower Ladder 7,tower,quint (pump); 95' aerial mid-mount
+Larchmont,222,15,,Rescue 1,rescue,light/cascade
+Larchmont,222,15,,Marine 34,boat,22'
+Mamaroneck Town,223,15,,Engine 36,engine,pump/tank 1500/750 gpm/gal
+Mamaroneck Town,223,15,,Engine 37,engine,pump/tank 1500/650 gpm/gal
+Mamaroneck Town,223,15,,Engine 51,engine,pump/tank 1500/750 gpm/gal
+Mamaroneck Town,223,15,,Ladder 19,ladder,100' aerial rear-mount
+Mamaroneck Town,223,15,,Tower Ladder 19,tower,RESERVED number (no apparatus listed)
+Mamaroneck Town,223,15,,Rescue 6,rescue,medium/cascade
+Mamaroneck Town,223,15,,Rescue 46,rescue,RESERVED number (no apparatus listed)
+Mamaroneck Town,223,15,,Marine 36,boat,
+Mamaroneck Village,224,15,,Engine 38,engine,pump/tank 1500/500 gpm/gal
+Mamaroneck Village,224,15,,Engine 39,engine,spare; pump/tank 1500/750 gpm/gal
+Mamaroneck Village,224,15,,Engine 40,engine,pump/tank 1500/750 gpm/gal
+Mamaroneck Village,224,15,,Engine 41,engine,pump/tank 1500/500 gpm/gal
+Mamaroneck Village,224,15,,Engine 42,engine,pump/tank 1750/750 gpm/gal
+Mamaroneck Village,224,15,,Ladder 20,ladder,RESERVED number (no apparatus listed)
+Mamaroneck Village,224,15,,Ladder 21,ladder,tiller; 100' aerial mid-mount
+Mamaroneck Village,224,15,,Tower Ladder 20,tower,100' aerial mid-mount
+Mamaroneck Village,224,15,,Marine 2,boat,
+Millwood,225,17,,Engine 244,engine,antique
+Millwood,225,17,,Engine 245,engine,RESERVED number (no apparatus listed)
+Millwood,225,17,,Engine 246,engine,RESERVED number (no apparatus listed)
+Millwood,225,17,,Engine 247,engine,
+Millwood,225,17,,Engine 248,engine,
+Millwood,225,17,,Engine 249,engine,RESERVED number (no apparatus listed)
+Millwood,225,17,,Ladder 52,ladder,quint (pump); 75' aerial mid-mount
+Millwood,225,17,,Tower Ladder 52,tower,RESERVED number (no apparatus listed)
+Millwood,225,17,,Rescue 36,rescue,rescue/pumper/cascade
+Millwood,225,17,,Tanker 15,tanker,
+Millwood,225,17,,Mini Attack 10,brush,mini-attack
+Millwood,225,17,,Marine 10,boat,RESERVED number (no apparatus listed)
+Millwood,225,17,,Marine 45,boat,15' zodiac
+Montrose,227,10,,Engine 121,engine,RESERVED number (no apparatus listed)
+Montrose,227,10,,Engine 122,engine,pump/tank 1500/500 gpm/gal
+Montrose,227,10,,Engine 123,engine,pump/tank 2000/750 gpm/gal
+Montrose,227,10,,Engine 124,engine,RESERVED number (no apparatus listed)
+Montrose,227,10,,Engine 125,engine,RESERVED number (no apparatus listed)
+Montrose,227,10,,Tower Ladder 8,tower,quint (pump); 100' aerial rear-mount
+Montrose,227,10,,Rescue 51,rescue,heavy w/ pump
+Montrose,227,10,,Mini Attack 24,brush,mini-attack; RESERVED number (no apparatus listed)
+Montrose,227,10,,Mini Attack 25,brush,mini-attack; utv
+Montrose,227,10,,Marine 51,boat,RESERVED number (no apparatus listed)
+Montrose VA,257,10,,Engine 223,engine,RESERVED number (no apparatus listed)
+Montrose VA,257,10,,Engine 224,engine,
+Montrose VA,257,10,,Engine 225,engine,
+Montrose VA,257,10,,Rescue 48,rescue,light/ems
+Montrose VA,257,10,,Mini Attack 28,brush,mini-attack; RESERVED number (no apparatus listed)
+Montrose VA,257,10,,Marine 21,boat,RESERVED number (no apparatus listed)
+Montrose VA,257,10,,Hazmat 3,other,hazmat unit
+Mount Kisco,228,16,,Engine 102,engine,pump/tank 1250/500 gpm/gal
+Mount Kisco,228,16,,Engine 103,engine,pump/tank 1750/750 gpm/gal
+Mount Kisco,228,16,,Engine 104,engine,pump/tank 1750/750 gpm/gal
+Mount Kisco,228,16,,Engine 105,engine,pump/tank 2000/750 gpm/gal
+Mount Kisco,228,16,,Engine 106,engine,pump/tank 2000/750 gpm/gal
+Mount Kisco,228,16,,Engine 212,engine,antique
+Mount Kisco,228,16,,Ladder 43,ladder,RESERVED number (no apparatus listed)
+Mount Kisco,228,16,,Tower Ladder 14,tower,95' aerial mid-mount
+Mount Kisco,228,16,,Tower Ladder 43,tower,RESERVED number (no apparatus listed)
+Mount Kisco,228,16,,Rescue 15,rescue,heavy
+Mount Kisco,228,16,,Rescue 31,rescue,medium
+Mount Vernon,229,18,,Engine 201,engine,spare
+Mount Vernon,229,18,,Engine 202,engine,
+Mount Vernon,229,18,,Engine 203,engine,
+Mount Vernon,229,18,,Engine 204,engine,
+Mount Vernon,229,18,,Engine 205,engine,
+Mount Vernon,229,18,,Engine 206,engine,
+Mount Vernon,229,18,,Engine 207,engine,RESERVED number (no apparatus listed)
+Mount Vernon,229,18,,Ladder 61,ladder,RESERVED number (no apparatus listed)
+Mount Vernon,229,18,,Ladder 62,ladder,100' aerial rear-mount
+Mount Vernon,229,18,,Ladder 63,ladder,
+Mount Vernon,229,18,,Ladder 64,ladder,RESERVED number (no apparatus listed)
+Mount Vernon,229,18,,Tower Ladder 61,tower,
+Mount Vernon,229,18,,Tower Ladder 62,tower,RESERVED number (no apparatus listed)
+Mount Vernon,229,18,,Tower Ladder 63,tower,
+Mount Vernon,229,18,,Tower Ladder 64,tower,RESERVED number (no apparatus listed)
+Mount Vernon,229,18,,Rescue 2,rescue,heavy
+Mount Vernon,229,18,,Squad 3,squad,hazmat/decon
+Mount Vernon,229,18,,Squad 33,squad,RESERVED number (no apparatus listed); tech rescue
+Mount Vernon,229,18,,MSU 2,other,mask service unit (SCBA air)
+Mount Vernon,229,18,,SSU 3,other,squad support unit; RESERVED number (no apparatus listed)
+Mount Vernon,229,18,,SSU 33,other,squad support unit; RESERVED number (no apparatus listed)
+New Rochelle,230,18,,Engine 17,engine,spare; pump/tank 2000/500 gpm/gal
+New Rochelle,230,18,,Engine 18,engine,spare; pump/tank 2000/500 gpm/gal
+New Rochelle,230,18,,Engine 19,engine,RESERVED number (no apparatus listed)
+New Rochelle,230,18,,Engine 20,engine,RESERVED number (no apparatus listed)
+New Rochelle,230,18,,Engine 21,engine,pump/tank 2000/500 gpm/gal
+New Rochelle,230,18,,Engine 22,engine,pump/tank 2000/500 gpm/gal
+New Rochelle,230,18,,Engine 23,engine,pump/tank 2000/500 gpm/gal
+New Rochelle,230,18,,Engine 24,engine,pump/tank 2000/500 gpm/gal
+New Rochelle,230,18,,Engine 25,engine,pump/tank 2000/750 gpm/gal
+New Rochelle,230,18,,Engine 26,engine,RESERVED number (no apparatus listed)
+New Rochelle,230,18,,Ladder 11,ladder,RESERVED number (no apparatus listed)
+New Rochelle,230,18,,Ladder 12,ladder,103' aerial rear-mount
+New Rochelle,230,18,,Ladder 13,ladder,100' aerial rear-mount
+New Rochelle,230,18,,Ladder 14,ladder,spare; 110' aerial rear-mount
+New Rochelle,230,18,,Tower Ladder 11,tower,93' aerial mid-mount
+New Rochelle,230,18,,Tower Ladder 13,tower,RESERVED number (no apparatus listed)
+New Rochelle,230,18,,Rescue 4,rescue,heavy
+New Rochelle,230,18,,Rescue 54,rescue,collapse
+New Rochelle,230,18,,Squad 2,squad,hazmat/decon
+New Rochelle,230,18,,Squad 32,squad,tech rescue
+New Rochelle,230,18,,Mini Attack 31,brush,mini-attack; RESERVED number (no apparatus listed)
+New Rochelle,230,18,,MSU 3,other,mask service unit (SCBA air)
+New Rochelle,230,18,,SSU 2,other,squad support unit
+New Rochelle,230,18,,SSU 32,other,squad support unit; RESERVED number (no apparatus listed)
+North White Plains,232,19,,Engine 74,engine,
+North White Plains,232,19,,Engine 75,engine,
+North White Plains,232,19,,Ladder 47,ladder,quint (pump); 75' aerial rear-mount
+North White Plains,232,19,,Tower Ladder 47,tower,RESERVED number (no apparatus listed)
+North White Plains,232,19,,Rescue 33,rescue,medium
+North White Plains,232,19,,MSU 4,other,mask service unit (SCBA air); trailer
+Ossining,233,12,,Engine 96,engine,pump/tank 2000/500 gpm/gal
+Ossining,233,12,,Engine 97,engine,pump/tank 1500/500 gpm/gal
+Ossining,233,12,,Engine 98,engine,pump/tank 1500/750 gpm/gal
+Ossining,233,12,,Engine 99,engine,pump/tank 1500/500 gpm/gal
+Ossining,233,12,,Engine 100,engine,pump/tank 1500/620 gpm/gal
+Ossining,233,12,,Engine 101,engine,pump/tank 1500/660 gpm/gal
+Ossining,233,12,,Ladder 41,ladder,105' aerial rear-mount
+Ossining,233,12,,Ladder 42,ladder,RESERVED number (no apparatus listed)
+Ossining,233,12,,Tower Ladder 41,tower,RESERVED number (no apparatus listed)
+Ossining,233,12,,Tower Ladder 42,tower,100' aerial rear-mount
+Ossining,233,12,,Rescue 14,rescue,heavy
+Ossining,233,12,,Marine 14,boat,RESERVED number (no apparatus listed)
+Ossining,233,12,,Marine 15,boat,RESERVED number (no apparatus listed)
+Ossining PD/EMS,,,,74-MAR-1,boat,
+Peekskill,234,10,,Engine 130,engine,
+Peekskill,234,10,,Engine 131,engine,
+Peekskill,234,10,,Engine 132,engine,
+Peekskill,234,10,,Engine 133,engine,
+Peekskill,234,10,,Engine 134,engine,RESERVED number (no apparatus listed)
+Peekskill,234,10,,Ladder 45,ladder,RESERVED number (no apparatus listed)
+Peekskill,234,10,,Tower Ladder 45,tower,quint (pump); 100' aerial rear-mount
+Peekskill,234,10,,Rescue 134,rescue,heavy w/ pump
+Peekskill,234,10,,Marine 23,boat,RESERVED number (no apparatus listed)
+Pelham,235,18,,Engine 4,engine,pump/tank 1500/500 gpm/gal
+Pelham,235,18,,Engine 5,engine,pump/tank 2000/500 gpm/gal
+Pelham,235,18,,Engine 6,engine,antique
+Pelham,235,18,,Ladder 2,ladder,100' aerial rear-mount
+Pelham,235,18,,Rescue 45,rescue,light/ems
+Pelham Manor,236,18,,Engine 1,engine,
+Pelham Manor,236,18,,Engine 2,engine,
+Pelham Manor,236,18,,Engine 3,engine,antique
+Pelham Manor,236,18,,Ladder 3,ladder,RESERVED number (no apparatus listed)
+Pelham Manor,236,18,,Tower Ladder 3,tower,75' aerial mid-mount
+Pleasantville,237,11,,Engine 90,engine,pump/tank 2000/750 gpm/gal
+Pleasantville,237,11,,Engine 91,engine,pump/tank 2000/1000 gpm/gal
+Pleasantville,237,11,,Engine 259,engine,RESERVED number (no apparatus listed)
+Pleasantville,237,11,,Engine 260,engine,RESERVED number (no apparatus listed)
+Pleasantville,237,11,,Tower Ladder 5,tower,95' aerial mid-mount
+Pleasantville,237,11,,Rescue 47,rescue,rescue/pumper
+Pleasantville,237,11,,Tanker 18,tanker,RESERVED number (no apparatus listed)
+Pleasantville,237,11,,Mini Attack 5,brush,mini-attack; RESERVED number (no apparatus listed)
+Pocantico Hills,238,12,,Engine 189,engine,
+Pocantico Hills,238,12,,Engine 190,engine,RESERVED number (no apparatus listed)
+Pocantico Hills,238,12,,Rescue 43,rescue,rescue/pumper
+Pocantico Hills,238,12,,Tanker 12,tanker,
+Port Chester,239,15,,Engine 16,engine,RESERVED number (no apparatus listed)
+Port Chester,239,15,,Engine 58,engine,RESERVED number (no apparatus listed)
+Port Chester,239,15,,Engine 59,engine,spare; pump/tank 1250/500 gpm/gal
+Port Chester,239,15,,Engine 60,engine,pump/tank 1500/500 gpm/gal
+Port Chester,239,15,,Engine 61,engine,pump/tank 2000/500 gpm/gal
+Port Chester,239,15,,Engine 62,engine,pump/tank 1500/500 gpm/gal
+Port Chester,239,15,,Engine 63,engine,pump/tank 1500/500 gpm/gal
+Port Chester,239,15,,Engine 64,engine,pump/tank 1500/500 gpm/gal
+Port Chester,239,15,,Ladder 31,ladder,100' aerial rear-mount
+Port Chester,239,15,,Tower Ladder 2,tower,95' aerial mid-mount
+Port Chester,239,15,,Tower Ladder 31,tower,RESERVED number (no apparatus listed)
+Port Chester,239,15,,Rescue 40,rescue,heavy
+Port Chester,239,15,,Rescue 41,rescue,spare
+Port Chester,239,15,,Marine 40,boat,
+Pound Ridge,240,13,,Engine 111,engine,pump/tank 2000/1000 gpm/gal
+Pound Ridge,240,13,,Engine 112,engine,pump/tank 1500/300 gpm/gal
+Pound Ridge,240,13,,Engine 113,engine,pump/tank 2000/1000 gpm/gal
+Pound Ridge,240,13,,Rescue 22,rescue,heavy
+Pound Ridge,240,13,,Tanker 3,tanker,
+Pound Ridge,240,13,,Mini Attack 21,brush,mini-attack
+Purchase,241,19,,Engine 238,engine,
+Purchase,241,19,,Engine 239,engine,RESERVED number (no apparatus listed)
+Purchase,241,19,,Engine 240,engine,
+Purchase,241,19,,Engine 241,engine,
+Purchase,241,19,,Ladder 53,ladder,RESERVED number (no apparatus listed)
+Purchase,241,19,,Tower Ladder 53,tower,quint (pump); 100' aerial rear-mount
+Purchase,241,19,,Rescue 30,rescue,heavy
+Round Hill (Greenwich CT),,,,Tanker 66,tanker,out-of-county (Greenwich CT) tanker assigned county number
+Rye,242,15,,Engine 191,engine,
+Rye,242,15,,Engine 192,engine,
+Rye,242,15,,Engine 193,engine,spare
+Rye,242,15,,Engine 194,engine,RESERVED number (no apparatus listed)
+Rye,242,15,,Ladder 25,ladder,100' aerial rear-mount
+Rye,242,15,,Ladder 26,ladder,RESERVED number (no apparatus listed)
+Rye,242,15,,Tower Ladder 25,tower,RESERVED number (no apparatus listed)
+Rye,242,15,,Tower Ladder 26,tower,RESERVED number (no apparatus listed)
+Rye,242,15,,Marine 3,boat,RESERVED number (no apparatus listed)
+Rye,242,15,,Marine 39,boat,16' zodiac
+Rye Brook,266,15,,Engine 14,engine,pump/tank 1500/800 gpm/gal
+Rye Brook,266,15,,Engine 15,engine,RESERVED number (no apparatus listed)
+Rye Brook,266,15,,Ladder 30,ladder,quint (pump); 105' aerial rear-mount
+Rye Brook,266,15,,Tower Ladder 30,tower,RESERVED number (no apparatus listed)
+Scarsdale,243,19,,Engine 53,engine,antique
+Scarsdale,243,19,,Engine 54,engine,pump/tank 1500/500 gpm/gal
+Scarsdale,243,19,,Engine 55,engine,pump/tank 1500/500 gpm/gal
+Scarsdale,243,19,,Engine 56,engine,spare; pump/tank 1500/500 gpm/gal
+Scarsdale,243,19,,Engine 57,engine,RESERVED number (no apparatus listed)
+Scarsdale,243,19,,Ladder 28,ladder,quint (pump); 100' aerial rear-mount
+Scarsdale,243,19,,Ladder 29,ladder,RESERVED number (no apparatus listed)
+Scarsdale,243,19,,Tower Ladder 28,tower,RESERVED number (no apparatus listed)
+Scarsdale,243,19,,Tower Ladder 29,tower,RESERVED number (no apparatus listed)
+Scarsdale,243,19,,SSU 36,other,squad support unit
+Sleepy Hollow,231,12,,Engine 85,engine,pump/tank 1750/750 gpm/gal
+Sleepy Hollow,231,12,,Engine 86,engine,pump/tank 2000/750 gpm/gal
+Sleepy Hollow,231,12,,Engine 87,engine,pump/tank 1750/500 gpm/gal
+Sleepy Hollow,231,12,,Ladder 38,ladder,RESERVED number (no apparatus listed)
+Sleepy Hollow,231,12,,Tower Ladder 38,tower,95' aerial mid-mount
+Sleepy Hollow,231,12,,Rescue 12,rescue,medium
+Sleepy Hollow,231,12,,Mini Attack 29,brush,mini-attack; RESERVED number (no apparatus listed)
+Sleepy Hollow,231,12,,Marine 7,boat,pump
+Sleepy Hollow,231,12,,Marine 27,boat,14' zodiac
+Somers,244,13,,Engine 180,engine,
+Somers,244,13,,Engine 181,engine,
+Somers,244,13,,Engine 182,engine,antique
+Somers,244,13,,Engine 183,engine,
+Somers,244,13,,Engine 184,engine,RESERVED number (no apparatus listed)
+Somers,244,13,,Engine 185,engine,
+Somers,244,13,,Engine 186,engine,RESERVED number (no apparatus listed)
+Somers,244,13,,Engine 187,engine,RESERVED number (no apparatus listed)
+Somers,244,13,,Engine 188,engine,pumper/tanker
+Somers,244,13,,Ladder 18,ladder,RESERVED number (no apparatus listed)
+Somers,244,13,,Ladder 48,ladder,quint (pump); 70' aerial mid-mount
+Somers,244,13,,Tower Ladder 18,tower,100' aerial mid-mount
+Somers,244,13,,Tower Ladder 48,tower,RESERVED number (no apparatus listed)
+Somers,244,13,,Rescue 20,rescue,heavy
+Somers,244,13,,Rescue 38,rescue,RESERVED number (no apparatus listed)
+Somers,244,13,,Tanker 16,tanker,
+Somers,244,13,,Mini Attack 13,brush,mini-attack; RESERVED number (no apparatus listed)
+Somers,244,13,,Mini Attack 14,brush,mini-attack
+Somers,244,13,,Marine 22,boat,RESERVED number (no apparatus listed)
+Somers,244,13,,Marine 67,boat,
+Somers,244,13,,Marine 68,boat,
+Somers,244,13,,Marine 69,boat,
+South Salem,245,13,,Engine 166,engine,
+South Salem,245,13,,Engine 167,engine,
+South Salem,245,13,,Engine 168,engine,RESERVED number (no apparatus listed)
+South Salem,245,13,,Ladder 66,ladder,RESERVED number (no apparatus listed)
+South Salem,245,13,,Tower Ladder 66,tower,RESERVED number (no apparatus listed)
+South Salem,245,13,,Rescue 21,rescue,heavy
+South Salem,245,13,,Rescue 34,rescue,RESERVED number (no apparatus listed)
+South Salem,245,13,,Tanker 2,tanker,
+South Salem,245,13,,Mini Attack 20,brush,mini-attack; RESERVED number (no apparatus listed)
+South Salem,245,13,,Mini Attack 22,brush,mini-attack; RESERVED number (no apparatus listed)
+South Salem,245,13,,Marine 33,boat,14'
+Tarrytown,246,14,,Engine 76,engine,pump/tank 2000/780 gpm/gal
+Tarrytown,246,14,,Engine 77,engine,
+Tarrytown,246,14,,Engine 78,engine,RESERVED number (no apparatus listed)
+Tarrytown,246,14,,Engine 79,engine,pump/tank 2250/1000 gpm/gal
+Tarrytown,246,14,,Engine 80,engine,pump/tank 2000/700 gpm/gal
+Tarrytown,246,14,,Ladder 37,ladder,105' aerial rear-mount
+Tarrytown,246,14,,Tower Ladder 37,tower,RESERVED number (no apparatus listed)
+Tarrytown,246,14,,Marine 5,boat,pump
+Tarrytown,246,14,,Marine 9,boat,RESERVED number (no apparatus listed)
+Tarrytown,246,14,,Marine 31,boat,12' zodiac
+Thornwood,247,11,,Engine 88,engine,pump/tank 1500/750 gpm/gal
+Thornwood,247,11,,Engine 89,engine,pump/tank 1500/750 gpm/gal
+Thornwood,247,11,,Engine 290,engine,RESERVED number (no apparatus listed)
+Thornwood,247,11,,Tower Ladder 1,tower,quint (pump); 95' aerial mid-mount
+Thornwood,247,11,,Rescue 75,rescue,rescue/pumper
+Thornwood,247,11,,Mini Attack 19,brush,mini-attack; utv
+Valhalla,248,11,,Engine 81,engine,RESERVED number (no apparatus listed)
+Valhalla,248,11,,Engine 82,engine,RESERVED number (no apparatus listed)
+Valhalla,248,11,,Engine 83,engine,
+Valhalla,248,11,,Engine 84,engine,
+Valhalla,248,11,,Ladder 49,ladder,RESERVED number (no apparatus listed)
+Valhalla,248,11,,Tower Ladder 49,tower,100' aerial mid-mount
+Valhalla,248,11,,Rescue 9,rescue,heavy/cascade
+Valhalla,248,11,,Rescue 59,rescue,medium
+Valhalla,248,11,,Mini Attack 1,brush,mini-attack; RESERVED number (no apparatus listed)
+Valhalla,248,11,,Marine 49,boat,18' zodiac
+Verplanck,249,10,,Engine 126,engine,pump/tank 1250/750 gpm/gal
+Verplanck,249,10,,Engine 127,engine,RESERVED number (no apparatus listed)
+Verplanck,249,10,,Engine 128,engine,pump/tank 1750/780 gpm/gal
+Verplanck,249,10,,Ladder 46,ladder,RESERVED number (no apparatus listed)
+Verplanck,249,10,,Tower Ladder 46,tower,quint (pump); 75' aerial mid-mount
+Verplanck,249,10,,Rescue 42,rescue,RESERVED number (no apparatus listed)
+Verplanck,249,10,,Marine 1,boat,pump
+Verplanck,249,10,,Marine 29,boat,16'
+Verplanck,249,10,,Marine 30,boat,12'
+Vista,256,13,,Engine 141,engine,
+Vista,256,13,,Engine 142,engine,
+Vista,256,13,,Engine 143,engine,
+Vista,256,13,,Rescue 13,rescue,RESERVED number (no apparatus listed)
+Vista,256,13,,Tanker 4,tanker,
+West Harrison,250,19,,Engine 52,engine,RESERVED number (no apparatus listed)
+West Harrison,250,19,,Engine 265,engine,
+West Harrison,250,19,,Engine 266,engine,
+West Harrison,250,19,,Engine 267,engine,
+West Harrison,250,19,,Ladder 9,ladder,RESERVED number (no apparatus listed)
+West Harrison,250,19,,Ladder 59,ladder,RESERVED number (no apparatus listed)
+West Harrison,250,19,,Tower Ladder 9,tower,quint (pump); 95' aerial mid-mount
+West Harrison,250,19,,Rescue 35,rescue,RESERVED number (no apparatus listed)
+West Harrison,250,19,,Mini Attack 3,brush,mini-attack; RESERVED number (no apparatus listed)
+Westchester County Airport,,19,,Airport 7,other,ARFF (aircraft rescue firefighting); plate AP7
+Westchester County Airport,,19,,Airport 11,other,ARFF (aircraft rescue firefighting); plate AP11
+Westchester County Airport,,19,,Airport 17,other,ARFF (aircraft rescue firefighting); plate AP17
+Westchester County DES,,,,Rescue 77,rescue,tech rescue team (p.56: D.E.S./Special Operations Tech Rescue Truck)
+Westchester County DES,,,,Squad 8,squad,RESERVED number (no apparatus listed)
+Westchester County DES,,,,Marine 77,boat,trt; 15' zodiac
+Westchester County DES,,,,Marine 78,boat,trt; 18' zodiac
+Westchester County DES,,,,Utility 3,utility,D.P.W./Fire WMD response vehicle (red)
+Westchester County DES,,,,Utility 76,utility,D.E.S./Special Operations WMD response vehicle (white)
+Westchester County DES,,,,Utility 77,utility,D.E.S./Special Operations collapse rescue unit
+Westchester County DES,,,,Utility 78,utility,D.E.S./Fire flatbed truck
+Westchester County DES,,,,Utility 103,utility,D.E.S. scene support truck (six Western Shelter tents)
+Westchester County DES,,,,Utility 106,utility,D.E.S./Special Operations rack body truck w/ hydraulic lift & flat bed
+Westchester County DES,,,,Utility 177,utility,D.E.S./Special Operations special ops rack body truck
+Westchester County DES,,,,60U1,ems,D.E.S./E.M.S. METU medical evacuation transport unit
+Westchester County DES,,,,Car 24,chief,"D.E.S. Cause & Origin, North Battalion (Arson Zones 4-5) (p.20)"
+Westchester County DES,,,,Car 25,chief,"D.E.S. Cause & Origin, South Battalion (Arson Zones 1-3) (p.20)"
+Westchester County DES,,,,(unnumbered foam unit),other,"D.E.S./Special Operations foam unit, 500 gal foam concentrate poly tank; no unit number printed"
+Westchester County DES,,,,Car 1402,other,D.E.S./Fire Cause & Origin Team vehicle
+Westchester County DES,,,,Car 1405,other,D.E.S./Fire Cause & Origin Team vehicle
+Westchester County DES,,,,Field Comm 1,other,D.E.S./Communications field communications truck
+Westchester County DES,,,,Hazmat 1,other,"hazmat unit (p.56: Haz Mat 1, D.E.S./Special Operations Hazardous Materials Truck)"
+Westchester County DES,,,,MDU 1,other,mass decon unit; hazmat/decon trailer
+Westchester County DES,,,,MSU 7,other,mask service unit (SCBA air); trailer
+Westchester County DES,,,,RACES Comm Truck,other,D.E.S./Communications RACES communications truck
+Westchester County DES,,,,SSU 8,other,squad support unit; RESERVED number (no apparatus listed)
+Westchester County Police,,,,Marine 145,boat,13' zodiac; county police boat
+Westchester County Police,,,,Marine 245,boat,36' safeboat; pump; county police boat
+Westchester County Police,,,,Marine 345,boat,31' safeboat; pump; county police boat
+Westchester County Police,,,,Marine 445,boat,33' safeboat; pump; county police boat
+White Plains,251,19,,Engine 65,engine,pump/tank 1250/750 gpm/gal
+White Plains,251,19,,Engine 66,engine,pump/tank 1250/750 gpm/gal
+White Plains,251,19,,Engine 67,engine,pump/tank 1250/750 gpm/gal
+White Plains,251,19,,Engine 68,engine,spare; pump/tank 1250/750 gpm/gal
+White Plains,251,19,,Engine 69,engine,spare; pump/tank 1250/750 gpm/gal
+White Plains,251,19,,Engine 70,engine,pump/tank 1250/750 gpm/gal
+White Plains,251,19,,Engine 71,engine,pump/tank 1250/750 gpm/gal
+White Plains,251,19,,Engine 72,engine,spare; pump/tank 1250/750 gpm/gal
+White Plains,251,19,,Engine 73,engine,RESERVED number (no apparatus listed)
+White Plains,251,19,,Engine 210,engine,antique
+White Plains,251,19,,Ladder 6,ladder,RESERVED number (no apparatus listed)
+White Plains,251,19,,Ladder 32,ladder,105' aerial rear-mount
+White Plains,251,19,,Ladder 33,ladder,spare
+White Plains,251,19,,Ladder 34,ladder,105' aerial rear-mount
+White Plains,251,19,,Tower Ladder 6,tower,100' aerial mid-mount
+White Plains,251,19,,Tower Ladder 32,tower,RESERVED number (no apparatus listed)
+White Plains,251,19,,Tower Ladder 33,tower,RESERVED number (no apparatus listed)
+White Plains,251,19,,Tower Ladder 34,tower,RESERVED number (no apparatus listed)
+White Plains,251,19,,Rescue 88,rescue,heavy
+White Plains,251,19,,Rescue 89,rescue,spare; heavy
+White Plains,251,19,,Squad 4,squad,hazmat/decon
+White Plains,251,19,,Squad 34,squad,tech rescue
+White Plains,251,19,,Mini Attack 32,brush,mini-attack
+White Plains,251,19,,SSU 4,other,squad support unit
+White Plains,251,19,,SSU 34,other,squad support unit; RESERVED number (no apparatus listed)
+Yonkers,252,18,,Engine 298,engine,spare
+Yonkers,252,18,,Engine 300,engine,spare; ldh
+Yonkers,252,18,,Engine 301,engine,RESERVED number (no apparatus listed)
+Yonkers,252,18,,Engine 302,engine,RESERVED number (no apparatus listed)
+Yonkers,252,18,,Engine 303,engine,
+Yonkers,252,18,,Engine 304,engine,
+Yonkers,252,18,,Engine 305,engine,RESERVED number (no apparatus listed)
+Yonkers,252,18,,Engine 306,engine,
+Yonkers,252,18,,Engine 307,engine,ldh
+Yonkers,252,18,,Engine 308,engine,
+Yonkers,252,18,,Engine 309,engine,ldh
+Yonkers,252,18,,Engine 310,engine,
+Yonkers,252,18,,Engine 311,engine,RESERVED number (no apparatus listed)
+Yonkers,252,18,,Engine 312,engine,ldh
+Yonkers,252,18,,Engine 313,engine,
+Yonkers,252,18,,Engine 314,engine,
+Yonkers,252,18,,Engine 315,engine,spare; ldh
+Yonkers,252,18,,Engine 316,engine,spare
+Yonkers,252,18,,Engine 317,engine,spare
+Yonkers,252,18,,Engine 318,engine,spare
+Yonkers,252,18,,Engine 319,engine,spare
+Yonkers,252,18,,Ladder 69,ladder,RESERVED number (no apparatus listed)
+Yonkers,252,18,,Ladder 70,ladder,100' aerial rear-mount
+Yonkers,252,18,,Ladder 71,ladder,RESERVED number (no apparatus listed)
+Yonkers,252,18,,Ladder 72,ladder,100' aerial rear-mount
+Yonkers,252,18,,Ladder 73,ladder,100' aerial rear-mount
+Yonkers,252,18,,Ladder 74,ladder,100' aerial rear-mount
+Yonkers,252,18,,Ladder 75,ladder,RESERVED number (no apparatus listed)
+Yonkers,252,18,,Ladder 76,ladder,spare
+Yonkers,252,18,,Ladder 77,ladder,spare
+Yonkers,252,18,,Ladder 78,ladder,spare
+Yonkers,252,18,,Ladder 79,ladder,RESERVED number (no apparatus listed)
+Yonkers,252,18,,Ladder 80,ladder,RESERVED number (no apparatus listed)
+Yonkers,252,18,,Ladder 81,ladder,RESERVED number (no apparatus listed)
+Yonkers,252,18,,Ladder 82,ladder,RESERVED number (no apparatus listed)
+Yonkers,252,18,,Tower Ladder 69,tower,RESERVED number (no apparatus listed)
+Yonkers,252,18,,Tower Ladder 70,tower,RESERVED number (no apparatus listed)
+Yonkers,252,18,,Tower Ladder 71,tower,75' aerial mid-mount
+Yonkers,252,18,,Tower Ladder 72,tower,RESERVED number (no apparatus listed)
+Yonkers,252,18,,Tower Ladder 73,tower,RESERVED number (no apparatus listed)
+Yonkers,252,18,,Tower Ladder 74,tower,RESERVED number (no apparatus listed)
+Yonkers,252,18,,Tower Ladder 75,tower,75' aerial mid-mount
+Yonkers,252,18,,Tower Ladder 76,tower,RESERVED number (no apparatus listed)
+Yonkers,252,18,,Tower Ladder 77,tower,RESERVED number (no apparatus listed)
+Yonkers,252,18,,Tower Ladder 78,tower,RESERVED number (no apparatus listed)
+Yonkers,252,18,,Tower Ladder 79,tower,RESERVED number (no apparatus listed)
+Yonkers,252,18,,Tower Ladder 80,tower,spare
+Yonkers,252,18,,Tower Ladder 81,tower,spare
+Yonkers,252,18,,Tower Ladder 82,tower,spare
+Yonkers,252,18,,Rescue 11,rescue,heavy
+Yonkers,252,18,,Rescue 80,rescue,usar
+Yonkers,252,18,,Rescue 81,rescue,spare; heavy
+Yonkers,252,18,,Squad 1,squad,hazmat/decon
+Yonkers,252,18,,Squad 11,squad,rescue/pumper
+Yonkers,252,18,,Squad 21,squad,spare; rescue/pumper
+Yonkers,252,18,,Squad 31,squad,RESERVED number (no apparatus listed); tech rescue
+Yonkers,252,18,,Marine 11,boat,pump
+Yonkers,252,18,,Hazmat 2,other,hazmat unit
+Yonkers,252,18,,MSU 1,other,mask service unit (SCBA air)
+Yonkers,252,18,,MSU 5,other,mask service unit (SCBA air); trailer
+Yonkers,252,18,,SSU 1,other,squad support unit; collapse
+Yonkers,252,18,,SSU 11,other,squad support unit; collapse
+Yonkers,252,18,,SSU 21,other,squad support unit; RESERVED number (no apparatus listed)
+Yonkers,252,18,,SSU 31,other,squad support unit; RESERVED number (no apparatus listed)
+Yorktown,253,17,,Engine 270,engine,
+Yorktown,253,17,,Engine 271,engine,
+Yorktown,253,17,,Engine 272,engine,
+Yorktown,253,17,,Engine 273,engine,
+Yorktown,253,17,,Engine 274,engine,
+Yorktown,253,17,,Engine 275,engine,RESERVED number (no apparatus listed)
+Yorktown,253,17,,Engine 276,engine,antique
+Yorktown,253,17,,Engine 277,engine,RESERVED number (no apparatus listed)
+Yorktown,253,17,,Engine 278,engine,RESERVED number (no apparatus listed)
+Yorktown,253,17,,Engine 279,engine,RESERVED number (no apparatus listed)
+Yorktown,253,17,,Ladder 51,ladder,quint (pump); 100' aerial rear-mount
+Yorktown,253,17,,Ladder 68,ladder,RESERVED number (no apparatus listed)
+Yorktown,253,17,,Tower Ladder 51,tower,RESERVED number (no apparatus listed)
+Yorktown,253,17,,Tower Ladder 68,tower,RESERVED number (no apparatus listed)
+Yorktown,253,17,,Rescue 16,rescue,heavy
+Yorktown,253,17,,Rescue 55,rescue,dive/water
+Yorktown,253,17,,Tanker 14,tanker,
+Yorktown,253,17,,Mini Attack 8,brush,mini-attack
+Yorktown,253,17,,Marine 55,boat,18' zodiac
+Yorktown,253,17,,Marine 56,boat,13' zodiac
+Yorktown,253,17,,Marine 57,boat,RESERVED number (no apparatus listed)

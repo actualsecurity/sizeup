@@ -24,6 +24,7 @@ INCIDENT_TYPES: list[tuple[str, str, tuple[str, ...]]] = [
     ("Brush fire", "fire", ("brush fire", "grass fire", "mulch fire", "outside fire", "dumpster fire",
                             "rubbish fire", "garbage fire")),
     ("Fire alarm", "fire", ("activated fire alarm", "fire alarm", "automatic alarm", "alarm activation",
+                            "commercial alarm", "residential alarm", "commercial line",  # ASR of "commercial alarm"
                             "smoke detector", "smoke alarm", "pull station", "water flow alarm", "waterflow")),
     ("CO alarm", "hazard", ("carbon monoxide", "co alarm", "c o alarm", "co detector", "c o detector")),
     ("Gas leak", "hazard", ("gas leak", "odor of gas", "smell of gas", "natural gas", "gas condition",
@@ -87,6 +88,7 @@ class Dispatch:
     type_phrase: str = ""          # the words that set the type
     code: str = ""                 # priority dispatch code as heard, "30-A-5"
     units: list[str] = field(default_factory=list)   # "Engine 25"
+    numbers: list[int] = field(default_factory=list)  # bare numbers in the unit list ("174, 175, Ladder 1")
     location: str = ""             # the address / place part, for the geocoder
     cross_street: str = ""
     time_out: str = ""             # "14:32"
@@ -159,6 +161,12 @@ def parse(text: str) -> Dispatch:
     masked = EMD.sub(" , ", masked)
     masked = TIME_OUT.sub(" , ", masked)
     a = ADDRESS.search(masked)
+    # Bare numbers before the address are often engines read without the word ("174, 175, Ladder 1");
+    # the app checks them against the apparatus roster.
+    head = masked[: a.start()] if a else ""
+    for n in re.findall(r"\b(\d{1,3})\b", head):
+        if int(n) not in d.numbers:
+            d.numbers.append(int(n))
     if a:
         d.location = f"{a.group(1)} {_clean_street(a.group(2))}".strip()
         after = masked[a.end():]

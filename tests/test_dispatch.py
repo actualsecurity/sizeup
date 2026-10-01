@@ -53,3 +53,13 @@ def test_real_mutual_aid_page_with_time_out_at_the_end():
               "Alta Vista Drive and Can field Avenue. A female unable to ambulate. 153965.")
     assert d.incident_type == "Mutual aid" and d.location == "349 helena avenue"
     assert d.cross_street == "alta vista drive and canfield avenue" and d.time_out == "15:39"
+
+
+def test_real_page_with_bare_engine_numbers():
+    # South 2, 2026-10-01 15:43, tones 832.5/1201.0: Fairview (Engines 174/175 + Ladder 1 in the roster).
+    d = parse("It's Challenger, 174-175-Ladder 1-2122-443-443-Terrytown Road, Phoenix Salon, between Manhattan "
+              "Avenue and Yellow stone Avenue, Commercial Line. Challenger, 174-175-Ladder 1-2122-443-443-Terrytown "
+              "Road, Phoenix Salon, between Manhattan Avenue, Yellowstone Avenue , Commercial Line. 143-62.")
+    assert d.units == ["Ladder 1"] and d.numbers[:2] == [174, 175]   # the app maps 174/175 via the roster
+    assert d.incident_type == "Fire alarm" and d.location == "443 terrytown road"
+    assert d.cross_street.startswith("manhattan avenue and yellow")

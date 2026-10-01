@@ -14,6 +14,10 @@ class ConfigError(ValueError):
     pass
 
 
+# Department names used across sizeup for the two home departments (tone codes, incidents).
+HOME_DEPARTMENTS = {"Port Chester": "Port Chester FD", "Rye Brook": "Rye Brook FD"}
+
+
 @dataclass(frozen=True)
 class ChannelCfg:
     label: str                 # "South 2", "FG1"
@@ -99,7 +103,22 @@ def load(path: str | Path) -> Config:
     p25 = _take(data.get("p25", {}), "p25", {"capture_dir", "talkgroups", "aliases"})
     storage = _take(data.get("storage", {}), "storage", {"clips_dir", "keep_hours"})
     mdc = _take(data.get("mdc", {}), "mdc", {"aliases"})
-    units = _take(data.get("units", {}), "units", {"departments"})
+    units = _take(data.get("units", {}), "units", {"departments", "apparatus_file"})
+    unit_departments: dict[str, str] = {}
+    af = units.get("apparatus_file", "data/westchester_apparatus.csv")
+    if af:
+        af_path = Path(af) if Path(af).is_absolute() else (base / af)
+        if not af_path.is_file():
+            af_path = Path(__file__).resolve().parent.parent / af
+        if af_path.is_file():
+            import csv
+            rows = (ln for ln in af_path.read_text().splitlines() if ln.strip() and not ln.startswith("#"))
+            for r in csv.DictReader(rows):
+                dep = HOME_DEPARTMENTS.get(r["department"], r["department"])
+                unit_departments[r["unit"].strip().title()] = dep
+        elif "apparatus_file" in units:
+            raise ConfigError(f"units.apparatus_file: {af} not found")
+    unit_departments.update({str(k).title(): v for k, v in units.get("departments", {}).items()})
     mp = _take(data.get("map", {}), "map", {"home_lon", "home_lat", "home_zoom"})
     rel = lambda p: str((base / p).resolve()) if p and not Path(p).is_absolute() else p
     return Config(
@@ -113,7 +132,7 @@ def load(path: str | Path) -> Config:
         p25_talkgroups={int(k): v for k, v in p25.get("talkgroups", {"307": "Fire/EMS 15"}).items()},
         p25_aliases={str(k): v for k, v in p25.get("aliases", {}).items()},
         mdc_aliases={str(k).upper(): v for k, v in mdc.get("aliases", {}).items()},
-        unit_departments={str(k).title(): v for k, v in units.get("departments", {}).items()},
+        unit_departments=unit_departments,
         clips_dir=rel(storage.get("clips_dir", "captures/clips")), keep_hours=float(storage.get("keep_hours", 24)),
         home=(float(mp.get("home_lon", -73.6640)), float(mp.get("home_lat", 41.0130)), float(mp.get("home_zoom", 13.4))),
     )

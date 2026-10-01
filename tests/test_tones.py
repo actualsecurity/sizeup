@@ -85,5 +85,5 @@ def test_same_frequency_code_and_county_list():
     assert plan.match(ToneEvent("two_tone", 349.1, 311.1, 0, 1)).names == ("Port Chester FD",)
     assert plan.match(ToneEvent("two_tone", 496.8, 767.4, 0, 1)).names == ("Eastchester VAC (est.)",)
     assert plan.match(ToneEvent("two_tone", 928.1, 810.2, 0, 1)).names == ("Scarsdale EMS (heard)",)
-    assert plan.match(ToneEvent("two_tone", 741.3, 623.7, 0, 1)).names == ("Scarsdale FD (heard)",)
+    assert plan.match(ToneEvent("two_tone", 741.3, 623.7, 0, 1)).names == ()  # heard, owner not known yet
     assert plan.match(ToneEvent("two_tone", 1700.0, 1100.0, 0, 1)).names == ()

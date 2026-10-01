@@ -5,7 +5,10 @@
 # only; the voice was "Sixty Control, mutual aid to the city of Yonkers..." (user), not a department name.
 # estimated=2: learned on the air by sizeup (South 2), with the evidence:
 #   Scarsdale EMS 928.1/810.2 - 2026-10-01 15:40, voice "Scarsdale EMS, mutual aid to Yonkers, 349 Helena Ave"
-#   Scarsdale FD 741.3/623.7 - probable: 15:32 page stacked with Scarsdale EMS, "Engine 25, 42 Stratton Road"
+#   Fairview 832.5/1201.0 - 2026-10-01 15:43, units "174, 175, Ladder 1" (Fairview's Engines 174/175 + Ladder 1
+#   in the 2021 mutual aid plan), 443 Tarrytown Road; the wiki's Fairview 1199.4/1199.4 shares only the B tone
+#   741.3/623.7 - still unknown: 15:32 page stacked with Scarsdale EMS for "Engine 25" (New Rochelle per
+#   the 2021 mutual aid plan; New Rochelle FD's listed code is 328.2/328.2), 42 Stratton Road
 name,a_hz,b_hz,estimated
 Ardsley,1031.8,763.3,0
 Archville,951.4,1430.7,0
@@ -89,4 +92,4 @@ Thornwood,2425,2635,1
 Verplanck,2360,2726,1
 West Harrison,1048,387,1
 Scarsdale EMS,928.1,810.2,2
-Scarsdale FD,741.3,623.7,2
+Fairview,832.5,1201.0,2
