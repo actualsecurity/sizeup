@@ -68,6 +68,16 @@ class Page:
                 "raw": self.raw, "confidence": self.confidence}
 
 
+def page_from_dict(d: dict) -> Page:
+    """A saved page (Page.as_dict + dispatch), reloaded after a restart; audio stays on disk."""
+    tones = [ToneEvent(t["kind"], t["a_hz"], t.get("b_hz"), 0.0, 0.0, tuple(t.get("names", ())))
+             for t in d.get("tones", [])]
+    p = Page(d["id"], d["label"], d["mhz"], d["start"], d["end"], d["kind"], tones, 0.0, None,
+             d.get("quieting_db", 0.0), d.get("status", "done"), d.get("raw", ""), d.get("confidence"))
+    p.dispatch = d.get("dispatch")  # type: ignore[attr-defined]
+    return p
+
+
 def assemble(label: str, mhz: float, seg: Segment, plan: TonePlan) -> Page:
     """Classify one squelched transmission into a page (with tones) or plain voice."""
     det = ToneDetector(RATE)

@@ -12,9 +12,13 @@ has no map point and the map stays on the home view.
 
 from __future__ import annotations
 
+import json
+import os
 import threading
 import time
 import uuid
+from dataclasses import fields
+from pathlib import Path
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable
@@ -38,7 +42,16 @@ class Traffic:
     talkgroup: int | None = None
 
     def as_dict(self) -> dict:
-        return dict(self.__dict__)
+        return {k: v for k, v in self.__dict__.items() if k != "raw_audio"}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> Traffic:
+        names = {f.name for f in fields(cls)}
+        t = cls(**{k: v for k, v in d.items() if k in names})
+        for k, v in d.items():           # extras the pipeline added (raw, confidence, ...)
+            if k not in names and k != "has_audio":
+                setattr(t, k, v)
+        return t
 
 
 @dataclass
@@ -68,15 +81,58 @@ class Incident:
                              for i, t, s in zip(self.pages, self.page_text, self.page_starts)]
         return d
 
+    def to_json(self) -> dict:
+        d = {k: v for k, v in self.__dict__.items() if k != "traffic"}
+        d["traffic"] = [t.as_dict() for t in self.traffic]
+        return d
+
+    @classmethod
+    def from_json(cls, d: dict) -> Incident:
+        names = {f.name for f in fields(cls)}
+        inc = cls(**{k: v for k, v in d.items() if k in names and k != "traffic"})
+        inc.traffic = [Traffic.from_dict(t) for t in d.get("traffic", [])]
+        return inc
+
 
 class IncidentStore:
     def __init__(self, ours: set[str], geocode: Callable[[Dispatch], dict | None] = lambda d: None,
-                 clock: Callable[[], float] = time.time):
+                 clock: Callable[[], float] = time.time, path: str | Path | None = None,
+                 keep_s: float = 24 * 3600):
         self.ours = ours                    # department names that are "us" (from the tone plan)
         self.geocode, self.clock = geocode, clock
         self._lock = threading.Lock()
         self.incidents: deque[Incident] = deque(maxlen=HISTORY)
         self.loose: deque[Traffic] = deque(maxlen=200)  # traffic with no active incident
+        # Saved on every change and reloaded on start, so a restart doesn't wipe the screen.
+        self.path, self.keep_s = (Path(path) if path else None), keep_s
+        self._load()
+
+    def _load(self) -> None:
+        if not self.path or not self.path.is_file():
+            return
+        try:
+            d = json.loads(self.path.read_text())
+        except (OSError, ValueError):
+            return
+        cutoff = self.clock() - self.keep_s
+        for i in d.get("incidents", []):
+            if i.get("updated", 0) >= cutoff:
+                self.incidents.append(Incident.from_json(i))
+        for t in d.get("loose", []):
+            if t.get("end", 0) >= cutoff:
+                self.loose.append(Traffic.from_dict(t))
+
+    def save(self) -> None:
+        if not self.path:
+            return
+        with self._lock:
+            d = {"incidents": [i.to_json() for i in self.incidents], "loose": [t.as_dict() for t in self.loose]}
+        try:
+            tmp = self.path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(d))
+            os.replace(tmp, self.path)
+        except OSError:
+            pass  # disk trouble must never stop the display
 
     def active(self) -> Incident | None:
         now = self.clock()
@@ -115,32 +171,41 @@ class IncidentStore:
                     for x in depts:
                         if x not in inc.departments:
                             inc.departments.append(x)
-                    return inc
+                    merged = inc
+                    break
+            else:
+                merged = None
+        if merged is not None:
+            self.save()
+            return merged
         inc = Incident(uuid.uuid4().hex[:10], at, at, depts, d.incident_type, d.category, d.location,
                        d.cross_street, d.time_out, self.geocode(d) if d.location else None,
                        pages=[page_id], page_text=[d.text], page_starts=[at],
                        units=list(getattr(d, "units", [])), code=getattr(d, "code", ""))
         with self._lock:
             self.incidents.append(inc)
+        self.save()
         return inc
 
     def on_traffic(self, t: Traffic) -> Incident | None:
         inc = self.active()
         with self._lock:
-            if inc is None:
+            if inc is not None:
+                inc.traffic.append(t)
+                inc.updated = max(inc.updated, t.end)
+            else:
                 self.loose.append(t)
-                return None
-            inc.traffic.append(t)
-            inc.updated = max(inc.updated, t.end)
-            return inc
+        self.save()
+        return inc
 
     def close(self, incident_id: str) -> bool:
         with self._lock:
-            for inc in self.incidents:
-                if inc.id == incident_id:
-                    inc.status = "closed"
-                    return True
-        return False
+            found = next((inc for inc in self.incidents if inc.id == incident_id), None)
+            if found:
+                found.status = "closed"
+        if found:
+            self.save()
+        return found is not None
 
     def state(self) -> dict:
         self.active()  # age out quiet incidents

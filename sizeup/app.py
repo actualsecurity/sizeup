@@ -31,7 +31,7 @@ from sizeup.incidents import IncidentStore, Traffic
 from sizeup.radio.fm import RATE, Channel, NfmReceiver, Segment, speech_seconds
 from sizeup.radio.mdc1200 import decode as mdc_decode
 from sizeup.radio.p25 import Call, CallIngest
-from sizeup.radio.page import Page, assemble
+from sizeup.radio.page import Page, assemble, page_from_dict
 from sizeup.radio.tones import TonePlan
 from sizeup.stt import Transcriber, WhisperClient, radio_voice, wav_bytes
 from sizeup.web.server import WebServer
@@ -95,12 +95,16 @@ class App:
         self.stt = Transcriber(WhisperClient(f"http://127.0.0.1:{cfg.stt_port}/inference"), self._transcribed,
                                prompt=lambda item: cfg.stt_prompt)
         self.gaz = self._load_gazetteer()
-        self.store = IncidentStore(set(cfg.ours), geocode=self._geocode)
-        self.pages: deque[Page] = deque(maxlen=100)
+        self.keep_s = cfg.keep_hours * 3600
         self.clips: OrderedDict[str, np.ndarray] = OrderedDict()
         self.clips_dir = Path(cfg.clips_dir) if cfg.clips_dir else None
         if self.clips_dir:
             self.clips_dir.mkdir(parents=True, exist_ok=True)
+        # Pages, incidents and traffic survive restarts (storage.keep_hours); old clips are pruned.
+        self.store = IncidentStore(set(cfg.ours), geocode=self._geocode, keep_s=self.keep_s,
+                                   path=(self.clips_dir.parent / "incidents.json") if self.clips_dir else None)
+        self.pages: deque[Page] = deque(maxlen=1000)
+        self._load_pages()
         self._lock = threading.Lock()
         self._last_tones_only: Page | None = None
         self.receivers = [NfmReceiver(cfg.rtl_fm, c.device, c.gain_db, Channel(c.mhz, c.label),
@@ -132,6 +136,40 @@ class App:
             return None
         return {"lat": m.lat, "lon": m.lon, "label": m.label, "kind": m.kind,
                 "confidence": round(float(m.confidence), 2)}
+
+    # -- persistence ----------------------------------------------------------------------------
+
+    def _load_pages(self) -> None:
+        if not self.clips_dir:
+            return
+        cutoff = time.time() - self.keep_s
+        for f in list(self.clips_dir.glob("*.wav")) + list(self.clips_dir.glob("*.json")):
+            try:
+                if f.stat().st_mtime < cutoff:
+                    f.unlink()
+            except OSError:
+                pass
+        loaded = []
+        for f in self.clips_dir.glob("*.page.json"):
+            try:
+                d = json.loads(f.read_text())
+            except (OSError, ValueError):
+                continue
+            if d.get("end", 0) >= cutoff:
+                loaded.append(page_from_dict(d))
+        for p in sorted(loaded, key=lambda p: p.start, reverse=True):
+            self.pages.append(p)
+        if loaded:
+            log(f"reloaded {len(loaded)} page(s) from the last {self.cfg.keep_hours:g} h")
+
+    def _save_page(self, page: Page) -> None:
+        if not self.clips_dir:
+            return
+        try:
+            d = dict(page.as_dict(), dispatch=getattr(page, "dispatch", None))
+            (self.clips_dir / f"{page.id}.page.json").write_text(json.dumps(d))
+        except OSError:
+            pass
 
     # -- clips ----------------------------------------------------------------------------------
 
@@ -193,6 +231,7 @@ class App:
             names = page.departments
             log(f"{ch.label}: {page.kind} " + (", ".join(t.describe() for t in page.tones) or "voice"))
             if page.status == "no_voice":
+                self._save_page(page)
                 if any(n in self.cfg.ours for n in names):
                     self._last_tones_only = page
                 if page.tones and not names:
@@ -257,6 +296,7 @@ class App:
                 if dep and dep not in d.departments:
                     d.departments.append(dep)
         page.dispatch = d.as_dict() if d else None  # type: ignore[attr-defined]
+        self._save_page(page)
         log(f"{page.label} {page.kind}: {page.raw or '(' + page.status + ')'}")
         if d is None:
             return

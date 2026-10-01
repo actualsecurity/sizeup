@@ -120,3 +120,23 @@ def test_page_naming_our_unit_opens_incident_with_unknown_tones(tmp_path):
     inc = app.store.active()
     assert inc.departments == ["Port Chester FD"] and inc.incident_type == "Chest pain"
     assert inc.location == "209 westchester avenue"
+
+
+def test_pages_and_incidents_survive_a_restart(tmp_path):
+    # User: "it disappeared? can we store these for at least 1 hr" (a restart wiped the screen).
+    from dataclasses import replace
+    c = replace(cfg(tmp_path), unit_departments={"Engine 61": "Port Chester FD"})
+    app = App(c)
+    app._kind = {"South 2": "paging"}
+    app.stt.client = FakeWhisper({6: "10 Charlie 2, Engine 61, 209 Westchester Avenue, Pearl Street and Gilbert Place"})
+    app.stt.start()
+    audio = np.concatenate([tone(349.1, 1.0), tone(311.1, 3.0), np.zeros(int(0.2 * RATE)), voice(6.0)]).astype(np.float32)
+    now = time.time()
+    app._segment(Channel(470.2, "South 2"), Segment(now, now + len(audio) / RATE, audio, 25.0))
+    assert wait(lambda: app.store.active() is not None)
+    page_id = app.state()["pages"][0]["id"]
+    again = App(c)                                   # a restart
+    st = again.state()
+    assert [p["id"] for p in st["pages"]] == [page_id] and st["pages"][0]["dispatch"]["incident_type"] == "Chest pain"
+    assert st["incidents"][0]["location"] == "209 westchester avenue" and st["incidents"][0]["status"] == "active"
+    assert again.clip(page_id)[:4] == b"RIFF"

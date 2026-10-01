@@ -136,10 +136,14 @@ class NoiseSquelch:
             self._frames, self._qs = [], []
             self.open = False
             # Keep the carrier-up span: first to last frame fully quieted.
+            # Carrier-up span: from the first fully quieted frame to the last frame still above the
+            # hold-open level. (Ending at the last *fully* quieted frame cut a 60 s South 2 page at 17 s:
+            # quieting dips under open_db during long pages while the carrier is still up.)
             up = [i for i, v in enumerate(qs) if v >= self.open_db]
+            held = [i for i, v in enumerate(qs) if v >= self.close_db]
             if not up:
                 return None
-            i0, i1 = up[0], up[-1]
+            i0, i1 = up[0], held[-1]
             quieting = float(np.median(qs[i0:i1 + 1]))
             body = frames[i0:i1 + 1]
             data = data_frames(body)

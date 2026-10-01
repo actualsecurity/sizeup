@@ -125,3 +125,15 @@ def test_noise_reduction_removes_steady_whine_not_speech():
 
     off, on = radio_voice(raw, nr=False), radio_voice(raw)
     assert whine_vs_speech(off) - whine_vs_speech(on) > 12      # speech held at the same loudness
+
+
+def test_long_page_with_quieting_dips_is_kept_whole():
+    # South 2, 2026-10-01 15:59: a ~60 s page was cut at 17 s because quieting dipped under the opening
+    # level (still above the hold level) for the rest of the transmission.
+    hold = 10 ** (-8 / 20)  # quieting ~8 dB: between close (6) and open (10)
+    weak = (voice_like(30.0) + 0.4 * hold * rng.standard_normal(RATE * 30))
+    t = np.arange(len(weak)) / RATE
+    weak = weak + 0.1 * np.sin(2 * np.pi * 156.7 * t)
+    tx = np.concatenate([keyed(np.concatenate([tone(741.3, 1.0), tone(623.7, 3.0), voice_like(10.0)])), weak])
+    segs = run_squelch(np.concatenate([hiss(3.0), tx, hiss(2.0)]))
+    assert len(segs) == 1 and segs[0].end - segs[0].start > 40

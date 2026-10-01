@@ -477,8 +477,18 @@ function renderPages() {
       }
       if (!who.children.length) who.append(el("span", "dim", "No tones · department not identified"));
       const done = p.status === "done" && p.raw;
-      const txt = el("div", done ? "txt clamp" : "txt muted", done ? p.raw : STATUS_TEXT[p.status] || p.status);
-      if (done) txt.title = p.raw;
+      // Two lines in the list; tap to read the whole page (stays open across updates).
+      const open = (ui.expanded ||= new Set()).has(p.id);
+      const txt = el("div", done ? (open ? "txt expandable" : "txt clamp expandable") : "txt muted",
+                     done ? p.raw : STATUS_TEXT[p.status] || p.status);
+      if (done) {
+        txt.title = open ? "Tap to collapse" : "Tap to read the whole page";
+        txt.addEventListener("click", () => {
+          if (ui.expanded.has(p.id)) ui.expanded.delete(p.id); else ui.expanded.add(p.id);
+          txt.classList.toggle("clamp", !ui.expanded.has(p.id));
+          txt.title = ui.expanded.has(p.id) ? "Tap to collapse" : "Tap to read the whole page";
+        });
+      }
       li.replaceChildren(meta, who, txt);
       const q = [];
       if (p.mhz) q.push(`${p.mhz} MHz`);
