@@ -79,8 +79,11 @@ def test_same_frequency_code_and_county_list():
     root = Path(__file__).parent.parent
     plan = TonePlan(list(load(root / "config.example.toml").tones))
     assert plan.match(ev[0]).names == ("Larchmont FD", "Peekskill")
-    # Real South 2 pages 2026-10-01: PCFD's code and an estimated-list match; an unlisted pair stays unknown.
+    # Real South 2 pages 2026-10-01: PCFD's code, an estimated-list match, codes learned on the air,
+    # and a pair nobody has (stays unknown).
     from sizeup.radio.tones import ToneEvent
     assert plan.match(ToneEvent("two_tone", 349.1, 311.1, 0, 1)).names == ("Port Chester FD",)
     assert plan.match(ToneEvent("two_tone", 496.8, 767.4, 0, 1)).names == ("Eastchester VAC (est.)",)
-    assert plan.match(ToneEvent("two_tone", 741.3, 623.7, 0, 1)).names == ()
+    assert plan.match(ToneEvent("two_tone", 928.1, 810.2, 0, 1)).names == ("Scarsdale EMS (heard)",)
+    assert plan.match(ToneEvent("two_tone", 741.3, 623.7, 0, 1)).names == ("Scarsdale FD (heard)",)
+    assert plan.match(ToneEvent("two_tone", 1700.0, 1100.0, 0, 1)).names == ()
