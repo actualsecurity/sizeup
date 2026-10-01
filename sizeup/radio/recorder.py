@@ -104,6 +104,12 @@ class TrunkRecorder:
                 self._stop.wait(1.0)
             if self._stop.is_set():
                 break
+            tail = " ".join(list(self.last_lines)[-5:])
+            if "Wrong rtlsdr device index" in tail or "No supported devices" in tail or "No matching devices" in tail:
+                # Dongle unplugged (bench, 2026-10-01): say so plainly, look again every 15 s, no log spam.
+                self.state, self.detail = "absent", "dongle not connected (unplugged?)"
+                self._stop.wait(15.0)
+                continue
             self.restarts += 1
             self.state = "down"
             self.detail = f"trunk-recorder exited ({self._proc.returncode}): " + (self.last_lines[-1] if self.last_lines else "")

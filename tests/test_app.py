@@ -188,3 +188,19 @@ def test_other_battalions_talkgroups_are_context_not_incident_traffic(tmp_path):
     inc = app.store.active()
     assert wait(lambda: len(inc.traffic) == 1 and len(app.store.loose) == 1)
     assert inc.traffic[0].source == "Fire/EMS 15" and app.store.loose[0].source == "Fire/EMS 10"
+
+
+def test_trunk_recorder_missing_dongle_is_reported_plainly(tmp_path):
+    # Bench 2026-10-01: the V4 dropped off USB; trunk-recorder exits "Wrong rtlsdr device index given".
+    import stat
+    from sizeup.radio.recorder import TrunkRecorder
+    exe = tmp_path / "fake-trunk-recorder"
+    exe.write_text("#!/bin/sh\necho '(error)   Failed parsing Config: Wrong rtlsdr device index given.'\nexit 1\n")
+    exe.chmod(exe.stat().st_mode | stat.S_IEXEC)
+    events = []
+    r = TrunkRecorder(str(exe), str(tmp_path), events.append).start()
+    try:
+        assert wait(lambda: r.state == "absent")
+        assert "not connected" in r.detail and r.restarts == 0 and events == []
+    finally:
+        r.stop()
