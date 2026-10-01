@@ -30,7 +30,8 @@ HISTORY_FRAMES = 20 * 60       # hiss reference: last minute
 LEARN_FRAMES = 40              # 2 s before the squelch may open
 HANG_FRAMES = 8                # carrier may flicker for 0.4 s inside one transmission
 MIN_FRAMES = 6                 # under 0.3 s of carrier: not worth keeping
-TAIL_FRAMES = 4                # last 0.2 s of carrier = the squelch-tail (reverse) burst: dropped
+DATA_SHARE = 0.75              # a frame with this much of its voice-band energy at 1000-2100 Hz ...
+DATA_OVER_DB = 15.0            # ... and this far over the dead air is an MDC-1200 data burst
 MAX_FRAMES = 20 * 120          # split anything over 2 minutes (a long page is ~30-60 s)
 STALL_S = 5.0
 HF_BAND = (4000.0, 7500.0)
@@ -43,6 +44,22 @@ class Segment:
     end: float
     audio: np.ndarray = field(repr=False)  # float32 -1..1, 16 kHz, as demodulated (carrier-up part only)
     quieting_db: float = 0.0   # how far the carrier quieted the hiss (signal quality)
+    bursts: list = field(default_factory=list, repr=False)  # MDC-1200 data bursts cut from the edges
+
+def data_frames(frames: list[np.ndarray]) -> list[bool]:
+    """Which 50 ms frames are an MDC-1200 burst (1200 baud MSK, 1200/1800 Hz: Motorola PTT-ID, sent
+    on key-up and/or release). FG1 bench: +26 dB at 1000-3000 Hz, 14-20 dB over the voice."""
+    if not frames:
+        return []
+    f = np.fft.rfftfreq(FRAME, 1 / RATE)
+    voice = (f >= VOICE_BAND[0]) & (f <= VOICE_BAND[1])
+    fsk = (f >= 1000) & (f <= 2100)
+    win = np.hanning(FRAME)
+    S = np.abs(np.fft.rfft(np.stack(frames) * win, axis=1)) ** 2
+    ev, ef = S[:, voice].sum(axis=1) + 1e-20, S[:, fsk].sum(axis=1)
+    db = 10 * np.log10(ev)
+    floor = np.percentile(db, 5)
+    return list((ef / ev >= DATA_SHARE) & (db >= floor + DATA_OVER_DB))
 
 
 def speech_seconds(audio: np.ndarray, rate: int = RATE, margin_db: float = 8.0) -> float:
@@ -65,10 +82,10 @@ def speech_seconds(audio: np.ndarray, rate: int = RATE, margin_db: float = 8.0) 
 class NoiseSquelch:
     """Streaming FM noise squelch. feed() 50 ms frames; get finished Segments back.
 
-    A segment is only the part where the carrier is fully up: no hiss before key-up, and not the
-    last 0.2 s either, where radios send the CTCSS reverse burst on PTT release. (On the FG1
-    bench those were the loudest things in every clip, ~25 dB over the voice, and the only
-    content of a mic click.)"""
+    A segment is only the voice part of a transmission: no hiss before key-up, and no MDC-1200
+    data burst at either end (Motorola PTT-ID on key-up / release). On the FG1 bench those were
+    the loudest things in every clip, 14-25 dB over the voice, and the only content of a mic
+    click. The bursts are kept on the segment (unit ID decoding)."""
 
     def __init__(self, open_db: float = 10.0, close_db: float = 6.0,
                  clock: Callable[[], float] = time.time):
@@ -121,12 +138,36 @@ class NoiseSquelch:
             up = [i for i, v in enumerate(qs) if v >= self.open_db]
             if not up:
                 return None
-            i0, i1 = up[0], up[-1] - TAIL_FRAMES
-            if i1 - i0 + 1 < MIN_FRAMES:
+            i0, i1 = up[0], up[-1]
+            quieting = float(np.median(qs[i0:i1 + 1]))
+            body = frames[i0:i1 + 1]
+            data = data_frames(body)
+            bursts: list[np.ndarray] = []
+            # Cut data bursts off both ends (a frame or two of dead air may sit beyond them).
+            lo, hi = 0, len(body) - 1
+            for _ in range(2):
+                k = next((j for j in range(lo, min(lo + 3, hi + 1)) if data[j]), None)
+                if k is None:
+                    break
+                e = k
+                while e + 1 <= hi and data[e + 1]:
+                    e += 1
+                bursts.append(np.concatenate(body[k:e + 1]))
+                lo = e + 1
+            for _ in range(2):
+                k = next((j for j in range(hi, max(hi - 3, lo - 1), -1) if data[j]), None)
+                if k is None:
+                    break
+                b = k
+                while b - 1 >= lo and data[b - 1]:
+                    b -= 1
+                bursts.append(np.concatenate(body[b:k + 1]))
+                hi = b - 1
+            if hi - lo + 1 < MIN_FRAMES:
                 return None
-            audio = np.concatenate(frames[i0:i1 + 1]).astype(np.float32)
-            t0 = start + i0 * FRAME / RATE
-            return Segment(t0, t0 + len(audio) / RATE, audio, float(np.median(qs[i0:i1 + 1])))
+            audio = np.concatenate(body[lo:hi + 1]).astype(np.float32)
+            t0 = start + (i0 + lo) * FRAME / RATE
+            return Segment(t0, t0 + len(audio) / RATE, audio, quieting, bursts)
         return None
 
 

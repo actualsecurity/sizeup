@@ -88,9 +88,10 @@ def test_radio_voice_removes_ctcss_and_hiss_and_sets_loudness():
 def test_segments_are_trimmed_to_the_carrier_and_clicks_have_no_speech():
     from sizeup.radio.fm import speech_seconds
     # FG1 bench: the loudest part of every clip was hiss before key-up and the squelch tail.
-    def burst(s=0.18):  # reverse burst on PTT release, carrier still up: a loud voice-band thump
-        t = np.arange(int(RATE * s)) / RATE      # (measured +20 dB voice-band/hiss ratio on FG1)
-        return 0.6 * np.sin(2 * np.pi * 400 * t) * np.exp(-t / 0.08)
+    def burst(s=0.2):  # MDC-1200 PTT-ID on release: 1200 baud MSK, 1200/1800 Hz (as on the FG1 bench)
+        bits = np.random.default_rng(5).integers(0, 2, int(1200 * s))
+        f = np.repeat(np.where(bits, 1200.0, 1800.0), RATE // 1200 + 1)[: int(RATE * s)]
+        return 0.6 * np.sin(2 * np.pi * np.cumsum(f) / RATE)
 
     talk = np.concatenate([np.zeros(int(0.3 * RATE)), voice_like(2.0)])   # key up, then talk
     segs = run_squelch(np.concatenate([hiss(3.0), keyed(np.concatenate([np.zeros(int(0.9 * RATE)), burst()])),
@@ -102,3 +103,4 @@ def test_segments_are_trimmed_to_the_carrier_and_clicks_have_no_speech():
         assert max(edge) < 0.3, "hiss left at the edges"          # hiss rms is 0.4, speech ~0.25
     assert speech_seconds(click.audio) < 0.15                       # a mic click: dead air only
     assert speech_seconds(speech.audio) > 0.5
+    assert len(click.bursts) == 1 and len(speech.bursts) == 1        # the PTT-IDs, kept for decoding

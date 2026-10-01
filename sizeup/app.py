@@ -167,6 +167,14 @@ class App:
             # A key-up with nothing said: carrier, dead air. Whisper turns these into words
             # ("Yes.", "Thank you."), so they aren't transcribed.
             log(f"{ch.label}: mic click ({seg.end - seg.start:.1f} s, no speech) skipped")
+            if self.clips_dir:  # kept (not shown) so the click/speech decision can be checked
+                try:
+                    d = self.clips_dir / "skipped"
+                    d.mkdir(exist_ok=True)
+                    (d / f"{ch.label.replace(' ', '')}-{int(seg.start * 1000)}.wav").write_bytes(
+                        wav_bytes((np.clip(seg.audio, -1, 1) * 32767).astype(np.int16), RATE))
+                except OSError:
+                    pass
             return
         if paging:
             self._keep_clip(page.id, seg.audio)
