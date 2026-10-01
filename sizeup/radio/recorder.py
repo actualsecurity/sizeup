@@ -1,0 +1,102 @@
+"""Supervised trunk-recorder process (Fire/EMS 15 on the county P25 system).
+
+trunk-recorder owns its dongle and writes one WAV + JSON per call into a capture directory,
+which radio/p25.py ingests. This only keeps the process running: start, stop (frees the
+dongle for another receiver on a one-dongle bench), restart with backoff if it dies.
+"""
+
+from __future__ import annotations
+
+import os
+import shlex
+import signal
+import subprocess
+import threading
+import time
+from collections import deque
+from pathlib import Path
+from typing import Callable
+
+
+class TrunkRecorder:
+    def __init__(self, command: str, workdir: str, on_event: Callable[[str], None] = lambda m: None):
+        self.argv = shlex.split(os.path.expanduser(command))
+        self.workdir = workdir
+        self.on_event = on_event
+        self.state, self.detail, self.restarts = "off", "", 0
+        self.last_lines: deque[str] = deque(maxlen=30)
+        self._proc: subprocess.Popen | None = None
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    @property
+    def installed(self) -> bool:
+        exe = self.argv[0] if self.argv else ""
+        return bool(exe) and Path(exe).is_file() and os.access(exe, os.X_OK)
+
+    def start(self) -> TrunkRecorder:
+        if self._thread and self._thread.is_alive():
+            return self
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, name="trunk-recorder", daemon=True)
+        self._thread.start()
+        return self
+
+    def stop(self, reason: str = "off") -> None:
+        self._stop.set()
+        p = self._proc
+        if p and p.poll() is None:
+            try:
+                os.killpg(p.pid, signal.SIGTERM)
+                p.wait(timeout=8)
+            except Exception:
+                try:
+                    os.killpg(p.pid, signal.SIGKILL)
+                    p.wait(timeout=3)
+                except Exception:
+                    pass
+        if self._thread:
+            self._thread.join(timeout=10)
+        self.state, self.detail = "off", reason
+
+    def status(self) -> dict:
+        return {"label": "trunk-recorder", "mhz": None, "state": self.state, "detail": self.detail,
+                "open": False, "quieting_db": None, "restarts": self.restarts, "last_heard": None}
+
+    def _drain(self, p: subprocess.Popen) -> None:
+        for raw in iter(p.stdout.readline, b""):
+            line = raw.decode(errors="replace").rstrip()
+            if line:
+                self.last_lines.append(line)
+                low = line.lower()
+                if "control channel" in low or "decoding" in low or "error" in low or "starting" in low:
+                    self.detail = line[-160:]
+
+    def _run(self) -> None:
+        backoff = 2.0
+        while not self._stop.is_set():
+            if not self.installed:
+                self.state, self.detail = "absent", f"trunk-recorder not installed ({self.argv[0] if self.argv else '?'})"
+                self._stop.wait(15)
+                continue
+            try:
+                self._proc = subprocess.Popen(self.argv, cwd=self.workdir, stdout=subprocess.PIPE,
+                                              stderr=subprocess.STDOUT, start_new_session=True)
+            except OSError as e:
+                self.state, self.detail = "down", f"cannot start trunk-recorder: {e}"
+                self._stop.wait(backoff)
+                backoff = min(backoff * 2, 30)
+                continue
+            self.state, self.detail = "ok", "trunk-recorder starting"
+            threading.Thread(target=self._drain, args=(self._proc,), daemon=True).start()
+            started = time.monotonic()
+            while not self._stop.is_set() and self._proc.poll() is None:
+                self._stop.wait(1.0)
+            if self._stop.is_set():
+                break
+            self.restarts += 1
+            self.state = "down"
+            self.detail = f"trunk-recorder exited ({self._proc.returncode}): " + (self.last_lines[-1] if self.last_lines else "")
+            self.on_event(self.detail)
+            backoff = 2.0 if time.monotonic() - started > 60 else min(backoff * 2, 30)
+            self._stop.wait(backoff)

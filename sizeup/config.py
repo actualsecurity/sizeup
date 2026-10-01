@@ -48,6 +48,10 @@ class Config:
     p25_aliases: dict[str, str] = field(default_factory=dict)
     mdc_aliases: dict[str, str] = field(default_factory=dict)   # MDC-1200 unit ID ("0611") -> name
     unit_departments: dict[str, str] = field(default_factory=dict)  # "Engine 60" -> "Port Chester FD"
+    shared_device: str = ""      # one dongle for everything (bench): switch channel / P25 in the web app
+    start_mode: str = ""         # with shared_device: what the dongle does at startup ("South 2", "FG1", "Fire/EMS 15")
+    p25_recorder: str = ""       # trunk-recorder command line, started/stopped by sizeup
+    p25_recorder_dir: str = ""   # its working directory (config.json + talkgroups.csv)
     clips_dir: str = ""
     keep_hours: float = 24.0
     home: tuple[float, float, float] = (-73.6640, 41.0130, 13.4)   # lon, lat, zoom
@@ -70,7 +74,7 @@ def load(path: str | Path) -> Config:
     _take(data, "config", {"station", "web", "radio", "tones", "stt", "p25", "mdc", "units", "storage", "map"})
     st = _take(data.get("station", {}), "station", {"id", "name"})
     web = _take(data.get("web", {}), "web", {"host", "port"})
-    radio = _take(data.get("radio", {}), "radio", {"rtl_fm", "channels", "tones_file"})
+    radio = _take(data.get("radio", {}), "radio", {"rtl_fm", "channels", "tones_file", "shared_device", "start_mode"})
     channels = []
     for i, c in enumerate(radio.get("channels", [])):
         _take(c, f"radio.channels[{i}]", {"label", "mhz", "kind", "device", "gain_db", "squelch_db"})
@@ -100,7 +104,7 @@ def load(path: str | Path) -> Config:
         if t.get("ours", False):
             ours.add(t["name"])
     stt = _take(data.get("stt", {}), "stt", {"server_binary", "model", "port", "threads", "prompt"})
-    p25 = _take(data.get("p25", {}), "p25", {"capture_dir", "talkgroups", "aliases"})
+    p25 = _take(data.get("p25", {}), "p25", {"capture_dir", "talkgroups", "aliases", "recorder", "recorder_dir"})
     storage = _take(data.get("storage", {}), "storage", {"clips_dir", "keep_hours"})
     mdc = _take(data.get("mdc", {}), "mdc", {"aliases"})
     units = _take(data.get("units", {}), "units", {"departments", "apparatus_file"})
@@ -133,6 +137,8 @@ def load(path: str | Path) -> Config:
         p25_aliases={str(k): v for k, v in p25.get("aliases", {}).items()},
         mdc_aliases={str(k).upper(): v for k, v in mdc.get("aliases", {}).items()},
         unit_departments=unit_departments,
+        shared_device=radio.get("shared_device", ""), start_mode=radio.get("start_mode", ""),
+        p25_recorder=p25.get("recorder", ""), p25_recorder_dir=rel(p25.get("recorder_dir", "")),
         clips_dir=rel(storage.get("clips_dir", "captures/clips")), keep_hours=float(storage.get("keep_hours", 24)),
         home=(float(mp.get("home_lon", -73.6640)), float(mp.get("home_lat", 41.0130)), float(mp.get("home_zoom", 13.4))),
     )

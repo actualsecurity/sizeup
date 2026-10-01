@@ -236,6 +236,40 @@ function renderConn() {
 
 const RADIO_STATE = { ok: "", off: "off", absent: "absent", down: "down", starting: "starting" };
 
+// One dongle on the bench: a segmented switch hands it to a channel or to trunk-recorder (P25).
+function renderSdr() {
+  const sdr = ui.state && ui.state.sdr;
+  const box = $("#sdr");
+  show(box, !!(sdr && sdr.shared));
+  if (!sdr || !sdr.shared) return;
+  const modes = sdr.modes || [];
+  const btns = [...box.querySelectorAll("button")];
+  if (btns.map((b) => b.dataset.mode).join("|") !== modes.join("|")) {
+    btns.forEach((b) => b.remove());
+    for (const m of modes) {
+      const b = el("button", "", m);
+      b.dataset.mode = m;
+      b.addEventListener("click", () => setSdrMode(m));
+      box.append(b);
+    }
+  }
+  for (const b of box.querySelectorAll("button")) {
+    b.classList.toggle("active", b.dataset.mode === sdr.mode);
+    b.disabled = !!sdr.switching || !!ui.sdrBusy;
+  }
+}
+
+async function setSdrMode(mode) {
+  if (ui.sdrBusy) return;
+  ui.sdrBusy = true;
+  renderSdr();
+  try {
+    await fetch("/api/mode", { method: "POST", headers: { "Content-Type": "application/json" },
+                               body: JSON.stringify({ mode }) });
+  } catch (_) { /* the next state push shows what happened */ }
+  ui.sdrBusy = false;
+}
+
 function renderRadios() {
   const radios = (ui.state && ui.state.radios) || [];
   syncList($("#radios"), radios, {
@@ -621,6 +655,7 @@ function onState(data) {
   ui.inc = activeIncident();
   renderConn();
   renderRadios();
+  renderSdr();
   renderIncident(ui.inc);
   renderDispatch(ui.inc);
   renderTraffic(ui.inc);

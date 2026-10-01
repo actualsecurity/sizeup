@@ -140,3 +140,31 @@ def test_pages_and_incidents_survive_a_restart(tmp_path):
     assert [p["id"] for p in st["pages"]] == [page_id] and st["pages"][0]["dispatch"]["incident_type"] == "Chest pain"
     assert st["incidents"][0]["location"] == "209 westchester avenue" and st["incidents"][0]["status"] == "active"
     assert again.clip(page_id)[:4] == b"RIFF"
+
+
+def test_one_shared_dongle_switches_between_channels_and_p25(tmp_path, monkeypatch):
+    # User: "add the ability to manually switch between each of the 3 since we only have one sdr".
+    from dataclasses import replace
+    import sizeup.app as appmod
+    from sizeup.config import ChannelCfg
+    monkeypatch.setattr(appmod, "SWITCH_PAUSE_S", 0.0)
+    c = replace(cfg(tmp_path), rtl_fm=str(tmp_path / "no-rtl_fm"),
+                channels=(ChannelCfg("South 2", 470.2, "paging", "fire-page"), ChannelCfg("FG1", 453.0375, "traffic", "fire-fg")),
+                shared_device="00000001", start_mode="South 2", p25_dir=str(tmp_path / "p25"),
+                p25_talkgroups={307: "Fire/EMS 15"}, p25_recorder=str(tmp_path / "no-trunk-recorder") + " --config=x",
+                p25_recorder_dir=str(tmp_path))
+    app = App(c).start()
+    try:
+        st = app.state()
+        assert st["sdr"]["modes"] == ["South 2", "FG1", "Fire/EMS 15"] and st["sdr"]["mode"] == "South 2"
+        radios = {r["label"]: r for r in st["radios"]}
+        assert radios["FG1"]["state"] == "off" and radios["FG1"]["detail"] == "SDR on South 2"
+        assert all(r.device == "00000001" for r in app.receivers)          # everything on the one dongle
+        assert app.set_mode("FG1") is None and app.state()["sdr"]["mode"] == "FG1"
+        assert {r["label"]: r["state"] for r in app.state()["radios"]}["South 2"] == "off"
+        assert app.set_mode("Fire/EMS 15") is None
+        assert wait(lambda: app.recorder.state == "absent")                 # not installed yet: says so
+        assert app.set_mode("Nope") is not None
+        assert app.set_mode("South 2") is None and app.recorder.state == "off"
+    finally:
+        app.stop()

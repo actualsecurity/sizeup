@@ -31,6 +31,7 @@ from sizeup.incidents import IncidentStore, Traffic
 from sizeup.radio.fm import RATE, Channel, NfmReceiver, Segment, speech_seconds
 from sizeup.radio.mdc1200 import decode as mdc_decode
 from sizeup.radio.p25 import Call, CallIngest
+from sizeup.radio.recorder import TrunkRecorder
 from sizeup.radio.page import Page, assemble, page_from_dict
 from sizeup.radio.tones import TonePlan
 from sizeup.stt import Transcriber, WhisperClient, radio_voice, wav_bytes
@@ -38,6 +39,8 @@ from sizeup.web.server import WebServer
 
 ROOT = Path(__file__).resolve().parent.parent
 SPLIT_PAGE_S = 30.0      # voice this soon after a tones-only page for us = that page's voice
+P25_MODE = "Fire/EMS 15"   # the shared-dongle mode that runs trunk-recorder
+SWITCH_PAUSE_S = 1.0       # between stopping one program on the shared dongle and starting the next
 MIN_SPEECH_S = 0.15      # less sound than this above the dead-air floor (and no tones) = a mic click
 CATEGORIES = {"fire": "#ff4d3d", "ems": "#4da3ff", "rescue": "#ffb020", "hazard": "#c86bff",
               "service": "#3ddc97", "unknown": "#9aa0b4"}
@@ -109,6 +112,14 @@ class App:
         self._last_tones_only: Page | None = None
         self.receivers = [NfmReceiver(cfg.rtl_fm, c.device, c.gain_db, Channel(c.mhz, c.label),
                                       self._segment, log, open_db=c.squelch_db) for c in cfg.channels]
+        self.recorder = (TrunkRecorder(cfg.p25_recorder, cfg.p25_recorder_dir or ".", log)
+                         if cfg.p25_recorder else None)
+        # One dongle for everything (bench): only the selected mode runs; switch in the web app.
+        self.shared = bool(cfg.shared_device)
+        self.modes = [c.label for c in cfg.channels] + ([P25_MODE] if self.recorder else [])
+        self.mode = (cfg.start_mode if cfg.start_mode in self.modes else (self.modes[0] if self.modes else ""))
+        self._mode_lock = threading.Lock()
+        self.switching = False
         self._kind = {c.label: c.kind for c in cfg.channels}
         self.p25 = (CallIngest(cfg.p25_dir, cfg.p25_talkgroups, self._call, cfg.p25_aliases, on_event=log)
                     if cfg.p25_dir else None)
@@ -316,10 +327,73 @@ class App:
 
     # -- state --------------------------------------------------------------------------------------
 
+    # -- one shared dongle ---------------------------------------------------------------------
+
+    def _receiver(self, label: str) -> NfmReceiver | None:
+        return next((r for r in self.receivers if r.channel.label == label), None)
+
+    def _fresh_receiver(self, old: NfmReceiver) -> NfmReceiver:
+        c = next(c for c in self.cfg.channels if c.label == old.channel.label)
+        r = NfmReceiver(self.cfg.rtl_fm, self.cfg.shared_device, c.gain_db, Channel(c.mhz, c.label),
+                        self._segment, log, open_db=c.squelch_db)
+        self.receivers[self.receivers.index(old)] = r
+        return r
+
+    def _start_mode(self, mode: str) -> None:
+        if mode == P25_MODE:
+            self.recorder.start()
+        else:
+            r = self._receiver(mode)
+            if r is not None:
+                self._fresh_receiver(r).start()
+
+    def set_mode(self, mode: str) -> str | None:
+        """Hand the shared dongle to another channel (or to trunk-recorder for Fire/EMS 15)."""
+        if not self.shared:
+            return "each channel has its own dongle: nothing to switch"
+        if mode not in self.modes:
+            return f"unknown mode {mode!r}; one of {', '.join(self.modes)}"
+        with self._mode_lock:
+            if mode == self.mode:
+                return None
+            self.switching = True
+            try:
+                log(f"SDR: {self.mode} -> {mode}")
+                if self.mode == P25_MODE:
+                    self.recorder.stop(f"SDR on {mode}")
+                else:
+                    r = self._receiver(self.mode)
+                    if r is not None:
+                        r.stop()
+                time.sleep(SWITCH_PAUSE_S)  # let the dongle go before the next program opens it
+                self.mode = mode
+                self._start_mode(mode)
+            finally:
+                self.switching = False
+        return None
+
+    def sdr(self) -> dict | None:
+        return ({"shared": True, "mode": self.mode, "modes": self.modes, "switching": self.switching}
+                if self.shared else None)
+
     def radios(self) -> list[dict]:
-        out = [r.status() for r in self.receivers]
+        out = []
+        for r in self.receivers:
+            st = r.status()
+            if self.shared and r.channel.label != self.mode:
+                st.update(state="off", detail=f"SDR on {self.mode}", open=False, quieting_db=None)
+            out.append(st)
         if self.p25:
-            out.append(self.p25.status())
+            st = self.p25.status()
+            if self.recorder is not None:
+                rs = self.recorder.status()
+                if self.shared and self.mode != P25_MODE:
+                    st.update(state="off", detail=f"SDR on {self.mode}")
+                elif rs["state"] != "ok":
+                    st.update(state=rs["state"], detail=rs["detail"])
+                else:
+                    st["detail"] = rs["detail"] + (" · " + st["detail"] if st.get("detail") else "")
+            out.append(st)
         out.append({"label": "STT", "mhz": None, "state": self.whisper.state, "detail": self.whisper.detail,
                     "open": False, "quieting_db": None, "restarts": 0, "last_heard": None})
         return out
@@ -333,7 +407,7 @@ class App:
     def state(self) -> dict:
         with self._lock:
             pages = [dict(p.as_dict(), dispatch=getattr(p, "dispatch", None)) for p in list(self.pages)[:50]]
-        st = {"time": time.time(), "radios": self.radios(), **self.store.state(), "pages": pages}
+        st = {"time": time.time(), "radios": self.radios(), **self.store.state(), "pages": pages, "sdr": self.sdr()}
         # Tell the display which entries have a recording (so ▶ isn't a dead button).
         for p in st["pages"]:
             p["has_audio"] = self.has_clip(p["id"])
@@ -359,8 +433,16 @@ class App:
     def start(self) -> App:
         self.whisper.start()
         self.stt.start()
-        for r in self.receivers:
-            r.start()
+        if self.shared:
+            for r in self.receivers:  # everything on the one dongle, only the selected mode running
+                r.device = self.cfg.shared_device
+            if self.mode:
+                self._start_mode(self.mode)
+        else:
+            for r in self.receivers:
+                r.start()
+            if self.recorder:
+                self.recorder.start()
         if self.p25:
             self.p25.start()
         return self
@@ -368,6 +450,8 @@ class App:
     def stop(self) -> None:
         for r in self.receivers:
             r.stop()
+        if self.recorder:
+            self.recorder.stop()
         if self.p25:
             self.p25.stop()
         self.whisper.stop()
@@ -384,7 +468,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"config: {e}", file=sys.stderr)
         return 2
     app = App(cfg).start()
-    server = WebServer(cfg.host, cfg.port, app.scene(), app.state, app.clip, app.store.close)
+    server = WebServer(cfg.host, cfg.port, app.scene(), app.state, app.clip, app.store.close, app.set_mode)
     signal.signal(signal.SIGTERM, lambda *_: server.shutdown())
     log(f"sizeup: {cfg.station_name} · {len(cfg.channels)} channel(s)"
         + (f" · P25 {cfg.p25_dir}" if cfg.p25_dir else "") + f" · {server.url}")

@@ -10,6 +10,10 @@ port = 8090
 
 [radio]
 rtl_fm = "rtl_fm"                  # the RTL-SDR Blog build for a V4
+# One dongle for everything (bench): the web app switches it between the channels below and
+# Fire/EMS 15 (trunk-recorder). Leave empty when each channel has its own dongle.
+shared_device = ""
+start_mode = "South 2"
 
 # One rtl_fm per channel, one dongle each (serials set with `rtl_eeprom -s <serial>`).
 [[radio.channels]]
@@ -45,7 +49,9 @@ prompt = ""                        # optional vocabulary hint (can make the mode
 
 [p25]
 # trunk-recorder capture directory (Westchester County P25, South simulcast site). Empty = no P25.
-capture_dir = ""
+capture_dir = "captures/p25"            # where trunk-recorder writes calls
+recorder = "~/.local/src/trunk-recorder/build/trunk-recorder --config=config.json"
+recorder_dir = "deploy/trunk-recorder"  # its config.json + talkgroups.csv
 talkgroups = { "307" = "Fire/EMS 15", "301" = "60 Control" }
 aliases = {}                       # radio ID -> unit name, e.g. { "2391001" = "2391" }
 
