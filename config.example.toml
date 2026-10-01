@@ -68,7 +68,8 @@ departments = {}                   # overrides / additions, e.g. { "Engine 65" =
 
 [storage]
 clips_dir = "captures/clips"
-keep_hours = 24
+keep_hours = 24                    # pages, incidents, transcripts
+audio_keep_hours = 12              # every WAV under captures/ (clips, skipped clicks, P25 calls); cleaner runs every 10 min
 
 [map]
 home_lon = -73.6640

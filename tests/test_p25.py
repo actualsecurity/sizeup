@@ -35,3 +35,14 @@ def test_scan_keeps_our_talkgroups_resamples_and_names_units(tmp_path):
     write_call(day, "301-1790000002_478312500-call_3", 301, [1])
     assert [c.label for c in ing.scan()] == ["60 Control"]           # picked up once the wav lands
     assert ing.scan() == []                                          # each call once
+
+
+def test_empty_wav_is_skipped_not_fatal(tmp_path):
+    # trunk-recorder can leave a header-less/zero-length WAV (wave raises EOFError): skip it, keep going.
+    day = tmp_path / "westchester" / "2026" / "10" / "1"
+    day.mkdir(parents=True)
+    ing = CallIngest(tmp_path, LABELS, on_call=lambda c: None).prime()
+    (day / "307-1.json").write_text(json.dumps({"talkgroup": 307}))
+    (day / "307-1.wav").write_bytes(b"")
+    write_call(day, "307-2", 307, [1])
+    assert [c.label for c in ing.scan()] == ["Fire/EMS 15"]

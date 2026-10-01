@@ -260,10 +260,28 @@ function renderSdr() {
   }
 }
 
+// Disk use under captures/, from the cleaner's last pass (every 10 min): size, oldest audio, limits.
+function renderStorage() {
+  const st = ui.state && ui.state.storage;
+  const box = $("#storage");
+  show(box, !!st);
+  if (!st) return;
+  const mb = st.bytes / 1e6;
+  const size = mb >= 1000 ? `${(mb / 1000).toFixed(1)} GB` : `${mb < 10 ? mb.toFixed(1) : Math.round(mb)} MB`;
+  const age = st.oldest_audio ? (Date.now() / 1000 - st.oldest_audio) / 3600 : null;
+  const oldest = age == null ? "no audio" : `oldest ${age < 1 ? Math.round(age * 60) + " min" : age.toFixed(1) + " h"}`;
+  box.textContent = `captures ${size} · ${oldest} · audio kept ${st.audio_hours} h`;
+  const checked = new Date(st.checked * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  box.title = `${st.audio_files} audio files. Audio is deleted after ${st.audio_hours} h, pages and ` +
+              `transcripts after ${st.history_hours} h. Last cleanup ${checked}` +
+              (st.deleted ? `, removed ${st.deleted} files.` : ".");
+}
+
 async function setSdrMode(mode) {
   if (ui.sdrBusy) return;
   ui.sdrBusy = true;
   renderSdr();
+  renderStorage();
   try {
     await fetch("/api/mode", { method: "POST", headers: { "Content-Type": "application/json" },
                                body: JSON.stringify({ mode }) });
@@ -1086,6 +1104,7 @@ function onState(data) {
   renderConn();
   renderRadios();
   renderSdr();
+  renderStorage();
   renderIncident(ui.inc);
   renderDispatch(ui.inc);
   renderTraffic(ui.inc);

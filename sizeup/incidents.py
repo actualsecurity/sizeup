@@ -122,6 +122,20 @@ class IncidentStore:
             if t.get("end", 0) >= cutoff:
                 self.loose.append(Traffic.from_dict(t))
 
+    def prune(self, cutoff: float) -> None:
+        """Forget closed incidents and loose traffic older than the history limit."""
+        with self._lock:
+            n0 = len(self.incidents) + len(self.loose)
+            keep = [i for i in self.incidents if i.status == "active" or i.updated >= cutoff]
+            self.incidents.clear()
+            self.incidents.extend(keep)
+            loose = [t for t in self.loose if t.end >= cutoff]
+            self.loose.clear()
+            self.loose.extend(loose)
+            changed = n0 != len(self.incidents) + len(self.loose)
+        if changed:
+            self.save()
+
     def save(self) -> None:
         if not self.path:
             return

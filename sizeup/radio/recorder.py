@@ -18,6 +18,9 @@ from pathlib import Path
 from typing import Callable
 
 
+LOG_MAX_BYTES = 5_000_000
+
+
 class TrunkRecorder:
     def __init__(self, command: str, workdir: str, on_event: Callable[[str], None] = lambda m: None):
         self.argv = shlex.split(os.path.expanduser(command))
@@ -69,10 +72,18 @@ class TrunkRecorder:
             log = open(Path(self.workdir) / "trunk-recorder.log", "a", buffering=1)
         except OSError:
             pass
+        path = Path(self.workdir) / "trunk-recorder.log"
         for raw in iter(p.stdout.readline, b""):
             line = raw.decode(errors="replace").rstrip()
             if log:
                 log.write(line + "\n")
+                try:  # capped: 5 MB, one previous file kept
+                    if log.tell() > LOG_MAX_BYTES:
+                        log.close()
+                        os.replace(path, path.with_suffix(".log.1"))
+                        log = open(path, "a", buffering=1)
+                except OSError:
+                    log = None
             if line:
                 self.last_lines.append(line)
                 low = line.lower()

@@ -38,6 +38,13 @@ class Call:
     wav_path: str = ""
 
 
+def _mtime(p: Path) -> float:
+    try:
+        return p.stat().st_mtime
+    except OSError:                                          # removed between listing and sorting
+        return 0.0
+
+
 def read_wav_16k(path: Path) -> np.ndarray:
     with wave.open(str(path)) as w:
         rate, n, ch, width = w.getframerate(), w.getnframes(), w.getnchannels(), w.getsampwidth()
@@ -110,7 +117,7 @@ class CallIngest:
 
     def scan(self) -> list[Call]:
         calls = []
-        for meta in sorted(self.dir.rglob("*.json"), key=lambda p: p.stat().st_mtime):
+        for meta in sorted(self.dir.rglob("*.json"), key=_mtime):
             key = str(meta)
             if key in self._seen:
                 continue
@@ -123,7 +130,7 @@ class CallIngest:
                 continue
             try:
                 call.audio = read_wav_16k(wav)
-            except (OSError, ValueError, wave.Error) as e:
+            except (OSError, ValueError, EOFError, wave.Error) as e:   # EOFError: empty/truncated WAV
                 self.on_event(f"p25: skipped {wav.name}: {e}")
                 continue
             calls.append(call)
@@ -137,7 +144,12 @@ class CallIngest:
                 self.state = "ok"
                 self.detail = f"watching {self.dir.name}" + (
                     f" · last call {time.strftime('%H:%M', time.localtime(self.last_call))}" if self.last_call else "")
-                for call in self.scan():
+                try:
+                    calls = self.scan()
+                except Exception as e:                       # never let one bad file stop ingest
+                    self.on_event(f"p25 scan error: {type(e).__name__}: {e}")
+                    calls = []
+                for call in calls:
                     self.last_call = call.end or time.time()
                     try:
                         self.on_call(call)

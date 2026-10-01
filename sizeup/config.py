@@ -55,7 +55,8 @@ class Config:
     p25_recorder: str = ""       # trunk-recorder command line, started/stopped by sizeup
     p25_recorder_dir: str = ""   # its working directory (config.json + talkgroups.csv)
     clips_dir: str = ""
-    keep_hours: float = 24.0
+    keep_hours: float = 24.0          # pages, incidents, transcripts
+    audio_keep_hours: float = 12.0    # every audio file under captures/ (clips, P25 calls, skipped clicks)
     home: tuple[float, float, float] = (-73.6640, 41.0130, 13.4)   # lon, lat, zoom
 
 
@@ -120,7 +121,7 @@ def load(path: str | Path) -> Config:
             p25_tgs[int(r["Decimal"])] = r["Alpha Tag"]
             p25_info[int(r["Decimal"])] = {"name": r["Alpha Tag"], "group": r.get("Tag") or "",
                                            "encrypted": "E" in (r.get("Mode") or "").upper()}
-    storage = _take(data.get("storage", {}), "storage", {"clips_dir", "keep_hours"})
+    storage = _take(data.get("storage", {}), "storage", {"clips_dir", "keep_hours", "audio_keep_hours"})
     mdc = _take(data.get("mdc", {}), "mdc", {"aliases"})
     units = _take(data.get("units", {}), "units", {"departments", "apparatus_file"})
     unit_departments: dict[str, str] = {}
@@ -156,5 +157,6 @@ def load(path: str | Path) -> Config:
         shared_device=radio.get("shared_device", ""), start_mode=radio.get("start_mode", ""),
         p25_recorder=p25.get("recorder", ""), p25_recorder_dir=rel(p25.get("recorder_dir", "")),
         clips_dir=rel(storage.get("clips_dir", "captures/clips")), keep_hours=float(storage.get("keep_hours", 24)),
+        audio_keep_hours=float(storage.get("audio_keep_hours", 12)),
         home=(float(mp.get("home_lon", -73.6640)), float(mp.get("home_lat", 41.0130)), float(mp.get("home_zoom", 13.4))),
     )

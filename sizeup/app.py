@@ -26,6 +26,7 @@ from pathlib import Path
 import numpy as np
 
 from sizeup.config import Config, ConfigError, load
+from sizeup import janitor
 from sizeup.dispatch import parse
 from sizeup.incidents import IncidentStore, Traffic
 from sizeup.radio.fm import RATE, Channel, NfmReceiver, Segment, speech_seconds
@@ -101,7 +102,9 @@ class App:
                                prompt=lambda item: cfg.stt_prompt)
         self.gaz = self._load_gazetteer()
         self.keep_s = cfg.keep_hours * 3600
-        self.clips: OrderedDict[str, np.ndarray] = OrderedDict()
+        self._lock = threading.Lock()
+        self.storage: dict | None = None
+        self.clips: OrderedDict[str, tuple[np.ndarray, float]] = OrderedDict()   # id -> (pcm, saved at)
         self.clips_dir = Path(cfg.clips_dir) if cfg.clips_dir else None
         if self.clips_dir:
             self.clips_dir.mkdir(parents=True, exist_ok=True)
@@ -116,7 +119,6 @@ class App:
         for t in list(self.store.loose) + [t for i in self.store.incidents for t in i.traffic]:
             if t.talkgroup is not None:
                 self.tg.seed(t.talkgroup, t.end)
-        self._lock = threading.Lock()
         self._last_tones_only: Page | None = None
         self.receivers = [NfmReceiver(cfg.rtl_fm, c.device, c.gain_db, Channel(c.mhz, c.label),
                                       self._segment, log, open_db=c.squelch_db) for c in cfg.channels]
@@ -171,12 +173,7 @@ class App:
         if not self.clips_dir:
             return
         cutoff = time.time() - self.keep_s
-        for f in list(self.clips_dir.glob("*.wav")) + list(self.clips_dir.glob("*.json")):
-            try:
-                if f.stat().st_mtime < cutoff:
-                    f.unlink()
-            except OSError:
-                pass
+        self._clean()
         loaded = []
         for f in self.clips_dir.glob("*.page.json"):
             try:
@@ -189,6 +186,33 @@ class App:
             self.pages.append(p)
         if loaded:
             log(f"reloaded {len(loaded)} page(s) from the last {self.cfg.keep_hours:g} h")
+
+    def _clean(self) -> None:
+        """Enforce the storage limits (sizeup/janitor.py) and drop expired history from memory."""
+        if not self.clips_dir:
+            return
+        audio_s, history_s = self.cfg.audio_keep_hours * 3600, self.keep_s
+        self.storage = janitor.clean(self.clips_dir.parent, self.clips_dir,
+                                     Path(self.cfg.p25_dir) if self.cfg.p25_dir else None, audio_s, history_s)
+        now = time.time()
+        with self._lock:
+            for cid in [c for c, (_, t) in self.clips.items() if now - t > audio_s]:
+                del self.clips[cid]
+            while self.pages and self.pages[-1].end < now - history_s:
+                self.pages.pop()
+        if hasattr(self, "store"):
+            self.store.prune(now - history_s)
+        if self.storage.get("deleted"):
+            log(f"storage: removed {self.storage['deleted']} expired file(s); "
+                f"{self.storage['bytes'] / 1e6:.1f} MB in captures/")
+
+    def _janitor(self) -> None:
+        while True:
+            time.sleep(600)
+            try:
+                self._clean()
+            except Exception as e:  # cleanup must never take the display down
+                log(f"storage cleanup error: {type(e).__name__}: {e}")
 
     def _save_page(self, page: Page) -> None:
         if not self.clips_dir:
@@ -206,7 +230,7 @@ class App:
         # not the raw discriminator output, which is quiet and dominated by CTCSS + hiss.
         pcm = (np.clip(audio if processed else radio_voice(audio), -1, 1) * 32767).astype(np.int16)
         with self._lock:
-            self.clips[cid] = pcm
+            self.clips[cid] = (pcm, time.time())
             while len(self.clips) > 400:
                 self.clips.popitem(last=False)
         if self.clips_dir:
@@ -219,9 +243,9 @@ class App:
         if not cid.replace("-", "").replace("_", "").isalnum():
             return None
         with self._lock:
-            pcm = self.clips.get(cid)
-        if pcm is not None:
-            return wav_bytes(pcm, RATE)
+            hit = self.clips.get(cid)
+        if hit is not None:
+            return wav_bytes(hit[0], RATE)
         p = self.clips_dir / f"{cid}.wav" if self.clips_dir else None
         return p.read_bytes() if p and p.is_file() else None
 
@@ -281,6 +305,7 @@ class App:
     def _call(self, call: Call) -> None:
         if not self.tg.record(call.talkgroup):  # switched off in the web app: dropped on arrival
             self.tg.seen(call.talkgroup, dropped=True)
+            self._drop_recorder_files(call)
             return
         self.tg.seen(call.talkgroup)
         t = Traffic(call.id, call.label, call.start, call.end, "", status="pending",
@@ -289,6 +314,17 @@ class App:
             t.fm = False  # decoded P25 voice: no FM de-emphasis  # type: ignore[attr-defined]
             self._keep_clip(t.id, radio_voice(call.audio, deemph=False), processed=True)
             self.stt.submit(t, call.audio)
+        self._drop_recorder_files(call)  # sizeup's clip is the one copy kept
+
+    def _drop_recorder_files(self, call: Call) -> None:
+        if not self.clips_dir or not call.wav_path:  # without our own clip store, keep the originals
+            return
+        wav = Path(call.wav_path)
+        for f in (wav, wav.with_suffix(".json")):
+            try:
+                f.unlink()
+            except OSError:
+                pass
 
     def _save_skipped(self, item) -> None:
         audio = getattr(item, "raw_audio", None)
@@ -461,6 +497,7 @@ class App:
         with self._lock:
             pages = [dict(p.as_dict(), dispatch=getattr(p, "dispatch", None)) for p in list(self.pages)[:50]]
         st = {"time": time.time(), "radios": self.radios(), **self.store.state(), "pages": pages, "sdr": self.sdr(),
+              "storage": getattr(self, "storage", None),
               "talkgroups": self.tg.state() if self.p25 else []}
         # Tell the display which entries have a recording (so ▶ isn't a dead button).
         for p in st["pages"]:
@@ -487,6 +524,7 @@ class App:
     def start(self) -> App:
         self.whisper.start()
         self.stt.start()
+        threading.Thread(target=self._janitor, name="janitor", daemon=True).start()
         if self.shared:
             for r in self.receivers:  # everything on the one dongle, only the selected mode running
                 r.device = self.cfg.shared_device
