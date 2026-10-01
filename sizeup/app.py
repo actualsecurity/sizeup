@@ -181,20 +181,11 @@ class App:
         paging = self._kind.get(ch.label) == "paging"
         page = assemble(ch.label, ch.mhz, seg, self.plan) if paging else None
         units = self._units(seg)
-        if not (page and page.tones) and speech_seconds(seg.audio) < MIN_SPEECH_S:
-            # A key-up with nothing said: carrier, dead air. Whisper turns these into words
-            # ("Yes.", "Thank you."), so they aren't transcribed.
-            log(f"{ch.label}: mic click ({seg.end - seg.start:.1f} s, no speech) skipped"
-                + (f" · unit {', '.join(units)}" if units else ""))
-            if self.clips_dir:  # kept (not shown) so the click/speech decision can be checked
-                try:
-                    d = self.clips_dir / "skipped"
-                    d.mkdir(exist_ok=True)
-                    (d / f"{ch.label.replace(' ', '')}-{int(seg.start * 1000)}.wav").write_bytes(
-                        wav_bytes((np.clip(seg.audio, -1, 1) * 32767).astype(np.int16), RATE))
-                except OSError:
-                    pass
-            return
+        # Weak signals: speech can sit only 2-6 dB over the dead air (FG1 bench, indoor antenna),
+        # so nothing is skipped on energy. Everything is transcribed; a result that is one of
+        # whisper's dead-air phrases ("Thank you.", "Yes.") on audio with no voice energy is a
+        # mic click (stt.Transcriber), dropped in _transcribed.
+        low_energy = speech_seconds(seg.audio) < MIN_SPEECH_S
         if paging:
             self._keep_clip(page.id, seg.audio)
             with self._lock:
@@ -211,6 +202,8 @@ class App:
         else:
             t = Traffic(f"{ch.label.replace(' ', '')}-{int(seg.start * 1000)}", ch.label, seg.start, seg.end,
                         "", status="pending", unit=", ".join(units))
+            t.low_energy = low_energy  # type: ignore[attr-defined]
+            t.raw_audio = seg.audio    # type: ignore[attr-defined]  (saved if it turns out to be a click)
             self._keep_clip(t.id, seg.audio)
             self.stt.submit(t, seg.audio)
 
@@ -226,9 +219,29 @@ class App:
             self._keep_clip(t.id, radio_voice(call.audio, deemph=False), processed=True)
             self.stt.submit(t, call.audio)
 
+    def _save_skipped(self, item) -> None:
+        audio = getattr(item, "raw_audio", None)
+        if self.clips_dir is None or audio is None:
+            return
+        try:  # kept (not shown) so the click/speech decision can be checked
+            d = self.clips_dir / "skipped"
+            d.mkdir(exist_ok=True)
+            (d / f"{item.id}.wav").write_bytes(wav_bytes((np.clip(audio, -1, 1) * 32767).astype(np.int16), RATE))
+        except OSError:
+            pass
+
     def _transcribed(self, item) -> None:
         if isinstance(item, Traffic):
             item.text = getattr(item, "raw", "")
+            if item.status == "no_speech":
+                log(f"{item.source}: mic click ({item.end - item.start:.1f} s, no speech) skipped"
+                    + (f" · unit {item.unit}" if item.unit else ""))
+                self._save_skipped(item)
+                with self._lock:
+                    self.clips.pop(item.id, None)
+                return
+            if hasattr(item, "raw_audio"):
+                del item.raw_audio
             self.store.on_traffic(item)
             log(f"{item.source}: {'[' + item.unit + '] ' if item.unit else ''}{item.text or '(' + item.status + ')'}")
             return

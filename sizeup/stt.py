@@ -22,8 +22,10 @@ import numpy as np
 
 NOISE_LABEL = re.compile(r"^[\[(*].*[\])*]$")  # "(static)", "[MUSIC]" — not speech
 # What whisper says about a short burst of noise (a mic click, a squelch tail).
-HALLUCINATIONS = {"thank you", "thanks", "thank you very much", "you", "bye", "okay", "thanks for watching",
-                  "thank you for watching", "so", "oh"}
+# What whisper says for dead air / a mic click (FG1 bench: "Thank you." or "Yes." on 6 of 6
+# dead-air cuts). Rejected only when the audio has no voice energy or is very short.
+HALLUCINATIONS = {"thank you", "thanks", "thank you very much", "yes", "you", "bye", "bye bye", "okay",
+                  "ok", "thanks for watching", "thank you for watching", "so", "oh", "the end"}
 SHORT_S = 1.5
 
 
@@ -162,7 +164,8 @@ class Transcriber:
                 continue
             said = re.sub(r"[^a-z0-9 ]", "", raw.lower()).strip()
             if (not raw or NOISE_LABEL.match(raw) or not said  # "." = squelch tail
-                    or (len(audio) / 16000 < SHORT_S and said in HALLUCINATIONS)):
+                    or (said in HALLUCINATIONS
+                        and (len(audio) / 16000 < SHORT_S or getattr(item, "low_energy", False)))):
                 raw, item.status = "", "no_speech"
             else:
                 item.status = "done"

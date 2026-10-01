@@ -73,19 +73,24 @@ def test_page_opens_incident_and_traffic_attaches(tmp_path):
     assert app.clip(page_id)[:4] == b"RIFF" and app.clip("../etc") is None
 
 
-def test_mic_clicks_are_not_transcribed(tmp_path):
-    # Real FG1 bench: key-ups with nothing said (0.7-1.05 s) came back from whisper as "Yes.".
-    # After squelch trimming a click is carrier with dead air; a short reply has syllables.
+def test_mic_clicks_dropped_weak_speech_kept(tmp_path):
+    # FG1 bench: whisper says "Thank you."/"Yes." for dead air (6 of 6); real speech at only
+    # 2-6 dB over the dead air ("Testing one, two.") must still come through.
     app = App(cfg(tmp_path))
     app._kind = {"FG1": "traffic"}
-    sent = []
-    app.stt.submit = lambda item, audio: sent.append(item)
+    rng = np.random.default_rng(2)
+    dead_air = (0.003 * rng.standard_normal(int(RATE * 1.5))).astype(np.float32)
+    weak = (0.003 * rng.standard_normal(int(RATE * 1.5))).astype(np.float32)   # energy gate can't tell
+    replies = iter(["Thank you.", "Testing one, two."])
+    app.stt.client = type("W", (), {"transcribe": lambda self, a, prompt="": (next(replies), 0.6)})()
+    app.stt.start()
     now = time.time()
-    dead_air = (0.003 * np.random.default_rng(2).standard_normal(int(RATE * 1.05))).astype(np.float32)
-    app._segment(Channel(453.0375, "FG1"), Segment(now, now + 1.05, dead_air, 20.0))
-    assert sent == [] and app.state()["loose_traffic"] == []
-    app._segment(Channel(453.0375, "FG1"), Segment(now + 5, now + 5.8, voice(0.8, seed=3), 20.0))  # short "copy"
-    assert len(sent) == 1
+    app._segment(Channel(453.0375, "FG1"), Segment(now, now + 1.5, dead_air, 20.0))
+    app._segment(Channel(453.0375, "FG1"), Segment(now + 5, now + 6.5, weak, 20.0))
+    assert wait(lambda: len(app.state()["loose_traffic"]) == 1)
+    time.sleep(0.2)
+    assert [t["text"] for t in app.state()["loose_traffic"]] == ["Testing one, two."]
+    assert len(list((tmp_path / "clips" / "skipped").glob("*.wav"))) == 1   # the click, kept for review
 
 
 def test_mdc_unit_id_names_the_talker(tmp_path):
