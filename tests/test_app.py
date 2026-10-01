@@ -156,7 +156,7 @@ def test_one_shared_dongle_switches_between_channels_and_p25(tmp_path, monkeypat
     app = App(c).start()
     try:
         st = app.state()
-        assert st["sdr"]["modes"] == ["South 2", "FG1", "Fire/EMS 15"] and st["sdr"]["mode"] == "South 2"
+        assert st["sdr"]["modes"] == ["South 2", "FG1", "Fire/EMS 15", "Off"] and st["sdr"]["mode"] == "South 2"
         radios = {r["label"]: r for r in st["radios"]}
         assert radios["FG1"]["state"] == "off" and radios["FG1"]["detail"] == "SDR on South 2"
         assert all(r.device == "00000001" for r in app.receivers)          # everything on the one dongle
@@ -166,6 +166,13 @@ def test_one_shared_dongle_switches_between_channels_and_p25(tmp_path, monkeypat
         assert wait(lambda: app.recorder.state == "absent")                 # not installed yet: says so
         assert app.set_mode("Nope") is not None
         assert app.set_mode("South 2") is None and app.recorder.state == "off"
+        # Off: release the dongle for other programs; nothing of ours holds it.
+        assert app.set_mode("Off") is None
+        radios = {r["label"]: r for r in app.state()["radios"]}
+        assert all(radios[k]["state"] == "off" and radios[k]["detail"] == "SDR released (Off)"
+                   for k in ("South 2", "FG1", "Fire/EMS 15"))
+        assert all(r._proc is None or r._proc.poll() is not None for r in app.receivers)
+        assert app.set_mode("FG1") is None and app.state()["sdr"]["mode"] == "FG1"
     finally:
         app.stop()
 

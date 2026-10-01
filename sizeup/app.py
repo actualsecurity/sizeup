@@ -41,6 +41,7 @@ from sizeup.web.server import WebServer
 ROOT = Path(__file__).resolve().parent.parent
 SPLIT_PAGE_S = 30.0      # voice this soon after a tones-only page for us = that page's voice
 P25_MODE = "Fire/EMS 15"   # the shared-dongle mode that runs trunk-recorder
+OFF_MODE = "Off"           # the shared dongle released for other programs (sizeup keeps running)
 SWITCH_PAUSE_S = 1.0       # between stopping one program on the shared dongle and starting the next
 MIN_SPEECH_S = 0.15      # less sound than this above the dead-air floor (and no tones) = a mic click
 CATEGORIES = {"fire": "#ff4d3d", "ems": "#4da3ff", "rescue": "#ffb020", "hazard": "#c86bff",
@@ -121,6 +122,8 @@ class App:
         # One dongle for everything (bench): only the selected mode runs; switch in the web app.
         self.shared = bool(cfg.shared_device)
         self.modes = [c.label for c in cfg.channels] + ([P25_MODE] if self.recorder else [])
+        if self.shared:
+            self.modes.append(OFF_MODE)
         self.mode = (cfg.start_mode if cfg.start_mode in self.modes else (self.modes[0] if self.modes else ""))
         # The last mode picked in the web app wins over start_mode, so a restart doesn't move the dongle.
         self._mode_file = (Path(cfg.clips_dir).parent / "sdr_mode.txt") if cfg.clips_dir else None
@@ -356,6 +359,9 @@ class App:
         return r
 
     def _start_mode(self, mode: str) -> None:
+        if mode == OFF_MODE:
+            log("SDR released: no receiver running (switch it back on in the web app)")
+            return
         if mode == P25_MODE:
             self.recorder.start()
         else:
@@ -375,7 +381,9 @@ class App:
             self.switching = True
             try:
                 log(f"SDR: {self.mode} -> {mode}")
-                if self.mode == P25_MODE:
+                if self.mode == OFF_MODE:
+                    pass
+                elif self.mode == P25_MODE:
                     self.recorder.stop(f"SDR on {mode}")
                 else:
                     r = self._receiver(self.mode)
@@ -401,6 +409,9 @@ class App:
         log(f"talkgroup {tg} ({self.tg.name(int(tg))}): record={self.tg.record(int(tg))} main={self.tg.main(int(tg))}")
         return None
 
+    def _off_detail(self) -> str:
+        return "SDR released (Off)" if self.mode == OFF_MODE else f"SDR on {self.mode}"
+
     def sdr(self) -> dict | None:
         return ({"shared": True, "mode": self.mode, "modes": self.modes, "switching": self.switching}
                 if self.shared else None)
@@ -410,14 +421,14 @@ class App:
         for r in self.receivers:
             st = r.status()
             if self.shared and r.channel.label != self.mode:
-                st.update(state="off", detail=f"SDR on {self.mode}", open=False, quieting_db=None)
+                st.update(state="off", detail=self._off_detail(), open=False, quieting_db=None)
             out.append(st)
         if self.p25:
             st = self.p25.status()
             if self.recorder is not None:
                 rs = self.recorder.status()
                 if self.shared and self.mode != P25_MODE:
-                    st.update(state="off", detail=f"SDR on {self.mode}")
+                    st.update(state="off", detail=self._off_detail())
                 elif rs["state"] != "ok":
                     st.update(state=rs["state"], detail=rs["detail"])
                 else:
