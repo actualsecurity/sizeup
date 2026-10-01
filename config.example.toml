@@ -49,6 +49,10 @@ capture_dir = ""
 talkgroups = { "307" = "Fire/EMS 15", "301" = "60 Control" }
 aliases = {}                       # radio ID -> unit name, e.g. { "2391001" = "2391" }
 
+[mdc]
+# MDC-1200 PTT-ID (Motorola radios send it on key-up/release): radio ID -> unit name shown on traffic.
+aliases = {}                       # e.g. { "0611" = "Engine 60" }
+
 [storage]
 clips_dir = "captures/clips"
 keep_hours = 24

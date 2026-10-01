@@ -29,6 +29,7 @@ from sizeup.config import Config, ConfigError, load
 from sizeup.dispatch import parse
 from sizeup.incidents import IncidentStore, Traffic
 from sizeup.radio.fm import RATE, Channel, NfmReceiver, Segment, speech_seconds
+from sizeup.radio.mdc1200 import decode as mdc_decode
 from sizeup.radio.p25 import Call, CallIngest
 from sizeup.radio.page import Page, assemble
 from sizeup.radio.tones import TonePlan
@@ -160,13 +161,31 @@ class App:
 
     # -- radio events -----------------------------------------------------------------------------
 
+    def _units(self, seg: Segment) -> list[str]:
+        """Who keyed up: MDC-1200 PTT-IDs in the bursts cut from the transmission's ends."""
+        out: list[str] = []
+        for b in seg.bursts:
+            try:
+                pkts = mdc_decode(b, RATE)
+            except Exception:
+                continue
+            for p in pkts:
+                if p.kind in ("pre-id", "post-id", "emergency"):
+                    name = self.cfg.mdc_aliases.get(p.unit_hex, p.unit_hex)
+                    name = f"{name} EMERGENCY" if p.kind == "emergency" else name
+                    if name not in out:
+                        out.append(name)
+        return out
+
     def _segment(self, ch: Channel, seg: Segment) -> None:
         paging = self._kind.get(ch.label) == "paging"
         page = assemble(ch.label, ch.mhz, seg, self.plan) if paging else None
+        units = self._units(seg)
         if not (page and page.tones) and speech_seconds(seg.audio) < MIN_SPEECH_S:
             # A key-up with nothing said: carrier, dead air. Whisper turns these into words
             # ("Yes.", "Thank you."), so they aren't transcribed.
-            log(f"{ch.label}: mic click ({seg.end - seg.start:.1f} s, no speech) skipped")
+            log(f"{ch.label}: mic click ({seg.end - seg.start:.1f} s, no speech) skipped"
+                + (f" · unit {', '.join(units)}" if units else ""))
             if self.clips_dir:  # kept (not shown) so the click/speech decision can be checked
                 try:
                     d = self.clips_dir / "skipped"
@@ -191,7 +210,7 @@ class App:
             self.stt.submit(page, page.voice)
         else:
             t = Traffic(f"{ch.label.replace(' ', '')}-{int(seg.start * 1000)}", ch.label, seg.start, seg.end,
-                        "", status="pending")
+                        "", status="pending", unit=", ".join(units))
             self._keep_clip(t.id, seg.audio)
             self.stt.submit(t, seg.audio)
 
@@ -211,7 +230,7 @@ class App:
         if isinstance(item, Traffic):
             item.text = getattr(item, "raw", "")
             self.store.on_traffic(item)
-            log(f"{item.source}: {item.unit + ': ' if item.unit else ''}{item.text or '(' + item.status + ')'}")
+            log(f"{item.source}: {'[' + item.unit + '] ' if item.unit else ''}{item.text or '(' + item.status + ')'}")
             return
         page: Page = item
         d = parse(page.raw) if page.raw else None

@@ -32,6 +32,7 @@ HANG_FRAMES = 8                # carrier may flicker for 0.4 s inside one transm
 MIN_FRAMES = 6                 # under 0.3 s of carrier: not worth keeping
 DATA_SHARE = 0.75              # a frame with this much of its voice-band energy at 1000-2100 Hz ...
 DATA_OVER_DB = 15.0            # ... and this far over the dead air is an MDC-1200 data burst
+EDGE_SEARCH = 6                # look for a burst within 0.3 s of either end of the carrier
 MAX_FRAMES = 20 * 120          # split anything over 2 minutes (a long page is ~30-60 s)
 STALL_S = 5.0
 HF_BAND = (4000.0, 7500.0)
@@ -143,26 +144,28 @@ class NoiseSquelch:
             body = frames[i0:i1 + 1]
             data = data_frames(body)
             bursts: list[np.ndarray] = []
-            # Cut data bursts off both ends (a frame or two of dead air may sit beyond them).
+            # Cut data bursts off both ends. Radios hold the carrier a moment around the ID
+            # (FG1 bench: up to ~0.15 s of dead air beyond it), and the frames where the burst
+            # starts/ends are only partly burst, so one more frame goes with it.
             lo, hi = 0, len(body) - 1
             for _ in range(2):
-                k = next((j for j in range(lo, min(lo + 3, hi + 1)) if data[j]), None)
+                k = next((j for j in range(lo, min(lo + EDGE_SEARCH, hi + 1)) if data[j]), None)
                 if k is None:
                     break
                 e = k
                 while e + 1 <= hi and data[e + 1]:
                     e += 1
-                bursts.append(np.concatenate(body[k:e + 1]))
-                lo = e + 1
+                bursts.append(np.concatenate(body[max(lo, k - 1):min(hi, e + 1) + 1]))
+                lo = e + 2
             for _ in range(2):
-                k = next((j for j in range(hi, max(hi - 3, lo - 1), -1) if data[j]), None)
+                k = next((j for j in range(hi, max(hi - EDGE_SEARCH, lo - 1), -1) if data[j]), None)
                 if k is None:
                     break
                 b = k
                 while b - 1 >= lo and data[b - 1]:
                     b -= 1
-                bursts.append(np.concatenate(body[b:k + 1]))
-                hi = b - 1
+                bursts.append(np.concatenate(body[max(lo, b - 1):min(hi, k + 1) + 1]))
+                hi = b - 2
             if hi - lo + 1 < MIN_FRAMES:
                 return None
             audio = np.concatenate(body[lo:hi + 1]).astype(np.float32)

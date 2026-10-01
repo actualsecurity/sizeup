@@ -86,3 +86,16 @@ def test_mic_clicks_are_not_transcribed(tmp_path):
     assert sent == [] and app.state()["loose_traffic"] == []
     app._segment(Channel(453.0375, "FG1"), Segment(now + 5, now + 5.8, voice(0.8, seed=3), 20.0))  # short "copy"
     assert len(sent) == 1
+
+
+def test_mdc_unit_id_names_the_talker(tmp_path):
+    # Real FG1 burst from the bench: MDC-1200 post-ID 0611 = Engine 61 portable 1.
+    import wave
+    from dataclasses import replace
+    from pathlib import Path
+    with wave.open(str(Path(__file__).parent / "fixtures" / "mdc" / "fg1_165566.wav")) as w:
+        burst = np.frombuffer(w.readframes(w.getnframes()), "<i2").astype(np.float32) / 32768
+    app = App(replace(cfg(tmp_path), mdc_aliases={"0611": "Engine 61 Portable 1"}))
+    assert app._units(Segment(0, 1, np.zeros(RATE, np.float32), 20.0, [burst])) == ["Engine 61 Portable 1"]
+    app = App(cfg(tmp_path))
+    assert app._units(Segment(0, 1, np.zeros(RATE, np.float32), 20.0, [burst])) == ["0611"]  # no alias: the ID

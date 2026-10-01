@@ -42,6 +42,7 @@ class Config:
     p25_dir: str
     p25_talkgroups: dict[int, str] = field(default_factory=dict)
     p25_aliases: dict[str, str] = field(default_factory=dict)
+    mdc_aliases: dict[str, str] = field(default_factory=dict)   # MDC-1200 unit ID ("0611") -> name
     clips_dir: str = ""
     keep_hours: float = 24.0
     home: tuple[float, float, float] = (-73.6640, 41.0130, 13.4)   # lon, lat, zoom
@@ -61,7 +62,7 @@ def load(path: str | Path) -> Config:
         data = tomllib.loads(path.read_text())
     except tomllib.TOMLDecodeError as e:
         raise ConfigError(f"{path}: {e}") from e
-    _take(data, "config", {"station", "web", "radio", "tones", "stt", "p25", "storage", "map"})
+    _take(data, "config", {"station", "web", "radio", "tones", "stt", "p25", "mdc", "storage", "map"})
     st = _take(data.get("station", {}), "station", {"id", "name"})
     web = _take(data.get("web", {}), "web", {"host", "port"})
     radio = _take(data.get("radio", {}), "radio", {"rtl_fm", "channels"})
@@ -82,6 +83,7 @@ def load(path: str | Path) -> Config:
     stt = _take(data.get("stt", {}), "stt", {"server_binary", "model", "port", "threads", "prompt"})
     p25 = _take(data.get("p25", {}), "p25", {"capture_dir", "talkgroups", "aliases"})
     storage = _take(data.get("storage", {}), "storage", {"clips_dir", "keep_hours"})
+    mdc = _take(data.get("mdc", {}), "mdc", {"aliases"})
     mp = _take(data.get("map", {}), "map", {"home_lon", "home_lat", "home_zoom"})
     rel = lambda p: str((base / p).resolve()) if p and not Path(p).is_absolute() else p
     return Config(
@@ -94,6 +96,7 @@ def load(path: str | Path) -> Config:
         p25_dir=rel(p25.get("capture_dir", "")),
         p25_talkgroups={int(k): v for k, v in p25.get("talkgroups", {"307": "Fire/EMS 15"}).items()},
         p25_aliases={str(k): v for k, v in p25.get("aliases", {}).items()},
+        mdc_aliases={str(k).upper(): v for k, v in mdc.get("aliases", {}).items()},
         clips_dir=rel(storage.get("clips_dir", "captures/clips")), keep_hours=float(storage.get("keep_hours", 24)),
         home=(float(mp.get("home_lon", -73.6640)), float(mp.get("home_lat", 41.0130)), float(mp.get("home_zoom", 13.4))),
     )

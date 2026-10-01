@@ -94,8 +94,9 @@ def test_segments_are_trimmed_to_the_carrier_and_clicks_have_no_speech():
         return 0.6 * np.sin(2 * np.pi * np.cumsum(f) / RATE)
 
     talk = np.concatenate([np.zeros(int(0.3 * RATE)), voice_like(2.0)])   # key up, then talk
-    segs = run_squelch(np.concatenate([hiss(3.0), keyed(np.concatenate([np.zeros(int(0.9 * RATE)), burst()])),
-                                       hiss(1.5), keyed(np.concatenate([talk, burst()])), hiss(1.5)]))
+    hold = np.zeros(int(0.15 * RATE))   # carrier held a moment after the ID (14:03:50 click on the bench)
+    segs = run_squelch(np.concatenate([hiss(3.0), keyed(np.concatenate([np.zeros(int(0.9 * RATE)), burst(), hold])),
+                                       hiss(1.5), keyed(np.concatenate([talk, burst(), hold])), hiss(1.5)]))
     assert len(segs) == 2
     click, speech = segs
     for s in segs:
