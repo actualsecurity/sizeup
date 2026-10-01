@@ -250,3 +250,23 @@ def test_talkgroup_counts_survive_a_restart(tmp_path):
     again = App(c)
     row = {r["tg"]: r for r in again.state()["talkgroups"]}[329]
     assert row["count"] == 1 and abs(row["last"] - (now - 58)) < 1
+
+
+def test_whole_talkgroup_section_on_off_persists(tmp_path):
+    # User: "add the ability to turn on and off a whole section too, and let these settings persist restarts".
+    from dataclasses import replace
+    info = {383: {"name": "WCPD Ch 1", "group": "County Police", "encrypted": False},
+            385: {"name": "WCPD Ch 3", "group": "County Police", "encrypted": False},
+            391: {"name": "WCPD Hotline", "group": "County Police", "encrypted": True},
+            307: {"name": "Fire/EMS 15", "group": "Fire/EMS", "encrypted": False}}
+    c = replace(cfg(tmp_path), p25_dir=str(tmp_path / "p25"), p25_tg_info=info,
+                p25_talkgroups={k: v["name"] for k, v in info.items()}, p25_incident_talkgroups=frozenset({307}))
+    app = App(c)
+    assert app.set_talkgroup_group("County Police", record=False) is None
+    assert not any(app.tg.record(t) for t in (383, 385, 391)) and app.tg.record(307)
+    again = App(c)                                           # persists across a restart
+    assert not again.tg.record(383) and not again.tg.record(385) and again.tg.record(307)
+    assert again.set_talkgroup_group("County Police", record=True) is None
+    assert again.tg.record(383) and again.tg.record(385) and not again.tg.record(391)   # encrypted stays off
+    assert App(c).tg.record(385)
+    assert again.set_talkgroup_group("Nope", record=False) is not None

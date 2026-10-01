@@ -415,6 +415,16 @@ class App:
     def _off_detail(self) -> str:
         return "SDR released (Off)" if self.mode == OFF_MODE else f"SDR on {self.mode}"
 
+    def set_talkgroup_group(self, group: str, record: bool | None = None, main: bool | None = None) -> str | None:
+        """POST /api/talkgroup-group: a whole section on/off in one go."""
+        if not self.p25:
+            return "no P25 configured"
+        n = self.tg.set_group(str(group), record, main)
+        if not n:
+            return f"no talkgroups in group {group!r}"
+        log(f"talkgroup group {group} ({n}): record={record} main={main}")
+        return None
+
     def sdr(self) -> dict | None:
         return ({"shared": True, "mode": self.mode, "modes": self.modes, "switching": self.switching}
                 if self.shared else None)
@@ -513,7 +523,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     app = App(cfg).start()
     server = WebServer(cfg.host, cfg.port, app.scene(), app.state, app.clip, app.store.close, app.set_mode,
-                       app.set_talkgroup)
+                       app.set_talkgroup, app.set_talkgroup_group)
     signal.signal(signal.SIGTERM, lambda *_: server.shutdown())
     log(f"sizeup: {cfg.station_name} · {len(cfg.channels)} channel(s)"
         + (f" · P25 {cfg.p25_dir}" if cfg.p25_dir else "") + f" · {server.url}")

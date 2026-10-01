@@ -7,6 +7,7 @@ GET  /api/stream               SSE: the state, pushed every second
 GET  /api/audio/<id>.wav       a page or transmission clip
 POST /api/incident/<id>/close  close an incident by hand
 POST /api/talkgroup {"tg": 307, "record": bool?, "main": bool?}  per-talkgroup switches (state "talkgroups")
+POST /api/talkgroup-group {"group": "County Police", "record": bool?, "main": bool?}  a whole section
 POST /api/mode {"mode": ...}  one shared dongle: hand it to a channel or trunk-recorder (state "sdr")
 GET  /healthz
 
@@ -73,7 +74,8 @@ class Broadcaster:
 
 def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | None],
                  close_incident: Callable[[str], bool], set_mode: Callable[[str], str | None] | None = None,
-                 set_talkgroup: Callable[..., str | None] | None = None):
+                 set_talkgroup: Callable[..., str | None] | None = None,
+                 set_talkgroup_group: Callable[..., str | None] | None = None):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -114,6 +116,16 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                     n = int(self.headers.get("Content-Length") or 0)
                     body = json.loads(self.rfile.read(min(n, 1024)) or b"{}")
                     err = set_talkgroup(int(body["tg"]), body.get("record"), body.get("main"))
+                except (ValueError, KeyError, TypeError) as e:
+                    err = f"bad request: {e}"
+                if err:
+                    return self._send(400, json.dumps({"error": err}).encode(), "application/json")
+                return self._send(200, b'{"ok":true}', "application/json")
+            if path == "/api/talkgroup-group" and set_talkgroup_group is not None:
+                try:
+                    n = int(self.headers.get("Content-Length") or 0)
+                    body = json.loads(self.rfile.read(min(n, 1024)) or b"{}")
+                    err = set_talkgroup_group(str(body["group"]), body.get("record"), body.get("main"))
                 except (ValueError, KeyError, TypeError) as e:
                     err = f"bad request: {e}"
                 if err:
@@ -166,11 +178,12 @@ class WebServer:
     def __init__(self, host: str, port: int, scene: dict, state_fn: Callable[[], dict],
                  clip: Callable[[str], bytes | None], close_incident: Callable[[str], bool],
                  set_mode: Callable[[str], str | None] | None = None,
-                 set_talkgroup: Callable[..., str | None] | None = None):
+                 set_talkgroup: Callable[..., str | None] | None = None,
+                 set_talkgroup_group: Callable[..., str | None] | None = None):
         self.broadcaster = Broadcaster(state_fn)
         self.httpd = ThreadingHTTPServer((host, port), make_handler(
             json.dumps(scene, separators=(",", ":")).encode(), self.broadcaster, clip, close_incident, set_mode,
-            set_talkgroup))
+            set_talkgroup, set_talkgroup_group))
         self.httpd.daemon_threads = True
 
     @property

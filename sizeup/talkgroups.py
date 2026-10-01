@@ -64,6 +64,23 @@ class TalkgroupPrefs:
                 p["main"] = bool(main)
         self.save()
 
+    def group_of(self, tg: int) -> str:
+        return self.info.get(tg, {}).get("group") or "Unknown"
+
+    def set_group(self, group: str, record: bool | None = None, main: bool | None = None) -> int:
+        """A whole section (e.g. 'County Police') on or off. Turning recording on skips encrypted
+        talkgroups (they can't be decoded). Saved per talkgroup, so it survives restarts."""
+        tgs = {tg for tg in set(self.info) | set(self._seen) | set(self._prefs) if self.group_of(tg) == group}
+        with self._lock:
+            for tg in tgs:
+                p = self._prefs.setdefault(tg, {})
+                if record is not None and not (record and self.info.get(tg, {}).get("encrypted")):
+                    p["record"] = bool(record)
+                if main is not None:
+                    p["main"] = bool(main)
+        self.save()
+        return len(tgs)
+
     def save(self) -> None:
         if not self.path:
             return
@@ -81,7 +98,7 @@ class TalkgroupPrefs:
             rows = []
             for tg in tgs:
                 i, s = self.info.get(tg, {}), self._seen.get(tg, {})
-                rows.append({"tg": tg, "name": self.name(tg), "group": i.get("group", "Unknown"),
+                rows.append({"tg": tg, "name": self.name(tg), "group": i.get("group") or "Unknown",
                              "encrypted": bool(i.get("encrypted")), "record": self.record(tg),
                              "main": self.main(tg), "count": s.get("count", 0), "last": s.get("last"),
                              "dropped": s.get("dropped", 0)})

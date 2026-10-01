@@ -533,6 +533,34 @@ async function setTalkgroup(tg, field, value) {
   renderTalkgroupViews();
 }
 
+// A whole section (e.g. "County Police") on/off: optimistic per row, then the server's push.
+async function setTalkgroupGroup(group, record) {
+  const rows = (ui.state && ui.state.talkgroups || []).filter((r) => (r.group || "") === group);
+  for (const r of rows) {
+    if (record && r.encrypted) continue;
+    const p = tgPending.get(r.tg) || { vals: {} };
+    p.vals.record = record;
+    p.until = Date.now() + PENDING_MS;
+    tgPending.set(r.tg, p);
+  }
+  ui.tgError = null;
+  renderTalkgroupViews();
+  try {
+    const res = await fetch("/api/talkgroup-group", { method: "POST", headers: { "Content-Type": "application/json" },
+                                                       body: JSON.stringify({ group: group || "Unknown", record }) });
+    let j = null;
+    try { j = await res.json(); } catch (_) { /* not JSON */ }
+    if (!res.ok || !j || j.ok === false) throw new Error((j && j.error) || `HTTP ${res.status}`);
+  } catch (err) {
+    for (const r of rows) {
+      const q = tgPending.get(r.tg);
+      if (q) { delete q.vals.record; if (!Object.keys(q.vals).length) tgPending.delete(r.tg); }
+    }
+    ui.tgError = `Couldn't change Record for ${groupName(group)}: ${err.message}`;
+  }
+  renderTalkgroupViews();
+}
+
 function renderTalkgroupViews() {
   indexTalkgroups();
   renderTraffic(ui.inc);
@@ -758,13 +786,29 @@ function renderTgPanel() {
     make: () => {
       const sec = el("section", "tg-group");
       const h = el("h3", "tg-ghead");
-      h.append(chip("", null, "tg-gchip"), el("span", "dim tg-gcount"));
+      // Whole-section Record switch: on / off / mixed (encrypted talkgroups don't count).
+      const gsw = el("button", "sw gsw");
+      gsw.setAttribute("role", "switch");
+      gsw.append(el("i", "knob"), el("span", "lbl"));
+      h.append(chip("", null, "tg-gchip"), el("span", "dim tg-gcount"), el("span", "tg-gspacer"), gsw);
       sec.append(h, el("ol", "tg-rows"));
       return sec;
     },
     fill: (sec, x) => {
       const [h, ol] = sec.children;
-      const [gchip, gcount] = h.children;
+      const [gchip, gcount, , gsw] = h.children;
+      const decodable = x.list.filter((r) => !r.encrypted);
+      const recOn = decodable.filter((r) => r.record).length;
+      const allOn = decodable.length > 0 && recOn === decodable.length;
+      const mixed = recOn > 0 && !allOn;
+      gsw.dataset.group = x.g;
+      setSwitch(gsw, allOn, mixed ? "Record: some" : allOn ? "Record: all" : "Record: none");
+      gsw.classList.add("gsw");  // setSwitch resets the class list
+      gsw.classList.toggle("mixed", mixed);
+      gsw.disabled = !decodable.length;
+      gsw.title = !decodable.length ? "Every talkgroup here is encrypted"
+        : allOn ? `Recording all ${decodable.length} — tap to stop recording this whole section`
+        : `Tap to record all ${decodable.length} in this section (encrypted ones stay off)`;
       setText(gchip, groupName(x.g));
       gchip.style.setProperty("--c", groupColor(x.g));
       const m = x.list.filter((r) => r.main).length, hd = x.list.filter((r) => r.count).length;
@@ -837,6 +881,7 @@ $("#tg-filter").addEventListener("input", renderTgPanel);
 $("#tg-groups").addEventListener("click", (e) => {
   const b = e.target.closest("button.sw");
   if (!b) return;
+  if (b.classList.contains("gsw")) { setTalkgroupGroup(b.dataset.group, !b.classList.contains("on")); return; }
   const tg = Number(b.closest(".tg-row").dataset.key);
   const r = ui.tgIndex && ui.tgIndex.get(tg);
   if (!r) return;

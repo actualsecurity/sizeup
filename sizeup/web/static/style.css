@@ -531,3 +531,10 @@ body.modal { overflow: hidden; }
 .seg button:last-of-type { border-radius: 0 4px 4px 0; }
 .seg button.active { background: #3ddc97; color: #0b0b14; border-color: #3ddc97; font-weight: 700; }
 .seg button:disabled { opacity: 0.5; cursor: wait; }
+
+/* Whole-section Record switch in the Talkgroups panel */
+.tg-gspacer { flex: 1; }
+.sw.gsw { font-size: 0.85em; }
+.sw.gsw.mixed .knob { background: var(--warn, #ffb020); }
+.sw.gsw.mixed .knob::after { transform: translateX(0.45em); background: #fff; }
+.sw.gsw:disabled { opacity: 0.4; cursor: not-allowed; }
