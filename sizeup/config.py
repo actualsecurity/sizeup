@@ -51,6 +51,7 @@ class Config:
     mdc_aliases: dict[str, str] = field(default_factory=dict)   # MDC-1200 unit ID ("0611") -> name
     unit_departments: dict[str, str] = field(default_factory=dict)  # "Engine 60" -> "Port Chester FD"
     unit_callsigns: dict[str, str] = field(default_factory=dict)    # "2398" -> "2398 Duty Officer"
+    stt_talker_prompt: str = "off"    # "ids": hint whisper with who keyed up ("77 Alpha 4, 60 Control"); "ids+time": + HHMM
     shared_device: str = ""      # one dongle for everything (bench): switch channel / P25 in the web app
     start_mode: str = ""         # with shared_device: what the dongle does at startup ("South 2", "FG1", "Fire/EMS 15")
     p25_recorder: str = ""       # trunk-recorder command line, started/stopped by sizeup
@@ -107,7 +108,10 @@ def load(path: str | Path) -> Config:
                               t.get("agency", "")))
         if t.get("ours", False):
             ours.add(t["name"])
-    stt = _take(data.get("stt", {}), "stt", {"server_binary", "model", "port", "threads", "prompt"})
+    stt = _take(data.get("stt", {}), "stt", {"server_binary", "model", "port", "threads", "prompt", "talker_prompt"})
+    talker_mode = str(stt.get("talker_prompt", "off"))
+    if talker_mode not in ("off", "ids", "ids+time"):
+        raise ConfigError('stt.talker_prompt: "off", "ids" or "ids+time"')
     p25 = _take(data.get("p25", {}), "p25", {"capture_dir", "talkgroups", "talkgroups_file", "incident_talkgroups",
                                              "aliases", "recorder", "recorder_dir"})
     p25_tgs = {int(k): v for k, v in p25.get("talkgroups", {"307": "Fire/EMS 15"}).items()}
@@ -164,6 +168,7 @@ def load(path: str | Path) -> Config:
         ours=frozenset(ours | {"Port Chester FD", "Rye Brook FD"}),
         stt_server=stt.get("server_binary", "whisper-server"), stt_model=rel(stt.get("model", "models/ggml-large-v3-turbo.bin")),
         stt_port=int(stt.get("port", 8179)), stt_threads=int(stt.get("threads", 8)), stt_prompt=stt.get("prompt", ""),
+        stt_talker_prompt=talker_mode,
         p25_dir=rel(p25.get("capture_dir", "")),
         p25_talkgroups=p25_tgs, p25_tg_info=p25_info,
         p25_incident_talkgroups=frozenset(int(x) for x in p25.get("incident_talkgroups", [307, 333])),

@@ -318,3 +318,22 @@ def test_rerun_waits_behind_live_traffic():
     tr.submit("live-2", np.zeros(1), priority=LIVE)
     order = [tr._q.get_nowait()[2] for _ in range(4)]
     assert order == ["live-1", "live-2", "rerun-1", "rerun-2"]
+
+
+def test_talker_prompt_reaches_whisper_only_when_switched_on(tmp_path):
+    seen = []
+
+    class Spy(FakeWhisper):
+        def transcribe(self, audio, prompt=""):
+            seen.append(prompt)
+            return "77 Alpha 3, arrival Stamford", 0.9
+
+    now = time.time()
+    for mode, want in (("off", ""), ("ids", "77 Alpha 3, 60 Control.")):  # talkers in talk order
+        seen.clear()
+        app = App(replace(cfg(tmp_path / mode), p25_talkgroups={307: "Fire/EMS 15"}, stt_talker_prompt=mode))
+        app.stt.client = Spy({})
+        app.stt.start()
+        app._call(Call(f"307-{mode}", 307, "Fire/EMS 15", now, now + 2, ["77A3", "60 Ctrl OP 7"], voice(2.0), ""))
+        assert wait(lambda: seen)
+        assert seen[0] == want

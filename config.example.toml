@@ -46,6 +46,7 @@ model = "models/ggml-large-v3-turbo.bin"
 port = 8179
 threads = 8
 prompt = ""                        # optional vocabulary hint (can make the model insert words: off by default)
+talker_prompt = "off"              # "ids": hint each call with who keyed up ("77 Alpha 4, 60 Control"); "ids+time": also its HHMM
 
 [p25]
 # trunk-recorder capture directory (Westchester County P25, South simulcast site). Empty = no P25.

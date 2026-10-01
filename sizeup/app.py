@@ -38,6 +38,7 @@ from sizeup.radio.p25 import Call, CallIngest
 from sizeup.radio.recorder import TrunkRecorder
 from sizeup.radio.page import Page, assemble, page_from_dict
 from sizeup.radio.tones import TonePlan
+from sizeup.talkers import talker_prompt
 from sizeup.stt import LIVE, RERUN, Transcriber, WhisperClient, radio_voice, wav_bytes
 from sizeup.talkgroups import TalkgroupPrefs
 from sizeup.web.server import WebServer
@@ -104,6 +105,8 @@ class Rerun:
     kind: str                 # "traffic" | "page"
     fm: bool                  # FM audio still needs de-emphasis (False for P25 and for saved listening clips)
     low_energy: bool = False
+    unit: str = ""            # talkers, for the speech-to-text hint (same as the live pass)
+    start: float | None = None
     status: str = "pending"
     raw: str = ""
     confidence: float | None = None
@@ -114,7 +117,7 @@ class App:
         self.plan = TonePlan(list(cfg.tones))
         self.whisper = WhisperService(cfg.stt_server, cfg.stt_model, cfg.stt_port, cfg.stt_threads)
         self.stt = Transcriber(WhisperClient(f"http://127.0.0.1:{cfg.stt_port}/inference"), self._transcribed,
-                               prompt=lambda item: cfg.stt_prompt)
+                               prompt=self._prompt)
         self.gaz = self._load_gazetteer()
         self.keep_s = cfg.keep_hours * 3600
         self._lock = threading.Lock()
@@ -256,6 +259,15 @@ class App:
                 (self.clips_dir / f"{cid}.wav").write_bytes(wav_bytes(pcm, RATE))
             except OSError:
                 pass
+
+    def _prompt(self, item) -> str:
+        """whisper's prompt for one recording: the configured text, plus (stt.talker_prompt) the
+        talkers on this call as they're said on the air."""
+        parts = [self.cfg.stt_prompt]
+        if self.cfg.stt_talker_prompt != "off":
+            parts.append(talker_prompt(getattr(item, "unit", "") or "", getattr(item, "start", None),
+                                       with_time=self.cfg.stt_talker_prompt == "ids+time"))
+        return " ".join(p for p in parts if p)
 
     def _keep_source(self, cid: str, audio: np.ndarray | None) -> None:
         """The exact audio speech-to-text was given (before the listening filter), kept with the
@@ -464,7 +476,7 @@ class App:
             if (want is None or p.id in want) and p.id not in busy and p.id not in seen:
                 got = self._rerun_audio(p.id, True, p.voice_offset_s)
                 if got:
-                    jobs.append((p.start, Rerun(p.id, "page", got[1]), got[0]))
+                    jobs.append((p.start, Rerun(p.id, "page", got[1], start=p.start), got[0]))
                     seen.add(p.id)
         traffic = list(self.store.loose) + [t for i in self.store.incidents for t in i.traffic]
         for t in traffic:
@@ -472,7 +484,7 @@ class App:
                 got = self._rerun_audio(t.id, getattr(t, "fm", True))
                 if got:
                     low = speech_seconds(got[0]) < MIN_SPEECH_S  # same mic-click rule as the live pass
-                    jobs.append((t.start, Rerun(t.id, "traffic", got[1], low), got[0]))
+                    jobs.append((t.start, Rerun(t.id, "traffic", got[1], low, t.unit, t.start), got[0]))
                     seen.add(t.id)
         jobs.sort(key=lambda j: -j[0])  # newest first: what's on screen updates first
         with self._lock:
