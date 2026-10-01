@@ -35,6 +35,7 @@ from sizeup.radio.recorder import TrunkRecorder
 from sizeup.radio.page import Page, assemble, page_from_dict
 from sizeup.radio.tones import TonePlan
 from sizeup.stt import Transcriber, WhisperClient, radio_voice, wav_bytes
+from sizeup.talkgroups import TalkgroupPrefs
 from sizeup.web.server import WebServer
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -108,6 +109,9 @@ class App:
                                    path=(self.clips_dir.parent / "incidents.json") if self.clips_dir else None)
         self.pages: deque[Page] = deque(maxlen=1000)
         self._load_pages()
+        self.tg = TalkgroupPrefs(cfg.p25_tg_info or {k: {"name": v} for k, v in cfg.p25_talkgroups.items()},
+                                 set(cfg.p25_incident_talkgroups),
+                                 (self.clips_dir.parent / "talkgroups.json") if self.clips_dir else None)
         self._lock = threading.Lock()
         self._last_tones_only: Page | None = None
         self.receivers = [NfmReceiver(cfg.rtl_fm, c.device, c.gain_db, Channel(c.mhz, c.label),
@@ -269,6 +273,10 @@ class App:
             + ", ".join(f"{t.a_hz:.1f}/{(t.b_hz or 0):.1f} Hz" for t in page.tones))
 
     def _call(self, call: Call) -> None:
+        if not self.tg.record(call.talkgroup):  # switched off in the web app: dropped on arrival
+            self.tg.seen(call.talkgroup, dropped=True)
+            return
+        self.tg.seen(call.talkgroup)
         t = Traffic(call.id, call.label, call.start, call.end, "", status="pending",
                     unit=", ".join(call.units), talkgroup=call.talkgroup)
         if call.audio is not None:
@@ -290,7 +298,7 @@ class App:
     def _transcribed(self, item) -> None:
         if isinstance(item, Traffic):
             item.text = getattr(item, "raw", "")
-            attach = item.talkgroup is None or item.talkgroup in self.cfg.p25_incident_talkgroups
+            attach = item.talkgroup is None or self.tg.main(item.talkgroup)
             if item.status == "no_speech":
                 log(f"{item.source}: mic click ({item.end - item.start:.1f} s, no speech) skipped"
                     + (f" · unit {item.unit}" if item.unit else ""))
@@ -385,6 +393,14 @@ class App:
                 self.switching = False
         return None
 
+    def set_talkgroup(self, tg: int, record: bool | None = None, main: bool | None = None) -> str | None:
+        """POST /api/talkgroup: record = keep its calls; main = main list + attach to our incident."""
+        if not self.p25:
+            return "no P25 configured"
+        self.tg.set(int(tg), record, main)
+        log(f"talkgroup {tg} ({self.tg.name(int(tg))}): record={self.tg.record(int(tg))} main={self.tg.main(int(tg))}")
+        return None
+
     def sdr(self) -> dict | None:
         return ({"shared": True, "mode": self.mode, "modes": self.modes, "switching": self.switching}
                 if self.shared else None)
@@ -420,7 +436,8 @@ class App:
     def state(self) -> dict:
         with self._lock:
             pages = [dict(p.as_dict(), dispatch=getattr(p, "dispatch", None)) for p in list(self.pages)[:50]]
-        st = {"time": time.time(), "radios": self.radios(), **self.store.state(), "pages": pages, "sdr": self.sdr()}
+        st = {"time": time.time(), "radios": self.radios(), **self.store.state(), "pages": pages, "sdr": self.sdr(),
+              "talkgroups": self.tg.state() if self.p25 else []}
         # Tell the display which entries have a recording (so ▶ isn't a dead button).
         for p in st["pages"]:
             p["has_audio"] = self.has_clip(p["id"])
@@ -481,7 +498,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"config: {e}", file=sys.stderr)
         return 2
     app = App(cfg).start()
-    server = WebServer(cfg.host, cfg.port, app.scene(), app.state, app.clip, app.store.close, app.set_mode)
+    server = WebServer(cfg.host, cfg.port, app.scene(), app.state, app.clip, app.store.close, app.set_mode,
+                       app.set_talkgroup)
     signal.signal(signal.SIGTERM, lambda *_: server.shutdown())
     log(f"sizeup: {cfg.station_name} · {len(cfg.channels)} channel(s)"
         + (f" · P25 {cfg.p25_dir}" if cfg.p25_dir else "") + f" · {server.url}")

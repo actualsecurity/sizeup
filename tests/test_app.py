@@ -204,3 +204,29 @@ def test_trunk_recorder_missing_dongle_is_reported_plainly(tmp_path):
         assert "not connected" in r.detail and r.restarts == 0 and events == []
     finally:
         r.stop()
+
+
+def test_talkgroup_record_and_main_switches(tmp_path):
+    # User: poll all talkgroups, group the others, toggle which are recorded from the UI.
+    from dataclasses import replace
+    info = {307: {"name": "Fire/EMS 15", "group": "Fire/EMS", "encrypted": False},
+            383: {"name": "WCPD Ch 1", "group": "County Police", "encrypted": False},
+            391: {"name": "WCPD Hotline", "group": "County Police", "encrypted": True}}
+    c = replace(cfg(tmp_path), p25_dir=str(tmp_path / "p25"), p25_talkgroups={k: v["name"] for k, v in info.items()},
+                p25_tg_info=info, p25_incident_talkgroups=frozenset({307}))
+    app = App(c)
+    sent = []
+    app.stt.submit = lambda item, audio: sent.append(item)
+    rows = {r["tg"]: r for r in app.state()["talkgroups"]}
+    assert rows[307]["main"] and rows[307]["record"] and not rows[383]["main"] and rows[383]["record"]
+    assert not rows[391]["record"]                                   # encrypted: off by default
+    now = time.time()
+    app._call(Call("383-a", 383, "WCPD Ch 1", now, now + 2, [], np.zeros(RATE * 2, np.float32)))
+    assert len(sent) == 1
+    assert app.set_talkgroup(383, record=False) is None
+    app._call(Call("383-b", 383, "WCPD Ch 1", now + 5, now + 7, [], np.zeros(RATE * 2, np.float32)))
+    assert len(sent) == 1                                            # dropped on arrival
+    assert app.set_talkgroup(383, main=True) is None and app.tg.main(383)
+    again = App(c)                                                   # choices survive a restart
+    assert not again.tg.record(383) and again.tg.main(383)
+    assert {r["tg"]: r for r in again.state()["talkgroups"]}[383]["dropped"] == 0

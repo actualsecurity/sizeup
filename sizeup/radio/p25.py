@@ -52,13 +52,14 @@ def read_wav_16k(path: Path) -> np.ndarray:
     return x.astype(np.float32)
 
 
-def parse_call(meta_path: Path, labels: dict[int, str], aliases: dict[str, str] | None = None) -> Call | None:
+def parse_call(meta_path: Path, labels: dict[int, str], aliases: dict[str, str] | None = None,
+               record_all: bool = False) -> Call | None:
     try:
         d = json.loads(meta_path.read_text())
     except (OSError, ValueError):
         return None
     tg = d.get("talkgroup")
-    if tg not in labels:
+    if not isinstance(tg, int) or (tg not in labels and not record_all):
         return None
     aliases = aliases or {}
     units = []
@@ -70,7 +71,7 @@ def parse_call(meta_path: Path, labels: dict[int, str], aliases: dict[str, str] 
         if not units or units[-1] != name:
             units.append(name)
     wav = meta_path.with_suffix(".wav")
-    return Call(meta_path.stem, int(tg), labels[tg], float(d.get("start_time", 0)),
+    return Call(meta_path.stem, int(tg), labels.get(tg) or f"TG {tg}", float(d.get("start_time", 0)),
                 float(d.get("stop_time", d.get("start_time", 0))), units, None, str(wav))
 
 
@@ -81,6 +82,7 @@ class CallIngest:
                  aliases: dict[str, str] | None = None, poll_s: float = 1.0,
                  on_event: Callable[[str], None] = lambda m: None, name: str = "P25"):
         self.name = name  # status label (the header pill), not every talkgroup's name
+        self.record_all = True  # every talkgroup trunk-recorder writes (sizeup decides what to keep)
         self.dir, self.labels, self.on_call = Path(capture_dir), labels, on_call
         self.aliases, self.poll_s, self.on_event = aliases or {}, poll_s, on_event
         self._seen: set[str] = set()
@@ -116,7 +118,7 @@ class CallIngest:
             if not wav.exists():
                 continue  # audio not finished yet: pick it up next poll
             self._seen.add(key)
-            call = parse_call(meta, self.labels, self.aliases)
+            call = parse_call(meta, self.labels, self.aliases, record_all=self.record_all)
             if call is None:
                 continue
             try:

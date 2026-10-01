@@ -1,3 +1,81 @@
-Decimal,Hex,Alpha Tag,Mode,Description,Tag,Category
-307,133,Fire/EMS 15,T,Fire/EMS 15 (Battalion 15: Port Chester / Rye Brook),Fire Dispatch,Westchester
-333,14d,Airport Incident,T,Airport Incidents (KHPN; Port Chester first due),Fire Dispatch,Westchester
+Decimal,Hex,Alpha Tag,Mode,Description,Tag,Category,Priority
+359,167,WCPD PSD,T,"PSD",County Police,Westchester,3
+363,16b,WCPD Muni,T,"Muni",County Police,Westchester,3
+365,16d,WCPD PSD Event,T,"PSD Event",County Police,Westchester,3
+367,16f,WCPD SOD,T,"SOD",County Police,Westchester,3
+371,173,WCPD Detectives,T,"Detectives",County Police,Westchester,3
+375,177,WCPD Playland,T,"Rye Playland",County Police,Westchester,3
+377,179,WCPD Parks,T,"Parks",County Police,Westchester,3
+381,17d,WCPD Admin,T,"Admin",County Police,Westchester,3
+383,17f,WCPD Ch 1,T,"Ch 1 (Patched with 155.310)",County Police,Westchester,3
+385,181,WCPD Ch 3,T,"Ch 3 (Patched with 155.550)",County Police,Westchester,3
+387,183,WCPD Car-to-Car,T,"Car-to-Car",County Police,Westchester,3
+391,187,WCPD Hotline,TE,"Hotline Secure",County Police,Westchester,3
+301,12d,60 Control,T,"60 Control",Fire/EMS,Westchester,2
+111,06f,Fire/EMS 10,T,"Fire/EMS 10 (Battalion 10)",Fire/EMS,Westchester,2
+113,071,Fire/EMS 11,T,"Fire/EMS 11 (Battalion 11)",Fire/EMS,Westchester,2
+303,12f,Fire/EMS 12,T,"Fire/EMS 12 (Battalion 12)",Fire/EMS,Westchester,2
+103,067,Fire/EMS 13,T,"Fire/EMS 13 (Battalion 13)",Fire/EMS,Westchester,2
+305,131,Fire/EMS 14,T,"Fire/EMS 14 (Battalion 14)",Fire/EMS,Westchester,2
+307,133,Fire/EMS 15,T,"Fire/EMS 15 (Battalion 15: Port Chester / Rye Brook)",Fire/EMS,Westchester,1
+105,069,Fire/EMS 16,T,"Fire/EMS 16 (Battalion 16)",Fire/EMS,Westchester,2
+107,06b,Fire/EMS 17,T,"Fire/EMS 17 (Battalion 17)",Fire/EMS,Westchester,2
+309,135,Fire/EMS 18,T,"Fire/EMS 18 (Battalion 18)",Fire/EMS,Westchester,2
+311,137,Fire/EMS 19,T,"Fire/EMS 19 (Battalion 19)",Fire/EMS,Westchester,2
+325,145,Fire/EMS 20,T,"Fire/EMS 20",Fire/EMS,Westchester,2
+327,147,Fire/EMS 21,T,"Fire/EMS 21",Fire/EMS,Westchester,2
+329,149,Fire/EMS 22,T,"Fire/EMS 22",Fire/EMS,Westchester,2
+331,14b,Fire/EMS 23,T,"Fire/EMS 23",Fire/EMS,Westchester,2
+333,14d,Airport Incident,T,"Airport Incidents (KHPN; Port Chester first due)",Fire/EMS,Westchester,1
+335,14f,Hazmat,T,"Hazmat",Fire/EMS,Westchester,2
+337,151,Tech Rescue,T,"Tech Rescue",Fire/EMS,Westchester,2
+2323,913,EMS MCI 1,T,"EMS MCI 1",Fire/EMS,Westchester,2
+2325,915,EMS MCI 2,T,"EMS MCI 2",Fire/EMS,Westchester,2
+2103,837,HudsonValley Hsp,TE,"Hudson Valley",Hospital,Westchester,3
+2105,839,N Westchestr Hsp,TE,"North Westchester",Hospital,Westchester,3
+2107,83b,New Rochelle Hsp,TE,"New Rochelle",Hospital,Westchester,3
+2109,83d,Phelps Hsp,TE,"Phelps",Hospital,Westchester,3
+2111,83f,WCMC Hsp,TE,"Westchester Medical Center",Hospital,Westchester,3
+2113,841,White Plains Hsp,TE,"White Plains",Hospital,Westchester,3
+2115,843,Greenwich Hsp,TE,"Greenwich",Hospital,Westchester,3
+2117,845,Dobbs Ferry Hsp,TE,"Dobbs Ferry",Hospital,Westchester,3
+2119,847,Lawrence Hsp,TE,"Lawrence",Hospital,Westchester,3
+2121,849,St John's Hsp,TE,"Saint John's",Hospital,Westchester,3
+2123,84b,St Joseph's Hsp,TE,"Saint Joseph's",Hospital,Westchester,3
+2125,84d,Mount Vernon Hsp,TE,"Mount Vernon",Hospital,Westchester,3
+2139,85b,Putnam Hsp,TE,"Putnam",Hospital,Westchester,3
+339,153,Trunk Ops 1,T,"Trunk Ops 1",Operations,Westchester,3
+341,155,Trunk Ops 2,T,"Trunk Ops 2",Operations,Westchester,3
+343,157,Trunk Ops 3,T,"Trunk Ops 3",Operations,Westchester,3
+345,159,Trunk Ops 4,T,"Trunk Ops 4",Operations,Westchester,3
+347,15b,Trunk Ops 5,T,"Trunk Ops 5",Operations,Westchester,3
+349,15d,Trunk Ops 6,T,"Trunk Ops 6",Operations,Westchester,3
+351,15f,Private 1,TE,"Private 1",Operations,Westchester,3
+353,161,Private 2,TE,"Private 2",Operations,Westchester,3
+355,163,Private 3,TE,"Private 3",Operations,Westchester,3
+357,165,Private 4,TE,"Private 4",Operations,Westchester,3
+2311,907,Interop 1,T,"Interop 1",Interop/Events,Westchester,3
+2313,909,Interop 2,T,"Interop 2",Interop/Events,Westchester,3
+2315,90b,Interop 3,T,"Interop 3",Interop/Events,Westchester,3
+2317,90d,Interop 4,T,"Interop 4",Interop/Events,Westchester,3
+2327,917,Special Events 1,T,"Special Events 1",Interop/Events,Westchester,3
+2329,919,Special Events 2,T,"Special Events 2",Interop/Events,Westchester,3
+2331,91b,Special Events 3,T,"Special Events 3",Interop/Events,Westchester,3
+2333,91d,Special Events 4,T,"Special Events 4",Interop/Events,Westchester,3
+2501,9c5,OEM Ops,T,"Operations",OEM,Westchester,3
+2503,9c7,OEM Calling,T,"Calling",OEM,Westchester,3
+1325,52d,DOT Dispatch 1,T,"DOT Dispatch 1",DOT,Westchester,3
+1327,52f,DOT Dispatch 2,T,"DOT Dispatch 2",DOT,Westchester,3
+1329,531,DOT Dispatch 3,T,"DOT Dispatch 3",DOT,Westchester,3
+1331,533,DOT Dispatch 4,T,"DOT Dispatch 4",DOT,Westchester,3
+1333,535,DOT Dispatch 5,T,"DOT Dispatch 5",DOT,Westchester,3
+2305,901,DOT/LLT Radio,T,"DOT/LLT Radio",DOT,Westchester,3
+3115,c2b,PTLA Enterprise,T,"PTLA Enterprise",DOT,Westchester,3
+3119,c2f,DOT Supervisor 1,T,"DOT Supervisor 1",DOT,Westchester,3
+3120,c30,DOT Supervisor 2,T,"DOT Supervisor 2",DOT,Westchester,3
+3127,c37,LLT Supervisor 1,T,"LLT Supervisor 1",DOT,Westchester,3
+3129,c39,LLT Supervisor 2,T,"LLT Supervisor 2",DOT,Westchester,3
+3133,c3d,LLT Maintenance1,T,"LLT Maintenance 1",DOT,Westchester,3
+3135,c3f,LLT Maintenance2,T,"LLT Maintenance 2",DOT,Westchester,3
+3137,c41,DOT Maintenance1,T,"DOT Maintenance 1",DOT,Westchester,3
+3138,c42,DOT Maintenance2,T,"DOT Maintenance 2",DOT,Westchester,3

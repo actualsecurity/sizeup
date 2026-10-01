@@ -6,7 +6,7 @@
       "rate": 2400000,
       "error": 0,
       "gain": 40,
-      "digitalRecorders": 4,
+      "digitalRecorders": 8,
       "driver": "osmosdr",
       "device": "rtl=00000001"
     }
@@ -18,7 +18,7 @@
       "modulation": "qpsk",
       "control_channels": [476075000, 476112500, 476212500, 476237500],
       "talkgroupsFile": "talkgroups.csv",
-      "recordUnknown": false,
+      "recordUnknown": true,
       "hideUnknownTalkgroups": true,
       "compressWav": false
     }

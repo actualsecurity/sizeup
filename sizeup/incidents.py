@@ -102,7 +102,7 @@ class IncidentStore:
         self.geocode, self.clock = geocode, clock
         self._lock = threading.Lock()
         self.incidents: deque[Incident] = deque(maxlen=HISTORY)
-        self.loose: deque[Traffic] = deque(maxlen=200)  # traffic with no active incident
+        self.loose: deque[Traffic] = deque(maxlen=1000)  # traffic with no active incident / other talkgroups
         # Saved on every change and reloaded on start, so a restart doesn't wipe the screen.
         self.path, self.keep_s = (Path(path) if path else None), keep_s
         self._load()
@@ -212,4 +212,4 @@ class IncidentStore:
         self.active()  # age out quiet incidents
         with self._lock:
             return {"incidents": [i.as_dict() for i in reversed(self.incidents)],
-                    "loose_traffic": [t.as_dict() for t in list(self.loose)[-50:]]}
+                    "loose_traffic": [t.as_dict() for t in list(self.loose)[-300:]]}

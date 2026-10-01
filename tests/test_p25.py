@@ -23,10 +23,12 @@ def test_scan_keeps_our_talkgroups_resamples_and_names_units(tmp_path):
     write_call(day, "307-1789999000_478187500-call_0", 307, [1])  # already there at startup: not replayed
     ing = CallIngest(tmp_path, LABELS, on_call=lambda c: None, aliases={"2391001": "2391"}).prime()
     write_call(day, "307-1790000000_478187500-call_1", 307, [2391001, 2391001, 6000123])
-    write_call(day, "999-1790000001_478187500-call_2", 999, [5])            # someone else's TG
+    write_call(day, "999-1790000001_478187500-call_2", 999, [5])            # a talkgroup not in our list
     (day / "301-1790000002_478312500-call_3.json").write_text(json.dumps({"talkgroup": 301}))  # wav not done yet
     calls = ing.scan()
-    assert [c.label for c in calls] == ["Fire/EMS 15"]
+    # Every talkgroup is ingested (sizeup decides what to keep); unlisted ones are named "TG n".
+    assert sorted(c.label for c in calls) == ["Fire/EMS 15", "TG 999"]
+    calls = [c for c in calls if c.talkgroup == 307]
     c = calls[0]
     assert c.units == ["2391", "6000123"] and c.talkgroup == 307
     assert len(c.audio) == 32000 and c.audio.dtype == np.float32   # 2 s at 16 kHz
