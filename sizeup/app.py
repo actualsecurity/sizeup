@@ -136,6 +136,7 @@ class WhisperService:
 
 
 
+CLIP_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,120}")
 MIN_TURN_S = 0.35   # a key-up shorter than this is a blip: folded into its neighbour, not its own row
 
 
@@ -344,7 +345,9 @@ class App:
             pass
 
     def clip(self, cid: str) -> bytes | None:
-        if not cid.replace("-", "").replace("_", "").isalnum():
+        # P25 ids carry trunk-recorder's timestamp ("307-1790954731.970_476112500.0-call_11-t2"):
+        # dots are allowed, but nothing that could leave the clips folder.
+        if not CLIP_ID.fullmatch(cid) or ".." in cid:
             return None
         with self._lock:
             hit = self.clips.get(cid)

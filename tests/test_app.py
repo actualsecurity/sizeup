@@ -369,3 +369,14 @@ def test_call_is_split_into_one_row_per_talker(tmp_path):
     assert wait(lambda: len(seen) == 2)
     assert sorted(seen) == ["60 Control.", "77 Alpha 3."]                   # each piece hinted with its own talker
     assert sorted(t.unit for t in app.store.loose) == ["60 Ctrl OP 6", "77A3"]
+
+
+def test_p25_clip_ids_with_dots_play_and_paths_dont(tmp_path):
+    app = App(replace(cfg(tmp_path), p25_talkgroups={307: "Fire/EMS 15"}))
+    app.stt.submit = lambda item, audio, priority=0: True
+    cid = "307-1790954731.970_476112500.0-call_11"
+    app._call(Call(cid, 307, "Fire/EMS 15", time.time(), time.time() + 2, ["77A4"], voice(2.0), ""))
+    app.clips.clear()                                   # served from disk, as after a restart
+    assert app.clip(cid)[:4] == b"RIFF"
+    for bad in ("../incidents", "..", "a/../../x", "/etc/passwd", ".hidden", ""):
+        assert app.clip(bad) is None
