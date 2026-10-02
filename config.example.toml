@@ -45,6 +45,7 @@ server_binary = "whisper-server"   # whisper.cpp server; the model stays loaded
 model = "models/ggml-large-v3-turbo.bin"
 port = 8179
 threads = 8
+beam_size = 0                      # whisper beam search width (0 = greedy). 5 = fewer garbled digit strings, ~10% slower
 prompt = ""                        # optional vocabulary hint (can make the model insert words: off by default)
 talker_prompt = "off"              # "ids": hint each call with who keyed up ("77 Alpha 4, 60 Control"); "ids+time": also its HHMM
 

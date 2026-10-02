@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import signal
 import socket
@@ -58,13 +59,44 @@ def log(msg: str) -> None:
 
 
 class WhisperService:
-    """Keep whisper-server running (model stays loaded). Reuses one already on the port."""
+    """Keep whisper-server running (model stays loaded). A server sizeup started earlier (recorded
+    in state_path) is reused when its model/flags still match the config and replaced when they
+    don't; a server on the port that sizeup didn't start is used as-is, never killed."""
 
-    def __init__(self, binary: str, model: str, port: int, threads: int):
+    def __init__(self, binary: str, model: str, port: int, threads: int, beam_size: int = 0,
+                 state_path: str | Path | None = None):
         self.argv = [binary, "-m", model, "--host", "127.0.0.1", "--port", str(port), "-t", str(threads)]
+        if beam_size > 1:
+            self.argv += ["-bs", str(beam_size)]
         self.port, self.state, self.detail = port, "starting", ""
+        self.state_path = Path(state_path) if state_path else None
         self._proc: subprocess.Popen | None = None
         self._stop = threading.Event()
+
+    def _ours(self) -> tuple[int, list[str]] | None:
+        """(pid, argv) of the whisper-server sizeup last started, if that process is still it."""
+        try:
+            d = json.loads(self.state_path.read_text()) if self.state_path else None
+            pid, argv = int(d["pid"]), list(d["argv"])
+            args = subprocess.run(["ps", "-o", "args=", "-p", str(pid)], capture_output=True, text=True,
+                                  timeout=5).stdout.strip()
+        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+            return None
+        return (pid, argv) if "whisper-server" in args and f"--port {self.port}" in args else None
+
+    def _replace_stale(self) -> None:
+        ours = self._ours()
+        if not ours or ours[1] == self.argv:
+            return
+        log(f"whisper-server: config changed ({' '.join(ours[1][2:3])} -> {' '.join(self.argv[2:3])}), restarting it")
+        try:
+            os.kill(ours[0], signal.SIGTERM)
+        except OSError:
+            return
+        for _ in range(40):
+            if not self.up():
+                return
+            time.sleep(0.5)
 
     def up(self) -> bool:
         try:
@@ -84,6 +116,7 @@ class WhisperService:
 
     def _run(self) -> None:
         backoff = 2.0
+        self._replace_stale()
         while not self._stop.is_set():
             if self.up():
                 self.state, self.detail, backoff = "ok", "speech-to-text ready", 2.0
@@ -91,6 +124,11 @@ class WhisperService:
                 try:
                     self._proc = subprocess.Popen(self.argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                     self.state, self.detail = "starting", "loading model"
+                    if self.state_path:
+                        try:
+                            self.state_path.write_text(json.dumps({"pid": self._proc.pid, "argv": self.argv}))
+                        except OSError:
+                            pass
                 except OSError as e:
                     self.state, self.detail = "down", f"cannot start whisper-server: {e}"
                     backoff = min(backoff * 2, 30)
@@ -139,7 +177,8 @@ class App:
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self.plan = TonePlan(list(cfg.tones))
-        self.whisper = WhisperService(cfg.stt_server, cfg.stt_model, cfg.stt_port, cfg.stt_threads)
+        self.whisper = WhisperService(cfg.stt_server, cfg.stt_model, cfg.stt_port, cfg.stt_threads, cfg.stt_beam_size,
+                                      (Path(cfg.clips_dir).parent / "whisper-server.json") if cfg.clips_dir else None)
         self.stt = Transcriber(WhisperClient(f"http://127.0.0.1:{cfg.stt_port}/inference"), self._transcribed,
                                prompt=self._prompt)
         self.gaz = self._load_gazetteer()
