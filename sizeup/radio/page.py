@@ -77,6 +77,7 @@ def page_from_dict(d: dict) -> Page:
     p.dispatch = d.get("dispatch")  # type: ignore[attr-defined]
     p.history = d.get("history") or []  # type: ignore[attr-defined]
     p.rerun_at = d.get("rerun_at")  # type: ignore[attr-defined]
+    p.model = d.get("model", "")  # type: ignore[attr-defined]
     return p
 
 

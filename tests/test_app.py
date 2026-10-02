@@ -292,7 +292,8 @@ def test_rerun_one_or_all_replaces_text_keeps_history_and_survives_restart(tmp_p
     assert wait(lambda: app.state()["rerun"]["pending"] == 0)
     t = next(t for t in app.store.loose if t.id == "307-a")
     assert t.text == "77 Alpha 4, Sixty Control, 1937"
-    assert t.history[-1]["text"] == "77 Alpha 4 joe evac 1937" and t.history[-1]["model"] == "m.bin"
+    assert t.history[-1]["text"] == "77 Alpha 4 joe evac 1937" and t.history[-1]["model"] == "m.bin"   # who wrote the old text
+    assert t.model == "m.bin"
 
     # Everything: the unchanged one gets no history entry.
     assert app.retranscribe(None) == 2

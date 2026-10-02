@@ -226,9 +226,10 @@ class IncidentStore:
                 hit = True
                 if t.text != text:
                     hist = list(getattr(t, "history", None) or [])
-                    hist.append({"text": t.text, "at": at, "model": model})
+                    # "model" = the model that wrote the text being replaced ("" = not recorded)
+                    hist.append({"text": t.text, "at": at, "model": getattr(t, "model", "") or ""})
                     t.history = hist[-5:]  # type: ignore[attr-defined]
-                t.text, t.status = text, status
+                t.text, t.status, t.model = text, status, model  # type: ignore[attr-defined]
                 t.confidence, t.rerun_at = confidence, at  # type: ignore[attr-defined]
             for inc in self.incidents:
                 for k, pid in enumerate(inc.pages):

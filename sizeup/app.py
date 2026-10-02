@@ -303,7 +303,8 @@ class App:
             return
         try:
             d = dict(page.as_dict(), dispatch=getattr(page, "dispatch", None),
-                     history=getattr(page, "history", None) or [], rerun_at=getattr(page, "rerun_at", None))
+                     history=getattr(page, "history", None) or [], rerun_at=getattr(page, "rerun_at", None),
+                     model=getattr(page, "model", ""))
             (self.clips_dir / f"{page.id}.page.json").write_text(json.dumps(d))
         except OSError:
             pass
@@ -462,12 +463,14 @@ class App:
                 return
             if hasattr(item, "raw_audio"):
                 del item.raw_audio
+            item.model = Path(self.cfg.stt_model).name  # type: ignore[attr-defined]  (which model wrote this text)
             self.store.on_traffic(item, attach=attach)
             log(f"{item.source}: {'[' + item.unit + '] ' if item.unit else ''}{item.text or '(' + item.status + ')'}")
             return
         if isinstance(item, Rerun):
             return self._rerun_done(item)
         page: Page = item
+        page.model = Path(self.cfg.stt_model).name  # type: ignore[attr-defined]
         d = self._dispatch(page.raw)
         page.dispatch = d.as_dict() if d else None  # type: ignore[attr-defined]
         self._save_page(page)
@@ -578,11 +581,11 @@ class App:
             if page is not None:
                 if page.raw != text:
                     hist = list(getattr(page, "history", None) or [])
-                    hist.append({"text": page.raw, "at": time.time(), "model": model})
+                    hist.append({"text": page.raw, "at": time.time(), "model": getattr(page, "model", "") or ""})
                     page.history = hist[-5:]  # type: ignore[attr-defined]
                     changed = True
                 page.raw, page.confidence = text, job.confidence
-                page.rerun_at = time.time()  # type: ignore[attr-defined]
+                page.rerun_at, page.model = time.time(), model  # type: ignore[attr-defined]
                 page.status = "done" if text else "no_speech"
                 d = self._dispatch(text)
                 page.dispatch = d.as_dict() if d else None  # type: ignore[attr-defined]

@@ -172,7 +172,7 @@ function historyTag(hist, rerunAt) {
   const tag = el("span", "dim was", same ? "re-run · same" : "re-run");
   const lines = same ? [`Re-run ${fmtTime(rerunAt, false)}: same text`] : [];
   for (const h of hist.slice().reverse())
-    lines.push(`Before (${h.model || "?"}, ${fmtTime(h.at, false)}): ${h.text || "(no speech)"}`);
+    lines.push(`Replaced ${fmtTime(h.at, false)} — was (${h.model || "earlier model"}): ${h.text || "(no speech)"}`);
   tag.title = lines.join("\n");
   return tag;
 }
@@ -282,7 +282,7 @@ function playClip(id) {
   const a = new Audio(`/api/audio/${encodeURIComponent(id)}.wav`);
   player.audio = a;
   player.id = id;
-  a.addEventListener("ended", () => { if (player.audio === a) stopClip(); });
+  a.addEventListener("ended", () => { if (player.audio === a) stopClip(); livePump(); });
   a.addEventListener("error", () => {
     player.missing.add(id);
     if (player.audio === a) stopClip();
@@ -295,6 +295,89 @@ function playClip(id) {
 document.addEventListener("click", (e) => {
   const b = e.target.closest("[data-play]");
   if (b) playClip(b.dataset.play);
+});
+
+// ---- listen live ------------------------------------------------------------------
+// Plays each new transmission (what Radio traffic shows: main talkgroups / our incident) and
+// each new page as it arrives, oldest first. A P25 call is only handed over when it ends, so
+// this runs a few seconds behind the air. One audio element, unlocked by the click that turns
+// Live on, so browsers that block sound without a tap (Safari) still play later clips.
+
+const SILENT_WAV = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=";
+const LIVE_MAX_QUEUE = 15;
+const live = { on: false, el: new Audio(), seen: new Set(), queue: [], dropped: 0, blocked: false };
+
+function liveItems() {
+  const inc = ui.inc;
+  const traffic = (inc ? inc.traffic || [] : (ui.state && ui.state.loose_traffic) || []).filter(isMainTraffic);
+  const pages = (ui.state && ui.state.pages) || [];
+  return [...traffic, ...pages].map((x) => ({ id: x.id, start: x.start, has: x.has_audio }));
+}
+
+function liveUpdate() {
+  if (!live.on) return;
+  const fresh = liveItems().filter((x) => !live.seen.has(x.id));
+  for (const x of fresh) live.seen.add(x.id);
+  const add = fresh.filter((x) => x.has !== false).sort((a, b) => a.start - b.start);
+  if (!add.length) return;
+  live.queue.push(...add.map((x) => x.id));
+  while (live.queue.length > LIVE_MAX_QUEUE) { live.queue.shift(); live.dropped++; }   // fell behind: keep the newest
+  livePump();
+}
+
+function livePump() {
+  if (!live.on || player.id || !live.queue.length) return renderLive();
+  const id = live.queue.shift();
+  stopClip();
+  live.el.src = `/api/audio/${encodeURIComponent(id)}.wav`;
+  player.audio = live.el;
+  player.id = id;
+  live.el.play().then(() => { live.blocked = false; renderLive(); })
+    .catch(() => { live.blocked = true; player.audio = player.id = null; paintAllPlay(); renderLive(); });
+  paintAllPlay();
+  renderLive();
+}
+
+function liveDone(missing) {
+  if (player.audio !== live.el) return;
+  if (missing && player.id) player.missing.add(player.id);
+  player.audio = player.id = null;
+  paintAllPlay();
+  livePump();
+}
+live.el.addEventListener("ended", () => liveDone(false));
+live.el.addEventListener("error", () => { if (live.el.src !== SILENT_WAV) liveDone(true); });
+
+function renderLive() {
+  const b = $("#live");
+  b.classList.toggle("active", live.on);
+  b.classList.toggle("blocked", live.on && live.blocked);
+  let t = live.on ? "🔊 Live" : "🔈 Live";
+  if (live.on && live.blocked) t += " · tap to allow sound";
+  else if (live.on && live.queue.length) t += ` · ${live.queue.length} queued`;
+  setText(b, t);
+  b.title = live.on
+    ? "Playing each new transmission and page as it comes in (a few seconds behind the air: a P25 call " +
+      "arrives when it ends). Radio traffic talkgroups only, not Other." +
+      (live.dropped ? ` Skipped ${live.dropped} older clip(s) to catch up.` : "") + " Click to stop."
+    : "Listen live: play each new transmission and page as it comes in";
+}
+
+$("#live").addEventListener("click", () => {
+  if (live.on && !live.blocked) {                       // turn off
+    live.on = false;
+    live.queue = [];
+    if (player.audio === live.el) stopClip();
+    return renderLive();
+  }
+  if (!live.on) {                                       // turn on: start from now, not the backlog
+    live.on = true;
+    live.dropped = 0;
+    live.seen = new Set(liveItems().map((x) => x.id));
+  }
+  live.el.src = SILENT_WAV;                             // unlock sound with this click
+  live.el.play().then(() => { live.blocked = false; livePump(); }).catch(() => { live.blocked = true; renderLive(); });
+  renderLive();
 });
 
 // ---- header ---------------------------------------------------------------------
@@ -1241,6 +1324,7 @@ function onState(data) {
   renderPages();
   renderHistory(ui.inc);
   renderMap();
+  liveUpdate();
 }
 
 function tick() {

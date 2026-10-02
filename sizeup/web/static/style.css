@@ -557,3 +557,7 @@ body.modal { overflow: hidden; }
 .list > li.from-unit .meta { justify-content: flex-end; }
 .list > li.from-dispatch .meta .unit { color: #8cc4ff; }
 .list > li.from-unit .meta .unit { color: #8be3a9; }
+
+.live-btn { margin-left: 0.6em; font-size: 0.85em; padding: 0.15em 0.7em; border-radius: 4px; white-space: nowrap; }
+.live-btn.active { color: #0b0b14; background: var(--ok); border-color: var(--ok); }
+.live-btn.blocked { background: var(--warn); border-color: var(--warn); }
