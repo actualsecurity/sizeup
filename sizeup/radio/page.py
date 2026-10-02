@@ -76,6 +76,7 @@ def page_from_dict(d: dict) -> Page:
              d.get("quieting_db", 0.0), d.get("status", "done"), d.get("raw", ""), d.get("confidence"))
     p.dispatch = d.get("dispatch")  # type: ignore[attr-defined]
     p.history = d.get("history") or []  # type: ignore[attr-defined]
+    p.rerun_at = d.get("rerun_at")  # type: ignore[attr-defined]
     return p
 
 

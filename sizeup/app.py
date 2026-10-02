@@ -303,7 +303,7 @@ class App:
             return
         try:
             d = dict(page.as_dict(), dispatch=getattr(page, "dispatch", None),
-                     history=getattr(page, "history", None) or [])
+                     history=getattr(page, "history", None) or [], rerun_at=getattr(page, "rerun_at", None))
             (self.clips_dir / f"{page.id}.page.json").write_text(json.dumps(d))
         except OSError:
             pass
@@ -582,6 +582,7 @@ class App:
                     page.history = hist[-5:]  # type: ignore[attr-defined]
                     changed = True
                 page.raw, page.confidence = text, job.confidence
+                page.rerun_at = time.time()  # type: ignore[attr-defined]
                 page.status = "done" if text else "no_speech"
                 d = self._dispatch(text)
                 page.dispatch = d.as_dict() if d else None  # type: ignore[attr-defined]
@@ -710,7 +711,8 @@ class App:
 
     def state(self) -> dict:
         with self._lock:
-            pages = [dict(p.as_dict(), dispatch=getattr(p, "dispatch", None), history=getattr(p, "history", None) or [])
+            pages = [dict(p.as_dict(), dispatch=getattr(p, "dispatch", None), history=getattr(p, "history", None) or [],
+                          rerun_at=getattr(p, "rerun_at", None))
                      for p in list(self.pages)[:50]]
         st = {"time": time.time(), "radios": self.radios(), **self.store.state(), "pages": pages, "sdr": self.sdr(),
               "storage": getattr(self, "storage", None),

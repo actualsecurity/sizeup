@@ -164,11 +164,16 @@ function rerunButton(id, pending, hasAudio = true) {
 }
 
 // "re-run" tag on text that changed after a re-run; hover shows what it said before.
-function historyTag(hist) {
-  if (!hist || !hist.length) return null;
-  const tag = el("span", "dim was", "re-run");
-  tag.title = hist.slice().reverse()
-    .map((h) => `Before (${h.model || "?"}, ${fmtTime(h.at, false)}): ${h.text || "(no speech)"}`).join("\n");
+function historyTag(hist, rerunAt) {
+  hist = hist || [];
+  if (!hist.length && !rerunAt) return null;
+  const last = hist.length ? hist[hist.length - 1].at : 0;
+  const same = rerunAt && rerunAt > last + 2;          // latest re-run came back with the same text
+  const tag = el("span", "dim was", same ? "re-run · same" : "re-run");
+  const lines = same ? [`Re-run ${fmtTime(rerunAt, false)}: same text`] : [];
+  for (const h of hist.slice().reverse())
+    lines.push(`Before (${h.model || "?"}, ${fmtTime(h.at, false)}): ${h.text || "(no speech)"}`);
+  tag.title = lines.join("\n");
   return tag;
 }
 
@@ -187,7 +192,14 @@ document.addEventListener("click", (e) => {
   if (!b || b.disabled) return;
   b.disabled = true;
   setText(b, "…");
-  retranscribe({ ids: [b.dataset.rerun] });   // the next push shows it queued, then the new text
+  // The row redraws when its re-run time changes (even if the text comes back the same).
+  retranscribe({ ids: [b.dataset.rerun] }).then((n) => {
+    if (!n && b.isConnected) {             // nothing queued (no audio on disk, or already queued)
+      b.disabled = false;
+      setText(b, "↻");
+      b.title = n === null ? "Re-run failed to start" : "Nothing to re-run (recording gone or already queued)";
+    }
+  });
 });
 
 // What a clip's status means, in words (pages and transmissions share these).
@@ -534,7 +546,7 @@ function renderDispatch(inc) {
   let items = (inc.pages || []).map((id) => byId.get(id)).filter(Boolean)
     .sort((a, b) => a.start - b.start)
     .map((p) => ({ key: p.id, clip: p.id, has: p.has_audio, start: p.start, text: p.raw, status: p.status, label: p.label,
-                   pending: p.rerun_pending, history: p.history }));
+                   pending: p.rerun_pending, history: p.history, rerunAt: p.rerun_at }));
   if (!items.length) {
     // The pages fell out of the recent list: the incident carries its own page entries.
     items = (inc.page_entries || []).map((p) => ({ key: p.id, clip: p.id, has: p.has_audio, start: p.start,
@@ -548,14 +560,14 @@ function renderDispatch(inc) {
   }
   syncList($("#dispatch"), items, {
     key: (it) => it.key,
-    sig: (it) => JSON.stringify([it.text, it.status, it.repeat, it.start, it.pending, (it.history || []).length]),
+    sig: (it) => JSON.stringify([it.text, it.status, it.repeat, it.start, it.pending, (it.history || []).length, it.rerunAt]),
     make: () => el("li"),
     fill: (li, it) => {
       const meta = el("div", "meta");
       if (it.clip) meta.append(playButton(it.clip, "Play the page", it.has), rerunButton(it.clip, it.pending, it.has));
       if (it.start) meta.append(el("span", "t", fmtTime(it.start)));
       if (it.label) meta.append(chip(it.label, sourceColor(it.label), "src"));
-      const was = historyTag(it.history);
+      const was = historyTag(it.history, it.rerunAt);
       if (was) meta.append(was);
       if (it.repeat) meta.append(el("span", "dim", "repeat — same as above"));
       li.replaceChildren(meta);
@@ -697,7 +709,7 @@ function renderTraffic(inc) {
   syncList($("#traffic"), items, {
     key: (t) => t.id,
     sig: (t) => JSON.stringify([t.text, t.status, t.unit, t.talkgroup, t.source, t.end, t.rerun_pending,
-                                (t.history || []).length]),
+                                (t.history || []).length, t.rerun_at]),
     make: () => el("li"),
     fill: (li, t) => {
       speakerSide(li, t.unit);
@@ -707,7 +719,7 @@ function renderTraffic(inc) {
       if (t.unit) meta.append(el("b", "unit", t.unit));
       if (t.talkgroup !== null && t.talkgroup !== undefined) meta.append(el("span", "dim", `TG ${t.talkgroup}`));
       if (t.end > t.start) meta.append(el("span", "dim dur", `${Math.round(t.end - t.start)} s`));
-      const was = historyTag(t.history);
+      const was = historyTag(t.history, t.rerun_at);
       if (was) meta.append(was);
       const done = t.status === "done" && t.text;
       li.replaceChildren(meta, done ? stampedText("txt", t.text, t.start) : el("div", "txt muted",
@@ -765,7 +777,7 @@ function callFill(li, t) {
               el("span", "t", fmtTime(t.start)));
   if (t.unit) meta.append(el("b", "unit", t.unit));
   if (t.end > t.start) meta.append(el("span", "dim dur", `${Math.round(t.end - t.start)} s`));
-  const was = historyTag(t.history);
+  const was = historyTag(t.history, t.rerun_at);
   if (was) meta.append(was);
   const done = t.status === "done" && t.text;
   li.replaceChildren(meta, done ? stampedText("txt", t.text, t.start) : el("div", "txt muted",
@@ -817,7 +829,7 @@ function renderOther(inc) {
       if (open) {
         syncList(calls, g.calls, {
           key: (t) => t.id, sig: (t) => JSON.stringify([t.text, t.status, t.unit, t.end, t.rerun_pending,
-                                                       (t.history || []).length]),
+                                                       (t.history || []).length, t.rerun_at]),
           make: () => el("li"), fill: callFill, empty: "No calls",
         });
       } else if (calls.children.length) calls.replaceChildren();
@@ -1040,7 +1052,7 @@ function renderPages() {
     key: (p) => p.id,
     sig: (p) => JSON.stringify([p.status, p.raw, p.departments, p.tones, p.dispatch && p.dispatch.incident_type,
                                 p.dispatch && p.dispatch.category, p.kind, p.label, p.rerun_pending,
-                                (p.history || []).length]),
+                                (p.history || []).length, p.rerun_at]),
     make: () => el("li"),
     fill: (li, p) => {
       const meta = el("div", "meta");
@@ -1048,7 +1060,7 @@ function renderPages() {
                   rerunButton(p.id, p.rerun_pending, p.has_audio && p.status !== "no_voice"),
                   el("span", "t", fmtTime(p.start)), chip(p.label || "?", sourceColor(p.label), "src"),
                   el("span", "kind", p.kind === "voice" ? "VOICE" : "PAGE"));
-      const was = historyTag(p.history);
+      const was = historyTag(p.history, p.rerun_at);
       if (was) meta.append(was);
       const d = p.dispatch;
       if (d && d.incident_type) {

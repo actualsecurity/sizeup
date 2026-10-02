@@ -301,6 +301,7 @@ def test_rerun_one_or_all_replaces_text_keeps_history_and_survives_restart(tmp_p
     assert st["total"] == 2 and st["done"] == 2 and st["changed"] == 0
     b_row = next(t for t in app.store.loose if t.id == "307-b")
     assert not getattr(b_row, "history", None)
+    assert b_row.rerun_at                                               # ran, same text: the display still hears about it
 
     # The saved history comes back after a restart.
     app2 = App(c)
