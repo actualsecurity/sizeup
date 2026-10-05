@@ -421,7 +421,7 @@ function renderSdr() {
     for (const x of list) {
       const row = el("span", "seg");
       row.dataset.sdr = x.serial;
-      row.append(el("span", "dim", list.length > 1 ? `SDR ${x.serial}` : "SDR"));
+      row.append(el("span", "dim sdr-label", ""));
       for (const m of modes) {
         const b = el("button", "", m);
         b.dataset.mode = m;
@@ -436,18 +436,21 @@ function renderSdr() {
     const row = [...box.children].find((r) => r.dataset.sdr === x.serial);
     if (!row) continue;
     row.classList.toggle("absent", !x.present);
+    setText(row.querySelector(".sdr-label"),
+            (list.length > 1 ? `SDR ${x.name || x.serial}` : "SDR") + (x.present ? "" : " · unplugged"));
     let err = row.querySelector(".sdr-err");
     if (!err) { err = el("span", "sdr-err"); row.append(err); }
     setText(err, ui.sdrError || "");
-    row.title = (x.present ? `SDR ${x.serial}: choose what it listens to.` : `SDR ${x.serial} is not plugged in.`) +
+    const nm = (x.name && x.name !== x.serial ? `${x.name} (serial ${x.serial})` : x.serial) + (x.product ? `, ${x.product}` : "");
+    row.title = (x.present ? `SDR ${nm}: choose what it listens to.` : `SDR ${nm} is not plugged in.`) +
       " One SDR hears one of these at a time (they're too far apart in frequency for one dongle)." +
-      (list.length < 2 ? " To run two at once, plug in another dongle and add its serial to [radio] sdrs in config.toml." : "");
+      (list.length < 2 ? " Plug in another dongle to run two at once: it appears here as its own row." : "");
     for (const b of row.querySelectorAll("button")) {
       const m = b.dataset.mode;
       const there = m !== "Off" && list.find((o) => o.serial !== x.serial && o.mode === m);
       b.classList.toggle("active", m === x.mode);
       b.classList.toggle("elsewhere", !!there);
-      b.title = there ? `${m} is on SDR ${there.serial}: click to move it here` : "";
+      b.title = there ? `${m} is on SDR ${there.name || there.serial}: click to move it here` : "";
       b.disabled = !!sdr.switching || !!ui.sdrBusy;
     }
   }

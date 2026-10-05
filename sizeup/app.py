@@ -211,13 +211,16 @@ class App:
                          if cfg.p25_recorder else None)
         # Switchable dongles ([radio] sdrs, by exact serial): each runs one mode at a time, picked in
         # the web app; a channel / Fire/EMS 15 runs on at most one of them.
-        self.sdrs: list[str] = list(cfg.sdrs) or ([cfg.shared_device] if cfg.shared_device else [])
-        self.shared = bool(self.sdrs)
+        # sdrs = "auto": every RTL-SDR plugged in gets a row (new ones start Off: sizeup never grabs a
+        # dongle by itself). A listed serial is always shown. sdr_ignore hides a dongle for good.
+        self._listed: list[str] = [sd for sd in (list(cfg.sdrs) or ([cfg.shared_device] if cfg.shared_device else []))
+                                   if sd not in cfg.sdr_ignore]
+        self.shared = bool(self._listed) or cfg.sdr_auto
         self.modes = [c.label for c in cfg.channels] + ([P25_MODE] if self.recorder else [])
         if self.shared:
             self.modes.append(OFF_MODE)
         first = cfg.start_mode if cfg.start_mode in self.modes else (self.modes[0] if self.modes else OFF_MODE)
-        self.assign: dict[str, str] = {sd: (first if k == 0 else OFF_MODE) for k, sd in enumerate(self.sdrs)}
+        self.assign: dict[str, str] = {sd: (first if k == 0 else OFF_MODE) for k, sd in enumerate(self._listed)}
         # What was picked in the web app wins over start_mode, so a restart doesn't move a dongle.
         self._mode_file = (Path(cfg.clips_dir).parent / "sdr_modes.json") if cfg.clips_dir else None
         self._load_modes()
@@ -608,25 +611,42 @@ class App:
     # -- switchable dongles ------------------------------------------------------------------------
 
     @property
+    def sdrs(self) -> list[str]:
+        """The dongles shown now: listed ones, every one plugged in (auto), and any unplugged one
+        still assigned a mode (so you can see what stopped). Plug order; listed first."""
+        out = list(self._listed)
+        here = [s for _i, _p, s in sdr_lookup.devices(self.cfg.rtl_fm)] if self.cfg.sdr_auto else []
+        for sd in here + [sd for sd, m in self.assign.items() if m != OFF_MODE]:
+            if sd and sd not in out and sd not in self.cfg.sdr_ignore:
+                out.append(sd)
+        return out
+
+    @property
     def mode(self) -> str:
         """The first dongle's mode (one-dongle setups)."""
-        return self.assign.get(self.sdrs[0], OFF_MODE) if self.sdrs else ""
+        rows = self.sdrs
+        return self.assign.get(rows[0], OFF_MODE) if rows else OFF_MODE
 
     def _load_modes(self) -> None:
         saved: dict = {}
         try:
             if self._mode_file and self._mode_file.is_file():
                 saved = json.loads(self._mode_file.read_text())
-            elif self._mode_file and self.sdrs and self._mode_file.with_name("sdr_mode.txt").is_file():
-                saved = {self.sdrs[0]: self._mode_file.with_name("sdr_mode.txt").read_text().strip()}  # one-dongle era
+            elif self._mode_file and self._listed and self._mode_file.with_name("sdr_mode.txt").is_file():
+                saved = {self._listed[0]: self._mode_file.with_name("sdr_mode.txt").read_text().strip()}  # one-dongle era
         except (OSError, ValueError):
             saved = {}
         taken: set[str] = set()
-        for sd in self.sdrs:
-            m = saved.get(sd, self.assign[sd])
+        for sd in list(dict.fromkeys([*self._listed, *saved])):
+            if sd in self.cfg.sdr_ignore:
+                continue
+            m = saved.get(sd, self.assign.get(sd, OFF_MODE))
             m = m if m in self.modes and (m == OFF_MODE or m not in taken) else OFF_MODE
             self.assign[sd] = m
             taken.add(m)
+
+    def sdr_name(self, serial: str) -> str:
+        return self.cfg.sdr_names.get(serial) or serial
 
     def _save_modes(self) -> None:
         if self._mode_file:
@@ -640,6 +660,7 @@ class App:
             i = sdr_lookup.resolve(serial, self.cfg.rtl_fm)
             return None if i is None else str(i)
         find.serial = serial  # type: ignore[attr-defined]
+        find.label = self.sdr_name(serial)  # type: ignore[attr-defined]
         return find
 
     def _receiver(self, label: str) -> NfmReceiver | None:
@@ -654,10 +675,10 @@ class App:
 
     def _start_mode(self, mode: str, serial: str) -> None:
         if mode == OFF_MODE:
-            log(f"SDR {serial} released: nothing of ours on it (switch it back on in the web app)")
+            log(f"SDR {self.sdr_name(serial)} released: nothing of ours on it (switch it back on in the web app)")
             return
         if mode == P25_MODE:
-            self.recorder.device_fn, self.recorder.device_name = self._dongle(serial), serial
+            self.recorder.device_fn, self.recorder.device_name = self._dongle(serial), self.sdr_name(serial)
             self.recorder.start()
         else:
             r = self._receiver(mode)
@@ -677,23 +698,24 @@ class App:
         A mode already running on another dongle moves here (that dongle goes Off)."""
         if not self.shared:
             return "each channel has its own dongle: nothing to switch"
-        sdr = sdr or self.sdrs[0]
-        if sdr not in self.sdrs:
-            return f"unknown SDR {sdr!r}; one of {', '.join(self.sdrs)}"
+        rows = self.sdrs
+        sdr = sdr or (rows[0] if rows else "")
+        if sdr not in rows:
+            return f"no SDR {sdr!r} plugged in" + (f"; one of {', '.join(rows)}" if rows else "")
         if mode not in self.modes:
             return f"unknown mode {mode!r}; one of {', '.join(self.modes)}"
         with self._mode_lock:
-            if self.assign[sdr] == mode:
+            if self.assign.get(sdr, OFF_MODE) == mode:
                 return None
             self.switching = True
             try:
                 other = next((o for o, m in self.assign.items() if o != sdr and m == mode != OFF_MODE), None)
                 if other:
-                    log(f"SDR {other}: {mode} -> {OFF_MODE} (moving to {sdr})")
-                    self._stop_mode(mode, f"moved to SDR {sdr}")
+                    log(f"SDR {self.sdr_name(other)}: {mode} -> {OFF_MODE} (moving to {self.sdr_name(sdr)})")
+                    self._stop_mode(mode, f"moved to SDR {self.sdr_name(sdr)}")
                     self.assign[other] = OFF_MODE
-                log(f"SDR {sdr}: {self.assign[sdr]} -> {mode}")
-                self._stop_mode(self.assign[sdr], f"SDR {sdr} on {mode}")
+                log(f"SDR {self.sdr_name(sdr)}: {self.assign.get(sdr, OFF_MODE)} -> {mode}")
+                self._stop_mode(self.assign.get(sdr, OFF_MODE), f"SDR {self.sdr_name(sdr)} on {mode}")
                 time.sleep(SWITCH_PAUSE_S)  # let the dongle go before the next program opens it
                 self.assign[sdr] = mode
                 self._start_mode(mode, sdr)
@@ -711,8 +733,9 @@ class App:
         return None
 
     def _off_detail(self) -> str:
-        on = [f"SDR {sd} on {m}" if len(self.sdrs) > 1 else f"SDR on {m}" for sd, m in self.assign.items() if m != OFF_MODE]
-        return "; ".join(on) if on else ("SDRs released (Off)" if len(self.sdrs) > 1 else "SDR released (Off)")
+        many = len(self.sdrs) > 1
+        on = [f"SDR {self.sdr_name(sd)} on {m}" if many else f"SDR on {m}" for sd, m in self.assign.items() if m != OFF_MODE]
+        return "; ".join(on) if on else ("SDRs released (Off)" if many else "SDR released (Off)")
 
     def set_talkgroup_group(self, group: str, record: bool | None = None, main: bool | None = None) -> str | None:
         """POST /api/talkgroup-group: a whole section on/off in one go."""
@@ -727,9 +750,12 @@ class App:
     def sdr(self) -> dict | None:
         if not self.shared:
             return None
-        here = {s for _i, _p, s in sdr_lookup.devices(self.cfg.rtl_fm)}
-        return {"shared": True, "mode": self.mode, "modes": self.modes, "switching": self.switching,
-                "sdrs": [{"serial": sd, "mode": self.assign[sd], "present": sd in here} for sd in self.sdrs]}
+        plugged = {s: p for _i, p, s in sdr_lookup.devices(self.cfg.rtl_fm)}
+        rows = self.sdrs
+        return {"shared": True, "mode": self.assign.get(rows[0], OFF_MODE) if rows else OFF_MODE, "modes": self.modes,
+                "switching": self.switching,
+                "sdrs": [{"serial": sd, "name": self.sdr_name(sd), "product": plugged.get(sd, ""),
+                          "mode": self.assign.get(sd, OFF_MODE), "present": sd in plugged} for sd in rows]}
 
     def radios(self) -> list[dict]:
         out = []

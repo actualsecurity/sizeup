@@ -387,39 +387,46 @@ def test_p25_clip_ids_with_dots_play_and_paths_dont(tmp_path):
 
 
 
-def test_two_dongles_each_run_their_own_mode_and_a_mode_moves(tmp_path, monkeypatch):
-    # User: "select multiple at the same time (if there are multiple SDRs plugged in)".
+def test_sdr_rows_follow_the_dongles_plugged_in(tmp_path, monkeypatch):
+    # User: "select multiple at the same time" + "those should dynamically appear when we plug in or
+    # unplug different sdrs, not be static".
     from dataclasses import replace
     import sizeup.app as appmod
     from sizeup.config import ChannelCfg
     monkeypatch.setattr(appmod, "SWITCH_PAUSE_S", 0.0)
-    plugged = [(0, "Blog V4", "v4"), (1, "RTL2838UHIDIR", "adsb"), (2, "RTL2838UHIDIR", "fire2")]
+    plugged = [(0, "Blog V4", "v4"), (1, "RTL2838UHIDIR", "keep-out")]
     monkeypatch.setattr(appmod.sdr_lookup, "devices", lambda *a, **k: list(plugged))
     monkeypatch.setattr(appmod.sdr_lookup, "resolve",
                         lambda serial, *a: next((i for i, _p, s in plugged if s == serial), None))
     c = replace(cfg(tmp_path), rtl_fm=str(tmp_path / "no-rtl_fm"),
                 channels=(ChannelCfg("South 2", 470.2, "paging", "fire-page"), ChannelCfg("FG1", 453.0375, "traffic", "fire-fg")),
-                sdrs=("v4", "fire2"), start_mode="South 2")
+                sdr_auto=True, sdr_names={"adsb": "V3"}, sdr_ignore=("keep-out",),
+                p25_dir=str(tmp_path / "p25"), p25_talkgroups={307: "Fire/EMS 15"},
+                p25_recorder=str(tmp_path / "no-trunk-recorder") + " --config=x", p25_recorder_dir=str(tmp_path))
     app = App(c).start()
+    rows = lambda: [(x["name"], x["mode"], x["present"]) for x in app.state()["sdr"]["sdrs"]]
     try:
-        st = app.state()["sdr"]
-        assert [(x["serial"], x["mode"], x["present"]) for x in st["sdrs"]] == [("v4", "South 2", True), ("fire2", "Off", True)]
-        assert app.set_mode("FG1", "fire2") is None
-        assert {r.channel.label: r.argv(r.device())[-2] for r in app.receivers} == {"South 2": "0", "FG1": "2"}  # by index
+        assert rows() == [("v4", "Off", True)]                              # ignored dongle never shown; nothing grabbed
+        plugged.append((2, "RTL2838UHIDIR", "adsb"))                         # plug one in: a row appears, Off
+        assert rows() == [("v4", "Off", True), ("V3", "Off", True)]
+        assert app.set_mode("Fire/EMS 15", "v4") is None and app.set_mode("FG1", "adsb") is None
+        assert {r.channel.label: r.argv(r.device())[-2] for r in app.receivers if r.channel.label == "FG1"} == {"FG1": "2"}
+        assert app.recorder.device_fn() == "0"                              # trunk-recorder on the V4, by index
         radios = {r["label"]: r for r in app.state()["radios"]}
-        assert radios["South 2"]["state"] != "off" and radios["FG1"]["state"] != "off"     # both at once
-        # South 2 picked on fire2: it moves there, v4 is released, FG1 stops.
-        assert app.set_mode("South 2", "fire2") is None
-        assert app.assign == {"v4": "Off", "fire2": "South 2"}
-        assert app._receiver("South 2").device.serial == "fire2"
-        assert app.set_mode("FG1", "adsb") is not None                     # not configured: never touched
-        assert app.set_mode("FG1", "v4") is None
+        assert radios["FG1"]["state"] != "off" and radios["Fire/EMS 15"]["state"] != "off"   # both at once
+        assert app.set_mode("FG1", "v4") is None                            # moves: V3 goes Off, P25 stops
+        assert app.assign["adsb"] == "Off" and app.assign["v4"] == "FG1"
+        assert app.set_mode("South 2", "adsb") is None
+        assert app.set_mode("FG1", "keep-out") is not None                  # ignored: never used
+        assert app.set_mode("FG1", "nope") is not None                      # not plugged in
+        plugged.pop()                                                        # V3 unplugged while running South 2: stays, marked
+        assert rows() == [("v4", "FG1", True), ("V3", "South 2", False)]
+        assert app.set_mode("Off", "adsb") is None and rows() == [("v4", "FG1", True)]   # idle + unplugged: gone
     finally:
         app.stop()
+    plugged.append((2, "RTL2838UHIDIR", "adsb"))
     again = App(c)                                                          # choices survive a restart
-    assert again.assign == {"v4": "FG1", "fire2": "South 2"}
-    plugged.pop()                                                           # fire2 unplugged
-    assert [x["present"] for x in again.state()["sdr"]["sdrs"]] == [True, False]
+    assert again.assign == {"v4": "FG1", "adsb": "Off"}
 
 
 def test_trunk_recorder_gets_the_dongle_index_not_the_serial(tmp_path):

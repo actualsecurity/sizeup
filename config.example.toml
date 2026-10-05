@@ -10,12 +10,14 @@ port = 8090
 
 [radio]
 rtl_fm = "rtl_fm"                  # the RTL-SDR Blog build for a V4
-# Dongles sizeup may switch in the web app, by exact USB serial (one row of switches each:
-# a channel, Fire/EMS 15 via trunk-recorder, or Off). Looked up by serial right before every
-# start and passed as an index, so numeric serials can't open the wrong dongle. Leave empty
-# when each channel has its own fixed dongle (device = below). A dongle another app also uses
-# (e.g. shortfinal) must be switched Off here before that app can open it.
-sdrs = ["v4"]
+# Dongles switched in the web app: "auto" = every RTL-SDR plugged in gets a row of switches (a
+# channel, Fire/EMS 15 via trunk-recorder, or Off); rows come and go as dongles are plugged in or
+# out. A new dongle starts Off: sizeup never opens one until you pick a mode for it. Or list exact
+# serials to show only those. Each is looked up by serial right before every start and passed as
+# an index (all-digit serials are read as indexes). sdr_ignore = serials never shown or used.
+sdrs = "auto"
+sdr_names = { v4 = "V4" }           # optional: name shown in the web app per serial
+sdr_ignore = []
 start_mode = "South 2"            # first SDR at a fresh start; after that the web app's choice is kept
 
 # One rtl_fm per channel, one dongle each (serials set with `rtl_eeprom -s <serial>`).

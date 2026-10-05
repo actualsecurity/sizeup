@@ -213,7 +213,8 @@ class NfmReceiver:
 
     @property
     def device_name(self) -> str:
-        return getattr(self.device, "serial", None) or (self.device if isinstance(self.device, str) else "") or "any"
+        return (getattr(self.device, "label", None) or getattr(self.device, "serial", None)
+                or (self.device if isinstance(self.device, str) else "") or "any")
 
     def start(self) -> NfmReceiver:
         threading.Thread(target=self._run, name=f"nfm-{self.channel.label}", daemon=True).start()

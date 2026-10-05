@@ -56,6 +56,9 @@ class Config:
     shared_device: str = ""      # one dongle for everything (bench): switch channel / P25 in the web app
     start_mode: str = ""         # with shared_device: what the dongle does at startup ("South 2", "FG1", "Fire/EMS 15")
     sdrs: tuple[str, ...] = ()   # dongles (exact USB serials) sizeup may use, each switched in the web app
+    sdr_names: dict[str, str] = field(default_factory=dict)   # serial -> name shown in the web app ("adsb" -> "V3")
+    sdr_ignore: tuple[str, ...] = ()   # serials never shown or used (a dongle dedicated to another app)
+    sdr_auto: bool = False       # switch whatever RTL-SDRs are plugged in (rows come and go with the dongles)
     p25_recorder: str = ""       # trunk-recorder command line, started/stopped by sizeup
     p25_recorder_dir: str = ""   # its working directory (config.json + talkgroups.csv)
     clips_dir: str = ""
@@ -81,8 +84,10 @@ def load(path: str | Path) -> Config:
     _take(data, "config", {"station", "web", "radio", "tones", "stt", "p25", "mdc", "units", "storage", "map"})
     st = _take(data.get("station", {}), "station", {"id", "name"})
     web = _take(data.get("web", {}), "web", {"host", "port"})
-    radio = _take(data.get("radio", {}), "radio", {"rtl_fm", "channels", "tones_file", "shared_device", "start_mode", "sdrs"})
-    sdrs = tuple(str(x) for x in radio.get("sdrs", ())) or ((str(radio["shared_device"]),) if radio.get("shared_device") else ())
+    radio = _take(data.get("radio", {}), "radio", {"rtl_fm", "channels", "tones_file", "shared_device", "start_mode", "sdrs", "sdr_names", "sdr_ignore"})
+    raw_sdrs = radio.get("sdrs", ())
+    sdr_auto = raw_sdrs == "auto"
+    sdrs = (() if sdr_auto else tuple(str(x) for x in raw_sdrs)) or ((str(radio["shared_device"]),) if radio.get("shared_device") else ())
     if len(set(sdrs)) != len(sdrs):
         raise ConfigError("radio.sdrs: a serial is listed twice")
     channels = []
@@ -181,7 +186,8 @@ def load(path: str | Path) -> Config:
         mdc_aliases={str(k).upper(): v for k, v in mdc.get("aliases", {}).items()},
         unit_departments=unit_departments, unit_callsigns=unit_callsigns,
         shared_device=radio.get("shared_device", "") or (sdrs[0] if sdrs else ""), start_mode=radio.get("start_mode", ""),
-        sdrs=sdrs,
+        sdrs=sdrs, sdr_names={str(k): str(v) for k, v in radio.get("sdr_names", {}).items()},
+        sdr_ignore=tuple(str(x) for x in radio.get("sdr_ignore", ())), sdr_auto=sdr_auto,
         p25_recorder=p25.get("recorder", ""), p25_recorder_dir=rel(p25.get("recorder_dir", "")),
         clips_dir=rel(storage.get("clips_dir", "captures/clips")), keep_hours=float(storage.get("keep_hours", 24)),
         audio_keep_hours=float(storage.get("audio_keep_hours", 12)),
