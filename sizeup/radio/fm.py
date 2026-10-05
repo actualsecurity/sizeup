@@ -202,13 +202,18 @@ class NfmReceiver:
         self._stop = threading.Event()
         self._proc: subprocess.Popen | None = None
 
-    def argv(self) -> list[str]:
+    def argv(self, dev: str | None = None) -> list[str]:
         cmd = [self.rtl_fm, "-M", "fm", "-f", f"{self.channel.mhz:.4f}M", "-s", str(RATE), "-E", "dc"]
         if self.gain_db is not None:
             cmd += ["-g", f"{self.gain_db:g}"]
-        if self.device:
-            cmd += ["-d", self.device]
+        dev = self.device if dev is None and not callable(self.device) else dev
+        if dev:
+            cmd += ["-d", str(dev)]
         return cmd + ["-"]
+
+    @property
+    def device_name(self) -> str:
+        return getattr(self.device, "serial", None) or (self.device if isinstance(self.device, str) else "") or "any"
 
     def start(self) -> NfmReceiver:
         threading.Thread(target=self._run, name=f"nfm-{self.channel.label}", daemon=True).start()
@@ -245,8 +250,15 @@ class NfmReceiver:
         backoff = 2.0
         while not self._stop.is_set():
             self._stderr.clear()
+            dev = None
+            if callable(self.device):  # a configured serial, looked up right now (never passed as-is)
+                dev = self.device()
+                if dev is None:
+                    self.state, self.detail = "absent", f"SDR '{self.device_name}' not plugged in"
+                    self._stop.wait(15.0)
+                    continue
             try:
-                self._proc = subprocess.Popen(self.argv(), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                self._proc = subprocess.Popen(self.argv(dev), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                               start_new_session=True)
                 threading.Thread(target=self._drain, args=(self._proc,), daemon=True).start()
             except OSError as e:
@@ -263,13 +275,13 @@ class NfmReceiver:
             err = " ".join(self._stderr)
             if not got and ("No matching devices" in err or "No supported devices" in err):
                 # Not plugged in (or a different serial): say so, look again every 15 s, stay quiet.
-                self.state, self.detail = "absent", f"dongle '{self.device or 'any'}' not connected"
+                self.state, self.detail = "absent", f"dongle '{self.device_name}' not connected"
                 self._stop.wait(15.0)
                 continue
             self.restarts += 1
             self.state = "down"
             if not got and ("usb_claim_interface" in err or "Failed to open" in err):
-                self.detail = f"dongle '{self.device}' busy (in use by another program?)"
+                self.detail = f"dongle '{self.device_name}' busy (in use by another program?)"
             else:
                 self.detail = "rtl_fm stopped" if got else "no audio from rtl_fm"
             self.on_event(f"{self.channel.label} down: {self.detail}")

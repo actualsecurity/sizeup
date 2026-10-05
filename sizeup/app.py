@@ -36,6 +36,7 @@ from sizeup.incidents import IncidentStore, Traffic
 from sizeup.radio.fm import RATE, Channel, NfmReceiver, Segment, speech_seconds
 from sizeup.radio.mdc1200 import decode as mdc_decode
 from sizeup.radio.p25 import Call, CallIngest
+from sizeup.radio import sdr as sdr_lookup
 from sizeup.radio.recorder import TrunkRecorder
 from sizeup.radio.page import Page, assemble, page_from_dict
 from sizeup.radio.tones import TonePlan
@@ -208,18 +209,18 @@ class App:
                                       self._segment, log, open_db=c.squelch_db) for c in cfg.channels]
         self.recorder = (TrunkRecorder(cfg.p25_recorder, cfg.p25_recorder_dir or ".", log)
                          if cfg.p25_recorder else None)
-        # One dongle for everything (bench): only the selected mode runs; switch in the web app.
-        self.shared = bool(cfg.shared_device)
+        # Switchable dongles ([radio] sdrs, by exact serial): each runs one mode at a time, picked in
+        # the web app; a channel / Fire/EMS 15 runs on at most one of them.
+        self.sdrs: list[str] = list(cfg.sdrs) or ([cfg.shared_device] if cfg.shared_device else [])
+        self.shared = bool(self.sdrs)
         self.modes = [c.label for c in cfg.channels] + ([P25_MODE] if self.recorder else [])
         if self.shared:
             self.modes.append(OFF_MODE)
-        self.mode = (cfg.start_mode if cfg.start_mode in self.modes else (self.modes[0] if self.modes else ""))
-        # The last mode picked in the web app wins over start_mode, so a restart doesn't move the dongle.
-        self._mode_file = (Path(cfg.clips_dir).parent / "sdr_mode.txt") if cfg.clips_dir else None
-        if self.shared and self._mode_file and self._mode_file.is_file():
-            saved = self._mode_file.read_text().strip()
-            if saved in self.modes:
-                self.mode = saved
+        first = cfg.start_mode if cfg.start_mode in self.modes else (self.modes[0] if self.modes else OFF_MODE)
+        self.assign: dict[str, str] = {sd: (first if k == 0 else OFF_MODE) for k, sd in enumerate(self.sdrs)}
+        # What was picked in the web app wins over start_mode, so a restart doesn't move a dongle.
+        self._mode_file = (Path(cfg.clips_dir).parent / "sdr_modes.json") if cfg.clips_dir else None
+        self._load_modes()
         self._mode_lock = threading.Lock()
         self.switching = False
         self._kind = {c.label: c.kind for c in cfg.channels}
@@ -604,57 +605,99 @@ class App:
 
     # -- state --------------------------------------------------------------------------------------
 
-    # -- one shared dongle ---------------------------------------------------------------------
+    # -- switchable dongles ------------------------------------------------------------------------
+
+    @property
+    def mode(self) -> str:
+        """The first dongle's mode (one-dongle setups)."""
+        return self.assign.get(self.sdrs[0], OFF_MODE) if self.sdrs else ""
+
+    def _load_modes(self) -> None:
+        saved: dict = {}
+        try:
+            if self._mode_file and self._mode_file.is_file():
+                saved = json.loads(self._mode_file.read_text())
+            elif self._mode_file and self.sdrs and self._mode_file.with_name("sdr_mode.txt").is_file():
+                saved = {self.sdrs[0]: self._mode_file.with_name("sdr_mode.txt").read_text().strip()}  # one-dongle era
+        except (OSError, ValueError):
+            saved = {}
+        taken: set[str] = set()
+        for sd in self.sdrs:
+            m = saved.get(sd, self.assign[sd])
+            m = m if m in self.modes and (m == OFF_MODE or m not in taken) else OFF_MODE
+            self.assign[sd] = m
+            taken.add(m)
+
+    def _save_modes(self) -> None:
+        if self._mode_file:
+            try:
+                self._mode_file.write_text(json.dumps(self.assign))
+            except OSError:
+                pass
+
+    def _dongle(self, serial: str):
+        def find() -> str | None:
+            i = sdr_lookup.resolve(serial, self.cfg.rtl_fm)
+            return None if i is None else str(i)
+        find.serial = serial  # type: ignore[attr-defined]
+        return find
 
     def _receiver(self, label: str) -> NfmReceiver | None:
         return next((r for r in self.receivers if r.channel.label == label), None)
 
-    def _fresh_receiver(self, old: NfmReceiver) -> NfmReceiver:
+    def _fresh_receiver(self, old: NfmReceiver, serial: str) -> NfmReceiver:
         c = next(c for c in self.cfg.channels if c.label == old.channel.label)
-        r = NfmReceiver(self.cfg.rtl_fm, self.cfg.shared_device, c.gain_db, Channel(c.mhz, c.label),
+        r = NfmReceiver(self.cfg.rtl_fm, self._dongle(serial), c.gain_db, Channel(c.mhz, c.label),
                         self._segment, log, open_db=c.squelch_db)
         self.receivers[self.receivers.index(old)] = r
         return r
 
-    def _start_mode(self, mode: str) -> None:
+    def _start_mode(self, mode: str, serial: str) -> None:
         if mode == OFF_MODE:
-            log("SDR released: no receiver running (switch it back on in the web app)")
+            log(f"SDR {serial} released: nothing of ours on it (switch it back on in the web app)")
             return
         if mode == P25_MODE:
+            self.recorder.device_fn, self.recorder.device_name = self._dongle(serial), serial
             self.recorder.start()
         else:
             r = self._receiver(mode)
             if r is not None:
-                self._fresh_receiver(r).start()
+                self._fresh_receiver(r, serial).start()
 
-    def set_mode(self, mode: str) -> str | None:
-        """Hand the shared dongle to another channel (or to trunk-recorder for Fire/EMS 15)."""
+    def _stop_mode(self, mode: str, why: str) -> None:
+        if mode == P25_MODE:
+            self.recorder.stop(why)
+        elif mode != OFF_MODE:
+            r = self._receiver(mode)
+            if r is not None:
+                r.stop()
+
+    def set_mode(self, mode: str, sdr: str | None = None) -> str | None:
+        """Give dongle `sdr` (default: the first) a channel, Fire/EMS 15 (trunk-recorder) or Off.
+        A mode already running on another dongle moves here (that dongle goes Off)."""
         if not self.shared:
             return "each channel has its own dongle: nothing to switch"
+        sdr = sdr or self.sdrs[0]
+        if sdr not in self.sdrs:
+            return f"unknown SDR {sdr!r}; one of {', '.join(self.sdrs)}"
         if mode not in self.modes:
             return f"unknown mode {mode!r}; one of {', '.join(self.modes)}"
         with self._mode_lock:
-            if mode == self.mode:
+            if self.assign[sdr] == mode:
                 return None
             self.switching = True
             try:
-                log(f"SDR: {self.mode} -> {mode}")
-                if self.mode == OFF_MODE:
-                    pass
-                elif self.mode == P25_MODE:
-                    self.recorder.stop(f"SDR on {mode}")
-                else:
-                    r = self._receiver(self.mode)
-                    if r is not None:
-                        r.stop()
+                other = next((o for o, m in self.assign.items() if o != sdr and m == mode != OFF_MODE), None)
+                if other:
+                    log(f"SDR {other}: {mode} -> {OFF_MODE} (moving to {sdr})")
+                    self._stop_mode(mode, f"moved to SDR {sdr}")
+                    self.assign[other] = OFF_MODE
+                log(f"SDR {sdr}: {self.assign[sdr]} -> {mode}")
+                self._stop_mode(self.assign[sdr], f"SDR {sdr} on {mode}")
                 time.sleep(SWITCH_PAUSE_S)  # let the dongle go before the next program opens it
-                self.mode = mode
-                self._start_mode(mode)
-                if self._mode_file:
-                    try:
-                        self._mode_file.write_text(mode)
-                    except OSError:
-                        pass
+                self.assign[sdr] = mode
+                self._start_mode(mode, sdr)
+                self._save_modes()
             finally:
                 self.switching = False
         return None
@@ -668,7 +711,8 @@ class App:
         return None
 
     def _off_detail(self) -> str:
-        return "SDR released (Off)" if self.mode == OFF_MODE else f"SDR on {self.mode}"
+        on = [f"SDR {sd} on {m}" if len(self.sdrs) > 1 else f"SDR on {m}" for sd, m in self.assign.items() if m != OFF_MODE]
+        return "; ".join(on) if on else ("SDRs released (Off)" if len(self.sdrs) > 1 else "SDR released (Off)")
 
     def set_talkgroup_group(self, group: str, record: bool | None = None, main: bool | None = None) -> str | None:
         """POST /api/talkgroup-group: a whole section on/off in one go."""
@@ -681,21 +725,24 @@ class App:
         return None
 
     def sdr(self) -> dict | None:
-        return ({"shared": True, "mode": self.mode, "modes": self.modes, "switching": self.switching}
-                if self.shared else None)
+        if not self.shared:
+            return None
+        here = {s for _i, _p, s in sdr_lookup.devices(self.cfg.rtl_fm)}
+        return {"shared": True, "mode": self.mode, "modes": self.modes, "switching": self.switching,
+                "sdrs": [{"serial": sd, "mode": self.assign[sd], "present": sd in here} for sd in self.sdrs]}
 
     def radios(self) -> list[dict]:
         out = []
         for r in self.receivers:
             st = r.status()
-            if self.shared and r.channel.label != self.mode:
+            if self.shared and r.channel.label not in self.assign.values():
                 st.update(state="off", detail=self._off_detail(), open=False, quieting_db=None)
             out.append(st)
         if self.p25:
             st = self.p25.status()
             if self.recorder is not None:
                 rs = self.recorder.status()
-                if self.shared and self.mode != P25_MODE:
+                if self.shared and P25_MODE not in self.assign.values():
                     st.update(state="off", detail=self._off_detail())
                 elif rs["state"] != "ok":
                     st.update(state=rs["state"], detail=rs["detail"])
@@ -753,10 +800,8 @@ class App:
         self.stt.start()
         threading.Thread(target=self._janitor, name="janitor", daemon=True).start()
         if self.shared:
-            for r in self.receivers:  # everything on the one dongle, only the selected mode running
-                r.device = self.cfg.shared_device
-            if self.mode:
-                self._start_mode(self.mode)
+            for sd, m in self.assign.items():  # each dongle runs what was picked for it
+                self._start_mode(m, sd)
         else:
             for r in self.receivers:
                 r.start()

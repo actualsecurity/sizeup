@@ -148,6 +148,7 @@ def test_one_shared_dongle_switches_between_channels_and_p25(tmp_path, monkeypat
     import sizeup.app as appmod
     from sizeup.config import ChannelCfg
     monkeypatch.setattr(appmod, "SWITCH_PAUSE_S", 0.0)
+    monkeypatch.setattr(appmod.sdr_lookup, "devices", lambda *a, **k: [])
     c = replace(cfg(tmp_path), rtl_fm=str(tmp_path / "no-rtl_fm"),
                 channels=(ChannelCfg("South 2", 470.2, "paging", "fire-page"), ChannelCfg("FG1", 453.0375, "traffic", "fire-fg")),
                 shared_device="00000001", start_mode="South 2", p25_dir=str(tmp_path / "p25"),
@@ -159,7 +160,8 @@ def test_one_shared_dongle_switches_between_channels_and_p25(tmp_path, monkeypat
         assert st["sdr"]["modes"] == ["South 2", "FG1", "Fire/EMS 15", "Off"] and st["sdr"]["mode"] == "South 2"
         radios = {r["label"]: r for r in st["radios"]}
         assert radios["FG1"]["state"] == "off" and radios["FG1"]["detail"] == "SDR on South 2"
-        assert all(r.device == "00000001" for r in app.receivers)          # everything on the one dongle
+        south = app._receiver("South 2")
+        assert south.device.serial == "00000001" and south.device() is None   # looked up by serial at start; not plugged in here
         assert app.set_mode("FG1") is None and app.state()["sdr"]["mode"] == "FG1"
         assert {r["label"]: r["state"] for r in app.state()["radios"]}["South 2"] == "off"
         assert app.set_mode("Fire/EMS 15") is None
@@ -382,3 +384,59 @@ def test_p25_clip_ids_with_dots_play_and_paths_dont(tmp_path):
     assert app.clip(cid)[:4] == b"RIFF"
     for bad in ("../incidents", "..", "a/../../x", "/etc/passwd", ".hidden", ""):
         assert app.clip(bad) is None
+
+
+
+def test_two_dongles_each_run_their_own_mode_and_a_mode_moves(tmp_path, monkeypatch):
+    # User: "select multiple at the same time (if there are multiple SDRs plugged in)".
+    from dataclasses import replace
+    import sizeup.app as appmod
+    from sizeup.config import ChannelCfg
+    monkeypatch.setattr(appmod, "SWITCH_PAUSE_S", 0.0)
+    plugged = [(0, "Blog V4", "v4"), (1, "RTL2838UHIDIR", "adsb"), (2, "RTL2838UHIDIR", "fire2")]
+    monkeypatch.setattr(appmod.sdr_lookup, "devices", lambda *a, **k: list(plugged))
+    monkeypatch.setattr(appmod.sdr_lookup, "resolve",
+                        lambda serial, *a: next((i for i, _p, s in plugged if s == serial), None))
+    c = replace(cfg(tmp_path), rtl_fm=str(tmp_path / "no-rtl_fm"),
+                channels=(ChannelCfg("South 2", 470.2, "paging", "fire-page"), ChannelCfg("FG1", 453.0375, "traffic", "fire-fg")),
+                sdrs=("v4", "fire2"), start_mode="South 2")
+    app = App(c).start()
+    try:
+        st = app.state()["sdr"]
+        assert [(x["serial"], x["mode"], x["present"]) for x in st["sdrs"]] == [("v4", "South 2", True), ("fire2", "Off", True)]
+        assert app.set_mode("FG1", "fire2") is None
+        assert {r.channel.label: r.argv(r.device())[-2] for r in app.receivers} == {"South 2": "0", "FG1": "2"}  # by index
+        radios = {r["label"]: r for r in app.state()["radios"]}
+        assert radios["South 2"]["state"] != "off" and radios["FG1"]["state"] != "off"     # both at once
+        # South 2 picked on fire2: it moves there, v4 is released, FG1 stops.
+        assert app.set_mode("South 2", "fire2") is None
+        assert app.assign == {"v4": "Off", "fire2": "South 2"}
+        assert app._receiver("South 2").device.serial == "fire2"
+        assert app.set_mode("FG1", "adsb") is not None                     # not configured: never touched
+        assert app.set_mode("FG1", "v4") is None
+    finally:
+        app.stop()
+    again = App(c)                                                          # choices survive a restart
+    assert again.assign == {"v4": "FG1", "fire2": "South 2"}
+    plugged.pop()                                                           # fire2 unplugged
+    assert [x["present"] for x in again.state()["sdr"]["sdrs"]] == [True, False]
+
+
+def test_trunk_recorder_gets_the_dongle_index_not_the_serial(tmp_path):
+    import json
+    from sizeup.radio.recorder import TrunkRecorder
+    (tmp_path / "config.json").write_text(json.dumps({"sources": [{"device": "rtl=00000001", "rate": 2400000}]}))
+    exe = tmp_path / "trunk-recorder"
+    exe.write_text("#!/bin/sh\nsleep 30\n")
+    exe.chmod(0o755)
+    r = TrunkRecorder(f"{exe} --config=config.json", str(tmp_path))
+    argv = r._argv_for(0)
+    assert argv[-1] == "--config=config.runtime.json"
+    assert json.loads((tmp_path / "config.runtime.json").read_text())["sources"][0]["device"] == "rtl=0"
+    assert json.loads((tmp_path / "config.json").read_text())["sources"][0]["device"] == "rtl=00000001"   # untouched
+    r.device_fn, r.device_name = (lambda: None), "v4"
+    r.start()
+    try:
+        assert wait(lambda: r.state == "absent") and "v4" in r.detail and "not plugged in" in r.detail
+    finally:
+        r.stop()

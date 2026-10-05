@@ -406,71 +406,49 @@ function renderConn() {
 
 const RADIO_STATE = { ok: "", off: "off", absent: "absent", down: "down", starting: "starting" };
 
-// One dongle on the bench: a segmented switch hands it to a channel or to trunk-recorder (P25).
+// Switchable dongles: one segmented row per SDR (by serial). Each runs one channel, Fire/EMS 15
+// (trunk-recorder) or Off; a mode running on another SDR is outlined, and picking it moves it here.
 function renderSdr() {
   const sdr = ui.state && ui.state.sdr;
   const box = $("#sdr");
   show(box, !!(sdr && sdr.shared));
   if (!sdr || !sdr.shared) return;
+  const list = sdr.sdrs || [{ serial: "", mode: sdr.mode, present: true }];
   const modes = sdr.modes || [];
-  const btns = [...box.querySelectorAll("button")];
-  if (btns.map((b) => b.dataset.mode).join("|") !== modes.join("|")) {
-    btns.forEach((b) => b.remove());
-    for (const m of modes) {
-      const b = el("button", "", m);
-      b.dataset.mode = m;
-      b.addEventListener("click", () => setSdrMode(m));
-      box.append(b);
+  const key = list.map((x) => x.serial).join("|") + "#" + modes.join("|");
+  if (box.dataset.key !== key) {
+    box.replaceChildren();
+    for (const x of list) {
+      const row = el("span", "seg");
+      row.dataset.sdr = x.serial;
+      row.append(el("span", "dim", list.length > 1 ? `SDR ${x.serial}` : "SDR"));
+      for (const m of modes) {
+        const b = el("button", "", m);
+        b.dataset.mode = m;
+        b.addEventListener("click", () => setSdrMode(m, x.serial));
+        row.append(b);
+      }
+      box.append(row);
+    }
+    box.dataset.key = key;
+  }
+  for (const x of list) {
+    const row = [...box.children].find((r) => r.dataset.sdr === x.serial);
+    if (!row) continue;
+    row.classList.toggle("absent", !x.present);
+    row.title = x.present ? `SDR ${x.serial}: choose what it listens to` : `SDR ${x.serial} is not plugged in`;
+    for (const b of row.querySelectorAll("button")) {
+      const m = b.dataset.mode;
+      const there = m !== "Off" && list.find((o) => o.serial !== x.serial && o.mode === m);
+      b.classList.toggle("active", m === x.mode);
+      b.classList.toggle("elsewhere", !!there);
+      b.title = there ? `${m} is on SDR ${there.serial}: click to move it here` : "";
+      b.disabled = !!sdr.switching || !!ui.sdrBusy;
     }
   }
-  for (const b of box.querySelectorAll("button")) {
-    b.classList.toggle("active", b.dataset.mode === sdr.mode);
-    b.disabled = !!sdr.switching || !!ui.sdrBusy;
-  }
 }
 
-// "Re-run all": every recording still on disk goes through speech-to-text again (newest first,
-// behind live traffic). Progress comes back in state.rerun.
-function renderRerun() {
-  const r = ui.state && ui.state.rerun;
-  const b = $("#rerun-all"), msg = $("#rerun-msg");
-  if (!r) return;
-  b.disabled = r.pending > 0 || !!ui.rerunBusy;
-  setText(msg, r.pending > 0 ? `re-running ${r.done} / ${r.total}` + (r.changed ? ` · ${r.changed} changed` : "")
-    : r.total ? `last re-run: ${r.done} done · ${r.changed} changed` + (r.failed ? ` · ${r.failed} failed` : "") : "");
-}
-
-$("#rerun-all").addEventListener("click", async () => {
-  const hours = (ui.state && ui.state.storage && ui.state.storage.audio_hours) || 12;
-  if (!confirm(`Run speech-to-text again on every recording still on disk (last ${hours} h)? ` +
-               "Live traffic is always transcribed first.")) return;
-  ui.rerunBusy = true;
-  renderRerun();
-  const n = await retranscribe({ all: true });
-  ui.rerunBusy = false;
-  if (n === null) setText($("#rerun-msg"), "re-run failed to start");
-  else if (n === 0) setText($("#rerun-msg"), "nothing to re-run");
-  else renderRerun();
-});
-
-// Disk use under captures/, from the cleaner's last pass (every 10 min): size, oldest audio, limits.
-function renderStorage() {
-  const st = ui.state && ui.state.storage;
-  const box = $("#storage");
-  show(box, !!st);
-  if (!st) return;
-  const mb = st.bytes / 1e6;
-  const size = mb >= 1000 ? `${(mb / 1000).toFixed(1)} GB` : `${mb < 10 ? mb.toFixed(1) : Math.round(mb)} MB`;
-  const age = st.oldest_audio ? (Date.now() / 1000 - st.oldest_audio) / 3600 : null;
-  const oldest = age == null ? "no audio" : `oldest ${age < 1 ? Math.round(age * 60) + " min" : age.toFixed(1) + " h"}`;
-  box.textContent = `captures ${size} · ${oldest} · audio kept ${st.audio_hours} h`;
-  const checked = new Date(st.checked * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  box.title = `${st.audio_files} audio files. Audio is deleted after ${st.audio_hours} h, pages and ` +
-              `transcripts after ${st.history_hours} h. Last cleanup ${checked}` +
-              (st.deleted ? `, removed ${st.deleted} files.` : ".");
-}
-
-async function setSdrMode(mode) {
+async function setSdrMode(mode, serial) {
   if (ui.sdrBusy) return;
   ui.sdrBusy = true;
   renderSdr();
@@ -478,7 +456,7 @@ async function setSdrMode(mode) {
   renderRerun();
   try {
     await fetch("/api/mode", { method: "POST", headers: { "Content-Type": "application/json" },
-                               body: JSON.stringify({ mode }) });
+                               body: JSON.stringify(serial ? { mode, sdr: serial } : { mode }) });
   } catch (_) { /* the next state push shows what happened */ }
   ui.sdrBusy = false;
 }

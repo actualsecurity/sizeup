@@ -7,6 +7,7 @@ dongle for another receiver on a one-dongle bench), restart with backoff if it d
 
 from __future__ import annotations
 
+import json
 import os
 import shlex
 import signal
@@ -31,6 +32,30 @@ class TrunkRecorder:
         self._proc: subprocess.Popen | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        # Set by the app when it hands trunk-recorder a dongle: () -> current index, or None if
+        # that dongle isn't plugged in. The source device in a generated config.runtime.json
+        # becomes "rtl=<index>" (never the serial: osmosdr reads all-digit serials as indexes).
+        self.device_fn: Callable[[], int | str | None] | None = None
+        self.device_name = ""
+
+    def _argv_for(self, dev: int | str) -> list[str]:
+        """argv with --config pointing at a copy of its config whose sources use dongle `dev`."""
+        argv = list(self.argv)
+        k = next((i for i, a in enumerate(argv) if a.startswith("--config")), None)
+        name = (argv[k].split("=", 1)[1] if "=" in argv[k] else argv[k + 1]) if k is not None else "config.json"
+        src = Path(self.workdir) / name
+        conf = json.loads(src.read_text())
+        for s in conf.get("sources", []):
+            s["device"] = f"rtl={dev}"
+        out = Path(self.workdir) / "config.runtime.json"
+        out.write_text(json.dumps(conf, indent=2))
+        if k is None:
+            argv.append(f"--config={out.name}")
+        elif "=" in argv[k]:
+            argv[k] = f"--config={out.name}"
+        else:
+            argv[k + 1] = out.name
+        return argv
 
     @property
     def installed(self) -> bool:
@@ -97,11 +122,24 @@ class TrunkRecorder:
                 self.state, self.detail = "absent", f"trunk-recorder not installed ({self.argv[0] if self.argv else '?'})"
                 self._stop.wait(15)
                 continue
+            argv = self.argv
+            if self.device_fn is not None:
+                dev = self.device_fn()
+                if dev is None:
+                    self.state, self.detail = "absent", f"SDR '{self.device_name}' not plugged in"
+                    self._stop.wait(15.0)
+                    continue
+                try:
+                    argv = self._argv_for(dev)
+                except (OSError, ValueError) as e:
+                    self.state, self.detail = "down", f"cannot write trunk-recorder config: {e}"
+                    self._stop.wait(15.0)
+                    continue
             try:
                 # trunk-recorder runs ffmpeg by name for call audio: make sure Homebrew's bin is on PATH.
                 env = dict(os.environ)
                 env["PATH"] = ":".join(["/opt/homebrew/bin", "/usr/local/bin", env.get("PATH", "")])
-                self._proc = subprocess.Popen(self.argv, cwd=self.workdir, stdout=subprocess.PIPE,
+                self._proc = subprocess.Popen(argv, cwd=self.workdir, stdout=subprocess.PIPE,
                                               stderr=subprocess.STDOUT, start_new_session=True, env=env)
             except OSError as e:
                 self.state, self.detail = "down", f"cannot start trunk-recorder: {e}"

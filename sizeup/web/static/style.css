@@ -561,3 +561,8 @@ body.modal { overflow: hidden; }
 .live-btn { margin-left: 0.6em; font-size: 0.85em; padding: 0.15em 0.7em; border-radius: 4px; white-space: nowrap; }
 .live-btn.active { color: #0b0b14; background: var(--ok); border-color: var(--ok); }
 .live-btn.blocked { background: var(--warn); border-color: var(--warn); }
+
+.sdrs { display: inline-flex; flex-direction: column; gap: 0.3em; }
+.sdrs .seg { margin-left: 0.6em; }
+.seg.absent { opacity: 0.5; }
+.seg button.elsewhere { border-style: dashed; color: var(--dim); }

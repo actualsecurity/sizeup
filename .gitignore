@@ -10,3 +10,4 @@ models/
 cache/
 deploy/trunk-recorder/*.log
 deploy/trunk-recorder/westchester/
+deploy/trunk-recorder/config.runtime.json

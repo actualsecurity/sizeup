@@ -55,6 +55,7 @@ class Config:
     stt_talker_prompt: str = "off"    # "ids": hint whisper with who keyed up ("77 Alpha 4, 60 Control"); "ids+time": + HHMM
     shared_device: str = ""      # one dongle for everything (bench): switch channel / P25 in the web app
     start_mode: str = ""         # with shared_device: what the dongle does at startup ("South 2", "FG1", "Fire/EMS 15")
+    sdrs: tuple[str, ...] = ()   # dongles (exact USB serials) sizeup may use, each switched in the web app
     p25_recorder: str = ""       # trunk-recorder command line, started/stopped by sizeup
     p25_recorder_dir: str = ""   # its working directory (config.json + talkgroups.csv)
     clips_dir: str = ""
@@ -80,7 +81,10 @@ def load(path: str | Path) -> Config:
     _take(data, "config", {"station", "web", "radio", "tones", "stt", "p25", "mdc", "units", "storage", "map"})
     st = _take(data.get("station", {}), "station", {"id", "name"})
     web = _take(data.get("web", {}), "web", {"host", "port"})
-    radio = _take(data.get("radio", {}), "radio", {"rtl_fm", "channels", "tones_file", "shared_device", "start_mode"})
+    radio = _take(data.get("radio", {}), "radio", {"rtl_fm", "channels", "tones_file", "shared_device", "start_mode", "sdrs"})
+    sdrs = tuple(str(x) for x in radio.get("sdrs", ())) or ((str(radio["shared_device"]),) if radio.get("shared_device") else ())
+    if len(set(sdrs)) != len(sdrs):
+        raise ConfigError("radio.sdrs: a serial is listed twice")
     channels = []
     for i, c in enumerate(radio.get("channels", [])):
         _take(c, f"radio.channels[{i}]", {"label", "mhz", "kind", "device", "gain_db", "squelch_db"})
@@ -176,7 +180,8 @@ def load(path: str | Path) -> Config:
         p25_aliases={str(k): v for k, v in p25.get("aliases", {}).items()},
         mdc_aliases={str(k).upper(): v for k, v in mdc.get("aliases", {}).items()},
         unit_departments=unit_departments, unit_callsigns=unit_callsigns,
-        shared_device=radio.get("shared_device", ""), start_mode=radio.get("start_mode", ""),
+        shared_device=radio.get("shared_device", "") or (sdrs[0] if sdrs else ""), start_mode=radio.get("start_mode", ""),
+        sdrs=sdrs,
         p25_recorder=p25.get("recorder", ""), p25_recorder_dir=rel(p25.get("recorder_dir", "")),
         clips_dir=rel(storage.get("clips_dir", "captures/clips")), keep_hours=float(storage.get("keep_hours", 24)),
         audio_keep_hours=float(storage.get("audio_keep_hours", 12)),

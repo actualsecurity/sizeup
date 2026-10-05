@@ -8,7 +8,7 @@
       "gain": 40,
       "digitalRecorders": 8,
       "driver": "osmosdr",
-      "device": "rtl=00000001"
+      "device": "rtl=v4"
     }
   ],
   "systems": [

@@ -134,7 +134,8 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
             if path == "/api/mode" and set_mode is not None:
                 try:
                     n = int(self.headers.get("Content-Length") or 0)
-                    err = set_mode(str(json.loads(self.rfile.read(min(n, 1024)) or b"{}")["mode"]))
+                    body = json.loads(self.rfile.read(min(n, 1024)) or b"{}")
+                    err = set_mode(str(body["mode"]), str(body["sdr"]) if body.get("sdr") else None)
                 except (ValueError, KeyError, TypeError) as e:
                     err = f"bad request: {e}"
                 if err:
