@@ -436,6 +436,9 @@ function renderSdr() {
     const row = [...box.children].find((r) => r.dataset.sdr === x.serial);
     if (!row) continue;
     row.classList.toggle("absent", !x.present);
+    let err = row.querySelector(".sdr-err");
+    if (!err) { err = el("span", "sdr-err"); row.append(err); }
+    setText(err, ui.sdrError || "");
     row.title = x.present ? `SDR ${x.serial}: choose what it listens to` : `SDR ${x.serial} is not plugged in`;
     for (const b of row.querySelectorAll("button")) {
       const m = b.dataset.mode;
@@ -451,14 +454,24 @@ function renderSdr() {
 async function setSdrMode(mode, serial) {
   if (ui.sdrBusy) return;
   ui.sdrBusy = true;
+  ui.sdrError = "";
   renderSdr();
-  renderStorage();
-  renderRerun();
+  // Never leave the switches disabled: a request the server doesn't answer (e.g. it was
+  // restarting) gives up after 15 s, and a refusal is shown next to the switch.
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 15000);
   try {
-    await fetch("/api/mode", { method: "POST", headers: { "Content-Type": "application/json" },
-                               body: JSON.stringify(serial ? { mode, sdr: serial } : { mode }) });
-  } catch (_) { /* the next state push shows what happened */ }
-  ui.sdrBusy = false;
+    const r = await fetch("/api/mode", { method: "POST", headers: { "Content-Type": "application/json" },
+                                         body: JSON.stringify(serial ? { mode, sdr: serial } : { mode }),
+                                         signal: ctl.signal });
+    if (!r.ok) ui.sdrError = ((await r.json().catch(() => ({}))).error) || `switch refused (${r.status})`;
+  } catch (e) {
+    ui.sdrError = e.name === "AbortError" ? "no answer from sizeup, try again" : "couldn't reach sizeup";
+  } finally {
+    clearTimeout(timer);
+    ui.sdrBusy = false;
+    renderSdr();
+  }
 }
 
 function renderRadios() {

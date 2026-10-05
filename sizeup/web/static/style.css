@@ -566,3 +566,5 @@ body.modal { overflow: hidden; }
 .sdrs .seg { margin-left: 0.6em; }
 .seg.absent { opacity: 0.5; }
 .seg button.elsewhere { border-style: dashed; color: var(--dim); }
+.sdr-err { color: var(--warn); font-size: 0.85em; margin-left: 0.5em; }
+.sdr-err:empty { display: none; }
