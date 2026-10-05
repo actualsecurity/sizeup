@@ -439,7 +439,9 @@ function renderSdr() {
     let err = row.querySelector(".sdr-err");
     if (!err) { err = el("span", "sdr-err"); row.append(err); }
     setText(err, ui.sdrError || "");
-    row.title = x.present ? `SDR ${x.serial}: choose what it listens to` : `SDR ${x.serial} is not plugged in`;
+    row.title = (x.present ? `SDR ${x.serial}: choose what it listens to.` : `SDR ${x.serial} is not plugged in.`) +
+      " One SDR hears one of these at a time (they're too far apart in frequency for one dongle)." +
+      (list.length < 2 ? " To run two at once, plug in another dongle and add its serial to [radio] sdrs in config.toml." : "");
     for (const b of row.querySelectorAll("button")) {
       const m = b.dataset.mode;
       const there = m !== "Off" && list.find((o) => o.serial !== x.serial && o.mode === m);
