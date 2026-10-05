@@ -36,6 +36,7 @@ from sizeup.incidents import IncidentStore, Traffic
 from sizeup.radio.fm import RATE, Channel, NfmReceiver, Segment, speech_seconds
 from sizeup.radio.mdc1200 import decode as mdc_decode
 from sizeup.radio.p25 import Call, CallIngest
+from sizeup.radio import claims
 from sizeup.radio import sdr as sdr_lookup
 from sizeup.radio.recorder import TrunkRecorder
 from sizeup.radio.page import Page, assemble, page_from_dict
@@ -693,10 +694,14 @@ class App:
         self.receivers[self.receivers.index(old)] = r
         return r
 
-    def _start_mode(self, mode: str, serial: str) -> None:
+    def _start_mode(self, mode: str, serial: str) -> bool:
         if mode == OFF_MODE:
             log(f"SDR {self.sdr_name(serial)} released: nothing of ours on it (switch it back on in the web app)")
-            return
+            return True
+        if not claims.claim(serial, mode):   # another app (shortfinal) holds it: leave it alone
+            c = claims.other(serial) or {}
+            log(f"SDR {self.sdr_name(serial)}: in use by {c.get('app', 'another app')} ({c.get('mode', '?')}), not starting {mode}")
+            return False
         if mode == P25_MODE:
             self.recorder.device_fn, self.recorder.device_name = self._dongle(serial), self.sdr_name(serial)
             self.recorder.start()
@@ -704,14 +709,16 @@ class App:
             r = self._receiver(mode)
             if r is not None:
                 self._fresh_receiver(r, serial).start()
+        return True
 
-    def _stop_mode(self, mode: str, why: str) -> None:
+    def _stop_mode(self, mode: str, why: str, serial: str) -> None:
         if mode == P25_MODE:
             self.recorder.stop(why)
         elif mode != OFF_MODE:
             r = self._receiver(mode)
             if r is not None:
                 r.stop()
+        claims.release(serial)
 
     def set_mode(self, mode: str, sdr: str | None = None) -> str | None:
         """Give dongle `sdr` (default: the first) a channel, Fire/EMS 15 (trunk-recorder) or Off.
@@ -724,6 +731,9 @@ class App:
             return f"no SDR {sdr!r} plugged in" + (f"; one of {', '.join(rows)}" if rows else "")
         if mode not in self.modes:
             return f"unknown mode {mode!r}; one of {', '.join(self.modes)}"
+        held = claims.other(sdr) if mode != OFF_MODE else None
+        if held:
+            return f"SDR {self.sdr_name(sdr)} is in use by {held.get('app', 'another app')} ({held.get('mode', '?')})"
         with self._mode_lock:
             if self.assign.get(sdr, OFF_MODE) == mode:
                 return None
@@ -732,14 +742,16 @@ class App:
                 other = next((o for o, m in self.assign.items() if o != sdr and m == mode != OFF_MODE), None)
                 if other:
                     log(f"SDR {self.sdr_name(other)}: {mode} -> {OFF_MODE} (moving to {self.sdr_name(sdr)})")
-                    self._stop_mode(mode, f"moved to SDR {self.sdr_name(sdr)}")
+                    self._stop_mode(mode, f"moved to SDR {self.sdr_name(sdr)}", other)
                     self.assign[other] = OFF_MODE
                 log(f"SDR {self.sdr_name(sdr)}: {self.assign.get(sdr, OFF_MODE)} -> {mode}")
-                self._stop_mode(self.assign.get(sdr, OFF_MODE), f"SDR {self.sdr_name(sdr)} on {mode}")
+                self._stop_mode(self.assign.get(sdr, OFF_MODE), f"SDR {self.sdr_name(sdr)} on {mode}", sdr)
                 time.sleep(SWITCH_PAUSE_S)  # let the dongle go before the next program opens it
-                self.assign[sdr] = mode
-                self._start_mode(mode, sdr)
+                ok = self._start_mode(mode, sdr)
+                self.assign[sdr] = mode if ok else OFF_MODE
                 self._save_modes()
+                if not ok:
+                    return f"SDR {self.sdr_name(sdr)} was just taken by another app"
             finally:
                 self.switching = False
         return None
@@ -775,7 +787,9 @@ class App:
         return {"shared": True, "mode": self.assign.get(rows[0], OFF_MODE) if rows else OFF_MODE, "modes": self.modes,
                 "switching": self.switching,
                 "sdrs": [{"serial": sd, "name": self.sdr_name(sd), "product": plugged.get(sd, ""),
-                          "mode": self.assign.get(sd, OFF_MODE), "present": sd in plugged} for sd in rows]}
+                          "mode": self.assign.get(sd, OFF_MODE), "present": sd in plugged,
+                          "held_by": ({"app": c.get("app"), "mode": c.get("mode")} if (c := claims.other(sd)) else None)}
+                         for sd in rows]}
 
     def radios(self) -> list[dict]:
         out = []
@@ -846,8 +860,10 @@ class App:
         self.stt.start()
         threading.Thread(target=self._janitor, name="janitor", daemon=True).start()
         if self.shared:
-            for sd, m in self.assign.items():  # each dongle runs what was picked for it
-                self._start_mode(m, sd)
+            for sd, m in list(self.assign.items()):  # each dongle runs what was picked for it
+                if not self._start_mode(m, sd):         # held by shortfinal now: don't fight for it
+                    self.assign[sd] = OFF_MODE
+            self._save_modes()
         else:
             for r in self.receivers:
                 r.start()
@@ -864,6 +880,8 @@ class App:
             self.recorder.stop()
         if self.p25:
             self.p25.stop()
+        for sd in list(self.assign):
+            claims.release(sd)
         self.whisper.stop()
 
 

@@ -441,8 +441,10 @@ function renderSdr() {
     const row = [...box.children].find((r) => r.dataset.sdr === x.serial);
     if (!row) continue;
     row.classList.toggle("absent", !x.present);
+    const held = x.held_by ? ` · in use by ${x.held_by.app} (${x.held_by.mode})` : "";
+    row.classList.toggle("held", !!x.held_by);
     setText(row.querySelector(".sdr-label"),
-            (list.length > 1 ? `SDR ${x.name || x.serial}` : "SDR") + (x.present ? "" : " · unplugged"));
+            (list.length > 1 ? `SDR ${x.name || x.serial}` : "SDR") + (x.present ? "" : " · unplugged") + held);
     let err = row.querySelector(".sdr-err");
     if (!err) { err = el("span", "sdr-err"); row.append(err); }
     setText(err, ui.sdrError || "");

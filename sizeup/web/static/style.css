@@ -570,3 +570,5 @@ body.modal { overflow: hidden; }
 .sdr-err:empty { display: none; }
 .list > li.keyup { padding: 0.15em 0; }
 .list > li.keyup .txt { font-size: 0.82em; color: var(--dim); font-style: italic; margin-top: 0; }
+.seg.held .sdr-label { color: var(--warn); }
+.seg.held button { opacity: 0.55; }

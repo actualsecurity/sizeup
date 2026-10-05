@@ -466,3 +466,36 @@ def test_unreadable_mdc_burst_is_noted_and_kept(tmp_path):
     rows = app.state()["loose_traffic"]
     assert [t.get("id_note") for t in rows] == ["ID burst unreadable", "no ID burst"]
     assert (tmp_path / "clips" / f"{rows[0]['id']}.mdc.wav").is_file()
+
+
+def test_dongle_held_by_shortfinal_is_left_alone(tmp_path, monkeypatch):
+    import json, os
+    from dataclasses import replace
+    import sizeup.app as appmod
+    import sizeup.radio.claims as claims
+    from sizeup.config import ChannelCfg
+    monkeypatch.setattr(appmod, "SWITCH_PAUSE_S", 0.0)
+    plugged = [(0, "Blog V4", "v4"), (1, "RTL2838UHIDIR", "adsb")]
+    monkeypatch.setattr(appmod.sdr_lookup, "devices", lambda *a, **k: list(plugged))
+    monkeypatch.setattr(appmod.sdr_lookup, "resolve", lambda serial, *a: next((i for i, _p, s in plugged if s == serial), None))
+    claims.DIR.mkdir(parents=True, exist_ok=True)
+    (claims.DIR / "adsb.json").write_text(json.dumps({"app": "shortfinal", "pid": os.getppid(), "mode": "TWR", "since": 1.0}))
+    (tmp_path / "sdr_modes.json").write_text(json.dumps({"v4": "Off", "adsb": "FG1"}))   # saved, but now taken
+    c = replace(cfg(tmp_path), rtl_fm=str(tmp_path / "no-rtl_fm"), clips_dir=str(tmp_path / "clips"),
+                channels=(ChannelCfg("South 2", 470.2, "paging", "p"), ChannelCfg("FG1", 453.0375, "traffic", "f")), sdr_auto=True)
+    (tmp_path / "clips").mkdir(exist_ok=True)
+    app = App(c).start()
+    try:
+        assert app.assign["adsb"] == "Off"                                   # didn't fight shortfinal for it
+        rows = {x["serial"]: x for x in app.state()["sdr"]["sdrs"]}
+        assert rows["adsb"]["held_by"] == {"app": "shortfinal", "mode": "TWR"} and rows["v4"]["held_by"] is None
+        assert "in use by shortfinal (TWR)" in app.set_mode("FG1", "adsb")
+        assert app.set_mode("FG1", "v4") is None
+        mine = json.loads((claims.DIR / "v4.json").read_text())
+        assert (mine["app"], mine["mode"], mine["pid"]) == ("sizeup", "FG1", os.getpid())
+        assert app.set_mode("Off", "v4") is None and not (claims.DIR / "v4.json").exists()   # released
+        assert app.set_mode("South 2", "v4") is None
+    finally:
+        app.stop()
+    assert not (claims.DIR / "v4.json").exists()                            # released on shutdown
+    assert (claims.DIR / "adsb.json").exists()                              # shortfinal's untouched
