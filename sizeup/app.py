@@ -443,33 +443,22 @@ class App:
             except OSError:
                 pass
 
-    def _save_skipped(self, item) -> None:
-        audio = getattr(item, "raw_audio", None)
-        if self.clips_dir is None or audio is None:
-            return
-        try:  # kept (not shown) so the click/speech decision can be checked
-            d = self.clips_dir / "skipped"
-            d.mkdir(exist_ok=True)
-            (d / f"{item.id}.wav").write_bytes(wav_bytes((np.clip(audio, -1, 1) * 32767).astype(np.int16), RATE))
-        except OSError:
-            pass
-
     def _transcribed(self, item) -> None:
         if isinstance(item, Traffic):
             item.text = getattr(item, "raw", "")
             attach = item.talkgroup is None or self.tg.main(item.talkgroup)
             if item.status == "no_speech":
-                log(f"{item.source}: mic click ({item.end - item.start:.1f} s, no speech) skipped"
+                # A key-up with nothing said (mic click): still shown, as who keyed and when, with
+                # its clip; just no transcript.
+                item.text = ""
+                log(f"{item.source}: key-up ({item.end - item.start:.1f} s, no speech)"
                     + (f" · unit {item.unit}" if item.unit else ""))
-                self._save_skipped(item)
-                with self._lock:
-                    self.clips.pop(item.id, None)
-                return
             if hasattr(item, "raw_audio"):
                 del item.raw_audio
             item.model = Path(self.cfg.stt_model).name  # type: ignore[attr-defined]  (which model wrote this text)
             self.store.on_traffic(item, attach=attach)
-            log(f"{item.source}: {'[' + item.unit + '] ' if item.unit else ''}{item.text or '(' + item.status + ')'}")
+            if item.status != "no_speech":
+                log(f"{item.source}: {'[' + item.unit + '] ' if item.unit else ''}{item.text or '(' + item.status + ')'}")
             return
         if isinstance(item, Rerun):
             return self._rerun_done(item)

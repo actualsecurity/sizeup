@@ -73,7 +73,7 @@ def test_page_opens_incident_and_traffic_attaches(tmp_path):
     assert app.clip(page_id)[:4] == b"RIFF" and app.clip("../etc") is None
 
 
-def test_mic_clicks_dropped_weak_speech_kept(tmp_path):
+def test_mic_clicks_shown_as_key_ups_weak_speech_kept(tmp_path):
     # FG1 bench: whisper says "Thank you."/"Yes." for dead air (6 of 6); real speech at only
     # 2-6 dB over the dead air ("Testing one, two.") must still come through.
     app = App(cfg(tmp_path))
@@ -87,10 +87,11 @@ def test_mic_clicks_dropped_weak_speech_kept(tmp_path):
     now = time.time()
     app._segment(Channel(453.0375, "FG1"), Segment(now, now + 1.5, dead_air, 20.0))
     app._segment(Channel(453.0375, "FG1"), Segment(now + 5, now + 6.5, weak, 20.0))
-    assert wait(lambda: len(app.state()["loose_traffic"]) == 1)
-    time.sleep(0.2)
-    assert [t["text"] for t in app.state()["loose_traffic"]] == ["Testing one, two."]
-    assert len(list((tmp_path / "clips" / "skipped").glob("*.wav"))) == 1   # the click, kept for review
+    assert wait(lambda: len(app.state()["loose_traffic"]) == 2)
+    rows = app.state()["loose_traffic"]
+    # User: "log key presses even when they don't have audio... radio id clicked but no transcription".
+    assert [(t["status"], t["text"]) for t in rows] == [("no_speech", ""), ("done", "Testing one, two.")]
+    assert rows[0]["has_audio"]                                              # the click can still be played
 
 
 def test_mdc_unit_id_names_the_talker(tmp_path):

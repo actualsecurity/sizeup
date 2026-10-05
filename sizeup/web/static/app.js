@@ -202,6 +202,10 @@ document.addEventListener("click", (e) => {
   });
 });
 
+// A transmission with nothing said: the radio keyed up (mic click). Shown compact, with who keyed.
+const KEYUP_TEXT = "key-up · no speech";
+const trafficStatus = (t) => t.status === "no_speech" ? KEYUP_TEXT : STATUS_TEXT[t.status] || t.status;
+
 // What a clip's status means, in words (pages and transmissions share these).
 const STATUS_TEXT = {
   pending: "transcribing…",
@@ -311,14 +315,15 @@ function liveItems() {
   const inc = ui.inc;
   const traffic = (inc ? inc.traffic || [] : (ui.state && ui.state.loose_traffic) || []).filter(isMainTraffic);
   const pages = (ui.state && ui.state.pages) || [];
-  return [...traffic, ...pages].map((x) => ({ id: x.id, start: x.start, has: x.has_audio }));
+  return [...traffic.map((x) => ({ id: x.id, start: x.start, has: x.has_audio, keyup: x.status === "no_speech" })),
+          ...pages.map((x) => ({ id: x.id, start: x.start, has: x.has_audio, keyup: false }))];   // pages always play
 }
 
 function liveUpdate() {
   if (!live.on) return;
   const fresh = liveItems().filter((x) => !live.seen.has(x.id));
   for (const x of fresh) live.seen.add(x.id);
-  const add = fresh.filter((x) => x.has !== false).sort((a, b) => a.start - b.start);
+  const add = fresh.filter((x) => x.has !== false && !x.keyup).sort((a, b) => a.start - b.start);   // key-ups not played
   if (!add.length) return;
   live.queue.push(...add.map((x) => x.id));
   while (live.queue.length > LIVE_MAX_QUEUE) { live.queue.shift(); live.dropped++; }   // fell behind: keep the newest
@@ -792,6 +797,7 @@ function renderTraffic(inc) {
     make: () => el("li"),
     fill: (li, t) => {
       speakerSide(li, t.unit);
+      li.classList.toggle("keyup", t.status === "no_speech");
       const meta = el("div", "meta");
       meta.append(playButton(t.id, "Play this transmission", t.has_audio), rerunButton(t.id, t.rerun_pending, t.has_audio),
                   el("span", "t", fmtTime(t.start)), chip(t.source || "?", sourceColor(t.source), "src"));
@@ -802,7 +808,7 @@ function renderTraffic(inc) {
       if (was) meta.append(was);
       const done = t.status === "done" && t.text;
       li.replaceChildren(meta, done ? stampedText("txt", t.text, t.start) : el("div", "txt muted",
-        t.status === "done" ? "(no words)" : STATUS_TEXT[t.status] || t.status));
+        t.status === "done" ? "(no words)" : trafficStatus(t)));
     },
     empty: inc ? "No radio traffic yet"
       : ((ui.state && ui.state.radios) || []).some((r) => r.state === "ok" && r.label !== "STT")
@@ -843,7 +849,8 @@ function otherGroups(inc) {
     g.last = g.calls[0].start;
     const newest = g.calls[0];
     const said = g.calls.find((t) => t.status === "done" && t.text);
-    g.snippet = newest.status === "done" ? (said ? said.text : "(no words)") : STATUS_TEXT[newest.status] || newest.status;
+    g.snippet = newest.status === "done" ? (said ? said.text : "(no words)")
+      : said ? said.text : trafficStatus(newest);
     g.snippetMuted = !(newest.status === "done" && newest.text);
   }
   return groups.sort((a, b) => b.last - a.last);
@@ -851,6 +858,7 @@ function otherGroups(inc) {
 
 function callFill(li, t) {
   speakerSide(li, t.unit);
+  li.classList.toggle("keyup", t.status === "no_speech");
   const meta = el("div", "meta");
   meta.append(playButton(t.id, "Play this transmission", t.has_audio), rerunButton(t.id, t.rerun_pending, t.has_audio),
               el("span", "t", fmtTime(t.start)));
@@ -860,7 +868,7 @@ function callFill(li, t) {
   if (was) meta.append(was);
   const done = t.status === "done" && t.text;
   li.replaceChildren(meta, done ? stampedText("txt", t.text, t.start) : el("div", "txt muted",
-    t.status === "done" ? "(no words)" : STATUS_TEXT[t.status] || t.status));
+    t.status === "done" ? "(no words)" : trafficStatus(t)));
 }
 
 function renderOther(inc) {

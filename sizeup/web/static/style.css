@@ -568,3 +568,5 @@ body.modal { overflow: hidden; }
 .seg button.elsewhere { border-style: dashed; color: var(--dim); }
 .sdr-err { color: var(--warn); font-size: 0.85em; margin-left: 0.5em; }
 .sdr-err:empty { display: none; }
+.list > li.keyup { padding: 0.15em 0; }
+.list > li.keyup .txt { font-size: 0.82em; color: var(--dim); font-style: italic; margin-top: 0; }
