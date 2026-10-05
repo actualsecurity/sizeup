@@ -379,10 +379,38 @@ class App:
                         out.append(name)
         return out
 
+    def _id_note(self, label: str, seg: Segment, units: list[str]) -> str:
+        """Why no radio ID, when there isn't one: a burst we couldn't read vs. no burst at all."""
+        if units:
+            return ""
+        if not seg.bursts:
+            return "no ID burst"
+        bad = 0
+        for b in seg.bursts:
+            try:
+                bad += sum(not p.crc_ok for p in mdc_decode(b, RATE, only_valid=False))
+            except Exception:
+                pass
+        log(f"{label}: MDC ID burst heard but not decoded ({len(seg.bursts)} burst(s), "
+            + (f"{bad} sync hit(s) failed the CRC" if bad else "no sync found") + ")")
+        return "ID burst unreadable"
+
+    def _keep_bursts(self, cid: str, seg: Segment) -> None:
+        """The cut-off MDC bursts, next to the clip (same 12 h limit), so the ID can be decoded again."""
+        if not self.clips_dir or not seg.bursts:
+            return
+        gap = np.zeros(RATE // 20, dtype=np.float32)
+        audio = np.concatenate([x for b in seg.bursts for x in (np.asarray(b, np.float32), gap)])
+        try:
+            (self.clips_dir / f"{cid}.mdc.wav").write_bytes(wav_bytes((np.clip(audio, -1, 1) * 32767).astype(np.int16), RATE))
+        except OSError:
+            pass
+
     def _segment(self, ch: Channel, seg: Segment) -> None:
         paging = self._kind.get(ch.label) == "paging"
         page = assemble(ch.label, ch.mhz, seg, self.plan) if paging else None
         units = self._units(seg)
+        id_note = "" if paging else self._id_note(ch.label, seg, units)
         # Weak signals: speech can sit only 2-6 dB over the dead air (FG1 bench, indoor antenna),
         # so nothing is skipped on energy. Everything is transcribed; a result that is one of
         # whisper's dead-air phrases ("Thank you.", "Yes.") on audio with no voice energy is a
@@ -407,6 +435,9 @@ class App:
             t = Traffic(f"{ch.label.replace(' ', '')}-{int(seg.start * 1000)}", ch.label, seg.start, seg.end,
                         "", status="pending", unit=", ".join(units))
             t.low_energy = low_energy  # type: ignore[attr-defined]
+            if id_note:
+                t.id_note = id_note    # type: ignore[attr-defined]
+            self._keep_bursts(t.id, seg)
             t.raw_audio = seg.audio    # type: ignore[attr-defined]  (saved if it turns out to be a click)
             self._keep_clip(t.id, seg.audio)
             self._keep_source(t.id, seg.audio)

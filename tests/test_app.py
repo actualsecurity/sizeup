@@ -448,3 +448,21 @@ def test_trunk_recorder_gets_the_dongle_index_not_the_serial(tmp_path):
         assert wait(lambda: r.state == "absent") and "v4" in r.detail and "not plugged in" in r.detail
     finally:
         r.stop()
+
+
+def test_unreadable_mdc_burst_is_noted_and_kept(tmp_path):
+    # User: "are you not getting a radio key from this radio? these are our new Motorola 6000s".
+    # A hissy transmission: a burst is cut off but fails to decode -> said so on the row, burst kept.
+    app = App(cfg(tmp_path))
+    app._kind = {"FG1": "traffic"}
+    app.stt.client = FakeWhisper({2: "Testing one two"})
+    app.stt.start()
+    rng = np.random.default_rng(5)
+    burst = (0.3 * rng.standard_normal(RATE // 4)).astype(np.float32)          # noise where the ID was
+    now = time.time()
+    app._segment(Channel(453.0375, "FG1"), Segment(now, now + 2, voice(2.0), 20.0, [burst]))
+    app._segment(Channel(453.0375, "FG1"), Segment(now + 5, now + 7, voice(2.0, 3), 20.0, []))
+    assert wait(lambda: len(app.state()["loose_traffic"]) == 2)
+    rows = app.state()["loose_traffic"]
+    assert [t.get("id_note") for t in rows] == ["ID burst unreadable", "no ID burst"]
+    assert (tmp_path / "clips" / f"{rows[0]['id']}.mdc.wav").is_file()

@@ -802,6 +802,7 @@ function renderTraffic(inc) {
       meta.append(playButton(t.id, "Play this transmission", t.has_audio), rerunButton(t.id, t.rerun_pending, t.has_audio),
                   el("span", "t", fmtTime(t.start)), chip(t.source || "?", sourceColor(t.source), "src"));
       if (t.unit) meta.append(el("b", "unit", t.unit));
+      else if (t.id_note) meta.append(el("span", "dim idnote", t.id_note));   // analog: why no radio ID
       if (t.talkgroup !== null && t.talkgroup !== undefined) meta.append(el("span", "dim", `TG ${t.talkgroup}`));
       if (t.end > t.start) meta.append(el("span", "dim dur", `${Math.round(t.end - t.start)} s`));
       const was = historyTag(t.history, t.rerun_at);
