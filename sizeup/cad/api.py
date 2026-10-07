@@ -27,6 +27,14 @@ POST /api/cad/incident/<id>/attach        {unit_ids, operator?}  units on a non-
 POST /api/cad/unit/<id>/status            {status, operator?, note?}
 POST /api/cad/runcards                    {type (TYPE or TYPE/SUBTYPE), slots, spoken?, rename_from?}   add / edit one
 POST /api/cad/runcards/delete             {type}
+GET  /api/cad/radios                      the radio registry (radio ID -> rig), conflicts, units not fitting
+                                          the ID pattern, the edit log
+POST /api/cad/radios                      {system: mdc|p25, radio_id, unit?, label?, source?, notes?, operator?}  add / edit
+POST /api/cad/radios/delete               {system, radio_id, operator?}
+GET  /api/cad/comms?unit=&channel=&event=&pcfd=1&since=&until=&limit=&rev=
+                                          every transmission (newest first) with its rig, radio ID, events
+GET  /api/cad/rigs                        board units (PCFD's own flagged), for the talk alerts
+GET  /api/cad/settings/audit?section=     every Settings change (who, section, key, old -> new), newest first
 """
 
 from __future__ import annotations
@@ -65,6 +73,14 @@ class CadApi:
                 return _json(200, self.cad.history())
             if path == "/api/cad/admin":
                 return _json(200, self.cad.admin())
+            if path == "/api/cad/radios":
+                return _json(200, self.cad.radio_registry())
+            if path == "/api/cad/comms":
+                return _json(200, self.cad.comms_query(parse_qs(query)))
+            if path == "/api/cad/rigs":
+                return _json(200, self.cad.rigs())
+            if path == "/api/cad/settings/audit":
+                return _json(200, self.cad.settings_audit(parse_qs(query)))
             if m := INCIDENT.fullmatch(path):
                 if m.group(2) is None:
                     return _json(200, self.cad.full(int(m.group(1))))
@@ -106,6 +122,10 @@ class CadApi:
                 return _json(200, c.save_run_card(body))
             if path == "/api/cad/runcards/delete":
                 return _json(200, c.delete_run_card(body))
+            if path == "/api/cad/radios":
+                return _json(200, c.save_radio(body))
+            if path == "/api/cad/radios/delete":
+                return _json(200, c.delete_radio(body))
         except CadError as e:
             return _json(400, {"error": str(e)})
         return 404, b"not found\n", "text/plain"

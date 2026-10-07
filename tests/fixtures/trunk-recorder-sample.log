@@ -1,0 +1,24 @@
+[2026-10-07 15:51:28.109458] (info)   [westchester]	[0;34m2C[0m	TG: [35m       307[0m	Freq: 476.075000 MHz	[32mStarting P25 Recorder Num [0][0m	TDMA: true	Slot: 1	QPSK: true
+[2026-10-07 15:51:31.608250] (info)   [westchester]	[0;34m2C[0m	TG: [35m       307[0m	Freq: 476.075000 MHz	[0;95mNew MotoP25_TDMA alias: [0m600007 ([0;34m60 Ctrl OP 7[0m)
+[2026-10-07 15:51:36.001499] (info)   [westchester]	[0;34m2C[0m	TG: [35m       307[0m	Freq: 476.075000 MHz	[33mConcluding Recorded Call[0m - Last Update: 4s	Recorder last write:4.51275	Call Elapsed: 8
+[2026-10-07 15:51:36.001527] (info)   [westchester]	[0;34m2C[0m	TG: [35m       307[0m	Freq: 476.075000 MHz	[33mStopping P25 Recorder Num [0][0m	TDMA: true	Slot: 1	TuningErr: +0 Hz
+[2026-10-07 15:51:36.001615] (info)   [westchester]	[0;34m2C[0m	TG: [35m       307[0m	Freq: 476.075000 MHz	- Transmission src: 600007 ([0;34m60 Ctrl OP 7[0m) pos:  0.00 length:  2.96
+[2026-10-07 15:51:52.521403] (info)   [westchester]	[0;34m4C[0m	TG: [35m      1329[0m	Freq: 476.075000 MHz	[32mStarting P25 Recorder Num [1][0m	TDMA: true	Slot: 1	QPSK: true
+[2026-10-07 15:51:55.313561] (info)   [westchester]	[0;34m4C[0m	TG: [35m      1329[0m	Freq: 476.075000 MHz	[0;95mNew MotoP25_TDMA alias: [0m21527 ([0;34mBUS527[0m)
+[2026-10-07 15:51:55.420312] (info)   [westchester]	[0;34m4C[0m	TG: [35m      1329[0m	Freq: 476.075000 MHz	Unit ID set via Control Channel, ext: 14	current: -1	 samples: 0
+[2026-10-07 15:52:06.455807] (info)   [westchester]	[0;34m4C[0m	TG: [35m      1329[0m	Freq: 476.075000 MHz	[0;95mNew MotoP25_TDMA alias: [0m14 ([0;34mYonkers OP 2[0m)
+[2026-10-07 15:52:06.880215] (info)   [westchester]	[0;34m4C[0m	TG: [35m      1329[0m	Freq: 476.075000 MHz	Unit ID set via Control Channel, ext: 21527	current: -1	 samples: 0
+[2026-10-07 15:52:14.006000] (info)   [westchester]	[0;34m4C[0m	TG: [35m      1329[0m	Freq: 476.075000 MHz	[33mConcluding Recorded Call[0m - Last Update: 4s	Recorder last write:4.9409	Call Elapsed: 22
+[2026-10-07 15:52:14.006027] (info)   [westchester]	[0;34m4C[0m	TG: [35m      1329[0m	Freq: 476.075000 MHz	[33mStopping P25 Recorder Num [1][0m	TDMA: true	Slot: 1	TuningErr: +0 Hz
+[2026-10-07 15:52:14.006085] (info)   [westchester]	[0;34m4C[0m	TG: [35m      1329[0m	Freq: 476.075000 MHz	- Transmission src: 21527 ([0;34mBUS527[0m) pos:  0.00 length:  1.80
+[2026-10-07 15:52:14.006089] (info)   [westchester]	[0;34m4C[0m	TG: [35m      1329[0m	Freq: 476.075000 MHz	- Transmission src: 14 ([0;34mYonkers OP 2[0m) pos:  1.80 length: 10.68
+[2026-10-07 15:52:14.006092] (info)   [westchester]	[0;34m4C[0m	TG: [35m      1329[0m	Freq: 476.075000 MHz	- Transmission src: 21527 ([0;34mBUS527[0m) pos: 12.48 length:  1.68
+[2026-10-07 15:53:20.938796] (info)   [westchester]	[0;34m8C[0m	TG: [35m       107[0m	Freq: 476.075000 MHz	[32mStarting P25 Recorder Num [0][0m	TDMA: true	Slot: 0	QPSK: true
+[2026-10-07 15:53:24.438554] (info)   [westchester]	[0;34m8C[0m	TG: [35m       107[0m	Freq: 476.075000 MHz	[0;95mNew MotoP25_TDMA alias: [0m36034 ([0;34mE274[0m)
+[2026-10-07 15:53:24.438580] (info)   [westchester]	[0;34m8C[0m	TG: [35m       107[0m	Freq: 476.075000 MHz	Unit ID set via Control Channel, ext: 600003	current: -1	 samples: 0
+[2026-10-07 15:53:26.620784] (info)   [westchester]	[0;34m8C[0m	TG: [35m       107[0m	Freq: 476.075000 MHz	[0;95mNew MotoP25_TDMA alias: [0m600003 ([0;34m60 Ctrl OP 3[0m)
+[2026-10-07 15:53:32.003214] (info)   [westchester]	[0;34m8C[0m	TG: [35m       107[0m	Freq: 476.075000 MHz	[33mConcluding Recorded Call[0m - Last Update: 5s	Recorder last write:3.80322	Call Elapsed: 12
+[2026-10-07 15:53:32.003231] (info)   [westchester]	[0;34m8C[0m	TG: [35m       107[0m	Freq: 476.075000 MHz	[33mStopping P25 Recorder Num [0][0m	TDMA: true	Slot: 0	TuningErr: +0 Hz
+[2026-10-07 15:53:32.003421] (info)   [westchester]	[0;34m8C[0m	TG: [35m       107[0m	Freq: 476.075000 MHz	- Transmission src: 36034 ([0;34mE274[0m) pos:  0.00 length:  2.60
+[2026-10-07 15:53:32.003427] (info)   [westchester]	[0;34m8C[0m	TG: [35m       107[0m	Freq: 476.075000 MHz	- Transmission src: 600003 ([0;34m60 Ctrl OP 3[0m) pos:  2.60 length:  1.68
+[2026-10-07 15:53:32.003430] (info)   [westchester]	[0;34m8C[0m	TG: [35m       107[0m	Freq: 476.075000 MHz	- Transmission src: -1 pos:  4.28 length:  0.08

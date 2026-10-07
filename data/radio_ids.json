@@ -1,0 +1,34 @@
+{
+  "_about": [
+    "Radio IDs -> rigs (the CAD's unit codes), seeded into state/cad.sqlite once per 'version' (sizeup/cad/radios.py).",
+    "After seeding, the Radios panel in the console is the place to change them: edits are kept and logged,",
+    "a new version here only adds IDs that aren't in the database yet (it never overwrites an edit).",
+    "system: 'mdc' = MDC-1200 PTT-ID heard on FG1 (4 hex digits, as decoded); 'p25' = county P25 radio ID.",
+    "source: confirmed (the department said so) | guessed (from a pattern, below) | heard (named on the air,",
+    "e.g. a P25 talker alias 'E60').",
+    "patterns: the user's guess (2026-10-07): new APX radios are <unit number>01-<unit number>10 (E63 -> 6301-6310),",
+    "old radios are 0<unit number>1-0<unit number>9 (E61 -> 0611-0619). Applied to PCFD's own units of the",
+    "kinds listed; an ID two units would both get is left unmapped and listed as a conflict, and a unit whose",
+    "number doesn't give a 4-digit ID (TL2, U239, the chiefs) is listed as not fitting."
+  ],
+  "version": 1,
+  "confirmed": [
+    {"system": "mdc", "id": "0611", "unit": "E61", "label": "Portable 1", "notes": "Engine 61 Portable 1 (MDC alias)"},
+    {"system": "mdc", "id": "0615", "unit": "E61", "label": "Portable 5", "notes": "Engine 61 Portable 5 (MDC alias)"},
+    {"system": "mdc", "id": "9231", "unit": "", "label": "South End Firehouse Mobile",
+     "notes": "a firehouse radio, not on a rig: which unit (if any) to confirm"}
+  ],
+  "heard": [
+    {"system": "mdc", "id": "6301", "label": "APX 6000",
+     "notes": "heard on FG1 2026-10-07 (sends its ID 0.3-0.8 s into the transmission); E63 only by the pattern"}
+  ],
+  "patterns": [
+    {"name": "new", "label": "new radio {k}", "first": 1, "last": 10, "format": "{n}{k:02d}",
+     "about": "new APX radios: <unit number>01-<unit number>10"},
+    {"name": "old", "label": "old radio {k}", "first": 1, "last": 9, "format": "0{n}{k}",
+     "about": "old radios: 0<unit number>1-0<unit number>9"}
+  ],
+  "pattern_kinds": ["engine", "ladder", "tower", "rescue", "marine"],
+  "not_guessed_kinds": {"chief": "chief officers carry 4-digit callsigns (2391...): no pattern",
+                        "utility": "utilities aren't in the pattern (U239 couldn't fit; U65/U67 unconfirmed)"}
+}

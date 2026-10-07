@@ -5,6 +5,8 @@ a 400 with the reason), keeps the lists, store, run cards, dispatch audio and th
     operator: Event info -> Accept event (numbered; emergency -> Pending events, else Non-emergency)
               -> recommend -> preview -> dispatch (assign, log, audio, NullTransmitter) -> Active events
               -> Close event with a disposition
+    radio traffic (monitor) -> record_traffic(): the rig from the radio registry (radios.py), linked
+              to the events its unit (or its tactical channel) was on (comms.py) -> /comms, event "Radio traffic"
 """
 
 from __future__ import annotations
@@ -19,6 +21,8 @@ from pathlib import Path
 from typing import Callable
 
 from sizeup.cad import dispatcher, export, runcards
+from sizeup.cad.comms import Comms
+from sizeup.cad.radios import Registry, RadioError, is_pcfd
 from sizeup.cad import lists as lists_mod
 from sizeup.cad.dispatcher import AudioUnavailable
 from sizeup.cad.store import TZ, CadError, Store
@@ -43,6 +47,9 @@ class Settings:
     repeat: int = 2
     transmit: bool = False
     channels: tuple[str, ...] = ("FG1", "PC repeater")
+    tactical: tuple[str, ...] = ("FG1",)          # analog fireground channels: their traffic goes on the active events
+    incident_talkgroups: tuple[int, ...] = (307, 333)   # P25: where 60 Control answers our units
+    radio_seed: str = ""                           # "" = data/radio_ids.json
 
 
 def _text(body: dict, key: str, max_len: int, required: bool = False) -> str:
@@ -108,13 +115,24 @@ class Cad:
             log(f"CAD: added {n} units from {Path(self.lists.path).name}")
         if runcards.seed(self.store, fill=bool(self.store.migrated)):
             log("CAD: seeded default run cards (a stand-in: edit them to PCFD policy)")
+        self.radios = Registry(self.store, s.radio_seed or None)
+        n = self.radios.seed()
+        if n:
+            log(f"CAD: seeded {n} radio IDs ({len(self.radios.plan['conflicts'])} conflicts left unmapped)")
+        self.comms = Comms(self.store, s.tactical, s.incident_talkgroups, clock=clock)
+        self.comms.prune()
+        # Set by the app: who is transmitting now (sizeup/radio/live.py) and whether a clip's audio is still kept.
+        self.live: Callable[[], list[dict]] = lambda: []
+        self.has_clip: Callable[[str], bool] = lambda cid: False
 
     @classmethod
     def from_config(cls, cfg, geocoder=None, log=print) -> Cad:
         return cls(Settings(db=cfg.cad_db, lists=cfg.cad_lists, department=cfg.cad_department,
                             monitor_departments=tuple(cfg.cad_monitor_departments), tones=tuple(cfg.dispatch_tones),
                             voice=cfg.dispatch_voice, rate_wpm=cfg.dispatch_rate, repeat=cfg.dispatch_repeat,
-                            transmit=cfg.dispatch_transmit, channels=tuple(cfg.dispatch_channels)),
+                            transmit=cfg.dispatch_transmit, channels=tuple(cfg.dispatch_channels),
+                            tactical=tuple(c.label for c in cfg.channels if c.kind == "traffic") or ("FG1",),
+                            incident_talkgroups=tuple(sorted(cfg.p25_incident_talkgroups))),
                    geocoder=geocoder, log=log)
 
     # -- state ----------------------------------------------------------------------------------
@@ -124,11 +142,12 @@ class Cad:
         rev = self.store.rev
         if self._state is None or self._state[0] != rev:
             cards = runcards.cards(self.store)
+            incs = self._with_radio(self.store.incidents())
             self._state = (rev, {
                 "department": self.s.department,
                 "lists": self.lists.public(),
                 "units": self.store.units(),
-                "incidents": self.store.incidents(),
+                "incidents": incs,
                 "unit_log": self.store.unit_log(),
                 "run_cards": cards,
                 "run_cards_default": any(c["is_default"] for c in cards),
@@ -139,7 +158,17 @@ class Cad:
                           "tones": [list(t) for t in self.s.tones]},
                 "geocoder": self.geocoder is not None,
             })
-        return dict(self._state[1], time=self.clock(), rev=rev)
+        return dict(self._state[1], time=self.clock(), rev=rev, talking=self.live())
+
+    def _with_radio(self, incs: list[dict], limit: int = 200) -> list[dict]:
+        """Each event's radio traffic (newest first), with whether its audio is still kept."""
+        by = self.comms.for_incidents([i["id"] for i in incs], limit)
+        for i in incs:
+            rows = by.get(i["id"], [])
+            for r in rows:
+                r["has_audio"] = self.has_clip(r["id"])
+            i["radio"] = rows
+        return incs
 
     # -- events -----------------------------------------------------------------------------------
 
@@ -223,7 +252,7 @@ class Cad:
         return dict(r, units=[{k: u[k] for k in ("id", "name", "kind", "spare", "status", "slot")} for u in r["units"]])
 
     def full(self, iid: int) -> dict:
-        return self.store.full(iid)
+        return self._with_radio([self.store.full(iid)], limit=1000)[0]
 
     def history(self) -> dict:
         return {"incidents": self.store.history()}
@@ -437,6 +466,81 @@ class Cad:
     def delete_run_card(self, body: dict) -> dict:
         runcards.delete(self.store, _text(body, "type", 50, required=True))
         return {"ok": True}
+
+    # -- radios and communications ---------------------------------------------------------------
+
+    def radio_registry(self) -> dict:
+        return self.radios.public()
+
+    def save_radio(self, body: dict) -> dict:
+        try:
+            return self.radios.save(body, _text(body, "operator", 60))
+        except RadioError as e:
+            raise CadError(str(e)) from None
+
+    def delete_radio(self, body: dict) -> dict:
+        try:
+            self.radios.delete(_text(body, "system", 8, required=True), _text(body, "radio_id", 12, required=True),
+                               _text(body, "operator", 60))
+        except RadioError as e:
+            raise CadError(str(e)) from None
+        return {"ok": True}
+
+    def record_traffic(self, t: dict, replace: bool = True) -> list[int]:
+        """A transcribed transmission from the monitor: logged, and linked to the events its rig
+        (or its tactical channel) was on. Returns the event ids."""
+        iids = self.comms.record(t, replace=replace)
+        if iids and replace:
+            nums = [r["number"] or str(r["id"]) for r in self.store.q(
+                f"SELECT id, number FROM incidents WHERE id IN ({','.join('?' * len(iids))})", iids)]
+            self.log(f"CAD: {t.get('source')} {t.get('rig') or t.get('unit') or 'transmission'} -> {', '.join(nums)}")
+        return iids
+
+    def comms_query(self, q: dict) -> dict:
+        """GET /api/cad/comms: {rows, rev, channels, rigs, pcfd, talking}. ?rev=N: {unchanged: true}
+        when nothing was logged since N (the page polls)."""
+        def one(k: str) -> str:
+            v = (q.get(k) or [""])[0].strip()
+            if len(v) > 60:
+                raise CadError(f"{k}: at most 60 characters")
+            return v
+
+        def when(k: str) -> float | None:
+            v = one(k)
+            if not v:
+                return None
+            try:
+                return float(v)
+            except ValueError:
+                raise CadError(f"{k}: unix seconds") from None
+        rev = one("rev")
+        talking = self.live()
+        if rev and rev == str(self.comms.rev):
+            return {"unchanged": True, "rev": self.comms.rev, "talking": talking}
+        pcfd = [u["name"] for u in self.radios.units if is_pcfd(u)]
+        try:
+            limit = int(one("limit") or 300)
+        except ValueError:
+            raise CadError("limit: a number") from None
+        rows = self.comms.query(unit=one("unit"), channel=one("channel"), event=one("event"),
+                                pcfd=pcfd if one("pcfd") in ("1", "true", "on") else None,
+                                since=when("since"), until=when("until"), limit=limit)
+        for r in rows:
+            r["has_audio"] = self.has_clip(r["id"])
+        return {"rows": rows, "rev": self.comms.rev, "pcfd": pcfd, "talking": talking, **self.comms.facets(),
+                "events": [{"id": r["id"], "number": r["number"], "type": r["type"], "address": r["address"]}
+                           for r in self.store.q("SELECT DISTINCT i.id, i.number, i.type, i.address FROM radio_links l "
+                                                 "JOIN incidents i ON i.id = l.incident_id ORDER BY i.id DESC LIMIT 100")]}
+
+    def settings_audit(self, q: dict) -> dict:
+        from sizeup.cad.radios import audit_log
+        section = (q.get("section") or [""])[0][:40]
+        return {"audit": audit_log(self.store, section, 500)}
+
+    def rigs(self) -> dict:
+        """The board units for the alert settings (PCFD's own flagged)."""
+        return {"units": [{"name": u["name"], "kind": u["kind"], "pcfd": is_pcfd(u), "department": u["department"]}
+                          for u in self.store.units() if u["board"]]}
 
     # -- location suggestions -----------------------------------------------------------------------
 

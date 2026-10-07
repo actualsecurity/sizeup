@@ -37,6 +37,8 @@ class TrunkRecorder:
         # becomes "rtl=<index>" (never the serial: osmosdr reads all-digit serials as indexes).
         self.device_fn: Callable[[], int | str | None] | None = None
         self.device_name = ""
+        # Every line of its output, as it comes (sizeup/radio/live.py reads who is keying up from it).
+        self.on_line: Callable[[str], None] | None = None
 
     def _argv_for(self, dev: int | str) -> list[str]:
         """argv with --config pointing at a copy of its config whose sources use dongle `dev`."""
@@ -109,6 +111,11 @@ class TrunkRecorder:
                         log = open(path, "a", buffering=1)
                 except OSError:
                     log = None
+            if line and self.on_line is not None:
+                try:
+                    self.on_line(line)
+                except Exception as e:  # the live indicator must never stop the drain
+                    self.detail = f"live talker parse error: {type(e).__name__}: {e}"
             if line:
                 self.last_lines.append(line)
                 low = line.lower()

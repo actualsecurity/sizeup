@@ -256,7 +256,7 @@ def test_numbers_yy_nnnnnn_per_local_year_and_queued_unnumbered(tmp_path):
     with pytest.raises(CadError):
         st.accept(p)                                                   # already accepted
     st2 = Store(tmp_path / "cad.sqlite", clock=clock)
-    assert st2.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 3
+    assert st2.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 4
     assert st2.incident(st2.create_incident(type="SERVICE"))["number"] == "27-000003"
     with pytest.raises(sqlite3.IntegrityError):
         st2.create_incident(type="ALARM", source="60 Control page", source_ref="monitor:x", status="queued")
@@ -953,7 +953,7 @@ def test_migrates_a_v2_database_keeping_its_data(tmp_path):
     cards_before = runcards.cards(cad.store)
     cad2 = make_cad(tmp_path)
     st = cad2.store
-    assert st.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 3
+    assert st.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 4
     assert any("v2 -> v3" in m for m in st.migrated)
     assert st.q("SELECT new_status, note FROM unit_history") == [{"new_status": "DISPATCHED", "note": ""}]
     assert st.full(iid)["number"] == "26-000001" and by_name(cad2, "E60")["incident_id"] == iid

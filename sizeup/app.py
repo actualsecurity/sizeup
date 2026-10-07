@@ -9,6 +9,10 @@
     traffic channels (FG1)    --squelch--> transmission --STT--> traffic on the active incident
     P25 (trunk-recorder dir)  --call--> STT --> traffic on the active incident (unit IDs kept)
     incident for Port Chester --> an event in the CAD (/cad, sizeup/cad/) waiting for a person to accept it
+    every transmission: its radio ID (MDC / P25) -> the rig it's on (sizeup/cad/radios.py) -> the CAD's
+        communications log, linked to the events that rig is assigned to (/comms, sizeup/cad/comms.py)
+    who is keying up now (squelch + live MDC decode on FG1; trunk-recorder's log for P25):
+        sizeup/radio/live.py -> "talking" in both pages' state
 """
 
 from __future__ import annotations
@@ -36,10 +40,11 @@ from sizeup.cad import Cad
 from sizeup.cad.api import CadApi
 from sizeup.dispatch import parse
 from sizeup.incidents import IncidentStore, Traffic
-from sizeup.radio.fm import RATE, Channel, NfmReceiver, Segment, data_frames, speech_seconds
+from sizeup.radio.fm import FRAME, RATE, Channel, NfmReceiver, Segment, data_frames, speech_seconds
 from sizeup.radio.mdc1200 import decode as mdc_decode
 from sizeup.radio.p25 import Call, CallIngest
 from sizeup.radio import claims
+from sizeup.radio.live import LiveTalk
 from sizeup.radio import sdr as sdr_lookup
 from sizeup.radio.recorder import TrunkRecorder
 from sizeup.radio.page import Page, assemble, page_from_dict
@@ -55,6 +60,8 @@ P25_MODE = "Fire/EMS 15"   # the shared-dongle mode that runs trunk-recorder
 OFF_MODE = "Off"           # the shared dongle released for other programs (sizeup keeps running)
 SWITCH_PAUSE_S = 1.0       # between stopping one program on the shared dongle and starting the next
 MIN_SPEECH_S = 0.15      # less sound than this above the dead-air floor (and no tones) = a mic click
+LIVE_WATCH_S = 0.2       # FG1 talking watcher: how often the squelch is looked at (and the MDC ID tried)
+LIVE_ID_WINDOW_S = 4.0   # ... the live MDC decode looks at the first seconds only (pre-IDs; APX 0.3-0.8 s in)
 CATEGORIES = {"fire": "#ff4d3d", "ems": "#4da3ff", "rescue": "#ffb020", "hazard": "#c86bff",
               "service": "#3ddc97", "unknown": "#9aa0b4"}
 
@@ -236,6 +243,17 @@ class App:
                     if cfg.p25_dir else None)
         # PCFD's own dispatch console: incidents, units, run cards (state/cad.sqlite).
         self.cad = Cad.from_config(cfg, geocoder=self._geocode_text if self.gaz is not None else None, log=log)
+        # Radio ID -> rig, and who is transmitting right now (both pages' "talking").
+        self.radios = self.cad.radios
+        self.live = LiveTalk(resolve=self.radios.resolve, tg_name=self.tg.name, main=self.tg.main,
+                             learn=lambda src, alias, at: self.radios.heard("p25", src, alias, at))
+        self.cad.live = self.live.state
+        self.cad.has_clip = self.has_clip
+        if self.recorder is not None:
+            self.recorder.on_line = self.live.feed_line
+        self._fm_live: dict[str, dict] = {}
+        self._stopping = threading.Event()
+        self._backfill()
 
     # -- geocoding ------------------------------------------------------------------------------
 
@@ -378,22 +396,29 @@ class App:
 
     # -- radio events -----------------------------------------------------------------------------
 
-    def _units(self, seg: Segment) -> list[str]:
-        """Who keyed up: MDC-1200 PTT-IDs in the bursts cut from the transmission's ends, and anywhere
-        in the transmission itself (a burst the edge cut missed still names the radio; packets are
-        CRC-checked, so this can't invent an ID)."""
-        out: list[str] = []
-        for b in [*seg.bursts, seg.audio]:
+    def _mdc(self, *audios) -> list[tuple[str, bool]]:
+        """(MDC-1200 unit ID, emergency) for each radio ID found in these pieces of audio, in order."""
+        out: list[tuple[str, bool]] = []
+        for b in audios:
             try:
                 pkts = mdc_decode(b, RATE)
             except Exception:
                 continue
             for p in pkts:
-                if p.kind in ("pre-id", "post-id", "emergency"):
-                    name = self.cfg.mdc_aliases.get(p.unit_hex, p.unit_hex)
-                    name = f"{name} EMERGENCY" if p.kind == "emergency" else name
-                    if name not in out:
-                        out.append(name)
+                if p.kind in ("pre-id", "post-id", "emergency") and (p.unit_hex, p.kind == "emergency") not in out:
+                    out.append((p.unit_hex, p.kind == "emergency"))
+        return out
+
+    def _units(self, seg: Segment, found: list[tuple[str, bool]] | None = None) -> list[str]:
+        """Who keyed up: MDC-1200 PTT-IDs in the bursts cut from the transmission's ends, and anywhere
+        in the transmission itself (a burst the edge cut missed still names the radio; packets are
+        CRC-checked, so this can't invent an ID)."""
+        out: list[str] = []
+        for hexid, emergency in (self._mdc(*seg.bursts, seg.audio) if found is None else found):
+            name = self.cfg.mdc_aliases.get(hexid, hexid)
+            name = f"{name} EMERGENCY" if emergency else name
+            if name not in out:
+                out.append(name)
         return out
 
     def _id_note(self, label: str, seg: Segment, units: list[str]) -> str:
@@ -428,7 +453,8 @@ class App:
     def _segment(self, ch: Channel, seg: Segment) -> None:
         paging = self._kind.get(ch.label) == "paging"
         page = assemble(ch.label, ch.mhz, seg, self.plan) if paging else None
-        units = self._units(seg)
+        found = self._mdc(*seg.bursts, seg.audio)
+        units = self._units(seg, found)
         id_note = "" if paging else self._id_note(ch.label, seg, units)
         # Weak signals: speech can sit only 2-6 dB over the dead air (FG1 bench, indoor antenna),
         # so nothing is skipped on energy. Everything is transcribed; a result that is one of
@@ -451,8 +477,12 @@ class App:
             self._keep_source(page.id, page.voice)
             self.stt.submit(page, page.voice)
         else:
+            ids = list(dict.fromkeys(h for h, _e in found))
+            for h in ids:
+                self.radios.heard("mdc", h, at=seg.end)
+            self.live.fm_segment(ch.label, ids, seg.start, seg.end)
             t = Traffic(f"{ch.label.replace(' ', '')}-{int(seg.start * 1000)}", ch.label, seg.start, seg.end,
-                        "", status="pending", unit=", ".join(units))
+                        "", status="pending", unit=", ".join(units), rig=self.radios.rig_mdc(ids), radio_id=", ".join(ids))
             t.low_energy = low_energy  # type: ignore[attr-defined]
             if id_note:
                 t.id_note = id_note    # type: ignore[attr-defined]
@@ -472,11 +502,16 @@ class App:
             self._drop_recorder_files(call)
             return
         self.tg.seen(call.talkgroup)
+        for _name, (src, tag) in call.ids.items():      # radio ID <-> alias, kept for lookups without the alias
+            self.radios.heard("p25", src, tag, call.start)
         if call.audio is not None:
             # One row per talker: 60 Control and the unit it's talking to are separate key-ups in the
             # same call; each piece is transcribed with only its own talker as the hint.
             for cid, start, end, unit, audio in split_turns(call):
-                t = Traffic(cid, call.label, start, end, "", status="pending", unit=unit, talkgroup=call.talkgroup)
+                names = [n for n in unit.split(", ") if n]
+                pairs = [(call.ids.get(n, ("", ""))[0], call.ids.get(n, ("", ""))[1] or n) for n in names]
+                t = Traffic(cid, call.label, start, end, "", status="pending", unit=unit, talkgroup=call.talkgroup,
+                            rig=self.radios.rig_p25(pairs), radio_id=", ".join(src for src, _t in pairs if src))
                 t.fm = False  # decoded P25 voice: no FM de-emphasis  # type: ignore[attr-defined]
                 self._keep_clip(t.id, radio_voice(audio, deemph=False), processed=True)
                 self._keep_source(t.id, audio)
@@ -507,6 +542,7 @@ class App:
                 del item.raw_audio
             item.model = Path(self.cfg.stt_model).name  # type: ignore[attr-defined]  (which model wrote this text)
             self.store.on_traffic(item, attach=attach)
+            self._to_cad(item)
             if item.status != "no_speech":
                 log(f"{item.source}: {'[' + item.unit + '] ' if item.unit else ''}{item.text or '(' + item.status + ')'}")
             return
@@ -527,7 +563,9 @@ class App:
                 depts = prev.departments  # the voice half of a tones-only page
                 self._last_tones_only = None
             elif not any(x in self.cfg.ours for x in d.departments):
-                self.store.on_traffic(Traffic(page.id, page.label, page.start, page.end, page.raw))
+                t = Traffic(page.id, page.label, page.start, page.end, page.raw)
+                self.store.on_traffic(t)
+                self._to_cad(t)
                 return
         inc = self.store.on_page(page.id, depts, d, at=page.start)
         if inc:
@@ -537,6 +575,70 @@ class App:
                 self.cad.from_monitor(inc)
             except Exception as e:  # the CAD must never stop the monitor
                 log(f"CAD: could not open a pending incident: {type(e).__name__}: {e}")
+
+    def _to_cad(self, t: Traffic, replace: bool = True) -> None:
+        """A transmission into the CAD's communications log (linked to its rig's events)."""
+        try:
+            self.cad.record_traffic({"id": t.id, "start": t.start, "end": t.end, "source": t.source,
+                                     "talkgroup": t.talkgroup, "unit": t.unit, "rig": t.rig, "radio_id": t.radio_id,
+                                     "text": t.text, "status": t.status, "model": getattr(t, "model", "")},
+                                    replace=replace)
+        except Exception as e:  # the CAD must never stop the monitor
+            log(f"CAD: could not log a transmission: {type(e).__name__}: {e}")
+
+    def _backfill(self) -> None:
+        """Traffic saved before radio IDs were tied to rigs: the rig from its talker text, and every
+        transmission still in the history into the communications log (ones already there are left)."""
+        rows = list(self.store.loose) + [t for i in self.store.incidents for t in i.traffic]
+        n = 0
+        for t in rows:
+            if not t.rig and t.unit:
+                rig, ids = self.radios.rig_for_names(t.unit, t.talkgroup is None, self.cfg.mdc_aliases)
+                t.rig = rig
+                t.radio_id = t.radio_id or ids
+            if t.status != "pending":
+                before = self.cad.comms.rev
+                self._to_cad(t, replace=False)
+                n += self.cad.comms.rev != before
+        if n:
+            log(f"CAD: {n} earlier transmission(s) added to the communications log")
+
+    # -- who is talking now (FG1) ------------------------------------------------------------------
+
+    def _watch_fm(self) -> None:
+        """While a traffic channel's squelch is open it is "talking"; the MDC ID is tried on the
+        audio so far (an APX sends it 0.3-0.8 s in) so the rig shows before the transmission ends."""
+        while not self._stopping.wait(LIVE_WATCH_S):
+            try:
+                self._watch_fm_once()
+            except Exception as e:  # never let the indicator take anything down
+                log(f"talking watcher error: {type(e).__name__}: {e}")
+
+    def _watch_fm_once(self, now: float | None = None) -> None:
+        now = time.time() if now is None else now
+        for r in list(self.receivers):
+            label = r.channel.label
+            if self._kind.get(label) != "traffic":
+                continue
+            sq = r.squelch
+            on = sq.open and (not self.shared or label in self.assign.values())
+            st = self._fm_live.get(label)
+            if not on:
+                if st is not None:
+                    del self._fm_live[label]
+                    self.live.fm_close(label)
+                continue
+            since = sq._start
+            if st is None or st["since"] != since:
+                st = self._fm_live[label] = {"since": since, "ids": [], "n": 0}
+                self.live.fm_open(label, since)
+            frames = list(sq._frames)[: int(LIVE_ID_WINDOW_S * RATE / FRAME)]
+            if not st["ids"] and len(frames) >= 4 and len(frames) != st["n"] and now - since < LIVE_ID_WINDOW_S + 1:
+                st["n"] = len(frames)
+                ids = list(dict.fromkeys(h for h, _e in self._mdc(np.concatenate(frames).astype(np.float32))))
+                if ids:
+                    st["ids"] = ids
+                    self.live.fm_ids(label, ids)
 
     def _dispatch(self, raw: str):
         d = parse(raw) if raw else None
@@ -641,6 +743,10 @@ class App:
                         if t.id == job.id), None)
             changed = changed or (old is not None and old != text)
             self.store.retext(job.id, text, job.status, job.confidence, model)
+            try:
+                self.cad.comms.retext(job.id, text, job.status, model)
+            except Exception as e:  # the CAD must never stop the monitor
+                log(f"CAD: could not update the communications log: {type(e).__name__}: {e}")
             if changed:
                 log(f"re-run {job.id}: {text or '(no speech)'}")
         with self._lock:
@@ -813,7 +919,7 @@ class App:
                           "held_by": ({"app": c.get("app"), "mode": c.get("mode")} if (c := claims.other(sd)) else None)}
                          for sd in rows]}
 
-    def radios(self) -> list[dict]:
+    def radio_status(self) -> list[dict]:
         out = []
         for r in self.receivers:
             st = r.status()
@@ -846,10 +952,11 @@ class App:
             pages = [dict(p.as_dict(), dispatch=getattr(p, "dispatch", None), history=getattr(p, "history", None) or [],
                           rerun_at=getattr(p, "rerun_at", None))
                      for p in list(self.pages)[:50]]
-        st = {"time": time.time(), "radios": self.radios(), **self.store.state(), "pages": pages, "sdr": self.sdr(),
+        st = {"time": time.time(), "radios": self.radio_status(), **self.store.state(), "pages": pages, "sdr": self.sdr(),
               "storage": getattr(self, "storage", None),
               "rerun": dict(self.rerun, pending=len(self._rerun_ids)),
-              "talkgroups": self.tg.state() if self.p25 else []}
+              "talkgroups": self.tg.state() if self.p25 else [],
+              "talking": self.live.state()}
         # Tell the display which entries have a recording (so ▶ isn't a dead button).
         with self._lock:
             busy = set(self._rerun_ids)
@@ -881,6 +988,7 @@ class App:
         self.whisper.start()
         self.stt.start()
         threading.Thread(target=self._janitor, name="janitor", daemon=True).start()
+        threading.Thread(target=self._watch_fm, name="talking", daemon=True).start()
         if self.shared:
             for sd, m in list(self.assign.items()):  # each dongle runs what was picked for it
                 if not self._start_mode(m, sd):         # held by shortfinal now: don't fight for it
@@ -896,6 +1004,7 @@ class App:
         return self
 
     def stop(self) -> None:
+        self._stopping.set()
         for r in self.receivers:
             r.stop()
         if self.recorder:
@@ -920,6 +1029,7 @@ def main(argv: list[str] | None = None) -> int:
     app = App(cfg).start()
     server = WebServer(cfg.host, cfg.port, app.scene(), app.state, app.clip, app.store.close, app.set_mode,
                        app.set_talkgroup, app.set_talkgroup_group, app.retranscribe, cad=CadApi(app.cad))
+    app.live.on_change = server.poke          # a new talker is pushed at once, not on the next second
     signal.signal(signal.SIGTERM, lambda *_: server.shutdown())
     log(f"sizeup: {cfg.station_name} · {len(cfg.channels)} channel(s)"
         + (f" · P25 {cfg.p25_dir}" if cfg.p25_dir else "") + f" · {server.url} · CAD {server.url}cad"

@@ -40,6 +40,8 @@ class Traffic:
     status: str = "done"
     unit: str = ""          # talker (P25 radio ID / alias) when known
     talkgroup: int | None = None
+    rig: str = ""           # the unit code(s) its radio is on (sizeup/cad/radios.py): "E63"
+    radio_id: str = ""      # raw radio ID(s): MDC "6301", P25 "41228"
 
     def as_dict(self) -> dict:
         return {k: v for k, v in self.__dict__.items() if k != "raw_audio"}

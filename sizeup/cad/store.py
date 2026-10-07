@@ -15,6 +15,11 @@
       events        the chronology (and unit status changes with no incident)
       unit_history  every unit status change: old -> new, event, operator, why (out of service)
       dispatches    what was (or, transmit off, would have been) sent, with its audio
+      radios        radio ID -> rig (sizeup/cad/radios.py)
+      settings_audit every change made in Settings (who, section, key, old -> new)
+      radio_traffic every transcribed transmission, radio_links: which events it belongs to
+                    (sizeup/cad/comms.py)
+      meta          small settings (the radio seed version)
 
 The lists (types, subtypes, dispositions, unit statuses and what each one means) come from
 sizeup/cad/lists.py. One connection, one lock: the web server is threaded and SQLite writes are
@@ -36,7 +41,7 @@ from sizeup.cad import lists as lists_mod
 from sizeup.cad.lists import Lists
 
 TZ = ZoneInfo("America/New_York")
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 OPEN = ("queued", "pending", "active")
 SOURCES = ("manual", "60 Control page")
@@ -88,7 +93,8 @@ CREATE TABLE assignments (
   id INTEGER PRIMARY KEY,
   incident_id INTEGER NOT NULL REFERENCES incidents(id),
   unit_id INTEGER NOT NULL REFERENCES units(id),
-  dispatched_at REAL, enroute_at REAL, onscene_at REAL, cleared_at REAL
+  dispatched_at REAL, enroute_at REAL, onscene_at REAL, cleared_at REAL,
+  assigned_at REAL                      -- put on the event (dispatched or attached): its radio traffic counts from here
 );
 CREATE INDEX assignments_open ON assignments(unit_id) WHERE cleared_at IS NULL;
 CREATE TABLE run_cards (
@@ -139,7 +145,54 @@ CREATE TABLE dispatches (
   channel TEXT NOT NULL DEFAULT '',
   tx_note TEXT NOT NULL DEFAULT ''
 );
+""" + """
+CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS radios (
+  system TEXT NOT NULL,                 -- mdc (FG1 MDC-1200, 4 hex digits) | p25 (county radio number)
+  radio_id TEXT NOT NULL,
+  unit TEXT NOT NULL DEFAULT '',        -- the board code it's on ('' = no rig / not known)
+  label TEXT NOT NULL DEFAULT '',       -- "Portable 1", "Mobile", the P25 alias
+  source TEXT NOT NULL,                 -- confirmed | guessed | heard
+  alias TEXT NOT NULL DEFAULT '',       -- P25: the talker alias the system sends with it
+  notes TEXT NOT NULL DEFAULT '',
+  edited INTEGER NOT NULL DEFAULT 0,    -- a person changed it: what is heard never overwrites it
+  first_heard REAL, last_heard REAL, heard INTEGER NOT NULL DEFAULT 0,
+  updated_at REAL NOT NULL,
+  PRIMARY KEY (system, radio_id)
+);
+CREATE TABLE IF NOT EXISTS settings_audit (   -- every change made in Settings: who, what, old -> new
+  id INTEGER PRIMARY KEY, at REAL NOT NULL, operator TEXT NOT NULL DEFAULT '',
+  section TEXT NOT NULL,                -- radios | lists | run cards | units | ... (Settings sections)
+  key TEXT NOT NULL,                    -- what changed in it: "mdc:0611/unit", "mdc:0611" (added / removed)
+  old TEXT NOT NULL DEFAULT '', new TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS settings_audit_section ON settings_audit(section, at);
+CREATE TABLE IF NOT EXISTS radio_traffic (
+  id TEXT PRIMARY KEY,                  -- the monitor's clip id (/api/audio/<id>.wav while the audio is kept)
+  call_id TEXT NOT NULL DEFAULT '',     -- P25: the call it was cut from, and the talker turn
+  turn INTEGER,
+  start REAL NOT NULL, end REAL NOT NULL,
+  channel TEXT NOT NULL,                -- FG1, Fire/EMS 15, South 2 ...
+  talkgroup INTEGER,
+  talker TEXT NOT NULL DEFAULT '',      -- as heard: MDC alias / P25 alias
+  radio_id TEXT NOT NULL DEFAULT '',    -- raw ID(s)
+  rig TEXT NOT NULL DEFAULT '',         -- unit code(s), comma-separated
+  dispatcher INTEGER NOT NULL DEFAULT 0,
+  text TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '',
+  updated_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS radio_traffic_start ON radio_traffic(start);
+CREATE INDEX IF NOT EXISTS radio_traffic_call ON radio_traffic(call_id);
+CREATE TABLE IF NOT EXISTS radio_links (
+  traffic_id TEXT NOT NULL REFERENCES radio_traffic(id) ON DELETE CASCADE,
+  incident_id INTEGER NOT NULL REFERENCES incidents(id),
+  why TEXT NOT NULL,                    -- unit | channel | dispatcher
+  unit TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (traffic_id, incident_id)
+);
+CREATE INDEX IF NOT EXISTS radio_links_incident ON radio_links(incident_id);
 """
+RADIO_SCHEMA = SCHEMA[SCHEMA.index("CREATE TABLE IF NOT EXISTS meta"):]
 
 # Schema v1 (before the sheet's vocabulary) -> v2. Old call types -> (TYPE, SUBTYPE).
 V1_TYPES = {"Structure fire": ("STRU", ""), "Fire alarm – commercial": ("ALARM", "COMM"),
@@ -205,6 +258,7 @@ class Store:
                     if v == 1:
                         self._v1_to_v2(self.db)
                     self._v2_to_v3(self.db)
+                    self._v3_to_v4(self.db)
                     self.db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
                     self.db.execute("COMMIT")
                 except BaseException:
@@ -217,6 +271,19 @@ class Store:
         if "note" not in cols:
             db.execute("ALTER TABLE unit_history ADD COLUMN note TEXT NOT NULL DEFAULT ''")
             self.migrated.append("schema v2 -> v3 (unit history: out-of-service reason)")
+
+    def _v3_to_v4(self, db) -> None:
+        """Radio IDs, the communications log and its links to events; assignments.assigned_at
+        (old rows: when dispatched, else when the event was accepted)."""
+        cols = {r["name"] for r in db.execute("PRAGMA table_info(assignments)")}
+        if "assigned_at" not in cols:
+            db.execute("ALTER TABLE assignments ADD COLUMN assigned_at REAL")
+            db.execute("UPDATE assignments SET assigned_at = COALESCE(dispatched_at, (SELECT COALESCE(i.accepted_at, "
+                       "i.created_at) FROM incidents i WHERE i.id = assignments.incident_id))")
+        for stmt in RADIO_SCHEMA.split(";"):
+            if stmt.strip():
+                db.execute(stmt)
+        self.migrated.append("schema v3 -> v4 (radio IDs, communications log)")
 
     def _v1_to_v2(self, db) -> None:
         """The sheet's vocabulary: numbers 26-000001, TYPE/SUBTYPE, caller fields, dispositions,
@@ -587,8 +654,8 @@ class Store:
                     db.execute("UPDATE assignments SET cleared_at = ? WHERE id = ?", (now, a["id"]))
                     self._event(db, a["incident_id"], "status", f"{u['name']} reassigned to another event", operator, uid, now)
                     moved.append(f"{u['name']} (from {a['number']})")
-                db.execute("INSERT INTO assignments (incident_id, unit_id, dispatched_at) VALUES (?, ?, ?)",
-                           (iid, uid, None if attach else now))
+                db.execute("INSERT INTO assignments (incident_id, unit_id, dispatched_at, assigned_at) VALUES (?, ?, ?, ?)",
+                           (iid, uid, None if attach else now, now))
                 if not attach:
                     db.execute("UPDATE units SET status = ?, status_at = ? WHERE id = ?", (dispatched, now, uid))
                     self._event(db, iid, "status", f"{u['name']} {verb or self.lists.status_phrase(dispatched)}",

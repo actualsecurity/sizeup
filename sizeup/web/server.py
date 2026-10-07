@@ -11,6 +11,7 @@ POST /api/talkgroup-group {"group": "County Police", "record": bool?, "main": bo
 POST /api/mode {"mode": ...}  one shared dongle: hand it to a channel or trunk-recorder (state "sdr")
 GET  /healthz
 GET  /cad                      the PCFD dispatch console (static/cad.html); its API is /api/cad/... (sizeup/cad/api.py)
+GET  /comms                    every transmission with its rig, radio ID, channel and events (static/comms.html)
 
 STATE = {
   "time": unix s,
@@ -38,8 +39,11 @@ MAX_CAD_BODY = 65536
 
 
 class Broadcaster:
+    MIN_GAP_S = 0.25   # poke() pushes at once, but never more often than this
+
     def __init__(self, state_fn: Callable[[], dict], period_s: float = 1.0):
         self.state_fn, self.period_s = state_fn, period_s
+        self._wake = threading.Event()
         self._cond = threading.Condition()
         self._payload = b"{}"
         self._seq = 0
@@ -48,8 +52,13 @@ class Broadcaster:
     def start(self) -> None:
         threading.Thread(target=self._run, name="broadcast", daemon=True).start()
 
+    def poke(self) -> None:
+        """Something changed that should be on screen now (a radio keyed up): push early."""
+        self._wake.set()
+
     def stop(self) -> None:
         self.stopped = True
+        self._wake.set()
         with self._cond:
             self._cond.notify_all()
 
@@ -62,7 +71,9 @@ class Broadcaster:
             with self._cond:
                 self._payload, self._seq = body, self._seq + 1
                 self._cond.notify_all()
-            time.sleep(self.period_s)
+            time.sleep(self.MIN_GAP_S)
+            self._wake.wait(max(0.0, self.period_s - self.MIN_GAP_S))
+            self._wake.clear()
 
     def latest(self) -> tuple[int, bytes]:
         with self._cond:
@@ -102,6 +113,8 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 return self._static("index.html")
             if path in ("/cad", "/cad.html") and cad is not None:
                 return self._static("cad.html")
+            if path in ("/comms", "/comms.html") and cad is not None:
+                return self._static("comms.html")
             if path == "/api/cad/stream" and cad_b is not None:
                 return self._stream(cad_b)
             if path.startswith("/api/cad/") and cad is not None:
@@ -235,6 +248,11 @@ class WebServer:
             if self.cad_broadcaster:
                 self.cad_broadcaster.stop()
             self.httpd.server_close()
+
+    def poke(self) -> None:
+        self.broadcaster.poke()
+        if self.cad_broadcaster:
+            self.cad_broadcaster.poke()
 
     def shutdown(self) -> None:
         self.broadcaster.stop()
