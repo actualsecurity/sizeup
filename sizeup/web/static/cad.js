@@ -580,8 +580,44 @@ document.addEventListener("click", (e) => {
 
 // Status buttons (the old console's): one per status in the data file; out of service and
 // unmanned ask why first (optional), right there.
+// On the board, a working status (dispatched, acknowledged, responding, on location...) asks which
+// call: the unit's current one preselected, the other open calls, or none. Moving it takes it off
+// the old call (noted on both).
+function callPicker(u, where, box) {
+  const now = unitById(u.id) || u;
+  const st = unitStatus(cad.pick.status);
+  const form = el("form", "ask row pick");
+  const sel = el("select");
+  const open = incidents().filter((i) => ["pending", "active"].includes(i.status));
+  const add = (value, text) => { const o = el("option", "", text); o.value = String(value); sel.append(o); };
+  const cur = open.find((i) => i.id === now.incident_id);
+  if (cur) add(cur.id, `${incTitle(cur)} · ${typeLabel(cur.type, cur.subtype) || "type not set"} · ${cur.address || ""} (current)`);
+  for (const i of open) if (i !== cur) add(i.id, `${incTitle(i)} · ${typeLabel(i.type, i.subtype) || "type not set"} · ${i.address || ""}`);
+  add(0, "No call: status only");
+  const ok = el("button", "mini on", `${st.name}`);
+  ok.type = "submit";
+  ok.style.setProperty("--c", st.bg || "#9aa0b4");
+  const cancel = el("button", "mini", "Cancel");
+  cancel.type = "button";
+  cancel.addEventListener("click", (e) => { e.stopPropagation(); cad.pick = null; render(); });
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const status = cad.pick.status, iid = Number(sel.value);
+    cad.pick = null;
+    try {
+      await api("POST", `/api/cad/unit/${u.id}/status`, { status, incident_id: iid, operator: operator() });
+    } catch (err) { alert(err.message); }
+  });
+  form.addEventListener("click", (e) => e.stopPropagation());
+  form.append(el("span", "small", `${now.name || ""} ${st.name.toLowerCase()} on:`), sel, ok, cancel);
+  box.append(form);
+  setTimeout(() => { if (document.activeElement !== sel) sel.focus(); }, 0);
+  return box;
+}
+
 function statusButtons(u, where) {
   const box = el("div", "ubtns");
+  if (where === "board" && cad.pick && cad.pick.uid === u.id) return callPicker(u, where, box);
   if (cad.ask && cad.ask.uid === u.id && cad.ask.where === where) {
     const st = unitStatus(cad.ask.status);
     const form = el("form", "ask row");
@@ -619,6 +655,7 @@ function statusButtons(u, where) {
     b.addEventListener("click", (e) => {
       e.stopPropagation();
       if (s.role === "oos") { cad.ask = { uid: u.id, status: s.code, where, text: "" }; render(); }
+      else if (where === "board" && s.role !== "free") { cad.pick = { uid: u.id, status: s.code }; render(); }
       else setUnitStatus(u.id, s.code);
     });
     box.append(b);
@@ -1439,7 +1476,8 @@ function renderUnits() {
       key: (u) => String(u.id),
       sig: (u) => JSON.stringify([u.status, u.status_at, u.incident_number, u.out_of_service, u.spare, cad.openUnit === u.id,
         talkSig(u.name),
-        cad.ask && cad.ask.uid === u.id && cad.ask.where === "board" ? cad.ask.status : null, cad.listSig.length]),
+        cad.ask && cad.ask.uid === u.id && cad.ask.where === "board" ? cad.ask.status : null, cad.listSig.length,
+        cad.pick && cad.pick.uid === u.id ? cad.pick.status : null]),
       make: () => {
         const li = el("li", "urow");
         li.addEventListener("click", (e) => {

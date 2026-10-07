@@ -587,6 +587,12 @@ class Cad:
 
     def unit_status(self, uid: int, body: dict) -> dict:
         status = _text(body, "status", 40, required=True)
+        if "incident_id" in body and body["incident_id"] is not None:   # the board's "which call?" answer
+            try:
+                iid = int(body["incident_id"])
+            except (TypeError, ValueError):
+                raise CadError("incident_id: a number (0 = no call)") from None
+            return self.store.set_unit_status_on(uid, status, iid, _text(body, "operator", 60), _text(body, "note", 200))
         return self.store.set_unit_status(uid, status, _text(body, "operator", 60), _text(body, "note", 200))
 
     def run_cards(self) -> list[dict]:

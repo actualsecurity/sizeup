@@ -488,6 +488,35 @@ class Store:
             self._history(db, uid, u["status"], status, iid, operator, now, note if role == "oos" else "")
         return self.unit(uid)
 
+    def set_unit_status_on(self, uid: int, status: str, incident_id: int, operator: str = "", note: str = "") -> dict:
+        """The board's working statuses ask which call (user, 2026-10-07: "it should prompt us ... to
+        select the call they are now responding to and remove them from the old call if they were
+        on one"). incident_id > 0: put the unit on that call first (moved off any other, noted on both
+        chronologies); 0: on no call (cleared off the one it was on). Then the status."""
+        L = self.lists
+        if L.role(status) in ("free", "oos"):
+            return self.set_unit_status(uid, status, operator, note)
+        u = self.unit(uid)
+        now = self.clock()
+        if incident_id:
+            inc = self.q("SELECT status FROM incidents WHERE id = ?", (incident_id,))
+            if not inc:
+                raise CadError(f"no incident {incident_id}")
+            if inc[0]["status"] not in ("pending", "active"):
+                raise CadError("that call isn't open")
+            self.assign(incident_id, [uid], operator)
+            if status == L.status_for("dispatched"):
+                return self.unit(uid)                       # assign() already set and logged it
+        else:
+            with self.tx() as db:
+                a = db.execute("SELECT a.id, a.incident_id FROM assignments a WHERE a.unit_id = ? AND a.cleared_at IS NULL",
+                               (uid,)).fetchone()
+                if a is not None:
+                    db.execute("UPDATE assignments SET cleared_at = ? WHERE id = ?", (now, a["id"]))
+                    self._event(db, a["incident_id"], "status", f"{u['name']} off this call ({L.status_phrase(status)} elsewhere)",
+                                operator, uid, now)
+        return self.set_unit_status(uid, status, operator, note)
+
     def return_statuses(self) -> tuple[str, ...]:
         """What a cleared unit can go back to a still-open call as: the responding / on-location statuses."""
         L = self.lists
