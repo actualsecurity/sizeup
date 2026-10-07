@@ -1074,10 +1074,11 @@ async function upgrade(e, previewOnly) {
 }
 
 // ---- unit tags in the comment box -------------------------------------------------------------
-// Typing a unit code ("E", "E6", "E63"; any case) offers the units on this incident first, then the
-// fire units, then the rest (the server's order, inc.tag_units). Tab or Enter takes the highlighted
-// one, arrows move, Esc closes. A taken code is a tag: the note is stored with it (who said it).
-// A code typed out in full (E63, L31, 77A4: with a letter) counts as a tag too.
+// "@" starts a tag (user, 2026-10-07: "the add a unit should be with an @E63 to trigger it"): "@",
+// "@E6", "@e63" offer the units on this incident first, then the fire units, then the rest (the
+// server's order, inc.tag_units). Tab or Enter takes the highlighted one, arrows move, Esc closes.
+// A taken code is a tag: the note is stored with it (who said it). "@E63" typed out in full counts
+// too; a bare "E63" is just text, and so is an address like "a@b".
 
 const noteTag = { tags: new Set(), items: [], idx: 0, tok: null };
 function tagOrder(inc) {
@@ -1085,10 +1086,13 @@ function tagOrder(inc) {
   const on = ((inc && inc.assignments) || []).map((a) => a.name);
   return [...new Set([...on, ...units().filter((u) => u.board).map((u) => u.name)])];
 }
-function tokenAt(input) {
+function tokenAt(input) {              // the "@code" being typed at the caret (start: the "@")
   const pos = input.selectionStart ?? input.value.length;
-  const m = input.value.slice(0, pos).match(/([A-Za-z0-9-]+)$/);
-  return m ? { text: m[1], start: pos - m[1].length, end: pos } : null;
+  const m = input.value.slice(0, pos).match(/(?:^|\s)@([A-Za-z0-9-]*)$/);
+  return m ? { text: m[1], start: pos - m[1].length - 1, end: pos } : null;
+}
+function mentionsOf(text) {             // codes written as "@code" (upper case)
+  return new Set([...text.matchAll(/(?:^|\s)@([A-Za-z0-9-]+)/g)].map((m) => m[1].toUpperCase()));
 }
 function hideSugg() {
   const box = $("#note-sugg");
@@ -1129,7 +1133,7 @@ function takeUnit(code) {
   const input = $("#note-text"), tok = noteTag.tok || tokenAt(input);
   if (!tok) return;
   const after = input.value.slice(tok.end).replace(/^[A-Za-z0-9-]*/, "");
-  const lead = input.value.slice(0, tok.start) + code + (after.startsWith(" ") ? "" : " ");
+  const lead = input.value.slice(0, tok.start) + "@" + code + (after.startsWith(" ") ? "" : " ");
   input.value = lead + after;
   input.setSelectionRange(lead.length, lead.length);
   noteTag.tags.add(code);
@@ -1151,21 +1155,18 @@ function noteKeys(e) {
     hideSugg();
   }
 }
-function wordsOf(text) {
-  return new Set((text.match(/[A-Za-z0-9-]+/g) || []).map((w) => w.toUpperCase()));
-}
-function syncNoteTags() {               // a tag whose code was deleted from the text goes; a code typed out in full comes
-  const text = $("#note-text").value, words = wordsOf(text);
-  for (const t of [...noteTag.tags]) if (!words.has(t.toUpperCase())) noteTag.tags.delete(t);
+function syncNoteTags() {               // a tag whose @code was deleted goes; an @code typed out in full comes
+  const text = $("#note-text").value, said = mentionsOf(text);
+  for (const t of [...noteTag.tags]) if (!said.has(t.toUpperCase())) noteTag.tags.delete(t);
   const tok = tokenAt($("#note-text"));
   for (const c of tagOrder(selected())) {
-    if (/[A-Za-z]/.test(c) && words.has(c.toUpperCase()) && !(tok && tok.text.toUpperCase() === c.toUpperCase())) noteTag.tags.add(c);
+    if (said.has(c.toUpperCase()) && !(tok && tok.text.toUpperCase() === c.toUpperCase())) noteTag.tags.add(c);
   }
   renderNoteTags();
 }
 function noteUnits(text) {
-  const words = wordsOf(text);
-  return [...noteTag.tags].filter((t) => words.has(t.toUpperCase()));
+  const said = mentionsOf(text);
+  return [...noteTag.tags].filter((t) => said.has(t.toUpperCase()));
 }
 function renderNoteTags() {
   const box = $("#note-tags");
