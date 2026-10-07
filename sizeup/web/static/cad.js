@@ -191,6 +191,10 @@ function typeColor(t) {
   const x = (L().event_types || []).find((i) => i.code === t);
   return x ? x.color : "";
 }
+function jointOf(code) {             // Rye Brook's units: {town, tag, units, quick_add}, else null
+  for (const [town, j] of Object.entries(L().joint_response || {})) if (j.units.includes(code)) return { town, ...j };
+  return null;
+}
 function unitStatus(code) {
   return (L().unit_statuses || []).find((s) => s.code === code) || { code, name: code };
 }
@@ -321,6 +325,7 @@ function fillQueueItem(li, inc) {
   if (inc.type) t.style.setProperty("--c", typeColor(inc.type) || "#9aa0b4");
   else t.classList.add("warn");
   head.append(el("b", "qn", incTitle(inc)), t);
+  if (inc.joint_call) head.append(el("span", "chip joint", `${inc.joint_call} call`));
   const right = el("span", "qe");
   if (isOpen(inc)) since(right, inc.created_at);
   else right.textContent = fmtTime(inc.closed_at);
@@ -346,7 +351,7 @@ function renderQueue() {
   const all = incidents();
   const byAge = (a, b) => a.created_at - b.created_at;        // oldest first
   const sig = (i) => JSON.stringify([i.status, i.number, i.type, i.subtype, i.address, i.id === cad.sel, i.emergency,
-    i.until_at, i.disposition, i.type_note, openAssignments(i).map((a) => [a.name, a.status]), i.closed_at, cad.listSig.length]);
+    i.until_at, i.disposition, i.type_note, i.joint_call, openAssignments(i).map((a) => [a.name, a.status]), i.closed_at, cad.listSig.length]);
   const opts = { key: (i) => String(i.id), sig, make: queueItem, fill: fillQueueItem };
   syncList($("#q-queued"), all.filter((i) => i.status === "queued").sort(byAge), { ...opts, empty: "No pages waiting" });
   syncList($("#q-pending"), all.filter((i) => i.status === "pending" && i.emergency).sort(byAge),
@@ -392,6 +397,8 @@ function renderDetail() {
   const es = eventStatus(inc);
   stBadge($("#d-status"), es.name, es.bg);
   stBadge($("#d-class"), inc.emergency ? "Emergency" : "Non-emergency", inc.emergency ? "#ff8a7a" : "#8fb8d8");
+  show($("#d-joint"), !!inc.joint_call);
+  if (inc.joint_call) stBadge($("#d-joint"), `${inc.joint_call} call`, "#a3a9ff");
   setText($("#d-source"), inc.source === "manual" ? "entered by hand" : `from ${inc.source}`);
   show($("#d-accept"), inc.status === "queued");
   show($("#d-dismiss"), inc.status === "queued");
@@ -606,6 +613,9 @@ function renderDispatchBox(inc) {
   $("#r-dispatch").disabled = inc.status === "queued";
   const addOn = (inc.dispatches || []).length > 0;
   show($("#r-kind"), addOn);
+  const jq = jointQuick();
+  show($("#r-joint"), !!jq);
+  if (jq) setText($("#r-joint"), `Add ${jq.town} (${jq.quick_add.join(", ")})`);
   show($("#u-open"), addOn && inc.status !== "queued");
   if (!$("#r-dispatch")._busy) setText($("#r-dispatch"), addOn ? "Dispatch (add-on)" : "Dispatch");
   const rec = cad.rec && cad.rec.iid === inc.id ? cad.rec : null;
@@ -667,10 +677,33 @@ function tickAll() {
   const free = (L().unit_statuses || []).filter((s) => s.role === "free").map((s) => s.code);
   const listed = new Set([...cad.rec.units.map((u) => u.id), ...cad.rec.extra]);
   for (const u of units()) {
-    if (!kinds.includes(u.kind) || u.mutual_aid || !free.includes(u.status) || u.incident_id || !u.board) continue;
+    if (!kinds.includes(u.kind) || u.mutual_aid || jointOf(u.name) || !free.includes(u.status) || u.incident_id || !u.board) continue;
     if (!listed.has(u.id)) cad.rec.extra.push(u.id);
     cad.rec.checked.add(u.id);
   }
+  cad.rec.sig = null;
+  renderDispatchBox(inc);
+}
+
+function jointQuick() {              // the first joint-response town with a quick-add list
+  const e = Object.entries(L().joint_response || {}).find(([, j]) => (j.quick_add || []).length);
+  return e ? { town: e[0], ...e[1] } : null;
+}
+function addJoint() {                 // "Add Rye Brook (E14, L30, 2662)": tick those that can go
+  const inc = selected(), j = jointQuick();
+  flash($("#r-error"));
+  if (!inc || !cad.rec || !j) return;
+  const free = (L().unit_statuses || []).filter((s) => s.role === "free").map((s) => s.code);
+  const listed = new Set([...cad.rec.units.map((u) => u.id), ...cad.rec.extra]);
+  const skipped = [];
+  for (const code of j.quick_add) {
+    const u = units().find((x) => x.name === code);
+    if (!u || u.incident_id === inc.id) continue;
+    if (!free.includes(u.status) || u.incident_id) { skipped.push(`${code} ${u.incident_number ? `on ${u.incident_number}` : unitStatus(u.status).name.toLowerCase()}`); continue; }
+    if (!listed.has(u.id)) cad.rec.extra.push(u.id);
+    cad.rec.checked.add(u.id);
+  }
+  if (skipped.length) flash($("#r-error"), `Not available: ${skipped.join(", ")}`);
   cad.rec.sig = null;
   renderDispatchBox(inc);
 }
@@ -1009,7 +1042,8 @@ function renderMap(inc) {
 // ---- unit board ---------------------------------------------------------------------------
 
 function unitGroups() {
-  // On a board (or off the boards but still committed), in the data file's order.
+  // On a board (or off the boards but still committed), in the data file's order. The joint-response
+  // units (Rye Brook's) are direct units: grouped by kind with PCFD's, tagged.
   const all = units().filter((u) => u.board || u.incident_id);
   const taken = new Set();
   const groups = [];
@@ -1018,9 +1052,7 @@ function unitGroups() {
     rows.forEach((u) => taken.add(u.id));
     if (rows.length) groups.push([title, rows]);
   };
-  for (const [title, kinds] of KIND_GROUPS) take(title, (u) => !u.mutual_aid && !u.department && kinds.includes(u.kind));
-  const depts = [...new Set(all.filter((u) => u.mutual_aid || u.department).map((u) => u.department || ""))];
-  for (const d of depts) take(d ? `${d} (mutual aid)` : "Other departments", (u) => (u.mutual_aid || u.department) && (u.department || "") === d);
+  for (const [title, kinds] of KIND_GROUPS) take(title, (u) => !u.mutual_aid && kinds.includes(u.kind));
   take("Police", (u) => u.kind === "pd");
   take("EMS", (u) => u.kind === "ems");
   take("Other & mutual aid", () => true);
@@ -1068,6 +1100,9 @@ function renderUnits() {
         name.title = [u.title, u.spoken && u.spoken !== u.name ? `said "${u.spoken}"` : "", u.department, u.spare ? "spare" : ""]
           .filter(Boolean).join(" · ");
         head.append(name);
+        const j = jointOf(u.name);
+        if (j) { const t = el("span", "chip joint", j.tag); t.title = `${j.town}'s (joint response)`; head.append(t); }
+        else if (u.mutual_aid && u.department) head.append(el("span", "chip dept", u.department));
         if (u.title) head.append(el("span", "utitle dim small", u.title));
         if (u.spare) head.append(el("span", "chip spare", "spare"));
         head.append(el("span", "spacer"), statusChip(u.status), since(el("span", "dim small ut"), u.status_at));
@@ -1367,6 +1402,7 @@ $("#r-refresh").addEventListener("click", () => recommend());
 $("#r-preview").addEventListener("click", preview);
 $("#r-dispatch").addEventListener("click", dispatch);
 $("#r-tickall").addEventListener("click", tickAll);
+$("#r-joint").addEventListener("click", addJoint);
 $("#r-add-btn").addEventListener("click", () => {
   const id = Number($("#r-add").value);
   if (!id || !cad.rec) return;

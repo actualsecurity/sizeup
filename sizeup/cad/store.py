@@ -58,7 +58,7 @@ CREATE TABLE units (
   title TEXT NOT NULL DEFAULT '',       -- "Duty Officer"
   board TEXT NOT NULL DEFAULT '',       -- main | other ('' = no longer on a board)
   department TEXT NOT NULL DEFAULT '',
-  mutual_aid INTEGER NOT NULL DEFAULT 0 -- another department's: never picked by kind on a run card
+  mutual_aid INTEGER NOT NULL DEFAULT 0 -- another department's (not joint response): never picked by kind
 );
 CREATE TABLE incidents (
   id INTEGER PRIMARY KEY,
@@ -640,6 +640,8 @@ class Store:
             by[d["incident_id"]]["dispatches"].append(d)
         for r in by.values():
             r["events"] = r["events"][-max_events:]
+            r["town"] = self.lists.event_town(r)
+            r["joint_call"] = self.lists.joint_call(r)      # "Rye Brook": their call (their units first)
         return list(by.values())
 
     def incidents(self, closed_s: float = 12 * 3600, closed_max: int = 20) -> list[dict]:

@@ -5,9 +5,12 @@ subtype-specific card wins over the type-only one. A slot is either a kind with 
 ({"kind": "engine", "count": 3}; "ladder|tower" takes either) or one named unit ({"unit": "2398"}).
 The recommendation walks the slots in order and takes the next free unit for each: board order,
 regular apparatus before spares, skipping units that can't be dispatched, are committed, or are
-already on this event. Another department's units (mutual_aid in the data file) are only sent by
-name, never picked by kind. A slot it can't fill is reported ("no ladder/tower available"), never
-filled with something else.
+already on this event. A unit named on the card is kept for its own slot (a kind slot doesn't
+take it). Another department's units (mutual_aid in the data file: Rye's L25, E191) are only sent
+by name, never picked by kind. A joint-response department's units (joint_response: Rye Brook's
+2662, L30, E14, U42) are direct units: a kind slot takes them after PCFD's own units of that kind,
+and first when the event is in their town (their call). A slot it can't fill is reported
+("no ladder/tower available"), never filled with something else.
 
 The default cards come from data/cad_lists.json (run_cards). They are a stand-in so the console
 works on day one, NOT PCFD policy: the page says so until each card has been edited.
@@ -152,9 +155,15 @@ def recommend(store: Store, typ: str, subtype: str = "", incident_id: int | None
     if c is None:
         what = L.type_label(typ, subtype) or "this event"
         return {"card": None, "card_label": "", "units": [], "unfilled": [], "already": [u["name"] for u in on_here],
-                "note": f"No run card for {what}: add units by hand"}
+                "note": f"No run card for {what}: add units by hand", "joint_call": ""}
+    town = L.joint_call(store.incident(incident_id)) if incident_id is not None else ""
+
+    def rank(u: dict) -> int:          # the event's joint town's units, then PCFD's, then other joint units
+        jt = L.joint_town(u["name"])
+        return 0 if town and jt == town else (1 if not jt else 2)
     free = [u for u in units if u["status"] in L.free and u["incident_id"] is None]
-    free.sort(key=lambda u: (u["spare"], u["sort"]))   # regular apparatus first, spares last
+    free.sort(key=lambda u: (rank(u), u["spare"], u["sort"]))   # regular apparatus before spares
+    named = {s["unit"] for s in c["slots"] if s.get("unit")}
     taken: set[int] = set()
     picks, unfilled = [], []
     for slot in c["slots"]:
@@ -163,7 +172,8 @@ def recommend(store: Store, typ: str, subtype: str = "", incident_id: int | None
             need, match = 1, (lambda u, n=slot["unit"]: u["name"] == n)
         else:
             kinds = slot["kind"].split("|")
-            need, match = slot["count"], (lambda u, ks=kinds: u["kind"] in ks and not u["mutual_aid"])
+            need, match = slot["count"], (lambda u, ks=kinds: u["kind"] in ks and not u["mutual_aid"]
+                                          and u["name"] not in named)
             want = None
         for u in on_here:                              # already there: fills the slot
             if need and u["id"] not in taken and match(u):
@@ -185,7 +195,7 @@ def recommend(store: Store, typ: str, subtype: str = "", incident_id: int | None
                 unfilled.append(f"no {slot['kind'].replace('|', '/')} available" if need == slot["count"]
                                 else f"only {slot['count'] - need} of {slot['count']} {slot['kind'].replace('|', '/')} available")
     return {"card": c["type"], "card_label": c["label"], "units": picks, "unfilled": unfilled,
-            "already": [u["name"] for u in on_here], "note": ""}
+            "already": [u["name"] for u in on_here], "note": "", "joint_call": town}
 
 
 def from_page(incident_type: str, category: str, text: str) -> tuple[str, str, str]:

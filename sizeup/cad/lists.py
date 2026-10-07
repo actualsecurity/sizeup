@@ -16,6 +16,9 @@ shows). A new export can replace the file without a code change:
     event_statuses                   name + colors per event status
     unit_kinds, unit_boards, units   the two status boards (null = a blank separator row) and per-unit
                                      kind / spoken name / title / spare / department
+    joint_response                   town -> the units of a department answering jointly with PCFD
+                                     (Rye Brook): direct units, picked by kind after PCFD's own, first
+                                     on an event in that town
     spoken                           TYPE, TYPE/SUBTYPE or */SUBTYPE -> as the dispatch voice says it
     dispatch_wording                 the dispatch as templates (new / add-on / upgrade, full response)
     run_cards                        the default cards seeded once into the database
@@ -69,6 +72,7 @@ class Lists:
     geo_town_aliases: dict[str, str]
     unit_event_cell: dict = field(default_factory=dict)
     wording: dict = field(default_factory=dict)            # dispatcher.WORDING keys -> template
+    joint_response: dict = field(default_factory=dict)     # town -> {"tag", "units": (codes), "quick_add": (codes)}
     already_statuses: tuple[str, ...] = ()                 # add-on: units on the event in these are said
     full_response_kinds: tuple[str, ...] = ()              # "Tick all available PCFD apparatus"
     path: str = ""
@@ -190,7 +194,11 @@ class Lists:
         u = self.units.get(code, {})
         return {"kind": u.get("kind", "agency"), "spoken": u.get("spoken") or code, "title": u.get("title", ""),
                 "spare": bool(u.get("spare")), "department": u.get("department", ""),
-                "mutual_aid": bool(u.get("mutual_aid"))}
+                "mutual_aid": bool(u.get("mutual_aid")), "joint": self.joint_town(code)}
+
+    def joint_town(self, code: str) -> str:
+        """'E14' -> 'Rye Brook': the town whose department answers jointly with PCFD ('' = PCFD's own or other)."""
+        return next((t for t, j in self.joint_response.items() if code in j["units"]), "")
 
     @property
     def kind_ids(self) -> tuple[str, ...]:
@@ -214,6 +222,19 @@ class Lists:
                     out.append(town)
         return out
 
+    def event_town(self, inc: dict) -> str:
+        """Where an event is: its map point's town (the label ends ', Rye Brook'), else a town typed in
+        the location ('940 King St, Rye Brook'), else ''."""
+        if inc.get("lat") is not None and "," in (inc.get("geo_label") or ""):
+            return self.town_of(inc["geo_label"].rsplit(",", 1)[1])
+        typed = self.towns_typed(inc.get("address") or "")
+        return typed[0] if typed else ""
+
+    def joint_call(self, inc: dict) -> str:
+        """'Rye Brook' when the event is in a joint-response town (their call: their units go first)."""
+        t = self.event_town(inc)
+        return t if t in self.joint_response else ""
+
     def town_rank(self, municipality: str) -> int:
         town = self.town_of(municipality)
         return self.geo_town_order.index(town) if town in self.geo_town_order else len(self.geo_town_order)
@@ -230,6 +251,8 @@ class Lists:
                 "unit_event_cell": self.unit_event_cell, "unit_kinds": [dict(k) for k in self.unit_kinds],
                 "unit_boards": [dict(b, units=list(b["units"])) for b in self.unit_boards],
                 "spoken": self.spoken, "geo_town_order": list(self.geo_town_order),
+                "joint_response": {t: {"tag": j["tag"], "units": list(j["units"]), "quick_add": list(j["quick_add"])}
+                                   for t, j in self.joint_response.items()},
                 "full_response": self.wording.get("full_response", ""),
                 "full_response_kinds": list(self.full_response_kinds),
                 "source": _shown_path(self.path)}
@@ -401,6 +424,24 @@ def load(path: str | Path | None = None) -> Lists:
     if not set(fr_kinds) <= kind_ids:
         raise ListsError(f"{where}: dispatch_wording.full_response_kinds: ids from unit_kinds")
 
+    joint = {}
+    for town, j in (d.get("joint_response") or {}).items():
+        if isinstance(j, list):
+            j = {"units": j}
+        if not isinstance(j, dict) or not isinstance(j.get("units"), list) or not j["units"]:
+            raise ListsError(f"{where}: joint_response[{town!r}]: a list of unit codes, or {{tag, units, quick_add}}")
+        codes = tuple(str(c) for c in j["units"])
+        quick = tuple(str(c) for c in (j.get("quick_add") or codes))
+        for c in codes + quick:
+            if c not in units:
+                raise ListsError(f"{where}: joint_response[{town!r}]: {c!r} is not in units")
+            if units[c].get("mutual_aid"):
+                raise ListsError(f"{where}: joint_response[{town!r}]: {c!r} is mutual_aid (joint units are direct)")
+        if not set(quick) <= set(codes):
+            raise ListsError(f"{where}: joint_response[{town!r}].quick_add: codes from its units")
+        tag = str(j.get("tag") or "".join(w[0] for w in str(town).split()).upper())
+        joint[str(town)] = {"tag": tag, "units": codes, "quick_add": quick}
+
     order = tuple(str(t) for t in d.get("geo_town_order") or [])
     aliases = {str(k).lower(): str(v) for k, v in (d.get("geo_town_aliases") or {}).items()}
     for t in order:
@@ -411,5 +452,5 @@ def load(path: str | Path | None = None) -> Lists:
                  unit_kinds=tuple({"id": k["id"], "label": str(k.get("label") or k["id"])} for k in kinds),
                  unit_boards=tuple(boards), units=units, spoken=dict(spoken), run_cards=tuple(cards),
                  geo_town_order=order, geo_town_aliases=aliases, unit_event_cell=dict(d.get("unit_event_cell") or {}),
-                 wording=dict(WORDING, **wording), already_statuses=already, full_response_kinds=fr_kinds,
+                 wording=dict(WORDING, **wording), already_statuses=already, joint_response=joint, full_response_kinds=fr_kinds,
                  path=str(path))

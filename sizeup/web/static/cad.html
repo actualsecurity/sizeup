@@ -92,6 +92,7 @@
           <span id="d-number" class="number"></span>
           <span id="d-status" class="st-badge"></span>
           <span id="d-class" class="st-badge"></span>
+          <span id="d-joint" class="st-badge" hidden title="In a joint-response town: their units are recommended first"></span>
           <span id="d-source" class="dim"></span>
           <span class="spacer"></span>
           <button id="d-accept" class="primary" hidden>Accept</button>
@@ -188,7 +189,8 @@
         <div class="row add-unit">
           <select id="r-add"></select>
           <button id="r-add-btn" type="button">Add unit</button>
-          <button id="r-tickall" type="button" title="Tick every available PCFD apparatus (never mutual aid, PD or EMS)">Tick all available PCFD apparatus</button>
+          <button id="r-tickall" type="button" title="Tick every available PCFD apparatus (not Rye Brook's, mutual aid, PD or EMS)">Tick all available PCFD apparatus</button>
+          <button id="r-joint" type="button" hidden title="Tick these joint-response units if they are available">Add Rye Brook</button>
         </div>
         <div class="row">
           <label class="inline check" title="Say the department response phrase instead of each unit's name"><input id="r-full" type="checkbox"> <span id="r-full-label">Full department response</span></label>

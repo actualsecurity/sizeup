@@ -190,9 +190,9 @@
   ],
   "_units": [
     "Per unit (guesses, not in the sheet): kind (run cards pick by kind), spoken (as the dispatch voice says",
-    "it), title, spare (picked after regular apparatus), department + mutual_aid (another department's",
-    "apparatus: never picked by kind on a run card, only by name). A board unit missing here is kind",
-    "'agency', spoken as its code."
+    "it), title, spare (picked after regular apparatus), department (whose: Rye Brook's units answer jointly,",
+    "see joint_response), mutual_aid (another department's apparatus, e.g. Rye's: never picked by kind on a",
+    "run card, only by name). A board unit missing here is kind 'agency', spoken as its code."
   ],
   "units": {
     "2391": {"kind": "chief", "spoken": "23 91", "title": "Chief of Department"},
@@ -215,10 +215,10 @@
     "U239": {"kind": "utility", "spoken": "Utility 239"},
     "M40": {"kind": "marine", "spoken": "Marine 40"},
     "M60": {"kind": "marine", "spoken": "Marine 60"},
-    "2662": {"kind": "chief", "spoken": "26 62", "department": "Rye Brook", "mutual_aid": true},
-    "L30": {"kind": "ladder", "spoken": "Ladder 30", "department": "Rye Brook", "mutual_aid": true},
-    "E14": {"kind": "engine", "spoken": "Engine 14", "department": "Rye Brook", "mutual_aid": true},
-    "U42": {"kind": "utility", "spoken": "Utility 42"},
+    "2662": {"kind": "chief", "spoken": "26 62", "department": "Rye Brook"},
+    "L30": {"kind": "ladder", "spoken": "Ladder 30", "department": "Rye Brook"},
+    "E14": {"kind": "engine", "spoken": "Engine 14", "department": "Rye Brook"},
+    "U42": {"kind": "utility", "spoken": "Utility 42", "department": "Rye Brook"},
     "PCPD": {"kind": "pd", "spoken": "PCPD"},
     "PCPD1": {"kind": "pd", "spoken": "PCPD1"},
     "RBPD": {"kind": "pd", "spoken": "RBPD"},
@@ -324,7 +324,9 @@
         {"kind": "engine", "count": 3},
         {"kind": "ladder|tower", "count": 1},
         {"kind": "rescue", "count": 1},
-        {"unit": "2398"}
+        {"unit": "2398"},
+        {"unit": "E14"},
+        {"unit": "L30"}
       ]
     },
     {
@@ -357,11 +359,23 @@
     {"type": "MA", "slots": [{"unit": "2398"}, {"kind": "engine", "count": 1}]},
     {"type": "INVEST", "slots": [{"kind": "engine", "count": 1}]}
   ],
+  "_joint_response": [
+    "Departments that answer jointly with PCFD (a rule to confirm with the department). Their units are",
+    "direct units, not mutual aid: on the board with PCFD's of the same kind (tagged), and a run-card slot",
+    "by kind may pick them, after PCFD's own units of that kind. An event located in that town (its map",
+    "point's town, else a town typed in the location) is their call: their units of each kind go first.",
+    "quick_add: the units the dispatch box's 'Add <town>' button ticks (Rye Brook answers PCFD's STRUs on",
+    "the first dispatch). No special dispatch wording."
+  ],
+  "joint_response": {
+    "Rye Brook": {"tag": "RB", "units": ["2662", "L30", "E14", "U42"], "quick_add": ["E14", "L30", "2662"]}
+  },
   "_geo": [
     "Location suggestions: towns in this order first (then anything else); a town typed in the box wins.",
     "geo_town_aliases: words in the box (or a gazetteer municipality) -> the town."
   ],
-  "geo_town_order": ["Port Chester", "Rye Brook", "Rye", "Harrison", "Mamaroneck", "Greenwich"],
+  "geo_town_order": ["Port Chester", "Rye Brook", "Rye", "Harrison", "Greenwich", "Mamaroneck", "Larchmont",
+                     "Town of Mamaroneck"],
   "geo_town_aliases": {
     "port chester": "Port Chester",
     "rye brook": "Rye Brook",
@@ -373,7 +387,10 @@
     "purchase": "Harrison",
     "mamaroneck": "Mamaroneck",
     "rye neck": "Mamaroneck",
-    "larchmont": "Mamaroneck",
+    "village of mamaroneck": "Mamaroneck",
+    "larchmont": "Larchmont",
+    "village of larchmont": "Larchmont",
+    "town of mamaroneck": "Town of Mamaroneck",
     "greenwich": "Greenwich",
     "byram": "Greenwich",
     "glenville": "Greenwich",

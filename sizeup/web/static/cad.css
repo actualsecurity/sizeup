@@ -48,6 +48,8 @@ label.check { cursor: pointer; }
 .chip.spare { --c: #a3a9ff; font-size: 0.68em; }
 .chip.default { --c: var(--warn); font-size: 0.68em; }
 .chip.edited { --c: var(--ok); font-size: 0.68em; }
+.chip.joint { --c: #a3a9ff; font-size: 0.68em; }
+.chip.dept { --c: #9aa0b4; font-size: 0.68em; }
 .chip.addon { --c: var(--warn); font-size: 0.72em; }
 .qt { font-weight: 700; color: color-mix(in srgb, var(--c, var(--text)) 62%, #fff); }
 .qt.warn { color: var(--warn); }

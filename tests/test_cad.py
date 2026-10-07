@@ -209,9 +209,13 @@ def test_spoken_unit_names_kinds_and_spares():
                      "M40": "marine", "2391": "chief", "2662": "chief", "77A3": "ems", "7711": "ems", "RBPD1": "pd",
                      "DPW": "agency", "60CAD": "agency"}
     assert L.unit("E59")["spare"] and L.unit("R41")["spare"] and not L.unit("E60")["spare"]
-    assert L.unit("E14")["mutual_aid"] and L.unit("L30")["department"] == "Rye Brook" and not L.unit("E60")["mutual_aid"]
+    # Rye Brook's units answer jointly: direct, not mutual aid. Rye's are mutual aid.
+    for c in ("2662", "L30", "E14", "U42"):
+        assert (L.unit(c)["department"], L.unit(c)["mutual_aid"], L.unit(c)["joint"]) == ("Rye Brook", False, "Rye Brook")
+    assert L.unit("L25")["mutual_aid"] and L.unit("E191")["mutual_aid"] and L.unit("E191")["joint"] == ""
+    assert not L.unit("E60")["mutual_aid"] and L.unit("E60")["joint"] == "" and L.unit("U42")["spoken"] == "Utility 42"
     assert L.unit("NEW1") == {"kind": "agency", "spoken": "NEW1", "title": "", "spare": False, "department": "",
-                              "mutual_aid": False}
+                              "mutual_aid": False, "joint": ""}
 
 
 def test_lists_file_errors_name_the_file_and_the_problem(tmp_path):
@@ -338,21 +342,20 @@ def test_recommend_follows_card_skipping_busy_and_unavailable():
     cad = make_cad()
     iid = cad.create({"type": "STRU", "address": "209 Westchester Ave"})["id"]
     r = runcards.recommend(cad.store, "STRU", "", iid)
-    assert names(r["units"]) == ["E60", "E61", "E62", "L31", "R40", "2398"] and r["unfilled"] == []
+    assert names(r["units"]) == ["E60", "E61", "E62", "L31", "R40", "2398", "E14", "L30"] and r["unfilled"] == []
     other = cad.create({"type": "SERVICE"})["id"]
     cad.unit_status(uid(cad, "L31"), {"status": "OUT OF SERVICE"})
     cad.store.assign(other, [uid(cad, n) for n in ("TL2", "E61", "2398")])
     r = runcards.recommend(cad.store, "STRU", "", iid)
-    assert names(r["units"]) == ["E60", "E62", "E63", "R40"]
+    assert names(r["units"]) == ["E60", "E62", "E63", "R40", "E14", "L30"]   # L30 kept for its own (named) slot
     assert r["unfilled"] == ["no ladder/tower available", f"2398 not available (committed to {cad.store.incident(other)['number']})"]
-    # Spares after regular apparatus; another department's engine (E14) is never picked by kind.
+    # Spares after regular apparatus; Rye Brook's engine is named on this card, so not taken by kind.
     cad.store.assign(iid, [uid(cad, n) for n in ("E60", "E62", "E63", "R40")])
     cad.store.assign(other, [uid(cad, "E64")])
     third = cad.create({"type": "STRU"})["id"]
     r = runcards.recommend(cad.store, "STRU", "", third)
-    assert [(u["name"], u["spare"]) for u in r["units"]] == [("E59", True), ("R41", True)]
+    assert [(u["name"], u["spare"]) for u in r["units"]] == [("E59", True), ("R41", True), ("E14", False), ("L30", False)]
     assert r["unfilled"][:2] == ["only 1 of 3 engine available", "no ladder/tower available"]
-    assert by_name(cad, "E14")["status"] == "AVAILABLE"
 
 
 def test_run_card_resolution_type_subtype_beats_type():
@@ -516,7 +519,7 @@ def test_service_dispatch_add_on_and_upgrade():
         cad.upgrade(iid, {"operator": "JD"})
     # The upgrade recommends only what the new card adds over what's there.
     rec = cad.recommend(iid, {"type": "STRU"})
-    assert names(rec["units"]) == ["E62", "R40"]
+    assert names(rec["units"]) == ["E62", "R40", "E14", "L30"]
     clock.t = local(2026, 10, 7, 15, 20)
     body = {"type": "STRU", "info": "smoke in the structure", "full": True, "unit_ids": [u["id"] for u in rec["units"]],
             "operator": "JD"}
@@ -957,3 +960,60 @@ def test_migrates_a_v2_database_keeping_its_data(tmp_path):
     assert runcards.cards(st) == cards_before
     cad2.unit_status(uid(cad2, "E61"), {"status": "OUT OF SERVICE", "note": "tires"})
     assert st.q("SELECT note FROM unit_history ORDER BY id DESC LIMIT 1")[0]["note"] == "tires"
+
+
+# -- Rye Brook: joint response --------------------------------------------------------------------------------
+
+def test_rye_brook_units_are_direct_and_fill_after_pcfd():
+    cad = make_cad()
+    L = cad.lists
+    assert L.joint_response["Rye Brook"]["units"] == ("2662", "L30", "E14", "U42")
+    assert L.joint_response["Rye Brook"]["quick_add"] == ("E14", "L30", "2662") and L.joint_response["Rye Brook"]["tag"] == "RB"
+    pub = cad.state()["lists"]["joint_response"]
+    assert pub["Rye Brook"]["tag"] == "RB"
+    st = {u["name"]: u for u in cad.state()["units"]}
+    assert not any(st[c]["mutual_aid"] for c in ("2662", "L30", "E14", "U42")) and st["L25"]["mutual_aid"]
+    # The default structure fire card names Rye Brook's engine and ladder (first dispatch).
+    cards = {c["type"]: c for c in runcards.cards(cad.store)}
+    assert cards["STRU"]["slots"][-2:] == [{"unit": "E14"}, {"unit": "L30"}]
+    # By kind: PCFD's own fill first (spares included), then Rye Brook's; Rye's (mutual aid) never.
+    runcards.save(cad.store, "SERVICE", [{"kind": "engine", "count": 8}])
+    iid = cad.create({"type": "SERVICE", "address": "1 Main St"})["id"]
+    r = runcards.recommend(cad.store, "SERVICE", "", iid)
+    assert names(r["units"]) == ["E60", "E61", "E62", "E63", "E64", "E59", "E14"]
+    assert r["unfilled"] == ["only 7 of 8 engine available"] and r["joint_call"] == ""
+    runcards.save(cad.store, "MVA", [{"kind": "ladder|tower", "count": 3}, {"kind": "chief", "count": 6}])
+    r = runcards.recommend(cad.store, "MVA", "", cad.create({"type": "MVA"})["id"])
+    assert names(r["units"]) == ["L31", "TL2", "L30", "2391", "2392", "2393", "2395", "2398", "2662"]
+
+
+def test_an_event_in_rye_brook_is_their_call():
+    cad = make_cad()
+    runcards.save(cad.store, "SERVICE", [{"kind": "engine", "count": 2}, {"kind": "ladder|tower", "count": 1},
+                                         {"kind": "utility", "count": 1}])
+    rb = cad.create({"type": "SERVICE", "address": "800 Westchester Ave", "lat": 41.03, "lon": -73.69,
+                     "geo_label": "800 Westchester Ave, Rye Brook"})
+    inc = next(i for i in cad.state()["incidents"] if i["id"] == rb["id"])
+    assert (inc["town"], inc["joint_call"]) == ("Rye Brook", "Rye Brook")
+    r = cad.recommend(rb["id"], {})
+    assert names(r["units"]) == ["E14", "E60", "L30", "U42"] and r["joint_call"] == "Rye Brook"
+    # Typed, not on the map: the town in the location still counts.
+    typed = cad.create({"type": "SERVICE", "address": "940 King St, Rye Brook"})["id"]
+    assert names(cad.recommend(typed, {})["units"])[:1] == ["E14"]
+    # In Port Chester (or anywhere else): PCFD's first.
+    pc = cad.create({"type": "SERVICE", "address": "209 Westchester Ave", "lat": 41.0, "lon": -73.66,
+                     "geo_label": "209 Westchester Ave, Port Chester"})["id"]
+    inc = next(i for i in cad.state()["incidents"] if i["id"] == pc)
+    assert (inc["town"], inc["joint_call"]) == ("Port Chester", "")
+    assert names(cad.recommend(pc, {})["units"]) == ["E60", "E61", "L31", "U65"]
+    rye = cad.create({"type": "SERVICE", "address": "1 Purchase St, Rye"})["id"]
+    assert names(cad.recommend(rye, {})["units"]) == ["E60", "E61", "L31", "U65"]
+
+
+def test_town_order_and_aliases_for_location_suggestions():
+    L = lists.load()
+    assert L.geo_town_order == ("Port Chester", "Rye Brook", "Rye", "Harrison", "Greenwich", "Mamaroneck", "Larchmont",
+                                "Town of Mamaroneck")
+    assert L.towns_typed("5 Palmer Ave, Larchmont") == ["Larchmont"]
+    assert L.towns_typed("740 W Boston Post Rd, Town of Mamaroneck") == ["Town of Mamaroneck"]
+    assert L.towns_typed("123 Mamaroneck Ave, Mamaroneck") == ["Mamaroneck"]
