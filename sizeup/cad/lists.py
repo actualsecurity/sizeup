@@ -7,15 +7,19 @@ shows). A new export can replace the file without a code change:
 
     event_types                      {code, name, color}: Type dropdown and the colored type cells
     event_subtypes                   {code, name}: Subtype dropdown
-    type_subtypes                    TYPE -> allowed subtypes (missing or empty = any subtype)
+    type_subtypes                    TYPE -> allowed subtypes (missing = any subtype; listed with none =
+                                     no subtype). PCFD's map is partial (type_subtypes_partial)
     dispositions                     {code, name}: Close event needs one
     received_via                     {code, name}: how the call came in
     event_class                      emergency / non-emergency by TYPE/SUBTYPE, */SUBTYPE or TYPE
     unit_statuses                    {code, name, role, bg, fg}: the status dropdown; the role is what
-                                     the store does with it (free, oos, dispatched, enroute, onscene)
+                                     the store does with it (free, oos, dispatched, enroute, onscene);
+                                     free_status: the free one Close event sets (else the first free)
     event_statuses                   name + colors per event status
-    unit_kinds, unit_boards, units   the two status boards (null = a blank separator row) and per-unit
-                                     kind / spoken name / title / spare / department
+    unit_kinds, unit_boards, units   the status boards (null = a blank separator row; group_by kind,
+                                     rest_title, folded: how the board shows them) and per-unit kind /
+                                     spoken name / title / spare / department. Unit codes are the
+                                     department's, kept as written (242_eNG, 239_Cascd: any case)
     joint_response                   town -> the units of a department answering jointly with PCFD
                                      (Rye Brook): direct units, picked by kind after PCFD's own, first
                                      on an event in that town
@@ -25,6 +29,10 @@ shows). A new export can replace the file without a code change:
     dispatch_tones                   joint town -> its alert tones (null: not known, PCFD's are played)
     run_cards                        the default cards seeded once into the database
     geo_town_order, geo_town_aliases Location suggestions: which towns come first
+
+Any item may carry "confirm": why its meaning or role is a guess. Settings shows it as "meaning to
+confirm" until someone edits or confirms the item there (the override drops the note), as it does for a
+unit with no name (no spoken name, no title: shown as its code).
 
 load() checks it and raises ListsError (with the file and the reason) on anything inconsistent.
 The file is the defaults: the Settings page's edits are kept in the CAD database and laid over it
@@ -50,7 +58,8 @@ DEFAULT_PATH = ROOT / "data" / "cad_lists.json"
 ROLES = ("free", "oos", "dispatched", "enroute", "onscene")
 EVENT_STATUSES = ("queued", "pending", "open", "active", "closed", "dismissed")   # open: non-emergency, no units
 CLASSES = ("emergency", "non-emergency")
-CODE = re.compile(r"[A-Z0-9][A-Z0-9_\-]{0,23}")                  # types, subtypes, unit codes
+CODE = re.compile(r"[A-Z0-9][A-Z0-9_\-]{0,23}")                  # types, subtypes, new unit codes
+UNIT_CODE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_\-]{0,23}")        # unit codes as the department wrote them
 LONG_CODE = re.compile(r"[A-Z0-9][A-Z0-9 _/\-]{0,39}")           # dispositions, statuses, received via
 COLOR = re.compile(r"#[0-9a-fA-F]{6}")
 RESPONSES = ("fire", "mutual_aid", "agency")
@@ -90,6 +99,8 @@ class Lists:
     full_response_kinds: tuple[str, ...] = ()              # "Tick all available PCFD apparatus"
     status_flow: dict = field(default_factory=dict)        # status | "*" -> (next statuses), the incident's unit buttons
     lead_in_joint_only: dict = field(default_factory=dict) # town -> the lead-in when only its units go
+    free_status: str = ""                                  # the free status Close event sets ('' = the first free)
+    type_subtypes_partial: dict = field(default_factory=dict)  # {"given": [types], "not_given": [types]}
     dispatch_tones: dict = field(default_factory=dict)     # joint town -> [(hz, s), ...] | None (not known yet)
     path: str = ""
     _names: dict[str, dict[str, str]] = field(default_factory=dict, repr=False)
@@ -136,8 +147,10 @@ class Lists:
     # -- types ------------------------------------------------------------------------------------
 
     def subtypes_for(self, typ: str) -> tuple[str, ...]:
+        """The subtypes a type allows: its list in type_subtypes (none listed: no subtype), or every
+        subtype for a type the (partial) map doesn't list."""
         sub = self.type_subtypes.get(typ)
-        return tuple(s for s in sub if s in self.subtype_codes) if sub else self.subtype_codes
+        return tuple(s for s in sub if s in self.subtype_codes) if sub is not None else self.subtype_codes
 
     def check_type(self, typ: str, subtype: str = "", required: bool = True) -> None:
         """Raises ValueError with the reason for a type / subtype code that isn't on the lists."""
@@ -196,7 +209,10 @@ class Lists:
         return next((s.get("role", "") for s in self.unit_statuses if s["code"] == status), "")
 
     def status_for(self, role: str) -> str:
-        """The first status with that role: 'free' -> 'AVAILABLE', 'dispatched' -> 'DISPATCHED'."""
+        """The first status with that role: 'dispatched' -> 'DP'; 'free' -> free_status ('AV') when it is
+        an active free status, else the first free one."""
+        if role == "free" and self.free_status and self.free_status in self.free:
+            return self.free_status
         return next(s["code"] for s in self.unit_statuses if s.get("role") == role and not s.get("retired"))
 
     @property
@@ -237,7 +253,14 @@ class Lists:
         r = self.response(code)
         return {"kind": u.get("kind", "agency"), "spoken": u.get("spoken") or code, "title": u.get("title", ""),
                 "spare": bool(u.get("spare")), "department": u.get("department", ""),
-                "mutual_aid": r == "mutual_aid", "response": r, "joint": self.joint_town(code)}
+                "mutual_aid": r == "mutual_aid", "response": r, "joint": self.joint_town(code),
+                "named": self.named(code)}
+
+    def named(self, code: str) -> bool:
+        """Has a name (a spoken name other than the code, or a title)? Otherwise it shows as its code and
+        Settings marks it "meaning to confirm"."""
+        u = self.units.get(code, {})
+        return bool((u.get("spoken") and u["spoken"] != code) or u.get("title"))
 
     @property
     def attach_kinds(self) -> tuple[str, ...]:
@@ -259,6 +282,12 @@ class Lists:
     @property
     def kind_ids(self) -> tuple[str, ...]:
         return tuple(k["id"] for k in self.unit_kinds)
+
+    @property
+    def card_kinds(self) -> tuple[str, ...]:
+        """Kinds a run-card slot can ask for: fire apparatus (not attach_only, not by_name: 'other' and the
+        mutual-aid requests are sent only when named)."""
+        return tuple(k["id"] for k in self.unit_kinds if not k.get("attach_only") and not k.get("by_name"))
 
     # -- towns ------------------------------------------------------------------------------------
 
@@ -313,7 +342,24 @@ class Lists:
                 "full_response": self.wording.get("full_response", ""),
                 "full_response_kinds": list(self.full_response_kinds),
                 "status_flow": {k: list(v) for k, v in self.status_flow.items()},
+                "free_status": self.status_for("free"),
+                "type_subtypes_partial": self.type_subtypes_partial,
                 "source": _shown_path(self.path)}
+
+
+BOARD_META = ("group_by", "rest_title", "folded")
+
+
+def board_meta(b: dict) -> dict:
+    """How a board shows (not which units): group_by "kind", rest_title, folded."""
+    out = {}
+    if b.get("group_by") == "kind":
+        out["group_by"] = "kind"
+    if b.get("rest_title"):
+        out["rest_title"] = str(b["rest_title"])
+    if b.get("folded"):
+        out["folded"] = True
+    return out
 
 
 def unit_response(u: dict, attach_kinds) -> str:
@@ -333,6 +379,7 @@ def _shown_path(p: str) -> str:
 
 
 def _items(d: dict, k: str, where: str, pattern: re.Pattern, extra=()) -> tuple[dict, ...]:
+    extra = tuple(extra) + ("confirm",)
     """A list of {code, name, ...} (or plain strings: code = name), codes unique and well formed."""
     v = d.get(k)
     if not isinstance(v, list) or not v:
@@ -389,6 +436,9 @@ def build(d: dict, where: str, path: str | Path = "") -> Lists:
     received = _items(d, "received_via", where, LONG_CODE)
     statuses = _items(d, "unit_statuses", where, LONG_CODE, ("role", "bg", "fg"))
     type_codes, sub_codes = {t["code"] for t in types}, {s["code"] for s in subtypes}
+    for x in types + subtypes + dispositions + received + statuses:
+        if "confirm" in x and not isinstance(x["confirm"], str):
+            raise ListsError(f"{where}: {x['code']}.confirm: text (why it is to confirm)")
 
     ts = d.get("type_subtypes") or {}
     if not isinstance(ts, dict):
@@ -397,9 +447,13 @@ def build(d: dict, where: str, path: str | Path = "") -> Lists:
     for t, subs in ts.items():
         if t not in type_codes:
             raise ListsError(f"{where}: type_subtypes: {t!r} is not in event_types")
-        if not isinstance(subs, list) or any(s not in sub_codes for s in subs):
+        if not isinstance(subs, list) or any(s not in sub_codes for s in subs if s != ""):
             raise ListsError(f"{where}: type_subtypes[{t!r}]: a list of event_subtypes codes")
-        type_subtypes[t] = tuple(subs)
+        type_subtypes[t] = tuple(s for s in subs if s)          # "": no subtype (always allowed)
+    tsp = d.get("type_subtypes_partial") or {}
+    if not isinstance(tsp, dict) or not all(isinstance(tsp.get(k, []), list) for k in ("given", "not_given")):
+        raise ListsError(f"{where}: type_subtypes_partial: {{given: [types], not_given: [types]}}")
+    tsp = {k: [t for t in tsp.get(k, []) if t in type_codes] for k in ("given", "not_given")}
 
     def check_key(k: str, what: str) -> None:
         t, _, s = k.partition("/")
@@ -438,20 +492,24 @@ def build(d: dict, where: str, path: str | Path = "") -> Lists:
     if any("|" in k for k in kind_ids):
         raise ListsError(f"{where}: unit_kinds: an id can't contain |")
     attach_kinds = {k["id"] for k in kinds if k.get("attach_only")}
+    card_kinds = {k["id"] for k in kinds if not k.get("attach_only") and not k.get("by_name")}
 
-    boards, seen = [], set()
+    boards, seen, seen_up = [], set(), set()
     for i, b in enumerate(d.get("unit_boards") or []):
         if not isinstance(b, dict) or not isinstance(b.get("units"), list):
             raise ListsError(f"{where}: unit_boards[{i}]: an object with a units list")
         for code in b["units"]:
             if code is None:
                 continue
-            if not isinstance(code, str) or not CODE.fullmatch(code):
+            if not isinstance(code, str) or not UNIT_CODE.fullmatch(code):
                 raise ListsError(f"{where}: unit_boards[{i}]: {code!r} is not a unit code")
-            if code in seen:
+            if code in seen or code.upper() in seen_up:
                 raise ListsError(f"{where}: unit_boards: {code!r} is on the boards twice")
             seen.add(code)
-        boards.append({"id": str(b.get("id") or f"board{i}"), "title": str(b.get("title") or ""), "units": list(b["units"])})
+            seen_up.add(code.upper())
+        board = {"id": str(b.get("id") or f"board{i}"), "title": str(b.get("title") or ""), "units": list(b["units"])}
+        board.update(board_meta(b))
+        boards.append(board)
     if not seen:
         raise ListsError(f"{where}: unit_boards: no units")
 
@@ -491,7 +549,7 @@ def build(d: dict, where: str, path: str | Path = "") -> Lists:
                 raise ListsError(f"{where}: run_cards[{i}]: unit {s['unit']!r} is not on the boards")
             if s.get("unit") and agency(s["unit"]):
                 raise ListsError(f"{where}: run_cards[{i}]: {s['unit']!r} is another agency's unit (never on a run card)")
-            if not s.get("unit") and not set(str(s.get("kind", "")).split("|")) <= kind_ids - attach_kinds:
+            if not s.get("unit") and not set(str(s.get("kind", "")).split("|")) <= card_kinds:
                 raise ListsError(f"{where}: run_cards[{i}]: kind {s.get('kind')!r} is not a fire apparatus kind in unit_kinds")
 
     from sizeup.cad.dispatcher import WORDING
@@ -514,6 +572,9 @@ def build(d: dict, where: str, path: str | Path = "") -> Lists:
         if (k != "*" and k not in codes) or not isinstance(v, list) or not set(v) <= codes:
             raise ListsError(f"{where}: status_flow[{k!r}]: a unit_statuses code (or \"*\") -> a list of unit_statuses codes")
         flow[k] = tuple(v)
+    free_status = d.get("free_status") or ""
+    if free_status and free_status not in codes:
+        raise ListsError(f"{where}: free_status: {free_status!r} is not in unit_statuses")
     already = tuple(dw.get("already_statuses") or ())
     if not set(already) <= {s["code"] for s in statuses}:
         raise ListsError(f"{where}: dispatch_wording.already_statuses: codes from unit_statuses")
@@ -558,11 +619,12 @@ def build(d: dict, where: str, path: str | Path = "") -> Lists:
 
     return Lists(event_types=types, event_subtypes=subtypes, type_subtypes=type_subtypes, dispositions=dispositions,
                  received_via=received, event_class=event_class, unit_statuses=statuses, event_statuses=event_statuses,
-                 unit_kinds=tuple({"id": k["id"], "label": str(k.get("label") or k["id"]), "attach_only": bool(k.get("attach_only"))}
-                                  for k in kinds),
+                 unit_kinds=tuple({"id": k["id"], "label": str(k.get("label") or k["id"]), "attach_only": bool(k.get("attach_only")),
+                                   "by_name": bool(k.get("by_name"))} for k in kinds),
                  unit_boards=tuple(boards), units=units, spoken=dict(spoken), run_cards=tuple(cards),
                  geo_town_order=order, geo_town_aliases=aliases, unit_event_cell=dict(d.get("unit_event_cell") or {}),
                  wording=dict(WORDING, **wording), already_statuses=already, joint_response=joint, full_response_kinds=fr_kinds,
                  status_flow=flow,
                  lead_in_joint_only={str(t): str(v) for t, v in only.items()}, dispatch_tones=tones,
+                 free_status=free_status, type_subtypes_partial=tsp,
                  path=str(path))

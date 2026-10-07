@@ -80,7 +80,7 @@ def validate_slots(store: Store, slots) -> list[dict]:
         raise CadError(f"slots: a list of 1 to {MAX_SLOTS}")
     by_name = {u["name"]: u for u in store.units()}
     L = store.lists
-    kinds = tuple(k for k in L.kind_ids if k not in L.attach_kinds)
+    kinds = L.card_kinds
     out = []
     for i, s in enumerate(slots):
         if not isinstance(s, dict):
@@ -96,7 +96,8 @@ def validate_slots(store: Store, slots) -> list[dict]:
         ks = str(s.get("kind", "")).split("|")
         if not all(k in kinds for k in ks):
             raise CadError(f"slots[{i}].kind: one or more of {', '.join(kinds)} joined by | "
-                           "(EMS, PD and agencies are never on a run card)")
+                           "(EMS, PD and agencies are never on a run card; code-only units and mutual-aid "
+                           "requests only by name)")
         try:
             n = int(s.get("count", 1))
         except (TypeError, ValueError):

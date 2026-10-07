@@ -39,8 +39,8 @@ def test_overrides_are_laid_over_the_defaults_and_reset():
     post(cad, "dispositions", action="add", code="REFERRED", item={"name": "Referred to PD"})
     post(cad, "dispositions", action="move", code="REFERRED", to=0)
     assert cad.lists.disposition_codes[0] == "REFERRED" and cad.lists.name("dispositions", "REFERRED") == "Referred to PD"
-    post(cad, "unit_statuses", action="move", code="ON LOCATION", dir=-1)
-    assert cad.lists.status_ids[3:6] == ("ACKNOWLEDGED", "ON LOCATION", "RESPONDING")
+    post(cad, "unit_statuses", action="move", code="OL", dir=-1)
+    assert cad.lists.status_ids[3:6] == ("AK", "OL", "RS")
     post(cad, "dispositions", action="reset_section")
     assert "REFERRED" not in cad.lists.disposition_codes and cad.lists.disposition_codes[0] == "CANCELLED"
     # codes never change; bad colors and duplicates are refused with the reason
@@ -50,9 +50,9 @@ def test_overrides_are_laid_over_the_defaults_and_reset():
         post(cad, "event_types", action="edit", code="STRU", item={"color": "red"})
     with pytest.raises(CadError, match="already"):
         post(cad, "event_types", action="add", code="STRU", item={"name": "x", "color": "#000000"})
-    with pytest.raises(CadError, match="role 'free'"):
-        post(cad, "unit_statuses", action="edit", code="AVAILABLE", item={"role": ""})   # one status must free a unit
-    assert cad.lists.role("AVAILABLE") == "free"
+    with pytest.raises(CadError, match="role 'dispatched'"):
+        post(cad, "unit_statuses", action="edit", code="DP", item={"role": ""})   # one status must be the dispatch
+    assert cad.lists.role("DP") == "dispatched"
 
 
 def test_edits_persist_across_a_restart_and_survive_a_changed_data_file(tmp_path):
@@ -124,11 +124,11 @@ def test_retire_keeps_old_events_named_delete_only_when_unused():
         post(cad, "received_via", action="delete", code="RADIO")
     # a status units are in can't be retired; a deleted subtype takes its phrases and rules with it
     with pytest.raises(CadError, match="units are Available now"):
-        post(cad, "unit_statuses", action="retire", code="AVAILABLE")
-    post(cad, "unit_statuses", action="retire", code="ACKNOWLEDGED")
-    assert "ACKNOWLEDGED" not in cad.lists.status_ids and cad.lists.name("unit_statuses", "ACKNOWLEDGED") == "Acknowledged"
+        post(cad, "unit_statuses", action="retire", code="AV")
+    post(cad, "unit_statuses", action="retire", code="AK")
+    assert "AK" not in cad.lists.status_ids and cad.lists.name("unit_statuses", "AK") == "Acknowledge"
     with pytest.raises(CadError):
-        cad.unit_status(uid(cad, "E60"), {"status": "ACKNOWLEDGED"})
+        cad.unit_status(uid(cad, "E60"), {"status": "AK"})
     with pytest.raises(CadError, match="run card RESCUE/WATER"):
         post(cad, "event_subtypes", action="delete", code="WATER")
     post(cad, "event_subtypes", action="delete", code="NOTIF-PD")
@@ -144,7 +144,7 @@ def test_units_add_edit_move_retire():
     assert e65["board"] == "main" and e65["kind"] == "engine" and e65["response"] == "fire" and e65["spoken"] == "Engine 65"
     post(cad, "units", action="move", code="E65", dir=-1)
     main = cad.lists.unit_boards[0]["units"]
-    assert main.index("E65") == main.index("U42") - 1
+    assert main.index("E65") == main.index("266RCL") - 1
     post(cad, "units", action="edit", code="E59", unit={"spare": False, "spoken": "Engine Fifty-nine"})
     assert cad.lists.unit("E59") ["spoken"] == "Engine Fifty-nine" and not cad.lists.unit("E59")["spare"]
     # retire: off the boards (history kept); not while on an event, not while a run card names it
@@ -173,10 +173,13 @@ def test_ems_and_pd_never_on_run_cards_tick_all_or_the_air_but_can_be_attached()
     cad = make_cad()
     L = cad.lists
     agency = {u["name"] for u in cad.store.units() if u["response"] == "agency"}
-    assert {"77A1", "77M2", "7711", "PCPD", "RBPD1", "CONED-G", "DPW", "60CAD"} <= agency
-    assert {"L25", "E191", "DPT266", "DPT239"} == {u["name"] for u in cad.store.units() if u["response"] == "mutual_aid"}
+    assert {"77A1", "77M2", "7711", "PCPD", "RBPD1", "CONED-G", "DPW", "CHIEF7700", "KNOB_BOX1", "BAT10"} <= agency
+    on = {b["id"]: set(c for c in b["units"] if c) for b in L.unit_boards}
+    assert agency == on["ems"] | on["res-coned"] | on["res-keyholder"] | on["res-knox"] | on["res-pd"] | on["res-bat"] | on["agencies"]
+    ma = on["ma-rye"] | on["ma-purchase"] | on["ma-harrison"] | on["ma-west-harrison"] | on["ma-requests"]
+    assert ma == {u["name"] for u in cad.store.units() if u["response"] == "mutual_aid"} and {"L25", "E191", "MA3", "242_eNG"} <= ma
     assert not set(L.full_response_kinds) & set(L.attach_kinds)          # "Tick all" ticks these kinds only
-    assert cad.lists.unit_boards[1]["id"] == "agencies"
+    assert [b["id"] for b in cad.lists.unit_boards][:2] == ["main", "ems"]
     # run cards: not by kind, not by name
     for slots in ([{"kind": "ems", "count": 1}], [{"unit": "77A4"}], [{"kind": "engine|pd", "count": 1}]):
         with pytest.raises(CadError, match="never on a run card"):
@@ -200,7 +203,7 @@ def test_ems_and_pd_never_on_run_cards_tick_all_or_the_air_but_can_be_attached()
     # attached when it shows up: "77A4 on location", not "dispatched"
     cad.attach(iid, {"unit_ids": [a4], "operator": "JD"})
     u = next(x for x in cad.store.units() if x["id"] == a4)
-    assert u["status"] == "ON LOCATION" and u["incident_id"] == iid
+    assert u["status"] == "OL" and u["incident_id"] == iid
     ev = [e["text"] for e in cad.store.full(iid)["events"]]
     assert "77A4 on location" in ev and not any("77A4" in t and "dispatched" in t for t in ev)
     assert not any(t.startswith("Attached") for t in ev)
@@ -209,10 +212,10 @@ def test_ems_and_pd_never_on_run_cards_tick_all_or_the_air_but_can_be_attached()
     r = cad.dispatch(iid, {"unit_ids": [uid(cad, "E61")], "operator": "JD"})
     assert "77" not in r["text"] and "Engine 60 dispatched" in r["text"]
     with pytest.raises(CadError, match="only On location or Available"):
-        cad.unit_status(a4, {"status": "RESPONDING"})
-    cad.unit_status(a4, {"status": "AVAILABLE", "operator": "JD"})
+        cad.unit_status(a4, {"status": "RS"})
+    cad.unit_status(a4, {"status": "AV", "operator": "JD"})
     assert "77A4 cleared" in [e["text"] for e in cad.store.full(iid)["events"]]
-    assert cad.state()["lists"]["agency_statuses"] == ["ON LOCATION", "AVAILABLE"]
+    assert cad.state()["lists"]["agency_statuses"] == ["OL", "AV"]
 
 
 def test_mutual_aid_only_by_name_and_said_when_sent():
@@ -296,7 +299,7 @@ def test_settings_export_import_round_trip_with_a_dry_run(tmp_path):
     post(a, "users", action="add", name="Dana", role="admin")
     a.save_run_card({"type": "STRU", "slots": [{"kind": "engine", "count": 4}, {"unit": "E66"}]})
     data = json.loads(json.dumps(a.settings_export()))
-    assert data["format"] == "sizeup-cad-settings" and data["defaults_version"] == "2026-10-07.2"
+    assert data["format"] == "sizeup-cad-settings" and data["defaults_version"] == "2026-10-07.3"
 
     b = make_cad(tmp_path / "b")
     dry = post(b, "import", action="dry_run", settings=data)
@@ -343,7 +346,7 @@ def test_v5_migration_is_idempotent_over_the_radio_branchs_v4_tables(tmp_path):
     db.execute("INSERT INTO settings_audit (at, operator, section, key, old, new) VALUES (1, 'JD', 'radios', 'mdc:0611/unit', '', 'E60')")
     db.execute("PRAGMA user_version = 4")
     st = Store(path)
-    assert st.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 5
+    assert st.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 10
     assert any("schema v5" in m for m in st.migrated)
     assert st.q("SELECT section, key, new FROM settings_audit") == [{"section": "radios", "key": "mdc:0611/unit", "new": "E60"}]
     assert st.incident(iid)["type"] == "STRU" and st.q("SELECT COUNT(*) AS n FROM radios")[0]["n"] >= 0
@@ -355,7 +358,7 @@ def test_v5_migration_is_idempotent_over_the_radio_branchs_v4_tables(tmp_path):
     assert cols == ["id", "at", "operator", "section", "key", "old", "new"]
     st.db.execute("PRAGMA user_version = 3")         # an older file through the whole chain, twice
     Store(path)
-    assert Store(path).db.execute("PRAGMA user_version").fetchone()[0] == 5
+    assert Store(path).db.execute("PRAGMA user_version").fetchone()[0] == 10
     fresh = sqlite3.connect(":memory:")
     fresh.executescript(SETTINGS_SCHEMA + SETTINGS_SCHEMA)
     assert make_cad().store.q("SELECT COUNT(*) AS n FROM settings_overrides")[0]["n"] == 0
@@ -366,7 +369,7 @@ def test_v5_migration_is_idempotent_over_the_radio_branchs_v4_tables(tmp_path):
 def test_settings_api(server):
     code, page = server.j("GET", "/api/cad/settings")
     assert code == 200 and {"lists", "units", "dispatch", "operators", "system", "event_class", "geo_town_order"} <= set(page)
-    assert page["system"]["data_file"] == "data/cad_lists.json" and page["system"]["schema"] == 5
+    assert page["system"]["data_file"] == "data/cad_lists.json" and page["system"]["schema"] == 10
     assert page["lists"]["event_types"]["items"][0]["state"] == "default"
     code, r = server.j("POST", "/api/cad/settings/event_types", {"action": "edit", "code": "MVA", "item": {"color": "#0000FF"},
                                                                  "operator": "JD"})
@@ -386,21 +389,21 @@ def test_settings_api(server):
 
 def test_status_flow_the_next_step_buttons_are_editable():
     cad = make_cad()
-    assert cad.lists.next_statuses("DISPATCHED")[:2] == ("RESPONDING", "ON LOCATION")
-    post(cad, "status_flow", action="set", key="DISPATCHED", next=["ACKNOWLEDGED", "RESPONDING", "AVAILABLE"])
-    assert cad.lists.next_statuses("DISPATCHED") == ("ACKNOWLEDGED", "RESPONDING", "AVAILABLE")
-    assert next(r for r in cad.settings_get()["status_flow"]["rows"] if r["key"] == "DISPATCHED")["state"] == "edited"
+    assert cad.lists.next_statuses("DP")[:2] == ("RS", "OL")
+    post(cad, "status_flow", action="set", key="DP", next=["AK", "RS", "AV"])
+    assert cad.lists.next_statuses("DP") == ("AK", "RS", "AV")
+    assert next(r for r in cad.settings_get()["status_flow"]["rows"] if r["key"] == "DP")["state"] == "edited"
     with pytest.raises(CadError, match="status_flow"):
-        post(cad, "status_flow", action="set", key="DISPATCHED", next=["NAPPING"])
-    post(cad, "status_flow", action="remove", key="ON LOCATION")             # falls back to "*"
-    assert cad.lists.next_statuses("ON LOCATION") == ("AVAILABLE", "OUT OF SERVICE")
+        post(cad, "status_flow", action="set", key="DP", next=["NAPPING"])
+    post(cad, "status_flow", action="remove", key="OL")             # falls back to "*"
+    assert cad.lists.next_statuses("OL") == ("AV", "OS")
     with pytest.raises(CadError, match="stays"):
         post(cad, "status_flow", action="remove", key="*")
     post(cad, "unit_statuses", action="add", code="STAGED", item={"name": "Staged", "bg": "#335577"})
-    post(cad, "status_flow", action="set", key="STAGED", next=["ON LOCATION", "AVAILABLE"])
+    post(cad, "status_flow", action="set", key="STAGED", next=["OL", "AV"])
     post(cad, "status_flow", action="reset_section")
-    assert "STAGED" not in cad.lists.status_flow and cad.lists.next_statuses("DISPATCHED")[0] == "RESPONDING"
-    post(cad, "status_flow", action="set", key="STAGED", next=["ON LOCATION"])
+    assert "STAGED" not in cad.lists.status_flow and cad.lists.next_statuses("DP")[0] == "RS"
+    post(cad, "status_flow", action="set", key="STAGED", next=["OL"])
     post(cad, "unit_statuses", action="delete", code="STAGED")                # takes its flow row with it
     assert "STAGED" not in cad.lists.status_flow
 

@@ -43,7 +43,7 @@ from sizeup.cad import lists as lists_mod
 from sizeup.cad.lists import Lists
 
 TZ = ZoneInfo("America/New_York")
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 10        # 6-9 unused (other branches); v10: the department's own codes
 
 OPEN = ("queued", "pending", "active")
 SOURCES = ("manual", "60 Control page")
@@ -236,6 +236,58 @@ def v1_unit_code(name: str) -> str:
     return name
 
 
+# v10: the department's own unit status codes (its code sheet, 2026-10-07). UNMANNED stays.
+V10_STATUS = {"AVAILABLE": "AV", "DISPATCHED": "DP", "DISPATCH OTHER": "DO", "ACKNOWLEDGED": "AK",
+              "RESPONDING": "RS", "ON LOCATION": "OL", "OUT OF SERVICE": "OS"}
+V10_RETIRED_UNITS = ("CODE_ENFORCE", "60CAD", "60CAD1", "60CAD2")     # not on the sheet: retired, history kept
+V10_SAME_BOARDS = ("main",)            # the only board that means the same before and after v10
+
+
+def v10_layout(old: list, boards, rows: dict) -> list[dict]:
+    """A board layout saved in Settings (units/_boards) redone on the new boards. Only "main" means the
+    same thing before and after (the old "agencies" and "other" boards are now EMS, the mutual-aid
+    departments, the MA requests and agencies & resources), so: the main board keeps the old order of
+    the units it had (in the places they hold); a unit the old layout had on main stays on main; a unit
+    added in Settings goes to main if it was there, else to "agencies" (Other). Every other unit goes
+    where the data file puts it. Applying it again changes nothing."""
+    old_on = {}                                         # code -> (old board id, position)
+    for b in old:
+        if isinstance(b, dict):
+            for i, c in enumerate(b.get("units") or []):
+                if c:
+                    old_on[c] = (str(b.get("id") or ""), i)
+    new = [{"id": b["id"], "title": b["title"], "units": [c for c in b["units"] if c], **lists_mod.board_meta(b)}
+           for b in boards]
+    ids = {b["id"] for b in new}
+    home = {c: b["id"] for b in new for c in b["units"]}
+    for b in new:
+        if b["id"] not in V10_SAME_BOARDS:
+            continue
+        mine = [c for c in b["units"] if old_on.get(c, ("",))[0] == b["id"]]
+        it = iter(sorted(mine, key=lambda c: old_on[c][1]))
+        b["units"] = [next(it) if c in mine else c for c in b["units"]]
+    moved = []
+    for c, (bid, i) in sorted(old_on.items(), key=lambda x: (x[1][0], x[1][1])):
+        if c in V10_RETIRED_UNITS:
+            continue
+        same = bid if bid in V10_SAME_BOARDS and bid in ids else ""
+        if c in home:
+            if same and same != home[c]:
+                moved.append((c, same))
+            continue
+        u = rows.get(("units", c))
+        if isinstance(u, dict) and (u.get("deleted") or u.get("retired")):
+            continue
+        to = same or ("agencies" if "agencies" in ids else new[0]["id"])
+        moved.append((c, to))
+    for c, to in moved:
+        for b in new:
+            if c in b["units"]:
+                b["units"].remove(c)
+        next(b for b in new if b["id"] == to)["units"].append(c)
+    return new
+
+
 class CadError(ValueError):
     """A request that can't be done as asked (shown to the operator as the 400 reason)."""
 
@@ -281,6 +333,7 @@ class Store:
                     self._v2_to_v3(self.db)
                     self._v3_to_v4(self.db)
                     self._v4_to_v5(self.db)
+                    self._v9_to_v10(self.db)
                     self.db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
                     self.db.execute("COMMIT")
                 except BaseException:
@@ -315,6 +368,93 @@ class Store:
             if stmt.strip():
                 db.execute(stmt)
         self.migrated.append("schema v5 (settings: edits over the data file, audit log, operators)")
+
+    def _v9_to_v10(self, db) -> None:
+        """The department's own codes (its code sheet, 2026-10-07): unit statuses AQ, AV, DP ... OS.
+        The old status codes become the new ones wherever a status is stored: the units, unit history
+        (old and new), and the Settings edits keyed by status (unit_statuses items and order, status_flow
+        rows and steps). The chronology's text ("E63 responding") is what was written: left as it is.
+        Unit codes don't change; units off the sheet are retired by the data file (off the boards,
+        history kept). A saved board layout (Settings) is redone on the new boards, keeping the edits it
+        holds (order within a board, units moved to another board, units added). Every step checks
+        first: running it again changes nothing."""
+        done = []
+        old_codes = list(V10_STATUS)
+        marks = ",".join("?" * len(old_codes))
+        case = "CASE {col} " + " ".join(f"WHEN '{o}' THEN '{n}'" for o, n in V10_STATUS.items()) + " END"
+        n = db.execute(f"SELECT COUNT(*) FROM units WHERE status IN ({marks})", old_codes).fetchone()[0]
+        if n:
+            db.execute(f"UPDATE units SET status = {case.format(col='status')} WHERE status IN ({marks})", old_codes)
+            done.append(f"{n} unit statuses")
+        for col in ("old_status", "new_status"):
+            n = db.execute(f"SELECT COUNT(*) FROM unit_history WHERE {col} IN ({marks})", old_codes).fetchone()[0]
+            if n:
+                db.execute(f"UPDATE unit_history SET {col} = {case.format(col=col)} WHERE {col} IN ({marks})", old_codes)
+                done.append(f"{n} unit history {col.replace('_', ' ')}es")
+        if db.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'settings_overrides'").fetchone():
+            done += self._v10_overrides(db)
+        if done:
+            now = self.clock()
+            db.execute("INSERT INTO settings_audit (at, operator, section, key, old, new) VALUES (?, ?, ?, ?, ?, ?)",
+                       (now, "", "system", "migration v10", "old unit status codes",
+                        "the department's codes (" + ", ".join(f"{o} -> {n}" for o, n in V10_STATUS.items()) + "): "
+                        + "; ".join(done)))
+        self.migrated.append("schema v10 (the department's own codes: unit statuses "
+                             + ", ".join(f"{o} -> {n}" for o, n in V10_STATUS.items()) + ")"
+                             + (": " + "; ".join(done) if done else ": nothing to change"))
+
+    def _v10_overrides(self, db) -> list[str]:
+        """The Settings edits that name a status (or the old boards), mapped to the new codes."""
+        done = []
+        st = lambda c: V10_STATUS.get(c, c)
+
+        def put(sec, key, val):
+            db.execute("INSERT INTO settings_overrides (section, key, value, updated_at, operator) VALUES (?, ?, ?, ?, ?) "
+                       "ON CONFLICT(section, key) DO UPDATE SET value = excluded.value", (sec, key, json.dumps(val), self.clock(), ""))
+
+        def drop(sec, key):
+            db.execute("DELETE FROM settings_overrides WHERE section = ? AND key = ?", (sec, key))
+        rows = {(r["section"], r["key"]): json.loads(r["value"])
+                for r in db.execute("SELECT section, key, value FROM settings_overrides")}
+        for sec in ("unit_statuses", "status_flow"):
+            for (s_, key), val in list(rows.items()):
+                if s_ != sec:
+                    continue
+                new_key = st(key)
+                new_val = val
+                if sec == "status_flow" and isinstance(val, list):
+                    new_val = list(dict.fromkeys(st(c) for c in val))
+                if sec == "unit_statuses" and key == "_order" and isinstance(val, list):
+                    new_val = list(dict.fromkeys(st(c) for c in val))
+                if new_key == key and new_val == val:
+                    continue
+                if new_key != key and (sec, new_key) in rows:
+                    done.append(f"{sec} edit {key} left as it is ({new_key} is edited too)")
+                    continue
+                if new_key != key:
+                    drop(sec, key)
+                    rows.pop((sec, key))
+                put(sec, new_key, new_val)
+                rows[(sec, new_key)] = new_val
+                done.append(f"Settings {sec} {key}" + (f" -> {new_key}" if new_key != key else " (codes)"))
+        L = self.lists
+        for code in V10_RETIRED_UNITS:                    # an edited unit the data file now retires: retired too
+            v = rows.get(("units", code))
+            if isinstance(v, dict) and not v.get("deleted") and not v.get("retired"):
+                put("units", code, dict(v, retired=True))
+                done.append(f"Settings unit {code} retired (not on the department's sheet)")
+        layout = rows.get(("units", "_boards"))
+        if isinstance(layout, list):
+            new = v10_layout(layout, L.unit_boards, rows)
+            base = [{"id": b["id"], "title": b["title"], "units": list(b["units"]), **lists_mod.board_meta(b)}
+                    for b in L.unit_boards]
+            if new != layout:
+                if new == base:
+                    drop("units", "_boards")
+                else:
+                    put("units", "_boards", new)
+                done.append("Settings board layout redone on the new boards (its edits kept)")
+        return done
 
     def _v1_to_v2(self, db) -> None:
         """The sheet's vocabulary: numbers 26-000001, TYPE/SUBTYPE, caller fields, dispositions,

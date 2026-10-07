@@ -264,7 +264,7 @@ def test_traffic_links_to_the_event_while_the_unit_is_on_it_and_not_after(tmp_pa
     assert c.record_traffic(tx("FG1-5", clock.t + 1)) == []                           # unknown radio, two calls: neither
     # E63 clears (back in service): its later traffic is no longer on the event.
     clock.t += 10
-    c.unit_status(uid(c, "E63"), {"status": "AVAILABLE"})
+    c.unit_status(uid(c, "E63"), {"status": "AV"})
     clock.t += 1
     assert c.record_traffic(tx("FG1-6", clock.t, rig="E63")) == []                    # cleared: on no event
     c.close(a["id"], {"disposition": c.lists.disposition_codes[0]})
@@ -328,7 +328,7 @@ def test_v3_database_migrates_to_v4(tmp_path):
     db.commit()
     db.close()
     c2 = cad(tmp_path, clock)
-    assert c2.store.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 5
+    assert c2.store.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 10
     assert "schema v3 -> v4 (radio IDs, communications log)" in c2.store.migrated
     assert c2.store.one("SELECT assigned_at FROM assignments")["assigned_at"] is not None   # from dispatched_at
     assert c2.radios.resolve("mdc", "0611")["unit"] == "E61"
@@ -352,19 +352,23 @@ def test_units_on_an_incident_are_offered_only_the_next_steps():
     clock_inc = c.create({"type": "STRU", "address": "1 Main St"})
     c.dispatch(clock_inc["id"], {"unit_ids": [uid(c, "E63")], "operator": "x"})
     nxt = lambda: next(a["next"] for a in c.full(clock_inc["id"])["assignments"] if a["name"] == "E63")
-    assert nxt() == ["RESPONDING", "ON LOCATION", "AVAILABLE", "OUT OF SERVICE"]
-    c.unit_status(uid(c, "E63"), {"status": "ACKNOWLEDGED"})
-    assert nxt() == ["RESPONDING", "ON LOCATION", "AVAILABLE", "OUT OF SERVICE"]
-    c.unit_status(uid(c, "E63"), {"status": "RESPONDING"})
-    assert nxt() == ["ON LOCATION", "AVAILABLE", "OUT OF SERVICE"]
-    c.unit_status(uid(c, "E63"), {"status": "ON LOCATION"})
-    assert nxt() == ["AVAILABLE", "OUT OF SERVICE"]
-    c.unit_status(uid(c, "E63"), {"status": "DISPATCH OTHER"})        # the API still takes any status (the board)
-    assert nxt() == ["AVAILABLE", "OUT OF SERVICE"]
+    assert nxt() == ["RS", "OL", "ST", "AV", "CN", "OS"]
+    c.unit_status(uid(c, "E63"), {"status": "AK"})
+    assert nxt() == ["RS", "OL", "ST", "AV", "CN", "OS"]
+    c.unit_status(uid(c, "E63"), {"status": "RS"})
+    assert nxt() == ["OL", "ST", "AV", "CE", "OS"]
+    c.unit_status(uid(c, "E63"), {"status": "ST"})
+    assert nxt() == ["OL", "AV", "OS"]
+    c.unit_status(uid(c, "E63"), {"status": "OL"})
+    assert nxt() == ["IC", "AV", "OS"]
+    c.unit_status(uid(c, "E63"), {"status": "IC"})
+    assert nxt() == ["OL", "AV", "OS"]
+    c.unit_status(uid(c, "E63"), {"status": "DO"})        # the API still takes any status (the board)
+    assert nxt() == ["AV", "OS"]
     for a in c.state()["incidents"][0]["assignments"]:
-        assert not {"DISPATCHED", "DISPATCH OTHER", "ACKNOWLEDGED", "UNMANNED"} & set(a["next"])
-    assert c.state()["lists"]["status_flow"]["RESPONDING"] == ["ON LOCATION", "AVAILABLE", "OUT OF SERVICE"]
-    c.unit_status(uid(c, "E63"), {"status": "AVAILABLE"})              # clears it off the event
+        assert not {"DP", "DO", "AK", "UNMANNED"} & set(a["next"])
+    assert c.state()["lists"]["status_flow"]["RS"] == ["OL", "ST", "AV", "CE", "OS"]
+    c.unit_status(uid(c, "E63"), {"status": "AV"})              # clears it off the event
     a = next(a for a in c.full(clock_inc["id"])["assignments"] if a["name"] == "E63")
     assert a["cleared_at"] and a["next"] == []
 
@@ -377,12 +381,13 @@ def test_unit_tag_autocomplete_order_and_prefixes():
     s = lambda q: c.suggest_units(inc["id"], q)
     assert s("E6") == ["E63", "E60", "E61", "E62", "E64"]                    # on the event first, then board order
     assert s("e6") == s("E6") and s("E63") == ["E63"] and s("") == []
-    assert s("E")[:2] == ["E63", "E59"] and "E14" in s("E1")                  # Rye Brook's engine is a fire unit
+    assert s("E")[:2] == ["E63", "E58"] and "E14" in s("E1")                  # Rye Brook's engine is a fire unit
     assert s("L3") == ["L31", "L30"]
-    assert s("23") == ["2391", "2392", "2393", "2395", "2398"]
+    assert s("23") == ["2391", "2392", "2393", "2394", "2395", "2396", "2397", "2398"]     # 8 at most
     assert s("77A")[:3] == ["77A1", "77A2", "77A3"]                           # EMS: after the fire units
     order = c.tag_order(inc["id"])
-    assert order.index("U239") < order.index("PCPD") < order.index("77A1")    # fire, then police / EMS / agencies
+    assert order.index("U239") < order.index("77A1") < order.index("PCPD")    # fire, then EMS / police / agencies
+    assert s("242_e") == ["242_eNG"] and s("239_c") == ["239_Cascd"]          # codes as written, any case
     assert c.state()["incidents"][0]["tag_units"][:2] == ["E63", "L31"]
     got = json.loads(CadApi(c).get(f"/api/cad/incident/{inc['id']}/units", "q=e6")[1])
     assert got["units"][0] == "E63"

@@ -11,31 +11,31 @@ def test_cleared_unit_goes_back_to_an_open_call(tmp_path):
     a = _event_with(c, ["E63", "L30"], clock)
     e63, l30 = uid(c, "E63"), uid(c, "L30")
     clock.t += 5
-    c.unit_status(e63, {"status": "ON LOCATION"})
+    c.unit_status(e63, {"status": "OL"})
     first_on = next(x for x in c.full(a["id"])["assignments"] if x["unit_id"] == e63)["onscene_at"]
     clock.t += 60
-    c.unit_status(e63, {"status": "AVAILABLE"})                         # E63 clears; the alarm is still open
+    c.unit_status(e63, {"status": "AV"})                         # E63 clears; the alarm is still open
     row = next(x for x in c.full(a["id"])["assignments"] if x["unit_id"] == e63)
-    assert row["cleared_at"] and row["return"] == ["RESPONDING", "ON LOCATION"]
+    assert row["cleared_at"] and row["return"] == ["RS", "OL", "ET", "IC"]
     clock.t += 30
-    c.return_unit(a["id"], {"unit_id": e63, "status": "RESPONDING", "operator": "Corey"})
+    c.return_unit(a["id"], {"unit_id": e63, "status": "RS", "operator": "Corey"})
     row = next(x for x in c.full(a["id"])["assignments"] if x["unit_id"] == e63)
-    assert row["cleared_at"] is None and row["status"] == "RESPONDING" and row["return"] == []
+    assert row["cleared_at"] is None and row["status"] == "RS" and row["return"] == []
     assert row["onscene_at"] == first_on                                # the first times are kept
-    c.unit_status(e63, {"status": "ON LOCATION"})
+    c.unit_status(e63, {"status": "OL"})
     assert any("E63 returned (responding)" in e["text"] for e in c.full(a["id"])["events"])
     # Not while it's on another call, nor out of service, nor once the call is closed.
-    c.unit_status(l30, {"status": "AVAILABLE"})
+    c.unit_status(l30, {"status": "AV"})
     b = c.create({"type": "STRU", "address": "1 Main St"})
     c.dispatch(b["id"], {"unit_ids": [l30], "operator": "x"})
     with pytest.raises(CadError, match="is on"):
-        c.return_unit(a["id"], {"unit_id": l30, "status": "RESPONDING"})
+        c.return_unit(a["id"], {"unit_id": l30, "status": "RS"})
     with pytest.raises(CadError):
-        c.return_unit(a["id"], {"unit_id": e63, "status": "AVAILABLE"})   # only responding / on location
-    c.unit_status(e63, {"status": "AVAILABLE"})
+        c.return_unit(a["id"], {"unit_id": e63, "status": "AV"})   # only responding / on location
+    c.unit_status(e63, {"status": "AV"})
     c.close(a["id"], {"disposition": c.lists.disposition_codes[0]})
     with pytest.raises(CadError, match="closed"):
-        c.return_unit(a["id"], {"unit_id": e63, "status": "RESPONDING"})
+        c.return_unit(a["id"], {"unit_id": e63, "status": "RS"})
     assert all(x["return"] == [] for x in c.full(a["id"])["assignments"])
 
 
@@ -49,24 +49,24 @@ def test_board_status_puts_the_unit_on_the_chosen_call_and_off_the_old_one(tmp_p
     e63, e64 = uid(c, "E63"), uid(c, "E64")
     clock.t += 5
     # E64 wasn't on anything: responding to b puts it there.
-    c.unit_status(e64, {"status": "RESPONDING", "incident_id": b["id"], "operator": "Corey"})
+    c.unit_status(e64, {"status": "RS", "incident_id": b["id"], "operator": "Corey"})
     on_b = {x["unit_id"]: x for x in c.full(b["id"])["assignments"] if not x["cleared_at"]}
-    assert e64 in on_b and on_b[e64]["status"] == "RESPONDING" and on_b[e64]["enroute_at"]
+    assert e64 in on_b and on_b[e64]["status"] == "RS" and on_b[e64]["enroute_at"]
     assert c.full(b["id"])["status"] == "active"
     # E63 moves from a to b: off a (noted there), on b.
     clock.t += 5
-    c.unit_status(e63, {"status": "ON LOCATION", "incident_id": b["id"], "operator": "Corey"})
+    c.unit_status(e63, {"status": "OL", "incident_id": b["id"], "operator": "Corey"})
     assert all(x["cleared_at"] for x in c.full(a["id"])["assignments"] if x["unit_id"] == e63)
     assert any("E63 reassigned" in e["text"] for e in c.full(a["id"])["events"])
     on_b = {x["unit_id"]: x for x in c.full(b["id"])["assignments"] if not x["cleared_at"]}
-    assert on_b[e63]["status"] == "ON LOCATION"
+    assert on_b[e63]["status"] == "OL"
     # "No call: status only" takes it off the call it was on.
     clock.t += 5
-    c.unit_status(e64, {"status": "ACKNOWLEDGED", "incident_id": 0})
+    c.unit_status(e64, {"status": "AK", "incident_id": 0})
     assert all(x["cleared_at"] for x in c.full(b["id"])["assignments"] if x["unit_id"] == e64)
     # Free / out-of-service statuses don't ask (and clear as before); a closed call is refused.
-    c.unit_status(e63, {"status": "AVAILABLE", "incident_id": b["id"]})
+    c.unit_status(e63, {"status": "AV", "incident_id": b["id"]})
     assert all(x["cleared_at"] for x in c.full(b["id"])["assignments"] if x["unit_id"] == e63)
     c.close(a["id"], {"disposition": c.lists.disposition_codes[0]})
     with pytest.raises(CadError, match="isn't open"):
-        c.unit_status(e63, {"status": "RESPONDING", "incident_id": a["id"]})
+        c.unit_status(e63, {"status": "RS", "incident_id": a["id"]})

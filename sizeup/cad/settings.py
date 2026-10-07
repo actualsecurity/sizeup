@@ -164,6 +164,12 @@ def overlay(d: dict, ov: dict) -> dict:
     if o:
         units = dict(d.get("units") or {})
         boards = copy.deepcopy(o["_boards"]) if isinstance(o.get("_boards"), list) else d.get("unit_boards") or []
+        meta = {b.get("id"): lists_mod.board_meta(b) for b in d.get("unit_boards") or [] if isinstance(b, dict)}
+        for b in boards:                       # how a board shows follows the data file (a saved layout is its units)
+            if isinstance(b, dict) and b.get("id") in meta:
+                for k in lists_mod.BOARD_META:
+                    b.pop(k, None)
+                b.update(meta[b["id"]])
         off = set()
         for code, v in o.items():
             if code.startswith("_") or not isinstance(v, dict):
@@ -382,7 +388,10 @@ class Editor:
                                  "edited": "_list" in ov.get("geo_town_order", {})}
         out["units"] = self._unit_rows(L, ov)
         out["unit_kinds"] = [dict(k) for k in L.unit_kinds]
-        out["boards"] = [{"id": b["id"], "title": b["title"]} for b in L.unit_boards]
+        out["boards"] = [{"id": b["id"], "title": b["title"], **lists_mod.board_meta(b)} for b in L.unit_boards]
+        out["type_subtypes"] = {"map": {t: list(v) for t, v in L.type_subtypes.items()},
+                                "partial": dict(L.type_subtypes_partial),
+                                "unlisted": [t for t in L.type_codes if t not in L.type_subtypes]}
         out["dispatch"] = self._dispatch_page(L, ov)
         out["operators"] = self.operators()
         out["system"] = self._system(ov)
@@ -416,7 +425,7 @@ class Editor:
         return {"code": code, "board": board, "pos": pos, "spoken": u.get("spoken") or "", "title": info["title"],
                 "kind": info["kind"], "department": info["department"], "spare": info["spare"], "response": info["response"],
                 "station": L.station(code),
-                "retired": bool(u.get("retired")), "used": used.get(code, 0),
+                "retired": bool(u.get("retired")), "used": used.get(code, 0), "named": info["named"],
                 "state": "added" if code not in base_on and code not in self.base.units else "edited" if code in o else "default",
                 "status": lv.get("status", ""), "incident_number": lv.get("incident_number")}
 
@@ -639,14 +648,28 @@ class Editor:
     # -- units ------------------------------------------------------------------------------------------
 
     def _layout(self) -> list[dict]:
-        return [{"id": b["id"], "title": b["title"], "units": list(b["units"])} for b in self.cad.lists.unit_boards]
+        return [{"id": b["id"], "title": b["title"], "units": list(b["units"]), **lists_mod.board_meta(b)}
+                for b in self.cad.lists.unit_boards]
 
     def _board_of(self, layout: list[dict], code: str) -> dict | None:
         return next((b for b in layout if code in b["units"]), None)
 
     def _layout_change(self, layout: list[dict]):
-        base = [{"id": b["id"], "title": b["title"], "units": list(b["units"])} for b in self.base.unit_boards]
+        base = [{"id": b["id"], "title": b["title"], "units": list(b["units"]), **lists_mod.board_meta(b)}
+                for b in self.base.unit_boards]
         return REMOVE if layout == base else layout
+
+    def _default_board(self, kind: str, layout: list[dict]) -> str:
+        """Where a unit goes with no board said: other agencies' kinds on "agencies", the rest on "main"."""
+        want = "agencies" if kind in self.cad.lists.attach_kinds else "main"
+        return want if any(b["id"] == want for b in layout) else layout[0]["id"]
+
+    def _unit_code(self, raw: str, known) -> str:
+        """The unit code as the department wrote it (242_eNG, 239_Cascd): exact, else the one that
+        matches in any case; a code not known yet is upper case (a new unit)."""
+        if raw in known:
+            return raw
+        return next((c for c in known if c and c.upper() == raw.upper()), raw.upper())
 
     def _clean_unit(self, raw, cur: dict | None = None) -> dict:
         """A unit as edited: {kind, spoken, title, department, spare, response} (missing: as it was)."""
@@ -693,7 +716,8 @@ class Editor:
         live = {u["name"]: u for u in self.store.units()}
         if action == "reset_section":
             return self._commit([("units", k, REMOVE) for k in o], op, [("units", "units", f"{len(o)} edits", "reset to the defaults")])
-        code = _text(body.get("code"), "code", 24).upper()
+        known = {c for b in layout for c in b["units"] if c} | set(L.units) | {k for k in o if not k.startswith("_")} | set(live)
+        code = self._unit_code(_text(body.get("code"), "code", 24), known)
         on_board = self._board_of(layout, code)
         cur = L.units.get(code)
         base = self.base.units.get(code)
@@ -703,14 +727,14 @@ class Editor:
             return REMOVE if base_known and self._same_unit(new, base, code) else new
 
         if action == "add":
-            if not CODE.fullmatch(code):
-                raise CadError(f"code: {code!r}: capital letters, digits and - _ (up to 24)")
             if on_board or cur is not None or code in live:
                 raise CadError(f"{code} is already a unit" + (" (retired: restore it)" if cur and cur.get("retired") else ""))
+            if not CODE.fullmatch(code):
+                raise CadError(f"code: {code!r}: capital letters, digits and - _ (up to 24)")
             u = self._clean_unit(body.get("unit"))
             if not u.get("spoken"):
                 u["spoken"] = code
-            board = str((body.get("unit") or {}).get("board") or ("agencies" if u["kind"] in L.attach_kinds else "main"))
+            board = str((body.get("unit") or {}).get("board") or self._default_board(u["kind"], layout))
             b = next((x for x in layout if x["id"] == board), None)
             if b is None:
                 raise CadError(f"board: one of {', '.join(x['id'] for x in layout)}")
@@ -771,7 +795,7 @@ class Editor:
             cards = self._cards_naming(code)
             if cards:
                 raise CadError(f"{code} is named on run card{'s' if len(cards) > 1 else ''} {', '.join(cards)}: take it off first")
-            u = dict(_norm(cur), retired=True, board=on_board["id"] if on_board else "other")
+            u = dict(_norm(cur), retired=True, board=on_board["id"] if on_board else self._default_board(cur.get("kind", "agency"), layout))
             if on_board:
                 on_board["units"].remove(code)
             return self._commit([("units", code, u), ("units", "_boards", self._layout_change(layout))], op,
@@ -779,8 +803,9 @@ class Editor:
         if action == "restore":
             if not cur.get("retired"):
                 raise CadError(f"{code} is not retired")
-            raw_board = (o.get(code) or {}).get("board") or "main"
-            b = next((x for x in layout if x["id"] == raw_board), layout[0])
+            raw_board = (o.get(code) or {}).get("board") or self._default_board(cur.get("kind", "agency"), layout)
+            b = next((x for x in layout if x["id"] == raw_board), None) or next(
+                x for x in layout if x["id"] == self._default_board(cur.get("kind", "agency"), layout))
             b["units"].append(code)
             u = {k: v for k, v in _norm(cur).items() if k not in ("retired", "board")}
             return self._commit([("units", code, def_change(u)), ("units", "_boards", self._layout_change(layout))], op,
@@ -1118,7 +1143,7 @@ class Editor:
                 raise CadError("run_cards: a list")
             known = {c for c, _, _ in L.board_units()}
             seen = set()
-            fire_kinds = set(L.kind_ids) - set(L.attach_kinds)
+            fire_kinds = set(L.card_kinds)
             for i, c in enumerate(cards):
                 if not isinstance(c, dict):
                     raise CadError(f"run_cards[{i}]: an object")
