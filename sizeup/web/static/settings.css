@@ -66,6 +66,10 @@ input.s-color { width: 2.4em; height: 1.95em; padding: 0.1em 0.15em; cursor: poi
 .chip.s-state.retired { --c: var(--warn); }
 .chip.s-state.deleted { --c: var(--err); }
 .chip.s-flag { font-size: 0.68em; --c: #9aa0b4; }
+.chip.s-confirm { font-size: 0.68em; --c: #ffb547; border-style: dashed; }
+.s-tsmap { margin: 0.2em 0 0.6em; }
+.s-tslist { margin: 0.2em 0 0; padding-left: 1.2em; columns: 2 22em; }
+.s-tslist li { break-inside: avoid; overflow-wrap: anywhere; }
 .chip.s-flag.available { --c: #5aa9ff; }
 .chip.s-flag.unavailable { --c: var(--err); }
 
@@ -97,7 +101,7 @@ input.s-color { width: 2.4em; height: 1.95em; padding: 0.1em 0.15em; cursor: poi
 .s-panel .rc-list { max-height: 70vh; }
 .settings-radios:empty { display: none; }
 
-/* the board: other agencies folded until wanted */
+/* the board: folded groups (EMS, mutual aid, agencies) until wanted */
 .ugroup h3.fold { cursor: pointer; }
 .ugroup h3.fold:hover { color: var(--text); }
 .ugroup.folded > ol { display: none; }

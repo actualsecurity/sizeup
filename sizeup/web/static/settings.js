@@ -12,7 +12,7 @@
 const S = {
   section: null, list: store("sizeup.cad.settings.list") || "event_types",
   data: null, loading: false, again: false, deferred: false, msgT: null,
-  agOpen: false, audit: "", auditRows: null, auditFor: "", admin: null, importing: null,
+  boardsOpen: null, audit: "", auditRows: null, auditFor: "", admin: null, importing: null,
   previewT: null, previewSeq: 0,
 };
 const S_SECTIONS = [["lists", "Lists"], ["runcards", "Run cards"], ["units", "Units"], ["dispatch", "Dispatch"],
@@ -70,6 +70,12 @@ function sColor(value, onChange, label) {
 function sState(state, retired) {
   const k = retired ? "retired" : state;
   return el("span", `chip s-state ${k}`, k);
+}
+function sConfirm(why) {          // "meaning to confirm": a guess the department still has to confirm
+  const role = /^role/i.test(why || "");
+  const c = el("span", "chip s-confirm", role ? "role to confirm" : "meaning to confirm");
+  c.title = why || "No name yet: shown as its code";
+  return c;
 }
 function sCard(title, ...kids) {
   const c = el("div", "s-card");
@@ -219,12 +225,38 @@ function sListTable(sec) {
     "danger-quiet") : null;
   const ol = el("ol", "s-rows");
   items.forEach((x) => ol.append(sItemRow(sec, x, live.indexOf(x), live.length)));
-  const info = `${live.filter((x) => !x.retired).length} in use` + (live.some((x) => x.retired) ? `, ${live.filter((x) => x.retired).length} retired` : "");
+  const todo = live.filter((x) => x.confirm && !x.retired).length;
+  const info = `${live.filter((x) => !x.retired).length} in use` + (live.some((x) => x.retired) ? `, ${live.filter((x) => x.retired).length} retired` : "")
+    + (todo ? ` · ${todo} to confirm` : "");
   const about = {
-    unit_statuses: "What a status does: Available frees the unit; Unavailable takes it out of service (asks why); Dispatched, Responding and On location stamp the times. The rest keep it committed.",
+    unit_statuses: "The department's status codes and names. What a status does (its role) is a best guess where marked "
+      + "“role to confirm”: change it, or press Confirm when it is right. Available (in service) frees the unit and clears it "
+      + "off its call; Unavailable takes it out of service (asks why); Dispatched, Responding and On location stamp the "
+      + "times. The rest keep it committed.",
     event_types: "The color is the type's color on the queue, the board and the records.",
   }[sec];
-  return sCard(sCardHead(title, info, reset), about ? el("p", "dim small", about) : null, ol, sAddForm(sec));
+  const partial = (sec === "event_types" || sec === "event_subtypes") ? sSubtypeMap() : null;
+  return sCard(sCardHead(title, info, reset), about ? el("p", "dim small", about) : null, partial, ol, sAddForm(sec));
+}
+
+// The type -> subtype map (data file type_subtypes): the department's is partial.
+function sSubtypeMap() {
+  const t = S.data.type_subtypes;
+  if (!t) return null;
+  const det = el("details", "s-more s-tsmap");
+  const p = t.partial || {};
+  const sum = el("summary", "", "Allowed subtypes per type: the department's map is partial");
+  const list = el("ul", "small s-tslist");
+  for (const [typ, subs] of Object.entries(t.map || {})) {
+    const li = el("li");
+    li.append(el("code", "", typ), document.createTextNode(" → " + (subs.length ? subs.join(", ") : "no subtype")));
+    list.append(li);
+  }
+  const notGiven = (p.not_given || []).length ? p.not_given : t.unlisted || [];
+  det.append(sum, el("p", "dim small", "From the department's code sheet, which ends at MVA. "
+    + (notGiven.length ? `Not given yet: ${notGiven.join(", ")} (any subtype until they are). ` : "")
+    + "No subtype is always allowed. Edit the data file to change the map."), list);
+  return det;
 }
 
 function sItemRow(sec, x, i, n) {
@@ -257,6 +289,10 @@ function sItemRow(sec, x, i, n) {
     li.append(el("span", `chip s-flag ${flag}`, flag));
   }
   li.append(sState(x.state, x.retired));
+  if (x.confirm && !deleted) {
+    li.append(sConfirm(x.confirm));
+    if (!x.retired) li.append(sBtn("Confirm", `Right as it is: ${x.confirm}`, () => edit({}, "confirmed"), "mini"));
+  }
   const usedText = sec === "unit_statuses" && x.now ? `${x.now} unit${x.now === 1 ? "" : "s"} now · ` : "";
   li.append(el("span", "dim small s-used", usedText + (x.used ? `used ${x.used}×` : "unused")), el("span", "spacer"));
   if (deleted) {
@@ -464,27 +500,34 @@ function sUnits(panel) {
   const d = S.data.units;
   const rows = d.rows;
   const kinds = S.data.unit_kinds.map((k) => [k.id, k.label]);
-  const boards = S.data.boards.map((b) => [b.id, b.id === "main" ? "Main board" : b.id === "agencies" ? "Other agencies" : "Other / mutual aid"]);
+  const boards = S.data.boards.map((b) => [b.id, b.id === "main" ? "Main board" : b.title]);
   const reset = d.edited ? sBtn("Reset all units", "Every unit as in the data file", () => {
     if (sAsk("Put every unit back as in the data file? Units added here go off the boards (their history is kept).")) sPost("units", { action: "reset_section" }, "Units: back to the defaults.");
   }, "danger-quiet") : null;
+  const todo = rows.filter((r) => !r.retired && !r.named).length;
   const out = [...sHead("Units", "PCFD's and Rye Brook's fire units are the main board: run cards pick them by kind, "
-    + "“tick all” ticks PCFD's, and the dispatch says them. Mutual aid goes only when named. Other agencies "
-    + "(EMS, PD, utilities) are never on a run card, never dispatched or toned out: attach them to a call when they show up.", reset)];
+    + "“tick all” ticks PCFD's, and the dispatch says them. Mutual aid departments and requests go only when named. "
+    + "Other agencies (EMS, PD, utilities, resources) are never on a run card, never dispatched or toned out: attach them "
+    + "to a call when they show up. Codes are the department's; a unit with no name (said as, title) shows as its code, "
+    + `marked “meaning to confirm”${todo ? ` (${todo} now)` : ""}: name it when its meaning is known.`, reset)];
+  S.boardsOpen = S.boardsOpen || new Set();
   for (const b of S.data.boards) {
     const mine = rows.filter((r) => r.board === b.id && !r.retired);
     const ol = el("ol", "s-rows units");
     mine.forEach((u, i) => ol.append(sUnitRow(u, i, mine.length, kinds, boards)));
-    if (b.id === "agencies") {
+    const unnamed = mine.filter((r) => !r.named).length;
+    if (b.folded) {
       const det = el("details", "s-card s-fold");
-      det.open = S.agOpen;
-      det.addEventListener("toggle", () => { S.agOpen = det.open; });
+      det.open = S.boardsOpen.has(b.id);
+      det.addEventListener("toggle", () => { if (det.open) S.boardsOpen.add(b.id); else S.boardsOpen.delete(b.id); });
       const sum = el("summary");
-      sum.append(el("h3", "", b.title), el("span", "dim small", ` ${mine.length} units · folded on the board too`));
+      sum.append(el("h3", "", b.title), el("span", "dim small", ` ${mine.length} units`
+        + (unnamed ? ` · ${unnamed} to confirm` : "") + " · folded on the board too"));
       det.append(sum, ol);
       out.push(det);
     } else {
-      out.push(sCard(sCardHead(b.id === "main" ? "Main board — PCFD and Rye Brook fire units" : b.title, `${mine.length} units`), ol));
+      out.push(sCard(sCardHead(b.id === "main" ? "Main board — PCFD and Rye Brook fire units" : b.title,
+        `${mine.length} units` + (unnamed ? ` · ${unnamed} to confirm` : "")), ol));
     }
   }
   const retired = rows.filter((r) => r.retired);
@@ -545,7 +588,9 @@ function sUnitRow(u, i, n, kinds, boards) {
   const meta = el("span", "s-meta");
   if (u.status) meta.append(statusChip(u.status));
   if (u.incident_number) meta.append(el("span", "warn small", `on ${u.incident_number}`));
-  meta.append(sState(u.state, u.retired), el("span", "dim small", u.used ? `${u.used} records` : "no history"));
+  meta.append(sState(u.state, u.retired));
+  if (!u.named && !u.retired) meta.append(sConfirm(""));
+  meta.append(el("span", "dim small", u.used ? `${u.used} records` : "no history"));
   li.append(meta, el("span", "spacer"));
   if (u.retired) li.append(sBtn("Restore", "Back on its board", () => sPost("units", { action: "restore", code: u.code }, `${u.code} back on the board.`)));
   else li.append(sBtn("Retire", "Off the boards; history kept", () => {

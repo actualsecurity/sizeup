@@ -32,7 +32,8 @@ button.danger-quiet { color: #ffb3bb; }
 button:disabled { opacity: 0.45; cursor: default; }
 button.wide { width: 100%; }
 button.mini { font-size: 0.78em; padding: 0.05em 0.5em; }
-button.mini.on { color: #fff; background: var(--c); border-color: var(--c); opacity: 1; }
+/* filled: the status color a little darker, its text color (--fg, from the data file) readable on it */
+button.mini.on { color: var(--fg, #fff); background: color-mix(in srgb, var(--c) 88%, #000); border-color: var(--c); opacity: 1; }
 .small { font-size: 0.82em; }
 .warn { color: var(--warn); }
 .error { color: var(--err); font-weight: 600; }
@@ -181,6 +182,7 @@ label.check { cursor: pointer; }
 .usub .why { color: var(--dim); overflow-wrap: anywhere; }
 .inc-link { color: #ffb020; }
 .ubtns { display: flex; flex-wrap: wrap; gap: 0.3em; margin-top: 0.35em; }
+.ubtns button.mini:not(.on) { border-color: color-mix(in srgb, var(--c) 75%, transparent); color: color-mix(in srgb, var(--c) 45%, #fff); }
 .ubtns .ask { flex: 1; flex-wrap: nowrap; gap: 0.3em; }
 .ubtns .ask input { flex: 1; font-size: 0.85em; padding: 0.15em 0.4em; }
 .unit-log { font-size: 0.88em; }

@@ -21,8 +21,10 @@
 
 const $ = (sel) => document.querySelector(sel);
 const LOST_AFTER_MS = 6000;
-// The units board: the department's apparatus by kind (the data file's order within each), then
-// other departments, police, EMS, and the rest (utility companies, agencies).
+// The units board: the boards of the data file in order. One with group_by "kind" (main: PCFD's and
+// Rye Brook's) shows its apparatus by kind (the data file's order within each), then its code-only
+// units under rest_title; every other board is one group (EMS, each mutual-aid department, the MA
+// requests, agencies & resources), folded until opened when the data file says so.
 const KIND_GROUPS = [
   ["Chief officers", ["chief"]], ["Engines", ["engine"]], ["Ladders & towers", ["ladder", "tower"]],
   ["Rescue", ["rescue"]], ["Utility", ["utility"]], ["Marine", ["marine"]],
@@ -38,7 +40,7 @@ const cad = {
   listSig: "", rcEditing: null, openUnit: null,
   ask: null,                 // {uid, status, where}: asking why (out of service / unmanned)
   hooks: [],                 // more renderers (settings.js), called on every render
-  agenciesOpen: false,       // the board's "Other agencies" group, folded by default
+  openBoards: new Set(),     // folded boards (cad_lists.json unit_boards folded) opened here
   emergTouched: false,       // the operator set Emergency on the form: the type no longer does
   dbAt: 0,
 };
@@ -213,7 +215,13 @@ function statusChip(code, text) {   // the old outline chip, in the data file's 
   const st = unitStatus(code);
   const c = el("span", "chip st", text ?? st.name);
   c.style.setProperty("--c", st.bg || "#9aa0b4");
+  c.title = st.code === (text ?? st.name) ? st.code : `${st.code}: ${st.name}`;
   return c;
+}
+function statusColors(node, st) {  // a status button: its color, and its text color when filled
+  node.style.setProperty("--c", st.bg || "#9aa0b4");
+  if (st.fg) node.style.setProperty("--fg", st.fg);
+  return node;
 }
 function eventStatus(inc) {         // Pending / Open / Active / Closed, with the data file's color
   const es = L().event_statuses || {};
@@ -236,7 +244,7 @@ const live = (x) => !x.retired;     // retired: named on old events, off the pic
 function subtypesFor(t) {
   const m = (L().type_subtypes || {})[t];
   const all = (L().event_subtypes || []).filter(live);
-  return m && m.length ? all.filter((s) => m.includes(s.code)) : all;
+  return Array.isArray(m) ? all.filter((s) => m.includes(s.code)) : all;   // listed: only those (none: no subtype)
 }
 function fillSelect(sel, items, blank) {
   const keep = sel.value;
@@ -596,7 +604,7 @@ function callPicker(u, where, box) {
   add(0, "No call: status only");
   const ok = el("button", "mini on", `${st.name}`);
   ok.type = "submit";
-  ok.style.setProperty("--c", st.bg || "#9aa0b4");
+  statusColors(ok, st);
   const cancel = el("button", "mini", "Cancel");
   cancel.type = "button";
   cancel.addEventListener("click", (e) => { e.stopPropagation(); cad.pick = null; render(); });
@@ -629,7 +637,7 @@ function statusButtons(u, where) {
     input.addEventListener("input", () => { cad.ask.text = input.value; });
     const ok = el("button", "mini on", `Set ${st.name.toLowerCase()}`);
     ok.type = "submit";
-    ok.style.setProperty("--c", st.bg || "#9aa0b4");
+    statusColors(ok, st);
     const cancel = el("button", "mini", "Cancel");
     cancel.type = "button";
     cancel.addEventListener("click", (e) => { e.stopPropagation(); cad.ask = null; render(); });
@@ -650,7 +658,8 @@ function statusButtons(u, where) {
     if (where === "inc" && s.code === u.status) continue;
     if (s.retired) continue;
     const b = el("button", "mini" + (s.code === u.status ? " on" : ""), s.name);
-    b.style.setProperty("--c", s.bg || "#9aa0b4");
+    statusColors(b, s);
+    b.title = s.code;
     b.disabled = s.code === u.status;
     b.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -1395,22 +1404,30 @@ function renderMap(inc) {               // the working event's map: cadmap.js (e
 
 function unitGroups() {
   // On a board (or off the boards but still committed), in the data file's order. The joint-response
-  // units (Rye Brook's) are direct units: grouped by kind with PCFD's, tagged.
+  // units (Rye Brook's) are direct units: grouped by kind with PCFD's, tagged. [key, title, rows, board]
   const all = units().filter((u) => u.board || u.incident_id);
+  const boards = L().unit_boards || [];
   const taken = new Set();
   const groups = [];
-  const take = (title, pred) => {
+  const take = (key, title, pred, board) => {
     const rows = all.filter((u) => !taken.has(u.id) && pred(u));
     rows.forEach((u) => taken.add(u.id));
-    if (rows.length) groups.push([title, rows]);
+    if (rows.length) groups.push([key, title, rows, board]);
   };
-  for (const [title, kinds] of KIND_GROUPS) take(title, (u) => !u.mutual_aid && u.response !== "agency" && kinds.includes(u.kind));
-  take(AGENCIES, (u) => u.board === "agencies");
-  take("Other & mutual aid", () => true);
+  for (const b of boards) {
+    if (b.group_by === "kind") {
+      for (const [title, kinds] of KIND_GROUPS) {
+        take(`${b.id}/${title}`, title, (u) => u.board === b.id && !u.mutual_aid && u.response !== "agency" && kinds.includes(u.kind), b);
+      }
+      take(`${b.id}/rest`, b.rest_title || b.title, (u) => u.board === b.id, b);
+    } else {
+      take(b.id, b.title, (u) => u.board === b.id, b);
+    }
+  }
+  take("off", "Off the boards, still on a call", () => true, null);
   return groups;
 }
 
-const AGENCIES = "Other agencies — add to a call when they show up";
 function renderUnits() {
   const box = $("#units");
   const groups = unitGroups();
@@ -1419,27 +1436,36 @@ function renderUnits() {
     return;
   }
   box.querySelector(":scope > .empty")?.remove();
-  const titles = groups.map(([t]) => t);
-  for (const g of [...box.querySelectorAll(":scope > .ugroup")]) if (!titles.includes(g.dataset.group)) g.remove();
-  groups.forEach(([title, rows], i) => {
-    let g = [...box.children].find((c) => c.dataset.group === title);
+  const keys = groups.map(([k]) => k);
+  for (const g of [...box.querySelectorAll(":scope > .ugroup")]) if (!keys.includes(g.dataset.group)) g.remove();
+  groups.forEach(([key, title, all, board], i) => {
+    const fold = !!(board && board.folded);
+    let g = [...box.children].find((c) => c.dataset.group === key);
     if (!g) {
       g = el("section", "ugroup");
-      g.dataset.group = title;
+      g.dataset.group = key;
       const h = el("h3", "", title);
-      if (title === AGENCIES) {                 // folded: EMS and PD only matter once they show up
+      if (fold) {                               // folded: shown once opened (or for the units on a call)
         h.className = "fold";
         h.tabIndex = 0;
-        const flip = () => { cad.agenciesOpen = !cad.agenciesOpen; renderUnits(); };
+        h.setAttribute("role", "button");
+        const flip = () => {
+          if (cad.openBoards.has(board.id)) cad.openBoards.delete(board.id); else cad.openBoards.add(board.id);
+          renderUnits();
+        };
         h.addEventListener("click", flip);
-        h.addEventListener("keydown", (e) => { if (e.key === "Enter") flip(); });
+        h.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); flip(); } });
       }
       g.append(h, el("ol", "list ulist"));
     }
-    if (title === AGENCIES) {
-      const on = rows.filter((u) => u.incident_id).length;
-      g.classList.toggle("folded", !cad.agenciesOpen);
-      setText(g.querySelector("h3"), `${cad.agenciesOpen ? "▾" : "▸"} ${title}${on ? ` · ${on} on calls` : ""}`);
+    let rows = all;
+    if (fold) {
+      const open = cad.openBoards.has(board.id);
+      const on = all.filter((u) => u.incident_id);
+      if (!open) rows = on;
+      g.classList.toggle("folded", !open && !on.length);
+      g.querySelector("h3").setAttribute("aria-expanded", String(open));
+      setText(g.querySelector("h3"), `${open ? "▾" : "▸"} ${title} · ${all.length}${on.length ? ` · ${on.length} on calls` : ""}`);
     }
     if (box.children[i] !== g) box.insertBefore(g, box.children[i] || null);
     syncList(g.querySelector("ol"), rows, {
@@ -1471,7 +1497,10 @@ function renderUnits() {
         head.append(name);
         const j = jointOf(u.name);
         if (j) { const t = el("span", "chip joint", j.tag); t.title = `${j.town}'s (joint response)`; head.append(t); }
-        else if (u.mutual_aid && u.department) head.append(el("span", "chip dept", u.department));
+        else if (u.mutual_aid && u.department
+          && !((L().unit_boards || []).find((b) => b.id === u.board)?.title || "").includes(u.department)) {
+          head.append(el("span", "chip dept", u.department));       // not already said by its group's title
+        }
         if (u.title) head.append(el("span", "utitle dim small", u.title));
         if (u.spare) head.append(el("span", "chip spare", "spare"));
         if (talk) {
@@ -1606,7 +1635,7 @@ function slotRow(slot) {
     const n = el("input", "s-count");
     n.type = "number"; n.min = "1"; n.max = "10"; n.value = String(slot.count || 1);
     const s = el("select", "s-kind");
-    const kinds = (L().unit_kinds || []).filter((k) => !k.attach_only).map((k) => [k.id, k.label.toLowerCase()]);
+    const kinds = (L().unit_kinds || []).filter((k) => !k.attach_only && !k.by_name).map((k) => [k.id, k.label.toLowerCase()]);
     const ladder = kinds.some(([k]) => k === "ladder") && kinds.some(([k]) => k === "tower") ? [["ladder|tower", "ladder or tower"]] : [];
     fillSelect(s, [...kinds.slice(0, 1), ...ladder, ...kinds.slice(1)]);
     s.value = slot.kind || "engine";
