@@ -52,6 +52,7 @@ from sizeup.radio.tones import TonePlan
 from sizeup.talkers import talker_prompt
 from sizeup.stt import LIVE, RERUN, Transcriber, WhisperClient, radio_voice, wav_bytes
 from sizeup.talkgroups import TalkgroupPrefs
+from sizeup.tts import TtsService
 from sizeup.web.server import WebServer
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -192,6 +193,10 @@ class App:
         self.plan = TonePlan(list(cfg.tones))
         self.whisper = WhisperService(cfg.stt_server, cfg.stt_model, cfg.stt_port, cfg.stt_threads, cfg.stt_beam_size,
                                       (Path(cfg.clips_dir).parent / "whisper-server.json") if cfg.clips_dir else None)
+        # The dispatch voice (Kokoro, sizeup/tts.py), kept warm the same way; dispatches use `say` while it's down.
+        self.tts = (TtsService(cfg.dispatch_tts_python, cfg.dispatch_tts_port, cfg.dispatch_voice,
+                               (Path(cfg.clips_dir).parent / "tts-server.json") if cfg.clips_dir else None, log=log)
+                    if cfg.dispatch_tts_engine == "kokoro" and cfg.dispatch_tts_python else None)
         self.stt = Transcriber(WhisperClient(f"http://127.0.0.1:{cfg.stt_port}/inference"), self._transcribed,
                                prompt=self._prompt)
         self.gaz = self._load_gazetteer()
@@ -939,6 +944,7 @@ class App:
             out.append(st)
         out.append({"label": "STT", "mhz": None, "state": self.whisper.state, "detail": self.whisper.detail,
                     "open": False, "quieting_db": None, "restarts": 0, "last_heard": None})
+        out.append(self.tts.status() if self.tts else TtsService.say_status(self.cfg.dispatch_voice))
         return out
 
     def has_clip(self, cid: str) -> bool:
@@ -986,6 +992,8 @@ class App:
 
     def start(self) -> App:
         self.whisper.start()
+        if self.tts:
+            self.tts.start()
         self.stt.start()
         threading.Thread(target=self._janitor, name="janitor", daemon=True).start()
         threading.Thread(target=self._watch_fm, name="talking", daemon=True).start()
@@ -1014,6 +1022,8 @@ class App:
         for sd in list(self.assign):
             claims.release(sd)
         self.whisper.stop()
+        if self.tts:
+            self.tts.stop()
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -492,9 +492,10 @@ def test_dispatch_wording_new_add_on_upgrade_full():
     # The wording is the data file's: a department edit changes it without code.
     w = dict(lists.load().wording, full_response="all companies")
     assert "all companies, respond" in dispatcher.compose("new", units=[], full=True, wording=w, **kw)
-    # Spoken: the house number digit by digit, wherever the location sits.
-    assert dispatcher.speech(t, dispatcher.where(inc)).endswith("on location. 1 6 9 North Main Street, commercial fire "
-                                                                "alarm. Time out 15 13.")
+    # Spoken the dispatch way (sizeup/cad/speech.py), wherever the location sits.
+    assert dispatcher.speech(t, dispatcher.where(inc)).endswith(
+        "and twenty-three ninety-eight on location. One sixty-nine North Main Street, commercial fire alarm. "
+        "Time out fifteen thirteen.")
     assert dispatcher.spoken_street("St Marys Pl, Rye Brook") == "St Marys Place, Rye Brook"   # other towns said
     assert dispatcher.spoken_street("12 N Main St") == "12 North Main Street"
 

@@ -27,6 +27,8 @@ from sizeup.cad import lists as lists_mod
 from sizeup.cad.dispatcher import AudioUnavailable
 from sizeup.cad.store import TZ, CadError, Store
 from sizeup.cad.transmit import Transmitter, make_transmitter
+from sizeup.tts import VoiceCfg
+from sizeup.tts import voices as tts_voices
 
 AUDIO_NAME = re.compile(r"[0-9a-f]{20}")
 FIRE_KINDS = ("chief", "engine", "ladder", "tower", "rescue", "utility", "marine")
@@ -43,8 +45,12 @@ class Settings:
     department: str = "Port Chester Fire"          # first words of every dispatch
     monitor_departments: tuple[str, ...] = ("Port Chester FD",)   # monitor incidents that become queued ones
     tones: tuple[tuple[float, float], ...] = ((349.1, 1.0), (311.1, 3.0))
-    voice: str = "Samantha"
+    voice: str = "Samantha"                        # tts_engine "say": a `say -v` voice; "kokoro": a Kokoro voice
     rate_wpm: int = 0
+    tts_engine: str = "say"                        # "kokoro" | "say"; the config's default is kokoro, "say" here
+    speed: float = 1.0                             # keeps tests off any running TTS server (sizeup/tts.py)
+    tts_port: int = 8093
+    fallback_voice: str = "Samantha"
     repeat: int = 2
     transmit: bool = False
     channels: tuple[str, ...] = ("FG1", "PC repeater")
@@ -131,6 +137,8 @@ class Cad:
         return cls(Settings(db=cfg.cad_db, lists=cfg.cad_lists, department=cfg.cad_department,
                             monitor_departments=tuple(cfg.cad_monitor_departments), tones=tuple(cfg.dispatch_tones),
                             voice=cfg.dispatch_voice, rate_wpm=cfg.dispatch_rate, repeat=cfg.dispatch_repeat,
+                            tts_engine=cfg.dispatch_tts_engine, speed=cfg.dispatch_speed, tts_port=cfg.dispatch_tts_port,
+                            fallback_voice=cfg.dispatch_fallback_voice,
                             transmit=cfg.dispatch_transmit, channels=tuple(cfg.dispatch_channels),
                             tactical=tuple(c.label for c in cfg.channels if c.kind == "traffic") or ("FG1",),
                             incident_talkgroups=tuple(sorted(cfg.p25_incident_talkgroups))),
@@ -155,7 +163,9 @@ class Cad:
                 "transmit": {"enabled": self.transmitter.enabled, "transmitter": self.transmitter.name,
                              "channels": list(self.s.channels),
                              "note": "Transmit is off: logged and played here only"},
-                "audio": {"tts": bool(shutil.which("say") and shutil.which("afconvert")), "voice": self.s.voice,
+                "audio": {"tts": self.s.tts_engine == "kokoro" or bool(shutil.which("say") and shutil.which("afconvert")),
+                          "engine": self.s.tts_engine, "voice": self.s.voice, "speed": self.s.speed,
+                          "fallback_voice": self.s.fallback_voice, "label": self._voice().label(),
                           "tones": [list(t) for t in self.s.tones]},
                 "geocoder": self.geocoder is not None,
             })
@@ -317,14 +327,27 @@ class Cad:
             raise CadError(f"channel: one of {', '.join(self.s.channels)}")
         return ch
 
+    def _voice(self) -> VoiceCfg:
+        return VoiceCfg(self.s.tts_engine, self.s.voice, self.s.speed, self.s.tts_port, self.s.fallback_voice,
+                        self.s.rate_wpm)
+
+    def tts_voices(self) -> dict:
+        """GET /api/cad/tts/voices: the Kokoro voices to pick from and what's set now."""
+        return {"engine": self.s.tts_engine, "voice": self.s.voice, "speed": self.s.speed,
+                "fallback_voice": self.s.fallback_voice,
+                "voices": tts_voices(self.s.tts_port)}
+
     def _render(self, text: str, location: str = "") -> tuple[Path | None, str]:
+        """(the WAV, which voice said it: "Voice: Kokoro af_heart") or (None, why there's no audio).
+        `location` is no longer needed: every number in the text is said the dispatch way."""
         if self.audio_dir is None:
             import tempfile
             self.audio_dir = Path(tempfile.mkdtemp(prefix="sizeup-cad-audio-"))
         try:
             with self._render_lock:
-                return dispatcher.render_audio(text, self.s.tones, self.audio_dir, self.s.voice, self.s.rate_wpm,
-                                               self.s.repeat, location), ""
+                return dispatcher.render_dispatch(text, self.s.tones, self.audio_dir, self._voice(), self.s.repeat,
+                                                  {c: u.get("spoken", "") for c, u in self.lists.units.items()},
+                                                  log=self.log)
         except AudioUnavailable as e:
             return None, str(e)
         except OSError as e:

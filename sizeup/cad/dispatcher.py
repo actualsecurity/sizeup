@@ -10,12 +10,17 @@
                              Smoke in the structure. Now a structure fire, full department
                              response. Time out 15:20."
     full=True               "full department response" instead of the units' names
-    render_audio(text, tones)    alert tones (two-tone sequential) + gap + the voice read twice,
-                                 16 kHz mono 16-bit WAV, the voice from macOS `say`
+    render_dispatch(text, tones, out_dir, VoiceCfg(...))
+                                 alert tones (two-tone sequential) + gap + the voice read twice,
+                                 16 kHz mono 16-bit WAV, and which voice said it. The voice: the
+                                 Kokoro server (sizeup/tts.py) or, when it's down, errors or takes
+                                 over 10 s, macOS `say` with the fallback voice
+    render_audio(text, tones)    the same with `say` only (the WAV's path)
 
 The written text is what the timeline shows; speech() rewrites it the way a dispatcher says it
-(house numbers digit by digit, "time out fourteen thirty-two"). Unit names come already as said
-(cad_lists.json units.spoken: "Engine 60", "23 98", "77 Alpha 1").
+(sizeup/cad/speech.py: "two oh nine Westchester Avenue", "time out fourteen thirty-two"), the same
+text for every engine. Unit names come already as said (cad_lists.json units.spoken: "Engine 60",
+"23 98", "77 Alpha 1"); a unit code still in the text is said by that list too.
 """
 
 from __future__ import annotations
@@ -29,10 +34,13 @@ import tempfile
 import wave
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 
+from sizeup.cad import speech as spoken_words
 from sizeup.cad.store import TZ
+from sizeup.tts import TtsError, VoiceCfg, synthesize
 
 RATE = 16000
 GAP_S = 0.6          # after the tones, before the voice
@@ -180,20 +188,12 @@ def build_text(department: str, incident: dict, unit_names: list[str], phrase: s
                    full=full, wording=wording)
 
 
-def speech(text: str, location: str = "") -> str:
-    """Written dispatch -> words for the voice: the house number of `location` (or, without one,
-    the number after "respond to") digit by digit; "Time out 14 32"; "2398 Duty Officer": "23 98"."""
-    def digits(m: re.Match) -> str:
-        return m.group(1) + " ".join(m.group(2))
-    t = text
-    if location and (m := re.match(r"(\d+)(\b.*)", location)) and location in t:
-        t = t.replace(location, " ".join(m.group(1)) + m.group(2), 1)
-    elif not location:
-        t = re.sub(r"(respond to )(\d+)", digits, t)                       # "two zero nine Westchester"
-    t = re.sub(r"\bTime out (\d{2}):(\d{2})", lambda m: f"Time out {m.group(1)} {m.group(2)}"
-               if m.group(2) != "00" else f"Time out {m.group(1)} hundred", t)
-    t = re.sub(r"\b(\d{2})(\d{2})\b(?= [A-Z])", r"\1 \2", t)            # "2398 Duty Officer": "23 98"
-    return t
+def speech(text: str, location: str = "", spoken: dict[str, str] | None = None) -> str:
+    """Written dispatch -> words for the voice (sizeup/cad/speech.py): "two oh nine Westchester
+    Avenue", "Ladder thirty-one and twenty-three ninety-eight", "Time out fifteen thirteen".
+    `spoken`: unit code -> as said (cad_lists.json), for codes still in the text ("77A4").
+    `location` is accepted for older callers: every number is said the same way now."""
+    return spoken_words.words(text, spoken)
 
 
 def tone_audio(tones: list[tuple[float, float]], rate: int = RATE) -> np.ndarray:
@@ -238,14 +238,17 @@ def tts(text: str, voice: str = "", rate_wpm: int = 0) -> np.ndarray:
             x = np.frombuffer(w.readframes(w.getnframes()), "<i2").astype(np.float32) / 32768.0
             if w.getnchannels() > 1:
                 x = x.reshape(-1, w.getnchannels()).mean(axis=1)
+    return _peak(x)
+
+
+def _peak(x: np.ndarray) -> np.ndarray:
     peak = float(np.max(np.abs(x))) if len(x) else 0.0
-    return x * (AMPLITUDE / peak) if peak > 0 else x
+    return (x * (AMPLITUDE / peak) if peak > 0 else x).astype(np.float32)
 
 
-def render(text: str, tones: list[tuple[float, float]], voice: str = "", rate_wpm: int = 0,
-           repeat: int = 2, location: str = "") -> np.ndarray:
-    v = tts(speech(text, location), voice, rate_wpm)
-    parts = [tone_audio(tones), np.zeros(int(GAP_S * RATE))] if tones else []
+def assemble(v: np.ndarray, tones, repeat: int = 2) -> np.ndarray:
+    """Tones, a gap, then the voice `repeat` times with a pause between."""
+    parts = [tone_audio(list(tones)), np.zeros(int(GAP_S * RATE))] if tones else []
     for k in range(max(1, repeat)):
         if k:
             parts.append(np.zeros(int(REPEAT_GAP_S * RATE)))
@@ -265,20 +268,52 @@ def wav_bytes(x: np.ndarray, rate: int = RATE) -> bytes:
     return buf.getvalue()
 
 
-def audio_key(text: str, tones, voice: str, rate_wpm: int, repeat: int, location: str = "") -> str:
-    """Same text, tones and voice = same file: a preview and the dispatch right after share it."""
-    return hashlib.sha1(repr((text, list(tones), voice, rate_wpm, repeat, location)).encode()).hexdigest()[:20]
+def audio_key(said: str, tones, engine: str, voice: str, pace: float, repeat: int) -> str:
+    """Same words, tones, engine, voice and speed = same file: a preview and the dispatch right
+    after share it."""
+    return hashlib.sha1(repr((said, list(tones), engine, voice, pace, repeat)).encode()).hexdigest()[:20]
+
+
+def _write(path: Path, x: np.ndarray) -> None:
+    tmp = path.with_suffix(".tmp")
+    tmp.write_bytes(wav_bytes(x))
+    os.replace(tmp, path)
+
+
+def render_dispatch(text: str, tones, out_dir: str | Path, voice: VoiceCfg, repeat: int = 2,
+                    spoken: dict[str, str] | None = None,
+                    log: Callable[[str], None] | None = None) -> tuple[Path, str]:
+    """The dispatch as a WAV under out_dir (cached by content) and which voice said it ("Voice:
+    Kokoro af_heart", "Voice: Samantha (fallback)"). Engine kokoro falls back to `say` with
+    voice.fallback_voice when the server is down, errors or is slower than voice.timeout_s.
+    Raises AudioUnavailable (no voice at all)."""
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    said = speech(text, spoken=spoken)
+    tones = [tuple(t) for t in tones]
+    fallback = False
+    if voice.engine == "kokoro":
+        path = out_dir / f"{audio_key(said, tones, 'kokoro', voice.voice, voice.speed, repeat)}.wav"
+        if path.is_file():
+            return path, voice.label()
+        try:
+            _write(path, assemble(_peak(synthesize(said, voice.voice, voice.speed, voice.port, voice.timeout_s)),
+                                  tones, repeat))
+            return path, voice.label()
+        except TtsError as e:
+            fallback = True
+            if log:
+                log(f"CAD: dispatch voice: {e}; using {voice.fallback_voice or 'say'} instead")
+        say_voice = voice.fallback_voice
+    else:
+        say_voice = voice.voice
+    path = out_dir / f"{audio_key(said, tones, 'say', say_voice, voice.rate_wpm, repeat)}.wav"
+    if not path.is_file():
+        _write(path, assemble(tts(said, say_voice, voice.rate_wpm), tones, repeat))
+    return path, voice.label(fallback)
 
 
 def render_audio(text: str, tones, out_dir: str | Path, voice: str = "", rate_wpm: int = 0,
-                 repeat: int = 2, location: str = "") -> Path:
-    """The dispatch as a WAV under out_dir (cached by content). Raises AudioUnavailable."""
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / f"{audio_key(text, tones, voice, rate_wpm, repeat, location)}.wav"
-    if not path.is_file():
-        data = wav_bytes(render(text, list(tones), voice, rate_wpm, repeat, location))
-        tmp = path.with_suffix(".tmp")
-        tmp.write_bytes(data)
-        os.replace(tmp, path)
-    return path
+                 repeat: int = 2) -> Path:
+    """The dispatch said by macOS `say` (render_dispatch for the engine choice). Raises AudioUnavailable."""
+    return render_dispatch(text, tones, out_dir, VoiceCfg("say", voice, rate_wpm=rate_wpm), repeat)[0]

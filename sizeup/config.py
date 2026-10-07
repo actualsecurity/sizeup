@@ -3,11 +3,13 @@ See config.example.toml for every option with comments."""
 
 from __future__ import annotations
 
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from sizeup.radio.tones import ToneCode
+from sizeup.tts import DEFAULT_PYTHON, KOKORO_VOICES
 
 
 class ConfigError(ValueError):
@@ -72,7 +74,13 @@ class Config:
     cad_lists: str = ""               # the CAD's lists / boards / wording ("" = data/cad_lists.json)
     cad_monitor_departments: tuple[str, ...] = ("Port Chester FD",)   # monitor incidents that wait to be accepted
     dispatch_tones: tuple[tuple[float, float], ...] = ((349.1, 1.0), (311.1, 3.0))   # (Hz, s) in order
-    dispatch_voice: str = "Samantha"  # macOS `say -v`
+    # The dispatch voice. load() defaults to Kokoro af_heart at 0.92; built directly (tests), `say` Samantha.
+    dispatch_tts_engine: str = "say"  # "kokoro" (sizeup/tts_server.py; `say` as fallback) | "say"
+    dispatch_voice: str = "Samantha"  # engine kokoro: a Kokoro voice ("af_heart"); engine say: macOS `say -v`
+    dispatch_speed: float = 0.92      # Kokoro speaking speed (0.5-2.0)
+    dispatch_tts_port: int = 8093     # the TTS server, on 127.0.0.1
+    dispatch_fallback_voice: str = "Samantha"   # `say -v` when the TTS server is down, errors or is slow
+    dispatch_tts_python: str = ""     # the TTS environment's Python (tools/setup_tts.sh); "" = no TTS server
     dispatch_rate: int = 0            # words per minute (0 = the voice's own)
     dispatch_repeat: int = 2          # the voice read this many times
     dispatch_transmit: bool = False   # M1: must stay false (no radio interface yet)
@@ -84,6 +92,25 @@ def _take(d: dict, path: str, allowed: set[str]) -> dict:
     if extra:
         raise ConfigError(f"{path}: unknown key(s) {', '.join(sorted(extra))}")
     return d
+
+
+def _dispatch_voice(dsp: dict) -> tuple[str, str, str]:
+    """[dispatch] tts_engine, voice, fallback_voice. An older config's `voice = "Samantha"` (a `say`
+    voice, no tts_engine) becomes the fallback, and Kokoro's af_heart the voice."""
+    engine = str(dsp.get("tts_engine", "kokoro"))
+    if engine not in ("kokoro", "say"):
+        raise ConfigError('dispatch.tts_engine: "kokoro" or "say"')
+    voice, fallback = str(dsp.get("voice", "")).strip(), str(dsp.get("fallback_voice", "")).strip()
+    if engine == "kokoro" and voice and voice not in KOKORO_VOICES:
+        if "tts_engine" in dsp or re.fullmatch(r"[a-z]{2}_\w+", voice):
+            raise ConfigError(f"dispatch.voice: {voice!r} isn't a Kokoro voice (af_heart, am_michael, bf_emma, ...); "
+                              'for a macOS `say` voice set tts_engine = "say", or use it as fallback_voice')
+        voice, fallback = "", fallback or voice
+    voice = voice or ("af_heart" if engine == "kokoro" else "Samantha")
+    fallback = fallback or "Samantha"
+    if not all(re.fullmatch(r"[\w .()'-]{1,60}", v) for v in (voice, fallback)):
+        raise ConfigError("dispatch.voice / dispatch.fallback_voice: a voice name")
+    return engine, voice, fallback
 
 
 def load(path: str | Path) -> Config:
@@ -194,7 +221,8 @@ def load(path: str | Path) -> Config:
         if not cl.is_file():
             raise ConfigError(f"cad.lists: {cl} not found")
         cad_lists = str(cl.resolve())
-    dsp = _take(data.get("dispatch", {}), "dispatch", {"tones", "voice", "rate", "repeat", "transmit", "channels"})
+    dsp = _take(data.get("dispatch", {}), "dispatch", {"tones", "voice", "rate", "repeat", "transmit", "channels",
+                                                       "tts_engine", "speed", "tts_port", "fallback_voice", "tts_python"})
     if dsp.get("transmit", False) is not False:
         raise ConfigError("dispatch.transmit: must be false: this version has no radio interface (M2), "
                           "so dispatches are logged and played locally only")
@@ -208,6 +236,16 @@ def load(path: str | Path) -> Config:
     if not 1 <= d_repeat <= 3 or not (d_rate == 0 or 80 <= d_rate <= 400):
         raise ConfigError("dispatch.repeat: 1 to 3; dispatch.rate: 0 or 80 to 400 words per minute")
     d_channels = tuple(str(c) for c in dsp.get("channels", ["FG1", "PC repeater"]))
+    d_engine, d_voice, d_fallback = _dispatch_voice(dsp)
+    try:
+        d_speed, d_port = float(dsp.get("speed", 0.92)), int(dsp.get("tts_port", 8093))
+    except (TypeError, ValueError):
+        raise ConfigError("dispatch.speed: a number; dispatch.tts_port: a port number") from None
+    if not 0.5 <= d_speed <= 2.0:
+        raise ConfigError("dispatch.speed: 0.5 to 2.0 (1.0 = the voice's own pace)")
+    if not 1024 <= d_port <= 65535 or d_port in (int(web.get("port", 8090)), int(stt.get("port", 8179))):
+        raise ConfigError("dispatch.tts_port: a free port from 1024 to 65535 (not the web or whisper port)")
+    d_python = str(Path(str(dsp.get("tts_python") or DEFAULT_PYTHON)).expanduser())
     return Config(
         station_id=st.get("id", "pcfd"), station_name=st.get("name", "Port Chester FD"),
         host=web.get("host", "127.0.0.1"), port=int(web.get("port", 8090)),
@@ -233,6 +271,7 @@ def load(path: str | Path) -> Config:
         cad_db=rel(cad.get("db", "state/cad.sqlite")), cad_department=str(cad.get("department", "Port Chester Fire")),
         cad_lists=cad_lists,
         cad_monitor_departments=tuple(str(x) for x in cad.get("monitor_departments", ["Port Chester FD"])),
-        dispatch_tones=d_tones, dispatch_voice=str(dsp.get("voice", "Samantha")), dispatch_rate=d_rate,
+        dispatch_tones=d_tones, dispatch_tts_engine=d_engine, dispatch_voice=d_voice, dispatch_speed=d_speed,
+        dispatch_tts_port=d_port, dispatch_fallback_voice=d_fallback, dispatch_tts_python=d_python, dispatch_rate=d_rate,
         dispatch_repeat=d_repeat, dispatch_transmit=False, dispatch_channels=d_channels,
     )

@@ -11,6 +11,7 @@ GET  /api/cad/admin                       record counts and the next event numbe
 GET  /api/cad/export/<name>.csv           incidents | calls | unit-history | event-log, the sheet's columns
 GET  /api/cad/dispatch/<id>.wav           a logged dispatch's audio
 GET  /api/cad/audio/<key>.wav             a preview's audio
+GET  /api/cad/tts/voices                  {engine, voice, speed, fallback_voice, voices: [{id, name, accent, gender}]}
 POST /api/cad/incident                    Accept event: {type, subtype?, emergency?, received_via?, until_at?,
                                           address?, cross_street?, caller_name?, caller_address?, phone?,
                                           remarks?, lat?, lon?, geo_label?, operator?}
@@ -91,6 +92,8 @@ class CadApi:
             if m := EXPORT.fullmatch(path):
                 data = self.cad.export(m.group(1))
                 return (200, data, "text/csv; charset=utf-8") if data is not None else (404, b"no such export\n", "text/plain")
+            if path == "/api/cad/tts/voices":
+                return _json(200, self.cad.tts_voices())
             if path == "/api/cad/geocode":
                 return _json(200, self.cad.geocode((parse_qs(query).get("q") or [""])[0]))
             if m := DISPATCH_WAV.fullmatch(path):

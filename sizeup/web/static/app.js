@@ -410,6 +410,8 @@ function renderConn() {
 }
 
 const RADIO_STATE = { ok: "", off: "off", absent: "absent", down: "down", starting: "starting" };
+// Rows in the radios list that are services, not receivers (speech-to-text, the dispatch voice).
+const SERVICES = new Set(["STT", "Voice"]);
 
 // Switchable dongles: one segmented row per SDR (by serial). Each runs one channel, Fire/EMS 15
 // (trunk-recorder) or Off; a mode running on another SDR is outlined, and picking it moves it here.
@@ -563,8 +565,8 @@ function renderIncident(inc) {
     show($("#inc-body"), false);
     show($("#inc-close"), false);
     setText($("#inc-status"), "");
-    // Radios only: the speech-to-text service isn't something we listen on.
-    const ok = ((ui.state && ui.state.radios) || []).filter((r) => r.state === "ok" && r.label !== "STT")
+    // Radios only: speech-to-text and the dispatch voice aren't something we listen on.
+    const ok = ((ui.state && ui.state.radios) || []).filter((r) => r.state === "ok" && !SERVICES.has(r.label))
       .map((r) => r.label);
     setText($("#inc-listening"), ok.length ? `Listening · ${ok.join(" · ")}` : "No radio is receiving");
     const close = $("#inc-close");
@@ -856,7 +858,7 @@ function renderTraffic(inc) {
         t.status === "done" ? "(no words)" : trafficStatus(t)));
     },
     empty: inc ? "No radio traffic yet"
-      : ((ui.state && ui.state.radios) || []).some((r) => r.state === "ok" && r.label !== "STT")
+      : ((ui.state && ui.state.radios) || []).some((r) => r.state === "ok" && !SERVICES.has(r.label))
         ? "Listening — no traffic" : "No radio is receiving",
   });
 }

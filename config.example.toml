@@ -101,8 +101,16 @@ monitor_departments = ["Port Chester FD"]   # a 60 Control page for these -> an 
 # the Port Chester FD pair from data/westchester_tones.csv (RadioReference wiki, not yet heard on the
 # air). Set to the tones PCFD members' pagers/radios actually alert on before transmit is ever enabled.
 tones = [[349.1, 1.0], [311.1, 3.0]]
-voice = "Samantha"                 # macOS `say -v` voice (`say -v '?'` lists them)
-rate = 0                           # words per minute (0 = the voice's own pace)
+# The voice: Kokoro-82M, a local neural text-to-speech model, run by sizeup on 127.0.0.1:tts_port (CPU).
+# Set it up once with tools/setup_tts.sh (~1.3 GB in ~/.local/share/sizeup/tts). While its server is
+# down, erroring or slower than 10 s, dispatches use macOS `say` with fallback_voice (noted on each one).
+tts_engine = "kokoro"              # "kokoro" | "say" (macOS `say` only, with `voice` a `say -v` voice)
+voice = "af_heart"                 # Kokoro voice: af_/am_ American, bf_/bm_ British (GET /api/cad/tts/voices)
+speed = 0.92                       # Kokoro speaking speed, 0.5-2.0 (1.0 = the voice's own pace)
+tts_port = 8093
+fallback_voice = "Samantha"        # macOS `say -v` voice (`say -v '?'` lists them)
+# tts_python = "~/.local/share/sizeup/tts/venv/bin/python"   # the default
+rate = 0                           # `say` words per minute (0 = the voice's own pace)
 repeat = 2                         # the voice part read this many times
 # Transmit stays OFF in this version: there is no radio interface yet (M2: a sound-card + PTT
 # interface into a PCFD radio, with the department's authorization). "Dispatch" logs what would
