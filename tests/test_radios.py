@@ -249,7 +249,9 @@ def test_traffic_links_to_the_event_while_the_unit_is_on_it_and_not_after(tmp_pa
     a = _event_with(c, ["E63", "E60"], clock)
     clock.t += 10
     assert c.record_traffic(tx("FG1-2", clock.t, rig="E63", radio_id="6301")) == [a["id"]]
-    assert c.record_traffic(tx("FG1-3", clock.t + 1)) == [a["id"]]                     # FG1, no ID: the active event
+    assert c.record_traffic(tx("FG1-3", clock.t + 1)) == [a["id"]]                     # FG1, no ID, one call: that one
+    # A known radio that isn't a rig on the call (9231 = South End Firehouse mobile) is never attached.
+    assert c.record_traffic(tx("FG1-9231", clock.t + 1.5, radio_id="9231")) == []
     assert c.record_traffic(tx("307-9-call_4-t1", clock.t + 2, "Fire/EMS 15", "E60", "E60", 307)) == [a["id"]]
     assert c.record_traffic(tx("307-9-call_4-t0", clock.t + 1, "Fire/EMS 15", "", "60 Ctrl OP 6", 307)) == [a["id"]]
     assert c.record_traffic(tx("307-9-call_4-t2", clock.t + 4, "Fire/EMS 15", "", "60 Ctrl OP 6", 307)) == [a["id"]]
@@ -259,19 +261,19 @@ def test_traffic_links_to_the_event_while_the_unit_is_on_it_and_not_after(tmp_pa
     c.dispatch(b["id"], {"unit_ids": [uid(c, "L31")], "operator": "x"})
     clock.t += 5
     assert c.record_traffic(tx("FG1-4", clock.t, rig="E63")) == [a["id"]]             # its unit's event only
-    assert sorted(c.record_traffic(tx("FG1-5", clock.t + 1))) == [a["id"], b["id"]]   # unknown radio: both
+    assert c.record_traffic(tx("FG1-5", clock.t + 1)) == []                           # unknown radio, two calls: neither
     # E63 clears (back in service): its later traffic is no longer on the event.
     clock.t += 10
     c.unit_status(uid(c, "E63"), {"status": "AVAILABLE"})
     clock.t += 1
-    assert c.record_traffic(tx("FG1-6", clock.t, rig="E63")) == [a["id"], b["id"]]   # FG1 still in use by both
+    assert c.record_traffic(tx("FG1-6", clock.t, rig="E63")) == []                    # cleared: on no event
     c.close(a["id"], {"disposition": c.lists.disposition_codes[0]})
     c.close(b["id"], {"disposition": c.lists.disposition_codes[0]})
     clock.t += 1
     assert c.record_traffic(tx("FG1-7", clock.t, rig="E63")) == []
     radio = {r["id"]: r["why"] for r in c.full(a["id"])["radio"]}
     assert radio == {"FG1-2": "unit", "FG1-3": "channel", "307-9-call_4-t1": "unit", "307-9-call_4-t0": "dispatcher",
-                     "307-9-call_4-t2": "dispatcher", "FG1-4": "unit", "FG1-5": "channel", "FG1-6": "channel"}
+                     "307-9-call_4-t2": "dispatcher", "FG1-4": "unit"}
     # The dispatcher's turn can arrive first: linked when the unit's turn is linked.
     d = _event_with(c, ["R40"], clock)
     clock.t += 1
@@ -285,7 +287,7 @@ def test_traffic_links_to_the_event_while_the_unit_is_on_it_and_not_after(tmp_pa
     c2 = cad(tmp_path, clock)
     rows = {r["id"]: r for r in c2.full(a["id"])["radio"]}
     assert rows["FG1-2"]["text"] == "Engine 63 on location" and rows["FG1-2"]["rig"] == "E63"
-    assert rows["FG1-2"]["radio_id"] == "6301" and len(rows) == 8
+    assert rows["FG1-2"]["radio_id"] == "6301" and len(rows) == 6
     assert c2.state()["incidents"][0]["radio"] or any(i["radio"] for i in c2.state()["incidents"])
 
 
@@ -306,7 +308,7 @@ def test_comms_api_filters(tmp_path):
     assert set(all_["channels"]) == {"FG1", "Fire/EMS 15", "Notes"} and {"E63", "77A4", "E60", "E14"} <= set(all_["rigs"])
     assert [r["id"] for r in get("unit=E63")["rows"]] == ["FG1-1"]
     assert [r["id"] for r in get("channel=Fire%2FEMS+15")["rows"]] == ["307-2-call_1", "307-1-call_1"]
-    assert [r["id"] for r in get(f"event={a['number']}")["rows"]] == ["FG1-2", "FG1-1"]   # E14 not on it: FG1 in use
+    assert [r["id"] for r in get(f"event={a['number']}")["rows"]] == ["FG1-1"]   # E14 (known radio) is not on it
     assert [r["id"] for r in get("pcfd=1")["rows"]] == ["307-2-call_1", "FG1-1"]
     assert [r["id"] for r in get(f"since={clock.t + 0.5}&until={clock.t + 1.5}")["rows"]] == ["307-1-call_1"]
     assert get(f"rev={all_['rev']}")["unchanged"] is True
@@ -421,3 +423,19 @@ def test_unit_tagged_notes_are_stored_exported_and_merge_with_radio(tmp_path):
     assert [r["kind"] for r in get("channel=Notes")["rows"]] == ["note", "note"]
     assert [r["kind"] for r in get("type=radio")["rows"]] == ["radio"]
     assert get("pcfd=1")["rows"][0]["events"][0]["number"] == a["number"]
+
+
+def test_old_channel_links_of_known_radios_are_dropped(tmp_path):
+    # Links made by the earlier rule (a known radio, or one transmission on two calls) go on restart.
+    clock = Clock()
+    c = cad(tmp_path, clock)
+    a = _event_with(c, ["E63"], clock)
+    clock.t += 5
+    c.record_traffic(tx("FG1-u", clock.t))                                   # unknown radio, one call: kept
+    with c.store.tx() as db:
+        db.execute("INSERT INTO radio_traffic (id, start, end, channel, radio_id, rig, text, status, updated_at) "
+                   "VALUES ('FG1-k', ?, ?, 'FG1', '9231', '', '', 'no_speech', ?)", (clock.t, clock.t, clock.t))
+        db.execute("INSERT INTO radio_links (traffic_id, incident_id, why, unit) VALUES ('FG1-k', ?, 'channel', '')", (a["id"],))
+    from sizeup.cad.comms import Comms
+    Comms(c.store)
+    assert {r["id"] for r in c.full(a["id"])["radio"]} == {"FG1-u"}

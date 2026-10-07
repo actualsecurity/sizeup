@@ -6,8 +6,11 @@
     radio_links     transmission x event, and why:
                       unit        from a radio of a unit assigned to the event (dispatched or
                                   attached, until it cleared) at the time of the transmission
-                      channel     on the event's tactical channel (FG1) while the event had units on
-                                  it, when no assigned unit claims the transmission for one event
+                      channel     an UNIDENTIFIED radio (no ID decoded) on the tactical channel (FG1)
+                                  while exactly one emergency event had units on it. A known radio
+                                  (any decoded ID: a rig, or e.g. 9231 the South End mobile) links
+                                  only to events its rig is on (user, 2026-10-07: "why did this one
+                                  get added to this call? it wasn't dispatched to that call").
                       dispatcher  a 60 Control turn right before or after a linked unit's turn in the
                                   same P25 call on an incident talkgroup (Fire/EMS 15)
 
@@ -42,6 +45,18 @@ class Comms:
         self.store, self.clock = store, clock
         self.tactical, self.incident_tgs = set(tactical), set(incident_tgs)
         self.rev = 0            # bumped on every new or changed transmission (the /comms page polls it)
+        self._drop_bad_channel_links()
+
+    def _drop_bad_channel_links(self) -> None:
+        """Links the old channel rule made: a known radio, or one transmission on several events."""
+        try:
+            with self.store.tx() as db:
+                db.execute("DELETE FROM radio_links WHERE why = 'channel' AND traffic_id IN "
+                           "(SELECT id FROM radio_traffic WHERE radio_id != '' OR rig != '')")
+                db.execute("DELETE FROM radio_links WHERE why = 'channel' AND traffic_id IN "
+                           "(SELECT traffic_id FROM radio_links WHERE why = 'channel' GROUP BY traffic_id HAVING COUNT(*) > 1)")
+        except Exception:
+            pass                # no comms tables yet (a fresh store migrates first)
 
     # -- writing --------------------------------------------------------------------------------
 
@@ -76,9 +91,11 @@ class Comms:
             for rig in rigs:
                 for r in db.execute(self.ON_EVENT_BY_UNIT, (rig, start, start)).fetchall():
                     links.setdefault(r["incident_id"], ("unit", rig))
-            if not links and (t.get("source") or "") in self.tactical:
-                for r in db.execute(self.ACTIVE_EVENTS, (start, start)).fetchall():
-                    links.setdefault(r["incident_id"], ("channel", ""))
+            known = bool(rigs) or bool(t.get("radio_id"))
+            if not links and not known and (t.get("source") or "") in self.tactical:
+                active = db.execute(self.ACTIVE_EVENTS, (start, start)).fetchall()
+                if len(active) == 1:            # two calls on FG1: can't tell whose it is
+                    links[active[0]["incident_id"]] = ("channel", "")
             for iid, (why, unit) in links.items():
                 db.execute("INSERT OR IGNORE INTO radio_links (traffic_id, incident_id, why, unit) VALUES (?, ?, ?, ?)",
                            (tid, iid, why, unit))
