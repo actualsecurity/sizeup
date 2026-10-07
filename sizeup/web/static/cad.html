@@ -14,7 +14,10 @@
   <span class="cad-title">Dispatch</span>
   <span id="conn" class="pill warn">connecting…</span>
   <span id="tx-pill" class="pill tx-off" title="No radio interface in this version: dispatches are logged and played in the browser only">Transmit off</span>
+  <span id="talking" class="talking-strip" hidden aria-live="polite"></span>
   <span class="spacer"></span>
+  <span id="alerts"></span>
+  <button id="radios-open" class="tg-open" title="Radio IDs → rigs: which radio is on which unit (confirmed, guessed, heard)">📻 Radios</button>
   <button id="runcards-open" class="tg-open" title="Edit which units each event type sends">⚙ Run cards</button>
   <button id="records-open" class="tg-open" title="Every event, CSV exports (the sheet's columns), counts">Records</button>
   <button id="lists-open" class="tg-open" title="Types, subtypes, dispositions, unit statuses (data/cad_lists.json)">Lists</button>
@@ -22,6 +25,7 @@
     <span class="dim">Operator</span>
     <input id="operator" type="text" maxlength="60" autocomplete="off" spellcheck="false" placeholder="your name">
   </label>
+  <a class="nav" href="/comms" title="Every transmission: unit, radio ID, channel, event, transcript">Comms →</a>
   <a class="nav" href="/" title="The radio monitor (map, pages, traffic)">Monitor →</a>
   <span id="clock" class="clock"><b id="clock-local"></b></span>
 </header>
@@ -233,12 +237,27 @@
         <ol id="d-dispatches" class="list"></ol>
       </div>
 
+      <div id="d-radio-card" class="card">
+        <div class="card-head"><h2>Radio traffic &amp; unit notes</h2>
+          <span id="d-radio-sum" class="dim small"></span>
+          <span class="spacer"></span>
+          <a id="d-radio-all" class="nav" href="/comms" title="This incident's traffic on the communications page">All on Comms →</a>
+        </div>
+        <div id="d-radio-units" class="row unit-filter" role="group" aria-label="Show one unit"></div>
+        <ol id="d-radio" class="list log radio-log"></ol>
+      </div>
+
       <div class="card">
         <div class="card-head"><h2>Timeline</h2></div>
         <ol id="d-events" class="list events"></ol>
         <form id="note-form" class="row note" autocomplete="off">
-          <input id="note-text" type="text" maxlength="2000" placeholder="Add a note to the timeline">
+          <div class="note-box">
+            <input id="note-text" type="text" maxlength="2000" placeholder="Add a note · type a unit (E63) and Tab to tag who said it"
+                   role="combobox" aria-autocomplete="list" aria-controls="note-sugg" aria-expanded="false">
+            <ol id="note-sugg" class="sugg note-sugg" role="listbox" hidden></ol>
+          </div>
           <button id="note-add" type="submit">Add note</button>
+          <div id="note-tags" class="note-tags" hidden></div>
         </form>
       </div>
     </div>
@@ -320,8 +339,22 @@
   </div>
 </div>
 
+<div id="radios-overlay" class="overlay" hidden>
+  <div class="tg-panel radios-dialog" role="dialog" aria-modal="true" aria-labelledby="radios-title">
+    <div class="tg-head">
+      <h2 id="radios-title" class="tg-title">Radios</h2>
+      <span class="dim small">radio ID → rig</span>
+      <span class="spacer"></span>
+      <button id="radios-close" class="tg-close" title="Close (Esc)" aria-label="Close">✕</button>
+    </div>
+    <div id="radios-mount" class="radios-mount"></div>
+  </div>
+</div>
+
 <script src="/static/vendor/maplibre-gl.js"></script>
 <script src="/static/map-style.js"></script>
+<script src="/static/radio.js"></script>
+<script src="/static/radios-panel.js"></script>
 <script src="/static/cad.js"></script>
 </body>
 </html>

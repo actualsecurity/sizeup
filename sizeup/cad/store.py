@@ -118,7 +118,8 @@ CREATE TABLE events (
   at REAL NOT NULL,
   kind TEXT NOT NULL,                   -- created | system | accepted | dismissed | note | dispatch | attach | status | closed | edit
   text TEXT NOT NULL,
-  operator TEXT NOT NULL DEFAULT ''
+  operator TEXT NOT NULL DEFAULT '',
+  units TEXT NOT NULL DEFAULT ''        -- a note's unit tags ("E63,L31": who said it), typed with the unit autocomplete
 );
 CREATE INDEX events_incident ON events(incident_id);
 CREATE TABLE unit_history (           -- every unit status change (the sheet's Unit History)
@@ -160,13 +161,8 @@ CREATE TABLE IF NOT EXISTS radios (
   updated_at REAL NOT NULL,
   PRIMARY KEY (system, radio_id)
 );
-CREATE TABLE IF NOT EXISTS settings_audit (   -- every change made in Settings: who, what, old -> new
-  id INTEGER PRIMARY KEY, at REAL NOT NULL, operator TEXT NOT NULL DEFAULT '',
-  section TEXT NOT NULL,                -- radios | lists | run cards | units | ... (Settings sections)
-  key TEXT NOT NULL,                    -- what changed in it: "mdc:0611/unit", "mdc:0611" (added / removed)
-  old TEXT NOT NULL DEFAULT '', new TEXT NOT NULL DEFAULT ''
-);
-CREATE INDEX IF NOT EXISTS settings_audit_section ON settings_audit(section, at);
+-- every change made in Settings: who, which section, what key, old -> new (shared with the settings branch: same shape)
+CREATE TABLE IF NOT EXISTS settings_audit (id INTEGER PRIMARY KEY, at REAL NOT NULL, operator TEXT, section TEXT NOT NULL, key TEXT, old TEXT, new TEXT);
 CREATE TABLE IF NOT EXISTS radio_traffic (
   id TEXT PRIMARY KEY,                  -- the monitor's clip id (/api/audio/<id>.wav while the audio is kept)
   call_id TEXT NOT NULL DEFAULT '',     -- P25: the call it was cut from, and the talker turn
@@ -275,6 +271,8 @@ class Store:
     def _v3_to_v4(self, db) -> None:
         """Radio IDs, the communications log and its links to events; assignments.assigned_at
         (old rows: when dispatched, else when the event was accepted)."""
+        if "units" not in {r["name"] for r in db.execute("PRAGMA table_info(events)")}:
+            db.execute("ALTER TABLE events ADD COLUMN units TEXT NOT NULL DEFAULT ''")
         cols = {r["name"] for r in db.execute("PRAGMA table_info(assignments)")}
         if "assigned_at" not in cols:
             db.execute("ALTER TABLE assignments ADD COLUMN assigned_at REAL")
@@ -371,9 +369,9 @@ class Store:
         rows = self.q(sql, args)
         return rows[0] if rows else None
 
-    def _event(self, db, iid, kind: str, text: str, operator: str = "", uid=None, at=None) -> None:
-        db.execute("INSERT INTO events (incident_id, unit_id, at, kind, text, operator) VALUES (?, ?, ?, ?, ?, ?)",
-                   (iid, uid, self.clock() if at is None else at, kind, text, operator))
+    def _event(self, db, iid, kind: str, text: str, operator: str = "", uid=None, at=None, units: str = "") -> None:
+        db.execute("INSERT INTO events (incident_id, unit_id, at, kind, text, operator, units) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                   (iid, uid, self.clock() if at is None else at, kind, text, operator, units))
 
     def _history(self, db, uid: int, old: str, new: str, iid, operator: str, at: float, note: str = "") -> None:
         db.execute("INSERT INTO unit_history (at, unit_id, old_status, new_status, incident_id, operator, note) "
@@ -625,11 +623,11 @@ class Store:
                         + (f"; cleared {names}" if names else ""), operator, at=now)
         return self.incident(iid)
 
-    def note(self, iid: int, text: str, operator: str = "", kind: str = "note") -> None:
+    def note(self, iid: int, text: str, operator: str = "", kind: str = "note", units: list[str] | tuple = ()) -> None:
         """A chronology entry: an operator's comment (note), or kind 'upgrade'."""
         self.incident(iid)
         with self.tx() as db:
-            self._event(db, iid, kind, text, operator)
+            self._event(db, iid, kind, text, operator, units=",".join(units))
 
     def has_dispatch(self, iid: int) -> bool:
         return self.one("SELECT 1 AS x FROM dispatches WHERE incident_id = ? LIMIT 1", (iid,)) is not None
@@ -698,6 +696,7 @@ class Store:
                       f"transmitted, channel, tx_note FROM dispatches WHERE incident_id IN ({marks}) ORDER BY at", ids)
         by = {r["id"]: dict(r, emergency=bool(r["emergency"]), assignments=[], events=[], dispatches=[]) for r in rows}
         for a in assigns:
+            a["next"] = [] if a["cleared_at"] else list(self.lists.next_statuses(a["status"]))   # the row's buttons
             by[a["incident_id"]]["assignments"].append(a)
         for e in events:
             by[e["incident_id"]]["events"].append(e)

@@ -303,7 +303,7 @@ def test_comms_api_filters(tmp_path):
     all_ = get("")
     assert [r["id"] for r in all_["rows"]] == ["FG1-2", "307-2-call_1", "307-1-call_1", "FG1-1"]   # newest first
     assert all_["rows"][-1]["events"][0]["number"] == a["number"] and all_["rows"][-1]["has_audio"] is False
-    assert set(all_["channels"]) == {"FG1", "Fire/EMS 15"} and {"E63", "77A4", "E60", "E14"} <= set(all_["rigs"])
+    assert set(all_["channels"]) == {"FG1", "Fire/EMS 15", "Notes"} and {"E63", "77A4", "E60", "E14"} <= set(all_["rigs"])
     assert [r["id"] for r in get("unit=E63")["rows"]] == ["FG1-1"]
     assert [r["id"] for r in get("channel=Fire%2FEMS+15")["rows"]] == ["307-2-call_1", "307-1-call_1"]
     assert [r["id"] for r in get(f"event={a['number']}")["rows"]] == ["FG1-2", "FG1-1"]   # E14 not on it: FG1 in use
@@ -342,3 +342,82 @@ def test_plan_is_data_driven():
             "pattern_kinds": ["engine", "rescue"]}
     p = plan(seed, units)
     assert sorted(p["guesses"]) == ["7001", "7002"] and {x["unit"] for x in p["unfit"]} == {"E7", "R7"}
+
+
+def test_units_on_an_incident_are_offered_only_the_next_steps():
+    # User: "we should only be able to click the 'next up' options" (cad_lists.json status_flow).
+    c = cad()
+    clock_inc = c.create({"type": "STRU", "address": "1 Main St"})
+    c.dispatch(clock_inc["id"], {"unit_ids": [uid(c, "E63")], "operator": "x"})
+    nxt = lambda: next(a["next"] for a in c.full(clock_inc["id"])["assignments"] if a["name"] == "E63")
+    assert nxt() == ["RESPONDING", "ON LOCATION", "AVAILABLE", "OUT OF SERVICE"]
+    c.unit_status(uid(c, "E63"), {"status": "ACKNOWLEDGED"})
+    assert nxt() == ["RESPONDING", "ON LOCATION", "AVAILABLE", "OUT OF SERVICE"]
+    c.unit_status(uid(c, "E63"), {"status": "RESPONDING"})
+    assert nxt() == ["ON LOCATION", "AVAILABLE", "OUT OF SERVICE"]
+    c.unit_status(uid(c, "E63"), {"status": "ON LOCATION"})
+    assert nxt() == ["AVAILABLE", "OUT OF SERVICE"]
+    c.unit_status(uid(c, "E63"), {"status": "DISPATCH OTHER"})        # the API still takes any status (the board)
+    assert nxt() == ["AVAILABLE", "OUT OF SERVICE"]
+    for a in c.state()["incidents"][0]["assignments"]:
+        assert not {"DISPATCHED", "DISPATCH OTHER", "ACKNOWLEDGED", "UNMANNED"} & set(a["next"])
+    assert c.state()["lists"]["status_flow"]["RESPONDING"] == ["ON LOCATION", "AVAILABLE", "OUT OF SERVICE"]
+    c.unit_status(uid(c, "E63"), {"status": "AVAILABLE"})              # clears it off the event
+    a = next(a for a in c.full(clock_inc["id"])["assignments"] if a["name"] == "E63")
+    assert a["cleared_at"] and a["next"] == []
+
+
+def test_unit_tag_autocomplete_order_and_prefixes():
+    # User: start typing "E..E6...E63" in the comment box and tab-select the unit.
+    c = cad()
+    inc = c.create({"type": "STRU", "address": "1 Main St"})
+    c.dispatch(inc["id"], {"unit_ids": [uid(c, "E63"), uid(c, "L31")], "operator": "x"})
+    s = lambda q: c.suggest_units(inc["id"], q)
+    assert s("E6") == ["E63", "E60", "E61", "E62", "E64"]                    # on the event first, then board order
+    assert s("e6") == s("E6") and s("E63") == ["E63"] and s("") == []
+    assert s("E")[:2] == ["E63", "E59"] and "E14" in s("E1")                  # Rye Brook's engine is a fire unit
+    assert s("L3") == ["L31", "L30"]
+    assert s("23") == ["2391", "2392", "2393", "2395", "2398"]
+    assert s("77A")[:3] == ["77A1", "77A2", "77A3"]                           # EMS: after the fire units
+    order = c.tag_order(inc["id"])
+    assert order.index("U239") < order.index("PCPD") < order.index("77A1")    # fire, then police / EMS / agencies
+    assert c.state()["incidents"][0]["tag_units"][:2] == ["E63", "L31"]
+    got = json.loads(CadApi(c).get(f"/api/cad/incident/{inc['id']}/units", "q=e6")[1])
+    assert got["units"][0] == "E63"
+
+
+def test_unit_tagged_notes_are_stored_exported_and_merge_with_radio(tmp_path):
+    clock = Clock()
+    c = cad(tmp_path, clock)
+    a = _event_with(c, ["E63", "L31"], clock)
+    api = CadApi(c)
+    clock.t += 5
+    c.record_traffic(tx("FG1-1", clock.t, rig="E63", radio_id="6301", text="Engine 63 on location"))
+    clock.t += 5
+    code, body, _ = api.post(f"/api/cad/incident/{a['id']}/note", json.dumps({
+        "text": "E63 stated that the building manager is not able to access the basement",
+        "units": ["e63"], "operator": "Lt. Ruiz"}).encode())
+    assert code == 200 and json.loads(body)["units"] == ["E63"]
+    clock.t += 5
+    api.post(f"/api/cad/incident/{a['id']}/note", json.dumps({"text": "E63 and L31 report all clear",
+                                                             "units": ["E63", "L31"]}).encode())
+    api.post(f"/api/cad/incident/{a['id']}/note", json.dumps({"text": "Con Ed notified"}).encode())
+    code, body, _ = api.post(f"/api/cad/incident/{a['id']}/note", json.dumps({"text": "x", "units": ["Q9"]}).encode())
+    assert code == 400
+    notes = [e for e in c.full(a["id"])["events"] if e["kind"] == "note"]
+    assert [(n["units"], n["text"][:8]) for n in notes] == [("E63", "E63 stat"), ("E63,L31", "E63 and "), ("", "Con Ed n")]
+    # The event-log CSV: the note's unit tags in the Unit column.
+    import csv as _csv, io as _io
+    log = list(_csv.DictReader(_io.StringIO(c.export("event-log.csv").decode())))
+    units = {r["Event / Comment"][:14]: r["Unit"] for r in log}
+    assert units["E63 stated tha"] == "E63" and units["E63 and L31 re"] == "E63, L31" and units["Con Ed notifie"] == ""
+    # /comms: E63's typed notes with its transmissions, newest first; type=notes / channel Notes.
+    get = lambda q: json.loads(api.get("/api/cad/comms", q)[1])
+    rows = get(f"unit=E63&event={a['number']}")["rows"]
+    assert [(r["kind"], r["text"][:10]) for r in rows] == [("note", "E63 and L3"), ("note", "E63 stated"),
+                                                          ("radio", "Engine 63 ")]
+    assert [r["kind"] for r in get("unit=L31")["rows"]] == ["note"]
+    assert all(r["kind"] == "note" for r in get("type=notes")["rows"]) and len(get("type=notes")["rows"]) == 2
+    assert [r["kind"] for r in get("channel=Notes")["rows"]] == ["note", "note"]
+    assert [r["kind"] for r in get("type=radio")["rows"]] == ["radio"]
+    assert get("pcfd=1")["rows"][0]["events"][0]["number"] == a["number"]

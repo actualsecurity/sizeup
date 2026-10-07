@@ -448,8 +448,125 @@ function renderDetail() {
   show($("#d-dispatch"), open && !!inc.emergency);
   renderDispatchBox(inc);
   renderDispatches(inc);
+  renderRadio(inc);
   renderEvents(inc);
 }
+
+// ---- the incident's radio traffic (sizeup/cad/comms.py) ------------------------------------------
+// Every transmission from a radio on a unit assigned to it (dispatched / attached until it cleared),
+// FG1 while it had units on it, and 60 Control's turns answering those units in the same P25 call.
+
+const RADIO_WHY = { unit: "unit", channel: "FG1", dispatcher: "60 Control" };
+function radioRow(t) {
+  const li = el("li", "rt");
+  const meta = el("div", "meta");
+  const b = el("button", "play", "▶");
+  b.title = t.has_audio === false ? "Recording no longer kept (12 h)" : "Play this transmission";
+  b.disabled = t.has_audio === false;
+  b.addEventListener("click", () => play(`/api/audio/${encodeURIComponent(t.id)}.wav`));
+  const rr = el("button", "rerun", "↻");
+  rr.title = "Run speech-to-text again on this recording";
+  rr.disabled = t.has_audio === false;
+  rr.addEventListener("click", async () => {
+    rr.disabled = true;
+    setText(rr, "…");
+    try {
+      const r = await fetch("/api/retranscribe", { method: "POST", headers: { "Content-Type": "application/json" },
+                                                   body: JSON.stringify({ ids: [t.id] }) });
+      if (!r.ok || !(await r.json()).queued) { setText(rr, "↻"); rr.disabled = false; rr.title = "Nothing to re-run"; }
+    } catch (e) { setText(rr, "↻"); rr.disabled = false; }
+  });
+  meta.append(b, rr, el("span", "t", fmtTime(t.start, true)));
+  const tag = Radio.rigTag({ rig: t.rig, radio_id: t.radio_id, unit: t.talker });
+  if (tag) meta.append(tag);
+  meta.append(el("span", "chip src", t.channel));
+  if (t.why) {
+    const w = el("span", `why ${t.why}`, RADIO_WHY[t.why] || t.why);
+    w.title = t.why === "unit" ? `${t.link_unit || t.rig} was on this incident` : t.why === "channel"
+      ? "On the incident's fireground channel while it had units on it" : `60 Control answering ${t.link_unit || "a unit on it"} in the same call`;
+    meta.append(w);
+  }
+  if (t.end > t.start) meta.append(el("span", "dim", `${Math.round(t.end - t.start)} s`));
+  const said = t.status === "no_speech" ? "key-up · no speech" : t.status === "pending" ? "transcribing…" : "(no words)";
+  li.append(meta, el("div", "txt" + (t.text ? "" : " muted"), t.text || said));
+  li.classList.toggle("from-dispatch", !!t.dispatcher);
+  return li;
+}
+// A note tagged with units ("E63 stated that ..."), as a row among the transmissions.
+function noteRow(e) {
+  const li = el("li", "rt note");
+  const meta = el("div", "meta");
+  meta.append(el("span", "t", fmtTime(e.at, true)), el("span", "ek note", "note"));
+  for (const u of tagsOf(e)) meta.append(unitChip(u));
+  if (e.operator) meta.append(el("span", "", `· ${e.operator}`));
+  li.append(meta, el("div", "txt", noteText(e)));
+  return li;
+}
+const tagsOf = (e) => (e.units || "").split(",").filter(Boolean);
+function unitChip(u) {
+  const c = el("button", "unit-tag", u);
+  c.type = "button";
+  c.title = `Show only ${u}: its notes and its radio traffic`;
+  c.dataset.unitFilter = u;
+  if (Radio.talkingFor(u)) c.classList.add("talking");
+  return c;
+}
+// "E63 stated that ..." tagged E63 reads "E63 · stated that ...": the tag chip, then the rest.
+function noteText(e) {
+  const tags = tagsOf(e), m = (e.text || "").match(/^(\S+)\s+(.*)$/s);
+  return m && tags.some((u) => u.toLowerCase() === m[1].toLowerCase()) ? m[2] : e.text;
+}
+function renderRadio(inc) {
+  const rows = inc.radio;
+  show($("#d-radio-card"), Array.isArray(rows));
+  if (!Array.isArray(rows)) return;               // a server without the communications log
+  if (cad.radioFor !== inc.id) { cad.radioFor = inc.id; cad.radioUnit = ""; }
+  const notes = (inc.events || []).filter((e) => e.kind === "note" && e.units);
+  const items = [...rows.map((t) => ({ kind: "radio", at: t.start, key: `r:${t.id}`, units: (t.rig || "").split(/,\s*/).filter(Boolean), t })),
+                 ...notes.map((e) => ({ kind: "note", at: e.at, key: `n:${e.id}`, units: tagsOf(e), e }))]
+    .sort((a, b) => b.at - a.at);
+  const assigned = (inc.assignments || []).map((a) => a.name);
+  const all = [...new Set([...assigned, ...items.flatMap((x) => x.units)])];
+  const u = cad.radioUnit;
+  const shownItems = u ? items.filter((x) => x.units.includes(u)) : items;
+  const nr = items.filter((x) => x.kind === "radio").length, nn = items.length - nr;
+  setText($("#d-radio-sum"), [nr ? `${nr} transmission${nr === 1 ? "" : "s"}` : "", nn ? `${nn} unit note${nn === 1 ? "" : "s"}` : ""]
+    .filter(Boolean).join(" · "));
+  $("#d-radio-all").href = `/comms?event=${encodeURIComponent(inc.number || inc.id)}` + (u ? `&unit=${encodeURIComponent(u)}` : "");
+  const bar = $("#d-radio-units"), sig = JSON.stringify([all, u, all.map(talkSig)]);
+  if (bar._sig !== sig) {
+    bar._sig = sig;
+    const mk = (code, text) => {
+      const b = el("button", "mini uf" + (code === u ? " on" : "") + (code && Radio.talkingFor(code) ? " talking" : ""), text);
+      b.type = "button";
+      b.dataset.unitFilter = code;
+      b.setAttribute("aria-pressed", String(code === u));
+      return b;
+    };
+    bar.replaceChildren(mk("", "All"), ...all.map((c) => mk(c, c)));
+    show(bar, all.length > 0);
+  }
+  syncList($("#d-radio"), shownItems, {
+    key: (x) => x.key,
+    sig: (x) => x.kind === "radio" ? JSON.stringify([x.t.text, x.t.status, x.t.rig, x.t.why, x.t.has_audio, talkSig(x.t.rig)])
+      : JSON.stringify([x.e.text, x.e.units]),
+    make: () => el("li"),
+    fill: (li, x) => {
+      const n = x.kind === "radio" ? radioRow(x.t) : noteRow(x.e);
+      li.className = n.className;
+      li.replaceChildren(...n.childNodes);
+    },
+    empty: u ? `Nothing from ${u} on this incident yet` : isOpen(inc) ? "No radio traffic or unit notes yet"
+      : "No radio traffic was linked to it",
+  });
+}
+document.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-unit-filter]");
+  if (!b || !b.closest("#d-body")) return;
+  cad.radioUnit = cad.radioUnit === b.dataset.unitFilter ? "" : b.dataset.unitFilter;
+  renderRadio(selected());
+  $("#d-radio-card").scrollIntoView({ behavior: "smooth", block: "nearest" });
+});
 
 // Status buttons (the old console's): one per status in the data file; out of service and
 // unmanned ask why first (optional), right there.
@@ -482,7 +599,7 @@ function statusButtons(u, where) {
     setTimeout(() => { if (document.activeElement !== input) input.focus(); }, 0);
     return box;
   }
-  for (const s of (L().unit_statuses || [])) {
+  for (const s of statusChoices(u, where)) {
     if (where === "inc" && s.code === u.status) continue;
     const b = el("button", "mini" + (s.code === u.status ? " on" : ""), s.name);
     b.style.setProperty("--c", s.bg || "#9aa0b4");
@@ -497,11 +614,27 @@ function statusButtons(u, where) {
   return box;
 }
 
+// On an incident only the next steps (cad_lists.json status_flow, sent per assignment as `next`):
+// Dispatched -> Responding, On location, Available, Out of service ... The board offers every status.
+function statusChoices(u, where) {
+  const all = L().unit_statuses || [];
+  if (where !== "inc") return all;
+  const flow = L().status_flow || {};
+  const next = u.next || flow[u.status] || flow["*"];
+  if (!next) return all;                               // a server without the flow: as before
+  return next.map((c) => all.find((s) => s.code === c)).filter(Boolean);
+}
+function talkSig(name) {
+  const t = Radio.talkingFor(name);
+  return t ? `${t.key}|${t.ended ? 1 : 0}` : "";
+}
+
 function renderOnUnits(inc) {
   const rows = (inc.assignments || []).slice().sort((a, b) => (!!a.cleared_at - !!b.cleared_at));
   syncList($("#d-units"), rows, {
     key: (a) => String(a.id),
     sig: (a) => JSON.stringify([a.status, a.dispatched_at, a.enroute_at, a.onscene_at, a.cleared_at, cad.listSig.length,
+      (a.next || []).join(), talkSig(a.name),
       cad.ask && cad.ask.uid === a.unit_id && cad.ask.where === "inc" ? cad.ask.status : null]),
     make: () => el("li", "ou"),
     fill: (li, a) => {
@@ -513,7 +646,9 @@ function renderOnUnits(inc) {
         [["disp", a.dispatched_at], ["resp", a.enroute_at], ["on loc", a.onscene_at], ["cleared", a.cleared_at]]
           .filter(([, t]) => t).map(([k, t]) => `${k} ${fmtTime(t, true)}`).join(" · "));
       head.append(times, el("span", "spacer"));
-      if (!a.cleared_at && isOpen(inc)) head.append(statusButtons({ id: a.unit_id, status: a.status }, "inc"));
+      const talk = !a.cleared_at && Radio.talkingFor(a.name);
+      if (talk) head.append(el("span", "talk-badge", `📻 ${talk.ended ? "just transmitted" : "talking"} · ${talk.channel}`));
+      if (!a.cleared_at && isOpen(inc)) head.append(statusButtons({ id: a.unit_id, status: a.status, next: a.next }, "inc"));
       li.replaceChildren(head);
     },
     empty: inc.status === "queued" ? "None: accept, then dispatch" : "No units on this incident",
@@ -529,7 +664,7 @@ const EVENT_KINDS = { note: "comment", status: "status", system: "system", attac
 function renderEvents(inc) {
   syncList($("#d-events"), (inc.events || []).slice().reverse(), {
     key: (e) => String(e.id),
-    sig: (e) => String(e.id),
+    sig: (e) => `${e.id}|${e.units || ""}`,
     make: () => el("li", "ev"),
     fill: (li, e) => {
       const meta = el("div", "meta");
@@ -543,7 +678,10 @@ function renderEvents(inc) {
         b.addEventListener("click", () => play(`/api/cad/dispatch/${did}.wav`));
         txt.append(b);
       }
-      txt.append(document.createTextNode(e.text));
+      if (e.kind === "note" && e.units) {
+        for (const u of tagsOf(e)) txt.append(unitChip(u), document.createTextNode(" "));
+        txt.append(document.createTextNode("· " + noteText(e)));
+      } else txt.append(document.createTextNode(e.text));
       li.replaceChildren(meta, txt);
     },
     empty: "Nothing yet",
@@ -803,6 +941,113 @@ async function upgrade(e, previewOnly) {
       flash($("#u-error"), err.message);
     }
   });
+}
+
+// ---- unit tags in the comment box -------------------------------------------------------------
+// Typing a unit code ("E", "E6", "E63"; any case) offers the units on this incident first, then the
+// fire units, then the rest (the server's order, inc.tag_units). Tab or Enter takes the highlighted
+// one, arrows move, Esc closes. A taken code is a tag: the note is stored with it (who said it).
+// A code typed out in full (E63, L31, 77A4: with a letter) counts as a tag too.
+
+const noteTag = { tags: new Set(), items: [], idx: 0, tok: null };
+function tagOrder(inc) {
+  if (inc && Array.isArray(inc.tag_units)) return inc.tag_units;
+  const on = ((inc && inc.assignments) || []).map((a) => a.name);
+  return [...new Set([...on, ...units().filter((u) => u.board).map((u) => u.name)])];
+}
+function tokenAt(input) {
+  const pos = input.selectionStart ?? input.value.length;
+  const m = input.value.slice(0, pos).match(/([A-Za-z0-9-]+)$/);
+  return m ? { text: m[1], start: pos - m[1].length, end: pos } : null;
+}
+function hideSugg() {
+  const box = $("#note-sugg");
+  noteTag.items = [];
+  show(box, false);
+  $("#note-text").setAttribute("aria-expanded", "false");
+}
+function suggestUnits() {
+  const input = $("#note-text"), tok = tokenAt(input);
+  const order = tagOrder(selected());
+  const items = tok ? order.filter((c) => c.toLowerCase().startsWith(tok.text.toLowerCase())).slice(0, 8) : [];
+  if (!items.length || (items.length === 1 && items[0] === tok.text && noteTag.tags.has(items[0]))) return hideSugg();
+  if (noteTag.items.join() !== items.join()) noteTag.idx = 0;
+  noteTag.items = items;
+  noteTag.tok = tok;
+  const on = new Set(((selected() || {}).assignments || []).filter((a) => !a.cleared_at).map((a) => a.name));
+  const box = $("#note-sugg");
+  box.replaceChildren(...items.map((c, i) => {
+    const li = el("li", i === noteTag.idx ? "on" : "");
+    li.id = `note-sugg-${i}`;
+    li.setAttribute("role", "option");
+    li.setAttribute("aria-selected", String(i === noteTag.idx));
+    li.append(el("b", "", c));
+    const u = units().find((x) => x.name === c);
+    if (on.has(c)) li.append(el("span", "town ours", "on this incident"));
+    else if (u && (u.title || u.department)) li.append(el("span", "dim small", u.title || u.department));
+    li.addEventListener("mousedown", (e) => { e.preventDefault(); takeUnit(c); });
+    return li;
+  }));
+  box.append(el("li", "hint dim small", "Tab or Enter to tag · ↑↓ · Esc"));
+  const fresh = box.hidden;
+  show(box, true);
+  if (fresh) box.scrollIntoView({ block: "nearest" });
+  input.setAttribute("aria-expanded", "true");
+  input.setAttribute("aria-activedescendant", `note-sugg-${noteTag.idx}`);
+}
+function takeUnit(code) {
+  const input = $("#note-text"), tok = noteTag.tok || tokenAt(input);
+  if (!tok) return;
+  const after = input.value.slice(tok.end).replace(/^[A-Za-z0-9-]*/, "");
+  const lead = input.value.slice(0, tok.start) + code + (after.startsWith(" ") ? "" : " ");
+  input.value = lead + after;
+  input.setSelectionRange(lead.length, lead.length);
+  noteTag.tags.add(code);
+  renderNoteTags();
+  hideSugg();
+}
+function noteKeys(e) {
+  if (!noteTag.items.length) return;
+  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    e.preventDefault();
+    noteTag.idx = (noteTag.idx + (e.key === "ArrowDown" ? 1 : -1) + noteTag.items.length) % noteTag.items.length;
+    suggestUnits();
+  } else if (e.key === "Tab" || e.key === "Enter") {
+    e.preventDefault();
+    takeUnit(noteTag.items[noteTag.idx]);
+  } else if (e.key === "Escape") {
+    e.preventDefault();
+    e.stopPropagation();
+    hideSugg();
+  }
+}
+function wordsOf(text) {
+  return new Set((text.match(/[A-Za-z0-9-]+/g) || []).map((w) => w.toUpperCase()));
+}
+function syncNoteTags() {               // a tag whose code was deleted from the text goes; a code typed out in full comes
+  const text = $("#note-text").value, words = wordsOf(text);
+  for (const t of [...noteTag.tags]) if (!words.has(t.toUpperCase())) noteTag.tags.delete(t);
+  const tok = tokenAt($("#note-text"));
+  for (const c of tagOrder(selected())) {
+    if (/[A-Za-z]/.test(c) && words.has(c.toUpperCase()) && !(tok && tok.text.toUpperCase() === c.toUpperCase())) noteTag.tags.add(c);
+  }
+  renderNoteTags();
+}
+function noteUnits(text) {
+  const words = wordsOf(text);
+  return [...noteTag.tags].filter((t) => words.has(t.toUpperCase()));
+}
+function renderNoteTags() {
+  const box = $("#note-tags");
+  const tags = [...noteTag.tags];
+  box.replaceChildren(el("span", "dim small", "Who said it:"), ...tags.map((t) => {
+    const b = el("button", "unit-tag on", `${t} ✕`);
+    b.type = "button";
+    b.title = `Don't tag ${t}`;
+    b.addEventListener("click", () => { noteTag.tags.delete(t); renderNoteTags(); });
+    return b;
+  }));
+  show(box, tags.length > 0);
 }
 
 // ---- non-emergency: attach units --------------------------------------------------------------
@@ -1080,6 +1325,7 @@ function renderUnits() {
     syncList(g.querySelector("ol"), rows, {
       key: (u) => String(u.id),
       sig: (u) => JSON.stringify([u.status, u.status_at, u.incident_number, u.out_of_service, u.spare, cad.openUnit === u.id,
+        talkSig(u.name),
         cad.ask && cad.ask.uid === u.id && cad.ask.where === "board" ? cad.ask.status : null, cad.listSig.length]),
       make: () => {
         const li = el("li", "urow");
@@ -1094,7 +1340,9 @@ function renderUnits() {
       },
       fill: (li, u) => {
         const oos = roleOf(u.status) === "oos";
-        li.className = "urow" + (cad.openUnit === u.id ? " open" : "") + (oos ? " oos" : "");
+        const talk = Radio.talkingFor(u.name);
+        li.className = "urow" + (cad.openUnit === u.id ? " open" : "") + (oos ? " oos" : "")
+          + (talk ? (talk.ended ? " talked" : " talking") : "");
         const head = el("div", "uh");
         const name = el("b", "un", u.name);
         name.title = [u.title, u.spoken && u.spoken !== u.name ? `said "${u.spoken}"` : "", u.department, u.spare ? "spare" : ""]
@@ -1105,6 +1353,11 @@ function renderUnits() {
         else if (u.mutual_aid && u.department) head.append(el("span", "chip dept", u.department));
         if (u.title) head.append(el("span", "utitle dim small", u.title));
         if (u.spare) head.append(el("span", "chip spare", "spare"));
+        if (talk) {
+          const tb = el("span", "talk-badge", `📻 ${talk.ended ? "just transmitted" : "talking"} · ${talk.channel}`);
+          tb.title = [talk.radio_id ? `radio ${talk.radio_id}` : "", talk.label || talk.alias || ""].filter(Boolean).join(" · ");
+          head.append(tb);
+        }
         head.append(el("span", "spacer"), statusChip(u.status), since(el("span", "dim small ut"), u.status_at));
         li.replaceChildren(head);
         const sub = [];
@@ -1368,7 +1621,13 @@ function onState(data) {
   setText($("#tx-note"), tx.enabled ? "" : (tx.note || "Transmit is off") + ".");
   if (changed) cad.dbAt = 0;
   renderConn();
+  renderTalking();
   render();
+}
+
+// Who is talking now: the header strip, the talk alerts, the unit board highlight (radio.js).
+function renderTalking() {
+  Radio.update((cad.state && cad.state.talking) || []);
 }
 
 const newAddr = addressBox($("#f-address"), $("#f-geo"), $("#f-sugg"));
@@ -1433,14 +1692,29 @@ $("#note-form").addEventListener("submit", async (e) => {
   const inc = selected(), input = $("#note-text");
   if (!inc || !input.value.trim()) return;
   try {
-    await api("POST", `/api/cad/incident/${inc.id}/note`, { text: input.value.trim(), operator: operator() });
+    const units = noteUnits(input.value);
+    await api("POST", `/api/cad/incident/${inc.id}/note`, Object.assign({ text: input.value.trim(), operator: operator() },
+                                                                       units.length ? { units } : {}));
     input.value = "";
+    noteTag.tags.clear();
+    renderNoteTags();
+    hideSugg();
     if (cad.extra.has(inc.id)) { cad.extra.set(inc.id, await api("GET", `/api/cad/incident/${inc.id}`)); render(); }
   } catch (err) {
     alert(err.message);
   }
 });
+$("#note-text").addEventListener("input", () => { syncNoteTags(); suggestUnits(); });
+$("#note-text").addEventListener("keydown", noteKeys);
+$("#note-text").addEventListener("blur", () => setTimeout(hideSugg, 150));
+$("#note-text").addEventListener("click", suggestUnits);
 $("#runcards-open").addEventListener("click", openRunCards);
+$("#radios-open").addEventListener("click", () => {
+  openOverlay("#radios-overlay", true);
+  RadiosPanel.mount($("#radios-mount"), { operator });
+});
+$("#radios-close").addEventListener("click", () => openOverlay("#radios-overlay", false));
+Radio.mountAlerts($("#alerts"));
 $("#rc-close").addEventListener("click", () => openOverlay("#rc-overlay", false));
 $("#rc-form").addEventListener("submit", saveCard);
 $("#rc-type").addEventListener("change", () => { fillSubtypes($("#rc-subtype"), $("#rc-type").value, "Any subtype"); rcPlaceholder(); });
@@ -1453,7 +1727,7 @@ $("#records-open").addEventListener("click", () => { openOverlay("#db-overlay", 
 $("#db-close").addEventListener("click", () => openOverlay("#db-overlay", false));
 $("#lists-open").addEventListener("click", () => { openOverlay("#lists-overlay", true); renderLists(); });
 $("#lists-close").addEventListener("click", () => openOverlay("#lists-overlay", false));
-for (const id of ["#rc-overlay", "#db-overlay", "#lists-overlay"]) {
+for (const id of ["#rc-overlay", "#db-overlay", "#lists-overlay", "#radios-overlay"]) {
   $(id).addEventListener("click", (e) => { if (e.target === e.currentTarget) openOverlay(id, false); });
 }
 $("#operator").value = store("sizeup.cad.operator") || "";
@@ -1461,7 +1735,7 @@ $("#operator").addEventListener("input", () => store("sizeup.cad.operator", oper
 window.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
   if (cad.ask) { cad.ask = null; render(); return; }
-  for (const id of ["#rc-overlay", "#db-overlay", "#lists-overlay"]) if (!$(id).hidden) openOverlay(id, false);
+  for (const id of ["#rc-overlay", "#db-overlay", "#lists-overlay", "#radios-overlay"]) if (!$(id).hidden) openOverlay(id, false);
 });
 
 async function boot() {

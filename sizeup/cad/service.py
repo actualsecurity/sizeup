@@ -29,6 +29,7 @@ from sizeup.cad.store import TZ, CadError, Store
 from sizeup.cad.transmit import Transmitter, make_transmitter
 
 AUDIO_NAME = re.compile(r"[0-9a-f]{20}")
+FIRE_KINDS = ("chief", "engine", "ladder", "tower", "rescue", "utility", "marine")
 PREVIEW_KEEP_S = 24 * 3600
 MAX_UNITS = 30
 GEO_WINDOW = 0.25        # suggestions this close to the best one are ordered by town first
@@ -163,7 +164,9 @@ class Cad:
     def _with_radio(self, incs: list[dict], limit: int = 200) -> list[dict]:
         """Each event's radio traffic (newest first), with whether its audio is still kept."""
         by = self.comms.for_incidents([i["id"] for i in incs], limit)
+        units = self.store.units()
         for i in incs:
+            i["tag_units"] = self.tag_order(i["id"], units)
             rows = by.get(i["id"], [])
             for r in rows:
                 r["has_audio"] = self.has_clip(r["id"])
@@ -237,8 +240,36 @@ class Cad:
         return self.store.close(iid, _text(body, "disposition", 40), _text(body, "operator", 60))
 
     def note(self, iid: int, body: dict) -> dict:
-        self.store.note(iid, _text(body, "text", 2000, required=True), _text(body, "operator", 60))
-        return {"ok": True}
+        """A timeline comment. units: the unit tags picked with the autocomplete ("E63 stated that ..."):
+        who said it, so the event can show that unit's notes with its radio traffic."""
+        units = body.get("units") or []
+        if not isinstance(units, list) or len(units) > 10 or not all(isinstance(u, str) for u in units):
+            raise CadError("units: a list of up to 10 unit codes")
+        codes = {u["name"].upper(): u["name"] for u in self.store.units() if u["board"] or u["incident_id"]}
+        bad = [u for u in units if u.strip().upper() not in codes]
+        if bad:
+            raise CadError(f"units: {bad[0]!r} is not on the boards")
+        tags = list(dict.fromkeys(codes[u.strip().upper()] for u in units))
+        self.store.note(iid, _text(body, "text", 2000, required=True), _text(body, "operator", 60), units=tags)
+        return {"ok": True, "units": tags}
+
+    def tag_order(self, iid: int | None, units: list[dict] | None = None) -> list[str]:
+        """The unit autocomplete's order: units on this event (as assigned) first, then PCFD's and
+        Rye Brook's fire units (board order), then everyone else (police, EMS, agencies)."""
+        units = units if units is not None else self.store.units()
+        first = [r["name"] for r in self.store.q("SELECT u.name FROM assignments a JOIN units u ON u.id = a.unit_id "
+                                                 "WHERE a.incident_id = ? ORDER BY a.cleared_at IS NOT NULL, a.id",
+                                                 (iid,))] if iid else []
+        fire = [u["name"] for u in units if u["board"] and u["kind"] in FIRE_KINDS and not u["mutual_aid"]]
+        rest = [u["name"] for u in units if u["board"]]
+        return list(dict.fromkeys(first + fire + rest))
+
+    def suggest_units(self, iid: int | None, prefix: str, limit: int = 8) -> list[str]:
+        """Codes starting with what was typed (any case), in tag_order: 'e6' -> E63 (on the event), E59, E60..."""
+        p = (prefix or "").strip().lower()
+        if not p:
+            return []
+        return [c for c in self.tag_order(iid) if c.lower().startswith(p)][:limit]
 
     def recommend(self, iid: int, body: dict) -> dict:
         inc = self.store.incident(iid)
@@ -515,8 +546,8 @@ class Cad:
                 raise CadError(f"{k}: unix seconds") from None
         rev = one("rev")
         talking = self.live()
-        if rev and rev == str(self.comms.rev):
-            return {"unchanged": True, "rev": self.comms.rev, "talking": talking}
+        if rev and rev == f"{self.comms.rev}.{self.store.rev}":
+            return {"unchanged": True, "rev": rev, "talking": talking}
         pcfd = [u["name"] for u in self.radios.units if is_pcfd(u)]
         try:
             limit = int(one("limit") or 300)
@@ -524,10 +555,11 @@ class Cad:
             raise CadError("limit: a number") from None
         rows = self.comms.query(unit=one("unit"), channel=one("channel"), event=one("event"),
                                 pcfd=pcfd if one("pcfd") in ("1", "true", "on") else None,
-                                since=when("since"), until=when("until"), limit=limit)
+                                since=when("since"), until=when("until"), limit=limit,
+                                kind={"radio": "radio", "notes": "notes"}.get(one("type"), ""))
         for r in rows:
-            r["has_audio"] = self.has_clip(r["id"])
-        return {"rows": rows, "rev": self.comms.rev, "pcfd": pcfd, "talking": talking, **self.comms.facets(),
+            r["has_audio"] = r["kind"] == "radio" and self.has_clip(r["id"])
+        return {"rows": rows, "rev": f"{self.comms.rev}.{self.store.rev}", "pcfd": pcfd, "talking": talking, **self.comms.facets(),
                 "events": [{"id": r["id"], "number": r["number"], "type": r["type"], "address": r["address"]}
                            for r in self.store.q("SELECT DISTINCT i.id, i.number, i.type, i.address FROM radio_links l "
                                                  "JOIN incidents i ON i.id = l.incident_id ORDER BY i.id DESC LIMIT 100")]}

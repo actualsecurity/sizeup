@@ -17,3 +17,14 @@ def test_buttons_in_the_page_have_handlers():
     html = (Path(__file__).resolve().parent.parent / "sizeup" / "web" / "static" / "index.html").read_text()
     for bid in re.findall(r'<button id="([\w-]+)"', html):
         assert f'$("#{bid}").addEventListener' in JS, f"#{bid} has no click handler"
+
+
+def test_pages_load_only_scripts_that_exist_and_cad_buttons_have_handlers():
+    static = Path(__file__).resolve().parent.parent / "sizeup" / "web" / "static"
+    for page in ("index.html", "cad.html", "comms.html"):
+        html = (static / page).read_text()
+        for src in re.findall(r'<script src="/static/([\w./-]+)"', html):
+            assert (static / src).is_file(), f"{page}: {src} missing"
+    cad_js = (static / "cad.js").read_text()
+    for bid in ("radios-open", "radios-close", "note-add"):
+        assert f'$("#{bid}")' in cad_js or bid == "note-add", f"#{bid} has no handler"

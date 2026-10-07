@@ -75,6 +75,7 @@ class Lists:
     joint_response: dict = field(default_factory=dict)     # town -> {"tag", "units": (codes), "quick_add": (codes)}
     already_statuses: tuple[str, ...] = ()                 # add-on: units on the event in these are said
     full_response_kinds: tuple[str, ...] = ()              # "Tick all available PCFD apparatus"
+    status_flow: dict = field(default_factory=dict)        # status | "*" -> (next statuses), the incident's unit buttons
     path: str = ""
     _names: dict[str, dict[str, str]] = field(default_factory=dict, repr=False)
 
@@ -173,6 +174,13 @@ class Lists:
     def free(self) -> tuple[str, ...]:
         return tuple(s["code"] for s in self.unit_statuses if s.get("role") == "free")
 
+    def next_statuses(self, status: str) -> tuple[str, ...]:
+        """The buttons on a unit that is on an incident (status_flow): what can come next. Without a
+        flow in the data file: every status but the current one."""
+        if not self.status_flow:
+            return tuple(c for c in self.status_ids if c != status)
+        return tuple(c for c in self.status_flow.get(status, self.status_flow.get("*", ())) if c != status)
+
     def status_phrase(self, status: str) -> str:
         """'On location' -> 'on location' (for 'E63 on location')."""
         n = self.name("unit_statuses", status)
@@ -255,6 +263,7 @@ class Lists:
                                    for t, j in self.joint_response.items()},
                 "full_response": self.wording.get("full_response", ""),
                 "full_response_kinds": list(self.full_response_kinds),
+                "status_flow": {k: list(v) for k, v in self.status_flow.items()},
                 "source": _shown_path(self.path)}
 
 
@@ -417,6 +426,12 @@ def load(path: str | Path | None = None) -> Lists:
             except (KeyError, IndexError, ValueError) as e:
                 raise ListsError(f"{where}: dispatch_wording.{k}: unknown or broken placeholder ({e})") from None
             wording[k] = v
+    codes = {s["code"] for s in statuses}
+    flow: dict[str, tuple[str, ...]] = {}
+    for k, v in (d.get("status_flow") or {}).items():
+        if (k != "*" and k not in codes) or not isinstance(v, list) or not set(v) <= codes:
+            raise ListsError(f"{where}: status_flow[{k!r}]: a unit_statuses code (or \"*\") -> a list of unit_statuses codes")
+        flow[k] = tuple(v)
     already = tuple(dw.get("already_statuses") or ())
     if not set(already) <= {s["code"] for s in statuses}:
         raise ListsError(f"{where}: dispatch_wording.already_statuses: codes from unit_statuses")
@@ -453,4 +468,5 @@ def load(path: str | Path | None = None) -> Lists:
                  unit_boards=tuple(boards), units=units, spoken=dict(spoken), run_cards=tuple(cards),
                  geo_town_order=order, geo_town_aliases=aliases, unit_event_cell=dict(d.get("unit_event_cell") or {}),
                  wording=dict(WORDING, **wording), already_statuses=already, joint_response=joint, full_response_kinds=fr_kinds,
+                 status_flow=flow,
                  path=str(path))

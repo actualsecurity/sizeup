@@ -18,7 +18,8 @@ POST /api/cad/incident/<id>               edit: any of the fields above
 POST /api/cad/incident/<id>/accept        {type?, subtype?, operator?}  a 60 Control page -> pending (numbered)
 POST /api/cad/incident/<id>/dismiss       {operator?, reason?}   a 60 Control page nobody takes
 POST /api/cad/incident/<id>/close         {disposition, operator?}  units cleared
-POST /api/cad/incident/<id>/note          {text, operator?}
+POST /api/cad/incident/<id>/note          {text, units?: ["E63"], operator?}   units: the unit tags (who said it)
+GET  /api/cad/incident/<id>/units?q=e6    unit autocomplete: on the event first, then fire units, then the rest
 POST /api/cad/incident/<id>/recommend     {type?, subtype?}      -> {units, unfilled, already, card, note}
 POST /api/cad/incident/<id>/preview       {unit_ids, full?}      -> {text, kind, audio_url, audio_note}
 POST /api/cad/incident/<id>/dispatch      {unit_ids, operator, channel?, full?} -> {dispatch_id, text, audio_url, ...}
@@ -49,6 +50,7 @@ from sizeup.cad.store import CadError
 JSON = "application/json"
 MAX_BODY = 65536
 INCIDENT = re.compile(r"/api/cad/incident/(\d{1,9})(?:/(accept|dismiss|close|note|recommend|preview|dispatch|upgrade|attach))?")
+SUGGEST = re.compile(r"/api/cad/incident/(\d{1,9})/units")
 EXPORT = re.compile(r"/api/cad/export/([a-z-]{1,20}\.csv)")
 UNIT = re.compile(r"/api/cad/unit/(\d{1,9})/status")
 DISPATCH_WAV = re.compile(r"/api/cad/dispatch/(\d{1,9})\.wav")
@@ -81,6 +83,8 @@ class CadApi:
                 return _json(200, self.cad.rigs())
             if path == "/api/cad/settings/audit":
                 return _json(200, self.cad.settings_audit(parse_qs(query)))
+            if m := SUGGEST.fullmatch(path):
+                return _json(200, {"units": self.cad.suggest_units(int(m.group(1)), (parse_qs(query).get("q") or [""])[0][:20])})
             if m := INCIDENT.fullmatch(path):
                 if m.group(2) is None:
                     return _json(200, self.cad.full(int(m.group(1))))

@@ -23,6 +23,7 @@ import time
 from sizeup.cad.radios import is_dispatcher
 
 TURN = re.compile(r"^(?P<call>.+)-t(?P<k>\d+)$")
+NOTES = "Notes"          # the /comms "channel" of event notes tagged with a unit
 KEEP_UNLINKED_S = 90 * 24 * 3600     # transmissions on no event: kept 90 days (linked ones: always)
 MAX_ROWS = 500
 
@@ -143,9 +144,44 @@ class Comms:
         return out
 
     def query(self, unit: str = "", channel: str = "", event: str = "", pcfd: list[str] | None = None,
-              since: float | None = None, until: float | None = None, limit: int = 300) -> list[dict]:
-        """The /comms page: newest first, with the event numbers each transmission is linked to.
-        pcfd: only transmissions from these rigs (PCFD's own units)."""
+              since: float | None = None, until: float | None = None, limit: int = 300, kind: str = "") -> list[dict]:
+        """The /comms page: newest first, with the event numbers each transmission is linked to, and
+        (kind '' or 'notes') the event notes tagged with a unit ("E63 stated that ..."), as kind 'note'
+        rows on channel "Notes". pcfd: only these rigs (PCFD's own units)."""
+        limit = max(1, min(int(limit), MAX_ROWS))
+        notes = self._notes(unit, event, pcfd, since, until, limit) if kind in ("", "notes") and channel in ("", NOTES) else []
+        radio = self._radio(unit, channel, event, pcfd, since, until, limit) if kind in ("", "radio") and channel != NOTES else []
+        return sorted(radio + notes, key=lambda r: -r["start"])[:limit]
+
+    def _notes(self, unit, event, pcfd, since, until, limit) -> list[dict]:
+        where, args = ["e.kind = 'note'", "e.units != ''"], []
+        if unit:
+            where.append("(',' || e.units || ',') LIKE ?")
+            args.append(f"%,{unit},%")
+        if event:
+            where.append("(i.number = ? OR CAST(i.id AS TEXT) = ?)")
+            args += [event, event]
+        if pcfd is not None:
+            if not pcfd:
+                return []
+            where.append("(" + " OR ".join(["(',' || e.units || ',') LIKE ?"] * len(pcfd)) + ")")
+            args += [f"%,{u},%" for u in pcfd]
+        if since is not None:
+            where.append("e.at >= ?")
+            args.append(since)
+        if until is not None:
+            where.append("e.at <= ?")
+            args.append(until)
+        rows = self.store.q("SELECT e.id, e.at, e.text, e.operator, e.units, i.id AS iid, i.number, i.type, i.subtype, i.address "
+                            "FROM events e JOIN incidents i ON i.id = e.incident_id WHERE " + " AND ".join(where)
+                            + " ORDER BY e.at DESC LIMIT ?", (*args, limit))
+        return [{"kind": "note", "id": f"note-{r['id']}", "start": r["at"], "end": r["at"], "channel": NOTES,
+                 "talkgroup": None, "talker": r["operator"], "radio_id": "", "rig": r["units"].replace(",", ", "),
+                 "dispatcher": 0, "text": r["text"], "status": "done", "operator": r["operator"],
+                 "events": [{"id": r["iid"], "number": r["number"], "type": r["type"], "subtype": r["subtype"],
+                             "address": r["address"], "why": "note", "unit": r["units"]}]} for r in rows]
+
+    def _radio(self, unit, channel, event, pcfd, since, until, limit) -> list[dict]:
         where, args = [], []
         if unit:
             where.append("(',' || REPLACE(t.rig, ' ', '') || ',') LIKE ?")
@@ -168,8 +204,7 @@ class Comms:
         if until is not None:
             where.append("t.start <= ?")
             args.append(until)
-        limit = max(1, min(int(limit), MAX_ROWS))
-        rows = self.store.q("SELECT t.* FROM radio_traffic t" + (" WHERE " + " AND ".join(where) if where else "")
+        rows = self.store.q("SELECT t.*, 'radio' AS kind FROM radio_traffic t" + (" WHERE " + " AND ".join(where) if where else "")
                             + " ORDER BY t.start DESC LIMIT ?", (*args, limit))
         if rows:
             ids = [r["id"] for r in rows]
@@ -184,6 +219,6 @@ class Comms:
 
     def facets(self) -> dict:
         return {"channels": [r["channel"] for r in self.store.q(
-                    "SELECT channel, MAX(start) AS m FROM radio_traffic GROUP BY channel ORDER BY m DESC")],
+                    "SELECT channel, MAX(start) AS m FROM radio_traffic GROUP BY channel ORDER BY m DESC")] + [NOTES],
                 "rigs": sorted({x.strip() for r in self.store.q("SELECT DISTINCT rig FROM radio_traffic WHERE rig != ''")
                                 for x in r["rig"].split(",") if x.strip()})}

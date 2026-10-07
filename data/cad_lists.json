@@ -154,6 +154,16 @@
     "closed": {"name": "Closed", "bg": "#55546E", "fg": "#FFFFFF"},
     "dismissed": {"name": "Dismissed", "bg": "#55546E", "fg": "#FFFFFF"}
   },
+  "_status_flow": ["The next-step buttons on a unit in \"Units on this incident\": status -> the statuses offered, in order.",
+                   "\"*\" = any other status while on an incident. AVAILABLE (role free) clears the unit off the event;",
+                   "OUT OF SERVICE asks for the reason. The unit board (right) always offers every status."],
+  "status_flow": {
+    "DISPATCHED": ["RESPONDING", "ON LOCATION", "AVAILABLE", "OUT OF SERVICE"],
+    "ACKNOWLEDGED": ["RESPONDING", "ON LOCATION", "AVAILABLE", "OUT OF SERVICE"],
+    "RESPONDING": ["ON LOCATION", "AVAILABLE", "OUT OF SERVICE"],
+    "ON LOCATION": ["AVAILABLE", "OUT OF SERVICE"],
+    "*": ["AVAILABLE", "OUT OF SERVICE"]
+  },
   "unit_event_cell": {"bg": "#1E4766", "fg": "#EAF4F9"},
   "unit_kinds": [
     {"id": "engine", "label": "Engine"},
