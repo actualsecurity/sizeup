@@ -5,7 +5,8 @@ Coverage is defined by municipal boundary polygons (US Census TIGER/Line 2025
 PLACE for New York, COUSUB for Connecticut), not by a bounding box. See
 MUNICIPALITIES: Port Chester and Rye Brook (PCFD's district) first, then the
 City of Rye, Harrison (town = village, incl. Purchase and West Harrison), the
-Village of Mamaroneck (incl. Rye Neck, the part in the Town of Rye) and the
+Village of Mamaroneck (incl. Rye Neck, the part in the Town of Rye), the Village of
+Larchmont and the unincorporated Town of Mamaroneck, and the
 Town of Greenwich, CT (Byram, Glenville, Pemberwick, Chickahominy, central
 Greenwich, Cos Cob, Riverside, Old Greenwich, back country). Every address,
 street segment, intersection and landmark is tagged with the municipality whose
@@ -75,6 +76,10 @@ MUNICIPALITIES = (
     ("Harrison", "place", "36", "Harrison village"),      # = Town of Harrison (coterminous)
     ("Greenwich", "cousub", "09", "Greenwich town"),     # Byram, Glenville, Pemberwick, ...
     ("Mamaroneck", "place", "36", "Mamaroneck village"),  # incl. Rye Neck (Town of Rye part)
+    ("Larchmont", "place", "36", "Larchmont village"),
+    # Whole Town of Mamaroneck; listed after its villages, so a point gets the town label only
+    # when no village polygon contains it (= the unincorporated town).
+    ("Town of Mamaroneck", "cousub", "36", "Mamaroneck town"),
 )
 NY_LABELS = [m[0] for m in MUNICIPALITIES if m[2] == "36"]
 CT_LABELS = [m[0] for m in MUNICIPALITIES if m[2] == "09"]
@@ -95,7 +100,8 @@ TIGER_LINE_URLS = (
     f"{TIGER}/ADDRFEAT/tl_2025_09190_addrfeat.zip", f"{TIGER}/ROADS/tl_2025_09190_roads.zip",
 )
 TIGER_BOUNDARY_URLS = {("place", "36"): f"{TIGER}/PLACE/tl_2025_36_place.zip",
-                       ("cousub", "09"): f"{TIGER}/COUSUB/tl_2025_09_cousub.zip"}
+                       ("cousub", "09"): f"{TIGER}/COUSUB/tl_2025_09_cousub.zip",
+                       ("cousub", "36"): f"{TIGER}/COUSUB/tl_2025_36_cousub.zip"}
 COUNTY_URL = "https://giswww.westchestergov.com/arcgis/rest/services/DataHub_CommunityFacilities/MapServer"
 OVERPASS_URLS = (
     "https://overpass-api.de/api/interpreter",
@@ -342,7 +348,8 @@ def load_boundaries() -> Boundaries:
                 if (lyr, st) == (layer, fips)}
         for rec, _bbox, parts in read_tiger(url):
             label = want.get(rec.get("NAMELSAD", ""))
-            if label and (layer != "cousub" or rec.get("COUNTYFP") == "190"):
+            county = {"09": "190", "36": "119"}[fips]      # CT planning region / Westchester
+            if label and (layer != "cousub" or rec.get("COUNTYFP") == county):
                 polys[label] = [np.asarray(p, dtype=float) for p in parts]
     missing = [m[0] for m in MUNICIPALITIES if m[0] not in polys]
     if missing:
@@ -381,7 +388,7 @@ def fetch_ny_address_points(bounds: Boundaries) -> tuple[list[dict], dict]:
             continue
         attr = (a.get("IncorporatedMunicipality") or "").strip()
         if attr == "Mamaroneck" and a.get("MunicipalityType") != "3":
-            attr = ""                     # the unincorporated Town of Mamaroneck
+            attr = "Town of Mamaroneck"   # the unincorporated town (the village is type 3)
         recs.append({
             "number": a.get("AddressNumber"), "suffix": (a.get("SuffixAddressNumber") or "").strip(),
             "street": display_street(a), "active": (a.get("Status") or "Active") == "Active",
