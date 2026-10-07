@@ -463,6 +463,47 @@ function renderSdr() {
   }
 }
 
+// "Re-run all": every recording still on disk goes through speech-to-text again (newest first,
+// behind live traffic). Progress comes back in state.rerun.
+function renderRerun() {
+  const r = ui.state && ui.state.rerun;
+  const b = $("#rerun-all"), msg = $("#rerun-msg");
+  if (!r) return;
+  b.disabled = r.pending > 0 || !!ui.rerunBusy;
+  setText(msg, r.pending > 0 ? `re-running ${r.done} / ${r.total}` + (r.changed ? ` · ${r.changed} changed` : "")
+    : r.total ? `last re-run: ${r.done} done · ${r.changed} changed` + (r.failed ? ` · ${r.failed} failed` : "") : "");
+}
+
+$("#rerun-all").addEventListener("click", async () => {
+  const hours = (ui.state && ui.state.storage && ui.state.storage.audio_hours) || 12;
+  if (!confirm(`Run speech-to-text again on every recording still on disk (last ${hours} h)? ` +
+               "Live traffic is always transcribed first.")) return;
+  ui.rerunBusy = true;
+  renderRerun();
+  const n = await retranscribe({ all: true });
+  ui.rerunBusy = false;
+  if (n === null) setText($("#rerun-msg"), "re-run failed to start");
+  else if (n === 0) setText($("#rerun-msg"), "nothing to re-run");
+  else renderRerun();
+});
+
+// Disk use under captures/, from the cleaner's last pass (every 10 min): size, oldest audio, limits.
+function renderStorage() {
+  const st = ui.state && ui.state.storage;
+  const box = $("#storage");
+  show(box, !!st);
+  if (!st) return;
+  const mb = st.bytes / 1e6;
+  const size = mb >= 1000 ? `${(mb / 1000).toFixed(1)} GB` : `${mb < 10 ? mb.toFixed(1) : Math.round(mb)} MB`;
+  const age = st.oldest_audio ? (Date.now() / 1000 - st.oldest_audio) / 3600 : null;
+  const oldest = age == null ? "no audio" : `oldest ${age < 1 ? Math.round(age * 60) + " min" : age.toFixed(1) + " h"}`;
+  box.textContent = `captures ${size} · ${oldest} · audio kept ${st.audio_hours} h`;
+  const checked = new Date(st.checked * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  box.title = `${st.audio_files} audio files. Audio is deleted after ${st.audio_hours} h, pages and ` +
+              `transcripts after ${st.history_hours} h. Last cleanup ${checked}` +
+              (st.deleted ? `, removed ${st.deleted} files.` : ".");
+}
+
 async function setSdrMode(mode, serial) {
   if (ui.sdrBusy) return;
   ui.sdrBusy = true;
