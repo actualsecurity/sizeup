@@ -1,10 +1,13 @@
-"""CAD (M1): store, numbering, roster seed, run cards, dispatch text/audio, the bridge from the
-monitor, the HTTP API, and that nothing can transmit."""
+"""CAD: the lists data file, store, numbering, unit boards, run cards, dispatch wording and audio,
+emergency / non-emergency routing, the bridge from the monitor, location ranking, CSV exports,
+the v1 -> v2 migration, the HTTP API, and that nothing can transmit."""
 
+import csv
 import io
 import json
 import re
 import shutil
+import sqlite3
 import threading
 import time
 import urllib.error
@@ -17,7 +20,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from sizeup.cad import dispatcher, runcards
+from sizeup.cad import dispatcher, export, lists, runcards
 from sizeup.cad.api import CadApi
 from sizeup.cad.service import Cad, Settings
 from sizeup.cad.store import SCHEMA_VERSION, TZ, CadError, Store
@@ -27,10 +30,82 @@ from sizeup.dispatch import parse
 from sizeup.incidents import IncidentStore
 
 ROOT = Path(__file__).resolve().parent.parent
-ROSTER = ROOT / "data" / "westchester_apparatus.csv"
-CALLSIGNS = load(ROOT / "config.example.toml").unit_callsigns
+DATA = ROOT / "data" / "cad_lists.json"
 PAGE_TEXT = ("Port Chester Fire Department, respond to an activated fire alarm. 209 West Chester Avenue, "
              "cross of Pearl Street, Port Chester. Time out 1432.")
+V1_SCHEMA = """
+CREATE TABLE units (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  kind TEXT NOT NULL,
+  station TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'available',
+  status_at REAL NOT NULL,
+  out_of_service TEXT NOT NULL DEFAULT '',
+  spare INTEGER NOT NULL DEFAULT 0,
+  notes TEXT NOT NULL DEFAULT '',
+  sort INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE incidents (
+  id INTEGER PRIMARY KEY,
+  number TEXT UNIQUE,
+  type TEXT NOT NULL DEFAULT '',
+  priority INTEGER,
+  address TEXT NOT NULL DEFAULT '',
+  cross_street TEXT NOT NULL DEFAULT '',
+  lat REAL, lon REAL, geo_label TEXT NOT NULL DEFAULT '',
+  narrative TEXT NOT NULL DEFAULT '',
+  source TEXT NOT NULL,
+  source_ref TEXT UNIQUE,
+  status TEXT NOT NULL,
+  created_at REAL NOT NULL, accepted_at REAL, closed_at REAL
+);
+CREATE TABLE seq (year INTEGER PRIMARY KEY, last INTEGER NOT NULL);
+CREATE TABLE assignments (
+  id INTEGER PRIMARY KEY,
+  incident_id INTEGER NOT NULL REFERENCES incidents(id),
+  unit_id INTEGER NOT NULL REFERENCES units(id),
+  dispatched_at REAL, enroute_at REAL, onscene_at REAL, cleared_at REAL
+);
+CREATE INDEX assignments_open ON assignments(unit_id) WHERE cleared_at IS NULL;
+CREATE TABLE run_cards (
+  id INTEGER PRIMARY KEY,
+  type TEXT NOT NULL UNIQUE,
+  spoken TEXT NOT NULL DEFAULT '',
+  is_default INTEGER NOT NULL DEFAULT 0,
+  sort INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE run_card_slots (
+  card_id INTEGER NOT NULL REFERENCES run_cards(id) ON DELETE CASCADE,
+  pos INTEGER NOT NULL,
+  kind TEXT NOT NULL DEFAULT '',
+  count INTEGER NOT NULL DEFAULT 1,
+  unit TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE events (
+  id INTEGER PRIMARY KEY,
+  incident_id INTEGER REFERENCES incidents(id),
+  unit_id INTEGER REFERENCES units(id),
+  at REAL NOT NULL,
+  kind TEXT NOT NULL,
+  text TEXT NOT NULL,
+  operator TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX events_incident ON events(incident_id);
+CREATE TABLE dispatches (
+  id INTEGER PRIMARY KEY,
+  incident_id INTEGER NOT NULL REFERENCES incidents(id),
+  at REAL NOT NULL,
+  operator TEXT NOT NULL,
+  text TEXT NOT NULL,
+  unit_ids TEXT NOT NULL DEFAULT '[]',
+  audio_path TEXT NOT NULL DEFAULT '',
+  audio_note TEXT NOT NULL DEFAULT '',
+  transmitted INTEGER NOT NULL DEFAULT 0,
+  channel TEXT NOT NULL DEFAULT '',
+  tx_note TEXT NOT NULL DEFAULT ''
+);
+"""
 
 
 def local(y, mo, d, h, mi):
@@ -45,9 +120,9 @@ class Clock:
         return self.t
 
 
-def make_cad(tmp_path=None, clock=None, **kw):
-    s = Settings(db=str(tmp_path / "cad.sqlite") if tmp_path else "", callsigns=CALLSIGNS, **kw)
-    return Cad(s, log=lambda m: None, **({"clock": clock} if clock else {}))
+def make_cad(tmp_path=None, clock=None, geocoder=None, **kw):
+    s = Settings(db=str(tmp_path / "cad.sqlite") if tmp_path else "", **kw)
+    return Cad(s, geocoder=geocoder, log=lambda m: None, **({"clock": clock} if clock else {}))
 
 
 def names(units):
@@ -58,147 +133,398 @@ def by_name(cad, name):
     return next(u for u in cad.store.units() if u["name"] == name)
 
 
-# -- store ------------------------------------------------------------------------------------------
-
-def test_roster_seeded_from_county_csv_once():
-    st = Store()
-    n = st.seed_units(ROSTER, "Port Chester", CALLSIGNS)
-    units = {u["name"]: u for u in st.units()}
-    assert n == len(units) == 16
-    # Chiefs from the callsigns, apparatus in roster order; reserved numbers are not trucks.
-    assert names(st.units())[:5] == ["2391 Chief of Department", "2392 1st Assistant Chief", "2393 2nd Assistant Chief",
-                                     "2395 Immediate Past Chief", "2398 Duty Officer"]
-    for gone in ("Engine 16", "Engine 58", "Tower Ladder 31"):
-        assert gone not in units
-    assert units["Engine 59"]["spare"] and units["Rescue 41"]["spare"] and not units["Engine 60"]["spare"]
-    assert {u["status"] for u in units.values()} == {"available"}
-    assert (units["Ladder 31"]["kind"], units["Tower Ladder 2"]["kind"], units["Marine 40"]["kind"]) == ("ladder", "tower", "boat")
-    assert st.seed_units(ROSTER, "Port Chester", CALLSIGNS) == 0       # never re-seeded over edits
-    # Another department's callsigns aren't ours.
-    assert Store().seed_units(ROSTER, "Port Chester", {"2661": "2661 Chief"}) == 11
+def uid(cad, name):
+    return by_name(cad, name)["id"]
 
 
-def test_numbers_sequential_per_local_year_and_pending_unnumbered(tmp_path):
+def texts(cad, iid):
+    return [e["text"] for e in cad.store.full(iid)["events"]]
+
+
+def write_lists(tmp_path, **changes):
+    d = json.loads(DATA.read_text())
+    d.update(changes)
+    p = tmp_path / "lists.json"
+    p.write_text(json.dumps(d))
+    return p
+
+
+# -- the data file ------------------------------------------------------------------------------------
+
+def test_lists_file_has_the_sheets_vocabulary():
+    L = lists.load()
+    assert L.type_codes == ("ALARM", "ALS", "BLS", "BRUSH", "DRILL", "HAZARD", "INVEST", "MA", "MVA", "MVF", "NOTIF",
+                            "RECALL", "RESCUE", "SERVICE", "STRU")
+    assert len(L.subtype_codes) == 51 and L.subtype_codes[:3] == ("CO-COMM", "CO-RESD", "COMM")
+    assert len(L.disposition_codes) == 20 and "NOTIF MADE" in L.disposition_codes
+    assert L.status_ids == ("AVAILABLE", "DISPATCHED", "DISPATCH OTHER", "ACKNOWLEDGED", "RESPONDING", "ON LOCATION",
+                            "OUT OF SERVICE", "UNMANNED")
+    # Readable names shown, the sheet's codes stored; unclear codes stay codes.
+    assert L.type_label("SERVICE", "BOAT") == "Service / Boat" and L.type_label("STRU") == "Structure fire"
+    assert L.name("event_subtypes", "TREERD") == "Tree in road" and L.name("event_subtypes", "ECHO") == "ECHO"
+    assert L.name("dispositions", "TXALS") == "Transported ALS" and L.name("dispositions", "RMA") == "RMA"
+    assert L.name("unit_statuses", "ON LOCATION") == "On location"
+    # The sheet's colors.
+    assert {t["code"]: t["color"] for t in L.event_types}["SERVICE"] == "#8E7CC3"
+    assert L.event_statuses["pending"]["bg"] == "#F2A51E" and L.event_statuses["active"]["bg"] == "#2D9E51"
+    # Roles: what the store does with each status.
+    assert [L.role(s) for s in L.status_ids] == ["free", "dispatched", "", "", "enroute", "onscene", "oos", "oos"]
+    # No type -> subtype mapping in the sheet: any subtype with any type.
+    assert L.subtypes_for("ALARM") == L.subtype_codes
+    L.check_type("SERVICE", "BOAT")
+    with pytest.raises(ValueError):
+        L.check_type("FIRE")
+    assert L.received_codes == ("PHONE", "WALK-IN", "RADIO", "60 CONTROL", "PD", "OTHER")
+
+
+def test_unit_boards_in_the_sheets_order_with_gaps():
+    L = lists.load()
+    main, other = L.unit_boards
+    assert main["units"][:6] == ["2391", "2392", "2393", "2395", "2398", "E59"]
+    assert main["units"][23:26] == ["U42", None, "PCPD"] and main["units"][-1] == "7711" and len(main["units"]) == 41
+    assert other["units"][:2] == ["CONED-G", "CONED-G1"] and other["units"][-6:] == [None, "L25", "E191", None, "DPT266", "DPT239"]
+    codes = [c for c, _, _ in L.board_units()]
+    assert len(codes) == 61 and codes.index("7711") < codes.index("CONED-G")
+
+
+def test_spoken_unit_names_kinds_and_spares():
+    L = lists.load()
+    said = {c: L.unit(c)["spoken"] for c in ("E60", "L31", "TL2", "R40", "U65", "M40", "M60", "2398", "2662", "L30",
+                                              "E14", "L25", "E191", "77A1", "77M2", "PCPD", "CONED-G")}
+    assert said == {"E60": "Engine 60", "L31": "Ladder 31", "TL2": "Tower Ladder 2", "R40": "Rescue 40",
+                    "U65": "Utility 65", "M40": "Marine 40", "M60": "Marine 60", "2398": "23 98", "2662": "26 62",
+                    "L30": "Ladder 30", "E14": "Engine 14", "L25": "Ladder 25", "E191": "Engine 191",
+                    "77A1": "77 Alpha 1", "77M2": "77 Medic 2", "PCPD": "PCPD", "CONED-G": "CONED-G"}
+    kinds = {c: L.unit(c)["kind"] for c in ("E60", "L31", "TL2", "R40", "U239", "M40", "2391", "2662", "77A3", "7711",
+                                             "RBPD1", "DPW", "60CAD")}
+    assert kinds == {"E60": "engine", "L31": "ladder", "TL2": "tower", "R40": "rescue", "U239": "utility",
+                     "M40": "marine", "2391": "chief", "2662": "chief", "77A3": "ems", "7711": "ems", "RBPD1": "pd",
+                     "DPW": "agency", "60CAD": "agency"}
+    assert L.unit("E59")["spare"] and L.unit("R41")["spare"] and not L.unit("E60")["spare"]
+    assert L.unit("E14")["mutual_aid"] and L.unit("L30")["department"] == "Rye Brook" and not L.unit("E60")["mutual_aid"]
+    assert L.unit("NEW1") == {"kind": "agency", "spoken": "NEW1", "title": "", "spare": False, "department": "",
+                              "mutual_aid": False}
+
+
+def test_lists_file_errors_name_the_file_and_the_problem(tmp_path):
+    with pytest.raises(lists.ListsError, match="cannot read"):
+        lists.load(tmp_path / "nope.json")
+    (tmp_path / "bad.json").write_text("{")
+    with pytest.raises(lists.ListsError, match="not JSON"):
+        lists.load(tmp_path / "bad.json")
+    d = json.loads(DATA.read_text())
+    for change, msg in ((dict(event_types=["ALARM", "ALARM"]), "twice"),
+                        (dict(run_cards=[{"type": "FIRE", "slots": []}]), "run_cards"),
+                        (dict(unit_statuses=[{"code": "AVAILABLE", "role": "free"}]), "role 'oos'"),
+                        (dict(type_colors=None, event_types=[{"code": "STRU", "color": "red"}]), "#rrggbb"),
+                        (dict(dispatch_wording=dict(d["dispatch_wording"], new="{department} {nope}")), "placeholder"),
+                        (dict(event_class={"*/NOPE": "non-emergency"}), "event_class")):
+        p = write_lists(tmp_path, **change)
+        with pytest.raises(lists.ListsError, match=re.escape(msg)):
+            lists.load(p)
+    # Plain strings are fine (code = name): an export can be dropped in as-is.
+    L = lists.load(write_lists(tmp_path, dispositions=["COMPLETE", "FALSE"]))
+    assert L.dispositions == ({"code": "COMPLETE", "name": "COMPLETE"}, {"code": "FALSE", "name": "FALSE"})
+
+
+# -- store: numbering, fields, statuses ------------------------------------------------------------------
+
+def test_numbers_yy_nnnnnn_per_local_year_and_queued_unnumbered(tmp_path):
     clock = Clock(local(2026, 12, 31, 23, 30))       # 04:30 UTC on Jan 1: still 2026 in Port Chester
     st = Store(tmp_path / "cad.sqlite", clock=clock)
-    a = st.create_incident(type="Other")
-    p = st.create_incident(type="Other", source="60 Control page", source_ref="monitor:x", status="pending")
-    b = st.create_incident(type="Other")
-    assert st.incident(a)["number"] == "PCFD-2026-0001" and st.incident(b)["number"] == "PCFD-2026-0002"
-    assert st.incident(p)["number"] is None and st.incident(p)["status"] == "pending"
+    a = st.create_incident(type="SERVICE")
+    p = st.create_incident(type="ALARM", source="60 Control page", source_ref="monitor:x", status="queued")
+    b = st.create_incident(type="SERVICE")
+    assert st.incident(a)["number"] == "26-000001" and st.incident(b)["number"] == "26-000002"
+    assert st.incident(p)["number"] is None and st.incident(p)["status"] == "queued"
     clock.t = local(2027, 1, 1, 0, 30)
-    assert st.accept(p)["number"] == "PCFD-2027-0001"                 # numbered when accepted
-    assert st.incident(st.create_incident(type="Other"))["number"] == "PCFD-2027-0002"
+    assert st.accept(p)["number"] == "27-000001"                      # numbered when accepted
+    assert st.incident(p)["status"] == "pending"
+    assert st.incident(st.create_incident(type="SERVICE"))["number"] == "27-000002"
     with pytest.raises(CadError):
-        st.accept(p)                                                   # already active
-    # Reopened from disk: same data, same schema version.
+        st.accept(p)                                                   # already accepted
     st2 = Store(tmp_path / "cad.sqlite", clock=clock)
-    assert st2.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
-    assert st2.incident(st2.create_incident(type="Other"))["number"] == "PCFD-2027-0003"
-    with pytest.raises(sqlite_error()):
-        st2.create_incident(type="Other", source="60 Control page", source_ref="monitor:x", status="pending")
+    assert st2.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 2
+    assert st2.incident(st2.create_incident(type="SERVICE"))["number"] == "27-000003"
+    with pytest.raises(sqlite3.IntegrityError):
+        st2.create_incident(type="ALARM", source="60 Control page", source_ref="monitor:x", status="queued")
 
 
-def sqlite_error():
-    import sqlite3
-    return sqlite3.IntegrityError
+def test_event_info_fields_and_chronology_wording():
+    cad = make_cad()
+    inc = cad.create({"type": "SERVICE", "subtype": "BOAT", "address": "209 Westchester Ave", "caller_name": "COREY",
+                      "caller_address": "1 Main St", "phone": "914-555-0100", "remarks": "boat taking on water",
+                      "received_via": "PHONE", "operator": "JD"})
+    assert (inc["type"], inc["subtype"], inc["caller_name"], inc["caller_address"], inc["phone"], inc["remarks"],
+            inc["received_via"], inc["status"], inc["emergency"]) == (
+        "SERVICE", "BOAT", "COREY", "1 Main St", "914-555-0100", "boat taking on water", "PHONE", "pending", 1)
+    assert texts(cad, inc["id"]) == ["Event created (pending): Service / Boat at 209 Westchester Ave; received via Phone",
+                                     "Caller info: COREY · 1 Main St · 914-555-0100"]
+    for bad, msg in (({"type": "FIRE"}, "not an event type"), ({"type": "SERVICE", "subtype": "NOPE"}, "subtype"),
+                     ({"type": ""}, "required"), ({"type": "SERVICE", "received_via": "FAX"}, "received_via"),
+                     ({"type": "SERVICE", "emergency": "yes"}, "true or false")):
+        with pytest.raises(CadError, match=msg):
+            cad.create(bad)
+    cad.update(inc["id"], {"subtype": "WATER", "phone": "", "operator": "JD"})
+    assert texts(cad, inc["id"])[-1] == "Edited type: Service / Water; now a non-emergency event; phone: (none)"
 
 
-def test_unit_status_times_and_close_clears(tmp_path):
+def test_close_needs_a_disposition_and_clears_units(tmp_path):
     clock = Clock(local(2026, 10, 7, 14, 0))
     cad = make_cad(tmp_path, clock=clock)
     iid = cad.create({"type": "MVA", "address": "Boston Post Rd"})["id"]
-    e60 = by_name(cad, "Engine 60")["id"]
-    cad.store.assign(iid, [e60], "JD")
+    e60 = uid(cad, "E60")
+    cad.dispatch(iid, {"unit_ids": [e60], "operator": "JD"})
     clock.t += 60
-    cad.unit_status(e60, {"status": "enroute", "operator": "JD"})
+    cad.unit_status(e60, {"status": "RESPONDING", "operator": "JD"})
     clock.t += 120
-    cad.unit_status(e60, {"status": "onscene"})
-    a = cad.store.incidents()[0]["assignments"][0]
+    cad.unit_status(e60, {"status": "ON LOCATION"})
+    a = cad.store.full(iid)["assignments"][0]
     assert (a["enroute_at"] - a["dispatched_at"], a["onscene_at"] - a["dispatched_at"]) == (60, 180)
     with pytest.raises(CadError):
-        cad.unit_status(e60, {"status": "lunch"})
-    cad.close(iid, {"operator": "JD"})
-    u = by_name(cad, "Engine 60")
-    assert u["status"] == "available" and u["incident_id"] is None
-    events = [e["text"] for e in cad.store.incidents()[0]["events"]]
-    assert events[-1] == "Closed; cleared Engine 60" and "Engine 60: En route" in events
-    # Off any incident, a status change goes to the unit log.
-    cad.unit_status(e60, {"status": "out_of_service", "note": "pump repair"})
-    assert cad.store.unit_log()[0]["text"] == "Engine 60: Out of service (pump repair)"
+        cad.unit_status(e60, {"status": "ON SCENE"})                   # not the sheet's word
+    for body, msg in (({}, "required"), ({"disposition": "DONE"}, "not one of")):
+        with pytest.raises(CadError, match=msg):
+            cad.close(iid, body)
+    cad.close(iid, {"disposition": "COMPLETE", "operator": "JD"})
+    u = by_name(cad, "E60")
+    assert u["status"] == "AVAILABLE" and u["incident_id"] is None
+    inc = cad.store.full(iid)
+    assert inc["status"] == "closed" and inc["disposition"] == "COMPLETE"
+    t = texts(cad, iid)
+    assert t[-1] == "Event closed: Complete; cleared E60" and "E60 responding" in t and "E60 on location" in t
+    assert "Event status: active" in t and "E60 dispatched" in t
+    # Off any event, a status change goes to the unit log; unmanned can't be dispatched.
+    cad.unit_status(e60, {"status": "OUT OF SERVICE", "note": "pump repair"})
+    assert cad.store.unit_log()[0]["text"] == "E60 out of service (pump repair)"
+    cad.unit_status(uid(cad, "E61"), {"status": "UNMANNED"})
+    other = cad.create({"type": "STRU"})["id"]
+    with pytest.raises(CadError, match="E61"):
+        cad.dispatch(other, {"unit_ids": [uid(cad, "E61")], "operator": "JD"})
+    hist = cad.store.q("SELECT old_status, new_status FROM unit_history WHERE unit_id = ? ORDER BY id", (e60,))
+    assert [(h["old_status"], h["new_status"]) for h in hist] == [
+        ("AVAILABLE", "DISPATCHED"), ("DISPATCHED", "RESPONDING"), ("RESPONDING", "ON LOCATION"),
+        ("ON LOCATION", "AVAILABLE"), ("AVAILABLE", "OUT OF SERVICE")]
 
 
-# -- run cards -------------------------------------------------------------------------------------
+def test_units_follow_the_boards_and_sync_keeps_status(tmp_path):
+    cad = make_cad(tmp_path)
+    units = cad.store.units()
+    assert names(units)[:6] == ["2391", "2392", "2393", "2395", "2398", "E59"] and len(units) == 61
+    assert {u["status"] for u in units} == {"AVAILABLE"}
+    assert by_name(cad, "77A1")["spoken"] == "77 Alpha 1" and by_name(cad, "CONED-G")["board"] == "other"
+    cad.unit_status(uid(cad, "E62"), {"status": "OUT OF SERVICE"})
+    # A new data file: E62 kept with its status, a new unit added, a dropped unit off the boards.
+    d = json.loads(DATA.read_text())
+    d["unit_boards"][0]["units"] = [c for c in d["unit_boards"][0]["units"] if c != "U42"] + ["E65"]
+    p = tmp_path / "lists.json"
+    p.write_text(json.dumps(d))
+    cad2 = make_cad(tmp_path, lists=str(p))
+    assert by_name(cad2, "E62")["status"] == "OUT OF SERVICE" and by_name(cad2, "E65")["kind"] == "agency"
+    assert by_name(cad2, "U42")["board"] == "" and names(cad2.store.units())[-1] == "U42"
 
-def test_recommend_follows_card_skipping_busy_and_out_of_service():
+
+# -- run cards --------------------------------------------------------------------------------------
+
+def test_recommend_follows_card_skipping_busy_and_unavailable():
     cad = make_cad()
-    iid = cad.create({"type": "Structure fire", "address": "209 Westchester Ave"})["id"]
-    r = runcards.recommend(cad.store, "Structure fire", iid)
-    assert names(r["units"]) == ["Engine 60", "Engine 61", "Engine 62", "Ladder 31", "Rescue 40", "2398 Duty Officer"]
-    assert r["unfilled"] == []
-    # Ladder 31 out of service, Tower Ladder 2 and Engine 61 committed elsewhere, 2398 too.
-    other = cad.create({"type": "Other"})["id"]
-    cad.unit_status(by_name(cad, "Ladder 31")["id"], {"status": "out_of_service", "note": "at the shop"})
-    cad.store.assign(other, [by_name(cad, n)["id"] for n in ("Tower Ladder 2", "Engine 61", "2398 Duty Officer")])
-    r = runcards.recommend(cad.store, "Structure fire", iid)
-    assert names(r["units"]) == ["Engine 60", "Engine 62", "Engine 63", "Rescue 40"]
-    assert r["unfilled"] == ["no ladder/tower available", "2398 Duty Officer not available (committed to PCFD-2026-0002)"
-                             .replace("2026", str(datetime.now(TZ).year))]
-    # Units already on this incident fill their slots; spares come after regular apparatus.
-    cad.store.assign(iid, [by_name(cad, n)["id"] for n in ("Engine 60", "Engine 62", "Engine 63", "Rescue 40")])
-    cad.store.assign(other, [by_name(cad, "Engine 64")["id"]])
-    r = runcards.recommend(cad.store, "MVA with entrapment", other)
-    assert names(r["units"]) == ["Rescue 41"] and r["unfilled"] == []          # the rest are already on it
-    assert r["already"] == ["2398 Duty Officer", "Engine 61", "Engine 64", "Tower Ladder 2"]
-    third = cad.create({"type": "Structure fire"})["id"]
-    r = runcards.recommend(cad.store, "Structure fire", third)
-    assert [(u["name"], u["spare"]) for u in r["units"]] == [("Engine 59", True), ("Rescue 41", True)]   # spares, last
+    iid = cad.create({"type": "STRU", "address": "209 Westchester Ave"})["id"]
+    r = runcards.recommend(cad.store, "STRU", "", iid)
+    assert names(r["units"]) == ["E60", "E61", "E62", "L31", "R40", "2398"] and r["unfilled"] == []
+    other = cad.create({"type": "SERVICE"})["id"]
+    cad.unit_status(uid(cad, "L31"), {"status": "OUT OF SERVICE"})
+    cad.store.assign(other, [uid(cad, n) for n in ("TL2", "E61", "2398")])
+    r = runcards.recommend(cad.store, "STRU", "", iid)
+    assert names(r["units"]) == ["E60", "E62", "E63", "R40"]
+    assert r["unfilled"] == ["no ladder/tower available", f"2398 not available (committed to {cad.store.incident(other)['number']})"]
+    # Spares after regular apparatus; another department's engine (E14) is never picked by kind.
+    cad.store.assign(iid, [uid(cad, n) for n in ("E60", "E62", "E63", "R40")])
+    cad.store.assign(other, [uid(cad, "E64")])
+    third = cad.create({"type": "STRU"})["id"]
+    r = runcards.recommend(cad.store, "STRU", "", third)
+    assert [(u["name"], u["spare"]) for u in r["units"]] == [("E59", True), ("R41", True)]
     assert r["unfilled"][:2] == ["only 1 of 3 engine available", "no ladder/tower available"]
+    assert by_name(cad, "E14")["status"] == "AVAILABLE"
 
 
-def test_run_cards_seeded_as_defaults_and_edits_validated():
+def test_run_card_resolution_type_subtype_beats_type():
     cad = make_cad()
     cards = {c["type"]: c for c in runcards.cards(cad.store)}
-    assert len(cards) == 13 and all(c["is_default"] for c in cards.values())
-    assert cards["Water / marine rescue"]["slots"][0] == {"unit": "Marine 40"}
-    for bad in ([], [{"kind": "helicopter"}], [{"unit": "Engine 99"}], [{"kind": "engine", "count": 0}], "x"):
+    assert set(cards) == {"STRU", "ALARM/COMM", "ALARM/RESD", "ALARM/CO-COMM", "ALARM/CO-RESD", "HAZARD/GAS",
+                          "HAZARD/WIRES", "BRUSH", "MVA", "MVA/EXTRI", "RESCUE/WATER", "SERVICE", "ALS", "BLS", "MA",
+                          "INVEST"}
+    assert all(c["is_default"] for c in cards.values()) and cards["ALARM/COMM"]["phrase"] == "a commercial fire alarm"
+    assert runcards.resolve(cad.store, "MVA", "EXTRI")["type"] == "MVA/EXTRI"
+    assert runcards.resolve(cad.store, "MVA", "CAR")["type"] == "MVA"          # no MVA/CAR card: the type's
+    assert runcards.resolve(cad.store, "ALARM", "TROUB") is None               # no ALARM card at all
+    r = runcards.recommend(cad.store, "ALARM", "TROUB")
+    assert r["units"] == [] and r["note"] == "No run card for Alarm / Trouble: add units by hand"
+    cad.save_run_card({"type": "ALARM", "slots": [{"kind": "engine", "count": 1}]})
+    assert runcards.resolve(cad.store, "ALARM", "TROUB")["type"] == "ALARM"
+    assert runcards.resolve(cad.store, "ALARM", "COMM")["type"] == "ALARM/COMM"
+    for bad in ([], [{"kind": "helicopter"}], [{"unit": "E99"}], [{"kind": "engine", "count": 0}], "x"):
         with pytest.raises(CadError):
-            cad.save_run_card({"type": "CO alarm", "slots": bad})
-    c = cad.save_run_card({"type": "CO alarm", "slots": [{"kind": "engine", "count": 2}, {"unit": "2398 Duty Officer"}]})
-    assert c["slots"] == [{"kind": "engine", "count": 2}, {"unit": "2398 Duty Officer"}] and not c["is_default"]
-    cad.save_run_card({"type": "CO / gas", "rename_from": "CO alarm", "slots": [{"kind": "engine"}]})
-    assert runcards.card(cad.store, "CO alarm") is None and runcards.card(cad.store, "CO / gas")
-    cad.create({"type": "CO / gas"})
-    with pytest.raises(CadError, match="open incident"):
-        cad.delete_run_card({"type": "CO / gas"})
+            cad.save_run_card({"type": "ALARM/RESD", "slots": bad})
+    with pytest.raises(CadError, match="event type"):
+        cad.save_run_card({"type": "FIRE", "slots": [{"kind": "engine"}]})
+    c = cad.save_run_card({"type": "ALARM/RESD", "slots": [{"kind": "engine", "count": 2}, {"unit": "2398"}]})
+    assert c["slots"] == [{"kind": "engine", "count": 2}, {"unit": "2398"}] and not c["is_default"]
+    cad.delete_run_card({"type": "ALARM/RESD"})
+    assert runcards.resolve(cad.store, "ALARM", "RESD")["type"] == "ALARM"
     assert runcards.seed(cad.store) == 0                                # never re-seeded over edits
 
 
-def test_page_types_map_to_run_cards():
-    assert runcards.from_page("Fire alarm", "fire", PAGE_TEXT) == "Fire alarm – commercial"
-    assert runcards.from_page("Fire alarm", "fire", "residential fire alarm") == "Fire alarm – residential"
-    assert runcards.from_page("MVA", "rescue", "mva with entrapment") == "MVA with entrapment"
-    assert runcards.from_page("Working fire", "fire", "") == "Structure fire"
-    assert runcards.from_page("Breathing problem", "ems", "") == "EMS assist"
-    assert runcards.from_page("Unknown", "unknown", "") == "Other"
+def test_page_types_map_to_sheet_types_or_leave_a_note():
+    assert runcards.from_page("Fire alarm", "fire", PAGE_TEXT) == ("ALARM", "", "commercial or residential not stated on the page")
+    assert runcards.from_page("Fire alarm", "fire", "residential fire alarm, 5 King St") == ("ALARM", "RESD", "")
+    assert runcards.from_page("Fire alarm", "fire", "commercial alarm") == ("ALARM", "COMM", "")
+    assert runcards.from_page("CO alarm", "hazard", "co alarm, residential") == ("ALARM", "CO-RESD", "")
+    assert runcards.from_page("CO alarm", "hazard", "carbon monoxide")[:2] == ("ALARM", "")
+    assert runcards.from_page("Working fire", "fire", "") == ("STRU", "", "")
+    assert runcards.from_page("MVA", "rescue", "mva with entrapment") == ("MVA", "EXTRI", "")
+    assert runcards.from_page("Wires down", "hazard", "") == ("HAZARD", "WIRES", "")
+    assert runcards.from_page("Breathing problem", "ems", "6 delta 1") == (
+        "", "", "EMS (page: breathing problem): ALS or BLS not stated on the page")
+    assert runcards.from_page("EMS assist", "ems", "assist the ALS unit") == ("ALS", "", "")
+    assert runcards.from_page("Unknown", "unknown", "") == ("", "", "type not recognised (page)")
 
 
-# -- dispatch text and audio --------------------------------------------------------------------------
+# -- emergency / non-emergency ----------------------------------------------------------------------------
 
-def test_dispatch_text_as_spoken():
-    inc = {"address": "209 Westchester Ave, Port Chester", "cross_street": "Pearl St", "type": "Structure fire"}
-    card = {"spoken": "a structure fire"}
-    t = dispatcher.build_text("Port Chester Fire", inc, ["Engine 60", "Ladder 31", "Rescue 40"], card,
-                              at=local(2026, 10, 7, 14, 32))
-    assert t == ("Port Chester Fire, Engine 60, Ladder 31, Rescue 40, respond to 209 Westchester Avenue, "
-                 "cross of Pearl Street, for a structure fire. Time out 14:32.")
-    assert dispatcher.speech(t + " 2398 Duty Officer") == (
-        "Port Chester Fire, Engine 60, Ladder 31, Rescue 40, respond to 2 0 9 Westchester Avenue, "
-        "cross of Pearl Street, for a structure fire. Time out 14 32. 23 98 Duty Officer")
+def test_emergency_class_from_type_with_override():
+    L = lists.load()
+    assert not L.is_emergency("NOTIF") and not L.is_emergency("SERVICE", "WATER") and not L.is_emergency("HAZARD", "NOTIF-PD")
+    assert L.is_emergency("RESCUE", "WATER") and L.is_emergency("STRU") and L.is_emergency("SERVICE", "BOAT")
+    cad = make_cad()
+    road = cad.create({"type": "NOTIF", "address": "Westchester Ave", "remarks": "road closed for paving",
+                       "until_at": local(2026, 10, 10, 18, 0)})
+    assert road["emergency"] == 0 and road["until_at"] == local(2026, 10, 10, 18, 0) and road["number"]
+    forced = cad.create({"type": "NOTIF", "emergency": True})
+    assert forced["emergency"] == 1
+    assert cad.create({"type": "STRU", "emergency": False})["emergency"] == 0
+
+
+def test_accepting_a_queued_page_routes_by_class():
+    cad = make_cad()
+    _, inc = monitor_incident("Port Chester Fire, respond to a residential fire alarm at 5 King Street")
+    p = cad.from_monitor(inc)
+    assert (p["status"], p["number"], p["received_via"]) == ("queued", None, "60 CONTROL")
+    a = cad.accept(p["id"], {"operator": "JD"})
+    assert (a["status"], a["emergency"]) == ("pending", 1) and re.fullmatch(r"\d{2}-000001", a["number"])
+    # A page the operator files as a notification: accepted straight into Non-emergency events.
+    _, inc2 = monitor_incident("Port Chester Fire, be advised, hydrant out of service at 10 Grove Street")
+    q = cad.from_monitor(inc2)
+    with pytest.raises(CadError, match="pick the type"):
+        cad.accept(q["id"], {})
+    b = cad.accept(q["id"], {"type": "NOTIF", "operator": "JD"})
+    assert (b["status"], b["emergency"]) == ("pending", 0)
+    assert texts(cad, q["id"])[-1].startswith("Accepted as") and "(non-emergency): Notification" in texts(cad, q["id"])[-1]
+
+
+def test_non_emergency_events_get_no_dispatch_but_can_have_units():
+    cad = make_cad()
+    iid = cad.create({"type": "NOTIF", "subtype": "WATER", "address": "10 Grove St", "remarks": "hydrant OOS"})["id"]
+    r = cad.recommend(iid, {})
+    assert r["units"] == [] and r["note"].startswith("Non-emergency event")
+    e60 = uid(cad, "E60")
+    for fn in (cad.dispatch, cad.preview):
+        with pytest.raises(CadError, match="non-emergency"):
+            fn(iid, {"unit_ids": [e60], "operator": "JD"})
+    cad.attach(iid, {"unit_ids": [e60], "operator": "JD"})
+    inc = cad.store.full(iid)
+    assert inc["status"] == "active" and inc["dispatches"] == [] and texts(cad, iid)[-1] == "Attached E60"
+    assert by_name(cad, "E60")["status"] == "AVAILABLE" and by_name(cad, "E60")["incident_number"] == inc["number"]
+    cad.note(iid, {"text": "DPW notified", "operator": "JD"})
+    cad.close(iid, {"disposition": "NOTIF MADE", "operator": "JD"})
+    assert by_name(cad, "E60")["incident_id"] is None
+
+
+def test_open_non_emergency_events_survive_restarts_however_old(tmp_path):
+    clock = Clock(local(2026, 10, 4, 9, 0))
+    cad = make_cad(tmp_path, clock=clock)
+    iid = cad.create({"type": "NOTIF", "remarks": "Main St closed", "until_at": local(2026, 10, 9, 17, 0)})["id"]
+    closed = cad.create({"type": "NOTIF"})["id"]
+    cad.close(closed, {"disposition": "COMPLETE"})
+    clock.t = local(2026, 10, 7, 15, 0)                  # three days later, a restart
+    cad2 = make_cad(tmp_path, clock=clock)
+    listed = {i["id"]: i for i in cad2.store.incidents()}
+    assert iid in listed and listed[iid]["emergency"] is False and listed[iid]["until_at"] == local(2026, 10, 9, 17, 0)
+    assert closed not in listed                          # closed ones drop off after 12 h
+
+
+# -- dispatch wording and audio ------------------------------------------------------------------------------
+
+def test_dispatch_wording_new_add_on_upgrade_full():
+    inc = {"address": "169 North Main St, Port Chester"}
+    at = local(2026, 10, 7, 15, 13)
+    kw = dict(department="Port Chester Fire", incident=inc, at=at)
+    assert dispatcher.compose("new", units=["Engine 60", "Ladder 31"], phrase="a commercial fire alarm", **kw) == (
+        "Port Chester Fire, Engine 60, Ladder 31, respond to 169 North Main Street, for a commercial fire alarm. "
+        "Time out 15:13.")
+    assert dispatcher.compose("new", units=["Engine 60"], phrase="a structure fire", full=True, **kw) == (
+        "Port Chester Fire, full department response, respond to 169 North Main Street, for a structure fire. "
+        "Time out 15:13.")
+    t = dispatcher.compose("add_on", units=["Engine 61"], phrase="a commercial fire alarm",
+                           already=[("responding", ["Engine 60"]), ("on location", ["Ladder 31", "2398"])], **kw)
+    assert t == ("Port Chester Fire, Engine 61, added to the assignment. Engine 60 responding, Ladder 31 and 2398 on "
+                 "location. 169 North Main Street, commercial fire alarm. Time out 15:13.")
+    assert dispatcher.compose("add_on", units=["Engine 61", "Rescue 40"], phrase="a fire alarm",
+                              department="Port Chester Fire", incident={}, at=at) == (
+        "Port Chester Fire, Engine 61 and Rescue 40, added to the assignment. Fire alarm. Time out 15:13.")
+    up = dict(phrase="a commercial fire alarm", info="smoke in the structure", **kw)
+    assert dispatcher.compose("upgrade", units=[], new_phrase="a structure fire", full=True, **up) == (
+        "Port Chester Fire, upgrade on your last alarm, 169 North Main Street. Smoke in the structure. "
+        "Now a structure fire, full department response. Time out 15:20.".replace("15:20", "15:13"))
+    assert dispatcher.compose("upgrade", units=["Engine 62", "Rescue 40"], new_phrase="a structure fire", **up) == (
+        "Port Chester Fire, upgrade on your last alarm, 169 North Main Street. Smoke in the structure. "
+        "Now a structure fire. Engine 62, Rescue 40, respond. Time out 15:13.")
+    # The wording is the data file's: a department edit changes it without code.
+    w = dict(lists.load().wording, full_response="all companies")
+    assert "all companies, respond" in dispatcher.compose("new", units=[], full=True, wording=w, **kw)
+    # Spoken: the house number digit by digit, wherever the location sits.
+    assert dispatcher.speech(t, dispatcher.where(inc)).endswith("on location. 1 6 9 North Main Street, commercial fire "
+                                                                "alarm. Time out 15 13.")
     assert dispatcher.spoken_street("St Marys Pl, Rye Brook") == "St Marys Place, Rye Brook"   # other towns said
     assert dispatcher.spoken_street("12 N Main St") == "12 North Main Street"
-    t = dispatcher.build_text("Port Chester Fire", {"type": "Other"}, ["2398 Duty Officer"], None, at=local(2026, 1, 2, 9, 5))
-    assert t == "Port Chester Fire, 2398 Duty Officer, respond for an other. Time out 09:05."
+
+
+def test_service_dispatch_add_on_and_upgrade():
+    clock = Clock(local(2026, 10, 7, 15, 13))
+    cad = make_cad(clock=clock)
+    iid = cad.create({"type": "ALARM", "subtype": "COMM", "address": "169 North Main St"})["id"]
+    first = cad.dispatch(iid, {"unit_ids": [uid(cad, "E60"), uid(cad, "L31"), uid(cad, "2398")], "operator": "JD"})
+    assert first["kind"] == "dispatch" and first["text"].startswith(
+        "Port Chester Fire, Engine 60, Ladder 31, 23 98, respond to 169 North Main Street, for a commercial fire alarm.")
+    cad.unit_status(uid(cad, "E60"), {"status": "RESPONDING"})
+    cad.unit_status(uid(cad, "L31"), {"status": "ON LOCATION"})
+    cad.unit_status(uid(cad, "2398"), {"status": "ON LOCATION"})
+    pv = cad.preview(iid, {"unit_ids": [uid(cad, "E61")]})
+    add = cad.dispatch(iid, {"unit_ids": [uid(cad, "E61")], "operator": "JD"})
+    assert pv["text"] == add["text"] == ("Port Chester Fire, Engine 61, added to the assignment. Engine 60 responding, "
+                                         "Ladder 31 and 23 98 on location. 169 North Main Street, commercial fire alarm. "
+                                         "Time out 15:13.")
+    assert add["kind"] == "add-on" and "E61 added to the assignment" in texts(cad, iid)
+    with pytest.raises(CadError, match="nothing to upgrade"):
+        cad.upgrade(iid, {"operator": "JD"})
+    # The upgrade recommends only what the new card adds over what's there.
+    rec = cad.recommend(iid, {"type": "STRU"})
+    assert names(rec["units"]) == ["E62", "R40"]
+    clock.t = local(2026, 10, 7, 15, 20)
+    body = {"type": "STRU", "info": "smoke in the structure", "full": True, "unit_ids": [u["id"] for u in rec["units"]],
+            "operator": "JD"}
+    pv = cad.upgrade(iid, dict(body, preview=True))
+    assert cad.store.incident(iid)["type"] == "ALARM"                   # a preview changes nothing
+    up = cad.upgrade(iid, body)
+    assert pv["text"] == up["text"] == ("Port Chester Fire, upgrade on your last alarm, 169 North Main Street. Smoke in "
+                                        "the structure. Now a structure fire, full department response. Time out 15:20.")
+    inc = cad.store.full(iid)
+    assert (inc["type"], inc["subtype"]) == ("STRU", "") and [d["kind"] for d in inc["dispatches"]] == ["dispatch", "add-on", "upgrade"]
+    t = texts(cad, iid)
+    assert "Upgrade: Alarm / Commercial → Structure fire; smoke in the structure; full department response" in t
+    assert "E62 dispatched (upgrade)" in t and by_name(cad, "R40")["status"] == "DISPATCHED"
+    fresh = cad.create({"type": "STRU"})["id"]
+    with pytest.raises(CadError, match="dispatch it first"):
+        cad.upgrade(fresh, {"info": "x", "operator": "JD"})
 
 
 def peak_hz(x, rate=16000):
@@ -226,10 +552,10 @@ def test_dispatch_audio_tones_then_voice_twice(tmp_path):
 def test_no_tts_means_text_only_dispatch(monkeypatch):
     monkeypatch.setattr(shutil, "which", lambda name: None)
     cad = make_cad()
-    iid = cad.create({"type": "CO alarm", "address": "1 King St"})["id"]
-    r = cad.dispatch(iid, {"unit_ids": [by_name(cad, "Engine 60")["id"]], "operator": "JD"})
+    iid = cad.create({"type": "ALARM", "subtype": "CO-RESD", "address": "1 King St"})["id"]
+    r = cad.dispatch(iid, {"unit_ids": [uid(cad, "E60")], "operator": "JD"})
     assert r["audio_url"] is None and "say" in r["audio_note"] and r["transmitted"] is False
-    assert cad.store.incidents()[0]["dispatches"][0]["audio_note"] == r["audio_note"]
+    assert cad.store.full(iid)["dispatches"][0]["audio_note"] == r["audio_note"]
 
 
 # -- the bridge from the monitor ------------------------------------------------------------------------
@@ -239,32 +565,32 @@ def monitor_incident(text=PAGE_TEXT, depts=("Port Chester FD",), geo=None):
     return store, store.on_page("p1", list(depts), parse(text), at=local(2026, 10, 7, 14, 32))
 
 
-def test_page_for_port_chester_becomes_one_pending_incident():
+def test_page_for_port_chester_becomes_one_queued_event():
     cad = make_cad()
     geo = {"lat": 41.0025, "lon": -73.6669, "label": "209 Westchester Ave, Port Chester", "kind": "address",
            "confidence": 0.91}
     store, inc = monitor_incident(geo=geo)
     p = cad.from_monitor(inc)
-    assert (p["status"], p["number"], p["source"], p["source_ref"]) == ("pending", None, "60 Control page", f"monitor:{inc.id}")
-    assert (p["type"], p["address"], p["cross_street"]) == ("Fire alarm – commercial", "209 Westchester Ave, Port Chester", "Pearl Street")
-    assert (p["lat"], p["lon"]) == (41.0025, -73.6669)
-    assert "60 Control page 14:32: " + PAGE_TEXT in p["narrative"] and "location as heard: 209 West Chester Avenue" in p["narrative"]
-    # The repeat (same monitor incident) doesn't open a second one.
+    assert (p["status"], p["number"], p["source"], p["source_ref"]) == ("queued", None, "60 Control page", f"monitor:{inc.id}")
+    assert (p["type"], p["subtype"], p["type_note"]) == ("ALARM", "", "commercial or residential not stated on the page")
+    assert (p["address"], p["cross_street"], p["lat"]) == ("209 Westchester Ave, Port Chester", "Pearl Street", 41.0025)
+    assert "60 Control page 14:32: " + PAGE_TEXT in p["remarks"] and "location as heard: 209 West Chester Avenue" in p["remarks"]
     inc2 = store.on_page("p2", ["Port Chester FD"], parse(PAGE_TEXT), at=local(2026, 10, 7, 14, 33))
     assert inc2 is inc
     cad.from_monitor(inc2)
-    pending = [i for i in cad.store.incidents() if i["status"] == "pending"]
-    assert len(pending) == 1 and pending[0]["narrative"].count(PAGE_TEXT) == 2
+    queued = [i for i in cad.store.incidents() if i["status"] == "queued"]
+    assert len(queued) == 1 and queued[0]["remarks"].count(PAGE_TEXT) == 2
     with pytest.raises(CadError, match="accept"):
         cad.dispatch(p["id"], {"unit_ids": [1], "operator": "JD"})
-    cad.accept(p["id"], {"operator": "JD"})
-    assert cad.from_monitor(inc)["status"] == "active"
-    # Units named on the page are noted, not assigned.
+    cad.accept(p["id"], {"subtype": "COMM", "operator": "JD"})
+    acc = cad.store.incident(p["id"])
+    assert (acc["status"], acc["subtype"], acc["type_note"]) == ("pending", "COMM", "")
+    assert cad.from_monitor(inc)["status"] == "pending"
     _, inc3 = monitor_incident("Port Chester Fire, Engine 61, 2398, respond to a structure fire at 5 King Street")
     inc3.units = ["Engine 61", "2398 Duty Officer"]
     p3 = cad.from_monitor(inc3)
-    assert "units named on the page: Engine 61, 2398 Duty Officer" in p3["narrative"] and p3["type"] == "Structure fire"
-    assert by_name(cad, "Engine 61")["incident_id"] is None and p3["lat"] is None
+    assert "units named on the page: Engine 61, 2398 Duty Officer" in p3["remarks"] and p3["type"] == "STRU"
+    assert by_name(cad, "E61")["incident_id"] is None and p3["lat"] is None
 
 
 def test_rye_brook_only_page_is_not_ours_to_dispatch():
@@ -273,21 +599,152 @@ def test_rye_brook_only_page_is_not_ours_to_dispatch():
     assert cad.from_monitor(inc) is None and cad.store.incidents() == []
 
 
-def test_app_page_opens_pending_cad_incident(tmp_path):
+def test_app_page_opens_queued_cad_event(tmp_path):
     from tests.test_app import FakeWhisper, cfg, tone, voice, wait
     from sizeup.app import App
     from sizeup.radio.fm import RATE, Channel, Segment
-    app = App(replace(cfg(tmp_path), cad_db=str(tmp_path / "state" / "cad.sqlite"), unit_callsigns=CALLSIGNS))
+    app = App(replace(cfg(tmp_path), cad_db=str(tmp_path / "state" / "cad.sqlite")))
     app._kind = {"South 2": "paging"}
     app.stt.client = FakeWhisper({6: PAGE_TEXT})
     app.stt.start()
     audio = np.concatenate([tone(349.1, 1.0), tone(311.1, 3.0), np.zeros(int(0.2 * RATE)), voice(6.0)]).astype(np.float32)
     now = time.time()
     app._segment(Channel(470.2, "South 2"), Segment(now, now + len(audio) / RATE, audio, 25.0))
-    assert wait(lambda: any(i["status"] == "pending" for i in app.cad.store.incidents()))
+    assert wait(lambda: any(i["status"] == "queued" for i in app.cad.store.incidents()))
     p = app.cad.store.incidents()[0]
-    assert p["type"] == "Fire alarm – commercial" and p["source_ref"] == f"monitor:{app.store.active().id}"
+    assert p["type"] == "ALARM" and p["source_ref"] == f"monitor:{app.store.active().id}"
     assert (tmp_path / "state" / "cad.sqlite").is_file() and isinstance(app.cad.transmitter, NullTransmitter)
+
+
+# -- location suggestions ---------------------------------------------------------------------------------
+
+def stub_geocoder(*ms):
+    return lambda q: [dict(label=l, municipality=m, confidence=c, lat=41.0, lon=-73.67, kind="address", precision="exact")
+                      for l, m, c in ms]
+
+
+def test_location_suggestions_rank_our_towns_first_and_say_the_town(tmp_path):
+    # Stub: the same number and street in Rye scoring a bit higher than in Port Chester.
+    geo = stub_geocoder(("20 Grace Church St, Rye", "Rye", 0.86), ("Grace Church St", "Harrison", 0.5),
+                        ("20 Grace Church St, Port Chester", "Port Chester", 0.80),
+                        ("20 Grace Church St, Rye Brook", "Rye Brook", 0.79), ("20 Grace Ave, Mount Kisco", "Mount Kisco", 0.84))
+    cad = make_cad(geocoder=geo)
+    labels = [m["label"] for m in cad.geocode("20 grace church st")["matches"]]
+    assert labels == ["20 Grace Church St, Port Chester", "20 Grace Church St, Rye Brook", "20 Grace Church St, Rye",
+                      "20 Grace Ave, Mount Kisco", "Grace Church St, Harrison"]     # every one says its town
+    # A town typed in the box wins.
+    assert cad.geocode("20 grace church st rye")["matches"][0]["town"] == "Rye"
+    assert cad.geocode("20 grace church st, rye brook")["matches"][0]["town"] == "Rye Brook"
+    # The order is the data file's.
+    p = write_lists(tmp_path, geo_town_order=["Rye", "Port Chester"])
+    cad2 = make_cad(geocoder=geo, lists=str(p))
+    assert cad2.geocode("20 grace church st")["matches"][0]["town"] == "Rye"
+
+
+@pytest.mark.skipif(not (ROOT / "data" / "gazetteer.sqlite").is_file(), reason="no gazetteer data")
+def test_location_suggestions_real_duplicate_port_chester_first():
+    from sizeup.geo.gazetteer import Gazetteer
+    g = Gazetteer()
+    geo = lambda q: [{k: getattr(m, k) for k in ("label", "lat", "lon", "kind", "municipality", "precision")}
+                     | {"confidence": round(float(m.confidence), 2)} for m in g.candidates(q)[:20]]
+    cad = make_cad(geocoder=geo)
+    ms = cad.geocode("20 grace church st")["matches"]       # 20 Grace Church St is in Port Chester and in Rye
+    assert [m["label"] for m in ms[:2]] == ["20 Grace Church St, Port Chester", "20 Grace Church St, Rye"]
+    assert cad.geocode("20 grace church st rye")["matches"][0]["label"] == "20 Grace Church St, Rye"
+
+
+# -- records: CSV exports and admin ----------------------------------------------------------------------
+
+def read_csv(data: bytes) -> list[list[str]]:
+    return list(csv.reader(io.StringIO(data.decode("utf-8-sig"))))
+
+
+def test_csv_exports_have_the_sheets_columns_and_codes():
+    clock = Clock(local(2026, 10, 7, 18, 58))
+    cad = make_cad(clock=clock)
+    iid = cad.create({"type": "SERVICE", "subtype": "BOAT", "address": "209 Westchester Ave", "geo_label":
+                      "209 Westchester Ave, Port Chester", "lat": 41.0, "lon": -73.67, "caller_name": "COREY",
+                      "remarks": "boat adrift", "operator": "JD"})["id"]
+    cad.dispatch(iid, {"unit_ids": [uid(cad, "E63")], "operator": "JD"})
+    clock.t += 90
+    cad.unit_status(uid(cad, "E63"), {"status": "RESPONDING", "operator": "JD"})
+    clock.t += 3600
+    cad.close(iid, {"disposition": "SERVICE", "operator": "JD"})
+    rows = read_csv(cad.export("incidents.csv"))
+    assert rows[0] == export.INCIDENT_COLUMNS == ["Incident #", "Unused", "Event Type", "Event Sub-Type", "Location",
+                                                 "Municipality", "Received", "Status", "Assigned Units", "Dispatch",
+                                                 "First Enroute", "First On Scene", "Clear", "Duration", "Disposition",
+                                                 "Cross Streets", "Narrative Summary", "Closed?"]
+    assert rows[1] == ["26-000001", "", "SERVICE", "BOAT", "209 Westchester Ave", "Port Chester", "10/07/2026 18:58:00",
+                       "CLOSED", "E63", "10/07/2026 18:58:00", "10/07/2026 18:59:30", "", "10/07/2026 19:59:30",
+                       "1:01:30", "SERVICE", "", "boat adrift", "TRUE"]
+    calls = read_csv(cad.export("calls.csv"))
+    assert calls[0] == ["Incident #", "Event Type", "Event Sub-Type", "Location", "Received", "Clear", "Duration",
+                        "Disposition", "Units"] and calls[1][0] == "26-000001" and calls[1][-1] == "E63"
+    uh = read_csv(cad.export("unit-history.csv"))
+    assert uh[0] == ["Timestamp", "Unit", "Old Status", "New Status", "Incident #", "Operator"]
+    assert uh[1:] == [["10/07/2026 18:58:00", "E63", "AVAILABLE", "DISPATCHED", "26-000001", "JD"],
+                      ["10/07/2026 18:59:30", "E63", "DISPATCHED", "RESPONDING", "26-000001", "JD"],
+                      ["10/07/2026 19:59:30", "E63", "RESPONDING", "AVAILABLE", "26-000001", "JD"]]
+    log = read_csv(cad.export("event-log.csv"))
+    assert log[0] == ["Timestamp", "Incident #", "Unit", "Event Type", "Event / Comment", "Operator"]
+    kinds = [r[3] for r in log[1:]]
+    assert kinds[:3] == ["EVENT", "SYSTEM", "UNIT STATUS"] and "DISPATCH" in kinds
+    assert cad.export("nope.csv") is None
+    a = cad.admin()
+    assert a["next_number"] == "26-000002" and a["counts"]["Incident database"] == 1 and a["counts"]["Unit history"] == 3
+
+
+# -- migration from schema v1 ---------------------------------------------------------------------------------
+
+def test_migrates_a_v1_database(tmp_path):
+    path = tmp_path / "cad.sqlite"
+    db = sqlite3.connect(path)
+    db.executescript(V1_SCHEMA + "PRAGMA user_version = 1;")
+    t0 = local(2026, 10, 7, 12, 0)
+    for i, (name, kind, status) in enumerate((("2398 Duty Officer", "chief", "dispatched"), ("Engine 60", "engine", "onscene"),
+                                              ("Marine 40", "boat", "out_of_service"), ("Tower Ladder 2", "tower", "available-in-quarters"),
+                                              ("Rescue 40", "rescue", "transporting"))):
+        db.execute("INSERT INTO units (id, name, kind, status, status_at, sort) VALUES (?, ?, ?, ?, ?, ?)",
+                   (i + 1, name, kind, status, t0, i))
+    db.executemany("INSERT INTO incidents (id, number, type, address, narrative, source, source_ref, status, created_at, closed_at) "
+                   "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                   [(1, "PCFD-2026-0007", "Structure fire", "5 King St", "smoke", "manual", None, "active", t0, None),
+                    (2, None, "Fire alarm – commercial", "9 Main St", "page", "60 Control page", "monitor:9", "pending", t0, None),
+                    (3, "PCFD-2026-0008", "EMS assist", "", "", "manual", None, "active", t0, None),
+                    (4, "PCFD-2026-0006", "Other", "", "", "manual", None, "closed", t0, t0 + 60)])
+    db.executemany("INSERT INTO assignments (incident_id, unit_id, dispatched_at) VALUES (?, ?, ?)", [(1, 1, t0), (1, 2, t0)])
+    db.execute("INSERT INTO seq (year, last) VALUES (2026, 8)")
+    db.execute("INSERT INTO run_cards (id, type, spoken, is_default, sort) VALUES (1, 'Structure fire', 'a structure fire', 1, 0)")
+    db.execute("INSERT INTO run_cards (id, type, spoken, is_default, sort) VALUES (2, 'CO alarm', 'a CO alarm', 0, 1)")
+    db.execute("INSERT INTO run_cards (id, type, spoken, is_default, sort) VALUES (3, 'Lockout', '', 0, 2)")
+    db.executemany("INSERT INTO run_card_slots (card_id, pos, kind, count, unit) VALUES (?, ?, ?, ?, ?)",
+                   [(1, 0, "engine", 3, ""), (2, 0, "engine", 1, ""), (2, 1, "", 1, "2398 Duty Officer"),
+                    (2, 2, "boat", 1, ""), (3, 0, "engine", 1, "")])
+    db.execute("INSERT INTO dispatches (incident_id, at, operator, text) VALUES (1, ?, 'JD', 'Port Chester Fire...')", (t0,))
+    db.commit()
+    db.close()
+    cad = make_cad(tmp_path)
+    st = cad.store
+    assert st.db.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert "schema v1 -> v2" in st.migrated[0] and any("'Lockout' removed" in m for m in st.migrated)
+    rows = {r["id"]: r for r in st.q("SELECT * FROM incidents")}
+    assert (rows[1]["number"], rows[1]["type"], rows[1]["status"], rows[1]["remarks"]) == ("26-000007", "STRU", "active", "smoke")
+    assert (rows[2]["number"], rows[2]["type"], rows[2]["subtype"], rows[2]["status"], rows[2]["received_via"]) == (
+        None, "ALARM", "COMM", "queued", "60 CONTROL")
+    assert (rows[3]["type"], rows[3]["status"], rows[3]["type_note"]) == ("", "pending", "was 'EMS assist' before the sheet's types: pick the type")
+    assert rows[4]["status"] == "closed" and rows[4]["disposition"] == ""
+    units = {u["name"]: u for u in st.units()}
+    assert units["2398"]["status"] == "DISPATCHED" and units["2398"]["incident_number"] == "26-000007"
+    assert (units["E60"]["status"], units["M40"]["status"], units["M40"]["kind"], units["TL2"]["status"], units["R40"]["status"]) == (
+        "ON LOCATION", "OUT OF SERVICE", "marine", "AVAILABLE", "DISPATCHED")
+    assert len(units) == 61 and units["2398"]["spoken"] == "23 98"           # the rest of the boards added
+    cards = {c["type"]: c for c in runcards.cards(st)}
+    assert cards["ALARM"]["slots"] == [{"kind": "engine", "count": 1}, {"unit": "2398"}, {"kind": "marine", "count": 1}]
+    assert not cards["ALARM"]["is_default"] and cards["STRU"]["is_default"] and "Lockout" not in cards
+    assert st.full(1)["dispatches"][0]["kind"] == "dispatch"
+    assert st.incident(st.create_incident(type="SERVICE"))["number"] == "26-000009"     # the sequence carries on
+    cad.close(1, {"disposition": "FIRE"})
 
 
 # -- HTTP API -----------------------------------------------------------------------------------------
@@ -296,9 +753,8 @@ def test_app_page_opens_pending_cad_incident(tmp_path):
 def server(monkeypatch):
     from sizeup.web.server import WebServer
     monkeypatch.setattr(dispatcher, "tts", lambda text, voice="", rate_wpm=0: np.full(8000, 0.1, np.float32))
-    geocoder = lambda q: [{"label": "209 Westchester Ave, Port Chester", "lat": 41.0025, "lon": -73.6669,
-                           "kind": "address", "municipality": "Port Chester", "precision": "exact", "confidence": 0.93}]
-    cad = Cad(Settings(callsigns=CALLSIGNS), geocoder=geocoder, log=lambda m: None)
+    geocoder = stub_geocoder(("209 Westchester Ave, Port Chester", "Port Chester", 0.93))
+    cad = Cad(Settings(), geocoder=geocoder, log=lambda m: None)
     ws = WebServer("127.0.0.1", 0, {"timezone": "America/New_York"}, lambda: {"time": 0}, lambda cid: None,
                    lambda iid: False, cad=CadApi(cad))
     threading.Thread(target=ws.serve_forever, daemon=True).start()
@@ -320,62 +776,66 @@ def server(monkeypatch):
     ws.shutdown()
 
 
-def test_api_incident_lifecycle(server):
+def test_api_event_lifecycle(server):
     code, page, ctype = server.call("GET", "/cad")
     assert code == 200 and b"cad.js" in page and ctype.startswith("text/html")
     code, st = server.j("GET", "/api/cad/state")
-    assert code == 200 and len(st["units"]) == 16 and st["incidents"] == [] and st["run_cards_default"]
+    assert code == 200 and len(st["units"]) == 61 and st["incidents"] == [] and st["run_cards_default"]
+    assert st["lists"]["source"] == "data/cad_lists.json" and st["lists"]["unit_boards"][0]["units"][24] is None
     assert st["transmit"] == {"enabled": False, "transmitter": "null", "channels": ["FG1", "PC repeater"],
                               "note": "Transmit is off: logged and played here only"}
     code, g = server.j("GET", "/api/cad/geocode?q=209+westchester")
-    assert code == 200 and g["matches"][0]["label"] == "209 Westchester Ave, Port Chester"
-    assert server.j("POST", "/api/cad/incident", {"type": "Volcano"}) == (400, {"error": "type: no run card 'Volcano'"})
-    assert server.j("POST", "/api/cad/incident", {"type": "Other", "lat": 41.0})[0] == 400
+    assert code == 200 and g["matches"][0]["label"] == "209 Westchester Ave, Port Chester" and g["matches"][0]["town"] == "Port Chester"
+    assert server.j("POST", "/api/cad/incident", {"type": "Volcano"}) == (400, {"error": "type: 'Volcano' is not an event type"})
+    assert server.j("POST", "/api/cad/incident", {"type": "SERVICE", "lat": 41.0})[0] == 400
     assert server.call("POST", "/api/cad/incident", raw=b"{nope")[0] == 400
-    code, inc = server.j("POST", "/api/cad/incident", {"type": "Structure fire", "address": "209 Westchester Avenue",
-                                                       "cross_street": "Pearl Street", "operator": "JD"})
-    assert code == 200 and inc["status"] == "active" and re.fullmatch(r"PCFD-\d{4}-0001", inc["number"])
-    assert inc["lat"] == 41.0025 and inc["geo_label"] == "209 Westchester Ave, Port Chester"   # placed: gazetteer sure
+    code, inc = server.j("POST", "/api/cad/incident", {"type": "SERVICE", "subtype": "BOAT", "address": "209 Westchester Avenue",
+                                                       "caller_name": "COREY", "received_via": "PHONE", "operator": "JD"})
+    assert code == 200 and inc["status"] == "pending" and re.fullmatch(r"\d{2}-000001", inc["number"])
+    assert inc["lat"] == 41.0 and inc["geo_label"] == "209 Westchester Ave, Port Chester"   # placed: gazetteer sure
     iid = inc["id"]
-    assert server.j("POST", f"/api/cad/incident/{iid}/accept", {})[0] == 400                 # not pending
+    assert server.j("POST", f"/api/cad/incident/{iid}/accept", {})[0] == 400                 # not queued
     code, rec = server.j("POST", f"/api/cad/incident/{iid}/recommend", {})
-    assert code == 200 and names(rec["units"])[:3] == ["Engine 60", "Engine 61", "Engine 62"]
+    assert code == 200 and names(rec["units"]) == ["E60"] and rec["card"] == "SERVICE"
     ids = [u["id"] for u in rec["units"]]
     code, pv = server.j("POST", f"/api/cad/incident/{iid}/preview", {"unit_ids": ids})
-    assert code == 200 and pv["audio_url"].startswith("/api/cad/audio/")
+    assert code == 200 and pv["audio_url"].startswith("/api/cad/audio/") and pv["kind"] == "new"
     assert server.call("GET", pv["audio_url"])[1][:4] == b"RIFF"
-    assert server.cad.store.incidents()[0]["assignments"] == []                              # preview assigns nothing
+    assert server.cad.store.full(iid)["assignments"] == []                                   # preview assigns nothing
     assert server.j("POST", f"/api/cad/incident/{iid}/dispatch", {"unit_ids": ids})[1] == {"error": "operator: required"}
     assert server.j("POST", f"/api/cad/incident/{iid}/dispatch", {"unit_ids": ["x"], "operator": "JD"})[0] == 400
-    assert server.j("POST", f"/api/cad/incident/{iid}/dispatch",
-                    {"unit_ids": ids, "operator": "JD", "channel": "Ch 9"})[0] == 400
-    code, d = server.j("POST", f"/api/cad/incident/{iid}/dispatch", {"unit_ids": ids, "operator": "JD",
-                                                                     "channel": "PC repeater"})
+    assert server.j("POST", f"/api/cad/incident/{iid}/dispatch", {"unit_ids": ids, "operator": "JD", "channel": "Ch 9"})[0] == 400
+    code, d = server.j("POST", f"/api/cad/incident/{iid}/dispatch", {"unit_ids": ids, "operator": "JD", "channel": "PC repeater"})
     assert code == 200 and d["transmitted"] is False and d["channel"] == "PC repeater"
-    assert d["text"].startswith("Port Chester Fire, Engine 60, Engine 61, Engine 62, Ladder 31, Rescue 40, 2398 Duty Officer, "
-                                "respond to 209 Westchester Avenue, cross of Pearl Street, for a structure fire.")
+    assert d["text"].startswith("Port Chester Fire, Engine 60, respond to 209 Westchester Avenue, for a marine service call.")
     code, wav, ctype = server.call("GET", d["audio_url"])
     assert code == 200 and ctype == "audio/wav" and wave.open(io.BytesIO(wav)).getframerate() == 16000
     assert server.call("GET", "/api/cad/dispatch/999.wav")[0] == 404
-    e60 = ids[0]
-    assert server.j("POST", f"/api/cad/unit/{e60}/status", {"status": "napping"})[0] == 400
-    code, u = server.j("POST", f"/api/cad/unit/{e60}/status", {"status": "onscene", "operator": "JD"})
-    assert code == 200 and u["status"] == "onscene"
+    assert server.j("POST", f"/api/cad/unit/{ids[0]}/status", {"status": "napping"})[0] == 400
+    code, u = server.j("POST", f"/api/cad/unit/{ids[0]}/status", {"status": "ON LOCATION", "operator": "JD"})
+    assert code == 200 and u["status"] == "ON LOCATION"
+    code, up = server.j("POST", f"/api/cad/incident/{iid}/upgrade", {"info": "boat sinking", "full": True, "operator": "JD"})
+    assert code == 200 and "upgrade on your last alarm" in up["text"] and up["kind"] == "upgrade"
     assert server.j("POST", f"/api/cad/incident/{iid}/note", {"text": ""})[0] == 400
     assert server.j("POST", f"/api/cad/incident/{iid}/note", {"text": "Smoke showing", "operator": "JD"})[0] == 200
-    assert server.j("POST", f"/api/cad/incident/{iid}", {"cross_street": "Pearl St and Gilbert Pl"})[0] == 200
-    assert server.j("POST", f"/api/cad/incident/{iid}/close", {"operator": "JD"})[0] == 200
-    code, st = server.j("GET", "/api/cad/state")
-    inc = st["incidents"][0]
-    kinds = [e["kind"] for e in inc["events"]]
-    assert inc["status"] == "closed" and kinds[0] == "created" and kinds[-1] == "closed"
-    assert {"dispatch", "status", "note", "edit"} <= set(kinds)
-    assert inc["dispatches"][0]["transmitted"] is False and "NOT transmitted" in next(
-        e["text"] for e in inc["events"] if e["kind"] == "dispatch")
-    assert all(u["incident_id"] is None for u in st["units"])
-    code, rc = server.j("POST", "/api/cad/runcards", {"type": "Lockout", "slots": [{"kind": "engine", "count": 1}]})
-    assert code == 200 and rc["type"] == "Lockout"
-    assert server.j("POST", "/api/cad/runcards/delete", {"type": "Lockout"})[0] == 200
+    assert server.j("POST", f"/api/cad/incident/{iid}", {"cross_street": "Pearl St"})[0] == 200
+    assert server.j("POST", f"/api/cad/incident/{iid}/close", {"operator": "JD"})[0] == 400        # no disposition
+    assert server.j("POST", f"/api/cad/incident/{iid}/close", {"disposition": "RESCUE", "operator": "JD"})[0] == 200
+    code, full = server.j("GET", f"/api/cad/incident/{iid}")
+    assert code == 200 and full["status"] == "closed" and full["disposition"] == "RESCUE"
+    kinds = [e["kind"] for e in full["events"]]
+    assert kinds[:2] == ["created", "system"] and kinds[-1] == "closed" and {"dispatch", "status", "note", "edit", "upgrade"} <= set(kinds)
+    assert server.j("GET", "/api/cad/incident/999")[0] == 400
+    code, h = server.j("GET", "/api/cad/history")
+    assert code == 200 and h["incidents"][0]["number"] == inc["number"] and h["incidents"][0]["units"] == ["E60"]
+    code, a = server.j("GET", "/api/cad/admin")
+    assert code == 200 and a["counts"]["Call history"] == 1
+    code, data, ctype = server.call("GET", "/api/cad/export/incidents.csv")
+    assert code == 200 and ctype.startswith("text/csv") and read_csv(data)[1][0] == inc["number"]
+    assert server.call("GET", "/api/cad/export/secrets.csv")[0] == 404
+    code, rc = server.j("POST", "/api/cad/runcards", {"type": "SERVICE/LIFT", "slots": [{"kind": "engine", "count": 1}]})
+    assert code == 200 and rc["type"] == "SERVICE/LIFT" and rc["label"] == "Service / Lift"
+    assert server.j("POST", "/api/cad/runcards/delete", {"type": "SERVICE/LIFT"})[0] == 200
     assert server.call("POST", "/api/cad/nope", {})[0] == 404
 
 
@@ -408,11 +868,10 @@ def test_only_the_null_transmitter_exists_in_m1(tmp_path):
     for mod in ("serial", "sounddevice", "pyaudio", "hid", "gpiozero", "RPi", "simpleaudio", "pygame"):
         assert not re.search(rf"^\s*(import|from)\s+{mod}\b", src, re.M), mod
     assert "afplay" not in src
-    # The app wires the null one in.
     cad = make_cad()
-    iid = cad.create({"type": "CO alarm"})["id"]
+    iid = cad.create({"type": "ALARM", "subtype": "CO-RESD"})["id"]
     cad.s.tones = ()
-    r = cad.dispatch(iid, {"unit_ids": [by_name(cad, "Engine 60")["id"]], "operator": "JD"})
+    r = cad.dispatch(iid, {"unit_ids": [uid(cad, "E60")], "operator": "JD"})
     assert r["transmitted"] is False and cad.transmitter.sent[-1][1] == r["text"]
 
 
@@ -420,12 +879,12 @@ def test_config_cad_sections(tmp_path):
     c = load(ROOT / "config.example.toml")
     assert c.cad_db == str((ROOT / "state" / "cad.sqlite").resolve()) and c.dispatch_tones == ((349.1, 1.0), (311.1, 3.0))
     assert c.dispatch_channels == ("FG1", "PC repeater") and c.dispatch_transmit is False
-    assert c.apparatus_path.endswith("westchester_apparatus.csv")
-    for bad in ('[dispatch]\nvolume = 3\n', '[dispatch]\ntones = [[10, 1]]\n', '[cad]\nnope = 1\n'):
+    assert c.cad_lists == str(DATA.resolve())
+    for bad in ('[dispatch]\nvolume = 3\n', '[dispatch]\ntones = [[10, 1]]\n', '[cad]\nnope = 1\n', '[cad]\nlists = "nope.json"\n'):
         (tmp_path / "c.toml").write_text(bad)
         with pytest.raises(ConfigError):
             load(tmp_path / "c.toml")
-    (tmp_path / "c.toml").write_text("")                       # old configs keep working
+    (tmp_path / "c.toml").write_text('[cad]\nroster_department = "Port Chester"\n')     # old configs keep working
     assert load(tmp_path / "c.toml").cad_department == "Port Chester Fire"
 
 

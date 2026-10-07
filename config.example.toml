@@ -91,9 +91,10 @@ home_zoom = 13.4
 # SQLite file, outside captures/ (whose cleaner deletes old files).
 db = "state/cad.sqlite"
 department = "Port Chester Fire"   # first words of every dispatch, as said on the air
-roster_department = "Port Chester" # units seeded once from units.apparatus_file (this department's rows)
-                                   # plus its chief officers from units.callsigns; then edited in the app
-monitor_departments = ["Port Chester FD"]   # a 60 Control page for these -> a pending incident to accept
+# Event types, subtypes, dispositions, unit statuses, the two unit boards, colors and the dispatch
+# wording, from the department's sheet ("[TEMPLATE] PCFD ECC OPS"). Replace the file to change them.
+lists = "data/cad_lists.json"
+monitor_departments = ["Port Chester FD"]   # a 60 Control page for these -> an event to accept
 
 [dispatch]
 # Alert tones before the voice: [hz, seconds] in order (two-tone sequential). UNVERIFIED placeholder:

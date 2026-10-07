@@ -6,10 +6,18 @@ map stay as features that feed it.
 
 ## What it does (goal)
 
-1. **Incidents, ours.** Every call for PCFD becomes a CAD incident with a number (PCFD-YYYY-NNNN),
-   a type, an address (geocoded on our offline Westchester gazetteer), a narrative and a timeline.
+1. **Incidents, ours.** Every call for PCFD becomes a CAD event with a number (26-000001: year,
+   dash, sequence, as on the department's sheet), a type and subtype, a location (geocoded on our
+   offline Westchester gazetteer, Port Chester and Rye Brook first), caller details, remarks and a
+   chronology.
+   - The vocabulary (types, subtypes, dispositions, unit statuses, the two unit boards, colors,
+     dispatch wording) comes from the department's Google Sheet "[TEMPLATE] PCFD ECC OPS", which the
+     console replaces: `data/cad_lists.json`, codes as in the sheet, readable names on screen.
+   - Emergency events go Pending (accepted) -> Active (units dispatched) -> closed with a
+     disposition. Non-emergency ones (notifications, road closures, hydrants) are logged and tracked
+     until closed, with no dispatch.
    - Created automatically from a 60 Control page or Fire/EMS 15 dispatch that names Port Chester
-     (sizeup already detects these). Created as "pending" until a person accepts it.
+     (sizeup already detects these). Waits in "From 60 Control" until a person accepts it.
    - Or entered by hand: a walk-in, a phone call, a still alarm, a mutual-aid request.
 2. **Run cards.** Per call type (structure fire, fire alarm, CO alarm, MVA, EMS assist, wires down,
    water rescue…), the units to send and in what order ("Structure fire: 3 engines, ladder, rescue,
@@ -70,16 +78,29 @@ map stay as features that feed it.
 ## Milestones
 
 - **M1 (started):**
-  - CAD store; PCFD roster seeded from `data/westchester_apparatus.csv`; default run cards (editable).
-  - `/cad` console: new-incident form (type and address with gazetteer lookup); recommended units;
-    dispatch with preview (tones + TTS, no transmit); unit status board; incident timeline.
-  - Pending incidents from 60 Control pages for Port Chester.
+  - CAD store; the sheet's lists and unit boards from `data/cad_lists.json`; default run cards
+    keyed TYPE or TYPE/SUBTYPE (editable stand-ins, not policy).
+  - `/cad` console laid out like the sheet's LIVE CAD tab: Event info (with received via),
+    From 60 Control, Pending / Active / Non-emergency events, Working event (map, run-card
+    recommendation, preview, dispatch, add-on and upgrade wording, full department response,
+    disposition, close, chronology), Unit status and Other / mutual aid boards.
+  - Incident database tab; CSV exports with the sheet's columns (Incident Database, Call History,
+    Unit History, Event Log); admin counts and next event number.
+  - Events waiting to be accepted from 60 Control pages for Port Chester.
 - **M2:** transmit through a real radio interface (after hardware and authorization); key-time limits;
   transmit log.
 - **M3:** radio-derived status suggestions (FG1 MDC IDs, Fire/EMS 15 talkers and phrases); incident
   close-out; reports.
-- **M4+:** pre-plans and hydrants, mutual aid, member notifications, station alerting, mobile
-  acknowledgements.
+- **M4+:**
+  - pre-plans and hydrants
+  - mutual aid
+  - station alerting
+  - reports
+  - **Live unit and member locations (AVL) and statuses:**
+    - **IamResponding:** IAR already tracks responders ("Track Me if I Respond", Incident Map). Ask IAR/RapidSOS for agency API access in both directions: read responder status and locations into sizeup, and push sizeup's dispatched events into IAR through its CAD Incidents API so members get them in the IAR app.
+    - **Red Alert (Alpine Software, RedNMX):** ask Alpine for API access to member/apparatus location, and a CAD link so closed events pre-fill Red Alert incident reports.
+    - **An apparatus iPad web app** (ours, no vendor approval): shows the assigned event; GPS every few seconds while open; one-tap status (en route, on scene, available). Needs data access on the iPads and secure remote access to sizeup (VPN such as Tailscale, not exposed to the internet). Background tracking would need a native app.
+  - the user's request (2026-10-07): "could we also pull from RedAlert... to pull location information live of where they are? or maybe we could run an app on the ipads for that... would be nice to use IAR or RedAlert though that already has that info"
 
 ## Open questions for the department
 

@@ -8,7 +8,7 @@
             or the voice half of a tones-only page sent as a separate transmission
     traffic channels (FG1)    --squelch--> transmission --STT--> traffic on the active incident
     P25 (trunk-recorder dir)  --call--> STT --> traffic on the active incident (unit IDs kept)
-    incident for Port Chester --> pending incident in the CAD (/cad, sizeup/cad/) for a person to accept
+    incident for Port Chester --> an event in the CAD (/cad, sizeup/cad/) waiting for a person to accept it
 """
 
 from __future__ import annotations
@@ -262,10 +262,10 @@ class App:
                 "confidence": round(float(m.confidence), 2)}
 
     def _geocode_text(self, q: str) -> list[dict]:
-        """The CAD address box: every reading of what was typed, best first."""
+        """The CAD location box: every reading of what was typed, best first (the CAD orders them by town)."""
         try:
             return [{k: getattr(m, k) for k in ("label", "lat", "lon", "kind", "municipality", "precision")}
-                    | {"confidence": round(float(m.confidence), 2)} for m in self.gaz.candidates(q)[:8]]
+                    | {"confidence": round(float(m.confidence), 2)} for m in self.gaz.candidates(q)[:20]]
         except Exception as e:
             log(f"geocode error for {q!r}: {type(e).__name__}: {e}")
             return []

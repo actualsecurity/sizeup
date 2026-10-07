@@ -1,13 +1,21 @@
 """Dispatch text and audio.
 
-    build_text(incident, units)  "Port Chester Fire, Engine 60, Ladder 31, Rescue 40, respond to
-                                  209 Westchester Avenue, cross of Pearl Street, for a structure
-                                  fire. Time out 14:32."
+    compose("new", ...)     "Port Chester Fire, Engine 60, Ladder 31, Rescue 40, respond to
+                             209 Westchester Avenue, cross of Pearl Street, for a structure fire.
+                             Time out 14:32."
+    compose("add_on", ...)  "Port Chester Fire, Engine 61, added to the assignment. Engine 60
+                             responding, Ladder 31 and 23 98 on location. 169 North Main Street,
+                             commercial fire alarm. Time out 15:13."
+    compose("upgrade", ...) "Port Chester Fire, upgrade on your last alarm, 169 North Main Street.
+                             Smoke in the structure. Now a structure fire, full department
+                             response. Time out 15:20."
+    full=True               "full department response" instead of the units' names
     render_audio(text, tones)    alert tones (two-tone sequential) + gap + the voice read twice,
                                  16 kHz mono 16-bit WAV, the voice from macOS `say`
 
 The written text is what the timeline shows; speech() rewrites it the way a dispatcher says it
-(house numbers digit by digit, "time out fourteen thirty-two", chiefs "twenty-three ninety-eight").
+(house numbers digit by digit, "time out fourteen thirty-two"). Unit names come already as said
+(cad_lists.json units.spoken: "Engine 60", "23 98", "77 Alpha 1").
 """
 
 from __future__ import annotations
@@ -66,35 +74,122 @@ def spoken_street(s: str) -> str:
     return ", ".join(out)
 
 
-def type_phrase(card: dict | None, typ: str) -> str:
-    if card and card.get("spoken"):
-        return card["spoken"]
-    t = (typ or "a call for service").lower().replace(" / ", " or ").replace(" – ", ", ")
-    return t if t.startswith(("a ", "an ")) else ("an " if t[:1] in "aeiou" else "a ") + t
+# The wording, as templates (data/cad_lists.json "dispatch_wording" overrides any of these). Empty
+# parts drop out with their punctuation (tidy()).
+WORDING = {
+    "new": "{department}, {units}, respond to {location}, for {type}. Time out {time}.",
+    "new_no_location": "{department}, {units}, respond for {type}. Time out {time}.",
+    "add_on": "{department}, {units}, added to the assignment. {already} {location}, {type_bare}. Time out {time}.",
+    "upgrade": "{department}, upgrade on your last alarm, {location}. {info} {change} {respond} Time out {time}.",
+    "already_group": "{units} {status}",
+    "change_type": "Now {type}.",
+    "change_type_full": "Now {type}, {full}.",
+    "change_full": "{Full}.",
+    "respond": "{units}, respond.",
+    "full_response": "full department response",
+}
 
 
-def build_text(department: str, incident: dict, unit_names: list[str], card: dict | None = None,
-               at: float | None = None) -> str:
+def join_and(names: list[str]) -> str:
+    """['Engine 61', 'Rescue 40'] -> 'Engine 61 and Rescue 40'."""
+    names = [n for n in names if n]
+    return names[0] if len(names) == 1 else (", ".join(names[:-1]) + " and " + names[-1] if names else "")
+
+
+def where(incident: dict) -> str:
+    w = spoken_street(incident.get("address") or "")
+    if w and incident.get("cross_street"):
+        w += f", cross of {spoken_street(incident['cross_street'])}"
+    return w
+
+
+def bare(phrase: str) -> str:
+    """'a commercial fire alarm' -> 'commercial fire alarm'."""
+    return re.sub(r"^(an?|the) ", "", phrase or "")
+
+
+def sentence(text: str) -> str:
+    """'smoke in the structure' -> 'Smoke in the structure.'"""
+    t = (text or "").strip()
+    if not t:
+        return ""
+    t = t[0].upper() + t[1:]
+    return t if t[-1] in ".!?" else t + "."
+
+
+def tidy(s: str) -> str:
+    """Drop what an empty part left behind: doubled spaces, ', .', ', ,', a sentence starting with ', '."""
+    s = re.sub(r"\s+", " ", s)
+    for _ in range(3):
+        s = re.sub(r"\s+([.,])", r"\1", s)
+        s = re.sub(r",(\s*[.,])", r"\1", s)
+        s = re.sub(r"\.\s*\.", ".", s)
+        s = re.sub(r"(^|\.\s)\s*,\s*", r"\1", s)
+        s = re.sub(r"\.,\s*", ". ", s)
+    s = re.sub(r"(\.\s)([a-z])", lambda m: m.group(1) + m.group(2).upper(), s)   # a sentence starts upper case
+    return s.strip()
+
+
+def compose(kind: str, *, department: str, incident: dict, units: list[str], phrase: str = "",
+            at: float | None = None, full: bool = False, already: list[tuple[str, list[str]]] = (),
+            info: str = "", new_phrase: str = "", wording: dict | None = None) -> str:
+    """The written dispatch (what the chronology shows and, through speech(), what is said).
+
+    kind      new | add_on (units added to an event that already had a dispatch) | upgrade
+    units     the units sent, as spoken ("Engine 60", "23 98"); with full=True they are not
+              spoken: "full department response" instead
+    already   add_on: the units already on the event by status, [("responding", ["Engine 60"]), ...]
+    info      upgrade: the new information ("smoke in the structure")
+    new_phrase upgrade: the new type as spoken, when the type changed ("a structure fire")
+    """
+    w = dict(WORDING, **(wording or {}))
     at = at if at is not None else datetime.now(TZ).timestamp()
-    parts = [department, *unit_names]
-    where = spoken_street(incident.get("address") or "")
-    s = ", ".join(p for p in parts if p)
-    if where:
-        s += f", respond to {where}"
-        if incident.get("cross_street"):
-            s += f", cross of {spoken_street(incident['cross_street'])}"
-        s += f", for {type_phrase(card, incident.get('type', ''))}."
+    phrase = phrase or "a call for service"
+    loc = where(incident)
+    fr = w["full_response"]
+    if kind == "new":
+        tpl = w["new"] if loc else w["new_no_location"]
+        units_text = fr if full else ", ".join(u for u in units if u)
+    elif kind == "add_on":
+        tpl, units_text = w["add_on"], fr if full else join_and(units)
+    elif kind == "upgrade":
+        tpl, units_text = w["upgrade"], ""
     else:
-        s += f", respond for {type_phrase(card, incident.get('type', ''))}."
-    s += f" Time out {datetime.fromtimestamp(at, TZ):%H:%M}."
-    return s
+        raise ValueError(f"dispatch kind {kind!r}")
+    groups = [w["already_group"].format(units=join_and(names), status=st) for st, names in already if names]
+    if new_phrase and full:
+        change = w["change_type_full"].format(type=new_phrase, full=fr, Full=fr[:1].upper() + fr[1:])
+    elif new_phrase:
+        change = w["change_type"].format(type=new_phrase, full=fr, Full=fr[:1].upper() + fr[1:])
+    elif full:
+        change = w["change_full"].format(full=fr, Full=fr[:1].upper() + fr[1:])
+    else:
+        change = ""
+    respond = w["respond"].format(units=", ".join(units)) if kind == "upgrade" and units and not full else ""
+    s = tpl.format(department=department, units=units_text, location=loc, type=phrase, type_bare=bare(phrase),
+                   already=(", ".join(groups) + ".") if groups else "", info=sentence(info), change=change,
+                   respond=respond, time=f"{datetime.fromtimestamp(at, TZ):%H:%M}", full=fr)
+    return tidy(s)
 
 
-def speech(text: str) -> str:
-    """Written dispatch -> words for the voice."""
+def build_text(department: str, incident: dict, unit_names: list[str], phrase: str = "",
+               at: float | None = None, full: bool = False, wording: dict | None = None) -> str:
+    """A first dispatch. unit_names as spoken ("Engine 60", "23 98"); phrase as spoken ("a
+    commercial fire alarm", from the run card or the data file)."""
+    return compose("new", department=department, incident=incident, units=unit_names, phrase=phrase, at=at,
+                   full=full, wording=wording)
+
+
+def speech(text: str, location: str = "") -> str:
+    """Written dispatch -> words for the voice: the house number of `location` (or, without one,
+    the number after "respond to") digit by digit; "Time out 14 32"; "2398 Duty Officer": "23 98"."""
     def digits(m: re.Match) -> str:
         return m.group(1) + " ".join(m.group(2))
-    t = re.sub(r"(respond to )(\d+)", digits, text)                      # "two zero nine Westchester"
+    t = text
+    if location and (m := re.match(r"(\d+)(\b.*)", location)) and location in t:
+        t = t.replace(location, " ".join(m.group(1)) + m.group(2), 1)
+    elif not location:
+        t = re.sub(r"(respond to )(\d+)", digits, t)                       # "two zero nine Westchester"
     t = re.sub(r"\bTime out (\d{2}):(\d{2})", lambda m: f"Time out {m.group(1)} {m.group(2)}"
                if m.group(2) != "00" else f"Time out {m.group(1)} hundred", t)
     t = re.sub(r"\b(\d{2})(\d{2})\b(?= [A-Z])", r"\1 \2", t)            # "2398 Duty Officer": "23 98"
@@ -148,8 +243,8 @@ def tts(text: str, voice: str = "", rate_wpm: int = 0) -> np.ndarray:
 
 
 def render(text: str, tones: list[tuple[float, float]], voice: str = "", rate_wpm: int = 0,
-           repeat: int = 2) -> np.ndarray:
-    v = tts(speech(text), voice, rate_wpm)
+           repeat: int = 2, location: str = "") -> np.ndarray:
+    v = tts(speech(text, location), voice, rate_wpm)
     parts = [tone_audio(tones), np.zeros(int(GAP_S * RATE))] if tones else []
     for k in range(max(1, repeat)):
         if k:
@@ -170,19 +265,19 @@ def wav_bytes(x: np.ndarray, rate: int = RATE) -> bytes:
     return buf.getvalue()
 
 
-def audio_key(text: str, tones, voice: str, rate_wpm: int, repeat: int) -> str:
+def audio_key(text: str, tones, voice: str, rate_wpm: int, repeat: int, location: str = "") -> str:
     """Same text, tones and voice = same file: a preview and the dispatch right after share it."""
-    return hashlib.sha1(repr((text, list(tones), voice, rate_wpm, repeat)).encode()).hexdigest()[:20]
+    return hashlib.sha1(repr((text, list(tones), voice, rate_wpm, repeat, location)).encode()).hexdigest()[:20]
 
 
 def render_audio(text: str, tones, out_dir: str | Path, voice: str = "", rate_wpm: int = 0,
-                 repeat: int = 2) -> Path:
+                 repeat: int = 2, location: str = "") -> Path:
     """The dispatch as a WAV under out_dir (cached by content). Raises AudioUnavailable."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / f"{audio_key(text, tones, voice, rate_wpm, repeat)}.wav"
+    path = out_dir / f"{audio_key(text, tones, voice, rate_wpm, repeat, location)}.wav"
     if not path.is_file():
-        data = wav_bytes(render(text, list(tones), voice, rate_wpm, repeat))
+        data = wav_bytes(render(text, list(tones), voice, rate_wpm, repeat, location))
         tmp = path.with_suffix(".tmp")
         tmp.write_bytes(data)
         os.replace(tmp, path)

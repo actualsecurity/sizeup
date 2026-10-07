@@ -1,23 +1,31 @@
 """CAD JSON API under /api/cad/ (served by sizeup/web/server.py). Every POST takes a JSON body;
 a bad one is a 400 {"error": reason}.
 
-GET  /api/cad/state                       units, incidents (pending, active, recently closed), run cards
+GET  /api/cad/state                       lists, units, events (open, recently closed), run cards
 GET  /api/cad/stream                      SSE: the state, pushed every second (server.py)
-GET  /api/cad/geocode?q=209 westchester   gazetteer matches [{label, lat, lon, kind, confidence, ...}]
+GET  /api/cad/geocode?q=209 westchester   location suggestions, Port Chester / Rye Brook first, each with its town
 GET  /api/cad/runcards                    run cards
+GET  /api/cad/incident/<id>               one event with its units, chronology and dispatches
+GET  /api/cad/history                     the Incident database: every numbered event, newest first
+GET  /api/cad/admin                       record counts and the next event number
+GET  /api/cad/export/<name>.csv           incidents | calls | unit-history | event-log, the sheet's columns
 GET  /api/cad/dispatch/<id>.wav           a logged dispatch's audio
 GET  /api/cad/audio/<key>.wav             a preview's audio
-POST /api/cad/incident                    {type, address?, cross_street?, narrative?, lat?, lon?, geo_label?, priority?, operator?}
+POST /api/cad/incident                    Accept event: {type, subtype?, emergency?, received_via?, until_at?,
+                                          address?, cross_street?, caller_name?, caller_address?, phone?,
+                                          remarks?, lat?, lon?, geo_label?, operator?}
 POST /api/cad/incident/<id>               edit: any of the fields above
-POST /api/cad/incident/<id>/accept        {operator?}            pending -> active (numbered)
-POST /api/cad/incident/<id>/dismiss       {operator?, reason?}   pending -> dismissed
-POST /api/cad/incident/<id>/close         {operator?}            active -> closed, units cleared
+POST /api/cad/incident/<id>/accept        {type?, subtype?, operator?}  a 60 Control page -> pending (numbered)
+POST /api/cad/incident/<id>/dismiss       {operator?, reason?}   a 60 Control page nobody takes
+POST /api/cad/incident/<id>/close         {disposition, operator?}  units cleared
 POST /api/cad/incident/<id>/note          {text, operator?}
-POST /api/cad/incident/<id>/recommend     {type?}                -> {units, unfilled, already, card}
-POST /api/cad/incident/<id>/preview       {unit_ids}             -> {text, audio_url, audio_note}
-POST /api/cad/incident/<id>/dispatch      {unit_ids, operator, channel?} -> {dispatch_id, text, audio_url, transmitted, ...}
+POST /api/cad/incident/<id>/recommend     {type?, subtype?}      -> {units, unfilled, already, card, note}
+POST /api/cad/incident/<id>/preview       {unit_ids, full?}      -> {text, kind, audio_url, audio_note}
+POST /api/cad/incident/<id>/dispatch      {unit_ids, operator, channel?, full?} -> {dispatch_id, text, audio_url, ...}
+POST /api/cad/incident/<id>/upgrade       {type?, subtype?, info?, unit_ids?, full?, operator, channel?, preview?}
+POST /api/cad/incident/<id>/attach        {unit_ids, operator?}  units on a non-emergency event, no dispatch
 POST /api/cad/unit/<id>/status            {status, operator?, note?}
-POST /api/cad/runcards                    {type, slots, spoken?, rename_from?}   add / edit one
+POST /api/cad/runcards                    {type (TYPE or TYPE/SUBTYPE), slots, spoken?, rename_from?}   add / edit one
 POST /api/cad/runcards/delete             {type}
 """
 
@@ -32,7 +40,8 @@ from sizeup.cad.store import CadError
 
 JSON = "application/json"
 MAX_BODY = 65536
-INCIDENT = re.compile(r"/api/cad/incident/(\d{1,9})(?:/(accept|dismiss|close|note|recommend|preview|dispatch))?")
+INCIDENT = re.compile(r"/api/cad/incident/(\d{1,9})(?:/(accept|dismiss|close|note|recommend|preview|dispatch|upgrade|attach))?")
+EXPORT = re.compile(r"/api/cad/export/([a-z-]{1,20}\.csv)")
 UNIT = re.compile(r"/api/cad/unit/(\d{1,9})/status")
 DISPATCH_WAV = re.compile(r"/api/cad/dispatch/(\d{1,9})\.wav")
 PREVIEW_WAV = re.compile(r"/api/cad/audio/([0-9a-f]{20})\.wav")
@@ -52,6 +61,16 @@ class CadApi:
                 return _json(200, self.cad.state())
             if path == "/api/cad/runcards":
                 return _json(200, {"run_cards": self.cad.run_cards()})
+            if path == "/api/cad/history":
+                return _json(200, self.cad.history())
+            if path == "/api/cad/admin":
+                return _json(200, self.cad.admin())
+            if m := INCIDENT.fullmatch(path):
+                if m.group(2) is None:
+                    return _json(200, self.cad.full(int(m.group(1))))
+            if m := EXPORT.fullmatch(path):
+                data = self.cad.export(m.group(1))
+                return (200, data, "text/csv; charset=utf-8") if data is not None else (404, b"no such export\n", "text/plain")
             if path == "/api/cad/geocode":
                 return _json(200, self.cad.geocode((parse_qs(query).get("q") or [""])[0]))
             if m := DISPATCH_WAV.fullmatch(path):
@@ -78,7 +97,8 @@ class CadApi:
             if m := INCIDENT.fullmatch(path):
                 iid, action = int(m.group(1)), m.group(2)
                 fn = {None: c.update, "accept": c.accept, "dismiss": c.dismiss, "close": c.close, "note": c.note,
-                      "recommend": c.recommend, "preview": c.preview, "dispatch": c.dispatch}[action]
+                      "recommend": c.recommend, "preview": c.preview, "dispatch": c.dispatch, "upgrade": c.upgrade,
+                      "attach": c.attach}[action]
                 return _json(200, fn(iid, body))
             if m := UNIT.fullmatch(path):
                 return _json(200, c.unit_status(int(m.group(1)), body))

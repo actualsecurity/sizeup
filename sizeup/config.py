@@ -69,8 +69,8 @@ class Config:
     # CAD ([cad], [dispatch]): see sizeup/cad/
     cad_db: str = ""                  # "" = in memory (tests); load() defaults to state/cad.sqlite
     cad_department: str = "Port Chester Fire"           # first words of every dispatch, as said on the air
-    cad_roster_department: str = "Port Chester"         # whose apparatus the roster seeds
-    cad_monitor_departments: tuple[str, ...] = ("Port Chester FD",)   # monitor incidents that become pending ones
+    cad_lists: str = ""               # the CAD's lists / boards / wording ("" = data/cad_lists.json)
+    cad_monitor_departments: tuple[str, ...] = ("Port Chester FD",)   # monitor incidents that wait to be accepted
     dispatch_tones: tuple[tuple[float, float], ...] = ((349.1, 1.0), (311.1, 3.0))   # (Hz, s) in order
     dispatch_voice: str = "Samantha"  # macOS `say -v`
     dispatch_rate: int = 0            # words per minute (0 = the voice's own)
@@ -186,7 +186,14 @@ def load(path: str | Path) -> Config:
             unit_departments.setdefault(unit_callsigns[cs], dept_numbers[cs[:3]])
     mp = _take(data.get("map", {}), "map", {"home_lon", "home_lat", "home_zoom"})
     rel = lambda p: str((base / p).resolve()) if p and not Path(p).is_absolute() else p
-    cad = _take(data.get("cad", {}), "cad", {"db", "department", "roster_department", "monitor_departments"})
+    # roster_department: accepted from older configs, unused (the boards come from cad.lists)
+    cad = _take(data.get("cad", {}), "cad", {"db", "department", "lists", "roster_department", "monitor_departments"})
+    cad_lists = ""
+    if cad.get("lists"):
+        cl = Path(cad["lists"]) if Path(cad["lists"]).is_absolute() else base / cad["lists"]
+        if not cl.is_file():
+            raise ConfigError(f"cad.lists: {cl} not found")
+        cad_lists = str(cl.resolve())
     dsp = _take(data.get("dispatch", {}), "dispatch", {"tones", "voice", "rate", "repeat", "transmit", "channels"})
     if dsp.get("transmit", False) is not False:
         raise ConfigError("dispatch.transmit: must be false: this version has no radio interface (M2), "
@@ -224,7 +231,7 @@ def load(path: str | Path) -> Config:
         home=(float(mp.get("home_lon", -73.6640)), float(mp.get("home_lat", 41.0130)), float(mp.get("home_zoom", 13.4))),
         apparatus_path=af_found,
         cad_db=rel(cad.get("db", "state/cad.sqlite")), cad_department=str(cad.get("department", "Port Chester Fire")),
-        cad_roster_department=str(cad.get("roster_department", "Port Chester")),
+        cad_lists=cad_lists,
         cad_monitor_departments=tuple(str(x) for x in cad.get("monitor_departments", ["Port Chester FD"])),
         dispatch_tones=d_tones, dispatch_voice=str(dsp.get("voice", "Samantha")), dispatch_rate=d_rate,
         dispatch_repeat=d_repeat, dispatch_transmit=False, dispatch_channels=d_channels,
