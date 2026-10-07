@@ -755,11 +755,20 @@ function remarksNote() {
     : n > REMARKS_LONG ? `${n} characters: long (the voice reads it twice). Consider shortening.`
       : n ? `${n} characters · said as "Reported: …"` : "Nothing extra said");
 }
-function syncRemarks(inc) {          // the event's remarks, until the operator edits the box
+// The box starts from the event's remarks for its first dispatch only, and empty after each dispatch
+// (an add-on shouldn't repeat what was already said) and for 60 Control pages (their remarks are the
+// page transcript, not something to read out again). The operator's edits stick until they dispatch.
+function remarksPrefill(inc) {
+  if ((inc.dispatches || []).length) return "";
+  if (/60 control/i.test(inc.source || "") || /60 control/i.test(inc.received_via || "")) return "";
+  return inc.remarks || "";
+}
+function syncRemarks(inc) {
+  const n = (inc.dispatches || []).length, base = remarksPrefill(inc);
   const r = cad.remarks;
-  if (r && r.iid === inc.id && (r.edited || r.base === (inc.remarks || ""))) return;
-  cad.remarks = { iid: inc.id, base: inc.remarks || "", edited: false };
-  $("#r-remarks").value = inc.remarks || "";
+  if (r && r.iid === inc.id && r.n === n && (r.edited || r.base === base)) return;
+  cad.remarks = { iid: inc.id, n, base, edited: false };
+  $("#r-remarks").value = base;
   remarksNote();
 }
 
