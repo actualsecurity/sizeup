@@ -18,3 +18,15 @@ Run from this directory (paths are relative to it):
 ```
 
 On a one-dongle bench, stop sizeup's paging/fireground receivers first (they use the same dongle).
+
+## Who is talking, live (sizeup's "talking" highlight)
+
+sizeup reads trunk-recorder's output as it comes: "Unit ID set via Control Channel" names each new
+talker mid-call, and the "Transmission src" lines name everyone when a call ends. trunk-recorder
+logs no unit for a call's *first* transmission, so a one-transmission call shows its talker only when
+it ends. To name the first talker at the grant, enable the unit script (forks a tiny shell per unit
+event on the system):
+
+```json
+"systems": [{ ..., "unitScript": "./unit-event.sh" }]
+```
