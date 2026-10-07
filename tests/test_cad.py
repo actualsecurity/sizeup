@@ -162,6 +162,14 @@ def test_lists_file_has_the_sheets_vocabulary():
     # Readable names shown, the sheet's codes stored; unclear codes stay codes.
     assert L.type_label("SERVICE", "BOAT") == "Service / Boat" and L.type_label("STRU") == "Structure fire"
     assert L.name("event_subtypes", "TREERD") == "Tree in road" and L.name("event_subtypes", "ECHO") == "ECHO"
+    # Confirmed by PCFD: TRANS, CO-NO, CO-YES (named, said for any type; both CO calls stay emergency).
+    assert (L.name("event_subtypes", "TRANS"), L.name("event_subtypes", "CO-NO"), L.name("event_subtypes", "CO-YES")) == (
+        "Transformer", "CO \u2013 no symptoms", "CO \u2013 with symptoms")
+    assert (L.phrase("HAZARD", "TRANS"), L.phrase("ALARM", "CO-NO"), L.phrase("ALARM", "CO-YES")) == (
+        "a transformer", "a CO alarm, no symptoms", "a CO alarm with symptoms")
+    assert L.phrase("ALARM", "COMM") == "a commercial fire alarm" and L.phrase("ALARM", "AIR") == "a fire alarm"
+    assert L.is_emergency("ALARM", "CO-NO") and L.is_emergency("HAZARD", "CO-YES")
+    assert [L.name("event_subtypes", c) for c in ("AIR", "MULTI", "NEXT", "CAD")] == ["AIR", "MULTI", "NEXT", "CAD"]
     assert L.name("dispositions", "TXALS") == "Transported ALS" and L.name("dispositions", "RMA") == "RMA"
     assert L.name("unit_statuses", "ON LOCATION") == "On location"
     # The sheet's colors.
@@ -244,7 +252,7 @@ def test_numbers_yy_nnnnnn_per_local_year_and_queued_unnumbered(tmp_path):
     with pytest.raises(CadError):
         st.accept(p)                                                   # already accepted
     st2 = Store(tmp_path / "cad.sqlite", clock=clock)
-    assert st2.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 2
+    assert st2.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 3
     assert st2.incident(st2.create_incident(type="SERVICE"))["number"] == "27-000003"
     with pytest.raises(sqlite3.IntegrityError):
         st2.create_incident(type="ALARM", source="60 Control page", source_ref="monitor:x", status="queued")
@@ -682,10 +690,10 @@ def test_csv_exports_have_the_sheets_columns_and_codes():
     assert calls[0] == ["Incident #", "Event Type", "Event Sub-Type", "Location", "Received", "Clear", "Duration",
                         "Disposition", "Units"] and calls[1][0] == "26-000001" and calls[1][-1] == "E63"
     uh = read_csv(cad.export("unit-history.csv"))
-    assert uh[0] == ["Timestamp", "Unit", "Old Status", "New Status", "Incident #", "Operator"]
-    assert uh[1:] == [["10/07/2026 18:58:00", "E63", "AVAILABLE", "DISPATCHED", "26-000001", "JD"],
-                      ["10/07/2026 18:59:30", "E63", "DISPATCHED", "RESPONDING", "26-000001", "JD"],
-                      ["10/07/2026 19:59:30", "E63", "RESPONDING", "AVAILABLE", "26-000001", "JD"]]
+    assert uh[0] == ["Timestamp", "Unit", "Old Status", "New Status", "Incident #", "Operator", "Note"]
+    assert uh[1:] == [["10/07/2026 18:58:00", "E63", "AVAILABLE", "DISPATCHED", "26-000001", "JD", ""],
+                      ["10/07/2026 18:59:30", "E63", "DISPATCHED", "RESPONDING", "26-000001", "JD", ""],
+                      ["10/07/2026 19:59:30", "E63", "RESPONDING", "AVAILABLE", "26-000001", "JD", ""]]
     log = read_csv(cad.export("event-log.csv"))
     assert log[0] == ["Timestamp", "Incident #", "Unit", "Event Type", "Event / Comment", "Operator"]
     kinds = [r[3] for r in log[1:]]
@@ -726,7 +734,7 @@ def test_migrates_a_v1_database(tmp_path):
     db.close()
     cad = make_cad(tmp_path)
     st = cad.store
-    assert st.db.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert st.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     assert "schema v1 -> v2" in st.migrated[0] and any("'Lockout' removed" in m for m in st.migrated)
     rows = {r["id"]: r for r in st.q("SELECT * FROM incidents")}
     assert (rows[1]["number"], rows[1]["type"], rows[1]["status"], rows[1]["remarks"]) == ("26-000007", "STRU", "active", "smoke")
@@ -900,3 +908,52 @@ def test_cad_page_buttons_have_handlers():
     assert called and not (called - defined)
     css = (ROOT / "sizeup" / "web" / "static" / "cad.css").read_text()
     assert "text-transform: uppercase" not in css and "text-transform:uppercase" not in css      # readable casing
+
+
+# -- out of service / unmanned: the reason ------------------------------------------------------------------
+
+def test_out_of_service_reason_stored_shown_and_in_unit_history():
+    cad = make_cad()
+    e60, l31 = uid(cad, "E60"), uid(cad, "L31")
+    cad.unit_status(e60, {"status": "OUT OF SERVICE", "note": "pump repair", "operator": "JD"})
+    cad.unit_status(l31, {"status": "UNMANNED", "note": "no crew until 1800", "operator": "JD"})
+    units = {u["name"]: u for u in cad.state()["units"]}            # what the board shows under the unit
+    assert units["E60"]["out_of_service"] == "pump repair" and units["L31"]["out_of_service"] == "no crew until 1800"
+    log = [e["text"] for e in cad.state()["unit_log"]]
+    assert log[:2] == ["L31 unmanned (no crew until 1800)", "E60 out of service (pump repair)"]
+    hist = cad.store.q("SELECT u.name, h.new_status, h.note, h.operator FROM unit_history h JOIN units u ON u.id = h.unit_id "
+                       "ORDER BY h.id")
+    assert [tuple(h.values()) for h in hist] == [("E60", "OUT OF SERVICE", "pump repair", "JD"),
+                                                 ("L31", "UNMANNED", "no crew until 1800", "JD")]
+    uh = read_csv(cad.export("unit-history.csv"))
+    assert uh[1][1] == "E60" and uh[1][-1] == "pump repair"
+    # Back in service: the reason goes from the board; history keeps it; a reason on a free status is ignored.
+    cad.unit_status(e60, {"status": "AVAILABLE", "note": "ignored", "operator": "JD"})
+    assert by_name(cad, "E60")["out_of_service"] == ""
+    assert cad.store.q("SELECT note FROM unit_history ORDER BY id DESC LIMIT 1")[0]["note"] == ""
+    assert cad.store.unit_log()[0]["text"] == "E60 available"
+    # No reason given: none shown, none stored.
+    cad.unit_status(e60, {"status": "OUT OF SERVICE"})
+    assert by_name(cad, "E60")["out_of_service"] == "" and cad.store.unit_log()[0]["text"] == "E60 out of service"
+
+
+def test_migrates_a_v2_database_keeping_its_data(tmp_path):
+    cad = make_cad(tmp_path)
+    iid = cad.create({"type": "STRU", "address": "209 Westchester Ave"})["id"]
+    cad.dispatch(iid, {"unit_ids": [uid(cad, "E60")], "operator": "JD"})
+    runcards.save(cad.store, "STRU", [{"kind": "engine", "count": 5}, {"kind": "ladder|tower", "count": 2},
+                                      {"kind": "rescue", "count": 1}])        # an operator's edit survives
+    db = cad.store.db
+    db.execute("ALTER TABLE unit_history DROP COLUMN note")         # as a v2 file was
+    db.execute("PRAGMA user_version = 2")
+    db.commit()
+    cards_before = runcards.cards(cad.store)
+    cad2 = make_cad(tmp_path)
+    st = cad2.store
+    assert st.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 3
+    assert any("v2 -> v3" in m for m in st.migrated)
+    assert st.q("SELECT new_status, note FROM unit_history") == [{"new_status": "DISPATCHED", "note": ""}]
+    assert st.full(iid)["number"] == "26-000001" and by_name(cad2, "E60")["incident_id"] == iid
+    assert runcards.cards(st) == cards_before
+    cad2.unit_status(uid(cad2, "E61"), {"status": "OUT OF SERVICE", "note": "tires"})
+    assert st.q("SELECT note FROM unit_history ORDER BY id DESC LIMIT 1")[0]["note"] == "tires"

@@ -23,7 +23,7 @@ INCIDENT_COLUMNS = ["Incident #", "Unused", "Event Type", "Event Sub-Type", "Loc
                     "Disposition", "Cross Streets", "Narrative Summary", "Closed?"]
 CALL_COLUMNS = ["Incident #", "Event Type", "Event Sub-Type", "Location", "Received", "Clear", "Duration",
                 "Disposition", "Units"]
-UNIT_HISTORY_COLUMNS = ["Timestamp", "Unit", "Old Status", "New Status", "Incident #", "Operator"]
+UNIT_HISTORY_COLUMNS = ["Timestamp", "Unit", "Old Status", "New Status", "Incident #", "Operator", "Note"]
 EVENT_LOG_COLUMNS = ["Timestamp", "Incident #", "Unit", "Event Type", "Event / Comment", "Operator"]
 # Chronology kinds -> the sheet's Event Log "Event Type" (SYSTEM | EVENT | UNIT STATUS | ...)
 LOG_TYPES = {"system": "SYSTEM", "note": "COMMENT", "dispatch": "DISPATCH", "attach": "DISPATCH"}
@@ -95,7 +95,7 @@ def unit_history_csv(store: Store) -> bytes:
     rows = store.q("SELECT h.*, u.name, i.number FROM unit_history h JOIN units u ON u.id = h.unit_id "
                    "LEFT JOIN incidents i ON i.id = h.incident_id ORDER BY h.at, h.id")
     return _csv(UNIT_HISTORY_COLUMNS, [[ts(r["at"]), r["name"], r["old_status"], r["new_status"], r["number"] or "",
-                                        r["operator"]] for r in rows])
+                                        r["operator"], r["note"]] for r in rows])
 
 
 def event_log_csv(store: Store) -> bytes:

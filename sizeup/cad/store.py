@@ -13,7 +13,7 @@
       assignments   unit x incident, with dispatched / en route / on scene / cleared times
       run_cards     TYPE or TYPE/SUBTYPE -> ordered slots ("3 x engine", "2398")
       events        the chronology (and unit status changes with no incident)
-      unit_history  every unit status change: old -> new, event, operator
+      unit_history  every unit status change: old -> new, event, operator, why (out of service)
       dispatches    what was (or, transmit off, would have been) sent, with its audio
 
 The lists (types, subtypes, dispositions, unit statuses and what each one means) come from
@@ -36,7 +36,7 @@ from sizeup.cad import lists as lists_mod
 from sizeup.cad.lists import Lists
 
 TZ = ZoneInfo("America/New_York")
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 OPEN = ("queued", "pending", "active")
 SOURCES = ("manual", "60 Control page")
@@ -122,7 +122,8 @@ CREATE TABLE unit_history (           -- every unit status change (the sheet's U
   old_status TEXT NOT NULL,
   new_status TEXT NOT NULL,
   incident_id INTEGER REFERENCES incidents(id),
-  operator TEXT NOT NULL DEFAULT ''
+  operator TEXT NOT NULL DEFAULT '',
+  note TEXT NOT NULL DEFAULT ''         -- why: out of service / unmanned
 );
 CREATE TABLE dispatches (
   id INTEGER PRIMARY KEY,
@@ -198,15 +199,24 @@ class Store:
             if v == 0:
                 self.db.executescript("BEGIN;" + SCHEMA + f"PRAGMA user_version = {SCHEMA_VERSION}; COMMIT;")
                 return
-            if v == 1:
+            if v < SCHEMA_VERSION:
                 self.db.execute("BEGIN IMMEDIATE")
                 try:
-                    self._v1_to_v2(self.db)
-                    self.db.execute("PRAGMA user_version = 2")
+                    if v == 1:
+                        self._v1_to_v2(self.db)
+                    self._v2_to_v3(self.db)
+                    self.db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
                     self.db.execute("COMMIT")
                 except BaseException:
                     self.db.execute("ROLLBACK")
                     raise
+
+    def _v2_to_v3(self, db) -> None:
+        """unit_history.note: the reason given for out of service / unmanned. Old rows keep ''."""
+        cols = {r["name"] for r in db.execute("PRAGMA table_info(unit_history)")}
+        if "note" not in cols:
+            db.execute("ALTER TABLE unit_history ADD COLUMN note TEXT NOT NULL DEFAULT ''")
+            self.migrated.append("schema v2 -> v3 (unit history: out-of-service reason)")
 
     def _v1_to_v2(self, db) -> None:
         """The sheet's vocabulary: numbers 26-000001, TYPE/SUBTYPE, caller fields, dispositions,
@@ -298,9 +308,9 @@ class Store:
         db.execute("INSERT INTO events (incident_id, unit_id, at, kind, text, operator) VALUES (?, ?, ?, ?, ?, ?)",
                    (iid, uid, self.clock() if at is None else at, kind, text, operator))
 
-    def _history(self, db, uid: int, old: str, new: str, iid, operator: str, at: float) -> None:
-        db.execute("INSERT INTO unit_history (at, unit_id, old_status, new_status, incident_id, operator) "
-                   "VALUES (?, ?, ?, ?, ?, ?)", (at, uid, old, new, iid, operator))
+    def _history(self, db, uid: int, old: str, new: str, iid, operator: str, at: float, note: str = "") -> None:
+        db.execute("INSERT INTO unit_history (at, unit_id, old_status, new_status, incident_id, operator, note) "
+                   "VALUES (?, ?, ?, ?, ?, ?, ?)", (at, uid, old, new, iid, operator, note))
 
     # -- units ------------------------------------------------------------------------------------
 
@@ -372,7 +382,7 @@ class Store:
             text = f"{u['name']} {L.status_phrase(status)}" + (f" ({note})" if note and role == "oos" else "")
             iid = a["incident_id"] if a is not None else None
             self._event(db, iid, "status", text, operator, uid, now)
-            self._history(db, uid, u["status"], status, iid, operator, now)
+            self._history(db, uid, u["status"], status, iid, operator, now, note if role == "oos" else "")
         return self.unit(uid)
 
     # -- incidents --------------------------------------------------------------------------------
