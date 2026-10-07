@@ -665,7 +665,7 @@ function renderOnUnits(inc) {
   syncList($("#d-units"), rows, {
     key: (a) => String(a.id),
     sig: (a) => JSON.stringify([a.status, a.dispatched_at, a.enroute_at, a.onscene_at, a.cleared_at, cad.listSig.length,
-      (a.next || []).join(), talkSig(a.name),
+      (a.next || []).join(), (a.return || []).join(), talkSig(a.name),
       cad.ask && cad.ask.uid === a.unit_id && cad.ask.where === "inc" ? cad.ask.status : null]),
     make: () => el("li", "ou"),
     fill: (li, a) => {
@@ -680,6 +680,7 @@ function renderOnUnits(inc) {
       const talk = !a.cleared_at && Radio.talkingFor(a.name);
       if (talk) head.append(el("span", "talk-badge", `📻 ${talk.ended ? "just transmitted" : "talking"} · ${talk.channel}`));
       if (!a.cleared_at && isOpen(inc)) head.append(statusButtons({ id: a.unit_id, status: a.status, next: a.next }, "inc"));
+      else if (a.cleared_at && isOpen(inc) && (a.return || []).length) head.append(returnButtons(inc, a));
       li.replaceChildren(head);
     },
     empty: inc.status === "queued" ? "None: accept, then dispatch" : "No units on this incident",
@@ -1164,6 +1165,27 @@ async function closeIncident(e) {
   if (!d) return flash($("#c-error"), "Pick a disposition first.");
   const r = await act("close", { disposition: d }, $("#c-error"));
   if (r) { $("#c-disp").value = ""; show($("#close-form"), false); }
+}
+
+// A unit that cleared a call that's still open goes back to it (responding, then on location).
+async function returnUnit(iid, uid, status) {
+  try {
+    await api("POST", `/api/cad/incident/${iid}/return`, { unit_id: uid, status, operator: operator() });
+  } catch (e) {
+    alert(e.message);
+  }
+}
+function returnButtons(inc, a) {
+  const box = el("div", "ubtns");
+  for (const code of a.return || []) {
+    const s = unitStatus(code);
+    const b = el("button", "mini", s.name);
+    b.style.setProperty("--c", s.bg || "#9aa0b4");
+    b.title = `Send ${a.name} back to this call: ${s.name.toLowerCase()}`;
+    b.addEventListener("click", (e) => { e.stopPropagation(); returnUnit(inc.id, a.unit_id, code); });
+    box.append(b);
+  }
+  return box;
 }
 
 async function setUnitStatus(uid, status, note = "") {

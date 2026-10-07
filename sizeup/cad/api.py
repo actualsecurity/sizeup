@@ -60,7 +60,7 @@ from sizeup.cad.store import CadError
 
 JSON = "application/json"
 MAX_BODY = 65536
-INCIDENT = re.compile(r"/api/cad/incident/(\d{1,9})(?:/(accept|dismiss|close|note|recommend|preview|dispatch|upgrade|attach|link))?")
+INCIDENT = re.compile(r"/api/cad/incident/(\d{1,9})(?:/(accept|dismiss|close|note|recommend|preview|dispatch|upgrade|attach|link|return))?")
 SUGGEST = re.compile(r"/api/cad/incident/(\d{1,9})/units")
 EXPORT = re.compile(r"/api/cad/export/([a-z-]{1,20}\.csv)")
 UNIT = re.compile(r"/api/cad/unit/(\d{1,9})/status")
@@ -140,7 +140,7 @@ class CadApi:
                 iid, action = int(m.group(1)), m.group(2)
                 fn = {None: c.update, "accept": c.accept, "dismiss": c.dismiss, "close": c.close, "note": c.note,
                       "recommend": c.recommend, "preview": c.preview, "dispatch": c.dispatch, "upgrade": c.upgrade,
-                      "attach": c.attach, "link": c.link_traffic}[action]
+                      "attach": c.attach, "link": c.link_traffic, "return": c.return_unit}[action]
                 return _json(200, fn(iid, body))
             if m := UNIT.fullmatch(path):
                 return _json(200, c.unit_status(int(m.group(1)), body))

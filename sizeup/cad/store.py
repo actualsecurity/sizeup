@@ -488,6 +488,45 @@ class Store:
             self._history(db, uid, u["status"], status, iid, operator, now, note if role == "oos" else "")
         return self.unit(uid)
 
+    def return_statuses(self) -> tuple[str, ...]:
+        """What a cleared unit can go back to a still-open call as: the responding / on-location statuses."""
+        L = self.lists
+        return tuple(c for c in L.status_ids if L.role(c) in ("enroute", "onscene")
+                     and not any(s["code"] == c and s.get("retired") for s in L.unit_statuses))
+
+    def return_to_incident(self, iid: int, uid: int, status: str, operator: str = "") -> dict:
+        """A unit that cleared a call that is still open goes back to it (user, 2026-10-07: "after units
+        clear an alarm that is still opened, we need a way to send them back en route and then on
+        scene"). Its assignment on that call is reopened; the first times it recorded are kept."""
+        L = self.lists
+        if status not in self.return_statuses():
+            raise CadError("a unit goes back to a call as " + " or ".join(L.name("unit_statuses", s)
+                                                                           for s in self.return_statuses()))
+        u = self.unit(uid)
+        now = self.clock()
+        with self.tx() as db:
+            inc = db.execute("SELECT status FROM incidents WHERE id = ?", (iid,)).fetchone()
+            if inc is None:
+                raise CadError(f"no incident {iid}")
+            if inc["status"] in ("closed", "dismissed"):
+                raise CadError("the incident is closed")
+            busy = db.execute("SELECT a.incident_id, i.number FROM assignments a JOIN incidents i ON i.id = a.incident_id "
+                              "WHERE a.unit_id = ? AND a.cleared_at IS NULL", (uid,)).fetchone()
+            if busy is not None:
+                raise CadError(f"{u['name']} is on {busy['number'] or busy['incident_id']}: clear it there first")
+            if L.role(u["status"]) == "oos":
+                raise CadError(f"{u['name']} is {L.status_phrase(u['status'])}")
+            a = db.execute("SELECT id FROM assignments WHERE incident_id = ? AND unit_id = ? AND cleared_at IS NOT NULL "
+                           "ORDER BY cleared_at DESC, id DESC LIMIT 1", (iid, uid)).fetchone()
+            if a is None:
+                raise CadError(f"{u['name']} was not on this incident")
+            col = ON_TIMES[L.role(status)]
+            db.execute(f"UPDATE assignments SET cleared_at = NULL, {col} = COALESCE({col}, ?) WHERE id = ?", (now, a["id"]))
+            db.execute("UPDATE units SET status = ?, status_at = ?, out_of_service = '' WHERE id = ?", (status, now, uid))
+            self._event(db, iid, "status", f"{u['name']} returned ({L.status_phrase(status)})", operator, uid, now)
+            self._history(db, uid, u["status"], status, iid, operator, now)
+        return self.unit(uid)
+
     # -- incidents --------------------------------------------------------------------------------
 
     def _next_number(self, db, at: float) -> str:
@@ -740,8 +779,16 @@ class Store:
         disp = self.q(f"SELECT id, incident_id, at, operator, kind, text, unit_ids, audio_path != '' AS has_audio, audio_note, "
                       f"transmitted, channel, tx_note FROM dispatches WHERE incident_id IN ({marks}) ORDER BY at, id", ids)
         by = {r["id"]: dict(r, emergency=bool(r["emergency"]), assignments=[], events=[], dispatches=[]) for r in rows}
+        latest = {}                        # (incident, unit) -> its last assignment row
+        for a in assigns:
+            latest[(a["incident_id"], a["unit_id"])] = a["id"]
+        back = list(self.return_statuses())
         for a in assigns:
             a["next"] = [] if a["cleared_at"] else list(self.lists.next_statuses(a["status"]))   # the row's buttons
+            # A cleared unit, now free, on a call that is still open: it can go back to it.
+            a["return"] = back if (a["cleared_at"] and latest[(a["incident_id"], a["unit_id"])] == a["id"]
+                                   and by[a["incident_id"]]["status"] not in ("closed", "dismissed")
+                                   and self.lists.role(a["status"]) == "free") else []
             by[a["incident_id"]]["assignments"].append(a)
         for e in events:
             by[e["incident_id"]]["events"].append(e)

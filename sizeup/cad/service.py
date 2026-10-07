@@ -576,6 +576,15 @@ class Cad:
 
     # -- units and run cards ----------------------------------------------------------------------
 
+    def return_unit(self, iid: int, body: dict) -> dict:
+        """POST incident/<id>/return {unit_id, status, operator}: a cleared unit goes back to it."""
+        try:
+            uid = int(body["unit_id"])
+        except (KeyError, TypeError, ValueError):
+            raise CadError("unit_id: required") from None
+        return self.store.return_to_incident(iid, uid, _text(body, "status", 40, required=True),
+                                             _text(body, "operator", 60))
+
     def unit_status(self, uid: int, body: dict) -> dict:
         status = _text(body, "status", 40, required=True)
         return self.store.set_unit_status(uid, status, _text(body, "operator", 60), _text(body, "note", 200))

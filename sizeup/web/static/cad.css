@@ -134,6 +134,7 @@ label.check { cursor: pointer; }
 
 .on-units .ouh { display: flex; align-items: center; gap: 0.5em; flex-wrap: wrap; }
 .on-units li.cleared { opacity: 0.55; }
+.on-units li.cleared:hover, .on-units li.cleared:focus-within { opacity: 0.85; }   /* still greyed, buttons usable */
 .on-units .ubtns { margin-top: 0; justify-content: flex-end; }
 
 .warnbox { border: 1px solid var(--warn); color: var(--warn); border-radius: 0.35em; padding: 0.35em 0.6em; margin-bottom: 0.5em; font-size: 0.9em; }
