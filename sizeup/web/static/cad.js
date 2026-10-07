@@ -1,7 +1,10 @@
-// sizeup CAD console (/cad): PCFD's own events, units and dispatch, laid out like the department's
-// sheet ("[TEMPLATE] PCFD ECC OPS", LIVE CAD tab) it replaces. The lists (types, subtypes,
-// dispositions, unit statuses, boards, colors) come from the server's data file
-// (data/cad_lists.json) in every state push: codes are stored, readable names are shown.
+// sizeup CAD console (/cad): PCFD's own incidents, units and dispatch.
+// Left: new incident, the pages from 60 Control to accept, pending / active / non-emergency
+// incidents, recently closed. Middle: the selected incident (or the new-incident form), its units,
+// dispatch, dispatches and timeline. Right: the units board grouped by kind, with status buttons.
+// The lists (types, subtypes, dispositions, unit statuses and their colors, the boards' units and
+// order) come from the server's data file (data/cad_lists.json) in every state push: codes are
+// stored, readable names are shown.
 //
 // The server pushes the CAD state over SSE once a second (/api/cad/stream); every action is a
 // POST to /api/cad/... and the next push shows its result. Nothing here invents data: empty
@@ -13,15 +16,23 @@
 
 const $ = (sel) => document.querySelector(sel);
 const LOST_AFTER_MS = 6000;
+// The units board: the department's apparatus by kind (the data file's order within each), then
+// other departments, police, EMS, and the rest (utility companies, agencies).
+const KIND_GROUPS = [
+  ["Chief officers", ["chief"]], ["Engines", ["engine"]], ["Ladders & towers", ["ladder", "tower"]],
+  ["Rescue", ["rescue"]], ["Utility", ["utility"]], ["Marine", ["marine"]],
+];
 
 const cad = {
   scene: null, state: null, lastMsgAt: 0, skew: 0,
-  sel: null,                 // the working event's id
-  extra: new Map(),          // events opened from the Incident database that aren't in the state
+  sel: null,                 // selected incident id
+  mode: "none",              // none | new | view
+  extra: new Map(),          // incidents opened from Records that aren't in the live state
   rec: null,                 // {iid, units, unfilled, already, card, note, checked:Set, extra:[], error}
   map: null, marker: null, mapSig: "",
-  listSig: "", rcEditing: null, tab: "live",
-  emergTouched: false,       // the operator set Emergency on Event info: the type no longer does
+  listSig: "", rcEditing: null, openUnit: null,
+  ask: null,                 // {uid, status, where}: asking why (out of service / unmanned)
+  emergTouched: false,       // the operator set Emergency on the form: the type no longer does
   dbAt: 0,
 };
 
@@ -47,26 +58,35 @@ function fmt(kind) {
   if (!fmts[kind]) {
     const timeZone = (cad.scene && cad.scene.timezone) || "America/New_York";
     const opts = {
+      hm: { hour: "2-digit", minute: "2-digit", hourCycle: "h23" },
       hms: { hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" },
+      short: { month: "short", day: "numeric" },
       md: { month: "2-digit", day: "2-digit" },
-      date: { weekday: "short", month: "short", day: "numeric" },
       parts: { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" },
     }[kind];
     fmts[kind] = new Intl.DateTimeFormat("en-US", { ...opts, timeZone });
   }
   return fmts[kind];
 }
-function fmtRecv(unix) {            // the sheet's "10/07 18:58:33"
+function fmtTime(unix, secs = false) {
+  if (!unix) return "";
+  const d = new Date(unix * 1000);
+  const now = new Date(serverNow() * 1000);
+  const t = fmt(secs ? "hms" : "hm").format(d);
+  return fmt("short").format(d) === fmt("short").format(now) ? t : `${fmt("short").format(d)} ${t}`;
+}
+function fmtRecv(unix) {            // the sheet's "10/07 18:58:33" (Records)
   if (!unix) return "";
   const d = new Date(unix * 1000);
   return `${fmt("md").format(d)} ${fmt("hms").format(d)}`;
 }
-function fmtDur(s) {                // h:mm:ss, like the sheet
+function fmtDur(s) {
   if (s === null || s === undefined || !isFinite(s)) return "";
   s = Math.max(0, Math.floor(s));
-  return `${Math.floor(s / 3600)}:${pad(Math.floor((s % 3600) / 60))}:${pad(s % 60)}`;
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  return h ? `${h}:${pad(m)}:${pad(sec)}` : `${pad(m)}:${pad(sec)}`;
 }
-function since(node, unix) {        // a ticking elapsed (tick() updates every [data-since])
+function since(node, unix) {        // a ticking "elapsed" (tick() updates every [data-since])
   if (unix) node.dataset.since = String(unix);
   else delete node.dataset.since;
   setText(node, unix ? fmtDur(serverNow() - unix) : "");
@@ -94,16 +114,6 @@ function store(key, value) {
     localStorage.setItem(key, value);
   } catch (e) { /* private window / blocked storage: just not remembered */ }
   return null;
-}
-function textOn(bg) {               // readable text on a colored cell
-  const m = /^#?([0-9a-f]{6})$/i.exec(bg || "");
-  if (!m) return "#fff";
-  const n = parseInt(m[1], 16), r = n >> 16, g = (n >> 8) & 255, b = n & 255;
-  return (0.299 * r + 0.587 * g + 0.114 * b) > 150 ? "#0c141c" : "#fff";
-}
-function paint(node, bg, fg) {
-  node.style.background = bg || "";
-  node.style.color = bg ? (fg || textOn(bg)) : "";
 }
 
 async function api(method, path, body) {
@@ -181,28 +191,27 @@ function typeColor(t) {
   const x = (L().event_types || []).find((i) => i.code === t);
   return x ? x.color : "";
 }
-function typeCell(node, t, s) {
-  node.className = "typecell";
-  setText(node, typeLabel(t, s) || "Type not set");
-  paint(node, t ? typeColor(t) : "#7a5c12");
-  return node;
-}
 function unitStatus(code) {
   return (L().unit_statuses || []).find((s) => s.code === code) || { code, name: code };
 }
 function roleOf(code) {
   return unitStatus(code).role || "";
 }
-function eventStatus(inc) {         // what the sheet's STATUS cell shows
+function statusChip(code, text) {   // the old outline chip, in the data file's status color
+  const st = unitStatus(code);
+  const c = el("span", "chip st", text ?? st.name);
+  c.style.setProperty("--c", st.bg || "#9aa0b4");
+  return c;
+}
+function eventStatus(inc) {         // Pending / Open / Active / Closed, with the data file's color
   const es = L().event_statuses || {};
   const k = inc.status === "pending" && !inc.emergency ? "open" : inc.status;
   return es[k] || { name: inc.status };
 }
-function statusBadge(node, inc) {
-  const s = eventStatus(inc);
-  node.className = "badge";
-  setText(node, s.name);
-  paint(node, s.bg, s.fg);
+function stBadge(node, name, color) {
+  node.className = "st-badge";
+  setText(node, name);
+  node.style.setProperty("--c", color || "#9aa0b4");
   return node;
 }
 function isEmergency(t, s) {        // data file event_class: TYPE/SUBTYPE, */SUBTYPE, TYPE; default emergency
@@ -234,11 +243,11 @@ function fillListSelects() {
   const sig = JSON.stringify([L().event_types, L().event_subtypes, L().dispositions, L().received_via, L().type_subtypes]);
   if (sig === cad.listSig) return;
   cad.listSig = sig;
-  for (const id of ["#f-type", "#e-type", "#w-acc-type", "#u-type"]) fillTypes($(id));
+  for (const id of ["#f-type", "#e-type", "#d-acc-type", "#u-type"]) fillTypes($(id));
   fillTypes($("#rc-type"), undefined);
   fillSubtypes($("#f-subtype"), $("#f-type").value);
   fillSubtypes($("#e-subtype"), $("#e-type").value);
-  fillSubtypes($("#w-acc-sub"), $("#w-acc-type").value);
+  fillSubtypes($("#d-acc-sub"), $("#d-acc-type").value);
   fillSubtypes($("#u-subtype"), $("#u-type").value);
   fillSubtypes($("#rc-subtype"), $("#rc-type").value, "Any subtype");
   const via = (L().received_via || []).map((v) => [v.code, v.name]);
@@ -270,16 +279,17 @@ function renderConn() {
   else { pill.className = "pill ok"; setText(pill, "live"); }
   document.body.classList.toggle("stale", !!cad.lastMsgAt && age > LOST_AFTER_MS);
 }
+function renderClock() {
+  setText($("#clock-local"), fmt("hms").format(new Date(serverNow() * 1000)));
+}
 function tick() {
-  const now = new Date(serverNow() * 1000);
-  setText($("#clock-local"), fmt("hms").format(now));
-  setText($("#clock-date"), fmt("date").format(now));
+  renderClock();
   renderConn();
-  const t = serverNow();
-  for (const n of document.querySelectorAll("[data-since]")) setText(n, fmtDur(t - Number(n.dataset.since)));
+  const now = serverNow();
+  for (const n of document.querySelectorAll("[data-since]")) setText(n, fmtDur(now - Number(n.dataset.since)));
 }
 
-// ---- events -----------------------------------------------------------------------------
+// ---- incidents: queue --------------------------------------------------------------------
 
 function incidents() {
   return (cad.state && cad.state.incidents) || [];
@@ -290,165 +300,216 @@ function selected() {
 function openAssignments(inc) {
   return (inc.assignments || []).filter((a) => !a.cleared_at);
 }
-function unitsText(inc) {
-  return openAssignments(inc).map((a) => a.name).join(", ");
-}
 function isOpen(inc) {
   return ["queued", "pending", "active"].includes(inc.status);
 }
+function incTitle(inc) {
+  return inc.number || (inc.status === "queued" ? "Page" : "Not numbered");
+}
+
+function queueItem() {
+  const li = el("li", "qi");
+  li.tabIndex = 0;
+  li.addEventListener("click", () => selectIncident(Number(li.dataset.key)));
+  li.addEventListener("keydown", (e) => { if (e.key === "Enter") selectIncident(Number(li.dataset.key)); });
+  return li;
+}
+function fillQueueItem(li, inc) {
+  li.className = `qi ${inc.status}` + (inc.emergency ? "" : " nonemerg") + (inc.id === cad.sel ? " sel" : "");
+  const head = el("div", "qh");
+  const t = el("span", "qt", typeLabel(inc.type, inc.subtype) || "Type not set");
+  if (inc.type) t.style.setProperty("--c", typeColor(inc.type) || "#9aa0b4");
+  else t.classList.add("warn");
+  head.append(el("b", "qn", incTitle(inc)), t);
+  const right = el("span", "qe");
+  if (isOpen(inc)) since(right, inc.created_at);
+  else right.textContent = fmtTime(inc.closed_at);
+  head.append(el("span", "spacer"), right);
+  const addr = el("div", "qa" + (inc.address ? "" : " dim"), inc.address || "no location");
+  li.replaceChildren(head, addr);
+  if (inc.status === "queued") {
+    if (inc.type_note) li.append(el("div", "qs warn", inc.type_note));
+    li.append(el("div", "qs dim", "from 60 Control page · needs Accept or Dismiss"));
+  } else if (!inc.emergency && isOpen(inc)) {
+    li.append(el("div", "qs dim", inc.until_at ? `until ${fmtTime(inc.until_at)}` : "no end time"));
+  } else if (!isOpen(inc)) {
+    li.append(el("div", "qs dim", inc.status === "dismissed" ? "dismissed" : nameOf("dispositions", inc.disposition) || "closed"));
+  }
+  const on = openAssignments(inc);
+  if (on.length) {
+    const chips = el("div", "chips");
+    for (const a of on) chips.append(statusChip(a.status, `${a.name} · ${unitStatus(a.status).name}`));
+    li.append(chips);
+  }
+}
+function renderQueue() {
+  const all = incidents();
+  const byAge = (a, b) => a.created_at - b.created_at;        // oldest first
+  const sig = (i) => JSON.stringify([i.status, i.number, i.type, i.subtype, i.address, i.id === cad.sel, i.emergency,
+    i.until_at, i.disposition, i.type_note, openAssignments(i).map((a) => [a.name, a.status]), i.closed_at, cad.listSig.length]);
+  const opts = { key: (i) => String(i.id), sig, make: queueItem, fill: fillQueueItem };
+  syncList($("#q-queued"), all.filter((i) => i.status === "queued").sort(byAge), { ...opts, empty: "No pages waiting" });
+  syncList($("#q-pending"), all.filter((i) => i.status === "pending" && i.emergency).sort(byAge),
+    { ...opts, empty: "Nothing waiting for units" });
+  syncList($("#q-active"), all.filter((i) => i.status === "active" && i.emergency), { ...opts, empty: "No active incidents" });
+  syncList($("#q-nonemerg"), all.filter((i) => (i.status === "pending" || i.status === "active") && !i.emergency).sort(byAge),
+    { ...opts, empty: "None open" });
+  syncList($("#q-closed"), all.filter((i) => i.status === "closed" || i.status === "dismissed"),
+    { ...opts, empty: "None closed recently" });
+}
+
+// ---- incident detail ------------------------------------------------------------------
 
 function selectIncident(id) {
   cad.sel = id;
+  cad.mode = "view";
   cad.rec = null;
   show($("#edit-form"), false);
+  show($("#close-form"), false);
   show($("#upgrade-form"), false);
   show($("#r-preview-box"), false);
   $("#r-full").checked = false;
   flash($("#r-error"));
   flash($("#c-error"));
-  $("#c-disp").value = "";
-  if (cad.tab !== "live") setTab("live");
   render();
   recommend();
-  if (window.innerWidth <= 1200) $("#working").scrollIntoView({ behavior: "smooth", block: "start" });
+  if (window.innerWidth <= 1100) $("#detail").scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
-function eventRow() {
-  const tr = el("tr", "ev");
-  tr.tabIndex = 0;
-  tr.addEventListener("click", () => selectIncident(Number(tr.dataset.key)));
-  tr.addEventListener("keydown", (e) => { if (e.key === "Enter") selectIncident(Number(tr.dataset.key)); });
-  return tr;
-}
-function fillEventRow(tr, inc, kind) {
-  tr.className = "ev" + (inc.id === cad.sel ? " sel" : "");
-  const cells = [el("td", "num", inc.number || "—"), el("td", "")];
-  cells[1].append(typeCell(el("span"), inc.type, inc.subtype));
-  cells.push(el("td", "loc", inc.address || "—"), el("td", "t", fmtRecv(inc.created_at)));
-  if (kind === "nonemerg") cells.push(el("td", "t", inc.until_at ? fmtRecv(inc.until_at).slice(0, 11) : ""));
-  else if (kind === "closed") cells.push(el("td", "", nameOf("dispositions", inc.disposition) || (inc.status === "dismissed" ? "Dismissed" : "")));
-  else { const td = el("td"); td.append(statusBadge(el("span"), inc)); cells.push(td); }
-  cells.push(el("td", "", unitsText(inc)));
-  const dur = el("td", "t");
-  if (kind === "closed") setText(dur, fmtDur((inc.closed_at || 0) - inc.created_at));
-  else since(dur, inc.created_at);
-  cells.push(dur);
-  tr.replaceChildren(...cells);
-}
-function renderEventTables() {
-  const all = incidents();
-  const byAge = (a, b) => a.created_at - b.created_at;        // oldest first
-  const sig = (i) => JSON.stringify([i.status, i.number, i.type, i.subtype, i.address, i.id === cad.sel, unitsText(i),
-    i.until_at, i.disposition, i.emergency, cad.listSig.length]);
-  const opts = (kind, cols) => ({ key: (i) => String(i.id), sig, make: eventRow, fill: (tr, i) => fillEventRow(tr, i, kind), cols });
-  syncList($("#t-pending"), all.filter((i) => i.status === "pending" && i.emergency).sort(byAge),
-    { ...opts("pending", 7), empty: "No pending events" });
-  syncList($("#t-active"), all.filter((i) => i.status === "active" && i.emergency).sort(byAge),
-    { ...opts("active", 7), empty: "No active events" });
-  syncList($("#t-nonemerg"), all.filter((i) => (i.status === "pending" || i.status === "active") && !i.emergency).sort(byAge),
-    { ...opts("nonemerg", 7), empty: "No non-emergency events" });
-  syncList($("#t-closed"), all.filter((i) => i.status === "closed" || i.status === "dismissed"),
-    { ...opts("closed", 7), empty: "None closed in the last 12 hours" });
-  syncList($("#q-queued"), all.filter((i) => i.status === "queued").sort(byAge), {
-    key: (i) => String(i.id), sig,
-    make: () => {
-      const li = el("li", "qi");
-      li.tabIndex = 0;
-      li.addEventListener("click", () => selectIncident(Number(li.dataset.key)));
-      li.addEventListener("keydown", (e) => { if (e.key === "Enter") selectIncident(Number(li.dataset.key)); });
-      return li;
-    },
-    fill: (li, inc) => {
-      li.className = "qi" + (inc.id === cad.sel ? " sel" : "");
-      const head = el("div", "qh");
-      head.append(typeCell(el("span"), inc.type, inc.subtype), el("b", "", inc.address || "no location"),
-        el("span", "spacer"), since(el("span", "qe"), inc.created_at));
-      li.replaceChildren(head);
-      if (inc.type_note) li.append(el("div", "qnote", inc.type_note));
-      li.append(el("div", "dim small", `received ${fmtRecv(inc.created_at)} · click to check, then accept`));
-    },
-    empty: "Nothing from 60 Control waiting",
-  });
-}
-
-// ---- the working event ------------------------------------------------------------------
-
-function renderWorking() {
-  const inc = cad.sel !== null ? selected() : null;
-  show($("#w-empty"), !inc);
-  show($("#w-body"), !!inc);
-  if (cad.sel !== null && !inc) {
-    setText($("#w-empty .big"), "That event is no longer listed");
+function renderDetail() {
+  const inc = cad.mode === "view" ? selected() : null;
+  show($("#new-form"), cad.mode === "new");
+  show($("#d-empty"), cad.mode === "none" || (cad.mode === "view" && !inc));
+  show($("#d-body"), !!inc);
+  if (cad.mode === "view" && !inc) {
+    setText($("#d-empty .big"), "That incident is no longer listed");
     return;
   }
-  setText($("#w-empty .big"), "No event open");
+  setText($("#d-empty .big"), "No incident selected");
   if (!inc) return;
   const open = isOpen(inc);
-  setText($("#w-number"), inc.number || "Not yet numbered");
-  statusBadge($("#w-status"), inc);
-  const cls = $("#w-class");
-  cls.className = "chip " + (inc.emergency ? "emerg" : "nonemerg");
-  setText(cls, inc.emergency ? "Emergency" : "Non-emergency");
-  show($("#w-edit"), open);
-  show($("#w-queued"), inc.status === "queued");
+  setText($("#d-number"), incTitle(inc));
+  const es = eventStatus(inc);
+  stBadge($("#d-status"), es.name, es.bg);
+  stBadge($("#d-class"), inc.emergency ? "Emergency" : "Non-emergency", inc.emergency ? "#ff8a7a" : "#8fb8d8");
+  setText($("#d-source"), inc.source === "manual" ? "entered by hand" : `from ${inc.source}`);
+  show($("#d-accept"), inc.status === "queued");
+  show($("#d-dismiss"), inc.status === "queued");
+  show($("#d-close"), inc.status === "pending" || inc.status === "active");
+  show($("#d-edit"), open);
+  if (!(inc.status === "pending" || inc.status === "active")) show($("#close-form"), false);
+  show($("#d-queued"), inc.status === "queued");
   if (inc.status === "queued") {
-    setText($("#w-note"), inc.type_note || "");
-    const ts = $("#w-acc-type");
+    setText($("#d-qnote"), inc.type_note || "");
+    const ts = $("#d-acc-type");
     if (ts._for !== inc.id) {
       ts._for = inc.id;
       ts.value = inc.type || "";
-      fillSubtypes($("#w-acc-sub"), ts.value);
-      $("#w-acc-sub").value = inc.subtype || "";
+      fillSubtypes($("#d-acc-sub"), ts.value);
+      $("#d-acc-sub").value = inc.subtype || "";
     }
   }
-  setText($("#w-f-number"), inc.number || "—");
-  typeCell($("#w-f-type"), inc.type, inc.subtype);
-  setText($("#w-f-received"), fmtRecv(inc.created_at));
-  statusBadge($("#w-f-status"), inc);
-  const loc = (inc.address || "—") + (inc.cross_street ? ` · cross ${inc.cross_street}` : "");
-  setText($("#w-f-location"), loc);
-  setText($("#w-f-units"), unitsText(inc) || "—");
-  setText($("#w-f-caller"), inc.caller_name || "—");
-  setText($("#w-f-phone"), inc.phone || "—");
-  setText($("#w-f-caddr"), inc.caller_address || "—");
-  setText($("#w-f-via"), inc.received_via ? nameOf("received_via", inc.received_via) : "—");
-  show($("#w-f-until-w"), !!inc.until_at);
-  setText($("#w-f-until"), inc.until_at ? fmtRecv(inc.until_at) : "");
-  const dur = $("#w-f-duration");
-  if (open) since(dur, inc.created_at);
-  else { since(dur, null); setText(dur, fmtDur((inc.closed_at || 0) - inc.created_at)); }
-  show($("#w-f-disp-w"), !!inc.disposition);
-  setText($("#w-f-disp"), nameOf("dispositions", inc.disposition));
-  setText($("#w-f-remarks"), inc.remarks || "");
+  const type = $("#d-type");
+  setText(type, typeLabel(inc.type, inc.subtype) || "Type not set");
+  type.style.setProperty("--c", inc.type ? typeColor(inc.type) || "#ff7a5c" : "#ffb020");
+  const addr = $("#d-addr");
+  addr.className = "d-addr" + (inc.address ? "" : " dim");
+  setText(addr, inc.address || "No location");
+  setText($("#d-cross"), inc.cross_street ? `Cross: ${inc.cross_street}` : "");
+  setText($("#d-geo"), inc.lat != null ? `Map: ${inc.geo_label || `${inc.lat.toFixed(5)}, ${inc.lon.toFixed(5)}`}`
+    : "Not on the map (no gazetteer match picked)");
+  $("#d-geo").className = "geo" + (inc.lat != null ? "" : " warn");
+  setText($("#d-created"), fmtTime(inc.created_at, true));
+  const elapsed = $("#d-elapsed");
+  setText($("#d-elapsed-l"), open ? "Elapsed" : "Duration");
+  if (open) since(elapsed, inc.created_at);
+  else { since(elapsed, null); setText(elapsed, fmtDur((inc.closed_at || 0) - inc.created_at)); }
+  show($("#d-via-w"), !!inc.received_via);
+  setText($("#d-via"), inc.received_via ? nameOf("received_via", inc.received_via) : "");
+  show($("#d-until-w"), !!inc.until_at);
+  setText($("#d-until"), inc.until_at ? fmtTime(inc.until_at) : "");
+  show($("#d-disp-w"), !!inc.disposition);
+  setText($("#d-disp"), inc.disposition ? nameOf("dispositions", inc.disposition) : "");
+  const caller = [inc.caller_name, inc.phone, inc.caller_address].filter(Boolean).join(" · ");
+  setText($("#d-caller"), caller ? `Caller: ${caller}` : "");
+  setText($("#d-narr"), inc.remarks || "");
+  show($("#d-narr"), !!inc.remarks);
   renderMap(inc);
-  show($("#w-dispatch"), open && !!inc.emergency);
-  show($("#w-attach"), open && !inc.emergency && inc.status !== "queued");
-  show($("#w-closebox"), inc.status === "pending" || inc.status === "active");
-  renderDispatchBox(inc);
-  renderAttach(inc);
   renderOnUnits(inc);
-  renderChrono(inc);
-  show($("#note-form"), true);
+  show($("#d-attach"), open && !inc.emergency && inc.status !== "queued");
+  renderAttach(inc);
+  show($("#d-dispatch"), open && !!inc.emergency);
+  renderDispatchBox(inc);
+  renderDispatches(inc);
+  renderEvents(inc);
+}
+
+// Status buttons (the old console's): one per status in the data file; out of service and
+// unmanned ask why first (optional), right there.
+function statusButtons(u, where) {
+  const box = el("div", "ubtns");
+  if (cad.ask && cad.ask.uid === u.id && cad.ask.where === where) {
+    const st = unitStatus(cad.ask.status);
+    const form = el("form", "ask row");
+    const input = el("input");
+    input.type = "text";
+    input.maxLength = 200;
+    input.placeholder = `${st.name}: why? (optional)`;
+    input.value = cad.ask.text || "";
+    input.addEventListener("input", () => { cad.ask.text = input.value; });
+    const ok = el("button", "mini on", `Set ${st.name.toLowerCase()}`);
+    ok.type = "submit";
+    ok.style.setProperty("--c", st.bg || "#9aa0b4");
+    const cancel = el("button", "mini", "Cancel");
+    cancel.type = "button";
+    cancel.addEventListener("click", (e) => { e.stopPropagation(); cad.ask = null; render(); });
+    form.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const status = cad.ask.status;
+      cad.ask = null;
+      setUnitStatus(u.id, status, input.value.trim());
+    });
+    form.addEventListener("click", (e) => e.stopPropagation());
+    form.append(input, ok, cancel);
+    box.append(form);
+    setTimeout(() => { if (document.activeElement !== input) input.focus(); }, 0);
+    return box;
+  }
+  for (const s of (L().unit_statuses || [])) {
+    if (where === "inc" && s.code === u.status) continue;
+    const b = el("button", "mini" + (s.code === u.status ? " on" : ""), s.name);
+    b.style.setProperty("--c", s.bg || "#9aa0b4");
+    b.disabled = s.code === u.status;
+    b.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (s.role === "oos") { cad.ask = { uid: u.id, status: s.code, where, text: "" }; render(); }
+      else setUnitStatus(u.id, s.code);
+    });
+    box.append(b);
+  }
+  return box;
 }
 
 function renderOnUnits(inc) {
   const rows = (inc.assignments || []).slice().sort((a, b) => (!!a.cleared_at - !!b.cleared_at));
-  syncList($("#w-units"), rows, {
+  syncList($("#d-units"), rows, {
     key: (a) => String(a.id),
-    sig: (a) => JSON.stringify([a.status, a.dispatched_at, a.enroute_at, a.onscene_at, a.cleared_at, cad.listSig.length]),
+    sig: (a) => JSON.stringify([a.status, a.dispatched_at, a.enroute_at, a.onscene_at, a.cleared_at, cad.listSig.length,
+      cad.ask && cad.ask.uid === a.unit_id && cad.ask.where === "inc" ? cad.ask.status : null]),
     make: () => el("li", "ou"),
     fill: (li, a) => {
       li.className = "ou" + (a.cleared_at ? " cleared" : "");
       const head = el("div", "ouh");
       head.append(el("b", "", a.name));
-      if (!a.cleared_at) head.append(statusSelect(a.unit_id, a.status));
+      if (!a.cleared_at) head.append(statusChip(a.status));
       const times = el("span", "dim small",
-        [["dispatched", a.dispatched_at], ["responding", a.enroute_at], ["on location", a.onscene_at], ["cleared", a.cleared_at]]
-          .filter(([, t]) => t).map(([k, t]) => `${k} ${fmt("hms").format(new Date(t * 1000))}`).join(" · "));
-      head.append(times);
+        [["disp", a.dispatched_at], ["resp", a.enroute_at], ["on loc", a.onscene_at], ["cleared", a.cleared_at]]
+          .filter(([, t]) => t).map(([k, t]) => `${k} ${fmtTime(t, true)}`).join(" · "));
+      head.append(times, el("span", "spacer"));
+      if (!a.cleared_at && isOpen(inc)) head.append(statusButtons({ id: a.unit_id, status: a.status }, "inc"));
       li.replaceChildren(head);
     },
-    empty: inc.status === "queued" ? "None: accept it first" : "No units on this event",
+    empty: inc.status === "queued" ? "None: accept, then dispatch" : "No units on this incident",
   });
 }
 
@@ -457,14 +518,17 @@ function playForEvent(inc, e) {
   const d = (inc.dispatches || []).find((x) => Math.abs(x.at - e.at) < 0.001);
   return d && d.has_audio ? d.id : null;
 }
-function renderChrono(inc) {
-  syncList($("#w-chrono"), (inc.events || []).slice().reverse(), {
+const EVENT_KINDS = { note: "comment", status: "status", system: "system", attach: "attached" };
+function renderEvents(inc) {
+  syncList($("#d-events"), (inc.events || []).slice().reverse(), {
     key: (e) => String(e.id),
     sig: (e) => String(e.id),
-    make: () => el("tr"),
-    fill: (tr, e) => {
-      tr.className = `k-${e.kind}`;
-      const txt = el("td", "txt");
+    make: () => el("li", "ev"),
+    fill: (li, e) => {
+      const meta = el("div", "meta");
+      meta.append(el("span", "t", fmtTime(e.at, true)), el("span", `ek ${e.kind}`, EVENT_KINDS[e.kind] || e.kind));
+      if (e.operator) meta.append(el("span", "", `· ${e.operator}`));
+      const txt = el("div", "txt");
       const did = playForEvent(inc, e);
       if (did) {
         const b = el("button", "play mini", "▶");
@@ -473,16 +537,45 @@ function renderChrono(inc) {
         txt.append(b);
       }
       txt.append(document.createTextNode(e.text));
-      tr.replaceChildren(el("td", "t", fmtRecv(e.at)), txt, el("td", "by", e.operator || ""));
+      li.replaceChildren(meta, txt);
     },
-    empty: "Nothing yet", cols: 3,
+    empty: "Nothing yet",
+  });
+}
+
+const DISPATCH_KINDS = { dispatch: "dispatch", "add-on": "add-on", upgrade: "upgrade" };
+function renderDispatches(inc) {
+  show($("#d-dispatches-card"), !!inc.emergency || (inc.dispatches || []).length > 0);
+  syncList($("#d-dispatches"), (inc.dispatches || []).slice().reverse(), {
+    key: (d) => String(d.id),
+    sig: (d) => String(d.id),
+    make: () => el("li", "dp"),
+    fill: (li, d) => {
+      const meta = el("div", "meta");
+      meta.append(el("span", "t", fmtTime(d.at, true)), el("span", `ek ${d.kind === "upgrade" ? "upgrade" : "dispatch"}`,
+        DISPATCH_KINDS[d.kind] || d.kind || "dispatch"), el("span", "", d.operator ? `by ${d.operator}` : ""),
+      el("span", "", d.channel ? `· ${d.channel}` : ""));
+      meta.append(el("span", d.transmitted ? "txd" : "notx", d.transmitted ? "Transmitted" : "Not transmitted"));
+      if (!d.transmitted && d.tx_note) meta.append(el("span", "", `(${d.tx_note})`));
+      const row = el("div", "row");
+      if (d.has_audio) {
+        const b = el("button", "play", "▶");
+        b.title = "Play this dispatch";
+        b.addEventListener("click", () => play(`/api/cad/dispatch/${d.id}.wav`));
+        row.append(b);
+      }
+      row.append(el("div", "txt", d.text));
+      li.replaceChildren(meta, row);
+      if (d.audio_note) li.append(el("div", "dim small", d.audio_note));
+    },
+    empty: "No dispatches yet",
   });
 }
 
 // ---- recommendation / preview / dispatch / upgrade ----------------------------------------------
 
 async function recommend(typ, sub) {
-  // By id, not from the last push: a just-created event isn't in the state yet.
+  // By id, not from the last push: a just-created incident isn't in the state yet.
   const iid = cad.sel, inc = selected();
   if (iid === null || (inc && (!isOpen(inc) || !inc.emergency))) { cad.rec = null; if (inc) renderDispatchBox(inc); return; }
   const body = typ ? { type: typ, subtype: sub || "" } : {};
@@ -503,9 +596,6 @@ function units() {
 function unitById(id) {
   return units().find((u) => u.id === id);
 }
-function freeCodes() {
-  return (L().unit_statuses || []).filter((s) => s.role === "free").map((s) => s.code);
-}
 function canDispatch(u) {
   return roleOf(u.status) !== "oos";
 }
@@ -517,7 +607,7 @@ function renderDispatchBox(inc) {
   const addOn = (inc.dispatches || []).length > 0;
   show($("#r-kind"), addOn);
   show($("#u-open"), addOn && inc.status !== "queued");
-  setText($("#r-dispatch"), addOn ? "Dispatch (add-on)" : "Dispatch");
+  if (!$("#r-dispatch")._busy) setText($("#r-dispatch"), addOn ? "Dispatch (add-on)" : "Dispatch");
   const rec = cad.rec && cad.rec.iid === inc.id ? cad.rec : null;
   setText($("#r-card"), rec && rec.card ? `run card: ${rec.card_label || rec.card}${rec.forType ? " (new type)" : ""}` : "");
   const warn = rec ? [...(rec.error ? [rec.error] : []), ...(rec.note ? [rec.note] : []), ...rec.unfilled] : [];
@@ -532,7 +622,7 @@ function renderDispatchBox(inc) {
   const items = rows.map((u) => {
     const now = unitById(u.id) || u;
     const li = el("li", "ru");
-    const lab = el("label");
+    const lab = el("label", "row");
     const cb = el("input");
     cb.type = "checkbox";
     cb.checked = rec.checked.has(u.id);
@@ -540,27 +630,25 @@ function renderDispatchBox(inc) {
       if (cb.checked) rec.checked.add(u.id); else rec.checked.delete(u.id);
       rec.sig = null;
     });
-    const st = unitStatus(now.status);
-    const chip = el("span", "badge", st.name);
-    paint(chip, st.bg, st.fg);
-    lab.append(cb, el("b", "", u.name), el("span", "dim small", u.slot || ""), chip);
-    if (now.spare) lab.append(el("span", "dim small", "spare"));
+    lab.append(cb, el("b", "", u.name), el("span", "dim small", u.slot || ""), el("span", "spacer"), statusChip(now.status));
+    if (now.spare) lab.append(el("span", "chip spare", "spare"));
     if (now.incident_id && now.incident_id !== inc.id) lab.append(el("span", "warn small", `on ${now.incident_number} (will be moved)`));
     li.append(lab);
     return li;
   });
   if (!items.length) {
-    items.push(el("li", "empty", rec.already.length ? `On it: ${rec.already.join(", ")}. Nothing more on the run card.`
-      : "Nothing recommended: add units below"));
+    items.push(el("li", "empty", rec.already.length ? `Already on it: ${rec.already.join(", ")}. Nothing more on the run card.`
+      : "Nothing to recommend: add units below"));
   } else if (rec.already.length) {
     items.push(el("li", "dim small", `Already on it: ${rec.already.join(", ")}`));
   }
   list.replaceChildren(...items);
+  // Add any other unit (not out of service or unmanned, not already listed or on this incident).
   const listed = new Set(rows.map((u) => u.id));
-  const others = units().filter((u) => !listed.has(u.id) && canDispatch(u) && u.incident_id !== inc.id);
+  const others = units().filter((u) => !listed.has(u.id) && canDispatch(u) && u.incident_id !== inc.id && (u.board || u.incident_id));
   fillSelect($("#r-add"), others.map((u) => [String(u.id),
     `${u.name} · ${unitStatus(u.status).name}${u.incident_number ? ` (on ${u.incident_number})` : ""}`]),
-  others.length ? "Add another unit…" : "No other units can be dispatched");
+  others.length ? "Add another unit…" : "No other units in service");
   const ch = $("#r-channel");
   const chans = (cad.state.transmit && cad.state.transmit.channels) || [];
   if (ch.options.length !== chans.length) fillSelect(ch, chans.map((c) => [c, c]));
@@ -576,10 +664,10 @@ function tickAll() {
   const inc = selected();
   if (!inc || !cad.rec) return;
   const kinds = L().full_response_kinds || [];
-  const free = freeCodes();
+  const free = (L().unit_statuses || []).filter((s) => s.role === "free").map((s) => s.code);
   const listed = new Set([...cad.rec.units.map((u) => u.id), ...cad.rec.extra]);
   for (const u of units()) {
-    if (!kinds.includes(u.kind) || u.mutual_aid || !free.includes(u.status) || u.incident_id) continue;
+    if (!kinds.includes(u.kind) || u.mutual_aid || !free.includes(u.status) || u.incident_id || !u.board) continue;
     if (!listed.has(u.id)) cad.rec.extra.push(u.id);
     cad.rec.checked.add(u.id);
   }
@@ -600,8 +688,9 @@ function showPreview(title, text, url, note) {
 async function busy(button, label, fn) {
   const was = button.textContent;
   button.disabled = true;
+  button._busy = true;
   setText(button, label);
-  try { await fn(); } finally { button.disabled = false; setText(button, was); }
+  try { await fn(); } finally { button.disabled = false; button._busy = false; setText(button, was); render(); }
 }
 
 async function preview() {
@@ -687,7 +776,7 @@ async function upgrade(e, previewOnly) {
 
 function renderAttach(inc) {
   if (!inc || inc.emergency || !isOpen(inc)) return;
-  const others = units().filter((u) => u.incident_id !== inc.id);
+  const others = units().filter((u) => u.incident_id !== inc.id && (u.board || u.incident_id));
   const sig = JSON.stringify(others.map((u) => [u.id, u.status, u.incident_number]));
   const sel = $("#a-unit");
   if (sel._sig === sig) return;
@@ -698,7 +787,7 @@ function renderAttach(inc) {
 async function attach() {
   const inc = selected(), id = Number($("#a-unit").value);
   flash($("#a-error"));
-  if (!inc || !id) return;
+  if (!inc || !id) return flash($("#a-error"), "Pick a unit.");
   try {
     await api("POST", `/api/cad/incident/${inc.id}/attach`, { unit_ids: [id], operator: operator() });
     $("#a-unit").value = "";
@@ -707,7 +796,7 @@ async function attach() {
   }
 }
 
-// ---- event actions ----------------------------------------------------------------------
+// ---- incident actions --------------------------------------------------------------------
 
 async function act(action, body = {}, errNode = null) {
   const inc = selected();
@@ -722,36 +811,21 @@ async function act(action, body = {}, errNode = null) {
   }
 }
 
-async function closeEvent() {
+async function closeIncident(e) {
+  e.preventDefault();
   flash($("#c-error"));
   const d = $("#c-disp").value;
   if (!d) return flash($("#c-error"), "Pick a disposition first.");
-  if (!confirm(`Close this event as "${nameOf("dispositions", d)}"? Units still on it are cleared.`)) return;
   const r = await act("close", { disposition: d }, $("#c-error"));
-  if (r) $("#c-disp").value = "";
+  if (r) { $("#c-disp").value = ""; show($("#close-form"), false); }
 }
 
-async function setUnitStatus(uid, status) {
+async function setUnitStatus(uid, status, note = "") {
   try {
-    await api("POST", `/api/cad/unit/${uid}/status`, { status, operator: operator() });
+    await api("POST", `/api/cad/unit/${uid}/status`, { status, operator: operator(), note });
   } catch (e) {
     alert(e.message);
   }
-}
-function statusSelect(uid, current) {
-  const s = el("select", "st");
-  s.title = "Change this unit's status (takes effect at once)";
-  for (const st of (L().unit_statuses || [])) {
-    const o = el("option", "", st.name);
-    o.value = st.code;
-    s.append(o);
-  }
-  if (![...s.options].some((o) => o.value === current)) s.append(Object.assign(el("option", "", current), { value: current }));
-  s.value = current;
-  const st = unitStatus(current);
-  paint(s, st.bg, st.fg);
-  s.addEventListener("change", () => setUnitStatus(uid, s.value));
-  return s;
 }
 
 // ---- location box with gazetteer suggestions -------------------------------------------------
@@ -808,27 +882,33 @@ function addressBox(input, geoNote, list) {
   return box;
 }
 
-// ---- event info (entry) / edit -------------------------------------------------------------
+// ---- new incident / edit ----------------------------------------------------------------
 
 function entryClass() {
   const t = $("#f-type").value, s = $("#f-subtype").value;
-  if (!cad.emergTouched) $("#f-emergency").checked = !t || isEmergency(t, s);
   const auto = !t || isEmergency(t, s);
+  if (!cad.emergTouched) $("#f-emergency").checked = auto;
   setText($("#f-class"), t ? (cad.emergTouched && $("#f-emergency").checked !== auto
-    ? `(changed: the type says ${auto ? "emergency" : "non-emergency"})` : `(from the type)`) : "");
+    ? `(changed: the type says ${auto ? "emergency" : "non-emergency"})` : "(from the type)") : "");
   show($("#f-until-w"), !$("#f-emergency").checked);
 }
 
-function clearEntry() {
-  $("#entry-form").reset();
+function openNew() {
+  cad.mode = "new";
+  cad.sel = null;
+  cad.rec = null;
+  $("#new-form").reset();
   newAddr.set("", null);
   cad.emergTouched = false;
   fillSubtypes($("#f-subtype"), "");
   entryClass();
   flash($("#f-error"));
+  render();
+  if (window.innerWidth <= 1100) $("#detail").scrollIntoView({ behavior: "smooth", block: "start" });
+  $("#f-type").focus();
 }
 
-async function acceptEvent(e) {
+async function createIncident(e) {
   e.preventDefault();
   flash($("#f-error"));
   const body = {
@@ -839,10 +919,9 @@ async function acceptEvent(e) {
     until_at: $("#f-emergency").checked ? null : fromLocalInput($("#f-until").value),
     operator: operator(), ...newAddr.geo(),
   };
-  if (!body.type) { $("#f-type").focus(); return flash($("#f-error"), "Pick the event type."); }
+  if (!body.type) { $("#f-type").focus(); return flash($("#f-error"), "Pick the type."); }
   try {
     const inc = await api("POST", "/api/cad/incident", body);
-    clearEntry();
     selectIncident(inc.id);
   } catch (err) {
     flash($("#f-error"), err.message);
@@ -895,14 +974,14 @@ async function saveEdit(e) {
 
 function renderMap(inc) {
   const has = inc && inc.lat != null && inc.lon != null;
-  show($("#w-nomap"), !has || !window.maplibregl || !cad.scene);
-  show($("#w-map"), has && !!window.maplibregl && !!cad.scene);
-  if (!has) { setText($("#w-nomap"), "No map point for this event"); return; }
-  if (!window.maplibregl || !cad.scene) { setText($("#w-nomap"), "Map unavailable"); return; }
+  show($("#d-nomap"), !has || !window.maplibregl || !cad.scene);
+  show($("#d-map"), has && !!window.maplibregl && !!cad.scene);
+  if (!has) { setText($("#d-nomap"), "No map point for this incident"); return; }
+  if (!window.maplibregl || !cad.scene) { setText($("#d-nomap"), "Map unavailable"); return; }
   const sig = JSON.stringify([inc.id, inc.lat, inc.lon]);
   if (!cad.map) {
     cad.map = new maplibregl.Map({
-      container: $("#w-map"), style: buildMapStyle(cad.scene), center: [inc.lon, inc.lat], zoom: 16.5,
+      container: $("#d-map"), style: buildMapStyle(cad.scene), center: [inc.lon, inc.lat], zoom: 16.5,
       attributionControl: { compact: true }, maxPitch: 0, dragRotate: false, fadeDuration: 0,
     });
     cad.map.on("load", () => {
@@ -927,61 +1006,86 @@ function renderMap(inc) {
   cad.marker = new maplibregl.Marker({ element: m, anchor: "center" }).setLngLat([inc.lon, inc.lat]).addTo(cad.map);
 }
 
-// ---- unit boards ---------------------------------------------------------------------------
+// ---- unit board ---------------------------------------------------------------------------
 
-function renderBoards() {
-  const box = $("#boards");
-  const all = units();
-  const boards = L().unit_boards || [];
-  if (!all.length || !boards.length) {
+function unitGroups() {
+  // On a board (or off the boards but still committed), in the data file's order.
+  const all = units().filter((u) => u.board || u.incident_id);
+  const taken = new Set();
+  const groups = [];
+  const take = (title, pred) => {
+    const rows = all.filter((u) => !taken.has(u.id) && pred(u));
+    rows.forEach((u) => taken.add(u.id));
+    if (rows.length) groups.push([title, rows]);
+  };
+  for (const [title, kinds] of KIND_GROUPS) take(title, (u) => !u.mutual_aid && !u.department && kinds.includes(u.kind));
+  const depts = [...new Set(all.filter((u) => u.mutual_aid || u.department).map((u) => u.department || ""))];
+  for (const d of depts) take(d ? `${d} (mutual aid)` : "Other departments", (u) => (u.mutual_aid || u.department) && (u.department || "") === d);
+  take("Police", (u) => u.kind === "pd");
+  take("EMS", (u) => u.kind === "ems");
+  take("Other & mutual aid", () => true);
+  return groups;
+}
+
+function renderUnits() {
+  const box = $("#units");
+  const groups = unitGroups();
+  if (!groups.length) {
     if (!box.querySelector(".empty")) box.replaceChildren(el("div", "empty", "No units on the boards"));
     return;
   }
   box.querySelector(":scope > .empty")?.remove();
-  const byName = new Map(all.map((u) => [u.name, u]));
-  const onBoards = new Set(boards.flatMap((b) => b.units));
-  const off = all.filter((u) => !onBoards.has(u.name) && u.incident_id);    // off the boards but still committed
-  const sets = boards.map((b) => [b.id, b.title, b.units]);
-  if (off.length) sets.push(["off", "Not on the boards", off.map((u) => u.name)]);
-  for (const [id, title, codes] of sets) {
-    let sec = box.querySelector(`[data-board="${id}"]`);
-    if (!sec) {
-      sec = el("section", "panel");
-      sec.dataset.board = id;
-      const t = el("table", "board");
-      t.innerHTML = "<thead><tr><th>Unit</th><th>Status</th><th>Event</th><th>Elapsed</th></tr></thead><tbody></tbody>";
-      sec.append(el("h2", "", title), t);
-      box.append(sec);
+  const titles = groups.map(([t]) => t);
+  for (const g of [...box.querySelectorAll(":scope > .ugroup")]) if (!titles.includes(g.dataset.group)) g.remove();
+  groups.forEach(([title, rows], i) => {
+    let g = [...box.children].find((c) => c.dataset.group === title);
+    if (!g) {
+      g = el("section", "ugroup");
+      g.dataset.group = title;
+      g.append(el("h3", "", title), el("ol", "list ulist"));
     }
-    const rows = codes.map((c, i) => (c === null ? { gap: true, key: `gap-${i}` } : byName.get(c))).filter(Boolean);
-    syncList(sec.querySelector("tbody"), rows, {
-      key: (u) => (u.gap ? u.key : String(u.id)),
-      sig: (u) => (u.gap ? "gap" : JSON.stringify([u.status, u.status_at, u.incident_number, u.incident_id === cad.sel, u.spare, cad.listSig.length])),
-      make: (u) => el("tr", u.gap ? "gap" : "urow"),
-      fill: (tr, u) => {
-        if (u.gap) { tr.replaceChildren(Object.assign(el("td"), { colSpan: 4 })); return; }
-        const name = el("td", "u", u.name);
-        name.title = [u.title, u.spoken !== u.name ? `said "${u.spoken}"` : "", u.department, u.spare ? "spare" : ""].filter(Boolean).join(" · ");
-        if (u.spare) name.append(el("span", "sp", "spare"));
-        const stTd = el("td");
-        stTd.append(statusSelect(u.id, u.status));
-        const ev = el("td", "ev");
-        if (u.incident_number) {
-          const a = el("a", "", u.incident_number);
-          a.href = "#";
-          const c = L().unit_event_cell || {};
-          paint(a, c.bg, c.fg);
-          a.addEventListener("click", (e) => { e.preventDefault(); selectIncident(u.incident_id); });
-          ev.append(a);
-        }
-        tr.replaceChildren(name, stTd, ev, since(el("td", "el"), u.status_at));
+    if (box.children[i] !== g) box.insertBefore(g, box.children[i] || null);
+    syncList(g.querySelector("ol"), rows, {
+      key: (u) => String(u.id),
+      sig: (u) => JSON.stringify([u.status, u.status_at, u.incident_number, u.out_of_service, u.spare, cad.openUnit === u.id,
+        cad.ask && cad.ask.uid === u.id && cad.ask.where === "board" ? cad.ask.status : null, cad.listSig.length]),
+      make: () => {
+        const li = el("li", "urow");
+        li.addEventListener("click", (e) => {
+          if (e.target.closest("button, a, input, form")) return;
+          const id = Number(li.dataset.key);
+          cad.openUnit = cad.openUnit === id ? null : id;
+          if (cad.ask && cad.ask.where === "board") cad.ask = null;
+          renderUnits();
+        });
+        return li;
       },
-      empty: "No units", cols: 4,
+      fill: (li, u) => {
+        const oos = roleOf(u.status) === "oos";
+        li.className = "urow" + (cad.openUnit === u.id ? " open" : "") + (oos ? " oos" : "");
+        const head = el("div", "uh");
+        const name = el("b", "un", u.name);
+        name.title = [u.title, u.spoken && u.spoken !== u.name ? `said "${u.spoken}"` : "", u.department, u.spare ? "spare" : ""]
+          .filter(Boolean).join(" · ");
+        head.append(name);
+        if (u.title) head.append(el("span", "utitle dim small", u.title));
+        if (u.spare) head.append(el("span", "chip spare", "spare"));
+        head.append(el("span", "spacer"), statusChip(u.status), since(el("span", "dim small ut"), u.status_at));
+        li.replaceChildren(head);
+        const sub = [];
+        if (u.incident_number) {
+          const a = el("a", "inc-link", u.incident_number);
+          a.href = "#";
+          a.addEventListener("click", (e) => { e.preventDefault(); selectIncident(u.incident_id); });
+          sub.push(a);
+        }
+        if (oos && u.out_of_service) sub.push(el("span", "why", u.out_of_service));
+        if (sub.length) { const d = el("div", "usub"); d.append(...sub); li.append(d); }
+        if (cad.openUnit === u.id) li.append(statusButtons(u, "board"));
+      },
+      empty: "None",
     });
-  }
-  for (const sec of box.querySelectorAll("[data-board]")) {
-    if (!sets.some(([id]) => id === sec.dataset.board)) sec.remove();
-  }
+  });
 }
 
 function renderUnitLog() {
@@ -989,67 +1093,72 @@ function renderUnitLog() {
     key: (e) => String(e.id), sig: (e) => String(e.id), make: () => el("li", "ev"),
     fill: (li, e) => {
       const meta = el("div", "meta");
-      meta.append(el("span", "t", fmtRecv(e.at)));
+      meta.append(el("span", "t", fmtTime(e.at, true)));
       if (e.operator) meta.append(el("span", "", e.operator));
       li.replaceChildren(meta, el("div", "txt", e.text));
     },
-    empty: "No status changes off an event",
+    empty: "No status changes off an incident",
   });
 }
 
-// ---- tabs: incident database, lists ---------------------------------------------------------------
+// ---- records (incident database, CSV, counts) and lists ---------------------------------------
 
-function setTab(tab) {
-  cad.tab = tab;
-  for (const b of document.querySelectorAll(".tab")) b.classList.toggle("on", b.dataset.tab === tab);
-  show($("#view-live"), tab === "live");
-  show($("#view-db"), tab === "db");
-  show($("#view-lists"), tab === "lists");
-  if (tab === "live" && cad.map) setTimeout(() => cad.map.resize(), 0);
-  render();
+function openOverlay(id, on) {
+  show($(id), on);
+  document.body.classList.toggle("modal", !!document.querySelector(".overlay:not([hidden])"));
 }
 
-async function loadDatabase() {
-  if (cad.tab !== "db" || Date.now() - cad.dbAt < 3000) return;
+async function renderRecords() {
+  if ($("#db-overlay").hidden || Date.now() - cad.dbAt < 3000) return;
   cad.dbAt = Date.now();
   try {
     const [h, a] = await Promise.all([api("GET", "/api/cad/history"), api("GET", "/api/cad/admin")]);
     syncList($("#db-rows"), h.incidents, {
       key: (i) => String(i.id),
       sig: (i) => JSON.stringify([i.status, i.type, i.subtype, i.address, i.disposition, i.units, i.closed_at, cad.listSig.length]),
-      make: eventRow,
+      make: () => {
+        const tr = el("tr", "ev");
+        tr.tabIndex = 0;
+        tr.addEventListener("click", () => openFromRecords(Number(tr.dataset.key)));
+        tr.addEventListener("keydown", (e) => { if (e.key === "Enter") openFromRecords(Number(tr.dataset.key)); });
+        return tr;
+      },
       fill: (tr, i) => {
-        tr.className = "ev";
         const type = el("td");
-        type.append(typeCell(el("span"), i.type, i.subtype));
+        const t = el("span", "qt", typeLabel(i.type, i.subtype) || "—");
+        if (i.type) t.style.setProperty("--c", typeColor(i.type) || "#9aa0b4");
+        type.append(t);
         const st = el("td");
-        st.append(statusBadge(el("span"), i));
+        const es = eventStatus(i);
+        st.append(stBadge(el("span"), es.name, es.bg));
         tr.replaceChildren(el("td", "num", i.number), type, el("td", "loc", i.address || "—"), el("td", "t", fmtRecv(i.created_at)),
-          el("td", "t", fmtRecv(i.closed_at)), st, el("td", "", nameOf("dispositions", i.disposition)),
+          el("td", "t", fmtRecv(i.closed_at)), st, el("td", "", i.disposition ? nameOf("dispositions", i.disposition) : ""),
           el("td", "", (i.units || []).join(", ")), el("td", "", i.received_via ? nameOf("received_via", i.received_via) : ""));
       },
-      empty: "No events yet", cols: 9,
+      empty: "No incidents yet", cols: 9,
     });
-    const rows = Object.entries(a.counts).map(([k, v]) => [k, String(v)]).concat([["Next event #", a.next_number], ["Database", a.db]]);
+    const rows = Object.entries(a.counts).map(([k, v]) => [k, String(v)]).concat([["Next number", a.next_number], ["Database", a.db]]);
     $("#admin").replaceChildren(...rows.map(([k, v]) => { const d = el("div"); d.append(el("dt", "", k), el("dd", "", v)); return d; }));
   } catch (e) {
-    $("#db-rows").replaceChildren(Object.assign(el("tr"), {}));
-    $("#db-rows").firstChild.append(Object.assign(el("td", "empty", `Could not load: ${e.message}`), { colSpan: 9 }));
+    const tr = el("tr");
+    tr.append(Object.assign(el("td", "empty", `Could not load: ${e.message}`), { colSpan: 9 }));
+    $("#db-rows").replaceChildren(tr);
   }
 }
 
-// The Incident database opens an older event that isn't in the live state.
-async function openFromDatabase(id) {
+// Records open an older incident that isn't in the live state.
+async function openFromRecords(id) {
   if (!incidents().some((i) => i.id === id)) {
     try { cad.extra.set(id, await api("GET", `/api/cad/incident/${id}`)); } catch (e) { alert(e.message); return; }
   }
+  openOverlay("#db-overlay", false);
   selectIncident(id);
 }
 
 function renderLists() {
-  if (cad.tab !== "lists") return;
+  if ($("#lists-overlay").hidden) return;
   const l = L();
-  setText($("#lists-source"), l.source ? `· from ${l.source}` : "");
+  setText($("#lists-source"), l.source ? `from ${l.source}` : "");
   const box = $("#lists");
   if (box._sig === cad.listSig) return;
   box._sig = cad.listSig;
@@ -1069,10 +1178,10 @@ function renderLists() {
     return s;
   };
   box.replaceChildren(
-    section("Event types", l.event_types || [], (n, it) => { n.className = "typecell"; paint(n, it.color); }),
+    section("Event types", l.event_types || [], (n, it) => { n.className = "qt"; n.style.setProperty("--c", it.color); }),
     section("Event subtypes", l.event_subtypes || []),
     section("Dispositions", l.dispositions || []),
-    section("Unit statuses", l.unit_statuses || [], (n, it) => { n.className = "badge"; paint(n, it.bg, it.fg); }),
+    section("Unit statuses", l.unit_statuses || [], (n, it) => { n.className = "chip st"; n.style.setProperty("--c", it.bg); }),
     section("Received via", l.received_via || []),
     section("Non-emergency (the rest are emergency)",
       Object.entries(l.event_class || {}).filter(([, v]) => v === "non-emergency").map(([k]) => ({ code: k, name: k.replace("*/", "any type / ") }))),
@@ -1091,7 +1200,7 @@ function renderRunCards() {
   show($("#rc-banner"), !!(cad.state && cad.state.run_cards_default));
   syncList($("#rc-list"), cards, {
     key: (c) => String(c.id),
-    sig: (c) => JSON.stringify([c.type, c.slots, c.is_default, c.label, cad.rcEditing === c.type]),
+    sig: (c) => JSON.stringify([c.type, c.slots, c.is_default, c.label, c.phrase, cad.rcEditing === c.type, cad.listSig.length]),
     make: () => {
       const li = el("li", "rc");
       li.addEventListener("click", () => editCard(li._card));
@@ -1101,10 +1210,9 @@ function renderRunCards() {
       li._card = c;
       li.className = "rc" + (cad.rcEditing === c.type ? " sel" : "");
       const h = el("div", "row");
-      const t = el("span");
-      typeCell(t, ...c.type.split("/"));
-      h.append(t, el("span", "spacer"));
-      if (c.is_default) h.append(el("span", "chip default", "default"));
+      const [t, s] = c.type.split("/");
+      h.append(el("b", "", typeLabel(t, s)), el("span", "spacer"));
+      h.append(c.is_default ? el("span", "chip default", "default") : el("span", "chip edited", "edited"));
       li.replaceChildren(h, el("div", "dim small", c.slots.map(describeSlot).join(", ")), el("div", "dim small", `“…for ${c.phrase}”`));
     },
     empty: "No run cards: add one",
@@ -1115,15 +1223,15 @@ function slotRow(slot) {
   const li = el("li", "slot");
   if (slot.unit !== undefined) {
     const s = el("select", "s-unit");
-    fillSelect(s, units().map((u) => [u.name, u.name]));
+    fillSelect(s, units().filter((u) => u.board).map((u) => [u.name, u.title ? `${u.name} ${u.title}` : u.name]));
     s.value = slot.unit || (units()[0] && units()[0].name) || "";
     li.append(el("span", "dim", "unit"), s);
   } else {
     const n = el("input", "s-count");
     n.type = "number"; n.min = "1"; n.max = "10"; n.value = String(slot.count || 1);
     const s = el("select", "s-kind");
-    const kinds = (L().unit_kinds || []).map((k) => [k.id, k.label]);
-    const ladder = kinds.some(([k]) => k === "ladder") && kinds.some(([k]) => k === "tower") ? [["ladder|tower", "Ladder or tower"]] : [];
+    const kinds = (L().unit_kinds || []).map((k) => [k.id, k.label.toLowerCase()]);
+    const ladder = kinds.some(([k]) => k === "ladder") && kinds.some(([k]) => k === "tower") ? [["ladder|tower", "ladder or tower"]] : [];
     fillSelect(s, [...kinds.slice(0, 1), ...ladder, ...kinds.slice(1)]);
     s.value = slot.kind || "engine";
     li.append(n, el("span", "dim", "×"), s);
@@ -1143,7 +1251,7 @@ function slotRow(slot) {
 function rcPlaceholder() {
   const t = $("#rc-type").value, s = $("#rc-subtype").value;
   const sp = L().spoken || {};
-  $("#rc-spoken").placeholder = sp[s ? `${t}/${s}` : t] || sp[t] || "from the data file";
+  $("#rc-spoken").placeholder = (s && (sp[`${t}/${s}`] || sp[`*/${s}`])) || sp[t] || "from the data file";
 }
 
 function editCard(c) {
@@ -1194,7 +1302,7 @@ async function deleteCard() {
 }
 
 function openRunCards() {
-  show($("#rc-overlay"), true);
+  openOverlay("#rc-overlay", true);
   const cards = (cad.state && cad.state.run_cards) || [];
   editCard(cards.find((c) => c.type === cad.rcEditing) || cards[0] || null);
 }
@@ -1203,13 +1311,13 @@ function openRunCards() {
 
 function render() {
   fillListSelects();
-  renderEventTables();
-  renderWorking();
-  renderBoards();
+  renderQueue();
+  renderDetail();
+  renderUnits();
   renderUnitLog();
   renderRunCards();
   renderLists();
-  loadDatabase();
+  renderRecords();
 }
 
 function onState(data) {
@@ -1231,22 +1339,27 @@ function onState(data) {
 const newAddr = addressBox($("#f-address"), $("#f-geo"), $("#f-sugg"));
 const editAddr = addressBox($("#e-address"), $("#e-geo"), $("#e-sugg"));
 
-$("#tab-live").addEventListener("click", () => setTab("live"));
-$("#tab-db").addEventListener("click", () => setTab("db"));
-$("#tab-lists").addEventListener("click", () => setTab("lists"));
-$("#entry-form").addEventListener("submit", acceptEvent);
-$("#f-clear").addEventListener("click", clearEntry);
+$("#new-incident").addEventListener("click", openNew);
+$("#new-cancel").addEventListener("click", () => { cad.mode = cad.sel ? "view" : "none"; render(); });
+$("#new-form").addEventListener("submit", createIncident);
 $("#f-type").addEventListener("change", () => { fillSubtypes($("#f-subtype"), $("#f-type").value); entryClass(); });
 $("#f-subtype").addEventListener("change", entryClass);
 $("#f-emergency").addEventListener("change", () => { cad.emergTouched = true; entryClass(); });
-$("#w-edit").addEventListener("click", openEdit);
-$("#w-close-view").addEventListener("click", () => { cad.sel = null; cad.rec = null; render(); });
-$("#w-acc-type").addEventListener("change", () => fillSubtypes($("#w-acc-sub"), $("#w-acc-type").value));
-$("#w-accept").addEventListener("click", () => act("accept", { type: $("#w-acc-type").value, subtype: $("#w-acc-sub").value }));
-$("#w-dismiss").addEventListener("click", () => {
+$("#d-acc-type").addEventListener("change", () => fillSubtypes($("#d-acc-sub"), $("#d-acc-type").value));
+$("#d-accept").addEventListener("click", () => act("accept", { type: $("#d-acc-type").value, subtype: $("#d-acc-sub").value }));
+$("#d-dismiss").addEventListener("click", () => {
   const why = prompt("Dismiss this page: why? (optional)");
   if (why !== null) act("dismiss", { reason: why });
 });
+$("#d-close").addEventListener("click", () => {
+  const f = $("#close-form");
+  show(f, f.hidden);
+  flash($("#c-error"));
+  if (!f.hidden) $("#c-disp").focus();
+});
+$("#c-cancel").addEventListener("click", () => show($("#close-form"), false));
+$("#close-form").addEventListener("submit", closeIncident);
+$("#d-edit").addEventListener("click", openEdit);
 $("#e-type").addEventListener("change", () => fillSubtypes($("#e-subtype"), $("#e-type").value));
 $("#edit-cancel").addEventListener("click", () => show($("#edit-form"), false));
 $("#edit-form").addEventListener("submit", saveEdit);
@@ -1279,7 +1392,6 @@ $("#u-preview").addEventListener("click", () => upgrade(null, true));
 $("#u-cancel").addEventListener("click", () => { $("#upgrade-form").reset(); show($("#upgrade-form"), false); });
 $("#upgrade-form").addEventListener("submit", (e) => upgrade(e, false));
 $("#a-add").addEventListener("click", attach);
-$("#c-close").addEventListener("click", closeEvent);
 $("#note-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const inc = selected(), input = $("#note-text");
@@ -1287,17 +1399,13 @@ $("#note-form").addEventListener("submit", async (e) => {
   try {
     await api("POST", `/api/cad/incident/${inc.id}/note`, { text: input.value.trim(), operator: operator() });
     input.value = "";
-    if (cad.extra.has(inc.id)) cad.extra.set(inc.id, await api("GET", `/api/cad/incident/${inc.id}`));
+    if (cad.extra.has(inc.id)) { cad.extra.set(inc.id, await api("GET", `/api/cad/incident/${inc.id}`)); render(); }
   } catch (err) {
     alert(err.message);
   }
 });
-$("#db-rows").addEventListener("click", (e) => {
-  const tr = e.target.closest("tr.ev");
-  if (tr) { e.stopPropagation(); openFromDatabase(Number(tr.dataset.key)); }
-}, true);
 $("#runcards-open").addEventListener("click", openRunCards);
-$("#rc-close").addEventListener("click", () => show($("#rc-overlay"), false));
+$("#rc-close").addEventListener("click", () => openOverlay("#rc-overlay", false));
 $("#rc-form").addEventListener("submit", saveCard);
 $("#rc-type").addEventListener("change", () => { fillSubtypes($("#rc-subtype"), $("#rc-type").value, "Any subtype"); rcPlaceholder(); });
 $("#rc-subtype").addEventListener("change", rcPlaceholder);
@@ -1305,10 +1413,19 @@ $("#rc-add-kind").addEventListener("click", () => $("#rc-slots").append(slotRow(
 $("#rc-add-unit").addEventListener("click", () => $("#rc-slots").append(slotRow({ unit: "" })));
 $("#rc-new").addEventListener("click", () => editCard(null));
 $("#rc-delete").addEventListener("click", deleteCard);
+$("#records-open").addEventListener("click", () => { openOverlay("#db-overlay", true); cad.dbAt = 0; renderRecords(); });
+$("#db-close").addEventListener("click", () => openOverlay("#db-overlay", false));
+$("#lists-open").addEventListener("click", () => { openOverlay("#lists-overlay", true); renderLists(); });
+$("#lists-close").addEventListener("click", () => openOverlay("#lists-overlay", false));
+for (const id of ["#rc-overlay", "#db-overlay", "#lists-overlay"]) {
+  $(id).addEventListener("click", (e) => { if (e.target === e.currentTarget) openOverlay(id, false); });
+}
 $("#operator").value = store("sizeup.cad.operator") || "";
 $("#operator").addEventListener("input", () => store("sizeup.cad.operator", operator()));
 window.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && !$("#rc-overlay").hidden) show($("#rc-overlay"), false);
+  if (e.key !== "Escape") return;
+  if (cad.ask) { cad.ask = null; render(); return; }
+  for (const id of ["#rc-overlay", "#db-overlay", "#lists-overlay"]) if (!$(id).hidden) openOverlay(id, false);
 });
 
 async function boot() {
