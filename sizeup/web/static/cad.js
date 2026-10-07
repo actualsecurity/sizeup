@@ -465,7 +465,7 @@ function renderDetail() {
 // Every transmission from a radio on a unit assigned to it (dispatched / attached until it cleared),
 // FG1 while it had units on it, and 60 Control's turns answering those units in the same P25 call.
 
-const RADIO_WHY = { unit: "unit", channel: "FG1 · unidentified radio", dispatcher: "60 Control" };
+const RADIO_WHY = { unit: "unit", channel: "FG1 · unidentified radio", dispatcher: "60 Control", manual: "added" };
 function radioRow(t) {
   const li = el("li", "rt");
   const meta = el("div", "meta");
@@ -492,7 +492,8 @@ function radioRow(t) {
   if (t.why) {
     const w = el("span", `why ${t.why}`, RADIO_WHY[t.why] || t.why);
     w.title = t.why === "unit" ? `${t.link_unit || t.rig} was on this incident` : t.why === "channel"
-      ? "An unidentified radio on FG1 while this was the only call with units on it" : `60 Control answering ${t.link_unit || "a unit on it"} in the same call`;
+      ? "An unidentified radio on FG1 while this was the only call with units on it" : t.why === "manual"
+      ? `Added${t.link_unit ? ` by ${t.link_unit}` : " by hand"} (+ event on the 60 Control feed)` : `60 Control answering ${t.link_unit || "a unit on it"} in the same call`;
     meta.append(w);
   }
   if (t.end > t.start) meta.append(el("span", "dim", `${Math.round(t.end - t.start)} s`));
@@ -1786,6 +1787,8 @@ $("#note-text").addEventListener("blur", () => setTimeout(hideSugg, 150));
 $("#note-text").addEventListener("click", suggestUnits);
 $("#runcards-open").addEventListener("click", openRunCards);
 Radio.mountAlerts($("#alerts"));
+CadFeed.mount($("#feed"), { state: () => cad.state, selected, operator, api, radioRow, time: (u) => fmtTime(u, true) });
+cad.hooks.push(CadFeed.render);
 $("#rc-form").addEventListener("submit", saveCard);
 $("#rc-type").addEventListener("change", () => { fillSubtypes($("#rc-subtype"), $("#rc-type").value, "Any subtype"); rcPlaceholder(); });
 $("#rc-subtype").addEventListener("change", rcPlaceholder);

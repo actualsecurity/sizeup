@@ -318,3 +318,37 @@ body.comms { display: grid; grid-template-rows: auto 1fr; }
 .comms-list .chip.src { font-size: 0.72em; --c: #ff8a3d; }
 .comms-list .inc-link { font-weight: 700; color: #8cc4ff; text-decoration: none; font-size: 0.95em; }
 @media (max-width: 1100px) { body.comms .comms-main { overflow: visible; } .comms-list { overflow: visible; } }
+
+/* ---- the pinned 60 Control feed (cad-feed.js): top of the units column, the board scrolls under it ---- */
+.units > .feed { flex: none; position: sticky; top: -0.7em; z-index: 4; margin: -0.7em -0.7em 0.6em; padding: 0.5em 0.7em 0.45em;
+  background: var(--panel-solid); border-bottom: 1px solid var(--line); box-shadow: 0 0.4em 0.8em -0.5em rgba(0, 0, 0, 0.6); }
+.feed.talking { outline: 2px solid var(--ok); outline-offset: -2px; animation: urowpulse 1.1s ease-in-out infinite; }
+.feed-head { display: flex; align-items: center; gap: 0.45em; min-width: 0; flex-wrap: wrap; }
+.feed-head .spacer { flex: 1; }
+.feed-tog { padding: 0 0.4em; font-size: 0.85em; line-height: 1.4; }
+.feed-title { font-size: 0.9em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.feed-talk { overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+.feed-talk.disp { background: #5aa9ff; }
+.feed-talk.ended { background: transparent; color: var(--ok); border: 1px solid var(--ok); }
+.feed-more { font-size: 0.82em; color: #8cc4ff; text-decoration: none; white-space: nowrap; }
+.feed-list { max-height: 38vh; overflow-y: auto; margin-top: 0.3em; }
+.feed-list > li.feed-row { padding: 0.3em 0.3em 0.3em 0.45em; }
+.feed-list > li.from-dispatch { margin-right: 8%; }
+.feed-list > li .txt { font-size: 0.92em; }
+.feed-list > li.pc, .feed-ticker.pc { border: 1px solid #ff8a3d; border-left-width: 3px; border-radius: 0.3em;
+  background: rgba(255, 138, 61, 0.09); margin-bottom: 0.2em; }
+.feed-list > li.pc.from-dispatch { border-left-color: #5aa9ff; }
+.pc-badge { font-size: 0.75em; font-weight: 800; color: #0b0b14; background: #ff8a3d; border-radius: 0.25em; padding: 0 0.4em; }
+.feed-ev { font-size: 0.75em; font-weight: 700; color: #8cc4ff; border: 1px solid rgba(140, 196, 255, 0.5); border-radius: 0.25em; padding: 0 0.35em; }
+.feed-ev.manual { color: #ff8a3d; border-color: rgba(255, 138, 61, 0.55); }
+.feed-acts { margin-left: auto; display: inline-flex; align-items: center; gap: 0.35em; }
+.feed-ticker { display: flex; align-items: baseline; gap: 0.45em; margin-top: 0.3em; padding: 0.15em 0.35em; min-width: 0; font-size: 0.9em; }
+.feed-ticker.from-dispatch:not(.pc) { border-left: 3px solid #5aa9ff; }
+.feed-line { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; display: block; }
+.feed-line > * { margin-right: 0.45em; }
+.feed-line .t { color: var(--dim); font-variant-numeric: tabular-nums; }
+.feed-line .disp { color: #8cc4ff; }
+.feed-line .unit { color: #8be3a9; }
+.why.manual { color: #ff8a3d; border-color: rgba(255, 138, 61, 0.55); }
+@media (prefers-reduced-motion: reduce) { .feed.talking { animation: none; } }
+@media (max-width: 1100px) { .units > .feed { position: static; margin: 0 0 0.8em; border: 1px solid var(--line); border-radius: 0.4em; } }

@@ -43,6 +43,9 @@ POST /api/cad/radios                      {system: mdc|p25, radio_id, unit?, lab
 POST /api/cad/radios/delete               {system, radio_id, operator?}
 GET  /api/cad/comms?unit=&channel=&event=&pcfd=1&since=&until=&limit=&rev=
                                           every transmission (newest first) with its rig, radio ID, events
+GET  /api/cad/feed?limit=&tg=307,333      the pinned 60 Control feed: newest transmissions on the incident
+                                          talkgroup(s), pc = why it is talking to us (sizeup/cad/feed.py)
+POST /api/cad/incident/<id>/link          {traffic_id, operator}  put a transmission on the event (why manual)
 GET  /api/cad/rigs                        board units (PCFD's own flagged), for the talk alerts
 """
 
@@ -57,7 +60,7 @@ from sizeup.cad.store import CadError
 
 JSON = "application/json"
 MAX_BODY = 65536
-INCIDENT = re.compile(r"/api/cad/incident/(\d{1,9})(?:/(accept|dismiss|close|note|recommend|preview|dispatch|upgrade|attach))?")
+INCIDENT = re.compile(r"/api/cad/incident/(\d{1,9})(?:/(accept|dismiss|close|note|recommend|preview|dispatch|upgrade|attach|link))?")
 SUGGEST = re.compile(r"/api/cad/incident/(\d{1,9})/units")
 EXPORT = re.compile(r"/api/cad/export/([a-z-]{1,20}\.csv)")
 UNIT = re.compile(r"/api/cad/unit/(\d{1,9})/status")
@@ -94,6 +97,8 @@ class CadApi:
                 return _json(200, self.cad.radio_registry())
             if path == "/api/cad/comms":
                 return _json(200, self.cad.comms_query(parse_qs(query)))
+            if path == "/api/cad/feed":
+                return _json(200, self.cad.feed_query(parse_qs(query)))
             if path == "/api/cad/rigs":
                 return _json(200, self.cad.rigs())
             if m := SUGGEST.fullmatch(path):
@@ -135,7 +140,7 @@ class CadApi:
                 iid, action = int(m.group(1)), m.group(2)
                 fn = {None: c.update, "accept": c.accept, "dismiss": c.dismiss, "close": c.close, "note": c.note,
                       "recommend": c.recommend, "preview": c.preview, "dispatch": c.dispatch, "upgrade": c.upgrade,
-                      "attach": c.attach}[action]
+                      "attach": c.attach, "link": c.link_traffic}[action]
                 return _json(200, fn(iid, body))
             if m := UNIT.fullmatch(path):
                 return _json(200, c.unit_status(int(m.group(1)), body))

@@ -13,6 +13,8 @@
                                   get added to this call? it wasn't dispatched to that call").
                       dispatcher  a 60 Control turn right before or after a linked unit's turn in the
                                   same P25 call on an incident talkgroup (Fire/EMS 15)
+                      manual      put on the event by a person ("+ event" on the 60 Control feed);
+                                  unit = the operator who did it (also in the event's timeline)
 
 Links are made when the transcript arrives and never moved afterwards; a re-run of
 speech-to-text updates the copied text.
@@ -22,8 +24,10 @@ from __future__ import annotations
 
 import re
 import time
+from datetime import datetime
 
 from sizeup.cad.radios import is_dispatcher
+from sizeup.cad.store import TZ
 
 TURN = re.compile(r"^(?P<call>.+)-t(?P<k>\d+)$")
 NOTES = "Notes"          # the /comms "channel" of event notes tagged with a unit
@@ -129,6 +133,26 @@ class Comms:
                     if why == "unit":
                         db.execute("INSERT OR IGNORE INTO radio_links (traffic_id, incident_id, why, unit) VALUES (?, ?, 'dispatcher', ?)",
                                    (s["id"], iid, unit))
+
+    def link(self, tid: str, iid: int, operator: str = "") -> dict:
+        """A person puts a transmission on an event (why 'manual', unit = the operator), with a line in
+        the event's timeline. One already on that event is left as it was."""
+        with self.store.tx() as db:
+            t = db.execute("SELECT * FROM radio_traffic WHERE id = ?", (tid,)).fetchone()
+            if t is None:
+                return {"linked": False, "error": "no such transmission"}
+            old = db.execute("SELECT why FROM radio_links WHERE traffic_id = ? AND incident_id = ?", (tid, iid)).fetchone()
+            if old is not None:
+                return {"linked": False, "why": old["why"]}
+            db.execute("INSERT INTO radio_links (traffic_id, incident_id, why, unit) VALUES (?, ?, 'manual', ?)",
+                       (tid, iid, operator))
+            who = t["rig"] or t["talker"] or "radio"
+            said = (t["text"] or "").strip()
+            when = datetime.fromtimestamp(t["start"], TZ).strftime("%H:%M:%S")
+            self.store._event(db, iid, "radio", f"Radio traffic added: {when} {who} on {t['channel']}"
+                              + (f": \u201c{said[:160]}{'…' if len(said) > 160 else ''}\u201d" if said else ""), operator)
+            self.rev += 1
+        return {"linked": True, "why": "manual"}
 
     def retext(self, tid: str, text: str, status: str, model: str = "") -> bool:
         with self.store.tx() as db:

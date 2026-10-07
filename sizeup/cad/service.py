@@ -22,6 +22,7 @@ from typing import Callable
 
 from sizeup.cad import dispatcher, export, runcards
 from sizeup.cad.comms import Comms
+from sizeup.cad.feed import Feed
 from sizeup.cad.radios import Registry, RadioError, is_pcfd
 from sizeup.cad import settings as settings_mod
 from sizeup.cad import lists as lists_mod
@@ -131,6 +132,7 @@ class Cad:
             log(f"CAD: seeded {n} radio IDs ({len(self.radios.plan['conflicts'])} conflicts left unmapped)")
         self.comms = Comms(self.store, s.tactical, s.incident_talkgroups, clock=clock)
         self.comms.prune()
+        self.feed = Feed(self.store, lambda: self.lists, has_clip=lambda cid: self.has_clip(cid))   # the 60 Control feed
         # Set by the app: who is transmitting now (sizeup/radio/live.py) and whether a clip's audio is still kept.
         self.live: Callable[[], list[dict]] = lambda: []
         self.has_clip: Callable[[str], bool] = lambda cid: False
@@ -172,6 +174,7 @@ class Cad:
                           "tones": [list(t) for t in self.s.tones]},
                 "geocoder": self.geocoder is not None,
                 "operators": self.settings.operator_names(),
+                "feed": self.feed.state(),
             })
         return dict(self._state[1], time=self.clock(), rev=rev, talking=self.live())
 
@@ -659,6 +662,25 @@ class Cad:
                 "events": [{"id": r["id"], "number": r["number"], "type": r["type"], "address": r["address"]}
                            for r in self.store.q("SELECT DISTINCT i.id, i.number, i.type, i.address FROM radio_links l "
                                                  "JOIN incidents i ON i.id = l.incident_id ORDER BY i.id DESC LIMIT 100")]}
+
+    def feed_query(self, q: dict) -> dict:
+        """GET /api/cad/feed?limit=&tg=307,333: the 60 Control feed (default: the data file's talkgroups)."""
+        try:
+            limit = int((q.get("limit") or ["0"])[0] or 0) or None
+            tgs = tuple(int(x) for x in (q.get("tg") or [""])[0].split(",") if x.strip()) or None
+        except ValueError:
+            raise CadError("limit, tg: numbers (tg: comma-separated talkgroups)") from None
+        return dict(self.feed.state(), rows=self.feed.rows(limit, tgs))
+
+    def link_traffic(self, iid: int, body: dict) -> dict:
+        """POST /api/cad/incident/<id>/link {traffic_id, operator}: "+ event" on the 60 Control feed."""
+        inc = self.store.incident(iid)
+        if inc["status"] == "dismissed":
+            raise CadError("event is dismissed")
+        r = self.comms.link(_text(body, "traffic_id", 200, required=True), iid, _text(body, "operator", 60))
+        if r.get("error"):
+            raise CadError(r["error"])
+        return dict(r, incident_id=iid, number=inc["number"])
 
     def rigs(self) -> dict:
         """The board units for the alert settings (PCFD's own flagged)."""
