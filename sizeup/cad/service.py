@@ -140,6 +140,13 @@ class Cad:
         # The maps (sizeup/cad/mapview.py): live unit positions {code: {lat, lon, at}} from a future AVL
         # feed (IamResponding, Red Alert, an iPad app). Nothing sets it yet.
         self.positions: Callable[[], dict[str, dict]] = lambda: {}
+        # [cloud] role = "hub" (sizeup/cloud/hub.py): the voice is rendered by the station (no TTS in the
+        # cloud): remote_voice(job) -> (WAV bytes, "Voice: ...") or AudioUnavailable; audio_blobs keeps
+        # the dispatch audio in SQLite (the hub's disk is thrown away on a redeploy). cloud(): the
+        # station / hub connection for the console's header ({role, ...}), None all-in-one.
+        self.remote_voice: Callable[[dict], tuple[bytes, str]] | None = None
+        self.audio_blobs = None
+        self.cloud: Callable[[], dict | None] = lambda: None
 
     @classmethod
     def from_config(cls, cfg, geocoder=None, log=print) -> Cad:
@@ -186,7 +193,7 @@ class Cad:
         pos = self._positions(now)
         units = [dict(u, position=pos[u["name"]]) if u["name"] in pos else u for u in st["units"]] if pos else st["units"]
         return dict(st, units=units, map=self.map_slice(units, st["incidents"], pos, now), time=now, rev=rev,
-                    talking=self.live())
+                    talking=self.live(), cloud=self.cloud())
 
     def _positions(self, now: float) -> dict[str, dict]:
         """The AVL hook's fresh fixes (a broken feed never breaks the console)."""
@@ -382,6 +389,8 @@ class Cad:
         if self.audio_dir is None:
             import tempfile
             self.audio_dir = Path(tempfile.mkdtemp(prefix="sizeup-cad-audio-"))
+        if self.remote_voice is not None:
+            return self._render_remote(text, tones)
         try:
             with self._render_lock:
                 return dispatcher.render_dispatch(text, self.s.tones if tones is None else tones, self.audio_dir, self._voice(), self.s.repeat,
@@ -391,6 +400,41 @@ class Cad:
             return None, str(e)
         except OSError as e:
             return None, f"could not write the dispatch audio: {e}"
+
+    def _render_remote(self, text: str, tones=None) -> tuple[Path | None, str]:
+        """The hub's dispatch audio: the station renders it (same render_dispatch, its Kokoro) and the
+        WAV is cached here and in audio_blobs by content, like a local render. No station, or no
+        answer in time: (None, why) and the dispatch is text only (never a hang)."""
+        v = self._voice()
+        groups = dispatcher.tone_groups(self.s.tones if tones is None else tones)
+        spoken = {c: u.get("spoken", "") for c, u in self.lists.units.items()}
+        said = dispatcher.speech(text, spoken=spoken)
+        key = dispatcher.audio_key(said + "\x00station", groups, v.engine, v.voice,
+                                   v.speed if v.engine == "kokoro" else v.rate_wpm, self.s.repeat)
+        path = self.audio_dir / f"{key}.wav"
+        blobs = self.audio_blobs
+        if not path.is_file() and blobs is not None and (hit := blobs.get(key)) is not None:
+            self.audio_dir.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(hit)
+        if path.is_file():
+            return path, (blobs.note(key) if blobs is not None else "") or v.label()
+        try:
+            wav, label = self.remote_voice({
+                "text": text, "tones": [[list(t) for t in g] for g in groups], "repeat": self.s.repeat,
+                "spoken": spoken, "voice": {"engine": v.engine, "voice": v.voice, "speed": v.speed,
+                                            "fallback_voice": v.fallback_voice, "rate_wpm": v.rate_wpm}})
+        except AudioUnavailable as e:
+            return None, str(e)
+        try:
+            self.audio_dir.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_bytes(wav)
+            tmp.replace(path)
+        except OSError as e:
+            return None, f"could not write the dispatch audio: {e}"
+        if blobs is not None:
+            blobs.put(key, wav, "dispatch", label)
+        return path, label
 
     def _phrase(self, typ: str, sub: str) -> str:
         """The run card's phrase for TYPE/SUBTYPE; else the data file's, a TYPE card's phrase standing
@@ -585,6 +629,8 @@ class Cad:
             return
         keep = {Path(r["audio_path"]).name for r in self.store.q("SELECT audio_path FROM dispatches WHERE audio_path != ''")}
         cutoff = time.time() - PREVIEW_KEEP_S
+        if self.audio_blobs is not None:
+            self.audio_blobs.prune_dispatch({Path(k).stem for k in keep}, cutoff)
         for f in self.audio_dir.glob("*.wav"):
             try:
                 if f.name not in keep and f.stat().st_mtime < cutoff:
@@ -595,12 +641,16 @@ class Cad:
     def dispatch_audio(self, did: int) -> bytes | None:
         row = self.store.dispatch_row(did)
         p = Path(row["audio_path"]) if row and row["audio_path"] else None
+        if p and not p.is_file() and self.audio_blobs is not None:
+            return self.audio_blobs.get(p.stem)          # the hub after a redeploy: kept in SQLite
         return p.read_bytes() if p and p.is_file() else None
 
     def preview_audio(self, name: str) -> bytes | None:
         if not AUDIO_NAME.fullmatch(name) or self.audio_dir is None:
             return None
         p = self.audio_dir / f"{name}.wav"
+        if not p.is_file() and self.audio_blobs is not None:
+            return self.audio_blobs.get(name)
         return p.read_bytes() if p.is_file() else None
 
     # -- units and run cards ----------------------------------------------------------------------

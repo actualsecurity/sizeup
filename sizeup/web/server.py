@@ -9,7 +9,9 @@ POST /api/incident/<id>/close  close an incident by hand
 POST /api/talkgroup {"tg": 307, "record": bool?, "main": bool?}  per-talkgroup switches (state "talkgroups")
 POST /api/talkgroup-group {"group": "County Police", "record": bool?, "main": bool?}  a whole section
 POST /api/mode {"mode": ...}  one shared dongle: hand it to a channel or trunk-recorder (state "sdr")
-GET  /healthz
+GET  /healthz                   {"ok": true, version, build, role}: cheap, for the container health check
+GET|POST /api/station/...      [cloud] role = "hub" only: the station's ingest and job queue, bearer token
+                               (sizeup/cloud/hub.py)
 GET  /cad                      the PCFD dispatch console (static/cad.html); its API is /api/cad/... (sizeup/cad/api.py)
 GET  /comms                    every transmission with its rig, radio ID, channel and events (static/comms.html)
 
@@ -89,9 +91,10 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                  close_incident: Callable[[str], bool], set_mode: Callable[[str], str | None] | None = None,
                  set_talkgroup: Callable[..., str | None] | None = None,
                  set_talkgroup_group: Callable[..., str | None] | None = None, retranscribe=None,
-                 cad=None, cad_b: Broadcaster | None = None):
+                 cad=None, cad_b: Broadcaster | None = None, station=None, health: bytes = b'{"ok":true}'):
     """cad: a CadApi (sizeup/cad/api.py) and cad_b its own broadcaster (the console's state is
-    small and separate from the monitor's, so neither page carries the other's)."""
+    small and separate from the monitor's, so neither page carries the other's). station: the hub's
+    ingest (sizeup/cloud/hub.py Hub), which checks the station's token before reading any body."""
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -131,11 +134,26 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 wav = clip(path[len("/api/audio/"):-4])
                 return self._send(200, wav, "audio/wav") if wav else self._send(404, b"no such clip\n", "text/plain")
             if path == "/healthz":
-                return self._send(200, b'{"ok":true}', "application/json")
+                return self._send(200, health, "application/json")
+            if path.startswith("/api/station/") and station is not None:
+                return self._send(*station.handle("GET", path, url.query, self.headers, None))
             self._send(404, b"not found\n", "text/plain")
+
+        def _body(self, limit: int) -> bytes | None:
+            """The request body, or None when it's missing a length or bigger than limit."""
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                return None
+            return self.rfile.read(n) if 0 <= n <= limit else None
 
         def do_POST(self) -> None:
             path = urlsplit(self.path).path
+            if path.startswith("/api/station/") and station is not None:
+                code, body, ctype = station.handle("POST", path, "", self.headers, self._body)
+                if code >= 400:              # the body may be unread (a refused token): don't reuse the connection
+                    self.close_connection = True
+                return self._send(code, body, ctype)
             if path.startswith("/api/cad/") and cad is not None:
                 try:
                     n = int(self.headers.get("Content-Length") or 0)
@@ -224,12 +242,14 @@ class WebServer:
                  set_mode: Callable[[str], str | None] | None = None,
                  set_talkgroup: Callable[..., str | None] | None = None,
                  set_talkgroup_group: Callable[..., str | None] | None = None,
-                 retranscribe: Callable[[list[str] | None], int] | None = None, cad=None):
+                 retranscribe: Callable[[list[str] | None], int] | None = None, cad=None, station=None,
+                 health: dict | None = None):
         self.broadcaster = Broadcaster(state_fn)
         self.cad_broadcaster = Broadcaster(cad.cad.state) if cad is not None else None
         self.httpd = ThreadingHTTPServer((host, port), make_handler(
             json.dumps(scene, separators=(",", ":")).encode(), self.broadcaster, clip, close_incident, set_mode,
-            set_talkgroup, set_talkgroup_group, retranscribe, cad, self.cad_broadcaster))
+            set_talkgroup, set_talkgroup_group, retranscribe, cad, self.cad_broadcaster, station,
+            json.dumps(health or {"ok": True}, separators=(",", ":")).encode()))
         self.httpd.daemon_threads = True
 
     @property

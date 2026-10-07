@@ -1,0 +1,27 @@
+# The hub image needs sizeup/, data/, pyproject.toml, deploy/hub/ and the talkgroup names.
+.git
+.gitignore
+.claude/
+.venv/
+**/__pycache__/
+**/*.pyc
+*.egg-info/
+build/
+captures/
+state/
+models/
+cache/
+config.toml
+*.xlsx
+*.sqlite-shm
+*.sqlite-wal
+tests/
+tools/
+docs/
+deploy/station/
+deploy/trunk-recorder/*
+!deploy/trunk-recorder/talkgroups.csv
+deploy/hub/*.sqlite*
+Dockerfile
+.dockerignore
+.DS_Store

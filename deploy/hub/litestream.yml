@@ -1,0 +1,21 @@
+# Continuous backup of the hub's SQLite files to S3 (deploy/hub/entrypoint.sh, docs/cloud.md).
+# No credentials here: the ECS task role. ${...} are expanded from the environment by Litestream.
+dbs:
+  - path: ${SIZEUP_STATE_DIR}/cad.sqlite          # the CAD of record: events, units, dispatch log, settings, radio IDs, comms
+    replica:
+      type: s3
+      bucket: ${LITESTREAM_BUCKET}
+      path: ${LITESTREAM_PATH}/cad.sqlite
+      region: ${LITESTREAM_REGION}
+  - path: ${SIZEUP_STATE_DIR}/hub.sqlite          # the monitor: pages, incidents, transmissions; station events applied
+    replica:
+      type: s3
+      bucket: ${LITESTREAM_BUCKET}
+      path: ${LITESTREAM_PATH}/hub.sqlite
+      region: ${LITESTREAM_REGION}
+  - path: ${SIZEUP_STATE_DIR}/audio.sqlite        # clips (12 h) and dispatch audio
+    replica:
+      type: s3
+      bucket: ${LITESTREAM_BUCKET}
+      path: ${LITESTREAM_PATH}/audio.sqlite
+      region: ${LITESTREAM_REGION}

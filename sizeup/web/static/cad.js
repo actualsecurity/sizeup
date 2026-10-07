@@ -1763,8 +1763,36 @@ function onState(data) {
   setText($("#tx-note"), tx.enabled ? "" : (tx.note || "Transmit is off") + ".");
   if (changed) cad.dbAt = 0;
   renderConn();
+  renderCloud();
   renderTalking();
   render();
+}
+
+// [cloud] (docs/cloud.md). On the hub: the station's connection, next to the connection pill (radios,
+// speech-to-text and the dispatch voice are the station's). On the station: this console is not the
+// CAD of record, the hub's is.
+function renderCloud() {
+  const c = cad.state && cad.state.cloud;
+  const pill = $("#cloud-pill"), banner = $("#cloud-banner");
+  show(pill, !!c);
+  show(banner, !!(c && c.role === "station"));
+  if (!c) return;
+  if (c.role === "hub") {
+    pill.className = "pill " + (c.state === "ok" ? "ok" : "err");
+    setText(pill, c.state === "ok" ? "Station connected" : `Station ${c.word || "offline"}`);
+    pill.title = c.detail || "";
+    return;
+  }
+  pill.className = "pill " + (c.state === "ok" ? "ok" : "warn");
+  setText(pill, c.state === "ok" ? "Hub connected" : "Hub unreachable");
+  pill.title = c.detail || "";
+  const url = c.hub_url || "the hub";
+  if (banner.dataset.url !== url) {
+    banner.replaceChildren("This is the station's own console. The CAD of record is the hub: ",
+      Object.assign(el("a", null, url), { href: `${url}/cad`, target: "_blank", rel: "noopener" }),
+      ". Events, dispatches and settings made here stay on this machine and are not sent to the hub.");
+    banner.dataset.url = url;
+  }
 }
 
 // Who is talking now: the header strip, the talk alerts, the unit board highlight (radio.js).

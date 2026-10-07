@@ -1,0 +1,32 @@
+# Local dev convenience only (docs/cloud.md): the hub + a Cloudflare Tunnel on one machine, no
+# Litestream. Production is one Fargate task (hub + cloudflared sidecar, Litestream to S3).
+#   SIZEUP_STATION_TOKEN=$(openssl rand -hex 32) TUNNEL_TOKEN=... docker compose -f deploy/hub/compose.yaml up --build
+services:
+  hub:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: sizeup-hub:dev
+    environment:
+      SIZEUP_STATION_TOKEN: ${SIZEUP_STATION_TOKEN:?set SIZEUP_STATION_TOKEN}
+      SIZEUP_PUBLIC_URL: ${SIZEUP_PUBLIC_URL:-}
+      SIZEUP_HOST: 0.0.0.0          # for the optional port below; cloudflared reaches it on localhost either way
+    volumes:
+      - hub-data:/data
+    ports:
+      - "127.0.0.1:8090:8090"       # this machine only (optional: remove to reach it through the tunnel only)
+    restart: unless-stopped
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:?set TUNNEL_TOKEN}
+    # The hub's network namespace, as in the Fargate task: the tunnel's public hostname points at
+    # http://localhost:8090, and nothing else can reach the hub.
+    network_mode: "service:hub"
+    depends_on: [hub]
+    restart: unless-stopped
+
+volumes:
+  hub-data:

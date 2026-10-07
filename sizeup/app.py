@@ -13,6 +13,9 @@
         communications log, linked to the events that rig is assigned to (/comms, sizeup/cad/comms.py)
     who is keying up now (squelch + live MDC decode on FG1; trunk-recorder's log for P25):
         sizeup/radio/live.py -> "talking" in both pages' state
+    [cloud] role = "station": every finished page / transmission / transcript / radio ID heard also
+        goes to the hub through a durable outbox (_emit, sizeup/cloud/station.py); role = "hub": no
+        radios at all, the same state fed by the station (sizeup/cloud/hub.py). docs/cloud.md
 """
 
 from __future__ import annotations
@@ -31,6 +34,7 @@ import wave
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 
@@ -252,7 +256,11 @@ class App:
         # Radio ID -> rig, and who is transmitting right now (both pages' "talking").
         self.radios = self.cad.radios
         self.live = LiveTalk(resolve=self.radios.resolve, tg_name=self.tg.name, main=self.tg.main,
-                             learn=lambda src, alias, at: self.radios.heard("p25", src, alias, at))
+                             learn=lambda src, alias, at: self._heard("p25", src, alias, at))
+        # [cloud] role = "station": the hub link (sizeup/cloud/station.py) sets these; None = all-in-one.
+        self.events: Callable[[str, dict, str | None], None] | None = None   # (type, data, clip id)
+        self.link = None
+        self._heard_sent: dict[tuple[str, str, str], float] = {}
         self.cad.live = self.live.state
         self.cad.has_clip = self.has_clip
         if self.recorder is not None:
@@ -341,16 +349,45 @@ class App:
             except Exception as e:  # cleanup must never take the display down
                 log(f"storage cleanup error: {type(e).__name__}: {e}")
 
+    @staticmethod
+    def _page_doc(page: Page) -> dict:
+        """A page as saved (and as sent to the hub): Page.as_dict + what the pipeline added."""
+        return dict(page.as_dict(), dispatch=getattr(page, "dispatch", None),
+                    history=getattr(page, "history", None) or [], rerun_at=getattr(page, "rerun_at", None),
+                    model=getattr(page, "model", ""))
+
     def _save_page(self, page: Page) -> None:
         if not self.clips_dir:
             return
         try:
-            d = dict(page.as_dict(), dispatch=getattr(page, "dispatch", None),
-                     history=getattr(page, "history", None) or [], rerun_at=getattr(page, "rerun_at", None),
-                     model=getattr(page, "model", ""))
-            (self.clips_dir / f"{page.id}.page.json").write_text(json.dumps(d))
+            (self.clips_dir / f"{page.id}.page.json").write_text(json.dumps(self._page_doc(page)))
         except OSError:
             pass
+
+    # -- the hub link ([cloud] role = "station") ------------------------------------------------------
+
+    def _emit(self, kind: str, data: dict, clip: str | None = None) -> None:
+        """Hand one finished thing to the hub link (a no-op all-in-one). Never raises into the radio path."""
+        if self.events is None:
+            return
+        try:
+            self.events(kind, data, clip)
+        except Exception as e:  # the outbox must never stop the monitor
+            log(f"hub link: could not queue {kind}: {type(e).__name__}: {e}")
+
+    def _heard(self, system: str, radio_id: str, alias: str = "", at: float | None = None) -> None:
+        """A radio heard on the air: into the registry, and (station) to the hub's registry, once per
+        radio/alias every few minutes (P25 lists the same talkers on every call)."""
+        self.radios.heard(system, radio_id, alias, at)
+        if self.events is None or not radio_id:
+            return
+        key, now = (system, str(radio_id), alias or ""), time.time()
+        if now - self._heard_sent.get(key, 0) < 300:
+            return
+        self._heard_sent[key] = now
+        if len(self._heard_sent) > 5000:
+            self._heard_sent = {k: v for k, v in self._heard_sent.items() if now - v < 300}
+        self._emit("heard", {"system": system, "radio_id": str(radio_id), "alias": alias or "", "at": at})
 
     # -- clips ----------------------------------------------------------------------------------
 
@@ -469,23 +506,17 @@ class App:
         low_energy = speech_seconds(seg.audio) < MIN_SPEECH_S
         if paging:
             self._keep_clip(page.id, seg.audio)
-            with self._lock:
-                self.pages.appendleft(page)
-            names = page.departments
             log(f"{ch.label}: {page.kind} " + (", ".join(t.describe() for t in page.tones) or "voice"))
-            if page.status == "no_voice":
-                self._save_page(page)
-                if any(n in self.cfg.ours for n in names):
-                    self._last_tones_only = page
-                if page.tones and not names:
-                    self._unknown_tones(page)
+            heard = self._page_heard(page)
+            self._emit("page", self._page_doc(page), page.id)
+            if not heard:
                 return
             self._keep_source(page.id, page.voice)
             self.stt.submit(page, page.voice)
         else:
             ids = list(dict.fromkeys(h for h, _e in found))
             for h in ids:
-                self.radios.heard("mdc", h, at=seg.end)
+                self._heard("mdc", h, at=seg.end)
             self.live.fm_segment(ch.label, ids, seg.start, seg.end)
             t = Traffic(f"{ch.label.replace(' ', '')}-{int(seg.start * 1000)}", ch.label, seg.start, seg.end,
                         "", status="pending", unit=", ".join(units), rig=self.radios.rig_mdc(ids), radio_id=", ".join(ids))
@@ -498,6 +529,21 @@ class App:
             self._keep_source(t.id, seg.audio)
             self.stt.submit(t, seg.audio)
 
+    def _page_heard(self, page: Page) -> bool:
+        """A page just off the air (here, or on the hub from the station). False = tones only:
+        nothing to transcribe (kept as the tones half of a page whose voice comes separately)."""
+        with self._lock:
+            self.pages.appendleft(page)
+        if page.status != "no_voice":
+            return True
+        names = page.departments
+        self._save_page(page)
+        if any(n in self.cfg.ours for n in names):
+            self._last_tones_only = page
+        if page.tones and not names:
+            self._unknown_tones(page)
+        return False
+
     def _unknown_tones(self, page: Page) -> None:
         log("  unknown tone pair(s) kept for learning: "
             + ", ".join(f"{t.a_hz:.1f}/{(t.b_hz or 0):.1f} Hz" for t in page.tones))
@@ -509,7 +555,7 @@ class App:
             return
         self.tg.seen(call.talkgroup)
         for _name, (src, tag) in call.ids.items():      # radio ID <-> alias, kept for lookups without the alias
-            self.radios.heard("p25", src, tag, call.start)
+            self._heard("p25", src, tag, call.start)
         if call.audio is not None:
             # One row per talker: 60 Control and the unit it's talking to are separate key-ups in the
             # same call; each piece is transcribed with only its own talker as the hint.
@@ -519,6 +565,7 @@ class App:
                 t = Traffic(cid, call.label, start, end, "", status="pending", unit=unit, talkgroup=call.talkgroup,
                             rig=self.radios.rig_p25(pairs), radio_id=", ".join(src for src, _t in pairs if src))
                 t.fm = False  # decoded P25 voice: no FM de-emphasis  # type: ignore[attr-defined]
+                t.pairs = pairs  # (radio ID, alias) per talker, for the hub's own rig lookup  # type: ignore[attr-defined]
                 self._keep_clip(t.id, radio_voice(audio, deemph=False), processed=True)
                 self._keep_source(t.id, audio)
                 self.stt.submit(t, audio)
@@ -537,7 +584,10 @@ class App:
     def _transcribed(self, item) -> None:
         if isinstance(item, Traffic):
             item.text = getattr(item, "raw", "")
-            attach = item.talkgroup is None or self.tg.main(item.talkgroup)
+            # attach: the station's talkgroup choice when this came from one (hub); pairs: P25 talkers
+            attach = item.__dict__.pop("attach", None)
+            attach = (item.talkgroup is None or self.tg.main(item.talkgroup)) if attach is None else bool(attach)
+            pairs = item.__dict__.pop("pairs", None)
             if item.status == "no_speech":
                 # A key-up with nothing said (mic click): still shown, as who keyed and when, with
                 # its clip; just no transcript.
@@ -546,7 +596,9 @@ class App:
                     + (f" · unit {item.unit}" if item.unit else ""))
             if hasattr(item, "raw_audio"):
                 del item.raw_audio
-            item.model = Path(self.cfg.stt_model).name  # type: ignore[attr-defined]  (which model wrote this text)
+            # which model wrote this text (the station's, when the hub replays it)
+            item.model = getattr(item, "model", "") or Path(self.cfg.stt_model).name  # type: ignore[attr-defined]
+            self._emit("traffic", dict(item.as_dict(), attach=attach, pairs=pairs), item.id)
             self.store.on_traffic(item, attach=attach)
             self._to_cad(item)
             if item.status != "no_speech":
@@ -555,10 +607,11 @@ class App:
         if isinstance(item, Rerun):
             return self._rerun_done(item)
         page: Page = item
-        page.model = Path(self.cfg.stt_model).name  # type: ignore[attr-defined]
+        page.model = getattr(page, "model", "") or Path(self.cfg.stt_model).name  # type: ignore[attr-defined]
         d = self._dispatch(page.raw)
         page.dispatch = d.as_dict() if d else None  # type: ignore[attr-defined]
         self._save_page(page)
+        self._emit("page_text", self._page_doc(page))
         log(f"{page.label} {page.kind}: {page.raw or '(' + page.status + ')'}")
         if d is None:
             return
@@ -727,39 +780,46 @@ class App:
         return n
 
     def _rerun_done(self, job: Rerun) -> None:
-        model = Path(self.cfg.stt_model).name
         text = job.raw if job.status == "done" else ""
         changed = False
         if job.status != "error":
-            with self._lock:
-                page = next((p for p in self.pages if p.id == job.id), None)
-            if page is not None:
-                if page.raw != text:
-                    hist = list(getattr(page, "history", None) or [])
-                    hist.append({"text": page.raw, "at": time.time(), "model": getattr(page, "model", "") or ""})
-                    page.history = hist[-5:]  # type: ignore[attr-defined]
-                    changed = True
-                page.raw, page.confidence = text, job.confidence
-                page.rerun_at, page.model = time.time(), model  # type: ignore[attr-defined]
-                page.status = "done" if text else "no_speech"
-                d = self._dispatch(text)
-                page.dispatch = d.as_dict() if d else None  # type: ignore[attr-defined]
-                self._save_page(page)
-            old = next((t.text for t in list(self.store.loose) + [t for i in self.store.incidents for t in i.traffic]
-                        if t.id == job.id), None)
-            changed = changed or (old is not None and old != text)
-            self.store.retext(job.id, text, job.status, job.confidence, model)
-            try:
-                self.cad.comms.retext(job.id, text, job.status, model)
-            except Exception as e:  # the CAD must never stop the monitor
-                log(f"CAD: could not update the communications log: {type(e).__name__}: {e}")
-            if changed:
-                log(f"re-run {job.id}: {text or '(no speech)'}")
+            changed = self._retext(job.id, text, job.status, job.confidence, Path(self.cfg.stt_model).name)
         with self._lock:
             self._rerun_ids.discard(job.id)
             self.rerun["done"] += 1
             self.rerun["changed"] += changed
             self.rerun["failed"] += job.status == "error"
+
+    def _retext(self, cid: str, text: str, status: str, confidence: float | None, model: str) -> bool:
+        """New text for a page or transmission already on screen (a re-run here, or one the station
+        sent the hub), the old text kept in its history. True = the text changed."""
+        changed = False
+        with self._lock:
+            page = next((p for p in self.pages if p.id == cid), None)
+        if page is not None:
+            if page.raw != text:
+                hist = list(getattr(page, "history", None) or [])
+                hist.append({"text": page.raw, "at": time.time(), "model": getattr(page, "model", "") or ""})
+                page.history = hist[-5:]  # type: ignore[attr-defined]
+                changed = True
+            page.raw, page.confidence = text, confidence
+            page.rerun_at, page.model = time.time(), model  # type: ignore[attr-defined]
+            page.status = "done" if text else "no_speech"
+            d = self._dispatch(text)
+            page.dispatch = d.as_dict() if d else None  # type: ignore[attr-defined]
+            self._save_page(page)
+        old = next((t.text for t in list(self.store.loose) + [t for i in self.store.incidents for t in i.traffic]
+                    if t.id == cid), None)
+        changed = changed or (old is not None and old != text)
+        self.store.retext(cid, text, status, confidence, model)
+        try:
+            self.cad.comms.retext(cid, text, status, model)
+        except Exception as e:  # the CAD must never stop the monitor
+            log(f"CAD: could not update the communications log: {type(e).__name__}: {e}")
+        if changed:
+            log(f"re-run {cid}: {text or '(no speech)'}")
+        self._emit("retext", {"id": cid, "text": text, "status": status, "confidence": confidence, "model": model})
+        return changed
 
     # -- state --------------------------------------------------------------------------------------
 
@@ -946,7 +1006,13 @@ class App:
         out.append({"label": "STT", "mhz": None, "state": self.whisper.state, "detail": self.whisper.detail,
                     "open": False, "quieting_db": None, "restarts": 0, "last_heard": None})
         out.append(self.tts.status() if self.tts else TtsService.say_status(self.cfg.dispatch_voice))
+        if self.link is not None:
+            out.append(self.link.status_row())       # [cloud] station: the hub connection
         return out
+
+    def close_incident(self, iid: str) -> bool:
+        """POST /api/incident/<id>/close (the monitor's incident, not the CAD's)."""
+        return self.store.close(iid)
 
     def has_clip(self, cid: str) -> bool:
         with self._lock:
@@ -1010,6 +1076,8 @@ class App:
                 self.recorder.start()
         if self.p25:
             self.p25.start()
+        if self.link is not None:
+            self.link.start()
         return self
 
     def stop(self) -> None:
@@ -1025,26 +1093,69 @@ class App:
         self.whisper.stop()
         if self.tts:
             self.tts.stop()
+        if self.link is not None:
+            self.link.stop()
+
+
+def make_app(cfg: Config) -> App:
+    """The app for this config's role: all-in-one (no [cloud]), the hub (no radios: fed by the
+    station, sizeup/cloud/hub.py) or the station (all-in-one plus the hub link)."""
+    if cfg.cloud_role == "hub":
+        from sizeup.cloud.hub import HubApp
+        return HubApp(cfg, log=log)
+    app = App(cfg)
+    if cfg.cloud_role == "station":
+        from sizeup.cloud.station import StationLink
+        StationLink(app, cfg, log=log)     # sets app.events / app.link: nothing is missed from here on
+    return app
+
+
+def make_server(app: App) -> WebServer:
+    cfg = app.cfg
+    server = WebServer(cfg.host, cfg.port, app.scene(), app.state, app.clip, app.close_incident, app.set_mode,
+                       app.set_talkgroup, app.set_talkgroup_group, app.retranscribe, cad=CadApi(app.cad),
+                       station=getattr(app, "hub", None), health=health_info(cfg))
+    pokes = [server.poke] + ([app.link.live_changed] if app.link is not None else [])
+    app.live.on_change = lambda: [f() for f in pokes]   # a new talker is pushed at once, not on the next second
+    return server
+
+
+def health_info(cfg: Config) -> dict:
+    """/healthz: cheap, always 200 while the process serves (the container health check)."""
+    try:
+        from importlib.metadata import version
+        ver = version("sizeup")
+    except Exception:
+        from sizeup import __version__ as ver
+    return {"ok": True, "version": ver, "build": os.environ.get("SIZEUP_BUILD", ""),
+            "role": cfg.cloud_role or "all-in-one", "station": cfg.station_id,
+            **({"public_url": cfg.cloud_public_url} if cfg.cloud_public_url else {})}
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="sizeup", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", default="config.toml")
+    ap.add_argument("--init-state", action="store_true",
+                    help="create / migrate the databases and exit (the hub container runs this before Litestream)")
     args = ap.parse_args(argv)
     try:
         cfg = load(args.config)
     except (ConfigError, FileNotFoundError) as e:
         print(f"config: {e}", file=sys.stderr)
         return 2
-    app = App(cfg).start()
-    server = WebServer(cfg.host, cfg.port, app.scene(), app.state, app.clip, app.store.close, app.set_mode,
-                       app.set_talkgroup, app.set_talkgroup_group, app.retranscribe, cad=CadApi(app.cad))
-    app.live.on_change = server.poke          # a new talker is pushed at once, not on the next second
+    app = make_app(cfg)
+    if args.init_state:
+        log(f"sizeup: databases ready ({cfg.cad_db or 'in memory'})")
+        return 0
+    app.start()
+    server = make_server(app)
     signal.signal(signal.SIGTERM, lambda *_: server.shutdown())
+    role = {"hub": " · hub (fed by the station, no radios)",
+            "station": f" · station, forwarding to {cfg.cloud_hub_url}"}.get(cfg.cloud_role, "")
     log(f"sizeup: {cfg.station_name} · {len(cfg.channels)} channel(s)"
-        + (f" · P25 {cfg.p25_dir}" if cfg.p25_dir else "") + f" · {server.url} · CAD {server.url}cad"
-        + f" ({cfg.cad_db or 'in memory'}; transmit off)")
+        + (f" · P25 {cfg.p25_dir}" if cfg.p25_dir and cfg.cloud_role != "hub" else "") + role
+        + f" · {server.url} · CAD {server.url}cad" + f" ({cfg.cad_db or 'in memory'}; transmit off)")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

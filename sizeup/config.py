@@ -3,6 +3,7 @@ See config.example.toml for every option with comments."""
 
 from __future__ import annotations
 
+import os
 import re
 import tomllib
 from dataclasses import dataclass, field
@@ -86,6 +87,18 @@ class Config:
     dispatch_repeat: int = 2          # the voice read this many times
     dispatch_transmit: bool = False   # M1: must stay false (no radio interface yet)
     dispatch_channels: tuple[str, ...] = ("FG1", "PC repeater")   # labels on the log only, in M1
+    # [cloud] (sizeup/cloud/, docs/cloud.md): "" = all-in-one; "hub" (the cloud copy, no radios) or
+    # "station" (the Mac with the SDRs, forwarding to the hub).
+    cloud_role: str = ""
+    cloud_hub_url: str = ""           # station: the hub's https base URL
+    cloud_token: str = ""             # both: the station's bearer token (env SIZEUP_STATION_TOKEN wins)
+    cloud_access_id: str = ""         # station: Cloudflare Access service token (env SIZEUP_ACCESS_CLIENT_ID / _SECRET)
+    cloud_access_secret: str = ""
+    cloud_outbox: str = ""            # station: the durable outbox (SQLite)
+    cloud_outbox_max_mb: float = 300.0   # station: queued audio over this drops the oldest audio (never metadata)
+    cloud_public_url: str = ""        # hub: its public URL (env SIZEUP_PUBLIC_URL), shown in /healthz and the log
+    cloud_offline_s: float = 15.0     # hub: no word from the station this long = offline
+    cloud_audio_max_mb: float = 500.0  # hub: received audio kept (state/audio.sqlite), oldest dropped first
 
 
 def _take(d: dict, path: str, allowed: set[str]) -> dict:
@@ -114,6 +127,54 @@ def _dispatch_voice(dsp: dict) -> tuple[str, str, str]:
     return engine, voice, fallback
 
 
+# Environment overrides, for a container whose config file is baked into the image (deploy/hub/):
+#   SIZEUP_HOST, SIZEUP_PORT          [web] host / port
+#   SIZEUP_STATE_DIR                  where relative storage paths go (cad.db, storage.clips_dir,
+#                                     cloud.outbox) instead of the config file's folder
+#   SIZEUP_STATION_TOKEN              [cloud] token (preferred: never in a file)
+#   SIZEUP_ACCESS_CLIENT_ID / _SECRET [cloud] access_client_id / access_client_secret
+#   SIZEUP_PUBLIC_URL, SIZEUP_HUB_URL [cloud] public_url / hub_url
+def _env(name: str, default):
+    v = os.environ.get(name, "").strip()
+    return v if v else default
+
+
+def _cloud(data: dict) -> dict:
+    """[cloud] -> Config fields. No section = all-in-one (role "")."""
+    cl = _take(data.get("cloud", {}), "cloud", {"role", "hub_url", "token", "access_client_id", "access_client_secret",
+                                                "outbox", "outbox_max_mb", "public_url", "offline_after_s", "audio_max_mb"})
+    if not cl:
+        return {}                      # all-in-one: no environment variable changes anything here
+    role = str(cl.get("role", ""))
+    if role not in ("hub", "station"):
+        raise ConfigError('cloud.role: "hub" or "station"')
+    token = _env("SIZEUP_STATION_TOKEN", str(cl.get("token", "")))
+    hub_url = _env("SIZEUP_HUB_URL", str(cl.get("hub_url", ""))).rstrip("/")
+    if role == "station":
+        m = re.fullmatch(r"(https?)://([^/:]+)(:\d+)?(/.*)?", hub_url)
+        if not m:
+            raise ConfigError("cloud.hub_url: the hub's URL, https://...")
+        if m.group(1) == "http" and m.group(2) not in ("127.0.0.1", "localhost", "::1"):
+            raise ConfigError("cloud.hub_url: https:// (plain http only to this machine)")
+        if not token:
+            raise ConfigError("cloud: the station needs a token (env SIZEUP_STATION_TOKEN, or cloud.token)")
+    if token and len(token) < 16:
+        raise ConfigError("cloud.token: at least 16 characters (e.g. `openssl rand -hex 32`)")
+    try:
+        nums = {k: float(cl.get(k, d)) for k, d in (("outbox_max_mb", 300), ("offline_after_s", 15), ("audio_max_mb", 500))}
+    except (TypeError, ValueError):
+        raise ConfigError("cloud.outbox_max_mb / offline_after_s / audio_max_mb: numbers") from None
+    if nums["outbox_max_mb"] < 1 or nums["audio_max_mb"] < 1 or not 5 <= nums["offline_after_s"] <= 300:
+        raise ConfigError("cloud: outbox_max_mb and audio_max_mb at least 1; offline_after_s 5 to 300")
+    return dict(cloud_role=role, cloud_hub_url=hub_url, cloud_token=token,
+                cloud_access_id=_env("SIZEUP_ACCESS_CLIENT_ID", str(cl.get("access_client_id", ""))),
+                cloud_access_secret=_env("SIZEUP_ACCESS_CLIENT_SECRET", str(cl.get("access_client_secret", ""))),
+                cloud_outbox=str(cl.get("outbox", "state/outbox.sqlite")) if role == "station" else "",
+                cloud_outbox_max_mb=nums["outbox_max_mb"], cloud_offline_s=nums["offline_after_s"],
+                cloud_audio_max_mb=nums["audio_max_mb"],
+                cloud_public_url=_env("SIZEUP_PUBLIC_URL", str(cl.get("public_url", ""))).rstrip("/"))
+
+
 def load(path: str | Path) -> Config:
     path = Path(path)
     base = path.parent
@@ -122,9 +183,16 @@ def load(path: str | Path) -> Config:
     except tomllib.TOMLDecodeError as e:
         raise ConfigError(f"{path}: {e}") from e
     _take(data, "config", {"station", "web", "radio", "tones", "stt", "p25", "mdc", "units", "storage", "map",
-                           "cad", "dispatch"})
+                           "cad", "dispatch", "cloud"})
     st = _take(data.get("station", {}), "station", {"id", "name"})
-    web = _take(data.get("web", {}), "web", {"host", "port"})
+    web = dict(_take(data.get("web", {}), "web", {"host", "port"}))
+    web["host"] = _env("SIZEUP_HOST", web.get("host", "127.0.0.1"))
+    try:
+        web["port"] = int(_env("SIZEUP_PORT", web.get("port", 8090)))
+    except ValueError:
+        raise ConfigError("SIZEUP_PORT: a port number") from None
+    cloud = _cloud(data)
+    state_dir = Path(os.environ["SIZEUP_STATE_DIR"]).expanduser() if os.environ.get("SIZEUP_STATE_DIR", "").strip() else base
     radio = _take(data.get("radio", {}), "radio", {"rtl_fm", "channels", "tones_file", "shared_device", "start_mode", "sdrs", "sdr_names", "sdr_ignore"})
     raw_sdrs = radio.get("sdrs", ())
     sdr_auto = raw_sdrs == "auto"
@@ -220,6 +288,7 @@ def load(path: str | Path) -> Config:
             unit_departments.setdefault(unit_callsigns[cs], dept_numbers[cs[:3]])
     mp = _take(data.get("map", {}), "map", {"home_lon", "home_lat", "home_zoom"})
     rel = lambda p: str((base / p).resolve()) if p and not Path(p).is_absolute() else p
+    rel_state = lambda p: str((state_dir / p).resolve()) if p and not Path(p).is_absolute() else p   # storage
     # roster_department: accepted from older configs, unused (the boards come from cad.lists)
     cad = _take(data.get("cad", {}), "cad", {"db", "department", "lists", "roster_department", "monitor_departments"})
     cad_lists = ""
@@ -271,14 +340,15 @@ def load(path: str | Path) -> Config:
         sdrs=sdrs, sdr_names={str(k): str(v) for k, v in radio.get("sdr_names", {}).items()},
         sdr_ignore=tuple(str(x) for x in radio.get("sdr_ignore", ())), sdr_auto=sdr_auto,
         p25_recorder=p25.get("recorder", ""), p25_recorder_dir=rel(p25.get("recorder_dir", "")),
-        clips_dir=rel(storage.get("clips_dir", "captures/clips")), keep_hours=float(storage.get("keep_hours", 24)),
+        clips_dir=rel_state(storage.get("clips_dir", "captures/clips")), keep_hours=float(storage.get("keep_hours", 24)),
         audio_keep_hours=float(storage.get("audio_keep_hours", 12)),
         home=(float(mp.get("home_lon", -73.6640)), float(mp.get("home_lat", 41.0130)), float(mp.get("home_zoom", 13.4))),
         apparatus_path=af_found,
-        cad_db=rel(cad.get("db", "state/cad.sqlite")), cad_department=str(cad.get("department", "Port Chester Fire")),
+        cad_db=rel_state(cad.get("db", "state/cad.sqlite")), cad_department=str(cad.get("department", "Port Chester Fire")),
         cad_lists=cad_lists,
         cad_monitor_departments=tuple(str(x) for x in cad.get("monitor_departments", ["Port Chester FD"])),
         dispatch_tones=d_tones, dispatch_tts_engine=d_engine, dispatch_voice=d_voice, dispatch_speed=d_speed,
         dispatch_tts_port=d_port, dispatch_fallback_voice=d_fallback, dispatch_tts_python=d_python, dispatch_rate=d_rate,
         dispatch_repeat=d_repeat, dispatch_transmit=False, dispatch_channels=d_channels,
+        **(dict(cloud, cloud_outbox=rel_state(cloud["cloud_outbox"])) if cloud else {}),
     )

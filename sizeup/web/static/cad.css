@@ -360,3 +360,5 @@ body.comms { display: grid; grid-template-rows: auto 1fr; }
 form.pick { flex-wrap: wrap; gap: 0.35em; max-width: 100%; }
 form.pick > span { flex: 1 1 100%; }
 form.pick select { flex: 1 1 100%; min-width: 0; max-width: 100%; text-overflow: ellipsis; }
+.cloud-banner { margin: 0.4em 1em 0.2em; font-weight: 600; }
+.cloud-banner a { color: inherit; text-decoration: underline; }
