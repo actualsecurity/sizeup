@@ -57,6 +57,8 @@ header {
 }
 .station { font-weight: 800; letter-spacing: 0.02em; font-size: 1.1em; }
 .clock { font-size: 1.05em; }
+.nav { color: var(--text); text-decoration: none; border: 1px solid var(--line); border-radius: 0.4em; padding: 0.15em 0.7em; font-size: 0.85em; }
+.nav:hover { border-color: var(--dim); }
 .clock b { font-size: 1.25em; font-weight: 700; letter-spacing: 0.02em; margin: 0 0.15em; }
 
 .pill {
