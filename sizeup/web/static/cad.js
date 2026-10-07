@@ -203,7 +203,7 @@ function fillQueueItem(li, inc) {
   const head = el("div", "qh");
   head.append(el("b", "qn", incTitle(inc)), el("span", "qt", inc.type || "—"));
   const right = el("span", "qe");
-  if (inc.status === "pending" || inc.status === "active") since(right, inc.status === "active" ? inc.accepted_at || inc.created_at : inc.created_at);
+  if (inc.status === "pending" || inc.status === "active") since(right, inc.created_at);
   else right.textContent = fmtTime(inc.closed_at);
   head.append(el("span", "spacer"), right);
   const addr = el("div", "qa" + (inc.address ? "" : " dim"), inc.address || "no address");
@@ -362,9 +362,9 @@ function renderDispatches(inc) {
 // ---- recommendation / preview / dispatch ----------------------------------------------------
 
 async function recommend() {
-  const inc = selected();
-  if (!inc || (inc.status !== "pending" && inc.status !== "active")) { cad.rec = null; renderDispatchBox(inc); return; }
-  const iid = inc.id;
+  // By id, not from the last push: a just-created incident isn't in the state yet.
+  const iid = cad.sel, inc = selected();
+  if (iid === null || (inc && inc.status !== "pending" && inc.status !== "active")) { cad.rec = null; renderDispatchBox(inc); return; }
   try {
     const r = await api("POST", `/api/cad/incident/${iid}/recommend`, {});
     if (cad.sel !== iid) return;
