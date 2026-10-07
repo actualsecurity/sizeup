@@ -10,6 +10,7 @@ Reset to default = drop the override (one item, or a whole section).
     dispositions, received_via,              {"deleted": true}: a default item removed (only if never used)
     unit_statuses                  key "_order" -> [codes]: the list's order
     event_class                    key TYPE | TYPE/SUBTYPE | */SUBTYPE -> emergency | non-emergency | null (a default rule removed)
+    status_flow                    key STATUS | "*" -> [next statuses] (the incident's unit buttons) | null (removed)
     geo_town_order                 key "_list" -> [towns]
     units                          key CODE -> the unit as edited ({kind, spoken, title, department, spare,
                                    response, retired}); key "_boards" -> the boards' layout
@@ -41,7 +42,7 @@ OPERATOR_ROLES = ("admin", "dispatcher", "viewer")
 REMOVE = object()
 
 # Where each stored section shows in Settings (the audit log's section).
-PAGE_SECTION = {**{s: "lists" for s in LIST_SECTIONS}, "event_class": "lists", "geo_town_order": "lists",
+PAGE_SECTION = {**{s: "lists" for s in LIST_SECTIONS}, "event_class": "lists", "geo_town_order": "lists", "status_flow": "lists",
                 "units": "units", "dispatch_wording": "dispatch", "dispatch": "dispatch"}
 AUDIT_SECTIONS = ("lists", "run cards", "units", "dispatch", "users", "system", "radios")
 LIST_FIELDS = {"event_types": ("color",), "event_subtypes": (), "dispositions": (), "received_via": (),
@@ -143,6 +144,16 @@ def overlay(d: dict, ov: dict) -> dict:
             else:
                 ec[k] = v
         d["event_class"] = ec
+    o = ov.get("status_flow") or {}
+    gone_st = gone.get("unit_statuses", set())
+    if o or gone_st:
+        fl = dict(d.get("status_flow") or {})
+        for k, v in o.items():
+            if v is None:
+                fl.pop(k, None)
+            else:
+                fl[k] = v
+        d["status_flow"] = {k: [c for c in v if c not in gone_st] for k, v in fl.items() if k not in gone_st}
     o = ov.get("geo_town_order") or {}
     if isinstance(o.get("_list"), list):
         d["geo_town_order"] = list(o["_list"])
@@ -350,6 +361,13 @@ class Editor:
                               + [{"key": k, "value": None, "state": "deleted", "default": self.base.event_class.get(k)}
                                  for k, v in o.items() if v is None and k in self.base.event_class],
                               "edited": bool(o)}
+        o = ov.get("status_flow", {})
+        out["status_flow"] = {"rows": [{"key": k, "next": list(v), "state": "edited" if k in o else "default",
+                                        "default": list(self.base.status_flow.get(k, ())) or None}
+                                       for k, v in L.status_flow.items()]
+                              + [{"key": k, "next": [], "state": "deleted", "default": list(self.base.status_flow[k])}
+                                 for k, v in o.items() if v is None and k in self.base.status_flow],
+                              "edited": bool(o)}
         out["geo_town_order"] = {"towns": list(L.geo_town_order), "default": list(self.base.geo_town_order),
                                  "edited": "_list" in ov.get("geo_town_order", {})}
         out["units"] = self._unit_rows(L, ov)
@@ -399,8 +417,9 @@ class Editor:
                 "tones": {"value": tone_groups(self.cad.s.tones), "default": self.config_tones,
                           "edited": "tones" in d},
                 "channels": {"value": list(self.cad.s.channels), "default": list(self.config_channels), "edited": "channels" in d},
-                "voice": {"name": getattr(self.cad.s, "voice", ""), "rate_wpm": getattr(self.cad.s, "rate_wpm", 0),
-                          "repeat": getattr(self.cad.s, "repeat", 0)},
+                "voice": {"engine": getattr(self.cad.s, "tts_engine", "say"), "name": getattr(self.cad.s, "voice", ""),
+                          "speed": getattr(self.cad.s, "speed", 1.0), "rate_wpm": getattr(self.cad.s, "rate_wpm", 0),
+                          "fallback": getattr(self.cad.s, "fallback_voice", ""), "repeat": getattr(self.cad.s, "repeat", 0)},
                 "transmit": {"enabled": self.cad.transmitter.enabled, "note": "Transmit is off: logged and played here only"},
                 "department": self.cad.s.department}
 
@@ -422,7 +441,7 @@ class Editor:
             raise CadError("action: required")
         if section in LIST_SECTIONS:
             return self._list_op(section, action, body, op)
-        fn = {"event_class": self._class_op, "geo_town_order": self._towns_op, "units": self._units_op,
+        fn = {"event_class": self._class_op, "status_flow": self._flow_op, "geo_town_order": self._towns_op, "units": self._units_op,
               "dispatch": self._dispatch_op, "users": self._users_op, "runcards": self._cards_op,
               "import": self._import_op}.get(section)
         if fn is None:
@@ -512,6 +531,12 @@ class Editor:
             changes = [(sec, code, {"deleted": True} if code in base else REMOVE)]
             if isinstance(o.get("_order"), list) and code in o["_order"]:
                 changes.append((sec, "_order", [c for c in o["_order"] if c != code]))
+            if sec == "unit_statuses":          # its next-step buttons go with it
+                for k, v in ov.get("status_flow", {}).items():
+                    if k == code:
+                        changes.append(("status_flow", k, REMOVE))
+                    elif isinstance(v, list) and code in v:
+                        changes.append(("status_flow", k, [c for c in v if c != code] or REMOVE))
             return self._commit(changes, op, [("lists", f"{sec}/{code}", _norm(cur), "deleted")])
         if action == "reset":
             if code not in o:
@@ -542,6 +567,36 @@ class Editor:
             if key not in o:
                 raise CadError(f"{key} is already the default")
             return self._commit([("event_class", key, REMOVE)], op, [("lists", f"event_class/{key}", cur.get(key), base.get(key))])
+        raise CadError("action: set, remove, reset or reset_section")
+
+    def _flow_op(self, action: str, body: dict, op: str) -> dict:
+        """The next-step buttons on a unit that is on an incident: status (or "*", any other) -> statuses."""
+        o = self.overrides().get("status_flow", {})
+        cur, base = self.cad.lists.status_flow, self.base.status_flow
+        if action == "reset_section":
+            return self._commit([("status_flow", k, REMOVE) for k in o], op, [("lists", "status_flow", f"{len(o)} edits", "reset")])
+        key = _text(body.get("key"), "key", 40).upper()
+        if action == "set":
+            nxt = body.get("next")
+            if not isinstance(nxt, list) or not all(isinstance(c, str) for c in nxt) or len(set(nxt)) != len(nxt):
+                raise CadError("next: a list of unit status codes, each once")
+            if not nxt:
+                raise CadError("next: at least one status (remove the row to use \u201cany other\u201d)")
+            same = key in base and list(base[key]) == nxt
+            return self._commit([("status_flow", key, REMOVE if same else nxt)], op,
+                                [("lists", f"status_flow/{key}", list(cur.get(key, ())) or None, nxt)])
+        if action == "remove":
+            if key not in cur:
+                raise CadError(f"no next steps for {key}")
+            if key == "*":
+                raise CadError("\u201cany other status\u201d stays (edit its steps instead)")
+            return self._commit([("status_flow", key, None if key in base else REMOVE)], op,
+                                [("lists", f"status_flow/{key}", list(cur[key]), None)])
+        if action == "reset":
+            if key not in o:
+                raise CadError(f"{key} is already the default")
+            return self._commit([("status_flow", key, REMOVE)], op,
+                                [("lists", f"status_flow/{key}", list(cur.get(key, ())) or None, list(base.get(key, ())) or None)])
         raise CadError("action: set, remove, reset or reset_section")
 
     def _towns_op(self, action: str, body: dict, op: str) -> dict:

@@ -22,8 +22,7 @@ const S_LISTS = [["event_types", "Event types"], ["event_subtypes", "Event subty
   ["geo_town_order", "Town order"]];
 const S_ROLES = [["", "Committed (on a call)"], ["free", "Available (in service)"], ["dispatched", "Dispatched (set on dispatch)"],
   ["enroute", "Responding (first en route)"], ["onscene", "On location (first on scene)"], ["oos", "Unavailable (out of service)"]];
-const S_RESPONSES = [["fire", "Fire: run cards, tick all, dispatch"], ["mutual_aid", "Mutual aid: only when named"],
-  ["agency", "Other agency: attach only"]];
+const S_RESPONSES = [["fire", "Fire"], ["mutual_aid", "Mutual aid"], ["agency", "Other agency"]];
 const S_OP_ROLES = [["admin", "Admin"], ["dispatcher", "Dispatcher"], ["viewer", "Viewer"]];
 
 // ---- small builders -----------------------------------------------------------------------------
@@ -204,8 +203,10 @@ function sLists(panel) {
   if (S.list === "event_class") body = sClassRules();
   else if (S.list === "geo_town_order") body = sTowns();
   else body = sListTable(S.list);
+  const flow = S.list === "unit_statuses" && S.data.status_flow ? sFlow() : null;
   panel.replaceChildren(...sHead("Lists", "Codes stay as they are: they are on events and in the CSV exports. Names, colors "
-    + "and order are yours. Retire what you no longer use: old events keep showing it, the pick lists don't."), tabs, body);
+    + "and order are yours. Retire what you no longer use: old events keep showing it, the pick lists don't."), tabs, body,
+  ...(flow ? [flow] : []));
 }
 
 function sListTable(sec) {
@@ -299,6 +300,63 @@ function sAddForm(sec) {
     await sPost(sec, { action: "add", code: code.value.trim(), item }, `${code.value.trim()} added.`);
   });
   return f;
+}
+
+// The next-step buttons on a unit that is on an incident (status_flow).
+function sFlow() {
+  const d = S.data.status_flow;
+  const statuses = (L().unit_statuses || []).filter(live);
+  const label = (k) => (k === "*" ? "Any other status" : nameOf("unit_statuses", k));
+  const ol = el("ol", "s-rows flow");
+  for (const r of d.rows) {
+    const li = el("li", "s-row" + (r.state === "deleted" ? " deleted" : ""));
+    li.append(el("b", "s-rule", label(r.key)), el("span", "dim", "→"));
+    if (r.state === "deleted") {
+      li.append(el("span", "dim small", (r.default || []).map((c) => nameOf("unit_statuses", c)).join(", ")), sState("deleted"),
+        el("span", "spacer"), sBtn("Restore", "", () => sPost("status_flow", { action: "reset", key: r.key }, `${label(r.key)}: default again.`)));
+      ol.append(li);
+      continue;
+    }
+    const checks = el("span", "s-checks");
+    for (const st of statuses) {
+      if (st.code === r.key) continue;
+      const lab = el("label", "inline check small");
+      const cb = el("input");
+      cb.type = "checkbox";
+      cb.checked = r.next.includes(st.code);
+      cb.dataset.code = st.code;
+      cb.addEventListener("change", () => {
+        const next = [...checks.querySelectorAll("input:checked")].map((x) => x.dataset.code);
+        sPost("status_flow", { action: "set", key: r.key, next }, `${label(r.key)}: next steps saved.`);
+      });
+      lab.append(cb, el("span", "", st.name));
+      checks.append(lab);
+    }
+    li.append(checks, sState(r.state), el("span", "spacer"));
+    if (r.key !== "*") li.append(sBtn("Remove", "Use “any other status” for it", () => sPost("status_flow", { action: "remove", key: r.key }, `${label(r.key)}: uses any other.`), "danger-quiet"));
+    if (r.state === "edited") li.append(sBtn("Reset", "", () => sPost("status_flow", { action: "reset", key: r.key }, `${label(r.key)}: default again.`)));
+    ol.append(li);
+  }
+  const have = new Set(d.rows.map((r) => r.key));
+  const free = statuses.filter((x) => !have.has(x.code));
+  const f = el("form", "row s-add");
+  if (free.length) {
+    const pick = sSelect(free.map((x) => [x.code, x.name]), free[0].code, null, "Status");
+    const add = el("button", "primary", "Add next steps");
+    add.type = "submit";
+    f.append(el("span", "dim small", "Own steps for"), pick, add);
+    f.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const any = (d.rows.find((r) => r.key === "*") || { next: [] }).next.filter((c) => c !== pick.value);
+      sPost("status_flow", { action: "set", key: pick.value, next: any.length ? any : [free[0].code] }, `${label(pick.value)}: own next steps.`);
+    });
+  }
+  const reset = d.edited ? sBtn("Reset to default", "", () => {
+    if (sAsk("Put the next-step buttons back to the data file's?")) sPost("status_flow", { action: "reset_section" }, "Next steps: back to the defaults.");
+  }, "danger-quiet") : null;
+  return sCard(sCardHead("Next steps on an incident", "the buttons on a unit in “Units on this incident”", reset),
+    el("p", "dim small", "The board on the right always offers every status. Available clears the unit off the event; "
+      + "Out of service asks why."), ol, f);
 }
 
 function ruleLabel(k) {
@@ -466,14 +524,16 @@ function sUnitRow(u, i, n, kinds, boards) {
     sInput(u.spoken, 40, "Said as", (v) => edit({ spoken: v }, "now said as " + (v || u.code)), "s-said"),
     sInput(u.title, 60, "Title", (v) => edit({ title: v }, "title changed"), "s-title"),
     sSelect(kinds, u.kind, (v) => edit({ kind: v }, `kind ${v}`), "Kind"),
-    sInput(u.department, 40, "Department (blank: PCFD)", (v) => edit({ department: v }, "department changed"), "s-dept"));
+    sInput(u.department, 40, "Department", (v) => edit({ department: v }, "department changed"), "s-dept"));
   const spare = el("label", "inline check small");
   const cb = el("input");
   cb.type = "checkbox";
   cb.checked = !!u.spare;
   cb.addEventListener("change", () => edit({ spare: cb.checked }, cb.checked ? "a spare" : "not a spare"));
   spare.append(cb, el("span", "", "Spare"));
-  li.append(spare, sSelect(S_RESPONSES, u.response, (v) => edit({ response: v }, "answers as " + v.replace("_", " ")), "Answers as"));
+  const resp = sSelect(S_RESPONSES, u.response, (v) => edit({ response: v }, "answers as " + v.replace("_", " ")), "Answers as");
+  resp.title = "Fire: run cards, tick all, dispatch. Mutual aid: only when named. Other agency: attach only, never dispatched.";
+  li.append(spare, resp);
   if (!u.retired) li.append(sSelect(boards, u.board, (v) => edit({ board: v }, "moved to another board"), "Board"));
   const meta = el("span", "s-meta");
   if (u.status) meta.append(statusChip(u.status));
@@ -537,8 +597,10 @@ function sDispatch(panel) {
     sCard(sCardHead("Wording", d.department), legend, main, more),
     sCard(sCardHead("Live preview", "a sample event, rendered as typed"), pv),
     sTones(d.tones), sChannels(d.channels),
-    sCard(sCardHead("Voice"), el("div", "", `${d.voice.name || "the system voice"} · speed ${d.voice.rate_wpm ? `${d.voice.rate_wpm} words a minute` : "the voice's own"} · read ${d.voice.repeat || 2}×`),
-      el("p", "dim small", "From the config file. Voice settings come with the dispatch-voice work.")),
+    sCard(sCardHead("Voice", "read-only here"), el("div", "", d.voice.engine === "kokoro"
+      ? `Kokoro ${d.voice.name} · speed ${d.voice.speed} · fallback ${d.voice.fallback || "macOS say"} · read ${d.voice.repeat || 2}×`
+      : `${d.voice.name || "the system voice"} (macOS say) · ${d.voice.rate_wpm ? `${d.voice.rate_wpm} words a minute` : "the voice's own speed"} · read ${d.voice.repeat || 2}×`),
+    el("p", "dim small", "From the config file ([dispatch] voice, speed). Picking the voice here is for later.")),
     sCard(sCardHead("Transmit"), el("span", "pill tx-off", d.transmit.enabled ? "Transmit: on" : "Transmit: off"),
       el("p", "dim small", `${d.transmit.note}. Read-only: there is no radio interface in this version.`)));
   sPreview();
@@ -585,29 +647,43 @@ async function sPreview() {
 }
 
 function sTones(t) {
-  const rows = el("ol", "s-rows tones");
-  const add = (hz, s) => {
+  const groups = el("div", "s-tone-groups");
+  const addTone = (ol, hz, sec) => {
     const li = el("li", "s-row");
     const h = el("input");
     h.type = "number"; h.min = "50"; h.max = "4000"; h.step = "0.1"; h.value = String(hz); h.className = "s-num";
     h.setAttribute("aria-label", "Hz");
-    const sec = el("input");
-    sec.type = "number"; sec.min = "0.1"; sec.max = "10"; sec.step = "0.1"; sec.value = String(s); sec.className = "s-num";
-    sec.setAttribute("aria-label", "Seconds");
-    li.append(h, el("span", "dim", "Hz for"), sec, el("span", "dim", "s"), el("span", "spacer"), sBtn("✕", "Remove", () => li.remove(), "mini"));
-    rows.append(li);
+    const d = el("input");
+    d.type = "number"; d.min = "0.1"; d.max = "10"; d.step = "0.1"; d.value = String(sec); d.className = "s-num";
+    d.setAttribute("aria-label", "Seconds");
+    li.append(h, el("span", "dim", "Hz for"), d, el("span", "dim", "s"), el("span", "spacer"), sBtn("✕", "Remove this tone", () => li.remove(), "mini"));
+    ol.append(li);
   };
-  t.value.forEach(([hz, s]) => add(hz, s));
+  const addGroup = (tones) => {
+    const g = el("div", "s-tone-group");
+    const ol = el("ol", "s-rows tones");
+    const head = el("div", "row");
+    head.append(el("b", "small", "Tone group"), el("span", "dim small", "one department's tones"), el("span", "spacer"),
+      sBtn("+ Tone", "", () => addTone(ol, 1000, 1), "mini"), sBtn("✕ Group", "Remove this group", () => g.remove(), "mini"));
+    g.append(head, ol);
+    tones.forEach(([hz, sec]) => addTone(ol, hz, sec));
+    groups.append(g);
+  };
+  t.value.forEach(addGroup);
   const save = () => {
-    const v = [...rows.children].map((li) => li.querySelectorAll("input")).map(([h, s]) => [Number(h.value), Number(s.value)]);
+    const v = [...groups.querySelectorAll(".s-tone-group")].map((g) =>
+      [...g.querySelectorAll("li")].map((li) => [...li.querySelectorAll("input")].map((i) => Number(i.value))))
+      .filter((g) => g.length);
     sPost("dispatch", { action: "set", key: "tones", value: v }, "Tones saved.");
   };
   const tools = el("div", "row");
-  tools.append(sBtn("+ Tone", "", () => add(1000, 1)), el("span", "spacer"),
-    t.edited ? sBtn("Reset", `Config: ${t.default.map(([h, s]) => `${h} Hz ${s} s`).join(", ")}`, () => sPost("dispatch", { action: "reset", key: "tones" }, "Tones: from the config again.")) : null,
+  tools.append(sBtn("+ Group", "Another department's tones, played after", () => addGroup([[1000, 1]])), el("span", "spacer"),
+    t.edited ? sBtn("Reset", "From the config", () => sPost("dispatch", { action: "reset", key: "tones" }, "Tones: from the config again.")) : null,
     sBtn("Save tones", "", save, "primary"));
+  [...tools.childNodes].forEach((n) => { if (n.nodeType === 3) n.remove(); });
   return sCard(sCardHead("Alert tones", t.edited ? "edited here" : "from the config"),
-    el("p", "dim small", "Played in order before the voice (two-tone sequential). 50 to 4000 Hz, up to 10 s each, 20 s in all."), rows, tools);
+    el("p", "dim small", "Played before the voice: each group in order (one per department paged, a short gap between). "
+      + "50 to 4000 Hz, up to 10 s a tone, 20 s a group."), groups, tools);
 }
 
 function sChannels(c) {
@@ -623,6 +699,7 @@ function sChannels(c) {
     c.edited ? sBtn("Reset", `Config: ${c.default.join(", ")}`, () => sPost("dispatch", { action: "reset", key: "channels" }, "Channels: from the config again.")) : null,
     sBtn("Save channels", "", () => sPost("dispatch", { action: "set", key: "channels",
       value: [...rows.querySelectorAll("input")].map((i) => i.value.trim()).filter(Boolean) }, "Channels saved."), "primary"));
+  [...tools.childNodes].forEach((n) => { if (n.nodeType === 3) n.remove(); });
   return sCard(sCardHead("Channels", c.edited ? "edited here" : "from the config"),
     el("p", "dim small", "The labels the dispatch box offers (logged with each dispatch; nothing transmits)."), rows, tools);
 }

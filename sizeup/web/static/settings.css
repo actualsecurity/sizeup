@@ -5,7 +5,7 @@
 .settings[hidden] { display: none; }
 .s-nav { background: var(--panel-solid); border-right: 1px solid var(--line); padding: 0.8em; overflow-y: auto;
   display: flex; flex-direction: column; gap: 0.7em; }
-.s-back { align-self: flex-start; }
+.s-back { align-self: flex-start; white-space: nowrap; }
 .s-sections { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.15em; }
 .s-sections a { display: block; padding: 0.4em 0.65em; border-radius: 0.35em; color: var(--text); text-decoration: none; white-space: nowrap; }
 .s-sections a:hover { background: rgba(255, 255, 255, 0.05); }
@@ -19,9 +19,10 @@
 .s-msg.ok { color: var(--ok); }
 .s-msg.err { color: var(--err); }
 .s-panel { display: flex; flex-direction: column; gap: 0.8em; max-width: 84em; }
+#s-units { max-width: 118em; }
 .s-panel[hidden] { display: none; }
 .s-head { display: flex; align-items: center; gap: 0.6em; flex-wrap: wrap; }
-.s-head h2 { margin: 0; font-size: 1.2em; }
+.s-head h2 { margin: 0; font-size: 1.3em; color: var(--text); letter-spacing: 0; text-transform: none; }
 .s-about { margin: -0.3em 0 0; max-width: 60em; font-size: 0.9em; }
 .s-card { background: var(--card); border: 1px solid var(--line); border-radius: 0.5em; padding: 0.7em 0.9em; min-width: 0; }
 .s-card > h3, .s-card-head h3 { margin: 0; font-size: 1em; }
@@ -44,9 +45,10 @@
 .s-code { min-width: 7.5em; font-size: 0.85em; color: var(--dim); overflow-wrap: anywhere; }
 .s-code.unit-code { min-width: 5.5em; color: var(--text); font-weight: 700; font-size: 0.95em; }
 .s-name { flex: 1 1 12em; }
-.s-said { flex: 1 1 8em; }
-.s-title { flex: 1 1 9em; }
-.s-dept { flex: 0 1 9em; }
+.s-said { flex: 1 1 7em; min-width: 6em; }
+.s-title { flex: 1 1 9em; min-width: 7em; }
+.s-dept { flex: 0 1 7em; }
+.s-row.unit select { max-width: 10em; }
 .s-code-in { width: 9em; }
 .s-num { width: 6em; }
 .s-rule { min-width: 12em; }
@@ -81,6 +83,9 @@ input.s-color { width: 2.4em; height: 1.95em; padding: 0.1em 0.15em; cursor: poi
 .s-more .s-tpl { margin-bottom: 0.6em; }
 .s-preview { display: flex; flex-direction: column; gap: 0.5em; }
 .s-pv { padding: 0.4em 0.6em; border: 1px dashed rgba(255, 255, 255, 0.22); border-radius: 0.35em; }
+.s-checks { display: inline-flex; flex-wrap: wrap; gap: 0.2em 0.8em; flex: 1 1 20em; }
+.s-tone-groups { display: flex; flex-direction: column; gap: 0.6em; margin-bottom: 0.5em; }
+.s-tone-group { border: 1px dashed var(--line); border-radius: 0.4em; padding: 0.4em 0.6em; }
 .s-import { margin-top: 0.6em; display: flex; flex-direction: column; gap: 0.4em; }
 .s-import:empty { display: none; }
 .s-chg.added { color: var(--ok); }

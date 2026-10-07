@@ -382,3 +382,24 @@ def test_settings_api(server):
     assert code == 200 and exp["overrides"] == {"event_types": {"MVA": {"name": "MVA", "color": "#0000FF"}}}
     code, dry = server.j("POST", "/api/cad/settings/import", {"action": "dry_run", "settings": exp})
     assert code == 200 and dry["changes"] == []
+
+
+def test_status_flow_the_next_step_buttons_are_editable():
+    cad = make_cad()
+    assert cad.lists.next_statuses("DISPATCHED")[:2] == ("RESPONDING", "ON LOCATION")
+    post(cad, "status_flow", action="set", key="DISPATCHED", next=["ACKNOWLEDGED", "RESPONDING", "AVAILABLE"])
+    assert cad.lists.next_statuses("DISPATCHED") == ("ACKNOWLEDGED", "RESPONDING", "AVAILABLE")
+    assert next(r for r in cad.settings_get()["status_flow"]["rows"] if r["key"] == "DISPATCHED")["state"] == "edited"
+    with pytest.raises(CadError, match="status_flow"):
+        post(cad, "status_flow", action="set", key="DISPATCHED", next=["NAPPING"])
+    post(cad, "status_flow", action="remove", key="ON LOCATION")             # falls back to "*"
+    assert cad.lists.next_statuses("ON LOCATION") == ("AVAILABLE", "OUT OF SERVICE")
+    with pytest.raises(CadError, match="stays"):
+        post(cad, "status_flow", action="remove", key="*")
+    post(cad, "unit_statuses", action="add", code="STAGED", item={"name": "Staged", "bg": "#335577"})
+    post(cad, "status_flow", action="set", key="STAGED", next=["ON LOCATION", "AVAILABLE"])
+    post(cad, "status_flow", action="reset_section")
+    assert "STAGED" not in cad.lists.status_flow and cad.lists.next_statuses("DISPATCHED")[0] == "RESPONDING"
+    post(cad, "status_flow", action="set", key="STAGED", next=["ON LOCATION"])
+    post(cad, "unit_statuses", action="delete", code="STAGED")                # takes its flow row with it
+    assert "STAGED" not in cad.lists.status_flow
