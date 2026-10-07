@@ -458,6 +458,20 @@
     "played in their place, with a warning on the preview and the dispatch. Rye Brook's are NOT known: don't guess."
   ],
   "dispatch_tones": {"Rye Brook": null},
+  "_comms_feed": [
+    "The pinned feed at the top of the units column: the last transmissions on the county's incident",
+    "talkgroup(s), so the desk always sees what 60 Control said. talkgroups: P25 talkgroups shown (307 =",
+    "Fire/EMS 15; add 333 during an Airport incident). limit: how many. phrases: a transmission whose",
+    "transcript or talker says one of these is marked as talking to us (\"PC\"), as is one naming a PCFD or",
+    "Rye Brook unit (from units: E60 / Engine 60, 23 91 ...) and 60 Control's turn right before or after",
+    "such a unit's turn in the same call."
+  ],
+  "comms_feed": {
+    "title": "60 Control · Fire/EMS 15",
+    "talkgroups": [307],
+    "limit": 6,
+    "phrases": ["Port Chester", "Rye Brook", "PC dispatch", "Port Chester dispatch", "PCFD", "headquarters"]
+  },
   "_geo": [
     "Location suggestions: towns in this order first (then anything else); a town typed in the box wins.",
     "geo_town_aliases: words in the box (or a gazetteer municipality) -> the town."
