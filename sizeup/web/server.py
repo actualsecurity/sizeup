@@ -10,6 +10,7 @@ POST /api/talkgroup {"tg": 307, "record": bool?, "main": bool?}  per-talkgroup s
 POST /api/talkgroup-group {"group": "County Police", "record": bool?, "main": bool?}  a whole section
 POST /api/mode {"mode": ...}  one shared dongle: hand it to a channel or trunk-recorder (state "sdr")
 GET  /healthz
+GET  /cad                      the PCFD dispatch console (static/cad.html); its API is /api/cad/... (sizeup/cad/api.py)
 
 STATE = {
   "time": unix s,
@@ -33,6 +34,7 @@ from typing import Callable
 from urllib.parse import urlsplit
 
 STATIC_DIR = Path(__file__).parent / "static"
+MAX_CAD_BODY = 65536
 
 
 class Broadcaster:
@@ -75,7 +77,10 @@ class Broadcaster:
 def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | None],
                  close_incident: Callable[[str], bool], set_mode: Callable[[str], str | None] | None = None,
                  set_talkgroup: Callable[..., str | None] | None = None,
-                 set_talkgroup_group: Callable[..., str | None] | None = None, retranscribe=None):
+                 set_talkgroup_group: Callable[..., str | None] | None = None, retranscribe=None,
+                 cad=None, cad_b: Broadcaster | None = None):
+    """cad: a CadApi (sizeup/cad/api.py) and cad_b its own broadcaster (the console's state is
+    small and separate from the monitor's, so neither page carries the other's)."""
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -91,9 +96,16 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
             self.wfile.write(body)
 
         def do_GET(self) -> None:
-            path = urlsplit(self.path).path
+            url = urlsplit(self.path)
+            path = url.path
             if path in ("/", "/index.html"):
                 return self._static("index.html")
+            if path in ("/cad", "/cad.html") and cad is not None:
+                return self._static("cad.html")
+            if path == "/api/cad/stream" and cad_b is not None:
+                return self._stream(cad_b)
+            if path.startswith("/api/cad/") and cad is not None:
+                return self._send(*cad.get(path, url.query))
             if path.startswith("/static/"):
                 return self._static(path[len("/static/"):])
             if path == "/api/scene":
@@ -101,7 +113,7 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
             if path == "/api/state":
                 return self._send(200, b.latest()[1], "application/json")
             if path == "/api/stream":
-                return self._stream()
+                return self._stream(b)
             if path.startswith("/api/audio/") and path.endswith(".wav"):
                 wav = clip(path[len("/api/audio/"):-4])
                 return self._send(200, wav, "audio/wav") if wav else self._send(404, b"no such clip\n", "text/plain")
@@ -111,6 +123,14 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
 
         def do_POST(self) -> None:
             path = urlsplit(self.path).path
+            if path.startswith("/api/cad/") and cad is not None:
+                try:
+                    n = int(self.headers.get("Content-Length") or 0)
+                except ValueError:
+                    n = -1
+                if not 0 <= n <= MAX_CAD_BODY:
+                    return self._send(400, b'{"error":"bad or too large body (64 KB max)"}', "application/json")
+                return self._send(*cad.post(path, self.rfile.read(n)))
             if path == "/api/talkgroup" and set_talkgroup is not None:
                 try:
                     n = int(self.headers.get("Content-Length") or 0)
@@ -157,7 +177,7 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                                   "application/json")
             self._send(404, b"not found\n", "text/plain")
 
-        def _stream(self) -> None:
+        def _stream(self, b: Broadcaster) -> None:
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-store")
@@ -191,11 +211,12 @@ class WebServer:
                  set_mode: Callable[[str], str | None] | None = None,
                  set_talkgroup: Callable[..., str | None] | None = None,
                  set_talkgroup_group: Callable[..., str | None] | None = None,
-                 retranscribe: Callable[[list[str] | None], int] | None = None):
+                 retranscribe: Callable[[list[str] | None], int] | None = None, cad=None):
         self.broadcaster = Broadcaster(state_fn)
+        self.cad_broadcaster = Broadcaster(cad.cad.state) if cad is not None else None
         self.httpd = ThreadingHTTPServer((host, port), make_handler(
             json.dumps(scene, separators=(",", ":")).encode(), self.broadcaster, clip, close_incident, set_mode,
-            set_talkgroup, set_talkgroup_group, retranscribe))
+            set_talkgroup, set_talkgroup_group, retranscribe, cad, self.cad_broadcaster))
         self.httpd.daemon_threads = True
 
     @property
@@ -205,12 +226,18 @@ class WebServer:
 
     def serve_forever(self) -> None:
         self.broadcaster.start()
+        if self.cad_broadcaster:
+            self.cad_broadcaster.start()
         try:
             self.httpd.serve_forever(poll_interval=0.5)
         finally:
             self.broadcaster.stop()
+            if self.cad_broadcaster:
+                self.cad_broadcaster.stop()
             self.httpd.server_close()
 
     def shutdown(self) -> None:
         self.broadcaster.stop()
+        if self.cad_broadcaster:
+            self.cad_broadcaster.stop()
         threading.Thread(target=self.httpd.shutdown, daemon=True).start()

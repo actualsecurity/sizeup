@@ -85,3 +85,26 @@ audio_keep_hours = 12              # every WAV under captures/ (clips, skipped c
 home_lon = -73.6640
 home_lat = 41.0130
 home_zoom = 13.4
+
+[cad]
+# PCFD self-dispatch console (/cad). Incidents, units, run cards and the dispatch log live in one
+# SQLite file, outside captures/ (whose cleaner deletes old files).
+db = "state/cad.sqlite"
+department = "Port Chester Fire"   # first words of every dispatch, as said on the air
+roster_department = "Port Chester" # units seeded once from units.apparatus_file (this department's rows)
+                                   # plus its chief officers from units.callsigns; then edited in the app
+monitor_departments = ["Port Chester FD"]   # a 60 Control page for these -> a pending incident to accept
+
+[dispatch]
+# Alert tones before the voice: [hz, seconds] in order (two-tone sequential). UNVERIFIED placeholder:
+# the Port Chester FD pair from data/westchester_tones.csv (RadioReference wiki, not yet heard on the
+# air). Set to the tones PCFD members' pagers/radios actually alert on before transmit is ever enabled.
+tones = [[349.1, 1.0], [311.1, 3.0]]
+voice = "Samantha"                 # macOS `say -v` voice (`say -v '?'` lists them)
+rate = 0                           # words per minute (0 = the voice's own pace)
+repeat = 2                         # the voice part read this many times
+# Transmit stays OFF in this version: there is no radio interface yet (M2: a sound-card + PTT
+# interface into a PCFD radio, with the department's authorization). "Dispatch" logs what would
+# have gone out and plays it in the browser. true is refused at startup.
+transmit = false
+channels = ["FG1", "PC repeater"]  # labels on the dispatch log only (FG1, or the PC repeater as PCFD's paging channel)

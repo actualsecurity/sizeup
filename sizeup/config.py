@@ -65,6 +65,18 @@ class Config:
     keep_hours: float = 24.0          # pages, incidents, transcripts
     audio_keep_hours: float = 12.0    # every audio file under captures/ (clips, P25 calls, skipped clicks)
     home: tuple[float, float, float] = (-73.6640, 41.0130, 13.4)   # lon, lat, zoom
+    apparatus_path: str = ""          # the roster CSV actually found ("" = repo data/)
+    # CAD ([cad], [dispatch]): see sizeup/cad/
+    cad_db: str = ""                  # "" = in memory (tests); load() defaults to state/cad.sqlite
+    cad_department: str = "Port Chester Fire"           # first words of every dispatch, as said on the air
+    cad_roster_department: str = "Port Chester"         # whose apparatus the roster seeds
+    cad_monitor_departments: tuple[str, ...] = ("Port Chester FD",)   # monitor incidents that become pending ones
+    dispatch_tones: tuple[tuple[float, float], ...] = ((349.1, 1.0), (311.1, 3.0))   # (Hz, s) in order
+    dispatch_voice: str = "Samantha"  # macOS `say -v`
+    dispatch_rate: int = 0            # words per minute (0 = the voice's own)
+    dispatch_repeat: int = 2          # the voice read this many times
+    dispatch_transmit: bool = False   # M1: must stay false (no radio interface yet)
+    dispatch_channels: tuple[str, ...] = ("FG1", "PC repeater")   # labels on the log only, in M1
 
 
 def _take(d: dict, path: str, allowed: set[str]) -> dict:
@@ -81,7 +93,8 @@ def load(path: str | Path) -> Config:
         data = tomllib.loads(path.read_text())
     except tomllib.TOMLDecodeError as e:
         raise ConfigError(f"{path}: {e}") from e
-    _take(data, "config", {"station", "web", "radio", "tones", "stt", "p25", "mdc", "units", "storage", "map"})
+    _take(data, "config", {"station", "web", "radio", "tones", "stt", "p25", "mdc", "units", "storage", "map",
+                           "cad", "dispatch"})
     st = _take(data.get("station", {}), "station", {"id", "name"})
     web = _take(data.get("web", {}), "web", {"host", "port"})
     radio = _take(data.get("radio", {}), "radio", {"rtl_fm", "channels", "tones_file", "shared_device", "start_mode", "sdrs", "sdr_names", "sdr_ignore"})
@@ -140,6 +153,7 @@ def load(path: str | Path) -> Config:
     mdc = _take(data.get("mdc", {}), "mdc", {"aliases"})
     units = _take(data.get("units", {}), "units", {"departments", "apparatus_file", "callsigns"})
     unit_departments: dict[str, str] = {}
+    af_found = ""
     af = units.get("apparatus_file", "data/westchester_apparatus.csv")
     if af:
         af_path = Path(af) if Path(af).is_absolute() else (base / af)
@@ -147,6 +161,7 @@ def load(path: str | Path) -> Config:
             af_path = Path(__file__).resolve().parent.parent / af
         if af_path.is_file():
             import csv
+            af_found = str(af_path.resolve())
             rows = (ln for ln in af_path.read_text().splitlines() if ln.strip() and not ln.startswith("#"))
             for r in csv.DictReader(rows):
                 dep = HOME_DEPARTMENTS.get(r["department"], r["department"])
@@ -171,6 +186,21 @@ def load(path: str | Path) -> Config:
             unit_departments.setdefault(unit_callsigns[cs], dept_numbers[cs[:3]])
     mp = _take(data.get("map", {}), "map", {"home_lon", "home_lat", "home_zoom"})
     rel = lambda p: str((base / p).resolve()) if p and not Path(p).is_absolute() else p
+    cad = _take(data.get("cad", {}), "cad", {"db", "department", "roster_department", "monitor_departments"})
+    dsp = _take(data.get("dispatch", {}), "dispatch", {"tones", "voice", "rate", "repeat", "transmit", "channels"})
+    if dsp.get("transmit", False) is not False:
+        raise ConfigError("dispatch.transmit: must be false: this version has no radio interface (M2), "
+                          "so dispatches are logged and played locally only")
+    try:
+        d_tones = tuple((float(hz), float(sec)) for hz, sec in dsp.get("tones", [[349.1, 1.0], [311.1, 3.0]]))
+    except (TypeError, ValueError):
+        raise ConfigError("dispatch.tones: a list of [hz, seconds] pairs") from None
+    if any(not (50 <= hz <= 4000 and 0 < sec <= 10) for hz, sec in d_tones) or sum(s for _, s in d_tones) > 20:
+        raise ConfigError("dispatch.tones: each 50-4000 Hz for up to 10 s, 20 s in all")
+    d_repeat, d_rate = int(dsp.get("repeat", 2)), int(dsp.get("rate", 0))
+    if not 1 <= d_repeat <= 3 or not (d_rate == 0 or 80 <= d_rate <= 400):
+        raise ConfigError("dispatch.repeat: 1 to 3; dispatch.rate: 0 or 80 to 400 words per minute")
+    d_channels = tuple(str(c) for c in dsp.get("channels", ["FG1", "PC repeater"]))
     return Config(
         station_id=st.get("id", "pcfd"), station_name=st.get("name", "Port Chester FD"),
         host=web.get("host", "127.0.0.1"), port=int(web.get("port", 8090)),
@@ -192,4 +222,10 @@ def load(path: str | Path) -> Config:
         clips_dir=rel(storage.get("clips_dir", "captures/clips")), keep_hours=float(storage.get("keep_hours", 24)),
         audio_keep_hours=float(storage.get("audio_keep_hours", 12)),
         home=(float(mp.get("home_lon", -73.6640)), float(mp.get("home_lat", 41.0130)), float(mp.get("home_zoom", 13.4))),
+        apparatus_path=af_found,
+        cad_db=rel(cad.get("db", "state/cad.sqlite")), cad_department=str(cad.get("department", "Port Chester Fire")),
+        cad_roster_department=str(cad.get("roster_department", "Port Chester")),
+        cad_monitor_departments=tuple(str(x) for x in cad.get("monitor_departments", ["Port Chester FD"])),
+        dispatch_tones=d_tones, dispatch_voice=str(dsp.get("voice", "Samantha")), dispatch_rate=d_rate,
+        dispatch_repeat=d_repeat, dispatch_transmit=False, dispatch_channels=d_channels,
     )

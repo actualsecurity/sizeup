@@ -8,6 +8,7 @@
             or the voice half of a tones-only page sent as a separate transmission
     traffic channels (FG1)    --squelch--> transmission --STT--> traffic on the active incident
     P25 (trunk-recorder dir)  --call--> STT --> traffic on the active incident (unit IDs kept)
+    incident for Port Chester --> pending incident in the CAD (/cad, sizeup/cad/) for a person to accept
 """
 
 from __future__ import annotations
@@ -31,6 +32,8 @@ import numpy as np
 
 from sizeup.config import Config, ConfigError, load
 from sizeup import janitor
+from sizeup.cad import Cad
+from sizeup.cad.api import CadApi
 from sizeup.dispatch import parse
 from sizeup.incidents import IncidentStore, Traffic
 from sizeup.radio.fm import RATE, Channel, NfmReceiver, Segment, data_frames, speech_seconds
@@ -231,6 +234,8 @@ class App:
         self.p25 = (CallIngest(cfg.p25_dir, cfg.p25_talkgroups, self._call, {**cfg.unit_callsigns, **cfg.p25_aliases}, on_event=log,
                                name=P25_MODE)
                     if cfg.p25_dir else None)
+        # PCFD's own dispatch console: incidents, units, run cards (state/cad.sqlite).
+        self.cad = Cad.from_config(cfg, geocoder=self._geocode_text if self.gaz is not None else None, log=log)
 
     # -- geocoding ------------------------------------------------------------------------------
 
@@ -255,6 +260,15 @@ class App:
             return None
         return {"lat": m.lat, "lon": m.lon, "label": m.label, "kind": m.kind,
                 "confidence": round(float(m.confidence), 2)}
+
+    def _geocode_text(self, q: str) -> list[dict]:
+        """The CAD address box: every reading of what was typed, best first."""
+        try:
+            return [{k: getattr(m, k) for k in ("label", "lat", "lon", "kind", "municipality", "precision")}
+                    | {"confidence": round(float(m.confidence), 2)} for m in self.gaz.candidates(q)[:8]]
+        except Exception as e:
+            log(f"geocode error for {q!r}: {type(e).__name__}: {e}")
+            return []
 
     # -- persistence ----------------------------------------------------------------------------
 
@@ -519,6 +533,10 @@ class App:
         if inc:
             where = inc.geo["label"] if inc.geo else (inc.location or "location not found")
             log(f"INCIDENT {inc.incident_type} · {where} · {', '.join(inc.departments)}")
+            try:
+                self.cad.from_monitor(inc)
+            except Exception as e:  # the CAD must never stop the monitor
+                log(f"CAD: could not open a pending incident: {type(e).__name__}: {e}")
 
     def _dispatch(self, raw: str):
         d = parse(raw) if raw else None
@@ -901,10 +919,11 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     app = App(cfg).start()
     server = WebServer(cfg.host, cfg.port, app.scene(), app.state, app.clip, app.store.close, app.set_mode,
-                       app.set_talkgroup, app.set_talkgroup_group, app.retranscribe)
+                       app.set_talkgroup, app.set_talkgroup_group, app.retranscribe, cad=CadApi(app.cad))
     signal.signal(signal.SIGTERM, lambda *_: server.shutdown())
     log(f"sizeup: {cfg.station_name} · {len(cfg.channels)} channel(s)"
-        + (f" · P25 {cfg.p25_dir}" if cfg.p25_dir else "") + f" · {server.url}")
+        + (f" · P25 {cfg.p25_dir}" if cfg.p25_dir else "") + f" · {server.url} · CAD {server.url}cad"
+        + f" ({cfg.cad_db or 'in memory'}; transmit off)")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
