@@ -28,6 +28,7 @@ class ChannelCfg:
     device: str = ""           # dongle serial ("" = first found)
     gain_db: float | None = 40.0
     squelch_db: float = 10.0   # FM quieting needed to open
+    drop_db: float | None = None   # end a transmission this far under its own level (fm.NoiseSquelch)
 
 
 @dataclass(frozen=True)
@@ -132,11 +133,17 @@ def load(path: str | Path) -> Config:
         raise ConfigError("radio.sdrs: a serial is listed twice")
     channels = []
     for i, c in enumerate(radio.get("channels", [])):
-        _take(c, f"radio.channels[{i}]", {"label", "mhz", "kind", "device", "gain_db", "squelch_db"})
+        _take(c, f"radio.channels[{i}]", {"label", "mhz", "kind", "device", "gain_db", "squelch_db",
+                                                 "drop_db"})
         if c.get("kind", "traffic") not in ("paging", "traffic"):
             raise ConfigError(f"radio.channels[{i}].kind: 'paging' or 'traffic'")
-        channels.append(ChannelCfg(c["label"], float(c["mhz"]), c.get("kind", "traffic"), c.get("device", ""),
-                                   c.get("gain_db", 40.0), float(c.get("squelch_db", 10.0))))
+        kind = c.get("kind", "traffic")
+        # Simplex fireground: a weaker carrier can sit under ours (FG1 2026-10-07), so traffic channels
+        # end a transmission on a 10 dB drop. Paging stays off: a distant repeater fades (South 2).
+        drop = c.get("drop_db", 10.0 if kind == "traffic" else 0)
+        channels.append(ChannelCfg(c["label"], float(c["mhz"]), kind, c.get("device", ""),
+                                   c.get("gain_db", 40.0), float(c.get("squelch_db", 10.0)),
+                                   float(drop) if drop else None))
     tones, ours = [], set()
     tf = radio.get("tones_file", "data/westchester_tones.csv")
     if tf:

@@ -32,9 +32,9 @@ def voice_like(s):
     return 0.3 * sum(np.sin(k * ph) / k for k in range(1, 14)) * (0.4 + 0.6 * np.abs(np.sin(2 * np.pi * 2.5 * t)))
 
 
-def run_squelch(audio):
+def run_squelch(audio, **kw):
     clock = {"t": 1000.0}
-    sq = NoiseSquelch(clock=lambda: clock["t"])
+    sq = NoiseSquelch(clock=lambda: clock["t"], **kw)
     segs = []
     for i in range(0, len(audio) - FRAME + 1, FRAME):
         clock["t"] += FRAME / RATE
@@ -137,3 +137,67 @@ def test_long_page_with_quieting_dips_is_kept_whole():
     tx = np.concatenate([keyed(np.concatenate([tone(741.3, 1.0), tone(623.7, 3.0), voice_like(10.0)])), weak])
     segs = run_squelch(np.concatenate([hiss(3.0), tx, hiss(2.0)]))
     assert len(segs) == 1 and segs[0].end - segs[0].start > 40
+
+
+
+def mdc_burst(s=0.2):  # MDC-1200 PTT-ID: 1200 baud MSK, 1200/1800 Hz
+    bits = np.random.default_rng(5).integers(0, 2, int(1200 * s))
+    f = np.repeat(np.where(bits, 1200.0, 1800.0), RATE // 1200 + 1)[: int(RATE * s)]
+    return 0.6 * np.sin(2 * np.pi * np.cumsum(f) / RATE)
+
+
+def strong(audio):      # a PCFD portable nearby: ~45 dB quieting, no CTCSS (FG1 carries none)
+    return audio + 0.002 * rng.standard_normal(len(audio))
+
+
+def dead(s):
+    return np.zeros(int(RATE * s))
+
+
+def background(s):      # another, weaker carrier on the channel: ~26 dB quieting, nothing on it
+    return 0.02 * rng.standard_normal(int(RATE * s))
+
+
+def test_a_weaker_carrier_under_ours_does_not_hold_the_squelch_open():
+    # FG1 2026-10-07 17:17-17:21: short key-ups were logged as 21-28 s. PCFD radios quieted the
+    # receiver ~40 dB; something else on the frequency held it at 21-28 dB for 20-30 s afterwards.
+    audio = np.concatenate([hiss(3.0), strong(np.concatenate([dead(0.3), voice_like(2.0), mdc_burst(), dead(0.15)])),
+                            background(20.0),
+                            hiss(2.0), strong(voice_like(1.5)), hiss(2.0)])
+    segs = run_squelch(audio, drop_db=10)
+    assert len(segs) == 2                                  # the two key-ups; the background is not one
+    assert 2.0 < segs[0].end - segs[0].start < 2.9 and len(segs[0].bursts) == 1
+    assert 1.2 < segs[1].end - segs[1].start < 2.0
+    # Without drop_db (paging channels) the old behaviour stands: one long transmission.
+    assert run_squelch(audio)[0].end - run_squelch(audio)[0].start > 20
+
+
+def test_a_key_up_over_a_background_carrier_is_its_own_transmission():
+    # FG1 17:19:39: the squelch opened on the background, and two real key-ups (with their MDC IDs)
+    # 10 s and 17 s in were buried in one 21 s "transmission".
+    ku = strong(np.concatenate([dead(0.4), mdc_burst(), dead(0.2), voice_like(2.0), mdc_burst(), dead(0.15)]))
+    segs = run_squelch(np.concatenate([hiss(3.0), background(6.0), ku, background(5.0), ku, background(3.0),
+                                       hiss(2.0)]), drop_db=10)
+    assert len(segs) == 2                                  # the background alone (no ID) is not a key-up
+    for s in segs:
+        assert 1.8 < s.end - s.start < 2.6 and len(s.bursts) == 2      # voice only: the IDs are cut off
+
+
+def test_a_background_carrier_alone_does_not_hold_the_squelch_open():
+    # FG1 17:17 and 17:20: the background opened the squelch by itself (no PTT-ID, nothing said) and
+    # held RX lit for 23-28 s. After 4 s it's taken as the background; a key-up over it still opens.
+    ku = strong(np.concatenate([dead(0.4), mdc_burst(), dead(0.2), voice_like(1.5), mdc_burst(), dead(0.15)]))
+    clock, sq, lit, segs = {"t": 0.0}, None, 0, []
+    sq = NoiseSquelch(clock=lambda: clock["t"], drop_db=10)
+    audio = np.concatenate([hiss(3.0), background(12.0), ku, background(8.0), hiss(2.0)])
+    for i in range(0, len(audio) - FRAME + 1, FRAME):
+        clock["t"] += FRAME / RATE
+        if (s := sq.feed(audio[i:i + FRAME])) is not None:
+            segs.append(s)
+        lit += sq.open
+    assert len(segs) == 1 and len(segs[0].bursts) == 2
+    assert lit * FRAME / RATE < 4.5 + 3.0           # 4 s to learn the background, then the key-up only
+    # A radio without an ID that talks is kept, however long.
+    talk = np.concatenate([np.concatenate([dead(0.3), voice_like(1.3)]) for _ in range(5)])  # pauses between words
+    segs = run_squelch(np.concatenate([hiss(3.0), strong(talk), hiss(2.0)]), drop_db=10)
+    assert len(segs) == 1 and segs[0].end - segs[0].start > 7.5

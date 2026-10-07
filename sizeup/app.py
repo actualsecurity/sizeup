@@ -222,7 +222,8 @@ class App:
                 self.tg.seed(t.talkgroup, t.end)
         self._last_tones_only: Page | None = None
         self.receivers = [NfmReceiver(cfg.rtl_fm, c.device, c.gain_db, Channel(c.mhz, c.label),
-                                      self._segment, log, open_db=c.squelch_db) for c in cfg.channels]
+                                      self._segment, log, open_db=c.squelch_db, drop_db=c.drop_db)
+                          for c in cfg.channels]
         self.recorder = (TrunkRecorder(cfg.p25_recorder, cfg.p25_recorder_dir or ".", log)
                          if cfg.p25_recorder else None)
         # Switchable dongles ([radio] sdrs, by exact serial): each runs one mode at a time, picked in
@@ -823,7 +824,7 @@ class App:
     def _fresh_receiver(self, old: NfmReceiver, serial: str) -> NfmReceiver:
         c = next(c for c in self.cfg.channels if c.label == old.channel.label)
         r = NfmReceiver(self.cfg.rtl_fm, self._dongle(serial), c.gain_db, Channel(c.mhz, c.label),
-                        self._segment, log, open_db=c.squelch_db)
+                        self._segment, log, open_db=c.squelch_db, drop_db=c.drop_db)
         self.receivers[self.receivers.index(old)] = r
         return r
 

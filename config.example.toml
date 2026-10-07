@@ -35,6 +35,9 @@ mhz = 453.0375
 kind = "traffic"                   # transcribed and attached to the active incident
 device = "fire-fg"
 gain_db = 40
+drop_db = 10                       # end a transmission when quieting falls this far under its own
+                                   # level (another, weaker carrier on the channel); 0 = off.
+                                   # Default 10 for traffic channels, off for paging.
 
 # Two-tone codes. UNVERIFIED until heard on the air: every decoded pair is shown with its page
 # so the real codes can be confirmed and named here. `ours = true` = opens incidents.
