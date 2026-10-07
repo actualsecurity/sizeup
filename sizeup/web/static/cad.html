@@ -196,6 +196,11 @@
           <button id="r-tickall" type="button" title="Tick every available PCFD apparatus (not Rye Brook's, mutual aid, PD or EMS)">Tick all available PCFD apparatus</button>
           <button id="r-joint" type="button" hidden title="Tick these joint-response units if they are available">Add Rye Brook</button>
         </div>
+        <label class="remarks-box" title="Said after the call type: &quot;Reported: ...&quot;. Filled in from the event's remarks; edit it before preview or dispatch. Empty: nothing said.">
+          <span class="dim">Dispatch remarks (spoken)</span>
+          <textarea id="r-remarks" rows="2" placeholder="two vehicles, one on its side, fluid leaking"></textarea>
+          <span id="r-remarks-note" class="dim small"></span>
+        </label>
         <div class="row">
           <label class="inline check" title="Say the department response phrase instead of each unit's name"><input id="r-full" type="checkbox"> <span id="r-full-label">Full department response</span></label>
           <label class="inline"><span class="dim">Channel</span> <select id="r-channel"></select></label>
@@ -213,6 +218,7 @@
           <label>New type <span class="dim small">(optional)</span> <select id="u-type"></select></label>
           <label>New subtype <select id="u-subtype"></select></label>
           <label class="span2">New information <input id="u-info" type="text" maxlength="300" placeholder="smoke in the structure"></label>
+          <label class="span2">Remarks (spoken, optional) <input id="u-remarks" type="text" maxlength="500" placeholder="said as &quot;Reported: ...&quot;"></label>
           <div class="span2 row">
             <label class="inline check"><input id="u-full" type="checkbox"> <span id="u-full-label">Full department response</span></label>
             <span class="dim small">Units ticked above go with it.</span>
@@ -227,6 +233,7 @@
         <div id="r-preview-box" class="preview" hidden>
           <div id="r-preview-title" class="dim"></div>
           <div id="r-preview-text" class="ptext"></div>
+          <div id="r-preview-tones" class="dim small"></div>
           <audio id="r-audio" controls preload="auto"></audio>
           <div id="r-audio-note" class="dim"></div>
         </div>

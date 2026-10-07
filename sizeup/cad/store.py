@@ -116,7 +116,7 @@ CREATE TABLE events (
   incident_id INTEGER REFERENCES incidents(id),   -- NULL: a unit status change off any incident
   unit_id INTEGER REFERENCES units(id),
   at REAL NOT NULL,
-  kind TEXT NOT NULL,                   -- created | system | accepted | dismissed | note | dispatch | attach | status | closed | edit
+  kind TEXT NOT NULL,                   -- created | system | accepted | dismissed | note | dispatch | remarks | tones | attach | status | closed | edit
   text TEXT NOT NULL,
   operator TEXT NOT NULL DEFAULT '',
   units TEXT NOT NULL DEFAULT ''        -- a note's unit tags ("E63,L31": who said it), typed with the unit autocomplete
@@ -669,7 +669,10 @@ class Store:
     DISPATCH_KINDS = {"dispatch": "Dispatch", "add-on": "Add-on dispatch", "upgrade": "Upgrade"}
 
     def log_dispatch(self, iid: int, *, operator: str, text: str, unit_ids: list[int], audio_path: str,
-                     audio_note: str, transmitted: bool, channel: str, tx_note: str, kind: str = "dispatch") -> int:
+                     audio_note: str, transmitted: bool, channel: str, tx_note: str, kind: str = "dispatch",
+                     remarks: str = "", tones: str = "") -> int:
+        """The dispatch row and its chronology entry, then (same time, right after it: the dispatch's,
+        see _attach) "Dispatch remarks: ..." and "Tones: Port Chester + Rye Brook ..." when given."""
         now = self.clock()
         with self.tx() as db:
             cur = db.execute("INSERT INTO dispatches (incident_id, at, operator, kind, text, unit_ids, audio_path, "
@@ -678,6 +681,9 @@ class Store:
                               int(transmitted), channel, tx_note))
             how = f"transmitted on {channel}" if transmitted else f"not transmitted ({tx_note})"
             self._event(db, iid, "dispatch", f"{self.DISPATCH_KINDS.get(kind, kind)}, {how}: {text}", operator, at=now)
+            for k, label, v in (("remarks", "Dispatch remarks", remarks), ("tones", "Tones", tones)):
+                if v:
+                    self._event(db, iid, k, f"{label}: {v}", operator, at=now)
             return cur.lastrowid
 
     def dispatch_row(self, did: int) -> dict | None:
@@ -693,7 +699,7 @@ class Store:
                          f"WHERE a.incident_id IN ({marks}) ORDER BY a.id", ids)
         events = self.q(f"SELECT * FROM events WHERE incident_id IN ({marks}) ORDER BY at, id", ids)
         disp = self.q(f"SELECT id, incident_id, at, operator, kind, text, unit_ids, audio_path != '' AS has_audio, audio_note, "
-                      f"transmitted, channel, tx_note FROM dispatches WHERE incident_id IN ({marks}) ORDER BY at", ids)
+                      f"transmitted, channel, tx_note FROM dispatches WHERE incident_id IN ({marks}) ORDER BY at, id", ids)
         by = {r["id"]: dict(r, emergency=bool(r["emergency"]), assignments=[], events=[], dispatches=[]) for r in rows}
         for a in assigns:
             a["next"] = [] if a["cleared_at"] else list(self.lists.next_statuses(a["status"]))   # the row's buttons
@@ -703,7 +709,14 @@ class Store:
         for d in disp:
             d["transmitted"], d["has_audio"] = bool(d["transmitted"]), bool(d["has_audio"])
             d["unit_ids"] = json.loads(d["unit_ids"])
+            d["remarks"] = d["tones"] = ""
             by[d["incident_id"]]["dispatches"].append(d)
+        for r in by.values():
+            n = -1                                       # remarks / tones follow their dispatch's entry
+            for e in r["events"]:
+                n += e["kind"] == "dispatch"
+                if e["kind"] in ("remarks", "tones") and 0 <= n < len(r["dispatches"]):
+                    r["dispatches"][n][e["kind"]] = e["text"].split(": ", 1)[-1]
         for r in by.values():
             r["events"] = r["events"][-max_events:]
             r["town"] = self.lists.event_town(r)

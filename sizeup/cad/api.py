@@ -22,9 +22,11 @@ POST /api/cad/incident/<id>/close         {disposition, operator?}  units cleare
 POST /api/cad/incident/<id>/note          {text, units?: ["E63"], operator?}   units: the unit tags (who said it)
 GET  /api/cad/incident/<id>/units?q=e6    unit autocomplete: on the event first, then fire units, then the rest
 POST /api/cad/incident/<id>/recommend     {type?, subtype?}      -> {units, unfilled, already, card, note}
-POST /api/cad/incident/<id>/preview       {unit_ids, full?}      -> {text, kind, audio_url, audio_note}
-POST /api/cad/incident/<id>/dispatch      {unit_ids, operator, channel?, full?} -> {dispatch_id, text, audio_url, ...}
-POST /api/cad/incident/<id>/upgrade       {type?, subtype?, info?, unit_ids?, full?, operator, channel?, preview?}
+POST /api/cad/incident/<id>/preview       {unit_ids, full?, remarks?} -> {text, kind, audio_url, audio_note, remarks,
+                                                                    tones, tone_warnings}
+POST /api/cad/incident/<id>/dispatch      {unit_ids, operator, channel?, full?, remarks?} -> {dispatch_id, text, ...}
+                                          remarks: said as "Reported: ..." (at most 500 characters)
+POST /api/cad/incident/<id>/upgrade       {type?, subtype?, info?, remarks?, unit_ids?, full?, operator, channel?, preview?}
 POST /api/cad/incident/<id>/attach        {unit_ids, operator?}  units on a non-emergency event, no dispatch
 POST /api/cad/unit/<id>/status            {status, operator?, note?}
 POST /api/cad/runcards                    {type (TYPE or TYPE/SUBTYPE), slots, spoken?, rename_from?}   add / edit one

@@ -149,6 +149,8 @@ label.check { cursor: pointer; }
 .preview { margin-top: 0.6em; padding: 0.5em 0.7em; border: 1px dashed rgba(255, 255, 255, 0.25); border-radius: 0.4em; display: flex; flex-direction: column; gap: 0.35em; }
 .ptext { font-size: 1.05em; }
 .preview audio { width: 100%; }
+.remarks-box { display: flex; flex-direction: column; gap: 0.2em; margin: 0.4em 0; }
+.remarks-box textarea { width: 100%; box-sizing: border-box; }
 .notx { color: var(--warn); font-weight: 700; }
 .txd { color: var(--err); font-weight: 700; }
 #d-dispatches .row { flex-wrap: nowrap; align-items: flex-start; }

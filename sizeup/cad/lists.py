@@ -20,7 +20,9 @@ shows). A new export can replace the file without a code change:
                                      (Rye Brook): direct units, picked by kind after PCFD's own, first
                                      on an event in that town
     spoken                           TYPE, TYPE/SUBTYPE or */SUBTYPE -> as the dispatch voice says it
-    dispatch_wording                 the dispatch as templates (new / add-on / upgrade, full response)
+    dispatch_wording                 the dispatch as templates (new / add-on / upgrade, full response,
+                                     remarks, lead-in: "Port Chester and Rye Brook Fire" when theirs go)
+    dispatch_tones                   joint town -> its alert tones (null: not known, PCFD's are played)
     run_cards                        the default cards seeded once into the database
     geo_town_order, geo_town_aliases Location suggestions: which towns come first
 
@@ -76,6 +78,8 @@ class Lists:
     already_statuses: tuple[str, ...] = ()                 # add-on: units on the event in these are said
     full_response_kinds: tuple[str, ...] = ()              # "Tick all available PCFD apparatus"
     status_flow: dict = field(default_factory=dict)        # status | "*" -> (next statuses), the incident's unit buttons
+    lead_in_joint_only: dict = field(default_factory=dict) # town -> the lead-in when only its units go
+    dispatch_tones: dict = field(default_factory=dict)     # joint town -> [(hz, s), ...] | None (not known yet)
     path: str = ""
     _names: dict[str, dict[str, str]] = field(default_factory=dict, repr=False)
 
@@ -138,16 +142,21 @@ class Lists:
         self.check_type(typ, sub)
         return typ, sub
 
-    def phrase(self, typ: str, subtype: str = "") -> str:
-        """As the dispatch voice says it: 'a commercial fire alarm'."""
-        p = ((self.spoken.get(key(typ, subtype)) or self.spoken.get(f"*/{subtype}")) if subtype else None) \
-            or self.spoken.get(typ)
+    def phrase(self, typ: str, subtype: str = "", base: str = "") -> str:
+        """As the dispatch voice says it: 'a commercial fire alarm'. TYPE/SUBTYPE, then */SUBTYPE, then
+        TYPE; in a subtype's phrase {type} is the type's ('{type} with multiple injuries' -> 'a motor
+        vehicle accident with multiple injuries'). base: the type's phrase from elsewhere (a run card)."""
+        def generic(t: str) -> str:
+            return ("an " if t[:1] in "aeiou" else "a ") + t
+        sp = ((self.spoken.get(key(typ, subtype)) or self.spoken.get(f"*/{subtype}")) if subtype else None)
+        if sp:
+            return sp.replace("{type}", base or self.spoken.get(typ) or generic(self.type_label(typ).lower()))
+        p = base or self.spoken.get(typ)
         if p:
             return p
         if not typ:
             return "a call for service"
-        t = self.type_label(typ, subtype).replace(" / ", ", ").lower()
-        return ("an " if t[:1] in "aeiou" else "a ") + t
+        return generic(self.type_label(typ, subtype).replace(" / ", ", ").lower())
 
     def is_emergency(self, typ: str, subtype: str = "") -> bool:
         """TYPE/SUBTYPE, then */SUBTYPE, then TYPE; not listed = emergency."""
@@ -400,6 +409,8 @@ def load(path: str | Path | None = None) -> Lists:
             check_key(k, "spoken")
         if not isinstance(v, str) or not v.strip():
             raise ListsError(f"{where}: spoken[{k!r}]: text")
+        if "{" in v.replace("{type}", "") or "}" in v.replace("{type}", "") or ("{type}" in v and "/" not in k):
+            raise ListsError(f"{where}: spoken[{k!r}]: the only placeholder is {{type}}, in a subtype's phrase")
 
     cards = d.get("run_cards") or []
     for i, c in enumerate(cards):
@@ -416,7 +427,7 @@ def load(path: str | Path | None = None) -> Lists:
     dw = d.get("dispatch_wording") or {}
     wording = {}
     dummy = dict.fromkeys(("department", "units", "location", "type", "type_bare", "already", "info", "change",
-                           "respond", "time", "full", "Full", "status"), "x")
+                           "respond", "time", "full", "Full", "status", "remarks", "joint"), "x")
     for k, v in dw.items():
         if k in WORDING:
             if not isinstance(v, str) or not v.strip():
@@ -457,6 +468,18 @@ def load(path: str | Path | None = None) -> Lists:
         tag = str(j.get("tag") or "".join(w[0] for w in str(town).split()).upper())
         joint[str(town)] = {"tag": tag, "units": codes, "quick_add": quick}
 
+    only = dw.get("lead_in_joint_only") or {}
+    if not isinstance(only, dict) or not all(t in joint and isinstance(v, str) and v.strip() for t, v in only.items()):
+        raise ListsError(f"{where}: dispatch_wording.lead_in_joint_only: joint_response town -> text")
+    tones = {}
+    for town, t in (d.get("dispatch_tones") or {}).items():
+        ok = t is None or (isinstance(t, list) and 0 < len(t) <= 8 and all(
+            isinstance(x, list) and len(x) == 2 and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in x)
+            and 100 <= x[0] <= 4000 and 0 < x[1] <= 10 for x in t))
+        if town not in joint or not ok:
+            raise ListsError(f"{where}: dispatch_tones[{town!r}]: a joint_response town -> null or [[hz, seconds], ...]")
+        tones[town] = [tuple(float(v) for v in x) for x in t] if t else None
+
     order = tuple(str(t) for t in d.get("geo_town_order") or [])
     aliases = {str(k).lower(): str(v) for k, v in (d.get("geo_town_aliases") or {}).items()}
     for t in order:
@@ -469,4 +492,5 @@ def load(path: str | Path | None = None) -> Lists:
                  geo_town_order=order, geo_town_aliases=aliases, unit_event_cell=dict(d.get("unit_event_cell") or {}),
                  wording=dict(WORDING, **wording), already_statuses=already, joint_response=joint, full_response_kinds=fr_kinds,
                  status_flow=flow,
+                 lead_in_joint_only={str(t): str(v) for t, v in only.items()}, dispatch_tones=tones,
                  path=str(path))

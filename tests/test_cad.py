@@ -527,8 +527,9 @@ def test_service_dispatch_add_on_and_upgrade():
     pv = cad.upgrade(iid, dict(body, preview=True))
     assert cad.store.incident(iid)["type"] == "ALARM"                   # a preview changes nothing
     up = cad.upgrade(iid, body)
-    assert pv["text"] == up["text"] == ("Port Chester Fire, upgrade on your last alarm, 169 North Main Street. Smoke in "
-                                        "the structure. Now a structure fire, full department response. Time out 15:20.")
+    assert pv["text"] == up["text"] == ("Port Chester and Rye Brook Fire, upgrade on your last alarm, 169 North Main "   # E14, L30 go
+                                        "Street. Smoke in the structure. Now a structure fire, full department response. "
+                                        "Time out 15:20.")
     inc = cad.store.full(iid)
     assert (inc["type"], inc["subtype"]) == ("STRU", "") and [d["kind"] for d in inc["dispatches"]] == ["dispatch", "add-on", "upgrade"]
     t = texts(cad, iid)
@@ -537,6 +538,219 @@ def test_service_dispatch_add_on_and_upgrade():
     fresh = cad.create({"type": "STRU"})["id"]
     with pytest.raises(CadError, match="dispatch it first"):
         cad.upgrade(fresh, {"info": "x", "operator": "JD"})
+
+
+# -- subtype detail, dispatch remarks, the lead-in and each department's tones ---------------------------------
+
+def test_subtype_detail_is_always_said():
+    L = lists.load()
+    assert L.phrase("MVA", "MULTINJU") == "a motor vehicle accident with multiple injuries"
+    assert (L.phrase("MVA", "INJURIES"), L.phrase("MVA", "NOINJ")) == (
+        "a motor vehicle accident with injuries", "a motor vehicle accident, no injuries")
+    assert L.phrase("MVA", "EXTRI") == "a motor vehicle accident with entrapment"      # TYPE/SUBTYPE wins
+    assert (L.phrase("MVF", "CAR"), L.phrase("ALARM", "SPRINK"), L.phrase("ALARM", "TROUB")) == (
+        "a car fire", "a sprinkler alarm", "a fire alarm, trouble signal")
+    assert L.phrase("HAZARD", "TREERD") == "a hazardous condition, tree down in the road"
+    assert L.phrase("SERVICE", "WATER") == "a service call, water condition" and L.phrase("RESCUE", "WATER") == "a water rescue"
+    assert L.phrase("HAZARD", "CO-RESD") == "a residential carbon monoxide alarm"
+    # Unconfirmed codes have no phrase: the type's is said.
+    for code in ("ECHO", "AIR", "MULTI", "NEXT", "CAD"):
+        assert L.phrase("ALARM", code) == "a fire alarm" and f"*/{code}" not in L.spoken
+    for code in ("INJURIES", "MULTINJU", "NOINJ", "EXTRI", "CAR", "TRUCK", "BOAT", "WIRES", "TREE", "TREERD", "GAS",
+                 "INSIDE", "OUTSIDE", "SPRINK", "ELEVATOR", "LIFT", "WATER", "ANIMAL", "APPLIANC", "HEAT", "LOST",
+                 "VEHICLE", "WEATHER", "STRUCTURAL", "COMM", "RESD", "TROUB", "CO-COMM", "CO-RESD"):
+        assert f"*/{code}" in L.spoken, code
+    # A type with no phrase of its own: its name stands in once.
+    assert L.phrase("DRILL", "MULTINJU") == "a drill with multiple injuries"
+    # A run card's phrase for the type stands for the type's; the subtype is still said.
+    cad = make_cad()
+    cad.save_run_card({"type": "MVA", "spoken": "an MVA", "slots": [{"kind": "engine", "count": 1}]})
+    assert cad._phrase("MVA", "MULTINJU") == "an MVA with multiple injuries" and cad._phrase("MVA", "") == "an MVA"
+    with pytest.raises(lists.ListsError, match="placeholder"):
+        tmp = Path(__import__("tempfile").mkdtemp())
+        lists.load(write_lists(tmp, spoken={"MVA": "{type} crash"}))
+
+
+def test_remarks_cleaned_for_speech():
+    c = dispatcher.clean_remarks
+    assert c("  two vehicles,\n one on its side   fluid leaking ") == "two vehicles, one on its side fluid leaking."
+    assert c("pt trapped w/ head injury, car vs pole & tree") == "pt trapped with head injury, car versus pole and tree."
+    assert c("2 cars W/O injuries") == "2 cars without injuries."
+    assert c("smoke showing!") == "smoke showing!" and c("caller says,") == "caller says." and c("   ") == ""
+    assert c("ave w/b and 1/2 ton truck") == "ave w/b and 1/2 ton truck."          # not shorthand: left alone
+
+
+def test_remarks_wording_for_each_dispatch_kind():
+    inc = {"address": "209 Westchester Ave, Port Chester", "cross_street": "Pearl St"}
+    kw = dict(department="Port Chester Fire", incident=inc, at=local(2026, 10, 7, 15, 13),
+              phrase="a motor vehicle accident with multiple injuries")
+    r = "two vehicles, one on its side,  fluid leaking"
+    assert dispatcher.compose("new", units=["Engine 60", "Rescue 40"], remarks=r, **kw) == (
+        "Port Chester Fire, Engine 60, Rescue 40, respond to 209 Westchester Avenue, cross of Pearl Street, for a motor "
+        "vehicle accident with multiple injuries. Reported: two vehicles, one on its side, fluid leaking. Time out 15:13.")
+    assert dispatcher.compose("new", units=["Engine 60"], **kw) == (
+        "Port Chester Fire, Engine 60, respond to 209 Westchester Avenue, cross of Pearl Street, for a motor vehicle "
+        "accident with multiple injuries. Time out 15:13.")
+    assert dispatcher.compose("new", units=["Engine 60"], full=True, remarks="people trapped", **kw).endswith(
+        "full department response, respond to 209 Westchester Avenue, cross of Pearl Street, for a motor vehicle "
+        "accident with multiple injuries. Reported: people trapped. Time out 15:13.")
+    assert dispatcher.compose("new", units=["Engine 60"], remarks="car fire", **dict(kw, incident={})) == (
+        "Port Chester Fire, Engine 60, respond for a motor vehicle accident with multiple injuries. Reported: car fire. "
+        "Time out 15:13.")
+    assert dispatcher.compose("add_on", units=["Engine 61"], already=[("responding", ["Engine 60"])], remarks=r, **kw) == (
+        "Port Chester Fire, Engine 61, added to the assignment. Engine 60 responding. 209 Westchester Avenue, cross of "
+        "Pearl Street, motor vehicle accident with multiple injuries. Reported: two vehicles, one on its side, fluid "
+        "leaking. Time out 15:13.")
+    up = dict(kw, info="car on fire")
+    assert dispatcher.compose("upgrade", units=[], **up) == (
+        "Port Chester Fire, upgrade on your last alarm, 209 Westchester Avenue, cross of Pearl Street. Car on fire. "
+        "Time out 15:13.")
+    assert dispatcher.compose("upgrade", units=["Engine 62"], new_phrase="a vehicle fire", remarks="exposure to a house",
+                              **up) == (
+        "Port Chester Fire, upgrade on your last alarm, 209 Westchester Avenue, cross of Pearl Street. Car on fire. "
+        "Now a vehicle fire. Engine 62, respond. Reported: exposure to a house. Time out 15:13.")
+
+
+def test_remarks_lead_in_is_the_data_files():
+    kw = dict(department="Port Chester Fire", incident={"address": "1 King St"}, units=["Engine 60"], phrase="a brush fire",
+              at=local(2026, 10, 7, 15, 13), remarks="near the tracks")
+    assert lists.load().wording["remarks"] == "Reported: {remarks}"
+    w = dict(lists.load().wording, remarks="Caller reports {remarks}")
+    assert dispatcher.compose("new", wording=w, **kw) == (
+        "Port Chester Fire, Engine 60, respond to 1 King Street, for a brush fire. Caller reports near the tracks. "
+        "Time out 15:13.")
+    # A template written before remarks existed still says them, before the time out.
+    w = dict(w, new="{department}, {units}, respond to {location}, for {type}. Time out {time}.")
+    assert dispatcher.compose("new", wording=w, **kw).endswith("brush fire. Caller reports near the tracks. Time out 15:13.")
+    with pytest.raises(lists.ListsError, match="placeholder"):
+        d = json.loads(DATA.read_text())
+        tmp = Path(__import__("tempfile").mkdtemp())
+        lists.load(write_lists(tmp, dispatch_wording=dict(d["dispatch_wording"], remarks="Reported: {text}")))
+
+
+def test_service_remarks_stored_shown_and_logged(monkeypatch):
+    monkeypatch.setattr(shutil, "which", lambda name: None)              # text only: no `say` needed
+    clock = Clock(local(2026, 10, 7, 15, 13))
+    cad = make_cad(clock=clock)
+    iid = cad.create({"type": "MVA", "subtype": "MULTINJU", "address": "209 Westchester Ave", "cross_street": "Pearl St",
+                      "remarks": "two vehicles, one on its side"})["id"]
+    body = {"unit_ids": [uid(cad, "E60"), uid(cad, "R40")], "remarks": " two vehicles,  one on its side, fluid leaking "}
+    pv = cad.preview(iid, body)
+    d = cad.dispatch(iid, dict(body, operator="JD"))
+    want = ("Port Chester Fire, Engine 60, Rescue 40, respond to 209 Westchester Avenue, cross of Pearl Street, for a "
+            "motor vehicle accident with multiple injuries. Reported: two vehicles, one on its side, fluid leaking. "
+            "Time out 15:13.")
+    assert pv["text"] == d["text"] == want and pv["remarks"] == d["remarks"] == "two vehicles, one on its side, fluid leaking."
+    clock.t += 60
+    add = cad.dispatch(iid, {"unit_ids": [uid(cad, "E61")], "operator": "JD", "remarks": "w/ fluid on the road"})
+    assert add["text"].endswith("motor vehicle accident with multiple injuries. Reported: with fluid on the road. Time out 15:14.")
+    clock.t += 60
+    up = cad.upgrade(iid, {"info": "one trapped", "unit_ids": [uid(cad, "L31")], "operator": "JD"})
+    assert "Reported" not in up["text"] and up["remarks"] == ""
+    up2 = cad.upgrade(iid, {"remarks": "second patient", "operator": "JD"})
+    assert up2["text"].endswith("upgrade on your last alarm, 209 Westchester Avenue, cross of Pearl Street. Reported: "
+                                "second patient. Time out 15:15.")
+    full = cad.store.full(iid)
+    assert [(x["kind"], x["remarks"]) for x in full["dispatches"]] == [
+        ("dispatch", "two vehicles, one on its side, fluid leaking."), ("add-on", "with fluid on the road."),
+        ("upgrade", ""), ("upgrade", "second patient.")]
+    assert all(x["tones"] == "Port Chester" for x in full["dispatches"])
+    t = texts(cad, iid)
+    assert t.count("Dispatch remarks: two vehicles, one on its side, fluid leaking.") == 1
+    assert "Dispatch remarks: with fluid on the road." in t and "Dispatch remarks: second patient." in t
+    assert sum(x.startswith("Dispatch remarks:") for x in t) == 3
+    assert t.index(f"Dispatch, not transmitted ({d['detail']}): {want}") + 1 == t.index(
+        "Dispatch remarks: two vehicles, one on its side, fluid leaking.")
+    # No remarks, no sentence.
+    other = cad.create({"type": "BRUSH", "address": "1 King St"})["id"]
+    assert "Reported" not in cad.dispatch(other, {"unit_ids": [uid(cad, "E62")], "operator": "JD", "remarks": "  "})["text"]
+    assert cad.store.full(other)["dispatches"][0]["remarks"] == ""
+    with pytest.raises(CadError, match="remarks: at most 500 characters"):
+        cad.preview(iid, {"unit_ids": [uid(cad, "E63")], "remarks": "x" * 501})
+
+
+def lead(cad, iid, codes, **body):
+    return cad.preview(iid, dict(body, unit_ids=[uid(cad, c) for c in codes]))
+
+
+def test_lead_in_says_rye_brook_when_their_units_go(monkeypatch):
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    cad = make_cad(clock=Clock(local(2026, 10, 7, 15, 13)))
+    iid = cad.create({"type": "STRU", "address": "122 South Regent St"})["id"]
+    assert lead(cad, iid, ["E63"])["text"].startswith("Port Chester Fire, Engine 63, respond to 122 South Regent Street")
+    assert lead(cad, iid, ["E63", "L30"])["text"].startswith(
+        "Port Chester and Rye Brook Fire, Engine 63, Ladder 30, respond to 122 South Regent Street")
+    assert lead(cad, iid, ["E14", "L30"])["text"].startswith("Rye Brook Fire, Engine 14, Ladder 30, respond to 122 South")
+    assert lead(cad, iid, ["E14"], full=True)["text"].startswith(
+        "Port Chester and Rye Brook Fire, full department response, respond")
+    # Add-on: what's on the assignment counts too.
+    cad.dispatch(iid, {"unit_ids": [uid(cad, "E60"), uid(cad, "L30")], "operator": "JD"})
+    assert lead(cad, iid, ["E61"])["text"].startswith("Port Chester and Rye Brook Fire, Engine 61, added to the assignment")
+    rb = cad.create({"type": "BRUSH", "address": "940 King St, Rye Brook"})["id"]
+    first = cad.dispatch(rb, {"unit_ids": [uid(cad, "E14")], "operator": "JD"})
+    assert first["text"].startswith("Rye Brook Fire, Engine 14, respond to 940 King Street, Rye Brook, for a brush fire.")
+    assert lead(cad, rb, ["U42"])["text"].startswith("Rye Brook Fire, Utility 42, added to the assignment.")
+    assert lead(cad, rb, ["E62"])["text"].startswith("Port Chester and Rye Brook Fire, Engine 62, added to the assignment.")
+    # Full department response on an event Rye Brook is already on.
+    up = cad.upgrade(rb, {"full": True, "preview": True})
+    assert up["text"].startswith("Port Chester and Rye Brook Fire, upgrade on your last alarm") and "Full department" in up["text"]
+    # The lead-in is logged as part of the dispatch text.
+    assert any(t.startswith("Dispatch, not transmitted") and ": Rye Brook Fire, Engine 14" in t for t in texts(cad, rb))
+    w = dispatcher.lead_in
+    assert w("Port Chester Fire", []) == "Port Chester Fire" and w("Port Chester Fire", ["Rye Brook"], own=False) == (
+        "Port Chester and Rye Brook Fire")                                # no joint_only text: the joint lead-in
+
+
+PC = [(349.1, 1.0), (311.1, 3.0)]
+
+
+def test_tone_plan_by_department(monkeypatch):
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    cad = make_cad(clock=Clock(local(2026, 10, 7, 15, 13)))
+    iid = cad.create({"type": "STRU", "address": "122 South Regent St"})["id"]
+    p = cad._plan(cad.store.incident(iid), [by_name(cad, "E63")], "new", False)[1]
+    assert p == {"groups": [PC], "label": "Port Chester", "warnings": []}
+    p = cad._plan(cad.store.incident(iid), [by_name(cad, "E63"), by_name(cad, "L30")], "new", False)[1]
+    assert p["groups"] == [PC, PC]
+    assert p["label"] == "Port Chester + Rye Brook (not set → PC)"
+    assert p["warnings"] == ["Rye Brook tones not set — played Port Chester's"]
+    pv = lead(cad, iid, ["E14", "L30"])
+    assert pv["tones"] == "Rye Brook (not set → PC)" and pv["tone_warnings"] == ["Rye Brook tones not set — played Port Chester's"]
+    assert cad._plan(cad.store.incident(iid), [by_name(cad, "E14")], "new", False)[1]["groups"] == [PC]   # never silent
+    # Add-on: only the departments of the units added.
+    cad.dispatch(iid, {"unit_ids": [uid(cad, "E60")], "operator": "JD"})
+    assert lead(cad, iid, ["L30"])["tones"] == "Rye Brook (not set → PC)"
+    d = cad.dispatch(iid, {"unit_ids": [uid(cad, "E61")], "operator": "JD"})
+    assert d["tones"] == "Port Chester" and d["tone_warnings"] == []
+    cad.dispatch(iid, {"unit_ids": [uid(cad, "L30")], "operator": "JD"})
+    # Upgrade and full department response: everyone on the event.
+    assert cad.upgrade(iid, {"info": "fire showing", "preview": True})["tones"] == "Port Chester + Rye Brook (not set → PC)"
+    other = cad.create({"type": "STRU", "address": "1 King St"})["id"]
+    assert lead(cad, other, ["E14"], full=True)["tones"] == "Port Chester + Rye Brook (not set → PC)"
+    # Recorded with the dispatch and on the timeline.
+    full = cad.store.full(iid)
+    assert [x["tones"] for x in full["dispatches"]] == [
+        "Port Chester", "Port Chester", "Rye Brook (not set → PC). Rye Brook tones not set — played Port Chester's"]
+    assert "Tones: Rye Brook (not set → PC). Rye Brook tones not set — played Port Chester's" in texts(cad, iid)
+    with pytest.raises(lists.ListsError, match="dispatch_tones"):
+        lists.load(write_lists(Path(__import__("tempfile").mkdtemp()), dispatch_tones={"Rye": [[600, 1]]}))
+
+
+def test_joint_tones_follow_ours_in_the_audio(tmp_path, monkeypatch):
+    monkeypatch.setattr(dispatcher, "tts", lambda text, voice="", rate_wpm=0: np.zeros(1600, np.float32))
+    p = write_lists(tmp_path, dispatch_tones={"Rye Brook": [[600.0, 0.5], [800.0, 0.5]]})
+    cad = make_cad(tmp_path, lists=str(p), clock=Clock(local(2026, 10, 7, 15, 13)))
+    iid = cad.create({"type": "STRU", "address": "122 South Regent St"})["id"]
+    d = cad.dispatch(iid, {"unit_ids": [uid(cad, "E63"), uid(cad, "L30")], "operator": "JD"})
+    assert d["tones"] == "Port Chester + Rye Brook" and d["tone_warnings"] == []
+    with wave.open(io.BytesIO(cad.dispatch_audio(d["dispatch_id"]))) as w:
+        x = np.frombuffer(w.readframes(w.getnframes()), "<i2").astype(np.float32) / 32768
+
+    def at(a, b):
+        return peak_hz(x[int(a * 16000):int(b * 16000)])
+    assert abs(at(0.1, 0.9) - 349.1) < 2 and abs(at(1.2, 3.8) - 311.1) < 2
+    assert np.max(np.abs(x[int(4.05 * 16000):int(4.45 * 16000)])) < 0.01               # the gap between departments
+    assert abs(at(4.55, 4.95) - 600) < 3 and abs(at(5.05, 5.45) - 800) < 3
 
 
 def peak_hz(x, rate=16000):

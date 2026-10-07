@@ -10,6 +10,10 @@
                              Smoke in the structure. Now a structure fire, full department
                              response. Time out 15:20."
     full=True               "full department response" instead of the units' names
+    remarks="two vehicles"  "... for a motor vehicle accident. Reported: two vehicles. Time out ..."
+    lead_in(...)            "Port Chester Fire" / "Port Chester and Rye Brook Fire" / "Rye Brook Fire"
+    tone_plan(...)          a tone group per department paged (Port Chester's, then Rye Brook's); a
+                            department without tones gets Port Chester's, with a warning
     render_dispatch(text, tones, out_dir, VoiceCfg(...))
                                  alert tones + gap + the voice read twice. tones: one group of
                                  [hz, s] (two-tone sequential) or several groups (one per
@@ -88,17 +92,49 @@ def spoken_street(s: str) -> str:
 # The wording, as templates (data/cad_lists.json "dispatch_wording" overrides any of these). Empty
 # parts drop out with their punctuation (tidy()).
 WORDING = {
-    "new": "{department}, {units}, respond to {location}, for {type}. Time out {time}.",
-    "new_no_location": "{department}, {units}, respond for {type}. Time out {time}.",
-    "add_on": "{department}, {units}, added to the assignment. {already} {location}, {type_bare}. Time out {time}.",
-    "upgrade": "{department}, upgrade on your last alarm, {location}. {info} {change} {respond} Time out {time}.",
+    "new": "{department}, {units}, respond to {location}, for {type}. {remarks} Time out {time}.",
+    "new_no_location": "{department}, {units}, respond for {type}. {remarks} Time out {time}.",
+    "add_on": "{department}, {units}, added to the assignment. {already} {location}, {type_bare}. {remarks} Time out {time}.",
+    "upgrade": "{department}, upgrade on your last alarm, {location}. {info} {change} {respond} {remarks} Time out {time}.",
     "already_group": "{units} {status}",
     "change_type": "Now {type}.",
     "change_type_full": "Now {type}, {full}.",
     "change_full": "{Full}.",
     "respond": "{units}, respond.",
     "full_response": "full department response",
+    "remarks": "Reported: {remarks}",                  # the dispatcher's remarks, said after the type
+    "lead_in": "{department}",                         # {department}: the config's ("Port Chester Fire")
+    "lead_in_joint": "Port Chester and {joint} Fire",  # a joint-response department's unit goes too
 }
+REMARKS_MAX = 500
+# Dispatch shorthand that can only mean one thing, said in full ("w/" -> "with").
+REMARK_WORDS = [(re.compile(r"(?<!\w)w/o(?!\w)", re.I), "without"), (re.compile(r"(?<!\w)w/(?=\s)", re.I), "with"),
+                (re.compile(r"(?<!\w)vs\.?(?=\s)", re.I), "versus"), (re.compile(r"\s&\s"), " and ")]
+
+
+def clean_remarks(text: str) -> str:
+    """The operator's remarks, ready to say: trimmed, one space, shorthand said in full, ending in a period.
+    '  2 cars w/  fluid leaking ' -> '2 cars with fluid leaking.'"""
+    t = re.sub(r"\s+", " ", text or "").strip()
+    for pat, words in REMARK_WORDS:
+        t = pat.sub(words, t)
+    t = re.sub(r"\s+", " ", t).strip().rstrip(",;:- ")
+    return t if not t or t[-1] in ".!?" else t + "."
+
+
+def lead_in(department: str, joint: list[str] = (), own: bool = True, full: bool = False,
+            wording: dict | None = None, joint_only: dict | None = None) -> str:
+    """Whose dispatch it is. joint: the joint-response towns with a unit on this transmission or already on
+    the event ("Rye Brook"); own: one of the department's own units is too. None of theirs: "Port Chester
+    Fire"; theirs and ours (or full department response): "Port Chester and Rye Brook Fire"; only theirs:
+    joint_only[town] ("Rye Brook Fire")."""
+    w = dict(WORDING, **(wording or {}))
+    joint = [t for t in dict.fromkeys(joint) if t]
+    if not joint:
+        return w["lead_in"].format(department=department)
+    if not own and not full and len(joint) == 1 and (joint_only or {}).get(joint[0]):
+        return joint_only[joint[0]]
+    return w["lead_in_joint"].format(department=department, joint=join_and(joint))
 
 
 def join_and(names: list[str]) -> str:
@@ -141,9 +177,26 @@ def tidy(s: str) -> str:
     return s.strip()
 
 
+def tone_plan(departments: list[tuple[str, list | None]], home: str, home_tones) -> dict:
+    """[("Port Chester", tones), ("Rye Brook", None)] -> {"groups": [[(hz, s), ...] per department, in
+    turn], "label": "Port Chester + Rye Brook (not set → PC)", "warnings": [...]}. Tones not set (None)
+    are never skipped: the home department's are played instead, with a warning."""
+    groups, labels, warnings = [], [], []
+    short = "".join(w[0] for w in home.split()).upper()
+    for name, t in departments or [(home, home_tones)]:
+        if not t:
+            t = home_tones
+            labels.append(f"{name} (not set → {short})")
+            warnings.append(f"{name} tones not set — played {home}'s")
+        else:
+            labels.append(name)
+        groups.append([tuple(x) for x in t or ()])
+    return {"groups": groups, "label": " + ".join(labels), "warnings": warnings}
+
+
 def compose(kind: str, *, department: str, incident: dict, units: list[str], phrase: str = "",
             at: float | None = None, full: bool = False, already: list[tuple[str, list[str]]] = (),
-            info: str = "", new_phrase: str = "", wording: dict | None = None) -> str:
+            info: str = "", new_phrase: str = "", wording: dict | None = None, remarks: str = "") -> str:
     """The written dispatch (what the chronology shows and, through speech(), what is said).
 
     kind      new | add_on (units added to an event that already had a dispatch) | upgrade
@@ -152,6 +205,8 @@ def compose(kind: str, *, department: str, incident: dict, units: list[str], phr
     already   add_on: the units already on the event by status, [("responding", ["Engine 60"]), ...]
     info      upgrade: the new information ("smoke in the structure")
     new_phrase upgrade: the new type as spoken, when the type changed ("a structure fire")
+    remarks   the dispatcher's remarks ("two vehicles, one on its side"): "Reported: ...", before the time out
+    department the lead-in (lead_in(): "Port Chester and Rye Brook Fire" when theirs go too)
     """
     w = dict(WORDING, **(wording or {}))
     at = at if at is not None else datetime.now(TZ).timestamp()
@@ -177,18 +232,22 @@ def compose(kind: str, *, department: str, incident: dict, units: list[str], phr
     else:
         change = ""
     respond = w["respond"].format(units=", ".join(units)) if kind == "upgrade" and units and not full else ""
+    remarks = clean_remarks(remarks)
+    if remarks and "{remarks}" not in tpl:              # a template from before remarks: before the time out
+        tpl = tpl.replace("Time out {time}", "{remarks} Time out {time}") if "Time out {time}" in tpl else tpl + " {remarks}"
     s = tpl.format(department=department, units=units_text, location=loc, type=phrase, type_bare=bare(phrase),
                    already=(", ".join(groups) + ".") if groups else "", info=sentence(info), change=change,
-                   respond=respond, time=f"{datetime.fromtimestamp(at, TZ):%H:%M}", full=fr)
+                   respond=respond, time=f"{datetime.fromtimestamp(at, TZ):%H:%M}", full=fr,
+                   remarks=w["remarks"].format(remarks=remarks) if remarks else "")
     return tidy(s)
 
 
 def build_text(department: str, incident: dict, unit_names: list[str], phrase: str = "",
-               at: float | None = None, full: bool = False, wording: dict | None = None) -> str:
+               at: float | None = None, full: bool = False, wording: dict | None = None, remarks: str = "") -> str:
     """A first dispatch. unit_names as spoken ("Engine 60", "23 98"); phrase as spoken ("a
-    commercial fire alarm", from the run card or the data file)."""
+    commercial fire alarm", from the run card or the data file); remarks: "Reported: ..."."""
     return compose("new", department=department, incident=incident, units=unit_names, phrase=phrase, at=at,
-                   full=full, wording=wording)
+                   full=full, wording=wording, remarks=remarks)
 
 
 def speech(text: str, location: str = "", spoken: dict[str, str] | None = None) -> str:

@@ -711,6 +711,8 @@ function renderDispatches(inc) {
       }
       row.append(el("div", "txt", d.text));
       li.replaceChildren(meta, row);
+      if (d.remarks) li.append(el("div", "small", `Remarks: ${d.remarks}`));
+      if (d.tones) li.append(el("div", d.tones.includes("not set") ? "warn small" : "dim small", `Tones: ${d.tones}`));
       if (d.audio_note) li.append(el("div", "dim small", d.audio_note));
     },
     empty: "No dispatches yet",
@@ -745,8 +747,25 @@ function canDispatch(u) {
   return roleOf(u.status) !== "oos";
 }
 
+const REMARKS_LONG = 200, REMARKS_MAX = 500;
+function remarksNote() {
+  const n = $("#r-remarks").value.trim().length, note = $("#r-remarks-note");
+  note.className = n > REMARKS_LONG ? "warn small" : "dim small";
+  setText(note, n > REMARKS_MAX ? `${n} characters: too long to send (at most ${REMARKS_MAX})`
+    : n > REMARKS_LONG ? `${n} characters: long (the voice reads it twice). Consider shortening.`
+      : n ? `${n} characters · said as "Reported: …"` : "Nothing extra said");
+}
+function syncRemarks(inc) {          // the event's remarks, until the operator edits the box
+  const r = cad.remarks;
+  if (r && r.iid === inc.id && (r.edited || r.base === (inc.remarks || ""))) return;
+  cad.remarks = { iid: inc.id, base: inc.remarks || "", edited: false };
+  $("#r-remarks").value = inc.remarks || "";
+  remarksNote();
+}
+
 function renderDispatchBox(inc) {
   if (!inc || !isOpen(inc) || !inc.emergency) return;
+  syncRemarks(inc);
   show($("#r-pending"), inc.status === "queued");
   $("#r-dispatch").disabled = inc.status === "queued";
   const addOn = (inc.dispatches || []).length > 0;
@@ -846,10 +865,13 @@ function addJoint() {                 // "Add Rye Brook (E14, L30, 2662)": tick 
   renderDispatchBox(inc);
 }
 
-function showPreview(title, text, url, note) {
+function showPreview(title, text, url, note, r) {
   show($("#r-preview-box"), true);
   setText($("#r-preview-title"), title);
   setText($("#r-preview-text"), text);
+  const warns = (r && r.tone_warnings) || [];
+  $("#r-preview-tones").className = warns.length ? "warn small" : "dim small";
+  setText($("#r-preview-tones"), r && r.tones ? `Tones: ${r.tones}${warns.length ? ` · ${warns.join("; ")}` : ""}` : "");
   const a = $("#r-audio");
   show(a, !!url);
   if (url) { a.src = url; a.play().catch(() => {}); }
@@ -872,8 +894,9 @@ async function preview() {
   if (!ids.length) return flash($("#r-error"), "Tick at least one unit.");
   await busy($("#r-preview"), "Rendering…", async () => {
     try {
-      const r = await api("POST", `/api/cad/incident/${inc.id}/preview`, { unit_ids: ids, full: $("#r-full").checked });
-      showPreview(`Preview${r.kind === "add_on" ? " (add-on)" : ""}: nothing assigned or logged`, r.text, r.audio_url, r.audio_note);
+      const r = await api("POST", `/api/cad/incident/${inc.id}/preview`,
+        { unit_ids: ids, full: $("#r-full").checked, remarks: $("#r-remarks").value });
+      showPreview(`Preview${r.kind === "add_on" ? " (add-on)" : ""}: nothing assigned or logged`, r.text, r.audio_url, r.audio_note, r);
     } catch (e) {
       flash($("#r-error"), e.message);
     }
@@ -897,10 +920,10 @@ async function dispatch() {
   await busy($("#r-dispatch"), "Dispatching…", async () => {
     try {
       const r = await api("POST", `/api/cad/incident/${inc.id}/dispatch`,
-        { unit_ids: ids, operator: op, channel: $("#r-channel").value, full: $("#r-full").checked });
+        { unit_ids: ids, operator: op, channel: $("#r-channel").value, full: $("#r-full").checked, remarks: $("#r-remarks").value });
       const how = r.transmitted ? `transmitted on ${r.channel}` : `logged, not transmitted (${r.detail})`;
       showPreview(`${r.kind === "add-on" ? "Add-on dispatch" : "Dispatch"} #${r.dispatch_id}: ${how}`
-        + (r.moved.length ? ` · moved ${r.moved.join(", ")}` : ""), r.text, r.audio_url, r.audio_note);
+        + (r.moved.length ? ` · moved ${r.moved.join(", ")}` : ""), r.text, r.audio_url, r.audio_note, r);
       $("#r-full").checked = false;
       setTimeout(() => recommend(), 300);
     } catch (e) {
@@ -911,7 +934,7 @@ async function dispatch() {
 
 function upgradeBody() {
   const t = $("#u-type").value;
-  return { type: t, subtype: t ? $("#u-subtype").value : "", info: $("#u-info").value.trim(),
+  return { type: t, subtype: t ? $("#u-subtype").value : "", info: $("#u-info").value.trim(), remarks: $("#u-remarks").value,
     full: $("#u-full").checked, unit_ids: checkedIds() };
 }
 async function upgrade(e, previewOnly) {
@@ -929,10 +952,10 @@ async function upgrade(e, previewOnly) {
   await busy(b, previewOnly ? "Rendering…" : "Sending…", async () => {
     try {
       const r = await api("POST", `/api/cad/incident/${inc.id}/upgrade`, body);
-      if (previewOnly) showPreview("Upgrade preview: nothing changed or logged", r.text, r.audio_url, r.audio_note);
+      if (previewOnly) showPreview("Upgrade preview: nothing changed or logged", r.text, r.audio_url, r.audio_note, r);
       else {
         const how = r.transmitted ? `transmitted on ${r.channel}` : `logged, not transmitted (${r.detail})`;
-        showPreview(`Upgrade #${r.dispatch_id}: ${how}`, r.text, r.audio_url, r.audio_note);
+        showPreview(`Upgrade #${r.dispatch_id}: ${how}`, r.text, r.audio_url, r.audio_note, r);
         $("#upgrade-form").reset();
         show($("#upgrade-form"), false);
         setTimeout(() => recommend(), 300);
@@ -1659,6 +1682,7 @@ $("#edit-cancel").addEventListener("click", () => show($("#edit-form"), false));
 $("#edit-form").addEventListener("submit", saveEdit);
 $("#r-refresh").addEventListener("click", () => recommend());
 $("#r-preview").addEventListener("click", preview);
+$("#r-remarks").addEventListener("input", () => { if (cad.remarks) cad.remarks.edited = true; remarksNote(); });
 $("#r-dispatch").addEventListener("click", dispatch);
 $("#r-tickall").addEventListener("click", tickAll);
 $("#r-joint").addEventListener("click", addJoint);

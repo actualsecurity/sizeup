@@ -337,7 +337,7 @@ class Cad:
                 "fallback_voice": self.s.fallback_voice,
                 "voices": tts_voices(self.s.tts_port)}
 
-    def _render(self, text: str, location: str = "") -> tuple[Path | None, str]:
+    def _render(self, text: str, location: str = "", tones=None) -> tuple[Path | None, str]:
         """(the WAV, which voice said it: "Voice: Kokoro af_heart") or (None, why there's no audio).
         `location` is no longer needed: every number in the text is said the dispatch way."""
         if self.audio_dir is None:
@@ -345,7 +345,7 @@ class Cad:
             self.audio_dir = Path(tempfile.mkdtemp(prefix="sizeup-cad-audio-"))
         try:
             with self._render_lock:
-                return dispatcher.render_dispatch(text, self.s.tones, self.audio_dir, self._voice(), self.s.repeat,
+                return dispatcher.render_dispatch(text, self.s.tones if tones is None else tones, self.audio_dir, self._voice(), self.s.repeat,
                                                   {c: u.get("spoken", "") for c, u in self.lists.units.items()},
                                                   log=self.log)
         except AudioUnavailable as e:
@@ -354,14 +354,43 @@ class Cad:
             return None, f"could not write the dispatch audio: {e}"
 
     def _phrase(self, typ: str, sub: str) -> str:
-        card = runcards.resolve(self.store, typ, sub)
-        return (card or {}).get("spoken") or self.lists.phrase(typ, sub)
+        """The run card's phrase for TYPE/SUBTYPE; else the data file's, a TYPE card's phrase standing
+        for the type's (the subtype is always said: '{type} with multiple injuries')."""
+        card = runcards.resolve(self.store, typ, sub) or {}
+        if card.get("spoken") and card["type"] == lists_mod.key(typ, sub):
+            return card["spoken"]
+        return self.lists.phrase(typ, sub, base=card.get("spoken") or "")
+
+    def _departments(self, units: list[dict]) -> tuple[list[str], bool]:
+        """The joint-response towns among these units (in the data file's order) and whether one of
+        PCFD's own (apparatus kinds, not mutual aid) is among them."""
+        L = self.lists
+        towns = {L.joint_town(u["name"]) for u in units} - {""}
+        own = any(not L.joint_town(u["name"]) and not u.get("mutual_aid")
+                  and (u["kind"] in L.full_response_kinds or not L.full_response_kinds) for u in units)
+        return [t for t in L.joint_response if t in towns], own
+
+    def _plan(self, inc: dict, units: list[dict], kind: str, full: bool) -> tuple[str, dict]:
+        """Lead-in and alert tones for this transmission. Lead-in: by the units sent and those already on
+        the event ('Port Chester and Rye Brook Fire', or 'Rye Brook Fire' if only theirs). Tones: the
+        departments of the units sent (an upgrade or full response: also everyone on the event)."""
+        L = self.lists
+        sending = {u["id"] for u in units}
+        on = [u for u in self.store.units() if u["incident_id"] == inc["id"] and u["id"] not in sending]
+        joint, own = self._departments(units + on)
+        lead = dispatcher.lead_in(self.s.department, joint, own, full, L.wording, L.lead_in_joint_only)
+        t_joint, t_own = self._departments(units + on if kind == "upgrade" or full else units)
+        home = dispatcher.HOME_MUNI
+        groups = ([(home, list(self.s.tones))] if t_own or full or not t_joint else []) + \
+                 [(t, L.dispatch_tones.get(t)) for t in t_joint]
+        return lead, dispatcher.tone_plan(groups, home, list(self.s.tones))
 
     def _text_for(self, inc: dict, units: list[dict], kind: str, full: bool = False, info: str = "",
-                  new_phrase: str = "") -> str:
-        """The dispatch wording (data/cad_lists.json dispatch_wording). An add-on says who is
-        already on the event, by status (already_statuses), leaving out the units being sent."""
+                  new_phrase: str = "", remarks: str = "") -> tuple[str, dict]:
+        """The dispatch wording (data/cad_lists.json dispatch_wording) and its tone plan. An add-on says who
+        is already on the event, by status (already_statuses), leaving out the units being sent."""
         L = self.lists
+        lead, tones = self._plan(inc, units, kind, full)
         already = []
         if kind == "add_on":
             sending = {u["id"] for u in units}
@@ -373,10 +402,10 @@ class Cad:
                 names = [u["spoken"] or u["name"] for u in on if u["status"] == st]
                 if names:
                     already.append((L.status_phrase(st), names))
-        return dispatcher.compose(kind, department=self.s.department, incident=inc,
+        return dispatcher.compose(kind, department=lead, incident=inc,
                                   units=[u["spoken"] or u["name"] for u in units], phrase=self._phrase(inc["type"], inc["subtype"]),
                                   at=self.clock(), full=full, already=already, info=info, new_phrase=new_phrase,
-                                  wording=L.wording)
+                                  wording=L.wording, remarks=remarks), tones
 
     def _dispatchable(self, inc: dict) -> None:
         if inc["status"] == "queued":
@@ -389,15 +418,32 @@ class Cad:
     def _audio_url(self, path: Path | None) -> str | None:
         return f"/api/cad/audio/{path.stem}.wav" if path else None
 
-    def _send(self, iid: int, text: str, units: list[dict], operator: str, channel: str, kind: str, moved=()) -> dict:
-        path, note = self._render(text, dispatcher.where(self.store.incident(iid)))
+    @staticmethod
+    def _remarks(body: dict) -> str:
+        return dispatcher.clean_remarks(_text(body, "remarks", dispatcher.REMARKS_MAX))
+
+    @staticmethod
+    def _tones_text(plan: dict) -> str:
+        """'Port Chester + Rye Brook (not set → PC). Rye Brook tones not set — played Port Chester's.'"""
+        return ". ".join([plan["label"]] + plan["warnings"])
+
+    def _shown(self, text: str, kind: str, path: Path | None, note: str, remarks: str, plan: dict) -> dict:
+        """What a preview (and a dispatch) answers: the text and audio, the remarks and tones used."""
+        return {"text": text, "kind": kind, "audio_url": self._audio_url(path), "audio_note": note, "remarks": remarks,
+                "tones": plan["label"], "tone_warnings": plan["warnings"]}
+
+    def _send(self, iid: int, text: str, units: list[dict], operator: str, channel: str, kind: str, moved=(),
+              remarks: str = "", plan: dict | None = None) -> dict:
+        plan = plan or dispatcher.tone_plan([], dispatcher.HOME_MUNI, list(self.s.tones))
+        path, note = self._render(text, dispatcher.where(self.store.incident(iid)), plan["groups"])
         tx = self.transmitter.transmit(path, channel, text)
         did = self.store.log_dispatch(iid, operator=operator, text=text, unit_ids=[u["id"] for u in units],
                                       audio_path=str(path) if path else "", audio_note=note, transmitted=tx.transmitted,
-                                      channel=channel, tx_note=tx.detail, kind=kind)
-        return {"dispatch_id": did, "kind": kind, "text": text,
-                "audio_url": f"/api/cad/dispatch/{did}.wav" if path else None, "audio_note": note,
-                "transmitted": tx.transmitted, "detail": tx.detail, "channel": channel, "moved": list(moved)}
+                                      channel=channel, tx_note=tx.detail, kind=kind, remarks=remarks,
+                                      tones=self._tones_text(plan))
+        return dict(self._shown(text, kind, path, note, remarks, plan), dispatch_id=did,
+                    audio_url=f"/api/cad/dispatch/{did}.wav" if path else None,
+                    transmitted=tx.transmitted, detail=tx.detail, channel=channel, moved=list(moved))
 
     def preview(self, iid: int, body: dict) -> dict:
         """The dispatch as it would go out now, to hear first. Nothing is assigned or logged.
@@ -408,11 +454,12 @@ class Cad:
         if not inc["emergency"]:
             raise CadError("non-emergency event: no dispatch (attach units instead, or mark it an emergency)")
         units = self._units_for(body)
+        remarks = self._remarks(body)
         kind = "add_on" if self.store.has_dispatch(iid) else "new"
-        text = self._text_for(inc, units, kind, full=bool(_bool(body, "full")))
-        path, note = self._render(text, dispatcher.where(inc))
+        text, plan = self._text_for(inc, units, kind, full=bool(_bool(body, "full")), remarks=remarks)
+        path, note = self._render(text, dispatcher.where(inc), plan["groups"])
         self._prune_audio()
-        return {"text": text, "kind": kind, "audio_url": self._audio_url(path), "audio_note": note}
+        return self._shown(text, kind, path, note, remarks, plan)
 
     def dispatch(self, iid: int, body: dict) -> dict:
         """Dispatch the ticked units (full: 'full department response' instead of their names).
@@ -421,12 +468,14 @@ class Cad:
         self._dispatchable(inc)
         operator = _text(body, "operator", 60, required=True)
         units = self._units_for(body)
+        remarks = self._remarks(body)
         channel = self._channel(body)
         kind = "add_on" if self.store.has_dispatch(iid) else "new"
-        text = self._text_for(inc, units, kind, full=bool(_bool(body, "full")))
+        text, plan = self._text_for(inc, units, kind, full=bool(_bool(body, "full")), remarks=remarks)
         moved = self.store.assign(iid, [u["id"] for u in units], operator,
                                   verb="added to the assignment" if kind == "add_on" else "")
-        return self._send(iid, text, units, operator, channel, "add-on" if kind == "add_on" else "dispatch", moved)
+        return self._send(iid, text, units, operator, channel, "add-on" if kind == "add_on" else "dispatch", moved,
+                          remarks, plan)
 
     def upgrade(self, iid: int, body: dict) -> dict:
         """Re-dispatch with new information: optional new type/subtype, a line of new information,
@@ -448,15 +497,16 @@ class Cad:
         if not (inc["emergency"] or (changed and L.is_emergency(typ, sub))):
             raise CadError("non-emergency event: no dispatch (mark it an emergency first)")
         info = _text(body, "info", 300)
+        remarks = self._remarks(body)
         full = bool(_bool(body, "full"))
         units = self._units_for(body) if body.get("unit_ids") else []
-        if not (changed or info or full or units):
-            raise CadError("nothing to upgrade: give a new type, new information, units or full department response")
-        text = self._text_for(inc, units, "upgrade", full=full, info=info,
-                              new_phrase=self._phrase(typ, sub) if changed else "")
+        if not (changed or info or full or units or remarks):
+            raise CadError("nothing to upgrade: give a new type, new information, remarks, units or full department response")
+        text, plan = self._text_for(inc, units, "upgrade", full=full, info=info,
+                                    new_phrase=self._phrase(typ, sub) if changed else "", remarks=remarks)
         if body.get("preview"):
-            path, note = self._render(text, dispatcher.where(inc))
-            return {"text": text, "kind": "upgrade", "audio_url": self._audio_url(path), "audio_note": note}
+            path, note = self._render(text, dispatcher.where(inc), plan["groups"])
+            return self._shown(text, "upgrade", path, note, remarks, plan)
         operator = _text(body, "operator", 60, required=True)
         channel = self._channel(body)
         what = []
@@ -469,7 +519,7 @@ class Cad:
             what.append(L.wording["full_response"])
         self.store.note(iid, "Upgrade: " + "; ".join(what or ["more units"]), operator, kind="upgrade")
         moved = self.store.assign(iid, [u["id"] for u in units], operator, verb="dispatched (upgrade)") if units else []
-        return self._send(iid, text, units, operator, channel, "upgrade", moved)
+        return self._send(iid, text, units, operator, channel, "upgrade", moved, remarks, plan)
 
     def attach(self, iid: int, body: dict) -> dict:
         """Units on an event with no dispatch (a non-emergency event: a hydrant, a closure)."""
