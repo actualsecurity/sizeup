@@ -230,8 +230,8 @@ def test_dispatch_wording_edits_and_live_preview(monkeypatch):
     monkeypatch.setattr(dispatcher, "tts", lambda text, voice="", rate_wpm=0: np.full(800, 0.1, np.float32))
     cad = make_cad()
     p = post(cad, "dispatch", action="preview", wording={"new": "{department}: {units}, go to {location} for {type}."})
-    assert p["texts"]["new"] == ("Port Chester Fire: Engine 60, Ladder 31, Rescue 40, 23 98, go to 209 Westchester "
-                                 "Avenue, cross of Pearl Street for a structure fire.")
+    assert p["texts"]["new"].startswith("Port Chester Fire: Engine 60, Ladder 31, Rescue 40, 23 98, go to 209 Westchester "
+                                        "Avenue, cross of Pearl Street for a structure fire.")
     assert "Engine 61, added to the assignment" in p["texts"]["add_on"] and "upgrade on your last alarm" in p["texts"]["upgrade"]
     assert "full department response" in p["texts"]["full"]
     assert post(cad, "dispatch", action="preview", wording={"new": "{nope}"})["errors"] == {"new": "unknown or broken placeholder ('nope')"}
@@ -403,3 +403,32 @@ def test_status_flow_the_next_step_buttons_are_editable():
     post(cad, "status_flow", action="set", key="STAGED", next=["ON LOCATION"])
     post(cad, "unit_statuses", action="delete", code="STAGED")                # takes its flow row with it
     assert "STAGED" not in cad.lists.status_flow
+
+
+def test_dispatch_lead_ins_remarks_department_tones_and_voice():
+    cad = make_cad()
+    d = cad.settings_get()["dispatch"]
+    assert {"remarks", "lead_in", "lead_in_joint"} <= {w["key"] for w in d["wording"]}
+    assert d["dept_tones"] == [{"town": "Rye Brook", "value": None, "default": None, "edited": False}]   # not set
+    assert d["lead_in_joint_only"][0]["value"] == "Rye Brook Fire"
+    pv = post(cad, "dispatch", action="preview", wording={"remarks": "Caller says: {remarks}"})
+    assert "Caller says: Smoke showing from the second floor" in pv["texts"]["new"] or \
+        "Caller says: smoke showing from the second floor" in pv["texts"]["new"]
+    assert pv["texts"]["joint"].startswith("Port Chester and Rye Brook Fire, ") and pv["texts"]["joint_only"].startswith("Rye Brook Fire, ")
+    post(cad, "dispatch", action="set", key="lead_in_joint_only/Rye Brook", value="Rye Brook Fire Department")
+    assert cad.lists.lead_in_joint_only["Rye Brook"] == "Rye Brook Fire Department"
+    post(cad, "dispatch", action="reset", key="lead_in_joint_only/Rye Brook")
+    assert cad.store.q("SELECT * FROM settings_overrides") == []
+    post(cad, "dispatch", action="set", key="tones/Rye Brook", value=[[600, 1], [700, 3]])
+    assert cad.lists.dispatch_tones["Rye Brook"] == [(600.0, 1.0), (700.0, 3.0)]
+    post(cad, "dispatch", action="set", key="tones/Rye Brook", value=None)
+    assert cad.lists.dispatch_tones["Rye Brook"] is None and cad.store.q("SELECT * FROM settings_overrides") == []
+    with pytest.raises(CadError, match="joint-response"):
+        post(cad, "dispatch", action="set", key="tones/Rye", value=[[600, 1]])
+    post(cad, "dispatch", action="set", key="speed", value=0.85)
+    post(cad, "dispatch", action="set", key="voice", value="Alex")         # engine say here: any say voice
+    assert (cad.s.speed, cad.s.voice) == (0.85, "Alex") and cad.state()["audio"]["speed"] == 0.85
+    with pytest.raises(CadError, match="0.5 to 2.0"):
+        post(cad, "dispatch", action="set", key="speed", value=3)
+    post(cad, "dispatch", action="reset_section")
+    assert (cad.s.speed, cad.s.voice) == (1.0, "Samantha")

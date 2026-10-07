@@ -581,14 +581,17 @@ function sAddUnit(kinds, boards) {
 
 function sDispatch(panel) {
   const d = S.data.dispatch;
-  const reset = (d.wording.some((w) => w.state === "edited") || d.tones.edited || d.channels.edited)
+  const reset = (d.wording.some((w) => w.state === "edited") || d.tones.edited || d.channels.edited || d.voice.edited
+    || (d.dept_tones || []).some((t) => t.edited) || (d.lead_in_joint_only || []).some((t) => t.state === "edited"))
     ? sBtn("Reset all dispatch settings", "", () => {
       if (sAsk("Put the wording, tones and channels back to the defaults?")) sPost("dispatch", { action: "reset_section" }, "Dispatch: back to the defaults.");
     }, "danger-quiet") : null;
   const main = el("div", "s-wording");
   const more = el("details", "s-more");
   more.append(el("summary", "", "More templates (pieces of the add-on and upgrade)"));
-  d.wording.forEach((w, i) => (i < 4 ? main : more).append(sTemplate(w)));
+  const MAIN = ["new", "add_on", "upgrade", "full_response", "remarks", "lead_in", "lead_in_joint"];
+  d.wording.forEach((w) => (MAIN.includes(w.key) ? main : more).append(sTemplate(w)));
+  for (const j of d.lead_in_joint_only || []) main.append(sJointOnly(j));
   const legend = el("p", "dim small", "Placeholders: " + d.placeholders.map((p) => `{${p}}`).join(" ")
     + ". Empty parts drop out with their punctuation.");
   const pv = el("div", "s-preview");
@@ -596,14 +599,81 @@ function sDispatch(panel) {
   panel.replaceChildren(...sHead("Dispatch", "What the dispatch says and how it sounds. Changes apply to the next dispatch.", reset),
     sCard(sCardHead("Wording", d.department), legend, main, more),
     sCard(sCardHead("Live preview", "a sample event, rendered as typed"), pv),
-    sTones(d.tones), sChannels(d.channels),
-    sCard(sCardHead("Voice", "read-only here"), el("div", "", d.voice.engine === "kokoro"
-      ? `Kokoro ${d.voice.name} · speed ${d.voice.speed} · fallback ${d.voice.fallback || "macOS say"} · read ${d.voice.repeat || 2}×`
-      : `${d.voice.name || "the system voice"} (macOS say) · ${d.voice.rate_wpm ? `${d.voice.rate_wpm} words a minute` : "the voice's own speed"} · read ${d.voice.repeat || 2}×`),
-    el("p", "dim small", "From the config file ([dispatch] voice, speed). Picking the voice here is for later.")),
+    sVoice(d.voice), sTones(d.tones), ...(d.dept_tones || []).map(sDeptTones), sChannels(d.channels),
     sCard(sCardHead("Transmit"), el("span", "pill tx-off", d.transmit.enabled ? "Transmit: on" : "Transmit: off"),
       el("p", "dim small", `${d.transmit.note}. Read-only: there is no radio interface in this version.`)));
   sPreview();
+}
+
+function sJointOnly(j) {
+  const box = el("label", "s-tpl");
+  const head = el("span", "row");
+  head.append(el("b", "", `Lead-in when only ${j.town}'s units go`), el("code", "dim small", "lead_in_joint_only"), sState(j.state), el("span", "spacer"));
+  if (j.state === "edited") head.append(sBtn("Reset", j.default, () => sPost("dispatch", { action: "reset", key: `lead_in_joint_only/${j.town}` }, "Lead-in: default again.")));
+  const inp = sInput(j.value, 80, j.default, (v) => { if (v && v !== j.value) sPost("dispatch", { action: "set", key: `lead_in_joint_only/${j.town}`, value: v }, "Lead-in saved."); });
+  inp.dataset.town = j.town;
+  inp.addEventListener("input", () => { clearTimeout(S.previewT); S.previewT = setTimeout(sPreview, 250); });
+  box.append(head, inp);
+  return box;
+}
+
+// The voice: Kokoro voices to pick from (GET /api/cad/tts/voices), the speed. The engine is the config's.
+function sVoice(v) {
+  const box = sCard(sCardHead("Voice", v.engine === "kokoro" ? `Kokoro · fallback ${v.fallback || "macOS say"}` : "macOS say"));
+  const row = el("div", "row");
+  let pick;
+  if (v.engine === "kokoro") {
+    pick = sSelect(v.voices.map((x) => [x, x]), v.name, (x) => sPost("dispatch", { action: "set", key: "voice", value: x }, `Voice: ${x}.`), "Voice");
+    api("GET", "/api/cad/tts/voices").then((r) => {     // readable names: "Heart (American, female)"
+      const keep = pick.value;
+      const list = (r.voices || []).map((x) => [x.id, `${x.name} (${[x.accent, x.gender].filter(Boolean).join(", ")})`]);
+      if (list.length) { fillSelect(pick, list); pick.value = keep; }
+    }).catch(() => {});
+  } else {
+    pick = sInput(v.name, 60, "say voice", (x) => { if (x) sPost("dispatch", { action: "set", key: "voice", value: x }, `Voice: ${x}.`); });
+  }
+  const speed = el("input", "s-num");
+  speed.type = "number"; speed.min = "0.5"; speed.max = "2"; speed.step = "0.01"; speed.value = String(v.speed);
+  speed.setAttribute("aria-label", "Speed");
+  speed.addEventListener("change", () => sPost("dispatch", { action: "set", key: "speed", value: Number(speed.value) }, `Speed ${speed.value}.`));
+  row.append(el("span", "dim small", "Voice"), pick, el("span", "dim small", "Speed"), speed, el("span", "dim small", `read ${v.repeat || 2}×`),
+    el("span", "spacer"));
+  if (v.edited) row.append(sBtn("Reset", `Config: ${v.default}, ${v.default_speed}`, async () => {
+    await sPost("dispatch", { action: "reset", key: "voice" }, "Voice: from the config again.");
+    await sPost("dispatch", { action: "reset", key: "speed" }, "Voice and speed: from the config again.");
+  }));
+  box.append(row, el("p", "dim small", "Kokoro speed: 0.5 to 2 (0.92 is a touch slower than talking). Preview a dispatch on an event to hear it."));
+  return box;
+}
+
+// A joint-response department's own tones (played after PCFD's). Not set: PCFD's are played for them.
+function sDeptTones(t) {
+  const box = sCard(sCardHead(`${t.town} tones`, t.value ? (t.edited ? "edited here" : "from the data file") : "not set"));
+  const ol = el("ol", "s-rows tones");
+  const add = (hz, sec) => {
+    const li = el("li", "s-row");
+    const h = el("input"); h.type = "number"; h.min = "100"; h.max = "4000"; h.step = "0.1"; h.value = String(hz); h.className = "s-num";
+    h.setAttribute("aria-label", "Hz");
+    const d = el("input"); d.type = "number"; d.min = "0.1"; d.max = "10"; d.step = "0.1"; d.value = String(sec); d.className = "s-num";
+    d.setAttribute("aria-label", "Seconds");
+    li.append(h, el("span", "dim", "Hz for"), d, el("span", "dim", "s"), el("span", "spacer"), sBtn("✕", "Remove this tone", () => li.remove(), "mini"));
+    ol.append(li);
+  };
+  (t.value || []).forEach(([hz, sec]) => add(hz, sec));
+  const tools = el("div", "row");
+  const save = () => sPost("dispatch", { action: "set", key: `tones/${t.town}`,
+    value: [...ol.querySelectorAll("li")].map((li) => [...li.querySelectorAll("input")].map((i) => Number(i.value))) }, `${t.town} tones saved.`);
+  if (!t.value) {
+    box.append(el("p", "dim small", `Not set: ${t.town}'s tones aren't known yet, so PCFD's are played when their units go.`));
+    tools.append(sBtn("Set tones", "", () => { add(1000, 1); tools.replaceChildren(sBtn("+ Tone", "", () => add(1000, 1), "mini"), el("span", "spacer"), sBtn("Save tones", "", save, "primary")); }));
+  } else {
+    tools.append(sBtn("+ Tone", "", () => add(1000, 1), "mini"), el("span", "spacer"),
+      sBtn("Not set", "Forget them: PCFD's are played", () => sPost("dispatch", { action: "set", key: `tones/${t.town}`, value: null }, `${t.town} tones: not set.`), "danger-quiet"),
+      sBtn("Save tones", "", save, "primary"));
+  }
+  if (t.edited) tools.append(sBtn("Reset", "As in the data file", () => sPost("dispatch", { action: "reset", key: `tones/${t.town}` }, `${t.town} tones: default again.`)));
+  box.append(ol, tools);
+  return box;
 }
 
 function sTemplate(w) {
@@ -612,7 +682,7 @@ function sTemplate(w) {
   head.append(el("b", "", w.label), el("code", "dim small", w.key), sState(w.state), el("span", "spacer"));
   if (w.state === "edited") head.append(sBtn("Reset", w.default, () => sPost("dispatch", { action: "reset", key: w.key }, `${w.label}: default again.`)));
   const ta = el("textarea");
-  ta.rows = w.key === "full_response" ? 1 : 2;
+  ta.rows = ["new", "new_no_location", "add_on", "upgrade"].includes(w.key) ? 2 : 1;
   ta.maxLength = 400;
   ta.value = w.value;
   ta.dataset.key = w.key;
@@ -628,11 +698,15 @@ async function sPreview() {
   if (!box) return;
   const wording = {};
   for (const ta of document.querySelectorAll("#s-dispatch textarea[data-key]")) wording[ta.dataset.key] = ta.value;
+  const only = {};
+  for (const i of document.querySelectorAll("#s-dispatch input[data-town]")) only[i.dataset.town] = i.value;
+  wording.lead_in_joint_only = only;
   const my = ++S.previewSeq;
   try {
     const r = await api("POST", "/api/cad/settings/dispatch", { action: "preview", wording });
     if (my !== S.previewSeq) return;
-    const rows = [["new", "First dispatch"], ["add_on", "Added to the assignment"], ["upgrade", "Upgrade"], ["full", "Full department response"]];
+    const rows = [["new", "First dispatch, with remarks"], ["add_on", "Added to the assignment"], ["upgrade", "Upgrade"],
+      ["full", "Full department response"], ["joint", "With a joint department's units"], ["joint_only", "Only the joint department's units"]];
     const kids = rows.filter(([k]) => r.texts[k]).map(([k, t]) => {
       const d = el("div", "s-pv");
       d.append(el("div", "dim small", t), el("div", "ptext", r.texts[k]));
@@ -681,7 +755,7 @@ function sTones(t) {
     t.edited ? sBtn("Reset", "From the config", () => sPost("dispatch", { action: "reset", key: "tones" }, "Tones: from the config again.")) : null,
     sBtn("Save tones", "", save, "primary"));
   [...tools.childNodes].forEach((n) => { if (n.nodeType === 3) n.remove(); });
-  return sCard(sCardHead("Alert tones", t.edited ? "edited here" : "from the config"),
+  return sCard(sCardHead("Port Chester Fire tones", t.edited ? "edited here" : "from the config"),
     el("p", "dim small", "Played before the voice: each group in order (one per department paged, a short gap between). "
       + "50 to 4000 Hz, up to 10 s a tone, 20 s a group."), groups, tools);
 }

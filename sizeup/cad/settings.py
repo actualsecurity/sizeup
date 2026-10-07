@@ -14,8 +14,9 @@ Reset to default = drop the override (one item, or a whole section).
     geo_town_order                 key "_list" -> [towns]
     units                          key CODE -> the unit as edited ({kind, spoken, title, department, spare,
                                    response, retired}); key "_boards" -> the boards' layout
-    dispatch_wording               key template name -> text
-    dispatch                       key "tones" -> [[Hz, s], ...], "channels" -> [labels]
+    dispatch_wording               key template name -> text; "lead_in_joint_only" -> {town: text}
+    dispatch_tones                 key joint town -> [[Hz, s], ...] | null (not set: PCFD's are played)
+    dispatch                       key "tones" -> PCFD's tone groups, "channels" -> [labels], "voice", "speed"
 
 Codes never change (they are stored on events and exported): a rename changes the name only. An
 item in use can't be deleted, only retired (named on old events, off the pick lists). Every change
@@ -36,6 +37,7 @@ from sizeup.cad import dispatcher, runcards
 from sizeup.cad import lists as lists_mod
 from sizeup.cad.lists import CLASSES, CODE, COLOR, LIST_SECTIONS, LONG_CODE, RESPONSES, ROLES, ListsError
 from sizeup.cad.store import SCHEMA_VERSION, TZ, CadError
+from sizeup.tts import KOKORO_VOICES
 
 FORMAT, FORMAT_VERSION = "sizeup-cad-settings", 1
 OPERATOR_ROLES = ("admin", "dispatcher", "viewer")
@@ -43,7 +45,7 @@ REMOVE = object()
 
 # Where each stored section shows in Settings (the audit log's section).
 PAGE_SECTION = {**{s: "lists" for s in LIST_SECTIONS}, "event_class": "lists", "geo_town_order": "lists", "status_flow": "lists",
-                "units": "units", "dispatch_wording": "dispatch", "dispatch": "dispatch"}
+                "units": "units", "dispatch_wording": "dispatch", "dispatch_tones": "dispatch", "dispatch": "dispatch"}
 AUDIT_SECTIONS = ("lists", "run cards", "units", "dispatch", "users", "system", "radios")
 LIST_FIELDS = {"event_types": ("color",), "event_subtypes": (), "dispositions": (), "received_via": (),
                "unit_statuses": ("role", "bg", "fg")}
@@ -52,7 +54,8 @@ LIST_CODE = {"event_types": CODE, "event_subtypes": CODE, "dispositions": LONG_C
 LIST_TITLES = {"event_types": "Event types", "event_subtypes": "Event subtypes", "dispositions": "Dispositions",
                "received_via": "Received via", "unit_statuses": "Unit statuses"}
 WORDING = (("new", "First dispatch"), ("add_on", "Added to the assignment"), ("upgrade", "Upgrade"),
-           ("full_response", "Full department response"), ("new_no_location", "First dispatch, no location"),
+           ("full_response", "Full department response"), ("remarks", "Dispatcher remarks"), ("lead_in", "Lead-in"),
+           ("lead_in_joint", "Lead-in with a joint department"), ("new_no_location", "First dispatch, no location"),
            ("already_group", "Add-on: units already there"), ("change_type", "Upgrade: new type"),
            ("change_type_full", "Upgrade: new type, full response"), ("change_full", "Upgrade: full response"),
            ("respond", "Upgrade: more units"))
@@ -186,6 +189,9 @@ def overlay(d: dict, ov: dict) -> dict:
     o = ov.get("dispatch_wording") or {}
     if o:
         d["dispatch_wording"] = dict(d.get("dispatch_wording") or {}, **o)
+    o = ov.get("dispatch_tones") or {}
+    if o:
+        d["dispatch_tones"] = dict(d.get("dispatch_tones") or {}, **o)
     return d
 
 
@@ -199,6 +205,7 @@ class Editor:
         self.base = cad.lists                                   # the data file alone
         self.config_tones = tone_groups(cad.s.tones)
         self.config_channels = tuple(cad.s.channels)
+        self.config_voice = (getattr(cad.s, "voice", ""), getattr(cad.s, "speed", 1.0))
 
     # -- overrides ------------------------------------------------------------------------------------
 
@@ -232,6 +239,9 @@ class Editor:
         d = ov.get("dispatch") or {}
         self.cad.s.tones = tones_value(d.get("tones", self.config_tones))
         self.cad.s.channels = tuple(d.get("channels", self.config_channels))
+        if hasattr(self.cad.s, "speed"):
+            self.cad.s.voice = d.get("voice", self.config_voice[0])
+            self.cad.s.speed = float(d.get("speed", self.config_voice[1]))
         self.cad._state = None
 
     def _commit(self, changes: list[tuple[str, str, object]], operator: str, audit: list[tuple[str, str, object, object]],
@@ -413,11 +423,21 @@ class Editor:
         return {"wording": [{"key": k, "label": lab, "value": L.wording[k], "default": self.base.wording[k],
                              "state": "edited" if k in o else "default"} for k, lab in WORDING],
                 "placeholders": ["department", "units", "location", "type", "type_bare", "already", "info", "change",
-                                 "respond", "time", "full", "Full", "status"],
+                                 "respond", "remarks", "joint", "time", "full", "Full", "status"],
+                "lead_in_joint_only": [{"town": t, "value": L.lead_in_joint_only.get(t, ""),
+                                        "default": self.base.lead_in_joint_only.get(t, ""),
+                                        "state": "edited" if "lead_in_joint_only" in o and
+                                        L.lead_in_joint_only.get(t) != self.base.lead_in_joint_only.get(t) else "default"}
+                                       for t in L.joint_response],
+                "dept_tones": [{"town": t, "value": [list(x) for x in L.dispatch_tones[t]] if L.dispatch_tones.get(t) else None,
+                                "default": [list(x) for x in self.base.dispatch_tones[t]] if self.base.dispatch_tones.get(t) else None,
+                                "edited": t in ov.get("dispatch_tones", {})} for t in L.joint_response],
                 "tones": {"value": tone_groups(self.cad.s.tones), "default": self.config_tones,
                           "edited": "tones" in d},
                 "channels": {"value": list(self.cad.s.channels), "default": list(self.config_channels), "edited": "channels" in d},
                 "voice": {"engine": getattr(self.cad.s, "tts_engine", "say"), "name": getattr(self.cad.s, "voice", ""),
+                          "voices": list(KOKORO_VOICES), "default": self.config_voice[0], "default_speed": self.config_voice[1],
+                          "edited": "voice" in d or "speed" in d,
                           "speed": getattr(self.cad.s, "speed", 1.0), "rate_wpm": getattr(self.cad.s, "rate_wpm", 0),
                           "fallback": getattr(self.cad.s, "fallback_voice", ""), "repeat": getattr(self.cad.s, "repeat", 0)},
                 "transmit": {"enabled": self.cad.transmitter.enabled, "note": "Transmit is off: logged and played here only"},
@@ -828,10 +848,57 @@ class Editor:
             return self.preview(body.get("wording") or {})
         if action == "reset_section":
             ch = [("dispatch_wording", k, REMOVE) for k in ov.get("dispatch_wording", {})]
+            ch += [("dispatch_tones", k, REMOVE) for k in ov.get("dispatch_tones", {})]
             ch += [("dispatch", k, REMOVE) for k in ov.get("dispatch", {})]
             return self._commit(ch, op, [("dispatch", "dispatch", f"{len(ch)} edits", "reset to the defaults")])
-        key = _text(body.get("key"), "key", 40)
-        if key in dict(WORDING):
+        key = _text(body.get("key"), "key", 80)
+        if key.startswith("lead_in_joint_only/") or key.startswith("tones/"):
+            what, _, town = key.partition("/")
+            if town not in L.joint_response:
+                raise CadError(f"{town!r} is not a joint-response department")
+            if what == "tones":
+                cur = [list(x) for x in L.dispatch_tones[town]] if L.dispatch_tones.get(town) else None
+                if action == "set":
+                    v = body.get("value")
+                    v = None if v is None else self._tones(v)
+                    if v is not None and len(v) != 1:
+                        raise CadError("tones: one group for a department")
+                    v = v[0] if v else None
+                    base = [list(x) for x in self.base.dispatch_tones[town]] if self.base.dispatch_tones.get(town) else None
+                    return self._commit([("dispatch_tones", town, REMOVE if v == base else v)], op,
+                                        [("dispatch", f"tones/{town}", cur, v)])
+                if action == "reset":
+                    return self._commit([("dispatch_tones", town, REMOVE)], op, [("dispatch", f"tones/{town}", cur, "default")])
+            else:
+                only = dict(L.lead_in_joint_only)
+                if action == "set":
+                    only[town] = _text(body.get("value"), "lead-in", 80)
+                elif action == "reset":
+                    only[town] = self.base.lead_in_joint_only.get(town, "")
+                    only = {t: v for t, v in only.items() if v}
+                else:
+                    raise CadError("action: set or reset")
+                same = only == dict(self.base.lead_in_joint_only)
+                return self._commit([("dispatch_wording", "lead_in_joint_only", REMOVE if same else only)], op,
+                                    [("dispatch", key, L.lead_in_joint_only.get(town), only.get(town))])
+        elif key in ("voice", "speed"):
+            dflt = self.config_voice[0 if key == "voice" else 1]
+            cur = getattr(self.cad.s, key, dflt)
+            if action == "set":
+                v = body.get("value")
+                if key == "speed":
+                    if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0.5 <= v <= 2.0:
+                        raise CadError("speed: 0.5 to 2.0")
+                    v = round(float(v), 2)
+                elif getattr(self.cad.s, "tts_engine", "say") == "kokoro":
+                    if v not in KOKORO_VOICES:
+                        raise CadError(f"voice: one of the Kokoro voices ({', '.join(KOKORO_VOICES[:3])}, ...)")
+                else:
+                    v = _text(v, "voice", 60)
+                return self._commit([("dispatch", key, REMOVE if v == dflt else v)], op, [("dispatch", key, cur, v)])
+            if action == "reset":
+                return self._commit([("dispatch", key, REMOVE)], op, [("dispatch", key, cur, dflt)])
+        elif key in dict(WORDING):
             if action == "set":
                 v = _text(body.get("value"), key, 400)
                 return self._commit([("dispatch_wording", key, REMOVE if v == self.base.wording[key] else v)], op,
@@ -848,7 +915,8 @@ class Editor:
             if action == "reset":
                 return self._commit([("dispatch", key, REMOVE)], op, [("dispatch", key, cur, dflt)])
         else:
-            raise CadError(f"key: a template ({', '.join(k for k, _ in WORDING)}), tones or channels")
+            raise CadError(f"key: a template ({', '.join(k for k, _ in WORDING)}), tones, tones/<town>, "
+                           "lead_in_joint_only/<town>, channels, voice or speed")
         raise CadError("action: set, reset, reset_section or preview")
 
     def preview(self, wording: dict) -> dict:
@@ -858,7 +926,7 @@ class Editor:
         L = self.cad.lists
         w, errors = dict(L.wording), {}
         dummy = dict.fromkeys(("department", "units", "location", "type", "type_bare", "already", "info", "change",
-                               "respond", "time", "full", "Full", "status"), "x")
+                               "respond", "time", "full", "Full", "status", "remarks", "joint"), "x")
         for k, v in wording.items():
             if k not in dict(WORDING) or not isinstance(v, str):
                 continue
@@ -873,20 +941,34 @@ class Editor:
         at = self.store.clock()
         dep = self.cad.s.department
         alarm, stru = L.phrase("ALARM", "COMM"), L.phrase("STRU")
-        c = lambda kind, **kw: dispatcher.compose(kind, department=dep, incident=inc, at=at, wording=w, **kw)
+        only = dict(L.lead_in_joint_only)
+        if isinstance(wording.get("lead_in_joint_only"), dict):
+            only.update({k: v for k, v in wording["lead_in_joint_only"].items() if isinstance(v, str) and v.strip()})
+        joint = next(iter(L.joint_response), "")
+
+        def c(kind, lead=None, **kw):
+            lead = lead or dispatcher.lead_in(dep, [], True, False, w, only)
+            return dispatcher.compose(kind, department=lead, incident=inc, at=at, wording=w, **kw)
         try:
-            out = {"new": c("new", units=["Engine 60", "Ladder 31", "Rescue 40", "23 98"], phrase=stru),
+            out = {"new": c("new", units=["Engine 60", "Ladder 31", "Rescue 40", "23 98"], phrase=stru,
+                            remarks="smoke showing from the second floor"),
                    "add_on": c("add_on", units=["Engine 61"], phrase=alarm,
                                already=[("responding", ["Engine 60"]), ("on location", ["Ladder 31", "23 98"])]),
                    "upgrade": c("upgrade", units=[], phrase=alarm, info="smoke showing from the second floor",
                                 new_phrase=stru, full=True),
                    "full": c("new", units=["Engine 60"], phrase=stru, full=True)}
+            if joint:
+                out["joint"] = c("new", lead=dispatcher.lead_in(dep, [joint], True, False, w, only),
+                                 units=["Engine 60", "Engine 14", "Ladder 30"], phrase=stru)
+                out["joint_only"] = c("new", lead=dispatcher.lead_in(dep, [joint], False, False, w, only),
+                                      units=["Engine 14"], phrase=alarm)
         except (KeyError, IndexError, ValueError) as e:
             out = {}
             errors["_"] = f"can't render: {e}"
         return {"texts": out, "errors": errors,
-                "sample": "Sample: 209 Westchester Ave, cross of Pearl St; a structure fire (first dispatch, full "
-                          "response) and a commercial fire alarm (add-on, upgrade to a structure fire)."}
+                "sample": "Sample: 209 Westchester Ave, cross of Pearl St; a structure fire (first dispatch with remarks, "
+                          "full response, with a joint department) and a commercial fire alarm (add-on, upgrade, only the "
+                          "joint department's units)."}
 
     # -- run cards: reset ------------------------------------------------------------------------------
 
@@ -998,8 +1080,8 @@ class Editor:
             self._tones(d["tones"])
         if "channels" in d:
             self._channels(d["channels"])
-        if set(d) - {"tones", "channels"}:
-            raise CadError("overrides.dispatch: tones and channels only")
+        if set(d) - {"tones", "channels", "voice", "speed"}:
+            raise CadError("overrides.dispatch: tones, channels, voice and speed only")
         L = self.build(ov)
         # nothing in use may disappear
         for sec in LIST_SECTIONS:
