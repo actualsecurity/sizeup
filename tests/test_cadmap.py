@@ -183,15 +183,15 @@ def test_rigs_move_with_their_status_through_a_call():
         c.unit_station(uid(c, name), {"station": st})
     inc = c.create({"type": "STRU", "address": "209 Westchester Ave", "lat": 41.0, "lon": -73.67, "operator": "x"})
     c.dispatch(inc["id"], {"unit_ids": [uid(c, "E60"), uid(c, "L31"), uid(c, "E14")], "operator": "x"})
-    c.unit_status(uid(c, "E60"), {"status": "RESPONDING"})
-    c.unit_status(uid(c, "L31"), {"status": "ON LOCATION"})
+    c.unit_status(uid(c, "E60"), {"status": "RS"})
+    c.unit_status(uid(c, "L31"), {"status": "OL"})
     st = c.state()
     e60, l31, e14 = (marker(st, n) for n in ("E60", "L31", "E14"))
     assert (e60["place"], e60["look"], e60["line_to"]) == ("station", "responding", [-73.67, 41.0])
     assert (l31["place"], l31["look"], l31["group"]) == ("incident", "onscene", f"incident:{inc['id']}")
     assert (e14["place"], e14["look"], e14["tag"]) == ("station", "dispatched", "RB")
     assert [p["id"] for p in st["map"]["incidents"]] == [inc["id"]]
-    c.unit_status(uid(c, "E60"), {"status": "OUT OF SERVICE", "note": "pump"})
+    c.unit_status(uid(c, "E60"), {"status": "OS", "note": "pump"})
     assert (marker(c.state(), "E60")["look"], marker(c.state(), "E60")["place"]) == ("oos", "station")
 
 
@@ -219,7 +219,7 @@ def test_overview_summarises_each_open_incident():
     clock.t += 1
     n = c.create({"type": "NOTIF", "address": "Hydrant at King St", "operator": "x"})
     c.dispatch(a["id"], {"unit_ids": [uid(c, "E60"), uid(c, "L31")], "operator": "x"})
-    c.unit_status(uid(c, "L31"), {"status": "ON LOCATION"})
+    c.unit_status(uid(c, "L31"), {"status": "OL"})
     clock.t += 5
     c.record_traffic({"id": "FG1-1", "start": clock.t, "end": clock.t + 3, "source": "FG1", "talkgroup": None, "unit": "",
                       "rig": "L31", "radio_id": "", "text": "Ladder 31 on location, two story frame, nothing showing  ",
@@ -230,7 +230,7 @@ def test_overview_summarises_each_open_incident():
     o = ov[0]
     assert (o["number"], o["type"], o["status"], o["emergency"], o["address"]) == (a["number"], "STRU", "active", True,
                                                                                  "209 Westchester Ave")
-    assert [(u["name"], u["status"]) for u in o["units"]] == [("E60", "DISPATCHED"), ("L31", "ON LOCATION")]
+    assert [(u["name"], u["status"]) for u in o["units"]] == [("E60", "DP"), ("L31", "OL")]
     assert (o["radio"]["rig"], o["radio"]["channel"]) == ("L31", "FG1")
     assert o["radio"]["text"] == "Ladder 31 on location, two story frame, nothing showing"
     assert (o["note"]["kind"], o["note"]["text"], o["note"]["units"]) == ("note", "E60 stated that hydrant is out", ["E60"])
