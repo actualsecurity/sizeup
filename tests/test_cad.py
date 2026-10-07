@@ -155,7 +155,8 @@ def test_lists_file_has_the_sheets_vocabulary():
     L = lists.load()
     assert L.type_codes == ("ALARM", "ALS", "BLS", "BRUSH", "DRILL", "HAZARD", "INVEST", "MA", "MVA", "MVF", "NOTIF",
                             "RECALL", "RESCUE", "SERVICE", "STRU")
-    assert len(L.subtype_codes) == 51 and L.subtype_codes[:3] == ("CO-COMM", "CO-RESD", "COMM")
+    # the sheet's 51 subtypes are all there (the department has since added more, e.g. GAS-ODOR)
+    assert len(L.subtype_codes) >= 51 and L.subtype_codes[:3] == ("CO-COMM", "CO-RESD", "COMM")
     assert len(L.disposition_codes) == 20 and "NOTIF MADE" in L.disposition_codes
     assert L.status_ids == ("AVAILABLE", "DISPATCHED", "DISPATCH OTHER", "ACKNOWLEDGED", "RESPONDING", "ON LOCATION",
                             "OUT OF SERVICE", "UNMANNED")
@@ -1232,3 +1233,18 @@ def test_town_order_and_aliases_for_location_suggestions():
     assert L.towns_typed("5 Palmer Ave, Larchmont") == ["Larchmont"]
     assert L.towns_typed("740 W Boston Post Rd, Town of Mamaroneck") == ["Town of Mamaroneck"]
     assert L.towns_typed("123 Mamaroneck Ave, Mamaroneck") == ["Mamaroneck"]
+
+
+def test_gas_calls_are_said_by_what_they_are():
+    # User 2026-10-07: "we need things like odor, atmospheric gas alarm, etc".
+    from sizeup.cad.lists import load
+    L = load()
+    assert L.phrase("HAZARD", "GAS-ODOR") == "an odor of gas"
+    assert L.phrase("ALARM", "GAS-ATMOS") == "an atmospheric gas alarm"
+    assert L.phrase("HAZARD", "GAS-LEAK") == "a gas leak"
+    assert L.phrase("HAZARD", "GAS-LINE") == "a struck gas line"
+    assert L.phrase("INVEST", "GAS-OUT") == "an odor of gas outside"
+    assert L.phrase("ALARM", "GAS") == "an atmospheric gas alarm"      # the old plain GAS follows the type
+    assert L.phrase("HAZARD", "GAS") == "an odor of gas"
+    assert L.phrase("MVA", "EXTRI").endswith("with entrapment")
+    assert L.name("event_subtypes", "EXTRI") == "Extrication / entrapment"
