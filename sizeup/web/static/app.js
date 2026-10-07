@@ -835,7 +835,7 @@ function renderTraffic(inc) {
   const items = list.filter(isMainTraffic).sort((a, b) => b.start - a.start);
   syncList($("#traffic"), items, {
     key: (t) => t.id,
-    sig: (t) => JSON.stringify([t.text, t.status, t.unit, t.talkgroup, t.source, t.end, t.rerun_pending,
+    sig: (t) => JSON.stringify([t.text, t.status, t.unit, t.rig, t.radio_id, t.talkgroup, t.source, t.end, t.rerun_pending,
                                 (t.history || []).length, t.rerun_at]),
     make: () => el("li"),
     fill: (li, t) => {
@@ -844,7 +844,8 @@ function renderTraffic(inc) {
       const meta = el("div", "meta");
       meta.append(playButton(t.id, "Play this transmission", t.has_audio), rerunButton(t.id, t.rerun_pending, t.has_audio),
                   el("span", "t", fmtTime(t.start)), chip(t.source || "?", sourceColor(t.source), "src"));
-      if (t.unit) meta.append(el("b", "unit", t.unit));
+      const tag = Radio.rigTag(t);                                           // "E63 · 6301"
+      if (tag) meta.append(tag);
       else if (t.id_note) meta.append(el("span", "dim idnote", t.id_note));   // analog: why no radio ID
       if (t.talkgroup !== null && t.talkgroup !== undefined) meta.append(el("span", "dim", `TG ${t.talkgroup}`));
       if (t.end > t.start) meta.append(el("span", "dim dur", `${Math.round(t.end - t.start)} s`));
@@ -906,7 +907,8 @@ function callFill(li, t) {
   const meta = el("div", "meta");
   meta.append(playButton(t.id, "Play this transmission", t.has_audio), rerunButton(t.id, t.rerun_pending, t.has_audio),
               el("span", "t", fmtTime(t.start)));
-  if (t.unit) meta.append(el("b", "unit", t.unit));
+  const tag = Radio.rigTag(t);
+  if (tag) meta.append(tag);
   if (t.end > t.start) meta.append(el("span", "dim dur", `${Math.round(t.end - t.start)} s`));
   const was = historyTag(t.history, t.rerun_at);
   if (was) meta.append(was);
@@ -959,7 +961,7 @@ function renderOther(inc) {
       show(calls, open);
       if (open) {
         syncList(calls, g.calls, {
-          key: (t) => t.id, sig: (t) => JSON.stringify([t.text, t.status, t.unit, t.end, t.rerun_pending,
+          key: (t) => t.id, sig: (t) => JSON.stringify([t.text, t.status, t.unit, t.rig, t.radio_id, t.end, t.rerun_pending,
                                                        (t.history || []).length, t.rerun_at]),
           make: () => el("li"), fill: callFill, empty: "No calls",
         });
@@ -1373,7 +1375,15 @@ function onState(data) {
   renderHistory(ui.inc);
   renderMap();
   liveUpdate();
+  renderTalking();
 }
+
+// ---- who is talking now (radio.js: header strip and the talk alerts) --------------------------------
+
+function renderTalking() {
+  Radio.update((ui.state && ui.state.talking) || []);
+}
+Radio.mountAlerts($("#alerts"));
 
 function tick() {
   renderClock();
