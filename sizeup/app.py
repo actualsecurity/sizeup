@@ -91,7 +91,7 @@ class WhisperService:
         try:
             d = json.loads(self.state_path.read_text()) if self.state_path else None
             pid, argv = int(d["pid"]), list(d["argv"])
-            args = subprocess.run(["ps", "-o", "args=", "-p", str(pid)], capture_output=True, text=True,
+            args = subprocess.run(["ps", "-ww", "-o", "args=", "-p", str(pid)], capture_output=True, text=True,
                                   timeout=5).stdout.strip()
         except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
             return None
