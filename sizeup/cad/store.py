@@ -585,7 +585,7 @@ class Store:
         return added
 
     def units(self) -> list[dict]:
-        rows = self.q("SELECT u.*, a.incident_id, i.number AS incident_number FROM units u "
+        rows = self.q("SELECT u.*, a.incident_id, i.number AS incident_number, a.assigned_at FROM units u "
                       "LEFT JOIN assignments a ON a.unit_id = u.id AND a.cleared_at IS NULL "
                       "LEFT JOIN incidents i ON i.id = a.incident_id ORDER BY u.sort, u.id")
         for r in rows:
@@ -593,6 +593,15 @@ class Store:
             r["response"] = self.lists.response(r["name"])       # fire | mutual_aid | agency
             r["station"] = self.lists.station(r["name"])    # home firehouse: the data file, or Settings
         return rows
+
+    def recent_clears(self, since: float) -> dict[int, dict]:
+        """unit id -> the latest call it cleared since then, having been on location there
+        {incident_id, number, lat, lon, cleared_at} (where a returning rig drives home from:
+        sizeup/cad/mapview.py locate()). A call it was cancelled from en route doesn't count."""
+        rows = self.q("SELECT a.unit_id, a.incident_id, a.cleared_at, a.onscene_at, i.number, i.lat, i.lon FROM assignments a "
+                      "JOIN incidents i ON i.id = a.incident_id WHERE a.cleared_at >= ? ORDER BY a.cleared_at, a.id", (since,))
+        latest = {r["unit_id"]: r for r in rows}         # the latest wins
+        return {k: r for k, r in latest.items() if r["onscene_at"] is not None}
 
     def unit(self, uid: int) -> dict:
         u = next((u for u in self.units() if u["id"] == uid), None)

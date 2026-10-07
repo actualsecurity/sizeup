@@ -29,6 +29,8 @@
 .cm-rig.at-position { border-radius: 10px; box-shadow: 0 0 0 2px rgba(12, 11, 26, 0.8), 0 1px 6px rgba(0, 0, 0, 0.7); }
 .cm-rig.at-position::before { content: "◆ "; font-size: 8px; vertical-align: 1px; }
 .cm-rig.other { opacity: 0.55; }
+.cm-rig.at-returning { opacity: 0.6; border-style: dashed; }   /* on its way home: an estimated position */
+.cm-rig.at-returning::before { content: "↩ "; font-size: 8px; vertical-align: 1px; }
 .cm-rig.talking { outline: 2px solid var(--ok); outline-offset: 1px; animation: cmtalk 1.1s ease-in-out infinite; }
 .cm-rig.talked { outline: 1px dashed var(--ok); outline-offset: 1px; }
 @keyframes cmtalk { 0%, 100% { box-shadow: 0 0 0 0 rgba(70, 210, 122, 0.7); } 50% { box-shadow: 0 0 0 6px rgba(70, 210, 122, 0); } }

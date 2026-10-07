@@ -20,7 +20,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
-from sizeup.cad import dispatcher, export, mapview, runcards
+from sizeup.cad import dispatcher, eta, export, mapview, runcards
 from sizeup.cad.comms import Comms
 from sizeup.cad.feed import Feed
 from sizeup.cad.radios import Registry, RadioError, is_pcfd
@@ -120,6 +120,8 @@ class Cad:
         self._render_lock = threading.Lock()           # one `say` at a time
         self._state: tuple[int, dict] | None = None
         self.firehouses = mapview.load_firehouses()          # the maps' stations (a unit's home station is one)
+        self.eta = eta.Params()                              # the ETA estimates' settings (Settings > Dispatch)
+        self._clears: tuple[int, dict] | None = None         # (rev, Store.recent_clears): returning rigs
         self.settings = settings_mod.Editor(self)           # the Settings page's edits over the data file
         self.settings.startup()
         n = self.store.sync_units()
@@ -211,7 +213,23 @@ class Cad:
 
     def map_slice(self, units: list[dict], incs: list[dict], pos: dict, now: float) -> dict:
         tags = {c: j["tag"] for j in self.lists.joint_response.values() for c in j["units"]}
-        return mapview.map_slice(units, incs, self.lists.role, self.firehouses, pos, now, joint=lambda c: tags.get(c, ""))
+        return mapview.map_slice(units, incs, self.lists.role, self.firehouses, pos, now, joint=lambda c: tags.get(c, ""),
+                                 clears=self.clears(now), params=self.eta)
+
+    def clears(self, now: float) -> dict[int, dict]:
+        """Each unit's latest cleared call (a returning rig's start), re-read only when something changed."""
+        rev = self.store.rev
+        if self._clears is None or self._clears[0] != rev:
+            self._clears = (rev, self.store.recent_clears(now - mapview.RECENT_S))
+        return self._clears[1]
+
+    def locations(self, units: list[dict] | None = None, now: float | None = None) -> dict[str, dict | None]:
+        """unit code -> where it is now, estimated (mapview.locate): AVL, on a call, returning, its station."""
+        now = self.clock() if now is None else now
+        units = self.store.units() if units is None else units
+        incs = self.store.q("SELECT id, number, status, lat, lon FROM incidents WHERE status IN ('queued', 'pending', 'active')")
+        return mapview.locations(units, incs, self.lists.role, self.firehouses, self._positions(now), now,
+                                 self.clears(now), self.eta)
 
     def _with_radio(self, incs: list[dict], limit: int = 200) -> list[dict]:
         """Each event's radio traffic (newest first), with whether its audio is still kept."""
@@ -331,8 +349,9 @@ class Cad:
                     "note": "Non-emergency event: no run card and no dispatch. Attach units if needed."}
         typ = _text(body, "type", 24) or inc["type"]
         sub = _text(body, "subtype", 24) if "type" in body else inc["subtype"]
-        r = runcards.recommend(self.store, typ, sub, iid)
-        return dict(r, units=[{k: u[k] for k in ("id", "name", "kind", "spare", "status", "slot")} for u in r["units"]])
+        r = runcards.recommend(self.store, typ, sub, iid, where=self.locations(), params=self.eta)
+        return dict(r, units=[{k: u[k] for k in ("id", "name", "kind", "spare", "status", "slot", "eta_s", "eta", "reason")}
+                              for u in r["units"]])
 
     def full(self, iid: int) -> dict:
         return self._with_radio([self.store.full(iid)], limit=1000)[0]

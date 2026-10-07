@@ -143,6 +143,14 @@ label.check { cursor: pointer; }
 .unfilled { margin: 0 0 0.4em; padding-left: 1.2em; color: var(--warn); font-weight: 600; }
 .unfilled:empty { display: none; }
 .r-units li.ru label { cursor: pointer; }
+/* nearest first: each recommended rig's estimate and why ("~2 min est. · returning from 26-000004") */
+.r-order { margin: -0.2em 0 0.35em; }
+.r-order:empty { display: none; }
+.ru .eta { color: var(--dim); font-size: 0.82em; min-width: 0; overflow-wrap: anywhere; }
+.ru .eta b { color: var(--text); font-weight: 600; }
+.ru .eta.ret { color: color-mix(in srgb, var(--ok) 70%, var(--text)); }
+.ru .eta.unk { font-style: italic; }
+@media (max-width: 640px) { .ru .eta { order: 10; flex-basis: 100%; padding-left: 1.9em; margin-top: -0.25em; } }   /* its own line */
 .add-unit { margin: 0.5em 0; }
 .add-unit select { flex: 1 1 12em; min-width: 0; }
 .txnote { font-size: 0.88em; color: var(--warn); }

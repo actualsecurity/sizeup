@@ -17,7 +17,9 @@ Reset to default = drop the override (one item, or a whole section).
                                    response, station, retired}); key "_boards" -> the boards' layout
     dispatch_wording               key template name -> text; "lead_in_joint_only" -> {town: text}
     dispatch_tones                 key joint town -> [[Hz, s], ...] | null (not set: PCFD's are played)
-    dispatch                       key "tones" -> PCFD's tone groups, "channels" -> [labels], "voice", "speed"
+    dispatch                       key "tones" -> PCFD's tone groups, "channels" -> [labels], "voice", "speed";
+                                   the ETA estimates (sizeup/cad/eta.py): "road_factor", "speed_kmh", "turnout_min",
+                                   "return_margin_min", "order" (nearest | card), "quarters_status"
 
 Codes never change (they are stored on events and exported): a rename changes the name only. An
 item in use can't be deleted, only retired (named on old events, off the pick lists). Every change
@@ -34,7 +36,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from sizeup.cad import dispatcher, runcards
+from sizeup.cad import dispatcher, eta, runcards
 from sizeup.cad import lists as lists_mod
 from sizeup.cad.lists import CLASSES, CODE, COLOR, LIST_SECTIONS, LONG_CODE, RESPONSES, ROLES, ListsError
 from sizeup.cad.store import SCHEMA_VERSION, TZ, CadError
@@ -257,6 +259,7 @@ class Editor:
         if hasattr(self.cad.s, "speed"):
             self.cad.s.voice = d.get("voice", self.config_voice[0])
             self.cad.s.speed = float(d.get("speed", self.config_voice[1]))
+        self.cad.eta = eta.Params().with_overrides(d)
         self.cad._state = None
 
     def _commit(self, changes: list[tuple[str, str, object]], operator: str, audit: list[tuple[str, str, object, object]],
@@ -459,7 +462,20 @@ class Editor:
                           "speed": getattr(self.cad.s, "speed", 1.0), "rate_wpm": getattr(self.cad.s, "rate_wpm", 0),
                           "fallback": getattr(self.cad.s, "fallback_voice", ""), "repeat": getattr(self.cad.s, "repeat", 0)},
                 "transmit": {"enabled": self.cad.transmitter.enabled, "note": "Transmit is off: logged and played here only"},
-                "department": self.cad.s.department}
+                "department": self.cad.s.department,
+                "eta": self._eta_page(L, d)}
+
+    def _eta_page(self, L, d: dict) -> dict:
+        """The recommendation's ETA estimates (sizeup/cad/eta.py): each value, its default, edited or not."""
+        cur, dflt = self.cad.eta.as_dict(), eta.Params().as_dict()
+        return {"numbers": [{"key": k, "label": lab, "unit": unit, "min": lo, "max": hi, "value": cur[k], "default": dflt[k],
+                             "edited": k in d} for k, (_, lo, hi, lab, unit) in eta.NUMBERS.items()],
+                "order": {"value": cur["order"], "default": dflt["order"], "edited": "order" in d, "choices": list(eta.ORDERS)},
+                "quarters_status": {"value": cur["quarters_status"], "default": dflt["quarters_status"],
+                                    "edited": "quarters_status" in d,
+                                    "choices": [{"code": c, "name": L.name("unit_statuses", c)} for c in L.free]},
+                "note": "Estimates only: straight-line distance × road factor at an average speed, plus turnout "
+                        "from quarters. No road network or traffic. Shown as “~3 min est.”."}
 
     def _system(self, ov: dict) -> dict:
         try:
@@ -1022,6 +1038,16 @@ class Editor:
             if action == "reset":
                 return self._commit([("dispatch_wording", key, REMOVE)], op,
                                     [("dispatch", f"wording/{key}", L.wording[key], self.base.wording[key])])
+        elif key in eta.KEYS:
+            cur, dflt = self.cad.eta.as_dict()[key], eta.Params().as_dict()[key]
+            if action == "set":
+                try:
+                    v = eta.check(key, body.get("value"), L.free)
+                except ValueError as e:
+                    raise CadError(str(e)) from None
+                return self._commit([("dispatch", key, REMOVE if v == dflt else v)], op, [("dispatch", f"eta/{key}", cur, v)])
+            if action == "reset":
+                return self._commit([("dispatch", key, REMOVE)], op, [("dispatch", f"eta/{key}", cur, dflt)])
         elif key in ("tones", "channels"):
             cur = tone_groups(self.cad.s.tones) if key == "tones" else list(self.cad.s.channels)
             dflt = self.config_tones if key == "tones" else list(self.config_channels)
@@ -1032,7 +1058,7 @@ class Editor:
                 return self._commit([("dispatch", key, REMOVE)], op, [("dispatch", key, cur, dflt)])
         else:
             raise CadError(f"key: a template ({', '.join(k for k, _ in WORDING)}), tones, tones/<town>, "
-                           "lead_in_joint_only/<town>, channels, voice or speed")
+                           f"lead_in_joint_only/<town>, channels, voice, speed or {', '.join(eta.KEYS)}")
         raise CadError("action: set, reset, reset_section or preview")
 
     def preview(self, wording: dict) -> dict:
@@ -1196,9 +1222,15 @@ class Editor:
             self._tones(d["tones"])
         if "channels" in d:
             self._channels(d["channels"])
-        if set(d) - {"tones", "channels", "voice", "speed"}:
-            raise CadError("overrides.dispatch: tones, channels, voice and speed only")
+        if set(d) - {"tones", "channels", "voice", "speed", *eta.KEYS}:
+            raise CadError(f"overrides.dispatch: tones, channels, voice, speed and {', '.join(eta.KEYS)} only")
         L = self.build(ov)
+        for k in eta.KEYS:
+            if k in d:
+                try:
+                    eta.check(k, d[k], L.free)
+                except ValueError as e:
+                    raise CadError(f"overrides.dispatch.{e}") from None
         # nothing in use may disappear
         for sec in LIST_SECTIONS:
             now = {x["code"] for x in getattr(self.cad.lists, sec)}

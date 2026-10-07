@@ -14,12 +14,24 @@ and first when the event is in their town (their call). A slot it can't fill is 
 utilities: response "agency") are never on a card, by kind or by name: they are attached to an
 event when they show up.
 
+Nearest first (user, 2026-10-07: "can we use the location information of where these apparatus are
+normally to recommend certain ones based on proximity to the next call?"): given where each rig is
+now (sizeup/cad/mapview.py locate(): its station, on its way home from a call it just cleared, or a
+live AVL fix) and the event's map point, a kind slot takes the free units of that kind by estimated
+arrival (sizeup/cad/eta.py) instead of board order. The policy order stays on top: the event's joint
+town's units, then PCFD's, then other joint units; regular apparatus before spares. Units whose
+place is unknown (no home station) come after those with one, in board order; equal estimates keep
+board order (several engines share a house). With no stations set, no map point on the event, or
+Settings > Dispatch "run card order", the result is exactly the board order. Each unit carries its
+estimate and why ("~2 min est. · returning from 26-000004"); named units stay as named.
+
 The default cards come from data/cad_lists.json (run_cards). They are a stand-in so the console
 works on day one, NOT PCFD policy: the page says so until each card has been edited.
 """
 
 from __future__ import annotations
 
+from sizeup.cad import eta
 from sizeup.cad.lists import key
 from sizeup.cad.store import CadError, Store
 
@@ -194,25 +206,61 @@ def describe(slot: dict) -> str:
     return f"{slot['count']} × {slot['kind'].replace('|', '/')}"
 
 
-def recommend(store: Store, typ: str, subtype: str = "", incident_id: int | None = None) -> dict:
-    """{"units": [unit + "slot"], "unfilled": ["no ladder/tower available"], "card": key or None}.
+def estimates(units: list[dict], where: dict | None, inc: dict | None, params: eta.Params | None = None) -> dict[int, dict]:
+    """unit id -> {eta_s (None: unknown), eta ("~3 min est." or ''), reason} for the given units:
+    from where each is now (mapview.locate) to the event's map point."""
+    p = params or eta.Params()
+    to = [inc["lon"], inc["lat"]] if inc and inc.get("lat") is not None and inc.get("lon") is not None else None
+    out = {}
+    for u in units:
+        loc = (where or {}).get(u["name"])
+        if loc is None:
+            out[u["id"]] = {"eta_s": None, "eta": "", "reason": "station not set"}
+        elif to is None:
+            out[u["id"]] = {"eta_s": None, "eta": "", "reason": loc["label"]}
+        else:
+            s = eta.eta_s(loc["ll"], to, p, from_quarters=not loc["on_road"])
+            out[u["id"]] = {"eta_s": round(s), "eta": eta.text(s), "reason": f"{eta.text(s)} · {loc['label']}"}
+    return out
+
+
+def recommend(store: Store, typ: str, subtype: str = "", incident_id: int | None = None,
+              where: dict | None = None, params: eta.Params | None = None) -> dict:
+    """{"units": [unit + "slot", "eta_s", "eta", "reason"], "unfilled": ["no ladder/tower available"],
+    "card": key or None, "order": {by: nearest|card, note}, "others": {unit id: estimate} (the other free
+    units with an estimate: hints for adding one by hand)}.
     Units already on this event count toward their slots (a second alarm adds, it doesn't repeat).
-    No card for the type: no units and a note, never an error (the operator adds units by hand)."""
+    No card for the type: no units and a note, never an error (the operator adds units by hand).
+    where: unit code -> mapview.locate() (None: nobody's place is known: board order);
+    params: the ETA settings (eta.Params; its order "card" keeps board order, estimates still shown)."""
     L = store.lists
+    p = params or eta.Params()
     c = resolve(store, typ, subtype)
     units = store.units()
     on_here = [u for u in units if incident_id is not None and u["incident_id"] == incident_id]
+    inc = store.incident(incident_id) if incident_id is not None else None
+    free = [u for u in units if u["status"] in L.free and u["incident_id"] is None]
+    est = estimates(free, where, inc, p)
+    located = inc is not None and inc.get("lat") is not None and inc.get("lon") is not None
+    nearest = p.order == "nearest" and located and where is not None
+    order = {"by": "nearest" if nearest else "card",
+             "note": "" if nearest else "run card order (Settings > Dispatch)" if p.order != "nearest"
+             else "no map point on the event: run card order" if not located else ""}
+    others = {u["id"]: est[u["id"]] for u in free if u["response"] != "agency" and est[u["id"]]["eta"]}   # the add list's hints
     if c is None:
         what = L.type_label(typ, subtype) or "this event"
         return {"card": None, "card_label": "", "units": [], "unfilled": [], "already": [u["name"] for u in on_here],
-                "note": f"No run card for {what}: add units by hand", "joint_call": ""}
-    town = L.joint_call(store.incident(incident_id)) if incident_id is not None else ""
+                "note": f"No run card for {what}: add units by hand", "joint_call": "", "order": order, "others": others}
+    town = L.joint_call(inc) if inc is not None else ""
 
     def rank(u: dict) -> int:          # the event's joint town's units, then PCFD's, then other joint units
         jt = L.joint_town(u["name"])
         return 0 if town and jt == town else (1 if not jt else 2)
-    free = [u for u in units if u["status"] in L.free and u["incident_id"] is None]
-    free.sort(key=lambda u: (rank(u), u["spare"], u["sort"]))   # regular apparatus before spares
+
+    def near(u: dict) -> tuple:        # nearest first; unknown places after, in board order
+        s = est[u["id"]]["eta_s"] if nearest else None
+        return (0, s) if s is not None else (1, 0)
+    free.sort(key=lambda u: (rank(u), u["spare"], *near(u), u["sort"]))   # regular apparatus before spares
     named = {s["unit"] for s in c["slots"] if s.get("unit")}
     taken: set[int] = set()
     picks, unfilled = [], []
@@ -232,7 +280,7 @@ def recommend(store: Store, typ: str, subtype: str = "", incident_id: int | None
         for u in free:
             if need and u["id"] not in taken and match(u) and u["response"] != "agency":
                 taken.add(u["id"])
-                picks.append(dict(u, slot=describe(slot)))
+                picks.append(dict(u, slot=describe(slot), **est[u["id"]]))
                 need -= 1
         if need:
             if slot.get("unit"):
@@ -245,7 +293,8 @@ def recommend(store: Store, typ: str, subtype: str = "", incident_id: int | None
                 unfilled.append(f"no {slot['kind'].replace('|', '/')} available" if need == slot["count"]
                                 else f"only {slot['count'] - need} of {slot['count']} {slot['kind'].replace('|', '/')} available")
     return {"card": c["type"], "card_label": c["label"], "units": picks, "unfilled": unfilled,
-            "already": [u["name"] for u in on_here], "note": "", "joint_call": town}
+            "already": [u["name"] for u in on_here], "note": "", "joint_call": town, "order": order,
+            "others": {k: v for k, v in others.items() if k not in taken}}
 
 
 def from_page(incident_type: str, category: str, text: str) -> tuple[str, str, str]:

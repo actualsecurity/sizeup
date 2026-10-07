@@ -868,6 +868,9 @@ function renderDispatchBox(inc) {
   setText($("#r-card"), rec && rec.card ? `run card: ${rec.card_label || rec.card}${rec.forType ? " (new type)" : ""}` : "");
   const warn = rec ? [...(rec.error ? [rec.error] : []), ...(rec.note ? [rec.note] : []), ...rec.unfilled] : [];
   $("#r-unfilled").replaceChildren(...warn.map((w) => el("li", "", w)));
+  const order = rec && rec.order;
+  setText($("#r-order"), !order || !rec.units.length ? ""
+    : order.by === "nearest" ? "Nearest first in each slot, by estimated arrival (estimates only)" : `Board order: ${order.note}`);
   const rows = rec ? [...rec.units, ...rec.extra.map((id) => ({ ...unitById(id), slot: "added" }))] : [];
   const sig = JSON.stringify([rows.map((u) => u.id), rec && [...rec.checked], rec && rec.already,
     rows.map((u) => { const x = unitById(u.id); return x ? [x.status, x.incident_id] : null; }), cad.listSig.length]);
@@ -886,7 +889,9 @@ function renderDispatchBox(inc) {
       if (cb.checked) rec.checked.add(u.id); else rec.checked.delete(u.id);
       rec.sig = null;
     });
-    lab.append(cb, el("b", "", u.name), el("span", "dim small", u.slot || ""), el("span", "spacer"), statusChip(now.status));
+    lab.append(cb, el("b", "", u.name), el("span", "dim small", u.slot || ""));
+    if (u.reason) lab.append(etaHint(u));
+    lab.append(el("span", "spacer"), statusChip(now.status));
     if (now.spare) lab.append(el("span", "chip spare", "spare"));
     if (now.incident_id && now.incident_id !== inc.id) lab.append(el("span", "warn small", `on ${now.incident_number} (will be moved)`));
     li.append(lab);
@@ -902,12 +907,25 @@ function renderDispatchBox(inc) {
   // Add any other unit (not out of service or unmanned, not already listed or on this incident).
   const listed = new Set(rows.map((u) => u.id));
   const others = units().filter((u) => !listed.has(u.id) && canDispatch(u) && u.incident_id !== inc.id && (u.board || u.incident_id));
+  const hints = (rec && rec.others) || {};
   fillSelect($("#r-add"), others.map((u) => [String(u.id),
-    `${u.name} · ${unitStatus(u.status).name}${u.incident_number ? ` (on ${u.incident_number})` : ""}`]),
+    `${u.name} · ${unitStatus(u.status).name}${u.incident_number ? ` (on ${u.incident_number})` : ""}`
+    + (hints[u.id] ? ` · ${hints[u.id].reason}` : "")]),
   others.length ? "Add another unit…" : "No other units in service");
   const ch = $("#r-channel");
   const chans = (cad.state.transmit && cad.state.transmit.channels) || [];
   if (ch.options.length !== chans.length) fillSelect(ch, chans.map((c) => [c, c]));
+}
+
+// "~2 min est. · returning from 26-000004": the estimate in bold, the why after it (runcards.estimates).
+function etaHint(u) {
+  const [t, ...why] = u.eta ? u.reason.split(" · ") : ["", u.reason];
+  const span = el("span", "eta" + (/^returning|^near/.test(why.join(" · ")) ? " ret" : "") + (u.eta ? "" : " unk"));
+  if (t) span.append(el("b", "", t), document.createTextNode(why.length ? ` · ${why.join(" · ")}` : ""));
+  else span.textContent = why.join(" · ");
+  span.title = u.eta ? "Estimated arrival (straight line × road factor, average speed, + turnout from quarters): an estimate"
+    : "No estimate";
+  return span;
 }
 
 function checkedIds() {

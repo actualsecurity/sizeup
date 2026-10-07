@@ -9,6 +9,8 @@
 //   on location                     fanned out around the call's pin
 //   on a call, no home station      the outer ring at the call (outlined: not there yet)
 //   live position (future AVL)      where the feed says (state.map marker place "position")
+//   cleared a call, on its way home  faded, part way from the call to its firehouse (an estimate: place
+//                                    "returning"), with a thin line home
 //   no home station, not on a call  not drawn: listed in "Station not set" (click one to set it)
 //
 // This file only lays the server's markers out: chips fanned around their anchor in screen pixels
@@ -23,7 +25,7 @@ window.CadMap = (() => {
   const STATION_R = 34, INC_R = 30, RING_GAP = 24, CHIP_W = 48;   // px: the fan-out around an anchor
   const FAR_ZOOM = 13.6;               // below this: smaller chips, tighter rings
   const FOCUS_MAX_ZOOM = 16.3;
-  const LINE = "#ffb020";
+  const LINE = "#ffb020", HOME_LINE = "#c3cbff";      // to a call | a returning rig's way home (thin)
   const LOOK_NAMES = { available: "available", oos: "out of service", dispatched: "dispatched",
                        responding: "responding", onscene: "on location" };
 
@@ -69,7 +71,8 @@ window.CadMap = (() => {
           map.addLayer({
             id: "cm-lines", type: "line", source: "cm-lines",
             layout: { "line-cap": "round", "line-join": "round" },
-            paint: { "line-color": ["get", "color"], "line-width": 2.5, "line-opacity": 0.9, "line-dasharray": [1.6, 1.6] },
+            paint: { "line-color": ["get", "color"], "line-width": ["case", ["get", "home"], 1.6, 2.5],
+                     "line-opacity": ["case", ["get", "home"], 0.7, 0.9], "line-dasharray": [1.6, 1.6] },
           }, map.getLayer("firehouse") ? "firehouse" : undefined);
         }
         this.ready = true;
@@ -152,7 +155,7 @@ window.CadMap = (() => {
         rings.forEach((list, ring) => {
           if (!list.length) return;
           const m0 = list[0];
-          if (m0.place === "position") { list.forEach((m) => out.set(m.unit, [0, 0])); return; }
+          if (m0.place === "position" || m0.place === "returning") { list.forEach((m) => out.set(m.unit, [0, 0])); return; }
           const n = list.length, deg = Math.PI / 180;
           if (m0.place === "station") {
             r = Math.max(ring ? r + RING_GAP * k : STATION_R * k, (n * w) / (2 * Math.PI));
@@ -184,7 +187,7 @@ window.CadMap = (() => {
         const off = offs.get(m.unit) || [0, 0];
         const onFocus = !!this.focus && m.incident_id === this.focus.id;
         const sig = JSON.stringify([m.lon, m.lat, off, m.look, m.ring, m.place, st.bg, talk, m.tag, m.station, m.incident_number,
-          onFocus, !!this.focus, this.far]);
+          m.returning_from, onFocus, !!this.focus, this.far]);
         let rec = this.chips.get(m.unit);
         if (!rec) {
           const e = h("button", "cm-rig");
@@ -205,6 +208,7 @@ window.CadMap = (() => {
         e.replaceChildren(h("span", "n", m.unit));
         if (m.tag) e.append(h("span", "tag", m.tag));
         e.title = [m.unit, st.name, m.place === "position" ? "live position" : "",
+                   m.place === "returning" ? `returning from ${m.returning_from} (estimated position)` : "",
                    m.station ? `home: ${m.station}` : (m.fire ? "home station not set" : ""),
                    m.incident_number ? `on ${m.incident_number}` : "",
                    talk === "talking" ? "talking now" : talk ? "just transmitted" : ""].filter(Boolean).join(" · ");
@@ -219,8 +223,8 @@ window.CadMap = (() => {
       for (const m of markers) {
         if (!m.line_to) continue;
         const k = JSON.stringify([m.lon, m.lat, m.line_to]);
-        const color = statusOf(lists, m.status).bg || LINE;
-        if (!feats.has(k)) feats.set(k, { type: "Feature", properties: { color },
+        const color = m.home_line ? HOME_LINE : statusOf(lists, m.status).bg || LINE;
+        if (!feats.has(k)) feats.set(k, { type: "Feature", properties: { color, home: !!m.home_line },
           geometry: { type: "LineString", coordinates: [[m.lon, m.lat], m.line_to] } });
       }
       const fc = { type: "FeatureCollection", features: [...feats.values()] };
