@@ -1120,7 +1120,7 @@ def test_config_cad_sections(tmp_path):
 def test_cad_page_buttons_have_handlers():
     html = (ROOT / "sizeup" / "web" / "static" / "cad.html").read_text()
     js = (ROOT / "sizeup" / "web" / "static" / "cad.js").read_text()
-    js_all = js + (ROOT / "sizeup" / "web" / "static" / "settings.js").read_text()
+    js_all = js + "".join((ROOT / "sizeup" / "web" / "static" / f).read_text() for f in ("settings.js", "cadmap.js"))
     for bid, rest in re.findall(r'<button id="([\w-]+)"([^>]*)>', html):
         assert f'$("#{bid}").addEventListener' in js_all or 'type="submit"' in rest, f"#{bid} has no handler"
     for fid in re.findall(r'<form id="([\w-]+)"', html):

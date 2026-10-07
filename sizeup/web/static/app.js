@@ -1286,6 +1286,7 @@ function initMap() {
       })),
     });
     ui.mapReady = true;
+    if (window.CadMap) CadMap.monitor(map, $("#map"));      // the CAD's rigs at their stations / calls (cadmap.js)
   });
   const touched = (e) => { if (e.originalEvent) ui.userMovedAt = Date.now(); };
   map.on("movestart", touched);

@@ -1387,38 +1387,8 @@ async function saveEdit(e) {
 
 // ---- map ----------------------------------------------------------------------------------
 
-function renderMap(inc) {
-  const has = inc && inc.lat != null && inc.lon != null;
-  show($("#d-nomap"), !has || !window.maplibregl || !cad.scene);
-  show($("#d-map"), has && !!window.maplibregl && !!cad.scene);
-  if (!has) { setText($("#d-nomap"), "No map point for this incident"); return; }
-  if (!window.maplibregl || !cad.scene) { setText($("#d-nomap"), "Map unavailable"); return; }
-  const sig = JSON.stringify([inc.id, inc.lat, inc.lon]);
-  if (!cad.map) {
-    cad.map = new maplibregl.Map({
-      container: $("#d-map"), style: buildMapStyle(cad.scene), center: [inc.lon, inc.lat], zoom: 16.5,
-      attributionControl: { compact: true }, maxPitch: 0, dragRotate: false, fadeDuration: 0,
-    });
-    cad.map.on("load", () => {
-      cad.map.addImage("firehouse", firehouseIcon(), { pixelRatio: 2 });
-      cad.map.getSource("firehouses").setData({
-        type: "FeatureCollection",
-        features: (cad.scene.firehouses || []).map((f) => ({
-          type: "Feature", properties: { name: f.name, address: f.address },
-          geometry: { type: "Point", coordinates: f.ll },
-        })),
-      });
-    });
-  }
-  if (sig === cad.mapSig) return;
-  cad.mapSig = sig;
-  cad.map.resize();                      // the box may have just been shown
-  cad.map.jumpTo({ center: [inc.lon, inc.lat], zoom: 16.5 });
-  if (cad.marker) cad.marker.remove();
-  const m = el("div", "inc-marker");
-  m.style.setProperty("--c", "#ff4d3d");
-  m.append(el("i", "ring"), el("i", "dot"));
-  cad.marker = new maplibregl.Marker({ element: m, anchor: "center" }).setLngLat([inc.lon, inc.lat]).addTo(cad.map);
+function renderMap(inc) {               // the working event's map: cadmap.js (every call and rig, focused on this one)
+  if (window.CadMap) CadMap.detail(inc);
 }
 
 // ---- unit board ---------------------------------------------------------------------------

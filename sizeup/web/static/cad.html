@@ -8,11 +8,13 @@
 <link rel="stylesheet" href="/static/style.css">
 <link rel="stylesheet" href="/static/cad.css">
 <link rel="stylesheet" href="/static/settings.css">
+<link rel="stylesheet" href="/static/cadmap.css">
 </head>
 <body class="cad">
 <header>
   <span id="station" class="station">sizeup</span>
   <span class="cad-title">Dispatch</span>
+  <button id="overview-open" class="tg-open ov-tab" title="Every open call at once: map, units, the latest radio (cadmap.js)">▦ Overview</button>
   <span id="conn" class="pill warn">connecting…</span>
   <span id="tx-pill" class="pill tx-off" title="No radio interface in this version: dispatches are logged and played in the browser only">Transmit off</span>
   <span id="talking" class="talking-strip" hidden aria-live="polite"></span>
@@ -63,6 +65,25 @@
       <div class="dim">Pick one on the left, or enter a new one.</div>
     </div>
 
+    <!-- Overview (cadmap.js): the landing view with no incident open; every open call at once -->
+    <div id="overview" class="overview" hidden>
+      <div class="ov-head">
+        <h2>Overview</h2>
+        <span id="ov-counts" class="dim small"></span>
+        <span class="spacer"></span>
+        <div id="ov-talk" class="ov-talk" aria-live="polite"></div>
+      </div>
+      <div id="ov-pages" class="ov-pages" hidden></div>
+      <div class="ov-grid">
+        <div class="ov-mapbox"><div id="ov-map"></div></div>
+        <div class="ov-side">
+          <ol id="ov-cards" class="ov-cards"></ol>
+          <h3 class="ov-sub">Non-emergency <span class="dim">· until closed</span></h3>
+          <ol id="ov-nonemerg" class="list ov-nelist"></ol>
+        </div>
+      </div>
+    </div>
+
     <form id="new-form" class="card form" hidden autocomplete="off">
       <div class="card-head"><h2>New incident</h2><span class="spacer"></span>
         <button id="new-cancel" type="button">Cancel</button></div>
@@ -93,6 +114,7 @@
     <div id="d-body" hidden>
       <div id="d-card" class="card inc">
         <div class="card-head">
+          <button id="d-back" type="button" class="back" title="Back to the overview: every open call">← Overview</button>
           <span id="d-number" class="number"></span>
           <span id="d-status" class="st-badge"></span>
           <span id="d-class" class="st-badge"></span>
@@ -356,6 +378,7 @@
 <script src="/static/radios-panel.js"></script>
 <script src="/static/cad-feed.js"></script>
 <script src="/static/cad.js"></script>
+<script src="/static/cadmap.js"></script>
 <script src="/static/settings.js"></script>
 </body>
 </html>

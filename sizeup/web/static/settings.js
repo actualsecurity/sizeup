@@ -534,6 +534,13 @@ function sUnitRow(u, i, n, kinds, boards) {
   const resp = sSelect(S_RESPONSES, u.response, (v) => edit({ response: v }, "answers as " + v.replace("_", " ")), "Answers as");
   resp.title = "Fire: run cards, tick all, dispatch. Mutual aid: only when named. Other agency: attach only, never dispatched.";
   li.append(spare, resp);
+  const homes = S.data.units.stations || [];
+  if (u.response !== "agency" && homes.length) {             // home firehouse: where the maps draw it (cadmap.js)
+    const home = sSelect([["", "Home: not set"], ...homes.map((n) => [n, n])], u.station || "",
+      (v) => sPost("units", { action: "station", code: u.code, station: v }, `${u.code}: home station ${v || "not set"}.`), "Home station");
+    home.title = "The firehouse it is housed in: the maps draw it there (not set until the department says)";
+    li.append(home);
+  }
   if (!u.retired) li.append(sSelect(boards, u.board, (v) => edit({ board: v }, "moved to another board"), "Board"));
   const meta = el("span", "s-meta");
   if (u.status) meta.append(statusChip(u.status));
