@@ -11,169 +11,280 @@
 <body class="cad">
 <header>
   <span id="station" class="station">sizeup</span>
-  <span class="cad-title">Dispatch</span>
+  <span class="cad-title">Self-dispatch CAD · Live operations</span>
   <span id="conn" class="pill warn">connecting…</span>
-  <span id="tx-pill" class="pill tx-off" title="No radio interface in this version: dispatches are logged and played in the browser only">TRANSMIT OFF</span>
+  <span id="tx-pill" class="pill tx-off" title="No radio interface in this version: dispatches are logged and played in the browser only">Transmit off</span>
   <span class="spacer"></span>
-  <button id="runcards-open" class="tg-open" title="Edit which units each call type sends">⚙ Run cards</button>
-  <label class="operator" title="Your name: recorded on every dispatch and timeline entry">
+  <label class="operator" title="Your name: recorded on every dispatch, status change and chronology entry">
     <span class="dim">Operator</span>
     <input id="operator" type="text" maxlength="60" autocomplete="off" spellcheck="false" placeholder="your name">
   </label>
+  <button id="runcards-open" class="tg-open" title="Edit which units each event type sends">Run cards</button>
   <a class="nav" href="/" title="The radio monitor (map, pages, traffic)">Monitor →</a>
-  <span id="clock" class="clock"><b id="clock-local"></b></span>
+  <span id="clock" class="clock big-clock"><span id="clock-date" class="dim"></span> <b id="clock-local"></b></span>
 </header>
 
-<main class="cad-main">
-  <!-- queue: pending (from 60 Control), active, recently closed -->
-  <aside class="queue">
-    <button id="new-incident" class="primary wide">+ New incident</button>
-    <section>
-      <h2>Pending <span class="dim">· from 60 Control pages, to accept</span></h2>
-      <ol id="q-pending" class="list q"></ol>
-    </section>
-    <section class="grow">
-      <h2>Active</h2>
-      <ol id="q-active" class="list q"></ol>
-    </section>
-    <section>
-      <h2>Closed <span class="dim">· last 12 h</span></h2>
-      <ol id="q-closed" class="list q closed"></ol>
-    </section>
-  </aside>
+<nav class="tabs" role="tablist">
+  <button id="tab-live" class="tab on" data-tab="live" role="tab">Live CAD</button>
+  <button id="tab-db" class="tab" data-tab="db" role="tab">Incident database</button>
+  <button id="tab-lists" class="tab" data-tab="lists" role="tab">Lists</button>
+</nav>
 
-  <!-- the selected incident, or the new-incident form -->
-  <section id="detail" class="detail">
-    <div id="d-empty" class="d-empty">
-      <div class="big dim">No incident selected</div>
-      <div class="dim">Pick one on the left, or enter a new one.</div>
-    </div>
-
-    <form id="new-form" class="card form" hidden autocomplete="off">
-      <div class="card-head"><h2>New incident</h2><span class="spacer"></span>
-        <button id="new-cancel" type="button">Cancel</button></div>
-      <label>Type <select id="f-type" required></select></label>
-      <label>Priority
-        <select id="f-priority">
-          <option value="">—</option><option value="1">1 · emergency</option>
-          <option value="2">2 · urgent</option><option value="3">3 · routine</option>
-        </select></label>
-      <label class="span2">Address
-        <input id="f-address" type="text" maxlength="200" placeholder="209 Westchester Ave, a place, or an intersection" spellcheck="false">
-      </label>
-      <div id="f-geo" class="geo span2"></div>
-      <ol id="f-sugg" class="sugg span2" hidden></ol>
-      <label class="span2">Cross street <input id="f-cross" type="text" maxlength="200" spellcheck="false"></label>
-      <label class="span2">Narrative <textarea id="f-narr" rows="3" maxlength="4000"></textarea></label>
-      <div class="span2 row"><span id="f-error" class="error"></span><span class="spacer"></span>
-        <button id="new-create" type="submit" class="primary">Create</button></div>
+<main id="view-live" class="cad-live">
+  <!-- left: event info, the 60 Control queue, the event windows -->
+  <section class="col col-left">
+    <form id="entry-form" class="panel entry" autocomplete="off">
+      <h2>Event info</h2>
+      <div class="fgrid">
+        <label class="span2">Location
+          <input id="f-address" type="text" maxlength="200" placeholder="209 Westchester Ave, a place, or an intersection" spellcheck="false">
+        </label>
+        <div id="f-geo" class="geo span2"></div>
+        <ol id="f-sugg" class="sugg span2" hidden></ol>
+        <label class="span2">Cross street <input id="f-cross" type="text" maxlength="200" spellcheck="false"></label>
+        <label>Event type <select id="f-type"></select></label>
+        <label>Event subtype <select id="f-subtype"></select></label>
+        <label>Name <input id="f-name" type="text" maxlength="120" spellcheck="false" placeholder="caller"></label>
+        <label>Phone <input id="f-phone" type="tel" maxlength="40"></label>
+        <label class="span2">Address <input id="f-caddr" type="text" maxlength="200" spellcheck="false" placeholder="caller's address"></label>
+        <label>Received via <select id="f-via"></select></label>
+        <label class="check" title="Emergency: Pending events, then dispatched. Non-emergency (notifications, closures, hydrants): logged and tracked, no dispatch. Set from the type; change it here.">
+          <input id="f-emergency" type="checkbox" checked> <span>Emergency</span>
+          <span id="f-class" class="dim small"></span>
+        </label>
+        <label id="f-until-w" class="span2" hidden>Until (closures, hydrants out of service; optional)
+          <input id="f-until" type="datetime-local">
+        </label>
+        <label class="span2">Remarks <textarea id="f-remarks" rows="3" maxlength="4000"></textarea></label>
+      </div>
+      <div class="row"><span id="f-error" class="error"></span><span class="spacer"></span>
+        <button id="f-clear" type="button">Clear</button>
+        <button id="f-accept" type="submit" class="primary big-btn">Accept event</button></div>
     </form>
 
-    <div id="d-body" hidden>
-      <div id="d-card" class="card inc">
-        <div class="card-head">
-          <span id="d-number" class="number"></span>
-          <span id="d-status" class="st-badge"></span>
-          <span id="d-source" class="dim"></span>
-          <span class="spacer"></span>
-          <button id="d-accept" class="primary" hidden>Accept</button>
-          <button id="d-dismiss" hidden>Dismiss</button>
-          <button id="d-edit" title="Change type, address, cross street">Edit</button>
-          <button id="d-close" hidden>Close incident</button>
-        </div>
-        <div class="inc-grid">
-          <div>
-            <div id="d-type" class="d-type"></div>
-            <div id="d-addr" class="d-addr"></div>
-            <div id="d-cross" class="d-cross"></div>
-            <div id="d-geo" class="geo"></div>
-            <div class="facts">
-              <span><span class="dim">Created</span> <b id="d-created"></b></span>
-              <span><span class="dim">Elapsed</span> <b id="d-elapsed"></b></span>
-              <span id="d-prio-w"><span class="dim">Priority</span> <b id="d-prio"></b></span>
-            </div>
-            <pre id="d-narr" class="narr"></pre>
-          </div>
-          <div class="mapbox">
-            <div id="d-map"></div>
-            <div id="d-nomap" class="nomap dim" hidden></div>
-          </div>
-        </div>
+    <section class="panel">
+      <h2>From 60 Control <span class="dim">· accept?</span></h2>
+      <ol id="q-queued" class="list q"></ol>
+    </section>
 
-        <form id="edit-form" class="form" hidden autocomplete="off">
-          <label>Type <select id="e-type"></select></label>
-          <label>Priority
-            <select id="e-priority">
-              <option value="">—</option><option value="1">1 · emergency</option>
-              <option value="2">2 · urgent</option><option value="3">3 · routine</option>
-            </select></label>
-          <label class="span2">Address <input id="e-address" type="text" maxlength="200" spellcheck="false"></label>
-          <div id="e-geo" class="geo span2"></div>
-          <ol id="e-sugg" class="sugg span2" hidden></ol>
-          <label class="span2">Cross street <input id="e-cross" type="text" maxlength="200" spellcheck="false"></label>
-          <div class="span2 row"><span id="e-error" class="error"></span><span class="spacer"></span>
-            <button id="edit-cancel" type="button">Cancel</button>
-            <button id="edit-save" type="submit" class="primary">Save</button></div>
-        </form>
+    <section class="panel">
+      <h2>Pending events <span class="dim">· awaiting dispatch</span></h2>
+      <div class="tscroll"><table class="evtable"><thead><tr><th>Event #</th><th>Type</th><th>Location</th><th>Received</th><th>Status</th><th>Units</th><th>Duration</th></tr></thead>
+        <tbody id="t-pending"></tbody></table></div>
+    </section>
+    <section class="panel">
+      <h2>Active events</h2>
+      <div class="tscroll"><table class="evtable"><thead><tr><th>Event #</th><th>Type</th><th>Location</th><th>Received</th><th>Status</th><th>Units</th><th>Duration</th></tr></thead>
+        <tbody id="t-active"></tbody></table></div>
+    </section>
+    <section class="panel">
+      <h2>Non-emergency events <span class="dim">· notifications, closures, hydrants</span></h2>
+      <div class="tscroll"><table class="evtable"><thead><tr><th>Event #</th><th>Type</th><th>Location</th><th>Received</th><th>Until</th><th>Units</th><th>Elapsed</th></tr></thead>
+        <tbody id="t-nonemerg"></tbody></table></div>
+    </section>
+    <section class="panel">
+      <h2>Closed <span class="dim">· last 12 h</span></h2>
+      <div class="tscroll"><table class="evtable"><thead><tr><th>Event #</th><th>Type</th><th>Location</th><th>Received</th><th>Disposition</th><th>Units</th><th>Duration</th></tr></thead>
+        <tbody id="t-closed"></tbody></table></div>
+    </section>
+  </section>
+
+  <!-- center: the working event -->
+  <section id="working" class="col col-mid">
+    <div id="w-empty" class="panel w-empty">
+      <h2>Working event</h2>
+      <div class="big dim">No event open</div>
+      <div class="dim">Accept one from Event info, or click an event in a list.</div>
+    </div>
+
+    <div id="w-body" class="panel" hidden>
+      <div class="w-head">
+        <h2>Working event</h2>
+        <span id="w-number" class="number"></span>
+        <span id="w-status" class="badge"></span>
+        <span id="w-class" class="chip"></span>
+        <span class="spacer"></span>
+        <button id="w-edit" title="Change type, location, caller details, remarks">Edit</button>
+        <button id="w-close-view" title="Close this panel (the event stays as it is)">✕</button>
       </div>
 
-      <div class="card">
-        <div class="card-head"><h2>Units on this incident</h2></div>
-        <ol id="d-units" class="list on-units"></ol>
+      <div id="w-queued" class="warnbox" hidden>
+        <div>From 60 Control: check it, pick the type if the page didn't say, then accept or dismiss.</div>
+        <div id="w-note" class="w-note"></div>
+        <div class="row">
+          <label class="inline">Type <select id="w-acc-type"></select></label>
+          <label class="inline">Subtype <select id="w-acc-sub"></select></label>
+          <span class="spacer"></span>
+          <button id="w-dismiss">Dismiss</button>
+          <button id="w-accept" class="primary">Accept</button>
+        </div>
       </div>
 
-      <div id="d-dispatch" class="card">
-        <div class="card-head"><h2>Dispatch</h2>
-          <span id="r-card" class="dim"></span>
-          <span class="spacer"></span>
-          <button id="r-refresh" title="Recommend again from the run card and who is free now">↻ Recommend</button>
+      <div class="w-grid">
+        <dl class="fields">
+          <div><dt>Event #</dt><dd id="w-f-number"></dd></div>
+          <div><dt>Type</dt><dd><span id="w-f-type" class="typecell"></span></dd></div>
+          <div><dt>Received</dt><dd id="w-f-received"></dd></div>
+          <div><dt>Status</dt><dd id="w-f-status"></dd></div>
+          <div class="wide"><dt>Location</dt><dd id="w-f-location"></dd></div>
+          <div class="wide"><dt>Units</dt><dd id="w-f-units"></dd></div>
+          <div><dt>Caller</dt><dd id="w-f-caller"></dd></div>
+          <div><dt>Phone</dt><dd id="w-f-phone"></dd></div>
+          <div><dt>Caller address</dt><dd id="w-f-caddr"></dd></div>
+          <div><dt>Received via</dt><dd id="w-f-via"></dd></div>
+          <div id="w-f-until-w"><dt>Until</dt><dd id="w-f-until"></dd></div>
+          <div><dt>Duration</dt><dd id="w-f-duration"></dd></div>
+          <div id="w-f-disp-w"><dt>Disposition</dt><dd id="w-f-disp"></dd></div>
+          <div class="wide"><dt>Remarks</dt><dd><pre id="w-f-remarks" class="remarks"></pre></dd></div>
+        </dl>
+        <div class="mapbox">
+          <div id="w-map"></div>
+          <div id="w-nomap" class="nomap dim" hidden></div>
         </div>
-        <div id="r-pending" class="warnbox" hidden>Accept the incident before dispatching. You can preview it now.</div>
+      </div>
+
+      <form id="edit-form" class="fgrid edit" hidden autocomplete="off">
+        <label>Event type <select id="e-type"></select></label>
+        <label>Event subtype <select id="e-subtype"></select></label>
+        <label class="span2">Location <input id="e-address" type="text" maxlength="200" spellcheck="false"></label>
+        <div id="e-geo" class="geo span2"></div>
+        <ol id="e-sugg" class="sugg span2" hidden></ol>
+        <label class="span2">Cross street <input id="e-cross" type="text" maxlength="200" spellcheck="false"></label>
+        <label>Name <input id="e-name" type="text" maxlength="120" spellcheck="false"></label>
+        <label>Phone <input id="e-phone" type="tel" maxlength="40"></label>
+        <label class="span2">Address <input id="e-caddr" type="text" maxlength="200" spellcheck="false"></label>
+        <label>Received via <select id="e-via"></select></label>
+        <label class="check"><input id="e-emergency" type="checkbox"> <span>Emergency</span></label>
+        <label class="span2">Until <input id="e-until" type="datetime-local"></label>
+        <label class="span2">Remarks <textarea id="e-remarks" rows="3" maxlength="4000"></textarea></label>
+        <div class="span2 row"><span id="e-error" class="error"></span><span class="spacer"></span>
+          <button id="edit-cancel" type="button">Cancel</button>
+          <button id="edit-save" type="submit" class="primary">Save</button></div>
+      </form>
+
+      <!-- emergency: run card, dispatch, add-on, upgrade -->
+      <div id="w-dispatch" class="sub">
+        <div class="sub-head"><h3>Dispatch</h3>
+          <span id="r-card" class="dim small"></span>
+          <span id="r-kind" class="chip addon" hidden title="This event already had a dispatch: units sent now are &quot;added to the assignment&quot;">Next dispatch: add-on</span>
+          <span class="spacer"></span>
+          <button id="r-refresh" title="Recommend again from the run card and who is available now">↻ Recommend</button>
+        </div>
+        <div id="r-pending" class="warnbox" hidden>Accept the event before dispatching. You can preview it now.</div>
         <ul id="r-unfilled" class="unfilled"></ul>
         <ol id="r-units" class="list r-units"></ol>
         <div class="row add-unit">
           <select id="r-add"></select>
           <button id="r-add-btn" type="button">Add unit</button>
+          <button id="r-tickall" type="button" title="Tick every available PCFD apparatus (never mutual aid, PD or EMS)">Tick all available PCFD apparatus</button>
         </div>
         <div class="row">
+          <label class="check inline" title="Say the department response phrase instead of each unit's name"><input id="r-full" type="checkbox"> <span id="r-full-label">Full department response</span></label>
           <label class="inline"><span class="dim">Channel</span> <select id="r-channel"></select></label>
           <span class="spacer"></span>
-          <button id="r-preview">▶ Preview dispatch</button>
+          <button id="r-preview">▶ Preview</button>
           <button id="r-dispatch" class="primary danger">Dispatch</button>
         </div>
-        <div id="tx-note" class="txnote">Transmit is off: logged and played here only.</div>
+        <div class="row">
+          <button id="u-open" type="button" title="Re-dispatch with new information: a new type, more units, full department response">Upgrade…</button>
+          <span id="tx-note" class="txnote">Transmit is off: logged and played here only.</span>
+        </div>
+        <form id="upgrade-form" class="upgrade" hidden autocomplete="off">
+          <h3>Upgrade <span class="dim small">· "upgrade on your last alarm"</span></h3>
+          <div class="fgrid">
+            <label>New type <select id="u-type"></select></label>
+            <label>New subtype <select id="u-subtype"></select></label>
+            <label class="span2">New information <input id="u-info" type="text" maxlength="300" placeholder="smoke in the structure"></label>
+          </div>
+          <div class="row">
+            <label class="check inline"><input id="u-full" type="checkbox"> <span id="u-full-label">Full department response</span></label>
+            <span class="dim small">Units ticked above are sent with it.</span>
+          </div>
+          <div class="row"><span id="u-error" class="error"></span><span class="spacer"></span>
+            <button id="u-recommend" type="button" title="Recommend what the new type's run card adds over the units already on it">Recommend for the new type</button>
+            <button id="u-preview" type="button">▶ Preview upgrade</button>
+            <button id="u-cancel" type="button">Cancel</button>
+            <button id="u-send" type="submit" class="primary danger">Send upgrade</button></div>
+        </form>
         <div id="r-error" class="error"></div>
         <div id="r-preview-box" class="preview" hidden>
-          <div class="dim">Preview (nothing assigned or logged)</div>
+          <div id="r-preview-title" class="dim"></div>
           <div id="r-preview-text" class="ptext"></div>
           <audio id="r-audio" controls preload="auto"></audio>
           <div id="r-audio-note" class="dim"></div>
         </div>
       </div>
 
-      <div class="card">
-        <div class="card-head"><h2>Dispatches</h2></div>
-        <ol id="d-dispatches" class="list"></ol>
+      <!-- non-emergency: units attached, no dispatch -->
+      <div id="w-attach" class="sub" hidden>
+        <div class="sub-head"><h3>Units</h3><span class="dim small">Non-emergency: no run card and no dispatch.</span></div>
+        <div class="row add-unit">
+          <select id="a-unit"></select>
+          <button id="a-add" type="button">Attach unit</button>
+        </div>
+        <div id="a-error" class="error"></div>
       </div>
 
-      <div class="card">
-        <div class="card-head"><h2>Timeline</h2></div>
-        <ol id="d-events" class="list events"></ol>
+      <div class="sub">
+        <div class="sub-head"><h3>Units on this event</h3></div>
+        <ol id="w-units" class="list on-units"></ol>
+      </div>
+
+      <div id="w-closebox" class="sub">
+        <div class="row close-row">
+          <label class="inline">Disposition <select id="c-disp"></select></label>
+          <span class="spacer"></span>
+          <span id="c-error" class="error"></span>
+          <button id="c-close" class="danger">Close event</button>
+        </div>
+      </div>
+
+      <div class="sub">
+        <div class="sub-head"><h3>Chronology</h3></div>
+        <div class="tscroll chrono-wrap"><table class="chrono"><thead><tr><th>Time</th><th>Event / comment</th><th>By</th></tr></thead>
+          <tbody id="w-chrono"></tbody></table></div>
         <form id="note-form" class="row note" autocomplete="off">
-          <input id="note-text" type="text" maxlength="2000" placeholder="Add a note to the timeline">
-          <button id="note-add" type="submit">Add note</button>
+          <input id="note-text" type="text" maxlength="2000" placeholder="Add a comment to the chronology">
+          <button id="note-add" type="submit">Add</button>
         </form>
       </div>
     </div>
   </section>
 
-  <!-- units by kind, with status buttons -->
-  <aside class="units">
-    <h2>Units</h2>
-    <div id="units" class="unit-groups"></div>
-    <h2 class="mt">Unit log <span class="dim">· not on an incident</span></h2>
-    <ol id="unit-log" class="list unit-log"></ol>
-  </aside>
+  <!-- right: the unit boards -->
+  <section class="col col-right">
+    <div id="boards"></div>
+    <section class="panel">
+      <h2>Unit log <span class="dim">· not on an event</span></h2>
+      <ol id="unit-log" class="list unit-log"></ol>
+    </section>
+  </section>
+</main>
+
+<main id="view-db" class="cad-page" hidden>
+  <section class="panel">
+    <div class="row"><h2>Incident database</h2><span class="spacer"></span>
+      <span class="dim small">CSV, the sheet's columns:</span>
+      <a class="nav" href="/api/cad/export/incidents.csv" download>Incident database</a>
+      <a class="nav" href="/api/cad/export/calls.csv" download>Call history</a>
+      <a class="nav" href="/api/cad/export/unit-history.csv" download>Unit history</a>
+      <a class="nav" href="/api/cad/export/event-log.csv" download>Event log</a>
+    </div>
+    <div class="tscroll"><table class="evtable db"><thead><tr><th>Event #</th><th>Type</th><th>Location</th><th>Received</th><th>Closed</th><th>Status</th><th>Disposition</th><th>Units</th><th>Via</th></tr></thead>
+      <tbody id="db-rows"></tbody></table></div>
+  </section>
+  <section class="panel admin">
+    <h2>Admin</h2>
+    <dl id="admin" class="fields"></dl>
+    <div class="dim small">There is no "clear all data" here on purpose.</div>
+  </section>
+</main>
+
+<main id="view-lists" class="cad-page" hidden>
+  <section class="panel">
+    <h2>Lists <span id="lists-source" class="dim"></span></h2>
+    <div id="lists" class="lists"></div>
+  </section>
 </main>
 
 <div id="rc-overlay" class="overlay" hidden>
@@ -187,9 +298,13 @@
     <div class="rc-body">
       <ol id="rc-list" class="list rc-list"></ol>
       <form id="rc-form" class="rc-form" autocomplete="off">
-        <label>Call type <input id="rc-type" type="text" maxlength="60" required></label>
-        <label>Said in the dispatch as <input id="rc-spoken" type="text" maxlength="120" placeholder="a structure fire"></label>
-        <div class="dim small">Slots, in order. A kind takes the next free unit of that kind (regular apparatus before spares); a named unit takes that unit.</div>
+        <div class="row">
+          <label>Event type <select id="rc-type"></select></label>
+          <label>Subtype <select id="rc-subtype"></select></label>
+        </div>
+        <div class="dim small">A card for a type and subtype wins over the card for the type alone.</div>
+        <label>Said in the dispatch as <input id="rc-spoken" type="text" maxlength="120"></label>
+        <div class="dim small">Slots, in order. A kind takes the next available unit of that kind (regular apparatus before spares; never another department's); a named unit takes that unit.</div>
         <ol id="rc-slots" class="rc-slots"></ol>
         <div class="row">
           <button id="rc-add-kind" type="button">+ Kind</button>
@@ -197,7 +312,7 @@
         </div>
         <div class="row"><span id="rc-error" class="error"></span><span class="spacer"></span>
           <button id="rc-delete" type="button" class="danger-quiet">Delete</button>
-          <button id="rc-new" type="button">New call type</button>
+          <button id="rc-new" type="button">New card</button>
           <button id="rc-save" type="submit" class="primary">Save</button></div>
       </form>
     </div>

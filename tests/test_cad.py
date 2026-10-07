@@ -898,3 +898,5 @@ def test_cad_page_buttons_have_handlers():
     called = set(re.findall(r"^\s+([A-Za-z_]\w*)\(\);?$", re.search(r"^function render\(\) \{(.*?)^\}", js, re.S | re.M).group(1), re.M))
     defined = set(re.findall(r"^(?:async\s+)?function\s+([A-Za-z_]\w*)\s*\(", js, re.M))
     assert called and not (called - defined)
+    css = (ROOT / "sizeup" / "web" / "static" / "cad.css").read_text()
+    assert "text-transform: uppercase" not in css and "text-transform:uppercase" not in css      # readable casing
