@@ -213,7 +213,7 @@ def test_coverage_by_municipal_boundary(gaz):
     counts = json.loads(gaz.meta["counts"])
     by_muni = counts["addresses_by_muni"]
     minimum = {"Port Chester": 4000, "Rye Brook": 2500, "Rye": 3500, "Harrison": 5000,
-               "Greenwich": 12000, "Mamaroneck": 3500}
+               "Greenwich": 12000, "Mamaroneck": 3500, "Larchmont": 1500, "Town of Mamaroneck": 2500}
     for muni, n in minimum.items():
         assert by_muni[muni] > n, muni
     # every NYS / NAD point inside each TIGER boundary polygon was fetched
@@ -350,3 +350,16 @@ def test_fixture_town_priority(tmp_path):
     assert gaz.geocode("12 Gamma Street, Greenwich").municipality == "Greenwich"
     assert gaz.geocode("12 Gamma Street Rye Neck").municipality == "Mamaroneck"
     assert gaz.geocode("twelve Gamma Street Byram").municipality == "Greenwich"
+
+
+def test_larchmont_and_town_of_mamaroneck_are_their_own_towns():
+    # User 2026-10-07: "More towns for addresses: Mamaroneck Town/Larchmont and village".
+    gaz = Gazetteer()
+    m = gaz.geocode("5 Hall Avenue Larchmont")
+    assert m and m.municipality == "Larchmont" and m.label == "5 Hall Ave, Larchmont"
+    m = gaz.geocode("respond to 3 Cottage Circle in the Town of Mamaroneck")
+    assert m and m.municipality == "Town of Mamaroneck"
+    # Weaver St exists in Greenwich and in the Town of Mamaroneck: saying the town picks it.
+    m = gaz.geocode("Weaver Street, Town of Mamaroneck")
+    assert m and m.municipality == "Town of Mamaroneck"
+    assert TOWN_PRIORITY.index("Mamaroneck") < TOWN_PRIORITY.index("Town of Mamaroneck")

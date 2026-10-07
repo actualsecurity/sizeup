@@ -76,7 +76,8 @@ CROSS_GAP = CROSS_MARKERS | {"of", "street", "st", "streets", "is", "are", "and"
 # street / number exists in several of them: PCFD's own district first, then the
 # neighbours (mutual aid), then the rest. Edit this one tuple to change the order;
 # municipalities not listed get no preference. Labels match the ``muni`` column.
-TOWN_PRIORITY = ("Port Chester", "Rye Brook", "Rye", "Harrison", "Greenwich", "Mamaroneck")
+TOWN_PRIORITY = ("Port Chester", "Rye Brook", "Rye", "Harrison", "Greenwich", "Mamaroneck",
+                 "Larchmont", "Town of Mamaroneck")
 PRIOR_TOP, PRIOR_STEP = 0.05, 0.01
 MUNI_PRIOR = {m: round(max(0.0, PRIOR_TOP - PRIOR_STEP * i), 3) for i, m in enumerate(TOWN_PRIORITY)}
 # A town named in the text beats the priority order: right next to the location ...
@@ -94,7 +95,8 @@ MUNI_PHRASES = [
     (("town", "of", "harrison"), "Harrison", False),
     (("village", "of", "harrison"), "Harrison", False),
     (("village", "of", "mamaroneck"), "Mamaroneck", False),
-    (("town", "of", "mamaroneck"), "Mamaroneck", False),
+    (("town", "of", "mamaroneck"), "Town of Mamaroneck", False),
+    (("village", "of", "larchmont"), "Larchmont", False),
     (("town", "of", "greenwich"), "Greenwich", False),
     (("port", "chester"), "Port Chester", False),
     (("rye", "brook"), "Rye Brook", False),
@@ -105,6 +107,7 @@ MUNI_PHRASES = [
     (("cos", "cob"), "Greenwich", False),
     (("greenwich",), "Greenwich", False),
     (("mamaroneck",), "Mamaroneck", False),
+    (("larchmont",), "Larchmont", False),
     (("harrison",), "Harrison", True),
     (("purchase",), "Harrison", True),
     (("byram",), "Greenwich", True),
