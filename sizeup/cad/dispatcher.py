@@ -11,7 +11,9 @@
                              response. Time out 15:20."
     full=True               "full department response" instead of the units' names
     render_dispatch(text, tones, out_dir, VoiceCfg(...))
-                                 alert tones (two-tone sequential) + gap + the voice read twice,
+                                 alert tones + gap + the voice read twice. tones: one group of
+                                 [hz, s] (two-tone sequential) or several groups (one per
+                                 department paged), played in order with GROUP_GAP_S between;
                                  16 kHz mono 16-bit WAV, and which voice said it. The voice: the
                                  Kokoro server (sizeup/tts.py) or, when it's down, errors or takes
                                  over 10 s, macOS `say` with the fallback voice
@@ -44,6 +46,7 @@ from sizeup.tts import TtsError, VoiceCfg, synthesize
 
 RATE = 16000
 GAP_S = 0.6          # after the tones, before the voice
+GROUP_GAP_S = 0.5    # between tone groups (one department's tones, then the next's)
 REPEAT_GAP_S = 1.0   # between the two readings
 AMPLITUDE = 0.5      # tones; the voice is normalised to the same peak
 RAMP_S = 0.005       # tone on/off ramp, no clicks
@@ -246,9 +249,30 @@ def _peak(x: np.ndarray) -> np.ndarray:
     return (x * (AMPLITUDE / peak) if peak > 0 else x).astype(np.float32)
 
 
+def tone_groups(tones) -> tuple[tuple[tuple[float, float], ...], ...]:
+    """[[hz, s], ...] (one group) or [[[hz, s], ...], [[hz, s], ...]] (groups, in order) -> groups.
+    Empty groups are dropped."""
+    tones = list(tones or [])
+    flat = bool(tones) and all(isinstance(t, (list, tuple)) and len(t) == 2
+                               and all(isinstance(v, (int, float)) for v in t) for t in tones)
+    groups = [tones] if flat else tones
+    return tuple(g for g in (tuple((float(hz), float(sec)) for hz, sec in grp) for grp in groups) if g)
+
+
+def tone_sequence(tones, rate: int = RATE) -> np.ndarray:
+    """Each tone group in order, GROUP_GAP_S of silence between groups."""
+    parts = []
+    for k, g in enumerate(tone_groups(tones)):
+        if k:
+            parts.append(np.zeros(int(GROUP_GAP_S * rate)))
+        parts.append(tone_audio(list(g), rate))
+    return np.concatenate(parts) if parts else np.zeros(0)
+
+
 def assemble(v: np.ndarray, tones, repeat: int = 2) -> np.ndarray:
-    """Tones, a gap, then the voice `repeat` times with a pause between."""
-    parts = [tone_audio(list(tones)), np.zeros(int(GAP_S * RATE))] if tones else []
+    """Tone groups, a gap, then the voice `repeat` times with a pause between."""
+    t = tone_sequence(tones)
+    parts = [t, np.zeros(int(GAP_S * RATE))] if len(t) else []
     for k in range(max(1, repeat)):
         if k:
             parts.append(np.zeros(int(REPEAT_GAP_S * RATE)))
@@ -271,7 +295,7 @@ def wav_bytes(x: np.ndarray, rate: int = RATE) -> bytes:
 def audio_key(said: str, tones, engine: str, voice: str, pace: float, repeat: int) -> str:
     """Same words, tones, engine, voice and speed = same file: a preview and the dispatch right
     after share it."""
-    return hashlib.sha1(repr((said, list(tones), engine, voice, pace, repeat)).encode()).hexdigest()[:20]
+    return hashlib.sha1(repr((said, tone_groups(tones), engine, voice, pace, repeat)).encode()).hexdigest()[:20]
 
 
 def _write(path: Path, x: np.ndarray) -> None:
@@ -290,7 +314,7 @@ def render_dispatch(text: str, tones, out_dir: str | Path, voice: VoiceCfg, repe
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     said = speech(text, spoken=spoken)
-    tones = [tuple(t) for t in tones]
+    tones = tone_groups(tones)
     fallback = False
     if voice.engine == "kokoro":
         path = out_dir / f"{audio_key(said, tones, 'kokoro', voice.voice, voice.speed, repeat)}.wav"

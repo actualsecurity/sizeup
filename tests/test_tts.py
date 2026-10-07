@@ -186,6 +186,21 @@ def test_falls_back_on_timeout_and_on_errors(tmp_path, fake_server, fake_say):
     assert dispatcher.render_dispatch(A, TONES, tmp_path, v)[1] == "Voice: Kokoro af_heart"
 
 
+def test_tone_groups_in_order_then_the_voice_twice(tmp_path, fake_server):
+    groups = [[(349.1, 1.0), (311.1, 3.0)], [(600.0, 1.0), (800.0, 2.0)]]      # PCFD, then a second department
+    assert dispatcher.tone_groups(TONES) == (tuple(TONES),) and dispatcher.tone_groups([]) == ()
+    path, _ = dispatcher.render_dispatch(A, groups, tmp_path, tts.VoiceCfg("kokoro", "af_heart", 0.92, fake_server["port"]))
+    x = read16k(path)
+    g2 = int((4 + dispatcher.GROUP_GAP_S) * 16000)
+    assert abs(peak_hz(x[1000:15000]) - 349.1) < 2 and abs(peak_hz(x[17000:63000]) - 311.1) < 2
+    assert np.max(np.abs(x[64500:g2 - 500])) < 0.01                                          # gap between groups
+    assert abs(peak_hz(x[g2 + 1000:g2 + 15000]) - 600) < 2 and abs(peak_hz(x[g2 + 17000:g2 + 47000]) - 800) < 2
+    start = g2 + 3 * 16000 + int(dispatcher.GAP_S * 16000)
+    assert len(x) - start == 2 * 24000 + 16000 and abs(peak_hz(x[start:start + 24000]) - 440) < 2   # voice x2
+    assert dispatcher.render_dispatch(A, groups, tmp_path, tts.VoiceCfg("kokoro", "af_heart", 0.92, fake_server["port"]))[0] == path
+    assert dispatcher.render_dispatch(A, TONES, tmp_path, tts.VoiceCfg("kokoro", "af_heart", 0.92, fake_server["port"]))[0] != path
+
+
 def test_say_engine_and_labels(tmp_path, fake_say):
     path, label = dispatcher.render_dispatch(A, TONES, tmp_path, tts.VoiceCfg("say", "Alex"))
     assert label == "Voice: Alex" and fake_say[-1][1] == "Alex"
@@ -326,7 +341,7 @@ def test_app_status_row_for_the_voice(tmp_path):
     from sizeup.app import App
     app = App(cfg(tmp_path))                                  # built directly: `say`, no server
     assert app.tts is None
-    row = app.radios()[-1]
+    row = app.radio_status()[-1]
     assert row["label"] == "Voice" and row["state"] in ("ok", "down")
 
 
