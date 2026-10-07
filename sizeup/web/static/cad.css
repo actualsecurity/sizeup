@@ -353,3 +353,8 @@ body.comms { display: grid; grid-template-rows: auto 1fr; }
 .why.manual { color: #ff8a3d; border-color: rgba(255, 138, 61, 0.55); }
 @media (prefers-reduced-motion: reduce) { .feed.talking { animation: none; } }
 @media (max-width: 1100px) { .units > .feed { position: static; margin: 0 0 0.8em; border: 1px solid var(--line); border-radius: 0.4em; } }
+
+/* the units board's "which call?" picker: wraps inside the narrow column */
+form.pick { flex-wrap: wrap; gap: 0.35em; max-width: 100%; }
+form.pick > span { flex: 1 1 100%; }
+form.pick select { flex: 1 1 100%; min-width: 0; max-width: 100%; text-overflow: ellipsis; }
