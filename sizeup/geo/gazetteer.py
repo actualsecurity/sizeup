@@ -1,9 +1,15 @@
-"""Offline geocoder for dispatch-page transcripts (Port Chester / Rye Brook).
+"""Offline geocoder for dispatch-page transcripts and typed CAD addresses.
+
+Covers Port Chester and Rye Brook (PCFD's district) and the surrounding towns:
+the City of Rye, Harrison (incl. Purchase / West Harrison), the Village of
+Mamaroneck (incl. Rye Neck) and Greenwich, CT (Byram, Glenville, Pemberwick, ...).
 
 ``Gazetteer`` loads ``data/gazetteer.sqlite`` (built by ``tools/fetch_addresses.py``
-from NYS address points, TIGER street centrelines and county / OSM facilities)
-and turns speech-to-text such as "respond to one two three Westchester Avenue
-cross of Pearl Street" into a ``Match`` with a lat/lon and a confidence.
+from NYS / CT 9-1-1 address points, TIGER street centrelines and municipal
+boundaries, county / OSM facilities) and turns speech-to-text such as "respond to
+one two three Westchester Avenue cross of Pearl Street" into a ``Match`` with a
+lat/lon and a confidence. When the same street and number exist in several
+towns, a town named in the text wins; otherwise ``TOWN_PRIORITY`` decides.
 """
 
 from __future__ import annotations
@@ -66,20 +72,50 @@ INTERSECTION_KEY = {"and", "at", "near", "off", "by"}
 CROSS_MARKERS = {"cross", "crosses", "crossing", "between", "x"}
 CROSS_GAP = CROSS_MARKERS | {"of", "street", "st", "streets", "is", "are", "and", "at", "the"}
 
-# (phrase, municipality, counts only right next to the location)
+# Ranking of the covered municipalities when the text names none and the same
+# street / number exists in several of them: PCFD's own district first, then the
+# neighbours (mutual aid), then the rest. Edit this one tuple to change the order;
+# municipalities not listed get no preference. Labels match the ``muni`` column.
+TOWN_PRIORITY = ("Port Chester", "Rye Brook", "Rye", "Harrison", "Greenwich", "Mamaroneck")
+PRIOR_TOP, PRIOR_STEP = 0.05, 0.01
+MUNI_PRIOR = {m: round(max(0.0, PRIOR_TOP - PRIOR_STEP * i), 3) for i, m in enumerate(TOWN_PRIORITY)}
+# A town named in the text beats the priority order: right next to the location ...
+SAID_NEAR_BONUS = 0.12
+# ... or anywhere in the text (only for phrases that are not near-only).
+SAID_FAR_BONUS = 0.06
+assert SAID_FAR_BONUS > PRIOR_TOP and SAID_NEAR_BONUS > SAID_FAR_BONUS + PRIOR_TOP
+
+# Spoken / typed town names: (phrase tokens, municipality, counts only right next to
+# the location). Hamlets and neighbourhoods map to their municipality. Longest first.
 MUNI_PHRASES = [
+    (("village", "of", "port", "chester"), "Port Chester", False),
+    (("village", "of", "rye", "brook"), "Rye Brook", False),
     (("city", "of", "rye"), "Rye", False),
+    (("town", "of", "harrison"), "Harrison", False),
+    (("village", "of", "harrison"), "Harrison", False),
+    (("village", "of", "mamaroneck"), "Mamaroneck", False),
+    (("town", "of", "mamaroneck"), "Mamaroneck", False),
+    (("town", "of", "greenwich"), "Greenwich", False),
     (("port", "chester"), "Port Chester", False),
     (("rye", "brook"), "Rye Brook", False),
     (("west", "harrison"), "Harrison", False),
     (("rye", "city"), "Rye", False),
+    (("rye", "neck"), "Mamaroneck", False),
+    (("old", "greenwich"), "Greenwich", False),
+    (("cos", "cob"), "Greenwich", False),
+    (("greenwich",), "Greenwich", False),
+    (("mamaroneck",), "Mamaroneck", False),
     (("harrison",), "Harrison", True),
     (("purchase",), "Harrison", True),
+    (("byram",), "Greenwich", True),
+    (("glenville",), "Greenwich", True),
+    (("pemberwick",), "Greenwich", True),
+    (("chickahominy",), "Greenwich", True),
+    (("riverside",), "Greenwich", True),
     (("rye",), "Rye", True),
 ]
-# PCFD's own district (Port Chester + Rye Brook) wins ties against the City of Rye /
-# Harrison, which have some of the same street names and numbers.
-MUNI_PRIOR = {"Port Chester": 0.06, "Rye Brook": 0.05}
+_MUNI_WORDS = {p for p, _m, _n in MUNI_PHRASES}
+TOWN_RANK = {m: i for i, m in enumerate(TOWN_PRIORITY)}
 
 
 @dataclass
@@ -174,6 +210,11 @@ class Gazetteer:
             for muni, lst in st.addrs.items():
                 st.nums[muni] = [r[0] for r in lst]
             self._build_geometry(st, geo.get(st.id, []))
+        keys = [st.key for st in self.streets.values()]
+        self._reserved_phrases = [
+            p for p, _m, _n in MUNI_PHRASES if len(p) > 1 and "of" not in p
+            and (p in {("port", "chester"), ("rye", "brook")}
+                 or not any(k == " ".join(p) or k.startswith(" ".join(p) + " ") for k in keys))]
         self._build_index()
 
     # ------------------------------------------------------------------ loading
@@ -257,12 +298,14 @@ class Gazetteer:
 
     # ------------------------------------------------------------------ parsing
 
-    @staticmethod
-    def _reserved(tokens: list[str]) -> set[int]:
+    def _reserved(self, tokens: list[str]) -> set[int]:
+        """Token positions of multi-word town names, which are never part of a street."""
         res = set()
-        for i in range(len(tokens) - 1):
-            if (tokens[i], tokens[i + 1]) in {("port", "chester"), ("rye", "brook")}:
-                res.update((i, i + 1))
+        for phrase in self._reserved_phrases:
+            n = len(phrase)
+            for i in range(len(tokens) - n + 1):
+                if tuple(tokens[i:i + n]) == phrase:
+                    res.update(range(i, i + n))
         return res
 
     def _street_mentions(self, tokens: list[str]) -> list[_Mention]:
@@ -289,6 +332,8 @@ class Gazetteer:
                              and span[-2] in TYPE_ABBRS))
                 if (typed and len(span) == 1) or len(s) < (3 if typed else 4):
                     continue
+                if not typed and tuple(span) in _MUNI_WORDS:
+                    continue          # bare "Glenville" is the place, "Glenville Rd" the street
                 min_sim = 0.82 if typed else 0.88
                 if len(s) <= 6:
                     min_sim = max(min_sim, 0.9)
@@ -379,13 +424,17 @@ class Gazetteer:
         return num
 
     @staticmethod
-    def _muni_mentions(tokens: list[str]) -> list[tuple[int, int, str, bool]]:
+    def _muni_mentions(tokens: list[str], mentions: list[_Mention] = ()) -> list[tuple[int, int, str, bool]]:
+        """Town names in the text, except inside a typed street name ("Purchase St")."""
         out = []
+        streets = [(m.start, m.end) for m in mentions if m.strong]
         i = 0
         while i < len(tokens):
             for phrase, muni, near_only in MUNI_PHRASES:     # longest phrases first
                 if tuple(tokens[i:i + len(phrase)]) == phrase:
-                    out.append((i, i + len(phrase), muni, near_only))
+                    j = i + len(phrase)
+                    if not any(s < j and i < e for s, e in streets):
+                        out.append((i, j, muni, near_only))
                     i += len(phrase)
                     break
             else:
@@ -484,9 +533,9 @@ class Gazetteer:
                 continue
             near = (0 <= s - mention_span[1] <= 4) or (0 <= mention_span[0] - e <= 3)
             if near:
-                said = 0.08
+                said = SAID_NEAR_BONUS
             elif not near_only:
-                said = max(said, 0.03)
+                said = max(said, SAID_FAR_BONUS)
         return MUNI_PRIOR.get(muni, 0.0) + said
 
     def _address_cands(self, tokens, m: _Mention, num: str, verify: list[_Mention],
@@ -613,7 +662,7 @@ class Gazetteer:
         """All location readings of ``text``, best first."""
         tokens = tokenize(text)
         mentions = self._street_mentions(tokens)
-        munis = self._muni_mentions(tokens)
+        munis = self._muni_mentions(tokens, mentions)
         groups: list[list[Match]] = []
 
         roles: dict[int, str] = {}
@@ -666,10 +715,15 @@ class Gazetteer:
         for g in groups:
             self._penalize_ambiguity(g)
             out.extend(g)
-        for c in out:
-            c.confidence = round(max(0.0, min(1.0, c.confidence)), 3)
+        # Rank on the raw score. Town bonuses can push several exact addresses past 1.0
+        # ("15 Beech St, Byram" vs 15 Beech St in Port Chester); scaling by the top
+        # score instead of clamping keeps the runner-up visibly below the winner.
         kind_rank = {"address": 0, "intersection": 1, "landmark": 2, "street": 3}
-        out.sort(key=lambda c: (-c.confidence, kind_rank[c.kind]))
+        out.sort(key=lambda c: (-round(c.confidence, 6), kind_rank[c.kind],
+                                TOWN_RANK.get(c.municipality, len(TOWN_PRIORITY))))
+        scale = max(1.0, out[0].confidence) if out else 1.0
+        for c in out:
+            c.confidence = round(max(0.0, min(1.0, c.confidence / scale)), 3)
         return out
 
     def geocode(self, text: str, min_confidence: float = 0.2) -> Match | None:

@@ -8,7 +8,7 @@ import sqlite3
 
 import pytest
 
-from sizeup.geo.gazetteer import DEFAULT_DB, SCHEMA, Gazetteer
+from sizeup.geo.gazetteer import DEFAULT_DB, MUNI_PRIOR, SCHEMA, TOWN_PRIORITY, Gazetteer
 from sizeup.geo.normalize import street_key, tokenize
 
 
@@ -207,6 +207,94 @@ def test_street_only_is_low_confidence(gaz):
     assert m.municipality == "Port Chester"
 
 
+# --------------------------------------------------------------------------- surrounding towns
+
+def test_coverage_by_municipal_boundary(gaz):
+    counts = json.loads(gaz.meta["counts"])
+    by_muni = counts["addresses_by_muni"]
+    minimum = {"Port Chester": 4000, "Rye Brook": 2500, "Rye": 3500, "Harrison": 5000,
+               "Greenwich": 12000, "Mamaroneck": 3500}
+    for muni, n in minimum.items():
+        assert by_muni[muni] > n, muni
+    # every NYS / NAD point inside each TIGER boundary polygon was fetched
+    for muni, check in counts["address_points_by_polygon_check"].items():
+        assert check["points_in_polygon"] > 1000, muni
+    assert set(by_muni) <= set(TOWN_PRIORITY)
+    sources = json.loads(gaz.meta["sources"])
+    nad = next(s for s in sources if "National Address Database" in s["name"])
+    assert "public domain" in nad["license"].lower()
+    assert any("tl_2025_09190" in s["url"] for s in sources)
+
+
+def test_town_priority_order():
+    assert TOWN_PRIORITY[:2] == ("Port Chester", "Rye Brook")
+    priors = [MUNI_PRIOR[m] for m in TOWN_PRIORITY]
+    assert priors == sorted(priors, reverse=True) and priors[0] > priors[1] > priors[2]
+
+
+def test_greenwich_address(gaz):
+    # Greenwich Town Hall
+    m = gaz.geocode("one oh one Field Point Road, Greenwich")
+    assert m and m.kind == "address" and m.precision == "exact"
+    assert m.label == "101 Field Point Rd, Greenwich"
+    assert dist_m(m.lat, m.lon, 41.02494, -73.62908) < 40
+
+
+def test_harrison_address_outside_old_bbox(gaz):
+    # Harrison municipal building, south of the old 40.98 N bounding box
+    m = gaz.geocode("1 Heineman Place")
+    assert m and m.kind == "address" and m.municipality == "Harrison"
+    assert m.lat < 40.98 and dist_m(m.lat, m.lon, 40.96991, -73.71227) < 40
+    p = gaz.geocode("seven thirty five Anderson Hill Road, Purchase")
+    assert p and p.municipality == "Harrison" and p.house_number == "735"
+
+
+@pytest.mark.parametrize("text, muni", [
+    # 15 Beech St exists in Port Chester and in Byram (Greenwich), ~1 km apart
+    ("15 Beech Street", "Port Chester"),
+    ("fifteen Beech Street Byram", "Greenwich"),
+    ("15 Beech St, Greenwich, CT 06830", "Greenwich"),
+    ("Port Chester Fire Department, mutual aid to Byram, fifteen Beech Street", "Greenwich"),
+    # 7 Bonwit Rd exists in Rye Brook and in Riverside (Greenwich)
+    ("7 Bonwit Road", "Rye Brook"),
+    ("7 Bonwit Road, Greenwich", "Greenwich"),
+    ("seven Bonwit Road in Riverside", "Greenwich"),
+    # a Port Chester / Rye Brook border address: the district order breaks the tie
+    ("165 Betsy Brown Road", "Port Chester"),
+    ("165 Betsy Brown Road, Rye Brook", "Rye Brook"),
+])
+def test_same_address_in_two_towns(gaz, text, muni):
+    cands = [c for c in gaz.candidates(text) if c.kind == "address"]
+    assert cands[0].municipality == muni, text
+    other = next(c for c in cands if c.municipality != muni)
+    assert other.house_number == cands[0].house_number and other.street == cands[0].street
+    assert cands[0].confidence > other.confidence
+
+
+def test_spoken_neighbourhood_glenville(gaz):
+    m = gaz.geocode("King Street and Glenville Street, Glenville")
+    assert m and m.kind == "intersection" and m.municipality == "Greenwich"
+    assert {m.street, m.cross_street} == {"King St", "Glenville St"}
+    # the place name alone is not a street ("Glenville Rd" is)
+    assert gaz.find_in_text("Greenwich units respond to Glenville") is None
+    r = gaz.geocode("Glenville Road and Pemberwick Road")
+    assert r and r.kind == "intersection" and r.municipality == "Greenwich"
+
+
+def test_town_word_inside_street_name(gaz):
+    # Purchase St is in the City of Rye: the word "purchase" here is no hint for Harrison
+    m = gaz.geocode("100 Purchase Street")
+    assert m and m.municipality == "Rye" and m.precision == "exact"
+
+
+def test_border_intersection_belongs_to_side_street(gaz):
+    # King St is the NY / CT line; Arbor Dr is in Rye Brook
+    cands = [c for c in gaz.candidates("King Street and Arbor Drive") if c.kind == "intersection"]
+    assert cands[0].municipality == "Rye Brook"
+    g = gaz.geocode("King Street and Arbor Drive, Greenwich")
+    assert g.kind == "intersection" and dist_m(g.lat, g.lon, cands[0].lat, cands[0].lon) < 5
+
+
 # --------------------------------------------------------------------------- inline fixture
 
 @pytest.fixture()
@@ -244,3 +332,21 @@ def test_fixture_intersection_and_outside_range(tiny):
     m = tiny.geocode("Alpha Street and Beta Avenue")
     assert m.kind == "intersection" and (m.lat, m.lon) == (41.0005, -73.7)
     assert tiny.geocode("nine thousand Alpha Street").kind == "street"
+
+
+def test_fixture_town_priority(tmp_path):
+    path = tmp_path / "two.sqlite"
+    db = sqlite3.connect(path)
+    db.executescript(SCHEMA)
+    db.execute("INSERT INTO meta VALUES ('sources', '[]')")
+    db.execute("INSERT INTO streets VALUES (1, 'gamma st', 'Gamma St')")
+    db.executemany("INSERT INTO addresses VALUES (1, 12, '', ?, ?, ?, 1)",
+                   [("Greenwich", 41.03, -73.63), ("Rye Brook", 41.02, -73.69),
+                    ("Mamaroneck", 40.95, -73.73)])
+    db.commit()
+    db.close()
+    gaz = Gazetteer(path)
+    assert gaz.geocode("12 Gamma Street").municipality == "Rye Brook"
+    assert gaz.geocode("12 Gamma Street, Greenwich").municipality == "Greenwich"
+    assert gaz.geocode("12 Gamma Street Rye Neck").municipality == "Mamaroneck"
+    assert gaz.geocode("twelve Gamma Street Byram").municipality == "Greenwich"
