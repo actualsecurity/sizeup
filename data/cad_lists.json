@@ -4,7 +4,8 @@
     "From the department's sheet \"[TEMPLATE] PCFD ECC OPS\" (export of 2026-10-07): codes, order, statuses and",
     "colors. Each item is {code, name}: the code is the sheet's (stored, matched, exported to CSV), the name is",
     "what the console shows. A plain string is also accepted (code = name). Keys starting with _ are notes.",
-    "Still guesses (not in the sheet): names whose meaning is unclear are left as the code; type_subtypes is",
+    "Still guesses (not in the sheet): names whose meaning is unclear are left as the code (still to confirm:",
+    "ECHO, AIR, MULTI, NEXT, CAD, RMA; TRANS, CO-NO and CO-YES were confirmed by PCFD); type_subtypes is",
     "empty (the sheet has no type -> subtype mapping); event_class, unit kinds/spoken names/spares/departments,",
     "received_via, the DISPATCH OTHER color, run cards, spoken phrases and geo_town_order."
   ],
@@ -38,12 +39,12 @@
     {"code": "BOMB", "name": "Bomb"},
     {"code": "FLUID", "name": "Fluid"},
     {"code": "HAZMAT", "name": "Hazmat"},
-    {"code": "TRANS", "name": "TRANS"},
+    {"code": "TRANS", "name": "Transformer"},
     {"code": "TREE", "name": "Tree"},
     {"code": "TREERD", "name": "Tree in road"},
     {"code": "WIRES", "name": "Wires"},
-    {"code": "CO-NO", "name": "CO-NO"},
-    {"code": "CO-YES", "name": "CO-YES"},
+    {"code": "CO-NO", "name": "CO \u2013 no symptoms"},
+    {"code": "CO-YES", "name": "CO \u2013 with symptoms"},
     {"code": "ELECT", "name": "Electrical"},
     {"code": "INSIDE", "name": "Inside"},
     {"code": "OUTSIDE", "name": "Outside"},
@@ -256,7 +257,7 @@
     "DPT266": {"kind": "agency", "spoken": "DPT266"},
     "DPT239": {"kind": "agency", "spoken": "DPT239"}
   },
-  "_spoken": "How the dispatch voice says a TYPE or TYPE/SUBTYPE (the more specific wins): '... for a commercial fire alarm.'",
+  "_spoken": "How the dispatch voice says a TYPE, TYPE/SUBTYPE or */SUBTYPE (any type): TYPE/SUBTYPE, then */SUBTYPE, then TYPE: '... for a commercial fire alarm.'",
   "spoken": {
     "ALARM": "a fire alarm",
     "ALARM/COMM": "a commercial fire alarm",
@@ -283,7 +284,10 @@
     "RESCUE/ELEVATOR": "an elevator rescue",
     "SERVICE": "a service call",
     "SERVICE/BOAT": "a marine service call",
-    "STRU": "a structure fire"
+    "STRU": "a structure fire",
+    "*/TRANS": "a transformer",
+    "*/CO-NO": "a CO alarm, no symptoms",
+    "*/CO-YES": "a CO alarm with symptoms"
   },
   "_dispatch_wording": [
     "The dispatch, as templates. {department} {units} {location} {type} ('a structure fire')",
@@ -310,7 +314,8 @@
   },
   "_run_cards": [
     "Default run cards, keyed TYPE or TYPE/SUBTYPE (the more specific wins). Seeded once into the database",
-    "and edited in the app. A STAND-IN so the console works: NOT PCFD policy."
+    "and edited in the app. A STAND-IN so the console works: NOT PCFD policy.",
+    "Hint for the department (no card added): CO-YES (CO with symptoms) may also warrant EMS."
   ],
   "run_cards": [
     {

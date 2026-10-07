@@ -16,7 +16,7 @@ shows). A new export can replace the file without a code change:
     event_statuses                   name + colors per event status
     unit_kinds, unit_boards, units   the two status boards (null = a blank separator row) and per-unit
                                      kind / spoken name / title / spare / department
-    spoken                           TYPE or TYPE/SUBTYPE -> as the dispatch voice says it
+    spoken                           TYPE, TYPE/SUBTYPE or */SUBTYPE -> as the dispatch voice says it
     dispatch_wording                 the dispatch as templates (new / add-on / upgrade, full response)
     run_cards                        the default cards seeded once into the database
     geo_town_order, geo_town_aliases Location suggestions: which towns come first
@@ -135,7 +135,8 @@ class Lists:
 
     def phrase(self, typ: str, subtype: str = "") -> str:
         """As the dispatch voice says it: 'a commercial fire alarm'."""
-        p = self.spoken.get(key(typ, subtype)) or self.spoken.get(typ)
+        p = ((self.spoken.get(key(typ, subtype)) or self.spoken.get(f"*/{subtype}")) if subtype else None) \
+            or self.spoken.get(typ)
         if p:
             return p
         if not typ:
@@ -360,7 +361,11 @@ def load(path: str | Path | None = None) -> Lists:
 
     spoken = d.get("spoken") or {}
     for k, v in spoken.items():
-        check_key(k, "spoken")
+        if k.startswith("*/"):
+            if k[2:] not in sub_codes:
+                raise ListsError(f"{where}: spoken: {k!r}: {k[2:]!r} is not in event_subtypes")
+        else:
+            check_key(k, "spoken")
         if not isinstance(v, str) or not v.strip():
             raise ListsError(f"{where}: spoken[{k!r}]: text")
 
