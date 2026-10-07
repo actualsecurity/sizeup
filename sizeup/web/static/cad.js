@@ -12,6 +12,11 @@
 //
 // Transmit is off in this version: "Dispatch" assigns the units, logs the dispatch and plays
 // its audio here. Nothing is keyed on a radio.
+//
+// Settings (/cad#settings/<section>, settings.js) edit the lists, run cards, units and wording; the
+// edits come back in the next push like everything else. Retired items stay named on old events
+// but are off the pick lists. Other agencies' units (EMS, PD, utilities: response "agency") are never
+// dispatched or ticked: they are attached to an event when they show up.
 "use strict";
 
 const $ = (sel) => document.querySelector(sel);
@@ -32,6 +37,8 @@ const cad = {
   map: null, marker: null, mapSig: "",
   listSig: "", rcEditing: null, openUnit: null,
   ask: null,                 // {uid, status, where}: asking why (out of service / unmanned)
+  hooks: [],                 // more renderers (settings.js), called on every render
+  agenciesOpen: false,       // the board's "Other agencies" group, folded by default
   emergTouched: false,       // the operator set Emergency on the form: the type no longer does
   dbAt: 0,
 };
@@ -106,7 +113,8 @@ function fromLocalInput(v) {
   return guess - off;
 }
 function operator() {
-  return $("#operator").value.trim();
+  const pick = $("#operator-pick");
+  return (pick.hidden ? $("#operator").value : pick.value).trim();
 }
 function store(key, value) {
   try {
@@ -224,9 +232,10 @@ function isEmergency(t, s) {        // data file event_class: TYPE/SUBTYPE, */SU
   for (const k of keys) if (k in c) return c[k] === "emergency";
   return true;
 }
+const live = (x) => !x.retired;     // retired: named on old events, off the pick lists
 function subtypesFor(t) {
   const m = (L().type_subtypes || {})[t];
-  const all = L().event_subtypes || [];
+  const all = (L().event_subtypes || []).filter(live);
   return m && m.length ? all.filter((s) => m.includes(s.code)) : all;
 }
 function fillSelect(sel, items, blank) {
@@ -237,7 +246,7 @@ function fillSelect(sel, items, blank) {
   if ([...sel.options].some((o) => o.value === keep)) sel.value = keep;
 }
 function fillTypes(sel, blank = "—") {
-  fillSelect(sel, (L().event_types || []).map((t) => [t.code, t.name]), blank);
+  fillSelect(sel, (L().event_types || []).filter(live).map((t) => [t.code, t.name]), blank);
 }
 function fillSubtypes(sel, t, blank = "—") {
   fillSelect(sel, subtypesFor(t).map((s) => [s.code, s.name]), blank);
@@ -254,10 +263,10 @@ function fillListSelects() {
   fillSubtypes($("#d-acc-sub"), $("#d-acc-type").value);
   fillSubtypes($("#u-subtype"), $("#u-type").value);
   fillSubtypes($("#rc-subtype"), $("#rc-type").value, "Any subtype");
-  const via = (L().received_via || []).map((v) => [v.code, v.name]);
+  const via = (L().received_via || []).filter(live).map((v) => [v.code, v.name]);
   fillSelect($("#f-via"), via, "—");
   fillSelect($("#e-via"), via, "—");
-  fillSelect($("#c-disp"), (L().dispositions || []).map((d) => [d.code, d.name]), "Pick a disposition…");
+  fillSelect($("#c-disp"), (L().dispositions || []).filter(live).map((d) => [d.code, d.name]), "Pick a disposition…");
   const fr = L().full_response || "full department response";
   const label = fr.charAt(0).toUpperCase() + fr.slice(1);
   setText($("#r-full-label"), label);
@@ -443,7 +452,7 @@ function renderDetail() {
   show($("#d-narr"), !!inc.remarks);
   renderMap(inc);
   renderOnUnits(inc);
-  show($("#d-attach"), open && !inc.emergency && inc.status !== "queued");
+  show($("#d-attach"), open && inc.status !== "queued");
   renderAttach(inc);
   show($("#d-dispatch"), open && !!inc.emergency);
   renderDispatchBox(inc);
@@ -599,8 +608,10 @@ function statusButtons(u, where) {
     setTimeout(() => { if (document.activeElement !== input) input.focus(); }, 0);
     return box;
   }
+  if ((unitById(u.id) || u).response === "agency") return agencyButtons(u, where, box);
   for (const s of statusChoices(u, where)) {
     if (where === "inc" && s.code === u.status) continue;
+    if (s.retired) continue;
     const b = el("button", "mini" + (s.code === u.status ? " on" : ""), s.name);
     b.style.setProperty("--c", s.bg || "#9aa0b4");
     b.disabled = s.code === u.status;
@@ -627,6 +638,25 @@ function statusChoices(u, where) {
 function talkSig(name) {
   const t = Radio.talkingFor(name);
   return t ? `${t.key}|${t.ended ? 1 : 0}` : "";
+}
+
+// Another agency's unit (EMS, PD): on location when it shows up, then cleared. Nothing else.
+function agencyButtons(u, where, box) {
+  const now = unitById(u.id) || u;
+  if (!now.incident_id) {
+    if (where === "board") box.append(el("span", "dim small", "Attach it to an event when it shows up (never dispatched)."));
+    return box;
+  }
+  const codes = L().agency_statuses || [];
+  codes.forEach((code, i) => {
+    const s = unitStatus(code);
+    if (code === now.status) return;
+    const b = el("button", "mini", i === codes.length - 1 && s.role === "free" ? "Cleared" : s.name);
+    b.style.setProperty("--c", s.bg || "#9aa0b4");
+    b.addEventListener("click", (e) => { e.stopPropagation(); setUnitStatus(u.id, code); });
+    box.append(b);
+  });
+  return box;
 }
 
 function renderOnUnits(inc) {
@@ -744,7 +774,7 @@ function unitById(id) {
   return units().find((u) => u.id === id);
 }
 function canDispatch(u) {
-  return roleOf(u.status) !== "oos";
+  return roleOf(u.status) !== "oos" && u.response !== "agency";
 }
 
 const REMARKS_LONG = 200, REMARKS_MAX = 500;
@@ -843,7 +873,7 @@ function tickAll() {
   const free = (L().unit_statuses || []).filter((s) => s.role === "free").map((s) => s.code);
   const listed = new Set([...cad.rec.units.map((u) => u.id), ...cad.rec.extra]);
   for (const u of units()) {
-    if (!kinds.includes(u.kind) || u.mutual_aid || jointOf(u.name) || !free.includes(u.status) || u.incident_id || !u.board) continue;
+    if (!kinds.includes(u.kind) || u.response !== "fire" || u.mutual_aid || jointOf(u.name) || !free.includes(u.status) || u.incident_id || !u.board) continue;
     if (!listed.has(u.id)) cad.rec.extra.push(u.id);
     cad.rec.checked.add(u.id);
   }
@@ -914,7 +944,7 @@ async function preview() {
 
 function needOperator(errNode) {
   const op = operator();
-  if (!op) { $("#operator").focus(); flash(errNode, "Enter your name (Operator, top right) first."); }
+  if (!op) { ($("#operator-pick").hidden ? $("#operator") : $("#operator-pick")).focus(); flash(errNode, "Enter your name (Operator, top right) first."); }
   return op;
 }
 
@@ -1085,9 +1115,14 @@ function renderNoteTags() {
 // ---- non-emergency: attach units --------------------------------------------------------------
 
 function renderAttach(inc) {
-  if (!inc || inc.emergency || !isOpen(inc)) return;
-  const others = units().filter((u) => u.incident_id !== inc.id && (u.board || u.incident_id));
-  const sig = JSON.stringify(others.map((u) => [u.id, u.status, u.incident_number]));
+  if (!inc || !isOpen(inc)) return;
+  // An emergency event: only other agencies (EMS, PD) that show up; they are never dispatched.
+  setText($("#a-title"), inc.emergency ? "Other agencies on scene" : "Attach a unit");
+  setText($("#a-hint"), inc.emergency ? "EMS, PD, utilities: add them when they show up. Never dispatched or toned out."
+    : "Non-emergency: no run card and no dispatch.");
+  const others = units().filter((u) => u.incident_id !== inc.id && (u.board || u.incident_id)
+    && (!inc.emergency || u.response === "agency"));
+  const sig = JSON.stringify([inc.emergency, others.map((u) => [u.id, u.status, u.incident_number])]);
   const sel = $("#a-unit");
   if (sel._sig === sig) return;
   sel._sig = sig;
@@ -1238,12 +1273,22 @@ async function createIncident(e) {
   }
 }
 
+function keepOption(sel, code, label) {   // a retired type stays selectable on the event that has it
+  code = code || "";
+  if (code && ![...sel.options].some((o) => o.value === code)) {
+    const o = el("option", "", `${label} (retired)`);
+    o.value = code;
+    sel.append(o);
+  }
+  sel.value = code;
+}
+
 function openEdit() {
   const inc = selected();
   if (!inc) return;
-  $("#e-type").value = inc.type || "";
+  keepOption($("#e-type"), inc.type, typeLabel(inc.type));
   fillSubtypes($("#e-subtype"), inc.type);
-  $("#e-subtype").value = inc.subtype || "";
+  keepOption($("#e-subtype"), inc.subtype, nameOf("event_subtypes", inc.subtype));
   editAddr.set(inc.address, inc.lat != null ? { lat: inc.lat, lon: inc.lon, label: inc.geo_label || inc.address, kind: "current", confidence: 1 } : null);
   $("#e-cross").value = inc.cross_street || "";
   $("#e-name").value = inc.caller_name || "";
@@ -1329,13 +1374,13 @@ function unitGroups() {
     rows.forEach((u) => taken.add(u.id));
     if (rows.length) groups.push([title, rows]);
   };
-  for (const [title, kinds] of KIND_GROUPS) take(title, (u) => !u.mutual_aid && kinds.includes(u.kind));
-  take("Police", (u) => u.kind === "pd");
-  take("EMS", (u) => u.kind === "ems");
+  for (const [title, kinds] of KIND_GROUPS) take(title, (u) => !u.mutual_aid && u.response !== "agency" && kinds.includes(u.kind));
+  take(AGENCIES, (u) => u.board === "agencies");
   take("Other & mutual aid", () => true);
   return groups;
 }
 
+const AGENCIES = "Other agencies — add to a call when they show up";
 function renderUnits() {
   const box = $("#units");
   const groups = unitGroups();
@@ -1351,7 +1396,20 @@ function renderUnits() {
     if (!g) {
       g = el("section", "ugroup");
       g.dataset.group = title;
-      g.append(el("h3", "", title), el("ol", "list ulist"));
+      const h = el("h3", "", title);
+      if (title === AGENCIES) {                 // folded: EMS and PD only matter once they show up
+        h.className = "fold";
+        h.tabIndex = 0;
+        const flip = () => { cad.agenciesOpen = !cad.agenciesOpen; renderUnits(); };
+        h.addEventListener("click", flip);
+        h.addEventListener("keydown", (e) => { if (e.key === "Enter") flip(); });
+      }
+      g.append(h, el("ol", "list ulist"));
+    }
+    if (title === AGENCIES) {
+      const on = rows.filter((u) => u.incident_id).length;
+      g.classList.toggle("folded", !cad.agenciesOpen);
+      setText(g.querySelector("h3"), `${cad.agenciesOpen ? "▾" : "▸"} ${title}${on ? ` · ${on} on calls` : ""}`);
     }
     if (box.children[i] !== g) box.insertBefore(g, box.children[i] || null);
     syncList(g.querySelector("ol"), rows, {
@@ -1475,39 +1533,6 @@ async function openFromRecords(id) {
   selectIncident(id);
 }
 
-function renderLists() {
-  if ($("#lists-overlay").hidden) return;
-  const l = L();
-  setText($("#lists-source"), l.source ? `from ${l.source}` : "");
-  const box = $("#lists");
-  if (box._sig === cad.listSig) return;
-  box._sig = cad.listSig;
-  const section = (title, items, paintFn) => {
-    const s = el("div");
-    s.append(el("h3", "", title));
-    const ol = el("ol");
-    for (const it of items) {
-      const li = el("li");
-      const n = el("span", "", it.name);
-      if (paintFn) paintFn(n, it);
-      li.append(n);
-      if (it.code !== it.name) li.append(document.createTextNode(" "), el("code", "", it.code));
-      ol.append(li);
-    }
-    s.append(ol);
-    return s;
-  };
-  box.replaceChildren(
-    section("Event types", l.event_types || [], (n, it) => { n.className = "qt"; n.style.setProperty("--c", it.color); }),
-    section("Event subtypes", l.event_subtypes || []),
-    section("Dispositions", l.dispositions || []),
-    section("Unit statuses", l.unit_statuses || [], (n, it) => { n.className = "chip st"; n.style.setProperty("--c", it.bg); }),
-    section("Received via", l.received_via || []),
-    section("Non-emergency (the rest are emergency)",
-      Object.entries(l.event_class || {}).filter(([, v]) => v === "non-emergency").map(([k]) => ({ code: k, name: k.replace("*/", "any type / ") }))),
-  );
-}
-
 // ---- run card editor -----------------------------------------------------------------------
 
 function describeSlot(s) {
@@ -1515,7 +1540,7 @@ function describeSlot(s) {
 }
 
 function renderRunCards() {
-  if ($("#rc-overlay").hidden) return;
+  if ($("#settings").hidden || $("#s-runcards").hidden) return;
   const cards = (cad.state && cad.state.run_cards) || [];
   show($("#rc-banner"), !!(cad.state && cad.state.run_cards_default));
   syncList($("#rc-list"), cards, {
@@ -1543,14 +1568,14 @@ function slotRow(slot) {
   const li = el("li", "slot");
   if (slot.unit !== undefined) {
     const s = el("select", "s-unit");
-    fillSelect(s, units().filter((u) => u.board).map((u) => [u.name, u.title ? `${u.name} ${u.title}` : u.name]));
+    fillSelect(s, units().filter((u) => u.board && u.response !== "agency").map((u) => [u.name, u.title ? `${u.name} ${u.title}` : u.name]));
     s.value = slot.unit || (units()[0] && units()[0].name) || "";
     li.append(el("span", "dim", "unit"), s);
   } else {
     const n = el("input", "s-count");
     n.type = "number"; n.min = "1"; n.max = "10"; n.value = String(slot.count || 1);
     const s = el("select", "s-kind");
-    const kinds = (L().unit_kinds || []).map((k) => [k.id, k.label.toLowerCase()]);
+    const kinds = (L().unit_kinds || []).filter((k) => !k.attach_only).map((k) => [k.id, k.label.toLowerCase()]);
     const ladder = kinds.some(([k]) => k === "ladder") && kinds.some(([k]) => k === "tower") ? [["ladder|tower", "ladder or tower"]] : [];
     fillSelect(s, [...kinds.slice(0, 1), ...ladder, ...kinds.slice(1)]);
     s.value = slot.kind || "engine";
@@ -1600,7 +1625,7 @@ async function saveCard(e) {
   e.preventDefault();
   flash($("#rc-error"));
   const t = $("#rc-type").value, s = $("#rc-subtype").value;
-  const body = { type: s ? `${t}/${s}` : t, spoken: $("#rc-spoken").value.trim(), slots: slotsFromForm() };
+  const body = { type: s ? `${t}/${s}` : t, spoken: $("#rc-spoken").value.trim(), slots: slotsFromForm(), operator: operator() };
   if (cad.rcEditing && cad.rcEditing !== body.type) body.rename_from = cad.rcEditing;
   try {
     const c = await api("POST", "/api/cad/runcards", body);
@@ -1614,15 +1639,17 @@ async function saveCard(e) {
 async function deleteCard() {
   if (!cad.rcEditing || !confirm(`Delete the run card for ${typeLabel(...cad.rcEditing.split("/"))}?`)) return;
   try {
-    await api("POST", "/api/cad/runcards/delete", { type: cad.rcEditing });
+    await api("POST", "/api/cad/runcards/delete", { type: cad.rcEditing, operator: operator() });
     editCard(null);
   } catch (err) {
     flash($("#rc-error"), err.message);
   }
 }
 
-function openRunCards() {
-  openOverlay("#rc-overlay", true);
+function openRunCards() {           // the header button: Settings > Run cards
+  location.hash = "#settings/runcards";
+}
+function showRunCards() {           // settings.js, when the Run cards section opens
   const cards = (cad.state && cad.state.run_cards) || [];
   editCard(cards.find((c) => c.type === cad.rcEditing) || cards[0] || null);
 }
@@ -1636,8 +1663,24 @@ function render() {
   renderUnits();
   renderUnitLog();
   renderRunCards();
-  renderLists();
   renderRecords();
+  renderOperators();
+  for (const fn of cad.hooks) fn();
+}
+
+// The operator field: a picker from Settings > Users once there are operators, else free text.
+function renderOperators() {
+  const ops = (cad.state && cad.state.operators) || [];
+  const pick = $("#operator-pick"), input = $("#operator");
+  const sig = JSON.stringify(ops);
+  show(pick, ops.length > 0);
+  show(input, ops.length === 0);
+  if (pick._sig === sig) return;
+  pick._sig = sig;
+  const want = pick.value || store("sizeup.cad.operator") || "";
+  fillSelect(pick, ops.map((n) => [n, n]), "Pick your name…");
+  pick.value = ops.includes(want) ? want : "";
+  pick.classList.toggle("unset", !pick.value);
 }
 
 function onState(data) {
@@ -1742,13 +1785,7 @@ $("#note-text").addEventListener("keydown", noteKeys);
 $("#note-text").addEventListener("blur", () => setTimeout(hideSugg, 150));
 $("#note-text").addEventListener("click", suggestUnits);
 $("#runcards-open").addEventListener("click", openRunCards);
-$("#radios-open").addEventListener("click", () => {
-  openOverlay("#radios-overlay", true);
-  RadiosPanel.mount($("#radios-mount"), { operator });
-});
-$("#radios-close").addEventListener("click", () => openOverlay("#radios-overlay", false));
 Radio.mountAlerts($("#alerts"));
-$("#rc-close").addEventListener("click", () => openOverlay("#rc-overlay", false));
 $("#rc-form").addEventListener("submit", saveCard);
 $("#rc-type").addEventListener("change", () => { fillSubtypes($("#rc-subtype"), $("#rc-type").value, "Any subtype"); rcPlaceholder(); });
 $("#rc-subtype").addEventListener("change", rcPlaceholder);
@@ -1756,19 +1793,20 @@ $("#rc-add-kind").addEventListener("click", () => $("#rc-slots").append(slotRow(
 $("#rc-add-unit").addEventListener("click", () => $("#rc-slots").append(slotRow({ unit: "" })));
 $("#rc-new").addEventListener("click", () => editCard(null));
 $("#rc-delete").addEventListener("click", deleteCard);
-$("#records-open").addEventListener("click", () => { openOverlay("#db-overlay", true); cad.dbAt = 0; renderRecords(); });
 $("#db-close").addEventListener("click", () => openOverlay("#db-overlay", false));
-$("#lists-open").addEventListener("click", () => { openOverlay("#lists-overlay", true); renderLists(); });
-$("#lists-close").addEventListener("click", () => openOverlay("#lists-overlay", false));
-for (const id of ["#rc-overlay", "#db-overlay", "#lists-overlay", "#radios-overlay"]) {
+for (const id of ["#db-overlay"]) {
   $(id).addEventListener("click", (e) => { if (e.target === e.currentTarget) openOverlay(id, false); });
 }
 $("#operator").value = store("sizeup.cad.operator") || "";
 $("#operator").addEventListener("input", () => store("sizeup.cad.operator", operator()));
+$("#operator-pick").addEventListener("change", () => {
+  store("sizeup.cad.operator", operator());
+  $("#operator-pick").classList.toggle("unset", !operator());
+});
 window.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
   if (cad.ask) { cad.ask = null; render(); return; }
-  for (const id of ["#rc-overlay", "#db-overlay", "#lists-overlay", "#radios-overlay"]) if (!$(id).hidden) openOverlay(id, false);
+  for (const id of ["#db-overlay"]) if (!$(id).hidden) openOverlay(id, false);
 });
 
 async function boot() {

@@ -7,6 +7,7 @@
 <link rel="stylesheet" href="/static/vendor/maplibre-gl.css">
 <link rel="stylesheet" href="/static/style.css">
 <link rel="stylesheet" href="/static/cad.css">
+<link rel="stylesheet" href="/static/settings.css">
 </head>
 <body class="cad">
 <header>
@@ -17,12 +18,11 @@
   <span id="talking" class="talking-strip" hidden aria-live="polite"></span>
   <span class="spacer"></span>
   <span id="alerts"></span>
-  <button id="radios-open" class="tg-open" title="Radio IDs → rigs: which radio is on which unit (confirmed, guessed, heard)">📻 Radios</button>
-  <button id="runcards-open" class="tg-open" title="Edit which units each event type sends">⚙ Run cards</button>
-  <button id="records-open" class="tg-open" title="Every event, CSV exports (the sheet's columns), counts">Records</button>
-  <button id="lists-open" class="tg-open" title="Types, subtypes, dispositions, unit statuses (data/cad_lists.json)">Lists</button>
-  <label class="operator" title="Your name: recorded on every dispatch, status change and timeline entry">
+  <button id="runcards-open" class="tg-open" title="Edit which units each event type sends (Settings)">Run cards</button>
+  <a id="settings-open" class="nav" href="#settings" title="Lists, run cards, units, dispatch wording, users, records and exports">⚙ Settings</a>
+  <label class="operator" title="Your name: recorded on every dispatch, status change, timeline entry and settings change">
     <span class="dim">Operator</span>
+    <select id="operator-pick" hidden></select>
     <input id="operator" type="text" maxlength="60" autocomplete="off" spellcheck="false" placeholder="your name">
   </label>
   <a class="nav" href="/comms" title="Every transmission: unit, radio ID, channel, event, transcript">Comms →</a>
@@ -170,9 +170,9 @@
         <ol id="d-units" class="list on-units"></ol>
       </div>
 
-      <!-- non-emergency: units attached, no run card, no dispatch -->
+      <!-- non-emergency: units attached, no run card, no dispatch; any event: other agencies (EMS, PD) that show up -->
       <div id="d-attach" class="card" hidden>
-        <div class="card-head"><h2>Attach a unit</h2><span class="dim small">Non-emergency: no run card and no dispatch.</span></div>
+        <div class="card-head"><h2 id="a-title">Attach a unit</h2><span id="a-hint" class="dim small">Non-emergency: no run card and no dispatch.</span></div>
         <div class="row add-unit">
           <select id="a-unit"></select>
           <button id="a-add" type="button">Attach unit</button>
@@ -279,37 +279,52 @@
   </aside>
 </main>
 
-<div id="rc-overlay" class="overlay" hidden>
-  <div class="tg-panel rc-panel" role="dialog" aria-modal="true" aria-labelledby="rc-title">
-    <div class="tg-head">
-      <h2 id="rc-title" class="tg-title">Run cards</h2>
-      <span class="spacer"></span>
-      <button id="rc-close" class="tg-close" title="Close (Esc)" aria-label="Close">✕</button>
-    </div>
-    <div id="rc-banner" class="banner">Default run cards — edit to match PCFD policy. These are a stand-in so the console works; they are not the department's run cards.</div>
-    <div class="rc-body">
-      <ol id="rc-list" class="list rc-list"></ol>
-      <form id="rc-form" class="rc-form" autocomplete="off">
-        <div class="row rc-type-row">
-          <label>Event type <select id="rc-type"></select></label>
-          <label>Subtype <select id="rc-subtype"></select></label>
-        </div>
-        <div class="dim small">A card for a type and subtype wins over the card for the type alone.</div>
-        <label>Said in the dispatch as <input id="rc-spoken" type="text" maxlength="120"></label>
-        <div class="dim small">Slots, in order. A kind takes the next available unit of that kind (regular apparatus before spares; never another department's); a named unit takes that unit.</div>
-        <ol id="rc-slots" class="rc-slots"></ol>
-        <div class="row">
-          <button id="rc-add-kind" type="button">+ Kind</button>
-          <button id="rc-add-unit" type="button">+ Named unit</button>
-        </div>
-        <div class="row"><span id="rc-error" class="error"></span><span class="spacer"></span>
-          <button id="rc-delete" type="button" class="danger-quiet">Delete</button>
-          <button id="rc-new" type="button">New card</button>
-          <button id="rc-save" type="submit" class="primary">Save</button></div>
-      </form>
-    </div>
+<!-- Settings (/cad#settings/<section>): the lists, run cards, units, dispatch wording, users, records.
+     Edits are kept in the CAD database over data/cad_lists.json and pushed to every console at once. -->
+<main id="settings" class="settings" hidden>
+  <nav class="s-nav" aria-label="Settings sections">
+    <a class="nav s-back" href="#">← Dispatch</a>
+    <ol id="s-sections" class="s-sections"></ol>
+  </nav>
+  <div class="s-content">
+    <div id="s-msg" class="s-msg" role="status" aria-live="polite"></div>
+    <section id="s-lists" class="s-panel" data-s="lists" hidden></section>
+    <section id="s-runcards" class="s-panel" data-s="runcards" hidden>
+      <div class="s-head"><h2>Run cards</h2><span class="spacer"></span><span id="rc-tools" class="row"></span></div>
+      <div id="rc-banner" class="banner">Default run cards — edit to match PCFD policy. These are a stand-in so the console works; they are not the department's run cards.</div>
+      <div class="rc-body">
+        <ol id="rc-list" class="list rc-list"></ol>
+        <form id="rc-form" class="rc-form" autocomplete="off">
+          <div class="row rc-type-row">
+            <label>Event type <select id="rc-type"></select></label>
+            <label>Subtype <select id="rc-subtype"></select></label>
+          </div>
+          <div class="dim small">A card for a type and subtype wins over the card for the type alone.</div>
+          <label>Said in the dispatch as <input id="rc-spoken" type="text" maxlength="120"></label>
+          <div class="dim small">Slots, in order. A kind takes the next available unit of that kind (regular apparatus before spares; never another department's); a named unit takes that unit.</div>
+          <ol id="rc-slots" class="rc-slots"></ol>
+          <div class="row">
+            <button id="rc-add-kind" type="button">+ Kind</button>
+            <button id="rc-add-unit" type="button">+ Named unit</button>
+          </div>
+          <div class="row"><span id="rc-error" class="error"></span><span class="spacer"></span>
+            <button id="rc-delete" type="button" class="danger-quiet">Delete</button>
+            <button id="rc-new" type="button">New card</button>
+            <button id="rc-save" type="submit" class="primary">Save</button></div>
+        </form>
+      </div>
+    </section>
+    <section id="s-units" class="s-panel" data-s="units" hidden></section>
+    <section id="s-dispatch" class="s-panel" data-s="dispatch" hidden></section>
+    <section id="s-users" class="s-panel" data-s="users" hidden></section>
+    <section id="s-system" class="s-panel" data-s="system" hidden></section>
+    <section id="s-radios" class="s-panel" data-s="radios" hidden>
+      <div class="s-head"><h2>Radios</h2></div>
+      <div class="note-box">Radio IDs and rigs: coming from the radio-ID work. Its Radios editor plugs in here.</div>
+      <div id="settings-radios" class="settings-radios"></div>
+    </section>
   </div>
-</div>
+</main>
 
 <div id="db-overlay" class="overlay" hidden>
   <div class="tg-panel db-panel" role="dialog" aria-modal="true" aria-labelledby="db-title">
@@ -334,34 +349,11 @@
   </div>
 </div>
 
-<div id="lists-overlay" class="overlay" hidden>
-  <div class="tg-panel" role="dialog" aria-modal="true" aria-labelledby="lists-title">
-    <div class="tg-head">
-      <h2 id="lists-title" class="tg-title">Lists</h2>
-      <span id="lists-source" class="dim small"></span>
-      <span class="spacer"></span>
-      <button id="lists-close" class="tg-close" title="Close (Esc)" aria-label="Close">✕</button>
-    </div>
-    <div id="lists" class="lists"></div>
-  </div>
-</div>
-
-<div id="radios-overlay" class="overlay" hidden>
-  <div class="tg-panel radios-dialog" role="dialog" aria-modal="true" aria-labelledby="radios-title">
-    <div class="tg-head">
-      <h2 id="radios-title" class="tg-title">Radios</h2>
-      <span class="dim small">radio ID → rig</span>
-      <span class="spacer"></span>
-      <button id="radios-close" class="tg-close" title="Close (Esc)" aria-label="Close">✕</button>
-    </div>
-    <div id="radios-mount" class="radios-mount"></div>
-  </div>
-</div>
-
 <script src="/static/vendor/maplibre-gl.js"></script>
 <script src="/static/map-style.js"></script>
 <script src="/static/radio.js"></script>
 <script src="/static/radios-panel.js"></script>
 <script src="/static/cad.js"></script>
+<script src="/static/settings.js"></script>
 </body>
 </html>

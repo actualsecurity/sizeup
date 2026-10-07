@@ -326,7 +326,7 @@ def test_v3_database_migrates_to_v4(tmp_path):
     db.commit()
     db.close()
     c2 = cad(tmp_path, clock)
-    assert c2.store.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 4
+    assert c2.store.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 5
     assert "schema v3 -> v4 (radio IDs, communications log)" in c2.store.migrated
     assert c2.store.one("SELECT assigned_at FROM assignments")["assigned_at"] is not None   # from dispatched_at
     assert c2.radios.resolve("mdc", "0611")["unit"] == "E61"

@@ -25,6 +25,6 @@ def test_pages_load_only_scripts_that_exist_and_cad_buttons_have_handlers():
         html = (static / page).read_text()
         for src in re.findall(r'<script src="/static/([\w./-]+)"', html):
             assert (static / src).is_file(), f"{page}: {src} missing"
-    cad_js = (static / "cad.js").read_text()
-    for bid in ("radios-open", "radios-close", "note-add"):
-        assert f'$("#{bid}")' in cad_js or bid == "note-add", f"#{bid} has no handler"
+    # the Radios editor lives in Settings -> Radios
+    assert 'id="settings-radios"' in (static / "cad.html").read_text()
+    assert 'RadiosPanel.mount($("#settings-radios")' in (static / "settings.js").read_text()

@@ -1,0 +1,117 @@
+/* sizeup CAD Settings (/cad#settings/<section>): left section list, content on the right. Builds on
+   style.css and cad.css (tokens, cards, chips, buttons); sentence case, the same dark theme. */
+
+.settings { display: grid; grid-template-columns: 13em minmax(0, 1fr); min-height: 0; }
+.settings[hidden] { display: none; }
+.s-nav { background: var(--panel-solid); border-right: 1px solid var(--line); padding: 0.8em; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 0.7em; }
+.s-back { align-self: flex-start; }
+.s-sections { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.15em; }
+.s-sections a { display: block; padding: 0.4em 0.65em; border-radius: 0.35em; color: var(--text); text-decoration: none; white-space: nowrap; }
+.s-sections a:hover { background: rgba(255, 255, 255, 0.05); }
+.s-sections a.on { background: rgba(255, 255, 255, 0.09); font-weight: 700; box-shadow: inset 0.2em 0 0 var(--ok); }
+#settings-open.on { border-color: var(--ok); }
+
+.s-content { overflow-y: auto; padding: 0.9em 1.1em 3em; min-width: 0; }
+.s-msg { position: sticky; top: -0.9em; z-index: 3; margin: -0.9em -1.1em 0.6em; padding: 0.45em 1.1em; font-weight: 600;
+  background: var(--panel-solid); border-bottom: 1px solid var(--line); }
+.s-msg:empty { display: none; }
+.s-msg.ok { color: var(--ok); }
+.s-msg.err { color: var(--err); }
+.s-panel { display: flex; flex-direction: column; gap: 0.8em; max-width: 84em; }
+.s-panel[hidden] { display: none; }
+.s-head { display: flex; align-items: center; gap: 0.6em; flex-wrap: wrap; }
+.s-head h2 { margin: 0; font-size: 1.2em; }
+.s-about { margin: -0.3em 0 0; max-width: 60em; font-size: 0.9em; }
+.s-card { background: var(--card); border: 1px solid var(--line); border-radius: 0.5em; padding: 0.7em 0.9em; min-width: 0; }
+.s-card > h3, .s-card-head h3 { margin: 0; font-size: 1em; }
+.s-card-head { display: flex; align-items: center; gap: 0.6em; flex-wrap: wrap; margin-bottom: 0.4em; }
+.s-card > p { margin: 0.2em 0 0.5em; }
+.note-box { border: 1px dashed color-mix(in srgb, var(--warn) 70%, transparent); color: var(--warn); border-radius: 0.4em;
+  padding: 0.5em 0.75em; font-weight: 600; }
+
+.s-tabs { display: flex; flex-wrap: wrap; gap: 0.35em; }
+.s-tabs .tab.on { background: rgba(255, 255, 255, 0.1); border-color: var(--text); font-weight: 700; }
+
+.s-rows { list-style: none; margin: 0; padding: 0; }
+.s-row { display: flex; align-items: center; gap: 0.45em 0.55em; flex-wrap: wrap; padding: 0.35em 0; border-bottom: 1px solid var(--line); }
+.s-row:last-child { border-bottom: 0; }
+.s-row.retired > :not(.s-ord):not(button) { opacity: 0.62; }
+.s-row.deleted { opacity: 0.6; }
+.s-row.deleted .s-code, .s-row.deleted .s-name { text-decoration: line-through; }
+.s-rows > li.empty { color: var(--dim); font-style: italic; padding: 0.4em 0; }
+.s-ord { display: inline-flex; gap: 0.15em; }
+.s-code { min-width: 7.5em; font-size: 0.85em; color: var(--dim); overflow-wrap: anywhere; }
+.s-code.unit-code { min-width: 5.5em; color: var(--text); font-weight: 700; font-size: 0.95em; }
+.s-name { flex: 1 1 12em; }
+.s-said { flex: 1 1 8em; }
+.s-title { flex: 1 1 9em; }
+.s-dept { flex: 0 1 9em; }
+.s-code-in { width: 9em; }
+.s-num { width: 6em; }
+.s-rule { min-width: 12em; }
+.s-sample { white-space: nowrap; }
+.s-used { white-space: nowrap; }
+.s-meta { display: inline-flex; align-items: center; gap: 0.4em; flex-wrap: wrap; }
+input.s-color { width: 2.4em; height: 1.95em; padding: 0.1em 0.15em; cursor: pointer; }
+.s-add { margin-top: 0.6em; padding-top: 0.6em; border-top: 1px dashed var(--line); }
+.s-add .s-name { flex: 1 1 10em; }
+
+.chip.s-state { font-size: 0.68em; }
+.chip.s-state.default { --c: #9aa0b4; }
+.chip.s-state.edited { --c: var(--ok); }
+.chip.s-state.added { --c: #a3a9ff; }
+.chip.s-state.retired { --c: var(--warn); }
+.chip.s-state.deleted { --c: var(--err); }
+.chip.s-flag { font-size: 0.68em; --c: #9aa0b4; }
+.chip.s-flag.available { --c: #5aa9ff; }
+.chip.s-flag.unavailable { --c: var(--err); }
+
+.s-fold > summary { cursor: pointer; display: flex; align-items: baseline; gap: 0.4em; list-style: none; }
+.s-fold > summary::before { content: "▸"; color: var(--dim); }
+.s-fold[open] > summary::before { content: "▾"; }
+.s-fold > summary h3 { margin: 0; font-size: 1em; }
+.s-fold[open] > summary { margin-bottom: 0.4em; }
+
+.s-wording { display: flex; flex-direction: column; gap: 0.6em; }
+.s-tpl { display: flex; flex-direction: column; gap: 0.25em; }
+.s-tpl textarea { width: 100%; }
+.s-more { margin-top: 0.7em; }
+.s-more > summary { cursor: pointer; color: var(--dim); margin-bottom: 0.5em; }
+.s-more .s-tpl { margin-bottom: 0.6em; }
+.s-preview { display: flex; flex-direction: column; gap: 0.5em; }
+.s-pv { padding: 0.4em 0.6em; border: 1px dashed rgba(255, 255, 255, 0.22); border-radius: 0.35em; }
+.s-import { margin-top: 0.6em; display: flex; flex-direction: column; gap: 0.4em; }
+.s-import:empty { display: none; }
+.s-chg.added { color: var(--ok); }
+.s-chg.removed { color: var(--err); }
+.s-chg.changed { color: var(--warn); }
+.s-audit td { overflow-wrap: anywhere; }
+.s-panel .banner { margin: 0; }
+.s-panel .rc-body { padding: 0; }
+.s-panel .rc-list { max-height: 70vh; }
+.settings-radios:empty { display: none; }
+
+/* the board: other agencies folded until wanted */
+.ugroup h3.fold { cursor: pointer; }
+.ugroup h3.fold:hover { color: var(--text); }
+.ugroup.folded > ol { display: none; }
+#operator-pick { width: 11em; }
+#operator-pick.unset { border-color: var(--warn); }
+
+@media (max-width: 1100px) {
+  .settings { grid-template-columns: minmax(0, 1fr); }
+  .s-nav { border-right: 0; border-bottom: 1px solid var(--line); flex-direction: row; align-items: center; overflow-x: auto; padding: 0.5em 0.6em; }
+  .s-sections { flex-direction: row; gap: 0.2em; }
+  .s-content { overflow: visible; }
+  .s-msg { top: 0; }
+}
+@media (max-width: 640px) {
+  .s-content { padding: 0.6em 0.6em 3em; }
+  .s-msg { margin: -0.6em -0.6em 0.5em; padding: 0.45em 0.6em; }
+  .s-card { padding: 0.6em 0.65em; }
+  .s-code { min-width: 0; }
+  .s-row select { max-width: 100%; flex: 1 1 10em; }
+  .s-said, .s-title, .s-dept, .s-name { flex: 1 1 100%; }
+  #operator-pick { width: 8em; }
+}

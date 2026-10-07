@@ -1120,10 +1120,14 @@ def test_config_cad_sections(tmp_path):
 def test_cad_page_buttons_have_handlers():
     html = (ROOT / "sizeup" / "web" / "static" / "cad.html").read_text()
     js = (ROOT / "sizeup" / "web" / "static" / "cad.js").read_text()
+    js_all = js + (ROOT / "sizeup" / "web" / "static" / "settings.js").read_text()
     for bid, rest in re.findall(r'<button id="([\w-]+)"([^>]*)>', html):
-        assert f'$("#{bid}").addEventListener' in js or 'type="submit"' in rest, f"#{bid} has no handler"
+        assert f'$("#{bid}").addEventListener' in js_all or 'type="submit"' in rest, f"#{bid} has no handler"
     for fid in re.findall(r'<form id="([\w-]+)"', html):
-        assert f'$("#{fid}").addEventListener("submit"' in js, f"#{fid} has no submit handler"
+        assert f'$("#{fid}").addEventListener("submit"' in js_all, f"#{fid} has no submit handler"
+    # every element the scripts look up by id is on the page
+    for ref in set(re.findall(r'\$\("#([\w-]+)"\)', js_all)):
+        assert f'id="{ref}"' in html or f'.id = "{ref}"' in js_all, f"#{ref} is not on the page"
     called = set(re.findall(r"^\s+([A-Za-z_]\w*)\(\);?$", re.search(r"^function render\(\) \{(.*?)^\}", js, re.S | re.M).group(1), re.M))
     defined = set(re.findall(r"^(?:async\s+)?function\s+([A-Za-z_]\w*)\s*\(", js, re.M))
     assert called and not (called - defined)
