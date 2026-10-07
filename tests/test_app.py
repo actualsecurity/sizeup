@@ -499,3 +499,18 @@ def test_dongle_held_by_shortfinal_is_left_alone(tmp_path, monkeypatch):
         app.stop()
     assert not (claims.DIR / "v4.json").exists()                            # released on shutdown
     assert (claims.DIR / "adsb.json").exists()                              # shortfinal's untouched
+
+
+def test_apx6000_id_sent_late_in_the_transmission_is_found(tmp_path):
+    # FG1 2026-10-07 14:34:56: an APX 6000 (6301) whose post-IDs sit 0.3-0.8 s in. The 0.3 s edge
+    # search missed them and the row said "no ID burst". Real clip.
+    import wave
+    from pathlib import Path
+    from sizeup.radio.fm import NoiseSquelch
+    with wave.open(str(Path(__file__).parent / "fixtures" / "mdc" / "apx6000_6301_late_burst.wav")) as w:
+        audio = np.frombuffer(w.readframes(w.getnframes()), "<i2").astype(np.float32) / 32768
+    app = App(cfg(tmp_path))
+    seg = Segment(0, len(audio) / RATE, audio, 20.0, [])                 # as stored: nothing cut
+    assert app._units(seg) == ["6301"] and app._id_note("FG1", seg, ["6301"]) == ""
+    hiss = (0.05 * np.random.default_rng(1).standard_normal(len(audio))).astype(np.float32)
+    assert app._id_note("FG1", Segment(0, 1, hiss, 20.0, []), []) == "no ID burst"

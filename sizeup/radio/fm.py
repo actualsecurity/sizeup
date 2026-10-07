@@ -32,7 +32,8 @@ HANG_FRAMES = 8                # carrier may flicker for 0.4 s inside one transm
 MIN_FRAMES = 6                 # under 0.3 s of carrier: not worth keeping
 DATA_SHARE = 0.75              # a frame with this much of its voice-band energy at 1000-2100 Hz ...
 DATA_OVER_DB = 15.0            # ... and this far over the dead air is an MDC-1200 data burst
-EDGE_SEARCH = 6                # look for a burst within 0.3 s of either end of the carrier
+EDGE_SEARCH = 20               # look for a burst within 1 s of either end of the carrier (PCFD's APX
+                               # 6000s send it 0.3-0.8 s in, 2026-10-07; 0.3 s missed every one)
 MAX_FRAMES = 20 * 120          # split anything over 2 minutes (a long page is ~30-60 s)
 STALL_S = 5.0
 HF_BAND = (4000.0, 7500.0)
@@ -171,7 +172,13 @@ class NoiseSquelch:
                 bursts.append(np.concatenate(body[max(lo, b - 1):min(hi, k + 1) + 1]))
                 hi = b - 2
             if hi - lo + 1 < MIN_FRAMES:
-                return None
+                if not bursts:
+                    return None
+                # A key-up that is only an ID burst (+ dead carrier): still a transmission (who keyed),
+                # kept at its length with the audio blanked, so nothing reads the data tones as speech.
+                audio = np.zeros(len(body) * FRAME, np.float32)
+                t0 = start + i0 * FRAME / RATE
+                return Segment(t0, t0 + len(audio) / RATE, audio, quieting, bursts)
             audio = np.concatenate(body[lo:hi + 1]).astype(np.float32)
             t0 = start + (i0 + lo) * FRAME / RATE
             return Segment(t0, t0 + len(audio) / RATE, audio, quieting, bursts)

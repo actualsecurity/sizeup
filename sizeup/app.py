@@ -33,7 +33,7 @@ from sizeup.config import Config, ConfigError, load
 from sizeup import janitor
 from sizeup.dispatch import parse
 from sizeup.incidents import IncidentStore, Traffic
-from sizeup.radio.fm import RATE, Channel, NfmReceiver, Segment, speech_seconds
+from sizeup.radio.fm import RATE, Channel, NfmReceiver, Segment, data_frames, speech_seconds
 from sizeup.radio.mdc1200 import decode as mdc_decode
 from sizeup.radio.p25 import Call, CallIngest
 from sizeup.radio import claims
@@ -365,9 +365,11 @@ class App:
     # -- radio events -----------------------------------------------------------------------------
 
     def _units(self, seg: Segment) -> list[str]:
-        """Who keyed up: MDC-1200 PTT-IDs in the bursts cut from the transmission's ends."""
+        """Who keyed up: MDC-1200 PTT-IDs in the bursts cut from the transmission's ends, and anywhere
+        in the transmission itself (a burst the edge cut missed still names the radio; packets are
+        CRC-checked, so this can't invent an ID)."""
         out: list[str] = []
-        for b in seg.bursts:
+        for b in [*seg.bursts, seg.audio]:
             try:
                 pkts = mdc_decode(b, RATE)
             except Exception:
@@ -384,15 +386,17 @@ class App:
         """Why no radio ID, when there isn't one: a burst we couldn't read vs. no burst at all."""
         if units:
             return ""
-        if not seg.bursts:
+        F = RATE // 20
+        looks_like_data = any(data_frames([seg.audio[i:i + F] for i in range(0, len(seg.audio) - F + 1, F)]))
+        if not seg.bursts and not looks_like_data:
             return "no ID burst"
         bad = 0
-        for b in seg.bursts:
+        for b in [*seg.bursts, seg.audio]:
             try:
                 bad += sum(not p.crc_ok for p in mdc_decode(b, RATE, only_valid=False))
             except Exception:
                 pass
-        log(f"{label}: MDC ID burst heard but not decoded ({len(seg.bursts)} burst(s), "
+        log(f"{label}: MDC ID burst heard but not decoded ({len(seg.bursts)} cut burst(s), "
             + (f"{bad} sync hit(s) failed the CRC" if bad else "no sync found") + ")")
         return "ID burst unreadable"
 
