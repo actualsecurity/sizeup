@@ -7,8 +7,8 @@ shows). A new export can replace the file without a code change:
 
     event_types                      {code, name, color}: Type dropdown and the colored type cells
     event_subtypes                   {code, name}: Subtype dropdown
-    type_subtypes                    TYPE -> allowed subtypes (missing = any subtype; listed with none =
-                                     no subtype). PCFD's map is partial (type_subtypes_partial)
+    type_subtypes                    TYPE -> allowed subtypes (listed with none, or missing: no subtype).
+                                     type_subtypes_partial: which types PCFD gave, which are to confirm
     dispositions                     {code, name}: Close event needs one
     received_via                     {code, name}: how the call came in
     event_class                      emergency / non-emergency by TYPE/SUBTYPE, */SUBTYPE or TYPE
@@ -100,7 +100,7 @@ class Lists:
     status_flow: dict = field(default_factory=dict)        # status | "*" -> (next statuses), the incident's unit buttons
     lead_in_joint_only: dict = field(default_factory=dict) # town -> the lead-in when only its units go
     free_status: str = ""                                  # the free status Close event sets ('' = the first free)
-    type_subtypes_partial: dict = field(default_factory=dict)  # {"given": [types], "not_given": [types]}
+    type_subtypes_partial: dict = field(default_factory=dict)  # {"given": [types], "confirm": {type: why}}
     dispatch_tones: dict = field(default_factory=dict)     # joint town -> [(hz, s), ...] | None (not known yet)
     path: str = ""
     _names: dict[str, dict[str, str]] = field(default_factory=dict, repr=False)
@@ -147,10 +147,17 @@ class Lists:
     # -- types ------------------------------------------------------------------------------------
 
     def subtypes_for(self, typ: str) -> tuple[str, ...]:
-        """The subtypes a type allows: its list in type_subtypes (none listed: no subtype), or every
-        subtype for a type the (partial) map doesn't list."""
-        sub = self.type_subtypes.get(typ)
-        return tuple(s for s in sub if s in self.subtype_codes) if sub is not None else self.subtype_codes
+        """The subtypes a type allows now: its list in type_subtypes, active ones only. A type listed
+        with none, or not in the map at all, takes no subtype."""
+        return tuple(s for s in self.type_subtypes.get(typ, ()) if s in self.subtype_codes)
+
+    def map_gaps(self) -> list[str]:
+        """What the type -> subtype map is missing: an active type with no entry (it takes no subtype
+        until it has one), a retired subtype still listed (no longer offered)."""
+        out = [f"{t}: not in the map (no subtype)" for t in self.type_codes if t not in self.type_subtypes]
+        out += [f"{t}: {s} is retired" for t, subs in self.type_subtypes.items() if t in self.type_codes
+                for s in subs if self.retired("event_subtypes", s)]
+        return out
 
     def check_type(self, typ: str, subtype: str = "", required: bool = True) -> None:
         """Raises ValueError with the reason for a type / subtype code that isn't on the lists."""
@@ -167,7 +174,11 @@ class Lists:
         if subtype and subtype not in self.subtypes_for(typ):
             if self.retired("event_subtypes", subtype):
                 raise ValueError(f"subtype: {self.name('event_subtypes', subtype)} ({subtype}) is retired")
-            raise ValueError(f"subtype: {subtype!r} is not an event subtype for {self.type_label(typ)}")
+            if subtype not in self._names["event_subtypes"]:
+                raise ValueError(f"subtype: {subtype!r} is not an event subtype")
+            ok = self.subtypes_for(typ)
+            raise ValueError(f"subtype: {self.type_label(typ)} can't be {self.name('event_subtypes', subtype)} ({subtype}): "
+                             + (f"pick one of {', '.join(ok)} or none" if ok else "it takes no subtype"))
 
     def check_key(self, k: str) -> tuple[str, str]:
         """'ALARM/COMM' -> ('ALARM', 'COMM'), checked."""
@@ -451,9 +462,10 @@ def build(d: dict, where: str, path: str | Path = "") -> Lists:
             raise ListsError(f"{where}: type_subtypes[{t!r}]: a list of event_subtypes codes")
         type_subtypes[t] = tuple(s for s in subs if s)          # "": no subtype (always allowed)
     tsp = d.get("type_subtypes_partial") or {}
-    if not isinstance(tsp, dict) or not all(isinstance(tsp.get(k, []), list) for k in ("given", "not_given")):
-        raise ListsError(f"{where}: type_subtypes_partial: {{given: [types], not_given: [types]}}")
-    tsp = {k: [t for t in tsp.get(k, []) if t in type_codes] for k in ("given", "not_given")}
+    if not isinstance(tsp, dict) or not isinstance(tsp.get("given", []), list) or not isinstance(tsp.get("confirm", {}), dict):
+        raise ListsError(f"{where}: type_subtypes_partial: {{given: [types], confirm: {{type: why}}}}")
+    tsp = {"given": [t for t in tsp.get("given", []) if t in type_codes],
+           "confirm": {t: str(v) for t, v in tsp.get("confirm", {}).items() if t in type_codes}}
 
     def check_key(k: str, what: str) -> None:
         t, _, s = k.partition("/")

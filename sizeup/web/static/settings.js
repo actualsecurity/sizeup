@@ -13,11 +13,12 @@ const S = {
   section: null, list: store("sizeup.cad.settings.list") || "event_types",
   data: null, loading: false, again: false, deferred: false, msgT: null,
   boardsOpen: null, audit: "", auditRows: null, auditFor: "", admin: null, importing: null,
-  previewT: null, previewSeq: 0,
+  previewT: null, previewSeq: 0, tsOpen: new Set(),
 };
 const S_SECTIONS = [["lists", "Lists"], ["runcards", "Run cards"], ["units", "Units"], ["dispatch", "Dispatch"],
   ["users", "Users"], ["system", "System"], ["radios", "Radios"]];
-const S_LISTS = [["event_types", "Event types"], ["event_subtypes", "Event subtypes"], ["dispositions", "Dispositions"],
+const S_LISTS = [["event_types", "Event types"], ["event_subtypes", "Event subtypes"], ["type_subtypes", "Subtypes per type"],
+  ["dispositions", "Dispositions"],
   ["received_via", "Received via"], ["unit_statuses", "Unit statuses"], ["event_class", "Emergency rules"],
   ["geo_town_order", "Town order"]];
 const S_ROLES = [["", "Committed (on a call)"], ["free", "Available (in service)"], ["dispatched", "Dispatched (set on dispatch)"],
@@ -208,6 +209,7 @@ function sLists(panel) {
   let body;
   if (S.list === "event_class") body = sClassRules();
   else if (S.list === "geo_town_order") body = sTowns();
+  else if (S.list === "type_subtypes") body = sTypeMap();
   else body = sListTable(S.list);
   const flow = S.list === "unit_statuses" && S.data.status_flow ? sFlow() : null;
   panel.replaceChildren(...sHead("Lists", "Codes stay as they are: they are on events and in the CSV exports. Names, colors "
@@ -239,24 +241,83 @@ function sListTable(sec) {
   return sCard(sCardHead(title, info, reset), about ? el("p", "dim small", about) : null, partial, ol, sAddForm(sec));
 }
 
-// The type -> subtype map (data file type_subtypes): the department's is partial.
+// Pointer from the type and subtype lists to the map.
 function sSubtypeMap() {
   const t = S.data.type_subtypes;
   if (!t) return null;
-  const det = el("details", "s-more s-tsmap");
-  const p = t.partial || {};
-  const sum = el("summary", "", "Allowed subtypes per type: the department's map is partial");
-  const list = el("ul", "small s-tslist");
-  for (const [typ, subs] of Object.entries(t.map || {})) {
-    const li = el("li");
-    li.append(el("code", "", typ), document.createTextNode(" → " + (subs.length ? subs.join(", ") : "no subtype")));
-    list.append(li);
+  const todo = t.rows.filter((r) => r.confirm && !r.retired).length;
+  const p = el("p", "dim small", "Which subtypes each type offers: ");
+  const a = sBtn("Subtypes per type", "", () => { S.list = "type_subtypes"; store("sizeup.cad.settings.list", S.list); sRender(true); }, "mini");
+  p.append(a, document.createTextNode(todo ? ` (${todo} type${todo === 1 ? "" : "s"} to confirm with the department).` : "."));
+  return p;
+}
+
+// The type -> subtype map (type_subtypes): a row per type, its subtypes ticked. Strict: a type offers only
+// what is ticked; none ticked = no subtype. Department-given or proposed (to confirm until confirmed here).
+function sTypeMap() {
+  const d = S.data.type_subtypes;
+  const subs = (L().event_subtypes || []);
+  const reset = d.edited ? sBtn("Reset to default", "Every type's subtypes as in the data file", () => {
+    if (sAsk("Put every type's subtypes back to the data file's?")) sPost("type_subtypes", { action: "reset_section" }, "Subtypes per type: back to the defaults.");
+  }, "danger-quiet") : null;
+  const rows = d.rows.filter((r) => !r.retired);
+  const todo = rows.filter((r) => r.confirm).length;
+  const ol = el("ol", "s-rows s-tsrows");
+  for (const r of rows) {
+    const li = el("li", "s-row s-tsrow");
+    const open = S.tsOpen.has(r.type);
+    const label = el("b", "s-rule", r.name);
+    label.title = r.type;
+    const src = el("span", `chip s-flag ${r.source === "given" ? "available" : ""}`, r.source === "given" ? "department" : "proposed");
+    src.title = r.source === "given" ? "From the department's code sheet" : "Not on the department's code sheet: a proposal";
+    const allowed = el("span", "s-tsnow small" + (r.subtypes.length ? "" : " dim"),
+      r.subtypes.length ? r.subtypes.join(", ") : r.listed ? "no subtype" : "not in the map: no subtype");
+    li.append(label, el("code", "s-code", r.type), src, sState(r.state));
+    if (r.confirm) {
+      const c = el("span", "chip s-confirm", "to confirm");
+      c.title = r.confirm;
+      li.append(c);
+      li.append(sBtn("Confirm", `Right as it is: ${r.confirm}`,
+        () => sPost("type_subtypes", { action: "set", type: r.type, subtypes: r.subtypes }, `${r.type}: confirmed.`), "mini"));
+    }
+    li.append(allowed, el("span", "spacer"));
+    const tog = sBtn(open ? "Done" : "Edit", "Tick the subtypes this type offers", () => {
+      if (open) S.tsOpen.delete(r.type); else S.tsOpen.add(r.type);
+      sRender(true);
+    });
+    tog.setAttribute("aria-expanded", String(open));
+    li.append(tog);
+    if (r.state === "edited") li.append(sBtn("Reset", "Back to the data file's", () => sPost("type_subtypes", { action: "reset", type: r.type }, `${r.type}: default again.`)));
+    if (open) {
+      const grid = el("div", "s-tsgrid");
+      grid.setAttribute("role", "group");
+      grid.setAttribute("aria-label", `Subtypes for ${r.name}`);
+      for (const st of subs) {
+        const on = r.subtypes.includes(st.code);
+        if (st.retired && !on) continue;           // retired: only to untick
+        const lab = el("label", "inline check small" + (on ? " on" : ""));
+        const cb = el("input");
+        cb.type = "checkbox";
+        cb.checked = on;
+        cb.dataset.code = st.code;
+        cb.addEventListener("change", () => {
+          const pick = [...grid.querySelectorAll("input:checked")].map((x) => x.dataset.code);
+          sPost("type_subtypes", { action: "set", type: r.type, subtypes: pick }, `${r.type}: ${pick.length ? pick.join(", ") : "no subtype"}.`);
+        });
+        lab.title = st.code + (st.retired ? " (retired)" : "");
+        lab.append(cb, el("code", "", st.code), el("span", "dim", st.name + (st.retired ? " (retired)" : "")));
+        grid.append(lab);
+      }
+      li.append(grid);
+    }
+    ol.append(li);
   }
-  const notGiven = (p.not_given || []).length ? p.not_given : t.unlisted || [];
-  det.append(sum, el("p", "dim small", "From the department's code sheet, which ends at MVA. "
-    + (notGiven.length ? `Not given yet: ${notGiven.join(", ")} (any subtype until they are). ` : "")
-    + "No subtype is always allowed. Edit the data file to change the map."), list);
-  return det;
+  const gaps = (d.gaps || []).length ? el("p", "note-box small", "Check: " + d.gaps.join("; ") + ".") : null;
+  return sCard(sCardHead("Subtypes per type", `${rows.length} types` + (todo ? ` · ${todo} to confirm` : ""), reset),
+    el("p", "dim small", "After the type is picked, only its subtypes are offered (there is no ALS / Bomb); no subtype "
+      + "is always allowed. A type with none ticked takes no subtype. Department: from its code sheet (ALARM to MVA). "
+      + "Proposed: worked out from the order of its subtype list, or a guess: to confirm with the department (Confirm "
+      + "keeps it as it is). Taking a subtype off a type leaves old events as they are."), gaps, ol);
 }
 
 function sItemRow(sec, x, i, n) {

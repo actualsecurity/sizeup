@@ -1,5 +1,5 @@
 """The department's own codes (its code sheet, 2026-10-07): unit statuses AQ ... OS, every unit by
-department, the MA and misc codes, the partial type -> subtype map, and the v10 migration of a database
+department, the MA and misc codes, the strict type -> subtype map, and the v10 migration of a database
 written with the old status codes."""
 
 import hashlib
@@ -11,7 +11,7 @@ import pytest
 
 from sizeup.cad import lists, runcards
 from sizeup.cad.store import SCHEMA_VERSION, V10_STATUS, CadError, Store, v10_layout
-from tests.test_cad import make_cad, names, uid
+from tests.test_cad import make_cad, monitor_incident, names, texts, uid
 from tests.test_settings import item, post
 
 LIVE_DB = Path(__file__).resolve().parent.parent.parent / "live" / "state" / "cad.sqlite"
@@ -146,34 +146,184 @@ def test_guessed_status_roles_are_marked_until_confirmed():
     assert item(cad, "unit_statuses", "CN")["confirm"]
 
 
-# -- the partial type -> subtype map ------------------------------------------------------------------------
+# -- the type -> subtype map (strict) ------------------------------------------------------------------------
 
-def test_partial_subtype_map_applies_only_to_the_listed_types():
+LIVE_CARDS = ("STRU", "ALARM/COMM", "ALARM/RESD", "ALARM/CO-COMM", "ALARM/CO-RESD", "HAZARD/GAS", "HAZARD/WIRES", "BRUSH",
+              "MVA", "MVA/EXTRI", "RESCUE/WATER", "SERVICE", "ALS", "BLS", "MA", "INVEST")     # the live database's cards
+
+
+def test_every_type_is_mapped_and_only_its_subtypes_are_offered():
     L = lists.load()
-    assert set(L.subtypes_for("ALARM")) == {"CO-COMM", "CO-RESD", "COMM", "GAS", "GAS-ATMOS", "MED", "RESD", "TROUB"}
-    L.check_type("ALARM", "GAS-ATMOS")
-    with pytest.raises(ValueError, match="not an event subtype for Alarm"):
-        L.check_type("ALARM", "BOAT")
-    for t in ("HAZARD", "INVEST"):
-        for s in ("GAS-ODOR", "GAS-OUT", "GAS-LEAK", "GAS-LINE"):
-            L.check_type(t, s)
-    L.check_type("ALS", "ECHO")
+    assert L.map_gaps() == [] and set(L.type_subtypes) == set(L.type_codes)
+    for t, subs in L.type_subtypes.items():
+        assert subs == L.subtypes_for(t) and all(s in L.subtype_codes for s in subs)     # listed: real and active
+    assert L.subtypes_for("ALARM") == ("COMM", "RESD", "CO-COMM", "CO-RESD", "GAS", "MED", "TROUB")
+    assert L.retired("event_subtypes", "GAS-ATMOS") and L.name("event_subtypes", "GAS-ATMOS") == "Atmospheric gas alarm"
+    assert L.phrase("ALARM", "GAS-ATMOS") == "an atmospheric gas alarm"          # still said on an old event
+    with pytest.raises(ValueError, match="retired"):
+        L.check_type("ALARM", "GAS-ATMOS")
+    assert L.subtypes_for("ALS") == ("ECHO",)
     L.check_type("ALS")
-    for t in ("BLS", "BRUSH", "DRILL"):
+    L.check_type("ALS", "ECHO")
+    with pytest.raises(ValueError, match=r"ALS can't be Bomb \(BOMB\): pick one of ECHO or none"):
+        L.check_type("ALS", "BOMB")
+    for t in ("BLS", "BRUSH", "DRILL", "RECALL"):
         assert L.subtypes_for(t) == ()
         L.check_type(t)
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="takes no subtype"):
             L.check_type(t, "ECHO")
-    assert L.subtypes_for("MVA") == ("EXTRI", "INJURIES", "MULTINJU")
-    # Types the department didn't give: any subtype.
-    for t in ("STRU", "MVF", "NOTIF", "RECALL", "RESCUE", "SERVICE"):
-        assert L.subtypes_for(t) == L.subtype_codes
-    L.check_type("STRU", "BOAT")
-    assert L.type_subtypes_partial["not_given"] == ["MVF", "NOTIF", "RECALL", "RESCUE", "SERVICE", "STRU"]
+    assert L.subtypes_for("MVA") == ("EXTRI", "INJURIES", "MULTINJU", "NOINJ")
+    assert L.subtypes_for("STRU") == ("COMM", "RESD")
+    with pytest.raises(ValueError, match="Structure fire can't be"):
+        L.check_type("STRU", "FIRE")
+    with pytest.raises(ValueError, match="'NOPE' is not an event subtype"):
+        L.check_type("STRU", "NOPE")
+    for t, s in (("HAZARD", "GAS-LEAK"), ("HAZARD", "GAS-LINE"), ("INVEST", "GAS-ODOR"), ("INVEST", "GAS-OUT"),
+                 ("MVF", "TRUCK"), ("NOTIF", "NOTIF-PD"), ("RESCUE", "ELEVATOR"), ("SERVICE", "LIFT")):
+        L.check_type(t, s)
+    for t, s in (("HAZARD", "GAS-ODOR"), ("INVEST", "GAS-LEAK"), ("SERVICE", "ELEVATOR"), ("RESCUE", "LIFT")):
+        with pytest.raises(ValueError):
+            L.check_type(t, s)
+    # Department-given vs proposed: Settings marks the proposals "to confirm".
+    tsp = L.type_subtypes_partial
+    assert tsp["given"] == ["ALARM", "ALS", "BLS", "BRUSH", "DRILL", "HAZARD", "INVEST", "MA", "MVA"]
+    assert set(tsp["confirm"]) == {"MVA", "MVF", "NOTIF", "RECALL", "RESCUE", "SERVICE", "STRU"}
+    # Every default card fits the map, and so does every card on the live database.
+    for c in L.run_cards:
+        L.check_key(c["type"])
+    for k in LIVE_CARDS:
+        L.check_key(k)
+    # What a 60 Control page maps to fits too.
+    for t, s in (("ALARM", "RESD"), ("ALARM", "COMM"), ("ALARM", "CO-COMM"), ("ALARM", "CO-RESD"), ("HAZARD", "GAS"),
+                 ("HAZARD", "WIRES"), ("HAZARD", "HAZMAT"), ("MVF", "TRUCK"), ("MVF", "CAR"), ("MVA", "EXTRI"),
+                 ("RESCUE", "WATER")):
+        L.check_type(t, s)
+
+
+def test_the_server_rejects_a_pair_the_map_does_not_allow():
     cad = make_cad()
-    ts = cad.settings_get()["type_subtypes"]
-    assert ts["unlisted"] == ["MVF", "NOTIF", "RECALL", "RESCUE", "SERVICE", "STRU"] and ts["map"]["BLS"] == []
-    assert cad.state()["lists"]["type_subtypes"]["BLS"] == []
+    with pytest.raises(CadError, match=r"subtype: ALS can't be Bomb \(BOMB\)"):
+        cad.create({"type": "ALS", "subtype": "BOMB", "address": "1 Main St"})
+    with pytest.raises(CadError, match="Brush fire can't be"):
+        cad.create({"type": "BRUSH", "subtype": "COMM"})
+    iid = cad.create({"type": "ALS", "address": "1 Main St"})["id"]
+    with pytest.raises(CadError, match="ALS can't be Bomb"):
+        cad.update(iid, {"subtype": "BOMB", "operator": "JD"})
+    with pytest.raises(CadError, match="Bomb"):                    # a new type with a subtype it doesn't allow
+        cad.update(iid, {"type": "BLS", "subtype": "BOMB"})
+    assert cad.update(iid, {"type": "HAZARD", "subtype": "BOMB"})["subtype"] == "BOMB"
+    with pytest.raises(CadError, match="Alarm can't be Bomb"):     # type changed, subtype kept: checked as a pair
+        cad.update(iid, {"type": "ALARM"})
+    # The console gets the map: ALARM offers its list, BRUSH none.
+    ts = cad.state()["lists"]["type_subtypes"]
+    assert ts["ALARM"] == ["COMM", "RESD", "CO-COMM", "CO-RESD", "GAS", "MED", "TROUB"] and ts["BRUSH"] == []
+    # Run cards: a pair the map doesn't allow is refused.
+    with pytest.raises(CadError, match="run card ALS/BOMB: subtype: ALS can't be Bomb"):
+        cad.save_run_card({"type": "ALS/BOMB", "slots": [{"kind": "engine", "count": 1}], "operator": "JD"})
+    with pytest.raises(CadError, match="can't be"):
+        cad.save_run_card({"type": "ALS/BOMB", "rename_from": "ALS", "slots": [{"kind": "engine", "count": 1}]})
+    assert cad.save_run_card({"type": "ALS/ECHO", "slots": [{"kind": "engine", "count": 1}]})["type"] == "ALS/ECHO"
+    have = {c["type"] for c in cad.run_cards()}
+    assert set(LIVE_CARDS) - {"MA", "INVEST"} <= have          # every default card seeded (all fit)
+
+
+def test_an_old_event_with_a_pair_off_the_map_still_works(tmp_path):
+    cad = make_cad(tmp_path)
+    iid = cad.create({"type": "STRU", "address": "1 Main St", "operator": "JD"})["id"]
+    with cad.store.tx() as db:                                      # as the live database has it (STRU/FIRE)
+        db.execute("UPDATE incidents SET subtype = 'FIRE' WHERE id = ?", (iid,))
+    cad2 = make_cad(tmp_path)
+    inc = next(i for i in cad2.state()["incidents"] if i["id"] == iid)
+    assert (inc["type"], inc["subtype"]) == ("STRU", "FIRE")
+    assert cad2.lists.type_label("STRU", "FIRE") == "Structure fire / Fire"
+    cad2.update(iid, {"type": "STRU", "subtype": "FIRE", "cross_street": "Pearl St", "remarks": "smoke showing", "operator": "JD"})
+    cad2.note(iid, {"text": "2nd alarm requested", "operator": "JD"})
+    cad2.dispatch(iid, {"unit_ids": [uid(cad2, "E60")], "operator": "JD"})
+    cad2.upgrade(iid, {"info": "fire through the roof", "operator": "JD"})          # no new type: kept
+    with pytest.raises(CadError, match="Motor vehicle fire can't be Fire"):          # a change has to fit
+        cad2.update(iid, {"type": "MVF", "remarks": "car fire"})
+    assert cad2.store.incident(iid)["remarks"] == "smoke showing"                     # nothing of it saved
+    assert cad2.update(iid, {"subtype": "COMM"})["subtype"] == "COMM"
+    with cad2.store.tx() as db:
+        db.execute("UPDATE incidents SET subtype = 'FIRE' WHERE id = ?", (iid,))
+    closed = cad2.close(iid, {"disposition": "FIRE", "operator": "JD"})
+    assert (closed["status"], closed["type"], closed["subtype"]) == ("closed", "STRU", "FIRE")
+    assert texts(cad2, iid)[-1].startswith("Event closed")
+    # An old card under a pair off the map: its units can still be edited, the key can't be made again.
+    with cad2.store.tx() as db:
+        db.execute("INSERT INTO run_cards (type, spoken, is_default, sort) VALUES ('SERVICE/BOAT', '', 0, 99)")
+    assert cad2.save_run_card({"type": "SERVICE/BOAT", "slots": [{"kind": "engine", "count": 2}]})["slots"][0]["count"] == 2
+    with pytest.raises(CadError, match="Service can't be Boat"):
+        cad2.save_run_card({"type": "SERVICE/BOAT", "rename_from": "SERVICE", "slots": [{"kind": "engine", "count": 1}]})
+
+
+def test_a_60_control_page_with_a_pair_off_the_map_keeps_the_type(monkeypatch):
+    cad = make_cad()
+    _, inc = monitor_incident("Port Chester Fire, respond to a residential fire alarm at 5 King Street")
+    monkeypatch.setattr(runcards, "from_page", lambda *a: ("ALS", "BOMB", ""))
+    p = cad.from_monitor(inc)
+    assert (p["status"], p["type"], p["subtype"]) == ("queued", "ALS", "")
+    assert p["type_note"] == "subtype heard as BOMB, not one for ALS: pick the subtype"
+    _, inc2 = monitor_incident("Port Chester Fire, respond to a residential fire alarm at 6 King Street")
+    monkeypatch.setattr(runcards, "from_page", lambda *a: ("VOLCANO", "BOMB", ""))
+    q = cad.from_monitor(inc2)
+    assert (q["type"], q["subtype"], q["type_note"]) == ("", "", "type heard: Fire alarm")
+    a = cad.accept(p["id"], {"operator": "JD"})
+    assert (a["status"], a["type"], a["subtype"]) == ("pending", "ALS", "")
+
+
+def test_settings_edit_the_map_audited():
+    cad = make_cad()
+    rows = {r["type"]: r for r in cad.settings_get()["type_subtypes"]["rows"]}
+    assert rows["ALARM"]["source"] == "given" and "confirm" not in rows["ALARM"] and rows["ALARM"]["state"] == "default"
+    assert rows["STRU"]["source"] == "proposed" and rows["STRU"]["confirm"] and rows["STRU"]["subtypes"] == ["COMM", "RESD"]
+    assert rows["MVA"]["source"] == "given" and "NOINJ" in rows["MVA"]["confirm"]
+    assert cad.settings_get()["type_subtypes"]["gaps"] == []
+    # Confirm STRU as it is: kept (no longer marked), audited.
+    post(cad, "type_subtypes", action="set", type="STRU", subtypes=["COMM", "RESD"])
+    rows = {r["type"]: r for r in cad.settings_get()["type_subtypes"]["rows"]}
+    assert rows["STRU"]["state"] == "edited" and "confirm" not in rows["STRU"]
+    # BRUSH gets OUTSIDE; ALS loses ECHO.
+    post(cad, "type_subtypes", action="set", type="BRUSH", subtypes=["OUTSIDE"], operator="Pat")
+    post(cad, "type_subtypes", action="set", type="ALS", subtypes=[])
+    assert cad.lists.subtypes_for("BRUSH") == ("OUTSIDE",) and cad.lists.subtypes_for("ALS") == ()
+    assert cad.state()["lists"]["type_subtypes"]["BRUSH"] == ["OUTSIDE"]
+    cad.create({"type": "BRUSH", "subtype": "OUTSIDE"})
+    with pytest.raises(CadError, match="ALS can't be ECHO"):
+        cad.create({"type": "ALS", "subtype": "ECHO"})
+    log = [(r["operator"], r["section"], r["key"], r["old"], r["new"]) for r in cad.settings.audit_log("lists")]
+    assert log[:3] == [("JD", "lists", "type_subtypes/ALS", '["ECHO"]', "[]"),
+                       ("Pat", "lists", "type_subtypes/BRUSH", "[]", '["OUTSIDE"]'),
+                       ("JD", "lists", "type_subtypes/STRU", '["COMM","RESD"]', '["COMM","RESD"]')]
+    # Checked: real codes, not retired, and no run card left for a pair the map drops.
+    with pytest.raises(CadError, match="NOPE not in the event subtypes"):
+        post(cad, "type_subtypes", action="set", type="ALS", subtypes=["NOPE"])
+    with pytest.raises(CadError, match="GAS-ATMOS retired"):
+        post(cad, "type_subtypes", action="set", type="ALARM", subtypes=["COMM", "GAS-ATMOS"])
+    with pytest.raises(CadError, match="run cards ALARM/CO-COMM, ALARM/CO-RESD would no longer fit"):
+        post(cad, "type_subtypes", action="set", type="ALARM", subtypes=["COMM", "RESD"])
+    # Reset: the data file's again.
+    post(cad, "type_subtypes", action="reset", type="ALS")
+    assert cad.lists.subtypes_for("ALS") == ("ECHO",)
+    assert cad.settings.export()["overrides"]["type_subtypes"] == {"BRUSH": ["OUTSIDE"], "STRU": ["COMM", "RESD"]}
+    post(cad, "type_subtypes", action="reset_section")
+    assert cad.lists.subtypes_for("BRUSH") == () and "type_subtypes" not in cad.settings.overrides()
+
+
+def test_a_type_added_in_settings_takes_no_subtype_until_mapped():
+    cad = make_cad()
+    post(cad, "event_types", action="add", code="WATERCOND", item={"name": "Water condition", "color": "#3366CC"})
+    assert cad.lists.subtypes_for("WATERCOND") == () and "WATERCOND" not in cad.state()["lists"]["type_subtypes"]
+    assert cad.settings_get()["type_subtypes"]["gaps"] == ["WATERCOND: not in the map (no subtype)"]
+    with pytest.raises(CadError, match="Water condition can't be"):
+        cad.create({"type": "WATERCOND", "subtype": "WATER"})
+    cad.create({"type": "WATERCOND"})
+    post(cad, "type_subtypes", action="set", type="WATERCOND", subtypes=["WATER", "INSIDE"])
+    assert cad.lists.subtypes_for("WATERCOND") == ("INSIDE", "WATER")        # in the subtype list's order
+    cad.create({"type": "WATERCOND", "subtype": "WATER"})
+    # A retired subtype drops off what is offered (old events keep it) and shows as a gap.
+    post(cad, "event_subtypes", action="retire", code="INSIDE")
+    assert cad.lists.subtypes_for("WATERCOND") == ("WATER",) and "INVEST: INSIDE is retired" in cad.settings_get()["type_subtypes"]["gaps"]
 
 
 # -- the v10 migration --------------------------------------------------------------------------------------

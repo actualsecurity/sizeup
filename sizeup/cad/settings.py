@@ -10,6 +10,7 @@ Reset to default = drop the override (one item, or a whole section).
     dispositions, received_via,              {"deleted": true}: a default item removed (only if never used)
     unit_statuses                  key "_order" -> [codes]: the list's order
     event_class                    key TYPE | TYPE/SUBTYPE | */SUBTYPE -> emergency | non-emergency | null (a default rule removed)
+    type_subtypes                  key TYPE -> [the subtypes it allows] ([]: no subtype)
     status_flow                    key STATUS | "*" -> [next statuses] (the incident's unit buttons) | null (removed)
     geo_town_order                 key "_list" -> [towns]
     units                          key CODE -> the unit as edited ({kind, spoken, title, department, spare,
@@ -45,6 +46,7 @@ REMOVE = object()
 
 # Where each stored section shows in Settings (the audit log's section).
 PAGE_SECTION = {**{s: "lists" for s in LIST_SECTIONS}, "event_class": "lists", "geo_town_order": "lists", "status_flow": "lists",
+                "type_subtypes": "lists",
                 "units": "units", "dispatch_wording": "dispatch", "dispatch_tones": "dispatch", "dispatch": "dispatch"}
 AUDIT_SECTIONS = ("lists", "run cards", "units", "dispatch", "users", "system", "radios")
 LIST_FIELDS = {"event_types": ("color",), "event_subtypes": (), "dispositions": (), "received_via": (),
@@ -128,6 +130,13 @@ def overlay(d: dict, ov: dict) -> dict:
             want = [c for c in o["_order"] if c in by]
             order = want + [c for c in order if c not in want]
         d[sec] = [by[c] for c in order]
+    o = ov.get("type_subtypes") or {}
+    if o:                                      # a type or subtype deleted since: its leftovers drop out
+        def codes(sec):
+            return {str(x.get("code") if isinstance(x, dict) else x) for x in d.get(sec) or []}
+        types, subs = codes("event_types"), codes("event_subtypes")
+        d["type_subtypes"] = dict(d.get("type_subtypes") or {}, **{t: [x for x in v if x in subs] for t, v in o.items()
+                                                                     if t in types and isinstance(v, list)})
     # A deleted type or subtype takes its rules, phrases and default cards with it.
     gt, gs = gone.get("event_types", set()), gone.get("event_subtypes", set())
     if gt or gs:
@@ -389,9 +398,7 @@ class Editor:
         out["units"] = self._unit_rows(L, ov)
         out["unit_kinds"] = [dict(k) for k in L.unit_kinds]
         out["boards"] = [{"id": b["id"], "title": b["title"], **lists_mod.board_meta(b)} for b in L.unit_boards]
-        out["type_subtypes"] = {"map": {t: list(v) for t, v in L.type_subtypes.items()},
-                                "partial": dict(L.type_subtypes_partial),
-                                "unlisted": [t for t in L.type_codes if t not in L.type_subtypes]}
+        out["type_subtypes"] = self._map_page(L, ov)
         out["dispatch"] = self._dispatch_page(L, ov)
         out["operators"] = self.operators()
         out["system"] = self._system(ov)
@@ -472,7 +479,7 @@ class Editor:
             raise CadError("action: required")
         if section in LIST_SECTIONS:
             return self._list_op(section, action, body, op)
-        fn = {"event_class": self._class_op, "status_flow": self._flow_op, "geo_town_order": self._towns_op, "units": self._units_op,
+        fn = {"event_class": self._class_op, "status_flow": self._flow_op, "type_subtypes": self._map_op, "geo_town_order": self._towns_op, "units": self._units_op,
               "dispatch": self._dispatch_op, "users": self._users_op, "runcards": self._cards_op,
               "import": self._import_op}.get(section)
         if fn is None:
@@ -629,6 +636,73 @@ class Editor:
             return self._commit([("status_flow", key, REMOVE)], op,
                                 [("lists", f"status_flow/{key}", list(cur.get(key, ())) or None, list(base.get(key, ())) or None)])
         raise CadError("action: set, remove, reset or reset_section")
+
+    def _map_page(self, L, ov: dict) -> dict:
+        """The type -> subtype map, a row per type: what it allows, whether the department gave it or it
+        is a proposal to confirm (until edited or confirmed here), the default."""
+        o, tsp = ov.get("type_subtypes", {}), L.type_subtypes_partial
+        rows = []
+        for t in L.event_types:
+            c = t["code"]
+            row = {"type": c, "name": t["name"], "subtypes": list(L.type_subtypes.get(c, ())), "listed": c in L.type_subtypes,
+                   "state": "edited" if c in o else "default", "default": list(self.base.type_subtypes.get(c, ())),
+                   "source": "given" if c in tsp.get("given", ()) else "proposed"}
+            if t.get("retired"):
+                row["retired"] = True
+            if c in tsp.get("confirm", {}) and c not in o:
+                row["confirm"] = tsp["confirm"][c]
+            rows.append(row)
+        return {"rows": rows, "gaps": L.map_gaps(), "edited": bool(o)}
+
+    def _map_op(self, action: str, body: dict, op: str) -> dict:
+        """Which subtypes a type allows (a checkbox per subtype in Settings). set with the list as it is:
+        confirmed (a proposal no longer marked "to confirm"). A subtype off the map stays on old events;
+        a run card for that pair has to go first (it could never match an event again)."""
+        L, o = self.cad.lists, self.overrides().get("type_subtypes", {})
+        if action == "reset_section":
+            return self._commit([("type_subtypes", k, REMOVE) for k in o], op, [("lists", "type_subtypes", f"{len(o)} edits", "reset")],
+                                check=self._cards_fit)
+        typ = _text(body.get("type"), "type", 24).upper()
+        if typ not in {t["code"] for t in L.event_types}:
+            raise CadError(f"no event type {typ!r}")
+        cur = list(L.type_subtypes.get(typ, ()))
+        if action == "set":
+            subs = body.get("subtypes")
+            if not isinstance(subs, list) or not all(isinstance(x, str) for x in subs) or len(set(subs)) != len(subs):
+                raise CadError("subtypes: a list of subtype codes, each once")
+            known = {x["code"] for x in L.event_subtypes}
+            bad = [x for x in subs if x not in known]
+            if bad:
+                raise CadError(f"subtypes: {', '.join(bad)} not in the event subtypes")
+            new_on = [x for x in subs if x not in cur and L.retired("event_subtypes", x)]
+            if new_on:
+                raise CadError(f"subtypes: {', '.join(new_on)} retired (restore it first)")
+            order = [x["code"] for x in L.event_subtypes]
+            subs = sorted(subs, key=lambda x: (x not in cur, cur.index(x) if x in cur else order.index(x)))
+            same = typ in self.base.type_subtypes and set(self.base.type_subtypes[typ]) == set(subs) \
+                and typ not in L.type_subtypes_partial.get("confirm", {})
+            return self._commit([("type_subtypes", typ, REMOVE if same else subs)], op,
+                                [("lists", f"type_subtypes/{typ}", cur if typ in L.type_subtypes else None, subs)],
+                                check=self._cards_fit)
+        if action == "reset":
+            if typ not in o:
+                raise CadError(f"{typ} is already the default")
+            return self._commit([("type_subtypes", typ, REMOVE)], op,
+                                [("lists", f"type_subtypes/{typ}", cur, list(self.base.type_subtypes.get(typ, ())))],
+                                check=self._cards_fit)
+        raise CadError("action: set, reset or reset_section")
+
+    def _cards_fit(self, new) -> None:
+        """A map edit can't leave a run card for a pair the map no longer allows (one already off it: kept)."""
+        old = self.cad.lists
+        lost = []
+        for c in runcards.cards(self.store):
+            t, _, sub = c["type"].partition("/")
+            if sub and sub in old.subtypes_for(t) and sub not in new.subtypes_for(t):
+                lost.append(c["type"])
+        if lost:
+            raise CadError(f"run card{'s' if len(lost) != 1 else ''} {', '.join(lost)} would no longer fit: "
+                           "change or delete the card first (Run cards)")
 
     def _towns_op(self, action: str, body: dict, op: str) -> dict:
         cur, base = list(self.cad.lists.geo_town_order), list(self.base.geo_town_order)

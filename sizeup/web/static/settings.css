@@ -67,9 +67,12 @@ input.s-color { width: 2.4em; height: 1.95em; padding: 0.1em 0.15em; cursor: poi
 .chip.s-state.deleted { --c: var(--err); }
 .chip.s-flag { font-size: 0.68em; --c: #9aa0b4; }
 .chip.s-confirm { font-size: 0.68em; --c: #ffb547; border-style: dashed; }
-.s-tsmap { margin: 0.2em 0 0.6em; }
-.s-tslist { margin: 0.2em 0 0; padding-left: 1.2em; columns: 2 22em; }
-.s-tslist li { break-inside: avoid; overflow-wrap: anywhere; }
+.s-tsnow { overflow-wrap: anywhere; min-width: 0; flex: 1 1 14em; }
+.s-tsgrid { flex: 1 1 100%; display: grid; grid-template-columns: repeat(auto-fill, minmax(13em, 1fr)); gap: 0.15em 0.8em;
+  margin: 0.2em 0 0.4em; padding: 0.45em 0.6em; border: 1px dashed var(--line); border-radius: 0.4em; }
+.s-tsgrid label { display: flex; align-items: baseline; gap: 0.35em; min-width: 0; }
+.s-tsgrid label > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.s-tsgrid label.on code { color: var(--ok); font-weight: 700; }
 .chip.s-flag.available { --c: #5aa9ff; }
 .chip.s-flag.unavailable { --c: var(--err); }
 

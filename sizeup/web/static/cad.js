@@ -241,10 +241,9 @@ function isEmergency(t, s) {        // data file event_class: TYPE/SUBTYPE, */SU
   return true;
 }
 const live = (x) => !x.retired;     // retired: named on old events, off the pick lists
-function subtypesFor(t) {
-  const m = (L().type_subtypes || {})[t];
-  const all = (L().event_subtypes || []).filter(live);
-  return Array.isArray(m) ? all.filter((s) => m.includes(s.code)) : all;   // listed: only those (none: no subtype)
+function subtypesFor(t) {            // the type -> subtype map: only those listed (none, or not in the map: no subtype)
+  const m = (L().type_subtypes || {})[t] || [];
+  return (L().event_subtypes || []).filter((s) => live(s) && m.includes(s.code));
 }
 function fillSelect(sel, items, blank) {
   const keep = sel.value;
@@ -257,7 +256,10 @@ function fillTypes(sel, blank = "—") {
   fillSelect(sel, (L().event_types || []).filter(live).map((t) => [t.code, t.name]), blank);
 }
 function fillSubtypes(sel, t, blank = "—") {
-  fillSelect(sel, subtypesFor(t).map((s) => [s.code, s.name]), blank);
+  const subs = subtypesFor(t);
+  fillSelect(sel, subs.map((s) => [s.code, s.name]), blank);
+  sel.disabled = !subs.length;           // a type with no subtypes (BRUSH, BLS...): nothing to pick
+  sel.title = t && !subs.length ? `${nameOf("event_types", t)} takes no subtype` : "";
 }
 
 function fillListSelects() {
@@ -1342,14 +1344,19 @@ async function createIncident(e) {
   }
 }
 
-function keepOption(sel, code, label) {   // a retired type stays selectable on the event that has it
-  code = code || "";
+function keepOption(sel, code, label, why = "retired") {   // a retired type (or a subtype off the map) stays
+  code = code || "";                                          // shown on the event that has it
   if (code && ![...sel.options].some((o) => o.value === code)) {
-    const o = el("option", "", `${label} (retired)`);
+    const o = el("option", "", `${label} (${why})`);
     o.value = code;
     sel.append(o);
   }
   sel.value = code;
+}
+function keepSubtype(sel, t, s) {      // an old event's (or card's) subtype the map no longer allows: shown, not offered
+  const gone = (L().event_subtypes || []).some((x) => x.code === s && x.retired);
+  keepOption(sel, s, nameOf("event_subtypes", s), gone ? "retired" : `not for ${nameOf("event_types", t)}`);
+  sel.disabled = sel.options.length < 2;
 }
 
 function openEdit() {
@@ -1357,7 +1364,7 @@ function openEdit() {
   if (!inc) return;
   keepOption($("#e-type"), inc.type, typeLabel(inc.type));
   fillSubtypes($("#e-subtype"), inc.type);
-  keepOption($("#e-subtype"), inc.subtype, nameOf("event_subtypes", inc.subtype));
+  keepSubtype($("#e-subtype"), inc.type, inc.subtype);
   editAddr.set(inc.address, inc.lat != null ? { lat: inc.lat, lon: inc.lon, label: inc.geo_label || inc.address, kind: "current", confidence: 1 } : null);
   $("#e-cross").value = inc.cross_street || "";
   $("#e-name").value = inc.caller_name || "";
@@ -1664,7 +1671,7 @@ function editCard(c) {
   const [t, s] = c ? c.type.split("/") : [$("#rc-type").value || "", ""];
   $("#rc-type").value = t;
   fillSubtypes($("#rc-subtype"), t, "Any subtype");
-  $("#rc-subtype").value = s || "";
+  keepSubtype($("#rc-subtype"), t, s || "");
   $("#rc-spoken").value = c ? c.spoken || "" : "";
   rcPlaceholder();
   $("#rc-slots").replaceChildren(...(c ? c.slots : [{ kind: "engine", count: 1 }]).map(slotRow));
@@ -1789,7 +1796,11 @@ $("#d-close").addEventListener("click", () => {
 $("#c-cancel").addEventListener("click", () => show($("#close-form"), false));
 $("#close-form").addEventListener("submit", closeIncident);
 $("#d-edit").addEventListener("click", openEdit);
-$("#e-type").addEventListener("change", () => fillSubtypes($("#e-subtype"), $("#e-type").value));
+$("#e-type").addEventListener("change", () => {     // a new type offers only its subtypes; back to the event's: as it was
+  const inc = selected(), t = $("#e-type").value;
+  fillSubtypes($("#e-subtype"), t);
+  if (inc && t === inc.type) keepSubtype($("#e-subtype"), t, inc.subtype);
+});
 $("#edit-cancel").addEventListener("click", () => show($("#edit-form"), false));
 $("#edit-form").addEventListener("submit", saveEdit);
 $("#r-refresh").addEventListener("click", () => recommend());
@@ -1849,7 +1860,12 @@ Radio.mountAlerts($("#alerts"));
 CadFeed.mount($("#feed"), { state: () => cad.state, selected, operator, api, radioRow, time: (u) => fmtTime(u, true) });
 cad.hooks.push(CadFeed.render);
 $("#rc-form").addEventListener("submit", saveCard);
-$("#rc-type").addEventListener("change", () => { fillSubtypes($("#rc-subtype"), $("#rc-type").value, "Any subtype"); rcPlaceholder(); });
+$("#rc-type").addEventListener("change", () => {
+  const t = $("#rc-type").value, [ct, cs] = (cad.rcEditing || "").split("/");
+  fillSubtypes($("#rc-subtype"), t, "Any subtype");
+  if (cs && t === ct) keepSubtype($("#rc-subtype"), t, cs);
+  rcPlaceholder();
+});
 $("#rc-subtype").addEventListener("change", rcPlaceholder);
 $("#rc-add-kind").addEventListener("click", () => $("#rc-slots").append(slotRow({ kind: "engine", count: 1 })));
 $("#rc-add-unit").addEventListener("click", () => $("#rc-slots").append(slotRow({ unit: "" })));

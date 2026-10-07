@@ -12,7 +12,7 @@ GET  /api/cad/settings                    the Settings page: lists, units, dispa
 GET  /api/cad/settings/export             every setting as one JSON file (edits, run cards, operators)
 GET  /api/cad/settings/audit?section=     every Settings change (who, section, key, old -> new), newest first
 POST /api/cad/settings/<section>          {action, ..., operator?}: event_types | event_subtypes | dispositions |
-                                          received_via | unit_statuses | event_class | geo_town_order | units |
+                                          received_via | unit_statuses | event_class | type_subtypes | geo_town_order | units |
                                           dispatch | users | runcards | import (dry_run / apply)
 GET  /api/cad/export/<name>.csv           incidents | calls | unit-history | event-log, the sheet's columns
 GET  /api/cad/dispatch/<id>.wav           a logged dispatch's audio

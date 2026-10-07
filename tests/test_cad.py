@@ -189,7 +189,7 @@ def test_lists_file_has_the_sheets_vocabulary():
     bg = {s["code"]: s["bg"] for s in L.unit_statuses}
     assert (bg["AV"], bg["DP"], bg["OL"], bg["ST"], bg["CB"], bg["OS"], bg["CN"]) == (
         "#4A78D0", "#F0A030", "#B84A30", "#66E044", "#8A2BE2", "#606060", "#A8ABB8")
-    L.check_type("SERVICE", "BOAT")
+    L.check_type("SERVICE", "LIFT")
     with pytest.raises(ValueError):
         L.check_type("FIRE")
     assert L.received_codes == ("PHONE", "WALK-IN", "RADIO", "60 CONTROL", "PD", "OTHER")
@@ -311,21 +311,21 @@ def test_numbers_yy_nnnnnn_per_local_year_and_queued_unnumbered(tmp_path):
 
 def test_event_info_fields_and_chronology_wording():
     cad = make_cad()
-    inc = cad.create({"type": "SERVICE", "subtype": "BOAT", "address": "209 Westchester Ave", "caller_name": "COREY",
+    inc = cad.create({"type": "SERVICE", "subtype": "LIFT", "address": "209 Westchester Ave", "caller_name": "COREY",
                       "caller_address": "1 Main St", "phone": "914-555-0100", "remarks": "boat taking on water",
                       "received_via": "PHONE", "operator": "JD"})
     assert (inc["type"], inc["subtype"], inc["caller_name"], inc["caller_address"], inc["phone"], inc["remarks"],
             inc["received_via"], inc["status"], inc["emergency"]) == (
-        "SERVICE", "BOAT", "COREY", "1 Main St", "914-555-0100", "boat taking on water", "PHONE", "pending", 1)
-    assert texts(cad, inc["id"]) == ["Event created (pending): Service / Boat at 209 Westchester Ave; received via Phone",
+        "SERVICE", "LIFT", "COREY", "1 Main St", "914-555-0100", "boat taking on water", "PHONE", "pending", 1)
+    assert texts(cad, inc["id"]) == ["Event created (pending): Service / Lift at 209 Westchester Ave; received via Phone",
                                      "Caller info: COREY · 1 Main St · 914-555-0100"]
     for bad, msg in (({"type": "FIRE"}, "not an event type"), ({"type": "SERVICE", "subtype": "NOPE"}, "subtype"),
                      ({"type": ""}, "required"), ({"type": "SERVICE", "received_via": "FAX"}, "received_via"),
                      ({"type": "SERVICE", "emergency": "yes"}, "true or false")):
         with pytest.raises(CadError, match=msg):
             cad.create(bad)
-    cad.update(inc["id"], {"subtype": "WATER", "phone": "", "operator": "JD"})
-    assert texts(cad, inc["id"])[-1] == "Edited type: Service / Water; now a non-emergency event; phone: (none)"
+    cad.update(inc["id"], {"type": "NOTIF", "subtype": "WATER", "phone": "", "operator": "JD"})
+    assert texts(cad, inc["id"])[-1] == "Edited type: Notification / Water; now a non-emergency event; phone: (none)"
 
 
 def test_close_needs_a_disposition_and_clears_units(tmp_path):
@@ -936,7 +936,7 @@ def read_csv(data: bytes) -> list[list[str]]:
 def test_csv_exports_have_the_sheets_columns_and_codes():
     clock = Clock(local(2026, 10, 7, 18, 58))
     cad = make_cad(clock=clock)
-    iid = cad.create({"type": "SERVICE", "subtype": "BOAT", "address": "209 Westchester Ave", "geo_label":
+    iid = cad.create({"type": "SERVICE", "subtype": "LIFT", "address": "209 Westchester Ave", "geo_label":
                       "209 Westchester Ave, Port Chester", "lat": 41.0, "lon": -73.67, "caller_name": "COREY",
                       "remarks": "boat adrift", "operator": "JD"})["id"]
     cad.dispatch(iid, {"unit_ids": [uid(cad, "E63")], "operator": "JD"})
@@ -949,7 +949,7 @@ def test_csv_exports_have_the_sheets_columns_and_codes():
                                                  "Municipality", "Received", "Status", "Assigned Units", "Dispatch",
                                                  "First Enroute", "First On Scene", "Clear", "Duration", "Disposition",
                                                  "Cross Streets", "Narrative Summary", "Closed?"]
-    assert rows[1] == ["26-000001", "", "SERVICE", "BOAT", "209 Westchester Ave", "Port Chester", "10/07/2026 18:58:00",
+    assert rows[1] == ["26-000001", "", "SERVICE", "LIFT", "209 Westchester Ave", "Port Chester", "10/07/2026 18:58:00",
                        "CLOSED", "E63", "10/07/2026 18:58:00", "10/07/2026 18:59:30", "", "10/07/2026 19:59:30",
                        "1:01:30", "SERVICE", "", "boat adrift", "TRUE"]
     calls = read_csv(cad.export("calls.csv"))
@@ -1063,7 +1063,7 @@ def test_api_event_lifecycle(server):
     assert server.j("POST", "/api/cad/incident", {"type": "Volcano"}) == (400, {"error": "type: 'Volcano' is not an event type"})
     assert server.j("POST", "/api/cad/incident", {"type": "SERVICE", "lat": 41.0})[0] == 400
     assert server.call("POST", "/api/cad/incident", raw=b"{nope")[0] == 400
-    code, inc = server.j("POST", "/api/cad/incident", {"type": "SERVICE", "subtype": "BOAT", "address": "209 Westchester Avenue",
+    code, inc = server.j("POST", "/api/cad/incident", {"type": "SERVICE", "subtype": "LIFT", "address": "209 Westchester Avenue",
                                                        "caller_name": "COREY", "received_via": "PHONE", "operator": "JD"})
     assert code == 200 and inc["status"] == "pending" and re.fullmatch(r"\d{2}-000001", inc["number"])
     assert inc["lat"] == 41.0 and inc["geo_label"] == "209 Westchester Ave, Port Chester"   # placed: gazetteer sure
@@ -1081,7 +1081,7 @@ def test_api_event_lifecycle(server):
     assert server.j("POST", f"/api/cad/incident/{iid}/dispatch", {"unit_ids": ids, "operator": "JD", "channel": "Ch 9"})[0] == 400
     code, d = server.j("POST", f"/api/cad/incident/{iid}/dispatch", {"unit_ids": ids, "operator": "JD", "channel": "PC repeater"})
     assert code == 200 and d["transmitted"] is False and d["channel"] == "PC repeater"
-    assert d["text"].startswith("Port Chester Fire, Engine 58, respond to 209 Westchester Avenue, for a marine service call.")
+    assert d["text"].startswith("Port Chester Fire, Engine 58, respond to 209 Westchester Avenue, for a lift assist.")
     code, wav, ctype = server.call("GET", d["audio_url"])
     assert code == 200 and ctype == "audio/wav" and wave.open(io.BytesIO(wav)).getframerate() == 16000
     assert server.call("GET", "/api/cad/dispatch/999.wav")[0] == 404
