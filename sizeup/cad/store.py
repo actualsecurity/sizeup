@@ -451,6 +451,7 @@ class Store:
         for r in rows:
             r["spare"], r["mutual_aid"] = bool(r["spare"]), bool(r["mutual_aid"])
             r["response"] = self.lists.response(r["name"])       # fire | mutual_aid | agency
+            r["station"] = self.lists.station(r["name"])    # home firehouse: the data file, or Settings
         return rows
 
     def unit(self, uid: int) -> dict:

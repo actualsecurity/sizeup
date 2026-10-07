@@ -20,7 +20,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
-from sizeup.cad import dispatcher, export, runcards
+from sizeup.cad import dispatcher, export, mapview, runcards
 from sizeup.cad.comms import Comms
 from sizeup.cad.feed import Feed
 from sizeup.cad.radios import Registry, RadioError, is_pcfd
@@ -119,6 +119,7 @@ class Cad:
         self.transmitter: Transmitter = make_transmitter(s.transmit, log)
         self._render_lock = threading.Lock()           # one `say` at a time
         self._state: tuple[int, dict] | None = None
+        self.firehouses = mapview.load_firehouses()          # the maps' stations (a unit's home station is one)
         self.settings = settings_mod.Editor(self)           # the Settings page's edits over the data file
         self.settings.startup()
         n = self.store.sync_units()
@@ -136,6 +137,9 @@ class Cad:
         # Set by the app: who is transmitting now (sizeup/radio/live.py) and whether a clip's audio is still kept.
         self.live: Callable[[], list[dict]] = lambda: []
         self.has_clip: Callable[[str], bool] = lambda cid: False
+        # The maps (sizeup/cad/mapview.py): live unit positions {code: {lat, lon, at}} from a future AVL
+        # feed (IamResponding, Red Alert, an iPad app). Nothing sets it yet.
+        self.positions: Callable[[], dict[str, dict]] = lambda: {}
 
     @classmethod
     def from_config(cls, cfg, geocoder=None, log=print) -> Cad:
@@ -175,8 +179,32 @@ class Cad:
                 "geocoder": self.geocoder is not None,
                 "operators": self.settings.operator_names(),
                 "feed": self.feed.state(),
+                "overview": mapview.overview(incs, self.s.tactical),
             })
-        return dict(self._state[1], time=self.clock(), rev=rev, talking=self.live())
+        st = self._state[1]
+        now = self.clock()
+        pos = self._positions(now)
+        units = [dict(u, position=pos[u["name"]]) if u["name"] in pos else u for u in st["units"]] if pos else st["units"]
+        return dict(st, units=units, map=self.map_slice(units, st["incidents"], pos, now), time=now, rev=rev,
+                    talking=self.live())
+
+    def _positions(self, now: float) -> dict[str, dict]:
+        """The AVL hook's fresh fixes (a broken feed never breaks the console)."""
+        try:
+            raw = self.positions() or {}
+        except Exception as e:  # noqa: BLE001 - whatever the feed raised
+            self.log(f"CAD: unit positions: {type(e).__name__}: {e}")
+            return {}
+        out = {}
+        for code, p in raw.items() if isinstance(raw, dict) else ():
+            f = mapview.fresh_position(p, now)
+            if f:
+                out[str(code)] = f
+        return out
+
+    def map_slice(self, units: list[dict], incs: list[dict], pos: dict, now: float) -> dict:
+        tags = {c: j["tag"] for j in self.lists.joint_response.values() for c in j["units"]}
+        return mapview.map_slice(units, incs, self.lists.role, self.firehouses, pos, now, joint=lambda c: tags.get(c, ""))
 
     def _with_radio(self, incs: list[dict], limit: int = 200) -> list[dict]:
         """Each event's radio traffic (newest first), with whether its audio is still kept."""
@@ -594,6 +622,15 @@ class Cad:
                 raise CadError("incident_id: a number (0 = no call)") from None
             return self.store.set_unit_status_on(uid, status, iid, _text(body, "operator", 60), _text(body, "note", 200))
         return self.store.set_unit_status(uid, status, _text(body, "operator", 60), _text(body, "note", 200))
+
+    def unit_station(self, uid: int, body: dict) -> dict:
+        """A unit's home firehouse (a name from data/firehouses.json; '' = not set). Stored as a Settings
+        units override (sizeup/cad/settings.py, so Settings > Units shows and edits it too) over the data
+        file's units[code].station, and audited in settings_audit (section "units", key CODE/station)."""
+        u = self.store.unit(uid)
+        self.settings.post("units", {"action": "station", "code": u["name"], "station": body.get("station"),
+                                     "operator": body.get("operator")})
+        return self.store.unit(uid)
 
     def run_cards(self) -> list[dict]:
         return runcards.cards(self.store)

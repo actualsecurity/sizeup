@@ -35,6 +35,7 @@ POST /api/cad/incident/<id>/dispatch      {unit_ids, operator, channel?, full?, 
 POST /api/cad/incident/<id>/upgrade       {type?, subtype?, info?, remarks?, unit_ids?, full?, operator, channel?, preview?}
 POST /api/cad/incident/<id>/attach        {unit_ids, operator?}  units on a non-emergency event, no dispatch
 POST /api/cad/unit/<id>/status            {status, operator?, note?}
+POST /api/cad/unit/<id>/station           {station, operator?}  home firehouse (data/firehouses.json name; '' unsets)
 POST /api/cad/runcards                    {type (TYPE or TYPE/SUBTYPE), slots, spoken?, rename_from?}   add / edit one
 POST /api/cad/runcards/delete             {type}
 GET  /api/cad/radios                      the radio registry (radio ID -> rig), conflicts, units not fitting
@@ -64,6 +65,7 @@ INCIDENT = re.compile(r"/api/cad/incident/(\d{1,9})(?:/(accept|dismiss|close|not
 SUGGEST = re.compile(r"/api/cad/incident/(\d{1,9})/units")
 EXPORT = re.compile(r"/api/cad/export/([a-z-]{1,20}\.csv)")
 UNIT = re.compile(r"/api/cad/unit/(\d{1,9})/status")
+UNIT_STATION = re.compile(r"/api/cad/unit/(\d{1,9})/station")
 DISPATCH_WAV = re.compile(r"/api/cad/dispatch/(\d{1,9})\.wav")
 PREVIEW_WAV = re.compile(r"/api/cad/audio/([0-9a-f]{20})\.wav")
 SETTINGS = re.compile(r"/api/cad/settings/([a-z_]{1,30})")
@@ -144,6 +146,8 @@ class CadApi:
                 return _json(200, fn(iid, body))
             if m := UNIT.fullmatch(path):
                 return _json(200, c.unit_status(int(m.group(1)), body))
+            if m := UNIT_STATION.fullmatch(path):
+                return _json(200, c.unit_station(int(m.group(1)), body))
             if path == "/api/cad/runcards":
                 return _json(200, c.save_run_card(body))
             if path == "/api/cad/runcards/delete":

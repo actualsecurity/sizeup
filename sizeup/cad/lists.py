@@ -248,6 +248,10 @@ class Lists:
         """fire | mutual_aid | agency (see the module doc)."""
         return unit_response(self.units.get(code, {}), self.attach_kinds)
 
+    def station(self, code: str) -> str:
+        """The firehouse the data file houses it in ('' = not set: the department hasn't said)."""
+        return (self.units.get(code) or {}).get("station") or ""
+
     def joint_town(self, code: str) -> str:
         """'E14' -> 'Rye Brook': the town whose department answers jointly with PCFD ('' = PCFD's own or other)."""
         return next((t for t, j in self.joint_response.items() if code in j["units"]), "")
@@ -459,6 +463,8 @@ def build(d: dict, where: str, path: str | Path = "") -> Lists:
             raise ListsError(f"{where}: units[{code!r}].kind: one of {', '.join(sorted(kind_ids))}")
         if u.get("response") not in (None, "") + RESPONSES:
             raise ListsError(f"{where}: units[{code!r}].response: one of {', '.join(RESPONSES)}")
+        if not isinstance(u.get("station", ""), str):
+            raise ListsError(f"{where}: units[{code!r}].station: a firehouse name (text)")
 
     def agency(code: str) -> bool:
         return unit_response(units.get(code, {}), attach_kinds) == "agency"

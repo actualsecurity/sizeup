@@ -222,7 +222,10 @@
     "run card, only by name). A board unit missing here is kind 'agency', spoken as its code.",
     "response (optional): fire | mutual_aid | agency; without it: mutual_aid if flagged, agency for the",
     "attach_only kinds (EMS, PD, utilities: attached to a call, never on a run card, never dispatched or",
-    "said on the air), else fire."
+    "said on the air), else fire.",
+    "station (optional): the firehouse it is housed in, a name from data/firehouses.json (the maps draw it",
+    "there while available). Not set for any unit yet: the department hasn't said which apparatus is where.",
+    "Set from the map or Settings > Units (POST /api/cad/unit/<id>/station): a units override in the database."
   ],
   "units": {
     "2391": {"kind": "chief", "spoken": "23 91", "title": "Chief of Department"},

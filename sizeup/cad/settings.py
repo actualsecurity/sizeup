@@ -13,7 +13,7 @@ Reset to default = drop the override (one item, or a whole section).
     status_flow                    key STATUS | "*" -> [next statuses] (the incident's unit buttons) | null (removed)
     geo_town_order                 key "_list" -> [towns]
     units                          key CODE -> the unit as edited ({kind, spoken, title, department, spare,
-                                   response, retired}); key "_boards" -> the boards' layout
+                                   response, station, retired}); key "_boards" -> the boards' layout
     dispatch_wording               key template name -> text; "lead_in_joint_only" -> {town: text}
     dispatch_tones                 key joint town -> [[Hz, s], ...] | null (not set: PCFD's are played)
     dispatch                       key "tones" -> PCFD's tone groups, "channels" -> [labels], "voice", "speed"
@@ -407,13 +407,15 @@ class Editor:
         for code, v in o.items():
             if isinstance(v, dict) and v.get("deleted"):
                 rows.append(dict(self._unit_row(self.base, code, "", 0, {}, used, base_on, live), state="deleted"))
-        return {"rows": rows, "edited": bool(o), "layout_edited": "_boards" in o}
+        return {"rows": rows, "edited": bool(o), "layout_edited": "_boards" in o,
+                "stations": [f["name"] for f in getattr(self.cad, "firehouses", [])]}
 
     def _unit_row(self, L, code, board, pos, o, used, base_on, live) -> dict:
         u, info = L.units.get(code, {}), L.unit(code)
         lv = live.get(code) or {}
         return {"code": code, "board": board, "pos": pos, "spoken": u.get("spoken") or "", "title": info["title"],
                 "kind": info["kind"], "department": info["department"], "spare": info["spare"], "response": info["response"],
+                "station": L.station(code),
                 "retired": bool(u.get("retired")), "used": used.get(code, 0),
                 "state": "added" if code not in base_on and code not in self.base.units else "edited" if code in o else "default",
                 "status": lv.get("status", ""), "incident_number": lv.get("incident_number")}
@@ -662,6 +664,12 @@ class Editor:
                 out[k] = v
         if g("spare"):
             out["spare"] = True
+        st = _text(g("station"), "station", 80, required=False)      # home firehouse (the maps)
+        if st:
+            names = [f["name"] for f in getattr(self.cad, "firehouses", [])]
+            if st not in names:
+                raise CadError(f"station: one of {', '.join(names)} (or empty: not set)")
+            out["station"] = st
         r = raw.get("response") or lists_mod.unit_response(cur if cur else {"kind": kind}, L.attach_kinds)
         if r not in RESPONSES:
             raise CadError(f"response: one of {', '.join(RESPONSES)}")
@@ -674,6 +682,7 @@ class Editor:
             u = u or {}
             return (u.get("kind", "agency"), (u.get("spoken") or code) if u.get("spoken") != code else code,
                     u.get("title") or "", u.get("department") or "", bool(u.get("spare")), bool(u.get("retired")),
+                    u.get("station") or "",
                     lists_mod.unit_response(u, self.cad.lists.attach_kinds))
         return k(a) == k(b)
 
@@ -711,6 +720,14 @@ class Editor:
         if cur is None and not on_board and not (action == "reset" and code in o):
             raise CadError(f"no unit {code!r}")
         cur = dict(cur or {})
+        if action == "station":                         # home firehouse only (the maps' station picker)
+            old = L.station(code)
+            u = self._clean_unit({"station": body.get("station")}, cur)
+            if u.get("station", "") == old:
+                return {"ok": True}
+            if cur.get("retired"):
+                u["retired"] = True
+            return self._commit([("units", code, def_change(u))], op, [("units", f"{code}/station", old, u.get("station", ""))])
         if action == "edit":
             raw = body.get("unit") or {}
             if isinstance(raw, dict) and raw.get("code") not in (None, code):
