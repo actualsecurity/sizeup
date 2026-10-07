@@ -328,14 +328,28 @@ def tone_sequence(tones, rate: int = RATE) -> np.ndarray:
     return np.concatenate(parts) if parts else np.zeros(0)
 
 
-def assemble(v: np.ndarray, tones, repeat: int = 2) -> np.ndarray:
-    """Tone groups, a gap, then the voice `repeat` times with a pause between."""
+TAIL_GAP_S = 0.25
+TIME_OUT = re.compile(r"\s*(Time out\b[^.]*\.?)\s*$")
+
+
+def split_time_out(said: str) -> tuple[str, str]:
+    """'... Reported: x. Time out fifteen thirteen.' -> (body, 'Time out fifteen thirteen.'). The
+    message is read twice but the time out only once, after the second reading (user, 2026-10-07)."""
+    m = TIME_OUT.search(said)
+    return (said[:m.start()].rstrip(), m.group(1)) if m else (said, "")
+
+
+def assemble(v: np.ndarray, tones, repeat: int = 2, tail: np.ndarray | None = None) -> np.ndarray:
+    """Tone groups, a gap, then the voice `repeat` times with a pause between; `tail` (the time out)
+    once, after the last reading."""
     t = tone_sequence(tones)
     parts = [t, np.zeros(int(GAP_S * RATE))] if len(t) else []
     for k in range(max(1, repeat)):
         if k:
             parts.append(np.zeros(int(REPEAT_GAP_S * RATE)))
         parts.append(v)
+    if tail is not None and len(tail):
+        parts += [np.zeros(int(TAIL_GAP_S * RATE)), tail]
     return np.concatenate(parts).astype(np.float32)
 
 
@@ -373,15 +387,17 @@ def render_dispatch(text: str, tones, out_dir: str | Path, voice: VoiceCfg, repe
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     said = speech(text, spoken=spoken)
+    body, tail = split_time_out(said)
+    key_said = said + "\x00time-out-once"          # (older files said the time out every reading)
     tones = tone_groups(tones)
     fallback = False
     if voice.engine == "kokoro":
-        path = out_dir / f"{audio_key(said, tones, 'kokoro', voice.voice, voice.speed, repeat)}.wav"
+        path = out_dir / f"{audio_key(key_said, tones, 'kokoro', voice.voice, voice.speed, repeat)}.wav"
         if path.is_file():
             return path, voice.label()
         try:
-            _write(path, assemble(_peak(synthesize(said, voice.voice, voice.speed, voice.port, voice.timeout_s)),
-                                  tones, repeat))
+            say = lambda x: _peak(synthesize(x, voice.voice, voice.speed, voice.port, voice.timeout_s))
+            _write(path, assemble(say(body), tones, repeat, say(tail) if tail else None))
             return path, voice.label()
         except TtsError as e:
             fallback = True
@@ -390,9 +406,10 @@ def render_dispatch(text: str, tones, out_dir: str | Path, voice: VoiceCfg, repe
         say_voice = voice.fallback_voice
     else:
         say_voice = voice.voice
-    path = out_dir / f"{audio_key(said, tones, 'say', say_voice, voice.rate_wpm, repeat)}.wav"
+    path = out_dir / f"{audio_key(key_said, tones, 'say', say_voice, voice.rate_wpm, repeat)}.wav"
     if not path.is_file():
-        _write(path, assemble(tts(said, say_voice, voice.rate_wpm), tones, repeat))
+        _write(path, assemble(tts(body, say_voice, voice.rate_wpm), tones, repeat,
+                              tts(tail, say_voice, voice.rate_wpm) if tail else None))
     return path, voice.label(fallback)
 
 

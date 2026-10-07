@@ -148,16 +148,19 @@ def test_kokoro_voice_after_tones_twice_at_16k(tmp_path, fake_server, fake_say):
     v = tts.VoiceCfg("kokoro", "af_heart", 0.92, fake_server["port"])
     path, label = dispatcher.render_dispatch(A, TONES, tmp_path, v)
     assert label == "Voice: Kokoro af_heart" and fake_say == []
-    assert fake_server["requests"] == [{"text": dispatcher.speech(A), "voice": "af_heart", "speed": 0.92}]
+    body, tail = dispatcher.split_time_out(dispatcher.speech(A))       # the time out is said once, at the end
+    assert fake_server["requests"] == [{"text": body, "voice": "af_heart", "speed": 0.92},
+                                       {"text": tail, "voice": "af_heart", "speed": 0.92}]
     x = read16k(path)
     assert abs(peak_hz(x[1000:15000]) - 349.1) < 2 and abs(peak_hz(x[17000:63000]) - 311.1) < 2   # the tones
     start = int((4 + dispatcher.GAP_S) * 16000)
     assert np.max(np.abs(x[64500:start - 100])) < 0.01                                       # the gap
-    first, second = x[start:start + 24000], x[start + 24000 + 16000:]
-    assert len(second) == 24000 and abs(peak_hz(first) - 440) < 2 and abs(peak_hz(second) - 440) < 2
+    first, second = x[start:start + 24000], x[start + 24000 + 16000:start + 64000]
+    tail = x[start + 64000 + int(dispatcher.TAIL_GAP_S * 16000):]
+    assert len(tail) == 24000 and abs(peak_hz(first) - 440) < 2 and abs(peak_hz(second) - 440) < 2
     assert np.max(np.abs(first)) == pytest.approx(dispatcher.AMPLITUDE, abs=0.02)            # same level as the tones
     again = dispatcher.render_dispatch(A, TONES, tmp_path, v)
-    assert again == (path, label) and len(fake_server["requests"]) == 1                      # cached
+    assert again == (path, label) and len(fake_server["requests"]) == 2                      # cached
     other = dispatcher.render_dispatch(A, TONES, tmp_path, tts.VoiceCfg("kokoro", "am_michael", 0.92, fake_server["port"]))
     assert other[0] != path and other[1] == "Voice: Kokoro am_michael"
 
@@ -167,7 +170,8 @@ def test_falls_back_to_say_when_the_server_is_down(tmp_path, fake_say):
     v = tts.VoiceCfg("kokoro", "af_heart", 0.92, free_port(), fallback_voice="Samantha")
     path, label = dispatcher.render_dispatch(A, TONES, tmp_path, v, log=logged.append)
     assert label == "Voice: Samantha (fallback)"
-    assert fake_say == [(dispatcher.speech(A), "Samantha")] and "not reachable" in logged[0]
+    body, tail = dispatcher.split_time_out(dispatcher.speech(A))
+    assert fake_say == [(body, "Samantha"), (tail, "Samantha")] and "not reachable" in logged[0]
     x = read16k(path)
     assert abs(peak_hz(x[int(4.6 * 16000):int(5.6 * 16000)]) - 220) < 2
 
@@ -196,7 +200,8 @@ def test_tone_groups_in_order_then_the_voice_twice(tmp_path, fake_server):
     assert np.max(np.abs(x[64500:g2 - 500])) < 0.01                                          # gap between groups
     assert abs(peak_hz(x[g2 + 1000:g2 + 15000]) - 600) < 2 and abs(peak_hz(x[g2 + 17000:g2 + 47000]) - 800) < 2
     start = g2 + 3 * 16000 + int(dispatcher.GAP_S * 16000)
-    assert len(x) - start == 2 * 24000 + 16000 and abs(peak_hz(x[start:start + 24000]) - 440) < 2   # voice x2
+    tail = int(dispatcher.TAIL_GAP_S * 16000) + 24000                                         # the time out, once
+    assert len(x) - start == 2 * 24000 + 16000 + tail and abs(peak_hz(x[start:start + 24000]) - 440) < 2   # voice x2
     assert dispatcher.render_dispatch(A, groups, tmp_path, tts.VoiceCfg("kokoro", "af_heart", 0.92, fake_server["port"]))[0] == path
     assert dispatcher.render_dispatch(A, TONES, tmp_path, tts.VoiceCfg("kokoro", "af_heart", 0.92, fake_server["port"]))[0] != path
 

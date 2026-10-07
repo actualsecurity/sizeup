@@ -1254,3 +1254,22 @@ def test_gas_calls_are_said_by_what_they_are():
     assert L.phrase("HAZARD", "GAS") == "an odor of gas"
     assert L.phrase("MVA", "EXTRI").endswith("with entrapment")
     assert L.name("event_subtypes", "EXTRI") == "Extrication / entrapment"
+
+
+def test_time_out_is_said_once_after_the_second_reading(tmp_path, monkeypatch):
+    # User 2026-10-07: "the time out on dispatch should only be after the second repeated message, not twice".
+    from sizeup.cad import dispatcher as D
+    assert D.split_time_out("Port Chester Fire, Engine 60, respond to 1 Main Street. Time out fifteen thirteen.") == (
+        "Port Chester Fire, Engine 60, respond to 1 Main Street.", "Time out fifteen thirteen.")
+    assert D.split_time_out("No time out here.") == ("No time out here.", "")
+    said = []
+    monkeypatch.setattr(D, "tts", lambda text, voice="", rate=0: (said.append(text), np.ones(D.RATE // 10 * len(text.split()), np.float32))[1])
+    path, note = D.render_dispatch("Port Chester Fire, Engine 60, respond to 1 Main Street. Time out 15:13.",
+                                   [[349.1, 1.0]], tmp_path, D.VoiceCfg("say", "Samantha"))
+    assert said[0].endswith("Main Street.") and "Time out" not in said[0] and said[1].startswith("Time out")
+    import wave as W
+    with W.open(str(path)) as w:
+        n = w.getnframes()
+    body, tail = len(said[0].split()) * D.RATE // 10, len(said[1].split()) * D.RATE // 10
+    expect = int(1.0 * D.RATE) + int(D.GAP_S * D.RATE) + 2 * body + int(D.REPEAT_GAP_S * D.RATE) + int(D.TAIL_GAP_S * D.RATE) + tail
+    assert abs(n - expect) < D.RATE // 20                    # tones, body twice, the time out once
