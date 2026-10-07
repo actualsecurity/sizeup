@@ -127,3 +127,8 @@ input.s-color { width: 2.4em; height: 1.95em; padding: 0.1em 0.15em; cursor: poi
   .s-said, .s-title, .s-dept, .s-name { flex: 1 1 100%; }
   #operator-pick { width: 8em; }
 }
+/* Dispatch > Arrival estimates: one setting a line, the labels in a column (wrapping on a phone) */
+.s-eta > .row { padding: 0.25em 0; border-top: 1px solid var(--line); }
+.s-eta > .row:first-child { border-top: 0; }
+.s-eta-l { flex: 0 1 24em; min-width: 12em; }
+.s-eta select { max-width: 100%; }

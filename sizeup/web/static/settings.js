@@ -695,9 +695,10 @@ function sAddUnit(kinds, boards) {
 function sDispatch(panel) {
   const d = S.data.dispatch;
   const reset = (d.wording.some((w) => w.state === "edited") || d.tones.edited || d.channels.edited || d.voice.edited
-    || (d.dept_tones || []).some((t) => t.edited) || (d.lead_in_joint_only || []).some((t) => t.state === "edited"))
+    || (d.dept_tones || []).some((t) => t.edited) || (d.lead_in_joint_only || []).some((t) => t.state === "edited")
+    || (d.eta && (d.eta.numbers.some((n) => n.edited) || d.eta.order.edited || d.eta.quarters_status.edited)))
     ? sBtn("Reset all dispatch settings", "", () => {
-      if (sAsk("Put the wording, tones and channels back to the defaults?")) sPost("dispatch", { action: "reset_section" }, "Dispatch: back to the defaults.");
+      if (sAsk("Put the wording, tones, channels and arrival estimates back to the defaults?")) sPost("dispatch", { action: "reset_section" }, "Dispatch: back to the defaults.");
     }, "danger-quiet") : null;
   const main = el("div", "s-wording");
   const more = el("details", "s-more");
@@ -713,6 +714,7 @@ function sDispatch(panel) {
     sCard(sCardHead("Wording", d.department), legend, main, more),
     sCard(sCardHead("Live preview", "a sample event, rendered as typed"), pv),
     sVoice(d.voice), sTones(d.tones), ...(d.dept_tones || []).map(sDeptTones), sChannels(d.channels),
+    d.eta ? sEta(d.eta) : null,
     sCard(sCardHead("Transmit"), el("span", "pill tx-off", d.transmit.enabled ? "Transmit: on" : "Transmit: off"),
       el("p", "dim small", `${d.transmit.note}. Read-only: there is no radio interface in this version.`)));
   sPreview();
@@ -871,6 +873,39 @@ function sTones(t) {
   return sCard(sCardHead("Port Chester Fire tones", t.edited ? "edited here" : "from the config"),
     el("p", "dim small", "Played before the voice: each group in order (one per department paged, a short gap between). "
       + "50 to 4000 Hz, up to 10 s a tone, 20 s a group."), groups, tools);
+}
+
+// Nearest first (sizeup/cad/eta.py): the recommendation's order and the numbers behind its estimates.
+function sEta(e) {
+  const rows = el("div", "s-eta");
+  const order = sSelect([["nearest", "Nearest first (by estimated arrival)"], ["card", "Run card / board order"]], e.order.value,
+    (v) => sPost("dispatch", { action: "set", key: "order", value: v }, v === "nearest" ? "Recommend: nearest first." : "Recommend: run card order."),
+    "Recommend");
+  const line = (label, ctl, item, key, shown) => {
+    const r = el("div", "row");
+    r.append(el("span", "s-eta-l", label), ctl, sState(item.edited ? "edited" : "default"), el("span", "spacer"));
+    if (item.edited) r.append(sBtn("Reset", `Default: ${shown}`, () => sPost("dispatch", { action: "reset", key }, `${label}: default again.`)));
+    return r;
+  };
+  rows.append(line("Recommend", order, e.order, "order", e.order.default === "nearest" ? "nearest first" : "run card order"));
+  for (const n of e.numbers) {
+    const i = el("input", "s-num");
+    i.type = "number"; i.min = String(n.min); i.max = String(n.max); i.step = n.key === "road_factor" ? "0.05" : "0.5";
+    i.value = String(n.value);
+    i.setAttribute("aria-label", n.label);
+    i.addEventListener("change", () => sPost("dispatch", { action: "set", key: n.key, value: Number(i.value) }, `${n.label}: ${i.value} ${n.unit}.`));
+    const ctl = el("span", "row");
+    ctl.append(i, el("span", "dim small", n.unit));
+    rows.append(line(n.label, ctl, n, n.key, `${n.default} ${n.unit}`));
+  }
+  const q = e.quarters_status;
+  const qs = sSelect([["", "None"], ...q.choices.map((c) => [c.code, `${c.code} · ${c.name}`])], q.value,
+    (v) => sPost("dispatch", { action: "set", key: "quarters_status", value: v }, `Back in quarters: ${v || "none"}.`), "Back in quarters status");
+  rows.append(line("“Back in quarters” status (ends a return)", qs, q, "quarters_status", q.default || "none"));
+  return sCard(sCardHead("Arrival estimates", e.order.value === "nearest" ? "recommend nearest first" : "recommend in run card order"),
+    el("p", "dim small", `${e.note} A rig that cleared a call is taken to be driving home for the drive back plus the return margin `
+      + "(no turnout from there); the “back in quarters” status puts it home at once. Rigs with no home station come after those with one."),
+    rows);
 }
 
 function sChannels(c) {
