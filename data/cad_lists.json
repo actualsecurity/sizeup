@@ -5,7 +5,7 @@
     "colors. Each item is {code, name}: the code is the sheet's (stored, matched, exported to CSV), the name is",
     "what the console shows. A plain string is also accepted (code = name). Keys starting with _ are notes.",
     "The department's own code sheet (2026-10-07, dept_codes) adds the unit status codes (AQ, AV, DP ... OS),",
-    "every unit by department, the MA codes, the misc codes and a PARTIAL type -> subtype map (to MVA). Codes",
+    "every unit by department, the MA codes, the misc codes and a type -> subtype map to MVA (the rest to confirm). Codes",
     "are the identity: a code shows as itself until it is named (Settings). Names are filled only where the",
     "meaning is clear (E60 Engine 60, 2398 23 98); everything else stays a bare code, marked \"meaning to",
     "confirm\" in Settings, like an item with a confirm note here (\"confirm\": why).",
@@ -15,7 +15,7 @@
     "These are the defaults: edits made in the console's Settings are kept in the CAD database, laid over",
     "this file (sizeup/cad/settings.py). version: shown in Settings > System; bump it when the file changes."
   ],
-  "version": "2026-10-07.3",
+  "version": "2026-10-07.4",
   "event_types": [
     {"code": "ALARM", "name": "Alarm", "color": "#CC0000"},
     {"code": "ALS", "name": "ALS", "color": "#93C47D"},
@@ -40,7 +40,7 @@
     {"code": "GAS", "name": "Gas"},
     {"code": "GAS-ODOR", "name": "Odor of gas"},
     {"code": "GAS-OUT", "name": "Odor of gas outside"},
-    {"code": "GAS-ATMOS", "name": "Atmospheric gas alarm"},
+    {"code": "GAS-ATMOS", "name": "Atmospheric gas alarm", "retired": true},
     {"code": "GAS-LEAK", "name": "Gas leak"},
     {"code": "GAS-LINE", "name": "Gas line struck / damaged"},
     {"code": "MED", "name": "Medical"},
@@ -92,25 +92,43 @@
     {"code": "WEATHER", "name": "Weather"}
   ],
   "_type_subtypes": [
-    "TYPE -> the subtypes it allows (none listed: no subtype). A type missing here allows every subtype.",
-    "PARTIAL: the department's type -> subtype pairs (code sheet, 2026-10-07) end at MVA. MVF, NOTIF, RECALL,",
-    "RESCUE, SERVICE and STRU were not given: any subtype until they are. ALS allows no subtype or ECHO;",
-    "BLS, BRUSH and DRILL list none. Kept from the user's own additions: ALARM GAS-ATMOS; HAZARD and INVEST",
-    "GAS-ODOR, GAS-OUT, GAS-LEAK and GAS-LINE."
+    "TYPE -> the subtypes it allows; no subtype is always allowed. Strict: a type listed with none, or missing",
+    "here, takes no subtype (there is no ALS / BOMB). Every type is listed. The department's code sheet",
+    "(2026-10-07) gave ALARM .. MVA. Its subtype list runs in one alphabetical block per type, in type order:",
+    "MVA's NOINJ, MVF (AIR .. TRUCK) and NOTIF (CAD .. WATER) follow that order. The RESCUE / SERVICE split of",
+    "the last block (ANIMAL .. WEATHER), STRU (COMM, RESD) and RECALL (none) are proposals: to confirm with the",
+    "department (type_subtypes_partial.confirm, shown in Settings until confirmed there). ALARM GAS is the",
+    "department's atmospheric gas alarm: GAS-ATMOS is retired. GAS-LEAK / GAS-LINE are HAZARD's, GAS-ODOR /",
+    "GAS-OUT INVEST's (the user's own additions)."
   ],
-  "type_subtypes_partial": {"given": ["ALARM", "ALS", "BLS", "BRUSH", "DRILL", "HAZARD", "INVEST", "MA", "MVA"],
-                            "not_given": ["MVF", "NOTIF", "RECALL", "RESCUE", "SERVICE", "STRU"]},
+  "type_subtypes_partial": {
+    "given": ["ALARM", "ALS", "BLS", "BRUSH", "DRILL", "HAZARD", "INVEST", "MA", "MVA"],
+    "confirm": {
+      "MVA": "NOINJ added: next in the department's subtype list after MULTINJU",
+      "MVF": "not given: the AIR .. TRUCK block of the department's subtype list",
+      "NOTIF": "not given: the CAD .. WATER block of the department's subtype list",
+      "RECALL": "not given: proposed no subtype",
+      "RESCUE": "not given: a proposed split of the ANIMAL .. WEATHER block with SERVICE",
+      "SERVICE": "not given: a proposed split of the ANIMAL .. WEATHER block with RESCUE",
+      "STRU": "not given: proposed commercial / residential"
+    }
+  },
   "type_subtypes": {
-    "ALARM": ["CO-COMM", "CO-RESD", "COMM", "GAS", "MED", "RESD", "TROUB", "GAS-ATMOS"],
+    "ALARM": ["COMM", "RESD", "CO-COMM", "CO-RESD", "GAS", "MED", "TROUB"],
     "ALS": ["ECHO"],
     "BLS": [],
     "BRUSH": [],
     "DRILL": [],
-    "HAZARD": ["AIRCRAFT", "BOMB", "FLUID", "GAS", "HAZMAT", "TRANS", "TREE", "TREERD", "WIRES",
-               "GAS-ODOR", "GAS-OUT", "GAS-LEAK", "GAS-LINE"],
-    "INVEST": ["CO-NO", "CO-YES", "ELECT", "INSIDE", "OUTSIDE", "GAS-ODOR", "GAS-OUT", "GAS-LEAK", "GAS-LINE"],
+    "HAZARD": ["AIRCRAFT", "BOMB", "FLUID", "GAS", "HAZMAT", "TRANS", "TREE", "TREERD", "WIRES", "GAS-LEAK", "GAS-LINE"],
+    "INVEST": ["CO-NO", "CO-YES", "ELECT", "INSIDE", "OUTSIDE", "GAS-ODOR", "GAS-OUT"],
     "MA": ["EMS", "EMS-A", "FIRE", "OTHER"],
-    "MVA": ["EXTRI", "INJURIES", "MULTINJU"]
+    "MVA": ["EXTRI", "INJURIES", "MULTINJU", "NOINJ"],
+    "MVF": ["AIR", "BOAT", "CAR", "INPARK", "MULTI", "NEXT", "TRUCK"],
+    "NOTIF": ["CAD", "NOTIF-PD", "POLICE", "WATER"],
+    "RECALL": [],
+    "RESCUE": ["ANIMAL", "ELEVATOR", "LOST", "STRUCTURAL", "VEHICLE", "WATER"],
+    "SERVICE": ["APPLIANC", "HEAT", "LIFT", "MISC", "SPRINK", "WEATHER"],
+    "STRU": ["COMM", "RESD"]
   },
   "dispositions": [
     {"code": "CANCELLED", "name": "Cancelled"},

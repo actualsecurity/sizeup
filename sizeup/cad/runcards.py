@@ -109,16 +109,20 @@ def validate_slots(store: Store, slots) -> list[dict]:
 
 
 def check_key(store: Store, k: str) -> str:
+    """TYPE or TYPE/SUBTYPE, a pair the type -> subtype map allows (no ALS/BOMB card)."""
     try:
         typ, sub = store.lists.check_key((k or "").strip())
     except ValueError as e:
-        raise CadError(str(e)) from None
+        raise CadError(f"run card {(k or '').strip()}: {e}") from None
     return key(typ, sub)
 
 
 def save(store: Store, k: str, slots, spoken: str = "", rename_from: str = "") -> dict:
-    """Add or edit one card (k = TYPE or TYPE/SUBTYPE). An edited card is no longer a default."""
-    k = check_key(store, k)
+    """Add or edit one card (k = TYPE or TYPE/SUBTYPE). An edited card is no longer a default. A card
+    kept under a pair the map no longer allows can still have its units edited (not a new key)."""
+    k = (k or "").strip()
+    if (rename_from and rename_from != k) or card(store, k) is None:
+        k = check_key(store, k)
     slots = validate_slots(store, slots)
     spoken = (spoken or "").strip()[:120]
     old = card(store, rename_from or k)

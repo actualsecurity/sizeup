@@ -529,11 +529,12 @@ class Cad:
         if not self.store.has_dispatch(iid):
             raise CadError("nothing dispatched yet: dispatch it first")
         typ, sub = (_text(body, "type", 24), _text(body, "subtype", 24)) if body.get("type") else (inc["type"], inc["subtype"])
-        try:
-            L.check_type(typ, sub)
-        except ValueError as e:
-            raise CadError(str(e)) from None
         changed = (typ, sub) != (inc["type"], inc["subtype"])
+        if changed:                                    # an old event's pair the map no longer allows: kept as it is
+            try:
+                L.check_type(typ, sub)
+            except ValueError as e:
+                raise CadError(str(e)) from None
         if not (inc["emergency"] or (changed and L.is_emergency(typ, sub))):
             raise CadError("non-emergency event: no dispatch (mark it an emergency first)")
         info = _text(body, "info", 300)
@@ -808,8 +809,12 @@ class Cad:
         typ, sub, note = runcards.from_page(inc.incident_type, inc.category, " ".join(inc.page_text))
         try:
             self.lists.check_type(typ, sub, required=False)
-        except ValueError:                             # a data file without that code: leave it to the operator
-            typ, sub, note = "", "", note or f"type heard: {inc.incident_type}"
+        except ValueError:
+            try:                                       # the type fits, the subtype not (the map changed): keep the type
+                self.lists.check_type(typ, required=False)
+                sub, note = "", note or f"subtype heard as {sub}, not one for {self.lists.type_label(typ)}: pick the subtype"
+            except ValueError:                         # a data file without that code: leave it to the operator
+                typ, sub, note = "", "", note or f"type heard: {inc.incident_type}"
         f = {"type": typ, "subtype": sub, "type_note": note,
              "address": (address or "")[:200], "cross_street": (inc.cross_street or "").title()[:200],
              "remarks": remarks, "lat": geo.get("lat"), "lon": geo.get("lon"), "geo_label": (geo.get("label") or "")[:200]}
