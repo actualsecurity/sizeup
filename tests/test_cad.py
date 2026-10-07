@@ -188,9 +188,11 @@ def test_lists_file_has_the_sheets_vocabulary():
 
 def test_unit_boards_in_the_sheets_order_with_gaps():
     L = lists.load()
-    main, other = L.unit_boards
+    main, agencies, other = L.unit_boards
     assert main["units"][:6] == ["2391", "2392", "2393", "2395", "2398", "E59"]
-    assert main["units"][23:26] == ["U42", None, "PCPD"] and main["units"][-1] == "7711" and len(main["units"]) == 41
+    assert main["units"][-1] == "U42" and len(main["units"]) == 24 and None not in main["units"]     # fire units only
+    assert agencies["units"][:5] == ["PCPD", "PCPD1", "RBPD", "RBPD1", None] and agencies["units"][-1] == "7711"
+    assert agencies["title"] == "Other agencies — add to a call when they show up"
     assert other["units"][:2] == ["CONED-G", "CONED-G1"] and other["units"][-6:] == [None, "L25", "E191", None, "DPT266", "DPT239"]
     codes = [c for c, _, _ in L.board_units()]
     assert len(codes) == 61 and codes.index("7711") < codes.index("CONED-G")
@@ -216,7 +218,7 @@ def test_spoken_unit_names_kinds_and_spares():
     assert L.unit("L25")["mutual_aid"] and L.unit("E191")["mutual_aid"] and L.unit("E191")["joint"] == ""
     assert not L.unit("E60")["mutual_aid"] and L.unit("E60")["joint"] == "" and L.unit("U42")["spoken"] == "Utility 42"
     assert L.unit("NEW1") == {"kind": "agency", "spoken": "NEW1", "title": "", "spare": False, "department": "",
-                              "mutual_aid": False, "joint": ""}
+                              "mutual_aid": False, "response": "agency", "joint": ""}
 
 
 def test_lists_file_errors_name_the_file_and_the_problem(tmp_path):
@@ -257,7 +259,7 @@ def test_numbers_yy_nnnnnn_per_local_year_and_queued_unnumbered(tmp_path):
     with pytest.raises(CadError):
         st.accept(p)                                                   # already accepted
     st2 = Store(tmp_path / "cad.sqlite", clock=clock)
-    assert st2.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 4
+    assert st2.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 5
     assert st2.incident(st2.create_incident(type="SERVICE"))["number"] == "27-000003"
     with pytest.raises(sqlite3.IntegrityError):
         st2.create_incident(type="ALARM", source="60 Control page", source_ref="monitor:x", status="queued")
@@ -1008,7 +1010,7 @@ def test_api_event_lifecycle(server):
     assert code == 200 and b"cad.js" in page and ctype.startswith("text/html")
     code, st = server.j("GET", "/api/cad/state")
     assert code == 200 and len(st["units"]) == 61 and st["incidents"] == [] and st["run_cards_default"]
-    assert st["lists"]["source"] == "data/cad_lists.json" and st["lists"]["unit_boards"][0]["units"][24] is None
+    assert st["lists"]["source"] == "data/cad_lists.json" and st["lists"]["unit_boards"][1]["units"][4] is None
     assert st["transmit"] == {"enabled": False, "transmitter": "null", "channels": ["FG1", "PC repeater"],
                               "note": "Transmit is off: logged and played here only"}
     code, g = server.j("GET", "/api/cad/geocode?q=209+westchester")
@@ -1169,7 +1171,7 @@ def test_migrates_a_v2_database_keeping_its_data(tmp_path):
     cards_before = runcards.cards(cad.store)
     cad2 = make_cad(tmp_path)
     st = cad2.store
-    assert st.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 4
+    assert st.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 5
     assert any("v2 -> v3" in m for m in st.migrated)
     assert st.q("SELECT new_status, note FROM unit_history") == [{"new_status": "DISPATCHED", "note": ""}]
     assert st.full(iid)["number"] == "26-000001" and by_name(cad2, "E60")["incident_id"] == iid

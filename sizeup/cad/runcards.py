@@ -10,7 +10,9 @@ take it). Another department's units (mutual_aid in the data file: Rye's L25, E1
 by name, never picked by kind. A joint-response department's units (joint_response: Rye Brook's
 2662, L30, E14, U42) are direct units: a kind slot takes them after PCFD's own units of that kind,
 and first when the event is in their town (their call). A slot it can't fill is reported
-("no ladder/tower available"), never filled with something else.
+("no ladder/tower available"), never filled with something else. Other agencies' units (EMS, PD,
+utilities: response "agency") are never on a card, by kind or by name: they are attached to an
+event when they show up.
 
 The default cards come from data/cad_lists.json (run_cards). They are a stand-in so the console
 works on day one, NOT PCFD policy: the page says so until each card has been edited.
@@ -76,20 +78,25 @@ def resolve(store: Store, typ: str, subtype: str = "") -> dict | None:
 def validate_slots(store: Store, slots) -> list[dict]:
     if not isinstance(slots, list) or not slots or len(slots) > MAX_SLOTS:
         raise CadError(f"slots: a list of 1 to {MAX_SLOTS}")
-    names = {u["name"] for u in store.units()}
-    kinds = store.lists.kind_ids
+    by_name = {u["name"]: u for u in store.units()}
+    L = store.lists
+    kinds = tuple(k for k in L.kind_ids if k not in L.attach_kinds)
     out = []
     for i, s in enumerate(slots):
         if not isinstance(s, dict):
             raise CadError(f"slots[{i}]: an object")
         if s.get("unit"):
-            if str(s["unit"]) not in names:
+            if str(s["unit"]) not in by_name:
                 raise CadError(f"slots[{i}]: no unit {s['unit']!r}")
+            if by_name[str(s["unit"])]["response"] == "agency":
+                raise CadError(f"slots[{i}]: {s['unit']} is another agency's unit: never on a run card "
+                               "(attach it to the event when it shows up)")
             out.append({"unit": str(s["unit"])})
             continue
         ks = str(s.get("kind", "")).split("|")
         if not all(k in kinds for k in ks):
-            raise CadError(f"slots[{i}].kind: one or more of {', '.join(kinds)} joined by |")
+            raise CadError(f"slots[{i}].kind: one or more of {', '.join(kinds)} joined by | "
+                           "(EMS, PD and agencies are never on a run card)")
         try:
             n = int(s.get("count", 1))
         except (TypeError, ValueError):
@@ -128,6 +135,44 @@ def save(store: Store, k: str, slots, spoken: str = "", rename_from: str = "") -
             db.execute("UPDATE run_cards SET type = ?, spoken = ?, is_default = 0 WHERE id = ?", (k, spoken, cid))
         _write_slots(db, cid, slots)
     return card(store, k)
+
+
+def default_card(store: Store, k: str) -> dict | None:
+    return next((c for c in store.lists.run_cards if c["type"] == k), None)
+
+
+def reset(store: Store, k: str) -> dict:
+    """One card back to the data file's default (is_default again)."""
+    d = default_card(store, k)
+    if d is None:
+        raise CadError(f"no default run card for {k}: delete it instead")
+    c = card(store, k)
+    with store.tx() as db:
+        if c is None:
+            sort = db.execute("SELECT COALESCE(MAX(sort), -1) + 1 FROM run_cards").fetchone()[0]
+            cid = db.execute("INSERT INTO run_cards (type, spoken, is_default, sort) VALUES (?, '', 1, ?)", (k, sort)).lastrowid
+        else:
+            cid = c["id"]
+            db.execute("UPDATE run_cards SET spoken = '', is_default = 1 WHERE id = ?", (cid,))
+        _write_slots(db, cid, d["slots"])
+    return card(store, k)
+
+
+def reset_all(store: Store) -> None:
+    """Every card back to the defaults: added cards removed, edited ones restored."""
+    with store.tx() as db:
+        db.execute("DELETE FROM run_cards")
+    seed(store)
+
+
+def replace_all(store: Store, new: list[dict]) -> None:
+    """The cards from a settings import (checked first by the caller)."""
+    with store.tx() as db:
+        db.execute("DELETE FROM run_cards")
+        for k, c in enumerate(new):
+            cid = db.execute("INSERT INTO run_cards (type, spoken, is_default, sort) VALUES (?, ?, ?, ?)",
+                             (c["type"], c.get("spoken", ""), int(bool(c.get("is_default"))), k)).lastrowid
+            _write_slots(db, cid, c["slots"])
 
 
 def delete(store: Store, k: str) -> None:
@@ -172,7 +217,7 @@ def recommend(store: Store, typ: str, subtype: str = "", incident_id: int | None
             need, match = 1, (lambda u, n=slot["unit"]: u["name"] == n)
         else:
             kinds = slot["kind"].split("|")
-            need, match = slot["count"], (lambda u, ks=kinds: u["kind"] in ks and not u["mutual_aid"]
+            need, match = slot["count"], (lambda u, ks=kinds: u["kind"] in ks and u["response"] == "fire"
                                           and u["name"] not in named)
             want = None
         for u in on_here:                              # already there: fills the slot
@@ -180,14 +225,14 @@ def recommend(store: Store, typ: str, subtype: str = "", incident_id: int | None
                 taken.add(u["id"])
                 need -= 1
         for u in free:
-            if need and u["id"] not in taken and match(u):
+            if need and u["id"] not in taken and match(u) and u["response"] != "agency":
                 taken.add(u["id"])
                 picks.append(dict(u, slot=describe(slot)))
                 need -= 1
         if need:
             if slot.get("unit"):
                 u = want[0] if want else None
-                why = "not on the boards" if u is None else (
+                why = "not on the boards" if u is None else "another agency's unit: attach it" if u["response"] == "agency" else (
                     f"committed to {u['incident_number']}" if u["incident_id"] else
                     L.name("unit_statuses", u["status"]).lower())
                 unfilled.append(f"{slot['unit']} not available ({why})")

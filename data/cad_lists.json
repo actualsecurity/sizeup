@@ -7,8 +7,11 @@
     "Still guesses (not in the sheet): names whose meaning is unclear are left as the code (still to confirm:",
     "ECHO, AIR, MULTI, NEXT, CAD, RMA; TRANS, CO-NO and CO-YES were confirmed by PCFD); type_subtypes is",
     "empty (the sheet has no type -> subtype mapping); event_class, unit kinds/spoken names/spares/departments,",
-    "received_via, the DISPATCH OTHER color, run cards, spoken phrases and geo_town_order."
+    "received_via, the DISPATCH OTHER color, run cards, spoken phrases and geo_town_order.",
+    "These are the defaults: edits made in the console's Settings are kept in the CAD database, laid over",
+    "this file (sizeup/cad/settings.py). version: shown in Settings > System; bump it when the file changes."
   ],
+  "version": "2026-10-07.2",
   "event_types": [
     {"code": "ALARM", "name": "Alarm", "color": "#CC0000"},
     {"code": "ALS", "name": "ALS", "color": "#93C47D"},
@@ -178,19 +181,28 @@
     {"id": "utility", "label": "Utility"},
     {"id": "marine", "label": "Marine"},
     {"id": "chief", "label": "Chief officer"},
-    {"id": "ems", "label": "EMS"},
-    {"id": "pd", "label": "Police"},
-    {"id": "agency", "label": "Utility co. / agency"}
+    {"id": "ems", "label": "EMS", "attach_only": true},
+    {"id": "pd", "label": "Police", "attach_only": true},
+    {"id": "agency", "label": "Utility co. / agency", "attach_only": true}
   ],
-  "_unit_boards": "The two status boards, in the sheet's order. null = a blank row (a visual separator).",
+  "_unit_boards": ["The status boards, in the sheet's order. null = a blank row (a visual separator).",
+                   "main: PCFD's and Rye Brook's fire units. agencies: EMS and PD, attached to a call when they",
+                   "show up (never dispatched). other: utilities, agencies and real mutual aid."],
   "unit_boards": [
     {
       "id": "main",
       "title": "Unit status",
       "units": [
         "2391", "2392", "2393", "2395", "2398", "E59", "E60", "E61", "E62", "E63", "E64", "L31", "TL2", "R40", "R41",
-        "U65", "U67", "U239", "M40", "M60", "2662", "L30", "E14", "U42", null, "PCPD", "PCPD1", "RBPD", "RBPD1",
-        "77A1", "77A2", "77A3", "77A4", "77A5", "77A6", "77A7", "77A8", "77A9", "77M2", "77M3", "7711"
+        "U65", "U67", "U239", "M40", "M60", "2662", "L30", "E14", "U42"
+      ]
+    },
+    {
+      "id": "agencies",
+      "title": "Other agencies \u2014 add to a call when they show up",
+      "units": [
+        "PCPD", "PCPD1", "RBPD", "RBPD1", null, "77A1", "77A2", "77A3", "77A4", "77A5", "77A6", "77A7", "77A8", "77A9",
+        "77M2", "77M3", "7711"
       ]
     },
     {
@@ -207,7 +219,10 @@
     "Per unit (guesses, not in the sheet): kind (run cards pick by kind), spoken (as the dispatch voice says",
     "it), title, spare (picked after regular apparatus), department (whose: Rye Brook's units answer jointly,",
     "see joint_response), mutual_aid (another department's apparatus, e.g. Rye's: never picked by kind on a",
-    "run card, only by name). A board unit missing here is kind 'agency', spoken as its code."
+    "run card, only by name). A board unit missing here is kind 'agency', spoken as its code.",
+    "response (optional): fire | mutual_aid | agency; without it: mutual_aid if flagged, agency for the",
+    "attach_only kinds (EMS, PD, utilities: attached to a call, never on a run card, never dispatched or",
+    "said on the air), else fire."
   ],
   "units": {
     "2391": {"kind": "chief", "spoken": "23 91", "title": "Chief of Department"},
@@ -269,8 +284,8 @@
     "60CAD2": {"kind": "agency", "spoken": "60CAD2"},
     "L25": {"kind": "ladder", "spoken": "Ladder 25", "department": "Rye", "mutual_aid": true},
     "E191": {"kind": "engine", "spoken": "Engine 191", "department": "Rye", "mutual_aid": true},
-    "DPT266": {"kind": "agency", "spoken": "DPT266"},
-    "DPT239": {"kind": "agency", "spoken": "DPT239"}
+    "DPT266": {"kind": "agency", "spoken": "DPT266", "mutual_aid": true},
+    "DPT239": {"kind": "agency", "spoken": "DPT239", "mutual_aid": true}
   },
   "_spoken": "How the dispatch voice says a TYPE, TYPE/SUBTYPE or */SUBTYPE (any type): TYPE/SUBTYPE, then */SUBTYPE, then TYPE: '... for a commercial fire alarm.' In a subtype's phrase {type} is the type's phrase: '{type} with multiple injuries' -> 'a motor vehicle accident with multiple injuries'. A subtype with no phrase (ECHO, AIR, MULTI, NEXT, CAD, RMA: meaning unconfirmed) says the type's.",
   "spoken": {

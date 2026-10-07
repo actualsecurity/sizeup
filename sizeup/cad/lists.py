@@ -27,6 +27,15 @@ shows). A new export can replace the file without a code change:
     geo_town_order, geo_town_aliases Location suggestions: which towns come first
 
 load() checks it and raises ListsError (with the file and the reason) on anything inconsistent.
+The file is the defaults: the Settings page's edits are kept in the CAD database and laid over it
+(sizeup/cad/settings.py) before build() checks the result the same way. An item can be retired
+("retired": true): still named on old events, off the pick lists (codes() is the active ones).
+
+Units answer one of three ways (units.<code>.response, else from the flags): "fire" (PCFD's and the
+joint-response department's apparatus: run cards by kind, "tick all", the dispatch), "mutual_aid"
+(another department's: only when named or picked by hand) and "agency" (EMS, PD, utilities: the
+unit_kinds marked attach_only; never on a run card, never dispatched or said on the air, only
+attached to an event when they show up, with a short status set).
 """
 
 from __future__ import annotations
@@ -44,6 +53,8 @@ CLASSES = ("emergency", "non-emergency")
 CODE = re.compile(r"[A-Z0-9][A-Z0-9_\-]{0,23}")                  # types, subtypes, unit codes
 LONG_CODE = re.compile(r"[A-Z0-9][A-Z0-9 _/\-]{0,39}")           # dispositions, statuses, received via
 COLOR = re.compile(r"#[0-9a-fA-F]{6}")
+RESPONSES = ("fire", "mutual_aid", "agency")
+LIST_SECTIONS = ("event_types", "event_subtypes", "dispositions", "received_via", "unit_statuses")
 
 
 class ListsError(ValueError):
@@ -84,13 +95,17 @@ class Lists:
     _names: dict[str, dict[str, str]] = field(default_factory=dict, repr=False)
 
     def __post_init__(self):
-        for k in ("event_types", "event_subtypes", "dispositions", "received_via", "unit_statuses"):
+        for k in LIST_SECTIONS:
             self._names[k] = {x["code"]: x["name"] for x in getattr(self, k)}
 
     # -- codes and names ----------------------------------------------------------------------------
 
     def codes(self, which: str) -> tuple[str, ...]:
-        return tuple(self._names[which])
+        """The active codes (what can be picked now); a retired one is still named (name())."""
+        return tuple(x["code"] for x in getattr(self, which) if not x.get("retired"))
+
+    def retired(self, which: str, code: str) -> bool:
+        return any(x["code"] == code and x.get("retired") for x in getattr(self, which))
 
     def name(self, which: str, code: str) -> str:
         return self._names[which].get(code, code)
@@ -121,7 +136,8 @@ class Lists:
     # -- types ------------------------------------------------------------------------------------
 
     def subtypes_for(self, typ: str) -> tuple[str, ...]:
-        return self.type_subtypes.get(typ) or self.subtype_codes
+        sub = self.type_subtypes.get(typ)
+        return tuple(s for s in sub if s in self.subtype_codes) if sub else self.subtype_codes
 
     def check_type(self, typ: str, subtype: str = "", required: bool = True) -> None:
         """Raises ValueError with the reason for a type / subtype code that isn't on the lists."""
@@ -132,8 +148,12 @@ class Lists:
                 raise ValueError("subtype: pick the type first")
             return
         if typ not in self.type_codes:
+            if self.retired("event_types", typ):
+                raise ValueError(f"type: {self.type_label(typ)} ({typ}) is retired")
             raise ValueError(f"type: {typ!r} is not an event type")
         if subtype and subtype not in self.subtypes_for(typ):
+            if self.retired("event_subtypes", subtype):
+                raise ValueError(f"subtype: {self.name('event_subtypes', subtype)} ({subtype}) is retired")
             raise ValueError(f"subtype: {subtype!r} is not an event subtype for {self.type_label(typ)}")
 
     def check_key(self, k: str) -> tuple[str, str]:
@@ -177,11 +197,16 @@ class Lists:
 
     def status_for(self, role: str) -> str:
         """The first status with that role: 'free' -> 'AVAILABLE', 'dispatched' -> 'DISPATCHED'."""
-        return next(s["code"] for s in self.unit_statuses if s.get("role") == role)
+        return next(s["code"] for s in self.unit_statuses if s.get("role") == role and not s.get("retired"))
 
     @property
     def free(self) -> tuple[str, ...]:
-        return tuple(s["code"] for s in self.unit_statuses if s.get("role") == "free")
+        return tuple(s["code"] for s in self.unit_statuses if s.get("role") == "free" and not s.get("retired"))
+
+    def agency_statuses(self) -> tuple[str, ...]:
+        """Another agency's unit on an event (EMS, PD): on location, then cleared (the free status)."""
+        return tuple(self.status_for(r) for r in ("onscene", "free") if any(
+            s.get("role") == r and not s.get("retired") for s in self.unit_statuses))
 
     def next_statuses(self, status: str) -> tuple[str, ...]:
         """The buttons on a unit that is on an incident (status_flow): what can come next. Without a
@@ -209,9 +234,19 @@ class Lists:
 
     def unit(self, code: str) -> dict:
         u = self.units.get(code, {})
+        r = self.response(code)
         return {"kind": u.get("kind", "agency"), "spoken": u.get("spoken") or code, "title": u.get("title", ""),
                 "spare": bool(u.get("spare")), "department": u.get("department", ""),
-                "mutual_aid": bool(u.get("mutual_aid")), "joint": self.joint_town(code)}
+                "mutual_aid": r == "mutual_aid", "response": r, "joint": self.joint_town(code)}
+
+    @property
+    def attach_kinds(self) -> tuple[str, ...]:
+        """Kinds that are other agencies (EMS, PD, utilities): attached, never dispatched."""
+        return tuple(k["id"] for k in self.unit_kinds if k.get("attach_only"))
+
+    def response(self, code: str) -> str:
+        """fire | mutual_aid | agency (see the module doc)."""
+        return unit_response(self.units.get(code, {}), self.attach_kinds)
 
     def joint_town(self, code: str) -> str:
         """'E14' -> 'Rye Brook': the town whose department answers jointly with PCFD ('' = PCFD's own or other)."""
@@ -265,6 +300,7 @@ class Lists:
                 "dispositions": [dict(x) for x in self.dispositions],
                 "received_via": [dict(x) for x in self.received_via], "event_class": self.event_class,
                 "unit_statuses": [dict(s) for s in self.unit_statuses], "event_statuses": self.event_statuses,
+                "agency_statuses": list(self.agency_statuses()),
                 "unit_event_cell": self.unit_event_cell, "unit_kinds": [dict(k) for k in self.unit_kinds],
                 "unit_boards": [dict(b, units=list(b["units"])) for b in self.unit_boards],
                 "spoken": self.spoken, "geo_town_order": list(self.geo_town_order),
@@ -274,6 +310,15 @@ class Lists:
                 "full_response_kinds": list(self.full_response_kinds),
                 "status_flow": {k: list(v) for k, v in self.status_flow.items()},
                 "source": _shown_path(self.path)}
+
+
+def unit_response(u: dict, attach_kinds) -> str:
+    r = u.get("response")
+    if r in RESPONSES:
+        return r
+    if u.get("mutual_aid"):
+        return "mutual_aid"
+    return "agency" if u.get("kind", "agency") in attach_kinds else "fire"
 
 
 def _shown_path(p: str) -> str:
@@ -301,6 +346,8 @@ def _items(d: dict, k: str, where: str, pattern: re.Pattern, extra=()) -> tuple[
             raise ListsError(f"{where}: {k} lists {code!r} twice")
         seen.add(code)
         item = {"code": code, "name": str(x.get("name") or code).strip()}
+        if x.get("retired"):
+            item["retired"] = True
         for e in extra:
             if e in x and x[e] not in (None, ""):
                 item[e] = x[e]
@@ -311,17 +358,27 @@ def _items(d: dict, k: str, where: str, pattern: re.Pattern, extra=()) -> tuple[
     return tuple(out)
 
 
-def load(path: str | Path | None = None) -> Lists:
+def read(path: str | Path | None = None) -> dict:
+    """The data file as it is (the defaults), unchecked."""
     path = Path(path) if path else DEFAULT_PATH
-    where = str(path)
     try:
         d = json.loads(path.read_text())
     except OSError as e:
-        raise ListsError(f"{where}: cannot read ({e.strerror or e})") from None
+        raise ListsError(f"{path}: cannot read ({e.strerror or e})") from None
     except ValueError as e:
-        raise ListsError(f"{where}: not JSON ({e})") from None
+        raise ListsError(f"{path}: not JSON ({e})") from None
     if not isinstance(d, dict):
-        raise ListsError(f"{where}: a JSON object expected")
+        raise ListsError(f"{path}: a JSON object expected")
+    return d
+
+
+def load(path: str | Path | None = None) -> Lists:
+    path = Path(path) if path else DEFAULT_PATH
+    return build(read(path), str(path), path)
+
+
+def build(d: dict, where: str, path: str | Path = "") -> Lists:
+    """The lists from the file's contents (or the defaults with the Settings edits laid over)."""
     types = _items(d, "event_types", where, CODE, ("color",))
     subtypes = _items(d, "event_subtypes", where, CODE)
     dispositions = _items(d, "dispositions", where, LONG_CODE)
@@ -360,7 +417,7 @@ def load(path: str | Path | None = None) -> Lists:
         if s.get("role", "") not in ("",) + ROLES:
             raise ListsError(f"{where}: unit_statuses[{i}].role: one of {', '.join(ROLES)} (or none)")
     for need in ("free", "oos", "dispatched"):
-        if not any(s.get("role") == need for s in statuses):
+        if not any(s.get("role") == need and not s.get("retired") for s in statuses):
             raise ListsError(f"{where}: unit_statuses: one status needs role {need!r}")
 
     es = d.get("event_statuses") or {}
@@ -376,6 +433,7 @@ def load(path: str | Path | None = None) -> Lists:
     kind_ids = {k["id"] for k in kinds}
     if any("|" in k for k in kind_ids):
         raise ListsError(f"{where}: unit_kinds: an id can't contain |")
+    attach_kinds = {k["id"] for k in kinds if k.get("attach_only")}
 
     boards, seen = [], set()
     for i, b in enumerate(d.get("unit_boards") or []):
@@ -399,6 +457,11 @@ def load(path: str | Path | None = None) -> Lists:
             raise ListsError(f"{where}: units[{code!r}]: an object")
         if u.get("kind", "agency") not in kind_ids:
             raise ListsError(f"{where}: units[{code!r}].kind: one of {', '.join(sorted(kind_ids))}")
+        if u.get("response") not in (None, "") + RESPONSES:
+            raise ListsError(f"{where}: units[{code!r}].response: one of {', '.join(RESPONSES)}")
+
+    def agency(code: str) -> bool:
+        return unit_response(units.get(code, {}), attach_kinds) == "agency"
 
     spoken = d.get("spoken") or {}
     for k, v in spoken.items():
@@ -420,8 +483,10 @@ def load(path: str | Path | None = None) -> Lists:
         for s in c["slots"]:
             if s.get("unit") and s["unit"] not in seen:
                 raise ListsError(f"{where}: run_cards[{i}]: unit {s['unit']!r} is not on the boards")
-            if not s.get("unit") and not set(str(s.get("kind", "")).split("|")) <= kind_ids:
-                raise ListsError(f"{where}: run_cards[{i}]: kind {s.get('kind')!r} is not in unit_kinds")
+            if s.get("unit") and agency(s["unit"]):
+                raise ListsError(f"{where}: run_cards[{i}]: {s['unit']!r} is another agency's unit (never on a run card)")
+            if not s.get("unit") and not set(str(s.get("kind", "")).split("|")) <= kind_ids - attach_kinds:
+                raise ListsError(f"{where}: run_cards[{i}]: kind {s.get('kind')!r} is not a fire apparatus kind in unit_kinds")
 
     from sizeup.cad.dispatcher import WORDING
     dw = d.get("dispatch_wording") or {}
@@ -447,8 +512,8 @@ def load(path: str | Path | None = None) -> Lists:
     if not set(already) <= {s["code"] for s in statuses}:
         raise ListsError(f"{where}: dispatch_wording.already_statuses: codes from unit_statuses")
     fr_kinds = tuple(dw.get("full_response_kinds") or ())
-    if not set(fr_kinds) <= kind_ids:
-        raise ListsError(f"{where}: dispatch_wording.full_response_kinds: ids from unit_kinds")
+    if not set(fr_kinds) <= kind_ids - attach_kinds:
+        raise ListsError(f"{where}: dispatch_wording.full_response_kinds: fire apparatus ids from unit_kinds")
 
     joint = {}
     for town, j in (d.get("joint_response") or {}).items():
@@ -461,8 +526,8 @@ def load(path: str | Path | None = None) -> Lists:
         for c in codes + quick:
             if c not in units:
                 raise ListsError(f"{where}: joint_response[{town!r}]: {c!r} is not in units")
-            if units[c].get("mutual_aid"):
-                raise ListsError(f"{where}: joint_response[{town!r}]: {c!r} is mutual_aid (joint units are direct)")
+            if unit_response(units[c], attach_kinds) != "fire":
+                raise ListsError(f"{where}: joint_response[{town!r}]: {c!r} is mutual aid or an agency (joint units are direct)")
         if not set(quick) <= set(codes):
             raise ListsError(f"{where}: joint_response[{town!r}].quick_add: codes from its units")
         tag = str(j.get("tag") or "".join(w[0] for w in str(town).split()).upper())
@@ -487,7 +552,8 @@ def load(path: str | Path | None = None) -> Lists:
 
     return Lists(event_types=types, event_subtypes=subtypes, type_subtypes=type_subtypes, dispositions=dispositions,
                  received_via=received, event_class=event_class, unit_statuses=statuses, event_statuses=event_statuses,
-                 unit_kinds=tuple({"id": k["id"], "label": str(k.get("label") or k["id"])} for k in kinds),
+                 unit_kinds=tuple({"id": k["id"], "label": str(k.get("label") or k["id"]), "attach_only": bool(k.get("attach_only"))}
+                                  for k in kinds),
                  unit_boards=tuple(boards), units=units, spoken=dict(spoken), run_cards=tuple(cards),
                  geo_town_order=order, geo_town_aliases=aliases, unit_event_cell=dict(d.get("unit_event_cell") or {}),
                  wording=dict(WORDING, **wording), already_statuses=already, joint_response=joint, full_response_kinds=fr_kinds,

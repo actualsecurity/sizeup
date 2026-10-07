@@ -20,6 +20,8 @@
       radio_traffic every transcribed transmission, radio_links: which events it belongs to
                     (sizeup/cad/comms.py)
       meta          small settings (the radio seed version)
+      settings_overrides  the Settings page's edits, laid over data/cad_lists.json (sizeup/cad/settings.py)
+      operators           the people at the console (no sign-in yet)
 
 The lists (types, subtypes, dispositions, unit statuses and what each one means) come from
 sizeup/cad/lists.py. One connection, one lock: the web server is threaded and SQLite writes are
@@ -41,7 +43,7 @@ from sizeup.cad import lists as lists_mod
 from sizeup.cad.lists import Lists
 
 TZ = ZoneInfo("America/New_York")
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 OPEN = ("queued", "pending", "active")
 SOURCES = ("manual", "60 Control page")
@@ -190,6 +192,29 @@ CREATE INDEX IF NOT EXISTS radio_links_incident ON radio_links(incident_id);
 """
 RADIO_SCHEMA = SCHEMA[SCHEMA.index("CREATE TABLE IF NOT EXISTS meta"):]
 
+# v5: Settings. Every statement can run again (IF NOT EXISTS): the radio-ID work (v4) creates the
+# same settings_audit table, and either can come first.
+SETTINGS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS settings_audit (id INTEGER PRIMARY KEY, at REAL NOT NULL, operator TEXT, section TEXT NOT NULL, key TEXT, old TEXT, new TEXT);
+CREATE INDEX IF NOT EXISTS settings_audit_section ON settings_audit(section, at);
+CREATE TABLE IF NOT EXISTS settings_overrides (
+  section TEXT NOT NULL,                -- event_types | units | dispatch_wording | ... (sizeup/cad/settings.py)
+  key TEXT NOT NULL,                    -- a code ("STRU"), "_order", "_boards", a template name, "tones"
+  value TEXT NOT NULL,                  -- JSON: the item as edited
+  updated_at REAL NOT NULL,
+  operator TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (section, key)
+);
+CREATE TABLE IF NOT EXISTS operators (  -- who works the console. Sign-in later = more columns (pin_hash, auth_provider, auth_subject)
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  role TEXT NOT NULL DEFAULT 'dispatcher',   -- admin | dispatcher | viewer (not enforced yet)
+  active INTEGER NOT NULL DEFAULT 1,
+  created_at REAL NOT NULL,
+  updated_at REAL NOT NULL
+);
+"""
+
 # Schema v1 (before the sheet's vocabulary) -> v2. Old call types -> (TYPE, SUBTYPE).
 V1_TYPES = {"Structure fire": ("STRU", ""), "Fire alarm – commercial": ("ALARM", "COMM"),
             "Fire alarm – residential": ("ALARM", "RESD"), "CO alarm": ("ALARM", ""),
@@ -246,7 +271,7 @@ class Store:
             if v > SCHEMA_VERSION:
                 raise RuntimeError(f"{self.path}: schema v{v} is newer than this sizeup (v{SCHEMA_VERSION})")
             if v == 0:
-                self.db.executescript("BEGIN;" + SCHEMA + f"PRAGMA user_version = {SCHEMA_VERSION}; COMMIT;")
+                self.db.executescript("BEGIN;" + SCHEMA + SETTINGS_SCHEMA + f"PRAGMA user_version = {SCHEMA_VERSION}; COMMIT;")
                 return
             if v < SCHEMA_VERSION:
                 self.db.execute("BEGIN IMMEDIATE")
@@ -255,6 +280,7 @@ class Store:
                         self._v1_to_v2(self.db)
                     self._v2_to_v3(self.db)
                     self._v3_to_v4(self.db)
+                    self._v4_to_v5(self.db)
                     self.db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
                     self.db.execute("COMMIT")
                 except BaseException:
@@ -282,6 +308,13 @@ class Store:
             if stmt.strip():
                 db.execute(stmt)
         self.migrated.append("schema v3 -> v4 (radio IDs, communications log)")
+
+    def _v4_to_v5(self, db) -> None:
+        """Settings: overrides over the data file, the audit log, operators. Safe to run again."""
+        for stmt in SETTINGS_SCHEMA.split(";"):
+            if stmt.strip():
+                db.execute(stmt)
+        self.migrated.append("schema v5 (settings: edits over the data file, audit log, operators)")
 
     def _v1_to_v2(self, db) -> None:
         """The sheet's vocabulary: numbers 26-000001, TYPE/SUBTYPE, caller fields, dispositions,
@@ -417,6 +450,7 @@ class Store:
                       "LEFT JOIN incidents i ON i.id = a.incident_id ORDER BY u.sort, u.id")
         for r in rows:
             r["spare"], r["mutual_aid"] = bool(r["spare"]), bool(r["mutual_aid"])
+            r["response"] = self.lists.response(r["name"])       # fire | mutual_aid | agency
         return rows
 
     def unit(self, uid: int) -> dict:
@@ -433,6 +467,9 @@ class Store:
             raise CadError(f"unknown status {status!r}; one of {', '.join(L.status_ids)}")
         role = L.role(status)
         u = self.unit(uid)
+        if u["response"] == "agency" and status not in L.agency_statuses():
+            raise CadError(f"{u['name']} is another agency's unit: only "
+                           + " or ".join(L.name("unit_statuses", s) for s in L.agency_statuses()))
         now = self.clock()
         with self.tx() as db:
             a = db.execute("SELECT * FROM assignments WHERE unit_id = ? AND cleared_at IS NULL", (uid,)).fetchone()
@@ -444,7 +481,8 @@ class Store:
                                "WHERE id = ?", (now, a["id"]))
                 elif role in ("free", "oos"):
                     db.execute("UPDATE assignments SET cleared_at = ? WHERE id = ?", (now, a["id"]))
-            text = f"{u['name']} {L.status_phrase(status)}" + (f" ({note})" if note and role == "oos" else "")
+            text = f"{u['name']} {'cleared' if u['response'] == 'agency' and role == 'free' else L.status_phrase(status)}" \
+                + (f" ({note})" if note and role == "oos" else "")
             iid = a["incident_id"] if a is not None else None
             self._event(db, iid, "status", text, operator, uid, now)
             self._history(db, uid, u["status"], status, iid, operator, now, note if role == "oos" else "")
@@ -632,7 +670,8 @@ class Store:
     def has_dispatch(self, iid: int) -> bool:
         return self.one("SELECT 1 AS x FROM dispatches WHERE incident_id = ? LIMIT 1", (iid,)) is not None
 
-    def assign(self, iid: int, unit_ids: list[int], operator: str = "", attach: bool = False, verb: str = "") -> list[str]:
+    def assign(self, iid: int, unit_ids: list[int], operator: str = "", attach: bool = False, verb: str = "",
+               quiet: bool = False) -> list[str]:
         """Units dispatched to the event (PENDING -> ACTIVE), or, attach=True, attached with no
         dispatch (a non-emergency event: logged on the chronology, unit status unchanged). A unit
         committed elsewhere is moved (its old assignment cleared, noted on both chronologies);
@@ -662,7 +701,7 @@ class Store:
                 added.append(u["name"])
             if db.execute("UPDATE incidents SET status = 'active' WHERE id = ? AND status = 'pending'", (iid,)).rowcount:
                 self._event(db, iid, "status", "Event status: active", operator, at=now)
-            if attach and added:
+            if attach and added and not quiet:
                 self._event(db, iid, "attach", f"Attached {', '.join(added)}", operator, at=now)
         return moved
 

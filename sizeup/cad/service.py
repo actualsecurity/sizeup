@@ -23,6 +23,7 @@ from typing import Callable
 from sizeup.cad import dispatcher, export, runcards
 from sizeup.cad.comms import Comms
 from sizeup.cad.radios import Registry, RadioError, is_pcfd
+from sizeup.cad import settings as settings_mod
 from sizeup.cad import lists as lists_mod
 from sizeup.cad.dispatcher import AudioUnavailable
 from sizeup.cad.store import TZ, CadError, Store
@@ -117,6 +118,8 @@ class Cad:
         self.transmitter: Transmitter = make_transmitter(s.transmit, log)
         self._render_lock = threading.Lock()           # one `say` at a time
         self._state: tuple[int, dict] | None = None
+        self.settings = settings_mod.Editor(self)           # the Settings page's edits over the data file
+        self.settings.startup()
         n = self.store.sync_units()
         if n:
             log(f"CAD: added {n} units from {Path(self.lists.path).name}")
@@ -168,6 +171,7 @@ class Cad:
                           "fallback_voice": self.s.fallback_voice, "label": self._voice().label(),
                           "tones": [list(t) for t in self.s.tones]},
                 "geocoder": self.geocoder is not None,
+                "operators": self.settings.operator_names(),
             })
         return dict(self._state[1], time=self.clock(), rev=rev, talking=self.live())
 
@@ -306,7 +310,7 @@ class Cad:
 
     # -- dispatch -------------------------------------------------------------------------------
 
-    def _units_for(self, body: dict) -> list[dict]:
+    def _units_for(self, body: dict, dispatching: bool = True) -> list[dict]:
         ids = body.get("unit_ids")
         if not isinstance(ids, list) or not ids or len(ids) > MAX_UNITS:
             raise CadError(f"unit_ids: a list of 1 to {MAX_UNITS} unit ids")
@@ -316,7 +320,11 @@ class Cad:
         missing = [i for i in ids if i not in by_id]
         if missing:
             raise CadError(f"unit_ids: no unit {missing[0]}")
-        cant = [by_id[i]["name"] for i in ids if self.lists.role(by_id[i]["status"]) == "oos"]
+        agency = [by_id[i]["name"] for i in ids if by_id[i]["response"] == "agency"]
+        if dispatching and agency:
+            raise CadError(f"never dispatched (another agency's unit: attach it to the event when it shows up): {', '.join(agency)}")
+        cant = [by_id[i]["name"] for i in ids if self.lists.role(by_id[i]["status"]) == "oos"
+                and not (by_id[i]["response"] == "agency" and not dispatching)]
         if cant:
             raise CadError(f"can't be dispatched ({', '.join(self.lists.name('unit_statuses', by_id[i]['status']).lower() for i in ids if by_id[i]['name'] in cant)}): {', '.join(cant)}")
         return [by_id[i] for i in ids]
@@ -396,7 +404,8 @@ class Cad:
             sending = {u["id"] for u in units}
             order = [r["unit_id"] for r in self.store.q("SELECT unit_id FROM assignments WHERE incident_id = ? AND "
                                                         "cleared_at IS NULL ORDER BY id", (inc["id"],))]
-            on = sorted((u for u in self.store.units() if u["incident_id"] == inc["id"] and u["id"] not in sending),
+            on = sorted((u for u in self.store.units() if u["incident_id"] == inc["id"] and u["id"] not in sending
+                         and u["response"] != "agency"),                  # EMS / PD are never said on the air
                         key=lambda u: order.index(u["id"]) if u["id"] in order else len(order))   # in the order sent
             for st in L.already_statuses:
                 names = [u["spoken"] or u["name"] for u in on if u["status"] == st]
@@ -526,8 +535,16 @@ class Cad:
         inc = self.store.incident(iid)
         if inc["status"] not in ("pending", "active"):
             raise CadError("accept the event first" if inc["status"] == "queued" else f"event is {inc['status']}")
-        units = self._units_for(body)
-        moved = self.store.assign(iid, [u["id"] for u in units], _text(body, "operator", 60), attach=True)
+        units = self._units_for(body, dispatching=False)
+        op = _text(body, "operator", 60)
+        ours = [u["id"] for u in units if u["response"] != "agency"]
+        agency = [u["id"] for u in units if u["response"] == "agency"]
+        moved = self.store.assign(iid, ours, op, attach=True) if ours else []
+        if agency:          # another agency's unit that showed up: "77A4 on location", never "dispatched"
+            moved += self.store.assign(iid, agency, op, attach=True, quiet=True)
+            onscene = self.lists.agency_statuses()[0]
+            for i in agency:
+                self.store.set_unit_status(i, onscene, op)
         return {"ok": True, "moved": moved}
 
     def _prune_audio(self) -> None:
@@ -564,11 +581,17 @@ class Cad:
         return runcards.cards(self.store)
 
     def save_run_card(self, body: dict) -> dict:
-        return runcards.save(self.store, _text(body, "type", 50, required=True), body.get("slots"),
-                             _text(body, "spoken", 120), _text(body, "rename_from", 50))
+        k, rename = _text(body, "type", 50, required=True), _text(body, "rename_from", 50)
+        old = runcards.card(self.store, rename or k)
+        c = runcards.save(self.store, k, body.get("slots"), _text(body, "spoken", 120), rename)
+        self.settings.audit_card(_text(body, "operator", 60), old, c)
+        return c
 
     def delete_run_card(self, body: dict) -> dict:
-        runcards.delete(self.store, _text(body, "type", 50, required=True))
+        k = _text(body, "type", 50, required=True)
+        old = runcards.card(self.store, k)
+        runcards.delete(self.store, k)
+        self.settings.audit_card(_text(body, "operator", 60), old, None)
         return {"ok": True}
 
     # -- radios and communications ---------------------------------------------------------------
@@ -637,15 +660,23 @@ class Cad:
                            for r in self.store.q("SELECT DISTINCT i.id, i.number, i.type, i.address FROM radio_links l "
                                                  "JOIN incidents i ON i.id = l.incident_id ORDER BY i.id DESC LIMIT 100")]}
 
-    def settings_audit(self, q: dict) -> dict:
-        from sizeup.cad.radios import audit_log
-        section = (q.get("section") or [""])[0][:40]
-        return {"audit": audit_log(self.store, section, 500)}
-
     def rigs(self) -> dict:
         """The board units for the alert settings (PCFD's own flagged)."""
         return {"units": [{"name": u["name"], "kind": u["kind"], "pcfd": is_pcfd(u), "department": u["department"]}
                           for u in self.store.units() if u["board"]]}
+    # -- settings (sizeup/cad/settings.py) ---------------------------------------------------------
+
+    def settings_get(self) -> dict:
+        return self.settings.page()
+
+    def settings_post(self, section: str, body: dict) -> dict:
+        return self.settings.post(section, body)
+
+    def settings_export(self) -> dict:
+        return self.settings.export()
+
+    def settings_audit_log(self, q: dict) -> dict:
+        return {"audit": self.settings.audit_log((q.get("section") or [""])[0][:40])}
 
     # -- location suggestions -----------------------------------------------------------------------
 

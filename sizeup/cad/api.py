@@ -8,6 +8,12 @@ GET  /api/cad/runcards                    run cards
 GET  /api/cad/incident/<id>               one event with its units, chronology and dispatches
 GET  /api/cad/history                     the Incident database: every numbered event, newest first
 GET  /api/cad/admin                       record counts and the next event number
+GET  /api/cad/settings                    the Settings page: lists, units, dispatch, operators, system (sizeup/cad/settings.py)
+GET  /api/cad/settings/export             every setting as one JSON file (edits, run cards, operators)
+GET  /api/cad/settings/audit?section=     every Settings change (who, section, key, old -> new), newest first
+POST /api/cad/settings/<section>          {action, ..., operator?}: event_types | event_subtypes | dispositions |
+                                          received_via | unit_statuses | event_class | geo_town_order | units |
+                                          dispatch | users | runcards | import (dry_run / apply)
 GET  /api/cad/export/<name>.csv           incidents | calls | unit-history | event-log, the sheet's columns
 GET  /api/cad/dispatch/<id>.wav           a logged dispatch's audio
 GET  /api/cad/audio/<key>.wav             a preview's audio
@@ -38,7 +44,6 @@ POST /api/cad/radios/delete               {system, radio_id, operator?}
 GET  /api/cad/comms?unit=&channel=&event=&pcfd=1&since=&until=&limit=&rev=
                                           every transmission (newest first) with its rig, radio ID, events
 GET  /api/cad/rigs                        board units (PCFD's own flagged), for the talk alerts
-GET  /api/cad/settings/audit?section=     every Settings change (who, section, key, old -> new), newest first
 """
 
 from __future__ import annotations
@@ -58,6 +63,7 @@ EXPORT = re.compile(r"/api/cad/export/([a-z-]{1,20}\.csv)")
 UNIT = re.compile(r"/api/cad/unit/(\d{1,9})/status")
 DISPATCH_WAV = re.compile(r"/api/cad/dispatch/(\d{1,9})\.wav")
 PREVIEW_WAV = re.compile(r"/api/cad/audio/([0-9a-f]{20})\.wav")
+SETTINGS = re.compile(r"/api/cad/settings/([a-z_]{1,30})")
 
 
 def _json(code: int, obj) -> tuple[int, bytes, str]:
@@ -70,6 +76,12 @@ class CadApi:
 
     def get(self, path: str, query: str) -> tuple[int, bytes, str]:
         try:
+            if path == "/api/cad/settings":
+                return _json(200, self.cad.settings_get())
+            if path == "/api/cad/settings/export":
+                return _json(200, self.cad.settings_export())
+            if path == "/api/cad/settings/audit":
+                return _json(200, self.cad.settings_audit_log(parse_qs(query)))
             if path == "/api/cad/state":
                 return _json(200, self.cad.state())
             if path == "/api/cad/runcards":
@@ -84,8 +96,6 @@ class CadApi:
                 return _json(200, self.cad.comms_query(parse_qs(query)))
             if path == "/api/cad/rigs":
                 return _json(200, self.cad.rigs())
-            if path == "/api/cad/settings/audit":
-                return _json(200, self.cad.settings_audit(parse_qs(query)))
             if m := SUGGEST.fullmatch(path):
                 return _json(200, {"units": self.cad.suggest_units(int(m.group(1)), (parse_qs(query).get("q") or [""])[0][:20])})
             if m := INCIDENT.fullmatch(path):
@@ -117,6 +127,8 @@ class CadApi:
             return _json(400, {"error": "the body must be a JSON object"})
         c = self.cad
         try:
+            if m := SETTINGS.fullmatch(path):
+                return _json(200, c.settings_post(m.group(1), body))
             if path == "/api/cad/incident":
                 return _json(200, c.create(body))
             if m := INCIDENT.fullmatch(path):
