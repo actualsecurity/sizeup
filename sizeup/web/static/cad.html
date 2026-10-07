@@ -16,6 +16,7 @@
   <span class="cad-title">Dispatch</span>
   <button id="overview-open" class="tg-open ov-tab" title="Every open call at once: map, units, the latest radio (cadmap.js)">▦ Overview</button>
   <span id="conn" class="pill warn">connecting…</span>
+  <span id="cloud-pill" class="pill" hidden></span>
   <span id="tx-pill" class="pill tx-off" title="No radio interface in this version: dispatches are logged and played in the browser only">Transmit off</span>
   <span id="talking" class="talking-strip" hidden aria-live="polite"></span>
   <span class="spacer"></span>
@@ -31,6 +32,7 @@
   <a class="nav" href="/" title="The radio monitor (map, pages, traffic)">Monitor →</a>
   <span id="clock" class="clock"><b id="clock-local"></b></span>
 </header>
+<div id="cloud-banner" class="banner cloud-banner" hidden></div>
 
 <main class="cad-main">
   <!-- queue: from 60 Control, pending, active, non-emergency, recently closed -->

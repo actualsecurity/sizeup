@@ -1,0 +1,61 @@
+# sizeup HUB: the web UI and the CAD in the cloud, fed by the station (docs/cloud.md).
+# Baked into the image; no secrets here. Environment overrides (sizeup/config.py):
+#   SIZEUP_STATION_TOKEN   the station's bearer token (required: without it the hub refuses the station)
+#   SIZEUP_STATE_DIR       where cad.sqlite, hub.sqlite and audio.sqlite go (the image sets /data)
+#   SIZEUP_PORT, SIZEUP_HOST, SIZEUP_PUBLIC_URL
+# Run it on a Mac or Linux box without radios:
+#   SIZEUP_STATE_DIR=$(mktemp -d) SIZEUP_STATION_TOKEN=... python -m sizeup --config deploy/hub/config.hub.toml
+
+[cloud]
+role = "hub"
+public_url = ""                    # e.g. "https://sizeup.example.org" (or SIZEUP_PUBLIC_URL); shown in /healthz
+offline_after_s = 15               # no word from the station this long = "Station offline" on screen
+audio_max_mb = 500                 # received clips kept in audio.sqlite (oldest dropped first)
+
+[station]
+id = "pcfd-hub"
+name = "Port Chester FD"
+
+[web]
+host = "127.0.0.1"                 # cloudflared runs beside it (same Fargate task / compose network namespace)
+port = 8090
+
+[radio]
+# Nothing is ever opened on the hub. The channels are listed for their labels and kinds only (the
+# CAD links unidentified traffic on the "traffic" ones to the active call): keep them the station's.
+sdrs = []
+
+[[radio.channels]]
+label = "South 2"
+mhz = 470.2
+kind = "paging"
+
+[[radio.channels]]
+label = "FG1"
+mhz = 453.0375
+kind = "traffic"
+
+[p25]
+capture_dir = ""                   # no trunk-recorder here: the station sends its calls
+talkgroups_file = "../trunk-recorder/talkgroups.csv"   # names for the talkgroups the station reports
+incident_talkgroups = [307, 333]
+
+[storage]
+keep_hours = 24                    # pages, monitor incidents, transcripts (the CAD keeps its own records)
+audio_keep_hours = 12              # received clips
+
+[cad]
+db = "cad.sqlite"                  # under SIZEUP_STATE_DIR: the CAD of record
+department = "Port Chester Fire"
+monitor_departments = ["Port Chester FD"]
+
+[dispatch]
+# The voice is rendered by the station (its Kokoro, `say` as its fallback) with these settings.
+tones = [[349.1, 1.0], [311.1, 3.0]]
+tts_engine = "kokoro"
+voice = "af_heart"
+speed = 0.92
+fallback_voice = "Samantha"
+repeat = 2
+transmit = false
+channels = ["FG1", "PC repeater"]

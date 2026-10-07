@@ -8,7 +8,7 @@ Fire dispatch situational display for Port Chester FD firehouses: the sibling of
 - **Fireground 1:** transcribe PCFD / Rye Brook fireground traffic while the call is ongoing.
 - **Map:** zoom to the incident location and show the incident type.
 
-See `docs/PLAN.md`.
+See `docs/PLAN.md`. To run the CAD in the cloud (a hub fed by this machine as the station): `docs/cloud.md`.
 
 ## Data
 

@@ -24,3 +24,20 @@ jobs:
           cache: pip
       - run: pip install -e ".[dev]"
       - run: python -m pytest -q -p no:cacheprovider
+
+  image:
+    # The hub image (docs/cloud.md): build it and check it serves /healthz with no radios, no
+    # whisper and no voice server, the way it runs on Fargate (without Litestream).
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t sizeup-hub:ci .
+      - run: |
+          docker run -d --name hub -e SIZEUP_HOST=0.0.0.0 -e SIZEUP_STATION_TOKEN="$(openssl rand -hex 32)" -p 8090:8090 sizeup-hub:ci
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8090/healthz && break; sleep 2; done
+          curl -fsS http://127.0.0.1:8090/healthz
+          curl -fsS -o /dev/null http://127.0.0.1:8090/cad
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8090/api/station/events)" = 401
+      - if: always()
+        run: docker logs hub 2>&1 | tail -50

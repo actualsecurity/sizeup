@@ -410,8 +410,9 @@ function renderConn() {
 }
 
 const RADIO_STATE = { ok: "", off: "off", absent: "absent", down: "down", starting: "starting" };
-// Rows in the radios list that are services, not receivers (speech-to-text, the dispatch voice).
-const SERVICES = new Set(["STT", "Voice"]);
+// Rows in the radios list that are services, not receivers (speech-to-text, the dispatch voice, and
+// [cloud]: the station's link to the hub / the hub's view of the station).
+const SERVICES = new Set(["STT", "Voice", "Hub", "Station"]);
 
 // Switchable dongles: one segmented row per SDR (by serial). Each runs one channel, Fire/EMS 15
 // (trunk-recorder) or Off; a mode running on another SDR is outlined, and picking it moves it here.
@@ -533,12 +534,13 @@ function renderRadios() {
   const radios = (ui.state && ui.state.radios) || [];
   syncList($("#radios"), radios, {
     key: (r) => r.label,
-    sig: (r) => JSON.stringify([r.state, r.open, r.detail, r.mhz, r.quieting_db, r.restarts]),
+    sig: (r) => JSON.stringify([r.state, r.open, r.detail, r.mhz, r.quieting_db, r.restarts, r.word]),
     make: () => el("span", "pill radio"),
     fill: (node, r) => {
       const state = r.state || "unknown";
       setClass(node, `pill radio ${state}${r.open && state === "ok" ? " open" : ""}`);
-      const word = r.open && state === "ok" ? "● RX" : RADIO_STATE[state] ?? state;
+      // r.word: a row's own short status ("offline 12:03", "40 queued") instead of the state's word
+      const word = r.open && state === "ok" ? "● RX" : r.word || (RADIO_STATE[state] ?? state);
       node.replaceChildren(el("b", null, r.label), ...(word ? [el("span", "st", word)] : []));
       const bits = [r.detail || r.label];
       if (r.mhz) bits.push(`${r.mhz} MHz`);

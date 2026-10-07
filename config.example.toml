@@ -120,3 +120,16 @@ repeat = 2                         # the voice part read this many times
 # have gone out and plays it in the browser. true is refused at startup.
 transmit = false
 channels = ["FG1", "PC repeater"]  # labels on the dispatch log only (FG1, or the PC repeater as PCFD's paging channel)
+
+# [cloud]: run the CAD in the cloud for people away from this machine (docs/cloud.md). Leave it out
+# for today's all-in-one. This machine (with the SDRs, whisper and the voice) is then the "station":
+# it runs everything as before and forwards what it hears to the hub over outbound HTTPS only.
+# The hub's own config is deploy/hub/config.hub.toml.
+# [cloud]
+# role = "station"
+# hub_url = "https://sizeup.example.org"   # the hub (behind Cloudflare Access: see docs/cloud.md)
+# token = ""                         # the station's bearer token; better: env SIZEUP_STATION_TOKEN (same on the hub)
+# access_client_id = ""              # Cloudflare Access service token for /api/station/* (or env
+# access_client_secret = ""          #   SIZEUP_ACCESS_CLIENT_ID / SIZEUP_ACCESS_CLIENT_SECRET); "" = not used
+# outbox = "state/outbox.sqlite"     # everything for the hub waits here while it's unreachable
+# outbox_max_mb = 300                # queued audio over this: the oldest clips are dropped (never the transcripts)
