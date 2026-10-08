@@ -1,34 +1,38 @@
-// MapLibre style for sizeup: a dark, street-readable basemap (OpenMapTiles schema,
+// MapLibre style for the PCFD screens: a dark graphite, street-readable basemap (OpenMapTiles schema,
 // served by OpenFreeMap) with street names and house numbers, under the firehouse
 // layer. The incident marker is an HTML marker added by app.js.
 "use strict";
 
+// Neutral graphite (the pages' tokens, style.css), so the department's type and status colors on top
+// are the only color; water a muted blue, parks a muted green; firehouses in the department's red.
 const PALETTE = {
-  bg: "#18172e",
-  residential: "#1d1c36",
-  industrial: "#1f1d33",
-  wood: "#192a28",
-  grass: "#1c3029",
-  water: "#0c2442",
-  waterLine: "#16385f",
-  building: "#242343",
-  buildingEdge: "#34335e",
-  path: "#3a3960",
-  service: "#2f2e55",
-  minor: "#3b3a68",
-  tertiary: "#46447a",
-  major: "#5b5899",
-  motorway: "#7266b3",
-  rail: "#4f4d7a",
-  roadLabel: "#c3c1ea",
-  majorLabel: "#e2e1fb",
-  placeLabel: "#dcdaf7",
-  suburbLabel: "#9997c6",
-  waterLabel: "#5d8fc8",
-  houseNumber: "#8a88bb",
-  poiLabel: "#8f8dbd",
-  halo: "#18172e",
-  firehouse: "#ff7a2e",
+  bg: "#15181B",
+  residential: "#1A1D21",
+  industrial: "#1C1E22",
+  wood: "#17211C",
+  grass: "#18241E",
+  water: "#0F1D29",
+  waterLine: "#1A3042",
+  building: "#22262B",
+  buildingEdge: "#2E333A",
+  path: "#353B42",
+  service: "#2D3238",
+  minor: "#394047",
+  tertiary: "#48505A",
+  major: "#5C646E",
+  motorway: "#76808B",
+  rail: "#434950",
+  roadLabel: "#BFC5CC",
+  majorLabel: "#E6E8EB",
+  placeLabel: "#D6DADF",
+  suburbLabel: "#8A929C",
+  waterLabel: "#5B85A8",
+  houseNumber: "#858D97",
+  poiLabel: "#8A929C",
+  halo: "#15181B",
+  firehouse: "#C8102E",
+  firehouseCross: "#F2F3F5",
+  firehouseLabel: "#D6DADF",
 };
 
 const ATTRIBUTION = '<a href="https://openfreemap.org">OpenFreeMap</a> © <a href="https://www.openmaptiles.org/">OpenMapTiles</a> ' +
@@ -178,23 +182,23 @@ function buildMapStyle(scene) {
         "text-justify": "auto", "text-max-width": 10, "text-optional": true,
       } : {}),
     },
-    paint: glyphs ? { "text-color": PALETTE.firehouse, "text-halo-color": "#0b0a18", "text-halo-width": 1.8 } : {},
+    paint: glyphs ? { "text-color": PALETTE.firehouseLabel, "text-halo-color": PALETTE.halo, "text-halo-width": 1.8 } : {},
   });
 
-  return { version: 8, name: "sizeup", glyphs, sources, layers };
+  return { version: 8, name: "pcfd", glyphs, sources, layers };
 }
 
-// Firehouse icon: an orange Maltese cross on a dark disc (drawn once, 2x for crisp TVs).
+// Firehouse icon: a white Maltese cross on a dark disc ringed in the department's red (drawn once, 2x for crisp TVs).
 function firehouseIcon() {
   const s = 56, c = document.createElement("canvas");
   c.width = c.height = s;
   const g = c.getContext("2d");
   g.translate(s / 2, s / 2);
-  g.fillStyle = "rgba(14, 13, 30, 0.92)";
+  g.fillStyle = "rgba(12, 14, 16, 0.94)";
   g.strokeStyle = PALETTE.firehouse;
   g.lineWidth = 3;
   g.beginPath(); g.arc(0, 0, s / 2 - 3, 0, 2 * Math.PI); g.fill(); g.stroke();
-  g.fillStyle = PALETTE.firehouse;
+  g.fillStyle = PALETTE.firehouseCross;
   for (let k = 0; k < 4; k++) {
     g.save();
     g.rotate((k * Math.PI) / 2);

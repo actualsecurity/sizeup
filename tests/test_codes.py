@@ -74,7 +74,7 @@ def test_status_colors_are_readable_on_the_dark_theme():
         assert ratio(fill, s["fg"]) >= 4.5, s["code"]
         mix = lambda p, other: "#" + "".join(                          # color-mix(in srgb, bg p, other)
             f"{round(int(s['bg'][i:i + 2], 16) * p + int(other[i:i + 2], 16) * (1 - p)):02X}" for i in (1, 3, 5))
-        assert ratio(mix(0.62, "#FFFFFF"), mix(0.16, "#141329")) >= 4.5, s["code"]   # the outline chip's text
+        assert ratio(mix(0.62, "#FFFFFF"), mix(0.16, "#1F2328")) >= 4.5, s["code"]   # the outline chip's text on --raised
 
 
 # -- units and boards ------------------------------------------------------------------------------------

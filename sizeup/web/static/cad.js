@@ -227,12 +227,12 @@ function roleOf(code) {
 function statusChip(code, text) {   // the old outline chip, in the data file's status color
   const st = unitStatus(code);
   const c = el("span", "chip st", text ?? st.name);
-  c.style.setProperty("--c", st.bg || "#9aa0b4");
+  c.style.setProperty("--c", st.bg || "#9AA3AD");
   c.title = st.code === (text ?? st.name) ? st.code : `${st.code}: ${st.name}`;
   return c;
 }
 function statusColors(node, st) {  // a status button: its color, and its text color when filled
-  node.style.setProperty("--c", st.bg || "#9aa0b4");
+  node.style.setProperty("--c", st.bg || "#9AA3AD");
   if (st.fg) node.style.setProperty("--fg", st.fg);
   return node;
 }
@@ -244,7 +244,7 @@ function eventStatus(inc) {         // Pending / Open / Active / Closed, with th
 function stBadge(node, name, color) {
   node.className = "st-badge";
   setText(node, name);
-  node.style.setProperty("--c", color || "#9aa0b4");
+  node.style.setProperty("--c", color || "#9AA3AD");
   return node;
 }
 function isEmergency(t, s) {        // data file event_class: TYPE/SUBTYPE, */SUBTYPE, TYPE; default emergency
@@ -357,7 +357,7 @@ function fillQueueItem(li, inc) {
   li.className = `qi ${inc.status}` + (inc.emergency ? "" : " nonemerg") + (inc.id === cad.sel ? " sel" : "");
   const head = el("div", "qh");
   const t = el("span", "qt", typeLabel(inc.type, inc.subtype) || "No type");
-  if (inc.type) t.style.setProperty("--c", typeColor(inc.type) || "#9aa0b4");
+  if (inc.type) t.style.setProperty("--c", typeColor(inc.type) || "#9AA3AD");
   else t.classList.add("warn");
   head.append(el("b", "qn", incTitle(inc)), t);
   if (inc.joint_call) head.append(el("span", "chip joint", inc.joint_call));
@@ -431,9 +431,9 @@ function renderDetail() {
   setText($("#d-number"), incTitle(inc));
   const es = eventStatus(inc);
   stBadge($("#d-status"), es.name, es.bg);
-  stBadge($("#d-class"), inc.emergency ? "Emergency" : "Non-emergency", inc.emergency ? "#ff8a7a" : "#8fb8d8");
+  stBadge($("#d-class"), inc.emergency ? "Emergency" : "Non-emergency", inc.emergency ? "#EE6475" : "#8fb8d8");
   show($("#d-joint"), !!inc.joint_call);
-  if (inc.joint_call) stBadge($("#d-joint"), inc.joint_call, "#a3a9ff");
+  if (inc.joint_call) stBadge($("#d-joint"), inc.joint_call, "#6AA6E8");
   setText($("#d-source"), inc.source === "manual" ? "Manual" : inc.source);
   show($("#d-accept"), inc.status === "queued");
   show($("#d-dismiss"), inc.status === "queued");
@@ -453,7 +453,7 @@ function renderDetail() {
   }
   const type = $("#d-type");
   setText(type, typeLabel(inc.type, inc.subtype) || "No type");
-  type.style.setProperty("--c", inc.type ? typeColor(inc.type) || "#ff7a5c" : "#ffb020");
+  type.style.setProperty("--c", inc.type ? typeColor(inc.type) || "#ff7a5c" : "#E0A030");
   const addr = $("#d-addr");
   addr.className = "d-addr" + (inc.address ? "" : " dim");
   setText(addr, inc.address || "No location");
@@ -495,7 +495,7 @@ const RADIO_WHY = { unit: "Unit", channel: "FG1", dispatcher: "60 Control", manu
 function radioRow(t) {
   const li = el("li", "rt");
   const meta = el("div", "meta");
-  const b = el("button", "play", "▶");
+  const b = Icon.play(el("button", "play"));
   b.title = t.has_audio === false ? "Recording expired (12 h)" : "Play";
   b.disabled = t.has_audio === false;
   b.addEventListener("click", () => play(`/api/audio/${encodeURIComponent(t.id)}.wav`));
@@ -715,7 +715,7 @@ function agencyButtons(u, where, box) {
     const s = unitStatus(code);
     if (code === now.status) return;
     const b = el("button", "mini", i === codes.length - 1 && s.role === "free" ? "Cleared" : s.name);
-    b.style.setProperty("--c", s.bg || "#9aa0b4");
+    b.style.setProperty("--c", s.bg || "#9AA3AD");
     b.addEventListener("click", (e) => { e.stopPropagation(); setUnitStatus(u.id, code); });
     box.append(b);
   });
@@ -767,7 +767,7 @@ function renderEvents(inc) {
       const txt = el("div", "txt");
       const did = playForEvent(inc, e);
       if (did) {
-        const b = el("button", "play mini", "▶");
+        const b = Icon.play(el("button", "play mini"));
         b.title = "Play";
         b.addEventListener("click", () => play(`/api/cad/dispatch/${did}.wav`));
         txt.append(b);
@@ -799,7 +799,7 @@ function renderDispatches(inc) {
       meta.append(tx);
       const row = el("div", "row");
       if (d.has_audio) {
-        const b = el("button", "play", "▶");
+        const b = Icon.play(el("button", "play"));
         b.title = "Play";
         b.addEventListener("click", () => play(`/api/cad/dispatch/${d.id}.wav`));
         row.append(b);
@@ -1264,7 +1264,7 @@ function returnButtons(inc, a) {
   for (const code of a.return || []) {
     const s = unitStatus(code);
     const b = el("button", "mini", s.name);
-    b.style.setProperty("--c", s.bg || "#9aa0b4");
+    b.style.setProperty("--c", s.bg || "#9AA3AD");
     b.title = `${a.name} back to this call: ${s.name}`;
     b.addEventListener("click", (e) => { e.stopPropagation(); returnUnit(inc.id, a.unit_id, code); });
     box.append(b);
@@ -1607,7 +1607,7 @@ async function renderRecords() {
       fill: (tr, i) => {
         const type = el("td");
         const t = el("span", "qt", typeLabel(i.type, i.subtype) || "—");
-        if (i.type) t.style.setProperty("--c", typeColor(i.type) || "#9aa0b4");
+        if (i.type) t.style.setProperty("--c", typeColor(i.type) || "#9AA3AD");
         type.append(t);
         const st = el("td");
         const es = eventStatus(i);
@@ -2052,9 +2052,11 @@ new MutationObserver(() => { if (cad.who && cad.who.enforced && !canDo("admin"))
 async function boot() {
   try {
     cad.scene = await (await fetch("/api/scene")).json();
-    const name = (cad.scene.station && cad.scene.station.name) || "sizeup";
-    document.title = `CAD ${name}`;
-    setText($("#station"), name);
+    // The header says "Port Chester FD"; the configured station name only when it says more.
+    const name = (cad.scene.station && cad.scene.station.name) || "";
+    const extra = name && name !== "Port Chester FD" ? name : "";
+    document.title = extra ? `PCFD CAD · ${extra}` : "PCFD CAD";
+    setText($("#station"), extra);
   } catch (e) {
     console.warn("no scene (map off):", e);
   }

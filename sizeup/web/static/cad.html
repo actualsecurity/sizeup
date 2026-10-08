@@ -3,7 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>sizeup CAD</title>
+<title>PCFD CAD</title>
+<link rel="icon" type="image/svg+xml" href="/static/brand/pcfd-mark.svg">
+<link rel="icon" type="image/png" sizes="32x32" href="/static/brand/pcfd-mark-32.png">
 <link rel="stylesheet" href="/static/vendor/maplibre-gl.css">
 <link rel="stylesheet" href="/static/style.css">
 <link rel="stylesheet" href="/static/cad.css">
@@ -12,24 +14,25 @@
 </head>
 <body class="cad">
 <header>
-  <span id="station" class="station">sizeup</span>
+  <a class="brand" href="/cad" title="Dispatch"><img class="brand-mark" src="/static/brand/pcfd-mark.svg" alt="" width="28" height="28"><span class="brand-name">Port Chester FD</span></a>
   <span class="cad-title">Dispatch</span>
-  <button id="overview-open" class="tg-open ov-tab" title="All open calls">Overview</button>
+  <span id="station" class="station"></span>
+  <button id="overview-open" class="tg-open ov-tab" title="All open calls"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-grid"/></svg>Overview</button>
   <span id="conn" class="pill warn">Connecting</span>
   <span id="cloud-pill" class="pill" hidden></span>
   <span id="tx-pill" class="pill tx-off" title="No radio interface: dispatches are logged and played here only">Transmit off</span>
   <span id="talking" class="talking-strip" hidden aria-live="polite"></span>
   <span class="spacer"></span>
   <span id="alerts"></span>
-  <button id="runcards-open" class="tg-open" title="Units sent per event type">Run cards</button>
-  <a id="settings-open" class="nav" href="#settings">Settings</a>
+  <button id="runcards-open" class="tg-open" title="Units sent per event type"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-list"/></svg>Run cards</button>
+  <a id="settings-open" class="nav" href="#settings" aria-label="Settings"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-settings"/></svg><span class="lbl">Settings</span></a>
   <label class="operator" title="Recorded on every action">
     <span class="dim">Operator</span>
     <select id="operator-pick" hidden></select>
     <input id="operator" type="text" maxlength="60" autocomplete="off" spellcheck="false" placeholder="Name">
   </label>
-  <a class="nav" href="/comms" title="All transmissions">Comms</a>
-  <a class="nav" href="/monitor" title="Radio monitor">Monitor</a>
+  <a class="nav" href="/comms" title="All transmissions" aria-label="Comms"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-radio"/></svg><span class="lbl">Comms</span></a>
+  <a class="nav" href="/monitor" title="Radio monitor" aria-label="Monitor"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-monitor"/></svg><span class="lbl">Monitor</span></a>
   <span id="clock" class="clock"><b id="clock-local"></b></span>
 </header>
 <div id="cloud-banner" class="banner cloud-banner" hidden></div>
@@ -38,7 +41,7 @@
 <main class="cad-main">
   <!-- queue: from 60 Control, pending, active, non-emergency, recently closed -->
   <aside class="queue">
-    <button id="new-incident" class="primary wide">New incident</button>
+    <button id="new-incident" class="primary wide"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-plus"/></svg>New incident</button>
     <section>
       <h2 title="Pages to accept or dismiss">60 Control</h2>
       <ol id="q-queued" class="list q"></ol>
@@ -116,7 +119,7 @@
     <div id="d-body" hidden>
       <div id="d-card" class="card inc">
         <div class="card-head">
-          <button id="d-back" type="button" class="back">← Overview</button>
+          <button id="d-back" type="button" class="back"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-back"/></svg>Overview</button>
           <span id="d-number" class="number"></span>
           <span id="d-status" class="st-badge"></span>
           <span id="d-class" class="st-badge"></span>
@@ -308,7 +311,7 @@
      Edits are kept in the CAD database over data/cad_lists.json and pushed to every console at once. -->
 <main id="settings" class="settings" hidden>
   <nav class="s-nav" aria-label="Settings sections">
-    <a class="nav s-back" href="#">← Dispatch</a>
+    <a class="nav s-back" href="#"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-back"/></svg>Dispatch</a>
     <ol id="s-sections" class="s-sections"></ol>
   </nav>
   <div class="s-content">
@@ -356,7 +359,7 @@ Slots go in order. A kind takes the next available unit of that kind (regular ap
     <div class="tg-head">
       <h2 id="db-title" class="tg-title">Records</h2>
       <span class="spacer"></span>
-      <button id="db-close" class="tg-close" title="Close (Esc)" aria-label="Close">✕</button>
+      <button id="db-close" class="tg-close" title="Close (Esc)" aria-label="Close"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-x"/></svg></button>
     </div>
     <div class="db-body">
       <div class="row csv-row">
@@ -375,6 +378,7 @@ Slots go in order. A kind takes the next available unit of that kind (regular ap
 
 <script src="/static/vendor/maplibre-gl.js"></script>
 <script src="/static/map-style.js"></script>
+<script src="/static/icons.js"></script>
 <script src="/static/help.js"></script>
 <script src="/static/radio.js"></script>
 <script src="/static/live.js"></script>
