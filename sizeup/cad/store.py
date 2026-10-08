@@ -22,7 +22,10 @@
       meta          small settings (the radio seed version)
       settings_overrides  the Settings page's edits, laid over data/cad_lists.json (sizeup/cad/settings.py)
       operators           the people at the console; on the hub behind Cloudflare Access, keyed by the
-                          email they signed in with (sizeup/cloud/access.py, Settings._person)
+                          email they signed in with (sizeup/cloud/access.py, Settings._person); when each
+                          was last seen and from where (last_seen / last_ip / last_ua)
+      user_activity       each signed-in person's history on the hub: sign-ins, writes, refusals, kept
+                          90 days (sizeup/cad/activity.py)
 
 The lists (types, subtypes, dispositions, unit statuses and what each one means) come from
 sizeup/cad/lists.py. One connection, one lock: the web server is threaded and SQLite writes are
@@ -216,8 +219,31 @@ CREATE TABLE IF NOT EXISTS operators (  -- who works the console
   created_at REAL NOT NULL,
   updated_at REAL NOT NULL,
   email TEXT NOT NULL DEFAULT '',            -- the Cloudflare Access sign-in, lower case ('' = none)
-  callsign TEXT NOT NULL DEFAULT ''
+  callsign TEXT NOT NULL DEFAULT '',
+  last_seen REAL,                            -- signed in, last request (at most a minute stale: activity.py)
+  last_ip TEXT NOT NULL DEFAULT '',
+  last_ua TEXT NOT NULL DEFAULT ''
 );
+"""
+
+# Per-person activity on the hub (sizeup/cad/activity.py). Like operators.email: made on every open,
+# not by a schema version (other branches hold v6-9), and doing it twice changes nothing.
+ACTIVITY_SCHEMA = """
+CREATE TABLE IF NOT EXISTS user_activity (
+  id INTEGER PRIMARY KEY,
+  at REAL NOT NULL,
+  email TEXT NOT NULL,                  -- who: the verified Cloudflare Access email
+  kind TEXT NOT NULL,                   -- signin | action | refused
+  route TEXT NOT NULL DEFAULT '',       -- "POST /api/cad/incident/12/dispatch"
+  summary TEXT NOT NULL DEFAULT '',     -- "Dispatched 26-000014: E60, L31"
+  incident_number TEXT,                 -- 26-000014, when it was about one
+  ok INTEGER NOT NULL DEFAULT 1,        -- 0: refused
+  ip TEXT NOT NULL DEFAULT '',          -- Cf-Connecting-Ip
+  ua TEXT NOT NULL DEFAULT '',          -- the browser (User-Agent, cut short)
+  session TEXT NOT NULL DEFAULT ''      -- a sign-in's Access session (Identity.session): one row each
+);
+CREATE INDEX IF NOT EXISTS user_activity_email ON user_activity(email, at);
+CREATE INDEX IF NOT EXISTS user_activity_at ON user_activity(at);
 """
 
 # Schema v1 (before the sheet's vocabulary) -> v2. Old call types -> (TYPE, SUBTYPE).
@@ -347,8 +373,12 @@ class Store:
             self._operator_identity()
 
     def _operator_identity(self) -> None:
-        """operators.email / callsign (Cloudflare Access sign-in, 2026-10-07). Checked on every open
+        """operators.email / callsign (Cloudflare Access sign-in, 2026-10-07), last_seen / ip / ua and
+        user_activity (per-person activity, 2026-10-08). Checked on every open
         rather than a schema version (other branches hold v6-9): adding them twice changes nothing."""
+        for stmt in ACTIVITY_SCHEMA.split(";"):          # per-person activity (2026-10-08): the same way
+            if stmt.strip():
+                self.db.execute(stmt)
         cols = {r["name"] for r in self.db.execute("PRAGMA table_info(operators)")}
         if not cols:
             return
@@ -357,6 +387,9 @@ class Store:
                 self.db.execute(f"ALTER TABLE operators ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
                 self.migrated.append(f"operators.{col} (Cloudflare Access sign-in)")
         self.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS operators_email ON operators(email) WHERE email != ''")
+        for col, decl in (("last_seen", "REAL"), ("last_ip", "TEXT NOT NULL DEFAULT ''"), ("last_ua", "TEXT NOT NULL DEFAULT ''")):
+            if col not in cols:                          # when each was last seen (sizeup/cad/activity.py)
+                self.db.execute(f"ALTER TABLE operators ADD COLUMN {col} {decl}")
 
     def _v2_to_v3(self, db) -> None:
         """unit_history.note: the reason given for out of service / unmanned. Old rows keep ''."""

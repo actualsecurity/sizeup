@@ -157,7 +157,8 @@ checked in `CadApi.post` and, for the monitor's own POSTs, in `server.py`):
 | deactivated (any role) | look only, "Your account is deactivated" |
 
 A refused write is a `403 {"error": "Only an admin can change settings (you are a dispatcher)"}` (and
-the like), logged on the hub (`CAD: refused POST <path> for <email> (<role>): needs admin`). A write
+the like), logged on the hub and in the person's activity (below: `CAD activity: <email>: Refused:
+settings/users (needs admin; dispatcher) (POST /api/cad/settings/users) ip=...`). A write
 route not in `WRITES` is admin only until someone decides otherwise. Reads are not limited: everyone
 signed in sees the console, Settings (read-only), the records, the CSV exports and the settings
 export (the same users and emails Settings already shows them).
@@ -174,6 +175,33 @@ off but the section tabs, filters, records and export) under "Settings are read-
 — ask an admin (Corey)"; for a viewer or a deactivated user every action on the dispatch screen is
 off too, under a banner. Without Access (all-in-one, the station, a hub without the keys) the role is
 recorded, not enforced: a typed or picked name is no proof of who is at the console.
+
+### Activity log
+
+> "lets add some per user logging too" (user, 2026-10-08)
+
+With Access on, the hub keeps one history per signed-in person (`sizeup/cad/activity.py`, the
+`user_activity` table in `state/cad.sqlite`, so Litestream backs it up), each row with the time, the
+route, the incident number when there is one, the visitor's address (`Cf-Connecting-Ip`) and browser:
+
+| Kind | When | Summary, e.g. |
+|---|---|---|
+| `signin` | once per Access login (the token's `jti` / `nonce` / `iat`), not per request | Signed in |
+| `action` | every write that went through (`CadApi.post`, and the monitor's own POSTs) | Created 26-000015 STRU/RESD at 209 Westchester Ave · Dispatched 26-000014: E60, L31 · Set E60 to OS (pump) · Changed settings: users/Julian role · Talkgroup 307: record on |
+| `refused` | every 403 from the roles above, and the last-admin 409 | Refused: settings/users (needs admin; dispatcher) |
+
+Summaries name what changed, never whole bodies or setting values (those stay in the settings
+audit); previews and recommendations change nothing and aren't logged. Each row is also one line in
+the server log (`CAD activity: <email>: <summary> [<number>] (<route>) ip=<ip>`), so CloudWatch has it.
+Each person's *last seen* (time, address, browser) is kept on their Users row, written at most once a
+minute. Rows older than **90 days** are dropped (on start and daily). All-in-one, the station or a hub
+without Access record nothing here: the chronology and the settings audit are unchanged.
+
+`GET /api/cad/activity?email=&kind=&since=&limit=` (newest first) and
+`GET /api/cad/export/activity.csv`: an admin reads anyone's (no `email`: everyone's) and exports
+it; anyone else reads only their own (`403` for someone else's, and for the CSV). **Settings → Users**
+shows "last seen 3 min ago · 203.0.113.9" on each row and an **Activity** list (a kind filter, *All
+users* and CSV for admins; *My activity* for everyone else).
 
 **The AUD tag:** Cloudflare dashboard → Zero Trust → Access controls → Applications → **sizeup** →
 Overview → *Application Audience (AUD) Tag* (64 hex digits). Use the `sizeup` application's (the
@@ -268,6 +296,7 @@ namespace, a named volume for `/data`, no Litestream).
 `sizeup/cloud/`: `station.py` (StationLink: outbox, forwarder, state, jobs), `outbox.py`,
 `client.py` (kept-alive HTTPS), `hub.py` (Hub: ingest, health, jobs; HubApp), `hubstore.py`
 (hub.sqlite, audio.sqlite), `access.py` (Cloudflare Access identity; the gate is in
-`sizeup/web/server.py`, the operator in `sizeup/cad/api.py` and `Settings.person`). Seams in `sizeup/app.py`: `_emit`, `_heard`, `_page_heard`, `_retext`,
+`sizeup/web/server.py`, the operator in `sizeup/cad/api.py` and `Settings.person`; the activity log in
+`sizeup/cad/activity.py`). Seams in `sizeup/app.py`: `_emit`, `_heard`, `_page_heard`, `_retext`,
 `make_app`; in `sizeup/cad/service.py`: `remote_voice`, `audio_blobs`, `cloud`. Tests:
-`tests/test_cloud.py`, `tests/test_access.py`.
+`tests/test_cloud.py`, `tests/test_access.py`, `tests/test_roles.py`, `tests/test_activity.py`.

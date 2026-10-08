@@ -15,7 +15,8 @@ keeps the same token in the `CF_Authorization` cookie). Verified here, stdlib on
     iss         https://<team> ([cloud] access_team)
     exp / nbf   with 60 s leeway
 
-Identity = the token's `email` claim, lower-cased. A service token's JWT (the station's, on the
+Identity = the token's `email` claim, lower-cased, and which login it is from (session: jti / nonce /
+iat, so a person's activity log has one "signed in" per login, not per request). A service token's JWT (the station's, on the
 `/api/station/` Access app) has no email, only `common_name` = the client id: that is a machine,
 never an operator. The `Cf-Access-Authenticated-User-Email` header is not used: anyone who reached
 the origin some other way could send it; the signed token can't be made up.
@@ -59,6 +60,8 @@ class Identity:
     email: str = ""              # a person who signed in ("" = a service token: a machine)
     service: str = ""            # a service token's client id (common_name)
     sub: str = ""
+    session: str = ""            # which Access login this token is from: its jti / nonce if it has one,
+                                 # else when it was issued (iat): one "signed in" each (sizeup/cad/activity.py)
 
     @property
     def person(self) -> bool:
@@ -192,7 +195,8 @@ class AccessVerifier:
         c = self.verify(token)
         email = c.get("email")
         if isinstance(email, str) and "@" in email.strip():
-            return Identity(email=email.strip().lower()[:254], sub=str(c.get("sub") or ""))
+            session = next((str(c[k]) for k in ("jti", "nonce", "iat") if c.get(k) not in (None, "")), "")
+            return Identity(email=email.strip().lower()[:254], sub=str(c.get("sub") or ""), session=session[:64])
         return Identity(service=str(c.get("common_name") or ""), sub=str(c.get("sub") or ""))
 
     def identify(self, headers) -> Identity | None:

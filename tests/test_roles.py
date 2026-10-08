@@ -102,7 +102,7 @@ def test_an_admin_changes_settings(api):
     for path, body in settings_writes(api.cad, api.ids):
         code, out = call(api, path, body, COREY)
         assert code == 200, (path, body, out)
-    assert api.logged == []
+    assert not [m for m in api.logged if "Refused" in m]       # each is in Corey's activity (tests/test_activity.py)
 
 
 def test_a_dispatcher_gets_403_on_every_settings_write_and_nothing_changes(api):
@@ -115,7 +115,8 @@ def test_a_dispatcher_gets_403_on_every_settings_write_and_nothing_changes(api):
     assert (api.cad.settings.audit_log(), api.cad.settings.overrides(), api.cad.settings.operators(),
             api.cad.run_cards(), api.cad.radio_registry()["radios"]) == before
     assert len(api.logged) == len(settings_writes(api.cad, api.ids))
-    assert "refused POST /api/cad/settings/users for julian@example.org (dispatcher): needs admin" in "\n".join(api.logged)
+    assert ("CAD activity: julian@example.org: Refused: settings/users (needs admin; dispatcher) (POST /api/cad/settings/users)"
+            in "\n".join(api.logged))
     # the wording preview changes nothing: anyone may
     code, out = call(api, "/api/cad/settings/dispatch", {"action": "preview", "wording": {}}, JULIAN)
     assert code == 200 and out
@@ -137,7 +138,7 @@ def test_a_dispatcher_runs_calls(api):
     ev = api.cad.store.q("SELECT operator FROM events WHERE incident_id = ?", (iid,))
     assert ev and all(e["operator"] == "Julian <julian@example.org>" for e in ev)
     assert api.cad.store.incident(iid)["status"] == "closed"
-    assert api.logged == []
+    assert not [m for m in api.logged if "Refused" in m]
 
 
 def test_a_viewer_and_a_deactivated_user_only_look(api):
