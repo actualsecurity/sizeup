@@ -72,3 +72,11 @@ def test_real_highway_page_without_house_number():
               "with injuries, you'll be the third ambulance.")
     assert d.incident_type == "MVA"
     assert d.location == "springbrook parkway" and d.cross_street == "bronx river parkway"
+
+
+def test_run_number_is_not_read_as_engines():
+    # South 2, 2026-10-08 15:12: a Rye page whose run number was read as Engines 16, 10, 191 and 22.
+    d = parse("16-10-191-22, it's 22 Locust Avenue, between Mead Place and Haviland Lane, outside order of gas, "
+              "kind of done seen. 16-10-191-22, 22 Locust Avenue, between Mead Place and H aviland Lane, "
+              "outside order of gas, 1506-615.")
+    assert d.numbers == [] and d.units == [] and d.location == "22 locust avenue"

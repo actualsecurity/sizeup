@@ -956,11 +956,21 @@ class Cad:
 
     # -- the bridge from the monitor ----------------------------------------------------------------
 
+    def _ours(self, inc) -> bool:
+        """A page for one of our departments: its tones, units said with the word or a callsign, or the
+        department named in the text put it there (inc.departments), or its address is in one of our towns.
+        Bare numbers taken for engines don't count (they never reach inc.departments)."""
+        if any(d in self.s.monitor_departments for d in inc.departments):
+            return True
+        towns = {d.removesuffix(" FD").strip().lower() for d in self.s.monitor_departments}
+        town = ((inc.geo or {}).get("town") or "").strip().lower()
+        return bool(town) and town in towns
+
     def from_monitor(self, inc) -> dict | None:
         """A monitor incident (60 Control page) for one of our departments -> a queued CAD event,
         once per monitor incident. A repeat of the page fills in what the first reading missed
         while it is still queued; nothing changes once a person has accepted it."""
-        if not any(d in self.s.monitor_departments for d in inc.departments):
+        if not self._ours(inc):
             return None
         ref = f"monitor:{inc.id}"
         geo = inc.geo or {}

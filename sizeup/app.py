@@ -307,7 +307,7 @@ class App:
             return None
         if m is None:
             return None
-        return {"lat": m.lat, "lon": m.lon, "label": m.label, "kind": m.kind,
+        return {"lat": m.lat, "lon": m.lon, "label": m.label, "kind": m.kind, "town": m.municipality,
                 "confidence": round(float(m.confidence), 2)}
 
     def _geocode_text(self, q: str) -> list[dict]:
@@ -719,6 +719,7 @@ class App:
     def _dispatch(self, raw: str):
         d = parse(raw) if raw else None
         if d is not None:  # units dispatched name their department ("Engine 61" -> Port Chester FD)
+            named = list(d.units)   # said with the word ("Engine 61"): these name a department
             for n in d.numbers:  # "174, 175, Ladder 1": engines read without the word, if the roster has them
                 u = f"Engine {n}"
                 if u in self.cfg.unit_departments and u not in d.units:
@@ -726,7 +727,10 @@ class App:
             for cs, name in self.cfg.unit_callsigns.items():  # chiefs by callsign: "2398 respond to ..."
                 if re.search(rf"\b{cs}\b", raw) and name not in d.units:
                     d.units.append(name)
-            for u in d.units:
+                    named.append(name)
+            # A bare number is only a guess at an engine: shown with the page, but it doesn't make the page
+            # some department's (2026-10-08: "16-10-191-22" read as Engine 16 and 191 queued a Rye call for PCFD).
+            for u in named:
                 dep = self.cfg.unit_departments.get(u)
                 if dep and dep not in d.departments:
                     d.departments.append(dep)

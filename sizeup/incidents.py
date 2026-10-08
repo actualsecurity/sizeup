@@ -162,8 +162,13 @@ class IncidentStore:
         """A transcribed page. Opens/merges an incident when it is for one of our departments."""
         at = self.clock() if at is None else at
         depts = list(dict.fromkeys(tone_departments + d.departments))
+        geo = None
         if not any(x in self.ours for x in depts):
-            return None
+            # No tones, units or name of ours on the page: still ours when the address is in one of our towns.
+            geo = self.geocode(d) if d.location else None
+            towns = {x.removesuffix(" FD").strip().lower() for x in self.ours}
+            if not geo or (geo.get("town") or "").strip().lower() not in towns:
+                return None
         with self._lock:
             for inc in reversed(self.incidents):
                 if inc.status == "active" and at - inc.opened < REPEAT_S and (
@@ -195,7 +200,7 @@ class IncidentStore:
             self.save()
             return merged
         inc = Incident(uuid.uuid4().hex[:10], at, at, depts, d.incident_type, d.category, d.location,
-                       d.cross_street, d.time_out, self.geocode(d) if d.location else None,
+                       d.cross_street, d.time_out, geo or (self.geocode(d) if d.location else None),
                        pages=[page_id], page_text=[d.text], page_starts=[at],
                        units=list(getattr(d, "units", [])), code=getattr(d, "code", ""))
         with self._lock:

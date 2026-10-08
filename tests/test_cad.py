@@ -1348,3 +1348,28 @@ def test_time_out_is_said_once_after_the_second_reading(tmp_path, monkeypatch):
     body, tail = len(said[0].split()) * D.RATE // 10, len(said[1].split()) * D.RATE // 10
     expect = int(1.0 * D.RATE) + int(D.GAP_S * D.RATE) + 2 * body + int(D.REPEAT_GAP_S * D.RATE) + int(D.TAIL_GAP_S * D.RATE) + tail
     assert abs(n - expect) < D.RATE // 20                    # tones, body twice, the time out once
+
+
+def test_only_pages_for_us_are_queued():
+    # 2026-10-08: a Rye page (no known tones, its run number guessed as engines) was queued for PCFD.
+    cad = make_cad()
+    rye = {"lat": 40.98, "lon": -73.68, "label": "22 Locust Ave, Rye", "kind": "address", "town": "Rye", "confidence": 0.9}
+    _, inc = monitor_incident("16-10-191-22, it's 22 Locust Avenue, between Mead Place and Haviland Lane, outside odor of gas",
+                              depts=(), geo=rye)
+    assert inc is None and cad.store.incidents() == []            # not even a monitor incident of ours
+    # No tones or units heard, but the address is in Port Chester: ours.
+    pc = {"lat": 41.0025, "lon": -73.6669, "label": "209 Westchester Ave, Port Chester", "kind": "address",
+          "town": "Port Chester", "confidence": 0.91}
+    _, inc2 = monitor_incident("Respond to an activated fire alarm at 209 Westchester Avenue", depts=(), geo=pc)
+    assert cad.from_monitor(inc2)["status"] == "queued"
+
+
+def test_bare_numbers_dont_make_a_page_ours(tmp_path):
+    from tests.test_app import cfg
+    from sizeup.app import App
+    c = replace(cfg(tmp_path), unit_departments={"Engine 16": "Port Chester FD", "Engine 60": "Port Chester FD"})
+    app = App(c)
+    d = app._dispatch("16, 191, respond to 22 Locust Avenue, odor of gas")
+    assert "Engine 16" in d.units and "Port Chester FD" not in d.departments      # a guess: shown, not ours
+    d2 = app._dispatch("Engine 60, respond to 22 Locust Avenue, odor of gas")
+    assert "Port Chester FD" in d2.departments                                  # said with the word: ours
