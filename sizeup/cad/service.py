@@ -20,6 +20,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
+from sizeup import polly
 from sizeup.cad import dispatcher, eta, export, mapview, runcards
 from sizeup.cad.activity import Activity
 from sizeup.cad.comms import Comms
@@ -37,6 +38,7 @@ AUDIO_NAME = re.compile(r"[0-9a-f]{20}")
 FIRE_KINDS = ("chief", "engine", "ladder", "tower", "rescue", "utility", "marine")
 PREVIEW_KEEP_S = 24 * 3600
 MAX_UNITS = 30
+VOICE_SAMPLE = "Engine 60, respond to 1 Main Street, structure fire. Time out 14:32."   # Settings > Voice > Preview
 GEO_WINDOW = 0.25        # suggestions this close to the best one are ordered by town first
 
 
@@ -48,18 +50,28 @@ class Settings:
     department: str = "Port Chester Fire"          # first words of every dispatch
     monitor_departments: tuple[str, ...] = ("Port Chester FD",)   # monitor incidents that become queued ones
     tones: tuple[tuple[float, float], ...] = ((349.1, 1.0), (311.1, 3.0))
-    voice: str = "Samantha"                        # tts_engine "say": a `say -v` voice; "kokoro": a Kokoro voice
+    voice: str = "Samantha"                        # tts_engine "say": a `say -v` voice; "kokoro": a Kokoro voice; "polly": "Matthew"
     rate_wpm: int = 0
-    tts_engine: str = "say"                        # "kokoro" | "say"; the config's default is kokoro, "say" here
+    tts_engine: str = "say"                        # "kokoro" | "polly" | "say"; the config's default is kokoro, "say" here
     speed: float = 1.0                             # keeps tests off any running TTS server (sizeup/tts.py)
     tts_port: int = 8093
     fallback_voice: str = "Samantha"
+    polly_region: str = ""                         # "" = AWS_REGION (sizeup/polly.py)
     repeat: int = 2
     transmit: bool = False
     channels: tuple[str, ...] = ("FG1", "PC repeater")
     tactical: tuple[str, ...] = ("FG1",)          # analog fireground channels: their traffic goes on the active events
     incident_talkgroups: tuple[int, ...] = (307, 333)   # P25: where 60 Control answers our units
     radio_seed: str = ""                           # "" = data/radio_ids.json
+
+
+def _short(why: str, n: int = 160) -> str:
+    return why if len(why) <= n else why[:n - 1].rstrip() + "…"
+
+
+def _inner(note: str) -> str:
+    """'Voice unavailable — station offline since 14:02: text only' -> 'station offline since 14:02'."""
+    return note.removeprefix("Voice unavailable — ").removesuffix(": text only")
 
 
 def _text(body: dict, key: str, max_len: int, required: bool = False) -> str:
@@ -147,9 +159,10 @@ class Cad:
         # The maps (sizeup/cad/mapview.py): live unit positions {code: {lat, lon, at}} from a future AVL
         # feed (IamResponding, Red Alert, an iPad app). Nothing sets it yet.
         self.positions: Callable[[], dict[str, dict]] = lambda: {}
-        # [cloud] role = "hub" (sizeup/cloud/hub.py): the voice is rendered by the station (no TTS in the
-        # cloud): remote_voice(job) -> (WAV bytes, "Voice: ...") or AudioUnavailable; audio_blobs keeps
-        # the dispatch audio in SQLite (the hub's disk is thrown away on a redeploy). cloud(): the
+        # [cloud] role = "hub" (sizeup/cloud/hub.py): the voice is Amazon Polly's, rendered here
+        # (tts_engine "polly"), else the station's: remote_voice(job) -> (WAV bytes, "Voice: ...") or
+        # AudioUnavailable, also Polly's fallback; audio_blobs keeps the dispatch audio in SQLite (the
+        # hub's disk is thrown away on a redeploy). cloud(): the
         # station / hub connection for the console's header ({role, ...}), None all-in-one.
         self.remote_voice: Callable[[dict], tuple[bytes, str]] | None = None
         self.audio_blobs = None
@@ -164,7 +177,7 @@ class Cad:
                             monitor_departments=tuple(cfg.cad_monitor_departments), tones=tuple(cfg.dispatch_tones),
                             voice=cfg.dispatch_voice, rate_wpm=cfg.dispatch_rate, repeat=cfg.dispatch_repeat,
                             tts_engine=cfg.dispatch_tts_engine, speed=cfg.dispatch_speed, tts_port=cfg.dispatch_tts_port,
-                            fallback_voice=cfg.dispatch_fallback_voice,
+                            fallback_voice=cfg.dispatch_fallback_voice, polly_region=cfg.dispatch_polly_region,
                             transmit=cfg.dispatch_transmit, channels=tuple(cfg.dispatch_channels),
                             tactical=tuple(c.label for c in cfg.channels if c.kind == "traffic") or ("FG1",),
                             incident_talkgroups=tuple(sorted(cfg.p25_incident_talkgroups))),
@@ -189,7 +202,7 @@ class Cad:
                 "transmit": {"enabled": self.transmitter.enabled, "transmitter": self.transmitter.name,
                              "channels": list(self.s.channels),
                              "note": "Transmit is off: logged and played here only"},
-                "audio": {"tts": self.s.tts_engine == "kokoro" or bool(shutil.which("say") and shutil.which("afconvert")),
+                "audio": {"tts": self.s.tts_engine in ("kokoro", "polly") or bool(shutil.which("say") and shutil.which("afconvert")),
                           "engine": self.s.tts_engine, "voice": self.s.voice, "speed": self.s.speed,
                           "fallback_voice": self.s.fallback_voice, "label": self._voice().label(),
                           "tones": [list(t) for t in self.s.tones]},
@@ -428,13 +441,24 @@ class Cad:
 
     def _voice(self) -> VoiceCfg:
         return VoiceCfg(self.s.tts_engine, self.s.voice, self.s.speed, self.s.tts_port, self.s.fallback_voice,
-                        self.s.rate_wpm)
+                        self.s.rate_wpm, region=self.s.polly_region)
 
     def tts_voices(self) -> dict:
-        """GET /api/cad/tts/voices: the Kokoro voices to pick from and what's set now."""
-        return {"engine": self.s.tts_engine, "voice": self.s.voice, "speed": self.s.speed,
-                "fallback_voice": self.s.fallback_voice,
-                "voices": tts_voices(self.s.tts_port)}
+        """GET /api/cad/tts/voices: the voices to pick from (Kokoro's, or Polly's with their engines,
+        polly_engine: the one the voice last spoke with) and what's set now."""
+        out = {"engine": self.s.tts_engine, "voice": self.s.voice, "speed": self.s.speed,
+               "fallback_voice": self.s.fallback_voice}
+        if self.s.tts_engine == "polly":
+            return dict(out, voices=polly.voices(), polly_engine=polly.engine_in_use(self.s.voice, self.s.polly_region))
+        return dict(out, voices=tts_voices(self.s.tts_port))
+
+    def voice_preview(self) -> dict:
+        """Settings > Dispatch > Voice > Preview: a short sample said by the voice set now, through the
+        same render (and fallbacks) as a dispatch."""
+        text = VOICE_SAMPLE
+        path, note = self._render(text, tones=[])
+        self._prune_audio()
+        return {"text": text, "audio_url": self._audio_url(path), "audio_note": note}
 
     def _render(self, text: str, location: str = "", tones=None) -> tuple[Path | None, str]:
         """(the WAV, which voice said it: "Voice: Kokoro af_heart") or (None, why there's no audio).
@@ -443,7 +467,7 @@ class Cad:
             import tempfile
             self.audio_dir = Path(tempfile.mkdtemp(prefix="sizeup-cad-audio-"))
         if self.remote_voice is not None:
-            return self._render_remote(text, tones)
+            return self._render_hub(text, tones)
         try:
             with self._render_lock:
                 return dispatcher.render_dispatch(text, self.s.tones if tones is None else tones, self.audio_dir, self._voice(), self.s.repeat,
@@ -454,23 +478,66 @@ class Cad:
         except OSError as e:
             return None, f"could not write the dispatch audio: {e}"
 
-    def _render_remote(self, text: str, tones=None) -> tuple[Path | None, str]:
-        """The hub's dispatch audio: the station renders it (same render_dispatch, its Kokoro) and the
-        WAV is cached here and in audio_blobs by content, like a local render. No station, or no
-        answer in time: (None, why) and the dispatch is text only (never a hang)."""
+    def _render_hub(self, text: str, tones=None) -> tuple[Path | None, str]:
+        """The hub's dispatch audio. Engine polly: Amazon Polly, here (no station needed); if Polly
+        fails (no permission, network), the station's voice (_render_remote, its Kokoro with a man's
+        voice); neither: text only, saying why ("Voice unavailable — Polly: AccessDeniedException:
+        ...; station offline ...: text only"). Any other engine: the station, as before. The WAV
+        is cached here and in audio_blobs by content either way.
+
+        Seam: transmission stays station-local. When dispatches are transmitted (M2), the hub sends
+        this same WAV to the station to key up and play; the voice is never made there for it."""
         v = self._voice()
+        if v.engine != "polly":
+            return self._render_remote(text, tones, v)
         groups = dispatcher.tone_groups(self.s.tones if tones is None else tones)
         spoken = {c: u.get("spoken", "") for c, u in self.lists.units.items()}
-        said = dispatcher.speech(text, spoken=spoken)
-        key = dispatcher.audio_key(said + "\x00station", groups, v.engine, v.voice,
-                                   v.speed if v.engine == "kokoro" else v.rate_wpm, self.s.repeat)
+        key = dispatcher.dispatch_key(text, groups, v, self.s.repeat, spoken)
+        path, label = self._cached(key)
+        if path is not None:
+            return path, label or v.label()
+        try:
+            with self._render_lock:
+                path, label = dispatcher.render_dispatch(text, groups, self.audio_dir, v, self.s.repeat, spoken,
+                                                         log=self.log, local_fallback=False)
+        except AudioUnavailable as e:
+            why = str(e)
+            self.log(f"CAD: dispatch voice: {why}; asking the station")
+            station = VoiceCfg("kokoro", polly.STATION_VOICE, v.speed, v.port, v.fallback_voice, v.rate_wpm)
+            path, note = self._render_remote(text, tones, station)
+            if path is None:
+                return None, f"Voice unavailable — {_short(why)}; {_inner(note)}: text only"
+            return path, f"{note} (station: {_short(why, 80)})"
+        except OSError as e:
+            return None, f"could not write the dispatch audio: {e}"
+        if self.audio_blobs is not None:
+            self.audio_blobs.put(key, path.read_bytes(), "dispatch", label)
+        return path, label
+
+    def _cached(self, key: str) -> tuple[Path | None, str]:
+        """(the WAV, its note) already rendered on the hub: on disk, or in audio_blobs after a redeploy."""
         path = self.audio_dir / f"{key}.wav"
         blobs = self.audio_blobs
         if not path.is_file() and blobs is not None and (hit := blobs.get(key)) is not None:
             self.audio_dir.mkdir(parents=True, exist_ok=True)
             path.write_bytes(hit)
         if path.is_file():
-            return path, (blobs.note(key) if blobs is not None else "") or v.label()
+            return path, blobs.note(key) if blobs is not None else ""
+        return None, ""
+
+    def _render_remote(self, text: str, tones=None, v: VoiceCfg | None = None) -> tuple[Path | None, str]:
+        """The hub's dispatch audio from the station (same render_dispatch, its Kokoro): cached here
+        and in audio_blobs by content, like a local render. No station, or no answer in time:
+        (None, why) and the dispatch is text only (never a hang)."""
+        v = v or self._voice()
+        groups = dispatcher.tone_groups(self.s.tones if tones is None else tones)
+        spoken = {c: u.get("spoken", "") for c, u in self.lists.units.items()}
+        said = dispatcher.speech(text, spoken=spoken)
+        key = dispatcher.audio_key(said + "\x00station", groups, v.engine, v.voice,
+                                   v.speed if v.engine == "kokoro" else v.rate_wpm, self.s.repeat)
+        path, label = self._cached(key)
+        if path is not None:
+            return path, label or v.label()
         try:
             wav, label = self.remote_voice({
                 "text": text, "tones": [[list(t) for t in g] for g in groups], "repeat": self.s.repeat,
@@ -478,6 +545,7 @@ class Cad:
                                             "fallback_voice": v.fallback_voice, "rate_wpm": v.rate_wpm}})
         except AudioUnavailable as e:
             return None, str(e)
+        path = self.audio_dir / f"{key}.wav"
         try:
             self.audio_dir.mkdir(parents=True, exist_ok=True)
             tmp = path.with_suffix(".tmp")
@@ -485,8 +553,8 @@ class Cad:
             tmp.replace(path)
         except OSError as e:
             return None, f"could not write the dispatch audio: {e}"
-        if blobs is not None:
-            blobs.put(key, wav, "dispatch", label)
+        if self.audio_blobs is not None:
+            self.audio_blobs.put(key, wav, "dispatch", label)
         return path, label
 
     def _phrase(self, typ: str, sub: str) -> str:

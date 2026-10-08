@@ -34,8 +34,8 @@ DEFAULT_PYTHON = str(HOME / "venv" / "bin" / "python")
 SERVER = Path(__file__).with_name("tts_server.py")
 DEFAULT_PORT = 8093
 RATE = 16000
-ENGINES = ("kokoro", "say")
-LABELS = {"kokoro": "Kokoro"}
+ENGINES = ("kokoro", "say", "polly")
+LABELS = {"kokoro": "Kokoro", "polly": "Polly"}
 
 # Kokoro-82M v1.0's English voices (what setup_tts.sh installs); the server's own list wins when it's up.
 KOKORO_VOICES = ("af_heart af_alloy af_aoede af_bella af_jessica af_kore af_nicole af_nova af_river af_sarah af_sky "
@@ -49,19 +49,21 @@ class TtsError(RuntimeError):
 
 @dataclass(frozen=True)
 class VoiceCfg:
-    engine: str = "say"            # "kokoro" (the server, `say` as fallback) | "say" (macOS only)
-    voice: str = ""                # engine kokoro: a Kokoro voice ("af_heart"); engine say: a `say -v` voice
-    speed: float = 1.0             # kokoro: 0.5-2.0 (0.92 = a touch slower than conversational)
+    engine: str = "say"            # "kokoro" (the server, `say` as fallback) | "say" (macOS only) |
+                                   # "polly" (Amazon Polly, sizeup/polly.py: the hub's)
+    voice: str = ""                # kokoro: a Kokoro voice ("af_heart"); say: a `say -v` voice; polly: "Matthew"
+    speed: float = 1.0             # kokoro, polly: 0.5-2.0 (0.92 = a touch slower than conversational)
     port: int = DEFAULT_PORT
     fallback_voice: str = "Samantha"
     rate_wpm: int = 0              # `say` words per minute (0 = the voice's own)
     timeout_s: float = 10.0        # longer than this -> `say`
+    region: str = ""               # polly: "" = AWS_REGION / AWS_DEFAULT_REGION / us-east-1
 
     def label(self, fallback: bool = False) -> str:
-        """'Voice: Kokoro af_heart', 'Voice: Samantha (fallback)', 'Voice: Samantha'."""
-        if self.engine == "kokoro" and not fallback:
-            return f"Voice: Kokoro {self.voice}"
-        v = (self.fallback_voice if self.engine == "kokoro" else self.voice) or "macOS say"
+        """'Voice: Kokoro af_heart', 'Voice: Polly Matthew', 'Voice: Samantha (fallback)', 'Voice: Samantha'."""
+        if self.engine in LABELS and not fallback:
+            return f"Voice: {LABELS[self.engine]} {self.voice}"
+        v = (self.fallback_voice if self.engine in LABELS else self.voice) or "macOS say"
         return f"Voice: {v}" + (" (fallback)" if fallback else "")
 
 
@@ -262,6 +264,12 @@ class TtsService:
         """A row of the app's radios/status list: Voice ready (ok) / starting / down."""
         return {"label": "Voice", "mhz": None, "state": self.state, "detail": self.detail, "open": False,
                 "quieting_db": None, "restarts": 0, "last_heard": None}
+
+    @staticmethod
+    def polly_status(voice: str) -> dict:
+        """The row when [dispatch] tts_engine = "polly" (Amazon's, over the internet: no server here)."""
+        return {"label": "Voice", "mhz": None, "state": "ok", "detail": f"voice: Amazon Polly {voice}",
+                "open": False, "quieting_db": None, "restarts": 0, "last_heard": None}
 
     @staticmethod
     def say_status(voice: str) -> dict:
