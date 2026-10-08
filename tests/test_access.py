@@ -276,7 +276,9 @@ def test_hub_with_access_refuses_pages_and_api_without_a_token(keys, hub):
 def test_the_signed_in_person_is_the_operator_whatever_the_page_sends(keys, hub):
     h = {"Cf-Access-Jwt-Assertion": jwt(keys[0])}
     code, me = req(hub.url + "/api/cad/whoami", headers=h)
-    assert code == 200 and me == {"email": "corey@example.org", "name": "corey@example.org", "callsign": "", "source": "access"}
+    assert code == 200 and me == {"email": "corey@example.org", "name": "corey@example.org", "callsign": "", "source": "access",
+                                  "role": "dispatcher", "active": True, "may": "admin", "bootstrap": True, "admins": [],
+                                  "enforced": True}       # no admin yet: anyone signed in (tests/test_roles.py)
     cad = hub.app.cad
     ops = cad.settings.operators()
     assert [(o["name"], o["email"]) for o in ops] == [("corey@example.org", "corey@example.org")]   # added, not named yet
@@ -288,8 +290,8 @@ def test_the_signed_in_person_is_the_operator_whatever_the_page_sends(keys, hub)
     code, _ = req(hub.url + "/api/cad/settings/users", "POST", {"action": "edit", "id": ops[0]["id"], "name": "Corey",
                                                                 "callsign": "2398", "operator": "Mallory"}, h)
     assert code == 200
-    assert req(hub.url + "/api/cad/whoami", headers=h)[1] == {"email": "corey@example.org", "name": "Corey",
-                                                              "callsign": "2398", "source": "access"}
+    assert {k: v for k, v in req(hub.url + "/api/cad/whoami", headers=h)[1].items() if k in ("email", "name", "callsign", "source")} == {
+        "email": "corey@example.org", "name": "Corey", "callsign": "2398", "source": "access"}
     code, _ = req(hub.url + f"/api/cad/incident/{inc['id']}/note", "POST", {"text": "Smoke showing", "operator": "Mallory"}, h)
     assert code == 200
     code, _ = req(hub.url + "/api/cad/incident/{}/note".format(inc["id"]), "POST", {"text": "No operator sent"}, h)
@@ -331,7 +333,8 @@ def test_all_in_one_is_unchanged(tmp_path):
     assert access_verifier(hub_cfg(tmp_path)) is None                    # a hub without them: as before
     api = CadApi(make_cad(tmp_path / "x"))
     code, body, _ = api.get("/api/cad/whoami", "")
-    assert code == 200 and json.loads(body) == {"email": "", "name": "", "callsign": "", "source": "none"}
+    assert code == 200 and json.loads(body) == {"email": "", "name": "", "callsign": "", "source": "none", "role": "",
+                                                "enforced": False}
     code, body, _ = api.post("/api/cad/incident", json.dumps({"type": "STRU", "operator": "Mallory"}).encode())
     assert code == 200
     assert api.cad.store.q("SELECT operator FROM events")[0]["operator"] == "Mallory"

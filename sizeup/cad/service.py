@@ -813,8 +813,8 @@ class Cad:
     def settings_get(self) -> dict:
         return self.settings.page()
 
-    def settings_post(self, section: str, body: dict) -> dict:
-        return self.settings.post(section, body)
+    def settings_post(self, section: str, body: dict, guard: bool = False) -> dict:
+        return self.settings.post(section, body, guard)
 
     def settings_export(self) -> dict:
         return self.settings.export()

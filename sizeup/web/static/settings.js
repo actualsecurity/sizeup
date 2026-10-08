@@ -7,6 +7,8 @@
 // (the Operator field) in the audit log (System). Codes never change: rename, recolor, reorder,
 // retire (old events keep showing it), or delete what was never used. GET /api/cad/settings has
 // everything this page shows; POST /api/cad/settings/<section> {action, ...} changes it.
+// On the hub with Cloudflare Access only an admin may (sizeup/cad/api.py): for anyone else cad.js
+// disables every control here but those marked ro-ok (they only read) and shows why (#s-role).
 "use strict";
 
 const S = {
@@ -247,7 +249,7 @@ function sSubtypeMap() {
   if (!t) return null;
   const todo = t.rows.filter((r) => r.confirm && !r.retired).length;
   const p = el("p", "dim small", "Which subtypes each type offers: ");
-  const a = sBtn("Subtypes per type", "", () => { S.list = "type_subtypes"; store("sizeup.cad.settings.list", S.list); sRender(true); }, "mini");
+  const a = sBtn("Subtypes per type", "", () => { S.list = "type_subtypes"; store("sizeup.cad.settings.list", S.list); sRender(true); }, "mini ro-ok");
   p.append(a, document.createTextNode(todo ? ` (${todo} type${todo === 1 ? "" : "s"} to confirm with the department).` : "."));
   return p;
 }
@@ -969,11 +971,17 @@ function sUsers(panel) {
   });
   const signedIn = cad.who
     ? `You are signed in with Cloudflare Access as ${cad.who.email}: that is the operator on everything you do here, `
-      + "named from this list. Someone who signs in for the first time is added under their email: give them a name. "
+      + "named from this list. Someone who signs in for the first time is added under their email, as a dispatcher: give them a name. "
     : "Behind Cloudflare Access (the hub), the email someone signs in with picks their row here and they become the "
       + "operator automatically; here, anyone at the console picks a name. ";
+  const roles = cad.who && cad.who.enforced
+    ? "Roles are enforced: an admin changes anything, a dispatcher runs calls but can’t change Settings, a viewer (or "
+      + "someone deactivated) only looks. Until there is an active admin with a sign-in email, anyone signed in can change "
+      + "everything; after that the last admin can’t be demoted or deactivated."
+    : "The role is recorded here, not enforced: anyone at the console can change anything. On the hub, with Cloudflare "
+      + "Access, it is: an admin changes anything, a dispatcher runs calls, a viewer only looks.";
   panel.replaceChildren(...sHead("Users", "The people at the console. Once there is one, the Operator field becomes a picker of the active ones."),
-    el("div", "s-note", signedIn + "The role is recorded, not enforced."),
+    el("div", "s-note", signedIn + roles),
     sCard(sCardHead("Operators", `${ops.filter((o) => o.active).length} active`), ol, f));
 }
 
@@ -984,7 +992,7 @@ function sSystem(panel) {
   const recs = el("div", "row csv-row");
   recs.append(sBtn("Open records", "Every numbered event; click one to open it", () => {
     openOverlay("#db-overlay", true); cad.dbAt = 0; renderRecords();
-  }, "primary"), el("span", "dim small", "CSV, the sheet's columns:"));
+  }, "primary ro-ok"), el("span", "dim small", "CSV, the sheet's columns:"));
   for (const [f, t] of [["incidents", "Incident database"], ["calls", "Call history"], ["unit-history", "Unit history"], ["event-log", "Event log"]]) {
     const a = el("a", "nav", t);
     a.href = `/api/cad/export/${f}.csv`;
@@ -1001,7 +1009,7 @@ function sSystem(panel) {
     d.append(el("dt", "", k), el("dd", "", v));
     file.append(d);
   }
-  const exp = sBtn("Export settings", "Every edit, run card and operator as one JSON file", sExport, "primary");
+  const exp = sBtn("Export settings", "Every edit, run card and operator as one JSON file", sExport, "primary ro-ok");
   const fileIn = el("input");
   fileIn.type = "file";
   fileIn.accept = ".json,application/json";
@@ -1013,6 +1021,7 @@ function sSystem(panel) {
     + "Import shows what would change first; nothing changes until you apply it."), (() => { const r = el("div", "row"); r.append(exp, el("span", "dim small", "Import:"), fileIn); return r; })(), imp);
   const sel = sSelect([["", "All sections"], ...S.data.audit_sections.map((s) => [s, s.charAt(0).toUpperCase() + s.slice(1)])], S.audit,
     (v) => { S.audit = v; S.auditFor = ""; sAudit(); }, "Section");
+  sel.classList.add("ro-ok");
   const audit = el("div", "tscroll");
   audit.id = "s-audit";
   panel.replaceChildren(...sHead("System"),

@@ -6,6 +6,13 @@ Who: on the hub behind Cloudflare Access the server hands each request the verif
 Users), whatever the page sent: post() is the one place every write goes through. Without Access,
 `operator` is what the page sent (the Operator field), as before.
 
+Roles (user, 2026-10-08: "now that i added julian and myself, myself as an admin i should only be
+the one to make changes?"): with that verified person, every POST is checked against WRITES first
+(permit(); server.py asks the same for its own POSTs): admins change anything, dispatchers run
+calls, viewers (and deactivated users) only look; a 403 {"error"} otherwise, logged. Until there is
+an active admin with a sign-in email anyone signed in may do anything (Settings.standing()). Without
+Access nothing is checked: a typed or picked name is no proof of who is at the console.
+
 GET  /api/cad/state                       lists, units, events (open, recently closed), run cards
 GET  /api/cad/stream                      SSE: the state, pushed every second (server.py)
 GET  /api/cad/geocode?q=209 westchester   location suggestions, Port Chester / Rye Brook first, each with its town
@@ -13,7 +20,8 @@ GET  /api/cad/runcards                    run cards
 GET  /api/cad/incident/<id>               one event with its units, chronology and dispatches
 GET  /api/cad/history                     the Incident database: every numbered event, newest first
 GET  /api/cad/admin                       record counts and the next event number
-GET  /api/cad/whoami                      {email, name, callsign, source: "access" | "none"}: who signed in
+GET  /api/cad/whoami                      {email, name, callsign, source: "access" | "none", role, enforced}: who
+                                          signed in; with Access also {active, may, bootstrap, admins: [names]}
 GET  /api/cad/settings                    the Settings page: lists, units, dispatch, operators, system (sizeup/cad/settings.py)
 GET  /api/cad/settings/export             every setting as one JSON file (edits, run cards, operators)
 GET  /api/cad/settings/audit?section=     every Settings change (who, section, key, old -> new), newest first
@@ -63,6 +71,7 @@ import re
 from urllib.parse import parse_qs
 
 from sizeup.cad.service import Cad
+from sizeup.cad.settings import LastAdmin
 from sizeup.cad.store import CadError
 
 JSON = "application/json"
@@ -76,6 +85,30 @@ DISPATCH_WAV = re.compile(r"/api/cad/dispatch/(\d{1,9})\.wav")
 PREVIEW_WAV = re.compile(r"/api/cad/audio/([0-9a-f]{20})\.wav")
 SETTINGS = re.compile(r"/api/cad/settings/([a-z_]{1,30})")
 
+# Who may POST what (enforced only with a verified sign-in, see above): "dispatch" = dispatchers and
+# admins (running calls), "admin" = admins only (Settings in every form, and the radios), "read" =
+# anyone signed in (a POST that changes nothing). First match wins; a path not here is "admin".
+WRITES = (
+    (re.compile(r"/api/cad/incident(?:/\d{1,9}(?:/(?:accept|dismiss|close|note|recommend|preview|dispatch|upgrade|attach"
+                r"|link|return))?)?"), "dispatch"),                       # events, notes, dispatches, radio links
+    (UNIT, "dispatch"),                                                     # unit status on the board
+    (re.compile(r"/api/incident/[^/]{1,80}/close"), "dispatch"),            # the monitor's incident list (server.py)
+    (UNIT_STATION, "admin"),                                                # a unit's home station: Settings > Units
+    (SETTINGS, "admin"),                                                    # lists, units, dispatch, users, import ...
+    (re.compile(r"/api/cad/runcards(?:/delete)?"), "admin"),
+    (re.compile(r"/api/cad/radios(?:/delete)?"), "admin"),                 # the radio-ID registry
+    (re.compile(r"/api/(?:talkgroup|talkgroup-group|mode|retranscribe)"), "admin"),   # the station's radios (server.py)
+)
+READ_ACTIONS = {("/api/cad/settings/dispatch", "preview")}                  # the wording on a sample event
+MAY = {"admin": ("read", "dispatch", "admin"), "dispatcher": ("read", "dispatch"), "viewer": ("read",)}
+
+
+def needs(path: str, body: dict | None = None) -> str:
+    """"read" | "dispatch" | "admin": what a POST to path needs."""
+    if body is not None and (path, body.get("action")) in READ_ACTIONS:
+        return "read"
+    return next((need for rx, need in WRITES if rx.fullmatch(path)), "admin")
+
 
 def _json(code: int, obj) -> tuple[int, bytes, str]:
     return code, json.dumps(obj, separators=(",", ":")).encode(), JSON
@@ -84,6 +117,28 @@ def _json(code: int, obj) -> tuple[int, bytes, str]:
 class CadApi:
     def __init__(self, cad: Cad):
         self.cad = cad
+
+    def permit(self, path: str, who, body: dict | None = None, st: dict | None = None) -> tuple[int, bytes, str] | None:
+        """None when this POST may go ahead; else the 403 (logged: who, what). Nothing is checked
+        without a verified person (who: sizeup/cloud/access.py Identity)."""
+        if who is None or not who.email:
+            return None
+        try:
+            st = st or self.cad.settings.standing(who.email)
+        except CadError as e:
+            return _json(403, {"error": f"signed in as {who.email}: {e}"})
+        need = needs(path, body)
+        if need in MAY.get(st["may"], ("read",)):
+            return None
+        ask = f" (ask {', '.join(st['admins'])})" if st["admins"] else ""
+        if not st["active"]:
+            why = f"Your account is deactivated: you can look but not change anything{ask}"
+        elif need == "admin":
+            why = f"Only an admin can change settings (you are a {st['role']})"
+        else:
+            why = f"Only a dispatcher or an admin can do that (you are a {st['role']})"
+        self.cad.log(f"CAD: refused POST {path} for {st['email']} ({st['role']}{'' if st['active'] else ', deactivated'}): needs {need}")
+        return _json(403, {"error": why})
 
     def get(self, path: str, query: str, who=None) -> tuple[int, bytes, str]:
         try:
@@ -143,9 +198,12 @@ class CadApi:
         c = self.cad
         try:
             if who is not None and who.email:      # signed in: that's the operator, not what the page typed
-                body["operator"] = c.settings.person(who.email)["operator"]
-            if m := SETTINGS.fullmatch(path):
-                return _json(200, c.settings_post(m.group(1), body))
+                st = c.settings.standing(who.email)
+                if refused := self.permit(path, who, body, st):
+                    return refused
+                body["operator"] = st["operator"]
+            if m := SETTINGS.fullmatch(path):      # guard: signed in, roles enforced: keep an admin
+                return _json(200, c.settings_post(m.group(1), body, guard=who is not None and bool(who.email)))
             if path == "/api/cad/incident":
                 return _json(200, c.create(body))
             if m := INCIDENT.fullmatch(path):
@@ -166,6 +224,8 @@ class CadApi:
                 return _json(200, c.save_radio(body))
             if path == "/api/cad/radios/delete":
                 return _json(200, c.delete_radio(body))
+        except LastAdmin as e:
+            return _json(409, {"error": str(e)})
         except CadError as e:
             return _json(400, {"error": str(e)})
         return 404, b"not found\n", "text/plain"

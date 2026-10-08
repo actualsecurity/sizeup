@@ -32,7 +32,7 @@ const KIND_GROUPS = [
 
 const cad = {
   scene: null, state: null, lastMsgAt: 0, skew: 0,
-  who: null,                 // signed in through Cloudflare Access (whoami): {email, name, callsign}
+  who: null,                 // signed in through Cloudflare Access (whoami): {email, name, callsign, role, may, ...}
   sel: null,                 // selected incident id
   mode: "none",              // none | new | view
   extra: new Map(),          // incidents opened from Records that aren't in the live state
@@ -1768,6 +1768,7 @@ function render() {
   renderRecords();
   renderOperators();
   for (const fn of cad.hooks) fn();
+  roLockAll();
 }
 
 // The operator field: a picker from Settings > Users once there are operators, else free text.
@@ -1805,6 +1806,7 @@ function onState(data) {
   setText(pill, tx.enabled ? "Transmit on" : "Transmit off");
   setText($("#tx-note"), tx.enabled ? "" : (tx.note || "Transmit is off") + ".");
   if (changed) cad.dbAt = 0;
+  if (changed && cad.who) loadWho();          // a role changed in Settings > Users: show it at once
   renderConn();
   renderCloud();
   renderTalking();
@@ -1977,7 +1979,75 @@ async function loadWho() {
   input.title = tip;
   input.closest("label").title = tip + ": recorded on every dispatch, status change, timeline entry and settings change";
   renderOperators();
+  applyRoles();
 }
+
+// Roles (user, 2026-10-08: "admins should be able to set users, dispatchers should not, but first
+// login should be able to set whatever i guess"). The server enforces them for whoever signed in
+// through Cloudflare Access (sizeup/cad/api.py WRITES); this only shows it: Settings read-only for a
+// dispatcher, every action off for a viewer or a deactivated user, each with a banner naming the
+// admins. Without Access (whoami enforced: false) nothing changes.
+function canDo(need) {             // "dispatch" (run calls) | "admin" (Settings, the radios)
+  const w = cad.who;
+  if (!w || !w.enforced) return true;
+  return w.may === "admin" || (need === "dispatch" && w.may === "dispatcher");
+}
+function askAdmin() {
+  const a = (cad.who && cad.who.admins) || [];
+  return a.length ? `ask an admin (${a.join(", ")})` : "ask an admin";
+}
+// What a viewer can't press on the dispatch screen (reading, filtering, playing, the maps stay).
+const RO_DISPATCH = "#new-incident, #new-form :is(input, select, textarea, #new-create), #d-accept, #d-dismiss, #d-edit, "
+  + "#d-close, #d-queued select, #close-form :is(select, #c-close), #edit-form :is(input, select, textarea, #edit-save), "
+  + "#d-attach :is(select, button), #d-dispatch :is(input, select, textarea, button:not(#u-cancel)), #note-text, #note-add, "
+  + ".ubtns button, .feed-add";
+// In Settings for anyone but an admin: everything but the section tabs, filters and what only reads.
+const RO_SETTINGS_KEEP = ".tab, [type=search], .ro-ok, .ro-ok *";
+function roLock(root, sel, keep) {
+  for (const n of root.querySelectorAll(sel)) {
+    if (!n.disabled && !(keep && n.matches(keep))) { n.disabled = true; n.dataset.ro = "1"; }
+  }
+}
+function roUnlock() {
+  for (const n of document.querySelectorAll("[data-ro]")) { n.disabled = false; delete n.dataset.ro; }
+}
+function roLockAll() {             // every render, and whatever appears later (the observer below)
+  if (!cad.who || !cad.who.enforced) return;
+  const main = document.querySelector(".cad-main");
+  if (!canDo("dispatch")) roLock(main, RO_DISPATCH);
+  if (!canDo("admin")) {
+    roLock($("#settings .s-content"), "button, input, select, textarea", RO_SETTINGS_KEEP);
+    roLock(main, "button.rerun");                     // speech-to-text again: the station's, admin only
+  }
+}
+function applyRoles() {
+  const w = cad.who;
+  if (!w || !w.enforced) return;
+  const viewOnly = !canDo("dispatch"), roSettings = !canDo("admin");
+  document.body.classList.toggle("ro-dispatch", viewOnly);
+  document.body.classList.toggle("ro-settings", roSettings);
+  const banner = $("#role-banner");
+  setText(banner, !w.active ? `Your account is deactivated: you can look but not change anything. To work the console, ${askAdmin()}.`
+    : `View only: you are a viewer. To run calls, ${askAdmin()}.`);
+  show(banner, viewOnly);
+  const note = $("#s-role");
+  const who = !w.active ? "your account is deactivated" : `for ${w.role === "viewer" ? "viewers" : "dispatchers"}`;
+  setText(note, w.bootstrap ? "No admin yet: anyone signed in can change settings. Make someone an admin (Users)."
+    : roSettings ? `Settings are read-only ${who.startsWith("for") ? who : `(${who})`} — ${askAdmin()}.` : "");
+  show(note, w.bootstrap || roSettings);
+  note.classList.toggle("boot", !!w.bootstrap);
+  const sig = `${w.may}|${w.active}`;
+  if (applyRoles.sig !== sig) {            // unlock what the old role locked, then lock for the new one
+    applyRoles.sig = sig;
+    roUnlock();
+    if (cad.state) render();
+    if (window.sRender) sRender(true);
+  }
+  roLockAll();
+}
+// Settings, the Radios editor and the feed draw on their own too: lock what appears.
+new MutationObserver(() => { if (cad.who && cad.who.enforced && !canDo("admin")) roLockAll(); })
+  .observe(document.body, { childList: true, subtree: true });
 
 async function boot() {
   try {

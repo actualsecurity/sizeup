@@ -203,6 +203,7 @@ window.RadiosPanel = (() => {
     for (const [v, t] of [["", "MDC + P25"], ["mdc", "MDC (FG1)"], ["p25", "P25"]]) sys.append(new Option(t, v));
     sys.value = p.sys;
     sys.addEventListener("change", () => { p.sys = sys.value; drawTable(); });
+    show.className = sys.className = "ro-ok";      // filters: still there when Settings are read-only (cad.js)
     tools.append(q, show, sys);
     out.push(tools, addForm());
     const wrap = el("div", "tscroll rp-scroll");
