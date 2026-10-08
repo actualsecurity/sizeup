@@ -1051,6 +1051,17 @@ def server(monkeypatch):
 
 
 def test_api_event_lifecycle(server):
+    req = urllib.request.Request(server.base + "/", method="GET")
+    class NoFollow(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *a, **k):
+            return None
+    try:
+        urllib.request.build_opener(NoFollow).open(req, timeout=10)
+        assert False, "/ should redirect"
+    except urllib.error.HTTPError as e:
+        assert e.code == 302 and e.headers["Location"] == "/cad"          # the CAD is the front page
+    code, page, _ = server.call("GET", "/monitor")
+    assert code == 200 and b"app.js" in page                              # the monitor moved here
     code, page, ctype = server.call("GET", "/cad")
     assert code == 200 and b"cad.js" in page and ctype.startswith("text/html")
     code, st = server.j("GET", "/api/cad/state")
