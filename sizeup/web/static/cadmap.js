@@ -25,7 +25,7 @@ window.CadMap = (() => {
   const STATION_R = 34, INC_R = 30, RING_GAP = 24, CHIP_W = 48;   // px: the fan-out around an anchor
   const FAR_ZOOM = 13.6;               // below this: smaller chips, tighter rings
   const FOCUS_MAX_ZOOM = 16.3;
-  const LINE = "#ffb020", HOME_LINE = "#c3cbff";      // to a call | a returning rig's way home (thin)
+  const LINE = "#E0A030", HOME_LINE = "#AEB6C0";      // to a call | a returning rig's way home (thin)
   const LOOK_NAMES = { available: "available", oos: "out of service", dispatched: "dispatched",
                        responding: "responding", onscene: "on location" };
 
@@ -115,7 +115,7 @@ window.CadMap = (() => {
         const isFocus = !!f && f.id === id;
         const t = typeOf(lists, p.type);
         const color = t ? t.color : "#ff4d3d";
-        const label = [p.number || (p.status === "queued" ? "Page" : ""), t ? t.name : ""].filter(Boolean).join(" · ");
+        const label = [p.number || (p.status === "queued" ? "Page" : ""), t ? t.name : ""].filter(Boolean).join(" ");
         const sig = JSON.stringify([p.lat, p.lon, color, label, isFocus, !!f, p.status, p.address]);
         let rec = this.pins.get(id);
         if (rec && rec.sig === sig) continue;
@@ -129,7 +129,7 @@ window.CadMap = (() => {
           e = h("button", "cm-pin" + (f ? " dim" : "") + (p.status === "queued" ? " queued" : ""));
           e.type = "button";
           e.append(h("i", "dot"), h("span", "lbl", label || "Incident"));
-          e.title = `${label}${p.address ? " · " + p.address : ""}: open it`;
+          e.title = `${label}${p.address ? ", " + p.address : ""}`;
           e.addEventListener("click", (ev) => { ev.stopPropagation(); if (this.opts.onPick) this.opts.onPick(id); });
         }
         e.style.setProperty("--c", color);
@@ -204,14 +204,14 @@ window.CadMap = (() => {
         const keep = [...e.classList].filter((c) => c.startsWith("maplibregl-")).join(" ");   // the marker's own
         e.className = `${keep} cm-rig look-${m.look} at-${m.place}` + (m.ring ? " outer" : "") + (talk ? ` ${talk}` : "")
           + (this.focus && m.incident_id && !onFocus ? " other" : "") + (onFocus ? " mine" : "");
-        e.style.setProperty("--c", st.bg || "#9aa0b4");
+        e.style.setProperty("--c", st.bg || "#9AA3AD");
         e.replaceChildren(h("span", "n", m.unit));
         if (m.tag) e.append(h("span", "tag", m.tag));
         e.title = [m.unit, st.name, m.place === "position" ? "live position" : "",
-                   m.place === "returning" ? `returning from ${m.returning_from} (estimated position)` : "",
-                   m.station ? `home: ${m.station}` : (m.fire ? "home station not set" : ""),
+                   m.place === "returning" ? `returning from ${m.returning_from} (est. position)` : "",
+                   m.station ? `home ${m.station}` : (m.fire ? "no home station" : ""),
                    m.incident_number ? `on ${m.incident_number}` : "",
-                   talk === "talking" ? "talking now" : talk ? "just transmitted" : ""].filter(Boolean).join(" · ");
+                   talk === "talking" ? "TX now" : talk ? "TX ended" : ""].filter(Boolean).join(", ");
         e.setAttribute("aria-label", e.title);
         rec.marker.setLngLat([m.lon, m.lat]).setOffset(off);
       }
@@ -247,9 +247,9 @@ window.CadMap = (() => {
       head.type = "button";
       head.setAttribute("aria-expanded", String(this.unsetOpen));
       const shown = names.slice(0, 4).join(", ") + (names.length > 4 ? ` +${names.length - 4}` : "");
-      head.append(h("b", "", "Station not set: "), h("span", "", this.unsetOpen ? `${names.length} rigs` : shown),
+      head.append(h("b", "", "No station "), h("span", "", this.unsetOpen ? `${names.length} rigs` : shown),
                   h("span", "car", this.unsetOpen ? "▾" : "▸"));
-      head.title = "Rigs with no home firehouse are not drawn until they are on a call. Click to list them and set one.";
+      head.title = "Rigs with no home firehouse: not drawn until on a call";
       head.addEventListener("click", (e) => { e.stopPropagation(); this.unsetOpen = !this.unsetOpen; this.draw(); });
       box.replaceChildren(head);
       if (!this.unsetOpen) return;
@@ -257,13 +257,13 @@ window.CadMap = (() => {
       for (const u of unset) {
         const b = h("button", "cm-rig look-unset", u.unit);
         b.type = "button";
-        b.title = (u.station ? `"${u.station}" is not a firehouse on the map. ` : "") + (u.on ? `On ${u.on}. ` : "")
-          + (this.editable() ? "Click to set its home station." : "");
+        b.title = (u.station ? `"${u.station}" not on the map. ` : "") + (u.on ? `On ${u.on}. ` : "")
+          + (this.editable() ? "Set home station" : "");
         b.disabled = !this.editable();
         b.addEventListener("click", (e) => { e.stopPropagation(); this.openPicker(u.id, u.unit, ""); });
         list.append(b);
       }
-      if (this.editable()) list.append(h("div", "cm-hint", "Click a rig to set its home firehouse."));
+      
       box.append(list);
     }
 
@@ -281,7 +281,7 @@ window.CadMap = (() => {
       const stations = (this.data && this.data.map && this.data.map.stations) || [];
       const pop = this.pop;
       const sel = h("select");
-      const none = h("option", "", "— not set —");
+      const none = h("option", "", "Not set");
       none.value = "";
       sel.append(none, ...stations.map((s) => { const o = h("option", "", s.name); o.value = s.name; return o; }));
       sel.value = current || "";
@@ -290,14 +290,14 @@ window.CadMap = (() => {
       const err = h("div", "error");
       save.type = cancel.type = "button";
       const head = h("div", "cm-pop-head");
-      head.append(h("b", "", `${name} · home station`));
+      head.append(h("b", "", `${name} home station`));
       pop.replaceChildren(head);
       if (m) {
         const st = statusOf(this.data.lists, m.status);
-        const line = h("div", "dim small", [st.name, m.incident_number ? `on ${m.incident_number}` : ""].filter(Boolean).join(" · "));
+        const line = h("div", "dim small", [st.name, m.incident_number ? `on ${m.incident_number}` : ""].filter(Boolean).join(" "));
         pop.append(line);
         if (m.incident_id && this.opts.onPick && (!this.focus || this.focus.id !== m.incident_id)) {
-          const go = h("button", "mini", `Open ${m.incident_number || "its call"}`);
+          const go = h("button", "mini", `Open ${m.incident_number || "call"}`);
           go.type = "button";
           go.addEventListener("click", () => { this.closePicker(); this.opts.onPick(m.incident_id); });
           line.append(" ", go);
@@ -305,8 +305,7 @@ window.CadMap = (() => {
       }
       const row = h("div", "row");
       row.append(sel, save, cancel);
-      pop.append(row, err, h("div", "dim small", "Where the rig is housed (the department's list, when it has one). "
-        + "Stored as an override of the data file and logged with your operator name."));
+      pop.append(row, err);
       pop.hidden = false;
       sel.focus();
       cancel.addEventListener("click", () => this.closePicker());
@@ -362,17 +361,19 @@ window.CadMap = (() => {
       this.note = h("div", "cm-note");
       this.note.hidden = true;
       const ctrls = h("div", "cm-ctrls");
-      const btn = (text, title, fn) => {
-        const b = h("button", "cm-btn", text);
+      const btn = (text, title, fn, icon) => {
+        const b = h("button", "cm-btn");
+        if (icon && window.Icon) b.append(Icon(icon));
+        b.append(text);
         b.type = "button";
         b.title = title;
         b.addEventListener("click", (e) => { e.stopPropagation(); fn(); });
         ctrls.append(b);
         return b;
       };
-      btn("⌖ Recenter", "Back to the call (and where its rigs come from)", () => { this.userMoved = false; this.fit(true); });
-      if (opts.onExpand) btn("⤢ Expand", "A large map (Esc closes it)", opts.onExpand);
-      if (opts.onClose) btn("✕ Close", "Close the large map (Esc)", opts.onClose);
+      btn("Recenter", "Back to the call and its rigs", () => { this.userMoved = false; this.fit(true); }, "locate");
+      if (opts.onExpand) btn("Expand", "Large map (Esc closes)", opts.onExpand, "expand");
+      if (opts.onClose) btn("Close", "Esc", opts.onClose, "x");
       host.append(this.canvas, ctrls, this.note);
       const sc = opts.scene;
       this.map = new maplibregl.Map({
@@ -445,14 +446,14 @@ window.CadMap = (() => {
   const views = { detail: null, big: null, overview: null, bigOpen: false };
   const mapData = () => ({ map: cad.state && cad.state.map, lists: cad.state && cad.state.lists });
   const mapsOk = () => !!(window.maplibregl && cad.scene && cad.scene.home);
-  const noPoint = (inc) => (inc && (inc.lat == null || inc.lon == null) ? "No map point for this incident" : "");
+  const noPoint = (inc) => (inc && (inc.lat == null || inc.lon == null) ? "No map point" : "");
 
   function detail(inc) {
     const box = $("#d-map"), nomap = $("#d-nomap");
     if (!mapsOk()) {
       show(box, false);
       show(nomap, true);
-      setText(nomap, "Map unavailable");
+      setText(nomap, "No map");
       return;
     }
     show(nomap, false);
@@ -506,39 +507,39 @@ window.CadMap = (() => {
 
   function cardFill(li, o) {
     const live = liveFor(o);
-    const color = typeColor(o.type) || "#9aa0b4";
+    const color = typeColor(o.type) || "#9AA3AD";
     li.className = `ov-card ${o.status}` + (live.length ? " live" : "");
     li.style.setProperty("--c", color);
     const head = el("div", "ov-h");
     const es = eventStatus(o);
     head.append(el("b", "ov-n", incTitle(o)), stBadge(el("span"), es.name, es.bg));
-    if (o.joint_call) head.append(el("span", "chip joint", `${o.joint_call} call`));
+    if (o.joint_call) head.append(el("span", "chip joint", o.joint_call));
     head.append(el("span", "spacer"), since(el("span", "ov-el", ""), o.created_at));
-    const type = el("div", "ov-type", typeLabel(o.type, o.subtype) || "Type not set");
-    const addr = el("div", "ov-addr" + (o.address ? "" : " dim"), o.address || "no location");
+    const type = el("div", "ov-type", typeLabel(o.type, o.subtype) || "No type");
+    const addr = el("div", "ov-addr" + (o.address ? "" : " dim"), o.address || "No location");
     li.replaceChildren(head, type, addr);
     const chips = el("div", "chips ov-units");
     if (o.units.length) {
       for (const u of o.units) {
-        const c = statusChip(u.status, `${u.name} · ${unitStatus(u.status).name}`);
+        const c = statusChip(u.status, `${u.name} ${u.status}`);
         const t = Radio.talkingFor(u.name);
         if (t && !t.ended) c.classList.add("talking");
         chips.append(c);
       }
-    } else chips.append(el("span", "dim small", o.status === "queued" ? "page waiting to be accepted" : "no units yet"));
+    } else chips.append(el("span", "dim small", o.status === "queued" ? "Page: accept" : "No units"));
     li.append(chips);
     if (live.length) {
       const l = el("div", "ov-live");
-      l.append(el("span", "ico", "📻"), el("b", "", "Talking now: "),
-               el("span", "", live.map((e) => `${Radio.who(e) || "radio"} · ${e.channel}`).join(", ")));
+      l.append(el("b", "", "TX "),
+               el("span", "", live.map((e) => `${Radio.who(e) || "Radio"} ${e.channel}`).join(", ")));
       li.append(l);
     }
     if (o.radio) {
       const r = el("div", "ov-radio");
       const who = o.radio.rig || o.radio.talker || (o.radio.dispatcher ? "60 Control" : "radio");
-      r.append(el("span", "t", fmtTime(o.radio.start)), el("b", "", who), el("span", "dim", ` · ${o.radio.channel}`));
+      r.append(el("span", "t", fmtTime(o.radio.start)), el("b", "", who), el("span", "dim", ` ${o.radio.channel}`));
       if (o.radio.text) r.append(el("span", "q", ` “${o.radio.text}”`));
-      else r.append(el("span", "dim", " (no transcript yet)"));
+      else r.append(el("span", "dim", " —"));
       li.append(r);
     }
     if (o.note) {
@@ -561,20 +562,21 @@ window.CadMap = (() => {
     const pages = ov.filter((o) => o.status === "queued");
     const ne = ov.filter((o) => !o.emergency && o.status !== "queued");
     const n = (k) => emerg.filter((o) => o.status === k).length;
-    setText($("#ov-counts"), `${n("active")} active · ${n("pending")} pending · ${ne.length} non-emergency`
-      + (pages.length ? ` · ${pages.length} page${pages.length > 1 ? "s" : ""} to accept` : ""));
+    const counts = [["Active", n("active")], ["Pending", n("pending")], ["Non-emerg", ne.length], ...(pages.length ? [["Pages", pages.length]] : [])];
+    const csig = JSON.stringify(counts), cbox = $("#ov-counts");
+    if (cbox._sig !== csig) { cbox._sig = csig; cbox.replaceChildren(...counts.map(([k, v]) => el("span", "", `${k} ${v}`))); }
     // talking now, with the call each one belongs to
     const talk = ((cad.state.talking || []).filter((e) => Radio.shown(e))).slice(0, 8);
     const tbox = $("#ov-talk");
     const tsig = JSON.stringify(talk.map((e) => [e.key, e.rig, e.ended, e.channel, e.alias]).concat(ov.map((o) => [o.id, o.units.length])));
     if (tbox._sig !== tsig) {
       tbox._sig = tsig;
-      tbox.replaceChildren(el("span", "dim small", talk.length ? "Talking now" : "Nobody talking"));
+      tbox.replaceChildren(el("span", "dim small", talk.length ? "TX" : "No TX"));
       for (const e of talk) {
         const c = el("span", "talk-chip" + (e.ended ? " ended" : "") + (e.rig ? " rig" : "") + (e.dispatcher ? " disp" : ""));
-        c.append(el("span", "ico", "📻"), el("span", "", Radio.label(e)));
+        c.append(el("span", "", Radio.label(e)));
         const on = ov.filter((o) => liveFor(o).includes(e) || (e.rig && o.units.some((u) => e.rig.split(/,\s*/).includes(u.name))));
-        if (on.length) c.append(el("span", "on", `→ ${on.map((o) => incTitle(o)).join(", ")}`));
+        if (on.length) c.append(el("span", "on", on.map((o) => incTitle(o)).join(", ")));
         tbox.append(c);
       }
     }
@@ -584,8 +586,8 @@ window.CadMap = (() => {
     syncList(pbox, pages, {
       key: (o) => String(o.id), sig: (o) => JSON.stringify([o.type, o.subtype, o.address]),
       make: () => { const b = el("button", "ov-page"); b.type = "button"; b.addEventListener("click", () => selectIncident(Number(b.dataset.key))); return b; },
-      fill: (b, o) => b.replaceChildren(el("b", "", "From 60 Control: "), el("span", "", `${typeLabel(o.type, o.subtype) || "type not set"} · ${o.address || "no location"}`),
-                                        el("span", "dim", " · accept or dismiss →")),
+      fill: (b, o) => b.replaceChildren(el("b", "", "60 Control "), el("span", "", `${typeLabel(o.type, o.subtype) || "No type"}, ${o.address || "No location"}`),
+                                        el("span", "dim", " Accept / Dismiss")),
       empty: "",
     });
     syncList($("#ov-cards"), emerg, {
@@ -600,7 +602,7 @@ window.CadMap = (() => {
         return li;
       },
       fill: cardFill,
-      empty: "No active or pending calls",
+      empty: "None",
     });
     syncList($("#ov-nonemerg"), ne, {
       key: (o) => String(o.id), sig: (o) => JSON.stringify([o.number, o.type, o.subtype, o.address, o.units.map((u) => u.name)]),
@@ -614,11 +616,11 @@ window.CadMap = (() => {
       fill: (li, o) => {
         const t = el("span", "qt", typeLabel(o.type, o.subtype));
         t.style.setProperty("--c", typeColor(o.type) || "#8fb8d8");
-        li.replaceChildren(el("b", "", incTitle(o)), t, el("span", "ov-addr-s", o.address || "no location"),
+        li.replaceChildren(el("b", "", incTitle(o)), t, el("span", "ov-addr-s", o.address || "No location"),
                            el("span", "spacer"), since(el("span", "dim small"), o.created_at));
         if (o.units.length) li.append(el("span", "dim small", o.units.map((u) => u.name).join(", ")));
       },
-      empty: "None open",
+      empty: "None",
     });
     if (mapsOk()) {
       if (!views.overview) {
@@ -626,7 +628,7 @@ window.CadMap = (() => {
                                                     onPick: (id) => selectIncident(id) });
       }
       views.overview.update(mapData(), null, "");
-    } else setText($("#ov-map"), "Map unavailable");
+    } else setText($("#ov-map"), "No map");
   }
 
   function goOverview() {

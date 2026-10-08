@@ -11,7 +11,7 @@
     incident for Port Chester --> an event in the CAD (/cad, sizeup/cad/) waiting for a person to accept it
     every transmission: its radio ID (MDC / P25) -> the rig it's on (sizeup/cad/radios.py) -> the CAD's
         communications log, linked to the events that rig is assigned to (/comms, sizeup/cad/comms.py)
-    who is keying up now (squelch + live MDC decode on FG1; trunk-recorder's log for P25):
+    who is keying up now (squelch + live MDC decode on FG1; trunk-recorder's grants + log for P25):
         sizeup/radio/live.py -> "talking" in both pages' state
     [cloud] role = "station": every finished page / transmission / transcript / radio ID heard also
         goes to the hub through a durable outbox (_emit, sizeup/cloud/station.py); role = "hub": no
@@ -258,7 +258,7 @@ class App:
         # Radio ID -> rig, and who is transmitting right now (both pages' "talking").
         self.radios = self.cad.radios
         self.live = LiveTalk(resolve=self.radios.resolve, tg_name=self.tg.name, main=self.tg.main,
-                             learn=lambda src, alias, at: self._heard("p25", src, alias, at))
+                             learn=lambda src, alias, at: self._heard("p25", src, alias, at), debug=log)
         # [cloud] role = "station": the hub link (sizeup/cloud/station.py) sets these; None = all-in-one.
         self.events: Callable[[str, dict, str | None], None] | None = None   # (type, data, clip id)
         self.link = None

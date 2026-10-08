@@ -74,7 +74,7 @@ def test_status_colors_are_readable_on_the_dark_theme():
         assert ratio(fill, s["fg"]) >= 4.5, s["code"]
         mix = lambda p, other: "#" + "".join(                          # color-mix(in srgb, bg p, other)
             f"{round(int(s['bg'][i:i + 2], 16) * p + int(other[i:i + 2], 16) * (1 - p)):02X}" for i in (1, 3, 5))
-        assert ratio(mix(0.62, "#FFFFFF"), mix(0.16, "#141329")) >= 4.5, s["code"]   # the outline chip's text
+        assert ratio(mix(0.62, "#FFFFFF"), mix(0.16, "#1F2328")) >= 4.5, s["code"]   # the outline chip's text on --raised
 
 
 # -- units and boards ------------------------------------------------------------------------------------
@@ -84,7 +84,7 @@ def test_ems_and_agencies_are_never_dispatched_and_mutual_aid_never_by_kind():
     L = cad.lists
     iid = cad.create({"type": "STRU", "address": "1 Main St"})["id"]
     for code in ("77A1", "7713", "DPT7700", "KEYHOLDER", "KNOB_BOX1", "CONED-E5", "BAT12", "SPCON", "WCPD1"):
-        with pytest.raises(CadError, match="never dispatched"):
+        with pytest.raises(CadError, match="attach, don't dispatch"):
             cad.dispatch(iid, {"unit_ids": [uid(cad, "E60"), uid(cad, code)], "operator": "JD"})
     # By kind: only PCFD's and Rye Brook's apparatus, whatever the count.
     runcards.save(cad.store, "SERVICE", [{"kind": "engine", "count": 10}, {"kind": "ladder|tower", "count": 10},
@@ -165,7 +165,7 @@ def test_every_type_is_mapped_and_only_its_subtypes_are_offered():
     assert L.subtypes_for("ALS") == ("ECHO",)
     L.check_type("ALS")
     L.check_type("ALS", "ECHO")
-    with pytest.raises(ValueError, match=r"ALS can't be Bomb \(BOMB\): pick one of ECHO or none"):
+    with pytest.raises(ValueError, match=r"ALS can't be BOMB: ECHO or none"):
         L.check_type("ALS", "BOMB")
     for t in ("BLS", "BRUSH", "DRILL", "RECALL"):
         assert L.subtypes_for(t) == ()
@@ -174,7 +174,7 @@ def test_every_type_is_mapped_and_only_its_subtypes_are_offered():
             L.check_type(t, "ECHO")
     assert L.subtypes_for("MVA") == ("EXTRI", "INJURIES", "MULTINJU", "NOINJ")
     assert L.subtypes_for("STRU") == ("COMM", "RESD")
-    with pytest.raises(ValueError, match="Structure fire can't be"):
+    with pytest.raises(ValueError, match="STRU can't be FIRE"):
         L.check_type("STRU", "FIRE")
     with pytest.raises(ValueError, match="'NOPE' is not an event subtype"):
         L.check_type("STRU", "NOPE")
@@ -202,23 +202,23 @@ def test_every_type_is_mapped_and_only_its_subtypes_are_offered():
 
 def test_the_server_rejects_a_pair_the_map_does_not_allow():
     cad = make_cad()
-    with pytest.raises(CadError, match=r"subtype: ALS can't be Bomb \(BOMB\)"):
+    with pytest.raises(CadError, match=r"ALS can't be BOMB"):
         cad.create({"type": "ALS", "subtype": "BOMB", "address": "1 Main St"})
-    with pytest.raises(CadError, match="Brush fire can't be"):
+    with pytest.raises(CadError, match="BRUSH can't be COMM: takes no subtype"):
         cad.create({"type": "BRUSH", "subtype": "COMM"})
     iid = cad.create({"type": "ALS", "address": "1 Main St"})["id"]
-    with pytest.raises(CadError, match="ALS can't be Bomb"):
+    with pytest.raises(CadError, match="ALS can't be BOMB"):
         cad.update(iid, {"subtype": "BOMB", "operator": "JD"})
-    with pytest.raises(CadError, match="Bomb"):                    # a new type with a subtype it doesn't allow
+    with pytest.raises(CadError, match="BOMB"):                    # a new type with a subtype it doesn't allow
         cad.update(iid, {"type": "BLS", "subtype": "BOMB"})
     assert cad.update(iid, {"type": "HAZARD", "subtype": "BOMB"})["subtype"] == "BOMB"
-    with pytest.raises(CadError, match="Alarm can't be Bomb"):     # type changed, subtype kept: checked as a pair
+    with pytest.raises(CadError, match="ALARM can't be BOMB"):     # type changed, subtype kept: checked as a pair
         cad.update(iid, {"type": "ALARM"})
     # The console gets the map: ALARM offers its list, BRUSH none.
     ts = cad.state()["lists"]["type_subtypes"]
     assert ts["ALARM"] == ["COMM", "RESD", "CO-COMM", "CO-RESD", "GAS", "MED", "TROUB"] and ts["BRUSH"] == []
     # Run cards: a pair the map doesn't allow is refused.
-    with pytest.raises(CadError, match="run card ALS/BOMB: subtype: ALS can't be Bomb"):
+    with pytest.raises(CadError, match="run card ALS/BOMB: ALS can't be BOMB"):
         cad.save_run_card({"type": "ALS/BOMB", "slots": [{"kind": "engine", "count": 1}], "operator": "JD"})
     with pytest.raises(CadError, match="can't be"):
         cad.save_run_card({"type": "ALS/BOMB", "rename_from": "ALS", "slots": [{"kind": "engine", "count": 1}]})
@@ -240,7 +240,7 @@ def test_an_old_event_with_a_pair_off_the_map_still_works(tmp_path):
     cad2.note(iid, {"text": "2nd alarm requested", "operator": "JD"})
     cad2.dispatch(iid, {"unit_ids": [uid(cad2, "E60")], "operator": "JD"})
     cad2.upgrade(iid, {"info": "fire through the roof", "operator": "JD"})          # no new type: kept
-    with pytest.raises(CadError, match="Motor vehicle fire can't be Fire"):          # a change has to fit
+    with pytest.raises(CadError, match="MVF can't be FIRE"):          # a change has to fit
         cad2.update(iid, {"type": "MVF", "remarks": "car fire"})
     assert cad2.store.incident(iid)["remarks"] == "smoke showing"                     # nothing of it saved
     assert cad2.update(iid, {"subtype": "COMM"})["subtype"] == "COMM"
@@ -253,7 +253,7 @@ def test_an_old_event_with_a_pair_off_the_map_still_works(tmp_path):
     with cad2.store.tx() as db:
         db.execute("INSERT INTO run_cards (type, spoken, is_default, sort) VALUES ('SERVICE/BOAT', '', 0, 99)")
     assert cad2.save_run_card({"type": "SERVICE/BOAT", "slots": [{"kind": "engine", "count": 2}]})["slots"][0]["count"] == 2
-    with pytest.raises(CadError, match="Service can't be Boat"):
+    with pytest.raises(CadError, match="SERVICE can't be BOAT"):
         cad2.save_run_card({"type": "SERVICE/BOAT", "rename_from": "SERVICE", "slots": [{"kind": "engine", "count": 1}]})
 
 
@@ -315,7 +315,7 @@ def test_a_type_added_in_settings_takes_no_subtype_until_mapped():
     post(cad, "event_types", action="add", code="WATERCOND", item={"name": "Water condition", "color": "#3366CC"})
     assert cad.lists.subtypes_for("WATERCOND") == () and "WATERCOND" not in cad.state()["lists"]["type_subtypes"]
     assert cad.settings_get()["type_subtypes"]["gaps"] == ["WATERCOND: not in the map (no subtype)"]
-    with pytest.raises(CadError, match="Water condition can't be"):
+    with pytest.raises(CadError, match="WATERCOND can't be WATER"):
         cad.create({"type": "WATERCOND", "subtype": "WATER"})
     cad.create({"type": "WATERCOND"})
     post(cad, "type_subtypes", action="set", type="WATERCOND", subtypes=["WATER", "INSIDE"])

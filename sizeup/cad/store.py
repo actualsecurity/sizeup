@@ -739,11 +739,11 @@ class Store:
             if inc is None:
                 raise CadError(f"no incident {iid}")
             if inc["status"] in ("closed", "dismissed"):
-                raise CadError("the incident is closed")
+                raise CadError("Incident closed")
             busy = db.execute("SELECT a.incident_id, i.number FROM assignments a JOIN incidents i ON i.id = a.incident_id "
                               "WHERE a.unit_id = ? AND a.cleared_at IS NULL", (uid,)).fetchone()
             if busy is not None:
-                raise CadError(f"{u['name']} is on {busy['number'] or busy['incident_id']}: clear it there first")
+                raise CadError(f"{u['name']} on {busy['number'] or busy['incident_id']}: clear it there")
             if L.role(u["status"]) == "oos":
                 raise CadError(f"{u['name']} is {L.status_phrase(u['status'])}")
             a = db.execute("SELECT id FROM assignments WHERE incident_id = ? AND unit_id = ? AND cleared_at IS NOT NULL "
@@ -882,9 +882,9 @@ class Store:
         dispatched, a non-emergency one to NON-EMERGENCY EVENTS."""
         inc = self.incident(iid)
         if inc["status"] != "queued":
-            raise CadError(f"event is {inc['status']}, not waiting to be accepted")
+            raise CadError(f"Event {inc['status']}: not a page")
         if not inc["type"]:
-            raise CadError("pick the type first (the page didn't say)")
+            raise CadError("Pick a type")
         now = self.clock()
         with self.tx() as db:
             number = self._next_number(db, now)
@@ -897,7 +897,7 @@ class Store:
     def dismiss(self, iid: int, operator: str = "", reason: str = "") -> dict:
         inc = self.incident(iid)
         if inc["status"] != "queued":
-            raise CadError(f"event is {inc['status']}, not waiting to be accepted")
+            raise CadError(f"Event {inc['status']}: not a page")
         now = self.clock()
         with self.tx() as db:
             db.execute("UPDATE incidents SET status = 'dismissed', closed_at = ? WHERE id = ?", (now, iid))
@@ -908,9 +908,9 @@ class Store:
         """CLOSE EVENT, with a DISPOSITION. Every unit still on it is cleared and back in service."""
         inc = self.incident(iid)
         if inc["status"] not in ("pending", "active"):
-            raise CadError(f"event is {inc['status']}" + (": accept or dismiss it" if inc["status"] == "queued" else ""))
+            raise CadError(f"Event {inc['status']}" + (": accept or dismiss" if inc["status"] == "queued" else ""))
         if not disposition:
-            raise CadError("disposition: required to close (one of the dispositions)")
+            raise CadError("Pick a disposition")
         if disposition not in self.lists.disposition_codes:
             raise CadError(f"disposition: {disposition!r} is not one of the dispositions")
         free = self.lists.status_for("free")

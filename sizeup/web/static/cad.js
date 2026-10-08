@@ -128,7 +128,7 @@ function opParts(s) {
 function opSpan(s, before = "") {
   const [name, email] = opParts(s);
   const sp = el("span", "", before + name);
-  if (email) sp.title = `Signed in with Cloudflare Access as ${email}`;
+  if (email) sp.title = email;
   return sp;
 }
 function store(key, value) {
@@ -227,12 +227,12 @@ function roleOf(code) {
 function statusChip(code, text) {   // the old outline chip, in the data file's status color
   const st = unitStatus(code);
   const c = el("span", "chip st", text ?? st.name);
-  c.style.setProperty("--c", st.bg || "#9aa0b4");
+  c.style.setProperty("--c", st.bg || "#9AA3AD");
   c.title = st.code === (text ?? st.name) ? st.code : `${st.code}: ${st.name}`;
   return c;
 }
 function statusColors(node, st) {  // a status button: its color, and its text color when filled
-  node.style.setProperty("--c", st.bg || "#9aa0b4");
+  node.style.setProperty("--c", st.bg || "#9AA3AD");
   if (st.fg) node.style.setProperty("--fg", st.fg);
   return node;
 }
@@ -244,7 +244,7 @@ function eventStatus(inc) {         // Pending / Open / Active / Closed, with th
 function stBadge(node, name, color) {
   node.className = "st-badge";
   setText(node, name);
-  node.style.setProperty("--c", color || "#9aa0b4");
+  node.style.setProperty("--c", color || "#9AA3AD");
   return node;
 }
 function isEmergency(t, s) {        // data file event_class: TYPE/SUBTYPE, */SUBTYPE, TYPE; default emergency
@@ -289,7 +289,7 @@ function fillListSelects() {
   const via = (L().received_via || []).filter(live).map((v) => [v.code, v.name]);
   fillSelect($("#f-via"), via, "—");
   fillSelect($("#e-via"), via, "—");
-  fillSelect($("#c-disp"), (L().dispositions || []).filter(live).map((d) => [d.code, d.name]), "Pick a disposition…");
+  fillSelect($("#c-disp"), (L().dispositions || []).filter(live).map((d) => [d.code, d.name]), "Disposition");
   const fr = L().full_response || "full department response";
   const label = fr.charAt(0).toUpperCase() + fr.slice(1);
   setText($("#r-full-label"), label);
@@ -310,12 +310,12 @@ function play(url) {
 function renderConn() {
   const pill = $("#conn");
   const age = Date.now() - cad.lastMsgAt;
-  if (!cad.lastMsgAt) { pill.className = "pill warn"; setText(pill, "connecting…"); }
-  else if (age > LOST_AFTER_MS) { pill.className = "pill err"; setText(pill, "not updating"); }
+  if (!cad.lastMsgAt) { pill.className = "pill warn"; setText(pill, "Connecting"); }
+  else if (age > LOST_AFTER_MS) { pill.className = "pill err"; setText(pill, "No updates"); }
   else if (cad.live && cad.live.mode() === "polling") {
-    pill.className = "pill ok"; setText(pill, "live · polling");
-    pill.title = "The live stream is blocked on this network: refreshing every 2 s instead";
-  } else { pill.className = "pill ok"; setText(pill, "live"); pill.title = ""; }
+    pill.className = "pill ok"; setText(pill, "Polling");
+    pill.title = "Stream blocked on this network: polling every 2 s";
+  } else { pill.className = "pill ok"; setText(pill, "Live"); pill.title = ""; }
   document.body.classList.toggle("stale", !!cad.lastMsgAt && age > LOST_AFTER_MS);
 }
 function renderClock() {
@@ -343,7 +343,7 @@ function isOpen(inc) {
   return ["queued", "pending", "active"].includes(inc.status);
 }
 function incTitle(inc) {
-  return inc.number || (inc.status === "queued" ? "Page" : "Not numbered");
+  return inc.number || (inc.status === "queued" ? "Page" : "—");
 }
 
 function queueItem() {
@@ -356,29 +356,29 @@ function queueItem() {
 function fillQueueItem(li, inc) {
   li.className = `qi ${inc.status}` + (inc.emergency ? "" : " nonemerg") + (inc.id === cad.sel ? " sel" : "");
   const head = el("div", "qh");
-  const t = el("span", "qt", typeLabel(inc.type, inc.subtype) || "Type not set");
-  if (inc.type) t.style.setProperty("--c", typeColor(inc.type) || "#9aa0b4");
+  const t = el("span", "qt", typeLabel(inc.type, inc.subtype) || "No type");
+  if (inc.type) t.style.setProperty("--c", typeColor(inc.type) || "#9AA3AD");
   else t.classList.add("warn");
   head.append(el("b", "qn", incTitle(inc)), t);
-  if (inc.joint_call) head.append(el("span", "chip joint", `${inc.joint_call} call`));
+  if (inc.joint_call) head.append(el("span", "chip joint", inc.joint_call));
   const right = el("span", "qe");
   if (isOpen(inc)) since(right, inc.created_at);
   else right.textContent = fmtTime(inc.closed_at);
   head.append(el("span", "spacer"), right);
-  const addr = el("div", "qa" + (inc.address ? "" : " dim"), inc.address || "no location");
+  const addr = el("div", "qa" + (inc.address ? "" : " dim"), inc.address || "No location");
   li.replaceChildren(head, addr);
   if (inc.status === "queued") {
     if (inc.type_note) li.append(el("div", "qs warn", inc.type_note));
-    li.append(el("div", "qs dim", "from 60 Control page · needs Accept or Dismiss"));
+    li.append(el("div", "qs dim", "Accept or Dismiss"));
   } else if (!inc.emergency && isOpen(inc)) {
-    li.append(el("div", "qs dim", inc.until_at ? `until ${fmtTime(inc.until_at)}` : "no end time"));
+    if (inc.until_at) li.append(el("div", "qs dim", `Until ${fmtTime(inc.until_at)}`));
   } else if (!isOpen(inc)) {
-    li.append(el("div", "qs dim", inc.status === "dismissed" ? "dismissed" : nameOf("dispositions", inc.disposition) || "closed"));
+    li.append(el("div", "qs dim", inc.status === "dismissed" ? "Dismissed" : nameOf("dispositions", inc.disposition) || "Closed"));
   }
   const on = openAssignments(inc);
   if (on.length) {
     const chips = el("div", "chips");
-    for (const a of on) chips.append(statusChip(a.status, `${a.name} · ${unitStatus(a.status).name}`));
+    for (const a of on) chips.append(statusChip(a.status, `${a.name} ${a.status}`));
     li.append(chips);
   }
 }
@@ -388,14 +388,14 @@ function renderQueue() {
   const sig = (i) => JSON.stringify([i.status, i.number, i.type, i.subtype, i.address, i.id === cad.sel, i.emergency,
     i.until_at, i.disposition, i.type_note, i.joint_call, openAssignments(i).map((a) => [a.name, a.status]), i.closed_at, cad.listSig.length]);
   const opts = { key: (i) => String(i.id), sig, make: queueItem, fill: fillQueueItem };
-  syncList($("#q-queued"), all.filter((i) => i.status === "queued").sort(byAge), { ...opts, empty: "No pages waiting" });
+  syncList($("#q-queued"), all.filter((i) => i.status === "queued").sort(byAge), { ...opts, empty: "None" });
   syncList($("#q-pending"), all.filter((i) => i.status === "pending" && i.emergency).sort(byAge),
-    { ...opts, empty: "Nothing waiting for units" });
-  syncList($("#q-active"), all.filter((i) => i.status === "active" && i.emergency), { ...opts, empty: "No active incidents" });
+    { ...opts, empty: "None" });
+  syncList($("#q-active"), all.filter((i) => i.status === "active" && i.emergency), { ...opts, empty: "None" });
   syncList($("#q-nonemerg"), all.filter((i) => (i.status === "pending" || i.status === "active") && !i.emergency).sort(byAge),
-    { ...opts, empty: "None open" });
+    { ...opts, empty: "None" });
   syncList($("#q-closed"), all.filter((i) => i.status === "closed" || i.status === "dismissed"),
-    { ...opts, empty: "None closed recently" });
+    { ...opts, empty: "None" });
 }
 
 // ---- incident detail ------------------------------------------------------------------
@@ -422,19 +422,19 @@ function renderDetail() {
   show($("#d-empty"), cad.mode === "none" || (cad.mode === "view" && !inc));
   show($("#d-body"), !!inc);
   if (cad.mode === "view" && !inc) {
-    setText($("#d-empty .big"), "That incident is no longer listed");
+    setText($("#d-empty .big"), "Not listed");
     return;
   }
-  setText($("#d-empty .big"), "No incident selected");
+  setText($("#d-empty .big"), "No incident");
   if (!inc) return;
   const open = isOpen(inc);
   setText($("#d-number"), incTitle(inc));
   const es = eventStatus(inc);
   stBadge($("#d-status"), es.name, es.bg);
-  stBadge($("#d-class"), inc.emergency ? "Emergency" : "Non-emergency", inc.emergency ? "#ff8a7a" : "#8fb8d8");
+  stBadge($("#d-class"), inc.emergency ? "Emergency" : "Non-emergency", inc.emergency ? "#EE6475" : "#8fb8d8");
   show($("#d-joint"), !!inc.joint_call);
-  if (inc.joint_call) stBadge($("#d-joint"), `${inc.joint_call} call`, "#a3a9ff");
-  setText($("#d-source"), inc.source === "manual" ? "entered by hand" : `from ${inc.source}`);
+  if (inc.joint_call) stBadge($("#d-joint"), inc.joint_call, "#6AA6E8");
+  setText($("#d-source"), inc.source === "manual" ? "Manual" : inc.source);
   show($("#d-accept"), inc.status === "queued");
   show($("#d-dismiss"), inc.status === "queued");
   show($("#d-close"), inc.status === "pending" || inc.status === "active");
@@ -452,14 +452,14 @@ function renderDetail() {
     }
   }
   const type = $("#d-type");
-  setText(type, typeLabel(inc.type, inc.subtype) || "Type not set");
-  type.style.setProperty("--c", inc.type ? typeColor(inc.type) || "#ff7a5c" : "#ffb020");
+  setText(type, typeLabel(inc.type, inc.subtype) || "No type");
+  type.style.setProperty("--c", inc.type ? typeColor(inc.type) || "#ff7a5c" : "#E0A030");
   const addr = $("#d-addr");
   addr.className = "d-addr" + (inc.address ? "" : " dim");
   setText(addr, inc.address || "No location");
   setText($("#d-cross"), inc.cross_street ? `Cross: ${inc.cross_street}` : "");
   setText($("#d-geo"), inc.lat != null ? `Map: ${inc.geo_label || `${inc.lat.toFixed(5)}, ${inc.lon.toFixed(5)}`}`
-    : "Not on the map (no gazetteer match picked)");
+    : "No map point");
   $("#d-geo").className = "geo" + (inc.lat != null ? "" : " warn");
   setText($("#d-created"), fmtTime(inc.created_at, true));
   const elapsed = $("#d-elapsed");
@@ -472,7 +472,7 @@ function renderDetail() {
   setText($("#d-until"), inc.until_at ? fmtTime(inc.until_at) : "");
   show($("#d-disp-w"), !!inc.disposition);
   setText($("#d-disp"), inc.disposition ? nameOf("dispositions", inc.disposition) : "");
-  const caller = [inc.caller_name, inc.phone, inc.caller_address].filter(Boolean).join(" · ");
+  const caller = [inc.caller_name, inc.phone, inc.caller_address].filter(Boolean).join(" / ");
   setText($("#d-caller"), caller ? `Caller: ${caller}` : "");
   setText($("#d-narr"), inc.remarks || "");
   show($("#d-narr"), !!inc.remarks);
@@ -491,16 +491,16 @@ function renderDetail() {
 // Every transmission from a radio on a unit assigned to it (dispatched / attached until it cleared),
 // FG1 while it had units on it, and 60 Control's turns answering those units in the same P25 call.
 
-const RADIO_WHY = { unit: "unit", channel: "FG1 · unidentified radio", dispatcher: "60 Control", manual: "added" };
+const RADIO_WHY = { unit: "Unit", channel: "FG1", dispatcher: "60 Control", manual: "Added" };
 function radioRow(t) {
   const li = el("li", "rt");
   const meta = el("div", "meta");
-  const b = el("button", "play", "▶");
-  b.title = t.has_audio === false ? "Recording no longer kept (12 h)" : "Play this transmission";
+  const b = Icon.play(el("button", "play"));
+  b.title = t.has_audio === false ? "Recording expired (12 h)" : "Play";
   b.disabled = t.has_audio === false;
   b.addEventListener("click", () => play(`/api/audio/${encodeURIComponent(t.id)}.wav`));
   const rr = el("button", "rerun", "↻");
-  rr.title = "Run speech-to-text again on this recording";
+  rr.title = "Re-transcribe";
   rr.disabled = t.has_audio === false;
   rr.addEventListener("click", async () => {
     rr.disabled = true;
@@ -518,12 +518,12 @@ function radioRow(t) {
   if (t.why) {
     const w = el("span", `why ${t.why}`, RADIO_WHY[t.why] || t.why);
     w.title = t.why === "unit" ? `${t.link_unit || t.rig} was on this incident` : t.why === "channel"
-      ? "An unidentified radio on FG1 while this was the only call with units on it" : t.why === "manual"
-      ? `Added${t.link_unit ? ` by ${t.link_unit}` : " by hand"} (+ event on the 60 Control feed)` : `60 Control answering ${t.link_unit || "a unit on it"} in the same call`;
+      ? "Unidentified FG1 radio while this was the only call with units" : t.why === "manual"
+      ? `Added${t.link_unit ? ` by ${t.link_unit}` : " by hand"}` : `60 Control answering ${t.link_unit || "a unit on it"}`;
     meta.append(w);
   }
   if (t.end > t.start) meta.append(el("span", "dim", `${Math.round(t.end - t.start)} s`));
-  const said = t.status === "no_speech" ? "key-up · no speech" : t.status === "pending" ? "transcribing…" : "(no words)";
+  const said = t.status === "no_speech" ? "Key-up, no speech" : t.status === "pending" ? "Transcribing" : "—";
   li.append(meta, el("div", "txt" + (t.text ? "" : " muted"), t.text || said));
   li.classList.toggle("from-dispatch", !!t.dispatcher);
   return li;
@@ -534,7 +534,7 @@ function noteRow(e) {
   const meta = el("div", "meta");
   meta.append(el("span", "t", fmtTime(e.at, true)), el("span", "ek note", "note"));
   for (const u of tagsOf(e)) meta.append(unitChip(u));
-  if (e.operator) meta.append(opSpan(e.operator, "· "));
+  if (e.operator) meta.append(opSpan(e.operator));
   li.append(meta, el("div", "txt", noteText(e)));
   return li;
 }
@@ -542,7 +542,7 @@ const tagsOf = (e) => (e.units || "").split(",").filter(Boolean);
 function unitChip(u) {
   const c = el("button", "unit-tag", u);
   c.type = "button";
-  c.title = `Show only ${u}: its notes and its radio traffic`;
+  c.title = `Only ${u}`;
   c.dataset.unitFilter = u;
   if (Radio.talkingFor(u)) c.classList.add("talking");
   return c;
@@ -566,8 +566,7 @@ function renderRadio(inc) {
   const u = cad.radioUnit;
   const shownItems = u ? items.filter((x) => x.units.includes(u)) : items;
   const nr = items.filter((x) => x.kind === "radio").length, nn = items.length - nr;
-  setText($("#d-radio-sum"), [nr ? `${nr} transmission${nr === 1 ? "" : "s"}` : "", nn ? `${nn} unit note${nn === 1 ? "" : "s"}` : ""]
-    .filter(Boolean).join(" · "));
+  setText($("#d-radio-sum"), [nr ? `${nr} TX` : "", nn ? `${nn} note${nn === 1 ? "" : "s"}` : ""].filter(Boolean).join(" / "));
   $("#d-radio-all").href = `/comms?event=${encodeURIComponent(inc.number || inc.id)}` + (u ? `&unit=${encodeURIComponent(u)}` : "");
   const bar = $("#d-radio-units"), sig = JSON.stringify([all, u, all.map(talkSig)]);
   if (bar._sig !== sig) {
@@ -592,8 +591,7 @@ function renderRadio(inc) {
       li.className = n.className;
       li.replaceChildren(...n.childNodes);
     },
-    empty: u ? `Nothing from ${u} on this incident yet` : isOpen(inc) ? "No radio traffic or unit notes yet"
-      : "No radio traffic was linked to it",
+    empty: "None",
   });
 }
 document.addEventListener("click", (e) => {
@@ -617,9 +615,9 @@ function callPicker(u, where, box) {
   const open = incidents().filter((i) => ["pending", "active"].includes(i.status));
   const add = (value, text) => { const o = el("option", "", text); o.value = String(value); sel.append(o); };
   const cur = open.find((i) => i.id === now.incident_id);
-  if (cur) add(cur.id, `${incTitle(cur)} · ${typeLabel(cur.type, cur.subtype) || "type not set"} · ${cur.address || ""} (current)`);
-  for (const i of open) if (i !== cur) add(i.id, `${incTitle(i)} · ${typeLabel(i.type, i.subtype) || "type not set"} · ${i.address || ""}`);
-  add(0, "No call: status only");
+  if (cur) add(cur.id, `${incTitle(cur)} ${typeLabel(cur.type, cur.subtype) || "No type"}, ${cur.address || ""} (current)`);
+  for (const i of open) if (i !== cur) add(i.id, `${incTitle(i)} ${typeLabel(i.type, i.subtype) || "No type"}, ${i.address || ""}`);
+  add(0, "No call");
   const ok = el("button", "mini on", `${st.name}`);
   ok.type = "submit";
   statusColors(ok, st);
@@ -635,7 +633,7 @@ function callPicker(u, where, box) {
     } catch (err) { alert(err.message); }
   });
   form.addEventListener("click", (e) => e.stopPropagation());
-  form.append(el("span", "small", `${now.name || ""} ${st.name.toLowerCase()} on:`), sel, ok, cancel);
+  form.append(el("span", "small", `${now.name || ""} ${st.code} on`), sel, ok, cancel);
   box.append(form);
   setTimeout(() => { if (document.activeElement !== sel) sel.focus(); }, 0);
   return box;
@@ -650,10 +648,10 @@ function statusButtons(u, where) {
     const input = el("input");
     input.type = "text";
     input.maxLength = 200;
-    input.placeholder = `${st.name}: why? (optional)`;
+    input.placeholder = "Reason (optional)";
     input.value = cad.ask.text || "";
     input.addEventListener("input", () => { cad.ask.text = input.value; });
-    const ok = el("button", "mini on", `Set ${st.name.toLowerCase()}`);
+    const ok = el("button", "mini on", st.name);
     ok.type = "submit";
     statusColors(ok, st);
     const cancel = el("button", "mini", "Cancel");
@@ -709,7 +707,7 @@ function talkSig(name) {
 function agencyButtons(u, where, box) {
   const now = unitById(u.id) || u;
   if (!now.incident_id) {
-    if (where === "board") box.append(el("span", "dim small", "Attach it to an event when it shows up (never dispatched)."));
+    if (where === "board") box.append(el("span", "dim small", "Attach only"));
     return box;
   }
   const codes = L().agency_statuses || [];
@@ -717,7 +715,7 @@ function agencyButtons(u, where, box) {
     const s = unitStatus(code);
     if (code === now.status) return;
     const b = el("button", "mini", i === codes.length - 1 && s.role === "free" ? "Cleared" : s.name);
-    b.style.setProperty("--c", s.bg || "#9aa0b4");
+    b.style.setProperty("--c", s.bg || "#9AA3AD");
     b.addEventListener("click", (e) => { e.stopPropagation(); setUnitStatus(u.id, code); });
     box.append(b);
   });
@@ -737,17 +735,17 @@ function renderOnUnits(inc) {
       const head = el("div", "ouh");
       head.append(el("b", "", a.name));
       if (!a.cleared_at) head.append(statusChip(a.status));
-      const times = el("span", "dim small",
-        [["disp", a.dispatched_at], ["resp", a.enroute_at], ["on loc", a.onscene_at], ["cleared", a.cleared_at]]
-          .filter(([, t]) => t).map(([k, t]) => `${k} ${fmtTime(t, true)}`).join(" · "));
+      const times = el("span", "dim small times");
+      times.append(...[["Disp", a.dispatched_at], ["Resp", a.enroute_at], ["OnLoc", a.onscene_at], ["Clr", a.cleared_at]]
+        .filter(([, t]) => t).map(([k, t]) => el("span", "", `${k} ${fmtTime(t, true)}`)));
       head.append(times, el("span", "spacer"));
       const talk = !a.cleared_at && Radio.talkingFor(a.name);
-      if (talk) head.append(el("span", "talk-badge", `📻 ${talk.ended ? "just transmitted" : "talking"} · ${talk.channel}`));
+      if (talk) head.append(el("span", "talk-badge", `${talk.ended ? "Ended" : "TX"} ${talk.channel}`));
       if (!a.cleared_at && isOpen(inc)) head.append(statusButtons({ id: a.unit_id, status: a.status, next: a.next }, "inc"));
       else if (a.cleared_at && isOpen(inc) && (a.return || []).length) head.append(returnButtons(inc, a));
       li.replaceChildren(head);
     },
-    empty: inc.status === "queued" ? "None: accept, then dispatch" : "No units on this incident",
+    empty: "None",
   });
 }
 
@@ -765,22 +763,22 @@ function renderEvents(inc) {
     fill: (li, e) => {
       const meta = el("div", "meta");
       meta.append(el("span", "t", fmtTime(e.at, true)), el("span", `ek ${e.kind}`, EVENT_KINDS[e.kind] || e.kind));
-      if (e.operator) meta.append(opSpan(e.operator, "· "));
+      if (e.operator) meta.append(opSpan(e.operator));
       const txt = el("div", "txt");
       const did = playForEvent(inc, e);
       if (did) {
-        const b = el("button", "play mini", "▶");
-        b.title = "Play this dispatch";
+        const b = Icon.play(el("button", "play mini"));
+        b.title = "Play";
         b.addEventListener("click", () => play(`/api/cad/dispatch/${did}.wav`));
         txt.append(b);
       }
       if (e.kind === "note" && e.units) {
         for (const u of tagsOf(e)) txt.append(unitChip(u), document.createTextNode(" "));
-        txt.append(document.createTextNode("· " + noteText(e)));
+        txt.append(document.createTextNode(noteText(e)));
       } else txt.append(document.createTextNode(e.text));
       li.replaceChildren(meta, txt);
     },
-    empty: "Nothing yet",
+    empty: "None",
   });
 }
 
@@ -794,14 +792,15 @@ function renderDispatches(inc) {
     fill: (li, d) => {
       const meta = el("div", "meta");
       meta.append(el("span", "t", fmtTime(d.at, true)), el("span", `ek ${d.kind === "upgrade" ? "upgrade" : "dispatch"}`,
-        DISPATCH_KINDS[d.kind] || d.kind || "dispatch"), d.operator ? opSpan(d.operator, "by ") : el("span", "", ""),
-      el("span", "", d.channel ? `· ${d.channel}` : ""));
-      meta.append(el("span", d.transmitted ? "txd" : "notx", d.transmitted ? "Transmitted" : "Not transmitted"));
-      if (!d.transmitted && d.tx_note) meta.append(el("span", "", `(${d.tx_note})`));
+        DISPATCH_KINDS[d.kind] || d.kind || "dispatch"), d.operator ? opSpan(d.operator) : el("span", "", ""),
+      el("span", "", d.channel || ""));
+      const tx = el("span", d.transmitted ? "txd" : "notx", d.transmitted ? "Transmitted" : "Not transmitted");
+      if (!d.transmitted && d.tx_note) tx.title = d.tx_note;
+      meta.append(tx);
       const row = el("div", "row");
       if (d.has_audio) {
-        const b = el("button", "play", "▶");
-        b.title = "Play this dispatch";
+        const b = Icon.play(el("button", "play"));
+        b.title = "Play";
         b.addEventListener("click", () => play(`/api/cad/dispatch/${d.id}.wav`));
         row.append(b);
       }
@@ -811,7 +810,7 @@ function renderDispatches(inc) {
       if (d.tones) li.append(el("div", d.tones.includes("not set") ? "warn small" : "dim small", `Tones: ${d.tones}`));
       if (d.audio_note) li.append(el("div", "dim small", d.audio_note));
     },
-    empty: "No dispatches yet",
+    empty: "None",
   });
 }
 
@@ -847,9 +846,8 @@ const REMARKS_LONG = 200, REMARKS_MAX = 500;
 function remarksNote() {
   const n = $("#r-remarks").value.trim().length, note = $("#r-remarks-note");
   note.className = n > REMARKS_LONG ? "warn small" : "dim small";
-  setText(note, n > REMARKS_MAX ? `${n} characters: too long to send (at most ${REMARKS_MAX})`
-    : n > REMARKS_LONG ? `${n} characters: long (the voice reads it twice). Consider shortening.`
-      : n ? `${n} characters · said as "Reported: …"` : "Nothing extra said");
+  setText(note, n > REMARKS_MAX ? `${n}/${REMARKS_MAX}: too long`
+    : n > REMARKS_LONG ? `${n}/${REMARKS_MAX}: long, read twice` : n ? `${n}/${REMARKS_MAX}` : "");
 }
 // The box starts from the event's remarks for its first dispatch only, and empty after each dispatch
 // (an add-on shouldn't repeat what was already said) and for 60 Control pages (their remarks are the
@@ -877,23 +875,23 @@ function renderDispatchBox(inc) {
   show($("#r-kind"), addOn);
   const jq = jointQuick();
   show($("#r-joint"), !!jq);
-  if (jq) setText($("#r-joint"), `Add ${jq.town} (${jq.quick_add.join(", ")})`);
+  if (jq) { setText($("#r-joint"), `Add ${jq.town}`); $("#r-joint").title = `Tick ${jq.quick_add.join(", ")} if available`; }
   show($("#u-open"), addOn && inc.status !== "queued");
-  if (!$("#r-dispatch")._busy) setText($("#r-dispatch"), addOn ? "Dispatch (add-on)" : "Dispatch");
+  if (!$("#r-dispatch")._busy) setText($("#r-dispatch"), addOn ? "Dispatch add-on" : "Dispatch");
   const rec = cad.rec && cad.rec.iid === inc.id ? cad.rec : null;
-  setText($("#r-card"), rec && rec.card ? `run card: ${rec.card_label || rec.card}${rec.forType ? " (new type)" : ""}` : "");
+  setText($("#r-card"), rec && rec.card ? `Card: ${rec.card_label || rec.card}${rec.forType ? " (new type)" : ""}` : "");
   const warn = rec ? [...(rec.error ? [rec.error] : []), ...(rec.note ? [rec.note] : []), ...rec.unfilled] : [];
   $("#r-unfilled").replaceChildren(...warn.map((w) => el("li", "", w)));
   const order = rec && rec.order;
   setText($("#r-order"), !order || !rec.units.length ? ""
-    : order.by === "nearest" ? "Nearest first in each slot, by estimated arrival (estimates only)" : `Board order: ${order.note}`);
+    : order.by === "nearest" ? "Order: nearest first (est.)" : `Order: ${order.note}`);
   const rows = rec ? [...rec.units, ...rec.extra.map((id) => ({ ...unitById(id), slot: "added" }))] : [];
   const sig = JSON.stringify([rows.map((u) => u.id), rec && [...rec.checked], rec && rec.already,
     rows.map((u) => { const x = unitById(u.id); return x ? [x.status, x.incident_id] : null; }), cad.listSig.length]);
   if (rec && rec.sig === sig) return;
   if (rec) rec.sig = sig;
   const list = $("#r-units");
-  if (!rec) { list.replaceChildren(el("li", "empty", "Working out the run card…")); return; }
+  if (!rec) { list.replaceChildren(el("li", "empty", "Loading")); return; }
   const items = rows.map((u) => {
     const now = unitById(u.id) || u;
     const li = el("li", "ru");
@@ -909,15 +907,14 @@ function renderDispatchBox(inc) {
     if (u.reason) lab.append(etaHint(u));
     lab.append(el("span", "spacer"), statusChip(now.status));
     if (now.spare) lab.append(el("span", "chip spare", "spare"));
-    if (now.incident_id && now.incident_id !== inc.id) lab.append(el("span", "warn small", `on ${now.incident_number} (will be moved)`));
+    if (now.incident_id && now.incident_id !== inc.id) lab.append(el("span", "warn small", `On ${now.incident_number}: moves`));
     li.append(lab);
     return li;
   });
   if (!items.length) {
-    items.push(el("li", "empty", rec.already.length ? `Already on it: ${rec.already.join(", ")}. Nothing more on the run card.`
-      : "Nothing to recommend: add units below"));
+    items.push(el("li", "empty", rec.already.length ? `On it: ${rec.already.join(", ")}. Card filled` : "None"));
   } else if (rec.already.length) {
-    items.push(el("li", "dim small", `Already on it: ${rec.already.join(", ")}`));
+    items.push(el("li", "dim small", `On it: ${rec.already.join(", ")}`));
   }
   list.replaceChildren(...items);
   // Add any other unit (not out of service or unmanned, not already listed or on this incident).
@@ -925,22 +922,26 @@ function renderDispatchBox(inc) {
   const others = units().filter((u) => !listed.has(u.id) && canDispatch(u) && u.incident_id !== inc.id && (u.board || u.incident_id));
   const hints = (rec && rec.others) || {};
   fillSelect($("#r-add"), others.map((u) => [String(u.id),
-    `${u.name} · ${unitStatus(u.status).name}${u.incident_number ? ` (on ${u.incident_number})` : ""}`
-    + (hints[u.id] ? ` · ${hints[u.id].reason}` : "")]),
-  others.length ? "Add another unit…" : "No other units in service");
+    `${u.name} ${u.status}${u.incident_number ? ` on ${u.incident_number}` : ""}`
+    + (hints[u.id] ? `, ${etaSplit(hints[u.id]).join(" ")}` : "")]),
+  others.length ? "Add unit" : "None available");
   const ch = $("#r-channel");
   const chans = (cad.state.transmit && cad.state.transmit.channels) || [];
   if (ch.options.length !== chans.length) fillSelect(ch, chans.map((c) => [c, c]));
 }
 
-// "~2 min est. · returning from 26-000004": the estimate in bold, the why after it (runcards.estimates).
-function etaHint(u) {
+// runcards.estimates' "~2 min est. · returning from 26-000004" shown as "≈2 min returning from 26-000004":
+// the estimate (still marked as one) in bold, then where from.
+function etaSplit(u) {
   const [t, ...why] = u.eta ? u.reason.split(" · ") : ["", u.reason];
-  const span = el("span", "eta" + (/^returning|^near/.test(why.join(" · ")) ? " ret" : "") + (u.eta ? "" : " unk"));
-  if (t) span.append(el("b", "", t), document.createTextNode(why.length ? ` · ${why.join(" · ")}` : ""));
-  else span.textContent = why.join(" · ");
-  span.title = u.eta ? "Estimated arrival (straight line × road factor, average speed, + turnout from quarters): an estimate"
-    : "No estimate";
+  return [t.replace(/^~(\d+) min est\.$/, "≈$1 min"), why.join(" ")].filter(Boolean);
+}
+function etaHint(u) {
+  const [t, why] = u.eta ? etaSplit(u) : ["", u.reason];
+  const span = el("span", "eta" + (/^returning|^near/.test(why || "") ? " ret" : "") + (u.eta ? "" : " unk"));
+  if (t) span.append(el("b", "", t), document.createTextNode(why ? ` ${why}` : ""));
+  else span.textContent = why || "";
+  span.title = u.eta ? "Estimate: straight line × road factor at average speed, plus turnout" : "No estimate";
   return span;
 }
 
@@ -994,7 +995,7 @@ function showPreview(title, text, url, note, r) {
   setText($("#r-preview-text"), text);
   const warns = (r && r.tone_warnings) || [];
   $("#r-preview-tones").className = warns.length ? "warn small" : "dim small";
-  setText($("#r-preview-tones"), r && r.tones ? `Tones: ${r.tones}${warns.length ? ` · ${warns.join("; ")}` : ""}` : "");
+  setText($("#r-preview-tones"), r && r.tones ? `Tones: ${r.tones}${warns.length ? `. ${warns.join("; ")}` : ""}` : "");
   const a = $("#r-audio");
   show(a, !!url);
   if (url) { a.src = url; a.play().catch(() => {}); }
@@ -1014,12 +1015,12 @@ async function preview() {
   flash($("#r-error"));
   if (!inc) return;
   const ids = checkedIds();
-  if (!ids.length) return flash($("#r-error"), "Tick at least one unit.");
-  await busy($("#r-preview"), "Rendering…", async () => {
+  if (!ids.length) return flash($("#r-error"), "Tick a unit");
+  await busy($("#r-preview"), "Rendering", async () => {
     try {
       const r = await api("POST", `/api/cad/incident/${inc.id}/preview`,
         { unit_ids: ids, full: $("#r-full").checked, remarks: $("#r-remarks").value });
-      showPreview(`Preview${r.kind === "add_on" ? " (add-on)" : ""}: nothing assigned or logged`, r.text, r.audio_url, r.audio_note, r);
+      showPreview(`Preview${r.kind === "add_on" ? " add-on" : ""}: not logged`, r.text, r.audio_url, r.audio_note, r);
     } catch (e) {
       flash($("#r-error"), e.message);
     }
@@ -1028,7 +1029,7 @@ async function preview() {
 
 function needOperator(errNode) {
   const op = operator();
-  if (!op) { ($("#operator-pick").hidden ? $("#operator") : $("#operator-pick")).focus(); flash(errNode, "Enter your name (Operator, top right) first."); }
+  if (!op) { ($("#operator-pick").hidden ? $("#operator") : $("#operator-pick")).focus(); flash(errNode, "Enter operator name (top right)"); }
   return op;
 }
 
@@ -1039,14 +1040,14 @@ async function dispatch() {
   const op = needOperator($("#r-error"));
   if (!op) return;
   const ids = checkedIds();
-  if (!ids.length) return flash($("#r-error"), "Tick at least one unit.");
-  await busy($("#r-dispatch"), "Dispatching…", async () => {
+  if (!ids.length) return flash($("#r-error"), "Tick a unit");
+  await busy($("#r-dispatch"), "Dispatching", async () => {
     try {
       const r = await api("POST", `/api/cad/incident/${inc.id}/dispatch`,
         { unit_ids: ids, operator: op, channel: $("#r-channel").value, full: $("#r-full").checked, remarks: $("#r-remarks").value });
-      const how = r.transmitted ? `transmitted on ${r.channel}` : `logged, not transmitted (${r.detail})`;
-      showPreview(`${r.kind === "add-on" ? "Add-on dispatch" : "Dispatch"} #${r.dispatch_id}: ${how}`
-        + (r.moved.length ? ` · moved ${r.moved.join(", ")}` : ""), r.text, r.audio_url, r.audio_note, r);
+      const how = r.transmitted ? `transmitted on ${r.channel}` : "logged, not transmitted";
+      showPreview(`${r.kind === "add-on" ? "Add-on" : "Dispatch"} #${r.dispatch_id}: ${how}`
+        + (r.moved.length ? `. Moved ${r.moved.join(", ")}` : ""), r.text, r.audio_url, r.audio_note, r);
       $("#r-full").checked = false;
       setTimeout(() => recommend(), 300);
     } catch (e) {
@@ -1072,12 +1073,12 @@ async function upgrade(e, previewOnly) {
     body.channel = $("#r-channel").value;
   } else body.preview = true;
   const b = previewOnly ? $("#u-preview") : $("#u-send");
-  await busy(b, previewOnly ? "Rendering…" : "Sending…", async () => {
+  await busy(b, previewOnly ? "Rendering" : "Sending", async () => {
     try {
       const r = await api("POST", `/api/cad/incident/${inc.id}/upgrade`, body);
-      if (previewOnly) showPreview("Upgrade preview: nothing changed or logged", r.text, r.audio_url, r.audio_note, r);
+      if (previewOnly) showPreview("Preview upgrade: not logged", r.text, r.audio_url, r.audio_note, r);
       else {
-        const how = r.transmitted ? `transmitted on ${r.channel}` : `logged, not transmitted (${r.detail})`;
+        const how = r.transmitted ? `transmitted on ${r.channel}` : "logged, not transmitted";
         showPreview(`Upgrade #${r.dispatch_id}: ${how}`, r.text, r.audio_url, r.audio_note, r);
         $("#upgrade-form").reset();
         show($("#upgrade-form"), false);
@@ -1133,12 +1134,12 @@ function suggestUnits() {
     li.setAttribute("aria-selected", String(i === noteTag.idx));
     li.append(el("b", "", c));
     const u = units().find((x) => x.name === c);
-    if (on.has(c)) li.append(el("span", "town ours", "on this incident"));
+    if (on.has(c)) li.append(el("span", "town ours", "Assigned"));
     else if (u && (u.title || u.department)) li.append(el("span", "dim small", u.title || u.department));
     li.addEventListener("mousedown", (e) => { e.preventDefault(); takeUnit(c); });
     return li;
   }));
-  box.append(el("li", "hint dim small", "Tab or Enter to tag · ↑↓ · Esc"));
+  box.append(el("li", "hint dim small", "Tab to tag, Esc to close"));
   const fresh = box.hidden;
   show(box, true);
   if (fresh) box.scrollIntoView({ block: "nearest" });
@@ -1187,10 +1188,10 @@ function noteUnits(text) {
 function renderNoteTags() {
   const box = $("#note-tags");
   const tags = [...noteTag.tags];
-  box.replaceChildren(el("span", "dim small", "Who said it:"), ...tags.map((t) => {
+  box.replaceChildren(el("span", "dim small", "Tagged"), ...tags.map((t) => {
     const b = el("button", "unit-tag on", `${t} ✕`);
     b.type = "button";
-    b.title = `Don't tag ${t}`;
+    b.title = `Untag ${t}`;
     b.addEventListener("click", () => { noteTag.tags.delete(t); renderNoteTags(); });
     return b;
   }));
@@ -1202,9 +1203,9 @@ function renderNoteTags() {
 function renderAttach(inc) {
   if (!inc || !isOpen(inc)) return;
   // An emergency event: only other agencies (EMS, PD) that show up; they are never dispatched.
-  setText($("#a-title"), inc.emergency ? "Other agencies on scene" : "Attach a unit");
-  setText($("#a-hint"), inc.emergency ? "EMS, PD, utilities: add them when they show up. Never dispatched or toned out."
-    : "Non-emergency: no run card and no dispatch.");
+  setText($("#a-title"), inc.emergency ? "Other agencies" : "Attach");
+  $("#a-hint").dataset.help = inc.emergency ? "EMS, PD, utilities: attach them when they arrive. Never dispatched or toned out."
+    : "Non-emergency: no run card, no dispatch.";
   const others = units().filter((u) => u.incident_id !== inc.id && (u.board || u.incident_id)
     && (!inc.emergency || u.response === "agency"));
   const sig = JSON.stringify([inc.emergency, others.map((u) => [u.id, u.status, u.incident_number])]);
@@ -1212,12 +1213,12 @@ function renderAttach(inc) {
   if (sel._sig === sig) return;
   sel._sig = sig;
   fillSelect(sel, others.map((u) => [String(u.id),
-    `${u.name} · ${unitStatus(u.status).name}${u.incident_number ? ` (on ${u.incident_number})` : ""}`]), "Pick a unit…");
+    `${u.name} ${u.status}${u.incident_number ? ` on ${u.incident_number}` : ""}`]), "Unit");
 }
 async function attach() {
   const inc = selected(), id = Number($("#a-unit").value);
   flash($("#a-error"));
-  if (!inc || !id) return flash($("#a-error"), "Pick a unit.");
+  if (!inc || !id) return flash($("#a-error"), "Pick a unit");
   try {
     await api("POST", `/api/cad/incident/${inc.id}/attach`, { unit_ids: [id], operator: operator() });
     $("#a-unit").value = "";
@@ -1245,7 +1246,7 @@ async function closeIncident(e) {
   e.preventDefault();
   flash($("#c-error"));
   const d = $("#c-disp").value;
-  if (!d) return flash($("#c-error"), "Pick a disposition first.");
+  if (!d) return flash($("#c-error"), "Pick a disposition");
   const r = await act("close", { disposition: d }, $("#c-error"));
   if (r) { $("#c-disp").value = ""; show($("#close-form"), false); }
 }
@@ -1263,8 +1264,8 @@ function returnButtons(inc, a) {
   for (const code of a.return || []) {
     const s = unitStatus(code);
     const b = el("button", "mini", s.name);
-    b.style.setProperty("--c", s.bg || "#9aa0b4");
-    b.title = `Send ${a.name} back to this call: ${s.name.toLowerCase()}`;
+    b.style.setProperty("--c", s.bg || "#9AA3AD");
+    b.title = `${a.name} back to this call: ${s.name}`;
     b.addEventListener("click", (e) => { e.stopPropagation(); returnUnit(inc.id, a.unit_id, code); });
     box.append(b);
   }
@@ -1288,8 +1289,8 @@ function addressBox(input, geoNote, list) {
     geoNote.className = "geo span2" + (box.picked ? "" : " warn");
     if (box.picked) setText(geoNote, `Map: ${box.picked.label} (${box.picked.kind}, ${Math.round(box.picked.confidence * 100)}%)`);
     else if (!input.value.trim()) setText(geoNote, "");
-    else if (cad.state && !cad.state.geocoder) setText(geoNote, "Geocoder unavailable: saved as typed, no map pin.");
-    else setText(geoNote, "No suggestion picked: saved as typed; placed on the map only if the gazetteer is sure.");
+    else if (cad.state && !cad.state.geocoder) setText(geoNote, "No geocoder: no map point");
+    else setText(geoNote, "No match picked: saved as typed");
   };
   const lookup = async () => {
     const q = input.value.trim();
@@ -1303,7 +1304,7 @@ function addressBox(input, geoNote, list) {
         const li = el("li", "");
         li.append(el("b", "", m.label));
         if (m.town) li.append(el("span", "town" + (ours().includes(m.town) ? " ours" : ""), m.town));
-        li.append(el("span", "dim small", `${m.kind} · ${Math.round(m.confidence * 100)}%`));
+        li.append(el("span", "dim small", `${m.kind} ${Math.round(m.confidence * 100)}%`));
         li.addEventListener("mousedown", (e) => {
           e.preventDefault();
           box.picked = m;
@@ -1313,7 +1314,7 @@ function addressBox(input, geoNote, list) {
         });
         return li;
       }));
-      if (!ms.length) list.replaceChildren(el("li", "dim", r.error || "No match in the gazetteer: saved as typed"));
+      if (!ms.length) list.replaceChildren(el("li", "dim", r.error || "No match"));
       show(list, true);
     } catch (e) {
       show(list, false);
@@ -1340,7 +1341,7 @@ function entryClass() {
   const auto = !t || isEmergency(t, s);
   if (!cad.emergTouched) $("#f-emergency").checked = auto;
   setText($("#f-class"), t ? (cad.emergTouched && $("#f-emergency").checked !== auto
-    ? `(changed: the type says ${auto ? "emergency" : "non-emergency"})` : "(from the type)") : "");
+    ? `(type says ${auto ? "emergency" : "non-emergency"})` : "(by type)") : "");
   show($("#f-until-w"), !$("#f-emergency").checked);
 }
 
@@ -1370,7 +1371,7 @@ async function createIncident(e) {
     until_at: $("#f-emergency").checked ? null : fromLocalInput($("#f-until").value),
     operator: operator(), ...newAddr.geo(),
   };
-  if (!body.type) { $("#f-type").focus(); return flash($("#f-error"), "Pick the type."); }
+  if (!body.type) { $("#f-type").focus(); return flash($("#f-error"), "Pick a type"); }
   try {
     const inc = await api("POST", "/api/cad/incident", body);
     selectIncident(inc.id);
@@ -1466,7 +1467,7 @@ function unitGroups() {
       take(b.id, b.title, (u) => u.board === b.id, b);
     }
   }
-  take("off", "Off the boards, still on a call", () => true, null);
+  take("off", "Off board, on a call", () => true, null);
   return groups;
 }
 
@@ -1474,7 +1475,7 @@ function renderUnits() {
   const box = $("#units");
   const groups = unitGroups();
   if (!groups.length) {
-    if (!box.querySelector(".empty")) box.replaceChildren(el("div", "empty", "No units on the boards"));
+    if (!box.querySelector(".empty")) box.replaceChildren(el("div", "empty", "None"));
     return;
   }
   box.querySelector(":scope > .empty")?.remove();
@@ -1507,7 +1508,7 @@ function renderUnits() {
       if (!open) rows = on;
       g.classList.toggle("folded", !open && !on.length);
       g.querySelector("h3").setAttribute("aria-expanded", String(open));
-      setText(g.querySelector("h3"), `${open ? "▾" : "▸"} ${title} · ${all.length}${on.length ? ` · ${on.length} on calls` : ""}`);
+      setText(g.querySelector("h3"), `${open ? "▾" : "▸"} ${title} (${all.length}${on.length ? `, ${on.length} on calls` : ""})`);
     }
     if (box.children[i] !== g) box.insertBefore(g, box.children[i] || null);
     syncList(g.querySelector("ol"), rows, {
@@ -1535,10 +1536,10 @@ function renderUnits() {
         const head = el("div", "uh");
         const name = el("b", "un", u.name);
         name.title = [u.title, u.spoken && u.spoken !== u.name ? `said "${u.spoken}"` : "", u.department, u.spare ? "spare" : ""]
-          .filter(Boolean).join(" · ");
+          .filter(Boolean).join(", ");
         head.append(name);
         const j = jointOf(u.name);
-        if (j) { const t = el("span", "chip joint", j.tag); t.title = `${j.town}'s (joint response)`; head.append(t); }
+        if (j) { const t = el("span", "chip joint", j.tag); t.title = `${j.town}, joint response`; head.append(t); }
         else if (u.mutual_aid && u.department
           && !((L().unit_boards || []).find((b) => b.id === u.board)?.title || "").includes(u.department)) {
           head.append(el("span", "chip dept", u.department));       // not already said by its group's title
@@ -1546,8 +1547,8 @@ function renderUnits() {
         if (u.title) head.append(el("span", "utitle dim small", u.title));
         if (u.spare) head.append(el("span", "chip spare", "spare"));
         if (talk) {
-          const tb = el("span", "talk-badge", `📻 ${talk.ended ? "just transmitted" : "talking"} · ${talk.channel}`);
-          tb.title = [talk.radio_id ? `radio ${talk.radio_id}` : "", talk.label || talk.alias || ""].filter(Boolean).join(" · ");
+          const tb = el("span", "talk-badge", `${talk.ended ? "Ended" : "TX"} ${talk.channel}`);
+          tb.title = [talk.radio_id ? `Radio ${talk.radio_id}` : "", talk.label || talk.alias || ""].filter(Boolean).join(", ");
           head.append(tb);
         }
         head.append(el("span", "spacer"), statusChip(u.status), since(el("span", "dim small ut"), u.status_at));
@@ -1577,7 +1578,7 @@ function renderUnitLog() {
       if (e.operator) meta.append(opSpan(e.operator));
       li.replaceChildren(meta, el("div", "txt", e.text));
     },
-    empty: "No status changes off an incident",
+    empty: "None",
   });
 }
 
@@ -1606,7 +1607,7 @@ async function renderRecords() {
       fill: (tr, i) => {
         const type = el("td");
         const t = el("span", "qt", typeLabel(i.type, i.subtype) || "—");
-        if (i.type) t.style.setProperty("--c", typeColor(i.type) || "#9aa0b4");
+        if (i.type) t.style.setProperty("--c", typeColor(i.type) || "#9AA3AD");
         type.append(t);
         const st = el("td");
         const es = eventStatus(i);
@@ -1615,13 +1616,13 @@ async function renderRecords() {
           el("td", "t", fmtRecv(i.closed_at)), st, el("td", "", i.disposition ? nameOf("dispositions", i.disposition) : ""),
           el("td", "", (i.units || []).join(", ")), el("td", "", i.received_via ? nameOf("received_via", i.received_via) : ""));
       },
-      empty: "No incidents yet", cols: 9,
+      empty: "None", cols: 9,
     });
     const rows = Object.entries(a.counts).map(([k, v]) => [k, String(v)]).concat([["Next number", a.next_number], ["Database", a.db]]);
     $("#admin").replaceChildren(...rows.map(([k, v]) => { const d = el("div"); d.append(el("dt", "", k), el("dd", "", v)); return d; }));
   } catch (e) {
     const tr = el("tr");
-    tr.append(Object.assign(el("td", "empty", `Could not load: ${e.message}`), { colSpan: 9 }));
+    tr.append(Object.assign(el("td", "empty", `Load failed: ${e.message}`), { colSpan: 9 }));
     $("#db-rows").replaceChildren(tr);
   }
 }
@@ -1662,7 +1663,7 @@ function renderRunCards() {
       h.append(c.is_default ? el("span", "chip default", "default") : el("span", "chip edited", "edited"));
       li.replaceChildren(h, el("div", "dim small", c.slots.map(describeSlot).join(", ")), el("div", "dim small", `“…for ${c.phrase}”`));
     },
-    empty: "No run cards: add one",
+    empty: "None",
   });
 }
 
@@ -1672,7 +1673,7 @@ function slotRow(slot) {
     const s = el("select", "s-unit");
     fillSelect(s, units().filter((u) => u.board && u.response !== "agency").map((u) => [u.name, u.title ? `${u.name} ${u.title}` : u.name]));
     s.value = slot.unit || (units()[0] && units()[0].name) || "";
-    li.append(el("span", "dim", "unit"), s);
+    li.append(el("span", "dim", "Unit"), s);
   } else {
     const n = el("input", "s-count");
     n.type = "number"; n.min = "1"; n.max = "10"; n.value = String(slot.count || 1);
@@ -1698,7 +1699,7 @@ function slotRow(slot) {
 function rcPlaceholder() {
   const t = $("#rc-type").value, s = $("#rc-subtype").value;
   const sp = L().spoken || {};
-  $("#rc-spoken").placeholder = (s && (sp[`${t}/${s}`] || sp[`*/${s}`])) || sp[t] || "from the data file";
+  $("#rc-spoken").placeholder = (s && (sp[`${t}/${s}`] || sp[`*/${s}`])) || sp[t] || "Default";
 }
 
 function editCard(c) {
@@ -1732,14 +1733,14 @@ async function saveCard(e) {
   try {
     const c = await api("POST", "/api/cad/runcards", body);
     cad.rcEditing = c.type;
-    flash($("#rc-error"), "Saved.");
+    flash($("#rc-error"), "Saved");
   } catch (err) {
     flash($("#rc-error"), err.message);
   }
 }
 
 async function deleteCard() {
-  if (!cad.rcEditing || !confirm(`Delete the run card for ${typeLabel(...cad.rcEditing.split("/"))}?`)) return;
+  if (!cad.rcEditing || !confirm(`Delete run card ${typeLabel(...cad.rcEditing.split("/"))}?`)) return;
   try {
     await api("POST", "/api/cad/runcards/delete", { type: cad.rcEditing, operator: operator() });
     editCard(null);
@@ -1789,7 +1790,7 @@ function renderOperators() {
   if (pick._sig === sig) return;
   pick._sig = sig;
   const want = pick.value || store("sizeup.cad.operator") || "";
-  fillSelect(pick, ops.map((n) => [n, n]), "Pick your name…");
+  fillSelect(pick, ops.map((n) => [n, n]), "Name");
   pick.value = ops.includes(want) ? want : "";
   pick.classList.toggle("unset", !pick.value);
 }
@@ -1804,7 +1805,8 @@ function onState(data) {
   const pill = $("#tx-pill");
   pill.className = "pill " + (tx.enabled ? "tx-on" : "tx-off");
   setText(pill, tx.enabled ? "Transmit on" : "Transmit off");
-  setText($("#tx-note"), tx.enabled ? "" : (tx.note || "Transmit is off") + ".");
+  setText($("#tx-note"), tx.enabled ? "" : "Transmit off: logged only");
+  $("#tx-note").title = tx.enabled ? "" : tx.note || "";
   if (changed) cad.dbAt = 0;
   if (changed && cad.who) loadWho();          // a role changed in Settings > Users: show it at once
   renderConn();
@@ -1824,7 +1826,7 @@ function renderCloud() {
   if (!c) return;
   if (c.role === "hub") {
     pill.className = "pill " + (c.state === "ok" ? "ok" : "err");
-    setText(pill, c.state === "ok" ? "Station connected" : `Station ${c.word || "offline"}`);
+    setText(pill, c.state === "ok" ? "Station online" : `Station ${c.word || "offline"}`);
     pill.title = c.detail || "";
     return;
   }
@@ -1835,9 +1837,8 @@ function renderCloud() {
   pill.title = c.detail || "";
   const url = c.hub_url || "the hub";
   if (banner.dataset.url !== url) {
-    banner.replaceChildren("This is the station's own console. The CAD of record is the hub: ",
-      Object.assign(el("a", null, url), { href: `${url}/cad`, target: "_blank", rel: "noopener" }),
-      ". Events, dispatches and settings made here stay on this machine and are not sent to the hub.");
+    banner.replaceChildren("Station console, not the CAD of record. Changes here stay local. Hub: ",
+      Object.assign(el("a", null, url), { href: `${url}/cad`, target: "_blank", rel: "noopener" }));
     banner.dataset.url = url;
   }
 }
@@ -1973,13 +1974,12 @@ async function loadWho() {
   } catch (e) { return; }
   if (!w || w.source !== "access") return;
   cad.who = w;
-  const input = $("#operator"), tip = `Signed in with Cloudflare Access as ${w.email}`
-    + (w.name === w.email ? " (not named yet: Settings > Users)" : "");
-  input.value = w.callsign ? `${w.name} · ${w.callsign}` : w.name;
+  const input = $("#operator"), tip = w.email + (w.name === w.email ? " (no name yet: Settings, Users)" : "");
+  input.value = w.callsign ? `${w.name} ${w.callsign}` : w.name;
   input.readOnly = true;
   input.classList.add("access");
   input.title = tip;
-  input.closest("label").title = tip + ": recorded on every dispatch, status change, timeline entry and settings change";
+  input.closest("label").title = tip;
   renderOperators();
   applyRoles();
 }
@@ -1996,15 +1996,15 @@ function canDo(need) {             // "dispatch" (run calls) | "admin" (Settings
 }
 function askAdmin() {
   const a = (cad.who && cad.who.admins) || [];
-  return a.length ? `ask an admin (${a.join(", ")})` : "ask an admin";
+  return a.length ? `Ask an admin (${a.join(", ")})` : "Ask an admin";
 }
 // What a viewer can't press on the dispatch screen (reading, filtering, playing, the maps stay).
 const RO_DISPATCH = "#new-incident, #new-form :is(input, select, textarea, #new-create), #d-accept, #d-dismiss, #d-edit, "
   + "#d-close, #d-queued select, #close-form :is(select, #c-close), #edit-form :is(input, select, textarea, #edit-save), "
-  + "#d-attach :is(select, button), #d-dispatch :is(input, select, textarea, button:not(#u-cancel)), #note-text, #note-add, "
+  + "#d-attach :is(select, button:not(.help)), #d-dispatch :is(input, select, textarea, button:not(#u-cancel):not(.help)), #note-text, #note-add, "
   + ".ubtns button, .feed-add";
 // In Settings for anyone but an admin: everything but the section tabs, filters and what only reads.
-const RO_SETTINGS_KEEP = ".tab, [type=search], .ro-ok, .ro-ok *";
+const RO_SETTINGS_KEEP = ".tab, [type=search], .ro-ok, .ro-ok *, .help";
 function roLock(root, sel, keep) {
   for (const n of root.querySelectorAll(sel)) {
     if (!n.disabled && !(keep && n.matches(keep))) { n.disabled = true; n.dataset.ro = "1"; }
@@ -2029,13 +2029,13 @@ function applyRoles() {
   document.body.classList.toggle("ro-dispatch", viewOnly);
   document.body.classList.toggle("ro-settings", roSettings);
   const banner = $("#role-banner");
-  setText(banner, !w.active ? `Your account is deactivated: you can look but not change anything. To work the console, ${askAdmin()}.`
-    : `View only: you are a viewer. To run calls, ${askAdmin()}.`);
+  setText(banner, !w.active ? `Account deactivated: read-only. ${askAdmin()}`
+    : `Read-only: viewer. ${askAdmin()}`);
   show(banner, viewOnly);
   const note = $("#s-role");
-  const who = !w.active ? "your account is deactivated" : `for ${w.role === "viewer" ? "viewers" : "dispatchers"}`;
-  setText(note, w.bootstrap ? "No admin yet: anyone signed in can change settings. Make someone an admin (Users)."
-    : roSettings ? `Settings are read-only ${who.startsWith("for") ? who : `(${who})`} — ${askAdmin()}.` : "");
+  const who = !w.active ? "account deactivated" : w.role === "viewer" ? "viewer" : "dispatcher";
+  setText(note, w.bootstrap ? "No admin yet: anyone signed in can change settings. Make one in Users."
+    : roSettings ? `Read-only: ${who}. ${askAdmin()}` : "");
   show(note, w.bootstrap || roSettings);
   note.classList.toggle("boot", !!w.bootstrap);
   const sig = `${w.may}|${w.active}`;
@@ -2054,9 +2054,11 @@ new MutationObserver(() => { if (cad.who && cad.who.enforced && !canDo("admin"))
 async function boot() {
   try {
     cad.scene = await (await fetch("/api/scene")).json();
-    const name = (cad.scene.station && cad.scene.station.name) || "sizeup";
-    document.title = `CAD · ${name}`;
-    setText($("#station"), name);
+    // The header says "Port Chester FD"; the configured station name only when it says more.
+    const name = (cad.scene.station && cad.scene.station.name) || "";
+    const extra = name && name !== "Port Chester FD" ? name : "";
+    document.title = extra ? `PCFD CAD · ${extra}` : "PCFD CAD";
+    setText($("#station"), extra);
   } catch (e) {
     console.warn("no scene (map off):", e);
   }
@@ -2069,6 +2071,6 @@ async function boot() {
 boot().catch((err) => {
   const pill = $("#conn");
   pill.className = "pill err";
-  pill.textContent = "failed to load: " + err.message;
+  pill.textContent = "Load failed: " + err.message;
   console.error(err);
 });

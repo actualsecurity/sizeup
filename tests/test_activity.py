@@ -152,7 +152,7 @@ def test_your_own_activity_and_an_admin_everyones(api):
     assert [s["email"] for s in out["seen"]] == [JULIAN] and out["seen"][0]["last_ip"] == IP
     assert get(api, "/api/cad/activity", f"email={JULIAN}&kind=refused", JULIAN)[1]["rows"][0]["kind"] == "refused"
     code, out = get(api, "/api/cad/activity", f"email={COREY}", JULIAN)
-    assert code == 403 and "Only an admin" in out["error"]
+    assert code == 403 and "Admins only" in out["error"]
     assert get(api, "/api/cad/activity", "", VAL)[1]["rows"] == []                          # a viewer: theirs (none)
     # Corey (admin): anyone's, or everyone's
     code, out = get(api, "/api/cad/activity", "", COREY)
@@ -167,7 +167,7 @@ def test_your_own_activity_and_an_admin_everyones(api):
 def test_the_csv_is_for_admins(api):
     call(api, "/api/cad/incident", {"type": "STRU", "address": "209 Westchester Ave"}, JULIAN)
     code, out = get(api, "/api/cad/export/activity.csv", "", JULIAN)
-    assert code == 403 and "Only an admin" in out["error"]
+    assert code == 403 and "Admins only" in out["error"]
     code, raw = get(api, "/api/cad/export/activity.csv", f"email={JULIAN}", COREY)
     assert code == 200
     table = list(csv.reader(io.StringIO(raw.decode("utf-8-sig"))))

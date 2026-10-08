@@ -268,30 +268,30 @@
         "ROAD266", "266RCL"
       ]
     },
-    {"id": "ems", "title": "Port Chester EMS \u2014 add to a call when they show up", "folded": true,
+    {"id": "ems", "title": "Port Chester EMS (attach only)", "folded": true,
       "units": [
         "7711", "7712", "7713", "77A1", "77A2", "77A3", "77A4", "77A5", "77A6", "77A7", "77A8", "77A9", "77M1",
         "77M2", "77M3", "77U1", "DPT7700", "7700EOC", "CHIEF7700"
       ]
     },
-    {"id": "ma-rye", "title": "Rye FD \u2014 mutual aid", "folded": true,
+    {"id": "ma-rye", "title": "Rye FD mutual aid", "folded": true,
       "units": [
         "2421", "2422", "2423", "2424", "2425", "2426", "E191", "E192", "E193", "L25", "L26", "U39", "U49", "U159",
         "U242", "M39", "DPT242", "242EOC", "CHIEF242", "ROAD242", "242RCL"
       ]
     },
-    {"id": "ma-purchase", "title": "Purchase FD \u2014 mutual aid", "folded": true,
+    {"id": "ma-purchase", "title": "Purchase FD mutual aid", "folded": true,
       "units": [
         "2411", "2412", "2413", "2414", "2415", "2416", "2417", "2418", "2419", "E238", "E239", "E240", "E241",
         "L53", "R30", "U10", "U101", "M41", "DPT241", "241EOC", "CHIEF241", "ROAD241"
       ]
     },
-    {"id": "ma-harrison", "title": "Harrison FD \u2014 mutual aid", "folded": true,
+    {"id": "ma-harrison", "title": "Harrison FD mutual aid", "folded": true,
       "units": [
         "2161", "2162", "2163", "2164", "2165", "E13", "E12", "E11", "E10", "TL24", "R19", "U20", "M35"
       ]
     },
-    {"id": "ma-west-harrison", "title": "West Harrison FD \u2014 mutual aid", "folded": true,
+    {"id": "ma-west-harrison", "title": "West Harrison FD mutual aid", "folded": true,
       "units": [
         "2501", "2502", "2503", "2504", "2505", "E265", "E266", "E267", "TL9", "U25", "U27", "M50", "MA3", "DPT250",
         "250EOC", "CHIEF250", "ROAD250"
@@ -305,33 +305,33 @@
         "250_Mar", "250_Res", "250_Twl", "250_UTV", "250_ma"
       ]
     },
-    {"id": "res-coned", "title": "Agencies & resources \u00b7 CONED-*", "folded": true,
+    {"id": "res-coned", "title": "Agencies: CONED-*", "folded": true,
       "units": [
         "CONED-G", "CONED-G1", "CONED-G2", "CONED-G3", "CONED-G4", "CONED-G5", "CONED-E", "CONED-E1", "CONED-E2",
         "CONED-E3", "CONED-E4", "CONED-E5"
       ]
     },
-    {"id": "res-keyholder", "title": "Agencies & resources \u00b7 KEYHOLDER*", "folded": true,
+    {"id": "res-keyholder", "title": "Agencies: KEYHOLDER*", "folded": true,
       "units": [
         "KEYHOLDER", "KEYHOLDER1", "KEYHOLDER2", "KEYHOLDER3", "KEYHOLDER4", "KEYHOLDER5"
       ]
     },
-    {"id": "res-knox", "title": "Agencies & resources \u00b7 KNOX_BOX*", "folded": true,
+    {"id": "res-knox", "title": "Agencies: KNOX_BOX*", "folded": true,
       "units": [
         "KNOX_BOX", "KNOB_BOX1", "KNOX_BOX2", "KNOX_BOX3", "KNOX_BOX4", "KNOX_BOX5"
       ]
     },
-    {"id": "res-pd", "title": "Agencies & resources \u00b7 PD", "folded": true,
+    {"id": "res-pd", "title": "Agencies: PD", "folded": true,
       "units": [
         "PCPD", "PCPD1", "PCPD2", "RBPD", "RBPD1", "RBPD2", "RPD", "RPD1", "RPD2", "WCPD", "WCPD1", "WCPD2"
       ]
     },
-    {"id": "res-bat", "title": "Agencies & resources \u00b7 BAT*", "folded": true,
+    {"id": "res-bat", "title": "Agencies: BAT*", "folded": true,
       "units": [
         "BAT10", "BAT11", "BAT12", "BAT13", "BAT14", "BAT15", "BAT16", "BAT17", "BAT18", "BAT19"
       ]
     },
-    {"id": "agencies", "title": "Agencies & resources \u00b7 Other", "folded": true,
+    {"id": "agencies", "title": "Agencies: Other", "folded": true,
       "units": [
         "BLDG_DPT", "BLDG_DPT1", "CODE_ENFOR", "CODE_ENFOR1", "DPW", "DPW1", "DPW2", "FIRE_INSP", "HELP_TRUCK",
         "HOSPITAL", "MNRR", "NYSDOT", "REDCRS", "SCHOOL", "SECURITY", "THRWY", "VERIZON", "EVRSORCE-E", "GAS-OTHER",

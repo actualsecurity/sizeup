@@ -3,6 +3,10 @@
 trunk-recorder owns its dongle and writes one WAV + JSON per call into a capture directory,
 which radio/p25.py ingests. This only keeps the process running: start, stop (frees the
 dongle for another receiver on a one-dongle bench), restart with backoff if it dies.
+
+It runs a copy of its config.json, config.runtime.json, with the dongle sizeup handed it and the
+unit script (unit-event.sh next to the config) on every system: trunk-recorder then prints each
+voice grant's radio ID to its output the moment the control channel sends it (radio/live.py).
 """
 
 from __future__ import annotations
@@ -20,6 +24,29 @@ from typing import Callable
 
 
 LOG_MAX_BYTES = 5_000_000
+UNIT_SCRIPT = "unit-event.sh"
+# trunk-recorder 5.2's unit_script plugin builds "<unitScript> <shortName> <radioID> call <tg> <patches> &"
+# in a 200-byte buffer (cut there: a cut "&" only makes it wait for the script): an absolute path
+# longer than this leaves too little room, use ./ then (trunk-recorder's cwd is workdir).
+UNIT_SCRIPT_MAX = 140
+
+
+def unit_script_command(workdir: str | Path, value: str | None = None) -> str:
+    """What goes in a system's "unitScript": the script as an absolute, shell-quoted path (the
+    plugin hands it to system()), run by /bin/sh if it isn't executable. value: what config.json
+    says ("" = off; a relative path is taken from workdir). '' when there is no script."""
+    if value == "":
+        return ""
+    base = Path(workdir).resolve()
+    if value and (value.startswith("/") or any(c.isspace() for c in value)):
+        return value                                     # absolute already, or a command line: as given
+    path = (base / value) if value else (base / UNIT_SCRIPT)
+    if not path.is_file():
+        return ""
+    cmd = shlex.quote(str(path))
+    if len(cmd) > UNIT_SCRIPT_MAX:
+        cmd = "./" + shlex.quote(str(path.relative_to(base))) if path.is_relative_to(base) else cmd
+    return cmd if os.access(path, os.X_OK) else f"/bin/sh {cmd}"
 
 
 class TrunkRecorder:
@@ -40,15 +67,25 @@ class TrunkRecorder:
         # Every line of its output, as it comes (sizeup/radio/live.py reads who is keying up from it).
         self.on_line: Callable[[str], None] | None = None
 
-    def _argv_for(self, dev: int | str) -> list[str]:
-        """argv with --config pointing at a copy of its config whose sources use dongle `dev`."""
+    def _argv_for(self, dev: int | str | None = None) -> list[str]:
+        """argv with --config pointing at a copy of its config (config.runtime.json) whose sources
+        use dongle `dev` (None: as configured) and whose systems run the unit script."""
         argv = list(self.argv)
         k = next((i for i, a in enumerate(argv) if a.startswith("--config")), None)
         name = (argv[k].split("=", 1)[1] if "=" in argv[k] else argv[k + 1]) if k is not None else "config.json"
         src = Path(self.workdir) / name
+        if dev is None and not src.is_file():
+            return argv                                  # no config of ours to amend: run as configured
         conf = json.loads(src.read_text())
-        for s in conf.get("sources", []):
-            s["device"] = f"rtl={dev}"
+        if dev is not None:
+            for s in conf.get("sources", []):
+                s["device"] = f"rtl={dev}"
+        for s in conf.get("systems", []):
+            cmd = unit_script_command(self.workdir, s.get("unitScript"))
+            if cmd:
+                s["unitScript"] = cmd
+            else:
+                s.pop("unitScript", None)
         out = Path(self.workdir) / "config.runtime.json"
         out.write_text(json.dumps(conf, indent=2))
         if k is None:
@@ -129,19 +166,19 @@ class TrunkRecorder:
                 self.state, self.detail = "absent", f"trunk-recorder not installed ({self.argv[0] if self.argv else '?'})"
                 self._stop.wait(15)
                 continue
-            argv = self.argv
+            dev = None
             if self.device_fn is not None:
                 dev = self.device_fn()
                 if dev is None:
                     self.state, self.detail = "absent", f"SDR '{self.device_name}' not plugged in"
                     self._stop.wait(15.0)
                     continue
-                try:
-                    argv = self._argv_for(dev)
-                except (OSError, ValueError) as e:
-                    self.state, self.detail = "down", f"cannot write trunk-recorder config: {e}"
-                    self._stop.wait(15.0)
-                    continue
+            try:
+                argv = self._argv_for(dev)
+            except (OSError, ValueError) as e:
+                self.state, self.detail = "down", f"cannot write trunk-recorder config: {e}"
+                self._stop.wait(15.0)
+                continue
             try:
                 # trunk-recorder runs ffmpeg by name for call audio: make sure Homebrew's bin is on PATH.
                 env = dict(os.environ)
