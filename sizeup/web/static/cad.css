@@ -25,6 +25,8 @@ input:focus, select:focus, textarea:focus { outline: 2px solid color-mix(in srgb
 input[type="checkbox"] { width: 1.15em; height: 1.15em; padding: 0; }
 #operator { width: 11em; }
 #operator:placeholder-shown { border-color: var(--warn); }
+#operator.access { border-color: transparent; background: transparent; font-weight: 600; cursor: default; text-overflow: ellipsis; }
+#operator.access:focus { outline: none; }
 textarea { resize: vertical; }
 button.primary { background: color-mix(in srgb, var(--ok) 22%, var(--panel-solid)); border-color: color-mix(in srgb, var(--ok) 60%, transparent); font-weight: 700; }
 button.danger { background: color-mix(in srgb, var(--err) 26%, var(--panel-solid)); border-color: color-mix(in srgb, var(--err) 65%, transparent); }

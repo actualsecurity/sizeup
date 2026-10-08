@@ -1114,10 +1114,25 @@ def make_server(app: App) -> WebServer:
     cfg = app.cfg
     server = WebServer(cfg.host, cfg.port, app.scene(), app.state, app.clip, app.close_incident, app.set_mode,
                        app.set_talkgroup, app.set_talkgroup_group, app.retranscribe, cad=CadApi(app.cad),
-                       station=getattr(app, "hub", None), health=health_info(cfg))
+                       station=getattr(app, "hub", None), health=health_info(cfg), access=access_verifier(cfg))
     pokes = [server.poke] + ([app.link.live_changed] if app.link is not None else [])
     app.live.on_change = lambda: [f() for f in pokes]   # a new talker is pushed at once, not on the next second
     return server
+
+
+def access_verifier(cfg: Config):
+    """The hub behind Cloudflare Access with its team and AUD tag set: who signed in
+    (sizeup/cloud/access.py), required on every page and the CAD API. Anything else: None (as before)."""
+    if cfg.cloud_role != "hub":
+        return None
+    if not (cfg.cloud_access_team and cfg.cloud_access_aud):
+        if cfg.cloud_access_team or cfg.cloud_access_aud:
+            log("cloudflare access: identity OFF: set both [cloud] access_team and access_aud "
+                "(SIZEUP_ACCESS_TEAM / SIZEUP_ACCESS_AUD); the Operator field is free text")
+        return None
+    from sizeup.cloud.access import AccessVerifier
+    log(f"cloudflare access: identity on (team {cfg.cloud_access_team}): the operator is who signed in")
+    return AccessVerifier(cfg.cloud_access_team, cfg.cloud_access_aud, log=log)
 
 
 def health_info(cfg: Config) -> dict:

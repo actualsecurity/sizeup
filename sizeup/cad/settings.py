@@ -24,7 +24,9 @@ Reset to default = drop the override (one item, or a whole section).
 Codes never change (they are stored on events and exported): a rename changes the name only. An
 item in use can't be deleted, only retired (named on old events, off the pick lists). Every change
 writes settings_audit (who, page section, key, old -> new). operators: the people at the console
-(a picker for the operator field; no sign-in yet). export() / import: every setting as one JSON
+(a picker for the operator field), each optionally keyed by the email they sign in with through
+Cloudflare Access on the hub (person(): the display name and callsign for a verified email; an email
+not listed yet is added unnamed for an admin to name). export() / import: every setting as one JSON
 file, checked and shown as a diff (dry run) before it replaces anything.
 """
 
@@ -33,18 +35,20 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 
 from sizeup.cad import dispatcher, eta, runcards
 from sizeup.cad import lists as lists_mod
 from sizeup.cad.lists import CLASSES, CODE, COLOR, LIST_SECTIONS, LONG_CODE, RESPONSES, ROLES, ListsError
-from sizeup.cad.store import SCHEMA_VERSION, TZ, CadError
+from sizeup.cad.store import OPERATOR_MAX, SCHEMA_VERSION, TZ, CadError
 from sizeup.tts import KOKORO_VOICES
 
 FORMAT, FORMAT_VERSION = "sizeup-cad-settings", 1
 OPERATOR_ROLES = ("admin", "dispatcher", "viewer")
 REMOVE = object()
+EMAIL = re.compile(r"[^@\s<>]{1,64}@[^@\s<>]{1,190}\.[^@\s<>]{1,63}")
 
 # Where each stored section shows in Settings (the audit log's section).
 PAGE_SECTION = {**{s: "lists" for s in LIST_SECTIONS}, "event_class": "lists", "geo_town_order": "lists", "status_flow": "lists",
@@ -489,7 +493,7 @@ class Editor:
     # -- edits ------------------------------------------------------------------------------------------
 
     def post(self, section: str, body: dict) -> dict:
-        op = _text(body.get("operator"), "operator", 60, required=False)
+        op = _text(body.get("operator"), "operator", OPERATOR_MAX, required=False)
         action = body.get("action")
         if not isinstance(action, str):
             raise CadError("action: required")
@@ -1140,6 +1144,54 @@ class Editor:
     def operator_names(self) -> list[str]:
         return [r["name"] for r in self.store.q("SELECT name FROM operators WHERE active = 1 ORDER BY name COLLATE NOCASE")]
 
+    # Signed in through Cloudflare Access (sizeup/cloud/access.py, 2026-10-07): the verified email is
+    # who did it. What's recorded as the operator is "Name <email>" (just the email until someone
+    # names it here), so the chronology reads "Corey" (cad.js shows the name, the email as its
+    # tooltip) and the audit can't mix up two people with one name.
+
+    @staticmethod
+    def recorded(name: str, email: str) -> str:
+        return email if not name or name.lower() == email else f"{name} <{email}>"
+
+    def person(self, email: str) -> dict:
+        """{email, name, callsign, operator} for a verified email. An email not on the list is added
+        (named by its email, a dispatcher) so an admin can give it a name in Settings > Users."""
+        email = email.strip().lower()
+        if not EMAIL.fullmatch(email):
+            raise CadError("not an email address")
+        r = self.store.one("SELECT name, callsign FROM operators WHERE email = ?", (email,))
+        if r is None:
+            with self.store.tx() as db:
+                row = db.execute("SELECT id, name, callsign, email FROM operators WHERE email = ? OR name = ?",
+                                 (email, email)).fetchone()
+                if row is None:
+                    now = self.store.clock()
+                    db.execute("INSERT INTO operators (name, role, active, created_at, updated_at, email) "
+                               "VALUES (?, 'dispatcher', 1, ?, ?, ?)", (email, now, now, email))
+                    self._audit(db, now, email, "users", email, None,
+                                {"email": email, "seen": "signed in through Cloudflare Access (not named yet)"})
+                    self.store.rev += 1
+                elif not row["email"]:      # an operator named by the email itself, entered by hand
+                    db.execute("UPDATE operators SET email = ? WHERE id = ?", (email, row["id"]))
+            r = self.store.one("SELECT name, callsign FROM operators WHERE email = ?", (email,)) or {"name": email, "callsign": ""}
+        return {"email": email, "name": r["name"], "callsign": r["callsign"], "operator": self.recorded(r["name"], email)}
+
+    def whoami(self, email: str) -> dict:
+        """GET /api/cad/whoami: the signed-in person ("access"), or nobody known ("none": the
+        Operator field is typed, as before)."""
+        if not email:
+            return {"email": "", "name": "", "callsign": "", "source": "none"}
+        p = self.person(email)
+        return {"email": p["email"], "name": p["name"], "callsign": p["callsign"], "source": "access"}
+
+    def _email(self, v, oid: int | None = None) -> str:
+        v = _text(v, "email", 254, required=False).lower()
+        if v and not EMAIL.fullmatch(v):
+            raise CadError("email: the address they sign in with (name@example.org)")
+        if v and self.store.one("SELECT 1 AS x FROM operators WHERE email = ? AND id != ?", (v, oid or -1)):
+            raise CadError(f"{v} is already another operator's email")
+        return v
+
     def _users_op(self, action: str, body: dict, op: str) -> dict:
         now = self.store.clock()
 
@@ -1151,12 +1203,15 @@ class Editor:
         if action == "add":
             name = _text(body.get("name"), "name", 60)
             role = role_of(body.get("role"), "dispatcher")
+            email, callsign = self._email(body.get("email")), _text(body.get("callsign"), "callsign", 20, required=False)
             if self.store.one("SELECT 1 AS x FROM operators WHERE name = ?", (name,)):
                 raise CadError(f"{name} is already an operator")
             with self.store.tx() as db:
-                oid = db.execute("INSERT INTO operators (name, role, active, created_at, updated_at) VALUES (?, ?, 1, ?, ?)",
-                                 (name, role, now, now)).lastrowid
-                self._audit(db, now, op, "users", name, None, {"role": role, "active": True})
+                oid = db.execute("INSERT INTO operators (name, role, active, created_at, updated_at, email, callsign) "
+                                 "VALUES (?, ?, 1, ?, ?, ?, ?)", (name, role, now, now, email, callsign)).lastrowid
+                self._audit(db, now, op, "users", name, None, {"role": role, "active": True,
+                                                                 **({"email": email} if email else {}),
+                                                                 **({"callsign": callsign} if callsign else {})})
             return self._operator(oid)
         oid = body.get("id")
         if not isinstance(oid, int) or isinstance(oid, bool):
@@ -1174,16 +1229,20 @@ class Editor:
                 if not isinstance(body["active"], bool):
                     raise CadError("active: true or false")
                 new["active"] = body["active"]
+            if "email" in body:
+                new["email"] = self._email(body.get("email"), oid)
+            if "callsign" in body:
+                new["callsign"] = _text(body.get("callsign"), "callsign", 20, required=False)
         elif action in ("deactivate", "activate"):
             new["active"] = action == "activate"
         else:
             raise CadError("action: add, edit, deactivate or activate")
-        diff = {k: (cur[k], new[k]) for k in ("name", "role", "active") if cur[k] != new[k]}
+        diff = {k: (cur[k], new[k]) for k in ("name", "role", "active", "email", "callsign") if cur[k] != new[k]}
         if not diff:
             return cur
         with self.store.tx() as db:
-            db.execute("UPDATE operators SET name = ?, role = ?, active = ?, updated_at = ? WHERE id = ?",
-                       (new["name"], new["role"], int(new["active"]), now, oid))
+            db.execute("UPDATE operators SET name = ?, role = ?, active = ?, email = ?, callsign = ?, updated_at = ? WHERE id = ?",
+                       (new["name"], new["role"], int(new["active"]), new["email"], new["callsign"], now, oid))
             self._audit(db, now, op, "users", cur["name"], {k: a for k, (a, _) in diff.items()}, {k: b for k, (_, b) in diff.items()})
         return self._operator(oid)
 
@@ -1203,7 +1262,8 @@ class Editor:
                 "overrides": self.overrides(),
                 "run_cards": [{"type": c["type"], "spoken": c["spoken"], "is_default": c["is_default"], "slots": c["slots"]}
                               for c in runcards.cards(self.store)],
-                "operators": [{"name": o["name"], "role": o["role"], "active": o["active"]} for o in self.operators()]}
+                "operators": [{"name": o["name"], "role": o["role"], "active": o["active"], "email": o["email"],
+                               "callsign": o["callsign"]} for o in self.operators()]}
 
     def _check_import(self, data) -> tuple[dict, list | None, list | None, object]:
         if not isinstance(data, dict) or data.get("format") != FORMAT:
@@ -1278,7 +1338,7 @@ class Editor:
         if ops is not None:
             if not isinstance(ops, list) or len(ops) > 500:
                 raise CadError("operators: a list")
-            names = set()
+            names, emails = set(), set()
             for i, o in enumerate(ops):
                 if not isinstance(o, dict):
                     raise CadError(f"operators[{i}]: an object")
@@ -1288,6 +1348,13 @@ class Editor:
                 if o["name"].lower() in names:
                     raise CadError(f"operators: {o['name']} twice")
                 names.add(o["name"].lower())
+                o["email"] = _text(o.get("email"), f"operators[{i}].email", 254, required=False).lower()
+                o["callsign"] = _text(o.get("callsign"), f"operators[{i}].callsign", 20, required=False)
+                if o["email"] and not EMAIL.fullmatch(o["email"]):
+                    raise CadError(f"operators[{i}].email: an email address")
+                if o["email"] and o["email"] in emails:
+                    raise CadError(f"operators: {o['email']} twice")
+                emails.add(o["email"])
         return ov, cards, ops, L
 
     def _import_op(self, action: str, body: dict, op: str) -> dict:
@@ -1318,11 +1385,12 @@ class Editor:
             have = {o["name"].lower(): o for o in self.operators()}
             for o in ops:
                 h = have.get(o["name"].lower())
-                new = {"role": o.get("role", "dispatcher"), "active": o.get("active", True)}
-                if h is None or {"role": h["role"], "active": h["active"]} != new or h["name"] != o["name"]:
+                new = {"role": o.get("role", "dispatcher"), "active": o.get("active", True), "email": o["email"],
+                       "callsign": o["callsign"]}
+                old = {k: h[k] for k in new} if h else None
+                if old != new or h["name"] != o["name"]:
                     changes.append({"section": "users", "store": "operators", "key": o["name"],
-                                    "change": "added" if h is None else "changed",
-                                    "old": {"role": h["role"], "active": h["active"]} if h else None, "new": new})
+                                    "change": "added" if h is None else "changed", "old": old, "new": new})
         if action == "dry_run":
             return {"ok": True, "dry_run": True, "changes": changes,
                     "note": "Nothing changed yet. Operators not in the file are kept; run cards and edits are replaced."}
@@ -1340,14 +1408,19 @@ class Editor:
                                      (c["type"], str(c.get("spoken") or "")[:120], int(bool(c.get("is_default"))), i)).lastrowid
                     runcards._write_slots(db, cid, c["slots"])
             if ops is not None:
+                for o in ops:      # an email the file gives someone else moves to them (the file wins)
+                    if o["email"]:
+                        db.execute("UPDATE operators SET email = '' WHERE email = ? AND name != ?", (o["email"], o["name"]))
                 for o in ops:
                     row = db.execute("SELECT id FROM operators WHERE name = ?", (o["name"],)).fetchone()
                     if row:
-                        db.execute("UPDATE operators SET name = ?, role = ?, active = ?, updated_at = ? WHERE id = ?",
-                                   (o["name"], o.get("role", "dispatcher"), int(o.get("active", True)), now, row[0]))
+                        db.execute("UPDATE operators SET name = ?, role = ?, active = ?, email = ?, callsign = ?, updated_at = ? "
+                                   "WHERE id = ?", (o["name"], o.get("role", "dispatcher"), int(o.get("active", True)),
+                                                    o["email"], o["callsign"], now, row[0]))
                     else:
-                        db.execute("INSERT INTO operators (name, role, active, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-                                   (o["name"], o.get("role", "dispatcher"), int(o.get("active", True)), now, now))
+                        db.execute("INSERT INTO operators (name, role, active, created_at, updated_at, email, callsign) "
+                                   "VALUES (?, ?, ?, ?, ?, ?, ?)", (o["name"], o.get("role", "dispatcher"),
+                                                                    int(o.get("active", True)), now, now, o["email"], o["callsign"]))
             for c in changes:
                 self._audit(db, now, op, c["section"], f"{c['store']}/{c['key']}" if c["store"] not in ("run_cards", "operators")
                             else c["key"], c["old"], c["new"])

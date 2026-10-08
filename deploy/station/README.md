@@ -40,7 +40,9 @@ export SIZEUP_ACCESS_CLIENT_SECRET=...
 ```
 
 (or `access_client_id` / `access_client_secret` in `[cloud]`). With an Access *bypass* policy on
-that path instead, leave them out: the bearer token is then the only gate.
+that path instead, leave them out: the bearer token is then the only gate. The service token is the
+station, never a person: on the hub it is never taken for an operator (who is at the console comes
+from the email they signed in with, docs/cloud.md "Who is signed in").
 
 ## 3. Start it and check
 

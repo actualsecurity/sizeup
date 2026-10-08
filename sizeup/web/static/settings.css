@@ -58,12 +58,14 @@
 input.s-color { width: 2.4em; height: 1.95em; padding: 0.1em 0.15em; cursor: pointer; }
 .s-add { margin-top: 0.6em; padding-top: 0.6em; border-top: 1px dashed var(--line); }
 .s-add .s-name { flex: 1 1 10em; }
+.s-email { flex: 1 1 14em; min-width: 9em; }
+.s-callsign { width: 6.5em; }
 
 .chip.s-state { font-size: 0.68em; }
 .chip.s-state.default { --c: #9aa0b4; }
 .chip.s-state.edited { --c: var(--ok); }
 .chip.s-state.added { --c: #a3a9ff; }
-.chip.s-state.retired { --c: var(--warn); }
+.chip.s-state.retired, .chip.s-state.pending { --c: var(--warn); }
 .chip.s-state.deleted { --c: var(--err); }
 .chip.s-flag { font-size: 0.68em; --c: #9aa0b4; }
 .chip.s-confirm { font-size: 0.68em; --c: #ffb547; border-style: dashed; }
@@ -124,7 +126,7 @@ input.s-color { width: 2.4em; height: 1.95em; padding: 0.1em 0.15em; cursor: poi
   .s-card { padding: 0.6em 0.65em; }
   .s-code { min-width: 0; }
   .s-row select { max-width: 100%; flex: 1 1 10em; }
-  .s-said, .s-title, .s-dept, .s-name { flex: 1 1 100%; }
+  .s-said, .s-title, .s-dept, .s-name, .s-email { flex: 1 1 100%; }
   #operator-pick { width: 8em; }
 }
 /* Dispatch > Arrival estimates: one setting a line, the labels in a column (wrapping on a phone) */

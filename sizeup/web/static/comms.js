@@ -126,7 +126,12 @@ function row(t) {
     a.title = `${e.type || ""} ${e.address || ""} · linked by ${e.why}${e.unit ? ` (${e.unit})` : ""}`.trim();
     meta.append(a);
   }
-  if (t.kind === "note" && t.operator) meta.append(el("span", "", `· ${t.operator}`));
+  if (t.kind === "note" && t.operator) {          // "Corey <corey@...>": signed in through Cloudflare Access
+    const m = /^(.*\S) <([^<>\s]+@[^<>\s]+)>$/.exec(t.operator);
+    const op = el("span", "", `· ${m ? m[1] : t.operator}`);
+    if (m) op.title = `Signed in with Cloudflare Access as ${m[2]}`;
+    meta.append(op);
+  }
   if (t.kind === "radio" && t.end > t.start) meta.append(el("span", "dim", `${Math.round(t.end - t.start)} s`));
   const said = t.status === "no_speech" ? "key-up · no speech" : t.status === "pending" ? "transcribing…" : "(no words)";
   li.append(meta, el("div", "txt" + (t.text ? "" : " muted"), t.text || said));

@@ -9,6 +9,7 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from sizeup.cloud.access import team_host
 from sizeup.radio.tones import ToneCode
 from sizeup.tts import DEFAULT_PYTHON, KOKORO_VOICES
 
@@ -99,6 +100,10 @@ class Config:
     cloud_public_url: str = ""        # hub: its public URL (env SIZEUP_PUBLIC_URL), shown in /healthz and the log
     cloud_offline_s: float = 15.0     # hub: no word from the station this long = offline
     cloud_audio_max_mb: float = 500.0  # hub: received audio kept (state/audio.sqlite), oldest dropped first
+    # hub: Cloudflare Access in front of it (sizeup/cloud/access.py). Both set = every page and API
+    # but /healthz and /api/station/ needs a verified Access token, and its email is the operator.
+    cloud_access_team: str = ""       # "yoda.cloudflareaccess.com" (env SIZEUP_ACCESS_TEAM)
+    cloud_access_aud: str = ""        # the Access application's AUD tag (env SIZEUP_ACCESS_AUD)
 
 
 def _take(d: dict, path: str, allowed: set[str]) -> dict:
@@ -134,6 +139,7 @@ def _dispatch_voice(dsp: dict) -> tuple[str, str, str]:
 #   SIZEUP_STATION_TOKEN              [cloud] token (preferred: never in a file)
 #   SIZEUP_ACCESS_CLIENT_ID / _SECRET [cloud] access_client_id / access_client_secret
 #   SIZEUP_PUBLIC_URL, SIZEUP_HUB_URL [cloud] public_url / hub_url
+#   SIZEUP_ACCESS_TEAM / _AUD         [cloud] access_team / access_aud (hub: Cloudflare Access identity)
 def _env(name: str, default):
     v = os.environ.get(name, "").strip()
     return v if v else default
@@ -142,7 +148,8 @@ def _env(name: str, default):
 def _cloud(data: dict) -> dict:
     """[cloud] -> Config fields. No section = all-in-one (role "")."""
     cl = _take(data.get("cloud", {}), "cloud", {"role", "hub_url", "token", "access_client_id", "access_client_secret",
-                                                "outbox", "outbox_max_mb", "public_url", "offline_after_s", "audio_max_mb"})
+                                                "outbox", "outbox_max_mb", "public_url", "offline_after_s", "audio_max_mb",
+                                                "access_team", "access_aud"})
     if not cl:
         return {}                      # all-in-one: no environment variable changes anything here
     role = str(cl.get("role", ""))
@@ -160,6 +167,14 @@ def _cloud(data: dict) -> dict:
             raise ConfigError("cloud: the station needs a token (env SIZEUP_STATION_TOKEN, or cloud.token)")
     if token and len(token) < 16:
         raise ConfigError("cloud.token: at least 16 characters (e.g. `openssl rand -hex 32`)")
+    team_raw = _env("SIZEUP_ACCESS_TEAM", str(cl.get("access_team", "")))
+    team = team_host(team_raw)
+    if team_raw and not team:
+        raise ConfigError('cloud.access_team: the Access team domain, e.g. "yoda.cloudflareaccess.com"')
+    aud = _env("SIZEUP_ACCESS_AUD", str(cl.get("access_aud", ""))).strip().lower()
+    if aud and not re.fullmatch(r"[0-9a-f]{32,128}", aud):
+        raise ConfigError("cloud.access_aud: the Access application's AUD tag (64 hex digits, from Zero Trust → "
+                          "Access → Applications → the app → Overview)")
     try:
         nums = {k: float(cl.get(k, d)) for k, d in (("outbox_max_mb", 300), ("offline_after_s", 15), ("audio_max_mb", 500))}
     except (TypeError, ValueError):
@@ -172,7 +187,8 @@ def _cloud(data: dict) -> dict:
                 cloud_outbox=str(cl.get("outbox", "state/outbox.sqlite")) if role == "station" else "",
                 cloud_outbox_max_mb=nums["outbox_max_mb"], cloud_offline_s=nums["offline_after_s"],
                 cloud_audio_max_mb=nums["audio_max_mb"],
-                cloud_public_url=_env("SIZEUP_PUBLIC_URL", str(cl.get("public_url", ""))).rstrip("/"))
+                cloud_public_url=_env("SIZEUP_PUBLIC_URL", str(cl.get("public_url", ""))).rstrip("/"),
+                cloud_access_team=team, cloud_access_aud=aud)
 
 
 def load(path: str | Path) -> Config:

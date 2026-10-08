@@ -932,29 +932,48 @@ function sUsers(panel) {
   const ops = S.data.operators;
   const ol = el("ol", "s-rows users");
   for (const o of ops) {
+    // Signed in through Cloudflare Access and not named yet: added under their email (sizeup/cad/settings.py person())
+    const unnamed = !!o.email && o.name.toLowerCase() === o.email;
+    const who = unnamed ? o.email : o.name;
     const li = el("li", "s-row" + (o.active ? "" : " retired"));
-    li.append(sInput(o.name, 60, "Name", (v) => { if (v && v !== o.name) sPost("users", { action: "edit", id: o.id, name: v }, `${o.name} is now ${v}.`); }, "s-name"),
-      sSelect(S_OP_ROLES, o.role, (v) => sPost("users", { action: "edit", id: o.id, role: v }, `${o.name}: ${v}.`), "Role"),
+    li.append(sInput(unnamed ? "" : o.name, 60, unnamed ? `Name for ${o.email}` : "Name",
+        (v) => { if (v && v !== o.name) sPost("users", { action: "edit", id: o.id, name: v }, `${who} is now ${v}.`); }, "s-name"),
+      sInput(o.email, 254, "Sign-in email", (v) => {
+        if (v.toLowerCase() !== o.email) sPost("users", { action: "edit", id: o.id, email: v }, v ? `${who}: signs in as ${v}.` : `${who}: no sign-in email.`);
+      }, "s-email"),
+      sInput(o.callsign, 20, "Callsign", (v) => {
+        if (v !== o.callsign) sPost("users", { action: "edit", id: o.id, callsign: v }, `${who}: callsign ${v || "removed"}.`);
+      }, "s-callsign"),
+      sSelect(S_OP_ROLES, o.role, (v) => sPost("users", { action: "edit", id: o.id, role: v }, `${who}: ${v}.`), "Role"),
+      unnamed ? el("span", "chip s-state pending", "not named yet") : null,
       el("span", `chip s-state ${o.active ? "added" : "retired"}`, o.active ? "active" : "inactive"), el("span", "spacer"),
       o.active ? sBtn("Deactivate", "Off the operator picker; their name stays on what they did",
-        () => sPost("users", { action: "deactivate", id: o.id }, `${o.name} deactivated.`))
-        : sBtn("Activate", "", () => sPost("users", { action: "activate", id: o.id }, `${o.name} active again.`)));
+        () => sPost("users", { action: "deactivate", id: o.id }, `${who} deactivated.`))
+        : sBtn("Activate", "", () => sPost("users", { action: "activate", id: o.id }, `${who} active again.`)));
+    [...li.childNodes].forEach((n) => { if (n.nodeType === 3) n.remove(); });   // the null above
     ol.append(li);
   }
   if (!ops.length) ol.append(el("li", "empty", "No operators yet: the Operator field (top right) is free text until there is one."));
   const f = el("form", "row s-add");
   const name = sInput("", 60, "Name", null, "s-name");
+  const email = sInput("", 254, "Sign-in email (optional)", null, "s-email");
+  const callsign = sInput("", 20, "Callsign", null, "s-callsign");
   const role = sSelect(S_OP_ROLES, "dispatcher", null, "Role");
   const add = el("button", "primary", "Add operator");
   add.type = "submit";
-  f.append(name, role, add);
+  f.append(name, email, callsign, role, add);
   f.addEventListener("submit", (e) => {
     e.preventDefault();
-    sPost("users", { action: "add", name: name.value.trim(), role: role.value }, `${name.value.trim()} added.`);
+    sPost("users", { action: "add", name: name.value.trim(), email: email.value.trim(), callsign: callsign.value.trim(),
+      role: role.value }, `${name.value.trim()} added.`);
   });
+  const signedIn = cad.who
+    ? `You are signed in with Cloudflare Access as ${cad.who.email}: that is the operator on everything you do here, `
+      + "named from this list. Someone who signs in for the first time is added under their email: give them a name. "
+    : "Behind Cloudflare Access (the hub), the email someone signs in with picks their row here and they become the "
+      + "operator automatically; here, anyone at the console picks a name. ";
   panel.replaceChildren(...sHead("Users", "The people at the console. Once there is one, the Operator field becomes a picker of the active ones."),
-    el("div", "note-box", "Sign-in and permissions: planned (PIN or accounts — to decide). For now anyone at the console picks "
-      + "a name; the role is recorded, not enforced."),
+    el("div", "note-box", signedIn + "The role is recorded, not enforced."),
     sCard(sCardHead("Operators", `${ops.filter((o) => o.active).length} active`), ol, f));
 }
 
