@@ -171,7 +171,7 @@ function sRoute() {
   sMsg("");
   if (sec === "runcards") { showRunCards(); sRunTools(); }
   if (sec === "radios" && window.RadiosPanel) {        // the radio-ID work's editor (radios-panel.js)
-    show($("#s-radios .note-box"), false);
+    show($("#s-radios .s-note"), false);
     RadiosPanel.mount($("#settings-radios"), { operator });
   }
   if (S.data) sRender(true);
@@ -312,7 +312,7 @@ function sTypeMap() {
     }
     ol.append(li);
   }
-  const gaps = (d.gaps || []).length ? el("p", "note-box small", "Check: " + d.gaps.join("; ") + ".") : null;
+  const gaps = (d.gaps || []).length ? el("p", "s-note small", "Check: " + d.gaps.join("; ") + ".") : null;
   return sCard(sCardHead("Subtypes per type", `${rows.length} types` + (todo ? ` · ${todo} to confirm` : ""), reset),
     el("p", "dim small", "After the type is picked, only its subtypes are offered (there is no ALS / Bomb); no subtype "
       + "is always allowed. A type with none ticked takes no subtype. Department: from its code sheet (ALARM to MVA). "
@@ -973,7 +973,7 @@ function sUsers(panel) {
     : "Behind Cloudflare Access (the hub), the email someone signs in with picks their row here and they become the "
       + "operator automatically; here, anyone at the console picks a name. ";
   panel.replaceChildren(...sHead("Users", "The people at the console. Once there is one, the Operator field becomes a picker of the active ones."),
-    el("div", "note-box", signedIn + "The role is recorded, not enforced."),
+    el("div", "s-note", signedIn + "The role is recorded, not enforced."),
     sCard(sCardHead("Operators", `${ops.filter((o) => o.active).length} active`), ol, f));
 }
 

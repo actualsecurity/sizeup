@@ -28,7 +28,7 @@
 .s-card > h3, .s-card-head h3 { margin: 0; font-size: 1em; }
 .s-card-head { display: flex; align-items: center; gap: 0.6em; flex-wrap: wrap; margin-bottom: 0.4em; }
 .s-card > p { margin: 0.2em 0 0.5em; }
-.note-box { border: 1px dashed color-mix(in srgb, var(--warn) 70%, transparent); color: var(--warn); border-radius: 0.4em;
+.s-note { border: 1px dashed color-mix(in srgb, var(--warn) 70%, transparent); color: var(--warn); border-radius: 0.4em;
   padding: 0.5em 0.75em; font-weight: 600; }
 
 .s-tabs { display: flex; flex-wrap: wrap; gap: 0.35em; }
