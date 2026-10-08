@@ -743,7 +743,7 @@ function sJointOnly(j) {
 function sVoice(v) {
   const picked = v.engine === "kokoro" || v.engine === "polly";
   const info = v.engine === "kokoro" ? `Kokoro, fallback ${v.fallback || "macOS say"}`
-    : v.engine === "polly" ? "Amazon Polly (made by the server)" : "macOS say";
+    : v.engine === "polly" ? "Amazon Polly (made by the server)" : v.engine === "none" ? "none (text only here)" : "macOS say";
   const box = sCard(sCardHead("Voice", info,
     picked ? sHelp("Speed 0.5 to 2 (0.92 is a touch slower than talking). Preview says a short sample in this voice.") : null));
   const row = el("div", "row");

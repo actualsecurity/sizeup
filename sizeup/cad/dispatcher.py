@@ -71,6 +71,10 @@ class AudioUnavailable(RuntimeError):
     """No text-to-speech here (`say`/`afconvert` are macOS): the dispatch is text only."""
 
 
+# [dispatch] tts_engine = "none": a station with no voice of its own (Linux: no Kokoro, no `say`).
+NO_VOICE = "this station has no voice (tts_engine \"none\"): text only"
+
+
 def spoken_street(s: str) -> str:
     """'209 Westchester Ave, Port Chester' -> '209 Westchester Avenue'. Abbreviations are expanded
     only where a street type goes (after a name), so 'St Marys Pl' stays Saint-able for the voice."""
@@ -404,6 +408,8 @@ def render_dispatch(text: str, tones, out_dir: str | Path, voice: VoiceCfg, repe
     slower than voice.timeout_s); local_fallback=False (the hub: no `say` there) raises
     AudioUnavailable with the reason instead ("Polly: AccessDeniedException: ...").
     Raises AudioUnavailable (no voice at all)."""
+    if voice.engine == "none":
+        raise AudioUnavailable(NO_VOICE)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     said = speech(text, spoken=spoken)

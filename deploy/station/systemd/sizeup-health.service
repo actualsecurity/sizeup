@@ -1,0 +1,10 @@
+# One health check of the station (sizeup-health.timer runs it every minute): GET /healthz on the
+# station's own web port; 3 failures in a row restart sizeup-station. /usr/local/lib/sizeup/health-check.
+[Unit]
+Description=sizeup station health check
+After=sizeup-station.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/sizeup/health-check
+SyslogIdentifier=sizeup-health

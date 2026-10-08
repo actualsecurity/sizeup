@@ -288,6 +288,8 @@ class StationLink:
     def _tts(self, a: dict) -> dict:
         """A dispatch said by this station's voice (Kokoro here; `say` as its fallback), for the hub."""
         text, v = a.get("text"), a.get("voice") or {}
+        if self.cfg.dispatch_tts_engine == "none":
+            return {"ok": False, "error": "station has no voice"}
         if not isinstance(text, str) or not text.strip() or len(text) > 4000:
             return {"ok": False, "error": "no dispatch text"}
         voice = VoiceCfg(str(v.get("engine") or "kokoro"), str(v.get("voice") or ""), float(v.get("speed") or 1.0),

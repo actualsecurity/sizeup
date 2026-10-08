@@ -91,7 +91,7 @@ class Config:
     cad_monitor_departments: tuple[str, ...] = ("Port Chester FD", "Rye Brook FD")   # their tones or towns: wait to be accepted
     dispatch_tones: tuple[tuple[float, float], ...] = ((349.1, 1.0), (311.1, 3.0))   # (Hz, s) in order
     # The dispatch voice. load() defaults to Kokoro af_heart at 0.92; built directly (tests), `say` Samantha.
-    dispatch_tts_engine: str = "say"  # "kokoro" (sizeup/tts_server.py; `say` as fallback) | "say" | "polly"
+    dispatch_tts_engine: str = "say"  # "kokoro" (sizeup/tts_server.py; `say` as fallback) | "say" | "polly" | "none"
     dispatch_voice: str = "Samantha"  # kokoro: a Kokoro voice ("af_heart"); say: macOS `say -v`; polly: "Matthew"
     dispatch_speed: float = 0.92      # Kokoro / Polly speaking speed (0.5-2.0)
     dispatch_polly_region: str = ""   # "" = AWS_REGION / AWS_DEFAULT_REGION, else us-east-1 (sizeup/polly.py)
@@ -144,8 +144,8 @@ def _dispatch_voice(dsp: dict) -> tuple[str, str, str]:
     """[dispatch] tts_engine, voice, fallback_voice. An older config's `voice = "Samantha"` (a `say`
     voice, no tts_engine) becomes the fallback, and Kokoro's af_heart the voice."""
     engine = str(dsp.get("tts_engine", "kokoro"))
-    if engine not in ("kokoro", "say", "polly"):
-        raise ConfigError('dispatch.tts_engine: "kokoro", "polly" or "say"')
+    if engine not in ("kokoro", "say", "polly", "none"):
+        raise ConfigError('dispatch.tts_engine: "kokoro", "polly", "say" or "none"')
     voice, fallback = str(dsp.get("voice", "")).strip(), str(dsp.get("fallback_voice", "")).strip()
     if engine == "polly" and voice and voice not in POLLY_VOICES:
         raise ConfigError(f"dispatch.voice: {voice!r} isn't one of the Polly voices offered ({', '.join(POLLY_VOICES)})")

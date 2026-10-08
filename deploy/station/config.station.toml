@@ -1,0 +1,106 @@
+# sizeup STATION on Linux (WSL2 Ubuntu 24.04 on the Windows box, or a Raspberry Pi): the radios,
+# local speech-to-text and the link that forwards everything to the hub (docs/cloud.md).
+# install-linux.sh copies this to /etc/sizeup/config.toml once and never overwrites it (each run
+# leaves the current template next to it as config.toml.dist, to diff). Unknown keys are rejected.
+#
+# Paths are the installer's (deploy/station/README.md "Where things are"):
+#   /opt/sizeup/app            the code (git checkout), run with PYTHONPATH=/opt/sizeup/app
+#   /opt/sizeup/rtl-sdr        rtl-sdr-blog build (RTL-SDR Blog V4 support): rtl_fm, librtlsdr
+#   /opt/sizeup/trunk-recorder trunk-recorder 5.2.0 with its plugins (unit_script)
+#   /opt/sizeup/whisper        whisper.cpp's whisper-server (CPU)
+#   /opt/sizeup/models/whisper.bin -> the model picked with install-linux.sh --model
+#   /var/lib/sizeup            SIZEUP_STATE_DIR: state/ (cad, outbox, cloud.json), captures/, trunk-recorder/
+# Secrets are never in this file: /etc/sizeup/station.env (sizeup-station secrets).
+
+[station]
+id = "pcfd-hq"
+name = "Port Chester FD Headquarters"
+
+[web]
+# Diagnostics only (the CAD of record is the hub). WSL2 forwards localhost, so the Windows browser
+# opens http://localhost:8091. Keep 127.0.0.1: nothing else needs to reach it.
+host = "127.0.0.1"
+port = 8091
+
+[radio]
+rtl_fm = "/opt/sizeup/rtl-sdr/bin/rtl_fm"
+# Every RTL-SDR plugged in gets a row of switches in the web app (a channel, Fire/EMS 15 via
+# trunk-recorder, or Off). A new dongle starts Off: pick its mode once (the hub's monitor can too).
+sdrs = "auto"
+sdr_names = { v4 = "V4", adsb = "V3", "00000001" = "V3 #2" }   # names in the web app (by serial)
+sdr_ignore = []
+start_mode = "South 2"            # first SDR at a fresh start; after that the web app's choice is kept
+
+[[radio.channels]]
+label = "South 2"                  # 60 Control fire paging, South Zone simulcast
+mhz = 470.2
+kind = "paging"
+device = "fire-page"
+gain_db = 40
+squelch_db = 10
+
+[[radio.channels]]
+label = "FG1"                      # PCFD / Rye Brook primary fireground
+mhz = 453.0375
+kind = "traffic"
+device = "fire-fg"
+gain_db = 40
+
+[[tones]]
+name = "Port Chester FD"
+a_hz = 349.1                       # RadioReference wiki (2025-07), unverified
+b_hz = 311.1
+agency = "PCFD"
+ours = true
+
+[stt]
+# whisper.cpp on the CPU. The main channels (South 2, FG1, Fire/EMS 15) default to Amazon Transcribe
+# on the hub (Settings > Radios, synced to this station); whisper here does the rest.
+# i5-6400T (4 cores): 3 threads leaves a core for trunk-recorder and rtl_fm.
+server_binary = "/opt/sizeup/whisper/bin/whisper-server"
+model = "/opt/sizeup/models/whisper.bin"
+port = 8179
+threads = 3
+beam_size = 0
+prompt = ""
+talker_prompt = "ids"
+
+[p25]
+capture_dir = "/var/lib/sizeup/captures/p25"
+recorder = "/opt/sizeup/trunk-recorder/bin/trunk-recorder --config=config.json"
+recorder_dir = "/var/lib/sizeup/trunk-recorder"   # config.json (made from deploy/trunk-recorder/), talkgroups.csv, unit-event.sh
+talkgroups_file = "/opt/sizeup/app/deploy/trunk-recorder/talkgroups.csv"
+incident_talkgroups = [307, 333]   # Fire/EMS 15 + Airport Incident
+aliases = {}
+
+[mdc]
+aliases = { "0611" = "Engine 61 Portable 1", "0615" = "Engine 61 Portable 5", "9231" = "South End Firehouse Mobile" }
+
+[units]
+apparatus_file = "data/westchester_apparatus.csv"
+departments = {}
+callsigns = { "2391" = "Chief of Department", "2392" = "1st Assistant Chief", "2393" = "2nd Assistant Chief", "2395" = "Immediate Past Chief", "2398" = "Duty Officer" }
+
+[storage]
+clips_dir = "captures/clips"       # under SIZEUP_STATE_DIR (/var/lib/sizeup)
+keep_hours = 24
+audio_keep_hours = 12
+
+[map]
+home_lon = -73.6640
+home_lat = 41.0130
+home_zoom = 13.4
+
+[cad]
+db = "state/cad.sqlite"            # under SIZEUP_STATE_DIR; the hub's is the CAD of record
+
+[dispatch]
+# No voice on this station: the hub says dispatches with Amazon Polly. "none" = nothing is rendered
+# here (no Kokoro, no macOS `say` on Linux); if Polly fails, the hub goes text only and says so.
+tts_engine = "none"
+
+[cloud]
+role = "station"                   # forward to the hub (Settings > System > Station switches it, kept in state/cloud.json)
+hub_url = "https://sizeup.actualsecurity.org"
+# outbox = "state/outbox.sqlite"   # default, under SIZEUP_STATE_DIR: survives restarts and outages
+# outbox_max_mb = 300

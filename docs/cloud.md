@@ -34,7 +34,10 @@ Secrets on the station: the environment, else `[cloud]`, else the **macOS Keycha
 (`security find-generic-password -s <service> -w`; services `sizeup-station-token`,
 `sizeup-access-id`, `sizeup-access-secret`, renamed with `[cloud] keychain_prefix` or
 `keychain_token` / `keychain_access_id` / `keychain_access_secret`). Never logged or shown: only
-"set (Keychain)" / "set (env)" / "missing". See `deploy/station/README.md`.
+"set (Keychain)" / "set (env)" / "missing". See `deploy/station/README.md`. A Linux station (Windows
+via WSL2, or a Raspberry Pi: `deploy/station/install-windows.ps1` / `install-linux.sh`) has them in
+`/etc/sizeup/station.env`, which its systemd unit loads into the environment; it has no voice
+(`[dispatch] tts_engine = "none"`), so a dispatch Polly can't say is text only.
 
 ```
  station (Mac)                                                       hub (Fargate task)
