@@ -148,6 +148,7 @@ def test_all_in_one_aws_both_off_and_record_off(tmp_path):
         assert t is not None and t.status == "pending" and comms_row(app, tid)["status"] == "pending"   # shown at once
         assert wait(lambda: traffic(app, tid).text == AWS_TEXT + ".", 10)
         assert traffic(app, tid).model == "aws-transcribe" and whisper.calls == 0
+        assert wait(lambda: comms_row(app, tid)["status"] == "done", 10)   # the stored row follows the live one
         row = comms_row(app, tid)
         assert (row["text"], row["model"], row["status"]) == (AWS_TEXT + ".", "aws-transcribe", "done")
         # both: whisper first, then AWS's text with whisper's kept to compare
@@ -155,6 +156,7 @@ def test_all_in_one_aws_both_off_and_record_off(tmp_path):
         time.sleep(0.01)
         tid2 = fm_segment(app)
         assert wait(lambda: (traffic(app, tid2) is not None and traffic(app, tid2).text == AWS_TEXT + "."), 10)
+        assert wait(lambda: comms_row(app, tid2)["alt_text"] == "whisper heard this", 10)
         row = comms_row(app, tid2)
         assert (row["alt_text"], row["alt_model"], row["model"]) == ("whisper heard this", "m.bin", "aws-transcribe")
         assert traffic(app, tid2).alt_text == "whisper heard this" and whisper.calls == 1
