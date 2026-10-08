@@ -1,0 +1,16 @@
+{"family":"sizeup-hub","requiresCompatibilities":["FARGATE"],"networkMode":"awsvpc","cpu":"256","memory":"1024",
+ "runtimePlatform":{"cpuArchitecture":"ARM64","operatingSystemFamily":"LINUX"},
+ "executionRoleArn":"arn:aws:iam::504804195561:role/sizeup-hub-exec","taskRoleArn":"arn:aws:iam::504804195561:role/sizeup-hub-task",
+ "containerDefinitions":[
+  {"name":"hub","image":"504804195561.dkr.ecr.us-east-1.amazonaws.com/sizeup-hub:latest","essential":true,
+   "portMappings":[{"containerPort":8090,"protocol":"tcp"}],
+   "environment":[{"name":"LITESTREAM_BUCKET","value":"sizeup-hub-backups-504804195561"},{"name":"LITESTREAM_PATH","value":"sizeup-hub"},
+                  {"name":"AWS_REGION","value":"us-east-1"},{"name":"SIZEUP_PUBLIC_URL","value":"https://sizeup.actualsecurity.org"}],
+   "secrets":[{"name":"SIZEUP_STATION_TOKEN","valueFrom":"arn:aws:ssm:us-east-1:504804195561:parameter/sizeup-hub/station-token"}],
+   "healthCheck":{"command":["CMD-SHELL","python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/healthz', timeout=3)\""],"interval":30,"timeout":5,"retries":3,"startPeriod":60},
+   "logConfiguration":{"logDriver":"awslogs","options":{"awslogs-group":"/ecs/sizeup-hub","awslogs-region":"us-east-1","awslogs-stream-prefix":"hub"}}},
+  {"name":"cloudflared","image":"cloudflare/cloudflared:latest","essential":true,
+   "command":["tunnel","--no-autoupdate","run","--url","http://localhost:8090"],
+   "secrets":[{"name":"TUNNEL_TOKEN","valueFrom":"arn:aws:ssm:us-east-1:504804195561:parameter/sizeup-hub/tunnel-token"}],
+   "dependsOn":[{"containerName":"hub","condition":"HEALTHY"}],
+   "logConfiguration":{"logDriver":"awslogs","options":{"awslogs-group":"/ecs/sizeup-hub","awslogs-region":"us-east-1","awslogs-stream-prefix":"cloudflared"}}}]}

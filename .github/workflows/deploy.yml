@@ -1,0 +1,64 @@
+name: deploy
+
+# After the tests pass on main: build the arm64 hub image, push it to ECR and roll the ECS
+# service (one task at a time). AWS access is a short-lived OIDC role, no stored keys.
+on:
+  workflow_run:
+    workflows: [test]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SHA }}
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/arm64
+          push: true
+          provenance: false
+          tags: ${{ steps.ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY }}:${{ env.SHA }}
+      - id: td
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: deploy/aws/taskdef.json
+          container-name: hub
+          image: ${{ steps.ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY }}:${{ env.SHA }}
+      - id: svc
+        run: echo "exists=$(aws ecs describe-services --cluster sizeup-hub --services sizeup-hub --query 'length(services[?status==`ACTIVE`])' --output text)" >> "$GITHUB_OUTPUT"
+      - if: steps.svc.outputs.exists == '1'
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.td.outputs.task-definition }}
+          cluster: sizeup-hub
+          service: sizeup-hub
+          wait-for-service-stability: true
+      - if: steps.svc.outputs.exists != '1'
+        run: |
+          aws ecs register-task-definition --cli-input-json "file://${{ steps.td.outputs.task-definition }}" >/dev/null
+          echo "::notice::Task definition registered; the ECS service isn't created yet (sizeup-aws/9-service.sh)."
