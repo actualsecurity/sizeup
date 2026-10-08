@@ -13,11 +13,16 @@
                                   get added to this call? it wasn't dispatched to that call").
                       dispatcher  a 60 Control turn right before or after a linked unit's turn in the
                                   same P25 call on an incident talkgroup (Fire/EMS 15)
-                      manual      put on the event by a person ("+ event" on the 60 Control feed);
+                      manual      put on the event by a person (a transmission's menu, "Add to event");
                                   unit = the operator who did it (also in the event's timeline)
+    radio_link_exclusions  transmission x event a person took off ("Remove from 26-000007", user,
+                    2026-10-08: "how do i remove things from an inc if it was added"): an auto link
+                    (unit / channel / dispatcher) removed is remembered here so the auto-linker never
+                    puts it back (the transcript coming again, the other turn of the call arriving);
+                    a manual add clears it. A manual link removed is just gone.
 
-Links are made when the transcript arrives and never moved afterwards; a re-run of
-speech-to-text updates the copied text.
+Links are made when the transcript arrives and never moved afterwards (but by a person); a re-run of
+speech-to-text updates the copied text. Adding and removing each write a line in the event's chronology.
 """
 
 from __future__ import annotations
@@ -91,6 +96,7 @@ class Comms:
                 db.execute("INSERT INTO radio_traffic (call_id, turn, start, end, channel, talkgroup, talker, radio_id, rig, "
                            "dispatcher, text, status, model, updated_at, id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                            (*vals, tid))
+            off = {r[0] for r in db.execute("SELECT incident_id FROM radio_link_exclusions WHERE traffic_id = ?", (tid,))}
             links: dict[int, tuple[str, str]] = {}
             for rig in rigs:
                 for r in db.execute(self.ON_EVENT_BY_UNIT, (rig, start, start)).fetchall():
@@ -101,8 +107,8 @@ class Comms:
                 if len(active) == 1:            # two calls on FG1: can't tell whose it is
                     links[active[0]["incident_id"]] = ("channel", "")
             for iid, (why, unit) in links.items():
-                db.execute("INSERT OR IGNORE INTO radio_links (traffic_id, incident_id, why, unit) VALUES (?, ?, ?, ?)",
-                           (tid, iid, why, unit))
+                if iid not in off:              # a person took it off that event: not again
+                    self._auto(db, tid, iid, why, unit)
             if p25 and turn is not None and t.get("talkgroup") in self.incident_tgs:
                 self._dispatcher_links(db, tid, call_id, turn, bool(disp), links)
             self.rev += 1
@@ -126,17 +132,23 @@ class Comms:
             if disp and not s["dispatcher"]:            # me: dispatcher; neighbour: a unit linked by unit
                 for r in db.execute("SELECT incident_id, unit FROM radio_links WHERE traffic_id = ? AND why = 'unit'",
                                     (s["id"],)).fetchall():
-                    db.execute("INSERT OR IGNORE INTO radio_links (traffic_id, incident_id, why, unit) VALUES (?, ?, 'dispatcher', ?)",
-                               (tid, r["incident_id"], r["unit"]))
+                    self._auto(db, tid, r["incident_id"], "dispatcher", r["unit"])
             elif not disp and s["dispatcher"]:          # me: a unit; neighbour: the dispatcher
                 for iid, (why, unit) in mine.items():
                     if why == "unit":
-                        db.execute("INSERT OR IGNORE INTO radio_links (traffic_id, incident_id, why, unit) VALUES (?, ?, 'dispatcher', ?)",
-                                   (s["id"], iid, unit))
+                        self._auto(db, s["id"], iid, "dispatcher", unit)
+
+    @staticmethod
+    def _auto(db, tid: str, iid: int, why: str, unit: str) -> None:
+        """An auto link, unless a person took this transmission off that event (radio_link_exclusions)."""
+        db.execute("INSERT OR IGNORE INTO radio_links (traffic_id, incident_id, why, unit) SELECT ?, ?, ?, ? "
+                   "WHERE NOT EXISTS (SELECT 1 FROM radio_link_exclusions WHERE traffic_id = ? AND incident_id = ?)",
+                   (tid, iid, why, unit, tid, iid))
 
     def link(self, tid: str, iid: int, operator: str = "") -> dict:
         """A person puts a transmission on an event (why 'manual', unit = the operator), with a line in
-        the event's timeline. One already on that event is left as it was."""
+        the event's timeline; one they took off before (an exclusion) may come back this way. One
+        already on that event is left as it was."""
         with self.store.tx() as db:
             t = db.execute("SELECT * FROM radio_traffic WHERE id = ?", (tid,)).fetchone()
             if t is None:
@@ -144,15 +156,37 @@ class Comms:
             old = db.execute("SELECT why FROM radio_links WHERE traffic_id = ? AND incident_id = ?", (tid, iid)).fetchone()
             if old is not None:
                 return {"linked": False, "why": old["why"]}
+            db.execute("DELETE FROM radio_link_exclusions WHERE traffic_id = ? AND incident_id = ?", (tid, iid))
             db.execute("INSERT INTO radio_links (traffic_id, incident_id, why, unit) VALUES (?, ?, 'manual', ?)",
                        (tid, iid, operator))
-            who = t["rig"] or t["talker"] or "radio"
             said = (t["text"] or "").strip()
-            when = datetime.fromtimestamp(t["start"], TZ).strftime("%H:%M:%S")
-            self.store._event(db, iid, "radio", f"Radio traffic added: {when} {who} on {t['channel']}"
+            self.store._event(db, iid, "radio", f"Radio traffic added: {_when(t)} {_who(t)} on {t['channel']}"
                               + (f": \u201c{said[:160]}{'…' if len(said) > 160 else ''}\u201d" if said else ""), operator)
             self.rev += 1
         return {"linked": True, "why": "manual"}
+
+    def unlink(self, tid: str, iid: int, operator: str = "") -> dict:
+        """A person takes a transmission off an event: a manual link is deleted; an auto one (unit,
+        channel, dispatcher) too, and remembered (radio_link_exclusions) so the auto-linker never puts it
+        back. A line in the event's chronology either way. One not on that event: nothing changes."""
+        with self.store.tx() as db:
+            t = db.execute("SELECT * FROM radio_traffic WHERE id = ?", (tid,)).fetchone()
+            if t is None:
+                return {"unlinked": False, "error": "no such transmission"}
+            old = db.execute("SELECT why, unit FROM radio_links WHERE traffic_id = ? AND incident_id = ?", (tid, iid)).fetchone()
+            if old is None:
+                return {"unlinked": False, "why": ""}
+            db.execute("DELETE FROM radio_links WHERE traffic_id = ? AND incident_id = ?", (tid, iid))
+            auto = old["why"] != "manual"
+            if auto:
+                db.execute("INSERT OR REPLACE INTO radio_link_exclusions (traffic_id, incident_id, at, operator, why, unit) "
+                           "VALUES (?, ?, ?, ?, ?, ?)", (tid, iid, self.clock(), operator, old["why"], old["unit"]))
+            name = re.sub(r"\s*<[^<>\s]+@[^<>\s]+>$", "", operator).strip()
+            self.store._event(db, iid, "radio", f"Radio {_when(t)} {_who(t)} on {t['channel']} removed from this event"
+                              + (f" (auto: {why_text(old['why'], old['unit'])})" if auto else "")
+                              + (f" by {name}" if name else ""), operator)
+            self.rev += 1
+        return {"unlinked": True, "why": old["why"], "excluded": auto}
 
     def retext(self, tid: str, text: str, status: str, model: str = "", alt: dict | None = None) -> bool:
         """New text for a transmission. alt {text, model}: the other engine's transcript, kept to compare
@@ -167,6 +201,25 @@ class Comms:
                 self.rev += 1
         return bool(n)
 
+    def set_alt(self, tid: str, alt: dict) -> bool:
+        """The other engine's text ("both"), the transcript left as it is."""
+        with self.store.tx() as db:
+            n = db.execute("UPDATE radio_traffic SET alt_text = ?, alt_model = ?, updated_at = ? WHERE id = ?",
+                           (str(alt.get("text") or ""), str(alt.get("model") or ""), self.clock(), tid)).rowcount
+            if n:
+                self.rev += 1
+        return bool(n)
+
+    def rerun_done(self, tid: str, result: str) -> bool:
+        """A re-run (re-transcribe) is over: when, and what came of it (changed | same | failed: why),
+        even when the text is the same, so the page that asked sees it end."""
+        with self.store.tx() as db:
+            n = db.execute("UPDATE radio_traffic SET rerun_at = ?, rerun_result = ?, updated_at = ? WHERE id = ?",
+                           (self.clock(), result, self.clock(), tid)).rowcount
+            if n:
+                self.rev += 1
+        return bool(n)
+
     def prune(self) -> int:
         cutoff = self.clock() - KEEP_UNLINKED_S
         with self.store.tx() as db:
@@ -176,7 +229,7 @@ class Comms:
     # -- reading --------------------------------------------------------------------------------
 
     def for_incidents(self, ids: list[int], limit: int = 200) -> dict[int, list[dict]]:
-        """Each event's radio traffic, newest first."""
+        """Each event's radio traffic, newest first, each with every event it is on (events)."""
         out: dict[int, list[dict]] = {i: [] for i in ids}
         if not ids:
             return out
@@ -187,7 +240,14 @@ class Comms:
             lst = out[r.pop("incident_id")]
             if len(lst) < limit:
                 lst.append(r)
+        shown = [r for lst in out.values() for r in lst]
+        ev = self.events_of(list({r["id"] for r in shown}))
+        for r in shown:
+            r["events"] = ev.get(r["id"], [])
         return out
+
+    def events_of(self, tids: list[str]) -> dict[str, list[dict]]:
+        return events_of(self.store, tids)
 
     def query(self, unit: str = "", channel: str = "", event: str = "", pcfd: list[str] | None = None,
               since: float | None = None, until: float | None = None, limit: int = 300, kind: str = "",
@@ -262,12 +322,7 @@ class Comms:
         rows = self.store.q("SELECT t.*, 'radio' AS kind FROM radio_traffic t" + (" WHERE " + " AND ".join(where) if where else "")
                             + " ORDER BY t.start DESC LIMIT ?", (*args, limit))
         if rows:
-            ids = [r["id"] for r in rows]
-            ev: dict[str, list[dict]] = {}
-            for l in self.store.q(f"SELECT l.traffic_id, l.why, l.unit, i.id, i.number, i.type, i.subtype, i.address "
-                                  f"FROM radio_links l JOIN incidents i ON i.id = l.incident_id "
-                                  f"WHERE l.traffic_id IN ({','.join('?' * len(ids))}) ORDER BY i.id", ids):
-                ev.setdefault(l.pop("traffic_id"), []).append(l)
+            ev = self.events_of([r["id"] for r in rows])
             for r in rows:
                 r["events"] = ev.get(r["id"], [])
         return rows
@@ -277,6 +332,37 @@ class Comms:
                     "SELECT channel, MAX(start) AS m FROM radio_traffic GROUP BY channel ORDER BY m DESC")] + [NOTES],
                 "rigs": sorted({x.strip() for r in self.store.q("SELECT DISTINCT rig FROM radio_traffic WHERE rig != ''")
                                 for x in r["rig"].split(",") if x.strip()})}
+
+
+def events_of(store, tids: list[str]) -> dict[str, list[dict]]:
+    """traffic id -> the events it is on [{id, number, type, subtype, address, status, why, unit}]."""
+    ev: dict[str, list[dict]] = {}
+    for k in range(0, len(tids), 500):
+        part = tids[k:k + 500]
+        for l in store.q(f"SELECT l.traffic_id, l.why, l.unit, i.id, i.number, i.type, i.subtype, i.address, i.status "
+                         f"FROM radio_links l JOIN incidents i ON i.id = l.incident_id "
+                         f"WHERE l.traffic_id IN ({','.join('?' * len(part))}) ORDER BY i.id", part):
+            ev.setdefault(l.pop("traffic_id"), []).append(l)
+    return ev
+
+
+def why_text(why: str, unit: str = "") -> str:
+    """Why an auto link was made, in words: 'E63 assigned', 'FG1, the only call with units' ..."""
+    if why == "unit":
+        return f"{unit or 'its unit'} assigned"
+    if why == "channel":
+        return "FG1, the only call with units"
+    if why == "dispatcher":
+        return f"60 Control answering {unit or 'a unit on it'}"
+    return why
+
+
+def _when(t) -> str:
+    return datetime.fromtimestamp(t["start"], TZ).strftime("%H:%M:%S")
+
+
+def _who(t) -> str:
+    return t["rig"] or t["talker"] or t["radio_id"] or "radio"
 
 
 def _like(w: str) -> str:

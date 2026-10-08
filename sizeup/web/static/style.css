@@ -294,12 +294,11 @@
   :where(.alerts-btn.active) { border-color: var(--ok); }
   :where(.alerts-btn.active) .ico { color: var(--ok-text); }
 
-  /* a transmission's play and re-transcribe buttons: small, square */
-  :where(button.play, button.rerun) {
+  /* a transmission's play button: small, square (its other actions: the "⋯" menu below) */
+  :where(button.play) {
     inline-size: var(--ctl-sm); min-block-size: var(--ctl-sm); padding-inline: 0; font-size: var(--fs-xs); line-height: var(--lh-xs);
   }
   :where(button.play) > .ico { inline-size: var(--ico-sm); block-size: var(--ico-sm); }
-  :where(button.rerun) { background-color: transparent; color: var(--dim); }
   :where(.play.playing) { color: var(--on-fill); background-color: var(--ok); border-color: var(--ok); }
 
   /* ---- fields ---------------------------------------------------------------------------------------- */
@@ -467,6 +466,8 @@
   :where(.talk-chip.rig) { background: var(--ok); border-color: var(--ok); }
   :where(.talk-chip.disp) { background: var(--info); border-color: var(--info); }
   :where(.talk-chip.ended) { animation: none; background: transparent; color: var(--ok); }
+  /* FG1 open, no MDC ID yet (PCFD's radios send it on release): muted, never a guessed name */
+  :where(.talk-chip.unid) { background: transparent; color: var(--text-2); border-color: var(--line-hover); font-weight: 500; }
   @keyframes talkpulse { 50% { opacity: 0.72; } }
 
   /* ---- card, panel and section heads --------------------------------------------------------------- */
@@ -589,13 +590,42 @@
   :where(button.help):where(:hover, [aria-expanded="true"])::before { border-color: var(--text); }
 
   /* ---- popover: menus, the help text, the talk alerts, the map's station picker -------------------- */
-  :where(.popover, .help-pop, .alerts-panel, .cm-pop) {
+  :where(.popover, .help-pop, .alerts-panel, .cm-pop, .menu) {
     z-index: var(--z-popover); padding: var(--s-2) var(--s-3);
     font-size: var(--fs-sm); line-height: var(--lh-sm); font-weight: 400; letter-spacing: 0; text-transform: none;
     color: var(--text); background: var(--raised); border: var(--bw) solid var(--line-strong);
     border-radius: var(--radius); box-shadow: var(--elev-dialog);
   }
   :where(.help-pop) { position: fixed; max-inline-size: min(30rem, calc(100vw - 2 * var(--s-4))); white-space: pre-line; }
+
+  /* ---- menu: a "⋯" button and its actions (ui.js UI.menu: role=menu, arrow keys, Esc) -----------------
+     The button: small, square, quiet; open: [aria-expanded=true]. The menu: a popover of full-width rows
+     (role=menuitem, the button's height: 28 px, 44 on touch), a mark column (✓, Back), the label, a hint
+     (dim, right: "current", "▸"). [aria-disabled=true]: shown, not chosen (already on that event). */
+  :where(button.menu-btn) { color: var(--text-2); }
+  :where(button.menu-btn):where([aria-expanded="true"]) { background-color: var(--hover); border-color: var(--line-strong); color: var(--text); }
+  :where(button.menu-btn)[aria-busy="true"] > .ico { display: none; }
+  :where(.menu) {
+    position: fixed; display: flex; flex-direction: column; padding: var(--s-1);
+    min-inline-size: 14rem; max-inline-size: min(28rem, calc(100vw - 2 * var(--s-4)));
+    max-block-size: min(70vh, 32rem); overflow-y: auto; overscroll-behavior: contain;
+  }
+  :where(button.menu-item) {
+    justify-content: flex-start; gap: var(--s-2); inline-size: 100%; padding-inline: var(--s-1) var(--s-2);
+    font-weight: 400; text-align: start; white-space: normal;
+    color: var(--text); background-color: transparent; border-color: transparent;
+  }
+  :where(button.menu-item):where(:hover, :focus-visible):where(:not([aria-disabled="true"])) {
+    background-color: var(--hover); border-color: transparent; color: var(--text);
+  }
+  :where(button.menu-item):where(:focus-visible) { outline-offset: calc(-1 * var(--focus-w)); }
+  :where(button.menu-item)[aria-disabled="true"] { opacity: 1; color: var(--dim); cursor: default; }
+  :where(button.menu-item.danger-quiet) { color: var(--accent-text); }
+  :where(.menu-mark) { display: inline-flex; justify-content: center; inline-size: var(--ico); flex: none; color: var(--ok-text); }
+  :where(.menu-back) .menu-mark { color: var(--text-2); }
+  :where(.menu-text) { flex: 1 1 auto; min-inline-size: 0; }
+  :where(.menu-hint) { flex: none; margin-inline-start: var(--s-2); font-size: var(--fs-xs); line-height: var(--lh-xs); color: var(--dim); }
+  :where(.menu-sep) { flex: none; block-size: var(--bw); margin-block: var(--s-1); background: var(--line); }
 
   /* ---- dialog: a scrim and a panel (records, the large map, the shortcut sheet, confirm) ----------- */
   :where(.overlay) {

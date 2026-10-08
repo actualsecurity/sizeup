@@ -140,7 +140,7 @@
       chip("Transmit on", "pill on")),
     row("Badges", chip("PC", "badge"), chip("TX FG1", "talk-badge"), chip("Ended", "talk-badge ended"), chip("MAIN", "tg-badge")),
     row("Why / link", chip("Unit", "why unit"), chip("60 Control", "why dispatcher"), chip("Added", "why manual"), ev, ub),
-    row("Talking", chip("TX E60 FG1", "talk-chip rig"), chip("60 Control", "talk-chip disp"), chip("E61 ended", "talk-chip ended")));
+    row("Talking", chip("TX E60 FG1", "talk-chip rig"), chip("60 Control", "talk-chip disp"), chip("E61 ended", "talk-chip ended"), chip("FG1 · ID on release", "talk-chip unid")));
   }
 
   function cards() {
@@ -177,12 +177,15 @@
       li.append(head, el("div", "qa", "1 Gateway Plz, Port Chester"));
       q.append(li);
     }
-    // a real transmission row (cad.js radioRow): Amazon Transcribe's text with the local model's to compare (⇄)
+    // a real transmission row (cad.js radioRow): play, an incident it is on (a chip), the "⋯" menu (ui.js UI.menu:
+    // Add to event ▸, Remove from, Re-transcribe, Copy text), and the other engine's text to compare (⇄)
     const now = Date.now() / 1000;
     const tx = el("ol", "list log radio-log");
     tx.append(radioRow({ id: "sg-aws", start: now - 90, end: now - 86, rig: "E60", channel: "Fire/EMS 15", has_audio: false,
       text: "Engine 60 on location, nothing showing", model: "aws-transcribe", alt_model: "whisper large-v3",
-      alt_text: "Engine 60 on location nothing showing" }));
+      alt_text: "Engine 60 on location nothing showing",
+      events: [{ id: -1, number: "26-000002", type: "ALARM", subtype: "COMM", address: "1 Gateway Plz", why: "unit", unit: "E60" }] },
+      { scope: "sg" }));
     // the phone pre-alert row (prealert.js), read-only here
     const pa = el("ol", "pa-list");
     PreAlert.column(pa, null, { time: now, open: [{ id: -1, test: false, source: "Tapout HQ phone", at: now - 42, title: "STATION PHONE RINGING",

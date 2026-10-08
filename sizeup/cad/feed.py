@@ -21,6 +21,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from sizeup.cad.comms import events_of
 from sizeup.cad.lists import Lists, ListsError
 from sizeup.cad.radios import PCFD_KINDS
 
@@ -162,12 +163,7 @@ class Feed:
                                   f"WHERE call_id IN ({','.join('?' * len(calls))})", calls):
                 if s["turn"] is not None:
                     turns[(s["call_id"], s["turn"])] = s
-        ids = [r["id"] for r in rows]
-        ev: dict[str, list[dict]] = {}
-        for l in self.store.q(f"SELECT l.traffic_id, l.why, l.unit, i.id, i.number, i.type, i.address "
-                              f"FROM radio_links l JOIN incidents i ON i.id = l.incident_id "
-                              f"WHERE l.traffic_id IN ({','.join('?' * len(ids))}) ORDER BY i.id", ids):
-            ev.setdefault(l.pop("traffic_id"), []).append(l)
+        ev = events_of(self.store, [r["id"] for r in rows])
         for r in rows:
             r["pc"] = self.pc(r, turns)
             r["events"] = ev.get(r["id"], [])

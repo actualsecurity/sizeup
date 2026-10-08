@@ -566,12 +566,12 @@ window.CadMap = (() => {
     // talking now, with the call each one belongs to
     const talk = ((cad.state.talking || []).filter((e) => Radio.shown(e))).slice(0, 8);
     const tbox = $("#ov-talk");
-    const tsig = JSON.stringify(talk.map((e) => [e.key, e.rig, e.ended, e.channel, e.alias]).concat(ov.map((o) => [o.id, o.units.length])));
+    const tsig = JSON.stringify(talk.map((e) => [e.key, e.rig, e.ended, e.channel, e.alias, e.id_on_release]).concat(ov.map((o) => [o.id, o.units.length])));
     if (tbox._sig !== tsig) {
       tbox._sig = tsig;
       tbox.replaceChildren(el("span", "dim small", talk.length ? "TX" : "No TX"));
       for (const e of talk) {
-        const c = el("span", "talk-chip" + (e.ended ? " ended" : "") + (e.rig ? " rig" : "") + (e.dispatcher ? " disp" : ""));
+        const c = el("span", Radio.chipClass(e));
         c.append(el("span", "", Radio.label(e)));
         const on = ov.filter((o) => liveFor(o).includes(e) || (e.rig && o.units.some((u) => e.rig.split(/,\s*/).includes(u.name))));
         if (on.length) c.append(el("span", "on", on.map((o) => incTitle(o)).join(", ")));

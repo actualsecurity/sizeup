@@ -254,6 +254,18 @@ class IncidentStore:
             self.save()
         return hit
 
+    def set_alt(self, tid: str, alt: dict) -> bool:
+        """The other engine's text for a transmission ("both"), its own text left as it is."""
+        hit = False
+        with self._lock:
+            for t in [t for i in self.incidents for t in i.traffic] + list(self.loose):
+                if t.id == tid:
+                    t.alt_text, t.alt_model = str(alt.get("text") or ""), str(alt.get("model") or "")  # type: ignore[attr-defined]
+                    hit = True
+        if hit:
+            self.save()
+        return hit
+
     def close(self, incident_id: str) -> bool:
         with self._lock:
             found = next((inc for inc in self.incidents if inc.id == incident_id), None)

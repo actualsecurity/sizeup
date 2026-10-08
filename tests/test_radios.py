@@ -322,10 +322,12 @@ def test_fg1_open_squelch_is_talking_and_live_mdc_names_the_rig(tmp_path):
     app._watch_fm_once()
     s = app.state()["talking"]
     assert [(e["channel"], e["rig"], e["radio_id"]) for e in s] == [("FG1", "", "")]   # open, radio not known yet
+    assert s[0]["id_on_release"] is True and s[0]["system"] == "fm"             # PCFD's MDC post-ID: "FG1 · ID on release"
     Sq._frames = [burst[i:i + FRAME] for i in range(0, len(burst) - FRAME + 1, FRAME)]
     app._watch_fm_once()
     s = app.cad.state()["talking"]
     assert [(e["channel"], e["rig"], e["radio_id"]) for e in s] == [("FG1", "E63", "6301")]
+    assert s[0]["id_on_release"] is False                                        # decoded: the unit, as before
     Sq.open = False
     app._watch_fm_once()
     assert app.state()["talking"] == []

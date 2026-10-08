@@ -48,6 +48,7 @@ const cad = {
   listSig: "", rcEditing: null, openUnit: null,
   ask: null,                 // {uid, status, where}: asking why (out of service / unmanned)
   hooks: [],                 // more renderers (settings.js), called on every render
+  txRev: 0,                  // bumped when a transmission row's own state changes (re-transcribe waiting): redraw them
   openBoards: new Set(),     // folded boards (cad_lists.json unit_boards folded) opened here
   emergTouched: false,       // the operator set Emergency on the form: the type no longer does
   dbAt: 0,
@@ -563,26 +564,18 @@ function renderDetail() {
 // FG1 while it had units on it, and 60 Control's turns answering those units in the same P25 call.
 
 const RADIO_WHY = { unit: "Unit", channel: "FG1", dispatcher: "60 Control", manual: "Added" };
-function radioRow(t) {
+// One transmission: play first, then time, rig, channel, duration; the incidents it is on as chips (a click:
+// that incident) and its "⋯" menu (txMenu) at the end; the transcript under it. ctx: {scope: "feed" | "rv" |
+// "inc" (where it is drawn: the menu's identity across redraws), current: the incident whose list this is
+// (no chip for it)}. The wall board: no chips, no menu.
+function radioRow(t, ctx = {}) {
   const li = el("li", "rt");
   const meta = el("div", "meta");
   const b = Icon.play(el("button", "play"));
   b.title = t.has_audio === false ? "Recording expired (12 h)" : "Play";
   b.disabled = t.has_audio === false;
   b.addEventListener("click", () => play(`/api/audio/${encodeURIComponent(t.id)}.wav`));
-  const rr = el("button", "rerun", "↻");
-  rr.title = "Re-transcribe";
-  rr.disabled = t.has_audio === false;
-  rr.addEventListener("click", async () => {
-    rr.disabled = true;
-    setText(rr, "…");
-    try {
-      const r = await fetch("/api/retranscribe", { method: "POST", headers: { "Content-Type": "application/json" },
-                                                   body: JSON.stringify({ ids: [t.id] }) });
-      if (!r.ok || !(await r.json()).queued) { setText(rr, "↻"); rr.disabled = false; rr.title = "Nothing to re-run"; }
-    } catch (e) { setText(rr, "↻"); rr.disabled = false; }
-  });
-  meta.append(b, rr, el("span", "t", fmtTime(t.start, true)));
+  meta.append(b, el("span", "t", fmtTime(t.start, true)));
   const tag = Radio.rigTag({ rig: t.rig, radio_id: t.radio_id, unit: t.talker });
   if (tag) meta.append(tag);
   meta.append(el("span", "chip src", t.channel));
@@ -594,10 +587,15 @@ function radioRow(t) {
     meta.append(w);
   }
   if (t.end > t.start) meta.append(el("span", "dim", `${Math.round(t.end - t.start)} s`));
-  if (/^aws-transcribe/.test(t.model || "")) {
-    const m = el("span", "chip stt-aws", "AWS");
-    m.title = `Transcript: Amazon Transcribe${t.model !== "aws-transcribe" ? ` (${t.model})` : ""}`;
-    meta.append(m);
+  const busy = rerunWaiting(t);
+  if (busy) meta.append(el("span", "dim small", "Re-transcribing…"));
+  if (!BOARD) {
+    const acts = el("span", "feed-acts");
+    for (const e of t.events || []) if (e.id !== ctx.current) acts.append(evChip(e));
+    const m = txMenu(t, ctx);
+    if (busy) { m.setAttribute("aria-busy", "true"); m.title = "Re-transcribing…"; }
+    acts.append(m);
+    meta.append(acts);
   }
   const txt = el("div", "txt" + (t.text ? "" : " muted"), t.text || sttSaid(t));
   li.append(meta, txt);
@@ -611,7 +609,7 @@ function radioRow(t) {
     const open = () => RADIO_ALT_OPEN.has(t.id);
     const paint = () => { show(alt, open()); tog.classList.toggle("active", open()); tog.setAttribute("aria-pressed", String(open())); };
     tog.addEventListener("click", () => { if (open()) RADIO_ALT_OPEN.delete(t.id); else RADIO_ALT_OPEN.add(t.id); paint(); });
-    meta.insertBefore(tog, meta.children[2] || null);
+    meta.insertBefore(tog, meta.children[1] || null);
     li.append(alt);
     paint();
   }
@@ -619,6 +617,147 @@ function radioRow(t) {
   return li;
 }
 const RADIO_ALT_OPEN = new Set();       // rows whose second transcript is shown (kept across redraws)
+
+// An incident a transmission (or note) is on: a chip; a click shows that incident (the Radio view: only its
+// traffic). Manual links in the warn color.
+function evChip(e) {
+  const b = el("button", "feed-ev" + (e.why === "manual" ? " manual" : ""), e.number || `#${e.id}`);
+  b.type = "button";
+  b.dataset.event = e.number || String(e.id);
+  b.dataset.iid = String(e.id);
+  b.title = `${typeLabel(e.type, e.subtype) || e.type || ""} ${e.address || ""}`.trim()
+    + (e.why === "note" ? "" : e.why === "manual" ? `, added${e.unit ? ` by ${opParts(e.unit)[0]}` : ""}`
+      : e.why ? `, auto: ${whyText(e.why, e.unit)}` : "");
+  return b;
+}
+// Why the auto-linker put it on (sizeup/cad/comms.py why_text).
+function whyText(why, unit) {
+  return why === "unit" ? `${unit || "its unit"} assigned` : why === "channel" ? "FG1, the only call with units"
+    : why === "dispatcher" ? `60 Control answering ${unit || "a unit on it"}` : why;
+}
+
+// ---- a transmission's "⋯" menu (ui.js UI.menu): Add to event ▸, Remove from <each>, Re-transcribe, Copy text ----
+// user, 2026-10-08: "how do i remove things from an inc if it was added ... maybe a triple dot on each that lets
+// you tab down to 'add it to a specific event' if it wasn't auto added". Adding and removing: dispatchers and
+// admins (POST /api/cad/incident/<id>/link | unlink; an auto link removed stays off); Re-transcribe: admins.
+function txMenu(t, ctx = {}) {
+  return UI.menu.button(`Actions: ${fmtTime(t.start, true)} ${t.rig || t.talker || t.radio_id || "transmission"}`,
+                        () => txMenuItems(t), { key: `${ctx.scope || "tx"}:${t.id}` });
+}
+function txMenuItems(t) {
+  const items = [], evs = t.events || [];
+  if (canDo("dispatch")) {
+    items.push({ label: "Add to event", sub: () => addToPage(t) });
+    for (const e of evs) {
+      const n = e.number || `#${e.id}`;
+      items.push({ label: e.why === "manual" ? `Remove from ${n}` : `Remove from ${n} (auto: ${whyText(e.why, e.unit)})`,
+                   run: () => unlinkTx(t, e) });
+    }
+    items.push("-");
+  }
+  if (canDo("admin")) {
+    const waiting = rerunWaiting(t);
+    items.push({ label: waiting ? "Re-transcribing…" : "Re-transcribe", disabled: t.has_audio === false || waiting,
+                 hint: t.has_audio === false ? "recording expired" : "", run: () => rerunTx(t) });
+  }
+  items.push({ label: "Copy text", disabled: !t.text, run: () => copyText(t) });
+  return items;
+}
+// The open incidents, newest first, the one open on the Dispatch view first ("current"); those it is on: checked.
+function addToPage(t) {
+  const on = new Set((t.events || []).map((e) => e.id));
+  const cur = selected();
+  const open = incidents().filter(isOpen).sort((a, b) => (b.created_at || 0) - (a.created_at || 0) || b.id - a.id);
+  if (cur && isOpen(cur)) open.sort((a, b) => (b.id === cur.id) - (a.id === cur.id));
+  if (!open.length) return [{ label: "No open incidents", disabled: true }];
+  return open.map((i) => ({
+    label: `${incTitle(i)} ${typeLabel(i.type, i.subtype) || i.type || "No type"}${i.address ? `, ${i.address}` : ""}`,
+    hint: cur && i.id === cur.id ? "current" : "", checked: on.has(i.id), disabled: on.has(i.id),
+    run: () => linkTx(t, i),
+  }));
+}
+function txChanged() {                   // a link changed: the Radio view asks again now (the feed and the incident: the state push)
+  window.dispatchEvent(new CustomEvent("sizeup:tx-changed"));
+}
+async function linkTx(t, inc) {
+  try {
+    await api("POST", `/api/cad/incident/${inc.id}/link`, { traffic_id: t.id, operator: operator() });
+    UI.toast(`Added to ${incTitle(inc)}`, "ok");
+  } catch (err) {
+    UI.toast(`Add failed: ${err.message}`, "err");
+  }
+  txChanged();
+}
+async function unlinkTx(t, e) {
+  const n = e.number || `#${e.id}`;
+  try {
+    const r = await api("POST", `/api/cad/incident/${e.id}/unlink`, { traffic_id: t.id, operator: operator() });
+    UI.toast(`Removed from ${n}`, "ok", r && r.excluded ? "It won't be added back on its own" : "");
+  } catch (err) {
+    UI.toast(`Remove failed: ${err.message}`, "err");
+  }
+  txChanged();
+}
+async function copyText(t) {
+  const text = `${fmtTime(t.start, true)} ${t.rig || t.talker || ""} (${t.channel}): ${t.text}`;
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch (e) {                            // no clipboard API (http, an old browser): a hidden field
+    const ta = el("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.className = "sr-only";
+    document.body.append(ta);
+    ta.select();
+    try { document.execCommand("copy"); } catch (_) { /* nothing more to try */ }
+    ta.remove();
+  }
+  UI.toast("Copied", "ok", t.text.length > 80 ? `${t.text.slice(0, 80)}…` : t.text);
+}
+// Re-transcribe (admins): POST /api/retranscribe {ids}; the row shows busy until its rerun_at passes the time
+// it was asked (the station or the hub always answers: changed, same or failed), then says how it went. No
+// answer in 45 s: said so. The engine is never named (it's in the logs).
+const RERUN_WAIT = new Map();            // transmission id -> {at (server time), timer}
+const RERUN_WAIT_MS = 45000;
+function rerunWaiting(t) {
+  const w = RERUN_WAIT.get(t.id);
+  if (!w) return false;
+  if ((t.rerun_at || 0) < w.at) return true;
+  clearTimeout(w.timer);
+  RERUN_WAIT.delete(t.id);
+  const res = String(t.rerun_result || "").split("; ")[0];
+  setTimeout(() => {                     // after this draw
+    if (res === "changed") UI.toast("Updated", "ok", t.text ? (t.text.length > 80 ? `${t.text.slice(0, 80)}…` : t.text) : "");
+    else if (res === "same") UI.toast("No change", "info");
+    else if (res.startsWith("failed")) UI.toast(`Failed: ${res.replace(/^failed:?\s*/, "") || "unknown"}`, "err");
+    else UI.toast("Re-transcribed", "ok");
+  });
+  return false;
+}
+async function rerunTx(t) {
+  const at = serverNow() - 1;
+  let r;
+  try {
+    r = await apiCall("POST", "/api/retranscribe", { ids: [t.id] });
+  } catch (e) {
+    UI.toast(`Failed: ${e.message}`, "err");
+    return;
+  }
+  if (!r || !r.queued) { UI.toast("Nothing to re-transcribe", "info", "No recording left, or it is already queued"); return; }
+  const timer = setTimeout(() => {
+    if (!RERUN_WAIT.has(t.id)) return;
+    RERUN_WAIT.delete(t.id);
+    UI.toast("No answer from the station", "err", "Re-transcribe: nothing came back in 45 s");
+    repaintTx();
+  }, RERUN_WAIT_MS);
+  RERUN_WAIT.set(t.id, { at, timer });
+  repaintTx();
+}
+function repaintTx() {                   // the rows' busy state changed: draw them again
+  cad.txRev++;
+  if (cad.state) render();
+  txChanged();
+}
 // What a transmission without text says (its status): sizeup/app.py, sizeup/channels.py.
 function sttSaid(t) {
   return { no_speech: "Key-up, no speech", pending: "Transcribing", remote: "Transcribing on the hub (AWS)", off: "Not transcribed",
@@ -679,17 +818,26 @@ function renderRadio(inc) {
   }
   syncList($("#d-radio"), shownItems, {
     key: (x) => x.key,
-    sig: (x) => x.kind === "radio" ? JSON.stringify([x.t.text, x.t.status, x.t.rig, x.t.why, x.t.has_audio, talkSig(x.t.rig)])
+    sig: (x) => x.kind === "radio" ? JSON.stringify([x.t.text, x.t.status, x.t.rig, x.t.why, x.t.has_audio, talkSig(x.t.rig),
+                                                     x.t.alt_text, x.t.rerun_at, (x.t.events || []).map((e) => [e.id, e.why]), cad.txRev])
       : JSON.stringify([x.e.text, x.e.units]),
     make: () => el("li"),
     fill: (li, x) => {
-      const n = x.kind === "radio" ? radioRow(x.t) : noteRow(x.e);
+      const n = x.kind === "radio" ? radioRow(x.t, { scope: "inc", current: inc.id }) : noteRow(x.e);
       li.className = n.className;
       li.replaceChildren(...n.childNodes);
     },
     empty: "None",
   });
 }
+// An incident chip on a transmission (the feed, an incident's radio list): that incident. (The Radio view
+// filters to it instead: radio-view.js.)
+document.addEventListener("click", (e) => {
+  const c = e.target.closest && e.target.closest(".feed-ev[data-iid]");
+  if (!c || c.closest("#radio-view") || BOARD) return;
+  const id = Number(c.dataset.iid);
+  if (incidents().some((i) => i.id === id)) selectIncident(id); else openFromRecords(id);
+});
 document.addEventListener("click", (e) => {
   const b = e.target.closest("[data-unit-filter]");
   if (!b || !b.closest("#d-body")) return;
@@ -2046,7 +2194,7 @@ $("#dispatch-open").addEventListener("click", openDispatch);
 window.addEventListener("hashchange", route);
 if (BOARD) setText($("#page-title"), "Monitor");
 Radio.mountAlerts($("#alerts"));
-CadFeed.mount($("#feed"), { state: () => cad.state, selected, operator, api, radioRow, time: (u) => fmtTime(u, true) });
+CadFeed.mount($("#feed"), { state: () => cad.state, radioRow, time: (u) => fmtTime(u, true), rev: () => cad.txRev });
 cad.hooks.push(CadFeed.render);
 $("#rc-form").addEventListener("submit", saveCard);
 $("#rc-type").addEventListener("change", () => {
@@ -2154,7 +2302,7 @@ function askAdmin() {
 const RO_DISPATCH = "#new-incident, #new-form :is(input, select, textarea, #new-create), #d-accept, #d-dismiss, #d-edit, "
   + "#d-close, #d-queued select, #close-form :is(select, #c-close), #edit-form :is(input, select, textarea, #edit-save), "
   + "#d-attach :is(select, button:not(.help)), #d-dispatch :is(input, select, textarea, button:not(#u-cancel):not(.help)), #note-text, #note-add, "
-  + ".ubtns button, .feed-add, .rv-add, .rv-pick :is(select, button), .pa-dismiss";
+  + ".ubtns button, .pa-dismiss";        // (a transmission's menu leaves out what the role can't do: txMenuItems)
 // In Settings for anyone but an admin: everything but the section tabs, filters and what only reads.
 const RO_SETTINGS_KEEP = ".tab, [type=search], .ro-ok, .ro-ok *, .help";
 function roLock(root, sel, keep) {
@@ -2171,7 +2319,6 @@ function roLockAll() {             // every render, and whatever appears later (
   if (!canDo("dispatch")) roLock(main, RO_DISPATCH);
   if (!canDo("admin")) {
     roLock($("#settings .s-content"), "button, input, select, textarea", RO_SETTINGS_KEEP);
-    roLock(main, "button.rerun");                     // speech-to-text again: the station's, admin only
   }
 }
 function applyRoles() {

@@ -189,8 +189,7 @@
   .radio-log .chip.src, .pages .chip.src { --c: var(--dim); }
   .unit-filter { margin-block-end: var(--s-2); gap: var(--s-1); }
   .unit-filter button.talking { border-color: var(--ok); box-shadow: 0 0 0 var(--bw) var(--ok); }
-  /* Amazon Transcribe's text, and the other engine's under it to compare ("both": Settings > Radios > Engine) */
-  .chip.stt-aws { --c: var(--info); }
+  /* the other engine's text under the transcript, to compare ("both": Settings > Radios > Engine; the ⇄ toggle) */
   .alt-txt { margin-block-start: var(--s-1); padding-inline-start: var(--s-2); border-inline-start: 2px solid var(--line-strong);
     font-size: var(--fs-sm); line-height: var(--lh-sm); }
   .pages .ptype { font-weight: 800; color: var(--text); }
@@ -270,7 +269,6 @@
   .feed-list > li.feed-row { padding: var(--s-1) var(--s-1) var(--s-1) var(--s-2); }
   .feed-list > li.from-dispatch { margin-inline-end: 8%; }
   .feed-list > li .txt { font-size: var(--fs-sm); line-height: var(--lh-sm); }
-  .feed-list .rerun { display: none; }                 /* re-transcribe: in the Radio view, not the pinned feed */
   /* about Port Chester: the department's red */
   .feed-list > li.pc, .feed-ticker.pc { border: var(--bw) solid var(--accent); border-inline-start-width: var(--bw-mark); border-radius: var(--radius-s);
     background: color-mix(in srgb, var(--accent) 9%, transparent); margin-block-end: var(--s-1); }
@@ -291,8 +289,6 @@
   .rv-filters select { flex: 0 1 auto; max-inline-size: 16rem; }
   .rv-sec .sum { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-inline-size: 0; }
   .radio-view .feed-acts { flex-wrap: wrap; justify-content: flex-end; }
-  .rv-pick { gap: var(--s-1); flex-wrap: wrap; }
-  .rv-pick select { max-inline-size: 22rem; block-size: var(--ctl-sm); font-size: var(--fs-sm); }
 
   /* ---- the talk alerts popover (radio.js) ----------------------------------------------------------- */
   .alerts-panel {
@@ -357,7 +353,7 @@
   html.board :is(.queue, #d-body, #new-form, #d-empty, #radio-view, .role-banner) { display: none !important; }
   html.board :is(.ov-card, .ov-ne, .ov-page) { cursor: default; }
   html.board .ov-page .dim { display: none; }          /* "Accept / Dismiss": the console's, not the board's */
-  html.board :is(.feed-add, .feed-more, .rerun) { display: none; }
+  html.board :is(.feed-more, .menu-btn) { display: none; }
   html.board .ov-grid { grid-template-columns: minmax(0, 1.6fr) minmax(18rem, 1fr); }
   html.board .ov-mapbox { block-size: calc(100dvh - var(--hdr-h) - 2 * var(--gutter) - var(--ctl) - var(--gutter)); }
   .b-sec { margin-block-start: var(--s-3); }

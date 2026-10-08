@@ -81,6 +81,8 @@ GET  /api/cad/comms?unit=&channel=&event=&pcfd=1&since=&until=&limit=&rev=
 GET  /api/cad/feed?limit=&tg=307,333      the pinned 60 Control feed: newest transmissions on the incident
                                           talkgroup(s), pc = why it is talking to us (sizeup/cad/feed.py)
 POST /api/cad/incident/<id>/link          {traffic_id, operator}  put a transmission on the event (why manual)
+POST /api/cad/incident/<id>/unlink        {traffic_id, operator}  take it off: an auto link (unit, channel,
+                                          dispatcher) stays off (sizeup/cad/comms.py radio_link_exclusions)
 GET  /api/cad/rigs                        board units (PCFD's own flagged), for the talk alerts
 POST /api/cad/prealert/<id>/dismiss       {operator?, reason?}  a phone pre-alert from Tapout that is nothing
                                           (sizeup/prealert.py; the state's "prealert"); dispatchers and admins
@@ -100,7 +102,7 @@ from sizeup.cad.store import CadError
 
 JSON = "application/json"
 MAX_BODY = 65536
-INCIDENT = re.compile(r"/api/cad/incident/(\d{1,9})(?:/(accept|dismiss|close|note|recommend|preview|dispatch|upgrade|attach|link|return))?")
+INCIDENT = re.compile(r"/api/cad/incident/(\d{1,9})(?:/(accept|dismiss|close|note|recommend|preview|dispatch|upgrade|attach|link|unlink|return))?")
 SUGGEST = re.compile(r"/api/cad/incident/(\d{1,9})/units")
 EXPORT = re.compile(r"/api/cad/export/([a-z-]{1,20}\.csv)")
 UNIT = re.compile(r"/api/cad/unit/(\d{1,9})/status")
@@ -115,7 +117,7 @@ PREALERT = re.compile(r"/api/cad/prealert/(\d{1,9})/dismiss")
 # anyone signed in (a POST that changes nothing). First match wins; a path not here is "admin".
 WRITES = (
     (re.compile(r"/api/cad/incident(?:/\d{1,9}(?:/(?:accept|dismiss|close|note|recommend|preview|dispatch|upgrade|attach"
-                r"|link|return))?)?"), "dispatch"),                       # events, notes, dispatches, radio links
+                r"|link|unlink|return))?)?"), "dispatch"),                       # events, notes, dispatches, radio links
     (UNIT, "dispatch"),                                                     # unit status on the board
     (PREALERT, "dispatch"),                                                 # a phone pre-alert that is nothing
     (re.compile(r"/api/incident/[^/]{1,80}/close"), "dispatch"),            # the monitor's incident list (server.py)
@@ -194,6 +196,8 @@ def _on_incident(m, b, o, c):
         return f"Attached {_units(c, b.get('unit_ids'))} to {ev}", n
     if act == "link":
         return f"Linked a transmission to {ev}", n
+    if act == "unlink":
+        return f"Removed a transmission from {ev}", n
     if act == "return":
         return f"Returned {_units(c, [b.get('unit_id')])} to {ev} ({b.get('status', '')})", n
     return f"{act.capitalize()} {ev}", n
@@ -467,7 +471,8 @@ class CadApi:
             iid, action = int(m.group(1)), m.group(2)
             fn = {None: c.update, "accept": c.accept, "dismiss": c.dismiss, "close": c.close, "note": c.note,
                   "recommend": c.recommend, "preview": c.preview, "dispatch": c.dispatch, "upgrade": c.upgrade,
-                  "attach": c.attach, "link": c.link_traffic, "return": c.return_unit}[action]
+                  "attach": c.attach, "link": c.link_traffic, "unlink": c.unlink_traffic,
+                  "return": c.return_unit}[action]
             return fn(iid, body)
         if m := UNIT.fullmatch(path):
             return c.unit_status(int(m.group(1)), body)

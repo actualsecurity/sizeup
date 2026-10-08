@@ -2,19 +2,20 @@
 // the last transmissions on the county's incident talkgroup(s), newest first, so the desk always
 // sees what 60 Control said, even when it was talking to the internal dispatcher.
 //
-//   CadFeed.mount(box, deps)   once; deps: {state, selected, operator, api, radioRow, time}
+//   CadFeed.mount(box, deps)   once; deps: {state, radioRow, time, rev (cad.txRev: rows' own state)}
 //   CadFeed.render()           on every state push and selection change (cheap when nothing changed)
 //
 // A row "talking to us" (pc: a phrase from the data file, a PCFD / Rye Brook unit, or 60 Control's
 // turn next to one) gets the accent border and a "PC" badge, and a toast when the talk alerts are on.
-// "+ event" puts the transmission on the open event (a manual link, with the operator).
+// Each row: the incidents it is on as chips (a click: that incident) and its "⋯" menu (cad.js txMenu: Add to
+// event ▸, Remove from ..., Re-transcribe, Copy text).
 // Collapsed to a one-line ticker: remembered in this browser (default: collapsed on a phone).
 "use strict";
 
 window.CadFeed = (() => {
   const KEY = "sizeup.cad.feed.collapsed";
   const ALERT_KEY = "sizeup.alerts";                     // radio.js's talk alert settings
-  const st = { box: null, deps: null, sig: "", headSig: "", seen: null, collapsed: false, busy: new Set() };
+  const st = { box: null, deps: null, sig: "", headSig: "", seen: null, collapsed: false };
 
   function el(tag, cls, text) {
     const n = document.createElement(tag);
@@ -34,10 +35,6 @@ window.CadFeed = (() => {
   const hhmmss = (unix) => st.deps.time(unix);
   const who = (t) => t.rig || t.talker || t.radio_id || "radio";
   const said = (t) => t.text || (typeof sttSaid === "function" ? sttSaid(t) : "—");
-  const openEvent = () => {
-    const inc = st.deps.selected();
-    return inc && !["closed", "dismissed"].includes(inc.status) ? inc : null;
-  };
 
   // ---- the panel ---------------------------------------------------------------------------------
 
@@ -73,11 +70,10 @@ window.CadFeed = (() => {
     st.box.hidden = !f;
     if (!f) return;
     renderHead(f, (s && s.talking) || []);
-    const inc = openEvent();
     const rows = f.rows || [];
-    const sig = JSON.stringify([st.collapsed, inc && inc.id, inc && inc.number,
-      rows.map((t) => [t.id, t.text, t.status, t.rig, t.pc, t.has_audio, (t.events || []).map((e) => e.id)]),
-      [...st.busy]]);
+    const sig = JSON.stringify([st.collapsed, st.deps.rev(),
+      rows.map((t) => [t.id, t.text, t.status, t.rig, t.pc, t.has_audio, t.alt_text, t.rerun_at,
+                       (t.events || []).map((e) => [e.id, e.why])])]);
     if (sig !== st.sig) {
       st.sig = sig;
       st.box.classList.toggle("collapsed", st.collapsed);
@@ -87,7 +83,7 @@ window.CadFeed = (() => {
       st.list.hidden = st.collapsed;
       st.ticker.hidden = !st.collapsed;
       if (st.collapsed) renderTicker(rows[0]);
-      else renderRows(rows, inc, f);
+      else renderRows(rows, f);
     }
     alertNew(rows);
   }
@@ -127,65 +123,21 @@ window.CadFeed = (() => {
     st.ticker.classList.toggle("from-dispatch", !!t.dispatcher);
   }
 
-  function renderRows(rows, inc, f) {
+  function renderRows(rows, f) {
     if (!rows.length) {
       st.list.replaceChildren(el("li", "empty", "None"));
       return;
     }
     const many = (f.talkgroups || []).length > 1;
     st.list.replaceChildren(...rows.map((t) => {
-      const li = st.deps.radioRow(t);
+      const li = st.deps.radioRow(t, { scope: "feed" });
       li.classList.add("feed-row");
       li.dataset.id = t.id;
       const meta = li.querySelector(".meta");
       if (!many) meta.querySelectorAll(".chip.src").forEach((n) => n.remove());   // one talkgroup: the title says it
       if (t.pc) { li.classList.add("pc"); meta.prepend(pcBadge(t)); }
-      const acts = el("span", "feed-acts");
-      for (const e of t.events || []) {
-        const c = el("span", "feed-ev" + (e.why === "manual" ? " manual" : ""), e.number || `#${e.id}`);
-        c.title = `${e.number || e.id}${e.address ? `, ${e.address}` : ""} (${e.why === "manual" ? `added by ${e.unit || "hand"}` : e.why})`;
-        acts.append(c);
-      }
-      acts.append(addButton(t, inc));
-      meta.append(acts);
       return li;
     }));
-  }
-
-  function addButton(t, inc) {
-    const b = el("button", "mini feed-add", "+ Event");
-    b.type = "button";
-    const on = inc && (t.events || []).some((e) => e.id === inc.id);
-    if (!inc) {
-      b.disabled = true;
-      b.title = "Open an event first";
-    } else if (on) {
-      b.disabled = true;
-      b.textContent = "Added";
-      b.title = `On ${inc.number || "this event"}`;
-    } else if (st.busy.has(t.id)) {
-      b.disabled = true;
-      b.textContent = "…";
-    } else {
-      b.title = `Add to ${inc.number || "the open event"}`;
-      b.addEventListener("click", () => link(t, inc, b));
-    }
-    return b;
-  }
-
-  async function link(t, inc, b) {
-    st.busy.add(t.id);
-    render();
-    try {
-      await st.deps.api("POST", `/api/cad/incident/${inc.id}/link`, { traffic_id: t.id, operator: st.deps.operator() });
-    } catch (err) {
-      b.title = err.message;
-      UI.toast(`Add failed: ${err.message}`, "err");
-    } finally {
-      st.busy.delete(t.id);
-      st.sig = "";
-      render();
-    }
   }
 
   // ---- "talking to us" alert ---------------------------------------------------------------------

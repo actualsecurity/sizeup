@@ -99,14 +99,72 @@ def test_one_type_scale_and_header_for_console_and_board():
 
 
 def test_every_post_the_scripts_make_is_in_the_permission_map():
-    """The POSTs the page makes (the Radio view's "+ Event", re-transcribe, Settings > Radios' switches,
+    """The POSTs the page makes (a transmission's menu: add to / remove from an event, re-transcribe; Settings > Radios' switches,
     closing the paged incident) need what the server enforces (sizeup/cad/api.py WRITES)."""
     scripts = "".join(js(n) for n in JS_FILES)
     for path, literal, role in (("/api/retranscribe", '"/api/retranscribe"', "admin"),
                                 ("/api/talkgroup", '"/api/talkgroup"', "admin"),
                                 ("/api/talkgroup-group", '"/api/talkgroup-group"', "admin"),
                                 ("/api/mode", '"/api/mode"', "admin"),
-                                ("/api/cad/incident/12/link", "`/api/cad/incident/${iid}/link`", "dispatch"),
+                                ("/api/cad/incident/12/link", "`/api/cad/incident/${inc.id}/link`", "dispatch"),
+                                ("/api/cad/incident/12/unlink", "`/api/cad/incident/${e.id}/unlink`", "dispatch"),
                                 ("/api/incident/abc/close", "`/api/incident/${encodeURIComponent(id)}/close`", "dispatch")):
         assert literal in scripts, f"no script posts to {path}"
         assert needs(path) == role, path
+
+
+def test_one_menu_component_with_its_keys_on_every_transmission_row():
+    """A transmission's actions are one "⋯" menu (ui.js UI.menu, cad.js txMenu) wherever the row is drawn: the
+    pinned feed, the Radio view (main and other talkgroups), an incident's radio list; none on the wall board.
+    The old per-row "+ Event" / "Added" buttons and the separate re-transcribe button are gone."""
+    ui = js("ui.js")
+    for need in ('"aria-haspopup", "menu"', '"aria-expanded"', '"role", "menu"', '"menuitem"', '"menuitemcheckbox"',
+                 '"aria-checked"', '"aria-disabled"', '"ArrowDown"', '"ArrowUp"', '"Home"', '"End"', '"Enter"', '" "',
+                 '"ArrowRight"', '"ArrowLeft"', '"Escape"', '"Tab"', '"mousedown"', "stopImmediatePropagation",
+                 "menu: { button: menuButton"):
+        assert need in ui, need
+    # Esc and Tab close and give the focus back to the button (or its redrawn twin)
+    close = re.search(r"function menuClose\(focus\) \{(.*?)\n  \}", ui, re.S).group(1)
+    assert "b.focus(" in close and "data-menu-key" in close
+    cad = js("cad.js")
+    row = re.search(r"^function radioRow\(t, ctx = \{\}\) \{(.*?)^\}", cad, re.S | re.M).group(1)
+    assert "txMenu(t, ctx)" in row and "if (!BOARD)" in row and "evChip(e)" in row
+    assert row.index('el("button", "play")') < row.index("txMenu(")                       # play stays first
+    items = re.search(r"^function txMenuItems\(t\) \{(.*?)^\}", cad, re.S | re.M).group(1)
+    for label in ('"Add to event"', "Remove from ${n}", "(auto: ${whyText(", '"Re-transcribe"', '"Copy text"'):
+        assert label in items, label
+    assert items.index('canDo("dispatch")') < items.index('"Add to event"') and 'canDo("admin")' in items
+    assert 'radioRow(t, { scope: "feed" })' in js("cad-feed.js")
+    assert 'radioRow(t, { scope: "rv" })' in js("radio-view.js")
+    assert 'radioRow(x.t, { scope: "inc", current: inc.id })' in cad
+    assert "radioRow(t)" in js("board.js")                                                  # (BOARD: no menu)
+    scripts = "".join(js(n) for n in JS_FILES)
+    for gone in ('"+ Event"', "feed-add", "rv-add", "rv-pick", '"rerun"', "stt-aws", '"AWS")'):
+        assert gone not in scripts, gone
+
+
+def test_re_transcribe_waits_for_the_answer_and_says_how_it_went():
+    """The station (or the hub) always answers a re-run (rerun_at, rerun_result): the row is busy until its
+    rerun_at passes the time it was asked, then "Updated" / "No change" / "Failed: ..." (the engine never
+    named); nothing in 45 s: "No answer from the station". Every row's redraw signature has rerun_at."""
+    cad = js("cad.js")
+    assert "const RERUN_WAIT_MS = 45000;" in cad and '"No answer from the station"' in cad
+    wait = re.search(r"^function rerunWaiting\(t\) \{(.*?)^\}", cad, re.S | re.M).group(1)
+    assert "t.rerun_at" in wait and "t.rerun_result" in wait
+    for word in ('UI.toast("Updated"', 'UI.toast("No change"', "UI.toast(`Failed: "):
+        assert word in wait, word
+    assert "AWS" not in wait and "whisper" not in wait
+    assert '"/api/retranscribe", { ids: [t.id] }' in cad and "serverNow()" in cad
+    for name, text in (("cad.js", cad), ("cad-feed.js", js("cad-feed.js")), ("radio-view.js", js("radio-view.js"))):
+        assert "rerun_at" in text, name
+
+
+def test_fg1_open_with_no_id_yet_says_id_on_release():
+    """PCFD's APX radios send their MDC ID after the PTT is let go: while FG1's carrier is open with no ID the
+    strip (and the Overview) says "FG1 · ID on release", muted; never a guessed talker; P25 never (its IDs
+    come with the grant). sizeup/radio/live.py sets id_on_release (tests/test_radios.py)."""
+    radio = js("radio.js")
+    assert 'if (e.system === "fm" && e.id_on_release) return `${e.channel} · ID on release`;' in radio
+    assert radio.index("if (w) return `TX ${w} ${e.channel}`;") < radio.index("ID on release")   # a decoded unit wins
+    assert '(e.id_on_release && !e.rig ? " unid" : "")' in radio and "Radio.chipClass(e)" in js("cadmap.js")
+    assert re.search(r":where\(\.talk-chip\.unid\) \{[^}]*color: var\(--text-2\)", (STATIC / "style.css").read_text())

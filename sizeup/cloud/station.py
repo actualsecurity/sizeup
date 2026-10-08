@@ -5,6 +5,8 @@
         page_text   its transcript (the hub parses the dispatch itself)     (App._transcribed)
         traffic     a finished, transcribed transmission, with its clip     (App._transcribed)
         retext      a re-run's new text for a page or transmission          (App._retext)
+        rerun       a re-run is over: changed | same | failed: why          (App._rerun_finish)
+        alt_text    "both" re-run: whisper's text as the alternative        (App._set_alt)
         heard       a radio ID (and P25 alias) heard on the air             (App._heard)
     forwarder thread   POST /api/station/events: batches in order, retried with backoff; the hub
                        answers with the last seq it has, which is then deleted here

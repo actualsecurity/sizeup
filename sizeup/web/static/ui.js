@@ -7,6 +7,10 @@
 //   UI.dialog.open(overlay, opts)   an .overlay's dialog: focus moves in, Tab stays inside, Esc and a click on
 //   UI.dialog.close(overlay)        the scrim close it, the focus goes back where it was (opts: onClose, opener)
 //   UI.keys(handlers)               the dispatcher's shortcuts (cad.js gives the handlers); "?" shows them
+//   UI.menu.button(label, items, {key})   a "⋯" button (aria-haspopup=menu) whose menu lists items() (asked each
+//                                   time it opens): [{label, run, disabled, checked, hint, danger, sub: () => items}, "-"]
+//                                   ("-": a line; sub: "▸", a second page in the same popover, with Back)
+//   UI.menu.close()                 closes the open one
 //
 // Shortcuts never fire while typing in a field (Esc there leaves the field first), with a modifier held,
 // or behind an open dialog.
@@ -143,6 +147,142 @@ window.UI = (() => {
     });
   }
 
+  // ---- menu: a "⋯" button and its actions (a transmission's: cad.js txMenu) --------------------------------
+  // Mouse: a click opens and closes it, a click anywhere else (or a scroll, a resize) closes it. Keys on the
+  // button: Enter / Space / Down open it on the first item, Up on the last. In it: Up / Down (wrapping),
+  // Home / End, Enter / Space choose, Right (or Enter) opens a "▸" page, Left / Backspace go back, Esc and Tab
+  // close it and put the focus back on the button. Items are role=menuitem (menuitemcheckbox when checked
+  // is given), one tab stop: the menu holds the focus while open. key: the button's identity across redraws
+  // (a row redrawn while its menu is open: the focus goes back to the new button).
+  const M = { el: null, btn: null, key: "", pages: [], items: [] };
+  function menuButton(label, items, { key = "", cls = "" } = {}) {
+    const b = make("button", `menu-btn sm icon quiet${cls ? ` ${cls}` : ""}`);
+    b.type = "button";
+    b.setAttribute("aria-haspopup", "menu");
+    b.setAttribute("aria-expanded", "false");
+    b.setAttribute("aria-label", label);
+    b.title = label;
+    if (key) b.dataset.menuKey = key;
+    b.append(window.Icon ? Icon("more") : "⋯");
+    b._menu = items;
+    b.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (M.el && (M.btn === b || (key && M.key === key))) menuClose(false);
+      else menuOpen(b, 0);
+    });
+    b.addEventListener("keydown", (e) => {
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); menuOpen(b, e.key === "ArrowUp" ? -1 : 0); }
+    });
+    return b;
+  }
+  function menuOpen(b, at) {
+    menuClose(false);
+    const el = make("div", "menu popover");
+    el.id = "ui-menu";
+    el.setAttribute("role", "menu");
+    el.setAttribute("aria-label", b.getAttribute("aria-label") || "Actions");
+    el.addEventListener("click", (e) => {
+      const n = e.target.closest(".menu-item");
+      if (n) { e.stopPropagation(); choose(M.items[Number(n.dataset.i)]); }
+    });
+    (b.closest(".overlay") || document.body).append(el);
+    Object.assign(M, { el, btn: b, key: b.dataset.menuKey || "", pages: [] });
+    b.setAttribute("aria-expanded", "true");
+    b.setAttribute("aria-controls", "ui-menu");
+    page(b._menu(), "", at);
+  }
+  function page(items, title, at) {
+    const el = M.el;
+    M.cur = { items, title };
+    M.items = title ? [{ label: title, back: true }, "-", ...items] : items;
+    el.replaceChildren(...M.items.map((it, i) => {
+      if (it === "-") {
+        const sep = make("div", "menu-sep");
+        sep.setAttribute("role", "separator");
+        return sep;
+      }
+      const n = make("button", "menu-item" + (it.danger ? " danger-quiet" : "") + (it.back ? " menu-back" : ""));
+      n.type = "button";
+      n.tabIndex = -1;
+      n.dataset.i = String(i);
+      n.setAttribute("role", it.checked === undefined ? "menuitem" : "menuitemcheckbox");
+      if (it.checked !== undefined) n.setAttribute("aria-checked", String(!!it.checked));
+      if (it.disabled) n.setAttribute("aria-disabled", "true");
+      if (it.sub) n.setAttribute("aria-haspopup", "menu");
+      if (it.back) n.setAttribute("aria-label", `Back from ${it.label}`);
+      const mark = make("span", "menu-mark");
+      if (it.back) mark.append(window.Icon ? Icon("back", "sm") : "‹");
+      else if (it.checked && window.Icon) mark.append(Icon("check", "sm"));
+      else if (it.checked) mark.textContent = "✓";
+      n.append(mark, make("span", "menu-text", it.label));
+      if (it.hint) n.append(make("span", "menu-hint", it.hint));
+      if (it.sub) n.append(window.Icon ? Icon("chevron", "sm menu-hint") : make("span", "menu-hint", "▸"));
+      return n;
+    }));
+    place();
+    const f = focusItems();
+    if (f.length) f[at < 0 ? f.length - 1 : Math.min(at || 0, f.length - 1)].focus({ preventScroll: true });
+    else { el.tabIndex = -1; el.focus({ preventScroll: true }); }
+  }
+  const focusItems = () => (M.el ? [...M.el.querySelectorAll(".menu-item")] : []);
+  function place() {
+    const el = M.el, b = M.btn && M.btn.isConnected ? M.btn : null;
+    const r = b ? b.getBoundingClientRect() : M.rect || { left: 8, right: 8, top: 8, bottom: 8 };
+    M.rect = r;
+    const vw = document.documentElement.clientWidth, vh = window.innerHeight, gap = 4;
+    const w = el.offsetWidth, h = el.offsetHeight;
+    el.style.left = `${Math.max(8, Math.min(r.right - w, vw - w - 8))}px`;
+    const below = r.bottom + gap, above = r.top - gap - h;
+    el.style.top = `${below + h <= vh - 8 || above < 8 ? Math.max(8, Math.min(below, vh - h - 8)) : above}px`;
+  }
+  function choose(it) {
+    if (!it || it === "-" || it.disabled) return;
+    if (it.back) {
+      const prev = M.pages.pop();
+      if (prev) page(prev.items, prev.title, prev.at);
+      return;
+    }
+    if (it.sub) {
+      M.pages.push({ items: M.cur.items, title: M.cur.title, at: Math.max(0, focusItems().indexOf(document.activeElement)) });
+      page(it.sub(), it.label, 1);                              // past Back, on the first choice
+      return;
+    }
+    menuClose(true);
+    if (it.run) it.run();
+  }
+  function menuClose(focus) {
+    if (!M.el) return;
+    M.el.remove();
+    const b = M.btn && M.btn.isConnected ? M.btn
+      : M.key ? document.querySelector(`.menu-btn[data-menu-key="${CSS.escape(M.key)}"]`) : null;
+    if (M.btn) M.btn.setAttribute("aria-expanded", "false");
+    if (b) b.setAttribute("aria-expanded", "false");
+    Object.assign(M, { el: null, btn: null, key: "", pages: [], items: [] });
+    if (focus && b) b.focus({ preventScroll: true });
+  }
+  window.addEventListener("keydown", (e) => {       // the window, before a dialog's own keys (the document's)
+    if (!M.el) return;
+    const f = focusItems(), i = f.indexOf(document.activeElement);
+    const move = (to) => { if (f.length) f[(to + f.length) % f.length].focus({ preventScroll: true }); };
+    const cur = i >= 0 ? M.items[Number(f[i].dataset.i)] : null;
+    let done = true;
+    if (e.key === "ArrowDown") move(i + 1);
+    else if (e.key === "ArrowUp") move(i < 0 ? -1 : i - 1);
+    else if (e.key === "Home") move(0);
+    else if (e.key === "End") move(-1);
+    else if (e.key === "Enter" || e.key === " ") choose(cur);
+    else if (e.key === "ArrowRight") { if (cur && cur.sub) choose(cur); }
+    else if (e.key === "ArrowLeft" || e.key === "Backspace") { if (M.pages.length) choose({ back: true }); }
+    else if (e.key === "Escape" || e.key === "Tab") menuClose(true);
+    else done = M.el.contains(document.activeElement);   // no shortcut fires behind an open menu
+    if (done) { e.preventDefault(); e.stopImmediatePropagation(); }
+  }, true);
+  document.addEventListener("mousedown", (e) => {
+    if (M.el && !M.el.contains(e.target) && !(e.target.closest && e.target.closest(".menu-btn") === M.btn)) menuClose(false);
+  }, true);
+  document.addEventListener("scroll", (e) => { if (M.el && !M.el.contains(e.target)) menuClose(false); }, true);
+  window.addEventListener("resize", () => menuClose(false));
+
   // ---- keyboard shortcuts ----------------------------------------------------------------------------
   const SHEET = [
     [["N"], "New incident"],
@@ -220,5 +360,6 @@ window.UI = (() => {
   document.addEventListener("keydown", onKey);
   function keys(h) { handlers = { ...handlers, ...h }; }
 
-  return { toast, confirm, busy, dialog: { open, close, isOpen }, keys, sheet };
+  return { toast, confirm, busy, dialog: { open, close, isOpen }, keys, sheet,
+           menu: { button: menuButton, close: menuClose, get open() { return !!M.el; } } };
 })();
