@@ -201,3 +201,97 @@ def test_a_background_carrier_alone_does_not_hold_the_squelch_open():
     talk = np.concatenate([np.concatenate([dead(0.3), voice_like(1.3)]) for _ in range(5)])  # pauses between words
     segs = run_squelch(np.concatenate([hiss(3.0), strong(talk), hiss(2.0)]), drop_db=10)
     assert len(segs) == 1 and segs[0].end - segs[0].start > 7.5
+
+
+FG1_FIXTURES = __import__("pathlib").Path(__file__).parent / "fixtures" / "fg1"
+
+
+def wav(name):
+    import wave
+    with wave.open(str(FG1_FIXTURES / name)) as w:
+        return np.frombuffer(w.readframes(w.getnframes()), "<i2").astype(float) / 32768
+
+
+def carrier(n, q, hiss_amp=0.4):
+    """Carrier noise that reads q dB of quieting against hiss(amp=hiss_amp)."""
+    return hiss_amp * 10 ** (-q / 20) * rng.standard_normal(n)
+
+
+def squelch_trace(audio, **kw):
+    """(segments, per-frame open flags, the squelch) for audio fed through a NoiseSquelch."""
+    clock = {"t": 0.0}
+    sq = NoiseSquelch(clock=lambda: clock["t"], **kw)
+    segs, lit = [], []
+    for i in range(0, len(audio) - FRAME + 1, FRAME):
+        clock["t"] += FRAME / RATE
+        if (s := sq.feed(audio[i:i + FRAME])) is not None:
+            segs.append(s)
+        lit.append(sq.open)
+    return segs, np.array(lit), sq
+
+
+@pytest.mark.parametrize("over_db", [16.0, 7.0])
+def test_a_key_up_into_the_background_is_not_held_open_by_its_id(over_db):
+    # FG1 2026-10-08 16:32:21: E63 keyed up (MDC post-ID 6301) and the background carrier came straight
+    # in after it; RX stayed lit 51 s and the station logged "key-up (51.5 s, no speech) · unit 6301".
+    # Replayed: the recorded ID burst and the background (the clip's first 12 s, looped) behind idle
+    # hiss at which the background reads ~11 dB of quieting; the key-up 16 dB over it (as recorded)
+    # or only 7 dB (under drop_db: only the rolling background rule can end it).
+    from sizeup.radio.mdc1200 import decode
+    burst, body = wav("FG1-1791491541708.mdc.wav")[:4000], wav("FG1-1791491541708.src.wav")
+    body = np.concatenate([body] + [body[3 * FRAME:]] * 4)                      # ~56 s of it
+    probe = NoiseSquelch()
+    bg = np.median([probe.hf_level(body[i:i + FRAME]) for i in range(0, len(body) - FRAME + 1, FRAME)])
+    amp = np.sqrt(bg * 10 ** (11 / 10) / (FRAME * 0.375))   # hiss whose 4-7.5 kHz level is 11 dB over it
+    ku = np.concatenate([dead(0.3), voice_like(1.0), dead(0.1), burst])
+    ku = ku + carrier(len(ku), 11 + over_db, amp)
+    audio = np.concatenate([amp * rng.standard_normal(RATE * 4), ku, body, amp * rng.standard_normal(RATE * 2)])
+    end = int((4.0 + len(ku) / RATE) * RATE / FRAME)                           # frame where the key-up ends
+    segs, lit, _ = squelch_trace(audio, drop_db=10)
+    assert len(segs) == 1                                                      # the key-up; no 50 s segment
+    assert 1.1 < segs[0].end - segs[0].start < 1.7
+    assert [p.unit_hex for b in segs[0].bursts for p in decode(b.astype(np.float32), RATE)] == ["6301"]
+    assert not lit[end + int(4.5 * RATE / FRAME):].any()                       # closed within 4.5 s, and stays
+    # Without drop_db (what the station ran: NfmReceiver dropped it on start) it is the 16:32 log.
+    segs, _, _ = squelch_trace(audio)
+    assert len(segs) == 1 and segs[0].end - segs[0].start > 50
+
+
+def test_keying_up_silently_then_talking_keeps_the_talking():
+    # 4 s of dead carrier reads as the background; speech on that same carrier opens it again.
+    segs, lit, _ = squelch_trace(np.concatenate([hiss(3.0), strong(np.concatenate([dead(6.0), voice_like(3.0)])),
+                                                 hiss(2.0)]), drop_db=10)
+    assert len(segs) == 1
+    from sizeup.radio.fm import speech_seconds
+    assert 3.0 < segs[0].end - segs[0].start < 4.5 and speech_seconds(segs[0].audio) > 2.0
+    assert segs[0].end == pytest.approx(12.0, abs=0.3)
+
+
+def test_the_floor_follows_a_weaker_background_down():
+    # A floor learnt from a strong carrier held silently must not block the key-ups after it, once
+    # only a weaker background is left on the channel.
+    ku = strong(np.concatenate([dead(0.4), mdc_burst(), dead(0.2), voice_like(1.5), mdc_burst(), dead(0.15)]))
+    first = np.concatenate([hiss(3.0), strong(dead(5.0)), background(20.0)])
+    segs, lit, sq = squelch_trace(first, drop_db=10)
+    assert segs == [] and sq.floor is not None and sq.floor < 30                # ~26 dB, not ~46
+    segs, lit, sq = squelch_trace(np.concatenate([first, ku, background(3.0), hiss(2.0)]), drop_db=10)
+    assert len(segs) == 1 and len(segs[0].bursts) == 2 and 1.3 < segs[0].end - segs[0].start < 2.1
+    assert segs[0].start == pytest.approx(28.6, abs=0.3)                       # opened at the key-up
+
+
+def test_a_key_up_just_over_the_background_ends_where_it_did():
+    # Quieting 7 dB over the background (under drop_db): the drop doesn't end it; 4 s of nothing does,
+    # and the key-up is kept with its IDs.
+    q = 26 + 7
+    ku = np.concatenate([dead(0.4), mdc_burst(), dead(0.2), voice_like(2.0), mdc_burst(), dead(0.15)])
+    ku = ku + carrier(len(ku), q)
+    segs, lit, _ = squelch_trace(np.concatenate([hiss(3.0), ku, background(15.0), hiss(2.0)]), drop_db=10)
+    assert len(segs) == 1 and len(segs[0].bursts) == 2 and 1.8 < segs[0].end - segs[0].start < 2.6
+    end = int((3.0 + len(ku) / RATE) * RATE / FRAME)
+    assert lit[end:end + 60].any() and not lit[end + 90:].any()               # closed within 4.5 s
+
+
+def test_receiver_squelch_keeps_drop_db_across_restarts():
+    from sizeup.radio.fm import Channel, NfmReceiver
+    r = NfmReceiver("rtl_fm", "", None, Channel(154.0, "FG1"), lambda c, s: None, drop_db=10.0)
+    assert r.squelch.drop_db == 10.0 and r.new_squelch().drop_db == 10.0

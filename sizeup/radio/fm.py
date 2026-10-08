@@ -46,8 +46,14 @@ LEVEL_FRAMES = 6               # a transmission's level: median quieting over it
 EDGE_DB = 3.0                  # the cut between the two carriers: where quieting reaches the weaker one's
                                # level (+ this), so an MDC burst at the edge stays with its transmission
 RISE_FRAMES = 3                # a stronger carrier inside an open one: this long (0.15 s) to count
-BACKGROUND_FRAMES = 80         # open 4 s with no PTT-ID and no speech: the background itself (it opened
-BACKGROUND_SPEECH_S = 0.3      # the squelch on its own at 17:17 and 17:20); dropped, and kept as the floor
+BACKGROUND_FRAMES = 80         # 4 s with no PTT-ID and no speech: the background itself (it opened the
+BACKGROUND_SPEECH_S = 0.3      # squelch on its own at 17:17 and 17:20); dropped, and kept as the floor.
+BACKGROUND_STEP = 10           # Looked for every 0.5 s over the last 4 s, not just once 4 s after opening
+                               # (FG1 2026-10-08 16:32: E63 keyed up, MDC ID 6301, and the background came
+                               # straight in after it; RX stayed lit 51 s. Checked over everything since
+                               # opening, the ID made all of it "not background"). The key-up is kept.
+REOPEN_FRAMES = 20             # closed on a background carrier: the last 1 s is watched for an MDC ID or
+REOPEN_STEP = 5                # speech (someone keyed silently, then talked), every 0.25 s
 VOICE_BAND = (300.0, 3000.0)
 
 
@@ -120,6 +126,9 @@ class NoiseSquelch:
         self._rise_run = 0
         self.floor: float | None = None     # quieting of a background carrier still on the channel
         self._floor_gone = 0
+        self._under: list[float] = []       # closed: a run of quieting well under the floor
+        self._held: deque[tuple[np.ndarray, float]] = deque(maxlen=REOPEN_FRAMES)  # closed: the last 1 s
+        self._up_db = open_db               # quieting that counts as carrier-up in this transmission
 
     def hf_level(self, frame: np.ndarray) -> float:
         spec = np.abs(np.fft.rfft(frame * self._win)) ** 2
@@ -141,10 +150,8 @@ class NoiseSquelch:
             self.hiss = float(np.percentile(np.fromiter(self.levels, float), 80))
         q = 10 * np.log10(self.hiss / lvl) if self.hiss > 0 else 0.0
         if not self.open:
-            if self.floor is not None:      # the background carrier: gone once it's under close_db
-                self._floor_gone = self._floor_gone + 1 if q < self.close_db else 0
-                if self._floor_gone > HANG_FRAMES:
-                    self.floor = None
+            if self.floor is not None and self._watch_floor(frame, q):
+                return None
             need = self.open_db if self.floor is None else max(self.open_db, self.floor + self.drop_db)
             if self._n >= LEARN_FRAMES and q >= need:
                 self._begin(frame, q, self.clock() - FRAME / RATE)
@@ -163,47 +170,106 @@ class NoiseSquelch:
                     n = len(self._frames) - RISE_FRAMES
                     while n > 1 and self._qs[n - 1] > self._level + EDGE_DB:
                         n -= 1
-                    frames, qs, start, level = self._frames[:n], self._qs[:n], self._start, self._level
+                    frames, qs, start, level, up = self._frames[:n], self._qs[:n], self._start, self._level, self._up_db
                     rest, rest_q = self._frames[n:], self._qs[n:]
                     self._begin(rest[0], rest_q[0], start + n * FRAME / RATE)
                     for f, v in zip(rest[1:], rest_q[1:]):
                         self._frames.append(f)
                         self._qs.append(v)
-                    self.floor, self._floor_gone = level, 0
-                    seg = self._segment(frames, qs, start)
+                    self._set_floor(level)
+                    seg = self._segment(frames, qs, start, up)
                     return seg if seg is not None and seg.bursts else None   # no ID: not a key-up
-                if len(self._frames) == BACKGROUND_FRAMES and not any(data_frames(self._frames)) \
-                        and speech_seconds(np.concatenate(self._frames)) < BACKGROUND_SPEECH_S:
-                    self.floor, self._floor_gone = float(np.median(self._qs)), 0
-                    self._frames, self._qs, self.open = [], [], False
-                    return None
+                k = len(self._frames)
+                if k >= BACKGROUND_FRAMES and (k - BACKGROUND_FRAMES) % BACKGROUND_STEP == 0:
+                    win = self._frames[-BACKGROUND_FRAMES:]
+                    if not any(data_frames(win)) and speech_seconds(np.concatenate(win)) < BACKGROUND_SPEECH_S:
+                        return self._background(k - BACKGROUND_FRAMES)
                 if self._drop_run > HANG_FRAMES and self._quiet_run <= HANG_FRAMES:
                     # Fell to a weaker carrier: this transmission ended where the drop began.
                     n = len(self._frames) - self._drop_run
-                    self.floor, self._floor_gone = float(np.median(self._qs[n:])), 0
+                    self._set_floor(float(np.median(self._qs[n:])))
                     while n < len(self._qs) and self._qs[n] > self.floor + EDGE_DB:
                         n += 1
-                    frames, qs, start = self._frames[:n], self._qs[:n], self._start
-                    self._frames, self._qs, self.open = [], [], False
-                    return self._segment(frames, qs, start)
+                    return self._close(n)
         if self._quiet_run > HANG_FRAMES or len(self._frames) >= MAX_FRAMES:
-            frames, qs, start = self._frames, self._qs, self._start
-            self._frames, self._qs = [], []
-            self.open = False
-            return self._segment(frames, qs, start)
+            return self._close(len(self._frames))
         return None
 
-    def _begin(self, frame: np.ndarray, q: float, start: float) -> None:
+    def _begin(self, frame: np.ndarray, q: float, start: float, up_db: float | None = None) -> None:
         self.open, self._start = True, start
         self._frames, self._qs, self._quiet_run = [frame], [q], 0
         self._level, self._drop_run, self._rise_run = None, 0, 0
+        self._up_db = self.open_db if up_db is None else up_db
 
-    def _segment(self, frames: list[np.ndarray], qs: list[float], start: float) -> Segment | None:
+    def _close(self, n: int) -> Segment | None:
+        """Close the squelch; the transmission is its first n frames (the rest is dropped)."""
+        frames, qs, start = self._frames[:n], self._qs[:n], self._start
+        self._frames, self._qs, self.open = [], [], False
+        return self._segment(frames, qs, start, self._up_db)
+
+    def _set_floor(self, q: float | None) -> None:
+        self.floor, self._floor_gone, self._under = q, 0, []
+        self._held.clear()
+
+    def _background(self, n: int) -> Segment | None:
+        """The last 4 s (from frame n on) are the background carrier: no ID, nothing said. The
+        transmission, if there was one, ended where it began: keep that part, drop the rest."""
+        qs = self._qs[:n]
+        self._set_floor(float(np.median(self._qs[n:])))
+        floor = self.floor
+        if n == 0 or not (any(data_frames(self._frames[:n]))
+                          or speech_seconds(np.concatenate(self._frames[:n])) >= BACKGROUND_SPEECH_S
+                          or sum(v >= floor + self.drop_db for v in qs) >= MIN_FRAMES):
+            self._frames, self._qs, self.open = [], [], False      # the background all along
+            return None
+        if max(qs) >= floor + 2 * EDGE_DB:  # a stronger key-up: the background's start isn't part of it
+            stop = max(1, n - BACKGROUND_STEP)
+            while n > stop and qs[n - 1] < floor + EDGE_DB:
+                n -= 1
+        return self._close(n)
+
+    def _watch_floor(self, frame: np.ndarray, q: float) -> bool:
+        """Closed, with a background carrier on the channel. Follows it: gone once it's under close_db,
+        lower once it's well under the floor (so a floor set by a strong carrier can't block the
+        key-ups after it). True: an ID or speech was heard on it, and a transmission opened there."""
+        self._floor_gone = self._floor_gone + 1 if q < self.close_db else 0
+        if self._floor_gone > HANG_FRAMES:
+            self._set_floor(None)
+            return False
+        if q < self.floor - self.drop_db:
+            self._under.append(q)
+            if len(self._under) > HANG_FRAMES:
+                low = float(np.median(self._under))
+                self._set_floor(low if low >= self.close_db else None)
+                return False
+        else:
+            self._under = []
+        self._held.append((frame, q))
+        if self._n % REOPEN_STEP:
+            return False
+        # The carrier at the floor's level (frames from a weaker one coming in aren't compared with it)
+        lo = max(self.close_db, self.floor - self.drop_db)
+        on = [i for i, (_f, v) in enumerate(self._held) if v >= lo]
+        if len(on) < REOPEN_FRAMES // 2:
+            return False
+        frames = [self._held[i][0] for i in on]
+        if not any(data_frames(frames)) and speech_seconds(np.concatenate(frames)) <= BACKGROUND_SPEECH_S:
+            return False
+        held = list(self._held)[on[0]:]
+        self._held.clear()
+        self._begin(held[0][0], held[0][1], self.clock() - len(held) * FRAME / RATE, up_db=self.close_db)
+        for f, v in held[1:]:
+            self._frames.append(f)
+            self._qs.append(v)
+        return True
+
+    def _segment(self, frames: list[np.ndarray], qs: list[float], start: float,
+                 up_db: float | None = None) -> Segment | None:
         # Keep the carrier-up span: first to last frame fully quieted.
         # Carrier-up span: from the first fully quieted frame to the last frame still above the
         # hold-open level. (Ending at the last *fully* quieted frame cut a 60 s South 2 page at 17 s:
         # quieting dips under open_db during long pages while the carrier is still up.)
-        up = [i for i, v in enumerate(qs) if v >= self.open_db]
+        up = [i for i, v in enumerate(qs) if v >= (self.open_db if up_db is None else up_db)]
         held = [i for i, v in enumerate(qs) if v >= self.close_db]
         if not up:
             return None
@@ -263,13 +329,18 @@ class NfmReceiver:
                  open_db: float = 10.0, drop_db: float | None = None):
         self.rtl_fm, self.device, self.gain_db, self.channel = rtl_fm, device, gain_db, channel
         self.on_segment, self.on_event = on_segment, on_event
-        self.open_db = open_db
-        self.squelch = NoiseSquelch(open_db=open_db, drop_db=drop_db)
+        self.open_db, self.drop_db = open_db, drop_db
+        self.squelch = self.new_squelch()
         self.state, self.detail, self.restarts = "starting", "", 0
         self.last_heard: float | None = None   # end of the last transmission
         self._stderr: deque[str] = deque(maxlen=20)
         self._stop = threading.Event()
         self._proc: subprocess.Popen | None = None
+
+    def new_squelch(self) -> NoiseSquelch:
+        # Fresh on every rtl_fm start. (It used to be made here without drop_db, so FG1 ran with none
+        # of the weaker-carrier rules live: 16:32 on 2026-10-08 was held open 51 s by the background.)
+        return NoiseSquelch(open_db=self.open_db, drop_db=self.drop_db)
 
     def argv(self, dev: str | None = None) -> list[str]:
         cmd = [self.rtl_fm, "-M", "fm", "-f", f"{self.channel.mhz:.4f}M", "-s", str(RATE), "-E", "dc"]
@@ -337,7 +408,7 @@ class NfmReceiver:
                 backoff = min(backoff * 2, 15)
                 continue
             self.state, self.detail = "ok", f"{self.channel.label} {self.channel.mhz:.4f}"
-            self.squelch = NoiseSquelch(open_db=self.open_db)
+            self.squelch = self.new_squelch()
             got = self._pump(self._proc)
             self._kill()
             if self._stop.is_set():
