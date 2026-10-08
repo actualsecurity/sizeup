@@ -1,6 +1,7 @@
 """Web server: stdlib HTTP + server-sent events (same approach as shortfinal).
 
-GET  /                         the display (static/index.html)
+GET  /                         -> /cad (the CAD is the front page; without a CAD: the monitor)
+GET  /monitor                  the radio monitor (static/index.html)
 GET  /api/scene                station, home view, firehouses (static per run)
 GET  /api/state                current state (see STATE below)
 GET  /api/stream               SSE: the state, pushed every second
@@ -109,10 +110,19 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
             self.end_headers()
             self.wfile.write(body)
 
+        def _redirect(self, where: str) -> None:
+            self.send_response(302)
+            self.send_header("Location", where)
+            self.send_header("Content-Length", "0")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+
         def do_GET(self) -> None:
             url = urlsplit(self.path)
             path = url.path
-            if path in ("/", "/index.html"):
+            if path == "/" and cad is not None:   # user, 2026-10-07: "make .../cad the default page"
+                return self._redirect("/cad")
+            if path in ("/", "/monitor", "/index.html"):
                 return self._static("index.html")
             if path in ("/cad", "/cad.html") and cad is not None:
                 return self._static("cad.html")
