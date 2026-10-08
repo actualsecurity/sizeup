@@ -867,10 +867,11 @@ def test_page_for_port_chester_becomes_one_queued_event():
     assert by_name(cad, "E61")["incident_id"] is None and p3["lat"] is None
 
 
-def test_rye_brook_only_page_is_not_ours_to_dispatch():
+def test_rye_brook_tones_are_ours_too():
+    # User, 2026-10-08: "pcfd tones or rye brook tones" (joint response).
     cad = make_cad()
     _, inc = monitor_incident("Rye Brook Fire, respond to an activated fire alarm, 940 King Street", depts=("Rye Brook FD",))
-    assert cad.from_monitor(inc) is None and cad.store.incidents() == []
+    assert cad.from_monitor(inc)["status"] == "queued"
 
 
 def test_app_page_opens_queued_cad_event(tmp_path):

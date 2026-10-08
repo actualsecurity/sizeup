@@ -5,10 +5,10 @@ PAGE = ("Port Chester Fire Department, respond to an activated fire alarm. 209 W
         "cross of Pearl Street, Port Chester. Time out 1432.")
 
 
-def store(clock):
+def store(clock, town="Port Chester"):
     return IncidentStore({"Port Chester FD", "Rye Brook FD"},
                          geocode=lambda d: {"lat": 41.0025, "lon": -73.6669, "label": d.location,
-                                            "kind": "address", "confidence": 0.9},
+                                            "kind": "address", "town": town, "confidence": 0.9},
                          clock=lambda: clock["t"])
 
 
@@ -30,6 +30,11 @@ def test_page_opens_repeat_merges_traffic_attaches_then_closes():
 
 def test_other_departments_do_not_open_incidents():
     clock = {"t": 0.0}
+    assert store(clock, town="Rye").on_page("p1", ["Rye FD"], parse("Rye fire department respond to a car fire Purchase Street")) is None
     s = store(clock)
-    assert s.on_page("p1", ["Rye FD"], parse("Rye fire department respond to a car fire Purchase Street")) is None
-    assert s.on_page("p2", [], parse(PAGE)) is not None  # tones not decoded, but the voice names PCFD
+    assert s.on_page("p2", [], parse(PAGE)) is not None  # tones not decoded, but the address is in Port Chester
+    # Ours only by our tones or our jurisdiction (2026-10-08): naming PCFD or "Engine 60" isn't enough.
+    elsewhere = store(clock, town="Valhalla")
+    assert elsewhere.on_page("p3", [], parse("60 Control, Engine 60, 75 Grasslands Road, party passed out")) is None
+    assert elsewhere.on_page("p4", [], parse(PAGE)) is None
+    assert elsewhere.on_page("p5", ["Port Chester FD"], parse(PAGE)) is not None   # our tones: ours anywhere (mutual aid)

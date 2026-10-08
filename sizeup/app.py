@@ -638,12 +638,14 @@ class App:
             if prev and page.start - prev.end < SPLIT_PAGE_S:
                 depts = prev.departments  # the voice half of a tones-only page
                 self._last_tones_only = None
-            elif not any(x in self.cfg.ours for x in d.departments):
-                t = Traffic(page.id, page.label, page.start, page.end, page.raw)
-                self.store.on_traffic(t)
-                self._to_cad(t)
-                return
+        # Ours only by our tones or an address in our towns (user, 2026-10-08: "we should only take these
+        # in here if they are our tones or in our jurisdiction"); anything else is traffic.
         inc = self.store.on_page(page.id, depts, d, at=page.start)
+        if inc is None and page.kind == "voice":
+            t = Traffic(page.id, page.label, page.start, page.end, page.raw)
+            self.store.on_traffic(t)
+            self._to_cad(t)
+            return
         if inc:
             where = inc.geo["label"] if inc.geo else (inc.location or "location not found")
             log(f"INCIDENT {inc.incident_type} · {where} · {', '.join(inc.departments)}")

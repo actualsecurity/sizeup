@@ -48,7 +48,7 @@ class Settings:
     audio_dir: str = ""                            # "" = next to the db (in memory: a temp dir)
     lists: str = ""                                # "" = data/cad_lists.json
     department: str = "Port Chester Fire"          # first words of every dispatch
-    monitor_departments: tuple[str, ...] = ("Port Chester FD",)   # monitor incidents that become queued ones
+    monitor_departments: tuple[str, ...] = ("Port Chester FD", "Rye Brook FD")   # their tones or towns -> queued
     tones: tuple[tuple[float, float], ...] = ((349.1, 1.0), (311.1, 3.0))
     voice: str = "Samantha"                        # tts_engine "say": a `say -v` voice; "kokoro": a Kokoro voice; "polly": "Matthew"
     rate_wpm: int = 0
@@ -957,10 +957,9 @@ class Cad:
     # -- the bridge from the monitor ----------------------------------------------------------------
 
     def _ours(self, inc) -> bool:
-        """A page for one of our departments: its tones, units said with the word or a callsign, or the
-        department named in the text put it there (inc.departments), or its address is in one of our towns.
-        Bare numbers taken for engines don't count (they never reach inc.departments)."""
-        if any(d in self.s.monitor_departments for d in inc.departments):
+        """A page for us: our tones (inc.tone_departments), or an address in one of our towns. Units or
+        departments only heard in the text don't count (user, 2026-10-08)."""
+        if any(d in self.s.monitor_departments for d in getattr(inc, "tone_departments", [])):
             return True
         towns = {d.removesuffix(" FD").strip().lower() for d in self.s.monitor_departments}
         town = ((inc.geo or {}).get("town") or "").strip().lower()
