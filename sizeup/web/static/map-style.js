@@ -1,6 +1,6 @@
 // MapLibre style for the PCFD screens: a dark graphite, street-readable basemap (OpenMapTiles schema,
 // served by OpenFreeMap) with street names and house numbers, under the firehouse
-// layer. The incident marker is an HTML marker added by app.js.
+// layer. The incident marker is an HTML marker added by cadmap.js.
 "use strict";
 
 // Neutral graphite (the pages' tokens, style.css), so the department's type and status colors on top
@@ -169,7 +169,7 @@ function buildMapStyle(scene) {
     }
   }
 
-  // Firehouses (data from the scene, set by app.js).
+  // Firehouses (data from the scene, set by cadmap.js).
   layers.push({
     id: "firehouse", type: "symbol", source: "firehouses",
     layout: {

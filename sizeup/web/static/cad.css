@@ -1,49 +1,18 @@
-/* sizeup CAD console (/cad). Builds on style.css (tokens, header, pills, chips, lists, overlay):
-   a desk screen read up close, so a fixed type size instead of the monitor's TV scaling.
-   Type and status colors come from the data file (set inline by cad.js as --c): outline chips,
-   lightened for text on the dark theme. */
+/* sizeup's views (cad.html): the console (/cad: Dispatch, Overview, Radio; Settings in settings.css) and
+   the wall board (/monitor, html.board). Builds on style.css (tokens, header, buttons, fields, pills, chips,
+   lists, dialogs). Type and status colors come from the data file (set inline by cad.js as --c): outline
+   chips, lightened for text on the dark theme. */
 
-html.cad { --fs: 14px; }
 html.cad, body.cad { overflow: hidden; }
+/* each page shows its own: the board hides the console's controls, the console the board's */
+html:not(.board) .board-only, html.board .console-only { display: none !important; }
 
 .pill.tx-off { color: var(--dim); border-style: dashed; }     /* dashed: not on the air */
 .pill.tx-on { color: var(--on-accent); background: var(--accent); border-color: var(--accent); }
-.operator { display: inline-flex; align-items: center; gap: 0.45em; font-size: 0.9em; }
-
-input, select, textarea {
-  font: inherit;
-  color: var(--text);
-  background: var(--bg);
-  border: 1px solid var(--line-strong);
-  border-radius: 3px;
-  padding: 0.3em 0.5em;
-  min-width: 0;
-  max-width: 100%;
-}
-input:focus, select:focus, textarea:focus { outline: 1px solid var(--accent-text); border-color: var(--accent-text); outline-offset: 0; }
-input[type="checkbox"] { width: 1.15em; height: 1.15em; padding: 0; }
 #operator { width: 11em; }
 #operator:placeholder-shown { border-color: var(--warn); }
 #operator.access { border-color: transparent; background: transparent; font-weight: 600; cursor: default; text-overflow: ellipsis; }
 #operator.access:focus { outline: none; }
-textarea { resize: vertical; }
-/* the primary action, and Dispatch / Close: the accent, filled */
-button.primary, button.danger { color: var(--on-accent); background: var(--accent); border-color: var(--accent); font-weight: 600; }
-button.primary:hover, button.danger:hover { background: color-mix(in srgb, var(--accent) 86%, #fff); border-color: color-mix(in srgb, var(--accent) 86%, #fff); }
-button.danger-quiet { color: var(--accent-text); }
-button:disabled, select:disabled { opacity: 0.45; cursor: default; }
-button.wide { width: 100%; }
-button.mini { font-size: 0.78em; padding: 0.05em 0.5em; }
-/* filled: the status color a little darker, its text color (--fg, from the data file) readable on it */
-button.mini.on { color: var(--fg, #fff); background: color-mix(in srgb, var(--c) 88%, #000); border-color: var(--c); opacity: 1; }
-.small { font-size: 0.82em; }
-.warn { color: var(--warn); }
-.error { color: var(--err); font-weight: 600; }
-.error:empty { display: none; }
-.row { display: flex; align-items: center; gap: 0.5em; flex-wrap: wrap; }
-.mt { margin-top: 1em; }
-.inline { display: inline-flex; align-items: center; gap: 0.4em; }
-label.check { cursor: pointer; }
 
 /* the old outline chips, in the data file's colors (text lightened to read on the dark theme) */
 .chip.st { font-size: 0.72em; color: color-mix(in srgb, var(--c) 62%, #fff); border-color: color-mix(in srgb, var(--c) 80%, transparent);
@@ -60,7 +29,7 @@ label.check { cursor: pointer; }
 .cad-main {
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(19em, 22%) minmax(0, 1fr) minmax(20em, 24%);
+  grid-template-columns: minmax(19em, 22%) minmax(0, 1fr) var(--side-w);
 }
 .cad-main > * { min-height: 0; min-width: 0; overflow-y: auto; }
 
@@ -181,7 +150,7 @@ label.check { cursor: pointer; }
 
 /* ---- unit board --------------------------------------------------------------------------- */
 
-.units { background: var(--panel-solid); border-left: 1px solid var(--line); padding: 0.7em; }
+.units { background: var(--panel-solid); border-left: 1px solid var(--line); padding: 0.7em; display: flex; flex-direction: column; }
 .ugroup h3 { margin: 0.7em 0 0.2em; font-size: 0.8em; color: var(--dim); font-weight: 700; }
 .ulist { overflow: visible; }
 .ulist > li.urow { padding: 0.25em 0.35em; cursor: pointer; border-radius: var(--radius-s); }
@@ -245,12 +214,8 @@ label.check { cursor: pointer; }
   .cad-main > * { overflow: visible; }
   .queue, .units { border: 0; }
   .inc-grid, .rc-body { grid-template-columns: minmax(0, 1fr); }
-  header { flex-wrap: wrap; white-space: normal; }
 }
 @media (max-width: 640px) {
-  html.cad { --fs: 13px; }
-  .cad-title { display: none; }
-  header { gap: 0.45em 0.6em; padding: 0.4em 0.6em; }
   #operator { width: 8em; }
   .detail { padding: 0.6em; }
   .queue, .units { padding: 0.6em; }
@@ -258,8 +223,6 @@ label.check { cursor: pointer; }
   .form { grid-template-columns: minmax(0, 1fr); }
   .form label.check { padding-top: 0; }
   .d-type { font-size: 1.45em; }
-  .overlay { padding: 0; }
-  .tg-panel { height: 100%; border-radius: 0; }
   .rc-list { max-height: 30vh; }
   /* records: each row a small card instead of nine columns */
   .evtable thead { display: none; }
@@ -323,18 +286,6 @@ button.mini.uf.talking { border-color: var(--ok); box-shadow: 0 0 0 1px var(--ok
   .rp-add input { width: 100%; }
 }
 
-/* ---- /comms ---- */
-body.comms { display: grid; grid-template-rows: auto 1fr; }
-.comms-main { min-height: 0; display: flex; flex-direction: column; padding: 0.6em 1em; gap: 0.5em; overflow: hidden; }
-.comms-filters { display: flex; flex-wrap: wrap; gap: 0.5em 0.9em; align-items: center; font-size: 0.92em; }
-.comms-filters label { display: inline-flex; align-items: center; gap: 0.35em; }
-.comms-filters select { max-width: 18em; }
-.comms-list { flex: 1; min-height: 0; overflow-y: auto; }
-.comms-list > li.note { border-left: 3px solid var(--info); padding-left: 0.6em; }
-.comms-list .chip.src { font-size: 0.72em; --c: var(--dim); }
-.comms-list .inc-link { font-weight: 700; color: var(--info); text-decoration: none; font-size: 0.95em; }
-@media (max-width: 1100px) { body.comms .comms-main { overflow: visible; } .comms-list { overflow: visible; } }
-
 /* ---- the pinned 60 Control feed (cad-feed.js): top of the units column, the board scrolls under it ---- */
 .units > .feed { flex: none; position: sticky; top: -0.7em; z-index: 4; margin: -0.7em -0.7em 0.6em; padding: 0.5em 0.7em 0.45em;
   background: var(--panel); border-bottom: 1px solid var(--line); }
@@ -384,3 +335,40 @@ body.cad > .cloud-banner { grid-row: 2; }
 body.cad > .role-banner { grid-row: 3; margin: 0.4em 1em 0.2em; font-weight: 600; }
 body.cad > main { grid-row: 4; }
 body.ro-dispatch .cad-main [data-ro] { cursor: not-allowed; }
+
+/* ---- Radio (radio-view.js, /cad#radio): Main up front, the other talkgroups folded ----------------------- */
+.radio-view { display: flex; flex-direction: column; gap: var(--sp-3); min-width: 0; }
+.rv-head { display: flex; align-items: center; gap: 0.6em; flex-wrap: wrap; }
+.rv-head h2 { margin: 0; }
+.rv-filters { display: flex; flex-wrap: wrap; gap: var(--sp-2); align-items: center; }
+.rv-filters #rv-q { flex: 1 1 14em; }
+.rv-filters select { flex: 0 1 auto; max-width: 16em; }
+.rv-sec { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 0.65em 0.85em; min-width: 0; }
+.rv-sec > .sec-head { margin-bottom: var(--sp-2); }
+.rv-sec .sum { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.radio-log.rv-list, .rv-sec .og-calls { max-height: none; overflow: visible; }
+.radio-view .feed-acts { flex-wrap: wrap; justify-content: flex-end; }
+.rv-ev { padding: 0 0.35em; line-height: 1.35; background: transparent; }
+.rv-pick { gap: 0.3em; flex-wrap: wrap; }
+.rv-pick select { max-width: 22em; font-size: 0.95em; padding: 0.1em 0.3em; }
+.radio-controls { display: flex; flex-direction: column; gap: 0.8em; }
+
+/* ---- the wall board (/monitor, board.js): the Overview, the feed, pages and units; nothing to press -------- */
+html.board main { font-size: 1.25em; }        /* one step up, to read across a room; the header keeps its size */
+@media (min-width: 1101px) { html.board .cad-main { grid-template-columns: minmax(0, 1fr) var(--side-w); } }
+html.board :is(.queue, #d-body, #new-form, #d-empty, #radio-view, .role-banner) { display: none !important; }
+html.board :is(.ov-card, .ov-ne, .ov-page) { cursor: default; }
+html.board .ov-page .dim { display: none; }          /* "Accept / Dismiss": the console's, not the board's */
+html.board :is(.feed-add, .feed-more, .rerun) { display: none; }
+html.board .ov-grid { grid-template-columns: minmax(0, 1.6fr) minmax(18em, 1fr); }
+html.board .ov-mapbox { height: calc(100vh - var(--hdr-h) - 5.5em); }
+.b-sec { margin-top: var(--sp-3); }
+.b-strip { display: flex; flex-wrap: wrap; gap: 0.3em; }
+.b-strip .chip { font-size: 0.78em; }
+.b-unit.talking { outline: 2px solid var(--ok); outline-offset: 1px; }
+.b-sec .pages > li .txt { font-size: 0.95em; }
+@media (max-width: 1100px) {
+  html.board main { font-size: 1.1em; }
+  html.board .ov-grid { grid-template-columns: minmax(0, 1fr); }
+  html.board .ov-mapbox { height: 50vh; }
+}

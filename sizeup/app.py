@@ -10,7 +10,7 @@
     P25 (trunk-recorder dir)  --call--> STT --> traffic on the active incident (unit IDs kept)
     incident for Port Chester --> an event in the CAD (/cad, sizeup/cad/) waiting for a person to accept it
     every transmission: its radio ID (MDC / P25) -> the rig it's on (sizeup/cad/radios.py) -> the CAD's
-        communications log, linked to the events that rig is assigned to (/comms, sizeup/cad/comms.py)
+        communications log, linked to the events that rig is assigned to (/cad#radio, sizeup/cad/comms.py)
     who is keying up now (squelch + live MDC decode on FG1; trunk-recorder's grants + log for P25):
         sizeup/radio/live.py -> "talking" in both pages' state
     [cloud] role = "station": every finished page / transmission / transcript / radio ID heard also
@@ -267,6 +267,7 @@ class App:
         self._heard_sent: dict[tuple[str, str, str], float] = {}
         self.cad.live = self.live.state
         self.cad.has_clip = self.has_clip
+        self.cad.main_tg = self.tg.main
         if self.recorder is not None:
             self.recorder.on_line = self.live.feed_line
         self._fm_live: dict[str, dict] = {}

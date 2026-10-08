@@ -1064,7 +1064,17 @@ def test_api_event_lifecycle(server):
         with urllib.request.urlopen(urllib.request.Request(server.base + path, method="HEAD"), timeout=5) as r:
             assert r.status == 200 and r.headers["Content-Type"].startswith(ctype) and r.read() == b""   # Netskope checks with HEAD
     code, page, _ = server.call("GET", "/monitor")
-    assert code == 200 and b"app.js" in page                              # the monitor moved here
+    assert code == 200 and b"cad.js" in page and b"board.js" in page      # the wall board: the CAD page, read-only
+    opener = urllib.request.build_opener(NoFollow)
+    for old, where in (("/comms", "/cad#radio"), ("/comms.html", "/cad#radio"),
+                       ("/comms?event=26-000012&unit=E63", "/cad#radio?event=26-000012&unit=E63")):
+        try:
+            opener.open(urllib.request.Request(server.base + old), timeout=10)
+            assert False, f"{old} should redirect"
+        except urllib.error.HTTPError as e:
+            assert e.code == 302 and e.headers["Location"] == where, old     # Comms is the CAD's Radio view
+    for gone in ("/static/comms.js", "/static/app.js", "/static/index.html"):
+        assert server.call("GET", gone)[0] == 404
     code, page, ctype = server.call("GET", "/cad")
     assert code == 200 and b"cad.js" in page and ctype.startswith("text/html")
     code, st = server.j("GET", "/api/cad/state")
@@ -1179,9 +1189,11 @@ def test_config_cad_sections(tmp_path):
 def test_cad_page_buttons_have_handlers():
     html = (ROOT / "sizeup" / "web" / "static" / "cad.html").read_text()
     js = (ROOT / "sizeup" / "web" / "static" / "cad.js").read_text()
-    js_all = js + "".join((ROOT / "sizeup" / "web" / "static" / f).read_text() for f in ("settings.js", "cadmap.js"))
+    js_all = js + "".join((ROOT / "sizeup" / "web" / "static" / f).read_text()
+                          for f in ("settings.js", "cadmap.js", "radio-view.js", "radio-controls.js", "board.js"))
     for bid, rest in re.findall(r'<button id="([\w-]+)"([^>]*)>', html):
-        assert f'$("#{bid}").addEventListener' in js_all or 'type="submit"' in rest, f"#{bid} has no handler"
+        assert (f'$("#{bid}").addEventListener' in js_all or f'RadioLive.button($("#{bid}")' in js_all
+                or 'type="submit"' in rest), f"#{bid} has no handler"
     for fid in re.findall(r'<form id="([\w-]+)"', html):
         assert f'$("#{fid}").addEventListener("submit"' in js_all, f"#{fid} has no submit handler"
     # every element the scripts look up by id is on the page

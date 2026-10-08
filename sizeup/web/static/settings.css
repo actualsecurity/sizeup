@@ -10,8 +10,6 @@
 .s-sections a { display: block; padding: 0.35em 0.65em; border-radius: var(--radius-s); color: var(--text); text-decoration: none; white-space: nowrap; }
 .s-sections a:hover { background: var(--hover); }
 .s-sections a.on { background: var(--raised); font-weight: 600; box-shadow: inset 3px 0 0 var(--accent); }
-#settings-open.on { border-color: var(--accent); background: var(--raised); }
-#settings-open.on .ico { color: var(--accent-text); }
 
 .s-content { overflow-y: auto; padding: 0.9em 1.1em 3em; min-width: 0; }
 .s-msg { position: sticky; top: -0.9em; z-index: 3; margin: -0.9em -1.1em 0.6em; padding: 0.45em 1.1em; font-weight: 600;

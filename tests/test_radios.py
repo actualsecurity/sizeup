@@ -422,6 +422,30 @@ def test_comms_api_filters(tmp_path):
     assert code == 400
 
 
+def test_comms_text_search_and_main_flag_for_the_radio_view(tmp_path):
+    """The CAD's Radio view (which replaced /comms): ?q= finds words in the transcript or a note (any
+    case, LIKE's own characters taken literally), and each row says whether it goes up front (Main:
+    no talkgroup, a talkgroup marked Main, a note) or folds under Other talkgroups."""
+    clock = Clock()
+    c = cad(tmp_path, clock)
+    a = _event_with(c, ["E63"], clock)
+    c.record_traffic(tx("FG1-1", clock.t + 1, rig="E63", text="Engine 63 on location"))
+    c.record_traffic(tx("307-1-call_1", clock.t + 2, "Fire/EMS 15", "E60", "E60", 307, text="Engine 60 responding"))
+    c.record_traffic(tx("359-1-call_1", clock.t + 3, "WCPD PSD", "", "1234", 359, text="unit 12, 100% copy"))
+    c.note(a["id"], {"text": "E63 stated that the engine is in service", "units": ["E63"], "operator": "Corey"})
+    get = lambda q: json.loads(CadApi(c).get("/api/cad/comms", q)[1])["rows"]
+    found = get("q=ENGINE")
+    assert [r["id"] for r in found][:2] == ["307-1-call_1", "FG1-1"] and [r["kind"] for r in found][2:] == ["note"]
+    assert [r["id"] for r in get("q=engine+location")] == ["FG1-1"]                # every word
+    assert [r["id"] for r in get("q=100%25")] == ["359-1-call_1"] and get("q=1_0") == []
+    main = {r["id"]: r["main"] for r in get("")}
+    assert main["FG1-1"] and main["307-1-call_1"] and not main["359-1-call_1"]   # 307: an incident talkgroup
+    assert all(r["main"] for r in get("type=notes"))
+    c.main_tg = lambda tg: tg == 359                                           # the station's Main switch (App sets it)
+    main = {r["id"]: r["main"] for r in get("")}
+    assert main["359-1-call_1"] and not main["307-1-call_1"] and main["FG1-1"]
+
+
 def test_v3_database_migrates_to_v4(tmp_path):
     clock = Clock()
     c = cad(tmp_path, clock)

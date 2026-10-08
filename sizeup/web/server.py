@@ -1,7 +1,8 @@
 """Web server: stdlib HTTP + server-sent events (same approach as shortfinal).
 
-GET  /                         -> /cad (the CAD is the front page; without a CAD: the monitor)
-GET  /monitor                  the radio monitor (static/index.html)
+GET  /                         -> /cad (the CAD is the front page)
+GET  /monitor                  the wall board: the CAD page read-only, overview only, larger type (static/cad.html;
+                               cad.js sees the path). For a second screen and for those not running the console.
 GET  /api/scene                station, home view, firehouses (static per run)
 GET  /api/state                current state (see STATE below)
 GET  /api/stream               SSE: the state, pushed every second
@@ -17,8 +18,10 @@ GET  /api/station-mode         not the hub (409 there): forwarding to the hub, i
                                secret came from, never a secret (sizeup/cloud/stationmode.py)
 POST /api/station-mode {"forward": bool?, "hub_url": str?, "operator": str?}  on / off while running
 POST /api/station-mode/test {"hub_url": str?}  the hub's /healthz and station path with the token
-GET  /cad                      the PCFD dispatch console (static/cad.html); its API is /api/cad/... (sizeup/cad/api.py)
-GET  /comms                    every transmission with its rig, radio ID, channel and events (static/comms.html)
+GET  /cad                      the PCFD dispatch console (static/cad.html); its API is /api/cad/... (sizeup/cad/api.py).
+                               Views: Dispatch, Overview, Radio (/cad#radio?unit=&channel=&event=&q=: every transmission
+                               with its rig, radio ID, channel and events), Settings (/cad#settings/<section>)
+GET  /comms                    -> /cad#radio?<the same query> (the old communications page)
 
 Hub with [cloud] access_team + access_aud (sizeup/cloud/access.py): every request but /healthz and
 /api/station/... (the station's bearer token) needs a verified Cloudflare Access token from a person
@@ -191,14 +194,12 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
             path = url.path
             if not self._admit(path):
                 return
-            if path == "/" and cad is not None:   # user, 2026-10-07: "make .../cad the default page"
+            if path in ("/", "/index.html") and cad is not None:   # user, 2026-10-07: "make .../cad the default page"
                 return self._redirect("/cad")
-            if path in ("/", "/monitor", "/index.html"):
-                return self._static("index.html")
-            if path in ("/cad", "/cad.html") and cad is not None:
+            if path in ("/cad", "/cad.html", "/monitor") and cad is not None:
                 return self._static("cad.html")
-            if path in ("/comms", "/comms.html") and cad is not None:
-                return self._static("comms.html")
+            if path in ("/comms", "/comms.html") and cad is not None:   # Comms is the CAD's Radio view now
+                return self._redirect("/cad#radio" + (f"?{url.query}" if url.query else ""))
             if path == "/api/cad/stream" and cad_b is not None:
                 return self._stream(cad_b)
             if path.startswith("/api/cad/") and cad is not None:

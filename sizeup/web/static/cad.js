@@ -13,6 +13,11 @@
 // Transmit is off in this version: "Dispatch" assigns the units, logs the dispatch and plays
 // its audio here. Nothing is keyed on a radio.
 //
+// Views (the header's tabs): Dispatch (the selected incident), Overview (every open call, cadmap.js),
+// Radio (/cad#radio?..., radio-view.js: every transmission, which replaced the Comms page) and Settings.
+// /monitor is this same page as a read-only wall board (BOARD, board.js): the Overview only, larger type,
+// nothing to press but Sound and Full screen, so it never disagrees with the console.
+//
 // Settings (/cad#settings/<section>, settings.js) edit the lists, run cards, units and wording; the
 // edits come back in the next push like everything else. Retired items stay named on old events
 // but are off the pick lists. Other agencies' units (EMS, PD, utilities: response "agency") are never
@@ -20,6 +25,7 @@
 "use strict";
 
 const $ = (sel) => document.querySelector(sel);
+const BOARD = document.documentElement.classList.contains("board");   // /monitor (cad.html's head script)
 const LOST_AFTER_MS = 6000;
 // The units board: the boards of the data file in order. One with group_by "kind" (main: PCFD's and
 // Rye Brook's) shows its apparatus by kind (the data file's order within each), then its code-only
@@ -34,7 +40,8 @@ const cad = {
   scene: null, state: null, lastMsgAt: 0, skew: 0,
   who: null,                 // signed in through Cloudflare Access (whoami): {email, name, callsign, role, may, ...}
   sel: null,                 // selected incident id
-  mode: "none",              // none | new | view
+  mode: "none",              // none (Overview) | new | view | idle (Dispatch with nothing selected)
+  radio: false,              // the Radio view is open (#radio)
   extra: new Map(),          // incidents opened from Records that aren't in the live state
   rec: null,                 // {iid, units, unfilled, already, card, note, checked:Set, extra:[], error}
   map: null, marker: null, mapSig: "",
@@ -71,6 +78,7 @@ function fmt(kind) {
       hm: { hour: "2-digit", minute: "2-digit", hourCycle: "h23" },
       hms: { hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" },
       short: { month: "short", day: "numeric" },
+      day: { weekday: "short", month: "short", day: "numeric" },
       md: { month: "2-digit", day: "2-digit" },
       parts: { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" },
     }[kind];
@@ -318,8 +326,48 @@ function renderConn() {
   } else { pill.className = "pill ok"; setText(pill, "Live"); pill.title = ""; }
   document.body.classList.toggle("stale", !!cad.lastMsgAt && age > LOST_AFTER_MS);
 }
-function renderClock() {
-  setText($("#clock-local"), fmt("hms").format(new Date(serverNow() * 1000)));
+function renderClock() {              // the same clock on the console and the board: date, local time, Zulu
+  const d = new Date(serverNow() * 1000);
+  setText($("#clock-date"), fmt("day").format(d));
+  setText($("#clock-local"), fmt("hms").format(d));
+  setText($("#clock-z"), `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}Z`);
+}
+
+// ---- views: Dispatch / Overview / Radio (Settings: settings.js) ---------------------------------------
+
+function leaveView() {               // an incident or the form opens: out of Radio and Settings
+  if (location.hash) history.pushState(null, "", location.pathname);
+  if (cad.radio || !$("#settings").hidden) window.dispatchEvent(new HashChangeEvent("hashchange"));
+}
+function route() {                    // #radio?filters: the Radio view; anything else: the console's own
+  const radio = !BOARD && location.hash.startsWith("#radio");
+  const q = radio ? location.hash.slice("#radio".length).replace(/^\?/, "") : "";
+  if (radio !== cad.radio || radio) {
+    cad.radio = radio;
+    show($("#radio-view"), radio);
+    if (window.RadioView) { if (radio) RadioView.open(q); else RadioView.close(); }
+    if (cad.state) render();
+    if (radio && window.innerWidth <= 1100) $("#detail").scrollIntoView({ block: "start" });   // stacked: under the queue
+  }
+}
+function renderTabs() {
+  const settings = !$("#settings").hidden;
+  const tab = settings ? "settings" : cad.radio ? "radio" : cad.mode === "none" ? "overview" : "dispatch";
+  for (const [id, k] of [["#dispatch-open", "dispatch"], ["#overview-open", "overview"], ["#radio-open", "radio"], ["#settings-open", "settings"]]) {
+    const b = $(id);
+    b.classList.toggle("on", tab === k);
+    if (tab === k) b.setAttribute("aria-current", "page"); else b.removeAttribute("aria-current");
+  }
+}
+function openDispatch() {             // the Dispatch tab: the incident last open, else the oldest working one
+  leaveView();
+  if (cad.mode === "new" || (cad.mode === "view" && selected())) return render();
+  const order = { queued: 0, active: 1, pending: 2 };
+  const next = incidents().filter((i) => i.status in order).sort((a, b) => (order[a.status] - order[b.status]) || (a.created_at - b.created_at))[0];
+  if (next) return selectIncident(next.id);
+  cad.mode = "idle";
+  cad.sel = null;
+  render();
 }
 function tick() {
   renderClock();
@@ -401,6 +449,8 @@ function renderQueue() {
 // ---- incident detail ------------------------------------------------------------------
 
 function selectIncident(id) {
+  if (BOARD) return;                  // the wall board only shows
+  leaveView();
   cad.sel = id;
   cad.mode = "view";
   cad.rec = null;
@@ -417,9 +467,14 @@ function selectIncident(id) {
 }
 
 function renderDetail() {
+  renderTabs();
+  if (cad.radio) {                    // the Radio view has the middle column (radio-view.js)
+    for (const id of ["#new-form", "#d-empty", "#d-body"]) show($(id), false);
+    return;
+  }
   const inc = cad.mode === "view" ? selected() : null;
   show($("#new-form"), cad.mode === "new");
-  show($("#d-empty"), cad.mode === "none" || (cad.mode === "view" && !inc));
+  show($("#d-empty"), cad.mode === "none" || cad.mode === "idle" || (cad.mode === "view" && !inc));
   show($("#d-body"), !!inc);
   if (cad.mode === "view" && !inc) {
     setText($("#d-empty .big"), "Not listed");
@@ -567,7 +622,7 @@ function renderRadio(inc) {
   const shownItems = u ? items.filter((x) => x.units.includes(u)) : items;
   const nr = items.filter((x) => x.kind === "radio").length, nn = items.length - nr;
   setText($("#d-radio-sum"), [nr ? `${nr} TX` : "", nn ? `${nn} note${nn === 1 ? "" : "s"}` : ""].filter(Boolean).join(" / "));
-  $("#d-radio-all").href = `/comms?event=${encodeURIComponent(inc.number || inc.id)}` + (u ? `&unit=${encodeURIComponent(u)}` : "");
+  $("#d-radio-all").href = `#radio?event=${encodeURIComponent(inc.number || inc.id)}` + (u ? `&unit=${encodeURIComponent(u)}` : "");
   const bar = $("#d-radio-units"), sig = JSON.stringify([all, u, all.map(talkSig)]);
   if (bar._sig !== sig) {
     bar._sig = sig;
@@ -1346,6 +1401,7 @@ function entryClass() {
 }
 
 function openNew() {
+  leaveView();
   cad.mode = "new";
   cad.sel = null;
   cad.rec = null;
@@ -1803,7 +1859,7 @@ function onState(data) {
   if (typeof data.time === "number") cad.skew = data.time - Date.now() / 1000;
   const tx = data.transmit || {};
   const pill = $("#tx-pill");
-  pill.className = "pill " + (tx.enabled ? "tx-on" : "tx-off");
+  pill.className = "pill console-only " + (tx.enabled ? "tx-on" : "tx-off");
   setText(pill, tx.enabled ? "Transmit on" : "Transmit off");
   setText($("#tx-note"), tx.enabled ? "" : "Transmit off: logged only");
   $("#tx-note").title = tx.enabled ? "" : tx.note || "";
@@ -1932,6 +1988,9 @@ $("#note-text").addEventListener("keydown", noteKeys);
 $("#note-text").addEventListener("blur", () => setTimeout(hideSugg, 150));
 $("#note-text").addEventListener("click", suggestUnits);
 $("#runcards-open").addEventListener("click", openRunCards);
+$("#dispatch-open").addEventListener("click", openDispatch);
+window.addEventListener("hashchange", route);
+if (BOARD) setText($("#page-title"), "Monitor");
 Radio.mountAlerts($("#alerts"));
 CadFeed.mount($("#feed"), { state: () => cad.state, selected, operator, api, radioRow, time: (u) => fmtTime(u, true) });
 cad.hooks.push(CadFeed.render);
@@ -2002,7 +2061,7 @@ function askAdmin() {
 const RO_DISPATCH = "#new-incident, #new-form :is(input, select, textarea, #new-create), #d-accept, #d-dismiss, #d-edit, "
   + "#d-close, #d-queued select, #close-form :is(select, #c-close), #edit-form :is(input, select, textarea, #edit-save), "
   + "#d-attach :is(select, button:not(.help)), #d-dispatch :is(input, select, textarea, button:not(#u-cancel):not(.help)), #note-text, #note-add, "
-  + ".ubtns button, .feed-add";
+  + ".ubtns button, .feed-add, .rv-add, .rv-pick :is(select, button)";
 // In Settings for anyone but an admin: everything but the section tabs, filters and what only reads.
 const RO_SETTINGS_KEEP = ".tab, [type=search], .ro-ok, .ro-ok *, .help";
 function roLock(root, sel, keep) {
@@ -2057,12 +2116,14 @@ async function boot() {
     // The header says "Port Chester FD"; the configured station name only when it says more.
     const name = (cad.scene.station && cad.scene.station.name) || "";
     const extra = name && name !== "Port Chester FD" ? name : "";
-    document.title = extra ? `PCFD CAD · ${extra}` : "PCFD CAD";
+    const page = BOARD ? "Monitor" : "CAD";
+    document.title = extra ? `PCFD ${page} · ${extra}` : `PCFD ${page}`;
     setText($("#station"), extra);
   } catch (e) {
     console.warn("no scene (map off):", e);
   }
   await loadWho();
+  route();
   cad.live = liveState("/api/cad/stream", "/api/cad/state", onState);
   tick();
   setInterval(tick, 1000);

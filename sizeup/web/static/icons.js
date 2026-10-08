@@ -1,4 +1,4 @@
-// Line icons from /static/icons.svg (one sprite, shared by the monitor, the CAD and comms).
+// Line icons from /static/icons.svg (one sprite, shared by the CAD and the wall board).
 //
 //   Icon("bell")               <svg class="ico"><use href="/static/icons.svg#i-bell"></svg>, aria-hidden
 //   Icon.play(button, state)   a play button's face: "play", "stop" or "none" (no recording: a dash)
