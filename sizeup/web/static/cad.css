@@ -136,6 +136,7 @@ label.check { cursor: pointer; }
 .sugg .town.ours { color: #0b0b14; background: #8fd3a6; }
 
 .on-units .ouh { display: flex; align-items: center; gap: 0.5em; flex-wrap: wrap; }
+.on-units .times > span + span { margin-left: 0.75em; }
 .on-units li.cleared { opacity: 0.55; }
 .on-units li.cleared:hover, .on-units li.cleared:focus-within { opacity: 0.85; }   /* still greyed, buttons usable */
 .on-units .ubtns { margin-top: 0; justify-content: flex-end; }
@@ -300,6 +301,7 @@ button.mini.uf.talking { border-color: var(--ok); box-shadow: 0 0 0 1px var(--ok
 .rp-add { gap: 0.4em; font-size: 0.9em; }
 .rp-add input { width: 10em; }
 .rp-table td.rp-u { font-weight: 800; color: #8be3a9; }
+.rp-sum > span + span { margin-left: 1em; }
 .rp-table td.rp-u.dim { color: var(--dim); font-weight: 400; }
 .rp-table td.rp-act { white-space: nowrap; text-align: right; }
 .rp-table tr.guessed td:first-child { box-shadow: inset 3px 0 0 var(--warn); }

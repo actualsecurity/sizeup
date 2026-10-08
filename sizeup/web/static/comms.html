@@ -11,12 +11,12 @@
 <header>
   <span id="station" class="station">sizeup</span>
   <span class="cad-title">Communications</span>
-  <span id="conn" class="pill warn">connecting…</span>
+  <span id="conn" class="pill warn">Connecting</span>
   <span id="talking" class="talking-strip" hidden aria-live="polite"></span>
   <span class="spacer"></span>
   <span id="alerts"></span>
-  <a class="nav" href="/cad" title="PCFD dispatch console">CAD →</a>
-  <a class="nav" href="/monitor" title="The radio monitor (map, pages, traffic)">Monitor →</a>
+  <a class="nav" href="/cad" title="Dispatch console">CAD</a>
+  <a class="nav" href="/monitor" title="Radio monitor">Monitor</a>
 </header>
 
 <main class="comms-main">
@@ -25,9 +25,9 @@
     <label>Channel <select id="f-channel"><option value="">Any channel</option></select></label>
     <label>Event <select id="f-event"><option value="">Any event</option></select></label>
     <label>Show <select id="f-type">
-      <option value="">Transmissions + unit notes</option><option value="radio">Transmissions</option><option value="notes">Unit notes</option>
+      <option value="">All</option><option value="radio">Transmissions</option><option value="notes">Unit notes</option>
     </select></label>
-    <label class="check"><input id="f-pcfd" type="checkbox"> <span>PCFD units only</span></label>
+    <label class="check"><input id="f-pcfd" type="checkbox"> <span>PCFD only</span></label>
     <label>From <input id="f-since" type="datetime-local"></label>
     <label>To <input id="f-until" type="datetime-local"></label>
     <button id="f-clear" type="button">Clear</button>

@@ -28,7 +28,7 @@ def test_cleared_unit_goes_back_to_an_open_call(tmp_path):
     c.unit_status(l30, {"status": "AV"})
     b = c.create({"type": "STRU", "address": "1 Main St"})
     c.dispatch(b["id"], {"unit_ids": [l30], "operator": "x"})
-    with pytest.raises(CadError, match="is on"):
+    with pytest.raises(CadError, match="clear it there"):
         c.return_unit(a["id"], {"unit_id": l30, "status": "RS"})
     with pytest.raises(CadError):
         c.return_unit(a["id"], {"unit_id": e63, "status": "AV"})   # only responding / on location

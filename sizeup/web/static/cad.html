@@ -14,22 +14,22 @@
 <header>
   <span id="station" class="station">sizeup</span>
   <span class="cad-title">Dispatch</span>
-  <button id="overview-open" class="tg-open ov-tab" title="Every open call at once: map, units, the latest radio (cadmap.js)">▦ Overview</button>
-  <span id="conn" class="pill warn">connecting…</span>
+  <button id="overview-open" class="tg-open ov-tab" title="All open calls">Overview</button>
+  <span id="conn" class="pill warn">Connecting</span>
   <span id="cloud-pill" class="pill" hidden></span>
-  <span id="tx-pill" class="pill tx-off" title="No radio interface in this version: dispatches are logged and played in the browser only">Transmit off</span>
+  <span id="tx-pill" class="pill tx-off" title="No radio interface: dispatches are logged and played here only">Transmit off</span>
   <span id="talking" class="talking-strip" hidden aria-live="polite"></span>
   <span class="spacer"></span>
   <span id="alerts"></span>
-  <button id="runcards-open" class="tg-open" title="Edit which units each event type sends (Settings)">Run cards</button>
-  <a id="settings-open" class="nav" href="#settings" title="Lists, run cards, units, dispatch wording, users, records and exports">⚙ Settings</a>
-  <label class="operator" title="Your name: recorded on every dispatch, status change, timeline entry and settings change">
+  <button id="runcards-open" class="tg-open" title="Units sent per event type">Run cards</button>
+  <a id="settings-open" class="nav" href="#settings">Settings</a>
+  <label class="operator" title="Recorded on every action">
     <span class="dim">Operator</span>
     <select id="operator-pick" hidden></select>
-    <input id="operator" type="text" maxlength="60" autocomplete="off" spellcheck="false" placeholder="your name">
+    <input id="operator" type="text" maxlength="60" autocomplete="off" spellcheck="false" placeholder="Name">
   </label>
-  <a class="nav" href="/comms" title="Every transmission: unit, radio ID, channel, event, transcript">Comms →</a>
-  <a class="nav" href="/monitor" title="The radio monitor (map, pages, traffic)">Monitor →</a>
+  <a class="nav" href="/comms" title="All transmissions">Comms</a>
+  <a class="nav" href="/monitor" title="Radio monitor">Monitor</a>
   <span id="clock" class="clock"><b id="clock-local"></b></span>
 </header>
 <div id="cloud-banner" class="banner cloud-banner" hidden></div>
@@ -38,13 +38,13 @@
 <main class="cad-main">
   <!-- queue: from 60 Control, pending, active, non-emergency, recently closed -->
   <aside class="queue">
-    <button id="new-incident" class="primary wide">+ New incident</button>
+    <button id="new-incident" class="primary wide">New incident</button>
     <section>
-      <h2>From 60 Control <span class="dim">· pages to accept</span></h2>
+      <h2 title="Pages to accept or dismiss">60 Control</h2>
       <ol id="q-queued" class="list q"></ol>
     </section>
     <section>
-      <h2>Pending <span class="dim">· not dispatched yet</span></h2>
+      <h2 title="Not dispatched">Pending</h2>
       <ol id="q-pending" class="list q"></ol>
     </section>
     <section class="grow">
@@ -52,11 +52,11 @@
       <ol id="q-active" class="list q"></ol>
     </section>
     <section>
-      <h2>Non-emergency <span class="dim">· until closed</span></h2>
+      <h2 title="Logged, no dispatch, open until closed">Non-emergency</h2>
       <ol id="q-nonemerg" class="list q"></ol>
     </section>
     <section>
-      <h2>Closed <span class="dim">· last 12 h</span></h2>
+      <h2 title="Closed in the last 12 hours">Closed 12h</h2>
       <ol id="q-closed" class="list q closed"></ol>
     </section>
   </aside>
@@ -64,8 +64,7 @@
   <!-- the selected incident, or the new-incident form -->
   <section id="detail" class="detail">
     <div id="d-empty" class="d-empty">
-      <div class="big dim">No incident selected</div>
-      <div class="dim">Pick one on the left, or enter a new one.</div>
+      <div class="big dim">No incident</div>
     </div>
 
     <!-- Overview (cadmap.js): the landing view with no incident open; every open call at once -->
@@ -81,7 +80,7 @@
         <div class="ov-mapbox"><div id="ov-map"></div></div>
         <div class="ov-side">
           <ol id="ov-cards" class="ov-cards"></ol>
-          <h3 class="ov-sub">Non-emergency <span class="dim">· until closed</span></h3>
+          <h3 class="ov-sub">Non-emergency</h3>
           <ol id="ov-nonemerg" class="list ov-nelist"></ol>
         </div>
       </div>
@@ -93,7 +92,7 @@
       <label>Type <select id="f-type"></select></label>
       <label>Subtype <select id="f-subtype"></select></label>
       <label class="span2">Location
-        <input id="f-address" type="text" maxlength="200" placeholder="209 Westchester Ave, a place, or an intersection" spellcheck="false">
+        <input id="f-address" type="text" maxlength="200" placeholder="Address, place or intersection" spellcheck="false">
       </label>
       <div id="f-geo" class="geo span2"></div>
       <ol id="f-sugg" class="sugg span2" hidden></ol>
@@ -102,11 +101,11 @@
       <label>Phone <input id="f-phone" type="tel" maxlength="40"></label>
       <label class="span2">Caller address <input id="f-caddr" type="text" maxlength="200" spellcheck="false"></label>
       <label>Received via <select id="f-via"></select></label>
-      <label class="check" title="Emergency: run card and dispatch. Non-emergency (notifications, closures, hydrants): logged and tracked until closed, no dispatch. Set from the type; change it here.">
+      <label class="check" title="Off: non-emergency, logged until closed, no dispatch. Set from the type.">
         <input id="f-emergency" type="checkbox" checked> <span>Emergency</span>
         <span id="f-class" class="dim small"></span>
       </label>
-      <label id="f-until-w" class="span2" hidden>Until <span class="dim small">(closures, hydrants out of service; optional)</span>
+      <label id="f-until-w" class="span2" hidden title="Optional: closures, hydrants out of service">Until
         <input id="f-until" type="datetime-local">
       </label>
       <label class="span2">Remarks <textarea id="f-remarks" rows="3" maxlength="4000"></textarea></label>
@@ -117,21 +116,21 @@
     <div id="d-body" hidden>
       <div id="d-card" class="card inc">
         <div class="card-head">
-          <button id="d-back" type="button" class="back" title="Back to the overview: every open call">← Overview</button>
+          <button id="d-back" type="button" class="back">← Overview</button>
           <span id="d-number" class="number"></span>
           <span id="d-status" class="st-badge"></span>
           <span id="d-class" class="st-badge"></span>
-          <span id="d-joint" class="st-badge" hidden title="In a joint-response town: their units are recommended first"></span>
+          <span id="d-joint" class="st-badge" hidden title="Joint response: their units first"></span>
           <span id="d-source" class="dim"></span>
           <span class="spacer"></span>
           <button id="d-accept" class="primary" hidden>Accept</button>
           <button id="d-dismiss" hidden>Dismiss</button>
-          <button id="d-edit" title="Change type, location, caller, remarks">Edit</button>
-          <button id="d-close" hidden>Close incident</button>
+          <button id="d-edit">Edit</button>
+          <button id="d-close" hidden>Close</button>
         </div>
 
         <div id="d-queued" class="warnbox" hidden>
-          <div>From a 60 Control page: check it, pick the type if the page didn't say, then accept or dismiss.</div>
+          <div>60 Control page: set type, then Accept or Dismiss</div>
           <div id="d-qnote" class="qnote"></div>
           <div class="row">
             <label class="inline">Type <select id="d-acc-type"></select></label>
@@ -141,11 +140,11 @@
 
         <form id="close-form" class="closebox" hidden autocomplete="off">
           <label class="inline">Disposition <select id="c-disp"></select></label>
-          <span class="dim small">Units still on it are cleared.</span>
+          <span class="dim small">Clears all units</span>
           <span class="spacer"></span>
           <span id="c-error" class="error"></span>
           <button id="c-cancel" type="button">Cancel</button>
-          <button id="c-close" type="submit" class="danger">Close incident</button>
+          <button id="c-close" type="submit" class="danger">Close</button>
         </form>
 
         <div class="inc-grid">
@@ -191,16 +190,16 @@
       </div>
 
       <div class="card">
-        <div class="card-head"><h2>Units on this incident</h2></div>
+        <div class="card-head"><h2>Assigned</h2></div>
         <ol id="d-units" class="list on-units"></ol>
       </div>
 
       <!-- non-emergency: units attached, no run card, no dispatch; any event: other agencies (EMS, PD) that show up -->
       <div id="d-attach" class="card" hidden>
-        <div class="card-head"><h2 id="a-title">Attach a unit</h2><span id="a-hint" class="dim small">Non-emergency: no run card and no dispatch.</span></div>
+        <div class="card-head"><h2 id="a-title">Attach</h2><button class="help" id="a-hint" type="button" aria-label="Help" aria-expanded="false" data-help="Non-emergency: no run card, no dispatch.">?</button></div>
         <div class="row add-unit">
           <select id="a-unit"></select>
-          <button id="a-add" type="button">Attach unit</button>
+          <button id="a-add" type="button">Attach</button>
         </div>
         <div id="a-error" class="error"></div>
       </div>
@@ -208,52 +207,51 @@
       <div id="d-dispatch" class="card">
         <div class="card-head"><h2>Dispatch</h2>
           <span id="r-card" class="dim"></span>
-          <span id="r-kind" class="chip addon" hidden title="This incident already had a dispatch: units sent now are &quot;added to the assignment&quot;">next dispatch: add-on</span>
+          <span id="r-kind" class="chip addon" hidden title="Units sent now are added to the assignment">Add-on</span>
           <span class="spacer"></span>
-          <button id="r-refresh" title="Recommend again from the run card and who is available now">↻ Recommend</button>
+          <button id="r-refresh" title="Run card against who is available now">Recommend</button>
         </div>
-        <div id="r-pending" class="warnbox" hidden>Accept the incident before dispatching. You can preview it now.</div>
+        <div id="r-pending" class="warnbox" hidden>Accept before dispatch</div>
         <ul id="r-unfilled" class="unfilled"></ul>
-        <div id="r-order" class="dim small r-order" title="Estimated arrival: straight-line distance × road factor at an average speed, plus turnout from quarters (Settings › Dispatch). No road network or traffic: an estimate."></div>
+        <div id="r-order" class="dim small r-order" title="Estimated arrival: straight line × road factor at average speed, plus turnout (Settings, Dispatch). No roads or traffic."></div>
         <ol id="r-units" class="list r-units"></ol>
         <div class="row add-unit">
           <select id="r-add"></select>
           <button id="r-add-btn" type="button">Add unit</button>
-          <button id="r-tickall" type="button" title="Tick every available PCFD apparatus (not Rye Brook's, mutual aid, PD or EMS)">Tick all available PCFD apparatus</button>
-          <button id="r-joint" type="button" hidden title="Tick these joint-response units if they are available">Add Rye Brook</button>
+          <button id="r-tickall" type="button" title="Tick every available PCFD apparatus (not Rye Brook, mutual aid, PD or EMS)">All PCFD</button>
+          <button id="r-joint" type="button" hidden>Add Rye Brook</button>
         </div>
-        <label class="remarks-box" title="Said after the call type: &quot;Reported: ...&quot;. Filled in from the event's remarks; edit it before preview or dispatch. Empty: nothing said.">
-          <span class="dim">Dispatch remarks (spoken)</span>
-          <textarea id="r-remarks" rows="2" placeholder="Optional: said after the call type as &quot;Reported: ...&quot;"></textarea>
+        <label class="remarks-box" title="Said after the call type as &quot;Reported: …&quot;. Starts from the event remarks. Empty: nothing said.">
+          <span class="dim">Remarks (spoken)</span>
+          <textarea id="r-remarks" rows="2" placeholder="Optional"></textarea>
           <span id="r-remarks-note" class="dim small"></span>
         </label>
         <div class="row">
-          <label class="inline check" title="Say the department response phrase instead of each unit's name"><input id="r-full" type="checkbox"> <span id="r-full-label">Full department response</span></label>
+          <label class="inline check" title="Say the department phrase, not each unit"><input id="r-full" type="checkbox"> <span id="r-full-label">Full department response</span></label>
           <label class="inline"><span class="dim">Channel</span> <select id="r-channel"></select></label>
           <span class="spacer"></span>
-          <button id="r-preview">▶ Preview dispatch</button>
+          <button id="r-preview">Preview</button>
           <button id="r-dispatch" class="primary danger">Dispatch</button>
         </div>
         <div class="row tx-row">
-          <span id="tx-note" class="txnote">Transmit is off: logged and played here only.</span>
+          <span id="tx-note" class="txnote">Transmit off: logged only</span>
           <span class="spacer"></span>
-          <button id="u-open" type="button" hidden title="Re-dispatch with new information: a new type, more units, full department response">Upgrade…</button>
+          <button id="u-open" type="button" hidden title="Re-dispatch: new type, more units, full response">Upgrade</button>
         </div>
         <form id="upgrade-form" class="upgrade-box form" hidden autocomplete="off">
-          <h2 class="span2">Upgrade <span class="dim">· "upgrade on your last alarm"</span></h2>
-          <label>New type <span class="dim small">(optional)</span> <select id="u-type"></select></label>
+          <h2 class="span2">Upgrade<button type="button" class="help" aria-label="Help" aria-expanded="false" data-help="Said as &quot;upgrade on your last alarm&quot;. Units ticked above go with it.">?</button></h2>
+          <label>New type <select id="u-type"></select></label>
           <label>New subtype <select id="u-subtype"></select></label>
-          <label class="span2">New information <input id="u-info" type="text" maxlength="300" placeholder="smoke in the structure"></label>
-          <label class="span2">Remarks (spoken, optional) <input id="u-remarks" type="text" maxlength="500" placeholder="said as &quot;Reported: ...&quot;"></label>
+          <label class="span2">New info <input id="u-info" type="text" maxlength="300" placeholder="smoke in the structure"></label>
+          <label class="span2">Remarks (spoken) <input id="u-remarks" type="text" maxlength="500" placeholder="Optional"></label>
           <div class="span2 row">
             <label class="inline check"><input id="u-full" type="checkbox"> <span id="u-full-label">Full department response</span></label>
-            <span class="dim small">Units ticked above go with it.</span>
           </div>
           <div class="span2 row"><span id="u-error" class="error"></span><span class="spacer"></span>
-            <button id="u-recommend" type="button" title="Tick what the new type's run card adds over the units already on it">Recommend for the new type</button>
-            <button id="u-preview" type="button">▶ Preview upgrade</button>
+            <button id="u-recommend" type="button" title="What the new type's run card adds">Recommend</button>
+            <button id="u-preview" type="button">Preview</button>
             <button id="u-cancel" type="button">Cancel</button>
-            <button id="u-send" type="submit" class="primary danger">Send upgrade</button></div>
+            <button id="u-send" type="submit" class="primary danger">Send</button></div>
         </form>
         <div id="r-error" class="error"></div>
         <div id="r-preview-box" class="preview" hidden>
@@ -271,10 +269,10 @@
       </div>
 
       <div id="d-radio-card" class="card">
-        <div class="card-head"><h2>Radio traffic &amp; unit notes</h2>
+        <div class="card-head"><h2>Radio</h2>
           <span id="d-radio-sum" class="dim small"></span>
           <span class="spacer"></span>
-          <a id="d-radio-all" class="nav" href="/comms" title="This incident's traffic on the communications page">All on Comms →</a>
+          <a id="d-radio-all" class="nav" href="/comms" title="This incident on Comms">Comms</a>
         </div>
         <div id="d-radio-units" class="row unit-filter" role="group" aria-label="Show one unit"></div>
         <ol id="d-radio" class="list log radio-log"></ol>
@@ -285,7 +283,7 @@
         <ol id="d-events" class="list events"></ol>
         <form id="note-form" class="row note" autocomplete="off">
           <div class="note-box">
-            <input id="note-text" type="text" maxlength="2000" placeholder="Add a note · @E63 + Tab tags who said it"
+            <input id="note-text" type="text" maxlength="2000" placeholder="Note  (@E63 to tag)"
                    role="combobox" aria-autocomplete="list" aria-controls="note-sugg" aria-expanded="false">
             <ol id="note-sugg" class="sugg note-sugg" role="listbox" hidden></ol>
           </div>
@@ -301,7 +299,7 @@
     <div id="feed" hidden></div>
     <h2>Units</h2>
     <div id="units" class="unit-groups"></div>
-    <h2 class="mt">Unit log <span class="dim">· not on an incident</span></h2>
+    <h2 class="mt" title="Status changes off an incident">Unit log</h2>
     <ol id="unit-log" class="list unit-log"></ol>
   </aside>
 </main>
@@ -318,8 +316,9 @@
     <div id="s-role" class="s-note s-role" hidden></div>
     <section id="s-lists" class="s-panel" data-s="lists" hidden></section>
     <section id="s-runcards" class="s-panel" data-s="runcards" hidden>
-      <div class="s-head"><h2>Run cards</h2><span class="spacer"></span><span id="rc-tools" class="row"></span></div>
-      <div id="rc-banner" class="banner">Default run cards — edit to match PCFD policy. These are a stand-in so the console works; they are not the department's run cards.</div>
+      <div class="s-head"><h2>Run cards</h2><button type="button" class="help" aria-label="Help" aria-expanded="false" data-help="A card for a type and subtype wins over the card for the type alone.
+Slots go in order. A kind takes the next available unit of that kind (regular apparatus before spares, never another department's). A named unit takes that unit.">?</button><span class="spacer"></span><span id="rc-tools" class="row"></span></div>
+      <div id="rc-banner" class="banner">Default run cards: not PCFD policy</div>
       <div class="rc-body">
         <ol id="rc-list" class="list rc-list"></ol>
         <form id="rc-form" class="rc-form" autocomplete="off">
@@ -327,13 +326,11 @@
             <label>Event type <select id="rc-type"></select></label>
             <label>Subtype <select id="rc-subtype"></select></label>
           </div>
-          <div class="dim small">A card for a type and subtype wins over the card for the type alone.</div>
-          <label>Said in the dispatch as <input id="rc-spoken" type="text" maxlength="120"></label>
-          <div class="dim small">Slots, in order. A kind takes the next available unit of that kind (regular apparatus before spares; never another department's); a named unit takes that unit.</div>
+          <label>Spoken as <input id="rc-spoken" type="text" maxlength="120"></label>
           <ol id="rc-slots" class="rc-slots"></ol>
           <div class="row">
             <button id="rc-add-kind" type="button">+ Kind</button>
-            <button id="rc-add-unit" type="button">+ Named unit</button>
+            <button id="rc-add-unit" type="button">+ Unit</button>
           </div>
           <div class="row"><span id="rc-error" class="error"></span><span class="spacer"></span>
             <button id="rc-delete" type="button" class="danger-quiet">Delete</button>
@@ -348,7 +345,7 @@
     <section id="s-system" class="s-panel" data-s="system" hidden></section>
     <section id="s-radios" class="s-panel" data-s="radios" hidden>
       <div class="s-head"><h2>Radios</h2></div>
-      <div class="s-note">Radio IDs and rigs: coming from the radio-ID work. Its Radios editor plugs in here.</div>
+      <div class="s-note">Radios editor unavailable</div>
       <div id="settings-radios" class="settings-radios"></div>
     </section>
   </div>
@@ -363,14 +360,13 @@
     </div>
     <div class="db-body">
       <div class="row csv-row">
-        <span class="dim small">CSV, the sheet's columns:</span>
+        <span class="dim small">CSV</span>
         <a class="nav" href="/api/cad/export/incidents.csv" download>Incident database</a>
         <a class="nav" href="/api/cad/export/calls.csv" download>Call history</a>
         <a class="nav" href="/api/cad/export/unit-history.csv" download>Unit history</a>
         <a class="nav" href="/api/cad/export/event-log.csv" download>Event log</a>
       </div>
       <dl id="admin" class="admin"></dl>
-      <div class="dim small">There is no "clear all data" here on purpose. Click an incident to open it.</div>
       <div class="tscroll"><table class="evtable db"><thead><tr><th>Number</th><th>Type</th><th>Location</th><th>Received</th><th>Closed</th><th>Status</th><th>Disposition</th><th>Units</th><th>Via</th></tr></thead>
         <tbody id="db-rows"></tbody></table></div>
     </div>
@@ -379,6 +375,7 @@
 
 <script src="/static/vendor/maplibre-gl.js"></script>
 <script src="/static/map-style.js"></script>
+<script src="/static/help.js"></script>
 <script src="/static/radio.js"></script>
 <script src="/static/live.js"></script>
 <script src="/static/radios-panel.js"></script>

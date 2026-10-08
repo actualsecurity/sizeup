@@ -163,22 +163,21 @@ class Lists:
         """Raises ValueError with the reason for a type / subtype code that isn't on the lists."""
         if not typ:
             if required:
-                raise ValueError("type: required (one of the event types)")
+                raise ValueError("Pick a type")
             if subtype:
-                raise ValueError("subtype: pick the type first")
+                raise ValueError("Pick a type first")
             return
         if typ not in self.type_codes:
             if self.retired("event_types", typ):
-                raise ValueError(f"type: {self.type_label(typ)} ({typ}) is retired")
+                raise ValueError(f"{typ} retired")
             raise ValueError(f"type: {typ!r} is not an event type")
         if subtype and subtype not in self.subtypes_for(typ):
             if self.retired("event_subtypes", subtype):
-                raise ValueError(f"subtype: {self.name('event_subtypes', subtype)} ({subtype}) is retired")
+                raise ValueError(f"{subtype} retired")
             if subtype not in self._names["event_subtypes"]:
                 raise ValueError(f"subtype: {subtype!r} is not an event subtype")
             ok = self.subtypes_for(typ)
-            raise ValueError(f"subtype: {self.type_label(typ)} can't be {self.name('event_subtypes', subtype)} ({subtype}): "
-                             + (f"pick one of {', '.join(ok)} or none" if ok else "it takes no subtype"))
+            raise ValueError(f"{typ} can't be {subtype}: " + (f"{', '.join(ok)} or none" if ok else "takes no subtype"))
 
     def check_key(self, k: str) -> tuple[str, str]:
         """'ALARM/COMM' -> ('ALARM', 'COMM'), checked."""

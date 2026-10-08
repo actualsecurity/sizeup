@@ -72,7 +72,7 @@ function fillFacets(d) {
   keep("#f-unit", (d.rigs || []).sort((a, b) => (pcfd.has(b) - pcfd.has(a)) || a.localeCompare(b, undefined, { numeric: true }))
     .map((u) => [u, pcfd.has(u) ? u : `${u} (not PCFD)`]), "Any unit");
   keep("#f-channel", (d.channels || []).map((x) => [x, x]), "Any channel");
-  keep("#f-event", (d.events || []).map((e) => [e.number || String(e.id), `${e.number || "#" + e.id} · ${e.type || ""} ${e.address || ""}`.trim()]),
+  keep("#f-event", (d.events || []).map((e) => [e.number || String(e.id), `${e.number || "#" + e.id} ${e.type || ""} ${e.address || ""}`.trim()]),
        "Any event");
 }
 
@@ -99,11 +99,11 @@ function row(t) {
     const b = el("button", "play", "▶");
     b.dataset.play = t.id;
     b.disabled = !t.has_audio;
-    b.title = t.has_audio ? "Play" : "Recording no longer kept (12 h)";
+    b.title = t.has_audio ? "Play" : "Recording expired (12 h)";
     if (!t.has_audio) b.textContent = "–";
     b.addEventListener("click", () => play(t.id, b));
     const rr = el("button", "rerun", "↻");
-    rr.title = "Run speech-to-text again on this recording";
+    rr.title = "Re-transcribe";
     rr.disabled = !t.has_audio;
     rr.addEventListener("click", async () => {
       rr.disabled = true;
@@ -119,21 +119,21 @@ function row(t) {
   meta.append(el("span", "t", fmtT.format(new Date(t.start * 1000))));
   const tag = Radio.rigTag({ rig: t.rig, radio_id: t.radio_id, unit: t.kind === "note" ? "" : t.talker });
   if (tag) meta.append(tag);
-  meta.append(el("span", "chip src", t.channel + (t.talkgroup ? ` · TG ${t.talkgroup}` : "")));
+  meta.append(el("span", "chip src", t.channel + (t.talkgroup ? ` TG ${t.talkgroup}` : "")));
   for (const e of t.events || []) {
     const a = el("a", "inc-link", e.number || `#${e.id}`);
     a.href = `/comms?event=${encodeURIComponent(e.number || e.id)}`;
-    a.title = `${e.type || ""} ${e.address || ""} · linked by ${e.why}${e.unit ? ` (${e.unit})` : ""}`.trim();
+    a.title = `${e.type || ""} ${e.address || ""}, linked by ${e.why}${e.unit ? ` (${e.unit})` : ""}`.trim();
     meta.append(a);
   }
   if (t.kind === "note" && t.operator) {          // "Corey <corey@...>": signed in through Cloudflare Access
     const m = /^(.*\S) <([^<>\s]+@[^<>\s]+)>$/.exec(t.operator);
-    const op = el("span", "", `· ${m ? m[1] : t.operator}`);
-    if (m) op.title = `Signed in with Cloudflare Access as ${m[2]}`;
+    const op = el("span", "", m ? m[1] : t.operator);
+    if (m) op.title = m[2];
     meta.append(op);
   }
   if (t.kind === "radio" && t.end > t.start) meta.append(el("span", "dim", `${Math.round(t.end - t.start)} s`));
-  const said = t.status === "no_speech" ? "key-up · no speech" : t.status === "pending" ? "transcribing…" : "(no words)";
+  const said = t.status === "no_speech" ? "Key-up, no speech" : t.status === "pending" ? "Transcribing" : "—";
   li.append(meta, el("div", "txt" + (t.text ? "" : " muted"), t.text || said));
   if (t.dispatcher) li.classList.add("from-dispatch");
   return li;
@@ -144,10 +144,10 @@ function render() {
   const sig = JSON.stringify(c.rows.map((t) => [t.id, t.text, t.status, t.rig, (t.events || []).length, t.has_audio]));
   if (box._sig !== sig) {
     box._sig = sig;
-    box.replaceChildren(...(c.rows.length ? c.rows.map(row) : [el("li", "empty", "Nothing matches these filters")]));
+    box.replaceChildren(...(c.rows.length ? c.rows.map(row) : [el("li", "empty", "None")]));
     paint();
   }
-  $("#count").textContent = `${c.rows.length}${c.rows.length >= 300 ? "+" : ""} shown · newest first · live`;
+  $("#count").textContent = `${c.rows.length}${c.rows.length >= 300 ? "+" : ""} shown`;
 }
 
 async function poll() {
@@ -169,7 +169,7 @@ async function poll() {
       render();
     }
   } catch (e) {
-    $("#count").textContent = `could not load: ${e.message}`;
+    $("#count").textContent = `Load failed: ${e.message}`;
   } finally {
     c.busy = false;
     conn();
@@ -179,7 +179,7 @@ async function poll() {
 function conn() {
   const p = $("#conn"), age = Date.now() - c.lastOk;
   p.className = "pill " + (!c.lastOk ? "warn" : age > LOST_AFTER_MS ? "err" : "ok");
-  p.textContent = !c.lastOk ? "connecting…" : age > LOST_AFTER_MS ? "not updating" : "live";
+  p.textContent = !c.lastOk ? "Connecting" : age > LOST_AFTER_MS ? "No updates" : "Live";
 }
 
 for (const id of ["#f-unit", "#f-channel", "#f-event", "#f-type", "#f-pcfd", "#f-since", "#f-until"]) $(id).addEventListener("change", changed);
@@ -193,7 +193,7 @@ Radio.mountAlerts($("#alerts"));
 fetch("/api/scene").then((r) => r.json()).then((s) => {
   const name = (s.station && s.station.name) || "sizeup";
   $("#station").textContent = name;
-  document.title = `Comms · ${name}`;
+  document.title = `Comms ${name}`;
 }).catch(() => {});
 fromUrl();
 poll();

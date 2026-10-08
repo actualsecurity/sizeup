@@ -628,3 +628,21 @@ header > * { min-width: 0; }
 main, aside, aside > section, .log, .list, .list > li, .meta { min-width: 0; }
 .list > li .txt { overflow-wrap: anywhere; }
 .meta > * { min-width: 0; }
+
+/* ---- "?" help (help.js): the explanation behind a small button next to a heading ------------------ */
+
+button.help {
+  display: inline-flex; align-items: center; justify-content: center; vertical-align: middle;
+  width: 1.5em; height: 1.5em; min-width: 1.5em; padding: 0; margin: 0 0 0 0.4em; border-radius: 50%;
+  font: 700 0.72rem/1 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; letter-spacing: 0; text-transform: none;
+  color: var(--dim); background: transparent; border: 1px solid color-mix(in srgb, var(--dim) 55%, transparent);
+}
+button.help:hover, button.help[aria-expanded="true"] { color: var(--text); border-color: var(--text); }
+button.help:focus-visible { outline: 2px solid var(--text); outline-offset: 1px; }
+.help-pop {
+  position: fixed; z-index: 60; max-width: min(30em, calc(100vw - 32px)); padding: 0.55em 0.75em;
+  font-size: 0.85rem; font-weight: 400; line-height: 1.4; letter-spacing: 0; text-transform: none; color: var(--text);
+  background: var(--panel-solid); border: 1px solid rgba(255, 255, 255, 0.22); border-radius: 0.4em;
+  box-shadow: 0 0.5em 1.6em rgba(0, 0, 0, 0.55); white-space: pre-line;
+}
+.help-pop[hidden] { display: none; }

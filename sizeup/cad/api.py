@@ -274,11 +274,11 @@ class CadApi:
             return None
         ask = f" (ask {', '.join(st['admins'])})" if st["admins"] else ""
         if not st["active"]:
-            why = f"Your account is deactivated: you can look but not change anything{ask}"
+            why = f"Account deactivated{ask}"
         elif need == "admin":
-            why = f"Only an admin can change settings (you are a {st['role']})"
+            why = f"Admins only (you: {st['role']})"
         else:
-            why = f"Only a dispatcher or an admin can do that (you are a {st['role']})"
+            why = f"Dispatchers and admins only (you: {st['role']})"
         self.refused(path, who, f"needs {need}; {st['role']}{'' if st['active'] else ', deactivated'}", client)
         return _json(403, {"error": why})
 
@@ -321,9 +321,9 @@ class CadApi:
         everyone = who is None or not who.email or self.cad.settings.standing(who.email)["may"] == "admin"
         if not everyone:
             if csv:
-                return _json(403, {"error": "Only an admin can export the activity log"})
+                return _json(403, {"error": "Admins only"})
             if email and email != who.email:
-                return _json(403, {"error": "Only an admin can see other people's activity"})
+                return _json(403, {"error": "Admins only"})
             email = who.email
         act = self.cad.activity
         rows = act.rows(email, kind, since, limit)

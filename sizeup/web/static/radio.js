@@ -34,10 +34,10 @@ window.Radio = (() => {
   }
   function label(e) {
     const w = who(e);
-    if (e.ended) return `${w || e.radio_id || "Radio"} just transmitted · ${e.channel}`;
-    if (w) return `${w} talking · ${e.channel}`;
-    if (e.system === "fm") return `${e.channel} open (unknown radio)`;
-    return `${e.channel} active` + (e.radio_id ? ` · radio ${e.radio_id}` : " · talker not known yet");
+    if (e.ended) return `${w || e.radio_id || "Radio"} ${e.channel} ended`;
+    if (w) return `TX ${w} ${e.channel}`;
+    if (e.system === "fm") return `${e.channel} open`;
+    return `TX ${e.channel}` + (e.radio_id ? ` radio ${e.radio_id}` : "");
   }
   function shown(e) {             // the strip: our rigs, FG1, and the talkgroups in Radio traffic
     return !!e.rig || e.system === "fm" || e.main;
@@ -58,9 +58,9 @@ window.Radio = (() => {
     box._sig = sig;
     box.replaceChildren(...items.map((e) => {
       const c = el("span", "talk-chip" + (e.ended ? " ended" : "") + (e.rig ? " rig" : "") + (e.dispatcher ? " disp" : ""));
-      c.append(el("span", "ico", "📻"), el("span", "", label(e)));
+      c.append(el("span", "", label(e)));
       c.title = [e.radio_id ? `radio ${e.radio_id}` : "", e.alias && e.alias !== e.rig ? `alias ${e.alias}` : "",
-                 e.label && e.label !== e.alias ? e.label : "", e.tg ? `TG ${e.tg}` : ""].filter(Boolean).join(" · ")
+                 e.label && e.label !== e.alias ? e.label : "", e.tg ? `TG ${e.tg}` : ""].filter(Boolean).join(", ")
         || "Transmitting now";
       return c;
     }));
@@ -141,7 +141,7 @@ window.Radio = (() => {
       document.body.append(st.toasts);
     }
     const t = el("div", "toast");
-    t.append(el("span", "ico", "📻"), el("b", "", text));
+    t.append(el("b", "", text));
     if (sub) t.append(el("span", "dim", sub));
     t.addEventListener("click", () => t.remove());
     st.toasts.prepend(t);
@@ -166,8 +166,8 @@ window.Radio = (() => {
     let rang = false;
     for (const [rig, e] of fresh) {
       if (!want.has(rig)) continue;
-      toast(`${rig} ${e.ended ? "just transmitted" : "transmitting"} on ${e.channel}`,
-            [e.radio_id ? `radio ${e.radio_id}` : "", e.label || ""].filter(Boolean).join(" · "));
+      toast(`${e.ended ? "" : "TX "}${rig} ${e.channel}${e.ended ? " ended" : ""}`,
+            [e.radio_id ? `radio ${e.radio_id}` : "", e.label || ""].filter(Boolean).join(", "));
       if (!rang) { ring(); rang = true; }
     }
   }
@@ -184,11 +184,11 @@ window.Radio = (() => {
   function renderButton() {
     if (!st.btn) return;
     const a = st.alerts;
-    st.btn.textContent = a.on ? (a.chime && !st.chimeOk ? "🔔 Alerts · tap for sound" : "🔔 Alerts on") : "🔕 Alerts";
+    st.btn.textContent = a.on ? (a.chime && !st.chimeOk ? "Alerts: tap for sound" : "Alerts on") : "Alerts";
     st.btn.classList.toggle("active", a.on);
-    st.btn.title = a.on ? `Alert when ${(a.units || ["PCFD engines and rescues"]).length > 6 ? "the chosen units"
-      : (a.units || ["PCFD engines and rescues"]).join(", ")} talk${a.chime ? " (with a chime)" : ""}. Click to change.`
-      : "Alert when chosen units talk (off)";
+    st.btn.title = a.on ? `Talk alerts: ${(a.units || ["PCFD engines and rescues"]).length > 6 ? "chosen units"
+      : (a.units || ["PCFD engines and rescues"]).join(", ")}${a.chime ? ", chime" : ""}`
+      : "Talk alerts off";
   }
 
   function mountAlerts(box) {
@@ -218,7 +218,7 @@ window.Radio = (() => {
       document.body.append(st.panel);
     }
     st.panel.hidden = false;
-    st.panel.replaceChildren(el("div", "dim", "Loading units…"));
+    st.panel.replaceChildren(el("div", "dim", "Loading"));
     await loadRigs();
     renderPanel();
   }
@@ -236,7 +236,7 @@ window.Radio = (() => {
   function renderPanel() {
     const p = st.panel, a = st.alerts;
     const head = el("div", "ap-head");
-    head.append(el("b", "", "Alert when these units talk"), el("span", "spacer"));
+    head.append(el("b", "", "Talk alerts"), el("span", "spacer"));
     const x = el("button", "tg-close", "✕");
     x.type = "button";
     x.setAttribute("aria-label", "Close");
@@ -271,9 +271,9 @@ window.Radio = (() => {
       }
       grid.append(g);
     }
-    if (!st.rigs.length) grid.append(el("div", "dim", "No unit list from the CAD (is it running?)."));
-    const note = el("div", "dim small", "Kept in this browser. A toast shows when a chosen unit keys up" +
-      " (P25: when trunk-recorder names the radio; FG1: when its MDC ID decodes). The chime needs this click to be allowed.");
+    if (!st.rigs.length) grid.append(el("div", "dim", "No unit list"));
+    const note = el("div", "dim small", "This browser only");
+    note.title = "A toast when a chosen unit keys up (P25: when the radio is named; FG1: when its MDC ID decodes).";
     p.replaceChildren(head, opts, quick, grid, note);
     if (!a.on) grid.classList.add("off");
   }
@@ -288,10 +288,10 @@ window.Radio = (() => {
       if (talkingFor(t.rig.split(/,\s*/)[0])) b.classList.add("talking");
       box.append(b);
       const extra = [t.radio_id, t.unit && t.unit !== t.rig && t.unit !== t.radio_id ? t.unit : ""].filter(Boolean);
-      if (extra.length) box.append(el("span", "dim rid", "· " + extra.join(" · ")));
+      if (extra.length) box.append(el("span", "dim rid", extra.join(" ")));
     } else if (t.unit) {
       box.append(el("b", "unit", t.unit));
-      if (t.radio_id && t.radio_id !== t.unit) box.append(el("span", "dim rid", "· " + t.radio_id));
+      if (t.radio_id && t.radio_id !== t.unit) box.append(el("span", "dim rid", t.radio_id));
     } else if (t.radio_id) {
       box.append(el("b", "unit", t.radio_id));
     }

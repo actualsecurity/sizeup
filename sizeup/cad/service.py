@@ -382,11 +382,11 @@ class Cad:
             raise CadError(f"unit_ids: no unit {missing[0]}")
         agency = [by_id[i]["name"] for i in ids if by_id[i]["response"] == "agency"]
         if dispatching and agency:
-            raise CadError(f"never dispatched (another agency's unit: attach it to the event when it shows up): {', '.join(agency)}")
+            raise CadError(f"Agency units: attach, don't dispatch ({', '.join(agency)})")
         cant = [by_id[i]["name"] for i in ids if self.lists.role(by_id[i]["status"]) == "oos"
                 and not (by_id[i]["response"] == "agency" and not dispatching)]
         if cant:
-            raise CadError(f"can't be dispatched ({', '.join(self.lists.name('unit_statuses', by_id[i]['status']).lower() for i in ids if by_id[i]['name'] in cant)}): {', '.join(cant)}")
+            raise CadError("Not available: " + ", ".join(by_id[i]["name"] + " " + by_id[i]["status"] for i in ids if by_id[i]["name"] in cant))
         return [by_id[i] for i in ids]
 
     def _channel(self, body: dict) -> str:
@@ -515,11 +515,11 @@ class Cad:
 
     def _dispatchable(self, inc: dict) -> None:
         if inc["status"] == "queued":
-            raise CadError("accept the event first")
+            raise CadError("Accept first")
         if inc["status"] not in ("pending", "active"):
             raise CadError(f"event is {inc['status']}")
         if not inc["emergency"]:
-            raise CadError("non-emergency event: no dispatch (attach units instead, or mark it an emergency)")
+            raise CadError("Non-emergency: attach units, no dispatch")
 
     def _audio_url(self, path: Path | None) -> str | None:
         return f"/api/cad/audio/{path.stem}.wav" if path else None
@@ -558,7 +558,7 @@ class Cad:
         if inc["status"] not in ("queued", "pending", "active"):
             raise CadError(f"event is {inc['status']}")
         if not inc["emergency"]:
-            raise CadError("non-emergency event: no dispatch (attach units instead, or mark it an emergency)")
+            raise CadError("Non-emergency: attach units, no dispatch")
         units = self._units_for(body)
         remarks = self._remarks(body)
         kind = "add_on" if self.store.has_dispatch(iid) else "new"
@@ -591,9 +591,9 @@ class Cad:
         inc = self.store.incident(iid)
         L = self.lists
         if inc["status"] not in ("pending", "active"):
-            raise CadError("accept the event first" if inc["status"] == "queued" else f"event is {inc['status']}")
+            raise CadError("Accept first" if inc["status"] == "queued" else f"event is {inc['status']}")
         if not self.store.has_dispatch(iid):
-            raise CadError("nothing dispatched yet: dispatch it first")
+            raise CadError("Dispatch first")
         typ, sub = (_text(body, "type", 24), _text(body, "subtype", 24)) if body.get("type") else (inc["type"], inc["subtype"])
         changed = (typ, sub) != (inc["type"], inc["subtype"])
         if changed:                                    # an old event's pair the map no longer allows: kept as it is
@@ -602,13 +602,13 @@ class Cad:
             except ValueError as e:
                 raise CadError(str(e)) from None
         if not (inc["emergency"] or (changed and L.is_emergency(typ, sub))):
-            raise CadError("non-emergency event: no dispatch (mark it an emergency first)")
+            raise CadError("Non-emergency: mark it emergency first")
         info = _text(body, "info", 300)
         remarks = self._remarks(body)
         full = bool(_bool(body, "full"))
         units = self._units_for(body) if body.get("unit_ids") else []
         if not (changed or info or full or units or remarks):
-            raise CadError("nothing to upgrade: give a new type, new information, remarks, units or full department response")
+            raise CadError("Nothing to upgrade: add a type, info, remarks or units")
         text, plan = self._text_for(inc, units, "upgrade", full=full, info=info,
                                     new_phrase=self._phrase(typ, sub) if changed else "", remarks=remarks)
         if body.get("preview"):
@@ -632,7 +632,7 @@ class Cad:
         """Units on an event with no dispatch (a non-emergency event: a hydrant, a closure)."""
         inc = self.store.incident(iid)
         if inc["status"] not in ("pending", "active"):
-            raise CadError("accept the event first" if inc["status"] == "queued" else f"event is {inc['status']}")
+            raise CadError("Accept first" if inc["status"] == "queued" else f"event is {inc['status']}")
         units = self._units_for(body, dispatching=False)
         op = _text(body, "operator", OPERATOR_MAX)
         ours = [u["id"] for u in units if u["response"] != "agency"]
