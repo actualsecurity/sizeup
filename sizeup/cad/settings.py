@@ -44,6 +44,7 @@ from sizeup.cad import dispatcher, eta, runcards
 from sizeup.cad import lists as lists_mod
 from sizeup.cad.lists import CLASSES, CODE, COLOR, LIST_SECTIONS, LONG_CODE, RESPONSES, ROLES, ListsError
 from sizeup.cad.store import OPERATOR_MAX, SCHEMA_VERSION, TZ, CadError
+from sizeup import polly
 from sizeup.tts import KOKORO_VOICES
 
 FORMAT, FORMAT_VERSION = "sizeup-cad-settings", 1
@@ -471,7 +472,7 @@ class Editor:
                           "edited": "tones" in d},
                 "channels": {"value": list(self.cad.s.channels), "default": list(self.config_channels), "edited": "channels" in d},
                 "voice": {"engine": getattr(self.cad.s, "tts_engine", "say"), "name": getattr(self.cad.s, "voice", ""),
-                          "voices": list(KOKORO_VOICES), "default": self.config_voice[0], "default_speed": self.config_voice[1],
+                          "voices": self._voice_ids(), "default": self.config_voice[0], "default_speed": self.config_voice[1],
                           "edited": "voice" in d or "speed" in d,
                           "speed": getattr(self.cad.s, "speed", 1.0), "rate_wpm": getattr(self.cad.s, "rate_wpm", 0),
                           "fallback": getattr(self.cad.s, "fallback_voice", ""), "repeat": getattr(self.cad.s, "repeat", 0)},
@@ -996,6 +997,8 @@ class Editor:
         L = self.cad.lists
         if action == "preview":
             return self.preview(body.get("wording") or {})
+        if action == "voice_preview":
+            return self.cad.voice_preview()
         if action == "reset_section":
             ch = [("dispatch_wording", k, REMOVE) for k in ov.get("dispatch_wording", {})]
             ch += [("dispatch_tones", k, REMOVE) for k in ov.get("dispatch_tones", {})]
@@ -1040,9 +1043,9 @@ class Editor:
                     if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0.5 <= v <= 2.0:
                         raise CadError("speed: 0.5 to 2.0")
                     v = round(float(v), 2)
-                elif getattr(self.cad.s, "tts_engine", "say") == "kokoro":
-                    if v not in KOKORO_VOICES:
-                        raise CadError(f"voice: one of the Kokoro voices ({', '.join(KOKORO_VOICES[:3])}, ...)")
+                elif getattr(self.cad.s, "tts_engine", "say") in ("kokoro", "polly"):
+                    if v not in self._voice_ids():
+                        raise CadError(f"voice: one of {', '.join(self._voice_ids()[:4])}, ...")
                 else:
                     v = _text(v, "voice", 60)
                 return self._commit([("dispatch", key, REMOVE if v == dflt else v)], op, [("dispatch", key, cur, v)])
@@ -1077,7 +1080,12 @@ class Editor:
         else:
             raise CadError(f"key: a template ({', '.join(k for k, _ in WORDING)}), tones, tones/<town>, "
                            f"lead_in_joint_only/<town>, channels, voice, speed or {', '.join(eta.KEYS)}")
-        raise CadError("action: set, reset, reset_section or preview")
+        raise CadError("action: set, reset, reset_section, preview or voice_preview")
+
+    def _voice_ids(self) -> list[str]:
+        """The voices the engine set in the config offers (Polly's: men first)."""
+        engine = getattr(self.cad.s, "tts_engine", "say")
+        return list(polly.VOICES) if engine == "polly" else list(KOKORO_VOICES) if engine == "kokoro" else []
 
     def preview(self, wording: dict) -> dict:
         """The dispatch wording on a sample event, as it would be said (templates not saved)."""

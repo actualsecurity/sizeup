@@ -1022,7 +1022,8 @@ class App:
             out.append(st)
         out.append({"label": "STT", "mhz": None, "state": self.whisper.state, "detail": self.whisper.detail,
                     "open": False, "quieting_db": None, "restarts": 0, "last_heard": None})
-        out.append(self.tts.status() if self.tts else TtsService.say_status(self.cfg.dispatch_voice))
+        out.append(self.tts.status() if self.tts else TtsService.polly_status(self.cfg.dispatch_voice)
+                   if self.cfg.dispatch_tts_engine == "polly" else TtsService.say_status(self.cfg.dispatch_voice))
         hub = self.station.hub_row() if self.station is not None else (self.link.status_row() if self.link else None)
         if hub is not None:
             out.append(hub)                          # [cloud] station: the hub connection

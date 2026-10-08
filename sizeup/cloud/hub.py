@@ -16,9 +16,11 @@ runs on a bare Linux box with Python + numpy.
 
 Every request needs `Authorization: Bearer <SIZEUP_STATION_TOKEN>` (constant-time compare); with
 no token configured the hub refuses them all. Jobs (the station only connects out):
-    tts    the dispatch voice: Cad._render_remote -> render_voice() waits up to 20 s for the station
-           to render it with its Kokoro; offline or too slow -> text only, said so ("Voice
-           unavailable — station offline"), never a hung request
+    tts    the dispatch voice when the station makes it: [dispatch] tts_engine = "polly" (the
+           default here) is rendered on the hub itself (sizeup/polly.py) and comes here only when
+           Polly fails; any other engine always. Cad._render_remote -> render_voice() waits up to
+           20 s for the station to render it with its Kokoro; offline or too slow -> text only,
+           said so ("Voice unavailable — station offline"), never a hung request
     call   set_mode / set_talkgroup / set_talkgroup_group / retranscribe from this UI, run there
 
 The monitor's state lives in hub.sqlite and the clips in audio.sqlite (hubstore.py), next to the
@@ -162,6 +164,7 @@ class Hub:
         self.app, self.log = app, log
         self.token = cfg.cloud_token
         self.offline_s = cfg.cloud_offline_s
+        self.own_voice = cfg.dispatch_tts_engine == "polly"   # the dispatch voice is the hub's (Polly), not the station's
         self.started = time.time()
         self.jobs = Jobs()
         self.live = RemoteLive(app.radios.resolve)
@@ -204,8 +207,9 @@ class Hub:
         since = self.last_seen
         return {"state": "down", "word": f"offline {_hhmm(since)}",
                 "detail": f"{name}: offline since {time.strftime('%H:%M:%S', time.localtime(since))} "
-                          f"(no contact for {int((now - since) // 60)} min): radios, speech-to-text and the "
-                          "dispatch voice are unavailable until it's back; what it heard meanwhile comes up then"}
+                          f"(no contact for {int((now - since) // 60)} min): radios"
+                          + (" and speech-to-text are" if self.own_voice else ", speech-to-text and the dispatch voice are")
+                          + " unavailable until it's back; what it heard meanwhile comes up then"}
 
     def station_row(self) -> dict:
         h = self.health()

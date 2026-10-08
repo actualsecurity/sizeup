@@ -736,17 +736,21 @@ function sJointOnly(j) {
   return box;
 }
 
-// The voice: Kokoro voices to pick from (GET /api/cad/tts/voices), the speed. The engine is the config's.
+// The voice: Kokoro's or Amazon Polly's voices to pick from (GET /api/cad/tts/voices), the speed, a
+// Preview (a short sample said through the same render as a dispatch). The engine is the config's.
 function sVoice(v) {
-  const box = sCard(sCardHead("Voice", v.engine === "kokoro" ? `Kokoro, fallback ${v.fallback || "macOS say"}` : "macOS say",
-    v.engine === "kokoro" ? sHelp("Speed 0.5 to 2 (0.92 is a touch slower than talking). Preview a dispatch on an event to hear it.") : null));
+  const picked = v.engine === "kokoro" || v.engine === "polly";
+  const info = v.engine === "kokoro" ? `Kokoro, fallback ${v.fallback || "macOS say"}`
+    : v.engine === "polly" ? "Amazon Polly (made by the server)" : "macOS say";
+  const box = sCard(sCardHead("Voice", info,
+    picked ? sHelp("Speed 0.5 to 2 (0.92 is a touch slower than talking). Preview says a short sample in this voice.") : null));
   const row = el("div", "row");
   let pick;
-  if (v.engine === "kokoro") {
+  if (picked) {
     pick = sSelect(v.voices.map((x) => [x, x]), v.name, (x) => sPost("dispatch", { action: "set", key: "voice", value: x }, `Voice ${x}`), "Voice");
-    api("GET", "/api/cad/tts/voices").then((r) => {     // readable names: "Heart (American, female)"
+    api("GET", "/api/cad/tts/voices").then((r) => {     // readable names: "Heart (American, female)", "Matthew (male, generative/neural/standard)"
       const keep = pick.value;
-      const list = (r.voices || []).map((x) => [x.id, `${x.name} (${[x.accent, x.gender].filter(Boolean).join(", ")})`]);
+      const list = (r.voices || []).map((x) => [x.id, `${x.name} (${[x.engines ? "" : x.accent, x.gender, (x.engines || []).join("/")].filter(Boolean).join(", ")})`]);
       if (list.length) { fillSelect(pick, list); pick.value = keep; }
     }).catch(() => {});
   } else {
@@ -756,8 +760,21 @@ function sVoice(v) {
   speed.type = "number"; speed.min = "0.5"; speed.max = "2"; speed.step = "0.01"; speed.value = String(v.speed);
   speed.setAttribute("aria-label", "Speed");
   speed.addEventListener("change", () => sPost("dispatch", { action: "set", key: "speed", value: Number(speed.value) }, `Speed ${speed.value}`));
+  const note = el("span", "dim small");
+  const hear = sBtn("Preview", "Say a short sample in this voice", async () => {
+    hear.disabled = true;
+    setText(note, "Rendering…");
+    try {
+      const r = await api("POST", "/api/cad/settings/dispatch", { action: "voice_preview" });
+      setText(note, r.audio_note || "");
+      play(r.audio_url);
+    } catch (e) {
+      setText(note, e.message);
+    }
+    hear.disabled = false;
+  });
   row.append(el("span", "dim small", "Voice"), pick, el("span", "dim small", "Speed"), speed, el("span", "dim small", `read ${v.repeat || 2}×`),
-    el("span", "spacer"));
+    hear, note, el("span", "spacer"));
   if (v.edited) row.append(sBtn("Reset", `Config: ${v.default}, ${v.default_speed}`, async () => {
     await sPost("dispatch", { action: "reset", key: "voice" }, "Voice reset");
     await sPost("dispatch", { action: "reset", key: "speed" }, "Voice and speed reset");

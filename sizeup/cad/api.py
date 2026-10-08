@@ -38,11 +38,14 @@ GET  /api/cad/settings/export             every setting as one JSON file (edits,
 GET  /api/cad/settings/audit?section=     every Settings change (who, section, key, old -> new), newest first
 POST /api/cad/settings/<section>          {action, ..., operator?}: event_types | event_subtypes | dispositions |
                                           received_via | unit_statuses | event_class | type_subtypes | geo_town_order | units |
-                                          dispatch | users | runcards | import (dry_run / apply)
+                                          dispatch | users | runcards | import (dry_run / apply);
+                                          dispatch {action: "voice_preview"} -> {text, audio_url, audio_note}:
+                                          a sample said by the voice set now (the same render as a dispatch)
 GET  /api/cad/export/<name>.csv           incidents | calls | unit-history | event-log, the sheet's columns
 GET  /api/cad/dispatch/<id>.wav           a logged dispatch's audio
 GET  /api/cad/audio/<key>.wav             a preview's audio
-GET  /api/cad/tts/voices                  {engine, voice, speed, fallback_voice, voices: [{id, name, accent, gender}]}
+GET  /api/cad/tts/voices                  {engine, voice, speed, fallback_voice, voices: [{id, name, accent, gender,
+                                          engines? (Polly's)}], polly_engine? (the one in use)}
 POST /api/cad/incident                    Accept event: {type, subtype?, emergency?, received_via?, until_at?,
                                           address?, cross_street?, caller_name?, caller_address?, phone?,
                                           remarks?, lat?, lon?, geo_label?, operator?}
@@ -196,7 +199,7 @@ def _unit_status(m, b, o, c):
 
 def _settings(m, b, o, c):
     sec, act = m.group(1), str(b.get("action") or "")
-    if (sec == "import" and act != "apply") or (sec, act) == ("dispatch", "preview"):
+    if (sec == "import" and act != "apply") or (sec == "dispatch" and act in ("preview", "voice_preview")):
         return None
     if sec == "import":
         return "Changed settings: imported a settings file", ""

@@ -7,6 +7,7 @@ same code and the same entry point (`python -m sizeup --config ...`), chosen by 
 |---|---|---|
 | Radios, trunk-recorder, MDC decode | yes | none: nothing opens an SDR or starts a program |
 | whisper (3.8 GB), Kokoro voice (1.4 GB) | yes | none |
+| Dispatch voice | its Kokoro (all-in-one; the hub's fallback) | **Amazon Polly**, made on the hub ([below](#the-dispatch-voice-amazon-polly)) |
 | Web UI: CAD `/cad` (Dispatch, Overview, Radio, Settings), wall board `/monitor` | yes (its own, local) | yes: **the CAD of record** |
 | CAD database | its own `state/cad.sqlite`, not synced | `cad.sqlite` (+ `hub.sqlite`, `audio.sqlite`) |
 | Network | outbound HTTPS to the hub only | reached only through Cloudflare Tunnel |
@@ -41,9 +42,10 @@ Secrets on the station: the environment, else `[cloud]`, else the **macOS Keycha
  │ receivers → STT → App (as all-in-one)    │   Bearer token      │ cloudflared ──► sizeup (HubApp)  │
  │   _emit ─► outbox.sqlite ─► forwarder ───┼──── POST events ───►│   same App code applies events   │
  │   talking now / status ─────────────────┼──── POST state ────►│   monitor, CAD comms, 60 Control │
- │   job runner ◄── long poll ─────────────┼──── GET jobs ◄──────│   jobs: voice, switches, re-runs │
- │     Kokoro renders the dispatch voice ───┼──── POST result ───►│   SQLite ─► Litestream ─► S3     │
- └──────────────────────────────────────────┘                     └──────────────────────────────────┘
+ │   job runner ◄── long poll ─────────────┼──── GET jobs ◄──────│   jobs: switches, re-runs, voice │
+ │     Kokoro: the voice if Polly fails ────┼──── POST result ───►│   SQLite ─► Litestream ─► S3     │
+ └──────────────────────────────────────────┘                     │ dispatch voice ─► Amazon Polly   │
+                                                                  └──────────────────────────────────┘
 ```
 
 ## What flows
@@ -75,7 +77,7 @@ back as `POST /api/station/jobs/<id>`), handed out once, dropped if not picked u
 
 | job | from | the station | if the station is offline / slow |
 |---|---|---|---|
-| `tts` | a dispatch / preview / upgrade on the hub (`Cad._render_remote`) | renders it with `render_dispatch` and its Kokoro (`say` as its fallback), returns the WAV | at once (offline) or after 20 s: **text only**, the note says "Voice unavailable — station offline" (or "didn't answer in 20 s"); never a hung request |
+| `tts` | a dispatch / preview / upgrade on the hub when Polly failed (`Cad._render_hub` → `_render_remote`), or always with an engine other than `polly` | renders it with `render_dispatch` and its Kokoro (`say` as its fallback), returns the WAV | at once (offline) or after 20 s: **text only**, the note says why: "Voice unavailable — Polly: AccessDeniedException: …; station offline since 14:02: text only" (or "didn't answer in 20 s"); never a hung request |
 | `call` `set_mode`, `set_talkgroup`, `set_talkgroup_group` | the hub's SDR / talkgroup switches | runs it, returns its own refusal if any | the switch is refused with the reason ("station offline since 12:03") |
 | `call` `retranscribe` | "Re-run" on the hub | queues it; new text comes back as `retext` | refused: speech-to-text runs on the station |
 
@@ -131,6 +133,54 @@ keeps working for local use, with a banner on its `/cad`: the CAD of record is t
 * With `access_team` + `access_aud` set, the hub itself also checks every person's Access token
   (below): reaching the origin around Access gets a 401, not the CAD.
 * Transmit stays off on both (`NullTransmitter`): the hub has no radio at all.
+
+## The dispatch voice (Amazon Polly)
+
+> "voice unavailable... that should be server side not station local, only the transmission when
+> we get there should be station local" (user, 2026-10-08) — Amazon Polly, "with a male voice".
+
+The hub makes the dispatch voice itself with **Amazon Polly** (`[dispatch] tts_engine = "polly"`,
+`voice = "Matthew"` in `deploy/hub/config.hub.toml`): a dispatch, preview or upgrade no longer needs
+the station. `sizeup/polly.py` calls `SynthesizeSpeech` (`POST https://polly.<region>.amazonaws.com/v1/speech`,
+16 kHz 16-bit PCM) signed with SigV4 in the standard library (no boto3); `render_dispatch` puts the
+tones in front and reads it twice with the time out once, exactly as with Kokoro.
+
+* **Credentials:** the task role, from the ECS container credentials endpoint
+  (`AWS_CONTAINER_CREDENTIALS_RELATIVE_URI`), cached until 5 min before they expire;
+  `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` win when set (running a hub
+  elsewhere). **Region:** `[dispatch] polly_region`, else `AWS_REGION` (the task definition sets it), else
+  `us-east-1`. Timeouts: 3 s to connect, 10 s to answer.
+* **Permission:** the task role (`sizeup-hub-task`) needs `polly:SynthesizeSpeech`, nothing else:
+  run `sizeup-aws/11-polly.sh` once (an inline policy `polly`); it applies from the next task start.
+* **Voices** (US English, Settings → Dispatch → Voice lists them, men first): Matthew (generative,
+  neural, standard), Stephen (generative, neural), Gregory (neural), Joey (neural, standard); also
+  Joanna, Ruth, Danielle. A voice is tried on its best engine first; if Polly answers that the
+  engine (or the SSML) isn't supported for it — `EngineNotSupportedException` / `ValidationException`
+  — the next one is used, logged once and remembered (`GET /api/cad/tts/voices` → `polly_engine`).
+  Which voices have the generative engine in us-east-1 is Amazon's list and changes; the fallback
+  covers an entry here that is off.
+* **Speed:** `speed` (0.92) is said as SSML `<prosody rate="92%">`; an engine that rejects it says
+  the text at its own pace. Over 2900 characters (Polly bills and caps 3000 a request) the text is
+  split at sentence ends and the pieces joined.
+* **Cache:** the WAV is keyed by the words, tones, `polly`, the voice and its first engine
+  (`Matthew:generative`), speed and repeat, on disk and in `audio.sqlite` like the station's renders:
+  a preview and the dispatch right after share it, and nothing is rendered twice.
+* **When Polly fails** (no permission yet, network, Polly's own error), the hub asks the station
+  (`tts` job, its Kokoro with a man's voice, `am_michael`): the note says so, "Voice: Kokoro
+  am_michael (station: Polly: AccessDeniedException: …)". No station either: **text only**, "Voice
+  unavailable — Polly: AccessDeniedException: …; no station connected: text only". The next dispatch
+  tries Polly again.
+* **Preview:** Settings → Dispatch → Voice → *Preview* says "Engine 60, respond to 1 Main Street,
+  structure fire. Time out 14:32." through the same path (`POST /api/cad/settings/dispatch
+  {action: "voice_preview"}`).
+* Stations and all-in-one keep Kokoro (`tts_engine = "kokoro"`); `polly` works there too with AWS
+  credentials in the environment, falling back to macOS `say` like Kokoro does.
+
+**Seam for transmission (M2, not built):** keying a radio stays on the station. The hub already
+stores and serves the rendered WAV for every dispatch (`dispatch-audio/` + `audio.sqlite`, `GET
+/api/cad/dispatch/<id>.wav`); when transmit is turned on, the hub's transmitter will hand that same
+WAV to the station (a job, like `tts` in reverse) for it to key up and play. The voice is never
+re-made on the station for that. Until then transmit stays off (`NullTransmitter`).
 
 ## Who is signed in (the operator from Cloudflare Access)
 
@@ -346,7 +396,7 @@ Everything the hub keeps is SQLite under `SIZEUP_STATE_DIR`, so Litestream can r
 |---|---|
 | `cad.sqlite` | the CAD: events, units, run cards, dispatch log, settings, radio registry, communications log, phone pre-alerts |
 | `hub.sqlite` | the monitor: incidents, transmissions, pages (one row each, written only when changed), and the station events applied so far |
-| `audio.sqlite` | received clips (`storage.audio_keep_hours`, 12 h, and `audio_max_mb`, oldest first) and the dispatch audio the station rendered (kept with the dispatch log; unused previews a day) |
+| `audio.sqlite` | received clips (`storage.audio_keep_hours`, 12 h, and `audio_max_mb`, oldest first) and the dispatch audio (Polly's or the station's; kept with the dispatch log; unused previews a day) |
 
 The hub has no `captures/` and writes no JSON files. Dispatch WAVs are also cached in
 `dispatch-audio/` on the task's disk; after a redeploy they're served from `audio.sqlite`.
@@ -361,7 +411,7 @@ station). Build with `--build-arg SIZEUP_BUILD=$(git rev-parse --short HEAD)`.
 
 One task, desired count 1, ephemeral disk:
 
-* **hub** container (this image). Entrypoint `deploy/hub/entrypoint.sh`:
+* **hub** container (this image); its task role may call `polly:SynthesizeSpeech` (`11-polly.sh`). Entrypoint `deploy/hub/entrypoint.sh`:
   * `LITESTREAM_BUCKET` set: `litestream restore -if-db-not-exists -if-replica-exists` for each of
     the three files, `python -m sizeup --init-state` (creates them on a first start), then
     `exec litestream replicate -exec "python -m sizeup --config ..."` with `deploy/hub/litestream.yml`
@@ -388,5 +438,5 @@ namespace, a named volume for `/data`, no Litestream).
 (hub.sqlite, audio.sqlite), `access.py` (Cloudflare Access identity; the gate is in
 `sizeup/web/server.py`, the operator in `sizeup/cad/api.py` and `Settings.person`; the activity log in
 `sizeup/cad/activity.py`). Seams in `sizeup/app.py`: `_emit`, `_heard`, `_page_heard`, `_retext`,
-`make_app`; in `sizeup/cad/service.py`: `remote_voice`, `audio_blobs`, `cloud`. Tests:
-`tests/test_cloud.py`, `tests/test_stationmode.py`, `tests/test_access.py`, `tests/test_roles.py`, `tests/test_activity.py`.
+`make_app`; in `sizeup/cad/service.py`: `remote_voice`, `_render_hub`, `audio_blobs`, `cloud`. The voice:
+`sizeup/polly.py`. Tests: `tests/test_polly.py`, `tests/test_cloud.py`, `tests/test_stationmode.py`, `tests/test_access.py`, `tests/test_roles.py`, `tests/test_activity.py`.

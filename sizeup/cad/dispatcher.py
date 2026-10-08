@@ -19,8 +19,9 @@
                                  [hz, s] (two-tone sequential) or several groups (one per
                                  department paged), played in order with GROUP_GAP_S between;
                                  16 kHz mono 16-bit WAV, and which voice said it. The voice: the
-                                 Kokoro server (sizeup/tts.py) or, when it's down, errors or takes
-                                 over 10 s, macOS `say` with the fallback voice
+                                 Kokoro server (sizeup/tts.py) or Amazon Polly (sizeup/polly.py, the
+                                 hub's) or, when that's down, errors or takes over 10 s, macOS `say`
+                                 with the fallback voice
     render_audio(text, tones)    the same with `say` only (the WAV's path)
 
 The written text is what the timeline shows; speech() rewrites it the way a dispatcher says it
@@ -44,6 +45,7 @@ from typing import Callable
 
 import numpy as np
 
+from sizeup import polly
 from sizeup.cad import speech as spoken_words
 from sizeup.cad.store import TZ
 from sizeup.tts import TtsError, VoiceCfg, synthesize
@@ -377,12 +379,30 @@ def _write(path: Path, x: np.ndarray) -> None:
     os.replace(tmp, path)
 
 
+def voice_key(said: str, tones, voice: VoiceCfg, repeat: int) -> str:
+    """The cache key of the dispatch said by `voice` itself (not its fallback). Polly's includes the
+    engine it is tried on first ("Matthew:generative"), so another voice or engine is another file."""
+    if voice.engine == "kokoro":
+        return audio_key(said, tones, "kokoro", voice.voice, voice.speed, repeat)
+    if voice.engine == "polly":
+        engines = polly.VOICES.get(voice.voice, {}).get("engines", polly.ENGINE_ORDER)
+        return audio_key(said, tones, "polly", f"{voice.voice}:{engines[0]}", voice.speed, repeat)
+    return audio_key(said, tones, "say", voice.voice, voice.rate_wpm, repeat)
+
+
+def dispatch_key(text: str, tones, voice: VoiceCfg, repeat: int = 2, spoken: dict[str, str] | None = None) -> str:
+    """The file name (without .wav) render_dispatch writes for this dispatch said by `voice`."""
+    return voice_key(speech(text, spoken=spoken) + "\x00time-out-once", tone_groups(tones), voice, repeat)
+
+
 def render_dispatch(text: str, tones, out_dir: str | Path, voice: VoiceCfg, repeat: int = 2,
                     spoken: dict[str, str] | None = None,
-                    log: Callable[[str], None] | None = None) -> tuple[Path, str]:
+                    log: Callable[[str], None] | None = None, local_fallback: bool = True) -> tuple[Path, str]:
     """The dispatch as a WAV under out_dir (cached by content) and which voice said it ("Voice:
-    Kokoro af_heart", "Voice: Samantha (fallback)"). Engine kokoro falls back to `say` with
-    voice.fallback_voice when the server is down, errors or is slower than voice.timeout_s.
+    Kokoro af_heart", "Voice: Polly Matthew", "Voice: Samantha (fallback)"). Engines kokoro and
+    polly fall back to `say` with voice.fallback_voice when they fail (kokoro: down, errors or
+    slower than voice.timeout_s); local_fallback=False (the hub: no `say` there) raises
+    AudioUnavailable with the reason instead ("Polly: AccessDeniedException: ...").
     Raises AudioUnavailable (no voice at all)."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -391,18 +411,24 @@ def render_dispatch(text: str, tones, out_dir: str | Path, voice: VoiceCfg, repe
     key_said = said + "\x00time-out-once"          # (older files said the time out every reading)
     tones = tone_groups(tones)
     fallback = False
-    if voice.engine == "kokoro":
-        path = out_dir / f"{audio_key(key_said, tones, 'kokoro', voice.voice, voice.speed, repeat)}.wav"
+    if voice.engine in ("kokoro", "polly"):
+        path = out_dir / f"{voice_key(key_said, tones, voice, repeat)}.wav"
         if path.is_file():
             return path, voice.label()
         try:
-            say = lambda x: _peak(synthesize(x, voice.voice, voice.speed, voice.port, voice.timeout_s))
+            if voice.engine == "kokoro":
+                say = lambda x: _peak(synthesize(x, voice.voice, voice.speed, voice.port, voice.timeout_s))
+            else:
+                say = lambda x: _peak(polly.synthesize(x, voice.voice, voice.speed, voice.region, log))
             _write(path, assemble(say(body), tones, repeat, say(tail) if tail else None))
             return path, voice.label()
-        except TtsError as e:
+        except (TtsError, polly.PollyError) as e:
+            why = f"Polly: {e}" if voice.engine == "polly" else str(e)
+            if not local_fallback:
+                raise AudioUnavailable(why) from None
             fallback = True
             if log:
-                log(f"CAD: dispatch voice: {e}; using {voice.fallback_voice or 'say'} instead")
+                log(f"CAD: dispatch voice: {why}; using {voice.fallback_voice or 'say'} instead")
         say_voice = voice.fallback_voice
     else:
         say_voice = voice.voice
