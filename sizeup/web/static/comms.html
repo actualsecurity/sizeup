@@ -3,20 +3,23 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>sizeup Comms</title>
+<title>PCFD Comms</title>
+<link rel="icon" type="image/svg+xml" href="/static/brand/pcfd-mark.svg">
+<link rel="icon" type="image/png" sizes="32x32" href="/static/brand/pcfd-mark-32.png">
 <link rel="stylesheet" href="/static/style.css">
 <link rel="stylesheet" href="/static/cad.css">
 </head>
 <body class="cad comms">
 <header>
-  <span id="station" class="station">sizeup</span>
+  <a class="brand" href="/cad" title="Dispatch console"><img class="brand-mark" src="/static/brand/pcfd-mark.svg" alt="" width="28" height="28"><span class="brand-name">Port Chester FD</span></a>
   <span class="cad-title">Communications</span>
+  <span id="station" class="station"></span>
   <span id="conn" class="pill warn">Connecting</span>
   <span id="talking" class="talking-strip" hidden aria-live="polite"></span>
   <span class="spacer"></span>
   <span id="alerts"></span>
-  <a class="nav" href="/cad" title="Dispatch console">CAD</a>
-  <a class="nav" href="/monitor" title="Radio monitor">Monitor</a>
+  <a class="nav" href="/cad" title="Dispatch console" aria-label="CAD"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-dispatch"/></svg><span class="lbl">CAD</span></a>
+  <a class="nav" href="/monitor" title="Radio monitor" aria-label="Monitor"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-monitor"/></svg><span class="lbl">Monitor</span></a>
 </header>
 
 <main class="comms-main">
@@ -37,6 +40,7 @@
   <ol id="rows" class="list log comms-list" aria-live="off"></ol>
 </main>
 
+<script src="/static/icons.js"></script>
 <script src="/static/radio.js"></script>
 <script src="/static/comms.js"></script>
 </body>

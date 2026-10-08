@@ -11,8 +11,8 @@
 const $ = (sel) => document.querySelector(sel);
 const LOST_AFTER_MS = 6000;          // no push for this long: say the display is stale
 const RETURN_AFTER_MS = 120000;      // someone panned the map: go back to the incident/home after 2 min
-const SOURCE_COLORS = { "Fire/EMS 15": "#3fd0e0", "FG1": "#ff8a3d", "South 2": "#e8d84a" };
-const EXTRA_COLORS = ["#7ee07e", "#f27ad1", "#a3a9ff", "#ffcf7a", "#7fe3c8"];
+const SOURCE_COLORS = { "Fire/EMS 15": "#6AA6E8", "FG1": "#ff8a3d", "South 2": "#e8d84a" };
+const EXTRA_COLORS = ["#7ee07e", "#f27ad1", "#B8C0CA", "#ffcf7a", "#7fe3c8"];
 
 const ui = {
   scene: null, state: null, map: null, mapReady: false,
@@ -119,7 +119,7 @@ const hz = (v) => (v === null || v === undefined ? "?" : Number(v).toFixed(1));
 
 function catColor(cat) {
   const c = (ui.scene && ui.scene.categories) || {};
-  return c[cat] || c.unknown || "#9aa0b4";
+  return c[cat] || c.unknown || "#9AA3AD";
 }
 
 function sourceColor(name) {
@@ -137,7 +137,7 @@ function chip(text, color, cls = "") {
 
 function playButton(id, title, hasAudio = true) {
   if (hasAudio === false) player.missing.add(id);  // the server says there's no recording
-  const b = el("button", "play", "▶");
+  const b = Icon.play(el("button", "play"));
   b.dataset.play = id;
   b.title = title || "Play";
   paintPlay(b);
@@ -267,7 +267,7 @@ const player = { audio: null, id: null, missing: new Set() };
 function paintPlay(b) {
   const id = b.dataset.play;
   const playing = player.id === id, missing = player.missing.has(id);
-  setText(b, playing ? "■" : missing ? "–" : "▶");
+  Icon.play(b, playing ? "stop" : missing ? "none" : "play");
   b.classList.toggle("playing", playing);
   b.classList.toggle("missing", missing);
   if (missing) b.title = "No recording for this one";
@@ -524,7 +524,7 @@ async function setSdrMode(mode, serial) {
                                          signal: ctl.signal });
     if (!r.ok) ui.sdrError = ((await r.json().catch(() => ({}))).error) || `switch refused (${r.status})`;
   } catch (e) {
-    ui.sdrError = e.name === "AbortError" ? "no answer from sizeup, try again" : "couldn't reach sizeup";
+    ui.sdrError = e.name === "AbortError" ? "no answer from the server, try again" : "couldn't reach the server";
   } finally {
     clearTimeout(timer);
     ui.sdrBusy = false;
@@ -719,7 +719,7 @@ function renderDispatch(inc) {
 
 const GROUP_ORDER = ["Fire/EMS", "County Police", "DOT", "Hospital", "Operations", "Interop/Events", "OEM", ""];
 const GROUP_COLORS = { "Fire/EMS": "#ff7a59", "County Police": "#6aa8ff", "DOT": "#e8d84a", "Hospital": "#f27ad1",
-                       "Operations": "#7ee07e", "Interop/Events": "#a3a9ff", "OEM": "#ffcf7a", "": "#9aa0b4" };
+                       "Operations": "#7ee07e", "Interop/Events": "#B8C0CA", "OEM": "#ffcf7a", "": "#9AA3AD" };
 const PENDING_MS = 8000;
 const tgPending = new Map();   // tg -> { vals: {record?, main?}, until }
 
@@ -1209,7 +1209,7 @@ function renderPages() {
           const known = (p.departments || []).length ? toneText(t) : `${t.names.join(" / ")} ${toneText(t)}`;
           who.append(el("span", "dim tone", known));
         } else {
-          who.append(chip(`Unknown tones ${toneText(t)}`, "#ffb020", "unknown"));
+          who.append(chip(`Unknown tones ${toneText(t)}`, "#E0A030", "unknown"));
         }
       }
       if (!who.children.length) who.append(el("span", "dim", "No tones"));
@@ -1399,9 +1399,11 @@ function tick() {
 async function boot() {
   ui.scene = await (await fetch("/api/scene")).json();
   const sc = ui.scene;
-  const name = (sc.station && sc.station.name) || "sizeup";
-  document.title = `Monitor ${name}`;
-  setText($("#station"), name);
+  // The header says "Port Chester FD"; the configured station name only when it says more.
+  const name = (sc.station && sc.station.name) || "";
+  const extra = name && name !== "Port Chester FD" ? name : "";
+  document.title = extra ? `PCFD Monitor · ${extra}` : "PCFD Monitor";
+  setText($("#station"), extra);
   initMap();
   ui.live = liveState("/api/stream", "/api/state", onState);
   tick();

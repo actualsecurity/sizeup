@@ -1,0 +1,92 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 660" width="560" height="660" role="img" aria-labelledby="t">
+  <title id="t">Port Chester Fire Department patch</title>
+  <!-- Redrawn from the department patch: black shield, red border, white Maltese cross, the schooner. -->
+  <defs>
+    <path id="shield" d="M84 36 Q280 18 476 36 Q526 38 526 86 V378 C526 500 430 580 300 626 Q280 633 260 626 C130 580 34 500 34 378 V86 Q34 38 84 36 Z"/>
+    <path id="arm" d="M0 0 L-30 -80 Q-44 -140 -104 -186 L0 -152 L104 -186 Q44 -140 30 -80 Z"/>
+    <clipPath id="scene"><circle r="76"/></clipPath>
+  </defs>
+
+  <!-- shield: thin black edge, thick red border, black field -->
+  <use href="#shield" fill="#000" stroke="#000" stroke-width="46" stroke-linejoin="round"/>
+  <use href="#shield" fill="#0A0A0A" stroke="#C8102E" stroke-width="30" stroke-linejoin="round"/>
+
+  <g fill="#fff" font-family="'Helvetica Neue', Helvetica, Arial, 'Segoe UI', Roboto, 'Liberation Sans', sans-serif"
+     font-weight="800" text-anchor="middle">
+    <text x="280" y="106" font-size="48" textLength="380" lengthAdjust="spacingAndGlyphs">PORT CHESTER</text>
+    <text x="280" y="566" font-size="40" textLength="214" lengthAdjust="spacingAndGlyphs">FIRE DEPT.</text>
+  </g>
+
+  <g transform="translate(280 318)">
+    <!-- the Maltese cross: four flared, notched arms, white with a red outline -->
+    <g fill="#fff" stroke="#C8102E" stroke-width="10" stroke-linejoin="round" paint-order="stroke">
+      <use href="#arm"/>
+      <use href="#arm" transform="rotate(90)"/>
+      <use href="#arm" transform="rotate(180)"/>
+      <use href="#arm" transform="rotate(270)"/>
+    </g>
+    <g fill="#C8102E" font-family="'Helvetica Neue', Helvetica, Arial, 'Segoe UI', Roboto, 'Liberation Sans', sans-serif"
+       font-weight="800" text-anchor="middle">
+      <text y="-124" font-size="26" textLength="84" lengthAdjust="spacingAndGlyphs">APRIL</text>
+      <text y="-92" font-size="26">23</text>
+      <text x="-128" y="11" font-size="32">N.</text>
+      <text x="128" y="11" font-size="32">Y.</text>
+      <text y="142" font-size="28" textLength="66" lengthAdjust="spacingAndGlyphs">1823</text>
+    </g>
+
+    <!-- the medallion: a schooner on the water -->
+    <g clip-path="url(#scene)">
+     <g transform="scale(1.06)">
+      <rect x="-80" y="-80" width="160" height="160" fill="#A7D2EE"/>
+      <!-- shoreline and buildings at the right -->
+      <path d="M18 17 Q32 9 48 11 Q62 8 80 6 V20 H18 Z" fill="#6E8460"/>
+      <g fill="#E4DCCB">
+        <rect x="38" y="2" width="7" height="12"/>
+        <rect x="47" y="-2" width="6" height="15"/>
+        <rect x="56" y="3" width="9" height="10"/>
+        <rect x="67" y="-4" width="5" height="16"/>
+      </g>
+      <g fill="#9A4E3C">
+        <path d="M37.5 2 L41.5 -2 L45.5 2 Z"/>
+        <path d="M55.5 3 L60.5 -1 L65.5 3 Z"/>
+      </g>
+      <!-- water -->
+      <rect x="-80" y="16" width="160" height="70" fill="#3F80C2"/>
+      <path d="M-80 34 Q-70 30 -60 34 T-40 34 T-20 34 T0 34 T20 34 T40 34 T60 34 T80 34 V80 H-80 Z" fill="#2D67A6"/>
+      <path d="M-80 52 Q-70 48 -60 52 T-40 52 T-20 52 T0 52 T20 52 T40 52 T60 52 T80 52 V80 H-80 Z" fill="#1F4E86"/>
+      <!-- the schooner, bow to the left -->
+      <g stroke-linejoin="round" transform="translate(4 0)">
+        <path d="M-56 16 L-75 9" stroke="#2A1E14" stroke-width="2"/>
+        <g stroke="#2A1E14" stroke-width="2.4" stroke-linecap="round">
+          <path d="M-26 17 V-50"/>
+          <path d="M-2 17 V-58"/>
+          <path d="M22 17 V-48"/>
+        </g>
+        <!-- pennants -->
+        <g fill="#C8102E">
+          <path d="M-26 -51 L-15 -48.5 L-26 -46 Z"/>
+          <path d="M-2 -59 L9 -56.5 L-2 -54 Z"/>
+          <path d="M22 -49 L33 -46.5 L22 -44 Z"/>
+        </g>
+        <!-- gaff sails and topsails, aft of each mast -->
+        <g fill="#EDE2C4" stroke="#BFB18E" stroke-width="0.8">
+          <path d="M-24.5 -36 L-6 -44 L-4 13 L-24.5 13 Z"/>
+          <path d="M-0.5 -44 L19 -52 L20 13 L-0.5 13 Z"/>
+          <path d="M23.5 -34 L42 -42 L44 13 L23.5 13 Z"/>
+          <path d="M-24.5 -47 L-24.5 -38 L-8 -45 Z"/>
+          <path d="M-0.5 -55 L-0.5 -46 L17 -53 Z"/>
+        </g>
+        <!-- headsails, forward of the foremast -->
+        <g fill="#F7F0DE" stroke="#BFB18E" stroke-width="0.8">
+          <path d="M-27.5 -46 L-72 9 L-36 13 Z"/>
+          <path d="M-27.5 -28 L-52 13 L-29 14 Z"/>
+        </g>
+        <!-- hull -->
+        <path d="M-63 11 Q-20 15.5 47 13.5 L45.5 22 Q40 25.5 30 26 L-40 26 Q-55 21 -63 11 Z" fill="#161616"/>
+        <path d="M-60 13.4 Q-20 17.6 46.6 15.8" fill="none" stroke="#E9DFC6" stroke-width="1.5"/>
+      </g>
+     </g>
+    </g>
+    <circle r="80" fill="none" stroke="#C8102E" stroke-width="8"/>
+  </g>
+</svg>

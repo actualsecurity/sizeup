@@ -348,7 +348,7 @@ function sItemRow(sec, x, i, n) {
       sColor(x.fg || "#FFFFFF", (v) => edit({ fg: v }, "text color changed"), "Text color"),
       sSelect(S_ROLES, x.role || "", (v) => edit({ role: v }, "meaning changed"), "What it does"));
     const c = el("span", "chip st s-sample", x.name);
-    c.style.setProperty("--c", x.bg || "#9aa0b4");
+    c.style.setProperty("--c", x.bg || "#9AA3AD");
     li.append(c);
     const flag = x.role === "oos" ? "unavailable" : x.role === "free" ? "available" : "committed";
     li.append(el("span", `chip s-flag ${flag}`, flag));
@@ -1128,7 +1128,18 @@ function sSystem(panel) {
   sel.classList.add("ro-ok");
   const audit = el("div", "tscroll");
   audit.id = "s-audit";
+  // the department, with its patch (static/brand)
+  const patch = el("img", "s-patch");
+  patch.src = "/static/brand/pcfd-patch.svg";
+  patch.alt = "Port Chester Fire Department patch";
+  patch.width = 68;
+  patch.height = 80;
+  const dept = el("div", "s-dept-text");
+  dept.append(el("b", "", "Port Chester Fire Department"), el("div", "dim small", "Port Chester, N.Y. · April 23, 1823"));
+  const about = sCard(patch, dept);
+  about.classList.add("s-dept");
   panel.replaceChildren(...sHead("System"),
+    about,
     sCard(sCardHead("Records"), recs, counts),
     sCard(sCardHead("Data file"), file),
     backup,

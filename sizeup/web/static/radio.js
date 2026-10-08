@@ -184,7 +184,8 @@ window.Radio = (() => {
   function renderButton() {
     if (!st.btn) return;
     const a = st.alerts;
-    st.btn.textContent = a.on ? (a.chime && !st.chimeOk ? "Alerts: tap for sound" : "Alerts on") : "Alerts";
+    st.btn.replaceChildren(window.Icon ? Icon("bell") : "",
+      a.on ? (a.chime && !st.chimeOk ? "Alerts: tap for sound" : "Alerts on") : "Alerts");
     st.btn.classList.toggle("active", a.on);
     st.btn.title = a.on ? `Talk alerts: ${(a.units || ["PCFD engines and rescues"]).length > 6 ? "chosen units"
       : (a.units || ["PCFD engines and rescues"]).join(", ")}${a.chime ? ", chime" : ""}`
@@ -237,7 +238,8 @@ window.Radio = (() => {
     const p = st.panel, a = st.alerts;
     const head = el("div", "ap-head");
     head.append(el("b", "", "Talk alerts"), el("span", "spacer"));
-    const x = el("button", "tg-close", "✕");
+    const x = el("button", "tg-close");
+    x.append(window.Icon ? Icon("x") : "✕");
     x.type = "button";
     x.setAttribute("aria-label", "Close");
     x.addEventListener("click", () => { p.hidden = true; });

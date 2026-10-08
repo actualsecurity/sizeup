@@ -25,7 +25,7 @@ window.CadMap = (() => {
   const STATION_R = 34, INC_R = 30, RING_GAP = 24, CHIP_W = 48;   // px: the fan-out around an anchor
   const FAR_ZOOM = 13.6;               // below this: smaller chips, tighter rings
   const FOCUS_MAX_ZOOM = 16.3;
-  const LINE = "#ffb020", HOME_LINE = "#c3cbff";      // to a call | a returning rig's way home (thin)
+  const LINE = "#E0A030", HOME_LINE = "#AEB6C0";      // to a call | a returning rig's way home (thin)
   const LOOK_NAMES = { available: "available", oos: "out of service", dispatched: "dispatched",
                        responding: "responding", onscene: "on location" };
 
@@ -204,7 +204,7 @@ window.CadMap = (() => {
         const keep = [...e.classList].filter((c) => c.startsWith("maplibregl-")).join(" ");   // the marker's own
         e.className = `${keep} cm-rig look-${m.look} at-${m.place}` + (m.ring ? " outer" : "") + (talk ? ` ${talk}` : "")
           + (this.focus && m.incident_id && !onFocus ? " other" : "") + (onFocus ? " mine" : "");
-        e.style.setProperty("--c", st.bg || "#9aa0b4");
+        e.style.setProperty("--c", st.bg || "#9AA3AD");
         e.replaceChildren(h("span", "n", m.unit));
         if (m.tag) e.append(h("span", "tag", m.tag));
         e.title = [m.unit, st.name, m.place === "position" ? "live position" : "",
@@ -361,17 +361,19 @@ window.CadMap = (() => {
       this.note = h("div", "cm-note");
       this.note.hidden = true;
       const ctrls = h("div", "cm-ctrls");
-      const btn = (text, title, fn) => {
-        const b = h("button", "cm-btn", text);
+      const btn = (text, title, fn, icon) => {
+        const b = h("button", "cm-btn");
+        if (icon && window.Icon) b.append(Icon(icon));
+        b.append(text);
         b.type = "button";
         b.title = title;
         b.addEventListener("click", (e) => { e.stopPropagation(); fn(); });
         ctrls.append(b);
         return b;
       };
-      btn("Recenter", "Back to the call and its rigs", () => { this.userMoved = false; this.fit(true); });
-      if (opts.onExpand) btn("Expand", "Large map (Esc closes)", opts.onExpand);
-      if (opts.onClose) btn("Close", "Esc", opts.onClose);
+      btn("Recenter", "Back to the call and its rigs", () => { this.userMoved = false; this.fit(true); }, "locate");
+      if (opts.onExpand) btn("Expand", "Large map (Esc closes)", opts.onExpand, "expand");
+      if (opts.onClose) btn("Close", "Esc", opts.onClose, "x");
       host.append(this.canvas, ctrls, this.note);
       const sc = opts.scene;
       this.map = new maplibregl.Map({
@@ -505,7 +507,7 @@ window.CadMap = (() => {
 
   function cardFill(li, o) {
     const live = liveFor(o);
-    const color = typeColor(o.type) || "#9aa0b4";
+    const color = typeColor(o.type) || "#9AA3AD";
     li.className = `ov-card ${o.status}` + (live.length ? " live" : "");
     li.style.setProperty("--c", color);
     const head = el("div", "ov-h");

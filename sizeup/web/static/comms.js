@@ -80,7 +80,7 @@ function play(id, b) {
   if (c.playing === id) { c.player.pause(); c.playing = null; paint(); return; }
   c.player.src = `/api/audio/${encodeURIComponent(id)}.wav`;
   c.playing = id;
-  c.player.play().catch(() => { c.playing = null; if (b) { b.textContent = "–"; b.title = "No recording (kept 12 h)"; } paint(); });
+  c.player.play().catch(() => { c.playing = null; if (b) { Icon.play(b, "none"); b.title = "No recording (kept 12 h)"; } paint(); });
   paint();
 }
 c.player.addEventListener("ended", () => { c.playing = null; paint(); });
@@ -88,7 +88,7 @@ function paint() {
   for (const b of document.querySelectorAll("[data-play]")) {
     const on = b.dataset.play === c.playing;
     b.classList.toggle("playing", on);
-    if (b.textContent !== "–") b.textContent = on ? "■" : "▶";
+    if (b.dataset.icon !== "none") Icon.play(b, on ? "stop" : "play");
   }
 }
 
@@ -96,11 +96,11 @@ function row(t) {
   const li = el("li", t.kind === "note" ? "rt note" : "rt");
   const meta = el("div", "meta");
   if (t.kind === "radio") {
-    const b = el("button", "play", "▶");
+    const b = Icon.play(el("button", "play"));
     b.dataset.play = t.id;
     b.disabled = !t.has_audio;
     b.title = t.has_audio ? "Play" : "Recording expired (12 h)";
-    if (!t.has_audio) b.textContent = "–";
+    if (!t.has_audio) Icon.play(b, "none");
     b.addEventListener("click", () => play(t.id, b));
     const rr = el("button", "rerun", "↻");
     rr.title = "Re-transcribe";
@@ -191,9 +191,10 @@ $("#f-clear").addEventListener("click", () => {
 $("#filters").addEventListener("submit", (e) => e.preventDefault());
 Radio.mountAlerts($("#alerts"));
 fetch("/api/scene").then((r) => r.json()).then((s) => {
-  const name = (s.station && s.station.name) || "sizeup";
-  $("#station").textContent = name;
-  document.title = `Comms ${name}`;
+  const name = (s.station && s.station.name) || "";             // the configured station name when it says more
+  const extra = name && name !== "Port Chester FD" ? name : "";
+  $("#station").textContent = extra;
+  document.title = extra ? `PCFD Comms · ${extra}` : "PCFD Comms";
 }).catch(() => {});
 fromUrl();
 poll();
