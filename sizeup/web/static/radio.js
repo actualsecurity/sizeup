@@ -135,26 +135,14 @@ window.Radio = (() => {
     st.chime.play().then(() => { st.chimeOk = true; }).catch(() => { st.chimeOk = false; renderButton(); });
   }
 
-  function toast(text, sub) {
-    if (!st.toasts) {
-      st.toasts = el("div", "toasts");
-      st.toasts.setAttribute("role", "status");
-      st.toasts.setAttribute("aria-live", "polite");
-      document.body.append(st.toasts);
-    }
-    const t = el("div", "toast");
-    t.append(el("b", "", text));
-    if (sub) t.append(el("span", "dim", sub));
-    t.addEventListener("click", () => t.remove());
-    st.toasts.prepend(t);
-    while (st.toasts.children.length > 4) st.toasts.lastChild.remove();
-    setTimeout(() => t.remove(), TOAST_MS);
+  function toast(text, sub) {          // ui.js's toast, held longer: a unit keyed up
+    UI.toast(text, "ok", sub, TOAST_MS);
   }
 
   // The phone pre-alert (prealert.js): a toast, and the chime when it is on, unless turned off here.
   function prealert(text, sub) {
     if (!st.alerts.prealert) return;
-    toast(text, sub);
+    UI.toast(text, "alert", sub, TOAST_MS);
     ring();
   }
 
@@ -215,13 +203,23 @@ window.Radio = (() => {
     box.replaceChildren(st.btn);
     renderButton();
     document.addEventListener("click", (ev) => {
-      if (st.panel && !st.panel.hidden && !st.panel.contains(ev.target) && ev.target !== st.btn) st.panel.hidden = true;
+      if (st.panel && !st.panel.hidden && !st.panel.contains(ev.target) && ev.target !== st.btn) hidePanel();
     });
-    document.addEventListener("keydown", (ev) => { if (ev.key === "Escape" && st.panel) st.panel.hidden = true; });
+    document.addEventListener("keydown", (ev) => {         // Esc: closed, and the focus back on the button
+      if (ev.key !== "Escape" || !st.panel || st.panel.hidden) return;
+      const inside = st.panel.contains(document.activeElement);
+      hidePanel();
+      if (inside) st.btn.focus();
+    });
   }
 
+  function hidePanel() {
+    st.panel.hidden = true;
+    st.btn.setAttribute("aria-expanded", "false");
+  }
   async function togglePanel() {
-    if (st.panel && !st.panel.hidden) { st.panel.hidden = true; return; }
+    if (st.panel && !st.panel.hidden) { hidePanel(); return; }
+    st.btn.setAttribute("aria-expanded", "true");
     if (!st.panel) {
       st.panel = el("div", "alerts-panel");
       st.panel.setAttribute("role", "dialog");
@@ -229,9 +227,11 @@ window.Radio = (() => {
       document.body.append(st.panel);
     }
     st.panel.hidden = false;
-    st.panel.replaceChildren(el("div", "dim", "Loading"));
+    st.panel.replaceChildren(el("div", "loading", "Loading"));
     await loadRigs();
     renderPanel();
+    const first = st.panel.querySelector("input, button");
+    if (first) first.focus();
   }
 
   function check(text, on, onChange, cls = "") {
@@ -248,11 +248,12 @@ window.Radio = (() => {
     const p = st.panel, a = st.alerts;
     const head = el("div", "ap-head");
     head.append(el("b", "", "Talk alerts"), el("span", "spacer"));
-    const x = el("button", "tg-close");
+    const x = el("button", "icon quiet sm");
     x.append(window.Icon ? Icon("x") : "✕");
     x.type = "button";
     x.setAttribute("aria-label", "Close");
-    x.addEventListener("click", () => { p.hidden = true; });
+    x.title = "Close (Esc)";
+    x.addEventListener("click", () => { hidePanel(); st.btn.focus(); });
     head.append(x);
     const opts = el("div", "ap-opts");
     opts.append(check("Alerts on", a.on, (v) => { a.on = v; saveAlerts(); renderButton(); renderPanel(); }),

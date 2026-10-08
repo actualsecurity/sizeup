@@ -49,13 +49,13 @@ window.CadFeed = (() => {
     box.className = "feed";
     box.setAttribute("aria-label", "60 Control feed");
     const head = el("div", "feed-head");
-    const tog = el("button", "feed-tog");
+    const tog = el("button", "feed-tog sm icon quiet");
     tog.type = "button";
     tog.addEventListener("click", () => { st.collapsed = !st.collapsed; save(KEY, st.collapsed ? "1" : "0"); st.sig = ""; render(); });
     const title = el("b", "feed-title");
     const talk = el("span", "feed-talk");
     talk.hidden = true;
-    const more = el("a", "feed-more", "More");
+    const more = el("a", "nav sm feed-more", "More");
     more.title = "All on this talkgroup";
     head.append(tog, title, talk, el("span", "spacer"), more);
     const ticker = el("div", "feed-ticker");
@@ -180,7 +180,7 @@ window.CadFeed = (() => {
       await st.deps.api("POST", `/api/cad/incident/${inc.id}/link`, { traffic_id: t.id, operator: st.deps.operator() });
     } catch (err) {
       b.title = err.message;
-      alert(`Add failed: ${err.message}`);
+      UI.toast(`Add failed: ${err.message}`, "err");
     } finally {
       st.busy.delete(t.id);
       st.sig = "";

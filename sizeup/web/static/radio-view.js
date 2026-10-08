@@ -207,7 +207,7 @@ window.RadioView = (() => {
     try {
       await api("POST", `/api/cad/incident/${iid}/link`, { traffic_id: t.id, operator: operator() });
     } catch (err) {
-      alert(`Add failed: ${err.message}`);
+      UI.toast(`Add failed: ${err.message}`, "err");
     } finally {
       st.linking.delete(t.id);
       st.rev = "";

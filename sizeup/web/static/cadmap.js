@@ -362,7 +362,7 @@ window.CadMap = (() => {
       this.note.hidden = true;
       const ctrls = h("div", "cm-ctrls");
       const btn = (text, title, fn, icon) => {
-        const b = h("button", "cm-btn");
+        const b = h("button", "cm-btn sm");
         if (icon && window.Icon) b.append(Icon(icon));
         b.append(text);
         b.type = "button";
@@ -476,13 +476,12 @@ window.CadMap = (() => {
       panel.setAttribute("aria-modal", "true");
       panel.setAttribute("aria-label", "Map");
       ov.append(panel);
-      ov.addEventListener("click", (e) => { if (e.target === ov) closeBig(); });
       document.body.append(ov);
       ov.hidden = false;
       views.big = new RigMap(panel, { scene: cad.scene, pins: true, unset: true, editable: () => canDo("admin"), operator,
                                       onPick: (id) => { closeBig(); selectIncident(id); }, onClose: closeBig });
     }
-    ov.hidden = false;
+    UI.dialog.open(ov, { onClose: () => { views.bigOpen = false; } });   // focus in, Esc / the scrim close (ui.js)
     views.bigOpen = true;
     const inc = cad.mode === "view" ? selected() : null;
     views.big.size = "";
@@ -491,7 +490,7 @@ window.CadMap = (() => {
   }
   function closeBig() {
     const ov = $("#cm-overlay");
-    if (ov) ov.hidden = true;
+    if (ov) UI.dialog.close(ov);
     views.bigOpen = false;
   }
 
@@ -508,7 +507,7 @@ window.CadMap = (() => {
   function cardFill(li, o) {
     const live = liveFor(o);
     const color = typeColor(o.type) || "#9AA3AD";
-    li.className = `ov-card ${o.status}` + (live.length ? " live" : "");
+    li.className = `ov-card item ${o.status}` + (live.length ? " live" : "");
     li.style.setProperty("--c", color);
     const head = el("div", "ov-h");
     const es = eventStatus(o);
@@ -593,7 +592,7 @@ window.CadMap = (() => {
       key: (o) => String(o.id),
       sig: (o) => JSON.stringify([o, liveFor(o).map((e) => [e.key, e.rig]), o.units.map((u) => talkState(u.name)), cad.listSig.length]),
       make: () => {
-        const li = el("li", "ov-card");
+        const li = el("li", "ov-card item");
         li.tabIndex = 0;
         li.setAttribute("role", "button");
         li.addEventListener("click", () => selectIncident(Number(li.dataset.key)));
@@ -606,7 +605,7 @@ window.CadMap = (() => {
     syncList($("#ov-nonemerg"), ne, {
       key: (o) => String(o.id), sig: (o) => JSON.stringify([o.number, o.type, o.subtype, o.address, o.units.map((u) => u.name)]),
       make: () => {
-        const li = el("li", "ov-ne");
+        const li = el("li", "ov-ne item");
         li.tabIndex = 0;
         li.addEventListener("click", () => selectIncident(Number(li.dataset.key)));
         li.addEventListener("keydown", (e) => { if (e.key === "Enter") selectIncident(Number(li.dataset.key)); });
@@ -646,7 +645,6 @@ window.CadMap = (() => {
       goOverview();
     });
     $("#d-back").addEventListener("click", goOverview);
-    window.addEventListener("keydown", (e) => { if (e.key === "Escape" && views.bigOpen) closeBig(); });
   }
 
   return { RigLayer, RigMap, detail, overview, goOverview, openBig, closeBig };

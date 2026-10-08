@@ -79,7 +79,7 @@ window.PreAlert = (() => {
       try {
         await deps.api("POST", `/api/cad/prealert/${p.id}/dismiss`, { operator: deps.operator() });
       } catch (err) {
-        alert(`Dismiss failed: ${err.message}`);
+        UI.toast(`Dismiss failed: ${err.message}`, "err");
       } finally {
         st.busy.delete(p.id);
       }

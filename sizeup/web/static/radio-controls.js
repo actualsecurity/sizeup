@@ -36,9 +36,9 @@ window.RadioControls = (() => {
   // ---- the section ----------------------------------------------------------------------------------
 
   function card(title, help, ...body) {
-    const c = el("div", "s-card");
-    const h = el("div", "s-card-head");
-    h.append(el("h3", "", title));
+    const c = el("div", "card s-card");
+    const h = el("div", "card-head");
+    h.append(el("h2", "", title));
     if (help) h.append(Help.button(help));
     c.append(h, ...body);
     return c;
@@ -255,7 +255,7 @@ window.RadioControls = (() => {
       const r = await fetch(`/api/incident/${encodeURIComponent(id)}/close`, { method: "POST" });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
     } catch (err) {
-      alert(`Close failed: ${err.message}`);
+      UI.toast(`Close failed: ${err.message}`, "err");
     }
     poll();
   }
@@ -272,7 +272,8 @@ window.RadioControls = (() => {
   async function rerunAll() {
     if (ro()) return;
     const hours = (st.state && st.state.storage && st.state.storage.audio_hours) || 12;
-    if (!confirm(`Re-transcribe every recording on disk (last ${hours} h)? Live traffic goes first.`)) return;
+    if (!(await UI.confirm(`Re-transcribe every recording on disk (last ${hours} h)? Live traffic goes first.`,
+      { ok: "Re-run all", danger: false }))) return;
     st.rerunBusy = true;
     st.rerunMsg = "";
     renderRerun();
@@ -431,7 +432,7 @@ window.RadioControls = (() => {
   }
 
   function engineSelect() {
-    const sel = el("select", "tg-eng");
+    const sel = el("select", "tg-eng sm");
     for (const [v, label] of ENGINES) sel.append(new Option(label, v));
     sel.setAttribute("aria-label", "Speech-to-text engine");
     return sel;

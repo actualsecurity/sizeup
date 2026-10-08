@@ -8,7 +8,6 @@
 if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentElement.classList.add("board");</script>
 <link rel="icon" type="image/svg+xml" href="/static/brand/pcfd-mark.svg">
 <link rel="icon" type="image/png" sizes="32x32" href="/static/brand/pcfd-mark-32.png">
-<link rel="stylesheet" href="/static/vendor/maplibre-gl.css">
 <link rel="stylesheet" href="/static/style.css">
 <link rel="stylesheet" href="/static/cad.css">
 <link rel="stylesheet" href="/static/settings.css">
@@ -45,13 +44,13 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
   <a class="nav board-only" href="/cad" title="Dispatch console"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-dispatch"/></svg><span class="lbl">CAD</span></a>
   <span id="clock" class="clock"><span id="clock-date" class="dim"></span> <b id="clock-local"></b> <span id="clock-z" class="dim"></span></span>
 </header>
-<div id="cloud-banner" class="banner cloud-banner" hidden></div>
-<div id="role-banner" class="banner role-banner" role="status" hidden></div>
+<div id="cloud-banner" class="notice info cloud-banner" hidden></div>
+<div id="role-banner" class="notice role-banner" role="status" hidden></div>
 
 <main class="cad-main">
   <!-- queue: from 60 Control, pending, active, non-emergency, recently closed -->
   <aside class="queue">
-    <button id="new-incident" class="primary wide"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-plus"/></svg>New incident</button>
+    <button id="new-incident" class="primary wide lg" title="New incident (N)"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-plus"/></svg>New incident</button>
     <section>
       <div class="q-head"><h2 title="Pages to accept or dismiss">60 Control</h2><span id="tapout" class="tapout" hidden></span></div>
       <ol id="q-prealert" class="pa-list" hidden aria-live="assertive" aria-label="Phone pre-alerts"></ol>
@@ -83,8 +82,8 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
 
     <!-- Overview (cadmap.js): the landing view with no incident open; every open call at once -->
     <div id="overview" class="overview" hidden>
-      <div class="ov-head">
-        <h2>Overview</h2>
+      <div class="ov-head view-head">
+        <h2 class="view-title">Overview</h2>
         <span id="ov-counts" class="dim small"></span>
         <span class="spacer"></span>
         <div id="ov-talk" class="ov-talk" aria-live="polite"></div>
@@ -103,14 +102,14 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
     <!-- Radio (radio-view.js, /cad#radio?unit=&channel=&event=&q=...): every transmission and unit note, Main
          channels up front, the other talkgroups folded. It replaced the Comms page (/comms redirects here). -->
     <div id="radio-view" class="radio-view" hidden>
-      <div class="rv-head">
-        <h2>Radio</h2>
+      <div class="rv-head view-head">
+        <h2 class="view-title">Radio</h2>
         <span id="rv-count" class="dim small"></span>
         <span class="spacer"></span>
         <button id="rv-live" class="live-btn" type="button">Live</button>
       </div>
       <form id="rv-filters" class="rv-filters" autocomplete="off" role="search">
-        <input id="rv-q" type="search" placeholder="Search words" aria-label="Search words" spellcheck="false" maxlength="60">
+        <input id="rv-q" type="search" placeholder="Search words  (/)" aria-label="Search words" spellcheck="false" maxlength="60">
         <select id="rv-unit" aria-label="Unit"><option value="">Any unit</option></select>
         <select id="rv-channel" aria-label="Channel or talkgroup"><option value="">Any channel</option></select>
         <select id="rv-event" aria-label="Incident"><option value="">Any incident</option></select>
@@ -137,26 +136,26 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
     <form id="new-form" class="card form" hidden autocomplete="off">
       <div class="card-head"><h2>New incident</h2><span class="spacer"></span>
         <button id="new-cancel" type="button">Cancel</button></div>
-      <label>Type <select id="f-type"></select></label>
-      <label>Subtype <select id="f-subtype"></select></label>
-      <label class="span2">Location
+      <label class="field">Type <select id="f-type"></select></label>
+      <label class="field">Subtype <select id="f-subtype"></select></label>
+      <label class="field span2">Location
         <input id="f-address" type="text" maxlength="200" placeholder="Address, place or intersection" spellcheck="false">
       </label>
       <div id="f-geo" class="geo span2"></div>
       <ol id="f-sugg" class="sugg span2" hidden></ol>
-      <label class="span2">Cross street <input id="f-cross" type="text" maxlength="200" spellcheck="false"></label>
-      <label>Caller name <input id="f-name" type="text" maxlength="120" spellcheck="false"></label>
-      <label>Phone <input id="f-phone" type="tel" maxlength="40"></label>
-      <label class="span2">Caller address <input id="f-caddr" type="text" maxlength="200" spellcheck="false"></label>
-      <label>Received via <select id="f-via"></select></label>
+      <label class="field span2">Cross street <input id="f-cross" type="text" maxlength="200" spellcheck="false"></label>
+      <label class="field">Caller name <input id="f-name" type="text" maxlength="120" spellcheck="false"></label>
+      <label class="field">Phone <input id="f-phone" type="tel" maxlength="40"></label>
+      <label class="field span2">Caller address <input id="f-caddr" type="text" maxlength="200" spellcheck="false"></label>
+      <label class="field">Received via <select id="f-via"></select></label>
       <label class="check" title="Off: non-emergency, logged until closed, no dispatch. Set from the type.">
         <input id="f-emergency" type="checkbox" checked> <span>Emergency</span>
         <span id="f-class" class="dim small"></span>
       </label>
-      <label id="f-until-w" class="span2" hidden title="Optional: closures, hydrants out of service">Until
+      <label id="f-until-w" class="field span2" hidden title="Optional: closures, hydrants out of service">Until
         <input id="f-until" type="datetime-local">
       </label>
-      <label class="span2">Remarks <textarea id="f-remarks" rows="3" maxlength="4000"></textarea></label>
+      <label class="field span2">Remarks <textarea id="f-remarks" rows="3" maxlength="4000"></textarea></label>
       <div class="span2 row"><span id="f-error" class="error"></span><span class="spacer"></span>
         <button id="new-create" type="submit" class="primary">Create</button></div>
     </form>
@@ -164,7 +163,7 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
     <div id="d-body" hidden>
       <div id="d-card" class="card inc">
         <div class="card-head">
-          <button id="d-back" type="button" class="back"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-back"/></svg>Overview</button>
+          <button id="d-back" type="button" class="sm" title="Overview (G O)"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-back"/></svg>Overview</button>
           <span id="d-number" class="number"></span>
           <span id="d-status" class="st-badge"></span>
           <span id="d-class" class="st-badge"></span>
@@ -177,7 +176,7 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
           <button id="d-close" hidden>Close</button>
         </div>
 
-        <div id="d-queued" class="warnbox" hidden>
+        <div id="d-queued" class="warnbox notice" hidden>
           <div>60 Control page: set type, then Accept or Dismiss</div>
           <div id="d-qnote" class="qnote"></div>
           <div class="row">
@@ -218,19 +217,19 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
         </div>
 
         <form id="edit-form" class="form" hidden autocomplete="off">
-          <label>Type <select id="e-type"></select></label>
-          <label>Subtype <select id="e-subtype"></select></label>
-          <label class="span2">Location <input id="e-address" type="text" maxlength="200" spellcheck="false"></label>
+          <label class="field">Type <select id="e-type"></select></label>
+          <label class="field">Subtype <select id="e-subtype"></select></label>
+          <label class="field span2">Location <input id="e-address" type="text" maxlength="200" spellcheck="false"></label>
           <div id="e-geo" class="geo span2"></div>
           <ol id="e-sugg" class="sugg span2" hidden></ol>
-          <label class="span2">Cross street <input id="e-cross" type="text" maxlength="200" spellcheck="false"></label>
-          <label>Caller name <input id="e-name" type="text" maxlength="120" spellcheck="false"></label>
-          <label>Phone <input id="e-phone" type="tel" maxlength="40"></label>
-          <label class="span2">Caller address <input id="e-caddr" type="text" maxlength="200" spellcheck="false"></label>
-          <label>Received via <select id="e-via"></select></label>
+          <label class="field span2">Cross street <input id="e-cross" type="text" maxlength="200" spellcheck="false"></label>
+          <label class="field">Caller name <input id="e-name" type="text" maxlength="120" spellcheck="false"></label>
+          <label class="field">Phone <input id="e-phone" type="tel" maxlength="40"></label>
+          <label class="field span2">Caller address <input id="e-caddr" type="text" maxlength="200" spellcheck="false"></label>
+          <label class="field">Received via <select id="e-via"></select></label>
           <label class="check"><input id="e-emergency" type="checkbox"> <span>Emergency</span></label>
-          <label class="span2">Until <input id="e-until" type="datetime-local"></label>
-          <label class="span2">Remarks <textarea id="e-remarks" rows="3" maxlength="4000"></textarea></label>
+          <label class="field span2">Until <input id="e-until" type="datetime-local"></label>
+          <label class="field span2">Remarks <textarea id="e-remarks" rows="3" maxlength="4000"></textarea></label>
           <div class="span2 row"><span id="e-error" class="error"></span><span class="spacer"></span>
             <button id="edit-cancel" type="button">Cancel</button>
             <button id="edit-save" type="submit" class="primary">Save</button></div>
@@ -259,7 +258,7 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
           <span class="spacer"></span>
           <button id="r-refresh" title="Run card against who is available now">Recommend</button>
         </div>
-        <div id="r-pending" class="warnbox" hidden>Accept before dispatch</div>
+        <div id="r-pending" class="warnbox notice" hidden>Accept before dispatch</div>
         <ul id="r-unfilled" class="unfilled"></ul>
         <div id="r-order" class="dim small r-order" title="Estimated arrival: straight line × road factor at average speed, plus turnout (Settings, Dispatch). No roads or traffic."></div>
         <ol id="r-units" class="list r-units"></ol>
@@ -269,7 +268,7 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
           <button id="r-tickall" type="button" title="Tick every available PCFD apparatus (not Rye Brook, mutual aid, PD or EMS)">All PCFD</button>
           <button id="r-joint" type="button" hidden>Add Rye Brook</button>
         </div>
-        <label class="remarks-box" title="Said after the call type as &quot;Reported: …&quot;. Starts from the event remarks. Empty: nothing said.">
+        <label class="field remarks-box" title="Said after the call type as &quot;Reported: …&quot;. Starts from the event remarks. Empty: nothing said.">
           <span class="dim">Remarks (spoken)</span>
           <textarea id="r-remarks" rows="2" placeholder="Optional"></textarea>
           <span id="r-remarks-note" class="dim small"></span>
@@ -288,10 +287,10 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
         </div>
         <form id="upgrade-form" class="upgrade-box form" hidden autocomplete="off">
           <h2 class="span2">Upgrade<button type="button" class="help" aria-label="Help" aria-expanded="false" data-help="Said as &quot;upgrade on your last alarm&quot;. Units ticked above go with it.">?</button></h2>
-          <label>New type <select id="u-type"></select></label>
-          <label>New subtype <select id="u-subtype"></select></label>
-          <label class="span2">New info <input id="u-info" type="text" maxlength="300" placeholder="smoke in the structure"></label>
-          <label class="span2">Remarks (spoken) <input id="u-remarks" type="text" maxlength="500" placeholder="Optional"></label>
+          <label class="field">New type <select id="u-type"></select></label>
+          <label class="field">New subtype <select id="u-subtype"></select></label>
+          <label class="field span2">New info <input id="u-info" type="text" maxlength="300" placeholder="smoke in the structure"></label>
+          <label class="field span2">Remarks (spoken) <input id="u-remarks" type="text" maxlength="500" placeholder="Optional"></label>
           <div class="span2 row">
             <label class="inline check"><input id="u-full" type="checkbox"> <span id="u-full-label">Full department response</span></label>
           </div>
@@ -320,7 +319,7 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
         <div class="card-head"><h2>Radio</h2>
           <span id="d-radio-sum" class="dim small"></span>
           <span class="spacer"></span>
-          <a id="d-radio-all" class="nav" href="#radio" title="This incident in Radio"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-radio"/></svg><span class="lbl">All</span></a>
+          <a id="d-radio-all" class="nav sm" href="#radio" title="This incident in Radio"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-radio"/></svg><span class="lbl">All</span></a>
         </div>
         <div id="d-radio-units" class="row unit-filter" role="group" aria-label="Show one unit"></div>
         <ol id="d-radio" class="list log radio-log"></ol>
@@ -347,6 +346,12 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
     <!-- the wall board: the phone pre-alert (prealert.js) above the 60 Control feed, read-only -->
     <ol id="b-prealert" class="pa-list board-only" hidden aria-live="assertive" aria-label="Phone pre-alerts"></ol>
     <div id="feed" hidden></div>
+    <!-- the wall board's radio (board.js): the main channels (FG1, Fire/EMS 15, every talkgroup marked Main), not the
+         console's pinned 60 Control feed (user, 2026-10-08: "isnt showing the radio traffic from FireGround 1") -->
+    <section class="board-only b-sec b-radio" aria-label="Radio: main channels">
+      <div class="sec-head"><h2>Radio</h2><span id="b-radio-sum" class="dim small trunc"></span></div>
+      <ol id="b-radio" class="list log radio-log" aria-live="polite"></ol>
+    </section>
     <!-- the wall board (board.js): recent pages and every unit's status in one strip, instead of the board's buttons -->
     <section class="board-only b-sec"><h2>Pages</h2><ol id="b-pages" class="list pages"></ol></section>
     <section class="board-only b-sec"><h2>Units</h2><div id="b-units" class="b-strip"></div></section>
@@ -361,25 +366,24 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
      Edits are kept in the CAD database over data/cad_lists.json and pushed to every console at once. -->
 <main id="settings" class="settings" hidden>
   <nav class="s-nav" aria-label="Settings sections">
-    <a class="nav s-back" href="#"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-back"/></svg>Dispatch</a>
-    <ol id="s-sections" class="s-sections"></ol>
+    <ol id="s-sections" class="s-sections tabs vertical"></ol>
   </nav>
   <div class="s-content">
-    <div id="s-msg" class="s-msg" role="status" aria-live="polite"></div>
-    <div id="s-role" class="s-note s-role" hidden></div>
+    <div id="s-msg" class="s-msg notice err" role="alert" aria-live="assertive"></div>
+    <div id="s-role" class="s-note notice s-role" hidden></div>
     <section id="s-lists" class="s-panel" data-s="lists" hidden></section>
     <section id="s-runcards" class="s-panel" data-s="runcards" hidden>
-      <div class="s-head"><h2>Run cards</h2><button type="button" class="help" aria-label="Help" aria-expanded="false" data-help="A card for a type and subtype wins over the card for the type alone.
+      <div class="s-head view-head"><h2 class="view-title">Run cards</h2><button type="button" class="help" aria-label="Help" aria-expanded="false" data-help="A card for a type and subtype wins over the card for the type alone.
 Slots go in order. A kind takes the next available unit of that kind (regular apparatus before spares, never another department's). A named unit takes that unit.">?</button><span class="spacer"></span><span id="rc-tools" class="row"></span></div>
-      <div id="rc-banner" class="banner">Default run cards: not PCFD policy</div>
+      <div id="rc-banner" class="banner notice">Default run cards: not PCFD policy</div>
       <div class="rc-body">
         <ol id="rc-list" class="list rc-list"></ol>
         <form id="rc-form" class="rc-form" autocomplete="off">
           <div class="row rc-type-row">
-            <label>Event type <select id="rc-type"></select></label>
-            <label>Subtype <select id="rc-subtype"></select></label>
+            <label class="field">Event type <select id="rc-type"></select></label>
+            <label class="field">Subtype <select id="rc-subtype"></select></label>
           </div>
-          <label>Spoken as <input id="rc-spoken" type="text" maxlength="120"></label>
+          <label class="field">Spoken as <input id="rc-spoken" type="text" maxlength="120"></label>
           <ol id="rc-slots" class="rc-slots"></ol>
           <div class="row">
             <button id="rc-add-kind" type="button">+ Kind</button>
@@ -397,22 +401,28 @@ Slots go in order. A kind takes the next available unit of that kind (regular ap
     <section id="s-users" class="s-panel" data-s="users" hidden></section>
     <section id="s-system" class="s-panel" data-s="system" hidden></section>
     <section id="s-radios" class="s-panel" data-s="radios" hidden>
-      <div class="s-head"><h2>Radios</h2></div>
+      <div class="s-head view-head"><h2 class="view-title">Radios</h2></div>
       <div id="settings-radio-controls" class="radio-controls"></div>
-      <div class="s-note">Radios editor unavailable</div>
-      <div id="settings-radios" class="settings-radios"></div>
+      <div class="s-note notice">Radios editor unavailable</div>
+      <section class="card">
+        <div class="card-head"><h2>Radio IDs</h2><button type="button" class="help" aria-label="Help" aria-expanded="false" data-help="Which rig each radio ID is (MDC on FG1, P25 unit IDs): confirmed by hand, guessed from the numbering, or heard on the air.">?</button></div>
+        <div id="settings-radios" class="settings-radios"></div>
+      </section>
     </section>
   </div>
 </main>
 
+<!-- the style guide (styleguide.js, /cad#styleguide): every component in every state; Settings > System links it -->
+<main id="styleguide" class="styleguide" hidden></main>
+
 <div id="db-overlay" class="overlay" hidden>
-  <div class="tg-panel db-panel" role="dialog" aria-modal="true" aria-labelledby="db-title">
-    <div class="tg-head">
-      <h2 id="db-title" class="tg-title">Records</h2>
+  <div class="dialog tall db-panel" role="dialog" aria-modal="true" aria-labelledby="db-title">
+    <div class="dialog-head">
+      <h2 id="db-title" class="dialog-title">Records</h2>
       <span class="spacer"></span>
-      <button id="db-close" class="tg-close" title="Close (Esc)" aria-label="Close"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-x"/></svg></button>
+      <button id="db-close" class="icon quiet" title="Close (Esc)" aria-label="Close"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-x"/></svg></button>
     </div>
-    <div class="db-body">
+    <div class="dialog-body db-body">
       <div class="row csv-row">
         <span class="dim small">CSV</span>
         <a class="nav" href="/api/cad/export/incidents.csv" download>Incident database</a>
@@ -431,6 +441,7 @@ Slots go in order. A kind takes the next available unit of that kind (regular ap
 <script src="/static/vendor/maplibre-gl.js"></script>
 <script src="/static/map-style.js"></script>
 <script src="/static/icons.js"></script>
+<script src="/static/ui.js"></script>
 <script src="/static/help.js"></script>
 <script src="/static/radio.js"></script>
 <script src="/static/live.js"></script>
@@ -443,5 +454,6 @@ Slots go in order. A kind takes the next available unit of that kind (regular ap
 <script src="/static/radio-controls.js"></script>
 <script src="/static/settings.js"></script>
 <script src="/static/board.js"></script>
+<script src="/static/styleguide.js"></script>
 </body>
 </html>
