@@ -450,7 +450,9 @@ def test_the_hub_config_starts_with_no_radio_programs_on_the_path(tmp_path):
         health = call(url + "/healthz", token=None)[1]
         assert health["ok"] and health["role"] == "hub" and health["public_url"] == "https://sizeup.example.org"
         code, page = call(url + "/cad", token=None)
-        assert code == 200 and b"cloud-pill" in page
+        # The shipped hub config has Cloudflare Access identity on (access_aud set): a page without a
+        # verified sign-in is refused (user, 2026-10-08: "should be proper identity").
+        assert code == 401
         assert sorted(p.name for p in (tmp_path / "data").glob("*.sqlite")) == ["audio.sqlite", "cad.sqlite", "hub.sqlite"]
         kids = subprocess.run(["pgrep", "-P", str(proc.pid)], capture_output=True, text=True).stdout.split()
         assert kids == []                                         # no whisper-server, no voice server, no rtl_fm

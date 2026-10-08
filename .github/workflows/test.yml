@@ -37,7 +37,7 @@ jobs:
           docker run -d --name hub -e SIZEUP_HOST=0.0.0.0 -e SIZEUP_STATION_TOKEN="$(openssl rand -hex 32)" -p 8090:8090 sizeup-hub:ci
           for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8090/healthz && break; sleep 2; done
           curl -fsS http://127.0.0.1:8090/healthz
-          curl -fsS -o /dev/null http://127.0.0.1:8090/cad
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8090/cad)" = 401   # identity on: needs Access sign-in
           test "$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8090/api/station/events)" = 401
       - if: always()
         run: docker logs hub 2>&1 | tail -50
