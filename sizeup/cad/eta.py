@@ -27,11 +27,12 @@ import math
 from dataclasses import asdict, dataclass, replace
 
 EARTH_KM = 6371.0088
+KM_PER_MILE = 1.609344
 
 # key -> (default, low, high, label, unit): what Settings > Dispatch edits (stored under "dispatch").
 NUMBERS = {
     "road_factor": (1.35, 1.0, 3.0, "Road factor (road distance ÷ straight line)", "×"),
-    "speed_kmh": (40.0, 10.0, 120.0, "Average emergency speed", "km/h"),
+    "speed_mph": (25.0, 5.0, 75.0, "Average emergency speed", "mph"),   # US units (user, 2026-10-08)
     "turnout_min": (2.0, 0.0, 15.0, "Turnout time from quarters", "min"),
     "return_margin_min": (3.0, 0.0, 60.0, "Return margin after clearing (paperwork, pickup)", "min"),
 }
@@ -42,15 +43,19 @@ KEYS = (*NUMBERS, "order", "quarters_status")
 @dataclass(frozen=True)
 class Params:
     road_factor: float = NUMBERS["road_factor"][0]
-    speed_kmh: float = NUMBERS["speed_kmh"][0]
+    speed_mph: float = NUMBERS["speed_mph"][0]
     turnout_min: float = NUMBERS["turnout_min"][0]
     return_margin_min: float = NUMBERS["return_margin_min"][0]
     order: str = "nearest"
     quarters_status: str = "AQ"      # the free status that means "back in quarters" (ends a return early)
 
     def with_overrides(self, d: dict) -> Params:
-        """These defaults with the stored Settings values (unknown keys ignored)."""
-        return replace(self, **{k: v for k, v in (d or {}).items() if k in KEYS})
+        """These defaults with the stored Settings values (unknown keys ignored). A speed saved before
+        the switch to mph (speed_kmh) is taken over, converted."""
+        d = dict(d or {})
+        if "speed_mph" not in d and isinstance(d.get("speed_kmh"), (int, float)) and not isinstance(d["speed_kmh"], bool):
+            d["speed_mph"] = min(max(round(d["speed_kmh"] / KM_PER_MILE, 1), NUMBERS["speed_mph"][1]), NUMBERS["speed_mph"][2])
+        return replace(self, **{k: v for k, v in d.items() if k in KEYS})
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -83,7 +88,7 @@ def haversine_km(a: list | tuple, b: list | tuple) -> float:
 
 def drive_s(a: list | tuple, b: list | tuple, p: Params) -> float:
     """Driving time a -> b, seconds (no turnout)."""
-    return haversine_km(a, b) * p.road_factor / p.speed_kmh * 3600.0
+    return haversine_km(a, b) * p.road_factor / (p.speed_mph * KM_PER_MILE) * 3600.0
 
 
 def eta_s(a: list | tuple, b: list | tuple, p: Params, from_quarters: bool) -> float:

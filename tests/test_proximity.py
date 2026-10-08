@@ -82,21 +82,21 @@ def work_and_clear(c, clock, iid, *codes, minutes_ago=0.0):
 
 def test_eta_math():
     p = eta.Params()
-    assert (p.road_factor, p.speed_kmh, p.turnout_min, p.return_margin_min, p.order) == (1.35, 40.0, 2.0, 3.0, "nearest")
+    assert (p.road_factor, p.speed_mph, p.turnout_min, p.return_margin_min, p.order) == (1.35, 25.0, 2.0, 3.0, "nearest")
     km = eta.haversine_km(HQ["ll"], WP["ll"])
     assert km == pytest.approx(0.824, abs=0.005)                  # 209 -> 464 Westchester Ave, as the crow flies
     assert eta.haversine_km([-73.0, 41.0], [-73.0, 42.0]) == pytest.approx(111.2, abs=0.1)   # a degree of latitude
-    assert eta.drive_s(HQ["ll"], WP["ll"], p) == pytest.approx(km * 1.35 / 40 * 3600)
+    assert eta.drive_s(HQ["ll"], WP["ll"], p) == pytest.approx(km * 1.35 / (25 * 1.609344) * 3600)    # 25 mph
     assert eta.eta_s(HQ["ll"], WP["ll"], p, from_quarters=True) == pytest.approx(eta.drive_s(HQ["ll"], WP["ll"], p) + 120)
     assert eta.eta_s(HQ["ll"], WP["ll"], p, from_quarters=False) == eta.drive_s(HQ["ll"], WP["ll"], p)
     assert eta.eta_s(HQ["ll"], HQ["ll"], p, True) == 120.0                 # next door to the house: turnout only
-    assert eta.drive_s(HQ["ll"], WP["ll"], eta.Params(speed_kmh=20.0)) == pytest.approx(2 * eta.drive_s(HQ["ll"], WP["ll"], p))
+    assert eta.drive_s(HQ["ll"], WP["ll"], eta.Params(speed_mph=12.5)) == pytest.approx(2 * eta.drive_s(HQ["ll"], WP["ll"], p))
     assert [eta.text(s) for s in (0, 29, 31, 150, 3600)] == ["~1 min est.", "~1 min est.", "~1 min est.", "~2 min est.",
                                                               "~60 min est."]
     assert eta.along([0, 0], [10, 20], 0.25) == [2.5, 5.0] and eta.along([0, 0], [10, 20], 7) == [10, 20]
     assert eta.return_window_s(HQ["ll"], WP["ll"], p) == pytest.approx(eta.drive_s(HQ["ll"], WP["ll"], p) + 180)
     assert eta.return_window_s(HQ["ll"], None, p) == 180.0
-    for k, bad in (("road_factor", 0.5), ("speed_kmh", 0), ("speed_kmh", True), ("turnout_min", "2"), ("order", "x"),
+    for k, bad in (("road_factor", 0.5), ("speed_mph", 0), ("speed_mph", True), ("turnout_min", "2"), ("order", "x"),
                    ("quarters_status", "DP"), ("nope", 1)):
         with pytest.raises(ValueError):
             eta.check(k, bad, ("AQ", "AV"))
@@ -289,14 +289,14 @@ def test_settings_change_order_and_numbers_audited_and_kept(tmp_path):
     assert names(r) == TODAY_STRU and r["order"] == {"by": "card", "note": "run card order (Settings > Dispatch)"}
     assert {u["name"]: u["reason"] for u in r["units"]}["E60"] == f"~4 min est. · from {HQ['name']}"   # still estimated
     c.settings_post("dispatch", {"action": "set", "key": "turnout_min", "value": 0, "operator": "Ann"})
-    c.settings_post("dispatch", {"action": "set", "key": "speed_kmh", "value": 30, "operator": "Ann"})
+    c.settings_post("dispatch", {"action": "set", "key": "speed_mph", "value": 18, "operator": "Ann"})
     assert rec(c, iid)["others"][uid(c, "E64")]["eta_s"] == 0                # at the call's door, no turnout
     e60 = {u["name"]: u["eta_s"] for u in rec(c, iid)["units"]}["E60"]
-    assert e60 == round(eta.drive_s(HQ["ll"], WP["ll"], eta.Params(speed_kmh=30)))
+    assert e60 == round(eta.drive_s(HQ["ll"], WP["ll"], eta.Params(speed_mph=18)))
     rows = c.settings_audit_log({"section": ["dispatch"]})["audit"]
     keys = [(e["key"], e["old"], e["new"], e["operator"]) for e in rows]
     assert ("eta/order", "nearest", "card", "Ann") in keys and ("eta/turnout_min", "2.0", "0.0", "Ann") in keys
-    for bad in ({"key": "speed_kmh", "value": 500}, {"key": "order", "value": "random"},
+    for bad in ({"key": "speed_mph", "value": 500}, {"key": "order", "value": "random"},
                 {"key": "quarters_status", "value": "OS"}):
         with pytest.raises(CadError):
             c.settings_post("dispatch", {"action": "set", **bad})
@@ -306,7 +306,7 @@ def test_settings_change_order_and_numbers_audited_and_kept(tmp_path):
     assert "AQ" in [s["code"] for s in page["quarters_status"]["choices"]]
     # Kept over a restart; the export carries them and imports back.
     c2 = make(tmp_path, stations=False)
-    assert (c2.eta.order, c2.eta.turnout_min, c2.eta.speed_kmh) == ("card", 0.0, 30.0)
+    assert (c2.eta.order, c2.eta.turnout_min, c2.eta.speed_mph) == ("card", 0.0, 18.0)
     assert c2.settings_export()["overrides"]["dispatch"]["order"] == "card"
     c2.settings_post("dispatch", {"action": "reset", "key": "order"})
     assert c2.eta.order == "nearest"
@@ -342,3 +342,11 @@ def test_stations_are_read_from_the_settings_units_override():
     assert c.settings.overrides()["units"]["E64"]["station"] == WP["name"]
     assert c.locations()["E64"]["where"] == "station" and c.locations()["E60"] is None
     assert math.isclose(c.locations()["E64"]["ll"][0], WP["ll"][0])
+
+
+def test_a_speed_saved_in_kmh_is_taken_over_in_mph():
+    # The setting was km/h before the switch to US units (2026-10-08): a saved value carries over.
+    p = eta.Params().with_overrides({"speed_kmh": 40})
+    assert p.speed_mph == 24.9
+    assert eta.Params().with_overrides({"speed_kmh": 40, "speed_mph": 30}).speed_mph == 30   # mph wins once set
+    assert eta.NUMBERS["speed_mph"][4] == "mph"

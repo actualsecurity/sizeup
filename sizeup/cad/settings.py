@@ -18,7 +18,7 @@ Reset to default = drop the override (one item, or a whole section).
     dispatch_wording               key template name -> text; "lead_in_joint_only" -> {town: text}
     dispatch_tones                 key joint town -> [[Hz, s], ...] | null (not set: PCFD's are played)
     dispatch                       key "tones" -> PCFD's tone groups, "channels" -> [labels], "voice", "speed";
-                                   the ETA estimates (sizeup/cad/eta.py): "road_factor", "speed_kmh", "turnout_min",
+                                   the ETA estimates (sizeup/cad/eta.py): "road_factor", "speed_mph", "turnout_min",
                                    "return_margin_min", "order" (nearest | card), "quarters_status"
     channels                       key "FG1" | "South 2" | "tg:307" -> {record?, transcribe?, engine?}: which channel is
                                    kept, transcribed, and by what (sizeup/channels.py; Settings > Radios)
