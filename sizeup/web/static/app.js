@@ -403,6 +403,9 @@ function renderConn() {
     cls = "pill err"; text = `connection lost · ${fmtDur(age / 1000)}`;
     title = "No update from the server — what is on screen may be out of date";
   } else if (ui.error) { cls = "pill err"; text = "server error"; title = ui.error; }
+  else if (ui.live && ui.live.mode() === "polling") {
+    text = "live · polling"; title = "The live stream is blocked on this network: refreshing every 2 s instead";
+  }
   setClass(pill, cls);
   setText(pill, text);
   if (pill.title !== title) pill.title = title;
@@ -1406,12 +1409,7 @@ async function boot() {
   document.title = `sizeup · ${name}`;
   setText($("#station"), name);
   initMap();
-  const es = new EventSource("/api/stream");
-  es.onmessage = (ev) => {
-    let data;
-    try { data = JSON.parse(ev.data); } catch (err) { console.warn("bad state push:", err); return; }
-    onState(data);
-  };
+  ui.live = liveState("/api/stream", "/api/state", onState);
   tick();
   setInterval(tick, 1000);
 }

@@ -221,12 +221,16 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
         def _stream(self, b: Broadcaster) -> None:
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/event-stream")
-            self.send_header("Cache-Control", "no-store")
+            self.send_header("Cache-Control", "no-store, no-transform")
+            self.send_header("X-Accel-Buffering", "no")       # proxies: pass events through, don't buffer
             self.send_header("Connection", "close")
             self.end_headers()
             self.close_connection = True
             seq, payload = b.latest()
             try:
+                # Reconnect after 2 s; and 2 KB of comment so proxies that hold a response until they
+                # have "enough" of it pass the first event straight on (pages also poll if this fails).
+                self.wfile.write(b"retry: 2000\n:" + b" " * 2048 + b"\n\n")
                 while not b.stopped:
                     self.wfile.write(b"data: " + payload + b"\n\n")
                     self.wfile.flush()
