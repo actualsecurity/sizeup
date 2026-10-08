@@ -109,7 +109,7 @@ department = "Port Chester Fire"   # first words of every dispatch, as said on t
 # Event types, subtypes, dispositions, unit statuses, the two unit boards, colors and the dispatch
 # wording, from the department's sheet ("[TEMPLATE] PCFD ECC OPS"). Replace the file to change them.
 lists = "data/cad_lists.json"
-monitor_departments = ["Port Chester FD"]   # a 60 Control page for these -> an event to accept
+monitor_departments = ["Port Chester FD", "Rye Brook FD"]   # their tones, or an address in their town -> an event to accept
 
 [dispatch]
 # Alert tones before the voice: [hz, seconds] in order (two-tone sequential). UNVERIFIED placeholder:

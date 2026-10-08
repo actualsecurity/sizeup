@@ -88,7 +88,7 @@ class Config:
     cad_db: str = ""                  # "" = in memory (tests); load() defaults to state/cad.sqlite
     cad_department: str = "Port Chester Fire"           # first words of every dispatch, as said on the air
     cad_lists: str = ""               # the CAD's lists / boards / wording ("" = data/cad_lists.json)
-    cad_monitor_departments: tuple[str, ...] = ("Port Chester FD",)   # monitor incidents that wait to be accepted
+    cad_monitor_departments: tuple[str, ...] = ("Port Chester FD", "Rye Brook FD")   # their tones or towns: wait to be accepted
     dispatch_tones: tuple[tuple[float, float], ...] = ((349.1, 1.0), (311.1, 3.0))   # (Hz, s) in order
     # The dispatch voice. load() defaults to Kokoro af_heart at 0.92; built directly (tests), `say` Samantha.
     dispatch_tts_engine: str = "say"  # "kokoro" (sizeup/tts_server.py; `say` as fallback) | "say" | "polly"

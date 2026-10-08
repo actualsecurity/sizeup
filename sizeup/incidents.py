@@ -67,7 +67,7 @@ class Incident:
     location: str
     cross_street: str
     time_out: str
-    geo: dict | None = None             # {lat, lon, label, kind, confidence}
+    geo: dict | None = None             # {lat, lon, label, kind, town, confidence}
     units: list[str] = field(default_factory=list)   # dispatched apparatus, "Engine 61"
     code: str = ""                      # priority dispatch code, "69-D-6"
     status: str = "active"              # active | closed
@@ -75,6 +75,7 @@ class Incident:
     page_text: list[str] = field(default_factory=list)
     page_starts: list[float] = field(default_factory=list)   # aligned with pages / page_text
     traffic: list[Traffic] = field(default_factory=list)
+    tone_departments: list[str] = field(default_factory=list)   # whose tones opened it (what makes it ours)
 
     def as_dict(self) -> dict:
         d = {k: v for k, v in self.__dict__.items() if k not in ("traffic", "page_starts")}
@@ -162,8 +163,14 @@ class IncidentStore:
         """A transcribed page. Opens/merges an incident when it is for one of our departments."""
         at = self.clock() if at is None else at
         depts = list(dict.fromkeys(tone_departments + d.departments))
-        if not any(x in self.ours for x in depts):
-            return None
+        geo = None
+        if not any(x in self.ours for x in tone_departments):
+            # Not our tones: ours only when the address is in one of our towns. Units or departments heard in
+            # the text don't count ("60 Control, ..." was read as Engine 60 on a Valhalla call, 2026-10-08).
+            geo = self.geocode(d) if d.location else None
+            towns = {x.removesuffix(" FD").strip().lower() for x in self.ours}
+            if not geo or (geo.get("town") or "").strip().lower() not in towns:
+                return None
         with self._lock:
             for inc in reversed(self.incidents):
                 if inc.status == "active" and at - inc.opened < REPEAT_S and (
@@ -187,6 +194,9 @@ class IncidentStore:
                     for x in depts:
                         if x not in inc.departments:
                             inc.departments.append(x)
+                    for x in tone_departments:
+                        if x not in inc.tone_departments:
+                            inc.tone_departments.append(x)
                     merged = inc
                     break
             else:
@@ -195,9 +205,10 @@ class IncidentStore:
             self.save()
             return merged
         inc = Incident(uuid.uuid4().hex[:10], at, at, depts, d.incident_type, d.category, d.location,
-                       d.cross_street, d.time_out, self.geocode(d) if d.location else None,
+                       d.cross_street, d.time_out, geo or (self.geocode(d) if d.location else None),
                        pages=[page_id], page_text=[d.text], page_starts=[at],
-                       units=list(getattr(d, "units", [])), code=getattr(d, "code", ""))
+                       units=list(getattr(d, "units", [])), code=getattr(d, "code", ""),
+                       tone_departments=list(tone_departments))
         with self._lock:
             self.incidents.append(inc)
         self.save()

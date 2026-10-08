@@ -120,7 +120,8 @@ def _clean_street(s: str) -> str:
 
 def parse(text: str) -> Dispatch:
     d = Dispatch(text)
-    t = _spoken_digits(_norm(text))
+    # "16-10-191-22": 60 Control's run number, not engines (the normalising below turns "-" into spaces).
+    t = _spoken_digits(_norm(re.sub(r"\b\d{1,3}(?:\s*-\s*\d{1,3}){3,}(?=\s*[,.])", " , ", text)))
     t = re.sub(r"\b(\d+)(?:\s+\1\b)+", r"\1", t)          # "42 42 stratton road": a repeat, not two numbers
     for name, phrases in DEPARTMENTS.items():
         if any(p in t for p in phrases):

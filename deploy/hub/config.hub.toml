@@ -65,7 +65,7 @@ audio_keep_hours = 12              # received clips
 [cad]
 db = "cad.sqlite"                  # under SIZEUP_STATE_DIR: the CAD of record
 department = "Port Chester Fire"
-monitor_departments = ["Port Chester FD"]
+monitor_departments = ["Port Chester FD", "Rye Brook FD"]
 
 [dispatch]
 # The voice is made here, by Amazon Polly (sizeup/polly.py; the task role needs polly:SynthesizeSpeech,

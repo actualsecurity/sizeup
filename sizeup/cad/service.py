@@ -48,7 +48,7 @@ class Settings:
     audio_dir: str = ""                            # "" = next to the db (in memory: a temp dir)
     lists: str = ""                                # "" = data/cad_lists.json
     department: str = "Port Chester Fire"          # first words of every dispatch
-    monitor_departments: tuple[str, ...] = ("Port Chester FD",)   # monitor incidents that become queued ones
+    monitor_departments: tuple[str, ...] = ("Port Chester FD", "Rye Brook FD")   # their tones or towns -> queued
     tones: tuple[tuple[float, float], ...] = ((349.1, 1.0), (311.1, 3.0))
     voice: str = "Samantha"                        # tts_engine "say": a `say -v` voice; "kokoro": a Kokoro voice; "polly": "Matthew"
     rate_wpm: int = 0
@@ -960,11 +960,20 @@ class Cad:
 
     # -- the bridge from the monitor ----------------------------------------------------------------
 
+    def _ours(self, inc) -> bool:
+        """A page for us: our tones (inc.tone_departments), or an address in one of our towns. Units or
+        departments only heard in the text don't count (user, 2026-10-08)."""
+        if any(d in self.s.monitor_departments for d in getattr(inc, "tone_departments", [])):
+            return True
+        towns = {d.removesuffix(" FD").strip().lower() for d in self.s.monitor_departments}
+        town = ((inc.geo or {}).get("town") or "").strip().lower()
+        return bool(town) and town in towns
+
     def from_monitor(self, inc) -> dict | None:
         """A monitor incident (60 Control page) for one of our departments -> a queued CAD event,
         once per monitor incident. A repeat of the page fills in what the first reading missed
         while it is still queued; nothing changes once a person has accepted it."""
-        if not any(d in self.s.monitor_departments for d in inc.departments):
+        if not self._ours(inc):
             return None
         ref = f"monitor:{inc.id}"
         geo = inc.geo or {}
