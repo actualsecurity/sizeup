@@ -70,8 +70,6 @@
   background: var(--bg); box-shadow: var(--shadow); }
 
 /* ---- Overview ------------------------------------------------------------------------------------ */
-.ov-tab.on, .tg-open.ov-tab.on { color: var(--text); border-color: var(--accent); background: var(--raised); }
-.ov-tab.on .ico { color: var(--accent-text); }
 button.back { font-size: 0.82em; padding: 0.1em 0.6em; display: inline-flex; align-items: center; gap: 0.35em; }
 .overview { display: flex; flex-direction: column; gap: 0.6em; min-width: 0; }
 .ov-head { display: flex; align-items: center; gap: 0.4em 0.8em; flex-wrap: wrap; }

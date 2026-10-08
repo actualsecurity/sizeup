@@ -7,7 +7,7 @@ same code and the same entry point (`python -m sizeup --config ...`), chosen by 
 |---|---|---|
 | Radios, trunk-recorder, MDC decode | yes | none: nothing opens an SDR or starts a program |
 | whisper (3.8 GB), Kokoro voice (1.4 GB) | yes | none |
-| Web UI: monitor `/`, CAD `/cad`, `/comms`, settings | yes (its own, local) | yes: **the CAD of record** |
+| Web UI: CAD `/cad` (Dispatch, Overview, Radio, Settings), wall board `/monitor` | yes (its own, local) | yes: **the CAD of record** |
 | CAD database | its own `state/cad.sqlite`, not synced | `cad.sqlite` (+ `hub.sqlite`, `audio.sqlite`) |
 | Network | outbound HTTPS to the hub only | reached only through Cloudflare Tunnel |
 
@@ -84,12 +84,12 @@ keeps working for local use, with a banner on its `/cad`: the CAD of record is t
 
 ## On screen
 
-* Hub, monitor header: a **Station** row ("3 s" / "offline 12:03"; the tooltip says "connected, last
+* Hub, Settings > Radios, Receivers: a **Station** row ("3 s" / "offline 12:03"; the tooltip says "connected, last
   seen 3 s ago" or "offline since 12:03:41"), then the station's rows as it reported them. Offline,
   those rows turn *unknown* with what they last said: never a stale "ok". The SDR switches only show
   while the station is connected.
 * Hub, CAD header: "Station connected" / "Station offline 12:03".
-* Station, monitor header: a **Hub** row (connected, or offline with how many events are waiting;
+* Station, Settings > Radios, Receivers: a **Hub** row (connected, or offline with how many events are waiting;
   "not sending" when forwarding is on without a token). Station `/cad`: the "Hub connected" /
   "Hub unreachable" pill and the banner with the hub's URL. All of it goes when forwarding is
   switched off (Settings → System → Station) and comes back when it's on.
@@ -176,7 +176,7 @@ checked in `CadApi.post` and, for the monitor's own POSTs, in `server.py`):
 | Role | May |
 |---|---|
 | admin | everything |
-| dispatcher | run calls: create / edit / accept / dismiss / close events, notes, recommend, preview, dispatch, upgrade, attach, return, put a transmission on an event, unit status on the board, close an incident on the monitor. **No** Settings of any kind (lists, run cards, units and their home station, dispatch wording / tones / channels / voice / arrival estimates, users, import, reset), the radio-ID registry, the talkgroup / mode switches or re-running speech-to-text |
+| dispatcher | run calls: create / edit / accept / dismiss / close events, notes, recommend, preview, dispatch, upgrade, attach, return, put a transmission on an event, unit status on the board, close the paged incident (Settings > Radios). **No** Settings of any kind (lists, run cards, units and their home station, dispatch wording / tones / channels / voice / arrival estimates, users, import, reset), the radio-ID registry, the talkgroup / mode switches or re-running speech-to-text |
 | viewer | look only (no writes) |
 | deactivated (any role) | look only, "Your account is deactivated" |
 

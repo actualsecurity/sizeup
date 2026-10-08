@@ -185,17 +185,23 @@ class Comms:
         return out
 
     def query(self, unit: str = "", channel: str = "", event: str = "", pcfd: list[str] | None = None,
-              since: float | None = None, until: float | None = None, limit: int = 300, kind: str = "") -> list[dict]:
-        """The /comms page: newest first, with the event numbers each transmission is linked to, and
+              since: float | None = None, until: float | None = None, limit: int = 300, kind: str = "",
+              text: str = "") -> list[dict]:
+        """The CAD's Radio view: newest first, with the event numbers each transmission is linked to, and
         (kind '' or 'notes') the event notes tagged with a unit ("E63 stated that ..."), as kind 'note'
-        rows on channel "Notes". pcfd: only these rigs (PCFD's own units)."""
+        rows on channel "Notes". pcfd: only these rigs (PCFD's own units). text: every word in the
+        transcript / note (any case)."""
         limit = max(1, min(int(limit), MAX_ROWS))
-        notes = self._notes(unit, event, pcfd, since, until, limit) if kind in ("", "notes") and channel in ("", NOTES) else []
-        radio = self._radio(unit, channel, event, pcfd, since, until, limit) if kind in ("", "radio") and channel != NOTES else []
+        words = [w.lower() for w in text.split()][:8]
+        notes = self._notes(unit, event, pcfd, since, until, limit, words) if kind in ("", "notes") and channel in ("", NOTES) else []
+        radio = self._radio(unit, channel, event, pcfd, since, until, limit, words) if kind in ("", "radio") and channel != NOTES else []
         return sorted(radio + notes, key=lambda r: -r["start"])[:limit]
 
-    def _notes(self, unit, event, pcfd, since, until, limit) -> list[dict]:
+    def _notes(self, unit, event, pcfd, since, until, limit, words=()) -> list[dict]:
         where, args = ["e.kind = 'note'", "e.units != ''"], []
+        for w in words:
+            where.append("LOWER(e.text) LIKE ? ESCAPE '\\'")
+            args.append(f"%{_like(w)}%")
         if unit:
             where.append("(',' || e.units || ',') LIKE ?")
             args.append(f"%,{unit},%")
@@ -222,8 +228,11 @@ class Comms:
                  "events": [{"id": r["iid"], "number": r["number"], "type": r["type"], "subtype": r["subtype"],
                              "address": r["address"], "why": "note", "unit": r["units"]}]} for r in rows]
 
-    def _radio(self, unit, channel, event, pcfd, since, until, limit) -> list[dict]:
+    def _radio(self, unit, channel, event, pcfd, since, until, limit, words=()) -> list[dict]:
         where, args = [], []
+        for w in words:
+            where.append("LOWER(t.text) LIKE ? ESCAPE '\\'")
+            args.append(f"%{_like(w)}%")
         if unit:
             where.append("(',' || REPLACE(t.rig, ' ', '') || ',') LIKE ?")
             args.append(f"%,{unit},%")
@@ -263,3 +272,8 @@ class Comms:
                     "SELECT channel, MAX(start) AS m FROM radio_traffic GROUP BY channel ORDER BY m DESC")] + [NOTES],
                 "rigs": sorted({x.strip() for r in self.store.q("SELECT DISTINCT rig FROM radio_traffic WHERE rig != ''")
                                 for x in r["rig"].split(",") if x.strip()})}
+
+
+def _like(w: str) -> str:
+    """A word for LIKE: its own % and _ (and the escape) taken literally."""
+    return w.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")

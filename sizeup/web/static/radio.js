@@ -1,4 +1,4 @@
-// Shared by the monitor (/), the CAD console (/cad) and the communications page (/comms):
+// Shared by the CAD console (/cad, its Radio view too) and the wall board (/monitor):
 // who is transmitting right now ("talking", pushed in each page's state), the talk alerts
 // (a toast and an optional chime when chosen units key up), and the rig + radio ID tag on a
 // transmission. The server says who is talking (sizeup/radio/live.py); nothing here guesses.
@@ -39,7 +39,7 @@ window.Radio = (() => {
     if (e.system === "fm") return `${e.channel} open`;
     return `TX ${e.channel}` + (e.radio_id ? ` radio ${e.radio_id}` : "");
   }
-  function shown(e) {             // the strip: our rigs, FG1, and the talkgroups in Radio traffic
+  function shown(e) {             // the strip: our rigs, FG1, and the Main talkgroups
     return !!e.rig || e.system === "fm" || e.main;
   }
 
@@ -121,7 +121,7 @@ window.Radio = (() => {
   const CHIME = chimeWav();
 
   // Browsers allow sound only after a click: the click that turns the chime on unlocks it
-  // (the same trick as the monitor's Live button).
+  // (the same trick as the Live and Sound buttons, radio-view.js).
   function unlockChime() {
     st.chime.src = SILENT_WAV;
     st.chime.play().then(() => { st.chimeOk = true; renderButton(); })
@@ -185,7 +185,7 @@ window.Radio = (() => {
     if (!st.btn) return;
     const a = st.alerts;
     st.btn.replaceChildren(window.Icon ? Icon("bell") : "",
-      a.on ? (a.chime && !st.chimeOk ? "Alerts: tap for sound" : "Alerts on") : "Alerts");
+      el("span", "lbl", a.on ? (a.chime && !st.chimeOk ? "Alerts: tap for sound" : "Alerts on") : "Alerts"));
     st.btn.classList.toggle("active", a.on);
     st.btn.title = a.on ? `Talk alerts: ${(a.units || ["PCFD engines and rescues"]).length > 6 ? "chosen units"
       : (a.units || ["PCFD engines and rescues"]).join(", ")}${a.chime ? ", chime" : ""}`
@@ -194,8 +194,9 @@ window.Radio = (() => {
 
   function mountAlerts(box) {
     if (!box) return;
-    st.btn = el("button", "tg-open alerts-btn");
+    st.btn = el("button", "nav alerts-btn");
     st.btn.type = "button";
+    st.btn.setAttribute("aria-label", "Talk alerts");
     st.btn.setAttribute("aria-haspopup", "dialog");
     st.btn.addEventListener("click", (ev) => {
       ev.stopPropagation();

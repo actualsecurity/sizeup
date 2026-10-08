@@ -29,8 +29,8 @@ The shortfinal session wasn't running when this was written, so the request is l
    buttons can't get stuck disabled.
 
 Code: `sizeup/radio/sdr.py`; `sizeup/app.py` (`sdrs` property, `_load_modes`, `_dongle`,
-`_start_mode` / `_stop_mode` / `set_mode`, `sdr()`); `sizeup/web/static/app.js` (`renderSdr`,
-`setSdrMode`); test `tests/test_app.py::test_sdr_rows_follow_the_dongles_plugged_in`.
+`_start_mode` / `_stop_mode` / `set_mode`, `sdr()`); `sizeup/web/static/radio-controls.js` (Settings > Radios:
+`renderSdr`, `setSdrMode`); test `tests/test_app.py::test_sdr_rows_follow_the_dongles_plugged_in`.
 
 ## Hardware (confirmed by the user, 2026-10-05)
 

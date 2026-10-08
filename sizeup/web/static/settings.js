@@ -154,12 +154,12 @@ async function sPost(section, body, done) {
 // ---- routing --------------------------------------------------------------------------------------
 
 function sRoute() {
-  const m = location.hash.match(/^#settings(?:\/([a-z]*))?/);
+  const m = !BOARD && location.hash.match(/^#settings(?:\/([a-z]*))?/);   // the wall board has no Settings
   const open = !!m;
   show($("#settings"), open);
   show(document.querySelector(".cad-main"), !open);
   document.body.classList.toggle("in-settings", open);
-  $("#settings-open").classList.toggle("on", open);
+  if (window.renderTabs) renderTabs();
   if (!open) {
     S.section = null;
     if (cad.map) setTimeout(() => cad.map.resize(), 0);
@@ -181,6 +181,7 @@ function sRoute() {
     show($("#s-radios .s-note"), false);
     RadiosPanel.mount($("#settings-radios"), { operator });
   }
+  if (sec === "radios" && window.RadioControls) RadioControls.mount($("#settings-radio-controls"));   // receivers, talkgroups
   if (S.data) sRender(true);
   sLoad();
 }

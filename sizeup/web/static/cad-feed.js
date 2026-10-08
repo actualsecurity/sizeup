@@ -102,7 +102,7 @@ window.CadFeed = (() => {
     if (sig === st.headSig) return;
     st.headSig = sig;
     st.title.textContent = f.title;
-    st.more.href = f.channel ? `/comms?channel=${encodeURIComponent(f.channel)}` : "/comms";
+    st.more.href = f.channel ? `#radio?channel=${encodeURIComponent(f.channel)}` : "#radio";
     st.talk.hidden = !now;
     st.talk.textContent = text;
     st.talk.className = "feed-talk talk-badge" + (now && now.ended ? " ended" : "") + (now && now.dispatcher ? " disp" : "");

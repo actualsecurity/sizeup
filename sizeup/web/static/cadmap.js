@@ -1,5 +1,5 @@
 // sizeup CAD maps: the working event's map (bigger, with an Expand overlay), the Overview page
-// (every open call: a large map, a card each, who is talking) and the rigs on the monitor's map.
+// (every open call: a large map, a card each, who is talking), which is also the whole wall board (/monitor).
 //
 // Every map shows everything (the open incidents' pins, every rig the server placed) and focuses on
 // the current call. Where a rig goes is decided on the server (sizeup/cad/mapview.py, state.map):
@@ -17,7 +17,7 @@
 // (so they stay neat at every zoom), the dashed lines, the pins, the station picker. A live AVL
 // position needs nothing here: it arrives as a marker with place "position".
 //
-// RigLayer and RigMap use nothing from cad.js (the monitor loads this file too); the CAD glue at the
+// RigLayer and RigMap use nothing from cad.js; the CAD glue at the
 // bottom (CadMap.detail, CadMap.overview) uses cad.js's helpers and state.
 "use strict";
 
@@ -553,8 +553,7 @@ window.CadMap = (() => {
   function overview(on) {
     const box = $("#overview");
     show(box, on);
-    if (on) show($("#d-empty"), false);             // the overview is the landing view
-    $("#overview-open").classList.toggle("on", on);
+    if (on) show($("#d-empty"), false);             // the overview is the landing view (and all of the wall board)
     if (!on || !cad.state) return;
     const ov = cad.state.overview || [];
     const emerg = ov.filter((o) => o.emergency && o.status !== "queued")
@@ -624,7 +623,7 @@ window.CadMap = (() => {
     });
     if (mapsOk()) {
       if (!views.overview) {
-        views.overview = new RigMap($("#ov-map"), { scene: cad.scene, pins: true, unset: true, editable: () => canDo("admin"), operator,
+        views.overview = new RigMap($("#ov-map"), { scene: cad.scene, pins: true, unset: !BOARD, editable: () => canDo("admin") && !BOARD, operator,
                                                     onPick: (id) => selectIncident(id) });
       }
       views.overview.update(mapData(), null, "");
@@ -639,29 +638,10 @@ window.CadMap = (() => {
     if (window.innerWidth <= 1100) $("#detail").scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
-  // ---- the monitor (/): the same rigs on its map, from the CAD state (polled) --------------------
-
-  function monitor(map, host) {
-    let layer = null, stop = false;
-    async function poll() {
-      if (stop) return;
-      try {
-        const r = await fetch("/api/cad/state");
-        if (r.status === 404) { stop = true; return; }            // no CAD on this station
-        const s = await r.json();
-        if (!layer) layer = new RigLayer(map, { host, pins: true, unset: false, editable: false,
-                                                onPick: () => { location.href = "/cad"; } });
-        layer.update({ map: s.map, lists: s.lists }, null);
-      } catch (e) { /* the next poll tries again */ }
-      setTimeout(poll, 4000);
-    }
-    poll();
-  }
-
   if (document.getElementById("overview") && typeof cad !== "undefined") {    // the CAD console (loaded after cad.js)
-    cad.hooks.push(() => overview(cad.mode === "none"));
+    cad.hooks.push(() => overview(cad.mode === "none" && !cad.radio));
     $("#overview-open").addEventListener("click", () => {
-      if (location.hash.startsWith("#settings")) history.pushState(null, "", location.pathname);
+      if (location.hash) history.pushState(null, "", location.pathname);     // out of Settings / Radio
       window.dispatchEvent(new HashChangeEvent("hashchange"));
       goOverview();
     });
@@ -669,5 +649,5 @@ window.CadMap = (() => {
     window.addEventListener("keydown", (e) => { if (e.key === "Escape" && views.bigOpen) closeBig(); });
   }
 
-  return { RigLayer, RigMap, detail, overview, goOverview, monitor, openBig, closeBig };
+  return { RigLayer, RigMap, detail, overview, goOverview, openBig, closeBig };
 })();

@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>PCFD CAD</title>
+<script>/* /monitor: the same page as a read-only wall board (cad.js BOARD), set before the first paint */
+if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentElement.classList.add("board");</script>
 <link rel="icon" type="image/svg+xml" href="/static/brand/pcfd-mark.svg">
 <link rel="icon" type="image/png" sizes="32x32" href="/static/brand/pcfd-mark-32.png">
 <link rel="stylesheet" href="/static/vendor/maplibre-gl.css">
@@ -13,27 +15,34 @@
 <link rel="stylesheet" href="/static/cadmap.css">
 </head>
 <body class="cad">
+<!-- One header for the console and the wall board (style.css "header"): the board hides .console-only, the console .board-only -->
 <header>
-  <a class="brand" href="/cad" title="Dispatch"><img class="brand-mark" src="/static/brand/pcfd-mark.svg" alt="" width="28" height="28"><span class="brand-name">Port Chester FD</span></a>
-  <span class="cad-title">Dispatch</span>
+  <a class="brand" href="/cad" title="CAD"><img class="brand-mark" src="/static/brand/pcfd-mark.svg" alt="" width="28" height="28"><span class="brand-name">Port Chester FD</span></a>
+  <span id="page-title" class="cad-title">CAD</span>
   <span id="station" class="station"></span>
-  <button id="overview-open" class="tg-open ov-tab" title="All open calls"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-grid"/></svg>Overview</button>
+  <nav class="tabs console-only" aria-label="Views">
+    <button id="dispatch-open" class="tab" type="button" title="The open incident"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-dispatch"/></svg><span class="lbl">Dispatch</span></button>
+    <button id="overview-open" class="tab" type="button" title="All open calls"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-grid"/></svg><span class="lbl">Overview</span></button>
+    <a id="radio-open" class="tab" href="#radio" title="All transmissions"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-radio"/></svg><span class="lbl">Radio</span></a>
+    <a id="settings-open" class="tab" href="#settings" title="Settings"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-settings"/></svg><span class="lbl">Settings</span></a>
+  </nav>
   <span id="conn" class="pill warn">Connecting</span>
   <span id="cloud-pill" class="pill" hidden></span>
-  <span id="tx-pill" class="pill tx-off" title="No radio interface: dispatches are logged and played here only">Transmit off</span>
+  <span id="tx-pill" class="pill tx-off console-only" title="No radio interface: dispatches are logged and played here only">Transmit off</span>
   <span id="talking" class="talking-strip" hidden aria-live="polite"></span>
   <span class="spacer"></span>
   <span id="alerts"></span>
-  <button id="runcards-open" class="tg-open" title="Units sent per event type"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-list"/></svg>Run cards</button>
-  <a id="settings-open" class="nav" href="#settings" aria-label="Settings"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-settings"/></svg><span class="lbl">Settings</span></a>
-  <label class="operator" title="Recorded on every action">
+  <button id="runcards-open" class="nav console-only" type="button" title="Units sent per event type"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-list"/></svg><span class="lbl">Run cards</span></button>
+  <label class="operator console-only" title="Recorded on every action">
     <span class="dim">Operator</span>
     <select id="operator-pick" hidden></select>
     <input id="operator" type="text" maxlength="60" autocomplete="off" spellcheck="false" placeholder="Name">
   </label>
-  <a class="nav" href="/comms" title="All transmissions" aria-label="Comms"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-radio"/></svg><span class="lbl">Comms</span></a>
-  <a class="nav" href="/monitor" title="Radio monitor" aria-label="Monitor"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-monitor"/></svg><span class="lbl">Monitor</span></a>
-  <span id="clock" class="clock"><b id="clock-local"></b></span>
+  <button id="sound" class="nav live-btn board-only" type="button">Sound</button>
+  <button id="fullscreen" class="nav board-only" type="button" title="Full screen (f)" aria-label="Full screen"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-expand"/></svg><span class="lbl">Full screen</span></button>
+  <a class="nav console-only" href="/monitor" target="sizeup-monitor" title="Wall board: opens in its own window"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-monitor"/></svg><span class="lbl">Monitor</span></a>
+  <a class="nav board-only" href="/cad" title="Dispatch console"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-dispatch"/></svg><span class="lbl">CAD</span></a>
+  <span id="clock" class="clock"><span id="clock-date" class="dim"></span> <b id="clock-local"></b> <span id="clock-z" class="dim"></span></span>
 </header>
 <div id="cloud-banner" class="banner cloud-banner" hidden></div>
 <div id="role-banner" class="banner role-banner" role="status" hidden></div>
@@ -87,6 +96,40 @@
           <ol id="ov-nonemerg" class="list ov-nelist"></ol>
         </div>
       </div>
+    </div>
+
+    <!-- Radio (radio-view.js, /cad#radio?unit=&channel=&event=&q=...): every transmission and unit note, Main
+         channels up front, the other talkgroups folded. It replaced the Comms page (/comms redirects here). -->
+    <div id="radio-view" class="radio-view" hidden>
+      <div class="rv-head">
+        <h2>Radio</h2>
+        <span id="rv-count" class="dim small"></span>
+        <span class="spacer"></span>
+        <button id="rv-live" class="live-btn" type="button">Live</button>
+      </div>
+      <form id="rv-filters" class="rv-filters" autocomplete="off" role="search">
+        <input id="rv-q" type="search" placeholder="Search words" aria-label="Search words" spellcheck="false" maxlength="60">
+        <select id="rv-unit" aria-label="Unit"><option value="">Any unit</option></select>
+        <select id="rv-channel" aria-label="Channel or talkgroup"><option value="">Any channel</option></select>
+        <select id="rv-event" aria-label="Incident"><option value="">Any incident</option></select>
+        <select id="rv-type" aria-label="Show"><option value="">All</option><option value="radio">Transmissions</option><option value="notes">Notes</option></select>
+        <label class="inline check"><input id="rv-pcfd" type="checkbox"> <span>PCFD only</span></label>
+        <label class="inline"><span class="dim">From</span> <input id="rv-since" type="datetime-local"></label>
+        <label class="inline"><span class="dim">To</span> <input id="rv-until" type="datetime-local"></label>
+        <button id="rv-clear" type="button">Clear</button>
+      </form>
+      <section class="rv-sec">
+        <div class="sec-head"><h2>Main</h2><span id="rv-main-sum" class="dim small sum"></span><button type="button" class="help" aria-label="Help" aria-expanded="false" data-help="FG1, Fire/EMS 15 and every talkgroup marked Main (Settings, Radios), and notes tagged with a unit. The rest: Other talkgroups.">?</button></div>
+        <ol id="rv-main" class="list log radio-log rv-list"></ol>
+      </section>
+      <section id="rv-other-sec" class="rv-sec other-section">
+        <div class="sec-head">
+          <button id="rv-other-toggle" class="sec-toggle" type="button" aria-expanded="false" aria-controls="rv-other">
+            <span class="caret" aria-hidden="true">▸</span><span class="h2">Other talkgroups</span><span id="rv-other-sum" class="dim sum"></span>
+          </button>
+        </div>
+        <ol id="rv-other" class="list other" hidden></ol>
+      </section>
     </div>
 
     <form id="new-form" class="card form" hidden autocomplete="off">
@@ -275,7 +318,7 @@
         <div class="card-head"><h2>Radio</h2>
           <span id="d-radio-sum" class="dim small"></span>
           <span class="spacer"></span>
-          <a id="d-radio-all" class="nav" href="/comms" title="This incident on Comms">Comms</a>
+          <a id="d-radio-all" class="nav" href="#radio" title="This incident in Radio"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-radio"/></svg><span class="lbl">All</span></a>
         </div>
         <div id="d-radio-units" class="row unit-filter" role="group" aria-label="Show one unit"></div>
         <ol id="d-radio" class="list log radio-log"></ol>
@@ -300,10 +343,13 @@
   <!-- units by kind, with status buttons -->
   <aside class="units">
     <div id="feed" hidden></div>
-    <h2>Units</h2>
-    <div id="units" class="unit-groups"></div>
-    <h2 class="mt" title="Status changes off an incident">Unit log</h2>
-    <ol id="unit-log" class="list unit-log"></ol>
+    <!-- the wall board (board.js): recent pages and every unit's status in one strip, instead of the board's buttons -->
+    <section class="board-only b-sec"><h2>Pages</h2><ol id="b-pages" class="list pages"></ol></section>
+    <section class="board-only b-sec"><h2>Units</h2><div id="b-units" class="b-strip"></div></section>
+    <h2 class="console-only">Units</h2>
+    <div id="units" class="unit-groups console-only"></div>
+    <h2 class="mt console-only" title="Status changes off an incident">Unit log</h2>
+    <ol id="unit-log" class="list unit-log console-only"></ol>
   </aside>
 </main>
 
@@ -348,6 +394,7 @@ Slots go in order. A kind takes the next available unit of that kind (regular ap
     <section id="s-system" class="s-panel" data-s="system" hidden></section>
     <section id="s-radios" class="s-panel" data-s="radios" hidden>
       <div class="s-head"><h2>Radios</h2></div>
+      <div id="settings-radio-controls" class="radio-controls"></div>
       <div class="s-note">Radios editor unavailable</div>
       <div id="settings-radios" class="settings-radios"></div>
     </section>
@@ -386,6 +433,9 @@ Slots go in order. A kind takes the next available unit of that kind (regular ap
 <script src="/static/cad-feed.js"></script>
 <script src="/static/cad.js"></script>
 <script src="/static/cadmap.js"></script>
+<script src="/static/radio-view.js"></script>
+<script src="/static/radio-controls.js"></script>
 <script src="/static/settings.js"></script>
+<script src="/static/board.js"></script>
 </body>
 </html>

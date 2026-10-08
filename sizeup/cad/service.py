@@ -142,6 +142,8 @@ class Cad:
         # Set by the app: who is transmitting now (sizeup/radio/live.py) and whether a clip's audio is still kept.
         self.live: Callable[[], list[dict]] = lambda: []
         self.has_clip: Callable[[str], bool] = lambda cid: False
+        # Is this talkgroup "Main" (the station's switch, Settings > Radios)? The app sets it; alone: the incident talkgroups.
+        self.main_tg: Callable[[int], bool] = lambda tg: tg in s.incident_talkgroups
         # The maps (sizeup/cad/mapview.py): live unit positions {code: {lat, lon, at}} from a future AVL
         # feed (IamResponding, Red Alert, an iPad app). Nothing sets it yet.
         self.positions: Callable[[], dict[str, dict]] = lambda: {}
@@ -753,7 +755,9 @@ class Cad:
 
     def comms_query(self, q: dict) -> dict:
         """GET /api/cad/comms: {rows, rev, channels, rigs, pcfd, talking}. ?rev=N: {unchanged: true}
-        when nothing was logged since N (the page polls)."""
+        when nothing was logged since N (the CAD's Radio view polls). ?q=: words in the transcript or
+        note. Each row says whether it is "main" (FG1 and the like, a talkgroup marked Main, a note):
+        the Radio view puts those up front and folds the rest by talkgroup."""
         def one(k: str) -> str:
             v = (q.get(k) or [""])[0].strip()
             if len(v) > 60:
@@ -780,9 +784,10 @@ class Cad:
         rows = self.comms.query(unit=one("unit"), channel=one("channel"), event=one("event"),
                                 pcfd=pcfd if one("pcfd") in ("1", "true", "on") else None,
                                 since=when("since"), until=when("until"), limit=limit,
-                                kind={"radio": "radio", "notes": "notes"}.get(one("type"), ""))
+                                kind={"radio": "radio", "notes": "notes"}.get(one("type"), ""), text=one("q"))
         for r in rows:
             r["has_audio"] = r["kind"] == "radio" and self.has_clip(r["id"])
+            r["main"] = r["talkgroup"] is None or bool(self.main_tg(r["talkgroup"]))
         return {"rows": rows, "rev": f"{self.comms.rev}.{self.store.rev}", "pcfd": pcfd, "talking": talking, **self.comms.facets(),
                 "events": [{"id": r["id"], "number": r["number"], "type": r["type"], "address": r["address"]}
                            for r in self.store.q("SELECT DISTINCT i.id, i.number, i.type, i.address FROM radio_links l "
