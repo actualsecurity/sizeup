@@ -5,7 +5,7 @@
 "use strict";
 
 window.RadiosPanel = (() => {
-  const SOURCE_TEXT = { confirmed: "confirmed", guessed: "guessed", heard: "heard on the air" };
+  const SOURCE_TEXT = { confirmed: "confirmed", guessed: "guessed", heard: "heard" };
   const p = { box: null, opts: {}, data: null, filter: "", show: "mapped", sys: "", editing: null, error: "" };
 
   function el(tag, cls, text) {
@@ -21,11 +21,11 @@ window.RadiosPanel = (() => {
   async function load() {
     try {
       const r = await fetch("/api/cad/radios");
-      if (!r.ok) throw new Error(r.status === 404 ? "this server has no radio registry yet (restart sizeup)" : `${r.status}`);
+      if (!r.ok) throw new Error(r.status === 404 ? "no radio registry (restart sizeup)" : `${r.status}`);
       p.data = await r.json();
       p.error = "";
     } catch (e) {
-      p.error = `Could not load the radios: ${e.message}`;
+      p.error = `Load failed: ${e.message}`;
     }
     render();
   }
@@ -41,7 +41,7 @@ window.RadiosPanel = (() => {
 
   function unitSelect(value) {
     const s = el("select", "rp-unit");
-    s.append(new Option("— no rig —", ""));
+    s.append(new Option("No rig", ""));
     const units = (p.data && p.data.units) || [];
     for (const [title, rows] of [["PCFD", units.filter((u) => u.pcfd)], ["Others", units.filter((u) => !u.pcfd)]]) {
       const g = document.createElement("optgroup");
@@ -77,7 +77,7 @@ window.RadiosPanel = (() => {
     const unit = unitSelect(r.unit), label = el("input"), src = sourceSelect(r.source), notes = el("input");
     label.value = r.label || "";
     label.maxLength = 60;
-    label.placeholder = "Portable 1, Mobile…";
+    label.placeholder = "Portable 1";
     notes.value = r.notes || "";
     notes.maxLength = 300;
     const save = el("button", "primary mini", "Save"), cancel = el("button", "mini", "Cancel"), del = el("button", "mini danger-quiet", "Remove");
@@ -92,7 +92,7 @@ window.RadiosPanel = (() => {
     });
     cancel.addEventListener("click", () => { p.editing = null; render(); });
     del.addEventListener("click", async () => {
-      if (!confirm(`Remove ${r.system.toUpperCase()} ${r.radio_id} from the registry?`)) return;
+      if (!confirm(`Remove ${r.system.toUpperCase()} ${r.radio_id}?`)) return;
       try { await post("/api/cad/radios/delete", { system: r.system, radio_id: r.radio_id }); p.editing = null; await load(); }
       catch (e) { p.error = e.message; render(); }
     });
@@ -111,9 +111,9 @@ window.RadiosPanel = (() => {
     const edit = el("button", "mini", "Edit");
     edit.type = "button";
     edit.addEventListener("click", () => { p.editing = `${r.system}:${r.radio_id}`; render(); });
-    const confirmB = el("button", "mini", "✓ Confirm");
+    const confirmB = el("button", "mini", "Confirm");
     confirmB.type = "button";
-    confirmB.title = "Mark this mapping confirmed by the department";
+    confirmB.title = "Confirmed by the department";
     confirmB.hidden = r.source === "confirmed" || !r.unit;
     confirmB.addEventListener("click", async () => {
       try { await post("/api/cad/radios", { system: r.system, radio_id: r.radio_id, source: "confirmed" }); await load(); }
@@ -130,7 +130,7 @@ window.RadiosPanel = (() => {
     const act = el("td", "rp-act");
     act.append(confirmB, edit);
     tr.append(act);
-    if (r.edited) tr.title = "Edited by a person: never overwritten by what is heard";
+    if (r.edited) tr.title = "Edited: never overwritten by what is heard";
     return tr;
   }
 
@@ -139,13 +139,13 @@ window.RadiosPanel = (() => {
     const sys = el("select");
     sys.append(new Option("MDC (FG1)", "mdc"), new Option("P25 (county)", "p25"));
     const id = el("input");
-    id.placeholder = "radio ID (0611 / 41228)";
+    id.placeholder = "Radio ID";
     id.maxLength = 12;
     id.required = true;
     const unit = unitSelect(""), label = el("input"), src = sourceSelect("confirmed");
-    label.placeholder = "label";
+    label.placeholder = "Label";
     label.maxLength = 60;
-    const b = el("button", "primary", "Add radio");
+    const b = el("button", "primary", "Add");
     b.type = "submit";
     f.append(el("b", "", "Add"), sys, id, unit, label, src, b);
     f.addEventListener("submit", async (e) => {
@@ -166,16 +166,17 @@ window.RadiosPanel = (() => {
     const d = p.data;
     const out = [];
     if (p.error) out.push(el("div", "error rp-error", p.error));
-    if (!d) { out.push(el("div", "dim", p.error ? "" : "Loading…")); box.replaceChildren(...out); return; }
+    if (!d) { out.push(el("div", "dim", p.error ? "" : "Loading")); box.replaceChildren(...out); return; }
     const all = d.radios || [];
     const n = (f) => all.filter(f).length;
-    out.push(el("div", "dim small rp-sum",
-      `${all.length} radio IDs · ${n((r) => r.source === "confirmed")} confirmed · ${n((r) => r.source === "guessed")} guessed · ` +
-      `${n((r) => r.source === "heard")} heard · ${n((r) => !r.unit)} on no rig. Seeded from ${d.seed.file} v${d.seed.version}; ` +
-      "a person's edit always wins over what is heard."));
+    const sum = el("div", "dim small rp-sum");
+    sum.append(...[[all.length, "IDs"], [n((r) => r.source === "confirmed"), "confirmed"], [n((r) => r.source === "guessed"), "guessed"],
+      [n((r) => r.source === "heard"), "heard"], [n((r) => !r.unit), "no rig"]].map(([k, t]) => el("span", "", `${k} ${t}`)));
+    sum.title = `Seeded from ${d.seed.file} v${d.seed.version}. A person's edit always wins over what is heard.`;
+    out.push(sum);
     if ((d.conflicts || []).length || (d.unfit || []).length) {
       const warn = el("details", "rp-warn");
-      warn.append(el("summary", "", `Left unmapped: ${d.conflicts.length} conflict(s), ${new Set(d.unfit.map((u) => u.unit)).size} unit(s) the ID pattern doesn't fit`));
+      warn.append(el("summary", "", `Unmapped: ${d.conflicts.length} conflicts, ${new Set(d.unfit.map((u) => u.unit)).size} units off pattern`));
       const ul = el("ul");
       for (const c of d.conflicts) ul.append(el("li", "", `${c.ids}: ${c.reason}`));
       const seen = new Set();
@@ -190,12 +191,12 @@ window.RadiosPanel = (() => {
     const tools = el("div", "row rp-tools");
     const q = el("input", "tg-filter");
     q.type = "search";
-    q.placeholder = "Filter: ID, unit, label, alias";
+    q.placeholder = "Filter";
     q.value = p.filter;
     q.setAttribute("aria-label", "Filter radios");
     q.addEventListener("input", () => { p.filter = q.value; drawTable(); });
     const show = el("select");
-    for (const [v, t] of [["mapped", "On a rig + all MDC"], ["all", "Everything (all P25 heard)"],
+    for (const [v, t] of [["mapped", "On a rig + all MDC"], ["all", "All (incl. P25 heard)"],
                           ["unassigned", "On no rig"], ["confirmed", "Confirmed only"]]) show.append(new Option(t, v));
     show.value = p.show;
     show.addEventListener("change", () => { p.show = show.value; drawTable(); });
@@ -221,8 +222,8 @@ window.RadiosPanel = (() => {
     const ol = el("ol", "list");
     for (const a of d.log || []) {
       const li = el("li", "small");
-      li.append(el("span", "dim", `${fmt(a.at)} ${a.operator || "—"} · `), el("b", "", a.key || ""), el("span", "",
-        a.old || a.new ? `: ${a.old || "(none)"} → ${a.new || "(removed)"}` : ""));
+      li.append(el("span", "dim", `${fmt(a.at)} ${a.operator || "—"} `), el("b", "", a.key || ""), el("span", "",
+        a.old || a.new ? `: ${a.old || "—"} → ${a.new || "removed"}` : ""));
       ol.append(li);
     }
     logBox.append(ol);
@@ -240,13 +241,13 @@ window.RadiosPanel = (() => {
     body.replaceChildren(...shownRows.map((r) => (p.editing === `${r.system}:${r.radio_id}` ? editRow(r) : viewRow(r))));
     if (!list.length) {
       const tr = el("tr");
-      const td = el("td", "dim", "No radios match");
+      const td = el("td", "dim", "None");
       td.colSpan = 9;
       tr.append(td);
       body.append(tr);
     } else if (list.length > shownRows.length) {
       const tr = el("tr");
-      const td = el("td", "dim", `${list.length - shownRows.length} more: filter to see them`);
+      const td = el("td", "dim", `${list.length - shownRows.length} more: filter`);
       td.colSpan = 9;
       tr.append(td);
       body.append(tr);

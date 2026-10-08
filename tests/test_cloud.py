@@ -242,6 +242,7 @@ def test_a_60_control_page_makes_the_same_pending_cad_event_on_the_hub(tmp_path)
         assert wait(lambda: [p["raw"] for p in hub.get("/api/state")["pages"]] == [PAGE_TEXT], 5)   # pushed once a second
         page = hub.get("/api/state")["pages"][0]
         assert page["raw"] == PAGE_TEXT and page["dispatch"] and page["has_audio"]
+        assert wait(lambda: hub.get("/api/state")["incidents"], 5)                                    # also pushed once a second
         assert hub.get("/api/state")["incidents"][0]["departments"] == st.state()["incidents"][0]["departments"]
     finally:
         st.link.stop()

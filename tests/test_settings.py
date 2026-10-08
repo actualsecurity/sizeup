@@ -197,7 +197,7 @@ def test_ems_and_pd_never_on_run_cards_tick_all_or_the_air_but_can_be_attached()
     iid = cad.create({"type": "ALS", "address": "209 Westchester Ave"})["id"]
     a4 = uid(cad, "77A4")
     for fn in (cad.preview, cad.dispatch):
-        with pytest.raises(CadError, match="never dispatched.*77A4"):
+        with pytest.raises(CadError, match="don't dispatch.*77A4"):
             fn(iid, {"unit_ids": [uid(cad, "E60"), a4], "operator": "JD"})
     cad.dispatch(iid, {"unit_ids": [uid(cad, "E60")], "operator": "JD"})
     # attached when it shows up: "77A4 on location", not "dispatched"

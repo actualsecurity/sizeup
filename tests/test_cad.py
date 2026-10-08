@@ -320,7 +320,7 @@ def test_event_info_fields_and_chronology_wording():
     assert texts(cad, inc["id"]) == ["Event created (pending): Service / Lift at 209 Westchester Ave; received via Phone",
                                      "Caller info: COREY · 1 Main St · 914-555-0100"]
     for bad, msg in (({"type": "FIRE"}, "not an event type"), ({"type": "SERVICE", "subtype": "NOPE"}, "subtype"),
-                     ({"type": ""}, "required"), ({"type": "SERVICE", "received_via": "FAX"}, "received_via"),
+                     ({"type": ""}, "Pick a type"), ({"type": "SERVICE", "received_via": "FAX"}, "received_via"),
                      ({"type": "SERVICE", "emergency": "yes"}, "true or false")):
         with pytest.raises(CadError, match=msg):
             cad.create(bad)
@@ -342,7 +342,7 @@ def test_close_needs_a_disposition_and_clears_units(tmp_path):
     assert (a["enroute_at"] - a["dispatched_at"], a["onscene_at"] - a["dispatched_at"]) == (60, 180)
     with pytest.raises(CadError):
         cad.unit_status(e60, {"status": "ON SCENE"})                   # not the sheet's word
-    for body, msg in (({}, "required"), ({"disposition": "DONE"}, "not one of")):
+    for body, msg in (({}, "Pick a disposition"), ({"disposition": "DONE"}, "not one of")):
         with pytest.raises(CadError, match=msg):
             cad.close(iid, body)
     cad.close(iid, {"disposition": "COMPLETE", "operator": "JD"})
@@ -473,7 +473,7 @@ def test_accepting_a_queued_page_routes_by_class():
     # A page the operator files as a notification: accepted straight into Non-emergency events.
     _, inc2 = monitor_incident("Port Chester Fire, be advised, hydrant out of service at 10 Grove Street")
     q = cad.from_monitor(inc2)
-    with pytest.raises(CadError, match="pick the type"):
+    with pytest.raises(CadError, match="Pick a type"):
         cad.accept(q["id"], {})
     b = cad.accept(q["id"], {"type": "NOTIF", "operator": "JD"})
     assert (b["status"], b["emergency"]) == ("pending", 0)
@@ -487,7 +487,7 @@ def test_non_emergency_events_get_no_dispatch_but_can_have_units():
     assert r["units"] == [] and r["note"].startswith("Non-emergency event")
     e60 = uid(cad, "E60")
     for fn in (cad.dispatch, cad.preview):
-        with pytest.raises(CadError, match="non-emergency"):
+        with pytest.raises(CadError, match="Non-emergency"):
             fn(iid, {"unit_ids": [e60], "operator": "JD"})
     cad.attach(iid, {"unit_ids": [e60], "operator": "JD"})
     inc = cad.store.full(iid)
@@ -564,7 +564,7 @@ def test_service_dispatch_add_on_and_upgrade():
                                          "Ladder 31 and 23 98 on location. 169 North Main Street, commercial fire alarm. "
                                          "Time out 15:13.")
     assert add["kind"] == "add-on" and "E61 added to the assignment" in texts(cad, iid)
-    with pytest.raises(CadError, match="nothing to upgrade"):
+    with pytest.raises(CadError, match="Nothing to upgrade"):
         cad.upgrade(iid, {"operator": "JD"})
     # The upgrade recommends only what the new card adds over what's there.
     rec = cad.recommend(iid, {"type": "STRU"})
@@ -584,7 +584,7 @@ def test_service_dispatch_add_on_and_upgrade():
     assert "Upgrade: Alarm / Commercial → Structure fire; smoke in the structure; full department response" in t
     assert "E58 dispatched (upgrade)" in t and by_name(cad, "R40")["status"] == "DP"
     fresh = cad.create({"type": "STRU"})["id"]
-    with pytest.raises(CadError, match="dispatch it first"):
+    with pytest.raises(CadError, match="Dispatch first"):
         cad.upgrade(fresh, {"info": "x", "operator": "JD"})
 
 
@@ -761,9 +761,9 @@ def test_tone_plan_by_department(monkeypatch):
     p = cad._plan(cad.store.incident(iid), [by_name(cad, "E63"), by_name(cad, "L30")], "new", False)[1]
     assert p["groups"] == [PC, PC]
     assert p["label"] == "Port Chester + Rye Brook (not set → PC)"
-    assert p["warnings"] == ["Rye Brook tones not set — played Port Chester's"]
+    assert p["warnings"] == ["Rye Brook tones not set: played Port Chester's"]
     pv = lead(cad, iid, ["E14", "L30"])
-    assert pv["tones"] == "Rye Brook (not set → PC)" and pv["tone_warnings"] == ["Rye Brook tones not set — played Port Chester's"]
+    assert pv["tones"] == "Rye Brook (not set → PC)" and pv["tone_warnings"] == ["Rye Brook tones not set: played Port Chester's"]
     assert cad._plan(cad.store.incident(iid), [by_name(cad, "E14")], "new", False)[1]["groups"] == [PC]   # never silent
     # Add-on: only the departments of the units added.
     cad.dispatch(iid, {"unit_ids": [uid(cad, "E60")], "operator": "JD"})
@@ -778,8 +778,8 @@ def test_tone_plan_by_department(monkeypatch):
     # Recorded with the dispatch and on the timeline.
     full = cad.store.full(iid)
     assert [x["tones"] for x in full["dispatches"]] == [
-        "Port Chester", "Port Chester", "Rye Brook (not set → PC). Rye Brook tones not set — played Port Chester's"]
-    assert "Tones: Rye Brook (not set → PC). Rye Brook tones not set — played Port Chester's" in texts(cad, iid)
+        "Port Chester", "Port Chester", "Rye Brook (not set → PC). Rye Brook tones not set: played Port Chester's"]
+    assert "Tones: Rye Brook (not set → PC). Rye Brook tones not set: played Port Chester's" in texts(cad, iid)
     with pytest.raises(lists.ListsError, match="dispatch_tones"):
         lists.load(write_lists(Path(__import__("tempfile").mkdtemp()), dispatch_tones={"Rye": [[600, 1]]}))
 
@@ -854,7 +854,7 @@ def test_page_for_port_chester_becomes_one_queued_event():
     cad.from_monitor(inc2)
     queued = [i for i in cad.store.incidents() if i["status"] == "queued"]
     assert len(queued) == 1 and queued[0]["remarks"].count(PAGE_TEXT) == 2
-    with pytest.raises(CadError, match="accept"):
+    with pytest.raises(CadError, match="Accept first"):
         cad.dispatch(p["id"], {"unit_ids": [1], "operator": "JD"})
     cad.accept(p["id"], {"subtype": "COMM", "operator": "JD"})
     acc = cad.store.incident(p["id"])

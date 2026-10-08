@@ -33,7 +33,7 @@ window.CadFeed = (() => {
   }
   const hhmmss = (unix) => st.deps.time(unix);
   const who = (t) => t.rig || t.talker || t.radio_id || "radio";
-  const said = (t) => t.text || (t.status === "no_speech" ? "key-up · no speech" : t.status === "pending" ? "transcribing…" : "(no words)");
+  const said = (t) => t.text || (t.status === "no_speech" ? "Key-up, no speech" : t.status === "pending" ? "Transcribing" : "—");
   const openEvent = () => {
     const inc = st.deps.selected();
     return inc && !["closed", "dismissed"].includes(inc.status) ? inc : null;
@@ -55,8 +55,8 @@ window.CadFeed = (() => {
     const title = el("b", "feed-title");
     const talk = el("span", "feed-talk");
     talk.hidden = true;
-    const more = el("a", "feed-more", "More →");
-    more.title = "Every transmission on this talkgroup (/comms)";
+    const more = el("a", "feed-more", "More");
+    more.title = "All on this talkgroup";
     head.append(tog, title, talk, el("span", "spacer"), more);
     const ticker = el("div", "feed-ticker");
     const list = el("ol", "list feed-list");
@@ -82,7 +82,7 @@ window.CadFeed = (() => {
       st.sig = sig;
       st.box.classList.toggle("collapsed", st.collapsed);
       st.tog.textContent = st.collapsed ? "▸" : "▾";
-      st.tog.title = st.collapsed ? "Show the last transmissions" : "Collapse to the latest line";
+      st.tog.title = st.collapsed ? "Expand" : "Collapse";
       st.tog.setAttribute("aria-expanded", String(!st.collapsed));
       st.list.hidden = st.collapsed;
       st.ticker.hidden = !st.collapsed;
@@ -96,8 +96,8 @@ window.CadFeed = (() => {
     const tgs = f.talkgroups || [];
     const live = talking.filter((e) => e.system === "p25" && tgs.includes(e.tg));
     const now = live.find((e) => !e.ended) || live[0] || null;
-    const text = now ? `${now.ended ? "just transmitted" : "talking now"} · ${now.rig || now.alias || (now.radio_id ? `radio ${now.radio_id}` : "talker not known yet")}`
-      + (tgs.length > 1 ? ` · ${now.channel}` : "") : "";
+    const text = now ? `${now.ended ? "Ended" : "TX"} ${now.rig || now.alias || (now.radio_id ? `radio ${now.radio_id}` : "unknown")}`
+      + (tgs.length > 1 ? ` ${now.channel}` : "") : "";
     const sig = JSON.stringify([f.title, f.channel, text, now && now.ended, now && now.dispatcher]);
     if (sig === st.headSig) return;
     st.headSig = sig;
@@ -106,18 +106,18 @@ window.CadFeed = (() => {
     st.talk.hidden = !now;
     st.talk.textContent = text;
     st.talk.className = "feed-talk talk-badge" + (now && now.ended ? " ended" : "") + (now && now.dispatcher ? " disp" : "");
-    if (now) st.talk.title = [now.radio_id ? `radio ${now.radio_id}` : "", now.alias || "", `TG ${now.tg}`].filter(Boolean).join(" · ");
+    if (now) st.talk.title = [now.radio_id ? `radio ${now.radio_id}` : "", now.alias || "", `TG ${now.tg}`].filter(Boolean).join(", ");
     st.box.classList.toggle("talking", !!now && !now.ended);
   }
 
   function pcBadge(t) {
     const b = el("span", "pc-badge", "PC");
-    b.title = `Talking to us: ${t.pc}`;
+    b.title = `To us: ${t.pc}`;
     return b;
   }
 
   function renderTicker(t) {
-    if (!t) { st.ticker.replaceChildren(el("span", "dim", "Nothing heard on this talkgroup yet")); return; }
+    if (!t) { st.ticker.replaceChildren(el("span", "dim", "None")); return; }
     const line = el("span", "feed-line");
     line.append(el("span", "t", hhmmss(t.start)), el("b", t.dispatcher ? "disp" : "unit", who(t)),
                 el("span", t.text ? "" : "dim", said(t)));
@@ -129,7 +129,7 @@ window.CadFeed = (() => {
 
   function renderRows(rows, inc, f) {
     if (!rows.length) {
-      st.list.replaceChildren(el("li", "empty", "Nothing heard on this talkgroup yet"));
+      st.list.replaceChildren(el("li", "empty", "None"));
       return;
     }
     const many = (f.talkgroups || []).length > 1;
@@ -143,7 +143,7 @@ window.CadFeed = (() => {
       const acts = el("span", "feed-acts");
       for (const e of t.events || []) {
         const c = el("span", "feed-ev" + (e.why === "manual" ? " manual" : ""), e.number || `#${e.id}`);
-        c.title = `On event ${e.number || e.id}${e.address ? ` · ${e.address}` : ""} (${e.why === "manual" ? `added by ${e.unit || "hand"}` : e.why})`;
+        c.title = `${e.number || e.id}${e.address ? `, ${e.address}` : ""} (${e.why === "manual" ? `added by ${e.unit || "hand"}` : e.why})`;
         acts.append(c);
       }
       acts.append(addButton(t, inc));
@@ -153,21 +153,21 @@ window.CadFeed = (() => {
   }
 
   function addButton(t, inc) {
-    const b = el("button", "mini feed-add", "+ event");
+    const b = el("button", "mini feed-add", "+ Event");
     b.type = "button";
     const on = inc && (t.events || []).some((e) => e.id === inc.id);
     if (!inc) {
       b.disabled = true;
-      b.title = "Open an event first: this puts the transmission in its radio traffic";
+      b.title = "Open an event first";
     } else if (on) {
       b.disabled = true;
-      b.textContent = "✓ event";
-      b.title = `Already in ${inc.number || "this event"}'s radio traffic`;
+      b.textContent = "Added";
+      b.title = `On ${inc.number || "this event"}`;
     } else if (st.busy.has(t.id)) {
       b.disabled = true;
       b.textContent = "…";
     } else {
-      b.title = `Put this transmission in ${inc.number || "the open event"}'s radio traffic`;
+      b.title = `Add to ${inc.number || "the open event"}`;
       b.addEventListener("click", () => link(t, inc, b));
     }
     return b;
@@ -180,7 +180,7 @@ window.CadFeed = (() => {
       await st.deps.api("POST", `/api/cad/incident/${inc.id}/link`, { traffic_id: t.id, operator: st.deps.operator() });
     } catch (err) {
       b.title = err.message;
-      alert(`Could not add it to the event: ${err.message}`);
+      alert(`Add failed: ${err.message}`);
     } finally {
       st.busy.delete(t.id);
       st.sig = "";
@@ -198,7 +198,7 @@ window.CadFeed = (() => {
       st.seen.add(t.id);
       if (first || !t.pc || !alertsOn() || !window.Radio) continue;
       const head = t.dispatcher ? "60 Control → Port Chester" : `${who(t)} → 60 Control`;
-      Radio.toast(`${head}: ${said(t)}`, `${hhmmss(t.start)} · ${t.channel} · ${t.pc}`);
+      Radio.toast(`${head}: ${said(t)}`, `${hhmmss(t.start)} ${t.channel}, ${t.pc}`);
     }
     if (st.seen.size > 500) st.seen = new Set(rows.map((t) => t.id));
   }

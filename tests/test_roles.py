@@ -111,7 +111,7 @@ def test_a_dispatcher_gets_403_on_every_settings_write_and_nothing_changes(api):
     for path, body in settings_writes(api.cad, api.ids):
         code, out = call(api, path, body, JULIAN)
         assert code == 403, (path, out)
-        assert out == {"error": "Only an admin can change settings (you are a dispatcher)"}
+        assert out == {"error": "Admins only (you: dispatcher)"}
     assert (api.cad.settings.audit_log(), api.cad.settings.overrides(), api.cad.settings.operators(),
             api.cad.run_cards(), api.cad.radio_registry()["radios"]) == before
     assert len(api.logged) == len(settings_writes(api.cad, api.ids))
@@ -144,8 +144,8 @@ def test_a_dispatcher_runs_calls(api):
 def test_a_viewer_and_a_deactivated_user_only_look(api):
     code, inc = call(api, "/api/cad/incident", {"type": "STRU", "address": "209 Westchester Ave"}, COREY)
     iid, e60 = inc["id"], uid(api.cad, "E60")
-    for email, why in ((VAL, "Only a dispatcher or an admin can do that (you are a viewer)"),
-                       (DEE, "Your account is deactivated: you can look but not change anything (ask Corey)")):
+    for email, why in ((VAL, "Dispatchers and admins only (you: viewer)"),
+                       (DEE, "Account deactivated (ask Corey)")):
         for path, body in (("/api/cad/incident", {"type": "STRU"}),
                            (f"/api/cad/incident/{iid}/note", {"text": "hi"}),
                            (f"/api/cad/incident/{iid}/dispatch", {"unit_ids": [e60]}),
@@ -175,7 +175,7 @@ def test_no_admin_yet_anyone_signed_in_may_then_only_the_admin(tmp_path):
     # the first person makes themself admin: from then on it's theirs
     assert call(api, "/api/cad/settings/users", {"action": "edit", "id": ids["Corey"], "role": "admin"}, COREY)[0] == 200
     code, out = call(api, "/api/cad/settings/users", {"action": "edit", "id": ids["Julian"], "role": "admin"}, JULIAN)
-    assert code == 403 and "you are a dispatcher" in out["error"]
+    assert code == 403 and "you: dispatcher" in out["error"]
     assert call(api, "/api/cad/settings/users", {"action": "edit", "id": ids["Julian"], "role": "admin"}, COREY)[0] == 200
     assert call(api, "/api/cad/settings/event_types", {"action": "reset_section"}, JULIAN)[0] == 200    # now an admin
 
@@ -225,7 +225,7 @@ def test_an_import_cant_remove_every_admin(api):
 
 def test_an_unknown_write_route_is_admin_only(api):
     code, out = call(api, "/api/cad/something-new", {}, JULIAN)
-    assert code == 403 and "Only an admin" in out["error"]
+    assert code == 403 and "Admins only" in out["error"]
     assert call(api, "/api/cad/something-new", {}, COREY)[0] == 404                  # allowed, then not found
     assert call(api, "/api/cad/incident/1/explode", {}, JULIAN)[0] == 403
 
@@ -251,7 +251,7 @@ def test_the_hub_enforces_roles_for_who_signed_in(keys, hub):  # noqa: F811
     code, inc = req(hub.url + "/api/cad/incident", "POST", {"type": "STRU", "operator": "Corey"}, as_(JULIAN))
     assert code == 200
     code, out = req(hub.url + "/api/cad/settings/users", "POST", {"action": "add", "name": "Pat", "operator": "Corey"}, as_(JULIAN))
-    assert (code, out) == (403, {"error": "Only an admin can change settings (you are a dispatcher)"})
+    assert (code, out) == (403, {"error": "Admins only (you: dispatcher)"})
     # the radio switches forwarded to the station are settings too; the monitor's close is a call
     for path, body in (("/api/talkgroup", {"tg": 307, "record": True}), ("/api/talkgroup-group", {"group": "Fire", "main": True}),
                        ("/api/mode", {"mode": "trunk"}), ("/api/retranscribe", {"all": True})):

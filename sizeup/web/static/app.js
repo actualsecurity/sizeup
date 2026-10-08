@@ -11,8 +11,8 @@
 const $ = (sel) => document.querySelector(sel);
 const LOST_AFTER_MS = 6000;          // no push for this long: say the display is stale
 const RETURN_AFTER_MS = 120000;      // someone panned the map: go back to the incident/home after 2 min
-const SOURCE_COLORS = { "Fire/EMS 15": "#3fd0e0", "FG1": "#ff8a3d", "South 2": "#e8d84a" };
-const EXTRA_COLORS = ["#7ee07e", "#f27ad1", "#a3a9ff", "#ffcf7a", "#7fe3c8"];
+const SOURCE_COLORS = { "Fire/EMS 15": "#6AA6E8", "FG1": "#ff8a3d", "South 2": "#e8d84a" };
+const EXTRA_COLORS = ["#7ee07e", "#f27ad1", "#B8C0CA", "#ffcf7a", "#7fe3c8"];
 
 const ui = {
   scene: null, state: null, map: null, mapReady: false,
@@ -119,7 +119,7 @@ const hz = (v) => (v === null || v === undefined ? "?" : Number(v).toFixed(1));
 
 function catColor(cat) {
   const c = (ui.scene && ui.scene.categories) || {};
-  return c[cat] || c.unknown || "#9aa0b4";
+  return c[cat] || c.unknown || "#9AA3AD";
 }
 
 function sourceColor(name) {
@@ -137,7 +137,7 @@ function chip(text, color, cls = "") {
 
 function playButton(id, title, hasAudio = true) {
   if (hasAudio === false) player.missing.add(id);  // the server says there's no recording
-  const b = el("button", "play", "▶");
+  const b = Icon.play(el("button", "play"));
   b.dataset.play = id;
   b.title = title || "Play";
   paintPlay(b);
@@ -159,7 +159,7 @@ function rerunButton(id, pending, hasAudio = true) {
   const b = el("button", "rerun", pending ? "…" : "↻");
   b.dataset.rerun = id;
   b.disabled = !!pending || hasAudio === false;
-  b.title = pending ? "Re-running speech-to-text…" : "Run speech-to-text again on this recording";
+  b.title = pending ? "Re-transcribing" : "Re-transcribe";
   return b;
 }
 
@@ -169,10 +169,10 @@ function historyTag(hist, rerunAt) {
   if (!hist.length && !rerunAt) return null;
   const last = hist.length ? hist[hist.length - 1].at : 0;
   const same = rerunAt && rerunAt > last + 2;          // latest re-run came back with the same text
-  const tag = el("span", "dim was", same ? "re-run · same" : "re-run");
+  const tag = el("span", "dim was", same ? "re-run, same" : "re-run");
   const lines = same ? [`Re-run ${fmtTime(rerunAt, false)}: same text`] : [];
   for (const h of hist.slice().reverse())
-    lines.push(`Replaced ${fmtTime(h.at, false)} — was (${h.model || "earlier model"}): ${h.text || "(no speech)"}`);
+    lines.push(`Replaced ${fmtTime(h.at, false)}, was (${h.model || "earlier model"}): ${h.text || "(no speech)"}`);
   tag.title = lines.join("\n");
   return tag;
 }
@@ -197,20 +197,20 @@ document.addEventListener("click", (e) => {
     if (!n && b.isConnected) {             // nothing queued (no audio on disk, or already queued)
       b.disabled = false;
       setText(b, "↻");
-      b.title = n === null ? "Re-run failed to start" : "Nothing to re-run (recording gone or already queued)";
+      b.title = n === null ? "Re-run failed" : "Nothing to re-run";
     }
   });
 });
 
 // A transmission with nothing said: the radio keyed up (mic click). Shown compact, with who keyed.
-const KEYUP_TEXT = "key-up · no speech";
+const KEYUP_TEXT = "Key-up, no speech";
 const trafficStatus = (t) => t.status === "no_speech" ? KEYUP_TEXT : STATUS_TEXT[t.status] || t.status;
 
 // What a clip's status means, in words (pages and transmissions share these).
 const STATUS_TEXT = {
-  pending: "transcribing…",
-  no_voice: "Tones only — no voice",
-  no_speech: "No speech recognized",
+  pending: "Transcribing",
+  no_voice: "Tones only, no voice",
+  no_speech: "No speech",
   error: "Transcription failed",
 };
 
@@ -267,7 +267,7 @@ const player = { audio: null, id: null, missing: new Set() };
 function paintPlay(b) {
   const id = b.dataset.play;
   const playing = player.id === id, missing = player.missing.has(id);
-  setText(b, playing ? "■" : missing ? "–" : "▶");
+  Icon.play(b, playing ? "stop" : missing ? "none" : "play");
   b.classList.toggle("playing", playing);
   b.classList.toggle("missing", missing);
   if (missing) b.title = "No recording for this one";
@@ -357,15 +357,15 @@ function renderLive() {
   const b = $("#live");
   b.classList.toggle("active", live.on);
   b.classList.toggle("blocked", live.on && live.blocked);
-  let t = live.on ? "🔊 Live" : "🔈 Live";
-  if (live.on && live.blocked) t += " · tap to allow sound";
-  else if (live.on && live.queue.length) t += ` · ${live.queue.length} queued`;
+  let t = live.on ? "Live on" : "Live";
+  if (live.on && live.blocked) t += ": tap for sound";
+  else if (live.on && live.queue.length) t += ` (${live.queue.length} queued)`;
   setText(b, t);
   b.title = live.on
     ? "Playing each new transmission and page as it comes in (a few seconds behind the air: a P25 call " +
       "arrives when it ends). Radio traffic talkgroups only, not Other." +
       (live.dropped ? ` Skipped ${live.dropped} older clip(s) to catch up.` : "") + " Click to stop."
-    : "Listen live: play each new transmission and page as it comes in";
+    : "Play each new transmission and page as it comes in";
 }
 
 $("#live").addEventListener("click", () => {
@@ -396,15 +396,15 @@ function renderClock() {
 
 function renderConn() {
   const pill = $("#conn");
-  let cls = "pill ok", text = "live", title = "Receiving updates from the sizeup server";
+  let cls = "pill ok", text = "Live", title = "";
   const age = Date.now() - ui.lastMsgAt;
-  if (!ui.lastMsgAt) { cls = "pill warn"; text = "connecting…"; title = ""; }
+  if (!ui.lastMsgAt) { cls = "pill warn"; text = "Connecting"; title = ""; }
   else if (age > LOST_AFTER_MS) {
-    cls = "pill err"; text = `connection lost · ${fmtDur(age / 1000)}`;
-    title = "No update from the server — what is on screen may be out of date";
-  } else if (ui.error) { cls = "pill err"; text = "server error"; title = ui.error; }
+    cls = "pill err"; text = `Lost ${fmtDur(age / 1000)}`;
+    title = "No update from the server: the screen may be out of date";
+  } else if (ui.error) { cls = "pill err"; text = "Server error"; title = ui.error; }
   else if (ui.live && ui.live.mode() === "polling") {
-    text = "live · polling"; title = "The live stream is blocked on this network: refreshing every 2 s instead";
+    text = "Polling"; title = "Stream blocked on this network: polling every 2 s";
   }
   setClass(pill, cls);
   setText(pill, text);
@@ -447,10 +447,10 @@ function renderSdr() {
     const row = [...box.children].find((r) => r.dataset.sdr === x.serial);
     if (!row) continue;
     row.classList.toggle("absent", !x.present);
-    const held = x.held_by ? ` · in use by ${x.held_by.app} (${x.held_by.mode})` : "";
+    const held = x.held_by ? `: ${x.held_by.app} ${x.held_by.mode}` : "";
     row.classList.toggle("held", !!x.held_by);
     setText(row.querySelector(".sdr-label"),
-            (list.length > 1 ? `SDR ${x.name || x.serial}` : "SDR") + (x.present ? "" : " · unplugged") + held);
+            (list.length > 1 ? `SDR ${x.name || x.serial}` : "SDR") + (x.present ? "" : " unplugged") + held);
     let err = row.querySelector(".sdr-err");
     if (!err) { err = el("span", "sdr-err"); row.append(err); }
     setText(err, ui.sdrError || "");
@@ -476,20 +476,19 @@ function renderRerun() {
   const b = $("#rerun-all"), msg = $("#rerun-msg");
   if (!r) return;
   b.disabled = r.pending > 0 || !!ui.rerunBusy;
-  setText(msg, r.pending > 0 ? `re-running ${r.done} / ${r.total}` + (r.changed ? ` · ${r.changed} changed` : "")
-    : r.total ? `last re-run: ${r.done} done · ${r.changed} changed` + (r.failed ? ` · ${r.failed} failed` : "") : "");
+  setText(msg, r.pending > 0 ? `Re-run ${r.done}/${r.total}` + (r.changed ? `, ${r.changed} changed` : "")
+    : r.total ? `Last re-run: ${r.done} done, ${r.changed} changed` + (r.failed ? `, ${r.failed} failed` : "") : "");
 }
 
 $("#rerun-all").addEventListener("click", async () => {
   const hours = (ui.state && ui.state.storage && ui.state.storage.audio_hours) || 12;
-  if (!confirm(`Run speech-to-text again on every recording still on disk (last ${hours} h)? ` +
-               "Live traffic is always transcribed first.")) return;
+  if (!confirm(`Re-transcribe every recording on disk (last ${hours} h)? Live traffic goes first.`)) return;
   ui.rerunBusy = true;
   renderRerun();
   const n = await retranscribe({ all: true });
   ui.rerunBusy = false;
-  if (n === null) setText($("#rerun-msg"), "re-run failed to start");
-  else if (n === 0) setText($("#rerun-msg"), "nothing to re-run");
+  if (n === null) setText($("#rerun-msg"), "Re-run failed");
+  else if (n === 0) setText($("#rerun-msg"), "Nothing to re-run");
   else renderRerun();
 });
 
@@ -503,7 +502,7 @@ function renderStorage() {
   const size = mb >= 1000 ? `${(mb / 1000).toFixed(1)} GB` : `${mb < 10 ? mb.toFixed(1) : Math.round(mb)} MB`;
   const age = st.oldest_audio ? (Date.now() / 1000 - st.oldest_audio) / 3600 : null;
   const oldest = age == null ? "no audio" : `oldest ${age < 1 ? Math.round(age * 60) + " min" : age.toFixed(1) + " h"}`;
-  box.textContent = `captures ${size} · ${oldest} · audio kept ${st.audio_hours} h`;
+  box.textContent = `${size}, ${oldest}, kept ${st.audio_hours} h`;
   const checked = new Date(st.checked * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   box.title = `${st.audio_files} audio files. Audio is deleted after ${st.audio_hours} h, pages and ` +
               `transcripts after ${st.history_hours} h. Last cleanup ${checked}` +
@@ -525,7 +524,7 @@ async function setSdrMode(mode, serial) {
                                          signal: ctl.signal });
     if (!r.ok) ui.sdrError = ((await r.json().catch(() => ({}))).error) || `switch refused (${r.status})`;
   } catch (e) {
-    ui.sdrError = e.name === "AbortError" ? "no answer from sizeup, try again" : "couldn't reach sizeup";
+    ui.sdrError = e.name === "AbortError" ? "no answer from the server, try again" : "couldn't reach the server";
   } finally {
     clearTimeout(timer);
     ui.sdrBusy = false;
@@ -573,7 +572,7 @@ function renderIncident(inc) {
     // Radios only: speech-to-text and the dispatch voice aren't something we listen on.
     const ok = ((ui.state && ui.state.radios) || []).filter((r) => r.state === "ok" && !SERVICES.has(r.label))
       .map((r) => r.label);
-    setText($("#inc-listening"), ok.length ? `Listening · ${ok.join(" · ")}` : "No radio is receiving");
+    setText($("#inc-listening"), ok.length ? `Listening: ${ok.join(", ")}` : "No radio receiving");
     const close = $("#inc-close");
     if (close.dataset.id) { close.dataset.id = ""; resetClose(); }
     return;
@@ -583,27 +582,27 @@ function renderIncident(inc) {
   setVar(box, "--c", color);
   show($("#inc-empty"), false);
   show($("#inc-body"), true);
-  setText($("#inc-status"), "● Active");
+  setText($("#inc-status"), "Active");
 
   const close = $("#inc-close");
   show(close, true);
   if (close.dataset.id !== inc.id) { close.dataset.id = inc.id; resetClose(); }
 
-  setText($("#inc-type"), (inc.incident_type || "Unknown") + (inc.code ? ` · ${inc.code}` : ""));
+  setText($("#inc-type"), (inc.incident_type || "Unknown") + (inc.code ? ` ${inc.code}` : ""));
   const geo = inc.geo;
   const addr = $("#inc-addr");
   if (geo && geo.label) { setText(addr, geo.label); setClass(addr, "inc-addr"); }
   else if (inc.location) { setText(addr, inc.location); setClass(addr, "inc-addr heard"); }
-  else { setText(addr, "Location not heard"); setClass(addr, "inc-addr missing"); }
+  else { setText(addr, "No location"); setClass(addr, "inc-addr missing"); }
 
   const note = $("#inc-geo-note");
   let noteText = "", warn = false;
   if (!geo) {
     warn = true;
-    noteText = inc.location ? "⚠ Location not found on the map" : "⚠ No location in the page";
+    noteText = inc.location ? "Not found on the map" : "No location in the page";
   } else if (geo.kind !== "address" || (geo.confidence ?? 1) < 0.8) {
-    const pct = geo.confidence !== null && geo.confidence !== undefined ? ` · ${Math.round(geo.confidence * 100)}%` : "";
-    noteText = `Map point approximate (${geo.kind || "match"}${pct})` + (inc.location ? ` — heard “${inc.location}”` : "");
+    const pct = geo.confidence !== null && geo.confidence !== undefined ? ` ${Math.round(geo.confidence * 100)}%` : "";
+    noteText = `Approx. map point (${geo.kind || "match"}${pct})` + (inc.location ? `, heard “${inc.location}”` : "");
   }
   setText(note, noteText);
   setClass(note, warn ? "inc-note warn" : "inc-note");
@@ -621,7 +620,7 @@ function renderIncident(inc) {
   syncList($("#inc-depts"), who, {
     key: (x) => x.k, sig: (x) => x.k,
     make: () => el("span", "chip"), fill: (n, x) => { setClass(n, x.c); setText(n, x.t); },
-    empty: "Department not identified",
+    empty: "No department",
   });
 }
 
@@ -649,7 +648,7 @@ $("#inc-close").addEventListener("click", async (e) => {
   }
   clearTimeout(ui.closeTimer);
   b.disabled = true;
-  setText(b, "Closing…");
+  setText(b, "Closing");
   try {
     const r = await fetch(`/api/incident/${encodeURIComponent(id)}/close`, { method: "POST" });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -703,7 +702,7 @@ function renderDispatch(inc) {
       if (it.label) meta.append(chip(it.label, sourceColor(it.label), "src"));
       const was = historyTag(it.history, it.rerunAt);
       if (was) meta.append(was);
-      if (it.repeat) meta.append(el("span", "dim", "repeat — same as above"));
+      if (it.repeat) meta.append(el("span", "dim", "Repeat"));
       li.replaceChildren(meta);
       if (!it.repeat) {
         const done = it.status === "done" && it.text;
@@ -720,7 +719,7 @@ function renderDispatch(inc) {
 
 const GROUP_ORDER = ["Fire/EMS", "County Police", "DOT", "Hospital", "Operations", "Interop/Events", "OEM", ""];
 const GROUP_COLORS = { "Fire/EMS": "#ff7a59", "County Police": "#6aa8ff", "DOT": "#e8d84a", "Hospital": "#f27ad1",
-                       "Operations": "#7ee07e", "Interop/Events": "#a3a9ff", "OEM": "#ffcf7a", "": "#9aa0b4" };
+                       "Operations": "#7ee07e", "Interop/Events": "#B8C0CA", "OEM": "#ffcf7a", "": "#9AA3AD" };
 const PENDING_MS = 8000;
 const tgPending = new Map();   // tg -> { vals: {record?, main?}, until }
 
@@ -838,7 +837,7 @@ function renderTalkgroupViews() {
 
 function renderTraffic(inc) {
   const list = inc ? inc.traffic || [] : (ui.state && ui.state.loose_traffic) || [];
-  setText($("#traffic-title"), inc ? "Radio traffic" : "Radio traffic · no active incident");
+  setText($("#traffic-title"), "Radio traffic");
   const items = list.filter(isMainTraffic).sort((a, b) => b.start - a.start);
   syncList($("#traffic"), items, {
     key: (t) => t.id,
@@ -849,7 +848,7 @@ function renderTraffic(inc) {
       speakerSide(li, t.unit);
       li.classList.toggle("keyup", t.status === "no_speech");
       const meta = el("div", "meta");
-      meta.append(playButton(t.id, "Play this transmission", t.has_audio), rerunButton(t.id, t.rerun_pending, t.has_audio),
+      meta.append(playButton(t.id, "Play", t.has_audio), rerunButton(t.id, t.rerun_pending, t.has_audio),
                   el("span", "t", fmtTime(t.start)), chip(t.source || "?", sourceColor(t.source), "src"));
       const tag = Radio.rigTag(t);                                           // "E63 · 6301"
       if (tag) meta.append(tag);
@@ -860,11 +859,10 @@ function renderTraffic(inc) {
       if (was) meta.append(was);
       const done = t.status === "done" && t.text;
       li.replaceChildren(meta, done ? stampedText("txt", t.text, t.start) : el("div", "txt muted",
-        t.status === "done" ? "(no words)" : trafficStatus(t)));
+        t.status === "done" ? "—" : trafficStatus(t)));
     },
-    empty: inc ? "No radio traffic yet"
-      : ((ui.state && ui.state.radios) || []).some((r) => r.state === "ok" && !SERVICES.has(r.label))
-        ? "Listening — no traffic" : "No radio is receiving",
+    empty: inc || ((ui.state && ui.state.radios) || []).some((r) => r.state === "ok" && !SERVICES.has(r.label))
+      ? "None" : "No radio receiving",
   });
 }
 
@@ -929,8 +927,7 @@ function renderOther(inc) {
   const groups = otherGroups(inc);
   const n = groups.reduce((s, g) => s + g.calls.length, 0);
   const sec = $("#other-section"), box = $("#other"), toggle = $("#other-toggle");
-  setText($("#other-sum"), n ? `· ${n} call${n === 1 ? "" : "s"} on ${groups.length} talkgroup${groups.length === 1 ? "" : "s"}`
-                             : "· none heard");
+  setText($("#other-sum"), n ? `${n} call${n === 1 ? "" : "s"}, ${groups.length} TG${groups.length === 1 ? "" : "s"}` : "None");
   setClass(sec, other.open ? "other-section open" : "other-section");
   if (toggle.getAttribute("aria-expanded") !== String(other.open)) toggle.setAttribute("aria-expanded", String(other.open));
   show(box, other.open);
@@ -964,17 +961,17 @@ function renderOther(inc) {
       setClass(snip, g.snippetMuted ? "og-snip muted" : "og-snip");
       const bits = [g.tg !== null && g.tg !== undefined ? `TG ${g.tg}` : "", groupName(g.group)];
       if (g.row) bits.push(`${g.row.count} call${g.row.count === 1 ? "" : "s"} heard`, g.row.record ? "recording" : "not recording");
-      head.title = bits.filter(Boolean).join(" · ") + (open ? "\nTap to hide its calls" : "\nTap to show its calls");
+      head.title = bits.filter(Boolean).join(", ");
       show(calls, open);
       if (open) {
         syncList(calls, g.calls, {
           key: (t) => t.id, sig: (t) => JSON.stringify([t.text, t.status, t.unit, t.rig, t.radio_id, t.end, t.rerun_pending,
                                                        (t.history || []).length, t.rerun_at]),
-          make: () => el("li"), fill: callFill, empty: "No calls",
+          make: () => el("li"), fill: callFill, empty: "None",
         });
       } else if (calls.children.length) calls.replaceChildren();
     },
-    empty: "Nothing heard on other talkgroups yet",
+    empty: "None",
   });
 }
 
@@ -1016,9 +1013,9 @@ function clearConfirm() {
 }
 
 function heardText(r) {
-  if (!r.count && !r.last) return "not heard yet";
+  if (!r.count && !r.last) return "Not heard";
   const n = `${r.count} call${r.count === 1 ? "" : "s"}`;
-  return r.last ? `${n} · last ${fmtWhen(r.last)}` : n;
+  return r.last ? `${n}, last ${fmtWhen(r.last)}` : n;
 }
 
 function tgMatches(r, words) {
@@ -1041,8 +1038,8 @@ function renderTgPanel() {
   const main = rows.filter((r) => r.main).length, rec = rows.filter((r) => r.record).length;
   const enc = rows.filter((r) => r.encrypted).length, heard = rows.filter((r) => r.count).length;
   setText($("#tg-sum"), rows.length
-    ? `${rows.length} talkgroups · ${main} main · ${rec} recording · ${heard} heard · ${enc} encrypted` +
-      (shown.length !== rows.length ? ` · showing ${shown.length}` : "")
+    ? `${rows.length} TGs, ${main} main, ${rec} recording, ${heard} heard, ${enc} encrypted` +
+      (shown.length !== rows.length ? `, ${shown.length} shown` : "")
     : "");
   const err = $("#tg-error");
   setText(err, ui.tgError || "");
@@ -1087,14 +1084,13 @@ function renderTgPanel() {
       gsw.classList.add("gsw");  // setSwitch resets the class list
       gsw.classList.toggle("mixed", mixed);
       gsw.disabled = !decodable.length;
-      gsw.title = !decodable.length ? "Every talkgroup here is encrypted"
-        : allOn ? `Recording all ${decodable.length} — tap to stop recording this whole section`
-        : `Tap to record all ${decodable.length} in this section (encrypted ones stay off)`;
+      gsw.title = !decodable.length ? "All encrypted"
+        : allOn ? `Recording all ${decodable.length}: tap to stop` : `Record all ${decodable.length} (encrypted stay off)`;
       setText(gchip, groupName(x.g));
       gchip.style.setProperty("--c", groupColor(x.g));
       const m = x.list.filter((r) => r.main).length, hd = x.list.filter((r) => r.count).length;
-      setText(gcount, `${x.list.length} talkgroup${x.list.length === 1 ? "" : "s"}` + (m ? ` · ${m} main` : "") +
-                      (hd ? ` · ${hd} heard` : ""));
+      setText(gcount, `${x.list.length} TG${x.list.length === 1 ? "" : "s"}` + (m ? `, ${m} main` : "") +
+                      (hd ? `, ${hd} heard` : ""));
       syncList(ol, x.list, {
         key: (r) => String(r.tg),
         sig: (r) => JSON.stringify([r.name, r.record, r.main, r.encrypted, r.count, r.last, r.dropped, !!r.pending,
@@ -1131,27 +1127,25 @@ function renderTgPanel() {
           setText(heard, heardText(r));
           setClass(heard, r.count ? "tg-heard" : "tg-heard dim");
           let n = "", ncls = "tg-note";
-          if (confirming) { n = "Encrypted: recordings will only be noise. Tap Record again to record anyway."; ncls += " warn"; }
-          else if (r.encrypted) { n = "encrypted — can't be decoded"; ncls += " enc"; }
+          if (confirming) { n = "Encrypted: noise only. Tap Record again to record anyway."; ncls += " warn"; }
+          else if (r.encrypted) { n = "Encrypted"; ncls += " enc"; }
           if (r.dropped && !confirming) {
-            n += `${n ? " · " : ""}${r.dropped} dropped (not recorded)`;
+            n += `${n ? ", " : ""}${r.dropped} dropped`;
           }
           setText(note, n);
           setClass(note, ncls);
           show(note, !!n);
           const [recB, mainB] = sw.children;
           setSwitch(recB, !!r.record, confirming ? "Record?" : "Record");
-          recB.title = r.record ? "Recording: its calls are kept and transcribed. Tap to stop."
-            : r.encrypted ? "Encrypted — can't be decoded. Tap to record anyway."
-            : "Not recording: its calls are dropped on arrival. Tap to record.";
+          recB.title = r.record ? "Recording: calls kept and transcribed" : r.encrypted ? "Encrypted: can't be decoded"
+            : "Not recording: calls dropped";
           setSwitch(mainB, !!r.main, "Main");
-          mainB.title = r.main ? "Main: its traffic shows in Radio traffic and attaches to our incident. Tap to move it to Other talkgroups."
-            : "Tap to make it Main: its traffic goes in Radio traffic and attaches to our incident.";
+          mainB.title = r.main ? "Main: in Radio traffic and on our incident" : "Other: not in Radio traffic";
         },
         empty: "",
       });
     },
-    empty: rows.length ? "No talkgroup matches the filter" : "The server hasn't sent a talkgroup list",
+    empty: rows.length ? "None" : "No talkgroup list",
   });
 }
 
@@ -1196,7 +1190,7 @@ function renderPages() {
     make: () => el("li"),
     fill: (li, p) => {
       const meta = el("div", "meta");
-      meta.append(playButton(p.id, "Play this page", p.has_audio),
+      meta.append(playButton(p.id, "Play", p.has_audio),
                   rerunButton(p.id, p.rerun_pending, p.has_audio && p.status !== "no_voice"),
                   el("span", "t", fmtTime(p.start)), chip(p.label || "?", sourceColor(p.label), "src"),
                   el("span", "kind", p.kind === "voice" ? "VOICE" : "PAGE"));
@@ -1212,24 +1206,24 @@ function renderPages() {
       for (const name of p.departments || []) who.append(chip(name, null, "dept"));
       for (const t of p.tones || []) {
         if (t.names && t.names.length) {
-          const known = (p.departments || []).length ? toneText(t) : `${t.names.join(" / ")} · ${toneText(t)}`;
+          const known = (p.departments || []).length ? toneText(t) : `${t.names.join(" / ")} ${toneText(t)}`;
           who.append(el("span", "dim tone", known));
         } else {
-          who.append(chip(`Unknown tones ${toneText(t)}`, "#ffb020", "unknown"));
+          who.append(chip(`Unknown tones ${toneText(t)}`, "#E0A030", "unknown"));
         }
       }
-      if (!who.children.length) who.append(el("span", "dim", "No tones · department not identified"));
+      if (!who.children.length) who.append(el("span", "dim", "No tones"));
       const done = p.status === "done" && p.raw;
       // Two lines in the list; tap to read the whole page (stays open across updates).
       const open = (ui.expanded ||= new Set()).has(p.id);
       const txt = el("div", done ? (open ? "txt expandable" : "txt clamp expandable") : "txt muted",
                      done ? p.raw : STATUS_TEXT[p.status] || p.status);
       if (done) {
-        txt.title = open ? "Tap to collapse" : "Tap to read the whole page";
+        txt.title = open ? "Collapse" : "Expand";
         txt.addEventListener("click", () => {
           if (ui.expanded.has(p.id)) ui.expanded.delete(p.id); else ui.expanded.add(p.id);
           txt.classList.toggle("clamp", !ui.expanded.has(p.id));
-          txt.title = ui.expanded.has(p.id) ? "Tap to collapse" : "Tap to read the whole page";
+          txt.title = ui.expanded.has(p.id) ? "Collapse" : "Expand";
         });
       }
       li.replaceChildren(meta, who, txt);
@@ -1237,9 +1231,9 @@ function renderPages() {
       if (p.mhz) q.push(`${p.mhz} MHz`);
       if (p.quieting_db !== null && p.quieting_db !== undefined) q.push(`quieting ${p.quieting_db} dB`);
       if (p.confidence !== null && p.confidence !== undefined) q.push(`speech confidence ${Math.round(p.confidence * 100)}%`);
-      li.title = q.join(" · ");
+      li.title = q.join(", ");
     },
-    empty: "No pages heard yet",
+    empty: "None",
   });
 }
 
@@ -1256,13 +1250,13 @@ function renderHistory(inc) {
       const ty = el("span", "htype", i.incident_type || "Unknown");
       ty.style.color = catColor(i.category);
       const where = (i.geo && i.geo.label) || i.location;
-      const loc = el("span", where ? "hloc" + (i.geo ? "" : " heard") : "hloc dim", where || "location not heard");
+      const loc = el("span", where ? "hloc" + (i.geo ? "" : " heard") : "hloc dim", where || "No location");
       const tail = i.status === "active" ? el("span", "chip live", "ACTIVE")
         : el("span", "dim", fmtShortDur(i.updated - i.opened));
       li.replaceChildren(el("span", "t", fmtWhen(i.opened)), ty, loc,
                          el("span", "dim hdept", (i.departments || []).join(", ")), tail);
     },
-    empty: "None yet",
+    empty: "None",
   });
 }
 
@@ -1405,9 +1399,11 @@ function tick() {
 async function boot() {
   ui.scene = await (await fetch("/api/scene")).json();
   const sc = ui.scene;
-  const name = (sc.station && sc.station.name) || "sizeup";
-  document.title = `sizeup · ${name}`;
-  setText($("#station"), name);
+  // The header says "Port Chester FD"; the configured station name only when it says more.
+  const name = (sc.station && sc.station.name) || "";
+  const extra = name && name !== "Port Chester FD" ? name : "";
+  document.title = extra ? `PCFD Monitor · ${extra}` : "PCFD Monitor";
+  setText($("#station"), extra);
   initMap();
   ui.live = liveState("/api/stream", "/api/state", onState);
   tick();
@@ -1417,6 +1413,6 @@ async function boot() {
 boot().catch((err) => {
   const pill = $("#conn");
   pill.className = "pill err";
-  pill.textContent = "failed to load: " + err.message;
+  pill.textContent = "Load failed: " + err.message;
   console.error(err);
 });

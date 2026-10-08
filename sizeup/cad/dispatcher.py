@@ -187,7 +187,7 @@ def tone_plan(departments: list[tuple[str, list | None]], home: str, home_tones)
         if not t:
             t = home_tones
             labels.append(f"{name} (not set → {short})")
-            warnings.append(f"{name} tones not set — played {home}'s")
+            warnings.append(f"{name} tones not set: played {home}'s")
         else:
             labels.append(name)
         groups.append([tuple(x) for x in t or ()])

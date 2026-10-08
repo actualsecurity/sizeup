@@ -77,8 +77,8 @@ function sState(state, retired) {
 }
 function sConfirm(why) {          // "meaning to confirm": a guess the department still has to confirm
   const role = /^role/i.test(why || "");
-  const c = el("span", "chip s-confirm", role ? "role to confirm" : "meaning to confirm");
-  c.title = why || "No name yet: shown as its code";
+  const c = el("span", "chip s-confirm", role ? "role unconfirmed" : "unconfirmed");
+  c.title = why || "No name: shown as its code";
   return c;
 }
 function sCard(title, ...kids) {
@@ -87,18 +87,21 @@ function sCard(title, ...kids) {
   c.append(...kids.filter(Boolean));
   return c;
 }
+// The section's explanation sits behind a "?" next to its title (help.js).
+function sHelp(text) {
+  return text ? Help.button(text) : null;
+}
 function sHead(title, about, ...tools) {
   const h = el("div", "s-head");
-  h.append(el("h2", "", title), el("span", "spacer"), ...tools.filter(Boolean));
-  const out = [h];
-  if (about) out.push(el("p", "s-about dim", about));
-  return out;
+  h.append(el("h2", "", title), ...(about ? [sHelp(about)] : []), el("span", "spacer"), ...tools.filter(Boolean));
+  return [h];
 }
-function sCardHead(title, info, ...tools) {
+function sCardHead(title, info, ...tools) {          // a help button among the tools goes next to the title
   const h = el("div", "s-card-head");
-  h.append(el("h3", "", title));
+  const kids = tools.filter(Boolean), help = kids.filter((t) => t.classList && t.classList.contains("help"));
+  h.append(el("h3", "", title), ...help);
   if (info) h.append(el("span", "dim small", info));
-  h.append(el("span", "spacer"), ...tools.filter(Boolean));
+  h.append(el("span", "spacer"), ...kids.filter((t) => !help.includes(t)));
   return h;
 }
 function sAsk(text) {
@@ -119,7 +122,7 @@ async function sLoad() {
     S.data = await api("GET", "/api/cad/settings");
     sRender();
   } catch (e) {
-    sMsg(`Could not load the settings: ${e.message}`);
+    sMsg(`Load failed: ${e.message}`);
   } finally {
     S.loading = false;
     if (S.again) { S.again = false; sLoad(); }
@@ -129,14 +132,14 @@ async function sLoad() {
 async function sPost(section, body, done) {
   const op = operator();
   if (!op) {
-    sMsg("Enter your name (Operator, top right) first: every settings change records who made it.");
+    sMsg("Enter operator name (top right)");
     ($("#operator-pick").hidden ? $("#operator") : $("#operator-pick")).focus();
     sRender(true);
     return null;
   }
   try {
     const r = await api("POST", `/api/cad/settings/${section}`, { ...body, operator: op });
-    sMsg(done || "Saved.", true);
+    sMsg(done || "Saved", true);
     S.auditFor = "";
     await sLoad();
     return r;
@@ -215,8 +218,8 @@ function sLists(panel) {
   else if (S.list === "type_subtypes") body = sTypeMap();
   else body = sListTable(S.list);
   const flow = S.list === "unit_statuses" && S.data.status_flow ? sFlow() : null;
-  panel.replaceChildren(...sHead("Lists", "Codes stay as they are: they are on events and in the CSV exports. Names, colors "
-    + "and order are yours. Retire what you no longer use: old events keep showing it, the pick lists don't."), tabs, body,
+  panel.replaceChildren(...sHead("Lists", "Codes don't change: they are on events and in the CSV exports. Names, colors "
+    + "and order are yours. Retire what you no longer use: old events keep it, the pick lists drop it."), tabs, body,
   ...(flow ? [flow] : []));
 }
 
@@ -225,23 +228,22 @@ function sListTable(sec) {
   const title = S.data.titles[sec];
   const items = d.items;
   const live = items.filter((x) => x.state !== "deleted");
-  const reset = d.edited ? sBtn("Reset to default", "Every item and the order as in the data file",
-    () => { if (sAsk(`Put ${title.toLowerCase()} back to the data file's defaults?`)) sPost(sec, { action: "reset_section" }, `${title}: back to the defaults.`); },
+  const reset = d.edited ? sBtn("Reset to default", "Data file items and order",
+    () => { if (sAsk(`Reset ${title.toLowerCase()} to defaults?`)) sPost(sec, { action: "reset_section" }, `${title} reset`); },
     "danger-quiet") : null;
   const ol = el("ol", "s-rows");
   items.forEach((x) => ol.append(sItemRow(sec, x, live.indexOf(x), live.length)));
   const todo = live.filter((x) => x.confirm && !x.retired).length;
   const info = `${live.filter((x) => !x.retired).length} in use` + (live.some((x) => x.retired) ? `, ${live.filter((x) => x.retired).length} retired` : "")
-    + (todo ? ` · ${todo} to confirm` : "");
+    + (todo ? `, ${todo} to confirm` : "");
   const about = {
     unit_statuses: "The department's status codes and names. What a status does (its role) is a best guess where marked "
-      + "“role to confirm”: change it, or press Confirm when it is right. Available (in service) frees the unit and clears it "
-      + "off its call; Unavailable takes it out of service (asks why); Dispatched, Responding and On location stamp the "
-      + "times. The rest keep it committed.",
-    event_types: "The color is the type's color on the queue, the board and the records.",
+      + "unconfirmed: change it, or Confirm. Available frees the unit and clears it off its call. Unavailable takes it out "
+      + "of service and asks why. Dispatched, Responding and On location stamp the times. The rest keep it committed.",
+    event_types: "The type's color on the queue, the board and the records.",
   }[sec];
   const partial = (sec === "event_types" || sec === "event_subtypes") ? sSubtypeMap() : null;
-  return sCard(sCardHead(title, info, reset), about ? el("p", "dim small", about) : null, partial, ol, sAddForm(sec));
+  return sCard(sCardHead(title, info, sHelp(about), reset), partial, ol, sAddForm(sec));
 }
 
 // Pointer from the type and subtype lists to the map.
@@ -249,9 +251,9 @@ function sSubtypeMap() {
   const t = S.data.type_subtypes;
   if (!t) return null;
   const todo = t.rows.filter((r) => r.confirm && !r.retired).length;
-  const p = el("p", "dim small", "Which subtypes each type offers: ");
+  const p = el("p", "dim small", "Map: ");
   const a = sBtn("Subtypes per type", "", () => { S.list = "type_subtypes"; store("sizeup.cad.settings.list", S.list); sRender(true); }, "mini ro-ok");
-  p.append(a, document.createTextNode(todo ? ` (${todo} type${todo === 1 ? "" : "s"} to confirm with the department).` : "."));
+  p.append(a, document.createTextNode(todo ? ` ${todo} to confirm` : ""));
   return p;
 }
 
@@ -260,8 +262,8 @@ function sSubtypeMap() {
 function sTypeMap() {
   const d = S.data.type_subtypes;
   const subs = (L().event_subtypes || []);
-  const reset = d.edited ? sBtn("Reset to default", "Every type's subtypes as in the data file", () => {
-    if (sAsk("Put every type's subtypes back to the data file's?")) sPost("type_subtypes", { action: "reset_section" }, "Subtypes per type: back to the defaults.");
+  const reset = d.edited ? sBtn("Reset to default", "Data file map", () => {
+    if (sAsk("Reset subtypes per type?")) sPost("type_subtypes", { action: "reset_section" }, "Subtypes per type reset");
   }, "danger-quiet") : null;
   const rows = d.rows.filter((r) => !r.retired);
   const todo = rows.filter((r) => r.confirm).length;
@@ -274,23 +276,23 @@ function sTypeMap() {
     const src = el("span", `chip s-flag ${r.source === "given" ? "available" : ""}`, r.source === "given" ? "department" : "proposed");
     src.title = r.source === "given" ? "From the department's code sheet" : "Not on the department's code sheet: a proposal";
     const allowed = el("span", "s-tsnow small" + (r.subtypes.length ? "" : " dim"),
-      r.subtypes.length ? r.subtypes.join(", ") : r.listed ? "no subtype" : "not in the map: no subtype");
+      r.subtypes.length ? r.subtypes.join(", ") : r.listed ? "None" : "Not mapped");
     li.append(label, el("code", "s-code", r.type), src, sState(r.state));
     if (r.confirm) {
       const c = el("span", "chip s-confirm", "to confirm");
       c.title = r.confirm;
       li.append(c);
-      li.append(sBtn("Confirm", `Right as it is: ${r.confirm}`,
-        () => sPost("type_subtypes", { action: "set", type: r.type, subtypes: r.subtypes }, `${r.type}: confirmed.`), "mini"));
+      li.append(sBtn("Confirm", r.confirm,
+        () => sPost("type_subtypes", { action: "set", type: r.type, subtypes: r.subtypes }, `${r.type} confirmed`), "mini"));
     }
     li.append(allowed, el("span", "spacer"));
-    const tog = sBtn(open ? "Done" : "Edit", "Tick the subtypes this type offers", () => {
+    const tog = sBtn(open ? "Done" : "Edit", "", () => {
       if (open) S.tsOpen.delete(r.type); else S.tsOpen.add(r.type);
       sRender(true);
     });
     tog.setAttribute("aria-expanded", String(open));
     li.append(tog);
-    if (r.state === "edited") li.append(sBtn("Reset", "Back to the data file's", () => sPost("type_subtypes", { action: "reset", type: r.type }, `${r.type}: default again.`)));
+    if (r.state === "edited") li.append(sBtn("Reset", "Default", () => sPost("type_subtypes", { action: "reset", type: r.type }, `${r.type} reset`)));
     if (open) {
       const grid = el("div", "s-tsgrid");
       grid.setAttribute("role", "group");
@@ -305,7 +307,7 @@ function sTypeMap() {
         cb.dataset.code = st.code;
         cb.addEventListener("change", () => {
           const pick = [...grid.querySelectorAll("input:checked")].map((x) => x.dataset.code);
-          sPost("type_subtypes", { action: "set", type: r.type, subtypes: pick }, `${r.type}: ${pick.length ? pick.join(", ") : "no subtype"}.`);
+          sPost("type_subtypes", { action: "set", type: r.type, subtypes: pick }, `${r.type}: ${pick.length ? pick.join(", ") : "none"}`);
         });
         lab.title = st.code + (st.retired ? " (retired)" : "");
         lab.append(cb, el("code", "", st.code), el("span", "dim", st.name + (st.retired ? " (retired)" : "")));
@@ -315,24 +317,23 @@ function sTypeMap() {
     }
     ol.append(li);
   }
-  const gaps = (d.gaps || []).length ? el("p", "s-note small", "Check: " + d.gaps.join("; ") + ".") : null;
-  return sCard(sCardHead("Subtypes per type", `${rows.length} types` + (todo ? ` · ${todo} to confirm` : ""), reset),
-    el("p", "dim small", "After the type is picked, only its subtypes are offered (there is no ALS / Bomb); no subtype "
-      + "is always allowed. A type with none ticked takes no subtype. Department: from its code sheet (ALARM to MVA). "
-      + "Proposed: worked out from the order of its subtype list, or a guess: to confirm with the department (Confirm "
-      + "keeps it as it is). Taking a subtype off a type leaves old events as they are."), gaps, ol);
+  const gaps = (d.gaps || []).length ? el("p", "s-note small", "Check: " + d.gaps.join("; ")) : null;
+  return sCard(sCardHead("Subtypes per type", `${rows.length} types` + (todo ? `, ${todo} to confirm` : ""),
+    sHelp("A type offers only its ticked subtypes (no ALS / Bomb); no subtype is always allowed. None ticked: no subtype. "
+      + "Department: from its code sheet (ALARM to MVA). Proposed: worked out from the subtype list, or a guess, to confirm "
+      + "with the department (Confirm keeps it). Taking a subtype off a type leaves old events as they are."), reset), gaps, ol);
 }
 
 function sItemRow(sec, x, i, n) {
   const deleted = x.state === "deleted";
   const li = el("li", "s-row" + (x.retired ? " retired" : "") + (deleted ? " deleted" : ""));
   const ord = el("span", "s-ord");
-  const up = sBtn("↑", "Move up", () => sPost(sec, { action: "move", code: x.code, dir: -1 }, `${x.code} moved up.`), "mini");
-  const down = sBtn("↓", "Move down", () => sPost(sec, { action: "move", code: x.code, dir: 1 }, `${x.code} moved down.`), "mini");
+  const up = sBtn("↑", "Move up", () => sPost(sec, { action: "move", code: x.code, dir: -1 }, `${x.code} up`), "mini");
+  const down = sBtn("↓", "Move down", () => sPost(sec, { action: "move", code: x.code, dir: 1 }, `${x.code} down`), "mini");
   up.disabled = deleted || i <= 0;
   down.disabled = deleted || i >= n - 1;
   ord.append(up, down);
-  const edit = (item, what) => sPost(sec, { action: "edit", code: x.code, item }, `${x.code}: ${what}.`);
+  const edit = (item, what) => sPost(sec, { action: "edit", code: x.code, item }, `${x.code} ${what}`);
   const name = sInput(x.name, 60, "Name", (v) => { if (v && v !== x.name) edit({ name: v }, "renamed"); }, "s-name");
   name.disabled = deleted;
   li.append(ord, el("code", "s-code", x.code), name);
@@ -347,7 +348,7 @@ function sItemRow(sec, x, i, n) {
       sColor(x.fg || "#FFFFFF", (v) => edit({ fg: v }, "text color changed"), "Text color"),
       sSelect(S_ROLES, x.role || "", (v) => edit({ role: v }, "meaning changed"), "What it does"));
     const c = el("span", "chip st s-sample", x.name);
-    c.style.setProperty("--c", x.bg || "#9aa0b4");
+    c.style.setProperty("--c", x.bg || "#9AA3AD");
     li.append(c);
     const flag = x.role === "oos" ? "unavailable" : x.role === "free" ? "available" : "committed";
     li.append(el("span", `chip s-flag ${flag}`, flag));
@@ -355,30 +356,30 @@ function sItemRow(sec, x, i, n) {
   li.append(sState(x.state, x.retired));
   if (x.confirm && !deleted) {
     li.append(sConfirm(x.confirm));
-    if (!x.retired) li.append(sBtn("Confirm", `Right as it is: ${x.confirm}`, () => edit({}, "confirmed"), "mini"));
+    if (!x.retired) li.append(sBtn("Confirm", x.confirm, () => edit({}, "confirmed"), "mini"));
   }
-  const usedText = sec === "unit_statuses" && x.now ? `${x.now} unit${x.now === 1 ? "" : "s"} now · ` : "";
+  const usedText = sec === "unit_statuses" && x.now ? `${x.now} now, ` : "";
   li.append(el("span", "dim small s-used", usedText + (x.used ? `used ${x.used}×` : "unused")), el("span", "spacer"));
   if (deleted) {
-    li.append(sBtn("Restore", "Bring the default back", () => sPost(sec, { action: "reset", code: x.code }, `${x.code} restored.`)));
+    li.append(sBtn("Restore", "Default", () => sPost(sec, { action: "reset", code: x.code }, `${x.code} restored`)));
     return li;
   }
   li.append(x.retired
-    ? sBtn("Restore", "Back on the pick lists", () => sPost(sec, { action: "restore", code: x.code }, `${x.code} restored.`))
-    : sBtn("Retire", "Off the pick lists; old events keep showing it", () => sPost(sec, { action: "retire", code: x.code }, `${x.code} retired.`)));
+    ? sBtn("Restore", "Back on the pick lists", () => sPost(sec, { action: "restore", code: x.code }, `${x.code} restored`))
+    : sBtn("Retire", "Off the pick lists, kept on old events", () => sPost(sec, { action: "retire", code: x.code }, `${x.code} retired`)));
   if (!x.used) {
-    li.append(sBtn("Delete", "Only for what was never used", () => {
-      if (sAsk(`Delete ${x.name} (${x.code})?`)) sPost(sec, { action: "delete", code: x.code }, `${x.code} deleted.`);
+    li.append(sBtn("Delete", "Never used", () => {
+      if (sAsk(`Delete ${x.name} (${x.code})?`)) sPost(sec, { action: "delete", code: x.code }, `${x.code} deleted`);
     }, "danger-quiet"));
   }
-  if (x.state === "edited") li.append(sBtn("Reset", "Back to the data file's default", () => sPost(sec, { action: "reset", code: x.code }, `${x.code}: default again.`)));
+  if (x.state === "edited") li.append(sBtn("Reset", "Default", () => sPost(sec, { action: "reset", code: x.code }, `${x.code} reset`)));
   return li;
 }
 
 function sAddForm(sec) {
   const f = el("form", "row s-add");
   f.autocomplete = "off";
-  const code = sInput("", sec === "event_types" || sec === "event_subtypes" ? 24 : 40, "Code (new)", null, "s-code-in");
+  const code = sInput("", sec === "event_types" || sec === "event_subtypes" ? 24 : 40, "Code", null, "s-code-in");
   code.addEventListener("input", () => { code.value = code.value.toUpperCase(); });
   const name = sInput("", 60, "Name", null, "s-name");
   const extra = {};
@@ -397,7 +398,7 @@ function sAddForm(sec) {
     e.preventDefault();
     const item = { name: name.value.trim() };
     for (const [k, inp] of Object.entries(extra)) item[k] = k === "role" ? inp.value : inp.value.toUpperCase();
-    await sPost(sec, { action: "add", code: code.value.trim(), item }, `${code.value.trim()} added.`);
+    await sPost(sec, { action: "add", code: code.value.trim(), item }, `${code.value.trim()} added`);
   });
   return f;
 }
@@ -413,7 +414,7 @@ function sFlow() {
     li.append(el("b", "s-rule", label(r.key)), el("span", "dim", "→"));
     if (r.state === "deleted") {
       li.append(el("span", "dim small", (r.default || []).map((c) => nameOf("unit_statuses", c)).join(", ")), sState("deleted"),
-        el("span", "spacer"), sBtn("Restore", "", () => sPost("status_flow", { action: "reset", key: r.key }, `${label(r.key)}: default again.`)));
+        el("span", "spacer"), sBtn("Restore", "", () => sPost("status_flow", { action: "reset", key: r.key }, `${label(r.key)} reset`)));
       ol.append(li);
       continue;
     }
@@ -427,14 +428,14 @@ function sFlow() {
       cb.dataset.code = st.code;
       cb.addEventListener("change", () => {
         const next = [...checks.querySelectorAll("input:checked")].map((x) => x.dataset.code);
-        sPost("status_flow", { action: "set", key: r.key, next }, `${label(r.key)}: next steps saved.`);
+        sPost("status_flow", { action: "set", key: r.key, next }, `${label(r.key)} saved`);
       });
       lab.append(cb, el("span", "", st.name));
       checks.append(lab);
     }
     li.append(checks, sState(r.state), el("span", "spacer"));
-    if (r.key !== "*") li.append(sBtn("Remove", "Use “any other status” for it", () => sPost("status_flow", { action: "remove", key: r.key }, `${label(r.key)}: uses any other.`), "danger-quiet"));
-    if (r.state === "edited") li.append(sBtn("Reset", "", () => sPost("status_flow", { action: "reset", key: r.key }, `${label(r.key)}: default again.`)));
+    if (r.key !== "*") li.append(sBtn("Remove", "Use Any other status", () => sPost("status_flow", { action: "remove", key: r.key }, `${label(r.key)} removed`), "danger-quiet"));
+    if (r.state === "edited") li.append(sBtn("Reset", "", () => sPost("status_flow", { action: "reset", key: r.key }, `${label(r.key)} reset`)));
     ol.append(li);
   }
   const have = new Set(d.rows.map((r) => r.key));
@@ -442,21 +443,20 @@ function sFlow() {
   const f = el("form", "row s-add");
   if (free.length) {
     const pick = sSelect(free.map((x) => [x.code, x.name]), free[0].code, null, "Status");
-    const add = el("button", "primary", "Add next steps");
+    const add = el("button", "primary", "Add");
     add.type = "submit";
-    f.append(el("span", "dim small", "Own steps for"), pick, add);
+    f.append(el("span", "dim small", "Steps for"), pick, add);
     f.addEventListener("submit", (e) => {
       e.preventDefault();
       const any = (d.rows.find((r) => r.key === "*") || { next: [] }).next.filter((c) => c !== pick.value);
-      sPost("status_flow", { action: "set", key: pick.value, next: any.length ? any : [free[0].code] }, `${label(pick.value)}: own next steps.`);
+      sPost("status_flow", { action: "set", key: pick.value, next: any.length ? any : [free[0].code] }, `${label(pick.value)} added`);
     });
   }
   const reset = d.edited ? sBtn("Reset to default", "", () => {
-    if (sAsk("Put the next-step buttons back to the data file's?")) sPost("status_flow", { action: "reset_section" }, "Next steps: back to the defaults.");
+    if (sAsk("Reset next steps?")) sPost("status_flow", { action: "reset_section" }, "Next steps reset");
   }, "danger-quiet") : null;
-  return sCard(sCardHead("Next steps on an incident", "the buttons on a unit in “Units on this incident”", reset),
-    el("p", "dim small", "The board on the right always offers every status. Available clears the unit off the event; "
-      + "Out of service asks why."), ol, f);
+  return sCard(sCardHead("Next steps", "", sHelp("The status buttons on an assigned unit. The board on the right always "
+      + "offers every status. Available clears the unit off the event; Out of service asks why."), reset), ol, f);
 }
 
 function ruleLabel(k) {
@@ -468,7 +468,7 @@ function ruleLabel(k) {
 function sClassRules() {
   const d = S.data.event_class;
   const reset = d.edited ? sBtn("Reset to default", "", () => {
-    if (sAsk("Put the emergency rules back to the data file's?")) sPost("event_class", { action: "reset_section" }, "Emergency rules: back to the defaults.");
+    if (sAsk("Reset emergency rules?")) sPost("event_class", { action: "reset_section" }, "Emergency rules reset");
   }, "danger-quiet") : null;
   const ol = el("ol", "s-rows");
   for (const r of d.rules) {
@@ -476,34 +476,34 @@ function sClassRules() {
     li.append(el("b", "s-rule", ruleLabel(r.key)), el("code", "s-code", r.key));
     if (r.state === "deleted") {
       li.append(el("span", "dim small", `was ${r.default}`), sState("deleted"), el("span", "spacer"),
-        sBtn("Restore", "", () => sPost("event_class", { action: "reset", key: r.key }, `${r.key}: default again.`)));
+        sBtn("Restore", "", () => sPost("event_class", { action: "reset", key: r.key }, `${r.key} reset`)));
     } else {
       li.append(sSelect([["emergency", "Emergency"], ["non-emergency", "Non-emergency"]], r.value,
-        (v) => sPost("event_class", { action: "set", key: r.key, value: v }, `${r.key}: ${v}.`), "Class"),
+        (v) => sPost("event_class", { action: "set", key: r.key, value: v }, `${r.key}: ${v}`), "Class"),
       sState(r.state), el("span", "spacer"),
-      sBtn("Remove", "Back to the next rule (or emergency)", () => sPost("event_class", { action: "remove", key: r.key }, `${r.key} removed.`), "danger-quiet"));
-      if (r.state === "edited") li.append(sBtn("Reset", "", () => sPost("event_class", { action: "reset", key: r.key }, `${r.key}: default again.`)));
+      sBtn("Remove", "Next rule applies", () => sPost("event_class", { action: "remove", key: r.key }, `${r.key} removed`), "danger-quiet"));
+      if (r.state === "edited") li.append(sBtn("Reset", "", () => sPost("event_class", { action: "reset", key: r.key }, `${r.key} reset`)));
     }
     ol.append(li);
   }
   const f = el("form", "row s-add");
   const types = [["*", "Any type"], ...(L().event_types || []).filter(live).map((t) => [t.code, t.name])];
   const t = sSelect(types, "", null, "Type");
-  const s = sSelect([["", "— no subtype"], ...(L().event_subtypes || []).filter(live).map((x) => [x.code, x.name])], "", null, "Subtype");
+  const s = sSelect([["", "No subtype"], ...(L().event_subtypes || []).filter(live).map((x) => [x.code, x.name])], "", null, "Subtype");
   const c = sSelect([["non-emergency", "Non-emergency"], ["emergency", "Emergency"]], "non-emergency", null, "Class");
   const add = el("button", "primary", "Add rule");
   add.type = "submit";
   f.append(t, s, c, add);
   f.addEventListener("submit", (e) => {
     e.preventDefault();
-    if (t.value === "*" && !s.value) return sMsg("Any type needs a subtype.");
+    if (t.value === "*" && !s.value) return sMsg("Any type needs a subtype");
     const key = s.value ? `${t.value}/${s.value}` : t.value;
-    sPost("event_class", { action: "set", key, value: c.value }, `${ruleLabel(key)}: ${c.value}.`);
+    sPost("event_class", { action: "set", key, value: c.value }, `${ruleLabel(key)}: ${c.value}`);
   });
-  return sCard(sCardHead("Emergency or non-emergency", `${d.rules.filter((r) => r.state !== "deleted").length} rules`, reset),
-    el("p", "dim small", "Non-emergency events (notifications, closures, hydrants) are logged and tracked, never dispatched. "
+  return sCard(sCardHead("Emergency rules", `${d.rules.filter((r) => r.state !== "deleted").length} rules`,
+    sHelp("Non-emergency events (notifications, closures, hydrants) are logged and tracked, never dispatched. "
       + "The most specific rule wins: type and subtype, then any type with the subtype, then the type. Anything "
-      + "not listed is an emergency. The operator can still change it on an event."), ol, f);
+      + "not listed is an emergency. The operator can still change it on an event."), reset), ol, f);
 }
 
 function sTowns() {
@@ -513,14 +513,14 @@ function sTowns() {
   const ol = el("ol", "s-rows towns");
   towns.forEach((t, i) => {
     const li = el("li", "s-row");
-    const up = sBtn("↑", "Move up", () => { const l = towns.slice(); l.splice(i - 1, 0, l.splice(i, 1)[0]); save(l, `${t} moved up.`); }, "mini");
-    const down = sBtn("↓", "Move down", () => { const l = towns.slice(); l.splice(i + 1, 0, l.splice(i, 1)[0]); save(l, `${t} moved down.`); }, "mini");
+    const up = sBtn("↑", "Move up", () => { const l = towns.slice(); l.splice(i - 1, 0, l.splice(i, 1)[0]); save(l, `${t} up`); }, "mini");
+    const down = sBtn("↓", "Move down", () => { const l = towns.slice(); l.splice(i + 1, 0, l.splice(i, 1)[0]); save(l, `${t} down`); }, "mini");
     up.disabled = i === 0;
     down.disabled = i === towns.length - 1;
     const ord = el("span", "s-ord");
     ord.append(up, down);
     li.append(ord, el("b", "", `${i + 1}. ${t}`), el("span", "spacer"),
-      sBtn("Remove", "", () => save(towns.filter((x) => x !== t), `${t} removed.`), "danger-quiet"));
+      sBtn("Remove", "", () => save(towns.filter((x) => x !== t), `${t} removed`), "danger-quiet"));
     ol.append(li);
   });
   const f = el("form", "row s-add");
@@ -528,10 +528,10 @@ function sTowns() {
   const add = el("button", "primary", "Add town");
   add.type = "submit";
   f.append(inp, add);
-  f.addEventListener("submit", (e) => { e.preventDefault(); if (inp.value.trim()) save([...towns, inp.value.trim()], `${inp.value.trim()} added.`); });
-  const reset = d.edited ? sBtn("Reset to default", "", () => sPost("geo_town_order", { action: "reset_section" }, "Town order: back to the defaults."), "danger-quiet") : null;
-  return sCard(sCardHead("Town order", "location suggestions", reset),
-    el("p", "dim small", "Location suggestions list these towns first, in this order (a town typed in the box always wins)."), ol, f);
+  f.addEventListener("submit", (e) => { e.preventDefault(); if (inp.value.trim()) save([...towns, inp.value.trim()], `${inp.value.trim()} added`); });
+  const reset = d.edited ? sBtn("Reset to default", "", () => sPost("geo_town_order", { action: "reset_section" }, "Town order reset"), "danger-quiet") : null;
+  return sCard(sCardHead("Town order", "", sHelp("Location suggestions list these towns first, in this order. A town typed in the box wins."), reset),
+    ol, f);
 }
 
 // ---- run cards: the editor is cad.js's; reset buttons here -----------------------------------------
@@ -545,14 +545,14 @@ function sRunTools() {
   const card = (cad.state && cad.state.run_cards || []).find((c) => c.type === editing);
   const kids = [];
   if (card && !card.is_default) {
-    kids.push(sBtn("Reset this card", "Back to the data file's default card for this type", async () => {
-      const r = await sPost("runcards", { action: "reset", type: editing }, `${editing}: default card again.`);
+    kids.push(sBtn("Reset card", "Default card for this type", async () => {
+      const r = await sPost("runcards", { action: "reset", type: editing }, `${editing} reset`);
       if (r) editCard(r);
     }));
   }
-  kids.push(sBtn("Reset all to defaults", "Every card as in the data file: edited cards restored, added ones removed", () => {
-    if (sAsk("Put every run card back to the defaults? Cards added here are removed.")) {
-      sPost("runcards", { action: "reset_section" }, "Run cards: back to the defaults.").then((r) => { if (r) editCard(null); });
+  kids.push(sBtn("Reset all", "Data file cards; cards added here are removed", () => {
+    if (sAsk("Reset all run cards? Cards added here are removed.")) {
+      sPost("runcards", { action: "reset_section" }, "Run cards reset").then((r) => { if (r) editCard(null); });
     }
   }, "danger-quiet"));
   box.replaceChildren(...kids);
@@ -565,15 +565,14 @@ function sUnits(panel) {
   const rows = d.rows;
   const kinds = S.data.unit_kinds.map((k) => [k.id, k.label]);
   const boards = S.data.boards.map((b) => [b.id, b.id === "main" ? "Main board" : b.title]);
-  const reset = d.edited ? sBtn("Reset all units", "Every unit as in the data file", () => {
-    if (sAsk("Put every unit back as in the data file? Units added here go off the boards (their history is kept).")) sPost("units", { action: "reset_section" }, "Units: back to the defaults.");
+  const reset = d.edited ? sBtn("Reset all units", "Data file units", () => {
+    if (sAsk("Reset all units? Units added here leave the boards (history kept).")) sPost("units", { action: "reset_section" }, "Units reset");
   }, "danger-quiet") : null;
   const todo = rows.filter((r) => !r.retired && !r.named).length;
-  const out = [...sHead("Units", "PCFD's and Rye Brook's fire units are the main board: run cards pick them by kind, "
-    + "“tick all” ticks PCFD's, and the dispatch says them. Mutual aid departments and requests go only when named. "
-    + "Other agencies (EMS, PD, utilities, resources) are never on a run card, never dispatched or toned out: attach them "
-    + "to a call when they show up. Codes are the department's; a unit with no name (said as, title) shows as its code, "
-    + `marked “meaning to confirm”${todo ? ` (${todo} now)` : ""}: name it when its meaning is known.`, reset)];
+  const out = [...sHead("Units", "Main board: PCFD and Rye Brook fire units. Run cards pick them by kind, All PCFD ticks "
+    + "PCFD's, the dispatch says them. Mutual aid departments and requests go only when named. Other agencies (EMS, PD, "
+    + "utilities, resources): never on a run card, never dispatched or toned out; attach them when they arrive. Codes are "
+    + `the department's. A unit with no name shows as its code, marked unconfirmed${todo ? ` (${todo} now)` : ""}.`, reset)];
   S.boardsOpen = S.boardsOpen || new Set();
   for (const b of S.data.boards) {
     const mine = rows.filter((r) => r.board === b.id && !r.retired);
@@ -586,19 +585,19 @@ function sUnits(panel) {
       det.addEventListener("toggle", () => { if (det.open) S.boardsOpen.add(b.id); else S.boardsOpen.delete(b.id); });
       const sum = el("summary");
       sum.append(el("h3", "", b.title), el("span", "dim small", ` ${mine.length} units`
-        + (unnamed ? ` · ${unnamed} to confirm` : "") + " · folded on the board too"));
+        + (unnamed ? `, ${unnamed} to confirm` : "")));
       det.append(sum, ol);
       out.push(det);
     } else {
-      out.push(sCard(sCardHead(b.id === "main" ? "Main board — PCFD and Rye Brook fire units" : b.title,
-        `${mine.length} units` + (unnamed ? ` · ${unnamed} to confirm` : "")), ol));
+      out.push(sCard(sCardHead(b.id === "main" ? "Main board" : b.title,
+        `${mine.length} units` + (unnamed ? `, ${unnamed} to confirm` : "")), ol));
     }
   }
   const retired = rows.filter((r) => r.retired);
   if (retired.length) {
     const ol = el("ol", "s-rows units");
     retired.forEach((u) => ol.append(sUnitRow(u, 0, 0, kinds, boards)));
-    out.push(sCard(sCardHead("Retired", "off the boards; their history is kept"), ol));
+    out.push(sCard(sCardHead("Retired", "history kept"), ol));
   }
   const deleted = rows.filter((r) => r.state === "deleted");
   if (deleted.length) {
@@ -606,29 +605,29 @@ function sUnits(panel) {
     for (const u of deleted) {
       const li = el("li", "s-row deleted");
       li.append(el("code", "s-code", u.code), el("span", "", u.spoken || u.code), sState("deleted"), el("span", "spacer"),
-        sBtn("Restore", "", () => sPost("units", { action: "reset", code: u.code }, `${u.code} restored.`)));
+        sBtn("Restore", "", () => sPost("units", { action: "reset", code: u.code }, `${u.code} restored`)));
       ol.append(li);
     }
-    out.push(sCard(sCardHead("Deleted", "defaults removed here"), ol));
+    out.push(sCard(sCardHead("Deleted", ""), ol));
   }
-  out.push(sCard(sCardHead("Add a unit"), sAddUnit(kinds, boards)));
+  out.push(sCard(sCardHead("Add unit"), sAddUnit(kinds, boards)));
   panel.replaceChildren(...out);
 }
 
 function sUnitRow(u, i, n, kinds, boards) {
   const li = el("li", "s-row unit" + (u.retired ? " retired" : ""));
-  const edit = (unit, what) => sPost("units", { action: "edit", code: u.code, unit }, `${u.code}: ${what}.`);
+  const edit = (unit, what) => sPost("units", { action: "edit", code: u.code, unit }, `${u.code}: ${what}`);
   if (!u.retired) {
     const ord = el("span", "s-ord");
-    const up = sBtn("↑", "Move up", () => sPost("units", { action: "move", code: u.code, dir: -1 }, `${u.code} moved up.`), "mini");
-    const down = sBtn("↓", "Move down", () => sPost("units", { action: "move", code: u.code, dir: 1 }, `${u.code} moved down.`), "mini");
+    const up = sBtn("↑", "Move up", () => sPost("units", { action: "move", code: u.code, dir: -1 }, `${u.code} up`), "mini");
+    const down = sBtn("↓", "Move down", () => sPost("units", { action: "move", code: u.code, dir: 1 }, `${u.code} down`), "mini");
     up.disabled = i === 0;
     down.disabled = i === n - 1;
     ord.append(up, down);
     li.append(ord);
   }
   li.append(el("code", "s-code unit-code", u.code),
-    sInput(u.spoken, 40, "Said as", (v) => edit({ spoken: v }, "now said as " + (v || u.code)), "s-said"),
+    sInput(u.spoken, 40, "Said as", (v) => edit({ spoken: v }, "said as " + (v || u.code)), "s-said"),
     sInput(u.title, 60, "Title", (v) => edit({ title: v }, "title changed"), "s-title"),
     sSelect(kinds, u.kind, (v) => edit({ kind: v }, `kind ${v}`), "Kind"),
     sInput(u.department, 40, "Department", (v) => edit({ department: v }, "department changed"), "s-dept"));
@@ -636,34 +635,34 @@ function sUnitRow(u, i, n, kinds, boards) {
   const cb = el("input");
   cb.type = "checkbox";
   cb.checked = !!u.spare;
-  cb.addEventListener("change", () => edit({ spare: cb.checked }, cb.checked ? "a spare" : "not a spare"));
+  cb.addEventListener("change", () => edit({ spare: cb.checked }, cb.checked ? "spare" : "not spare"));
   spare.append(cb, el("span", "", "Spare"));
   const resp = sSelect(S_RESPONSES, u.response, (v) => edit({ response: v }, "answers as " + v.replace("_", " ")), "Answers as");
-  resp.title = "Fire: run cards, tick all, dispatch. Mutual aid: only when named. Other agency: attach only, never dispatched.";
+  resp.title = "Fire: run cards and dispatch. Mutual aid: named only. Other agency: attach only.";
   li.append(spare, resp);
   const homes = S.data.units.stations || [];
   if (u.response !== "agency" && homes.length) {             // home firehouse: where the maps draw it (cadmap.js)
     const home = sSelect([["", "Home: not set"], ...homes.map((n) => [n, n])], u.station || "",
-      (v) => sPost("units", { action: "station", code: u.code, station: v }, `${u.code}: home station ${v || "not set"}.`), "Home station");
-    home.title = "The firehouse it is housed in: the maps draw it there (not set until the department says)";
+      (v) => sPost("units", { action: "station", code: u.code, station: v }, `${u.code}: home ${v || "not set"}`), "Home station");
+    home.title = "Firehouse: where the maps draw it";
     li.append(home);
   }
-  if (!u.retired) li.append(sSelect(boards, u.board, (v) => edit({ board: v }, "moved to another board"), "Board"));
+  if (!u.retired) li.append(sSelect(boards, u.board, (v) => edit({ board: v }, "board changed"), "Board"));
   const meta = el("span", "s-meta");
   if (u.status) meta.append(statusChip(u.status));
-  if (u.incident_number) meta.append(el("span", "warn small", `on ${u.incident_number}`));
+  if (u.incident_number) meta.append(el("span", "warn small", `On ${u.incident_number}`));
   meta.append(sState(u.state, u.retired));
   if (!u.named && !u.retired) meta.append(sConfirm(""));
   meta.append(el("span", "dim small", u.used ? `${u.used} records` : "no history"));
   li.append(meta, el("span", "spacer"));
-  if (u.retired) li.append(sBtn("Restore", "Back on its board", () => sPost("units", { action: "restore", code: u.code }, `${u.code} back on the board.`)));
-  else li.append(sBtn("Retire", "Off the boards; history kept", () => {
-    if (sAsk(`Retire ${u.code}? It goes off the boards; old events keep it.`)) sPost("units", { action: "retire", code: u.code }, `${u.code} retired.`);
+  if (u.retired) li.append(sBtn("Restore", "Back on its board", () => sPost("units", { action: "restore", code: u.code }, `${u.code} restored`)));
+  else li.append(sBtn("Retire", "Off the boards, history kept", () => {
+    if (sAsk(`Retire ${u.code}? Off the boards, history kept.`)) sPost("units", { action: "retire", code: u.code }, `${u.code} retired`);
   }));
-  if (!u.used) li.append(sBtn("Delete", "Only a unit with no history", () => {
-    if (sAsk(`Delete ${u.code}?`)) sPost("units", { action: "delete", code: u.code }, `${u.code} deleted.`);
+  if (!u.used) li.append(sBtn("Delete", "No history", () => {
+    if (sAsk(`Delete ${u.code}?`)) sPost("units", { action: "delete", code: u.code }, `${u.code} deleted`);
   }, "danger-quiet"));
-  if (u.state === "edited") li.append(sBtn("Reset", "As in the data file", () => sPost("units", { action: "reset", code: u.code }, `${u.code}: default again.`)));
+  if (u.state === "edited") li.append(sBtn("Reset", "Default", () => sPost("units", { action: "reset", code: u.code }, `${u.code} reset`)));
   return li;
 }
 
@@ -688,7 +687,7 @@ function sAddUnit(kinds, boards) {
   f.addEventListener("submit", (e) => {
     e.preventDefault();
     sPost("units", { action: "add", code: code.value.trim(), unit: { spoken: said.value.trim(), kind: kind.value,
-      department: dept.value.trim(), response: resp.value, board: board.value } }, `${code.value.trim()} added to the board.`);
+      department: dept.value.trim(), response: resp.value, board: board.value } }, `${code.value.trim()} added`);
   });
   return f;
 }
@@ -700,35 +699,35 @@ function sDispatch(panel) {
   const reset = (d.wording.some((w) => w.state === "edited") || d.tones.edited || d.channels.edited || d.voice.edited
     || (d.dept_tones || []).some((t) => t.edited) || (d.lead_in_joint_only || []).some((t) => t.state === "edited")
     || (d.eta && (d.eta.numbers.some((n) => n.edited) || d.eta.order.edited || d.eta.quarters_status.edited)))
-    ? sBtn("Reset all dispatch settings", "", () => {
-      if (sAsk("Put the wording, tones, channels and arrival estimates back to the defaults?")) sPost("dispatch", { action: "reset_section" }, "Dispatch: back to the defaults.");
+    ? sBtn("Reset all", "", () => {
+      if (sAsk("Reset wording, tones, channels and arrival estimates?")) sPost("dispatch", { action: "reset_section" }, "Dispatch reset");
     }, "danger-quiet") : null;
   const main = el("div", "s-wording");
   const more = el("details", "s-more");
-  more.append(el("summary", "", "More templates (pieces of the add-on and upgrade)"));
+  more.append(el("summary", "", "More templates"));
   const MAIN = ["new", "add_on", "upgrade", "full_response", "remarks", "lead_in", "lead_in_joint"];
   d.wording.forEach((w) => (MAIN.includes(w.key) ? main : more).append(sTemplate(w)));
   for (const j of d.lead_in_joint_only || []) main.append(sJointOnly(j));
-  const legend = el("p", "dim small", "Placeholders: " + d.placeholders.map((p) => `{${p}}`).join(" ")
-    + ". Empty parts drop out with their punctuation.");
+  const legend = el("p", "dim small", d.placeholders.map((p) => `{${p}}`).join(" "));
   const pv = el("div", "s-preview");
   pv.id = "s-preview";
   panel.replaceChildren(...sHead("Dispatch", "What the dispatch says and how it sounds. Changes apply to the next dispatch.", reset),
-    sCard(sCardHead("Wording", d.department), legend, main, more),
-    sCard(sCardHead("Live preview", "a sample event, rendered as typed"), pv),
+    sCard(sCardHead("Wording", d.department, sHelp("Placeholders fill from the event. Empty parts drop out with their punctuation. "
+      + "The more templates are pieces of the add-on and upgrade.")), legend, main, more),
+    sCard(sCardHead("Preview", "", sHelp("A sample event, rendered as typed")), pv),
     sVoice(d.voice), sTones(d.tones), ...(d.dept_tones || []).map(sDeptTones), sChannels(d.channels),
     d.eta ? sEta(d.eta) : null,
-    sCard(sCardHead("Transmit"), el("span", "pill tx-off", d.transmit.enabled ? "Transmit: on" : "Transmit: off"),
-      el("p", "dim small", `${d.transmit.note}. Read-only: there is no radio interface in this version.`)));
+    sCard(sCardHead("Transmit", "", sHelp(`${d.transmit.note}. Read-only here.`)),
+      el("span", "pill tx-off", d.transmit.enabled ? "Transmit on" : "Transmit off"), el("p", "dim small", "No radio interface")));
   sPreview();
 }
 
 function sJointOnly(j) {
   const box = el("label", "s-tpl");
   const head = el("span", "row");
-  head.append(el("b", "", `Lead-in when only ${j.town}'s units go`), el("code", "dim small", "lead_in_joint_only"), sState(j.state), el("span", "spacer"));
-  if (j.state === "edited") head.append(sBtn("Reset", j.default, () => sPost("dispatch", { action: "reset", key: `lead_in_joint_only/${j.town}` }, "Lead-in: default again.")));
-  const inp = sInput(j.value, 80, j.default, (v) => { if (v && v !== j.value) sPost("dispatch", { action: "set", key: `lead_in_joint_only/${j.town}`, value: v }, "Lead-in saved."); });
+  head.append(el("b", "", `Lead-in, ${j.town} only`), el("code", "dim small", "lead_in_joint_only"), sState(j.state), el("span", "spacer"));
+  if (j.state === "edited") head.append(sBtn("Reset", j.default, () => sPost("dispatch", { action: "reset", key: `lead_in_joint_only/${j.town}` }, "Lead-in reset")));
+  const inp = sInput(j.value, 80, j.default, (v) => { if (v && v !== j.value) sPost("dispatch", { action: "set", key: `lead_in_joint_only/${j.town}`, value: v }, "Lead-in saved"); });
   inp.dataset.town = j.town;
   inp.addEventListener("input", () => { clearTimeout(S.previewT); S.previewT = setTimeout(sPreview, 250); });
   box.append(head, inp);
@@ -737,36 +736,37 @@ function sJointOnly(j) {
 
 // The voice: Kokoro voices to pick from (GET /api/cad/tts/voices), the speed. The engine is the config's.
 function sVoice(v) {
-  const box = sCard(sCardHead("Voice", v.engine === "kokoro" ? `Kokoro · fallback ${v.fallback || "macOS say"}` : "macOS say"));
+  const box = sCard(sCardHead("Voice", v.engine === "kokoro" ? `Kokoro, fallback ${v.fallback || "macOS say"}` : "macOS say",
+    v.engine === "kokoro" ? sHelp("Speed 0.5 to 2 (0.92 is a touch slower than talking). Preview a dispatch on an event to hear it.") : null));
   const row = el("div", "row");
   let pick;
   if (v.engine === "kokoro") {
-    pick = sSelect(v.voices.map((x) => [x, x]), v.name, (x) => sPost("dispatch", { action: "set", key: "voice", value: x }, `Voice: ${x}.`), "Voice");
+    pick = sSelect(v.voices.map((x) => [x, x]), v.name, (x) => sPost("dispatch", { action: "set", key: "voice", value: x }, `Voice ${x}`), "Voice");
     api("GET", "/api/cad/tts/voices").then((r) => {     // readable names: "Heart (American, female)"
       const keep = pick.value;
       const list = (r.voices || []).map((x) => [x.id, `${x.name} (${[x.accent, x.gender].filter(Boolean).join(", ")})`]);
       if (list.length) { fillSelect(pick, list); pick.value = keep; }
     }).catch(() => {});
   } else {
-    pick = sInput(v.name, 60, "say voice", (x) => { if (x) sPost("dispatch", { action: "set", key: "voice", value: x }, `Voice: ${x}.`); });
+    pick = sInput(v.name, 60, "Voice", (x) => { if (x) sPost("dispatch", { action: "set", key: "voice", value: x }, `Voice ${x}`); });
   }
   const speed = el("input", "s-num");
   speed.type = "number"; speed.min = "0.5"; speed.max = "2"; speed.step = "0.01"; speed.value = String(v.speed);
   speed.setAttribute("aria-label", "Speed");
-  speed.addEventListener("change", () => sPost("dispatch", { action: "set", key: "speed", value: Number(speed.value) }, `Speed ${speed.value}.`));
+  speed.addEventListener("change", () => sPost("dispatch", { action: "set", key: "speed", value: Number(speed.value) }, `Speed ${speed.value}`));
   row.append(el("span", "dim small", "Voice"), pick, el("span", "dim small", "Speed"), speed, el("span", "dim small", `read ${v.repeat || 2}×`),
     el("span", "spacer"));
   if (v.edited) row.append(sBtn("Reset", `Config: ${v.default}, ${v.default_speed}`, async () => {
-    await sPost("dispatch", { action: "reset", key: "voice" }, "Voice: from the config again.");
-    await sPost("dispatch", { action: "reset", key: "speed" }, "Voice and speed: from the config again.");
+    await sPost("dispatch", { action: "reset", key: "voice" }, "Voice reset");
+    await sPost("dispatch", { action: "reset", key: "speed" }, "Voice and speed reset");
   }));
-  box.append(row, el("p", "dim small", "Kokoro speed: 0.5 to 2 (0.92 is a touch slower than talking). Preview a dispatch on an event to hear it."));
+  box.append(row);
   return box;
 }
 
 // A joint-response department's own tones (played after PCFD's). Not set: PCFD's are played for them.
 function sDeptTones(t) {
-  const box = sCard(sCardHead(`${t.town} tones`, t.value ? (t.edited ? "edited here" : "from the data file") : "not set"));
+  const box = sCard(sCardHead(`${t.town} tones`, t.value ? (t.edited ? "edited" : "default") : "not set"));
   const ol = el("ol", "s-rows tones");
   const add = (hz, sec) => {
     const li = el("li", "s-row");
@@ -774,22 +774,22 @@ function sDeptTones(t) {
     h.setAttribute("aria-label", "Hz");
     const d = el("input"); d.type = "number"; d.min = "0.1"; d.max = "10"; d.step = "0.1"; d.value = String(sec); d.className = "s-num";
     d.setAttribute("aria-label", "Seconds");
-    li.append(h, el("span", "dim", "Hz for"), d, el("span", "dim", "s"), el("span", "spacer"), sBtn("✕", "Remove this tone", () => li.remove(), "mini"));
+    li.append(h, el("span", "dim", "Hz for"), d, el("span", "dim", "s"), el("span", "spacer"), sBtn("✕", "Remove", () => li.remove(), "mini"));
     ol.append(li);
   };
   (t.value || []).forEach(([hz, sec]) => add(hz, sec));
   const tools = el("div", "row");
   const save = () => sPost("dispatch", { action: "set", key: `tones/${t.town}`,
-    value: [...ol.querySelectorAll("li")].map((li) => [...li.querySelectorAll("input")].map((i) => Number(i.value))) }, `${t.town} tones saved.`);
+    value: [...ol.querySelectorAll("li")].map((li) => [...li.querySelectorAll("input")].map((i) => Number(i.value))) }, `${t.town} tones saved`);
   if (!t.value) {
-    box.append(el("p", "dim small", `Not set: ${t.town}'s tones aren't known yet, so PCFD's are played when their units go.`));
-    tools.append(sBtn("Set tones", "", () => { add(1000, 1); tools.replaceChildren(sBtn("+ Tone", "", () => add(1000, 1), "mini"), el("span", "spacer"), sBtn("Save tones", "", save, "primary")); }));
+    box.append(el("p", "warn small", `Not set: PCFD tones play for ${t.town}`));
+    tools.append(sBtn("Set tones", "", () => { add(1000, 1); tools.replaceChildren(sBtn("+ Tone", "", () => add(1000, 1), "mini"), el("span", "spacer"), sBtn("Save", "", save, "primary")); }));
   } else {
     tools.append(sBtn("+ Tone", "", () => add(1000, 1), "mini"), el("span", "spacer"),
-      sBtn("Not set", "Forget them: PCFD's are played", () => sPost("dispatch", { action: "set", key: `tones/${t.town}`, value: null }, `${t.town} tones: not set.`), "danger-quiet"),
-      sBtn("Save tones", "", save, "primary"));
+      sBtn("Clear", "PCFD tones play instead", () => sPost("dispatch", { action: "set", key: `tones/${t.town}`, value: null }, `${t.town} tones cleared`), "danger-quiet"),
+      sBtn("Save", "", save, "primary"));
   }
-  if (t.edited) tools.append(sBtn("Reset", "As in the data file", () => sPost("dispatch", { action: "reset", key: `tones/${t.town}` }, `${t.town} tones: default again.`)));
+  if (t.edited) tools.append(sBtn("Reset", "Default", () => sPost("dispatch", { action: "reset", key: `tones/${t.town}` }, `${t.town} tones reset`)));
   box.append(ol, tools);
   return box;
 }
@@ -798,7 +798,7 @@ function sTemplate(w) {
   const box = el("label", "s-tpl");
   const head = el("span", "row");
   head.append(el("b", "", w.label), el("code", "dim small", w.key), sState(w.state), el("span", "spacer"));
-  if (w.state === "edited") head.append(sBtn("Reset", w.default, () => sPost("dispatch", { action: "reset", key: w.key }, `${w.label}: default again.`)));
+  if (w.state === "edited") head.append(sBtn("Reset", w.default, () => sPost("dispatch", { action: "reset", key: w.key }, `${w.label} reset`)));
   const ta = el("textarea");
   ta.rows = ["new", "new_no_location", "add_on", "upgrade"].includes(w.key) ? 2 : 1;
   ta.maxLength = 400;
@@ -806,7 +806,7 @@ function sTemplate(w) {
   ta.dataset.key = w.key;
   ta.spellcheck = false;
   ta.addEventListener("input", () => { clearTimeout(S.previewT); S.previewT = setTimeout(sPreview, 250); });
-  ta.addEventListener("change", () => { if (ta.value.trim() !== w.value) sPost("dispatch", { action: "set", key: w.key, value: ta.value.trim() }, `${w.label}: saved.`); });
+  ta.addEventListener("change", () => { if (ta.value.trim() !== w.value) sPost("dispatch", { action: "set", key: w.key, value: ta.value.trim() }, `${w.label} saved`); });
   box.append(head, ta);
   return box;
 }
@@ -823,8 +823,8 @@ async function sPreview() {
   try {
     const r = await api("POST", "/api/cad/settings/dispatch", { action: "preview", wording });
     if (my !== S.previewSeq) return;
-    const rows = [["new", "First dispatch, with remarks"], ["add_on", "Added to the assignment"], ["upgrade", "Upgrade"],
-      ["full", "Full department response"], ["joint", "With a joint department's units"], ["joint_only", "Only the joint department's units"]];
+    const rows = [["new", "First dispatch"], ["add_on", "Add-on"], ["upgrade", "Upgrade"],
+      ["full", "Full response"], ["joint", "With joint units"], ["joint_only", "Joint units only"]];
     const kids = rows.filter(([k]) => r.texts[k]).map(([k, t]) => {
       const d = el("div", "s-pv");
       d.append(el("div", "dim small", t), el("div", "ptext", r.texts[k]));
@@ -848,15 +848,15 @@ function sTones(t) {
     const d = el("input");
     d.type = "number"; d.min = "0.1"; d.max = "10"; d.step = "0.1"; d.value = String(sec); d.className = "s-num";
     d.setAttribute("aria-label", "Seconds");
-    li.append(h, el("span", "dim", "Hz for"), d, el("span", "dim", "s"), el("span", "spacer"), sBtn("✕", "Remove this tone", () => li.remove(), "mini"));
+    li.append(h, el("span", "dim", "Hz for"), d, el("span", "dim", "s"), el("span", "spacer"), sBtn("✕", "Remove", () => li.remove(), "mini"));
     ol.append(li);
   };
   const addGroup = (tones) => {
     const g = el("div", "s-tone-group");
     const ol = el("ol", "s-rows tones");
     const head = el("div", "row");
-    head.append(el("b", "small", "Tone group"), el("span", "dim small", "one department's tones"), el("span", "spacer"),
-      sBtn("+ Tone", "", () => addTone(ol, 1000, 1), "mini"), sBtn("✕ Group", "Remove this group", () => g.remove(), "mini"));
+    head.append(el("b", "small", "Tone group"), el("span", "spacer"),
+      sBtn("+ Tone", "", () => addTone(ol, 1000, 1), "mini"), sBtn("Remove group", "", () => g.remove(), "mini"));
     g.append(head, ol);
     tones.forEach(([hz, sec]) => addTone(ol, hz, sec));
     groups.append(g);
@@ -866,28 +866,28 @@ function sTones(t) {
     const v = [...groups.querySelectorAll(".s-tone-group")].map((g) =>
       [...g.querySelectorAll("li")].map((li) => [...li.querySelectorAll("input")].map((i) => Number(i.value))))
       .filter((g) => g.length);
-    sPost("dispatch", { action: "set", key: "tones", value: v }, "Tones saved.");
+    sPost("dispatch", { action: "set", key: "tones", value: v }, "Tones saved");
   };
   const tools = el("div", "row");
   tools.append(sBtn("+ Group", "Another department's tones, played after", () => addGroup([[1000, 1]])), el("span", "spacer"),
-    t.edited ? sBtn("Reset", "From the config", () => sPost("dispatch", { action: "reset", key: "tones" }, "Tones: from the config again.")) : null,
-    sBtn("Save tones", "", save, "primary"));
+    t.edited ? sBtn("Reset", "Config default", () => sPost("dispatch", { action: "reset", key: "tones" }, "Tones reset")) : null,
+    sBtn("Save", "", save, "primary"));
   [...tools.childNodes].forEach((n) => { if (n.nodeType === 3) n.remove(); });
-  return sCard(sCardHead("Port Chester Fire tones", t.edited ? "edited here" : "from the config"),
-    el("p", "dim small", "Played before the voice: each group in order (one per department paged, a short gap between). "
-      + "50 to 4000 Hz, up to 10 s a tone, 20 s a group."), groups, tools);
+  return sCard(sCardHead("Port Chester Fire tones", t.edited ? "edited" : "config",
+    sHelp("Played before the voice: each group in order (one per department paged, a short gap between). "
+      + "50 to 4000 Hz, up to 10 s a tone, 20 s a group.")), groups, tools);
 }
 
 // Nearest first (sizeup/cad/eta.py): the recommendation's order and the numbers behind its estimates.
 function sEta(e) {
   const rows = el("div", "s-eta");
-  const order = sSelect([["nearest", "Nearest first (by estimated arrival)"], ["card", "Run card / board order"]], e.order.value,
-    (v) => sPost("dispatch", { action: "set", key: "order", value: v }, v === "nearest" ? "Recommend: nearest first." : "Recommend: run card order."),
+  const order = sSelect([["nearest", "Nearest first (est.)"], ["card", "Run card / board order"]], e.order.value,
+    (v) => sPost("dispatch", { action: "set", key: "order", value: v }, v === "nearest" ? "Order: nearest first" : "Order: run card"),
     "Recommend");
   const line = (label, ctl, item, key, shown) => {
     const r = el("div", "row");
     r.append(el("span", "s-eta-l", label), ctl, sState(item.edited ? "edited" : "default"), el("span", "spacer"));
-    if (item.edited) r.append(sBtn("Reset", `Default: ${shown}`, () => sPost("dispatch", { action: "reset", key }, `${label}: default again.`)));
+    if (item.edited) r.append(sBtn("Reset", `Default: ${shown}`, () => sPost("dispatch", { action: "reset", key }, `${label} reset`)));
     return r;
   };
   rows.append(line("Recommend", order, e.order, "order", e.order.default === "nearest" ? "nearest first" : "run card order"));
@@ -896,18 +896,19 @@ function sEta(e) {
     i.type = "number"; i.min = String(n.min); i.max = String(n.max); i.step = n.key === "road_factor" ? "0.05" : "0.5";
     i.value = String(n.value);
     i.setAttribute("aria-label", n.label);
-    i.addEventListener("change", () => sPost("dispatch", { action: "set", key: n.key, value: Number(i.value) }, `${n.label}: ${i.value} ${n.unit}.`));
+    i.addEventListener("change", () => sPost("dispatch", { action: "set", key: n.key, value: Number(i.value) }, `${n.label}: ${i.value} ${n.unit}`));
     const ctl = el("span", "row");
     ctl.append(i, el("span", "dim small", n.unit));
     rows.append(line(n.label, ctl, n, n.key, `${n.default} ${n.unit}`));
   }
   const q = e.quarters_status;
-  const qs = sSelect([["", "None"], ...q.choices.map((c) => [c.code, `${c.code} · ${c.name}`])], q.value,
-    (v) => sPost("dispatch", { action: "set", key: "quarters_status", value: v }, `Back in quarters: ${v || "none"}.`), "Back in quarters status");
-  rows.append(line("“Back in quarters” status (ends a return)", qs, q, "quarters_status", q.default || "none"));
-  return sCard(sCardHead("Arrival estimates", e.order.value === "nearest" ? "recommend nearest first" : "recommend in run card order"),
-    el("p", "dim small", `${e.note} A rig that cleared a call is taken to be driving home for the drive back plus the return margin `
-      + "(no turnout from there); the “back in quarters” status puts it home at once. Rigs with no home station come after those with one."),
+  const qs = sSelect([["", "None"], ...q.choices.map((c) => [c.code, `${c.code} ${c.name}`])], q.value,
+    (v) => sPost("dispatch", { action: "set", key: "quarters_status", value: v }, `In quarters: ${v || "none"}`), "In-quarters status");
+  rows.append(line("In-quarters status", qs, q, "quarters_status", q.default || "none"));
+  return sCard(sCardHead("Arrival estimates", e.order.value === "nearest" ? "nearest first" : "run card order",
+    sHelp(`${e.note} A rig that cleared a call is taken to be driving home for the drive back plus the return margin `
+      + "(no turnout from there); the in-quarters status (it ends a return) puts it home at once. Rigs with no home station "
+      + "come after those with one.")),
     rows);
 }
 
@@ -921,12 +922,12 @@ function sChannels(c) {
   c.value.forEach(add);
   const tools = el("div", "row");
   tools.append(sBtn("+ Channel", "", () => add("")), el("span", "spacer"),
-    c.edited ? sBtn("Reset", `Config: ${c.default.join(", ")}`, () => sPost("dispatch", { action: "reset", key: "channels" }, "Channels: from the config again.")) : null,
-    sBtn("Save channels", "", () => sPost("dispatch", { action: "set", key: "channels",
-      value: [...rows.querySelectorAll("input")].map((i) => i.value.trim()).filter(Boolean) }, "Channels saved."), "primary"));
+    c.edited ? sBtn("Reset", `Config: ${c.default.join(", ")}`, () => sPost("dispatch", { action: "reset", key: "channels" }, "Channels reset")) : null,
+    sBtn("Save", "", () => sPost("dispatch", { action: "set", key: "channels",
+      value: [...rows.querySelectorAll("input")].map((i) => i.value.trim()).filter(Boolean) }, "Channels saved"), "primary"));
   [...tools.childNodes].forEach((n) => { if (n.nodeType === 3) n.remove(); });
-  return sCard(sCardHead("Channels", c.edited ? "edited here" : "from the config"),
-    el("p", "dim small", "The labels the dispatch box offers (logged with each dispatch; nothing transmits)."), rows, tools);
+  return sCard(sCardHead("Channels", c.edited ? "edited" : "config",
+    sHelp("The labels the dispatch box offers. Logged with each dispatch; nothing transmits.")), rows, tools);
 }
 
 // ---- users ----------------------------------------------------------------------------------------
@@ -940,57 +941,54 @@ function sUsers(panel) {
     const who = unnamed ? o.email : o.name;
     const li = el("li", "s-row" + (o.active ? "" : " retired"));
     li.append(sInput(unnamed ? "" : o.name, 60, unnamed ? `Name for ${o.email}` : "Name",
-        (v) => { if (v && v !== o.name) sPost("users", { action: "edit", id: o.id, name: v }, `${who} is now ${v}.`); }, "s-name"),
+        (v) => { if (v && v !== o.name) sPost("users", { action: "edit", id: o.id, name: v }, `${who} renamed ${v}`); }, "s-name"),
       sInput(o.email, 254, "Sign-in email", (v) => {
-        if (v.toLowerCase() !== o.email) sPost("users", { action: "edit", id: o.id, email: v }, v ? `${who}: signs in as ${v}.` : `${who}: no sign-in email.`);
+        if (v.toLowerCase() !== o.email) sPost("users", { action: "edit", id: o.id, email: v }, v ? `${who}: ${v}` : `${who}: email removed`);
       }, "s-email"),
       sInput(o.callsign, 20, "Callsign", (v) => {
-        if (v !== o.callsign) sPost("users", { action: "edit", id: o.id, callsign: v }, `${who}: callsign ${v || "removed"}.`);
+        if (v !== o.callsign) sPost("users", { action: "edit", id: o.id, callsign: v }, `${who}: callsign ${v || "removed"}`);
       }, "s-callsign"),
-      sSelect(S_OP_ROLES, o.role, (v) => sPost("users", { action: "edit", id: o.id, role: v }, `${who}: ${v}.`), "Role"),
-      unnamed ? el("span", "chip s-state pending", "not named yet") : null,
+      sSelect(S_OP_ROLES, o.role, (v) => sPost("users", { action: "edit", id: o.id, role: v }, `${who}: ${v}`), "Role"),
+      unnamed ? el("span", "chip s-state pending", "no name") : null,
       el("span", `chip s-state ${o.active ? "added" : "retired"}`, o.active ? "active" : "inactive"),
       cad.who && o.email ? Object.assign(el("span", "s-seen dim small", sSeenText(o.email)), { title: sSeenTip(o.email) }) : null,
       el("span", "spacer"),
-      cad.who && o.email && (sActAll() || sActMine(o.email)) ? sBtn("Activity", `What ${who} signed in, did and was refused`, () => {
+      cad.who && o.email && (sActAll() || sActMine(o.email)) ? sBtn("Activity", `${who}: sign-ins, actions, refusals`, () => {
         S.actEmail = o.email;
         sActivity(true);
         $("#s-activity").scrollIntoView({ block: "start", behavior: "smooth" });
       }, "ro-ok") : null,
-      o.active ? sBtn("Deactivate", "Off the operator picker; their name stays on what they did",
-        () => sPost("users", { action: "deactivate", id: o.id }, `${who} deactivated.`))
-        : sBtn("Activate", "", () => sPost("users", { action: "activate", id: o.id }, `${who} active again.`)));
+      o.active ? sBtn("Deactivate", "Off the picker; name kept on records",
+        () => sPost("users", { action: "deactivate", id: o.id }, `${who} deactivated`))
+        : sBtn("Activate", "", () => sPost("users", { action: "activate", id: o.id }, `${who} activated`)));
     [...li.childNodes].forEach((n) => { if (n.nodeType === 3) n.remove(); });   // the nulls above
     for (const sp of li.querySelectorAll(".s-seen")) sp.dataset.email = o.email;
     ol.append(li);
   }
-  if (!ops.length) ol.append(el("li", "empty", "No operators yet: the Operator field (top right) is free text until there is one."));
+  if (!ops.length) ol.append(el("li", "empty", "None"));
   const f = el("form", "row s-add");
   const name = sInput("", 60, "Name", null, "s-name");
-  const email = sInput("", 254, "Sign-in email (optional)", null, "s-email");
+  const email = sInput("", 254, "Email (optional)", null, "s-email");
   const callsign = sInput("", 20, "Callsign", null, "s-callsign");
   const role = sSelect(S_OP_ROLES, "dispatcher", null, "Role");
-  const add = el("button", "primary", "Add operator");
+  const add = el("button", "primary", "Add");
   add.type = "submit";
   f.append(name, email, callsign, role, add);
   f.addEventListener("submit", (e) => {
     e.preventDefault();
     sPost("users", { action: "add", name: name.value.trim(), email: email.value.trim(), callsign: callsign.value.trim(),
-      role: role.value }, `${name.value.trim()} added.`);
+      role: role.value }, `${name.value.trim()} added`);
   });
   const signedIn = cad.who
-    ? `You are signed in with Cloudflare Access as ${cad.who.email}: that is the operator on everything you do here, `
-      + "named from this list. Someone who signs in for the first time is added under their email, as a dispatcher: give them a name. "
-    : "Behind Cloudflare Access (the hub), the email someone signs in with picks their row here and they become the "
-      + "operator automatically; here, anyone at the console picks a name. ";
+    ? `Signed in with Cloudflare Access as ${cad.who.email}: that is the operator on everything you do here, named from `
+      + "this list. A first sign-in is added under its email, as a dispatcher: give them a name."
+    : "Behind Cloudflare Access (the hub) the sign-in email picks the operator. Here anyone at the console picks a name.";
   const roles = cad.who && cad.who.enforced
-    ? "Roles are enforced: an admin changes anything, a dispatcher runs calls but can’t change Settings, a viewer (or "
-      + "someone deactivated) only looks. Until there is an active admin with a sign-in email, anyone signed in can change "
-      + "everything; after that the last admin can’t be demoted or deactivated."
-    : "The role is recorded here, not enforced: anyone at the console can change anything. On the hub, with Cloudflare "
-      + "Access, it is: an admin changes anything, a dispatcher runs calls, a viewer only looks.";
-  panel.replaceChildren(...sHead("Users", "The people at the console. Once there is one, the Operator field becomes a picker of the active ones."),
-    el("div", "s-note", signedIn + roles),
+    ? "Admin: everything. Dispatcher: runs calls, no Settings. Viewer or deactivated: read-only. Until there is an active "
+      + "admin with a sign-in email, anyone signed in can change everything; after that the last admin can't be demoted or deactivated."
+    : "Roles are recorded here, not enforced. On the hub (Cloudflare Access) they are: admin everything, dispatcher runs calls, "
+      + "viewer read-only.";
+  panel.replaceChildren(...sHead("Users", `${signedIn}\n${roles}\nOnce there is an operator, the Operator field becomes a picker of the active ones.`),
     sCard(sCardHead("Operators", `${ops.filter((o) => o.active).length} active`), ol, f));
   if (cad.who) {                   // signed in through Cloudflare Access: there is activity to show
     const card = sCard(null);
@@ -1005,7 +1003,7 @@ function sUsers(panel) {
 // sizeup/cad/activity.py): each sign-in (once per login), what they did, what they were refused,
 // and when each was last seen. GET /api/cad/activity: an admin anyone's (or everyone's), anyone
 // else only their own. Only behind Cloudflare Access (cad.who): all-in-one records none.
-const S_ACT_KINDS = [["", "Everything"], ["signin", "Sign-ins"], ["action", "Actions"], ["refused", "Refused"]];
+const S_ACT_KINDS = [["", "All"], ["signin", "Sign-ins"], ["action", "Actions"], ["refused", "Refused"]];
 const S_ACT_LIMIT = 300;
 
 function sActAll() { return !!(cad.who && cad.who.may === "admin"); }
@@ -1020,11 +1018,11 @@ function sAgo(unix) {
 function sSeen(email) { return ((S.act && S.act.seen) || []).find((x) => x.email === email); }
 function sSeenText(email) {
   const v = sSeen(email);
-  return v && v.last_seen ? `last seen ${sAgo(v.last_seen)}` + (v.last_ip ? ` · ${v.last_ip}` : "") : "";
+  return v && v.last_seen ? `Seen ${sAgo(v.last_seen)}` + (v.last_ip ? ` ${v.last_ip}` : "") : "";
 }
 function sSeenTip(email) {
   const v = sSeen(email);
-  return v && v.last_seen ? `${fmtRecv(v.last_seen)}${v.last_ua ? ` · ${v.last_ua}` : ""}` : "";
+  return v && v.last_seen ? `${fmtRecv(v.last_seen)}${v.last_ua ? `, ${v.last_ua}` : ""}` : "";
 }
 
 async function sActivity(force) {
@@ -1056,18 +1054,18 @@ function sActivityRender() {
   const all = sActAll(), me = cad.who.email;
   const email = all ? S.actEmail : me;
   const op = S.data.operators.find((o) => o.email === email);
-  const title = !email ? "Activity · all users" : email === me ? "My activity" : `Activity · ${op ? op.name : email}`;
+  const title = !email ? "Activity: all" : email === me ? "My activity" : `Activity: ${op ? op.name : email}`;
   const kind = sSelect(S_ACT_KINDS, S.actKind, (v) => { S.actKind = v; sActivity(true); }, "Show");
   kind.classList.add("ro-ok");
   const tools = [kind];
-  if (all && email) tools.push(sBtn("All users", "Everyone's activity", () => { S.actEmail = ""; sActivity(true); }, "ro-ok"));
-  if (all && email !== me) tools.push(sBtn("Mine", "Your own activity", () => { S.actEmail = me; sActivity(true); }, "ro-ok"));
+  if (all && email) tools.push(sBtn("All users", "", () => { S.actEmail = ""; sActivity(true); }, "ro-ok"));
+  if (all && email !== me) tools.push(sBtn("Mine", "", () => { S.actEmail = me; sActivity(true); }, "ro-ok"));
   tools.push(sBtn("Refresh", "", () => sActivity(true), "ro-ok"));
   if (all) {
     const a = el("a", "nav ro-ok", "CSV");
     a.href = "/api/cad/export/activity.csv?" + new URLSearchParams({ email, kind: S.actKind });
     a.download = "";
-    a.title = "This list as a spreadsheet (everything kept: 90 days)";
+    a.title = "This list as CSV (kept 90 days)";
     tools.push(a);
   }
   const fresh = S.act && S.act.key === `${email}|${S.actKind}`;
@@ -1084,11 +1082,10 @@ function sActivityRender() {
     li.append(Object.assign(el("span", "s-act-ip dim", r.ip || "—"), { title: r.ua || "" }));
     ol.append(li);
   }
-  if (!rows.length) ol.append(el("li", "empty", fresh ? "Nothing here yet." : "Loading…"));
-  const n = fresh ? `${rows.length}${rows.length >= S_ACT_LIMIT ? "+" : ""} newest first` : "";
-  card.replaceChildren(sCardHead(title, n, ...tools),
-    el("p", "dim small", (email ? "Each" : "Everyone signed in: each") + " sign-in (once per login), every change and every "
-      + "refusal, with the address and browser it came from. Kept 90 days." + (all ? "" : " An admin sees everyone's.")),
+  if (!rows.length) ol.append(el("li", "empty", fresh ? "None" : "Loading"));
+  const n = fresh ? `${rows.length}${rows.length >= S_ACT_LIMIT ? "+" : ""}` : "";
+  card.replaceChildren(sCardHead(title, n, sHelp("Each sign-in (once per login), change and refusal, newest first, with the "
+      + "address and browser it came from. Kept 90 days." + (all ? "" : " An admin sees everyone's.")), ...tools),
     ol);
 }
 
@@ -1097,9 +1094,9 @@ function sActivityRender() {
 function sSystem(panel) {
   const sy = S.data.system;
   const recs = el("div", "row csv-row");
-  recs.append(sBtn("Open records", "Every numbered event; click one to open it", () => {
+  recs.append(sBtn("Open records", "Every numbered event", () => {
     openOverlay("#db-overlay", true); cad.dbAt = 0; renderRecords();
-  }, "primary ro-ok"), el("span", "dim small", "CSV, the sheet's columns:"));
+  }, "primary ro-ok"), el("span", "dim small", "CSV"));
   for (const [f, t] of [["incidents", "Incident database"], ["calls", "Call history"], ["unit-history", "Unit history"], ["event-log", "Event log"]]) {
     const a = el("a", "nav", t);
     a.href = `/api/cad/export/${f}.csv`;
@@ -1109,14 +1106,14 @@ function sSystem(panel) {
   const counts = el("dl", "admin");
   counts.id = "s-counts";
   const file = el("dl", "admin");
-  const edits = Object.entries(sy.overrides).map(([k, v]) => `${k.replace(/_/g, " ")} ${v}`).join(", ") || "none";
-  for (const [k, v] of [["Data file (defaults)", sy.data_file], ["Defaults version", sy.defaults_version || "—"],
-    ["Content", `sha-256 ${sy.sha256}`], ["Database", sy.db], ["Schema", `v${sy.schema}`], ["Your edits", edits]]) {
+  const edits = Object.entries(sy.overrides).map(([k, v]) => `${k.replace(/_/g, " ")} ${v}`).join(", ") || "None";
+  for (const [k, v] of [["Data file", sy.data_file], ["Defaults version", sy.defaults_version || "—"],
+    ["Content", `sha-256 ${sy.sha256}`], ["Database", sy.db], ["Schema", `v${sy.schema}`], ["Edits", edits]]) {
     const d = el("div");
     d.append(el("dt", "", k), el("dd", "", v));
     file.append(d);
   }
-  const exp = sBtn("Export settings", "Every edit, run card and operator as one JSON file", sExport, "primary ro-ok");
+  const exp = sBtn("Export settings", "Edits, run cards and operators as one JSON file", sExport, "primary ro-ok");
   const fileIn = el("input");
   fileIn.type = "file";
   fileIn.accept = ".json,application/json";
@@ -1124,18 +1121,29 @@ function sSystem(panel) {
   fileIn.addEventListener("change", () => sImportFile(fileIn));
   const imp = el("div", "s-import");
   imp.id = "s-import";
-  const backup = sCard(sCardHead("Backup and copy"), el("p", "dim small", "Export: a backup, or to set up another machine the same. "
-    + "Import shows what would change first; nothing changes until you apply it."), (() => { const r = el("div", "row"); r.append(exp, el("span", "dim small", "Import:"), fileIn); return r; })(), imp);
+  const backup = sCard(sCardHead("Backup", "", sHelp("Export: a backup, or to set up another machine the same. "
+    + "Import shows what would change first; nothing changes until you apply it.")), (() => { const r = el("div", "row"); r.append(exp, el("span", "dim small", "Import:"), fileIn); return r; })(), imp);
   const sel = sSelect([["", "All sections"], ...S.data.audit_sections.map((s) => [s, s.charAt(0).toUpperCase() + s.slice(1)])], S.audit,
     (v) => { S.audit = v; S.auditFor = ""; sAudit(); }, "Section");
   sel.classList.add("ro-ok");
   const audit = el("div", "tscroll");
   audit.id = "s-audit";
+  // the department, with its patch (static/brand)
+  const patch = el("img", "s-patch");
+  patch.src = "/static/brand/pcfd-patch.svg";
+  patch.alt = "Port Chester Fire Department patch";
+  patch.width = 68;
+  patch.height = 80;
+  const dept = el("div", "s-dept-text");
+  dept.append(el("b", "", "Port Chester Fire Department"), el("div", "dim small", "Port Chester, N.Y. · April 23, 1823"));
+  const about = sCard(patch, dept);
+  about.classList.add("s-dept");
   panel.replaceChildren(...sHead("System"),
-    sCard(sCardHead("Records", "moved here from the header"), recs, counts, el("p", "dim small", "There is no “clear all data” here on purpose.")),
+    about,
+    sCard(sCardHead("Records"), recs, counts),
     sCard(sCardHead("Data file"), file),
     backup,
-    sCard(sCardHead("Audit log", "who changed what in Settings", sel), audit));
+    sCard(sCardHead("Audit log", "", sel), audit));
   if (S.importing) sShowImport();
   sCounts();
   sAudit();
@@ -1176,7 +1184,7 @@ async function sAudit() {
   }
   if (!(S.auditRows || []).length) {
     const tr = el("tr");
-    tr.append(Object.assign(el("td", "empty", "No changes yet"), { colSpan: 6 }));
+    tr.append(Object.assign(el("td", "empty", "None"), { colSpan: 6 }));
     t.tBodies[0].append(tr);
   }
   box.replaceChildren(t);
@@ -1193,7 +1201,7 @@ async function sExport() {
     a.click();
     a.remove();
     setTimeout(() => URL.revokeObjectURL(a.href), 2000);
-    sMsg(`Exported ${a.download}.`, true);
+    sMsg(`Exported ${a.download}`, true);
   } catch (e) {
     sMsg(`Export failed: ${e.message}`);
   }
@@ -1231,13 +1239,13 @@ function sShowImport() {
     t.tBodies[0].append(tr);
   }
   const apply = sBtn(`Apply ${im.changes.length} change${im.changes.length === 1 ? "" : "s"}`, "", async () => {
-    const r = await sPost("import", { action: "apply", settings: im.data }, `Imported ${im.name}: ${im.changes.length} changes.`);
+    const r = await sPost("import", { action: "apply", settings: im.data }, `Imported ${im.name}: ${im.changes.length} changes`);
     if (r) { S.importing = null; sShowImport(); }
   }, "primary danger");
   apply.disabled = !im.changes.length;
   const cancel = sBtn("Cancel", "", () => { S.importing = null; sShowImport(); });
   const row = el("div", "row");
-  row.append(el("b", "", `${im.name}: ${im.changes.length ? `${im.changes.length} change${im.changes.length === 1 ? "" : "s"}` : "nothing would change"}`),
+  row.append(el("b", "", `${im.name}: ${im.changes.length ? `${im.changes.length} change${im.changes.length === 1 ? "" : "s"}` : "no changes"}`),
     el("span", "spacer"), cancel, apply);
   box.replaceChildren(row, el("p", "dim small", im.note || ""), ...(im.changes.length ? [el("div", "tscroll").appendChild(t).parentNode] : []));
 }
