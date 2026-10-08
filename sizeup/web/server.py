@@ -39,6 +39,7 @@ STATE = {
   "incidents": [Incident.as_dict(), newest first],   # sizeup/incidents.py
   "pages": [Page.as_dict() + {"dispatch": Dispatch.as_dict() | None}, newest first, last 50],
   "loose_traffic": [Traffic.as_dict()],              # traffic with no active incident
+  "prealert": {open, items, tapout, ...} | None,     # the phone pre-alert from Tapout (sizeup/prealert.py)
 }
 """
 

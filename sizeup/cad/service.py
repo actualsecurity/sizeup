@@ -154,6 +154,9 @@ class Cad:
         self.remote_voice: Callable[[dict], tuple[bytes, str]] | None = None
         self.audio_blobs = None
         self.cloud: Callable[[], dict | None] = lambda: None
+        # The phone pre-alert from Tapout (sizeup/prealert.py PreAlerts), set by the app on the CAD of
+        # record (hub, all-in-one) when [prealert] is on; None: no pre-alerts here.
+        self.prealert = None
 
     @classmethod
     def from_config(cls, cfg, geocoder=None, log=print) -> Cad:
@@ -200,7 +203,29 @@ class Cad:
         pos = self._positions(now)
         units = [dict(u, position=pos[u["name"]]) if u["name"] in pos else u for u in st["units"]] if pos else st["units"]
         return dict(st, units=units, map=self.map_slice(units, st["incidents"], pos, now), time=now, rev=rev,
-                    talking=self.live(), cloud=self.cloud())
+                    talking=self.live(), cloud=self.cloud(), prealert=self.prealert_state(now))
+
+    def prealert_state(self, now: float | None = None) -> dict | None:
+        """The phone pre-alerts and Tapout's health (a broken feed never breaks the console)."""
+        if self.prealert is None:
+            return None
+        try:
+            return self.prealert.state(now)
+        except Exception as e:  # noqa: BLE001
+            self.log(f"CAD: pre-alert: {type(e).__name__}: {e}")
+            return None
+
+    def _prealert_match(self, inc: dict) -> None:
+        if self.prealert is not None:
+            try:
+                self.prealert.match(inc)
+            except Exception as e:  # noqa: BLE001 - the event stands whatever the pre-alert does
+                self.log(f"CAD: pre-alert match: {type(e).__name__}: {e}")
+
+    def prealert_dismiss(self, pid: int, body: dict) -> dict:
+        if self.prealert is None:
+            raise CadError("no phone pre-alerts here ([prealert] is off, or this is a station: the hub has them)")
+        return self.prealert.dismiss(pid, body)
 
     def _positions(self, now: float) -> dict[str, dict]:
         """The AVL hook's fresh fixes (a broken feed never breaks the console)."""
@@ -290,7 +315,9 @@ class Cad:
         f = self._fields(body, partial=False)
         self._auto_geo(f)
         iid = self.store.create_incident(**f, source="manual", status="pending", operator=_text(body, "operator", OPERATOR_MAX))
-        return self.store.incident(iid)
+        inc = self.store.incident(iid)
+        self._prealert_match(inc)
+        return inc
 
     def update(self, iid: int, body: dict) -> dict:
         f = self._fields(body, partial=True)
@@ -368,6 +395,8 @@ class Cad:
         return export.admin(self.store)
 
     def export(self, name: str) -> bytes | None:
+        if name == "prealerts.csv":
+            return self.prealert.csv() if self.prealert is not None else None
         return export.export(self.store, name)
 
     # -- dispatch -------------------------------------------------------------------------------
@@ -902,7 +931,9 @@ class Cad:
                                              status="queued")
             self.log(f"CAD: from 60 Control: {self.lists.type_label(typ, sub) or 'type not set'} at "
                      f"{f['address'] or '(no location)'}")
-            return self.store.incident(iid)
+            inc = self.store.incident(iid)
+            self._prealert_match(inc)
+            return inc
         if old["status"] != "queued":
             return old
         fill = {k: v for k, v in f.items() if k == "remarks" or

@@ -26,6 +26,8 @@
                           was last seen and from where (last_seen / last_ip / last_ua)
       user_activity       each signed-in person's history on the hub: sign-ins, writes, refusals, kept
                           90 days (sizeup/cad/activity.py)
+      prealerts           phone pre-alerts from Tapout's ntfy feed and how each ended (sizeup/prealert.py,
+                          made there; its events: kind 'prealert', in the event log, not the unit log)
 
 The lists (types, subtypes, dispositions, unit statuses and what each one means) come from
 sizeup/cad/lists.py. One connection, one lock: the web server is threaded and SQLite writes are
@@ -124,7 +126,7 @@ CREATE TABLE events (
   incident_id INTEGER REFERENCES incidents(id),   -- NULL: a unit status change off any incident
   unit_id INTEGER REFERENCES units(id),
   at REAL NOT NULL,
-  kind TEXT NOT NULL,                   -- created | system | accepted | dismissed | note | dispatch | remarks | tones | attach | status | closed | edit
+  kind TEXT NOT NULL,                   -- created | system | accepted | dismissed | note | dispatch | remarks | tones | attach | status | closed | edit | prealert
   text TEXT NOT NULL,
   operator TEXT NOT NULL DEFAULT '',
   units TEXT NOT NULL DEFAULT ''        -- a note's unit tags ("E63,L31": who said it), typed with the unit autocomplete
@@ -1071,4 +1073,5 @@ class Store:
 
     def unit_log(self, limit: int = 50) -> list[dict]:
         """Status changes with no incident (out of service, back in quarters)."""
-        return self.q("SELECT * FROM events WHERE incident_id IS NULL ORDER BY at DESC, id DESC LIMIT ?", (limit,))
+        return self.q("SELECT * FROM events WHERE incident_id IS NULL AND kind != 'prealert' ORDER BY at DESC, id DESC LIMIT ?",
+                      (limit,))

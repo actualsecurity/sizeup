@@ -218,6 +218,9 @@ class StationMode:
             self.source = "settings"
             self._save(operator)
             self._audit(operator, was)
+        sync = getattr(self.app, "prealert_sync", None)
+        if sync is not None:                    # the phone pre-alert follows: on here only while not forwarding
+            sync()
         if was != (forward, url):
             self.log(f"station: forwarding {'on' if forward else 'off'}" + (f" to {url}" if forward else "")
                      + f" (Settings, {operator or 'no name'})")

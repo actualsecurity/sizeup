@@ -73,6 +73,9 @@ GET  /api/cad/feed?limit=&tg=307,333      the pinned 60 Control feed: newest tra
                                           talkgroup(s), pc = why it is talking to us (sizeup/cad/feed.py)
 POST /api/cad/incident/<id>/link          {traffic_id, operator}  put a transmission on the event (why manual)
 GET  /api/cad/rigs                        board units (PCFD's own flagged), for the talk alerts
+POST /api/cad/prealert/<id>/dismiss       {operator?, reason?}  a phone pre-alert from Tapout that is nothing
+                                          (sizeup/prealert.py; the state's "prealert"); dispatchers and admins
+GET  /api/cad/export/prealerts.csv        every ring kept (90 days) with its outcome: matched / dismissed / expired
 """
 
 from __future__ import annotations
@@ -96,6 +99,7 @@ UNIT_STATION = re.compile(r"/api/cad/unit/(\d{1,9})/station")
 DISPATCH_WAV = re.compile(r"/api/cad/dispatch/(\d{1,9})\.wav")
 PREVIEW_WAV = re.compile(r"/api/cad/audio/([0-9a-f]{20})\.wav")
 SETTINGS = re.compile(r"/api/cad/settings/([a-z_]{1,30})")
+PREALERT = re.compile(r"/api/cad/prealert/(\d{1,9})/dismiss")
 
 # Who may POST what (enforced only with a verified sign-in, see above): "dispatch" = dispatchers and
 # admins (running calls), "admin" = admins only (Settings in every form, and the radios), "read" =
@@ -104,6 +108,7 @@ WRITES = (
     (re.compile(r"/api/cad/incident(?:/\d{1,9}(?:/(?:accept|dismiss|close|note|recommend|preview|dispatch|upgrade|attach"
                 r"|link|return))?)?"), "dispatch"),                       # events, notes, dispatches, radio links
     (UNIT, "dispatch"),                                                     # unit status on the board
+    (PREALERT, "dispatch"),                                                 # a phone pre-alert that is nothing
     (re.compile(r"/api/incident/[^/]{1,80}/close"), "dispatch"),            # the monitor's incident list (server.py)
     (UNIT_STATION, "admin"),                                                # a unit's home station: Settings > Units
     (SETTINGS, "admin"),                                                    # lists, units, dispatch, users, import ...
@@ -206,6 +211,11 @@ def _settings(m, b, o, c):
     return f"Changed settings: {sec}{f'/{_clip(key, 40)}' if key else ''} {act}".rstrip(), ""
 
 
+def _prealert_at(o) -> str:
+    from sizeup.prealert import _hms
+    return _hms(o.get("at")) or "?"
+
+
 def _toggles(b) -> str:
     return ", ".join(f"{k} {'on' if b[k] else 'off'}" for k in ("record", "main") if b.get(k) is not None)
 
@@ -214,6 +224,8 @@ DOES = (
     (re.compile(r"/api/cad/incident"), _created),
     (INCIDENT, _on_incident),
     (UNIT, _unit_status),
+    (PREALERT, lambda m, b, o, c: (f"Dismissed the phone pre-alert of {_prealert_at(o)}"
+                                   + (f": {_clip(b.get('reason'))}" if b.get("reason") else ""), "")),
     (UNIT_STATION, lambda m, b, o, c: (f"Changed settings: {o.get('name', '')} station {_clip(b.get('station'), 40) or 'unset'}", "")),
     (SETTINGS, _settings),
     (re.compile(r"/api/cad/runcards"), lambda m, b, o, c: (f"Changed settings: run card {_clip(b.get('type'), 50)} saved", "")),
@@ -423,6 +435,8 @@ class CadApi:
             return fn(iid, body)
         if m := UNIT.fullmatch(path):
             return c.unit_status(int(m.group(1)), body)
+        if m := PREALERT.fullmatch(path):
+            return c.prealert_dismiss(int(m.group(1)), body)
         if m := UNIT_STATION.fullmatch(path):
             return c.unit_station(int(m.group(1)), body)
         if path == "/api/cad/runcards":

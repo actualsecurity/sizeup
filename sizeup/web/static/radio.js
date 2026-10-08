@@ -72,9 +72,11 @@ window.Radio = (() => {
   function loadAlerts() {
     try {
       const a = JSON.parse(localStorage.getItem(ALERT_KEY) || "null");
-      if (a && typeof a === "object") return { on: !!a.on, chime: !!a.chime, units: Array.isArray(a.units) ? a.units : null };
+      if (a && typeof a === "object") {
+        return { on: !!a.on, chime: !!a.chime, units: Array.isArray(a.units) ? a.units : null, prealert: a.prealert !== false };
+      }
     } catch (_) { /* no storage: defaults */ }
-    return { on: false, chime: false, units: null };
+    return { on: false, chime: false, units: null, prealert: true };
   }
   function saveAlerts() {
     try { localStorage.setItem(ALERT_KEY, JSON.stringify(st.alerts)); } catch (_) { /* not remembered */ }
@@ -147,6 +149,13 @@ window.Radio = (() => {
     st.toasts.prepend(t);
     while (st.toasts.children.length > 4) st.toasts.lastChild.remove();
     setTimeout(() => t.remove(), TOAST_MS);
+  }
+
+  // The phone pre-alert (prealert.js): a toast, and the chime when it is on, unless turned off here.
+  function prealert(text, sub) {
+    if (!st.alerts.prealert) return;
+    toast(text, sub);
+    ring();
   }
 
   function alertNew(entries) {
@@ -247,7 +256,8 @@ window.Radio = (() => {
     head.append(x);
     const opts = el("div", "ap-opts");
     opts.append(check("Alerts on", a.on, (v) => { a.on = v; saveAlerts(); renderButton(); renderPanel(); }),
-                check("Chime", a.chime, (v) => { a.chime = v; saveAlerts(); if (v) unlockChime(); renderButton(); }));
+                check("Chime", a.chime, (v) => { a.chime = v; saveAlerts(); if (v) unlockChime(); renderButton(); }),
+                check("Phone pre-alert", a.prealert, (v) => { a.prealert = v; saveAlerts(); }));
     const want = chosen();
     const set = (names) => { a.units = [...names]; saveAlerts(); renderButton(); renderPanel(); };
     const quick = el("div", "ap-quick");
@@ -276,7 +286,8 @@ window.Radio = (() => {
     }
     if (!st.rigs.length) grid.append(el("div", "dim", "No unit list"));
     const note = el("div", "dim small", "This browser only");
-    note.title = "A toast when a chosen unit keys up (P25: when the radio is named; FG1: when its MDC ID decodes).";
+    note.title = "A toast when a chosen unit keys up (P25: when the radio is named; FG1: when its MDC ID decodes). "
+      + "Phone pre-alert: a toast (and the chime, when on) when Tapout hears the HQ phone ring, even with talk alerts off.";
     p.replaceChildren(head, opts, quick, grid, note);
     if (!a.on) grid.classList.add("off");
   }
@@ -301,6 +312,6 @@ window.Radio = (() => {
     return box.childNodes.length ? box : null;
   }
 
-  return { update, talkingFor, rigTag, mountAlerts, label, who, shown, toast,
+  return { update, talkingFor, rigTag, mountAlerts, label, who, shown, toast, prealert,
            get talking() { return st.talking; } };
 })();

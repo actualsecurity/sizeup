@@ -275,13 +275,76 @@ SIZEUP_STATE_DIR=$(mktemp -d) SIZEUP_STATION_TOKEN=$(openssl rand -hex 32) \
   python -m sizeup --config deploy/hub/config.hub.toml        # http://localhost:8090/cad, /healthz
 ```
 
+## Phone pre-alert (Tapout)
+
+> "can we bake in the ntfy.sh feed from tapout into this? lets receive that feed as a possible
+> pre-alert of a possible incoming call" (user, 2026-10-08)
+
+Tapout (repo `firehouse-ring-alerter`) is an ESP32 on the PCFD headquarters phone line. When the
+line rings it posts to ntfy.sh; sizeup reads that feed (`sizeup/prealert.py`, `[prealert]` in the
+config) and shows each ring as a **pre-alert**: a possible incoming call, often before 60 Control
+pages it.
+
+**Read only.** `pcfd-phone-prealert` is the fire crew's real alert channel: sizeup only subscribes
+(every request is a `GET`, checked by `tests/test_prealert.py`) and never publishes to it or to any
+ntfy topic. Don't post to it by hand "to test" either: it pages the crew. Tests use a local fake
+ntfy server only.
+
+| topic | Tapout sends | sizeup does |
+|---|---|---|
+| `ring_topic` (`pcfd-phone-prealert`) | title `STATION PHONE RINGING`, max priority, message `Incoming call on the station line at 2026-10-08 14:03:21 EDT.` (late: `Phone rang ~45s ago at ... (alert delayed by network).`); a commissioning test is `[TEST] STATION PHONE RINGING` | a pre-alert {at, source "Tapout HQ phone", message, ntfy id}; a test is shown as "Test ring" and never matched |
+| `status_topic` (`pcfd-status`) | `Tapout heartbeat` hourly (`... hourly check-in, seq 12 ...`), `Tapout restarted` at boot, warnings (`Detector line STUCK active`, `ALERT DELIVERY FAILED`, `Low memory`), OTA lifecycle | Tapout's health: "Tapout: ok, heartbeat 12 min ago"; over `heartbeat_stale_min` (90) "no heartbeat for 2 h" in warning; never heard: "no heartbeat yet" |
+
+**Where it runs:** the CAD of record only: the **hub**, or all-in-one. While a station forwards to
+a hub it doesn't subscribe (logged): the hub does on its own, so it works whether or not the station
+is connected, and nobody gets two alerts. Switching forwarding in Settings > System > Station starts
+or stops it at once (`App.prealert_sync`; a restart resumes after the last message).
+
+**The stream:** one thread per topic on `GET <server>/<topic>/json` (ntfy's line-per-event JSON:
+`open`, `keepalive` about every 45 s, `message`). A dropped stream reconnects with backoff (1 s
+doubling to 60 s; a `429` waits at least 2 min, or `Retry-After`, up to 10) and resumes with
+`since=<last message id>`. The first connection asks `since=10m` for rings (a ring just before a
+restart isn't lost, old ones aren't news) and `since=90m` for the status topic (the last heartbeat).
+Rings are deduplicated by ntfy id in the database; one received more than `expire_min` after it rang
+is recorded as expired ("received late"), never shown as live.
+
+**On screen:** the open pre-alerts sit at the top of the CAD's **60 Control** column, a red blinking
+row "Phone ringing · Tapout HQ phone · 14:03:21", its age ticking, with **Dismiss**; Tapout's health
+is in that column's header (its tooltip: the last heartbeat and restart, a recent warning, a feed
+that isn't connected). The header shows a **Phone ringing 0:42** badge.
+Sound: the header's **Alerts** panel has *Phone pre-alert* (on by default, this browser): a toast, and
+the chime when *Chime* is on. The wall board (`/monitor`) has the
+same header badge and the open pre-alerts, read-only, above its 60 Control feed.
+
+**How each ends** (each in the CAD event log, kind `PRE-ALERT` in `event-log.csv`):
+
+| outcome | when |
+|---|---|
+| matched | a 60 Control page for Port Chester (`Cad.from_monitor`) or a new emergency event (`Cad.create`) is made while it is open (within `expire_min`), or up to 2 min before the ring. Every open pre-alert is linked to that event, whose chronology says "Phone pre-alert 14:03:21 matched: Tapout HQ phone rang 95 s before this event (60 Control page)". Non-emergency events don't match. |
+| dismissed | `POST /api/cad/prealert/<id>/dismiss {reason?}`: dispatchers and admins (hub with Access: enforced, the person's activity says "Dismissed the phone pre-alert of 14:03:21") |
+| expired | nothing within `expire_min` (5) |
+
+Pre-alerts are in `cad.sqlite` (`prealerts`, so Litestream keeps them): the last 24 h in the state,
+90 days kept. **Records → CSV → Phone pre-alerts** (`/api/cad/export/prealerts.csv`): each ring with
+its outcome, when, the seconds from ring to outcome and the event number, for reviewing ring → call.
+
+```toml
+[prealert]                       # leave the section out: off
+enabled = true
+server = "https://ntfy.sh"       # SIZEUP_PREALERT_SERVER overrides (a local test server)
+ring_topic = "pcfd-phone-prealert"
+status_topic = "pcfd-status"
+expire_min = 5
+heartbeat_stale_min = 90
+```
+
 ## The hub's storage
 
 Everything the hub keeps is SQLite under `SIZEUP_STATE_DIR`, so Litestream can replicate it:
 
 | file | holds |
 |---|---|
-| `cad.sqlite` | the CAD: events, units, run cards, dispatch log, settings, radio registry, communications log |
+| `cad.sqlite` | the CAD: events, units, run cards, dispatch log, settings, radio registry, communications log, phone pre-alerts |
 | `hub.sqlite` | the monitor: incidents, transmissions, pages (one row each, written only when changed), and the station events applied so far |
 | `audio.sqlite` | received clips (`storage.audio_keep_hours`, 12 h, and `audio_max_mb`, oldest first) and the dispatch audio the station rendered (kept with the dispatch log; unused previews a day) |
 

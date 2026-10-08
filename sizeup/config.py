@@ -109,6 +109,14 @@ class Config:
     # but /healthz and /api/station/ needs a verified Access token, and its email is the operator.
     cloud_access_team: str = ""       # "yoda.cloudflareaccess.com" (env SIZEUP_ACCESS_TEAM)
     cloud_access_aud: str = ""        # the Access application's AUD tag (env SIZEUP_ACCESS_AUD)
+    # [prealert] (sizeup/prealert.py): Tapout's ntfy feed, read only, on the CAD of record (hub or
+    # all-in-one; never a station forwarding to a hub). Off unless the section is in the config.
+    prealert_enabled: bool = False
+    prealert_server: str = "https://ntfy.sh"
+    prealert_ring_topic: str = "pcfd-phone-prealert"
+    prealert_status_topic: str = "pcfd-status"
+    prealert_expire_min: float = 5.0
+    prealert_heartbeat_stale_min: float = 90.0
 
 
 def _take(d: dict, path: str, allowed: set[str]) -> dict:
@@ -155,6 +163,7 @@ def hub_url_problem(url: str) -> str:
 #   SIZEUP_ACCESS_CLIENT_ID / _SECRET [cloud] access_client_id / access_client_secret
 #   SIZEUP_PUBLIC_URL, SIZEUP_HUB_URL [cloud] public_url / hub_url
 #   SIZEUP_ACCESS_TEAM / _AUD         [cloud] access_team / access_aud (hub: Cloudflare Access identity)
+#   SIZEUP_PREALERT_SERVER            [prealert] server (a local test server instead of ntfy.sh)
 def _env(name: str, default):
     v = os.environ.get(name, "").strip()
     return v if v else default
@@ -221,6 +230,33 @@ def _cloud(data: dict) -> dict:
                 cloud_access_team=team, cloud_access_aud=aud, **_keychain(cl))
 
 
+def _prealert(data: dict) -> dict:
+    """[prealert] -> Config fields. No section = off. Read only: sizeup never publishes to ntfy."""
+    if "prealert" not in data:
+        return {}
+    pa = _take(data["prealert"], "prealert", {"enabled", "server", "ring_topic", "status_topic", "expire_min",
+                                              "heartbeat_stale_min"})
+    server = _env("SIZEUP_PREALERT_SERVER", str(pa.get("server", "https://ntfy.sh"))).rstrip("/")
+    m = re.fullmatch(r"(https?)://([^/:?#]+)(:\d+)?", server)
+    if not m or (m.group(1) == "http" and m.group(2) not in ("127.0.0.1", "localhost", "::1")):
+        raise ConfigError('prealert.server: the ntfy server, "https://ntfy.sh" (plain http only to this machine)')
+    topics = {k: str(pa.get(k, d)) for k, d in (("ring_topic", "pcfd-phone-prealert"), ("status_topic", "pcfd-status"))}
+    if not all(re.fullmatch(r"[-_A-Za-z0-9]{1,64}", t) for t in topics.values()) or len(set(topics.values())) != 2:
+        raise ConfigError("prealert.ring_topic / status_topic: two different ntfy topics (letters, digits, - and _)")
+    try:
+        expire, stale = float(pa.get("expire_min", 5)), float(pa.get("heartbeat_stale_min", 90))
+    except (TypeError, ValueError):
+        raise ConfigError("prealert.expire_min / heartbeat_stale_min: minutes") from None
+    if not 0.5 <= expire <= 60 or not 5 <= stale <= 24 * 60:
+        raise ConfigError("prealert.expire_min: 0.5 to 60; prealert.heartbeat_stale_min: 5 to 1440")
+    enabled = pa.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise ConfigError("prealert.enabled: true or false")
+    return dict(prealert_enabled=enabled, prealert_server=server, prealert_ring_topic=topics["ring_topic"],
+                prealert_status_topic=topics["status_topic"], prealert_expire_min=expire,
+                prealert_heartbeat_stale_min=stale)
+
+
 def load(path: str | Path) -> Config:
     path = Path(path)
     base = path.parent
@@ -229,7 +265,7 @@ def load(path: str | Path) -> Config:
     except tomllib.TOMLDecodeError as e:
         raise ConfigError(f"{path}: {e}") from e
     _take(data, "config", {"station", "web", "radio", "tones", "stt", "p25", "mdc", "units", "storage", "map",
-                           "cad", "dispatch", "cloud"})
+                           "cad", "dispatch", "cloud", "prealert"})
     st = _take(data.get("station", {}), "station", {"id", "name"})
     web = dict(_take(data.get("web", {}), "web", {"host", "port"}))
     web["host"] = _env("SIZEUP_HOST", web.get("host", "127.0.0.1"))
@@ -398,4 +434,5 @@ def load(path: str | Path) -> Config:
         dispatch_repeat=d_repeat, dispatch_transmit=False, dispatch_channels=d_channels,
         **(dict(cloud, cloud_outbox=rel_state(cloud["cloud_outbox"])) if cloud else {}),
         cloud_state="" if cloud.get("cloud_role") == "hub" else rel_state("state/cloud.json"),
+        **_prealert(data),
     )
