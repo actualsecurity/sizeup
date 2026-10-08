@@ -11,10 +11,24 @@ P25 (county system): trunk-recorder's own log, read line by line as sizeup drain
     - Transmission src: 41228 (77A4) pos: ...       who talked, listed after the call ends: a radio not
                                                     shown live is flashed as "just transmitted"
 
-trunk-recorder logs no unit for a call's first transmission (only when the alias is new), so a
-one-transmission call shows its talker when it ends. Its unit_script plugin closes that gap: with
-"unitScript": "./unit-event.sh" on the system in its config.json, each grant prints
-"SIZEUP-UNIT westchester 41228 call 307" (deploy/trunk-recorder/unit-event.sh), read here too.
+trunk-recorder logs the talker of a call's first transmission only when its alias is new (3-4 s
+in, when the voice frames carry it) and a later talker only when its recorder was idle, so from the
+log alone a talker shows ~4 s after the key-up, or only when the call ends (replay of the station's
+log, 2026-10-08: median 3.9 s on Fire/EMS 15, a third named only at the end). Its unit_script
+plugin closes that gap: sizeup turns it on in the generated config.runtime.json (radio/recorder.py,
+"unitScript": <abs path>/unit-event.sh on each system) and trunk-recorder 5.2 then runs, for every
+voice grant and every grant whose source differs from the call's current one (= a new key-up),
+
+    unit-event.sh <shortName> <radioID> call <talkgroup> [patched talkgroups]
+
+on every talkgroup of the system, recorded or not; the script prints "SIZEUP-UNIT westchester 41228
+call 307" to trunk-recorder's stdout, which sizeup already reads line by line (one atomic write, no
+buffering, no polling). That grant names the talker at once (on_change -> the pages and the hub
+link are poked in the same call). A grant before its call's "Starting P25 Recorder" line (the script
+runs in the background) or on a talkgroup nothing records is held as a call of its own: adopted by
+the call's "Starting" line, else gone GRANT_IDLE_S after the grant. The finished call's JSON
+(radio/p25.py) stays the record of who said what; a talker shown live is not flashed again from the
+"Transmission src" lines at the end.
 
 FG1 (analog): the app's watcher calls fm_open while the squelch is open, fm_ids when the MDC-1200
 ID decodes from the audio so far (APX radios send it 0.3-0.8 s in), and fm_segment with the IDs
@@ -29,14 +43,17 @@ import time
 from typing import Callable
 
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
+TS = re.compile(r"^\[(?P<ts>\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)?)\]")   # trunk-recorder's (local) time
 LINE = re.compile(r"\[(?P<sys>[^\]\s]+)\]\s+(?P<call>\w+)\s+TG:\s*(?P<tg>\d+)\s+Freq:\s*[\d.]+\s*MHz\s+(?P<msg>.*)$")
 UNIT_SET = re.compile(r"Unit ID set via Control Channel, ext: (?P<src>\d+)")
 ALIAS = re.compile(r"New \S+ alias: (?P<src>\d+) \((?P<alias>[^)]*)\)")
 SRC = re.compile(r"- Transmission src: (?P<src>-?\d+)(?: \((?P<alias>[^)]*)\))? pos:")
-UNIT_SCRIPT = re.compile(r"^SIZEUP-UNIT (?P<sys>\S+) (?P<src>\d+) (?P<ev>\w+)(?: (?P<tg>\d+))?")
+UNIT_TAG = "SIZEUP-UNIT "
+UNIT_SCRIPT = re.compile(r"^SIZEUP-UNIT (?P<sys>\S+) (?P<src>-?\d+) (?P<ev>\w+)(?: (?P<tg>\d+))?")
 CALL_IDLE_S = 30.0       # a call with no log line this long is gone (trunk-recorder restarted mid-call)
 RECENT_S = 4.0           # "just transmitted": shown this long after the transmission ended
-GRANT_S = 3.0            # a unit-script grant waits this long for its call's "Starting" line
+GRANT_S = 3.0            # a grant held on its own is adopted by a "Starting" line for its talkgroup this soon
+GRANT_IDLE_S = 5.0       # ... and is gone this long after its last grant when no call line ever came
 CONCLUDED_KEEP_S = 5.0   # the "Transmission src" lines follow the conclusion
 
 
@@ -44,18 +61,33 @@ def _noop(*_a) -> None:
     pass
 
 
+def _tr_time(line: str) -> float | None:
+    """The time trunk-recorder stamped on a log line (epoch seconds), None if it has none."""
+    m = TS.match(line)
+    if not m:
+        return None
+    try:
+        return time.mktime(time.strptime(m["ts"][:19], "%Y-%m-%d %H:%M:%S")) + float("0" + m["ts"][19:])
+    except (ValueError, OverflowError):
+        return None
+
+
 class LiveTalk:
     def __init__(self, resolve: Callable[[str, str, str], dict | None] = lambda s, r, a: None,
                  tg_name: Callable[[int], str] = lambda tg: f"TG {tg}",
                  learn: Callable[[str, str, float], None] = _noop, clock: Callable[[], float] = time.time,
-                 on_change: Callable[[], None] = _noop, main: Callable[[int], bool] = lambda tg: True):
+                 on_change: Callable[[], None] = _noop, main: Callable[[int], bool] = lambda tg: True,
+                 debug: Callable[[str], None] | None = None):
         self.resolve, self.tg_name, self.learn, self.clock = resolve, tg_name, learn, clock
         self.main = main        # talkgroups shown in Radio traffic (an unidentified talker is shown only there)
         self.on_change = on_change
+        self.debug = debug      # one line per talker named on a main talkgroup: how fast it went out
         self._lock = threading.Lock()
-        self._calls: dict[tuple[str, str], dict] = {}       # (system, call) -> {tg, since, src, alias, talk_since, seen, shown}
+        # (system, call) -> {tg, since, src, alias, talk_since, seen, shown}; a grant with no call
+        # line yet is held under (system, "grant:<tg>") with grant=True.
+        self._calls: dict[tuple[str, str], dict] = {}
         self._done: dict[tuple[str, str], dict] = {}        # concluded, waiting for their "Transmission src" lines
-        self._grants: dict[tuple[str, int], tuple[str, float]] = {}
+        self._named: list[tuple[dict, str]] = []            # talkers named by the line being fed (for debug)
         self._fm: dict[str, dict] = {}                      # channel -> {since, ids}
         self._fm_last: dict[str, dict] = {}
         self._recent: list[dict] = []
@@ -64,44 +96,87 @@ class LiveTalk:
     # -- P25 -------------------------------------------------------------------------------------
 
     def feed_line(self, line: str) -> bool:
-        """One line of trunk-recorder output. True when the live state changed."""
+        """One line of trunk-recorder output (its log, or a unit-script line). True when the live
+        state changed; on_change() has then been called before this returns."""
+        got = time.time()
         line = ANSI.sub("", line).strip()
-        now = self.clock()
+        # The unit script writes to the same pipe as trunk-recorder's log, whose message and newline
+        # are two writes: a grant can land between them ("...QPSK: trueSIZEUP-UNIT ...").
+        i = line.find(UNIT_TAG)
+        parts = [line] if i <= 0 else [line[:i], line[i:]]
+        self._named = []
         changed = False
-        if m := UNIT_SCRIPT.match(line):
-            if m["ev"] == "call" and m["tg"]:
-                changed = self._grant(m["sys"], m["src"], int(m["tg"]), now)
-        elif m := LINE.search(line):
-            changed = self._call_line(m["sys"], m["call"], int(m["tg"]), m["msg"], now)
+        for part in parts:
+            changed = self._feed(part, self.clock()) or changed
         if changed:
             self.on_change()
+            if self.debug is not None:
+                self._report(got, _tr_time(line))
         return changed
 
-    def _grant(self, system: str, src: str, tg: int, now: float) -> bool:
-        with self._lock:
-            call = next((c for (s, _k), c in self._calls.items() if s == system and c["tg"] == tg), None)
-            if call is None:
-                self._grants[(system, tg)] = (src, now)
-                return False
-            return self._talker(call, src, now)
+    def _feed(self, line: str, now: float) -> bool:
+        if m := UNIT_SCRIPT.match(line):
+            if m["ev"] == "call" and m["tg"] and m["src"] not in ("-1", "0"):
+                return self._grant(m["sys"], m["src"], int(m["tg"]), now)
+            return False
+        if m := LINE.search(line):
+            return self._call_line(m["sys"], m["call"], int(m["tg"]), m["msg"], now)
+        return False
 
-    def _talker(self, call: dict, src: str, now: float) -> bool:
+    def _report(self, got: float, stamped: float | None) -> None:
+        sent = time.time()
+        for call, via in self._named:
+            tg = call["tg"]
+            try:
+                if not self.main(tg):
+                    continue
+                e = self._entry("", "", tg, call["src"], call["alias"], call["since"], call["talk_since"])
+            except Exception:
+                continue
+            who = e["rig"] or e["alias"] or "unknown radio"
+            t0 = stamped if stamped is not None else got
+            self.debug(f"live p25: {e['channel']} (TG {tg}) radio {call['src']} ({who}) talking via {via}: "
+                       f"published {(sent - t0) * 1000:.0f} ms after the {'log line' if stamped else 'grant'}, "
+                       f"{max(0.0, call['talk_since'] - call['since']):.1f} s into the call")
+
+    def _grant(self, system: str, src: str, tg: int, now: float) -> bool:
+        """A voice grant (or a grant with a new source on a call in progress): src is talking on tg now."""
+        with self._lock:
+            live = [c for (s, _k), c in self._calls.items() if s == system and c["tg"] == tg]
+            call = max((c for c in live if not c.get("grant")), key=lambda c: c["since"], default=None) \
+                or next((c for c in live if c.get("grant")), None)
+            if call is None:
+                call = self._calls[(system, f"grant:{tg}")] = {
+                    "tg": tg, "since": now, "src": "", "alias": "", "talk_since": now, "seen": now,
+                    "shown": set(), "grant": True}
+            if call.get("grant"):
+                call["seen"] = now
+            return self._talker(call, src, now, "grant")
+
+    def _talker(self, call: dict, src: str, now: float, via: str) -> bool:
         if call["src"] == src:
             call["seen"] = now
             return False
         call.update(src=src, alias=self.aliases.get(src, ""), talk_since=now, seen=now)
         call["shown"].add(src)
+        self._named.append((call, via))
         return True
+
+    def _open(self, system: str, key: str, tg: int, now: float) -> dict:
+        """A call trunk-recorder logs for the first time: it takes over a grant held for its talkgroup."""
+        g = self._calls.pop((system, f"grant:{tg}"), None)
+        call = {"tg": tg, "since": now, "src": "", "alias": "", "talk_since": now, "seen": now, "shown": set()}
+        if g is not None and now - g["seen"] <= GRANT_S:
+            call.update(since=g["since"], src=g["src"], alias=g["alias"], talk_since=g["talk_since"],
+                        shown=g["shown"])
+        self._calls[(system, key)] = call
+        return call
 
     def _call_line(self, system: str, key: str, tg: int, msg: str, now: float) -> bool:
         k = (system, key)
         with self._lock:
             if msg.startswith("Starting P25 Recorder"):
-                g = self._grants.pop((system, tg), None)
-                self._calls[k] = {"tg": tg, "since": now, "src": "", "alias": "", "talk_since": now, "seen": now,
-                                  "shown": set()}
-                if g and now - g[1] <= GRANT_S:
-                    self._talker(self._calls[k], g[0], now)
+                self._open(system, key, tg, now)
                 return True
             if msg.startswith("Concluding Recorded Call") or msg.startswith("Stopping P25 Recorder"):
                 call = self._calls.pop(k, None)
@@ -124,17 +199,16 @@ class LiveTalk:
                 return False
             call = self._calls.get(k)
             if call is None:                         # a line for a call started before we were listening
-                call = self._calls[k] = {"tg": tg, "since": now, "src": "", "alias": "", "talk_since": now,
-                                         "seen": now, "shown": set()}
+                call = self._open(system, key, tg, now)
             call["seen"] = now
             if m := UNIT_SET.search(msg):
-                return self._talker(call, m["src"], now)
+                return self._talker(call, m["src"], now, "log")
             if m := ALIAS.search(msg):
                 src, alias = m["src"], m["alias"].strip()
                 self.aliases[src] = alias
                 self.learn(src, alias, now)
                 if not call["src"]:
-                    return self._talker(call, src, now)
+                    return self._talker(call, src, now, "alias")
                 if call["src"] == src and call["alias"] != alias:
                     call["alias"] = alias
                     return True
@@ -208,16 +282,13 @@ class LiveTalk:
         out: list[dict] = []
         with self._lock:
             for k, c in list(self._calls.items()):
-                if now - c["seen"] > CALL_IDLE_S:
+                if now - c["seen"] > (GRANT_IDLE_S if c.get("grant") else CALL_IDLE_S):
                     del self._calls[k]
                     continue
                 out.append(self._entry(k[0], k[1], c["tg"], c["src"], c["alias"], c["since"], c["talk_since"]))
             for k, d in list(self._done.items()):
                 if now - d["ended"] > CONCLUDED_KEEP_S:
                     del self._done[k]
-            for (s, tg), (_src, at) in list(self._grants.items()):
-                if now - at > GRANT_S:
-                    del self._grants[(s, tg)]
             for ch, f in self._fm.items():
                 if f["ids"]:
                     out += [self._fm_entry(ch, i, f["since"], f.get("id_at", f["since"])) for i in f["ids"]]

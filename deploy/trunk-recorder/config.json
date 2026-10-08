@@ -25,7 +25,8 @@
       "talkgroupsFile": "talkgroups.csv",
       "recordUnknown": true,
       "hideUnknownTalkgroups": true,
-      "compressWav": false
+      "compressWav": false,
+      "unitScript": "./unit-event.sh"
     }
   ],
   "captureDir": "../../captures/p25",

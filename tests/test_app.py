@@ -450,6 +450,54 @@ def test_trunk_recorder_gets_the_dongle_index_not_the_serial(tmp_path):
         r.stop()
 
 
+def test_trunk_recorder_runtime_config_runs_the_unit_script_by_absolute_path(tmp_path):
+    # The talker at the grant (sizeup/radio/live.py) needs trunk-recorder's unit_script plugin on:
+    # every generated config.runtime.json names deploy/trunk-recorder/unit-event.sh absolutely.
+    import json
+    import shutil
+    import subprocess
+    from pathlib import Path
+    from sizeup.radio.recorder import UNIT_SCRIPT_MAX, TrunkRecorder, unit_script_command
+    import tempfile
+    deploy = Path(__file__).parent.parent / "deploy" / "trunk-recorder"
+    short = Path(tempfile.mkdtemp(prefix="tr-", dir="/tmp"))     # pytest's tmp_path is too long a path here
+    work = short / "trunk-recorder"
+    work.mkdir()
+    for f in ("config.json", "unit-event.sh"):
+        shutil.copy2(deploy / f, work / f)                       # keeps the script's x bit
+    r = TrunkRecorder("trunk-recorder --config=config.json", str(work))
+    assert r._argv_for(3)[-1] == "--config=config.runtime.json"
+    conf = json.loads((work / "config.runtime.json").read_text())
+    script = str((work / "unit-event.sh").resolve())
+    assert [s["unitScript"] for s in conf["systems"]] == [script] and conf["sources"][0]["device"] == "rtl=3"
+    # ... which trunk-recorder runs with system("<unitScript> <shortName> <radioID> call <tg> <patches> &").
+    out = subprocess.run(["/bin/sh", "-c", f"{conf['systems'][0]['unitScript']} westchester 41228 call 307  &"],
+                         capture_output=True, text=True, timeout=10).stdout
+    assert out == "SIZEUP-UNIT westchester 41228 call 307\n"
+    # No dongle handed over (not a shared dongle): still generated, sources as configured.
+    assert r._argv_for()[-1] == "--config=config.runtime.json"
+    conf = json.loads((work / "config.runtime.json").read_text())
+    assert conf["systems"][0]["unitScript"] == script and conf["sources"][0]["device"] == "rtl=v4"
+    # "unitScript": "" in config.json turns it off; no script next to the config: none.
+    (work / "config.json").write_text(json.dumps(dict(conf, systems=[dict(conf["systems"][0], unitScript="")])))
+    r._argv_for(0)
+    assert "unitScript" not in json.loads((work / "config.runtime.json").read_text())["systems"][0]
+    assert unit_script_command(tmp_path) == ""
+    # A path with a space is quoted (the plugin hands it to a shell); one too long for the plugin's
+    # 200-byte command line is run as ./unit-event.sh (trunk-recorder's cwd is that directory).
+    spaced = short / "a dir"
+    spaced.mkdir()
+    shutil.copy2(deploy / "unit-event.sh", spaced / "unit-event.sh")
+    assert unit_script_command(spaced) == f"'{(spaced / 'unit-event.sh').resolve()}'"
+    deep = short / ("d" * (UNIT_SCRIPT_MAX - len(str(short))))
+    deep.mkdir()
+    shutil.copy2(deploy / "unit-event.sh", deep / "unit-event.sh")
+    assert unit_script_command(deep) == "./unit-event.sh"
+    (deep / "unit-event.sh").chmod(0o644)
+    assert unit_script_command(deep) == "/bin/sh ./unit-event.sh"
+    shutil.rmtree(short)
+
+
 def test_unreadable_mdc_burst_is_noted_and_kept(tmp_path):
     # User: "are you not getting a radio key from this radio? these are our new Motorola 6000s".
     # A hissy transmission: a burst is cut off but fails to decode -> said so on the row, burst kept.

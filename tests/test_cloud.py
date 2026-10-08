@@ -216,6 +216,23 @@ def test_talking_now_reaches_the_hub_in_well_under_a_second(tmp_path):
         hub.close()
 
 
+def test_a_p25_grant_reaches_the_hub_as_talking_in_well_under_a_second(tmp_path):
+    # The unit script's grant line (deploy/trunk-recorder/unit-event.sh) is the keypress on Fire/EMS 15.
+    hub = HubRun(hub_cfg(tmp_path))
+    st = station(station_cfg(tmp_path, hub.url), {})
+    try:
+        assert wait(lambda: hub.app.hub.status is not None, 10)
+        t0 = time.time()
+        assert st.live.feed_line("SIZEUP-UNIT westchester 41228 call 307")
+        assert wait(lambda: [(e["radio_id"], e["tg"]) for e in hub.app.live.state()] == [("41228", 307)], 3)
+        assert time.time() - t0 < 1.0
+        st.live.feed_line("SIZEUP-UNIT westchester 600003 call 307")          # the next key-up
+        assert wait(lambda: [e["radio_id"] for e in hub.app.live.state()] == ["600003"], 3)
+    finally:
+        st.link.stop()
+        hub.close()
+
+
 def test_a_talking_snapshot_from_a_station_that_went_quiet_is_dropped():
     clock = [1000.0]
     live = hub_mod.RemoteLive(lambda s, r, a: None, clock=lambda: clock[0])
