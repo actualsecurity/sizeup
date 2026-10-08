@@ -237,7 +237,7 @@ window.CadMap = (() => {
 
     drawUnset(unset) {
       const box = this.unsetBox;
-      const sig = JSON.stringify([unset, this.unsetOpen, !!this.opts.editable]);
+      const sig = JSON.stringify([unset, this.unsetOpen, !!this.editable()]);
       if (box._sig === sig) return;
       box._sig = sig;
       box.hidden = !unset.length;
@@ -258,17 +258,22 @@ window.CadMap = (() => {
         const b = h("button", "cm-rig look-unset", u.unit);
         b.type = "button";
         b.title = (u.station ? `"${u.station}" is not a firehouse on the map. ` : "") + (u.on ? `On ${u.on}. ` : "")
-          + (this.opts.editable ? "Click to set its home station." : "");
-        b.disabled = !this.opts.editable;
+          + (this.editable() ? "Click to set its home station." : "");
+        b.disabled = !this.editable();
         b.addEventListener("click", (e) => { e.stopPropagation(); this.openPicker(u.id, u.unit, ""); });
         list.append(b);
       }
-      if (this.opts.editable) list.append(h("div", "cm-hint", "Click a rig to set its home firehouse."));
+      if (this.editable()) list.append(h("div", "cm-hint", "Click a rig to set its home firehouse."));
       box.append(list);
     }
 
+    editable() {             // opts.editable: true, or a function (cad.js canDo: only an admin sets a home station)
+      const e = this.opts.editable;
+      return typeof e === "function" ? !!e() : !!e;
+    }
+
     chipClick(m) {
-      if (this.opts.editable && m.fire && m.id != null) return this.openPicker(m.id, m.unit, m.station, m);
+      if (this.editable() && m.fire && m.id != null) return this.openPicker(m.id, m.unit, m.station, m);
       if (m.incident_id && this.opts.onPick) this.opts.onPick(m.incident_id);
     }
 
@@ -453,7 +458,7 @@ window.CadMap = (() => {
     show(nomap, false);
     show(box, true);
     if (!views.detail) {
-      views.detail = new RigMap(box, { scene: cad.scene, pins: true, unset: true, editable: true, operator,
+      views.detail = new RigMap(box, { scene: cad.scene, pins: true, unset: true, editable: () => canDo("admin"), operator,
                                        onPick: (id) => selectIncident(id), onExpand: openBig });
     }
     views.detail.update(mapData(), inc, noPoint(inc));
@@ -473,7 +478,7 @@ window.CadMap = (() => {
       ov.addEventListener("click", (e) => { if (e.target === ov) closeBig(); });
       document.body.append(ov);
       ov.hidden = false;
-      views.big = new RigMap(panel, { scene: cad.scene, pins: true, unset: true, editable: true, operator,
+      views.big = new RigMap(panel, { scene: cad.scene, pins: true, unset: true, editable: () => canDo("admin"), operator,
                                       onPick: (id) => { closeBig(); selectIncident(id); }, onClose: closeBig });
     }
     ov.hidden = false;
@@ -617,7 +622,7 @@ window.CadMap = (() => {
     });
     if (mapsOk()) {
       if (!views.overview) {
-        views.overview = new RigMap($("#ov-map"), { scene: cad.scene, pins: true, unset: true, editable: true, operator,
+        views.overview = new RigMap($("#ov-map"), { scene: cad.scene, pins: true, unset: true, editable: () => canDo("admin"), operator,
                                                     onPick: (id) => selectIncident(id) });
       }
       views.overview.update(mapData(), null, "");

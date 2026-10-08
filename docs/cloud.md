@@ -132,11 +132,48 @@ Access sends every request it lets through to the origin with a signed JWT
   "not named yet", for an admin to name. Recorded as `Corey <corey@example.org>` (just the email
   until named): the chronology shows "Corey" with the email as its tooltip, the audit log and CSV
   exports the whole thing.
-* **shows it**: `GET /api/cad/whoami` → `{email, name, callsign, source: "access" | "none"}`; the CAD's
-  Operator field then shows the name, read-only ("Signed in with Cloudflare Access as ...").
+* **shows it**: `GET /api/cad/whoami` → `{email, name, callsign, source: "access" | "none", role,
+  enforced}` (with Access also `active`, `may`, `bootstrap`, `admins`); the CAD's Operator field then
+  shows the name, read-only ("Signed in with Cloudflare Access as ...").
 
 Without both keys (all-in-one, the station, local dev, a hub not set up yet) nothing changes: the
 Operator field is typed or picked, as before. The hub logs which it is at startup.
+
+### Roles: who may change what
+
+> "admins should be able to set users, dispatchers should not, but first login should be able to set
+> whatever i guess... now that i added julian and myself, myself as an admin i should only be able to
+> be the one to make changes?" (user, 2026-10-08)
+
+Each user in **Settings → Users** has a role. On the hub with Access on, it is **enforced** for the
+signed-in person (their row, by email), server-side, on every POST (`sizeup/cad/api.py` `WRITES`,
+checked in `CadApi.post` and, for the monitor's own POSTs, in `server.py`):
+
+| Role | May |
+|---|---|
+| admin | everything |
+| dispatcher | run calls: create / edit / accept / dismiss / close events, notes, recommend, preview, dispatch, upgrade, attach, return, put a transmission on an event, unit status on the board, close an incident on the monitor. **No** Settings of any kind (lists, run cards, units and their home station, dispatch wording / tones / channels / voice / arrival estimates, users, import, reset), the radio-ID registry, the talkgroup / mode switches or re-running speech-to-text |
+| viewer | look only (no writes) |
+| deactivated (any role) | look only, "Your account is deactivated" |
+
+A refused write is a `403 {"error": "Only an admin can change settings (you are a dispatcher)"}` (and
+the like), logged on the hub (`CAD: refused POST <path> for <email> (<role>): needs admin`). A write
+route not in `WRITES` is admin only until someone decides otherwise. Reads are not limited: everyone
+signed in sees the console, Settings (read-only), the records, the CSV exports and the settings
+export (the same users and emails Settings already shows them).
+
+**No admin yet:** until there is an *active admin with a sign-in email*, anyone signed in may do what
+an admin does, so the first person can set things up (Settings says "No admin yet: anyone signed in
+can change settings. Make someone an admin."). Someone signing in for the first time is added as a
+dispatcher. **No lockout:** once there is such an admin, the last one can't be demoted, deactivated or
+have their email removed, and a settings import can't leave none (`409`, dry run included): make
+someone else an admin first.
+
+The console shows it (`cad.js` `applyRoles`): for a dispatcher Settings is read-only (every control
+off but the section tabs, filters, records and export) under "Settings are read-only for dispatchers
+— ask an admin (Corey)"; for a viewer or a deactivated user every action on the dispatch screen is
+off too, under a banner. Without Access (all-in-one, the station, a hub without the keys) the role is
+recorded, not enforced: a typed or picked name is no proof of who is at the console.
 
 **The AUD tag:** Cloudflare dashboard → Zero Trust → Access controls → Applications → **sizeup** →
 Overview → *Application Audience (AUD) Tag* (64 hex digits). Use the `sizeup` application's (the

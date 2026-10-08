@@ -19,7 +19,9 @@ GET  /comms                    every transmission with its rig, radio ID, channe
 Hub with [cloud] access_team + access_aud (sizeup/cloud/access.py): every request but /healthz and
 /api/station/... (the station's bearer token) needs a verified Cloudflare Access token from a person
 (401 otherwise: defence in depth should the origin ever be reached around Access), and the CAD API
-gets who it is (the operator on every write, GET /api/cad/whoami).
+gets who it is (the operator on every write, GET /api/cad/whoami). Every POST is then checked against
+that person's role (sizeup/cad/api.py WRITES: the CAD's own in CadApi.post, the rest here before
+anything is read): the talkgroup / mode switches and retranscribe are admin only.
 
 STATE = {
   "time": unix s,
@@ -202,6 +204,9 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 if not 0 <= n <= MAX_CAD_BODY:
                     return self._send(400, b'{"error":"bad or too large body (64 KB max)"}', "application/json")
                 return self._send(*cad.post(path, self.rfile.read(n), self.who))
+            if self.who is not None and cad is not None and (refused := cad.permit(path, self.who)):
+                self.close_connection = True     # the body is left unread
+                return self._send(*refused)
             if path == "/api/talkgroup" and set_talkgroup is not None:
                 try:
                     n = int(self.headers.get("Content-Length") or 0)

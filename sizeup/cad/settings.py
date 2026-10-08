@@ -26,8 +26,9 @@ item in use can't be deleted, only retired (named on old events, off the pick li
 writes settings_audit (who, page section, key, old -> new). operators: the people at the console
 (a picker for the operator field), each optionally keyed by the email they sign in with through
 Cloudflare Access on the hub (person(): the display name and callsign for a verified email; an email
-not listed yet is added unnamed for an admin to name). export() / import: every setting as one JSON
-file, checked and shown as a diff (dry run) before it replaces anything.
+not listed yet is added unnamed for an admin to name; standing(): what that person may do, enforced
+by sizeup/cad/api.py). export() / import: every setting as one JSON file, checked and shown as a diff
+(dry run) before it replaces anything.
 """
 
 from __future__ import annotations
@@ -214,6 +215,15 @@ def overlay(d: dict, ov: dict) -> dict:
     if o:
         d["dispatch_tones"] = dict(d.get("dispatch_tones") or {}, **o)
     return d
+
+
+class LastAdmin(CadError):
+    """A change that would leave no active admin with a sign-in email (409: nobody could change
+    Settings again). Only checked where roles are enforced (the hub with Cloudflare Access)."""
+
+
+def _is_admin(o: dict) -> bool:
+    return o.get("role") == "admin" and bool(o.get("active")) and bool(o.get("email"))
 
 
 class Editor:
@@ -492,7 +502,9 @@ class Editor:
 
     # -- edits ------------------------------------------------------------------------------------------
 
-    def post(self, section: str, body: dict) -> dict:
+    def post(self, section: str, body: dict, guard: bool = False) -> dict:
+        """guard: roles are enforced (the hub with Cloudflare Access): users and import may not take
+        away the last active admin with a sign-in email (LastAdmin)."""
         op = _text(body.get("operator"), "operator", OPERATOR_MAX, required=False)
         action = body.get("action")
         if not isinstance(action, str):
@@ -504,6 +516,8 @@ class Editor:
               "import": self._import_op}.get(section)
         if fn is None:
             raise CadError(f"no settings section {section!r}")
+        if section in ("users", "import"):
+            return fn(action, body, op, guard)
         return fn(action, body, op)
 
     def _clean_item(self, sec: str, raw, code: str) -> dict:
@@ -1176,13 +1190,43 @@ class Editor:
             r = self.store.one("SELECT name, callsign FROM operators WHERE email = ?", (email,)) or {"name": email, "callsign": ""}
         return {"email": email, "name": r["name"], "callsign": r["callsign"], "operator": self.recorded(r["name"], email)}
 
-    def whoami(self, email: str) -> dict:
-        """GET /api/cad/whoami: the signed-in person ("access"), or nobody known ("none": the
-        Operator field is typed, as before)."""
-        if not email:
-            return {"email": "", "name": "", "callsign": "", "source": "none"}
+    # Roles (user, 2026-10-08: "admins should be able to set users, dispatchers should not, but first
+    # login should be able to set whatever i guess"): enforced only for a verified sign-in (the hub
+    # with Cloudflare Access; sizeup/cad/api.py checks every POST). An admin changes anything; a
+    # dispatcher runs calls but can't change Settings; a viewer looks. Deactivated: a viewer. Until
+    # there is an active admin with a sign-in email, everyone signed in may do what an admin does, so
+    # the first person can set things up (and nobody is locked out); after that the last such admin
+    # can't be demoted, deactivated or imported away (LastAdmin).
+
+    def admins(self) -> list[dict]:
+        """The active admins with a sign-in email: the ones who count."""
+        return [o for o in self.operators() if _is_admin(o)]
+
+    def standing(self, email: str) -> dict:
+        """person() plus {role, active, may, bootstrap, admins}: may = what they may do now (admin |
+        dispatcher | viewer), bootstrap = no admin yet (anyone signed in may do anything)."""
         p = self.person(email)
-        return {"email": p["email"], "name": p["name"], "callsign": p["callsign"], "source": "access"}
+        r = self.store.one("SELECT role, active FROM operators WHERE email = ?", (p["email"],)) or {"role": "dispatcher", "active": 1}
+        admins = self.admins()
+        active = bool(r["active"])
+        may = "admin" if not admins else r["role"] if active and r["role"] in OPERATOR_ROLES else "viewer"
+        return {**p, "role": r["role"], "active": active, "may": may, "bootstrap": not admins,
+                "admins": [a["name"] for a in admins]}
+
+    def whoami(self, email: str) -> dict:
+        """GET /api/cad/whoami: the signed-in person ("access", roles enforced), or nobody known
+        ("none": the Operator field is typed, as before, and roles are recorded, not enforced)."""
+        if not email:
+            return {"email": "", "name": "", "callsign": "", "source": "none", "role": "", "enforced": False}
+        st = self.standing(email)
+        return {k: st[k] for k in ("email", "name", "callsign", "role", "active", "may", "bootstrap", "admins")} | {
+            "source": "access", "enforced": True}
+
+    def _keep_an_admin(self, after: list[dict], why: str) -> None:
+        """guard: the operators as they would be after a change still have an active admin with a
+        sign-in email, if they have one now."""
+        if self.admins() and not any(_is_admin(o) for o in after):
+            raise LastAdmin(why)
 
     def _email(self, v, oid: int | None = None) -> str:
         v = _text(v, "email", 254, required=False).lower()
@@ -1192,7 +1236,7 @@ class Editor:
             raise CadError(f"{v} is already another operator's email")
         return v
 
-    def _users_op(self, action: str, body: dict, op: str) -> dict:
+    def _users_op(self, action: str, body: dict, op: str, guard: bool = False) -> dict:
         now = self.store.clock()
 
         def role_of(v, dflt):
@@ -1240,6 +1284,10 @@ class Editor:
         diff = {k: (cur[k], new[k]) for k in ("name", "role", "active", "email", "callsign") if cur[k] != new[k]}
         if not diff:
             return cur
+        if guard and _is_admin(cur) and not _is_admin(new):
+            self._keep_an_admin([new if o["id"] == oid else o for o in self.operators()],
+                                f"{cur['name']} is the last admin: make someone else an admin first "
+                                "(nobody could change Settings after that)")
         with self.store.tx() as db:
             db.execute("UPDATE operators SET name = ?, role = ?, active = ?, email = ?, callsign = ?, updated_at = ? WHERE id = ?",
                        (new["name"], new["role"], int(new["active"]), new["email"], new["callsign"], now, oid))
@@ -1357,10 +1405,21 @@ class Editor:
                 emails.add(o["email"])
         return ov, cards, ops, L
 
-    def _import_op(self, action: str, body: dict, op: str) -> dict:
+    def _import_op(self, action: str, body: dict, op: str, guard: bool = False) -> dict:
         if action not in ("dry_run", "apply"):
             raise CadError("action: dry_run or apply")
         ov, cards, ops, L = self._check_import(body.get("settings"))
+        if guard and ops is not None:         # the operators as apply (below) would leave them
+            after = {o["name"]: dict(o) for o in self.operators()}
+            for o in ops:
+                for r in after.values():
+                    if o["email"] and r["email"] == o["email"] and r["name"] != o["name"]:
+                        r["email"] = ""
+            for o in ops:
+                after[o["name"]] = {"name": o["name"], "role": o.get("role", "dispatcher"), "active": o.get("active", True),
+                                    "email": o["email"]}
+            self._keep_an_admin(list(after.values()), "the file leaves no active admin with a sign-in email "
+                                f"({', '.join(a['name'] for a in self.admins())} now): nobody could change Settings after it")
         cur = self.overrides()
         changes = []
         for sec in sorted(set(cur) | set(ov)):

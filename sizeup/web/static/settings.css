@@ -134,3 +134,9 @@ input.s-color { width: 2.4em; height: 1.95em; padding: 0.1em 0.15em; cursor: poi
 .s-eta > .row:first-child { border-top: 0; }
 .s-eta-l { flex: 0 1 24em; min-width: 12em; }
 .s-eta select { max-width: 100%; }
+
+/* Roles (cad.js applyRoles): read-only for anyone but an admin on the hub; "no admin yet" before there is one. */
+.s-role { margin-bottom: 0.2em; }
+.s-role.boot { border-color: color-mix(in srgb, var(--ok) 70%, transparent); color: var(--ok); }
+body.ro-settings #settings .s-content [data-ro] { cursor: not-allowed; }
+body.ro-settings #settings .s-content :is(input, select, textarea)[data-ro] { opacity: 0.7; }
