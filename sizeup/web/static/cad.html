@@ -27,6 +27,7 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
     <a id="settings-open" class="tab" href="#settings" title="Settings"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-settings"/></svg><span class="lbl">Settings</span></a>
   </nav>
   <span id="conn" class="pill warn">Connecting</span>
+  <span id="prealert" class="pill pa-badge" hidden></span>
   <span id="cloud-pill" class="pill" hidden></span>
   <span id="tx-pill" class="pill tx-off console-only" title="No radio interface: dispatches are logged and played here only">Transmit off</span>
   <span id="talking" class="talking-strip" hidden aria-live="polite"></span>
@@ -52,7 +53,8 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
   <aside class="queue">
     <button id="new-incident" class="primary wide"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-plus"/></svg>New incident</button>
     <section>
-      <h2 title="Pages to accept or dismiss">60 Control</h2>
+      <div class="q-head"><h2 title="Pages to accept or dismiss">60 Control</h2><span id="tapout" class="tapout" hidden></span></div>
+      <ol id="q-prealert" class="pa-list" hidden aria-live="assertive" aria-label="Phone pre-alerts"></ol>
       <ol id="q-queued" class="list q"></ol>
     </section>
     <section>
@@ -342,6 +344,8 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
 
   <!-- units by kind, with status buttons -->
   <aside class="units">
+    <!-- the wall board: the phone pre-alert (prealert.js) above the 60 Control feed, read-only -->
+    <ol id="b-prealert" class="pa-list board-only" hidden aria-live="assertive" aria-label="Phone pre-alerts"></ol>
     <div id="feed" hidden></div>
     <!-- the wall board (board.js): recent pages and every unit's status in one strip, instead of the board's buttons -->
     <section class="board-only b-sec"><h2>Pages</h2><ol id="b-pages" class="list pages"></ol></section>
@@ -415,6 +419,7 @@ Slots go in order. A kind takes the next available unit of that kind (regular ap
         <a class="nav" href="/api/cad/export/calls.csv" download>Call history</a>
         <a class="nav" href="/api/cad/export/unit-history.csv" download>Unit history</a>
         <a class="nav" href="/api/cad/export/event-log.csv" download>Event log</a>
+        <a id="csv-prealerts" class="nav" href="/api/cad/export/prealerts.csv" download hidden>Phone pre-alerts</a>
       </div>
       <dl id="admin" class="admin"></dl>
       <div class="tscroll"><table class="evtable db"><thead><tr><th>Number</th><th>Type</th><th>Location</th><th>Received</th><th>Closed</th><th>Status</th><th>Disposition</th><th>Units</th><th>Via</th></tr></thead>
@@ -431,6 +436,7 @@ Slots go in order. A kind takes the next available unit of that kind (regular ap
 <script src="/static/live.js"></script>
 <script src="/static/radios-panel.js"></script>
 <script src="/static/cad-feed.js"></script>
+<script src="/static/prealert.js"></script>
 <script src="/static/cad.js"></script>
 <script src="/static/cadmap.js"></script>
 <script src="/static/radio-view.js"></script>

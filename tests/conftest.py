@@ -18,3 +18,20 @@ def _no_real_keychain(monkeypatch):
     monkeypatch.setattr(sm, "RUN", lambda args, **kw: subprocess.CompletedProcess(args, 44, "", "not found"))
     for k in ("SIZEUP_STATION_TOKEN", "SIZEUP_ACCESS_CLIENT_ID", "SIZEUP_ACCESS_CLIENT_SECRET"):
         monkeypatch.delenv(k, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _prealert_stays_local(monkeypatch):
+    """The phone pre-alert (sizeup/prealert.py) reads ntfy: in tests only ever a local fake server,
+    and only ever GET. Never ntfy.sh: its ring topic is the fire crew's real alert channel."""
+    from urllib.parse import urlsplit
+
+    import sizeup.prealert as prealert
+    real = prealert.urlopen
+
+    def local_only(req, *a, **kw):
+        host = urlsplit(req.full_url if hasattr(req, "full_url") else str(req)).hostname
+        assert host in ("127.0.0.1", "localhost", "::1"), f"a test tried to reach {host} (pre-alert: local fake ntfy only)"
+        assert getattr(req, "get_method", lambda: "GET")() == "GET" and getattr(req, "data", None) is None
+        return real(req, *a, **kw)
+    monkeypatch.setattr(prealert, "urlopen", local_only)

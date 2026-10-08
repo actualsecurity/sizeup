@@ -455,9 +455,12 @@ def test_hub_never_opens_an_sdr_or_starts_a_program(tmp_path, monkeypatch):
 
 
 def test_the_hub_config_starts_with_no_radio_programs_on_the_path(tmp_path):
+    from tests.test_prealert import FakeNtfy
+    ntfy = FakeNtfy()          # the shipped config reads Tapout's ntfy feed: here a local fake, never ntfy.sh
     port = free_port()
     env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "SIZEUP_STATE_DIR": str(tmp_path / "data"),
-           "SIZEUP_PORT": str(port), "SIZEUP_STATION_TOKEN": TOKEN, "SIZEUP_PUBLIC_URL": "https://sizeup.example.org"}
+           "SIZEUP_PORT": str(port), "SIZEUP_STATION_TOKEN": TOKEN, "SIZEUP_PUBLIC_URL": "https://sizeup.example.org",
+           "SIZEUP_PREALERT_SERVER": ntfy.url}
     proc = subprocess.Popen([sys.executable, "-m", "sizeup", "--config", str(ROOT / "deploy/hub/config.hub.toml")],
                             cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     try:
@@ -474,9 +477,13 @@ def test_the_hub_config_starts_with_no_radio_programs_on_the_path(tmp_path):
         assert sorted(p.name for p in (tmp_path / "data").glob("*.sqlite")) == ["audio.sqlite", "cad.sqlite", "hub.sqlite"]
         kids = subprocess.run(["pgrep", "-P", str(proc.pid)], capture_output=True, text=True).stdout.split()
         assert kids == []                                         # no whisper-server, no voice server, no rtl_fm
+        # the CAD of record subscribes to the phone pre-alert, read only
+        assert wait(lambda: ntfy.gets("pcfd-phone-prealert") and ntfy.gets("pcfd-status"), 10)
+        assert {m for m, _, _ in ntfy.requests} == {"GET"}
     finally:
         proc.terminate()
         proc.wait(10)
+        ntfy.close()
 
 
 def test_init_state_creates_the_databases_and_exits(tmp_path):

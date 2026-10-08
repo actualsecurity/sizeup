@@ -430,6 +430,15 @@ function fillQueueItem(li, inc) {
     li.append(chips);
   }
 }
+// The phone pre-alert (prealert.js, sizeup/prealert.py): Tapout heard the HQ phone ring.
+function renderPrealert() {
+  const pa = cad.state && cad.state.prealert;
+  const deps = { api, operator, time: (t) => fmtTime(t, true), readonly: BOARD };
+  PreAlert.column($(BOARD ? "#b-prealert" : "#q-prealert"), BOARD ? null : $("#tapout"), pa, deps);
+  PreAlert.badge($("#prealert"), pa);
+  PreAlert.notify(pa);
+  show($("#csv-prealerts"), !!pa);
+}
 function renderQueue() {
   const all = incidents();
   const byAge = (a, b) => a.created_at - b.created_at;        // oldest first
@@ -809,7 +818,7 @@ function playForEvent(inc, e) {
   const d = (inc.dispatches || []).find((x) => Math.abs(x.at - e.at) < 0.001);
   return d && d.has_audio ? d.id : null;
 }
-const EVENT_KINDS = { note: "comment", status: "status", system: "system", attach: "attached" };
+const EVENT_KINDS = { note: "comment", status: "status", system: "system", attach: "attached", prealert: "pre-alert" };
 function renderEvents(inc) {
   syncList($("#d-events"), (inc.events || []).slice().reverse(), {
     key: (e) => String(e.id),
@@ -1818,6 +1827,7 @@ function showRunCards() {           // settings.js, when the Run cards section o
 function render() {
   fillListSelects();
   renderQueue();
+  renderPrealert();
   renderDetail();
   renderUnits();
   renderUnitLog();
@@ -2061,7 +2071,7 @@ function askAdmin() {
 const RO_DISPATCH = "#new-incident, #new-form :is(input, select, textarea, #new-create), #d-accept, #d-dismiss, #d-edit, "
   + "#d-close, #d-queued select, #close-form :is(select, #c-close), #edit-form :is(input, select, textarea, #edit-save), "
   + "#d-attach :is(select, button:not(.help)), #d-dispatch :is(input, select, textarea, button:not(#u-cancel):not(.help)), #note-text, #note-add, "
-  + ".ubtns button, .feed-add, .rv-add, .rv-pick :is(select, button)";
+  + ".ubtns button, .feed-add, .rv-add, .rv-pick :is(select, button), .pa-dismiss";
 // In Settings for anyone but an admin: everything but the section tabs, filters and what only reads.
 const RO_SETTINGS_KEEP = ".tab, [type=search], .ro-ok, .ro-ok *, .help";
 function roLock(root, sel, keep) {

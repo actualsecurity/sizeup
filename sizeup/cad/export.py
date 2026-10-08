@@ -27,7 +27,7 @@ UNIT_HISTORY_COLUMNS = ["Timestamp", "Unit", "Old Status", "New Status", "Incide
 EVENT_LOG_COLUMNS = ["Timestamp", "Incident #", "Unit", "Event Type", "Event / Comment", "Operator"]
 # Chronology kinds -> the sheet's Event Log "Event Type" (SYSTEM | EVENT | UNIT STATUS | ...)
 LOG_TYPES = {"system": "SYSTEM", "note": "COMMENT", "dispatch": "DISPATCH", "attach": "DISPATCH",
-             "remarks": "DISPATCH", "tones": "DISPATCH"}
+             "remarks": "DISPATCH", "tones": "DISPATCH", "prealert": "PRE-ALERT"}
 FILES = {"incidents.csv", "calls.csv", "unit-history.csv", "event-log.csv"}
 
 

@@ -1099,7 +1099,8 @@ function sSystem(panel) {
   recs.append(sBtn("Open records", "Every numbered event", () => {
     openOverlay("#db-overlay", true); cad.dbAt = 0; renderRecords();
   }, "primary ro-ok"), el("span", "dim small", "CSV"));
-  for (const [f, t] of [["incidents", "Incident database"], ["calls", "Call history"], ["unit-history", "Unit history"], ["event-log", "Event log"]]) {
+  for (const [f, t] of [["incidents", "Incident database"], ["calls", "Call history"], ["unit-history", "Unit history"], ["event-log", "Event log"],
+                        ...(cad.state && cad.state.prealert ? [["prealerts", "Phone pre-alerts"]] : [])]) {
     const a = el("a", "nav", t);
     a.href = `/api/cad/export/${f}.csv`;
     a.download = "";

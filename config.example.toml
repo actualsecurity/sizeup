@@ -137,3 +137,20 @@ channels = ["FG1", "PC repeater"]  # labels on the dispatch log only (FG1, or th
 # outbox_max_mb = 300                # queued audio over this: the oldest clips are dropped (never the transcripts)
 # keychain_prefix = "sizeup"         # Keychain services sizeup-station-token, sizeup-access-id, sizeup-access-secret
 #                                    #   (or keychain_token / keychain_access_id / keychain_access_secret)
+
+# [prealert]: the phone pre-alert. Tapout (an ESP32 on the PCFD headquarters phone line, repo
+# firehouse-ring-alerter) posts to ntfy.sh when the station's phone rings; the CAD shows each ring
+# at the top of its 60 Control column as a possible incoming call, until a 60 Control page for Port
+# Chester or a new emergency event matches it, someone dismisses it, or expire_min passes. Tapout's
+# status topic (hourly heartbeat, restarts, warnings) shows as "Tapout: ok, heartbeat 12 min ago".
+# READ ONLY: sizeup only subscribes (GET). NEVER publish to these topics, from sizeup or by hand to
+# "test" it: pcfd-phone-prealert is the fire crew's real alert channel and pages their phones.
+# Runs on the CAD of record only: all-in-one, or the hub. While this station forwards to a hub it
+# doesn't subscribe (the hub does; two would double-alert). Leave the section out to turn it off.
+[prealert]
+enabled = true
+server = "https://ntfy.sh"           # or env SIZEUP_PREALERT_SERVER (a local test server)
+ring_topic = "pcfd-phone-prealert"   # real rings only (Tapout's ntfy_call)
+status_topic = "pcfd-status"         # boot, hourly heartbeat, errors, OTA (Tapout's ntfy_status)
+expire_min = 5                       # an unanswered pre-alert ends after this long
+heartbeat_stale_min = 90             # no heartbeat (or restart) this long: "Tapout: no heartbeat for ..." in warning

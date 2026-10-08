@@ -18,6 +18,8 @@
         radios at all, the same state fed by the station (sizeup/cloud/hub.py). docs/cloud.md
         Forwarding is switched on and off while running in Settings > System > Station
         (sizeup/cloud/stationmode.py; state/cloud.json then wins over the role here).
+    [prealert]: Tapout's ntfy feed (the HQ phone ringing), read only, on the CAD of record (all-in-one
+        or the hub) -> a pre-alert at the top of the CAD's 60 Control column (sizeup/prealert.py)
 """
 
 from __future__ import annotations
@@ -268,6 +270,16 @@ class App:
         self.cad.live = self.live.state
         self.cad.has_clip = self.has_clip
         self.cad.main_tg = self.tg.main
+        # The phone pre-alert from Tapout's ntfy feed (sizeup/prealert.py), read only, on the CAD of
+        # record: all-in-one or the hub. While this station forwards to a hub it is off here (the hub
+        # subscribes: one alert): prealert_sync() follows Settings > System > Station.
+        self.prealert = None
+        self._started = False
+        if cfg.prealert_enabled:
+            from sizeup.prealert import PreAlerts
+            self.prealert = PreAlerts(self.cad, cfg.prealert_server, cfg.prealert_ring_topic, cfg.prealert_status_topic,
+                                      cfg.prealert_expire_min, cfg.prealert_heartbeat_stale_min, log=log)
+            self.prealert_sync()
         if self.recorder is not None:
             self.recorder.on_line = self.live.feed_line
         self._fm_live: dict[str, dict] = {}
@@ -1035,7 +1047,8 @@ class App:
               "storage": getattr(self, "storage", None),
               "rerun": dict(self.rerun, pending=len(self._rerun_ids)),
               "talkgroups": self.tg.state() if self.p25 else [],
-              "talking": self.live.state()}
+              "talking": self.live.state(),
+              "prealert": self.cad.prealert_state()}
         # Tell the display which entries have a recording (so ▶ isn't a dead button).
         with self._lock:
             busy = set(self._rerun_ids)
@@ -1086,7 +1099,31 @@ class App:
             self.station.start()
         elif self.link is not None:
             self.link.start()
+        self._started = True
+        self.prealert_sync()
         return self
+
+    def forwarding(self) -> bool:
+        """This app sends what it hears to a hub, which is then the CAD of record."""
+        if self.station is not None:
+            return bool(self.station.forward)
+        return self.cfg.cloud_role == "station"
+
+    def prealert_sync(self) -> None:
+        """The phone pre-alert on while this is the CAD of record, off while forwarding to a hub
+        (at start, and on every Settings > System > Station change)."""
+        pa = self.prealert
+        if pa is None:
+            return
+        if self.forwarding():
+            if pa.running or self.cad.prealert is not None:
+                log("prealert: off here: this station forwards to a hub, which subscribes to Tapout's feed")
+            pa.stop()
+            self.cad.prealert = None
+            return
+        self.cad.prealert = pa
+        if self._started and not pa.running:
+            pa.start()
 
     def stop(self) -> None:
         self._stopping.set()
@@ -1105,6 +1142,8 @@ class App:
             self.station.stop()
         elif self.link is not None:
             self.link.stop()
+        if self.prealert is not None:
+            self.prealert.stop()
 
 
 def make_app(cfg: Config) -> App:
@@ -1117,6 +1156,7 @@ def make_app(cfg: Config) -> App:
     app = App(cfg)
     from sizeup.cloud.stationmode import StationMode
     StationMode(app, cfg, log=log)     # on: sets app.events / app.link now, so nothing is missed
+    app.prealert_sync()                # state/cloud.json may say otherwise than config.toml
     return app
 
 
@@ -1133,6 +1173,8 @@ def make_server(app: App) -> WebServer:
         if link is not None:
             link.live_changed()
     app.live.on_change = changed
+    if app.prealert is not None:
+        app.prealert.on_change = server.poke             # so is the phone ringing
     return server
 
 

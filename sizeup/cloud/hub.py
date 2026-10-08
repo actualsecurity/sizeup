@@ -549,10 +549,14 @@ class HubApp(App):
 
     def start(self) -> HubApp:
         threading.Thread(target=self._hub_janitor, name="hub-janitor", daemon=True).start()
+        self._started = True                      # the phone pre-alert: the hub's own subscription
+        self.prealert_sync()
         return self
 
     def stop(self) -> None:
         self._stopping.set()
+        if self.prealert is not None:
+            self.prealert.stop()
         try:
             self.sync()
         except Exception:

@@ -68,3 +68,13 @@ fallback_voice = "Samantha"
 repeat = 2
 transmit = false
 channels = ["FG1", "PC repeater"]
+
+[prealert]
+# The phone pre-alert from Tapout (docs/cloud.md, config.example.toml): the hub is the CAD of record,
+# so it subscribes, read only. NEVER publish to these topics: pcfd-phone-prealert pages the fire crew.
+enabled = true
+server = "https://ntfy.sh"           # SIZEUP_PREALERT_SERVER overrides (tests: a local fake)
+ring_topic = "pcfd-phone-prealert"
+status_topic = "pcfd-status"
+expire_min = 5
+heartbeat_stale_min = 90
