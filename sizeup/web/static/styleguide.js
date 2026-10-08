@@ -177,8 +177,19 @@
       li.append(head, el("div", "qa", "1 Gateway Plz, Port Chester"));
       q.append(li);
     }
+    // a real transmission row (cad.js radioRow): Amazon Transcribe's text with the local model's to compare (⇄)
+    const now = Date.now() / 1000;
+    const tx = el("ol", "list log radio-log");
+    tx.append(radioRow({ id: "sg-aws", start: now - 90, end: now - 86, rig: "E60", channel: "Fire/EMS 15", has_audio: false,
+      text: "Engine 60 on location, nothing showing", model: "aws-transcribe", alt_model: "whisper large-v3",
+      alt_text: "Engine 60 on location nothing showing" }));
+    // the phone pre-alert row (prealert.js), read-only here
+    const pa = el("ol", "pa-list");
+    PreAlert.column(pa, null, { time: now, open: [{ id: -1, test: false, source: "Tapout HQ phone", at: now - 42, title: "STATION PHONE RINGING",
+      message: "Incoming call on the station line", ntfy_id: "sample" }, { id: -2, test: true, source: "Tapout HQ phone", at: now - 75,
+      title: "[TEST]", message: "Test ring", ntfy_id: "sample-test" }] }, { time: (t) => fmtTime(t, true), readonly: true });
     const states = el("div");
-    states.append(row("Empty", el("div", "empty", "None")), row("Loading", el("div", "loading", "Loading")),
+    states.append(row("Transmission", tx), row("Pre-alert", pa), row("Empty", el("div", "empty", "None")), row("Loading", el("div", "loading", "Loading")),
       row("Error", el("div", "error", "Load failed: 503 Service Unavailable")));
     return card("sg-lists", "Lists & rows", "A .list splits rows with a line; an .item row opens something: hover, selected "
       + "(the red edge), keyboard focus. Every list says None, Loading or what failed the same way.", ol, q, states);

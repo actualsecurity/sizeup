@@ -1,8 +1,9 @@
 // The wall board (/monitor): this same page read-only, for a second screen and for those not running
 // the console (user, 2026-10-08: "it could show the overview on another screen of what is going on
 // for those not operating the dispatch cad"). The CAD's own Overview (cadmap.js: the big map with
-// the rigs and calls, active and pending cards, who is talking), the pinned 60 Control feed, and here:
-// the recent 60 Control pages and every unit's status in one strip. One scale step larger (cad.css
+// the rigs and calls, active and pending cards, who is talking), and here: the main channels' radio (FG1,
+// Fire/EMS 15, every talkgroup marked Main: the Radio view's Main, from /api/cad/comms; the console's pinned
+// 60 Control feed is not shown here), the recent 60 Control pages and every unit's status in one strip. One scale step larger (cad.css
 // html.board). Nothing to press but Sound (RadioLive: each new Main transmission and page as it
 // comes in) and Full screen; a card opens nothing. Pages and Sound come from the monitor state
 // (/api/stream, polling when streams are blocked), everything else from the CAD state.
@@ -12,6 +13,49 @@
   if (!BOARD) return;
   const PAGES = 8;
   const b = { state: null };
+
+  // ---- the main channels' radio: FG1 (fireground, marked), Fire/EMS 15, every Main talkgroup -----------------
+
+  const RADIO_N = 8, RADIO_POLL_MS = 2000;      // the newest 8: pages and units stay on the screen below
+  const r = { rev: "", rows: [], error: "" };
+  const fireground = (t) => {           // an FM traffic channel (FG1), not a talkgroup or the paging channel
+    const fm = (((b.state && b.state.channels) || {}).fm || []);
+    const ch = fm.find((c) => c.key === t.channel);
+    return ch ? ch.kind === "traffic" : (t.talkgroup === null || t.talkgroup === undefined) && /^FG/i.test(t.channel || "");
+  };
+  async function pollRadio() {
+    try {
+      const q = new URLSearchParams({ type: "radio" });
+      if (r.rev) q.set("rev", r.rev);
+      const d = await api("GET", `/api/cad/comms?${q}`);
+      if (!d.unchanged) {
+        r.rev = d.rev;
+        r.rows = (d.rows || []).filter((t) => t.main !== false && t.kind !== "note").slice(0, RADIO_N);
+      }
+      r.error = "";
+    } catch (e) {
+      r.error = e.message;
+    }
+    renderRadio();
+    setTimeout(pollRadio, RADIO_POLL_MS);
+  }
+  function renderRadio() {
+    setText($("#b-radio-sum"), [...new Set(r.rows.map((t) => t.channel))].join(" · ") || "Main channels");
+    syncList($("#b-radio"), r.rows, {
+      key: (t) => t.id,
+      sig: (t) => JSON.stringify([t.text, t.status, t.rig, t.talker, t.has_audio, t.model, t.alt_text, fireground(t), talkSig(t.rig)]),
+      make: () => el("li"),
+      fill: (li, t) => {
+        const n = radioRow(t);                     // cad.js: play, time, rig, channel, duration, the transcript
+        const fg = fireground(t);
+        li.className = n.className + (fg ? " fg" : "");
+        li.replaceChildren(...n.childNodes);
+        const chip = li.querySelector(".chip.src");
+        if (chip) { chip.classList.toggle("fg", fg); if (fg) chip.title = "Fireground"; }
+      },
+      empty: r.error ? `Load failed: ${r.error}` : "None",
+    });
+  }
 
   // ---- pages ----------------------------------------------------------------------------------------
 
@@ -99,4 +143,5 @@
   RadioLive.button($("#sound"), "Sound");
   cad.hooks.push(renderStrip);
   liveState("/api/stream", "/api/state", onMonitor);
+  pollRadio();
 })();
