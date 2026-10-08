@@ -92,7 +92,7 @@ window.RadiosPanel = (() => {
     });
     cancel.addEventListener("click", () => { p.editing = null; render(); });
     del.addEventListener("click", async () => {
-      if (!confirm(`Remove ${r.system.toUpperCase()} ${r.radio_id}?`)) return;
+      if (!(await UI.confirm(`Remove ${r.system.toUpperCase()} ${r.radio_id}?`, { ok: "Remove" }))) return;
       try { await post("/api/cad/radios/delete", { system: r.system, radio_id: r.radio_id }); p.editing = null; await load(); }
       catch (e) { p.error = e.message; render(); }
     });

@@ -147,7 +147,12 @@ function store(key, value) {
   return null;
 }
 
-async function api(method, path, body) {
+// Every call to the server. A write marks the button that started it busy until the answer (ui.js).
+function api(method, path, body) {
+  const p = apiCall(method, path, body);
+  return method === "GET" ? p : UI.busy(p);
+}
+async function apiCall(method, path, body) {
   const opts = { method, headers: {} };
   if (body !== undefined) {
     opts.headers["Content-Type"] = "application/json";
@@ -239,7 +244,8 @@ function statusChip(code, text) {   // the old outline chip, in the data file's 
   c.title = st.code === (text ?? st.name) ? st.code : `${st.code}: ${st.name}`;
   return c;
 }
-function statusColors(node, st) {  // a status button: its color, and its text color when filled
+function statusColors(node, st) {  // a status button (style.css .stat): its color, and its text color when filled
+  node.classList.add("stat");
   node.style.setProperty("--c", st.bg || "#9AA3AD");
   if (st.fg) node.style.setProperty("--fg", st.fg);
   return node;
@@ -337,7 +343,7 @@ function renderClock() {              // the same clock on the console and the b
 
 function leaveView() {               // an incident or the form opens: out of Radio and Settings
   if (location.hash) history.pushState(null, "", location.pathname);
-  if (cad.radio || !$("#settings").hidden) window.dispatchEvent(new HashChangeEvent("hashchange"));
+  if (cad.radio || !$("#settings").hidden || !$("#styleguide").hidden) window.dispatchEvent(new HashChangeEvent("hashchange"));
 }
 function route() {                    // #radio?filters: the Radio view; anything else: the console's own
   const radio = !BOARD && location.hash.startsWith("#radio");
@@ -351,7 +357,7 @@ function route() {                    // #radio?filters: the Radio view; anythin
   }
 }
 function renderTabs() {
-  const settings = !$("#settings").hidden;
+  const settings = !$("#settings").hidden || !$("#styleguide").hidden;
   const tab = settings ? "settings" : cad.radio ? "radio" : cad.mode === "none" ? "overview" : "dispatch";
   for (const [id, k] of [["#dispatch-open", "dispatch"], ["#overview-open", "overview"], ["#radio-open", "radio"], ["#settings-open", "settings"]]) {
     const b = $(id);
@@ -395,14 +401,15 @@ function incTitle(inc) {
 }
 
 function queueItem() {
-  const li = el("li", "qi");
+  const li = el("li", "qi item");
   li.tabIndex = 0;
   li.addEventListener("click", () => selectIncident(Number(li.dataset.key)));
   li.addEventListener("keydown", (e) => { if (e.key === "Enter") selectIncident(Number(li.dataset.key)); });
   return li;
 }
 function fillQueueItem(li, inc) {
-  li.className = `qi ${inc.status}` + (inc.emergency ? "" : " nonemerg") + (inc.id === cad.sel ? " sel" : "");
+  li.className = `qi item ${inc.status}` + (inc.emergency ? "" : " nonemerg") + (inc.id === cad.sel ? " sel" : "");
+  if (inc.id === cad.sel) li.setAttribute("aria-current", "true"); else li.removeAttribute("aria-current");
   const head = el("div", "qh");
   const t = el("span", "qt", typeLabel(inc.type, inc.subtype) || "No type");
   if (inc.type) t.style.setProperty("--c", typeColor(inc.type) || "#9AA3AD");
@@ -597,8 +604,9 @@ function radioRow(t) {
   if (t.alt_model) {                     // "both": the other engine's text, to compare (Settings > Radios > Engine)
     const alt = el("div", "txt alt-txt");
     alt.append(el("span", "dim", `${t.alt_model}: `), document.createTextNode(t.alt_text || "(nothing)"));
-    const tog = el("button", "mini alt-tog", "\u21c4");
+    const tog = el("button", "mini icon alt-tog", "\u21c4");
     tog.type = "button";
+    tog.setAttribute("aria-label", `Compare with ${t.alt_model}`);
     tog.title = `Compare with ${t.alt_model}`;
     const open = () => RADIO_ALT_OPEN.has(t.id);
     const paint = () => { show(alt, open()); tog.classList.toggle("active", open()); tog.setAttribute("aria-pressed", String(open())); };
@@ -718,7 +726,7 @@ function callPicker(u, where, box) {
     cad.pick = null;
     try {
       await api("POST", `/api/cad/unit/${u.id}/status`, { status, incident_id: iid, operator: operator() });
-    } catch (err) { alert(err.message); }
+    } catch (err) { UI.toast(err.message, "err"); }
   });
   form.addEventListener("click", (e) => e.stopPropagation());
   form.append(el("span", "small", `${now.name || ""} ${st.code} on`), sel, ok, cancel);
@@ -802,8 +810,7 @@ function agencyButtons(u, where, box) {
   codes.forEach((code, i) => {
     const s = unitStatus(code);
     if (code === now.status) return;
-    const b = el("button", "mini", i === codes.length - 1 && s.role === "free" ? "Cleared" : s.name);
-    b.style.setProperty("--c", s.bg || "#9AA3AD");
+    const b = statusColors(el("button", "mini", i === codes.length - 1 && s.role === "free" ? "Cleared" : s.name), s);
     b.addEventListener("click", (e) => { e.stopPropagation(); setUnitStatus(u.id, code); });
     box.append(b);
   });
@@ -1094,8 +1101,11 @@ async function busy(button, label, fn) {
   const was = button.textContent;
   button.disabled = true;
   button._busy = true;
+  button.setAttribute("aria-busy", "true");
   setText(button, label);
-  try { await fn(); } finally { button.disabled = false; button._busy = false; setText(button, was); render(); }
+  try { await fn(); } finally {
+    button.disabled = false; button._busy = false; button.removeAttribute("aria-busy"); setText(button, was); render();
+  }
 }
 
 async function preview() {
@@ -1325,7 +1335,7 @@ async function act(action, body = {}, errNode = null) {
     if (action === "accept") setTimeout(() => recommend(), 300);
     return r;
   } catch (e) {
-    if (errNode) flash(errNode, e.message); else alert(e.message);
+    if (errNode) flash(errNode, e.message); else UI.toast(e.message, "err");
     return null;
   }
 }
@@ -1344,15 +1354,14 @@ async function returnUnit(iid, uid, status) {
   try {
     await api("POST", `/api/cad/incident/${iid}/return`, { unit_id: uid, status, operator: operator() });
   } catch (e) {
-    alert(e.message);
+    UI.toast(e.message, "err");
   }
 }
 function returnButtons(inc, a) {
   const box = el("div", "ubtns");
   for (const code of a.return || []) {
     const s = unitStatus(code);
-    const b = el("button", "mini", s.name);
-    b.style.setProperty("--c", s.bg || "#9AA3AD");
+    const b = statusColors(el("button", "mini", s.name), s);
     b.title = `${a.name} back to this call: ${s.name}`;
     b.addEventListener("click", (e) => { e.stopPropagation(); returnUnit(inc.id, a.unit_id, code); });
     box.append(b);
@@ -1364,7 +1373,7 @@ async function setUnitStatus(uid, status, note = "") {
   try {
     await api("POST", `/api/cad/unit/${uid}/status`, { status, operator: operator(), note });
   } catch (e) {
-    alert(e.message);
+    UI.toast(e.message, "err");
   }
 }
 
@@ -1607,20 +1616,29 @@ function renderUnits() {
         cad.ask && cad.ask.uid === u.id && cad.ask.where === "board" ? cad.ask.status : null, cad.listSig.length,
         cad.pick && cad.pick.uid === u.id ? cad.pick.status : null]),
       make: () => {
-        const li = el("li", "urow");
-        li.addEventListener("click", (e) => {
-          if (e.target.closest("button, a, input, form")) return;
+        const li = el("li", "urow item");
+        const flip = () => {
           const id = Number(li.dataset.key);
           cad.openUnit = cad.openUnit === id ? null : id;
           if (cad.ask && cad.ask.where === "board") cad.ask = null;
           renderUnits();
+        };
+        if (!BOARD) {
+          li.tabIndex = 0;
+          li.addEventListener("keydown", (e) => {
+            if (e.target === li && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); flip(); }
+          });
+        }
+        li.addEventListener("click", (e) => {
+          if (e.target.closest("button, a, input, form")) return;
+          flip();
         });
         return li;
       },
       fill: (li, u) => {
         const oos = roleOf(u.status) === "oos";
         const talk = Radio.talkingFor(u.name);
-        li.className = "urow" + (cad.openUnit === u.id ? " open" : "") + (oos ? " oos" : "")
+        li.className = "urow item" + (cad.openUnit === u.id ? " open" : "") + (oos ? " oos" : "")
           + (talk ? (talk.ended ? " talked" : " talking") : "");
         const head = el("div", "uh");
         const name = el("b", "un", u.name);
@@ -1633,7 +1651,8 @@ function renderUnits() {
           && !((L().unit_boards || []).find((b) => b.id === u.board)?.title || "").includes(u.department)) {
           head.append(el("span", "chip dept", u.department));       // not already said by its group's title
         }
-        if (u.title) head.append(el("span", "utitle dim small", u.title));
+        if (u.title) { const t = el("span", "utitle dim small", u.title); t.title = u.title; head.append(t); }
+        if (!BOARD) li.setAttribute("aria-expanded", String(cad.openUnit === u.id));
         if (u.spare) head.append(el("span", "chip spare", "spare"));
         if (talk) {
           const tb = el("span", "talk-badge", `${talk.ended ? "Ended" : "TX"} ${talk.channel}`);
@@ -1673,9 +1692,8 @@ function renderUnitLog() {
 
 // ---- records (incident database, CSV, counts) and lists ---------------------------------------
 
-function openOverlay(id, on) {
-  show($(id), on);
-  document.body.classList.toggle("modal", !!document.querySelector(".overlay:not([hidden])"));
+function openOverlay(id, on) {        // a dialog (ui.js: the focus goes in, stays in, and comes back)
+  if (on) UI.dialog.open($(id)); else UI.dialog.close($(id));
 }
 
 async function renderRecords() {
@@ -1719,7 +1737,7 @@ async function renderRecords() {
 // Records open an older incident that isn't in the live state.
 async function openFromRecords(id) {
   if (!incidents().some((i) => i.id === id)) {
-    try { cad.extra.set(id, await api("GET", `/api/cad/incident/${id}`)); } catch (e) { alert(e.message); return; }
+    try { cad.extra.set(id, await api("GET", `/api/cad/incident/${id}`)); } catch (e) { UI.toast(e.message, "err"); return; }
   }
   openOverlay("#db-overlay", false);
   selectIncident(id);
@@ -1739,13 +1757,15 @@ function renderRunCards() {
     key: (c) => String(c.id),
     sig: (c) => JSON.stringify([c.type, c.slots, c.is_default, c.label, c.phrase, cad.rcEditing === c.type, cad.listSig.length]),
     make: () => {
-      const li = el("li", "rc");
+      const li = el("li", "rc item");
+      li.tabIndex = 0;
       li.addEventListener("click", () => editCard(li._card));
+      li.addEventListener("keydown", (e) => { if (e.key === "Enter") editCard(li._card); });
       return li;
     },
     fill: (li, c) => {
       li._card = c;
-      li.className = "rc" + (cad.rcEditing === c.type ? " sel" : "");
+      li.className = "rc item" + (cad.rcEditing === c.type ? " sel" : "");
       const h = el("div", "row");
       const [t, s] = c.type.split("/");
       h.append(el("b", "", typeLabel(t, s)), el("span", "spacer"));
@@ -1773,11 +1793,11 @@ function slotRow(slot) {
     s.value = slot.kind || "engine";
     li.append(n, el("span", "dim", "×"), s);
   }
-  const up = el("button", "mini", "↑");
+  const up = el("button", "mini icon", "↑");
   up.type = "button";
   up.title = "Move up";
   up.addEventListener("click", () => { if (li.previousElementSibling) li.parentNode.insertBefore(li, li.previousElementSibling); });
-  const rm = el("button", "mini", "✕");
+  const rm = el("button", "mini icon", "✕");
   rm.type = "button";
   rm.title = "Remove";
   rm.addEventListener("click", () => li.remove());
@@ -1822,14 +1842,14 @@ async function saveCard(e) {
   try {
     const c = await api("POST", "/api/cad/runcards", body);
     cad.rcEditing = c.type;
-    flash($("#rc-error"), "Saved");
+    UI.toast("Run card saved");
   } catch (err) {
     flash($("#rc-error"), err.message);
   }
 }
 
 async function deleteCard() {
-  if (!cad.rcEditing || !confirm(`Delete run card ${typeLabel(...cad.rcEditing.split("/"))}?`)) return;
+  if (!cad.rcEditing || !(await UI.confirm(`Delete run card ${typeLabel(...cad.rcEditing.split("/"))}?`, { ok: "Delete" }))) return;
   try {
     await api("POST", "/api/cad/runcards/delete", { type: cad.rcEditing, operator: operator() });
     editCard(null);
@@ -2014,7 +2034,7 @@ $("#note-form").addEventListener("submit", async (e) => {
     hideSugg();
     if (cad.extra.has(inc.id)) { cad.extra.set(inc.id, await api("GET", `/api/cad/incident/${inc.id}`)); render(); }
   } catch (err) {
-    alert(err.message);
+    UI.toast(err.message, "err");
   }
 });
 $("#note-text").addEventListener("input", () => { syncNoteTags(); suggestUnits(); });
@@ -2050,11 +2070,50 @@ $("#operator-pick").addEventListener("change", () => {
   store("sizeup.cad.operator", operator());
   $("#operator-pick").classList.toggle("unset", !operator());
 });
-window.addEventListener("keydown", (e) => {
-  if (e.key !== "Escape") return;
-  if (cad.ask) { cad.ask = null; render(); return; }
-  for (const id of ["#db-overlay"]) if (!$(id).hidden) openOverlay(id, false);
+window.addEventListener("keydown", (e) => {        // Esc: the unit's "why?" box first (dialogs: ui.js)
+  if (e.key === "Escape" && cad.ask) { cad.ask = null; render(); }
 });
+
+// ---- keyboard shortcuts (ui.js: "?" shows them; never while typing) ----------------------------------
+// N new incident, / search, G then D / O / R / S a view, J / K the next / previous incident in the queue,
+// Esc closes what is open (a dialog, the incident's open form, the new-incident form, an opened unit row).
+function queueStep(dir) {
+  const items = [...document.querySelectorAll(".queue .q > li.qi")].filter((n) => n.getClientRects().length);
+  if (!items.length) return;
+  const at = items.findIndex((n) => Number(n.dataset.key) === cad.sel);
+  const next = items[at < 0 ? (dir > 0 ? 0 : items.length - 1) : Math.max(0, Math.min(items.length - 1, at + dir))];
+  selectIncident(Number(next.dataset.key));
+  next.focus({ preventScroll: true });
+  next.scrollIntoView({ block: "nearest" });
+}
+function focusSearch() {
+  const here = [...document.querySelectorAll("main:not([hidden]) input[type=search], main:not([hidden]) .tg-filter")]
+    .find((n) => n.getClientRects().length && !n.closest("[hidden]"));
+  if (here) { here.focus(); here.select(); return; }
+  location.hash = "#radio";
+  setTimeout(() => { $("#rv-q").focus(); $("#rv-q").select(); }, 0);
+}
+function escapeView(fromField) {
+  if (fromField) return;
+  for (const [form, cancel] of [["#upgrade-form", "#u-cancel"], ["#close-form", "#c-cancel"], ["#edit-form", "#edit-cancel"]]) {
+    if (!$(form).hidden && !$("#d-body").hidden) { $(cancel).click(); return; }
+  }
+  if (cad.mode === "new") { $("#new-cancel").click(); return; }
+  if (cad.openUnit !== null) { cad.openUnit = null; renderUnits(); }
+}
+if (!BOARD) {
+  UI.keys({
+    n: () => { if (!$("#new-incident").disabled) openNew(); },
+    "/": focusSearch,
+    j: () => queueStep(1),
+    k: () => queueStep(-1),
+    gd: () => $("#dispatch-open").click(),
+    go: () => $("#overview-open").click(),
+    gr: () => { location.hash = "#radio"; },
+    gs: () => { location.hash = "#settings"; },
+    escape: escapeView,
+  });
+} else UI.keys({ board: true });
 
 // user, 2026-10-07: "can we get the auth info from the cloudflare access auth to identify email that
 // was authed with one time code to set the operators name dynamically?"

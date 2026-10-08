@@ -85,17 +85,17 @@ def test_one_palette_from_tokens_with_readable_text():
 
 
 def test_one_type_scale_and_header_for_console_and_board():
-    """Sizes come from style.css's tokens; the views don't set their own base size or header (the old
-    monitor scaled with the screen and its header was taller than the CAD's). The board is one step up,
-    in its main area only."""
+    """Sizes come from style.css's tokens (tests/test_design.py has the rest); the views don't set their own
+    base size or header (the old monitor scaled with the screen and its header was taller than the CAD's).
+    The board is one step up, in its main area only, through one variable."""
     style, cad = (STATIC / "style.css").read_text(), (STATIC / "cad.css").read_text()
-    for tok in ("--fs: 14px", "--hdr-h:", "--ctl-h:", "--side-w:", "--t-xs:", "--t-s:", "--sp-2:"):
+    for tok in ("--fs-md:", "--hdr-h:", "--ctl:", "--side-w:", "--rail-w:", "--fs-2xs:", "--fs-sm:", "--s-2:", "--zoom:"):
         assert tok in style, tok
     for other in ("cad.css", "cadmap.css", "settings.css"):
         text = (STATIC / other).read_text()
-        assert "--fs:" not in text and not re.search(r"^\s*header\s*\{", text, re.M), other
-    assert "var(--side-w)" in cad and "html.board main { font-size: 1.25em; }" in cad
-    assert "clamp(" not in style.split("}")[0]                                  # no screen-height scaling
+        assert "--fs" not in text.replace("var(--fs", "") and not re.search(r"^\s*header\s*\{", text, re.M), other
+    assert "var(--side-w)" in cad and "html.board .cad-main { --zoom: 1.25; }" in cad
+    assert "clamp(" not in style and "vh" not in re.sub(r"[^\n]*(block-size|height)[^\n]*", "", style)   # no screen scaling
 
 
 def test_every_post_the_scripts_make_is_in_the_permission_map():
