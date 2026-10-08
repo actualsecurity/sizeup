@@ -78,6 +78,9 @@ def page_from_dict(d: dict) -> Page:
     p.history = d.get("history") or []  # type: ignore[attr-defined]
     p.rerun_at = d.get("rerun_at")  # type: ignore[attr-defined]
     p.model = d.get("model", "")  # type: ignore[attr-defined]
+    p.stt = d.get("stt", "")  # type: ignore[attr-defined]   (aws | both: Amazon Transcribe on the hub)
+    if d.get("alt_model"):
+        p.alt_text, p.alt_model = d.get("alt_text", ""), d["alt_model"]  # type: ignore[attr-defined]
     return p
 
 

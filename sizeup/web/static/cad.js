@@ -587,10 +587,34 @@ function radioRow(t) {
     meta.append(w);
   }
   if (t.end > t.start) meta.append(el("span", "dim", `${Math.round(t.end - t.start)} s`));
-  const said = t.status === "no_speech" ? "Key-up, no speech" : t.status === "pending" ? "Transcribing" : "—";
-  li.append(meta, el("div", "txt" + (t.text ? "" : " muted"), t.text || said));
+  if (/^aws-transcribe/.test(t.model || "")) {
+    const m = el("span", "chip stt-aws", "AWS");
+    m.title = `Transcript: Amazon Transcribe${t.model !== "aws-transcribe" ? ` (${t.model})` : ""}`;
+    meta.append(m);
+  }
+  const txt = el("div", "txt" + (t.text ? "" : " muted"), t.text || sttSaid(t));
+  li.append(meta, txt);
+  if (t.alt_model) {                     // "both": the other engine's text, to compare (Settings > Radios > Engine)
+    const alt = el("div", "txt alt-txt");
+    alt.append(el("span", "dim", `${t.alt_model}: `), document.createTextNode(t.alt_text || "(nothing)"));
+    const tog = el("button", "mini alt-tog", "\u21c4");
+    tog.type = "button";
+    tog.title = `Compare with ${t.alt_model}`;
+    const open = () => RADIO_ALT_OPEN.has(t.id);
+    const paint = () => { show(alt, open()); tog.classList.toggle("active", open()); tog.setAttribute("aria-pressed", String(open())); };
+    tog.addEventListener("click", () => { if (open()) RADIO_ALT_OPEN.delete(t.id); else RADIO_ALT_OPEN.add(t.id); paint(); });
+    meta.insertBefore(tog, meta.children[2] || null);
+    li.append(alt);
+    paint();
+  }
   li.classList.toggle("from-dispatch", !!t.dispatcher);
   return li;
+}
+const RADIO_ALT_OPEN = new Set();       // rows whose second transcript is shown (kept across redraws)
+// What a transmission without text says (its status): sizeup/app.py, sizeup/channels.py.
+function sttSaid(t) {
+  return { no_speech: "Key-up, no speech", pending: "Transcribing", remote: "Transcribing on the hub (AWS)", off: "Not transcribed",
+           error: "Transcription failed" }[t.status] || "—";
 }
 // A note tagged with units ("E63 stated that ..."), as a row among the transmissions.
 function noteRow(e) {

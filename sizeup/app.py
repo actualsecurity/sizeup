@@ -20,6 +20,9 @@
         (sizeup/cloud/stationmode.py; state/cloud.json then wins over the role here).
     [prealert]: Tapout's ntfy feed (the HQ phone ringing), read only, on the CAD of record (all-in-one
         or the hub) -> a pre-alert at the top of the CAD's 60 Control column (sizeup/prealert.py)
+    per channel (Settings > Radios, sizeup/channels.py): record / transcribe / engine (local whisper,
+        Amazon Transcribe on the hub, or both): _stt() routes each transmission; AWS results come back
+        through _aws_done -> _retext (sizeup/transcribe.py)
 """
 
 from __future__ import annotations
@@ -58,6 +61,7 @@ from sizeup.radio.recorder import TrunkRecorder
 from sizeup.radio.page import Page, assemble, page_from_dict
 from sizeup.radio.tones import TonePlan
 from sizeup.talkers import talker_prompt
+from sizeup import channels
 from sizeup.stt import LIVE, RERUN, Transcriber, WhisperClient, radio_voice, wav_bytes
 from sizeup.talkgroups import TalkgroupPrefs
 from sizeup.tts import TtsService
@@ -183,6 +187,16 @@ def split_turns(call: Call) -> list[tuple[str, float, float, str, np.ndarray]]:
 
 
 @dataclass
+class AwsJob:
+    """A transmission or page sent to Amazon Transcribe (sizeup/transcribe.py hands it back)."""
+    kind: str                 # "traffic" | "page"
+    id: str
+    channel: str
+    alt: dict | None = None   # "both": the local model's {text, model}, kept next to AWS's text
+    page: object = None
+
+
+@dataclass
 class Rerun:
     """A speech-to-text re-run of a recording already on screen (a transmission or a page)."""
     id: str
@@ -270,6 +284,16 @@ class App:
         self.cad.live = self.live.state
         self.cad.has_clip = self.has_clip
         self.cad.main_tg = self.tg.main
+        # Per-channel record / transcribe / engine (Settings > Radios, sizeup/channels.py) and Amazon
+        # Transcribe where this process may call it ([stt] aws: the hub; sizeup/transcribe.py).
+        self.cad.radio_ctx = self
+        self._chan_ov: dict = self.cad.settings.channel_overrides()
+        self._hub_aws = self._load_hub_aws()
+        self._aws_wait: dict[str, tuple[np.ndarray, str]] = {}
+        self._vocab_suggest: list[str] | None = None
+        self.aws = self.vocab = None
+        if cfg.stt_aws:
+            self._aws_setup()
         # The phone pre-alert from Tapout's ntfy feed (sizeup/prealert.py), read only, on the CAD of
         # record: all-in-one or the hub. While this station forwards to a hub it is off here (the hub
         # subscribes: one alert): prealert_sync() follows Settings > System > Station.
@@ -369,9 +393,12 @@ class App:
     @staticmethod
     def _page_doc(page: Page) -> dict:
         """A page as saved (and as sent to the hub): Page.as_dict + what the pipeline added."""
-        return dict(page.as_dict(), dispatch=getattr(page, "dispatch", None),
-                    history=getattr(page, "history", None) or [], rerun_at=getattr(page, "rerun_at", None),
-                    model=getattr(page, "model", ""))
+        d = dict(page.as_dict(), dispatch=getattr(page, "dispatch", None),
+                 history=getattr(page, "history", None) or [], rerun_at=getattr(page, "rerun_at", None),
+                 model=getattr(page, "model", ""), stt=getattr(page, "stt", ""))
+        if getattr(page, "alt_model", ""):
+            d.update(alt_text=getattr(page, "alt_text", ""), alt_model=page.alt_model)  # type: ignore[attr-defined]
+        return d
 
     def _save_page(self, page: Page) -> None:
         if not self.clips_dir:
@@ -515,26 +542,36 @@ class App:
         page = assemble(ch.label, ch.mhz, seg, self.plan) if paging else None
         found = self._mdc(*seg.bursts, seg.audio)
         units = self._units(seg, found)
-        id_note = "" if paging else self._id_note(ch.label, seg, units)
+        record = self.channel_pref(ch.label)["record"]
+        id_note = "" if paging or not record else self._id_note(ch.label, seg, units)
         # Weak signals: speech can sit only 2-6 dB over the dead air (FG1 bench, indoor antenna),
         # so nothing is skipped on energy. Everything is transcribed; a result that is one of
         # whisper's dead-air phrases ("Thank you.", "Yes.") on audio with no voice energy is a
         # mic click (stt.Transcriber), dropped in _transcribed.
         low_energy = speech_seconds(seg.audio) < MIN_SPEECH_S
         if paging:
+            if not record:              # Settings > Radios: not recorded (the receiver keeps running)
+                log(f"{ch.label}: {page.kind} not recorded (Record is off in Settings > Radios)")
+                return
             self._keep_clip(page.id, seg.audio)
             log(f"{ch.label}: {page.kind} " + (", ".join(t.describe() for t in page.tones) or "voice"))
             heard = self._page_heard(page)
+            eng = self.stt_engine(ch.label) if heard else ""
+            page.stt = eng if eng in ("aws", "both") else ""  # type: ignore[attr-defined]
+            if eng == "aws" and self.forwarding():
+                page.status = "remote"          # the hub transcribes it (Amazon Transcribe)
             self._emit("page", self._page_doc(page), page.id)
             if not heard:
                 return
             self._keep_source(page.id, page.voice)
-            self.stt.submit(page, page.voice)
+            self._stt(page, page.voice, eng, ch.label)
         else:
             ids = list(dict.fromkeys(h for h, _e in found))
             for h in ids:
                 self._heard("mdc", h, at=seg.end)
             self.live.fm_segment(ch.label, ids, seg.start, seg.end)
+            if not record:              # squelch, MDC IDs and "talking now" stay live; nothing is kept
+                return
             t = Traffic(f"{ch.label.replace(' ', '')}-{int(seg.start * 1000)}", ch.label, seg.start, seg.end,
                         "", status="pending", unit=", ".join(units), rig=self.radios.rig_mdc(ids), radio_id=", ".join(ids))
             t.low_energy = low_energy  # type: ignore[attr-defined]
@@ -544,7 +581,7 @@ class App:
             t.raw_audio = seg.audio    # type: ignore[attr-defined]  (saved if it turns out to be a click)
             self._keep_clip(t.id, seg.audio)
             self._keep_source(t.id, seg.audio)
-            self.stt.submit(t, seg.audio)
+            self._stt(t, seg.audio, self.stt_engine(ch.label), ch.label)
 
     def _page_heard(self, page: Page) -> bool:
         """A page just off the air (here, or on the hub from the station). False = tones only:
@@ -573,6 +610,8 @@ class App:
         self.tg.seen(call.talkgroup)
         for _name, (src, tag) in call.ids.items():      # radio ID <-> alias, kept for lookups without the alias
             self._heard("p25", src, tag, call.start)
+        key = channels.tg_key(call.talkgroup)
+        eng = self.stt_engine(key)
         if call.audio is not None:
             # One row per talker: 60 Control and the unit it's talking to are separate key-ups in the
             # same call; each piece is transcribed with only its own talker as the hint.
@@ -585,7 +624,7 @@ class App:
                 t.pairs = pairs  # (radio ID, alias) per talker, for the hub's own rig lookup  # type: ignore[attr-defined]
                 self._keep_clip(t.id, radio_voice(audio, deemph=False), processed=True)
                 self._keep_source(t.id, audio)
-                self.stt.submit(t, audio)
+                self._stt(t, audio, eng, key)
         self._drop_recorder_files(call)  # sizeup's clip is the one copy kept
 
     def _drop_recorder_files(self, call: Call) -> None:
@@ -599,6 +638,13 @@ class App:
                 pass
 
     def _transcribed(self, item) -> None:
+        self._transcribed_one(item)
+        wait = (self._aws_wait.pop(getattr(item, "id", ""), None)
+                if self._aws_wait and not isinstance(item, Rerun) else None)
+        if wait is not None and getattr(item, "status", "") in ("done", "no_speech"):
+            self._aws_alt(item, *wait)          # "both": the local text is in; Amazon Transcribe's next
+
+    def _transcribed_one(self, item) -> None:
         if isinstance(item, Traffic):
             item.text = getattr(item, "raw", "")
             # attach: the station's talkgroup choice when this came from one (hub); pairs: P25 talkers
@@ -807,20 +853,24 @@ class App:
             self.rerun["changed"] += changed
             self.rerun["failed"] += job.status == "error"
 
-    def _retext(self, cid: str, text: str, status: str, confidence: float | None, model: str) -> bool:
+    def _retext(self, cid: str, text: str, status: str, confidence: float | None, model: str,
+                alt: dict | None = None, why: str = "re-run") -> bool:
         """New text for a page or transmission already on screen (a re-run here, or one the station
-        sent the hub), the old text kept in its history. True = the text changed."""
+        sent the hub, or Amazon Transcribe's), the old text kept in its history. True = the text changed.
+        alt {text, model}: the other engine's transcript, kept to compare ("both")."""
         changed = False
         with self._lock:
             page = next((p for p in self.pages if p.id == cid), None)
         if page is not None:
-            if page.raw != text:
+            if page.raw != text and (page.raw or page.status not in ("pending", "remote")):
                 hist = list(getattr(page, "history", None) or [])
                 hist.append({"text": page.raw, "at": time.time(), "model": getattr(page, "model", "") or ""})
                 page.history = hist[-5:]  # type: ignore[attr-defined]
                 changed = True
             page.raw, page.confidence = text, confidence
             page.rerun_at, page.model = time.time(), model  # type: ignore[attr-defined]
+            if alt is not None:
+                page.alt_text, page.alt_model = str(alt.get("text") or ""), str(alt.get("model") or "")  # type: ignore[attr-defined]
             page.status = "done" if text else "no_speech"
             d = self._dispatch(text)
             page.dispatch = d.as_dict() if d else None  # type: ignore[attr-defined]
@@ -828,15 +878,228 @@ class App:
         old = next((t.text for t in list(self.store.loose) + [t for i in self.store.incidents for t in i.traffic]
                     if t.id == cid), None)
         changed = changed or (old is not None and old != text)
-        self.store.retext(cid, text, status, confidence, model)
+        self.store.retext(cid, text, status, confidence, model, alt=alt)
         try:
-            self.cad.comms.retext(cid, text, status, model)
+            self.cad.comms.retext(cid, text, status, model, alt)
         except Exception as e:  # the CAD must never stop the monitor
             log(f"CAD: could not update the communications log: {type(e).__name__}: {e}")
         if changed:
-            log(f"re-run {cid}: {text or '(no speech)'}")
-        self._emit("retext", {"id": cid, "text": text, "status": status, "confidence": confidence, "model": model})
+            log(f"{why} {cid}: {text or '(no speech)'}")
+        self._emit("retext", {"id": cid, "text": text, "status": status, "confidence": confidence, "model": model,
+                              **({"alt": alt} if alt is not None else {})})
         return changed
+
+
+    # -- per-channel speech-to-text (Settings > Radios, sizeup/channels.py) --------------------------------
+
+    def channel_pref(self, key: str) -> dict:
+        """{record, transcribe, engine} for "FG1" / "South 2" / "tg:307" (a talkgroup's record is its own switch)."""
+        p = channels.pref(key, self._chan_ov, self.cfg.stt_aws_channels)
+        if channels.is_tg(key):
+            p["record"] = self.tg.record(int(key[3:]))
+        return p
+
+    def aws_ok(self) -> tuple[bool, str]:
+        """Can Amazon Transcribe take audio now? Forwarding to a hub: what the hub last said (it runs it);
+        else this process's own (the hub; all-in-one with [stt] aws and credentials)."""
+        if self.forwarding():
+            return bool(self._hub_aws.get("ok")), str(self._hub_aws.get("why") or "")
+        if self.aws is None:
+            return False, "Amazon Transcribe isn't set up here ([stt] aws): the local model is used"
+        return self.aws.available()
+
+    def stt_engine(self, key: str) -> str:
+        """off | local | aws | both: what runs for this channel now ("aws" falls back to local without AWS)."""
+        return channels.effective(self.channel_pref(key), self.aws_ok()[0])
+
+    def _stt(self, item, audio: np.ndarray, eng: str, key: str) -> None:
+        """One transmission or page to speech-to-text the way its channel says (audio: whisper's 16 kHz input)."""
+        item.stt = eng if eng in ("aws", "both") else ""
+        if eng == "off":                       # kept, not transcribed
+            item.raw, item.confidence, item.status = "", None, "off"
+            item.model = ""
+            return self._transcribed(item)
+        if eng == "aws" and self.forwarding():
+            # The hub runs Amazon Transcribe on the clip it gets: no whisper here.
+            item.raw, item.confidence, item.status, item.model = "", None, "remote", channels_model()
+            if isinstance(item, Traffic):
+                item.transcript_pending = "aws"
+                return self._transcribed(item)
+            return self._save_page(item)
+        if eng == "aws" or (eng == "both" and not self.forwarding()):   # (both, forwarding: the hub adds AWS)
+            from sizeup.transcribe import pcm8k
+            pcm = pcm8k(radio_voice(audio, deemph=getattr(item, "fm", True), nr=False), RATE)
+            if eng == "aws":
+                return self._aws_start(item, pcm, key)
+            self._aws_wait[item.id] = (pcm, key)
+        self.stt.submit(item, audio)
+
+    # -- Amazon Transcribe (the hub; all-in-one with [stt] aws) ---------------------------------------------
+
+    def _aws_setup(self) -> None:
+        from sizeup import aws as aws_mod
+        from sizeup.transcribe import AwsTranscriber, Settings as AwsSettings, Usage, Vocabulary, respell
+        cfg, store = self.cfg, self.cad.store
+        reg = aws_mod.region(cfg.stt_aws_region)
+        self.aws_usage = Usage(store.meta_get, store.meta_put)
+        self.vocab = Vocabulary(reg, store.meta_get, store.meta_put, cfg.stt_aws_vocabulary, cfg.stt_aws_api_endpoint,
+                                log=log, on_ready=self._vocab_ready)
+        self.aws = AwsTranscriber(AwsSettings(region=reg, endpoint=cfg.stt_aws_endpoint, api_endpoint=cfg.stt_aws_api_endpoint,
+                                              idle_s=cfg.stt_aws_idle_s, pace=cfg.stt_aws_pace, vocabulary=cfg.stt_aws_vocabulary),
+                                  self.aws_usage, self._aws_done, self._aws_failed, log=log,
+                                  limit_usd=self.cad.settings.aws_limit,
+                                  respell=lambda t: respell(t, self.vocab.state()["respell"]))
+        if self.vocab.ready():
+            self.aws.vocabulary = cfg.stt_aws_vocabulary
+        log(f"speech-to-text: Amazon Transcribe streaming ({reg}) for the channels set to AWS in Settings > Radios")
+
+    def _vocab_ready(self, name: str) -> None:
+        if self.aws is not None and self.aws.vocabulary != name:
+            self.aws.vocabulary = name
+            log(f"aws transcribe: custom vocabulary {name} in use from the next stream")
+
+    def _aws_start(self, item, pcm: np.ndarray, key: str) -> None:
+        """Amazon Transcribe for a transmission (shown at once as "Transcribing", the text follows) or a
+        page (its dispatch is read when the text comes)."""
+        item.status, item.raw, item.confidence, item.model = "pending", "", None, channels_model()
+        item.stt = "aws"
+        if isinstance(item, Traffic):
+            item.__dict__.pop("transcript_pending", None)
+            self._transcribed(item)
+            job = AwsJob("traffic", item.id, key)
+        else:
+            self._save_page(item)
+            job = AwsJob("page", item.id, key, page=item)
+        ok, why = self.aws.available() if self.aws is not None else (False, "Amazon Transcribe isn't set up here")
+        if not ok:
+            return self._aws_failed(job, why)
+        self.aws.submit(key, job, pcm)
+
+    def _aws_alt(self, item, pcm: np.ndarray, key: str) -> None:
+        """"both": the local text is in; Amazon Transcribe's becomes the text, the local one the alternative."""
+        if self.aws is None or not self.aws.available()[0]:
+            return
+        alt = {"text": getattr(item, "text", "") if isinstance(item, Traffic) else getattr(item, "raw", ""),
+               "model": getattr(item, "model", "") or ""}
+        self.aws.submit(key, AwsJob("traffic" if isinstance(item, Traffic) else "page", item.id, key, alt,
+                                    None if isinstance(item, Traffic) else item), pcm)
+
+    def _aws_done(self, job: AwsJob, text: str, conf: float | None) -> None:
+        status = "done" if text else "no_speech"
+        if job.kind == "page" and job.alt is None:
+            page = job.page
+            page.raw, page.confidence, page.status, page.model = text, conf, status, channels_model()
+            self._transcribed(page)
+        else:
+            self._retext(job.id, text, status, conf, channels_model(), alt=job.alt, why="AWS Transcribe")
+
+    def _aws_failed(self, job: AwsJob, why: str) -> None:
+        """Never dropped: the local model takes it ("both": the local text simply stays)."""
+        log(f"aws transcribe: {job.kind} {job.id}: {why}" + ("" if job.alt is not None else ": using the local model"))
+        if job.alt is not None:
+            return
+        if job.kind == "page":
+            page = job.page
+            if page.audio is not None:
+                page.status, page.model, page.stt = "pending", "", ""
+                self.stt.submit(page, page.voice)
+                return
+            page.status = "error"
+            self._save_page(page)
+            return
+        if not self.retranscribe([job.id]):
+            self._retext(job.id, "", "error", None, f"{channels_model()} (failed: {why[:80]})", why="AWS Transcribe")
+
+    # -- the radios' side of Settings > Radios (Cad.radio_ctx) ---------------------------------------------
+
+    def channels_locked(self) -> str:
+        if self.forwarding():
+            return ("Channels are set on the hub (the CAD of record) while this station forwards to it: "
+                    "change them there")
+        return ""
+
+    def aws_channels(self) -> tuple[str, ...]:
+        return self.cfg.stt_aws_channels
+
+    def aws_limit_default(self) -> float:
+        return float(self.cfg.stt_aws_limit_usd)
+
+    def channels_changed(self) -> None:
+        self._chan_ov = self.cad.settings.channel_overrides()
+        log("speech-to-text channels: " + (", ".join(f"{k} {v}" for k, v in sorted(self._chan_ov.items())) or "the defaults"))
+
+    def vocabulary_suggestions(self) -> list[str]:
+        if self._vocab_suggest is None:
+            streets: list[str] = []
+            if self.gaz is not None:
+                ours = ("Port Chester", "Rye Brook")
+                ranked = sorted(self.gaz.streets.values(),
+                                key=lambda st: -sum(len(v) for m, v in st.addrs.items() if m in ours))
+                streets = [st.name for st in ranked if any(m in ours for m in st.addrs)]
+            self._vocab_suggest = channels.vocabulary_suggestions(self.cad.lists.units, streets)
+        return list(self._vocab_suggest)
+
+    def vocabulary_push(self, phrases: list[str]) -> dict:
+        if self.vocab is None:
+            return {"state": "error", "reason": "Amazon Transcribe isn't set up here: push the vocabulary on the hub"}
+        return self.vocab.push(phrases)
+
+    def vocabulary_state(self) -> dict:
+        if self.vocab is None:
+            return {"name": self.cfg.stt_aws_vocabulary, "state": "none", "reason": "", "phrases": 0, "sig": ""}
+        st = self.vocab.state()
+        st.pop("respell", None)
+        return st
+
+    def aws_status(self) -> dict:
+        """Where Amazon Transcribe runs and what it cost this month (the cost line)."""
+        ok, why = self.aws_ok()
+        if self.aws is None:
+            return {"enabled": False, "where": "hub" if self.forwarding() else "none", "ok": ok, "why": why}
+        return {"enabled": True, "where": "here", "ok": ok, "why": why, **self.aws.spent(),
+                "price_per_min": self.aws.s.price_per_min, **self.aws.status()}
+
+    # -- the hub's choices on the station (the set_channel_prefs job) ------------------------------------------
+
+    def _load_hub_aws(self) -> dict:
+        try:
+            d = json.loads(self.cad.store.meta_get("hub_aws") or "{}")
+        except ValueError:
+            d = {}
+        return {"ok": bool(d.get("ok")), "why": str(d.get("why") or "the hub hasn't said whether it can use AWS yet")}
+
+    def set_channel_prefs(self, prefs: dict, aws: dict | None = None) -> dict:
+        """From the hub (CAD of record): its whole channel map and whether it can take AWS audio now.
+        Applied here and kept (this station's own Settings overrides, audited as "hub")."""
+        clean = channels.check_map(prefs)
+        changed = self.cad.settings.replace_channels(clean, "hub")
+        self._chan_ov = self.cad.settings.channel_overrides()
+        if isinstance(aws, dict):
+            new = {"ok": bool(aws.get("ok")), "why": str(aws.get("why") or "")[:300]}
+            if new != self._hub_aws:
+                self._hub_aws = new
+                self.cad.store.meta_put("hub_aws", json.dumps(new))
+                changed = True
+        if changed:
+            log(f"speech-to-text channels from the hub: {len(clean)} set; AWS {'on' if self._hub_aws['ok'] else 'off'}"
+                + (f" ({self._hub_aws['why']})" if not self._hub_aws["ok"] and self._hub_aws["why"] else ""))
+        return self.channels_applied()
+
+    def channels_applied(self) -> dict:
+        """What this station runs (its state push: the hub compares sig)."""
+        return {"prefs": self._chan_ov, "aws": dict(self._hub_aws), "sig": channels.sig(self._chan_ov, self._hub_aws["ok"])}
+
+    def channels_sync(self) -> dict:
+        if self.forwarding():
+            return {"state": "hub", "detail": "Set on the hub (the CAD of record) and applied here"}
+        return {"state": "local", "detail": ""}
+
+    def channels_state(self) -> dict:
+        """Settings > Radios > Channels: the choices, what AWS can do, where they stand, the cost."""
+        ok, why = self.aws_ok()
+        return {"prefs": self._chan_ov, "aws_channels": list(self.cfg.stt_aws_channels), "aws_ok": ok, "aws_why": why,
+                "fm": [{"key": c.label, "kind": c.kind, "mhz": c.mhz} for c in self.cfg.channels],
+                "sync": self.channels_sync(), "aws": self.aws_status()}
 
     # -- state --------------------------------------------------------------------------------------
 
@@ -1049,7 +1312,8 @@ class App:
               "rerun": dict(self.rerun, pending=len(self._rerun_ids)),
               "talkgroups": self.tg.state() if self.p25 else [],
               "talking": self.live.state(),
-              "prealert": self.cad.prealert_state()}
+              "prealert": self.cad.prealert_state(),
+              "channels": self.channels_state()}
         # Tell the display which entries have a recording (so ▶ isn't a dead button).
         with self._lock:
             busy = set(self._rerun_ids)
@@ -1096,6 +1360,8 @@ class App:
                 self.recorder.start()
         if self.p25:
             self.p25.start()
+        if self.vocab is not None and self.vocab.state()["state"] == "PENDING":
+            self.vocab.poll()
         if self.station is not None:
             self.station.start()
         elif self.link is not None:
@@ -1137,6 +1403,8 @@ class App:
         for sd in list(self.assign):
             claims.release(sd)
         self.whisper.stop()
+        if self.aws is not None:
+            self.aws.stop()
         if self.tts:
             self.tts.stop()
         if self.station is not None:
@@ -1145,6 +1413,11 @@ class App:
             self.link.stop()
         if self.prealert is not None:
             self.prealert.stop()
+
+
+def channels_model() -> str:
+    from sizeup.transcribe import MODEL
+    return MODEL
 
 
 def make_app(cfg: Config) -> App:

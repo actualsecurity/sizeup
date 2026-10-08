@@ -21,7 +21,14 @@ no token configured the hub refuses them all. Jobs (the station only connects ou
            Polly fails; any other engine always. Cad._render_remote -> render_voice() waits up to
            20 s for the station to render it with its Kokoro; offline or too slow -> text only,
            said so ("Voice unavailable — station offline"), never a hung request
-    call   set_mode / set_talkgroup / set_talkgroup_group / retranscribe from this UI, run there
+    call   set_mode / set_talkgroup / set_talkgroup_group / retranscribe from this UI, run there;
+           set_channel_prefs: Settings > Radios > Channels (record / transcribe / engine) and whether
+           Amazon Transcribe can take audio now, sent whenever the station's reported copy (its
+           state's channels.sig) differs, so a station that was offline catches up (channels_check)
+Amazon Transcribe ([stt] aws, sizeup/transcribe.py) runs here: a "traffic" / "page" event with
+transcript_pending "aws" (the station skipped whisper) is shown as "Transcribing" and gets AWS's text
+(_aws_start -> _retext); "both" gets AWS's text with the station's kept as alt_text. If AWS can't, the
+station's whisper is asked for it (retranscribe), else it says "transcription failed".
 
 The monitor's state lives in hub.sqlite and the clips in audio.sqlite (hubstore.py), next to the
 CAD's cad.sqlite: all of it under one state dir that Litestream replicates (deploy/hub/).
@@ -42,7 +49,8 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Callable
 
-from sizeup.app import CLIP_ID, App
+from sizeup import channels
+from sizeup.app import CLIP_ID, App, AwsJob, channels_model
 from sizeup.cad.dispatcher import AudioUnavailable
 from sizeup.cloud.hubstore import AudioDb, MonitorDb
 from sizeup.incidents import Traffic
@@ -350,6 +358,7 @@ class Hub:
             if isinstance(tgs, list):
                 self.talkgroups = tgs
             self.status = st
+            self.app.channels_check()          # the station runs other channel choices than these: send them
         if isinstance(d.get("talking"), list):
             self.live.update(d["talking"], now)
         return _json(200, {"ok": True})
@@ -407,6 +416,7 @@ class HubApp(App):
         self.cad.remote_voice = self.hub.render_voice
         self.cad.audio_blobs = self.audio
         self.cad.cloud = self.hub.cad_cloud
+        self._chan_push = {"busy": False, "at": 0.0, "error": "", "again": False}
         for d in self.mdb.load(self.store):
             self.pages.append(page_from_dict(d))
         self._clean_hub()
@@ -421,8 +431,19 @@ class HubApp(App):
         elif kind == "traffic":
             self._apply_traffic(d, audio)
         elif kind == "retext":
-            self._retext(self._id(d), str(d.get("text") or ""), str(d.get("status") or "done"),
-                         d.get("confidence"), str(d.get("model") or ""))
+            pid = self._id(d)
+            with self._lock:
+                page = next((p for p in self.pages if p.id == pid), None)
+            if page is not None and page.status == "pending" and getattr(page, "stt", "") == "aws":
+                # the station's whisper standing in for Amazon Transcribe: the page is read now
+                page.raw, page.confidence = str(d.get("text") or ""), d.get("confidence")
+                page.status, page.model = str(d.get("status") or "done"), str(d.get("model") or "")  # type: ignore[attr-defined]
+                page.stt = ""  # type: ignore[attr-defined]
+                self._transcribed(page)
+                return
+            alt = d.get("alt") if isinstance(d.get("alt"), dict) else None
+            self._retext(pid, str(d.get("text") or ""), str(d.get("status") or "done"),
+                         d.get("confidence"), str(d.get("model") or ""), alt=alt)
         elif kind == "heard":
             if d.get("system") in ("mdc", "p25"):
                 self.radios.heard(d["system"], str(d.get("radio_id") or ""), str(d.get("alias") or ""), d.get("at"))
@@ -444,7 +465,9 @@ class HubApp(App):
         page = page_from_dict(d)
         if audio:
             self.audio.put(pid, audio, "clip", at=page.end)
-        self._page_heard(page)
+        heard = self._page_heard(page)
+        if heard and getattr(page, "stt", "") == "aws":      # the station skipped whisper: Amazon Transcribe here
+            self._aws_from_clip(page, audio, page.label)
 
     def _apply_page_text(self, d: dict) -> None:
         pid = self._id(d)
@@ -454,11 +477,13 @@ class HubApp(App):
             page = page_from_dict(d)
             with self._lock:
                 self.pages.appendleft(page)
-        elif page.status != "pending":
-            return                                    # applied before
+        elif page.status != "pending" or getattr(page, "stt", "") == "aws":
+            return                                    # applied before (or Amazon Transcribe reads it here)
         page.raw, page.confidence = str(d.get("raw") or ""), d.get("confidence")
         page.status, page.model = str(d.get("status") or "done"), str(d.get("model") or "")  # type: ignore[attr-defined]
         self._transcribed(page)
+        if str(d.get("stt") or "") == "both" and page.status in ("done", "no_speech"):
+            self._aws_from_clip(page, self.audio.get(pid), page.label, both=True)
 
     def _apply_traffic(self, d: dict, audio: bytes | None) -> None:
         tid = self._id(d)
@@ -477,7 +502,136 @@ class HubApp(App):
             t.rig = self.radios.rig_p25([(str(p[0]), str(p[1])) for p in pairs if isinstance(p, list) and len(p) == 2])
         else:
             t.rig = self.radios.rig_for_names(t.unit, False)[0]
+        key = channels.tg_key(t.talkgroup) if t.talkgroup is not None else t.source
+        if d.get("transcript_pending") == "aws":            # the station skipped whisper: Amazon Transcribe here
+            return self._aws_from_clip(t, audio, key)
         self._transcribed(t)
+        if d.get("stt") == "both" and t.status in ("done", "no_speech"):
+            self._aws_from_clip(t, audio, key, both=True)
+
+    # -- Amazon Transcribe here, for the station's clips --------------------------------------------------
+
+    def _aws_from_clip(self, item, wav: bytes | None, key: str, both: bool = False) -> None:
+        from sizeup.transcribe import wav_pcm
+        pcm = wav_pcm(wav, getattr(item, "voice_offset_s", 0.0) if not isinstance(item, Traffic) else 0.0) if wav else None
+        if both:
+            if pcm is not None:
+                self._aws_alt(item, pcm, key)
+            return
+        if pcm is None:                                    # no clip came (the outbox dropped it): the station's whisper
+            item.status, item.raw, item.model, item.stt = "pending", "", channels_model(), "aws"
+            if isinstance(item, Traffic):
+                item.__dict__.pop("transcript_pending", None)
+                self._transcribed(item)
+            return self._aws_failed(AwsJob("traffic" if isinstance(item, Traffic) else "page", item.id, key,
+                                           page=None if isinstance(item, Traffic) else item), "no audio came with it")
+        self._aws_start(item, pcm, key)
+
+    def _aws_done(self, job, text: str, conf) -> None:
+        super()._aws_done(job, text, conf)
+        self.sync()
+
+    def _aws_failed(self, job, why: str) -> None:
+        """Amazon Transcribe couldn't: the station's whisper does it (retranscribe, the text comes back as
+        a retext event); a station that can't: "transcription failed", said on the transmission."""
+        self.hub.log(f"aws transcribe: {job.kind} {job.id}: {why}" + ("" if job.alt is not None else
+                                                                       ": asking the station's whisper"))
+        if job.alt is not None:                    # "both": the station's text stays
+            return
+
+        def ask() -> None:
+            err = ""
+            try:
+                n = int(self.hub.remote("retranscribe", [job.id], timeout=CALL_WAIT_S) or 0)
+            except (StationOffline, RuntimeError, TypeError, ValueError) as e:
+                n, err = 0, str(e)
+            if n:
+                return
+            note = f"{channels_model()} failed ({why[:80]}); station: {err or 'no recording to re-run'}"
+            if job.kind == "page" and job.page is not None:
+                job.page.status, job.page.model = "error", note
+                self.sync()
+            else:
+                self._retext(job.id, "", "error", None, note, why="transcription failed:")
+                self.sync()
+        threading.Thread(target=ask, name="aws-fallback", daemon=True).start()
+
+    def _aws_recover(self) -> None:
+        """After a redeploy: what was waiting for Amazon Transcribe goes to it again (or the station)."""
+        if self.aws is None:
+            return
+        cutoff = time.time() - 3600
+        with self._lock:
+            pages = [p for p in self.pages if p.status == "pending" and getattr(p, "stt", "") == "aws" and p.end > cutoff]
+        for p in pages:
+            self._aws_from_clip(p, self.audio.get(p.id), p.label)
+        for t in list(self.store.loose) + [t for i in self.store.incidents for t in i.traffic]:
+            if t.status == "pending" and getattr(t, "stt", "") == "aws" and t.end > cutoff:
+                from sizeup.transcribe import wav_pcm
+                pcm = wav_pcm(self.audio.get(t.id) or b"")
+                key = channels.tg_key(t.talkgroup) if t.talkgroup is not None else t.source
+                if pcm is not None and self.aws.available()[0]:
+                    self.aws.submit(key, AwsJob("traffic", t.id, key), pcm)
+                else:
+                    self._aws_failed(AwsJob("traffic", t.id, key), "the hub restarted")
+
+    # -- Settings > Radios > Channels on the station ----------------------------------------------------
+
+    def channels_changed(self) -> None:
+        super().channels_changed()
+        self.channels_check(force=True)
+
+    def channel_desired(self) -> dict:
+        ok, why = self.aws_ok()
+        return {"prefs": dict(self._chan_ov), "aws": {"ok": ok, "why": why}, "sig": channels.sig(self._chan_ov, ok)}
+
+    def channels_check(self, force: bool = False) -> None:
+        """Send the station these choices when what it reports differs (a change here, a station that was
+        offline, AWS's limit reached or a new month): one push at a time, at most every 10 s unless forced."""
+        want = self.channel_desired()
+        got = (self.hub.status or {}).get("channels") or {}
+        if got.get("sig") == want["sig"] or not self.hub.connected():
+            return
+        now = time.time()
+        with self._lock:
+            if self._chan_push["busy"]:
+                self._chan_push["again"] = self._chan_push["again"] or force    # a change while one is on its way
+                return
+            if not force and now - self._chan_push["at"] < 10:
+                return
+            self._chan_push.update(busy=True, at=now, again=False)
+
+        def push() -> None:
+            try:
+                res = self.hub.remote("set_channel_prefs", want["prefs"], want["aws"])
+                if isinstance(res, dict) and self.hub.status is not None:
+                    self.hub.status["channels"] = res
+                self._chan_push["error"] = ""
+            except (StationOffline, RuntimeError) as e:
+                self._chan_push["error"] = str(e)
+                self.hub.log(f"hub: channel choices not applied on the station: {e}")
+            finally:
+                with self._lock:
+                    self._chan_push["busy"] = False
+                    again, self._chan_push["again"] = self._chan_push["again"], False
+                if again:
+                    self.channels_check(force=True)
+        threading.Thread(target=push, name="hub-channels", daemon=True).start()
+
+    def channels_sync(self) -> dict:
+        want = self.channel_desired()
+        got = (self.hub.status or {}).get("channels") or {}
+        if not self.hub.status:
+            return {"state": "offline", "detail": "No station has reported yet: these apply when it connects"}
+        if got.get("sig") == want["sig"]:
+            return {"state": "applied", "detail": "Applied on the station"}
+        if not self.hub.connected():
+            return {"state": "offline", "detail": f"Station offline since {_hhmm(self.hub.last_seen)}: "
+                                                  "these apply when it's back"}
+        if "sig" not in got:
+            return {"state": "pending", "detail": "The station runs an older sizeup: update it to apply these"}
+        err = self._chan_push.get("error")
+        return {"state": "pending", "detail": "Waiting for the station" + (f" ({err})" if err else "")}
 
     def sync(self) -> None:
         with self._lock:
@@ -555,12 +709,20 @@ class HubApp(App):
         threading.Thread(target=self._hub_janitor, name="hub-janitor", daemon=True).start()
         self._started = True                      # the phone pre-alert: the hub's own subscription
         self.prealert_sync()
+        if self.vocab is not None and self.vocab.state()["state"] == "PENDING":
+            self.vocab.poll()
+        try:
+            self._aws_recover()
+        except Exception as e:  # never in the way of starting
+            self.hub.log(f"hub: could not resume Amazon Transcribe work: {type(e).__name__}: {e}")
         return self
 
     def stop(self) -> None:
         self._stopping.set()
         if self.prealert is not None:
             self.prealert.stop()
+        if self.aws is not None:
+            self.aws.stop()
         try:
             self.sync()
         except Exception:

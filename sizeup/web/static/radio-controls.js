@@ -1,8 +1,12 @@
 // Settings > Radios, the station's receivers (moved here from the old monitor page, user 2026-10-08:
 // the console is where things are done, the monitor only shows): each receiver's state, the SDR
 // switch (one dongle hears one thing at a time), the incident the station opened from the last page
-// (closed by hand here), which talkgroups are recorded and which are Main (up front in Radio, attached
-// to that incident), re-running speech-to-text on every recording, and the disk. All from the monitor state (/api/state, polled every 2 s while this section is open);
+// (closed by hand here), the Channels table (FG1, South 2, then every talkgroup): Record, Main (up
+// front in Radio, attached to that incident), Transcribe and the speech-to-text Engine (Local =
+// whisper on the station, AWS = Amazon Transcribe from the hub, Both = compare; sizeup/channels.py),
+// with whether the station applied them and what AWS cost this month; the AWS custom vocabulary;
+// re-running speech-to-text on every recording, and the disk. All from the monitor state (/api/state,
+// polled every 2 s while this section is open) and /api/cad/stt (the vocabulary);
 // every switch is a POST the server allows admins only (sizeup/cad/api.py WRITES): for anyone else the
 // controls are locked here too (cad.js roLock). Closing the paged incident is a dispatcher's.
 //
@@ -16,8 +20,15 @@ window.RadioControls = (() => {
   const GROUP_COLORS = { "Fire/EMS": "#ff7a59", "County Police": "#6aa8ff", "DOT": "#e8d84a", "Hospital": "#f27ad1",
                          "Operations": "#7ee07e", "Interop/Events": "#B8C0CA", "OEM": "#ffcf7a", "": "#9AA3AD" };
   const RADIO_STATE = { ok: "", off: "off", absent: "absent", down: "down", starting: "starting" };
-  const st = { box: null, state: null, timer: 0, pending: new Map(), error: "", sdrBusy: false, sdrError: "", rerunBusy: false,
-               rerunMsg: "", confirm: null, confirmTimer: 0, closing: null, closeTimer: 0, n: {} };
+  const st = { box: null, state: null, timer: 0, pending: new Map(), cpending: new Map(), error: "", sdrBusy: false, sdrError: "",
+               rerunBusy: false, rerunMsg: "", confirm: null, confirmTimer: 0, closing: null, closeTimer: 0, n: {},
+               stt: null, sttTimer: 0, vocabMsg: "", vocabBusy: false, vocabDirty: false };
+  const ENGINES = [["local", "Local"], ["aws", "AWS"], ["both", "Both"]];
+  const ENGINE_HELP = "Local: whisper.cpp large-v3 on the station (whisper-server, port 8179).\n"
+    + "AWS: Amazon Transcribe streaming, called from the hub (its task role): $0.024 a minute, at least 15 s a stream; "
+    + "the station skips whisper and sends the clip.\nBoth: whisper on the station and AWS on the hub; AWS's text is "
+    + "shown, whisper's kept to compare (Radio view: \u21c4).\nWithout AWS (not set up, no credentials, the monthly "
+    + "limit reached) AWS channels use Local until it's back.";
   const ro = () => typeof canDo === "function" && !canDo("admin");
   const groupName = (g) => g || "Unknown";
   const groupColor = (g) => GROUP_COLORS[g || ""] || GROUP_COLORS[""];
@@ -43,12 +54,15 @@ window.RadioControls = (() => {
       n.tgSum = el("span", "dim small");
       n.filter = el("input", "tg-filter");
       Object.assign(n.filter, { type: "search", placeholder: "Filter", autocomplete: "off", spellcheck: false });
-      n.filter.setAttribute("aria-label", "Filter talkgroups");
+      n.filter.setAttribute("aria-label", "Filter channels and talkgroups");
       n.filter.addEventListener("input", renderTalkgroups);
       n.tgErr = el("div", "tg-error");
       n.tgErr.hidden = true;
       n.groups = el("div", "tg-groups rc-groups");
       n.groups.addEventListener("click", onSwitch);
+      n.groups.addEventListener("change", onEngine);
+      n.sync = el("div", "small rc-sync");
+      n.cost = el("div", "dim small rc-cost");
       n.rerun = el("button", "", "Re-run all");
       n.rerun.type = "button";
       n.rerun.title = "Re-transcribe every recording still on disk";
@@ -67,11 +81,17 @@ window.RadioControls = (() => {
              + "pick what it listens to. Plug in another dongle to run two at once.", n.radios, n.sdr, n.storage),
         card("Paged incident", "The incident the station opened from the last page: Main traffic attaches to it until it "
              + "goes quiet. Close it when the call is over.", n.inc),
-        card("Talkgroups", "Record: keeps its calls and transcribes them.\nMain: up front in Radio and on our incident; "
-             + "the rest are folded under Other talkgroups.", tools, n.tgErr, n.groups),
-        card("Speech-to-text", "Runs every recording still on disk through speech-to-text again (newest first, behind live traffic).",
-             rerunRow));
+        card("Channels", "Record: keeps its transmissions (off for FG1 / South 2: the receiver keeps running, squelch, "
+             + "MDC IDs and Talking now stay live, nothing is kept).\nMain: up front in Radio and on our incident; "
+             + "the rest are folded under Other talkgroups.\nTranscribe: speech-to-text at all.\nEngine:\n" + ENGINE_HELP,
+             n.sync, n.cost, tools, n.tgErr, n.groups),
+        card("Vocabulary", "Words Amazon Transcribe should expect: unit names, places, streets. AWS takes letters only, "
+             + "so numbers go spelled out (Engine 60 \u2192 Engine-sixty) and come back as written. Saved here, sent to "
+             + "AWS with Push (the hub's vocabulary sizeup-pcfd), used by new streams once it is Ready.", ...vocabCard()),
+        card("Speech-to-text", "Runs every recording still on disk through speech-to-text again (newest first, behind live "
+             + "traffic), with the local model.\n" + ENGINE_HELP, rerunRow));
     }
+    loadStt();
     poll();
   }
 
@@ -271,14 +291,34 @@ window.RadioControls = (() => {
   // state.talkgroups is the truth. A switch shows at once (pending) until a push agrees, or 8 s.
 
   function talkgroups() {
-    const rows = (st.state && st.state.talkgroups) || [];
+    const rows = ((st.state && st.state.talkgroups) || []).map((r) => ({ ...r, ...chan(`tg:${r.tg}`), record: r.record }));
     return st.pending.size ? rows.map((r) => (st.pending.has(r.tg) ? { ...r, ...st.pending.get(r.tg).vals, pending: true } : r)) : rows;
+  }
+  // Channel choices (sizeup/channels.py): the default (AWS for [stt] aws_channels), what is saved, what was just clicked.
+  function chan(key) {
+    const c = (st.state && st.state.channels) || {};
+    const p = { record: true, transcribe: true, engine: (c.aws_channels || []).includes(key) ? "aws" : "local",
+                ...((c.prefs || {})[key] || {}) };
+    const q = st.cpending.get(key);
+    if (q) Object.assign(p, q.vals, { cpending: true });
+    p.effective = !p.transcribe ? "off" : p.engine === "local" || c.aws_ok ? p.engine : "local";
+    return p;
+  }
+  function fmRows() {
+    const c = (st.state && st.state.channels) || {};
+    return (c.fm || []).map((f) => ({ key: `ch:${f.key}`, chan: f.key, name: f.key, kind: f.kind, mhz: f.mhz, fm: true, ...chan(f.key) }));
   }
   function settle() {
     const now = Date.now(), by = new Map(((st.state && st.state.talkgroups) || []).map((r) => [r.tg, r]));
     for (const [tg, p] of st.pending) {
       const r = by.get(tg);
       if (!r || now > p.until || Object.entries(p.vals).every(([k, v]) => r[k] === v)) st.pending.delete(tg);
+    }
+    const c = (st.state && st.state.channels) || {};
+    for (const [key, p] of st.cpending) {
+      const saved = { record: true, transcribe: true, engine: (c.aws_channels || []).includes(key) ? "aws" : "local",
+                      ...((c.prefs || {})[key] || {}) };
+      if (now > p.until || Object.entries(p.vals).every(([k, v]) => saved[k] === v)) st.cpending.delete(key);
     }
   }
   function mark(tg, field, value) {
@@ -309,6 +349,30 @@ window.RadioControls = (() => {
     }
     renderTalkgroups();
   }
+  async function setChannel(key, field, value, label) {
+    const q = st.cpending.get(key) || { vals: {} };
+    q.vals[field] = value;
+    q.until = Date.now() + PENDING_MS;
+    st.cpending.set(key, q);
+    st.error = "";
+    renderTalkgroups();
+    try {
+      await api("POST", "/api/cad/settings/channels", { action: "set", key, [field]: value,
+                                                        operator: typeof operator === "function" ? operator() : "" });
+      poll();
+    } catch (err) {
+      const p = st.cpending.get(key);
+      if (p) { delete p.vals[field]; if (!Object.keys(p.vals).length) st.cpending.delete(key); }
+      st.error = `Couldn't change ${field === "engine" ? "Engine" : field === "transcribe" ? "Transcribe" : "Record"} for ${label}: ${err.message}`;
+    }
+    renderTalkgroups();
+  }
+  function onEngine(e) {
+    const s = e.target.closest("select.tg-eng");
+    if (!s || s.disabled || ro()) return;
+    const li = s.closest(".tg-row"), key = li.dataset.ckey;
+    setChannel(key, "engine", s.value, li.dataset.label || key);
+  }
   async function setGroup(group, record) {
     const rows = ((st.state && st.state.talkgroups) || []).filter((r) => (r.group || "") === group && !(record && r.encrypted));
     for (const r of rows) mark(r.tg, "record", record);
@@ -326,7 +390,13 @@ window.RadioControls = (() => {
     const b = e.target.closest("button.sw");
     if (!b || b.disabled || ro()) return;
     if (b.classList.contains("gsw")) return setGroup(b.dataset.group, !b.classList.contains("on"));
-    const tg = Number(b.closest(".tg-row").dataset.key);
+    const li = b.closest(".tg-row");
+    if (b.dataset.field === "transcribe" || li.dataset.fm === "1") {
+      const key = li.dataset.ckey, cur = li.dataset.fm === "1" ? fmRows().find((x) => x.chan === key) : chan(key);
+      if (!cur) return;
+      return setChannel(key, b.dataset.field, !cur[b.dataset.field], li.dataset.label || key);
+    }
+    const tg = Number(li.dataset.key);
     const r = talkgroups().find((x) => x.tg === tg);
     if (!r) return;
     const field = b.dataset.field, next = !r[field];
@@ -360,15 +430,59 @@ window.RadioControls = (() => {
     return b;
   }
 
+  function engineSelect() {
+    const sel = el("select", "tg-eng");
+    for (const [v, label] of ENGINES) sel.append(new Option(label, v));
+    sel.setAttribute("aria-label", "Speech-to-text engine");
+    return sel;
+  }
+  function channelNote(r) {
+    const c = (st.state && st.state.channels) || {};
+    if (!r.record) return "";
+    if (!r.transcribe) return "not transcribed";
+    if (r.engine !== "local" && r.effective === "local") return `AWS off: local${c.aws_why ? ` (${c.aws_why})` : ""}`;
+    return "";
+  }
+
+  function renderSync() {
+    const c = (st.state && st.state.channels) || {}, n = st.n;
+    const sy = c.sync || {}, a = c.aws || {};
+    setText(n.sync, sy.detail || "");
+    n.sync.className = `small rc-sync ${sy.state || ""}`;
+    show(n.sync, !!sy.detail);
+    let cost = "";
+    if (a.enabled) {
+      cost = `AWS this month: ${Math.round(a.minutes || 0)} min ≈ $${(a.usd || 0).toFixed(2)} of $${a.limit_usd} limit`;
+      if (!a.ok && a.why) cost += ` · ${a.why}`;
+      n.cost.title = `${a.streams || 0} streams, ${Math.round((a.audio_s || 0) / 60)} min of audio sent in ${a.month}; `
+        + `billed at least 15 s a stream at $${a.price_per_min}/min. Open now: ${a.streams_open || 0}.`
+        + (a.last_error ? `\nLast AWS error: ${a.last_error}` : "");
+    } else if (a.where === "hub") {
+      cost = "AWS runs on the hub: its cost and limit are shown there";
+      n.cost.title = c.aws_ok ? "The hub can take AWS audio now" : `The hub can't take AWS audio now: ${c.aws_why || "?"}`;
+    } else {
+      cost = "AWS isn't set up here: every channel uses the local model";
+      n.cost.title = c.aws_why || "";
+    }
+    setText(n.cost, cost);
+    n.cost.classList.toggle("warn", !!(a.enabled && !a.ok));
+  }
+
   function renderTalkgroups() {
     if (!st.box) return;
+    renderSync();
     const n = st.n, rows = talkgroups(), lock = ro();
     const words = n.filter.value.toLowerCase().split(/\s+/).filter(Boolean);
-    const shown = rows.filter((r) => !words.length || words.every((w) =>
-      `${r.name} ${r.tg} ${groupName(r.group)} ${r.main ? "main" : ""} ${r.encrypted ? "encrypted" : ""}`.toLowerCase().includes(w)));
+    const match = (r) => !words.length || words.every((w) =>
+      `${r.name} ${r.tg ?? ""} ${r.fm ? "fm channels" : groupName(r.group)} ${r.main ? "main" : ""} ${r.encrypted ? "encrypted" : ""} `
+      .concat(`${r.engine} ${r.transcribe ? "" : "off"}`).toLowerCase().includes(w));
+    const shown = rows.filter(match);
+    const fm = fmRows().filter(match);
     const count = (p) => rows.filter(p).length;
-    setText(n.tgSum, rows.length ? `${rows.length} TGs, ${count((r) => r.main)} main, ${count((r) => r.record)} recording, `
-      + `${count((r) => r.count)} heard, ${count((r) => r.encrypted)} encrypted` + (shown.length !== rows.length ? `, ${shown.length} shown` : "") : "");
+    const aws = rows.concat(fmRows()).filter((r) => r.record && r.transcribe && r.engine !== "local").length;
+    setText(n.tgSum, (rows.length || fm.length) ? `${fmRows().length} FM, ${rows.length} TGs, ${count((r) => r.main)} main, `
+      + `${count((r) => r.record)} recording, ${aws} on AWS, ${count((r) => r.count)} heard, ${count((r) => r.encrypted)} encrypted`
+      + (shown.length !== rows.length ? `, ${shown.length} shown` : "") : "");
     setText(n.tgErr, st.error);
     show(n.tgErr, !!st.error);
     const by = new Map();
@@ -380,10 +494,13 @@ window.RadioControls = (() => {
     const groups = [...by.entries()].sort((a, b) => rank(a[0]) - rank(b[0]) || a[0].localeCompare(b[0]))
       .map(([g, list]) => ({ g, list: list.slice().sort((a, b) => (b.main - a.main) || ((b.last || 0) - (a.last || 0))
                                                          || a.name.localeCompare(b.name, "en", { numeric: true })) }));
+    if (fm.length) groups.unshift({ g: "\u0000fm", fm: true, list: fm });
+    const rowSig = (r) => JSON.stringify([r.name, r.record, r.main, r.encrypted, r.count, r.last, r.dropped, !!r.pending, fmtTime(r.last),
+                                         st.confirm === r.tg, lock, r.transcribe, r.engine, r.effective, !!r.cpending, channelNote(r),
+                                         (((st.state && st.state.channels) || {}).sync || {}).state]);
     syncList(n.groups, groups, {
       key: (x) => `g:${x.g}`,
-      sig: (x) => JSON.stringify([x.list.map((r) => [r.tg, r.name, r.record, r.main, r.encrypted, r.count, r.last, r.dropped, !!r.pending,
-                                                   fmtTime(r.last)]), st.confirm, lock]),
+      sig: (x) => JSON.stringify([x.list.map(rowSig), st.confirm, lock, (((st.state && st.state.channels) || {}).sync || {}).state]),
       make: () => {
         const sec = el("section", "tg-group");
         const h = el("h3", "tg-ghead");
@@ -395,21 +512,28 @@ window.RadioControls = (() => {
       fill: (sec, x) => {
         const [h, ol] = sec.children;
         const [gchip, gcount, , gsw] = h.children;
-        const dec = x.list.filter((r) => !r.encrypted), on = dec.filter((r) => r.record).length;
-        const all = dec.length > 0 && on === dec.length, mixed = on > 0 && !all;
-        gsw.dataset.group = x.g;
-        setSwitch(gsw, all, mixed ? "Record: some" : all ? "Record: all" : "Record: none");
-        gsw.classList.toggle("mixed", mixed);
-        gsw.disabled = !dec.length || lock;
-        gsw.title = !dec.length ? "All encrypted" : all ? `Recording all ${dec.length}: tap to stop` : `Record all ${dec.length} (encrypted stay off)`;
-        setText(gchip, groupName(x.g));
-        gchip.style.setProperty("--c", groupColor(x.g));
-        const m = x.list.filter((r) => r.main).length, hd = x.list.filter((r) => r.count).length;
-        setText(gcount, `${x.list.length} TG${x.list.length === 1 ? "" : "s"}` + (m ? `, ${m} main` : "") + (hd ? `, ${hd} heard` : ""));
+        if (x.fm) {
+          setText(gchip, "FM channels");
+          gchip.style.setProperty("--c", "var(--accent)");
+          setText(gcount, `${x.list.length} channel${x.list.length === 1 ? "" : "s"}, squelch + MDC IDs`);
+          show(gsw, false);
+        } else {
+          show(gsw, true);
+          const dec = x.list.filter((r) => !r.encrypted), on = dec.filter((r) => r.record).length;
+          const all = dec.length > 0 && on === dec.length, mixed = on > 0 && !all;
+          gsw.dataset.group = x.g;
+          setSwitch(gsw, all, mixed ? "Record: some" : all ? "Record: all" : "Record: none");
+          gsw.classList.toggle("mixed", mixed);
+          gsw.disabled = !dec.length || lock;
+          gsw.title = !dec.length ? "All encrypted" : all ? `Recording all ${dec.length}: tap to stop` : `Record all ${dec.length} (encrypted stay off)`;
+          setText(gchip, groupName(x.g));
+          gchip.style.setProperty("--c", groupColor(x.g));
+          const m = x.list.filter((r) => r.main).length, hd = x.list.filter((r) => r.count).length;
+          setText(gcount, `${x.list.length} TG${x.list.length === 1 ? "" : "s"}` + (m ? `, ${m} main` : "") + (hd ? `, ${hd} heard` : ""));
+        }
         syncList(ol, x.list, {
-          key: (r) => String(r.tg),
-          sig: (r) => JSON.stringify([r.name, r.record, r.main, r.encrypted, r.count, r.last, r.dropped, !!r.pending, fmtTime(r.last),
-                                      st.confirm === r.tg, lock]),
+          key: (r) => (r.fm ? r.key : String(r.tg)),
+          sig: rowSig,
           make: () => {
             const li = el("li", "tg-row");
             const id = el("div", "tg-id");
@@ -417,7 +541,7 @@ window.RadioControls = (() => {
             const info = el("div", "tg-info");
             info.append(el("span", "tg-heard"), el("span", "tg-note"));
             const sw = el("div", "tg-sw");
-            sw.append(switchButton("record"), switchButton("main"));
+            sw.append(switchButton("record"), switchButton("main"), switchButton("transcribe"), engineSelect());
             li.append(id, info, sw);
             return li;
           },
@@ -425,33 +549,167 @@ window.RadioControls = (() => {
             const [id, info, sw] = li.children;
             const [mk, name, num, badge] = id.children;
             const [heard, note] = info.children;
-            const confirming = st.confirm === r.tg;
+            const confirming = !r.fm && st.confirm === r.tg;
+            li.dataset.fm = r.fm ? "1" : "";
+            li.dataset.ckey = r.fm ? r.chan : `tg:${r.tg}`;
+            li.dataset.label = r.name;
             li.className = "tg-row" + (r.main ? " main" : "") + (r.encrypted ? " enc" : "") + (r.record ? "" : " norec")
-              + (r.pending ? " pending" : "") + (confirming ? " confirm" : "");
+              + (r.pending || r.cpending ? " pending" : "") + (confirming ? " confirm" : "") + (r.effective === "aws" || r.effective === "both" ? " aws" : "");
             setText(mk, r.encrypted ? "🔒" : "");
             show(mk, !!r.encrypted);
             setText(name, r.name);
-            setText(num, `TG ${r.tg}`);
+            setText(num, r.fm ? `${r.mhz} MHz${r.kind === "paging" ? " · paging" : ""}` : `TG ${r.tg}`);
             show(badge, !!r.main);
-            setText(heard, heardText(r));
-            heard.className = r.count ? "tg-heard" : "tg-heard dim";
+            setText(heard, r.fm ? (r.kind === "paging" ? "60 Control pages" : "Fireground") : heardText(r));
+            heard.className = r.fm || r.count ? "tg-heard" : "tg-heard dim";
             let t = confirming ? "Encrypted: noise only. Tap Record again to record anyway." : r.encrypted ? "Encrypted" : "";
             if (r.dropped && !confirming) t += `${t ? ", " : ""}${r.dropped} dropped`;
+            const cn = channelNote(r);
+            if (cn && !confirming) t += `${t ? ", " : ""}${cn}`;
             setText(note, t);
             note.className = "tg-note" + (confirming ? " warn" : r.encrypted ? " enc" : "");
             show(note, !!t);
-            const [recB, mainB] = sw.children;
+            const [recB, mainB, sttB, engS] = sw.children;
             setSwitch(recB, !!r.record, confirming ? "Record?" : "Record");
-            recB.title = r.record ? "Recording: calls kept and transcribed" : r.encrypted ? "Encrypted: can't be decoded" : "Not recording: calls dropped";
+            recB.title = r.record ? "Recording: transmissions kept (and transcribed if Transcribe is on)"
+              : r.fm ? "Not recording: the receiver runs (squelch, MDC IDs, Talking now), nothing is kept"
+              : r.encrypted ? "Encrypted: can't be decoded" : "Not recording: calls dropped";
             setSwitch(mainB, !!r.main, "Main");
             mainB.title = r.main ? "Main: up front in Radio, on our incident" : "Other: folded in Radio";
-            recB.disabled = mainB.disabled = lock;
+            show(mainB, !r.fm);
+            setSwitch(sttB, !!r.transcribe, "Transcribe");
+            sttB.title = r.transcribe ? "Speech-to-text on" : "Kept without a transcript";
+            if (engS.value !== r.engine) engS.value = r.engine;
+            engS.title = `Speech-to-text engine: ${r.engine}${r.effective !== r.engine && r.transcribe ? ` (running: ${r.effective})` : ""}\n${ENGINE_HELP}`;
+            const onHub = (((st.state && st.state.channels) || {}).sync || {}).state === "hub";   // set on the hub, not here
+            recB.disabled = mainB.disabled = sttB.disabled = engS.disabled = lock;
+            if (r.fm) recB.disabled = recB.disabled || onHub;
+            sttB.disabled = sttB.disabled || !r.record || onHub;
+            engS.disabled = engS.disabled || !r.record || !r.transcribe || onHub;
+            if (onHub) sttB.title = engS.title = "Set on the hub (the CAD of record) while this station forwards to it";
           },
           empty: "",
         });
       },
-      empty: rows.length ? "None" : "No talkgroup list",
+      empty: rows.length ? "None" : "No channels",
     });
+  }
+
+  // ---- the AWS custom vocabulary (GET /api/cad/stt; POST /api/cad/settings/stt) ------------------------------
+
+  function vocabCard() {
+    const n = st.n;
+    n.vocab = el("textarea", "vocab-text");
+    Object.assign(n.vocab, { rows: 8, spellcheck: false, placeholder: "One phrase a line: Engine 60, Rye Brook, King Street" });
+    n.vocab.setAttribute("aria-label", "Vocabulary phrases, one a line");
+    n.vocab.addEventListener("input", () => { st.vocabDirty = true; renderVocab(); });
+    const btn = (label, fn, title) => {
+      const b = el("button", "", label);
+      b.type = "button";
+      if (title) b.title = title;
+      b.addEventListener("click", fn);
+      return b;
+    };
+    n.vocabSave = btn("Save", saveVocab, "Save the list (it goes to AWS with Push)");
+    n.vocabSuggest = btn("Suggestions", () => { const v = st.stt && st.stt.vocabulary; if (!v) return;
+      n.vocab.value = v.suggestions.join("\n"); st.vocabDirty = true; renderVocab(); },
+    "Unit names from the boards, PCFD words and the busiest Port Chester / Rye Brook streets");
+    n.vocabPush = btn("Push to AWS", pushVocab, "Send the saved list to Amazon Transcribe (vocabulary sizeup-pcfd)");
+    n.vocabState = el("span", "small vocab-state");
+    n.vocabMsg = el("div", "dim small");
+    n.vocabSkip = el("details", "small vocab-skip");
+    n.vocabSkip.append(el("summary", "", "As sent to AWS"), el("div", "dim vocab-aws"));
+    n.limit = el("input", "vocab-limit");
+    Object.assign(n.limit, { type: "number", min: 0, max: 10000, step: 1 });
+    n.limit.setAttribute("aria-label", "Monthly AWS limit in dollars");
+    n.limitSave = btn("Save limit", saveLimit, "When this month's AWS cost reaches it, AWS channels use the local model until next month");
+    const row = el("div", "row");
+    row.append(n.vocabSave, n.vocabSuggest, n.vocabPush, n.vocabState);
+    const lim = el("div", "row");
+    lim.append(el("span", "small", "Monthly AWS limit $"), n.limit, n.limitSave);
+    return [n.vocab, row, n.vocabMsg, n.vocabSkip, lim];
+  }
+
+  async function loadStt() {
+    clearTimeout(st.sttTimer);
+    try {
+      st.stt = await api("GET", "/api/cad/stt");
+    } catch (e) {
+      st.vocabMsg = `Couldn't load the vocabulary: ${e.message}`;
+    }
+    renderVocab(true);
+    const s = st.stt && st.stt.vocabulary && st.stt.vocabulary.state;
+    if (s && s.state === "PENDING" && st.box && st.box.isConnected) st.sttTimer = setTimeout(loadStt, 5000);
+  }
+
+  function renderVocab(fresh) {
+    const n = st.n, d = st.stt;
+    if (!d || !n.vocab) return;
+    const v = d.vocabulary, lock = ro();
+    if (fresh && !st.vocabDirty) n.vocab.value = v.phrases.join("\n");
+    if (fresh && document.activeElement !== n.limit) n.limit.value = d.limit.value;
+    const s = v.state || {};
+    const when = s.updated ? ` (sent ${fmtTime(s.updated)})` : "";
+    const word = { READY: "Ready", PENDING: "Being built by AWS…", FAILED: "Failed", error: "Error", none: "Not on AWS yet" }[s.state] || s.state;
+    setText(n.vocabState, `${s.name || "sizeup-pcfd"}: ${word}${when}` + (s.state === "READY" && s.sig && s.sig !== v.sig ? " · the saved list changed: Push again" : "")
+      + (s.reason ? ` · ${s.reason}` : ""));
+    n.vocabState.className = `small vocab-state ${s.state === "READY" ? "ok" : s.state === "FAILED" || s.state === "error" ? "bad" : ""}`;
+    setText(n.vocabMsg, st.vocabMsg || `${v.phrases.length} phrases${v.edited ? "" : " (the suggestions)"}`
+      + (v.skipped.length ? `, ${v.skipped.length} can't go to AWS` : "") + (st.vocabDirty ? " · not saved" : ""));
+    const awsBox = n.vocabSkip.lastChild;
+    setText(awsBox, v.aws.join(", ") + (v.skipped.length ? `\nNot sent: ${v.skipped.map((x) => `${x.phrase} (${x.why})`).join(", ")}` : ""));
+    const enabled = d.aws && d.aws.enabled;
+    n.vocabSave.disabled = lock || st.vocabBusy || !st.vocabDirty;
+    n.vocabSuggest.disabled = lock || st.vocabBusy;
+    n.vocabPush.disabled = lock || st.vocabBusy || !enabled || st.vocabDirty;
+    n.vocabPush.title = !enabled ? "Amazon Transcribe runs on the hub: push from there" : st.vocabDirty ? "Save the list first" : "Send the saved list to Amazon Transcribe";
+    n.vocab.disabled = n.limit.disabled = n.limitSave.disabled = lock;
+  }
+
+  async function saveVocab() {
+    if (ro()) return;
+    st.vocabBusy = true;
+    st.vocabMsg = "";
+    renderVocab();
+    const phrases = st.n.vocab.value.split("\n").map((x) => x.trim()).filter(Boolean);
+    try {
+      await api("POST", "/api/cad/settings/stt", { action: "set", key: "vocabulary", value: phrases,
+                                                   operator: typeof operator === "function" ? operator() : "" });
+      st.vocabDirty = false;
+    } catch (e) {
+      st.vocabMsg = `Not saved: ${e.message}`;
+    }
+    st.vocabBusy = false;
+    loadStt();
+  }
+
+  async function pushVocab() {
+    if (ro()) return;
+    st.vocabBusy = true;
+    st.vocabMsg = "Sending to AWS…";
+    renderVocab();
+    try {
+      const r = await api("POST", "/api/cad/settings/stt", { action: "push", operator: typeof operator === "function" ? operator() : "" });
+      st.vocabMsg = r.ok ? "" : `AWS: ${r.error || "refused"}`;
+    } catch (e) {
+      st.vocabMsg = `Not sent: ${e.message}`;
+    }
+    st.vocabBusy = false;
+    loadStt();
+  }
+
+  async function saveLimit() {
+    if (ro()) return;
+    const v = Number(st.n.limit.value);
+    try {
+      await api("POST", "/api/cad/settings/stt", { action: "set", key: "aws_monthly_limit_usd", value: v,
+                                                   operator: typeof operator === "function" ? operator() : "" });
+      st.vocabMsg = "";
+    } catch (e) {
+      st.vocabMsg = `Limit not saved: ${e.message}`;
+    }
+    loadStt();
+    poll();
   }
 
   return { mount };

@@ -33,7 +33,7 @@ window.CadFeed = (() => {
   }
   const hhmmss = (unix) => st.deps.time(unix);
   const who = (t) => t.rig || t.talker || t.radio_id || "radio";
-  const said = (t) => t.text || (t.status === "no_speech" ? "Key-up, no speech" : t.status === "pending" ? "Transcribing" : "—");
+  const said = (t) => t.text || (typeof sttSaid === "function" ? sttSaid(t) : "—");
   const openEvent = () => {
     const inc = st.deps.selected();
     return inc && !["closed", "dismissed"].includes(inc.status) ? inc : null;

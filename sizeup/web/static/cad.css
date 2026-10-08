@@ -372,3 +372,8 @@ html.board .ov-mapbox { height: calc(100vh - var(--hdr-h) - 5.5em); }
   html.board .ov-grid { grid-template-columns: minmax(0, 1fr); }
   html.board .ov-mapbox { height: 50vh; }
 }
+
+/* Amazon Transcribe's text and the local model's next to it ("both": Settings > Radios > Engine) */
+.chip.stt-aws { font-size: 0.72em; color: var(--info); border-color: color-mix(in srgb, var(--info) 50%, transparent); }
+.alt-txt { margin-top: 0.15em; padding-left: 0.6em; border-left: 2px solid var(--line-strong); font-size: 0.92em; }
+.alt-tog.active { color: var(--accent); }

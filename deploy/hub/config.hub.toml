@@ -49,6 +49,15 @@ capture_dir = ""                   # no trunk-recorder here: the station sends i
 talkgroups_file = "../trunk-recorder/talkgroups.csv"   # names for the talkgroups the station reports
 incident_talkgroups = [307, 333]
 
+[stt]
+# Amazon Transcribe streaming for the channels set to AWS in Settings > Radios (sizeup/transcribe.py).
+# Credentials: the task role (sizeup-aws/12-transcribe.sh adds transcribe:StartStreamTranscription*
+# and the sizeup-* vocabularies); region: the task's AWS_REGION. No whisper here: the station runs it.
+aws = true
+aws_channels = ["South 2", "FG1", 307]   # South 2 paging, FG1, Fire/EMS 15 default to AWS
+aws_monthly_limit_usd = 25               # Settings > Radios can change it; reached: whisper on the station
+aws_idle_s = 120
+
 [storage]
 keep_hours = 24                    # pages, monitor incidents, transcripts (the CAD keeps its own records)
 audio_keep_hours = 12              # received clips

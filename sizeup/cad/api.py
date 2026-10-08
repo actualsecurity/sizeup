@@ -38,9 +38,15 @@ GET  /api/cad/settings/export             every setting as one JSON file (edits,
 GET  /api/cad/settings/audit?section=     every Settings change (who, section, key, old -> new), newest first
 POST /api/cad/settings/<section>          {action, ..., operator?}: event_types | event_subtypes | dispositions |
                                           received_via | unit_statuses | event_class | type_subtypes | geo_town_order | units |
-                                          dispatch | users | runcards | import (dry_run / apply);
+                                          dispatch | users | runcards | import (dry_run / apply) |
                                           dispatch {action: "voice_preview"} -> {text, audio_url, audio_note}:
                                           a sample said by the voice set now (the same render as a dispatch)
+                                          channels {action: set | set_many | reset, key ("FG1", "tg:307") | keys,
+                                          record?, transcribe?, engine?: local | aws | both} (Settings > Radios) |
+                                          stt {action: set | reset, key: vocabulary | aws_monthly_limit_usd, value}
+                                          | {action: push}: the vocabulary to Amazon Transcribe (sizeup/channels.py)
+GET  /api/cad/stt                         Settings > Radios > Vocabulary: {vocabulary: {phrases, edited, suggestions,
+                                          aws (as sent), skipped, sig, state}, limit, aws (where it runs, this month's cost)}
 GET  /api/cad/export/<name>.csv           incidents | calls | unit-history | event-log, the sheet's columns
 GET  /api/cad/dispatch/<id>.wav           a logged dispatch's audio
 GET  /api/cad/audio/<key>.wav             a preview's audio
@@ -114,6 +120,8 @@ WRITES = (
     (PREALERT, "dispatch"),                                                 # a phone pre-alert that is nothing
     (re.compile(r"/api/incident/[^/]{1,80}/close"), "dispatch"),            # the monitor's incident list (server.py)
     (UNIT_STATION, "admin"),                                                # a unit's home station: Settings > Units
+    (re.compile(r"/api/cad/settings/(?:channels|stt)"), "admin"),           # Settings > Radios: record / transcribe /
+                                                                            # engine per channel, the AWS vocabulary + limit
     (SETTINGS, "admin"),                                                    # lists, units, dispatch, users, import ...
     (re.compile(r"/api/cad/runcards(?:/delete)?"), "admin"),
     (re.compile(r"/api/cad/radios(?:/delete)?"), "admin"),                 # the radio-ID registry
@@ -214,6 +222,27 @@ def _settings(m, b, o, c):
     return f"Changed settings: {sec}{f'/{_clip(key, 40)}' if key else ''} {act}".rstrip(), ""
 
 
+def _channels(m, b, o, c):
+    act = str(b.get("action") or "")
+    what = ", ".join(f"{k} {'on' if b[k] else 'off'}" if isinstance(b[k], bool) else f"{k} {b[k]}"
+                     for k in ("record", "transcribe", "engine") if b.get(k) is not None)
+    if act == "reset":
+        return f"Channel {_clip(b.get('key'), 30)}: back to the default", ""
+    if act == "set_many":
+        return f"Channels ({len(b.get('keys') or [])}): {what or 'no change'}", ""
+    return f"Channel {_clip(b.get('key'), 30)}: {what or 'no change'}", ""
+
+
+def _stt(m, b, o, c):
+    act, key = str(b.get("action") or ""), str(b.get("key") or "")
+    if act == "push":
+        return "Pushed the speech-to-text vocabulary to Amazon Transcribe", ""
+    if key == "vocabulary":
+        return ("Changed the speech-to-text vocabulary" + (f" ({len(b['value'])} phrases)" if isinstance(b.get("value"), list)
+                                                           else " (back to the default)")), ""
+    return f"Changed the AWS monthly limit: {b.get('value') if act == 'set' else 'default'}", ""
+
+
 def _prealert_at(o) -> str:
     from sizeup.prealert import _hms
     return _hms(o.get("at")) or "?"
@@ -230,6 +259,8 @@ DOES = (
     (PREALERT, lambda m, b, o, c: (f"Dismissed the phone pre-alert of {_prealert_at(o)}"
                                    + (f": {_clip(b.get('reason'))}" if b.get("reason") else ""), "")),
     (UNIT_STATION, lambda m, b, o, c: (f"Changed settings: {o.get('name', '')} station {_clip(b.get('station'), 40) or 'unset'}", "")),
+    (re.compile(r"/api/cad/settings/channels"), _channels),
+    (re.compile(r"/api/cad/settings/stt"), _stt),
     (SETTINGS, _settings),
     (re.compile(r"/api/cad/runcards"), lambda m, b, o, c: (f"Changed settings: run card {_clip(b.get('type'), 50)} saved", "")),
     (re.compile(r"/api/cad/runcards/delete"), lambda m, b, o, c: (f"Changed settings: run card {_clip(b.get('type'), 50)} deleted", "")),
@@ -358,6 +389,8 @@ class CadApi:
                 return _json(200, self.cad.settings_export())
             if path == "/api/cad/settings/audit":
                 return _json(200, self.cad.settings_audit_log(parse_qs(query)))
+            if path == "/api/cad/stt":
+                return _json(200, self.cad.settings.stt_page())
             if path == "/api/cad/state":
                 return _json(200, self.cad.state())
             if path == "/api/cad/runcards":

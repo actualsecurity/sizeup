@@ -216,7 +216,7 @@ class IncidentStore:
         return inc
 
     def retext(self, tid: str, text: str, status: str, confidence: float | None = None,
-               model: str = "", at: float | None = None) -> bool:
+               model: str = "", at: float | None = None, alt: dict | None = None) -> bool:
         """A re-run of speech-to-text for one transmission or page: new text in place, the old text
         kept in `history` (newest last, up to 5) so it can be compared."""
         at = self.clock() if at is None else at
@@ -226,13 +226,15 @@ class IncidentStore:
                 if t.id != tid:
                     continue
                 hit = True
-                if t.text != text:
+                if t.text != text and (t.text or t.status not in ("pending", "remote")):   # (not a first text)
                     hist = list(getattr(t, "history", None) or [])
                     # "model" = the model that wrote the text being replaced ("" = not recorded)
                     hist.append({"text": t.text, "at": at, "model": getattr(t, "model", "") or ""})
                     t.history = hist[-5:]  # type: ignore[attr-defined]
                 t.text, t.status, t.model = text, status, model  # type: ignore[attr-defined]
                 t.confidence, t.rerun_at = confidence, at  # type: ignore[attr-defined]
+                if alt is not None:     # the other engine's text, to compare ("both")
+                    t.alt_text, t.alt_model = str(alt.get("text") or ""), str(alt.get("model") or "")  # type: ignore[attr-defined]
             for inc in self.incidents:
                 for k, pid in enumerate(inc.pages):
                     if pid == tid and k < len(inc.page_text):

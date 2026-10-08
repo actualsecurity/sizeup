@@ -56,6 +56,18 @@ threads = 8
 beam_size = 0                      # whisper beam search width (0 = greedy). 5 = fewer garbled digit strings, ~10% slower
 prompt = ""                        # optional vocabulary hint (can make the model insert words: off by default)
 talker_prompt = "off"              # "ids": hint each call with who keyed up ("77 Alpha 4, 60 Control"); "ids+time": also its HHMM
+# Amazon Transcribe streaming (docs/cloud.md "Speech-to-text per channel"). It runs on the hub
+# (deploy/hub/config.hub.toml: aws = true); a station forwarding to the hub needs nothing here.
+# All-in-one with AWS credentials in the environment could set aws = true too.
+# aws = false
+# aws_region = ""                  # "" = AWS_REGION / AWS_DEFAULT_REGION, else us-east-1
+# aws_channels = ["South 2", "FG1", 307]   # engine "aws" by default; Settings > Radios changes any channel
+# aws_monthly_limit_usd = 25       # until Settings > Radios sets one; reached: AWS channels use whisper
+# aws_idle_s = 120                 # a channel's stream ends this long after its last transmission
+# aws_pace = 2.0                   # audio sent this many times faster than real time
+# aws_vocabulary = "sizeup-pcfd"   # the custom vocabulary (Settings > Radios > Vocabulary, Push)
+# aws_endpoint = ""                # tests / dev only: a local fake (ws://127.0.0.1:9431)
+# aws_api_endpoint = ""            # tests / dev only: a local fake of the JSON API (http://127.0.0.1:9432)
 
 [p25]
 # trunk-recorder capture directory (Westchester County P25, South simulcast site). Empty = no P25.

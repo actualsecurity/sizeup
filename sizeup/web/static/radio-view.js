@@ -237,7 +237,7 @@ window.RadioView = (() => {
     meta.append(acts);
     return li;
   }
-  const rowSig = (t) => JSON.stringify([t.text, t.status, t.rig, t.has_audio, (t.events || []).map((e) => e.id), st.pick === t.id,
+  const rowSig = (t) => JSON.stringify([t.text, t.status, t.model, t.alt_text, t.alt_model, t.rig, t.has_audio, (t.events || []).map((e) => e.id), st.pick === t.id,
                                        st.linking.has(t.id), talkSig(t.rig), openEvents().length]);
   const fillRow = (li, t) => {
     const n = row(t);
