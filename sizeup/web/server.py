@@ -152,7 +152,8 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
-            self.wfile.write(body)
+            if self.command != "HEAD":
+                self.wfile.write(body)
 
         def _redirect(self, where: str) -> None:
             self.send_response(302)
@@ -202,6 +203,10 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
             except ValueError:
                 return None
             return self.rfile.read(n) if 0 <= n <= limit else None
+
+        # HEAD: what GET would answer, without the body. Netskope's browser isolation checks a page
+        # with HEAD before loading it; it got 501 here (ECC workstation, 2026-10-08).
+        do_HEAD = do_GET
 
         def do_POST(self) -> None:
             path = urlsplit(self.path).path
@@ -277,6 +282,8 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
             self.send_header("Connection", "close")
             self.end_headers()
             self.close_connection = True
+            if self.command == "HEAD":
+                return
             seq, payload = b.latest()
             try:
                 # Reconnect after 2 s; and 2 KB of comment so proxies that hold a response until they

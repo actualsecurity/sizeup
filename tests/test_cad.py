@@ -1060,6 +1060,9 @@ def test_api_event_lifecycle(server):
         assert False, "/ should redirect"
     except urllib.error.HTTPError as e:
         assert e.code == 302 and e.headers["Location"] == "/cad"          # the CAD is the front page
+    for path, ctype in (("/cad", "text/html"), ("/static/cad.js", "text/javascript"), ("/api/cad/stream", "text/event-stream")):
+        with urllib.request.urlopen(urllib.request.Request(server.base + path, method="HEAD"), timeout=5) as r:
+            assert r.status == 200 and r.headers["Content-Type"].startswith(ctype) and r.read() == b""   # Netskope checks with HEAD
     code, page, _ = server.call("GET", "/monitor")
     assert code == 200 and b"app.js" in page                              # the monitor moved here
     code, page, ctype = server.call("GET", "/cad")
