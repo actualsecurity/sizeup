@@ -237,8 +237,20 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
       </div>
 
       <div class="card">
-        <div class="card-head"><h2>Assigned</h2></div>
+        <div class="card-head"><h2>Assigned</h2><span id="d-cmd" class="dim small"></span><span class="spacer"></span>
+          <button id="o-open" type="button" class="sm" hidden title="A unit nobody dispatched: heard responding, or on location. Nothing said on the air."><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-plus"/></svg>Add unit</button></div>
         <ol id="d-units" class="list on-units"></ol>
+        <!-- a unit that wasn't dispatched: on the event as Responding or On location (POST attach {status}) -->
+        <form id="o-form" class="row add-unit" hidden autocomplete="off">
+          <div class="note-box">
+            <input id="o-unit" type="text" maxlength="20" placeholder="Unit (2395, E63)" spellcheck="false" autocapitalize="characters"
+                   role="combobox" aria-label="Unit" aria-autocomplete="list" aria-controls="o-sugg" aria-expanded="false">
+            <ol id="o-sugg" class="sugg note-sugg" role="listbox" hidden></ol>
+          </div>
+          <span id="o-status" class="row"></span>
+          <button id="o-cancel" type="button">Cancel</button>
+        </form>
+        <div id="o-error" class="error"></div>
       </div>
 
       <!-- non-emergency: units attached, no run card, no dispatch; any event: other agencies (EMS, PD) that show up -->

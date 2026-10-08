@@ -69,6 +69,7 @@ RESPONSES = ("fire", "mutual_aid", "agency")
 HOME_DEPARTMENT = "Port Chester FD"     # whose apparatus a run card's full-department slot ({"all": ...}) calls
 ANY_KIND = "any"                        # a run-card kind slot that takes any apparatus ("1 × any")
 ANY_SKIPS = ("chief",)                  # ...but not a chief officer's car (those are named on a card)
+COMMAND = "IC"                          # Incident command: one unit per event
 LIST_SECTIONS = ("event_types", "event_subtypes", "dispositions", "received_via", "unit_statuses")
 
 
@@ -235,6 +236,12 @@ class Lists:
     def free(self) -> tuple[str, ...]:
         return tuple(s["code"] for s in self.unit_statuses if s.get("role") == "free" and not s.get("retired"))
 
+    @property
+    def command_status(self) -> str:
+        """Incident command (COMMAND): one unit per event holds it (user, 2026-10-08: "there also can only be
+        one inc commander"); '' when the list has no such status."""
+        return COMMAND if COMMAND in self.status_ids else ""
+
     def agency_statuses(self) -> tuple[str, ...]:
         """Another agency's unit on an event (EMS, PD): on location, then cleared (the free status)."""
         return tuple(self.status_for(r) for r in ("onscene", "free") if any(
@@ -366,7 +373,7 @@ class Lists:
                 "dispositions": [dict(x) for x in self.dispositions],
                 "received_via": [dict(x) for x in self.received_via], "event_class": self.event_class,
                 "unit_statuses": [dict(s) for s in self.unit_statuses], "event_statuses": self.event_statuses,
-                "agency_statuses": list(self.agency_statuses()),
+                "agency_statuses": list(self.agency_statuses()), "command_status": self.command_status,
                 "unit_event_cell": self.unit_event_cell, "unit_kinds": [dict(k) for k in self.unit_kinds],
                 "unit_boards": [dict(b, units=list(b["units"])) for b in self.unit_boards],
                 "spoken": self.spoken, "geo_town_order": list(self.geo_town_order),

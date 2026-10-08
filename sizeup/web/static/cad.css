@@ -173,6 +173,7 @@
   .ek.status { color: var(--warn); }
   .events .txt .play { margin-inline-end: var(--s-2); }
   .note { margin-block-start: var(--s-3); flex-wrap: wrap; }
+  /* a field with its pick list under it: the note's @-tags, Assigned > Add unit */
   .note-box { position: relative; flex: 1 1 18rem; min-inline-size: 0; display: flex; }
   .note-box input { flex: 1; min-inline-size: 0; }
   .note-sugg { position: absolute; inset-inline: 0; inset-block-start: 100%; margin-block-start: var(--s-1); z-index: var(--z-popover); }

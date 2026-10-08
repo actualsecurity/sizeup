@@ -733,11 +733,16 @@ class Cad:
         return self._send(iid, text, units, operator, channel, "upgrade", moved, remarks, plan)
 
     def attach(self, iid: int, body: dict) -> dict:
-        """Units on an event with no dispatch (a non-emergency event: a hydrant, a closure)."""
+        """Units on an event with no dispatch (a non-emergency event: a hydrant, a closure).
+        status (RS, OL...: Assigned > Add unit): a unit heard on the air responding, or showing up,
+        that nobody toned out (user, 2026-10-08: "we need to 'add someone responding' even if they
+        were not on the original dispatch"). Any open event, emergency too; nothing is said on the air."""
         inc = self.store.incident(iid)
         if inc["status"] not in ("pending", "active"):
             raise CadError("Accept first" if inc["status"] == "queued" else f"event is {inc['status']}")
         units = self._units_for(body, dispatching=False)
+        if body.get("status") is not None:
+            return self._add_responding(iid, units, body)
         op = _text(body, "operator", OPERATOR_MAX)
         ours = [u["id"] for u in units if u["response"] != "agency"]
         agency = [u["id"] for u in units if u["response"] == "agency"]
@@ -748,6 +753,24 @@ class Cad:
             for i in agency:
                 self.store.set_unit_status(i, onscene, op)
         return {"ok": True, "moved": moved}
+
+    def _add_responding(self, iid: int, units: list[dict], body: dict) -> dict:
+        """attach with a status: on the event in that status, no dispatch logged, no Disp time. A unit
+        already on this event is refused; one on another call is moved, as a dispatch moves it."""
+        L = self.lists
+        status = _text(body, "status", 40)
+        ok = self.store.return_statuses()
+        if status not in ok:
+            raise CadError("status: " + " or ".join(f"{c} ({L.name('unit_statuses', c)})" for c in ok))
+        op = _text(body, "operator", OPERATOR_MAX, required=True)
+        here = [u["name"] for u in units if u["incident_id"] == iid]
+        if here:
+            raise CadError(f"Already on this event: {', '.join(here)}")
+        agency = [u["name"] for u in units if u["response"] == "agency" and status not in L.agency_statuses()]
+        if agency:
+            raise CadError(f"Another agency's unit, only on location: {', '.join(agency)}")
+        moved = self.store.assign(iid, [u["id"] for u in units], op, status=status)
+        return {"ok": True, "moved": moved, "status": status}
 
     def _prune_audio(self) -> None:
         """Previews nobody dispatched are dropped after a day; dispatch audio is kept with the log."""
