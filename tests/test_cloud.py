@@ -518,3 +518,27 @@ def test_all_in_one_is_unchanged(tmp_path, monkeypatch):
         assert call(url + "/healthz", token=None)[1]["role"] == "all-in-one"
     finally:
         server.shutdown()
+
+
+def test_hub_logs_each_request_but_not_the_routine_ones():
+    # ECC workstation 2026-10-08: the CAD arrived without its CSS and scripts behind browser
+    # isolation, and the hub had no record of what was fetched. The hub now logs one line per request.
+    import threading
+    import urllib.request
+    from sizeup.web.server import WebServer
+    lines = []
+    ws = WebServer("127.0.0.1", 0, {}, lambda: {"time": 0}, lambda cid: None, lambda iid: False,
+                   access_log=lines.append)
+    threading.Thread(target=ws.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{ws.httpd.server_address[1]}"
+    try:
+        for path in ("/healthz", "/api/state", "/static/app.js", "/static/nope.css"):
+            req = urllib.request.Request(base + path, headers={"Cf-Connecting-Ip": "203.0.113.9", "User-Agent": "probe"})
+            try:
+                urllib.request.urlopen(req, timeout=5).read()
+            except urllib.error.HTTPError:
+                pass
+    finally:
+        ws.shutdown()
+    assert [ln.split()[1:4] for ln in lines] == [["GET", "/static/app.js", "200"], ["GET", "/static/nope.css", "404"]]
+    assert "ip=203.0.113.9" in lines[0] and "no-token" in lines[0] and "ua=probe" in lines[0]

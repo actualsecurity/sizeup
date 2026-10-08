@@ -1114,7 +1114,8 @@ def make_server(app: App) -> WebServer:
     cfg = app.cfg
     server = WebServer(cfg.host, cfg.port, app.scene(), app.state, app.clip, app.close_incident, app.set_mode,
                        app.set_talkgroup, app.set_talkgroup_group, app.retranscribe, cad=CadApi(app.cad),
-                       station=getattr(app, "hub", None), health=health_info(cfg), access=access_verifier(cfg))
+                       station=getattr(app, "hub", None), health=health_info(cfg), access=access_verifier(cfg),
+                       access_log=log if cfg.cloud_role == "hub" else None)
     pokes = [server.poke] + ([app.link.live_changed] if app.link is not None else [])
     app.live.on_change = lambda: [f() for f in pokes]   # a new talker is pushed at once, not on the next second
     return server

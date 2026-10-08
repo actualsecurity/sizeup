@@ -98,7 +98,7 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                  set_talkgroup: Callable[..., str | None] | None = None,
                  set_talkgroup_group: Callable[..., str | None] | None = None, retranscribe=None,
                  cad=None, cad_b: Broadcaster | None = None, station=None, health: bytes = b'{"ok":true}',
-                 access=None):
+                 access=None, access_log: Callable[[str], None] | None = None):
     """cad: a CadApi (sizeup/cad/api.py) and cad_b its own broadcaster (the console's state is
     small and separate from the monitor's, so neither page carries the other's). station: the hub's
     ingest (sizeup/cloud/hub.py Hub), which checks the station's token before reading any body.
@@ -110,6 +110,22 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
 
         def log_message(self, *a) -> None:
             pass
+
+        def log_request(self, code="-", size="-") -> None:
+            """access_log (the hub): one line per request, so what a browser behind someone else's
+            proxy actually fetched can be seen (ECC workstation, 2026-10-08: the page arrived without
+            its CSS and scripts). Routine traffic is left out: health checks, the 2 s state polls and
+            the station's own posts when they succeed."""
+            if access_log is None:
+                return
+            path, code = urlsplit(self.path).path, int(code) if str(code).isdigit() else 0
+            if path == "/healthz" or (code < 400 and (path in ("/api/state", "/api/cad/state", "/api/cad/whoami")
+                                                      or path.startswith("/api/station/"))):
+                return
+            h = self.headers
+            who = getattr(self.who, "email", None) or ("token" if h.get("Cf-Access-Jwt-Assertion") else "no-token")
+            access_log(f"http {self.command} {path} {code} ip={h.get('Cf-Connecting-Ip', '-')} {who} "
+                       f"ray={h.get('Cf-Ray', '-')} ua={(h.get('User-Agent') or '-')[:90]}")
 
         def _admit(self, path: str) -> bool:
             """access set: a person with a verified token, else a 401 (and False). /healthz (the
@@ -287,14 +303,14 @@ class WebServer:
                  set_talkgroup: Callable[..., str | None] | None = None,
                  set_talkgroup_group: Callable[..., str | None] | None = None,
                  retranscribe: Callable[[list[str] | None], int] | None = None, cad=None, station=None,
-                 health: dict | None = None, access=None):
+                 health: dict | None = None, access=None, access_log: Callable[[str], None] | None = None):
         self.access = access
         self.broadcaster = Broadcaster(state_fn)
         self.cad_broadcaster = Broadcaster(cad.cad.state) if cad is not None else None
         self.httpd = ThreadingHTTPServer((host, port), make_handler(
             json.dumps(scene, separators=(",", ":")).encode(), self.broadcaster, clip, close_incident, set_mode,
             set_talkgroup, set_talkgroup_group, retranscribe, cad, self.cad_broadcaster, station,
-            json.dumps(health or {"ok": True}, separators=(",", ":")).encode(), access))
+            json.dumps(health or {"ok": True}, separators=(",", ":")).encode(), access, access_log))
         self.httpd.daemon_threads = True
 
     @property
