@@ -1,8 +1,9 @@
 """Run cards: event type -> the units to send, in order.
 
 A card is keyed by a TYPE ("STRU") or a TYPE/SUBTYPE ("ALARM/COMM"); for an event the
-subtype-specific card wins over the type-only one. A slot is either a kind with a count
-({"kind": "engine", "count": 3}; "ladder|tower" takes either) or one named unit ({"unit": "2398"}).
+subtype-specific card wins over the type-only one. A slot is a kind with a count
+({"kind": "engine", "count": 3}; "ladder|tower" takes either; "any" takes any apparatus but a chief
+officer's car), one named unit ({"unit": "2398"}) or the full department ({"all": "Port Chester FD"}).
 The recommendation walks the slots in order and takes the next free unit for each: board order,
 regular apparatus before spares, skipping units that can't be dispatched, are committed, or are
 already on this event. A unit named on the card is kept for its own slot (a kind slot doesn't
@@ -13,6 +14,15 @@ and first when the event is in their town (their call). A slot it can't fill is 
 ("no ladder/tower available"), never filled with something else. Other agencies' units (EMS, PD,
 utilities: response "agency") are never on a card, by kind or by name: they are attached to an
 event when they show up.
+
+Full department (user, 2026-10-08: "in the run cards we need full department response to be an option for
+PCFD units"): {"all": "Port Chester FD"}, at most one per card, takes every free PCFD apparatus on the boards
+that no earlier slot took, in the same order as a kind slot (regular before spares; board order or nearest
+first). PCFD apparatus is what "All PCFD" on the dispatch box ticks (Lists.department_apparatus): fire units
+of the full_response_kinds, not Rye Brook's (joint), not mutual aid, never EMS, PD or an agency, never a
+code-only unit. A unit named on the card is left for its own slot. The recommendation says "full" and the
+console ticks "Full department response", so the dispatch says that instead of each unit.
+Stored as kind "all" with the department in the unit column (no schema change).
 
 Nearest first (user, 2026-10-07: "can we use the location information of where these apparatus are
 normally to recommend certain ones based on proximity to the next call?"): given where each rig is
@@ -32,10 +42,11 @@ works on day one, NOT PCFD policy: the page says so until each card has been edi
 from __future__ import annotations
 
 from sizeup.cad import eta
-from sizeup.cad.lists import key
+from sizeup.cad.lists import ANY_KIND, key
 from sizeup.cad.store import CadError, Store
 
 MAX_SLOTS, MAX_COUNT = 20, 10
+ALL = "all"          # the full-department slot's key, and its kind in run_card_slots
 
 
 def seed(store: Store, fill: bool = False) -> int:
@@ -59,8 +70,17 @@ def seed(store: Store, fill: bool = False) -> int:
 def _write_slots(db, cid: int, slots: list[dict]) -> None:
     db.execute("DELETE FROM run_card_slots WHERE card_id = ?", (cid,))
     for pos, s in enumerate(slots):
-        db.execute("INSERT INTO run_card_slots (card_id, pos, kind, count, unit) VALUES (?, ?, ?, ?, ?)",
-                   (cid, pos, s.get("kind", ""), int(s.get("count", 1)), s.get("unit", "")))
+        row = (ALL, 1, s[ALL]) if s.get(ALL) else (s.get("kind", ""), int(s.get("count", 1)), s.get("unit", ""))
+        db.execute("INSERT INTO run_card_slots (card_id, pos, kind, count, unit) VALUES (?, ?, ?, ?, ?)", (cid, pos, *row))
+
+
+def normal(s: dict) -> dict:
+    """A slot as cards() gives it (and the settings file holds it): {"all"}, {"unit"} or {"kind", "count"}."""
+    if s.get(ALL):
+        return {ALL: s[ALL]}
+    if s.get("unit"):
+        return {"unit": s["unit"]}
+    return {"kind": s["kind"], "count": int(s.get("count", 1))}
 
 
 def cards(store: Store) -> list[dict]:
@@ -72,8 +92,7 @@ def cards(store: Store) -> list[dict]:
         typ, _, sub = c["type"].partition("/")
         c["label"] = L.type_label(typ, sub)
         c["phrase"] = c["spoken"] or L.phrase(typ, sub)      # what the dispatch will say
-        c["slots"] = [({"unit": s["unit"]} if s["unit"] else {"kind": s["kind"], "count": s["count"]})
-                      for s in slots if s["card_id"] == c["id"]]
+        c["slots"] = [normal({ALL: s["unit"]} if s["kind"] == ALL else s) for s in slots if s["card_id"] == c["id"]]
     return out
 
 
@@ -97,6 +116,13 @@ def validate_slots(store: Store, slots) -> list[dict]:
     for i, s in enumerate(slots):
         if not isinstance(s, dict):
             raise CadError(f"slots[{i}]: an object")
+        if ALL in s:
+            if s[ALL] not in L.departments:
+                raise CadError(f"slots[{i}].all: {' or '.join(L.departments)}")
+            if any(ALL in x for x in out):
+                raise CadError("one full department per card")
+            out.append({ALL: s[ALL]})
+            continue
         if s.get("unit"):
             if str(s["unit"]) not in by_name:
                 raise CadError(f"slots[{i}]: no unit {s['unit']!r}")
@@ -106,8 +132,8 @@ def validate_slots(store: Store, slots) -> list[dict]:
             out.append({"unit": str(s["unit"])})
             continue
         ks = str(s.get("kind", "")).split("|")
-        if not all(k in kinds for k in ks):
-            raise CadError(f"slots[{i}].kind: one or more of {', '.join(kinds)} joined by | "
+        if ks != [ANY_KIND] and not all(k in kinds for k in ks):
+            raise CadError(f"slots[{i}].kind: {ANY_KIND}, or one or more of {', '.join(kinds)} joined by | "
                            "(EMS, PD and agencies are never on a run card; code-only units and mutual-aid "
                            "requests only by name)")
         try:
@@ -201,9 +227,16 @@ def delete(store: Store, k: str) -> None:
 
 
 def describe(slot: dict) -> str:
+    if slot.get(ALL):
+        return "full department"
     if slot.get("unit"):
         return slot["unit"]
     return f"{slot['count']} × {slot['kind'].replace('|', '/')}"
+
+
+def _kinds_text(slot: dict) -> str:
+    """For "no ... available": 'ladder/tower', 'apparatus' (an any slot)."""
+    return "apparatus" if slot["kind"] == ANY_KIND else slot["kind"].replace("|", "/")
 
 
 def estimates(units: list[dict], where: dict | None, inc: dict | None, params: eta.Params | None = None) -> dict[int, dict]:
@@ -228,7 +261,8 @@ def recommend(store: Store, typ: str, subtype: str = "", incident_id: int | None
               where: dict | None = None, params: eta.Params | None = None) -> dict:
     """{"units": [unit + "slot", "eta_s", "eta", "reason"], "unfilled": ["no ladder/tower available"],
     "card": key or None, "order": {by: nearest|card, note}, "others": {unit id: estimate} (the other free
-    units with an estimate: hints for adding one by hand)}.
+    units with an estimate: hints for adding one by hand), "full": the department a full-department slot
+    calls ('' = none: the console ticks "Full department response" for it)}.
     Units already on this event count toward their slots (a second alarm adds, it doesn't repeat).
     No card for the type: no units and a note, never an error (the operator adds units by hand).
     where: unit code -> mapview.locate() (None: nobody's place is known: board order);
@@ -250,7 +284,8 @@ def recommend(store: Store, typ: str, subtype: str = "", incident_id: int | None
     if c is None:
         what = L.type_label(typ, subtype) or "this event"
         return {"card": None, "card_label": "", "units": [], "unfilled": [], "already": [u["name"] for u in on_here],
-                "note": f"No run card for {what}: add units by hand", "joint_call": "", "order": order, "others": others}
+                "note": f"No run card for {what}: add units by hand", "joint_call": "", "order": order, "others": others,
+                "full": ""}
     town = L.joint_call(inc) if inc is not None else ""
 
     def rank(u: dict) -> int:          # the event's joint town's units, then PCFD's, then other joint units
@@ -264,12 +299,24 @@ def recommend(store: Store, typ: str, subtype: str = "", incident_id: int | None
     named = {s["unit"] for s in c["slots"] if s.get("unit")}
     taken: set[int] = set()
     picks, unfilled = [], []
+
+    def ours(u: dict) -> bool:         # the full department's: PCFD apparatus on the boards, not named on the card
+        return L.department_apparatus(u) and u["name"] not in named and bool(u["board"])
     for slot in c["slots"]:
+        if slot.get(ALL):                              # every free one of the department's apparatus left
+            there = [u for u in on_here if ours(u)]
+            taken.update(u["id"] for u in there)
+            got = [u for u in free if u["id"] not in taken and ours(u)]
+            taken.update(u["id"] for u in got)
+            picks += [dict(u, slot=describe(slot), **est[u["id"]]) for u in got]
+            if not got and not there:
+                unfilled.append(f"no {slot[ALL]} apparatus available")
+            continue
         if slot.get("unit"):
             want = [u for u in units if u["name"] == slot["unit"]]
             need, match = 1, (lambda u, n=slot["unit"]: u["name"] == n)
         else:
-            kinds = slot["kind"].split("|")
+            kinds = L.any_kinds if slot["kind"] == ANY_KIND else slot["kind"].split("|")
             need, match = slot["count"], (lambda u, ks=kinds: u["kind"] in ks and u["response"] == "fire"
                                           and u["name"] not in named)
             want = None
@@ -290,11 +337,12 @@ def recommend(store: Store, typ: str, subtype: str = "", incident_id: int | None
                     L.name("unit_statuses", u["status"]).lower())
                 unfilled.append(f"{slot['unit']} not available ({why})")
             else:
-                unfilled.append(f"no {slot['kind'].replace('|', '/')} available" if need == slot["count"]
-                                else f"only {slot['count'] - need} of {slot['count']} {slot['kind'].replace('|', '/')} available")
+                unfilled.append(f"no {_kinds_text(slot)} available" if need == slot["count"]
+                                else f"only {slot['count'] - need} of {slot['count']} {_kinds_text(slot)} available")
     return {"card": c["type"], "card_label": c["label"], "units": picks, "unfilled": unfilled,
             "already": [u["name"] for u in on_here], "note": "", "joint_call": town, "order": order,
-            "others": {k: v for k, v in others.items() if k not in taken}}
+            "others": {k: v for k, v in others.items() if k not in taken},
+            "full": next((s[ALL] for s in c["slots"] if s.get(ALL)), "")}
 
 
 def from_page(incident_type: str, category: str, text: str) -> tuple[str, str, str]:
