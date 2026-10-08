@@ -13,6 +13,28 @@ same code and the same entry point (`python -m sizeup --config ...`), chosen by 
 
 No `[cloud]` section = today's all-in-one, unchanged.
 
+**Station on / off from the UI** (user, 2026-10-08: "how do we turn on and off station mode
+though? id like that to be easy to do from the ui"): on any machine that isn't the hub,
+**Settings → System → Station** has a *Forward to hub* switch, the hub URL, the link's status, where
+each secret came from and *Test connection* (`sizeup/cloud/stationmode.py`). Switching starts or
+stops only the link (forwarder, state, job long poll) and the station-only parts (the "CAD of
+record is the hub" banner, the Hub row and pill): radios, speech-to-text and the voice keep
+running. Off keeps the outbox: what was queued goes up first when it's back on; what is heard while
+off is not queued (all-in-one). The choice is kept in `state/cloud.json` and from the first change
+wins over `[cloud] role` / `hub_url`, which are only the default. Each change is in the Settings
+audit (section system) with the Operator's name. The hub can't be switched (a cloud deployment):
+`GET|POST /api/station-mode` answers 409 there. API: `GET /api/station-mode` → `{forward, hub_url,
+from, running, status: {state, text, detail, waiting, last_error, ...}, secrets: {token, access_id,
+access_secret: {set, source}}, keychain}`; `POST /api/station-mode {forward?, hub_url?, operator}`;
+`POST /api/station-mode/test {hub_url?}` → `{ok, status, text}` (the hub's `/healthz`, then
+`GET /api/station/hello` with the token: nothing sent, the hub doesn't count it as "seen").
+
+Secrets on the station: the environment, else `[cloud]`, else the **macOS Keychain**
+(`security find-generic-password -s <service> -w`; services `sizeup-station-token`,
+`sizeup-access-id`, `sizeup-access-secret`, renamed with `[cloud] keychain_prefix` or
+`keychain_token` / `keychain_access_id` / `keychain_access_secret`). Never logged or shown: only
+"set (Keychain)" / "set (env)" / "missing". See `deploy/station/README.md`.
+
 ```
  station (Mac)                                                       hub (Fargate task)
  ┌──────────────────────────────────────────┐   HTTPS, outbound   ┌──────────────────────────────────┐
@@ -67,8 +89,10 @@ keeps working for local use, with a banner on its `/cad`: the CAD of record is t
   those rows turn *unknown* with what they last said: never a stale "ok". The SDR switches only show
   while the station is connected.
 * Hub, CAD header: "Station connected" / "Station offline 12:03".
-* Station, monitor header: a **Hub** row (connected, or offline with how many events are waiting).
-  Station `/cad`: the banner with the hub's URL.
+* Station, monitor header: a **Hub** row (connected, or offline with how many events are waiting;
+  "not sending" when forwarding is on without a token). Station `/cad`: the "Hub connected" /
+  "Hub unreachable" pill and the banner with the hub's URL. All of it goes when forwarding is
+  switched off (Settings → System → Station) and comes back when it's on.
 
 ## Failure behaviour
 
@@ -210,13 +234,15 @@ hostname's), not the `api/station` service-token application's. Not a secret: it
 
 ## Config
 
-Station (`config.toml`, see `deploy/station/README.md`):
+Station (optional: Settings → System → Station does the same; see `deploy/station/README.md`):
 
 ```toml
 [cloud]
-role = "station"
+role = "station"           # the default until the switch is first used (state/cloud.json then wins)
 hub_url = "https://sizeup.example.org"
-# token: env SIZEUP_STATION_TOKEN; Access service token: env SIZEUP_ACCESS_CLIENT_ID / _SECRET
+# token: env SIZEUP_STATION_TOKEN or Keychain sizeup-station-token; Access service token: env
+# SIZEUP_ACCESS_CLIENT_ID / _SECRET or Keychain sizeup-access-id / sizeup-access-secret
+# keychain_prefix = "sizeup"
 # outbox = "state/outbox.sqlite"
 # outbox_max_mb = 300
 ```
@@ -293,10 +319,11 @@ namespace, a named volume for `/data`, no Litestream).
 
 ## Code
 
-`sizeup/cloud/`: `station.py` (StationLink: outbox, forwarder, state, jobs), `outbox.py`,
+`sizeup/cloud/`: `station.py` (StationLink: outbox, forwarder, state, jobs), `stationmode.py`
+(Settings → System → Station: the link on / off at runtime, state/cloud.json, the Keychain), `outbox.py`,
 `client.py` (kept-alive HTTPS), `hub.py` (Hub: ingest, health, jobs; HubApp), `hubstore.py`
 (hub.sqlite, audio.sqlite), `access.py` (Cloudflare Access identity; the gate is in
 `sizeup/web/server.py`, the operator in `sizeup/cad/api.py` and `Settings.person`; the activity log in
 `sizeup/cad/activity.py`). Seams in `sizeup/app.py`: `_emit`, `_heard`, `_page_heard`, `_retext`,
 `make_app`; in `sizeup/cad/service.py`: `remote_voice`, `audio_blobs`, `cloud`. Tests:
-`tests/test_cloud.py`, `tests/test_access.py`, `tests/test_roles.py`, `tests/test_activity.py`.
+`tests/test_cloud.py`, `tests/test_stationmode.py`, `tests/test_access.py`, `tests/test_roles.py`, `tests/test_activity.py`.

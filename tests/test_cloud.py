@@ -499,8 +499,18 @@ def _toml(tmp_path, text: str) -> Path:
 def test_cloud_config(tmp_path, monkeypatch):
     for k in ("SIZEUP_STATION_TOKEN", "SIZEUP_STATE_DIR", "SIZEUP_HUB_URL", "SIZEUP_PORT", "SIZEUP_PUBLIC_URL"):
         monkeypatch.delenv(k, raising=False)
-    with pytest.raises(ConfigError, match="needs a token"):
-        load(_toml(tmp_path, '[cloud]\nrole = "station"\nhub_url = "https://hub.example.org"\n'))
+    # No token in the file or the environment: not an error any more (it may be in the Keychain;
+    # without one anywhere Settings > System > Station says so).
+    nokey = load(_toml(tmp_path, '[cloud]\nrole = "station"\nhub_url = "https://hub.example.org"\n'))
+    assert nokey.cloud_token == "" and nokey.cloud_keychain_token == "sizeup-station-token"
+    with pytest.raises(ConfigError, match="hub_url"):
+        load(_toml(tmp_path, '[cloud]\nhub_url = "ftp://hub.example.org"\n'))
+    with pytest.raises(ConfigError, match="Keychain service"):
+        load(_toml(tmp_path, '[cloud]\nkeychain_token = "bad name!"\n'))
+    named = load(_toml(tmp_path, '[cloud]\nkeychain_prefix = "pcfd"\nkeychain_access_secret = "cf-secret"\n'))
+    assert (named.cloud_role, named.cloud_keychain_token, named.cloud_keychain_access_id,
+            named.cloud_keychain_access_secret) == ("", "pcfd-station-token", "pcfd-access-id", "cf-secret")
+    assert named.cloud_state == str((tmp_path / "state" / "cloud.json").resolve())
     with pytest.raises(ConfigError, match="hub_url"):
         load(_toml(tmp_path, f'[cloud]\nrole = "station"\nhub_url = "http://hub.example.org"\ntoken = "{TOKEN}"\n'))
     with pytest.raises(ConfigError, match="role"):

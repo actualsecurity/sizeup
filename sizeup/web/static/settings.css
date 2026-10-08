@@ -169,3 +169,22 @@ body.ro-settings #settings .s-content :is(input, select, textarea)[data-ro] { op
   .s-act-ip { justify-self: end; }
   .s-seen { white-space: normal; flex: 1 1 100%; }
 }
+
+/* System > Station: forwarding to the hub (settings.js sStation) */
+.sm-row { display: flex; align-items: center; gap: 0.5em 0.7em; flex-wrap: wrap; margin: 0.35em 0; }
+.sm-sw { font-size: 0.9em; border: 1px solid var(--line); cursor: pointer; }
+.sm-sw:disabled { opacity: 0.5; cursor: wait; }
+.sm-status { font-weight: 600; }
+.sm-status.ok, .sm-result.ok { color: var(--ok); }
+.sm-status.err, .sm-result.err, .sm-secrets dd.err { color: var(--err); }
+.sm-status.warn { color: var(--warn); }
+.sm-url { flex: 1 1 18em; min-width: 0; max-width: 32em; }
+.sm-result { flex: 1 1 100%; overflow-wrap: anywhere; }
+.sm-result:empty { display: none; }
+.sm-secrets { margin-top: 0.5em; }
+.sm-hint { margin: 0.5em 0 0; }
+.sm-hint code { overflow-wrap: anywhere; user-select: all; }
+@media (max-width: 640px) {
+  .sm-lab { flex: 1 1 100%; }
+  .sm-url { flex: 1 1 100%; max-width: none; }
+}

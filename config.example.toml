@@ -124,12 +124,16 @@ channels = ["FG1", "PC repeater"]  # labels on the dispatch log only (FG1, or th
 # [cloud]: run the CAD in the cloud for people away from this machine (docs/cloud.md). Leave it out
 # for today's all-in-one. This machine (with the SDRs, whisper and the voice) is then the "station":
 # it runs everything as before and forwards what it hears to the hub over outbound HTTPS only.
-# The hub's own config is deploy/hub/config.hub.toml.
+# The hub's own config is deploy/hub/config.hub.toml. Forwarding is switched on and off in the CAD,
+# Settings > System > Station (kept in state/cloud.json, which then wins over role / hub_url here);
+# secrets from the environment, this section, or the macOS Keychain (deploy/station/README.md).
 # [cloud]
-# role = "station"
+# role = "station"                   # the default until the switch is first used; leave out: off
 # hub_url = "https://sizeup.example.org"   # the hub (behind Cloudflare Access: see docs/cloud.md)
 # token = ""                         # the station's bearer token; better: env SIZEUP_STATION_TOKEN (same on the hub)
 # access_client_id = ""              # Cloudflare Access service token for /api/station/* (or env
 # access_client_secret = ""          #   SIZEUP_ACCESS_CLIENT_ID / SIZEUP_ACCESS_CLIENT_SECRET); "" = not used
 # outbox = "state/outbox.sqlite"     # everything for the hub waits here while it's unreachable
 # outbox_max_mb = 300                # queued audio over this: the oldest clips are dropped (never the transcripts)
+# keychain_prefix = "sizeup"         # Keychain services sizeup-station-token, sizeup-access-id, sizeup-access-secret
+#                                    #   (or keychain_token / keychain_access_id / keychain_access_secret)

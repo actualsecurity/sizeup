@@ -12,6 +12,7 @@ runs on a bare Linux box with Python + numpy.
                                   progress, outbox size
     GET  /api/station/jobs?wait=25   long poll: jobs for the station -> {jobs: [{id, type, args}]}
     POST /api/station/jobs/<id>   the station's answer {ok, error?, result?, label?, audio?}
+    GET  /api/station/hello      {ok}: the token works (the station's Test connection; not counted as "seen")
 
 Every request needs `Authorization: Bearer <SIZEUP_STATION_TOKEN>` (constant-time compare); with
 no token configured the hub refuses them all. Jobs (the station only connects out):
@@ -292,6 +293,8 @@ class Hub:
         refused = self._auth(headers)
         if refused:
             return refused
+        if method == "GET" and path == "/api/station/hello":
+            return _json(200, {"ok": True})    # the station's Test connection: the token works (not "seen")
         self._seen()
         try:
             if method == "GET" and path == "/api/station/jobs":
