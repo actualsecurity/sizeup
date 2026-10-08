@@ -95,7 +95,12 @@ class Config:
     cloud_token: str = ""             # both: the station's bearer token (env SIZEUP_STATION_TOKEN wins)
     cloud_access_id: str = ""         # station: Cloudflare Access service token (env SIZEUP_ACCESS_CLIENT_ID / _SECRET)
     cloud_access_secret: str = ""
-    cloud_outbox: str = ""            # station: the durable outbox (SQLite)
+    cloud_outbox: str = ""            # station: the durable outbox (SQLite); "" = outbox.sqlite next to cloud_state
+    cloud_state: str = ""             # not the hub: state/cloud.json, Settings > System > Station (sizeup/cloud/stationmode.py)
+    # not the hub: macOS Keychain services (generic passwords) for the three secrets when the env has none
+    cloud_keychain_token: str = "sizeup-station-token"
+    cloud_keychain_access_id: str = "sizeup-access-id"
+    cloud_keychain_access_secret: str = "sizeup-access-secret"
     cloud_outbox_max_mb: float = 300.0   # station: queued audio over this drops the oldest audio (never metadata)
     cloud_public_url: str = ""        # hub: its public URL (env SIZEUP_PUBLIC_URL), shown in /healthz and the log
     cloud_offline_s: float = 15.0     # hub: no word from the station this long = offline
@@ -132,6 +137,16 @@ def _dispatch_voice(dsp: dict) -> tuple[str, str, str]:
     return engine, voice, fallback
 
 
+def hub_url_problem(url: str) -> str:
+    """"" for a usable hub URL, else why not (config and Settings > System > Station)."""
+    m = re.fullmatch(r"(https?)://([^/:\s]+)(:\d{1,5})?(/\S*)?", url or "")
+    if not m:
+        return "the hub's URL, https://..."
+    if m.group(1) == "http" and m.group(2) not in ("127.0.0.1", "localhost", "::1"):
+        return "https:// (plain http only to this machine)"
+    return ""
+
+
 # Environment overrides, for a container whose config file is baked into the image (deploy/hub/):
 #   SIZEUP_HOST, SIZEUP_PORT          [web] host / port
 #   SIZEUP_STATE_DIR                  where relative storage paths go (cad.db, storage.clips_dir,
@@ -145,26 +160,41 @@ def _env(name: str, default):
     return v if v else default
 
 
+def _keychain(cl: dict) -> dict:
+    """[cloud] keychain_prefix ("sizeup": sizeup-station-token, sizeup-access-id, sizeup-access-secret)
+    or keychain_token / keychain_access_id / keychain_access_secret one by one."""
+    prefix = str(cl.get("keychain_prefix", "sizeup"))
+    out = {}
+    for key, field_, suffix in (("keychain_token", "cloud_keychain_token", "station-token"),
+                                ("keychain_access_id", "cloud_keychain_access_id", "access-id"),
+                                ("keychain_access_secret", "cloud_keychain_access_secret", "access-secret")):
+        name = str(cl.get(key, f"{prefix}-{suffix}"))
+        if not re.fullmatch(r"[\w.@-]{1,100}", name):
+            raise ConfigError(f"cloud.{key} / keychain_prefix: a Keychain service name (letters, digits, . _ - @)")
+        out[field_] = name
+    return out
+
+
 def _cloud(data: dict) -> dict:
-    """[cloud] -> Config fields. No section = all-in-one (role "")."""
+    """[cloud] -> Config fields. No section = all-in-one (role ""). A section without a role is
+    all-in-one too, with its hub_url / Keychain names ready for Settings > System > Station."""
     cl = _take(data.get("cloud", {}), "cloud", {"role", "hub_url", "token", "access_client_id", "access_client_secret",
                                                 "outbox", "outbox_max_mb", "public_url", "offline_after_s", "audio_max_mb",
-                                                "access_team", "access_aud"})
+                                                "access_team", "access_aud", "keychain_prefix", "keychain_token",
+                                                "keychain_access_id", "keychain_access_secret"})
     if not cl:
         return {}                      # all-in-one: no environment variable changes anything here
     role = str(cl.get("role", ""))
-    if role not in ("hub", "station"):
-        raise ConfigError('cloud.role: "hub" or "station"')
+    if role not in ("", "hub", "station"):
+        raise ConfigError('cloud.role: "hub" or "station" (or leave it out: all-in-one)')
     token = _env("SIZEUP_STATION_TOKEN", str(cl.get("token", "")))
     hub_url = _env("SIZEUP_HUB_URL", str(cl.get("hub_url", ""))).rstrip("/")
-    if role == "station":
-        m = re.fullmatch(r"(https?)://([^/:]+)(:\d+)?(/.*)?", hub_url)
-        if not m:
-            raise ConfigError("cloud.hub_url: the hub's URL, https://...")
-        if m.group(1) == "http" and m.group(2) not in ("127.0.0.1", "localhost", "::1"):
-            raise ConfigError("cloud.hub_url: https:// (plain http only to this machine)")
-        if not token:
-            raise ConfigError("cloud: the station needs a token (env SIZEUP_STATION_TOKEN, or cloud.token)")
+    if role == "station" or (role == "" and hub_url):
+        why = hub_url_problem(hub_url)
+        if why:
+            raise ConfigError(f"cloud.hub_url: {why}")
+    # The station's token may also come from the Keychain (sizeup/cloud/stationmode.py): without one
+    # anywhere the link waits, and Settings > System > Station says what is missing.
     if token and len(token) < 16:
         raise ConfigError("cloud.token: at least 16 characters (e.g. `openssl rand -hex 32`)")
     team_raw = _env("SIZEUP_ACCESS_TEAM", str(cl.get("access_team", "")))
@@ -184,11 +214,11 @@ def _cloud(data: dict) -> dict:
     return dict(cloud_role=role, cloud_hub_url=hub_url, cloud_token=token,
                 cloud_access_id=_env("SIZEUP_ACCESS_CLIENT_ID", str(cl.get("access_client_id", ""))),
                 cloud_access_secret=_env("SIZEUP_ACCESS_CLIENT_SECRET", str(cl.get("access_client_secret", ""))),
-                cloud_outbox=str(cl.get("outbox", "state/outbox.sqlite")) if role == "station" else "",
+                cloud_outbox=str(cl.get("outbox", "state/outbox.sqlite")) if role != "hub" else "",
                 cloud_outbox_max_mb=nums["outbox_max_mb"], cloud_offline_s=nums["offline_after_s"],
                 cloud_audio_max_mb=nums["audio_max_mb"],
                 cloud_public_url=_env("SIZEUP_PUBLIC_URL", str(cl.get("public_url", ""))).rstrip("/"),
-                cloud_access_team=team, cloud_access_aud=aud)
+                cloud_access_team=team, cloud_access_aud=aud, **_keychain(cl))
 
 
 def load(path: str | Path) -> Config:
@@ -367,4 +397,5 @@ def load(path: str | Path) -> Config:
         dispatch_tts_port=d_port, dispatch_fallback_voice=d_fallback, dispatch_tts_python=d_python, dispatch_rate=d_rate,
         dispatch_repeat=d_repeat, dispatch_transmit=False, dispatch_channels=d_channels,
         **(dict(cloud, cloud_outbox=rel_state(cloud["cloud_outbox"])) if cloud else {}),
+        cloud_state="" if cloud.get("cloud_role") == "hub" else rel_state("state/cloud.json"),
     )

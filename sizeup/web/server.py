@@ -13,6 +13,10 @@ POST /api/mode {"mode": ...}  one shared dongle: hand it to a channel or trunk-r
 GET  /healthz                   {"ok": true, version, build, role}: cheap, for the container health check
 GET|POST /api/station/...      [cloud] role = "hub" only: the station's ingest and job queue, bearer token
                                (sizeup/cloud/hub.py)
+GET  /api/station-mode         not the hub (409 there): forwarding to the hub, its status and where each
+                               secret came from, never a secret (sizeup/cloud/stationmode.py)
+POST /api/station-mode {"forward": bool?, "hub_url": str?, "operator": str?}  on / off while running
+POST /api/station-mode/test {"hub_url": str?}  the hub's /healthz and station path with the token
 GET  /cad                      the PCFD dispatch console (static/cad.html); its API is /api/cad/... (sizeup/cad/api.py)
 GET  /comms                    every transmission with its rig, radio ID, channel and events (static/comms.html)
 
@@ -103,11 +107,13 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                  set_talkgroup: Callable[..., str | None] | None = None,
                  set_talkgroup_group: Callable[..., str | None] | None = None, retranscribe=None,
                  cad=None, cad_b: Broadcaster | None = None, station=None, health: bytes = b'{"ok":true}',
-                 access=None, access_log: Callable[[str], None] | None = None):
+                 access=None, access_log: Callable[[str], None] | None = None, station_mode=None):
     """cad: a CadApi (sizeup/cad/api.py) and cad_b its own broadcaster (the console's state is
     small and separate from the monitor's, so neither page carries the other's). station: the hub's
     ingest (sizeup/cloud/hub.py Hub), which checks the station's token before reading any body.
-    access: an AccessVerifier (sizeup/cloud/access.py): who signed in, required on the hub."""
+    access: an AccessVerifier (sizeup/cloud/access.py): who signed in, required on the hub.
+    station_mode: Settings > System > Station (sizeup/cloud/stationmode.py StationMode), not on the hub."""
+    hub_says = json.dumps({"error": "this is the hub: station forwarding is switched on the station"}).encode()
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -209,6 +215,11 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 return self._send(200, health, "application/json")
             if path.startswith("/api/station/") and station is not None:
                 return self._send(*station.handle("GET", path, url.query, self.headers, None))
+            if path == "/api/station-mode":
+                if station is not None:
+                    return self._send(409, hub_says, "application/json")
+                if station_mode is not None:
+                    return self._send(200, json.dumps(station_mode.state()).encode(), "application/json")
             self._send(404, b"not found\n", "text/plain")
 
         def _body(self, limit: int) -> bytes | None:
@@ -287,6 +298,20 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                     return self._send(400, json.dumps({"error": f"bad request: {e}"}).encode(), "application/json")
                 self._did(path, body)
                 return self._send(200, json.dumps({"queued": queued}).encode(), "application/json")
+            if path in ("/api/station-mode", "/api/station-mode/test") and (station is not None or station_mode is not None):
+                raw = self._body(4096)
+                if station is not None:
+                    self.close_connection = True
+                    return self._send(409, hub_says, "application/json")
+                try:
+                    body = json.loads(raw or b"{}") if raw is not None else None
+                    if not isinstance(body, dict):
+                        raise ValueError("a JSON object, at most 4 KB")
+                    out = station_mode.test(body) if path.endswith("/test") else station_mode.set(body)
+                except ValueError as e:
+                    return self._send(400, json.dumps({"error": str(e)}).encode(), "application/json")
+                self._did(path, body)
+                return self._send(200, json.dumps(out).encode(), "application/json")
             if path.startswith("/api/incident/") and path.endswith("/close"):
                 ok = close_incident(path[len("/api/incident/"):-len("/close")])
                 if ok:
@@ -336,14 +361,15 @@ class WebServer:
                  set_talkgroup: Callable[..., str | None] | None = None,
                  set_talkgroup_group: Callable[..., str | None] | None = None,
                  retranscribe: Callable[[list[str] | None], int] | None = None, cad=None, station=None,
-                 health: dict | None = None, access=None, access_log: Callable[[str], None] | None = None):
+                 health: dict | None = None, access=None, access_log: Callable[[str], None] | None = None,
+                 station_mode=None):
         self.access = access
         self.broadcaster = Broadcaster(state_fn)
         self.cad_broadcaster = Broadcaster(cad.cad.state) if cad is not None else None
         self.httpd = ThreadingHTTPServer((host, port), make_handler(
             json.dumps(scene, separators=(",", ":")).encode(), self.broadcaster, clip, close_incident, set_mode,
             set_talkgroup, set_talkgroup_group, retranscribe, cad, self.cad_broadcaster, station,
-            json.dumps(health or {"ok": True}, separators=(",", ":")).encode(), access, access_log))
+            json.dumps(health or {"ok": True}, separators=(",", ":")).encode(), access, access_log, station_mode))
         self.httpd.daemon_threads = True
 
     @property

@@ -70,9 +70,11 @@ def clip_8k(wav: bytes | None) -> bytes | None:
 
 class StationLink:
     def __init__(self, app, cfg, log: Callable[[str], None] = print,
-                 client: Callable[[float], HubClient] | None = None):
+                 client: Callable[[float], HubClient] | None = None, outbox: Outbox | None = None):
+        """outbox: the one already open (Settings > System > Station turns the link off and on
+        again over the same outbox, sizeup/cloud/stationmode.py)."""
         self.app, self.cfg, self.log = app, cfg, log
-        self.outbox = Outbox(cfg.cloud_outbox or ":memory:", int(cfg.cloud_outbox_max_mb * 1024 * 1024))
+        self.outbox = outbox or Outbox(cfg.cloud_outbox or ":memory:", int(cfg.cloud_outbox_max_mb * 1024 * 1024))
         self._client = client or (lambda timeout: HubClient(cfg.cloud_hub_url, cfg.cloud_token, cfg.cloud_access_id,
                                                             cfg.cloud_access_secret, timeout))
         self._stop = threading.Event()
@@ -101,13 +103,24 @@ class StationLink:
         self._live_wake.set()
 
     def start(self) -> StationLink:
+        if self._threads:
+            return self
         for name, fn in (("hub-forward", self._forward), ("hub-state", self._state), ("hub-jobs", self._jobs)):
             t = threading.Thread(target=fn, name=name, daemon=True)
             t.start()
             self._threads.append(t)
         return self
 
+    @property
+    def running(self) -> bool:
+        return bool(self._threads) and not self._stop.is_set()
+
+    @property
+    def stopped(self) -> bool:
+        return self._stop.is_set()
+
     def stop(self) -> None:
+        """The threads end at their next turn (a long poll in flight: when it returns)."""
         self._stop.set()
         self._wake.set()
         self._live_wake.set()
@@ -182,7 +195,8 @@ class StationLink:
                 continue
             self.outbox.ack(acked)
             self.sent += sum(1 for x in rows if x["seq"] <= acked)
-            self._ok()
+            if not self._stop.is_set():
+                self._ok()
             backoff = 1.0
 
     # -- talking now + status (latest wins) ------------------------------------------------------------
@@ -241,8 +255,9 @@ class StationLink:
                 backoff = min(backoff * 2, 30.0)
                 continue
             backoff = 2.0
-            self._ok()
-            for job in r.get("jobs") or []:
+            if not self._stop.is_set():
+                self._ok()
+            for job in r.get("jobs") or []:        # handed to this station: run, even if just turned off
                 threading.Thread(target=self._run_job, args=(job,), name="hub-job", daemon=True).start()
 
     def _run_job(self, job: dict) -> None:

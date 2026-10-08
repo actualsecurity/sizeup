@@ -1828,8 +1828,10 @@ function renderCloud() {
     pill.title = c.detail || "";
     return;
   }
+  // (Settings > System > Station switches forwarding on and off: no cloud, no pill and no banner)
   pill.className = "pill " + (c.state === "ok" ? "ok" : "warn");
-  setText(pill, c.state === "ok" ? "Hub connected" : "Hub unreachable");
+  setText(pill, c.state === "ok" ? "Hub connected" : c.state === "starting" ? "Hub connecting"
+    : c.blocked ? "Hub not sending" : "Hub unreachable");
   pill.title = c.detail || "";
   const url = c.hub_url || "the hub";
   if (banner.dataset.url !== url) {

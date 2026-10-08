@@ -16,6 +16,8 @@
     [cloud] role = "station": every finished page / transmission / transcript / radio ID heard also
         goes to the hub through a durable outbox (_emit, sizeup/cloud/station.py); role = "hub": no
         radios at all, the same state fed by the station (sizeup/cloud/hub.py). docs/cloud.md
+        Forwarding is switched on and off while running in Settings > System > Station
+        (sizeup/cloud/stationmode.py; state/cloud.json then wins over the role here).
 """
 
 from __future__ import annotations
@@ -260,6 +262,8 @@ class App:
         # [cloud] role = "station": the hub link (sizeup/cloud/station.py) sets these; None = all-in-one.
         self.events: Callable[[str, dict, str | None], None] | None = None   # (type, data, clip id)
         self.link = None
+        # Settings > System > Station turns that link on and off while running (sizeup/cloud/stationmode.py).
+        self.station = None
         self._heard_sent: dict[tuple[str, str, str], float] = {}
         self.cad.live = self.live.state
         self.cad.has_clip = self.has_clip
@@ -1006,8 +1010,9 @@ class App:
         out.append({"label": "STT", "mhz": None, "state": self.whisper.state, "detail": self.whisper.detail,
                     "open": False, "quieting_db": None, "restarts": 0, "last_heard": None})
         out.append(self.tts.status() if self.tts else TtsService.say_status(self.cfg.dispatch_voice))
-        if self.link is not None:
-            out.append(self.link.status_row())       # [cloud] station: the hub connection
+        hub = self.station.hub_row() if self.station is not None else (self.link.status_row() if self.link else None)
+        if hub is not None:
+            out.append(hub)                          # [cloud] station: the hub connection
         return out
 
     def close_incident(self, iid: str) -> bool:
@@ -1076,7 +1081,9 @@ class App:
                 self.recorder.start()
         if self.p25:
             self.p25.start()
-        if self.link is not None:
+        if self.station is not None:
+            self.station.start()
+        elif self.link is not None:
             self.link.start()
         return self
 
@@ -1093,20 +1100,22 @@ class App:
         self.whisper.stop()
         if self.tts:
             self.tts.stop()
-        if self.link is not None:
+        if self.station is not None:
+            self.station.stop()
+        elif self.link is not None:
             self.link.stop()
 
 
 def make_app(cfg: Config) -> App:
-    """The app for this config's role: all-in-one (no [cloud]), the hub (no radios: fed by the
-    station, sizeup/cloud/hub.py) or the station (all-in-one plus the hub link)."""
+    """The app for this config's role: the hub (no radios: fed by the station, sizeup/cloud/hub.py),
+    or all-in-one, forwarding to the hub as the station when that is on (config.toml's [cloud] role
+    = "station" until Settings > System > Station changes it: sizeup/cloud/stationmode.py)."""
     if cfg.cloud_role == "hub":
         from sizeup.cloud.hub import HubApp
         return HubApp(cfg, log=log)
     app = App(cfg)
-    if cfg.cloud_role == "station":
-        from sizeup.cloud.station import StationLink
-        StationLink(app, cfg, log=log)     # sets app.events / app.link: nothing is missed from here on
+    from sizeup.cloud.stationmode import StationMode
+    StationMode(app, cfg, log=log)     # on: sets app.events / app.link now, so nothing is missed
     return app
 
 
@@ -1115,9 +1124,14 @@ def make_server(app: App) -> WebServer:
     server = WebServer(cfg.host, cfg.port, app.scene(), app.state, app.clip, app.close_incident, app.set_mode,
                        app.set_talkgroup, app.set_talkgroup_group, app.retranscribe, cad=CadApi(app.cad),
                        station=getattr(app, "hub", None), health=health_info(cfg), access=access_verifier(cfg),
-                       access_log=log if cfg.cloud_role == "hub" else None)
-    pokes = [server.poke] + ([app.link.live_changed] if app.link is not None else [])
-    app.live.on_change = lambda: [f() for f in pokes]   # a new talker is pushed at once, not on the next second
+                       access_log=log if cfg.cloud_role == "hub" else None, station_mode=app.station)
+
+    def changed() -> None:             # a new talker is pushed at once, not on the next second
+        server.poke()
+        link = app.link                # (the hub link comes and goes: Settings > System > Station)
+        if link is not None:
+            link.live_changed()
+    app.live.on_change = changed
     return server
 
 
@@ -1167,8 +1181,9 @@ def main(argv: list[str] | None = None) -> int:
     app.start()
     server = make_server(app)
     signal.signal(signal.SIGTERM, lambda *_: server.shutdown())
-    role = {"hub": " · hub (fed by the station, no radios)",
-            "station": f" · station, forwarding to {cfg.cloud_hub_url}"}.get(cfg.cloud_role, "")
+    sm = app.station
+    role = (" · hub (fed by the station, no radios)" if cfg.cloud_role == "hub"
+            else f" · station, forwarding to {sm.hub_url}" if sm is not None and sm.forward else "")
     log(f"sizeup: {cfg.station_name} · {len(cfg.channels)} channel(s)"
         + (f" · P25 {cfg.p25_dir}" if cfg.p25_dir and cfg.cloud_role != "hub" else "") + role
         + f" · {server.url} · CAD {server.url}cad" + f" ({cfg.cad_db or 'in memory'}; transmit off)")
