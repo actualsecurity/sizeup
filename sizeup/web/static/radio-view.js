@@ -9,9 +9,9 @@
 //
 // Filters live in the URL hash, so a link from an event (#radio?event=26-000012) or the feed's More
 // (#radio?channel=Fire/EMS 15) opens filtered. Polls /api/cad/comms every 2 s while open (unchanged:
-// cheap, ?rev). Playing, re-transcribing (admin) and "+ Event" (dispatchers: POST
-// /api/cad/incident/<id>/link) are the same calls as the incident's Radio card and the feed. Uses
-// cad.js's helpers (el, syncList, radioRow, api, operator ...): loaded after it.
+// cheap, ?rev). Each row is cad.js's radioRow, as on the incident's Radio card and the feed: play, the
+// incidents it is on (a click: only that one's traffic), its "⋯" menu (Add to event ▸, Remove from ...,
+// Re-transcribe, Copy text). Uses cad.js's helpers (el, syncList, radioRow, evChip, api ...): loaded after it.
 //
 //   RadioLive: the Live / Sound button (this view, and the wall board): plays each new Main
 //   transmission (and, on the board, each new page) as it arrives, oldest first.
@@ -94,7 +94,7 @@ window.RadioView = (() => {
   const OTHER_KEY = "sizeup.cad.radio.other";
   const FIELDS = ["q", "unit", "channel", "event", "type", "pcfd", "since", "until"];
   const st = { open: false, rev: "", rows: [], facets: "", busy: false, again: false, timer: 0, lastOk: 0, error: "",
-               other: { open: false, tgs: new Set() }, pick: null, linking: new Set(), qTimer: 0 };
+               other: { open: false, tgs: new Set() }, qTimer: 0 };
   try {
     const v = JSON.parse(localStorage.getItem(OTHER_KEY) || "null");
     if (v) { st.other.open = !!v.open; st.other.tgs = new Set((v.tgs || []).map(String)); }
@@ -160,61 +160,6 @@ window.RadioView = (() => {
 
   // ---- rows ---------------------------------------------------------------------------------------
 
-  const openEvents = () => incidents().filter((i) => ["queued", "pending", "active"].includes(i.status));
-
-  function evChip(e) {                             // an incident it is on: click to see only that one
-    const b = el("button", "feed-ev rv-ev" + (e.why === "manual" ? " manual" : ""), e.number || `#${e.id}`);
-    b.type = "button";
-    b.dataset.event = e.number || String(e.id);
-    b.title = `${typeLabel(e.type, e.subtype) || e.type || ""} ${e.address || ""}`.trim()
-      + (e.why ? `, ${e.why === "manual" ? `added${e.unit ? ` by ${e.unit}` : ""}` : `linked by ${e.why}${e.unit ? ` (${e.unit})` : ""}`}` : "");
-    return b;
-  }
-  function addBox(t) {                             // "+ Event": which open incident it goes on
-    const span = el("span", "feed-acts");
-    if (st.pick === t.id) {
-      const form = el("form", "rv-pick row");
-      const sel = el("select");
-      const on = new Set((t.events || []).map((e) => e.id));
-      const opts = openEvents().filter((i) => !on.has(i.id));
-      const cur = selected();
-      for (const i of opts) sel.append(new Option(`${incTitle(i)} ${typeLabel(i.type, i.subtype) || "No type"}, ${i.address || ""}`, String(i.id)));
-      if (cur && opts.includes(cur)) sel.value = String(cur.id);
-      const ok = el("button", "mini primary", "Add");
-      ok.type = "submit";
-      ok.disabled = !opts.length;
-      const no = el("button", "mini", "Cancel");
-      no.type = "button";
-      no.addEventListener("click", () => { st.pick = null; render(); });
-      form.addEventListener("submit", (e) => { e.preventDefault(); link(t, Number(sel.value)); });
-      form.append(opts.length ? sel : el("span", "dim small", "No open incident"), ok, no);
-      span.append(form);
-      return span;
-    }
-    const b = el("button", "mini rv-add", st.linking.has(t.id) ? "…" : "+ Event");
-    b.type = "button";
-    b.title = "Put it on an incident";
-    b.disabled = st.linking.has(t.id) || !openEvents().length;
-    b.addEventListener("click", () => { st.pick = t.id; render(); });
-    span.append(b);
-    return span;
-  }
-  async function link(t, iid) {
-    if (!iid) return;
-    st.pick = null;
-    st.linking.add(t.id);
-    render();
-    try {
-      await api("POST", `/api/cad/incident/${iid}/link`, { traffic_id: t.id, operator: operator() });
-    } catch (err) {
-      UI.toast(`Add failed: ${err.message}`, "err");
-    } finally {
-      st.linking.delete(t.id);
-      st.rev = "";
-      poll();
-    }
-  }
-
   function noteRow(t) {
     const li = el("li", "rt note");
     const meta = el("div", "meta");
@@ -229,16 +174,13 @@ window.RadioView = (() => {
   }
   function row(t) {
     if (t.kind === "note") return noteRow(t);
-    const li = radioRow(t);                        // cad.js: play, re-transcribe, time, rig, channel, text
+    const li = radioRow(t, { scope: "rv" });       // cad.js: play, time, rig, channel, chips, the ⋯ menu, text
     const meta = li.querySelector(".meta");
     if (t.talkgroup !== null && t.talkgroup !== undefined) meta.querySelector(".chip.src").title = `TG ${t.talkgroup}`;
-    const acts = addBox(t);
-    for (const e of (t.events || []).slice().reverse()) acts.prepend(evChip(e));
-    meta.append(acts);
     return li;
   }
-  const rowSig = (t) => JSON.stringify([t.text, t.status, t.model, t.alt_text, t.alt_model, t.rig, t.has_audio, (t.events || []).map((e) => e.id), st.pick === t.id,
-                                       st.linking.has(t.id), talkSig(t.rig), openEvents().length]);
+  const rowSig = (t) => JSON.stringify([t.text, t.status, t.model, t.alt_text, t.alt_model, t.rig, t.has_audio,
+                                       (t.events || []).map((e) => [e.id, e.why]), t.rerun_at, talkSig(t.rig), cad.txRev]);
   const fillRow = (li, t) => {
     const n = row(t);
     li.className = n.className;
@@ -385,7 +327,9 @@ window.RadioView = (() => {
     changed();
   });
   RadioLive.button($("#rv-live"), "Live");
-  cad.hooks.push(() => { if (st.open && (st.pick !== null || st.linking.size)) render(); });   // the open incidents changed
+  let drawnRev = -1;
+  cad.hooks.push(() => { if (st.open && drawnRev !== cad.txRev) { drawnRev = cad.txRev; render(); } });   // a row's own state
+  window.addEventListener("sizeup:tx-changed", () => { st.rev = ""; poll(); });   // a link added or removed: ask now
 
   return { open, close, render };
 })();

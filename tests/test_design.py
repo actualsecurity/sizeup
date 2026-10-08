@@ -11,12 +11,13 @@ LAYERS = ["vendor", "reset", "tokens", "base", "components", "views", "utilities
 
 # The components (style.css @layer components): the vocabulary the views and scripts build with.
 COMPONENTS = {
-    "btn", "nav", "primary", "danger", "quiet", "danger-quiet", "sm", "mini", "lg", "icon", "wide", "stat", "play", "rerun",
+    "btn", "nav", "primary", "danger", "quiet", "danger-quiet", "sm", "mini", "lg", "icon", "wide", "stat", "play", "menu-btn",
     "live-btn", "alerts-btn", "field", "check", "sw", "knob", "seg", "tabs", "tab", "vertical", "chip", "chips", "pill",
     "badge", "st-badge", "why", "feed-ev", "town", "pc-badge", "tg-badge", "talk-badge", "unit-tag", "talk-chip", "card",
     "card-head", "sec-head", "view-head", "view-title", "list", "item", "meta", "txt", "sugg", "evtable", "tscroll",
     "empty", "loading", "error", "notice", "warnbox", "banner", "help", "help-pop", "popover", "alerts-panel", "overlay",
     "dialog", "dialog-head", "dialog-title", "dialog-body", "dialog-foot", "toasts", "toast", "ico", "inc-marker",
+    "menu", "menu-item", "menu-mark", "menu-text", "menu-hint", "menu-sep", "menu-back",
 }
 
 # Raw lengths a view may still write for a size, each for a reason: the map's own marks are drawn a step
@@ -38,7 +39,7 @@ HOOKS = {
     "mixed", "gsw", "held", "elsewhere", "absent", "radio", "state", "rp-unit", "rp-source", "rp-error", "rp-scroll",
     "rc-groups", "radios-panel", "s-tsrow", "s-tsrows", "s-tsnow", "cm-focus", "cm-pop-head", "cm-overlay", "look-unset",
     "dispatcher", "upgrade", "dispatch", "note", "status", "system", "attach", "comment", "busy", "times", "pc", "feed",
-    "feed-row", "feed-add", "rv-add", "rv-ev", "uf", "ask", "pick", "inline", "row", "spacer", "dim", "small", "mono",
+    "feed-row", "uf", "ask", "pick", "inline", "row", "spacer", "dim", "small", "mono",
     "s-sample", "s-used", "s-meta", "sm-save", "sm-test", "sm-lab", "ap-unit", "unit-code", "span2", "qi", "urow",
     "ov-card", "ov-ne", "ov-page", "cm-btn", "cm-rig", "cm-pin", "sg-l", "db", "rp-edit", "joint", "spare", "dept",
     "addon", "unknown", "live", "src-confirmed", "src-guessed", "src-heard", "s-state", "s-flag", "s-confirm", "s-kind",

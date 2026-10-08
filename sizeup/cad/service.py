@@ -904,11 +904,20 @@ class Cad:
         return dict(self.feed.state(), rows=self.feed.rows(limit, tgs))
 
     def link_traffic(self, iid: int, body: dict) -> dict:
-        """POST /api/cad/incident/<id>/link {traffic_id, operator}: "+ event" on the 60 Control feed."""
+        """POST /api/cad/incident/<id>/link {traffic_id, operator}: "Add to event" in a transmission's menu."""
         inc = self.store.incident(iid)
         if inc["status"] == "dismissed":
             raise CadError("event is dismissed")
         r = self.comms.link(_text(body, "traffic_id", 200, required=True), iid, _text(body, "operator", OPERATOR_MAX))
+        if r.get("error"):
+            raise CadError(r["error"])
+        return dict(r, incident_id=iid, number=inc["number"])
+
+    def unlink_traffic(self, iid: int, body: dict) -> dict:
+        """POST /api/cad/incident/<id>/unlink {traffic_id, operator}: "Remove from 26-000007" in a
+        transmission's menu. An auto link removed stays removed (comms.py radio_link_exclusions)."""
+        inc = self.store.incident(iid)
+        r = self.comms.unlink(_text(body, "traffic_id", 200, required=True), iid, _text(body, "operator", OPERATOR_MAX))
         if r.get("error"):
             raise CadError(r["error"])
         return dict(r, incident_id=iid, number=inc["number"])

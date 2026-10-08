@@ -444,6 +444,10 @@ class HubApp(App):
             alt = d.get("alt") if isinstance(d.get("alt"), dict) else None
             self._retext(pid, str(d.get("text") or ""), str(d.get("status") or "done"),
                          d.get("confidence"), str(d.get("model") or ""), alt=alt)
+        elif kind == "rerun":                         # a re-run on the station is over (changed, same or failed)
+            self._rerun_finish(self._id(d), str(d.get("result") or "")[:200], str(d.get("model") or "")[:80])
+        elif kind == "alt_text":                      # "both" re-run: the station's whisper text, to compare
+            self._set_alt(self._id(d), str(d.get("text") or ""), str(d.get("model") or "")[:80])
         elif kind == "heard":
             if d.get("system") in ("mdc", "p25"):
                 self.radios.heard(d["system"], str(d.get("radio_id") or ""), str(d.get("alias") or ""), d.get("at"))
@@ -536,6 +540,10 @@ class HubApp(App):
         a retext event); a station that can't: "transcription failed", said on the transmission."""
         self.hub.log(f"aws transcribe: {job.kind} {job.id}: {why}" + ("" if job.alt is not None else
                                                                        ": asking the station's whisper"))
+        if job.rerun:                              # re-transcribe: the station's whisper instead, said so
+            self._rerun_note[job.id] = f"AWS failed ({why[:80]})"
+            threading.Thread(target=self._rerun_station, args=([job.id],), name="aws-fallback", daemon=True).start()
+            return
         if job.alt is not None:                    # "both": the station's text stays
             return
 
@@ -683,11 +691,61 @@ class HubApp(App):
     def set_talkgroup_group(self, group: str, record: bool | None = None, main: bool | None = None) -> str | None:
         return self._switch("set_talkgroup_group", str(group), record, main)
 
-    def retranscribe(self, ids: list[str] | None = None) -> int:
+    def retranscribe(self, ids: list[str] | None = None, as_alt: bool = False) -> int:
+        """Each one the way its channel says now: "aws" with Amazon Transcribe here (on the clip in
+        audio.sqlite), "both" AWS here and the station's whisper for the alternative, "local" (and every
+        recording: ids None) the station's whisper. AWS unavailable (not set up, the monthly limit, no
+        clip): the station's whisper, said in the result."""
+        if ids is None:
+            return self._station_rerun(None)
+        n, local, alt = self._rerun_split(ids) if self.aws is not None else (0, list(ids), [])
+        if self.aws is None:
+            for cid in local:
+                item, key = self._find(cid)
+                if item is not None and self.channel_pref(key)["engine"] in ("aws", "both"):
+                    self._rerun_note[cid] = "AWS unavailable (not set up on the hub)"
+        if alt:
+            threading.Thread(target=self._rerun_station, args=(alt, True), name="hub-rerun-alt", daemon=True).start()
+        if not local:
+            return n
+        if n:                    # AWS took some: the rest go to the station without holding up the answer
+            threading.Thread(target=self._rerun_station, args=(local,), name="hub-rerun", daemon=True).start()
+            return n + len(local)
+        err: ValueError | None = None
         try:
-            return int(self.hub.remote("retranscribe", ids) or 0)
-        except (StationOffline, RuntimeError) as e:
+            got = self._station_rerun(local)
+        except ValueError as e:
+            got, err = 0, e
+        if not got:
+            for cid in local:
+                self._rerun_note.pop(cid, None)
+        if err is not None:
+            raise err
+        return got
+
+    def _station_rerun(self, ids: list[str] | None, as_alt: bool = False) -> int:
+        try:
+            return int((self.hub.remote("retranscribe", ids, True) if as_alt else self.hub.remote("retranscribe", ids)) or 0)
+        except (StationOffline, RuntimeError, TypeError, ValueError) as e:
             raise ValueError(f"speech-to-text runs on the station: {e}") from None
+
+    def _rerun_station(self, ids: list[str], as_alt: bool = False) -> None:
+        """In the background: the station's whisper for these; any it can't take finish failed (not for
+        the alternative of a "both": AWS's result is the one said)."""
+        try:
+            n, err = self._station_rerun(ids, as_alt), ""
+        except ValueError as e:
+            n, err = 0, str(e)
+        if n or as_alt:
+            return
+        for cid in ids:
+            self._rerun_finish(cid, f"failed: {err or 'the station has no recording to re-run'}")
+        self.sync()
+
+    def _rerun_pcm(self, item):
+        from sizeup.transcribe import wav_pcm
+        wav = self.audio.get(item.id)
+        return wav_pcm(wav, 0.0 if isinstance(item, Traffic) else getattr(item, "voice_offset_s", 0.0)) if wav else None
 
     def _clean_hub(self) -> None:
         now = time.time()

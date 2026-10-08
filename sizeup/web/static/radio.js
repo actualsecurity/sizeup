@@ -36,8 +36,13 @@ window.Radio = (() => {
     const w = who(e);
     if (e.ended) return `${w || e.radio_id || "Radio"} ${e.channel} ended`;
     if (w) return `TX ${w} ${e.channel}`;
+    if (e.system === "fm" && e.id_on_release) return `${e.channel} · ID on release`;   // MDC post-ID: known when the PTT is let go
     if (e.system === "fm") return `${e.channel} open`;
     return `TX ${e.channel}` + (e.radio_id ? ` radio ${e.radio_id}` : "");
+  }
+  function chipClass(e) {          // the strip's and the Overview's chip: rig, 60 Control, ended, no ID yet
+    return "talk-chip" + (e.ended ? " ended" : "") + (e.rig ? " rig" : "") + (e.dispatcher ? " disp" : "")
+      + (e.id_on_release && !e.rig ? " unid" : "");
   }
   function shown(e) {             // the strip: our rigs, FG1, and the Main talkgroups
     return !!e.rig || e.system === "fm" || e.main;
@@ -53,11 +58,11 @@ window.Radio = (() => {
     const box = document.getElementById("talking");
     if (!box) return;
     const items = st.talking.filter(shown).slice(0, 6);
-    const sig = JSON.stringify(items.map((e) => [e.key, e.rig, e.alias, e.ended, e.channel]));
+    const sig = JSON.stringify(items.map((e) => [e.key, e.rig, e.alias, e.ended, e.channel, e.id_on_release]));
     if (box._sig === sig) return;
     box._sig = sig;
     box.replaceChildren(...items.map((e) => {
-      const c = el("span", "talk-chip" + (e.ended ? " ended" : "") + (e.rig ? " rig" : "") + (e.dispatcher ? " disp" : ""));
+      const c = el("span", chipClass(e));
       c.append(el("span", "", label(e)));
       c.title = [e.radio_id ? `radio ${e.radio_id}` : "", e.alias && e.alias !== e.rig ? `alias ${e.alias}` : "",
                  e.label && e.label !== e.alias ? e.label : "", e.tg ? `TG ${e.tg}` : ""].filter(Boolean).join(", ")
@@ -313,6 +318,6 @@ window.Radio = (() => {
     return box.childNodes.length ? box : null;
   }
 
-  return { update, talkingFor, rigTag, mountAlerts, label, who, shown, toast, prealert,
+  return { update, talkingFor, rigTag, mountAlerts, label, chipClass, who, shown, toast, prealert,
            get talking() { return st.talking; } };
 })();

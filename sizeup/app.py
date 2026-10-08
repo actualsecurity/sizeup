@@ -194,6 +194,7 @@ class AwsJob:
     channel: str
     alt: dict | None = None   # "both": the local model's {text, model}, kept next to AWS's text
     page: object = None
+    rerun: bool = False       # a person asked for it again (re-transcribe): the text is replaced, the result said
 
 
 @dataclass
@@ -208,6 +209,7 @@ class Rerun:
     status: str = "pending"
     raw: str = ""
     confidence: float | None = None
+    as_alt: bool = False      # "both" re-run: this text is the alternative to compare, not the text
 
 class App:
     def __init__(self, cfg: Config):
@@ -227,6 +229,7 @@ class App:
         self.storage: dict | None = None
         self._rerun_ids: set[str] = set()
         self.rerun = {"total": 0, "done": 0, "changed": 0, "failed": 0}
+        self._rerun_note: dict[str, str] = {}     # id -> why a re-run didn't go the channel's way ("AWS unavailable ...")
         self.clips: OrderedDict[str, tuple[np.ndarray, float]] = OrderedDict()   # id -> (pcm, saved at)
         self.clips_dir = Path(cfg.clips_dir) if cfg.clips_dir else None
         if self.clips_dir:
@@ -395,6 +398,7 @@ class App:
         """A page as saved (and as sent to the hub): Page.as_dict + what the pipeline added."""
         d = dict(page.as_dict(), dispatch=getattr(page, "dispatch", None),
                  history=getattr(page, "history", None) or [], rerun_at=getattr(page, "rerun_at", None),
+                 rerun_result=getattr(page, "rerun_result", ""),
                  model=getattr(page, "model", ""), stt=getattr(page, "stt", ""))
         if getattr(page, "alt_model", ""):
             d.update(alt_text=getattr(page, "alt_text", ""), alt_model=page.alt_model)  # type: ignore[attr-defined]
@@ -811,9 +815,70 @@ class App:
             return None
         return audio[int(voice_offset_s * RATE):], False
 
-    def retranscribe(self, ids: list[str] | None = None) -> int:
-        """Run speech-to-text again on recordings still on disk (ids=None: all of them). Queued
-        behind live traffic; results replace the text and keep the old one in history."""
+    def retranscribe(self, ids: list[str] | None = None, as_alt: bool = False) -> int:
+        """Run speech-to-text again (ids=None: every recording still on disk, with the local model).
+        Each one the way its channel says now (Settings > Radios > Engine): "aws" with Amazon Transcribe
+        when it is set up here (else the local model, the reason kept for the result), "both" with AWS
+        for the text and the local model for the alternative, otherwise the local model. as_alt: the
+        hub's "both" re-run asking this station's whisper for the alternative. Every one finishes with
+        a result on the transmission (rerun_at, rerun_result: changed | same | failed: why): the
+        Re-transcribe menu item waits for it."""
+        if ids is None or as_alt or self.aws is None or self.forwarding():
+            return self._rerun_local(ids, as_alt)
+        n, local, alt = self._rerun_split(ids)
+        n += self._rerun_local(local) if local else 0
+        if alt:
+            self._rerun_local(alt, as_alt=True)
+        return n
+
+    def _find(self, cid: str):
+        """(page or transmission, its channel key: "FG1", "South 2", "tg:307") or (None, "")."""
+        with self._lock:
+            page = next((p for p in self.pages if p.id == cid), None)
+        if page is not None:
+            return page, page.label
+        t = next((t for t in list(self.store.loose) + [t for i in self.store.incidents for t in i.traffic] if t.id == cid), None)
+        if t is None:
+            return None, ""
+        return t, channels.tg_key(t.talkgroup) if t.talkgroup is not None else t.source
+
+    def _rerun_pcm(self, item) -> np.ndarray | None:
+        """A recording as Amazon Transcribe takes it (int16, 8 kHz), or None."""
+        from sizeup.transcribe import pcm8k
+        if isinstance(item, Traffic):
+            got = self._rerun_audio(item.id, getattr(item, "fm", True))
+        else:
+            got = self._rerun_audio(item.id, True, item.voice_offset_s)
+        return pcm8k(radio_voice(got[0], deemph=got[1], nr=False), RATE) if got else None
+
+    def _rerun_split(self, ids: list[str]) -> tuple[int, list[str], list[str]]:
+        """The ids whose channel is on AWS go to it now: (how many, the ones for the local model, the ones
+        whose local text is the alternative ("both"))."""
+        ok, why = self.aws.available() if self.aws is not None else (False, "Amazon Transcribe isn't set up here")
+        n, local, alt = 0, [], []
+        for cid in dict.fromkeys(ids):
+            item, key = self._find(cid)
+            eng = self.channel_pref(key)["engine"] if item is not None else ""
+            if eng not in ("aws", "both"):
+                local.append(cid)
+                continue
+            pcm = self._rerun_pcm(item) if ok else None
+            if pcm is None:
+                self._rerun_note[cid] = f"AWS unavailable ({why if not ok else 'no recording for it here'})"
+                local.append(cid)
+                continue
+            page = None if isinstance(item, Traffic) else item
+            self.aws.submit(key, AwsJob("traffic" if page is None else "page", cid, key, page=page, rerun=True), pcm)
+            n += 1
+            if eng == "both":
+                alt.append(cid)
+        if n:
+            log(f"speech-to-text re-run: {n} recording(s) to Amazon Transcribe")
+        return n, local, alt
+
+    def _rerun_local(self, ids: list[str] | None = None, as_alt: bool = False) -> int:
+        """The local model again on recordings still on disk (ids=None: all of them). Queued behind live
+        traffic; results replace the text and keep the old one in history."""
         want = set(ids) if ids is not None else None
         jobs: list[tuple[float, Rerun, np.ndarray]] = []
         seen: set[str] = set()
@@ -824,7 +889,7 @@ class App:
             if (want is None or p.id in want) and p.id not in busy and p.id not in seen:
                 got = self._rerun_audio(p.id, True, p.voice_offset_s)
                 if got:
-                    jobs.append((p.start, Rerun(p.id, "page", got[1], start=p.start), got[0]))
+                    jobs.append((p.start, Rerun(p.id, "page", got[1], start=p.start, as_alt=as_alt), got[0]))
                     seen.add(p.id)
         traffic = list(self.store.loose) + [t for i in self.store.incidents for t in i.traffic]
         for t in traffic:
@@ -832,7 +897,7 @@ class App:
                 got = self._rerun_audio(t.id, getattr(t, "fm", True))
                 if got:
                     low = speech_seconds(got[0]) < MIN_SPEECH_S  # same mic-click rule as the live pass
-                    jobs.append((t.start, Rerun(t.id, "traffic", got[1], low, t.unit, t.start), got[0]))
+                    jobs.append((t.start, Rerun(t.id, "traffic", got[1], low, t.unit, t.start, as_alt=as_alt), got[0]))
                     seen.add(t.id)
         jobs.sort(key=lambda j: -j[0])  # newest first: what's on screen updates first
         with self._lock:
@@ -850,14 +915,55 @@ class App:
 
     def _rerun_done(self, job: Rerun) -> None:
         text = job.raw if job.status == "done" else ""
+        model = Path(self.cfg.stt_model).name
         changed = False
-        if job.status != "error":
-            changed = self._retext(job.id, text, job.status, job.confidence, Path(self.cfg.stt_model).name)
+        if job.as_alt:
+            if job.status != "error":
+                self._set_alt(job.id, text, model)
+        elif job.status != "error":
+            changed = self._retext(job.id, text, job.status, job.confidence, model)
         with self._lock:
             self._rerun_ids.discard(job.id)
             self.rerun["done"] += 1
             self.rerun["changed"] += changed
             self.rerun["failed"] += job.status == "error"
+        if not job.as_alt:
+            self._rerun_finish(job.id, "failed: speech-to-text error" if job.status == "error"
+                               else "changed" if changed else "same", model)
+
+    def _rerun_finish(self, cid: str, result: str, model: str = "") -> None:
+        """A re-run is over, whatever came of it: changed | same | failed: why (and, after "; ", why it
+        didn't run the channel's way). On the transmission (rerun_at, rerun_result) and the page, and to
+        the hub (a "rerun" event): the Re-transcribe menu item shows it."""
+        note = self._rerun_note.pop(cid, "")
+        if note and not result.startswith("failed"):
+            note += ": the local model ran"
+        result = (result + (f"; {note}" if note else ""))[:300]
+        with self._lock:
+            page = next((p for p in self.pages if p.id == cid), None)
+        if page is not None:
+            page.rerun_at, page.rerun_result = time.time(), result  # type: ignore[attr-defined]
+        try:
+            self.cad.comms.rerun_done(cid, result)
+        except Exception as e:  # the CAD must never stop the monitor
+            log(f"CAD: could not note a re-run: {type(e).__name__}: {e}")
+        log(f"re-run {cid}: {result}" + (f" ({model})" if model else ""))
+        self._emit("rerun", {"id": cid, "result": result, "model": model})
+
+    def _set_alt(self, cid: str, text: str, model: str) -> None:
+        """The alternative transcript ("both": the local model's next to AWS's), the text left as it is."""
+        alt = {"text": text, "model": model}
+        with self._lock:
+            page = next((p for p in self.pages if p.id == cid), None)
+        if page is not None:
+            page.alt_text, page.alt_model = text, model  # type: ignore[attr-defined]
+            self._save_page(page)
+        self.store.set_alt(cid, alt)
+        try:
+            self.cad.comms.set_alt(cid, alt)
+        except Exception as e:  # the CAD must never stop the monitor
+            log(f"CAD: could not update the communications log: {type(e).__name__}: {e}")
+        self._emit("alt_text", {"id": cid, **alt})
 
     def _retext(self, cid: str, text: str, status: str, confidence: float | None, model: str,
                 alt: dict | None = None, why: str = "re-run") -> bool:
@@ -992,6 +1098,9 @@ class App:
 
     def _aws_done(self, job: AwsJob, text: str, conf: float | None) -> None:
         status = "done" if text else "no_speech"
+        if job.rerun:
+            changed = self._retext(job.id, text, status, conf, channels_model(), why="AWS Transcribe re-run")
+            return self._rerun_finish(job.id, "changed" if changed else "same", channels_model())
         if job.kind == "page" and job.alt is None:
             page = job.page
             page.raw, page.confidence, page.status, page.model = text, conf, status, channels_model()
@@ -1002,6 +1111,12 @@ class App:
     def _aws_failed(self, job: AwsJob, why: str) -> None:
         """Never dropped: the local model takes it ("both": the local text simply stays)."""
         log(f"aws transcribe: {job.kind} {job.id}: {why}" + ("" if job.alt is not None else ": using the local model"))
+        if job.rerun:
+            self._rerun_note[job.id] = f"AWS failed ({why[:80]})"
+            if not self._rerun_local([job.id]):
+                self._rerun_note.pop(job.id, None)
+                self._rerun_finish(job.id, f"failed: AWS: {why[:80]}; no recording here for the local model")
+            return
         if job.alt is not None:
             return
         if job.kind == "page":
@@ -1013,7 +1128,7 @@ class App:
             page.status = "error"
             self._save_page(page)
             return
-        if not self.retranscribe([job.id]):
+        if not self._rerun_local([job.id]):
             self._retext(job.id, "", "error", None, f"{channels_model()} (failed: {why[:80]})", why="AWS Transcribe")
 
     # -- the radios' side of Settings > Radios (Cad.radio_ctx) ---------------------------------------------

@@ -6,7 +6,8 @@ station's) and Playwright with Chromium (`pip install playwright && playwright i
 pytest. It loads every view at 1920, 1366 and 390 px (the phone with touch, so pointer: coarse applies):
 
   Dispatch (an incident open), New incident, Overview, Radio, each Settings section, the style guide, the
-  Monitor board, and the dialogs (Records, Talk alerts, "?" help, the large map, the shortcut sheet)
+  Monitor board, the dialogs (Records, Talk alerts, "?" help, the large map, the shortcut sheet), and a
+  transmission's "⋯" menu open (ui.js UI.menu)
 
 and checks, per width:
   - the header is the same height on every view (the board's included)
@@ -32,7 +33,8 @@ SECTIONS = ("lists", "runcards", "units", "dispatch", "users", "system", "radios
 VIEWS = ([("dispatch", "/cad", "incident"), ("new", "/cad", "new"), ("overview", "/cad", None), ("radio", "/cad#radio", None)]
          + [(f"settings-{s}", f"/cad#settings/{s}", None) for s in SECTIONS]
          + [("styleguide", "/cad#styleguide", None), ("monitor", "/monitor", None), ("records", "/cad#settings/system", "records"),
-            ("alerts", "/cad", "alerts"), ("help", "/cad#radio", "help"), ("bigmap", "/cad", "bigmap"), ("shortcuts", "/cad", "shortcuts")])
+            ("alerts", "/cad", "alerts"), ("help", "/cad#radio", "help"), ("bigmap", "/cad", "bigmap"), ("shortcuts", "/cad", "shortcuts"),
+            ("menu", "/cad#radio", "menu")])
 
 MEASURE = r"""() => {
   const vis = (e) => {
@@ -63,8 +65,8 @@ MEASURE = r"""() => {
     if (b.matches(".seg button")) return "segmented";
     if (b.matches(".cm-rig, .cm-pin, .unit-tag, .ov-page, .og-head, .sec-toggle, .cm-unset-head, .feed-ev, .chip")) return null;
     if (b.closest("header")) return "button-header";
-    const size = b.matches(".sm, .mini, .play, .rerun") ? "-sm" : b.matches(".lg") ? "-lg" : "";
-    const icon = b.matches(".icon, .play, .rerun") ? "-icon" : "";
+    const size = b.matches(".sm, .mini, .play") ? "-sm" : b.matches(".lg") ? "-lg" : "";
+    const icon = b.matches(".icon, .play") ? "-icon" : "";
     const kind = b.matches(".primary, .danger") ? "primary" : "button";
     return `${kind}${size}${icon}`;
   };
@@ -144,6 +146,9 @@ def setup(pg, how):
         pg.wait_for_timeout(1500)
         pg.locator("#d-body button", has_text="Expand").first.click()
         pg.wait_for_timeout(1500)
+    elif how == "menu":
+        pg.locator("#rv-main .menu-btn").first.click()
+        pg.wait_for_timeout(400)
     elif how == "shortcuts":
         pg.keyboard.press("?")
         pg.wait_for_timeout(400)

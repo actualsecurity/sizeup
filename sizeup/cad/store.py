@@ -18,7 +18,7 @@
       radios        radio ID -> rig (sizeup/cad/radios.py)
       settings_audit every change made in Settings (who, section, key, old -> new)
       radio_traffic every transcribed transmission, radio_links: which events it belongs to
-                    (sizeup/cad/comms.py)
+                    (sizeup/cad/comms.py), radio_link_exclusions: auto links a person took off
       meta          small settings (the radio seed version)
       settings_overrides  the Settings page's edits, laid over data/cad_lists.json (sizeup/cad/settings.py)
       operators           the people at the console; on the hub behind Cloudflare Access, keyed by the
@@ -192,7 +192,7 @@ CREATE INDEX IF NOT EXISTS radio_traffic_call ON radio_traffic(call_id);
 CREATE TABLE IF NOT EXISTS radio_links (
   traffic_id TEXT NOT NULL REFERENCES radio_traffic(id) ON DELETE CASCADE,
   incident_id INTEGER NOT NULL REFERENCES incidents(id),
-  why TEXT NOT NULL,                    -- unit | channel | dispatcher
+  why TEXT NOT NULL,                    -- unit | channel | dispatcher | manual
   unit TEXT NOT NULL DEFAULT '',
   PRIMARY KEY (traffic_id, incident_id)
 );
@@ -246,6 +246,21 @@ CREATE TABLE IF NOT EXISTS user_activity (
 );
 CREATE INDEX IF NOT EXISTS user_activity_email ON user_activity(email, at);
 CREATE INDEX IF NOT EXISTS user_activity_at ON user_activity(at);
+"""
+
+# A transmission a person took off an event that the auto-linker had put on it (sizeup/cad/comms.py
+# unlink): never linked to that event again by unit / channel / dispatcher; a manual add clears it. Made
+# on every open, like user_activity (2026-10-08).
+EXCLUSION_SCHEMA = """
+CREATE TABLE IF NOT EXISTS radio_link_exclusions (
+  traffic_id TEXT NOT NULL REFERENCES radio_traffic(id) ON DELETE CASCADE,
+  incident_id INTEGER NOT NULL REFERENCES incidents(id),
+  at REAL NOT NULL,
+  operator TEXT NOT NULL DEFAULT '',    -- who took it off
+  why TEXT NOT NULL DEFAULT '',         -- the auto link it was: unit | channel | dispatcher
+  unit TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (traffic_id, incident_id)
+);
 """
 
 # Schema v1 (before the sheet's vocabulary) -> v2. Old call types -> (TYPE, SUBTYPE).
@@ -378,13 +393,16 @@ class Store:
         """operators.email / callsign (Cloudflare Access sign-in, 2026-10-07), last_seen / ip / ua and
         user_activity (per-person activity, 2026-10-08). Checked on every open
         rather than a schema version (other branches hold v6-9): adding them twice changes nothing."""
-        for stmt in ACTIVITY_SCHEMA.split(";"):          # per-person activity (2026-10-08): the same way
+        for stmt in (ACTIVITY_SCHEMA + EXCLUSION_SCHEMA).split(";"):   # per-person activity, removed links (2026-10-08)
             if stmt.strip():
                 self.db.execute(stmt)
         tcols = {r["name"] for r in self.db.execute("PRAGMA table_info(radio_traffic)")}
         for col in ("alt_text", "alt_model"):            # the second transcript ("both": whisper next to AWS), 2026-10-08
             if tcols and col not in tcols:
                 self.db.execute(f"ALTER TABLE radio_traffic ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
+        for col, decl in (("rerun_at", "REAL"), ("rerun_result", "TEXT NOT NULL DEFAULT ''")):   # re-transcribe's
+            if tcols and col not in tcols:                                                        # result, 2026-10-08
+                self.db.execute(f"ALTER TABLE radio_traffic ADD COLUMN {col} {decl}")
         cols = {r["name"] for r in self.db.execute("PRAGMA table_info(operators)")}
         if not cols:
             return
