@@ -50,7 +50,7 @@ def settings_writes(cad, ids):
         ("/api/cad/settings/event_class", {"action": "reset_section"}),
         ("/api/cad/settings/geo_town_order", {"action": "set", "towns": ["Rye Brook", "Port Chester"]}),
         ("/api/cad/settings/units", {"action": "edit", "code": "E60", "unit": {"spoken": "Engine Sixty"}}),
-        ("/api/cad/settings/dispatch", {"action": "set", "key": "speed_kmh", "value": 40}),
+        ("/api/cad/settings/dispatch", {"action": "set", "key": "speed_mph", "value": 40}),
         ("/api/cad/settings/dispatch", {"action": "set", "key": "voice", "value": "af_heart"}),
         ("/api/cad/settings/users", {"action": "add", "name": "Pat"}),
         ("/api/cad/settings/users", {"action": "edit", "id": ids["Julian"], "role": "admin"}),

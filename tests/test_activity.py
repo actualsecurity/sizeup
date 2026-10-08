@@ -86,7 +86,7 @@ def test_writes_are_readable_sentences_with_the_incident_number(api):
                        (f"/api/cad/incident/{iid}/close", {"disposition": "COMPLETE"})):
         assert call(api, path, body, JULIAN)[0] == 200, path
     assert call(api, "/api/cad/settings/users", {"action": "edit", "id": api.ids["Julian"], "role": "viewer"}, COREY)[0] == 200
-    assert call(api, "/api/cad/settings/dispatch", {"action": "set", "key": "speed_kmh", "value": 40}, COREY)[0] == 200
+    assert call(api, "/api/cad/settings/dispatch", {"action": "set", "key": "speed_mph", "value": 40}, COREY)[0] == 200
     assert call(api, "/api/cad/settings/dispatch", {"action": "preview", "wording": {}}, COREY)[0] == 200   # reads only
     got = [(r["email"], r["kind"], r["summary"], r["incident_number"], r["route"]) for r in reversed(rows(api))]
     assert got == [
@@ -97,7 +97,7 @@ def test_writes_are_readable_sentences_with_the_incident_number(api):
         (JULIAN, "action", f"Edited {n}: cross_street", n, f"POST /api/cad/incident/{iid}"),
         (JULIAN, "action", f"Closed {n}: COMPLETE", n, f"POST /api/cad/incident/{iid}/close"),
         (COREY, "action", "Changed settings: users/Julian role", None, "POST /api/cad/settings/users"),
-        (COREY, "action", "Changed settings: dispatch/speed_kmh set", None, "POST /api/cad/settings/dispatch"),
+        (COREY, "action", "Changed settings: dispatch/speed_mph set", None, "POST /api/cad/settings/dispatch"),
     ]
     assert all(r["ok"] for r in rows(api))
     # the chronology and the settings audit are as they were
