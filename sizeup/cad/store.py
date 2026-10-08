@@ -21,7 +21,8 @@
                     (sizeup/cad/comms.py)
       meta          small settings (the radio seed version)
       settings_overrides  the Settings page's edits, laid over data/cad_lists.json (sizeup/cad/settings.py)
-      operators           the people at the console (no sign-in yet)
+      operators           the people at the console; on the hub behind Cloudflare Access, keyed by the
+                          email they signed in with (sizeup/cloud/access.py, Settings._person)
 
 The lists (types, subtypes, dispositions, unit statuses and what each one means) come from
 sizeup/cad/lists.py. One connection, one lock: the web server is threaded and SQLite writes are
@@ -43,6 +44,8 @@ from sizeup.cad import lists as lists_mod
 from sizeup.cad.lists import Lists
 
 TZ = ZoneInfo("America/New_York")
+# "Name <email>" when the operator signed in through Cloudflare Access (sizeup/cloud/access.py).
+OPERATOR_MAX = 320
 SCHEMA_VERSION = 10        # 6-9 unused (other branches); v10: the department's own codes
 
 OPEN = ("queued", "pending", "active")
@@ -205,13 +208,15 @@ CREATE TABLE IF NOT EXISTS settings_overrides (
   operator TEXT NOT NULL DEFAULT '',
   PRIMARY KEY (section, key)
 );
-CREATE TABLE IF NOT EXISTS operators (  -- who works the console. Sign-in later = more columns (pin_hash, auth_provider, auth_subject)
+CREATE TABLE IF NOT EXISTS operators (  -- who works the console
   id INTEGER PRIMARY KEY,
   name TEXT NOT NULL UNIQUE COLLATE NOCASE,
   role TEXT NOT NULL DEFAULT 'dispatcher',   -- admin | dispatcher | viewer (not enforced yet)
   active INTEGER NOT NULL DEFAULT 1,
   created_at REAL NOT NULL,
-  updated_at REAL NOT NULL
+  updated_at REAL NOT NULL,
+  email TEXT NOT NULL DEFAULT '',            -- the Cloudflare Access sign-in, lower case ('' = none)
+  callsign TEXT NOT NULL DEFAULT ''
 );
 """
 
@@ -324,7 +329,7 @@ class Store:
                 raise RuntimeError(f"{self.path}: schema v{v} is newer than this sizeup (v{SCHEMA_VERSION})")
             if v == 0:
                 self.db.executescript("BEGIN;" + SCHEMA + SETTINGS_SCHEMA + f"PRAGMA user_version = {SCHEMA_VERSION}; COMMIT;")
-                return
+                return self._operator_identity()
             if v < SCHEMA_VERSION:
                 self.db.execute("BEGIN IMMEDIATE")
                 try:
@@ -339,6 +344,19 @@ class Store:
                 except BaseException:
                     self.db.execute("ROLLBACK")
                     raise
+            self._operator_identity()
+
+    def _operator_identity(self) -> None:
+        """operators.email / callsign (Cloudflare Access sign-in, 2026-10-07). Checked on every open
+        rather than a schema version (other branches hold v6-9): adding them twice changes nothing."""
+        cols = {r["name"] for r in self.db.execute("PRAGMA table_info(operators)")}
+        if not cols:
+            return
+        for col in ("email", "callsign"):
+            if col not in cols:
+                self.db.execute(f"ALTER TABLE operators ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
+                self.migrated.append(f"operators.{col} (Cloudflare Access sign-in)")
+        self.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS operators_email ON operators(email) WHERE email != ''")
 
     def _v2_to_v3(self, db) -> None:
         """unit_history.note: the reason given for out of service / unmanned. Old rows keep ''."""

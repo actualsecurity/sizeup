@@ -16,6 +16,11 @@ GET|POST /api/station/...      [cloud] role = "hub" only: the station's ingest a
 GET  /cad                      the PCFD dispatch console (static/cad.html); its API is /api/cad/... (sizeup/cad/api.py)
 GET  /comms                    every transmission with its rig, radio ID, channel and events (static/comms.html)
 
+Hub with [cloud] access_team + access_aud (sizeup/cloud/access.py): every request but /healthz and
+/api/station/... (the station's bearer token) needs a verified Cloudflare Access token from a person
+(401 otherwise: defence in depth should the origin ever be reached around Access), and the CAD API
+gets who it is (the operator on every write, GET /api/cad/whoami).
+
 STATE = {
   "time": unix s,
   "radios": [{"label", "mhz", "state", "detail", "open", "quieting_db", ...}],
@@ -92,15 +97,36 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                  close_incident: Callable[[str], bool], set_mode: Callable[[str], str | None] | None = None,
                  set_talkgroup: Callable[..., str | None] | None = None,
                  set_talkgroup_group: Callable[..., str | None] | None = None, retranscribe=None,
-                 cad=None, cad_b: Broadcaster | None = None, station=None, health: bytes = b'{"ok":true}'):
+                 cad=None, cad_b: Broadcaster | None = None, station=None, health: bytes = b'{"ok":true}',
+                 access=None):
     """cad: a CadApi (sizeup/cad/api.py) and cad_b its own broadcaster (the console's state is
     small and separate from the monitor's, so neither page carries the other's). station: the hub's
-    ingest (sizeup/cloud/hub.py Hub), which checks the station's token before reading any body."""
+    ingest (sizeup/cloud/hub.py Hub), which checks the station's token before reading any body.
+    access: an AccessVerifier (sizeup/cloud/access.py): who signed in, required on the hub."""
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
+        who = None                       # the verified Access identity of the current request (access set)
+
         def log_message(self, *a) -> None:
             pass
+
+        def _admit(self, path: str) -> bool:
+            """access set: a person with a verified token, else a 401 (and False). /healthz (the
+            container health check) and /api/station/ (its own bearer token) are not for people."""
+            self.who = None
+            if access is None or path == "/healthz" or path.startswith("/api/station/"):
+                return True
+            who = access.identify(self.headers)
+            if who is not None and who.person:
+                self.who = who
+                return True
+            self.close_connection = True     # a POST's body is left unread
+            if path.startswith("/api/"):
+                return self._send(401, b'{"error":"sign in through Cloudflare Access"}', "application/json") or False
+            return self._send(401, b"<!doctype html><meta charset=utf-8><title>Sign in</title>"
+                                   b"<p>Sign in through Cloudflare Access to use sizeup: reload this page.</p>",
+                              "text/html; charset=utf-8") or False
 
         def _send(self, code: int, body: bytes, ctype: str) -> None:
             self.send_response(code)
@@ -120,6 +146,8 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
         def do_GET(self) -> None:
             url = urlsplit(self.path)
             path = url.path
+            if not self._admit(path):
+                return
             if path == "/" and cad is not None:   # user, 2026-10-07: "make .../cad the default page"
                 return self._redirect("/cad")
             if path in ("/", "/monitor", "/index.html"):
@@ -131,7 +159,7 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
             if path == "/api/cad/stream" and cad_b is not None:
                 return self._stream(cad_b)
             if path.startswith("/api/cad/") and cad is not None:
-                return self._send(*cad.get(path, url.query))
+                return self._send(*cad.get(path, url.query, self.who))
             if path.startswith("/static/"):
                 return self._static(path[len("/static/"):])
             if path == "/api/scene":
@@ -159,6 +187,8 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
 
         def do_POST(self) -> None:
             path = urlsplit(self.path).path
+            if not self._admit(path):
+                return
             if path.startswith("/api/station/") and station is not None:
                 code, body, ctype = station.handle("POST", path, "", self.headers, self._body)
                 if code >= 400:              # the body may be unread (a refused token): don't reuse the connection
@@ -171,7 +201,7 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                     n = -1
                 if not 0 <= n <= MAX_CAD_BODY:
                     return self._send(400, b'{"error":"bad or too large body (64 KB max)"}', "application/json")
-                return self._send(*cad.post(path, self.rfile.read(n)))
+                return self._send(*cad.post(path, self.rfile.read(n), self.who))
             if path == "/api/talkgroup" and set_talkgroup is not None:
                 try:
                     n = int(self.headers.get("Content-Length") or 0)
@@ -257,13 +287,14 @@ class WebServer:
                  set_talkgroup: Callable[..., str | None] | None = None,
                  set_talkgroup_group: Callable[..., str | None] | None = None,
                  retranscribe: Callable[[list[str] | None], int] | None = None, cad=None, station=None,
-                 health: dict | None = None):
+                 health: dict | None = None, access=None):
+        self.access = access
         self.broadcaster = Broadcaster(state_fn)
         self.cad_broadcaster = Broadcaster(cad.cad.state) if cad is not None else None
         self.httpd = ThreadingHTTPServer((host, port), make_handler(
             json.dumps(scene, separators=(",", ":")).encode(), self.broadcaster, clip, close_incident, set_mode,
             set_talkgroup, set_talkgroup_group, retranscribe, cad, self.cad_broadcaster, station,
-            json.dumps(health or {"ok": True}, separators=(",", ":")).encode()))
+            json.dumps(health or {"ok": True}, separators=(",", ":")).encode(), access))
         self.httpd.daemon_threads = True
 
     @property

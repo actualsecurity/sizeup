@@ -3,6 +3,7 @@
 #   SIZEUP_STATION_TOKEN   the station's bearer token (required: without it the hub refuses the station)
 #   SIZEUP_STATE_DIR       where cad.sqlite, hub.sqlite and audio.sqlite go (the image sets /data)
 #   SIZEUP_PORT, SIZEUP_HOST, SIZEUP_PUBLIC_URL
+#   SIZEUP_ACCESS_TEAM, SIZEUP_ACCESS_AUD   Cloudflare Access identity (below)
 # Run it on a Mac or Linux box without radios:
 #   SIZEUP_STATE_DIR=$(mktemp -d) SIZEUP_STATION_TOKEN=... python -m sizeup --config deploy/hub/config.hub.toml
 
@@ -11,6 +12,14 @@ role = "hub"
 public_url = ""                    # e.g. "https://sizeup.example.org" (or SIZEUP_PUBLIC_URL); shown in /healthz
 offline_after_s = 15               # no word from the station this long = "Station offline" on screen
 audio_max_mb = 500                 # received clips kept in audio.sqlite (oldest dropped first)
+# Cloudflare Access identity (sizeup/cloud/access.py, docs/cloud.md "Who is signed in"): with both set,
+# every page and API but /healthz and /api/station/ needs a verified Access token, and the email
+# someone signed in with is the operator (named in Settings > Users). Either empty: off (free-text
+# Operator field), said in the log. Neither is a secret.
+access_team = "yoda.cloudflareaccess.com"
+# The "sizeup" Access application's Application Audience (AUD) Tag: Zero Trust → Access controls →
+# Applications → sizeup → Overview. 64 hex digits; or SIZEUP_ACCESS_AUD.
+access_aud = ""
 
 [station]
 id = "pcfd-hub"

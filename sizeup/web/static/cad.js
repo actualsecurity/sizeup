@@ -32,6 +32,7 @@ const KIND_GROUPS = [
 
 const cad = {
   scene: null, state: null, lastMsgAt: 0, skew: 0,
+  who: null,                 // signed in through Cloudflare Access (whoami): {email, name, callsign}
   sel: null,                 // selected incident id
   mode: "none",              // none | new | view
   extra: new Map(),          // incidents opened from Records that aren't in the live state
@@ -117,6 +118,18 @@ function fromLocalInput(v) {
 function operator() {
   const pick = $("#operator-pick");
   return (pick.hidden ? $("#operator").value : pick.value).trim();
+}
+// "Corey <corey@example.org>": an operator who signed in through Cloudflare Access (the hub,
+// sizeup/cloud/access.py). Shown by name with the email as the tooltip; a typed name as it is.
+function opParts(s) {
+  const m = /^(.*\S) <([^<>\s]+@[^<>\s]+)>$/.exec(s || "");
+  return m ? [m[1], m[2]] : [s || "", /^[^<>\s]+@[^<>\s]+$/.test(s || "") ? s : ""];
+}
+function opSpan(s, before = "") {
+  const [name, email] = opParts(s);
+  const sp = el("span", "", before + name);
+  if (email) sp.title = `Signed in with Cloudflare Access as ${email}`;
+  return sp;
 }
 function store(key, value) {
   try {
@@ -521,7 +534,7 @@ function noteRow(e) {
   const meta = el("div", "meta");
   meta.append(el("span", "t", fmtTime(e.at, true)), el("span", "ek note", "note"));
   for (const u of tagsOf(e)) meta.append(unitChip(u));
-  if (e.operator) meta.append(el("span", "", `· ${e.operator}`));
+  if (e.operator) meta.append(opSpan(e.operator, "· "));
   li.append(meta, el("div", "txt", noteText(e)));
   return li;
 }
@@ -752,7 +765,7 @@ function renderEvents(inc) {
     fill: (li, e) => {
       const meta = el("div", "meta");
       meta.append(el("span", "t", fmtTime(e.at, true)), el("span", `ek ${e.kind}`, EVENT_KINDS[e.kind] || e.kind));
-      if (e.operator) meta.append(el("span", "", `· ${e.operator}`));
+      if (e.operator) meta.append(opSpan(e.operator, "· "));
       const txt = el("div", "txt");
       const did = playForEvent(inc, e);
       if (did) {
@@ -781,7 +794,7 @@ function renderDispatches(inc) {
     fill: (li, d) => {
       const meta = el("div", "meta");
       meta.append(el("span", "t", fmtTime(d.at, true)), el("span", `ek ${d.kind === "upgrade" ? "upgrade" : "dispatch"}`,
-        DISPATCH_KINDS[d.kind] || d.kind || "dispatch"), el("span", "", d.operator ? `by ${d.operator}` : ""),
+        DISPATCH_KINDS[d.kind] || d.kind || "dispatch"), d.operator ? opSpan(d.operator, "by ") : el("span", "", ""),
       el("span", "", d.channel ? `· ${d.channel}` : ""));
       meta.append(el("span", d.transmitted ? "txd" : "notx", d.transmitted ? "Transmitted" : "Not transmitted"));
       if (!d.transmitted && d.tx_note) meta.append(el("span", "", `(${d.tx_note})`));
@@ -1561,7 +1574,7 @@ function renderUnitLog() {
     fill: (li, e) => {
       const meta = el("div", "meta");
       meta.append(el("span", "t", fmtTime(e.at, true)));
-      if (e.operator) meta.append(el("span", "", e.operator));
+      if (e.operator) meta.append(opSpan(e.operator));
       li.replaceChildren(meta, el("div", "txt", e.text));
     },
     empty: "No status changes off an incident",
@@ -1758,10 +1771,18 @@ function render() {
 }
 
 // The operator field: a picker from Settings > Users once there are operators, else free text.
+// Signed in through Cloudflare Access (whoami): that person, read-only (the server records them on
+// every write whatever the page sends), named from Settings > Users.
 function renderOperators() {
   const ops = (cad.state && cad.state.operators) || [];
   const pick = $("#operator-pick"), input = $("#operator");
   const sig = JSON.stringify(ops);
+  if (cad.who) {
+    show(pick, false);
+    show(input, true);
+    if (pick._sig !== sig) { pick._sig = sig; loadWho(); }   // renamed in Settings: show the new name
+    return;
+  }
   show(pick, ops.length > 0);
   show(input, ops.length === 0);
   if (pick._sig === sig) return;
@@ -1937,6 +1958,27 @@ window.addEventListener("keydown", (e) => {
   for (const id of ["#db-overlay"]) if (!$(id).hidden) openOverlay(id, false);
 });
 
+// user, 2026-10-07: "can we get the auth info from the cloudflare access auth to identify email that
+// was authed with one time code to set the operators name dynamically?"
+async function loadWho() {
+  let w;
+  try {
+    const r = await fetch("/api/cad/whoami");
+    if (!r.ok) return;
+    w = await r.json();
+  } catch (e) { return; }
+  if (!w || w.source !== "access") return;
+  cad.who = w;
+  const input = $("#operator"), tip = `Signed in with Cloudflare Access as ${w.email}`
+    + (w.name === w.email ? " (not named yet: Settings > Users)" : "");
+  input.value = w.callsign ? `${w.name} · ${w.callsign}` : w.name;
+  input.readOnly = true;
+  input.classList.add("access");
+  input.title = tip;
+  input.closest("label").title = tip + ": recorded on every dispatch, status change, timeline entry and settings change";
+  renderOperators();
+}
+
 async function boot() {
   try {
     cad.scene = await (await fetch("/api/scene")).json();
@@ -1946,6 +1988,7 @@ async function boot() {
   } catch (e) {
     console.warn("no scene (map off):", e);
   }
+  await loadWho();
   cad.live = liveState("/api/cad/stream", "/api/cad/state", onState);
   tick();
   setInterval(tick, 1000);

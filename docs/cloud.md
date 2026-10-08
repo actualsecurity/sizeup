@@ -104,7 +104,44 @@ keeps working for local use, with a banner on its `/cad`: the CAD of record is t
   station with its login page shows up on the station as "hub sent something that isn't JSON: is
   Cloudflare Access letting the station through?".
 * The hub binds `127.0.0.1` inside the task: only the cloudflared sidecar reaches it.
+* With `access_team` + `access_aud` set, the hub itself also checks every person's Access token
+  (below): reaching the origin around Access gets a 401, not the CAD.
 * Transmit stays off on both (`NullTransmitter`): the hub has no radio at all.
+
+## Who is signed in (the operator from Cloudflare Access)
+
+> "can we get the auth info from the cloudflare access auth to identify email that was authed with
+> one time code to set the operators name dynamically?" (user, 2026-10-07)
+
+Access sends every request it lets through to the origin with a signed JWT
+(`Cf-Access-Jwt-Assertion`; the browser also holds it as the `CF_Authorization` cookie). With
+`[cloud] access_team` and `access_aud` set, the hub (`sizeup/cloud/access.py`, stdlib only):
+
+* **verifies it**: RS256 signature against the team's keys from
+  `https://<access_team>/cdn-cgi/access/certs` (cached an hour; fetched again for an unknown key id,
+  at most every 30 s; the cached keys are kept if a fetch fails), `aud` contains the AUD tag, `iss`
+  is `https://<access_team>`, `exp` / `nbf` with 60 s leeway. Any other algorithm (`none`, `HS256`)
+  is refused. The `Cf-Access-Authenticated-User-Email` header is never trusted on its own.
+* **requires it** on every page and API except `/healthz` (the health check) and `/api/station/*`
+  (the station's bearer token): 401 otherwise. A service token's JWT (no email, `common_name` =
+  client id: the station) is a machine and never an operator.
+* **uses the email as the operator**: every CAD write (events, notes, dispatches, unit status, run
+  cards, radio IDs, Settings edits and their audit) records the signed-in person, whatever the page
+  sent (`CadApi.post`). The name comes from **Settings → Users**, where an operator can have a
+  sign-in email and a callsign; someone signing in for the first time is added under their email,
+  "not named yet", for an admin to name. Recorded as `Corey <corey@example.org>` (just the email
+  until named): the chronology shows "Corey" with the email as its tooltip, the audit log and CSV
+  exports the whole thing.
+* **shows it**: `GET /api/cad/whoami` → `{email, name, callsign, source: "access" | "none"}`; the CAD's
+  Operator field then shows the name, read-only ("Signed in with Cloudflare Access as ...").
+
+Without both keys (all-in-one, the station, local dev, a hub not set up yet) nothing changes: the
+Operator field is typed or picked, as before. The hub logs which it is at startup.
+
+**The AUD tag:** Cloudflare dashboard → Zero Trust → Access controls → Applications → **sizeup** →
+Overview → *Application Audience (AUD) Tag* (64 hex digits). Use the `sizeup` application's (the
+hostname's), not the `api/station` service-token application's. Not a secret: it goes in
+`deploy/hub/config.hub.toml` (`access_aud`) or `SIZEUP_ACCESS_AUD`.
 
 ## Config
 
@@ -127,6 +164,8 @@ role = "hub"
 public_url = ""          # or SIZEUP_PUBLIC_URL
 offline_after_s = 15
 audio_max_mb = 500
+access_team = "yoda.cloudflareaccess.com"   # or SIZEUP_ACCESS_TEAM
+access_aud = ""          # the sizeup Access app's AUD tag (or SIZEUP_ACCESS_AUD); empty = identity off
 
 [cad]
 db = "cad.sqlite"        # under SIZEUP_STATE_DIR (/data in the image)
@@ -134,7 +173,8 @@ db = "cad.sqlite"        # under SIZEUP_STATE_DIR (/data in the image)
 
 Environment overrides (any role): `SIZEUP_HOST`, `SIZEUP_PORT`, `SIZEUP_STATE_DIR` (where relative
 storage paths go: `cad.db`, `storage.clips_dir`, `cloud.outbox`), `SIZEUP_STATION_TOKEN`,
-`SIZEUP_PUBLIC_URL`, `SIZEUP_HUB_URL`, `SIZEUP_ACCESS_CLIENT_ID` / `_SECRET`. `[cloud]` values are
+`SIZEUP_PUBLIC_URL`, `SIZEUP_HUB_URL`, `SIZEUP_ACCESS_CLIENT_ID` / `_SECRET`, `SIZEUP_ACCESS_TEAM` /
+`SIZEUP_ACCESS_AUD`. `[cloud]` values are
 only read with a `[cloud]` section: all-in-one ignores them.
 
 Run a hub on any machine without radios:
@@ -190,6 +230,7 @@ namespace, a named volume for `/data`, no Litestream).
 
 `sizeup/cloud/`: `station.py` (StationLink: outbox, forwarder, state, jobs), `outbox.py`,
 `client.py` (kept-alive HTTPS), `hub.py` (Hub: ingest, health, jobs; HubApp), `hubstore.py`
-(hub.sqlite, audio.sqlite). Seams in `sizeup/app.py`: `_emit`, `_heard`, `_page_heard`, `_retext`,
+(hub.sqlite, audio.sqlite), `access.py` (Cloudflare Access identity; the gate is in
+`sizeup/web/server.py`, the operator in `sizeup/cad/api.py` and `Settings.person`). Seams in `sizeup/app.py`: `_emit`, `_heard`, `_page_heard`, `_retext`,
 `make_app`; in `sizeup/cad/service.py`: `remote_voice`, `audio_blobs`, `cloud`. Tests:
-`tests/test_cloud.py`.
+`tests/test_cloud.py`, `tests/test_access.py`.

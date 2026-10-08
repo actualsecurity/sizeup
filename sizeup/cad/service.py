@@ -27,7 +27,7 @@ from sizeup.cad.radios import Registry, RadioError, is_pcfd
 from sizeup.cad import settings as settings_mod
 from sizeup.cad import lists as lists_mod
 from sizeup.cad.dispatcher import AudioUnavailable
-from sizeup.cad.store import TZ, CadError, Store
+from sizeup.cad.store import OPERATOR_MAX, TZ, CadError, Store
 from sizeup.cad.transmit import Transmitter, make_transmitter
 from sizeup.tts import VoiceCfg
 from sizeup.tts import voices as tts_voices
@@ -284,7 +284,7 @@ class Cad:
         """Accept event (Event info): numbered at once; emergency -> Pending events, else Non-emergency."""
         f = self._fields(body, partial=False)
         self._auto_geo(f)
-        iid = self.store.create_incident(**f, source="manual", status="pending", operator=_text(body, "operator", 60))
+        iid = self.store.create_incident(**f, source="manual", status="pending", operator=_text(body, "operator", OPERATOR_MAX))
         return self.store.incident(iid)
 
     def update(self, iid: int, body: dict) -> dict:
@@ -293,21 +293,21 @@ class Cad:
             f["lat"] = f["lon"] = None
             f["geo_label"] = ""
             self._auto_geo(f)
-        return self.store.update_incident(iid, f, _text(body, "operator", 60))
+        return self.store.update_incident(iid, f, _text(body, "operator", OPERATOR_MAX))
 
     def accept(self, iid: int, body: dict) -> dict:
         """A queued 60 Control page accepted (the type can be picked in the same call)."""
-        op = _text(body, "operator", 60)
+        op = _text(body, "operator", OPERATOR_MAX)
         f = {k: _text(body, k, 24) for k in ("type", "subtype") if k in body}
         if f:
             self.store.update_incident(iid, f, op)
         return self.store.accept(iid, op)
 
     def dismiss(self, iid: int, body: dict) -> dict:
-        return self.store.dismiss(iid, _text(body, "operator", 60), _text(body, "reason", 200))
+        return self.store.dismiss(iid, _text(body, "operator", OPERATOR_MAX), _text(body, "reason", 200))
 
     def close(self, iid: int, body: dict) -> dict:
-        return self.store.close(iid, _text(body, "disposition", 40), _text(body, "operator", 60))
+        return self.store.close(iid, _text(body, "disposition", 40), _text(body, "operator", OPERATOR_MAX))
 
     def note(self, iid: int, body: dict) -> dict:
         """A timeline comment. units: the unit tags picked with the autocomplete ("E63 stated that ..."):
@@ -320,7 +320,7 @@ class Cad:
         if bad:
             raise CadError(f"units: {bad[0]!r} is not on the boards")
         tags = list(dict.fromkeys(codes[u.strip().upper()] for u in units))
-        self.store.note(iid, _text(body, "text", 2000, required=True), _text(body, "operator", 60), units=tags)
+        self.store.note(iid, _text(body, "text", 2000, required=True), _text(body, "operator", OPERATOR_MAX), units=tags)
         return {"ok": True, "units": tags}
 
     def tag_order(self, iid: int | None, units: list[dict] | None = None) -> list[str]:
@@ -569,7 +569,7 @@ class Cad:
         An event that already had a dispatch: 'Engine 61, added to the assignment...'."""
         inc = self.store.incident(iid)
         self._dispatchable(inc)
-        operator = _text(body, "operator", 60, required=True)
+        operator = _text(body, "operator", OPERATOR_MAX, required=True)
         units = self._units_for(body)
         remarks = self._remarks(body)
         channel = self._channel(body)
@@ -611,7 +611,7 @@ class Cad:
         if body.get("preview"):
             path, note = self._render(text, dispatcher.where(inc), plan["groups"])
             return self._shown(text, "upgrade", path, note, remarks, plan)
-        operator = _text(body, "operator", 60, required=True)
+        operator = _text(body, "operator", OPERATOR_MAX, required=True)
         channel = self._channel(body)
         what = []
         if changed:
@@ -631,7 +631,7 @@ class Cad:
         if inc["status"] not in ("pending", "active"):
             raise CadError("accept the event first" if inc["status"] == "queued" else f"event is {inc['status']}")
         units = self._units_for(body, dispatching=False)
-        op = _text(body, "operator", 60)
+        op = _text(body, "operator", OPERATOR_MAX)
         ours = [u["id"] for u in units if u["response"] != "agency"]
         agency = [u["id"] for u in units if u["response"] == "agency"]
         moved = self.store.assign(iid, ours, op, attach=True) if ours else []
@@ -681,7 +681,7 @@ class Cad:
         except (KeyError, TypeError, ValueError):
             raise CadError("unit_id: required") from None
         return self.store.return_to_incident(iid, uid, _text(body, "status", 40, required=True),
-                                             _text(body, "operator", 60))
+                                             _text(body, "operator", OPERATOR_MAX))
 
     def unit_status(self, uid: int, body: dict) -> dict:
         status = _text(body, "status", 40, required=True)
@@ -690,8 +690,8 @@ class Cad:
                 iid = int(body["incident_id"])
             except (TypeError, ValueError):
                 raise CadError("incident_id: a number (0 = no call)") from None
-            return self.store.set_unit_status_on(uid, status, iid, _text(body, "operator", 60), _text(body, "note", 200))
-        return self.store.set_unit_status(uid, status, _text(body, "operator", 60), _text(body, "note", 200))
+            return self.store.set_unit_status_on(uid, status, iid, _text(body, "operator", OPERATOR_MAX), _text(body, "note", 200))
+        return self.store.set_unit_status(uid, status, _text(body, "operator", OPERATOR_MAX), _text(body, "note", 200))
 
     def unit_station(self, uid: int, body: dict) -> dict:
         """A unit's home firehouse (a name from data/firehouses.json; '' = not set). Stored as a Settings
@@ -709,14 +709,14 @@ class Cad:
         k, rename = _text(body, "type", 50, required=True), _text(body, "rename_from", 50)
         old = runcards.card(self.store, rename or k)
         c = runcards.save(self.store, k, body.get("slots"), _text(body, "spoken", 120), rename)
-        self.settings.audit_card(_text(body, "operator", 60), old, c)
+        self.settings.audit_card(_text(body, "operator", OPERATOR_MAX), old, c)
         return c
 
     def delete_run_card(self, body: dict) -> dict:
         k = _text(body, "type", 50, required=True)
         old = runcards.card(self.store, k)
         runcards.delete(self.store, k)
-        self.settings.audit_card(_text(body, "operator", 60), old, None)
+        self.settings.audit_card(_text(body, "operator", OPERATOR_MAX), old, None)
         return {"ok": True}
 
     # -- radios and communications ---------------------------------------------------------------
@@ -726,14 +726,14 @@ class Cad:
 
     def save_radio(self, body: dict) -> dict:
         try:
-            return self.radios.save(body, _text(body, "operator", 60))
+            return self.radios.save(body, _text(body, "operator", OPERATOR_MAX))
         except RadioError as e:
             raise CadError(str(e)) from None
 
     def delete_radio(self, body: dict) -> dict:
         try:
             self.radios.delete(_text(body, "system", 8, required=True), _text(body, "radio_id", 12, required=True),
-                               _text(body, "operator", 60))
+                               _text(body, "operator", OPERATOR_MAX))
         except RadioError as e:
             raise CadError(str(e)) from None
         return {"ok": True}
@@ -799,7 +799,7 @@ class Cad:
         inc = self.store.incident(iid)
         if inc["status"] == "dismissed":
             raise CadError("event is dismissed")
-        r = self.comms.link(_text(body, "traffic_id", 200, required=True), iid, _text(body, "operator", 60))
+        r = self.comms.link(_text(body, "traffic_id", 200, required=True), iid, _text(body, "operator", OPERATOR_MAX))
         if r.get("error"):
             raise CadError(r["error"])
         return dict(r, incident_id=iid, number=inc["number"])

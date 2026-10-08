@@ -1,6 +1,11 @@
 """CAD JSON API under /api/cad/ (served by sizeup/web/server.py). Every POST takes a JSON body;
 a bad one is a 400 {"error": reason}.
 
+Who: on the hub behind Cloudflare Access the server hands each request the verified identity
+(sizeup/cloud/access.py), and every POST's `operator` is that person ("Name <email>", Settings >
+Users), whatever the page sent: post() is the one place every write goes through. Without Access,
+`operator` is what the page sent (the Operator field), as before.
+
 GET  /api/cad/state                       lists, units, events (open, recently closed), run cards
 GET  /api/cad/stream                      SSE: the state, pushed every second (server.py)
 GET  /api/cad/geocode?q=209 westchester   location suggestions, Port Chester / Rye Brook first, each with its town
@@ -8,6 +13,7 @@ GET  /api/cad/runcards                    run cards
 GET  /api/cad/incident/<id>               one event with its units, chronology and dispatches
 GET  /api/cad/history                     the Incident database: every numbered event, newest first
 GET  /api/cad/admin                       record counts and the next event number
+GET  /api/cad/whoami                      {email, name, callsign, source: "access" | "none"}: who signed in
 GET  /api/cad/settings                    the Settings page: lists, units, dispatch, operators, system (sizeup/cad/settings.py)
 GET  /api/cad/settings/export             every setting as one JSON file (edits, run cards, operators)
 GET  /api/cad/settings/audit?section=     every Settings change (who, section, key, old -> new), newest first
@@ -79,8 +85,10 @@ class CadApi:
     def __init__(self, cad: Cad):
         self.cad = cad
 
-    def get(self, path: str, query: str) -> tuple[int, bytes, str]:
+    def get(self, path: str, query: str, who=None) -> tuple[int, bytes, str]:
         try:
+            if path == "/api/cad/whoami":
+                return _json(200, self.cad.settings.whoami(who.email if who is not None else ""))
             if path == "/api/cad/settings":
                 return _json(200, self.cad.settings_get())
             if path == "/api/cad/settings/export":
@@ -125,7 +133,7 @@ class CadApi:
             return _json(400, {"error": str(e)})
         return 404, b"not found\n", "text/plain"
 
-    def post(self, path: str, raw: bytes) -> tuple[int, bytes, str]:
+    def post(self, path: str, raw: bytes, who=None) -> tuple[int, bytes, str]:
         try:
             body = json.loads(raw or b"{}")
         except ValueError as e:
@@ -134,6 +142,8 @@ class CadApi:
             return _json(400, {"error": "the body must be a JSON object"})
         c = self.cad
         try:
+            if who is not None and who.email:      # signed in: that's the operator, not what the page typed
+                body["operator"] = c.settings.person(who.email)["operator"]
             if m := SETTINGS.fullmatch(path):
                 return _json(200, c.settings_post(m.group(1), body))
             if path == "/api/cad/incident":

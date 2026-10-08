@@ -284,7 +284,7 @@ def test_operators_add_edit_deactivate_and_the_picker():
     assert [(o["name"], o["role"], o["active"]) for o in cad.settings_get()["operators"]] == [
         ("Pat J.", "viewer", True), ("Corey Smith", "admin", False)]
     cols = {r["name"] for r in cad.store.q("PRAGMA table_info(operators)")}
-    assert cols == {"id", "name", "role", "active", "created_at", "updated_at"}     # sign-in later: add a column
+    assert cols == {"id", "name", "role", "active", "created_at", "updated_at", "email", "callsign"}   # email: Access sign-in
 
 
 # -- export / import --------------------------------------------------------------------------------------------
