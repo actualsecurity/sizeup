@@ -196,6 +196,112 @@ def test_trunk_recorder_log_lines_give_who_is_talking():
     assert lt3.state()[0]["rig"] == "77A4"
 
 
+UNIT_EVENT = Path(__file__).parent.parent / "deploy" / "trunk-recorder" / "unit-event.sh"
+
+
+def unit_script(*args: str) -> tuple[list[str], float]:
+    """Run deploy/trunk-recorder/unit-event.sh the way trunk-recorder 5.2's unit_script plugin does:
+    system("<script> <shortName> <radioID> <event> [<tg> <patches>] &") with trunk-recorder's stdout
+    a pipe sizeup reads line by line. Its lines, and how long the first one took to arrive."""
+    import subprocess
+    t0 = time.time()
+    p = subprocess.Popen(["/bin/sh", "-c", f"{UNIT_EVENT} {' '.join(args)} &"], stdout=subprocess.PIPE)
+    lines = [raw.decode().rstrip("\n") for raw in iter(p.stdout.readline, b"")]
+    took = time.time() - t0
+    p.wait()
+    return lines, took
+
+
+def test_unit_script_prints_only_grants_in_trunk_recorders_argument_order():
+    assert UNIT_EVENT.is_file() and UNIT_EVENT.stat().st_mode & 0o111
+    lines, took = unit_script("westchester", "34701", "call", "307", "")         # no patch: "call 307  &"
+    assert lines == ["SIZEUP-UNIT westchester 34701 call 307"] and took < 1.0
+    assert unit_script("westchester", "34701", "call", "307", "307,111")[0] == ["SIZEUP-UNIT westchester 34701 call 307"]
+    for ev in (("join", "307", ""), ("on",), ("off",), ("ackresp",), ("data",), ("location", "307", "")):
+        assert unit_script("westchester", "34701", *ev)[0] == []
+
+
+def test_a_voice_grant_names_the_talker_at_once():
+    # User 2026-10-08: "we are not identifying who is talking on FireEMS15 ... quick enough, it shows
+    # up after a few seconds and after, but we really need to on keypress". The grant is the keypress.
+    clock = Clock()
+    c = cad()
+    c.radios.heard("p25", "41228", "77A4")                                    # a radio on a rig
+    pokes, notes = [], []
+    lt = LiveTalk(resolve=c.radios.resolve, tg_name={307: "Fire/EMS 15", 383: "WCPD Ch 1"}.get, clock=clock,
+                  on_change=lambda: pokes.append(clock.t), main=lambda tg: tg == 307, debug=notes.append)
+    head = ("[2026-10-08 13:26:29.132061] (info)   [westchester]\t\x1b[0;34m140C\x1b[0m\tTG: \x1b[35m       307"
+            "\x1b[0m\tFreq: 476.112500 MHz\t")
+    line = unit_script("westchester", "41228", "call", "307", "")[0][0]
+    # The grant alone (its "Starting" line not read yet): talking now, pushed before feed_line returns.
+    assert lt.feed_line(line) and pokes == [clock.t]
+    s = lt.state()
+    assert [(e["radio_id"], e["rig"], e["channel"], e["tg"], e["ended"]) for e in s] == [
+        ("41228", "77A4", "Fire/EMS 15", 307, False)]
+    assert len(notes) == 1 and "radio 41228 (77A4) talking via grant" in notes[0] and "ms after the grant" in notes[0]
+    talk_since = s[0]["talk_since"]
+    clock.t += 0.01
+    # trunk-recorder's own lines for the same call: one entry, the same talker, nothing new to push.
+    assert lt.feed_line(head + "\x1b[32mStarting P25 Recorder Num [0]\x1b[0m\tTDMA: true\tSlot: 1\tQPSK: true")
+    assert [(e["radio_id"], e["talk_since"]) for e in lt.state()] == [("41228", talk_since)]
+    assert not lt.feed_line(line)                                             # the same grant again
+    assert not lt.feed_line(head + "Unit ID set via Control Channel, ext: 41228\tcurrent: -1\t samples: 0")
+    lt.feed_line(head + "New MotoP25_TDMA alias: 41228 (77A4)")                 # the alias, seconds later
+    assert [(e["radio_id"], e["alias"], e["talk_since"]) for e in lt.state()] == [("41228", "77A4", talk_since)]
+    assert len(notes) == 1                                                    # not named a second time
+    # A re-grant with a new source on the same talkgroup = the next key-up: the talker switches.
+    clock.t += 3
+    assert lt.feed_line("SIZEUP-UNIT westchester 600003 call 307")
+    s = lt.state()
+    assert [(e["radio_id"], e["rig"], e["talk_since"]) for e in s] == [("600003", "", clock.t)]   # unknown: the ID
+    assert "radio 600003 (unknown radio)" in notes[-1]
+    clock.t += 2
+    assert lt.feed_line("SIZEUP-UNIT westchester 41228 call 307")             # and back
+    assert [e["radio_id"] for e in lt.state()] == ["41228"]
+    # The call ends: cleared; the "Transmission src" lines name only talkers already shown: no flash,
+    # (the finished call's JSON is the record: radio/p25.py), so nobody is shown twice.
+    clock.t += 4
+    assert lt.feed_line(head + "Concluding Recorded Call - Last Update: 4s\tRecorder last write:4.48\tCall Elapsed: 9")
+    assert lt.state() == []
+    for src in ("41228 (77A4)", "600003 (60 Ctrl OP 3)", "41228 (77A4)"):
+        lt.feed_line(head + f"- Transmission src: {src} pos:  0.00 length:  2.76")
+    assert lt.state() == []
+    # Starting first, the grant a few ms later (the script runs in the background): named at the grant.
+    head2 = head.replace("140C", "141C")
+    lt.feed_line(head2 + "Starting P25 Recorder Num [1]\tTDMA: true\tSlot: 0\tQPSK: true")
+    assert [e["radio_id"] for e in lt.state()] == [""]
+    assert lt.feed_line("SIZEUP-UNIT westchester 34701 call 307")
+    assert [e["radio_id"] for e in lt.state()] == ["34701"] and len(lt.state()) == 1
+    # A grant written between a log message and its newline (two writes to the same pipe): both read.
+    clock.t += 1
+    assert lt.feed_line(head2 + "Unit ID set via Control Channel, ext: 34701\tcurrent: -1\t samples: 0"
+                        "SIZEUP-UNIT westchester 41228 call 307")
+    assert [e["radio_id"] for e in lt.state()] == ["41228"]
+    # Not a talker: a grant with no source, other unit events.
+    assert not lt.feed_line("SIZEUP-UNIT westchester -1 call 307")
+    assert not lt.feed_line("SIZEUP-UNIT westchester 0 call 307")
+    assert not lt.feed_line("SIZEUP-UNIT westchester 41228 join 307")
+
+
+def test_a_grant_on_a_talkgroup_nothing_records_shows_until_its_timeout():
+    from sizeup.radio.live import GRANT_IDLE_S, GRANT_S
+    clock = Clock()
+    notes = []
+    lt = LiveTalk(tg_name={383: "WCPD Ch 1"}.get, clock=clock, main=lambda tg: tg == 307, debug=notes.append)
+    assert lt.feed_line("SIZEUP-UNIT westchester 5551 call 383")
+    assert [(e["radio_id"], e["channel"], e["main"]) for e in lt.state()] == [("5551", "WCPD Ch 1", False)]
+    assert notes == []                                                        # debug only for main talkgroups
+    clock.t += GRANT_IDLE_S - 0.5
+    assert len(lt.state()) == 1
+    clock.t += 1
+    assert lt.state() == []
+    # A held grant too old for the call that starts later: that call starts with no talker.
+    lt.feed_line("SIZEUP-UNIT westchester 5551 call 383")
+    clock.t += GRANT_S + 0.5
+    lt.feed_line("[westchester]\t9C\tTG:        383\tFreq: 476.112500 MHz\tStarting P25 Recorder Num [3]")
+    assert [e["radio_id"] for e in lt.state()] == [""]
+
+
 def test_fg1_open_squelch_is_talking_and_live_mdc_names_the_rig(tmp_path):
     app = App(cfg(tmp_path))
     app._kind = {"FG1": "traffic"}

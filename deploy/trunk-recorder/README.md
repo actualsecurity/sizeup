@@ -21,12 +21,28 @@ On a one-dongle bench, stop sizeup's paging/fireground receivers first (they use
 
 ## Who is talking, live (sizeup's "talking" highlight)
 
-sizeup reads trunk-recorder's output as it comes: "Unit ID set via Control Channel" names each new
-talker mid-call, and the "Transmission src" lines name everyone when a call ends. trunk-recorder
-logs no unit for a call's *first* transmission, so a one-transmission call shows its talker only when
-it ends. To name the first talker at the grant, enable the unit script (forks a tiny shell per unit
-event on the system):
+The talker is named at the keypress: trunk-recorder's unit_script plugin runs `unit-event.sh` for
+every voice grant (and every re-grant with a new source on a call in progress, i.e. the next
+key-up), on every talkgroup of the system:
 
-```json
-"systems": [{ ..., "unitScript": "./unit-event.sh" }]
-```
+    unit-event.sh <shortName> <radioID> call <talkgroup> [patches]
+
+The script prints `SIZEUP-UNIT westchester 41228 call 307` to trunk-recorder's stdout, which sizeup
+reads line by line (`sizeup/radio/live.py`): the radio ID is resolved to its rig (CAD radio
+registry) and pushed to the pages and the hub at once (bench: ~8 ms from the grant to "talking").
+
+sizeup turns it on by itself: the `config.runtime.json` it generates from `config.json` sets
+`"unitScript"` on each system to this directory's `unit-event.sh` by absolute path (`./unit-event.sh`
+if that path is too long for the plugin's 200-byte command line; `"unitScript": ""` in config.json
+turns it off). It takes effect when sizeup (re)starts trunk-recorder: switch the dongle Off and back to
+Fire/EMS 15, or restart sizeup. trunk-recorder's log should then list
+`- [westchester]: /…/unit-event.sh` under PLUGINS, and sizeup's log
+`live p25: Fire/EMS 15 (TG 307) radio … talking via grant: published N ms after the grant` per
+key-up on a main talkgroup.
+
+Without it, the talker comes from trunk-recorder's log only: the alias line 3-4 s into the call, or
+the "Transmission src" lines when the call ends (station log, 2026-10-08: median 3.9 s on Fire/EMS 15,
+a third of the calls named only at the end). Those lines are still read (they fill in aliases, and
+a talker never shown live is flashed as "just transmitted"); the finished call's JSON stays the
+record of who said what. The plugin forks a tiny shell per unit event on the system (registrations
+and affiliations too); only grants print.
