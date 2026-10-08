@@ -19,7 +19,7 @@ audio_max_mb = 500                 # received clips kept in audio.sqlite (oldest
 access_team = "yoda.cloudflareaccess.com"
 # The "sizeup" Access application's Application Audience (AUD) Tag: Zero Trust → Access controls →
 # Applications → sizeup → Overview. 64 hex digits; or SIZEUP_ACCESS_AUD.
-access_aud = ""
+access_aud = "12529a64fd59333b30c2b9c681726f2c15339084be03f4d5c7f8ac4b72cdf736"
 
 [station]
 id = "pcfd-hub"
