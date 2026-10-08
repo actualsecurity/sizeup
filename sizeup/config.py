@@ -60,6 +60,17 @@ class Config:
     unit_callsigns: dict[str, str] = field(default_factory=dict)    # "2398" -> "2398 Duty Officer"
     stt_beam_size: int = 0            # whisper-server -bs (0/1 = greedy). Beam search: fewer garbled digit strings
     stt_talker_prompt: str = "off"    # "ids": hint whisper with who keyed up ("77 Alpha 4, 60 Control"); "ids+time": + HHMM
+    # Amazon Transcribe streaming ([stt] aws*, sizeup/transcribe.py, sizeup/channels.py): where it runs (the hub;
+    # all-in-one only with credentials here), and which channels default to it (Settings > Radios changes that).
+    stt_aws: bool = False             # this process may call Transcribe (the hub: deploy/hub/config.hub.toml)
+    stt_aws_region: str = ""          # "" = AWS_REGION / AWS_DEFAULT_REGION (the Fargate task has it), else us-east-1
+    stt_aws_endpoint: str = ""        # the streaming endpoint (tests / dev: a local fake ws://127.0.0.1:port)
+    stt_aws_api_endpoint: str = ""    # the JSON API for the custom vocabulary (tests / dev: a local fake)
+    stt_aws_idle_s: float = 120.0     # a channel's stream ends this long after its last transmission
+    stt_aws_pace: float = 2.0         # audio sent this many times faster than real time
+    stt_aws_limit_usd: float = 25.0   # the monthly limit until Settings > Radios sets one
+    stt_aws_channels: tuple[str, ...] = ("South 2", "FG1", "tg:307")   # engine "aws" by default
+    stt_aws_vocabulary: str = "sizeup-pcfd"
     shared_device: str = ""      # one dongle for everything (bench): switch channel / P25 in the web app
     start_mode: str = ""         # with shared_device: what the dongle does at startup ("South 2", "FG1", "Fire/EMS 15")
     sdrs: tuple[str, ...] = ()   # dongles (exact USB serials) sizeup may use, each switched in the web app
@@ -262,6 +273,29 @@ def _prealert(data: dict) -> dict:
                 prealert_heartbeat_stale_min=stale)
 
 
+def _stt_aws(stt: dict) -> dict:
+    """[stt] aws*: Amazon Transcribe (sizeup/transcribe.py). aws_channels: labels or talkgroup numbers."""
+    try:
+        idle, pace = float(stt.get("aws_idle_s", 120)), float(stt.get("aws_pace", 2.0))
+        limit = float(stt.get("aws_monthly_limit_usd", 25))
+    except (TypeError, ValueError):
+        raise ConfigError("stt.aws_idle_s, aws_pace, aws_monthly_limit_usd: numbers") from None
+    if not 1 <= idle <= 3600 or not 0.5 <= pace <= 10 or not 0 <= limit <= 10000:
+        raise ConfigError("stt.aws_idle_s: 1 to 3600; aws_pace: 0.5 to 10; aws_monthly_limit_usd: 0 to 10000")
+    chans = stt.get("aws_channels", ["South 2", "FG1", 307])
+    if not isinstance(chans, list):
+        raise ConfigError('stt.aws_channels: a list of channel labels and talkgroups, e.g. ["South 2", "FG1", 307]')
+    names = tuple(f"tg:{c}" if isinstance(c, int) else str(c) for c in chans)
+    vocab = str(stt.get("aws_vocabulary", "sizeup-pcfd"))
+    if not re.fullmatch(r"[0-9a-zA-Z._-]{1,200}", vocab):
+        raise ConfigError("stt.aws_vocabulary: letters, digits, . _ -")
+    return dict(stt_aws=bool(stt.get("aws", False)), stt_aws_region=str(stt.get("aws_region", "")),
+                stt_aws_endpoint=str(stt.get("aws_endpoint", "")).rstrip("/"),
+                stt_aws_api_endpoint=str(stt.get("aws_api_endpoint", "")).rstrip("/"),
+                stt_aws_idle_s=idle, stt_aws_pace=pace, stt_aws_limit_usd=limit, stt_aws_channels=names,
+                stt_aws_vocabulary=vocab)
+
+
 def load(path: str | Path) -> Config:
     path = Path(path)
     base = path.parent
@@ -320,10 +354,13 @@ def load(path: str | Path) -> Config:
                               t.get("agency", "")))
         if t.get("ours", False):
             ours.add(t["name"])
-    stt = _take(data.get("stt", {}), "stt", {"server_binary", "model", "port", "threads", "prompt", "talker_prompt", "beam_size"})
+    stt = _take(data.get("stt", {}), "stt", {"server_binary", "model", "port", "threads", "prompt", "talker_prompt", "beam_size",
+                                             "aws", "aws_region", "aws_endpoint", "aws_api_endpoint", "aws_idle_s", "aws_pace",
+                                             "aws_monthly_limit_usd", "aws_channels", "aws_vocabulary"})
     talker_mode = str(stt.get("talker_prompt", "off"))
     if talker_mode not in ("off", "ids", "ids+time"):
         raise ConfigError('stt.talker_prompt: "off", "ids" or "ids+time"')
+    aws_stt = _stt_aws(stt)
     p25 = _take(data.get("p25", {}), "p25", {"capture_dir", "talkgroups", "talkgroups_file", "incident_talkgroups",
                                              "aliases", "recorder", "recorder_dir"})
     p25_tgs = {int(k): v for k, v in p25.get("talkgroups", {"307": "Fire/EMS 15"}).items()}
@@ -420,7 +457,7 @@ def load(path: str | Path) -> Config:
         ours=frozenset(ours | {"Port Chester FD", "Rye Brook FD"}),
         stt_server=stt.get("server_binary", "whisper-server"), stt_model=rel(stt.get("model", "models/ggml-large-v3-turbo.bin")),
         stt_port=int(stt.get("port", 8179)), stt_threads=int(stt.get("threads", 8)), stt_prompt=stt.get("prompt", ""),
-        stt_talker_prompt=talker_mode, stt_beam_size=int(stt.get("beam_size", 0)),
+        stt_talker_prompt=talker_mode, stt_beam_size=int(stt.get("beam_size", 0)), **aws_stt,
         p25_dir=rel(p25.get("capture_dir", "")),
         p25_talkgroups=p25_tgs, p25_tg_info=p25_info,
         p25_incident_talkgroups=frozenset(int(x) for x in p25.get("incident_talkgroups", [307, 333])),

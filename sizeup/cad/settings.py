@@ -20,6 +20,10 @@ Reset to default = drop the override (one item, or a whole section).
     dispatch                       key "tones" -> PCFD's tone groups, "channels" -> [labels], "voice", "speed";
                                    the ETA estimates (sizeup/cad/eta.py): "road_factor", "speed_kmh", "turnout_min",
                                    "return_margin_min", "order" (nearest | card), "quarters_status"
+    channels                       key "FG1" | "South 2" | "tg:307" -> {record?, transcribe?, engine?}: which channel is
+                                   kept, transcribed, and by what (sizeup/channels.py; Settings > Radios)
+    stt                            key "vocabulary" -> [phrases] (Amazon Transcribe's custom vocabulary),
+                                   "aws_monthly_limit_usd" -> the monthly AWS limit (sizeup/transcribe.py)
 
 Codes never change (they are stored on events and exported): a rename changes the name only. An
 item in use can't be deleted, only retired (named on old events, off the pick lists). Every change
@@ -40,6 +44,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 
+from sizeup import channels as channels_mod
 from sizeup.cad import dispatcher, eta, runcards
 from sizeup.cad import lists as lists_mod
 from sizeup.cad.lists import CLASSES, CODE, COLOR, LIST_SECTIONS, LONG_CODE, RESPONSES, ROLES, ListsError
@@ -55,7 +60,8 @@ EMAIL = re.compile(r"[^@\s<>]{1,64}@[^@\s<>]{1,190}\.[^@\s<>]{1,63}")
 # Where each stored section shows in Settings (the audit log's section).
 PAGE_SECTION = {**{s: "lists" for s in LIST_SECTIONS}, "event_class": "lists", "geo_town_order": "lists", "status_flow": "lists",
                 "type_subtypes": "lists",
-                "units": "units", "dispatch_wording": "dispatch", "dispatch_tones": "dispatch", "dispatch": "dispatch"}
+                "units": "units", "dispatch_wording": "dispatch", "dispatch_tones": "dispatch", "dispatch": "dispatch",
+                "channels": "radios", "stt": "radios"}
 AUDIT_SECTIONS = ("lists", "run cards", "units", "dispatch", "users", "system", "radios")
 LIST_FIELDS = {"event_types": ("color",), "event_subtypes": (), "dispositions": (), "received_via": (),
                "unit_statuses": ("role", "bg", "fg")}
@@ -70,6 +76,7 @@ WORDING = (("new", "First dispatch"), ("add_on", "Added to the assignment"), ("u
            ("change_type_full", "Upgrade: new type, full response"), ("change_full", "Upgrade: full response"),
            ("respond", "Upgrade: more units"))
 MAX_TONES, MAX_GROUPS, MAX_CHANNELS = 8, 4, 8
+MAX_VOCAB, MAX_PHRASE_CHARS = 500, 100
 
 
 def tone_groups(tones) -> list[list[list[float]]]:
@@ -514,7 +521,7 @@ class Editor:
             return self._list_op(section, action, body, op)
         fn = {"event_class": self._class_op, "status_flow": self._flow_op, "type_subtypes": self._map_op, "geo_town_order": self._towns_op, "units": self._units_op,
               "dispatch": self._dispatch_op, "users": self._users_op, "runcards": self._cards_op,
-              "import": self._import_op}.get(section)
+              "import": self._import_op, "channels": self._channels_op, "stt": self._stt_op}.get(section)
         if fn is None:
             raise CadError(f"no settings section {section!r}")
         if section in ("users", "import"):
@@ -1138,6 +1145,169 @@ class Editor:
                           "full response, with a joint department) and a commercial fire alarm (add-on, upgrade, only the "
                           "joint department's units)."}
 
+    # -- radios: channels (record / transcribe / engine) and speech-to-text (sizeup/channels.py) ---------------
+
+    def channel_overrides(self) -> dict:
+        return dict(self.overrides().get(channels_mod.SECTION) or {})
+
+    def _channel_value(self, key: str, cur: dict, vals: dict):
+        """The override to store for key: only what differs from the default (REMOVE: nothing does)."""
+        dflt = channels_mod.defaults(key, self._aws_channels())
+        new = {k: v for k, v in {**cur, **vals}.items() if k in channels_mod.FIELDS and v != dflt.get(k)}
+        if channels_mod.is_tg(key):
+            new.pop("record", None)
+        return new or REMOVE
+
+    def _aws_channels(self) -> tuple:
+        ctx = self.cad.radio_ctx
+        return tuple(ctx.aws_channels()) if ctx is not None else channels_mod.DEFAULT_AWS
+
+    def _channels_op(self, action: str, body: dict, op: str) -> dict:
+        """set {key, record?, transcribe?, engine?} | set_many {keys, transcribe?, engine?} | reset {key}.
+        A talkgroup's record goes to its own Record switch (the station's TalkgroupPrefs)."""
+        ctx = self.cad.radio_ctx
+        locked = ctx.channels_locked() if ctx is not None else ""
+        if locked:
+            raise CadError(locked)
+        ov = self.channel_overrides()
+        aws = self._aws_channels()
+        if action in ("set", "set_many"):
+            keys = [body.get("key")] if action == "set" else body.get("keys")
+            if not isinstance(keys, list) or not 1 <= len(keys) <= 2000:
+                raise CadError("keys: a list of channels")
+            try:
+                vals = {k: channels_mod.clean(k, {f: body.get(f) for f in channels_mod.FIELDS}) for k in keys}
+            except ValueError as e:
+                raise CadError(str(e)) from None
+            changes, audit = [], []
+            for key, v in vals.items():
+                if channels_mod.is_tg(key) and "record" in v:
+                    rec = v.pop("record")
+                    err = ctx.set_talkgroup(int(key[3:]), rec) if ctx is not None else "no talkgroups here"
+                    if err:
+                        raise CadError(err)
+                if not v:
+                    continue
+                cur = ov.get(key) or {}
+                new = self._channel_value(key, cur, v)
+                before, after = channels_mod.pref(key, ov, aws), channels_mod.pref(key, {key: {} if new is REMOVE else new}, aws)
+                if before != after:
+                    changes.append((channels_mod.SECTION, key, new))
+                    audit.append(("radios", f"channel/{key}", {k: before[k] for k in v}, {k: after[k] for k in v}))
+            if not changes:
+                return {"ok": True}
+            out = self._commit(changes, op, audit)
+        elif action == "reset":
+            key = _text(body.get("key"), "key", 40)
+            if key not in ov:
+                return {"ok": True}
+            out = self._commit([(channels_mod.SECTION, key, REMOVE)], op,
+                               [("radios", f"channel/{key}", ov[key], "default")])
+        else:
+            raise CadError("action: set, set_many or reset")
+        if ctx is not None:
+            ctx.channels_changed()
+        return out
+
+    def replace_channels(self, prefs: dict, operator: str) -> bool:
+        """The whole channel map as the hub sent it (the station applying the CAD of record's choices).
+        True when anything changed."""
+        cur = self.channel_overrides()
+        changes = [(channels_mod.SECTION, k, REMOVE) for k in cur if k not in prefs]
+        changes += [(channels_mod.SECTION, k, v) for k, v in prefs.items() if cur.get(k) != v]
+        if not changes:
+            return False
+        self._commit(changes, operator, [("radios", f"channel/{k}", cur.get(k), None if v is REMOVE else v)
+                                         for _s, k, v in changes])
+        return True
+
+    def stt_values(self) -> dict:
+        return dict(self.overrides().get("stt") or {})
+
+    def _vocab_list(self, v) -> list[str]:
+        if not isinstance(v, list) or len(v) > MAX_VOCAB:
+            raise CadError(f"vocabulary: a list of at most {MAX_VOCAB} phrases")
+        out = []
+        for i, x in enumerate(v):
+            x = _text(x, f"vocabulary[{i}]", MAX_PHRASE_CHARS, required=False)
+            x = " ".join(x.split())
+            if x and x.lower() not in {y.lower() for y in out}:
+                out.append(x)
+        return out
+
+    @staticmethod
+    def _limit(v) -> float:
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 <= v <= 10000:
+            raise CadError("aws_monthly_limit_usd: 0 to 10000 (dollars)")
+        return round(float(v), 2)
+
+    def _stt_op(self, action: str, body: dict, op: str) -> dict:
+        """set {key: vocabulary | aws_monthly_limit_usd, value} | reset {key} | push (the vocabulary to AWS)."""
+        ctx = self.cad.radio_ctx
+        cur = self.stt_values()
+        if action == "push":
+            if ctx is None:
+                raise CadError("no speech-to-text here")
+            phrases = self.vocabulary()
+            st = ctx.vocabulary_push(phrases)
+            with self.store.tx() as db:
+                self._audit(db, self.store.clock(), op, "radios", "vocabulary/push", None,
+                            f"{len(phrases)} phrases: {st.get('state', '?')}")
+            return {"ok": st.get("state") != "error", "vocabulary": st, **({"error": st["reason"]}
+                                                                           if st.get("state") == "error" else {})}
+        key = _text(body.get("key"), "key", 40)
+        if key not in ("vocabulary", "aws_monthly_limit_usd"):
+            raise CadError("key: vocabulary or aws_monthly_limit_usd")
+        if action == "set":
+            if key == "vocabulary":
+                v = self._vocab_list(body.get("value"))
+                dflt = ctx.vocabulary_suggestions() if ctx is not None else []
+                new = REMOVE if v == dflt else v
+                shown = (f"{len(cur[key])} phrases" if key in cur else "default"), f"{len(v)} phrases"
+            else:
+                v = self._limit(body.get("value"))
+                dflt = ctx.aws_limit_default() if ctx is not None else 25.0
+                new = REMOVE if v == dflt else v
+                shown = cur.get(key, dflt), v
+            out = self._commit([("stt", key, new)], op, [("radios", f"stt/{key}", *shown)])
+        elif action == "reset":
+            out = self._commit([("stt", key, REMOVE)], op, [("radios", f"stt/{key}", "edited", "default")])
+        else:
+            raise CadError("action: set, reset or push")
+        if ctx is not None:
+            ctx.channels_changed()
+        return out
+
+    def vocabulary(self) -> list[str]:
+        v = self.stt_values().get("vocabulary")
+        if isinstance(v, list):
+            return [str(x) for x in v]
+        ctx = self.cad.radio_ctx
+        return list(ctx.vocabulary_suggestions()) if ctx is not None else []
+
+    def aws_limit(self) -> float:
+        v = self.stt_values().get("aws_monthly_limit_usd")
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            return float(v)
+        ctx = self.cad.radio_ctx
+        return ctx.aws_limit_default() if ctx is not None else 25.0
+
+    def stt_page(self) -> dict:
+        """GET /api/cad/stt: the vocabulary (as edited, as AWS gets it, its state there), the limit, AWS's use."""
+        from sizeup.transcribe import build_vocabulary
+        ctx = self.cad.radio_ctx
+        cur = self.stt_values()
+        phrases = self.vocabulary()
+        built = build_vocabulary(phrases)
+        return {"vocabulary": {"phrases": phrases, "edited": "vocabulary" in cur,
+                               "suggestions": ctx.vocabulary_suggestions() if ctx is not None else [],
+                               "aws": built["phrases"], "skipped": built["skipped"],
+                               "sig": channels_mod.phrases_sig(built["phrases"]),
+                               "state": ctx.vocabulary_state() if ctx is not None else {"state": "none"}},
+                "limit": {"value": self.aws_limit(), "default": ctx.aws_limit_default() if ctx is not None else 25.0,
+                          "edited": "aws_monthly_limit_usd" in cur},
+                "aws": ctx.aws_status() if ctx is not None else {"enabled": False}}
+
     # -- run cards: reset ------------------------------------------------------------------------------
 
     def _cards_op(self, action: str, body: dict, op: str) -> dict:
@@ -1344,6 +1514,18 @@ class Editor:
             self._channels(d["channels"])
         if set(d) - {"tones", "channels", "voice", "speed", *eta.KEYS}:
             raise CadError(f"overrides.dispatch: tones, channels, voice, speed and {', '.join(eta.KEYS)} only")
+        for k, v in (ov.get(channels_mod.SECTION) or {}).items():
+            try:
+                channels_mod.clean(k, v)
+            except ValueError as e:
+                raise CadError(f"overrides.channels.{k}: {e}") from None
+        st = ov.get("stt") or {}
+        if set(st) - {"vocabulary", "aws_monthly_limit_usd"}:
+            raise CadError("overrides.stt: vocabulary and aws_monthly_limit_usd only")
+        if "vocabulary" in st:
+            self._vocab_list(st["vocabulary"])
+        if "aws_monthly_limit_usd" in st:
+            self._limit(st["aws_monthly_limit_usd"])
         L = self.build(ov)
         for k in eta.KEYS:
             if k in d:
@@ -1499,4 +1681,6 @@ class Editor:
         self._use(L, ov)
         self.store.sync_units()
         self.store.rev += 1
+        if self.cad.radio_ctx is not None and any(c["store"] in (channels_mod.SECTION, "stt") for c in changes):
+            self.cad.radio_ctx.channels_changed()
         return {"ok": True, "dry_run": False, "changes": changes}

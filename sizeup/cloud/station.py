@@ -13,7 +13,8 @@
                        voice status, re-run progress and the outbox size (also the heartbeat)
     jobs thread        GET /api/station/jobs?wait=25 (long poll: the station never takes inbound
                        connections): "tts" renders a dispatch with the local voice; "call" runs
-                       set_mode / set_talkgroup / set_talkgroup_group / retranscribe here
+                       set_mode / set_talkgroup / set_talkgroup_group / retranscribe / set_channel_prefs
+                       (Settings > Radios > Channels, as the hub has them) here
 
 Clips go as 8 kHz WAV: they are already band-limited to 300-3300 Hz (stt.radio_voice), so
 halving the rate halves the upload and changes nothing you can hear.
@@ -44,7 +45,7 @@ STATUS_S = 5.0           # radio / SDR / STT / voice status (and the heartbeat)
 TALKGROUPS_S = 30.0      # the talkgroup list (big, slow to change): this often, or when a switch changes
 JOB_WAIT_S = 25          # long poll; Cloudflare allows 100 s
 CONNECTED_S = 15.0       # no answer from the hub this long = not connected (the station's own header)
-CALLS = ("set_mode", "set_talkgroup", "set_talkgroup_group", "retranscribe")
+CALLS = ("set_mode", "set_talkgroup", "set_talkgroup_group", "retranscribe", "set_channel_prefs")
 
 
 def clip_8k(wav: bytes | None) -> bytes | None:
@@ -207,6 +208,7 @@ class StationLink:
         out = {"id": self.cfg.station_id, "name": self.cfg.station_name,
                "radios": [r for r in app.radio_status() if r.get("label") != "Hub"],
                "sdr": app.sdr(), "rerun": dict(app.rerun, pending=len(app._rerun_ids)),
+               "channels": app.channels_applied(),
                "outbox": {"pending": n, "oldest": oldest, "dropped_audio": self.outbox.dropped_audio}}
         if talkgroups:
             out["talkgroups"] = app.tg.state() if app.p25 else []

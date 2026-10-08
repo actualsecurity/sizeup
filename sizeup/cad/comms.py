@@ -154,8 +154,13 @@ class Comms:
             self.rev += 1
         return {"linked": True, "why": "manual"}
 
-    def retext(self, tid: str, text: str, status: str, model: str = "") -> bool:
+    def retext(self, tid: str, text: str, status: str, model: str = "", alt: dict | None = None) -> bool:
+        """New text for a transmission. alt {text, model}: the other engine's transcript, kept to compare
+        ("both": Amazon Transcribe's is the text, whisper's the alternative)."""
         with self.store.tx() as db:
+            if alt is not None:
+                db.execute("UPDATE radio_traffic SET alt_text = ?, alt_model = ? WHERE id = ?",
+                           (str(alt.get("text") or ""), str(alt.get("model") or ""), tid))
             n = db.execute("UPDATE radio_traffic SET text = ?, status = ?, model = ?, updated_at = ? WHERE id = ?",
                            (text, status, model, self.clock(), tid)).rowcount
             if n:

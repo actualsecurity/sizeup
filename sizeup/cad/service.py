@@ -170,6 +170,10 @@ class Cad:
         # The phone pre-alert from Tapout (sizeup/prealert.py PreAlerts), set by the app on the CAD of
         # record (hub, all-in-one) when [prealert] is on; None: no pre-alerts here.
         self.prealert = None
+        # The radios' side of Settings > Radios > Channels / Vocabulary (sizeup/channels.py): the app
+        # (App) answers channels_locked(), set_talkgroup(tg, record), channels_changed(), aws_channels(),
+        # vocabulary_suggestions() / _push(phrases) / _state(), aws_status(), aws_limit_default(). None: alone.
+        self.radio_ctx = None
 
     @classmethod
     def from_config(cls, cfg, geocoder=None, log=print) -> Cad:

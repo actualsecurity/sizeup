@@ -381,6 +381,10 @@ class Store:
         for stmt in ACTIVITY_SCHEMA.split(";"):          # per-person activity (2026-10-08): the same way
             if stmt.strip():
                 self.db.execute(stmt)
+        tcols = {r["name"] for r in self.db.execute("PRAGMA table_info(radio_traffic)")}
+        for col in ("alt_text", "alt_model"):            # the second transcript ("both": whisper next to AWS), 2026-10-08
+            if tcols and col not in tcols:
+                self.db.execute(f"ALTER TABLE radio_traffic ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
         cols = {r["name"] for r in self.db.execute("PRAGMA table_info(operators)")}
         if not cols:
             return
@@ -586,6 +590,17 @@ class Store:
                     store.lock.release()
                 return False
         return _Tx()
+
+    def meta_get(self, key: str) -> str | None:
+        with self.lock:
+            r = self.db.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        return r[0] if r else None
+
+    def meta_put(self, key: str, value: str) -> None:
+        """A small value (AWS usage, the vocabulary's state): written at once, not a CAD change (no rev)."""
+        with self.lock:
+            self.db.execute("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                            (key, value))
 
     def q(self, sql: str, args=()) -> list[dict]:
         with self.lock:

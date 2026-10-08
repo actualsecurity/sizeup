@@ -56,9 +56,9 @@ same App code, so the hub's monitor and CAD come out as they would locally.
 
 | event | emitted in | carries | the hub does |
 |---|---|---|---|
-| `page` | `_segment` (paging channel) | the page (tones, departments, times) + its clip | `_page_heard`: listed; a tones-only page waits for its voice |
+| `page` | `_segment` (paging channel) | the page (tones, departments, times) + its clip; `stt: "aws"` (no `page_text` follows) / `"both"` | `_page_heard`: listed; a tones-only page waits for its voice; "aws": Amazon Transcribe reads the voice, then the dispatch is parsed |
 | `page_text` | `_transcribed` | the page's transcript | `_transcribed`: parses the dispatch itself → monitor incident → **pending CAD event** (`from_monitor`) |
-| `traffic` | `_transcribed` | a finished transmission: times, channel / talkgroup, talker, radio IDs (P25: ID + alias per talker), transcript, model, whether it attaches to our incident + its clip | rig from the **hub's** radio registry, then `_transcribed`: monitor + CAD communications log (links to events) |
+| `traffic` | `_transcribed` | a finished transmission: times, channel / talkgroup, talker, radio IDs (P25: ID + alias per talker), transcript, model, whether it attaches to our incident + its clip; `transcript_pending: "aws"` (no text: the station skipped whisper) or `stt: "both"` | rig from the **hub's** radio registry, then `_transcribed`: monitor + CAD communications log (links to events); "aws" / "both": Amazon Transcribe on the clip (below) |
 | `retext` | `_retext` | new text for a page / transmission (a re-run) | `_retext`: monitor, page dispatch, CAD log; old text kept in history |
 | `heard` | `_heard` | a radio ID (and P25 alias) heard on the air | the hub's radio registry learns it |
 
@@ -79,7 +79,8 @@ back as `POST /api/station/jobs/<id>`), handed out once, dropped if not picked u
 |---|---|---|---|
 | `tts` | a dispatch / preview / upgrade on the hub when Polly failed (`Cad._render_hub` → `_render_remote`), or always with an engine other than `polly` | renders it with `render_dispatch` and its Kokoro (`say` as its fallback), returns the WAV | at once (offline) or after 20 s: **text only**, the note says why: "Voice unavailable — Polly: AccessDeniedException: …; station offline since 14:02: text only" (or "didn't answer in 20 s"); never a hung request |
 | `call` `set_mode`, `set_talkgroup`, `set_talkgroup_group` | the hub's SDR / talkgroup switches | runs it, returns its own refusal if any | the switch is refused with the reason ("station offline since 12:03") |
-| `call` `retranscribe` | "Re-run" on the hub | queues it; new text comes back as `retext` | refused: speech-to-text runs on the station |
+| `call` `retranscribe` | "Re-run" on the hub, or Amazon Transcribe failing for a clip the station didn't run whisper on | queues it; new text comes back as `retext` | refused: speech-to-text runs on the station (a failed AWS clip then says "transcription failed") |
+| `call` `set_channel_prefs` | Settings > Radios > Channels on the hub, or the station reporting other choices than the hub's (`channels.sig` in its state) | applies the whole map + whether AWS can take audio now, keeps it (its own Settings overrides, audited as "hub"), reports `{prefs, aws, sig}` | sent when it's back: the Channels card says "Station offline ...: these apply when it's back" |
 
 Settings, run cards, units, radio IDs and every CAD record stay on the hub. The station's own CAD
 keeps working for local use, with a banner on its `/cad`: the CAD of record is the hub.
@@ -325,6 +326,84 @@ SIZEUP_STATE_DIR=$(mktemp -d) SIZEUP_STATION_TOKEN=$(openssl rand -hex 32) \
   python -m sizeup --config deploy/hub/config.hub.toml        # http://localhost:8090/cad, /healthz
 ```
 
+## Speech-to-text per channel: whisper on the station, Amazon Transcribe on the hub
+
+> "lets try it [AWS Transcribe], but lets make it configurable, which channel in the settings gets
+> recorded ... and of which, which gets transcribed, and which transcription to use, that will let us
+> test aws transcribe on the important channels like South 2 paging, Fire/EMS 15 and our fireground for
+> now, and use the existing model infra for the other channels" (user, 2026-10-08)
+
+**Settings → Radios → Channels** (admins; `sizeup/channels.py`): one row per FM channel (FG1, South 2,
+at the top) and per talkgroup, each with
+
+| switch | on | off |
+|---|---|---|
+| Record | the transmission is kept (clip, monitor, CAD log) and forwarded | FM: the receiver keeps running (squelch, MDC IDs, Talking now stay live), nothing is kept or forwarded. Talkgroup: its existing Record switch (calls dropped on arrival) |
+| Main | (talkgroups) up front in Radio, attached to our incident | folded under Other talkgroups |
+| Transcribe | speech-to-text with the Engine | kept without text ("Not transcribed") |
+| Engine | **Local**: whisper.cpp large-v3 on the station (whisper-server, `127.0.0.1:8179`). **AWS**: Amazon Transcribe streaming, called from the hub with its task role; the station skips whisper and sends the clip with `transcript_pending: "aws"`. **Both**: whisper on the station and AWS on the hub; AWS's text is the transcript, whisper's is kept (`alt_text`, `alt_model`) and shown with ⇄ in the Radio view | |
+
+Defaults (`[stt] aws_channels`): **South 2, FG1 and Fire/EMS 15 (TG 307): record, transcribe, AWS**;
+every other talkgroup as before (its Record switch, transcribe, local). Stored as CAD settings
+overrides (section `channels`: only what differs from the default), audited under Radios, in the
+settings export / import. Group switches (Record: all / none per talkgroup section) work as before.
+
+**Where they apply.** The hub is the CAD of record: its choices go to the station as a `call`
+`set_channel_prefs` job (the whole map, and whether the hub can take AWS audio now), whenever the
+`sig` the station reports in its state push differs from the hub's — after a change, after the
+station was offline or restarted, when the monthly limit is reached or a new month starts. The card
+says *Applied on the station*, *Waiting for the station* or *Station offline 12:03: these apply when
+it's back*. On a station that forwards, the channels are read-only ("set on the hub"). All-in-one:
+applied at once, AWS only if that machine has `[stt] aws` and credentials.
+
+**An AWS channel uses whisper whenever AWS can't take audio**: the hub without `[stt] aws`, no
+credentials, or **the monthly limit** (`aws_monthly_limit_usd`, default $25, editable under Vocabulary)
+reached: the station is told (`aws.ok = false`) and runs whisper; the row says "AWS off: local (why)".
+The cost line: *AWS this month: 214 min ≈ $5.14 of $25 limit* (billed seconds per month in the CAD
+database, `meta` `aws_usage:YYYY-MM`; a new month starts at zero).
+
+**How the hub streams** (`sizeup/transcribe.py`, stdlib: RFC 6455 WebSocket, AWS event-stream framing
+with CRC32, SigV4 query signing in `sizeup/aws.py`): Transcribe bills $0.024 a minute with **15 s
+minimum per stream**, so there is **one long-lived stream per channel** (`wss://transcribestreaming.
+<region>.amazonaws.com:8443/stream-transcription-websocket`, en-US, PCM, 8 kHz = the clips the hub
+gets, `vocabulary-name` once the vocabulary is ready). Transmissions are fed back to back (100 ms
+chunks at 2× real time, `aws_pace`) with 0.3 s of silence between them; each one's place in the
+stream is kept, and the words of the final results (their start time) go to the transmission they
+fall in, so a result that runs over two transmissions is split correctly. A transmission is done
+when no open result starts inside it and a final result ended past it, or 1.5 s after its audio went;
+a result still open gets up to 1.5 s more silence, then the stream is ended (which finalizes it).
+The stream is ended `aws_idle_s` (120 s) after the channel's last transmission and opened again on
+the next; while it waits it gets 0.1 s of silence every 10 s (Transcribe closes a stream with no
+audio for 15 s; billed as audio: ~1 % of the idle time). Near the 4-hour stream limit a new stream is
+opened between transmissions. Errors (BadRequest, LimitExceeded, ServiceUnavailable, a dropped
+connection): what wasn't done is tried once more in a new stream after a backoff, then the
+fallback; a 403 (no permission) falls back at once.
+
+**Never dropped.** A transmission waiting for AWS shows at once as "Transcribing"; AWS's text comes
+in like a re-run (`_retext`, model `aws-transcribe`). A page waits
+for AWS's text before its dispatch is parsed. AWS failing: the hub asks the station's whisper
+(`retranscribe`: the station keeps every clip's whisper input); the station unreachable too: the row
+says "Transcription failed" with the reason in its model. "Both": AWS failing leaves whisper's text.
+After a hub redeploy what was still waiting for AWS goes to it again (or to the station).
+
+**Vocabulary** (Settings → Radios → Vocabulary; `sizeup-pcfd`): the phrases AWS should expect —
+seeded from the boards' spoken unit names (Engine 60, Ladder 31, Tower Ladder 2, Rescue 40, 23 98 …),
+PCFD words (60 Control, Port Chester, Rye Brook, Fire EMS 15 …) and the 60 busiest Port Chester /
+Rye Brook streets as said ("North Main Street"). AWS's rules for a phrase list: letters, apostrophes
+and periods only, the words of a phrase joined by hyphens, ≤ 256 characters, **no digits**: numbers
+are spelled out as said on the air ("Engine 60" → `Engine-sixty`, "23 98" →
+`twenty-three-ninety-eight`), and Transcribe's "Engine sixty" is written back as "Engine 60".
+*Push* sends it (`CreateVocabulary`, or `UpdateVocabulary` when it exists, SigV4 JSON API), polls
+`GetVocabulary` until READY / FAILED, and new streams use it once READY.
+
+AWS permissions: the hub's task role, from `sizeup-aws/12-transcribe.sh`
+(`transcribe:StartStreamTranscription*`, the `sizeup-*` vocabularies). Credentials: `sizeup/aws.py`
+(the environment, else the ECS container credentials endpoint, refreshed before they expire) —
+written to be shared with the Polly voice. Config: `[stt] aws = true` on the hub
+(`deploy/hub/config.hub.toml`); `aws_region`, `aws_channels`, `aws_monthly_limit_usd`, `aws_idle_s`,
+`aws_pace`, `aws_vocabulary`; `aws_endpoint` / `aws_api_endpoint` point at a local fake
+(`python -m tests.fake_transcribe`) for tests and dev.
+
 ## Phone pre-alert (Tapout)
 
 > "can we bake in the ntfy.sh feed from tapout into this? lets receive that feed as a possible
@@ -437,6 +516,9 @@ namespace, a named volume for `/data`, no Litestream).
 `client.py` (kept-alive HTTPS), `hub.py` (Hub: ingest, health, jobs; HubApp), `hubstore.py`
 (hub.sqlite, audio.sqlite), `access.py` (Cloudflare Access identity; the gate is in
 `sizeup/web/server.py`, the operator in `sizeup/cad/api.py` and `Settings.person`; the activity log in
-`sizeup/cad/activity.py`). Seams in `sizeup/app.py`: `_emit`, `_heard`, `_page_heard`, `_retext`,
-`make_app`; in `sizeup/cad/service.py`: `remote_voice`, `_render_hub`, `audio_blobs`, `cloud`. The voice:
-`sizeup/polly.py`. Tests: `tests/test_polly.py`, `tests/test_cloud.py`, `tests/test_stationmode.py`, `tests/test_access.py`, `tests/test_roles.py`, `tests/test_activity.py`.
+`sizeup/cad/activity.py`). Seams in `sizeup/app.py`: `_emit`, `_heard`, `_page_heard`, `_retext`, `_stt`,
+`_aws_start` / `_aws_done` / `_aws_failed`, `set_channel_prefs`, `make_app`; in `sizeup/cad/service.py`:
+`remote_voice`, `_render_hub`, `audio_blobs`, `cloud`, `radio_ctx`. The voice: `sizeup/polly.py`. Speech-to-text per channel: `sizeup/channels.py`,
+`sizeup/transcribe.py`, `sizeup/aws.py`. Tests: `tests/test_polly.py`, `tests/test_cloud.py`, `tests/test_stationmode.py`,
+`tests/test_access.py`, `tests/test_roles.py`, `tests/test_activity.py`, `tests/test_channels.py`,
+`tests/test_transcribe.py` (fakes: `tests/fake_transcribe.py`).

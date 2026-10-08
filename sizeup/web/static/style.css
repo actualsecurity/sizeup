@@ -433,6 +433,24 @@ body.modal { overflow: hidden; }
 .sw.gsw.mixed .knob::after { transform: translateX(0.45em); background: #fff; }
 .sw.gsw:disabled { opacity: 0.4; cursor: not-allowed; }
 
+/* Settings > Radios > Channels: Record / Main / Transcribe / Engine under each row (sizeup/channels.py) */
+.rc-groups .tg-rows { grid-template-columns: repeat(auto-fill, minmax(min(27em, 100%), 1fr)); }
+.rc-groups .tg-row { grid-template-columns: minmax(0, 1fr); grid-template-areas: "id" "info" "sw"; row-gap: 0.25em; }
+.rc-groups .tg-sw { flex-wrap: wrap; align-items: center; }
+.rc-groups .tg-row.aws { border-left-color: var(--info); }
+.rc-groups .tg-row.main.aws { border-left-color: var(--accent); }
+.tg-eng { font-size: 0.78em; padding: 0.15em 0.3em; }
+.rc-sync { margin: 0 0 0.25em; }
+.rc-sync.applied, .rc-sync.local { color: var(--ok); }
+.rc-sync.pending, .rc-sync.offline { color: var(--warn); }
+.rc-cost { margin: 0 0 0.4em; }
+.rc-cost.warn { color: var(--warn); }
+.vocab-text { width: 100%; box-sizing: border-box; font: inherit; font-size: var(--t-s, 0.9em); min-height: 8em; resize: vertical; }
+.vocab-state.ok { color: var(--ok); }
+.vocab-state.bad { color: var(--err); }
+.vocab-skip .vocab-aws { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 12em; overflow: auto; }
+.vocab-limit { width: 6em; }
+
 /* the SDR switch: one segmented row per dongle */
 .sdrs { display: flex; flex-direction: column; gap: 0.3em; margin-top: var(--sp-2); }
 .seg { display: inline-flex; align-items: center; gap: 0; font-size: var(--t-s); flex-wrap: wrap; }
