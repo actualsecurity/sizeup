@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Callable
 
 from sizeup.cad import dispatcher, eta, export, mapview, runcards
+from sizeup.cad.activity import Activity
 from sizeup.cad.comms import Comms
 from sizeup.cad.feed import Feed
 from sizeup.cad.radios import Registry, RadioError, is_pcfd
@@ -123,6 +124,8 @@ class Cad:
         self.eta = eta.Params()                              # the ETA estimates' settings (Settings > Dispatch)
         self._clears: tuple[int, dict] | None = None         # (rev, Store.recent_clears): returning rigs
         self.settings = settings_mod.Editor(self)           # the Settings page's edits over the data file
+        # Per-person activity on the hub (sizeup/cad/activity.py): who signed in, did and was refused what.
+        self.activity = Activity(self.store, lambda m: self.log(m))
         self.settings.startup()
         n = self.store.sync_units()
         if n:

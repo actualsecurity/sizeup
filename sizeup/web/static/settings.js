@@ -16,6 +16,7 @@ const S = {
   data: null, loading: false, again: false, deferred: false, msgT: null,
   boardsOpen: null, audit: "", auditRows: null, auditFor: "", admin: null, importing: null,
   previewT: null, previewSeq: 0, tsOpen: new Set(),
+  act: null, actEmail: "", actKind: "", actKey: "", actAt: 0,
 };
 const S_SECTIONS = [["lists", "Lists"], ["runcards", "Run cards"], ["units", "Units"], ["dispatch", "Dispatch"],
   ["users", "Users"], ["system", "System"], ["radios", "Radios"]];
@@ -948,11 +949,19 @@ function sUsers(panel) {
       }, "s-callsign"),
       sSelect(S_OP_ROLES, o.role, (v) => sPost("users", { action: "edit", id: o.id, role: v }, `${who}: ${v}.`), "Role"),
       unnamed ? el("span", "chip s-state pending", "not named yet") : null,
-      el("span", `chip s-state ${o.active ? "added" : "retired"}`, o.active ? "active" : "inactive"), el("span", "spacer"),
+      el("span", `chip s-state ${o.active ? "added" : "retired"}`, o.active ? "active" : "inactive"),
+      cad.who && o.email ? Object.assign(el("span", "s-seen dim small", sSeenText(o.email)), { title: sSeenTip(o.email) }) : null,
+      el("span", "spacer"),
+      cad.who && o.email && (sActAll() || sActMine(o.email)) ? sBtn("Activity", `What ${who} signed in, did and was refused`, () => {
+        S.actEmail = o.email;
+        sActivity(true);
+        $("#s-activity").scrollIntoView({ block: "start", behavior: "smooth" });
+      }, "ro-ok") : null,
       o.active ? sBtn("Deactivate", "Off the operator picker; their name stays on what they did",
         () => sPost("users", { action: "deactivate", id: o.id }, `${who} deactivated.`))
         : sBtn("Activate", "", () => sPost("users", { action: "activate", id: o.id }, `${who} active again.`)));
-    [...li.childNodes].forEach((n) => { if (n.nodeType === 3) n.remove(); });   // the null above
+    [...li.childNodes].forEach((n) => { if (n.nodeType === 3) n.remove(); });   // the nulls above
+    for (const sp of li.querySelectorAll(".s-seen")) sp.dataset.email = o.email;
     ol.append(li);
   }
   if (!ops.length) ol.append(el("li", "empty", "No operators yet: the Operator field (top right) is free text until there is one."));
@@ -983,6 +992,104 @@ function sUsers(panel) {
   panel.replaceChildren(...sHead("Users", "The people at the console. Once there is one, the Operator field becomes a picker of the active ones."),
     el("div", "s-note", signedIn + roles),
     sCard(sCardHead("Operators", `${ops.filter((o) => o.active).length} active`), ol, f));
+  if (cad.who) {                   // signed in through Cloudflare Access: there is activity to show
+    const card = sCard(null);
+    card.id = "s-activity";
+    panel.append(card);
+    sActivityRender();
+    sActivity();
+  }
+}
+
+// Per-person activity on the hub (user, 2026-10-08: "lets add some per user logging too";
+// sizeup/cad/activity.py): each sign-in (once per login), what they did, what they were refused,
+// and when each was last seen. GET /api/cad/activity: an admin anyone's (or everyone's), anyone
+// else only their own. Only behind Cloudflare Access (cad.who): all-in-one records none.
+const S_ACT_KINDS = [["", "Everything"], ["signin", "Sign-ins"], ["action", "Actions"], ["refused", "Refused"]];
+const S_ACT_LIMIT = 300;
+
+function sActAll() { return !!(cad.who && cad.who.may === "admin"); }
+function sActMine(email) { return !!(cad.who && email === cad.who.email); }
+function sAgo(unix) {
+  const s = Math.max(0, serverNow() - unix);
+  if (s < 60) return "just now";
+  if (s < 3600) return `${Math.floor(s / 60)} min ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
+  return `${Math.floor(s / 86400)} d ago`;
+}
+function sSeen(email) { return ((S.act && S.act.seen) || []).find((x) => x.email === email); }
+function sSeenText(email) {
+  const v = sSeen(email);
+  return v && v.last_seen ? `last seen ${sAgo(v.last_seen)}` + (v.last_ip ? ` · ${v.last_ip}` : "") : "";
+}
+function sSeenTip(email) {
+  const v = sSeen(email);
+  return v && v.last_seen ? `${fmtRecv(v.last_seen)}${v.last_ua ? ` · ${v.last_ua}` : ""}` : "";
+}
+
+async function sActivity(force) {
+  if (!cad.who || S.section !== "users") return;
+  const email = sActAll() ? S.actEmail : cad.who.email;
+  const key = `${email}|${S.actKind}`;
+  if (!force && S.actKey === key && Date.now() - S.actAt < 15000) return;
+  S.actKey = key;
+  S.actAt = Date.now();
+  try {
+    const r = await api("GET", "/api/cad/activity?" + new URLSearchParams({ email, kind: S.actKind, limit: S_ACT_LIMIT }));
+    if (S.actKey !== key) return;          // asked again meanwhile
+    S.act = { ...r, key };
+  } catch (e) {
+    const c = $("#s-activity");
+    if (c) c.replaceChildren(el("div", "error", `Activity: ${e.message}`));
+    return;
+  }
+  sActivityRender();
+  for (const sp of document.querySelectorAll(".s-seen[data-email]")) {
+    setText(sp, sSeenText(sp.dataset.email));
+    sp.title = sSeenTip(sp.dataset.email);
+  }
+}
+
+function sActivityRender() {
+  const card = $("#s-activity");
+  if (!card || !cad.who) return;
+  const all = sActAll(), me = cad.who.email;
+  const email = all ? S.actEmail : me;
+  const op = S.data.operators.find((o) => o.email === email);
+  const title = !email ? "Activity · all users" : email === me ? "My activity" : `Activity · ${op ? op.name : email}`;
+  const kind = sSelect(S_ACT_KINDS, S.actKind, (v) => { S.actKind = v; sActivity(true); }, "Show");
+  kind.classList.add("ro-ok");
+  const tools = [kind];
+  if (all && email) tools.push(sBtn("All users", "Everyone's activity", () => { S.actEmail = ""; sActivity(true); }, "ro-ok"));
+  if (all && email !== me) tools.push(sBtn("Mine", "Your own activity", () => { S.actEmail = me; sActivity(true); }, "ro-ok"));
+  tools.push(sBtn("Refresh", "", () => sActivity(true), "ro-ok"));
+  if (all) {
+    const a = el("a", "nav ro-ok", "CSV");
+    a.href = "/api/cad/export/activity.csv?" + new URLSearchParams({ email, kind: S.actKind });
+    a.download = "";
+    a.title = "This list as a spreadsheet (everything kept: 90 days)";
+    tools.push(a);
+  }
+  const fresh = S.act && S.act.key === `${email}|${S.actKind}`;
+  const rows = fresh ? S.act.rows : [];
+  const ol = el("ol", "s-rows s-act" + (email ? " one" : ""));
+  for (const r of rows) {
+    const li = el("li", "s-act-row" + (r.ok ? "" : " no"));
+    const t = el("span", "s-act-t", fmtRecv(r.at));
+    t.title = `${fmtTime(r.at, true)}`;
+    li.append(t);
+    if (!email) li.append(Object.assign(el("span", "s-act-who", r.name && r.name !== r.email ? r.name : r.email), { title: r.email }));
+    li.append(el("span", `chip s-kind ${r.kind}`, { signin: "sign-in", action: "action", refused: "refused" }[r.kind] || r.kind));
+    li.append(Object.assign(el("span", "s-act-sum", r.summary), { title: r.route }));
+    li.append(Object.assign(el("span", "s-act-ip dim", r.ip || "—"), { title: r.ua || "" }));
+    ol.append(li);
+  }
+  if (!rows.length) ol.append(el("li", "empty", fresh ? "Nothing here yet." : "Loading…"));
+  const n = fresh ? `${rows.length}${rows.length >= S_ACT_LIMIT ? "+" : ""} newest first` : "";
+  card.replaceChildren(sCardHead(title, n, ...tools),
+    el("p", "dim small", (email ? "Each" : "Everyone signed in: each") + " sign-in (once per login), every change and every "
+      + "refusal, with the address and browser it came from. Kept 90 days." + (all ? "" : " An admin sees everyone's.")),
+    ol);
 }
 
 // ---- system ---------------------------------------------------------------------------------------

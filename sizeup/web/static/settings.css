@@ -140,3 +140,27 @@ input.s-color { width: 2.4em; height: 1.95em; padding: 0.1em 0.15em; cursor: poi
 .s-role.boot { border-color: color-mix(in srgb, var(--ok) 70%, transparent); color: var(--ok); }
 body.ro-settings #settings .s-content [data-ro] { cursor: not-allowed; }
 body.ro-settings #settings .s-content :is(input, select, textarea)[data-ro] { opacity: 0.7; }
+
+/* Users > Activity (settings.js sActivity, sizeup/cad/activity.py): one line a row, wrapping on a phone. */
+.s-seen { white-space: nowrap; }
+.s-act { max-height: 34em; overflow-y: auto; }
+.s-act-row { display: grid; gap: 0.15em 0.7em; align-items: baseline; padding: 0.3em 0; border-bottom: 1px solid var(--line);
+  grid-template-columns: 8.4em minmax(6em, 11em) 5.4em minmax(0, 1fr) minmax(6em, 9em); grid-template-areas: "t who kind sum ip"; }
+.s-act.one .s-act-row { grid-template-columns: 8.4em 5.4em minmax(0, 1fr) minmax(6em, 9em); grid-template-areas: "t kind sum ip"; }
+.s-act-row:last-child { border-bottom: 0; }
+.s-act-t { grid-area: t; color: var(--dim); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.s-act-who { grid-area: who; font-weight: 600; }
+.s-act-who, .s-act-ip { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.s-act-row .chip.s-kind { grid-area: kind; justify-self: start; font-size: 0.68em; }
+.s-act-sum { grid-area: sum; overflow-wrap: anywhere; min-width: 0; }
+.s-act-ip { grid-area: ip; font-size: 0.85em; font-variant-numeric: tabular-nums; }
+.s-act-row.no .s-act-sum { color: var(--err); }
+.chip.s-kind.signin { --c: #5aa9ff; }
+.chip.s-kind.action { --c: var(--ok); }
+.chip.s-kind.refused { --c: var(--err); }
+@media (max-width: 640px) {
+  .s-act-row { grid-template-columns: auto auto minmax(0, 1fr); grid-template-areas: "t kind ip" "who who who" "sum sum sum"; }
+  .s-act.one .s-act-row { grid-template-columns: auto auto minmax(0, 1fr); grid-template-areas: "t kind ip" "sum sum sum"; }
+  .s-act-ip { justify-self: end; }
+  .s-seen { white-space: normal; flex: 1 1 100%; }
+}

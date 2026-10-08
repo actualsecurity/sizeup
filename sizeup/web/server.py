@@ -22,6 +22,9 @@ Hub with [cloud] access_team + access_aud (sizeup/cloud/access.py): every reques
 gets who it is (the operator on every write, GET /api/cad/whoami). Every POST is then checked against
 that person's role (sizeup/cad/api.py WRITES: the CAD's own in CadApi.post, the rest here before
 anything is read): the talkgroup / mode switches and retranscribe are admin only.
+Each verified request also goes to that person's activity (sizeup/cad/activity.py): their sign-in
+(once per Access login), when they were last seen, what they did and what they were refused, with
+the address (Cf-Connecting-Ip) and browser it came from.
 
 STATE = {
   "time": unix s,
@@ -138,6 +141,8 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
             who = access.identify(self.headers)
             if who is not None and who.person:
                 self.who = who
+                if cad is not None:
+                    cad.visit(who, self._client(), f"{self.command} {path}")
                 return True
             self.close_connection = True     # a POST's body is left unread
             if path.startswith("/api/"):
@@ -145,6 +150,16 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
             return self._send(401, b"<!doctype html><meta charset=utf-8><title>Sign in</title>"
                                    b"<p>Sign in through Cloudflare Access to use sizeup: reload this page.</p>",
                               "text/html; charset=utf-8") or False
+
+        def _client(self) -> tuple[str, str]:
+            """(ip, browser) for the activity log: the visitor's address as Cloudflare saw it."""
+            h = self.headers
+            return (h.get("Cf-Connecting-Ip") or "")[:64], (h.get("User-Agent") or "")[:120]
+
+        def _did(self, path: str, body: dict | None = None) -> None:
+            """One of the POSTs below went through: in the signed-in person's activity."""
+            if self.who is not None and cad is not None:
+                cad.did(path, self.who, body, None, self._client())
 
         def _send(self, code: int, body: bytes, ctype: str) -> None:
             self.send_response(code)
@@ -224,8 +239,8 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                     n = -1
                 if not 0 <= n <= MAX_CAD_BODY:
                     return self._send(400, b'{"error":"bad or too large body (64 KB max)"}', "application/json")
-                return self._send(*cad.post(path, self.rfile.read(n), self.who))
-            if self.who is not None and cad is not None and (refused := cad.permit(path, self.who)):
+                return self._send(*cad.post(path, self.rfile.read(n), self.who, self._client()))
+            if self.who is not None and cad is not None and (refused := cad.permit(path, self.who, client=self._client())):
                 self.close_connection = True     # the body is left unread
                 return self._send(*refused)
             if path == "/api/talkgroup" and set_talkgroup is not None:
@@ -237,6 +252,7 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                     err = f"bad request: {e}"
                 if err:
                     return self._send(400, json.dumps({"error": err}).encode(), "application/json")
+                self._did(path, body)
                 return self._send(200, b'{"ok":true}', "application/json")
             if path == "/api/talkgroup-group" and set_talkgroup_group is not None:
                 try:
@@ -247,6 +263,7 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                     err = f"bad request: {e}"
                 if err:
                     return self._send(400, json.dumps({"error": err}).encode(), "application/json")
+                self._did(path, body)
                 return self._send(200, b'{"ok":true}', "application/json")
             if path == "/api/mode" and set_mode is not None:
                 try:
@@ -257,6 +274,7 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                     err = f"bad request: {e}"
                 if err:
                     return self._send(400, json.dumps({"error": err}).encode(), "application/json")
+                self._did(path, body)
                 return self._send(200, b'{"ok":true}', "application/json")
             if path == "/api/retranscribe" and retranscribe is not None:
                 # {"ids": ["307-...", ...]} re-runs those; {"all": true} every recording still on disk
@@ -267,9 +285,12 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                     queued = retranscribe(ids)
                 except (ValueError, KeyError, TypeError, AttributeError) as e:
                     return self._send(400, json.dumps({"error": f"bad request: {e}"}).encode(), "application/json")
+                self._did(path, body)
                 return self._send(200, json.dumps({"queued": queued}).encode(), "application/json")
             if path.startswith("/api/incident/") and path.endswith("/close"):
                 ok = close_incident(path[len("/api/incident/"):-len("/close")])
+                if ok:
+                    self._did(path)
                 return self._send(200 if ok else 404, b'{"ok":%s}' % (b"true" if ok else b"false"),
                                   "application/json")
             self._send(404, b"not found\n", "text/plain")

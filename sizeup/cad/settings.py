@@ -1149,8 +1149,12 @@ class Editor:
 
     # -- users ----------------------------------------------------------------------------------------------
 
+    # last_seen / last_ip / last_ua (sizeup/cad/activity.py) are left out: where someone was is their
+    # activity, an admin's to see (GET /api/cad/activity), not every reader of the Settings page's.
+    OPERATOR_COLUMNS = "id, name, role, active, created_at, updated_at, email, callsign"
+
     def operators(self) -> list[dict]:
-        rows = self.store.q("SELECT * FROM operators ORDER BY active DESC, name COLLATE NOCASE")
+        rows = self.store.q(f"SELECT {self.OPERATOR_COLUMNS} FROM operators ORDER BY active DESC, name COLLATE NOCASE")
         for r in rows:
             r["active"] = bool(r["active"])
         return rows
@@ -1295,7 +1299,7 @@ class Editor:
         return self._operator(oid)
 
     def _operator(self, oid: int) -> dict:
-        r = self.store.one("SELECT * FROM operators WHERE id = ?", (oid,))
+        r = self.store.one(f"SELECT {self.OPERATOR_COLUMNS} FROM operators WHERE id = ?", (oid,))
         if r is None:
             raise CadError(f"no operator {oid}")
         r["active"] = bool(r["active"])
