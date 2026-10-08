@@ -168,7 +168,10 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             if self.command != "HEAD":
-                self.wfile.write(body)
+                try:
+                    self.wfile.write(body)
+                except (BrokenPipeError, ConnectionResetError, TimeoutError):
+                    self.close_connection = True   # the client left first (a station restart, a closed tab)
 
         def _redirect(self, where: str) -> None:
             self.send_response(302)
