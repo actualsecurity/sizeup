@@ -1,0 +1,48 @@
+# The sizeup station (deploy/station/README.md). Installed by install-linux.sh; edit there, not here.
+[Unit]
+Description=sizeup station: radios, speech-to-text, forwarding to the hub
+Documentation=file:///opt/sizeup/app/deploy/station/README.md
+Wants=network-online.target
+After=network-online.target systemd-udevd.service
+# Never give up restarting (Restart=always below); the health timer also restarts a hung process.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=sizeup
+Group=sizeup
+SupplementaryGroups=plugdev
+WorkingDirectory=/opt/sizeup/app
+# Secrets: SIZEUP_STATION_TOKEN, SIZEUP_ACCESS_CLIENT_ID / _SECRET (sizeup-station secrets). Missing:
+# the station still runs, records and queues, and its page says what is missing.
+EnvironmentFile=-/etc/sizeup/station.env
+EnvironmentFile=-/etc/sizeup/build.env
+Environment=HOME=/var/lib/sizeup
+Environment=SIZEUP_STATE_DIR=/var/lib/sizeup
+Environment=PYTHONPATH=/opt/sizeup/app
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+# The rtl-sdr-blog librtlsdr (V4) and trunk-recorder's plugins first.
+Environment=LD_LIBRARY_PATH=/opt/sizeup/rtl-sdr/lib:/opt/sizeup/trunk-recorder/lib/trunk-recorder
+Environment=PATH=/opt/sizeup/rtl-sdr/bin:/opt/sizeup/trunk-recorder/bin:/opt/sizeup/whisper/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/opt/sizeup/venv/bin/python -m sizeup --config /etc/sizeup/config.toml
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+# rtl_fm, trunk-recorder and whisper-server are its children: stopped and restarted with it.
+KillMode=control-group
+LimitNOFILE=65536
+# Ahead of anything else on the box (apt, updates), radios first.
+Nice=-5
+CPUWeight=500
+IOWeight=500
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=yes
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sizeup-station
+
+[Install]
+WantedBy=multi-user.target

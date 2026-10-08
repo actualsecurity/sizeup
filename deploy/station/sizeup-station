@@ -1,0 +1,199 @@
+#!/usr/bin/env bash
+# sizeup-station: run the station installed by install-linux.sh (deploy/station/README.md).
+#
+#   sizeup-station status        service, dongles, hub link, what's waiting, CPU
+#   sizeup-station logs [-f]     the station's log (journalctl; other journalctl options pass through)
+#   sizeup-station restart       restart it (also: start, stop)
+#   sizeup-station update        fetch the configured ref, reinstall what changed, restart
+#                                (config, state and secrets are kept); options pass to install-linux.sh
+#   sizeup-station secrets       enter the hub token / Cloudflare Access service token again
+#   sizeup-station doctor        check everything, say what's wrong and what to do
+#   sizeup-station version
+#
+# Never prints a secret: the hub check goes through the station itself (POST /api/station-mode/test).
+set -euo pipefail
+
+UNIT=sizeup-station.service
+APP=/opt/sizeup/app
+VENV=/opt/sizeup/venv
+CONF=/etc/sizeup/config.toml
+ENVFILE=/etc/sizeup/station.env
+INSTALLER=$APP/deploy/station/install-linux.sh
+RTLSDR_LIB=/opt/sizeup/rtl-sdr/lib
+
+need_root() {
+  if [ "$(id -u)" -ne 0 ]; then
+    exec sudo "$0" "$@"
+  fi
+}
+
+# conf_port SECTION DEFAULT: [web] port / [stt] port from the config
+conf_port() {
+  "$VENV/bin/python" -c 'import sys, tomllib; print(int(tomllib.load(open(sys.argv[1], "rb")).get(sys.argv[2], {}).get("port", sys.argv[3])))' \
+    "$CONF" "$1" "$2" 2>/dev/null || echo "$2"
+}
+port() { conf_port web 8091; }
+
+# GET/POST the station's own API (127.0.0.1): prints the JSON, or nothing.
+api() {
+  local method=$1 path=$2
+  if [ "$method" = POST ]; then
+    curl -fsS --max-time "${3:-25}" -X POST -H 'Content-Type: application/json' -d '{}' "http://127.0.0.1:$(port)$path" 2>/dev/null || true
+  else
+    curl -fsS --max-time 5 "http://127.0.0.1:$(port)$path" 2>/dev/null || true
+  fi
+}
+
+# json EXPR: read JSON on stdin, print the Python expression over it (d), or nothing.
+json() {
+  python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except ValueError:
+    sys.exit(0)
+try:
+    r = eval(sys.argv[1], {"d": d})
+except Exception:
+    sys.exit(0)
+print("\n".join(r) if isinstance(r, list) else r)' "$1"
+}
+
+rtl_usb() { lsusb 2>/dev/null | grep -Ei 'ID 0bda:(2838|2832)' || true; }
+
+# The serials librtlsdr sees (sizeup's own lookup; doesn't take a dongle another program is using).
+rtl_serials() {
+  runuser -u sizeup -- env HOME=/var/lib/sizeup PYTHONPATH="$APP" LD_LIBRARY_PATH="$RTLSDR_LIB" "$VENV/bin/python" -c '
+from sizeup.radio import sdr
+for i, product, serial in sdr.devices("/opt/sizeup/rtl-sdr/bin/rtl_fm", fresh=True):
+    print("  #%d %s  %s" % (i, serial or "(no serial)", product))' 2>/dev/null || true
+}
+
+cmd_status() {
+  local active since state mode p
+  active=$(systemctl is-active "$UNIT" 2>/dev/null || true)
+  since=$(systemctl show -p ActiveEnterTimestamp --value "$UNIT" 2>/dev/null || true)
+  echo "service:   $active${since:+ since $since} ($(systemctl is-enabled "$UNIT" 2>/dev/null || echo '?') at boot)"
+  echo "health:    timer $(systemctl is-active sizeup-health.timer 2>/dev/null || true); last check $(journalctl -u sizeup-health.service -n 1 -o cat --no-pager 2>/dev/null | tail -n 1 || true)"
+  p=$(port)
+  if curl -fsS --max-time 5 -o /dev/null "http://127.0.0.1:$p/healthz" 2>/dev/null; then
+    echo "web:       http://localhost:$p (diagnostics) answers"
+  else
+    echo "web:       http://localhost:$p is NOT answering"
+  fi
+  mode=$(api GET /api/station-mode)
+  if [ -n "$mode" ]; then
+    echo "hub:       $(echo "$mode" | json 'd["status"].get("text", "?") + " (" + d.get("hub_url", "") + ", forwarding " + ("on" if d.get("forward") else "off") + ")"')"
+  fi
+  state=$(api GET /api/state)
+  if [ -n "$state" ]; then
+    echo "radios:"
+    echo "$state" | json '["  %-16s %-9s %s" % (r.get("label", ""), r.get("word") or r.get("state", ""), (r.get("detail") or "")[:90]) for r in d.get("radios", [])]'
+  fi
+  echo "dongles on USB: $(rtl_usb | wc -l)"
+  rtl_usb | sed 's/^/  /'
+  echo "CPU:       load $(cut -d' ' -f1-3 /proc/loadavg) on $(nproc) CPU(s); memory $(free -m | awk '/Mem:/ {print $3 " of " $2 " MB used"}')"
+  echo "disk:      $(df -h /var/lib/sizeup | awk 'NR==2 {print $4 " free on " $6}')"
+}
+
+cmd_doctor() {
+  local bad=0 p out
+  ok() { printf '  ok    %s\n' "$*"; }
+  no() { printf '  FAIL  %s\n' "$*"; bad=$((bad + 1)); }
+  note() { printf '  note  %s\n' "$*"; }
+  echo "sizeup station doctor"
+  case "$(systemctl is-system-running 2>/dev/null || true)" in
+    running|degraded) ok "systemd is running" ;;
+    *) no "systemd isn't running (WSL: /etc/wsl.conf [boot] systemd=true, then wsl --terminate <distro>)" ;;
+  esac
+  if systemctl is-active --quiet "$UNIT"; then ok "sizeup-station is running"; else no "sizeup-station isn't running: sizeup-station logs"; fi
+  if systemctl is-enabled --quiet "$UNIT"; then ok "sizeup-station starts at boot"; else no "sizeup-station isn't enabled: systemctl enable $UNIT"; fi
+  if systemctl is-active --quiet sizeup-health.timer; then ok "health check timer is on"; else no "health timer off: systemctl enable --now sizeup-health.timer"; fi
+  p=$(port)
+  if curl -fsS --max-time 5 -o /dev/null "http://127.0.0.1:$p/healthz"; then ok "station answers on http://localhost:$p"; else no "nothing answers on port $p"; fi
+  # radios
+  if [ -n "$(rtl_usb)" ]; then
+    ok "RTL-SDR(s) on USB: $(rtl_usb | wc -l)"
+  elif grep -qiE 'microsoft|wsl' /proc/sys/kernel/osrelease 2>/dev/null; then
+    no "no RTL-SDR on USB in WSL: in Windows, usbipd list (should say Attached); C:\\ProgramData\\sizeup\\usb.log"
+  else
+    no "no RTL-SDR on USB (lsusb): plugged in? powered hub?"
+  fi
+  out=$(rtl_serials)
+  if [ -n "$out" ]; then ok "librtlsdr sees:"; echo "$out"; else note "librtlsdr lists no dongle (or they're all busy)"; fi
+  if [ -x /opt/sizeup/rtl-sdr/bin/rtl_fm ]; then ok "rtl_fm (rtl-sdr-blog) installed"; else no "rtl_fm missing: run install-linux.sh again"; fi
+  if out=$(LD_LIBRARY_PATH="$RTLSDR_LIB:/opt/sizeup/trunk-recorder/lib/trunk-recorder" /opt/sizeup/trunk-recorder/bin/trunk-recorder --version 2>&1 | grep -iE 'version|[0-9]+\.[0-9]+' | head -n 1); then
+    ok "trunk-recorder: ${out:-installed}"
+  else
+    no "trunk-recorder doesn't run: install-linux.sh --rebuild"
+  fi
+  if find /opt/sizeup/trunk-recorder -name libunit_script.so 2>/dev/null | grep -q .; then ok "trunk-recorder unit_script plugin"; else no "unit_script plugin missing"; fi
+  if [ -x /opt/sizeup/whisper/bin/whisper-server ]; then ok "whisper-server installed"; else no "whisper-server missing: run install-linux.sh again"; fi
+  if [ -s /opt/sizeup/models/whisper.bin ]; then
+    ok "whisper model: $(readlink /opt/sizeup/models/whisper.bin) ($(du -Lh /opt/sizeup/models/whisper.bin | cut -f1))"
+  else
+    no "no whisper model: run install-linux.sh again"
+  fi
+  local wp code
+  wp=$(conf_port stt 8179)
+  code=$(curl -s --max-time 5 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$wp/" 2>/dev/null || true)
+  if [ -n "$code" ] && [ "$code" != 000 ]; then ok "whisper-server answers on :$wp"; else no "whisper-server isn't answering on :$wp (sizeup starts it; give it a minute after a restart)"; fi
+  # secrets: names only
+  if [ -f "$ENVFILE" ]; then
+    local perm
+    perm=$(stat -c '%U:%G %a' "$ENVFILE")
+    if [ "$perm" = "root:sizeup 640" ]; then ok "$ENVFILE is root:sizeup 640"; else no "$ENVFILE is $perm (want root:sizeup 640): sizeup-station secrets"; fi
+    for k in SIZEUP_STATION_TOKEN SIZEUP_ACCESS_CLIENT_ID SIZEUP_ACCESS_CLIENT_SECRET; do
+      if grep -qE "^$k=.+" "$ENVFILE"; then ok "$k is set"; else note "$k is not set"; fi
+    done
+  else
+    no "no secrets yet: sizeup-station secrets"
+  fi
+  # the hub: reachable at all, then with the token (the station checks; it never shows a secret)
+  local hub
+  hub=$(api GET /api/station-mode | json 'd.get("hub_url", "")')
+  if [ -n "$hub" ]; then
+    if curl -fsS --max-time 10 -o /dev/null "$hub/healthz" 2>/dev/null; then ok "hub reachable: $hub"; else note "hub $hub/healthz didn't answer plainly (Cloudflare Access may want a person: see the next line)"; fi
+    out=$(api POST /api/station-mode/test 30)
+    local said
+    said=$(printf '%s' "$out" | json 'd.get("text", "")')
+    if [ "$(printf '%s' "$out" | json 'd.get("ok")')" = "True" ]; then
+      ok "hub took the token: $said"
+    else
+      no "hub check: ${said:-no answer from the station}"
+    fi
+    out=$(api GET /api/station-mode | json 'd["status"].get("text", "")')
+    [ -n "$out" ] && note "hub link: $out"
+  else
+    no "can't ask the station about the hub (is it running?)"
+  fi
+  # time: the hub warns past 5 s of difference
+  if [ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null || true)" = yes ]; then ok "clock synchronized"; else note "clock not NTP-synchronized (timedatectl): keep it within 5 s of the hub"; fi
+  out=$(df --output=avail -BG /var/lib/sizeup | tail -n 1 | tr -dc 0-9)
+  if [ "${out:-0}" -ge 5 ]; then ok "disk: ${out} GB free"; else no "disk: only ${out} GB free under /var/lib/sizeup"; fi
+  echo
+  if [ "$bad" -eq 0 ]; then echo "All good."; else echo "$bad problem(s). Logs: sizeup-station logs"; fi
+  [ "$bad" -eq 0 ]
+}
+
+cmd="${1:-status}"
+[ $# -gt 0 ] && shift
+case "$cmd" in
+  status) cmd_status ;;
+  logs)
+    if [ $# -eq 0 ]; then exec journalctl -u "$UNIT" -u sizeup-health.service -n 200 --no-pager; fi
+    exec journalctl -u "$UNIT" -u sizeup-health.service "$@" ;;
+  restart|start|stop)
+    need_root "$cmd" "$@"
+    systemctl "$cmd" "$UNIT"
+    [ "$cmd" = stop ] && echo "Stopped. It starts again at the next boot (systemctl disable $UNIT to keep it off)."
+    exit 0 ;;
+  update) need_root update "$@"; exec bash "$INSTALLER" --update "$@" ;;
+  secrets) need_root secrets "$@"; exec bash "$INSTALLER" --secrets ;;
+  doctor) need_root doctor "$@"; cmd_doctor ;;
+  version)
+    runuser -u sizeup -- git -C "$APP" log -1 --format='%h %d %s (%cd)' --date=short 2>/dev/null || echo "(not a git checkout)"
+    cat /etc/sizeup/install.conf 2>/dev/null | grep -v '^#' || true ;;
+  -h|--help|help) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0" ;;
+  *) echo "sizeup-station: unknown command $cmd (sizeup-station help)" >&2; exit 2 ;;
+esac

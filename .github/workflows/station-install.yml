@@ -1,0 +1,94 @@
+name: station-install
+
+# The Linux station installer (deploy/station/install-linux.sh) on a clean Ubuntu 24.04, the same
+# release WSL runs on the Windows box: builds rtl-sdr-blog, trunk-recorder and whisper.cpp, sets up
+# the sizeup user, venv, config and systemd units; then starts the station for real (no dongles, no
+# secrets: it runs, records nothing and waits for its token) and checks it answers. Plus shellcheck
+# and a parse of the Windows scripts.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "deploy/station/**"
+      - "deploy/trunk-recorder/**"
+      - ".github/workflows/station-install.yml"
+  pull_request:
+    paths:
+      - "deploy/station/**"
+      - "deploy/trunk-recorder/**"
+      - ".github/workflows/station-install.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: station-install-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: shellcheck -x deploy/station/install-linux.sh deploy/station/sizeup-station deploy/station/health-check.sh deploy/trunk-recorder/unit-event.sh
+      - name: PowerShell parse
+        shell: pwsh
+        run: |
+          $bad = 0
+          foreach ($f in Get-ChildItem -Recurse deploy/station -Filter *.ps1) {
+            $tokens = $null; $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count) { $bad++; $errors | ForEach-Object { "::error file=$($f.FullName),line=$($_.Extent.StartLineNumber)::$($_.Message)" } }
+            else { "$($f.Name): parses" }
+          }
+          exit $bad
+
+  install:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: install-linux.sh --ci
+        run: sudo deploy/station/install-linux.sh --ci --from-dir "$GITHUB_WORKSPACE"
+      - name: again (repair is a no-op rebuild-wise)
+        run: |
+          set -o pipefail
+          sudo deploy/station/install-linux.sh --ci --from-dir "$GITHUB_WORKSPACE" | tee second.log
+          grep -q "rtl-sdr-blog: up to date" second.log
+          grep -q "trunk-recorder: up to date" second.log
+          grep -q "whisper.cpp: up to date" second.log
+          grep -q "model: ggml-small.en-q5_1.bin verified" second.log
+      - name: sizeup --init-state as the sizeup user
+        run: |
+          sudo runuser -u sizeup -- env -C /opt/sizeup/app HOME=/var/lib/sizeup PYTHONPATH=/opt/sizeup/app \
+            SIZEUP_STATE_DIR=/var/lib/sizeup /opt/sizeup/venv/bin/python -m sizeup --config /etc/sizeup/config.toml --init-state
+          sudo test -f /var/lib/sizeup/state/cad.sqlite
+      - name: the programs
+        run: |
+          test -x /opt/sizeup/rtl-sdr/bin/rtl_fm
+          ldd /opt/sizeup/rtl-sdr/bin/rtl_fm | grep -q "/opt/sizeup/rtl-sdr/lib/librtlsdr.so.0"
+          LD_LIBRARY_PATH=/opt/sizeup/rtl-sdr/lib:/opt/sizeup/trunk-recorder/lib/trunk-recorder /opt/sizeup/trunk-recorder/bin/trunk-recorder --version
+          find /opt/sizeup/trunk-recorder -name libunit_script.so | grep -q .
+          /opt/sizeup/whisper/bin/whisper-server --help > /dev/null
+          readlink /opt/sizeup/models/whisper.bin
+          sudo cat /var/lib/sizeup/trunk-recorder/config.json
+          test "$(sudo stat -c '%U:%G %a' /etc/sizeup/config.toml)" = "root:sizeup 640"
+          systemd-analyze verify /etc/systemd/system/sizeup-station.service /etc/systemd/system/sizeup-health.timer
+      - name: start the station (no dongles, no secrets)
+        run: |
+          sudo systemctl daemon-reload
+          sudo systemctl start sizeup-station.service
+          for i in $(seq 1 60); do curl -fsS http://127.0.0.1:8091/healthz && break; sleep 2; done
+          curl -fsS http://127.0.0.1:8091/healthz
+          sudo /usr/local/lib/sizeup/health-check
+          sizeup-station status
+          sudo sizeup-station doctor || true      # no dongles and no token here: some checks fail by design
+          for i in $(seq 1 60); do curl -s -o /dev/null http://127.0.0.1:8179/ && break; sleep 2; done
+          curl -s -o /dev/null -w 'whisper-server: HTTP %{http_code}\n' http://127.0.0.1:8179/
+      - if: always()
+        run: |
+          sudo journalctl -u sizeup-station --no-pager -n 200 || true
+          sudo tail -n 100 /var/log/sizeup-install.log || true

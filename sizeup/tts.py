@@ -34,7 +34,7 @@ DEFAULT_PYTHON = str(HOME / "venv" / "bin" / "python")
 SERVER = Path(__file__).with_name("tts_server.py")
 DEFAULT_PORT = 8093
 RATE = 16000
-ENGINES = ("kokoro", "say", "polly")
+ENGINES = ("kokoro", "say", "polly", "none")
 LABELS = {"kokoro": "Kokoro", "polly": "Polly"}
 
 # Kokoro-82M v1.0's English voices (what setup_tts.sh installs); the server's own list wins when it's up.
@@ -50,7 +50,8 @@ class TtsError(RuntimeError):
 @dataclass(frozen=True)
 class VoiceCfg:
     engine: str = "say"            # "kokoro" (the server, `say` as fallback) | "say" (macOS only) |
-                                   # "polly" (Amazon Polly, sizeup/polly.py: the hub's)
+                                   # "polly" (Amazon Polly, sizeup/polly.py: the hub's) |
+                                   # "none" (no voice here: a Linux station, the hub's Polly speaks)
     voice: str = ""                # kokoro: a Kokoro voice ("af_heart"); say: a `say -v` voice; polly: "Matthew"
     speed: float = 1.0             # kokoro, polly: 0.5-2.0 (0.92 = a touch slower than conversational)
     port: int = DEFAULT_PORT
@@ -60,7 +61,10 @@ class VoiceCfg:
     region: str = ""               # polly: "" = AWS_REGION / AWS_DEFAULT_REGION / us-east-1
 
     def label(self, fallback: bool = False) -> str:
-        """'Voice: Kokoro af_heart', 'Voice: Polly Matthew', 'Voice: Samantha (fallback)', 'Voice: Samantha'."""
+        """'Voice: Kokoro af_heart', 'Voice: Polly Matthew', 'Voice: Samantha (fallback)', 'Voice: Samantha',
+        'Voice: none'."""
+        if self.engine == "none":
+            return "Voice: none"
         if self.engine in LABELS and not fallback:
             return f"Voice: {LABELS[self.engine]} {self.voice}"
         v = (self.fallback_voice if self.engine in LABELS else self.voice) or "macOS say"
@@ -270,6 +274,13 @@ class TtsService:
         """The row when [dispatch] tts_engine = "polly" (Amazon's, over the internet: no server here)."""
         return {"label": "Voice", "mhz": None, "state": "ok", "detail": f"voice: Amazon Polly {voice}",
                 "open": False, "quieting_db": None, "restarts": 0, "last_heard": None}
+
+    @staticmethod
+    def none_status() -> dict:
+        """The row when [dispatch] tts_engine = "none" (a station with no voice: the hub's Polly speaks)."""
+        return {"label": "Voice", "mhz": None, "state": "off", "detail": "no voice on this machine: dispatches are "
+                "spoken by the hub (Amazon Polly), text only here", "open": False, "quieting_db": None, "restarts": 0,
+                "last_heard": None}
 
     @staticmethod
     def say_status(voice: str) -> dict:

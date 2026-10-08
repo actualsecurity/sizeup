@@ -28,7 +28,9 @@ def _load(rtl_fm: str = "") -> ctypes.CDLL | None:
         return _lib
     _lib_tried = True
     here = Path(rtl_fm).resolve().parent if rtl_fm else None
-    for cand in ([str(here / "librtlsdr.dylib"), str(here / "librtlsdr.so")] if here else []) + [
+    # next to rtl_fm, or in its prefix's lib/ (the Linux station: /opt/sizeup/rtl-sdr/{bin,lib}, install-linux.sh)
+    for cand in ([str(here / "librtlsdr.dylib"), str(here / "librtlsdr.so"), str(here.parent / "lib" / "librtlsdr.so.0")]
+                 if here else []) + [
             "/opt/homebrew/lib/librtlsdr.dylib", "/usr/local/lib/librtlsdr.dylib", "librtlsdr.dylib", "librtlsdr.so.0"]:
         try:
             _lib = ctypes.CDLL(cand)

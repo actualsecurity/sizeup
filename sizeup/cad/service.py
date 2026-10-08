@@ -52,7 +52,7 @@ class Settings:
     tones: tuple[tuple[float, float], ...] = ((349.1, 1.0), (311.1, 3.0))
     voice: str = "Samantha"                        # tts_engine "say": a `say -v` voice; "kokoro": a Kokoro voice; "polly": "Matthew"
     rate_wpm: int = 0
-    tts_engine: str = "say"                        # "kokoro" | "polly" | "say"; the config's default is kokoro, "say" here
+    tts_engine: str = "say"                        # "kokoro" | "polly" | "say" | "none"; the config's default is kokoro, "say" here
     speed: float = 1.0                             # keeps tests off any running TTS server (sizeup/tts.py)
     tts_port: int = 8093
     fallback_voice: str = "Samantha"
@@ -206,7 +206,8 @@ class Cad:
                 "transmit": {"enabled": self.transmitter.enabled, "transmitter": self.transmitter.name,
                              "channels": list(self.s.channels),
                              "note": "Transmit is off: logged and played here only"},
-                "audio": {"tts": self.s.tts_engine in ("kokoro", "polly") or bool(shutil.which("say") and shutil.which("afconvert")),
+                "audio": {"tts": self.s.tts_engine in ("kokoro", "polly") or (self.s.tts_engine != "none" and bool(
+                              shutil.which("say") and shutil.which("afconvert"))),
                           "engine": self.s.tts_engine, "voice": self.s.voice, "speed": self.s.speed,
                           "fallback_voice": self.s.fallback_voice, "label": self._voice().label(),
                           "tones": [list(t) for t in self.s.tones]},
