@@ -299,7 +299,10 @@ function renderConn() {
   const age = Date.now() - cad.lastMsgAt;
   if (!cad.lastMsgAt) { pill.className = "pill warn"; setText(pill, "connecting…"); }
   else if (age > LOST_AFTER_MS) { pill.className = "pill err"; setText(pill, "not updating"); }
-  else { pill.className = "pill ok"; setText(pill, "live"); }
+  else if (cad.live && cad.live.mode() === "polling") {
+    pill.className = "pill ok"; setText(pill, "live · polling");
+    pill.title = "The live stream is blocked on this network: refreshing every 2 s instead";
+  } else { pill.className = "pill ok"; setText(pill, "live"); pill.title = ""; }
   document.body.classList.toggle("stale", !!cad.lastMsgAt && age > LOST_AFTER_MS);
 }
 function renderClock() {
@@ -1943,12 +1946,7 @@ async function boot() {
   } catch (e) {
     console.warn("no scene (map off):", e);
   }
-  const es = new EventSource("/api/cad/stream");
-  es.onmessage = (ev) => {
-    let data;
-    try { data = JSON.parse(ev.data); } catch (err) { console.warn("bad state push:", err); return; }
-    onState(data);
-  };
+  cad.live = liveState("/api/cad/stream", "/api/cad/state", onState);
   tick();
   setInterval(tick, 1000);
 }
