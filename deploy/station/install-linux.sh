@@ -326,7 +326,7 @@ PKGS=(
 apt-get install -y -q --no-install-recommends "${PKGS[@]}"
 # volk_profile (tunes GNU Radio's SIMD kernels for this CPU): optional, named differently per release
 for p in libvolk-bin libvolk2-bin; do
-  apt-get install -y -q --no-install-recommends "$p" >/dev/null 2>&1 && break || true
+  if apt-get install -y -q --no-install-recommends "$p" >/dev/null 2>&1; then break; fi
 done
 
 # -- user and directories --------------------------------------------------------------------------
@@ -462,7 +462,7 @@ step "sizeup code ($SIZEUP_SOURCE)"
 if [ "$SIZEUP_SOURCE" = dir ]; then
   [ -n "$OPT_FROM_DIR" ] || die "installed from a folder: run again with --from-dir <the new copy> (or --repo/--ref for git)"
   from=$(cd "$OPT_FROM_DIR" && pwd)
-  [ -f "$from/pyproject.toml" ] && [ -d "$from/sizeup" ] || die "--from-dir $from: not a sizeup checkout"
+  if [ ! -f "$from/pyproject.toml" ] || [ ! -d "$from/sizeup" ]; then die "--from-dir $from: not a sizeup checkout"; fi
   # .git stays behind (a CI checkout's credentials live in it); so do local state and models.
   rsync -a --delete --exclude /.git --exclude /.venv --exclude /.claude --exclude /state --exclude /captures \
     --exclude /models --exclude /config.toml --exclude /build --exclude '__pycache__' --exclude '*.egg-info' \

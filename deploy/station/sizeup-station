@@ -193,7 +193,7 @@ case "$cmd" in
   doctor) need_root doctor "$@"; cmd_doctor ;;
   version)
     runuser -u sizeup -- git -C "$APP" log -1 --format='%h %d %s (%cd)' --date=short 2>/dev/null || echo "(not a git checkout)"
-    cat /etc/sizeup/install.conf 2>/dev/null | grep -v '^#' || true ;;
+    grep -v '^#' /etc/sizeup/install.conf 2>/dev/null || true ;;
   -h|--help|help) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0" ;;
   *) echo "sizeup-station: unknown command $cmd (sizeup-station help)" >&2; exit 2 ;;
 esac
