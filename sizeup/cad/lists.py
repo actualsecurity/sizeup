@@ -27,7 +27,10 @@ shows). A new export can replace the file without a code change:
     dispatch_wording                 the dispatch as templates (new / add-on / upgrade, full response,
                                      remarks, lead-in: "Port Chester and Rye Brook Fire" when theirs go)
     dispatch_tones                   joint town -> its alert tones (null: not known, PCFD's are played)
-    run_cards                        the default cards seeded once into the database
+    run_cards                        the default cards seeded once into the database. A slot is
+                                     {"kind": "engine", "count": 3} ("ladder|tower": either; "any": any
+                                     apparatus, ANY_KIND), {"unit": "2398"} or {"all": "Port Chester FD"}
+                                     (the full department: sizeup/cad/runcards.py)
     geo_town_order, geo_town_aliases Location suggestions: which towns come first
 
 Any item may carry "confirm": why its meaning or role is a guess. Settings shows it as "meaning to
@@ -63,6 +66,9 @@ UNIT_CODE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_\-]{0,23}")        # unit codes a
 LONG_CODE = re.compile(r"[A-Z0-9][A-Z0-9 _/\-]{0,39}")           # dispositions, statuses, received via
 COLOR = re.compile(r"#[0-9a-fA-F]{6}")
 RESPONSES = ("fire", "mutual_aid", "agency")
+HOME_DEPARTMENT = "Port Chester FD"     # whose apparatus a run card's full-department slot ({"all": ...}) calls
+ANY_KIND = "any"                        # a run-card kind slot that takes any apparatus ("1 × any")
+ANY_SKIPS = ("chief",)                  # ...but not a chief officer's car (those are named on a card)
 LIST_SECTIONS = ("event_types", "event_subtypes", "dispositions", "received_via", "unit_statuses")
 
 
@@ -299,6 +305,23 @@ class Lists:
         mutual-aid requests are sent only when named)."""
         return tuple(k["id"] for k in self.unit_kinds if not k.get("attach_only") and not k.get("by_name"))
 
+    @property
+    def any_kinds(self) -> tuple[str, ...]:
+        """What a "1 × any" slot takes: the card kinds but a chief officer's car."""
+        return tuple(k for k in self.card_kinds if k not in ANY_SKIPS)
+
+    @property
+    def departments(self) -> tuple[str, ...]:
+        """Who a run card can call in full ({"all": ...}): the home department."""
+        return (HOME_DEPARTMENT,)
+
+    def department_apparatus(self, u: dict) -> bool:
+        """One of the home department's own apparatus, as "All PCFD" ticks them: a fire unit (not mutual aid,
+        not an agency), not a joint-response department's, of a full_response_kinds kind (none listed: any
+        card kind), never a by-name kind. u: a unit row (name, kind)."""
+        kinds = [k for k in (self.full_response_kinds or self.card_kinds) if k in self.card_kinds]
+        return self.response(u["name"]) == "fire" and not self.joint_town(u["name"]) and u["kind"] in kinds
+
     # -- towns ------------------------------------------------------------------------------------
 
     def town_of(self, municipality: str) -> str:
@@ -351,6 +374,7 @@ class Lists:
                                    for t, j in self.joint_response.items()},
                 "full_response": self.wording.get("full_response", ""),
                 "full_response_kinds": list(self.full_response_kinds),
+                "home_department": HOME_DEPARTMENT,
                 "status_flow": {k: list(v) for k, v in self.status_flow.items()},
                 "free_status": self.status_for("free"),
                 "type_subtypes_partial": self.type_subtypes_partial,
@@ -502,6 +526,8 @@ def build(d: dict, where: str, path: str | Path = "") -> Lists:
     kind_ids = {k["id"] for k in kinds}
     if any("|" in k for k in kind_ids):
         raise ListsError(f"{where}: unit_kinds: an id can't contain |")
+    if ANY_KIND in kind_ids:
+        raise ListsError(f"{where}: unit_kinds: {ANY_KIND!r} is taken (a run card's \"any apparatus\")")
     attach_kinds = {k["id"] for k in kinds if k.get("attach_only")}
     card_kinds = {k["id"] for k in kinds if not k.get("attach_only") and not k.get("by_name")}
 
@@ -555,12 +581,19 @@ def build(d: dict, where: str, path: str | Path = "") -> Lists:
         if not isinstance(c, dict) or not isinstance(c.get("slots"), list):
             raise ListsError(f"{where}: run_cards[{i}]: an object with type and slots")
         check_key(str(c.get("type", "")), f"run_cards[{i}].type")
+        if sum(1 for s in c["slots"] if isinstance(s, dict) and "all" in s) > 1:
+            raise ListsError(f"{where}: run_cards[{i}]: one full department per card")
         for s in c["slots"]:
-            if s.get("unit") and s["unit"] not in seen:
+            if not isinstance(s, dict):
+                raise ListsError(f"{where}: run_cards[{i}]: a slot is an object")
+            if "all" in s:
+                if s["all"] != HOME_DEPARTMENT:
+                    raise ListsError(f"{where}: run_cards[{i}]: all: {HOME_DEPARTMENT!r} (the only full department)")
+                continue
                 raise ListsError(f"{where}: run_cards[{i}]: unit {s['unit']!r} is not on the boards")
             if s.get("unit") and agency(s["unit"]):
                 raise ListsError(f"{where}: run_cards[{i}]: {s['unit']!r} is another agency's unit (never on a run card)")
-            if not s.get("unit") and not set(str(s.get("kind", "")).split("|")) <= card_kinds:
+            if not s.get("unit") and s.get("kind") != ANY_KIND and not set(str(s.get("kind", "")).split("|")) <= card_kinds:
                 raise ListsError(f"{where}: run_cards[{i}]: kind {s.get('kind')!r} is not a fire apparatus kind in unit_kinds")
 
     from sizeup.cad.dispatcher import WORDING

@@ -1566,13 +1566,18 @@ class Editor:
                 slots = c.get("slots")
                 if not isinstance(slots, list) or not 1 <= len(slots) <= runcards.MAX_SLOTS:
                     raise CadError(f"run_cards[{i}].slots: 1 to {runcards.MAX_SLOTS}")
+                if sum(1 for sl in slots if isinstance(sl, dict) and runcards.ALL in sl) > 1:
+                    raise CadError(f"run_cards[{i}]: one full department per card")
                 for sl in slots:
                     if not isinstance(sl, dict):
                         raise CadError(f"run_cards[{i}]: a slot is an object")
-                    if sl.get("unit"):
+                    if runcards.ALL in sl:
+                        if sl[runcards.ALL] not in L.departments:
+                            raise CadError(f"run_cards[{i}]: all: {' or '.join(L.departments)}")
+                    elif sl.get("unit"):
                         if sl["unit"] not in known or L.response(sl["unit"]) == "agency":
                             raise CadError(f"run_cards[{i}]: {sl['unit']!r} is not a fire unit on the boards")
-                    elif not set(str(sl.get("kind", "")).split("|")) <= fire_kinds or not (
+                    elif not (sl.get("kind") == lists_mod.ANY_KIND or set(str(sl.get("kind", "")).split("|")) <= fire_kinds) or not (
                             isinstance(sl.get("count", 1), int) and 1 <= sl.get("count", 1) <= runcards.MAX_COUNT):
                         raise CadError(f"run_cards[{i}]: kind {sl.get('kind')!r} x {sl.get('count')!r}: a fire apparatus kind, 1 to {runcards.MAX_COUNT}")
                 c["type"] = k
@@ -1627,8 +1632,7 @@ class Editor:
             have = {c["type"]: {"spoken": c["spoken"], "is_default": c["is_default"], "slots": c["slots"]}
                     for c in runcards.cards(self.store)}
             want = {c["type"]: {"spoken": str(c.get("spoken") or ""), "is_default": bool(c.get("is_default")),
-                                "slots": [{"unit": s["unit"]} if s.get("unit") else {"kind": s["kind"], "count": int(s.get("count", 1))}
-                                          for s in c["slots"]]} for c in cards}
+                                "slots": [runcards.normal(s) for s in c["slots"]]} for c in cards}
             for k in sorted(set(have) | set(want)):
                 if have.get(k) != want.get(k):
                     changes.append({"section": "run cards", "store": "run_cards", "key": k,

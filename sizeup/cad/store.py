@@ -117,9 +117,9 @@ CREATE TABLE run_cards (
 CREATE TABLE run_card_slots (
   card_id INTEGER NOT NULL REFERENCES run_cards(id) ON DELETE CASCADE,
   pos INTEGER NOT NULL,
-  kind TEXT NOT NULL DEFAULT '',        -- "engine", or "ladder|tower" (either)
+  kind TEXT NOT NULL DEFAULT '',        -- "engine", "ladder|tower" (either), "any"; "all": the full department
   count INTEGER NOT NULL DEFAULT 1,
-  unit TEXT NOT NULL DEFAULT ''         -- or one named unit ("2398")
+  unit TEXT NOT NULL DEFAULT ''         -- or one named unit ("2398"); kind "all": the department ("Port Chester FD")
 );
 CREATE TABLE events (
   id INTEGER PRIMARY KEY,

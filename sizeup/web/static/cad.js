@@ -1064,15 +1064,28 @@ async function recommend(typ, sub) {
   const iid = cad.sel, inc = selected();
   if (iid === null || (inc && (!isOpen(inc) || !inc.emergency))) { cad.rec = null; if (inc) renderDispatchBox(inc); return; }
   const body = typ ? { type: typ, subtype: sub || "" } : {};
+  const prev = cad.rec && cad.rec.iid === iid ? cad.rec : null;
   try {
     const r = await api("POST", `/api/cad/incident/${iid}/recommend`, body);
     if (cad.sel !== iid) return;
     cad.rec = { iid, ...r, checked: new Set(r.units.map((u) => u.id)), extra: [], forType: typ || "" };
+    syncFull(inc, prev, cad.rec);
   } catch (e) {
     cad.rec = { iid, units: [], unfilled: [], already: [], card: null, note: "", checked: new Set(), extra: [], error: e.message };
   }
   cad.rec.sig = null;
   renderDispatchBox(selected());
+}
+
+// A card with the full department ticks "Full department response" (said instead of each unit): on a
+// first dispatch, or in the upgrade for the new type's card. Only when the card changes, so an operator's
+// untick sticks through a refresh.
+function syncFull(inc, prev, rec) {
+  const was = prev && prev.forType === rec.forType ? !!prev.full : null;
+  if (was === !!rec.full) return;
+  if (rec.forType) { if (rec.full) $("#u-full").checked = true; return; }
+  if (!rec.full) { if (was) $("#r-full").checked = false; return; }
+  if (!inc || !(inc.dispatches || []).length) $("#r-full").checked = true;
 }
 
 function units() {
@@ -1894,7 +1907,7 @@ async function openFromRecords(id) {
 // ---- run card editor -----------------------------------------------------------------------
 
 function describeSlot(s) {
-  return s.unit ? s.unit : `${s.count} × ${s.kind.replace("|", "/")}`;
+  return s.all ? "full department" : s.unit ? s.unit : `${s.count} × ${s.kind.replace("|", "/")}`;
 }
 
 function renderRunCards() {
@@ -1924,9 +1937,15 @@ function renderRunCards() {
   });
 }
 
+function homeDepartment() {
+  return L().home_department || "Port Chester FD";
+}
 function slotRow(slot) {
   const li = el("li", "slot");
-  if (slot.unit !== undefined) {
+  if (slot.all !== undefined) {          // every available PCFD apparatus not already on the card
+    li.dataset.all = slot.all || homeDepartment();
+    li.append(el("span", "", "Full department"), el("span", "dim", `· ${li.dataset.all}`));
+  } else if (slot.unit !== undefined) {
     const s = el("select", "s-unit");
     fillSelect(s, units().filter((u) => u.board && u.response !== "agency").map((u) => [u.name, u.title ? `${u.name} ${u.title}` : u.name]));
     s.value = slot.unit || (units()[0] && units()[0].name) || "";
@@ -1937,7 +1956,7 @@ function slotRow(slot) {
     const s = el("select", "s-kind");
     const kinds = (L().unit_kinds || []).filter((k) => !k.attach_only && !k.by_name).map((k) => [k.id, k.label.toLowerCase()]);
     const ladder = kinds.some(([k]) => k === "ladder") && kinds.some(([k]) => k === "tower") ? [["ladder|tower", "ladder or tower"]] : [];
-    fillSelect(s, [...kinds.slice(0, 1), ...ladder, ...kinds.slice(1)]);
+    fillSelect(s, [["any", "any apparatus"], ...kinds.slice(0, 1), ...ladder, ...kinds.slice(1)]);
     s.value = slot.kind || "engine";
     li.append(n, el("span", "dim", "×"), s);
   }
@@ -1948,9 +1967,14 @@ function slotRow(slot) {
   const rm = el("button", "mini icon", "✕");
   rm.type = "button";
   rm.title = "Remove";
-  rm.addEventListener("click", () => li.remove());
+  rm.addEventListener("click", () => { li.remove(); rcAllSync(); });
   li.append(el("span", "spacer"), up, rm);
   return li;
+}
+function rcAllSync() {              // one full department per card
+  const b = $("#rc-add-all"), has = !!$("#rc-slots").querySelector("li[data-all]");
+  b.disabled = has;
+  b.title = has ? "This card already calls the full department" : `Every available ${homeDepartment()} apparatus not already on the card`;
 }
 
 function rcPlaceholder() {
@@ -1968,6 +1992,7 @@ function editCard(c) {
   $("#rc-spoken").value = c ? c.spoken || "" : "";
   rcPlaceholder();
   $("#rc-slots").replaceChildren(...(c ? c.slots : [{ kind: "engine", count: 1 }]).map(slotRow));
+  rcAllSync();
   show($("#rc-delete"), !!c);
   flash($("#rc-error"));
   renderRunCards();
@@ -1975,6 +2000,7 @@ function editCard(c) {
 
 function slotsFromForm() {
   return [...$("#rc-slots").children].map((li) => {
+    if (li.dataset.all) return { all: li.dataset.all };
     const u = li.querySelector(".s-unit");
     if (u) return { unit: u.value };
     return { kind: li.querySelector(".s-kind").value, count: Number(li.querySelector(".s-count").value) };
@@ -2206,6 +2232,10 @@ $("#rc-type").addEventListener("change", () => {
 $("#rc-subtype").addEventListener("change", rcPlaceholder);
 $("#rc-add-kind").addEventListener("click", () => $("#rc-slots").append(slotRow({ kind: "engine", count: 1 })));
 $("#rc-add-unit").addEventListener("click", () => $("#rc-slots").append(slotRow({ unit: "" })));
+$("#rc-add-all").addEventListener("click", () => {
+  if (!$("#rc-slots").querySelector("li[data-all]")) $("#rc-slots").append(slotRow({ all: homeDepartment() }));
+  rcAllSync();
+});
 $("#rc-new").addEventListener("click", () => editCard(null));
 $("#rc-delete").addEventListener("click", deleteCard);
 $("#db-close").addEventListener("click", () => openOverlay("#db-overlay", false));
