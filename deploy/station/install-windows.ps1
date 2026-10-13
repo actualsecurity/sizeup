@@ -77,8 +77,18 @@ function Invoke-Wsl([string[]]$Arguments) {
     $p = Start-Process -FilePath $Wsl -ArgumentList $Arguments -NoNewWindow -Wait -PassThru
     return $p.ExitCode
 }
+# wsl.exe's stdout as text. Its stderr (e.g. "Failed to start the systemd user session for 'root'",
+# printed while systemd is still coming up) is logged, not returned: on Windows PowerShell 5.1 a
+# stderr line under $ErrorActionPreference = "Stop" would otherwise end the whole install.
 function Get-WslText([string[]]$Arguments) {
-    $out = & $Wsl @Arguments 2>&1 | Out-String
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try { $all = & $Wsl @Arguments 2>&1 } finally { $ErrorActionPreference = $prev }
+    foreach ($e in @($all | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] })) {
+        $msg = ($e.ToString() -replace "`0", "").Trim()
+        if ($msg) { Write-SizeupLog $msg "Yellow" }
+    }
+    $out = $all | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] } | Out-String
     return ($out -replace "`0", "")
 }
 function Test-Distro {
