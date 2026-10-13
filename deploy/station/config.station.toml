@@ -17,7 +17,7 @@ id = "pcfd-hq"
 name = "Port Chester FD Headquarters"
 
 [web]
-# Diagnostics only (the CAD of record is the hub). WSL2 forwards localhost, so the Windows browser
+# The station page (radios, what it heard, the hub link; the CAD is on the hub). WSL2 forwards localhost, so the Windows browser
 # opens http://localhost:8091. Keep 127.0.0.1: nothing else needs to reach it.
 host = "127.0.0.1"
 port = 8091

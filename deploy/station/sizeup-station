@@ -77,7 +77,7 @@ cmd_status() {
   echo "health:    timer $(systemctl is-active sizeup-health.timer 2>/dev/null || true); last check $(journalctl -u sizeup-health.service -n 1 -o cat --no-pager 2>/dev/null | tail -n 1 || true)"
   p=$(port)
   if curl -fsS --max-time 5 -o /dev/null "http://127.0.0.1:$p/healthz" 2>/dev/null; then
-    echo "web:       http://localhost:$p (diagnostics) answers"
+    echo "web:       http://localhost:$p (station page) answers"
   else
     echo "web:       http://localhost:$p is NOT answering"
   fi

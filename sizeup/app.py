@@ -1779,7 +1779,8 @@ def make_server(app: App) -> WebServer:
     server = WebServer(cfg.host, cfg.port, app.scene(), app.state, app.clip, app.close_incident, app.set_mode,
                        app.set_talkgroup, app.set_talkgroup_group, app.retranscribe, cad=CadApi(app.cad),
                        station=getattr(app, "hub", None), health=health_info(cfg), access=access_verifier(cfg),
-                       access_log=log if cfg.cloud_role == "hub" else None, station_mode=app.station)
+                       access_log=log if cfg.cloud_role == "hub" else None, station_mode=app.station,
+                       role=cfg.cloud_role)
 
     def changed() -> None:             # a new talker is pushed at once, not on the next second
         server.poke()
@@ -1843,7 +1844,8 @@ def main(argv: list[str] | None = None) -> int:
             else f" · station, forwarding to {sm.hub_url}" if sm is not None and sm.forward else "")
     log(f"sizeup: {cfg.station_name} · {len(cfg.channels)} channel(s)"
         + (f" · P25 {cfg.p25_dir}" if cfg.p25_dir and cfg.cloud_role != "hub" else "") + role
-        + f" · {server.url} · CAD {server.url}cad" + f" ({cfg.cad_db or 'in memory'}; transmit off)")
+        + (f" · station page {server.url} (the CAD is on the hub)" if cfg.cloud_role == "station"
+           else f" · {server.url} · CAD {server.url}cad" + f" ({cfg.cad_db or 'in memory'}; transmit off)"))
     try:
         server.serve_forever()
     except KeyboardInterrupt:

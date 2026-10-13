@@ -17,7 +17,6 @@ const S = {
   boardsOpen: null, audit: "", auditRows: null, auditFor: "", admin: null, importing: null,
   previewT: null, previewSeq: 0, tsOpen: new Set(),
   act: null, actEmail: "", actKind: "", actKey: "", actAt: 0,
-  station: null, stationBusy: false, stationTest: null,
 };
 const S_SECTIONS = [["lists", "Lists"], ["runcards", "Run cards"], ["units", "Units"], ["dispatch", "Dispatch"],
   ["users", "Users"], ["system", "System"], ["radios", "Radios"]];
@@ -1185,167 +1184,22 @@ function sSystem(panel) {
 
 // ---- system: Station (forwarding to the hub, sizeup/cloud/stationmode.py) ---------------------------
 // This machine's own switch: on, what it hears also goes to the hub (the CAD of record then); off,
-// all-in-one. Radios keep running either way. Not on the hub (409: hidden). Secrets are shown only
-// as where they came from.
+// all-in-one. Radios keep running either way. Not on the hub (409: hidden). The card is hublink.js's,
+// the same as on the station page; secrets are shown only as where they came from.
 
-const SM_SECRETS = [["token", "Token"], ["access_id", "Access id"], ["access_secret", "Access secret"]];
-
-async function sStation() {
+function sStation() {
   const card = $("#s-station");
   if (!card) return;
-  let r = null, d = null;
-  try {
-    r = await fetch("/api/station-mode", { cache: "no-store" });
-    d = await r.json();
-  } catch (e) { /* shown below */ }
-  if (r && (r.status === 409 || r.status === 404)) { card.hidden = true; return; }   // the hub, or no switch here
-  card.hidden = false;
-  if (!r || !r.ok || !d) {
-    card.replaceChildren(sCardHead("Station"), el("div", "error", (d && d.error) || "Could not load the station switch"));
-    delete card.dataset.built;
-    return;
-  }
-  S.station = d;
-  if (!card.dataset.built) sStationBuild(card);
-  sStationFill(card, d);
-}
-
-function sStationBuild(card) {
-  const sw = el("button", "sw sm-sw");
-  sw.type = "button";
-  sw.setAttribute("role", "switch");
-  sw.append(el("i", "knob"), el("span", "lbl"));
-  sw.title = "On: what this station hears also goes to the hub, and the hub is the CAD of record. "
-    + "Off: all-in-one. Radios, speech-to-text and the voice keep running either way; nothing queued is lost.";
-  sw.addEventListener("click", () => sStationSet({ forward: !S.station.forward }));
-  const status = el("span", "sm-status");
-  const url = sInput("", 300, "https://hub.example.org", null, "sm-url ro-ok");
-  url.type = "url";
-  url.setAttribute("aria-label", "Hub URL");
-  url.title = "The hub's address: https:// (plain http only to this machine)";
-  const save = sBtn("Save", "Use this hub URL", () => sStationSet({ hub_url: url.value.trim() }));
-  save.classList.add("sm-save");
-  url.addEventListener("input", () => { save.disabled = url.value.trim() === (S.station.hub_url || ""); });
-  url.addEventListener("keydown", (e) => { if (e.key === "Enter" && !save.disabled) { e.preventDefault(); save.click(); } });
-  const test = sBtn("Test connection", "The hub's /healthz, then its station path with this station's token "
-    + "and Access headers. Nothing is sent.", sStationTest, "ro-ok sm-test");
-  const result = el("span", "sm-result small");
-  const row1 = el("div", "row sm-row");
-  row1.append(sw, status);
-  const row2 = el("div", "row sm-row");
-  row2.append(el("label", "dim small sm-lab", "Hub URL"), url, save, test, result);
-  const secrets = el("dl", "admin sm-secrets");
-  const hint = el("p", "dim small sm-hint");
-  card.replaceChildren(sCardHead("Station", "forward to the hub"), row1, row2, secrets, hint);
-  card.dataset.built = "1";
-}
-
-function sStationFill(card, d) {
-  const sw = card.querySelector(".sm-sw");
-  sw.className = "sw sm-sw" + (d.forward ? " on" : "");
-  sw.setAttribute("aria-checked", String(!!d.forward));
-  sw.disabled = S.stationBusy;
-  setText(sw.lastChild, "Forward to hub");
-  const st = d.status || {};
-  const status = card.querySelector(".sm-status");
-  status.className = "sm-status " + ({ ok: "ok", down: "err", blocked: "err", starting: "warn" }[st.state] || "dim");
-  setText(status, st.text || "");
-  status.title = [st.detail, st.last_error && `Last error: ${st.last_error}`].filter(Boolean).join("\n");
-  const url = card.querySelector(".sm-url");
-  if (document.activeElement !== url && url.dataset.saved !== (d.hub_url || "")) {
-    url.value = d.hub_url || "";
-    url.dataset.saved = d.hub_url || "";
-  }
-  card.querySelector(".sm-save").disabled = S.stationBusy || url.value.trim() === (d.hub_url || "");
-  card.querySelector(".sm-test").disabled = S.stationBusy;
-  const res = card.querySelector(".sm-result");
-  const t = S.stationTest;
-  res.className = "sm-result small " + (t ? (t.busy ? "dim" : t.ok ? "ok" : "err") : "");
-  setText(res, t ? (t.busy ? "Testing…" : (!t.ok && t.status ? `HTTP ${t.status}: ` : "") + t.text) : "");
-  const sec = d.secrets || {};
-  const rows = SM_SECRETS.map(([k, label]) => {
-    const x = sec[k] || {};
-    const v = x.set ? `set (${x.source})` : x.short ? `too short (${x.source})` : k === "token" ? "missing" : "not set";
-    const dd = el("dd", x.set ? "" : k === "token" ? "err" : "dim", v);
-    dd.title = (x.set ? `From ${x.source === "env" ? x.env : x.source === "Keychain" ? `the Keychain (${x.keychain})` : "config.toml"}`
-      : `Env ${x.env}` + (d.keychain ? `, or Keychain service ${x.keychain}` : "")) + (k === "token" ? "" : ". Only needed with a Cloudflare Access service token.");
-    const div = el("div");
-    div.append(el("dt", "", label), dd);
-    return div;
+  HubLink.mount(card, {
+    title: "Station",
+    operator,
+    askOperator: () => ($("#operator-pick").hidden ? $("#operator") : $("#operator-pick")).focus(),
+    msg: sMsg,
+    changed: () => { S.auditFor = ""; sAudit(); },
+    offText: "Stop forwarding to the hub? This console becomes the CAD of record again; anything still queued waits here.",
+    time: (t) => fmtTime(t, true),
   });
-  card.querySelector(".sm-secrets").replaceChildren(...rows);
-  const hint = card.querySelector(".sm-hint");
-  const tok = sec.token || {};
-  hint.replaceChildren();
-  if (!tok.set) {
-    if (d.keychain) {
-      hint.append("Add the token to the Keychain: ",
-        el("code", "", `security add-generic-password -a sizeup -s ${tok.keychain || "sizeup-station-token"} -w`), ", then Test connection.");
-    } else {
-      hint.append("No Keychain on this system: set ", el("code", "", tok.env || "SIZEUP_STATION_TOKEN"), " and restart.");
-    }
-  } else if (d.from === "config") {
-    hint.append(`From config.toml (${d.config_role}) until changed here.`);
-  }
-  show(hint, hint.childNodes.length > 0);
 }
-
-async function sStationSet(body) {
-  const op = operator();
-  if (!op) {
-    sMsg("Enter your name (Operator, top right) first: every settings change records who made it.");
-    ($("#operator-pick").hidden ? $("#operator") : $("#operator-pick")).focus();
-    return;
-  }
-  if (body.forward === true && !$("#s-station .sm-url").value.trim() && !S.station.hub_url) {
-    sMsg("Enter the hub URL first.");
-    $("#s-station .sm-url").focus();
-    return;
-  }
-  if (body.forward === true) {
-    const typed = $("#s-station .sm-url").value.trim();
-    if (typed) body.hub_url = typed;
-  }
-  if (body.forward === false && !(await UI.confirm("Stop forwarding to the hub? This console becomes the CAD of record again; "
-    + "anything still queued waits here.", { ok: "Stop forwarding" }))) return;
-  S.stationBusy = true;
-  sStationFill($("#s-station"), S.station);
-  try {
-    const r = await fetch("/api/station-mode", { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...body, operator: op }) });
-    const d = await r.json().catch(() => null);
-    if (!r.ok) throw new Error((d && d.error) || `${r.status} ${r.statusText}`);
-    S.station = d;
-    S.auditFor = "";
-    sMsg("forward" in body ? (d.forward ? "Forwarding to the hub: on." : "Forwarding to the hub: off.") : "Hub URL saved.", true);
-  } catch (e) {
-    sMsg(e.message);
-  } finally {
-    S.stationBusy = false;
-    const card = $("#s-station");
-    if (card && S.station) sStationFill(card, S.station);
-    sAudit();
-  }
-}
-
-async function sStationTest() {
-  const url = $("#s-station .sm-url").value.trim();
-  S.stationTest = { busy: true };
-  sStationFill($("#s-station"), S.station);
-  try {
-    const r = await fetch("/api/station-mode/test", { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(url ? { hub_url: url } : {}) });
-    const d = await r.json().catch(() => null);
-    S.stationTest = r.ok && d ? d : { ok: false, status: r.status, text: (d && d.error) || r.statusText };
-  } catch (e) {
-    S.stationTest = { ok: false, status: 0, text: e.message };
-  }
-  sStation();
-}
-
-setInterval(() => {           // the status line (Connected / Offline since ...) while System is open
-  if (S.section === "system" && !document.hidden && !S.stationBusy) sStation();
-}, 5000);
 
 async function sCounts() {
   try {

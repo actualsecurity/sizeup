@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en" class="cad station-page">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PCFD Station</title>
+<link rel="icon" type="image/svg+xml" href="/static/brand/pcfd-mark.svg">
+<link rel="icon" type="image/png" sizes="32x32" href="/static/brand/pcfd-mark-32.png">
+<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/cad.css">
+<link rel="stylesheet" href="/static/settings.css">
+<link rel="stylesheet" href="/static/station.css">
+</head>
+<!-- The station's own page ([cloud] role = "station", station.js): the radios, what this station heard and the
+     hub link. No CAD here: the CAD of record is on the hub. Same header and components as the CAD (style.css). -->
+<body class="cad">
+<header>
+  <a class="brand" href="/" title="Station"><img class="brand-mark" src="/static/brand/pcfd-mark.svg" alt="" width="28" height="28"><span class="brand-name">Port Chester FD</span></a>
+  <span id="page-title" class="cad-title">Station</span>
+  <span id="station" class="station"></span>
+  <nav class="tabs" aria-label="Views">
+    <a id="radios-open" class="tab" href="#radios" title="Receivers, dongles, channels, speech-to-text"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-radio"/></svg><span class="lbl">Radios</span></a>
+    <a id="monitor-open" class="tab" href="#monitor" title="What this station heard"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-monitor"/></svg><span class="lbl">Monitor</span></a>
+    <a id="settings-open" class="tab" href="#settings" title="The hub link, this install"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-settings"/></svg><span class="lbl">Settings</span></a>
+  </nav>
+  <span id="conn" class="pill warn">Connecting</span>
+  <span id="hub-pill" class="pill" hidden></span>
+  <span id="talking" class="talking-strip" hidden aria-live="polite"></span>
+  <span class="spacer"></span>
+  <a id="hub-cad" class="nav" href="/" target="_blank" rel="noopener" hidden title="The CAD of record, on the hub"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-dispatch"/></svg><span class="lbl">CAD on the hub</span></a>
+  <label class="operator" title="Recorded on every change">
+    <span class="dim">Operator</span>
+    <input id="operator" type="text" maxlength="60" autocomplete="off" spellcheck="false" placeholder="Name">
+  </label>
+  <span id="clock" class="clock"><span id="clock-date" class="dim"></span> <b id="clock-local"></b> <span id="clock-z" class="dim"></span></span>
+</header>
+<!-- arriving from /cad (or an old bookmark of it): where the CAD went -->
+<div id="from-cad" class="notice info cloud-banner" role="status" hidden></div>
+
+<!-- Radios: Settings > Radios of the CAD (radio-controls.js): receivers, dongles, the paged incident, channels
+     (record, transcribe, engine), vocabulary, speech-to-text re-run, the disk -->
+<main id="v-radios" class="st-view" hidden>
+  <div class="s-content">
+    <section class="s-panel">
+      <div class="s-head view-head"><h2 class="view-title">Radios</h2><button type="button" class="help" aria-label="Help" aria-expanded="false" data-help="What this station listens to and how. While it forwards, the channel choices are set on the hub (Settings > Radios there) and arrive here; each dongle's job is set here or from the hub.">?</button></div>
+      <div id="radio-controls" class="radio-controls"></div>
+    </section>
+  </div>
+</main>
+
+<!-- Monitor (/monitor too): pages and transmissions this station heard, newest first, with their audio and transcript -->
+<main id="v-monitor" class="st-view" hidden>
+  <div class="s-content">
+    <section class="s-panel">
+      <div class="s-head view-head">
+        <h2 class="view-title">Monitor</h2>
+        <span id="m-count" class="dim small"></span>
+        <span class="spacer"></span>
+        <form id="m-filters" class="row m-filters" autocomplete="off" role="search">
+          <input id="m-q" type="search" placeholder="Search words" aria-label="Search words" spellcheck="false" maxlength="60">
+          <select id="m-channel" aria-label="Channel or talkgroup"><option value="">Any channel</option></select>
+        </form>
+      </div>
+      <section class="rv-sec">
+        <div class="sec-head"><h2>Pages</h2><span id="m-pages-sum" class="dim small"></span><button type="button" class="help" aria-label="Help" aria-expanded="false" data-help="Tones and dispatches on the paging channel, as decoded here. The hub turns them into CAD events.">?</button></div>
+        <ol id="m-pages" class="list log pages"></ol>
+      </section>
+      <section class="rv-sec">
+        <div class="sec-head"><h2>Transmissions</h2><span id="m-traffic-sum" class="dim small"></span><button type="button" class="help" aria-label="Help" aria-expanded="false" data-help="Every transmission kept here, newest first: who keyed up (radio ID and rig when known), the channel and the transcript. Channels on AWS are transcribed on the hub: their text shows there, not here. Audio is kept 12 h.">?</button></div>
+        <ol id="m-traffic" class="list log radio-log"></ol>
+      </section>
+    </section>
+  </div>
+</main>
+
+<!-- Settings: the hub link (hublink.js) and this install -->
+<main id="v-settings" class="st-view" hidden>
+  <div class="s-content">
+    <section class="s-panel">
+      <div class="s-head view-head"><h2 class="view-title">Settings</h2></div>
+      <div id="s-msg" class="s-msg notice err" role="alert" aria-live="assertive"></div>
+      <div id="hub-card" class="card s-card" hidden></div>
+      <div class="card s-card">
+        <div class="card-head"><h2>This station</h2></div>
+        <dl id="sys-facts" class="admin"></dl>
+        <p class="dim small sys-cmds">On the station PC: <code>sizeup-station status</code>, <code>sizeup-station doctor</code> (every check, and what to do about each failure), <code>sizeup-station logs -f</code>.</p>
+      </div>
+    </section>
+  </div>
+</main>
+
+<script src="/static/icons.js"></script>
+<script src="/static/ui.js"></script>
+<script src="/static/help.js"></script>
+<script src="/static/radio.js"></script>
+<script src="/static/live.js"></script>
+<script src="/static/hublink.js"></script>
+<script src="/static/radio-controls.js"></script>
+<script src="/static/station.js"></script>
+</body>
+</html>

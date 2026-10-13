@@ -23,6 +23,19 @@ GET  /cad                      the PCFD dispatch console (static/cad.html); its 
                                with its rig, radio ID, channel and events), Settings (/cad#settings/<section>)
 GET  /comms                    -> /cad#radio?<the same query> (the old communications page)
 
+[cloud] role = "station" (the PC with the dongles; user, 2026-10-13: "the local system doesnt show the cad
+bits just things relevant to the sdr station"): the station page instead of the CAD (static/station.html):
+GET  /, /station, /monitor     the station page: Radios (receivers, dongles, channels, speech-to-text),
+                               Monitor (what this station heard), Settings (the hub link, this install)
+GET  /cad, /comms              -> /?from=cad, /#monitor (the page says where the CAD is; its script maps the
+                               CAD's old #settings/... and #radio links to its views)
+     /api/cad/...              409 {"error": "this is the station: the CAD is on the hub", hub_url}, but for
+                               what the station page's Radios uses (STATION_CAD below): Settings > Radios'
+                               channel and vocabulary settings, which the station keeps for its own radios
+                               (the hub sends its choices with set_channel_prefs). The CAD itself (the
+                               store: the radio-ID registry, those settings, the communications log) keeps
+                               running inside; only its pages and API are off, and its state push.
+
 Hub with [cloud] access_team + access_aud (sizeup/cloud/access.py): every request but /healthz and
 /api/station/... (the station's bearer token) needs a verified Cloudflare Access token from a person
 (401 otherwise: defence in depth should the origin ever be reached around Access), and the CAD API
@@ -57,6 +70,8 @@ from urllib.parse import urlsplit
 
 STATIC_DIR = Path(__file__).parent / "static"
 MAX_CAD_BODY = 65536
+# role = "station": the only CAD routes served, (method, path): what Settings > Radios (radio-controls.js) uses
+STATION_CAD = {("GET", "/api/cad/stt"), ("POST", "/api/cad/settings/channels"), ("POST", "/api/cad/settings/stt")}
 
 
 class Broadcaster:
@@ -111,13 +126,25 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                  set_talkgroup: Callable[..., str | None] | None = None,
                  set_talkgroup_group: Callable[..., str | None] | None = None, retranscribe=None,
                  cad=None, cad_b: Broadcaster | None = None, station=None, health: bytes = b'{"ok":true}',
-                 access=None, access_log: Callable[[str], None] | None = None, station_mode=None):
+                 access=None, access_log: Callable[[str], None] | None = None, station_mode=None,
+                 role: str = ""):
     """cad: a CadApi (sizeup/cad/api.py) and cad_b its own broadcaster (the console's state is
     small and separate from the monitor's, so neither page carries the other's). station: the hub's
     ingest (sizeup/cloud/hub.py Hub), which checks the station's token before reading any body.
     access: an AccessVerifier (sizeup/cloud/access.py): who signed in, required on the hub.
-    station_mode: Settings > System > Station (sizeup/cloud/stationmode.py StationMode), not on the hub."""
+    station_mode: Settings > System > Station (sizeup/cloud/stationmode.py StationMode), not on the hub.
+    role: [cloud] role; "station" serves the station page and refuses the CAD's (see the top)."""
     hub_says = json.dumps({"error": "this is the hub: station forwarding is switched on the station"}).encode()
+    station_ui = role == "station"
+
+    def station_says() -> bytes:
+        url = (getattr(station_mode, "hub_url", "") or "") if station_mode is not None else ""
+        return json.dumps({"error": "this is the station: the CAD is on the hub" + (f" ({url})" if url else ""),
+                           "hub_url": url}).encode()
+
+    def cad_refused(method: str, path: str) -> bool:
+        return station_ui and path.startswith("/api/cad/") and (method, path) not in STATION_CAD
+
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -195,6 +222,15 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
             path = url.path
             if not self._admit(path):
                 return
+            if station_ui:
+                if path in ("/", "/index.html", "/station", "/monitor"):
+                    return self._static("station.html")
+                if path in ("/cad", "/cad.html"):
+                    return self._redirect("/?from=cad")
+                if path in ("/comms", "/comms.html"):
+                    return self._redirect("/#monitor")
+                if cad_refused("GET", path):
+                    return self._send(409, station_says(), "application/json")
             if path in ("/", "/index.html") and cad is not None:   # user, 2026-10-07: "make .../cad the default page"
                 return self._redirect("/cad")
             if path in ("/cad", "/cad.html", "/monitor") and cad is not None:
@@ -248,6 +284,9 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 if code >= 400:              # the body may be unread (a refused token): don't reuse the connection
                     self.close_connection = True
                 return self._send(code, body, ctype)
+            if cad_refused("POST", path):
+                self.close_connection = True     # the body is left unread
+                return self._send(409, station_says(), "application/json")
             if path.startswith("/api/cad/") and cad is not None:
                 try:
                     n = int(self.headers.get("Content-Length") or 0)
@@ -367,14 +406,16 @@ class WebServer:
                  set_talkgroup_group: Callable[..., str | None] | None = None,
                  retranscribe: Callable[[list[str] | None], int] | None = None, cad=None, station=None,
                  health: dict | None = None, access=None, access_log: Callable[[str], None] | None = None,
-                 station_mode=None):
+                 station_mode=None, role: str = ""):
         self.access = access
         self.broadcaster = Broadcaster(state_fn)
-        self.cad_broadcaster = Broadcaster(cad.cad.state) if cad is not None else None
+        # The CAD's own state push (the whole console rebuilt and sent once a second): not on a station,
+        # whose page has no CAD (role = "station": its /api/cad/stream is refused).
+        self.cad_broadcaster = Broadcaster(cad.cad.state) if cad is not None and role != "station" else None
         self.httpd = ThreadingHTTPServer((host, port), make_handler(
             json.dumps(scene, separators=(",", ":")).encode(), self.broadcaster, clip, close_incident, set_mode,
             set_talkgroup, set_talkgroup_group, retranscribe, cad, self.cad_broadcaster, station,
-            json.dumps(health or {"ok": True}, separators=(",", ":")).encode(), access, access_log, station_mode))
+            json.dumps(health or {"ok": True}, separators=(",", ":")).encode(), access, access_log, station_mode, role))
         self.httpd.daemon_threads = True
 
     @property

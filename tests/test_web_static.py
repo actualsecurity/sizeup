@@ -7,7 +7,7 @@ from pathlib import Path
 from sizeup.cad.api import needs
 
 STATIC = Path(__file__).resolve().parent.parent / "sizeup" / "web" / "static"
-PAGES = ("cad.html",)                      # the only page: /cad and /monitor (comms.html, index.html are gone)
+PAGES = ("cad.html", "station.html")       # /cad and /monitor; the station's own page (comms.html, index.html are gone)
 JS_FILES = sorted(p.name for p in STATIC.glob("*.js"))
 
 
@@ -26,7 +26,7 @@ def test_every_function_called_on_update_is_defined():
 
 
 def test_buttons_in_the_page_have_handlers():
-    html = (STATIC / "cad.html").read_text()
+    html = "".join((STATIC / page).read_text() for page in PAGES)
     scripts = "".join(js(n) for n in JS_FILES)
     for bid in re.findall(r'<button id="([\w-]+)"(?! type="submit")', html):     # a submit button: its form's handler
         assert re.search(rf'\$\("#{bid}"\)\.addEventListener|RadioLive\.button\(\$\("#{bid}"\)', scripts), f"#{bid} has no handler"
@@ -41,7 +41,7 @@ def test_pages_load_only_scripts_that_exist_and_nothing_points_at_the_old_pages(
             assert (STATIC / src).is_file(), f"{page}: {src} missing"
         for href in re.findall(r'href="/static/([\w./-]+)"', html):
             assert (STATIC / href).is_file(), f"{page}: {href} missing"
-        for new in ("radio-view.js", "radio-controls.js", "board.js"):
+        for new in (("radio-view.js", "radio-controls.js", "board.js") if page == "cad.html" else ("radio-controls.js",)):
             assert f'<script src="/static/{new}">' in html
     for name in [*JS_FILES, *PAGES]:
         text = (STATIC / name).read_text()

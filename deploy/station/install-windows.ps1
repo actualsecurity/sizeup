@@ -378,7 +378,7 @@ if ((Invoke-Wsl $linuxArgs) -ne 0) { Fail "install-linux.sh failed inside $Distr
 Step "Done"
 Invoke-Wsl @("-d", $Distro, "-u", "root", "--exec", "/usr/local/bin/sizeup-station", "doctor") | Out-Null
 Write-SizeupLog "The station runs inside WSL and starts by itself after every restart or power cut." "Green"
-Write-SizeupLog "  Diagnostics page:  http://localhost:8091" "Green"
+Write-SizeupLog "  Station page:      http://localhost:8091" "Green"
 Write-SizeupLog "  Status / checks:   wsl -d $Distro -u root sizeup-station status   (or: doctor, logs, update, secrets)" "Green"
 Write-SizeupLog ""
 Write-SizeupLog "Two things to set by hand, once:" "Yellow"
