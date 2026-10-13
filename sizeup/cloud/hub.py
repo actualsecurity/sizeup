@@ -7,7 +7,8 @@ runs on a bare Linux box with Python + numpy.
                                   (_page_heard, _transcribed, _retext, the radio registry); each
                                   event once: the hub remembers the last seq per outbox epoch
                                   (hub.sqlite), and pages / transmissions are keyed by their ids
-    POST /api/station/state       {at, talking?, status?}: who is talking now (latest wins) and the
+    POST /api/station/state       {at, talking?, paging?, status?}: who is talking now and a page going
+                                  out now (latest wins; paging: sizeup/radio/livepage.py) and the
                                   station's radio / SDR / STT / voice rows, talkgroups, re-run
                                   progress, outbox size
     GET  /api/station/jobs?wait=25   long poll: jobs for the station -> {jobs: [{id, type, args}]}
@@ -136,15 +137,28 @@ class RemoteLive:
         self.on_change: Callable[[], None] = lambda: None
         self._lock = threading.Lock()
         self._entries: list[dict] = []
+        self._paging: list[dict] = []
         self._at = 0.0
 
-    def update(self, entries: list, at: float | None = None) -> None:
+    def update(self, entries: list, at: float | None = None, paging: list | None = None) -> None:
+        """A snapshot: who is talking, and (paging) the pages going out now; a station before #63 sends
+        none, which is the same as none going out."""
         clean = [dict(e) for e in entries if isinstance(e, dict)][:50]
+        pages = [dict(p) for p in (paging or []) if isinstance(p, dict) and isinstance(p.get("pairs"), list)][:8]
         with self._lock:
-            changed = clean != self._entries
-            self._entries, self._at = clean, self.clock() if at is None else at
+            changed = clean != self._entries or pages != self._paging
+            self._entries, self._paging, self._at = clean, pages, self.clock() if at is None else at
         if changed:
             self.on_change()
+
+    def paging_state(self) -> list[dict]:
+        """The station's pages going out now (a just-finished one until its `until`); [] once the
+        snapshot is older than LIVE_STALE_S, like the talkers."""
+        now = self.clock()
+        with self._lock:
+            if now - self._at > LIVE_STALE_S:
+                return []
+            return [dict(p) for p in self._paging if not (p.get("ended") and (p.get("until") or 0) <= now)]
 
     def state(self) -> list[dict]:
         now = self.clock()
@@ -360,7 +374,7 @@ class Hub:
             self.status = st
             self.app.channels_check()          # the station runs other channel choices than these: send them
         if isinstance(d.get("talking"), list):
-            self.live.update(d["talking"], now)
+            self.live.update(d["talking"], now, d.get("paging") if isinstance(d.get("paging"), list) else None)
         return _json(200, {"ok": True})
 
     def _events(self, raw: bytes | None) -> tuple[int, bytes, str]:
@@ -413,12 +427,15 @@ class HubApp(App):
         self.hub = Hub(self, cfg, log)
         self.live = self.hub.live                      # main() sets on_change to push the display
         self.cad.live = self.live.state
+        self.paging_state = self.live.paging_state     # the station's page going out now
         self.cad.remote_voice = self.hub.render_voice
         self.cad.audio_blobs = self.audio
         self.cad.cloud = self.hub.cad_cloud
         self._chan_push = {"busy": False, "at": 0.0, "error": "", "again": False}
         for d in self.mdb.load(self.store):
             self.pages.append(page_from_dict(d))
+        for p in list(self.pages):                     # pages from before #64: rows in Radio too
+            self._page_to_cad(p, replace=False)
         self._clean_hub()
 
     # -- the station's events ----------------------------------------------------------------------

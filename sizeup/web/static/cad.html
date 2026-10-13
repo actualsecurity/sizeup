@@ -121,6 +121,7 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
       </form>
       <section class="rv-sec">
         <div class="sec-head"><h2>Main</h2><span id="rv-main-sum" class="dim small sum"></span><button type="button" class="help" aria-label="Help" aria-expanded="false" data-help="FG1, Fire/EMS 15 and every talkgroup marked Main (Settings, Radios), and notes tagged with a unit. The rest: Other talkgroups.">?</button></div>
+        <div id="rv-paging" class="paging-live" hidden aria-live="polite"></div>
         <ol id="rv-main" class="list log radio-log rv-list"></ol>
       </section>
       <section id="rv-other-sec" class="rv-sec other-section">
@@ -208,6 +209,7 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
               <span id="d-disp-w"><span class="dim">Disposition</span> <b id="d-disp"></b></span>
             </div>
             <div id="d-caller" class="d-caller"></div>
+            <div id="d-pages" class="d-pages" hidden aria-label="The 60 Control page"></div>
             <pre id="d-narr" class="narr"></pre>
           </div>
           <div class="mapbox">
@@ -365,7 +367,7 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
       <ol id="b-radio" class="list log radio-log" aria-live="polite"></ol>
     </section>
     <!-- the wall board (board.js): recent pages and every unit's status in one strip, instead of the board's buttons -->
-    <section class="board-only b-sec"><h2>Pages</h2><ol id="b-pages" class="list pages"></ol></section>
+    <section class="board-only b-sec"><h2>Pages</h2><div id="b-paging" class="paging-live" hidden aria-live="polite"></div><ol id="b-pages" class="list pages"></ol></section>
     <section class="board-only b-sec"><h2>Units</h2><div id="b-units" class="b-strip"></div></section>
     <h2 class="console-only">Units</h2>
     <div id="units" class="unit-groups console-only"></div>

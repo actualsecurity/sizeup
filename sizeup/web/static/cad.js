@@ -548,6 +548,7 @@ function renderDetail() {
   setText($("#d-caller"), caller ? `Caller: ${caller}` : "");
   setText($("#d-narr"), inc.remarks || "");
   show($("#d-narr"), !!inc.remarks);
+  renderSourcePages(inc);
   renderMap(inc);
   renderOnUnits(inc);
   renderAddUnit(inc);
@@ -560,11 +561,35 @@ function renderDetail() {
   renderEvents(inc);
 }
 
+// The 60 Control page(s) an event came from (comms.py why "page", #64): play over the page's text, from the
+// queue through Accept and after. An event from before the link has none: no button, nothing guessed.
+function renderSourcePages(inc) {
+  const box = $("#d-pages");
+  const pages = (inc.radio || []).filter((t) => t.why === "page").sort((a, b) => a.start - b.start);
+  const sig = JSON.stringify([inc.id, pages.map((t) => [t.id, t.has_audio, t.voice_at, t.tones])]);
+  if (box._sig === sig) return;
+  box._sig = sig;
+  box.replaceChildren(...pages.map((t) => {
+    const r = el("div", "d-page");
+    const b = Icon.play(el("button", "play"));
+    b.type = "button";
+    b.disabled = t.has_audio === false;
+    b.title = t.has_audio === false ? "Recording expired (12 h)" : `Play the page (${fmtTime(t.start, true)})`;
+    b.addEventListener("click", () => play(`/api/audio/${encodeURIComponent(t.id)}.wav`));
+    r.append(b);
+    const v = voiceButton(t);
+    if (v) r.append(v);
+    r.append(el("span", "dim", `Page ${fmtTime(t.start)}`), ...Radio.pageTags(t.tones));
+    return r;
+  }));
+  show(box, pages.length > 0);
+}
+
 // ---- the incident's radio traffic (sizeup/cad/comms.py) ------------------------------------------
 // Every transmission from a radio on a unit assigned to it (dispatched / attached until it cleared),
 // FG1 while it had units on it, and 60 Control's turns answering those units in the same P25 call.
 
-const RADIO_WHY = { unit: "Unit", channel: "FG1", dispatcher: "60 Control", manual: "Added" };
+const RADIO_WHY = { unit: "Unit", channel: "FG1", dispatcher: "60 Control", manual: "Added", page: "Page" };
 // One transmission: play first, then time, rig, channel, duration; the incidents it is on as chips (a click:
 // that incident) and its "⋯" menu (txMenu) at the end; the transcript under it. ctx: {scope: "feed" | "rv" |
 // "inc" (where it is drawn: the menu's identity across redraws), current: the incident whose list this is
@@ -576,15 +601,20 @@ function radioRow(t, ctx = {}) {
   b.title = t.has_audio === false ? "Recording expired (12 h)" : "Play";
   b.disabled = t.has_audio === false;
   b.addEventListener("click", () => play(`/api/audio/${encodeURIComponent(t.id)}.wav`));
-  meta.append(b, el("span", "t", fmtTime(t.start, true)));
+  meta.append(b);
+  const vb = voiceButton(t);
+  if (vb) meta.append(vb);
+  meta.append(el("span", "t", fmtTime(t.start, true)));
   const tag = Radio.rigTag({ rig: t.rig, radio_id: t.radio_id, unit: t.talker });
   if (tag) meta.append(tag);
   meta.append(el("span", "chip src", t.channel));
+  if (t.tones && t.tones.length) meta.append(...Radio.pageTags(t.tones));   // a page: who it was for (#64)
   if (t.why) {
     const w = el("span", `why ${t.why}`, RADIO_WHY[t.why] || t.why);
     w.title = t.why === "unit" ? `${t.link_unit || t.rig} was on this incident` : t.why === "channel"
       ? "Unidentified FG1 radio while this was the only call with units" : t.why === "manual"
-      ? `Added${t.link_unit ? ` by ${t.link_unit}` : " by hand"}` : `60 Control answering ${t.link_unit || "a unit on it"}`;
+      ? `Added${t.link_unit ? ` by ${t.link_unit}` : " by hand"}` : t.why === "page" ? "The 60 Control page for this event"
+      : `60 Control answering ${t.link_unit || "a unit on it"}`;
     meta.append(w);
   }
   if (t.end > t.start) meta.append(el("span", "dim", `${Math.round(t.end - t.start)} s`));
@@ -618,6 +648,15 @@ function radioRow(t, ctx = {}) {
   return li;
 }
 const RADIO_ALT_OPEN = new Set();       // rows whose second transcript is shown (kept across redraws)
+// A page's voice without its tones: the clip from voice_at (a media fragment, nothing new on the server).
+function voiceButton(t) {
+  if (!(t.voice_at > 0) || t.has_audio === false) return null;
+  const v = el("button", "mini", "Voice");
+  v.type = "button";
+  v.title = "Play the voice only (skip the tones)";
+  v.addEventListener("click", () => play(`/api/audio/${encodeURIComponent(t.id)}.wav#t=${Number(t.voice_at).toFixed(2)}`));
+  return v;
+}
 
 // An incident a transmission (or note) is on: a chip; a click shows that incident (the Radio view: only its
 // traffic). Manual links in the warn color.
@@ -634,7 +673,7 @@ function evChip(e) {
 // Why the auto-linker put it on (sizeup/cad/comms.py why_text).
 function whyText(why, unit) {
   return why === "unit" ? `${unit || "its unit"} assigned` : why === "channel" ? "FG1, the only call with units"
-    : why === "dispatcher" ? `60 Control answering ${unit || "a unit on it"}` : why;
+    : why === "dispatcher" ? `60 Control answering ${unit || "a unit on it"}` : why === "page" ? "the 60 Control page" : why;
 }
 
 // ---- a transmission's "⋯" menu (ui.js UI.menu): Add to event ▸, Remove from <each>, Re-transcribe, Copy text ----
@@ -761,7 +800,7 @@ function repaintTx() {                   // the rows' busy state changed: draw t
 }
 // What a transmission without text says (its status): sizeup/app.py, sizeup/channels.py.
 function sttSaid(t) {
-  return { no_speech: "Key-up, no speech", pending: "Transcribing", remote: "Transcribing on the hub (AWS)", off: "Not transcribed",
+  return { no_speech: "Key-up, no speech", no_voice: "Tones only", pending: "Transcribing", remote: "Transcribing on the hub (AWS)", off: "Not transcribed",
            error: "Transcription failed" }[t.status] || "—";
 }
 // A note tagged with units ("E63 stated that ..."), as a row among the transmissions.
@@ -2401,7 +2440,7 @@ function renderCloud() {
 
 // Who is talking now: the header strip, the talk alerts, the unit board highlight (radio.js).
 function renderTalking() {
-  Radio.update((cad.state && cad.state.talking) || []);
+  Radio.update((cad.state && cad.state.talking) || [], (cad.state && cad.state.paging) || []);
 }
 
 const newAddr = addressBox($("#f-address"), $("#f-geo"), $("#f-sugg"));

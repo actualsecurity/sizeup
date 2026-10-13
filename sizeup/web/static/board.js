@@ -30,7 +30,8 @@
       const d = await api("GET", `/api/cad/comms?${q}`);
       if (!d.unchanged) {
         r.rev = d.rev;
-        r.rows = (d.rows || []).filter((t) => t.main !== false && t.kind !== "note").slice(0, RADIO_N);
+        // pages have their own list below (with the one going out now)
+        r.rows = (d.rows || []).filter((t) => t.main !== false && t.kind !== "note" && !(t.tones && t.tones.length)).slice(0, RADIO_N);
       }
       r.error = "";
     } catch (e) {
@@ -61,9 +62,11 @@
 
   function renderPages() {
     const pages = ((b.state && b.state.pages) || []).slice().sort((x, y) => y.start - x.start).slice(0, PAGES);
+    // a page going out now (South 2): over the list, until its finished row is in it
+    Radio.fillPaging($("#b-paging"), b.state && b.state.paging, new Set(pages.map((p) => p.id)));
     syncList($("#b-pages"), pages, {
       key: (p) => p.id,
-      sig: (p) => JSON.stringify([p.status, p.raw, p.departments, p.label, p.has_audio, p.dispatch && p.dispatch.incident_type]),
+      sig: (p) => JSON.stringify([p.status, p.raw, p.departments, p.tones, p.label, p.has_audio, p.dispatch && p.dispatch.incident_type]),
       make: () => el("li"),
       fill: (li, p) => {
         const meta = el("div", "meta");
@@ -75,7 +78,8 @@
         meta.append(play, el("span", "t", fmtTime(p.start, true)), el("span", "chip src", p.label || "?"));
         const d = p.dispatch;
         if (d && d.incident_type) meta.append(el("b", "ptype", d.incident_type));
-        for (const name of p.departments || []) meta.append(el("span", "chip dept", name));
+        if (p.tones && p.tones.length) meta.append(...Radio.pageTags(p.tones));   // unknown pairs as their tones
+        else for (const name of p.departments || []) meta.append(el("span", "chip dept", name));
         const done = p.status === "done" && p.raw;
         li.replaceChildren(meta, el("div", done ? "txt clamp" : "txt muted", done ? p.raw
           : { pending: "Transcribing", no_voice: "Tones only", no_speech: "No speech", error: "Transcription failed" }[p.status] || p.status));

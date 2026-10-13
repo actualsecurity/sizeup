@@ -16,6 +16,11 @@
                                   an unknown radio between them (no ID, issue #62) is looked past
                       manual      put on the event by a person (a transmission's menu, "Add to event");
                                   unit = the operator who did it (also in the event's timeline)
+                      page        a 60 Control page (South 2) on the event it opened, or a repeat of it
+                                  (Cad.from_monitor): the event's page plays from the event itself
+    A page is a row like any transmission (id = the page id, channel South 2, talker 60 Control), with
+    its tone pairs (tones: [{a_hz, b_hz, names}], JSON) and where the voice starts (voice_at, seconds
+    into the clip: "voice only" skips the tones).
     radio_link_exclusions  transmission x event a person took off ("Remove from 26-000007", user,
                     2026-10-08: "how do i remove things from an inc if it was added"): an auto link
                     (unit / channel / dispatcher) removed is remembered here so the auto-linker never
@@ -28,6 +33,7 @@ speech-to-text updates the copied text. Adding and removing each write a line in
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from datetime import datetime
@@ -86,17 +92,18 @@ class Comms:
             have = db.execute("SELECT 1 FROM radio_traffic WHERE id = ?", (tid,)).fetchone()
             if have and not replace:
                 return []
+            tones = json.dumps(t["tones"]) if t.get("tones") else ""
             vals = (call_id, turn, start, float(t.get("end") or start), t.get("source") or "", t.get("talkgroup"),
                     talker, t.get("radio_id") or "", ", ".join(rigs), disp, t.get("text") or "", t.get("status") or "",
-                    t.get("model") or "", now)
+                    t.get("model") or "", tones, t.get("voice_at"), now)
             if have:
                 db.execute("UPDATE radio_traffic SET call_id = ?, turn = ?, start = ?, end = ?, channel = ?, talkgroup = ?, "
-                           "talker = ?, radio_id = ?, rig = ?, dispatcher = ?, text = ?, status = ?, model = ?, updated_at = ? "
-                           "WHERE id = ?", (*vals, tid))
+                           "talker = ?, radio_id = ?, rig = ?, dispatcher = ?, text = ?, status = ?, model = ?, tones = ?, "
+                           "voice_at = ?, updated_at = ? WHERE id = ?", (*vals, tid))
             else:
                 db.execute("INSERT INTO radio_traffic (call_id, turn, start, end, channel, talkgroup, talker, radio_id, rig, "
-                           "dispatcher, text, status, model, updated_at, id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                           (*vals, tid))
+                           "dispatcher, text, status, model, tones, voice_at, updated_at, id) "
+                           "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (*vals, tid))
             off = {r[0] for r in db.execute("SELECT incident_id FROM radio_link_exclusions WHERE traffic_id = ?", (tid,))}
             links: dict[int, tuple[str, str]] = {}
             for rig in rigs:
@@ -166,6 +173,21 @@ class Comms:
         db.execute("INSERT OR IGNORE INTO radio_links (traffic_id, incident_id, why, unit) SELECT ?, ?, ?, ? "
                    "WHERE NOT EXISTS (SELECT 1 FROM radio_link_exclusions WHERE traffic_id = ? AND incident_id = ?)",
                    (tid, iid, why, unit, tid, iid))
+
+    def link_pages(self, iid: int, page_ids) -> int:
+        """The 60 Control pages that opened (or repeated) an event, on it (why 'page'): each one already
+        in the log, unless a person took it off. Returns how many are new on it."""
+        n = 0
+        with self.store.tx() as db:
+            for pid in dict.fromkeys(str(p) for p in page_ids if p):
+                if db.execute("SELECT 1 FROM radio_traffic WHERE id = ?", (pid,)).fetchone() is None:
+                    continue
+                n += db.execute("INSERT OR IGNORE INTO radio_links (traffic_id, incident_id, why, unit) SELECT ?, ?, 'page', '' "
+                                "WHERE NOT EXISTS (SELECT 1 FROM radio_link_exclusions WHERE traffic_id = ? AND incident_id = ?)",
+                                (pid, iid, pid, iid)).rowcount
+            if n:
+                self.rev += 1
+        return n
 
     def link(self, tid: str, iid: int, operator: str = "") -> dict:
         """A person puts a transmission on an event (why 'manual', unit = the operator), with a line in
@@ -261,7 +283,7 @@ class Comms:
         for r in rows:
             lst = out[r.pop("incident_id")]
             if len(lst) < limit:
-                lst.append(r)
+                lst.append(_tones(r))
         shown = [r for lst in out.values() for r in lst]
         ev = self.events_of(list({r["id"] for r in shown}))
         for r in shown:
@@ -347,6 +369,7 @@ class Comms:
             ev = self.events_of([r["id"] for r in rows])
             for r in rows:
                 r["events"] = ev.get(r["id"], [])
+                _tones(r)
         return rows
 
     def facets(self) -> dict:
@@ -376,7 +399,18 @@ def why_text(why: str, unit: str = "") -> str:
         return "FG1, the only call with units"
     if why == "dispatcher":
         return f"60 Control answering {unit or 'a unit on it'}"
+    if why == "page":
+        return "the 60 Control page"
     return why
+
+
+def _tones(r: dict) -> dict:
+    """A row's tone pairs as a list ([] for anything but a page)."""
+    try:
+        r["tones"] = json.loads(r["tones"]) if r.get("tones") else []
+    except (TypeError, ValueError):
+        r["tones"] = []
+    return r
 
 
 def _when(t) -> str:

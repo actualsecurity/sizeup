@@ -156,6 +156,7 @@ class Cad:
         self.feed = Feed(self.store, lambda: self.lists, has_clip=lambda cid: self.has_clip(cid))   # the 60 Control feed
         # Set by the app: who is transmitting now (sizeup/radio/live.py) and whether a clip's audio is still kept.
         self.live: Callable[[], list[dict]] = lambda: []
+        self.paging: Callable[[], list[dict]] = lambda: []      # a page going out now (sizeup/radio/livepage.py)
         self.has_clip: Callable[[str], bool] = lambda cid: False
         # Is this talkgroup "Main" (the station's switch, Settings > Radios)? The app sets it; alone: the incident talkgroups.
         self.main_tg: Callable[[int], bool] = lambda tg: tg in s.incident_talkgroups
@@ -229,7 +230,7 @@ class Cad:
         pos = self._positions(now)
         units = [dict(u, position=pos[u["name"]]) if u["name"] in pos else u for u in st["units"]] if pos else st["units"]
         return dict(st, units=units, map=self.map_slice(units, st["incidents"], pos, now), time=now, rev=rev,
-                    talking=self.live(), cloud=self.cloud(), prealert=self.prealert_state(now))
+                    talking=self.live(), paging=self.paging(), cloud=self.cloud(), prealert=self.prealert_state(now))
 
     def prealert_state(self, now: float | None = None) -> dict | None:
         """The phone pre-alerts and Tapout's health (a broken feed never breaks the console)."""
@@ -1162,9 +1163,11 @@ class Cad:
                                              status="queued")
             self.log(f"CAD: from 60 Control: {self.lists.type_label(typ, sub) or 'type not set'} at "
                      f"{f['address'] or '(no location)'}")
+            self.comms.link_pages(iid, getattr(inc, "pages", []))   # its page plays from the event (#64)
             inc = self.store.incident(iid)
             self._prealert_match(inc)
             return inc
+        self.comms.link_pages(old["id"], getattr(inc, "pages", []))  # a repeat of the page: on it too, accepted or not
         if old["status"] != "queued":
             return old
         fill = {k: v for k, v in f.items() if k == "remarks" or
