@@ -1,0 +1,88 @@
+{
+ "id": 183,
+ "name": "Fire Stations",
+ "type": "Feature Layer",
+ "geometryType": "esriGeometryPoint",
+ "maxRecordCount": 1000,
+ "capabilities": "Map,Query,Data",
+ "editingInfo": null,
+ "copyrightText": "",
+ "supportsAdvancedQueries": true,
+ "supportedQueryFormats": "JSON, geoJSON, PBF",
+ "description": "Fire stations in Westchester County, New York, with name, address, and contact information. Data is updated as of 12/8/2015",
+ "fields": [
+  {
+   "name": "OBJECTID",
+   "type": "esriFieldTypeOID",
+   "alias": "OBJECTID"
+  },
+  {
+   "name": "NAME",
+   "type": "esriFieldTypeString",
+   "alias": "NAME"
+  },
+  {
+   "name": "DEPT",
+   "type": "esriFieldTypeDouble",
+   "alias": "DEPT"
+  },
+  {
+   "name": "ADDRESS",
+   "type": "esriFieldTypeString",
+   "alias": "ADDRESS"
+  },
+  {
+   "name": "CITY",
+   "type": "esriFieldTypeString",
+   "alias": "CITY"
+  },
+  {
+   "name": "ZIPCODE",
+   "type": "esriFieldTypeString",
+   "alias": "ZIP"
+  },
+  {
+   "name": "CONTACT",
+   "type": "esriFieldTypeString",
+   "alias": "CONTACT"
+  },
+  {
+   "name": "PHONE",
+   "type": "esriFieldTypeString",
+   "alias": "PHONE"
+  },
+  {
+   "name": "LOC_STATUS",
+   "type": "esriFieldTypeString",
+   "alias": "LOC_STATUS"
+  },
+  {
+   "name": "POINT_X",
+   "type": "esriFieldTypeDouble",
+   "alias": "POINT_X"
+  },
+  {
+   "name": "POINT_Y",
+   "type": "esriFieldTypeDouble",
+   "alias": "POINT_Y"
+  },
+  {
+   "name": "STATION",
+   "type": "esriFieldTypeString",
+   "alias": "STATION"
+  },
+  {
+   "name": "SHAPE",
+   "type": "esriFieldTypeGeometry",
+   "alias": "Shape"
+  },
+  {
+   "name": "OBJECTID_1",
+   "type": "esriFieldTypeInteger",
+   "alias": "OBJECTID_1"
+  }
+ ],
+ "advancedQueryCapabilities": {
+  "supportsPagination": true
+ }
+}

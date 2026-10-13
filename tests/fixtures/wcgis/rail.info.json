@@ -1,0 +1,43 @@
+{
+ "id": 1,
+ "name": "Railroad Lines",
+ "type": "Feature Layer",
+ "geometryType": "esriGeometryPolyline",
+ "maxRecordCount": 1000,
+ "capabilities": "Map,Query,Data",
+ "editingInfo": null,
+ "copyrightText": "",
+ "supportsAdvancedQueries": true,
+ "supportedQueryFormats": "JSON, geoJSON, PBF",
+ "description": "The Rail Line layer is intended to be used as one of the base layers with other digital layers such as cadastral features, topography and orthophotos. This dataset covers the geographic area of Westchester County, New York and contains planimetric base map data representing the railway lines in the County The source for the imagery is aerial photography acquired in April 2023. The planimetric data",
+ "fields": [
+  {
+   "name": "OBJECTID",
+   "type": "esriFieldTypeOID",
+   "alias": "OBJECTID"
+  },
+  {
+   "name": "NAME",
+   "type": "esriFieldTypeString",
+   "alias": "NAME"
+  },
+  {
+   "name": "SHAPE",
+   "type": "esriFieldTypeGeometry",
+   "alias": "Shape"
+  },
+  {
+   "name": "FEA_CODE",
+   "type": "esriFieldTypeInteger",
+   "alias": "FEA_Code"
+  },
+  {
+   "name": "DESCRIPTION",
+   "type": "esriFieldTypeString",
+   "alias": "Description"
+  }
+ ],
+ "advancedQueryCapabilities": {
+  "supportsPagination": true
+ }
+}

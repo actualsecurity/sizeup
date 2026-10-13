@@ -1,0 +1,53 @@
+{
+ "id": 150,
+ "name": "Volunteer Ambulance Corps",
+ "type": "Feature Layer",
+ "geometryType": "esriGeometryPoint",
+ "maxRecordCount": 1000,
+ "capabilities": "Map,Query,Data",
+ "editingInfo": null,
+ "copyrightText": "",
+ "supportsAdvancedQueries": true,
+ "supportedQueryFormats": "JSON, geoJSON, PBF",
+ "description": "Coverage includes location of all volunteer ambulance corps building locations in Westchester County, New York as of 2016. Coverage is cartographically consistent with NYSDOT street center line files. Coverage item descriptions include: Volunteer ambulance corps name, address, and contact information.",
+ "fields": [
+  {
+   "name": "OBJECTID",
+   "type": "esriFieldTypeOID",
+   "alias": "FID"
+  },
+  {
+   "name": "SHAPE",
+   "type": "esriFieldTypeGeometry",
+   "alias": "Shape"
+  },
+  {
+   "name": "VAC_NAME",
+   "type": "esriFieldTypeString",
+   "alias": "NAME"
+  },
+  {
+   "name": "ADDRESS",
+   "type": "esriFieldTypeString",
+   "alias": "ADDRESS"
+  },
+  {
+   "name": "CITY",
+   "type": "esriFieldTypeString",
+   "alias": "CITY"
+  },
+  {
+   "name": "ZIP",
+   "type": "esriFieldTypeString",
+   "alias": "ZIP"
+  },
+  {
+   "name": "PHONE",
+   "type": "esriFieldTypeString",
+   "alias": "PHONE"
+  }
+ ],
+ "advancedQueryCapabilities": {
+  "supportsPagination": true
+ }
+}

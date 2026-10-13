@@ -1,0 +1,43 @@
+{
+ "id": 156,
+ "name": "Train Stations",
+ "type": "Feature Layer",
+ "geometryType": "esriGeometryPoint",
+ "maxRecordCount": 1000,
+ "capabilities": "Map,Query,Data",
+ "editingInfo": null,
+ "copyrightText": "Westchester County GIS and Metropolitan Transportation Authority (MTA).",
+ "supportsAdvancedQueries": true,
+ "supportedQueryFormats": "JSON, geoJSON, PBF",
+ "description": "The data layer contains locations of train stations along the three major train lines in Westchester County, New York (Hudson, Harlem, and New Haven) which are part of the Metro-North commuter rail line system. It is recommended that the coverage be used in conjunction with county rail line coverage (WCRAIL). Data was last updated in February 2022 to reflect the same point location as the MTA data",
+ "fields": [
+  {
+   "name": "OBJECTID",
+   "type": "esriFieldTypeOID",
+   "alias": "OBJECTID"
+  },
+  {
+   "name": "STATNAME",
+   "type": "esriFieldTypeString",
+   "alias": "Station Name"
+  },
+  {
+   "name": "SHAPE",
+   "type": "esriFieldTypeGeometry",
+   "alias": "Shape"
+  },
+  {
+   "name": "WCSTATIONS",
+   "type": "esriFieldTypeInteger",
+   "alias": "WCSTATIONS"
+  },
+  {
+   "name": "WCSTATIO_1",
+   "type": "esriFieldTypeInteger",
+   "alias": "WCSTATIO_1"
+  }
+ ],
+ "advancedQueryCapabilities": {
+  "supportsPagination": true
+ }
+}

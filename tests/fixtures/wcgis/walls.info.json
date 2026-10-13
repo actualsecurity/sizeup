@@ -1,0 +1,48 @@
+{
+ "id": 12,
+ "name": "Barriers",
+ "type": "Feature Layer",
+ "geometryType": "esriGeometryPolyline",
+ "maxRecordCount": 1000,
+ "capabilities": "Map,Query,Data",
+ "editingInfo": null,
+ "copyrightText": "Westchester County GIS.",
+ "supportsAdvancedQueries": true,
+ "supportedQueryFormats": "JSON, geoJSON, PBF",
+ "description": "The Barrier layer is intended to be used as one of the base layers with other digital layers such as cadastral features, topography and orthophotos.",
+ "fields": [
+  {
+   "name": "OBJECTID",
+   "type": "esriFieldTypeOID",
+   "alias": "OBJECTID"
+  },
+  {
+   "name": "DESCRIPTION",
+   "type": "esriFieldTypeString",
+   "alias": "Description"
+  },
+  {
+   "name": "PHOTO_DATE",
+   "type": "esriFieldTypeDate",
+   "alias": "Photo_date"
+  },
+  {
+   "name": "FEA_CODE",
+   "type": "esriFieldTypeInteger",
+   "alias": "FEA_Code"
+  },
+  {
+   "name": "SHAPE",
+   "type": "esriFieldTypeGeometry",
+   "alias": "Shape"
+  },
+  {
+   "name": "SHAPE.LEN",
+   "type": "esriFieldTypeDouble",
+   "alias": "SHAPE.LEN"
+  }
+ ],
+ "advancedQueryCapabilities": {
+  "supportsPagination": true
+ }
+}

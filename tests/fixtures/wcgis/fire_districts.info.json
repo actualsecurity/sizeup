@@ -1,0 +1,43 @@
+{
+ "id": 153,
+ "name": "Fire Districts",
+ "type": "Feature Layer",
+ "geometryType": "esriGeometryPolygon",
+ "maxRecordCount": 2000,
+ "capabilities": "Query,Map,Data",
+ "editingInfo": null,
+ "copyrightText": "",
+ "supportsAdvancedQueries": true,
+ "supportedQueryFormats": "JSON, geoJSON, PBF",
+ "description": "This coverage shows the Fire agency boundaries in the form of polygons in Westchester County. This coverage identifies fire agency boundry polygons in Westchester County. This information is captured using Microstation. Updated as of February 2011.",
+ "fields": [
+  {
+   "name": "OBJECTID_1",
+   "type": "esriFieldTypeOID",
+   "alias": "OBJECTID_1"
+  },
+  {
+   "name": "FIREID",
+   "type": "esriFieldTypeInteger",
+   "alias": "FIREID"
+  },
+  {
+   "name": "OBJECTID",
+   "type": "esriFieldTypeInteger",
+   "alias": "OBJECTID"
+  },
+  {
+   "name": "FIRENAME",
+   "type": "esriFieldTypeString",
+   "alias": "NAME"
+  },
+  {
+   "name": "SHAPE",
+   "type": "esriFieldTypeGeometry",
+   "alias": "Shape"
+  }
+ ],
+ "advancedQueryCapabilities": {
+  "supportsPagination": true
+ }
+}

@@ -202,3 +202,30 @@ heartbeat_stale_min = 90             # no heartbeat (or restart) this long: "Tap
 # events_every_s = 90                     # at least 60 (511NY: 10 calls a minute per key)
 # signs_every_min = 5                     # at least 1
 # cameras_every_min = 60                  # at least 10
+
+# [gis]: the CAD maps' "County GIS" layers (sizeup/gis.py, docs/cloud.md "County GIS layers"): Westchester
+# County GIS open data (tax parcels, fire and EMS districts, hydrants, buildings, flood plains, rail ...),
+# fetched by the hub (or all-in-one) from the county's ArcGIS REST services on a slow schedule, cached
+# under the state dir (gis/<key>.geojson) and served to the browsers from here; the starter set is
+# sizeup/gis.py DEFAULT_LAYERS, each with its terms. No key needed. Leave the section out: the starter
+# set as is. One [[gis.layers]] entry with a starter key changes that entry; a new key adds a dataset.
+# [gis]
+# enabled = true
+# bbox = [-73.80, 40.92, -73.56, 41.10]   # west, south, east, north: the area kept, unless a layer has its own
+# [[gis.layers]]
+# key = "parcels"                         # a starter entry: only what is set here changes
+# on = true                               # on for a viewer who hasn't chosen
+# [[gis.layers]]
+# key = "zoning"                          # a new dataset: one entry, no code
+# label = "Zoning districts"
+# group = "Boundaries"                    # the sub-heading in the Layers box
+# url = "https://giswww.westchestergov.com/arcgis/rest/services/DataHub_EnvironmentandPlanning/MapServer/207"
+# fields = [["ZONING", "Zone"], ["ZONE_NAME", "Name"], ["MAX_HGHT", "Max height"], ["STORIES", "Storeys"]]   # shown on a click, first = title
+# style = { color = "--warn", fill = 0.08, width = 1 }   # a design token or "#hex"; fill (opacity), width, radius, dash, label, labelzoom
+# minzoom = 13                            # drawn from this zoom ("zoom in" below it)
+# refresh = "monthly"                     # hourly | daily | weekly | monthly
+# tiled = false                           # true: served by viewport (a big layer: the parcels, the buildings)
+# simplify_m = 1.0                        # Douglas-Peucker tolerance in metres (0: as drawn)
+# where = "MUN = 'Port Chester'"          # an extra SQL filter; bbox = [...] its own box
+# licence = "Westchester County GIS disclaimer: public, as is"   # recorded here and in docs/cloud.md
+# page = "https://gis.westchestercountyny.gov/datasets/<item>_207"

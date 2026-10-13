@@ -1,0 +1,282 @@
+{
+ "id": 1,
+ "name": "Nursing Homes",
+ "type": "Feature Layer",
+ "geometryType": "esriGeometryPoint",
+ "maxRecordCount": 2000,
+ "capabilities": "Query",
+ "editingInfo": {
+  "lastEditDate": 1599580738298,
+  "schemaLastEditDate": 1599580738298,
+  "dataLastEditDate": 1599580738298
+ },
+ "copyrightText": "",
+ "supportsAdvancedQueries": true,
+ "supportedQueryFormats": "JSON, geoJSON, PBF",
+ "description": "FACILITIES.nursinghomes",
+ "fields": [
+  {
+   "name": "OBJECTID",
+   "type": "esriFieldTypeOID",
+   "alias": "OBJECTID"
+  },
+  {
+   "name": "X",
+   "type": "esriFieldTypeDouble",
+   "alias": "X"
+  },
+  {
+   "name": "Y",
+   "type": "esriFieldTypeDouble",
+   "alias": "Y"
+  },
+  {
+   "name": "FACILITY_NAME",
+   "type": "esriFieldTypeString",
+   "alias": "FACILITY_NAME"
+  },
+  {
+   "name": "CERTIFICATION_NUMBER",
+   "type": "esriFieldTypeString",
+   "alias": "CERTIFICATION_NUMBER"
+  },
+  {
+   "name": "AREA_OFFICE_ABBREV",
+   "type": "esriFieldTypeString",
+   "alias": "AREA_OFFICE_ABBREV"
+  },
+  {
+   "name": "FACILITY_ADDRESS_2",
+   "type": "esriFieldTypeString",
+   "alias": "FACILITY_ADDRESS_2"
+  },
+  {
+   "name": "FACILITY_CITY",
+   "type": "esriFieldTypeString",
+   "alias": "FACILITY_CITY"
+  },
+  {
+   "name": "FACILITY_ZIP",
+   "type": "esriFieldTypeInteger",
+   "alias": "FACILITY_ZIP"
+  },
+  {
+   "name": "COUNTY",
+   "type": "esriFieldTypeString",
+   "alias": "COUNTY"
+  },
+  {
+   "name": "PHONE",
+   "type": "esriFieldTypeDouble",
+   "alias": "PHONE"
+  },
+  {
+   "name": "FACILITY_WEBSITE",
+   "type": "esriFieldTypeString",
+   "alias": "FACILITY_WEBSITE"
+  },
+  {
+   "name": "OPERATOR",
+   "type": "esriFieldTypeString",
+   "alias": "OPERATOR"
+  },
+  {
+   "name": "OPERATOR_ADDRESS_1",
+   "type": "esriFieldTypeString",
+   "alias": "OPERATOR_ADDRESS_1"
+  },
+  {
+   "name": "OPERATOR_ADDRESS_2",
+   "type": "esriFieldTypeString",
+   "alias": "OPERATOR_ADDRESS_2"
+  },
+  {
+   "name": "OPERATOR_CITY",
+   "type": "esriFieldTypeString",
+   "alias": "OPERATOR_CITY"
+  },
+  {
+   "name": "OPERATOR_STATE",
+   "type": "esriFieldTypeString",
+   "alias": "OPERATOR_STATE"
+  },
+  {
+   "name": "OPERATOR_ZIP",
+   "type": "esriFieldTypeInteger",
+   "alias": "OPERATOR_ZIP"
+  },
+  {
+   "name": "MEDICARE_CERTIFIED",
+   "type": "esriFieldTypeInteger",
+   "alias": "MEDICARE_CERTIFIED"
+  },
+  {
+   "name": "MEDICARE_NUMBER",
+   "type": "esriFieldTypeString",
+   "alias": "MEDICARE_NUMBER"
+  },
+  {
+   "name": "MEDICAID_CERTIFIED",
+   "type": "esriFieldTypeInteger",
+   "alias": "MEDICAID_CERTIFIED"
+  },
+  {
+   "name": "OWNERSHIP",
+   "type": "esriFieldTypeString",
+   "alias": "OWNERSHIP"
+  },
+  {
+   "name": "MULTICAMPUS_FACILITY_ID",
+   "type": "esriFieldTypeString",
+   "alias": "MULTICAMPUS_FACILITY_ID"
+  },
+  {
+   "name": "NOTES",
+   "type": "esriFieldTypeString",
+   "alias": "NOTES"
+  },
+  {
+   "name": "OCCUPANCY_RATE",
+   "type": "esriFieldTypeDouble",
+   "alias": "OCCUPANCY_RATE"
+  },
+  {
+   "name": "OCCUPANCY_REPORT_DATE",
+   "type": "esriFieldTypeString",
+   "alias": "OCCUPANCY_REPORT_DATE"
+  },
+  {
+   "name": "OCCUPANCY_EXCEPTION_COMMENT",
+   "type": "esriFieldTypeString",
+   "alias": "OCCUPANCY_EXCEPTION_COMMENT"
+  },
+  {
+   "name": "AVERAGE_OCCUPIED_BEDS",
+   "type": "esriFieldTypeInteger",
+   "alias": "AVERAGE_OCCUPIED_BEDS"
+  },
+  {
+   "name": "INSP_STANDARD_HEALTH",
+   "type": "esriFieldTypeInteger",
+   "alias": "INSP_STANDARD_HEALTH"
+  },
+  {
+   "name": "INSP_LSC",
+   "type": "esriFieldTypeInteger",
+   "alias": "INSP_LSC"
+  },
+  {
+   "name": "INSP_TOTAL",
+   "type": "esriFieldTypeInteger",
+   "alias": "INSP_TOTAL"
+  },
+  {
+   "name": "INSP_HARM",
+   "type": "esriFieldTypeInteger",
+   "alias": "INSP_HARM"
+  },
+  {
+   "name": "INSP_PERCENT_HARM",
+   "type": "esriFieldTypeDouble",
+   "alias": "INSP_PERCENT_HARM"
+  },
+  {
+   "name": "COMP_RECEIVED",
+   "type": "esriFieldTypeInteger",
+   "alias": "COMP_RECEIVED"
+  },
+  {
+   "name": "COMP_RECEIVED_PER_100",
+   "type": "esriFieldTypeDouble",
+   "alias": "COMP_RECEIVED_PER_100"
+  },
+  {
+   "name": "COMP_SELF_REPORTED",
+   "type": "esriFieldTypeDouble",
+   "alias": "COMP_SELF_REPORTED"
+  },
+  {
+   "name": "COMP_ONSITE",
+   "type": "esriFieldTypeInteger",
+   "alias": "COMP_ONSITE"
+  },
+  {
+   "name": "COMP_CITATIONS",
+   "type": "esriFieldTypeInteger",
+   "alias": "COMP_CITATIONS"
+  },
+  {
+   "name": "COMP_CITATIONS_PER_100",
+   "type": "esriFieldTypeDouble",
+   "alias": "COMP_CITATIONS_PER_100"
+  },
+  {
+   "name": "ALL_SURVEYS",
+   "type": "esriFieldTypeInteger",
+   "alias": "ALL_SURVEYS"
+  },
+  {
+   "name": "COMP_DEF_ADMINISTRATION",
+   "type": "esriFieldTypeInteger",
+   "alias": "COMP_DEF_ADMINISTRATION"
+  },
+  {
+   "name": "COMP_DEF_QUALITY_OF_CARE",
+   "type": "esriFieldTypeInteger",
+   "alias": "COMP_DEF_QUALITY_OF_CARE"
+  },
+  {
+   "name": "COMP_DEF_RESIDENT_RIGHTS",
+   "type": "esriFieldTypeInteger",
+   "alias": "COMP_DEF_RESIDENT_RIGHTS"
+  },
+  {
+   "name": "COMP_DEF_RESIDENT_ASSESSMENT",
+   "type": "esriFieldTypeInteger",
+   "alias": "COMP_DEF_RESIDENT_ASSESSMENT"
+  },
+  {
+   "name": "COMP_DEF_DIETARY_SERVICES",
+   "type": "esriFieldTypeInteger",
+   "alias": "COMP_DEF_DIETARY_SERVICES"
+  },
+  {
+   "name": "COMP_DEF_PHYSICAL_ENVIRONMENT",
+   "type": "esriFieldTypeInteger",
+   "alias": "COMP_DEF_PHYSICAL_ENVIRONMENT"
+  },
+  {
+   "name": "COMP_DEF_OTHER_SERVICES",
+   "type": "esriFieldTypeInteger",
+   "alias": "COMP_DEF_OTHER_SERVICES"
+  },
+  {
+   "name": "COMP_DEF_TOTAL",
+   "type": "esriFieldTypeInteger",
+   "alias": "COMP_DEF_TOTAL"
+  },
+  {
+   "name": "TOTAL_BEDS",
+   "type": "esriFieldTypeInteger",
+   "alias": "TOTAL_BEDS"
+  },
+  {
+   "name": "EMPLOYEE_FLU_VACCINATION_RATE",
+   "type": "esriFieldTypeDouble",
+   "alias": "EMPLOYEE_FLU_VACCINATION_RATE"
+  },
+  {
+   "name": "VACCINATION_RATE_REPORT_DATE",
+   "type": "esriFieldTypeString",
+   "alias": "VACCINATION_RATE_REPORT_DATE"
+  },
+  {
+   "name": "ADDRESS",
+   "type": "esriFieldTypeString",
+   "alias": "Address"
+  }
+ ],
+ "advancedQueryCapabilities": {
+  "supportsPagination": true
+ }
+}

@@ -1,0 +1,53 @@
+{
+ "id": 0,
+ "name": "Streams",
+ "type": "Feature Layer",
+ "geometryType": "esriGeometryPolyline",
+ "maxRecordCount": 1000,
+ "capabilities": "Map,Query,Data",
+ "editingInfo": null,
+ "copyrightText": "Westchester County/Sanborn",
+ "supportsAdvancedQueries": true,
+ "supportedQueryFormats": "JSON, geoJSON, PBF",
+ "description": "This dataset covers the geographic area of Westchester County, New York. Dataset contains planimetric base map data for streams, creeks, and in some cases rivers, that are less than 10' in width. The source for the imagery is aerial photography acquired in April 2023. The planimetric data was originally compiled from aerial imagery collected in the year 2004. In 2023, new aerial imagery was acquir",
+ "fields": [
+  {
+   "name": "OBJECTID",
+   "type": "esriFieldTypeOID",
+   "alias": "OBJECTID"
+  },
+  {
+   "name": "HYDROLN_CO",
+   "type": "esriFieldTypeInteger",
+   "alias": "HYDROLN_CO"
+  },
+  {
+   "name": "NAME",
+   "type": "esriFieldTypeString",
+   "alias": "NAME"
+  },
+  {
+   "name": "SHAPE",
+   "type": "esriFieldTypeGeometry",
+   "alias": "Shape"
+  },
+  {
+   "name": "DESCRIPTION",
+   "type": "esriFieldTypeString",
+   "alias": "Description"
+  },
+  {
+   "name": "FEA_CODE",
+   "type": "esriFieldTypeInteger",
+   "alias": "FEA_Code"
+  },
+  {
+   "name": "PHOTO_DATE",
+   "type": "esriFieldTypeDate",
+   "alias": "Photo_date"
+  }
+ ],
+ "advancedQueryCapabilities": {
+  "supportsPagination": true
+ }
+}

@@ -1,0 +1,53 @@
+{
+ "id": 16,
+ "name": "Transportation Structures",
+ "type": "Feature Layer",
+ "geometryType": "esriGeometryPolygon",
+ "maxRecordCount": 1000,
+ "capabilities": "Map,Query,Data",
+ "editingInfo": null,
+ "copyrightText": "Westchester County GIS.",
+ "supportsAdvancedQueries": true,
+ "supportedQueryFormats": "JSON, geoJSON, PBF",
+ "description": "The Transtruct layer is intended to be used as one of the base layers with other digital layers such as cadastral features, topography and orthophotos.",
+ "fields": [
+  {
+   "name": "OBJECTID",
+   "type": "esriFieldTypeOID",
+   "alias": "OBJECTID"
+  },
+  {
+   "name": "FEA_CODE",
+   "type": "esriFieldTypeInteger",
+   "alias": "FEA_Code"
+  },
+  {
+   "name": "PHOTO_DATE",
+   "type": "esriFieldTypeDate",
+   "alias": "Photo_date"
+  },
+  {
+   "name": "DESCRIPTION",
+   "type": "esriFieldTypeString",
+   "alias": "Description"
+  },
+  {
+   "name": "SHAPE",
+   "type": "esriFieldTypeGeometry",
+   "alias": "Shape"
+  },
+  {
+   "name": "SHAPE.AREA",
+   "type": "esriFieldTypeDouble",
+   "alias": "SHAPE.AREA"
+  },
+  {
+   "name": "SHAPE.LEN",
+   "type": "esriFieldTypeDouble",
+   "alias": "SHAPE.LEN"
+  }
+ ],
+ "advancedQueryCapabilities": {
+  "supportsPagination": true
+ }
+}

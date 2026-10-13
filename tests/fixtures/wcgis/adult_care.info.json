@@ -1,0 +1,132 @@
+{
+ "id": 0,
+ "name": "Adult Care Facilities",
+ "type": "Feature Layer",
+ "geometryType": "esriGeometryPoint",
+ "maxRecordCount": 2000,
+ "capabilities": "Query",
+ "editingInfo": {
+  "lastEditDate": 1599580738298,
+  "schemaLastEditDate": 1599580738298,
+  "dataLastEditDate": 1599580738298
+ },
+ "copyrightText": "",
+ "supportsAdvancedQueries": true,
+ "supportedQueryFormats": "JSON, geoJSON, PBF",
+ "description": "FACILITIES.adultcarefac",
+ "fields": [
+  {
+   "name": "OBJECTID",
+   "type": "esriFieldTypeOID",
+   "alias": "OBJECTID"
+  },
+  {
+   "name": "FACILITY_NAME",
+   "type": "esriFieldTypeString",
+   "alias": "Facility Name"
+  },
+  {
+   "name": "ADDRESS",
+   "type": "esriFieldTypeString",
+   "alias": "Address"
+  },
+  {
+   "name": "COUNTY",
+   "type": "esriFieldTypeString",
+   "alias": "County"
+  },
+  {
+   "name": "CITY",
+   "type": "esriFieldTypeString",
+   "alias": "City"
+  },
+  {
+   "name": "ZIP",
+   "type": "esriFieldTypeInteger",
+   "alias": "Zip"
+  },
+  {
+   "name": "PHONE",
+   "type": "esriFieldTypeString",
+   "alias": "Phone"
+  },
+  {
+   "name": "FAX",
+   "type": "esriFieldTypeString",
+   "alias": "Fax"
+  },
+  {
+   "name": "FACILITY_ID",
+   "type": "esriFieldTypeString",
+   "alias": "Facility ID"
+  },
+  {
+   "name": "OPERATOR",
+   "type": "esriFieldTypeString",
+   "alias": "Operator"
+  },
+  {
+   "name": "CERTIFICATE_NUMBER",
+   "type": "esriFieldTypeString",
+   "alias": "Certificate Number"
+  },
+  {
+   "name": "NUMBER_OF_BEDS",
+   "type": "esriFieldTypeInteger",
+   "alias": "Number of Beds"
+  },
+  {
+   "name": "ASSISTED_LIVING_PROGRAM_BEDS",
+   "type": "esriFieldTypeInteger",
+   "alias": "Assisted Living Program Beds"
+  },
+  {
+   "name": "ASSISTED_LIVING_RESIDENCE__ALR",
+   "type": "esriFieldTypeInteger",
+   "alias": "Assisted Living Residence (ALR) Beds"
+  },
+  {
+   "name": "ENHANCED_ALR_BEDS",
+   "type": "esriFieldTypeInteger",
+   "alias": "Enhanced ALR Beds"
+  },
+  {
+   "name": "SPECIAL_NEEDS_ALR_BEDS",
+   "type": "esriFieldTypeInteger",
+   "alias": "Special Needs ALR Beds"
+  },
+  {
+   "name": "TYPE_",
+   "type": "esriFieldTypeString",
+   "alias": "Type"
+  },
+  {
+   "name": "CLASSIFICATION",
+   "type": "esriFieldTypeString",
+   "alias": "Classification"
+  },
+  {
+   "name": "REGIONAL_OFFICE",
+   "type": "esriFieldTypeString",
+   "alias": "Regional Office"
+  },
+  {
+   "name": "LOCATION",
+   "type": "esriFieldTypeString",
+   "alias": "Location"
+  },
+  {
+   "name": "LONG_",
+   "type": "esriFieldTypeDouble",
+   "alias": "Long"
+  },
+  {
+   "name": "LAT",
+   "type": "esriFieldTypeDouble",
+   "alias": "Lat"
+  }
+ ],
+ "advancedQueryCapabilities": {
+  "supportsPagination": true
+ }
+}

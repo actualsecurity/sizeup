@@ -53,3 +53,19 @@ def _roads_stay_local(monkeypatch):
         assert host in ("127.0.0.1", "localhost", "::1"), f"a test tried to reach {host} (roads: fixtures only)"
         return real(req, *a, **kw)
     monkeypatch.setattr(roads, "urlopen", local_only)
+
+
+@pytest.fixture(autouse=True)
+def _gis_stays_local(monkeypatch):
+    """The county GIS layers (sizeup/gis.py) never reach the county from a test: the real fetch only to
+    this machine (tests hand in recorded fixtures)."""
+    from urllib.parse import urlsplit
+
+    import sizeup.gis as gis
+    real = gis.urlopen
+
+    def local_only(req, *a, **kw):
+        host = urlsplit(req.full_url if hasattr(req, "full_url") else str(req)).hostname
+        assert host in ("127.0.0.1", "localhost", "::1"), f"a test tried to reach {host} (gis: fixtures only)"
+        return real(req, *a, **kw)
+    monkeypatch.setattr(gis, "urlopen", local_only)

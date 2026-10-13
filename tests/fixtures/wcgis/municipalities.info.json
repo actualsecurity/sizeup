@@ -1,0 +1,43 @@
+{
+ "id": 163,
+ "name": "Municipal Boundaries",
+ "type": "Feature Layer",
+ "geometryType": "esriGeometryPolygon",
+ "maxRecordCount": 2000,
+ "capabilities": "Query,Map,Data",
+ "editingInfo": null,
+ "copyrightText": "",
+ "supportsAdvancedQueries": true,
+ "supportedQueryFormats": "JSON, geoJSON, PBF",
+ "description": "This layer identifies corporate boundaries for all 45 municipal jurisdictions in Westchester County. Coverage originally obtained from New York State Office for Real Property Services (ORPS), and has been substantially modified to better align with current municipal tax parcel boundaries (WCparcels) based on a compilation of 2012 municipal tax parcel datasets. As all of Westchester's town's and ci",
+ "fields": [
+  {
+   "name": "OBJECTID",
+   "type": "esriFieldTypeOID",
+   "alias": "OBJECTID"
+  },
+  {
+   "name": "NAME",
+   "type": "esriFieldTypeString",
+   "alias": "NAME"
+  },
+  {
+   "name": "SHAPE",
+   "type": "esriFieldTypeGeometry",
+   "alias": "Shape"
+  },
+  {
+   "name": "SQMILES",
+   "type": "esriFieldTypeDouble",
+   "alias": "SQMILES"
+  },
+  {
+   "name": "SHAPE_LENG",
+   "type": "esriFieldTypeDouble",
+   "alias": "SHAPE_LENG"
+  }
+ ],
+ "advancedQueryCapabilities": {
+  "supportsPagination": true
+ }
+}

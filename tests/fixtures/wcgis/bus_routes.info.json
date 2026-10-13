@@ -1,0 +1,48 @@
+{
+ "id": 154,
+ "name": "Bee Line Bus Routes",
+ "type": "Feature Layer",
+ "geometryType": "esriGeometryPolyline",
+ "maxRecordCount": 1000,
+ "capabilities": "Map,Query,Data",
+ "editingInfo": null,
+ "copyrightText": "Westchester County Department of Public Works & Transportation",
+ "supportsAdvancedQueries": true,
+ "supportedQueryFormats": "JSON, geoJSON, PBF",
+ "description": "Westchester County Bee-line bus routes data was provided by Planning Department in April, 2022. The data was exported from County's Trapeze system and processed by County GIS for general use in mapping and GIS applications. The  Bee-line system with more than 60 routes operates within the service area of Westchester, Putnam, The Bronx and Manhattan counties.",
+ "fields": [
+  {
+   "name": "OBJECTID",
+   "type": "esriFieldTypeOID",
+   "alias": "OBJECTID"
+  },
+  {
+   "name": "SHAPE",
+   "type": "esriFieldTypeGeometry",
+   "alias": "Shape"
+  },
+  {
+   "name": "LINEABBR",
+   "type": "esriFieldTypeString",
+   "alias": "LineAbbr"
+  },
+  {
+   "name": "LINENAME",
+   "type": "esriFieldTypeString",
+   "alias": "LineName"
+  },
+  {
+   "name": "DIRNAME1",
+   "type": "esriFieldTypeString",
+   "alias": "DirName1"
+  },
+  {
+   "name": "DIRNAME2",
+   "type": "esriFieldTypeString",
+   "alias": "DirName2"
+  }
+ ],
+ "advancedQueryCapabilities": {
+  "supportsPagination": true
+ }
+}

@@ -1,0 +1,53 @@
+{
+ "id": 154,
+ "name": "National Wetlands Inventory",
+ "type": "Feature Layer",
+ "geometryType": "esriGeometryPolygon",
+ "maxRecordCount": 2000,
+ "capabilities": "Query,Map,Data",
+ "editingInfo": null,
+ "copyrightText": "US Fish and Wildlife Service",
+ "supportsAdvancedQueries": true,
+ "supportedQueryFormats": "JSON, geoJSON, PBF",
+ "description": "The National Wetlands Inventory (NWI) dataset was downloaded from the US Fish and Wildlife Service website at https://www.fws.gov/wetlands/Data/State-Downloads.html on 05/04/2021.  Metadata derives from original NWI database and updated to reflect the date of download. According to website, this layer was updated last October 1st, 2020. This is a clip of all wetlands features within the Westcheste",
+ "fields": [
+  {
+   "name": "OBJECTID",
+   "type": "esriFieldTypeOID",
+   "alias": "OBJECTID"
+  },
+  {
+   "name": "ATTRIBUTE",
+   "type": "esriFieldTypeString",
+   "alias": "ATTRIBUTE"
+  },
+  {
+   "name": "WETLAND_TYPE",
+   "type": "esriFieldTypeString",
+   "alias": "WETLAND_TYPE"
+  },
+  {
+   "name": "ACRES",
+   "type": "esriFieldTypeDouble",
+   "alias": "ACRES"
+  },
+  {
+   "name": "SHAPE",
+   "type": "esriFieldTypeGeometry",
+   "alias": "SHAPE"
+  },
+  {
+   "name": "SHAPE.AREA",
+   "type": "esriFieldTypeDouble",
+   "alias": "SHAPE.AREA"
+  },
+  {
+   "name": "SHAPE.LEN",
+   "type": "esriFieldTypeDouble",
+   "alias": "SHAPE.LEN"
+  }
+ ],
+ "advancedQueryCapabilities": {
+  "supportsPagination": true
+ }
+}

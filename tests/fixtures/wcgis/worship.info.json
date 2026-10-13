@@ -1,0 +1,58 @@
+{
+ "id": 176,
+ "name": "Houses of Worship",
+ "type": "Feature Layer",
+ "geometryType": "esriGeometryPoint",
+ "maxRecordCount": 1000,
+ "capabilities": "Map,Query,Data",
+ "editingInfo": null,
+ "copyrightText": "Westchester County Departments of Senior Program and Services, Planning, and IT",
+ "supportsAdvancedQueries": true,
+ "supportedQueryFormats": "JSON, geoJSON, PBF",
+ "description": "This data layer maps 624 houses of worship (churches, synagogues and mosques) in Westchester County and includes facilities serving all religious denominations in the county. The data was geocoded based on a spread sheet of addresses compiled by the Westchester County Department of Senior Programs and Services, March 2014.",
+ "fields": [
+  {
+   "name": "OBJECTID",
+   "type": "esriFieldTypeOID",
+   "alias": "OBJECTID"
+  },
+  {
+   "name": "ORGANIZATION",
+   "type": "esriFieldTypeString",
+   "alias": "Organization"
+  },
+  {
+   "name": "ADDRESS",
+   "type": "esriFieldTypeString",
+   "alias": "Address"
+  },
+  {
+   "name": "CITY",
+   "type": "esriFieldTypeString",
+   "alias": "City"
+  },
+  {
+   "name": "STATE",
+   "type": "esriFieldTypeString",
+   "alias": "State"
+  },
+  {
+   "name": "ZIP",
+   "type": "esriFieldTypeDouble",
+   "alias": "Zip"
+  },
+  {
+   "name": "SHAPE",
+   "type": "esriFieldTypeGeometry",
+   "alias": "Shape"
+  },
+  {
+   "name": "MAP_NAME",
+   "type": "esriFieldTypeString",
+   "alias": "MAP_NAME"
+  }
+ ],
+ "advancedQueryCapabilities": {
+  "supportsPagination": true
+ }
+}

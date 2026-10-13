@@ -1,0 +1,143 @@
+{
+ "id": 153,
+ "name": "Bee Line Bus Stops",
+ "type": "Feature Layer",
+ "geometryType": "esriGeometryPoint",
+ "maxRecordCount": 1000,
+ "capabilities": "Map,Query,Data",
+ "editingInfo": null,
+ "copyrightText": "Westchester County Department of Public Works & Transportation",
+ "supportsAdvancedQueries": true,
+ "supportedQueryFormats": "JSON, geoJSON, PBF",
+ "description": "Westchester County Bee-Line Bus System, with its principal transit operator, Liberty Lines, comprises hundreds of buses carrying more than 30 million passengers annually on approximately 63 routes, with approximately 3,000 bus stops. Two smaller transit operators also provide service within limited geographic areas. The bus routes operate within the service area of Westchester, Putnam, Bronx and M",
+ "fields": [
+  {
+   "name": "OBJECTID",
+   "type": "esriFieldTypeOID",
+   "alias": "OBJECTID"
+  },
+  {
+   "name": "STOPNAME",
+   "type": "esriFieldTypeString",
+   "alias": "STOP NAME"
+  },
+  {
+   "name": "ONSTREET",
+   "type": "esriFieldTypeString",
+   "alias": "ONSTREET"
+  },
+  {
+   "name": "CROSSTREET",
+   "type": "esriFieldTypeString",
+   "alias": "CROSS STREET"
+  },
+  {
+   "name": "ONPHOTO",
+   "type": "esriFieldTypeString",
+   "alias": "PHOTO 1"
+  },
+  {
+   "name": "SIDEPHOTO",
+   "type": "esriFieldTypeString",
+   "alias": "PHOTO 2"
+  },
+  {
+   "name": "BENCHES",
+   "type": "esriFieldTypeString",
+   "alias": "BENCHES"
+  },
+  {
+   "name": "SHELTER",
+   "type": "esriFieldTypeString",
+   "alias": "SHELTER"
+  },
+  {
+   "name": "SHAPE",
+   "type": "esriFieldTypeGeometry",
+   "alias": "Shape"
+  },
+  {
+   "name": "STOPID",
+   "type": "esriFieldTypeDouble",
+   "alias": "STOPID"
+  },
+  {
+   "name": "LANDMARKS",
+   "type": "esriFieldTypeString",
+   "alias": "LANDMARKS"
+  },
+  {
+   "name": "INSERVICES",
+   "type": "esriFieldTypeDouble",
+   "alias": "INSERVICES"
+  },
+  {
+   "name": "COMMENTS",
+   "type": "esriFieldTypeString",
+   "alias": "COMMENTS"
+  },
+  {
+   "name": "ROUTES",
+   "type": "esriFieldTypeString",
+   "alias": "ROUTES"
+  },
+  {
+   "name": "INSPDATE",
+   "type": "esriFieldTypeDate",
+   "alias": "INSPDATE"
+  },
+  {
+   "name": "DIR",
+   "type": "esriFieldTypeString",
+   "alias": "DIR"
+  },
+  {
+   "name": "GARBAGECAN",
+   "type": "esriFieldTypeString",
+   "alias": "GARBAGECAN"
+  },
+  {
+   "name": "BENCHSURF",
+   "type": "esriFieldTypeString",
+   "alias": "BENCHSURF"
+  },
+  {
+   "name": "SIGN",
+   "type": "esriFieldTypeString",
+   "alias": "SIGN"
+  },
+  {
+   "name": "OPPAT",
+   "type": "esriFieldTypeString",
+   "alias": "OPPAT"
+  },
+  {
+   "name": "LOCATION",
+   "type": "esriFieldTypeString",
+   "alias": "LOCATION"
+  },
+  {
+   "name": "ZIPCODE",
+   "type": "esriFieldTypeString",
+   "alias": "ZIPCODE"
+  },
+  {
+   "name": "STATE",
+   "type": "esriFieldTypeString",
+   "alias": "STATE"
+  },
+  {
+   "name": "TIMEPOINT",
+   "type": "esriFieldTypeString",
+   "alias": "TIMEPOINT"
+  },
+  {
+   "name": "MUNICIPALITY",
+   "type": "esriFieldTypeString",
+   "alias": "MUNICIPALITY"
+  }
+ ],
+ "advancedQueryCapabilities": {
+  "supportsPagination": true
+ }
+}

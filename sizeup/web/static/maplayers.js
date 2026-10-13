@@ -22,6 +22,10 @@
 //
 // The sources' terms (sizeup/roads.py): every event, sign and snapshot shows when it was published or
 // updated, and the map's attribution names each source that is on, with a link.
+//
+// Other scripts add their own groups to the same Layers box: MapLayers.addGroup({attach(control) ->
+// {panel() -> Element | null}}) (gislayers.js: the county GIS layers, #91); attach() gets each map's
+// control (its map, showInfo(title, sub, lines, foot), close()), panel() is asked at every render.
 "use strict";
 
 window.MapLayers = (() => {
@@ -177,6 +181,11 @@ window.MapLayers = (() => {
 
   // ---- one map's layers and its Layers control --------------------------------------------------------------
   const maps = new Set();
+  const groups = [];               // extra layer groups (addGroup), attached to every control, present and future
+  function addGroup(g) {
+    groups.push(g);
+    for (const m of maps) { try { m.groups.push(g.attach(m)); if (!m.panel.hidden) m.renderPanel(); } catch (e) { console.error(e); } }
+  }
 
   class MapRoads {
     constructor(map, host, ctrls, opts = {}) {
@@ -218,6 +227,8 @@ window.MapLayers = (() => {
       if (map.isStyleLoaded() || map.loaded()) init();
       else { map.once("load", init); map.once("idle", init); }
       maps.add(this);
+      this.groups = [];
+      for (const g of groups) { try { this.groups.push(g.attach(this)); } catch (e) { console.error(e); } }
       subscribe((d) => this.update(d));
     }
 
@@ -370,6 +381,9 @@ window.MapLayers = (() => {
       }
       if (d && d.configured && d.note) this.panel.append(h("div", "dim small", d.note));
       if (window.AirportLayer && AirportLayer.credit()) this.panel.append(h("div", "dim small", AirportLayer.credit()));
+      for (const g of this.groups) {
+        try { const el = g.panel && g.panel(); if (el) this.panel.append(el); } catch (e) { console.error(e); }
+      }
     }
 
     clicked(key, id) {
@@ -663,6 +677,6 @@ window.MapLayers = (() => {
     try { return new MapRoads(map, host, ctrls, opts); } catch (e) { console.error("map layers:", e); return null; }
   }
 
-  return { attach, openCamera, closeCamera, nearby, nearest, searchPlaces, openPlace, prefs, setLayer, LAYERS,
+  return { attach, addGroup, openCamera, closeCamera, nearby, nearest, searchPlaces, openPlace, prefs, setLayer, LAYERS,
            load, data: () => store.data, maps };
 })();
