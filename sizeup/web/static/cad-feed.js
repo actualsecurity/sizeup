@@ -10,6 +10,8 @@
 // Each row: the incidents it is on as chips (a click: that incident) and its "⋯" menu (cad.js txMenu: Add to
 // event ▸, Remove from ..., Re-transcribe, Copy text).
 // Collapsed to a one-line ticker: remembered in this browser (default: collapsed on a phone).
+// A page going out now on South 2 (60 Control's paging channel, state.paging) shows under the head while it
+// goes out, with who is being paged (radio.js fillPaging), collapsed or not.
 "use strict";
 
 window.CadFeed = (() => {
@@ -55,11 +57,14 @@ window.CadFeed = (() => {
     const more = el("a", "nav sm feed-more", "More");
     more.title = "All on this talkgroup";
     head.append(tog, title, talk, el("span", "spacer"), more);
+    const paging = el("div", "paging-live");
+    paging.hidden = true;
+    paging.setAttribute("aria-live", "polite");
     const ticker = el("div", "feed-ticker");
     const list = el("ol", "list feed-list");
     list.setAttribute("aria-live", "polite");
-    box.replaceChildren(head, ticker, list);
-    Object.assign(st, { tog, title, talk, more, ticker, list, head });
+    box.replaceChildren(head, paging, ticker, list);
+    Object.assign(st, { tog, title, talk, more, paging, ticker, list, head });
     render();
   }
 
@@ -70,6 +75,7 @@ window.CadFeed = (() => {
     st.box.hidden = !f;
     if (!f) return;
     renderHead(f, (s && s.talking) || []);
+    if (window.Radio) Radio.fillPaging(st.paging, s.paging, null);
     const rows = f.rows || [];
     const sig = JSON.stringify([st.collapsed, st.deps.rev(),
       rows.map((t) => [t.id, t.text, t.status, t.rig, t.pc, t.has_audio, t.alt_text, t.rerun_at,

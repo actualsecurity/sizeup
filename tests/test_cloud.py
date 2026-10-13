@@ -242,6 +242,70 @@ def test_a_talking_snapshot_from_a_station_that_went_quiet_is_dropped():
     assert live.state() == []
 
 
+def test_a_page_going_out_reaches_the_hub_pair_by_pair_and_ends(tmp_path):
+    # South 2 (#63): each tone pair as it decodes on the station, on the hub's CAD and monitor in well under a
+    # second, then "voice", then ended (handing over to the finished page), then gone.
+    hub = HubRun(hub_cfg(tmp_path))
+    st = station(station_cfg(tmp_path, hub.url), {})
+    st.paging.on_change = st.link.live_changed
+    try:
+        assert wait(lambda: hub.app.hub.status is not None, 10)
+        since = time.time()
+        frames = lambda x: [x[i:i + 800] for i in range(0, len(x) - 799, 800)]
+        for f in frames(np.concatenate([tone(349.1, 1.0), tone(311.1, 0.8)])):
+            st.paging.feed("South 2", since, f)
+        t0 = time.time()
+        names = lambda: [p["names"] for e in hub.app.cad.state()["paging"] for p in e["pairs"]]
+        assert wait(lambda: names() == [["Port Chester FD"]], 3)
+        assert time.time() - t0 < 1.0
+        e = hub.app.state()["paging"][0]                               # the monitor's state too
+        assert (e["channel"], e["phase"], e["ours"], e["ended"]) == ("South 2", "tones", True, False)
+        for f in frames(np.concatenate([tone(311.1, 2.2), tone(741.3, 1.0), tone(623.7, 3.0), np.zeros(4000), voice(2.0)])):
+            st.paging.feed("South 2", since, f)
+        assert wait(lambda: names() == [["Port Chester FD"], []], 3)     # an unknown pair: its tones, no name
+        assert wait(lambda: hub.app.cad.state()["paging"][0]["phase"] == "voice", 3)
+        assert hub.app.cad.state()["paging"][0]["pairs"][1]["a"] == pytest.approx(741.3, abs=2)
+        st.paging.close("South 2")
+        st.paging.finished("South 2", "abc123")
+        assert wait(lambda: hub.app.cad.state()["paging"][0]["ended"], 3)
+        assert hub.app.cad.state()["paging"][0]["page_id"] == "abc123"
+        assert wait(lambda: hub.app.cad.state()["paging"] == [], 8)       # RECENT_S after the page is built
+    finally:
+        st.link.stop()
+        hub.close()
+
+
+def test_the_hub_drops_a_stale_or_finished_paging_state_and_takes_a_station_without_one():
+    clock = [1000.0]
+    live = hub_mod.RemoteLive(lambda s, r, a: None, clock=lambda: clock[0])
+    page = {"key": "page:South 2:999.00", "channel": "South 2", "started": 999.0, "phase": "tones", "ended": False,
+            "pairs": [{"a": 349.1, "b": 311.1, "names": ["Port Chester FD"], "ours": True}]}
+    live.update([], paging=[page, {"junk": 1}, "x"])
+    assert [p["key"] for p in live.paging_state()] == [page["key"]]   # the malformed ones dropped
+    clock[0] += hub_mod.LIVE_STALE_S + 1
+    assert live.paging_state() == []                                  # the station went quiet
+    live.update([], paging=[dict(page, ended=True, until=clock[0] + 2)])
+    assert len(live.paging_state()) == 1
+    clock[0] += 3
+    assert live.paging_state() == []                                  # ended and past its until
+    live.update([{"key": "fm:FG1", "channel": "FG1"}])                # a station from before #63: no paging
+    assert live.paging_state() == [] and len(live.state()) == 1
+
+
+def test_the_state_post_takes_paging_and_ignores_what_it_does_not_know(tmp_path):
+    hub = HubRun(hub_cfg(tmp_path))
+    try:
+        page = {"key": "k", "channel": "South 2", "started": time.time(), "phase": "voice", "ended": False,
+                "pairs": [{"a": 741.3, "b": 623.7, "names": [], "ours": False}]}
+        code, _ = call(hub.url + "/api/station/state", "POST",
+                       {"at": time.time(), "talking": [], "paging": [page], "from_the_future": {"x": 1}})
+        assert code == 200 and [p["key"] for p in hub.app.cad.state()["paging"]] == ["k"]
+        code, _ = call(hub.url + "/api/station/state", "POST", {"at": time.time(), "talking": [], "paging": "bad"})
+        assert code == 200 and hub.app.cad.state()["paging"] == []
+    finally:
+        hub.close()
+
+
 def test_a_60_control_page_makes_the_same_pending_cad_event_on_the_hub(tmp_path):
     hub = HubRun(hub_cfg(tmp_path))
     st = station(station_cfg(tmp_path, hub.url), {6: PAGE_TEXT})

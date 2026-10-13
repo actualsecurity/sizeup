@@ -275,9 +275,11 @@ function renderMonitor() {
   const s = sta.state;
   if (sta.view !== "monitor" || !s) return;
   const pages = (s.pages || []).filter((p) => matches(p, p.raw));
+  // a page going out now (South 2, state.paging): over the Pages list until its finished row is in it
+  Radio.fillPaging($("#m-paging"), s.paging, new Set((s.pages || []).map((p) => p.id)));
   const all = traffic(s);
   const rows = all.filter((t) => matches(t, t.text)).slice(0, MONITOR_ROWS);
-  const sig = JSON.stringify([sta.q, sta.channel, pages.map((p) => [p.id, p.status, p.raw, p.has_audio]),
+  const sig = JSON.stringify([sta.q, sta.channel, pages.map((p) => [p.id, p.status, p.raw, p.has_audio, p.tones]),
                               rows.map((t) => [t.id, t.status, t.text, t.has_audio, t.rig, t.alt_text])]);
   fillChannels(all, s.pages || []);
   if (sig === sta.monSig) return;
@@ -288,15 +290,14 @@ function renderMonitor() {
   const filtered = !!(sta.q || sta.channel);
   syncList($("#m-pages"), pages.slice(0, 20), {
     key: (p) => p.id,
-    sig: (p) => JSON.stringify([p.status, p.raw, p.has_audio]),
+    sig: (p) => JSON.stringify([p.status, p.raw, p.has_audio, p.tones]),
     make: () => el("li", "rt"),
     fill: (li, p) => {
       const meta = el("div", "meta");
       meta.append(playButton(p), el("span", "t", fmtTime(p.start, true)), el("span", "chip src", p.label));
       const d = p.dispatch;
       if (d && d.incident_type) meta.append(el("span", "ptype", d.incident_type));
-      const tones = (p.tones || []).flatMap((t) => t.names || []);
-      if (tones.length) meta.append(el("span", "", tones.join(", ")));
+      if ((p.tones || []).length) meta.append(...Radio.pageTags(p.tones));   // who it was for; an unknown pair as its tones
       else if (p.kind === "voice") meta.append(el("span", "", "Voice, no tones"));
       li.replaceChildren(meta, el("div", "txt" + (p.raw ? "" : " muted"), p.raw || said(p)));
     },
@@ -359,7 +360,7 @@ function onState(s) {
   sta.state = s;
   sta.lastMsgAt = Date.now();
   if (s.time) sta.skew = s.time - Date.now() / 1000;
-  Radio.update(s.talking || []);
+  Radio.update(s.talking || [], s.paging || []);     // the header chip: who is keying up, a page going out
   renderMonitor();
 }
 

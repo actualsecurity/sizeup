@@ -3,7 +3,10 @@
 // (a toast and an optional chime when chosen units key up), and the rig + radio ID tag on a
 // transmission. The server says who is talking (sizeup/radio/live.py); nothing here guesses.
 //
-//   Radio.update(talking)       every state push: redraws #talking, raises alerts
+//   Radio.update(talking, paging)  every state push: redraws #talking (a page going out first), raises alerts
+//   Radio.fillPaging(box, paging, done)  a page going out now as a row (the pinned feed, Radio, the board's
+//                               Pages); `done`: finished page ids already listed there (the row hands over)
+//   Radio.pageTags(tones)       one tag per tone pair: the department(s), or the tones when nobody's code
 //   Radio.talkingFor(rig)       the entry for a rig transmitting now (unit board highlight), or null
 //   Radio.rigTag(t)             "E63 · 6301" for a transmission row
 //   Radio.mountAlerts(box)      the "🔔 Alerts" button + its settings (kept in this browser)
@@ -14,7 +17,7 @@ window.Radio = (() => {
   const DEFAULT_KINDS = ["engine", "rescue"];          // "all PCFD engines and rescues" when first switched on
   const TOAST_MS = 7000;
   const SILENT_WAV = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=";
-  const st = { talking: [], seen: null, rigs: null, alerts: loadAlerts(), panel: null, btn: null,
+  const st = { talking: [], paging: [], seen: null, rigs: null, alerts: loadAlerts(), panel: null, btn: null,
                chime: new Audio(), chimeOk: false, toasts: null };
 
   function el(tag, cls, text) {
@@ -52,16 +55,62 @@ window.Radio = (() => {
     return st.talking.find((e) => e.rig && e.rig.split(/,\s*/).includes(rig)) || null;
   }
 
+  // ---- a page going out now (South 2, sizeup/radio/livepage.py) ------------------------------------
+  // {channel, started, pairs: [{a, b, names, ours}], phase: "tones" | "voice", ours, ended, page_id}. A pair
+  // nobody's code matches is shown as its tones ("741.3/623.7"), never a guess. "(heard)" is dropped (confirmed
+  // on the air); "(est.)" stays (an estimated code).
+
+  const hz = (x) => Number(x).toFixed(1);
+  const pairName = (p) => (p.names || []).map((n) => n.replace(/ \(heard\)$/, "")).join(" / ");
+  const pairTones = (p) => hz(p.a ?? p.a_hz) + ((p.b ?? p.b_hz) ? `/${hz(p.b ?? p.b_hz)}` : "");
+  function pageWords(p) {
+    return [p.channel, p.ended ? "Paged" : "Paging", ...(p.pairs || []).map((x) => pairName(x) || pairTones(x)),
+            ...(p.phase === "voice" ? ["voice"] : [])].join(" · ");
+  }
+  function pageTags(tones) {
+    return (tones || []).map((x) => {
+      const name = pairName(x);
+      const t = el("span", "page-dept" + (x.ours ? " ours" : "") + (name ? "" : " unk"), name || pairTones(x));
+      t.title = name ? `${name}: ${pairTones(x)} Hz` : `${pairTones(x)} Hz: no department has this code yet`;
+      return t;
+    });
+  }
+  function pagingChip(p) {
+    const c = el("span", "talk-chip paging" + (p.ours ? " ours" : "") + (p.ended ? " ended" : ""));
+    if (window.Icon) c.append(Icon("page"));
+    c.append(el("span", "", pageWords(p)));
+    c.title = (p.pairs || []).map((x) => `${pairName(x) || "unknown"} ${pairTones(x)} Hz`).join(", ");
+    return c;
+  }
+  function pagingRow(p) {
+    const r = el("div", "paging-row" + (p.ours ? " ours" : "") + (p.ended ? " ended" : ""));
+    if (window.Icon) r.append(Icon("page"));
+    r.append(el("b", "", p.channel), el("span", "pg-what", p.ended ? "Paged" : "Paging"), ...pageTags(p.pairs));
+    if (p.phase === "voice") r.append(el("span", "dim", "voice"));
+    r.title = pageWords(p);
+    return r;
+  }
+  function fillPaging(box, paging, done) {
+    if (!box) return;
+    const items = (Array.isArray(paging) ? paging : []).filter((p) => !(p.ended && done && done.has(p.page_id)));
+    const sig = JSON.stringify(items.map((p) => [p.key, p.pairs, p.phase, p.ended]));
+    if (box._sig === sig) return;
+    box._sig = sig;
+    box.replaceChildren(...items.map(pagingRow));
+    box.hidden = !items.length;
+  }
+
   // ---- the strip ----------------------------------------------------------------------------------
 
   function renderStrip() {
     const box = document.getElementById("talking");
     if (!box) return;
     const items = st.talking.filter(shown).slice(0, 6);
-    const sig = JSON.stringify(items.map((e) => [e.key, e.rig, e.alias, e.ended, e.channel, e.id_on_release]));
+    const sig = JSON.stringify([st.paging.map((p) => [p.key, p.pairs, p.phase, p.ended]),
+                                items.map((e) => [e.key, e.rig, e.alias, e.ended, e.channel, e.id_on_release])]);
     if (box._sig === sig) return;
     box._sig = sig;
-    box.replaceChildren(...items.map((e) => {
+    box.replaceChildren(...st.paging.map(pagingChip), ...items.map((e) => {
       const c = el("span", chipClass(e));
       c.append(el("span", "", label(e)));
       c.title = [e.radio_id ? `radio ${e.radio_id}` : "", e.alias && e.alias !== e.rig ? `alias ${e.alias}` : "",
@@ -69,7 +118,7 @@ window.Radio = (() => {
         || "Transmitting now";
       return c;
     }));
-    box.hidden = !items.length;
+    box.hidden = !items.length && !st.paging.length;
   }
 
   // ---- alerts -------------------------------------------------------------------------------------
@@ -174,8 +223,9 @@ window.Radio = (() => {
     }
   }
 
-  function update(talking) {
+  function update(talking, paging) {
     st.talking = Array.isArray(talking) ? talking : [];
+    st.paging = Array.isArray(paging) ? paging : [];
     renderStrip();
     if (st.alerts.on && !st.rigs) loadRigs();
     alertNew(st.talking);
@@ -318,6 +368,6 @@ window.Radio = (() => {
     return box.childNodes.length ? box : null;
   }
 
-  return { update, talkingFor, rigTag, mountAlerts, label, chipClass, who, shown, toast, prealert,
-           get talking() { return st.talking; } };
+  return { update, talkingFor, rigTag, mountAlerts, label, chipClass, who, shown, toast, prealert, fillPaging, pageTags,
+           get talking() { return st.talking; }, get paging() { return st.paging; } };
 })();

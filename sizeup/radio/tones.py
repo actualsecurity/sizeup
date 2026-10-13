@@ -125,6 +125,26 @@ class ToneDetector:
         events += self._expire_a(float("inf"))
         return events
 
+    def pending(self) -> ToneEvent | None:
+        """The page the tone ringing now already makes, before it ends (the live display,
+        radio/livepage.py): an A then 0.6 s of B is that pair whatever B's length (only B's frequency
+        can still move a little); a single run past 2.5 s is an A=B code, a long tone from 5 s."""
+        if self._run is None:
+            return None
+        hz, start, end = float(np.median(self._run)), self._run_start, self._run_end
+        a = self._pending_a
+        if a is not None and end - start >= B_MIN_S and start - a.end <= PAIR_GAP_S:
+            return ToneEvent("two_tone", a.hz, hz, a.start, end)
+        if a is None and end - start >= SAME_AB_S:
+            return (ToneEvent("long_tone", hz, None, start, end) if end - start >= LONG_TONE_S
+                    else ToneEvent("two_tone", hz, hz, start, end))
+        return None
+
+    @property
+    def ringing(self) -> bool:
+        """A tone is on the air now (a run at least MIN_RUN_S long)."""
+        return self._run is not None and self._run_end - self._run_start >= MIN_RUN_S
+
     def _step(self, hz: float | None, t_start: float, t_end: float) -> list[ToneEvent]:
         events: list[ToneEvent] = []
         if hz is not None and self._run is not None and abs(hz - np.mean(self._run)) <= SAME_TONE * hz:

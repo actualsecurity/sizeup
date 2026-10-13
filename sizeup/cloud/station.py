@@ -10,8 +10,9 @@
         heard       a radio ID (and P25 alias) heard on the air             (App._heard)
     forwarder thread   POST /api/station/events: batches in order, retried with backoff; the hub
                        answers with the last seq it has, which is then deleted here
-    state thread       POST /api/station/state: who is talking now (pushed the moment it changes:
-                       sub-second; latest wins, never queued) and every 5 s the radio / SDR / STT /
+    state thread       POST /api/station/state: who is talking now and a page going out now (paging:
+                       each tone pair as it decodes), pushed the moment it changes
+                       (sub-second; latest wins, never queued) and every 5 s the radio / SDR / STT /
                        voice status, re-run progress and the outbox size (also the heartbeat)
     jobs thread        GET /api/station/jobs?wait=25 (long poll: the station never takes inbound
                        connections): "tts" renders a dispatch with the local voice; "call" runs
@@ -223,7 +224,8 @@ class StationLink:
         while not self._stop.is_set():
             now = time.time()
             talking = self.app.live.state()
-            body: dict = {"at": now, "talking": talking}
+            paging = self.app.paging_state()            # a page going out now (a hub before #63 ignores it)
+            body: dict = {"at": now, "talking": talking, "paging": paging}
             if self._status_now or now - last_status >= STATUS_S:
                 tgs = self.app.tg.state() if self.app.p25 else []
                 sig = [(r["tg"], r["record"], r["main"]) for r in tgs]
@@ -241,7 +243,7 @@ class StationLink:
             except HubError as e:
                 self._fail(e)
                 self._stop.wait(3.0)
-            self._live_wake.wait(LIVE_REFRESH_S if talking else STATUS_S)
+            self._live_wake.wait(LIVE_REFRESH_S if talking or paging else STATUS_S)
             self._live_wake.clear()
             self._stop.wait(0.05)           # a burst of changes goes up as one update
 

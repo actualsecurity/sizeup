@@ -18,6 +18,7 @@ COMPONENTS = {
     "empty", "loading", "error", "notice", "warnbox", "banner", "help", "help-pop", "popover", "alerts-panel", "overlay",
     "dialog", "dialog-head", "dialog-title", "dialog-body", "dialog-foot", "toasts", "toast", "ico", "inc-marker",
     "menu", "menu-item", "menu-mark", "menu-text", "menu-hint", "menu-sep", "menu-back",
+    "paging-live", "paging-row", "page-dept",
 }
 
 # Raw lengths a view may still write for a size, each for a reason: the map's own marks are drawn a step

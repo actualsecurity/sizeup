@@ -14,6 +14,10 @@
         communications log, linked to the events that rig is assigned to (/cad#radio, sizeup/cad/comms.py)
     who is keying up now (squelch + live MDC decode on FG1; trunk-recorder's grants + log for P25):
         sizeup/radio/live.py -> "talking" in both pages' state
+    a page going out now on South 2 (tone pairs as they decode, then "voice"): sizeup/radio/livepage.py
+        -> "paging"; it and FG1's live MDC both come from the live tap on each FM receiver's frames
+        (sizeup/radio/tap.py). Each page is also a row in the communications log, linked to the event
+        it opened (comms.py why "page"): it plays from the Radio view and the event.
     [cloud] role = "station": every finished page / transmission / transcript / radio ID heard also
         goes to the hub through a durable outbox (_emit, sizeup/cloud/station.py); role = "hub": no
         radios at all, the same state fed by the station (sizeup/cloud/hub.py). docs/cloud.md
@@ -57,9 +61,11 @@ from sizeup.radio.mdc1200 import decode as mdc_decode
 from sizeup.radio.p25 import Call, CallIngest, Piece, split_call
 from sizeup.radio import claims
 from sizeup.radio.live import LiveTalk
+from sizeup.radio.livepage import HOLD_S, LivePaging
 from sizeup.radio import sdr as sdr_lookup
 from sizeup.radio.recorder import TrunkRecorder
 from sizeup.radio.page import Page, PageHold, assemble, page_from_dict, recording_note
+from sizeup.radio.tap import LiveTap
 from sizeup.radio.tones import TonePlan
 from sizeup.talkers import talker_prompt
 from sizeup import channels
@@ -77,8 +83,7 @@ SDR_WATCH_S = 3.0          # [radio] auto_assign: how often the plugged-in dongl
 SDR_FAILING_RESTARTS = 3   # an auto job that has restarted this often and is down: logged once, left as is
 SDR_SETTLE_S = 60.0        # after startup, Off dongles wait this long for the ones that had jobs (USB attach order)
 MIN_SPEECH_S = 0.15      # less sound than this above the dead-air floor (and no tones) = a mic click
-LIVE_WATCH_S = 0.2       # FG1 talking watcher: how often the squelch is looked at (and the MDC ID tried)
-LIVE_ID_WINDOW_S = 4.0   # ... the live MDC decode looks at the first seconds only (pre-IDs; APX 0.3-0.8 s in)
+LIVE_WATCH_S = 0.2       # FG1 talking watcher: how often the squelch is looked at (the MDC ID: radio/tap.py)
 CATEGORIES = {"fire": "#ff4d3d", "ems": "#4da3ff", "rescue": "#ffb020", "hazard": "#c86bff",
               "service": "#3ddc97", "unknown": "#9aa0b4"}
 
@@ -288,6 +293,18 @@ class App:
         self.station = None
         self._heard_sent: dict[tuple[str, str, str], float] = {}
         self.cad.live = self.live.state
+        # A page going out now (South 2: who is being paged, pair by pair) and the MDC pre-ID at key-up
+        # (FG1): one live tap on every FM receiver's frames (radio/tap.py, radio/livepage.py).
+        # It outlasts a paging channel's continuation window (#61: a page is held continue_s after its
+        # carrier drops, then finalised through _page_done -> _page_heard, which ends the live state).
+        cont = [c.continue_s or 0.0 for c in cfg.channels if c.kind == "paging"]
+        self.paging = LivePaging(self.plan, set(cfg.ours) | set(cfg.cad_monitor_departments),
+                                 hold_s=max(HOLD_S, max(cont, default=0.0) + 1.0))
+        self.paging_state: Callable[[], list[dict]] = self.paging.state    # the hub: the station's (cloud/hub.py)
+        self.tap = LiveTap(lambda label: self._kind.get(label, ""), self.paging, self.live, mdc=lambda a: self._mdc(a), log=log)
+        for r in self.receivers:
+            self.tap.attach(r)
+        self.cad.paging = lambda: self.paging_state()
         self.cad.has_clip = self.has_clip
         self.cad.main_tg = self.tg.main
         # Per-channel record / transcribe / engine (Settings > Radios, sizeup/channels.py) and Amazon
@@ -548,6 +565,10 @@ class App:
         if self._kind.get(ch.label) == "paging":
             return self._page_segment(ch, seg)
         found = self._mdc(*seg.bursts, seg.audio)
+        # An ID decoded live at key-up (radio/tap.py: a pre-ID the squelch cut off the segment) first, then
+        # the segment's own (its edges, a post-ID at release): different ones are all kept, never one picked.
+        pre = self.tap.ids(ch.label, seg.start, seg.end)
+        found = pre + [x for x in found if x not in pre]
         units = self._units(seg, found)
         record = self.channel_pref(ch.label)["record"]
         id_note = "" if not record else self._id_note(ch.label, seg, units)
@@ -629,19 +650,50 @@ class App:
         """A page just off the air (here, or on the hub from the station). False = tones only:
         nothing to transcribe (kept as the tones half of a page whose voice comes separately)."""
         self._show_page(page)
+        self.paging.finished(page.label, page.id)       # the page going out live hands over to this one
+        if any(not t.names for t in page.tones):
+            self._unknown_tones(page)                   # once per page (the live display never logs)
+        self._page_to_cad(page)                         # a row in Radio, with play, from now on (#64)
         if page.status != "no_voice":
             return True
         names = page.departments
         self._save_page(page)
         if any(n in self.cfg.ours for n in names):
             self._last_tones_only = page
-        if page.tones and not names:
-            self._unknown_tones(page)
         return False
 
     def _unknown_tones(self, page: Page) -> None:
-        log("  unknown tone pair(s) kept for learning: "
-            + ", ".join(f"{t.a_hz:.1f}/{(t.b_hz or 0):.1f} Hz" for t in page.tones))
+        """Pairs nobody's code matches, kept to be named later (data/westchester_tones.csv): the log, and
+        a line per page in unknown_tones.jsonl next to the clips {at, channel, page, pairs, named}."""
+        unknown = [t for t in page.tones if not t.names]
+        log(f"  {page.label}: unknown tone pair(s) kept for learning: "
+            + ", ".join(f"{t.a_hz:.1f}/{(t.b_hz or 0):.1f} Hz" for t in unknown))
+        if not self.clips_dir:
+            return
+        row = {"at": round(page.start, 2), "time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(page.start)),
+               "channel": page.label, "page": page.id,
+               "pairs": [[round(t.a_hz, 1), round(t.b_hz, 1) if t.b_hz else None] for t in unknown],
+               "named": [n for t in page.tones for n in t.names]}       # stacked with these (who else was paged)
+        try:
+            with open(self.clips_dir.parent / "unknown_tones.jsonl", "a") as f:
+                f.write(json.dumps(row) + "\n")
+        except OSError:
+            pass
+
+    def _page_to_cad(self, page: Page, replace: bool = True) -> None:
+        """A page into the CAD's communications log: a row in Radio like any transmission (talker 60
+        Control, its tone pairs, where the voice starts), so it plays there and from the event it opens."""
+        try:
+            self.cad.record_traffic({"id": page.id, "start": page.start, "end": page.end, "source": page.label,
+                                     "talkgroup": None, "unit": "60 Control" if page.tones else "", "rig": "", "radio_id": "",
+                                     "text": page.raw, "status": page.status, "model": getattr(page, "model", ""),
+                                     "tones": [{"a_hz": round(t.a_hz, 1), "b_hz": round(t.b_hz, 1) if t.b_hz else None,
+                                                "names": list(t.names), "ours": self.paging.is_ours(t.names)}
+                                               for t in page.tones],
+                                     "voice_at": round(page.voice_offset_s, 2) if page.tones else None},
+                                    replace=replace)
+        except Exception as e:  # the CAD must never stop the monitor
+            log(f"CAD: could not log a page: {type(e).__name__}: {e}")
 
     def _call(self, call: Call) -> None:
         if not self.tg.record(call.talkgroup):  # switched off in the web app: dropped on arrival
@@ -719,16 +771,19 @@ class App:
         d = self._dispatch(page.raw)
         page.dispatch = d.as_dict() if d else None  # type: ignore[attr-defined]
         self._save_page(page)
+        self._page_to_cad(page)                     # its text in the log (before an event links it)
         self._emit("page_text", self._page_doc(page))
         log(f"{page.label} {page.kind}: {page.raw or '(' + page.status + ')'}")
         if d is None:
             return
         depts = page.departments
+        tones_half = None
         if page.kind == "voice":
             prev = self._last_tones_only
             if prev and page.start - prev.end < SPLIT_PAGE_S:
                 depts = prev.departments  # the voice half of a tones-only page
                 self._last_tones_only = None
+                tones_half = prev
         # Ours only by our tones or an address in our towns (user, 2026-10-08: "we should only take these
         # in here if they are our tones or in our jurisdiction"); anything else is traffic.
         inc = self.store.on_page(page.id, depts, d, at=page.start)
@@ -741,7 +796,9 @@ class App:
             where = inc.geo["label"] if inc.geo else (inc.location or "location not found")
             log(f"INCIDENT {inc.incident_type} · {where} · {', '.join(inc.departments)}")
             try:
-                self.cad.from_monitor(inc)
+                ev = self.cad.from_monitor(inc)
+                if ev and tones_half is not None:       # its tones came as a transmission of their own
+                    self.cad.comms.link_pages(ev["id"], [tones_half.id])
             except Exception as e:  # the CAD must never stop the monitor
                 log(f"CAD: could not open a pending incident: {type(e).__name__}: {e}")
 
@@ -769,14 +826,21 @@ class App:
                 before = self.cad.comms.rev
                 self._to_cad(t, replace=False)
                 n += self.cad.comms.rev != before
+        with self._lock:
+            pages = list(self.pages)
+        for p in pages:                                   # pages from before #64: rows in Radio too
+            before = self.cad.comms.rev
+            self._page_to_cad(p, replace=False)
+            n += self.cad.comms.rev != before
         if n:
             log(f"CAD: {n} earlier transmission(s) added to the communications log")
 
     # -- who is talking now (FG1) ------------------------------------------------------------------
 
     def _watch_fm(self) -> None:
-        """While a traffic channel's squelch is open it is "talking"; the MDC ID is tried on the
-        audio so far (an APX sends it 0.3-0.8 s in) so the rig shows before the transmission ends."""
+        """While a traffic channel's squelch is open it is "talking" (opened at once by the live tap,
+        radio/tap.py, which also decodes the MDC pre-ID as the frames come in); this watcher ends it
+        when the squelch closes, or when its dongle is switched to something else."""
         while not self._stopping.wait(LIVE_WATCH_S):
             try:
                 self._watch_fm_once()
@@ -788,7 +852,6 @@ class App:
                 log(f"page hold error: {type(e).__name__}: {e}")
 
     def _watch_fm_once(self, now: float | None = None) -> None:
-        now = time.time() if now is None else now
         for r in list(self.receivers):
             label = r.channel.label
             if self._kind.get(label) != "traffic":
@@ -803,15 +866,8 @@ class App:
                 continue
             since = sq._start
             if st is None or st["since"] != since:
-                st = self._fm_live[label] = {"since": since, "ids": [], "n": 0}
+                st = self._fm_live[label] = {"since": since}
                 self.live.fm_open(label, since)
-            frames = list(sq._frames)[: int(LIVE_ID_WINDOW_S * RATE / FRAME)]
-            if not st["ids"] and len(frames) >= 4 and len(frames) != st["n"] and now - since < LIVE_ID_WINDOW_S + 1:
-                st["n"] = len(frames)
-                ids = list(dict.fromkeys(h for h, _e in self._mdc(np.concatenate(frames).astype(np.float32))))
-                if ids:
-                    st["ids"] = ids
-                    self.live.fm_ids(label, ids)
 
     def _dispatch(self, raw: str):
         d = parse(raw) if raw else None
@@ -1515,6 +1571,7 @@ class App:
         r = NfmReceiver(self.cfg.rtl_fm, self._dongle(serial), c.gain_db, Channel(c.mhz, c.label),
                         self._segment, log, open_db=c.squelch_db, drop_db=c.drop_db,
                         hang_s=c.hang_s, continue_s=c.continue_s)
+        self.tap.attach(r)
         self.receivers[self.receivers.index(old)] = r
         return r
 
@@ -1679,6 +1736,7 @@ class App:
               "rerun": dict(self.rerun, pending=len(self._rerun_ids)),
               "talkgroups": self.tg.state() if self.p25 else [],
               "talking": self.live.state(),
+              "paging": self.paging_state(),
               "prealert": self.cad.prealert_state(),
               "channels": self.channels_state()}
         # Tell the display which entries have a recording (so ▶ isn't a dead button).
@@ -1687,6 +1745,8 @@ class App:
         for p in st["pages"]:
             p["has_audio"] = self.has_clip(p["id"])
             p["rerun_pending"] = p["id"] in busy
+            for t in p.get("tones") or []:
+                t["ours"] = self.paging.is_ours(t.get("names") or [])
         for t in st["loose_traffic"]:
             t["has_audio"] = self.has_clip(t["id"])
             t["rerun_pending"] = t["id"] in busy
@@ -1825,6 +1885,7 @@ def make_server(app: App) -> WebServer:
         if link is not None:
             link.live_changed()
     app.live.on_change = changed
+    app.paging.on_change = changed     # each tone pair of a page going out, as it decodes
     if app.prealert is not None:
         app.prealert.on_change = server.poke             # so is the phone ringing
     return server

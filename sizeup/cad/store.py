@@ -192,7 +192,7 @@ CREATE INDEX IF NOT EXISTS radio_traffic_call ON radio_traffic(call_id);
 CREATE TABLE IF NOT EXISTS radio_links (
   traffic_id TEXT NOT NULL REFERENCES radio_traffic(id) ON DELETE CASCADE,
   incident_id INTEGER NOT NULL REFERENCES incidents(id),
-  why TEXT NOT NULL,                    -- unit | channel | dispatcher | manual
+  why TEXT NOT NULL,                    -- unit | channel | dispatcher | manual | page
   unit TEXT NOT NULL DEFAULT '',
   PRIMARY KEY (traffic_id, incident_id)
 );
@@ -402,6 +402,9 @@ class Store:
                 self.db.execute(f"ALTER TABLE radio_traffic ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
         for col, decl in (("rerun_at", "REAL"), ("rerun_result", "TEXT NOT NULL DEFAULT ''")):   # re-transcribe's
             if tcols and col not in tcols:                                                        # result, 2026-10-08
+                self.db.execute(f"ALTER TABLE radio_traffic ADD COLUMN {col} {decl}")
+        for col, decl in (("tones", "TEXT NOT NULL DEFAULT ''"), ("voice_at", "REAL")):   # pages in the log (#64)
+            if tcols and col not in tcols:
                 self.db.execute(f"ALTER TABLE radio_traffic ADD COLUMN {col} {decl}")
         cols = {r["name"] for r in self.db.execute("PRAGMA table_info(operators)")}
         if not cols:

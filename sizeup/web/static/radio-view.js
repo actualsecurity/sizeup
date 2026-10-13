@@ -206,8 +206,14 @@ window.RadioView = (() => {
     return groups.sort((a, b) => b.last - a.last);
   }
 
+  // A page going out now (South 2), over Main until its finished row is in the list.
+  function renderPaging() {
+    Radio.fillPaging($("#rv-paging"), cad.state && cad.state.paging, new Set(st.rows.map((t) => t.id)));
+  }
+
   function render() {
     if (!st.open) return;
+    renderPaging();
     const rows = st.rows;
     const main = rows.filter((t) => t.main !== false);
     const rest = rows.filter((t) => t.main === false);
@@ -329,6 +335,7 @@ window.RadioView = (() => {
   RadioLive.button($("#rv-live"), "Live");
   let drawnRev = -1;
   cad.hooks.push(() => { if (st.open && drawnRev !== cad.txRev) { drawnRev = cad.txRev; render(); } });   // a row's own state
+  cad.hooks.push(() => { if (st.open) renderPaging(); });          // each tone pair as it decodes (the state push)
   window.addEventListener("sizeup:tx-changed", () => { st.rev = ""; poll(); });   // a link added or removed: ask now
 
   return { open, close, render };

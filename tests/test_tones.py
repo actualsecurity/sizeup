@@ -1,3 +1,4 @@
+import re
 import numpy as np
 import pytest
 
@@ -87,3 +88,33 @@ def test_same_frequency_code_and_county_list():
     assert plan.match(ToneEvent("two_tone", 928.1, 810.2, 0, 1)).names == ("Scarsdale EMS (heard)",)
     assert plan.match(ToneEvent("two_tone", 741.3, 623.7, 0, 1)).names == ()  # heard, owner not known yet
     assert plan.match(ToneEvent("two_tone", 1700.0, 1100.0, 0, 1)).names == ()
+
+
+def test_tone_list_has_a_source_and_date_per_row_and_keeps_the_air_rows():
+    # data/westchester_tones.csv (#63): every row says where it came from and when; codes learned on the air
+    # are never replaced by web values; sources that disagree are both kept and the conflict said in a comment.
+    import csv
+    from pathlib import Path
+    from sizeup.config import load
+    root = Path(__file__).parent.parent
+    text = (root / "data" / "westchester_tones.csv").read_text()
+    rows = list(csv.DictReader(ln for ln in text.splitlines() if ln.strip() and not ln.startswith("#")))
+    assert list(rows[0]) == ["name", "a_hz", "b_hz", "estimated", "source", "fetched"]
+    assert len(rows) >= 89
+    for r in rows:
+        assert r["estimated"] in ("0", "1", "2") and r["source"] and re.fullmatch(r"\d{4}-\d\d-\d\d", r["fetched"]), r
+        float(r["a_hz"]), float(r["b_hz"]) if r["b_hz"] else None
+    air = {(r["name"], r["a_hz"], r["b_hz"]) for r in rows if r["estimated"] == "2"}
+    assert air == {("Scarsdale EMS", "928.1", "810.2"), ("Fairview", "832.5", "1201.0"), ("Eastchester VAC", "496.8", "767.4")}
+    assert all(r["source"] == "air" for r in rows if r["estimated"] == "2")
+    legend = {k for r in rows for k in r["source"].split("+")}
+    for key in legend:
+        assert re.search(rf"^#\s+{re.escape(key)}\s", text, re.M), f"source {key} not in the legend"
+    assert text.count("# CONFLICT:") >= 4 and "Mohegan" in text and "Rye Brook FD" in text
+    # The web re-check (2026-10-13) added these: an older revision's codes kept next to the current ones.
+    got = {(r["name"], r["a_hz"], r["b_hz"]) for r in rows}
+    assert {("Mohegan", "312.6", "346.7"), ("Mohegan", "313.0", "358.6"), ("Northern Westchester Medics", "2495", "1032")} <= got
+    plan = TonePlan(list(load(root / "config.example.toml").tones))
+    from sizeup.radio.tones import ToneEvent
+    assert plan.match(ToneEvent("two_tone", 313.0, 358.6, 0, 1)).names == ("Mohegan",)
+    assert plan.match(ToneEvent("two_tone", 2495.0, 1032.0, 0, 1)).names == ("Northern Westchester Medics (est.)",)

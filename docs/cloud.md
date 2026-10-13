@@ -101,8 +101,11 @@ the upload). Each event has a `seq` from the station's outbox; the hub remembers
 per outbox `epoch` (in `hub.sqlite`), so a retried batch is applied once, and pages / transmissions are
 also keyed by their ids.
 
-**Station → hub, latest wins** (`POST /api/station/state`): who is talking now, pushed the moment it
-changes (sub-second; re-sent every 2 s while someone talks; the hub drops a snapshot older than 8 s),
+**Station → hub, latest wins** (`POST /api/station/state`): who is talking now and a page going out now
+on South 2 (`paging`: each tone pair as it decodes, then "voice", then ended for 4 s once the page is
+built; sizeup/radio/livepage.py), pushed the moment it changes (sub-second; re-sent every 2 s while
+someone talks or a page goes out; the hub drops a snapshot older than 8 s; a hub from before ignores
+`paging`, a station from before sends none),
 and every 5 s the station's radio / SDR / STT / voice rows, SDR switches, re-run progress and outbox
 size (also the heartbeat). The talkgroup list goes every 30 s or when a switch changes.
 

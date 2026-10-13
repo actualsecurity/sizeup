@@ -102,6 +102,13 @@
   .geo { font-size: var(--fs-xs); line-height: var(--lh-xs); color: var(--dim); margin-block-start: var(--s-1); }
   .geo.warn { color: var(--warn); }
   .facts { display: flex; flex-wrap: wrap; gap: var(--s-1) var(--s-5); margin-block-start: var(--s-2); }
+  /* the 60 Control page the event came from: play (and its voice only) over the page's text */
+  .d-pages { display: flex; flex-direction: column; gap: var(--s-1); margin-block-start: var(--s-3); }
+  .d-page { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1) var(--s-2); min-inline-size: 0; }
+  .d-pages + .narr { margin-block-start: var(--s-1); }
+  /* a page going out now, over the lists it will join (radio.js fillPaging) */
+  .paging-live { margin-block-end: var(--s-2); }
+  .feed > .paging-live { margin-block: var(--s-1) 0; }
   .narr {
     white-space: pre-wrap; font-size: var(--fs-sm); line-height: var(--lh-sm); color: var(--text-2); overflow-wrap: anywhere;
     margin-block-start: var(--s-3); padding: var(--s-2) var(--s-3); background: var(--bg); border: var(--bw) solid var(--line); border-radius: var(--radius);
