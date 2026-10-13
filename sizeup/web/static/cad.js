@@ -46,6 +46,7 @@ const cad = {
   rec: null,                 // {iid, units, unfilled, already, card, note, checked:Set, extra:[], error}
   map: null, marker: null, mapSig: "",
   listSig: "", rcEditing: null, openUnit: null,
+  closedOpen: false,         // the queue's Closed 12h section unfolded (#89; remembered: closedFold)
   ask: null,                 // {uid, status, where}: asking why (out of service / unmanned)
   hooks: [],                 // more renderers (settings.js), called on every render
   txRev: 0,                  // bumped when a transmission row's own state changes (re-transcribe waiting): redraw them
@@ -405,7 +406,7 @@ function queueItem() {
   const li = el("li", "qi item");
   li.tabIndex = 0;
   li.addEventListener("click", () => selectIncident(Number(li.dataset.key)));
-  li.addEventListener("keydown", (e) => { if (e.key === "Enter") selectIncident(Number(li.dataset.key)); });
+  li.addEventListener("keydown", (e) => { if (e.key === "Enter" && e.target === li) selectIncident(Number(li.dataset.key)); });
   return li;
 }
 function fillQueueItem(li, inc) {
@@ -429,7 +430,12 @@ function fillQueueItem(li, inc) {
   } else if (!inc.emergency && isOpen(inc)) {
     if (inc.until_at) li.append(el("div", "qs dim", `Until ${fmtTime(inc.until_at)}`));
   } else if (!isOpen(inc)) {
-    li.append(el("div", "qs dim", inc.status === "dismissed" ? "Dismissed" : nameOf("dispositions", inc.disposition) || "Closed"));
+    const foot = el("div", "qs dim closed-foot");
+    foot.append(el("span", "", inc.status === "dismissed" ? "Dismissed" : nameOf("dispositions", inc.disposition) || "Closed"));
+    if (!BOARD && canDo("dispatch")) {      // the closed row's "⋯": Reopen (#89)
+      foot.append(el("span", "spacer"), UI.menu.button(`Actions: ${incTitle(inc)}`, () => closedMenuItems(inc), { key: `inc-closed:${inc.id}` }));
+    }
+    li.append(foot);
   }
   const on = openAssignments(inc);
   if (on.length) {
@@ -451,7 +457,8 @@ function renderQueue() {
   const all = incidents();
   const byAge = (a, b) => a.created_at - b.created_at;        // oldest first
   const sig = (i) => JSON.stringify([i.status, i.number, i.type, i.subtype, i.address, i.id === cad.sel, i.emergency,
-    i.until_at, i.disposition, i.type_note, i.joint_call, openAssignments(i).map((a) => [a.name, a.status]), i.closed_at, cad.listSig.length]);
+    i.until_at, i.disposition, i.type_note, i.joint_call, openAssignments(i).map((a) => [a.name, a.status]), i.closed_at, cad.listSig.length,
+    canDo("dispatch")]);
   const opts = { key: (i) => String(i.id), sig, make: queueItem, fill: fillQueueItem };
   syncList($("#q-queued"), all.filter((i) => i.status === "queued").sort(byAge), { ...opts, empty: "None" });
   syncList($("#q-pending"), all.filter((i) => i.status === "pending" && i.emergency).sort(byAge),
@@ -459,8 +466,36 @@ function renderQueue() {
   syncList($("#q-active"), all.filter((i) => i.status === "active" && i.emergency), { ...opts, empty: "None" });
   syncList($("#q-nonemerg"), all.filter((i) => (i.status === "pending" || i.status === "active") && !i.emergency).sort(byAge),
     { ...opts, empty: "None" });
-  syncList($("#q-closed"), all.filter((i) => i.status === "closed" || i.status === "dismissed"),
-    { ...opts, empty: "None" });
+  // Closed 12h: folded to start, the count in its header; a click unfolds it (#89)
+  const closed = all.filter((i) => i.status === "closed" || i.status === "dismissed");
+  const sec = $("#q-closed-sec"), tog = $("#q-closed-toggle"), box = $("#q-closed");
+  sec.classList.toggle("open", cad.closedOpen);
+  tog.setAttribute("aria-expanded", String(cad.closedOpen));
+  setText($("#q-closed-n"), closed.length ? `· ${closed.length}` : "");
+  show(box, cad.closedOpen);
+  syncList(box, closed, { ...opts, empty: "None" });
+}
+// The Closed 12h fold, remembered per browser (localStorage, like the operator name): "1" open, else folded.
+function closedFold(open) {
+  if (open === undefined) return store("sizeup.cad.closedOpen") === "1";
+  cad.closedOpen = open;
+  store("sizeup.cad.closedOpen", open ? "1" : "0");
+  renderQueue();
+}
+// The closed row's "⋯" (the queue, Records): Reopen (#89)
+function closedMenuItems(inc) {
+  return [{ label: "Reopen", hint: inc.status === "dismissed" ? "to 60 Control" : "", run: () => reopenIncident(inc.id) }];
+}
+// A closed event back on the boards (POST reopen): Active if a unit was ever on it, else Pending; a dismissed
+// page back to 60 Control. The disposition goes into the chronology; the dispatcher adds units again.
+async function reopenIncident(iid) {
+  try {
+    const inc = await api("POST", `/api/cad/incident/${iid}/reopen`, { operator: operator() });
+    cad.extra.delete(iid);                 // open again: the live state carries it from here
+    UI.toast(`${incTitle(inc)} reopened: ${eventStatus(inc).name || inc.status}`);
+  } catch (e) {
+    UI.toast(e.message, "err");
+  }
 }
 
 // ---- incident detail ------------------------------------------------------------------
@@ -510,6 +545,7 @@ function renderDetail() {
   show($("#d-accept"), inc.status === "queued");
   show($("#d-dismiss"), inc.status === "queued");
   show($("#d-close"), inc.status === "pending" || inc.status === "active");
+  show($("#d-reopen"), !open);
   show($("#d-edit"), open);
   if (!(inc.status === "pending" || inc.status === "active")) show($("#close-form"), false);
   show($("#d-queued"), inc.status === "queued");
@@ -1144,7 +1180,7 @@ function playForEvent(inc, e) {
   const d = (inc.dispatches || []).find((x) => Math.abs(x.at - e.at) < 0.001);
   return d && d.has_audio ? d.id : null;
 }
-const EVENT_KINDS = { note: "comment", status: "status", system: "system", attach: "attached", prealert: "pre-alert" };
+const EVENT_KINDS = { note: "comment", status: "status", system: "system", attach: "attached", prealert: "pre-alert", reopened: "reopened" };
 function renderEvents(inc) {
   syncList($("#d-events"), (inc.events || []).slice().reverse(), {
     key: (e) => String(e.id),
@@ -2276,12 +2312,13 @@ async function renderRecords() {
     const [h, a] = await Promise.all([api("GET", "/api/cad/history"), api("GET", "/api/cad/admin")]);
     syncList($("#db-rows"), h.incidents, {
       key: (i) => String(i.id),
-      sig: (i) => JSON.stringify([i.status, i.type, i.subtype, i.address, i.disposition, i.units, i.closed_at, cad.listSig.length]),
+      sig: (i) => JSON.stringify([i.status, i.type, i.subtype, i.address, i.disposition, i.units, i.closed_at, cad.listSig.length,
+                                  canDo("dispatch")]),
       make: () => {
         const tr = el("tr", "ev");
         tr.tabIndex = 0;
         tr.addEventListener("click", () => openFromRecords(Number(tr.dataset.key)));
-        tr.addEventListener("keydown", (e) => { if (e.key === "Enter") openFromRecords(Number(tr.dataset.key)); });
+        tr.addEventListener("keydown", (e) => { if (e.key === "Enter" && e.target === tr) openFromRecords(Number(tr.dataset.key)); });
         return tr;
       },
       fill: (tr, i) => {
@@ -2292,17 +2329,19 @@ async function renderRecords() {
         const st = el("td");
         const es = eventStatus(i);
         st.append(stBadge(el("span"), es.name, es.bg));
+        const act = el("td", "act");        // a closed one: "⋯" Reopen, from here too (older than the queue's 12 h, #89)
+        if (!isOpen(i) && canDo("dispatch")) act.append(UI.menu.button(`Actions: ${i.number}`, () => closedMenuItems(i), { key: `db-closed:${i.id}` }));
         tr.replaceChildren(el("td", "num", i.number), type, el("td", "loc", i.address || "—"), el("td", "t", fmtRecv(i.created_at)),
           el("td", "t", fmtRecv(i.closed_at)), st, el("td", "", i.disposition ? nameOf("dispositions", i.disposition) : ""),
-          el("td", "", (i.units || []).join(", ")), el("td", "", i.received_via ? nameOf("received_via", i.received_via) : ""));
+          el("td", "", (i.units || []).join(", ")), el("td", "", i.received_via ? nameOf("received_via", i.received_via) : ""), act);
       },
-      empty: "None", cols: 9,
+      empty: "None", cols: 10,
     });
     const rows = Object.entries(a.counts).map(([k, v]) => [k, String(v)]).concat([["Next number", a.next_number], ["Database", a.db]]);
     $("#admin").replaceChildren(...rows.map(([k, v]) => { const d = el("div"); d.append(el("dt", "", k), el("dd", "", v)); return d; }));
   } catch (e) {
     const tr = el("tr");
-    tr.append(Object.assign(el("td", "empty", `Load failed: ${e.message}`), { colSpan: 9 }));
+    tr.append(Object.assign(el("td", "empty", `Load failed: ${e.message}`), { colSpan: 10 }));
     $("#db-rows").replaceChildren(tr);
   }
 }
@@ -2565,6 +2604,8 @@ $("#d-close").addEventListener("click", () => {
   flash($("#c-error"));
   if (!f.hidden) $("#c-disp").focus();
 });
+$("#d-reopen").addEventListener("click", () => { const inc = selected(); if (inc) reopenIncident(inc.id); });
+$("#q-closed-toggle").addEventListener("click", () => closedFold(!cad.closedOpen));
 $("#c-cancel").addEventListener("click", () => show($("#close-form"), false));
 $("#close-form").addEventListener("submit", closeIncident);
 $("#d-edit").addEventListener("click", openEdit);
@@ -2747,7 +2788,7 @@ function askAdmin() {
 }
 // What a viewer can't press on the dispatch screen (reading, filtering, playing, the maps stay).
 const RO_DISPATCH = "#new-incident, #new-form :is(input, select, textarea, #new-create), #d-accept, #d-dismiss, #d-edit, "
-  + "#d-close, #d-queued select, #close-form :is(select, #c-close), #edit-form :is(input, select, textarea, #edit-save), "
+  + "#d-close, #d-reopen, #d-queued select, #close-form :is(select, #c-close), #edit-form :is(input, select, textarea, #edit-save), "
   + "#d-attach :is(select, button:not(.help)), #o-open, #o-form :is(input, button:not(#o-cancel)), #d-dispatch :is(input, select, textarea, button:not(#u-cancel):not(.help)), #note-text, #note-add, "
   + ".ubtns button, .pa-dismiss";        // (a transmission's menu leaves out what the role can't do: txMenuItems)
 // In Settings for anyone but an admin: everything but the section tabs, filters and what only reads.
@@ -2810,6 +2851,7 @@ async function boot() {
     console.warn("no scene (map off):", e);
   }
   await loadWho();
+  cad.closedOpen = closedFold();
   route();
   cad.live = liveState("/api/cad/stream", "/api/cad/state", onState);
   tick();

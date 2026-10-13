@@ -72,6 +72,11 @@ POST /api/cad/incident/<id>               edit: any of the fields above
 POST /api/cad/incident/<id>/accept        {type?, subtype?, operator?}  a 60 Control page -> pending (numbered)
 POST /api/cad/incident/<id>/dismiss       {operator?, reason?}   a 60 Control page nobody takes
 POST /api/cad/incident/<id>/close         {disposition, operator?}  units cleared
+POST /api/cad/incident/<id>/reopen        {operator?}  a closed or dismissed event back on the boards, its number kept
+                                          (#89): closed -> active if a unit was ever on it, else pending (a
+                                          non-emergency one: open again), the disposition cleared into the chronology;
+                                          dismissed -> queued (60 Control, to accept or dismiss); no unit comes back
+                                          by itself. 400 for an open event; dispatchers and admins
 POST /api/cad/incident/<id>/note          {text, units?: ["E63"], places?: [{label, lat, lon, kind?, sub?, source?}],
                                           operator?}   units: the unit tags (who said it); places: its "@" places, each
                                           kept while "@label" is in the text (never moves the event)
@@ -122,7 +127,7 @@ from sizeup.cad.store import CadError
 
 JSON = "application/json"
 MAX_BODY = 65536
-INCIDENT = re.compile(r"/api/cad/incident/(\d{1,9})(?:/(accept|dismiss|close|note|recommend|preview|dispatch|upgrade|attach|link|unlink|return))?")
+INCIDENT = re.compile(r"/api/cad/incident/(\d{1,9})(?:/(accept|dismiss|close|reopen|note|recommend|preview|dispatch|upgrade|attach|link|unlink|return))?")
 SUGGEST = re.compile(r"/api/cad/incident/(\d{1,9})/units")
 EXPORT = re.compile(r"/api/cad/export/([a-z-]{1,20}\.csv)")
 UNIT = re.compile(r"/api/cad/unit/(\d{1,9})/status")
@@ -136,8 +141,8 @@ PREALERT = re.compile(r"/api/cad/prealert/(\d{1,9})/dismiss")
 # admins (running calls), "admin" = admins only (Settings in every form, and the radios), "read" =
 # anyone signed in (a POST that changes nothing). First match wins; a path not here is "admin".
 WRITES = (
-    (re.compile(r"/api/cad/incident(?:/\d{1,9}(?:/(?:accept|dismiss|close|note|recommend|preview|dispatch|upgrade|attach"
-                r"|link|unlink|return))?)?"), "dispatch"),                       # events, notes, dispatches, radio links
+    (re.compile(r"/api/cad/incident(?:/\d{1,9}(?:/(?:accept|dismiss|close|reopen|note|recommend|preview|dispatch|upgrade"
+                r"|attach|link|unlink|return))?)?"), "dispatch"),                # events, notes, dispatches, radio links
     (UNIT, "dispatch"),                                                     # unit status on the board
     (PREALERT, "dispatch"),                                                 # a phone pre-alert that is nothing
     (re.compile(r"/api/incident/[^/]{1,80}/close"), "dispatch"),            # the monitor's incident list (server.py)
@@ -192,7 +197,7 @@ def _created(m, b, o, c):
 def _on_incident(m, b, o, c):
     iid, act = int(m.group(1)), m.group(2)
     n = _number(c, iid)
-    ev = n or ("a 60 Control page" if act in ("dismiss", "accept") else f"event {iid}")
+    ev = n or ("a 60 Control page" if act in ("dismiss", "accept", "reopen") else f"event {iid}")
     if act is None:
         return f"Edited {ev}: {', '.join(k for k in b if k != 'operator') or 'nothing'}", n
     if act in ("recommend", "preview") or (act == "upgrade" and b.get("preview")):
@@ -203,6 +208,8 @@ def _on_incident(m, b, o, c):
         return f"Dismissed {ev}" + (f": {_clip(b.get('reason'))}" if b.get("reason") else ""), n
     if act == "close":
         return f"Closed {ev}: {b.get('disposition', '')}", n
+    if act == "reopen":
+        return f"Reopened {ev}" + (f": {o['status']}" if o.get("status") else ""), n
     if act == "note":
         tags = (o.get("units") or []) + [f"@{p['label']}" for p in o.get("places") or []]
         return f"Note on {ev}" + (f" ({', '.join(tags)})" if tags else "") + f": {_clip(b.get('text'))}", n
@@ -496,7 +503,7 @@ class CadApi:
             return c.create(body)
         if m := INCIDENT.fullmatch(path):
             iid, action = int(m.group(1)), m.group(2)
-            fn = {None: c.update, "accept": c.accept, "dismiss": c.dismiss, "close": c.close, "note": c.note,
+            fn = {None: c.update, "accept": c.accept, "dismiss": c.dismiss, "close": c.close, "reopen": c.reopen, "note": c.note,
                   "recommend": c.recommend, "preview": c.preview, "dispatch": c.dispatch, "upgrade": c.upgrade,
                   "attach": c.attach, "link": c.link_traffic, "unlink": c.unlink_traffic,
                   "return": c.return_unit}[action]
