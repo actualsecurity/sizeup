@@ -25,11 +25,15 @@ port = 8091
 [radio]
 rtl_fm = "/opt/sizeup/rtl-sdr/bin/rtl_fm"
 # Every RTL-SDR plugged in gets a row of switches in the web app (a channel, Fire/EMS 15 via
-# trunk-recorder, or Off). A new dongle starts Off: pick its mode once (the hub's monitor can too).
+# trunk-recorder, or Off). A new dongle gets a job by itself: FG1, then the county P25 system, then
+# South 2, whichever no other dongle has (all three covered: Off). A job picked by a person (here or
+# on the hub's monitor), Off included, is kept across restarts and never changed by this.
 sdrs = "auto"
 sdr_names = { v4 = "V4", adsb = "V3", "00000001" = "V3 #2" }   # names in the web app (by serial)
 sdr_ignore = []
-start_mode = "South 2"            # first SDR at a fresh start; after that the web app's choice is kept
+start_mode = "South 2"            # only with listed serials (not "auto"): the first one's job at a fresh start
+auto_assign = true                # false: new dongles start Off until a mode is picked
+auto_assign_order = ["fg1", "p25", "south2"]
 
 [[radio.channels]]
 label = "South 2"                  # 60 Control fire paging, South Zone simulcast

@@ -12,13 +12,22 @@ port = 8090
 rtl_fm = "rtl_fm"                  # the RTL-SDR Blog build for a V4
 # Dongles switched in the web app: "auto" = every RTL-SDR plugged in gets a row of switches (a
 # channel, Fire/EMS 15 via trunk-recorder, or Off); rows come and go as dongles are plugged in or
-# out. A new dongle starts Off: sizeup never opens one until you pick a mode for it. Or list exact
-# serials to show only those. Each is looked up by serial right before every start and passed as
-# an index (all-digit serials are read as indexes). sdr_ignore = serials never shown or used.
+# out. Or list exact serials to show only those. Each is looked up by serial right before every
+# start and passed as an index (all-digit serials are read as indexes). sdr_ignore = serials never
+# shown or used.
 sdrs = "auto"
 sdr_names = { v4 = "V4" }           # optional: name shown in the web app per serial
 sdr_ignore = []
-start_mode = "South 2"            # first SDR at a fresh start; after that the web app's choice is kept
+start_mode = "South 2"            # first listed SDR at a fresh start; after that the web app's choice is kept
+# A dongle that shows up (at startup, or plugged in while running) with no job a person picked gets
+# the first job in auto_assign_order that no other dongle has; all covered = it stays Off. Never a
+# dongle another app holds (shortfinal, ~/.local/state/rtl-claims), never over a person's choice
+# (Off included), and nothing moves when a dongle is unplugged. Shown as "FG1 · auto" in the web app.
+# Jobs: channel labels (any case/spacing: "fg1", "south2") or "p25" (Fire/EMS 15, trunk-recorder:
+# one dongle covers the county system's control and voice channels). false = new dongles start Off
+# and sizeup never opens one until you pick a mode for it.
+auto_assign = true
+auto_assign_order = ["fg1", "p25", "south2"]
 
 # One rtl_fm per channel, one dongle each (serials set with `rtl_eeprom -s <serial>`).
 [[radio.channels]]

@@ -171,10 +171,13 @@ window.RadioControls = (() => {
       row.classList.toggle("absent", !x.present);
       row.classList.toggle("held", !!x.held_by);
       setText(row.querySelector(".sdr-label"), (list.length > 1 ? `SDR ${x.name || x.serial}` : "SDR") + (x.present ? "" : " unplugged")
-              + (x.held_by ? `: ${x.held_by.app} ${x.held_by.mode}` : ""));
+              + (x.held_by ? `: ${x.held_by.app} ${x.held_by.mode}` : "")
+              + (x.set_by === "auto" && x.mode !== "Off" ? ` · ${x.mode} · auto` : ""));   // given by [radio] auto_assign
       setText(row.querySelector(".sdr-err"), st.sdrError);
       const nm = (x.name && x.name !== x.serial ? `${x.name} (serial ${x.serial})` : x.serial) + (x.product ? `, ${x.product}` : "");
-      row.title = x.present ? `SDR ${nm}` : `SDR ${nm}: not plugged in`;
+      const who = x.set_by === "auto" ? `${x.mode} set automatically when it was plugged in`
+                : x.set_by === "person" ? `${x.mode} picked by a person` : "";
+      row.title = (x.present ? `SDR ${nm}` : `SDR ${nm}: not plugged in`) + (who ? `\n${who}` : "");
       for (const b of row.querySelectorAll("button")) {
         const m = b.dataset.mode;
         const there = m !== "Off" && list.find((o) => o.serial !== x.serial && o.mode === m);
