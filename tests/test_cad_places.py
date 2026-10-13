@@ -143,7 +143,16 @@ def test_old_notes_and_plain_notes_are_unchanged(cad, tmp_path):
     s = Store(str(path))
     iid = s.create_incident(type="SERVICE", subtype="LIFT", address="1 Main St", status="pending")
     s.note(iid, "an old note", "JD", units=["E63"])
-    s.db.execute("ALTER TABLE events DROP COLUMN places")
+    # the events table as it was (rebuilt the classic way: DROP COLUMN is not on every SQLite)
+    s.db.executescript("""
+        CREATE TABLE events_old (id INTEGER PRIMARY KEY, incident_id INTEGER REFERENCES incidents(id),
+            unit_id INTEGER REFERENCES units(id), at REAL NOT NULL, kind TEXT NOT NULL, text TEXT NOT NULL,
+            operator TEXT NOT NULL DEFAULT '', units TEXT NOT NULL DEFAULT '');
+        INSERT INTO events_old SELECT id, incident_id, unit_id, at, kind, text, operator, units FROM events;
+        DROP TABLE events;
+        ALTER TABLE events_old RENAME TO events;
+        CREATE INDEX events_incident ON events(incident_id);""")
+    assert "places" not in {r["name"] for r in s.db.execute("PRAGMA table_info(events)")}
     s.db.close()
     s = Store(str(path))
     assert "places" in {r["name"] for r in s.db.execute("PRAGMA table_info(events)")}
