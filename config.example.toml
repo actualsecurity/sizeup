@@ -186,3 +186,18 @@ ring_topic = "pcfd-phone-prealert"   # real rings only (Tapout's ntfy_call)
 status_topic = "pcfd-status"         # boot, hourly heartbeat, errors, OTA (Tapout's ntfy_status)
 expire_min = 5                       # an unanswered pre-alert ends after this long
 heartbeat_stale_min = 90             # no heartbeat (or restart) this long: "Tapout: no heartbeat for ..." in warning
+
+# [roads]: the CAD maps' highway layers (sizeup/roads.py, docs/cloud.md "Highway layers"): 511NY's
+# traffic cameras, incidents and closures, roadwork and message signs, for our area only; camera
+# snapshots go through this process, never from the browser to 511NY. Access to the feeds is by
+# request (https://511ny.org/help/24); the approval brings their addresses and a key. The key: env
+# SIZEUP_511NY_KEY, never here; the addresses have {key} where it goes. Without both: those four
+# layers are off ("not configured"); the mileposts and exits (the gazetteer's) still show.
+# [roads]
+# events_url = "https://.../events?key={key}&format=json"
+# cameras_url = "https://.../cameras?key={key}"
+# signs_url = "https://.../messagesigns?key={key}&format=json"
+# bbox = [-73.80, 40.92, -73.56, 41.10]   # west, south, east, north: Port Chester, Rye Brook, neighbours
+# events_every_s = 90                     # at least 60 (511NY: 10 calls a minute per key)
+# signs_every_min = 5                     # at least 1
+# cameras_every_min = 60                  # at least 10

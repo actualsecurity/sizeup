@@ -35,3 +35,20 @@ def _prealert_stays_local(monkeypatch):
         assert getattr(req, "get_method", lambda: "GET")() == "GET" and getattr(req, "data", None) is None
         return real(req, *a, **kw)
     monkeypatch.setattr(prealert, "urlopen", local_only)
+
+
+@pytest.fixture(autouse=True)
+def _roads_stay_local(monkeypatch):
+    """The highway layers (sizeup/roads.py) never reach 511NY or a camera from a test: no key from the
+    environment, and the real fetch only to this machine (tests hand in recorded fixtures)."""
+    from urllib.parse import urlsplit
+
+    import sizeup.roads as roads
+    monkeypatch.delenv("SIZEUP_511NY_KEY", raising=False)
+    real = roads.urlopen
+
+    def local_only(req, *a, **kw):
+        host = urlsplit(req.full_url if hasattr(req, "full_url") else str(req)).hostname
+        assert host in ("127.0.0.1", "localhost", "::1"), f"a test tried to reach {host} (roads: fixtures only)"
+        return real(req, *a, **kw)
+    monkeypatch.setattr(roads, "urlopen", local_only)

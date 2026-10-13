@@ -4,6 +4,7 @@
 #   SIZEUP_STATE_DIR       where cad.sqlite, hub.sqlite and audio.sqlite go (the image sets /data)
 #   SIZEUP_PORT, SIZEUP_HOST, SIZEUP_PUBLIC_URL
 #   SIZEUP_ACCESS_TEAM, SIZEUP_ACCESS_AUD   Cloudflare Access identity (below)
+#   SIZEUP_511NY_KEY       the 511NY feeds' key (SSM /sizeup-hub/511ny-key; [roads] below)
 # Run it on a Mac or Linux box without radios:
 #   SIZEUP_STATE_DIR=$(mktemp -d) SIZEUP_STATION_TOKEN=... python -m sizeup --config deploy/hub/config.hub.toml
 
@@ -89,3 +90,13 @@ ring_topic = "pcfd-phone-prealert"
 status_topic = "pcfd-status"
 expire_min = 5
 heartbeat_stale_min = 90
+
+[roads]
+# The maps' highway layers from 511NY (sizeup/roads.py, docs/cloud.md "Highway layers"): off until
+# 511NY approves access (https://511ny.org/help/24) and the key is in SSM /sizeup-hub/511ny-key
+# (SIZEUP_511NY_KEY in deploy/aws/taskdef.json). Then the feed addresses from the approval go here,
+# {key} where the key goes (never the key itself). Mileposts and exits work without it.
+# events_url = ""
+# cameras_url = ""
+# signs_url = ""
+bbox = [-73.80, 40.92, -73.56, 41.10]   # west, south, east, north: Port Chester, Rye Brook, the neighbours, Greenwich

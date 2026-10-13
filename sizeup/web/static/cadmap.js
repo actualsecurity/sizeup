@@ -17,6 +17,9 @@
 // (so they stay neat at every zoom), the dashed lines, the pins, the station picker. A live AVL
 // position needs nothing here: it arrives as a marker with place "position".
 //
+// Highway layers (cameras, incidents, signs, mileposts, exits) and their Layers button: maplayers.js,
+// attached to every RigMap; the event's "Cameras nearby" row from detail().
+//
 // RigLayer and RigMap use nothing from cad.js; the CAD glue at the
 // bottom (CadMap.detail, CadMap.overview) uses cad.js's helpers and state.
 "use strict";
@@ -392,6 +395,8 @@ window.CadMap = (() => {
       });
       this.map.on("movestart", (e) => { if (e.originalEvent) this.userMoved = true; });
       this.layer = new RigLayer(this.map, { ...opts, host });
+      // Cameras, incidents, roadwork, signs, mileposts, exits and their Layers button (maplayers.js, #73)
+      this.roads = window.MapLayers ? MapLayers.attach(this.map, host, ctrls) : null;
       this.focusId = undefined;
       this.fitKey = null;
       this.userMoved = false;
@@ -492,10 +497,12 @@ window.CadMap = (() => {
       show(box, false);
       show(nomap, true);
       setText(nomap, "No map");
+      if (window.MapLayers) MapLayers.nearby(inc, box.parentElement);
       return;
     }
     show(nomap, false);
     show(box, true);
+    if (window.MapLayers) MapLayers.nearby(inc, box.parentElement);      // "Cameras nearby" under the map (#73)
     if (!views.detail) {
       views.detail = new RigMap(box, { scene: cad.scene, pins: true, unset: true, editable: () => canDo("admin"), operator,
                                        onPick: (id) => selectIncident(id), onExpand: openBig });

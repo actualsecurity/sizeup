@@ -63,7 +63,7 @@ MEASURE = r"""() => {
     if (b.matches(".tab, [role=tab]")) return b.closest("header") ? "tab-header" : "tab";
     if (b.matches(".sw")) return "switch";
     if (b.matches(".seg button")) return "segmented";
-    if (b.matches(".cm-rig, .cm-pin, .unit-tag, .ov-page, .og-head, .sec-toggle, .cm-unset-head, .feed-ev, .chip")) return null;
+    if (b.matches(".cm-rig, .cm-pin, .unit-tag, .ov-page, .og-head, .sec-toggle, .cm-unset-head, .feed-ev, .chip, .ml-thumb")) return null;   // .ml-thumb: a camera picture
     if (b.closest("header")) return "button-header";
     const size = b.matches(".sm, .mini, .play") ? "-sm" : b.matches(".lg") ? "-lg" : "";
     const icon = b.matches(".icon, .play") ? "-icon" : "";
