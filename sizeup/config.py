@@ -168,6 +168,7 @@ class Config:
     roads_cameras_url: str = ""
     roads_signs_url: str = ""
     roads_thruway: bool = True        # the NYS Thruway Authority's public feeds (no key): I-95, I-287 (#86)
+    roads_county: bool = True         # Westchester County DPW's cameras (a public ArcGIS layer, no key) (#99)
     # [gis] (sizeup/gis.py, #91): Westchester County GIS datasets as map layers, fetched by the hub.
     # load() ships the starter set (gis.DEFAULT_LAYERS); built directly (tests), none.
     gis_enabled: bool = True
@@ -354,10 +355,10 @@ def _roads(data: dict) -> dict:
     area, the default schedule. The key never needs to be in a file (the environment wins); the
     addresses hold "{key}" instead."""
     rd = _take(data.get("roads", {}), "roads", {"enabled", "key", "bbox", "cameras_every_min", "events_every_s",
-                                                "signs_every_min", "events_url", "cameras_url", "signs_url", "thruway"})
-    enabled, thruway = rd.get("enabled", True), rd.get("thruway", True)
-    if not isinstance(enabled, bool) or not isinstance(thruway, bool):
-        raise ConfigError("roads.enabled / roads.thruway: true or false")
+                                                "signs_every_min", "events_url", "cameras_url", "signs_url", "thruway", "county"})
+    enabled, thruway, county = rd.get("enabled", True), rd.get("thruway", True), rd.get("county", True)
+    if not all(isinstance(x, bool) for x in (enabled, thruway, county)):
+        raise ConfigError("roads.enabled / roads.thruway / roads.county: true or false")
     key = _env("SIZEUP_511NY_KEY", str(rd.get("key", ""))).strip()
     if key and not re.fullmatch(r"[!-~]{8,256}", key):
         raise ConfigError("roads.key / SIZEUP_511NY_KEY: the key from 511NY's access approval (8 or more characters, no spaces)")
@@ -388,7 +389,7 @@ def _roads(data: dict) -> dict:
             raise ConfigError(f"roads.{k}: put {{key}} where the key goes, never the key itself (SIZEUP_511NY_KEY)")
         urls[f"roads_{k}"] = u
     return dict(roads_enabled=enabled, roads_key=key, roads_bbox=(w, s, e, n), roads_cameras_s=cams,
-                roads_events_s=events, roads_signs_s=signs, roads_thruway=thruway, **urls)
+                roads_events_s=events, roads_signs_s=signs, roads_thruway=thruway, roads_county=county, **urls)
 
 
 def _bbox(v, what: str, max_deg: float = 3.0) -> tuple[float, float, float, float]:

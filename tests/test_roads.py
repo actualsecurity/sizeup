@@ -10,6 +10,7 @@ feeds in tests/fixtures/thruway/ are recorded from webdataapi.thruway.ny.gov on 
 to the records around Port Chester plus two elsewhere."""
 
 import json
+import re
 import sqlite3
 import threading
 from email.utils import formatdate
@@ -80,12 +81,12 @@ class FakeFetch:
         raise AssertionError(f"unexpected fetch {url}")
 
 
-def make(tmp_path=None, key=KEY, urls=URLS, fetch=None, clock=None, thruway=False, **kw):
+def make(tmp_path=None, key=KEY, urls=URLS, fetch=None, clock=None, thruway=False, county=False, **kw):
     """A Roads with 511NY on (the fixtures) and, with thruway=True, the Thruway's feeds (the fixtures) too."""
     logs = []
     r = Roads(key, urls, cache=(tmp_path / "roads511.json") if tmp_path else None, fetch=fetch or FakeFetch(),
               log=logs.append, clock=clock or Clock(), gazetteer=kw.pop("gazetteer", Path("/nonexistent")),
-              thruway=thruway, thruway_urls=kw.pop("thruway_urls", TURLS if thruway else {}), **kw)
+              thruway=thruway, thruway_urls=kw.pop("thruway_urls", TURLS if thruway else {}), county=county, **kw)
     r.logs = logs
     return r
 
@@ -115,8 +116,9 @@ def test_cameras_from_the_api_json_and_the_inventory_xml():
     cams = {c["id"]: c for c in parse_cameras(decode(fixture("cameras.json")))}
     assert set(cams) == {"4616", "4620", "4631"}
     assert cams["4616"] == {"id": "4616", "name": "I-95 at Exit 21 - Port Chester", "road": "I-95", "dir": "Northbound",
-                            "lat": 41.0012, "lon": -73.6748, "url": "https://511ny.org/map/Cctv/4616", "has_video": True,
-                            "off": False}
+                            "lat": 41.0012, "lon": -73.6748, "url": "https://511ny.org/map/Cctv/4616",
+                            "video": "https://s58.nysdot.skyvdn.com:443/rtplive/R11_008/playlist.m3u8", "has_video": True,
+                            "off": False, "cadence": 60}
     assert cams["4631"]["off"] and cams["4631"]["dir"] == ""                  # Disabled; "Unknown" direction dropped
     assert not cams["4620"]["has_video"]
     xml = {c["id"]: c for c in parse_cameras(decode(fixture("cameras.xml")))}
@@ -162,7 +164,8 @@ def test_a_refresh_reads_each_feed_with_the_key_and_nothing_else_carries_it(tmp_
     pub = r.public()
     assert pub["configured"] and pub["attribution"] == "powered by 511NY" and pub["link"] == "https://511ny.org/"
     assert [c["id"] for c in pub["cameras"]] == ["4631", "4620", "4616"]
-    assert all(set(c) == {"id", "name", "road", "dir", "mile", "lat", "lon", "has_video", "off", "source"} for c in pub["cameras"])
+    assert all(set(c) == {"id", "name", "road", "dir", "mile", "lat", "lon", "has_video", "off", "source", "cadence", "down",
+                          "down_since", "last_image"} for c in pub["cameras"])
     assert all(c["source"] == "511NY" for c in pub["cameras"]) and all(e["source"] == "511NY" for e in pub["events"])
     assert [s["name"] for s in pub["sources"]] == ["511ny"]
     st = pub["sources"][0]["status"]
@@ -403,7 +406,8 @@ def test_thruway_cameras_parse_with_road_direction_and_mile():
     pc = cams["1ne01370s"]
     assert pc == {"id": "1ne01370s", "name": "I-95 at Interchange 21 (Route1/I-287)", "road": "I-95", "dir": "Southbound",
                   "mile": "13.8", "lat": 40.9874, "lon": -73.68029, "url": "https://nyssnapshot.com/thumbs/TA_058.flv.png",
-                  "has_video": True, "off": False}
+                  "video": "https://s58.nysdot.skyvdn.com:443/rtplive/TA_058/playlist.m3u8", "has_video": True, "off": False,
+                  "cadence": 60}
     assert {c["road"] for c in cams.values()} == {"I-95", "I-287"}
     assert all(c["dir"] in ("Northbound", "Southbound", "Eastbound", "Westbound", "") for c in cams.values())
     assert all(c["url"].startswith("https://nyssnapshot.com/") for c in cams.values())
@@ -458,8 +462,9 @@ def test_the_thruway_alone_needs_no_key_and_the_layers_are_on(tmp_path):
     assert "Thruway on (cameras every 3600 s, events every 120 s, signs every 300 s)" in "\n".join(r.logs)
     assert "511NY not configured" in "\n".join(r.logs)
     r.stop()
-    # the snapshot proxy, through the Thruway's redirecting thumbs address
+    # the snapshot proxy, through the Thruway's redirecting thumbs address (start() swept them: forget that)
     f.urls.clear()
+    r._images.clear()
     code, body, ctype, headers = r.get("/api/cad/cameras/1ne01370s/image", "")
     assert (code, body, ctype) == (200, JPEG, "image/jpeg") and f.urls == ["https://nyssnapshot.com/thumbs/TA_058.flv.png"]
     # nearest to a point between the interchange 21 cameras: them, then the one before Connecticut
@@ -493,7 +498,7 @@ def test_both_providers_merge_with_511ny_first(tmp_path):
     assert len(pub["cameras"]) == 3 + 15 - 1
     assert [c["source"] for c in pub["cameras"][:3]] == ["511NY"] * 3 and pub["cameras"][-1]["source"] == "Thruway"
     assert len(pub["events"]) == 3 + 2 and len(pub["signs"]) == 2 + 8        # nothing within 50 m across sources
-    assert [s["name"] for s in pub["sources"]] == ["511ny", "thruway"] and all(s["configured"] for s in pub["sources"])
+    assert [s["name"] for s in pub["sources"]] == ["511ny", "thruway"] and all(s["configured"] for s in pub["sources"])   # (county off here)
     assert pub["note"] == ""
     # per item: the camera endpoint and the proxy find either
     assert r.camera("4616")["source"] == "511NY" and r.camera("1cw00250w")["source"] == "Thruway"
@@ -637,7 +642,175 @@ def test_the_cameras_endpoint(highway):
     assert code == 200 and doc["highway"]["dir"] == "SB" and [c["rel"] for c in doc["cameras"]] == ["before", "after"]
     assert r.get("/api/cad/cameras", "for=nowhere")[0] == 400
     assert json.loads(r.get("/api/cad/cameras", "for=41.0165,-73.6830&label=Crawford+Park")[1]) == {
-        "configured": True, "highway": None, "cameras": []}
+        "configured": True, "highway": None, "cameras": [], "down": []}
+
+
+# ---- Westchester County DPW's cameras (#99), and cameras that are down ------------------------------------------
+
+CFIX = Path(__file__).parent / "fixtures" / "county"
+CURLS = {"cameras": "https://county.example/arcgis/rest/services/MappingWestchesterCounty/MapServer/124/query?f=json"}
+OLD = formatdate(1_626_646_462, usegmt=True)                 # Sun, 18 Jul 2021: the county's dead-camera placeholder
+
+
+class CountyFetch(FakeFetch):
+    """FakeFetch plus the county's layer (recorded) and images: fresh by default; per-camera overrides."""
+
+    def __init__(self):
+        super().__init__()
+        self.county: dict[str, object] = {}                  # camera number -> "old" | "404" | Exception
+
+    def __call__(self, url, timeout, limit):
+        if url.startswith("https://county.example/"):
+            return 200, {"content-type": "application/json"}, (CFIX / "cameras.json").read_bytes()
+        if url.startswith("https://nyssnapshot.com/thumbs/"):                        # the Thruway's, fresh too
+            self.urls.append(url)
+            return 200, {"content-type": "image/png", "last-modified": formatdate(self.now() - 20, usegmt=True)}, JPEG
+        m = re.fullmatch(r"https://www\.westchestergov\.com/cctv/camera(\d+)\.jpg", url)
+        if m:
+            self.urls.append(url)
+            how = self.county.get(m.group(1))
+            if isinstance(how, Exception):
+                raise how
+            if how == "404":
+                return 404, {"content-type": "text/html"}, b"<html>not found</html>"
+            if how == "old":
+                return 200, {"content-type": "image/jpeg", "last-modified": OLD}, JPEG
+            return 200, {"content-type": "image/jpeg", "last-modified": formatdate(self.now() - 4, usegmt=True)}, JPEG
+        return super().__call__(url, timeout, limit)
+
+
+def county(tmp_path=None, clock=None, gazetteer=Path("/nonexistent"), thruway=True):
+    clock = clock or Clock()
+    f = CountyFetch()
+    f.now = clock
+    r = make(tmp_path, key="", urls={}, fetch=f, clock=clock, thruway=thruway, gazetteer=gazetteer, county=True, county_urls=CURLS)
+    assert r.refresh("cameras")
+    return r, f
+
+
+def test_county_cameras_parse_from_the_arcgis_layer():
+    from sizeup.roads import parse_county_cameras
+    cams = {c["id"]: c for c in parse_county_cameras(json.loads((CFIX / "cameras.json").read_bytes()))}
+    assert len(cams) == 26                                                       # the two in Yonkers are outside our box
+    king = cams["wc23"]
+    assert king == {"id": "wc23", "name": "SB King Approach - King St/Willett Ave/North Pearl St", "road": "King St",
+                    "dir": "Southbound", "mile": "", "lat": 41.003494, "lon": -73.663581,
+                    "url": "https://www.westchestergov.com/cctv/camera23.jpg", "video": "", "has_video": False, "off": False,
+                    "cadence": 8}
+    assert (cams["wc22"]["road"], cams["wc22"]["dir"]) == ("I-287", "Eastbound")         # "going East on I-287"
+    assert (cams["wc4"]["road"], cams["wc4"]["mile"]) == ("BRP", "15.5")
+    assert all(c["url"].startswith("https://") for c in cams.values())              # the layer says http://
+    assert parse_county_cameras({"error": {"code": 400}}) == [] and parse_county_cameras([]) == []
+
+
+def test_the_county_is_a_third_provider_with_its_own_attribution(tmp_path):
+    r, f = county(tmp_path)
+    pub = r.public()
+    assert [s["short"] for s in pub["sources"]] == ["511NY", "Thruway", "County"]
+    c = next(s for s in pub["sources"] if s["name"] == "county")
+    assert c["configured"] and c["label"] == "Westchester County DPW" and c["link"] == "https://www.westchestergov.com/trafficcamera"
+    assert c["status"]["cameras"]["n"] == 26 and not c["status"]["events"]["on"]        # cameras only
+    assert r.county.every["cameras"] == 86400.0                                        # the list daily
+    assert len(pub["cameras"]) == 15 + 26 and {x["source"] for x in pub["cameras"]} == {"Thruway", "County"}
+    assert all({"cadence", "down", "down_since", "last_image"} <= set(x) for x in pub["cameras"])
+    assert {x["cadence"] for x in pub["cameras"]} == {8, 60}
+    assert r.get("/api/cad/cameras/wc23/image", "")[0] == 200 and f.urls[-1] == "https://www.westchestergov.com/cctv/camera23.jpg"
+    assert "wc23" in {h["camera"] for h in r.search_places("king st camera")}
+    assert json.loads(r.get("/api/cad/roads", "")[1])["configured"]
+    # off and on
+    assert make(key="", urls={}, county=False).county is None
+    with pytest.raises(ConfigError, match="county"):
+        load_cfg(tmp_path, '[roads]\ncounty = "yes"\n')
+    assert load_cfg(tmp_path, "[roads]\ncounty = false\n").roads_county is False and load_cfg(tmp_path, "").roads_county is True
+
+
+def test_a_stale_image_is_no_image_and_the_camera_is_down_until_a_fresh_one(tmp_path):
+    clock = Clock()
+    r, f = county(tmp_path, clock)
+    f.county["68"] = "old"                                                           # the 2021 placeholder
+    code, body, ctype, headers = r.get("/api/cad/cameras/wc68/image", "")
+    doc = json.loads(body)
+    assert code == 404 and ctype == "application/json" and doc["error"] == "no current image"
+    assert doc["down"] and doc["down_since"] == clock.t and doc["last_image"] == 1_626_646_462
+    assert headers["Cache-Control"] == "no-store"
+    cam = next(c for c in r.public()["cameras"] if c["id"] == "wc68")
+    assert cam["down"] and cam["down_since"] == clock.t and cam["last_image"] == 1_626_646_462
+    assert "wc68" not in [c["id"] for c in r.nearest(41.01765, -73.72633, within_km=0.5)]   # never offered while down
+    # back: a fresh image
+    clock.t += 60
+    del f.county["68"]
+    assert r.get("/api/cad/cameras/wc68/image", "")[0] == 200
+    assert not r.health("wc68")["down"] and r.health("wc68")["last_image"] == clock.t - 4
+
+
+def test_three_failures_are_down_and_the_old_picture_is_not_served(tmp_path):
+    clock = Clock()
+    r, f = county(tmp_path, clock)
+    assert r.get("/api/cad/cameras/wc23/image", "")[0] == 200                       # a good one first
+    f.county["23"] = OSError("timed out")
+    for i in range(2):                                                               # 1, 2: the last picture, marked stale
+        clock.t += IMAGE_TTL_S + 1
+        code, body, _, headers = r.get("/api/cad/cameras/wc23/image", "")
+        assert code == 200 and headers.get("X-Image-Stale") == "1" and not r.health("wc23")["down"]
+    clock.t += IMAGE_TTL_S + 1
+    code, body, _, _ = r.get("/api/cad/cameras/wc23/image", "")                    # 3: down, and no old picture
+    assert code == 404 and json.loads(body)["down"] and r.health("wc23")["down_since"] == clock.t
+    assert r.health("wc23")["last_image"] is not None
+    rev = r.rev
+    clock.t += IMAGE_TTL_S + 1
+    assert r.get("/api/cad/cameras/wc23/image", "")[0] == 404 and r.rev == rev     # still down: no churn
+    f.county["24"] = "404"                                                           # a 404 counts as a failure
+    for _ in range(3):
+        clock.t += IMAGE_TTL_S + 1
+        r.get("/api/cad/cameras/wc24/image", "")
+    assert r.health("wc24")["down"] and r.health("wc24")["last_image"] is None
+    # recovery clears it
+    del f.county["23"]
+    clock.t += IMAGE_TTL_S + 1
+    assert r.get("/api/cad/cameras/wc23/image", "")[0] == 200 and not r.health("wc23")["down"]
+
+
+def test_the_sweep_looks_at_every_camera_so_the_map_knows(tmp_path):
+    clock = Clock()
+    r, f = county(tmp_path, clock)
+    f.county["68"] = f.county["8"] = "old"
+    f.county["24"] = f.county["16"] = "404"
+    n = r.sweep()
+    assert n == 15 + 26 and len(f.urls) >= 41
+    down = sorted(c["id"] for c in r.public()["cameras"] if c["down"])
+    assert down == ["wc68", "wc8"]                                                   # stale: at once; 404s: not yet (1 of 3)
+    assert r.sweep() == 0                                                            # looked at already
+    clock.t += 901
+    r.sweep(); clock.t += 901; r.sweep()
+    assert sorted(c["id"] for c in r.public()["cameras"] if c["down"]) == ["wc16", "wc24", "wc68", "wc8"]
+
+
+def test_down_cameras_are_demoted_in_the_picker_and_listed_apart(tmp_path):
+    clock = Clock()
+    r, f = county(tmp_path, clock, gazetteer=GAZ)
+    lat, lon = place("I-287 EB MM 5.5")
+    live = r.cameras_for(lat, lon, "I-287 EB MM 5.5")
+    rels = [(c["rel"], c["id"]) for c in live["cameras"]]
+    assert {i for r_, i in rels if r_ == "at"} == {"wc16", "wc22", "wc39"} and live["down"] == []   # the county's three at the spot
+    assert ("before", "1cw00520e") in rels and next(i for r_, i in rels if r_ == "after") in ("wc68", "1cw00710e")
+    f.county["16"] = "404"
+    f.county["22"] = "old"
+    for _ in range(3):
+        clock.t += IMAGE_TTL_S + 1
+        r.get("/api/cad/cameras/wc16/image", "")
+    r.get("/api/cad/cameras/wc22/image", "")
+    o = r.cameras_for(lat, lon, "I-287 EB MM 5.5")
+    rels = [(c["rel"], c["id"]) for c in o["cameras"]]
+    assert ("at", "wc39") in rels and ("before", "1cw00520e") in rels and not {"wc16", "wc22"} & {i for _, i in rels}
+    assert {(c["rel"], c["id"], c["miles"]) for c in o["down"]} == {("down", "wc16", 0.0), ("down", "wc22", 0.0)}
+    assert all(c["down"] and c["down_since"] for c in o["down"])
+    assert {c["id"] for c in json.loads(r.get("/api/cad/cameras", f"for={lat},{lon}&label=I-287+EB+MM+5.5")[1])["down"]} == {"wc16", "wc22"}
+    # off the highway too: a down camera close by is listed apart
+    f.county["23"] = "old"
+    r.get("/api/cad/cameras/wc23/image", "")
+    o = r.cameras_for(41.0035, -73.6636, "King St & Willett Ave")
+    assert [c["id"] for c in o["cameras"]] == [] or all(c["id"] != "wc23" for c in o["cameras"])
+    assert [c["id"] for c in o["down"]] == ["wc23"] and o["down"][0]["km"] == 0.0
 
 
 # ---- config ------------------------------------------------------------------------------------------------
@@ -749,7 +922,7 @@ def test_the_hub_serves_layers_and_snapshots_to_a_signed_in_viewer(tmp_path, key
         post(h.app.cad, "users", action="add", name="Corey", email="corey@example.org", role="admin")
         post(h.app.cad, "users", action="add", name="Val", email="val@example.org", role="viewer")
         assert wait_for(lambda: all(h.app.roads.ny.status[f]["at"] for f in ("events", "signs", "cameras")))
-        assert all(f"key={KEY}" in p for p in fake511.requests)
+        assert all(f"key={KEY}" in p for p in fake511.requests if not p.startswith("/cctv/"))   # (the health sweep fetches images)
         assert req(h.url + "/api/cad/roads")[0] == 401                               # Access: a person only
         assert req(h.url + "/api/cad/cameras/4616/image")[0] == 401
         val = {"Cf-Access-Jwt-Assertion": jwt(keys[0], email="val@example.org")}     # a viewer may look
@@ -758,7 +931,7 @@ def test_the_hub_serves_layers_and_snapshots_to_a_signed_in_viewer(tmp_path, key
         code, img = req(h.url + "/api/cad/cameras/4616/image", headers=val)
         assert code == 200 and img == JPEG
         code, img = req(h.url + "/api/cad/cameras/4616/image", headers=val)
-        assert sum(p.startswith("/cctv/") for p in fake511.requests) == 1             # the second from the cache
+        assert sum(p.startswith("/cctv/4616") for p in fake511.requests) == 1         # the second from the cache
         code, near = req(h.url + "/api/cad/cameras?near=41.0006,-73.6739", headers=val)
         assert [c["id"] for c in near["cameras"]] == ["4616"]
         for path in ("/api/cad/roads", "/api/cad/cameras?q=camera", "/api/cad/cameras/4616/image"):
@@ -839,5 +1012,7 @@ def test_the_layers_control_is_on_every_map_with_its_six_layers():
     assert 'MapLayers.cameras(act, $("#ov-cams"), { small: true })' in cadmap              # the wall board's two (#95)
     assert 'id="d-cams"' in html and 'id="ov-cams"' in html
     assert "/api/cad/cameras?" in js and "CAM_REFRESH_MS)" in js and 'aria-expanded' in js   # live, collapsible
+    assert '"ml-cam-down"' in js and "Hide down cameras" in js and "cameras down" in js       # down cameras (#99)
+    assert "Down since" in js and "Snapshot, updated every" in js
     sprite = (STATIC / "icons.svg").read_text()
     assert 'id="i-layers"' in sprite and 'id="i-camera"' in sprite

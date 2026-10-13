@@ -59,9 +59,13 @@ window.MapLayers = (() => {
   // ---- per-viewer choices (localStorage may be missing or refuse: then just this page view) --------------
   const prefs = (() => {
     const p = Object.fromEntries(LAYERS.map((l) => [l.key, l.on]));
+    p.hideDown = false;                                  // "Hide down cameras" (#99): off by default
     try {
       const saved = JSON.parse(localStorage.getItem(PREF_KEY) || "null");
-      if (saved && typeof saved === "object") for (const l of LAYERS) if (typeof saved[l.key] === "boolean") p[l.key] = saved[l.key];
+      if (saved && typeof saved === "object") {
+        for (const l of LAYERS) if (typeof saved[l.key] === "boolean") p[l.key] = saved[l.key];
+        if (typeof saved.hideDown === "boolean") p.hideDown = saved.hideDown;
+      }
     } catch (_) { /* defaults */ }
     return p;
   })();
@@ -156,7 +160,20 @@ window.MapLayers = (() => {
       g.fillStyle = fill; g.strokeStyle = white; g.lineWidth = 2;
       g.beginPath(); g.roundRect(2, 2, 16, 16, 3); g.fill(); g.stroke();
     });
-    return { "ml-cam": cam(info), "ml-cam-off": cam(dim), "ml-inc": tri(err), "ml-closed": closed, "ml-work": work,
+    const camDown = canvas(44, 44, (g) => {                                           // dim, with a red "!" badge
+      g.translate(22, 22);
+      g.globalAlpha = 0.55;
+      g.fillStyle = DARK; g.strokeStyle = dim; g.lineWidth = 3;
+      g.beginPath(); g.arc(0, 0, 18.5, 0, 2 * Math.PI); g.fill(); g.stroke();
+      g.fillStyle = white;
+      g.beginPath(); g.roundRect(-11, -6.5, 15, 13, 2.5); g.fill();
+      g.beginPath(); g.moveTo(4, -1.5); g.lineTo(11, -6); g.lineTo(11, 6); g.lineTo(4, 1.5); g.closePath(); g.fill();
+      g.globalAlpha = 1;
+      g.fillStyle = err; g.strokeStyle = DARK; g.lineWidth = 2;
+      g.beginPath(); g.arc(13, -13, 7.5, 0, 2 * Math.PI); g.fill(); g.stroke();
+      g.fillStyle = white; g.fillRect(12, -17.5, 2.2, 6); g.fillRect(12, -10.5, 2.2, 2.2);
+    });
+    return { "ml-cam": cam(info), "ml-cam-off": cam(dim), "ml-cam-down": camDown, "ml-inc": tri(err), "ml-closed": closed, "ml-work": work,
              "ml-sign": sign(true), "ml-sign-blank": sign(false), "ml-mp": tag(ok), "ml-exit": tag("#1F7A45") };
   }
 
@@ -165,7 +182,11 @@ window.MapLayers = (() => {
   const fc = (features) => ({ type: "FeatureCollection", features });
   function features(d, key) {
     if (!d) return fc([]);
-    if (key === "cameras") return fc((d.cameras || []).map((c) => pt(c, { id: c.id, icon: c.off ? "ml-cam-off" : "ml-cam", off: !!c.off })));
+    if (key === "cameras") {
+      return fc((d.cameras || []).filter((c) => !(prefs.hideDown && c.down)).map((c) => pt(c, {
+        id: c.id, icon: c.down ? "ml-cam-down" : c.off ? "ml-cam-off" : "ml-cam", off: !!c.off, down: !!c.down,
+        label: c.down ? "camera down" : "" })));
+    }
     if (key === "incidents" || key === "roadwork") {
       return fc((d.events || []).filter((e) => e.layer === key).map((e) => pt(e, {
         id: e.id, icon: key === "roadwork" ? "ml-work" : e.closed ? "ml-closed" : "ml-inc" })));
@@ -366,6 +387,16 @@ window.MapLayers = (() => {
         }
         list.append(lab);
       }
+      if (d && (d.cameras || []).some((c) => c.down)) {                 // down cameras (#99): dim with a badge, or hidden
+        const lab = h("label", "check ml-hide-down");
+        const cb = h("input");
+        cb.type = "checkbox";
+        cb.checked = !!prefs.hideDown;
+        cb.addEventListener("change", () => setLayer("hideDown", cb.checked));
+        const n = (d.cameras || []).filter((c) => c.down).length;
+        lab.append(cb, h("span", "", `Hide down cameras (${n})`));
+        list.append(lab);
+      }
       this.panel.replaceChildren(head, list);
       if (!d) this.panel.append(h("div", "dim small", "Loading…"));
       else if (!d.configured) this.panel.append(h("div", "dim small", "No camera or incident source is on: " + (d.note || "not configured on the hub")));
@@ -434,7 +465,11 @@ window.MapLayers = (() => {
   function setLayer(key, on) {
     prefs[key] = !!on;
     savePrefs();
-    for (const m of maps) { m.applyVisibility(); if (!m.panel.hidden) m.renderPanel(); }
+    for (const m of maps) {
+      if (key === "hideDown") { m.sigs.cameras = ""; if (store.data) m.update(store.data); }
+      m.applyVisibility();
+      if (!m.panel.hidden) m.renderPanel();
+    }
   }
 
   // ---- times ------------------------------------------------------------------------------------------------
@@ -457,7 +492,8 @@ window.MapLayers = (() => {
   }
 
   // ---- the camera viewer --------------------------------------------------------------------------------------
-  const viewer = { ov: null, id: null, timer: null, url: null, taken: 0, busy: false, tick: null };
+  const viewer = { ov: null, id: null, timer: null, url: null, taken: 0, busy: false, tick: null, down: null, cadence: 60 };
+  const cadenceText = (c) => `Snapshot, updated every ${c && c.cadence ? c.cadence : 60} s`;
 
   function buildViewer() {
     const ov = h("div", "overlay");
@@ -514,7 +550,13 @@ window.MapLayers = (() => {
     if (viewer.id) viewer.el.time.textContent = viewer.taken ? `Image ${hhmm(viewer.taken)}, paused` : "Paused";
   }
   function showTime() {
-    if (!viewer.id || !viewer.taken) return;
+    if (!viewer.id) return;
+    if (viewer.down) {
+      const d = viewer.down;
+      viewer.el.time.textContent = `Down since ${when(d.down_since)}` + (d.last_image ? ` (last image ${when(d.last_image)})` : " (no image)");
+      return;
+    }
+    if (!viewer.taken) return;
     viewer.el.time.textContent = `Image ${when(viewer.taken)} (${ago(viewer.taken)})${viewer.stale ? ", camera not answering" : ""}`;
   }
 
@@ -527,8 +569,17 @@ window.MapLayers = (() => {
       if (id !== viewer.id) return;
       if (!r.ok) {
         const e = await r.json().catch(() => null);
+        if (e && e.down) {                                   // down (#99): say so, not the old picture
+          viewer.down = e;
+          viewer.el.img.hidden = true;
+          viewer.el.msg.hidden = false;
+          viewer.el.msg.textContent = "Camera down: no current image";
+          showTime();
+          return;
+        }
         throw new Error((e && e.error) || `${r.status} ${r.statusText}`);
       }
+      viewer.down = null;
       const blob = await r.blob();
       if (id !== viewer.id) return;
       const url = URL.createObjectURL(blob);
@@ -557,6 +608,8 @@ window.MapLayers = (() => {
     viewer.id = String(id);
     viewer.taken = 0;
     viewer.stale = false;
+    viewer.down = c && c.down ? { down: true, down_since: c.down_since, last_image: c.last_image } : null;
+    viewer.cadence = (c && c.cadence) || 60;
     const el = viewer.el;
     el.title.textContent = c ? c.name : `Camera ${id}`;
     el.where.textContent = c ? [c.road, c.dir, c.mile ? `MP ${c.mile}` : ""].filter(Boolean).join(" · ") || "" : "";
@@ -565,12 +618,14 @@ window.MapLayers = (() => {
     a.href = src ? src.link : "#";
     a.target = "_blank";
     a.rel = "noopener";
-    el.foot.replaceChildren("Snapshot through the hub, ", a, ". A new one every 10 s while this is open.");
+    el.foot.replaceChildren(`${cadenceText(c)}, through the hub (`, a, "). Looked at every 10 s while this is open.");
     el.img.hidden = true;
     el.img.alt = c ? `Traffic camera: ${c.name}` : "Traffic camera";
     el.msg.hidden = false;
-    el.msg.textContent = c && c.off ? `This camera is marked out of service by ${c.source || "its source"}: trying anyway…` : "Loading…";
+    el.msg.textContent = c && c.down ? "Camera down: no current image"
+      : c && c.off ? `This camera is marked out of service by ${c.source || "its source"}: trying anyway…` : "Loading…";
     el.time.textContent = "";
+    if (viewer.down) showTime();
     if (viewer.url) { URL.revokeObjectURL(viewer.url); viewer.url = null; }
     if (window.UI && UI.dialog) UI.dialog.open(viewer.ov, { onClose: stopCamera, opener });
     else viewer.ov.hidden = false;
@@ -651,8 +706,9 @@ window.MapLayers = (() => {
     const d = st.data, inc = st.inc;
     const cams = (d && d.cameras) || [];
     const shown = st.small ? cams.filter((c) => c.rel !== "nearby") : cams;
-    const sig = JSON.stringify([shown.map((c) => [c.id, c.rel, c.miles]), st.open, d && d.highway]);
-    if (!shown.length) { host.hidden = true; host.replaceChildren(); st.sig = ""; return; }
+    const down = st.small ? [] : ((d && d.down) || []);
+    const sig = JSON.stringify([shown.map((c) => [c.id, c.rel, c.miles]), down.map((c) => c.id), st.open, st.downOpen, d && d.highway]);
+    if (!shown.length && !down.length) { host.hidden = true; host.replaceChildren(); st.sig = ""; return; }
     host.hidden = false;
     const stamp = Math.floor(Date.now() / CAM_REFRESH_MS);
     if (sig === st.sig && !fresh) return;
@@ -700,6 +756,29 @@ window.MapLayers = (() => {
     if (near.length) {
       if (along.length) host.append(h("div", "ml-cams-sub dim small", "Nearby"));
       host.append(list(near));
+    }
+    if (down.length) {                                     // folded away below the live ones (#99)
+      const row = h("button", "ml-cams-down");
+      row.type = "button";
+      row.setAttribute("aria-expanded", String(!!st.downOpen));
+      row.append(h("span", "ml-down-badge", "!"), h("span", "", down.length === 1 ? "1 camera down" : `${down.length} cameras down`),
+                 h("span", "car dim", st.downOpen ? "▾" : "▸"));
+      row.addEventListener("click", () => { st.downOpen = !st.downOpen; st.sig = ""; drawCams(host, st, true); });
+      host.append(row);
+      if (st.downOpen) {
+        const ul = h("div", "ml-down-list");
+        for (const c of down) {
+          const b = h("button", "ml-down-item");
+          b.type = "button";
+          b.dataset.camera = c.id;
+          b.setAttribute("aria-label", `camera down: ${c.name}`);
+          b.append(h("span", "", c.name), h("span", "dim small", (c.miles != null ? `${c.miles.toFixed(1)} mi` : `${Math.round((c.km || 0) * 1000)} m`)
+            + (c.down_since ? `, down since ${when(c.down_since)}` : "")));
+          b.addEventListener("click", () => openCamera(c.id, b));
+          ul.append(b);
+        }
+        host.append(ul);
+      }
     }
   }
   function nearby(inc, mapbox) {            // (the #73 row: now the panel; kept for a page that still calls it)

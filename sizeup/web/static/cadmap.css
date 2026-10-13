@@ -145,6 +145,14 @@
   .ml-thumb-lbl.facing { color: var(--ok-text); }
   .ml-thumb-cap { font-size: var(--fs-2xs); line-height: var(--lh-2xs); color: var(--text-2); overflow: hidden; text-overflow: ellipsis;
     display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .ml-cams-down { display: flex; align-items: center; gap: var(--s-2); justify-content: flex-start; padding-inline: var(--s-1);
+    font-size: var(--fs-xs); line-height: var(--lh-xs); font-weight: 400; color: var(--dim); background: none; border-color: transparent; }
+  .ml-down-badge { display: inline-flex; align-items: center; justify-content: center; inline-size: var(--s-4); block-size: var(--s-4);
+    border-radius: 50%; background: var(--err); color: var(--on-accent); font-size: var(--fs-2xs); line-height: 1; font-weight: 700; }
+  .ml-down-list { display: flex; flex-direction: column; gap: var(--s-0); }
+  .ml-down-item { display: flex; align-items: baseline; gap: var(--s-2); justify-content: flex-start; min-inline-size: 0; white-space: normal;
+    text-align: start; font-weight: 400; color: var(--text-2); background: none; border-color: transparent; }
+  .ml-hide-down { margin-block-start: var(--s-1); padding-block-start: var(--s-1); border-block-start: var(--bw) solid var(--line); }
   .ml-cams-small { grid-column: auto; }
   .ml-cams-small .ml-near-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .ml-cams-small .ml-thumb-cap { -webkit-line-clamp: 1; }

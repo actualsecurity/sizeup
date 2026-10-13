@@ -46,6 +46,7 @@ def _roads_stay_local(monkeypatch):
     import sizeup.roads as roads
     monkeypatch.delenv("SIZEUP_511NY_KEY", raising=False)
     monkeypatch.setattr(roads, "THRUWAY_URLS", {})      # the Thruway provider is on by default: not in tests
+    monkeypatch.setattr(roads, "COUNTY_URLS", {})       # the county's too
     real = roads.urlopen
 
     def local_only(req, *a, **kw):

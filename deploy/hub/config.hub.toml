@@ -98,6 +98,7 @@ heartbeat_stale_min = 90
 # (SIZEUP_511NY_KEY in deploy/aws/taskdef.json); then the feed addresses from the approval go here,
 # {key} where the key goes (never the key itself). Mileposts and exits work without either.
 thruway = true
+county = true                           # Westchester County DPW's cameras (no key)
 # events_url = ""
 # cameras_url = ""
 # signs_url = ""

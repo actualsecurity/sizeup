@@ -195,6 +195,7 @@ heartbeat_stale_min = 90             # no heartbeat (or restart) this long: "Tap
 # this process, never from the browser to a provider. The mileposts and exits are the gazetteer's.
 # [roads]
 # thruway = true
+# county = true                          # Westchester County DPW's cameras (no key)
 # events_url = "https://.../events?key={key}&format=json"
 # cameras_url = "https://.../cameras?key={key}"
 # signs_url = "https://.../messagesigns?key={key}&format=json"
