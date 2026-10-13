@@ -20,7 +20,7 @@ if [ "${since:-0}" -gt 0 ] && [ $(( (now - since) / 1000000 )) -lt "$GRACE_S" ];
   exit 0
 fi
 
-port=$(/opt/sizeup/venv/bin/python -c 'import sys, tomllib; print(int(tomllib.load(open(sys.argv[1], "rb")).get("web", {}).get("port", 8090)))' "$CONF" 2>/dev/null || echo 8091)
+port=$(python3 -c 'import sys, tomllib; print(int(tomllib.load(open(sys.argv[1], "rb")).get("web", {}).get("port", 8090)))' "$CONF" 2>/dev/null || echo 8091)
 
 mkdir -p "$(dirname "$COUNT")"
 if curl -fsS --max-time 10 -o /dev/null "http://127.0.0.1:$port/healthz"; then

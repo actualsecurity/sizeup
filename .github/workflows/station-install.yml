@@ -2,21 +2,27 @@ name: station-install
 
 # The Linux station installer (deploy/station/install-linux.sh) on a clean Ubuntu 24.04, the same
 # release WSL runs on the Windows box: builds rtl-sdr-blog, trunk-recorder and whisper.cpp, sets up
-# the sizeup user, venv, config and systemd units; then starts the station for real (no dongles, no
-# secrets: it runs, records nothing and waits for its token) and checks it answers. Plus shellcheck
-# and a parse of the Windows scripts.
+# the sizeup user, the release (code + venv), config and systemd units; then starts the station for
+# real (no dongles, no secrets: it runs, records nothing and waits for its token) and checks it
+# answers. Then the auto-update (sizeup/cloud/autoupdate.py) end to end against a local git repo: a
+# newer commit side by side, one that doesn't come up (switched back), one that fails its preflight
+# (never switched to), and a rollback by hand. Plus shellcheck and a parse of the Windows scripts.
 on:
   push:
     branches: [main]
     paths:
       - "deploy/station/**"
       - "deploy/trunk-recorder/**"
+      - "sizeup/cloud/autoupdate.py"
       - ".github/workflows/station-install.yml"
+      - ".github/scripts/station-update.sh"
   pull_request:
     paths:
       - "deploy/station/**"
       - "deploy/trunk-recorder/**"
+      - "sizeup/cloud/autoupdate.py"
       - ".github/workflows/station-install.yml"
+      - ".github/scripts/station-update.sh"
   workflow_dispatch:
 
 permissions:
@@ -33,7 +39,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: shellcheck
-        run: shellcheck -x deploy/station/install-linux.sh deploy/station/sizeup-station deploy/station/health-check.sh deploy/trunk-recorder/unit-event.sh
+        run: |
+          shellcheck -x deploy/station/install-linux.sh deploy/station/sizeup-station deploy/station/health-check.sh \
+            deploy/station/start-station deploy/station/start-whisper deploy/trunk-recorder/unit-event.sh \
+            .github/scripts/station-update.sh
       - name: PowerShell parse
         shell: pwsh
         run: |
@@ -63,24 +72,28 @@ jobs:
           grep -q "model: ggml-small.en-q5_1.bin verified" second.log
       - name: sizeup --init-state as the sizeup user
         run: |
-          sudo runuser -u sizeup -- env -C /opt/sizeup/app HOME=/var/lib/sizeup PYTHONPATH=/opt/sizeup/app \
-            SIZEUP_STATE_DIR=/var/lib/sizeup /opt/sizeup/venv/bin/python -m sizeup --config /etc/sizeup/config.toml --init-state
+          sudo runuser -u sizeup -- env -C /opt/sizeup/current HOME=/var/lib/sizeup PYTHONPATH=/opt/sizeup/current \
+            SIZEUP_STATE_DIR=/var/lib/sizeup /opt/sizeup/current/venv/bin/python -m sizeup --config /etc/sizeup/config.toml --init-state
           sudo test -f /var/lib/sizeup/state/cad.sqlite
+          readlink /opt/sizeup/current
+          test "$(stat -c '%U' "$(readlink -f /opt/sizeup/current)/sizeup/app.py")" = root   # the service user only reads it
       - name: the programs
         run: |
           test -x /opt/sizeup/rtl-sdr/bin/rtl_fm
-          ldd /opt/sizeup/rtl-sdr/bin/rtl_fm | grep -q "/opt/sizeup/rtl-sdr/lib/librtlsdr.so.0"
+          ldd /opt/sizeup/rtl-sdr/bin/rtl_fm | grep -q "librtlsdr.so.0 => /opt/sizeup/builds/rtl-sdr-blog-"
+          readlink /opt/sizeup/rtl-sdr /opt/sizeup/trunk-recorder /opt/sizeup/whisper
           LD_LIBRARY_PATH=/opt/sizeup/rtl-sdr/lib:/opt/sizeup/trunk-recorder/lib/trunk-recorder /opt/sizeup/trunk-recorder/bin/trunk-recorder --version
           find /opt/sizeup/trunk-recorder -name libunit_script.so | grep -q .
           /opt/sizeup/whisper/bin/whisper-server --help > /dev/null
           readlink /opt/sizeup/models/whisper.bin
           sudo cat /var/lib/sizeup/trunk-recorder/config.json
           test "$(sudo stat -c '%U:%G %a' /etc/sizeup/config.toml)" = "root:sizeup 640"
-          systemd-analyze verify /etc/systemd/system/sizeup-station.service /etc/systemd/system/sizeup-health.timer
+          systemd-analyze verify /etc/systemd/system/sizeup-station.service /etc/systemd/system/sizeup-health.timer \
+            /etc/systemd/system/sizeup-whisper.service /etc/systemd/system/sizeup-update.path /etc/systemd/system/sizeup-update.timer
       - name: start the station (no dongles, no secrets)
         run: |
           sudo systemctl daemon-reload
-          sudo systemctl start sizeup-station.service
+          sudo systemctl start sizeup-whisper.service sizeup-station.service
           for i in $(seq 1 60); do curl -fsS http://127.0.0.1:8091/healthz && break; sleep 2; done
           curl -fsS http://127.0.0.1:8091/healthz
           sudo /usr/local/lib/sizeup/health-check
@@ -88,7 +101,12 @@ jobs:
           sudo sizeup-station doctor || true      # no dongles and no token here: some checks fail by design
           for i in $(seq 1 60); do curl -s -o /dev/null http://127.0.0.1:8179/ && break; sleep 2; done
           curl -s -o /dev/null -w 'whisper-server: HTTP %{http_code}\n' http://127.0.0.1:8179/
+      - name: auto-update (side by side, switch back, preflight, rollback)
+        timeout-minutes: 25
+        run: sudo bash .github/scripts/station-update.sh
       - if: always()
         run: |
-          sudo journalctl -u sizeup-station --no-pager -n 200 || true
+          sudo journalctl -u sizeup-station -u sizeup-whisper --no-pager -n 200 || true
+          sudo journalctl -u sizeup-update --no-pager -n 300 || true
+          sudo cat /var/log/sizeup-update.log /var/lib/sizeup-update/state.json || true
           sudo tail -n 100 /var/log/sizeup-install.log || true

@@ -1,0 +1,32 @@
+# whisper-server for the sizeup station, as its own service (deploy/station/README.md): an update
+# restarts sizeup in a second or two without reloading the model. Restarted only when its program,
+# model or [stt] flags change (install-linux.sh compares start-whisper --print with the running one).
+# sizeup (SIZEUP_STT_EXTERNAL=1) uses whatever answers on [stt] port. Installed by install-linux.sh.
+[Unit]
+Description=sizeup station: whisper-server (speech-to-text)
+Documentation=file:///opt/sizeup/current/deploy/station/README.md
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=sizeup
+Group=sizeup
+WorkingDirectory=/opt/sizeup
+RuntimeDirectory=sizeup-whisper
+RuntimeDirectoryMode=0755
+ExecStart=/usr/local/lib/sizeup/start-whisper
+Restart=always
+RestartSec=5
+TimeoutStopSec=15
+# Below the radios (sizeup-station: Nice=-5, CPUWeight=500): transcription waits, reception doesn't.
+CPUWeight=100
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=yes
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sizeup-whisper
+
+[Install]
+WantedBy=multi-user.target

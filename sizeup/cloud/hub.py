@@ -10,7 +10,8 @@ runs on a bare Linux box with Python + numpy.
     POST /api/station/state       {at, talking?, paging?, status?}: who is talking now and a page going
                                   out now (latest wins; paging: sizeup/radio/livepage.py) and the
                                   station's radio / SDR / STT / voice rows, talkgroups, re-run
-                                  progress, outbox size
+                                  progress, outbox size, its version -> {ok, build}: the hub's own
+                                  build (SIZEUP_BUILD), which the station follows (autoupdate.py)
     GET  /api/station/jobs?wait=25   long poll: jobs for the station -> {jobs: [{id, type, args}]}
     POST /api/station/jobs/<id>   the station's answer {ok, error?, result?, label?, audio?}
     GET  /api/station/hello      {ok}: the token works (the station's Test connection; not counted as "seen")
@@ -41,6 +42,7 @@ import base64
 import binascii
 import hmac
 import json
+import os
 import re
 import secrets
 import threading
@@ -53,6 +55,7 @@ from typing import Callable
 from sizeup import channels
 from sizeup.app import CLIP_ID, App, AwsJob, channels_model
 from sizeup.cad.dispatcher import AudioUnavailable
+from sizeup.cloud.autoupdate import describe
 from sizeup.cloud.hubstore import AudioDb, MonitorDb
 from sizeup.incidents import Traffic
 from sizeup.radio.page import page_from_dict
@@ -188,6 +191,7 @@ class Hub:
         self.offline_s = cfg.cloud_offline_s
         self.own_voice = cfg.dispatch_tts_engine == "polly"   # the dispatch voice is the hub's (Polly), not the station's
         self.started = time.time()
+        self.build = os.environ.get("SIZEUP_BUILD", "").strip()   # the git sha CI built this image from
         self.jobs = Jobs()
         self.live = RemoteLive(app.radios.resolve)
         self.last_seen: float | None = None
@@ -222,7 +226,13 @@ class Hub:
             detail = (f"{name}: connected, last seen {ago} s ago" + (f" · {q} event(s) still on their way up" if q else "")
                       + (f" · clocks differ by {self.skew:+.0f} s (set both to network time)" if abs(self.skew) > 5 else "")
                       + (f" · {self.errors} event(s) failed to apply, last: {self.last_error}" if self.errors else ""))
-            return {"state": "ok", "word": f"{ago} s" if ago >= 5 else "", "detail": detail}
+            v = self.version()
+            word = f"{ago} s" if ago >= 5 else ""
+            if v is not None:
+                detail += f" · version: {v['text']}"
+                if not word and v["state"] in ("updating", "failed"):
+                    word = "updating" if v["state"] == "updating" else "update failed"
+            return {"state": "ok", "word": word, "detail": detail}
         if self.last_seen is None:
             return {"state": "down", "word": "waiting",
                     "detail": f"no station has connected since the hub started ({_hhmm(self.started)})"}
@@ -232,6 +242,15 @@ class Hub:
                           f"(no contact for {int((now - since) // 60)} min): radios"
                           + (" and speech-to-text are" if self.own_voice else ", speech-to-text and the dispatch voice are")
                           + " unavailable until it's back; what it heard meanwhile comes up then"}
+
+    def version(self) -> dict | None:
+        """{state, text}: the station's version against this hub's build ("up to date", "updating",
+        "update to abc1234 failed ..."), from what the station last reported; None from a station
+        that doesn't report one."""
+        v = (self.status or {}).get("version")
+        if not isinstance(v, dict):
+            return None
+        return describe(str(v.get("build") or ""), self.build, v.get("update") if isinstance(v.get("update"), dict) else {})
 
     def station_row(self) -> dict:
         h = self.health()
@@ -375,7 +394,7 @@ class Hub:
             self.app.channels_check()          # the station runs other channel choices than these: send them
         if isinstance(d.get("talking"), list):
             self.live.update(d["talking"], now, d.get("paging") if isinstance(d.get("paging"), list) else None)
-        return _json(200, {"ok": True})
+        return _json(200, {"ok": True, "build": self.build})
 
     def _events(self, raw: bytes | None) -> tuple[int, bytes, str]:
         if raw is None:

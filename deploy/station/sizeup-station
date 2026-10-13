@@ -3,9 +3,13 @@
 #
 #   sizeup-station status        service, dongles, hub link, what's waiting, CPU
 #   sizeup-station logs [-f]     the station's log (journalctl; other journalctl options pass through)
-#   sizeup-station restart       restart it (also: start, stop)
-#   sizeup-station update        fetch the configured ref, reinstall what changed, restart
-#                                (config, state and secrets are kept); options pass to install-linux.sh
+#   sizeup-station restart       restart it (also: start, stop); whisper-server too if its [stt] changed
+#   sizeup-station update        fetch the configured ref, build its release beside the running one,
+#                                switch, restart (config, state and secrets are kept); options pass to
+#                                install-linux.sh (--ref REF: run a branch; auto-update pauses)
+#   sizeup-station autoupdate on|off|status|now
+#                                follow the hub's build by itself (on by default; off = stay put)
+#   sizeup-station rollback      back to the release that ran before (a rename and a restart)
 #   sizeup-station secrets       enter the hub token / Cloudflare Access service token again
 #   sizeup-station doctor        check everything, say what's wrong and what to do
 #   sizeup-station version
@@ -14,11 +18,14 @@
 set -euo pipefail
 
 UNIT=sizeup-station.service
-APP=/opt/sizeup/app
-VENV=/opt/sizeup/venv
+APP=/opt/sizeup/current                 # the release that runs (deploy/station/README.md "Updating")
+[ -e "$APP" ] || APP=/opt/sizeup/app    # (a station from before side-by-side releases)
+VENV=$APP/venv
+[ -x "$VENV/bin/python" ] || VENV=/opt/sizeup/venv
 CONF=/etc/sizeup/config.toml
 ENVFILE=/etc/sizeup/station.env
 INSTALLER=$APP/deploy/station/install-linux.sh
+UPDATER=/usr/local/lib/sizeup/autoupdate.py
 RTLSDR_LIB=/opt/sizeup/rtl-sdr/lib
 
 need_root() {
@@ -29,7 +36,7 @@ need_root() {
 
 # conf_port SECTION DEFAULT: [web] port / [stt] port from the config
 conf_port() {
-  "$VENV/bin/python" -c 'import sys, tomllib; print(int(tomllib.load(open(sys.argv[1], "rb")).get(sys.argv[2], {}).get("port", sys.argv[3])))' \
+  python3 -c 'import sys, tomllib; print(int(tomllib.load(open(sys.argv[1], "rb")).get(sys.argv[2], {}).get("port", sys.argv[3])))' \
     "$CONF" "$1" "$2" 2>/dev/null || echo "$2"
 }
 port() { conf_port web 8091; }
@@ -75,6 +82,11 @@ cmd_status() {
   since=$(systemctl show -p ActiveEnterTimestamp --value "$UNIT" 2>/dev/null || true)
   echo "service:   $active${since:+ since $since} ($(systemctl is-enabled "$UNIT" 2>/dev/null || echo '?') at boot)"
   echo "health:    timer $(systemctl is-active sizeup-health.timer 2>/dev/null || true); last check $(journalctl -u sizeup-health.service -n 1 -o cat --no-pager 2>/dev/null | tail -n 1 || true)"
+  echo "whisper:   sizeup-whisper.service $(systemctl is-active sizeup-whisper.service 2>/dev/null || true)"
+  if [ -f "$UPDATER" ]; then
+    python3 -I "$UPDATER" status 2>/dev/null || echo "version:   ? ($UPDATER status failed)"
+    echo "updater:   sizeup-update.path $(systemctl is-active sizeup-update.path 2>/dev/null || true), timer $(systemctl is-active sizeup-update.timer 2>/dev/null || true)$(systemctl is-active --quiet sizeup-update.service 2>/dev/null && echo ', updating now')"
+  fi
   p=$(port)
   if curl -fsS --max-time 5 -o /dev/null "http://127.0.0.1:$p/healthz" 2>/dev/null; then
     echo "web:       http://localhost:$p (station page) answers"
@@ -109,6 +121,20 @@ cmd_doctor() {
   if systemctl is-active --quiet "$UNIT"; then ok "sizeup-station is running"; else no "sizeup-station isn't running: sizeup-station logs"; fi
   if systemctl is-enabled --quiet "$UNIT"; then ok "sizeup-station starts at boot"; else no "sizeup-station isn't enabled: systemctl enable $UNIT"; fi
   if systemctl is-active --quiet sizeup-health.timer; then ok "health check timer is on"; else no "health timer off: systemctl enable --now sizeup-health.timer"; fi
+  if systemctl is-active --quiet sizeup-whisper.service; then ok "sizeup-whisper is running"; else no "sizeup-whisper isn't running: systemctl enable --now sizeup-whisper.service"; fi
+  # updates: follows the hub's build (deploy/station/README.md "Updating")
+  if [ -f "$UPDATER" ]; then
+    if systemctl is-active --quiet sizeup-update.path && systemctl is-active --quiet sizeup-update.timer; then
+      ok "auto-update watches for the hub's build (sizeup-update.path, .timer)"
+    else
+      no "auto-update isn't watching: systemctl enable --now sizeup-update.path sizeup-update.timer"
+    fi
+    out=$(python3 -I "$UPDATER" doctor 2>&1 || true)
+    printf '%s\n' "$out"
+    bad=$((bad + $(printf '%s\n' "$out" | grep -c '^  FAIL' || true)))
+  else
+    no "no auto-update yet ($UPDATER): sudo sizeup-station update"
+  fi
   p=$(port)
   if curl -fsS --max-time 5 -o /dev/null "http://127.0.0.1:$p/healthz"; then ok "station answers on http://localhost:$p"; else no "nothing answers on port $p"; fi
   # radios
@@ -186,13 +212,49 @@ case "$cmd" in
   restart|start|stop)
     need_root "$cmd" "$@"
     systemctl "$cmd" "$UNIT"
-    [ "$cmd" = stop ] && echo "Stopped. It starts again at the next boot (systemctl disable $UNIT to keep it off)."
+    if [ "$cmd" = stop ]; then
+      echo "Stopped. It starts again at the next boot (systemctl disable $UNIT to keep it off)."
+    elif [ "$(/usr/local/lib/sizeup/start-whisper --print 2>/dev/null || true)" != "$(cat /run/sizeup-whisper/argv 2>/dev/null || true)" ]; then
+      systemctl restart sizeup-whisper.service
+      echo "whisper-server restarted too ([stt] changed)"
+    fi
     exit 0 ;;
-  update) need_root update "$@"; exec bash "$INSTALLER" --update "$@" ;;
+  update)
+    need_root update "$@"
+    if systemctl is-active --quiet sizeup-update.service 2>/dev/null; then
+      echo "An automatic update is running (journalctl -u sizeup-update -f): try again when it's done." >&2
+      exit 1
+    fi
+    exec bash "$INSTALLER" --update "$@" ;;
+  autoupdate)
+    sub="${1:-status}"
+    case "$sub" in
+      on|off)
+        need_root autoupdate "$@"
+        python3 -I "$UPDATER" "$sub"
+        [ "$sub" = on ] && systemctl start --no-block sizeup-update.service
+        exit 0 ;;
+      now)
+        need_root autoupdate "$@"
+        systemctl start sizeup-update.service
+        python3 -I "$UPDATER" status ;;
+      status)
+        python3 -I "$UPDATER" status
+        tail -n 5 /var/log/sizeup-update.log 2>/dev/null | sed 's/^/  /' || true ;;
+      *) echo "sizeup-station autoupdate on|off|status|now" >&2; exit 2 ;;
+    esac ;;
+  rollback)
+    need_root rollback "$@"
+    if systemctl is-active --quiet sizeup-update.service 2>/dev/null; then
+      echo "An automatic update is running (journalctl -u sizeup-update -f): try again when it's done." >&2
+      exit 1
+    fi
+    exec python3 -I "$UPDATER" rollback ;;
   secrets) need_root secrets "$@"; exec bash "$INSTALLER" --secrets ;;
   doctor) need_root doctor "$@"; cmd_doctor ;;
   version)
-    runuser -u sizeup -- git -C "$APP" log -1 --format='%h %d %s (%cd)' --date=short 2>/dev/null || echo "(not a git checkout)"
+    echo "release: $(readlink -f /opt/sizeup/current 2>/dev/null || echo "none ($APP)") build $(cat "$APP/BUILD" 2>/dev/null || echo '?')"
+    git --git-dir=/opt/sizeup/repo.git log -1 --format='%h %s (%cd)' --date=short "$(cat "$APP/BUILD" 2>/dev/null || echo HEAD)" 2>/dev/null || true
     grep -v '^#' /etc/sizeup/install.conf 2>/dev/null || true ;;
   -h|--help|help) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0" ;;
   *) echo "sizeup-station: unknown command $cmd (sizeup-station help)" >&2; exit 2 ;;

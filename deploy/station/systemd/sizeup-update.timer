@@ -1,0 +1,12 @@
+# A safety net for sizeup-update.path: the auto-updater looks again every 15 minutes (it only ever
+# acts on the build the station heard from the hub; nothing to do = a quick exit).
+[Unit]
+Description=sizeup station: auto-update check, every 15 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitInactiveSec=15min
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

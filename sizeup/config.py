@@ -151,6 +151,9 @@ class Config:
     prealert_status_topic: str = "pcfd-status"
     prealert_expire_min: float = 5.0
     prealert_heartbeat_stale_min: float = 90.0
+    # [station] auto_update: a Linux station installed by deploy/station/install-linux.sh follows the
+    # hub's build (sizeup/cloud/autoupdate.py); false keeps it where it is (also: sizeup-station autoupdate off)
+    station_auto_update: bool = True
 
 
 def _take(d: dict, path: str, allowed: set[str]) -> dict:
@@ -357,7 +360,9 @@ def load(path: str | Path) -> Config:
         raise ConfigError(f"{path}: {e}") from e
     _take(data, "config", {"station", "web", "radio", "tones", "stt", "p25", "mdc", "units", "storage", "map",
                            "cad", "dispatch", "cloud", "prealert"})
-    st = _take(data.get("station", {}), "station", {"id", "name"})
+    st = _take(data.get("station", {}), "station", {"id", "name", "auto_update"})
+    if not isinstance(st.get("auto_update", True), bool):
+        raise ConfigError("station.auto_update: true or false")
     web = dict(_take(data.get("web", {}), "web", {"host", "port"}))
     web["host"] = _env("SIZEUP_HOST", web.get("host", "127.0.0.1"))
     try:
@@ -515,6 +520,7 @@ def load(path: str | Path) -> Config:
         raise ConfigError('dispatch.polly_region: an AWS region ("us-east-1"), or "" for AWS_REGION')
     return Config(
         station_id=st.get("id", "pcfd"), station_name=st.get("name", "Port Chester FD"),
+        station_auto_update=st.get("auto_update", True),
         host=web.get("host", "127.0.0.1"), port=int(web.get("port", 8090)),
         rtl_fm=radio.get("rtl_fm", "rtl_fm"), channels=tuple(channels), tones=tuple(tones),
         ours=frozenset(ours | {"Port Chester FD", "Rye Brook FD"}),

@@ -95,7 +95,9 @@ def log(msg: str) -> None:
 class WhisperService:
     """Keep whisper-server running (model stays loaded). A server sizeup started earlier (recorded
     in state_path) is reused when its model/flags still match the config and replaced when they
-    don't; a server on the port that sizeup didn't start is used as-is, never killed."""
+    don't; a server on the port that sizeup didn't start is used as-is, never killed.
+    SIZEUP_STT_EXTERNAL=1 (the Linux station: sizeup-whisper.service runs it, so restarting sizeup
+    for an update doesn't reload the model): never started here, only waited for."""
 
     def __init__(self, binary: str, model: str, port: int, threads: int, beam_size: int = 0,
                  state_path: str | Path | None = None):
@@ -106,6 +108,7 @@ class WhisperService:
         self.state_path = Path(state_path) if state_path else None
         self._proc: subprocess.Popen | None = None
         self._stop = threading.Event()
+        self.external = os.environ.get("SIZEUP_STT_EXTERNAL", "") == "1"
 
     def _ours(self) -> tuple[int, list[str]] | None:
         """(pid, argv) of the whisper-server sizeup last started, if that process is still it."""
@@ -150,10 +153,13 @@ class WhisperService:
 
     def _run(self) -> None:
         backoff = 2.0
-        self._replace_stale()
+        if not self.external:
+            self._replace_stale()
         while not self._stop.is_set():
             if self.up():
                 self.state, self.detail, backoff = "ok", "speech-to-text ready", 2.0
+            elif self.external:
+                self.state, self.detail = "starting", "waiting for whisper-server (sizeup-whisper.service)"
             elif self._proc is None or self._proc.poll() is not None:
                 try:
                     self._proc = subprocess.Popen(self.argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

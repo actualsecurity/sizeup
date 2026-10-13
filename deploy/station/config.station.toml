@@ -4,10 +4,10 @@
 # leaves the current template next to it as config.toml.dist, to diff). Unknown keys are rejected.
 #
 # Paths are the installer's (deploy/station/README.md "Where things are"):
-#   /opt/sizeup/app            the code (git checkout), run with PYTHONPATH=/opt/sizeup/app
-#   /opt/sizeup/rtl-sdr        rtl-sdr-blog build (RTL-SDR Blog V4 support): rtl_fm, librtlsdr
-#   /opt/sizeup/trunk-recorder trunk-recorder 5.2.0 with its plugins (unit_script)
-#   /opt/sizeup/whisper        whisper.cpp's whisper-server (CPU)
+#   /opt/sizeup/current        -> releases/<sha>: the code that runs, with its venv (README "Updating")
+#   /opt/sizeup/rtl-sdr        -> builds/...: rtl-sdr-blog build (RTL-SDR Blog V4 support): rtl_fm, librtlsdr
+#   /opt/sizeup/trunk-recorder -> builds/...: trunk-recorder 5.2.0 with its plugins (unit_script)
+#   /opt/sizeup/whisper        -> builds/...: whisper.cpp's whisper-server (CPU)
 #   /opt/sizeup/models/whisper.bin -> the model picked with install-linux.sh --model
 #   /var/lib/sizeup            SIZEUP_STATE_DIR: state/ (cad, outbox, cloud.json), captures/, trunk-recorder/
 # Secrets are never in this file: /etc/sizeup/station.env (sizeup-station secrets).
@@ -15,6 +15,10 @@
 [station]
 id = "pcfd-hq"
 name = "Port Chester FD Headquarters"
+# Follow the hub's build by itself (deploy/station/README.md "Updating"): the exact commit the hub
+# runs, built beside the running release, switched in a quiet moment, switched back if it doesn't
+# come up. false = stay put (so does `sizeup-station autoupdate off`, or a station on another --ref).
+auto_update = true
 
 [web]
 # The station page (radios, what it heard, the hub link; the CAD is on the hub). WSL2 forwards localhost, so the Windows browser
@@ -74,7 +78,7 @@ talker_prompt = "ids"
 capture_dir = "/var/lib/sizeup/captures/p25"
 recorder = "/opt/sizeup/trunk-recorder/bin/trunk-recorder --config=config.json"
 recorder_dir = "/var/lib/sizeup/trunk-recorder"   # config.json (made from deploy/trunk-recorder/), talkgroups.csv, unit-event.sh
-talkgroups_file = "/opt/sizeup/app/deploy/trunk-recorder/talkgroups.csv"
+talkgroups_file = "/var/lib/sizeup/trunk-recorder/talkgroups.csv"   # trunk-recorder's copy, from the running release
 incident_talkgroups = [307, 333]   # Fire/EMS 15 + Airport Incident
 aliases = {}
 

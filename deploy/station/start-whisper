@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# sizeup-whisper.service's ExecStart (installed as /usr/local/lib/sizeup/start-whisper): whisper-server
+# with the [stt] settings of /etc/sizeup/config.toml, as its own service, so restarting sizeup (an
+# update) doesn't reload the model. sizeup uses the server on the port (SIZEUP_STT_EXTERNAL=1).
+#   start-whisper --print   the command line it would run (the installer restarts the service only
+#                           when this differs from the running one's: program, model or flags changed)
+set -euo pipefail
+mapfile -t argv < <(python3 - /etc/sizeup/config.toml <<'PY'
+import os, sys, tomllib
+try:
+    with open(sys.argv[1], "rb") as f:
+        stt = tomllib.load(f).get("stt", {})
+except (OSError, tomllib.TOMLDecodeError):
+    stt = {}
+def path(p):
+    return os.path.realpath(p if os.path.isabs(p) else os.path.join(os.path.dirname(sys.argv[1]), p))
+argv = [path(stt.get("server_binary") or "/opt/sizeup/whisper/bin/whisper-server"),
+        "-m", path(stt.get("model") or "/opt/sizeup/models/whisper.bin"),
+        "--host", "127.0.0.1", "--port", str(int(stt.get("port", 8179))), "-t", str(int(stt.get("threads", 8)))]
+if int(stt.get("beam_size", 0) or 0) > 1:
+    argv += ["-bs", str(int(stt["beam_size"]))]
+print("\n".join(argv))
+PY
+)
+if [ "${1:-}" = --print ]; then
+  printf '%s\n' "${argv[@]}"
+  exit 0
+fi
+printf '%s\n' "${argv[@]}" > /run/sizeup-whisper/argv 2>/dev/null || true
+exec "${argv[@]}"

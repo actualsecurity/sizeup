@@ -1,7 +1,8 @@
 # syntax=docker/dockerfile:1
 # The sizeup HUB (docs/cloud.md): web UI + CAD in the cloud, fed by the station. No radios, no
 # whisper, no voice server: Python + numpy only. Built for linux/arm64 (Fargate Graviton); amd64 works.
-#   docker buildx build --platform linux/arm64 --build-arg SIZEUP_BUILD=$(git rev-parse --short HEAD) -t sizeup-hub .
+#   docker buildx build --platform linux/arm64 --build-arg SIZEUP_BUILD=$(git rev-parse HEAD) -t sizeup-hub .
+# SIZEUP_BUILD: the full git sha (CI passes it); stations follow the hub's build (sizeup/cloud/autoupdate.py).
 FROM python:3.14-slim
 
 ARG TARGETARCH

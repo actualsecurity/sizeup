@@ -1,0 +1,22 @@
+# The station's auto-update (sizeup/cloud/autoupdate.py, installed as /usr/local/lib/sizeup/autoupdate.py):
+# follows the hub's build. Started by sizeup-update.path the moment the station writes the hub's build
+# to /run/sizeup/update-wanted, and by sizeup-update.timer as a safety net. Root, outside sizeup: it
+# builds the new release beside the running one, switches, and switches back if it doesn't come up.
+# Off: sizeup-station autoupdate off. One line per attempt: /var/log/sizeup-update.log.
+[Unit]
+Description=sizeup station: follow the hub's build (auto-update)
+Documentation=file:///opt/sizeup/current/deploy/station/README.md
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 -I /usr/local/lib/sizeup/autoupdate.py run
+# a pin change rebuilds trunk-recorder / whisper.cpp (up to an hour on the i5-6400T); usually seconds
+TimeoutStartSec=3h
+# building is background work: the radios come first
+Nice=10
+CPUWeight=20
+IOWeight=20
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sizeup-update
