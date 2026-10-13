@@ -14,6 +14,9 @@
                        each tone pair as it decodes), pushed the moment it changes
                        (sub-second; latest wins, never queued) and every 5 s the radio / SDR / STT /
                        voice status, re-run progress and the outbox size (also the heartbeat)
+                       The hub answers with its build: Watch (autoupdate.py) passes it to the
+                       station's auto-updater once it holds still; this station's version and the
+                       updater's last result go up in the status ("version")
     jobs thread        GET /api/station/jobs?wait=25 (long poll: the station never takes inbound
                        connections): "tts" renders a dispatch with the local voice; "call" runs
                        set_mode / set_talkgroup / set_talkgroup_group / retranscribe / set_channel_prefs
@@ -39,6 +42,7 @@ import numpy as np
 
 from sizeup.cad import dispatcher
 from sizeup.cad.dispatcher import AudioUnavailable
+from sizeup.cloud.autoupdate import Watch
 from sizeup.cloud.client import HubClient, HubError
 from sizeup.cloud.outbox import Outbox
 from sizeup.tts import VoiceCfg
@@ -74,10 +78,13 @@ def clip_8k(wav: bytes | None) -> bytes | None:
 
 class StationLink:
     def __init__(self, app, cfg, log: Callable[[str], None] = print,
-                 client: Callable[[float], HubClient] | None = None, outbox: Outbox | None = None):
+                 client: Callable[[float], HubClient] | None = None, outbox: Outbox | None = None,
+                 updates: Watch | None = None):
         """outbox: the one already open (Settings > System > Station turns the link off and on
-        again over the same outbox, sizeup/cloud/stationmode.py)."""
+        again over the same outbox, sizeup/cloud/stationmode.py); updates: the hub's build -> the
+        auto-updater (kept across that too)."""
         self.app, self.cfg, self.log = app, cfg, log
+        self.updates = updates or Watch(log=log)
         self.outbox = outbox or Outbox(cfg.cloud_outbox or ":memory:", int(cfg.cloud_outbox_max_mb * 1024 * 1024))
         self._client = client or (lambda timeout: HubClient(cfg.cloud_hub_url, cfg.cloud_token, cfg.cloud_access_id,
                                                             cfg.cloud_access_secret, timeout))
@@ -167,6 +174,10 @@ class StationLink:
                       "it goes up when the hub is back")
         if self.outbox.dropped_audio:
             detail += f" · {self.outbox.dropped_audio} clip(s) dropped to keep the outbox under its limit"
+        v = self.updates.status()
+        detail += f" · version: {v['text']}"
+        if not word and v["state"] in ("updating", "failed"):
+            word = "updating" if v["state"] == "updating" else "update failed"
         return {"label": "Hub", "mhz": None, "state": state, "word": word, "detail": detail, "open": False,
                 "quieting_db": None, "restarts": 0, "last_heard": None}
 
@@ -212,7 +223,8 @@ class StationLink:
                "radios": [r for r in app.radio_status() if r.get("label") != "Hub"],
                "sdr": app.sdr(), "rerun": dict(app.rerun, pending=len(app._rerun_ids)),
                "channels": app.channels_applied(),
-               "outbox": {"pending": n, "oldest": oldest, "dropped_audio": self.outbox.dropped_audio}}
+               "outbox": {"pending": n, "oldest": oldest, "dropped_audio": self.outbox.dropped_audio},
+               "version": self.updates.status()}
         if talkgroups:
             out["talkgroups"] = app.tg.state() if app.p25 else []
         return out
@@ -234,8 +246,9 @@ class StationLink:
                 if send_tg:
                     body["status"]["talkgroups"] = tgs
             try:
-                client.request("POST", "/api/station/state", body, timeout=10.0)
+                r = client.request("POST", "/api/station/state", body, timeout=10.0)
                 self._ok()
+                self.updates.hub(r.get("build") if isinstance(r, dict) else None)
                 if "status" in body:
                     last_status, self._status_now = now, False
                     if "talkgroups" in body["status"]:

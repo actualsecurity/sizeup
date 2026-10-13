@@ -101,28 +101,30 @@ parallel jobs to the memory it has.
 
 `install-linux.sh` options: `--ref REF`, `--repo URL`, `--from-dir DIR` (a copy of the repo instead
 of the deploy key and a clone), `--model NAME`, `--update`, `--secrets`, `--rebuild`, `--ci` (CI:
-nothing enabled or started, no prompts). Running it again at any time is the repair. Log:
-`/var/log/sizeup-install.log`.
+nothing enabled or started, no prompts); `--stage SHA` and `--activate NAME` are the auto-updater's
+([Updating](#updating)). Running it again at any time is the repair. Log: `/var/log/sizeup-install.log`.
 
 ## What it installs (Linux)
 
 | What | Where |
 |---|---|
-| sizeup: git checkout at the ref, read with the station's read-only deploy key | `/opt/sizeup/app` |
-| Python venv (sizeup's dependencies; the service runs the checkout, `PYTHONPATH=/opt/sizeup/app`) | `/opt/sizeup/venv` |
-| rtl-sdr-blog v1.3.6 (RTL-SDR Blog V4 support): rtl_fm, rtl_test, rtl_eeprom, librtlsdr | `/opt/sizeup/rtl-sdr` |
-| trunk-recorder v5.2.0 with its plugins (unit_script) | `/opt/sizeup/trunk-recorder` |
-| whisper.cpp v1.9.4 whisper-server, built for this CPU (AVX2 on the i5-6400T) | `/opt/sizeup/whisper` |
+| the repo, a bare clone (root's), fetched with the station's read-only deploy key (`/etc/sizeup/deploy_key`, root only) | `/opt/sizeup/repo.git` |
+| one release per commit: the code (`git archive`, root-owned: the service user only reads it), its own venv, `BUILD` (the sha), `BUILDS` (the builds it runs with) | `/opt/sizeup/releases/<sha>` |
+| the release that runs (a link, swapped by rename) | `/opt/sizeup/current` |
+| rtl-sdr-blog v1.3.6 (RTL-SDR Blog V4 support): rtl_fm, rtl_test, rtl_eeprom, librtlsdr | `/opt/sizeup/rtl-sdr` -> `builds/rtl-sdr-blog-<tag>-<commit>` |
+| trunk-recorder v5.2.0 with its plugins (unit_script) | `/opt/sizeup/trunk-recorder` -> `builds/trunk-recorder-<tag>-<commit>` |
+| whisper.cpp v1.9.4 whisper-server, built for this CPU (AVX2 on the i5-6400T) | `/opt/sizeup/whisper` -> `builds/whisper.cpp-<tag>-<commit>-native` |
 | whisper model, SHA-256 checked; `whisper.bin` points at the one in use | `/opt/sizeup/models` |
 | config, from `config.station.toml` once and never overwritten (`config.toml.dist` = the current template) | `/etc/sizeup/config.toml` |
 | secrets `SIZEUP_STATION_TOKEN`, `SIZEUP_ACCESS_CLIENT_ID`, `SIZEUP_ACCESS_CLIENT_SECRET` (root:sizeup 0640) | `/etc/sizeup/station.env` |
-| what `update` fetches (repo, ref) and the model | `/etc/sizeup/install.conf` |
-| state: CAD, outbox, `cloud.json`, captures, trunk-recorder's working dir, the deploy key | `/var/lib/sizeup` |
-| `sizeup-station.service`, `sizeup-health.timer`, journald cap (200 MB, kept across reboots) | `/etc/systemd/...` |
-| the `sizeup-station` command | `/usr/local/bin` |
+| what `update` fetches (repo, ref), the model, auto-update on / off | `/etc/sizeup/install.conf` |
+| state: CAD, outbox, `cloud.json`, captures, trunk-recorder's working dir | `/var/lib/sizeup` |
+| `sizeup-station.service`, `sizeup-whisper.service`, `sizeup-health.timer`, `sizeup-update.path` / `.timer` / `.service`, journald cap (200 MB, kept across reboots) | `/etc/systemd/...` |
+| the auto-updater's record (state, last result, failed builds) and its one-line-per-update log | `/var/lib/sizeup-update/state.json`, `/var/log/sizeup-update.log` |
+| the `sizeup-station` command; the launchers and the updater | `/usr/local/bin`; `/usr/local/lib/sizeup` |
 
-The source builds are pinned to a tag **and** its commit (a moved tag is refused), and rebuilt only
-when the pin changes (or with `--rebuild`). trunk-recorder's `config.json` in
+The source builds are pinned to a tag **and** its commit (a moved tag is refused), built once per
+pin into their own directory under `/opt/sizeup/builds`, and rebuilt only with `--rebuild`. trunk-recorder's `config.json` in
 `/var/lib/sizeup/trunk-recorder` is made from the repo's `deploy/trunk-recorder/config.json` on every
 run: change it there. The whisper models come from huggingface.co/ggerganov/whisper.cpp at a fixed
 revision and are checked against the SHA-256 that revision lists for them. On Ubuntu 24.04,
@@ -136,14 +138,123 @@ sizeup-station status       # service, dongles, hub link, what's waiting to go u
 sizeup-station logs -f      # the station's log (journalctl options pass through)
 sizeup-station doctor       # every check, and what to do about each failure
 sudo sizeup-station restart
-sudo sizeup-station update  # fetch the ref, rebuild what changed, restart; config, state, secrets kept
 sudo sizeup-station secrets # enter the token / Access service token again
+sizeup-station autoupdate status     # this station's build, the hub's, the last update
 ```
 
-`update` runs the *new* version's installer after fetching, so changes to the units or this command
-come along. Another branch or tag: `sudo sizeup-station update --ref <name>` (remembered). Another
-model: `sudo sizeup-station update --model base.en`. The config file is never overwritten: compare it
-with `/etc/sizeup/config.toml.dist` after an update.
+Updates come by themselves ([below](#updating)). The config file is never overwritten: compare it
+with `/etc/sizeup/config.toml.dist` after an update. Another model:
+`sudo sizeup-station update --model base.en`.
+
+## Updating
+
+**The station runs exactly the commit the hub runs, and follows it by itself.** Nothing to do after
+a merge to main: CI deploys the hub, and about a minute later the station runs the same build.
+
+How it goes, end to end:
+
+1. The hub knows its build: CI builds its image with `SIZEUP_BUILD=<the full git sha>`
+   (`.github/workflows/deploy.yml`), and every answer to the station's state post (every 5 s or
+   sooner) carries it. No new connection, nothing inbound, no polling GitHub.
+2. Once the hub has said the same build for 30 s (a rolling deploy answers with both for a while),
+   the station writes it to `/run/sizeup/update-wanted`: the only thing the sizeup user does for an
+   update. An unknown or empty build: nothing.
+3. `sizeup-update.path` sees the file change and starts `sizeup-update.service`: root, outside the
+   sizeup process (restarting sizeup can't kill it half-way), at low CPU priority.
+4. It fetches into `/opt/sizeup/repo.git`. The commit must be on `origin/main` (`git merge-base
+   --is-ancestor`): never anything ahead of or beside what the hub can run.
+5. **Side by side, nothing in place.** That commit's own `install-linux.sh --stage <sha>` builds
+   `/opt/sizeup/releases/<sha>`: the code from git, the running release's venv as hard links (a
+   second) unless `pyproject.toml` changed (then a new venv), bytecode compiled. trunk-recorder,
+   whisper.cpp or rtl-sdr are built (into a new `builds/` directory) only if the release changes
+   their pin; apt runs only if a package is missing. The running station is not touched.
+6. **Preflight**, before anything switches: the new code imports, `/etc/sizeup/config.toml` loads
+   with it, `sizeup --init-state` brings the databases up in a scratch directory, its systemd units
+   parse, rtl_fm / trunk-recorder `--version` / whisper-server run. A failure: no switch, the sha is
+   recorded as failed and reported to the hub.
+7. **A quiet moment**: no carrier open, nobody talking, no transcription queued or running (the
+   station's `GET /api/station-mode`, `update.busy`). It waits up to 5 minutes for one, then goes
+   anyway.
+8. **The switch**: `install-linux.sh --activate <sha>` swaps the build links and `/opt/sizeup/current`
+   (each one rename), installs the release's units and commands, and restarts sizeup-station once.
+   whisper-server is its own service now (`sizeup-whisper.service`) and keeps its model loaded; it is
+   restarted only when its program, model or `[stt]` flags change.
+9. `/healthz` must answer **with the new build** within 90 s. Otherwise the same swap back to the
+   release that ran before (a rename and a restart: nothing rebuilt), and that sha is not tried again
+   until the hub moves on to another one.
+10. The last 3 releases are kept (the current one and the two before it), older ones and builds no
+    kept release uses are deleted.
+
+**No restart when nothing the station runs changed.** If the new commit only touches `docs/`,
+`tests/`, `.github/`, the hub's own files (`deploy/hub/`, `deploy/aws/`, `Dockerfile`), the Windows
+installers or `*.md` outside `sizeup/` and `data/`, the station stays as it is and counts as up to
+date ("up to date: abc1234 (no runtime change since def5678)", here and on the hub). Anything else
+goes the usual way.
+
+**A build that breaks for another reason** than its preflight (apt or dpkg busy with unattended
+upgrades, the network, a full disk, a slow pin rebuild cut off) is tried again after 5, 15, 60 and
+60 minutes, 5 times in all, then recorded as failed; `autoupdate status` and the hub say "not built
+yet (try N of 5 ...)". A pin rebuild that was cut off keeps its build directory and carries on.
+A preflight failure is not retried (the same commit would fail the same way).
+
+**One install at a time.** The updater holds `/run/sizeup-update/lock` for a whole update; a manual
+`sizeup-station update` (or `install-linux.sh`) takes the same lock, says so if an update is running,
+and stops `sizeup-update.path` / `.timer` until it is done (then looks once for a hub build it missed).
+
+Timings: a Python-only update is about 10-20 s of building beside the running station (archive, venv
+links, bytecode, preflight), then the quiet-moment wait, then one restart. The radios are off the air
+only during that restart: the FM channels (rtl_fm) for a few seconds, Fire/EMS 15 until trunk-recorder
+has restarted and locked on to the control channel again (#71: trunk-recorder as its own service).
+Each update logs those numbers (`sizeup-station autoupdate status`, `/var/log/sizeup-update.log`:
+"web back N s after the switch, radios M s"). Nothing heard is lost across a restart: the outbox
+(`/var/lib/sizeup/state/outbox.sqlite`) is on disk and goes up first when the station is back.
+
+Watching it:
+
+* `sizeup-station status` / `autoupdate status`: this station's build, the hub's, auto-update on or
+  off, the last update and its result; `doctor` fails on an update that failed.
+* The station page: the Hub row says "version: up to date (abc1234)", "updating ...", or "update to
+  abc1234 failed (...): staying on def5678 until the hub moves on".
+* The hub: its Station row says the same about the station.
+* `journalctl -u sizeup-update`, and one line per attempt in `/var/log/sizeup-update.log`.
+
+By hand:
+
+```sh
+sudo sizeup-station autoupdate off   # stay put (on: follow the hub again, now)
+sudo sizeup-station autoupdate now   # look now instead of waiting for the next change / 15 min check
+sudo sizeup-station rollback         # back to the release that ran before (never to one that failed);
+                                     # the one left isn't tried again until the hub moves on
+sudo sizeup-station update           # the tip of the ref now, side by side (also: --ref, --model)
+```
+
+`[station] auto_update = false` in `/etc/sizeup/config.toml` also keeps it put. **A station on another
+`--ref` than main doesn't auto-update** (testing a branch: the hub runs main, and the station never
+runs anything the hub can't); `sudo sizeup-station update --ref main` follows the hub again. Installed
+with `--from-dir`: no auto-update either. If the hub can't be reached the station stays where it is;
+a 15-minute timer looks again, but only ever at the build the hub said (a want older than an hour is
+ignored).
+
+Windows side: when `deploy/station/windows/*.ps1` differ from `C:\ProgramData\sizeup\*.ps1`, the
+updater copies them over through `/mnt/c` (a temporary file, then a rename). If it can't, the station
+page and `doctor` say "Windows scripts out of date: run install-windows.ps1". This means root in WSL
+can rewrite the scripts the Windows tasks run as the administrator: acceptable, since root in WSL is
+already "whoever controls main" (it runs main's installer).
+
+What root trusts from the sizeup user, and how: the want file is read without following a link,
+never waited on (not a FIFO), 64 bytes at most, and only a full sha that main has is taken; files in
+`/var/lib/sizeup` (trunk-recorder's directory included) are written by the sizeup user itself, never by
+root through a path it controls; the old checkout is read as a `git bundle` made by that user.
+
+**A station installed before this** (a git checkout in `/opt/sizeup/app`, run in place) moves to
+releases once, by hand: `sudo sizeup-station update`. The old command fetches main and runs the new
+installer, which: makes `/opt/sizeup/repo.git` from the old checkout (no network), copies the deploy
+key to `/etc/sizeup/deploy_key` (GitHub needs nothing new), moves each build under `/opt/sizeup/builds`
+with a link in its place (a rename: nothing rebuilt), makes a release of the commit that was running
+(with the old venv, as hard links) and one of main, preflights main, changes `[p25] talkgroups_file`
+to trunk-recorder's copy, switches and restarts once. If main doesn't answer within 90 s it switches
+back to the release of the old commit by itself. Safe to run again at any point. `/opt/sizeup/app`
+and `/opt/sizeup/venv` stay until that old release is pruned (after two more updates), then go.
 
 ## Switching over from the Mac
 
@@ -200,7 +311,8 @@ and the station page and the hub's monitor show the row as "· FG1 · auto".
 
 | What happens | What brings it back |
 |---|---|
-| sizeup crashes | systemd restarts it after 5 s, forever (`Restart=always`, no start limit). rtl_fm, trunk-recorder and whisper-server are its children and restart with it. |
+| sizeup crashes | systemd restarts it after 5 s, forever (`Restart=always`, no start limit). rtl_fm and trunk-recorder are its children and restart with it; whisper-server is its own service (`sizeup-whisper`, also `Restart=always`). |
+| An update doesn't come up | The updater switches back to the release that ran before within 90 s, and doesn't try that build again until the hub moves on ([Updating](#updating)). |
 | sizeup hangs (running, not answering) | `sizeup-health.timer` asks `/healthz` every minute; 3 failures in a row restart it. |
 | PC restart, Windows Update restart | The sizeup-wsl task starts WSL at boot, systemd starts the station, sizeup-usb attaches the dongles: a couple of minutes. |
 | Power cut | The same, once the PC powers on: BIOS "Restore on AC power loss = Power On". |

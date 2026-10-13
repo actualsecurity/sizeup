@@ -42,6 +42,10 @@ jobs:
           platforms: linux/arm64
           push: true
           provenance: false
+          # the full git sha: /healthz and the station link report it, and stations follow it
+          # (sizeup/cloud/autoupdate.py matches it against git)
+          build-args: |
+            SIZEUP_BUILD=${{ env.SHA }}
           tags: ${{ steps.ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY }}:${{ env.SHA }}
       - id: td
         uses: aws-actions/amazon-ecs-render-task-definition@v1

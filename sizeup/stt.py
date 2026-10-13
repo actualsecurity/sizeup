@@ -172,6 +172,11 @@ class Transcriber:
         self._q: queue.PriorityQueue = queue.PriorityQueue()
         self._seq = itertools.count()
         self.last_error = ""
+        self._working = False
+
+    def busy(self) -> int:
+        """Transcriptions queued or running (the station's auto-update waits for none before a restart)."""
+        return self._q.qsize() + (1 if self._working else 0)
 
     def submit(self, item, audio: np.ndarray, priority: int = LIVE) -> bool:
         if self._q.qsize() >= QUEUE_MAX:
@@ -185,7 +190,9 @@ class Transcriber:
 
     def _run(self) -> None:
         while True:
+            self._working = False
             _prio, _n, item, audio = self._q.get()
+            self._working = True
             for attempt in range(3):
                 try:
                     # No noise reduction for the model: on the FG1 bench it cut the whine 15 dB for listening

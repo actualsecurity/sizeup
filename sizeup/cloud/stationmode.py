@@ -33,6 +33,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Callable
 
+from sizeup.cloud.autoupdate import Watch
 from sizeup.cloud.client import HubClient, HubError
 from sizeup.cloud.outbox import Outbox
 from sizeup.cloud.station import StationLink
@@ -84,6 +85,7 @@ class StationMode:
         self._values: dict[str, str] = {}       # the secrets themselves: only ever handed to the link
         self._where: dict[str, str] = {}        # name -> "env" | "config" | "Keychain" | ""
         self._lock = threading.RLock()
+        self.updates = Watch(log=log)           # the hub's build -> the auto-updater (autoupdate.py)
         app.station = self
         app.cad.cloud = self.cad_cloud
         if self.forward:
@@ -170,7 +172,8 @@ class StationMode:
                 link.stop()
             cfg = replace(self.cfg, cloud_hub_url=want[0], cloud_token=want[1], cloud_access_id=want[2],
                           cloud_access_secret=want[3])
-            link = self.link = StationLink(self.app, cfg, log=self.log, client=self._client, outbox=self.outbox())
+            link = self.link = StationLink(self.app, cfg, log=self.log, client=self._client, outbox=self.outbox(),
+                                           updates=self.updates)
             self.app.cad.cloud = self.cad_cloud       # (StationLink set its own)
         if self.problem:
             self.log(f"station: forwarding is on but waiting: {self.problem}")
@@ -278,7 +281,33 @@ class StationMode:
             return {"forward": self.forward, "hub_url": self.hub_url, "from": self.source,
                     "config_role": self.cfg.cloud_role or "all-in-one",
                     "running": bool(self.link is not None and self.link.running),
-                    "status": self.status(), "secrets": self.secrets(), "keychain": keychain_available()}
+                    "status": self.status(), "secrets": self.secrets(), "keychain": keychain_available(),
+                    "update": dict(self.updates.status(), busy=self.busy())}
+
+    def busy(self) -> str:
+        """What a restart would cut off now ("" = a quiet moment): a carrier open, someone talking,
+        transcriptions queued or running, a re-run in progress. The auto-updater waits for "" (up to
+        a few minutes) before it switches releases (sizeup/cloud/autoupdate.py)."""
+        app, out = self.app, []
+        try:
+            rows = app.radio_status()
+        except Exception:  # noqa: BLE001 - a status that can't be read is not a reason to wait
+            rows = []
+        opened = [str(r.get("label")) for r in rows if r.get("open")]
+        if opened:
+            out.append("carrier open on " + ", ".join(opened))
+        live = getattr(app, "live", None)
+        talking = live.state() if live is not None else []
+        if talking:
+            out.append(f"{len(talking)} talking")
+        stt = getattr(app, "stt", None)
+        n = stt.busy() if stt is not None and hasattr(stt, "busy") else 0
+        if n:
+            out.append(f"{n} transcription(s) in flight")
+        rerun = len(getattr(app, "_rerun_ids", ()) or ())
+        if rerun:
+            out.append(f"{rerun} re-run(s) pending")
+        return ", ".join(out)
 
     def hub_row(self) -> dict | None:
         """The monitor header's Hub row: only while forwarding is on."""

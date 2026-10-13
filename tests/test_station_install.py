@@ -5,7 +5,10 @@ voice (tts_engine "none"), the /healthz the health timer polls, and static check
 from __future__ import annotations
 
 import json
+import os
 import re
+import subprocess
+import sys
 import threading
 import urllib.request
 from dataclasses import replace
@@ -29,8 +32,9 @@ SECRETS = ("SIZEUP_STATION_TOKEN", "SIZEUP_ACCESS_CLIENT_ID", "SIZEUP_ACCESS_CLI
 
 def station_config(tmp_path, monkeypatch, text: str | None = None):
     """The template as installed (/etc/sizeup/config.toml, SIZEUP_STATE_DIR=/var/lib/sizeup), with
-    /opt/sizeup/app pointing at this checkout and the state directory at tmp_path."""
-    text = (text if text is not None else TEMPLATE.read_text()).replace("/opt/sizeup/app/", f"{ROOT}/")
+    trunk-recorder's talkgroups.csv this checkout's and the state directory at tmp_path."""
+    text = (text if text is not None else TEMPLATE.read_text()).replace(
+        "/var/lib/sizeup/trunk-recorder/talkgroups.csv", f"{ROOT}/deploy/trunk-recorder/talkgroups.csv")
     etc = tmp_path / "etc"
     etc.mkdir(exist_ok=True)
     (etc / "config.toml").write_text(text)
@@ -60,7 +64,7 @@ def test_station_template_is_a_linux_station(tmp_path, monkeypatch):
     # no voice here (the hub's Polly), no phone pre-alert (the hub's), and no secret in the file
     assert c.dispatch_tts_engine == "none" and not c.prealert_enabled
     assert (c.cloud_token, c.cloud_access_id, c.cloud_access_secret) == ("", "", "")
-    assert c.unit_departments and c.tones          # data/ found through the package (PYTHONPATH=/opt/sizeup/app)
+    assert c.unit_departments and c.tones          # data/ found through the package (PYTHONPATH=the release)
 
 
 def test_station_template_has_no_mac_paths_or_secrets():
@@ -157,6 +161,7 @@ def test_hub_goes_text_only_when_the_station_has_no_voice(tmp_path):
 
 def scripts() -> list[Path]:
     return [STATION / "install-linux.sh", STATION / "sizeup-station", STATION / "health-check.sh",
+            STATION / "start-station", STATION / "start-whisper",
             STATION / "install-windows.ps1", STATION / "uninstall-windows.ps1",
             STATION / "windows" / "usb-attach.ps1", STATION / "windows" / "wsl-keepalive.ps1"]
 
@@ -196,9 +201,16 @@ def test_units_restart_forever_and_load_the_secrets():
     svc = (STATION / "systemd" / "sizeup-station.service").read_text()
     for want in ("User=sizeup", "Restart=always", "RestartSec=5", "StartLimitIntervalSec=0",
                  "EnvironmentFile=-/etc/sizeup/station.env", "Environment=SIZEUP_STATE_DIR=/var/lib/sizeup",
-                 "Environment=PYTHONPATH=/opt/sizeup/app", "--config /etc/sizeup/config.toml",
-                 "WantedBy=multi-user.target", "Wants=network-online.target", "LimitNOFILE="):
-        assert want in svc, want
+                 "ExecStart=/usr/local/lib/sizeup/start-station", "Environment=SIZEUP_STT_EXTERNAL=1",
+                 "Environment=SIZEUP_UPDATE_DIR=/run/sizeup", "RuntimeDirectory=sizeup\n", "RuntimeDirectoryPreserve=yes",
+                 "WantedBy=multi-user.target", "Wants=network-online.target sizeup-whisper.service", "LimitNOFILE="):
+        assert want.replace("\\n", "\n") in svc, want
+    assert "/opt/sizeup/app" not in svc and "build.env" not in svc
+    # the release that runs is resolved once, at start: a switch never changes code under a running process
+    start = (STATION / "start-station").read_text()
+    for want in ('rel=$(readlink -f /opt/sizeup/current || true)', 'PYTHONPATH="$rel"', 'SIZEUP_BUILD=$(head -n 1 "$rel/BUILD"',
+                 'py="$rel/venv/bin/python"', 'exec "$py" -m sizeup --config /etc/sizeup/config.toml'):
+        assert want in start, want
     timer = (STATION / "systemd" / "sizeup-health.timer").read_text()
     assert "OnUnitActiveSec=60s" in timer and "WantedBy=timers.target" in timer
     assert "SystemMaxUse=200M" in (STATION / "systemd" / "journald-sizeup.conf").read_text()
@@ -207,10 +219,15 @@ def test_units_restart_forever_and_load_the_secrets():
 def test_installer_installs_what_is_in_the_folder():
     """Every deploy/station file the installers copy exists (a missing one would only fail on the box)."""
     sh = (STATION / "install-linux.sh").read_text()
-    for rel in re.findall(r'"\$STATION_SRC/([^"]+)"', sh):
-        assert (STATION / rel).is_file(), rel
-    for rel in re.findall(r'"\$APP/(deploy/[^"]+)"', sh):
+    found = re.findall(r'"\$sys/([^"$]+)"', sh)
+    assert "start-station" in found and "start-whisper" in found
+    for rel in found:
+        assert (STATION / rel).resolve().is_file(), rel
+    for rel in re.findall(r'"\$rel/(deploy/[^"$]+)"', sh):
         assert (ROOT / rel).exists(), rel
+    units = re.search(r"for t in (sizeup-[^;]+);", sh).group(1).replace("\\", " ").split()
+    on_disk = sorted(p.name for p in (STATION / "systemd").iterdir() if p.suffix in (".service", ".timer", ".path"))
+    assert sorted(units) == on_disk                       # every unit installed, none forgotten
     ps = (STATION / "install-windows.ps1").read_text()
     for rel in re.findall(r'"(windows\\[\w.-]+\.ps1)"', ps):
         assert (STATION / rel.replace("\\", "/")).is_file(), rel
@@ -218,3 +235,118 @@ def test_installer_installs_what_is_in_the_folder():
     offered = re.search(r'ValidateSet\(([^)]*)\)', ps).group(1)
     for name in re.findall(r'"([^"]+)"', offered):
         assert f"    {name})" in sh, name
+
+
+# -- side-by-side releases and the auto-update (issue #58) ---------------------------------------------------
+
+def test_update_units_watch_the_want_file_and_run_as_root():
+    path = (STATION / "systemd" / "sizeup-update.path").read_text()
+    assert "PathChanged=/run/sizeup/update-wanted" in path and "Unit=sizeup-update.service" in path
+    assert "WantedBy=paths.target" in path
+    svc = (STATION / "systemd" / "sizeup-update.service").read_text()
+    assert "Type=oneshot" in svc and "ExecStart=/usr/bin/python3 -I /usr/local/lib/sizeup/autoupdate.py run" in svc
+    assert "User=" not in svc                              # root: the sizeup user only writes the want file
+    timer = (STATION / "systemd" / "sizeup-update.timer").read_text()
+    assert "OnUnitInactiveSec=" in timer and "WantedBy=timers.target" in timer
+    whisper = (STATION / "systemd" / "sizeup-whisper.service").read_text()
+    for want in ("User=sizeup", "ExecStart=/usr/local/lib/sizeup/start-whisper", "RuntimeDirectory=sizeup-whisper",
+                 "Restart=always", "WantedBy=multi-user.target"):
+        assert want in whisper, want
+
+
+def test_installer_builds_beside_and_switches_by_rename():
+    sh = (STATION / "install-linux.sh").read_text()
+    for want in ("--stage) STAGE_SHA=", "--activate) ACTIVATE_NAME=", 'RELEASES=$OPT/releases', 'CURRENT=$OPT/current',
+                 'archive --format=tar "$sha"', 'cp -al "$donor" "$tmp/venv"', 'mv -Tf "$tmp" "$2"',
+                 'swap_link "releases/$name" "$CURRENT"', 'BUILDS=$OPT/builds', '-DCMAKE_INSTALL_PREFIX="$TR_B"',
+                 "compileall", "--ci needs --from-dir or a local --repo",
+                 'sizeup --config "$conf" --init-state', "systemd-analyze verify", '"$tr/bin/trunk-recorder" --version',
+                 'git clone -q --bare "$LEGACY_BUNDLE"', "bundle create - --all", "DEPLOY_KEY=$ETC/deploy_key"):
+        assert want in sh, want
+    # stage: nothing the running station uses is touched; activate is the only switch, after a preflight
+    stage = sh[sh.index('if [ -n "$STAGE_SHA" ]; then\n  # --'):sh.index('if [ -n "$ACTIVATE_NAME" ]; then\n')]
+    assert "preflight" in stage and "activate" not in stage and "systemctl" not in stage
+    main = sh[sh.index("# -- install / repair / update"):]
+    assert main.index('preflight "$REL"') < main.index('activate "$NAME"')
+    # whisper-server is restarted only when its command line changed
+    assert 'want=$("$LIB/start-whisper" --print' in sh and "have=$(whisper_argv)" in sh
+
+
+def test_start_whisper_runs_what_sizeup_would_have(tmp_path):
+    """sizeup-whisper.service runs whisper-server with the same model / port / threads / beam as
+    WhisperService would from the same config (so nothing changes when it moved out of sizeup)."""
+    from sizeup.app import WhisperService
+    text = (STATION / "start-whisper").read_text()
+    py = text[text.index("<<'PY'\n") + 7:text.index("\nPY\n")]
+    conf = tmp_path / "config.toml"
+    conf.write_text(TEMPLATE.read_text().replace("beam_size = 0", "beam_size = 5").replace(
+        "/var/lib/sizeup/trunk-recorder/talkgroups.csv", f"{ROOT}/deploy/trunk-recorder/talkgroups.csv"))
+    got = subprocess.run([sys.executable, "-c", py, str(conf)], capture_output=True, text=True, check=True).stdout.split("\n")
+    c = load(conf)
+    want = WhisperService(c.stt_server, c.stt_model, c.stt_port, c.stt_threads, c.stt_beam_size).argv
+    assert [x for x in got if x] == [os.path.realpath(want[0]), want[1], os.path.realpath(want[2]), *want[3:]]
+
+
+def test_cli_has_the_update_commands():
+    cli = (STATION / "sizeup-station").read_text()
+    for want in ("autoupdate)", "on|off)", "now)", "rollback)", 'python3 -I "$UPDATER" "$sub"',
+                 'exec python3 -I "$UPDATER" rollback', "systemctl is-active --quiet sizeup-update.service",
+                 'python3 -I "$UPDATER" doctor', 'python3 -I "$UPDATER" status', "APP=/opt/sizeup/current"):
+        assert want in cli, want
+
+
+def test_the_template_follows_the_hub():
+    import tomllib
+    assert tomllib.loads(TEMPLATE.read_text())["station"]["auto_update"] is True
+
+
+def test_the_hub_image_is_built_with_its_git_sha():
+    """The station follows the hub's build: CI must pass the full sha it builds from."""
+    wf = (ROOT / ".github" / "workflows" / "deploy.yml").read_text()
+    assert "SIZEUP_BUILD=${{ env.SHA }}" in wf and "SHA: ${{ github.event.workflow_run.head_sha || github.sha }}" in wf
+    assert "ARG SIZEUP_BUILD" in (ROOT / "Dockerfile").read_text()
+
+
+def test_nothing_points_into_the_old_checkout():
+    """/opt/sizeup/app (before side-by-side releases) goes away after the switch: the template, the
+    units and the launchers never name it (the installer moves an old config's talkgroups_file)."""
+    for path in [TEMPLATE, *(STATION / "systemd").iterdir(), STATION / "start-whisper", STATION / "health-check.sh"]:
+        assert "/opt/sizeup/app" not in path.read_text(), path.name
+        assert "/opt/sizeup/venv" not in path.read_text(), path.name
+    sh = (STATION / "install-linux.sh").read_text()
+    assert 'sed -i "s#$LEGACY_APP/deploy/trunk-recorder/talkgroups.csv#$TR_DIR/talkgroups.csv#" "$CONF"' in sh
+
+
+def test_root_never_writes_through_the_sizeup_users_paths():
+    """/var/lib/sizeup (and trunk-recorder's dir in it) is the sizeup user's: a link it plants there
+    must never make root write, chown or mkdir somewhere else. Every write there runs as that user
+    (as_user / runuser); root only tests for files. The CI update test plants such links for real."""
+    sh = (STATION / "install-linux.sh").read_text()
+    writes = re.compile(r"\b(install|chown|chmod|mkdir|cp|mv|tee|ln|rm|python3|cat)\b|>")
+    for n, line in enumerate(sh.splitlines(), 1):
+        code = line.split(" #", 1)[0].replace(">/dev/null", "").replace("2>&1", "")
+        if re.search(r'"\$(TR_DIR|STATE)/', code) and writes.search(code):
+            assert "as_user" in code or "runuser" in code, f"install-linux.sh:{n} root writes in the sizeup user's dir: {line.strip()}"
+    assert 'os.replace(dst + ".tmp", dst)' in sh                   # config.json: replaced, never written through
+    # and what root reads from the sizeup user: bounded, as that user
+    assert "whisper_argv() { timeout 5 runuser -u \"$SVC_USER\" -- head -c 8192 /run/sizeup-whisper/argv" in sh
+    assert "cat /run/sizeup-whisper/argv" not in (STATION / "sizeup-station").read_text()
+
+
+def test_start_station_survives_a_cut_short_first_switch():
+    start = (STATION / "start-station").read_text()
+    assert "rel=/opt/sizeup/app" in start and "py=/opt/sizeup/venv/bin/python" in start
+
+
+def test_one_default_port_everywhere():
+    """sizeup/config.py's default (8090) wherever a config without [web] port is read."""
+    from sizeup.config import Config  # noqa: F401 (the default lives in load())
+    for path in (STATION / "health-check.sh", STATION / "sizeup-station", STATION / "install-linux.sh"):
+        text = path.read_text()
+        assert '"port", 8091' not in text and "conf_port web 8091" not in text and "echo 8091" not in text, path.name
+
+
+def test_rebuild_never_removes_a_build_in_use():
+    sh = (STATION / "install-linux.sh").read_text()
+    assert 'RTLSDR_B="$RTLSDR_B-$rebuilt" TR_B="$TR_B-$rebuilt" WHISPER_B="$WHISPER_B-$rebuilt"' in sh
+    assert "git -C \"$dir\" clean -q -fdx -e /build/" in sh          # a stopped build picks up where it was

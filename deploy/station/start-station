@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# sizeup-station.service's ExecStart (installed as /usr/local/lib/sizeup/start-station): the release
+# /opt/sizeup/current points at, resolved once here, so a switch to another release never changes
+# the code under a running process: it takes effect at the next start (deploy/station/README.md).
+set -euo pipefail
+rel=$(readlink -f /opt/sizeup/current || true)
+py="$rel/venv/bin/python"
+if [ ! -e /opt/sizeup/current ] && [ -d /opt/sizeup/app/sizeup ] && [ -x /opt/sizeup/venv/bin/python ]; then
+  # The first switch to releases was cut short (power cut between the new units and the link):
+  # the old checkout still runs. sudo sizeup-station update finishes the move.
+  rel=/opt/sizeup/app
+  py=/opt/sizeup/venv/bin/python
+  echo "start-station: no /opt/sizeup/current yet: running the old checkout $rel" >&2
+elif [ ! -x "$py" ]; then
+  echo "start-station: no release at /opt/sizeup/current ($rel): sudo sizeup-station update" >&2
+  exit 1
+fi
+SIZEUP_BUILD=$(head -n 1 "$rel/BUILD" 2>/dev/null || true)
+export SIZEUP_BUILD PYTHONPATH="$rel"
+cd "$rel"
+exec "$py" -m sizeup --config /etc/sizeup/config.toml

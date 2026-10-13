@@ -1,0 +1,10 @@
+# Starts sizeup-update.service when the station writes the hub's build (sizeup/cloud/autoupdate.py).
+[Unit]
+Description=sizeup station: the hub's build changed
+
+[Path]
+PathChanged=/run/sizeup/update-wanted
+Unit=sizeup-update.service
+
+[Install]
+WantedBy=paths.target
