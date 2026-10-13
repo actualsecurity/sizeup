@@ -559,8 +559,20 @@ exits and whole mileposts from 12, the tenths from 14. A camera opens the **came
 snapshot, its name, road, direction and milepost, which source it is from and when the image was
 taken, a new one every 10 s while it is open and the tab is visible (paused when hidden); it fits a
 390 px phone. An incident, closure, roadwork or sign opens a small box with what the source says and
-when it was updated. An event with a map point shows its nearest working cameras (up to 3 within
-1.5 km) as **Cameras nearby** under its map. The Layers box names each source that is on and when it
+when it was updated. An event with a map point has a **Cameras** panel under its map (#95: "add
+that as an automatic option on the incident viewer to show the camera live feed, even if it's just
+past or just before where it came in, as immediate reference points"): on a highway we have mile
+markers for (I-95, I-287, the Hutch, US-1, I-684, the 120s: the location is a marker or exit, or
+the point is within 150 m of the road's markers), the camera **just before** and **just after** the
+event along the road, by our markers, in its direction of travel when the location says one ("0.3 mi
+before (SB) · I-95 at Interchange 21"; a camera over the event's carriageway wins over one up to
+0.3 mi nearer and is marked as facing), else each side by compass ("0.4 mi south"); within 2 mi,
+nothing shown beyond that. Then **Nearby**, lower: cameras within 300 m as the crow flies (off a
+highway, that alone). The panel is collapsible, open while the event is open, with live snapshots
+(a new one every 10 s while the page is visible); a click opens the viewer. The wall board shows
+the two along the road for the active highway event, small, above its cards.
+`GET /api/cad/cameras?for=lat,lon&label=&address=` → `{highway: {road, dir, mile} | null, cameras:
+[{..., rel: before | after | at | side | nearby, miles, side, facing, km}]}` (`Roads.cameras_for`). The Layers box names each source that is on and when it
 last read: *Data: New York State Thruway Authority, updated 16:48*, *powered by 511NY, updated 16:49*.
 
 ### Sources
@@ -724,6 +736,133 @@ or an aircraft fire at the airport by name takes that subtype). "240 Airport Roa
 airport: a fire alarm at the terminal stays an alarm. While exactly one Airport event is open, every
 transmission on the **Airport Incident** talkgroup (333) is linked to it (reason "Airport TG"), whoever is
 talking; two open and it can't tell whose, so none; a link a person removes is not put back.
+## County GIS layers (Westchester County GIS)
+
+> "add Westchester County GIS open-data datasets as map layers ... there are a lot of data points,
+> let's focus on the important ones for fire service" (user, 2026-10-13; GitHub #91)
+
+Every CAD map's **Layers** box has a **County GIS** group: Westchester County GIS open data as map
+layers, one toggle per dataset under a folding sub-heading (*Parcels*, *Boundaries*, *Utilities*,
+*Facilities*, *Hazards*, *Site details*, *Transportation*), each on or off per viewer (this browser's
+`localStorage`, key `sizeup.gisLayers`; the folds are remembered too). Only the fire districts start
+on. A layer with a minimum zoom says "zoom in" below it. A click on a feature opens the same small box
+the highway layers use, with the configured fields as the county names them (a parcel: address, unit,
+municipality, owner, class, acres, living area, year built, style, heat, fuel, tax map number), the
+dataset's date and the source line. Our own fire district (`[cad] monitor_departments`: Port Chester
+FD, Rye Brook FD) is drawn in the department's red; a fire station of ours likewise. *Buildings* can
+be extruded by their height: the "3D" row in the group tilts the map. The attribution "Westchester
+County GIS" is on the group and in the map's corner.
+
+**Source: Westchester County GIS** (<https://gis.westchestercountyny.gov>, an ArcGIS Hub; the data
+from the county's ArcGIS Server at `giswww.westchestergov.com/arcgis/rest/services/`). Surveyed
+2026-10-13; the portal's categories are Basemap Planimetrics, Boundary, Tax Parcels, Infrastructure,
+Environment & Planning, Transportation, Demographics (skipped) and Community Facilities.
+
+**Terms.** The portal has no terms page and no licence statement; every dataset is public under the
+county's disclaimer, on the portal's home page: *"the geographic information and all downloadable data
+is provided "as is" to the public for general information, and are not accurate to surveying or
+engineering standards, and not suitable for site-specific purposes. The County of Westchester hereby
+disclaims any liability for any and all damage, loss, or liability which may result, directly or
+indirectly, from the use of this GIS mapping system and downloadable data."* Some items carry that text
+as their licence, some none; none restricts reuse, and `accessInformation` asks for "Westchester
+County, NY GIS" as the source (given). The tax parcels carry the NYS ITS parcel terms as well: *"as
+is", no warranty, "the User ... assumes all risks associated with its use"*, and the county's note that
+the data is for general reference and the tax maps of record are each assessor's. Each entry in
+`sizeup/gis.py DEFAULT_LAYERS` records its terms (`licence`) and its portal page (`page`).
+
+**The starter set** (the dataset, its service layer, its date as the county states it, the fields shown):
+
+| group | layer | the county's layer | date | on a click |
+|---|---|---|---|---|
+| Parcels | Tax parcels (zoom 15+, Port Chester, Rye Brook, Rye and Harrison only, weekly) | `DataHub_TaxParcels/0` (NYS schema, 258 k parcels countywide) | 2025 roll, May 2026 | address, unit, municipality, owner(s), class (NYS code), acres, living sq ft, year built, style, heat, fuel, tax map |
+| Boundaries | Fire districts (on at first; ours in red) | `Datahub_Boundaries/153` | Feb 2011 | district, number |
+| | EMS districts | `Datahub_Boundaries/152` | Feb 2011 | district |
+| | Municipal boundaries | `Datahub_Boundaries/163` | | municipality, square miles |
+| Utilities | Hydrants (zoom 14+) | `DataHub_Infrastructure/147` (22 k, from 50 departments, some partial) | Oct 2015 | fire district, hydrant number, municipality |
+| | Petroleum bulk storage | `DataHub_EnvironmentandPlanning/165` (NYSDEC PBS) | June 2017 | facility, address, PBS number |
+| | Tanks, towers, antennas | `DataHub_BasemapPlanimetrics/14` (structures with codes TANK / TOWER / ANTENNA) | per feature (photo date) | structure, height, top elevation |
+| | Bridges & tunnels | `DataHub_BasemapPlanimetrics/16` (footprints: BRIDGE / TUNNEL / RAIL_BRIDGE / PEDESTRIAN_BRIDGE) | per feature | structure, photo date; the county publishes no load or clearance limits |
+| Facilities | Fire stations (ours in red) | `DataHub_CommunityFacilities/183` | Dec 2015 | department, address, phone |
+| | Police stations | `DataHub_CommunityFacilities/167` | | station, address, phone |
+| | Hospitals | `DataHub_CommunityFacilities/178` (NYS DOH) | Apr 2020 | hospital, address, phone |
+| | Nursing homes | `DOHdata/1` (hosted, NYS DOH) | Sept 2020 | facility, address, phone, occupied beds, operator |
+| | Assisted living & adult care | `DOHdata/0` (hosted, NYS DOH) | Sept 2020 | facility, address, phone, beds, type, operator |
+| | Public schools | `DataHub_CommunityFacilities/162` | | school, address, district, phone |
+| | Houses of worship | `DataHub_CommunityFacilities/176` | | congregation, address |
+| | Volunteer ambulance corps | `DataHub_CommunityFacilities/150` | 2016 | corps, address, phone |
+| Hazards | Flood plains (FEMA) | `DataHub_EnvironmentandPlanning/157` (FEMA DFIRM: 100- and 500-year) | | flood plain (year) |
+| | Wetlands | `DataHub_EnvironmentandPlanning/154` (USFWS National Wetlands Inventory) | May 2021 | type, NWI code, acres |
+| Site details | Buildings (zoom 15+, our four towns; 3D by height) | `DataHub_BasemapPlanimetrics/5` (278 k footprints countywide) | per feature (photos 2000-2023) | height, roof and base elevation, photo date |
+| | Driveways (zoom 16+) | `DataHub_BasemapPlanimetrics/10` | per feature | surface, photo date |
+| | Parking lots (zoom 16+) | `DataHub_BasemapPlanimetrics/9` | per feature | surface, photo date |
+| | Walls & guard rails (zoom 16+) | `DataHub_BasemapPlanimetrics/12` (guard rails, road barriers, stone / concrete / retaining / noise walls) | per feature | barrier, photo date |
+| | Streams | `DataHub_BasemapPlanimetrics/0` | | stream, kind |
+| | Lakes & ponds | `DataHub_BasemapPlanimetrics/11` | | water, kind |
+| Transportation | Railroads (zoom 13+) | `DataHub_BasemapPlanimetrics/1` (the county's rail lines; no owner or electrification field: the New Haven Line's catenary is a fixed note) | | line, kind |
+| | Train stations | `DataHub_Transportation/156` | | station |
+| | Bee-Line bus routes | `DataHub_Transportation/154` | Apr 2022 | route, name |
+| | Bee-Line bus stops (zoom 15+) | `DataHub_Transportation/153` | | stop, on, at, routes |
+
+**Looked for and not on the portal** (Hub search and every service enumerated): water mains, gas
+transmission, electric substations and lines, dams, railroad grade crossings, cell towers (only the
+TOWER / ANTENNA footprints above), sewer pump stations (only treatment plants, mains and manholes),
+emergency shelters, airports / heliports (that folder needs a token), a fire response-area layer other
+than the fire districts, swimming pools, fences, stairs, overhead wires, curbs (the edge-of-pavement
+polygons are the *Roadways* layer), building storeys or use (the parcel has style and year built),
+private schools, a Greenwich edge (the county's data stops at the state line). Not included on
+purpose: school districts, demographics, utility poles (188 k points from 2004), the storm-drain and
+sewer layers, zip codes, zoning, land use. Worth adding later with one entry each: the EPA hazardous
+waste / TRI facilities (hosted `EPAdata`), the hurricane storm-surge and planning zones, water districts
+(the supplier per fire district, with a phone), police districts, traffic cameras (the county's copy of
+511NY's), 2-ft contours, the 2025 aerial photo service.
+
+**How it works** (`sizeup/gis.py`): the hub (or all-in-one; a station has no maps) fetches each layer
+through the ArcGIS REST query API (`<layer>/query?f=geojson&outSR=4326&geometry=<bbox>&outFields=...`),
+paged with `resultOffset` and never more than the service's `maxRecordCount` a page, with only the
+configured fields and only our area (`[gis] bbox`, or the layer's own: the parcels and the planimetrics
+keep to Port Chester, Rye Brook, Rye and Harrison with a margin, and the parcels add
+`MUNI_NAME IN (...)`), the geometry rounded to 6 decimals and simplified (Douglas-Peucker, the entry's
+`simplify_m`: 0.5 m for parcels, 0.3 m for the planimetrics, 1 m for water). What is kept is cached on
+disk (`gis/<key>.geojson` under the state dir, with the config it was fetched for: a changed entry is
+fetched afresh), so a restart fetches nothing, and fetched again on the entry's schedule (parcels
+weekly, the rest monthly; `hourly` and `daily` exist); a failed fetch backs off 5 min doubling to 6 h.
+The request names us: `User-Agent: sizeup/<version> (Port Chester FD dispatch; contact ...)`. The log
+says each layer's size when fetched. Measured 2026-10-13: parcels 20,903 features, 11.9 MB (1.4 MB gzip);
+buildings 42,352, 16.8 MB (2.6 MB); driveways 30,304, 12.9 MB (2.1 MB); parking 1,898, 2.4 MB; hydrants 7,042,
+1.2 MB (0.08 MB); flood plains 747, 1.7 MB (0.4 MB); bus routes 41, 1.5 MB; the rest under 0.5 MB each; about
+40 MB on disk in all.
+
+**The browser never talks to the county.** Everything comes from the hub, to anyone signed in (viewers
+too; all GET), with an `ETag` (a 304 for `If-None-Match`) and gzip when the browser accepts it:
+
+| | |
+|---|---|
+| `GET /api/cad/gis` | the catalog: `{configured, source, attribution, link, terms, rev, layers: [{key, label, group, kind, style, minzoom, fields, on, refresh, tiled, licence, page, asof, note, at, n, bytes, error, updated, rev}]}` (the pages poll it every 5 min) |
+| `GET /api/cad/gis/<key>` | the whole layer as GeoJSON (`Cache-Control: private, max-age=300`), one fetch for every map on the page |
+| `GET /api/cad/gis/<key>?bbox=w,s,e,n` | only the features touching the box (`max-age=60`): how a **tiled** layer is served. The parcels and the planimetrics are too big to send whole (21 k parcels, 42 k buildings in our area), so the page asks for its viewport, padded, from the layer's minimum zoom, and again only when the map leaves that box; a box over 0.25° a side is refused |
+
+**Adding a dataset is one config entry** (`[[gis.layers]]`, no code): its key, label and group, the
+layer's REST URL (`.../MapServer/<n>` or `.../FeatureServer/<n>`), the fields to show (the first is the
+title), a style (colors as design tokens: `--info`, `--warn`, `--err`, `--ok`, `--dim`, `--text-2`, or
+hex; `fill`, `width`, `radius`, `dash`, a `label` field and `labelzoom`, a `height` field with
+`height_scale` for 3D), `minzoom`, `refresh`, `tiled` for a big one, `simplify_m`, a `bbox` or `where`,
+`on`, and its `licence`, `page`, `asof` and `note`. An entry with a starter key changes only what it
+sets; `enabled = false` drops one. `config.example.toml` has a worked example. The config refuses a
+plain-http URL, an unknown key, a bad zoom or refresh.
+
+**Fire districts as "ours".** The hub keeps the fire-district polygons, so `gis.district_at(lat, lon)`
+answers which district a point is in (`{FIRENAME, FIREID, _ours}`); a follow-up issue wires it into the
+page / event "ours" checks and the geocoder's town threshold. Note the county's 2011 boundaries put Rye
+Brook inside the Port Chester FD district.
+
+```toml
+[gis]                            # sizeup/gis.py; leave out: the starter set
+enabled = true
+bbox = [-73.80, 40.92, -73.56, 41.10]
+[[gis.layers]]
+key = "hydrants"
+on = true                        # one line changes one thing
+```
 
 ## The hub's storage
 
@@ -784,4 +923,5 @@ station follows the hub's build: `Watch` in the station, the root updater), `sta
 `hublink.js`, `station.css`; its routes in `sizeup/web/server.py`. Tests: `tests/test_station_page.py`, `tests/test_polly.py`, `tests/test_cloud.py`, `tests/test_stationmode.py`,
 `tests/test_access.py`, `tests/test_roles.py`, `tests/test_activity.py`, `tests/test_channels.py`,
 `tests/test_transcribe.py` (fakes: `tests/fake_transcribe.py`), `tests/test_autoupdate.py`,
-`tests/test_station_install.py`.
+`tests/test_station_install.py`. The county GIS layers: `sizeup/gis.py` (`tests/test_gis.py`, fixtures
+`tests/fixtures/wcgis/`), `sizeup/web/static/gislayers.js` (a group in maplayers.js's Layers box).

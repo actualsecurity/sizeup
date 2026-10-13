@@ -15,13 +15,18 @@
 //                 (/api/cad/cameras/<id>/image: the browser never talks to 511NY or the camera), its name,
 //                 road and direction, and when the image was taken; a new one every 10 s while it is open
 //                 and the page is visible (paused when hidden).
-//   An event      its nearest working cameras (up to 3 within 1.5 km) as thumbnails under its map.
+//   An event      its Cameras panel (#95, below): the camera just before and just after along the road, live,
+//                 then any within 300 m; the wall board the two along the road for the active highway event.
 //   Places        MapLayers.searchPlaces(q): cameras for the "@" place search ({kind: "camera", camera,
 //                 label, sub, lat, lon}); MapLayers.openPlace(p) opens one (true when it was a camera).
 //                 Anything with data-camera="<id>" (a camera chip in a note) opens the viewer when clicked.
 //
 // The sources' terms (sizeup/roads.py): every event, sign and snapshot shows when it was published or
 // updated, and the map's attribution names each source that is on, with a link.
+//
+// Other scripts add their own groups to the same Layers box: MapLayers.addGroup({attach(control) ->
+// {panel() -> Element | null}}) (gislayers.js: the county GIS layers, #91); attach() gets each map's
+// control (its map, showInfo(title, sub, lines, foot), close()), panel() is asked at every render.
 "use strict";
 
 window.MapLayers = (() => {
@@ -177,6 +182,11 @@ window.MapLayers = (() => {
 
   // ---- one map's layers and its Layers control --------------------------------------------------------------
   const maps = new Set();
+  const groups = [];               // extra layer groups (addGroup), attached to every control, present and future
+  function addGroup(g) {
+    groups.push(g);
+    for (const m of maps) { try { m.groups.push(g.attach(m)); if (!m.panel.hidden) m.renderPanel(); } catch (e) { console.error(e); } }
+  }
 
   class MapRoads {
     constructor(map, host, ctrls, opts = {}) {
@@ -218,6 +228,8 @@ window.MapLayers = (() => {
       if (map.isStyleLoaded() || map.loaded()) init();
       else { map.once("load", init); map.once("idle", init); }
       maps.add(this);
+      this.groups = [];
+      for (const g of groups) { try { this.groups.push(g.attach(this)); } catch (e) { console.error(e); } }
       subscribe((d) => this.update(d));
     }
 
@@ -370,6 +382,9 @@ window.MapLayers = (() => {
       }
       if (d && d.configured && d.note) this.panel.append(h("div", "dim small", d.note));
       if (window.AirportLayer && AirportLayer.credit()) this.panel.append(h("div", "dim small", AirportLayer.credit()));
+      for (const g of this.groups) {
+        try { const el = g.panel && g.panel(); if (el) this.panel.append(el); } catch (e) { console.error(e); }
+      }
     }
 
     clicked(key, id) {
@@ -577,7 +592,13 @@ window.MapLayers = (() => {
     else { viewer.ov.hidden = true; stopCamera(); }
   }
 
-  // ---- "Cameras nearby" under the event's map ---------------------------------------------------------------
+  // ---- the incident viewer's Cameras panel (#95): just before and just after along the road, live ------------
+  // MapLayers.cameras(inc, host, {small}): the hub picks them (GET /api/cad/cameras?for=lat,lon&label=, sizeup/roads.py
+  // cameras_for): on a highway the camera just before and just after the event by our mile markers, in its direction
+  // of travel when the location says one ("0.3 mi before (SB) · I-95 at Interchange 21"), else each side by compass
+  // ("0.4 mi south"); then "Nearby" (within 300 m as the crow flies), lower. Collapsible, open while the event is
+  // open; thumbnails through the proxy, a new one every 10 s while the page is visible; a click opens the viewer.
+  // {small}: the wall board's strip for the active highway event (the two along the road only, smaller).
   function km(a, b, c, d) {
     const p = Math.PI / 180;
     const x = Math.sin((c - a) * p / 2) ** 2 + Math.cos(a * p) * Math.cos(c * p) * Math.sin((d - b) * p / 2) ** 2;
@@ -589,51 +610,101 @@ window.MapLayers = (() => {
       .sort((x, y) => x[0] - y[0]).slice(0, n).map(([k, c]) => ({ ...c, km: k }));
   }
 
-  const near = { row: null, inc: null, sig: "", timer: null, mapbox: null };
-  function nearby(inc, mapbox) {
-    near.inc = inc || null;
-    if (mapbox) near.mapbox = mapbox;
-    if (!near.mapbox) return;
-    if (!near.row) {
-      near.row = h("div", "ml-near");
-      near.row.hidden = true;
-      near.mapbox.after(near.row);
-      subscribe(() => drawNear());
-      near.timer = setInterval(() => {                       // new thumbnails now and then, while visible
-        if (document.visibilityState !== "hidden" && !near.row.hidden) drawNear(true);
-      }, THUMB_REFRESH_MS);
+  const CAM_REL = { before: "before", after: "after", at: "at the location" };
+  const panels = new Map();            // host -> {inc, key, data, open, timer, small}
+  function cameras(inc, host, opts = {}) {
+    if (!host) return;
+    let st = panels.get(host);
+    if (!st) {
+      st = { inc: null, key: "", data: null, open: true, openFor: null, small: !!opts.small, rev: "" };
+      panels.set(host, st);
+      host.classList.add("ml-cams");
+      if (st.small) host.classList.add("ml-cams-small");
+      subscribe(() => { st.key = ""; cameras(st.inc, host); });            // the cameras changed: ask again
+      st.timer = setInterval(() => {                                      // fresh snapshots while on screen
+        if (document.visibilityState !== "hidden" && !host.hidden && st.open) drawCams(host, st, true);
+      }, CAM_REFRESH_MS);
     }
-    drawNear();
+    st.inc = inc || null;
+    const ok = inc && inc.lat != null && inc.lon != null && store.data && store.data.configured;
+    const key = ok ? JSON.stringify([inc.id, inc.lat, inc.lon, inc.geo_label || "", inc.address || ""]) : "";
+    if (!ok) { st.key = ""; st.data = null; host.hidden = true; host.replaceChildren(); return; }
+    if (inc.id !== st.openFor) { st.openFor = inc.id; st.open = isOpenEvent(inc); }   // open by default while the event is open
+    if (key === st.key) { drawCams(host, st, false); return; }
+    st.key = key;
+    const p = new URLSearchParams({ for: `${inc.lat},${inc.lon}`, label: inc.geo_label || "", address: inc.address || "" });
+    fetch(`/api/cad/cameras?${p}`, { credentials: "same-origin" }).then((r) => (r.ok ? r.json() : null)).then((d) => {
+      if (st.key !== key) return;
+      st.data = d;
+      drawCams(host, st, true);
+    }).catch(() => { if (st.key === key) { st.data = null; host.hidden = true; } });
   }
-  function drawNear(force) {
-    const inc = near.inc, row = near.row;
-    const cams = inc && inc.lat != null && inc.lon != null && !near.mapbox.hidden ? nearest(inc.lat, inc.lon) : [];
-    const sig = JSON.stringify(cams.map((c) => c.id));
-    if (sig === near.sig && !force) return;
-    near.sig = sig;
-    row.hidden = !cams.length;
-    if (!cams.length) { row.replaceChildren(); return; }
-    const stamp = Math.floor(Date.now() / THUMB_REFRESH_MS);
-    const list = h("div", "ml-near-list");
-    for (const c of cams) {
-      const b = h("button", "ml-thumb");
-      b.type = "button";
-      b.dataset.camera = c.id;
-      b.title = `${c.name}${c.road ? `, ${c.road}` : ""}${c.dir ? ` ${c.dir}` : ""} (${c.km.toFixed(1)} km)`;
-      const img = h("img", "ml-thumb-img");
-      img.alt = "";
-      img.loading = "lazy";
-      img.src = `/api/cad/cameras/${encodeURIComponent(c.id)}/image?t=${stamp}`;
-      img.addEventListener("error", () => img.classList.add("ml-broken"));
-      const cap = h("span", "ml-thumb-cap", c.name);
-      b.append(img, cap);
-      b.addEventListener("click", () => openCamera(c.id, b));
-      list.append(b);
+  const isOpenEvent = (inc) => !["closed", "dismissed"].includes(inc.status);
+  function camLabel(c) {
+    if (c.rel === "nearby") return c.km != null ? `${Math.round(c.km * 1000)} m away` : "nearby";
+    const mi = c.miles != null ? `${c.miles.toFixed(1)} mi ` : "";
+    if (c.rel === "at") return "at the location";
+    if (c.rel === "side") return `${mi}${c.side}`;
+    return `${mi}${CAM_REL[c.rel] || c.rel}`;
+  }
+  function drawCams(host, st, fresh) {
+    const d = st.data, inc = st.inc;
+    const cams = (d && d.cameras) || [];
+    const shown = st.small ? cams.filter((c) => c.rel !== "nearby") : cams;
+    const sig = JSON.stringify([shown.map((c) => [c.id, c.rel, c.miles]), st.open, d && d.highway]);
+    if (!shown.length) { host.hidden = true; host.replaceChildren(); st.sig = ""; return; }
+    host.hidden = false;
+    const stamp = Math.floor(Date.now() / CAM_REFRESH_MS);
+    if (sig === st.sig && !fresh) return;
+    if (sig === st.sig) {                                                   // the same cameras: new pictures only
+      for (const img of host.querySelectorAll("img[data-camera]")) img.src = `/api/cad/cameras/${encodeURIComponent(img.dataset.camera)}/image?t=${stamp}`;
+      return;
     }
-    const head = h("div", "ml-near-head");
+    st.sig = sig;
+    const head = h("button", "ml-cams-head");
+    head.type = "button";
+    head.setAttribute("aria-expanded", String(st.open));
     if (window.Icon) head.append(Icon("camera"));
-    head.append(h("b", "", "Cameras nearby"), h("span", "dim small", [...new Set(cams.map((c) => c.source || "511NY"))].join(" · ")));
-    row.replaceChildren(head, list);
+    const hw = d.highway;
+    const title = hw ? `Cameras on ${hw.road}${hw.dir ? ` ${hw.dir}` : ""}` : "Cameras nearby";
+    head.append(h("b", "", title));
+    if (hw) head.append(h("span", "dim small", `MP ${hw.mile.toFixed(1)}`));
+    const srcs = [...new Set(shown.map((c) => c.source || "511NY"))].join(" · ");
+    head.append(h("span", "spacer"), h("span", "dim small", srcs), h("span", "car dim", st.open ? "▾" : "▸"));
+    head.addEventListener("click", () => { st.open = !st.open; st.sig = ""; drawCams(host, st, true); });
+    host.replaceChildren(head);
+    if (!st.open) return;
+    const along = shown.filter((c) => c.rel !== "nearby"), near = shown.filter((c) => c.rel === "nearby");
+    const list = (cs) => {
+      const ul = h("div", "ml-near-list");
+      for (const c of cs) {
+        const b = h("button", "ml-thumb");
+        b.type = "button";
+        b.dataset.camera = c.id;
+        b.title = `${c.name}${c.road ? `, ${c.road}` : ""}${c.dir ? ` ${c.dir}` : ""}${c.mile ? ` MP ${c.mile}` : ""} (${c.source || "511NY"}). Open live`;
+        const img = h("img", "ml-thumb-img");
+        img.alt = "";
+        img.loading = "lazy";
+        img.dataset.camera = c.id;
+        img.src = `/api/cad/cameras/${encodeURIComponent(c.id)}/image?t=${stamp}`;
+        img.addEventListener("error", () => img.classList.add("ml-broken"));
+        const lbl = h("span", "ml-thumb-lbl" + (c.facing ? " facing" : ""), camLabel(c) + (c.rel !== "nearby" && hw && hw.dir && c.rel !== "at" ? ` (${hw.dir})` : ""));
+        if (c.facing) lbl.title = "This camera is over the event's carriageway";
+        b.append(img, lbl, h("span", "ml-thumb-cap", c.name));
+        b.addEventListener("click", () => openCamera(c.id, b));
+        ul.append(b);
+      }
+      return ul;
+    };
+    if (along.length) host.append(list(along));
+    if (near.length) {
+      if (along.length) host.append(h("div", "ml-cams-sub dim small", "Nearby"));
+      host.append(list(near));
+    }
+  }
+  function nearby(inc, mapbox) {            // (the #73 row: now the panel; kept for a page that still calls it)
+    const host = mapbox && mapbox.parentElement && mapbox.parentElement.querySelector(".ml-cams");
+    if (host) cameras(inc, host);
   }
 
   // ---- the place search hook ("@", #67) -----------------------------------------------------------------------
@@ -663,6 +734,6 @@ window.MapLayers = (() => {
     try { return new MapRoads(map, host, ctrls, opts); } catch (e) { console.error("map layers:", e); return null; }
   }
 
-  return { attach, openCamera, closeCamera, nearby, nearest, searchPlaces, openPlace, prefs, setLayer, LAYERS,
+  return { attach, addGroup, openCamera, closeCamera, cameras, nearby, nearest, searchPlaces, openPlace, prefs, setLayer, LAYERS,
            load, data: () => store.data, maps };
 })();

@@ -168,6 +168,11 @@ class Config:
     roads_cameras_url: str = ""
     roads_signs_url: str = ""
     roads_thruway: bool = True        # the NYS Thruway Authority's public feeds (no key): I-95, I-287 (#86)
+    # [gis] (sizeup/gis.py, #91): Westchester County GIS datasets as map layers, fetched by the hub.
+    # load() ships the starter set (gis.DEFAULT_LAYERS); built directly (tests), none.
+    gis_enabled: bool = True
+    gis_bbox: tuple[float, float, float, float] = (-73.80, 40.92, -73.56, 41.10)
+    gis_layers: tuple = ()            # sizeup.gis.Layer, in panel order
 
 
 def _take(d: dict, path: str, allowed: set[str]) -> dict:
@@ -218,6 +223,7 @@ def hub_url_problem(url: str) -> str:
 #   SIZEUP_ACCESS_TEAM / _AUD         [cloud] access_team / access_aud (hub: Cloudflare Access identity)
 #   SIZEUP_PREALERT_SERVER            [prealert] server (a local test server instead of ntfy.sh)
 #   SIZEUP_511NY_KEY                  [roads] key: the 511NY developer key (never in a file on the hub)
+#   (no [gis] secrets: the county's open data needs no key)
 def _env(name: str, default):
     v = os.environ.get(name, "").strip()
     return v if v else default
@@ -385,6 +391,93 @@ def _roads(data: dict) -> dict:
                 roads_events_s=events, roads_signs_s=signs, roads_thruway=thruway, **urls)
 
 
+def _bbox(v, what: str, max_deg: float = 3.0) -> tuple[float, float, float, float]:
+    try:
+        w, s, e, n = (float(x) for x in v)
+    except (TypeError, ValueError):
+        raise ConfigError(f"{what}: [west, south, east, north] in degrees") from None
+    if not (-180 <= w < e <= 180 and -90 <= s < n <= 90) or e - w > max_deg or n - s > max_deg:
+        raise ConfigError(f"{what}: [west, south, east, north], west < east and south < north, at most {max_deg:g} degrees a side")
+    return (w, s, e, n)
+
+
+GIS_LAYER_KEYS = {"key", "label", "url", "group", "kind", "style", "minzoom", "fields", "refresh", "bbox", "where", "on",
+                  "tiled", "simplify_m", "licence", "page", "enabled", "asof", "ours_field", "note"}
+
+
+def _gis_layer(raw: dict, i: int, base=None):
+    """One [[gis.layers]] entry -> a sizeup.gis.Layer. base: the starter entry with the same key, whose
+    values it overrides (so one line, `on = true`, changes one thing)."""
+    from sizeup.gis import KEY_RE, KINDS, REFRESH_S, URL_RE, Layer
+    where = f"gis.layers[{i}]"
+    _take(raw, where, GIS_LAYER_KEYS)
+    d = {k: getattr(base, k) for k in GIS_LAYER_KEYS} if base is not None else {}
+    d.update({k: v for k, v in raw.items()})
+    key = str(d.get("key", ""))
+    if not KEY_RE.fullmatch(key):
+        raise ConfigError(f"{where}.key: a short name, lower-case letters, digits and _ (\"parcels\")")
+    where = f"gis.layers[{key}]"
+    url = str(d.get("url", "")).strip().rstrip("/")
+    if not URL_RE.fullmatch(url):
+        raise ConfigError(f"{where}.url: the ArcGIS REST layer, https://.../MapServer/<n> or .../FeatureServer/<n>")
+    label = str(d.get("label", "")).strip()
+    if not 1 <= len(label) <= 60:
+        raise ConfigError(f"{where}.label: the name on the Layers panel (1 to 60 characters)")
+    kind = str(d.get("kind", ""))
+    if kind not in ("", *KINDS):
+        raise ConfigError(f"{where}.kind: point, line or polygon (or leave it out: the service says)")
+    refresh = str(d.get("refresh", "daily"))
+    if refresh not in REFRESH_S:
+        raise ConfigError(f"{where}.refresh: {', '.join(REFRESH_S)}")
+    style = d.get("style", {})
+    if not isinstance(style, dict) or not all(isinstance(v, (str, int, float)) and not isinstance(v, bool) for v in style.values()):
+        raise ConfigError(f"{where}.style: a table of colors (design tokens \"--info\" or \"#hex\") and numbers")
+    fields = []
+    for f in d.get("fields", ()):
+        if isinstance(f, str) and f.strip():
+            fields.append((f.strip(), f.strip().replace("_", " ").title()))
+        elif isinstance(f, (list, tuple)) and len(f) == 2 and all(isinstance(x, str) and x.strip() for x in f):
+            fields.append((f[0].strip(), f[1].strip()))
+        else:
+            raise ConfigError(f"{where}.fields: a list of the service's field names, each \"FIELD\" or [\"FIELD\", \"Label shown\"]")
+    try:
+        minzoom, simplify_m = int(d.get("minzoom", 0)), float(d.get("simplify_m", 0))
+    except (TypeError, ValueError):
+        raise ConfigError(f"{where}.minzoom: a zoom level; simplify_m: metres") from None
+    if not 0 <= minzoom <= 22 or not 0 <= simplify_m <= 50:
+        raise ConfigError(f"{where}.minzoom: 0 to 22; simplify_m: 0 to 50 metres")
+    for k in ("on", "tiled", "enabled"):
+        if not isinstance(d.get(k, False), bool):
+            raise ConfigError(f"{where}.{k}: true or false")
+    bbox = _bbox(d["bbox"], f"{where}.bbox") if d.get("bbox") else None
+    text = {k: str(d.get(k, "")).strip() for k in ("group", "where", "licence", "page", "asof", "ours_field", "note")}
+    if not text["group"]:
+        text["group"] = "County GIS"
+    return Layer(key=key, label=label, url=url, group=text["group"], kind=kind, style=dict(style), minzoom=minzoom,
+                 fields=tuple(fields), refresh=refresh, bbox=bbox, where=text["where"], on=bool(d.get("on", False)),
+                 tiled=bool(d.get("tiled", False)), simplify_m=simplify_m, licence=text["licence"], page=text["page"],
+                 enabled=bool(d.get("enabled", True)), asof=text["asof"], ours_field=text["ours_field"], note=text["note"])
+
+
+def _gis(data: dict) -> dict:
+    """[gis] -> Config fields (sizeup/gis.py). No section: the starter set. A [[gis.layers]] entry with a
+    starter key overrides that entry's values (enabled = false drops it); a new key adds a dataset."""
+    from sizeup.gis import DEFAULT_LAYERS
+    g = _take(data.get("gis", {}), "gis", {"enabled", "bbox", "layers"})
+    enabled = g.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise ConfigError("gis.enabled: true or false")
+    bbox = _bbox(g.get("bbox", [-73.80, 40.92, -73.56, 41.10]), "gis.bbox")
+    layers = {l.key: l for l in DEFAULT_LAYERS}
+    raw = g.get("layers", [])
+    if not isinstance(raw, list) or not all(isinstance(x, dict) for x in raw):
+        raise ConfigError("gis.layers: [[gis.layers]] tables, one per dataset")
+    for i, entry in enumerate(raw):
+        key = str(entry.get("key", ""))
+        layers[key] = _gis_layer(entry, i, layers.get(key))
+    return dict(gis_enabled=enabled, gis_bbox=bbox, gis_layers=tuple(l for l in layers.values() if l.enabled))
+
+
 def _stt_aws(stt: dict) -> dict:
     """[stt] aws*: Amazon Transcribe (sizeup/transcribe.py). aws_channels: labels or talkgroup numbers."""
     try:
@@ -416,7 +509,7 @@ def load(path: str | Path) -> Config:
     except tomllib.TOMLDecodeError as e:
         raise ConfigError(f"{path}: {e}") from e
     _take(data, "config", {"station", "web", "radio", "tones", "stt", "p25", "mdc", "units", "storage", "map",
-                           "cad", "dispatch", "cloud", "prealert", "roads"})
+                           "cad", "dispatch", "cloud", "prealert", "roads", "gis"})
     st = _take(data.get("station", {}), "station", {"id", "name", "auto_update"})
     if not isinstance(st.get("auto_update", True), bool):
         raise ConfigError("station.auto_update: true or false")
@@ -607,5 +700,5 @@ def load(path: str | Path) -> Config:
         dispatch_repeat=d_repeat, dispatch_transmit=False, dispatch_channels=d_channels, dispatch_polly_region=d_region,
         **(dict(cloud, cloud_outbox=rel_state(cloud["cloud_outbox"])) if cloud else {}),
         cloud_state="" if cloud.get("cloud_role") == "hub" else rel_state("state/cloud.json"),
-        **_prealert(data), **_roads(data),
+        **_prealert(data), **_roads(data), **_gis(data),
     )

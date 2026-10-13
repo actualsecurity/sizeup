@@ -1,0 +1,68 @@
+{
+ "id": 165,
+ "name": "Petroleum Bulk Storage",
+ "type": "Feature Layer",
+ "geometryType": "esriGeometryPoint",
+ "maxRecordCount": 2000,
+ "capabilities": "Query,Map,Data",
+ "editingInfo": null,
+ "copyrightText": "The data was extracted from Digital health database maintained by the Department of Information Technology HHS (Health and Human Services ) Team and was delivered to GIS on June 9th 2017",
+ "supportsAdvancedQueries": true,
+ "supportedQueryFormats": "JSON, geoJSON, PBF",
+ "description": "This data layer shows the locations of active bulk petroleum storage facilities in Westchester County as of June 2017. The data was extracted from the Digital Health database maintained by the Department of Information Technology HHS (Health and Human Services) team and was delivered to GIS on June 9th 2017. The [Grade] attributes indicate different levels of spatial accuracy.A- The address locati",
+ "fields": [
+  {
+   "name": "OBJECTID",
+   "type": "esriFieldTypeOID",
+   "alias": "OBJECTID"
+  },
+  {
+   "name": "STREET",
+   "type": "esriFieldTypeString",
+   "alias": "STREET"
+  },
+  {
+   "name": "CITY",
+   "type": "esriFieldTypeString",
+   "alias": "CITY"
+  },
+  {
+   "name": "STATE",
+   "type": "esriFieldTypeString",
+   "alias": "STATE"
+  },
+  {
+   "name": "ZIP",
+   "type": "esriFieldTypeInteger",
+   "alias": "ZIP"
+  },
+  {
+   "name": "SHAPE",
+   "type": "esriFieldTypeGeometry",
+   "alias": "Shape"
+  },
+  {
+   "name": "INPUTID",
+   "type": "esriFieldTypeInteger",
+   "alias": "InputId"
+  },
+  {
+   "name": "LOGN_",
+   "type": "esriFieldTypeDouble",
+   "alias": "LOGN_"
+  },
+  {
+   "name": "FACILITY_NAME",
+   "type": "esriFieldTypeString",
+   "alias": "facility Name"
+  },
+  {
+   "name": "PBSNUMBER",
+   "type": "esriFieldTypeString",
+   "alias": "pbsnumber"
+  }
+ ],
+ "advancedQueryCapabilities": {
+  "supportsPagination": true
+ }
+}

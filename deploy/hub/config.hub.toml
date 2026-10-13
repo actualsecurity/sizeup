@@ -102,3 +102,6 @@ thruway = true
 # cameras_url = ""
 # signs_url = ""
 bbox = [-73.80, 40.92, -73.56, 41.10]   # west, south, east, north: Port Chester, Rye Brook, the neighbours, Greenwich
+
+# [gis]: the maps' County GIS layers (sizeup/gis.py, docs/cloud.md "County GIS layers"): the starter set
+# from Westchester County GIS, fetched here on its schedule, cached under /data/gis. No key. Nothing to set.

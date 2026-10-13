@@ -1,0 +1,78 @@
+{
+ "id": 162,
+ "name": "Public Schools",
+ "type": "Feature Layer",
+ "geometryType": "esriGeometryPoint",
+ "maxRecordCount": 1000,
+ "capabilities": "Map,Query,Data",
+ "editingInfo": null,
+ "copyrightText": "",
+ "supportsAdvancedQueries": true,
+ "supportedQueryFormats": "JSON, geoJSON, PBF",
+ "description": "This schools dataset is composed of all Public elementary and secondary education in the United States as defined by the Common Core of Data, National Center for Education Statistics, US Department of Education. This includes all Kindergarten through 12th grade schools as tracked by the Common Core of Data. Included in this dataset are the military schools abroad and referenced in the city field w",
+ "fields": [
+  {
+   "name": "OBJECTID",
+   "type": "esriFieldTypeOID",
+   "alias": "OBJECTID"
+  },
+  {
+   "name": "NAME",
+   "type": "esriFieldTypeString",
+   "alias": "NAME"
+  },
+  {
+   "name": "ADDRESS",
+   "type": "esriFieldTypeString",
+   "alias": "ADDRESS"
+  },
+  {
+   "name": "ZIPCODE",
+   "type": "esriFieldTypeString",
+   "alias": "ZIP"
+  },
+  {
+   "name": "DISTNAME",
+   "type": "esriFieldTypeString",
+   "alias": "DISTRICT NAME"
+  },
+  {
+   "name": "MUNSINCL",
+   "type": "esriFieldTypeString",
+   "alias": "MUNICIPALITIES"
+  },
+  {
+   "name": "CITY",
+   "type": "esriFieldTypeString",
+   "alias": "CITY"
+  },
+  {
+   "name": "PHONE",
+   "type": "esriFieldTypeString",
+   "alias": "PHONE"
+  },
+  {
+   "name": "WEBSITE",
+   "type": "esriFieldTypeString",
+   "alias": "WEB"
+  },
+  {
+   "name": "SHAPE",
+   "type": "esriFieldTypeGeometry",
+   "alias": "Shape"
+  },
+  {
+   "name": "SCHWEB",
+   "type": "esriFieldTypeString",
+   "alias": "SCHWEB"
+  },
+  {
+   "name": "NCESID_NUM",
+   "type": "esriFieldTypeInteger",
+   "alias": "NCESID Num"
+  }
+ ],
+ "advancedQueryCapabilities": {
+  "supportsPagination": true
+ }
+}

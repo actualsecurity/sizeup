@@ -1,0 +1,373 @@
+{
+ "id": 0,
+ "name": "Tax Parcels",
+ "type": "Feature Layer",
+ "geometryType": "esriGeometryPolygon",
+ "maxRecordCount": 1000,
+ "capabilities": "Query,Map,Data",
+ "editingInfo": null,
+ "copyrightText": "Contributing counties, NYS Office of Information Technology Services Geospatial Services and NYS Department of Taxation and Finance\u2019s Office of Real Property Tax Services (ORPTS).",
+ "supportsAdvancedQueries": true,
+ "supportedQueryFormats": "JSON, geoJSON, PBF",
+ "description": "NYS Publication Date: May 2026. This file contains 2025 parcel data only for NY State Counties which gave ITS NYS Geospatial Services permission to share this data with the public. To date, 38 counties have provided Geospatial Services permission to share their parcel data with the public. Parcel data for counties which do not allow Geospatial Services to redistribute their data must be obtained d",
+ "fields": [
+  {
+   "name": "OBJECTID",
+   "type": "esriFieldTypeOID",
+   "alias": "OBJECTID"
+  },
+  {
+   "name": "SWIS",
+   "type": "esriFieldTypeString",
+   "alias": "SWIS"
+  },
+  {
+   "name": "SBL",
+   "type": "esriFieldTypeString",
+   "alias": "SBL"
+  },
+  {
+   "name": "SHAPE",
+   "type": "esriFieldTypeGeometry",
+   "alias": "Shape"
+  },
+  {
+   "name": "SHAPE.AREA",
+   "type": "esriFieldTypeDouble",
+   "alias": "SHAPE.AREA"
+  },
+  {
+   "name": "SHAPE.LEN",
+   "type": "esriFieldTypeDouble",
+   "alias": "SHAPE.LEN"
+  },
+  {
+   "name": "CITYTOWN_NAME",
+   "type": "esriFieldTypeString",
+   "alias": "CITYTOWN_NAME"
+  },
+  {
+   "name": "CITYTOWN_SWIS",
+   "type": "esriFieldTypeString",
+   "alias": "CITYTOWN_SWIS"
+  },
+  {
+   "name": "COUNTY_NAME",
+   "type": "esriFieldTypeString",
+   "alias": "COUNTY_NAME"
+  },
+  {
+   "name": "MUNI_NAME",
+   "type": "esriFieldTypeString",
+   "alias": "MUNI_NAME"
+  },
+  {
+   "name": "PARCEL_ADDR",
+   "type": "esriFieldTypeString",
+   "alias": "PARCEL_ADDR"
+  },
+  {
+   "name": "PRINT_KEY",
+   "type": "esriFieldTypeString",
+   "alias": "PRINT_KEY"
+  },
+  {
+   "name": "LOC_UNIT",
+   "type": "esriFieldTypeString",
+   "alias": "LOC_UNIT"
+  },
+  {
+   "name": "LOC_ZIP",
+   "type": "esriFieldTypeString",
+   "alias": "LOC_ZIP"
+  },
+  {
+   "name": "PROP_CLASS",
+   "type": "esriFieldTypeString",
+   "alias": "PROP_CLASS"
+  },
+  {
+   "name": "ROLL_SECTION",
+   "type": "esriFieldTypeString",
+   "alias": "ROLL_SECTION"
+  },
+  {
+   "name": "LAND_AV",
+   "type": "esriFieldTypeDouble",
+   "alias": "LAND_AV"
+  },
+  {
+   "name": "TOTAL_AV",
+   "type": "esriFieldTypeDouble",
+   "alias": "TOTAL_AV"
+  },
+  {
+   "name": "FULL_MARKET_VAL",
+   "type": "esriFieldTypeDouble",
+   "alias": "FULL_MARKET_VAL"
+  },
+  {
+   "name": "YR_BLT",
+   "type": "esriFieldTypeInteger",
+   "alias": "YR_BLT"
+  },
+  {
+   "name": "FRONT",
+   "type": "esriFieldTypeInteger",
+   "alias": "FRONT"
+  },
+  {
+   "name": "DEPTH",
+   "type": "esriFieldTypeInteger",
+   "alias": "DEPTH"
+  },
+  {
+   "name": "SQ_FT",
+   "type": "esriFieldTypeDouble",
+   "alias": "SQ_FT"
+  },
+  {
+   "name": "ACRES",
+   "type": "esriFieldTypeDouble",
+   "alias": "ACRES"
+  },
+  {
+   "name": "SEWER_TYPE",
+   "type": "esriFieldTypeString",
+   "alias": "SEWER_TYPE"
+  },
+  {
+   "name": "SEWER_DESC",
+   "type": "esriFieldTypeString",
+   "alias": "SEWER_DESC"
+  },
+  {
+   "name": "WATER_SUPPLY",
+   "type": "esriFieldTypeString",
+   "alias": "WATER_SUPPLY"
+  },
+  {
+   "name": "WATER_DESC",
+   "type": "esriFieldTypeString",
+   "alias": "WATER_DESC"
+  },
+  {
+   "name": "UTILITIES",
+   "type": "esriFieldTypeString",
+   "alias": "UTILITIES"
+  },
+  {
+   "name": "UTILITIES_DESC",
+   "type": "esriFieldTypeString",
+   "alias": "UTILITIES_DESC"
+  },
+  {
+   "name": "BLDG_STYLE",
+   "type": "esriFieldTypeString",
+   "alias": "BLDG_STYLE"
+  },
+  {
+   "name": "BLDG_STYLE_DESC",
+   "type": "esriFieldTypeString",
+   "alias": "BLDG_STYLE_DESC"
+  },
+  {
+   "name": "HEAT_TYPE",
+   "type": "esriFieldTypeString",
+   "alias": "HEAT_TYPE"
+  },
+  {
+   "name": "HEAT_TYPE_DESC",
+   "type": "esriFieldTypeString",
+   "alias": "HEAT_TYPE_DESC"
+  },
+  {
+   "name": "FUEL_TYPE",
+   "type": "esriFieldTypeString",
+   "alias": "FUEL_TYPE"
+  },
+  {
+   "name": "FUEL_TYPE_DESC",
+   "type": "esriFieldTypeString",
+   "alias": "FUEL_TYPE_DESC"
+  },
+  {
+   "name": "SQFT_LIVING",
+   "type": "esriFieldTypeDouble",
+   "alias": "SQFT_LIVING"
+  },
+  {
+   "name": "GFA",
+   "type": "esriFieldTypeInteger",
+   "alias": "GFA"
+  },
+  {
+   "name": "NBR_KITCHENS",
+   "type": "esriFieldTypeSmallInteger",
+   "alias": "NBR_KITCHENS"
+  },
+  {
+   "name": "NBR_FULL_BATHS",
+   "type": "esriFieldTypeSmallInteger",
+   "alias": "NBR_FULL_BATHS"
+  },
+  {
+   "name": "NBR_BEDROOMS",
+   "type": "esriFieldTypeSmallInteger",
+   "alias": "NBR_BEDROOMS"
+  },
+  {
+   "name": "USED_AS_CODE",
+   "type": "esriFieldTypeString",
+   "alias": "USED_AS_CODE"
+  },
+  {
+   "name": "USED_AS_DESC",
+   "type": "esriFieldTypeString",
+   "alias": "USED_AS_DESC"
+  },
+  {
+   "name": "AG_DIST_CODE",
+   "type": "esriFieldTypeString",
+   "alias": "AG_DIST_CODE"
+  },
+  {
+   "name": "AG_DIST_NAME",
+   "type": "esriFieldTypeString",
+   "alias": "AG_DIST_NAME"
+  },
+  {
+   "name": "MAIL_ADDR",
+   "type": "esriFieldTypeString",
+   "alias": "MAIL_ADDR"
+  },
+  {
+   "name": "PO_BOX",
+   "type": "esriFieldTypeString",
+   "alias": "PO_BOX"
+  },
+  {
+   "name": "MAIL_CITY",
+   "type": "esriFieldTypeString",
+   "alias": "MAIL_CITY"
+  },
+  {
+   "name": "MAIL_STATE",
+   "type": "esriFieldTypeString",
+   "alias": "MAIL_STATE"
+  },
+  {
+   "name": "MAIL_ZIP",
+   "type": "esriFieldTypeString",
+   "alias": "MAIL_ZIP"
+  },
+  {
+   "name": "ADD_MAIL_ADDR",
+   "type": "esriFieldTypeString",
+   "alias": "ADD_MAIL_ADDR"
+  },
+  {
+   "name": "ADD_MAIL_PO_BOX",
+   "type": "esriFieldTypeString",
+   "alias": "ADD_MAIL_PO_BOX"
+  },
+  {
+   "name": "ADD_MAIL_CITY",
+   "type": "esriFieldTypeString",
+   "alias": "ADD_MAIL_CITY"
+  },
+  {
+   "name": "ADD_MAIL_STATE",
+   "type": "esriFieldTypeString",
+   "alias": "ADD_MAIL_STATE"
+  },
+  {
+   "name": "ADD_MAIL_ZIP",
+   "type": "esriFieldTypeString",
+   "alias": "ADD_MAIL_ZIP"
+  },
+  {
+   "name": "BOOK",
+   "type": "esriFieldTypeInteger",
+   "alias": "BOOK"
+  },
+  {
+   "name": "PAGE",
+   "type": "esriFieldTypeInteger",
+   "alias": "PAGE"
+  },
+  {
+   "name": "GRID_EAST",
+   "type": "esriFieldTypeDouble",
+   "alias": "GRID_EAST"
+  },
+  {
+   "name": "GRID_NORTH",
+   "type": "esriFieldTypeDouble",
+   "alias": "GRID_NORTH"
+  },
+  {
+   "name": "MUNI_PARCEL_ID",
+   "type": "esriFieldTypeString",
+   "alias": "MUNI_PARCEL_ID"
+  },
+  {
+   "name": "SWIS_SBL_ID",
+   "type": "esriFieldTypeString",
+   "alias": "SWIS_SBL_ID"
+  },
+  {
+   "name": "SWIS_PRINT_KEY_ID",
+   "type": "esriFieldTypeString",
+   "alias": "SWIS_PRINT_KEY_ID"
+  },
+  {
+   "name": "ROLL_YR",
+   "type": "esriFieldTypeInteger",
+   "alias": "ROLL_YR"
+  },
+  {
+   "name": "SPATIAL_YR",
+   "type": "esriFieldTypeInteger",
+   "alias": "SPATIAL_YR"
+  },
+  {
+   "name": "OWNER_TYPE",
+   "type": "esriFieldTypeString",
+   "alias": "OWNER_TYPE"
+  },
+  {
+   "name": "PRIMARY_OWNER",
+   "type": "esriFieldTypeString",
+   "alias": "PRIMARY_OWNER"
+  },
+  {
+   "name": "ADD_OWNER",
+   "type": "esriFieldTypeString",
+   "alias": "ADD_OWNER"
+  },
+  {
+   "name": "NYS_NAME",
+   "type": "esriFieldTypeString",
+   "alias": "NYS_NAME"
+  },
+  {
+   "name": "NYS_NAME_SOURCE",
+   "type": "esriFieldTypeString",
+   "alias": "NYS_NAME_SOURCE"
+  },
+  {
+   "name": "DUP_GEO",
+   "type": "esriFieldTypeString",
+   "alias": "DUP_GEO"
+  },
+  {
+   "name": "CALC_ACRES",
+   "type": "esriFieldTypeDouble",
+   "alias": "CALC_ACRES"
+  }
+ ],
+ "advancedQueryCapabilities": {
+  "supportsPagination": true
+ }
+}

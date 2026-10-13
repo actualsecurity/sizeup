@@ -25,6 +25,8 @@
         (sizeup/cloud/stationmode.py; state/cloud.json then wins over the role here).
     [roads]: 511NY's cameras, incidents, roadwork and message signs for the maps' Layers, camera
         snapshots proxied by this process (sizeup/roads.py)
+    [gis]: Westchester County GIS datasets (parcels, boundaries, utilities ...) for the maps' Layers,
+        fetched and served by this process (sizeup/gis.py)
     [prealert]: Tapout's ntfy feed (the HQ phone ringing), read only, on the CAD of record (all-in-one
         or the hub) -> a pre-alert at the top of the CAD's 60 Control column (sizeup/prealert.py)
     per channel (Settings > Radios, sizeup/channels.py): record / transcribe / engine (local whisper,
@@ -356,6 +358,10 @@ class App:
         from sizeup.roads import Roads
         self.roads = Roads.from_config(cfg, log=log)
         self.cad.place_providers = [self.roads.search_places]
+        # The county GIS layers (sizeup/gis.py, #91): parcels, boundaries, utilities, facilities ... fetched
+        # from Westchester County GIS by the CAD of record, served to the maps from here.
+        from sizeup.gis import Gis
+        self.gis = Gis.from_config(cfg, log=log)
         if cfg.prealert_enabled:
             from sizeup.prealert import PreAlerts
             self.prealert = PreAlerts(self.cad, cfg.prealert_server, cfg.prealert_ring_topic, cfg.prealert_status_topic,
@@ -1913,6 +1919,7 @@ class App:
         self.prealert_sync()
         if self.cfg.cloud_role != "station":   # the station page has no maps: don't spend 511NY calls there
             self.roads.start()
+            self.gis.start()
         return self
 
     def forwarding(self) -> bool:
@@ -1964,6 +1971,7 @@ class App:
         if self.prealert is not None:
             self.prealert.stop()
         self.roads.stop()
+        self.gis.stop()
 
 
 def channels_model() -> str:
@@ -1991,7 +1999,7 @@ def make_server(app: App) -> WebServer:
                        app.set_talkgroup, app.set_talkgroup_group, app.retranscribe, cad=CadApi(app.cad),
                        station=getattr(app, "hub", None), health=health_info(cfg), access=access_verifier(cfg),
                        access_log=log if cfg.cloud_role == "hub" else None, station_mode=app.station,
-                       role=cfg.cloud_role, roads=app.roads)
+                       role=cfg.cloud_role, roads=app.roads, gis=app.gis)
 
     def changed() -> None:             # a new talker is pushed at once, not on the next second
         server.poke()

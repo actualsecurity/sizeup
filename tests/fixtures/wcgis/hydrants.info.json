@@ -1,0 +1,48 @@
+{
+ "id": 147,
+ "name": "Fire Hydrants",
+ "type": "Feature Layer",
+ "geometryType": "esriGeometryPoint",
+ "maxRecordCount": 1000,
+ "capabilities": "Map,Query,Data",
+ "editingInfo": null,
+ "copyrightText": "Westchester County, Purchase Fire Department (FD), Eastchester FD, Vista FD, Pound Ridge FD, Bedford FD, Katonah FD, Bedford Hills FD, Armonk FD, Chappaqua FD, Millwood FD, Sleepy Hollow FD, Thornwood FD, Valhalla FD, West Harrison FD, Port Chester FD, Rye FD, Mamaroneck Village FD, Mamaroneck Town FD, Larchmont FD, New Rochelle FD, Pelham FD, Pelham Manor FD, Dobbs Ferry FD, Hastings FD, Ardsley FD, Greenville FD, Scarsdale FD, Mount Kisco DPW, Pleasantville DPW, Yorktown Water Department, Somers Water Departments, Mount Vernon DPW, Yonkers DPW",
+ "supportsAdvancedQueries": true,
+ "supportedQueryFormats": "JSON, geoJSON, PBF",
+ "description": "This data is a collection of fire hydrants for 50 fire departments (some with partial data) within Westchester County. The data was collected and/or verified by fire departments or other local sources. As of October 5, 2015 this is the most up to date version of fire hydrant data available.",
+ "fields": [
+  {
+   "name": "OBJECTID",
+   "type": "esriFieldTypeOID",
+   "alias": "OBJECTID"
+  },
+  {
+   "name": "DISTRICT",
+   "type": "esriFieldTypeString",
+   "alias": "Fire District"
+  },
+  {
+   "name": "MUNCIPALIT",
+   "type": "esriFieldTypeString",
+   "alias": "Municipality"
+  },
+  {
+   "name": "HYD_NUMBER",
+   "type": "esriFieldTypeString",
+   "alias": "Hydrant Number"
+  },
+  {
+   "name": "FIRENAME",
+   "type": "esriFieldTypeString",
+   "alias": "Fire District Name"
+  },
+  {
+   "name": "SHAPE",
+   "type": "esriFieldTypeGeometry",
+   "alias": "Shape"
+  }
+ ],
+ "advancedQueryCapabilities": {
+  "supportsPagination": true
+ }
+}

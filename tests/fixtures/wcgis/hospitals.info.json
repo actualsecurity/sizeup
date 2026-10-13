@@ -1,0 +1,53 @@
+{
+ "id": 178,
+ "name": "Hospitals",
+ "type": "Feature Layer",
+ "geometryType": "esriGeometryPoint",
+ "maxRecordCount": 1000,
+ "capabilities": "Map,Query,Data",
+ "editingInfo": null,
+ "copyrightText": "",
+ "supportsAdvancedQueries": true,
+ "supportedQueryFormats": "JSON, geoJSON, PBF",
+ "description": "Hospitals in Westchester County, New York as of April 2020. Descriptions include: Hospital name, street address, and phone number. There are currently seventeen hospitals.Data comes from the NYS DOH. Link: https://profiles.health.ny.gov/hospital/county_or_region/county:119 Hospital --VETERANS ADMINISTRATION HOSPITAL (MONTROSE) is not in NYS DOH list, It was added becasue this hospital is serviced ",
+ "fields": [
+  {
+   "name": "OBJECTID",
+   "type": "esriFieldTypeOID",
+   "alias": "OBJECTID"
+  },
+  {
+   "name": "HOSPNAME",
+   "type": "esriFieldTypeString",
+   "alias": "NAME"
+  },
+  {
+   "name": "ADDRESS",
+   "type": "esriFieldTypeString",
+   "alias": "ADDRESS"
+  },
+  {
+   "name": "CITY",
+   "type": "esriFieldTypeString",
+   "alias": "CITY"
+  },
+  {
+   "name": "ZIP",
+   "type": "esriFieldTypeString",
+   "alias": "ZIP"
+  },
+  {
+   "name": "PHONE",
+   "type": "esriFieldTypeString",
+   "alias": "PHONE"
+  },
+  {
+   "name": "SHAPE",
+   "type": "esriFieldTypeGeometry",
+   "alias": "Shape"
+  }
+ ],
+ "advancedQueryCapabilities": {
+  "supportsPagination": true
+ }
+}

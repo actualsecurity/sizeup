@@ -501,12 +501,12 @@ window.CadMap = (() => {
       show(box, false);
       show(nomap, true);
       setText(nomap, "No map");
-      if (window.MapLayers) MapLayers.nearby(inc, box.parentElement);
+      if (window.MapLayers) MapLayers.cameras(inc, $("#d-cams"));
       return;
     }
     show(nomap, false);
     show(box, true);
-    if (window.MapLayers) MapLayers.nearby(inc, box.parentElement);      // "Cameras nearby" under the map (#73)
+    if (window.MapLayers) MapLayers.cameras(inc, $("#d-cams"));          // the Cameras panel under the map (#73, #95)
     if (!views.detail) {
       views.detail = new RigMap(box, { scene: cad.scene, pins: true, unset: true, editable: () => canDo("admin"), operator,
                                        onPick: (id) => selectIncident(id), onExpand: openBig });
@@ -675,6 +675,10 @@ window.CadMap = (() => {
       },
       empty: "None",
     });
+    if (BOARD && window.MapLayers) {        // the wall board: the active highway event's two cameras, small (#95)
+      const act = emerg.find((o) => o.status === "active" && o.lat != null) || emerg.find((o) => o.lat != null) || null;
+      MapLayers.cameras(act, $("#ov-cams"), { small: true });
+    }
     if (mapsOk()) {
       if (!views.overview) {
         views.overview = new RigMap($("#ov-map"), { scene: cad.scene, pins: true, unset: !BOARD, editable: () => canDo("admin") && !BOARD, operator,
