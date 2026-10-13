@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Callable
 
 from sizeup import polly
-from sizeup.cad import dispatcher, eta, export, mapview, runcards
+from sizeup.cad import airport, dispatcher, eta, export, mapview, runcards
 from sizeup.cad.activity import Activity
 from sizeup.cad.comms import Comms
 from sizeup.cad.feed import Feed
@@ -68,6 +68,7 @@ class Settings:
     channels: tuple[str, ...] = ("FG1", "PC repeater")
     tactical: tuple[str, ...] = ("FG1",)          # analog fireground channels: their traffic goes on the active events
     incident_talkgroups: tuple[int, ...] = (307, 333)   # P25: where 60 Control answers our units
+    airport_talkgroups: tuple[int, ...] = (333,)        # P25 Airport Incident: an open Airport event's (#87)
     radio_seed: str = ""                           # "" = data/radio_ids.json
 
 
@@ -154,7 +155,8 @@ class Cad:
         n = self.radios.seed()
         if n:
             log(f"CAD: seeded {n} radio IDs ({len(self.radios.plan['conflicts'])} conflicts left unmapped)")
-        self.comms = Comms(self.store, s.tactical, s.incident_talkgroups, clock=clock, paging=s.paging)
+        self.comms = Comms(self.store, s.tactical, s.incident_talkgroups, clock=clock, paging=s.paging,
+                           airport_tgs=s.airport_talkgroups)
         self.comms.prune()
         # The 60 Control feed: the incident talkgroup(s) and every page on the paging channel(s) (#80).
         self.feed = Feed(self.store, lambda: self.lists, has_clip=lambda cid: self.has_clip(cid), paging=s.paging)
@@ -354,6 +356,7 @@ class Cad:
     def create(self, body: dict) -> dict:
         """Accept event (Event info): numbered at once; emergency -> Pending events, else Non-emergency."""
         f = self._fields(body, partial=False)
+        airport.default_location(f)            # an Airport event with no location: the terminal (#87)
         self._auto_geo(f)
         iid = self.store.create_incident(**f, source="manual", status="pending", operator=_text(body, "operator", OPERATOR_MAX))
         inc = self.store.incident(iid)
@@ -366,6 +369,10 @@ class Cad:
             f["lat"] = f["lon"] = None
             f["geo_label"] = ""
             self._auto_geo(f)
+        if f.get("type") == airport.TYPE and not f.get("address") and f.get("lat") is None:   # typed Airport, no location (#87)
+            old = self.store.incident(iid)
+            if ("address" in f or not old["address"]) and ("lat" in f or old["lat"] is None):
+                airport.default_location(f)
         return self.store.update_incident(iid, f, _text(body, "operator", OPERATOR_MAX))
 
     def accept(self, iid: int, body: dict) -> dict:
@@ -893,7 +900,8 @@ class Cad:
     def save_run_card(self, body: dict) -> dict:
         k, rename = _text(body, "type", 50, required=True), _text(body, "rename_from", 50)
         old = runcards.card(self.store, rename or k)
-        c = runcards.save(self.store, k, body.get("slots"), _text(body, "spoken", 120), rename)
+        c = runcards.save(self.store, k, body.get("slots"), _text(body, "spoken", 120), rename,
+                          remarks=_text(body, "remarks", runcards.MAX_REMARKS))
         self.settings.audit_card(_text(body, "operator", OPERATOR_MAX), old, c)
         return c
 

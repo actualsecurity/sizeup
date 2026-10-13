@@ -187,7 +187,7 @@ def test_every_type_is_mapped_and_only_its_subtypes_are_offered():
     # Department-given vs proposed: Settings marks the proposals "to confirm".
     tsp = L.type_subtypes_partial
     assert tsp["given"] == ["ALARM", "ALS", "BLS", "BRUSH", "DRILL", "HAZARD", "INVEST", "MA", "MVA"]
-    assert set(tsp["confirm"]) == {"MVA", "MVF", "NOTIF", "RECALL", "RESCUE", "SERVICE", "STRU"}
+    assert set(tsp["confirm"]) == {"AIRPORT", "MVA", "MVF", "NOTIF", "RECALL", "RESCUE", "SERVICE", "STRU"}
     # Every default card fits the map, and so does every card on the live database.
     for c in L.run_cards:
         L.check_key(c["type"])

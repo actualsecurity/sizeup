@@ -1633,8 +1633,8 @@ class Editor:
                 "exported_at": datetime.fromtimestamp(self.store.clock(), TZ).isoformat(timespec="seconds"),
                 "data_file": lists_mod._shown_path(str(self.path)), "defaults_version": str(self.defaults.get("version") or ""),
                 "overrides": self.overrides(),
-                "run_cards": [{"type": c["type"], "spoken": c["spoken"], "is_default": c["is_default"], "slots": c["slots"]}
-                              for c in runcards.cards(self.store)],
+                "run_cards": [{"type": c["type"], "spoken": c["spoken"], "is_default": c["is_default"], "slots": c["slots"],
+                               "remarks": c["remarks"]} for c in runcards.cards(self.store)],
                 "operators": [{"name": o["name"], "role": o["role"], "active": o["active"], "email": o["email"],
                                "callsign": o["callsign"]} for o in self.operators()]}
 
@@ -1777,10 +1777,11 @@ class Editor:
                                     "change": "added" if k not in a else "removed" if k not in b else "changed",
                                     "old": a.get(k), "new": b.get(k)})
         if cards is not None:
-            have = {c["type"]: {"spoken": c["spoken"], "is_default": c["is_default"], "slots": c["slots"]}
+            have = {c["type"]: {"spoken": c["spoken"], "is_default": c["is_default"], "slots": c["slots"], "remarks": c["remarks"]}
                     for c in runcards.cards(self.store)}
             want = {c["type"]: {"spoken": str(c.get("spoken") or ""), "is_default": bool(c.get("is_default")),
-                                "slots": [runcards.normal(s) for s in c["slots"]]} for c in cards}
+                                "slots": [runcards.normal(s) for s in c["slots"]],
+                                "remarks": " ".join(str(c.get("remarks") or "").split())[:runcards.MAX_REMARKS]} for c in cards}
             for k in sorted(set(have) | set(want)):
                 if have.get(k) != want.get(k):
                     changes.append({"section": "run cards", "store": "run_cards", "key": k,
@@ -1809,8 +1810,9 @@ class Editor:
             if cards is not None:
                 db.execute("DELETE FROM run_cards")
                 for i, c in enumerate(cards):
-                    cid = db.execute("INSERT INTO run_cards (type, spoken, is_default, sort) VALUES (?, ?, ?, ?)",
-                                     (c["type"], str(c.get("spoken") or "")[:120], int(bool(c.get("is_default"))), i)).lastrowid
+                    cid = db.execute("INSERT INTO run_cards (type, spoken, is_default, sort, remarks) VALUES (?, ?, ?, ?, ?)",
+                                     (c["type"], str(c.get("spoken") or "")[:120], int(bool(c.get("is_default"))), i,
+                                      " ".join(str(c.get("remarks") or "").split())[:runcards.MAX_REMARKS])).lastrowid
                     runcards._write_slots(db, cid, c["slots"])
             if ops is not None:
                 for o in ops:      # an email the file gives someone else moves to them (the file wins)

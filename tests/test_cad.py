@@ -153,7 +153,7 @@ def write_lists(tmp_path, **changes):
 
 def test_lists_file_has_the_sheets_vocabulary():
     L = lists.load()
-    assert L.type_codes == ("ALARM", "ALS", "BLS", "BRUSH", "DRILL", "HAZARD", "INVEST", "MA", "MVA", "MVF", "NOTIF",
+    assert L.type_codes == ("AIRPORT", "ALARM", "ALS", "BLS", "BRUSH", "DRILL", "HAZARD", "INVEST", "MA", "MVA", "MVF", "NOTIF",
                             "RECALL", "RESCUE", "SERVICE", "STRU")
     # the sheet's 51 subtypes are all there (the department has since added more, e.g. GAS-ODOR)
     assert len(L.subtype_codes) >= 51 and L.subtype_codes[:3] == ("CO-COMM", "CO-RESD", "COMM")
@@ -411,7 +411,7 @@ def test_run_card_resolution_type_subtype_beats_type():
     cards = {c["type"]: c for c in runcards.cards(cad.store)}
     assert set(cards) == {"STRU", "ALARM/COMM", "ALARM/RESD", "ALARM/CO-COMM", "ALARM/CO-RESD", "HAZARD/GAS",
                           "HAZARD/WIRES", "BRUSH", "MVA", "MVA/EXTRI", "RESCUE/WATER", "SERVICE", "ALS", "BLS", "MA",
-                          "INVEST"}
+                          "INVEST", "AIRPORT/ALERT-2", "AIRPORT/ALERT-3"}
     assert all(c["is_default"] for c in cards.values()) and cards["ALARM/COMM"]["phrase"] == "a commercial fire alarm"
     assert runcards.resolve(cad.store, "MVA", "EXTRI")["type"] == "MVA/EXTRI"
     assert runcards.resolve(cad.store, "MVA", "CAR")["type"] == "MVA"          # no MVA/CAR card: the type's

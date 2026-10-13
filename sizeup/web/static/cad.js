@@ -633,7 +633,7 @@ function pageMenuItems(t) {
 // Every transmission from a radio on a unit assigned to it (dispatched / attached until it cleared),
 // FG1 while it had units on it, and 60 Control's turns answering those units in the same P25 call.
 
-const RADIO_WHY = { unit: "Unit", channel: "FG1", dispatcher: "60 Control", manual: "Added", page: "Page" };
+const RADIO_WHY = { unit: "Unit", channel: "FG1", dispatcher: "60 Control", manual: "Added", page: "Page", airport: "Airport TG" };
 // One transmission: play first, then time, rig, channel, duration; the incidents it is on as chips (a click:
 // that incident) and its "⋯" menu (txMenu) at the end; the transcript under it. ctx: {scope: "feed" | "rv" |
 // "inc" (where it is drawn: the menu's identity across redraws), current: the incident whose list this is
@@ -663,6 +663,7 @@ function radioRow(t, ctx = {}) {
     w.title = t.why === "unit" ? `${t.link_unit || t.rig} was on this incident` : t.why === "channel"
       ? "Unidentified FG1 radio while this was the only call with units" : t.why === "manual"
       ? `Added${t.link_unit ? ` by ${t.link_unit}` : " by hand"}` : t.why === "page" ? "The 60 Control page for this event"
+      : t.why === "airport" ? "On the Airport Incident talkgroup while this was the open airport event"
       : `60 Control answering ${t.link_unit || "a unit on it"}`;
     meta.append(w);
   }
@@ -1319,7 +1320,8 @@ function renderDispatchBox(inc) {
   if (!$("#r-dispatch")._busy) setText($("#r-dispatch"), addOn ? "Dispatch add-on" : "Dispatch");
   const rec = cad.rec && cad.rec.iid === inc.id ? cad.rec : null;
   setText($("#r-card"), rec && rec.card ? `Card: ${rec.card_label || rec.card}${rec.forType ? " (new type)" : ""}` : "");
-  const warn = rec ? [...(rec.error ? [rec.error] : []), ...(rec.note ? [rec.note] : []), ...rec.unfilled] : [];
+  const warn = rec ? [...(rec.error ? [rec.error] : []), ...(rec.note ? [rec.note] : []), ...(rec.remarks ? [rec.remarks] : []),
+                     ...rec.unfilled] : [];
   $("#r-unfilled").replaceChildren(...warn.map((w) => el("li", "", w)));
   const order = rec && rec.order;
   setText($("#r-order"), !order || !rec.units.length ? ""
@@ -2367,7 +2369,7 @@ function renderRunCards() {
   show($("#rc-banner"), !!(cad.state && cad.state.run_cards_default));
   syncList($("#rc-list"), cards, {
     key: (c) => String(c.id),
-    sig: (c) => JSON.stringify([c.type, c.slots, c.is_default, c.label, c.phrase, cad.rcEditing === c.type, cad.listSig.length]),
+    sig: (c) => JSON.stringify([c.type, c.slots, c.is_default, c.label, c.phrase, c.remarks, cad.rcEditing === c.type, cad.listSig.length]),
     make: () => {
       const li = el("li", "rc item");
       li.tabIndex = 0;
@@ -2383,6 +2385,7 @@ function renderRunCards() {
       h.append(el("b", "", typeLabel(t, s)), el("span", "spacer"));
       h.append(c.is_default ? el("span", "chip default", "default") : el("span", "chip edited", "edited"));
       li.replaceChildren(h, el("div", "dim small", c.slots.map(describeSlot).join(", ")), el("div", "dim small", `“…for ${c.phrase}”`));
+      if (c.remarks) li.append(el("div", "small rc-remarks", c.remarks));
     },
     empty: "None",
   });
@@ -2441,6 +2444,7 @@ function editCard(c) {
   fillSubtypes($("#rc-subtype"), t, "Any subtype");
   keepSubtype($("#rc-subtype"), t, s || "");
   $("#rc-spoken").value = c ? c.spoken || "" : "";
+  $("#rc-remarks").value = c ? c.remarks || "" : "";
   rcPlaceholder();
   $("#rc-slots").replaceChildren(...(c ? c.slots : [{ kind: "engine", count: 1 }]).map(slotRow));
   rcAllSync();
@@ -2462,7 +2466,8 @@ async function saveCard(e) {
   e.preventDefault();
   flash($("#rc-error"));
   const t = $("#rc-type").value, s = $("#rc-subtype").value;
-  const body = { type: s ? `${t}/${s}` : t, spoken: $("#rc-spoken").value.trim(), slots: slotsFromForm(), operator: operator() };
+  const body = { type: s ? `${t}/${s}` : t, spoken: $("#rc-spoken").value.trim(), remarks: $("#rc-remarks").value.trim(),
+                 slots: slotsFromForm(), operator: operator() };
   if (cad.rcEditing && cad.rcEditing !== body.type) body.rename_from = cad.rcEditing;
   try {
     const c = await api("POST", "/api/cad/runcards", body);

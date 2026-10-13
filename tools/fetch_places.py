@@ -798,6 +798,11 @@ def build(db_path: Path, bounds, today: str, skip: set[str] = frozenset(), old_d
         if src.get("code") == "nysdot-rm" and not src.get("kept_from_previous_build"):
             src["calibration"] = {k: v for k, v in calibration.items() if k != "landmarks_without_marker"}
     counts = write_places(db, rows, sources, stats, calibration)
+    try:                                   # the airport's places (#87, tools/fetch_airport.py): after ours, from checked-in files
+        import fetch_airport
+        counts["khpn"] = fetch_airport.add_places(db, fetch_airport.place_rows(fetch_airport.read("khpn_surface.geojson"), db), today)
+    except Exception as e:                 # noqa: BLE001  (a missing file is reported, the rest of the build stands)
+        print(f"airport places skipped: {e}", file=sys.stderr)
     db.execute("VACUUM")
     db.close()
     if prev_db is not db:

@@ -24,6 +24,9 @@ code-only unit. A unit named on the card is left for its own slot. The recommend
 console ticks "Full department response", so the dispatch says that instead of each unit.
 Stored as kind "all" with the department in the unit column (no schema change).
 
+Remarks (#87): a card may carry a line for the dispatcher ("Staging: Airport Command Post / EOC, 1 Airport
+Emergency Staging Way"), shown with the recommendation and on the card; never spoken.
+
 Nearest first (user, 2026-10-07: "can we use the location information of where these apparatus are
 normally to recommend certain ones based on proximity to the next call?"): given where each rig is
 now (sizeup/cad/mapview.py locate(): its station, on its way home from a call it just cleared, or a
@@ -41,11 +44,12 @@ works on day one, NOT PCFD policy: the page says so until each card has been edi
 
 from __future__ import annotations
 
-from sizeup.cad import eta
+from sizeup.cad import airport, eta
 from sizeup.cad.lists import ANY_KIND, key
 from sizeup.cad.store import CadError, Store
 
 MAX_SLOTS, MAX_COUNT = 20, 10
+MAX_REMARKS = 300
 ALL = "all"          # the full-department slot's key, and its kind in run_card_slots
 
 
@@ -61,8 +65,8 @@ def seed(store: Store, fill: bool = False) -> int:
     with store.tx() as db:
         base = db.execute("SELECT COALESCE(MAX(sort), -1) + 1 FROM run_cards").fetchone()[0]
         for k, c in enumerate(cards, base):
-            cid = db.execute("INSERT INTO run_cards (type, spoken, is_default, sort) VALUES (?, '', 1, ?)",
-                             (c["type"], k)).lastrowid
+            cid = db.execute("INSERT INTO run_cards (type, spoken, is_default, sort, remarks) VALUES (?, '', 1, ?, ?)",
+                             (c["type"], k, c.get("remarks", ""))).lastrowid
             _write_slots(db, cid, c["slots"])
     return len(cards)
 
@@ -155,7 +159,7 @@ def check_key(store: Store, k: str) -> str:
     return key(typ, sub)
 
 
-def save(store: Store, k: str, slots, spoken: str = "", rename_from: str = "") -> dict:
+def save(store: Store, k: str, slots, spoken: str = "", rename_from: str = "", remarks: str = "") -> dict:
     """Add or edit one card (k = TYPE or TYPE/SUBTYPE). An edited card is no longer a default. A card
     kept under a pair the map no longer allows can still have its units edited (not a new key)."""
     k = (k or "").strip()
@@ -163,6 +167,7 @@ def save(store: Store, k: str, slots, spoken: str = "", rename_from: str = "") -
         k = check_key(store, k)
     slots = validate_slots(store, slots)
     spoken = (spoken or "").strip()[:120]
+    remarks = " ".join((remarks or "").split())[:MAX_REMARKS]
     old = card(store, rename_from or k)
     if rename_from and old is None:
         raise CadError(f"no run card {rename_from!r}")
@@ -171,11 +176,12 @@ def save(store: Store, k: str, slots, spoken: str = "", rename_from: str = "") -
     with store.tx() as db:
         if old is None:
             sort = (db.execute("SELECT COALESCE(MAX(sort), -1) + 1 FROM run_cards").fetchone()[0])
-            cid = db.execute("INSERT INTO run_cards (type, spoken, is_default, sort) VALUES (?, ?, 0, ?)",
-                             (k, spoken, sort)).lastrowid
+            cid = db.execute("INSERT INTO run_cards (type, spoken, is_default, sort, remarks) VALUES (?, ?, 0, ?, ?)",
+                             (k, spoken, sort, remarks)).lastrowid
         else:
             cid = old["id"]
-            db.execute("UPDATE run_cards SET type = ?, spoken = ?, is_default = 0 WHERE id = ?", (k, spoken, cid))
+            db.execute("UPDATE run_cards SET type = ?, spoken = ?, is_default = 0, remarks = ? WHERE id = ?",
+                       (k, spoken, remarks, cid))
         _write_slots(db, cid, slots)
     return card(store, k)
 
@@ -193,10 +199,11 @@ def reset(store: Store, k: str) -> dict:
     with store.tx() as db:
         if c is None:
             sort = db.execute("SELECT COALESCE(MAX(sort), -1) + 1 FROM run_cards").fetchone()[0]
-            cid = db.execute("INSERT INTO run_cards (type, spoken, is_default, sort) VALUES (?, '', 1, ?)", (k, sort)).lastrowid
+            cid = db.execute("INSERT INTO run_cards (type, spoken, is_default, sort, remarks) VALUES (?, '', 1, ?, ?)",
+                             (k, sort, d.get("remarks", ""))).lastrowid
         else:
             cid = c["id"]
-            db.execute("UPDATE run_cards SET spoken = '', is_default = 1 WHERE id = ?", (cid,))
+            db.execute("UPDATE run_cards SET spoken = '', is_default = 1, remarks = ? WHERE id = ?", (d.get("remarks", ""), cid))
         _write_slots(db, cid, d["slots"])
     return card(store, k)
 
@@ -213,8 +220,9 @@ def replace_all(store: Store, new: list[dict]) -> None:
     with store.tx() as db:
         db.execute("DELETE FROM run_cards")
         for k, c in enumerate(new):
-            cid = db.execute("INSERT INTO run_cards (type, spoken, is_default, sort) VALUES (?, ?, ?, ?)",
-                             (c["type"], c.get("spoken", ""), int(bool(c.get("is_default"))), k)).lastrowid
+            cid = db.execute("INSERT INTO run_cards (type, spoken, is_default, sort, remarks) VALUES (?, ?, ?, ?, ?)",
+                             (c["type"], c.get("spoken", ""), int(bool(c.get("is_default"))), k,
+                              str(c.get("remarks") or "")[:MAX_REMARKS])).lastrowid
             _write_slots(db, cid, c["slots"])
 
 
@@ -285,7 +293,7 @@ def recommend(store: Store, typ: str, subtype: str = "", incident_id: int | None
         what = L.type_label(typ, subtype) or "this event"
         return {"card": None, "card_label": "", "units": [], "unfilled": [], "already": [u["name"] for u in on_here],
                 "note": f"No run card for {what}: add units by hand", "joint_call": "", "order": order, "others": others,
-                "full": ""}
+                "full": "", "remarks": ""}
     town = L.joint_call(inc) if inc is not None else ""
 
     def rank(u: dict) -> int:          # the event's joint town's units, then PCFD's, then other joint units
@@ -342,7 +350,7 @@ def recommend(store: Store, typ: str, subtype: str = "", incident_id: int | None
     return {"card": c["type"], "card_label": c["label"], "units": picks, "unfilled": unfilled,
             "already": [u["name"] for u in on_here], "note": "", "joint_call": town, "order": order,
             "others": {k: v for k, v in others.items() if k not in taken},
-            "full": next((s[ALL] for s in c["slots"] if s.get(ALL)), "")}
+            "full": next((s[ALL] for s in c["slots"] if s.get(ALL)), ""), "remarks": c.get("remarks", "")}
 
 
 def from_page(incident_type: str, category: str, text: str) -> tuple[str, str, str]:
@@ -352,6 +360,9 @@ def from_page(incident_type: str, category: str, text: str) -> tuple[str, str, s
     t = " " + " ".join((text or "").lower().replace(",", " ").replace(".", " ").split()) + " "
     has = lambda *ws: any(f" {w} " in t for w in ws)
     heard = f"page: {incident_type.lower()}" if incident_type and incident_type != "Unknown" else "page"
+    ap = airport.heard(text)                   # the airport or an alert level named (#87): an Airport event
+    if ap is not None:
+        return ap
     if incident_type in ("Working fire", "Structure fire"):
         return "STRU", "", ""
     if incident_type == "Fire alarm":

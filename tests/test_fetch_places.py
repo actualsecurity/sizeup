@@ -222,7 +222,7 @@ def test_build_writes_the_table_and_meta_and_keeps_a_failed_source(fp, tmp_path,
     sources = json.loads(meta["sources"])
     assert sources[0]["name"] == "NYS Address Points"                  # the rest of the build is left alone
     ours = {s["code"]: s for s in sources if s.get("part") == "places"}
-    assert set(ours) == {"nysdot-rm", "nysta-mileposts", "osm"}
+    assert set(ours) == {"nysdot-rm", "nysta-mileposts", "osm", "khpn"}      # khpn: tools/fetch_airport.py (#87)
     assert all(s["fetched"] == "2026-10-13" and s["license"] for s in ours.values())
     assert "ODbL" in ours["osm"]["license"]
     assert json.loads(meta["counts"])["places"]["by_source"] == {"nysdot-rm": 4, "nysdot-lrs": 2, "nysta-mileposts": 1, "osm": 7}

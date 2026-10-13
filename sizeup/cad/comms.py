@@ -14,6 +14,10 @@
                       dispatcher  a 60 Control turn right before or after a linked unit's turn in the
                                   same P25 call on an incident talkgroup (Fire/EMS 15); a key-up of
                                   an unknown radio between them (no ID, issue #62) is looked past
+                      airport     a P25 transmission on the Airport Incident talkgroup (333) while
+                                  exactly one Airport event (type AIRPORT, #87) is open: the whole
+                                  talkgroup is that incident's, whoever is talking. Two open: can't
+                                  tell whose, no link; none open: nothing.
                       manual      put on the event by a person (a transmission's menu, "Add to event");
                                   unit = the operator who did it (also in the event's timeline)
                       page        a 60 Control page (South 2) on the event it opened, or a repeat of it
@@ -41,6 +45,7 @@ import re
 import time
 from datetime import datetime
 
+from sizeup.cad import airport
 from sizeup.cad.radios import is_dispatcher
 from sizeup.cad.store import TZ
 
@@ -60,9 +65,10 @@ def split_call(tid: str, p25: bool) -> tuple[str, int | None]:
 
 class Comms:
     def __init__(self, store, tactical: tuple[str, ...] = ("FG1",), incident_tgs: tuple[int, ...] = (307, 333),
-                 clock=time.time, paging: tuple[str, ...] = ("South 2",)):
+                 clock=time.time, paging: tuple[str, ...] = ("South 2",), airport_tgs: tuple[int, ...] = (333,)):
         self.store, self.clock = store, clock
         self.tactical, self.incident_tgs, self.paging = set(tactical), set(incident_tgs), set(paging)
+        self.airport_tgs = set(airport_tgs)      # the Airport Incident talkgroup(s): an open Airport event's (#87)
         self.rev = 0            # bumped on every new or changed transmission (the /comms page polls it)
         self._drop_bad_channel_links()
 
@@ -117,6 +123,10 @@ class Comms:
                 active = db.execute(self.ACTIVE_EVENTS, (start, start)).fetchall()
                 if len(active) == 1:            # two calls on FG1: can't tell whose it is
                     links[active[0]["incident_id"]] = ("channel", "")
+            if p25 and t.get("talkgroup") in self.airport_tgs:
+                open_ap = db.execute(self.OPEN_AIRPORT, (airport.TYPE, start, start)).fetchall()
+                if len(open_ap) == 1:           # the Airport Incident talkgroup: the one open airport event's
+                    links.setdefault(open_ap[0]["id"], ("airport", ""))
             for iid, (why, unit) in links.items():
                 if iid not in off:              # a person took it off that event: not again
                     self._auto(db, tid, iid, why, unit)
@@ -129,6 +139,9 @@ class Comms:
     ON_EVENT_BY_UNIT = ("SELECT DISTINCT a.incident_id FROM assignments a JOIN units u ON u.id = a.unit_id "
                         "WHERE u.name = ? AND a.assigned_at IS NOT NULL AND a.assigned_at <= ? "
                         "AND (a.cleared_at IS NULL OR a.cleared_at >= ?)")
+    # Airport events (#87) open at time T: created by then and not yet closed or dismissed (a late transcript
+    # from while it was open still links).
+    OPEN_AIRPORT = "SELECT id FROM incidents WHERE type = ? AND created_at <= ? AND (closed_at IS NULL OR closed_at >= ?)"
     # Emergency events with any unit on them at time T (their tactical channel is in use).
     ACTIVE_EVENTS = ("SELECT DISTINCT a.incident_id FROM assignments a JOIN incidents i ON i.id = a.incident_id "
                      "WHERE i.emergency = 1 AND a.assigned_at IS NOT NULL AND a.assigned_at <= ? "
@@ -426,6 +439,8 @@ def why_text(why: str, unit: str = "") -> str:
         return f"60 Control answering {unit or 'a unit on it'}"
     if why == "page":
         return "the 60 Control page"
+    if why == "airport":
+        return "Airport Incident talkgroup, the open airport event"
     return why
 
 

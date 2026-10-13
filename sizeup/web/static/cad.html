@@ -404,6 +404,7 @@ Slots go in order. A kind takes the next available unit of that kind (regular ap
             <label class="field">Subtype <select id="rc-subtype"></select></label>
           </div>
           <label class="field">Spoken as <input id="rc-spoken" type="text" maxlength="120"></label>
+          <label class="field">Remarks <input id="rc-remarks" type="text" maxlength="300" placeholder="For the dispatcher: staging, talkgroup, mutual aid (shown, not spoken)"></label>
           <ol id="rc-slots" class="rc-slots"></ol>
           <div class="row">
             <button id="rc-add-kind" type="button">+ Kind</button>
@@ -462,6 +463,7 @@ Slots go in order. A kind takes the next available unit of that kind (regular ap
 
 <script src="/static/vendor/maplibre-gl.js"></script>
 <script src="/static/map-style.js"></script>
+<script src="/static/airport.js"></script>
 <script src="/static/maplayers.js"></script>
 <script src="/static/icons.js"></script>
 <script src="/static/ui.js"></script>

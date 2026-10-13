@@ -15,8 +15,9 @@
     "These are the defaults: edits made in the console's Settings are kept in the CAD database, laid over",
     "this file (sizeup/cad/settings.py). version: shown in Settings > System; bump it when the file changes."
   ],
-  "version": "2026-10-07.4",
+  "version": "2026-10-13.1",
   "event_types": [
+    {"code": "AIRPORT", "name": "Airport", "color": "#4A9AE8", "confirm": "proposed (#87): Westchester County Airport alerts; PCFD responds to Alert 2 and above"},
     {"code": "ALARM", "name": "Alarm", "color": "#CC0000"},
     {"code": "ALS", "name": "ALS", "color": "#93C47D"},
     {"code": "BLS", "name": "BLS", "color": "#93C47D"},
@@ -89,7 +90,19 @@
     {"code": "SPRINK", "name": "Sprinkler"},
     {"code": "STRUCTURAL", "name": "Structural"},
     {"code": "VEHICLE", "name": "Vehicle"},
-    {"code": "WEATHER", "name": "Weather"}
+    {"code": "WEATHER", "name": "Weather"},
+    {"code": "ALERT-1", "name": "Alert 1", "confirm": "proposed (#87): in-flight difficulty, airport standby (PCFD not due)"},
+    {"code": "ALERT-2", "name": "Alert 2", "confirm": "proposed (#87): major difficulty, possible crash: PCFD responds"},
+    {"code": "ALERT-3", "name": "Alert 3", "confirm": "proposed (#87): a crash on or near the airport"},
+    {"code": "FUEL", "name": "Fuel spill", "confirm": "proposed (#87)"},
+    {"code": "ACFT-FIRE", "name": "Aircraft fire (ground)", "confirm": "proposed (#87)"}
+  ],
+  "_airport": [
+    "Westchester County Airport (HPN, #87): the type AIRPORT and its subtypes are a proposal (the FAA's three alert levels",
+    "plus a fuel spill, an aircraft fire on the ground and other): the department confirms the wording and the list.",
+    "A 60 Control page or Fire/EMS dispatch naming the airport or an alert level opens the event as AIRPORT with",
+    "the level set (sizeup/cad/airport.py); the Airport Incident talkgroup (333) links to the open Airport event;",
+    "an Airport event with no location is placed at the terminal, 240 Airport Rd (the map turns the Airport layer on)."
   ],
   "_type_subtypes": [
     "TYPE -> the subtypes it allows; no subtype is always allowed. Strict: a type listed with none, or missing",
@@ -104,6 +117,7 @@
   "type_subtypes_partial": {
     "given": ["ALARM", "ALS", "BLS", "BRUSH", "DRILL", "HAZARD", "INVEST", "MA", "MVA"],
     "confirm": {
+      "AIRPORT": "not given: proposed (#87) Alert 1 / 2 / 3, fuel spill, aircraft fire on the ground, other",
       "MVA": "NOINJ added: next in the department's subtype list after MULTINJU",
       "MVF": "not given: the AIR .. TRUCK block of the department's subtype list",
       "NOTIF": "not given: the CAD .. WATER block of the department's subtype list",
@@ -114,6 +128,7 @@
     }
   },
   "type_subtypes": {
+    "AIRPORT": ["ALERT-1", "ALERT-2", "ALERT-3", "FUEL", "ACFT-FIRE", "OTHER"],
     "ALARM": ["COMM", "RESD", "CO-COMM", "CO-RESD", "GAS", "MED", "TROUB"],
     "ALS": ["ECHO"],
     "BLS": [],
@@ -538,6 +553,13 @@
   },
   "_spoken": "How the dispatch voice says a TYPE, TYPE/SUBTYPE or */SUBTYPE (any type): TYPE/SUBTYPE, then */SUBTYPE, then TYPE: '... for a commercial fire alarm.' In a subtype's phrase {type} is the type's phrase: '{type} with multiple injuries' -> 'a motor vehicle accident with multiple injuries'. A subtype with no phrase (ECHO, AIR, MULTI, NEXT, CAD, RMA: meaning unconfirmed) says the type's.",
   "spoken": {
+    "AIRPORT": "an incident at Westchester County Airport",
+    "AIRPORT/ALERT-1": "an Alert 1 at Westchester County Airport, standby",
+    "AIRPORT/ALERT-2": "an Alert 2 at Westchester County Airport",
+    "AIRPORT/ALERT-3": "an Alert 3 at Westchester County Airport",
+    "AIRPORT/FUEL": "a fuel spill at Westchester County Airport",
+    "AIRPORT/ACFT-FIRE": "an aircraft fire on the ground at Westchester County Airport",
+    "AIRPORT/OTHER": "an incident at Westchester County Airport",
     "ALARM": "a fire alarm",
     "ALARM/COMM": "a commercial fire alarm",
     "ALARM/RESD": "a residential fire alarm",
@@ -646,7 +668,11 @@
   "_run_cards": [
     "Default run cards, keyed TYPE or TYPE/SUBTYPE (the more specific wins). Seeded once into the database",
     "and edited in the app. A STAND-IN so the console works: NOT PCFD policy.",
-    "Hint for the department (no card added): CO-YES (CO with symptoms) may also warrant EMS."
+    "Hint for the department (no card added): CO-YES (CO with symptoms) may also warrant EMS.",
+    "remarks: a line for the dispatcher, shown with the recommendation (never spoken). The airport cards (#87):",
+    "Alert 2 = the full department plus the duty officer, Alert 3 = the full department with a mutual-aid note;",
+    "both stage at the Command Post / EOC, 1 Airport Emergency Staging Way (user, 2026-10-13; the spot is the NYS",
+    "address point, to confirm on the ground). The department edits them to the airport plan."
   ],
   "run_cards": [
     {
@@ -688,7 +714,17 @@
     {"type": "ALS", "slots": [{"kind": "engine", "count": 1}]},
     {"type": "BLS", "slots": [{"kind": "engine", "count": 1}]},
     {"type": "MA", "slots": [{"unit": "2398"}, {"kind": "engine", "count": 1}]},
-    {"type": "INVEST", "slots": [{"kind": "engine", "count": 1}]}
+    {"type": "INVEST", "slots": [{"kind": "engine", "count": 1}]},
+    {
+      "type": "AIRPORT/ALERT-2",
+      "slots": [{"unit": "2398"}, {"all": "Port Chester FD"}],
+      "remarks": "Staging: Airport Command Post / EOC, 1 Airport Emergency Staging Way (Tower Rd side). Airport Incident talkgroup. Not yet PCFD policy: edit to the airport plan."
+    },
+    {
+      "type": "AIRPORT/ALERT-3",
+      "slots": [{"unit": "2398"}, {"all": "Port Chester FD"}],
+      "remarks": "Staging: Airport Command Post / EOC, 1 Airport Emergency Staging Way (Tower Rd side). Mutual aid per the county airport plan through 60 Control. Airport Incident talkgroup. Not yet PCFD policy: edit to the airport plan."
+    }
   ],
   "_joint_response": [
     "Departments that answer jointly with PCFD (a rule to confirm with the department). Their units are",

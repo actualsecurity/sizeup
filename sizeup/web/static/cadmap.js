@@ -411,6 +411,8 @@ window.CadMap = (() => {
         if (this.canvas.clientWidth) this.fitKey = null;
       }
       this.layer.update(data, focus);
+      this.focus = focus || null;
+      if (this.roads && this.roads.focus) this.roads.focus(this.focus);     // an event at the airport: its layer on (#87)
       this.note.textContent = note || "";
       this.note.hidden = !note;
       const fid = focus ? focus.id : null;
@@ -475,8 +477,10 @@ window.CadMap = (() => {
       if (!pts.length) return this.map.jumpTo({ center: sc.home.center, zoom: sc.home.zoom });
       const b = new maplibregl.LngLatBounds(pts[0], pts[0]);
       pts.forEach((p) => b.extend(p));
+      const field = window.AirportLayer ? AirportLayer.focusBounds(this.focus) : null;   // at the airport: the whole field (#87)
+      if (field) { b.extend(field[0]); b.extend(field[1]); }
       const pad = Math.max(10, Math.min(90, Math.floor(Math.min(w, ht) / 3.5)));   // room for the chips around the edge
-      if (pts.length === 1 || (b.getEast() - b.getWest() < 1e-4 && b.getNorth() - b.getSouth() < 1e-4)) {
+      if (!field && (pts.length === 1 || (b.getEast() - b.getWest() < 1e-4 && b.getNorth() - b.getSouth() < 1e-4))) {
         return this.map.easeTo({ center: b.getCenter(), zoom: this.focusId != null ? 16 : sc.home.zoom, duration: dur });
       }
       const top = Math.min(pad + 34, Math.floor(ht / 2.5));        // below the Recenter / Expand buttons
