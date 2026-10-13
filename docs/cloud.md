@@ -106,8 +106,10 @@ on South 2 (`paging`: each tone pair as it decodes, then "voice", then ended for
 built; sizeup/radio/livepage.py), pushed the moment it changes (sub-second; re-sent every 2 s while
 someone talks or a page goes out; the hub drops a snapshot older than 8 s; a hub from before ignores
 `paging`, a station from before sends none),
-and every 5 s the station's radio / SDR / STT / voice rows, SDR switches, re-run progress and outbox
-size (also the heartbeat). The talkgroup list goes every 30 s or when a switch changes.
+and every 5 s the station's radio / SDR / STT / voice rows, SDR switches, re-run progress, outbox
+size and its version (also the heartbeat). The talkgroup list goes every 30 s or when a switch
+changes. The hub answers `{ok, build}`: its own build, which the station follows
+([Station updates](#station-updates-it-follows-the-hubs-build)).
 
 **Hub → station, jobs** (`GET /api/station/jobs?wait=25`, the station's long poll; the answer comes
 back as `POST /api/station/jobs/<id>`), handed out once, dropped if not picked up in time:
@@ -125,14 +127,15 @@ pages of its own ([the station page](#the-station-page)).
 ## On screen
 
 * Hub, Settings > Radios, Receivers: a **Station** row ("3 s" / "offline 12:03"; the tooltip says "connected, last
-  seen 3 s ago" or "offline since 12:03:41"), then the station's rows as it reported them. Offline,
+  seen 3 s ago" or "offline since 12:03:41", and the station's version: "up to date (abc1234)",
+  "updating ...", "update to abc1234 failed (...)"; the word says "updating" / "update failed"), then the station's rows as it reported them. Offline,
   those rows turn *unknown* with what they last said: never a stale "ok". The SDR switches only show
   while the station is connected. A dongle whose job the station gave it by itself (`[radio]
   auto_assign`, deploy/station/README.md) reads "· FG1 · auto" (the row's `set_by`: "person", "auto",
   or missing from an older station, which then shows no "auto").
 * Hub, CAD header: "Station connected" / "Station offline 12:03".
 * Station page, Radios, Receivers: a **Hub** row (connected, or offline with how many events are waiting;
-  "not sending" when forwarding is on without a token). Its header: the "Hub connected" / "Hub
+  "not sending" when forwarding is on without a token; its version against the hub's, as above). Its header: the "Hub connected" / "Hub
   unreachable" / "Not forwarding" pill and a link to the CAD on the hub. Settings: the last contact
   and what waits in the outbox.
 * An all-in-one machine forwarding from Settings → System → Station: the same Hub row, and on its
@@ -152,6 +155,33 @@ pages of its own ([the station page](#the-station-page)).
 | Hub redeployed | Litestream restores the three SQLite files before the app starts. Lost: up to ~1 s of the newest writes, a tones-only page waiting for its separate voice transmission, the in-memory "talking now" and station status (back within 5 s). Received clips survive (in `audio.sqlite`, 12 h). |
 | Clocks differ | Transmission times are the station's clock; the hub warns in the Station row above 5 s. Keep both on NTP. |
 | Late delivery | Events that arrive after an outage are applied as they arrive: the monitor attaches traffic to whatever incident is active then; the CAD links by the transmission's own time. |
+| A station update doesn't come up | Switched back to the release that ran before within 90 s; that build isn't tried again until the hub moves on. The Station row says "update to ... failed". |
+| A station update fails its preflight | Never switched to: the station keeps running, untouched. Same report. |
+
+## Station updates: it follows the hub's build
+
+The Linux station (deploy/station/README.md "Updating") runs exactly the commit the hub runs:
+
+* The hub's image is built with `SIZEUP_BUILD` = the full git sha (`.github/workflows/deploy.yml`);
+  `/healthz` and every `POST /api/station/state` answer carry it. No build (a local hub): stations
+  do nothing.
+* The station (`sizeup/cloud/autoupdate.py`, `Watch`) writes that build to
+  `/run/sizeup/update-wanted` once the hub has said it for 30 s. That file is all the sizeup user
+  does; `sizeup-update.path` starts the root updater outside the sizeup process.
+* The updater only takes a commit that is on `origin/main`; builds it **beside** the running one
+  (`/opt/sizeup/releases/<sha>`: the code, its venv, as hard links when the requirements didn't
+  change; trunk-recorder / whisper.cpp / rtl-sdr only when their pins changed); preflights it
+  (imports, the config, the databases in a scratch dir, the units, the programs); waits up to 5 min
+  for a quiet moment (no carrier open, nobody talking, no transcription running); swaps
+  `/opt/sizeup/current` by rename and restarts once; and swaps back if `/healthz` doesn't answer with
+  the new build within 90 s. A failed build is not tried again until the hub moves on. 3 releases kept.
+* Paused: `sizeup-station autoupdate off`, `[station] auto_update = false`, a station on another
+  `--ref` than main, or one installed from a folder. The hub out of reach: the station stays put.
+* What it did goes up in the station's status (`version`: its build, the updater's state, last
+  result, recent failures) and shows in the hub's Station row (above).
+* Nothing heard is lost across the restart: the outbox is on disk (`state/outbox.sqlite`, committed
+  per event) and goes up first. whisper-server runs as its own service on the station, so an update
+  doesn't reload the model; trunk-recorder still restarts with sizeup (#71).
 
 ## Auth and security
 
@@ -528,7 +558,8 @@ The hub has no `captures/` and writes no JSON files. Dispatch WAVs are also cach
 10001), `pip install .`, `data/` included, Litestream 0.5.17 pinned and sha256-checked, health check
 on `/healthz` (a Python one-liner: slim has no curl). `/healthz` answers 200 with
 `{ok, version, build, role, station, public_url}` while the process serves (it doesn't depend on the
-station). Build with `--build-arg SIZEUP_BUILD=$(git rev-parse --short HEAD)`.
+station). Build with `--build-arg SIZEUP_BUILD=$(git rev-parse HEAD)`: the full sha (the deploy
+workflow passes it); stations follow it.
 
 One task, desired count 1, ephemeral disk:
 
@@ -553,7 +584,8 @@ namespace, a named volume for `/data`, no Litestream).
 
 ## Code
 
-`sizeup/cloud/`: `station.py` (StationLink: outbox, forwarder, state, jobs), `stationmode.py`
+`sizeup/cloud/`: `station.py` (StationLink: outbox, forwarder, state, jobs), `autoupdate.py` (the
+station follows the hub's build: `Watch` in the station, the root updater), `stationmode.py`
 (Settings → System → Station and the station page's hub link: on / off at runtime, state/cloud.json, the Keychain), `outbox.py`,
 `client.py` (kept-alive HTTPS), `hub.py` (Hub: ingest, health, jobs; HubApp), `hubstore.py`
 (hub.sqlite, audio.sqlite), `access.py` (Cloudflare Access identity; the gate is in
@@ -564,4 +596,5 @@ namespace, a named volume for `/data`, no Litestream).
 `sizeup/transcribe.py`, `sizeup/aws.py`. The station page: `sizeup/web/static/station.html`, `station.js`,
 `hublink.js`, `station.css`; its routes in `sizeup/web/server.py`. Tests: `tests/test_station_page.py`, `tests/test_polly.py`, `tests/test_cloud.py`, `tests/test_stationmode.py`,
 `tests/test_access.py`, `tests/test_roles.py`, `tests/test_activity.py`, `tests/test_channels.py`,
-`tests/test_transcribe.py` (fakes: `tests/fake_transcribe.py`).
+`tests/test_transcribe.py` (fakes: `tests/fake_transcribe.py`), `tests/test_autoupdate.py`,
+`tests/test_station_install.py`.
