@@ -77,6 +77,9 @@ map stay as features that feed it.
 
 ## Milestones
 
+Order and status now live in [ROADMAP.md](ROADMAP.md) and the GitHub issues; the M numbers below
+are referenced from there. M1 is built.
+
 - **M1 (started):**
   - CAD store; the sheet's lists and unit boards from `data/cad_lists.json`; default run cards
     keyed TYPE or TYPE/SUBTYPE (editable stand-ins, not policy).

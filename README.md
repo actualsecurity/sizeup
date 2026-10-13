@@ -8,7 +8,7 @@ Fire dispatch situational display for Port Chester FD firehouses: the sibling of
 - **Fireground 1:** transcribe PCFD / Rye Brook fireground traffic while the call is ongoing.
 - **Map:** zoom to the incident location and show the incident type.
 
-See `docs/PLAN.md`. To run the CAD in the cloud (a hub fed by this machine as the station): `docs/cloud.md`.
+Where it's going: `docs/ROADMAP.md` (work is tracked in GitHub issues). Background: `docs/PLAN.md`. To run the CAD in the cloud (a hub fed by this machine as the station): `docs/cloud.md`.
 - **Phone pre-alert:** Tapout's ntfy feed (the HQ phone ringing), read only, at the top of the CAD's
   60 Control column as a possible incoming call (`[prealert]`, `docs/cloud.md` "Phone pre-alert").
 
