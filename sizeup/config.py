@@ -24,6 +24,10 @@ class ConfigError(ValueError):
 HOME_DEPARTMENTS = {"Port Chester": "Port Chester FD", "Rye Brook": "Rye Brook FD"}
 
 
+PAGING_HANG_S = 1.5        # see ChannelCfg.hang_s / continue_s
+PAGING_CONTINUE_S = 3.0
+
+
 @dataclass(frozen=True)
 class ChannelCfg:
     label: str                 # "South 2", "FG1"
@@ -33,6 +37,18 @@ class ChannelCfg:
     gain_db: float | None = 40.0
     squelch_db: float = 10.0   # FM quieting needed to open
     drop_db: float | None = None   # end a transmission this far under its own level (fm.NoiseSquelch)
+    # Fades on paging channels (GitHub #61): the squelch hang once a transmission has had tones or speech
+    # in it, and how long after it closes the carrier may come back (at the close threshold) and still
+    # be the same page. None: by kind (paging 1.5 s / 3 s; traffic 0.4 s, as always / none).
+    hang_s: float | None = None
+    continue_s: float | None = None
+
+    def __post_init__(self):
+        paging = self.kind == "paging"
+        if self.hang_s is None:
+            object.__setattr__(self, "hang_s", PAGING_HANG_S if paging else None)
+        if self.continue_s is None:
+            object.__setattr__(self, "continue_s", PAGING_CONTINUE_S if paging else 0.0)
 
 
 @dataclass(frozen=True)
@@ -360,16 +376,26 @@ def load(path: str | Path) -> Config:
     channels = []
     for i, c in enumerate(radio.get("channels", [])):
         _take(c, f"radio.channels[{i}]", {"label", "mhz", "kind", "device", "gain_db", "squelch_db",
-                                                 "drop_db"})
+                                                 "drop_db", "hang_s", "continue_s"})
         if c.get("kind", "traffic") not in ("paging", "traffic"):
             raise ConfigError(f"radio.channels[{i}].kind: 'paging' or 'traffic'")
         kind = c.get("kind", "traffic")
         # Simplex fireground: a weaker carrier can sit under ours (FG1 2026-10-07), so traffic channels
         # end a transmission on a 10 dB drop. Paging stays off: a distant repeater fades (South 2).
         drop = c.get("drop_db", 10.0 if kind == "traffic" else 0)
+        if kind != "paging" and c.get("continue_s"):
+            raise ConfigError(f"radio.channels[{i}].continue_s: paging channels only (pages are joined, traffic isn't)")
+        hang = c.get("hang_s")
+        if hang is not None and not 0.05 <= float(hang) <= 10:
+            raise ConfigError(f"radio.channels[{i}].hang_s: 0.05 to 10 seconds")
+        cont = c.get("continue_s")
+        if cont is not None and not 0 <= float(cont) <= 30:
+            raise ConfigError(f"radio.channels[{i}].continue_s: 0 to 30 seconds")
         channels.append(ChannelCfg(c["label"], float(c["mhz"]), kind, c.get("device", ""),
                                    c.get("gain_db", 40.0), float(c.get("squelch_db", 10.0)),
-                                   float(drop) if drop else None))
+                                   float(drop) if drop else None,
+                                   float(hang) if hang is not None else None,
+                                   float(cont) if cont is not None else None))
     tones, ours = [], set()
     tf = radio.get("tones_file", "data/westchester_tones.csv")
     if tf:

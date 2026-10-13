@@ -2,6 +2,7 @@ import time
 from dataclasses import replace
 
 import numpy as np
+import pytest
 
 from sizeup.app import App
 from sizeup.config import Config
@@ -563,3 +564,37 @@ def test_apx6000_id_sent_late_in_the_transmission_is_found(tmp_path):
     assert app._units(seg) == ["6301"] and app._id_note("FG1", seg, ["6301"]) == ""
     hiss = (0.05 * np.random.default_rng(1).standard_normal(len(audio))).astype(np.float32)
     assert app._id_note("FG1", Segment(0, 1, hiss, 20.0, []), []) == "no ID burst"
+
+
+def test_a_page_that_fades_and_comes_back_is_one_page_sent_once(tmp_path, capsys):
+    # GitHub #61: the squelch closed in a fade and the page came back 2 s later as a continuation. The
+    # page shows as pending at once, goes to the hub and speech-to-text once, after the window, whole.
+    app = App(cfg(tmp_path))
+    app._kind = {"South 2": "paging"}
+    app.stt.client = FakeWhisper({10: PAGE_TEXT})
+    app.stt.start()
+    sent = []
+    app.events = lambda kind, data, clip: sent.append((kind, data, clip))
+    head = np.concatenate([tone(349.1, 1.0), tone(311.1, 3.0), np.zeros(int(0.2 * RATE)), voice(4.0)]).astype(np.float32)
+    tail = voice(4.0, seed=1)
+    ch, now = Channel(470.2, "South 2"), time.time()
+    first = Segment(now, now + len(head) / RATE, head, 25.0, reason="quiet", hold_until=now + len(head) / RATE + 4.5)
+    app._segment(ch, first)
+    page = app.pages[0]
+    assert page.kind == "page" and page.status == "pending" and sent == []     # shown, not sent on yet
+    cont = Segment(first.end + 2.0, first.end + 6.0, tail, 9.0, reason="quiet", cont=True, hold_until=first.end + 10.5)
+    app._segment(ch, cont)
+    assert list(app.pages) == [page] and sent == []
+    app._release_pages(now=cont.hold_until - 1.0)
+    assert sent == []
+    app._release_pages(now=cont.hold_until + 1.0)
+    assert [k for k, _d, _c in sent] == ["page"] and sent[0][2] == page.id
+    assert sent[0][1]["departments"] == ["Port Chester FD"] and sent[0][1]["end"] == pytest.approx(cont.end, abs=0.01)
+    assert wait(lambda: page.status == "done") and page.raw == PAGE_TEXT       # the voice, transcribed whole
+    assert len(page.audio) / RATE == pytest.approx(cont.end - first.start, abs=0.01)
+    assert app.clip(page.id) is not None and len(app.clip(page.id)) > 2 * RATE * 13
+    assert wait(lambda: app.store.active() is not None)
+    out = capsys.readouterr().out
+    assert "South 2 recording end: page 14.2 s · quiet after hang" in out and "1 continuation(s) joined (gap 2.0 s)" in out
+    app._release_pages(now=cont.hold_until + 60)
+    assert [k for k, _d, _c in sent].count("page") == 1
