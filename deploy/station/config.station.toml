@@ -26,8 +26,9 @@ port = 8091
 rtl_fm = "/opt/sizeup/rtl-sdr/bin/rtl_fm"
 # Every RTL-SDR plugged in gets a row of switches in the web app (a channel, Fire/EMS 15 via
 # trunk-recorder, or Off). A new dongle gets a job by itself: FG1, then the county P25 system, then
-# South 2, whichever no other dongle has (all three covered: Off). A job picked by a person (here or
-# on the hub's monitor), Off included, is kept across restarts and never changed by this.
+# South 2, whichever no plugged-in dongle has (all three covered: Off), so a replacement for a dead
+# FG1 dongle gets FG1. A job picked by a person (here or on the hub's monitor), Off included, is kept
+# across restarts and never changed by this (deploy/station/README.md).
 sdrs = "auto"
 sdr_names = { v4 = "V4", adsb = "V3", "00000001" = "V3 #2" }   # names in the web app (by serial)
 sdr_ignore = []

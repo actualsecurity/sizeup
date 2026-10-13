@@ -161,7 +161,7 @@ Both use station id `pcfd-hq`: to the hub it is the same station, moved. Going b
 
 `[radio] auto_assign = true` (the default): when a dongle shows up, at startup or plugged in while
 running, and no person has picked a job for it, it gets the first job in `auto_assign_order` that no
-other dongle has:
+**plugged-in** dongle has:
 
 1. `fg1`: FG1, 453.0375 NFM, MDC-1200 IDs
 2. `p25`: Fire/EMS 15, the county P25 system through trunk-recorder. One dongle runs it (2.4 MS/s at
@@ -169,14 +169,26 @@ other dongle has:
    when trunk-recorder isn't installed or its config.json has more than one source.
 3. `south2`: South 2, 470.2 NFM, paging tones
 
-With all three covered, a fourth dongle stays Off. The log says `sdr: V3 #2 (00000001) → FG1 (auto)`,
+With all three covered, another dongle stays Off. The log says `sdr: V3 #2 (00000001) → FG1 (auto)`,
 and the station page and the hub's monitor show the row as "· FG1 · auto".
 
+* **FG1 first, even after a dongle dies.** A job whose dongle is unplugged or missing isn't covered:
+  the next dongle that arrives takes it (its program stops waiting on the missing one), so a
+  replacement for a dead FG1 dongle gets FG1.
+* **When the old dongle comes back:** if nobody took its job, it resumes it. If a replacement has it
+  and the job was set automatically, the old dongle is looked at like a new one: next free job, else
+  Off (`sdr: V4 (v4) back; FG1 is on V3 #2 → Fire/EMS 15 (auto)`). If a person had set it, it keeps
+  its job beside the replacement, with a warning in the log; the job keeps running where it is now
+  (on the replacement) until a person picks, or the replacement goes, and at the next restart the
+  person's dongle has it and the other one gets the next free job.
+* **Running dongles are never moved.** Only dongles arriving (and, at startup, those without a job)
+  are looked at: a dongle on P25 doesn't jump to FG1 when FG1's dongle disappears.
+* **Startup:** for up to 60 s after sizeup starts, a dongle without a job waits until the dongles
+  that had jobs are back, so the order USB attaches them in (usbipd, every 10 s) doesn't move jobs.
 * A job picked by a person (here or on the hub), **Off included**, is kept across restarts and
   replugs and never changed automatically. Picking the job a dongle already has makes it the person's.
-* A dongle another app holds (rtl-claims, e.g. shortfinal on the Mac) is never taken.
-* Nothing is reshuffled: an unplugged dongle keeps its job (it resumes when it's back), and nobody
-  else picks it up meanwhile. A job that keeps failing on its dongle is logged once and left there.
+* A dongle another app holds (rtl-claims, e.g. shortfinal on the Mac) is never taken. An auto job
+  that fails to start isn't retried; one that keeps failing is logged once and left where it is.
 * `sdr_modes.json` (next to `captures/clips`) records who set each job: `{serial: mode, ...,
   "_set_by": {serial: "person" | "auto"}}`. Entries saved before this (no `"_set_by"`) count as not
   set by a person, so an Off left over from the old "new dongles start Off" is filled.

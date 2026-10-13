@@ -74,6 +74,7 @@ OFF_MODE = "Off"           # the shared dongle released for other programs (size
 SWITCH_PAUSE_S = 1.0       # between stopping one program on the shared dongle and starting the next
 SDR_WATCH_S = 3.0          # [radio] auto_assign: how often the plugged-in dongles are looked at
 SDR_FAILING_RESTARTS = 3   # an auto job that has restarted this often and is down: logged once, left as is
+SDR_SETTLE_S = 60.0        # after startup, Off dongles wait this long for the ones that had jobs (USB attach order)
 MIN_SPEECH_S = 0.15      # less sound than this above the dead-air floor (and no tones) = a mic click
 LIVE_WATCH_S = 0.2       # FG1 talking watcher: how often the squelch is looked at (and the MDC ID tried)
 LIVE_ID_WINDOW_S = 4.0   # ... the live MDC decode looks at the first seconds only (pre-IDs; APX 0.3-0.8 s in)
@@ -257,7 +258,7 @@ class App:
         # the web app; a channel / Fire/EMS 15 runs on at most one of them.
         # sdrs = "auto": every RTL-SDR plugged in gets a row. A listed serial is always shown. sdr_ignore
         # hides a dongle for good. [radio] auto_assign (default on): a dongle that appears with no job
-        # a person chose gets the first job in auto_assign_order that no dongle has (_auto_assign);
+        # a person chose gets the first job in auto_assign_order no plugged-in dongle has (_arrive);
         # off, new ones start Off and sizeup never grabs a dongle by itself.
         self._listed: list[str] = [sd for sd in (list(cfg.sdrs) or ([cfg.shared_device] if cfg.shared_device else []))
                                    if sd not in cfg.sdr_ignore]
@@ -277,7 +278,9 @@ class App:
         self._auto_skip: set[str] = set()     # an auto job failed to start on it: not tried again this run
         self._failing: set[str] = set()       # auto job down after restarts: logged once
         self._p25_skip = ""                   # why P25 isn't auto-assigned (logged when it changes)
-        self._mode_lock = threading.Lock()
+        self._deferred: set[str] = set()      # Off arrivals waiting for the startup settle (_sdr_arrivals)
+        self._settle_until = 0.0
+        self._mode_lock = threading.RLock()
         self.switching = False
         self._kind = {c.label: c.kind for c in cfg.channels}
         self.p25 = (CallIngest(cfg.p25_dir, cfg.p25_talkgroups, self._call, {**cfg.unit_callsigns, **cfg.p25_aliases}, on_event=log,
@@ -1269,7 +1272,9 @@ class App:
         by = saved.pop("_set_by", None)
         by = by if isinstance(by, dict) else {}
         taken: set[str] = set()
-        for sd in list(dict.fromkeys([*self._listed, *saved])):
+        # Two dongles saved on one job (a person's kept while a replacement ran it): the person's wins,
+        # the other starts Off (and auto-assign gives it the next job).
+        for sd in sorted(dict.fromkeys([*self._listed, *saved]), key=lambda sd: by.get(sd) != "person"):
             if sd in self.cfg.sdr_ignore:
                 continue
             m = saved.get(sd, self.assign.get(sd, OFF_MODE))
@@ -1299,10 +1304,13 @@ class App:
         here = dict.fromkeys(s for _i, _p, s in sdr_lookup.devices(self.cfg.rtl_fm))
         return [s for s in here if s and s not in self.cfg.sdr_ignore and (self.cfg.sdr_auto or s in self._listed)]
 
-    def _next_job(self) -> str | None:
-        """The first job in [radio] auto_assign_order that no dongle has (plugged in or not: a job
-        whose dongle was unplugged stays there, it isn't moved) and that can run on one dongle."""
-        have = set(self.assign.values())
+    def _covered(self, but: str = "") -> set[str]:
+        """The jobs running now: on a dongle that is plugged in (a job whose dongle is gone is free)."""
+        return {self.assign.get(sd, OFF_MODE) for sd in self._seen if sd != but} - {OFF_MODE}
+
+    def _next_job(self, sd: str) -> str | None:
+        """The first job in [radio] auto_assign_order no plugged-in dongle has and that can run on one dongle."""
+        have = self._covered(but=sd)
         for job in self.cfg.sdr_auto_order:
             if job == OFF_MODE or job not in self.modes or job in have:
                 continue
@@ -1317,57 +1325,130 @@ class App:
             return job
         return None
 
-    def _auto_assign(self, sd: str) -> str | None:
+    def _program_on(self, mode: str) -> str | None:
+        """The dongle the program for `mode` (its rtl_fm, or trunk-recorder) is running on, if any."""
+        if mode == P25_MODE:
+            rec = self.recorder
+            alive = rec is not None and rec._thread is not None and rec._thread.is_alive()
+            return getattr(rec.device_fn, "serial", None) if alive else None
+        r = self._receiver(mode)
+        return getattr(r.device, "serial", None) if r is not None and not r._stop.is_set() else None
+
+    def _auto_assign(self, sd: str, head: str = "") -> str | None:
         """A dongle just appeared (or was there at startup): if it has no job and a person didn't
-        choose Off for it, give it the next job (_next_job). Never one another app holds, never one
+        choose Off for it, give it the next job (_next_job). A job whose dongle is unplugged is free:
+        its program stops waiting there and runs here. Never a dongle another app holds, never one
         whose auto job already failed to start this run. The job it got, or None."""
         if not (self.shared and self.cfg.sdr_auto_assign):
             return None
-        tag = self._sdr_tag(sd)
+        head = head or f"sdr: {self._sdr_tag(sd)}"
         with self._mode_lock:
             if self.assign.get(sd, OFF_MODE) != OFF_MODE or sd in self._auto_skip:
-                return None                       # has a job (picked, auto or saved): kept as is
+                return None                       # has a job (picked, auto or saved): _arrive
             if self.set_by.get(sd) == "person":
-                log(f"sdr: {tag} stays Off (set by a person)")
+                log(f"{head} stays Off (set by a person)")
                 return None
             held = claims.other(sd)
             if held:
-                log(f"sdr: {tag} in use by {held.get('app', 'another app')} ({held.get('mode', '?')}), not auto-assigned")
+                log(f"{head} in use by {held.get('app', 'another app')} ({held.get('mode', '?')}), not auto-assigned")
                 return None
-            job = self._next_job()
+            job = self._next_job(sd)
             if job is None:
                 jobs = [j for j in self.cfg.sdr_auto_order if j in self.modes]
-                log(f"sdr: {tag} stays Off (auto: {', '.join(jobs) or 'no jobs'} already covered)")
+                log(f"{head} → Off (auto: {', '.join(jobs) or 'no jobs'} already covered)")
                 return None
             self.switching = True
             try:
+                for o in [o for o, m in self.assign.items() if m == job and o != sd]:   # unplugged ones
+                    log(f"sdr: {job}'s dongle {self._sdr_tag(o)} is unplugged: {job} goes to {self.sdr_name(sd)}")
+                    self._stop_mode(job, f"moved to SDR {self.sdr_name(sd)}", o)
                 ok = self._start_mode(job, sd)
             finally:
                 self.switching = False
             if not ok:
                 self._auto_skip.add(sd)
-                log(f"sdr: {tag} → {job} (auto) didn't start: left Off")
+                log(f"{head} → {job} (auto) didn't start: left Off")
                 return None
             self.assign[sd], self.set_by[sd] = job, "auto"
             self._save_modes()
-            log(f"sdr: {tag} → {job} (auto)")
+            log(f"{head} → {job} (auto)")
             return job
 
+    def _arrive(self, sd: str) -> str | None:
+        """One dongle plugged in (or there at startup). Off: _auto_assign. With a job that no other
+        plugged-in dongle runs: it resumes here. With a job a replacement took while it was gone: set
+        by auto, it is looked at like a new dongle; set by a person, it keeps it (warned)."""
+        job = self.assign.get(sd, OFF_MODE)
+        if job == OFF_MODE:
+            return self._auto_assign(sd)
+        tag = self._sdr_tag(sd)
+        with self._mode_lock:
+            if self.assign.get(sd, OFF_MODE) != job:
+                return None
+            other = next((o for o in sorted(self._seen) if o != sd and self.assign.get(o) == job), None)
+            if other is None:
+                on = self._program_on(job)
+                if on != sd:                            # it ran on a replacement that is gone now: back here
+                    if on is not None:
+                        self._stop_mode(job, f"back on SDR {self.sdr_name(sd)}", on)
+                    if not self._start_mode(job, sd):
+                        self.assign[sd] = OFF_MODE
+                        self.set_by.pop(sd, None)
+                        self._save_modes()
+                    log(f"sdr: {tag} back: {job} runs here again")
+                return None
+            if self.set_by.get(sd) == "person":
+                log(f"sdr: WARNING {tag} back with {job} (set by a person), which {self.sdr_name(other)} also has now: "
+                    f"kept; {job} runs on {self.sdr_name(self._program_on(job) or other)} until a job is picked in the web app")
+                return None
+            self.assign[sd] = OFF_MODE                 # its program already went to the replacement
+            self.set_by.pop(sd, None)
+            claims.release(sd)
+            self._save_modes()
+            return self._auto_assign(sd, head=f"sdr: {tag} back; {job} is on {self.sdr_name(other)}")
+
     def _sdr_arrivals(self) -> list[str]:
-        """Look at what's plugged in: every dongle not there last time is an arrival (_auto_assign).
-        Unplugging moves nothing. The jobs given, for the log and tests."""
+        """Look at what's plugged in: every dongle not there last time is an arrival (_arrive).
+        Unplugging moves nothing. Right after startup, Off dongles wait (SDR_SETTLE_S) for the ones
+        that had jobs, so the order USB attaches them in doesn't move jobs around. The jobs given."""
         here = self._plugged()
         new = [s for s in here if s not in self._seen]
+        gone = self._seen - set(here)
         self._seen = set(here)
-        given = [j for sd in new if (j := self._auto_assign(sd))]
+        self._departures(gone)
+        waiting = time.monotonic() < self._settle_until and any(
+            m != OFF_MODE and sd not in self._seen for sd, m in self.assign.items())
+        if waiting:
+            for sd in [s for s in new if self.assign.get(s, OFF_MODE) == OFF_MODE]:
+                log(f"sdr: {self._sdr_tag(sd)} waits up to {SDR_SETTLE_S:.0f} s for the dongles that had jobs")
+                self._deferred.add(sd)
+                new.remove(sd)
+        else:
+            new = [s for s in sorted(self._deferred) if s in self._seen] + new
+            self._deferred.clear()
+        given = [j for sd in new if (j := self._arrive(sd))]
         self._watch_failing()
         return given
 
+    def _departures(self, gone: set[str]) -> None:
+        """A dongle unplugged: nothing is reassigned. Only when its job is also kept on a plugged-in
+        dongle (a person's, beside a replacement) does the job's program go to that one."""
+        with self._mode_lock:
+            for g in sorted(gone):
+                job = self.assign.get(g, OFF_MODE)
+                if job == OFF_MODE or self._program_on(job) != g:
+                    continue
+                o = next((o for o in sorted(self._seen) if self.assign.get(o) == job), None)
+                if o is not None:
+                    self._stop_mode(job, f"SDR {self.sdr_name(g)} unplugged", g)
+                    if self._start_mode(job, o):
+                        log(f"sdr: {self._sdr_tag(g)} unplugged: {job} runs on {self.sdr_name(o)}, which also has it")
+
     def _watch_failing(self) -> None:
         """An auto job whose program keeps failing on its dongle is logged once and left where it is:
-        jobs aren't moved around between dongles."""
+        jobs aren't moved around between running dongles."""
         for sd, m in list(self.assign.items()):
-            if m == OFF_MODE or self.set_by.get(sd) != "auto":
+            if m == OFF_MODE or self.set_by.get(sd) != "auto" or self._program_on(m) != sd:
                 self._failing.discard(sd)
                 continue
             r = self.recorder if m == P25_MODE else self._receiver(m)
@@ -1423,12 +1504,16 @@ class App:
         return True
 
     def _stop_mode(self, mode: str, why: str, serial: str) -> None:
-        if mode == P25_MODE:
-            self.recorder.stop(why)
-        elif mode != OFF_MODE:
-            r = self._receiver(mode)
-            if r is not None:
-                r.stop()
+        """Stop `mode`'s program if it runs on this dongle (not when it runs on another one: two dongles
+        can hold one job, a person's kept beside a replacement's) and release the dongle."""
+        on = self._program_on(mode) if mode != OFF_MODE else None
+        if on is None or on == serial:
+            if mode == P25_MODE:
+                self.recorder.stop(why)
+            elif mode != OFF_MODE:
+                r = self._receiver(mode)
+                if r is not None:
+                    r.stop()
         claims.release(serial)
 
     def set_mode(self, mode: str, sdr: str | None = None, by: str = "person") -> str | None:
@@ -1448,15 +1533,15 @@ class App:
         if held:
             return f"SDR {self.sdr_name(sdr)} is in use by {held.get('app', 'another app')} ({held.get('mode', '?')})"
         with self._mode_lock:
-            if self.assign.get(sdr, OFF_MODE) == mode:
+            dup = mode != OFF_MODE and any(o != sdr and m == mode for o, m in self.assign.items())
+            if self.assign.get(sdr, OFF_MODE) == mode and not dup:
                 if self.set_by.get(sdr) != by:           # a person confirmed what auto picked: theirs now
                     self.set_by[sdr] = by
                     self._save_modes()
                 return None
             self.switching = True
             try:
-                other = next((o for o, m in self.assign.items() if o != sdr and m == mode != OFF_MODE), None)
-                if other:
+                for other in [o for o, m in self.assign.items() if o != sdr and m == mode != OFF_MODE]:
                     log(f"SDR {self.sdr_name(other)}: {mode} -> {OFF_MODE} (moving to {self.sdr_name(sdr)})")
                     self._stop_mode(mode, f"moved to SDR {self.sdr_name(sdr)}", other)
                     self.assign[other] = OFF_MODE
@@ -1605,6 +1690,7 @@ class App:
                     self.set_by.pop(sd, None)
             self._save_modes()
             if self.cfg.sdr_auto_assign:                # unassigned ones now, new ones as they're plugged in
+                self._settle_until = time.monotonic() + SDR_SETTLE_S
                 self._sdr_arrivals()
                 threading.Thread(target=self._watch_sdrs, name="sdr-watch", daemon=True).start()
         else:

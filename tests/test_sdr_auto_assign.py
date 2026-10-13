@@ -30,6 +30,7 @@ def rig(tmp_path, monkeypatch):
     apps: list[App] = []
     monkeypatch.setattr(appmod, "SWITCH_PAUSE_S", 0.0)
     monkeypatch.setattr(appmod, "SDR_WATCH_S", 3600.0)          # tests look for arrivals themselves
+    monkeypatch.setattr(appmod, "SDR_SETTLE_S", 0.0)            # (the startup wait has its own test)
     monkeypatch.setattr(appmod, "log", logs.append)
     monkeypatch.setattr(appmod.sdr_lookup, "devices", lambda *a, **k: list(plugged))
     monkeypatch.setattr(appmod.sdr_lookup, "resolve",
@@ -75,7 +76,7 @@ def test_priority_order_with_one_to_four_dongles(rig, n, want):
     assert [jobs(app)[s] for _i, _p, s in DONGLES[:n]] == [(m, "auto" if m != "Off" else None) for m in want]
     assert "sdr: V3 #2 (00000001) → FG1 (auto)" in logs
     if n == 4:
-        assert "sdr: spare stays Off (auto: FG1, Fire/EMS 15, South 2 already covered)" in logs
+        assert "sdr: spare → Off (auto: FG1, Fire/EMS 15, South 2 already covered)" in logs
     on = {m: getattr(app._receiver(m).device, "serial", None) for m in ("FG1", "South 2")}
     assert on == {m: (s if m in want else None) for (_i, _p, s), m in zip(DONGLES, ["FG1", P25, "South 2"])
                   if m != P25}                                     # each channel started on its dongle
@@ -215,12 +216,132 @@ def test_no_reshuffle_when_a_dongle_goes_away(rig):
     before = dict(app.assign)
     assert before == {"00000001": "FG1", "v4": P25, "adsb": "South 2"}
     plugged.pop(0)                                                 # FG1's dongle unplugged
-    assert app._sdr_arrivals() == [] and app.assign == before      # nobody else picks up FG1
+    assert app._sdr_arrivals() == [] and app.assign == before      # running dongles stay on their jobs
     assert jobs(app)["00000001"] == ("FG1", "auto")                # shown, unplugged, still FG1
-    plugged.append(DONGLES[3])                                     # a new one: FG1 still counts as covered
-    assert app._sdr_arrivals() == [] and app.assign.get("spare", "Off") == "Off"
-    plugged.insert(0, DONGLES[0])                                  # back: it keeps FG1
-    assert app._sdr_arrivals() == [] and app.assign == before
+    assert app._program_on(P25) == "v4" and app._program_on("South 2") == "adsb"
+
+
+def test_replacement_takes_fg1_and_the_old_auto_dongle_is_looked_at_again(rig):
+    plugged, logs, make = rig
+    plugged[:] = DONGLES[:2]
+    app = make()
+    assert app.assign == {"00000001": "FG1", "v4": P25}
+    plugged.pop(0)                                                 # FG1's dongle dies
+    app._sdr_arrivals()
+    plugged.append(DONGLES[2])                                     # a replacement (another serial)
+    assert app._sdr_arrivals() == ["FG1"]                          # FG1 first: it isn't covered any more
+    assert app._program_on("FG1") == "adsb" and jobs(app)["adsb"] == ("FG1", "auto")
+    assert "sdr: FG1's dongle V3 #2 (00000001) is unplugged: FG1 goes to V3" in logs
+    assert app.assign["v4"] == P25                                 # nobody running was moved
+    plugged.insert(0, DONGLES[0])                                  # the old one is back: set by auto,
+    assert app._sdr_arrivals() == ["South 2"]                      # so it gets the next free job
+    assert "sdr: V3 #2 (00000001) back; FG1 is on V3 → South 2 (auto)" in logs
+    assert app.assign == {"00000001": "South 2", "v4": P25, "adsb": "FG1"}
+    assert app._program_on("FG1") == "adsb" and app._program_on("South 2") == "00000001"
+
+
+def test_old_auto_dongle_back_with_everything_covered_goes_off(rig):
+    plugged, logs, make = rig
+    plugged[:] = DONGLES[:3]
+    app = make()
+    plugged.pop(0)
+    app._sdr_arrivals()
+    plugged.append(DONGLES[3])
+    assert app._sdr_arrivals() == ["FG1"] and app.assign["spare"] == "FG1"
+    plugged.insert(0, DONGLES[0])
+    assert app._sdr_arrivals() == [] and app.assign["00000001"] == "Off"
+    assert "sdr: V3 #2 (00000001) back; FG1 is on spare → Off (auto: FG1, Fire/EMS 15, South 2 already covered)" in logs
+
+
+def test_old_dongle_back_before_anyone_took_its_job_resumes_it(rig):
+    plugged, logs, make = rig
+    plugged[:] = DONGLES[:2]
+    app = make()
+    plugged.pop(0)
+    app._sdr_arrivals()
+    plugged.insert(0, DONGLES[0])
+    assert app._sdr_arrivals() == [] and app.assign == {"00000001": "FG1", "v4": P25}
+    assert app._program_on("FG1") == "00000001"
+
+
+def test_job_comes_back_to_the_old_dongle_when_the_replacement_is_gone(rig):
+    plugged, logs, make = rig
+    plugged[:] = DONGLES[:1]
+    app = make()
+    plugged.clear()
+    app._sdr_arrivals()
+    plugged.append(DONGLES[2])
+    assert app._sdr_arrivals() == ["FG1"] and app._program_on("FG1") == "adsb"
+    plugged.clear()                                                # the replacement goes too
+    app._sdr_arrivals()
+    plugged.append(DONGLES[0])                                     # the old one back: FG1 is free, runs there
+    assert app._sdr_arrivals() == [] and app._program_on("FG1") == "00000001"
+    assert "sdr: V3 #2 (00000001) back: FG1 runs here again" in logs
+    plugged.append(DONGLES[2])                                     # the replacement back: auto, looked at again
+    assert app._sdr_arrivals() == [P25] and app.assign == {"00000001": "FG1", "adsb": P25}
+
+
+def test_old_person_dongle_back_keeps_its_job_with_a_warning(rig, tmp_path):
+    plugged, logs, make = rig
+    plugged[:] = DONGLES[:2]
+    app = make()
+    assert app.set_mode("FG1", "00000001") is None                 # a person confirms FG1 on V3 #2
+    plugged.pop(0)
+    app._sdr_arrivals()
+    plugged.append(DONGLES[2])
+    assert app._sdr_arrivals() == ["FG1"]                          # unplugged = not covered, even a person's
+    plugged.insert(0, DONGLES[0])
+    assert app._sdr_arrivals() == []
+    assert jobs(app)["00000001"] == ("FG1", "person") and jobs(app)["adsb"] == ("FG1", "auto")   # both on FG1
+    warn = [ln for ln in logs if "WARNING" in ln]
+    assert warn == ["sdr: WARNING V3 #2 (00000001) back with FG1 (set by a person), which V3 also has now: "
+                    "kept; FG1 runs on V3 until a job is picked in the web app"]
+    assert app._program_on("FG1") == "adsb"                        # no running dongle was moved
+    plugged.pop()                                                  # the replacement goes: FG1 runs on the person's
+    app._sdr_arrivals()
+    assert app._program_on("FG1") == "00000001"
+    plugged.append(DONGLES[2])
+    app._sdr_arrivals()                                            # the replacement back (auto): next job
+    assert app.assign["adsb"] == "South 2"
+    app.stop()
+    again = make()                                                 # and across a restart the person's wins
+    assert again.assign == {"00000001": "FG1", "v4": P25, "adsb": "South 2"}
+
+
+def test_person_dongle_kept_beside_a_replacement_wins_at_restart(rig, tmp_path):
+    plugged, logs, make = rig
+    (tmp_path / "sdr_modes.json").write_text(json.dumps({"adsb": "FG1", "00000001": "FG1",
+                                                         "_set_by": {"adsb": "auto", "00000001": "person"}}))
+    plugged[:] = [DONGLES[0], DONGLES[2]]
+    app = make()
+    assert app.assign == {"00000001": "FG1", "adsb": P25}          # the auto one got the next job
+    assert app._program_on("FG1") == "00000001"
+
+
+def test_off_dongles_wait_for_the_ones_that_had_jobs_after_startup(rig, tmp_path, monkeypatch):
+    # The station boots before usbipd has attached every dongle: a spare that shows up first
+    # must not take FG1 from the dongle that had it and is about to be attached.
+    plugged, logs, make = rig
+    monkeypatch.setattr(appmod, "SDR_SETTLE_S", 60.0)
+    (tmp_path / "sdr_modes.json").write_text(json.dumps({"00000001": "FG1", "v4": P25,
+                                                         "_set_by": {"00000001": "auto", "v4": "auto"}}))
+    plugged[:] = [DONGLES[3], DONGLES[1]]                          # spare and V4 attached, V3 #2 not yet
+    app = make()
+    assert app.assign.get("spare", "Off") == "Off" and "sdr: spare waits up to 60 s for the dongles that had jobs" in logs
+    plugged.append(DONGLES[0])                                     # V3 #2 attached: everyone's here
+    assert app._sdr_arrivals() == ["South 2"]
+    assert app.assign == {"00000001": "FG1", "v4": P25, "spare": "South 2"}
+
+
+def test_off_dongles_stop_waiting_when_the_settle_time_is_up(rig, tmp_path, monkeypatch):
+    plugged, logs, make = rig
+    monkeypatch.setattr(appmod, "SDR_SETTLE_S", 60.0)
+    (tmp_path / "sdr_modes.json").write_text(json.dumps({"00000001": "FG1", "_set_by": {"00000001": "auto"}}))
+    plugged[:] = [DONGLES[3]]
+    app = make()
+    assert "spare" not in app.assign
+    app._settle_until = 0.0                                        # 60 s later, V3 #2 still missing
+    assert app._sdr_arrivals() == ["FG1"] and app.assign["spare"] == "FG1"
 
 
 def test_p25_is_skipped_when_it_cannot_run_on_one_dongle(rig, monkeypatch):

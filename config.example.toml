@@ -20,9 +20,10 @@ sdr_names = { v4 = "V4" }           # optional: name shown in the web app per se
 sdr_ignore = []
 start_mode = "South 2"            # first listed SDR at a fresh start; after that the web app's choice is kept
 # A dongle that shows up (at startup, or plugged in while running) with no job a person picked gets
-# the first job in auto_assign_order that no other dongle has; all covered = it stays Off. Never a
-# dongle another app holds (shortfinal, ~/.local/state/rtl-claims), never over a person's choice
-# (Off included), and nothing moves when a dongle is unplugged. Shown as "FG1 · auto" in the web app.
+# the first job in auto_assign_order that no plugged-in dongle has (an unplugged dongle's job is
+# free: a replacement takes it); all covered = it stays Off. Never a dongle another app holds
+# (shortfinal, ~/.local/state/rtl-claims), never over a person's choice (Off included), and running
+# dongles are never moved. Shown as "FG1 · auto" in the web app. deploy/station/README.md has the rules.
 # Jobs: channel labels (any case/spacing: "fg1", "south2") or "p25" (Fire/EMS 15, trunk-recorder:
 # one dongle covers the county system's control and voice channels). false = new dongles start Off
 # and sizeup never opens one until you pick a mode for it.
