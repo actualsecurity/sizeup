@@ -172,6 +172,7 @@ window.MapLayers = (() => {
   class MapRoads {
     constructor(map, host, ctrls, opts = {}) {
       this.map = map;
+      map.on("zoomend", () => { if (!this.panel.hidden) this.renderPanel(); });   // the "zoom in" hints follow the zoom
       this.host = host;
       this.opts = opts;
       this.ready = false;
@@ -311,7 +312,7 @@ window.MapLayers = (() => {
         cb.disabled = !ok;
         cb.addEventListener("change", () => setLayer(l.key, cb.checked));
         lab.append(cb, h("span", "", l.label));
-        if (ok && l.minzoom >= 12) lab.append(h("span", "dim small", "zoom in"));
+        if (ok && l.minzoom > 0 && this.map && this.map.getZoom() < l.minzoom) lab.append(h("span", "dim small", "zoom in"));
         if (ok && l.feed && d.status && d.status[l.key === "incidents" || l.key === "roadwork" ? "events" : l.key]
             && d.status[l.key === "incidents" || l.key === "roadwork" ? "events" : l.key].error) {
           lab.append(h("span", "ml-err small", "feed error"));
