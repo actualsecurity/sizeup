@@ -512,7 +512,9 @@ def test_both_providers_merge_with_511ny_first(tmp_path):
 
 
 def test_the_user_agent_says_who_we_are():
-    assert UA.startswith("sizeup/") and "Port Chester FD" in UA and "github.com/actualsecurity/sizeup" in UA
+    assert UA.startswith("sizeup/") and "Port Chester FD" in UA and "contact pcfd-sizeup.cqmpy@dralias.com" in UA
+    from sizeup import USER_AGENT
+    assert UA == USER_AGENT                                                      # one header everywhere
     assert "Mozilla" not in UA and "Chrome" not in UA                        # a plain client, never a browser
 
 

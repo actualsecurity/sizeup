@@ -85,6 +85,15 @@ SOURCE = "511NY"
 ATTRIBUTION = "powered by 511NY"
 TERMS_URL = "https://511ny.org/help/24"
 LINK_URL = "https://511ny.org/"
+THRUWAY = "Thruway"                                   # the short source name on each item
+THRUWAY_LABEL = "New York State Thruway Authority"    # "Data: ..." in the Layers box
+THRUWAY_LINK = "https://www.thruway.ny.gov/travelers/map"
+THRUWAY_TERMS = "https://www.thruway.ny.gov/legal/disclaimer"
+THRUWAY_API = "https://webdataapi.thruway.ny.gov/api/data"
+THRUWAY_URLS = {"cameras": f"{THRUWAY_API}/trafficcameras/xml", "events": f"{THRUWAY_API}/events/xml",
+                "signs": f"{THRUWAY_API}/dmsstatus/xml"}
+THRUWAY_EVERY_S = {"cameras": 3600.0, "events": 120.0, "signs": 300.0}
+# A plain client that says who it is (no browser impersonation, ever: a host that refuses this is left alone)
 from sizeup import USER_AGENT as UA
 FEEDS = ("cameras", "events", "signs")
 # West, south, east, north: Port Chester and Rye Brook, then Rye, Harrison / Purchase, Mamaroneck,
