@@ -68,7 +68,12 @@ POST /api/cad/incident/<id>/dispatch      {unit_ids, operator, channel?, full?, 
                                           remarks: said as "Reported: ..." (at most 500 characters)
 POST /api/cad/incident/<id>/upgrade       {type?, subtype?, info?, remarks?, unit_ids?, full?, operator, channel?, preview?}
 POST /api/cad/incident/<id>/attach        {unit_ids, operator?}  units on a non-emergency event, no dispatch
-POST /api/cad/unit/<id>/status            {status, operator?, note?}
+                                          {unit_ids, status: RS | OL | ET | IC, operator} -> {ok, moved, status}: on
+                                          any open event in that status, not dispatched (no Disp time, no dispatch
+                                          logged, nothing said); 400 for a unit already on it, out of service, or
+                                          another agency's (on location only); one on another call is moved (moved)
+POST /api/cad/unit/<id>/status            {status, operator?, note?}  IC (incident command): one unit per event,
+                                          whoever held it there goes back to OL (command_from: [names])
 POST /api/cad/unit/<id>/station           {station, operator?}  home firehouse (data/firehouses.json name; '' unsets)
 POST /api/cad/runcards                    {type (TYPE or TYPE/SUBTYPE), slots, spoken?, rename_from?}   add / edit one
 POST /api/cad/runcards/delete             {type}
@@ -192,6 +197,9 @@ def _on_incident(m, b, o, c):
         what = [x for x in (_type(b.get("type", ""), b.get("subtype", "")) if b.get("type") else "",
                             _units(c, b.get("unit_ids")) if b.get("unit_ids") else "", "full response" if b.get("full") else "") if x]
         return f"Upgraded {ev}" + (f": {', '.join(what)}" if what else ""), n
+    if act == "attach" and b.get("status"):
+        return (f"Added {_units(c, b.get('unit_ids'))} to {ev} {c.lists.status_phrase(str(b['status']))} (not dispatched)"
+                + (f"; moved {', '.join(o['moved'])}" if o.get("moved") else "")), n
     if act == "attach":
         return f"Attached {_units(c, b.get('unit_ids'))} to {ev}", n
     if act == "link":
@@ -206,7 +214,7 @@ def _on_incident(m, b, o, c):
 def _unit_status(m, b, o, c):
     n = o.get("incident_number") or (_number(c, b["incident_id"]) if b.get("incident_id") else "")
     return f"Set {o.get('name', '')} to {b.get('status', '')}" + (f" ({_clip(b['note'], 40)})" if b.get("note") else "") \
-        + (f" on {n}" if n else ""), n
+        + (f" on {n}" if n else "") + (f"; command from {', '.join(o['command_from'])}" if o.get("command_from") else ""), n
 
 
 def _settings(m, b, o, c):

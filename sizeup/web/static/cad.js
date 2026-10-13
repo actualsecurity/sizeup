@@ -550,6 +550,7 @@ function renderDetail() {
   show($("#d-narr"), !!inc.remarks);
   renderMap(inc);
   renderOnUnits(inc);
+  renderAddUnit(inc);
   show($("#d-attach"), open && inc.status !== "queued");
   renderAttach(inc);
   show($("#d-dispatch"), open && !!inc.emergency);
@@ -917,9 +918,11 @@ function statusButtons(u, where) {
   for (const s of statusChoices(u, where)) {
     if (where === "inc" && s.code === u.status) continue;
     if (s.retired) continue;
-    const b = el("button", "mini" + (s.code === u.status ? " on" : ""), s.name);
+    // Incident command is one unit's per event (the server moves it): on the event, "Take command" when another has it.
+    const take = where === "inc" && u.cmd && s.code === L().command_status;
+    const b = el("button", "mini" + (s.code === u.status ? " on" : ""), take ? "Take command" : s.name);
     statusColors(b, s);
-    b.title = s.code;
+    b.title = take ? `Command from ${u.cmd}` : s.code;
     b.disabled = s.code === u.status;
     b.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -967,9 +970,11 @@ function agencyButtons(u, where, box) {
 
 function renderOnUnits(inc) {
   const rows = (inc.assignments || []).slice().sort((a, b) => (!!a.cleared_at - !!b.cleared_at));
+  const cmd = rows.filter((a) => !a.cleared_at && a.status === L().command_status).map((a) => a.name).join(", ");
+  setText($("#d-cmd"), cmd ? `Command: ${cmd}` : "");
   syncList($("#d-units"), rows, {
     key: (a) => String(a.id),
-    sig: (a) => JSON.stringify([a.status, a.dispatched_at, a.enroute_at, a.onscene_at, a.cleared_at, cad.listSig.length,
+    sig: (a) => JSON.stringify([a.status, a.dispatched_at, a.enroute_at, a.onscene_at, a.cleared_at, cad.listSig.length, cmd,
       (a.next || []).join(), (a.return || []).join(), talkSig(a.name),
       cad.ask && cad.ask.uid === a.unit_id && cad.ask.where === "inc" ? cad.ask.status : null]),
     make: () => el("li", "ou"),
@@ -984,7 +989,9 @@ function renderOnUnits(inc) {
       head.append(times, el("span", "spacer"));
       const talk = !a.cleared_at && Radio.talkingFor(a.name);
       if (talk) head.append(el("span", "talk-badge", `${talk.ended ? "Ended" : "TX"} ${talk.channel}`));
-      if (!a.cleared_at && isOpen(inc)) head.append(statusButtons({ id: a.unit_id, status: a.status, next: a.next }, "inc"));
+      if (!a.cleared_at && isOpen(inc)) {
+        head.append(statusButtons({ id: a.unit_id, status: a.status, next: a.next, cmd: cmd !== a.name && cmd }, "inc"));
+      }
       else if (a.cleared_at && isOpen(inc) && (a.return || []).length) head.append(returnButtons(inc, a));
       li.replaceChildren(head);
     },
@@ -1528,6 +1535,128 @@ function returnButtons(inc, a) {
     box.append(b);
   }
   return box;
+}
+
+// ---- Assigned > Add unit: a unit nobody dispatched (heard responding, or on location) ---------------
+// The units on this event first, then the fire units, then the rest (the server's tag order, as the note's
+// @-tags and /incident/<id>/units). Not the units already on it, nor other agencies (Attach has those).
+// Nothing is said on the air; the server logs it as "2395 added responding (not dispatched)".
+
+const addUnit = { items: [], idx: 0, iid: null };
+function addStatuses() {                  // Responding, On location: the first of each role
+  const all = L().unit_statuses || [];
+  return ["enroute", "onscene"].map((r) => all.find((s) => s.role === r && !s.retired)).filter(Boolean);
+}
+function addCandidates(inc) {
+  const on = new Set(openAssignments(inc).map((a) => a.name));
+  return tagOrder(inc).filter((c) => !on.has(c)).map((c) => units().find((u) => u.name === c))
+    .filter((u) => u && u.response !== "agency");
+}
+function renderAddUnit(inc) {
+  const ok = !BOARD && isOpen(inc) && inc.status !== "queued";
+  if (!$("#o-form").hidden && (!ok || addUnit.iid !== inc.id)) closeAddUnit();    // another event, or this one closed
+  show($("#o-open"), ok && $("#o-form").hidden);
+  const box = $("#o-status"), sig = JSON.stringify(addStatuses().map((s) => [s.code, s.name, s.bg]));
+  if (box._sig === sig) return;
+  box._sig = sig;
+  box.replaceChildren(...addStatuses().map((s) => {
+    const b = statusColors(el("button", "", s.name), s);
+    b.type = "button";
+    b.dataset.status = s.code;
+    b.title = `On this event as ${s.name}, not dispatched`;
+    b.addEventListener("click", () => submitAddUnit(s.code));
+    return b;
+  }));
+}
+function openAddUnit() {
+  const inc = selected();
+  if (!inc) return;
+  addUnit.iid = inc.id;
+  show($("#o-form"), true);
+  show($("#o-open"), false);
+  flash($("#o-error"));
+  $("#o-unit").focus();
+}
+function closeAddUnit(refocus = false) {
+  addUnit.iid = null;
+  $("#o-unit").value = "";
+  hideAddSugg();
+  show($("#o-form"), false);
+  flash($("#o-error"));
+  const inc = selected();
+  show($("#o-open"), !BOARD && !!inc && isOpen(inc) && inc.status !== "queued");
+  if (refocus && !$("#o-open").hidden) $("#o-open").focus();
+}
+function hideAddSugg() {
+  addUnit.items = [];
+  show($("#o-sugg"), false);
+  $("#o-unit").setAttribute("aria-expanded", "false");
+}
+function suggestAddUnit() {
+  const inc = selected(), input = $("#o-unit"), q = input.value.trim().toLowerCase();
+  if (!inc || !q) return hideAddSugg();
+  const items = addCandidates(inc).filter((u) => u.name.toLowerCase().startsWith(q)).slice(0, 8);
+  if (!items.length || (items.length === 1 && items[0].name.toLowerCase() === q)) return hideAddSugg();
+  if (addUnit.items.map((u) => u.id).join() !== items.map((u) => u.id).join()) addUnit.idx = 0;
+  addUnit.items = items;
+  const box = $("#o-sugg");
+  box.replaceChildren(...items.map((u, i) => {
+    const li = el("li", i === addUnit.idx ? "on" : "");
+    li.id = `o-sugg-${i}`;
+    li.setAttribute("role", "option");
+    li.setAttribute("aria-selected", String(i === addUnit.idx));
+    li.append(el("b", "", u.name));
+    if (roleOf(u.status) === "oos") li.append(el("span", "warn small", unitStatus(u.status).name));
+    else if (u.incident_id) li.append(el("span", "warn small", `On ${u.incident_number || "another call"}`));
+    else if (u.title || u.department) li.append(el("span", "dim small", u.title || u.department));
+    li.addEventListener("mousedown", (e) => { e.preventDefault(); takeAddUnit(u.name); });
+    return li;
+  }));
+  show(box, true);
+  input.setAttribute("aria-expanded", "true");
+  input.setAttribute("aria-activedescendant", `o-sugg-${addUnit.idx}`);
+}
+function takeAddUnit(name) {
+  $("#o-unit").value = name;
+  hideAddSugg();
+}
+function addUnitKeys(e) {
+  if (addUnit.items.length && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+    e.preventDefault();
+    addUnit.idx = (addUnit.idx + (e.key === "ArrowDown" ? 1 : -1) + addUnit.items.length) % addUnit.items.length;
+    suggestAddUnit();
+  } else if (addUnit.items.length && (e.key === "Tab" || e.key === "Enter")) {
+    e.preventDefault();
+    takeAddUnit(addUnit.items[addUnit.idx].name);
+  } else if (e.key === "Enter") {                 // a whole code typed or taken: Responding
+    e.preventDefault();
+    const first = addStatuses()[0];
+    if (first) submitAddUnit(first.code);
+  } else if (e.key === "Escape") {
+    e.preventDefault();
+    e.stopPropagation();
+    if (addUnit.items.length) hideAddSugg(); else closeAddUnit(true);
+  }
+}
+async function submitAddUnit(status) {
+  const inc = selected(), err = $("#o-error");
+  flash(err);
+  if (!inc) return;
+  const code = $("#o-unit").value.trim().toLowerCase();
+  if (!code) return flash(err, "Enter a unit");
+  const u = units().find((x) => x.name.toLowerCase() === code);
+  if (!u) return flash(err, `No unit ${$("#o-unit").value.trim()}`);
+  const op = needOperator(err);
+  if (!op) return;
+  if (u.incident_id && u.incident_id !== inc.id
+      && !await UI.confirm(`${u.name} is on ${u.incident_number || "another call"}. Move it here?`, { ok: "Move", danger: false })) return;
+  try {
+    const r = await api("POST", `/api/cad/incident/${inc.id}/attach`, { unit_ids: [u.id], status, operator: op });
+    closeAddUnit();
+    if (r.moved && r.moved.length) UI.toast(`Moved ${r.moved.join(", ")}`, "info");
+  } catch (e) {
+    flash(err, e.message);
+  }
 }
 
 async function setUnitStatus(uid, status, note = "") {
@@ -2194,6 +2323,12 @@ $("#u-preview").addEventListener("click", () => upgrade(null, true));
 $("#u-cancel").addEventListener("click", () => { $("#upgrade-form").reset(); show($("#upgrade-form"), false); });
 $("#upgrade-form").addEventListener("submit", (e) => upgrade(e, false));
 $("#a-add").addEventListener("click", attach);
+$("#o-open").addEventListener("click", openAddUnit);
+$("#o-cancel").addEventListener("click", () => closeAddUnit(true));
+$("#o-form").addEventListener("submit", (e) => e.preventDefault());
+$("#o-unit").addEventListener("input", () => { flash($("#o-error")); suggestAddUnit(); });
+$("#o-unit").addEventListener("keydown", addUnitKeys);
+$("#o-unit").addEventListener("blur", () => setTimeout(hideAddSugg, 150));
 $("#note-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const inc = selected(), input = $("#note-text");
@@ -2273,7 +2408,8 @@ function focusSearch() {
 }
 function escapeView(fromField) {
   if (fromField) return;
-  for (const [form, cancel] of [["#upgrade-form", "#u-cancel"], ["#close-form", "#c-cancel"], ["#edit-form", "#edit-cancel"]]) {
+  for (const [form, cancel] of [["#upgrade-form", "#u-cancel"], ["#close-form", "#c-cancel"], ["#edit-form", "#edit-cancel"],
+    ["#o-form", "#o-cancel"]]) {
     if (!$(form).hidden && !$("#d-body").hidden) { $(cancel).click(); return; }
   }
   if (cad.mode === "new") { $("#new-cancel").click(); return; }
@@ -2331,7 +2467,7 @@ function askAdmin() {
 // What a viewer can't press on the dispatch screen (reading, filtering, playing, the maps stay).
 const RO_DISPATCH = "#new-incident, #new-form :is(input, select, textarea, #new-create), #d-accept, #d-dismiss, #d-edit, "
   + "#d-close, #d-queued select, #close-form :is(select, #c-close), #edit-form :is(input, select, textarea, #edit-save), "
-  + "#d-attach :is(select, button:not(.help)), #d-dispatch :is(input, select, textarea, button:not(#u-cancel):not(.help)), #note-text, #note-add, "
+  + "#d-attach :is(select, button:not(.help)), #o-open, #o-form :is(input, button:not(#o-cancel)), #d-dispatch :is(input, select, textarea, button:not(#u-cancel):not(.help)), #note-text, #note-add, "
   + ".ubtns button, .pa-dismiss";        // (a transmission's menu leaves out what the role can't do: txMenuItems)
 // In Settings for anyone but an admin: everything but the section tabs, filters and what only reads.
 const RO_SETTINGS_KEEP = ".tab, [type=search], .ro-ok, .ro-ok *, .help";

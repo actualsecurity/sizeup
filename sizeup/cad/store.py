@@ -695,6 +695,23 @@ class Store:
             raise CadError(f"no unit {uid}")
         return u
 
+    def _take_command(self, db, iid: int, uid: int, name: str, operator: str, now: float) -> tuple[str, list[str]]:
+        """uid takes incident command on iid (user, 2026-10-08: "there also can only be one inc commander, so
+        the option should minus from others if its set on someone new"): whoever held it there goes back to
+        on location, the status command is taken from, in the caller's transaction.
+        -> ("Command: E63 (from 2392)", the units relieved)."""
+        L = self.lists
+        back = next((s["code"] for s in L.unit_statuses if s.get("role") == "onscene" and not s.get("retired")
+                     and s["code"] != L.command_status), L.status_for("onscene"))
+        held = db.execute("SELECT u.id, u.name, u.status FROM assignments a JOIN units u ON u.id = a.unit_id "
+                          "WHERE a.incident_id = ? AND a.cleared_at IS NULL AND u.status = ? AND u.id != ? ORDER BY a.id",
+                          (iid, L.command_status, uid)).fetchall()
+        for h in held:
+            db.execute("UPDATE units SET status = ?, status_at = ? WHERE id = ?", (back, now, h["id"]))
+            self._history(db, h["id"], h["status"], back, iid, operator, now, f"command to {name}")
+        was = [h["name"] for h in held]
+        return f"Command: {name}" + (f" (from {', '.join(was)})" if was else ""), was
+
     def set_unit_status(self, uid: int, status: str, operator: str = "", note: str = "") -> dict:
         """The status dropdown. A free or out-of-service status clears the unit off its event;
         dispatched, en route and on scene stamp the assignment's times."""
@@ -720,9 +737,15 @@ class Store:
             text = f"{u['name']} {'cleared' if u['response'] == 'agency' and role == 'free' else L.status_phrase(status)}" \
                 + (f" ({note})" if note and role == "oos" else "")
             iid = a["incident_id"] if a is not None else None
+            relieved = []
+            if iid is not None and status == L.command_status:      # one line: "Command: E63 (from 2392)"
+                text, relieved = self._take_command(db, iid, uid, u["name"], operator, now)
             self._event(db, iid, "status", text, operator, uid, now)
             self._history(db, uid, u["status"], status, iid, operator, now, note if role == "oos" else "")
-        return self.unit(uid)
+        out = self.unit(uid)
+        if relieved:
+            out["command_from"] = relieved
+        return out
 
     def set_unit_status_on(self, uid: int, status: str, incident_id: int, operator: str = "", note: str = "") -> dict:
         """The board's working statuses ask which call (user, 2026-10-07: "it should prompt us ... to
@@ -790,6 +813,8 @@ class Store:
             db.execute("UPDATE units SET status = ?, status_at = ?, out_of_service = '' WHERE id = ?", (status, now, uid))
             self._event(db, iid, "status", f"{u['name']} returned ({L.status_phrase(status)})", operator, uid, now)
             self._history(db, uid, u["status"], status, iid, operator, now)
+            if status == L.command_status:
+                self._event(db, iid, "status", self._take_command(db, iid, uid, u["name"], operator, now)[0], operator, uid, now)
         return self.unit(uid)
 
     # -- incidents --------------------------------------------------------------------------------
@@ -975,12 +1000,14 @@ class Store:
         return self.one("SELECT 1 AS x FROM dispatches WHERE incident_id = ? LIMIT 1", (iid,)) is not None
 
     def assign(self, iid: int, unit_ids: list[int], operator: str = "", attach: bool = False, verb: str = "",
-               quiet: bool = False) -> list[str]:
+               quiet: bool = False, status: str = "") -> list[str]:
         """Units dispatched to the event (PENDING -> ACTIVE), or, attach=True, attached with no
         dispatch (a non-emergency event: logged on the chronology, unit status unchanged). A unit
         committed elsewhere is moved (its old assignment cleared, noted on both chronologies);
         one already on this event stays. verb: how the chronology says it ("added to the assignment");
-        default the dispatched status ("E63 dispatched")."""
+        default the dispatched status ("E63 dispatched").
+        status (a responding / on-location code): on the event with no dispatch in that status, its
+        time stamped and Disp left empty ("2395 added responding (not dispatched)")."""
         now = self.clock()
         dispatched = self.lists.status_for("dispatched")
         moved, added = [], []
@@ -995,9 +1022,19 @@ class Store:
                     db.execute("UPDATE assignments SET cleared_at = ? WHERE id = ?", (now, a["id"]))
                     self._event(db, a["incident_id"], "status", f"{u['name']} reassigned to another event", operator, uid, now)
                     moved.append(f"{u['name']} (from {a['number']})")
-                db.execute("INSERT INTO assignments (incident_id, unit_id, dispatched_at, assigned_at) VALUES (?, ?, ?, ?)",
-                           (iid, uid, None if attach else now, now))
-                if not attach:
+                cur = db.execute("INSERT INTO assignments (incident_id, unit_id, dispatched_at, assigned_at) VALUES (?, ?, ?, ?)",
+                                 (iid, uid, None if attach or status else now, now))
+                if status:
+                    col = ON_TIMES[self.lists.role(status)]
+                    db.execute(f"UPDATE assignments SET {col} = ? WHERE id = ?", (now, cur.lastrowid))
+                    db.execute("UPDATE units SET status = ?, status_at = ?, out_of_service = '' WHERE id = ?", (status, now, uid))
+                    self._event(db, iid, "status", f"{u['name']} added {self.lists.status_phrase(status)} (not dispatched)",
+                                operator, uid, now)
+                    self._history(db, uid, u["status"], status, iid, operator, now)
+                    if status == self.lists.command_status:
+                        self._event(db, iid, "status", self._take_command(db, iid, uid, u["name"], operator, now)[0],
+                                    operator, uid, now)
+                elif not attach:
                     db.execute("UPDATE units SET status = ?, status_at = ? WHERE id = ?", (dispatched, now, uid))
                     self._event(db, iid, "status", f"{u['name']} {verb or self.lists.status_phrase(dispatched)}",
                                 operator, uid, now)

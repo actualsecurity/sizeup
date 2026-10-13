@@ -45,7 +45,7 @@ def test_status_roles_and_the_next_steps():
     a = {x["name"]: x for x in inc["assignments"]}
     assert a["E60"]["cleared_at"] and a["E61"]["enroute_at"] and a["L31"]["onscene_at"]
     t = [e["text"] for e in inc["events"]]
-    assert "E60 cancelled" in t and "E61 enroute to" in t and "L31 incident command" in t
+    assert "E60 cancelled" in t and "E61 enroute to" in t and "Command: L31" in t      # one commander: tests/test_assigned_panel.py
     assert cad.store.unit(e60)["status"] == "CN" and cad.store.unit(e60)["incident_id"] is None
     runcards.save(cad.store, "SERVICE", [{"kind": "engine", "count": 10}])
     rec = runcards.recommend(cad.store, "SERVICE", "", cad.create({"type": "SERVICE"})["id"])
