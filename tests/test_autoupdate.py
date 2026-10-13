@@ -140,10 +140,11 @@ class Repo:
         git(self.opt, "--git-dir=repo.git", "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
         git(self.opt, "--git-dir=repo.git", "fetch", "-q", "origin")
 
-    def commit(self, text: str, branch: str = "main") -> str:
+    def commit(self, text: str, branch: str = "main", path: str = "f.txt") -> str:
         git(self.origin, "checkout", "-q", "-B", branch)
-        (self.origin / "f.txt").write_text(text)
-        git(self.origin, "add", "f.txt")
+        (self.origin / path).parent.mkdir(parents=True, exist_ok=True)
+        (self.origin / path).write_text(text)
+        git(self.origin, "add", path)
         git(self.origin, "commit", "-q", "-m", text)
         sha = git(self.origin, "rev-parse", "HEAD")
         if branch != "main":
@@ -166,6 +167,7 @@ class FakeUpdater(Updater):
                          out=self.lines.append, **kw)
         self.calls: list[tuple] = []
         self.bad_preflight: set[str] = set()
+        self.stage_errors: list[str] = []       # transient: apt lock, network, disk
         self.unhealthy: set[str] = set()
         self.busy_for = 0                   # polls that still see a carrier open
         self.releases_dir = repo.opt / "releases"
@@ -190,7 +192,10 @@ class FakeUpdater(Updater):
     def stage(self, sha):
         self.calls.append(("stage", sha))
         if sha in self.bad_preflight:
-            raise StepError("preflight failed: imports fail: ModuleNotFoundError: No module named 'nope'")
+            raise StepError("preflight failed: imports fail: ModuleNotFoundError: No module named 'nope'",
+                            au.PREFLIGHT_EXIT)
+        if self.stage_errors:
+            raise StepError(self.stage_errors.pop(0))
         self.make_release(sha, sha)
 
     def activate(self, name, leaving=""):
@@ -273,7 +278,8 @@ def test_never_a_commit_that_isnt_on_main(station):
     assert u.run() == 1
     assert u.current()[1] == repo.shas[0] and ("stage", side) not in u.calls
     st = u.load()
-    assert st["state"] == "failed" and st["last"]["result"] == "refused" and "not on origin/main" in st["last"]["why"]
+    assert st["state"] == "failed" and st["last"]["result"] == "refused"
+    assert st["last"]["why"] in ("not on origin/main", "no such commit in the repository")   # only main is fetched
     u.calls.clear()
     assert u.run() == 0 and u.calls == []                            # not tried again
 
@@ -520,3 +526,154 @@ def test_state_json_is_what_the_station_reads(station):
     v = w.status()
     assert v["update"]["state"] == "current" and v["update"]["last"]["result"] == "ok"
     assert json.loads(u.p.state.read_text())["current"] == new
+
+
+# -- review fixes ------------------------------------------------------------------------------------------
+
+def test_a_transient_build_failure_is_retried_with_backoff_then_given_up(station):
+    repo, u = station
+    new = repo.commit("two")
+    u.want(new)
+    u.stage_errors = ["E: Could not get lock /var/lib/dpkg/lock-frontend"] * 5
+    assert u.run() == 1
+    st = u.load()
+    assert st["state"] == "behind" and st["retry"][new]["n"] == 1 and not st.get("failed")
+    assert describe(repo.shas[0], new, Watch(own="", run_dir="", state_path=str(u.p.state)).state())["state"] == "updating"
+    u.calls.clear()
+    assert u.run() == 0 and u.calls == []                            # not before its time
+    for n, wait in zip(range(2, 6), (300, 900, 3600, 3600)):
+        u.t[0] += wait
+        u.run()
+        assert u.load().get("retry", {}).get(new, {}).get("n", n) == n
+    st = u.load()
+    assert st["state"] == "failed" and "couldn't build it 5 times" in st["failed"][new]["why"]
+    assert len([c for c in u.calls if c[0] == "stage"]) == 4
+    assert u.current()[1] == repo.shas[0]
+
+
+def test_a_retry_that_works_switches(station):
+    repo, u = station
+    new = repo.commit("two")
+    u.want(new)
+    u.stage_errors = ["network unreachable"]
+    u.run()
+    u.t[0] += 301
+    assert u.run() == 0 and u.current()[1] == new and "retry" not in u.load()
+
+
+def test_docs_only_changes_dont_restart(station):
+    repo, u = station
+    old = repo.shas[0]
+    docs = repo.commit("words", path="docs/cloud.md")
+    repo.commit("more words", path="deploy/station/README.md")
+    ci = repo.commit("ci", path=".github/workflows/x.yml")
+    u.want(ci)
+    assert u.run() == 0
+    assert u.calls == [] and u.current()[1] == old                   # nothing staged, nothing restarted
+    st = u.load()
+    assert st["state"] == "current" and st["equivalent"][ci] == old
+    assert describe(old, ci, Watch(own="", run_dir="", state_path=str(u.p.state)).state())["text"] == \
+        f"up to date: {ci[:7]} (no runtime change since {old[:7]})"
+    assert u.run() == 0 and u.calls == []                            # and stays that way: no loop
+    code = repo.commit("code", path="sizeup/x.py")
+    u.want(code)
+    assert u.run() == 0 and u.current()[1] == code                   # a runtime change: the usual update
+    assert au.runtime_changes(["docs/a.md", "README.md", "tests/t.py", "sizeup/cloud/x.py"]) == ["sizeup/cloud/x.py"]
+    assert au.runtime_changes(["deploy/station/windows/usb-attach.ps1", "data/notes.md"]) == \
+        ["deploy/station/windows/usb-attach.ps1", "data/notes.md"]
+    del docs
+
+
+def test_only_a_full_sha_is_followed(station):
+    repo, u = station
+    new = repo.commit("two")
+    u.want(new[:7])                                                  # a short name can match a branch first
+    assert u.run() == 0 and u.calls == []
+    assert "isn't a full git sha" in u.load()["paused"]
+
+
+def test_a_branch_named_like_a_sha_never_wins(tmp_path):
+    """install-linux.sh --stage resolves the 40-hex sha as an object, not as a ref of that name."""
+    repo = Repo(tmp_path)
+    on_main = repo.shas[0]
+    side = repo.commit("planted", branch="feature")
+    git(repo.origin, "branch", "-f", on_main, side)                  # a branch called <the main sha>
+    bare = repo.opt / "repo.git"
+    git(repo.opt, "--git-dir=repo.git", "fetch", "-q", "origin", "+refs/heads/*:refs/remotes/origin/*")
+    assert git(repo.opt, "--git-dir=repo.git", "rev-parse", f"refs/remotes/origin/{on_main}") == side
+    got = git(repo.opt, "--git-dir=repo.git", "rev-parse", "-q", "--verify", f"{on_main}^{{commit}}")
+    assert got == on_main and bare.is_dir()
+    sh = (ROOT / "deploy" / "station" / "install-linux.sh").read_text()
+    stage = sh[sh.index('if [ -n "$STAGE_SHA" ]; then\n  # --'):sh.index('if [ -n "$ACTIVATE_NAME" ]; then\n')]
+    for want in ('[[ "$STAGE_SHA" =~ ^[0-9a-f]{40}$ ]]', 'rev-parse -q --verify "$STAGE_SHA^{commit}"',
+                 '[ "$sha" = "$STAGE_SHA" ]', 'merge-base --is-ancestor "$sha" "refs/remotes/origin/main"'):
+        assert want in stage, want
+    assert "resolve_ref" not in stage
+
+
+def test_want_file_never_follows_a_link_waits_on_a_fifo_or_reads_much(station):
+    repo, u = station
+    new = repo.commit("two")
+    target = u.p.want.parent / "elsewhere"
+    target.write_text(new + "\n")
+    u.p.want.symlink_to(target)
+    assert u.read_want() == ""
+    u.p.want.unlink()
+    os.mkfifo(u.p.want)
+    t0 = time.time()
+    assert u.read_want() == "" and time.time() - t0 < 1
+    u.p.want.unlink()
+    u.p.want.write_text(new + "\n" + "x" * 10_000_000)
+    assert u.read_want() == new
+
+
+def test_the_installer_runs_under_the_updaters_lock(tmp_path):
+    script = tmp_path / "fake.sh"
+    script.write_text('echo "locked=$SIZEUP_UPDATE_LOCKED"\nexit 3\n')
+    lines = []
+    u = Updater(Paths(opt=tmp_path), out=lines.append)
+    with pytest.raises(StepError) as e:
+        u.installer(["--stage", A], script)
+    assert lines == ["locked=1"] and e.value.code == au.PREFLIGHT_EXIT
+    sh = (ROOT / "deploy" / "station" / "install-linux.sh").read_text()
+    assert 'flock -n 9' in sh and '"${SIZEUP_UPDATE_LOCKED:-}"' in sh and "/run/sizeup-update/lock" in sh
+    assert "systemctl stop sizeup-update.path sizeup-update.timer" in sh
+
+
+def test_the_port_default_is_sizeups(tmp_path):
+    from sizeup.config import load
+    conf = tmp_path / "config.toml"
+    conf.write_text('[station]\nid = "t"\n')
+    u = Updater(Paths(config=conf, install_conf=tmp_path / "none"))
+    assert u.settings()["port"] == load(conf).port == au.PORT
+
+
+def test_status_and_doctor_print(station, capsys):
+    repo, u = station
+    new = repo.commit("two")
+    u.want(new)
+    u.run()
+    r = u.report()
+    assert r["state"] == "ok" and r["record"]["last"]["result"] == "ok"
+    lines = au.status_lines(r)
+    assert lines[0].startswith(f"version:   {new[:7]}") and any("last update" in ln and "ok" in ln for ln in lines)
+    assert any("version" in ln and ln.startswith("  ok") for ln in au.doctor_lines(r))
+
+
+def test_status_and_doctor_after_a_rollback_and_with_any_old_state(station, monkeypatch, capsys):
+    repo, u = station
+    old, new = repo.shas[0], repo.commit("two")
+    u.want(new)
+    u.run()
+    assert u.rollback() == 0
+    monkeypatch.setattr(au, "Updater", lambda **kw: u)
+    for cmd in ("status", "doctor"):
+        assert au.main([cmd]) == 0
+    out = capsys.readouterr().out
+    assert f"version:   {old[:7]}" in out and "rolled back by hand" in out
+    assert "FAIL" in out and new[:7] in out                          # doctor: the one left behind failed
+    for junk in ('"a string"', '{"last": "x", "failed": [1], "state": 3}', "not json"):
+        u.p.state.write_text(junk)
+        for cmd in ("status", "doctor"):
+            assert au.main([cmd]) == 0                              # never a traceback on a station
+    assert "Traceback" not in capsys.readouterr().out

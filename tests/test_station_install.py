@@ -208,8 +208,8 @@ def test_units_restart_forever_and_load_the_secrets():
     assert "/opt/sizeup/app" not in svc and "build.env" not in svc
     # the release that runs is resolved once, at start: a switch never changes code under a running process
     start = (STATION / "start-station").read_text()
-    for want in ('rel=$(readlink -f /opt/sizeup/current)', 'PYTHONPATH="$rel"', 'SIZEUP_BUILD=$(head -n 1 "$rel/BUILD"',
-                 'exec "$rel/venv/bin/python" -m sizeup --config /etc/sizeup/config.toml'):
+    for want in ('rel=$(readlink -f /opt/sizeup/current || true)', 'PYTHONPATH="$rel"', 'SIZEUP_BUILD=$(head -n 1 "$rel/BUILD"',
+                 'py="$rel/venv/bin/python"', 'exec "$py" -m sizeup --config /etc/sizeup/config.toml'):
         assert want in start, want
     timer = (STATION / "systemd" / "sizeup-health.timer").read_text()
     assert "OnUnitActiveSec=60s" in timer and "WantedBy=timers.target" in timer
@@ -261,7 +261,7 @@ def test_installer_builds_beside_and_switches_by_rename():
                  'swap_link "releases/$name" "$CURRENT"', 'BUILDS=$OPT/builds', '-DCMAKE_INSTALL_PREFIX="$TR_B"',
                  "compileall", "--ci needs --from-dir or a local --repo",
                  'sizeup --config "$conf" --init-state', "systemd-analyze verify", '"$tr/bin/trunk-recorder" --version',
-                 "clone -q --bare --no-local", "DEPLOY_KEY=$ETC/deploy_key"):
+                 'git clone -q --bare "$LEGACY_BUNDLE"', "bundle create - --all", "DEPLOY_KEY=$ETC/deploy_key"):
         assert want in sh, want
     # stage: nothing the running station uses is touched; activate is the only switch, after a preflight
     stage = sh[sh.index('if [ -n "$STAGE_SHA" ]; then\n  # --'):sh.index('if [ -n "$ACTIVATE_NAME" ]; then\n')]
@@ -269,7 +269,7 @@ def test_installer_builds_beside_and_switches_by_rename():
     main = sh[sh.index("# -- install / repair / update"):]
     assert main.index('preflight "$REL"') < main.index('activate "$NAME"')
     # whisper-server is restarted only when its command line changed
-    assert 'want=$("$LIB/start-whisper" --print' in sh and "have=$(cat /run/sizeup-whisper/argv" in sh
+    assert 'want=$("$LIB/start-whisper" --print' in sh and "have=$(whisper_argv)" in sh
 
 
 def test_start_whisper_runs_what_sizeup_would_have(tmp_path):
@@ -310,9 +310,43 @@ def test_the_hub_image_is_built_with_its_git_sha():
 def test_nothing_points_into_the_old_checkout():
     """/opt/sizeup/app (before side-by-side releases) goes away after the switch: the template, the
     units and the launchers never name it (the installer moves an old config's talkgroups_file)."""
-    for path in [TEMPLATE, *(STATION / "systemd").iterdir(), STATION / "start-station", STATION / "start-whisper",
-                 STATION / "health-check.sh"]:
+    for path in [TEMPLATE, *(STATION / "systemd").iterdir(), STATION / "start-whisper", STATION / "health-check.sh"]:
         assert "/opt/sizeup/app" not in path.read_text(), path.name
         assert "/opt/sizeup/venv" not in path.read_text(), path.name
     sh = (STATION / "install-linux.sh").read_text()
     assert 'sed -i "s#$LEGACY_APP/deploy/trunk-recorder/talkgroups.csv#$TR_DIR/talkgroups.csv#" "$CONF"' in sh
+
+
+def test_root_never_writes_through_the_sizeup_users_paths():
+    """/var/lib/sizeup (and trunk-recorder's dir in it) is the sizeup user's: a link it plants there
+    must never make root write, chown or mkdir somewhere else. Every write there runs as that user
+    (as_user / runuser); root only tests for files. The CI update test plants such links for real."""
+    sh = (STATION / "install-linux.sh").read_text()
+    writes = re.compile(r"\b(install|chown|chmod|mkdir|cp|mv|tee|ln|rm|python3|cat)\b|>")
+    for n, line in enumerate(sh.splitlines(), 1):
+        code = line.split(" #", 1)[0].replace(">/dev/null", "").replace("2>&1", "")
+        if re.search(r'"\$(TR_DIR|STATE)/', code) and writes.search(code):
+            assert "as_user" in code or "runuser" in code, f"install-linux.sh:{n} root writes in the sizeup user's dir: {line.strip()}"
+    assert 'os.replace(dst + ".tmp", dst)' in sh                   # config.json: replaced, never written through
+    # and what root reads from the sizeup user: bounded, as that user
+    assert "whisper_argv() { timeout 5 runuser -u \"$SVC_USER\" -- head -c 8192 /run/sizeup-whisper/argv" in sh
+    assert "cat /run/sizeup-whisper/argv" not in (STATION / "sizeup-station").read_text()
+
+
+def test_start_station_survives_a_cut_short_first_switch():
+    start = (STATION / "start-station").read_text()
+    assert "rel=/opt/sizeup/app" in start and "py=/opt/sizeup/venv/bin/python" in start
+
+
+def test_one_default_port_everywhere():
+    """sizeup/config.py's default (8090) wherever a config without [web] port is read."""
+    from sizeup.config import Config  # noqa: F401 (the default lives in load())
+    for path in (STATION / "health-check.sh", STATION / "sizeup-station", STATION / "install-linux.sh"):
+        text = path.read_text()
+        assert '"port", 8091' not in text and "conf_port web 8091" not in text and "echo 8091" not in text, path.name
+
+
+def test_rebuild_never_removes_a_build_in_use():
+    sh = (STATION / "install-linux.sh").read_text()
+    assert 'RTLSDR_B="$RTLSDR_B-$rebuilt" TR_B="$TR_B-$rebuilt" WHISPER_B="$WHISPER_B-$rebuilt"' in sh
+    assert "git -C \"$dir\" clean -q -fdx -e /build/" in sh          # a stopped build picks up where it was

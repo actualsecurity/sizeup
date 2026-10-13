@@ -175,6 +175,9 @@ The Linux station (deploy/station/README.md "Updating") runs exactly the commit 
   for a quiet moment (no carrier open, nobody talking, no transcription running); swaps
   `/opt/sizeup/current` by rename and restarts once; and swaps back if `/healthz` doesn't answer with
   the new build within 90 s. A failed build is not tried again until the hub moves on. 3 releases kept.
+* A commit that changes nothing the station runs (docs, tests, CI, the hub's files) doesn't restart
+  it: the station counts as up to date with it. A build that breaks for a passing reason (apt lock,
+  network, disk) is retried after 5, 15, 60, 60 minutes, then recorded as failed.
 * Paused: `sizeup-station autoupdate off`, `[station] auto_update = false`, a station on another
   `--ref` than main, or one installed from a folder. The hub out of reach: the station stays put.
 * What it did goes up in the station's status (`version`: its build, the updater's state, last

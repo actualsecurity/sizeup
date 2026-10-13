@@ -52,6 +52,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -74,6 +75,16 @@ KEEP_FAILED = 20
 KEEP_RELEASES = 3
 MAIN = "main"
 SHA = re.compile(r"[0-9a-f]{7,40}")
+FULL_SHA = re.compile(r"[0-9a-f]{40}")
+PORT = 8090                # [web] port when the config has none (sizeup/config.py's default)
+PREFLIGHT_EXIT = 3         # install-linux.sh --stage: the release was built but its preflight failed
+RETRY_S = (300.0, 900.0, 3600.0, 3600.0)   # a stage that broke for another reason (apt lock, network, disk)
+MAX_STAGES = 5             # ... is tried this often per sha, then recorded as failed
+KEEP_EQUIVALENT = 10
+# Changes here don't change what the station runs: the hub's build moves on, the station stays as it is
+# (no restart) and counts as up to date. Conservative: anything not listed restarts.
+NOT_RUNTIME = ("docs/", "tests/", ".github/", "deploy/hub/", "deploy/aws/", "Dockerfile", ".dockerignore",
+               ".gitignore", "deploy/station/install-windows.ps1", "deploy/station/uninstall-windows.ps1")
 NOT_RADIOS = ("Hub", "STT")
 WINDOWS_STALE = "Windows scripts out of date: run install-windows.ps1"
 
@@ -103,13 +114,27 @@ def failed_entry(failed: dict | None, sha: str) -> dict | None:
     return None
 
 
-def plan(want: str, current: str, paused: str, failed: dict | None) -> tuple[str, str]:
+def runtime_changes(changed: list[str]) -> list[str]:
+    """The changed paths the station runs ([] = docs, tests, CI, the hub's own files: no restart)."""
+    return [f for f in changed if not f.startswith(NOT_RUNTIME)
+            and not (f.endswith(".md") and not f.startswith(("sizeup/", "data/")))]
+
+
+def equivalent_to(upd: dict | None, want: str, current: str) -> bool:
+    """want differs from current only in what the station doesn't run (recorded by the updater)."""
+    eq = (upd or {}).get("equivalent") if isinstance((upd or {}).get("equivalent"), dict) else {}
+    return any(same_build(k, want) and same_build(v, current) for k, v in eq.items())
+
+
+def plan(want: str, current: str, paused: str, failed: dict | None, upd: dict | None = None) -> tuple[str, str]:
     """What to do about the hub's build: (action, why). Actions: "none" (the hub's build isn't
     known), "current", "paused", "failed-before", "update"."""
     if not norm(want):
         return "none", "the hub's build isn't known"
     if same_build(want, current):
         return "current", f"on the hub's build {short(want)}"
+    if equivalent_to(upd, want, current):
+        return "current", f"on {short(current)}: the hub's {short(want)} changes nothing it runs"
     if paused:
         return "paused", paused
     f = failed_entry(failed, want)
@@ -153,6 +178,8 @@ def describe(build: str, hub: str, upd: dict | None, now: float | None = None) -
         return {"state": "unknown", "text": f"version {short(build)} (the hub's build isn't known: not updating){win}"}
     if same_build(build, hub):
         return {"state": "ok", "text": f"up to date ({short(build)}){win}"}
+    if equivalent_to(upd, hub, build):
+        return {"state": "ok", "text": f"up to date: {short(hub)} (no runtime change since {short(build)}){win}"}
     if (upd.get("state") in ("waiting", "updating") and same_build(upd.get("to"), hub)
             and now - float(upd.get("since") or 0) < STALE_ATTEMPT_S):
         wait = " (waiting for a quiet moment)" if upd.get("state") == "waiting" else ""
@@ -161,6 +188,12 @@ def describe(build: str, hub: str, upd: dict | None, now: float | None = None) -
     if f is not None:
         return {"state": "failed", "text": f"update to {short(hub)} failed ({f.get('why') or '?'}): "
                                            f"staying on {short(build)} until the hub moves on{win}"}
+    r = (upd.get("retry") or {}) if isinstance(upd.get("retry"), dict) else {}
+    rt = next((v for k, v in r.items() if same_build(k, hub) and isinstance(v, dict)), None)
+    if rt is not None:
+        at = time.strftime("%H:%M", time.localtime(float(rt.get("next_at") or now)))
+        return {"state": "updating", "text": f"update to {short(hub)} not built yet (try {rt.get('n', '?')} of "
+                                             f"{MAX_STAGES}: {rt.get('why') or '?'}); again after {at}{win}"}
     if upd.get("paused"):
         return {"state": "paused", "text": f"on {short(build)}, the hub runs {short(hub)}: {upd['paused']}{win}"}
     return {"state": "behind", "text": f"on {short(build)}, the hub runs {short(hub)}{win}"}
@@ -238,7 +271,8 @@ class Watch:
         if mtime != self._read[0]:
             self._read = (mtime, read_state(self.state_path) if mtime else {})
         st = self._read[1]
-        out = {k: st[k] for k in ("state", "since", "to", "from", "paused", "windows", "last") if k in st}
+        out = {k: st[k] for k in ("state", "since", "to", "from", "paused", "windows", "last", "equivalent", "retry")
+               if k in st}
         out["failed"] = _newest_failed(st.get("failed") if isinstance(st.get("failed"), dict) else {}, 5)
         return out
 
@@ -252,7 +286,9 @@ class Watch:
 # -- the updater (root) --------------------------------------------------------------------------------
 
 class StepError(RuntimeError):
-    pass
+    def __init__(self, msg: str, code: int = 1):
+        super().__init__(msg)
+        self.code = code             # PREFLIGHT_EXIT: built, but the preflight failed (not worth retrying)
 
 
 @dataclass
@@ -362,8 +398,9 @@ class Updater:
         """bash SCRIPT ARGS, its output passed through (the journal); StepError with its last
         FAILED / WARNING lines when it fails."""
         tail: deque[str] = deque(maxlen=40)
+        # (this run holds the update lock: the installer must not take it again)
         proc = subprocess.Popen(["bash", str(script), *args], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                text=True, errors="replace")
+                                text=True, errors="replace", env=dict(os.environ, SIZEUP_UPDATE_LOCKED="1"))
         assert proc.stdout is not None
         for line in proc.stdout:
             line = line.rstrip("\n")
@@ -371,7 +408,8 @@ class Updater:
             self.out(line)
         if proc.wait() != 0:
             said = [ln.split("  ", 1)[-1] for ln in tail if "FAILED" in ln or "WARNING" in ln]
-            raise StepError("; ".join(said[-3:]) or f"{script.name} {args[0]} failed (exit {proc.returncode})")
+            raise StepError("; ".join(said[-3:]) or f"{script.name} {args[0]} failed (exit {proc.returncode})",
+                            proc.returncode)
 
     def stage(self, sha: str) -> None:
         """That commit's own installer builds and preflights releases/<sha> (nothing switches)."""
@@ -394,7 +432,7 @@ class Updater:
     def _get(self, path: str, timeout: float = 5.0) -> dict | None:
         try:
             with urllib.request.urlopen(f"http://127.0.0.1:{self.settings()['port']}{path}", timeout=timeout) as r:
-                d = json.loads(r.read() or b"{}")
+                d = json.loads(r.read(16 * 1024 * 1024) or b"{}")      # (the sizeup process answers: bounded)
             return d if isinstance(d, dict) else None
         except (OSError, ValueError):
             return None
@@ -458,7 +496,7 @@ class Updater:
             self._settings = {"ref": kv.get("SIZEUP_REF", MAIN), "source": kv.get("SIZEUP_SOURCE", "git"),
                               "switch": kv.get("SIZEUP_AUTO_UPDATE", "on"),
                               "config": station.get("auto_update", True) if isinstance(station, dict) else True,
-                              "port": int(web.get("port", 8091)) if isinstance(web, dict) else 8091}
+                              "port": int(web.get("port", PORT)) if isinstance(web, dict) else PORT}
         return self._settings
 
     def current(self) -> tuple[str, str]:
@@ -527,15 +565,39 @@ class Updater:
             pass
 
     def read_want(self) -> str:
-        """The hub's build as the station last heard it; "" if none, malformed or too old."""
+        """The hub's build as the station last heard it; "" if none, malformed or too old. The sizeup
+        user writes that file: no symlink followed, no FIFO waited on, 64 bytes at most."""
         try:
-            age = time.time() - self.p.want.stat().st_mtime
-            words = self.p.want.read_text().split()
+            fd = os.open(self.p.want, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         except OSError:
             return ""
-        if age > WANT_MAX_AGE_S or not words:
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
+                return ""
+            words = os.read(fd, 64).decode("ascii", "replace").split()
+        except OSError:
+            return ""
+        finally:
+            os.close(fd)
+        if time.time() - st.st_mtime > WANT_MAX_AGE_S or not words:
             return ""
         return norm(words[0])
+
+    def retry_later(self, st: dict, sha: str) -> bool:
+        """A stage of sha broke for a reason worth retrying, and its time hasn't come yet."""
+        r = (st.get("retry") or {}).get(sha) if isinstance(st.get("retry"), dict) else None
+        return isinstance(r, dict) and self.clock() < float(r.get("next_at") or 0)
+
+    def _attempt(self, st: dict, sha: str) -> int:
+        """Count a stage of sha before it starts (a run killed half-way counts too): the n-th try."""
+        retry = st.get("retry") if isinstance(st.get("retry"), dict) else {}
+        retry = {k: v for k, v in retry.items() if k == sha}          # only the hub's current build
+        n = int((retry.get(sha) or {}).get("n") or 0) + 1
+        retry[sha] = {"n": n, "next_at": self.clock() + RETRY_S[min(n, len(RETRY_S)) - 1],
+                      "why": (retry.get(sha) or {}).get("why", "")}
+        self.save(st, retry=retry)
+        return n
 
     def _failed(self, st: dict, sha: str, why: str) -> None:
         failed = st.get("failed") if isinstance(st.get("failed"), dict) else {}
@@ -545,6 +607,8 @@ class Updater:
     # -- the work -----------------------------------------------------------------------------------------------
 
     def locked(self, fn: Callable[[], int]) -> int:
+        if os.environ.get("SIZEUP_UPDATE_LOCKED") == "1":     # (run by an installer that holds it)
+            return fn()
         self.p.work.mkdir(parents=True, exist_ok=True)
         with (self.p.work / "lock").open("w") as lk:
             try:
@@ -575,8 +639,13 @@ class Updater:
         paused = paused_reason(self.settings())
         if not name and not paused:
             paused = "this station isn't on side-by-side releases yet: sudo sizeup-station update"
-        action, why = plan(want, build, paused, st.get("failed"))
+        action, why = plan(want, build, paused, st.get("failed"), st)
         if action == "none":
+            return 0
+        if action == "update" and not FULL_SHA.fullmatch(want):
+            action = "paused"
+            why = paused = f"the hub's build {want} isn't a full git sha: not updating"
+        if action == "update" and self.retry_later(st, want):
             return 0
         if action == "current":
             if st.get("state") != "current" or st.get("current") != build or st.get("paused") != paused:
@@ -621,7 +690,7 @@ class Updater:
         last = {"at": t0, "from": build, "to": want}
         self.save(st, state="updating", to=want, hub=want, paused="", **{"from": name})
         try:
-            self.git("fetch", "--prune", "--tags", "--force", "origin")
+            self.git("fetch", "--force", "origin", f"+refs/heads/{MAIN}:refs/remotes/origin/{MAIN}")
         except StepError as e:
             self.result(f"{tag}: can't fetch ({e}): staying on {short(build)}; trying again at the next check")
             self.save(st, state="behind", current=build, last=dict(last, result="no fetch", why=str(e)[:300]))
@@ -636,18 +705,40 @@ class Updater:
             return 1
         last["to"] = sha
         self.save(st, to=sha)
-        self.note(f"auto-update: {tag}: building the release beside the running one")
+        if build and FULL_SHA.fullmatch(build) and not runtime_changes(self.changed(build, sha)):
+            eq = dict(st.get("equivalent") or {}) if isinstance(st.get("equivalent"), dict) else {}
+            eq[sha] = build
+            st["equivalent"] = dict(list(eq.items())[-KEEP_EQUIVALENT:])
+            self.result(f"{tag}: nothing the station runs changed (docs, tests, CI, the hub's files): "
+                        f"no restart; up to date")
+            self.save(st, state="current", current=build, hub=want,
+                      last=dict(last, result="no runtime change", why="", seconds=0))
+            return 0
+        n = self._attempt(st, sha)
+        self.note(f"auto-update: {tag}: building the release beside the running one (try {n} of {MAX_STAGES})")
         try:
             self.stage(sha)
         except (StepError, OSError) as e:
-            why = f"preflight: {e}"[:300]
-            self._failed(st, sha, why)
             secs = self.clock() - t0
-            self.result(f"{tag}: not switched ({why}); still on {short(build)}; not trying {short(sha)} again "
-                        "until the hub moves on")
-            self.save(st, state="failed", current=build,
-                      last=dict(last, result="preflight failed", why=why, seconds=round(secs)))
+            preflight = isinstance(e, StepError) and e.code == PREFLIGHT_EXIT
+            if preflight or n >= MAX_STAGES:
+                why = (f"preflight: {e}" if preflight else f"couldn't build it {n} times: {e}")[:300]
+                self._failed(st, sha, why)
+                st.pop("retry", None)
+                self.result(f"{tag}: not switched ({why}); still on {short(build)}; not trying {short(sha)} again "
+                            "until the hub moves on")
+                self.save(st, state="failed", current=build,
+                          last=dict(last, result="preflight failed" if preflight else "build failed", why=why,
+                                    seconds=round(secs)))
+                return 1
+            st["retry"][sha]["why"] = str(e)[:200]
+            at = time.strftime("%H:%M", time.localtime(st["retry"][sha]["next_at"]))
+            self.result(f"{tag}: couldn't build it yet ({e}); still on {short(build)}; trying again after {at} "
+                        f"(try {n} of {MAX_STAGES})")
+            self.save(st, state="behind", current=build,
+                      last=dict(last, result="build failed, will retry", why=str(e)[:300], seconds=round(secs)))
             return 1
+        st.pop("retry", None)
         staged = self.clock() - t0
         self.save(st, state="waiting")
         waited, busy = wait_quiet(self.busy, self.quiet_max_s, self.clock, self.sleep)
@@ -684,6 +775,13 @@ class Updater:
                   last=dict(last, result="rolled back" if not back else "rollback failed",
                             why=why + ("" if not back else f"; going back: {back}"), seconds=round(secs)))
         return 1
+
+    def changed(self, a: str, b: str) -> list[str]:
+        """The paths that differ between two commits (unknown: one that isn't there = everything)."""
+        try:
+            return [f for f in self.git("diff", "--name-only", a, b).splitlines() if f.strip()]
+        except StepError:
+            return ["?"]
 
     def is_ancestor(self, sha: str, ref: str) -> bool:
         try:
@@ -759,11 +857,17 @@ class Updater:
             dst = self.p.windows / src.name
             if same_text(src, dst):
                 continue
+            tmp = dst.with_name(f".{dst.name}.tmp")
             try:
-                shutil.copyfile(src, dst)
+                shutil.copyfile(src, tmp)
+                os.replace(tmp, dst)               # (a task starting now sees the old one or the new one)
                 self.note(f"auto-update: refreshed {dst}")
                 continue
             except OSError as e:
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
                 self.note(f"auto-update: can't write {dst}: {e}")
             stale.append(src.name)
         return f"{WINDOWS_STALE} ({', '.join(stale)})" if stale else ""
@@ -772,21 +876,31 @@ class Updater:
 
     def report(self) -> dict:
         st = self.load()
+        for k in ("last", "failed", "retry", "equivalent"):          # (one shape, whatever an older run wrote)
+            if k in st and not isinstance(st[k], dict):
+                st[k] = {}
         name, build = self.current()
         want = self.read_want()
         paused = paused_reason(self.settings())
         d = describe(build, want, dict(st, paused=paused))
         win = st.get("windows", "") if os.geteuid() != 0 else self.windows()
-        return {"build": build, "release": name, "hub": want, "paused": paused, "state": st, "windows": win,
+        return {"build": build, "release": name, "hub": want, "paused": paused, "record": st, "windows": win,
                 "releases": self.releases(), "previous": self.previous(), **d}
 
 
+def _dict(x) -> dict:
+    return x if isinstance(x, dict) else {}
+
+
 def _when(t) -> str:
-    return time.strftime("%Y-%m-%d %H:%M", time.localtime(float(t))) if t else "?"
+    try:
+        return time.strftime("%Y-%m-%d %H:%M", time.localtime(float(t))) if t else "?"
+    except (TypeError, ValueError, OverflowError, OSError):
+        return "?"
 
 
 def status_lines(r: dict) -> list[str]:
-    last = (r["state"] or {}).get("last") or {}
+    last = _dict(_dict(r.get("record")).get("last"))
     out = [f"version:   {short(r['build'])} (release {r['release'] or 'none yet: sudo sizeup-station update'})",
            f"hub:       {short(r['hub']) if r['hub'] else 'not known yet (the station passes it on once the hub answers)'}"
            f" · {r['text']}",
@@ -798,7 +912,7 @@ def status_lines(r: dict) -> list[str]:
                    + (f" in {last['seconds']} s" if last.get("seconds") is not None else "")
                    + (f"; web back after {last['up_s']} s" if last.get("up_s") is not None else "")
                    + (f", radios after {last['radios_s']} s" if last.get("radios_s") is not None else ""))
-    if r["windows"]:
+    if r.get("windows"):
         out.append(f"windows:   {r['windows']}")
     return out
 
@@ -845,8 +959,12 @@ def main(argv: list[str] | None = None) -> int:
         why = paused_reason(u.settings())
         print(f"auto-update {a.cmd}" + (f" (but still off: {why})" if a.cmd == "on" and why else ""))
         return 0
-    r = u.report()
-    print("\n".join(status_lines(r) if a.cmd == "status" else doctor_lines(r)))
+    try:
+        r = u.report()
+        print("\n".join(status_lines(r) if a.cmd == "status" else doctor_lines(r)))
+    except Exception as e:  # noqa: BLE001 - status must never take the CLI down
+        print(f"version:   ? (the updater's state can't be read: {type(e).__name__}: {e})" if a.cmd == "status"
+              else f"  FAIL  the updater's state can't be read ({type(e).__name__}: {e}): /var/lib/sizeup-update/state.json")
     return 0
 
 

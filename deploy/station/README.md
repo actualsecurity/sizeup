@@ -185,6 +185,22 @@ How it goes, end to end:
 10. The last 3 releases are kept (the current one and the two before it), older ones and builds no
     kept release uses are deleted.
 
+**No restart when nothing the station runs changed.** If the new commit only touches `docs/`,
+`tests/`, `.github/`, the hub's own files (`deploy/hub/`, `deploy/aws/`, `Dockerfile`), the Windows
+installers or `*.md` outside `sizeup/` and `data/`, the station stays as it is and counts as up to
+date ("up to date: abc1234 (no runtime change since def5678)", here and on the hub). Anything else
+goes the usual way.
+
+**A build that breaks for another reason** than its preflight (apt or dpkg busy with unattended
+upgrades, the network, a full disk, a slow pin rebuild cut off) is tried again after 5, 15, 60 and
+60 minutes, 5 times in all, then recorded as failed; `autoupdate status` and the hub say "not built
+yet (try N of 5 ...)". A pin rebuild that was cut off keeps its build directory and carries on.
+A preflight failure is not retried (the same commit would fail the same way).
+
+**One install at a time.** The updater holds `/run/sizeup-update/lock` for a whole update; a manual
+`sizeup-station update` (or `install-linux.sh`) takes the same lock, says so if an update is running,
+and stops `sizeup-update.path` / `.timer` until it is done (then looks once for a hub build it missed).
+
 Timings: a Python-only update is about 10-20 s of building beside the running station (archive, venv
 links, bytecode, preflight), then the quiet-moment wait, then one restart. The radios are off the air
 only during that restart: the FM channels (rtl_fm) for a few seconds, Fire/EMS 15 until trunk-recorder
@@ -220,8 +236,15 @@ a 15-minute timer looks again, but only ever at the build the hub said (a want o
 ignored).
 
 Windows side: when `deploy/station/windows/*.ps1` differ from `C:\ProgramData\sizeup\*.ps1`, the
-updater copies them over through `/mnt/c`. If it can't, the station page and `doctor` say "Windows
-scripts out of date: run install-windows.ps1".
+updater copies them over through `/mnt/c` (a temporary file, then a rename). If it can't, the station
+page and `doctor` say "Windows scripts out of date: run install-windows.ps1". This means root in WSL
+can rewrite the scripts the Windows tasks run as the administrator: acceptable, since root in WSL is
+already "whoever controls main" (it runs main's installer).
+
+What root trusts from the sizeup user, and how: the want file is read without following a link,
+never waited on (not a FIFO), 64 bytes at most, and only a full sha that main has is taken; files in
+`/var/lib/sizeup` (trunk-recorder's directory included) are written by the sizeup user itself, never by
+root through a path it controls; the old checkout is read as a `git bundle` made by that user.
 
 **A station installed before this** (a git checkout in `/opt/sizeup/app`, run in place) moves to
 releases once, by hand: `sudo sizeup-station update`. The old command fetches main and runs the new

@@ -52,7 +52,9 @@ wait_for 120 is_build "$A"
 systemctl enable --now sizeup-update.path sizeup-update.timer
 sizeup-station status || true
 
-say "B: a Python-only change, side by side"
+say "B: a Python-only change, side by side (and the sizeup user plants links where root writes)"
+runuser -u sizeup -- ln -sfn /usr/local/lib/sizeup/autoupdate.py /var/lib/sizeup/trunk-recorder/config.json
+runuser -u sizeup -- ln -sfn /usr/local/lib/sizeup/start-station /var/lib/sizeup/trunk-recorder/unit-event.sh
 echo "# ci: release B" >> "$SRC/sizeup/__init__.py"
 B=$(push B)
 t0=$(date +%s)
@@ -66,6 +68,22 @@ np=$(find "/opt/sizeup/releases/$B/venv" -name '__init__.py' -path '*numpy/__ini
 test "$(stat -c %i "$np")" = "$(stat -c %i "/opt/sizeup/releases/$A/${np#/opt/sizeup/releases/"$B"/}")"   # venv: hard links
 tail -n 1 /var/log/sizeup-update.log | grep -q "ok in"
 tail -n 1 /var/log/sizeup-update.log
+# root wrote neither through the planted links: they were replaced, the targets are untouched and root's
+test ! -L /var/lib/sizeup/trunk-recorder/config.json && test ! -L /var/lib/sizeup/trunk-recorder/unit-event.sh
+cmp "/opt/sizeup/releases/$B/sizeup/cloud/autoupdate.py" /usr/local/lib/sizeup/autoupdate.py
+cmp "/opt/sizeup/releases/$B/deploy/station/start-station" /usr/local/lib/sizeup/start-station
+test "$(stat -c %U /usr/local/lib/sizeup/autoupdate.py /usr/local/lib/sizeup/start-station | sort -u)" = root
+
+say "a docs-only change: no restart"
+pid=$(systemctl show -p MainPID --value sizeup-station.service)
+echo "more words" >> "$SRC/docs/cloud.md"
+DOCS=$(push docs)
+hub_runs "$DOCS"
+wait_for 300 state_is current "$DOCS"
+test "$(current)" = "$B"
+test "$(systemctl show -p MainPID --value sizeup-station.service)" = "$pid"
+field 'd["equivalent"]["'"$DOCS"'"]'
+tail -n 1 /var/log/sizeup-update.log | grep -q "no restart"
 
 say "C: starts, never answers: switched back"
 python3 - "$SRC/sizeup/app.py" <<'PY'

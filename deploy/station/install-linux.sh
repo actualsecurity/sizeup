@@ -107,6 +107,11 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
+# --rebuild: into new directories (the ones in use stay until the switch; pruned later)
+if [ "$REBUILD" -eq 1 ]; then
+  rebuilt="rebuilt-$(date +%Y%m%d%H%M%S)"
+  RTLSDR_B="$RTLSDR_B-$rebuilt" TR_B="$TR_B-$rebuilt" WHISPER_B="$WHISPER_B-$rebuilt"
+fi
 for v in "$STAGE_SHA" "$ACTIVATE_NAME"; do
   if [ -n "$v" ] && ! [[ "$v" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
     echo "install-linux.sh: bad release name $v" >&2
@@ -131,13 +136,36 @@ say() { printf '%s  %s\n' "$(date '+%F %T')" "$*"; }
 step() { STEP="$*"; say "== $*"; }
 warn() { say "WARNING: $*"; }
 die() { say "FAILED: $*" >&2; exit 1; }
+PAUSED_UPDATER=0
 on_exit() {
   local rc=$?
   if [ "$rc" -ne 0 ]; then
     say "install-linux.sh stopped (exit $rc) during: ${STEP:-start}. Fix it and run it again: it picks up where it left off. Log: $LOG"
   fi
+  if [ "$PAUSED_UPDATER" -eq 1 ]; then
+    exec 9>&-                                  # (the lock: the updater may run now)
+    systemctl start sizeup-update.path sizeup-update.timer 2>/dev/null || true
+    systemctl start --no-block sizeup-update.service 2>/dev/null || true    # a hub build heard meanwhile
+  fi
 }
 trap on_exit EXIT
+
+# One install at a time: the auto-updater (sizeup/cloud/autoupdate.py) holds this lock for a whole
+# update and runs --stage / --activate under it (SIZEUP_UPDATE_LOCKED=1); a run by hand takes it too
+# and keeps the updater's path unit and timer stopped until it's done.
+if [ -z "${SIZEUP_UPDATE_LOCKED:-}" ] && [ "$WSL_PREPARE" -eq 0 ]; then
+  mkdir -p /run/sizeup-update
+  exec 9>/run/sizeup-update/lock
+  if ! flock -n 9; then
+    echo "install-linux.sh: an automatic update is running (journalctl -u sizeup-update -f): run this again when it's done" >&2
+    exit 1
+  fi
+  export SIZEUP_UPDATE_LOCKED=1
+  if [ -d /run/systemd/system ] && systemctl is-active --quiet sizeup-update.path 2>/dev/null; then
+    systemctl stop sizeup-update.path sizeup-update.timer
+    PAUSED_UPDATER=1
+  fi
+fi
 
 is_wsl() { grep -qiE 'microsoft|wsl' /proc/sys/kernel/osrelease 2>/dev/null; }
 interactive() { [ "$CI_MODE" -eq 0 ] && [ -t 0 ]; }
@@ -328,7 +356,9 @@ install_key() {
   install -d -m 0750 -o root -g "$SVC_USER" "$ETC"
   if [ ! -f "$DEPLOY_KEY" ]; then
     if [ -f "$STATE/.ssh/id_ed25519" ]; then
-      install -m 0600 -o root -g root "$STATE/.ssh/id_ed25519" "$DEPLOY_KEY"
+      # (read as the sizeup user: whatever that path is, root copies only what sizeup could read)
+      ( umask 077; as_user cat "$STATE/.ssh/id_ed25519" > "$DEPLOY_KEY.tmp" )
+      mv -f "$DEPLOY_KEY.tmp" "$DEPLOY_KEY"
       say "code: the deploy key is now $DEPLOY_KEY (root only)"
     else
       ssh-keygen -q -t ed25519 -N "" -C "sizeup-station@$(hostname)" -f "$DEPLOY_KEY"
@@ -360,12 +390,22 @@ check_access() {
   done
 }
 
+# The old checkout (sizeup's) as a git bundle, written by the sizeup user: root never runs git in it.
+LEGACY_BUNDLE=""
+legacy_bundle() {
+  [ -z "$LEGACY_BUNDLE" ] || return 0
+  LEGACY_BUNDLE=$(mktemp /tmp/sizeup-legacy.XXXXXX.bundle)
+  as_user git -C "$LEGACY_APP" bundle create - --all > "$LEGACY_BUNDLE"
+}
+legacy_git() { as_user git -C "$LEGACY_APP" "$@"; }
+
 # The bare clone: made once (from the old checkout when there is one: no network needed), then fetched.
 ensure_repo() {
   if [ ! -d "$REPO" ] || ! git --git-dir="$REPO" rev-parse --git-dir >/dev/null 2>&1; then
     rm -rf "$REPO" "$REPO.tmp"
     if [ -d "$LEGACY_APP/.git" ]; then
-      git -c safe.directory='*' clone -q --bare --no-local "$LEGACY_APP" "$REPO.tmp"
+      legacy_bundle
+      git clone -q --bare "$LEGACY_BUNDLE" "$REPO.tmp"
       say "code: $REPO made from the old checkout $LEGACY_APP"
     else
       install_key
@@ -375,13 +415,19 @@ ensure_repo() {
     mv "$REPO.tmp" "$REPO"
   fi
   repo_git config remote.origin.url "$SIZEUP_REPO"
-  repo_git config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'
+  repo_git config remote.origin.fetch '+refs/heads/main:refs/remotes/origin/main'
 }
 
+# main (what the hub runs), and the configured ref when it's another branch or a tag. No other heads.
 fetch_repo() {
   install_key
   check_access
-  repo_git fetch -q --prune --tags --force origin
+  repo_git fetch -q --force origin '+refs/heads/main:refs/remotes/origin/main'
+  if [ "$SIZEUP_REF" != main ]; then
+    repo_git fetch -q --force origin "+refs/heads/$SIZEUP_REF:refs/remotes/origin/$SIZEUP_REF" 2>/dev/null \
+      || repo_git fetch -q --force origin "+refs/tags/$SIZEUP_REF:refs/tags/$SIZEUP_REF" 2>/dev/null \
+      || warn "no branch or tag $SIZEUP_REF on $SIZEUP_REPO (a commit sha is looked up as it is)"
+  fi
 }
 
 # The commit a ref names: a branch (origin/REF), else a tag or a sha.
@@ -431,7 +477,10 @@ user_and_dirs() {
   fi
   usermod -a -G plugdev "$SVC_USER"
   install -d -m 0755 -o root -g root "$OPT" "$SRC" "$MODELS" "$RELEASES" "$BUILDS" "$UPDATE_STATE"
-  install -d -m 0750 -o "$SVC_USER" -g "$SVC_USER" "$STATE" "$STATE/state" "$STATE/captures" "$TR_DIR"
+  # $STATE's parent is root's; anything inside is the sizeup user's to make (root never follows a
+  # link the sizeup user could have put there)
+  install -d -m 0750 -o "$SVC_USER" -g "$SVC_USER" "$STATE"
+  as_user mkdir -p -m 0750 "$STATE/state" "$STATE/captures" "$TR_DIR"
   install -d -m 0750 -o root -g "$SVC_USER" "$ETC"
 }
 
@@ -448,7 +497,12 @@ fetch_source() {
   got=$(git -C "$dir" rev-parse "refs/tags/$tag^{commit}")
   [ "$got" = "$commit" ] || die "$name $tag is $got upstream, pinned $commit: refusing (update the pin on purpose)"
   git -C "$dir" -c advice.detachedHead=false checkout -q --force "$commit" >&2
-  git -C "$dir" clean -q -fdx >&2
+  # The build dir stays for the same commit (a slow build that was stopped picks up where it was);
+  # another commit or --rebuild starts it fresh.
+  if [ "$REBUILD" -eq 1 ] || [ "$(cat "$dir/build/.sizeup-commit" 2>/dev/null)" != "$commit" ]; then rm -rf "$dir/build"; fi
+  git -C "$dir" clean -q -fdx -e /build/ >&2
+  mkdir -p "$dir/build"
+  echo "$commit" > "$dir/build/.sizeup-commit"
   echo "$dir"
 }
 up_to_date() { [ "$REBUILD" -eq 0 ] && [ -x "$1" ] && [ "$(cat "$2" 2>/dev/null)" = "$3" ]; }
@@ -678,7 +732,10 @@ preflight() {
   if ! "$wh/bin/whisper-server" --help >/dev/null 2>&1; then
     warn "preflight: whisper-server --help fails"; bad=1
   fi
-  [ "$bad" -eq 0 ] || die "preflight failed for $(basename "$rel"): not switching to it"
+  if [ "$bad" -ne 0 ]; then
+    say "FAILED: preflight failed for $(basename "$rel"): not switching to it" >&2
+    exit 3                                     # (the updater: a build that doesn't work, not one to retry)
+  fi
   say "preflight: ok"
 }
 
@@ -689,6 +746,10 @@ swap_link() {     # swap_link TARGET LINK: a rename over the old link, never a m
   ln -sfn "$1" "$tmp"
   mv -Tf "$tmp" "$2"
 }
+
+# what the running whisper-server was started with (written by start-whisper as the sizeup user):
+# read as that user, bounded, never waiting long
+whisper_argv() { timeout 5 runuser -u "$SVC_USER" -- head -c 8192 /run/sizeup-whisper/argv 2>/dev/null || true; }
 
 activate() {
   local name=$1 rel="$RELEASES/$1" sys pair t want have t0 t1
@@ -718,12 +779,14 @@ activate() {
   if [ -f "$rel/deploy/station/config.station.toml" ]; then
     install -m 0640 -o root -g "$SVC_USER" "$rel/deploy/station/config.station.toml" "$CONF.dist"
   fi
-  # trunk-recorder's working directory, from this release's deploy/trunk-recorder
-  install -m 0644 -o "$SVC_USER" -g "$SVC_USER" "$rel/deploy/trunk-recorder/talkgroups.csv" "$TR_DIR/talkgroups.csv"
-  install -m 0755 -o "$SVC_USER" -g "$SVC_USER" "$rel/deploy/trunk-recorder/unit-event.sh" "$TR_DIR/unit-event.sh"
+  # trunk-recorder's working directory, from this release's deploy/trunk-recorder: written by the
+  # sizeup user (it owns that directory; root never writes through a path it controls)
+  as_user rm -f "$TR_DIR/talkgroups.csv" "$TR_DIR/unit-event.sh"       # (a link there goes, not what it points at)
+  as_user install -m 0644 "$rel/deploy/trunk-recorder/talkgroups.csv" "$TR_DIR/talkgroups.csv"
+  as_user install -m 0755 "$rel/deploy/trunk-recorder/unit-event.sh" "$TR_DIR/unit-event.sh"
   # Made from the repo's config.json each time (change it there): capture paths absolute, under $STATE.
-  python3 - "$rel/deploy/trunk-recorder/config.json" "$TR_DIR/config.json" "$STATE/captures" <<'PY'
-import json, sys
+  as_user python3 - "$rel/deploy/trunk-recorder/config.json" "$TR_DIR/config.json" "$STATE/captures" <<'PY'
+import json, os, sys
 src, dst, captures = sys.argv[1:4]
 c = json.load(open(src))
 c["captureDir"] = f"{captures}/p25"
@@ -731,10 +794,11 @@ c["tempDir"] = f"{captures}/p25-tmp"
 for s in c.get("systems", []):
     s["talkgroupsFile"] = "talkgroups.csv"
     s["unitScript"] = "./unit-event.sh"
-json.dump(c, open(dst, "w"), indent=2)
+with open(dst + ".tmp", "w") as f:
+    json.dump(c, f, indent=2)
+os.replace(dst + ".tmp", dst)       # (replaces whatever is there, a link included: never written through)
 PY
-  chown "$SVC_USER:$SVC_USER" "$TR_DIR/config.json"
-  install -d -m 0750 -o "$SVC_USER" -g "$SVC_USER" "$STATE/captures/p25" "$STATE/captures/p25-tmp" "$STATE/captures/clips"
+  as_user mkdir -p -m 0750 "$STATE/captures/p25" "$STATE/captures/p25-tmp" "$STATE/captures/clips"
   # The builds this release was staged with, then the release itself: renames, nothing rebuilt.
   while IFS= read -r pair; do
     case "${pair%%=*}" in rtl-sdr|trunk-recorder|whisper) ;; *) continue ;; esac
@@ -758,7 +822,7 @@ PY
   t1=$(date +%s%N)
   # whisper-server is a service of its own: restarted only when its program, model or flags change
   want=$("$LIB/start-whisper" --print 2>/dev/null || true)
-  have=$(cat /run/sizeup-whisper/argv 2>/dev/null || true)
+  have=$(whisper_argv)
   if systemctl is-active --quiet sizeup-whisper.service && [ "$want" = "$have" ]; then
     say "whisper-server: unchanged, left running (the model stays loaded)"
   else
@@ -766,14 +830,15 @@ PY
     say "whisper-server: (re)started"
   fi
   systemctl restart sizeup-health.timer
-  systemctl start sizeup-update.path sizeup-update.timer
+  # (a run by hand stopped them: they start again when it ends)
+  [ "$PAUSED_UPDATER" -eq 1 ] || systemctl start sizeup-update.path sizeup-update.timer
   say "release $name is current; sizeup-station restarted in $(( (t1 - t0) / 1000000 )) ms"
 }
 
 # healthy BUILD SECONDS: /healthz answers with that build ("" = any) within SECONDS
 healthy() {
   local build=$1 limit=$2 port i got
-  port=$(python3 -c 'import sys, tomllib; print(int(tomllib.load(open(sys.argv[1], "rb")).get("web", {}).get("port", 8091)))' "$CONF" 2>/dev/null || echo 8091)
+  port=$(python3 -c 'import sys, tomllib; print(int(tomllib.load(open(sys.argv[1], "rb")).get("web", {}).get("port", 8090)))' "$CONF" 2>/dev/null || echo 8090)
   for i in $(seq 1 "$limit"); do
     got=$(curl -fsS --max-time 2 "http://127.0.0.1:$port/healthz" 2>/dev/null \
       | python3 -c 'import json, sys; print(json.load(sys.stdin).get("build", "") or "-")' 2>/dev/null || true)
@@ -794,8 +859,13 @@ if [ -n "$STAGE_SHA" ]; then
   packages
   builds
   model
+  # Exactly this commit, and only if main has it: a full sha, looked up as an object (never as a
+  # branch or tag of that name), checked against origin/main here as well as by the updater.
+  [[ "$STAGE_SHA" =~ ^[0-9a-f]{40}$ ]] || die "--stage: a full 40-character commit sha"
   ensure_repo
-  sha=$(resolve_ref "$STAGE_SHA")
+  sha=$(repo_git rev-parse -q --verify "$STAGE_SHA^{commit}" 2>/dev/null || true)
+  [ "$sha" = "$STAGE_SHA" ] || die "--stage: no commit $STAGE_SHA in $REPO"
+  repo_git merge-base --is-ancestor "$sha" "refs/remotes/origin/main" || die "--stage: $sha isn't on origin/main"
   make_release "$sha" "$sha"
   preflight "$RELEASES/$sha"
   STEP=""
@@ -824,8 +894,8 @@ if [ ! -L "$CURRENT" ] && [ -d "$LEGACY_APP/.git" ]; then
   # The first run since #58: what ran so far. build.env (the old installer wrote it), else the
   # checkout's HEAD before the old installer's --update moved it (HEAD@{1}), else HEAD.
   LEGACY_SHA=$(sed -n 's/^SIZEUP_BUILD=//p' "$ETC/build.env" 2>/dev/null | head -n 1)
-  [ -n "$LEGACY_SHA" ] || LEGACY_SHA=$(git -c safe.directory='*' -C "$LEGACY_APP" rev-parse -q --verify 'HEAD@{1}' 2>/dev/null || true)
-  [ -n "$LEGACY_SHA" ] || LEGACY_SHA=$(git -c safe.directory='*' -C "$LEGACY_APP" rev-parse HEAD 2>/dev/null || true)
+  [ -n "$LEGACY_SHA" ] || LEGACY_SHA=$(legacy_git rev-parse -q --verify 'HEAD@{1}' 2>/dev/null || true)
+  [ -n "$LEGACY_SHA" ] || LEGACY_SHA=$(legacy_git rev-parse HEAD 2>/dev/null || true)
   say "code: moving this station to side-by-side releases (it ran $(short "${LEGACY_SHA:-?}") from $LEGACY_APP)"
 fi
 SHA=""
@@ -841,8 +911,9 @@ else
   if [ "$NO_FETCH" -eq 1 ] && [ -n "$LEGACY_SHA" ]; then
     # An installer from before #58 already fetched, checked the new code out in $LEGACY_APP and ran
     # this one: that commit is the one to run.
-    git -c safe.directory='*' --git-dir="$REPO" fetch -q "$LEGACY_APP" "+HEAD:refs/sizeup/checkout-head"
-    SHA=$(git -c safe.directory='*' -C "$LEGACY_APP" rev-parse HEAD)
+    legacy_bundle
+    repo_git fetch -q "$LEGACY_BUNDLE" "+HEAD:refs/sizeup/checkout-head"
+    SHA=$(repo_git rev-parse refs/sizeup/checkout-head)
     install_key
   elif [ "$UPDATE" -eq 1 ] || [ -n "$OPT_REF$OPT_REPO" ] || [ -z "$BACK" ]; then
     step "fetch $SIZEUP_REF"
@@ -860,6 +931,10 @@ else
   make_release "$NAME" "$SHA"
 fi
 REL="$RELEASES/$NAME"
+[ -z "$LEGACY_BUNDLE" ] || rm -f "$LEGACY_BUNDLE"
+if [ "$REBUILD" -eq 1 ]; then                 # (a release staged before: it runs with the rebuilt ones now)
+  printf 'rtl-sdr=%s\ntrunk-recorder=%s\nwhisper=%s\n' "$RTLSDR_B" "$TR_B" "$WHISPER_B" > "$REL/BUILDS"
+fi
 
 # -- config ----------------------------------------------------------------------------------------
 step "config ($CONF)"
@@ -870,7 +945,7 @@ elif ! cmp -s "$CONF" "$REL/deploy/station/config.station.toml"; then
   say "config: keeping your $CONF (the current template is $CONF.dist)"
 fi
 # (a new box: the talkgroups the config names, before the preflight loads it)
-[ -f "$TR_DIR/talkgroups.csv" ] || install -m 0644 -o "$SVC_USER" -g "$SVC_USER" "$REL/deploy/trunk-recorder/talkgroups.csv" "$TR_DIR/talkgroups.csv"
+[ -f "$TR_DIR/talkgroups.csv" ] || as_user install -m 0644 "$REL/deploy/trunk-recorder/talkgroups.csv" "$TR_DIR/talkgroups.csv"
 preflight "$REL"
 
 ask_secrets 0

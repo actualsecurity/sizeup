@@ -39,7 +39,7 @@ conf_port() {
   python3 -c 'import sys, tomllib; print(int(tomllib.load(open(sys.argv[1], "rb")).get(sys.argv[2], {}).get("port", sys.argv[3])))' \
     "$CONF" "$1" "$2" 2>/dev/null || echo "$2"
 }
-port() { conf_port web 8091; }
+port() { conf_port web 8090; }      # (sizeup/config.py's default; the station template says 8091)
 
 # GET/POST the station's own API (127.0.0.1): prints the JSON, or nothing.
 api() {
@@ -215,7 +215,7 @@ case "$cmd" in
     systemctl "$cmd" "$UNIT"
     if [ "$cmd" = stop ]; then
       echo "Stopped. It starts again at the next boot (systemctl disable $UNIT to keep it off)."
-    elif [ "$(/usr/local/lib/sizeup/start-whisper --print 2>/dev/null || true)" != "$(cat /run/sizeup-whisper/argv 2>/dev/null || true)" ]; then
+    elif [ "$(/usr/local/lib/sizeup/start-whisper --print 2>/dev/null || true)" != "$(timeout 5 runuser -u sizeup -- head -c 8192 /run/sizeup-whisper/argv 2>/dev/null || true)" ]; then
       systemctl restart sizeup-whisper.service
       echo "whisper-server restarted too ([stt] changed)"
     fi
