@@ -28,13 +28,20 @@ def test_page_opens_repeat_merges_traffic_attaches_then_closes():
     assert s.state()["loose_traffic"][0]["id"] == "t2"
 
 
-def test_other_departments_do_not_open_incidents():
+def test_only_our_tones_open_an_incident():
+    # #80, 2026-10-13 16:02: a page with Fairview's tones at "34 Longdale Avenue" was taken as ours because the
+    # geocoder weakly read the street as Port Chester's. Only PCFD's or Rye Brook's tones open one now.
     clock = {"t": 0.0}
     assert store(clock, town="Rye").on_page("p1", ["Rye FD"], parse("Rye fire department respond to a car fire Purchase Street")) is None
-    s = store(clock)
-    assert s.on_page("p2", [], parse(PAGE)) is not None  # tones not decoded, but the address is in Port Chester
-    # Ours only by our tones or our jurisdiction (2026-10-08): naming PCFD or "Engine 60" isn't enough.
+    s = store(clock)                                                             # every address is in Port Chester here
+    assert s.on_page("p2", ["Fairview"], parse("Fairview, 34 Longdale Avenue, smoke in the building")) is None   # another department's tones
+    assert s.on_page("p3", [], parse(PAGE)) is None                              # no tones decoded: not even "Port Chester Fire Department" in the voice
+    assert s.on_page("p4", [], parse("60 Control, Engine 60, 75 Grasslands Road, party passed out")) is None   # a unit named: not enough
+    assert s.on_page("p5", ["Port Chester FD"], parse(PAGE)) is not None         # our tones: ours
     elsewhere = store(clock, town="Valhalla")
-    assert elsewhere.on_page("p3", [], parse("60 Control, Engine 60, 75 Grasslands Road, party passed out")) is None
-    assert elsewhere.on_page("p4", [], parse(PAGE)) is None
-    assert elsewhere.on_page("p5", ["Port Chester FD"], parse(PAGE)) is not None   # our tones: ours anywhere (mutual aid)
+    assert elsewhere.on_page("p6", ["Port Chester FD"], parse(PAGE)) is not None   # our tones: ours anywhere (mutual aid)
+    assert elsewhere.on_page("p7", ["Rye Brook FD (est.)"], parse(PAGE)) is not None   # an estimated code still names them
+    assert elsewhere.on_page("p8", ["Fairview (heard)", "Port Chester FD"], parse(PAGE)) is not None   # stacked with ours
+    assert s.is_ours(["Fairview"]) is False and s.is_ours(["Port Chester FD (heard)"]) is True
+
+

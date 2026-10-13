@@ -53,6 +53,11 @@ POST /api/cad/settings/<section>          {action, ..., operator?}: event_types 
                                           record?, transcribe?, engine?: local | aws | both} (Settings > Radios) |
                                           stt {action: set | reset, key: vocabulary | aws_monthly_limit_usd, value}
                                           | {action: push}: the vocabulary to Amazon Transcribe (sizeup/channels.py)
+                                          tones {action: set, a_hz, b_hz, name, ours?, page?} | {action: delete, key}:
+                                          a tone pair named from a page row ("Name these tones", #80); page: that
+                                          page is read again with the name
+GET  /api/cad/tones                       {named: [{key, name, a_hz, b_hz, ours, page?, at, operator}], names: the
+                                          department names to pick from, ours: PCFD's and Rye Brook's}
 GET  /api/cad/stt                         Settings > Radios > Vocabulary: {vocabulary: {phrases, edited, suggestions,
                                           aws (as sent), skipped, sig, state}, limit, aws (where it runs, this month's cost)}
 GET  /api/cad/export/<name>.csv           incidents | calls | unit-history | event-log, the sheet's columns
@@ -413,6 +418,8 @@ class CadApi:
                 return _json(200, self.cad.settings_audit_log(parse_qs(query)))
             if path == "/api/cad/stt":
                 return _json(200, self.cad.settings.stt_page())
+            if path == "/api/cad/tones":
+                return _json(200, self.cad.tone_names())
             if path == "/api/cad/state":
                 return _json(200, self.cad.state())
             if path == "/api/cad/runcards":

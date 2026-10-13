@@ -108,7 +108,10 @@ def test_mdc_unit_id_names_the_talker(tmp_path):
     assert app._units(Segment(0, 1, np.zeros(RATE, np.float32), 20.0, [burst])) == ["0611"]  # no alias: the ID
 
 
-def test_page_naming_our_unit_opens_incident_with_unknown_tones(tmp_path):
+def test_unknown_tones_are_a_page_row_until_an_admin_names_them(tmp_path):
+    """#80: a page whose tones nobody's code matches is never an event, even naming our unit at our address; it
+    stays a page row ("unknown tones") in the 60 Control feed. "Name these tones" (Settings, section tones) puts
+    the pair in the plan, re-reads that page, and when the name is ours it becomes a pending event."""
     from dataclasses import replace
     app = App(replace(cfg(tmp_path), unit_departments={"Engine 61": "Port Chester FD"}))
     app._kind = {"South 2": "paging"}
@@ -118,10 +121,52 @@ def test_page_naming_our_unit_opens_incident_with_unknown_tones(tmp_path):
     audio = np.concatenate([tone(741.3, 1.0), tone(623.7, 3.0), np.zeros(int(0.2 * RATE)), voice(6.0)]).astype(np.float32)
     now = time.time()
     app._segment(Channel(470.2, "South 2"), Segment(now, now + len(audio) / RATE, audio, 25.0))
-    assert wait(lambda: app.store.active() is not None)
+    pid = app.state()["pages"][0]["id"]
+    assert wait(lambda: any(r["id"] == pid and r["text"] for r in app.cad.feed.rows(limit=20)))
+    assert app.store.active() is None and app.cad.store.incidents() == []           # a page, not an event
+    row = next(r for r in app.cad.feed.rows(limit=20) if r["id"] == pid)
+    assert row["page"] == "unknown" and row["pc"] == "" and row["events"] == [] and row["tones"][0]["names"] == []
+    assert row["voice_at"] > 0 and row["channel"] == "South 2"
+    names = app.tone_names()
+    assert names["named"] == [] and names["ours"] == ["Port Chester FD", "Rye Brook FD"] and "Port Chester FD" in names["names"]
+    # Named as another department: in the plan, the row says who, still not an event
+    app.cad.settings.post("tones", {"action": "set", "a_hz": 741.3, "b_hz": 623.7, "name": "Purchase", "page": pid, "operator": "Dana"})
+    row = next(r for r in app.cad.feed.rows(limit=20) if r["id"] == pid)
+    assert row["page"] == "other" and row["tones"][0]["names"] == ["Purchase"] and app.store.active() is None
+    assert app.state()["pages"][0]["departments"] == ["Purchase"]
+    assert app.cad.settings.audit_log("radios")[0]["key"] == "tones/741.3/623.7"
+    # Renamed as ours: the page is read again, the incident opens and the CAD has it queued
+    app.cad.settings.post("tones", {"action": "set", "a_hz": 741.3, "b_hz": 623.7, "name": "Port Chester FD", "page": pid, "operator": "Dana"})
     inc = app.store.active()
-    assert inc.departments == ["Port Chester FD"] and inc.incident_type == "Chest pain"
-    assert inc.location == "209 westchester avenue"
+    assert inc is not None and inc.tone_departments == ["Port Chester FD"] and inc.incident_type == "Chest pain"
+    assert inc.location == "209 westchester avenue" and inc.pages == [pid]
+    ev = app.cad.store.incidents()
+    assert len(ev) == 1 and ev[0]["status"] == "queued" and ev[0]["source_ref"] == f"monitor:{inc.id}"
+    row = next(r for r in app.cad.feed.rows(limit=20) if r["id"] == pid)
+    assert row["page"] == "ours" and row["pc"] == "Port Chester FD" and [e["why"] for e in row["events"]] == ["page"]
+    named = app.tone_names()["named"]
+    assert [(t["key"], t["name"], t["ours"], t["operator"]) for t in named] == [("741.3/623.7", "Port Chester FD", True, "Dana")]
+    assert app.cad.settings_export()["overrides"]["tones"]["741.3/623.7"]["name"] == "Port Chester FD"
+    # The next page with that pair is ours from the air (the live plan and the page hold share the plan)
+    app.stt.client = FakeWhisper({6: "Engine 61, 1 Main Street, structure fire"})
+    later = now + 900
+    app._segment(Channel(470.2, "South 2"), Segment(later, later + len(audio) / RATE, audio, 25.0))
+    assert wait(lambda: len(app.cad.store.incidents()) == 2)
+    assert app.state()["pages"][0]["tones"][0]["ours"] is True
+    # Forgotten: unknown again on the next page
+    app.cad.settings.post("tones", {"action": "delete", "key": "741.3/623.7", "operator": "Dana"})
+    assert app.plan.names() == ["Port Chester FD"] and app.tone_names()["named"] == []
+
+
+def test_a_town_is_claimed_only_when_the_gazetteer_is_sure():
+    # #80: "34 Longdale Avenue" matched Port Chester at 0.34; the point and label stay for the map, no town.
+    from types import SimpleNamespace as M
+    from sizeup.app import geo_of
+    weak = geo_of(M(lat=41.0, lon=-73.66, label="34 Longdale Ave, Port Chester", kind="address", municipality="Port Chester", confidence=0.34))
+    assert weak["town"] == "" and weak["label"] == "34 Longdale Ave, Port Chester" and weak["confidence"] == 0.34
+    sure = geo_of(M(lat=41.0, lon=-73.66, label="209 Westchester Ave", kind="address", municipality="Port Chester", confidence=0.91))
+    assert sure["town"] == "Port Chester"
+    assert geo_of(None) is None
 
 
 def test_pages_and_incidents_survive_a_restart(tmp_path):

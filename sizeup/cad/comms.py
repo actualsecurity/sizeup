@@ -19,8 +19,11 @@
                       page        a 60 Control page (South 2) on the event it opened, or a repeat of it
                                   (Cad.from_monitor): the event's page plays from the event itself
     A page is a row like any transmission (id = the page id, channel South 2, talker 60 Control), with
-    its tone pairs (tones: [{a_hz, b_hz, names}], JSON) and where the voice starts (voice_at, seconds
-    into the clip: "voice only" skips the tones).
+    its tone pairs (tones: [{a_hz, b_hz, names, ours}], JSON) and where the voice starts (voice_at, seconds
+    into the clip: play skips the tones). Read back, each row says what kind of page it is (page, #80):
+    "ours" (a pair names PCFD / Rye Brook: the event it opened is on it), "other" (another department's),
+    "unknown" (a pair nobody's code matches: "Name these tones"), "none" (a paging channel's transmission
+    with no tones decoded: voice only, or a missed decode), "" (not a page).
     radio_link_exclusions  transmission x event a person took off ("Remove from 26-000007", user,
                     2026-10-08: "how do i remove things from an inc if it was added"): an auto link
                     (unit / channel / dispatcher) removed is remembered here so the auto-linker never
@@ -57,9 +60,9 @@ def split_call(tid: str, p25: bool) -> tuple[str, int | None]:
 
 class Comms:
     def __init__(self, store, tactical: tuple[str, ...] = ("FG1",), incident_tgs: tuple[int, ...] = (307, 333),
-                 clock=time.time):
+                 clock=time.time, paging: tuple[str, ...] = ("South 2",)):
         self.store, self.clock = store, clock
-        self.tactical, self.incident_tgs = set(tactical), set(incident_tgs)
+        self.tactical, self.incident_tgs, self.paging = set(tactical), set(incident_tgs), set(paging)
         self.rev = 0            # bumped on every new or changed transmission (the /comms page polls it)
         self._drop_bad_channel_links()
 
@@ -270,6 +273,28 @@ class Comms:
             return db.execute("DELETE FROM radio_traffic WHERE start < ? AND id NOT IN (SELECT traffic_id FROM radio_links)",
                               (cutoff,)).rowcount
 
+    def retag_pages(self, match, is_ours) -> int:
+        """Every page row's tone pairs matched again (#80: a pair named from one row is named on them all,
+        older unknown rows included). match(a_hz, b_hz) -> names, is_ours(names) -> bool. Rows changed."""
+        n = 0
+        with self.store.tx() as db:
+            for r in db.execute("SELECT id, tones FROM radio_traffic WHERE tones != ''").fetchall():
+                try:
+                    tones = json.loads(r["tones"])
+                except (TypeError, ValueError):
+                    continue
+                new = []
+                for t in tones:
+                    names = list(match(float(t.get("a_hz") or 0), t.get("b_hz")))
+                    new.append(dict(t, names=names, ours=bool(is_ours(names))))
+                if new != tones:
+                    db.execute("UPDATE radio_traffic SET tones = ?, updated_at = ? WHERE id = ?", (json.dumps(new), self.clock(), r["id"]))
+                    n += 1
+        if n:
+            self.rev += 1
+            self.store.rev += 1
+        return n
+
     # -- reading --------------------------------------------------------------------------------
 
     def for_incidents(self, ids: list[int], limit: int = 200) -> dict[int, list[dict]]:
@@ -283,7 +308,7 @@ class Comms:
         for r in rows:
             lst = out[r.pop("incident_id")]
             if len(lst) < limit:
-                lst.append(_tones(r))
+                lst.append(_tones(r, self.paging))
         shown = [r for lst in out.values() for r in lst]
         ev = self.events_of(list({r["id"] for r in shown}))
         for r in shown:
@@ -369,7 +394,7 @@ class Comms:
             ev = self.events_of([r["id"] for r in rows])
             for r in rows:
                 r["events"] = ev.get(r["id"], [])
-                _tones(r)
+                _tones(r, self.paging)
         return rows
 
     def facets(self) -> dict:
@@ -404,12 +429,22 @@ def why_text(why: str, unit: str = "") -> str:
     return why
 
 
-def _tones(r: dict) -> dict:
-    """A row's tone pairs as a list ([] for anything but a page)."""
+def page_kind(tones: list[dict], channel: str = "", paging=()) -> str:
+    """What a page's tones say (#80): ours | other | unknown | none; '' for a row that isn't a page."""
+    if tones:
+        if any(t.get("ours") for t in tones):
+            return "ours"
+        return "unknown" if any(not t.get("names") for t in tones) else "other"
+    return "none" if channel in paging else ""
+
+
+def _tones(r: dict, paging=()) -> dict:
+    """A row's tone pairs as a list ([] for anything but a page), and its page kind (page, #80)."""
     try:
         r["tones"] = json.loads(r["tones"]) if r.get("tones") else []
     except (TypeError, ValueError):
         r["tones"] = []
+    r["page"] = page_kind(r["tones"], r.get("channel") or "", paging)
     return r
 
 

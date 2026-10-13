@@ -15,7 +15,9 @@ group / all-call. We find the tones from the audio itself:
      a single run of 5 s or more = long tone
 
 TonePlan matches decoded pairs against configured departments (+/- 1.5 %, about the spacing
-between neighbouring Motorola tone codes / 2).
+between neighbouring Motorola tone codes / 2). The codes come from data/westchester_tones.csv (and
+[[tones]] in the config), plus the pairs an admin named from the console (Settings, section "tones":
+"Name these tones" on an unknown-tones page row, #80), merged in by App._apply_named_tones.
 """
 
 from __future__ import annotations
@@ -188,6 +190,16 @@ class ToneDetector:
         return []
 
 
+def base_name(n: str) -> str:
+    """'Rye Brook FD (est.)' / 'Fairview (heard)' -> the department's name as the config and the CAD say it."""
+    return n.removesuffix(" (heard)").removesuffix(" (est.)")
+
+
+def pair_key(a_hz: float, b_hz: float | None) -> str:
+    """A tone pair as the named-tones settings key it: '832.5/1201.0' (a long tone: '1201.0/-')."""
+    return f"{float(a_hz):.1f}/" + (f"{float(b_hz):.1f}" if b_hz else "-")
+
+
 @dataclass(frozen=True)
 class ToneCode:
     name: str                 # "Port Chester FD", "Rye Brook FD", "PCFD all call" ...
@@ -221,3 +233,12 @@ class TonePlan:
 
     def match_all(self, events: Iterable[ToneEvent]) -> list[ToneEvent]:
         return [self.match(e) for e in events]
+
+    def replace(self, codes: Iterable[ToneCode]) -> None:
+        """A new list of codes in place: the live paging display, the page hold and the assembler all
+        share this one plan, so a pair named from the console counts for every one of them at once."""
+        self.codes = list(codes)
+
+    def names(self) -> list[str]:
+        """Every department the plan knows, once each, without the (heard) / (est.) tags."""
+        return list(dict.fromkeys(base_name(c.name) for c in self.codes))

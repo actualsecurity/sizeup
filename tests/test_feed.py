@@ -166,3 +166,56 @@ def test_units_matched_follow_the_lists_settings_edits():
     c.lists = dataclasses.replace(c.lists, units={**c.lists.units, "E66": {"kind": "engine", "spoken": "Engine 66"}})
     c.record_traffic(tx("307-n-call_1", 1_791_400_000.0, "Fire/EMS 15", "", "60 Ctrl OP 7", 307, "Engine 66 responding"))
     assert c.state()["feed"]["rows"][0]["pc"] == "E66"
+
+
+def test_every_page_is_in_the_feed_only_ours_as_an_event(tmp_path):
+    """#80: South 2 pages are feed rows beside the talkgroup's; page says what each was. Only a page with our
+    tones is "talking to us" (pc = the department) and carries the event it opened."""
+    clock = Clock()
+    c = cad(tmp_path, clock)
+    t = clock.t
+    c.record_traffic(tx("307-a-call_1-t0", t + 1, "Fire/EMS 15", "", "60 Ctrl OP 7", 307, "Port Chester, stage."))
+
+    def page(pid, at, tones, text, voice_at=4.2):
+        return dict(tx(pid, at, "South 2", "", "60 Control" if tones else "", None, text), tones=tones, voice_at=voice_at if tones else None)
+    c.record_traffic(page("S2-ours", t + 2, [{"a_hz": 349.1, "b_hz": 311.1, "names": ["Port Chester FD"], "ours": True}],
+                          "Port Chester, 209 Westchester Avenue, fire alarm"))
+    c.record_traffic(page("S2-other", t + 3, [{"a_hz": 832.5, "b_hz": 1201.0, "names": ["Fairview (heard)"], "ours": False}],
+                          "Fairview, 34 Longdale Avenue, smoke in the building, Port Chester"))
+    c.record_traffic(page("S2-unknown", t + 4, [{"a_hz": 741.3, "b_hz": 623.7, "names": [], "ours": False}], "Engine 61, 1 Main Street"))
+    c.record_traffic(page("S2-none", t + 5, [], "Port Chester, respond to 1 Main Street"))
+    c.record_traffic(tx("FG1-1", t + 6, rig="E63", text="E63 on location"))
+    iid = c.store.create_incident(type="ALARM", address="209 Westchester Ave", source="60 Control page", source_ref="monitor:x", status="queued")
+    c.comms.link_pages(iid, ["S2-ours"])
+    rows = {r["id"]: r for r in c.feed.rows(limit=20)}
+    assert list(rows) == ["S2-none", "S2-unknown", "S2-other", "S2-ours", "307-a-call_1-t0"]     # FG1 isn't in the feed
+    assert {k: r["page"] for k, r in rows.items()} == {"S2-none": "none", "S2-unknown": "unknown", "S2-other": "other",
+                                                        "S2-ours": "ours", "307-a-call_1-t0": ""}
+    assert rows["S2-ours"]["pc"] == "Port Chester FD" and [e["why"] for e in rows["S2-ours"]["events"]] == ["page"]
+    assert rows["S2-other"]["pc"] == "" and rows["S2-other"]["events"] == []       # "Port Chester" in the text doesn't count
+    assert rows["S2-unknown"]["pc"] == "" and rows["S2-none"]["pc"] == ""   # even naming us in the voice: a page, not an event
+    assert rows["S2-ours"]["voice_at"] == 4.2 and rows["S2-none"]["voice_at"] is None
+    s = c.state()["feed"]
+    assert s["channel"] == "Fire/EMS 15" and s["rows"][0]["id"] == "S2-none"       # the title's channel is the talkgroup's
+    api = CadApi(c)
+    assert [r["page"] for r in json.loads(api.get("/api/cad/feed", "limit=3")[1])["rows"]] == ["none", "unknown", "other"]
+    # the Radio view's rows say the same
+    assert {r["id"]: r["page"] for r in c.comms.query(limit=10)}["S2-other"] == "other"
+
+
+def test_naming_a_pair_retags_every_stored_page_with_it(tmp_path):
+    """#80: a pair named from one row names it on every page row that has it (older unknown ones too)."""
+    clock = Clock()
+    c = cad(tmp_path, clock)
+    t = clock.t
+    for k in range(3):
+        c.record_traffic(dict(tx(f"S2-{k}", t + k, "South 2", "", "60 Control", None, "words"),
+                              tones=[{"a_hz": 741.3 + 0.1 * k, "b_hz": 623.7, "names": [], "ours": False}], voice_at=4.0))
+    c.record_traffic(dict(tx("S2-x", t + 9, "South 2", "", "60 Control", None, "words"),
+                          tones=[{"a_hz": 349.1, "b_hz": 311.1, "names": ["Port Chester FD"], "ours": True}], voice_at=4.0))
+    match = lambda a, b: ["Purchase"] if abs(a - 741.3) <= 0.015 * 741.3 else ["Port Chester FD"] if abs(a - 349.1) < 1 else []
+    assert c.comms.retag_pages(match, lambda names: "Port Chester FD" in names) == 3        # the three (within tolerance), not the known one
+    rows = {r["id"]: r for r in c.feed.rows(limit=20)}
+    assert all(rows[f"S2-{k}"]["page"] == "other" and rows[f"S2-{k}"]["tones"][0]["names"] == ["Purchase"] for k in range(3))
+    assert rows["S2-x"]["page"] == "ours"
+    assert c.comms.retag_pages(match, lambda names: "Port Chester FD" in names) == 0        # nothing left to change

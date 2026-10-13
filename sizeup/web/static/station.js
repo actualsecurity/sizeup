@@ -240,18 +240,25 @@ function stopPlay() {
   if (playing) Icon.play(playing, "play");
   playing = null;
 }
-function play(btn, id) {
+// A page plays from where its voice starts (voice_offset_s: the tones skipped, #80); "Play with tones" is in its menu.
+function play(btn, id, at = 0) {
   if (playing === btn) { player.pause(); return stopPlay(); }
   stopPlay();
-  player.src = `/api/audio/${encodeURIComponent(id)}.wav`;
+  player.src = `/api/audio/${encodeURIComponent(id)}.wav` + (at > 0 ? `#t=${Number(at).toFixed(2)}` : "");
   player.play().then(() => { playing = btn; Icon.play(btn, "stop"); }).catch((e) => console.warn("audio:", e));
+}
+function pageMenu(p) {
+  return UI.menu.button(`Actions: page ${fmtTime(p.start, true)}`, () => [
+    { label: "Play with tones", disabled: p.has_audio === false, run: () => play(playButton(p), p.id, 0) },
+  ], { key: `page:${p.id}` });
 }
 function playButton(x) {
   const b = Icon.play(el("button", "play"), x.has_audio === false ? "none" : "play");
   b.type = "button";
   b.disabled = x.has_audio === false;
-  b.title = x.has_audio === false ? "Recording expired (12 h)" : "Play";
-  b.addEventListener("click", () => play(b, x.id));
+  const skip = (x.tones || []).length && x.voice_offset_s > 0;
+  b.title = x.has_audio === false ? "Recording expired (12 h)" : skip ? "Play (tones skipped)" : "Play";
+  b.addEventListener("click", () => play(b, x.id, skip ? x.voice_offset_s : 0));
   return b;
 }
 
@@ -298,7 +305,9 @@ function renderMonitor() {
       const d = p.dispatch;
       if (d && d.incident_type) meta.append(el("span", "ptype", d.incident_type));
       if ((p.tones || []).length) meta.append(...Radio.pageTags(p.tones));   // who it was for; an unknown pair as its tones
-      else if (p.kind === "voice") meta.append(el("span", "", "Voice, no tones"));
+      else if (p.kind === "voice") meta.append(el("span", "dim small", "no tones"));
+      if ((p.tones || []).some((x) => !(x.names || []).length)) meta.append(el("span", "dim small", "unknown tones"));
+      if ((p.tones || []).length && p.voice_offset_s > 0) meta.append(pageMenu(p));
       li.replaceChildren(meta, el("div", "txt" + (p.raw ? "" : " muted"), p.raw || said(p)));
     },
     empty: filtered ? "No pages match" : "No pages yet",

@@ -106,6 +106,17 @@
   .d-pages { display: flex; flex-direction: column; gap: var(--s-1); margin-block-start: var(--s-3); }
   .d-page { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1) var(--s-2); min-inline-size: 0; }
   .d-pages + .narr { margin-block-start: var(--s-1); }
+  /* a page that isn't an event (#80): its note, and the row a step quieter than the events and the talk */
+  .page-note { white-space: nowrap; }
+  .rt.page-other, .rt.page-unknown, .rt.page-none { border-inline-start: var(--bw-mark) solid var(--line); }
+  .rt.page-other .txt, .rt.page-none .txt { color: var(--text-2); }
+  .feed-list > li.skipped { margin-inline-end: 8%; }
+  /* "Name these tones": one row per unknown pair, the department's name next to its tones */
+  .tone-form .dialog-body { display: flex; flex-direction: column; gap: var(--s-3); }
+  .tone-form .tone-pair { display: flex; flex-wrap: wrap; align-items: end; gap: var(--s-2) var(--s-3); }
+  .tone-form .tone-pair .field { flex: 1 1 14rem; }
+  .tone-form .tone-pair .check { flex: none; min-block-size: var(--ctl); }
+  .tone-form .dialog-foot { margin-block-start: var(--s-1); }
   /* a page going out now, over the lists it will join (radio.js fillPaging) */
   .paging-live { margin-block-end: var(--s-2); }
   .feed > .paging-live { margin-block: var(--s-1) 0; }

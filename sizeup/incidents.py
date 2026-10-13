@@ -1,7 +1,10 @@
 """Incidents: a page opens one; radio traffic attaches to it while it is active.
 
-    page (our department's tones, or our department named in the voice)
+    page whose tones name one of our departments (PCFD, Rye Brook: the tone plan's names)
       -> Incident(type, location, cross street, time out, geocoded point)
+    (a page with another department's tones, unknown tones, or no tones never opens one, whatever
+    the address or the voice says: #80, after a Fairview page at 34 Longdale Avenue was taken as ours
+    because the geocoder weakly read the street as Port Chester's)
     a repeat of the same page within REPEAT_S (dispatch reads it twice) -> merged, not a new one
     Fire/EMS 15 and Fireground 1 transmissions while an incident is active -> its traffic log
     no traffic for QUIET_CLOSE_S -> closed (kept in history)
@@ -24,6 +27,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from sizeup.dispatch import Dispatch
+from sizeup.radio.tones import base_name
 
 REPEAT_S = 300          # same location paged again within 5 min = the repeat
 QUIET_CLOSE_S = 3600    # an hour with no page or traffic -> closed
@@ -159,18 +163,18 @@ class IncidentStore:
                     inc.status = "closed"
             return next((i for i in reversed(self.incidents) if i.status == "active"), None)
 
+    def is_ours(self, tone_departments: list[str]) -> bool:
+        """Do these tones name one of our departments? '(est.)' / '(heard)' tags don't matter."""
+        return any(base_name(x) in self.ours for x in tone_departments)
+
     def on_page(self, page_id: str, tone_departments: list[str], d: Dispatch, at: float | None = None) -> Incident | None:
-        """A transcribed page. Opens/merges an incident when it is for one of our departments."""
+        """A transcribed page. Opens/merges an incident only when its tones name one of our departments
+        (#80). Units or departments heard in the text don't count ("60 Control, ..." was read as Engine 60
+        on a Valhalla call, 2026-10-08), and neither does the address: the geocoder's town is for the map."""
         at = self.clock() if at is None else at
+        if not self.is_ours(tone_departments):
+            return None
         depts = list(dict.fromkeys(tone_departments + d.departments))
-        geo = None
-        if not any(x in self.ours for x in tone_departments):
-            # Not our tones: ours only when the address is in one of our towns. Units or departments heard in
-            # the text don't count ("60 Control, ..." was read as Engine 60 on a Valhalla call, 2026-10-08).
-            geo = self.geocode(d) if d.location else None
-            towns = {x.removesuffix(" FD").strip().lower() for x in self.ours}
-            if not geo or (geo.get("town") or "").strip().lower() not in towns:
-                return None
         with self._lock:
             for inc in reversed(self.incidents):
                 if inc.status == "active" and at - inc.opened < REPEAT_S and (
@@ -205,7 +209,7 @@ class IncidentStore:
             self.save()
             return merged
         inc = Incident(uuid.uuid4().hex[:10], at, at, depts, d.incident_type, d.category, d.location,
-                       d.cross_street, d.time_out, geo or (self.geocode(d) if d.location else None),
+                       d.cross_street, d.time_out, self.geocode(d) if d.location else None,
                        pages=[page_id], page_text=[d.text], page_starts=[at],
                        units=list(getattr(d, "units", [])), code=getattr(d, "code", ""),
                        tone_departments=list(tone_departments))

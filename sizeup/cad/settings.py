@@ -24,6 +24,10 @@ Reset to default = drop the override (one item, or a whole section).
                                    kept, transcribed, and by what (sizeup/channels.py; Settings > Radios)
     stt                            key "vocabulary" -> [phrases] (Amazon Transcribe's custom vocabulary),
                                    "aws_monthly_limit_usd" -> the monthly AWS limit (sizeup/transcribe.py)
+    tones                          key "832.5/1201.0" (A/B Hz) -> {name, a_hz, b_hz, ours, page}: a tone pair named
+                                   from an unknown-tones page row ("Name these tones", #80), merged into the tone plan
+                                   over data/westchester_tones.csv (sizeup/app.py _apply_named_tones); ours: the
+                                   name counts as one of ours (PCFD, Rye Brook: their pages become pending events)
 
 Codes never change (they are stored on events and exported): a rename changes the name only. An
 item in use can't be deleted, only retired (named on old events, off the pick lists). Every change
@@ -50,6 +54,7 @@ from sizeup.cad import lists as lists_mod
 from sizeup.cad.lists import CLASSES, CODE, COLOR, LIST_SECTIONS, LONG_CODE, RESPONSES, ROLES, ListsError
 from sizeup.cad.store import OPERATOR_MAX, SCHEMA_VERSION, TZ, CadError
 from sizeup import polly
+from sizeup.radio.tones import pair_key
 from sizeup.tts import KOKORO_VOICES
 
 FORMAT, FORMAT_VERSION = "sizeup-cad-settings", 1
@@ -61,7 +66,7 @@ EMAIL = re.compile(r"[^@\s<>]{1,64}@[^@\s<>]{1,190}\.[^@\s<>]{1,63}")
 PAGE_SECTION = {**{s: "lists" for s in LIST_SECTIONS}, "event_class": "lists", "geo_town_order": "lists", "status_flow": "lists",
                 "type_subtypes": "lists",
                 "units": "units", "dispatch_wording": "dispatch", "dispatch_tones": "dispatch", "dispatch": "dispatch",
-                "channels": "radios", "stt": "radios", "places": "lists"}
+                "channels": "radios", "stt": "radios", "places": "lists", "tones": "radios"}
 AUDIT_SECTIONS = ("lists", "run cards", "units", "dispatch", "users", "system", "radios")
 LIST_FIELDS = {"event_types": ("color",), "event_subtypes": (), "dispositions": (), "received_via": (),
                "unit_statuses": ("role", "bg", "fg")}
@@ -78,6 +83,7 @@ WORDING = (("new", "First dispatch"), ("add_on", "Added to the assignment"), ("u
 MAX_TONES, MAX_GROUPS, MAX_CHANNELS = 8, 4, 8
 MAX_VOCAB, MAX_PHRASE_CHARS = 500, 100
 MAX_PLACE_NAMES = 300
+TONES_SECTION, MAX_NAMED_TONES, TONE_HZ = "tones", 200, (250.0, 3500.0)     # the decoder's band (radio/tones.py)
 
 
 def tone_groups(tones) -> list[list[list[float]]]:
@@ -429,6 +435,7 @@ class Editor:
         out["dispatch"] = self._dispatch_page(L, ov)
         out["operators"] = self.operators()
         out["system"] = self._system(ov)
+        out["tone_names"] = self.tone_rows()
         return out
 
     def _unit_rows(self, L, ov: dict) -> dict:
@@ -524,7 +531,7 @@ class Editor:
         fn = {"event_class": self._class_op, "status_flow": self._flow_op, "type_subtypes": self._map_op, "geo_town_order": self._towns_op, "units": self._units_op,
               "dispatch": self._dispatch_op, "users": self._users_op, "runcards": self._cards_op,
               "import": self._import_op, "channels": self._channels_op, "stt": self._stt_op,
-              "places": self._places_op}.get(section)
+              "places": self._places_op, TONES_SECTION: self._tones_op}.get(section)
         if fn is None:
             raise CadError(f"no settings section {section!r}")
         if section in ("users", "import"):
@@ -1271,6 +1278,92 @@ class Editor:
                                          for _s, k, v in changes])
         return True
 
+    # -- tone pairs named from the console (#80) --------------------------------------------------------
+    # Kept as overrides (section "tones", key "A/B" in Hz) so they are audited, exported and imported with
+    # the rest, and sent to the station with the channel choices (the hub's set_channel_prefs job).
+
+    def tone_overrides(self) -> dict:
+        return dict(self.overrides().get(TONES_SECTION) or {})
+
+    def tone_rows(self) -> list[dict]:
+        """Settings > Radios > Named tones and GET /api/cad/tones: each named pair, who named it and when."""
+        rows = self.store.q("SELECT key, value, updated_at, operator FROM settings_overrides WHERE section = ? ORDER BY key",
+                            (TONES_SECTION,))
+        return [dict(json.loads(r["value"]), key=r["key"], at=r["updated_at"], operator=r["operator"] or "") for r in rows]
+
+    @staticmethod
+    def _clean_tone(v, where: str = "") -> tuple[str, dict]:
+        """{a_hz, b_hz, name, ours?, page?} checked -> (key, the value stored). CadError."""
+        what = f"{where}: " if where else ""
+        if not isinstance(v, dict):
+            raise CadError(f"{what}an object {{a_hz, b_hz, name, ours}}")
+        hz = {}
+        for k in ("a_hz", "b_hz"):
+            x = v.get(k)
+            if k == "b_hz" and x in (None, ""):
+                hz[k] = None
+                continue
+            if isinstance(x, bool) or not isinstance(x, (int, float)) or not TONE_HZ[0] <= x <= TONE_HZ[1]:
+                raise CadError(f"{what}{k}: {TONE_HZ[0]:.0f} to {TONE_HZ[1]:.0f} Hz")
+            hz[k] = round(float(x), 1)
+        name = _text(v.get("name"), f"{what}name", 60)
+        if any(name.endswith(t) for t in (" (heard)", " (est.)")):
+            raise CadError(f"{what}name: the department's name alone")
+        ours = v.get("ours", False)
+        if not isinstance(ours, bool):
+            raise CadError(f"{what}ours: true or false")
+        page = _text(v.get("page"), f"{what}page", 80, required=False)
+        out = {"name": name, "a_hz": hz["a_hz"], "b_hz": hz["b_hz"], "ours": ours}
+        if page:
+            out["page"] = page
+        return pair_key(hz["a_hz"], hz["b_hz"]), out
+
+    def _tones_op(self, action: str, body: dict, op: str) -> dict:
+        """set {a_hz, b_hz, name, ours?, page?}: name a pair (page: the page it was heard on, read again) |
+        delete {key}: forget a name (the pair is unknown again)."""
+        cur = self.tone_overrides()
+        if action == "delete":
+            key = _text(body.get("key"), "key", 20)
+            if key not in cur:
+                raise CadError(f"no named tones {key!r}")
+            out = self._commit([(TONES_SECTION, key, REMOVE)], op, [("radios", f"tones/{key}", cur[key], None)])
+            page = ""
+        elif action == "set":
+            key, val = self._clean_tone(body)
+            if key not in cur and len(cur) >= MAX_NAMED_TONES:
+                raise CadError(f"at most {MAX_NAMED_TONES} named tone pairs")
+            if val.get("ours") is False and val["name"] in self.cad.s.monitor_departments:
+                val["ours"] = True                    # PCFD's / Rye Brook's name: theirs are ours whatever the box said
+            if cur.get(key) == val:
+                return {"ok": True, "key": key}
+            out = self._commit([(TONES_SECTION, key, val)], op, [("radios", f"tones/{key}", cur.get(key), val)])
+            page = val.get("page", "")
+        else:
+            raise CadError("action: set or delete")
+        ctx = self.cad.radio_ctx
+        if ctx is not None:
+            ctx.tones_changed(page)
+        return {**out, "key": key}
+
+    def replace_tones(self, tones: dict, operator: str) -> bool:
+        """The whole named-pairs map as the hub sent it (the station applying the CAD of record's names).
+        True when anything changed. A bad entry: nothing changes (ValueError)."""
+        want = {}
+        for k, v in (tones or {}).items():
+            try:
+                key, val = self._clean_tone(v, f"tones.{k}")
+            except CadError as e:
+                raise ValueError(str(e)) from None
+            want[key] = val
+        cur = self.tone_overrides()
+        changes = [(TONES_SECTION, k, REMOVE) for k in cur if k not in want]
+        changes += [(TONES_SECTION, k, v) for k, v in want.items() if cur.get(k) != v]
+        if not changes:
+            return False
+        self._commit(changes, operator, [("radios", f"tones/{k}", cur.get(k), None if v is REMOVE else v)
+                                         for _s, k, v in changes])
+        return True
+
     def stt_values(self) -> dict:
         return dict(self.overrides().get("stt") or {})
 
@@ -1569,6 +1662,11 @@ class Editor:
                 channels_mod.clean(k, v)
             except ValueError as e:
                 raise CadError(f"overrides.channels.{k}: {e}") from None
+        for k, v in (ov.get(TONES_SECTION) or {}).items():
+            key, val = self._clean_tone(v, f"overrides.tones.{k}")
+            if key != k:
+                raise CadError(f"overrides.tones.{k}: the key is the pair, {key}")
+            ov[TONES_SECTION][k] = val
         st = ov.get("stt") or {}
         if set(st) - {"vocabulary", "aws_monthly_limit_usd"}:
             raise CadError("overrides.stt: vocabulary and aws_monthly_limit_usd only")
@@ -1737,4 +1835,6 @@ class Editor:
         self.store.rev += 1
         if self.cad.radio_ctx is not None and any(c["store"] in (channels_mod.SECTION, "stt") for c in changes):
             self.cad.radio_ctx.channels_changed()
+        if self.cad.radio_ctx is not None and any(c["store"] == TONES_SECTION for c in changes):
+            self.cad.radio_ctx.tones_changed()
         return {"ok": True, "dry_run": False, "changes": changes}

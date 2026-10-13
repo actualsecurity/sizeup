@@ -1358,11 +1358,20 @@ def test_only_pages_for_us_are_queued():
     _, inc = monitor_incident("16-10-191-22, it's 22 Locust Avenue, between Mead Place and Haviland Lane, outside odor of gas",
                               depts=(), geo=rye)
     assert inc is None and cad.store.incidents() == []            # not even a monitor incident of ours
-    # No tones or units heard, but the address is in Port Chester: ours.
+    # #80: the address never decides. No tones decoded, the address in Port Chester: a page, not an event.
     pc = {"lat": 41.0025, "lon": -73.6669, "label": "209 Westchester Ave, Port Chester", "kind": "address",
           "town": "Port Chester", "confidence": 0.91}
     _, inc2 = monitor_incident("Respond to an activated fire alarm at 209 Westchester Avenue", depts=(), geo=pc)
-    assert cad.from_monitor(inc2)["status"] == "queued"
+    assert inc2 is None
+    # Another department's tones at an address the geocoder puts in Port Chester (Fairview, 34 Longdale Avenue,
+    # 2026-10-13 16:02): never ours, even when a monitor incident is handed over with that geo.
+    _, fv = monitor_incident("Fairview, 34 Longdale Avenue, smoke in the building", depts=("Fairview",), geo=pc)
+    assert fv is None
+    from sizeup.incidents import Incident
+    handed = Incident("x1", 0, 0, ["Fairview"], "Smoke", "fire", "34 longdale avenue", "", "", geo=pc, tone_departments=["Fairview"])
+    assert cad._ours(handed) is False and cad.from_monitor(handed) is None
+    handed.tone_departments = ["Rye Brook FD (est.)"]
+    assert cad._ours(handed) is True                                  # an estimated code for one of ours counts
 
 
 def test_bare_numbers_dont_make_a_page_ours(tmp_path):

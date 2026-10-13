@@ -4,7 +4,7 @@
 
     paging channel (South 2) --squelch--> transmission --tones?--> Page (held a few seconds in case the
         carrier comes back after a fade: radio/page.py PageHold, GitHub #61)
-        page for one of our departments --STT--> dispatch parse --> incident (geocoded)
+        page whose tones are one of ours (#80) --STT--> dispatch parse --> incident (geocoded)
         voice-only transmission --STT--> dispatcher traffic (attached to the active incident),
             or the voice half of a tones-only page sent as a separate transmission
     traffic channels (FG1)    --squelch--> transmission --STT--> traffic on the active incident
@@ -68,7 +68,7 @@ from sizeup.radio import sdr as sdr_lookup
 from sizeup.radio.recorder import TrunkRecorder
 from sizeup.radio.page import Page, PageHold, assemble, page_from_dict, recording_note
 from sizeup.radio.tap import LiveTap
-from sizeup.radio.tones import TonePlan
+from sizeup.radio.tones import ToneCode, ToneEvent, TonePlan, base_name, pair_key
 from sizeup.talkers import talker_prompt
 from sizeup import channels
 from sizeup.stt import LIVE, RERUN, Transcriber, WhisperClient, radio_voice, wav_bytes
@@ -78,6 +78,18 @@ from sizeup.web.server import WebServer
 
 ROOT = Path(__file__).resolve().parent.parent
 SPLIT_PAGE_S = 30.0      # voice this soon after a tones-only page for us = that page's voice
+# The gazetteer names a town only from this confidence up (#80: "34 Longdale Avenue" read as Port Chester at
+# 0.34 was a street near Fairview). The point and label stay for the map; the town is never a trigger anyway.
+TOWN_CONFIDENCE = 0.6
+
+
+def geo_of(m) -> dict | None:
+    """A gazetteer match as the page / incident carries it: {lat, lon, label, kind, town, confidence}."""
+    if m is None:
+        return None
+    conf = round(float(m.confidence), 2)
+    return {"lat": m.lat, "lon": m.lon, "label": m.label, "kind": m.kind,
+            "town": m.municipality if conf >= TOWN_CONFIDENCE else "", "confidence": conf}
 P25_MODE = P25_JOB         # the shared-dongle mode that runs trunk-recorder ("Fire/EMS 15")
 OFF_MODE = "Off"           # the shared dongle released for other programs (sizeup keeps running)
 SWITCH_PAUSE_S = 1.0       # between stopping one program on the shared dongle and starting the next
@@ -322,6 +334,11 @@ class App:
         # Transcribe where this process may call it ([stt] aws: the hub; sizeup/transcribe.py).
         self.cad.radio_ctx = self
         self._chan_ov: dict = self.cad.settings.channel_overrides()
+        # Tone pairs named from the console (Settings "tones", #80): merged into the plan, with the names
+        # that count as ours; the hub sends them to the station with the channel choices.
+        self._tone_ov: dict = {}
+        self._apply_named_tones()
+        self.cad.tone_names = self.tone_names
         self._hub_aws = self._load_hub_aws()
         self._aws_wait: dict[str, tuple[np.ndarray, str]] = {}
         self._vocab_suggest: list[str] | None = None
@@ -369,10 +386,7 @@ class App:
         except Exception as e:
             log(f"geocode error for {q!r}: {type(e).__name__}: {e}")
             return None
-        if m is None:
-            return None
-        return {"lat": m.lat, "lon": m.lon, "label": m.label, "kind": m.kind, "town": m.municipality,
-                "confidence": round(float(m.confidence), 2)}
+        return geo_of(m)
 
     def _geocode_text(self, q: str) -> list[dict]:
         """The CAD location box: every reading of what was typed, best first (the CAD orders them by town)."""
@@ -801,14 +815,21 @@ class App:
                 depts = prev.departments  # the voice half of a tones-only page
                 self._last_tones_only = None
                 tones_half = prev
-        # Ours only by our tones or an address in our towns (user, 2026-10-08: "we should only take these
-        # in here if they are our tones or in our jurisdiction"); anything else is traffic.
-        inc = self.store.on_page(page.id, depts, d, at=page.start)
+        # Ours only by our tones (#80: never by the address or the units named); anything else stays a page
+        # row in Radio and the feed (and a voice-only page is traffic too).
+        inc = self._page_incident(page, depts, d, tones_half)
         if inc is None and page.kind == "voice":
             t = Traffic(page.id, page.label, page.start, page.end, page.raw)
             self.store.on_traffic(t)
             self._to_cad(t)
             return
+        if inc is None and depts and not self.store.is_ours(depts):
+            log(f"{page.label}: {', '.join(depts)} paged: not ours")
+
+    def _page_incident(self, page: Page, depts: list[str], d, tones_half: Page | None = None):
+        """The page into the monitor's incidents and, through it, the CAD's queue: only when its tones
+        name one of ours (IncidentStore.on_page). Returns the incident, or None."""
+        inc = self.store.on_page(page.id, depts, d, at=page.start)
         if inc:
             where = inc.geo["label"] if inc.geo else (inc.location or "location not found")
             log(f"INCIDENT {inc.incident_type} · {where} · {', '.join(inc.departments)}")
@@ -818,6 +839,73 @@ class App:
                     self.cad.comms.link_pages(ev["id"], [tones_half.id])
             except Exception as e:  # the CAD must never stop the monitor
                 log(f"CAD: could not open a pending incident: {type(e).__name__}: {e}")
+        return inc
+
+    # -- tone pairs named from the console (Settings "tones", #80) ------------------------------------------
+
+    def _apply_named_tones(self) -> None:
+        """The plan = the config's codes + the named pairs; ours = the config's + the named pairs marked ours."""
+        self._tone_ov = self.cad.settings.tone_overrides()
+        named = [ToneCode(str(v["name"]), float(v["a_hz"]), float(v["b_hz"]) if v.get("b_hz") else None)
+                 for v in self._tone_ov.values()]
+        self.plan.replace(list(self.cfg.tones) + named)
+        ours = set(self.cfg.ours) | set(self.cfg.cad_monitor_departments) | {c.name for c in named
+                                                                               if self._tone_ov[pair_key(c.a_hz, c.b_hz)].get("ours")}
+        self.store.ours = ours
+        self.paging.ours = {base_name(n) for n in ours}
+        self._rematch_pages()
+
+    def _rematch_pages(self) -> None:
+        """The pages on screen matched against the plan as it is now (names learned since they were heard)."""
+        with self._lock:
+            for p in self.pages:
+                self.plan.match_all(p.tones)
+
+    def _match_pair(self, a_hz: float, b_hz: float | None) -> list[str]:
+        return list(self.plan.match(ToneEvent("two_tone" if b_hz else "long_tone", a_hz, b_hz, 0.0, 0.0)).names)
+
+    def tones_changed(self, page_id: str = "") -> None:
+        """Settings: a pair was named (or its name removed). The plan changes at once, every page row with the
+        pair says the name, and the page it was named from is read again (its tones now say who it was for,
+        so a page of ours becomes a pending event)."""
+        self._apply_named_tones()
+        log("tone pairs named from the console: " + (", ".join(f"{k} {v['name']}" + (" (ours)" if v.get("ours") else "")
+                                                                for k, v in sorted(self._tone_ov.items())) or "none"))
+        try:
+            n = self.cad.comms.retag_pages(self._match_pair, self.paging.is_ours)
+            if n:
+                log(f"  {n} page row(s) in Radio say the name now")
+        except Exception as e:  # the CAD must never stop the monitor
+            log(f"CAD: could not retag the page rows: {type(e).__name__}: {e}")
+        if page_id:
+            self.reevaluate_page(page_id)
+        self.channels_check_tones()
+
+    def channels_check_tones(self) -> None:
+        """The hub sends the named pairs to the station with the channel choices (HubApp)."""
+
+    def reevaluate_page(self, page_id: str) -> bool:
+        """One page matched against the plan as it is now: its rows (Radio, the feed, the station page) show
+        the names, and the page -> incident path runs again. False when there is no such page."""
+        with self._lock:
+            page = next((p for p in self.pages if p.id == page_id), None)
+        if page is None:
+            return False
+        self.plan.match_all(page.tones)
+        self._save_page(page)
+        self._page_to_cad(page)
+        if page.kind == "page" and page.status in ("done", "no_speech") and page.raw:
+            d = self._dispatch(page.raw)
+            if d is not None:
+                page.dispatch = d.as_dict()  # type: ignore[attr-defined]
+                self._page_incident(page, page.departments, d)
+        return True
+
+    def tone_names(self) -> dict:
+        """GET /api/cad/tones: the pairs named here and the department names to pick from."""
+        ours = sorted(set(self.cfg.ours) | set(self.cfg.cad_monitor_departments))
+        names = list(dict.fromkeys(ours + self.plan.names() + list(self.cad.lists.departments)))
+        return {"named": self.cad.settings.tone_rows(), "names": sorted(names), "ours": ours}
 
     def _to_cad(self, t: Traffic, replace: bool = True) -> None:
         """A transmission into the CAD's communications log (linked to its rig's events)."""
@@ -1307,12 +1395,16 @@ class App:
             d = {}
         return {"ok": bool(d.get("ok")), "why": str(d.get("why") or "the hub hasn't said whether it can use AWS yet")}
 
-    def set_channel_prefs(self, prefs: dict, aws: dict | None = None) -> dict:
-        """From the hub (CAD of record): its whole channel map and whether it can take AWS audio now.
-        Applied here and kept (this station's own Settings overrides, audited as "hub")."""
+    def set_channel_prefs(self, prefs: dict, aws: dict | None = None, tones: dict | None = None) -> dict:
+        """From the hub (CAD of record): its whole channel map, whether it can take AWS audio now, and the
+        tone pairs named there (#80; a hub from before sends none: this station's stay). Applied here and
+        kept (this station's own Settings overrides, audited as "hub")."""
         clean = channels.check_map(prefs)
         changed = self.cad.settings.replace_channels(clean, "hub")
         self._chan_ov = self.cad.settings.channel_overrides()
+        if isinstance(tones, dict) and self.cad.settings.replace_tones(tones, "hub"):
+            self._apply_named_tones()
+            changed = True
         if isinstance(aws, dict):
             new = {"ok": bool(aws.get("ok")), "why": str(aws.get("why") or "")[:300]}
             if new != self._hub_aws:
@@ -1326,7 +1418,8 @@ class App:
 
     def channels_applied(self) -> dict:
         """What this station runs (its state push: the hub compares sig)."""
-        return {"prefs": self._chan_ov, "aws": dict(self._hub_aws), "sig": channels.sig(self._chan_ov, self._hub_aws["ok"])}
+        return {"prefs": self._chan_ov, "aws": dict(self._hub_aws), "tones": len(self._tone_ov),
+                "sig": channels.sig(self._chan_ov, self._hub_aws["ok"], self._tone_ov)}
 
     def channels_sync(self) -> dict:
         if self.forwarding():
