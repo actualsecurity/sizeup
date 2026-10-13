@@ -542,79 +542,119 @@ expire_min = 5
 heartbeat_stale_min = 90
 ```
 
-## Highway layers: cameras, incidents, signs, mileposts (511NY)
+## Highway layers: cameras, incidents, signs, mileposts (the Thruway, 511NY)
 
 > "it looks like this has location data of all the highway things, including cameras, that would be
 > nice to add in for the ability to @ and then also, click on camera feeds available from the maps
 > (maybe there is a layers option to turn on these overlays too on the map)" (user, 2026-10-13, on the
-> Thruway's traveler map; GitHub #73)
+> Thruway's traveler map; GitHub #73). Then, #86: "they exist on that other website so we should be
+> able to enumerate them without ny511".
 
 Every CAD map (the event's, the large map, the Overview, `/monitor`) has a **Layers** button:
-*Cameras*, *Incidents & closures*, *Roadwork*, *Message signs* (from 511NY), *Mileposts* and *Exits*
-(from the gazetteer, #67). Each is on or off per viewer (this browser's `localStorage`, key
-`sizeup.mapLayers`); cameras and incidents start on. Signs show from zoom 11, exits from 12, whole
-mileposts from 12 (whole miles) and the tenths from 14. A camera opens the **camera viewer**: the snapshot, its
-name, road and direction and when the image was taken, a new one every 10 s while it is open and the
-tab is visible (paused when hidden); it fits a 390 px phone. An incident, closure, roadwork or sign
-opens a small box with what 511NY says and when it was updated. An event with a map point shows its
-nearest working cameras (up to 3 within 1.5 km) as **Cameras nearby** under its map.
+*Cameras*, *Incidents & closures*, *Roadwork*, *Message signs* (from the sources below), *Mileposts*
+and *Exits* (from the gazetteer, #67, #83). Each is on or off per viewer (this browser's
+`localStorage`, key `sizeup.mapLayers`); cameras and incidents start on. Signs show from zoom 11,
+exits and whole mileposts from 12, the tenths from 14. A camera opens the **camera viewer**: the
+snapshot, its name, road, direction and milepost, which source it is from and when the image was
+taken, a new one every 10 s while it is open and the tab is visible (paused when hidden); it fits a
+390 px phone. An incident, closure, roadwork or sign opens a small box with what the source says and
+when it was updated. An event with a map point shows its nearest working cameras (up to 3 within
+1.5 km) as **Cameras nearby** under its map. The Layers box names each source that is on and when it
+last read: *Data: New York State Thruway Authority, updated 16:48*, *powered by 511NY, updated 16:49*.
 
-**Source: the 511NY data feeds** (NYSDOT, <https://511ny.org/help/24>). Considered and not used:
+### Sources
 
-| source | what | why not |
-|---|---|---|
-| The Thruway map (thruway.ny.gov/travelers/map) | keyless XML / GeoJSON at `webdataapi.thruway.ny.gov` | its developer page documents events, signs and interchanges, not the cameras or mileposts the map uses; Thruway roads only (no Hutch, US-1); its disclaimer forbids redistribution for profit. Possible later for events / signs, keyless. |
-| 511ny.org's own map endpoints (`api-511x-nysdot.carsprogram.org`) | the new site's JSON | undocumented: the site's, not for us |
-| The old 511NY developer API (`/api/getcameras?key=`) | | gone: since the new site (2026) those paths answer the site's HTML page |
-| data.ny.gov | Thruway interchanges (`7jkf-259w`), travel plazas, gantries; archived 511 events | no live cameras or events; static data is #67's |
-| NYSDOT Reference Markers (ArcGIS) | mile markers | static: in the gazetteer (#67) |
-| CTroads (Connecticut, I-95 in Greenwich) | the same kind of developer API (key, 10 calls a minute): events, signs, advisories; cameras on its map at `ctroads.org/map/Cctv/<id>` | its API documents no cameras and its terms page could not be read: later, if CTDOT confirms |
+Two providers (`sizeup/roads.py` `Provider`), read side by side and merged (`Roads.merged`): when
+both are on, **511NY wins per item**: a Thruway camera, sign or event within 50 m of a 511NY one (the
+same layer, for events) is left out as the same thing. Every item carries its `source` (`"511NY"` or
+`"Thruway"`), shown on the map, in the camera viewer and in "Cameras nearby".
 
-**Terms** (511NY Developer Access Agreement, updated 2026-09-18): no fee; access by request; we may
-"redistribute, enhance, repackage, and add value to the data" but not alter what a report says; we
-"must display the time at which the data was published or last updated wherever [we] present it"
-(every event, sign and snapshot shows its time); the source may be acknowledged as "powered by
-511NY" with a link to 511NY.org (the camera viewer, the map's attribution); the name and logo are
-not ours to brand with. NYSDOT may stop the feed or a use at any time. Camera video (HLS) is not
-proxied: snapshots only (the agreement doesn't speak to re-serving video, and every segment would
-come through the hub).
+**The New York State Thruway Authority** (`[roads] thruway = true`, the default; no key): the public
+data host its traveler map reads, `webdataapi.thruway.ny.gov/api/data/<feed>/xml`
+(<https://www.thruway.ny.gov/developers>): `trafficcameras` (the camera list, with each camera's
+snapshot and video URLs, milepost and which way it looks), `events` (incidents and roadwork; a
+closure is read from the wording: "all lanes closed", "ramp closed", "closure"), `dmsstatus` (the
+message signs' text). I-95 (New England Thruway) and I-287 (Cross Westchester Expressway) are
+Thruway roads, so this covers our two highways with no sign-up at all: 15 cameras, 8 signs and the
+day's events in our area on 2026-10-13. Checked that day: all three feeds (and the interchange and
+milepost ones) answered a plain client, `curl` and Python's `urllib`, with the User-Agent below, HTTP
+200 with no key, cookie or browser headers; so did the snapshot host (`nyssnapshot.com`, one
+redirect, `image/png`, with a `Last-Modified`). Nothing is done to look like a browser: if the host
+ever refuses plain clients, that feed stays off and the log says so.
+*Terms:* the site's [disclaimer](https://www.thruway.ny.gov/legal/disclaimer) says the data "is not
+to be sold, or used in any process for resale as a value added product, or otherwise distributed for
+profit"; this is a fire department's non-commercial dispatch tool, shown to its members, with the
+source named on the map, in the Layers box and in the viewer ("Data: New York State Thruway
+Authority", linked). Polled gently: the camera list hourly, events every 2 min, signs every 5, with a
+real User-Agent, `sizeup/<version> (Port Chester FD dispatch; contact
+https://github.com/actualsecurity/sizeup)`. The Thruway's **milepost and interchange feeds are not
+read** for the map: the gazetteer's own mile markers are (#67, #83; the Thruway's were used once to
+cross-check them, see #83).
 
-**How it works** (`sizeup/roads.py`): the hub (or all-in-one) fetches each feed on its own schedule,
-events every 90 s, signs every 5 min, the camera inventory hourly (the old API's limit was 10 calls
-a minute per key; the config refuses anything faster than 5 a minute for all three), keeps only our
-area (`[roads] bbox`: Port Chester, Rye Brook and the mutual-aid neighbours with a margin, Greenwich
-included), and caches what it kept in `roads511.json` in the state dir so a restart spends no calls.
-A refused key (401 / 403) waits 30 min, a 429 5 min, anything else backs off 1 min doubling to 15.
-Each feed may be JSON or XML; records are read by field name (`ID`, `RoadwayName`,
-`DirectionOfTravel`, `Latitude`, the inventory's `Views [{Url, VideoUrl}]` ...), whatever the case.
+**511NY** (NYSDOT, <https://511ny.org/help/24>; off until approved): the Developer Access Agreement
+(updated 2026-09-18) lists traffic events (JSON), the camera inventory (XML), message signs (JSON)
+and winter road conditions. Access is by request (the *XML Data Feed Request Form* linked there,
+reviewed weekly); the approval brings the feed addresses, their documentation and a key. So the
+addresses are config (`[roads] events_url`, `cameras_url`, `signs_url`, each with `{key}` where the
+key goes) and the key a secret (`SIZEUP_511NY_KEY`; on the hub SSM `/sizeup-hub/511ny-key`). Each
+feed may be JSON or XML; records are read by field name (`ID`, `RoadwayName`, `DirectionOfTravel`,
+`Latitude`, the inventory's `Views [{Url, VideoUrl}]` ...), whatever the case. *Terms:* no fee; we
+may "redistribute, enhance, repackage, and add value to the data" but not alter what a report says;
+we "must display the time at which the data was published or last updated wherever [we] present it"
+(every event, sign and snapshot shows its time); the source may be acknowledged as "powered by 511NY"
+with a link to 511NY.org (the viewer, the Layers box, the map's attribution); the name and logo are
+not ours to brand with. NYSDOT may stop the feed or a use at any time. The old developer API
+(`511ny.org/api/getcameras?key=`) is gone since the site was rebuilt in 2026: those paths answer the
+site's HTML page. Schedule: events every 90 s, signs every 5 min, the inventory hourly; the config
+refuses anything faster than 5 calls a minute for all three (the old API's limit was 10 a minute).
 
-**The key never leaves the hub.** It comes from `SIZEUP_511NY_KEY` (on the hub: SSM
-`/sizeup-hub/511ny-key`); the feed addresses hold `{key}` where it goes. It is not in any response,
-the cache, an error or the log (`_redact`; `tests/test_roads.py` checks each). **The browser never
-talks to 511NY or a camera**: `GET /api/cad/cameras/<id>/image` is fetched by the hub from the
-camera's snapshot URL in the inventory, kept 15 s (one fetch however many are watching; four cameras
-at a time at most), and served with `X-Image-Time` (the camera's `Last-Modified`, else when the hub
-fetched it). A camera that stops answering gets its last snapshot for up to 10 min, marked stale.
-So the key stays private, and there is no mixed content or cross-origin request behind Cloudflare
-Access. Anyone signed in may look (viewers too): these are all GETs.
+Considered and not used:
+
+| source | why not |
+|---|---|
+| 511ny.org's own map endpoints (`api-511x-nysdot.carsprogram.org`) | undocumented: the site's, not for us |
+| data.ny.gov | Thruway interchanges (`7jkf-259w`), travel plazas, gantries; archived 511 events: no live cameras or events, and the static data is the gazetteer's |
+| NYSDOT Reference Markers (ArcGIS) | mile markers: static, in the gazetteer (#67, #83) |
+| CTroads (Connecticut, I-95 in Greenwich) | the same kind of keyed developer API (events, signs, advisories, 10 calls a minute); its API documents no cameras and its terms page could not be read: later, if CTDOT confirms |
+
+Camera video (HLS) is not proxied from either source: snapshots only (neither source's terms speak
+to re-serving video, and every segment would come through the hub).
+
+### How it works
+
+Each provider fetches its feeds on its own schedule and keeps only our area (`[roads] bbox`: Port
+Chester, Rye Brook and the mutual-aid neighbours with a margin, Greenwich included); one disk cache
+(`roads511.json` in the state dir) holds what each kept, items only, so a restart spends no calls.
+A refused key (401 / 403) waits 30 min, a 429 5 min, anything else backs off 1 min doubling to 15,
+never under the feed's floor; one provider's error never touches the other's data.
+
+**The 511NY key never leaves the hub.** It is not in any response, the cache, an error or the log
+(`_redact`; `tests/test_roads.py` checks each). **The browser never talks to a provider or a
+camera**: `GET /api/cad/cameras/<id>/image` is fetched by the hub from the camera's snapshot URL as
+its provider lists it, kept 15 s (one fetch however many are watching; four cameras at a time at
+most), and served with `X-Image-Time` (the camera's `Last-Modified`, else when the hub fetched it).
+A camera that stops answering gets its last snapshot for up to 10 min, marked stale. So the key
+stays private, and there is no mixed content or cross-origin request behind Cloudflare Access.
+Anyone signed in may look (viewers too): these are all GETs.
 
 | | |
 |---|---|
-| `GET /api/cad/roads[?rev=]` | `{configured, note, attribution, link, rev, status: {cameras, events, signs: {on, at, n, error}}, cameras, events, signs, mileposts, exits, highway_places}`; the same `rev`: `{rev, same: true}` (the pages poll each minute) |
+| `GET /api/cad/roads[?rev=]` | `{configured, note, sources: [{name, short, label, link, configured, at, status: {cameras, events, signs: {on, at, n, error}}}], rev, cameras, events, signs, mileposts, exits, highway_places}`; the same `rev`: `{rev, same: true}` (the pages poll each minute). `configured`: any source is on; `note`: why 511NY isn't, when it isn't. Each camera, event and sign has `source` and, from the Thruway, `mile`. |
 | `GET /api/cad/cameras?q=&near=lat,lon&n=` | `{cameras}`: cameras for the place search, or the nearest to a point |
-| `GET /api/cad/cameras/<id>/image` | the snapshot (`image/*`), `X-Image-Time`, `X-Image-Stale: 1` when old; 404 not configured / no such camera, 502 the camera didn't answer |
+| `GET /api/cad/cameras/<id>/image` | the snapshot (`image/*`), `X-Image-Time`, `X-Image-Stale: 1` when old; 404 no source on / no such camera, 502 the camera didn't answer |
 
-**@ cameras.** `Roads.search_places(q)` answers "@I-95 exit 21 camera" in the place search's shape
-(`{kind: "camera", label, sub, lat, lon, source, camera}`), and the app hands it to the CAD as
-`cad.place_providers`, for #67's `/api/cad/places` to ask. In the page, `MapLayers.searchPlaces(q)` and
-`MapLayers.openPlace(place)` do the same, and any element with `data-camera="<id>"` (a camera chip in
-a note) opens the viewer.
+**@ cameras.** `Roads.search_places(q)` answers "@I-95 exit 21 camera", "@287 mile 2.5 camera" in
+the place search's shape (`{kind: "camera", label, sub, lat, lon, source, camera}`), and the app
+hands it to the CAD as `cad.place_providers`, for #67's `/api/cad/places` to ask. In the page,
+`MapLayers.searchPlaces(q)` and `MapLayers.openPlace(place)` do the same, and any element with
+`data-camera="<id>"` (a camera chip in a note) opens the viewer.
 
-**Without a key** (or before the feed addresses are set) nothing is fetched, the log says so once,
-the four 511NY layers are greyed in the Layers box with the reason, and the mileposts and exits still
-work. Nothing else changes.
+**Without any source** (`thruway = false` and no 511NY key) nothing is fetched, the log says so
+once, the four layers are greyed in the Layers box with the reason, and the mileposts and exits
+still work. With the Thruway alone (the default until 511NY approves), the layers are on and the
+box notes that 511NY isn't.
 
-**Setting it up:**
+**Setting up 511NY:**
 
 1. Request access: the *XML Data Feed Request Form* linked from <https://511ny.org/help/24> (reviewed
    weekly). Describe the use: Port Chester FD's dispatch console, shown to its members behind sign-in;
@@ -630,15 +670,16 @@ work. Nothing else changes.
    key itself: the config refuses it). Re-record `tests/fixtures/511ny/` from the real feeds.
 
 ```toml
-[roads]                          # sizeup/roads.py; leave out: off
-events_url = "https://.../events?key={key}&format=json"     # from 511NY's approval
+[roads]                          # sizeup/roads.py; leave out: the Thruway on, 511NY off
+thruway = true                   # the NYS Thruway Authority's public feeds: I-95, I-287 (no key)
+events_url = "https://.../events?key={key}&format=json"     # 511NY, from its approval
 cameras_url = "https://.../cameras?key={key}"
 signs_url = "https://.../messagesigns?key={key}&format=json"
 bbox = [-73.80, 40.92, -73.56, 41.10]   # west, south, east, north
-events_every_s = 90              # at least 60
+events_every_s = 90              # 511NY; at least 60 (the Thruway: every 2 min, fixed)
 signs_every_min = 5              # at least 1
 cameras_every_min = 60           # at least 10
-# key: env SIZEUP_511NY_KEY (the hub: SSM /sizeup-hub/511ny-key); enabled = false turns it off
+# key: env SIZEUP_511NY_KEY (the hub: SSM /sizeup-hub/511ny-key); enabled = false turns everything off
 ```
 
 ## The hub's storage
@@ -673,7 +714,7 @@ One task, desired count 1, ephemeral disk:
     `LITESTREAM_REGION` default `AWS_REGION`; credentials from the **task role**, no keys).
   * unset: just `python -m sizeup` (local dev).
   * Environment: `SIZEUP_STATION_TOKEN` (secret from SSM), `SIZEUP_PUBLIC_URL`, optionally
-    `SIZEUP_PORT` and `SIZEUP_511NY_KEY` (secret from SSM, [the highway layers](#highway-layers-cameras-incidents-signs-mileposts-511ny));
+    `SIZEUP_PORT` and `SIZEUP_511NY_KEY` (secret from SSM, [the highway layers](#highway-layers-cameras-incidents-signs-mileposts-the-thruway-511ny));
     the image sets `SIZEUP_STATE_DIR=/data`, `SIZEUP_CONFIG`.
 * **cloudflared** sidecar: `cloudflare/cloudflared:latest tunnel --no-autoupdate run`, `TUNNEL_TOKEN`
   secret from SSM. awsvpc: it reaches the hub at `http://localhost:8090` (the tunnel's public

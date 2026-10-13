@@ -2,11 +2,13 @@
 // large map, the Overview and /monitor), the camera viewer, the event's "Cameras nearby" row, and the
 // hook the "@" place search uses for cameras.
 //
-//   Layers        Cameras, Incidents & closures, Roadwork, Message signs (511NY, through the hub:
-//                 GET /api/cad/roads, sizeup/roads.py), Mileposts, Exits (the gazetteer's, #67). Each one
-//                 on / off per viewer (localStorage "sizeup.mapLayers"); cameras and incidents on at first.
-//                 Signs from zoom 11, exits and mileposts from 12 (the tenths of a mile from 14). 511NY not set up on the hub: its four
-//                 are greyed with the reason; the rest still work.
+//   Layers        Cameras, Incidents & closures, Roadwork, Message signs (the NYS Thruway Authority's public
+//                 feeds and 511NY's, through the hub: GET /api/cad/roads, sizeup/roads.py; each item says its
+//                 source), Mileposts, Exits (the gazetteer's, #67). Each one on / off per viewer (localStorage
+//                 "sizeup.mapLayers"); cameras and incidents on at first. Signs from zoom 11, exits and mileposts from 12
+//                 (the tenths of a mile from 14). The box says which sources are on and when each last updated
+//                 ("Data: New York State Thruway Authority", "511NY, updated hh:mm"); no source at all: the
+//                 four are greyed with the reason; the rest still work.
 //   A camera      opens the viewer (a dialog: fits a 390 px phone): the snapshot through the hub
 //                 (/api/cad/cameras/<id>/image: the browser never talks to 511NY or the camera), its name,
 //                 road and direction, and when the image was taken; a new one every 10 s while it is open
@@ -16,8 +18,8 @@
 //                 label, sub, lat, lon}); MapLayers.openPlace(p) opens one (true when it was a camera).
 //                 Anything with data-camera="<id>" (a camera chip in a note) opens the viewer when clicked.
 //
-// 511NY's terms (sizeup/roads.py): every event, sign and snapshot shows when it was published or
-// updated, and the map's attribution says "powered by 511NY" with a link.
+// The sources' terms (sizeup/roads.py): every event, sign and snapshot shows when it was published or
+// updated, and the map's attribution names each source that is on, with a link.
 "use strict";
 
 window.MapLayers = (() => {
@@ -32,7 +34,9 @@ window.MapLayers = (() => {
     { key: "mileposts", label: "Mileposts", feed: false, minzoom: 12, on: false },
     { key: "exits", label: "Exits", feed: false, minzoom: 12, on: false },
   ];
-  const ATTR = '<a href="https://511ny.org/" target="_blank" rel="noopener">511NY</a>';   // short: the map's corner is small
+  const SOURCE_NOTE = { "511NY": "powered by 511NY", Thruway: "Data: New York State Thruway Authority" };
+  const attributionFor = (d) => ((d && d.sources) || []).filter((s) => s.configured)      // the map's corner is small: names only
+    .map((s) => `<a href="${esc(s.link)}" target="_blank" rel="noopener">${esc(s.short === "Thruway" ? "NYS Thruway Authority" : s.label)}</a>`).join(" · ");
 
   function h(tag, cls, text) {
     const n = document.createElement(tag);
@@ -198,10 +202,13 @@ window.MapLayers = (() => {
       this.info.addEventListener("click", (e) => e.stopPropagation());
       host.append(this.panel, this.info);
       map.on("click", () => { this.close(); this.closeInfo(); });
-      const init = () => {
+      const init = () => {                 // once the map's style and the first data are both in (the attribution)
         if (this.ready) return;
+        this.mapReady = true;
+        if (!store.data) return;
         try { this.init(); } catch (e) { map.once("idle", init); }
       };
+      this._init = init;
       if (map.isStyleLoaded() || map.loaded()) init();
       else { map.once("load", init); map.once("idle", init); }
       maps.add(this);
@@ -216,7 +223,8 @@ window.MapLayers = (() => {
       for (const l of LAYERS) {
         const src = `ml-${l.key}`;
         if (map.getSource(src)) continue;
-        map.addSource(src, { type: "geojson", data: fc([]), ...(l.key === "cameras" ? { attribution: ATTR } : {}) });
+        const attr = l.key === "cameras" ? attributionFor(store.data) : "";
+        map.addSource(src, { type: "geojson", data: fc([]), ...(attr ? { attribution: attr } : {}) });
         const vis = prefs[l.key] ? "visible" : "none";
         if (l.key === "mileposts" || l.key === "exits") {
           if (l.key === "mileposts") {
@@ -256,6 +264,7 @@ window.MapLayers = (() => {
     }
 
     update(d) {
+      if (!this.ready && this.mapReady && this._init) this._init();
       if (this.ready) {
         for (const l of LAYERS) {
           const data = features(d, l.key), sig = JSON.stringify(data);
@@ -313,22 +322,27 @@ window.MapLayers = (() => {
         cb.addEventListener("change", () => setLayer(l.key, cb.checked));
         lab.append(cb, h("span", "", l.label));
         if (ok && l.minzoom > 0 && this.map && this.map.getZoom() < l.minzoom) lab.append(h("span", "dim small", "zoom in"));
-        if (ok && l.feed && d.status && d.status[l.key === "incidents" || l.key === "roadwork" ? "events" : l.key]
-            && d.status[l.key === "incidents" || l.key === "roadwork" ? "events" : l.key].error) {
+        const feed = l.key === "incidents" || l.key === "roadwork" ? "events" : l.key;
+        if (ok && l.feed && (d.sources || []).some((s) => s.status && s.status[feed] && s.status[feed].error)) {
           lab.append(h("span", "ml-err small", "feed error"));
         }
         list.append(lab);
       }
       this.panel.replaceChildren(head, list);
       if (!d) this.panel.append(h("div", "dim small", "Loading…"));
-      else if (!d.configured) this.panel.append(h("div", "dim small", d.note || "511NY not configured on the hub"));
+      else if (!d.configured) this.panel.append(h("div", "dim small", "No camera or incident source is on: " + (d.note || "not configured on the hub")));
       if (d && !d.highway_places) this.panel.append(h("div", "dim small", "Mileposts and exits: not in the places database yet"));
-      if (d && d.configured) {
-        const at = d.status && d.status.events && d.status.events.at;
-        const src = h("div", "dim small");
-        src.append("511NY" + (at ? `, updated ${hhmm(at)}` : ""));
-        this.panel.append(src);
+      for (const s of (d && d.sources) || []) {                   // each source that is on, and when it last read
+        if (!s.configured) continue;
+        const line = h("div", "dim small ml-source");
+        const a = h("a", "", SOURCE_NOTE[s.short] || s.label);
+        a.href = s.link;
+        a.target = "_blank";
+        a.rel = "noopener";
+        line.append(a, s.at ? `, updated ${hhmm(s.at)}` : ", waiting for the first read");
+        this.panel.append(line);
       }
+      if (d && d.configured && d.note) this.panel.append(h("div", "dim small", d.note));
     }
 
     clicked(key, id) {
@@ -337,20 +351,21 @@ window.MapLayers = (() => {
       const d = store.data || {};
       if (key === "signs") {
         const s = (d.signs || []).find((x) => String(x.id) === String(id));
-        if (s) this.showInfo(s.name, [s.road, s.dir].filter(Boolean).join(" "), (s.lines || []).length ? s.lines : ["(blank)"],
-                             s.updated ? `Sign updated ${when(s.updated)}` : "", "ml-sign-text");
+        if (s) this.showInfo(s.name, [s.road, s.dir, s.mile ? `MP ${s.mile}` : ""].filter(Boolean).join(" "),
+                             (s.lines || []).length ? s.lines : ["(blank)"],
+                             `${s.source || "511NY"}` + (s.updated ? `, sign updated ${when(s.updated)}` : ""), "ml-sign-text");
         return;
       }
       const e = (d.events || []).find((x) => String(x.id) === String(id));
       if (!e) return;
       const kind = e.layer === "roadwork" ? "Roadwork" : e.closed ? "Closure" : "Incident";
       const title = kind + (e.subtype && e.subtype.toLowerCase() !== kind.toLowerCase() ? `: ${e.subtype}` : "");
-      const sub = [e.road, e.dir].filter(Boolean).join(" ");
+      const sub = [e.road, e.dir, e.mile ? `MP ${e.mile}` : ""].filter(Boolean).join(" ");
       const lines = [e.description || "(no description)"];
       if (e.lanes) lines.push(`Lanes: ${e.lanes}`);
       if (e.end) lines.push(`Planned end ${when(e.end)}`);
       const t = e.updated || e.start;
-      this.showInfo(title, sub, lines, t ? `511NY updated ${when(t)}` : "", "");
+      this.showInfo(title, sub, lines, `${e.source || "511NY"}` + (t ? ` updated ${when(t)}` : ""), "");
     }
 
     showInfo(title, sub, lines, foot, cls) {
@@ -432,17 +447,12 @@ window.MapLayers = (() => {
     time.setAttribute("aria-live", "polite");
     meta.append(where, time);
     const foot = h("div", "dim small ml-cam-src");
-    foot.append("Snapshot through the hub, ", h("a", "", "powered by 511NY"), ". A new one every 10 s while this is open.");
-    const a = foot.querySelector("a");
-    a.href = "https://511ny.org/";
-    a.target = "_blank";
-    a.rel = "noopener";
     body.append(frame, meta, foot);
     panel.append(head, body);
     ov.append(panel);
     document.body.append(ov);
     viewer.ov = ov;
-    viewer.el = { title, img, msg, where, time };
+    viewer.el = { title, img, msg, where, time, foot };
     document.addEventListener("visibilitychange", () => {
       if (!viewer.id) return;
       if (document.visibilityState === "hidden") stopRefresh();
@@ -507,11 +517,17 @@ window.MapLayers = (() => {
     viewer.stale = false;
     const el = viewer.el;
     el.title.textContent = c ? c.name : `Camera ${id}`;
-    el.where.textContent = c ? [c.road, c.dir].filter(Boolean).join(" · ") || "" : "";
+    el.where.textContent = c ? [c.road, c.dir, c.mile ? `MP ${c.mile}` : ""].filter(Boolean).join(" · ") || "" : "";
+    const src = ((store.data && store.data.sources) || []).find((s) => c && s.short === c.source);
+    const a = h("a", "", SOURCE_NOTE[c && c.source] || (src ? src.label : "the source"));
+    a.href = src ? src.link : "#";
+    a.target = "_blank";
+    a.rel = "noopener";
+    el.foot.replaceChildren("Snapshot through the hub, ", a, ". A new one every 10 s while this is open.");
     el.img.hidden = true;
     el.img.alt = c ? `Traffic camera: ${c.name}` : "Traffic camera";
     el.msg.hidden = false;
-    el.msg.textContent = c && c.off ? "This camera is marked out of service by 511NY: trying anyway…" : "Loading…";
+    el.msg.textContent = c && c.off ? `This camera is marked out of service by ${c.source || "its source"}: trying anyway…` : "Loading…";
     el.time.textContent = "";
     if (viewer.url) { URL.revokeObjectURL(viewer.url); viewer.url = null; }
     if (window.UI && UI.dialog) UI.dialog.open(viewer.ov, { onClose: stopCamera, opener });
@@ -589,7 +605,7 @@ window.MapLayers = (() => {
     }
     const head = h("div", "ml-near-head");
     if (window.Icon) head.append(Icon("camera"));
-    head.append(h("b", "", "Cameras nearby"), h("span", "dim small", "511NY"));
+    head.append(h("b", "", "Cameras nearby"), h("span", "dim small", [...new Set(cams.map((c) => c.source || "511NY"))].join(" · ")));
     row.replaceChildren(head, list);
   }
 

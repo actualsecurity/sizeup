@@ -154,8 +154,9 @@ class Config:
     # [station] auto_update: a Linux station installed by deploy/station/install-linux.sh follows the
     # hub's build (sizeup/cloud/autoupdate.py); false keeps it where it is (also: sizeup-station autoupdate off)
     station_auto_update: bool = True
-    # [roads] (sizeup/roads.py, #73): the highway layers on the CAD maps from the 511NY data feeds.
-    # The key: env SIZEUP_511NY_KEY (the hub: SSM /sizeup-hub/511ny-key), else [roads] key. None: off.
+    # [roads] (sizeup/roads.py, #73, #86): the highway layers on the CAD maps: the Thruway's public feeds
+    # (on by default) and 511NY's (a key: env SIZEUP_511NY_KEY, the hub: SSM /sizeup-hub/511ny-key, else
+    # [roads] key, and the feed addresses below; none: 511NY off).
     roads_enabled: bool = True
     roads_key: str = ""
     roads_bbox: tuple[float, float, float, float] = (-73.80, 40.92, -73.56, 41.10)   # west, south, east, north
@@ -166,6 +167,7 @@ class Config:
     roads_events_url: str = ""
     roads_cameras_url: str = ""
     roads_signs_url: str = ""
+    roads_thruway: bool = True        # the NYS Thruway Authority's public feeds (no key): I-95, I-287 (#86)
 
 
 def _take(d: dict, path: str, allowed: set[str]) -> dict:
@@ -342,13 +344,14 @@ def _auto_assign(radio: dict, channels: list) -> dict:
 
 
 def _roads(data: dict) -> dict:
-    """[roads] -> Config fields. No section: off (no feed addresses), our area, the default schedule.
-    The key never needs to be in a file (the environment wins); the addresses hold "{key}" instead."""
+    """[roads] -> Config fields. No section: the Thruway's feeds on, 511NY off (no feed addresses), our
+    area, the default schedule. The key never needs to be in a file (the environment wins); the
+    addresses hold "{key}" instead."""
     rd = _take(data.get("roads", {}), "roads", {"enabled", "key", "bbox", "cameras_every_min", "events_every_s",
-                                                "signs_every_min", "events_url", "cameras_url", "signs_url"})
-    enabled = rd.get("enabled", True)
-    if not isinstance(enabled, bool):
-        raise ConfigError("roads.enabled: true or false")
+                                                "signs_every_min", "events_url", "cameras_url", "signs_url", "thruway"})
+    enabled, thruway = rd.get("enabled", True), rd.get("thruway", True)
+    if not isinstance(enabled, bool) or not isinstance(thruway, bool):
+        raise ConfigError("roads.enabled / roads.thruway: true or false")
     key = _env("SIZEUP_511NY_KEY", str(rd.get("key", ""))).strip()
     if key and not re.fullmatch(r"[!-~]{8,256}", key):
         raise ConfigError("roads.key / SIZEUP_511NY_KEY: the key from 511NY's access approval (8 or more characters, no spaces)")
@@ -379,7 +382,7 @@ def _roads(data: dict) -> dict:
             raise ConfigError(f"roads.{k}: put {{key}} where the key goes, never the key itself (SIZEUP_511NY_KEY)")
         urls[f"roads_{k}"] = u
     return dict(roads_enabled=enabled, roads_key=key, roads_bbox=(w, s, e, n), roads_cameras_s=cams,
-                roads_events_s=events, roads_signs_s=signs, **urls)
+                roads_events_s=events, roads_signs_s=signs, roads_thruway=thruway, **urls)
 
 
 def _stt_aws(stt: dict) -> dict:

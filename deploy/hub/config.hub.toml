@@ -92,10 +92,12 @@ expire_min = 5
 heartbeat_stale_min = 90
 
 [roads]
-# The maps' highway layers from 511NY (sizeup/roads.py, docs/cloud.md "Highway layers"): off until
-# 511NY approves access (https://511ny.org/help/24) and the key is in SSM /sizeup-hub/511ny-key
-# (SIZEUP_511NY_KEY in deploy/aws/taskdef.json). Then the feed addresses from the approval go here,
-# {key} where the key goes (never the key itself). Mileposts and exits work without it.
+# The maps' highway layers (sizeup/roads.py, docs/cloud.md "Highway layers"). thruway: the NYS Thruway
+# Authority's public feeds (cameras, incidents, signs on I-95 and I-287; no key). 511NY: off until it
+# approves access (https://511ny.org/help/24) and the key is in SSM /sizeup-hub/511ny-key
+# (SIZEUP_511NY_KEY in deploy/aws/taskdef.json); then the feed addresses from the approval go here,
+# {key} where the key goes (never the key itself). Mileposts and exits work without either.
+thruway = true
 # events_url = ""
 # cameras_url = ""
 # signs_url = ""
