@@ -2,7 +2,8 @@
 
     python -m sizeup --config config.toml        # open http://localhost:8090/
 
-    paging channel (South 2) --squelch--> transmission --tones?--> Page
+    paging channel (South 2) --squelch--> transmission --tones?--> Page (held a few seconds in case the
+        carrier comes back after a fade: radio/page.py PageHold, GitHub #61)
         page for one of our departments --STT--> dispatch parse --> incident (geocoded)
         voice-only transmission --STT--> dispatcher traffic (attached to the active incident),
             or the voice half of a tones-only page sent as a separate transmission
@@ -58,7 +59,7 @@ from sizeup.radio import claims
 from sizeup.radio.live import LiveTalk
 from sizeup.radio import sdr as sdr_lookup
 from sizeup.radio.recorder import TrunkRecorder
-from sizeup.radio.page import Page, assemble, page_from_dict
+from sizeup.radio.page import Page, PageHold, assemble, page_from_dict, recording_note
 from sizeup.radio.tones import TonePlan
 from sizeup.talkers import talker_prompt
 from sizeup import channels
@@ -246,8 +247,10 @@ class App:
             if t.talkgroup is not None:
                 self.tg.seed(t.talkgroup, t.end)
         self._last_tones_only: Page | None = None
+        self.pagehold = PageHold(self.plan)   # paging: a page waits out its continuation window
         self.receivers = [NfmReceiver(cfg.rtl_fm, c.device, c.gain_db, Channel(c.mhz, c.label),
-                                      self._segment, log, open_db=c.squelch_db, drop_db=c.drop_db)
+                                      self._segment, log, open_db=c.squelch_db, drop_db=c.drop_db,
+                                      hang_s=c.hang_s, continue_s=c.continue_s)
                           for c in cfg.channels]
         self.recorder = (TrunkRecorder(cfg.p25_recorder, cfg.p25_recorder_dir or ".", log)
                          if cfg.p25_recorder else None)
@@ -542,56 +545,90 @@ class App:
             pass
 
     def _segment(self, ch: Channel, seg: Segment) -> None:
-        paging = self._kind.get(ch.label) == "paging"
-        page = assemble(ch.label, ch.mhz, seg, self.plan) if paging else None
+        if self._kind.get(ch.label) == "paging":
+            return self._page_segment(ch, seg)
         found = self._mdc(*seg.bursts, seg.audio)
         units = self._units(seg, found)
         record = self.channel_pref(ch.label)["record"]
-        id_note = "" if paging or not record else self._id_note(ch.label, seg, units)
+        id_note = "" if not record else self._id_note(ch.label, seg, units)
         # Weak signals: speech can sit only 2-6 dB over the dead air (FG1 bench, indoor antenna),
         # so nothing is skipped on energy. Everything is transcribed; a result that is one of
         # whisper's dead-air phrases ("Thank you.", "Yes.") on audio with no voice energy is a
         # mic click (stt.Transcriber), dropped in _transcribed.
         low_energy = speech_seconds(seg.audio) < MIN_SPEECH_S
-        if paging:
-            if not record:              # Settings > Radios: not recorded (the receiver keeps running)
-                log(f"{ch.label}: {page.kind} not recorded (Record is off in Settings > Radios)")
-                return
-            self._keep_clip(page.id, seg.audio)
+        ids = list(dict.fromkeys(h for h, _e in found))
+        for h in ids:
+            self._heard("mdc", h, at=seg.end)
+        self.live.fm_segment(ch.label, ids, seg.start, seg.end)
+        if not record:              # squelch, MDC IDs and "talking now" stay live; nothing is kept
+            return
+        t = Traffic(f"{ch.label.replace(' ', '')}-{int(seg.start * 1000)}", ch.label, seg.start, seg.end,
+                    "", status="pending", unit=", ".join(units), rig=self.radios.rig_mdc(ids), radio_id=", ".join(ids))
+        t.low_energy = low_energy  # type: ignore[attr-defined]
+        if id_note:
+            t.id_note = id_note    # type: ignore[attr-defined]
+        self._keep_bursts(t.id, seg)
+        t.raw_audio = seg.audio    # type: ignore[attr-defined]  (saved if it turns out to be a click)
+        self._keep_clip(t.id, seg.audio)
+        self._keep_source(t.id, seg.audio)
+        self._stt(t, seg.audio, self.stt_engine(ch.label), ch.label)
+
+    def _page_segment(self, ch: Channel, seg: Segment) -> None:
+        """A transmission on a paging channel: a new page, or (after a fade) more of the one before.
+        A page shows as pending at once; it is finalised (_page_done) when the squelch's continuation
+        window has passed (PageHold, GitHub #61), or at once when there is none."""
+        if not self.channel_pref(ch.label)["record"]:   # Settings > Radios: not recorded (receiver keeps running)
+            log(f"{ch.label}: {assemble(ch.label, ch.mhz, seg, self.plan).kind} not recorded "
+                "(Record is off in Settings > Radios)")
+            return
+        done, touched = self.pagehold.add(ch.label, ch.mhz, seg)
+        finished = {id(p) for p in done}
+        for page, joined in touched:
+            self._keep_clip(page.id, page.audio)        # joined: the clip grows with the page
+            if joined:
+                continue
             log(f"{ch.label}: {page.kind} " + (", ".join(t.describe() for t in page.tones) or "voice"))
-            heard = self._page_heard(page)
-            eng = self.stt_engine(ch.label) if heard else ""
-            page.stt = eng if eng in ("aws", "both") else ""  # type: ignore[attr-defined]
-            if eng == "aws" and self.forwarding():
-                page.status = "remote"          # the hub transcribes it (Amazon Transcribe)
-            self._emit("page", self._page_doc(page), page.id)
-            if not heard:
-                return
-            self._keep_source(page.id, page.voice)
-            self._stt(page, page.voice, eng, ch.label)
-        else:
-            ids = list(dict.fromkeys(h for h, _e in found))
-            for h in ids:
-                self._heard("mdc", h, at=seg.end)
-            self.live.fm_segment(ch.label, ids, seg.start, seg.end)
-            if not record:              # squelch, MDC IDs and "talking now" stay live; nothing is kept
-                return
-            t = Traffic(f"{ch.label.replace(' ', '')}-{int(seg.start * 1000)}", ch.label, seg.start, seg.end,
-                        "", status="pending", unit=", ".join(units), rig=self.radios.rig_mdc(ids), radio_id=", ".join(ids))
-            t.low_energy = low_energy  # type: ignore[attr-defined]
-            if id_note:
-                t.id_note = id_note    # type: ignore[attr-defined]
-            self._keep_bursts(t.id, seg)
-            t.raw_audio = seg.audio    # type: ignore[attr-defined]  (saved if it turns out to be a click)
-            self._keep_clip(t.id, seg.audio)
-            self._keep_source(t.id, seg.audio)
-            self._stt(t, seg.audio, self.stt_engine(ch.label), ch.label)
+            if id(page) not in finished:
+                self._show_page(page)                   # pending until its window passes
+        for page in done:
+            self._page_done(page)
+
+    def _show_page(self, page: Page) -> None:
+        with self._lock:
+            if not getattr(page, "shown", False):
+                page.shown = True  # type: ignore[attr-defined]
+                self.pages.appendleft(page)
+
+    def _page_done(self, page: Page) -> None:
+        """A paging recording is complete: save it, send it to the hub, transcribe it."""
+        log(recording_note(page))
+        heard = self._page_heard(page)
+        eng = self.stt_engine(page.label) if heard else ""
+        page.stt = eng if eng in ("aws", "both") else ""  # type: ignore[attr-defined]
+        if eng == "aws" and self.forwarding():
+            page.status = "remote"          # the hub transcribes it (Amazon Transcribe)
+        self._emit("page", self._page_doc(page), page.id)
+        if not heard:
+            return
+        self._keep_source(page.id, page.voice)
+        self._stt(page, page.voice, eng, page.label)
+
+    def _release_pages(self, now: float | None = None) -> None:
+        """Pages whose continuation window has passed (or is still being added to, while the squelch
+        is open on the continuation): finalise them."""
+        if not self.pagehold.held:
+            return
+
+        def busy(label: str) -> bool:
+            r = self._receiver(label)
+            return r is not None and r.squelch.open and r.squelch.continuing
+        for page in self.pagehold.due(time.time() if now is None else now, busy):
+            self._page_done(page)
 
     def _page_heard(self, page: Page) -> bool:
         """A page just off the air (here, or on the hub from the station). False = tones only:
         nothing to transcribe (kept as the tones half of a page whose voice comes separately)."""
-        with self._lock:
-            self.pages.appendleft(page)
+        self._show_page(page)
         if page.status != "no_voice":
             return True
         names = page.departments
@@ -741,6 +778,10 @@ class App:
                 self._watch_fm_once()
             except Exception as e:  # never let the indicator take anything down
                 log(f"talking watcher error: {type(e).__name__}: {e}")
+            try:
+                self._release_pages()
+            except Exception as e:
+                log(f"page hold error: {type(e).__name__}: {e}")
 
     def _watch_fm_once(self, now: float | None = None) -> None:
         now = time.time() if now is None else now
@@ -1285,7 +1326,8 @@ class App:
     def _fresh_receiver(self, old: NfmReceiver, serial: str) -> NfmReceiver:
         c = next(c for c in self.cfg.channels if c.label == old.channel.label)
         r = NfmReceiver(self.cfg.rtl_fm, self._dongle(serial), c.gain_db, Channel(c.mhz, c.label),
-                        self._segment, log, open_db=c.squelch_db, drop_db=c.drop_db)
+                        self._segment, log, open_db=c.squelch_db, drop_db=c.drop_db,
+                        hang_s=c.hang_s, continue_s=c.continue_s)
         self.receivers[self.receivers.index(old)] = r
         return r
 
@@ -1519,6 +1561,11 @@ class App:
         self._stopping.set()
         for r in self.receivers:
             r.stop()
+        for page in self.pagehold.flush():   # pages still in their continuation window: as they are
+            try:
+                self._page_done(page)
+            except Exception as e:
+                log(f"page hold: {page.label} page not finalised: {type(e).__name__}: {e}")
         if self.recorder:
             self.recorder.stop()
         if self.p25:

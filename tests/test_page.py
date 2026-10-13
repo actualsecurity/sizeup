@@ -295,3 +295,199 @@ def test_receiver_squelch_keeps_drop_db_across_restarts():
     from sizeup.radio.fm import Channel, NfmReceiver
     r = NfmReceiver("rtl_fm", "", None, Channel(154.0, "FG1"), lambda c, s: None, drop_db=10.0)
     assert r.squelch.drop_db == 10.0 and r.new_squelch().drop_db == 10.0
+
+
+# -- GitHub #61: South 2 pages cut off by a fade (2026-10-13 13:04, the "time out" never recorded) ------
+
+PAGING = dict(hang_s=1.5, continue_s=3.0)       # config defaults for kind = "paging"
+
+
+def south2_page(voice_s=6.0):
+    """Tones for Port Chester, then the dispatcher: one keyed transmission at ~26 dB quieting."""
+    return keyed(np.concatenate([tone(349.1, 1.0), tone(311.1, 3.0), np.zeros(int(0.2 * RATE)), voice_like(voice_s)]))
+
+
+def held_pages(segs, label="South 2"):
+    """Segments through the page assembler, then its window let run out: the pages, in order."""
+    from sizeup.radio.page import PageHold
+    hold, out = PageHold(PLAN), []
+    for s in segs:
+        done, _touched = hold.add(label, 470.2, s)
+        out += done
+    return out + hold.due(float("inf"))
+
+
+def test_a_short_fade_mid_page_stays_one_page():
+    # 0.6 s of no carrier in the middle of the voice: over the old 0.4 s hang, inside the paging one.
+    audio = np.concatenate([hiss(4.0), south2_page(), hiss(0.6), keyed(voice_like(6.0)), hiss(6.0)])
+    segs = run_squelch(audio, **PAGING)
+    assert len(segs) == 1 and segs[0].end - segs[0].start == pytest.approx(16.8, abs=0.3)
+    (page,) = held_pages(segs)
+    assert page.kind == "page" and page.departments == ["Port Chester FD"] and page.status == "pending"
+    assert len(page.voice) / RATE == pytest.approx(12.8, abs=0.5)        # both halves of the voice
+    g0, g1 = segs[0].breaks[0]
+    assert g1 - g0 == pytest.approx(0.6, abs=0.1)
+    gap = segs[0].audio[int((g0 + 0.05) * RATE):int((g1 - 0.05) * RATE)]
+    assert np.abs(gap).max() == 0                                       # the hiss is muted, not kept
+    # The old hang (traffic channels, and paging before #61) ends the page at the fade.
+    assert len(run_squelch(audio)) == 2
+
+
+def test_a_fade_that_comes_back_under_the_open_threshold_is_joined():
+    # Under close_db for 2.5 s (past the 1.5 s hang: the squelch closes), then the page comes back at
+    # ~8 dB of quieting: between close (6) and open (10). Before #61 it never reopened: the tail was lost.
+    tail = voice_like(5.0) + carrier(RATE * 5, 8.0)
+    audio = np.concatenate([hiss(4.0), south2_page(), hiss(2.5), tail, hiss(6.0)])
+    assert len(run_squelch(audio)) == 1                                  # the cut-off page (old behaviour)
+    segs = run_squelch(audio, **PAGING)
+    assert len(segs) == 2
+    first, cont = segs
+    assert first.reason == "quiet" and not first.cont and first.hold_until > first.end
+    assert cont.cont and cont.start < first.hold_until and 7 < cont.q_open < 10
+    (page,) = held_pages(segs)
+    alone = assemble("South 2", 470.2, first, PLAN)
+    # One page, one recording: the tones and where the voice starts are those of the first part ...
+    assert page.kind == "page" and page.departments == ["Port Chester FD"]
+    assert [(t.a_hz, t.b_hz, t.start, t.end) for t in page.tones] == [(t.a_hz, t.b_hz, t.start, t.end) for t in alone.tones]
+    assert page.voice_offset_s == alone.voice_offset_s
+    # ... and the audio runs on to the end of the tail, with the time between kept as silence.
+    assert page.start == first.start and page.end == pytest.approx(cont.end, abs=0.01)
+    assert len(page.audio) / RATE == pytest.approx(cont.end - first.start, abs=0.01)
+    n0, n1 = len(first.audio), int(round((cont.start - first.end) * RATE))
+    assert n1 / RATE == pytest.approx(2.5, abs=0.2)
+    assert np.array_equal(page.audio[:n0], first.audio) and not page.audio[n0:n0 + n1].any()
+    assert np.array_equal(page.audio[n0 + n1:], cont.audio)
+    assert len(page.parts) == 2 and page.parts[1]["gap"] == pytest.approx(2.5, abs=0.2)
+
+
+def test_a_separate_time_out_after_the_window_stays_separate():
+    # A genuine end: 5 s of nothing, then 60 Control's "time out" as its own (full strength) key-up.
+    audio = np.concatenate([hiss(4.0), south2_page(), hiss(5.0), keyed(voice_like(3.0)), hiss(6.0)])
+    segs = run_squelch(audio, **PAGING)
+    assert len(segs) == 2 and not segs[1].cont
+    page, timeout = held_pages(segs)
+    assert page.kind == "page" and len(page.parts) == 1
+    assert timeout.kind == "voice" and timeout.start == segs[1].start
+
+
+def test_a_no_tone_transmission_in_the_window_joins_the_page():
+    # The voice of a tones-only page, keyed again 1 s after the tones (full strength): one page.
+    audio = np.concatenate([hiss(4.0), keyed(np.concatenate([tone(349.1, 1.0), tone(311.1, 3.0)])), hiss(2.5),
+                            keyed(voice_like(5.0)), hiss(6.0)])
+    segs = run_squelch(audio, **PAGING)
+    assert len(segs) == 2 and segs[1].cont
+    (page,) = held_pages(segs)
+    assert page.kind == "page" and page.status == "pending" and len(page.voice) / RATE > 5.0
+    # New tones in the window are a new page, not more of this one.
+    audio = np.concatenate([hiss(4.0), south2_page(), hiss(2.5), south2_page(), hiss(6.0)])
+    pages = held_pages(run_squelch(audio, **PAGING))
+    assert [p.kind for p in pages] == ["page", "page"] and all(len(p.parts) == 1 for p in pages)
+
+
+def test_the_next_page_inside_the_hang_is_cut_off_as_its_own():
+    # Re-keyed with new tones 1 s after the voice: the long hang holds the squelch open across it (one
+    # segment), but the page is cut where the carrier came back, so neither loses its voice.
+    audio = np.concatenate([hiss(4.0), south2_page(), hiss(1.0), south2_page(), hiss(6.0)])
+    segs = run_squelch(audio, **PAGING)
+    assert len(segs) == 1 and len(segs[0].breaks) == 1
+    first, second = held_pages(segs)
+    for p in (first, second):
+        assert p.kind == "page" and p.departments == ["Port Chester FD"] and p.status == "pending"
+        assert len(p.voice) / RATE == pytest.approx(6.0, abs=0.5)
+    assert second.start - first.end == pytest.approx(1.0, abs=0.1)
+
+
+def test_max_length_still_splits_a_joined_page():
+    from sizeup.radio.page import MAX_PAGE_S
+    # One carrier for 150 s: the squelch splits it at 2 minutes and nothing waits on the first part.
+    long_tx = keyed(np.concatenate([tone(349.1, 1.0), tone(311.1, 3.0), voice_like(146.0)]))
+    segs = run_squelch(np.concatenate([hiss(4.0), long_tx, hiss(4.0)]), **PAGING)
+    assert len(segs) == 2 and segs[0].reason == "max length" and segs[0].hold_until == 0
+    pages = held_pages(segs)
+    assert len(pages) == 2 and pages[0].end - pages[0].start == pytest.approx(MAX_PAGE_S, abs=0.1)
+    # A continuation that would take a page past 2 minutes is a page of its own.
+    audio = np.concatenate([hiss(4.0), south2_page(100.0), hiss(2.5), voice_like(30.0) + carrier(RATE * 30, 8.0),
+                            hiss(6.0)])
+    segs = run_squelch(audio, **PAGING)
+    assert len(segs) == 2 and segs[1].cont
+    pages = held_pages(segs)
+    assert len(pages) == 2 and all(p.end - p.start <= MAX_PAGE_S for p in pages)
+
+
+def test_page_hold_waits_out_the_window_and_a_continuation_in_progress():
+    from sizeup.radio.page import HOLD_SLACK_S, PageHold
+    tail = voice_like(5.0) + carrier(RATE * 5, 8.0)
+    first, cont = run_squelch(np.concatenate([hiss(4.0), south2_page(), hiss(2.5), tail, hiss(6.0)]), **PAGING)
+    hold = PageHold(PLAN)
+    done, touched = hold.add("South 2", 470.2, first)
+    assert done == [] and touched[0][1] is False                     # shown as pending, not finalised
+    page = touched[0][0]
+    assert hold.due(first.hold_until) == []                          # not before the window (+ slack) ends
+    assert hold.due(first.hold_until + HOLD_SLACK_S + 1, busy=lambda label: True) == []   # carrier back: waits
+    done, touched = hold.add("South 2", 470.2, cont)
+    assert done == [] and touched == [(page, True)]
+    assert hold.due(cont.hold_until + HOLD_SLACK_S) == [page] and hold.held == {}
+
+
+def test_traffic_channels_keep_the_short_hang_and_no_continuation():
+    # FG1 and the other traffic channels: 0.4 s hang, no continuation, as before #61.
+    from sizeup.config import ChannelCfg
+    from sizeup.radio.fm import HANG_FRAMES, Channel, NfmReceiver
+    fg1, s2 = ChannelCfg("FG1", 453.0375, "traffic"), ChannelCfg("South 2", 470.2, "paging")
+    assert (fg1.hang_s, fg1.continue_s) == (None, 0.0) and (s2.hang_s, s2.continue_s) == (1.5, 3.0)
+    r = NfmReceiver("rtl_fm", "", None, Channel(fg1.mhz, fg1.label), lambda c, s: None, drop_db=10.0,
+                    hang_s=fg1.hang_s, continue_s=fg1.continue_s)
+    sq = r.new_squelch()
+    assert sq._hang_live == HANG_FRAMES and sq._cont_frames == 0 and sq.drop_db == 10.0
+    talk = np.concatenate([hiss(3.0), strong(voice_like(3.0)), hiss(0.6), strong(voice_like(3.0)), hiss(3.0)])
+    segs = run_squelch(talk, drop_db=10)
+    assert len(segs) == 2 and all(not s.cont and s.hold_until == 0 for s in segs)
+    # Weaker carriers coming back under open_db stay closed on traffic channels.
+    segs = run_squelch(np.concatenate([hiss(3.0), strong(voice_like(3.0)), hiss(2.0),
+                                       voice_like(3.0) + carrier(RATE * 3, 8.0), hiss(3.0)]), drop_db=10)
+    assert len(segs) == 1
+
+
+def test_a_page_in_progress_is_kept_when_the_audio_stops():
+    # rtl_fm stalls mid-page (or the receiver is stopped): what was heard is a page, with the reason.
+    clock = {"t": 0.0}
+    sq = NoiseSquelch(clock=lambda: clock["t"], **PAGING)
+    audio = np.concatenate([hiss(4.0), south2_page()])
+    for i in range(0, len(audio) - FRAME + 1, FRAME):
+        clock["t"] += FRAME / RATE
+        assert sq.feed(audio[i:i + FRAME]) is None
+    seg = sq.flush("stall")
+    assert seg is not None and seg.reason == "stall" and seg.hold_until == 0 and not sq.open
+    assert sq.flush("stall") is None
+
+
+def test_recording_end_is_logged_with_why_it_ended():
+    from sizeup.radio.page import recording_note
+    tail = voice_like(5.0) + carrier(RATE * 5, 8.0)
+    (page,) = held_pages(run_squelch(np.concatenate([hiss(4.0), south2_page(), hiss(2.5), tail, hiss(6.0)]), **PAGING))
+    note = recording_note(page)
+    assert note.startswith("South 2 recording end: page 17.") and "quiet after hang" in note
+    assert "quieting 26." in note and "at open, 8." in note and "idle hiss" in note
+    assert "1 continuation(s) joined (gap 2.5 s)" in note
+    (page,) = held_pages(run_squelch(np.concatenate([hiss(4.0), south2_page(), hiss(6.0)]), **PAGING))
+    assert recording_note(page).endswith("no continuation")
+
+
+def test_rx_shows_hold_between_a_page_and_its_continuation_not_a_flicker():
+    from sizeup.radio.fm import Channel, NfmReceiver
+    r = NfmReceiver("rtl_fm", "", None, Channel(470.2, "South 2"), lambda c, s: None, **PAGING)
+    r.state = "ok"
+    clock = {"t": 0.0}
+    r.squelch = NoiseSquelch(clock=lambda: clock["t"], **PAGING)
+    tail = voice_like(5.0) + carrier(RATE * 5, 8.0)
+    audio = np.concatenate([hiss(4.0), south2_page(), hiss(2.5), tail, hiss(6.0)])
+    words = []
+    for i in range(0, len(audio) - FRAME + 1, FRAME):
+        clock["t"] += FRAME / RATE
+        r.squelch.feed(audio[i:i + FRAME])
+        st = r.status()
+        w = "RX" if st["open"] else st.get("word", "")
+        if not words or words[-1] != w:
+            words.append(w)
+    # Open through the page and its 1.5 s hang, "RX hold" while the carrier is gone, RX again when it's back.
+    assert words == ["", "RX", "RX hold", "RX", "RX hold", ""]

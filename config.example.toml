@@ -28,6 +28,10 @@ kind = "paging"                    # tones -> pages -> incidents
 device = "fire-page"
 gain_db = 40
 squelch_db = 10                    # FM quieting (dB below the idle hiss) needed to open
+# hang_s = 1.5                     # paging: once a page has had tones or speech, it stays open this long
+#                                  # through a fade (traffic: 0.4 s, unchanged)
+# continue_s = 3                   # paging: the carrier back within this long after a page closed (even
+#                                  # under squelch_db) is more of the same page; it's sent on after this
 
 [[radio.channels]]
 label = "FG1"                      # PCFD / Rye Brook primary fireground (county list 2024-11-06)
