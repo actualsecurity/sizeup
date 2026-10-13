@@ -58,7 +58,7 @@ HTTP (sizeup/web/server.py, any signed-in person: viewers too, all GET):
                                            nearest to a point
     GET /api/cad/cameras?for=lat,lon&label=&address=   the incident viewer's cameras (#95, cameras_for):
                                            {highway: {road, dir, mile} | null, cameras: [{..., rel: before | after |
-                                           at | side | nearby, miles, side, facing}]}
+                                           at | side | nearby, miles, side, facing}], down: [...]} (down cameras, #99)
     GET /api/cad/cameras/<id>/image       the snapshot (image/jpeg ...), X-Image-Time: when it was taken
                                            (the camera's Last-Modified, else when the hub fetched it)
 
@@ -98,6 +98,21 @@ THRUWAY_API = "https://webdataapi.thruway.ny.gov/api/data"
 THRUWAY_URLS = {"cameras": f"{THRUWAY_API}/trafficcameras/xml", "events": f"{THRUWAY_API}/events/xml",
                 "signs": f"{THRUWAY_API}/dmsstatus/xml"}
 THRUWAY_EVERY_S = {"cameras": 3600.0, "events": 120.0, "signs": 300.0}
+COUNTY = "County"                                     # Westchester County DPW's traffic cameras (#99)
+COUNTY_LABEL = "Westchester County DPW"
+COUNTY_LINK = "https://www.westchestergov.com/trafficcamera"
+COUNTY_URLS = {"cameras": "https://giswww.westchestergov.com/arcgis/rest/services/MappingWestchesterCounty/MapServer/124/query"
+                          "?where=1%3D1&outFields=*&outSR=4326&f=json"}            # a public ArcGIS layer, no token
+COUNTY_EVERY_S = {"cameras": 86400.0, "events": 86400.0, "signs": 86400.0}          # the list daily (no events or signs)
+COUNTY_IMAGE = "https://www.westchestergov.com/cctv/camera{id}.jpg"
+CADENCE_S = {SOURCE: 60, THRUWAY: 60, COUNTY: 8}      # how often each source's snapshots change (the viewer says so)
+# A camera is "down" (dim with a badge on the map, demoted and folded away in the panels, "Down since" in
+# the viewer) when its latest image is older than STALE_IMAGE_S (the county's 2021 placeholders) or its
+# snapshot fails DOWN_FAILS times running; a fresh image brings it back. The hub looks at every camera
+# every HEALTH_SWEEP_S so the map knows before anyone opens one.
+STALE_IMAGE_S = 300.0
+DOWN_FAILS = 3
+HEALTH_SWEEP_S = 900.0
 # A plain client that says who it is (no browser impersonation, ever: a host that refuses this is left alone)
 from sizeup import USER_AGENT as UA
 FEEDS = ("cameras", "events", "signs")
@@ -106,6 +121,7 @@ FEEDS = ("cameras", "events", "signs")
 DEFAULT_BBOX = (-73.80, 40.92, -73.56, 41.10)
 EVERY_S = {"cameras": 3600.0, "events": 90.0, "signs": 300.0}
 MIN_EVERY_S = {"cameras": 600.0, "events": 60.0, "signs": 60.0}   # 3 feeds at these: 5 calls a minute, under 10
+COUNTY_MIN_S = {"cameras": 3600.0, "events": 3600.0, "signs": 3600.0}
 DEDUPE_M = 50.0                  # a Thruway item this close to a 511NY one is the same thing
 BACKOFF_S = (60.0, 900.0)        # a failed fetch: 1 min doubling to 15 (never sooner than the feed's floor)
 REFUSED_S = 1800.0               # 401 / 403: the key is wrong or not yet active; try again in 30 min
@@ -355,7 +371,7 @@ def parse_cameras(doc, bbox=DEFAULT_BBOX) -> list[dict]:
         seen.add(cid)
         out.append({"id": cid, "name": _s(_pick(r, "name", cid), 120), "road": _s(_pick(r, "road", ""), 80),
                     "dir": _direction(_pick(r, "dir", "")), "lat": round(pt[0], 6), "lon": round(pt[1], 6),
-                    "url": url, "has_video": bool(video), "off": off or not url})
+                    "url": url, "video": video, "has_video": bool(video), "off": off or not url, "cadence": CADENCE_S[SOURCE]})
     out.sort(key=lambda c: (c["road"], c["name"]))
     return out
 
@@ -480,8 +496,8 @@ def parse_thruway_cameras(doc, bbox=DEFAULT_BBOX) -> list[dict]:
         off = r.get("active", "1") != "1" or r.get("cutoff", "0") == "1" or r.get("problemstream", "0") == "1"
         out.append({"id": cid, "name": _s(r.get("cameradesc") or cid, 120), "road": _thruway_road(r.get("route", "")),
                     "dir": _thruway_dir(r.get("directiondesc", "")), "mile": _s(r.get("milepost"), 10),
-                    "lat": round(pt[0], 6), "lon": round(pt[1], 6), "url": url, "has_video": bool(video),
-                    "off": off or not url})
+                    "lat": round(pt[0], 6), "lon": round(pt[1], 6), "url": url, "video": video, "has_video": bool(video),
+                    "off": off or not url, "cadence": CADENCE_S[THRUWAY]})
     out.sort(key=lambda c: (c["road"], _f(c["mile"]) or 0, c["name"]))
     return out
 
@@ -523,6 +539,48 @@ def parse_thruway_signs(doc, bbox=DEFAULT_BBOX) -> list[dict]:
 
 
 THRUWAY_PARSE = {"cameras": parse_thruway_cameras, "events": parse_thruway_events, "signs": parse_thruway_signs}
+
+
+# ---- Westchester County DPW's cameras (#99): an ArcGIS feature layer --------------------------------------------
+#   {"features": [{"attributes": {NATIVE_CCTV_ID: 23.0, CCTV_NAME: "SB King Approach - King St/Willett Ave/North Pearl St",
+#                  DESCRIPTION: "Traffic Approaching the Camera is going South on King St.", URL:
+#                  "http://www.westchestergov.com/cctv/camera23.jpg", REFRESH_RATE: "8 seconds", MILE_POINT: 15.5 | null,
+#                  OWNER_NAME, LOCATION, NY511_REGION, ...}, "geometry": {"x": -73.66358, "y": 41.00349}}, ...]}
+# The images: https://www.westchestergov.com/cctv/camera<id>.jpg, 1280x960, a new one every 8 s with its
+# Last-Modified; a dead camera serves a placeholder from 2021 (so: STALE_IMAGE_S) or a 404.
+
+COUNTY_GOING = re.compile(r"going\s+(north|south|east|west)(?:\s+on\s+(?:the\s+)?([^.]+?))?\s*\.?\s*$", re.I)
+
+
+def parse_county_cameras(doc, bbox=DEFAULT_BBOX) -> list[dict]:
+    out, seen = [], set()
+    feats = doc.get("features") if isinstance(doc, dict) else None
+    for f in feats or []:
+        a, g = (f.get("attributes") or {}), (f.get("geometry") or {})
+        n = _f(a.get("NATIVE_CCTV_ID"))
+        lat, lon = _f(g.get("y")), _f(g.get("x"))
+        if n is None or not in_bbox(lat, lon, bbox):
+            continue
+        cid = f"wc{int(n)}"
+        if cid in seen:
+            continue
+        seen.add(cid)
+        url = _url(re.sub(r"^http://(www\.)?westchestergov\.com/", "https://www.westchestergov.com/", str(a.get("URL") or ""))) \
+            or COUNTY_IMAGE.format(id=int(n))
+        desc = _s(a.get("DESCRIPTION"), 200)
+        m = COUNTY_GOING.search(desc)
+        road = _s(m.group(2), 80) if m and m.group(2) else ""
+        rate = _f(re.sub(r"[^\d.]", "", str(a.get("REFRESH_RATE") or ""))) or CADENCE_S[COUNTY]
+        mp = _f(a.get("MILE_POINT"))
+        out.append({"id": cid, "name": _s(a.get("CCTV_NAME") or a.get("LOCATION") or cid, 120), "road": road,
+                    "dir": f"{m.group(1).capitalize()}bound" if m else "", "mile": f"{mp:g}" if mp is not None else "",
+                    "lat": round(lat, 6), "lon": round(lon, 6), "url": url, "video": "", "has_video": False,
+                    "off": str(a.get("STATUS") or "").lower() in ("inactive", "disabled", "off"), "cadence": int(rate)})
+    out.sort(key=lambda c: int(c["id"][2:]))
+    return out
+
+
+COUNTY_PARSE = {"cameras": parse_county_cameras, "events": lambda doc, bbox=DEFAULT_BBOX: [], "signs": lambda doc, bbox=DEFAULT_BBOX: []}
 
 
 # The highways the gazetteer has mile markers for (#67, #83), as named in a location label ("I-95 SB
@@ -629,7 +687,7 @@ class Provider:
                 return ("511NY not configured: no feed addresses ([roads] events_url, cameras_url, signs_url, "
                         "from 511NY's access approval)")
             return "511NY not configured: no key (SIZEUP_511NY_KEY)"
-        return f"{self.short} feeds off"
+        return f"{self.short} cameras off"
 
     def url(self, feed: str) -> str:
         return self.urls[feed].replace("{key}", quote(self.key, safe=""))
@@ -693,7 +751,7 @@ class Roads:
                  every: dict | None = None, gazetteer: str | Path | None = None,
                  fetch: Callable[[str, float, int], tuple[int, dict, bytes]] = http_get,
                  log: Callable[[str], None] = print, clock: Callable[[], float] = time.time,
-                 thruway: bool = True, thruway_urls: dict | None = None):
+                 thruway: bool = True, thruway_urls: dict | None = None, county: bool = True, county_urls: dict | None = None):
         self.bbox = tuple(float(x) for x in bbox)
         self.cache = Path(cache) if cache else None
         self.fetch, self.log, self.clock = fetch, log, clock
@@ -708,7 +766,12 @@ class Roads:
                                  THRUWAY_URLS if thruway_urls is None else thruway_urls, THRUWAY_PARSE, None,
                                  THRUWAY_EVERY_S, MIN_EVERY_S, "", self.bbox, fetch, log, clock, self._changed)
                         if thruway else None)
-        self.providers = [p for p in (self.ny, self.thruway) if p is not None]
+        self.county = (Provider("county", COUNTY, COUNTY_LABEL, COUNTY_LINK, COUNTY_URLS if county_urls is None else county_urls,
+                                COUNTY_PARSE, None, COUNTY_EVERY_S, COUNTY_MIN_S, "", self.bbox, fetch, log, clock, self._changed)
+                       if county else None)
+        self.providers = [p for p in (self.ny, self.thruway, self.county) if p is not None]
+        self._health: dict[str, dict] = {}            # camera id -> {fails, down_since, last_image, checked}
+        self._swept = 0.0
         self._images: OrderedDict[str, dict] = OrderedDict()
         self._image_locks: dict[str, threading.Lock] = {}
         self._parallel = threading.BoundedSemaphore(IMAGE_PARALLEL)
@@ -725,7 +788,7 @@ class Roads:
                    {"cameras": cfg.roads_cameras_url, "events": cfg.roads_events_url, "signs": cfg.roads_signs_url} if on else {},
                    cfg.roads_bbox, (state / "roads511.json") if state else None,
                    {"cameras": cfg.roads_cameras_s, "events": cfg.roads_events_s, "signs": cfg.roads_signs_s}, log=log,
-                   thruway=on and cfg.roads_thruway)
+                   thruway=on and cfg.roads_thruway, county=on and cfg.roads_county)
 
     @property
     def configured(self) -> bool:
@@ -770,8 +833,27 @@ class Roads:
                     if self._stop.is_set():
                         break
                     if p.feed_on(feed) and self.clock() >= p.status[feed]["next"]:
-                        self.refresh(feed, p)
+                        if self.refresh(feed, p) and feed == "cameras":
+                            self._swept = 0.0                   # a new camera list: look at them now
+            if self.clock() >= self._swept + HEALTH_SWEEP_S:
+                self.sweep()
             self._stop.wait(5.0)
+
+    def sweep(self) -> int:
+        """Look at every camera's snapshot not looked at within HEALTH_SWEEP_S, so the map knows which are
+        down before anyone opens one. The number fetched."""
+        now = self.clock()
+        self._swept = now
+        n = 0
+        for c in list(self.merged("cameras")):
+            if self._stop.is_set():
+                break
+            h = self._health.get(c["id"])
+            if c["off"] or (h and now - h["checked"] < HEALTH_SWEEP_S):
+                continue
+            self.image(c["id"])
+            n += 1
+        return n
 
     def due(self) -> list[tuple[str, str]]:
         """(provider, feed) pairs to fetch now."""
@@ -857,9 +939,40 @@ class Roads:
             self._merge[1][feed] = out
         return out
 
-    @staticmethod
-    def _cam_public(c: dict) -> dict:
-        return {k: c.get(k, "") for k in ("id", "name", "road", "dir", "mile", "lat", "lon", "has_video", "off", "source")}
+    def _cam_public(self, c: dict) -> dict:
+        out = {k: c.get(k, "") for k in ("id", "name", "road", "dir", "mile", "lat", "lon", "has_video", "off", "source")}
+        out["cadence"] = int(c.get("cadence") or CADENCE_S.get(c.get("source", ""), 60))
+        return out | self.health(c["id"])
+
+    # -- camera health: down when its image is stale or it keeps failing (#99) --------------------------
+
+    def health(self, cid: str) -> dict:
+        h = self._health.get(cid)
+        if not h:
+            return {"down": False, "down_since": None, "last_image": None}
+        return {"down": h["down_since"] is not None, "down_since": h["down_since"], "last_image": h["last_image"]}
+
+    def _note_image(self, cid: str, ok: bool, taken: float | None, now: float) -> None:
+        """A snapshot fetch's outcome: fresh (ok), or stale / failed. Transitions bump the rev."""
+        h = self._health.setdefault(cid, {"fails": 0, "down_since": None, "last_image": None, "checked": 0.0})
+        h["checked"] = now
+        if taken is not None:
+            h["last_image"] = max(h["last_image"] or 0, taken)
+        was = h["down_since"] is not None
+        if ok:
+            h["fails"] = 0
+            h["down_since"] = None
+        else:
+            h["fails"] += 1
+            stale = taken is not None and now - taken > STALE_IMAGE_S
+            if (h["fails"] >= DOWN_FAILS or stale) and h["down_since"] is None:
+                h["down_since"] = now
+        if was != (h["down_since"] is not None):
+            self._changed()
+
+    def _down_answer(self, cid: str) -> tuple[int, bytes, str, dict]:
+        h = self.health(cid)
+        return 404, json.dumps({"error": "no current image", **h}).encode(), JSON, {"Cache-Control": "no-store"}
 
     def public(self) -> dict:
         """The layers for the maps. Camera image URLs stay here (the browser uses our proxy)."""
@@ -881,7 +994,7 @@ class Roads:
         return next((c for c in self.merged("cameras") if c["id"] == cid), None)
 
     def nearest(self, lat: float, lon: float, n: int = 3, within_km: float = NEAR_KM) -> list[dict]:
-        cams = [c for c in self.merged("cameras") if not c["off"]]
+        cams = [c for c in self.merged("cameras") if not c["off"] and not self.health(c["id"])["down"]]
         d = sorted(((km(lat, lon, c["lat"], c["lon"]), c) for c in cams), key=lambda x: x[0])
         return [self._cam_public(c) | {"km": round(k, 2)} for k, c in d[:max(0, n)] if k <= within_km]
 
@@ -961,7 +1074,7 @@ class Roads:
         nearer: "facing"), else the nearest on each side labelled by compass (rel "side"); within ALONG_MI.
         Then (and off a highway, only) the cameras within NEARBY_KM as the crow flies (rel "nearby")."""
         where = self.locate_on_road(lat, lon, label, address)
-        out, taken = [], set()
+        out, taken, down = [], set(), []
         if where:
             route, d, mile = where["road"], where["dir"], where["mile"]
             pos, neg = ROUTES.get(route, ("NB", "SB", None))[:2]
@@ -975,6 +1088,11 @@ class Roads:
                     continue
                 at = self._mileage(route, c["lat"], c["lon"])
                 if not at or at[1] > MARKER_M:
+                    continue
+                if self.health(c["id"])["down"]:                              # demoted: the folded "N cameras down" row
+                    if abs(at[0] - mile) <= ALONG_MI:
+                        down.append(self._cam_public(c) | {"rel": "down", "miles": round(abs(at[0] - mile), 1),
+                                                           "side": "", "facing": False, "km": round(km(lat, lon, c["lat"], c["lon"]), 2)})
                     continue
                 cands.append((at[0] - mile, c))
             def side(lower: bool) -> list:
@@ -998,7 +1116,7 @@ class Roads:
                 taken.add(c["id"])
             for lower, rel in sides:
                 cs = [x for x in side(lower) if x[2]["id"] not in taken]
-                if cs and cs[0][0] < AT_MI:                                    # one right at the spot: it, then the next along
+                while cs and cs[0][0] < AT_MI:                                 # right at the spot: those, then the next along
                     add("at", cs[0][0], cs[0][2], lower)
                     cs = cs[1:]
                 p = pick(cs)
@@ -1008,7 +1126,15 @@ class Roads:
         for c in self.nearest(lat, lon, n=3, within_km=NEARBY_KM):
             if c["id"] not in taken:
                 out.append(c | {"rel": "nearby", "miles": None, "side": "", "facing": False})
-        return {"configured": self.configured, "highway": where, "cameras": out}
+        seen = {c["id"] for c in down}
+        for c in self.merged("cameras"):                                       # down cameras close by, too
+            if c["id"] in seen or c["off"] or not self.health(c["id"])["down"]:
+                continue
+            k = km(lat, lon, c["lat"], c["lon"])
+            if k <= NEARBY_KM:
+                down.append(self._cam_public(c) | {"rel": "down", "miles": None, "side": "", "facing": False, "km": round(k, 2)})
+        down.sort(key=lambda c: c["km"])
+        return {"configured": self.configured, "highway": where, "cameras": out, "down": down}
 
     # -- the snapshot proxy ----------------------------------------------------------------------------
 
@@ -1040,6 +1166,11 @@ class Roads:
                         taken = min(now, parsedate_to_datetime(headers["last-modified"]).timestamp())
                     except (TypeError, ValueError, IndexError):
                         pass
+                if now - taken > STALE_IMAGE_S:          # an old picture (a dead camera's placeholder): no image
+                    self._note_image(cid, False, taken, now)
+                    self._images.pop(cid, None)
+                    return self._down_answer(cid)
+                self._note_image(cid, True, taken, now)
                 hit = {"body": body, "ctype": ctype, "taken": taken, "fetched": now}
                 self._images[cid] = hit
                 self._images.move_to_end(cid)
@@ -1048,6 +1179,10 @@ class Roads:
                 return self._image_out(hit, False)
             except (HTTPError, URLError, OSError, ValueError) as e:
                 why = _redact(f"{type(e).__name__}: {getattr(e, 'reason', e)}", self.ny.key)
+                self._note_image(cid, False, None, now)
+                if self.health(cid)["down"]:              # down: say so, never the old picture
+                    self._images.pop(cid, None)
+                    return self._down_answer(cid)
                 if hit and now - hit["fetched"] < IMAGE_STALE_S:
                     return self._image_out(hit, True)
                 return 502, json.dumps({"error": f"the camera didn't answer ({why})"}).encode(), JSON, {}

@@ -604,6 +604,21 @@ https://github.com/actualsecurity/sizeup)`. The Thruway's **milepost and interch
 read** for the map: the gazetteer's own mile markers are (#67, #83; the Thruway's were used once to
 cross-check them, see #83).
 
+**Westchester County DPW** (`[roads] county = true`, the default; no key): the county's traffic
+cameras, from the public ArcGIS feature layer its map reads
+(`giswww.westchestergov.com/arcgis/rest/services/MappingWestchesterCounty/MapServer/124`, no token;
+public viewer <https://www.westchestergov.com/trafficcamera>), 51 cameras countywide, 26 in our
+area: the King St / Willett Ave / N Pearl St approaches on the Port Chester–Rye Brook line, Playland
+Pkwy at Forest Ave, Mamaroneck Ave at the Hutch ramps, I-287 at White Plains Ave, the Bronx River
+Pkwy set. The list is read daily; the images (`www.westchestergov.com/cctv/camera<id>.jpg`,
+1280×960, a new one every 8 s with its `Last-Modified`) go through the proxy like the others. A dead
+county camera serves a placeholder last modified in 2021, or a 404: the hub never shows those (below).
+Each camera's direction comes from the layer's description ("Traffic Approaching the Camera is
+going South on King St"). *Terms:* the ArcGIS item's disclaimer (a public service, no liability, not
+recorded), no reuse restriction; the county's own release says the cameras are for rapid response
+to accidents and weather emergencies. Attribution "Westchester County DPW" in the Layers box and the
+map. When 511NY arrives it wins the 50 m dedupe (the county's cameras are in 511NY too).
+
 **511NY** (NYSDOT, <https://511ny.org/help/24>; off until approved): the Developer Access Agreement
 (updated 2026-09-18) lists traffic events (JSON), the camera inventory (XML), message signs (JSON)
 and winter road conditions. Access is by request (the *XML Data Feed Request Form* linked there,
@@ -632,6 +647,21 @@ Considered and not used:
 
 Camera video (HLS) is not proxied from either source: snapshots only (neither source's terms speak
 to re-serving video, and every segment would come through the hub).
+
+### Cameras that are down
+
+A camera is **down** when its latest image is older than 5 min (by `Last-Modified`: the county's 2021
+placeholders) or its snapshot fetch fails 3 times running (a 404, a timeout); a fresh image brings
+it back on its own. The hub looks at every camera every 15 min (`Roads.sweep`), so the map knows
+before anyone opens one. Down cameras are obvious and out of the way: on the map the icon is dim
+with a small red "!" badge (and *Hide down cameras (N)* in the Layers box hides them, off by
+default, per viewer); in the incident viewer's Cameras panel and the before/after picker they are
+never shown as a stale thumbnail: the live ones come first and the down ones fold into a one-line
+"N cameras down" row (expandable, each with how far and since when); the viewer shows *Down since
+hh:mm (last image hh:mm)* rather than the old picture (`GET .../image` answers 404 `{error: "no
+current image", down, down_since, last_image}`). Each camera in `/api/cad/roads` carries `down`,
+`down_since`, `last_image` and `cadence` (how often its source's snapshots change: the county 8 s,
+the Thruway and 511NY about 60 s; the viewer says *Snapshot, updated every N s*).
 
 ### How it works
 
@@ -683,8 +713,9 @@ box notes that 511NY isn't.
    key itself: the config refuses it). Re-record `tests/fixtures/511ny/` from the real feeds.
 
 ```toml
-[roads]                          # sizeup/roads.py; leave out: the Thruway on, 511NY off
+[roads]                          # sizeup/roads.py; leave out: the Thruway and the county on, 511NY off
 thruway = true                   # the NYS Thruway Authority's public feeds: I-95, I-287 (no key)
+county = true                    # Westchester County DPW's cameras (no key)
 events_url = "https://.../events?key={key}&format=json"     # 511NY, from its approval
 cameras_url = "https://.../cameras?key={key}"
 signs_url = "https://.../messagesigns?key={key}&format=json"

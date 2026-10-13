@@ -1,0 +1,1039 @@
+{
+"displayFieldName": "CCTV_NAME",
+"fieldAliases": {
+"OBJECTID": "OBJECTID",
+"CCTV_ID": "CCTV_ID",
+"CCTV_NAME": "CCTV_Name",
+"NATIVE_CCTV_ID": "Native_CCTV_ID",
+"OWNER_NAME": "Owner_Name",
+"DESCRIPTION": "Description",
+"DIRECTION": "Direction",
+"LOCATION": "Location",
+"STATE": "State",
+"STATUS": "Status",
+"URL": "URL",
+"LASTUPDATED": "LastUpdated",
+"UNIQUEID": "UniqueID",
+"TRAFFICLANDID": "TrafficLandID",
+"CARS": "CARS",
+"STATEWIDECCTV": "StatewideCCTV",
+"NEWDELETED": "NewDeleted",
+"REFRESH_RATE": "Refresh Rate",
+"LINK_ROAD": "Link_Road",
+"COUNTY": "County",
+"DOT_REGION": "DOT_Region",
+"NY511_REGION": "NY511_Region",
+"MILE_POINT": "Mile_Point"
+},
+"geometryType": "esriGeometryPoint",
+"spatialReference": {
+"wkid": 4326,
+"latestWkid": 4326
+},
+"fields": [
+{
+"name": "OBJECTID",
+"type": "esriFieldTypeOID",
+"alias": "OBJECTID"
+},
+{
+"name": "CCTV_ID",
+"type": "esriFieldTypeString",
+"alias": "CCTV_ID",
+"length": 255
+},
+{
+"name": "CCTV_NAME",
+"type": "esriFieldTypeString",
+"alias": "CCTV_Name",
+"length": 255
+},
+{
+"name": "NATIVE_CCTV_ID",
+"type": "esriFieldTypeDouble",
+"alias": "Native_CCTV_ID"
+},
+{
+"name": "OWNER_NAME",
+"type": "esriFieldTypeString",
+"alias": "Owner_Name",
+"length": 255
+},
+{
+"name": "DESCRIPTION",
+"type": "esriFieldTypeString",
+"alias": "Description",
+"length": 255
+},
+{
+"name": "DIRECTION",
+"type": "esriFieldTypeString",
+"alias": "Direction",
+"length": 255
+},
+{
+"name": "LOCATION",
+"type": "esriFieldTypeString",
+"alias": "Location",
+"length": 255
+},
+{
+"name": "STATE",
+"type": "esriFieldTypeString",
+"alias": "State",
+"length": 255
+},
+{
+"name": "STATUS",
+"type": "esriFieldTypeString",
+"alias": "Status",
+"length": 255
+},
+{
+"name": "URL",
+"type": "esriFieldTypeString",
+"alias": "URL",
+"length": 255
+},
+{
+"name": "LASTUPDATED",
+"type": "esriFieldTypeString",
+"alias": "LastUpdated",
+"length": 255
+},
+{
+"name": "UNIQUEID",
+"type": "esriFieldTypeString",
+"alias": "UniqueID",
+"length": 255
+},
+{
+"name": "TRAFFICLANDID",
+"type": "esriFieldTypeString",
+"alias": "TrafficLandID",
+"length": 255
+},
+{
+"name": "CARS",
+"type": "esriFieldTypeString",
+"alias": "CARS",
+"length": 255
+},
+{
+"name": "STATEWIDECCTV",
+"type": "esriFieldTypeString",
+"alias": "StatewideCCTV",
+"length": 255
+},
+{
+"name": "NEWDELETED",
+"type": "esriFieldTypeString",
+"alias": "NewDeleted",
+"length": 255
+},
+{
+"name": "REFRESH_RATE",
+"type": "esriFieldTypeString",
+"alias": "Refresh Rate",
+"length": 255
+},
+{
+"name": "LINK_ROAD",
+"type": "esriFieldTypeString",
+"alias": "Link_Road",
+"length": 255
+},
+{
+"name": "COUNTY",
+"type": "esriFieldTypeString",
+"alias": "County",
+"length": 255
+},
+{
+"name": "DOT_REGION",
+"type": "esriFieldTypeDouble",
+"alias": "DOT_Region"
+},
+{
+"name": "NY511_REGION",
+"type": "esriFieldTypeString",
+"alias": "NY511_Region",
+"length": 255
+},
+{
+"name": "MILE_POINT",
+"type": "esriFieldTypeDouble",
+"alias": "Mile_Point"
+}
+],
+"features": [
+{
+"attributes": {
+"OBJECTID": 20,
+"CCTV_ID": null,
+"CCTV_NAME": "SB Wilett Approach - King St/Willett Ave/North Pearl St",
+"NATIVE_CCTV_ID": 24.0,
+"OWNER_NAME": "Westchester County DPW",
+"DESCRIPTION": "Traffic Approaching the Camera is going South on Willett Ave.",
+"DIRECTION": null,
+"LOCATION": "SB Wilett Approach - King St/Willett Ave/North Pearl St",
+"STATE": "NY",
+"STATUS": null,
+"URL": "http://www.westchestergov.com/cctv/camera24.jpg",
+"LASTUPDATED": null,
+"UNIQUEID": null,
+"TRAFFICLANDID": null,
+"CARS": null,
+"STATEWIDECCTV": null,
+"NEWDELETED": null,
+"REFRESH_RATE": "8 seconds",
+"LINK_ROAD": null,
+"COUNTY": "Westchester",
+"DOT_REGION": 8.0,
+"NY511_REGION": "Hudson Valley Catskill Area",
+"MILE_POINT": null
+},
+"geometry": {
+"x": -73.66358099993788,
+"y": 41.00349400014733
+}
+},
+{
+"attributes": {
+"OBJECTID": 21,
+"CCTV_ID": null,
+"CCTV_NAME": "WB Willett Approach - King St/Willett Ave/North Pearl St",
+"NATIVE_CCTV_ID": 25.0,
+"OWNER_NAME": "Westchester County DPW",
+"DESCRIPTION": "Traffic Approaching the Camera is going West on Willett Ave.",
+"DIRECTION": null,
+"LOCATION": "WB Willett Approach - King St/Willett Ave/North Pearl St",
+"STATE": "NY",
+"STATUS": null,
+"URL": "http://www.westchestergov.com/cctv/camera25.jpg",
+"LASTUPDATED": null,
+"UNIQUEID": null,
+"TRAFFICLANDID": null,
+"CARS": null,
+"STATEWIDECCTV": null,
+"NEWDELETED": null,
+"REFRESH_RATE": "8 seconds",
+"LINK_ROAD": null,
+"COUNTY": "Westchester",
+"DOT_REGION": 8.0,
+"NY511_REGION": "Hudson Valley Catskill Area",
+"MILE_POINT": null
+},
+"geometry": {
+"x": -73.66358099993788,
+"y": 41.00349400014733
+}
+},
+{
+"attributes": {
+"OBJECTID": 22,
+"CCTV_ID": null,
+"CCTV_NAME": "NB Pearl Approach - King St/Willett Ave/North Pearl St",
+"NATIVE_CCTV_ID": 26.0,
+"OWNER_NAME": "Westchester County DPW",
+"DESCRIPTION": "Traffic Approaching the Camera is going North on North Peal St.",
+"DIRECTION": null,
+"LOCATION": "NB Pearl Approach - King St/Willett Ave/North Pearl St",
+"STATE": "NY",
+"STATUS": null,
+"URL": "http://www.westchestergov.com/cctv/camera26.jpg",
+"LASTUPDATED": null,
+"UNIQUEID": null,
+"TRAFFICLANDID": null,
+"CARS": null,
+"STATEWIDECCTV": null,
+"NEWDELETED": null,
+"REFRESH_RATE": "8 seconds",
+"LINK_ROAD": null,
+"COUNTY": "Westchester",
+"DOT_REGION": 8.0,
+"NY511_REGION": "Hudson Valley Catskill Area",
+"MILE_POINT": null
+},
+"geometry": {
+"x": -73.66358099993788,
+"y": 41.00349400014733
+}
+},
+{
+"attributes": {
+"OBJECTID": 23,
+"CCTV_ID": null,
+"CCTV_NAME": "EB Approach - BRP NB Ramp & Yonkers Ave.",
+"NATIVE_CCTV_ID": 30.0,
+"OWNER_NAME": "Westchester County DPW",
+"DESCRIPTION": "Traffic Approaching the Camera is going East on Yonkers Ave.",
+"DIRECTION": null,
+"LOCATION": "EB Approach - BRP NB Ramp & Yonkers Ave.",
+"STATE": "NY",
+"STATUS": null,
+"URL": "http://www.westchestergov.com/cctv/camera30.jpg",
+"LASTUPDATED": null,
+"UNIQUEID": null,
+"TRAFFICLANDID": null,
+"CARS": null,
+"STATEWIDECCTV": null,
+"NEWDELETED": null,
+"REFRESH_RATE": "8 seconds",
+"LINK_ROAD": null,
+"COUNTY": "Westchester",
+"DOT_REGION": 8.0,
+"NY511_REGION": "Hudson Valley Catskill Area",
+"MILE_POINT": null
+},
+"geometry": {
+"x": -73.85026667035144,
+"y": 40.913627779994485
+}
+},
+{
+"attributes": {
+"OBJECTID": 24,
+"CCTV_ID": null,
+"CCTV_NAME": "NB Approach - BRP NB Ramp & Yonkers Ave.",
+"NATIVE_CCTV_ID": 31.0,
+"OWNER_NAME": "Westchester County DPW",
+"DESCRIPTION": "Traffic Approaching the Camera is going North exiting the Bronx River Pkwy.",
+"DIRECTION": null,
+"LOCATION": "NB Approach - BRP NB Ramp & Yonkers Ave.",
+"STATE": "NY",
+"STATUS": null,
+"URL": "http://www.westchestergov.com/cctv/camera31.jpg",
+"LASTUPDATED": null,
+"UNIQUEID": null,
+"TRAFFICLANDID": null,
+"CARS": null,
+"STATEWIDECCTV": null,
+"NEWDELETED": null,
+"REFRESH_RATE": "8 seconds",
+"LINK_ROAD": null,
+"COUNTY": "Westchester",
+"DOT_REGION": 8.0,
+"NY511_REGION": "Hudson Valley Catskill Area",
+"MILE_POINT": null
+},
+"geometry": {
+"x": -73.85026667035144,
+"y": 40.913627779994485
+}
+},
+{
+"attributes": {
+"OBJECTID": 29,
+"CCTV_ID": null,
+"CCTV_NAME": "Old Westchester Ave WB & White Plains Ave",
+"NATIVE_CCTV_ID": 39.0,
+"OWNER_NAME": "Westchester County DPW",
+"DESCRIPTION": "Traffic Closest to the Camera is going West on I-287",
+"DIRECTION": null,
+"LOCATION": "Old Westchester Ave WB & White Plains Ave",
+"STATE": "NY",
+"STATUS": null,
+"URL": "http://www.westchestergov.com/cctv/camera39.jpg",
+"LASTUPDATED": null,
+"UNIQUEID": null,
+"TRAFFICLANDID": null,
+"CARS": null,
+"STATEWIDECCTV": null,
+"NEWDELETED": null,
+"REFRESH_RATE": "8 seconds",
+"LINK_ROAD": null,
+"COUNTY": "Westchester",
+"DOT_REGION": 8.0,
+"NY511_REGION": "Hudson Valley Catskill Area",
+"MILE_POINT": null
+},
+"geometry": {
+"x": -73.74942499987421,
+"y": 41.031781000262285
+}
+},
+{
+"attributes": {
+"OBJECTID": 30,
+"CCTV_ID": null,
+"CCTV_NAME": "N Broadway & Park Dr (Kensico Dam)",
+"NATIVE_CCTV_ID": 50.0,
+"OWNER_NAME": "Westchester County DPW",
+"DESCRIPTION": "Traffic Closest to the Camera is going North on N. Broadway",
+"DIRECTION": null,
+"LOCATION": "N Broadway & Park Dr (Kensico Dam)",
+"STATE": "NY",
+"STATUS": null,
+"URL": "http://www.westchestergov.com/cctv/camera50.jpg",
+"LASTUPDATED": null,
+"UNIQUEID": null,
+"TRAFFICLANDID": null,
+"CARS": null,
+"STATEWIDECCTV": null,
+"NEWDELETED": null,
+"REFRESH_RATE": "8 seconds",
+"LINK_ROAD": null,
+"COUNTY": "Westchester",
+"DOT_REGION": 8.0,
+"NY511_REGION": "Hudson Valley Catskill Area",
+"MILE_POINT": null
+},
+"geometry": {
+"x": -73.76808856899643,
+"y": 41.07017707197243
+}
+},
+{
+"attributes": {
+"OBJECTID": 42,
+"CCTV_ID": null,
+"CCTV_NAME": "Mamaroneck Ave & HRP Ramps",
+"NATIVE_CCTV_ID": 62.0,
+"OWNER_NAME": "Westchester County DPW",
+"DESCRIPTION": "Traffic Closest to the Camera is going South on Mamaroneck Ave.",
+"DIRECTION": null,
+"LOCATION": "Mamaroneck Ave & HRP Ramps",
+"STATE": "NY",
+"STATUS": null,
+"URL": "http://www.westchestergov.com/cctv/camera62.jpg",
+"LASTUPDATED": null,
+"UNIQUEID": null,
+"TRAFFICLANDID": null,
+"CARS": null,
+"STATEWIDECCTV": null,
+"NEWDELETED": null,
+"REFRESH_RATE": "8 seconds",
+"LINK_ROAD": null,
+"COUNTY": "Westchester",
+"DOT_REGION": 8.0,
+"NY511_REGION": "Hudson Valley Catskill Area",
+"MILE_POINT": null
+},
+"geometry": {
+"x": -73.74418999946445,
+"y": 40.98278600002592
+}
+},
+{
+"attributes": {
+"OBJECTID": 43,
+"CCTV_ID": null,
+"CCTV_NAME": "Mamaroneck Ave & Union Ave",
+"NATIVE_CCTV_ID": 63.0,
+"OWNER_NAME": "Westchester County DPW",
+"DESCRIPTION": "Traffic Closest to the Camera is going South on Mamaroneck Ave.",
+"DIRECTION": null,
+"LOCATION": "Mamaroneck Ave & Union Ave",
+"STATE": "NY",
+"STATUS": null,
+"URL": "http://www.westchestergov.com/cctv/camera63.jpg",
+"LASTUPDATED": null,
+"UNIQUEID": null,
+"TRAFFICLANDID": null,
+"CARS": null,
+"STATEWIDECCTV": null,
+"NEWDELETED": null,
+"REFRESH_RATE": "8 seconds",
+"LINK_ROAD": null,
+"COUNTY": "Westchester",
+"DOT_REGION": 8.0,
+"NY511_REGION": "Hudson Valley Catskill Area",
+"MILE_POINT": null
+},
+"geometry": {
+"x": -73.74402799968934,
+"y": 40.98182300032891
+}
+},
+{
+"attributes": {
+"OBJECTID": 44,
+"CCTV_ID": null,
+"CCTV_NAME": "Mamaroneck Ave & Saxon Woods Pk",
+"NATIVE_CCTV_ID": 64.0,
+"OWNER_NAME": "Westchester County DPW",
+"DESCRIPTION": "Traffic Closest to the Camera is going North on Mamaroneck Ave.",
+"DIRECTION": null,
+"LOCATION": "Mamaroneck Ave & Saxon Woods Pk",
+"STATE": "NY",
+"STATUS": null,
+"URL": "http://www.westchestergov.com/cctv/camera64.jpg",
+"LASTUPDATED": null,
+"UNIQUEID": null,
+"TRAFFICLANDID": null,
+"CARS": null,
+"STATEWIDECCTV": null,
+"NEWDELETED": null,
+"REFRESH_RATE": "8 seconds",
+"LINK_ROAD": null,
+"COUNTY": "Westchester",
+"DOT_REGION": 8.0,
+"NY511_REGION": "Hudson Valley Catskill Area",
+"MILE_POINT": null
+},
+"geometry": {
+"x": -73.7431920002025,
+"y": 40.97843799995904
+}
+},
+{
+"attributes": {
+"OBJECTID": 45,
+"CCTV_ID": null,
+"CCTV_NAME": "Mamaroneck Ave 500 block",
+"NATIVE_CCTV_ID": 65.0,
+"OWNER_NAME": "Westchester County DPW",
+"DESCRIPTION": "Traffic Closest to the Camera is going South on Mamaroneck Ave.",
+"DIRECTION": null,
+"LOCATION": "Mamaroneck Ave 500 block",
+"STATE": "NY",
+"STATUS": null,
+"URL": "http://www.westchestergov.com/cctv/camera65.jpg",
+"LASTUPDATED": null,
+"UNIQUEID": null,
+"TRAFFICLANDID": null,
+"CARS": null,
+"STATEWIDECCTV": null,
+"NEWDELETED": null,
+"REFRESH_RATE": "8 seconds",
+"LINK_ROAD": null,
+"COUNTY": "Westchester",
+"DOT_REGION": 8.0,
+"NY511_REGION": "Hudson Valley Catskill Area",
+"MILE_POINT": null
+},
+"geometry": {
+"x": -73.74326400032376,
+"y": 40.97657879972074
+}
+},
+{
+"attributes": {
+"OBJECTID": 46,
+"CCTV_ID": null,
+"CCTV_NAME": "Mamaroneck Ave 450 block",
+"NATIVE_CCTV_ID": 66.0,
+"OWNER_NAME": "Westchester County DPW",
+"DESCRIPTION": "Traffic Closest to the Camera is going South on Mamaroneck Ave.",
+"DIRECTION": null,
+"LOCATION": "Mamaroneck Ave 450 block",
+"STATE": "NY",
+"STATUS": null,
+"URL": "http://www.westchestergov.com/cctv/camera66.jpg",
+"LASTUPDATED": null,
+"UNIQUEID": null,
+"TRAFFICLANDID": null,
+"CARS": null,
+"STATEWIDECCTV": null,
+"NEWDELETED": null,
+"REFRESH_RATE": "8 seconds",
+"LINK_ROAD": null,
+"COUNTY": "Westchester",
+"DOT_REGION": 8.0,
+"NY511_REGION": "Hudson Valley Catskill Area",
+"MILE_POINT": null
+},
+"geometry": {
+"x": -73.74303099954597,
+"y": 40.97299599973965
+}
+},
+{
+"attributes": {
+"OBJECTID": 47,
+"CCTV_ID": null,
+"CCTV_NAME": "Mamaroneck Ave 440 block",
+"NATIVE_CCTV_ID": 67.0,
+"OWNER_NAME": "Westchester County DPW",
+"DESCRIPTION": "Traffic Closest to the Camera is going South on Mamaroneck Ave.",
+"DIRECTION": null,
+"LOCATION": "Mamaroneck Ave 440 block",
+"STATE": "NY",
+"STATUS": null,
+"URL": "http://www.westchestergov.com/cctv/camera67.jpg",
+"LASTUPDATED": null,
+"UNIQUEID": null,
+"TRAFFICLANDID": null,
+"CARS": null,
+"STATEWIDECCTV": null,
+"NEWDELETED": null,
+"REFRESH_RATE": "8 seconds",
+"LINK_ROAD": null,
+"COUNTY": "Westchester",
+"DOT_REGION": 8.0,
+"NY511_REGION": "Hudson Valley Catskill Area",
+"MILE_POINT": null
+},
+"geometry": {
+"x": -73.74263399951023,
+"y": 40.9706160003464
+}
+},
+{
+"attributes": {
+"OBJECTID": 48,
+"CCTV_ID": null,
+"CCTV_NAME": "Westchester Ave EB & Corporate Park Dr",
+"NATIVE_CCTV_ID": 68.0,
+"OWNER_NAME": "Westchester County DPW",
+"DESCRIPTION": "Traffic Closest to the Camera is going East on Westchester Ave.",
+"DIRECTION": null,
+"LOCATION": "Westchester Ave EB & Corporate Park Dr",
+"STATE": "NY",
+"STATUS": null,
+"URL": "http://www.westchestergov.com/cctv/camera68.jpg",
+"LASTUPDATED": null,
+"UNIQUEID": null,
+"TRAFFICLANDID": null,
+"CARS": null,
+"STATEWIDECCTV": null,
+"NEWDELETED": null,
+"REFRESH_RATE": "8 seconds",
+"LINK_ROAD": null,
+"COUNTY": "Westchester",
+"DOT_REGION": 8.0,
+"NY511_REGION": "Hudson Valley Catskill Area",
+"MILE_POINT": null
+},
+"geometry": {
+"x": -73.7263310001355,
+"y": 41.017646999927
+}
+},
+{
+"attributes": {
+"OBJECTID": 49,
+"CCTV_ID": null,
+"CCTV_NAME": "Westchester Ave WB & Corporate Park Dr",
+"NATIVE_CCTV_ID": 69.0,
+"OWNER_NAME": "Westchester County DPW",
+"DESCRIPTION": "Traffic Closest to the Camera is going West on Westchester Ave.",
+"DIRECTION": null,
+"LOCATION": "Westchester Ave WB & Corporate Park Dr",
+"STATE": "NY",
+"STATUS": null,
+"URL": "http://www.westchestergov.com/cctv/camera69.jpg",
+"LASTUPDATED": null,
+"UNIQUEID": null,
+"TRAFFICLANDID": null,
+"CARS": null,
+"STATEWIDECCTV": null,
+"NEWDELETED": null,
+"REFRESH_RATE": "8 seconds",
+"LINK_ROAD": null,
+"COUNTY": "Westchester",
+"DOT_REGION": 8.0,
+"NY511_REGION": "Hudson Valley Catskill Area",
+"MILE_POINT": null
+},
+"geometry": {
+"x": -73.72519299969088,
+"y": 41.018044000327144
+}
+},
+{
+"attributes": {
+"OBJECTID": 50,
+"CCTV_ID": null,
+"CCTV_NAME": "Westchester Ave EB @ Purchase St",
+"NATIVE_CCTV_ID": 70.0,
+"OWNER_NAME": "Westchester County DPW",
+"DESCRIPTION": "Traffic Closest to the Camera is going East on Westchester Ave.",
+"DIRECTION": null,
+"LOCATION": "Westchester Ave EB @ Purchase St",
+"STATE": "NY",
+"STATUS": null,
+"URL": "http://www.westchestergov.com/cctv/camera70.jpg",
+"LASTUPDATED": null,
+"UNIQUEID": null,
+"TRAFFICLANDID": null,
+"CARS": null,
+"STATEWIDECCTV": null,
+"NEWDELETED": null,
+"REFRESH_RATE": "8 seconds",
+"LINK_ROAD": null,
+"COUNTY": "Westchester",
+"DOT_REGION": 8.0,
+"NY511_REGION": "Hudson Valley Catskill Area",
+"MILE_POINT": null
+},
+"geometry": {
+"x": -73.70433299989423,
+"y": 41.01250000011177
+}
+},
+{
+"attributes": {
+"OBJECTID": 51,
+"CCTV_ID": null,
+"CCTV_NAME": "Westchester Ave WB @ Purchase St",
+"NATIVE_CCTV_ID": 71.0,
+"OWNER_NAME": "Westchester County DPW",
+"DESCRIPTION": "Traffic Closest to the Camera is going West on Westchester Ave.",
+"DIRECTION": null,
+"LOCATION": "Westchester Ave WB @ Purchase St",
+"STATE": "NY",
+"STATUS": null,
+"URL": "http://www.westchestergov.com/cctv/camera71.jpg",
+"LASTUPDATED": null,
+"UNIQUEID": null,
+"TRAFFICLANDID": null,
+"CARS": null,
+"STATEWIDECCTV": null,
+"NEWDELETED": null,
+"REFRESH_RATE": "8 seconds",
+"LINK_ROAD": null,
+"COUNTY": "Westchester",
+"DOT_REGION": 8.0,
+"NY511_REGION": "Hudson Valley Catskill Area",
+"MILE_POINT": null
+},
+"geometry": {
+"x": -73.70378599973738,
+"y": 41.013394999966195
+}
+},
+{
+"attributes": {
+"OBJECTID": 4,
+"CCTV_ID": null,
+"CCTV_NAME": "Bronx River Parkway at County Center",
+"NATIVE_CCTV_ID": 4.0,
+"OWNER_NAME": "Westchester County DPW",
+"DESCRIPTION": "Traffic Closest to the Camera is going South on the BRP",
+"DIRECTION": null,
+"LOCATION": "Bronx River Parkway at County Center",
+"STATE": "NY",
+"STATUS": null,
+"URL": "http://www.westchestergov.com/cctv/camera4.jpg",
+"LASTUPDATED": null,
+"UNIQUEID": null,
+"TRAFFICLANDID": null,
+"CARS": null,
+"STATEWIDECCTV": null,
+"NEWDELETED": null,
+"REFRESH_RATE": "8 seconds",
+"LINK_ROAD": null,
+"COUNTY": "Westchester",
+"DOT_REGION": 8.0,
+"NY511_REGION": "Hudson Valley Catskill Area",
+"MILE_POINT": 15.5
+},
+"geometry": {
+"x": -73.77815277987493,
+"y": 41.03672222016175
+}
+},
+{
+"attributes": {
+"OBJECTID": 5,
+"CCTV_ID": null,
+"CCTV_NAME": "Bronx River Parkway at Virginia Road",
+"NATIVE_CCTV_ID": 5.0,
+"OWNER_NAME": "Westchester County DPW",
+"DESCRIPTION": "Traffic Closest to the Camera is going South on the BRP",
+"DIRECTION": null,
+"LOCATION": "Bronx River Parkway at Virginia Road",
+"STATE": "NY",
+"STATUS": null,
+"URL": "http://www.westchestergov.com/cctv/camera5.jpg",
+"LASTUPDATED": null,
+"UNIQUEID": null,
+"TRAFFICLANDID": null,
+"CARS": null,
+"STATEWIDECCTV": null,
+"NEWDELETED": null,
+"REFRESH_RATE": "8 seconds",
+"LINK_ROAD": null,
+"COUNTY": "Westchester",
+"DOT_REGION": 8.0,
+"NY511_REGION": "Hudson Valley Catskill Area",
+"MILE_POINT": 17.3
+},
+"geometry": {
+"x": -73.77441110972264,
+"y": 41.062216670012134
+}
+},
+{
+"attributes": {
+"OBJECTID": 6,
+"CCTV_ID": null,
+"CCTV_NAME": "Bronx River Parkway at Fisher Lane",
+"NATIVE_CCTV_ID": 6.0,
+"OWNER_NAME": "Westchester County DPW",
+"DESCRIPTION": "Traffic Closest to the Camera is going South on the BRP",
+"DIRECTION": null,
+"LOCATION": "Bronx River Parkway at Fisher Lane",
+"STATE": "NY",
+"STATUS": null,
+"URL": "http://www.westchestergov.com/cctv/camera6.jpg",
+"LASTUPDATED": null,
+"UNIQUEID": null,
+"TRAFFICLANDID": null,
+"CARS": null,
+"STATEWIDECCTV": null,
+"NEWDELETED": null,
+"REFRESH_RATE": "8 seconds",
+"LINK_ROAD": null,
+"COUNTY": "Westchester",
+"DOT_REGION": 8.0,
+"NY511_REGION": "Hudson Valley Catskill Area",
+"MILE_POINT": 16.7
+},
+"geometry": {
+"x": -73.77487500032565,
+"y": 41.05439444026826
+}
+},
+{
+"attributes": {
+"OBJECTID": 8,
+"CCTV_ID": null,
+"CCTV_NAME": "Bronx River Parkway at Main Street",
+"NATIVE_CCTV_ID": 8.0,
+"OWNER_NAME": "Westchester County DPW",
+"DESCRIPTION": "Traffic Closest to the Camera is going South on the BRP",
+"DIRECTION": null,
+"LOCATION": "Bronx River Parkway at Main Street",
+"STATE": "NY",
+"STATUS": null,
+"URL": "http://www.westchestergov.com/cctv/camera8.jpg",
+"LASTUPDATED": null,
+"UNIQUEID": null,
+"TRAFFICLANDID": null,
+"CARS": null,
+"STATEWIDECCTV": null,
+"NEWDELETED": null,
+"REFRESH_RATE": "8 seconds",
+"LINK_ROAD": null,
+"COUNTY": "Westchester",
+"DOT_REGION": 8.0,
+"NY511_REGION": "Hudson Valley Catskill Area",
+"MILE_POINT": 15.1
+},
+"geometry": {
+"x": -73.77597778056231,
+"y": 41.0322805596188
+}
+},
+{
+"attributes": {
+"OBJECTID": 10,
+"CCTV_ID": null,
+"CCTV_NAME": "Playland Parkway at Forest Avenue",
+"NATIVE_CCTV_ID": 10.0,
+"OWNER_NAME": "Westchester County DPW",
+"DESCRIPTION": "Traffic Closest to the Camera is going East on Playland Pkwy.",
+"DIRECTION": null,
+"LOCATION": "Playland Parkway at Forest Avenue",
+"STATE": "NY",
+"STATUS": null,
+"URL": "http://www.westchestergov.com/cctv/camera10.jpg",
+"LASTUPDATED": null,
+"UNIQUEID": null,
+"TRAFFICLANDID": null,
+"CARS": null,
+"STATEWIDECCTV": null,
+"NEWDELETED": null,
+"REFRESH_RATE": "8 seconds",
+"LINK_ROAD": null,
+"COUNTY": "Westchester",
+"DOT_REGION": 8.0,
+"NY511_REGION": "Hudson Valley Catskill Area",
+"MILE_POINT": null
+},
+"geometry": {
+"x": -73.68085832985767,
+"y": 40.965544440120716
+}
+},
+{
+"attributes": {
+"OBJECTID": 12,
+"CCTV_ID": null,
+"CCTV_NAME": "Bronx River Parkway at Greenacres Avenue",
+"NATIVE_CCTV_ID": 12.0,
+"OWNER_NAME": "Westchester County DPW",
+"DESCRIPTION": "Traffic Closest to the Camera is going North on the BRP",
+"DIRECTION": null,
+"LOCATION": "Bronx River Parkway at Greenacres Avenue",
+"STATE": "NY",
+"STATUS": null,
+"URL": "http://www.westchestergov.com/cctv/camera12.jpg",
+"LASTUPDATED": null,
+"UNIQUEID": null,
+"TRAFFICLANDID": null,
+"CARS": null,
+"STATEWIDECCTV": null,
+"NEWDELETED": null,
+"REFRESH_RATE": "8 seconds",
+"LINK_ROAD": null,
+"COUNTY": "Westchester",
+"DOT_REGION": 8.0,
+"NY511_REGION": "Hudson Valley Catskill Area",
+"MILE_POINT": 13.3
+},
+"geometry": {
+"x": -73.79453888994809,
+"y": 41.010861110285525
+}
+},
+{
+"attributes": {
+"OBJECTID": 15,
+"CCTV_ID": null,
+"CCTV_NAME": "White Plains SB Approach at EB Old Westchester Ave",
+"NATIVE_CCTV_ID": 16.0,
+"OWNER_NAME": "Westchester County DPW",
+"DESCRIPTION": "Traffic Approaching the Camera is going South on White Plains Ave.",
+"DIRECTION": null,
+"LOCATION": "White Plains SB Approach at EB Old Westchester Ave",
+"STATE": "NY",
+"STATUS": null,
+"URL": "http://www.westchestergov.com/cctv/camera16.jpg",
+"LASTUPDATED": null,
+"UNIQUEID": null,
+"TRAFFICLANDID": null,
+"CARS": null,
+"STATEWIDECCTV": null,
+"NEWDELETED": null,
+"REFRESH_RATE": "8 seconds",
+"LINK_ROAD": null,
+"COUNTY": "Westchester",
+"DOT_REGION": 8.0,
+"NY511_REGION": "Hudson Valley Catskill Area",
+"MILE_POINT": null
+},
+"geometry": {
+"x": -73.75007200001338,
+"y": 41.03046100044413
+}
+},
+{
+"attributes": {
+"OBJECTID": 16,
+"CCTV_ID": null,
+"CCTV_NAME": "Bronx River Parkway at Parkway Homes Rd",
+"NATIVE_CCTV_ID": 17.0,
+"OWNER_NAME": "Westchester County DPW",
+"DESCRIPTION": "Traffic Closest to the Camera is going South on the BRP",
+"DIRECTION": null,
+"LOCATION": "BRP @ Parkway Homes Rd",
+"STATE": "NY",
+"STATUS": null,
+"URL": "http://www.westchestergov.com/cctv/camera17.jpg",
+"LASTUPDATED": null,
+"UNIQUEID": null,
+"TRAFFICLANDID": null,
+"CARS": null,
+"STATEWIDECCTV": null,
+"NEWDELETED": null,
+"REFRESH_RATE": "8 seconds",
+"LINK_ROAD": null,
+"COUNTY": "Westchester",
+"DOT_REGION": 8.0,
+"NY511_REGION": "Hudson Valley Catskill Area",
+"MILE_POINT": 17.0
+},
+"geometry": {
+"x": -73.77393055548991,
+"y": 41.058169444423825
+}
+},
+{
+"attributes": {
+"OBJECTID": 17,
+"CCTV_ID": null,
+"CCTV_NAME": "Bronx River Parkway at Cemetery/Old Tarrytown Rd",
+"NATIVE_CCTV_ID": 18.0,
+"OWNER_NAME": "Westchester County DPW",
+"DESCRIPTION": "Traffic Closest to the Camera is going South on the BRP",
+"DIRECTION": null,
+"LOCATION": "BRP @ Cemetery/Old Tarrytown Rd",
+"STATE": "NY",
+"STATUS": null,
+"URL": "http://www.westchestergov.com/cctv/camera18.jpg",
+"LASTUPDATED": null,
+"UNIQUEID": null,
+"TRAFFICLANDID": null,
+"CARS": null,
+"STATEWIDECCTV": null,
+"NEWDELETED": null,
+"REFRESH_RATE": "8 seconds",
+"LINK_ROAD": null,
+"COUNTY": "Westchester",
+"DOT_REGION": 8.0,
+"NY511_REGION": "Hudson Valley Catskill Area",
+"MILE_POINT": 16.1
+},
+"geometry": {
+"x": -73.77527777821278,
+"y": 41.0461194435582
+}
+},
+{
+"attributes": {
+"OBJECTID": 18,
+"CCTV_ID": null,
+"CCTV_NAME": "Old Westchester Ave EB & White Plains Ave (I-287)",
+"NATIVE_CCTV_ID": 22.0,
+"OWNER_NAME": "Westchester County DPW",
+"DESCRIPTION": "Traffic Closest to the Camera is going East on I-287",
+"DIRECTION": null,
+"LOCATION": "Old Westchester Ave EB & White Plains Ave (I-287)",
+"STATE": "NY",
+"STATUS": null,
+"URL": "http://www.westchestergov.com/cctv/camera22.jpg",
+"LASTUPDATED": null,
+"UNIQUEID": null,
+"TRAFFICLANDID": null,
+"CARS": null,
+"STATEWIDECCTV": null,
+"NEWDELETED": null,
+"REFRESH_RATE": "8 seconds",
+"LINK_ROAD": null,
+"COUNTY": "Westchester",
+"DOT_REGION": 8.0,
+"NY511_REGION": "Hudson Valley Catskill Area",
+"MILE_POINT": null
+},
+"geometry": {
+"x": -73.74982500003934,
+"y": 41.030692000205306
+}
+},
+{
+"attributes": {
+"OBJECTID": 19,
+"CCTV_ID": null,
+"CCTV_NAME": "SB King Approach - King St/Willett Ave/North Pearl St",
+"NATIVE_CCTV_ID": 23.0,
+"OWNER_NAME": "Westchester County DPW",
+"DESCRIPTION": "Traffic Approaching the Camera is going South on King St.",
+"DIRECTION": null,
+"LOCATION": "SB King Approach - King St/Willett Ave/North Pearl St",
+"STATE": "NY",
+"STATUS": null,
+"URL": "http://www.westchestergov.com/cctv/camera23.jpg",
+"LASTUPDATED": null,
+"UNIQUEID": null,
+"TRAFFICLANDID": null,
+"CARS": null,
+"STATEWIDECCTV": null,
+"NEWDELETED": null,
+"REFRESH_RATE": "8 seconds",
+"LINK_ROAD": null,
+"COUNTY": "Westchester",
+"DOT_REGION": 8.0,
+"NY511_REGION": "Hudson Valley Catskill Area",
+"MILE_POINT": null
+},
+"geometry": {
+"x": -73.66358099993788,
+"y": 41.00349400014733
+}
+}
+]
+}
