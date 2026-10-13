@@ -83,7 +83,7 @@ jobs:
           ldd /opt/sizeup/rtl-sdr/bin/rtl_fm | grep -q "librtlsdr.so.0 => /opt/sizeup/builds/rtl-sdr-blog-"
           readlink /opt/sizeup/rtl-sdr /opt/sizeup/trunk-recorder /opt/sizeup/whisper
           LD_LIBRARY_PATH=/opt/sizeup/rtl-sdr/lib:/opt/sizeup/trunk-recorder/lib/trunk-recorder /opt/sizeup/trunk-recorder/bin/trunk-recorder --version
-          find /opt/sizeup/trunk-recorder -name libunit_script.so | grep -q .
+          find -L /opt/sizeup/trunk-recorder -name libunit_script.so | grep -q .
           /opt/sizeup/whisper/bin/whisper-server --help > /dev/null
           readlink /opt/sizeup/models/whisper.bin
           sudo cat /var/lib/sizeup/trunk-recorder/config.json

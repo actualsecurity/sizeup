@@ -153,7 +153,7 @@ cmd_doctor() {
   else
     no "trunk-recorder doesn't run: install-linux.sh --rebuild"
   fi
-  if find /opt/sizeup/trunk-recorder -name libunit_script.so 2>/dev/null | grep -q .; then ok "trunk-recorder unit_script plugin"; else no "unit_script plugin missing"; fi
+  if find -L /opt/sizeup/trunk-recorder -name libunit_script.so 2>/dev/null | grep -q .; then ok "trunk-recorder unit_script plugin"; else no "unit_script plugin missing"; fi
   if [ -x /opt/sizeup/whisper/bin/whisper-server ]; then ok "whisper-server installed"; else no "whisper-server missing: run install-linux.sh again"; fi
   if [ -s /opt/sizeup/models/whisper.bin ]; then
     ok "whisper model: $(readlink /opt/sizeup/models/whisper.bin) ($(du -Lh /opt/sizeup/models/whisper.bin | cut -f1))"
