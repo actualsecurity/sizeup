@@ -553,7 +553,7 @@ Every CAD map (the event's, the large map, the Overview, `/monitor`) has a **Lay
 *Cameras*, *Incidents & closures*, *Roadwork*, *Message signs* (from 511NY), *Mileposts* and *Exits*
 (from the gazetteer, #67). Each is on or off per viewer (this browser's `localStorage`, key
 `sizeup.mapLayers`); cameras and incidents start on. Signs show from zoom 11, exits from 12, whole
-mileposts from 14 and the tenths from 15.5. A camera opens the **camera viewer**: the snapshot, its
+mileposts from 12 (whole miles) and the tenths from 14. A camera opens the **camera viewer**: the snapshot, its
 name, road and direction and when the image was taken, a new one every 10 s while it is open and the
 tab is visible (paused when hidden); it fits a 390 px phone. An incident, closure, roadwork or sign
 opens a small box with what 511NY says and when it was updated. An event with a map point shows its
