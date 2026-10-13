@@ -77,6 +77,9 @@ P25 South ──► trunk-recorder (per-call WAV + JSON: TG, unit IDs) ──►
 
 ## Milestones
 
+The first monitor's milestones (2026-10-01), kept for history. F0–F4 are built; the app is now the
+CAD + monitor. Current plan: [ROADMAP.md](ROADMAP.md) and the GitHub issues.
+
 - **F0** ✔ scaffold + two-tone decoder (tests).
 - **F1** paging chain on the bench: 470.2 NFM receiver, squelch, tones → page capture → STT;
   log every tone pair (learn PCFD / Rye Brook codes from the air).
