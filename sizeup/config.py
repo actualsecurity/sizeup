@@ -77,6 +77,10 @@ class Config:
     sdr_names: dict[str, str] = field(default_factory=dict)   # serial -> name shown in the web app ("adsb" -> "V3")
     sdr_ignore: tuple[str, ...] = ()   # serials never shown or used (a dongle dedicated to another app)
     sdr_auto: bool = False       # switch whatever RTL-SDRs are plugged in (rows come and go with the dongles)
+    # A dongle that appears with no job a person chose gets the first job in auto_assign_order that no
+    # other dongle has (sizeup/app.py _auto_assign). load() defaults it on; built directly (tests), off.
+    sdr_auto_assign: bool = False
+    sdr_auto_order: tuple[str, ...] = ("FG1", "Fire/EMS 15", "South 2")   # channel labels / "Fire/EMS 15" (P25)
     p25_recorder: str = ""       # trunk-recorder command line, started/stopped by sizeup
     p25_recorder_dir: str = ""   # its working directory (config.json + talkgroups.csv)
     clips_dir: str = ""
@@ -273,6 +277,38 @@ def _prealert(data: dict) -> dict:
                 prealert_heartbeat_stale_min=stale)
 
 
+P25_JOB = "Fire/EMS 15"   # the dongle job that runs trunk-recorder (sizeup/app.py P25_MODE)
+AUTO_ORDER = ("FG1", P25_JOB, "South 2")
+
+
+def _job_key(name: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", name.lower())
+
+
+def _auto_assign(radio: dict, channels: list) -> dict:
+    """[radio] auto_assign (default on) and auto_assign_order: the jobs a newly seen dongle gets, first
+    one no other dongle has. Entries name a channel by its label (any case and spacing: "fg1", "south2")
+    or the P25 system ("p25" or "Fire/EMS 15"; skipped while there's no [p25] recorder to run)."""
+    on = radio.get("auto_assign", True)
+    if not isinstance(on, bool):
+        raise ConfigError("radio.auto_assign: true or false")
+    if "auto_assign_order" not in radio:
+        return dict(sdr_auto_assign=on, sdr_auto_order=AUTO_ORDER)
+    raw = radio["auto_assign_order"]
+    if not isinstance(raw, list) or not all(isinstance(x, str) and x.strip() for x in raw):
+        raise ConfigError('radio.auto_assign_order: a list of jobs, e.g. ["fg1", "p25", "south2"]')
+    known = {_job_key(c.label): c.label for c in channels} | {"p25": P25_JOB, _job_key(P25_JOB): P25_JOB}
+    order: list[str] = []
+    for x in raw:
+        job = known.get(_job_key(x))
+        if job is None:
+            raise ConfigError(f"radio.auto_assign_order: {x!r} is not a channel label here or \"p25\" "
+                              f"(one of {', '.join(sorted({*(c.label for c in channels), 'p25'}))})")
+        if job not in order:
+            order.append(job)
+    return dict(sdr_auto_assign=on, sdr_auto_order=tuple(order))
+
+
 def _stt_aws(stt: dict) -> dict:
     """[stt] aws*: Amazon Transcribe (sizeup/transcribe.py). aws_channels: labels or talkgroup numbers."""
     try:
@@ -314,7 +350,8 @@ def load(path: str | Path) -> Config:
         raise ConfigError("SIZEUP_PORT: a port number") from None
     cloud = _cloud(data)
     state_dir = Path(os.environ["SIZEUP_STATE_DIR"]).expanduser() if os.environ.get("SIZEUP_STATE_DIR", "").strip() else base
-    radio = _take(data.get("radio", {}), "radio", {"rtl_fm", "channels", "tones_file", "shared_device", "start_mode", "sdrs", "sdr_names", "sdr_ignore"})
+    radio = _take(data.get("radio", {}), "radio", {"rtl_fm", "channels", "tones_file", "shared_device", "start_mode", "sdrs", "sdr_names", "sdr_ignore",
+                                                 "auto_assign", "auto_assign_order"})
     raw_sdrs = radio.get("sdrs", ())
     sdr_auto = raw_sdrs == "auto"
     sdrs = (() if sdr_auto else tuple(str(x) for x in raw_sdrs)) or ((str(radio["shared_device"]),) if radio.get("shared_device") else ())
@@ -467,6 +504,7 @@ def load(path: str | Path) -> Config:
         shared_device=radio.get("shared_device", "") or (sdrs[0] if sdrs else ""), start_mode=radio.get("start_mode", ""),
         sdrs=sdrs, sdr_names={str(k): str(v) for k, v in radio.get("sdr_names", {}).items()},
         sdr_ignore=tuple(str(x) for x in radio.get("sdr_ignore", ())), sdr_auto=sdr_auto,
+        **_auto_assign(radio, channels),
         p25_recorder=p25.get("recorder", ""), p25_recorder_dir=rel(p25.get("recorder_dir", "")),
         clips_dir=rel_state(storage.get("clips_dir", "captures/clips")), keep_hours=float(storage.get("keep_hours", 24)),
         audio_keep_hours=float(storage.get("audio_keep_hours", 12)),

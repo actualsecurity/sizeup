@@ -95,7 +95,9 @@ keeps working for local use, with a banner on its `/cad`: the CAD of record is t
 * Hub, Settings > Radios, Receivers: a **Station** row ("3 s" / "offline 12:03"; the tooltip says "connected, last
   seen 3 s ago" or "offline since 12:03:41"), then the station's rows as it reported them. Offline,
   those rows turn *unknown* with what they last said: never a stale "ok". The SDR switches only show
-  while the station is connected.
+  while the station is connected. A dongle whose job the station gave it by itself (`[radio]
+  auto_assign`, deploy/station/README.md) reads "· FG1 · auto" (the row's `set_by`: "person", "auto",
+  or missing from an older station, which then shows no "auto").
 * Hub, CAD header: "Station connected" / "Station offline 12:03".
 * Station, Settings > Radios, Receivers: a **Hub** row (connected, or offline with how many events are waiting;
   "not sending" when forwarding is on without a token). Station `/cad`: the "Hub connected" /

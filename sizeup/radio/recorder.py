@@ -101,6 +101,25 @@ class TrunkRecorder:
         exe = self.argv[0] if self.argv else ""
         return bool(exe) and Path(exe).is_file() and os.access(exe, os.X_OK)
 
+    def one_dongle(self) -> tuple[bool, str]:
+        """(can run now on the one dongle sizeup hands it, why not). sizeup points every source in
+        config.json at that dongle, so a config with more than one source would need more dongles
+        than a job gets. The shipped config (deploy/trunk-recorder/config.json) has one: 2.4 MS/s
+        at 477.19375 MHz covers the control channels 476.075-476.2375 and the voice channels."""
+        if not self.installed:
+            return False, f"trunk-recorder not installed ({self.argv[0] if self.argv else '?'})"
+        argv = self.argv
+        k = next((i for i, a in enumerate(argv) if a.startswith("--config")), None)
+        name = ((argv[k].split("=", 1)[1] if "=" in argv[k] else (argv[k + 1] if k + 1 < len(argv) else ""))
+                if k is not None else "config.json")
+        try:
+            n = len(json.loads((Path(self.workdir) / name).read_text()).get("sources", []))
+        except (OSError, ValueError, AttributeError):
+            return True, ""                      # no config of ours to read: run as configured
+        if n > 1:
+            return False, f"trunk-recorder's {name} has {n} sources: one dongle can't run it"
+        return True, ""
+
     def start(self) -> TrunkRecorder:
         if self._thread and self._thread.is_alive():
             return self

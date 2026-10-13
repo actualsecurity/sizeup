@@ -40,8 +40,8 @@ the station:
 6. Enter the **station token** (the hub's `SIZEUP_STATION_TOKEN`), then the Cloudflare Access service
    token's Client ID and Client Secret. Typing is hidden; nothing is shown or logged.
 7. It finishes with `sizeup-station doctor`. Plug in the dongles (any time): they are attached to WSL
-   within about 10 s. Open http://localhost:8091 and give each dongle its job (South 2, FG1 or
-   Fire/EMS 15), or do it from the hub's monitor.
+   within about 10 s, and each one gets a job by itself (see "Dongles get a job by themselves"
+   below). Open http://localhost:8091 to see or change them, or do it from the hub's monitor.
 
 Then once, by hand: in the BIOS/UEFI set **Restore on AC power loss** (or "After power failure") to
 **Power On**, so the PC boots by itself after a power cut.
@@ -151,10 +151,48 @@ Only one station should forward at a time (two would send everything twice).
    there). What it had queued goes up first.
 2. Move the dongles to the new station (all at once, or one by one: a dongle the Mac still has is
    simply not there for the PC). The PC's `sizeup-station status` lists each one as it arrives.
-3. On the new station: `sizeup-station status` shows the hub connected; give each dongle its mode at
+3. On the new station: `sizeup-station status` shows the hub connected; each dongle takes the next
+   job as it arrives (FG1, then Fire/EMS 15, then South 2). Check or change them at
    http://localhost:8091 (or from the hub's monitor). The hub's Station row says "connected".
 
 Both use station id `pcfd-hq`: to the hub it is the same station, moved. Going back is the reverse.
+
+## Dongles get a job by themselves
+
+`[radio] auto_assign = true` (the default): when a dongle shows up, at startup or plugged in while
+running, and no person has picked a job for it, it gets the first job in `auto_assign_order` that no
+**plugged-in** dongle has:
+
+1. `fg1`: FG1, 453.0375 NFM, MDC-1200 IDs
+2. `p25`: Fire/EMS 15, the county P25 system through trunk-recorder. One dongle runs it (2.4 MS/s at
+   477.19375 MHz covers the control channels 476.075-476.2375 and the voice channels); it is skipped
+   when trunk-recorder isn't installed or its config.json has more than one source.
+3. `south2`: South 2, 470.2 NFM, paging tones
+
+With all three covered, another dongle stays Off. The log says `sdr: V3 #2 (00000001) → FG1 (auto)`,
+and the station page and the hub's monitor show the row as "· FG1 · auto".
+
+* **FG1 first, even after a dongle dies.** A job whose dongle is unplugged or missing isn't covered:
+  the next dongle that arrives takes it (its program stops waiting on the missing one), so a
+  replacement for a dead FG1 dongle gets FG1.
+* **When the old dongle comes back:** if nobody took its job, it resumes it. If a replacement has it
+  and the job was set automatically, the old dongle is looked at like a new one: next free job, else
+  Off (`sdr: V4 (v4) back; FG1 is on V3 #2 → Fire/EMS 15 (auto)`). If a person had set it, it keeps
+  its job beside the replacement, with a warning in the log; the job keeps running where it is now
+  (on the replacement) until a person picks, or the replacement goes, and at the next restart the
+  person's dongle has it and the other one gets the next free job.
+* **Running dongles are never moved.** Only dongles arriving (and, at startup, those without a job)
+  are looked at: a dongle on P25 doesn't jump to FG1 when FG1's dongle disappears.
+* **Startup:** for up to 60 s after sizeup starts, a dongle without a job waits until the dongles
+  that had jobs are back, so the order USB attaches them in (usbipd, every 10 s) doesn't move jobs.
+* A job picked by a person (here or on the hub), **Off included**, is kept across restarts and
+  replugs and never changed automatically. Picking the job a dongle already has makes it the person's.
+* A dongle another app holds (rtl-claims, e.g. shortfinal on the Mac) is never taken. An auto job
+  that fails to start isn't retried; one that keeps failing is logged once and left where it is.
+* `sdr_modes.json` (next to `captures/clips`) records who set each job: `{serial: mode, ...,
+  "_set_by": {serial: "person" | "auto"}}`. Entries saved before this (no `"_set_by"`) count as not
+  set by a person, so an Off left over from the old "new dongles start Off" is filled.
+* `auto_assign = false`: new dongles start Off until someone picks a job (the old behaviour).
 
 ## When things go wrong, it comes back by itself
 
@@ -165,7 +203,7 @@ Both use station id `pcfd-hq`: to the hub it is the same station, moved. Going b
 | PC restart, Windows Update restart | The sizeup-wsl task starts WSL at boot, systemd starts the station, sizeup-usb attaches the dongles: a couple of minutes. |
 | Power cut | The same, once the PC powers on: BIOS "Restore on AC power loss = Power On". |
 | WSL stopped or updated | The keep-alive loop starts it again within 10 s (the task every 5 minutes, should the loop itself die). |
-| Dongle unplugged and plugged back in | sizeup-usb attaches it again within ~10 s; sizeup finds it by serial and resumes the mode it had. |
+| Dongle unplugged and plugged back in | sizeup-usb attaches it again within ~10 s; sizeup finds it by serial and resumes the mode it had (one that never had one gets the next job by itself). |
 | Hub or internet down | Everything queues in `/var/lib/sizeup/state/outbox.sqlite` and goes up in order when the hub is back, also across restarts (docs/cloud.md). The hub shows "Station offline since ...". |
 | Missing or wrong token | The station runs and queues; its page and `doctor` say what is missing: `sizeup-station secrets`. |
 | Disk filling up | Audio older than 12 h is deleted (every 10 min); the outbox drops the oldest queued clips over 300 MB (never transcripts); the journal is capped at 200 MB. |
