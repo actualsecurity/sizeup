@@ -233,6 +233,11 @@
   .q-fold .sec-toggle .sum { flex: none; }
   .closed-foot { display: flex; align-items: center; gap: var(--s-1); }
   .closed-foot .menu-btn { margin-block: calc(-1 * var(--s-1)); }     /* the "⋯" adds no height to the row */
+  /* the incident's Timeline, folded to start with its count and the latest entry on one line (#107); the note box
+     under it is outside the fold */
+  .tl-fold .sec-toggle .sum { flex: none; }
+  .tl-fold .sec-toggle .tl-last { flex: 1 1 0; min-inline-size: 0; white-space: nowrap; }
+  .tl-fold.open .sec-toggle .caret { transform: rotate(90deg); }
   .evtable td.act { text-align: end; padding-inline: 0 var(--s-1); }
   .sec-toggle .sum { font-size: var(--fs-xs); font-weight: 400; overflow: hidden; text-overflow: ellipsis; }
   .other > li.og { padding: 0; }

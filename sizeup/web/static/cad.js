@@ -47,6 +47,7 @@ const cad = {
   map: null, marker: null, mapSig: "",
   listSig: "", rcEditing: null, openUnit: null,
   closedOpen: false,         // the queue's Closed 12h section unfolded (#89; remembered: closedFold)
+  timelineOpen: false,       // the incident's Timeline unfolded (#107; remembered: timelineFold)
   ask: null,                 // {uid, status, where}: asking why (out of service / unmanned)
   hooks: [],                 // more renderers (settings.js), called on every render
   txRev: 0,                  // bumped when a transmission row's own state changes (re-transcribe waiting): redraw them
@@ -1182,8 +1183,29 @@ function playForEvent(inc, e) {
   return d && d.has_audio ? d.id : null;
 }
 const EVENT_KINDS = { note: "comment", status: "status", system: "system", attach: "attached", prealert: "pre-alert", reopened: "reopened" };
+// The latest entry, one line, for the folded Timeline's header: "19:34:21 status · 2392 on location"
+function eventLine(e) {
+  const text = e.kind === "note" && e.units ? noteText(e) : e.text;
+  return `${fmtTime(e.at, true)} ${EVENT_KINDS[e.kind] || e.kind} · ${(text || "").replace(/\s+/g, " ").trim()}`;
+}
+// The Timeline fold, remembered per browser like Closed 12h (#107): "1" open, else folded.
+function timelineFold(open) {
+  if (open === undefined) return store("sizeup.cad.timelineOpen") === "1";
+  cad.timelineOpen = open;
+  store("sizeup.cad.timelineOpen", open ? "1" : "0");
+  const inc = selected();
+  if (inc) renderEvents(inc);
+}
 function renderEvents(inc) {
-  syncList($("#d-events"), (inc.events || []).slice().reverse(), {
+  // Folded to start: the count and the latest entry in the header, the list hidden; the note box below stays (#107)
+  const events = inc.events || [], last = events[events.length - 1], open = cad.timelineOpen;
+  $("#d-timeline").classList.toggle("open", open);
+  $("#d-events-toggle").setAttribute("aria-expanded", String(open));
+  setText($("#d-events-n"), events.length ? `· ${events.length}` : "");
+  setText($("#d-events-last"), last ? eventLine(last) : "");
+  show($("#d-events-last"), !open && !!last);
+  show($("#d-events"), open);
+  syncList($("#d-events"), events.slice().reverse(), {
     key: (e) => String(e.id),
     sig: (e) => `${e.id}|${e.units || ""}`,
     make: () => el("li", "ev"),
@@ -2611,6 +2633,7 @@ $("#d-close").addEventListener("click", () => {
 });
 $("#d-reopen").addEventListener("click", () => { const inc = selected(); if (inc) reopenIncident(inc.id); });
 $("#q-closed-toggle").addEventListener("click", () => closedFold(!cad.closedOpen));
+$("#d-events-toggle").addEventListener("click", () => timelineFold(!cad.timelineOpen));
 $("#c-cancel").addEventListener("click", () => show($("#close-form"), false));
 $("#close-form").addEventListener("submit", closeIncident);
 $("#d-edit").addEventListener("click", openEdit);
@@ -2857,6 +2880,7 @@ async function boot() {
   }
   await loadWho();
   cad.closedOpen = closedFold();
+  cad.timelineOpen = timelineFold();
   route();
   cad.live = liveState("/api/cad/stream", "/api/cad/state", onState);
   tick();
