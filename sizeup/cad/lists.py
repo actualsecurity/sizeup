@@ -27,7 +27,8 @@ shows). A new export can replace the file without a code change:
     dispatch_wording                 the dispatch as templates (new / add-on / upgrade, full response,
                                      remarks, lead-in: "Port Chester and Rye Brook Fire" when theirs go)
     dispatch_tones                   joint town -> its alert tones (null: not known, PCFD's are played)
-    run_cards                        the default cards seeded once into the database. A slot is
+    run_cards                        the default cards seeded once into the database (remarks: a line for
+                                     the dispatcher, shown with the recommendation, #87). A slot is
                                      {"kind": "engine", "count": 3} ("ladder|tower": either; "any": any
                                      apparatus, ANY_KIND), {"unit": "2398"} or {"all": "Port Chester FD"}
                                      (the full department: sizeup/cad/runcards.py)
@@ -588,6 +589,8 @@ def build(d: dict, where: str, path: str | Path = "") -> Lists:
         if not isinstance(c, dict) or not isinstance(c.get("slots"), list):
             raise ListsError(f"{where}: run_cards[{i}]: an object with type and slots")
         check_key(str(c.get("type", "")), f"run_cards[{i}].type")
+        if not isinstance(c.get("remarks", ""), str) or len(c.get("remarks", "")) > 300:
+            raise ListsError(f"{where}: run_cards[{i}].remarks: text, up to 300 characters")
         if sum(1 for s in c["slots"] if isinstance(s, dict) and "all" in s) > 1:
             raise ListsError(f"{where}: run_cards[{i}]: one full department per card")
         for s in c["slots"]:

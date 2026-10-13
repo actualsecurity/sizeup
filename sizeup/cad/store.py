@@ -112,7 +112,8 @@ CREATE TABLE run_cards (
   type TEXT NOT NULL UNIQUE,            -- "STRU" or "ALARM/COMM"
   spoken TEXT NOT NULL DEFAULT '',      -- '' = the data file's phrase for the type
   is_default INTEGER NOT NULL DEFAULT 0,   -- seeded stand-in, not yet edited to PCFD policy
-  sort INTEGER NOT NULL DEFAULT 0
+  sort INTEGER NOT NULL DEFAULT 0,
+  remarks TEXT NOT NULL DEFAULT ''      -- a line for the dispatcher ("Staging: ..."), shown, never spoken (#87)
 );
 CREATE TABLE run_card_slots (
   card_id INTEGER NOT NULL REFERENCES run_cards(id) ON DELETE CASCADE,
@@ -400,6 +401,9 @@ class Store:
         ecols = {r["name"] for r in self.db.execute("PRAGMA table_info(events)")}
         if ecols and "places" not in ecols:              # a note's "@" places (#67), 2026-10-13: old notes keep ''
             self.db.execute("ALTER TABLE events ADD COLUMN places TEXT NOT NULL DEFAULT ''")
+        rcols = {r["name"] for r in self.db.execute("PRAGMA table_info(run_cards)")}
+        if rcols and "remarks" not in rcols:              # a run card's remarks (#87), 2026-10-13: old cards keep ''
+            self.db.execute("ALTER TABLE run_cards ADD COLUMN remarks TEXT NOT NULL DEFAULT ''")
         tcols = {r["name"] for r in self.db.execute("PRAGMA table_info(radio_traffic)")}
         for col in ("alt_text", "alt_model"):            # the second transcript ("both": whisper next to AWS), 2026-10-08
             if tcols and col not in tcols:

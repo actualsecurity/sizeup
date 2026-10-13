@@ -301,7 +301,7 @@ def test_settings_export_import_round_trip_with_a_dry_run(tmp_path):
     post(a, "users", action="add", name="Dana", role="admin")
     a.save_run_card({"type": "STRU", "slots": [{"kind": "engine", "count": 4}, {"unit": "E66"}]})
     data = json.loads(json.dumps(a.settings_export()))
-    assert data["format"] == "sizeup-cad-settings" and data["defaults_version"] == "2026-10-07.4"
+    assert data["format"] == "sizeup-cad-settings" and data["defaults_version"] == "2026-10-13.1"
 
     b = make_cad(tmp_path / "b")
     dry = post(b, "import", action="dry_run", settings=data)

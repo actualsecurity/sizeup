@@ -552,7 +552,8 @@ heartbeat_stale_min = 90
 
 Every CAD map (the event's, the large map, the Overview, `/monitor`) has a **Layers** button:
 *Cameras*, *Incidents & closures*, *Roadwork*, *Message signs* (from the sources below), *Mileposts*
-and *Exits* (from the gazetteer, #67, #83). Each is on or off per viewer (this browser's
+and *Exits* (from the gazetteer, #67, #83), and *Airport* with *Approaches*
+([the airport](#the-airport-hpn-the-airport-layer-places-alerts), #87). Each is on or off per viewer (this browser's
 `localStorage`, key `sizeup.mapLayers`); cameras and incidents start on. Signs show from zoom 11,
 exits and whole mileposts from 12, the tenths from 14. A camera opens the **camera viewer**: the
 snapshot, its name, road, direction and milepost, which source it is from and when the image was
@@ -681,6 +682,48 @@ signs_every_min = 5              # at least 1
 cameras_every_min = 60           # at least 10
 # key: env SIZEUP_511NY_KEY (the hub: SSM /sizeup-hub/511ny-key); enabled = false turns everything off
 ```
+
+## The airport (HPN): the Airport layer, places, alerts
+
+> "the airport is part of Port Chester / Rye Brook area, we respond (Port Chester) to their L2+ alerts"
+> (user, 2026-10-13; GitHub #87)
+
+**On the map.** The Layers box has **Airport** (the field's outline at any zoom; from zoom 12 the runways
+with their numbers at the ends, the taxiways, the aprons; from 13 the hangars and other buildings and the
+points of interest: the terminal, the FBOs, the control tower, the Command Post / EOC staging area, the
+two entrances) and, under it, **Approaches** (off by default: the final approach paths to runways 16 and 34
+from the FAA CIFP and the fixes on them, labelled, CZIMR and ISLET among them, so "inside CZIMR" can be
+read against the map). Both are remembered per viewer like the other layers; the Airport layer also comes
+on by itself, on that map only, for an event at the airport (within 1.5 km of the field, or typed Airport),
+marked "event here" in the box until unticked, and the event's map takes in the whole field. The data is
+`data/khpn_airport.geojson` (`GET /api/cad/airport`; `tools/fetch_airport.py` from the OSM and FAA files in
+`data/airport/`, sources in the README), drawn by `sizeup/web/static/airport.js`, which `maplayers.js` lists
+and switches.
+
+**Places.** The "@" search and the location box know the airport's places (category *airport*): `@hpn`
+lists them all; `@staging way`, `@airport command post` or `@airport EOC` find the **Airport Command Post /
+EOC (staging)** at 1 Airport Emergency Staging Way (the NYS address point: the spot is to be confirmed on
+the ground); `@runway 16`, `@taxiway B`, `@gate C`, `@million air`, `@terminal`, `@airport entrance`. The
+ARFF station and Signature's office are not in the data: add them in Settings > Places when known.
+
+**The event.** Type **Airport** with subtypes *Alert 1* (in-flight difficulty, airport standby: PCFD not
+due), *Alert 2* (major difficulty, possible crash: PCFD responds), *Alert 3* (a crash on or near the
+airport), *Fuel spill*, *Aircraft fire (ground)*, *Other*: a proposal (`data/cad_lists.json`, marked "to
+confirm" in Settings like the other guesses) for the department to confirm, with the spoken phrases ("an
+Alert 2 at Westchester County Airport"). Run cards for **Alert 2** (the duty officer and the full
+department) and **Alert 3** (the same, with a mutual-aid note) are editable defaults marked not yet PCFD
+policy like the rest; each carries **remarks** (a new line on every card, shown with the recommendation
+and never spoken): "Staging: Airport Command Post / EOC, 1 Airport Emergency Staging Way". An Airport event
+created without a location is placed at the terminal, 240 Airport Rd (Rye Brook), so its map centres on
+the field.
+
+**Pages and the talkgroup.** A 60 Control page for us (by tones, #84) or a Fire/EMS dispatch that names
+the airport ("Westchester County Airport", "the airport", "HPN") or an alert level ("Alert 2", "alert
+two") opens the queued event as Airport with the level set (`sizeup/cad/airport.py` `heard()`; a fuel spill
+or an aircraft fire at the airport by name takes that subtype). "240 Airport Road" alone is not the
+airport: a fire alarm at the terminal stays an alarm. While exactly one Airport event is open, every
+transmission on the **Airport Incident** talkgroup (333) is linked to it (reason "Airport TG"), whoever is
+talking; two open and it can't tell whose, so none; a link a person removes is not put back.
 
 ## The hub's storage
 

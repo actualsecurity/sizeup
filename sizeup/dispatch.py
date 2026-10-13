@@ -17,6 +17,10 @@ from dataclasses import dataclass, field
 
 # (display type, category, phrases). First match wins, so specific before generic.
 INCIDENT_TYPES: list[tuple[str, str, tuple[str, ...]]] = [
+    # The airport's alert levels (#87: an Alert 2 or 3 brings Port Chester): the level is read again by
+    # sizeup/cad/airport.py when the page becomes an event.
+    ("Airport alert", "fire", ("alert 1", "alert one", "alert 2", "alert two", "alert 3", "alert three", "airport alert",
+                               "aircraft emergency", "aircraft crash", "plane crash", "aircraft down")),
     ("Working fire", "fire", ("10 75", "ten seventy five", "1075", "working fire", "working structure fire")),
     ("Structure fire", "fire", ("structure fire", "house fire", "building fire", "fire in a building",
                                 "apartment fire", "commercial fire", "reported structure", "fire in the building")),

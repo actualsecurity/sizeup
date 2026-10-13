@@ -28,6 +28,8 @@ GET  /api/cad/places?q=287 eb mm 10&near=lat,lon&iid=&limit=
                                           category?, detail?, route?, dir?, value?, score}]}, our towns first, then
                                           nearest to near (else the event iid's point); read only: viewers too
 GET  /api/cad/runcards                    run cards
+GET  /api/cad/airport                     the Airport map layer (#87): data/khpn_airport.geojson, with "airport" (where the
+                                          field is) and "sources"; {} when the file isn't there
 GET  /api/cad/incident/<id>               one event with its units, chronology and dispatches
 GET  /api/cad/history                     the Incident database: every numbered event, newest first
 GET  /api/cad/admin                       record counts and the next event number
@@ -95,7 +97,7 @@ POST /api/cad/incident/<id>/attach        {unit_ids, operator?}  units on a non-
 POST /api/cad/unit/<id>/status            {status, operator?, note?}  IC (incident command): one unit per event,
                                           whoever held it there goes back to OL (command_from: [names])
 POST /api/cad/unit/<id>/station           {station, operator?}  home firehouse (data/firehouses.json name; '' unsets)
-POST /api/cad/runcards                    {type (TYPE or TYPE/SUBTYPE), slots, spoken?, rename_from?}   add / edit one
+POST /api/cad/runcards                    {type (TYPE or TYPE/SUBTYPE), slots, spoken?, remarks?, rename_from?}   add / edit one
 POST /api/cad/runcards/delete             {type}
 GET  /api/cad/radios                      the radio registry (radio ID -> rig), conflicts, units not fitting
                                           the ID pattern, the edit log
@@ -120,6 +122,7 @@ import json
 import re
 from urllib.parse import parse_qs
 
+from sizeup.cad import airport
 from sizeup.cad.activity import CSV_MAX_ROWS, KINDS, MAX_ROWS
 from sizeup.cad.service import Cad
 from sizeup.cad.settings import LastAdmin
@@ -431,6 +434,8 @@ class CadApi:
                 return _json(200, self.cad.state())
             if path == "/api/cad/runcards":
                 return _json(200, {"run_cards": self.cad.run_cards()})
+            if path == "/api/cad/airport":
+                return _json(200, airport.layer())
             if path == "/api/cad/history":
                 return _json(200, self.cad.history())
             if path == "/api/cad/admin":

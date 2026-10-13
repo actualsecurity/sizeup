@@ -4,7 +4,9 @@
 //
 //   Layers        Cameras, Incidents & closures, Roadwork, Message signs (the NYS Thruway Authority's public
 //                 feeds and 511NY's, through the hub: GET /api/cad/roads, sizeup/roads.py; each item says its
-//                 source), Mileposts, Exits (the gazetteer's, #67). Each one on / off per viewer (localStorage
+//                 source), Mileposts, Exits (the gazetteer's, #67), Airport with its Approaches sub-toggle (airport.js,
+//                 #87: drawn by that module, listed and switched here; on by itself for an event at the airport,
+//                 focus(inc)). Each one on / off per viewer (localStorage
 //                 "sizeup.mapLayers"); cameras and incidents on at first. Signs from zoom 11, exits and mileposts from 12
 //                 (the tenths of a mile from 14). The box says which sources are on and when each last updated
 //                 ("Data: New York State Thruway Authority", "511NY, updated hh:mm"); no source at all: the
@@ -33,10 +35,13 @@ window.MapLayers = (() => {
     { key: "signs", label: "Message signs", feed: true, minzoom: 11, on: false },
     { key: "mileposts", label: "Mileposts", feed: false, minzoom: 12, on: false },
     { key: "exits", label: "Exits", feed: false, minzoom: 12, on: false },
+    { key: "airport", label: "Airport", feed: false, minzoom: 0, on: false, plugin: "AirportLayer" },          // airport.js (#87)
+    { key: "approaches", label: "Approaches", feed: false, minzoom: 0, on: false, plugin: "AirportLayer", sub: "airport" },
   ];
   const SOURCE_NOTE = { "511NY": "powered by 511NY", Thruway: "Data: New York State Thruway Authority" };
   const attributionFor = (d) => ((d && d.sources) || []).filter((s) => s.configured)      // the map's corner is small: names only
     .map((s) => `<a href="${esc(s.link)}" target="_blank" rel="noopener">${esc(s.short === "Thruway" ? "NYS Thruway Authority" : s.label)}</a>`).join(" · ");
+  const plugin = (l) => (l.plugin ? window[l.plugin] : null);
 
   function h(tag, cls, text) {
     const n = document.createElement(tag);
@@ -168,7 +173,7 @@ window.MapLayers = (() => {
     if (key === "exits") return fc((d.exits || []).map((x) => pt(x, { label: x.value ? `Exit ${x.value}` : x.label, name: x.label })));
     return fc([]);
   }
-  const available = (d, l) => !!d && (l.feed ? !!d.configured : !!d.highway_places);
+  const available = (d, l) => (l.plugin ? !!(plugin(l) && plugin(l).ready()) : !!d && (l.feed ? !!d.configured : !!d.highway_places));
 
   // ---- one map's layers and its Layers control --------------------------------------------------------------
   const maps = new Set();
@@ -181,11 +186,12 @@ window.MapLayers = (() => {
       this.opts = opts;
       this.ready = false;
       this.sigs = {};
+      this.force = {};          // layers on for this map's event (airport: an event at the field, #87), until unticked
       this.btn = h("button", "cm-btn sm");
       this.btn.type = "button";
       if (window.Icon) this.btn.append(Icon("layers"));
       this.btn.append("Layers");
-      this.btn.title = "Map layers: cameras, incidents, roadwork, signs, mileposts, exits";
+      this.btn.title = "Map layers: cameras, incidents, roadwork, signs, mileposts, exits, the airport";
       this.btn.setAttribute("aria-expanded", "false");
       this.btn.setAttribute("aria-haspopup", "true");
       this.btn.addEventListener("click", (e) => { e.stopPropagation(); this.toggle(); });
@@ -220,7 +226,12 @@ window.MapLayers = (() => {
       for (const [name, img] of Object.entries(set)) if (!map.hasImage(name)) map.addImage(name, img, { pixelRatio: 2 });
       const before = map.getLayer("firehouse") ? "firehouse" : undefined;
       const glyphs = !!(map.getStyle() && map.getStyle().glyphs);
+      if (window.AirportLayer) {                       // the airport under the markers (airport.js, #87)
+        AirportLayer.init(map, before, glyphs);
+        AirportLayer.subscribe(() => { this.focus(this.focused); this.applyVisibility(); if (!this.panel.hidden) this.renderPanel(); });
+      }
       for (const l of LAYERS) {
+        if (l.plugin) continue;
         const src = `ml-${l.key}`;
         if (map.getSource(src)) continue;
         const attr = l.key === "cameras" ? attributionFor(store.data) : "";
@@ -267,6 +278,7 @@ window.MapLayers = (() => {
       if (!this.ready && this.mapReady && this._init) this._init();
       if (this.ready) {
         for (const l of LAYERS) {
+          if (l.plugin) continue;
           const data = features(d, l.key), sig = JSON.stringify(data);
           if (this.sigs[l.key] === sig) continue;
           this.sigs[l.key] = sig;
@@ -278,9 +290,21 @@ window.MapLayers = (() => {
       if (!this.panel.hidden) this.renderPanel();
     }
 
+    on(key) { return !!(prefs[key] || this.force[key]); }
+    focus(inc) {                  // the map's event (cadmap.js RigMap.update): at the airport, that layer comes on
+      this.focused = inc || null;
+      const on = !!(window.AirportLayer && AirportLayer.near(inc));
+      if (on === !!this.force.airport) return;
+      this.force.airport = on;
+      this.applyVisibility();
+      if (!this.panel.hidden) this.renderPanel();
+    }
+
     applyVisibility() {
       if (!this.ready) return;
+      if (window.AirportLayer) AirportLayer.apply(this.map, this.on("airport"), this.on("approaches"));
       for (const l of LAYERS) {
+        if (l.plugin) continue;
         for (const id of [`ml-${l.key}`, `ml-${l.key}-tenths`]) {
           if (this.map.getLayer(id)) this.map.setLayoutProperty(id, "visibility", prefs[l.key] ? "visible" : "none");
         }
@@ -313,14 +337,16 @@ window.MapLayers = (() => {
       head.append(h("span", "spacer"), x);
       const list = h("div", "ml-list");
       for (const l of LAYERS) {
-        const ok = available(d, l);
-        const lab = h("label", "check");
+        const ok = available(d, l) && !(l.sub && !this.on(l.sub));
+        const lab = h("label", "check" + (l.sub ? " ml-sub" : ""));
         const cb = h("input");
         cb.type = "checkbox";
-        cb.checked = !!prefs[l.key];
+        cb.checked = this.on(l.key);
         cb.disabled = !ok;
-        cb.addEventListener("change", () => setLayer(l.key, cb.checked));
+        cb.addEventListener("change", () => { this.force[l.key] = false; setLayer(l.key, cb.checked); });
         lab.append(cb, h("span", "", l.label));
+        if (l.key === "airport" && this.force.airport && !prefs.airport) lab.append(h("span", "dim small", "event here"));
+        if (l.plugin && plugin(l) && !plugin(l).ready() && plugin(l).note()) lab.title = plugin(l).note();
         if (ok && l.minzoom > 0 && this.map && this.map.getZoom() < l.minzoom) lab.append(h("span", "dim small", "zoom in"));
         const feed = l.key === "incidents" || l.key === "roadwork" ? "events" : l.key;
         if (ok && l.feed && (d.sources || []).some((s) => s.status && s.status[feed] && s.status[feed].error)) {
@@ -343,6 +369,7 @@ window.MapLayers = (() => {
         this.panel.append(line);
       }
       if (d && d.configured && d.note) this.panel.append(h("div", "dim small", d.note));
+      if (window.AirportLayer && AirportLayer.credit()) this.panel.append(h("div", "dim small", AirportLayer.credit()));
     }
 
     clicked(key, id) {

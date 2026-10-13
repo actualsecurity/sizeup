@@ -26,6 +26,12 @@ licences and fetch dates are in its `meta` table):
   NY-120 and NY-120A, the Hutch's offset to 60 Control's own mileage, #83) — NYSDOT GIS;
   New England Thruway (I-95) mileposts — NYS Thruway Authority GIS; exits and named places
   © OpenStreetMap contributors, ODbL (each row keeps its source)
+- Westchester County Airport (HPN, `tools/fetch_airport.py`, #87): `data/khpn_airport.geojson` (the Airport map
+  layer) and the airport's `places` rows (terminal, FBOs, hangars, gates, runway ends, taxiways, the Command
+  Post / EOC staging area, the entrances), from `data/airport/`: OSM aeroway features © OpenStreetMap
+  contributors, ODbL (`khpn_surface.geojson`); FAA CIFP cycle 261001 approaches and Chart Supplement runway
+  ends, public domain (`khpn_procedures.geojson`); NYS address points (CC0) and TIGER intersections (public
+  domain) already in the gazetteer
 
 Map tiles: OpenFreeMap / OpenMapTiles, © OpenStreetMap contributors.
 
