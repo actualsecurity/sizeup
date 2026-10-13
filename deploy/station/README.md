@@ -8,7 +8,8 @@ outbound HTTPS, through an outbox that keeps it all while the hub or the interne
 forwarding, no inbound firewall rule. The hub is the CAD of record and says the dispatches (Amazon
 Polly); the main channels (South 2, FG1, Fire/EMS 15) can be transcribed there with Amazon
 Transcribe (Settings > Radios, synced to the station). The station's own page
-(http://localhost:8091) is for diagnostics only. Architecture and failure behaviour: [docs/cloud.md](../../docs/cloud.md).
+(http://localhost:8091, [below](#the-station-page)) is about the station only: its radios, what it
+heard and the hub link. It has no CAD. Architecture and failure behaviour: [docs/cloud.md](../../docs/cloud.md).
 
 Three ways to run it:
 
@@ -41,7 +42,8 @@ the station:
    token's Client ID and Client Secret. Typing is hidden; nothing is shown or logged.
 7. It finishes with `sizeup-station doctor`. Plug in the dongles (any time): they are attached to WSL
    within about 10 s, and each one gets a job by itself (see "Dongles get a job by themselves"
-   below). Open http://localhost:8091 to see or change them, or do it from the hub's monitor.
+   below). Open http://localhost:8091 (the station page, Radios) to see or change them, or do it
+   from the hub's monitor.
 
 Then once, by hand: in the BIOS/UEFI set **Restore on AC power loss** (or "After power failure") to
 **Power On**, so the PC boots by itself after a power cut.
@@ -147,13 +149,13 @@ with `/etc/sizeup/config.toml.dist` after an update.
 
 Only one station should forward at a time (two would send everything twice).
 
-1. On the Mac's console: Settings > System > Station, turn **Forward to hub** off (or stop sizeup
-   there). What it had queued goes up first.
+1. On the Mac: its station page's Settings (Settings > System > Station if it runs the CAD), turn
+   **Forward to hub** off (or stop sizeup there). What it had queued goes up first.
 2. Move the dongles to the new station (all at once, or one by one: a dongle the Mac still has is
    simply not there for the PC). The PC's `sizeup-station status` lists each one as it arrives.
 3. On the new station: `sizeup-station status` shows the hub connected; each dongle takes the next
    job as it arrives (FG1, then Fire/EMS 15, then South 2). Check or change them at
-   http://localhost:8091 (or from the hub's monitor). The hub's Station row says "connected".
+   http://localhost:8091, Radios (or from the hub's monitor). The hub's Station row says "connected".
 
 Both use station id `pcfd-hq`: to the hub it is the same station, moved. Going back is the reverse.
 
@@ -205,7 +207,7 @@ and the station page and the hub's monitor show the row as "· FG1 · auto".
 | WSL stopped or updated | The keep-alive loop starts it again within 10 s (the task every 5 minutes, should the loop itself die). |
 | Dongle unplugged and plugged back in | sizeup-usb attaches it again within ~10 s; sizeup finds it by serial and resumes the mode it had (one that never had one gets the next job by itself). |
 | Hub or internet down | Everything queues in `/var/lib/sizeup/state/outbox.sqlite` and goes up in order when the hub is back, also across restarts (docs/cloud.md). The hub shows "Station offline since ...". |
-| Missing or wrong token | The station runs and queues; its page and `doctor` say what is missing: `sizeup-station secrets`. |
+| Missing or wrong token | The station runs and queues; its page (Settings) and `doctor` say what is missing: `sizeup-station secrets`. |
 | Disk filling up | Audio older than 12 h is deleted (every 10 min); the outbox drops the oldest queued clips over 300 MB (never transcripts); the journal is capped at 200 MB. |
 
 ## CPU: the i5-6400T
@@ -218,7 +220,7 @@ about one core all the time; each rtl_fm a little. So:
 * whisper on the station does the rest with **small.en (q5_1)**, the default, on 3 threads.
   `large-v3-turbo-q5_0` is more accurate but several times slower: only if the station transcribes
   little. `base.en` if it falls behind.
-* In Settings > Radios, **turn off transcription for talkgroups you don't need** (they can stay
+* In Settings > Radios on the hub, **turn off transcription for talkgroups you don't need** (they can stay
   recorded): every transmission whisper skips is CPU for the ones that matter.
 * `sizeup-station status` shows the load: above 4 for long, transcribe less or use a smaller model.
 
@@ -243,21 +245,41 @@ on `/api/station/*` instead of a service token, leave the Access id and secret o
 is then the only gate. The service token is the station, never a person: on the hub it is never
 taken for an operator.
 
-## Settings > System > Station
+## The station page
 
-On the station's own console (`/cad` > Settings > System), the **Station** card:
+http://localhost:8091 on the station (`/monitor` opens its Monitor). The header says **Station**, the
+station id (`pcfd-hq`), the hub link's state (Hub connected / Hub unreachable / Hub not sending / Not
+forwarding) and links to the CAD on the hub. Three views:
 
-* **Forward to hub** on / off. Off: all-in-one again; radios and speech-to-text keep running.
-* **Hub URL** and the status (Connected / Offline since 12:03 / N waiting / not sending, and why).
-* Where each secret came from, or that it is missing.
-* **Test connection**: the hub's `/healthz`, then its station path with the token and the Access
-  headers ("OK: hub reached, token accepted", or the HTTP code and what it means).
-  `sizeup-station doctor` runs the same test.
+* **Radios**: the receivers, speech-to-text and the Hub row; each dongle's job (and whether shortfinal
+  holds it); the paged incident; Channels (record, transcribe, engine: set on the hub while this
+  forwards, locked here); the AWS vocabulary; re-run speech-to-text; the disk.
+* **Monitor**: the pages and transmissions this station heard, newest first, with the audio, the talker
+  (rig and radio ID), the channel and the transcript. Channels on AWS say "Transcribed on the hub
+  (AWS)": their text is on the hub. Search and a channel filter.
+* **Settings**, the **Hub link** card:
+  * **Forward to hub** on / off. Off: nothing is sent; radios and speech-to-text keep running, and what
+    is already queued waits here.
+  * **Hub URL** and the status (Connected / Offline since 12:03 / N waiting / not sending, and why), the
+    last contact, what waits in the outbox, the last error.
+  * Where each secret came from, or that it is missing (never a value).
+  * **Test connection**: the hub's `/healthz`, then its station path with the token and the Access
+    headers ("OK: hub reached, token accepted", or the HTTP code and what it means).
+    `sizeup-station doctor` runs the same test.
 
-Each change is in the Settings audit log. The choice is kept in `state/cloud.json` and survives
-restarts; from the first change there it wins over `config.toml`. Keep the clock on network time:
-the hub warns when the two differ by more than 5 s. Deleting `state/outbox.sqlite` throws away
-whatever hadn't gone up yet.
+  and **This station**: id, name, role, version, build. The rest of the checks and the logs are on the
+  PC: `sizeup-station status`, `doctor`, `logs -f`.
+
+No CAD here: no dispatch console, events, run cards, CAD lists or users, dispatch voice settings or
+wall board. `/cad` comes back to this page with "This is the station. The CAD is on the hub: ...", and
+the CAD's API answers `409` ("this is the station: the CAD is on the hub"). The station keeps its own
+`state/cad.sqlite` for what its radios use (radio IDs for talker names, the channel choices the hub
+sends, the vocabulary).
+
+Each change of the hub link (with the Operator name from the header) is kept in the settings audit.
+The choice is kept in `state/cloud.json` and survives restarts; from the first change there it wins
+over `config.toml`. Keep the clock on network time: the hub warns when the two differ by more than
+5 s. Deleting `state/outbox.sqlite` throws away whatever hadn't gone up yet.
 
 ## The voice
 

@@ -1,12 +1,12 @@
 """The design system (static/style.css) holds: cascade layers in order, one token set, the views (cad.css,
-cadmap.css, settings.css) only lay out on the tokens, every component the pages and scripts use is defined
+cadmap.css, settings.css, station.css) only lay out on the tokens, every component the pages and scripts use is defined
 once in the components layer, and every class they use exists. tools/ui_consistency.py checks the rendered
 result in a browser; this is the static half (no browser)."""
 import re
 from pathlib import Path
 
 STATIC = Path(__file__).resolve().parent.parent / "sizeup" / "web" / "static"
-VIEWS = ("cad.css", "cadmap.css", "settings.css")
+VIEWS = ("cad.css", "cadmap.css", "settings.css", "station.css")
 LAYERS = ["vendor", "reset", "tokens", "base", "components", "views", "utilities"]
 
 # The components (style.css @layer components): the vocabulary the views and scripts build with.
@@ -187,7 +187,7 @@ def test_focus_ring_and_targets():
 def used_classes():
     """Class names the page and the scripts put on elements."""
     found = set()
-    html = (STATIC / "cad.html").read_text()
+    html = "".join((STATIC / page).read_text() for page in ("cad.html", "station.html"))
     for m in re.findall(r'class="([^"]*)"', html):
         found |= set(m.split())
     for js in STATIC.glob("*.js"):

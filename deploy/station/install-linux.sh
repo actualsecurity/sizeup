@@ -605,7 +605,7 @@ else
     sleep 2
   done
   if curl -fsS --max-time 3 "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1; then
-    say "sizeup-station is up: http://localhost:$PORT (diagnostics) · status: sizeup-station status · checks: sizeup-station doctor"
+    say "sizeup-station is up: http://localhost:$PORT (station page) · status: sizeup-station status · checks: sizeup-station doctor"
   else
     warn "sizeup-station hasn't answered yet: sizeup-station logs"
   fi

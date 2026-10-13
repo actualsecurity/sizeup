@@ -150,7 +150,7 @@
   .sm-url { flex: 1 1 18rem; max-inline-size: 32rem; }
   .sm-result { flex: 1 1 100%; overflow-wrap: anywhere; }
   .sm-result:empty { display: none; }
-  .sm-secrets { margin-block-start: var(--s-2); }
+  .sm-facts, .sm-secrets { margin-block-start: var(--s-2); }
   .sm-hint { margin-block-start: var(--s-2); }
   .sm-hint code { overflow-wrap: anywhere; user-select: all; }
 

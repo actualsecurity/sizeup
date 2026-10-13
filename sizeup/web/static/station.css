@@ -1,0 +1,35 @@
+/* The station's own page (station.html, [cloud] role = "station"): the CAD's header and Settings layout
+   (cad.css, settings.css) with three views and no CAD. Layout only, on style.css's tokens and components. */
+
+@layer views {
+
+  /* one view at a time under the header, each scrolling on its own (the page scrolls on a narrow screen) */
+  .st-view { display: grid; grid-template-rows: minmax(0, 1fr); min-block-size: 0; }
+  .st-view > .s-content { min-block-size: 0; }
+
+  /* the header always says this is the station, and which one */
+  .station-page body > header > .cad-title,
+  .station-page body > header > .station:not(:empty) { display: inline-block; }
+  .station-page body > header > .station { color: var(--text-2); font-family: var(--mono); }
+  @container hdr (width < 1240px) {
+    #hub-cad .lbl { display: none; }
+    #hub-cad { inline-size: var(--ctl); padding-inline: 0; }
+  }
+
+  /* Monitor */
+  .m-filters { flex: 1 1 22rem; justify-content: flex-end; }
+  .m-filters input { flex: 1 1 12rem; max-inline-size: 22rem; }
+  .m-filters select { flex: 0 1 auto; max-inline-size: 16rem; }
+
+  /* Settings: this install */
+  .sys-cmds { margin-block-start: var(--s-3); }
+  .sys-cmds code { overflow-wrap: anywhere; user-select: all; }
+
+  @media (max-width: 640px) {
+    /* one row for who this is: Station, its id, the hub link (the connection pill only when it's not live; every
+       row on the page has its time, so the clock gives way) */
+    .station-page body > header > :is(#conn.ok, .clock) { display: none; }
+    .m-filters { flex-basis: 100%; justify-content: stretch; }
+    .m-filters :is(input, select) { max-inline-size: none; }
+  }
+}

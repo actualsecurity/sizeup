@@ -8,15 +8,44 @@ same code and the same entry point (`python -m sizeup --config ...`), chosen by 
 | Radios, trunk-recorder, MDC decode | yes | none: nothing opens an SDR or starts a program |
 | whisper (3.8 GB), Kokoro voice (1.4 GB) | yes | none |
 | Dispatch voice | its Kokoro (all-in-one; the hub's fallback) | **Amazon Polly**, made on the hub ([below](#the-dispatch-voice-amazon-polly)) |
-| Web UI: CAD `/cad` (Dispatch, Overview, Radio, Settings), wall board `/monitor` | yes (its own, local) | yes: **the CAD of record** |
-| CAD database | its own `state/cad.sqlite`, not synced | `cad.sqlite` (+ `hub.sqlite`, `audio.sqlite`) |
+| Web UI | the **station page** `/` ([below](#the-station-page)): Radios, Monitor, Settings (the hub link). No CAD | CAD `/cad` (Dispatch, Overview, Radio, Settings), wall board `/monitor`: **the CAD of record** |
+| CAD database | its own `state/cad.sqlite`, not synced: the radio-ID registry (talker names), the channel and speech-to-text settings the hub sends, the vocabulary | `cad.sqlite` (+ `hub.sqlite`, `audio.sqlite`) |
 | Network | outbound HTTPS to the hub only | reached only through Cloudflare Tunnel |
 
 No `[cloud]` section = today's all-in-one, unchanged.
 
+### The station page
+
+With `role = "station"` the station's own web page (http://localhost:8091 on the station PC) is about
+the station only (user, 2026-10-13: "the local system doesnt show the cad bits just things relevant to
+the sdr station data pulling/pushing, and maybe the monitor page too"): `static/station.html`,
+`station.js`. The header says it is the station: "Station", its id, the hub link's state ("Hub
+connected" / "Hub unreachable" / "Hub not sending" / "Not forwarding") and a link to the CAD on the hub.
+
+| view | what's on it |
+|---|---|
+| **Radios** (`/`, `#radios`) | the CAD's Settings > Radios (`radio-controls.js`): receivers, speech-to-text and the Hub row; each dongle's job (and who else holds it: shortfinal's claims); the paged incident; Channels (record, transcribe, engine; set on the hub while forwarding, then locked here); vocabulary; re-run speech-to-text; the disk |
+| **Monitor** (`#monitor`, also `/monitor`) | the pages and transmissions this station heard, newest first: play, time, talker (rig and radio ID), channel, the transcript and the model that wrote it ("Transcribed on the hub (AWS)" for channels on AWS); search and a channel filter |
+| **Settings** (`#settings`) | the **Hub link** card (`hublink.js`, the same card as the CAD's Settings → System → Station): Forward to hub on / off, the hub URL, Test connection, the status, the last contact, what waits in the outbox, the last error, where each secret came from (never a value); **This station**: id, name, role, version, build, and the `sizeup-station` commands for the rest (`status`, `doctor`, `logs -f`) |
+
+What it doesn't have: the dispatch console, events, run cards, the CAD's lists and users, the dispatch
+voice settings, the wall board. `/cad` redirects to the station page (`/?from=cad`, which then says
+"This is the station. The CAD is on the hub: <hub URL>/cad"; the console's old links land on the
+matching view: `#settings/radios` on Radios, `#settings/...` on Settings, `#radio` on Monitor).
+Every `/api/cad/...` route answers `409 {"error": "this is the station: the CAD is on the hub
+(<hub URL>)", "hub_url"}`, the mirror of the hub's `409` on `/api/station-mode`, but for the three
+Settings > Radios uses (`GET /api/cad/stt`, `POST /api/cad/settings/channels`, `POST
+/api/cad/settings/stt`: `sizeup/web/server.py` `STATION_CAD`).
+
+The CAD itself still runs inside the station process: its store holds what the station's radios use
+(the radio-ID registry for talker names, the channel and speech-to-text choices the hub sends with
+`set_channel_prefs`, the vocabulary, the communications log), and the hub's `tts` jobs render through
+it. What doesn't start on a station is the CAD's state push (the whole console rebuilt and sent to
+`/api/cad/stream` once a second), which nothing there would read. Hub and all-in-one are unchanged.
+
 **Station on / off from the UI** (user, 2026-10-08: "how do we turn on and off station mode
 though? id like that to be easy to do from the ui"): on any machine that isn't the hub,
-**Settings → System → Station** has a *Forward to hub* switch, the hub URL, the link's status, where
+**Settings → System → Station** (on a station: the station page's **Settings**) has a *Forward to hub* switch, the hub URL, the link's status, where
 each secret came from and *Test connection* (`sizeup/cloud/stationmode.py`). Switching starts or
 stops only the link (forwarder, state, job long poll) and the station-only parts (the "CAD of
 record is the hub" banner, the Hub row and pill): radios, speech-to-text and the voice keep
@@ -87,8 +116,8 @@ back as `POST /api/station/jobs/<id>`), handed out once, dropped if not picked u
 | `call` `retranscribe` | Re-transcribe on the hub for a channel on the local model (one on "aws" runs Amazon Transcribe on the hub's clip; "both": AWS here, this for the alternative, args `[ids, true]`; AWS unavailable: here, said in the result), or Amazon Transcribe failing for a clip the station didn't run whisper on | queues it; new text comes back as `retext`, then always a `rerun` (changed / same / failed) | refused: speech-to-text runs on the station (a failed AWS clip then says "transcription failed"; a re-run ends "failed: ...") |
 | `call` `set_channel_prefs` | Settings > Radios > Channels on the hub, or the station reporting other choices than the hub's (`channels.sig` in its state) | applies the whole map + whether AWS can take audio now, keeps it (its own Settings overrides, audited as "hub"), reports `{prefs, aws, sig}` | sent when it's back: the Channels card says "Station offline ...: these apply when it's back" |
 
-Settings, run cards, units, radio IDs and every CAD record stay on the hub. The station's own CAD
-keeps working for local use, with a banner on its `/cad`: the CAD of record is the hub.
+Settings, run cards, units, radio IDs and every CAD record stay on the hub. The station has no CAD
+pages of its own ([the station page](#the-station-page)).
 
 ## On screen
 
@@ -99,10 +128,13 @@ keeps working for local use, with a banner on its `/cad`: the CAD of record is t
   auto_assign`, deploy/station/README.md) reads "· FG1 · auto" (the row's `set_by`: "person", "auto",
   or missing from an older station, which then shows no "auto").
 * Hub, CAD header: "Station connected" / "Station offline 12:03".
-* Station, Settings > Radios, Receivers: a **Hub** row (connected, or offline with how many events are waiting;
-  "not sending" when forwarding is on without a token). Station `/cad`: the "Hub connected" /
-  "Hub unreachable" pill and the banner with the hub's URL. All of it goes when forwarding is
-  switched off (Settings → System → Station) and comes back when it's on.
+* Station page, Radios, Receivers: a **Hub** row (connected, or offline with how many events are waiting;
+  "not sending" when forwarding is on without a token). Its header: the "Hub connected" / "Hub
+  unreachable" / "Not forwarding" pill and a link to the CAD on the hub. Settings: the last contact
+  and what waits in the outbox.
+* An all-in-one machine forwarding from Settings → System → Station: the same Hub row, and on its
+  `/cad` the pill and the banner with the hub's URL. They go when forwarding is switched off and come
+  back when it's on.
 
 ## Failure behaviour
 
@@ -292,7 +324,7 @@ hostname's), not the `api/station` service-token application's. Not a secret: it
 
 ## Config
 
-Station (optional: Settings → System → Station does the same; see `deploy/station/README.md`):
+Station (optional: the station page's Settings does the same; see `deploy/station/README.md`):
 
 ```toml
 [cloud]
@@ -433,7 +465,7 @@ ntfy server only.
 
 **Where it runs:** the CAD of record only: the **hub**, or all-in-one. While a station forwards to
 a hub it doesn't subscribe (logged): the hub does on its own, so it works whether or not the station
-is connected, and nobody gets two alerts. Switching forwarding in Settings > System > Station starts
+is connected, and nobody gets two alerts. Switching forwarding (Settings > System > Station, or the station page's Settings) starts
 or stops it at once (`App.prealert_sync`; a restart resumes after the last message).
 
 **The stream:** one thread per topic on `GET <server>/<topic>/json` (ntfy's line-per-event JSON:
@@ -519,13 +551,14 @@ namespace, a named volume for `/data`, no Litestream).
 ## Code
 
 `sizeup/cloud/`: `station.py` (StationLink: outbox, forwarder, state, jobs), `stationmode.py`
-(Settings → System → Station: the link on / off at runtime, state/cloud.json, the Keychain), `outbox.py`,
+(Settings → System → Station and the station page's hub link: on / off at runtime, state/cloud.json, the Keychain), `outbox.py`,
 `client.py` (kept-alive HTTPS), `hub.py` (Hub: ingest, health, jobs; HubApp), `hubstore.py`
 (hub.sqlite, audio.sqlite), `access.py` (Cloudflare Access identity; the gate is in
 `sizeup/web/server.py`, the operator in `sizeup/cad/api.py` and `Settings.person`; the activity log in
 `sizeup/cad/activity.py`). Seams in `sizeup/app.py`: `_emit`, `_heard`, `_page_heard`, `_retext`, `_stt`,
 `_aws_start` / `_aws_done` / `_aws_failed`, `set_channel_prefs`, `make_app`; in `sizeup/cad/service.py`:
 `remote_voice`, `_render_hub`, `audio_blobs`, `cloud`, `radio_ctx`. The voice: `sizeup/polly.py`. Speech-to-text per channel: `sizeup/channels.py`,
-`sizeup/transcribe.py`, `sizeup/aws.py`. Tests: `tests/test_polly.py`, `tests/test_cloud.py`, `tests/test_stationmode.py`,
+`sizeup/transcribe.py`, `sizeup/aws.py`. The station page: `sizeup/web/static/station.html`, `station.js`,
+`hublink.js`, `station.css`; its routes in `sizeup/web/server.py`. Tests: `tests/test_station_page.py`, `tests/test_polly.py`, `tests/test_cloud.py`, `tests/test_stationmode.py`,
 `tests/test_access.py`, `tests/test_roles.py`, `tests/test_activity.py`, `tests/test_channels.py`,
 `tests/test_transcribe.py` (fakes: `tests/fake_transcribe.py`).
