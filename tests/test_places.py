@@ -58,6 +58,10 @@ def fixture_gazetteer(path):
                   source="nysdot-rm", ref="287I 8701 1101"),
         place_row("milemarker", "I-95 MM 14.0", "Rye", 40.9900, -73.6800, "I-95", "", "14.0",
                   source="nysta-mileposts", ref="NE 614.0"),
+        place_row("milemarker", "I-287 EB MM 9.1", "Rye Brook", 41.0052, -73.6951, "I-287", "EB", "9.1",
+                  source="nysdot-rm", ref="287I 8701 1091", aliases="1091|287i 8701 1091|rye brook town line"),
+        place_row("milemarker", "Hutch NB MM 16.6", "Harrison", 41.0223, -73.7102, "Hutch", "NB", "16.6",
+                  source="nysdot-lrs", ref="907W 8702 5019", aliases="5019|907w 8702 5019|bridge purchase st"),
         place_row("exit", "Hutch SB exit 19A", "Rye Brook", 41.0350, -73.6750, "Hutch", "SB", "19A",
                   ref="node/9", aliases="old 30s"),
         place_row("exit", "I-95 NB exit 21", "Port Chester", 41.0050, -73.6700, "I-95", "NB", "21",
@@ -128,6 +132,17 @@ def test_mile_marker_queries(ix):
     assert ix.search("Hutch SB exit 30")[0]["label"] == "Hutch SB exit 19A (old 30S)"
     # an address on a street whose number is a highway's stays an address
     assert ix.search("287 King St")[0]["kind"] == "address"
+
+
+def test_markers_by_the_name_60_control_gives_them(ix):
+    # the spot's name from 60 Control's list (#83) finds the marker; its own numbers don't match a name search
+    h = ix.search("rye brook town line")[0]
+    assert (h["label"], h["kind"], h["value"], h["sub"]) == ("I-287 EB MM 9.1", "milemarker", "9.1", "Rye Brook")
+    assert ix.search("purchase st bridge")[0]["label"] == "Hutch NB MM 16.6"
+    assert ix.search("bridge purch")[0]["label"] == "Hutch NB MM 16.6"
+    assert ix.search("hutch nb mm 16.6")[0]["label"] == "Hutch NB MM 16.6"
+    assert ix.search("hutch 5019")[0]["label"] == "Hutch NB MM 16.6"                 # the panel it stands by
+    assert all(h["kind"] != "milemarker" for h in ix.search("1091"))
 
 
 def test_park_query_and_aliases(ix):
@@ -202,6 +217,13 @@ def test_real_mile_markers(real):
     assert real.search("I-287 WB MM 10.0")[0]["label"] == "I-287 WB MM 10.0"
     assert real.search("I-95 NB MM 14")[0]["label"] == "I-95 NB MM 14.0"
     assert real.search("hutch nb 5041")[0]["route"] == "Hutch"
+    # the Hutch reads as 60 Control's list (#83): exit 15A / I-287 at 15.6-16.0, and the spots by name
+    h = real.search("hutch nb mm 15.8")[0]
+    assert h["label"] == "Hutch NB MM 15.8" and h["detail"] == "bridge I-287 / Westchester Ave"
+    assert real.search("rye brook town line")[0]["label"] == "I-287 EB MM 9.1"
+    assert real.search("i-287 ends")[0]["label"] == "I-287 EB MM 10.8"
+    assert real.search("bowman ave bridge")[0]["label"] == "I-287 EB MM 9.0"
+    assert {real.search(q)[0]["label"] for q in ("purchase st bridge", "bridge purchase")} <= {"Hutch NB MM 16.6", "Hutch SB MM 16.6"}
 
 
 def test_real_exits_and_parks(real):

@@ -7,7 +7,8 @@ One ranked list across every kind of place the gazetteer knows, for typed (not s
     intersection  intersections (TIGER)                           king & arbor               King St & Arbor Dr
     street        streets                                         westchester av             Westchester Ave
     place         landmarks + places kind "place" (county, OSM)   lyon park, high school     Lyon Park
-    milemarker    places (NYSDOT reference markers, Thruway)      287 eastbound mile marker 10   I-287 EB MM 10.0
+    milemarker    places (NYSDOT panels and milepoints, Thruway)  287 eastbound mile marker 10   I-287 EB MM 10.0
+                  ... or by the name 60 Control gives the spot    rye brook town line        I-287 EB MM 9.1
     exit          places (OSM motorway junctions)                 hutch sb exit 30           Hutch SB exit 30
     place         the department's own names (Settings, cad.sqlite: Cad.search_places passes them in)
 
@@ -266,11 +267,22 @@ class PlaceIndex:
                                 "muni": lm["muni"], "lat": lm["lat"], "lon": lm["lon"], "source": lm["source"],
                                 "aliases": [a for a in lm["aliases"] if a]})
         self.markers: dict[str, list[dict]] = {r: [] for r in ROUTES}
+        # mile markers with a name 60 Control gives the spot ("Rye Brook town line", "bridge Bowman Ave":
+        # GitHub #83): found by that name too, like a place
+        self.named_markers: list[dict] = []
+        named: list[tuple[tuple[str, ...], int]] = []
         for row in self._rows():
             if row["kind"] == "place":
                 self.places.append(row)
             elif row["route"] in self.markers:
                 self.markers[row["route"]].append(row)
+                if row["kind"] == "milemarker":
+                    words = [tuple(norm_tokens(a)) for a in row["aliases"]]
+                    words = [w for w in words if any(t.isalpha() and len(t) >= 3 for t in w)]
+                    if words:
+                        named += [(w, len(self.named_markers)) for w in words]
+                        self.named_markers.append(row)
+        self.named_ix = NameIndex(named)
         aliases: list[tuple[tuple[str, ...], int]] = []
         for i, p in enumerate(self.places):
             names = {tuple(norm_tokens(p["name"]))}
@@ -332,6 +344,7 @@ class PlaceIndex:
         while len(q) > 1 and q[-1] in SEPARATORS:
             q = q[:-1]
         out += self._places(q, near)
+        out += self._named_markers(q, near)
         out += self._local(q, near, extra)
         if not (hw and hw.value) and not open_cross:
             out += self._streets(q, near)
@@ -456,6 +469,16 @@ class PlaceIndex:
             cat = p["category"].split("=")[-1].replace("_", " ")          # an OSM landmark's "leisure=park": park
             out.append(self._item("place", p["name"], p["muni"], p["lat"], p["lon"], p["source"], quality, near,
                                   category=cat, detail=p["address"]))
+        return out
+
+    def _named_markers(self, q: list[str], near) -> list[dict]:
+        """'rye brook town line', 'purchase st bridge': the mile marker 60 Control calls that."""
+        out = []
+        for i, quality in self.named_ix.match(q, limit=10):
+            r = self.named_markers[i]
+            label = f"{r['route']}{' ' + r['dir'] if r['dir'] else ''} MM {r['value']}"
+            out.append(self._item("milemarker", label, r["muni"], r["lat"], r["lon"], r["source"], quality, near,
+                                  route=r["route"], dir=r["dir"], value=r["value"], detail=r["address"]))
         return out
 
     def _local(self, q: list[str], near, extra) -> list[dict]:

@@ -7,9 +7,19 @@ addresses, intersections and landmarks of tools/fetch_addresses.py. Never used t
 Sources (each row keeps its own: ``source`` + ``ref``; each source with its fetch date in meta 'sources'):
 
 * NYSDOT Roadway Inventory, Reference Marker layer (gisportalny.dot.ny.gov, public NYSDOT GIS service):
-  the small green markers every 0.1 mile on I-287, I-684, the Hutchinson River Pkwy (907W), US-1,
-  NY-120 and NY-120A. The marker's last three digits are the posted tenths of a mile in the county
-  ("287I 8701 1100" = I-287 MM 10.0); the route id's last digit is the direction (1 primary, 2/3 reverse).
+  the small green panels every 0.1 mile, with the route's milepoint (MEASURE: the distance along the
+  route from where it enters the county, NYSDOT's linear referencing). Two uses (#83):
+  - I-287 and I-684 (RM_ROUTES): the panel itself is the marker, its last three digits the posted
+    tenths of a mile ("287I 8701 1100" = I-287 MM 10.0): on these two the panels count on through the
+    county and 60 Control's I-287 list agrees with them. The route id's last digit is the direction
+    (1 primary, 2/3 reverse).
+  - The Hutchinson River Pkwy (907W), US-1, NY-120 and NY-120A (LRS_ROUTES): the panel numbers restart
+    at every segment (the Hutch's reach 2.4 at I-287 where 60 Control says 15.6-16.0), so the markers are
+    made from the milepoints instead: tenth-mile points interpolated between the panels, shifted by the
+    offset fitted to 60 Control's own mileage (SIXTY_CONTROL, the HRP NB list) where we have it, and
+    otherwise NYSDOT's county mileage as it is, marked unverified. The Hutch's offset is ~4.55 (the Bronx
+    part of the parkway: 60 Control counts from the Bruckner interchange, NYSDOT from the county line).
+    60 Control's landmark names (bridges, town lines, "I-287 ends") become aliases of the matching marker.
 * NYS Thruway Authority mileposts, tenth-mile (services2.arcgis.com, the Thruway's public GIS
   service): I-95, the New England Thruway (posted miles 0-15 from the Bronx line to Connecticut).
 * OpenStreetMap via Overpass (ODbL 1.0, (c) OpenStreetMap contributors): motorway junctions (exits)
@@ -29,6 +39,7 @@ If one source fails, the rows of that source from the previous build are kept an
 from __future__ import annotations
 
 import argparse
+import bisect
 import collections
 import datetime as dt
 import json
@@ -37,7 +48,7 @@ import sqlite3
 import sys
 import time
 from pathlib import Path
-from typing import Callable
+from typing import Callable, NamedTuple
 
 TOOLS = Path(__file__).resolve().parent
 sys.path.insert(0, str(TOOLS))
@@ -51,8 +62,91 @@ from sizeup.geo.places import ROUTES, norm_phrase  # noqa: E402
 NYSDOT_RM_URL = "https://gisportalny.dot.ny.gov/hostingny/rest/services/Roadways/Roadway/FeatureServer/0/query"
 THRUWAY_MP_URL = ("https://services2.arcgis.com/gubH6kG9JCAsMX2M/arcgis/rest/services/"
                   "NY_State_Thruway_Mileposts/FeatureServer/1/query")
-# NYSDOT reference route (the panel's first four characters) -> our highway name
-RM_ROUTES = {"287I": "I-287", "684I": "I-684", "907W": "Hutch", "1": "US-1", "120": "NY-120", "120A": "NY-120A"}
+# NYSDOT reference route (the panel's first four characters) -> our highway name: the panels are the markers
+RM_ROUTES = {"287I": "I-287", "684I": "I-684"}
+# ... and the roads whose markers are made from NYSDOT's milepoints (#83: their panel numbers restart)
+LRS_ROUTES = {"907W": "Hutch", "1": "US-1", "120": "NY-120", "120A": "NY-120A"}
+LRS_MAX_GAP = 0.25                    # miles between two panels beyond which no marker is interpolated
+# What the marker's mileage is counted from, for the roads without a 60 Control list (the row's category)
+LRS_ORIGIN = {
+    "US-1": "NYSDOT mileage from the Bronx line (unverified vs 60 Control)",
+    "NY-120": "NYSDOT mileage from US-1 in Rye (unverified vs 60 Control)",
+    "NY-120A": "NYSDOT mileage from its south end (unverified vs 60 Control)",
+}
+
+
+class CalPoint(NamedTuple):
+    """One line of a 60 Control commonplace list: its mileage, what it says, and where that is when we
+    know (lat, lon). fit: part of the offset fit; a point with a position but fit=False is only checked."""
+    mile: float
+    text: str
+    lat: float | None = None
+    lon: float | None = None
+    fit: bool = True
+
+
+class Calibration(NamedTuple):
+    note: str                   # what the mileage is, for the marker rows (their category)
+    points: list[CalPoint]
+
+
+# 60 Control's own mileage (GitHub #83: Julian's photos of the CAD commonplace lists, 2026-10-13), per
+# road and side. The positions: an exit at its OSM motorway_junction node (where the ramp leaves), a
+# bridge where the cross street's OSM way crosses the carriageway, the state line where the OSM boundary
+# does. For the roads in LRS_ROUTES the offset between NYSDOT's milepoints and these is fitted (the mean
+# over the fit points) and every placed point's residual reported; for the others (I-287: the posted
+# panels) the points are only checked. The text becomes the marker's detail and, unless it is the exit
+# itself (the exit row has that), an alias the "@" search finds ("Rye Brook town line", "bridge Bowman
+# Ave", "I-287 ends"). The Hutch SB list is not transcribed yet: the SB side is fitted on the bridges,
+# physical points it shares with NB.
+SIXTY_CONTROL: dict[tuple[str, str], Calibration] = {
+    ("Hutch", "NB"): Calibration("60 Control mileage (HRP NB list)", [
+        CalPoint(14.5, "EXIT 14 (North St – Rt 127) – old exit 25", 40.996839, -73.728479),
+        CalPoint(15.2, "south of exit 15A"),
+        CalPoint(15.6, "EXIT 15A (I-287 EB – West Ave) – old exit 26E", 41.009251, -73.718896),
+        CalPoint(15.8, "bridge I-287 / Westchester Ave", 41.014030, -73.716920),
+        CalPoint(15.9, "EXIT 15B (Westchester Ave – I-287 WB)", 41.014657, -73.716662),
+        CalPoint(16.0, "north of exit 15B"),
+        CalPoint(16.1, "south of I-684 (SB only)"),
+        CalPoint(16.2, "EXIT 16A (I-684)", 41.017181, -73.715625),
+        CalPoint(16.4, "EXIT 16B (Purchase St – Rt 120) – old exit 27", 41.020888, -73.713559),
+        CalPoint(16.6, "bridge Purchase St", 41.022290, -73.710090),
+        CalPoint(17.0, "south of exit 17"),
+        CalPoint(17.2, "EXIT 17 (Lincoln Ave) – old exit 28"),
+        CalPoint(17.4, "bridge Lincoln Ave", 41.023360, -73.695340),
+        CalPoint(17.9, "ramp to exit 18"),
+        CalPoint(18.0, "EXIT 18 (N Ridge St) – old exit 29", 41.027518, -73.688176),
+        CalPoint(18.1, "bridge N Ridge St", 41.028190, -73.683540),
+        CalPoint(18.6, "south of Rt 120A"),
+        CalPoint(18.8, "EXIT 19A (Rt 120A – King St) – old exit 30", 41.035089, -73.676473),
+        CalPoint(18.9, "bridge King St"),
+        CalPoint(19.0, "ramp from King St – CT"),
+        # the OSM state boundary crosses the parkway 0.03 mi past the last NY panel, at 18.9 by this fit:
+        # 60 Control's 19.1 is 0.2 mi further on (probably where its Merritt list starts), so not fitted
+        CalPoint(19.1, "CT state line", 41.036740, -73.675500, fit=False),
+    ]),
+    # the bridges of the NB list: physical points both sides share. The HRP SB list is not checked yet.
+    ("Hutch", "SB"): Calibration("60 Control mileage (the bridges of the HRP NB list; SB list unverified)", [
+        CalPoint(15.8, "bridge I-287 / Westchester Ave", 41.014030, -73.717220),
+        CalPoint(16.6, "bridge Purchase St", 41.022360, -73.710120),
+        CalPoint(17.4, "bridge Lincoln Ave", 41.023430, -73.695360),
+        CalPoint(18.1, "bridge N Ridge St", 41.028310, -73.683430),
+    ]),
+    ("I-287", "EB"): Calibration("posted panels (60 Control's I287 EB list agrees)", [   # checked, never fitted
+        CalPoint(8.4, "EXIT 10 (Westchester Ave EB / Rt 120)", 41.012272, -73.702722),
+        CalPoint(8.7, "bridge Westchester Ave"),
+        CalPoint(9.0, "bridge Bowman Ave"),
+        CalPoint(9.1, "Rye Brook town line"),
+        CalPoint(9.9, "bridge Ridge St"),
+        CalPoint(10.2, "bridge High St"),
+        CalPoint(10.3, "EXIT 11 (to Boston Post Rd)", 40.993788, -73.678388),
+        CalPoint(10.4, "bridge Boston Post Rd"),
+        CalPoint(10.5, "EXIT 12 (I-95 SB)", 40.991364, -73.677072),
+        CalPoint(10.6, "railroad bridge"),
+        CalPoint(10.7, "Midland Ave underpass"),
+        CalPoint(10.8, "I-287 ends – exit to I-95 NB"),
+    ]),
+}
 OSM_HIGHWAYS = (                      # (OSM ref or name contains, our highway name)
     ("I 95", "I-95"), ("I 287", "I-287"), ("I 684", "I-684"), ("CT 15", "Merritt Pkwy"),
     ("Hutchinson", "Hutch"), ("Merritt", "Merritt Pkwy"), ("New England Thruway", "I-95"),
@@ -175,42 +269,197 @@ def row(kind, name, category, address, muni, lat, lon, route="", dir_="", value=
 
 # --------------------------------------------------------------------------- highway markers
 
-def markers_from_rm(features: list[dict], muni_at: Callable[[float, float], str]) -> list[dict]:
-    """NYSDOT reference markers -> milemarker rows, with the side of the road where it is divided."""
-    by_route: dict[str, list[tuple]] = collections.defaultdict(list)
+class Panel(NamedTuple):
+    route: str          # our highway name
+    rid: str            # NYSDOT route id; its last digit is the direction (1 primary)
+    measure: float      # NYSDOT milepoint: miles along the route from where it enters the county
+    panel: str          # "907W87025041"
+    lat: float
+    lon: float
+
+    @property
+    def seq(self) -> str:
+        return self.panel[-4:]
+
+    @property
+    def ref(self) -> str:
+        return f"{self.panel[:4].strip()} {self.panel[4:8]} {self.seq}"
+
+    @property
+    def primary(self) -> bool:
+        return self.rid.endswith("1")
+
+
+def parse_panels(features: list[dict]) -> list[Panel]:
+    """The live reference markers of our highways (RM_ROUTES and LRS_ROUTES) in the layer's features."""
+    out = []
     for f in features:
         a, g = f.get("attributes") or {}, f.get("geometry") or {}
         panel = a.get("Panel") or a.get("REFERENCE_MARKER_PANEL") or ""
-        if a.get("TO_DATE") or "x" not in g or len(panel) < 12:
+        if a.get("TO_DATE") or "x" not in g or len(panel) < 12 or not panel[-4:].isdigit():
             continue
-        route = RM_ROUTES.get(panel[:4].strip())
-        seq = panel[-4:]
-        if not route or not seq.isdigit():
+        key = panel[:4].strip()
+        route = RM_ROUTES.get(key) or LRS_ROUTES.get(key)
+        if not route or a.get("MEASURE") is None:
             continue
-        rid = str(a.get("ROUTE_ID") or "")
-        by_route[route].append((rid, float(a.get("MEASURE") or 0.0), panel, g["y"], g["x"]))
-    out = []
-    for route, feats in by_route.items():
-        primary = sorted((f for f in feats if f[0].endswith("1")), key=lambda f: f[1])
-        reverse = [f for f in feats if not f[0].endswith("1")]
-        pos, neg, _v = ROUTES[route]
-        p_dir = side(route, primary[-1][3] - primary[0][3], primary[-1][4] - primary[0][4]) if len(primary) > 1 else pos
-        r_dir = neg if p_dir == pos else pos
-        divided = {f[2] for f in reverse}           # panels posted on both carriageways
-        seen = set()
-        for rid, _m, panel, lat, lon in feats:
-            is_primary = rid.endswith("1")
-            d = (p_dir if is_primary else r_dir) if panel in divided else ""
-            if (route, d, panel) in seen:
-                continue
-            seen.add((route, d, panel))
-            seq = panel[-4:]
-            mile = f"{int(seq[1:]) / 10:.1f}"
-            ref = f"{panel[:4].strip()} {panel[4:8]} {seq}"
-            name = f"{route}{' ' + d if d else ''} MM {mile}"
-            out.append(row("milemarker", name, "reference marker", "", muni_at(lat, lon), lat, lon, route, d,
-                           mile, "nysdot-rm", ref, [seq, norm_phrase(ref)]))
+        out.append(Panel(route, str(a.get("ROUTE_ID") or ""), float(a["MEASURE"]), panel, g["y"], g["x"]))
     return out
+
+
+def markers_from_rm(features: list[dict], muni_at: Callable[[float, float], str]) -> list[dict]:
+    """NYSDOT reference markers of RM_ROUTES -> milemarker rows (the posted tenths), with the side of the
+    road where it is divided."""
+    by_route: dict[str, list[Panel]] = collections.defaultdict(list)
+    for p in parse_panels(features):
+        if p.route in RM_ROUTES.values():
+            by_route[p.route].append(p)
+    out = []
+    for route, panels in by_route.items():
+        primary = sorted((p for p in panels if p.primary), key=lambda p: p.measure)
+        reverse = [p for p in panels if not p.primary]
+        pos, neg, _v = ROUTES[route]
+        p_dir = side(route, primary[-1].lat - primary[0].lat, primary[-1].lon - primary[0].lon) if len(primary) > 1 else pos
+        r_dir = neg if p_dir == pos else pos
+        divided = {p.panel for p in reverse}        # panels posted on both carriageways
+        seen = set()
+        for p in panels:
+            d = (p_dir if p.primary else r_dir) if p.panel in divided else ""
+            if (route, d, p.panel) in seen:
+                continue
+            seen.add((route, d, p.panel))
+            mile = f"{int(p.seq[1:]) / 10:.1f}"
+            name = f"{route}{' ' + d if d else ''} MM {mile}"
+            out.append(row("milemarker", name, "reference marker", "", muni_at(p.lat, p.lon), p.lat, p.lon, route, d,
+                           mile, "nysdot-rm", p.ref, [p.seq, norm_phrase(p.ref)]))
+    return out
+
+
+def panel_check(features: list[dict]) -> dict:
+    """Per route id of RM_ROUTES: how far the posted tenths stray from the milepoint (they should differ by
+    one constant along the road; a jump means the panel numbers restart, and the road belongs in LRS_ROUTES)."""
+    by_rid: dict[tuple[str, str], list[float]] = collections.defaultdict(list)
+    for p in parse_panels(features):
+        if p.route in RM_ROUTES.values():
+            by_rid[(p.route, p.rid)].append(int(p.seq[1:]) / 10 - p.measure)
+    out = {}
+    for (route, rid), diffs in sorted(by_rid.items()):
+        diffs.sort()
+        median = diffs[len(diffs) // 2]
+        out[f"{route} {rid}"] = {"panels": len(diffs), "posted_minus_milepoint": round(median, 2),
+                                 "max_stray": round(max(abs(d - median) for d in diffs), 2)}
+    return out
+
+
+def measure_at(panels: list[Panel], lat: float, lon: float) -> tuple[float, float]:
+    """The milepoint of the point of the panel line (the panels in order, joined) closest to (lat, lon),
+    and how far from that line the point is (m)."""
+    best = (math.inf, panels[0].measure)
+    px, py = lon * fa.M_PER_DEG_LON, lat * fa.M_PER_DEG_LAT
+    for a, b in zip(panels, panels[1:]):
+        ax, ay, bx, by = a.lon * fa.M_PER_DEG_LON, a.lat * fa.M_PER_DEG_LAT, b.lon * fa.M_PER_DEG_LON, b.lat * fa.M_PER_DEG_LAT
+        dx, dy, l2 = bx - ax, by - ay, (bx - ax) ** 2 + (by - ay) ** 2
+        t = 0.0 if l2 == 0 else max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / l2))
+        d = math.hypot(px - ax - t * dx, py - ay - t * dy)
+        if d < best[0]:
+            best = (d, a.measure + t * (b.measure - a.measure))
+    return best[1], best[0]
+
+
+def fit_offset(panels: list[Panel], points: list[CalPoint]) -> tuple[float, list[dict]]:
+    """The offset (miles) to add to NYSDOT's milepoints to read like 60 Control's: the mean of
+    (its mileage - the milepoint where it is) over the fit points, and each placed point's residual."""
+    placed = []
+    for c in points:
+        if c.lat is None or c.lon is None:
+            continue
+        m, off_line = measure_at(panels, c.lat, c.lon)
+        placed.append((c, m, off_line))
+    fit = [c.mile - m for c, m, _ in placed if c.fit]
+    offset = sum(fit) / len(fit) if fit else 0.0
+    report = [{"mile": c.mile, "text": c.text, "fitted": round(m + offset, 2), "residual": round(c.mile - m - offset, 3),
+               "fit": c.fit, "off_line_m": round(off_line)} for c, m, off_line in placed]
+    return offset, report
+
+
+def tenth_markers(route: str, d: str, panels: list[Panel], offset: float, note: str, muni_at) -> list[dict]:
+    """Markers at every tenth of a mile of (milepoint + offset), placed between the two panels around it;
+    none where the panels are more than LRS_MAX_GAP apart (a stretch without NY panels: no guessing)."""
+    measures = [p.measure for p in panels]
+    lo = math.ceil((measures[0] + offset) * 10 - 1e-6)
+    hi = math.floor((measures[-1] + offset) * 10 + 1e-6)
+    out = []
+    for t in range(lo, hi + 1):
+        m = t / 10 - offset
+        i = min(max(bisect.bisect_right(measures, m + 1e-9) - 1, 0), len(panels) - 2)
+        a, b = panels[i], panels[i + 1]
+        gap = b.measure - a.measure
+        at_panel = abs(m - a.measure) <= 1e-6 or abs(m - b.measure) <= 1e-6
+        if gap > LRS_MAX_GAP and not at_panel:
+            continue
+        f = 0.0 if gap <= 0 else max(0.0, min(1.0, (m - a.measure) / gap))
+        lat, lon = a.lat + f * (b.lat - a.lat), a.lon + f * (b.lon - a.lon)
+        near = a if f < 0.5 else b                     # the posted panel this marker stands by
+        value = f"{t / 10:.1f}"
+        name = f"{route}{' ' + d if d else ''} MM {value}"
+        out.append(row("milemarker", name, note, "", muni_at(lat, lon), lat, lon,
+                       route, d, value, "nysdot-lrs", near.ref, [near.seq, norm_phrase(near.ref)]))
+    return out
+
+
+def markers_from_lrs(features: list[dict], muni_at) -> tuple[list[dict], dict]:
+    """NYSDOT milepoints of LRS_ROUTES -> tenth-mile marker rows, offset to 60 Control's mileage where
+    SIXTY_CONTROL has that road (else as NYSDOT counts them), one side each where the road is divided
+    (both carriageways have panels), else one row for both. -> (rows, the calibration report)."""
+    by_route: dict[str, list[Panel]] = collections.defaultdict(list)
+    for p in parse_panels(features):
+        if p.route in LRS_ROUTES.values():
+            by_route[p.route].append(p)
+    rows, report = [], {}
+    for route, panels in sorted(by_route.items()):
+        sides = []
+        for want in (True, False):
+            by_m = {}
+            for p in panels:
+                if p.primary == want:
+                    by_m.setdefault(round(p.measure, 3), p)
+            sides.append([by_m[k] for k in sorted(by_m)])
+        primary, reverse = sides
+        if len(primary) < 2:
+            continue
+        pos, neg, _v = ROUTES[route]
+        divided = len(reverse) >= 0.8 * len(primary)
+        p_dir = side(route, primary[-1].lat - primary[0].lat, primary[-1].lon - primary[0].lon) if divided else ""
+        r_dir = (neg if p_dir == pos else pos) if divided else ""
+        for d, ps in ((p_dir, primary), (r_dir, reverse)) if divided else ((p_dir, primary),):
+            cal = SIXTY_CONTROL.get((route, d))
+            offset, residuals = fit_offset(ps, cal.points if cal else [])
+            made = tenth_markers(route, d, ps, offset, cal.note if cal else LRS_ORIGIN.get(route, "NYSDOT mileage"), muni_at)
+            rows += made
+            report[f"{route} {d}".strip()] = {
+                "panels": len(ps), "milepoints": [round(ps[0].measure, 2), round(ps[-1].measure, 2)],
+                "offset": round(offset, 3), "markers": len(made),
+                "values": [made[0]["value"], made[-1]["value"]] if made else [],
+                "max_residual": max((abs(r["residual"]) for r in residuals if r["fit"]), default=None),
+                "points": residuals}
+    return rows, report
+
+
+def apply_landmarks(rows: list[dict]) -> list[str]:
+    """60 Control's texts onto the markers with their mileage: the detail (address), and an alias the search
+    finds unless the text is the exit itself. -> the points with no marker to carry them."""
+    by_key = {(r["route"], r["dir"], r["value"]): r for r in rows if r["kind"] == "milemarker"}
+    missing = []
+    for (route, d), cal in SIXTY_CONTROL.items():
+        for c in cal.points:
+            r = by_key.get((route, d, f"{c.mile:.1f}"))
+            if r is None:
+                missing.append(f"{route} {d} {c.mile:.1f} {c.text}")
+                continue
+            r["address"] = " / ".join(x for x in (r["address"], c.text) if x)
+            if not c.text.upper().startswith("EXIT"):
+                aliases = set(r["aliases"].split("|")) | {norm_phrase(c.text)}
+                r["aliases"] = "|".join(sorted(a for a in aliases if a))
+    return missing
 
 
 def markers_from_thruway(features: list[dict], muni_at) -> list[dict]:
@@ -408,8 +657,10 @@ def fetch_thruway(bbox) -> list[dict]:
 
 # --------------------------------------------------------------------------- write
 
-def write_places(db: sqlite3.Connection, rows: list[dict], sources: list[dict], stats: dict) -> dict:
-    """Replace the places table and its part of meta (sources marked part 'places', counts.places)."""
+def write_places(db: sqlite3.Connection, rows: list[dict], sources: list[dict], stats: dict,
+                 calibration: dict | None = None) -> dict:
+    """Replace the places table and its part of meta (sources marked part 'places', counts.places: the counts,
+    and the mile markers' calibration report against 60 Control)."""
     db.execute("DROP TABLE IF EXISTS places")
     db.executescript(PLACES_SCHEMA)
     cols = ("kind", "name", "category", "address", "muni", "lat", "lon", "route", "dir", "value", "source", "ref",
@@ -426,6 +677,7 @@ def write_places(db: sqlite3.Connection, rows: list[dict], sources: list[dict], 
         "by_route": dict(collections.Counter(f"{r['route']} {r['kind']}" for r in rows if r["route"])),
         "by_category": dict(collections.Counter(r["category"] for r in rows if r["kind"] == "place").most_common()),
         "osm_filter": stats,
+        "calibration": calibration or {},
     }
     db.execute("INSERT OR REPLACE INTO meta VALUES ('sources', ?)", (json.dumps(old + sources),))
     db.execute("INSERT OR REPLACE INTO meta VALUES ('counts', ?)", (json.dumps(counts),))
@@ -435,10 +687,12 @@ def write_places(db: sqlite3.Connection, rows: list[dict], sources: list[dict], 
     return counts["places"]
 
 
-def previous(db: sqlite3.Connection, source: str) -> tuple[list[dict], dict | None]:
-    """The rows and the meta source entry of ``source`` from the last build (a fetch failed)."""
+def previous(db: sqlite3.Connection, source: str, row_sources: tuple[str, ...] = ()) -> tuple[list[dict], dict | None]:
+    """The rows (source in row_sources, default ``source`` itself) and the meta source entry of ``source``
+    from the last build (a fetch failed)."""
+    row_sources = row_sources or (source,)
     try:
-        cur = db.execute("SELECT * FROM places WHERE source = ?", (source,))
+        cur = db.execute(f"SELECT * FROM places WHERE source IN ({', '.join('?' * len(row_sources))})", row_sources)
         cols = [c[0] for c in cur.description]
         rows = [dict(zip(cols, r)) for r in cur]
         srcs = json.loads(dict(db.execute("SELECT key, value FROM meta")).get("sources") or "[]")
@@ -478,9 +732,10 @@ def build(db_path: Path, bounds, today: str, skip: set[str] = frozenset(), old_d
     sources: list[dict] = []
     missing: list[str] = []
     stats: dict = {}
+    calibration: dict = {}
 
-    def take(code: str, name: str, url: str, license_: str, fn) -> None:
-        nonlocal stats
+    def take(code: str, name: str, url: str, license_: str, fn, row_sources: tuple[str, ...] = ()) -> None:
+        """Fetch one source; its rows carry source ``code`` (or one of row_sources)."""
         got, src_url = None, url
         if code not in skip:
             try:
@@ -494,16 +749,26 @@ def build(db_path: Path, bounds, today: str, skip: set[str] = frozenset(), old_d
             sources.append({"part": "places", "code": code, "name": name, "url": src_url, "license": license_,
                             "fetched": today, "records": len(got)})
             return
-        old, entry = previous(prev_db, code)
+        old, entry = previous(prev_db, code, row_sources)
         rows.extend(old)
         if entry:
             sources.append(dict(entry, kept_from_previous_build=True))
+            if code == "nysdot-rm":
+                calibration.update(entry.get("calibration") or {})
         missing.append(f"{name}: {'kept ' + str(len(old)) + ' rows of the last build' if old else 'nothing'}")
 
     print("NYSDOT reference markers ...", file=sys.stderr)
-    take("nysdot-rm", "NYSDOT Roadway Inventory: Reference Markers (I-287, I-684, Hutchinson River Pkwy, US-1, "
-         "NY-120, NY-120A)", NYSDOT_RM_URL, "NYSDOT public GIS service (New York State public data; no licence "
-         "stated: attribute NYSDOT)", lambda: markers_from_rm(fetch_rm(hw_bbox), muni_at))
+
+    def nysdot():
+        feats = fetch_rm(hw_bbox)
+        lrs, report = markers_from_lrs(feats, muni_at)
+        calibration.update(report)
+        calibration["posted_panels"] = panel_check(feats)
+        return markers_from_rm(feats, muni_at) + lrs
+    take("nysdot-rm", "NYSDOT Roadway Inventory: Reference Markers (the posted panels on I-287 and I-684; tenth-mile "
+         "milepoints on the Hutchinson River Pkwy, US-1, NY-120 and NY-120A, the Hutch's offset to 60 Control's "
+         "mileage)", NYSDOT_RM_URL, "NYSDOT public GIS service (New York State public data; no licence stated: "
+         "attribute NYSDOT)", nysdot, row_sources=("nysdot-rm", "nysdot-lrs"))
     print("Thruway mileposts (I-95) ...", file=sys.stderr)
     take("nysta-mileposts", "NYS Thruway Authority mileposts, tenth-mile (New England Thruway, I-95)", THRUWAY_MP_URL,
          "NYS Thruway Authority public GIS service (listed on data.gis.ny.gov; no licence stated: attribute the "
@@ -528,7 +793,11 @@ def build(db_path: Path, bounds, today: str, skip: set[str] = frozenset(), old_d
         return ex + pl, url
     take("osm", "OpenStreetMap via Overpass API: motorway junctions (exits) and named places", OVERPASS_URLS[0],
          osm_license, osm)
-    counts = write_places(db, rows, sources, stats)
+    calibration["landmarks_without_marker"] = apply_landmarks(rows)
+    for src in sources:                    # the report travels with the source entry (kept with its rows)
+        if src.get("code") == "nysdot-rm" and not src.get("kept_from_previous_build"):
+            src["calibration"] = {k: v for k, v in calibration.items() if k != "landmarks_without_marker"}
+    counts = write_places(db, rows, sources, stats, calibration)
     db.execute("VACUUM")
     db.close()
     if prev_db is not db:

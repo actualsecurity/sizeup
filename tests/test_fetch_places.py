@@ -1,5 +1,6 @@
-"""tools/fetch_places.py on small fixtures (no network): the places table's mile markers, exits and
-named places, the meta it writes, and a source that fails keeping the last build's rows."""
+"""tools/fetch_places.py on small fixtures (no network): the places table's mile markers (the posted panels,
+and the milepoint markers offset to 60 Control's mileage, #83), exits and named places, the meta it writes,
+and a source that fails keeping the last build's rows."""
 
 from __future__ import annotations
 
@@ -84,11 +85,78 @@ LANDMARKS = [{"name": "Lyon Park", "lat": 41.0012, "lon": -73.6642, "aliases": [
 def test_reference_markers(fp):
     rows = fp.markers_from_rm(RM, town)
     by = {(r["route"], r["dir"], r["value"]) for r in rows}
-    assert by == {("I-287", "EB", "9.9"), ("I-287", "EB", "10.0"), ("I-287", "WB", "9.9"), ("I-287", "WB", "10.0"),
-                  ("US-1", "", "1.2"), ("US-1", "", "1.3")}
+    assert by == {("I-287", "EB", "9.9"), ("I-287", "EB", "10.0"), ("I-287", "WB", "9.9"), ("I-287", "WB", "10.0")}
     eb = next(r for r in rows if r["name"] == "I-287 EB MM 10.0")
     assert (eb["kind"], eb["source"], eb["ref"], eb["muni"]) == ("milemarker", "nysdot-rm", "287I 8701 1100", "Rye Brook")
     assert "1100" in eb["aliases"].split("|")
+    # US-1's panel numbers restart: its markers are NYSDOT's milepoints (the fixture's 11.8, 11.9), not the panels
+    rows, report = fp.markers_from_lrs(RM, town)
+    assert [(r["route"], r["dir"], r["value"], r["source"]) for r in rows] == [
+        ("US-1", "", "11.8", "nysdot-lrs"), ("US-1", "", "11.9", "nysdot-lrs")]
+    assert rows[0]["category"].startswith("NYSDOT mileage") and "unverified" in rows[0]["category"]
+    assert rows[0]["ref"] == "1 8703 5012" and "5012" in rows[0]["aliases"].split("|")   # the panel it stands by
+    assert report["US-1"]["offset"] == 0.0 and report["US-1"]["markers"] == 2 and report["US-1"]["points"] == []
+
+
+def panels(rid, first_seq, measures, lat0, lon0, dlat=0.0014, dlon=0.0, route="907W8702"):
+    """A straight road's panels every tenth: seq numbers from first_seq, milepoints as given."""
+    return [rm(rid, f"{route}{first_seq + i:04d}", m, lat0 + i * dlat, lon0 + i * dlon) for i, m in enumerate(measures)]
+
+
+def test_milepoint_markers_fitted_to_60_control(fp, monkeypatch):
+    # the Hutch, both carriageways heading north: panels 1000..1010 at milepoints 10.0..11.0 (the reverse
+    # carriageway's milepoints run 0.04 higher, as NYSDOT's do), then a gap, then two more
+    nb = panels("100546011", 1000, [10.0 + i / 10 for i in range(11)], 41.000, -73.700)
+    nb += panels("100546011", 2000, [11.5, 11.6], 41.021, -73.700)
+    sb = panels("100546012", 1000, [10.04 + i / 10 for i in range(11)], 41.000, -73.7003)
+    sb += panels("100546012", 2000, [11.54, 11.64], 41.021, -73.7003)
+    # 60 Control: the bridge at milepoint 10.5 is its 15.0, the exit at 10.8 its 15.4 (0.1 more than the fit)
+    monkeypatch.setattr(fp, "SIXTY_CONTROL", {
+        ("Hutch", "NB"): fp.Calibration("60 Control mileage (test)", [
+            fp.CalPoint(15.0, "bridge Test St", 41.007, -73.7001), fp.CalPoint(15.4, "EXIT 1 (Test Rd)", 41.0112, -73.7),
+            fp.CalPoint(15.2, "north of the bridge"), fp.CalPoint(16.0, "CT state line", 41.03, -73.7, fit=False)]),
+        ("Hutch", "SB"): fp.Calibration("60 Control mileage (SB: the bridge)", [fp.CalPoint(15.0, "bridge Test St", 41.007, -73.7003)]),
+    })
+    rows, report = fp.markers_from_lrs(nb + sb, town)
+    r = report["Hutch NB"]
+    assert r["offset"] == 4.55 and r["panels"] == 13 and r["max_residual"] == 0.05
+    assert [(p["mile"], p["fitted"], p["residual"], p["fit"]) for p in r["points"]] == [
+        (15.0, 15.05, -0.05, True), (15.4, 15.35, 0.05, True), (16.0, 16.15, -0.15, False)]
+    assert report["Hutch SB"]["offset"] == 4.46 and report["Hutch SB"]["max_residual"] == 0.0
+    by = {(r["dir"], r["value"]): r for r in rows}
+    # tenths of (milepoint + offset): 14.6 .. 15.5 from the first eleven panels, 16.1 from the last two, none
+    # across the 0.5 mi gap; the SB side (its own offset: the bridge reads 15.0 on both) on its own carriageway
+    assert [v for d, v in by if d == "NB"] == [f"{x / 10:.1f}" for x in range(146, 156)] + ["16.1"]
+    assert [v for d, v in by if d == "SB"] == [f"{x / 10:.1f}" for x in range(145, 156)] + ["16.0", "16.1"]
+    m = by[("NB", "15.0")]
+    assert m["name"] == "Hutch NB MM 15.0" and m["source"] == "nysdot-lrs" and m["category"] == "60 Control mileage (test)"
+    assert abs(m["lat"] - (41.000 + 4.5 * 0.0014)) < 1e-6 and m["lon"] == -73.7          # milepoint 10.45: between panels 1004 and 1005
+    assert m["ref"] in ("907W 8702 1004", "907W 8702 1005") and m["ref"][-4:] in m["aliases"].split("|")   # the panel by it (halfway here)
+    assert abs(by[("SB", "15.0")]["lon"] - -73.7003) < 1e-6 and abs(by[("SB", "15.0")]["lat"] - 41.007) < 1e-6   # at the bridge
+    assert all(r["muni"] == "Rye Brook" for r in rows if float(r["value"]) > 15.3)      # town(): lat > 41.01
+    # 60 Control's names go onto the markers: the detail, and an alias unless it is the exit itself
+    missing = fp.apply_landmarks(rows)
+    assert missing == ["Hutch NB 16.0 CT state line"]                                      # no marker past the panels
+    assert by[("NB", "15.0")]["address"] == "bridge Test St" and "bridge test st" in by[("NB", "15.0")]["aliases"].split("|")
+    assert by[("SB", "15.0")]["address"] == "bridge Test St"
+    assert by[("NB", "15.2")]["address"] == "north of the bridge" and "n of the bridge" in by[("NB", "15.2")]["aliases"]
+    assert by[("NB", "15.4")]["address"] == "EXIT 1 (Test Rd)" and "exit" not in by[("NB", "15.4")]["aliases"]
+
+
+def test_an_undivided_road_gets_one_marker_per_tenth(fp):
+    rows, report = fp.markers_from_lrs(panels("100050011", 1000, [0.01, 0.11, 0.21, 0.31], 40.98, -73.684, route="120 8701"), town)
+    assert [(r["dir"], r["value"]) for r in rows] == [("", "0.1"), ("", "0.2"), ("", "0.3")]
+    assert rows[0]["route"] == "NY-120" and rows[0]["name"] == "NY-120 MM 0.1"
+
+
+def test_posted_panels_are_checked_against_the_milepoint(fp):
+    steady = panels("100248021", 1000, [3.45 + i / 10 for i in range(5)], 41.0, -73.7)
+    for f in steady:
+        f["attributes"]["Panel"] = "287I8701" + f["attributes"]["Panel"][-4:]
+    reset = [rm("100248022", "287I87012003", 6.0, 41.0, -73.7), rm("100248022", "287I87013000", 6.1, 41.001, -73.7)]
+    check = fp.panel_check(steady + reset)
+    assert check["I-287 100248021"] == {"panels": 5, "posted_minus_milepoint": -3.45, "max_stray": 0.0}
+    assert check["I-287 100248022"]["max_stray"] == 0.4                                    # a restart: 0.3 then 0.0
 
 
 def test_thruway_mileposts(fp):
@@ -147,6 +215,8 @@ def test_build_writes_the_table_and_meta_and_keeps_a_failed_source(fp, tmp_path,
     bounds = type("B", (), {"area": lambda self, margin=0.0: (40.9, -73.8, 41.1, -73.6), "polys": {}})()
     counts = fp.build(path, bounds, "2026-10-13")
     assert counts["by_kind"] == {"milemarker": 7, "exit": 2, "place": 5} and counts["missing"] == []
+    assert counts["calibration"]["US-1"]["markers"] == 2 and counts["calibration"]["posted_panels"]["I-287 100248021"]["panels"] == 2
+    assert counts["calibration"]["landmarks_without_marker"]          # the fixture has none of 60 Control's spots
     db = sqlite3.connect(path)
     meta = dict(db.execute("SELECT key, value FROM meta"))
     sources = json.loads(meta["sources"])
@@ -155,7 +225,8 @@ def test_build_writes_the_table_and_meta_and_keeps_a_failed_source(fp, tmp_path,
     assert set(ours) == {"nysdot-rm", "nysta-mileposts", "osm"}
     assert all(s["fetched"] == "2026-10-13" and s["license"] for s in ours.values())
     assert "ODbL" in ours["osm"]["license"]
-    assert json.loads(meta["counts"])["places"]["by_source"] == {"nysdot-rm": 6, "nysta-mileposts": 1, "osm": 7}
+    assert json.loads(meta["counts"])["places"]["by_source"] == {"nysdot-rm": 4, "nysdot-lrs": 2, "nysta-mileposts": 1, "osm": 7}
+    assert ours["nysdot-rm"]["calibration"]["US-1"]["offset"] == 0.0
     db.close()
     # the search reads it
     ix = PlaceIndex(Gazetteer(path))
@@ -172,3 +243,9 @@ def test_build_writes_the_table_and_meta_and_keeps_a_failed_source(fp, tmp_path,
     osm = next(s for s in sources if s.get("code") == "osm")
     assert osm["fetched"] == "2026-10-13" and osm["kept_from_previous_build"]
     assert next(s for s in sources if s.get("code") == "nysdot-rm")["fetched"] == "2026-10-14"
+    # NYSDOT down: both the panel rows and the milepoint rows of the last build stay, with their calibration
+    monkeypatch.setattr(fp, "fetch_rm", down)
+    counts = fp.build(path, bounds, "2026-10-15")
+    assert counts["by_source"]["nysdot-rm"] == 4 and counts["by_source"]["nysdot-lrs"] == 2
+    assert counts["missing"][0].startswith("NYSDOT") and "kept 6 rows" in counts["missing"][0]
+    assert counts["calibration"]["US-1"]["markers"] == 2
