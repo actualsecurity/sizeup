@@ -88,6 +88,74 @@ def test_times_and_units():
         "1st Assistant Chief, 4th Street, 3.5 miles, 1,200 gallons")
 
 
+def test_highway_locations_said_in_words():
+    """#82: the geocoder's and the @ places' labels (sizeup/geo/places.py) are said the way the radio says
+    them, not letter by letter ("I-95 SB" is not "I dash ninety-five S B")."""
+    # Directions, and the slashed form a dispatcher types in remarks.
+    assert words("I-95 SB exit 21") == "I ninety-five southbound exit twenty-one"
+    assert words("I-95 NB MM 14.3") == "I ninety-five northbound mile marker fourteen point three"
+    assert words("I-287 EB MM 10.0") == "I two eighty-seven eastbound mile marker ten"
+    assert words("I-287 WB exit 9A") == "I two eighty-seven westbound exit nine A"
+    assert words("Reported: 2 cars in the s/b lane.") == "Reported: two cars in the southbound lane."
+    assert words("S/B lane blocked") == "Southbound lane blocked"
+    # Interstates: hundreds the radio way.
+    assert words("I-684 NB MM 5.3") == "I six eighty-four northbound mile marker five point three"
+    assert words("Interstate 95") == "I ninety-five"
+    # Routes and parkways.
+    assert words("US-1") == "Route one"
+    assert words("NY-120") == "Route one twenty"
+    assert words("NY-120A") == "Route one twenty A"
+    assert words("NY-120A MM 2.3") == "Route one twenty A mile marker two point three"
+    assert words("US-1 NB MM 0.8") == "Route one northbound mile marker zero point eight"
+    assert words("respond to Hutch NB exit 19A (old 30S), for") == (
+        "Respond to the Hutchinson River Parkway northbound exit nineteen A, for")
+    assert words("Hutchinson River Pkwy SB MM 1.9") == "The Hutchinson River Parkway southbound mile marker one point nine"
+    assert words("Merritt Pkwy SB exit 19B") == "The Merritt Parkway southbound exit nineteen B"
+    assert words("Merritt Parkway NB exit 27") == "The Merritt Parkway northbound exit twenty-seven"
+    assert words("Merritt SB exit 19B") == "The Merritt Parkway southbound exit nineteen B"
+    assert words("on the Hutch SB") == "On the Hutchinson River Parkway southbound"   # no "the the"
+    # Mile markers and exits.
+    assert words("MM 10.0") == "Mile marker ten"
+    assert words("MM 10.3") == "Mile marker ten point three"
+    assert words("MM 14.35") == "Mile marker fourteen point three five"
+    assert words("exit 21") == "Exit twenty-one"
+    assert words("exit 19A") == "Exit nineteen A"
+    assert words("I-287 EB exit 8W") == "I two eighty-seven eastbound exit eight W"
+    # Not highways: streets that share a word, and the Boston Post Road, stay.
+    assert words("4040 Boston Post Road") == "Forty forty Boston Post Road"
+    assert words("12 Merritt Street, cross of Hutchinson Avenue") == "Twelve Merritt Street, cross of Hutchinson Avenue"
+    # A whole dispatch: everything else is still said the dispatch way.
+    assert words("Port Chester Fire, Engine 60, Ladder 31, respond to I-95 SB exit 21, for a motor vehicle accident. "
+                 "Time out 14:32.") == (
+        "Port Chester Fire, Engine sixty, Ladder thirty-one, respond to I ninety-five southbound exit twenty-one, "
+        "for a motor vehicle accident. Time out fourteen thirty-two.")
+
+
+def test_real_highway_labels_said_in_words():
+    """Every mile marker and exit label in data/gazetteer.sqlite (what the geocoder and the @ search hand
+    the dispatch) is said in words: no "MM", no "SB", no "I-", no route code, no digits left."""
+    import re
+    import sqlite3
+    from sizeup.geo.gazetteer import DEFAULT_DB
+    if not DEFAULT_DB.exists():
+        pytest.skip("data/gazetteer.sqlite missing")
+    with sqlite3.connect(DEFAULT_DB) as db:
+        names = [r[0] for r in db.execute("select name from places where kind in ('milemarker', 'exit')")]
+    if not names:
+        pytest.skip("data/gazetteer.sqlite has no markers: run tools/fetch_places.py")
+    assert len(names) > 100
+    for name in names:
+        said = words(name)
+        assert not re.search(r"\d|\bMM\b|\b[NSEW]B\b|\bI-|\b(?:US|NY|CT)-|\bPkwy\b|\bHutch\b", said), (name, said)
+        assert re.search(r"\b(?:exit|mile marker) ", said), (name, said)
+    # Spot checks on the labels as the data writes them.
+    by = {n: words(n) for n in names}
+    assert by.get("I-95 NB exit 21") == "I ninety-five northbound exit twenty-one"
+    assert by.get("I-287 EB MM 10.0") == "I two eighty-seven eastbound mile marker ten"
+    assert by.get("Hutch SB exit 19A") == "The Hutchinson River Parkway southbound exit nineteen A"
+    assert by.get("Merritt Pkwy SB exit 19B") == "The Merritt Parkway southbound exit nineteen B"
+
+
 # -- the Kokoro client and the `say` fallback ---------------------------------------------------------
 
 @pytest.fixture

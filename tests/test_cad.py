@@ -548,6 +548,37 @@ def test_dispatch_wording_new_add_on_upgrade_full():
     assert dispatcher.spoken_street("12 N Main St") == "12 North Main Street"
 
 
+def test_highway_dispatch_written_short_and_said_in_words():
+    """#82: a highway location (the geocoder's or an @ place's label) is written the short way in the
+    dispatch text (the chronology, the log) and said in words by every voice: the first dispatch, an
+    add-on, an upgrade, all through the one speech() the renders and the voice preview use."""
+    at = local(2026, 10, 7, 14, 32)
+    new = dispatcher.compose("new", department="Port Chester Fire", incident={"address": "I-95 SB exit 21"},
+                             units=["Engine 60", "Ladder 31"], phrase="a motor vehicle accident", at=at)
+    assert new == ("Port Chester Fire, Engine 60, Ladder 31, respond to I-95 SB exit 21, for a motor vehicle accident. "
+                   "Time out 14:32.")
+    assert dispatcher.speech(new) == (
+        "Port Chester Fire, Engine sixty, Ladder thirty-one, respond to I ninety-five southbound exit twenty-one, "
+        "for a motor vehicle accident. Time out fourteen thirty-two.")
+    add = dispatcher.compose("add_on", department="Port Chester Fire", incident={"address": "Hutch NB exit 19A (old 30S)"},
+                             units=["Rescue 40"], phrase="a motor vehicle accident", at=at,
+                             already=[("responding", ["Engine 60"])])
+    assert "Engine 60 responding. Hutch NB exit 19A (old 30S), motor vehicle accident." in add
+    assert ("Engine sixty responding. The Hutchinson River Parkway northbound exit nineteen A, motor vehicle accident."
+            in dispatcher.speech(add))
+    up = dispatcher.compose("upgrade", department="Port Chester Fire", incident={"address": "I-287 EB MM 10.3"},
+                            units=[], info="vehicle fire", new_phrase="a vehicle fire", at=at, remarks="2 cars w/ fluid leaking")
+    assert up.startswith("Port Chester Fire, upgrade on your last alarm, I-287 EB MM 10.3. Vehicle fire.")
+    assert dispatcher.speech(up).startswith(
+        "Port Chester Fire, upgrade on your last alarm, I two eighty-seven eastbound mile marker ten point three. "
+        "Vehicle fire.")
+    # The Merritt is written as the gazetteer labels it, said as the parkway; the Post Road is itself.
+    inc = {"address": "Merritt Pkwy SB exit 19B", "cross_street": ""}
+    assert dispatcher.where(inc) == "Merritt Parkway SB exit 19B"
+    assert dispatcher.speech(dispatcher.where(inc)) == "The Merritt Parkway southbound exit nineteen B"
+    assert dispatcher.speech(dispatcher.where({"address": "4040 Boston Post Rd"})) == "Forty forty Boston Post Road"
+
+
 def test_service_dispatch_add_on_and_upgrade():
     clock = Clock(local(2026, 10, 7, 15, 13))
     cad = make_cad(clock=clock)
