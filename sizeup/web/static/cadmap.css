@@ -128,17 +128,27 @@
   .ml-cam-time { font-variant-numeric: tabular-nums; }
   .ml-cam-src a { color: var(--info); }
 
-  /* the event's nearest cameras, under its map (the grid's second column; one column when narrow) */
-  .ml-near { grid-column: 2; display: flex; flex-direction: column; gap: var(--s-1); min-inline-size: 0; }
-  .ml-near-head { display: flex; align-items: baseline; gap: var(--s-2); font-size: var(--fs-sm); line-height: var(--lh-sm); }
-  .ml-near-list { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--s-2); }
+  /* the event's Cameras panel (maplayers.js cameras, #95): under its map (the grid's second column; one column
+     when narrow); the wall board's strip (.ml-cams-small) above the cards */
+  .ml-cams { grid-column: 2; display: flex; flex-direction: column; gap: var(--s-1); min-inline-size: 0; }
+  .ml-cams-head { display: flex; align-items: center; gap: var(--s-2); inline-size: 100%; justify-content: flex-start;
+    padding-inline: var(--s-1); font-size: var(--fs-sm); line-height: var(--lh-sm); font-weight: 400; background: none; border-color: transparent; }
+  .ml-cams-head b { font-weight: 700; }
+  .ml-cams-head .car { margin-inline-start: var(--s-1); }
+  .ml-cams-sub { padding-inline: var(--s-1); }
+  .ml-near-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(9rem, 100%), 1fr)); gap: var(--s-2); }
   .ml-thumb { display: flex; flex-direction: column; align-items: stretch; gap: var(--s-0); padding: var(--s-0); block-size: auto;
     min-inline-size: 0; white-space: normal; text-align: start; font-weight: 400; }
   .ml-thumb-img { display: block; inline-size: 100%; aspect-ratio: 4 / 3; object-fit: cover; background: var(--bg); border-radius: var(--radius-s); }
   .ml-thumb-img.ml-broken { visibility: hidden; }
+  .ml-thumb-lbl { font-size: var(--fs-xs); line-height: var(--lh-xs); font-weight: 700; color: var(--text); }
+  .ml-thumb-lbl.facing { color: var(--ok-text); }
   .ml-thumb-cap { font-size: var(--fs-2xs); line-height: var(--lh-2xs); color: var(--text-2); overflow: hidden; text-overflow: ellipsis;
     display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
-  @container (width < 44rem) { .ml-near { grid-column: auto; } }
+  .ml-cams-small { grid-column: auto; }
+  .ml-cams-small .ml-near-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .ml-cams-small .ml-thumb-cap { -webkit-line-clamp: 1; }
+  @container (width < 44rem) { .ml-cams { grid-column: auto; } }
 
   /* Expand: the large map, a dialog */
   .cm-big { inline-size: min(96vw, 112rem); block-size: 92vh; border-radius: var(--radius); border: var(--bw) solid var(--line-strong);

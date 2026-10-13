@@ -559,8 +559,20 @@ exits and whole mileposts from 12, the tenths from 14. A camera opens the **came
 snapshot, its name, road, direction and milepost, which source it is from and when the image was
 taken, a new one every 10 s while it is open and the tab is visible (paused when hidden); it fits a
 390 px phone. An incident, closure, roadwork or sign opens a small box with what the source says and
-when it was updated. An event with a map point shows its nearest working cameras (up to 3 within
-1.5 km) as **Cameras nearby** under its map. The Layers box names each source that is on and when it
+when it was updated. An event with a map point has a **Cameras** panel under its map (#95: "add
+that as an automatic option on the incident viewer to show the camera live feed, even if it's just
+past or just before where it came in, as immediate reference points"): on a highway we have mile
+markers for (I-95, I-287, the Hutch, US-1, I-684, the 120s: the location is a marker or exit, or
+the point is within 150 m of the road's markers), the camera **just before** and **just after** the
+event along the road, by our markers, in its direction of travel when the location says one ("0.3 mi
+before (SB) · I-95 at Interchange 21"; a camera over the event's carriageway wins over one up to
+0.3 mi nearer and is marked as facing), else each side by compass ("0.4 mi south"); within 2 mi,
+nothing shown beyond that. Then **Nearby**, lower: cameras within 300 m as the crow flies (off a
+highway, that alone). The panel is collapsible, open while the event is open, with live snapshots
+(a new one every 10 s while the page is visible); a click opens the viewer. The wall board shows
+the two along the road for the active highway event, small, above its cards.
+`GET /api/cad/cameras?for=lat,lon&label=&address=` → `{highway: {road, dir, mile} | null, cameras:
+[{..., rel: before | after | at | side | nearby, miles, side, facing, km}]}` (`Roads.cameras_for`). The Layers box names each source that is on and when it
 last read: *Data: New York State Thruway Authority, updated 16:48*, *powered by 511NY, updated 16:49*.
 
 ### Sources

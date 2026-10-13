@@ -97,6 +97,7 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
       <div class="ov-grid">
         <div class="ov-mapbox"><div id="ov-map"></div></div>
         <div class="ov-side">
+          <div id="ov-cams" class="ml-cams ml-cams-small board-only" hidden aria-label="Cameras"></div>
           <ol id="ov-cards" class="ov-cards"></ol>
           <h3 class="ov-sub">Non-emergency</h3>
           <ol id="ov-nonemerg" class="list ov-nelist"></ol>
@@ -222,6 +223,7 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
             <div id="d-map"></div>
             <div id="d-nomap" class="nomap dim" hidden></div>
           </div>
+          <div id="d-cams" class="ml-cams" hidden aria-label="Cameras"></div>
         </div>
 
         <form id="edit-form" class="form" hidden autocomplete="off">

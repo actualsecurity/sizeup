@@ -516,6 +516,128 @@ def test_the_user_agent_says_who_we_are():
     assert "Mozilla" not in UA and "Chrome" not in UA                        # a plain client, never a browser
 
 
+# ---- the incident viewer's cameras: just before and just after, along the road (#95) ------------------------------
+
+ROOT = Path(__file__).resolve().parent.parent
+GAZ = ROOT / "data" / "gazetteer.sqlite"          # the real mile markers (I-95, I-287, the Hutch, US-1, I-684, ...)
+
+
+def place(name: str) -> tuple[float, float]:
+    db = sqlite3.connect(f"file:{GAZ}?mode=ro", uri=True)
+    try:
+        lat, lon = db.execute("SELECT lat, lon FROM places WHERE name = ?", (name,)).fetchone()
+    finally:
+        db.close()
+    return lat, lon
+
+
+@pytest.fixture
+def highway():
+    """The Thruway's recorded cameras on the real markers: 15 cameras on I-95 and I-287 around Port Chester."""
+    r = make(thruway=True, key="", urls={}, gazetteer=GAZ)
+    assert r.refresh("cameras")
+    return r
+
+
+def picks(o):
+    return [(c["rel"], c["miles"], c["side"], c["facing"], c["id"]) for c in o["cameras"]]
+
+
+def test_a_highway_event_names_its_road_direction_and_mileage(highway):
+    r = highway
+    lat, lon = place("I-95 SB exit 21")
+    assert r.locate_on_road(lat, lon, "I-95 SB exit 21") == {"road": "I-95", "dir": "SB", "mile": 14.5}
+    assert r.locate_on_road(lat, lon, "") == {"road": "I-95", "dir": "", "mile": 14.5}            # on the road, no direction
+    assert r.locate_on_road(lat, lon, "", "I-95 southbound at exit 21")["dir"] == "SB"            # from a typed address
+    assert r.locate_on_road(*place("I-287 EB MM 7.5"), "I-287 EB MM 7.5") == {"road": "I-287", "dir": "EB", "mile": 7.5}
+    assert r.locate_on_road(*place("Hutch NB MM 18.8"), "Hutch NB MM 18.8") == {"road": "Hutch", "dir": "NB", "mile": 18.8}
+    assert r.locate_on_road(41.0019, -73.6669, "Lyon Park, Port Chester")["road"] == "NY-120A"     # (N Main St is Route 120A)
+    assert r.locate_on_road(41.0165, -73.6830, "Crawford Park, Rye Brook") is None                  # 1 km from any marked road
+    assert r.locate_on_road(40.9880, -73.6790, "20 Clinton St")["road"] == "I-95"                   # 130 m from I-95: on it
+    assert r.locate_on_road(None, None, "I-95 NB exit 21") is None
+    # a road named in the label but the point far from it: the point wins (a mislabelled event)
+    assert r.locate_on_road(41.0165, -73.6830, "I-95 NB exit 21") is None
+
+
+def test_before_and_after_follow_the_direction_of_travel(highway):
+    r = highway
+    # southbound at exit 21 (MP 14.5): "before" is north of it (the way the traffic came), "after" south
+    sb = r.cameras_for(*place("I-95 SB exit 21"), "I-95 SB exit 21")
+    assert sb["highway"] == {"road": "I-95", "dir": "SB", "mile": 14.5}
+    assert picks(sb) == [("before", 0.2, "north", False, "1ne01470n"), ("after", 0.3, "south", False, "1ne01420n")]
+    # northbound at exit 21 (MP 13.7): a camera right there, then the one before (south) and after (north, on the NB side)
+    nb = r.cameras_for(*place("I-95 NB exit 21"), "I-95 NB exit 21")
+    assert picks(nb) == [("at", 0.0, "north", False, "1ne01370s"), ("before", 1.2, "south", True, "1ne01240n"),
+                         ("after", 0.5, "north", True, "1ne01420n")]
+    assert nb["cameras"][0]["name"] == "I-95 at Interchange 21 (Route1/I-287)"
+    # no direction: both sides by compass
+    assert picks(r.cameras_for(*place("I-95 MM 9.5"), "I-95 MM 9.5")) == [
+        ("side", 0.3, "south", False, "1ne00915s"), ("side", 0.4, "north", False, "1ne00989s")]
+    # I-287 eastbound at MM 7.5: before is west (the EB camera at interchange 9, over its carriageway), after east
+    eb = r.cameras_for(*place("I-287 EB MM 7.5"), "I-287 EB MM 7.5")
+    assert picks(eb) == [("before", 0.1, "west", True, "1cw00710e"), ("after", 0.6, "east", False, "1cw00780w")]
+    wb = r.cameras_for(*place("I-287 EB MM 7.5"), "I-287 WB MM 7.5")
+    assert picks(wb) == [("before", 0.6, "east", True, "1cw00780w"), ("after", 0.1, "west", False, "1cw00710e")]
+    # each pick carries what the panel shows
+    assert set(sb["cameras"][0]) >= {"id", "name", "road", "dir", "mile", "lat", "lon", "source", "rel", "miles", "side", "facing", "km"}
+
+
+def test_a_camera_over_the_events_carriageway_wins_when_it_is_nearly_as_close(highway):
+    r = highway
+    # I-95 southbound at MP 9.5: the SB camera at 9.15 (0.3 mi) is "before"; northbound, the same camera is "after"
+    # (no NB camera within 0.3 mi of it), not facing
+    sb = picks(r.cameras_for(*place("I-95 MM 9.5"), "I-95 SB MM 9.5"))
+    assert sb == [("before", 0.4, "north", True, "1ne00989s"), ("after", 0.3, "south", True, "1ne00915s")]
+    nb = picks(r.cameras_for(*place("I-95 MM 9.5"), "I-95 NB MM 9.5"))
+    assert nb == [("before", 0.3, "south", False, "1ne00915s"), ("after", 0.4, "north", False, "1ne00989s")]
+    # a facing camera up to 0.3 mi further than the nearest is preferred: a fake NB one at 10.1 vs the SB one at 9.9
+    fake = dict(r.camera("1ne00989s"), id="fakeNB", dir="Northbound", lat=40.96413, lon=-73.73698)   # ~MP 10.1
+    r.thruway.data["cameras"].append(fake)
+    r._changed()
+    assert picks(r.cameras_for(*place("I-95 MM 9.5"), "I-95 NB MM 9.5"))[1] == ("after", 0.5, "north", True, "fakeNB")
+
+
+def test_no_camera_within_two_miles_shows_nothing_and_off_the_highway_only_nearby(highway):
+    r = highway
+    hutch = r.cameras_for(*place("Hutch NB MM 18.8"), "Hutch NB MM 18.8")
+    assert hutch["highway"]["road"] == "Hutch" and hutch["cameras"] == []        # no camera on the Hutch
+    far = r.cameras_for(*place("US-1 MM 10.0"), "US-1 MM 10.0")                   # I-95's cameras beside it are I-95's
+    assert far["highway"] == {"road": "US-1", "dir": "", "mile": 10.0} and far["cameras"] == []
+    # off the highway: only what is within 300 m as the crow flies, as "nearby"
+    park = r.cameras_for(41.0165, -73.6830, "Crawford Park, Rye Brook")
+    assert park["highway"] is None and park["cameras"] == []
+    close = r.cameras_for(40.9880, -73.6815, "a house 90 m from the interchange 21 camera")
+    assert close["highway"]["road"] == "I-95"                                     # (that close to I-95 counts as on it)
+    r2 = make(thruway=True, key="", urls={}, gazetteer=Path("/nonexistent"))      # no markers at all: nearby only
+    assert r2.refresh("cameras")
+    o = r2.cameras_for(40.9880, -73.6815, "I-95 SB exit 21")
+    assert o["highway"] is None and [(c["rel"], c["id"]) for c in o["cameras"]] == [("nearby", "1ne01370s")]
+    assert o["cameras"][0]["km"] < 0.3 and o["cameras"][0]["miles"] is None
+    # a camera marked off is never picked
+    r.camera("1ne01420n")["off"] = True
+    r._changed()
+    assert "1ne01420n" not in [c["id"] for c in r.cameras_for(*place("I-95 SB exit 21"), "I-95 SB exit 21")["cameras"]]
+
+
+def test_another_roads_camera_at_the_interchange_is_not_this_roads(highway):
+    r = highway
+    # the I-287 camera at interchange 5 is ~1 km from I-95's markers: never on I-95; and I-95's cameras at
+    # interchange 21 are within 300 m of I-287's last markers but say "I-95": not I-287's
+    end = r.cameras_for(*place("I-287 EB MM 10.5"), "I-287 EB MM 10.5")
+    assert end["highway"]["road"] == "I-287" and all(c["road"] == "I-287" for c in end["cameras"] if c["rel"] != "nearby")
+
+
+def test_the_cameras_endpoint(highway):
+    r = highway
+    lat, lon = place("I-95 SB exit 21")
+    code, body, ctype, _ = r.get("/api/cad/cameras", f"for={lat},{lon}&label=I-95+SB+exit+21")
+    doc = json.loads(body)
+    assert code == 200 and doc["highway"]["dir"] == "SB" and [c["rel"] for c in doc["cameras"]] == ["before", "after"]
+    assert r.get("/api/cad/cameras", "for=nowhere")[0] == 400
+    assert json.loads(r.get("/api/cad/cameras", "for=41.0165,-73.6830&label=Crawford+Park")[1]) == {
+        "configured": True, "highway": None, "cameras": []}
+
+
 # ---- config ------------------------------------------------------------------------------------------------
 
 
@@ -711,6 +833,9 @@ def test_the_layers_control_is_on_every_map_with_its_six_layers():
     assert not re.search(r"carsprogram|511ny\.org/(api|map)|[?&]key=|skyvdn|nyssnapshot", js)
     assert "visibilitychange" in js and "CAM_REFRESH_MS = 10000" in js                # ~10 s, paused when hidden
     cadmap = (STATIC / "cadmap.js").read_text()
-    assert "MapLayers.attach(this.map, host, ctrls)" in cadmap and "MapLayers.nearby(inc" in cadmap
+    assert "MapLayers.attach(this.map, host, ctrls)" in cadmap and 'MapLayers.cameras(inc, $("#d-cams"))' in cadmap
+    assert 'MapLayers.cameras(act, $("#ov-cams"), { small: true })' in cadmap              # the wall board's two (#95)
+    assert 'id="d-cams"' in html and 'id="ov-cams"' in html
+    assert "/api/cad/cameras?" in js and "CAM_REFRESH_MS)" in js and 'aria-expanded' in js   # live, collapsible
     sprite = (STATIC / "icons.svg").read_text()
     assert 'id="i-layers"' in sprite and 'id="i-camera"' in sprite

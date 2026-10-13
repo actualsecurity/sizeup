@@ -55,7 +55,10 @@ HTTP (sizeup/web/server.py, any signed-in person: viewers too, all GET):
                                            status: {cameras, events, signs: {on, at, n, error}}}], rev, cameras,
                                            events, signs, mileposts, exits}; ?rev= the same rev: {rev, same: true}
     GET /api/cad/cameras?q=&near=lat,lon&n=   {cameras: [...]}: the place search for "@...camera", or the
-                                           nearest to a point (an event's "Cameras nearby")
+                                           nearest to a point
+    GET /api/cad/cameras?for=lat,lon&label=&address=   the incident viewer's cameras (#95, cameras_for):
+                                           {highway: {road, dir, mile} | null, cameras: [{..., rel: before | after |
+                                           at | side | nearby, miles, side, facing}]}
     GET /api/cad/cameras/<id>/image       the snapshot (image/jpeg ...), X-Image-Time: when it was taken
                                            (the camera's Last-Modified, else when the hub fetched it)
 
@@ -80,6 +83,8 @@ from typing import Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote, urlsplit
 from urllib.request import Request, urlopen
+
+from sizeup.geo.places import ROUTES          # each highway's positive direction (NB / EB: the mileage rises that way)
 
 SOURCE = "511NY"
 ATTRIBUTION = "powered by 511NY"
@@ -119,7 +124,14 @@ IMAGE_KEEP = 200                 # snapshots kept in memory (least recently used
 IMAGE_PARALLEL = 4               # fetches to the cameras at once
 CAMERA_ID = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
 CAMERA_PATH = re.compile(r"/api/cad/cameras/([A-Za-z0-9_.:-]{1,64})/image")
-NEAR_KM = 1.5                    # "Cameras nearby": this close to the event
+NEAR_KM = 1.5                    # "Cameras nearby" (the map's nearest-camera lookup): this close to the event
+# The incident viewer's cameras (#95): along the road, not as the crow flies
+ALONG_MI = 2.0                   # the camera just before / just after the event: this far along the road at most
+ON_ROAD_M = 150.0                # an event this close to a road's mile markers is on that road
+MARKER_M = 300.0                 # a camera (or a labelled event) this close to a marker takes its mileage
+FACING_MI = 0.3                  # a camera on the event's side of the road wins over a nearer one this much nearer
+AT_MI = 0.05                     # closer than this along the road: "at the location"
+NEARBY_KM = 0.3                  # off the highway (or besides the two): cameras this close, as the crow flies
 JSON = "application/json"
 
 # Field names, any case, in the order tried: the developer API's (ID, RoadwayName, ...), the camera
@@ -517,6 +529,41 @@ def parse_thruway_signs(doc, bbox=DEFAULT_BBOX) -> list[dict]:
 THRUWAY_PARSE = {"cameras": parse_thruway_cameras, "events": parse_thruway_events, "signs": parse_thruway_signs}
 
 
+# The highways the gazetteer has mile markers for (#67, #83), as named in a location label ("I-95 SB
+# exit 21", "Hutch NB MM 15.6"), a typed address ("I-287 eastbound at exit 10") or a camera's road.
+HIGHWAY_WORDS = (
+    (re.compile(r"\bi[- ]?95\b|new england (thruway|twy)", re.I), "I-95"),
+    (re.compile(r"\bi[- ]?287\b|cross westchester", re.I), "I-287"),
+    (re.compile(r"\bi[- ]?684\b", re.I), "I-684"),
+    (re.compile(r"\bhutch(inson)?\b|\bhrp\b", re.I), "Hutch"),
+    (re.compile(r"\bus[- ]?1\b|\b(us )?(rte|route) 1\b|boston post", re.I), "US-1"),
+    (re.compile(r"\bny[- ]?120a\b|\b(rte|route) 120a\b", re.I), "NY-120A"),
+    (re.compile(r"\bny[- ]?120\b|\b(rte|route) 120\b", re.I), "NY-120"),
+)
+DIR_WORDS = re.compile(r"\b(nb|sb|eb|wb|northbound|southbound|eastbound|westbound)\b", re.I)
+
+
+def highway_from_text(text: str) -> tuple[str, str] | None:
+    """("I-95", "SB") from "I-95 SB exit 21" / "I-95 southbound at exit 21"; the direction "" when none."""
+    if not text:
+        return None
+    for rx, route in HIGHWAY_WORDS:
+        if rx.search(text):
+            m = DIR_WORDS.search(text)
+            return route, (m.group(1)[0].upper() + "B") if m else ""
+    return None
+
+
+def c_dir(c: dict) -> str:
+    return c.get("dir", "") or ""
+
+
+def cam_dir(text: str) -> str:
+    """A camera's direction ("Northbound", "NB") as "NB"; "" when it has none."""
+    m = DIR_WORDS.search(text or "")
+    return (m.group(1)[0].upper() + "B") if m else ""
+
+
 def highway_places(path: str | Path | None, bbox=DEFAULT_BBOX) -> dict:
     """The mile markers and exits in the gazetteer's places table (#67: NYSDOT reference markers, OSM
     motorway junctions), in our area. {} when that table isn't there yet (before #67)."""
@@ -866,6 +913,107 @@ class Roads:
         out.sort(key=lambda p: -p["score"])
         return out[:max(1, min(limit, 20))]
 
+    # -- the incident viewer's cameras: just before and just after, along the road (#95) -------------------
+
+    def _routes(self) -> dict:
+        """{route: [(mileage, lat, lon), ...]} from the gazetteer's mile markers (both carriageways' rows)."""
+        cached = getattr(self, "_route_markers", None)
+        if cached is not None:
+            return cached
+        out: dict[str, list] = {}
+        for m in self.places.get("mileposts", []):
+            v = _f(m.get("value"))
+            if v is not None and m.get("route"):
+                out.setdefault(m["route"], []).append((v, m["lat"], m["lon"]))
+        self._route_markers = out
+        return out
+
+    def _mileage(self, route: str, lat: float, lon: float) -> tuple[float, float] | None:
+        """(mileage, metres from the nearest marker) on route, or None without markers."""
+        best = None
+        for v, mlat, mlon in self._routes().get(route, ()):
+            d = km(lat, lon, mlat, mlon) * 1000
+            if best is None or d < best[1]:
+                best = (v, d)
+        return best
+
+    def locate_on_road(self, lat: float, lon: float, label: str = "", address: str = "") -> dict | None:
+        """{road, dir, mile} for an event on a highway we have markers for: the road and direction named
+        in its location ("I-95 SB exit 21", "I-287 eastbound at exit 10") when the point is within
+        MARKER_M of that road's markers, else the road whose markers are within ON_ROAD_M. None otherwise."""
+        if lat is None or lon is None or not self._routes():
+            return None
+        named = highway_from_text(label) or highway_from_text(address)
+        if named and named[0] in self._routes():
+            at = self._mileage(named[0], lat, lon)
+            if at and at[1] <= MARKER_M:
+                return {"road": named[0], "dir": named[1], "mile": at[0]}
+        best = None
+        for route in self._routes():
+            at = self._mileage(route, lat, lon)
+            if at and at[1] <= ON_ROAD_M and (best is None or at[1] < best[1][1]):
+                best = (route, at)
+        if best is None:
+            return None
+        d = named[1] if named and named[0] == best[0] else ""
+        return {"road": best[0], "dir": d, "mile": best[1][0]}
+
+    def cameras_for(self, lat: float, lon: float, label: str = "", address: str = "") -> dict:
+        """The incident viewer's cameras (#95). On a highway: the camera just before and just after the
+        event along the road (by our mile markers), in its direction of travel when the location says one
+        (rel "before" / "after", with the miles; a camera on that carriageway wins over one up to FACING_MI
+        nearer: "facing"), else the nearest on each side labelled by compass (rel "side"); within ALONG_MI.
+        Then (and off a highway, only) the cameras within NEARBY_KM as the crow flies (rel "nearby")."""
+        where = self.locate_on_road(lat, lon, label, address)
+        out, taken = [], set()
+        if where:
+            route, d, mile = where["road"], where["dir"], where["mile"]
+            pos, neg = ROUTES.get(route, ("NB", "SB", None))[:2]
+            compass = {"NB": ("south", "north"), "EB": ("west", "east")}[pos]       # the lower side, the higher side
+            cands = []
+            for c in self.merged("cameras"):
+                if c["off"]:
+                    continue
+                on = highway_from_text(c.get("road", ""))
+                if on and on[0] != route:                                     # another road's camera at the interchange
+                    continue
+                at = self._mileage(route, c["lat"], c["lon"])
+                if not at or at[1] > MARKER_M:
+                    continue
+                cands.append((at[0] - mile, c))
+            def side(lower: bool) -> list:
+                return sorted(((abs(dm), dm, c) for dm, c in cands if (dm < 0) == lower and abs(dm) <= ALONG_MI), key=lambda x: x[0])
+            def pick(cs: list):
+                if not cs:
+                    return None
+                best = cs[0]
+                if d:
+                    facing = next((x for x in cs if cam_dir(c_dir(x[2])) == d), None)
+                    if facing and facing[0] <= best[0] + FACING_MI:
+                        best = facing
+                return best
+            sides = [(True, "side"), (False, "side")]
+            if d:                                                              # travelling with the mileage, or against it
+                sides = [(True, "before"), (False, "after")] if d == pos else [(False, "before"), (True, "after")]
+            def add(rel: str, dist: float, c: dict, lower: bool) -> None:
+                out.append(self._cam_public(c) | {
+                    "rel": rel, "miles": round(dist, 1), "side": compass[0] if lower else compass[1],
+                    "facing": bool(d) and cam_dir(c_dir(c)) == d, "km": round(km(lat, lon, c["lat"], c["lon"]), 2)})
+                taken.add(c["id"])
+            for lower, rel in sides:
+                cs = [x for x in side(lower) if x[2]["id"] not in taken]
+                if cs and cs[0][0] < AT_MI:                                    # one right at the spot: it, then the next along
+                    add("at", cs[0][0], cs[0][2], lower)
+                    cs = cs[1:]
+                p = pick(cs)
+                if p is not None:
+                    add(rel, p[0], p[2], lower)
+            out.sort(key=lambda c: {"at": 0, "before": 1, "after": 2, "side": 3}[c["rel"]])
+        for c in self.nearest(lat, lon, n=3, within_km=NEARBY_KM):
+            if c["id"] not in taken:
+                out.append(c | {"rel": "nearby", "miles": None, "side": "", "facing": False})
+        return {"configured": self.configured, "highway": where, "cameras": out}
+
     # -- the snapshot proxy ----------------------------------------------------------------------------
 
     def image(self, cid: str) -> tuple[int, bytes, str, dict]:
@@ -928,6 +1076,12 @@ class Roads:
                 return 200, json.dumps({"rev": self.rev, "same": True}).encode(), JSON, {}
             return 200, self._public_bytes(), JSON, {}
         if path == "/api/cad/cameras":
+            if one("for"):                                   # the incident viewer's cameras (#95)
+                try:
+                    lat, lon = (float(x) for x in one("for").split(","))
+                except ValueError:
+                    return 400, b'{"error":"for: lat,lon"}', JSON, {}
+                return 200, json.dumps(self.cameras_for(lat, lon, one("label")[:200], one("address")[:200])).encode(), JSON, {}
             near = None
             if one("near"):
                 try:
