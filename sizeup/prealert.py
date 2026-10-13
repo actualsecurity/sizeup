@@ -62,7 +62,8 @@ FIRST_SINCE = "10m"            # the first connection's window (later ones: sinc
 LIST_S = 24 * 3600             # shown and in the state
 KEEP_S = 90 * 24 * 3600        # kept in the database (the CSV export)
 MATCH_BEFORE_S = 120           # an event made this long before the ring still matches it
-UA = "sizeup-prealert (read-only ntfy subscriber)"
+from sizeup import USER_AGENT
+UA = USER_AGENT + " ntfy read-only subscriber"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS prealerts (

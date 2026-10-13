@@ -18,13 +18,14 @@ class HubError(RuntimeError):
 
 class HubClient:
     def __init__(self, base_url: str, token: str, access_id: str = "", access_secret: str = "",
-                 timeout: float = 15.0, user_agent: str = "sizeup-station"):
+                 timeout: float = 15.0, user_agent: str = ""):
         u = urlsplit(base_url)
         self.https = u.scheme == "https"
         self.host, self.port = u.hostname or "", u.port or (443 if self.https else 80)
         self.prefix = (u.path or "").rstrip("/")
         self.timeout = timeout
-        self.headers = {"Authorization": f"Bearer {token}", "User-Agent": user_agent, "Accept": "application/json"}
+        from sizeup import USER_AGENT
+        self.headers = {"Authorization": f"Bearer {token}", "User-Agent": user_agent or USER_AGENT + " station", "Accept": "application/json"}
         if access_id and access_secret:
             self.headers.update({"CF-Access-Client-Id": access_id, "CF-Access-Client-Secret": access_secret})
         self._conn: http.client.HTTPConnection | None = None

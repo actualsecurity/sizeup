@@ -66,7 +66,7 @@ from sizeup.geo.normalize import (  # noqa: E402
 from sizeup.geo.shapefile import iter_shapes, read_dbf  # noqa: E402
 
 DB_PATH = ROOT / "data" / "gazetteer.sqlite"
-USER_AGENT = "sizeup-gazetteer/0.2 (Port Chester FD dispatch display; offline geocoder build)"
+USER_AGENT = "sizeup-gazetteer/0.2 (Port Chester FD dispatch; offline geocoder build; contact pcfd-sizeup.cqmpy@dralias.com)"
 
 # Covered municipalities: (label used everywhere, TIGER layer, state FIPS, TIGER NAMELSAD).
 # Labels must match sizeup.geo.gazetteer.TOWN_PRIORITY (the ranking order).

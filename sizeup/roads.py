@@ -93,12 +93,8 @@ THRUWAY_API = "https://webdataapi.thruway.ny.gov/api/data"
 THRUWAY_URLS = {"cameras": f"{THRUWAY_API}/trafficcameras/xml", "events": f"{THRUWAY_API}/events/xml",
                 "signs": f"{THRUWAY_API}/dmsstatus/xml"}
 THRUWAY_EVERY_S = {"cameras": 3600.0, "events": 120.0, "signs": 300.0}
-try:
-    from sizeup import __version__ as _VERSION
-except Exception:  # pragma: no cover
-    _VERSION = "0"
 # A plain client that says who it is (no browser impersonation, ever: a host that refuses this is left alone)
-UA = f"sizeup/{_VERSION} (Port Chester FD dispatch; contact https://github.com/actualsecurity/sizeup)"
+from sizeup import USER_AGENT as UA
 FEEDS = ("cameras", "events", "signs")
 # West, south, east, north: Port Chester and Rye Brook, then Rye, Harrison / Purchase, Mamaroneck,
 # Rye Neck, White Plains' east edge, Greenwich CT, and I-287 / I-95 / Hutch / Merritt between them.
