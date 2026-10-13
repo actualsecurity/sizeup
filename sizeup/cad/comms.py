@@ -12,7 +12,8 @@
                                   only to events its rig is on (user, 2026-10-07: "why did this one
                                   get added to this call? it wasn't dispatched to that call").
                       dispatcher  a 60 Control turn right before or after a linked unit's turn in the
-                                  same P25 call on an incident talkgroup (Fire/EMS 15)
+                                  same P25 call on an incident talkgroup (Fire/EMS 15); a key-up of
+                                  an unknown radio between them (no ID, issue #62) is looked past
                       manual      put on the event by a person (a transmission's menu, "Add to event");
                                   unit = the operator who did it (also in the event's timeline)
     radio_link_exclusions  transmission x event a person took off ("Remove from 26-000007", user,
@@ -125,9 +126,30 @@ class Comms:
 
     def _dispatcher_links(self, db, tid: str, call_id: str, turn: int, disp: bool, mine: dict) -> None:
         """60 Control answering (or calling) a linked unit: the turn right before or after it in the
-        same call. Either side may be transcribed first, so both directions are checked."""
-        sib = db.execute("SELECT id, turn, dispatcher FROM radio_traffic WHERE call_id = ? AND turn IN (?, ?)",
-                         (call_id, turn - 1, turn + 1)).fetchall()
+        same call. Either side may be transcribed first, so both directions are checked. A turn of an
+        unknown radio (no talker, no ID) in between is looked past; one not logged yet stops the look
+        (it may be the unit that was really answered), and when it comes in unknown it bridges the two."""
+        rows = {r["turn"]: r for r in db.execute(
+            "SELECT id, turn, dispatcher, talker, radio_id, rig FROM radio_traffic WHERE call_id = ?", (call_id,))}
+
+        def near(step: int):
+            k = turn + step
+            while k in rows:
+                if rows[k]["talker"] or rows[k]["radio_id"] or rows[k]["rig"]:
+                    return rows[k]
+                k += step
+            return None
+
+        sib = [s for s in (near(-1), near(1)) if s is not None]
+        me = rows.get(turn)
+        if me is not None and not (me["talker"] or me["radio_id"] or me["rig"]):
+            # me: an unknown radio's key-up; the turns on either side may be 60 Control and a unit
+            if len(sib) == 2 and sib[0]["dispatcher"] != sib[1]["dispatcher"]:
+                d, u = sib if sib[0]["dispatcher"] else sib[::-1]
+                for r in db.execute("SELECT incident_id, unit FROM radio_links WHERE traffic_id = ? AND why = 'unit'",
+                                    (u["id"],)).fetchall():
+                    self._auto(db, d["id"], r["incident_id"], "dispatcher", r["unit"])
+            return
         for s in sib:
             if disp and not s["dispatcher"]:            # me: dispatcher; neighbour: a unit linked by unit
                 for r in db.execute("SELECT incident_id, unit FROM radio_links WHERE traffic_id = ? AND why = 'unit'",

@@ -53,7 +53,7 @@ from sizeup.dispatch import parse
 from sizeup.incidents import IncidentStore, Traffic
 from sizeup.radio.fm import FRAME, RATE, Channel, NfmReceiver, Segment, data_frames, speech_seconds
 from sizeup.radio.mdc1200 import decode as mdc_decode
-from sizeup.radio.p25 import Call, CallIngest
+from sizeup.radio.p25 import Call, CallIngest, Piece, split_call
 from sizeup.radio import claims
 from sizeup.radio.live import LiveTalk
 from sizeup.radio import sdr as sdr_lookup
@@ -165,28 +165,11 @@ class WhisperService:
 
 
 CLIP_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,120}")
-MIN_TURN_S = 0.35   # a key-up shorter than this is a blip: folded into its neighbour, not its own row
 
 
-def split_turns(call: Call) -> list[tuple[str, float, float, str, np.ndarray]]:
-    """(id, start, end, talker, audio) per talker turn; one entry (the call's own id) when one
-    talker or no positions."""
-    audio, n = call.audio, len(call.audio)
-    cuts = [(min(n, int(pos * RATE)), name) for pos, name in call.turns]
-    merged: list[list] = []
-    for i, (a, name) in enumerate(cuts):
-        b = cuts[i + 1][0] if i + 1 < len(cuts) else n
-        if merged and (b - a < MIN_TURN_S * RATE or merged[-1][2] == name):
-            merged[-1][1] = b                                    # blip or same talker: extend previous
-        elif merged and merged[-1][1] - merged[-1][0] < MIN_TURN_S * RATE:
-            merged[-1] = [merged[-1][0], b, name]                # previous was the blip: this talker owns it
-        else:
-            merged.append([a, b, name])
-    if len(merged) < 2:
-        return [(call.id, call.start, call.end, ", ".join(call.units), audio)]
-    merged[0][0] = 0
-    return [(f"{call.id}-t{k}", call.start + a / RATE, call.start + b / RATE, name, audio[a:b])
-            for k, (a, b, name) in enumerate(merged)]
+def split_turns(call: Call) -> list[Piece]:
+    """One Piece (id, start, end, talker, audio, pairs, stt) per key-up: radio/p25.py split_call."""
+    return split_call(call, RATE)
 
 
 @dataclass
@@ -292,6 +275,9 @@ class App:
         self.radios = self.cad.radios
         self.live = LiveTalk(resolve=self.radios.resolve, tg_name=self.tg.name, main=self.tg.main,
                              learn=lambda src, alias, at: self._heard("p25", src, alias, at), debug=log)
+        if self.p25 is not None:        # a finished call's key-ups checked against the live grants (issue #62)
+            self.p25.grants = self.live.grants
+            self.p25.alias_of = lambda src: self.live.aliases.get(src, "")
         # [cloud] role = "station": the hub link (sizeup/cloud/station.py) sets these; None = all-in-one.
         self.events: Callable[[str, dict, str | None], None] | None = None   # (type, data, clip id)
         self.link = None
@@ -631,18 +617,22 @@ class App:
         key = channels.tg_key(call.talkgroup)
         eng = self.stt_engine(key)
         if call.audio is not None:
-            # One row per talker: 60 Control and the unit it's talking to are separate key-ups in the
-            # same call; each piece is transcribed with only its own talker as the hint.
-            for cid, start, end, unit, audio in split_turns(call):
-                names = [n for n in unit.split(", ") if n]
-                pairs = [(call.ids.get(n, ("", ""))[0], call.ids.get(n, ("", ""))[1] or n) for n in names]
-                t = Traffic(cid, call.label, start, end, "", status="pending", unit=unit, talkgroup=call.talkgroup,
-                            rig=self.radios.rig_p25(pairs), radio_id=", ".join(src for src, _t in pairs if src))
+            # One row per key-up (issue #62): 60 Control and the unit it's talking to, a unit keying
+            # twice, a radio with no ID; each piece is transcribed with only its own talker as the hint.
+            for pc in split_turns(call):
+                t = Traffic(pc.id, call.label, pc.start, pc.end, "", status="pending", unit=pc.talker,
+                            talkgroup=call.talkgroup, rig=self.radios.rig_p25(pc.pairs),
+                            radio_id=", ".join(src for src, _t in pc.pairs if src))
                 t.fm = False  # decoded P25 voice: no FM de-emphasis  # type: ignore[attr-defined]
-                t.pairs = pairs  # (radio ID, alias) per talker, for the hub's own rig lookup  # type: ignore[attr-defined]
-                self._keep_clip(t.id, radio_voice(audio, deemph=False), processed=True)
-                self._keep_source(t.id, audio)
-                self._stt(t, audio, eng, key)
+                t.pairs = pc.pairs  # (radio ID, alias) per talker, for the hub's own rig lookup  # type: ignore[attr-defined]
+                self._keep_clip(t.id, radio_voice(pc.audio, deemph=False), processed=True)
+                self._keep_source(t.id, pc.audio)
+                if pc.stt:
+                    self._stt(t, pc.audio, eng, key)
+                else:                   # a sub-0.3 s key-up with no voice: kept, not transcribed
+                    t.raw, t.confidence, t.status, t.model = "", None, "no_speech", ""  # type: ignore[attr-defined]
+                    t.stt = ""  # type: ignore[attr-defined]
+                    self._transcribed(t)
         self._drop_recorder_files(call)  # sizeup's clip is the one copy kept
 
     def _drop_recorder_files(self, call: Call) -> None:

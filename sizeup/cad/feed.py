@@ -11,7 +11,8 @@ Settings come from the data file (data/cad_lists.json, "comms_feed"):
 
 A transmission is "talking to us" (rows[i]["pc"] says why) when its transcript or talker names a
 phrase, or one of PCFD's or Rye Brook's units by code or as said ("E60", "Engine 60", "23 91"),
-or it is 60 Control's turn right before or after such a unit's turn in the same P25 call.
+or it is 60 Control's turn right before or after such a unit's turn in the same P25 call (looking past
+the key-ups of unknown radios in between).
 """
 
 from __future__ import annotations
@@ -159,7 +160,7 @@ class Feed:
         calls = sorted({r["call_id"] for r in rows if r["call_id"]})
         turns: dict[tuple[str, int], dict] = {}
         if calls:
-            for s in self.store.q(f"SELECT id, call_id, turn, talker, rig, dispatcher, text FROM radio_traffic "
+            for s in self.store.q(f"SELECT id, call_id, turn, talker, rig, radio_id, dispatcher, text FROM radio_traffic "
                                   f"WHERE call_id IN ({','.join('?' * len(calls))})", calls):
                 if s["turn"] is not None:
                     turns[(s["call_id"], s["turn"])] = s
@@ -174,8 +175,12 @@ class Feed:
         why = self.matcher.match(r["text"], r["talker"], r["rig"])
         if why or not r["dispatcher"] or not r["call_id"] or r["turn"] is None:
             return why
-        for k in (r["turn"] - 1, r["turn"] + 1):             # 60 Control answering (or calling) one of ours
+        for step in (-1, 1):                                  # 60 Control answering (or calling) one of ours
+            k = r["turn"] + step
             s = turns.get((r["call_id"], k))
+            while s and not (s["talker"] or s["radio_id"] or s["rig"]):   # an unknown radio's key-up: look past it
+                k += step
+                s = turns.get((r["call_id"], k))
             if s and not s["dispatcher"]:
                 w = self.matcher.match(s["text"], s["talker"], s["rig"])
                 if w:

@@ -30,6 +30,11 @@ the call's "Starting" line, else gone GRANT_IDLE_S after the grant. The finished
 (radio/p25.py) stays the record of who said what; a talker shown live is not flashed again from the
 "Transmission src" lines at the end.
 
+Every grant is also kept for GRANT_KEEP_S (grants(): time, radio ID per system and talkgroup), and
+the finished call's turns are checked against them (radio/p25.py apply_grants): a key-up the call
+JSON has no radio ID for is named by the grant that opened it, and a transmission that ran into the
+next talker's (no terminator decoded) is cut where that talker was granted.
+
 FG1 (analog): the app's watcher calls fm_open while the squelch is open, fm_ids when the MDC-1200
 ID decodes from the audio so far (APX radios send it 0.3-0.8 s in), and fm_segment with the IDs
 found in the whole transmission when it ends (a post-ID on release is only known then).
@@ -40,12 +45,16 @@ from __future__ import annotations
 import re
 import threading
 import time
+from collections import deque
 from typing import Callable
 
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 TS = re.compile(r"^\[(?P<ts>\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)?)\]")   # trunk-recorder's (local) time
 LINE = re.compile(r"\[(?P<sys>[^\]\s]+)\]\s+(?P<call>\w+)\s+TG:\s*(?P<tg>\d+)\s+Freq:\s*[\d.]+\s*MHz\s+(?P<msg>.*)$")
 UNIT_SET = re.compile(r"Unit ID set via Control Channel, ext: (?P<src>\d+)")
+# 5.2.0 (error level) / later (debug): a grant to another radio while the recorder holds this call's
+# transmission; trunk-recorder caches it for the next transmission. Kept as a grant (call turns only).
+GRANT_SET = re.compile(r"Unit ID externally set from GRANT: (?P<src>\d+)")
 ALIAS = re.compile(r"New \S+ alias: (?P<src>\d+) \((?P<alias>[^)]*)\)")
 SRC = re.compile(r"- Transmission src: (?P<src>-?\d+)(?: \((?P<alias>[^)]*)\))? pos:")
 UNIT_TAG = "SIZEUP-UNIT "
@@ -55,6 +64,8 @@ RECENT_S = 4.0           # "just transmitted": shown this long after the transmi
 GRANT_S = 3.0            # a grant held on its own is adopted by a "Starting" line for its talkgroup this soon
 GRANT_IDLE_S = 5.0       # ... and is gone this long after its last grant when no call line ever came
 CONCLUDED_KEEP_S = 5.0   # the "Transmission src" lines follow the conclusion
+GRANT_KEEP_S = 1800.0    # grants kept this long for the finished calls' turns (radio/p25.py apply_grants)
+GRANT_DUP_S = 2.0        # the unit script and the log line naming the same grant: kept once
 
 
 def _noop(*_a) -> None:
@@ -92,6 +103,7 @@ class LiveTalk:
         self._fm_last: dict[str, dict] = {}
         self._recent: list[dict] = []
         self.aliases: dict[str, str] = {}                   # P25 radio ID -> alias, learned from the log
+        self._grant_log: deque[tuple[float, str, int, str]] = deque(maxlen=20000)   # (time, system, tg, src)
 
     # -- P25 -------------------------------------------------------------------------------------
 
@@ -139,9 +151,31 @@ class LiveTalk:
                        f"published {(sent - t0) * 1000:.0f} ms after the {'log line' if stamped else 'grant'}, "
                        f"{max(0.0, call['talk_since'] - call['since']):.1f} s into the call")
 
+    def grants(self, system: str, tg: int, t0: float, t1: float) -> list[tuple[float, str]]:
+        """(time, radio ID) of each grant on talkgroup tg between t0 and t1 ('' system: any)."""
+        with self._lock:
+            return [(at, src) for at, s, g, src in self._grant_log
+                    if g == tg and (not system or s == system) and t0 <= at <= t1]
+
+    def _log_grant(self, system: str, tg: int, src: str, now: float) -> None:
+        """Under the lock: one grant for the call turns. The same radio granted on the same talkgroup
+        again within GRANT_DUP_S (the unit script and trunk-recorder's own log line) is one grant."""
+        log = self._grant_log
+        while log and now - log[0][0] > GRANT_KEEP_S:
+            log.popleft()
+        for at, s, g, r in reversed(log):
+            if now - at > GRANT_DUP_S:
+                break
+            if s == system and g == tg:
+                if r == src:
+                    return
+                break
+        log.append((now, system, tg, src))
+
     def _grant(self, system: str, src: str, tg: int, now: float) -> bool:
         """A voice grant (or a grant with a new source on a call in progress): src is talking on tg now."""
         with self._lock:
+            self._log_grant(system, tg, src, now)
             live = [c for (s, _k), c in self._calls.items() if s == system and c["tg"] == tg]
             call = max((c for c in live if not c.get("grant")), key=lambda c: c["since"], default=None) \
                 or next((c for c in live if c.get("grant")), None)
@@ -201,7 +235,13 @@ class LiveTalk:
             if call is None:                         # a line for a call started before we were listening
                 call = self._open(system, key, tg, now)
             call["seen"] = now
+            if m := GRANT_SET.search(msg):
+                if m["src"] not in ("-1", "0"):
+                    self._log_grant(system, tg, m["src"], now)
+                return False
             if m := UNIT_SET.search(msg):
+                if m["src"] not in ("-1", "0"):
+                    self._log_grant(system, tg, m["src"], now)
                 return self._talker(call, m["src"], now, "log")
             if m := ALIAS.search(msg):
                 src, alias = m["src"], m["alias"].strip()
