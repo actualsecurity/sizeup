@@ -197,8 +197,33 @@ function sRender(force) {
     return;
   }
   S.deferred = false;
-  const fn = { lists: sLists, units: sUnits, dispatch: sDispatch, users: sUsers, system: sSystem }[S.section];
+  const fn = { lists: sLists, units: sUnits, dispatch: sDispatch, users: sUsers, system: sSystem, radios: sRadios }[S.section];
   if (fn) fn(panel);
+}
+
+// ---- radios: the tone pairs named from a page row (#80; the rest of the section is radios-panel.js, radio-controls.js) ----
+
+function sRadios() {
+  const box = $("#settings-tone-names");
+  if (box) box.replaceChildren(sToneNames(S.data.tone_names || []));
+}
+function sToneNames(rows) {
+  const ol = el("ol", "s-rows tones");
+  for (const t of rows) {
+    const li = el("li", "s-row");
+    const hz = `${Number(t.a_hz).toFixed(1)}/${t.b_hz ? Number(t.b_hz).toFixed(1) : "-"}`;
+    li.append(el("span", "mono", hz), el("b", "", t.name), t.ours ? el("span", "chip s-state added", "ours") : null,
+      el("span", "dim small", `${t.operator || "—"}${t.at ? `, ${fmtTime(t.at)}` : ""}`), el("span", "spacer"),
+      sBtn("Remove", "The pair is unknown again", () => sAsk(`Forget that ${hz} Hz is ${t.name}?`,
+        () => sPost("tones", { action: "delete", key: t.key }, `${t.name} removed`), "Remove")));
+    [...li.childNodes].forEach((n) => { if (n.nodeType === 3) n.remove(); });
+    ol.append(li);
+  }
+  if (!rows.length) ol.append(el("li", "empty", "None yet: on a page row with unknown tones, Name these tones"));
+  return sCard(sCardHead("Named tones", rows.length ? `${rows.length}` : "",
+    sHelp("Tone pairs named from the 60 Control feed or Radio (an admin's Name these tones on a page nobody's code "
+      + "matched). They go over data/westchester_tones.csv on the hub and the station. A pair marked ours (PCFD, Rye "
+      + "Brook) makes its pages pending events.")), ol);
 }
 
 function sHook() {                 // every render (cad.js): keep up with edits made elsewhere

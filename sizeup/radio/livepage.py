@@ -31,7 +31,7 @@ from typing import Callable, Iterable
 import numpy as np
 
 from sizeup.radio.fm import RATE, speech_seconds
-from sizeup.radio.tones import ToneDetector, ToneEvent, TonePlan
+from sizeup.radio.tones import ToneDetector, ToneEvent, TonePlan, base_name
 
 HOLD_S = 4.0          # the carrier back this soon: the same page (a fade, not a new key-up)
 RECENT_S = 4.0        # a finished page's live state stays this long, marked ended
@@ -45,8 +45,6 @@ def _noop() -> None:
     pass
 
 
-def base_name(n: str) -> str:
-    return n.removesuffix(" (heard)").removesuffix(" (est.)")
 
 
 @dataclass

@@ -370,3 +370,28 @@ def test_only_an_admin_changes_channels_on_the_hub(tmp_path):
     assert acts[0]["summary"] == "Channel FG1: engine local"
     code, raw, _ = api.get("/api/cad/stt", "", Identity(email=JULIAN))           # reading is for everyone
     assert code == 200 and "vocabulary" in json.loads(raw)
+
+
+def test_named_tones_reach_the_station_with_the_channel_choices(tmp_path):
+    """#80: a pair named on the hub goes to the station in the set_channel_prefs job (the signature covers it),
+    so its live paging display names the pair next time; a name removed goes too."""
+    from sizeup.radio.tones import ToneEvent
+    hub = HubRun(hub_cfg(tmp_path))
+    st = None
+    try:
+        assert hub_post(hub, "tones", {"action": "set", "a_hz": 832.5, "b_hz": 1201.0, "name": "Fairview"})[0] == 200
+        st = station(station_cfg(tmp_path, hub.url), {})
+        assert wait(lambda: st.cad.settings.tone_overrides().get("832.5/1201.0", {}).get("name") == "Fairview", 10)
+        assert wait(lambda: hub.get("/api/state")["channels"]["sync"]["state"] == "applied", 10)
+        assert st.plan.match(ToneEvent("two_tone", 832.5, 1201.0, 0, 4)).names == ("Fairview",)
+        assert st.cad.settings.audit_log("radios")[0]["operator"] == "hub"
+        assert hub_post(hub, "tones", {"action": "set", "a_hz": 669.9, "b_hz": 1092.4, "name": "Rye Brook FD"})[0] == 200
+        assert wait(lambda: st.paging.is_ours(st.plan.match(ToneEvent("two_tone", 669.9, 1092.4, 0, 4)).names), 10)
+        assert hub_post(hub, "tones", {"action": "delete", "key": "832.5/1201.0"})[0] == 200
+        assert wait(lambda: st.plan.match(ToneEvent("two_tone", 832.5, 1201.0, 0, 4)).names == (), 10)
+        assert "832.5/1201.0" not in st.cad.settings.tone_overrides()
+        assert hub.get("/api/cad/tones")["named"][0]["name"] == "Rye Brook FD"
+    finally:
+        if st is not None:
+            st.link.stop()
+        hub.close()

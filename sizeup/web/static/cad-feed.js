@@ -7,6 +7,9 @@
 //
 // A row "talking to us" (pc: a phrase from the data file, a PCFD / Rye Brook unit, or 60 Control's
 // turn next to one) gets the accent border and a "PC" badge, and a toast when the talk alerts are on.
+// Every page on South 2 is a row too (#80): one with our tones is an event (its chip is on the row, pc = the
+// department); any other page says what it was ("not ours", "unknown tones" with Name these tones for an admin,
+// "no tones") and is never an event: the row is quieter, nothing is lost.
 // Each row: the incidents it is on as chips (a click: that incident) and its "⋯" menu (cad.js txMenu: Add to
 // event ▸, Remove from ..., Re-transcribe, Copy text).
 // Collapsed to a one-line ticker: remembered in this browser (default: collapsed on a phone).
@@ -78,7 +81,7 @@ window.CadFeed = (() => {
     if (window.Radio) Radio.fillPaging(st.paging, s.paging, null);
     const rows = f.rows || [];
     const sig = JSON.stringify([st.collapsed, st.deps.rev(),
-      rows.map((t) => [t.id, t.text, t.status, t.rig, t.pc, t.has_audio, t.alt_text, t.rerun_at,
+      rows.map((t) => [t.id, t.text, t.status, t.rig, t.pc, t.has_audio, t.alt_text, t.rerun_at, t.page, t.tones,
                        (t.events || []).map((e) => [e.id, e.why])])]);
     if (sig !== st.sig) {
       st.sig = sig;
@@ -121,7 +124,7 @@ window.CadFeed = (() => {
   function renderTicker(t) {
     if (!t) { st.ticker.replaceChildren(el("span", "dim", "None")); return; }
     const line = el("span", "feed-line");
-    line.append(el("span", "t", hhmmss(t.start)), el("b", t.dispatcher ? "disp" : "unit", who(t)),
+    line.append(el("span", "t", hhmmss(t.start)), el("b", t.dispatcher ? "disp" : "unit", t.page ? "Page" : who(t)),
                 el("span", t.text ? "" : "dim", said(t)));
     st.ticker.replaceChildren(...(t.pc ? [pcBadge(t)] : []), line);
     st.ticker.title = `${hhmmss(t.start)} ${who(t)}: ${said(t)}`;
@@ -142,6 +145,7 @@ window.CadFeed = (() => {
       const meta = li.querySelector(".meta");
       if (!many) meta.querySelectorAll(".chip.src").forEach((n) => n.remove());   // one talkgroup: the title says it
       if (t.pc) { li.classList.add("pc"); meta.prepend(pcBadge(t)); }
+      if (t.page && t.page !== "ours") li.classList.add("skipped");       // a page that isn't an event
       return li;
     }));
   }

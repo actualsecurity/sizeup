@@ -108,6 +108,7 @@ def test_every_post_the_scripts_make_is_in_the_permission_map():
                                 ("/api/mode", '"/api/mode"', "admin"),
                                 ("/api/cad/incident/12/link", "`/api/cad/incident/${inc.id}/link`", "dispatch"),
                                 ("/api/cad/incident/12/unlink", "`/api/cad/incident/${e.id}/unlink`", "dispatch"),
+                                ("/api/cad/settings/tones", '"/api/cad/settings/tones"', "admin"),
                                 ("/api/incident/abc/close", "`/api/incident/${encodeURIComponent(id)}/close`", "dispatch")):
         assert literal in scripts, f"no script posts to {path}"
         assert needs(path) == role, path
@@ -168,3 +169,26 @@ def test_fg1_open_with_no_id_yet_says_id_on_release():
     assert radio.index("if (w) return `TX ${w} ${e.channel}`;") < radio.index("ID on release")   # a decoded unit wins
     assert '(e.id_on_release && !e.rig ? " unid" : "")' in radio and "Radio.chipClass(e)" in js("cadmap.js")
     assert re.search(r":where\(\.talk-chip\.unid\) \{[^}]*color: var\(--text-2\)", (STATIC / "style.css").read_text())
+
+
+def test_one_play_button_on_page_rows_skips_the_tones():
+    """#80: a page row has one play button (it starts at the voice, voice_at / voice_offset_s); "Play with tones"
+    is in the "⋯" menu. The separate Voice button is gone from Radio, the feed, the event's page row and the
+    station page. A page that isn't an event says so, and an admin gets "Name these tones" on unknown ones."""
+    cad = js("cad.js")
+    scripts = "".join(js(n) for n in JS_FILES)
+    assert "voiceButton" not in scripts and '"mini", "Voice")' not in scripts and "Voice, no tones" not in scripts
+    assert "function clipUrl(t, withTones)" in cad and "#t=${Number(t.voice_at).toFixed(2)}" in cad
+    row = re.search(r"^function radioRow\(t, ctx = \{\}\) \{(.*?)^\}", cad, re.S | re.M).group(1)
+    assert row.count('el("button", "play")') == 1 and "play(clipUrl(t, false))" in row
+    assert "pageNote(t)" in row and 'nameTonesButton(t)' in row and 'canDo("admin")' in row.split("nameTonesButton")[0]
+    items = re.search(r"^function txMenuItems\(t\) \{(.*?)^\}", cad, re.S | re.M).group(1)
+    assert "pageMenuItems(t)" in items and '"Play with tones"' in cad
+    pages = re.search(r"^function renderSourcePages\(inc\) \{(.*?)^\}", cad, re.S | re.M).group(1)
+    assert pages.count('el("button", "play")') == 1 and "play(clipUrl(t, false))" in pages and "pageMenuItems(t)" in pages
+    for note in ('"unknown tones"', '"no tones"', '"not ours"', '"Name these tones"', '"/api/cad/tones"'):
+        assert note in cad, note
+    station = js("station.js")
+    assert "function play(btn, id, at = 0)" in station and "voice_offset_s" in station and '"Play with tones"' in station
+    assert '"no tones"' in station and '"unknown tones"' in station
+    assert 'id="settings-tone-names"' in (STATIC / "cad.html").read_text() and "function sToneNames" in js("settings.js")

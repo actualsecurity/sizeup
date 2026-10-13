@@ -10,7 +10,8 @@ the tone decoder:
                      (repeats, "time out", updates)
 
 Every decoded tone pair is kept with its page, matched or not, so the real codes for PCFD /
-Rye Brook can be learned from the air and named in the config.
+Rye Brook can be learned from the air and named: in the config, or from the console ("Name these
+tones" on the page's row, Settings section "tones", #80).
 
 Fades (GitHub #61): South 2 is simulcast, and a page can drop under the squelch for a moment and come
 back. When the squelch says a transmission may still continue (Segment.hold_until), PageHold keeps

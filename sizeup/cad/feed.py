@@ -1,6 +1,10 @@
 """The pinned "60 Control · Fire/EMS 15" feed on the CAD console: the last few transmissions on the
 county's incident talkgroup(s), so the desk always sees what 60 Control said, and which of them
-were "talking to us" (Port Chester / Rye Brook).
+were "talking to us" (Port Chester / Rye Brook); and every page on the paging channel(s) (South 2,
+#80), each saying what it was (rows[i]["page"], sizeup/cad/comms.py page_kind): "ours" (PCFD's or Rye
+Brook's tones: the event it opened is on the row, pc = the department), "other" (another department's
+tones), "unknown" (tones nobody's code matches: an admin names them from the row), "none" (no tones
+decoded). Only an "ours" page is an event to accept; the rest stay visible so nothing is lost.
 
 Settings come from the data file (data/cad_lists.json, "comms_feed"):
 
@@ -22,7 +26,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from sizeup.cad.comms import events_of
+from sizeup.cad.comms import _tones, events_of
 from sizeup.cad.lists import Lists, ListsError
 from sizeup.cad.radios import PCFD_KINDS
 
@@ -132,10 +136,10 @@ class Matcher:
 
 
 class Feed:
-    def __init__(self, store, lists, has_clip=lambda cid: False):
+    def __init__(self, store, lists, has_clip=lambda cid: False, paging: tuple[str, ...] = ("South 2",)):
         """lists: the Lists, or a function returning the current ones (Settings edits replace them:
-        the units matched follow)."""
-        self.store, self.has_clip = store, has_clip
+        the units matched follow). paging: the channels whose rows are pages."""
+        self.store, self.has_clip, self.paging = store, has_clip, tuple(paging)
         self._lists = lists if callable(lists) else (lambda: lists)
         self._for = None
         self._refresh()
@@ -153,8 +157,10 @@ class Feed:
         self._refresh()
         tgs = tuple(talkgroups or self.cfg.talkgroups)
         n = max(1, min(int(limit or self.cfg.limit), MAX_LIMIT))
+        pg = self.paging
         rows = self.store.q(f"SELECT * FROM radio_traffic WHERE talkgroup IN ({','.join('?' * len(tgs))}) "
-                            f"ORDER BY start DESC, turn DESC LIMIT ?", (*tgs, n))
+                            + (f"OR (talkgroup IS NULL AND channel IN ({','.join('?' * len(pg))})) " if pg else "")
+                            + "ORDER BY start DESC, turn DESC LIMIT ?", (*tgs, *pg, n))
         if not rows:
             return rows
         calls = sorted({r["call_id"] for r in rows if r["call_id"]})
@@ -166,10 +172,19 @@ class Feed:
                     turns[(s["call_id"], s["turn"])] = s
         ev = events_of(self.store, [r["id"] for r in rows])
         for r in rows:
-            r["pc"] = self.pc(r, turns)
+            _tones(r, pg)
+            r["pc"] = self.page_pc(r) if r["page"] else self.pc(r, turns)
             r["events"] = ev.get(r["id"], [])
             r["has_audio"] = self.has_clip(r["id"])
         return rows
+
+    def page_pc(self, r: dict) -> str:
+        """Why a page is to us: its tones' department(s) when they are ours; '' for any other page, whatever
+        its text says ("Port Chester" on a Fairview page is mutual aid, not an event), so the accent means
+        one thing in the feed: an event of ours."""
+        if r["page"] == "ours":
+            return ", ".join(dict.fromkeys(n for t in r["tones"] if t.get("ours") for n in t.get("names") or []))
+        return ""
 
     def pc(self, r: dict, turns: dict[tuple[str, int], dict]) -> str:
         why = self.matcher.match(r["text"], r["talker"], r["rig"])
@@ -189,8 +204,9 @@ class Feed:
 
     def state(self) -> dict:
         rows = self.rows()
-        ch = rows[0]["channel"] if rows else ""
-        if rows and len(self.cfg.talkgroups) > 1:
-            ch = next((r["channel"] for r in rows if r["talkgroup"] == self.cfg.talkgroups[0]), ch)
+        tg = [r for r in rows if r["talkgroup"] is not None]
+        ch = tg[0]["channel"] if tg else ""
+        if tg and len(self.cfg.talkgroups) > 1:
+            ch = next((r["channel"] for r in tg if r["talkgroup"] == self.cfg.talkgroups[0]), ch)
         return {"title": self.cfg.title, "talkgroups": list(self.cfg.talkgroups), "limit": self.cfg.limit,
                 "channel": ch, "rows": rows}

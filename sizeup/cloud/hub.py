@@ -24,7 +24,8 @@ no token configured the hub refuses them all. Jobs (the station only connects ou
            20 s for the station to render it with its Kokoro; offline or too slow -> text only,
            said so ("Voice unavailable — station offline"), never a hung request
     call   set_mode / set_talkgroup / set_talkgroup_group / retranscribe from this UI, run there;
-           set_channel_prefs: Settings > Radios > Channels (record / transcribe / engine) and whether
+           set_channel_prefs: Settings > Radios > Channels (record / transcribe / engine), the tone pairs
+           named from the console (#80), and whether
            Amazon Transcribe can take audio now, sent whenever the station's reported copy (its
            state's channels.sig) differs, so a station that was offline catches up (channels_check)
 Amazon Transcribe ([stt] aws, sizeup/transcribe.py) runs here: a "traffic" / "page" event with
@@ -453,6 +454,7 @@ class HubApp(App):
         self._chan_push = {"busy": False, "at": 0.0, "error": "", "again": False}
         for d in self.mdb.load(self.store):
             self.pages.append(page_from_dict(d))
+        self._rematch_pages()                          # pairs named since they were heard (#80)
         for p in list(self.pages):                     # pages from before #64: rows in Radio too
             self._page_to_cad(p, replace=False)
         self._clean_hub()
@@ -627,7 +629,12 @@ class HubApp(App):
 
     def channel_desired(self) -> dict:
         ok, why = self.aws_ok()
-        return {"prefs": dict(self._chan_ov), "aws": {"ok": ok, "why": why}, "sig": channels.sig(self._chan_ov, ok)}
+        return {"prefs": dict(self._chan_ov), "aws": {"ok": ok, "why": why}, "tones": dict(self._tone_ov),
+                "sig": channels.sig(self._chan_ov, ok, self._tone_ov)}
+
+    def channels_check_tones(self) -> None:
+        """A pair named here: the station gets it with the next channel push (the signature changed)."""
+        self.channels_check(force=True)
 
     def channels_check(self, force: bool = False) -> None:
         """Send the station these choices when what it reports differs (a change here, a station that was
@@ -647,7 +654,7 @@ class HubApp(App):
 
         def push() -> None:
             try:
-                res = self.hub.remote("set_channel_prefs", want["prefs"], want["aws"])
+                res = self.hub.remote("set_channel_prefs", want["prefs"], want["aws"], want["tones"])
                 if isinstance(res, dict) and self.hub.status is not None:
                     self.hub.status["channels"] = res
                 self._chan_push["error"] = ""

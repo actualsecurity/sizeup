@@ -1,7 +1,8 @@
 """The CAD service: what the web API and the monitor bridge call. Validates input (CadError =
 a 400 with the reason), keeps the lists, store, run cards, dispatch audio and the transmitter together.
 
-    monitor incident for Port Chester (60 Control page) -> from_monitor() -> queued CAD event
+    monitor incident for Port Chester (60 Control page with PCFD's or Rye Brook's tones) -> from_monitor()
+              -> queued CAD event (any other page stays a page row in the feed and Radio, #80)
     operator: Event info -> Accept event (numbered; emergency -> Pending events, else Non-emergency)
               -> recommend -> preview -> dispatch (assign, log, audio, NullTransmitter) -> Active events
               -> Close event with a disposition
@@ -31,6 +32,7 @@ from sizeup.cad import lists as lists_mod
 from sizeup.cad.dispatcher import AudioUnavailable
 from sizeup.cad.store import OPERATOR_MAX, TZ, CadError, Store
 from sizeup.cad.transmit import Transmitter, make_transmitter
+from sizeup.radio.tones import base_name
 from sizeup.tts import VoiceCfg
 from sizeup.tts import voices as tts_voices
 
@@ -51,7 +53,8 @@ class Settings:
     audio_dir: str = ""                            # "" = next to the db (in memory: a temp dir)
     lists: str = ""                                # "" = data/cad_lists.json
     department: str = "Port Chester Fire"          # first words of every dispatch
-    monitor_departments: tuple[str, ...] = ("Port Chester FD", "Rye Brook FD")   # their tones or towns -> queued
+    monitor_departments: tuple[str, ...] = ("Port Chester FD", "Rye Brook FD")   # their tones -> queued (#80)
+    paging: tuple[str, ...] = ("South 2",)        # the paging channels: their rows are pages (the feed, Radio)
     tones: tuple[tuple[float, float], ...] = ((349.1, 1.0), (311.1, 3.0))
     voice: str = "Samantha"                        # tts_engine "say": a `say -v` voice; "kokoro": a Kokoro voice; "polly": "Matthew"
     rate_wpm: int = 0
@@ -151,9 +154,10 @@ class Cad:
         n = self.radios.seed()
         if n:
             log(f"CAD: seeded {n} radio IDs ({len(self.radios.plan['conflicts'])} conflicts left unmapped)")
-        self.comms = Comms(self.store, s.tactical, s.incident_talkgroups, clock=clock)
+        self.comms = Comms(self.store, s.tactical, s.incident_talkgroups, clock=clock, paging=s.paging)
         self.comms.prune()
-        self.feed = Feed(self.store, lambda: self.lists, has_clip=lambda cid: self.has_clip(cid))   # the 60 Control feed
+        # The 60 Control feed: the incident talkgroup(s) and every page on the paging channel(s) (#80).
+        self.feed = Feed(self.store, lambda: self.lists, has_clip=lambda cid: self.has_clip(cid), paging=s.paging)
         # Set by the app: who is transmitting now (sizeup/radio/live.py) and whether a clip's audio is still kept.
         self.live: Callable[[], list[dict]] = lambda: []
         self.paging: Callable[[], list[dict]] = lambda: []      # a page going out now (sizeup/radio/livepage.py)
@@ -183,6 +187,9 @@ class Cad:
         # (App) answers channels_locked(), set_talkgroup(tg, record), channels_changed(), aws_channels(),
         # vocabulary_suggestions() / _push(phrases) / _state(), aws_status(), aws_limit_default(). None: alone.
         self.radio_ctx = None
+        # GET /api/cad/tones (#80): the pairs named from the console and the names to pick from; the app sets it.
+        self.tone_names: Callable[[], dict] = lambda: {"named": self.settings.tone_rows(), "names": list(s.monitor_departments),
+                                                        "ours": list(s.monitor_departments)}
 
     @classmethod
     def from_config(cls, cfg, geocoder=None, log=print) -> Cad:
@@ -193,6 +200,7 @@ class Cad:
                             fallback_voice=cfg.dispatch_fallback_voice, polly_region=cfg.dispatch_polly_region,
                             transmit=cfg.dispatch_transmit, channels=tuple(cfg.dispatch_channels),
                             tactical=tuple(c.label for c in cfg.channels if c.kind == "traffic") or ("FG1",),
+                            paging=tuple(c.label for c in cfg.channels if c.kind == "paging") or ("South 2",),
                             incident_talkgroups=tuple(sorted(cfg.p25_incident_talkgroups))),
                    geocoder=geocoder, log=log)
 
@@ -1112,13 +1120,10 @@ class Cad:
     # -- the bridge from the monitor ----------------------------------------------------------------
 
     def _ours(self, inc) -> bool:
-        """A page for us: our tones (inc.tone_departments), or an address in one of our towns. Units or
-        departments only heard in the text don't count (user, 2026-10-08)."""
-        if any(d in self.s.monitor_departments for d in getattr(inc, "tone_departments", [])):
-            return True
-        towns = {d.removesuffix(" FD").strip().lower() for d in self.s.monitor_departments}
-        town = ((inc.geo or {}).get("town") or "").strip().lower()
-        return bool(town) and town in towns
+        """A page for us: its tones name one of our departments (inc.tone_departments: PCFD, Rye Brook). Units
+        or departments only heard in the text don't count (user, 2026-10-08), and the address never does
+        (#80: a Fairview page geocoded weakly to Port Chester was queued; the monitor departments' tones only)."""
+        return any(base_name(d) in self.s.monitor_departments for d in getattr(inc, "tone_departments", []))
 
     def from_monitor(self, inc) -> dict | None:
         """A monitor incident (60 Control page) for one of our departments -> a queued CAD event,

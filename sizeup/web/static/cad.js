@@ -563,6 +563,7 @@ function renderDetail() {
 
 // The 60 Control page(s) an event came from (comms.py why "page", #64): play over the page's text, from the
 // queue through Accept and after. An event from before the link has none: no button, nothing guessed.
+// One play button (#80): it starts at the voice (the tones skipped); "Play with tones" is in the "⋯" menu.
 function renderSourcePages(inc) {
   const box = $("#d-pages");
   const pages = (inc.radio || []).filter((t) => t.why === "page").sort((a, b) => a.start - b.start);
@@ -574,15 +575,22 @@ function renderSourcePages(inc) {
     const b = Icon.play(el("button", "play"));
     b.type = "button";
     b.disabled = t.has_audio === false;
-    b.title = t.has_audio === false ? "Recording expired (12 h)" : `Play the page (${fmtTime(t.start, true)})`;
-    b.addEventListener("click", () => play(`/api/audio/${encodeURIComponent(t.id)}.wav`));
-    r.append(b);
-    const v = voiceButton(t);
-    if (v) r.append(v);
-    r.append(el("span", "dim", `Page ${fmtTime(t.start)}`), ...Radio.pageTags(t.tones));
+    b.title = t.has_audio === false ? "Recording expired (12 h)" : `Play the page (${fmtTime(t.start, true)})${t.voice_at > 0 ? ", tones skipped" : ""}`;
+    b.addEventListener("click", () => play(clipUrl(t, false)));
+    r.append(b, el("span", "dim", `Page ${fmtTime(t.start)}`), ...Radio.pageTags(t.tones));
+    if (!BOARD) r.append(UI.menu.button(`Actions: page ${fmtTime(t.start, true)}`, () => pageMenuItems(t), { key: `inc-page:${t.id}` }));
     return r;
   }));
   show(box, pages.length > 0);
+}
+// A clip's URL: a page plays from where the voice starts (voice_at, a media fragment: nothing new on the server)
+// unless the tones are wanted too.
+function clipUrl(t, withTones) {
+  const url = `/api/audio/${encodeURIComponent(t.id)}.wav`;
+  return !withTones && t.voice_at > 0 ? `${url}#t=${Number(t.voice_at).toFixed(2)}` : url;
+}
+function pageMenuItems(t) {
+  return t.voice_at > 0 ? [{ label: "Play with tones", disabled: t.has_audio === false, run: () => play(clipUrl(t, true)) }] : [];
 }
 
 // ---- the incident's radio traffic (sizeup/cad/comms.py) ------------------------------------------
@@ -598,17 +606,22 @@ function radioRow(t, ctx = {}) {
   const li = el("li", "rt");
   const meta = el("div", "meta");
   const b = Icon.play(el("button", "play"));
-  b.title = t.has_audio === false ? "Recording expired (12 h)" : "Play";
+  b.title = t.has_audio === false ? "Recording expired (12 h)" : t.voice_at > 0 ? "Play (tones skipped)" : "Play";
   b.disabled = t.has_audio === false;
-  b.addEventListener("click", () => play(`/api/audio/${encodeURIComponent(t.id)}.wav`));
-  meta.append(b);
-  const vb = voiceButton(t);
-  if (vb) meta.append(vb);
-  meta.append(el("span", "t", fmtTime(t.start, true)));
+  b.addEventListener("click", () => play(clipUrl(t, false)));
+  meta.append(b, el("span", "t", fmtTime(t.start, true)));
   const tag = Radio.rigTag({ rig: t.rig, radio_id: t.radio_id, unit: t.talker });
   if (tag) meta.append(tag);
   meta.append(el("span", "chip src", t.channel));
+  if (t.page && t.why !== "page") {       // a page (#80): what it was, and whether it is an event or just a page
+    li.classList.add(`page-${t.page}`);
+    const w = el("span", "why page", "Page");
+    w.title = PAGE_WHAT[t.page] || "A 60 Control page";
+    meta.append(w);
+  }
   if (t.tones && t.tones.length) meta.append(...Radio.pageTags(t.tones));   // a page: who it was for (#64)
+  const note = pageNote(t);
+  if (note) meta.append(note);
   if (t.why) {
     const w = el("span", `why ${t.why}`, RADIO_WHY[t.why] || t.why);
     w.title = t.why === "unit" ? `${t.link_unit || t.rig} was on this incident` : t.why === "channel"
@@ -623,6 +636,7 @@ function radioRow(t, ctx = {}) {
   if (!BOARD) {
     const acts = el("span", "feed-acts");
     for (const e of t.events || []) if (e.id !== ctx.current) acts.append(evChip(e));
+    if (t.page === "unknown" && canDo("admin")) acts.append(nameTonesButton(t));
     const m = txMenu(t, ctx);
     if (busy) { m.setAttribute("aria-busy", "true"); m.title = "Re-transcribing…"; }
     acts.append(m);
@@ -648,14 +662,100 @@ function radioRow(t, ctx = {}) {
   return li;
 }
 const RADIO_ALT_OPEN = new Set();       // rows whose second transcript is shown (kept across redraws)
-// A page's voice without its tones: the clip from voice_at (a media fragment, nothing new on the server).
-function voiceButton(t) {
-  if (!(t.voice_at > 0) || t.has_audio === false) return null;
-  const v = el("button", "mini", "Voice");
-  v.type = "button";
-  v.title = "Play the voice only (skip the tones)";
-  v.addEventListener("click", () => play(`/api/audio/${encodeURIComponent(t.id)}.wav#t=${Number(t.voice_at).toFixed(2)}`));
-  return v;
+
+// ---- a page that isn't an event (#80: only PCFD's or Rye Brook's tones queue one) ------------------------
+// t.page (sizeup/cad/comms.py page_kind): ours (the event it opened is on the row), other (another department's
+// tones), unknown (tones nobody's code matches: an admin names them from the row), none (no tones decoded).
+const PAGE_WHAT = { ours: "A 60 Control page with our tones: the event it opened is on this row",
+                    other: "Another department's tones: not ours, whatever the address", unknown: "Tones no department's code matches",
+                    none: "No tones decoded (voice only, or a missed decode): a page, not an event" };
+function pageNote(t) {
+  if (!t.page || t.page === "ours") return null;
+  const n = el("span", "page-note dim small", t.page === "unknown" ? "unknown tones" : t.page === "none" ? "no tones" : "not ours");
+  n.title = PAGE_WHAT[t.page];
+  return n;
+}
+function nameTonesButton(t) {
+  const b = el("button", "mini", "Name these tones");
+  b.type = "button";
+  b.title = "Say whose tones these are: the pair goes in the tone list and this page is read again";
+  b.addEventListener("click", () => nameTonesDialog(t));
+  return b;
+}
+// The small form: one row per unknown pair (the department's name, picked from the names known or typed; Ours
+// when it is PCFD's or Rye Brook's), saved to Settings (section tones, audited, exported) and the page re-read.
+async function nameTonesDialog(t) {
+  const pairs = (t.tones || []).filter((x) => !(x.names || []).length);
+  if (!pairs.length) return;
+  let known = { names: [], ours: [] };
+  try { known = await api("GET", "/api/cad/tones"); } catch (e) { /* type the name */ }
+  const oursSet = new Set(known.ours || []);
+  const ov = el("div", "overlay");
+  const panel = el("div", "dialog narrow tone-form");
+  panel.setAttribute("role", "dialog");
+  panel.setAttribute("aria-modal", "true");
+  panel.setAttribute("aria-labelledby", "tone-form-title");
+  const head = el("div", "dialog-head");
+  head.append(el("h2", "dialog-title", "Name these tones"));
+  head.querySelector("h2").id = "tone-form-title";
+  const body = el("form", "dialog-body");
+  const list = el("datalist");
+  list.id = "tone-form-names";
+  list.append(...(known.names || []).map((n) => new Option(n)));
+  body.append(el("p", "dim small", `Page ${fmtTime(t.start, true)} ${t.channel}. A name goes in the tone list; this page is read again.`), list);
+  const rows = pairs.map((x) => {
+    const row = el("div", "tone-pair");
+    const hz = `${Number(x.a_hz).toFixed(1)}/${x.b_hz ? Number(x.b_hz).toFixed(1) : "-"}`;
+    const f = el("label", "field");
+    const name = el("input");
+    name.type = "text";
+    name.maxLength = 60;
+    name.placeholder = "Department";
+    name.setAttribute("list", list.id);
+    name.autocomplete = "off";
+    name.spellcheck = false;
+    f.append(el("span", "mono", `${hz} Hz`), name);
+    const ours = el("label", "check");
+    const cb = el("input");
+    cb.type = "checkbox";
+    ours.append(cb, el("span", "", "Ours"));
+    ours.title = "One of ours (PCFD, Rye Brook): its pages become pending events";
+    name.addEventListener("input", () => { cb.checked = oursSet.has(name.value.trim()); });
+    row.append(f, ours);
+    return { x, name, cb, row };
+  });
+  body.append(...rows.map((r) => r.row));
+  const err = el("p", "error small");
+  err.hidden = true;
+  const foot = el("div", "dialog-foot");
+  const no = el("button", "", "Cancel");
+  no.type = "button";
+  const yes = el("button", "primary", "Save");
+  yes.type = "submit";
+  foot.append(no, yes);
+  body.append(err, foot);
+  panel.append(head, body);
+  ov.append(panel);
+  document.body.append(ov);
+  no.addEventListener("click", () => UI.dialog.close(ov));
+  body.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const todo = rows.filter((r) => r.name.value.trim());
+    if (!todo.length) { err.textContent = "Type a department"; err.hidden = false; rows[0].name.focus(); return; }
+    try {
+      for (const r of todo) {
+        await api("POST", "/api/cad/settings/tones", { action: "set", a_hz: r.x.a_hz, b_hz: r.x.b_hz || null,
+          name: r.name.value.trim(), ours: r.cb.checked, page: t.id, operator: operator() });
+      }
+      UI.toast(`Named: ${todo.map((r) => r.name.value.trim()).join(", ")}`);
+      UI.dialog.close(ov);
+      txChanged();
+    } catch (ex) {
+      err.textContent = ex.message;
+      err.hidden = false;
+    }
+  });
+  UI.dialog.open(ov, { focus: rows[0].name, onClose: () => ov.remove() });
 }
 
 // An incident a transmission (or note) is on: a chip; a click shows that incident (the Radio view: only its
@@ -685,7 +785,8 @@ function txMenu(t, ctx = {}) {
                         () => txMenuItems(t), { key: `${ctx.scope || "tx"}:${t.id}` });
 }
 function txMenuItems(t) {
-  const items = [], evs = t.events || [];
+  const items = [...pageMenuItems(t)], evs = t.events || [];     // a page: "Play with tones" (play alone skips them, #80)
+  if (items.length) items.push("-");
   if (canDo("dispatch")) {
     items.push({ label: "Add to event", sub: () => addToPage(t) });
     for (const e of evs) {

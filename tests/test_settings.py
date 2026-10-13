@@ -437,3 +437,55 @@ def test_dispatch_lead_ins_remarks_department_tones_and_voice():
         post(cad, "dispatch", action="set", key="speed", value=3)
     post(cad, "dispatch", action="reset_section")
     assert (cad.s.speed, cad.s.voice) == (1.0, "Samantha")
+
+
+def test_named_tones_are_settings_audited_exported_and_imported(tmp_path):
+    """#80: a pair named from a page row is an override (section tones), checked, audited, in the export, and an
+    import brings it along; the radios side (App.tones_changed) is told."""
+    a = make_cad(tmp_path / "a")
+    told = []
+    a.radio_ctx = type("Ctx", (), {"tones_changed": lambda self, page="": told.append(page),
+                                   "channels_changed": lambda self: None, "channels_locked": lambda self: ""})()
+    r = post(a, "tones", action="set", a_hz=832.5, b_hz=1201.0, name="Fairview", page="S2-1", operator="Dana")
+    assert r["key"] == "832.5/1201.0" and told == ["S2-1"]
+    assert a.settings.tone_overrides() == {"832.5/1201.0": {"name": "Fairview", "a_hz": 832.5, "b_hz": 1201.0, "ours": False, "page": "S2-1"}}
+    post(a, "tones", action="set", a_hz=349.12, b_hz=311.1, name="Port Chester FD")        # PCFD's name: ours whatever the box
+    assert a.settings.tone_overrides()["349.1/311.1"]["ours"] is True
+    post(a, "tones", action="set", a_hz=1201.0, name="Larchmont all call", ours=True)      # a long tone
+    assert a.settings.tone_overrides()["1201.0/-"] == {"name": "Larchmont all call", "a_hz": 1201.0, "b_hz": None, "ours": True}
+    rows = a.settings.tone_rows()
+    assert [(t["key"], t["name"], t["operator"]) for t in rows] == [("1201.0/-", "Larchmont all call", "JD"),
+                                                                  ("349.1/311.1", "Port Chester FD", "JD"), ("832.5/1201.0", "Fairview", "Dana")]
+    assert all(t["at"] for t in rows)
+    log = [(x["key"], x["old"], x["new"]) for x in a.settings.audit_log("radios") if x["key"].startswith("tones/")]
+    assert log[-1] == ("tones/832.5/1201.0", "", '{"name":"Fairview","a_hz":832.5,"b_hz":1201.0,"ours":false,"page":"S2-1"}')
+    for bad in ({"a_hz": 100, "b_hz": 311.1, "name": "X"}, {"a_hz": 349.1, "b_hz": 311.1, "name": ""},
+                {"a_hz": 349.1, "b_hz": 311.1, "name": "Rye FD (est.)"}, {"a_hz": "349.1", "b_hz": 311.1, "name": "X"},
+                {"a_hz": 349.1, "b_hz": 311.1, "name": "X", "ours": "yes"}):
+        with pytest.raises(CadError):
+            post(a, "tones", action="set", **bad)
+    with pytest.raises(CadError, match="no named tones"):
+        post(a, "tones", action="delete", key="1.0/2.0")
+    assert a.settings.page()["tone_names"][2]["name"] == "Fairview"
+    data = json.loads(json.dumps(a.settings_export()))
+    assert set(data["overrides"]["tones"]) == {"832.5/1201.0", "349.1/311.1", "1201.0/-"}
+    b = make_cad(tmp_path / "b")
+    dry = post(b, "import", action="dry_run", settings=data)
+    assert ("radios", "832.5/1201.0", "added") in {(c["section"], c["key"], c["change"]) for c in dry["changes"]}
+    post(b, "import", action="apply", settings=data)
+    assert b.settings.tone_overrides() == a.settings.tone_overrides()
+    bad = json.loads(json.dumps(data))
+    bad["overrides"]["tones"] = {"832.5/1201.0": {"a_hz": 832.5, "b_hz": 1201.0, "name": ""}}
+    with pytest.raises(CadError, match="name: required"):
+        post(b, "import", action="dry_run", settings=bad)
+    bad["overrides"]["tones"] = {"1/2": {"a_hz": 832.5, "b_hz": 1201.0, "name": "X"}}
+    with pytest.raises(CadError, match="the key is the pair"):
+        post(b, "import", action="dry_run", settings=bad)
+    # the station takes the hub's whole map (replace_tones): a change is audited as the hub's
+    assert b.settings.replace_tones({"832.5/1201.0": {"a_hz": 832.5, "b_hz": 1201.0, "name": "Fairview"}}, "hub") is True
+    assert set(b.settings.tone_overrides()) == {"832.5/1201.0"} and b.settings.audit_log("radios")[0]["operator"] == "hub"
+    assert b.settings.replace_tones({"832.5/1201.0": {"a_hz": 832.5, "b_hz": 1201.0, "name": "Fairview"}}, "hub") is False
+    with pytest.raises(ValueError):
+        b.settings.replace_tones({"x": {"a_hz": 1, "b_hz": 2, "name": "X"}}, "hub")
+    post(a, "tones", action="delete", key="832.5/1201.0")
+    assert "832.5/1201.0" not in a.settings.tone_overrides() and told[-1] == ""
