@@ -68,9 +68,14 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
       <h2 title="Logged, no dispatch, open until closed">Non-emergency</h2>
       <ol id="q-nonemerg" class="list q"></ol>
     </section>
-    <section>
-      <h2 title="Closed in the last 12 hours">Closed 12h</h2>
-      <ol id="q-closed" class="list q closed"></ol>
+    <!-- folded to start, with the count (#89); the choice is remembered per browser (cad.js closedFold) -->
+    <section id="q-closed-sec" class="q-fold">
+      <div class="q-head">
+        <button id="q-closed-toggle" class="sec-toggle" type="button" aria-expanded="false" aria-controls="q-closed" title="Closed in the last 12 hours">
+          <span class="caret" aria-hidden="true">▸</span><span class="h2">Closed 12h</span><span id="q-closed-n" class="dim sum"></span>
+        </button>
+      </div>
+      <ol id="q-closed" class="list q closed" hidden></ol>
     </section>
   </aside>
 
@@ -175,6 +180,7 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
           <button id="d-dismiss" hidden>Dismiss</button>
           <button id="d-edit">Edit</button>
           <button id="d-close" hidden>Close</button>
+          <button id="d-reopen" hidden title="Back on the boards with its number; the disposition cleared, no units">Reopen</button>
         </div>
 
         <div id="d-queued" class="warnbox notice" hidden>
@@ -448,7 +454,7 @@ Slots go in order. A kind takes the next available unit of that kind (regular ap
         <a id="csv-prealerts" class="nav" href="/api/cad/export/prealerts.csv" download hidden>Phone pre-alerts</a>
       </div>
       <dl id="admin" class="admin"></dl>
-      <div class="tscroll"><table class="evtable db"><thead><tr><th>Number</th><th>Type</th><th>Location</th><th>Received</th><th>Closed</th><th>Status</th><th>Disposition</th><th>Units</th><th>Via</th></tr></thead>
+      <div class="tscroll"><table class="evtable db"><thead><tr><th>Number</th><th>Type</th><th>Location</th><th>Received</th><th>Closed</th><th>Status</th><th>Disposition</th><th>Units</th><th>Via</th><th><span class="sr-only">Actions</span></th></tr></thead>
         <tbody id="db-rows"></tbody></table></div>
     </div>
   </div>

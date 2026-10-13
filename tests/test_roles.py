@@ -68,7 +68,7 @@ def settings_writes(cad, ids):
 
 def test_the_permission_map():
     assert needs("/api/cad/incident") == needs("/api/cad/incident/7") == needs("/api/cad/incident/7/dispatch") == "dispatch"
-    for a in ("accept", "dismiss", "close", "note", "recommend", "preview", "upgrade", "attach", "link", "return"):
+    for a in ("accept", "dismiss", "close", "reopen", "note", "recommend", "preview", "upgrade", "attach", "link", "return"):
         assert needs(f"/api/cad/incident/7/{a}") == "dispatch", a
     assert needs("/api/cad/unit/3/status") == needs("/api/incident/abc-1/close") == "dispatch"
     for p in ("/api/cad/unit/3/station", "/api/cad/settings/users", "/api/cad/settings/import", "/api/cad/runcards",

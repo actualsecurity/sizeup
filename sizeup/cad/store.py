@@ -126,7 +126,7 @@ CREATE TABLE events (
   incident_id INTEGER REFERENCES incidents(id),   -- NULL: a unit status change off any incident
   unit_id INTEGER REFERENCES units(id),
   at REAL NOT NULL,
-  kind TEXT NOT NULL,                   -- created | system | accepted | dismissed | note | dispatch | remarks | tones | attach | status | closed | edit | prealert
+  kind TEXT NOT NULL,                   -- created | system | accepted | dismissed | note | dispatch | remarks | tones | attach | status | closed | reopened | edit | prealert
   text TEXT NOT NULL,
   operator TEXT NOT NULL DEFAULT '',
   units TEXT NOT NULL DEFAULT '',       -- a note's unit tags ("E63,L31": who said it), typed with the unit autocomplete
@@ -997,6 +997,32 @@ class Store:
             names = ", ".join(a["name"] for a in on)
             self._event(db, iid, "closed", f"Event closed: {self.lists.name('dispositions', disposition)}"
                         + (f"; cleared {names}" if names else ""), operator, at=now)
+        return self.incident(iid)
+
+    def reopen(self, iid: int, operator: str = "") -> dict:
+        """A closed or dismissed event back on the boards, its number kept (#89). Closed: Active if a unit
+        was ever on it, else Pending (a non-emergency one: open again); the disposition is cleared and
+        kept in the chronology ("Reopened by JD; was Complete at 16:46"). Dismissed: back to the 60
+        Control queue, to accept or dismiss. No unit comes back by itself: the dispatcher adds them."""
+        inc = self.incident(iid)
+        if inc["status"] not in ("closed", "dismissed"):
+            raise CadError(f"Event {inc['status']}: not closed")
+        now = self.clock()
+        if inc["status"] == "dismissed":
+            status, was = "queued", "dismissed"
+        else:
+            had = self.one("SELECT 1 AS x FROM assignments WHERE incident_id = ? LIMIT 1", (iid,)) is not None
+            status = "active" if had and inc["emergency"] else "pending"
+            was = self.lists.name("dispositions", inc["disposition"]) or inc["disposition"] or "closed"
+        if inc["closed_at"]:
+            then, today = datetime.fromtimestamp(inc["closed_at"], TZ), datetime.fromtimestamp(now, TZ)
+            at = then.strftime("%H:%M" if then.date() == today.date() else "%m/%d %H:%M")
+        else:
+            at = "?"
+        who = re.sub(r"\s*<[^<>]*>\s*$", "", operator).strip()       # "Name <email>" (api.py): the name
+        with self.tx() as db:
+            db.execute("UPDATE incidents SET status = ?, closed_at = NULL, disposition = '' WHERE id = ?", (status, iid))
+            self._event(db, iid, "reopened", f"Reopened{f' by {who}' if who else ''}; was {was} at {at}", operator, at=now)
         return self.incident(iid)
 
     def note(self, iid: int, text: str, operator: str = "", kind: str = "note", units: list[str] | tuple = (),

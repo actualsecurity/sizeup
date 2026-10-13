@@ -382,6 +382,10 @@ class Cad:
     def close(self, iid: int, body: dict) -> dict:
         return self.store.close(iid, _text(body, "disposition", 40), _text(body, "operator", OPERATOR_MAX))
 
+    def reopen(self, iid: int, body: dict) -> dict:
+        """A closed or dismissed event back on the boards (#89): see Store.reopen."""
+        return self.store.reopen(iid, _text(body, "operator", OPERATOR_MAX))
+
     def note(self, iid: int, body: dict) -> dict:
         """A timeline comment. units: the unit tags picked with the autocomplete ("E63 stated that ..."):
         who said it, so the event can show that unit's notes with its radio traffic. places: the places
