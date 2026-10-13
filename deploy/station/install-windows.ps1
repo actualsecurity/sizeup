@@ -223,11 +223,14 @@ if (Test-Distro) {
         $tar = Join-Path $Home_ $file
         Write-SizeupLog "Downloading $base/$file"
         Invoke-WebRequest -UseBasicParsing -Uri "$base/$file" -OutFile $tar
-        $sums = (Invoke-WebRequest -UseBasicParsing -Uri "$base/SHA256SUMS").Content
-        $line = ($sums -split "`n") | Where-Object { $_ -match [regex]::Escape($file) + '$' } | Select-Object -First 1
-        if (-not $line) { Fail "no checksum for $file in SHA256SUMS" }
+        # SHA256SUMS comes without a Content-Type, so Windows PowerShell 5.1 hands back bytes, not text.
+        $resp = Invoke-WebRequest -UseBasicParsing -Uri "$base/SHA256SUMS"
+        $sums = if ($resp.Content -is [byte[]]) { [Text.Encoding]::ASCII.GetString($resp.Content) } else { [string]$resp.Content }
+        $line = ($sums -split "\r?\n") | Where-Object { $_ -match [regex]::Escape($file) + '$' } | Select-Object -First 1
+        if (-not $line) { Fail "no checksum for $file in $base/SHA256SUMS" }
         $sum = ($line -split '\s+')[0].ToLower()
-        if ((Get-FileHash -Algorithm SHA256 $tar).Hash.ToLower() -ne $sum) { Remove-Item -Force $tar; Fail "${file}: checksum mismatch" }
+        $got = (Get-FileHash -Algorithm SHA256 $tar).Hash.ToLower()
+        if ($got -ne $sum) { Remove-Item -Force $tar; Fail "${file}: checksum mismatch (expected $sum, got $got; size $((Get-Item $tar -ErrorAction SilentlyContinue).Length))" }
         $dir = Join-Path $Home_ "wsl\$Distro"
         New-Item -ItemType Directory -Force -Path $dir | Out-Null
         if ((Invoke-Wsl @("--import", $Distro, $dir, $tar, "--version", "2")) -ne 0) { Fail "wsl --import failed" }
@@ -265,7 +268,12 @@ if (-not $usbipd) {
     $url = "https://github.com/dorssel/usbipd-win/releases/download/v$UsbipdVersion/usbipd-win_$($UsbipdVersion)_$Arch.msi"
     Write-SizeupLog "Downloading $url"
     Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $msi
-    if ((Get-FileHash -Algorithm SHA256 $msi).Hash.ToLower() -ne $UsbipdMsiSha256[$Arch]) { Remove-Item -Force $msi; Fail "usbipd-win MSI checksum mismatch" }
+    $got = (Get-FileHash -Algorithm SHA256 $msi).Hash.ToLower()
+    if ($got -ne $UsbipdMsiSha256[$Arch]) {
+        $size = (Get-Item $msi).Length
+        Remove-Item -Force $msi
+        Fail "usbipd-win MSI checksum mismatch (expected $($UsbipdMsiSha256[$Arch]), got $got; $size bytes from $url). A proxy or antivirus may have changed the download."
+    }
     $p = Start-Process msiexec.exe -ArgumentList @("/i", "`"$msi`"", "/qn", "/norestart") -Wait -PassThru
     if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { Fail "usbipd-win MSI install failed (exit $($p.ExitCode))" }
     $usbipd = Find-Usbipd
