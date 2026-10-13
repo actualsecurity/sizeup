@@ -2,7 +2,7 @@
 # sizeup-station: run the station installed by install-linux.sh (deploy/station/README.md).
 #
 #   sizeup-station status        service, dongles, hub link, what's waiting, CPU
-#   sizeup-station logs [-f]     the station's log (journalctl; other journalctl options pass through)
+#   sizeup-station logs [-f]     the station's log, whisper-server's and the updater's (journalctl options pass through)
 #   sizeup-station restart       restart it (also: start, stop); whisper-server too if its [stt] changed
 #   sizeup-station update        fetch the configured ref, build its release beside the running one,
 #                                switch, restart (config, state and secrets are kept); options pass to
@@ -207,8 +207,9 @@ cmd="${1:-status}"
 case "$cmd" in
   status) cmd_status ;;
   logs)
-    if [ $# -eq 0 ]; then exec journalctl -u "$UNIT" -u sizeup-health.service -n 200 --no-pager; fi
-    exec journalctl -u "$UNIT" -u sizeup-health.service "$@" ;;
+    units=(-u "$UNIT" -u sizeup-health.service -u sizeup-whisper.service -u sizeup-update.service)
+    if [ $# -eq 0 ]; then exec journalctl "${units[@]}" -n 200 --no-pager; fi
+    exec journalctl "${units[@]}" "$@" ;;
   restart|start|stop)
     need_root "$cmd" "$@"
     systemctl "$cmd" "$UNIT"
