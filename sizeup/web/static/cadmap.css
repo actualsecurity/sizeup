@@ -95,6 +95,7 @@
   .ml-list .check { justify-content: flex-start; }
   .ml-list .check .dim { margin-inline-start: auto; }
   .ml-err { color: var(--warn); margin-inline-start: auto; }
+  .ml-source a { color: var(--text-2); }
   .ml-lines { display: flex; flex-direction: column; gap: var(--s-0); overflow-wrap: anywhere; }
   .ml-sign-text { font-family: var(--mono); font-weight: 700; color: var(--warn); text-transform: uppercase;
     padding: var(--s-1) var(--s-2); background: var(--bg); border-radius: var(--radius-s); }

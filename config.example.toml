@@ -187,13 +187,14 @@ status_topic = "pcfd-status"         # boot, hourly heartbeat, errors, OTA (Tapo
 expire_min = 5                       # an unanswered pre-alert ends after this long
 heartbeat_stale_min = 90             # no heartbeat (or restart) this long: "Tapout: no heartbeat for ..." in warning
 
-# [roads]: the CAD maps' highway layers (sizeup/roads.py, docs/cloud.md "Highway layers"): 511NY's
-# traffic cameras, incidents and closures, roadwork and message signs, for our area only; camera
-# snapshots go through this process, never from the browser to 511NY. Access to the feeds is by
-# request (https://511ny.org/help/24); the approval brings their addresses and a key. The key: env
-# SIZEUP_511NY_KEY, never here; the addresses have {key} where it goes. Without both: those four
-# layers are off ("not configured"); the mileposts and exits (the gazetteer's) still show.
+# [roads]: the CAD maps' highway layers (sizeup/roads.py, docs/cloud.md "Highway layers"): traffic
+# cameras, incidents and closures, roadwork and message signs for our area, from the NYS Thruway
+# Authority's public feeds (I-95, I-287; no key; on by default) and from 511NY once it approves
+# access (https://511ny.org/help/24: the approval brings the feed addresses and a key; the key: env
+# SIZEUP_511NY_KEY, never here; the addresses have {key} where it goes). Camera snapshots go through
+# this process, never from the browser to a provider. The mileposts and exits are the gazetteer's.
 # [roads]
+# thruway = true
 # events_url = "https://.../events?key={key}&format=json"
 # cameras_url = "https://.../cameras?key={key}"
 # signs_url = "https://.../messagesigns?key={key}&format=json"
