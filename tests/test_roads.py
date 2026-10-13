@@ -520,7 +520,9 @@ def test_the_layers_control_is_on_every_map_with_its_six_layers():
     assert [(k, label, on) for k, label, _, _, on in layers] == [
         ("cameras", "Cameras", "true"), ("incidents", "Incidents & closures", "true"), ("roadwork", "Roadwork", "false"),
         ("signs", "Message signs", "false"), ("mileposts", "Mileposts", "false"), ("exits", "Exits", "false")]
-    assert dict((k, int(z)) for k, _, _, z, _ in layers)["mileposts"] >= 14          # only when zoomed in
+    zooms = dict((k, int(z)) for k, _, _, z, _ in layers)
+    assert zooms["mileposts"] == zooms["exits"] >= 12          # whole miles with the exits, only when zoomed in
+    assert 'minzoom: 14, filter: ["!", ["get", "whole"]]' in js                      # the tenths later still
     # each viewer's choice, and localStorage only ever inside a try
     lines = js.splitlines()
     uses = [i for i, ln in enumerate(lines) if "localStorage." in ln]
