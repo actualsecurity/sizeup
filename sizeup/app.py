@@ -274,6 +274,9 @@ class App:
                     if cfg.p25_dir else None)
         # PCFD's own dispatch console: incidents, units, run cards (state/cad.sqlite).
         self.cad = Cad.from_config(cfg, geocoder=self._geocode_text if self.gaz is not None else None, log=log)
+        if self.gaz is not None:           # the place search over the same gazetteer (a note's "@", #67)
+            from sizeup.geo.places import PlaceIndex
+            self.cad.place_source = lambda: PlaceIndex(self.gaz)
         # Radio ID -> rig, and who is transmitting right now (both pages' "talking").
         self.radios = self.cad.radios
         self.live = LiveTalk(resolve=self.radios.resolve, tg_name=self.tg.name, main=self.tg.main,
@@ -1470,6 +1473,7 @@ class App:
             self.tts.start()
         self.stt.start()
         threading.Thread(target=self._janitor, name="janitor", daemon=True).start()
+        threading.Thread(target=self.cad.place_index, name="places", daemon=True).start()   # built before the first "@"
         threading.Thread(target=self._watch_fm, name="talking", daemon=True).start()
         if self.shared:
             for sd, m in list(self.assign.items()):  # each dongle runs what was picked for it

@@ -61,7 +61,7 @@ EMAIL = re.compile(r"[^@\s<>]{1,64}@[^@\s<>]{1,190}\.[^@\s<>]{1,63}")
 PAGE_SECTION = {**{s: "lists" for s in LIST_SECTIONS}, "event_class": "lists", "geo_town_order": "lists", "status_flow": "lists",
                 "type_subtypes": "lists",
                 "units": "units", "dispatch_wording": "dispatch", "dispatch_tones": "dispatch", "dispatch": "dispatch",
-                "channels": "radios", "stt": "radios"}
+                "channels": "radios", "stt": "radios", "places": "lists"}
 AUDIT_SECTIONS = ("lists", "run cards", "units", "dispatch", "users", "system", "radios")
 LIST_FIELDS = {"event_types": ("color",), "event_subtypes": (), "dispositions": (), "received_via": (),
                "unit_statuses": ("role", "bg", "fg")}
@@ -77,6 +77,7 @@ WORDING = (("new", "First dispatch"), ("add_on", "Added to the assignment"), ("u
            ("respond", "Upgrade: more units"))
 MAX_TONES, MAX_GROUPS, MAX_CHANNELS = 8, 4, 8
 MAX_VOCAB, MAX_PHRASE_CHARS = 500, 100
+MAX_PLACE_NAMES = 300
 
 
 def tone_groups(tones) -> list[list[list[float]]]:
@@ -420,6 +421,7 @@ class Editor:
                               "edited": bool(o)}
         out["geo_town_order"] = {"towns": list(L.geo_town_order), "default": list(self.base.geo_town_order),
                                  "edited": "_list" in ov.get("geo_town_order", {})}
+        out["place_names"] = {"items": self.local_places(), "max": MAX_PLACE_NAMES}
         out["units"] = self._unit_rows(L, ov)
         out["unit_kinds"] = [dict(k) for k in L.unit_kinds]
         out["boards"] = [{"id": b["id"], "title": b["title"], **lists_mod.board_meta(b)} for b in L.unit_boards]
@@ -521,7 +523,8 @@ class Editor:
             return self._list_op(section, action, body, op)
         fn = {"event_class": self._class_op, "status_flow": self._flow_op, "type_subtypes": self._map_op, "geo_town_order": self._towns_op, "units": self._units_op,
               "dispatch": self._dispatch_op, "users": self._users_op, "runcards": self._cards_op,
-              "import": self._import_op, "channels": self._channels_op, "stt": self._stt_op}.get(section)
+              "import": self._import_op, "channels": self._channels_op, "stt": self._stt_op,
+              "places": self._places_op}.get(section)
         if fn is None:
             raise CadError(f"no settings section {section!r}")
         if section in ("users", "import"):
@@ -745,6 +748,53 @@ class Editor:
         if lost:
             raise CadError(f"run card{'s' if len(lost) != 1 else ''} {', '.join(lost)} would no longer fit: "
                            "change or delete the card first (Run cards)")
+
+    # -- the department's own names for places (#67): "the Waterfront", "Kohl's plaza" -------------------
+    # Kept as overrides (section "places", key: the name in lower case) so they are audited, exported and
+    # imported with the rest; the place search (Cad.search_places, the location box) offers them first.
+
+    def local_places(self) -> list[dict]:
+        rev = self.store.rev
+        if getattr(self, "_places_cache", (None,))[0] != rev:
+            rows = self.store.q("SELECT key, value FROM settings_overrides WHERE section = 'places' ORDER BY key")
+            self._places_cache = (rev, [dict(json.loads(r["value"]), key=r["key"]) for r in rows])
+        return [dict(r) for r in self._places_cache[1]]
+
+    def _places_op(self, action: str, body: dict, op: str) -> dict:
+        cur = {r["key"]: {k: v for k, v in r.items() if k != "key"} for r in self.local_places()}
+        if action == "delete":
+            key = _text(body.get("key"), "key", 80)
+            if key not in cur:
+                raise CadError(f"no place name {key!r}")
+            return self._commit([("places", key, REMOVE)], op, [("lists", f"place/{cur[key]['name']}", cur[key], None)])
+        if action != "set":
+            raise CadError("action: set or delete")
+        name = _text(body.get("name"), "name", 60)
+        key = " ".join(re.sub(r"[^a-z0-9]+", " ", name.lower()).split())
+        if not key:
+            raise CadError("name: letters or digits")
+        raw = body.get("aliases") or []
+        if isinstance(raw, str):
+            raw = [a for a in raw.split(",")]
+        if not isinstance(raw, list) or len(raw) > 10:
+            raise CadError("aliases: up to 10 other names")
+        aliases = [a for a in (_text(a, "alias", 60, required=False) for a in raw) if a]
+        where = body.get("place")
+        if not isinstance(where, dict):
+            raise CadError("place: pick where it is from the suggestions")
+        label = _text(where.get("label"), "place", 200)
+        try:
+            lat, lon = float(where.get("lat")), float(where.get("lon"))
+        except (TypeError, ValueError):
+            raise CadError("place: lat and lon") from None
+        if not (40.0 <= lat <= 42.0 and -75.0 <= lon <= -72.0):
+            raise CadError("place: lat and lon in the area")
+        if key not in cur and len(cur) >= MAX_PLACE_NAMES:
+            raise CadError(f"at most {MAX_PLACE_NAMES} place names")
+        val = {"name": name, "aliases": aliases, "label": label, "lat": round(lat, 6), "lon": round(lon, 6),
+               "muni": _text(where.get("sub"), "town", 80, required=False),
+               "note": _text(body.get("note"), "note", 120, required=False)}
+        return self._commit([("places", key, val)], op, [("lists", f"place/{name}", cur.get(key), val)])
 
     def _towns_op(self, action: str, body: dict, op: str) -> dict:
         cur, base = list(self.cad.lists.geo_town_order), list(self.base.geo_town_order)

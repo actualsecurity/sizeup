@@ -21,6 +21,10 @@ licences and fetch dates are in its `meta` table):
 - TIGER/Line 2025 ADDRFEAT + roads — US Census Bureau, public domain
 - Westchester County community facilities — Westchester County GIS
 - Landmarks © OpenStreetMap contributors, ODbL
+- The `places` table (`tools/fetch_places.py`: what a note's "@" and the location box suggest):
+  NYSDOT reference markers (mile markers on I-287, I-684, the Hutch, US-1, NY-120, NY-120A) — NYSDOT GIS;
+  New England Thruway (I-95) mileposts — NYS Thruway Authority GIS; exits and named places
+  © OpenStreetMap contributors, ODbL (each row keeps its source)
 
 Map tiles: OpenFreeMap / OpenMapTiles, © OpenStreetMap contributors.
 

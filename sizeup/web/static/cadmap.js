@@ -414,6 +414,7 @@ window.CadMap = (() => {
         this.userMoved = false;
         this.fitKey = null;
         this.layer.closePicker();
+        this.clearPlace();
       }
       const key = JSON.stringify(this.layer.focusPoints());
       if (key !== this.fitKey && this.canvas.clientWidth) {
@@ -421,6 +422,43 @@ window.CadMap = (() => {
         this.fitKey = key;
         if (!this.userMoved) this.fit(!first);
       }
+    }
+
+    // A place named in a note ("@Lyon Park", #67): a pin, the map moved to it, its name in a box at the
+    // top (where the station picker opens). onSet (a dispatcher, an open call): "Set as location" makes it
+    // the event's location. One at a time; another call, or Close, takes it away.
+    showPlace(p, onSet) {
+      this.clearPlace();
+      const pin = h("div", "cm-place");
+      pin.append(h("span", "dot"));
+      pin.title = p.label;
+      const box = h("div", "cm-pop cm-place-pop");
+      const head = h("div", "row");
+      head.append(h("b", "", p.label));
+      if (p.sub) head.append(h("span", "town", p.sub));
+      const btns = h("div", "row");
+      if (onSet) {
+        const b = h("button", "mini", "Set as location");
+        b.type = "button";
+        b.title = "Make this the event's location (in the chronology)";
+        b.addEventListener("click", async (e) => { e.stopPropagation(); if (await onSet()) this.clearPlace(); });
+        btns.append(b);
+      }
+      const x = h("button", "mini quiet", "Close");
+      x.type = "button";
+      x.addEventListener("click", (e) => { e.stopPropagation(); this.clearPlace(); });
+      btns.append(x);
+      box.append(head, h("div", "dim small", "Named in a note: the event stays where it is"), btns);
+      box.addEventListener("keydown", (e) => { if (e.key === "Escape") { e.stopPropagation(); this.clearPlace(); } });
+      this.host.append(box);
+      this.place = [new maplibregl.Marker({ element: pin, anchor: "center" }).setLngLat([p.lon, p.lat]).addTo(this.map), box];
+      this.userMoved = true;                           // stay on the place until Recenter
+      this.map.easeTo({ center: [p.lon, p.lat], zoom: Math.max(this.map.getZoom(), 15.5), duration: 500 });
+    }
+
+    clearPlace() {
+      if (this.place) { this.place[0].remove(); this.place[1].remove(); }
+      this.place = null;
     }
 
     fit(animate) {
@@ -464,6 +502,12 @@ window.CadMap = (() => {
     }
     views.detail.update(mapData(), inc, noPoint(inc));
     if (views.bigOpen) views.big.update(mapData(), inc, noPoint(inc));
+  }
+
+  function place(p, onSet) {           // a note's "@place" on the working event's map (cad.js showPlace)
+    if (!views.detail || !mapsOk() || $("#d-map").hidden) return false;
+    views.detail.showPlace(p, onSet);
+    return true;
   }
 
   function openBig() {
@@ -647,5 +691,5 @@ window.CadMap = (() => {
     $("#d-back").addEventListener("click", goOverview);
   }
 
-  return { RigLayer, RigMap, detail, overview, goOverview, openBig, closeBig };
+  return { RigLayer, RigMap, detail, place, overview, goOverview, openBig, closeBig };
 })();

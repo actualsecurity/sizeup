@@ -129,7 +129,8 @@ CREATE TABLE events (
   kind TEXT NOT NULL,                   -- created | system | accepted | dismissed | note | dispatch | remarks | tones | attach | status | closed | edit | prealert
   text TEXT NOT NULL,
   operator TEXT NOT NULL DEFAULT '',
-  units TEXT NOT NULL DEFAULT ''        -- a note's unit tags ("E63,L31": who said it), typed with the unit autocomplete
+  units TEXT NOT NULL DEFAULT '',       -- a note's unit tags ("E63,L31": who said it), typed with the unit autocomplete
+  places TEXT NOT NULL DEFAULT ''       -- a note's "@" places: JSON [{label, lat, lon, kind, sub, source}] (#67); '' none
 );
 CREATE INDEX events_incident ON events(incident_id);
 CREATE TABLE unit_history (           -- every unit status change (the sheet's Unit History)
@@ -396,6 +397,9 @@ class Store:
         for stmt in (ACTIVITY_SCHEMA + EXCLUSION_SCHEMA).split(";"):   # per-person activity, removed links (2026-10-08)
             if stmt.strip():
                 self.db.execute(stmt)
+        ecols = {r["name"] for r in self.db.execute("PRAGMA table_info(events)")}
+        if ecols and "places" not in ecols:              # a note's "@" places (#67), 2026-10-13: old notes keep ''
+            self.db.execute("ALTER TABLE events ADD COLUMN places TEXT NOT NULL DEFAULT ''")
         tcols = {r["name"] for r in self.db.execute("PRAGMA table_info(radio_traffic)")}
         for col in ("alt_text", "alt_model"):            # the second transcript ("both": whisper next to AWS), 2026-10-08
             if tcols and col not in tcols:
@@ -628,9 +632,11 @@ class Store:
         rows = self.q(sql, args)
         return rows[0] if rows else None
 
-    def _event(self, db, iid, kind: str, text: str, operator: str = "", uid=None, at=None, units: str = "") -> None:
-        db.execute("INSERT INTO events (incident_id, unit_id, at, kind, text, operator, units) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                   (iid, uid, self.clock() if at is None else at, kind, text, operator, units))
+    def _event(self, db, iid, kind: str, text: str, operator: str = "", uid=None, at=None, units: str = "",
+               places: str = "") -> None:
+        db.execute("INSERT INTO events (incident_id, unit_id, at, kind, text, operator, units, places) "
+                   "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                   (iid, uid, self.clock() if at is None else at, kind, text, operator, units, places))
 
     def _history(self, db, uid: int, old: str, new: str, iid, operator: str, at: float, note: str = "") -> None:
         db.execute("INSERT INTO unit_history (at, unit_id, old_status, new_status, incident_id, operator, note) "
@@ -990,11 +996,14 @@ class Store:
                         + (f"; cleared {names}" if names else ""), operator, at=now)
         return self.incident(iid)
 
-    def note(self, iid: int, text: str, operator: str = "", kind: str = "note", units: list[str] | tuple = ()) -> None:
-        """A chronology entry: an operator's comment (note), or kind 'upgrade'."""
+    def note(self, iid: int, text: str, operator: str = "", kind: str = "note", units: list[str] | tuple = (),
+             places: list[dict] | tuple = ()) -> None:
+        """A chronology entry: an operator's comment (note), or kind 'upgrade'. places: its "@" places
+        (Cad.note checks them), kept as JSON with the note; they never move the event."""
         self.incident(iid)
         with self.tx() as db:
-            self._event(db, iid, kind, text, operator, units=",".join(units))
+            self._event(db, iid, kind, text, operator, units=",".join(units),
+                        places=json.dumps(list(places), separators=(",", ":")) if places else "")
 
     def has_dispatch(self, iid: int) -> bool:
         return self.one("SELECT 1 AS x FROM dispatches WHERE incident_id = ? LIMIT 1", (iid,)) is not None
@@ -1093,6 +1102,7 @@ class Store:
                                    and self.lists.role(a["status"]) == "free") else []
             by[a["incident_id"]]["assignments"].append(a)
         for e in events:
+            e["places"] = json.loads(e["places"]) if e.get("places") else []     # a note's "@" places (#67)
             by[e["incident_id"]]["events"].append(e)
         for d in disp:
             d["transmitted"], d["has_audio"] = bool(d["transmitted"]), bool(d["has_audio"])

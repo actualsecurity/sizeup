@@ -1024,8 +1024,8 @@ function renderEvents(inc) {
       }
       if (e.kind === "note" && e.units) {
         for (const u of tagsOf(e)) txt.append(unitChip(u), document.createTextNode(" "));
-        txt.append(document.createTextNode(noteText(e)));
-      } else txt.append(document.createTextNode(e.text));
+        txt.append(...noteNodes(e, noteText(e)));
+      } else txt.append(...(e.kind === "note" ? noteNodes(e, e.text) : [document.createTextNode(e.text)]));
       li.replaceChildren(meta, txt);
     },
     empty: "None",
@@ -1356,14 +1356,23 @@ async function upgrade(e, previewOnly) {
   });
 }
 
-// ---- unit tags in the comment box -------------------------------------------------------------
+// ---- "@" in the comment box: unit tags and places --------------------------------------------------
 // "@" starts a tag (user, 2026-10-07: "the add a unit should be with an @E63 to trigger it"): "@",
 // "@E6", "@e63" offer the units on this incident first, then the fire units, then the rest (the
 // server's order, inc.tag_units). Tab or Enter takes the highlighted one, arrows move, Esc closes.
 // A taken code is a tag: the note is stored with it (who said it). "@E63" typed out in full counts
 // too; a bare "E63" is just text, and so is an address like "a@b".
+//
+// "@" also finds places (#67, user 2026-10-13: "@ locations for highways and common places, like names
+// of things parks/etc, milemarkers on the highways"): "@Lyon Park", "@189 North Main", "@287 eb mm 10",
+// "@hutch sb exit 30" ask GET /api/cad/places (addresses, intersections, named places, mile markers and
+// exits; our towns first, then nearest the event). Text that looks like a unit code (E63, L31, 2398)
+// lists the units first, anything else the places. A taken place is written "@<label>" and goes with
+// the note (label, lat, lon): its chip shows the spot on the event's map. It never moves the event.
 
-const noteTag = { tags: new Set(), items: [], idx: 0, tok: null };
+const noteTag = { tags: new Set(), places: [], items: [], idx: 0, tok: null, ptok: null, pq: "", hits: [], seq: 0, timer: null };
+const UNITISH = /^[A-Za-z]{0,3}\d{1,4}[A-Za-z]?$/;       // E63, L31, 2398: a unit code, not a place
+const PLACE_KIND = { milemarker: "mile marker", exit: "exit", address: "address", intersection: "intersection", street: "street" };
 function tagOrder(inc) {
   if (inc && Array.isArray(inc.tag_units)) return inc.tag_units;
   const on = ((inc && inc.assignments) || []).map((a) => a.name);
@@ -1374,8 +1383,24 @@ function tokenAt(input) {              // the "@code" being typed at the caret (
   const m = input.value.slice(0, pos).match(/(?:^|\s)@([A-Za-z0-9-]*)$/);
   return m ? { text: m[1], start: pos - m[1].length - 1, end: pos } : null;
 }
+function placeTokenAt(input) {         // the "@words" being typed at the caret, for the place search
+  const pos = input.selectionStart ?? input.value.length, before = input.value.slice(0, pos);
+  const at = before.lastIndexOf("@");
+  if (at < 0 || (at > 0 && !/\s/.test(before[at - 1]))) return null;
+  const text = before.slice(at + 1);
+  if (!text.trim() || /^\s/.test(text) || text.length > 60 || /[@\n]/.test(text)) return null;
+  if (noteTag.places.some((p) => text.toLowerCase().startsWith(p.label.toLowerCase()))) return null;   // taken already
+  return { text, start: at, end: pos };
+}
+function withoutPlaces(text) {         // "@189 N Main St" is a place, not unit 189
+  let t = text;
+  for (const p of noteTag.places) t = t.split(`@${p.label}`).join(" ");
+  const ptok = placeTokenAt($("#note-text"));
+  if (ptok && /\s/.test(ptok.text) && text === $("#note-text").value) t = t.replace(`@${ptok.text}`, " ");
+  return t;
+}
 function mentionsOf(text) {             // codes written as "@code" (upper case)
-  return new Set([...text.matchAll(/(?:^|\s)@([A-Za-z0-9-]+)/g)].map((m) => m[1].toUpperCase()));
+  return new Set([...withoutPlaces(text).matchAll(/(?:^|\s)@([A-Za-z0-9-]+)/g)].map((m) => m[1].toUpperCase()));
 }
 function hideSugg() {
   const box = $("#note-sugg");
@@ -1383,34 +1408,69 @@ function hideSugg() {
   show(box, false);
   $("#note-text").setAttribute("aria-expanded", "false");
 }
-function suggestUnits() {
-  const input = $("#note-text"), tok = tokenAt(input);
-  const order = tagOrder(selected());
-  const items = tok ? order.filter((c) => c.toLowerCase().startsWith(tok.text.toLowerCase())).slice(0, 8) : [];
-  if (!items.length || (items.length === 1 && items[0] === tok.text && noteTag.tags.has(items[0]))) return hideSugg();
-  if (noteTag.items.join() !== items.join()) noteTag.idx = 0;
+function lookPlaces(q) {                // the place search for "@q", a moment after the typing stops
+  if (noteTag.pq === q) return;
+  noteTag.pq = q;
+  noteTag.hits = [];
+  clearTimeout(noteTag.timer);
+  const my = ++noteTag.seq;
+  noteTag.timer = setTimeout(async () => {
+    const inc = selected();
+    const near = inc && inc.lat != null && inc.lon != null ? `&near=${inc.lat},${inc.lon}` : "";
+    try {
+      const r = await api("GET", `/api/cad/places?q=${encodeURIComponent(q)}&limit=6${near}`);
+      if (my !== noteTag.seq) return;
+      noteTag.hits = r.places || [];
+      if (document.activeElement === $("#note-text")) suggestNote();
+    } catch (e) { /* no place search here: the units alone */ }
+  }, 180);
+}
+function suggestNote() {
+  const input = $("#note-text"), tok = tokenAt(input), ptok = placeTokenAt(input);
+  let codes = tok ? tagOrder(selected()).filter((c) => c.toLowerCase().startsWith(tok.text.toLowerCase())).slice(0, 8) : [];
+  if (codes.length === 1 && codes[0] === tok.text && noteTag.tags.has(codes[0])) codes = [];
+  const q = ptok ? ptok.text.trim() : "";
+  if (q.length >= 2) lookPlaces(q); else { noteTag.pq = ""; noteTag.hits = []; }
+  const places = q.length >= 2 && noteTag.pq === q ? noteTag.hits : [];
+  const us = codes.map((c) => ({ unit: c })), ps = places.map((x) => ({ place: x }));
+  const items = !tok || !tok.text || UNITISH.test(tok.text) ? [...us, ...ps] : [...ps, ...us];
+  if (!items.length) return hideSugg();
+  const key = (x) => (x.unit ? `u:${x.unit}` : `p:${x.place.label}|${x.place.lat}`);
+  if (noteTag.items.map(key).join() !== items.map(key).join()) noteTag.idx = 0;
   noteTag.items = items;
   noteTag.tok = tok;
+  noteTag.ptok = ptok;
   const on = new Set(((selected() || {}).assignments || []).filter((a) => !a.cleared_at).map((a) => a.name));
+  const ours = (L().geo_town_order || []).slice(0, 2);
   const box = $("#note-sugg");
-  box.replaceChildren(...items.map((c, i) => {
+  box.replaceChildren(...items.map((x, i) => {
     const li = el("li", i === noteTag.idx ? "on" : "");
     li.id = `note-sugg-${i}`;
     li.setAttribute("role", "option");
     li.setAttribute("aria-selected", String(i === noteTag.idx));
-    li.append(el("b", "", c));
-    const u = units().find((x) => x.name === c);
-    if (on.has(c)) li.append(el("span", "town ours", "Assigned"));
-    else if (u && (u.title || u.department)) li.append(el("span", "dim small", u.title || u.department));
-    li.addEventListener("mousedown", (e) => { e.preventDefault(); takeUnit(c); });
+    if (x.unit) {
+      const c = x.unit, u = units().find((y) => y.name === c);
+      li.append(el("b", "", c));
+      if (on.has(c)) li.append(el("span", "town ours", "Assigned"));
+      else if (u && (u.title || u.department)) li.append(el("span", "dim small", u.title || u.department));
+    } else {
+      const p = x.place;
+      li.append(el("b", "", p.label));
+      if (p.sub) li.append(el("span", "town" + (ours.includes(p.sub) ? " ours" : ""), p.sub));
+      li.append(el("span", "dim small", PLACE_KIND[p.kind] || p.category || "place"));
+    }
+    li.addEventListener("mousedown", (e) => { e.preventDefault(); takeItem(x); });
     return li;
   }));
-  box.append(el("li", "hint dim small", "Tab to tag, Esc to close"));
+  box.append(el("li", "hint dim small", "Tab to take, Esc to close"));
   const fresh = box.hidden;
   show(box, true);
   if (fresh) box.scrollIntoView({ block: "nearest" });
   input.setAttribute("aria-expanded", "true");
   input.setAttribute("aria-activedescendant", `note-sugg-${noteTag.idx}`);
+}
+function takeItem(x) {
+  if (x.unit) takeUnit(x.unit); else takePlace(x.place);
 }
 function takeUnit(code) {
   const input = $("#note-text"), tok = noteTag.tok || tokenAt(input);
@@ -1423,15 +1483,30 @@ function takeUnit(code) {
   renderNoteTags();
   hideSugg();
 }
+function takePlace(p) {                 // "@lyon pa" -> "@Lyon Park ", the place kept for the note
+  const input = $("#note-text"), tok = noteTag.ptok || placeTokenAt(input);
+  if (!tok) return;
+  const after = input.value.slice(tok.end).replace(/^[A-Za-z0-9.-]*/, "");
+  const lead = input.value.slice(0, tok.start) + "@" + p.label + (after.startsWith(" ") ? "" : " ");
+  input.value = lead + after;
+  input.setSelectionRange(lead.length, lead.length);
+  if (!noteTag.places.some((x) => x.label === p.label)) {
+    noteTag.places.push({ label: p.label, lat: p.lat, lon: p.lon, kind: p.kind, sub: p.sub || "", source: p.source || "" });
+  }
+  noteTag.pq = "";
+  noteTag.hits = [];
+  renderNoteTags();
+  hideSugg();
+}
 function noteKeys(e) {
   if (!noteTag.items.length) return;
   if (e.key === "ArrowDown" || e.key === "ArrowUp") {
     e.preventDefault();
     noteTag.idx = (noteTag.idx + (e.key === "ArrowDown" ? 1 : -1) + noteTag.items.length) % noteTag.items.length;
-    suggestUnits();
+    suggestNote();
   } else if (e.key === "Tab" || e.key === "Enter") {
     e.preventDefault();
-    takeUnit(noteTag.items[noteTag.idx]);
+    takeItem(noteTag.items[noteTag.idx]);
   } else if (e.key === "Escape") {
     e.preventDefault();
     e.stopPropagation();
@@ -1439,7 +1514,9 @@ function noteKeys(e) {
   }
 }
 function syncNoteTags() {               // a tag whose @code was deleted goes; an @code typed out in full comes
-  const text = $("#note-text").value, said = mentionsOf(text);
+  const text = $("#note-text").value;
+  noteTag.places = noteTag.places.filter((p) => text.includes(`@${p.label}`));   // an edited "@place" is text again
+  const said = mentionsOf(text);
   for (const t of [...noteTag.tags]) if (!said.has(t.toUpperCase())) noteTag.tags.delete(t);
   const tok = tokenAt($("#note-text"));
   for (const c of tagOrder(selected())) {
@@ -1451,6 +1528,17 @@ function noteUnits(text) {
   const said = mentionsOf(text);
   return [...noteTag.tags].filter((t) => said.has(t.toUpperCase()));
 }
+function notePlaces(text) {
+  return noteTag.places.filter((p) => text.includes(`@${p.label}`));
+}
+function clearNoteTags() {
+  noteTag.tags.clear();
+  noteTag.places = [];
+  noteTag.pq = "";
+  noteTag.hits = [];
+  renderNoteTags();
+  hideSugg();
+}
 function renderNoteTags() {
   const box = $("#note-tags");
   const tags = [...noteTag.tags];
@@ -1460,8 +1548,63 @@ function renderNoteTags() {
     b.title = `Untag ${t}`;
     b.addEventListener("click", () => { noteTag.tags.delete(t); renderNoteTags(); });
     return b;
+  }), ...noteTag.places.map((p) => {
+    const b = el("button", "chip place-tag on");
+    b.type = "button";
+    b.append(Icon("locate"), `${p.label} ✕`);
+    b.title = `Not a place: keep "@${p.label}" as text`;
+    b.addEventListener("click", () => { noteTag.places = noteTag.places.filter((x) => x !== p); renderNoteTags(); });
+    return b;
   }));
-  show(box, tags.length > 0);
+  show(box, tags.length + noteTag.places.length > 0);
+}
+
+// A note's "@places" as chips in its text; a chip shows the spot on the event's map, where a dispatcher
+// may make it the event's location (the usual location edit, in the chronology).
+function placeChip(p) {
+  const b = el("button", "chip place-tag");
+  b.type = "button";
+  b.append(Icon("locate"), p.label);
+  b.title = `${p.label}${p.sub ? `, ${p.sub}` : ""}: show it on the map`;
+  b.addEventListener("click", (e) => { e.stopPropagation(); showPlace(p); });
+  return b;
+}
+function noteNodes(e, text) {
+  const ps = (e.places || []).filter((p) => p && p.label).sort((a, b) => b.label.length - a.label.length);
+  if (!ps.length) return [document.createTextNode(text)];
+  const out = [];
+  let rest = text;
+  while (rest) {
+    let best = null;
+    for (const p of ps) {
+      const i = rest.toLowerCase().indexOf(`@${p.label.toLowerCase()}`);
+      if (i >= 0 && (!best || i < best.i)) best = { i, p };
+    }
+    if (!best) { out.push(document.createTextNode(rest)); break; }
+    if (best.i) out.push(document.createTextNode(rest.slice(0, best.i)));
+    out.push(placeChip(best.p));
+    rest = rest.slice(best.i + best.p.label.length + 1);
+  }
+  return out;
+}
+function showPlace(p) {
+  const inc = selected();
+  const may = !!inc && isOpen(inc) && !BOARD && canDo("dispatch");
+  const shown = window.CadMap && CadMap.place && CadMap.place(p, may ? () => placeAsLocation(inc, p) : null);
+  if (!shown) return UI.toast(`${p.label}${p.sub ? `, ${p.sub}` : ""}: no map here`, "info");
+  $("#d-map").scrollIntoView({ block: "nearest", behavior: "smooth" });
+}
+async function placeAsLocation(inc, p) {
+  if (!await UI.confirm(`Make ${p.label} the event's location?`, { ok: "Set location", danger: false })) return false;
+  try {
+    await api("POST", `/api/cad/incident/${inc.id}`, { address: p.label, lat: p.lat, lon: p.lon, operator: operator(),
+      geo_label: p.sub && !p.label.includes(p.sub) ? `${p.label}, ${p.sub}` : p.label });
+    UI.toast(`Location: ${p.label}`, "info");
+    return true;
+  } catch (err) {
+    UI.toast(err.message, "err");
+    return false;
+  }
 }
 
 // ---- non-emergency: attach units --------------------------------------------------------------
@@ -2334,22 +2477,20 @@ $("#note-form").addEventListener("submit", async (e) => {
   const inc = selected(), input = $("#note-text");
   if (!inc || !input.value.trim()) return;
   try {
-    const units = noteUnits(input.value);
+    const units = noteUnits(input.value), places = notePlaces(input.value);
     await api("POST", `/api/cad/incident/${inc.id}/note`, Object.assign({ text: input.value.trim(), operator: operator() },
-                                                                       units.length ? { units } : {}));
+                                                                       units.length ? { units } : {}, places.length ? { places } : {}));
     input.value = "";
-    noteTag.tags.clear();
-    renderNoteTags();
-    hideSugg();
+    clearNoteTags();
     if (cad.extra.has(inc.id)) { cad.extra.set(inc.id, await api("GET", `/api/cad/incident/${inc.id}`)); render(); }
   } catch (err) {
     UI.toast(err.message, "err");
   }
 });
-$("#note-text").addEventListener("input", () => { syncNoteTags(); suggestUnits(); });
+$("#note-text").addEventListener("input", () => { syncNoteTags(); suggestNote(); });
 $("#note-text").addEventListener("keydown", noteKeys);
 $("#note-text").addEventListener("blur", () => setTimeout(hideSugg, 150));
-$("#note-text").addEventListener("click", suggestUnits);
+$("#note-text").addEventListener("click", suggestNote);
 $("#runcards-open").addEventListener("click", openRunCards);
 $("#dispatch-open").addEventListener("click", openDispatch);
 window.addEventListener("hashchange", route);
