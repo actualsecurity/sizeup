@@ -120,7 +120,10 @@
   .ml-cam-body { gap: var(--s-2); }
   .ml-cam-frame { position: relative; display: flex; align-items: center; justify-content: center; aspect-ratio: 4 / 3;
     max-block-size: 65vh; background: var(--bg); border: var(--bw) solid var(--line); border-radius: var(--radius); overflow: hidden; }
-  .ml-cam-img { display: block; inline-size: 100%; block-size: 100%; object-fit: contain; }
+  .ml-cam-img, .ml-cam-video { display: block; inline-size: 100%; block-size: 100%; object-fit: contain; background: #000; }
+  .ml-live { position: absolute; inset-block-start: var(--s-2); inset-inline-start: var(--s-2); padding: 0 var(--s-2);
+    font-size: var(--fs-2xs); line-height: var(--lh-2xs); font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em;
+    color: var(--on-accent); background: var(--accent); border-radius: var(--radius-s); }
   .ml-cam-msg { position: absolute; inset-inline: var(--s-2); inset-block-end: var(--s-2); text-align: center;
     padding: var(--s-1) var(--s-2); background: color-mix(in srgb, var(--panel) 92%, transparent); border-radius: var(--radius-s); }
   .ml-cam-meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s-1) var(--s-3); }

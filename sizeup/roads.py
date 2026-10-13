@@ -42,6 +42,16 @@ items only, never the key or a feed address), so a restart spends no calls.
 The 511NY key is only ever in the request this module makes to 511NY: never in a response, the state,
 the cache, an error or the log (_redact).
 
+Live video (#101): the Thruway's cameras each list an HLS stream (512x288, about 205 kbit/s, 6 s
+segments, on nysdot.skyvdn.com, answering a plain client with no key; CORS open). The viewer plays
+it, muted, through the hub (Roads.stream: the playlist, its chunklist and the segments, nothing the
+playlist didn't name and only from the stream's own folder), only while that viewer is open: a
+closed viewer stops asking for the playlist and the hub stops serving the segments after
+STREAM_IDLE_S; STREAM_MAX streams at once hub-wide, a 5th viewer gets snapshots. The terms are the
+same as for the pictures (the Thruway's disclaimer: no resale or redistribution for profit). 511NY's
+camera inventory has a VideoUrl too (kept as "video"); the county's cameras are JPEG only. The
+viewer always says which it shows: "Live", or "Snapshot, updated every N s" with the source's cadence.
+
 Camera images: the browser never talks to a provider or a camera (the key stays here, and nothing is
 mixed content or cross-origin behind Cloudflare Access): GET /api/cad/cameras/<id>/image is fetched
 by the hub from the camera's own snapshot URL as its provider lists it (the Thruway's redirect once
@@ -61,6 +71,9 @@ HTTP (sizeup/web/server.py, any signed-in person: viewers too, all GET):
                                            at | side | nearby, miles, side, facing}], down: [...]} (down cameras, #99)
     GET /api/cad/cameras/<id>/image       the snapshot (image/jpeg ...), X-Image-Time: when it was taken
                                            (the camera's Last-Modified, else when the hub fetched it)
+    GET /api/cad/cameras/<id>/stream/playlist.m3u8, .../<chunklist>.m3u8, .../<segment>.ts
+                                           live video (#101, Roads.stream): the camera's HLS stream through the hub,
+                                           only while a viewer keeps asking for the playlist
 
 Place search (#67's "@"): Roads.search_places(q, near, limit) answers in the place search's own
 shape ({kind: "camera", label, sub, lat, lon, source, camera}); the app hands it to the CAD as
@@ -136,6 +149,14 @@ IMAGE_KEEP = 200                 # snapshots kept in memory (least recently used
 IMAGE_PARALLEL = 4               # fetches to the cameras at once
 CAMERA_ID = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
 CAMERA_PATH = re.compile(r"/api/cad/cameras/([A-Za-z0-9_.:-]{1,64})/image")
+# Live video (#101): a camera's HLS stream through the hub, only while a viewer is open
+STREAM_PATH = re.compile(r"/api/cad/cameras/([A-Za-z0-9_.:-]{1,64})/stream/([A-Za-z0-9_-]{1,80}\.(?:m3u8|ts))")
+STREAM_IDLE_S = 30.0             # no playlist request this long: the stream's segments stop (a viewer polls every few s)
+STREAM_MAX = 4                   # live streams open at once, hub-wide (each about 26 KB/s): the 5th is refused
+STREAM_TIMEOUT_S = 10.0
+STREAM_MAX_BYTES = 4 * 1024 * 1024
+STREAM_SEG_TTL_S = 60.0          # a segment kept this long (two viewers of one camera: one fetch)
+STREAM_SEG_KEEP = 40
 NEAR_KM = 1.5                    # "Cameras nearby" (the map's nearest-camera lookup): this close to the event
 # The incident viewer's cameras (#95): along the road, not as the crow flies
 ALONG_MI = 2.0                   # the camera just before / just after the event: this far along the road at most
@@ -771,6 +792,9 @@ class Roads:
                        if county else None)
         self.providers = [p for p in (self.ny, self.thruway, self.county) if p is not None]
         self._health: dict[str, dict] = {}            # camera id -> {fails, down_since, last_image, checked}
+        self._streams: dict[str, dict] = {}           # camera id -> {last (playlist request), base (the stream's folder)}
+        self._segments: OrderedDict[str, dict] = OrderedDict()   # "cid/name" -> {body, ctype, fetched}
+        self._stream_lock = threading.Lock()
         self._swept = 0.0
         self._images: OrderedDict[str, dict] = OrderedDict()
         self._image_locks: dict[str, threading.Lock] = {}
@@ -1194,10 +1218,82 @@ class Roads:
             h["X-Image-Stale"] = "1"
         return 200, hit["body"], hit["ctype"], h
 
+    # -- live video (#101): the camera's HLS stream through the hub, only while a viewer is open --------------
+
+    def streams_open(self, now: float | None = None) -> int:
+        now = self.clock() if now is None else now
+        return sum(1 for st in self._streams.values() if now - st["last"] <= STREAM_IDLE_S)
+
+    def stream(self, cid: str, name: str) -> tuple[int, bytes, str, dict]:
+        """GET /api/cad/cameras/<id>/stream/<name>: playlist.m3u8 (the camera's master playlist, its chunklist
+        named as the hub serves it), <chunklist>.m3u8 (the segment names likewise), <segment>.ts (the bytes).
+        A playlist request opens or keeps the camera's stream (STREAM_MAX at once, hub-wide; a 5th is 429);
+        segments are served only while one was asked for within STREAM_IDLE_S: a closed viewer stops the
+        flow by itself. Nothing is fetched that a playlist didn't name, and only from the stream's own folder."""
+        cam = self.camera(cid)
+        if cam is None or not self.configured:
+            return 404, b'{"error":"no such camera"}', JSON, {}
+        if not cam.get("video"):
+            return 404, b'{"error":"this camera has no video stream"}', JSON, {}
+        if self.health(cid)["down"]:
+            return self._down_answer(cid)
+        now = self.clock()
+        base = cam["video"].rsplit("/", 1)[0] + "/"
+        hdr = {"Cache-Control": "no-store"}
+        opened = False
+        with self._stream_lock:
+            st = self._streams.get(cid)
+            if name.endswith(".m3u8"):
+                if st is None or now - st["last"] > STREAM_IDLE_S:
+                    if self.streams_open(now) >= STREAM_MAX:
+                        return 429, json.dumps({"error": f"too many live streams open ({STREAM_MAX}); snapshots instead"}).encode(), JSON, hdr
+                    st = self._streams[cid] = {"last": now, "base": base}
+                    opened = True
+                st["last"] = now
+            elif st is None or now - st["last"] > STREAM_IDLE_S:
+                return 404, b'{"error":"the stream is not open: ask for its playlist first"}', JSON, hdr
+        src = cam["video"] if name == "playlist.m3u8" else base + name
+        if name.endswith(".ts"):
+            key = f"{cid}/{name}"
+            hit = self._segments.get(key)
+            if hit and now - hit["fetched"] < STREAM_SEG_TTL_S:
+                return 200, hit["body"], hit["ctype"], {**hdr, "Cache-Control": "private, max-age=60"}
+        try:
+            with self._parallel:
+                code, headers, body = self.fetch(src, STREAM_TIMEOUT_S, STREAM_MAX_BYTES)
+            if code != 200 or not body:
+                raise ValueError(f"HTTP {code}")
+        except (HTTPError, URLError, OSError, ValueError) as e:
+            why = _redact(f"{type(e).__name__}: {getattr(e, 'reason', e)}", self.ny.key)
+            if opened:                                           # a stream that never answered holds no slot
+                with self._stream_lock:
+                    self._streams.pop(cid, None)
+            return 502, json.dumps({"error": f"the stream didn't answer ({why})"}).encode(), JSON, hdr
+        if name.endswith(".ts"):
+            ctype = (headers.get("content-type") or "video/MP2T").split(";")[0].strip() or "video/MP2T"
+            with self._stream_lock:
+                self._segments[key] = {"body": body, "ctype": ctype, "fetched": now}
+                self._segments.move_to_end(key)
+                while len(self._segments) > STREAM_SEG_KEEP:
+                    self._segments.popitem(last=False)
+            return 200, body, ctype, {**hdr, "Cache-Control": "private, max-age=60"}
+        # a playlist: every line that names a file must be a plain name in the stream's own folder
+        lines = []
+        for ln in body.decode("utf-8", errors="replace").splitlines():
+            t = ln.strip()
+            if not t or t.startswith("#"):
+                lines.append(t)
+                continue
+            if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}\.(?:m3u8|ts)", t):
+                return 502, b'{"error":"the stream names files the hub will not fetch"}', JSON, hdr
+            lines.append(t)
+        return 200, ("\n".join(lines) + "\n").encode(), "application/vnd.apple.mpegurl", hdr
+
     # -- HTTP ------------------------------------------------------------------------------------------
 
     def handles(self, path: str) -> bool:
-        return path == "/api/cad/roads" or path == "/api/cad/cameras" or bool(CAMERA_PATH.fullmatch(path))
+        return (path == "/api/cad/roads" or path == "/api/cad/cameras" or bool(CAMERA_PATH.fullmatch(path))
+                or bool(STREAM_PATH.fullmatch(path)))
 
     def get(self, path: str, query: str) -> tuple[int, bytes, str, dict]:
         q = parse_qs(query or "")
@@ -1233,4 +1329,6 @@ class Roads:
             return 200, json.dumps({"configured": self.configured, "cameras": cams}).encode(), JSON, {}
         if m := CAMERA_PATH.fullmatch(path):
             return self.image(m.group(1))
+        if m := STREAM_PATH.fullmatch(path):
+            return self.stream(m.group(1), m.group(2))
         return 404, b"not found\n", "text/plain", {}

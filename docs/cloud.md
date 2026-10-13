@@ -555,10 +555,10 @@ Every CAD map (the event's, the large map, the Overview, `/monitor`) has a **Lay
 and *Exits* (from the gazetteer, #67, #83), and *Airport* with *Approaches*
 ([the airport](#the-airport-hpn-the-airport-layer-places-alerts), #87). Each is on or off per viewer (this browser's
 `localStorage`, key `sizeup.mapLayers`); cameras and incidents start on. Signs show from zoom 11,
-exits and whole mileposts from 12, the tenths from 14. A camera opens the **camera viewer**: the
-snapshot, its name, road, direction and milepost, which source it is from and when the image was
-taken, a new one every 10 s while it is open and the tab is visible (paused when hidden); it fits a
-390 px phone. An incident, closure, roadwork or sign opens a small box with what the source says and
+exits and whole mileposts from 12, the tenths from 14. A camera opens the **camera viewer**: live video where the source streams
+(the Thruway's cameras; muted, see below), else the snapshot, with its name, road, direction and
+milepost, which source it is from and when the image was taken, a new snapshot every 10 s while it
+is open and the tab is visible (paused when hidden); it fits a 390 px phone. An incident, closure, roadwork or sign opens a small box with what the source says and
 when it was updated. An event with a map point has a **Cameras** panel under its map (#95: "add
 that as an automatic option on the incident viewer to show the camera live feed, even if it's just
 past or just before where it came in, as immediate reference points"): on a highway we have mile
@@ -662,6 +662,38 @@ hh:mm (last image hh:mm)* rather than the old picture (`GET .../image` answers 4
 current image", down, down_since, last_image}`). Each camera in `/api/cad/roads` carries `down`,
 `down_since`, `last_image` and `cadence` (how often its source's snapshots change: the county 8 s,
 the Thruway and 511NY about 60 s; the viewer says *Snapshot, updated every N s*).
+
+### Live video
+
+> "can we do live feeds, instead of just screenshots?" (user, 2026-10-13; #101)
+
+Per provider: the **Thruway**'s camera list gives each camera an HLS stream (`videourl`, on
+`nysdot.skyvdn.com`: 512×288 H.264, about 205 kbit/s, 6 s segments; it answers a plain client with
+no key, CORS open); checked 2026-10-13. **511NY**'s inventory has a `VideoUrl` for some cameras
+(kept as `video`; untested until access is approved). The **county**'s cameras are JPEG only, every
+8 s. The terms are those of the pictures (the Thruway's disclaimer: no resale or redistribution for
+profit); the stream is re-served only to signed-in members, only while one of them is watching.
+
+The viewer plays a stream **muted** (hls.js 1.6 from cdnjs, or Safari's own HLS), through the hub:
+`GET /api/cad/cameras/<id>/stream/playlist.m3u8` (the camera's master playlist), `.../<chunklist>.m3u8`,
+`.../<segment>.ts` (`Roads.stream`). The hub fetches only what a playlist named, as a plain file name
+in the stream's own folder; a playlist that names anything else is refused. A playlist request opens
+or keeps the camera's stream; segments are served only while one was asked for within 30 s, so a
+closed viewer stops the flow by itself (the player stops polling); a hidden tab pauses the player
+and its polling. **At most 4 streams at once, hub-wide** (the 5th gets 429 and that viewer shows
+snapshots); the viewer itself shows one camera at a time. Any failure (no HLS support, a stream that
+won't play, the cap) falls back to the snapshots and says so for a few seconds. The viewer always
+says which it shows: **Live** (only once the video is actually playing), or **Snapshot, updated
+every N s** with the source's real cadence (the county 8 s, the Thruway and 511NY about 60 s).
+Thumbnails (the Cameras panel, the board) stay snapshots.
+
+Measured 2026-10-13 on a Mac, a hub with the real Thruway feeds and two streams open for 60 s
+through the proxy (a client polling each chunklist every 6 s and fetching each new segment, like
+hls.js): 13 segments, 1.15 MB served, 18.7 KB/s; the hub process used 2.7 s of CPU over the 95 s run
+including its feed refreshes and health sweep, about 3% of one core; memory steady around 300 MB
+RSS. Each stream is at most ~26 KB/s (205 kbit/s) each way, so the 4-stream cap is ~105 KB/s out
+and in, well within a 0.25 vCPU Fargate task; the pass-through does no decoding. One stream origin
+answered 502 at open during the run: that is the fallback path (snapshots) working.
 
 ### How it works
 

@@ -813,6 +813,127 @@ def test_down_cameras_are_demoted_in_the_picker_and_listed_apart(tmp_path):
     assert [c["id"] for c in o["down"]] == ["wc23"] and o["down"][0]["km"] == 0.0
 
 
+# ---- live video (#101): the camera's HLS stream through the hub, only while a viewer is open ---------------------
+
+SEG = b"\x47" + b"ts-bytes" * 100
+PLAYLIST = b"#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-STREAM-INF:BANDWIDTH=205422,CODECS=\"avc1.4d4015\",RESOLUTION=512x288\nchunklist_w1849562454.m3u8\n"
+CHUNKLIST = (b"#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:14\n#EXT-X-MEDIA-SEQUENCE:1225\n"
+             b"#EXTINF:6.4,\nmedia_w1849562454_1225.ts\n#EXTINF:6.799,\nmedia_w1849562454_1226.ts\n")
+
+
+class StreamFetch(FakeFetch):
+    """FakeFetch plus a Wowza-like HLS origin for every Thruway camera's stream folder."""
+
+    def __init__(self):
+        super().__init__()
+        self.chunklist = CHUNKLIST
+
+    def __call__(self, url, timeout, limit):
+        m = re.fullmatch(r"https://s58\.nysdot\.skyvdn\.com:443/rtplive/(TA_\d+)/(.+)", url)
+        if m:
+            self.urls.append(url)
+            name = m.group(2)
+            if name == "playlist.m3u8":
+                return 200, {"content-type": "application/vnd.apple.mpegurl"}, PLAYLIST
+            if name.startswith("chunklist_") and name.endswith(".m3u8"):
+                return 200, {"content-type": "application/vnd.apple.mpegurl"}, self.chunklist
+            if name.endswith(".ts"):
+                return 200, {"content-type": "video/MP2T"}, SEG
+            return 404, {"content-type": "text/plain"}, b"no"
+        return super().__call__(url, timeout, limit)
+
+
+def streaming(clock=None):
+    f = StreamFetch()
+    r = make(key="", urls={}, fetch=f, clock=clock or Clock(), thruway=True)
+    assert r.refresh("cameras")
+    return r, f
+
+
+def test_the_playlist_opens_the_stream_and_names_only_what_the_hub_serves():
+    r, f = streaming()
+    code, body, ctype, headers = r.get("/api/cad/cameras/1ne01370s/stream/playlist.m3u8", "")
+    assert (code, ctype, headers["Cache-Control"]) == (200, "application/vnd.apple.mpegurl", "no-store")
+    assert body == PLAYLIST and f.urls[-1] == "https://s58.nysdot.skyvdn.com:443/rtplive/TA_058/playlist.m3u8"
+    code, body, ctype, _ = r.get("/api/cad/cameras/1ne01370s/stream/chunklist_w1849562454.m3u8", "")
+    assert code == 200 and body == CHUNKLIST and f.urls[-1].endswith("/TA_058/chunklist_w1849562454.m3u8")
+    code, body, ctype, headers = r.get("/api/cad/cameras/1ne01370s/stream/media_w1849562454_1225.ts", "")
+    assert (code, body, ctype) == (200, SEG, "video/MP2T") and headers["Cache-Control"] == "private, max-age=60"
+    assert r.streams_open() == 1
+    # two viewers of one camera: one fetch per segment
+    n = len(f.urls)
+    assert r.get("/api/cad/cameras/1ne01370s/stream/media_w1849562454_1225.ts", "")[1] == SEG and len(f.urls) == n
+    # a playlist naming a file the hub won't fetch (another folder, a URL): refused, nothing fetched
+    f.chunklist = b"#EXTM3U\n#EXTINF:6,\n../other/x.ts\n"
+    assert r.get("/api/cad/cameras/1ne01370s/stream/chunklist_w1849562454.m3u8", "")[0] == 502
+    f.chunklist = b"#EXTM3U\n#EXTINF:6,\nhttps://evil.example/x.ts\n"
+    assert r.get("/api/cad/cameras/1ne01370s/stream/chunklist_w1849562454.m3u8", "")[0] == 502
+    # names the hub won't ask for at all
+    assert r.get("/api/cad/cameras/1ne01370s/stream/..%2Fx.ts", "")[0] == 404
+    assert r.handles("/api/cad/cameras/1ne01370s/stream/media_1.ts") and not r.handles("/api/cad/cameras/1ne01370s/stream/x.key")
+
+
+def test_segments_stop_when_nobody_asks_for_the_playlist():
+    clock = Clock()
+    r, f = streaming(clock)
+    assert r.get("/api/cad/cameras/1ne01370s/stream/media_w1849562454_1225.ts", "")[0] == 404   # not open yet
+    assert r.get("/api/cad/cameras/1ne01370s/stream/playlist.m3u8", "")[0] == 200
+    clock.t += 29
+    assert r.get("/api/cad/cameras/1ne01370s/stream/media_w1849562454_1226.ts", "")[0] == 200
+    clock.t += 31                                                                     # the viewer closed: idle stop
+    n = len(f.urls)
+    code, body, _, _ = r.get("/api/cad/cameras/1ne01370s/stream/media_w1849562454_1227.ts", "")
+    assert code == 404 and b"not open" in body and len(f.urls) == n and r.streams_open() == 0
+    assert r.get("/api/cad/cameras/1ne01370s/stream/chunklist_w1849562454.m3u8", "")[0] == 200   # asking again reopens
+    assert r.streams_open() == 1
+
+
+def test_at_most_four_streams_at_once_then_snapshots():
+    clock = Clock()
+    r, f = streaming(clock)
+    cams = [c["id"] for c in r.merged("cameras") if c["has_video"]][:5]
+    for cid in cams[:4]:
+        assert r.get(f"/api/cad/cameras/{cid}/stream/playlist.m3u8", "")[0] == 200
+    code, body, _, _ = r.get(f"/api/cad/cameras/{cams[4]}/stream/playlist.m3u8", "")
+    assert code == 429 and b"too many live streams" in body and r.streams_open() == 4
+    assert r.get(f"/api/cad/cameras/{cams[0]}/stream/playlist.m3u8", "")[0] == 200      # an open one keeps going
+    clock.t += 31                                                                      # they all went idle
+    assert r.get(f"/api/cad/cameras/{cams[4]}/stream/playlist.m3u8", "")[0] == 200
+    # the snapshots are untouched by any of this
+    assert r.get(f"/api/cad/cameras/{cams[4]}/image", "")[0] == 200
+
+
+def test_no_stream_for_a_camera_without_one_a_down_one_or_an_unknown_one():
+    clock = Clock()
+    r, f = streaming(clock)
+    r.thruway.data["cameras"][0]["video"] = ""
+    r._changed()
+    cid = r.thruway.data["cameras"][0]["id"]
+    assert b"no video stream" in r.get(f"/api/cad/cameras/{cid}/stream/playlist.m3u8", "")[1]
+    assert r.get("/api/cad/cameras/nope/stream/playlist.m3u8", "")[0] == 404
+    f.fail["image"] = OSError("gone")
+    for _ in range(3):
+        clock.t += IMAGE_TTL_S + 1
+        r.get("/api/cad/cameras/1ne01370s/image", "")
+    assert r.health("1ne01370s")["down"]
+    code, body, _, _ = r.get("/api/cad/cameras/1ne01370s/stream/playlist.m3u8", "")
+    assert code == 404 and json.loads(body)["down"]
+    # the origin failing: a 502, no session churn
+    del f.fail["image"]
+    clock.t += 1000
+    f.image = (200, {"content-type": "image/jpeg", "last-modified": formatdate(clock.t - 5, usegmt=True)}, JPEG)
+    r.get("/api/cad/cameras/1ne01370s/image", "")                                     # back up: a fresh picture
+    assert not r.health("1ne01370s")["down"]
+    orig = f.__call__
+    def failing(url, timeout, limit):
+        if "skyvdn" in url:
+            raise OSError("reset")
+        return orig(url, timeout, limit)
+    r.fetch = failing
+    assert r.get("/api/cad/cameras/1ne01370s/stream/playlist.m3u8", "")[0] == 502
+    assert r.streams_open() == 0                                                      # it holds no slot
+
+
 # ---- config ------------------------------------------------------------------------------------------------
 
 
@@ -1014,5 +1135,10 @@ def test_the_layers_control_is_on_every_map_with_its_six_layers():
     assert "/api/cad/cameras?" in js and "CAM_REFRESH_MS)" in js and 'aria-expanded' in js   # live, collapsible
     assert '"ml-cam-down"' in js and "Hide down cameras" in js and "cameras down" in js       # down cameras (#99)
     assert "Down since" in js and "Snapshot, updated every" in js
+    # live video (#101): hls.js only from cdnjs, muted and inline, "Live" only from the player, snapshots otherwise
+    assert re.search(r'const HLS_JS = "https://cdnjs\.cloudflare\.com/ajax/libs/hls\.js/[\d.]+/hls\.min\.js"', js)
+    assert not re.search(r"https://(?!cdnjs\.cloudflare\.com)[a-z0-9.-]+/[^\"']*\.js", js)
+    assert "video.muted = true" in js and 'setAttribute("playsinline"' in js and "/stream/playlist.m3u8" in js
+    assert 'viewer.el.time.textContent = "Live"' in js and "liveFailed(" in js
     sprite = (STATIC / "icons.svg").read_text()
     assert 'id="i-layers"' in sprite and 'id="i-camera"' in sprite

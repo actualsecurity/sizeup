@@ -492,8 +492,92 @@ window.MapLayers = (() => {
   }
 
   // ---- the camera viewer --------------------------------------------------------------------------------------
-  const viewer = { ov: null, id: null, timer: null, url: null, taken: 0, busy: false, tick: null, down: null, cadence: 60 };
+  const viewer = { ov: null, id: null, timer: null, url: null, taken: 0, busy: false, tick: null, down: null, cadence: 60,
+                   live: false, hls: null, video: null };
   const cadenceText = (c) => `Snapshot, updated every ${c && c.cadence ? c.cadence : 60} s`;
+  // Live video (#101): a camera with a stream plays it, muted, through the hub (/api/cad/cameras/<id>/stream/...),
+  // with hls.js from cdnjs (or the browser's own HLS, Safari); anything wrong falls back to the snapshots. The
+  // page says "Live" only while the stream plays; a snapshot is always "Snapshot, updated every N s".
+  const HLS_JS = "https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.6.16/hls.min.js";
+  let hlsLoad = null;
+  function loadHls() {
+    if (window.Hls) return Promise.resolve(window.Hls);
+    if (!hlsLoad) {
+      hlsLoad = new Promise((ok, no) => {
+        const sc = document.createElement("script");
+        sc.src = HLS_JS;
+        sc.async = true;
+        sc.onload = () => (window.Hls ? ok(window.Hls) : no(new Error("hls.js did not load")));
+        sc.onerror = () => no(new Error("hls.js did not load"));
+        document.head.append(sc);
+      }).catch((e) => { hlsLoad = null; throw e; });
+    }
+    return hlsLoad;
+  }
+  function stopLive() {
+    if (viewer.hls) { try { viewer.hls.destroy(); } catch (_) { /* gone */ } viewer.hls = null; }
+    if (viewer.video) { try { viewer.video.pause(); viewer.video.removeAttribute("src"); viewer.video.load(); } catch (_) { /* gone */ } }
+    if (viewer.el) { viewer.el.video.hidden = true; viewer.el.live.hidden = true; }
+    viewer.live = false;
+  }
+  function liveFailed(why) {               // back to snapshots, and say so once
+    if (!viewer.id) return;
+    stopLive();
+    viewer.el.msg.hidden = false;
+    viewer.el.msg.textContent = `No live video (${why}): snapshots instead`;
+    setTimeout(() => { if (viewer.el.msg.textContent.startsWith("No live video")) viewer.el.msg.hidden = true; }, 6000);
+    showFoot();
+    refreshCamera();
+    if (document.visibilityState !== "hidden") startRefresh();
+  }
+  function startLive(id) {
+    const url = `/api/cad/cameras/${encodeURIComponent(id)}/stream/playlist.m3u8`;
+    const v = viewer.el.video;
+    const playing = () => {
+      if (viewer.id !== String(id)) return;
+      viewer.live = true;
+      stopRefresh();
+      v.hidden = false;
+      viewer.el.img.hidden = true;
+      viewer.el.msg.hidden = true;
+      viewer.el.live.hidden = false;
+      viewer.el.time.textContent = "Live";
+      showFoot();
+    };
+    v.onplaying = playing;
+    v.onerror = () => liveFailed("the stream stopped");
+    const native = () => {                                           // Safari on iPhone (no MSE): its own HLS
+      if (!v.canPlayType("application/vnd.apple.mpegurl")) return liveFailed("no HLS here");
+      v.src = url;
+      v.play().catch(() => liveFailed("not allowed to play"));
+    };
+    loadHls().then((Hls) => {
+      if (viewer.id !== String(id)) return;
+      if (!Hls.isSupported()) return native();
+      const hls = new Hls({ enableWorker: false, lowLatencyMode: false, liveSyncDurationCount: 2, maxBufferLength: 20,
+                            manifestLoadingMaxRetry: 1, levelLoadingMaxRetry: 2, fragLoadingMaxRetry: 2 });
+      viewer.hls = hls;
+      hls.on(Hls.Events.ERROR, (_, data) => {
+        if (data && data.fatal) {
+          const r = data.response && data.response.code === 429 ? "the hub has enough streams open" : data.details || "stream error";
+          liveFailed(r);
+        }
+      });
+      hls.loadSource(url);
+      hls.attachMedia(v);
+      hls.on(Hls.Events.MANIFEST_PARSED, () => v.play().catch(() => liveFailed("not allowed to play")));
+    }).catch(() => native());                                       // hls.js didn't load: the browser's own, or snapshots
+  }
+  function showFoot() {
+    const c = camById(viewer.id);
+    const src = ((store.data && store.data.sources) || []).find((s) => c && s.short === c.source);
+    const a = h("a", "", SOURCE_NOTE[c && c.source] || (src ? src.label : "the source"));
+    a.href = src ? src.link : "#";
+    a.target = "_blank";
+    a.rel = "noopener";
+    if (viewer.live) viewer.el.foot.replaceChildren("Live video through the hub (", a, "), muted. Only while this is open.");
+    else viewer.el.foot.replaceChildren(`${cadenceText(c)}, through the hub (`, a, "). Looked at every 10 s while this is open.");
+  }
 
   function buildViewer() {
     const ov = h("div", "overlay");
@@ -517,8 +601,18 @@ window.MapLayers = (() => {
     const frame = h("div", "ml-cam-frame");
     const img = h("img", "ml-cam-img");
     img.alt = "";
+    const video = h("video", "ml-cam-video");
+    video.muted = true;
+    video.autoplay = true;
+    video.playsInline = true;
+    video.setAttribute("playsinline", "");
+    video.setAttribute("muted", "");
+    video.hidden = true;
+    const live = h("span", "ml-live", "Live");
+    live.hidden = true;
+    live.setAttribute("aria-label", "Live video");
     const msg = h("div", "ml-cam-msg dim");
-    frame.append(img, msg);
+    frame.append(video, img, live, msg);
     const meta = h("div", "ml-cam-meta");
     const where = h("span", "ml-cam-where");
     const time = h("span", "ml-cam-time dim small");
@@ -530,11 +624,16 @@ window.MapLayers = (() => {
     ov.append(panel);
     document.body.append(ov);
     viewer.ov = ov;
-    viewer.el = { title, img, msg, where, time, foot };
+    viewer.el = { title, img, msg, where, time, foot, video, live };
+    viewer.video = video;
     document.addEventListener("visibilitychange", () => {
       if (!viewer.id) return;
-      if (document.visibilityState === "hidden") stopRefresh();
-      else { refreshCamera(); startRefresh(); }
+      if (document.visibilityState === "hidden") {
+        stopRefresh();
+        if (viewer.live) { try { video.pause(); if (viewer.hls) viewer.hls.stopLoad(); } catch (_) { /* fine */ } }
+      } else if (viewer.live) {
+        try { if (viewer.hls) viewer.hls.startLoad(); video.play().catch(() => {}); } catch (_) { /* fine */ }
+      } else { refreshCamera(); startRefresh(); }
     });
   }
 
@@ -613,12 +712,8 @@ window.MapLayers = (() => {
     const el = viewer.el;
     el.title.textContent = c ? c.name : `Camera ${id}`;
     el.where.textContent = c ? [c.road, c.dir, c.mile ? `MP ${c.mile}` : ""].filter(Boolean).join(" · ") || "" : "";
-    const src = ((store.data && store.data.sources) || []).find((s) => c && s.short === c.source);
-    const a = h("a", "", SOURCE_NOTE[c && c.source] || (src ? src.label : "the source"));
-    a.href = src ? src.link : "#";
-    a.target = "_blank";
-    a.rel = "noopener";
-    el.foot.replaceChildren(`${cadenceText(c)}, through the hub (`, a, "). Looked at every 10 s while this is open.");
+    stopLive();
+    showFoot();
     el.img.hidden = true;
     el.img.alt = c ? `Traffic camera: ${c.name}` : "Traffic camera";
     el.msg.hidden = false;
@@ -629,11 +724,13 @@ window.MapLayers = (() => {
     if (viewer.url) { URL.revokeObjectURL(viewer.url); viewer.url = null; }
     if (window.UI && UI.dialog) UI.dialog.open(viewer.ov, { onClose: stopCamera, opener });
     else viewer.ov.hidden = false;
-    refreshCamera();
+    refreshCamera();                                             // a picture at once, even when video follows
     if (document.visibilityState !== "hidden") startRefresh();
+    if (c && c.has_video && !c.down && !c.off) startLive(c.id);
     return true;
   }
   function stopCamera() {
+    stopLive();
     clearInterval(viewer.timer);
     clearInterval(viewer.tick);
     viewer.timer = viewer.tick = null;
