@@ -17,8 +17,8 @@ LETTER = {"A": "Alpha", "B": "Bravo", "C": "Charlie", "D": "Delta", "E": "Echo",
           "O": "Oscar", "P": "Papa", "Q": "Quebec", "R": "Romeo", "S": "Sierra", "T": "Tango", "U": "Uniform",
           "V": "Victor", "W": "Whiskey", "X": "X-ray", "Y": "Yankee", "Z": "Zulu"}
 APPARATUS = {"E": "Engine", "R": "Rescue", "L": "Ladder", "TL": "Tower Ladder", "T": "Tower", "S": "Squad",
-             "TK": "Truck", "B": "Battalion", "U": "Utility", "M": "Medic"}
-APPARATUS_WORD = re.compile(r"^((?:Tower )?Ladder|Engine|Rescue|Squad|Truck|Tower|Battalion|Medic|Utility) \d+\b")
+             "TK": "Truck", "B": "Battalion", "U": "Utility", "M": "Medic", "AP": "Airport"}   # AP7: the airport's ARFF (#105)
+APPARATUS_WORD = re.compile(r"^((?:Tower )?Ladder|Engine|Rescue|Squad|Truck|Tower|Battalion|Medic|Utility|Airport) \d+\b")
 
 
 def spoken(tag: str) -> str | None:
@@ -32,7 +32,7 @@ def spoken(tag: str) -> str | None:
         return m.group(1)
     if m := re.match(r"^(\d{1,3})([A-Z])(\d{1,2})$", tag):      # "77A4" -> "77 Alpha 4"
         return f"{m.group(1)} {LETTER[m.group(2)]} {m.group(3)}"
-    if m := re.match(r"^(TL|TK|[ERLTSBUM])(\d{1,3})$", tag):   # "E60" -> "Engine 60"
+    if m := re.match(r"^(TL|TK|AP|[ERLTSBUM])(\d{1,3})$", tag):   # "E60" -> "Engine 60", "AP7" -> "Airport 7"
         return f"{APPARATUS[m.group(1)]} {m.group(2)}"
     return None
 

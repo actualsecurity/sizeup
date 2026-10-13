@@ -154,12 +154,14 @@ def test_units_add_edit_move_retire():
         post(cad, "units", action="retire", code="E62")
     with pytest.raises(CadError, match="named on run card"):
         post(cad, "units", action="retire", code="2398")
-    post(cad, "units", action="retire", code="E64")
-    e64 = next(u for u in cad.store.units() if u["name"] == "E64")
-    assert e64["board"] == "" and "E64" not in [c for c, _, _ in cad.lists.board_units()]
-    assert next(r for r in cad.settings_get()["units"]["rows"] if r["code"] == "E64")["retired"]
-    post(cad, "units", action="restore", code="E64")
-    assert next(u for u in cad.store.units() if u["name"] == "E64")["board"] == "main"
+    with pytest.raises(CadError, match="named on run card AIRPORT/ALERT-2"):     # the department's airport card (#105)
+        post(cad, "units", action="retire", code="E64")
+    post(cad, "units", action="retire", code="E61")
+    e61 = next(u for u in cad.store.units() if u["name"] == "E61")
+    assert e61["board"] == "" and "E61" not in [c for c, _, _ in cad.lists.board_units()]
+    assert next(r for r in cad.settings_get()["units"]["rows"] if r["code"] == "E61")["retired"]
+    post(cad, "units", action="restore", code="E61")
+    assert next(u for u in cad.store.units() if u["name"] == "E61")["board"] == "main"
     # delete only a unit with no history
     with pytest.raises(CadError, match="Retire it instead"):
         post(cad, "units", action="delete", code="E62")
@@ -176,7 +178,7 @@ def test_ems_and_pd_never_on_run_cards_tick_all_or_the_air_but_can_be_attached()
     assert {"77A1", "77M2", "7711", "PCPD", "RBPD1", "CONED-G", "DPW", "CHIEF7700", "KNOB_BOX1", "BAT10"} <= agency
     on = {b["id"]: set(c for c in b["units"] if c) for b in L.unit_boards}
     assert agency == on["ems"] | on["res-coned"] | on["res-keyholder"] | on["res-knox"] | on["res-pd"] | on["res-bat"] | on["agencies"]
-    ma = on["ma-rye"] | on["ma-purchase"] | on["ma-harrison"] | on["ma-west-harrison"] | on["ma-requests"]
+    ma = on["ma-rye"] | on["ma-purchase"] | on["ma-harrison"] | on["ma-west-harrison"] | on["ma-airport"] | on["ma-requests"]
     assert ma == {u["name"] for u in cad.store.units() if u["response"] == "mutual_aid"} and {"L25", "E191", "MA3", "242_eNG"} <= ma
     assert not set(L.full_response_kinds) & set(L.attach_kinds)          # "Tick all" ticks these kinds only
     assert [b["id"] for b in cad.lists.unit_boards][:2] == ["main", "ems"]
@@ -263,7 +265,8 @@ def test_run_cards_reset_one_or_all_to_the_defaults():
     with pytest.raises(CadError, match="delete it instead"):
         post(cad, "runcards", action="reset", type="SERVICE/LIFT")
     post(cad, "runcards", action="reset_section")
-    assert runcards.card(cad.store, "SERVICE/LIFT") is None and all(c["is_default"] for c in runcards.cards(cad.store))
+    assert runcards.card(cad.store, "SERVICE/LIFT") is None
+    assert all(c["is_default"] or c["confirmed"] for c in runcards.cards(cad.store))     # the department's own stay its own (#105)
 
 
 # -- users ---------------------------------------------------------------------------------------------------
@@ -296,12 +299,12 @@ def test_settings_export_import_round_trip_with_a_dry_run(tmp_path):
     post(a, "event_types", action="edit", code="STRU", item={"color": "#111111"})
     post(a, "dispositions", action="add", code="REFERRED", item={"name": "Referred"})
     post(a, "units", action="add", code="E66", unit={"kind": "engine", "spoken": "Engine 66"})
-    post(a, "units", action="retire", code="E64")
+    post(a, "units", action="retire", code="E61")
     post(a, "dispatch", action="set", key="channels", value=["FG1"])
     post(a, "users", action="add", name="Dana", role="admin")
     a.save_run_card({"type": "STRU", "slots": [{"kind": "engine", "count": 4}, {"unit": "E66"}]})
     data = json.loads(json.dumps(a.settings_export()))
-    assert data["format"] == "sizeup-cad-settings" and data["defaults_version"] == "2026-10-13.1"
+    assert data["format"] == "sizeup-cad-settings" and data["defaults_version"] == "2026-10-13.2"
 
     b = make_cad(tmp_path / "b")
     dry = post(b, "import", action="dry_run", settings=data)

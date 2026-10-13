@@ -104,6 +104,18 @@ def _num(body: dict, key: str, lo: float, hi: float) -> float | None:
     return float(v)
 
 
+def _count(body: dict, key: str, hi: int) -> int | None:
+    """A whole number 0..hi (or a string of digits), None for none."""
+    v = body.get(key)
+    if v in (None, ""):
+        return None
+    if isinstance(v, str) and v.strip().isdigit():
+        v = int(v.strip())
+    if isinstance(v, bool) or not isinstance(v, int) or not 0 <= v <= hi:
+        raise CadError(f"{key}: a whole number up to {hi}")
+    return v
+
+
 def _priority(body: dict) -> int | None:
     v = body.get("priority")
     if v in (None, ""):
@@ -336,7 +348,27 @@ class Cad:
             out["lat"], out["lon"] = lat, lon
             if lat is None:
                 out["geo_label"] = ""
+        self._airport_fields(body, partial, out)
         return out
+
+    @staticmethod
+    def _airport_fields(body: dict, partial: bool, out: dict) -> None:
+        """An Airport event's facts (#105): the tower's aircraft type, nature, minutes out, runway (16 / 34 / 11 / 29),
+        souls on board, Level 1-5 (from the souls unless said), fuel, dangerous goods. Any event may carry them
+        (the console shows them for type Airport); none given: left as they are (an edit) or empty (new)."""
+        for k, n in (("acft_type", 40), ("acft_nature", 120), ("acft_fuel", 40), ("acft_cargo", 120)):
+            if not partial or k in body:
+                out[k] = _text(body, k, n)
+        if not partial or "acft_runway" in body:
+            rw = _text(body, "acft_runway", 8).upper().removeprefix("RWY").strip()
+            if rw and rw not in airport.RUNWAYS:
+                raise CadError("acft_runway: 16, 34, 11 or 29")
+            out["acft_runway"] = rw
+        for k, hi in (("acft_eta", 600), ("acft_souls", 999), ("acft_level", 5)):
+            if not partial or k in body:
+                out[k] = _count(body, k, hi)
+        if out.get("acft_souls") is not None and ("acft_level" not in body or out.get("acft_level") is None):
+            out["acft_level"] = airport.level(out["acft_souls"])      # the Level follows the souls unless said
 
     def _auto_geo(self, f: dict) -> None:
         """Location typed but no suggestion picked: place it if the gazetteer is sure; else no pin."""
@@ -369,10 +401,12 @@ class Cad:
             f["lat"] = f["lon"] = None
             f["geo_label"] = ""
             self._auto_geo(f)
-        if f.get("type") == airport.TYPE and not f.get("address") and f.get("lat") is None:   # typed Airport, no location (#87)
-            old = self.store.incident(iid)
-            if ("address" in f or not old["address"]) and ("lat" in f or old["lat"] is None):
-                airport.default_location(f)
+        if not f.get("address") and f.get("lat") is None and ("type" in f or "address" in f or "lat" in f):
+            old = self.store.incident(iid)              # typed Airport, or an Airport event's location cleared: the terminal (#87)
+            if f.get("type", old["type"]) == airport.TYPE and ("address" in f or not old["address"]) and ("lat" in f or old["lat"] is None):
+                g = dict(f, type=airport.TYPE)
+                if airport.default_location(g):
+                    f.update(address=g["address"], lat=g["lat"], lon=g["lon"], geo_label=g["geo_label"])
         return self.store.update_incident(iid, f, _text(body, "operator", OPERATOR_MAX))
 
     def accept(self, iid: int, body: dict) -> dict:
@@ -1173,6 +1207,8 @@ class Cad:
         f = {"type": typ, "subtype": sub, "type_note": note,
              "address": (address or "")[:200], "cross_street": (inc.cross_street or "").title()[:200],
              "remarks": remarks, "lat": geo.get("lat"), "lon": geo.get("lon"), "geo_label": (geo.get("label") or "")[:200]}
+        if typ == airport.TYPE:                        # the tower's facts as the page says them (#105)
+            f.update(airport.fields(" ".join(inc.page_text)))
         old = self.store.by_source_ref(ref)
         if old is None:
             via = "60 CONTROL" if "60 CONTROL" in self.lists.received_codes else ""

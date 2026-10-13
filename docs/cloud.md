@@ -749,24 +749,75 @@ EOC (staging)** at 1 Airport Emergency Staging Way (the NYS address point: the s
 the ground); `@runway 16`, `@taxiway B`, `@gate C`, `@million air`, `@terminal`, `@airport entrance`. The
 ARFF station and Signature's office are not in the data: add them in Settings > Places when known.
 
-**The event.** Type **Airport** with subtypes *Alert 1* (in-flight difficulty, airport standby: PCFD not
-due), *Alert 2* (major difficulty, possible crash: PCFD responds), *Alert 3* (a crash on or near the
-airport), *Fuel spill*, *Aircraft fire (ground)*, *Other*: a proposal (`data/cad_lists.json`, marked "to
-confirm" in Settings like the other guesses) for the department to confirm, with the spoken phrases ("an
-Alert 2 at Westchester County Airport"). Run cards for **Alert 2** (the duty officer and the full
-department) and **Alert 3** (the same, with a mutual-aid note) are editable defaults marked not yet PCFD
-policy like the rest; each carries **remarks** (a new line on every card, shown with the recommendation
-and never spoken): "Staging: Airport Command Post / EOC, 1 Airport Emergency Staging Way". An Airport event
-created without a location is placed at the terminal, 240 Airport Rd (Rye Brook), so its map centres on
-the field.
+**The event.** Type **Airport** with the FAA's three alerts (AC 150/5200-31C, *Airport Emergency Plan*,
+para 7-1-4a) and the other calls PCFD has had at the field: *Alert 1 (local standby)* (an operational defect
+that should not normally cause serious difficulty: notification only, ARFF stands by; PCFD normally not due,
+to confirm; no run card), *Alert 2 (full emergency)* (a defect with danger of an accident: fire on board,
+unsafe gear, hydraulics, an engine out; all units to their positions, the airport closed after the landing),
+*Alert 3 (aircraft accident)* (an accident on or in the vicinity of the airport), *Aircraft accident off
+airport* (Rye Lake 2023; dispatched as an Alert 3 or as a normal call: to confirm), *Aircraft in the water /
+water rescue* (Rye Lake, Kensico, Blind Brook), *Fuel spill / hazmat* (the tanker rollover of December 2025),
+*Aircraft fire / ground emergency* (APU, brakes, a cabin fire at the gate), *Structural fire on the airport*
+(terminal, hangar, fuel farm), *Disabled aircraft / runway excursion* (2021), *Bomb threat / security*,
+*Hijack* (whether FD is dispatched: to confirm), *Other*. Each subtype carries its definition (`help` in
+`data/cad_lists.json`): on the subtype pick-list as a hover, behind "?" on the event and in Settings. The
+list and the wording are a proposal marked "to confirm" like the other guesses (#105); the spoken phrases are
+terse ("an Alert 2, full emergency, at Westchester County Airport", "an aircraft accident near the airport",
+"an aircraft in the water", "a fuel spill at the airport").
 
-**Pages and the talkgroup.** A 60 Control page for us (by tones, #84) or a Fire/EMS dispatch that names
-the airport ("Westchester County Airport", "the airport", "HPN") or an alert level ("Alert 2", "alert
-two") opens the queued event as Airport with the level set (`sizeup/cad/airport.py` `heard()`; a fuel spill
-or an aircraft fire at the airport by name takes that subtype). "240 Airport Road" alone is not the
-airport: a fire alarm at the terminal stays an alarm. While exactly one Airport event is open, every
-transmission on the **Airport Incident** talkgroup (333) is linked to it (reason "Airport TG"), whoever is
-talking; two open and it can't tell whose, so none; a link a person removes is not put back.
+**Alert vs Level.** The alert is the FAA's (1 / 2 / 3). Westchester responders overlay a **Level 1–5** on
+the souls on board (1–2 / 3–10 / 11–25 / 26–50 / 51+, reported by responders, unofficial), so "Alert 2 Level
+3" can be heard. The CAD keeps both and never derives one from the other: "Level N" alone is the souls
+Level, never the alert; the dispatcher picks the alert.
+
+**Run cards** (the department, 2026-10-13: "put Engine 64, 62 and Rescue 40 on the Alert Level 2, and FDR on
+the 3 and up"): **Alert 2** = Engine 64, Engine 62, Rescue 40, by name, in that order; **Alert 3** = the full
+department response. Both are the department's own (`confirmed` in the data file: seeded as not a default,
+shown with a *department* chip instead of *default* / *edited*, no "not PCFD policy" banner for them; Reset
+puts them back as given; a database seeded with #96's stand-ins gets them on the next open unless someone
+edited those). "And up": *Aircraft accident off airport* and *Aircraft in the water* take Alert 3's card
+(plus Marine 40 for the water) as a proposal, marked to confirm. Alert 1 has no card. Every card's remarks
+line carries "Staging: Airport Command Post / EOC, 1 Airport Emergency Staging Way" (the NYS address point,
+to be confirmed on the ground). The dispatch for an Alert 2 reads "Port Chester Fire, Engine 64, Engine 62,
+Rescue 40, respond to 240 Airport Road, for an Alert 2, full emergency, at Westchester County Airport. Time
+out 14:32."
+
+**What the tower passes.** An Airport event carries the ARFF notification (AC 150/5200-31C): **aircraft
+type**, **nature of the emergency**, **minutes out**, **runway** (16 / 34 / 11 / 29), **souls on board** with
+the **Level** it implies (set from the souls unless said), **fuel on board**, **dangerous goods**. The event
+view shows them in one compact row under the location ("Aircraft Boeing 737 · Nature unsafe gear · ETA 12 min
+· RWY 16 · 140 souls (Level 5) · 12,000 lb fuel · DG: none"), with the subtype's definition behind "?"; Edit
+(dispatchers and admins; the new-event form too) has a field for each, the Level following the souls as they
+are typed. The queue, the Overview's cards and the wall board show the same line ("Alert 2 · Boeing 737 ·
+unsafe gear · 12 min · RWY 16 · 140 souls (Level 5)"); `incidents.csv` has it as a last column, *Airport*.
+Stored on the event (`acft_*` columns, added to an older database on open; older events have none) and in
+`POST /api/cad/incident` as `acft_type`, `acft_nature`, `acft_eta`, `acft_runway`, `acft_souls`, `acft_level`,
+`acft_fuel`, `acft_cargo`.
+
+**Pages and the talkgroup.** A 60 Control page for us (by tones, #84) or a Fire/EMS dispatch that names the
+airport ("Westchester County Airport", "the airport", "HPN"), an alert ("Alert 2", "alert two", "Alert II",
+"alert level 2", "full emergency", "local standby") or an aircraft emergency ("inbound with an emergency",
+"declared an emergency", "emergency landing", "unsafe gear", "engine out", "smoke in the cockpit", "hydraulic
+failure", "bird strike") opens the queued event as Airport (`sizeup/cad/airport.py` `heard()`): the alert
+when one was said; an accident ("plane down", "aircraft accident", "crash") as an Alert 3 on or near the
+field, *off airport* when the page puts it off the field (Rye Lake, Kensico, "near the airport", a street),
+*in the water* when it does; a fuel spill, a hazmat condition, an aircraft fire on the ground, a hangar or
+terminal fire, an aircraft off the runway, a bomb threat, a suspicious package, a hijack: that subtype. An
+aircraft emergency with no alert said is left for the dispatcher with the nature as the note ("unsafe gear:
+alert level not stated"); "Level 3" alone adds "the souls-on-board level, not an alert". The page's facts fill
+the fields (`fields()`: "a Boeing 737", "12 minutes out", "runway 16", "140 souls on board" / "POB" /
+"persons on board" / "48 pax 4 crew", "12,000 pounds of fuel", "no dangerous goods"); a repeat of the page
+fills what was still empty. "240 Airport Road" alone is not the airport: a fire alarm at the terminal stays
+an alarm. While exactly one Airport event is open, every transmission on the **Airport Incident** talkgroup
+(333) is linked to it (reason "Airport TG"), whoever is talking; two open and it can't tell whose, so none; a
+link a person removes is not put back.
+
+**The airport's own units.** Airport 7, Airport 11, Airport 17 (ARFF, Airport Operations, county department
+259) and Car 2591 are on a folded *Westchester County Airport (ARFF)* board as mutual-aid units (never on a
+PCFD run card, never picked by kind), so a P25 talker alias "AP7" or "Airport 7" on the Airport Incident
+talkgroup resolves to the unit and the boards say "Airport 7" is talking. Their P25 radio IDs are not known:
+nothing is guessed; a radio heard with such an alias gets a "heard" row in the registry, mapped when a person
+confirms it.
 ## County GIS layers (Westchester County GIS)
 
 > "add Westchester County GIS open-data datasets as map layers ... there are a lot of data points,

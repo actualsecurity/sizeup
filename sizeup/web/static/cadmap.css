@@ -193,6 +193,7 @@
   .ov-el { color: var(--dim); }
   .ov-type { font-size: var(--fs-lg); line-height: var(--lh-lg); font-weight: 700; color: color-mix(in srgb, var(--c) 62%, #fff); overflow-wrap: anywhere; }
   .ov-addr { font-weight: 600; overflow-wrap: anywhere; }
+  .ov-airport { color: var(--info); font-size: var(--fs-sm); line-height: var(--lh-sm); overflow-wrap: anywhere; }   /* the tower's facts (#105) */
   .ov-units .chip.talking { outline: 2px solid var(--ok); outline-offset: 1px; }
   .ov-live { color: var(--ok); font-size: var(--fs-sm); line-height: var(--lh-sm); overflow-wrap: anywhere; }
   .ov-radio, .ov-note { display: block; font-size: var(--fs-sm); line-height: var(--lh-sm); overflow-wrap: anywhere; }

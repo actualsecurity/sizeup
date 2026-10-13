@@ -572,6 +572,8 @@ window.CadMap = (() => {
     const type = el("div", "ov-type", typeLabel(o.type, o.subtype) || "No type");
     const addr = el("div", "ov-addr" + (o.address ? "" : " dim"), o.address || "No location");
     li.replaceChildren(head, type, addr);
+    const ap = o.type === "AIRPORT" ? AirportLayer.summary(o, o.subtype ? nameOf("event_subtypes", o.subtype) : "") : "";
+    if (ap) li.append(el("div", "ov-airport", ap));       // "Alert 2 · B737 · unsafe gear · 12 min · RWY 16 · 140 souls (Level 5)" (#105)
     const chips = el("div", "chips ov-units");
     if (o.units.length) {
       for (const u of o.units) {

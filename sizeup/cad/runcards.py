@@ -27,6 +27,10 @@ Stored as kind "all" with the department in the unit column (no schema change).
 Remarks (#87): a card may carry a line for the dispatcher ("Staging: Airport Command Post / EOC, 1 Airport
 Emergency Staging Way"), shown with the recommendation and on the card; never spoken.
 
+Confirmed (#105): a data-file card marked "confirmed" is the department's own policy (the airport's Alert 2 and
+Alert 3, 2026-10-13), seeded as not a default (no "not PCFD policy" banner for it) and replacing an unedited
+default under its key; cards() says so ("confirmed") while the card still matches the file. Reset puts it back.
+
 Nearest first (user, 2026-10-07: "can we use the location information of where these apparatus are
 normally to recommend certain ones based on proximity to the next call?"): given where each rig is
 now (sizeup/cad/mapview.py locate(): its station, on its way home from a call it just cleared, or a
@@ -56,19 +60,28 @@ ALL = "all"          # the full-department slot's key, and its kind in run_card_
 def seed(store: Store, fill: bool = False) -> int:
     """The default cards, once (an empty table). Edited cards are never overwritten. fill: add
     the defaults whose key has no card yet (after a migration replaced the old defaults)."""
-    have = {r["type"] for r in store.q("SELECT type FROM run_cards")}
+    rows = {r["type"]: r for r in store.q("SELECT id, type, is_default FROM run_cards")}
+    have = set(rows)
     if have and not fill:
         return 0
     cards = [c for c in store.lists.run_cards if c["type"] not in have]
-    if not cards:
+    # A card the department confirmed since replaces the stand-in seeded under its key, if nobody edited it (#105).
+    by_key = {c["type"]: c for c in cards_db(store)}
+    renew = [c for c in store.lists.run_cards if c.get("confirmed") and c["type"] in have and rows[c["type"]]["is_default"]
+             and (by_key[c["type"]]["slots"] != [normal(s) for s in c["slots"]] or by_key[c["type"]]["remarks"] != c.get("remarks", ""))]
+    if not cards and not renew:
         return 0
     with store.tx() as db:
         base = db.execute("SELECT COALESCE(MAX(sort), -1) + 1 FROM run_cards").fetchone()[0]
         for k, c in enumerate(cards, base):
-            cid = db.execute("INSERT INTO run_cards (type, spoken, is_default, sort, remarks) VALUES (?, '', 1, ?, ?)",
-                             (c["type"], k, c.get("remarks", ""))).lastrowid
+            cid = db.execute("INSERT INTO run_cards (type, spoken, is_default, sort, remarks) VALUES (?, '', ?, ?, ?)",
+                             (c["type"], 0 if c.get("confirmed") else 1, k, c.get("remarks", ""))).lastrowid
             _write_slots(db, cid, c["slots"])
-    return len(cards)
+        for c in renew:
+            cid = rows[c["type"]]["id"]
+            db.execute("UPDATE run_cards SET spoken = '', is_default = 0, remarks = ? WHERE id = ?", (c.get("remarks", ""), cid))
+            _write_slots(db, cid, c["slots"])
+    return len(cards) + len(renew)
 
 
 def _write_slots(db, cid: int, slots: list[dict]) -> None:
@@ -87,16 +100,26 @@ def normal(s: dict) -> dict:
     return {"kind": s["kind"], "count": int(s.get("count", 1))}
 
 
-def cards(store: Store) -> list[dict]:
+def cards_db(store: Store) -> list[dict]:
+    """The cards as the database holds them: type, spoken, is_default, remarks, slots."""
     out = store.q("SELECT * FROM run_cards ORDER BY sort, id")
     slots = store.q("SELECT * FROM run_card_slots ORDER BY card_id, pos")
-    L = store.lists
     for c in out:
         c["is_default"] = bool(c["is_default"])
+        c["slots"] = [normal({ALL: s["unit"]} if s["kind"] == ALL else s) for s in slots if s["card_id"] == c["id"]]
+    return out
+
+
+def cards(store: Store) -> list[dict]:
+    out = cards_db(store)
+    L = store.lists
+    given = {c["type"]: c for c in L.run_cards if c.get("confirmed")}
+    for c in out:
         typ, _, sub = c["type"].partition("/")
         c["label"] = L.type_label(typ, sub)
         c["phrase"] = c["spoken"] or L.phrase(typ, sub)      # what the dispatch will say
-        c["slots"] = [normal({ALL: s["unit"]} if s["kind"] == ALL else s) for s in slots if s["card_id"] == c["id"]]
+        g = given.get(c["type"])                               # the department's own card, as long as it matches (#105)
+        c["confirmed"] = g["confirmed"] if g and not c["spoken"] and c["slots"] == [normal(s) for s in g["slots"]] else ""
     return out
 
 
@@ -197,13 +220,14 @@ def reset(store: Store, k: str) -> dict:
         raise CadError(f"no default run card for {k}: delete it instead")
     c = card(store, k)
     with store.tx() as db:
+        dflt = 0 if d.get("confirmed") else 1            # the department's own card is no stand-in (#105)
         if c is None:
             sort = db.execute("SELECT COALESCE(MAX(sort), -1) + 1 FROM run_cards").fetchone()[0]
-            cid = db.execute("INSERT INTO run_cards (type, spoken, is_default, sort, remarks) VALUES (?, '', 1, ?, ?)",
-                             (k, sort, d.get("remarks", ""))).lastrowid
+            cid = db.execute("INSERT INTO run_cards (type, spoken, is_default, sort, remarks) VALUES (?, '', ?, ?, ?)",
+                             (k, dflt, sort, d.get("remarks", ""))).lastrowid
         else:
             cid = c["id"]
-            db.execute("UPDATE run_cards SET spoken = '', is_default = 1, remarks = ? WHERE id = ?", (d.get("remarks", ""), cid))
+            db.execute("UPDATE run_cards SET spoken = '', is_default = ?, remarks = ? WHERE id = ?", (dflt, d.get("remarks", ""), cid))
         _write_slots(db, cid, d["slots"])
     return card(store, k)
 

@@ -16,11 +16,13 @@ import csv
 import io
 from datetime import datetime
 
+from sizeup.cad import airport
 from sizeup.cad.store import TZ, Store, event_number, local_year
 
+# The sheet's columns, then "Airport" (#105): an Airport event's facts in one line, "" on any other event.
 INCIDENT_COLUMNS = ["Incident #", "Unused", "Event Type", "Event Sub-Type", "Location", "Municipality", "Received",
                     "Status", "Assigned Units", "Dispatch", "First Enroute", "First On Scene", "Clear", "Duration",
-                    "Disposition", "Cross Streets", "Narrative Summary", "Closed?"]
+                    "Disposition", "Cross Streets", "Narrative Summary", "Closed?", "Airport"]
 CALL_COLUMNS = ["Incident #", "Event Type", "Event Sub-Type", "Location", "Received", "Clear", "Duration",
                 "Disposition", "Units"]
 UNIT_HISTORY_COLUMNS = ["Timestamp", "Unit", "Old Status", "New Status", "Incident #", "Operator", "Note"]
@@ -81,7 +83,8 @@ def incidents_csv(store: Store) -> bytes:
     rows = [[r["number"], "", r["type"], r["subtype"], r["address"], municipality(r["geo_label"]), ts(r["created_at"]),
              r["status"].upper(), ", ".join(r["units"]), ts(r["t_dispatch"]), ts(r["t_enroute"]), ts(r["t_onscene"]),
              ts(r["closed_at"]), r["duration"], r["disposition"], r["cross_street"], r["remarks"],
-             "TRUE" if r["status"] == "closed" else "FALSE"]
+             "TRUE" if r["status"] == "closed" else "FALSE",
+             airport.summary(r, store.lists.name("event_subtypes", r["subtype"]) if r["subtype"] else "") if r["type"] == airport.TYPE else ""]
             for r in _incidents(store, closed_only=False)]
     return _csv(INCIDENT_COLUMNS, rows)
 

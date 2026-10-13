@@ -93,6 +93,15 @@ CREATE TABLE incidents (
   phone TEXT NOT NULL DEFAULT '',
   remarks TEXT NOT NULL DEFAULT '',
   disposition TEXT NOT NULL DEFAULT '',
+  -- an Airport event (#105): what the tower passes (FAA AC 150/5200-31C); '' / NULL on any other event
+  acft_type TEXT NOT NULL DEFAULT '',   -- "Boeing 737"
+  acft_nature TEXT NOT NULL DEFAULT '', -- "unsafe gear"
+  acft_eta INTEGER,                     -- minutes out
+  acft_runway TEXT NOT NULL DEFAULT '', -- 16 | 34 | 11 | 29
+  acft_souls INTEGER,                   -- souls on board
+  acft_level INTEGER,                   -- the Westchester Level 1-5 (from the souls, or as said)
+  acft_fuel TEXT NOT NULL DEFAULT '',   -- "12,000 lb"
+  acft_cargo TEXT NOT NULL DEFAULT '',  -- dangerous goods: "none", "lithium batteries"
   source TEXT NOT NULL,                 -- manual | 60 Control page
   source_ref TEXT UNIQUE,               -- the monitor incident id (dedupe)
   status TEXT NOT NULL,                 -- queued | pending | active | closed | dismissed
@@ -204,6 +213,11 @@ RADIO_SCHEMA = SCHEMA[SCHEMA.index("CREATE TABLE IF NOT EXISTS meta"):]
 
 # v5: Settings. Every statement can run again (IF NOT EXISTS): the radio-ID work (v4) creates the
 # same settings_audit table, and either can come first.
+# An Airport event's facts (#105): added to an older database on open (old events keep none).
+AIRPORT_COLUMNS = (("acft_type", "TEXT NOT NULL DEFAULT ''"), ("acft_nature", "TEXT NOT NULL DEFAULT ''"), ("acft_eta", "INTEGER"),
+                   ("acft_runway", "TEXT NOT NULL DEFAULT ''"), ("acft_souls", "INTEGER"), ("acft_level", "INTEGER"),
+                   ("acft_fuel", "TEXT NOT NULL DEFAULT ''"), ("acft_cargo", "TEXT NOT NULL DEFAULT ''"))
+
 SETTINGS_SCHEMA = """
 CREATE TABLE IF NOT EXISTS settings_audit (id INTEGER PRIMARY KEY, at REAL NOT NULL, operator TEXT, section TEXT NOT NULL, key TEXT, old TEXT, new TEXT);
 CREATE INDEX IF NOT EXISTS settings_audit_section ON settings_audit(section, at);
@@ -404,6 +418,10 @@ class Store:
         rcols = {r["name"] for r in self.db.execute("PRAGMA table_info(run_cards)")}
         if rcols and "remarks" not in rcols:              # a run card's remarks (#87), 2026-10-13: old cards keep ''
             self.db.execute("ALTER TABLE run_cards ADD COLUMN remarks TEXT NOT NULL DEFAULT ''")
+        icols = {r["name"] for r in self.db.execute("PRAGMA table_info(incidents)")}
+        for col, decl in AIRPORT_COLUMNS:                 # an Airport event's facts (#105), 2026-10-13: old events have none
+            if icols and col not in icols:
+                self.db.execute(f"ALTER TABLE incidents ADD COLUMN {col} {decl}")
         tcols = {r["name"] for r in self.db.execute("PRAGMA table_info(radio_traffic)")}
         for col in ("alt_text", "alt_model"):            # the second transcript ("both": whisper next to AWS), 2026-10-08
             if tcols and col not in tcols:
@@ -843,7 +861,9 @@ class Store:
                         cross_street: str = "", caller_name: str = "", caller_address: str = "", phone: str = "",
                         remarks: str = "", lat: float | None = None, lon: float | None = None, geo_label: str = "",
                         priority: int | None = None, source: str = "manual", source_ref: str | None = None,
-                        status: str = "pending", operator: str = "") -> int:
+                        status: str = "pending", operator: str = "", acft_type: str = "", acft_nature: str = "",
+                        acft_eta: int | None = None, acft_runway: str = "", acft_souls: int | None = None,
+                        acft_level: int | None = None, acft_fuel: str = "", acft_cargo: str = "") -> int:
         """ACCEPT EVENT: entered by a person, numbered at once, PENDING until units go (or, a
         non-emergency one, listed under NON-EMERGENCY EVENTS until closed). One from a 60 Control
         page waits as queued, with no number, until someone accepts it. emergency None = from the
@@ -866,11 +886,13 @@ class Store:
             cur = db.execute(
                 "INSERT INTO incidents (number, type, subtype, type_note, emergency, received_via, until_at, priority, "
                 "address, cross_street, lat, lon, geo_label, caller_name, caller_address, phone, remarks, source, "
-                "source_ref, status, created_at, accepted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-                "?, ?, ?, ?, ?)",
+                "source_ref, status, created_at, accepted_at, acft_type, acft_nature, acft_eta, acft_runway, acft_souls, "
+                "acft_level, acft_fuel, acft_cargo) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+                "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (number, type, subtype, type_note, int(bool(emergency)), received_via, until_at, priority, address,
                  cross_street, lat, lon, geo_label, caller_name, caller_address, phone, remarks, source, source_ref,
-                 status, now, now if number else None))
+                 status, now, now if number else None, acft_type, acft_nature, acft_eta, acft_runway, acft_souls,
+                 acft_level, acft_fuel, acft_cargo))
             iid = cur.lastrowid
             L = self.lists
             what = (L.type_label(type, subtype) or "type not set") + (f" at {address}" if address else "")
@@ -896,7 +918,8 @@ class Store:
         return inc
 
     EDITABLE = ("type", "subtype", "type_note", "emergency", "received_via", "until_at", "priority", "address",
-                "cross_street", "lat", "lon", "geo_label", "caller_name", "caller_address", "phone", "remarks")
+                "cross_street", "lat", "lon", "geo_label", "caller_name", "caller_address", "phone", "remarks",
+                *(c for c, _ in AIRPORT_COLUMNS))
     QUIET = ("lat", "lon", "geo_label", "remarks", "type_note", "until_at")   # changed, not spelled out in the log
 
     def update_incident(self, iid: int, fields: dict, operator: str = "", log: bool = True) -> dict:
@@ -934,7 +957,9 @@ class Store:
             if "emergency" in changes:
                 parts.append("now " + ("an emergency" if changes["emergency"] else "a non-emergency") + " event")
             labels = {"address": "location", "caller_name": "caller", "caller_address": "caller address",
-                      "received_via": "received via"}
+                      "received_via": "received via", "acft_type": "aircraft", "acft_nature": "nature", "acft_eta": "minutes out",
+                      "acft_runway": "runway", "acft_souls": "souls on board", "acft_level": "level", "acft_fuel": "fuel",
+                      "acft_cargo": "dangerous goods"}
             if changes.get("received_via"):
                 changes_shown = dict(changes, received_via=self.lists.name("received_via", changes["received_via"]))
             else:

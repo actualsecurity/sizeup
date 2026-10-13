@@ -56,6 +56,7 @@ from pathlib import Path
 
 from sizeup.cad import eta
 from sizeup.cad.lists import ROOT
+from sizeup.cad import airport
 
 FIREHOUSES = ROOT / "data" / "firehouses.json"
 FIRE_KINDS = ("chief", "engine", "ladder", "tower", "rescue", "utility", "marine")
@@ -290,5 +291,6 @@ def overview(incidents: list[dict], tactical=("FG1",)) -> list[dict]:
             "note": {"at": note["at"], "kind": note["kind"], "text": _snippet(note["text"], 200), "operator": note.get("operator") or "",
                      "units": [x for x in (note.get("units") or "").split(",") if x]} if note else None,
             "channels": channels,
+            **({k: i.get(k) for k in airport.FIELDS} if i.get("type") == airport.TYPE else {}),   # the tower's facts (#105)
         })
     return out

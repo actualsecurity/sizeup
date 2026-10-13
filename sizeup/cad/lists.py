@@ -28,7 +28,8 @@ shows). A new export can replace the file without a code change:
                                      remarks, lead-in: "Port Chester and Rye Brook Fire" when theirs go)
     dispatch_tones                   joint town -> its alert tones (null: not known, PCFD's are played)
     run_cards                        the default cards seeded once into the database (remarks: a line for
-                                     the dispatcher, shown with the recommendation, #87). A slot is
+                                     the dispatcher, shown with the recommendation, #87; confirmed: the
+                                     department's own policy, not a stand-in, #105). A slot is
                                      {"kind": "engine", "count": 3} ("ladder|tower": either; "any": any
                                      apparatus, ANY_KIND), {"unit": "2398"} or {"all": "Port Chester FD"}
                                      (the full department: sizeup/cad/runcards.py)
@@ -472,8 +473,8 @@ def load(path: str | Path | None = None) -> Lists:
 
 def build(d: dict, where: str, path: str | Path = "") -> Lists:
     """The lists from the file's contents (or the defaults with the Settings edits laid over)."""
-    types = _items(d, "event_types", where, CODE, ("color",))
-    subtypes = _items(d, "event_subtypes", where, CODE)
+    types = _items(d, "event_types", where, CODE, ("color", "help"))
+    subtypes = _items(d, "event_subtypes", where, CODE, ("help",))
     dispositions = _items(d, "dispositions", where, LONG_CODE)
     received = _items(d, "received_via", where, LONG_CODE)
     statuses = _items(d, "unit_statuses", where, LONG_CODE, ("role", "bg", "fg"))
@@ -481,6 +482,8 @@ def build(d: dict, where: str, path: str | Path = "") -> Lists:
     for x in types + subtypes + dispositions + received + statuses:
         if "confirm" in x and not isinstance(x["confirm"], str):
             raise ListsError(f"{where}: {x['code']}.confirm: text (why it is to confirm)")
+        if "help" in x and not (isinstance(x["help"], str) and len(x["help"]) <= 600):   # the definition (#105)
+            raise ListsError(f"{where}: {x['code']}.help: text, up to 600 characters")
 
     ts = d.get("type_subtypes") or {}
     if not isinstance(ts, dict):
@@ -591,6 +594,8 @@ def build(d: dict, where: str, path: str | Path = "") -> Lists:
         check_key(str(c.get("type", "")), f"run_cards[{i}].type")
         if not isinstance(c.get("remarks", ""), str) or len(c.get("remarks", "")) > 300:
             raise ListsError(f"{where}: run_cards[{i}].remarks: text, up to 300 characters")
+        if not isinstance(c.get("confirmed", ""), str) or len(c.get("confirmed", "")) > 200:   # the department's own (#105)
+            raise ListsError(f"{where}: run_cards[{i}].confirmed: text (who confirmed it, when), up to 200 characters")
         if sum(1 for s in c["slots"] if isinstance(s, dict) and "all" in s) > 1:
             raise ListsError(f"{where}: run_cards[{i}]: one full department per card")
         for s in c["slots"]:
