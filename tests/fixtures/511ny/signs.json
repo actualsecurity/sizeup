@@ -1,0 +1,9 @@
+[
+ {"ID":"VMS-95-NB-21","Name":"I-95 NB before Exit 21","RoadwayName":"I-95","DirectionOfTravel":"Northbound",
+  "Messages":["CRASH AT EXIT 21<br/>RIGHT LANE BLOCKED","EXPECT DELAYS"],"Latitude":40.9962,"Longitude":-73.6801,
+  "LastUpdated":1791914650},
+ {"ID":"VMS-287-EB-9","Name":"I-287 EB at Exit 9","RoadwayName":"I-287","DirectionOfTravel":"Eastbound",
+  "Messages":["NO_MESSAGE"],"Latitude":41.0221,"Longitude":-73.7102,"LastUpdated":1791900000},
+ {"ID":"VMS-87-6","Name":"I-87 at Exit 6","RoadwayName":"I-87","DirectionOfTravel":"Northbound",
+  "Messages":["DRIVE SAFELY"],"Latitude":42.7452,"Longitude":-73.7731,"LastUpdated":1791900000}
+]

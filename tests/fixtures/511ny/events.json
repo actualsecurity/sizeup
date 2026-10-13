@@ -1,0 +1,21 @@
+[
+ {"ID":"NYSDOT-1001","Organization":"NYSDOT","RoadwayName":"I-95","DirectionOfTravel":"Northbound",
+  "Description":"Crash on I-95 northbound at Exit 21 (I-287/US 1), right lane blocked","Reported":1791914000,
+  "LastUpdated":1791914700,"StartDate":1791914000,"PlannedEndDate":null,"LanesAffected":"1 Right lane",
+  "LanesStatus":"blocked","Latitude":41.0005,"Longitude":-73.6741,"EventType":"accidentsAndIncidents",
+  "IsFullClosure":false,"EventSubType":"Crash","Severity":"Major","County":"Westchester"},
+ {"ID":"NYSDOT-1002","Organization":"NYSDOT","RoadwayName":"I-287","DirectionOfTravel":"Eastbound",
+  "Description":"Roadwork on I-287 eastbound between Exit 10 and Exit 11, 2 left lanes closed 9 PM to 5 AM",
+  "Reported":1791800000,"LastUpdated":1791900000,"StartDate":1791850000,"PlannedEndDate":1792000000,
+  "LanesAffected":"2 Left lanes","LanesStatus":"closed","Latitude":41.0162,"Longitude":-73.6905,
+  "EventType":"roadwork","IsFullClosure":false,"EventSubType":"Construction","Severity":"Minor"},
+ {"ID":"NYSDOT-1003","Organization":"NYSDOT","RoadwayName":"Hutchinson River Parkway","DirectionOfTravel":"Southbound",
+  "Description":"Hutchinson River Parkway southbound ramp to Exit 30 closed due to flooding","Reported":1791910000,
+  "LastUpdated":1791911000,"StartDate":1791910000,"PlannedEndDate":null,"LanesAffected":"Ramp",
+  "Latitude":41.0071,"Longitude":-73.7012,"EventType":"closures","IsFullClosure":true,"EventSubType":"Flooding",
+  "Severity":"Major"},
+ {"ID":"NYSDOT-9001","Organization":"NYSDOT","RoadwayName":"I-87","DirectionOfTravel":"Northbound",
+  "Description":"Crash on I-87 at Exit 6 (Albany)","Reported":1791914000,"LastUpdated":1791914100,
+  "StartDate":1791914000,"Latitude":42.7452,"Longitude":-73.7731,"EventType":"accidentsAndIncidents",
+  "EventSubType":"Crash","Severity":"Minor"}
+]

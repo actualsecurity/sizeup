@@ -1,0 +1,13 @@
+[
+ {"ID":"4616","Name":"I-95 at Exit 21 - Port Chester","DirectionOfTravel":"Northbound","RoadwayName":"I-95",
+  "Url":"https://511ny.org/map/Cctv/4616","VideoUrl":"https://s58.nysdot.skyvdn.com:443/rtplive/R11_008/playlist.m3u8",
+  "Disabled":false,"Blocked":false,"Latitude":41.0012,"Longitude":-73.6748},
+ {"ID":"4620","Name":"I-287 at Exit 11 (US 1) - Rye Brook","DirectionOfTravel":"Eastbound","RoadwayName":"I-287",
+  "Url":"https://511ny.org/map/Cctv/4620","VideoUrl":"","Disabled":false,"Blocked":false,
+  "Latitude":41.0168,"Longitude":-73.6822},
+ {"ID":"4631","Name":"Hutchinson River Pkwy at Exit 30 - Rye Brook","DirectionOfTravel":"Unknown",
+  "RoadwayName":"Hutchinson River Parkway","Url":"https://511ny.org/map/Cctv/4631","Disabled":true,"Blocked":false,
+  "Latitude":41.0083,"Longitude":-73.7001},
+ {"ID":"5001","Name":"I-87 at Exit 6 - Albany","DirectionOfTravel":"Northbound","RoadwayName":"I-87",
+  "Url":"https://511ny.org/map/Cctv/5001","Disabled":false,"Blocked":false,"Latitude":42.7452,"Longitude":-73.7731}
+]

@@ -154,6 +154,18 @@ class Config:
     # [station] auto_update: a Linux station installed by deploy/station/install-linux.sh follows the
     # hub's build (sizeup/cloud/autoupdate.py); false keeps it where it is (also: sizeup-station autoupdate off)
     station_auto_update: bool = True
+    # [roads] (sizeup/roads.py, #73): the highway layers on the CAD maps from the 511NY data feeds.
+    # The key: env SIZEUP_511NY_KEY (the hub: SSM /sizeup-hub/511ny-key), else [roads] key. None: off.
+    roads_enabled: bool = True
+    roads_key: str = ""
+    roads_bbox: tuple[float, float, float, float] = (-73.80, 40.92, -73.56, 41.10)   # west, south, east, north
+    roads_cameras_s: float = 3600.0
+    roads_events_s: float = 90.0
+    roads_signs_s: float = 300.0
+    # Each feed's address from 511NY's access approval, "{key}" where the key goes ("" = that feed off).
+    roads_events_url: str = ""
+    roads_cameras_url: str = ""
+    roads_signs_url: str = ""
 
 
 def _take(d: dict, path: str, allowed: set[str]) -> dict:
@@ -203,6 +215,7 @@ def hub_url_problem(url: str) -> str:
 #   SIZEUP_PUBLIC_URL, SIZEUP_HUB_URL [cloud] public_url / hub_url
 #   SIZEUP_ACCESS_TEAM / _AUD         [cloud] access_team / access_aud (hub: Cloudflare Access identity)
 #   SIZEUP_PREALERT_SERVER            [prealert] server (a local test server instead of ntfy.sh)
+#   SIZEUP_511NY_KEY                  [roads] key: the 511NY developer key (never in a file on the hub)
 def _env(name: str, default):
     v = os.environ.get(name, "").strip()
     return v if v else default
@@ -328,6 +341,47 @@ def _auto_assign(radio: dict, channels: list) -> dict:
     return dict(sdr_auto_assign=on, sdr_auto_order=tuple(order))
 
 
+def _roads(data: dict) -> dict:
+    """[roads] -> Config fields. No section: off (no feed addresses), our area, the default schedule.
+    The key never needs to be in a file (the environment wins); the addresses hold "{key}" instead."""
+    rd = _take(data.get("roads", {}), "roads", {"enabled", "key", "bbox", "cameras_every_min", "events_every_s",
+                                                "signs_every_min", "events_url", "cameras_url", "signs_url"})
+    enabled = rd.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise ConfigError("roads.enabled: true or false")
+    key = _env("SIZEUP_511NY_KEY", str(rd.get("key", ""))).strip()
+    if key and not re.fullmatch(r"[!-~]{8,256}", key):
+        raise ConfigError("roads.key / SIZEUP_511NY_KEY: the key from 511NY's access approval (8 or more characters, no spaces)")
+    bbox = rd.get("bbox", [-73.80, 40.92, -73.56, 41.10])
+    try:
+        w, s, e, n = (float(x) for x in bbox)
+    except (TypeError, ValueError):
+        raise ConfigError("roads.bbox: [west, south, east, north] in degrees") from None
+    if not (-180 <= w < e <= 180 and -90 <= s < n <= 90) or e - w > 3 or n - s > 3:
+        raise ConfigError("roads.bbox: [west, south, east, north], west < east and south < north, at most 3 degrees a side")
+    try:
+        cams, events, signs = (float(rd.get("cameras_every_min", 60)) * 60, float(rd.get("events_every_s", 90)),
+                               float(rd.get("signs_every_min", 5)) * 60)
+    except (TypeError, ValueError):
+        raise ConfigError("roads.cameras_every_min / events_every_s / signs_every_min: numbers") from None
+    # 511NY allows 10 calls a minute per key: these floors keep the three feeds at 5 at most.
+    if not (cams >= 600 and events >= 60 and signs >= 60):
+        raise ConfigError("roads: cameras_every_min at least 10, events_every_s at least 60, signs_every_min at least 1 "
+                          "(511NY allows 10 calls a minute)")
+    urls = {}
+    for k in ("events_url", "cameras_url", "signs_url"):
+        u = str(rd.get(k, "")).strip()
+        m = re.fullmatch(r"(https?)://([^/:?#\s]+)(:\d+)?([^\s]*)", u) if u else None
+        if u and (not m or (m.group(1) == "http" and m.group(2) not in ("127.0.0.1", "localhost", "::1"))):
+            raise ConfigError(f"roads.{k}: the feed's https:// address from 511NY, with {{key}} where the key goes "
+                              "(plain http only to this machine)")
+        if u and "key=" in u.lower() and "{key}" not in u:
+            raise ConfigError(f"roads.{k}: put {{key}} where the key goes, never the key itself (SIZEUP_511NY_KEY)")
+        urls[f"roads_{k}"] = u
+    return dict(roads_enabled=enabled, roads_key=key, roads_bbox=(w, s, e, n), roads_cameras_s=cams,
+                roads_events_s=events, roads_signs_s=signs, **urls)
+
+
 def _stt_aws(stt: dict) -> dict:
     """[stt] aws*: Amazon Transcribe (sizeup/transcribe.py). aws_channels: labels or talkgroup numbers."""
     try:
@@ -359,7 +413,7 @@ def load(path: str | Path) -> Config:
     except tomllib.TOMLDecodeError as e:
         raise ConfigError(f"{path}: {e}") from e
     _take(data, "config", {"station", "web", "radio", "tones", "stt", "p25", "mdc", "units", "storage", "map",
-                           "cad", "dispatch", "cloud", "prealert"})
+                           "cad", "dispatch", "cloud", "prealert", "roads"})
     st = _take(data.get("station", {}), "station", {"id", "name", "auto_update"})
     if not isinstance(st.get("auto_update", True), bool):
         raise ConfigError("station.auto_update: true or false")
@@ -550,5 +604,5 @@ def load(path: str | Path) -> Config:
         dispatch_repeat=d_repeat, dispatch_transmit=False, dispatch_channels=d_channels, dispatch_polly_region=d_region,
         **(dict(cloud, cloud_outbox=rel_state(cloud["cloud_outbox"])) if cloud else {}),
         cloud_state="" if cloud.get("cloud_role") == "hub" else rel_state("state/cloud.json"),
-        **_prealert(data),
+        **_prealert(data), **_roads(data),
     )

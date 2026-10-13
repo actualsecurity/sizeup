@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Cameras>
+  <Camera>
+    <Id>NYSDOT-R11-008</Id>
+    <Location>I-95 at Exit 21 - Port Chester</Location>
+    <Roadway>I-95</Roadway>
+    <Direction>Southbound</Direction>
+    <Latitude>41.0009</Latitude>
+    <Longitude>-73.6745</Longitude>
+    <Views>
+      <View><Id>9001</Id><Url>https://511ny.org/map/Cctv/9001</Url><VideoUrl>https://s58.nysdot.skyvdn.com:443/rtplive/R11_009/playlist.m3u8</VideoUrl><Status>Enabled</Status><Description>Southbound</Description></View>
+    </Views>
+  </Camera>
+  <Camera>
+    <Id>CTDOT-I95-GREENWICH-2</Id>
+    <Location>I-95 at Exit 2 - Greenwich</Location>
+    <Roadway>I-95</Roadway>
+    <Direction>Northbound</Direction>
+    <Latitude>41.0098</Latitude>
+    <Longitude>-73.6574</Longitude>
+    <Views>
+      <View><Id>9002</Id><Url>https://511ny.org/map/Cctv/9002</Url><Status>Disabled</Status></View>
+    </Views>
+  </Camera>
+  <Camera>
+    <Id>NYSDOT-R08-100</Id>
+    <Location>I-87 at Exit 1</Location>
+    <Roadway>I-87</Roadway>
+    <Latitude>40.8790</Latitude>
+    <Longitude>-73.8985</Longitude>
+    <Views><View><Url>https://511ny.org/map/Cctv/9003</Url><Status>Enabled</Status></View></Views>
+  </Camera>
+</Cameras>

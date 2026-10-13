@@ -23,6 +23,8 @@
         radios at all, the same state fed by the station (sizeup/cloud/hub.py). docs/cloud.md
         Forwarding is switched on and off while running in Settings > System > Station
         (sizeup/cloud/stationmode.py; state/cloud.json then wins over the role here).
+    [roads]: 511NY's cameras, incidents, roadwork and message signs for the maps' Layers, camera
+        snapshots proxied by this process (sizeup/roads.py)
     [prealert]: Tapout's ntfy feed (the HQ phone ringing), read only, on the CAD of record (all-in-one
         or the hub) -> a pre-alert at the top of the CAD's 60 Control column (sizeup/prealert.py)
     per channel (Settings > Radios, sizeup/channels.py): record / transcribe / engine (local whisper,
@@ -331,6 +333,12 @@ class App:
         # subscribes: one alert): prealert_sync() follows Settings > System > Station.
         self.prealert = None
         self._started = False
+        # The map's highway layers (sizeup/roads.py, #73): 511NY's cameras, incidents and signs where
+        # it is configured, the gazetteer's mile markers and exits everywhere. Its place search is a
+        # provider for the "@" place search (#67's Cad.search_places asks cad.place_providers).
+        from sizeup.roads import Roads
+        self.roads = Roads.from_config(cfg, log=log)
+        self.cad.place_providers = [self.roads.search_places]
         if cfg.prealert_enabled:
             from sizeup.prealert import PreAlerts
             self.prealert = PreAlerts(self.cad, cfg.prealert_server, cfg.prealert_ring_topic, cfg.prealert_status_topic,
@@ -1810,6 +1818,8 @@ class App:
             self.link.start()
         self._started = True
         self.prealert_sync()
+        if self.cfg.cloud_role != "station":   # the station page has no maps: don't spend 511NY calls there
+            self.roads.start()
         return self
 
     def forwarding(self) -> bool:
@@ -1860,6 +1870,7 @@ class App:
             self.link.stop()
         if self.prealert is not None:
             self.prealert.stop()
+        self.roads.stop()
 
 
 def channels_model() -> str:
@@ -1887,7 +1898,7 @@ def make_server(app: App) -> WebServer:
                        app.set_talkgroup, app.set_talkgroup_group, app.retranscribe, cad=CadApi(app.cad),
                        station=getattr(app, "hub", None), health=health_info(cfg), access=access_verifier(cfg),
                        access_log=log if cfg.cloud_role == "hub" else None, station_mode=app.station,
-                       role=cfg.cloud_role)
+                       role=cfg.cloud_role, roads=app.roads)
 
     def changed() -> None:             # a new talker is pushed at once, not on the next second
         server.poke()

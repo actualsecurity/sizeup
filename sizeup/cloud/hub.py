@@ -803,6 +803,7 @@ class HubApp(App):
         threading.Thread(target=self._hub_janitor, name="hub-janitor", daemon=True).start()
         self._started = True                      # the phone pre-alert: the hub's own subscription
         self.prealert_sync()
+        self.roads.start()                        # 511NY's layers for the maps (sizeup/roads.py)
         if self.vocab is not None and self.vocab.state()["state"] == "PENDING":
             self.vocab.poll()
         try:
@@ -815,6 +816,7 @@ class HubApp(App):
         self._stopping.set()
         if self.prealert is not None:
             self.prealert.stop()
+        self.roads.stop()
         if self.aws is not None:
             self.aws.stop()
         try:
