@@ -5,7 +5,7 @@
 //   Layers        Cameras, Incidents & closures, Roadwork, Message signs (511NY, through the hub:
 //                 GET /api/cad/roads, sizeup/roads.py), Mileposts, Exits (the gazetteer's, #67). Each one
 //                 on / off per viewer (localStorage "sizeup.mapLayers"); cameras and incidents on at first.
-//                 Signs from zoom 11, exits from 12, mileposts from 14. 511NY not set up on the hub: its four
+//                 Signs from zoom 11, exits and mileposts from 12 (the tenths of a mile from 14). 511NY not set up on the hub: its four
 //                 are greyed with the reason; the rest still work.
 //   A camera      opens the viewer (a dialog: fits a 390 px phone): the snapshot through the hub
 //                 (/api/cad/cameras/<id>/image: the browser never talks to 511NY or the camera), its name,
@@ -29,7 +29,7 @@ window.MapLayers = (() => {
     { key: "incidents", label: "Incidents & closures", feed: true, minzoom: 0, on: true },
     { key: "roadwork", label: "Roadwork", feed: true, minzoom: 0, on: false },
     { key: "signs", label: "Message signs", feed: true, minzoom: 11, on: false },
-    { key: "mileposts", label: "Mileposts", feed: false, minzoom: 14, on: false },
+    { key: "mileposts", label: "Mileposts", feed: false, minzoom: 12, on: false },
     { key: "exits", label: "Exits", feed: false, minzoom: 12, on: false },
   ];
   const ATTR = '<a href="https://511ny.org/" target="_blank" rel="noopener">511NY</a>';   // short: the map's corner is small
@@ -157,7 +157,7 @@ window.MapLayers = (() => {
         id: e.id, icon: key === "roadwork" ? "ml-work" : e.closed ? "ml-closed" : "ml-inc" })));
     }
     if (key === "signs") return fc((d.signs || []).map((s) => pt(s, { id: s.id, icon: (s.lines || []).length ? "ml-sign" : "ml-sign-blank" })));
-    if (key === "mileposts") {                // whole miles from zoom 14, the tenths from 15.5
+    if (key === "mileposts") {                // whole miles from zoom 12 (with the exits), the tenths from 14
       return fc((d.mileposts || []).map((m) => pt(m, { label: m.value ? `${m.value}` : m.label,
                                                        whole: !m.value || Math.abs(Number(m.value) % 1) < 1e-6 })));
     }
@@ -219,7 +219,7 @@ window.MapLayers = (() => {
         const vis = prefs[l.key] ? "visible" : "none";
         if (l.key === "mileposts" || l.key === "exits") {
           if (l.key === "mileposts") {
-            map.addLayer({ id: `${src}-tenths`, type: "symbol", source: src, minzoom: 15.5, filter: ["!", ["get", "whole"]],
+            map.addLayer({ id: `${src}-tenths`, type: "symbol", source: src, minzoom: 14, filter: ["!", ["get", "whole"]],
               layout: { visibility: vis, "icon-image": "ml-mp", "icon-allow-overlap": true, "icon-size": 0.45,
                         ...(glyphs ? { "text-field": ["get", "label"], "text-font": ["Noto Sans Regular"], "text-size": 10,
                                        "text-anchor": "left", "text-offset": [0.7, 0], "text-optional": true } : {}) },
