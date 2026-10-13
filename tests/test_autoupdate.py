@@ -629,13 +629,14 @@ def test_want_file_never_follows_a_link_waits_on_a_fifo_or_reads_much(station):
 
 def test_the_installer_runs_under_the_updaters_lock(tmp_path):
     script = tmp_path / "fake.sh"
-    script.write_text('echo "locked=$SIZEUP_UPDATE_LOCKED"\nexit 3\n')
+    script.write_text('echo "locked=$SIZEUP_UPDATE_LOCKED"\nexit 87\n')
     lines = []
     u = Updater(Paths(opt=tmp_path), out=lines.append)
     with pytest.raises(StepError) as e:
         u.installer(["--stage", A], script)
     assert lines == ["locked=1"] and e.value.code == au.PREFLIGHT_EXIT
     sh = (ROOT / "deploy" / "station" / "install-linux.sh").read_text()
+    assert "exit 87" in sh and "exit 3" not in sh and au.PREFLIGHT_EXIT == 87
     assert 'flock -n 9' in sh and '"${SIZEUP_UPDATE_LOCKED:-}"' in sh and "/run/sizeup-update/lock" in sh
     assert "systemctl stop sizeup-update.path sizeup-update.timer" in sh
 
@@ -677,3 +678,25 @@ def test_status_and_doctor_after_a_rollback_and_with_any_old_state(station, monk
         for cmd in ("status", "doctor"):
             assert au.main([cmd]) == 0                              # never a traceback on a station
     assert "Traceback" not in capsys.readouterr().out
+
+
+def test_a_rollback_holds_while_the_hub_sits_on_a_docs_only_descendant(station):
+    repo, u = station
+    p = repo.shas[0]
+    a = repo.commit("A: code", path="sizeup/a.py")
+    u.want(a)
+    u.run()
+    c = repo.commit("C: words", path="docs/c.md")                    # the hub moves on, docs only
+    u.want(c)
+    u.run()
+    assert u.current()[1] == a and u.load()["equivalent"][c] == a
+    assert u.rollback() == 0 and u.current()[1] == p                 # A misbehaves: back to P
+    u.calls.clear()
+    for _ in range(3):
+        u.t[0] += 900
+        assert u.run() == 0
+    assert u.calls == [] and u.current()[1] == p                     # C is A's code: not taken again
+    assert describe(p, c, Watch(own="", run_dir="", state_path=str(u.p.state)).state())["state"] == "failed"
+    d = repo.commit("D: a fix", path="sizeup/a.py")                  # the hub moves to real new code
+    u.want(d)
+    assert u.run() == 0 and u.current()[1] == d

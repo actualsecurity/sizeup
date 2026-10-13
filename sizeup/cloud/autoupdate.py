@@ -77,7 +77,7 @@ MAIN = "main"
 SHA = re.compile(r"[0-9a-f]{7,40}")
 FULL_SHA = re.compile(r"[0-9a-f]{40}")
 PORT = 8090                # [web] port when the config has none (sizeup/config.py's default)
-PREFLIGHT_EXIT = 3         # install-linux.sh --stage: the release was built but its preflight failed
+PREFLIGHT_EXIT = 87        # install-linux.sh --stage: the release was built but its preflight failed (set only there)
 RETRY_S = (300.0, 900.0, 3600.0, 3600.0)   # a stage that broke for another reason (apt lock, network, disk)
 MAX_STAGES = 5             # ... is tried this often per sha, then recorded as failed
 KEEP_EQUIVALENT = 10
@@ -126,6 +126,19 @@ def equivalent_to(upd: dict | None, want: str, current: str) -> bool:
     return any(same_build(k, want) and same_build(v, current) for k, v in eq.items())
 
 
+def failed_for(failed: dict | None, upd: dict | None, want: str) -> dict | None:
+    """want failed before, or runs the same code as a build that did (equivalent: only docs etc.
+    differ): a manual rollback from A holds while the hub sits on a docs-only descendant of A."""
+    f = failed_entry(failed, want)
+    if f is not None:
+        return f
+    eq = (upd or {}).get("equivalent") if isinstance((upd or {}).get("equivalent"), dict) else {}
+    for k, v in eq.items():
+        if same_build(k, want) and (f := failed_entry(failed, v)) is not None:
+            return dict(f, why=f"the same code as {short(v)}, which failed: {f.get('why') or '?'}")
+    return None
+
+
 def plan(want: str, current: str, paused: str, failed: dict | None, upd: dict | None = None) -> tuple[str, str]:
     """What to do about the hub's build: (action, why). Actions: "none" (the hub's build isn't
     known), "current", "paused", "failed-before", "update"."""
@@ -137,7 +150,7 @@ def plan(want: str, current: str, paused: str, failed: dict | None, upd: dict | 
         return "current", f"on {short(current)}: the hub's {short(want)} changes nothing it runs"
     if paused:
         return "paused", paused
-    f = failed_entry(failed, want)
+    f = failed_for(failed, upd, want)
     if f is not None:
         return "failed-before", f"{short(want)} failed before ({f.get('why') or '?'}): waiting for the hub to move on"
     return "update", f"{short(current)} -> {short(want)}"
@@ -184,7 +197,7 @@ def describe(build: str, hub: str, upd: dict | None, now: float | None = None) -
             and now - float(upd.get("since") or 0) < STALE_ATTEMPT_S):
         wait = " (waiting for a quiet moment)" if upd.get("state") == "waiting" else ""
         return {"state": "updating", "text": f"updating {short(build)} -> {short(hub)}{wait}{win}"}
-    f = failed_entry(upd.get("failed"), hub)
+    f = failed_for(upd.get("failed"), upd, hub)
     if f is not None:
         return {"state": "failed", "text": f"update to {short(hub)} failed ({f.get('why') or '?'}): "
                                            f"staying on {short(build)} until the hub moves on{win}"}

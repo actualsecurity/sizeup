@@ -668,6 +668,11 @@ legacy_release() {
   local sha=$1 name
   if [ -z "$sha" ] || [ ! -x "$LEGACY_VENV/bin/python" ]; then return 0; fi
   name=$(repo_git rev-parse -q --verify "$sha^{commit}" 2>/dev/null) || return 0
+  # only a commit the configured ref really has (as fetched from GitHub, not as the old checkout says)
+  if ! repo_git merge-base --is-ancestor "$name" "refs/remotes/origin/$SIZEUP_REF" 2>/dev/null; then
+    warn "no release of the old commit $(short "$name") to go back to: it isn't on origin/$SIZEUP_REF (or that couldn't be fetched)"
+    return 0
+  fi
   if [ ! -f "$RELEASES/$name/.complete" ]; then
     make_release "$name" "$name" "$LEGACY_VENV"
     {
@@ -734,7 +739,7 @@ preflight() {
   fi
   if [ "$bad" -ne 0 ]; then
     say "FAILED: preflight failed for $(basename "$rel"): not switching to it" >&2
-    exit 3                                     # (the updater: a build that doesn't work, not one to retry)
+    exit 87                                    # (only here: the updater won't retry a build that doesn't work)
   fi
   say "preflight: ok"
 }
@@ -915,6 +920,8 @@ else
     repo_git fetch -q "$LEGACY_BUNDLE" "+HEAD:refs/sizeup/checkout-head"
     SHA=$(repo_git rev-parse refs/sizeup/checkout-head)
     install_key
+    repo_git fetch -q --force origin "+refs/heads/$SIZEUP_REF:refs/remotes/origin/$SIZEUP_REF" 2>/dev/null \
+      || warn "couldn't fetch $SIZEUP_REF from $SIZEUP_REPO now (the updater fetches it later)"
   elif [ "$UPDATE" -eq 1 ] || [ -n "$OPT_REF$OPT_REPO" ] || [ -z "$BACK" ]; then
     step "fetch $SIZEUP_REF"
     fetch_repo
