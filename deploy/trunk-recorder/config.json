@@ -26,6 +26,8 @@
       "recordUnknown": true,
       "hideUnknownTalkgroups": true,
       "compressWav": false,
+      "minTransmissionDuration": 0,
+      "transmissionArchive": false,
       "unitScript": "./unit-event.sh"
     }
   ],

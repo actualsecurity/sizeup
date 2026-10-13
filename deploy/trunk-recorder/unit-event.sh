@@ -6,6 +6,8 @@
 # "call" = a voice grant, or a grant whose source differs from the call's current talker; on every
 # talkgroup of the system, recorded or not. Its stdout is trunk-recorder's, which sizeup reads line by
 # line (sizeup/radio/live.py): one short echo is one atomic write to that pipe, nothing is buffered.
+# sizeup also keeps each grant for half an hour to name and cut the key-ups of the finished call
+# (a transmission with no radio ID, or one that ran into the next talker's: sizeup/radio/p25.py).
 # sizeup sets "unitScript" (absolute path) on each system in the config.runtime.json it generates;
 # running trunk-recorder by hand, config.json's "./unit-event.sh" does the same. Only grants print.
 [ "$3" = "call" ] && [ -n "$4" ] && echo "SIZEUP-UNIT $1 $2 call $4"

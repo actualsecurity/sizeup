@@ -19,6 +19,30 @@ Run from this directory (paths are relative to it):
 
 On a one-dongle bench, stop sizeup's paging/fireground receivers first (they use the same dongle).
 
+## One row per key-up (issue #62)
+
+trunk-recorder keeps a talkgroup's back-to-back transmissions in one call WAV until `callTimeout`
+(3 s) of quiet, but it ends a *transmission* on every P25 terminator (the TDU at PTT release), and
+5.2.0's call JSON lists every transmission in order: one `srcList` entry (`src`, `time`, `pos`, `tag`,
+...) and one `freqList` entry (`pos`, `len`, `error_count`, ...) each, at the same `pos` in the WAV.
+`src` is `-1` when no radio ID was decoded for that transmission. sizeup (`sizeup/radio/p25.py`)
+cuts the call at every entry: the same radio keying twice is two rows, a `-1` is its own row with
+the talker unknown (named by the live grant that opened it, if there was one), and a transmission
+that ran into the next talker's (no terminator decoded: trunk-recorder credits it all to the later
+radio) is cut where the live grants say the next radio keyed. Each piece is its own clip
+(`<call>-t0`, `-t1`, ...), transcript and comms row.
+
+Settings, kept as they are on purpose:
+
+- `minTransmissionDuration: 0` (the default, written out): no key-up is dropped for being short.
+  sizeup decides (a piece under 0.3 s with no ID and no sound is merged into the one before it; one
+  under 0.3 s with no voice is kept, not transcribed).
+- `transmissionArchive: false` (the default): each transmission's own WAV is not kept. The call
+  JSON already places every transmission in the call WAV to 10 ms, so the extra files (with no
+  sidecar of their own, and timestamps only in their names) add nothing.
+- `callTimeout` stays 3 s: a shorter one splits a conversation into more calls but still puts a
+  quick reply in the same call, and it ends calls on control-channel gaps.
+
 ## Who is talking, live (sizeup's "talking" highlight)
 
 The talker is named at the keypress: trunk-recorder's unit_script plugin runs `unit-event.sh` for
@@ -44,5 +68,5 @@ Without it, the talker comes from trunk-recorder's log only: the alias line 3-4 
 the "Transmission src" lines when the call ends (station log, 2026-10-08: median 3.9 s on Fire/EMS 15,
 a third of the calls named only at the end). Those lines are still read (they fill in aliases, and
 a talker never shown live is flashed as "just transmitted"); the finished call's JSON stays the
-record of who said what. The plugin forks a tiny shell per unit event on the system (registrations
-and affiliations too); only grants print.
+record of who said what, checked against the grants seen live (above). The plugin forks a tiny
+shell per unit event on the system (registrations and affiliations too); only grants print.
