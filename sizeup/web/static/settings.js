@@ -23,7 +23,7 @@ const S_SECTIONS = [["lists", "Lists"], ["runcards", "Run cards"], ["units", "Un
 const S_LISTS = [["event_types", "Event types"], ["event_subtypes", "Event subtypes"], ["type_subtypes", "Subtypes per type"],
   ["dispositions", "Dispositions"],
   ["received_via", "Received via"], ["unit_statuses", "Unit statuses"], ["event_class", "Emergency rules"],
-  ["geo_town_order", "Town order"]];
+  ["geo_town_order", "Town order"], ["place_names", "Place names"]];
 const S_ROLES = [["", "Committed (on a call)"], ["free", "Available (in service)"], ["dispatched", "Dispatched (set on dispatch)"],
   ["enroute", "Responding (first en route)"], ["onscene", "On location (first on scene)"], ["oos", "Unavailable (out of service)"]];
 const S_RESPONSES = [["fire", "Fire"], ["mutual_aid", "Mutual aid"], ["agency", "Other agency"]];
@@ -219,6 +219,7 @@ function sLists(panel) {
   let body;
   if (S.list === "event_class") body = sClassRules();
   else if (S.list === "geo_town_order") body = sTowns();
+  else if (S.list === "place_names") body = sPlaceNames();
   else if (S.list === "type_subtypes") body = sTypeMap();
   else body = sListTable(S.list);
   const flow = S.list === "unit_statuses" && S.data.status_flow ? sFlow() : null;
@@ -536,6 +537,73 @@ function sTowns() {
   const reset = d.edited ? sBtn("Reset to default", "", () => sPost("geo_town_order", { action: "reset_section" }, "Town order reset"), "danger-quiet") : null;
   return sCard(sCardHead("Town order", "", sHelp("Location suggestions list these towns first, in this order. A town typed in the box wins."), reset),
     ol, f);
+}
+
+// The department's own names for places (#67): "the Waterfront", "Kohl's plaza". Each points at a place
+// picked from the place search; a note's "@" and the location box offer them first.
+function sPlaceNames() {
+  const d = S.data.place_names || { items: [] };
+  const ol = el("ol", "s-rows");
+  for (const x of d.items) {
+    const li = el("li", "s-row");
+    const where = [x.label, x.muni && !x.label.includes(x.muni) ? x.muni : ""].filter(Boolean).join(", ");
+    li.append(el("b", "s-name", x.name), el("span", "dim small", where + (x.aliases.length ? ` · also ${x.aliases.join(", ")}` : "")),
+      el("span", "spacer"), sBtn("Remove", "", () => sAsk(`Remove the name "${x.name}"?`,
+        () => sPost("places", { action: "delete", key: x.key }, `${x.name} removed`), "Remove"), "danger-quiet"));
+    ol.append(li);
+  }
+  if (!d.items.length) ol.append(el("li", "s-row dim", "None yet"));
+  const f = el("form", "row s-add");
+  const name = sInput("", 60, "Name (the Waterfront)", null, "s-name");
+  const aka = sInput("", 200, "Also called (commas)", null, "s-name");
+  const box = el("div", "note-box");
+  const where = sInput("", 120, "Where: a place or an address");
+  where.setAttribute("role", "combobox");
+  where.setAttribute("aria-autocomplete", "list");
+  const list = el("ol", "sugg note-sugg");
+  list.setAttribute("role", "listbox");
+  list.hidden = true;
+  box.append(where, list);
+  let picked = null, timer = null, seq = 0;
+  where.addEventListener("input", () => {
+    picked = null;
+    clearTimeout(timer);
+    const q = where.value.trim(), my = ++seq;
+    if (q.length < 2) return show(list, false);
+    timer = setTimeout(async () => {
+      let hits = [];
+      try { hits = (await api("GET", `/api/cad/places?q=${encodeURIComponent(q)}&limit=6`)).places || []; } catch (e) { hits = []; }
+      if (my !== seq) return;
+      list.replaceChildren(...hits.map((p) => {
+        const li = el("li", "");
+        li.setAttribute("role", "option");
+        li.append(el("b", "", p.label));
+        if (p.sub) li.append(el("span", "town", p.sub));
+        li.addEventListener("mousedown", (e) => {
+          e.preventDefault();
+          picked = { label: p.label, lat: p.lat, lon: p.lon, sub: p.sub || "" };
+          where.value = p.sub && !p.label.includes(p.sub) ? `${p.label}, ${p.sub}` : p.label;
+          show(list, false);
+        });
+        return li;
+      }));
+      if (!hits.length) list.replaceChildren(el("li", "hint dim small", "No match"));
+      show(list, true);
+    }, 200);
+  });
+  where.addEventListener("blur", () => setTimeout(() => show(list, false), 150));
+  const add = el("button", "primary", "Add name");
+  add.type = "submit";
+  f.append(name, box, aka, add);
+  f.addEventListener("submit", (e) => {
+    e.preventDefault();
+    if (!name.value.trim()) return sMsg("Name: required");
+    if (!picked) return sMsg("Where: pick the place from the suggestions");
+    sPost("places", { action: "set", name: name.value.trim(), aliases: aka.value, place: picked }, `${name.value.trim()} added`);
+  });
+  return sCard(sCardHead("Place names", d.items.length ? `${d.items.length}` : "",
+    sHelp("Your own names for places: \"the Waterfront\", \"Kohl's plaza\". An @ in a note and the location box "
+      + "offer them first, at the place picked here.")), ol, f);
 }
 
 // ---- run cards: the editor is cad.js's; reset buttons here -----------------------------------------

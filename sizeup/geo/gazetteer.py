@@ -45,7 +45,18 @@ CREATE TABLE intersections (a INTEGER NOT NULL, b INTEGER NOT NULL, lat REAL NOT
 CREATE TABLE landmarks (id INTEGER PRIMARY KEY, name TEXT NOT NULL, category TEXT NOT NULL,
     address TEXT NOT NULL, muni TEXT NOT NULL, lat REAL NOT NULL, lon REAL NOT NULL,
     source TEXT NOT NULL, aliases TEXT NOT NULL);
+""" + """
+CREATE TABLE places (id INTEGER PRIMARY KEY, kind TEXT NOT NULL, name TEXT NOT NULL,
+    category TEXT NOT NULL, address TEXT NOT NULL, muni TEXT NOT NULL, lat REAL NOT NULL,
+    lon REAL NOT NULL, route TEXT NOT NULL, dir TEXT NOT NULL, value TEXT NOT NULL,
+    source TEXT NOT NULL, ref TEXT NOT NULL, aliases TEXT NOT NULL);
 """
+# ``places`` (tools/fetch_places.py) is only for the place search (sizeup/geo/places.py: the CAD's
+# "@" mentions and the location box), never for reading page transcripts: kind "place" (named OSM
+# features that are not already a landmark), "milemarker" (NYSDOT reference markers, Thruway
+# mileposts) and "exit" (OSM motorway junctions). route / dir / value: "I-287", "EB" ("" = both
+# ways), "10.0" or "21A". source + ref name each row's origin (source "osm" rows are ODbL).
+PLACES_SCHEMA = SCHEMA[SCHEMA.index("CREATE TABLE places"):]
 
 LAT0, LON0 = 41.0, -73.68
 M_PER_DEG_LAT = 110_574.0

@@ -40,6 +40,9 @@ PREVIEW_KEEP_S = 24 * 3600
 MAX_UNITS = 30
 VOICE_SAMPLE = "Engine 60, respond to 1 Main Street, structure fire. Time out 14:32."   # Settings > Voice > Preview
 GEO_WINDOW = 0.25        # suggestions this close to the best one are ordered by town first
+PLACE_KINDS = ("address", "intersection", "street", "place", "milemarker", "exit")     # a note's "@" places
+PLACE_FIELDS = ("kind", "label", "sub", "lat", "lon", "source", "category", "detail", "route", "dir", "value",
+                "precision", "score")
 
 
 @dataclass
@@ -170,6 +173,11 @@ class Cad:
         # The phone pre-alert from Tapout (sizeup/prealert.py PreAlerts), set by the app on the CAD of
         # record (hub, all-in-one) when [prealert] is on; None: no pre-alerts here.
         self.prealert = None
+        # The place search (sizeup/geo/places.py, #67): the app sets place_source, a function that builds the
+        # PlaceIndex over its gazetteer (once, on first use); None: no gazetteer, no place suggestions.
+        self.place_source: Callable[[], object] | None = None
+        self._place_ix = None
+        self._place_lock = threading.Lock()
         # The radios' side of Settings > Radios > Channels / Vocabulary (sizeup/channels.py): the app
         # (App) answers channels_locked(), set_talkgroup(tg, record), channels_changed(), aws_channels(),
         # vocabulary_suggestions() / _push(phrases) / _state(), aws_status(), aws_limit_default(). None: alone.
@@ -327,6 +335,12 @@ class Cad:
         m = next(iter(self._ranked(q)), None)
         if m and m["confidence"] >= 0.6:
             f["lat"], f["lon"], f["geo_label"] = m["lat"], m["lon"], m["label"]
+            return
+        # "I287 EB MM 10.0", "Hutch SB exit 30": a highway marker the place search knows exactly (#67)
+        h = next((h for h in self._place_hits(f["address"][:120], limit=2)
+                  if h["kind"] in ("milemarker", "exit") and h["quality"] >= 0.95), None)
+        if h:
+            f["lat"], f["lon"], f["geo_label"] = h["lat"], h["lon"], h["label"]
 
     def create(self, body: dict) -> dict:
         """Accept event (Event info): numbered at once; emergency -> Pending events, else Non-emergency."""
@@ -361,7 +375,11 @@ class Cad:
 
     def note(self, iid: int, body: dict) -> dict:
         """A timeline comment. units: the unit tags picked with the autocomplete ("E63 stated that ..."):
-        who said it, so the event can show that unit's notes with its radio traffic."""
+        who said it, so the event can show that unit's notes with its radio traffic. places: the places
+        picked after an "@" (#67), [{label, lat, lon, kind?, sub?, source?}], each kept only while its
+        "@label" is in the text; shown as a chip that points at the spot. A place never moves the event."""
+        text = _text(body, "text", 2000, required=True)
+        places = self._note_places(body.get("places"), text)
         units = body.get("units") or []
         if not isinstance(units, list) or len(units) > 10 or not all(isinstance(u, str) for u in units):
             raise CadError("units: a list of up to 10 unit codes")
@@ -370,8 +388,32 @@ class Cad:
         if bad:
             raise CadError(f"units: {bad[0]!r} is not on the boards")
         tags = list(dict.fromkeys(codes[u.strip().upper()] for u in units))
-        self.store.note(iid, _text(body, "text", 2000, required=True), _text(body, "operator", OPERATOR_MAX), units=tags)
-        return {"ok": True, "units": tags}
+        self.store.note(iid, text, _text(body, "operator", OPERATOR_MAX), units=tags, places=places)
+        return {"ok": True, "units": tags, "places": places}
+
+    @staticmethod
+    def _note_places(raw, text: str) -> list[dict]:
+        if raw in (None, ""):
+            return []
+        if not isinstance(raw, list) or len(raw) > 10:
+            raise CadError("places: a list of up to 10 places")
+        out, seen, low = [], set(), text.lower()
+        for p in raw:
+            if not isinstance(p, dict):
+                raise CadError("places: each one {label, lat, lon}")
+            label = _text(p, "label", 200, required=True)
+            lat, lon = _num(p, "lat", 40.0, 42.0), _num(p, "lon", -75.0, -72.0)
+            if lat is None or lon is None:
+                raise CadError(f"places: {label!r} needs lat and lon")
+            kind = _text(p, "kind", 20)
+            if kind and kind not in PLACE_KINDS:
+                raise CadError(f"places: kind one of {', '.join(PLACE_KINDS)}")
+            if f"@{label.lower()}" not in low or label.lower() in seen:
+                continue                                 # its "@label" was edited away: not a mention any more
+            seen.add(label.lower())
+            out.append({"label": label, "lat": round(lat, 6), "lon": round(lon, 6), "kind": kind or "place",
+                        "sub": _text(p, "sub", 80), "source": _text(p, "source", 40)})
+        return out
 
     def tag_order(self, iid: int | None, units: list[dict] | None = None) -> list[str]:
         """The unit autocomplete's order: units on this event (as assigned) first, then PCFD's and
@@ -984,12 +1026,87 @@ class Cad:
                                          L.town_rank(m["town"]), -m["confidence"]))
 
     def geocode(self, q: str) -> dict:
+        """The location box. The gazetteer's readings, plus the place search's highway mile markers and
+        exits (first: the gazetteer has none) and named places it doesn't know (#67)."""
         q = (q or "").strip()
         if not q or len(q) > 200:
             raise CadError("q: 1 to 200 characters")
         if self.geocoder is None:
             return {"matches": [], "error": "geocoder unavailable"}
-        return {"matches": [m for m in self._ranked(q) if m["confidence"] >= 0.2][:6]}
+        ms = [m for m in self._ranked(q) if m["confidence"] >= 0.2]
+        hits = self._place_hits(q, limit=8) if len(q) <= 120 else []
+        highway = [self._as_match(h) for h in hits if h["kind"] in ("milemarker", "exit")]
+        known = {(m["label"].split(",")[0].strip().lower()) for m in ms}
+        named = [self._as_match(h) for h in hits if h["kind"] == "place" and h["label"].lower() not in known]
+        rest = sorted(ms + named, key=lambda m: -m["confidence"]) if named else ms
+        return {"matches": (highway + rest)[:6]}
+
+    # -- the place search: a note's "@", the location box (#67) -------------------------------------
+
+    def place_index(self):
+        """The PlaceIndex (built on first use: place_source), or None without a gazetteer."""
+        if self._place_ix is None and self.place_source is not None:
+            with self._place_lock:
+                if self._place_ix is None:
+                    try:
+                        self._place_ix = self.place_source()
+                    except Exception as e:           # no place suggestions, everything else as before
+                        self.log(f"CAD: place search unavailable ({type(e).__name__}: {e})")
+                        self.place_source = None
+        return self._place_ix
+
+    def local_places(self) -> list[dict]:
+        """The department's own names for places (Settings > Places), for the place search."""
+        return self.settings.local_places()
+
+    def _place_hits(self, q: str, near=None, limit: int = 8) -> list[dict]:
+        ix = self.place_index()
+        if ix is None:
+            return []
+        L = self.lists
+        hits = ix.search(q, near=near, limit=limit, extra=self.local_places(), priority=tuple(L.geo_town_order))
+        for h in hits:
+            h["sub"] = L.town_of(h["sub"])
+        return hits
+
+    def _as_match(self, h: dict) -> dict:
+        """A place-search hit as a location box suggestion (the gazetteer's shape)."""
+        conf = round(min(0.99, max(0.2, h.get("quality", 0.6))), 2)
+        kind = {"milemarker": "mile marker"}.get(h["kind"], h["kind"])       # as the box shows it
+        return {"label": h["label"], "lat": h["lat"], "lon": h["lon"], "kind": kind, "municipality": h["sub"],
+                "town": h["sub"], "precision": h.get("category") or h["kind"], "confidence": conf}
+
+    def search_places(self, query: dict) -> dict:
+        """GET /api/cad/places?q=&near=lat,lon&iid=: ranked places of every kind (addresses, intersections,
+        streets, named places, mile markers, exits); near (else the event's own point) breaks ties."""
+        def one(k: str) -> str:
+            return (query.get(k) or [""])[0].strip()
+        q = one("q")
+        if not q or len(q) > 120:
+            raise CadError("q: 1 to 120 characters")
+        near = None
+        if one("near"):
+            try:
+                lat, lon = (float(x) for x in one("near").split(","))
+            except ValueError:
+                raise CadError("near: lat,lon") from None
+            if not (40.0 <= lat <= 42.0 and -75.0 <= lon <= -72.0):
+                raise CadError("near: lat,lon in the area")
+            near = (lat, lon)
+        elif one("iid").isdigit():
+            try:
+                inc = self.store.incident(int(one("iid")))
+                if inc["lat"] is not None and inc["lon"] is not None:
+                    near = (inc["lat"], inc["lon"])
+            except CadError:
+                pass
+        try:
+            limit = max(1, min(int(one("limit") or 8), 20))
+        except ValueError:
+            raise CadError("limit: a number") from None
+        if self.place_index() is None:
+            return {"places": [], "error": "place search unavailable"}
+        return {"places": [{k: h[k] for k in PLACE_FIELDS if k in h} for h in self._place_hits(q, near, limit)]}
 
     # -- the bridge from the monitor ----------------------------------------------------------------
 

@@ -178,6 +178,9 @@
   .note-box input { flex: 1; min-inline-size: 0; }
   .note-sugg { position: absolute; inset-inline: 0; inset-block-start: 100%; margin-block-start: var(--s-1); z-index: var(--z-popover); }
   .note-tags { flex-basis: 100%; display: flex; align-items: center; flex-wrap: wrap; gap: var(--s-1); }
+  /* a note's "@place" (#67): a chip in the text that shows the spot on the map */
+  .place-tag { --c: var(--info); font-weight: 600; white-space: normal; text-align: start; }
+  .place-tag .ico { inline-size: var(--ico-sm); block-size: var(--ico-sm); }
 
   /* ---- the incident's radio, transmissions and notes ------------------------------------------------ */
   /* conversation: 60 Control on the left (info edge), units on the right */

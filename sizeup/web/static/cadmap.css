@@ -57,6 +57,13 @@
   .cm-pin.dim .dot { inline-size: var(--s-3); block-size: var(--s-3); }
   .cm-pin:is(:hover, :focus-visible) { opacity: 1; }
 
+  /* a place named in a note ("@Lyon Park", cad.js showPlace): a ringed dot in the info color; its name
+     and the actions in the map's popover (top left, as the station picker) */
+  .cm-place { z-index: 4; }
+  .cm-place .dot { display: block; inline-size: var(--s-4); block-size: var(--s-4); border-radius: 50%;
+    background: var(--info); border: 3px solid #fff; box-shadow: 0 0 0 2px var(--info), 0 1px 6px rgba(0, 0, 0, 0.7); }
+  .cm-place-pop { gap: var(--s-1); border-color: var(--info); }
+
   /* rigs with no home station, and the station picker */
   .cm-unset {
     position: absolute; inset-inline-start: var(--s-2); inset-block-end: var(--s-2); z-index: var(--z-map);

@@ -31,6 +31,7 @@ Sources:
 * OpenStreetMap named amenities/buildings via Overpass (ODbL) -- optional; if
   every Overpass mirror fails, the OSM landmarks of the previous build are kept
 * the five PCFD / Rye Brook firehouses from data/firehouses.json
+* then tools/fetch_places.py: the ``places`` table (named places, highway mile markers and exits)
 
 Run:  .venv/bin/python tools/fetch_addresses.py [--cache DIR]
 Only stdlib + numpy. Re-run after the NYS address points refresh (2nd/4th Friday).
@@ -1053,6 +1054,11 @@ def main(argv=None) -> int:
     db.commit()
     db.execute("VACUUM")
     db.close()
+    # the places table (named places, highway mile markers and exits: tools/fetch_places.py)
+    import fetch_places
+    pc = fetch_places.build(tmp, bounds, today, skip={"osm"} if args.no_osm else set(),
+                            old_db=args.out if args.out.exists() else None)
+    print(f"  places: {pc['by_kind']}" + (f"; missing: {pc['missing']}" if pc["missing"] else ""), file=sys.stderr)
     tmp.replace(args.out)
     print(json.dumps(counts, indent=1), file=sys.stderr)
     print(f"wrote {args.out} ({args.out.stat().st_size / 1e6:.2f} MB)", file=sys.stderr)

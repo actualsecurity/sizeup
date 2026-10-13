@@ -21,6 +21,12 @@ Without Access nothing is recorded there.
 GET  /api/cad/state                       lists, units, events (open, recently closed), run cards
 GET  /api/cad/stream                      SSE: the state, pushed every second (server.py)
 GET  /api/cad/geocode?q=209 westchester   location suggestions, Port Chester / Rye Brook first, each with its town
+                                          (with the place search's mile markers, exits and named places, #67)
+GET  /api/cad/places?q=287 eb mm 10&near=lat,lon&iid=&limit=
+                                          place search (#67: a note's "@"): {places: [{kind (address | intersection |
+                                          street | place | milemarker | exit), label, sub (town), lat, lon, source,
+                                          category?, detail?, route?, dir?, value?, score}]}, our towns first, then
+                                          nearest to near (else the event iid's point); read only: viewers too
 GET  /api/cad/runcards                    run cards
 GET  /api/cad/incident/<id>               one event with its units, chronology and dispatches
 GET  /api/cad/history                     the Incident database: every numbered event, newest first
@@ -38,6 +44,8 @@ GET  /api/cad/settings/export             every setting as one JSON file (edits,
 GET  /api/cad/settings/audit?section=     every Settings change (who, section, key, old -> new), newest first
 POST /api/cad/settings/<section>          {action, ..., operator?}: event_types | event_subtypes | dispositions |
                                           received_via | unit_statuses | event_class | type_subtypes | geo_town_order | units |
+                                          places {action: set, name, aliases?, place: {label, lat, lon, sub?}, note?} |
+                                          {action: delete, key}: the department's own place names (#67) |
                                           dispatch | users | runcards | import (dry_run / apply) |
                                           dispatch {action: "voice_preview"} -> {text, audio_url, audio_note}:
                                           a sample said by the voice set now (the same render as a dispatch)
@@ -59,7 +67,9 @@ POST /api/cad/incident/<id>               edit: any of the fields above
 POST /api/cad/incident/<id>/accept        {type?, subtype?, operator?}  a 60 Control page -> pending (numbered)
 POST /api/cad/incident/<id>/dismiss       {operator?, reason?}   a 60 Control page nobody takes
 POST /api/cad/incident/<id>/close         {disposition, operator?}  units cleared
-POST /api/cad/incident/<id>/note          {text, units?: ["E63"], operator?}   units: the unit tags (who said it)
+POST /api/cad/incident/<id>/note          {text, units?: ["E63"], places?: [{label, lat, lon, kind?, sub?, source?}],
+                                          operator?}   units: the unit tags (who said it); places: its "@" places, each
+                                          kept while "@label" is in the text (never moves the event)
 GET  /api/cad/incident/<id>/units?q=e6    unit autocomplete: on the event first, then fire units, then the rest
 POST /api/cad/incident/<id>/recommend     {type?, subtype?}      -> {units, unfilled, already, card, note}
 POST /api/cad/incident/<id>/preview       {unit_ids, full?, remarks?} -> {text, kind, audio_url, audio_note, remarks,
@@ -189,7 +199,7 @@ def _on_incident(m, b, o, c):
     if act == "close":
         return f"Closed {ev}: {b.get('disposition', '')}", n
     if act == "note":
-        tags = o.get("units") or []
+        tags = (o.get("units") or []) + [f"@{p['label']}" for p in o.get("places") or []]
         return f"Note on {ev}" + (f" ({', '.join(tags)})" if tags else "") + f": {_clip(b.get('text'))}", n
     if act == "dispatch":
         return f"Dispatched {ev}: {_units(c, b.get('unit_ids'))}" + (" (full response)" if b.get("full") else ""), n
@@ -429,6 +439,8 @@ class CadApi:
                 return (200, data, "text/csv; charset=utf-8") if data is not None else (404, b"no such export\n", "text/plain")
             if path == "/api/cad/tts/voices":
                 return _json(200, self.cad.tts_voices())
+            if path == "/api/cad/places":
+                return _json(200, self.cad.search_places(parse_qs(query)))
             if path == "/api/cad/geocode":
                 return _json(200, self.cad.geocode((parse_qs(query).get("q") or [""])[0]))
             if m := DISPATCH_WAV.fullmatch(path):
