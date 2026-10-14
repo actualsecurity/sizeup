@@ -62,7 +62,7 @@ from sizeup.cad import Cad
 from sizeup.cad.api import CadApi
 from sizeup.dispatch import parse
 from sizeup.incidents import IncidentStore, Traffic
-from sizeup.radio.fm import FRAME, RATE, Channel, NfmReceiver, Segment, data_frames, speech_seconds
+from sizeup.radio.fm import RATE, Channel, NfmReceiver, Segment, id_burst_frames, speech_seconds, voice_floor_db
 from sizeup.radio.mdc1200 import decode as mdc_decode
 from sizeup.radio import fleetsync
 from sizeup.cad.radios import fm_system
@@ -105,6 +105,9 @@ SDR_FAILING_RESTARTS = 3   # an auto job that has restarted this often and is do
 SDR_SETTLE_S = 60.0        # after startup, Off dongles wait this long for the ones that had jobs (USB attach order)
 MIN_SPEECH_S = 0.15      # less sound than this above the dead-air floor (and no tones) = a mic click
 LIVE_WATCH_S = 0.2       # FG1 talking watcher: how often the squelch is looked at (the MDC ID: radio/tap.py)
+ID_EDGE_S = 1.0          # an FG1 key-up with no ID: a burst is looked for this close to either end of the carrier (#163)
+NO_ID_MIN_QUIETING_DB = 20.0   # ... and "no ID sent" is said only of a carrier this strong (PCFD radios: ~40 dB at
+                               # the station); weaker, a burst may be lost in the hiss: "weak", nothing said either way
 CATEGORIES = {"fire": "#ff4d3d", "ems": "#4da3ff", "rescue": "#ffb020", "hazard": "#c86bff",
               "service": "#3ddc97", "unknown": "#9aa0b4"}
 
@@ -517,10 +520,11 @@ class App:
         except Exception as e:  # the outbox must never stop the monitor
             log(f"hub link: could not queue {kind}: {type(e).__name__}: {e}")
 
-    def _heard(self, system: str, radio_id: str, alias: str = "", at: float | None = None) -> None:
-        """A radio heard on the air: into the registry, and (station) to the hub's registry, once per
-        radio/alias every few minutes (P25 lists the same talkers on every call)."""
-        self.radios.heard(system, radio_id, alias, at)
+    def _heard(self, system: str, radio_id: str, alias: str = "", at: float | None = None, channel: str = "") -> None:
+        """A radio heard on the air (P25, and an MDC / FleetSync ID on FG1 alike, #163): into the registry, and
+        (station) to the hub's registry, once per radio/alias every few minutes (P25 lists the same talkers on
+        every call)."""
+        self.radios.heard(system, radio_id, alias, at, channel)
         if self.events is None or not radio_id:
             return
         key, now = (system, str(radio_id), alias or ""), time.time()
@@ -529,7 +533,7 @@ class App:
         self._heard_sent[key] = now
         if len(self._heard_sent) > 5000:
             self._heard_sent = {k: v for k, v in self._heard_sent.items() if now - v < 300}
-        self._emit("heard", {"system": system, "radio_id": str(radio_id), "alias": alias or "", "at": at})
+        self._emit("heard", {"system": system, "radio_id": str(radio_id), "alias": alias or "", "at": at, "channel": channel})
 
     # -- clips ----------------------------------------------------------------------------------
 
@@ -618,22 +622,38 @@ class App:
         return out
 
     def _id_note(self, label: str, seg: Segment, units: list[str]) -> str:
-        """Why no radio ID, when there isn't one: a burst we couldn't read vs. no burst at all."""
+        """Why an analog key-up has no radio ID, when it hasn't (#163; stored on the transmission, radio_traffic.id_note):
+
+            undecoded   an MDC / FleetSync burst was there (both tones of a pair, well over the dead air: radio/fm.py
+                        id_burst_frames) at the key-up (the live tap's window, pre-roll included) or at either end of
+                        the carrier (the bursts the squelch cut off), or an MDC sync there failed its CRC: "ID not decoded"
+            none        no burst anywhere in a strong transmission: the radio sent none ("No ID sent": PTT ID off in
+                        its codeplug, a radio from elsewhere)
+            weak        no burst, but the carrier quieted the hiss under NO_ID_MIN_QUIETING_DB: a burst may be lost in
+                        the noise, so nothing is said either way
+            ''          the squelch cut something data-like off an edge (most of it at 1000-2100 Hz) that isn't both
+                        tones of a pair and has no MDC sync: a roger beep, or a burst too broken to tell. No claim.
+
+        A burst anywhere else (mid-transmission) is not counted (a siren, a tone): it says nothing about the key-up."""
         if units:
             return ""
-        F = RATE // 20
-        looks_like_data = any(data_frames([seg.audio[i:i + F] for i in range(0, len(seg.audio) - F + 1, F)]))
-        if not seg.bursts and not looks_like_data:
-            return "no ID burst"
+        floor = voice_floor_db(seg.audio)
+        edge = int(ID_EDGE_S * RATE)        # a FleetSync 2400 burst (1200/2400 Hz): the squelch's edge cut leaves it
+        seen = (self.tap.burst(label, seg.start, seg.end) or any(any(id_burst_frames(b, floor)) for b in seg.bursts)
+                or any(any(id_burst_frames(x, floor)) for x in (seg.audio[:edge], seg.audio[-edge:])))
         bad = 0
-        for b in [*seg.bursts, seg.audio]:
+        for b in seg.bursts:
             try:
                 bad += sum(not p.crc_ok for p in mdc_decode(b, RATE, only_valid=False))
             except Exception:
                 pass
-        log(f"{label}: MDC ID burst heard but not decoded ({len(seg.bursts)} cut burst(s), "
-            + (f"{bad} sync hit(s) failed the CRC" if bad else "no sync found") + ")")
-        return "ID burst unreadable"
+        if seen or bad:
+            log(f"{label}: radio ID burst heard but not decoded ({len(seg.bursts)} cut burst(s)"
+                + (f", {bad} MDC sync hit(s) failed the CRC" if bad else "") + ")")
+            return "undecoded"
+        if seg.bursts:
+            return ""
+        return "none" if seg.quieting_db >= NO_ID_MIN_QUIETING_DB else "weak"
 
     def _keep_bursts(self, cid: str, seg: Segment) -> None:
         """The cut-off MDC bursts, next to the clip (same 12 h limit), so the ID can be decoded again."""
@@ -664,7 +684,7 @@ class App:
         low_energy = speech_seconds(seg.audio) < MIN_SPEECH_S
         ids = list(dict.fromkeys(h for h, _e in found))
         for h in ids:
-            self._heard(fm_system(h), h, at=seg.end)
+            self._heard(fm_system(h), h, at=seg.end, channel=ch.label)
         self.live.fm_segment(ch.label, ids, seg.start, seg.end)
         emergency = any(e for _h, e in found)        # the radio's emergency button (MDC / FleetSync, #128)
         live_key = self.tap.alarm_key(ch.label, seg.start, seg.end) if emergency else ""
@@ -802,7 +822,7 @@ class App:
             return
         self.tg.seen(call.talkgroup)
         for _name, (src, tag) in call.ids.items():      # radio ID <-> alias, kept for lookups without the alias
-            self._heard("p25", src, tag, call.start)
+            self._heard("p25", src, tag, call.start, call.label)
         key = channels.tg_key(call.talkgroup)
         eng = self.stt_engine(key)
         if call.audio is not None:
@@ -1070,7 +1090,8 @@ class App:
         try:
             self.cad.record_traffic({"id": t.id, "start": t.start, "end": t.end, "source": t.source,
                                      "talkgroup": t.talkgroup, "unit": t.unit, "rig": t.rig, "radio_id": t.radio_id,
-                                     "text": t.text, "status": t.status, "model": getattr(t, "model", "")},
+                                     "text": t.text, "status": t.status, "model": getattr(t, "model", ""),
+                                     "id_note": getattr(t, "id_note", "")},
                                     replace=replace)
         except Exception as e:  # the CAD must never stop the monitor
             log(f"CAD: could not log a transmission: {type(e).__name__}: {e}")

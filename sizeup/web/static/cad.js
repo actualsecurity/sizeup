@@ -731,10 +731,24 @@ async function rereadTones(t) {
 }
 
 // ---- the incident's radio traffic (sizeup/cad/comms.py) ------------------------------------------
-// Every transmission from a radio on a unit assigned to it (dispatched / attached until it cleared),
-// FG1 while it had units on it, and 60 Control's turns answering those units in the same P25 call.
+// Every transmission from a radio on a unit assigned to it (dispatched / attached until it cleared: the radio's
+// ID named in the registry), and 60 Control's turns answering those units in the same P25 call. A radio with no
+// ID never goes on an incident by itself (#163): it stays in the Radio view, saying why there is no ID.
 
-const RADIO_WHY = { unit: "Unit", channel: "FG1", dispatcher: "60 Control", manual: "Added", page: "Page", airport: "Airport TG" };
+const RADIO_WHY = { unit: "Unit", dispatcher: "60 Control", manual: "Added", page: "Page", airport: "Airport TG" };
+// An FG1 key-up with no radio ID (comms.py id_note, #163): what was found, never who it might be.
+const NO_ID = {
+  none: ["No ID sent", "No MDC-1200 or FleetSync burst at the key-up or the release, on a strong carrier: this radio didn't send an ID (PTT ID off, or a radio from elsewhere)"],
+  undecoded: ["ID not decoded", "An ID burst was there (key-up or release) but didn't decode: a weak or broken signal, or a format we don't read"],
+  weak: ["No ID", "No ID burst found, but the signal was too weak to tell whether the radio sent one"],
+  "": ["No ID", "No radio ID decoded"],
+};
+function noIdChip(t) {
+  const [text, why] = NO_ID[t.id_note] || NO_ID[""];
+  const c = el("span", `chip noid${t.id_note ? ` noid-${t.id_note}` : ""}`, text);
+  c.title = why;
+  return c;
+}
 // One transmission: play first, then time, rig, channel, duration; the incidents it is on as chips (a click:
 // that incident) and its "⋯" menu (txMenu) at the end; the transcript under it. ctx: {scope: "feed" | "rv" |
 // "inc" (where it is drawn: the menu's identity across redraws), current: the incident whose list this is
@@ -750,7 +764,8 @@ function radioRow(t, ctx = {}) {
   meta.append(b, el("span", "t", fmtTime(t.start, true)));
   const tag = Radio.rigTag({ rig: t.rig, radio_id: t.radio_id, unit: t.talker });
   if (tag) meta.append(tag);
-  meta.append(el("span", "chip src", t.channel));
+  meta.append(el("span", "chip src", t.channel));        // the channel once; never in the talker's place
+  if (!tag && t.kind !== "note" && !t.page && !t.dispatcher) meta.append(noIdChip(t));
   if (t.page && t.why !== "page") {       // a page (#80): what it was, and whether it is an event or just a page
     li.classList.add(`page-${t.page}`);
     const w = el("span", "why page", "Page");
@@ -762,8 +777,7 @@ function radioRow(t, ctx = {}) {
   if (note) meta.append(note);
   if (t.why) {
     const w = el("span", `why ${t.why}`, RADIO_WHY[t.why] || t.why);
-    w.title = t.why === "unit" ? `${t.link_unit || t.rig} was on this incident` : t.why === "channel"
-      ? "Unidentified FG1 radio while this was the only call with units" : t.why === "manual"
+    w.title = t.why === "unit" ? `${t.link_unit || t.rig} was on this incident` : t.why === "manual"
       ? `Added${t.link_unit ? ` by ${t.link_unit}` : " by hand"}` : t.why === "page" ? "The 60 Control page for this event"
       : t.why === "airport" ? "On the Airport Incident talkgroup while this was the open airport event"
       : `60 Control answering ${t.link_unit || "a unit on it"}`;
@@ -1031,8 +1045,9 @@ function evChip(e) {
 }
 // Why the auto-linker put it on (sizeup/cad/comms.py why_text).
 function whyText(why, unit) {
-  return why === "unit" ? `${unit || "its unit"} assigned` : why === "channel" ? "FG1, the only call with units"
-    : why === "dispatcher" ? `60 Control answering ${unit || "a unit on it"}` : why === "page" ? "the 60 Control page" : why;
+  return why === "unit" ? `${unit || "its unit"} assigned`
+    : why === "dispatcher" ? `60 Control answering ${unit || "a unit on it"}` : why === "page" ? "the 60 Control page"
+    : why === "airport" ? "Airport Incident talkgroup, the open airport event" : why;
 }
 
 // ---- a transmission's "⋯" menu (ui.js UI.menu): Add to event ▸, Remove from <each>, Re-transcribe, Copy text ----

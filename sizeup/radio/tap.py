@@ -21,7 +21,10 @@ Cheap on purpose (the station is an i5-6400T): the MDC decode takes a few ms on 
 runs at most every 0.2 s for the first 1.5 s of a carrier, and not again once an ID is found; tones
 are one FFT per frame, on the paging channel only, while it is open. The IDs found live are handed to
 the finished transmission (ids()), so the row is named even when the burst is cut off its segment;
-a post-ID at release that differs is kept next to it, never instead of it.
+a post-ID at release that differs is kept next to it, never instead of it. A key-up window that ends with no ID
+is looked at once more for a burst that was there but didn't decode (radio/fm.py id_burst_frames: both tones of
+an MDC / FleetSync pair, well over the dead air): burst() hands that to the finished transmission, which says
+"ID not decoded" rather than "no ID sent" (#163).
 """
 
 from __future__ import annotations
@@ -34,7 +37,7 @@ from typing import Callable
 
 import numpy as np
 
-from sizeup.radio.fm import FRAME, RATE
+from sizeup.radio.fm import FRAME, RATE, id_burst_frames
 
 PREROLL_FRAMES = 4      # 0.2 s read before the squelch opened (the start of a key-up burst)
 MDC_WINDOW_S = 1.5      # pre-IDs come in the first second (older radios at key-up, APX 0.3-0.8 s in)
@@ -52,8 +55,9 @@ class _Chan:
     n: int = 0                                  # frames of this carrier so far
     ids: list = field(default_factory=list)     # [(unit hex, emergency)] decoded live
     done: bool = False                          # stop decoding (found, or past the window)
-    last: list = field(default_factory=list)    # [(since, ids, at, alarm)] finished carriers, for ids()
+    last: list = field(default_factory=list)    # [(since, ids, at, alarm, burst)] finished carriers, for ids()
     alarm: str = ""                             # the emergency alarm raised for this carrier (its key)
+    burst: bool = False                         # no ID decoded in the key-up window, but a burst was there
 
 
 class TapSquelch:
@@ -131,7 +135,7 @@ class LiveTap:
             c = self._ch.setdefault(label, _Chan())
             if is_open and (not c.open or abs(since - c.since) > 0.01):
                 self._ended(c)
-                c.open, c.since, c.n, c.ids, c.done, c.alarm = True, since, 0, [], False, ""
+                c.open, c.since, c.n, c.ids, c.done, c.alarm, c.burst = True, since, 0, [], False, "", False
                 c.buf = list(c.pre)
                 c.pre.clear()
                 opened = True
@@ -166,8 +170,10 @@ class LiveTap:
         past = c.n * FRAME >= MDC_WINDOW_S * RATE
         if not past and (c.n < MDC_MIN_FRAMES or c.n % MDC_EVERY):
             return
-        found = self.mdc(np.concatenate(c.buf).astype(np.float32))
+        audio = np.concatenate(c.buf).astype(np.float32)
+        found = self.mdc(audio)
         if past:
+            c.burst = not found and any(id_burst_frames(audio))     # once per carrier, at the window's end
             c.done, c.buf = True, []
         if found:
             c.ids, c.done, c.buf = list(found), True, []
@@ -176,9 +182,11 @@ class LiveTap:
             self.live.fm_ids(label, list(dict.fromkeys(h for h, _e in found)))
 
     def _ended(self, c: _Chan) -> None:
-        if c.open and c.ids:
+        if c.open and not c.done and not c.ids and len(c.buf) >= MDC_MIN_FRAMES and self.mdc is not None:
+            c.burst = any(id_burst_frames(np.concatenate(c.buf)))    # closed inside the window (a short key-up)
+        if c.open and (c.ids or c.burst):
             now = self.clock()
-            c.last = [x for x in c.last if now - x[2] < KEEP_S] + [(c.since, list(c.ids), now, c.alarm)]
+            c.last = [x for x in c.last if now - x[2] < KEEP_S] + [(c.since, list(c.ids), now, c.alarm, c.burst)]
 
     def ids(self, label: str, start: float, end: float) -> list[tuple[str, bool]]:
         """The IDs decoded live from the carrier that made the transmission start..end (its pre-ID)."""
@@ -190,11 +198,16 @@ class LiveTap:
         got = self._carrier(label, start, end)
         return got[3] if got and got[3] != "raised" else ""
 
+    def burst(self, label: str, start: float, end: float) -> bool:
+        """The key-up window of this transmission's carrier had an ID burst that didn't decode (#163)."""
+        got = self._carrier(label, start, end)
+        return bool(got and got[4])
+
     def _carrier(self, label: str, start: float, end: float):
         with self._lock:
             c = self._ch.get(label)
             if c is None:
                 return None
-            cands = list(c.last) + ([(c.since, list(c.ids), 0.0, c.alarm)] if c.open and c.ids else [])
+            cands = list(c.last) + ([(c.since, list(c.ids), 0.0, c.alarm, c.burst)] if c.open and (c.ids or c.burst) else [])
         mine = [x for x in cands if x[0] <= start + 1.0 and x[0] < end and start - x[0] < 150]
         return max(mine, key=lambda x: x[0]) if mine else None      # the latest carrier that began before it

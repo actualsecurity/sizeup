@@ -1,11 +1,14 @@
 // The Radios editor: radio ID -> rig (sizeup/cad/radios.py), as a self-contained panel.
 //   RadiosPanel.mount(box, { operator: () => "name" })   draws into box (any page: the CAD's
 //   "📻 Radios" overlay now; Settings -> Radios later). Its API is /api/cad/radios; every edit is
-//   kept in settings_audit (who, key, old -> new), shown at the bottom.
+//   kept in settings_audit (who, key, old -> new), shown at the bottom. FG1's IDs (MDC, FleetSync) are heard like
+//   P25's (#163): a new one is a "heard" row, every one has its last-heard time and channel; the list puts the
+//   radios heard most recently first in each system, and says how many FG1 transmissions had an ID (id_stats).
 "use strict";
 
 window.RadiosPanel = (() => {
   const SOURCE_TEXT = { confirmed: "confirmed", guessed: "guessed", heard: "heard" };
+  const FM = new Set(["mdc", "fleetsync"]);         // FG1's: every one listed by default, named or not
   const p = { box: null, opts: {}, data: null, filter: "", show: "mapped", sys: "", editing: null, error: "" };
 
   function el(tag, cls, text) {
@@ -62,9 +65,13 @@ window.RadiosPanel = (() => {
   function rows() {
     const all = (p.data && p.data.radios) || [];
     const words = p.filter.toLowerCase().split(/\s+/).filter(Boolean);
-    return all.filter((r) => {
+    const order = new Map(all.map((r, i) => [r, i]));
+    // in each system (as the server sorts them), the radios heard most recently first, then the rest as they were
+    const sorted = all.slice().sort((a, b) => (a.system === b.system ? (b.last_heard || 0) - (a.last_heard || 0) : 0)
+                                              || order.get(a) - order.get(b));
+    return sorted.filter((r) => {
       if (p.sys && r.system !== p.sys) return false;
-      if (p.show === "mapped" && !r.unit && r.source !== "confirmed" && !(r.system === "mdc")) return false;
+      if (p.show === "mapped" && !r.unit && r.source !== "confirmed" && !FM.has(r.system)) return false;
       if (p.show === "unassigned" && r.unit) return false;
       if (p.show === "confirmed" && r.source !== "confirmed") return false;
       const hay = `${r.system} ${r.radio_id} ${r.unit} ${r.label} ${r.alias} ${r.source} ${r.notes}`.toLowerCase();
@@ -98,7 +105,8 @@ window.RadiosPanel = (() => {
     });
     const td = (n, cls) => { const c = el("td", cls); c.append(n); return c; };
     tr.append(td(el("span", "", r.system.toUpperCase())), td(el("b", "", r.radio_id)), td(unit), td(label), td(src),
-              td(el("span", "dim", r.alias || "")), td(el("span", "dim small", fmt(r.last_heard))), td(notes));
+              td(el("span", "dim", r.alias || "")), td(el("span", "dim small", fmt(r.last_heard))),
+              td(el("span", "dim small", r.last_channel || "")), td(notes));
     const act = el("td", "rp-act");
     act.append(save, cancel, del);
     tr.append(act);
@@ -119,7 +127,8 @@ window.RadiosPanel = (() => {
       try { await post("/api/cad/radios", { system: r.system, radio_id: r.radio_id, source: "confirmed" }); await load(); }
       catch (e) { p.error = e.message; render(); }
     });
-    const cells = [r.system.toUpperCase(), r.radio_id, r.unit || "—", r.label, null, r.alias, fmt(r.last_heard), r.notes];
+    const cells = [r.system.toUpperCase(), r.radio_id, r.unit || "—", r.label, null, r.alias, fmt(r.last_heard),
+                   r.last_channel || "", r.notes];
     cells.forEach((v, i) => {
       const c = el("td", i === 2 ? "rp-u" + (r.unit ? "" : " dim") : i >= 5 ? "dim small" : "");
       if (i === 4) c.append(chip);
@@ -174,6 +183,15 @@ window.RadiosPanel = (() => {
       [n((r) => r.source === "heard"), "heard"], [n((r) => !r.unit), "no rig"]].map(([k, t]) => el("span", "", `${k} ${t}`)));
     sum.title = `Seeded from ${d.seed.file} v${d.seed.version}. A person's edit always wins over what is heard.`;
     out.push(sum);
+    for (const x of d.id_stats || []) {           // FG1 in the last 24 h: how many key-ups had an ID, and why not (#163)
+      if (!x.n) continue;
+      const parts = [`${x.with_id} with an ID`, x.none && `${x.none} no ID sent`, x.undecoded && `${x.undecoded} ID not decoded`,
+                     x.weak && `${x.weak} too weak to tell`, x.unknown && `${x.unknown} not checked`].filter(Boolean);
+      const line = el("div", "dim small rp-ids", `${x.channel}, last 24 h: ${x.n} transmission${x.n === 1 ? "" : "s"}, ${parts.join(", ")}`);
+      line.title = "No ID sent: no MDC / FleetSync burst on a strong carrier (the radio sends none). ID not decoded: a burst "
+        + "was there but didn't decode. Too weak to tell: no burst found on a weak carrier. Not checked: from before this was kept.";
+      out.push(line);
+    }
     if ((d.conflicts || []).length || (d.unfit || []).length) {
       const warn = el("details", "rp-warn");
       warn.append(el("summary", "", `Unmapped: ${d.conflicts.length} conflicts, ${new Set(d.unfit.map((u) => u.unit)).size} units off pattern`));
@@ -196,7 +214,7 @@ window.RadiosPanel = (() => {
     q.setAttribute("aria-label", "Filter radios");
     q.addEventListener("input", () => { p.filter = q.value; drawTable(); });
     const show = el("select");
-    for (const [v, t] of [["mapped", "On a rig + all MDC"], ["all", "All (incl. P25 heard)"],
+    for (const [v, t] of [["mapped", "On a rig + all FG1"], ["all", "All (incl. P25 heard)"],
                           ["unassigned", "On no rig"], ["confirmed", "Confirmed only"]]) show.append(new Option(t, v));
     show.value = p.show;
     show.addEventListener("change", () => { p.show = show.value; drawTable(); });
@@ -211,7 +229,7 @@ window.RadiosPanel = (() => {
     const table = el("table", "evtable rp-table");
     const head = el("thead");
     const hr = el("tr");
-    for (const h of ["Sys", "Radio ID", "Rig", "Label", "Source", "Alias (P25)", "Last heard", "Notes", ""]) hr.append(el("th", "", h));
+    for (const h of ["Sys", "Radio ID", "Rig", "Label", "Source", "Alias (P25)", "Last heard", "Heard on", "Notes", ""]) hr.append(el("th", "", h));
     head.append(hr);
     const body = el("tbody");
     table.append(head, body);
@@ -242,13 +260,13 @@ window.RadiosPanel = (() => {
     if (!list.length) {
       const tr = el("tr");
       const td = el("td", "dim", "None");
-      td.colSpan = 9;
+      td.colSpan = 10;
       tr.append(td);
       body.append(tr);
     } else if (list.length > shownRows.length) {
       const tr = el("tr");
       const td = el("td", "dim", `${list.length - shownRows.length} more: filter`);
-      td.colSpan = 9;
+      td.colSpan = 10;
       tr.append(td);
       body.append(tr);
     }

@@ -479,8 +479,8 @@ class Alarms:
                 return r["id"]
         if not a["rig"] and a["channel"] in set(self.cad.comms.tactical):
             rows = st.q(f"SELECT i.id FROM incidents i WHERE {self.OPEN} AND i.id IN ({Comms.ACTIVE_EVENTS})", (at, at))
-            if len(rows) == 1:                  # FG1 with one call on it: that call's (comms.py's "channel" link)
-                return rows[0]["id"]
+            if len(rows) == 1:                  # FG1 with one call on it: the alarm is that call's (a mayday can't
+                return rows[0]["id"]            # wait for an ID; the transmission itself isn't put on it, #163)
         return None
 
     def _link(self, a: dict, acked: bool = False) -> dict:

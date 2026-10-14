@@ -29,6 +29,7 @@ from sizeup.cad.activity import Activity
 from sizeup.cad.alarms import Alarms
 from sizeup.cad.comms import Comms
 from sizeup.cad.feed import Feed
+from sizeup.cad.newids import NewIds
 from sizeup.cad.statushints import StatusHints
 from sizeup.cad.radios import Registry, RadioError, is_pcfd
 from sizeup.cad import settings as settings_mod
@@ -193,6 +194,8 @@ class Cad:
         self.hints = StatusHints(self.store, lambda: self.lists, channels=s.tactical,
                                  talkgroups=tuple(dict.fromkeys((*s.incident_talkgroups, *s.airport_talkgroups))), log=log)
         self.comms.on_text = self.hints.consider
+        # FG1 radio IDs nobody has named yet (#163): "Radio 1234 (MDC) on FG1: who is this?" on the console.
+        self.newids = NewIds(self)
         # The emergency button and a mayday heard on our fire channels (sizeup/cad/alarms.py, #128): the app feeds it
         # transmissions on the CAD of record; every console and wall board shows them until acknowledged.
         self.alarms = Alarms(self, lambda m: self.log(m))
@@ -285,7 +288,26 @@ class Cad:
         return dict(st, units=units, map=self.map_slice(units, st["incidents"], pos, now), time=now, rev=rev,
                     comms_rev=f"{self.comms.rev}.{rev}",
                     talking=self.live(), paging=self.paging(), cloud=self.cloud(), prealert=self.prealert_state(now),
-                    status_hints=self.status_hints(), alarms=self.alarms_state(now))
+                    status_hints=self.status_hints(), alarms=self.alarms_state(now), radio_ids=self.radio_ids(now))
+
+    def radio_ids(self, now: float | None = None) -> list[dict]:
+        """The FG1 radio IDs to ask about (#163, sizeup/cad/newids.py); a fault never breaks the console."""
+        try:
+            return self.newids.state(self.clock() if now is None else now)
+        except Exception as e:  # noqa: BLE001
+            self.log(f"CAD: new radio IDs: {type(e).__name__}: {e}")
+            return []
+
+    def name_radio(self, body: dict) -> dict:
+        """POST /api/cad/radio-id {system, radio_id, unit? | label? | ignore?, operator}: who a new FG1 radio is."""
+        try:
+            r = self.newids.answer(body, _text(body, "operator", OPERATOR_MAX))
+        except RadioError as e:
+            raise CadError(str(e)) from None
+        if r["linked"]:
+            self.log(f"CAD: radio {r['radio']['system']} {r['radio']['radio_id']} named {r['radio']['unit']}: "
+                     f"its transmissions -> {', '.join(r['linked'])}")
+        return r
 
     def status_hints(self) -> list[dict]:
         """The radio's status suggestions to show now (#37); a broken one never breaks the console."""
@@ -1019,13 +1041,18 @@ class Cad:
     # -- radios and communications ---------------------------------------------------------------
 
     def radio_registry(self) -> dict:
-        return self.radios.public()
+        """GET /api/cad/radios: the registry, and how many FG1 transmissions had an ID in the last 24 h (#163)."""
+        return dict(self.radios.public(), id_stats=self.comms.id_stats(self.clock() - 24 * 3600))
 
     def save_radio(self, body: dict) -> dict:
+        """Settings > Radios: add / edit one; a radio given a unit takes its unnamed transmissions with it (#163)."""
         try:
-            return self.radios.save(body, _text(body, "operator", OPERATOR_MAX))
+            row = self.radios.save(body, _text(body, "operator", OPERATOR_MAX))
         except RadioError as e:
             raise CadError(str(e)) from None
+        if row and row["unit"] and "unit" in body:
+            self.comms.relink(row["system"], row["radio_id"], row["unit"])
+        return row
 
     def delete_radio(self, body: dict) -> dict:
         try:

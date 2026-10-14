@@ -357,7 +357,7 @@ def test_traffic_links_to_the_event_while_the_unit_is_on_it_and_not_after(tmp_pa
     a = _event_with(c, ["E63", "E60"], clock)
     clock.t += 10
     assert c.record_traffic(tx("FG1-2", clock.t, rig="E63", radio_id="6301")) == [a["id"]]
-    assert c.record_traffic(tx("FG1-3", clock.t + 1)) == [a["id"]]                     # FG1, no ID, one call: that one
+    assert c.record_traffic(tx("FG1-3", clock.t + 1)) == []                            # FG1, no ID: on no call (#163)
     # A known radio that isn't a rig on the call (9231 = South End Firehouse mobile) is never attached.
     assert c.record_traffic(tx("FG1-9231", clock.t + 1.5, radio_id="9231")) == []
     assert c.record_traffic(tx("307-9-call_4-t1", clock.t + 2, "Fire/EMS 15", "E60", "E60", 307)) == [a["id"]]
@@ -380,7 +380,7 @@ def test_traffic_links_to_the_event_while_the_unit_is_on_it_and_not_after(tmp_pa
     clock.t += 1
     assert c.record_traffic(tx("FG1-7", clock.t, rig="E63")) == []
     radio = {r["id"]: r["why"] for r in c.full(a["id"])["radio"]}
-    assert radio == {"FG1-2": "unit", "FG1-3": "channel", "307-9-call_4-t1": "unit", "307-9-call_4-t0": "dispatcher",
+    assert radio == {"FG1-2": "unit", "307-9-call_4-t1": "unit", "307-9-call_4-t0": "dispatcher",
                      "307-9-call_4-t2": "dispatcher", "FG1-4": "unit"}
     # The dispatcher's turn can arrive first: linked when the unit's turn is linked.
     d = _event_with(c, ["R40"], clock)
@@ -395,7 +395,7 @@ def test_traffic_links_to_the_event_while_the_unit_is_on_it_and_not_after(tmp_pa
     c2 = cad(tmp_path, clock)
     rows = {r["id"]: r for r in c2.full(a["id"])["radio"]}
     assert rows["FG1-2"]["text"] == "Engine 63 on location" and rows["FG1-2"]["rig"] == "E63"
-    assert rows["FG1-2"]["radio_id"] == "6301" and len(rows) == 6
+    assert rows["FG1-2"]["radio_id"] == "6301" and len(rows) == 5
     assert c2.state()["incidents"][0]["radio"] or any(i["radio"] for i in c2.state()["incidents"])
 
 
@@ -562,17 +562,21 @@ def test_unit_tagged_notes_are_stored_exported_and_merge_with_radio(tmp_path):
     assert get("pcfd=1")["rows"][0]["events"][0]["number"] == a["number"]
 
 
-def test_old_channel_links_of_known_radios_are_dropped(tmp_path):
-    # Links made by the earlier rule (a known radio, or one transmission on two calls) go on restart.
+def test_old_channel_links_are_dropped_and_manual_ones_kept(tmp_path):
+    # #163: the FG1 channel rule (an unidentified radio put on the one call with units) is gone, and so are the
+    # links it made, on restart; what a person put on the call stays.
     clock = Clock()
     c = cad(tmp_path, clock)
     a = _event_with(c, ["E63"], clock)
     clock.t += 5
-    c.record_traffic(tx("FG1-u", clock.t))                                   # unknown radio, one call: kept
+    c.record_traffic(tx("FG1-u", clock.t))
+    c.record_traffic(tx("FG1-m", clock.t + 1))
     with c.store.tx() as db:
         db.execute("INSERT INTO radio_traffic (id, start, end, channel, radio_id, rig, text, status, updated_at) "
                    "VALUES ('FG1-k', ?, ?, 'FG1', '9231', '', '', 'no_speech', ?)", (clock.t, clock.t, clock.t))
-        db.execute("INSERT INTO radio_links (traffic_id, incident_id, why, unit) VALUES ('FG1-k', ?, 'channel', '')", (a["id"],))
-    from sizeup.cad.comms import Comms
-    Comms(c.store)
-    assert {r["id"] for r in c.full(a["id"])["radio"]} == {"FG1-u"}
+        for tid in ("FG1-k", "FG1-u"):
+            db.execute("INSERT INTO radio_links (traffic_id, incident_id, why, unit) VALUES (?, ?, 'channel', '')", (tid, a["id"]))
+    c.link_traffic(a["id"], {"traffic_id": "FG1-m", "operator": "Lt. Ruiz"})
+    assert {r["id"] for r in c.full(a["id"])["radio"]} == {"FG1-k", "FG1-u", "FG1-m"}
+    c2 = cad(tmp_path, clock)
+    assert {r["id"]: r["why"] for r in c2.full(a["id"])["radio"]} == {"FG1-m": "manual"}

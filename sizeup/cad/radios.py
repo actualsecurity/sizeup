@@ -14,7 +14,14 @@ as a conflict; a unit the pattern doesn't fit (TL2, U239, the chiefs) is listed 
 
 P25 needs no table to work: a talker alias that is a board code ("E60", "2398", "77A4") or starts
 with one ("E60 P2") names that unit. Every (radio ID, alias) pair heard is kept, so a radio heard
-once with its alias is known later without it. A person's edit in the Radios panel always wins
+once with its alias is known later without it.
+
+Heard on the air (heard()), P25 and FG1 alike (#163): an ID not in the table gets a row, source "heard",
+no unit (P25: the unit its alias names, if any); every ID heard, confirmed and guessed ones too, gets
+its last-heard time and the channel it was heard on (last_channel: FG1, Fire/EMS 15), written at most
+once a minute per radio (HEARD_WRITE_S) unless the channel or alias changed. An FG1 ID with no unit is
+asked about on the console (sizeup/cad/newids.py: "Radio 1234 on FG1: who is this?"); naming it there is
+an edit like any other here. A person's edit in the Radios panel always wins
 over what is heard (rows they touched are never overwritten) and every edit goes in settings_audit
 (who, section 'radios', key 'mdc:0611/unit', old -> new).
 """
@@ -146,6 +153,7 @@ class Registry:
         self._lock = threading.RLock()
         self._rows: dict[tuple[str, str], dict] = {}
         self._written: dict[tuple[str, str], float] = {}
+        self.rev = 0            # bumped when a row is added, named, edited or removed (not on a last-heard time)
         self.refresh_units()
         try:
             self.seed_data = load_seed(self.seed_path)
@@ -186,6 +194,7 @@ class Registry:
     def _reload(self) -> None:
         with self._lock:
             self._rows = {(r["system"], r["radio_id"]): r for r in self.store.q("SELECT * FROM radios")}
+        self.rev += 1
 
     def rows(self) -> list[dict]:
         with self._lock:
@@ -289,10 +298,11 @@ class Registry:
 
     # -- heard on the air -----------------------------------------------------------------------
 
-    def heard(self, system: str, radio_id: str, alias: str = "", at: float | None = None) -> None:
-        """A radio heard (a decoded MDC ID; a P25 radio with its alias). New radios get a row
-        (unit from the alias when it names one); known ones get their alias and last-heard time,
-        and a heard-only row its unit, unless a person edited it. Cheap when nothing changed."""
+    def heard(self, system: str, radio_id: str, alias: str = "", at: float | None = None, channel: str = "") -> None:
+        """A radio heard (a decoded MDC or FleetSync ID on FG1; a P25 radio with its alias), on channel.
+        New radios get a row, source "heard" (unit from the alias when it names one); known ones (confirmed,
+        guessed and heard alike) get their alias, last-heard time and channel, and a heard-only row its unit,
+        unless a person edited it. Cheap when nothing changed."""
         rid = str(radio_id or "").strip()
         if system == "mdc":
             rid = rid.upper()
@@ -301,6 +311,7 @@ class Registry:
         alias = " ".join(str(alias or "").split())[:60]
         if alias == rid:
             alias = ""
+        channel = " ".join(str(channel or "").split())[:40]
         at = self.clock() if at is None else at
         key = (system, rid)
         row = self.get(system, rid)
@@ -310,26 +321,37 @@ class Registry:
             with self.store.lock:
                 self.store.db.execute(
                     "INSERT OR IGNORE INTO radios (system, radio_id, unit, label, source, alias, first_heard, last_heard, "
-                    "heard, updated_at) VALUES (?, ?, ?, ?, 'heard', ?, ?, ?, 1, ?)", (system, rid, unit, label, alias, at, at, at))
+                    "heard, last_channel, updated_at) VALUES (?, ?, ?, ?, 'heard', ?, ?, ?, 1, ?, ?)",
+                    (system, rid, unit, label, alias, at, at, channel, at))
             self._written[key] = at
             self._reload_one(key)
+            self.rev += 1
             return
         changes: dict = {}
         if alias and alias != row["alias"]:
             changes["alias"] = alias
         if hit and not row["edited"] and row["source"] == "heard" and row["unit"] != hit[0]:
             changes["unit"], changes["label"] = hit[0], alias
+        named = "unit" in changes
+        # the channel goes with the last-heard time (a P25 radio moves between talkgroups all day: no extra writes)
+        newest = at >= (row["last_heard"] or 0)
         if not changes and at - self._written.get(key, 0) < HEARD_WRITE_S:
             with self._lock:
                 self._rows[key]["last_heard"] = max(row["last_heard"] or 0, at)
+                if channel and newest:
+                    self._rows[key]["last_channel"] = channel
             return
         changes["last_heard"] = max(row["last_heard"] or 0, at)
+        if channel and newest:
+            changes["last_channel"] = channel
         sets = ", ".join(f"{k} = ?" for k in changes)
         with self.store.lock:
             self.store.db.execute(f"UPDATE radios SET {sets}, heard = heard + 1, first_heard = COALESCE(first_heard, ?) "
                                   "WHERE system = ? AND radio_id = ?", (*changes.values(), at, system, rid))
         self._written[key] = at
         self._reload_one(key)
+        if named:
+            self.rev += 1
 
     def _reload_one(self, key: tuple[str, str]) -> None:
         r = self.store.one("SELECT * FROM radios WHERE system = ? AND radio_id = ?", key)
@@ -389,6 +411,7 @@ class Registry:
                 for k, v in ch.items():
                     audit(db, now, operator, "radios", f"{system}:{rid}/{k}", str(old[k] or ""), str(v or ""))
         self._reload_one((system, rid))
+        self.rev += 1
         return self.get(system, rid)
 
     def delete(self, system: str, radio_id: str, operator: str = "") -> None:
@@ -402,6 +425,7 @@ class Registry:
             db.execute("DELETE FROM radios WHERE system = ? AND radio_id = ?", (system, rid))
             audit(db, now, operator, "radios", f"{system}:{rid}", self._describe(old), "")
         self._reload_one((system, rid))
+        self.rev += 1
 
     @staticmethod
     def _describe(f: dict) -> str:

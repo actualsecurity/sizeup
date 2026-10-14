@@ -112,6 +112,10 @@ GET  /api/cad/radios                      the radio registry (radio ID -> rig), 
                                           the ID pattern, the edit log
 POST /api/cad/radios                      {system: mdc|p25, radio_id, unit?, label?, source?, notes?, operator?}  add / edit
 POST /api/cad/radios/delete               {system, radio_id, operator?}
+POST /api/cad/radio-id                    {system: mdc | fleetsync, radio_id, unit? | label? | ignore?, operator?}  who a
+                                          new FG1 radio is (#163, the state's radio_ids; sizeup/cad/newids.py): unit
+                                          names it (its transmissions go on that unit's events), label just says who,
+                                          ignore stops asking; dispatchers and admins, only for an ID nobody has set
 GET  /api/cad/comms?unit=&channel=&event=&pcfd=1&since=&until=&limit=&rev=
                                           every transmission (newest first) with its rig, radio ID, events
 GET  /api/cad/feed?limit=&tg=307,333      the pinned 60 Control feed: newest transmissions on the incident
@@ -171,6 +175,7 @@ WRITES = (
     (PREALERT, "dispatch"),                                                 # a phone pre-alert that is nothing
     (HINT, "dispatch"),                                                     # a status suggested from the radio (#37)
     (ALARM_ACK, "dispatch"),                                                # an emergency alarm seen (#128)
+    (re.compile(r"/api/cad/radio-id"), "dispatch"),                          # who a new FG1 radio is (#163)
     (re.compile(r"/api/incident/[^/]{1,80}/close"), "dispatch"),            # the monitor's incident list (server.py)
     (UNIT_STATION, "admin"),                                                # a unit's home station: Settings > Units
     (re.compile(r"/api/cad/settings/(?:channels|stt)"), "admin"),           # Settings > Radios: record / transcribe /
@@ -323,6 +328,11 @@ DOES = (
                                + (f" on {o['incident_number']}" if o.get("incident_number") else ""), o.get("incident_number") or "")),
     (ALARM_ACK, lambda m, b, o, c: (f"Acknowledged the emergency alarm: {_clip(o.get('who'), 30)} {o.get('what', '')} "
                                     f"on {o.get('channel', '')}".rstrip(), o.get("incident_number") or "")),
+    (re.compile(r"/api/cad/radio-id"), lambda m, b, o, c: (
+        f"Radio {b.get('system', '')} {_clip(b.get('radio_id'), 12)} "
+        + ("ignored" if b.get("ignore") is True else f"named {_clip(b.get('unit') or b.get('label'), 40)}")
+        + (f" (its transmissions on {', '.join(o.get('linked') or [])})" if o.get("linked") else ""),
+        (o.get("linked") or [""])[0])),
     (UNIT_STATION, lambda m, b, o, c: (f"Changed settings: {o.get('name', '')} station {_clip(b.get('station'), 40) or 'unset'}", "")),
     (re.compile(r"/api/cad/settings/channels"), _channels),
     (re.compile(r"/api/cad/settings/stt"), _stt),
@@ -561,4 +571,6 @@ class CadApi:
             return c.save_radio(body)
         if path == "/api/cad/radios/delete":
             return c.delete_radio(body)
+        if path == "/api/cad/radio-id":
+            return c.name_radio(body)
         return None

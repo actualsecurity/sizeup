@@ -180,6 +180,7 @@ CREATE TABLE IF NOT EXISTS radios (
   notes TEXT NOT NULL DEFAULT '',
   edited INTEGER NOT NULL DEFAULT 0,    -- a person changed it: what is heard never overwrites it
   first_heard REAL, last_heard REAL, heard INTEGER NOT NULL DEFAULT 0,
+  last_channel TEXT NOT NULL DEFAULT '', -- where it was last heard: FG1, Fire/EMS 15 (#163)
   updated_at REAL NOT NULL,
   PRIMARY KEY (system, radio_id)
 );
@@ -197,6 +198,7 @@ CREATE TABLE IF NOT EXISTS radio_traffic (
   rig TEXT NOT NULL DEFAULT '',         -- unit code(s), comma-separated
   dispatcher INTEGER NOT NULL DEFAULT 0,
   text TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '',
+  id_note TEXT NOT NULL DEFAULT '',     -- an analog key-up with no radio ID: none | undecoded | weak (#163)
   updated_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS radio_traffic_start ON radio_traffic(start);
@@ -436,6 +438,11 @@ class Store:
                           ("tone_seq", "TEXT NOT NULL DEFAULT ''")):                      # every tone heard (#115)
             if tcols and col not in tcols:
                 self.db.execute(f"ALTER TABLE radio_traffic ADD COLUMN {col} {decl}")
+        if tcols and "id_note" not in tcols:              # why an FG1 key-up has no radio ID (#163), 2026-10-14
+            self.db.execute("ALTER TABLE radio_traffic ADD COLUMN id_note TEXT NOT NULL DEFAULT ''")
+        radcols = {r["name"] for r in self.db.execute("PRAGMA table_info(radios)")}
+        if radcols and "last_channel" not in radcols:        # where a radio was last heard (#163), 2026-10-14
+            self.db.execute("ALTER TABLE radios ADD COLUMN last_channel TEXT NOT NULL DEFAULT ''")
         cols = {r["name"] for r in self.db.execute("PRAGMA table_info(operators)")}
         if not cols:
             return

@@ -69,6 +69,11 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
       <h2 title="Not dispatched">Pending</h2>
       <ol id="q-pending" class="list q"></ol>
     </section>
+    <!-- FG1 radio IDs nobody has named (radio-ids.js, #163): who is this? -->
+    <section id="newids" class="console-only" hidden>
+      <h2 title="Radio IDs heard on FG1 that the registry doesn't know: say who each is (nothing is guessed)">New radio IDs</h2>
+      <ol id="q-newids" class="nid-list" aria-live="polite" aria-label="New radio IDs"></ol>
+    </section>
     <section class="grow">
       <h2>Active</h2>
       <ol id="q-active" class="list q"></ol>
@@ -541,6 +546,7 @@ Slots go in order. A kind takes the next available unit of that kind (regular ap
 <script src="/static/prealert.js"></script>
 <script src="/static/cad.js"></script>
 <script src="/static/status-hints.js"></script>
+<script src="/static/radio-ids.js"></script>
 <script src="/static/cadmap.js"></script>
 <script src="/static/radio-view.js"></script>
 <script src="/static/radio-controls.js"></script>

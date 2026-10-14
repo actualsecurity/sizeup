@@ -123,6 +123,62 @@ def data_frames(frames: list[np.ndarray]) -> list[bool]:
     return list((ef / ev >= DATA_SHARE) & (db >= floor + DATA_OVER_DB))
 
 
+# A PTT-ID burst, told from anything else in the voice band (#163: "no ID sent" vs "ID not decoded" on an FG1
+# key-up with no ID). MDC-1200 is 1200/1800 Hz MSK, FleetSync 1200/1800 Hz (1200 bit/s) or 1200/2400 Hz (2400 bit/s)
+# FSK: most of the frame's voice-band energy is in the data band, well over the dead air, and it is both tones of a
+# pair, never one (a roger beep, a talk-permit tone, a pager tone or a whistle is a single tone: not a burst). The
+# synthetic bursts and the real FG1 captures (tests/fixtures/mdc, fg1) put 13-54 % of a data frame's energy on each
+# tone; one tone puts 0-1 % on the other.
+ID_BAND = (1000.0, 2550.0)
+ID_SHARE = 0.75                 # of the voice-band energy in ID_BAND
+ID_TONE_SHARE = 0.08            # ... and at least this much on each tone of a pair (+-150 Hz)
+ID_OVER_DB = DATA_OVER_DB       # over the transmission's dead air
+ID_PAIRS = ((1200.0, 1800.0), (1200.0, 2400.0))
+
+
+def _voice_frames(audio: np.ndarray, hop: int = FRAME) -> np.ndarray:
+    """Power spectra of the 50 ms frames of audio, one every hop samples (rows), or an empty array."""
+    x = np.asarray(audio, np.float64)
+    if len(x) < FRAME:
+        return np.zeros((0, FRAME // 2 + 1))
+    idx = np.arange(0, len(x) - FRAME + 1, hop)[:, None] + np.arange(FRAME)
+    return np.abs(np.fft.rfft(x[idx] * np.hanning(FRAME), axis=1)) ** 2
+
+
+_F = np.fft.rfftfreq(FRAME, 1 / RATE)
+_VOICE = (_F >= VOICE_BAND[0]) & (_F <= VOICE_BAND[1])
+
+
+def id_burst_frames(audio: np.ndarray, floor_db: float | None = None) -> list[bool]:
+    """Which 50 ms frames of audio (every 25 ms: a FleetSync burst is 45-90 ms) are a PTT-ID data burst (MDC-1200
+    or FleetSync), by the rule above. floor_db: the dead air's voice-band level to measure against (voice_floor_db
+    of the whole transmission; default: the 5th percentile of these frames, as data_frames)."""
+    S = _voice_frames(audio, FRAME // 2)
+    if not len(S):
+        return []
+    ev = S[:, _VOICE].sum(axis=1) + 1e-20
+    db = 10 * np.log10(ev)
+    floor = np.percentile(db, 5) if floor_db is None else floor_db
+    band = (_F >= ID_BAND[0]) & (_F <= ID_BAND[1])
+    share = {hz: S[:, (_F >= hz - 150) & (_F <= hz + 150)].sum(axis=1) / ev for pair in ID_PAIRS for hz in pair}
+    two = np.zeros(len(ev), bool)
+    for a, b in ID_PAIRS:
+        two |= (share[a] >= ID_TONE_SHARE) & (share[b] >= ID_TONE_SHARE)
+    return list((S[:, band].sum(axis=1) / ev >= ID_SHARE) & two & (db >= floor + ID_OVER_DB))
+
+
+def voice_floor_db(audio: np.ndarray) -> float | None:
+    """The dead air's voice-band level in a transmission (5th percentile of its 50 ms frames), for id_burst_frames;
+    None when there is too little of it, or it is blanked (a key-up that is only a burst: no dead air kept)."""
+    S = _voice_frames(audio)
+    if len(S) < 3:
+        return None
+    ev = S[:, _VOICE].sum(axis=1)
+    if not ev.any():
+        return None
+    return float(np.percentile(10 * np.log10(ev + 1e-20), 5))
+
+
 def speech_seconds(audio: np.ndarray, rate: int = RATE, margin_db: float = 8.0) -> float:
     """How much of a transmission has sound in the voice band above its own dead-air floor.
 

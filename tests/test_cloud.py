@@ -119,9 +119,9 @@ def event_with(cad, units, operator="Lt. Ruiz"):
     return inc, r
 
 
-def fm_segment(app, text_s=3.0):
+def fm_segment(app, text_s=3.0, bursts=()):
     now = time.time()
-    app._segment(Channel(453.0375, "FG1"), Segment(now, now + text_s, voice(text_s), 20.0))
+    app._segment(Channel(453.0375, "FG1"), Segment(now, now + text_s, voice(text_s), 20.0, list(bursts)))
     return f"FG1-{int(now * 1000)}"
 
 
@@ -162,13 +162,21 @@ def test_station_traffic_shows_on_the_hub_with_its_audio_and_on_the_cad_event(tm
         # No station yet: the dispatch goes out as text, and says why (never a hung request).
         assert r["audio_url"] is None and r["audio_note"].startswith("Voice unavailable") and "station" in r["audio_note"]
         st = station(station_cfg(tmp_path, hub.url), {3: "Engine 63 on location nothing showing"})
-        tid = fm_segment(st)
+        from sizeup.radio.mdc1200 import encode as mdc_encode
+        tid = fm_segment(st, bursts=[mdc_encode(0x01, 0x00, 0x6301).astype(np.float32)])     # E63's post-ID (#163)
         assert wait(lambda: any(t["id"] == tid for t in all_traffic(hub.get("/api/state"))), 15)
         t = next(t for t in all_traffic(hub.get("/api/state")) if t["id"] == tid)
         assert t["text"] == "Engine 63 on location nothing showing" and t["has_audio"] and t["source"] == "FG1"
-        # The CAD of record: on the event (an unidentified radio on FG1, one call with units on it).
+        # The CAD of record: on the event, from E63's radio (its MDC ID, named by the hub's registry).
         radio = hub.get(f"/api/cad/incident/{inc['id']}")["radio"]
-        assert [(x["id"], x["why"], x["has_audio"]) for x in radio] == [(tid, "channel", True)]
+        assert [(x["id"], x["why"], x["rig"], x["radio_id"], x["has_audio"]) for x in radio] == [(tid, "unit", "E63", "6301", True)]
+        # A key-up with no ID at all: in the Radio view, on no event, saying the radio sent none (#163).
+        time.sleep(0.01)
+        nid = fm_segment(st)
+        assert wait(lambda: any(r["id"] == nid for r in hub.get("/api/cad/comms")["rows"]), 15)
+        row = next(r for r in hub.get("/api/cad/comms")["rows"] if r["id"] == nid)
+        assert (row["radio_id"], row["rig"], row["id_note"], row["events"]) == ("", "", "none", [])
+        assert [x["id"] for x in hub.get(f"/api/cad/incident/{inc['id']}")["radio"]] == [tid]
         wav = hub.get(f"/api/audio/{tid}.wav")
         with wave.open(io.BytesIO(wav)) as w:
             assert w.getframerate() == 8000 and w.getnframes() == pytest.approx(3.0 * 8000, abs=10)

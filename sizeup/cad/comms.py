@@ -2,22 +2,30 @@
 
     radio_traffic   one row per transmission (the monitor's clip id: its audio plays from
                     /api/audio/<id>.wav until the 12 h audio limit; the transcript is copied here
-                    and kept), with the rig(s) the registry resolved and the raw radio ID(s)
+                    and kept), with the rig(s) the registry resolved and the raw radio ID(s); an FG1
+                    key-up with no ID says why (id_note, #163): none (no ID burst: the radio sent
+                    none), undecoded (a burst that didn't decode), weak (too weak to tell), '' (not known)
     radio_links     transmission x event, and why:
                       unit        from a radio of a unit assigned to the event (dispatched or
-                                  attached, until it cleared) at the time of the transmission
-                      channel     an UNIDENTIFIED radio (no ID decoded) on the tactical channel (FG1)
-                                  while exactly one emergency event had units on it. A known radio
-                                  (any decoded ID: a rig, or e.g. 9231 the South End mobile) links
-                                  only to events its rig is on (user, 2026-10-07: "why did this one
-                                  get added to this call? it wasn't dispatched to that call").
+                                  attached, until it cleared) at the time of the transmission: the
+                                  radio ID is in the registry and names that unit. The only way a
+                                  transmission on FG1 gets on an event by itself (#163: "these don't
+                                  have radio ids and were added to this inc ... we should only add them
+                                  if we know it, or ask if we see a new id"). A transmission with no ID
+                                  stays in the Radio view; an ID the registry doesn't know is asked
+                                  about (sizeup/cad/newids.py), and once it is named its transmissions
+                                  are linked like any other (relink(): the ones already logged too).
+                                  (Until #163, an unidentified FG1 radio was put on the one emergency
+                                  event with units, why "channel"; those links are dropped on start.)
                       dispatcher  a 60 Control turn right before or after a linked unit's turn in the
                                   same P25 call on an incident talkgroup (Fire/EMS 15); a key-up of
                                   an unknown radio between them (no ID, issue #62) is looked past
                       airport     a P25 transmission on the Airport Incident talkgroup (333) while
                                   exactly one Airport event (type AIRPORT, #87) is open: the whole
-                                  talkgroup is that incident's, whoever is talking. Two open: can't
-                                  tell whose, no link; none open: nothing.
+                                  talkgroup is that incident's, whoever is talking, as long as the
+                                  talker is identified (a radio ID or alias: a key-up with neither is
+                                  not linked, #163). Two open: can't tell whose, no link; none open:
+                                  nothing.
                       manual      put on the event by a person (a transmission's menu, "Add to event");
                                   unit = the operator who did it (also in the event's timeline)
                       page        a 60 Control page (South 2) on the event it opened, or a repeat of it
@@ -33,7 +41,7 @@
     Comms.names_ours set by the app from the feed's unit matcher): [unit codes], else [].
     radio_link_exclusions  transmission x event a person took off ("Remove from 26-000007", user,
                     2026-10-08: "how do i remove things from an inc if it was added"): an auto link
-                    (unit / channel / dispatcher) removed is remembered here so the auto-linker never
+                    (unit / dispatcher / airport) removed is remembered here so the auto-linker never
                     puts it back (the transcript coming again, the other turn of the call arriving);
                     a manual add clears it. A manual link removed is just gone.
 
@@ -56,6 +64,8 @@ TURN = re.compile(r"^(?P<call>.+)-t(?P<k>\d+)$")
 NOTES = "Notes"          # the /comms "channel" of event notes tagged with a unit
 KEEP_UNLINKED_S = 90 * 24 * 3600     # transmissions on no event: kept 90 days (linked ones: always)
 MAX_ROWS = 500
+ID_NOTES = ("none", "undecoded", "weak")    # why an FG1 key-up has no radio ID (radio_traffic.id_note, #163)
+RELINK_MAX = 2000                           # a radio just named: at most this many of its unnamed transmissions
 
 
 def split_call(tid: str, p25: bool) -> tuple[str, int | None]:
@@ -75,16 +85,14 @@ class Comms:
         self.rev = 0            # bumped on every new or changed transmission (the /comms page polls it)
         self.names_ours = None  # text -> [our unit codes] (the feed's matcher, #115): a page not ours naming them
         self.on_text = None     # traffic id -> None: a transcript arrived or changed (status suggestions, #37)
-        self._drop_bad_channel_links()
+        self._drop_channel_links()
 
-    def _drop_bad_channel_links(self) -> None:
-        """Links the old channel rule made: a known radio, or one transmission on several events."""
+    def _drop_channel_links(self) -> None:
+        """The links the old FG1 channel rule made (an unidentified radio put on the one call with units): gone
+        (#163). A person's own (manual) links stay."""
         try:
             with self.store.tx() as db:
-                db.execute("DELETE FROM radio_links WHERE why = 'channel' AND traffic_id IN "
-                           "(SELECT id FROM radio_traffic WHERE radio_id != '' OR rig != '')")
-                db.execute("DELETE FROM radio_links WHERE why = 'channel' AND traffic_id IN "
-                           "(SELECT traffic_id FROM radio_links WHERE why = 'channel' GROUP BY traffic_id HAVING COUNT(*) > 1)")
+                db.execute("DELETE FROM radio_links WHERE why = 'channel'")
         except Exception:
             pass                # no comms tables yet (a fresh store migrates first)
 
@@ -108,28 +116,27 @@ class Comms:
                 return []
             tones = json.dumps(t["tones"]) if t.get("tones") else ""
             seq = json.dumps(t["tone_seq"]) if t.get("tone_seq") else ""
+            known = bool(rigs) or bool(t.get("radio_id")) or bool(talker)
+            note = "" if known else str(t.get("id_note") or "")
+            note = note if note in ID_NOTES else ""
             vals = (call_id, turn, start, float(t.get("end") or start), t.get("source") or "", t.get("talkgroup"),
                     talker, t.get("radio_id") or "", ", ".join(rigs), disp, t.get("text") or "", t.get("status") or "",
-                    t.get("model") or "", tones, t.get("voice_at"), seq, now)
+                    t.get("model") or "", tones, t.get("voice_at"), seq, note, now)
             if have:
                 db.execute("UPDATE radio_traffic SET call_id = ?, turn = ?, start = ?, end = ?, channel = ?, talkgroup = ?, "
                            "talker = ?, radio_id = ?, rig = ?, dispatcher = ?, text = ?, status = ?, model = ?, tones = ?, "
-                           "voice_at = ?, tone_seq = ?, updated_at = ? WHERE id = ?", (*vals, tid))
+                           "voice_at = ?, tone_seq = ?, id_note = ?, updated_at = ? WHERE id = ?", (*vals, tid))
             else:
                 db.execute("INSERT INTO radio_traffic (call_id, turn, start, end, channel, talkgroup, talker, radio_id, rig, "
-                           "dispatcher, text, status, model, tones, voice_at, tone_seq, updated_at, id) "
-                           "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (*vals, tid))
+                           "dispatcher, text, status, model, tones, voice_at, tone_seq, id_note, updated_at, id) "
+                           "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (*vals, tid))
             off = {r[0] for r in db.execute("SELECT incident_id FROM radio_link_exclusions WHERE traffic_id = ?", (tid,))}
             links: dict[int, tuple[str, str]] = {}
             for rig in rigs:
                 for r in db.execute(self.ON_EVENT_BY_UNIT, (rig, start, start)).fetchall():
                     links.setdefault(r["incident_id"], ("unit", rig))
-            known = bool(rigs) or bool(t.get("radio_id"))
-            if not links and not known and (t.get("source") or "") in self.tactical:
-                active = db.execute(self.ACTIVE_EVENTS, (start, start)).fetchall()
-                if len(active) == 1:            # two calls on FG1: can't tell whose it is
-                    links[active[0]["incident_id"]] = ("channel", "")
-            if p25 and t.get("talkgroup") in self.airport_tgs:
+            # No ID, no link (#163): an unidentified FG1 radio stays in the Radio view, whoever's call is running.
+            if p25 and known and t.get("talkgroup") in self.airport_tgs:
                 open_ap = db.execute(self.OPEN_AIRPORT, (airport.TYPE, start, start)).fetchall()
                 if len(open_ap) == 1:           # the Airport Incident talkgroup: the one open airport event's
                     links.setdefault(open_ap[0]["id"], ("airport", ""))
@@ -157,7 +164,8 @@ class Comms:
     # Airport events (#87) open at time T: created by then and not yet closed or dismissed (a late transcript
     # from while it was open still links).
     OPEN_AIRPORT = "SELECT id FROM incidents WHERE type = ? AND created_at <= ? AND (closed_at IS NULL OR closed_at >= ?)"
-    # Emergency events with any unit on them at time T (their tactical channel is in use).
+    # Emergency events with any unit on them at time T (their tactical channel is in use): the alarms' FG1 mayday
+    # with no ID (sizeup/cad/alarms.py) and the new-ID prompt's "during 26-000016" (sizeup/cad/newids.py).
     ACTIVE_EVENTS = ("SELECT DISTINCT a.incident_id FROM assignments a JOIN incidents i ON i.id = a.incident_id "
                      "WHERE i.emergency = 1 AND a.assigned_at IS NOT NULL AND a.assigned_at <= ? "
                      "AND (a.cleared_at IS NULL OR a.cleared_at >= ?)")
@@ -204,6 +212,59 @@ class Comms:
         db.execute("INSERT OR IGNORE INTO radio_links (traffic_id, incident_id, why, unit) SELECT ?, ?, ?, ? "
                    "WHERE NOT EXISTS (SELECT 1 FROM radio_link_exclusions WHERE traffic_id = ? AND incident_id = ?)",
                    (tid, iid, why, unit, tid, iid))
+
+    def relink(self, system: str, radio_id: str, unit: str) -> list[int]:
+        """A radio ID just named (the new-ID prompt, sizeup/cad/newids.py, or Settings > Radios): each of its
+        transmissions logged with no rig (newest RELINK_MAX) gets that rig, and goes on the events the unit was on
+        when it was made, as record() would have put it (#163: "including that incident's recent ones"), unless a
+        person took it off one. A row that already had a rig keeps it (named as it was then). Returns the event
+        ids that got a transmission."""
+        rid = str(radio_id or "").strip()
+        rid = rid.upper() if system == "mdc" else rid
+        unit = str(unit or "").strip()
+        if not rid or not unit or not re.fullmatch(r"[0-9A-Za-z-]{1,12}", rid):
+            return []
+        fm = system in ("mdc", "fleetsync")
+        got: set[int] = set()
+        with self.store.tx() as db:
+            rows = db.execute("SELECT id, call_id, turn, start, talkgroup, dispatcher FROM radio_traffic WHERE rig = '' AND "
+                              + ("talkgroup IS NULL" if fm else "talkgroup IS NOT NULL")
+                              + " AND (', ' || radio_id || ', ') LIKE ? ORDER BY start DESC LIMIT ?",
+                              (f"%, {rid}, %", RELINK_MAX)).fetchall()
+            for r in rows:
+                db.execute("UPDATE radio_traffic SET rig = ?, id_note = '', updated_at = ? WHERE id = ?",
+                           (unit, self.clock(), r["id"]))
+                mine: dict[int, tuple[str, str]] = {}
+                for e in db.execute(self.ON_EVENT_BY_UNIT, (unit, r["start"], r["start"])).fetchall():
+                    mine[e["incident_id"]] = ("unit", unit)
+                    before = db.total_changes
+                    self._auto(db, r["id"], e["incident_id"], "unit", unit)
+                    if db.total_changes != before:
+                        got.add(e["incident_id"])
+                if not fm and r["turn"] is not None and r["talkgroup"] in self.incident_tgs:
+                    self._dispatcher_links(db, r["id"], r["call_id"], r["turn"], bool(r["dispatcher"]), mine)
+            if rows:
+                self.rev += 1
+        return sorted(got)
+
+    def id_stats(self, since: float, channels=None) -> list[dict]:
+        """Per analog channel since then (Settings > Radios, #163): transmissions, how many had a radio ID, and of
+        the rest how many sent none / had a burst that didn't decode / were too weak to tell / are from before."""
+        chans = list(channels if channels is not None else self.tactical)
+        if not chans:
+            return []
+        rows = self.store.q(f"SELECT channel, COUNT(*) AS n, SUM(radio_id != '' OR talker != '') AS with_id, "
+                            f"SUM(radio_id = '' AND talker = '' AND id_note = 'none') AS none, "
+                            f"SUM(radio_id = '' AND talker = '' AND id_note = 'undecoded') AS undecoded, "
+                            f"SUM(radio_id = '' AND talker = '' AND id_note = 'weak') AS weak "
+                            f"FROM radio_traffic WHERE talkgroup IS NULL AND start >= ? AND channel IN "
+                            f"({','.join('?' * len(chans))}) GROUP BY channel ORDER BY channel", (since, *chans))
+        out = []
+        for r in rows:
+            d = {k: int(r[k] or 0) for k in ("n", "with_id", "none", "undecoded", "weak")}
+            d["unknown"] = d["n"] - d["with_id"] - d["none"] - d["undecoded"] - d["weak"]
+            out.append({"channel": r["channel"], **d})
+        return out
 
     def link_pages(self, iid: int, page_ids) -> int:
         """The 60 Control pages that opened (or repeated) an event, on it (why 'page'): each one already
