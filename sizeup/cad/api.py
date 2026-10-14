@@ -72,7 +72,8 @@ POST /api/cad/incident                    Accept event: {type, subtype?, emergen
                                           remarks?, lat?, lon?, geo_label?, operator?; an Airport event (#105):
                                           acft_type?, acft_nature?, acft_eta? (minutes), acft_runway? (16|34|11|29),
                                           acft_souls?, acft_level? (1-5, from the souls unless given), acft_fuel?, acft_cargo?}
-POST /api/cad/incident/<id>               edit: any of the fields above
+POST /api/cad/incident/<id>               edit: any of the fields above, and map_layers?: {layer: true|false} | null, the
+                                          map's layer set for this event (#111; "cameras", "gis:hydrants" ...; null: the default)
 POST /api/cad/incident/<id>/accept        {type?, subtype?, operator?}  a 60 Control page -> pending (numbered)
 POST /api/cad/incident/<id>/dismiss       {operator?, reason?}   a 60 Control page nobody takes
 POST /api/cad/incident/<id>/close         {disposition, operator?}  units cleared

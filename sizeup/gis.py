@@ -107,6 +107,10 @@ class Layer:
     asof: str = ""                    # the data's date as the county states it ("as of Oct 2015"): shown
     ours_field: str = ""              # the field naming the department: features matching ours are marked _ours
     note: str = ""                    # what the data doesn't say, shown with every feature ("catenary: 12.5 kV")
+    icon: str = ""                    # the mark for a point layer (#111): static/icons.svg "i-gis-<icon>" ("hydrant",
+                                      # "fire-station"), in the style's color on the map, by its toggle, in the click box; "": a dot
+    sub: str = ""                     # what a feature is, under its title in the click box ("Petroleum bulk storage (NYSDEC PBS)");
+                                      # "": the label
 
     @property
     def every_s(self) -> float:
@@ -116,7 +120,7 @@ class Layer:
         return {"key": self.key, "label": self.label, "group": self.group, "kind": self.kind, "style": dict(self.style),
                 "minzoom": self.minzoom, "fields": [list(f) for f in self.fields], "on": self.on, "refresh": self.refresh,
                 "tiled": self.tiled, "licence": self.licence, "page": self.page, "asof": self.asof,
-                "ours_field": self.ours_field, "note": self.note}
+                "ours_field": self.ours_field, "note": self.note, "icon": self.icon, "sub": self.sub}
 
 
 # ---- the starter set: docs/cloud.md "County GIS layers" has each dataset's source and terms -------------------
@@ -157,16 +161,21 @@ DEFAULT_LAYERS: tuple[Layer, ...] = (
           fields=(("NAME", "Municipality"), ("SQMILES", "Square miles")), licence=COUNTY_TERMS,
           page=f"{_HUB}278ce38ecd784b79993af098f81809ed_163"),
     # -- Utilities (the county's infrastructure layers) ---------------------------------------------------------------
-    Layer("hydrants", "Hydrants", f"{_WC}/DataHub_Infrastructure/MapServer/147", group="Utilities", kind="point",
+    Layer("hydrants", "Hydrants", f"{_WC}/DataHub_Infrastructure/MapServer/147", group="Utilities", kind="point", icon="hydrant",
           style={"color": "--info", "radius": 4.5, "label": "HYD_NUMBER", "labelzoom": 17}, minzoom=14, refresh="monthly",
           fields=(("FIRENAME", "Fire district"), ("HYD_NUMBER", "Hydrant no."), ("MUNCIPALIT", "Municipality")),
           licence=COUNTY_TERMS, page=f"{_HUB}b1766f745f954027936f74e7b0d2de65_147", asof="as of Oct 2015",
           note="Positions from the departments that contributed them (some partial); no flow or size data"),
-    Layer("petroleum", "Petroleum bulk storage", f"{_WC}/DataHub_EnvironmentandPlanning/MapServer/165", group="Utilities", kind="point",
-          style={"color": "--warn", "radius": 5}, minzoom=12, refresh="monthly",
+    # The county's copy of NYSDEC's PBS registry carries the facility, its address and PBS number only (no tank count,
+    # product or gallons: those are in DEC's own PBS database, by the PBS number). The mark: a drum in the warning
+    # color, a third larger than the hydrant's, so a fuel site is unmistakable (#111).
+    Layer("petroleum", "Fuel storage sites (PBS)", f"{_WC}/DataHub_EnvironmentandPlanning/MapServer/165", group="Utilities", kind="point",
+          icon="petroleum", sub="Petroleum bulk storage (NYSDEC PBS)",
+          style={"color": "--warn", "radius": 5, "size": 1.35}, minzoom=12, refresh="monthly",
           fields=(("FACILITY_NAME", "Facility"), ("STREET", "Address"), ("CITY", "City"), ("PBSNUMBER", "PBS no.")),
-          licence=COUNTY_TERMS, page=f"{_HUB}04c419cd0cd4467db97cc434b36654c6_165", asof="NYSDEC, as of June 2017"),
-    Layer("tanks_towers", "Tanks, towers, antennas", f"{_WC}/DataHub_BasemapPlanimetrics/MapServer/14", group="Utilities", kind="polygon",
+          licence=COUNTY_TERMS, page=f"{_HUB}04c419cd0cd4467db97cc434b36654c6_165", asof="NYSDEC, as of June 2017",
+          note="Fuel tanks on site: check on a fire or spill (tank count, product and gallons: DEC's PBS record by the number)"),
+    Layer("tanks_towers", "Tanks, towers, antennas", f"{_WC}/DataHub_BasemapPlanimetrics/MapServer/14", group="Utilities", kind="polygon", icon="tank",
           style={"color": "--warn", "fill": 0.3, "width": 1.2, "height": "ACTUAL_HEIGHT", "height_scale": 0.3048},
           minzoom=13, refresh="monthly", simplify_m=0.3, where="FEA_CODE IN (2110, 2120, 2130)",
           fields=(("DESCRIPTION", "Structure"), ("ACTUAL_HEIGHT", "Height (ft)"), ("APPROX_ROOF_ELEVATION", "Top elevation (ft)"),
@@ -178,37 +187,37 @@ DEFAULT_LAYERS: tuple[Layer, ...] = (
           licence=COUNTY_TERMS, page=f"{_HUB}50f7273fb48948d0a514b51993066846_16", asof="aerial photos 2000-2023 (each feature's date)",
           note="Footprints only: the county publishes no load or clearance limits"),
     # -- Facilities -----------------------------------------------------------------------------------------------
-    Layer("fire_stations", "Fire stations", f"{_WC}/DataHub_CommunityFacilities/MapServer/183", group="Facilities", kind="point",
+    Layer("fire_stations", "Fire stations", f"{_WC}/DataHub_CommunityFacilities/MapServer/183", group="Facilities", kind="point", icon="fire-station",
           style={"color": "--err", "radius": 5}, minzoom=11, refresh="monthly",
           fields=(("NAME", "Department"), ("ADDRESS", "Address"), ("CITY", "City"), ("PHONE", "Phone")), ours_field="NAME",
           licence=COUNTY_TERMS, page=f"{_HUB}7b13a73e7a564c648d95529cebc10061_183", asof="as of Dec 2015"),
-    Layer("police", "Police stations", f"{_WC}/DataHub_CommunityFacilities/MapServer/167", group="Facilities", kind="point",
+    Layer("police", "Police stations", f"{_WC}/DataHub_CommunityFacilities/MapServer/167", group="Facilities", kind="point", icon="police",
           style={"color": "--info", "radius": 5}, minzoom=11, refresh="monthly",
           fields=(("NAME", "Station"), ("ADDRESS", "Address"), ("CITY", "City"), ("PHONE", "Phone")),
           licence=COUNTY_TERMS, page=f"{_HUB}939d7f4195e542faa8a6f14623caf61d_167"),
-    Layer("hospitals", "Hospitals", f"{_WC}/DataHub_CommunityFacilities/MapServer/178", group="Facilities", kind="point",
+    Layer("hospitals", "Hospitals", f"{_WC}/DataHub_CommunityFacilities/MapServer/178", group="Facilities", kind="point", icon="hospital",
           style={"color": "--ok", "radius": 6}, minzoom=10, refresh="monthly",
           fields=(("HOSPNAME", "Hospital"), ("ADDRESS", "Address"), ("CITY", "City"), ("PHONE", "Phone")),
           licence=COUNTY_TERMS, page=f"{_HUB}41f2aa4e2f74435ab7c05c7d56a9bf11_178", asof="NYS DOH, as of Apr 2020"),
-    Layer("nursing_homes", "Nursing homes", f"{_AGOL}/DOHdata/FeatureServer/1", group="Facilities", kind="point",
+    Layer("nursing_homes", "Nursing homes", f"{_AGOL}/DOHdata/FeatureServer/1", group="Facilities", kind="point", icon="nursing-home",
           style={"color": "--warn", "radius": 5}, minzoom=12, refresh="monthly",
           fields=(("FACILITY_NAME", "Facility"), ("FACILITY_ADDRESS_2", "Address"), ("FACILITY_CITY", "City"), ("PHONE", "Phone"),
                   ("AVERAGE_OCCUPIED_BEDS", "Occupied beds (avg)"), ("OPERATOR", "Operator")),
           licence=COUNTY_TERMS, page=f"{_HUB}c87ffaef3c344d8086d2a9eb0db2f709_1", asof="NYS DOH, Sept 2020"),
-    Layer("adult_care", "Assisted living & adult care", f"{_AGOL}/DOHdata/FeatureServer/0", group="Facilities", kind="point",
+    Layer("adult_care", "Assisted living & adult care", f"{_AGOL}/DOHdata/FeatureServer/0", group="Facilities", kind="point", icon="nursing-home",
           style={"color": "--warn", "radius": 5}, minzoom=12, refresh="monthly",
           fields=(("FACILITY_NAME", "Facility"), ("ADDRESS", "Address"), ("CITY", "City"), ("PHONE", "Phone"),
                   ("NUMBER_OF_BEDS", "Beds"), ("TYPE_", "Type"), ("OPERATOR", "Operator")),
           licence=COUNTY_TERMS, page=f"{_HUB}c87ffaef3c344d8086d2a9eb0db2f709_0", asof="NYS DOH, Sept 2020"),
-    Layer("schools", "Public schools", f"{_WC}/DataHub_CommunityFacilities/MapServer/162", group="Facilities", kind="point",
+    Layer("schools", "Public schools", f"{_WC}/DataHub_CommunityFacilities/MapServer/162", group="Facilities", kind="point", icon="school",
           style={"color": "--ok", "radius": 5}, minzoom=12, refresh="monthly",
           fields=(("NAME", "School"), ("ADDRESS", "Address"), ("CITY", "City"), ("DISTNAME", "District"), ("PHONE", "Phone")),
           licence=COUNTY_TERMS, page=f"{_HUB}b19db7de171a4aed8b930ca722cfe718_162"),
-    Layer("worship", "Houses of worship", f"{_WC}/DataHub_CommunityFacilities/MapServer/176", group="Facilities", kind="point",
+    Layer("worship", "Houses of worship", f"{_WC}/DataHub_CommunityFacilities/MapServer/176", group="Facilities", kind="point", icon="worship",
           style={"color": "--text-2", "radius": 4.5}, minzoom=13, refresh="monthly",
           fields=(("ORGANIZATION", "Congregation"), ("ADDRESS", "Address"), ("CITY", "City")),
           licence=COUNTY_TERMS, page=f"{_HUB}c67b77e9dc2744eeadbc82888a6f058a_176"),
-    Layer("ambulance", "Volunteer ambulance corps", f"{_WC}/DataHub_CommunityFacilities/MapServer/150", group="Facilities", kind="point",
+    Layer("ambulance", "Volunteer ambulance corps", f"{_WC}/DataHub_CommunityFacilities/MapServer/150", group="Facilities", kind="point", icon="ambulance",
           style={"color": "--ok", "radius": 5}, minzoom=11, refresh="monthly",
           fields=(("VAC_NAME", "Corps"), ("ADDRESS", "Address"), ("CITY", "City"), ("PHONE", "Phone")),
           licence=COUNTY_TERMS, page=f"{_HUB}167e50fdae6b4d60b734e3786307067e_150", asof="as of 2016"),
@@ -255,14 +264,14 @@ DEFAULT_LAYERS: tuple[Layer, ...] = (
           fields=(("NAME", "Line"), ("DESCRIPTION", "Kind")), licence=COUNTY_TERMS, page=f"{_HUB}7fa83627031243d999b8cd5f3ba26125_1",
           note="Metro-North New Haven Line (Port Chester, Rye): overhead catenary, 12.5 kV AC, plus the third rail at stations; "
                "the county's data names no owner or electrification"),
-    Layer("train_stations", "Train stations", f"{_WC}/DataHub_Transportation/MapServer/156", group="Transportation", kind="point",
+    Layer("train_stations", "Train stations", f"{_WC}/DataHub_Transportation/MapServer/156", group="Transportation", kind="point", icon="train",
           style={"color": "--text-2", "radius": 5.5}, minzoom=11, refresh="monthly",
           fields=(("STATNAME", "Station"),), licence=COUNTY_TERMS, page=f"{_HUB}bdf8a8439d294e3b9ef107d49b6a6743_156"),
     Layer("bus_routes", "Bee-Line bus routes", f"{_WC}/DataHub_Transportation/MapServer/154", group="Transportation", kind="line",
           style={"color": "--ok", "width": 1.8}, minzoom=12, refresh="monthly", simplify_m=2.0,
           fields=(("LINEABBR", "Route"), ("LINENAME", "Name")), licence=COUNTY_TERMS, page=f"{_HUB}7305a04a5aa24fd5957301d554f55c24_154",
           asof="Apr 2022"),
-    Layer("bus_stops", "Bee-Line bus stops", f"{_WC}/DataHub_Transportation/MapServer/153", group="Transportation", kind="point",
+    Layer("bus_stops", "Bee-Line bus stops", f"{_WC}/DataHub_Transportation/MapServer/153", group="Transportation", kind="point", icon="bus",
           style={"color": "--ok", "radius": 3.5}, minzoom=15, refresh="monthly",
           fields=(("STOPNAME", "Stop"), ("ONSTREET", "On"), ("CROSSTREET", "At"), ("ROUTES", "Routes")),
           licence=COUNTY_TERMS, page=f"{_HUB}b041128dd5334a999f20c11ba5074366_153"),

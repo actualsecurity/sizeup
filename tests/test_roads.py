@@ -1248,7 +1248,7 @@ def test_the_layers_control_is_on_every_map_with_its_six_layers():
     assert not re.search(r"carsprogram|511ny\.org/(api|map)|[?&]key=|skyvdn|nyssnapshot", js)
     assert "visibilitychange" in js and "CAM_REFRESH_MS = 10000" in js                # ~10 s, paused when hidden
     cadmap = (STATIC / "cadmap.js").read_text()
-    assert "MapLayers.attach(this.map, host, ctrls)" in cadmap and 'MapLayers.cameras(inc, $("#d-cams"))' in cadmap
+    assert "MapLayers.attach(this.map, host, ctrls, { layers: opts.layers })" in cadmap and 'MapLayers.cameras(inc, $("#d-cams"))' in cadmap
     assert 'MapLayers.cameras(act, $("#ov-cams"), { small: true })' in cadmap              # the wall board's two (#95)
     assert 'id="d-cams"' in html and 'id="ov-cams"' in html
     assert "/api/cad/cameras?" in js and "CAM_REFRESH_MS)" in js and 'aria-expanded' in js   # live, collapsible

@@ -6,8 +6,13 @@
 //                 feeds and 511NY's, through the hub: GET /api/cad/roads, sizeup/roads.py; each item says its
 //                 source), Mileposts, Exits (the gazetteer's, #67), Airport with its Approaches sub-toggle (airport.js,
 //                 #87: drawn by that module, listed and switched here; on by itself for an event at the airport,
-//                 focus(inc)). Each one on / off per viewer (localStorage
-//                 "sizeup.mapLayers"); cameras and incidents on at first. Signs from zoom 11, exits and mileposts from 12
+//                 focus(inc)). Each one on / off per viewer (localStorage "sizeup.mapLayers"), as two remembered
+//                 sets (#111): "overview" (the Overview map, the large map, the wall board) and "incident" (an
+//                 event's map); cameras and incidents on in both at first. An event can have its own set: a
+//                 dispatcher's change on its map is kept on the event (POST /api/cad/incident/<id> map_layers,
+//                 a flat {key: on} over every layer, GIS ones as "gis:<key>"), so that event looks the same
+//                 to everyone who opens it; "Reset to default" drops it. A viewer's change is theirs alone.
+//                 Signs from zoom 11, exits and mileposts from 12
 //                 (the tenths of a mile from 14). The box says which sources are on and when each last updated
 //                 ("Data: New York State Thruway Authority", "511NY, updated hh:mm"); no source at all: the
 //                 four are greyed with the reason; the rest still work.
@@ -25,8 +30,11 @@
 // updated, and the map's attribution names each source that is on, with a link.
 //
 // Other scripts add their own groups to the same Layers box: MapLayers.addGroup({attach(control) ->
-// {panel() -> Element | null}}) (gislayers.js: the county GIS layers, #91); attach() gets each map's
-// control (its map, showInfo(title, sub, lines, foot), close()), panel() is asked at every render.
+// {panel(folds) -> Element | null, keys() -> [[key, default]], refresh()}}) (gislayers.js: the county GIS
+// layers, #91); attach() gets each map's control (its map, on(key, default), setLayer(key, on),
+// showInfo(title, sub, lines, foot, cls, icon), close()); panel() is asked at every render, with each
+// <details data-fold> group's open state from the box as it was (the rebuild keeps the scroll, the focus
+// and the folds, #111); keys() the group's layers for the event's set; refresh() after a change.
 "use strict";
 
 window.MapLayers = (() => {
@@ -43,6 +51,12 @@ window.MapLayers = (() => {
     { key: "airport", label: "Airport", feed: false, minzoom: 0, on: false, plugin: "AirportLayer" },          // airport.js (#87)
     { key: "approaches", label: "Approaches", feed: false, minzoom: 0, on: false, plugin: "AirportLayer", sub: "airport" },
   ];
+  // The two remembered sets (#111) and what is on in each for a viewer who never chose: the layers' own
+  // defaults in both (a group's own layers add theirs: gislayers.js PROFILE_ON).
+  const BASE_ON = Object.fromEntries(LAYERS.filter((l) => l.on).map((l) => [l.key, true]));
+  const PROFILES = { overview: { ...BASE_ON }, incident: { ...BASE_ON } };
+  const OPEN = ["queued", "pending", "active"];
+  const canWrite = () => { try { return !!(window.canDo && canDo("dispatch")); } catch (_) { return false; } };
   const SOURCE_NOTE = { "511NY": "powered by 511NY", Thruway: "Data: New York State Thruway Authority" };
   const attributionFor = (d) => ((d && d.sources) || []).filter((s) => s.configured)      // the map's corner is small: names only
     .map((s) => `<a href="${esc(s.link)}" target="_blank" rel="noopener">${esc(s.short === "Thruway" ? "NYS Thruway Authority" : s.label)}</a>`).join(" · ");
@@ -57,14 +71,32 @@ window.MapLayers = (() => {
   const esc = (s) => String(s == null ? "" : s);
 
   // ---- per-viewer choices (localStorage may be missing or refuse: then just this page view) --------------
+  // {overview: {key: on}, incident: {key: on}, folds: {group: open}, hideDown}; only what the viewer chose is
+  // in a set (the rest: the profile's default). Before #111 one flat set was kept (and gislayers.js its own,
+  // "sizeup.gisLayers"): read once as both sets.
+  const KEY_RE = /^[a-z][a-z0-9_:-]{0,47}$/;
+  // a stored value (drop: then forget it), or null when storage is missing or refuses
+  function stored(key, drop = false) { try { const v = localStorage.getItem(key); if (drop) localStorage.removeItem(key); return v; } catch (_) { return null; } }
   const prefs = (() => {
-    const p = Object.fromEntries(LAYERS.map((l) => [l.key, l.on]));
-    p.hideDown = false;                                  // "Hide down cameras" (#99): off by default
+    const p = { overview: {}, incident: {}, folds: {}, hideDown: false };
     try {
-      const saved = JSON.parse(localStorage.getItem(PREF_KEY) || "null");
+      const saved = JSON.parse(stored(PREF_KEY) || "null");
       if (saved && typeof saved === "object") {
-        for (const l of LAYERS) if (typeof saved[l.key] === "boolean") p[l.key] = saved[l.key];
+        const flat = Object.fromEntries(Object.entries(saved).filter(([k, v]) => typeof v === "boolean" && k !== "hideDown"));
+        for (const name of Object.keys(PROFILES)) {
+          const set = saved[name] && typeof saved[name] === "object" ? saved[name] : flat;
+          for (const [k, v] of Object.entries(set)) if (typeof v === "boolean" && KEY_RE.test(k)) p[name][k] = v;
+        }
+        if (saved.folds && typeof saved.folds === "object") for (const [k, v] of Object.entries(saved.folds)) if (typeof v === "boolean") p.folds[k] = v;
         if (typeof saved.hideDown === "boolean") p.hideDown = saved.hideDown;
+      }
+      const gis = JSON.parse(stored("sizeup.gisLayers", true) || "null");          // read once, then gone
+      if (gis && typeof gis === "object") {
+        for (const [k, v] of Object.entries(gis)) {
+          if (typeof v !== "boolean") continue;
+          if (k.startsWith("_open:")) p.folds[k.slice(6)] = v;
+          else for (const name of Object.keys(PROFILES)) if (typeof p[name][`gis:${k}`] !== "boolean") p[name][`gis:${k}`] = v;
+        }
       }
     } catch (_) { /* defaults */ }
     return p;
@@ -218,6 +250,13 @@ window.MapLayers = (() => {
       this.ready = false;
       this.sigs = {};
       this.force = {};          // layers on for this map's event (airport: an event at the field, #87), until unticked
+      this.profile = opts.layers === "incident" ? "incident" : "overview";   // which remembered set (#111)
+      this.focused = null;      // the map's event (focus(inc)) and, on an event's map, its own layer set
+      this.focusId = null;
+      this.override = null;     // the event's own {key: on}, or null: the profile's set
+      this.overrideLocal = false;   // true: this viewer's unsaved copy (a viewer, or a closed event)
+      this.pending = 0;         // saves in flight
+      this.savedAt = 0;
       this.btn = h("button", "cm-btn sm");
       this.btn.type = "button";
       if (window.Icon) this.btn.append(Icon("layers"));
@@ -269,7 +308,7 @@ window.MapLayers = (() => {
         if (map.getSource(src)) continue;
         const attr = l.key === "cameras" ? attributionFor(store.data) : "";
         map.addSource(src, { type: "geojson", data: fc([]), ...(attr ? { attribution: attr } : {}) });
-        const vis = prefs[l.key] ? "visible" : "none";
+        const vis = this.on(l.key) ? "visible" : "none";
         if (l.key === "mileposts" || l.key === "exits") {
           if (l.key === "mileposts") {
             map.addLayer({ id: `${src}-tenths`, type: "symbol", source: src, minzoom: 14, filter: ["!", ["get", "whole"]],
@@ -323,13 +362,89 @@ window.MapLayers = (() => {
       if (!this.panel.hidden) this.renderPanel();
     }
 
-    on(key) { return !!(prefs[key] || this.force[key]); }
-    focus(inc) {                  // the map's event (cadmap.js RigMap.update): at the airport, that layer comes on
+    // is a layer on here: forced for the event (the airport), else the event's own set, else the viewer's set
+    // for this map's profile, else the default (a group's layers say theirs)
+    on(key, dflt) {
+      if (this.force[key]) return true;
+      if (this.override && typeof this.override[key] === "boolean") return this.override[key];
+      const mine = prefs[this.profile][key];
+      if (typeof mine === "boolean") return mine;
+      return dflt === undefined ? !!PROFILES[this.profile][key] : !!dflt;
+    }
+    perEvent() { return this.profile === "incident" && !!this.focused; }
+    focus(inc) {                  // the map's event (cadmap.js RigMap.update): its own layer set (#111); at the airport, that layer comes on
       this.focused = inc || null;
+      const id = inc ? inc.id : null;
+      let changed = false;
+      if (id !== this.focusId) { this.focusId = id; this.overrideLocal = false; this.pending = 0; this.savedAt = 0; changed = true; }
+      if (!this.overrideLocal && !this.pending && Date.now() - this.savedAt > 5000) {     // the hub's copy (not a save still on its way)
+        const set = this.perEvent() && inc.map_layers && typeof inc.map_layers === "object" ? inc.map_layers : null;
+        if (JSON.stringify(set) !== JSON.stringify(this.override)) { this.override = set; changed = true; }
+      }
       const on = !!(window.AirportLayer && AirportLayer.near(inc));
-      if (on === !!this.force.airport) return;
-      this.force.airport = on;
+      if (on !== !!this.force.airport) { this.force.airport = on; changed = true; }
+      if (changed) this.refresh();
+    }
+    // every layer as it shows on this map now: the event's set when one is made
+    effective() {
+      const set = {};
+      for (const l of LAYERS) set[l.key] = this.on(l.key);
+      for (const g of this.groups) { try { for (const [k, d] of (g.keys ? g.keys() : [])) set[k] = this.on(k, d); } catch (e) { console.error(e); } }
+      return set;
+    }
+    // a toggle: on an event's map the event's own set (saved on the event by a dispatcher while it is open;
+    // a viewer's, or a closed event's, stays here), else the viewer's set for this profile
+    setLayer(key, on) {
+      on = !!on;
+      if (key in this.force) this.force[key] = false;
+      if (this.perEvent()) {
+        const set = this.effective();
+        set[key] = on;
+        this.override = set;
+        if (canWrite() && OPEN.includes(this.focused.status)) this.saveOverride(set);
+        else { this.overrideLocal = true; prefs[this.profile][key] = on; savePrefs(); }
+        this.refresh();
+        return;
+      }
+      prefs[this.profile][key] = on;
+      savePrefs();
+      for (const m of maps) if (m.profile === this.profile && !m.override) m.refresh();
+    }
+    saveOverride(set) {
+      const id = this.focusId;
+      if (id == null) return;
+      this.pending++;
+      this.savedAt = Date.now();
+      let op = "";
+      try { op = window.operator ? operator() : ""; } catch (_) { /* no operator field on this page */ }
+      fetch(`/api/cad/incident/${encodeURIComponent(id)}`, { method: "POST", credentials: "same-origin",
+            headers: { "Content-Type": "application/json" }, body: JSON.stringify({ map_layers: set, operator: op }) })
+        .then(async (r) => {
+          if (r.ok) return;
+          let why = `${r.status}`;
+          try { why = (await r.json()).error || why; } catch (_) { /* not JSON */ }
+          throw new Error(why);
+        })
+        .catch((e) => { if (window.UI && UI.toast) UI.toast(`Map layers not saved: ${e.message}`, "err"); })
+        .finally(() => { if (this.focusId === id) this.pending = Math.max(0, this.pending - 1); });
+    }
+    resetOverride() {             // "Reset to default": the viewer's set again (and the event's own set dropped)
+      const saved = this.override && !this.overrideLocal;
+      this.override = null;
+      this.overrideLocal = false;
+      if (saved && canWrite()) this.saveOverride(null);
+      this.refresh();
+    }
+    useAsDefault() {              // "Use as default": the event's set becomes this viewer's set for every event
+      if (!this.override) return;
+      prefs[this.profile] = { ...this.override };
+      savePrefs();
+      if (window.UI && UI.toast) UI.toast("Saved as your default for events");
+      for (const m of maps) if (m.profile === this.profile && !m.override) m.refresh();
+    }
+    refresh() {
       this.applyVisibility();
+      for (const g of this.groups) { try { if (g.refresh) g.refresh(); } catch (e) { console.error(e); } }
       if (!this.panel.hidden) this.renderPanel();
     }
 
@@ -339,7 +454,7 @@ window.MapLayers = (() => {
       for (const l of LAYERS) {
         if (l.plugin) continue;
         for (const id of [`ml-${l.key}`, `ml-${l.key}-tenths`]) {
-          if (this.map.getLayer(id)) this.map.setLayoutProperty(id, "visibility", prefs[l.key] ? "visible" : "none");
+          if (this.map.getLayer(id)) this.map.setLayoutProperty(id, "visibility", this.on(l.key) ? "visible" : "none");
         }
       }
     }
@@ -360,11 +475,18 @@ window.MapLayers = (() => {
 
     renderPanel() {
       const d = store.data;
+      const panel = this.panel;
+      // a rebuild keeps the viewer's place (#111): the scroll, the focused control and each group's fold
+      const scroll = panel.scrollTop;
+      const active = document.activeElement && panel.contains(document.activeElement) ? document.activeElement.dataset.key || "" : "";
+      const folds = {};
+      for (const f of panel.querySelectorAll("details[data-fold]")) folds[f.dataset.fold] = f.open;
       const head = h("div", "ml-head");
-      head.append(h("b", "", "Layers"));
+      head.append(h("b", "", this.perEvent() && this.override ? "Layers for this event" : "Layers"));
       const x = h("button", "icon quiet sm");
       x.type = "button";
       x.setAttribute("aria-label", "Close");
+      x.dataset.key = "close";
       x.append(window.Icon ? Icon("x") : "✕");
       x.addEventListener("click", () => { this.close(); this.btn.focus(); });
       head.append(h("span", "spacer"), x);
@@ -376,9 +498,10 @@ window.MapLayers = (() => {
         cb.type = "checkbox";
         cb.checked = this.on(l.key);
         cb.disabled = !ok;
-        cb.addEventListener("change", () => { this.force[l.key] = false; setLayer(l.key, cb.checked); });
+        cb.dataset.key = l.key;
+        cb.addEventListener("change", () => this.setLayer(l.key, cb.checked));
         lab.append(cb, h("span", "", l.label));
-        if (l.key === "airport" && this.force.airport && !prefs.airport) lab.append(h("span", "dim small", "event here"));
+        if (l.key === "airport" && this.force.airport && !prefs[this.profile].airport) lab.append(h("span", "dim small", "event here"));
         if (l.plugin && plugin(l) && !plugin(l).ready() && plugin(l).note()) lab.title = plugin(l).note();
         if (ok && l.minzoom > 0 && this.map && this.map.getZoom() < l.minzoom) lab.append(h("span", "dim small", "zoom in"));
         const feed = l.key === "incidents" || l.key === "roadwork" ? "events" : l.key;
@@ -392,12 +515,15 @@ window.MapLayers = (() => {
         const cb = h("input");
         cb.type = "checkbox";
         cb.checked = !!prefs.hideDown;
-        cb.addEventListener("change", () => setLayer("hideDown", cb.checked));
+        cb.dataset.key = "hideDown";
+        cb.addEventListener("change", () => setHideDown(cb.checked));
         const n = (d.cameras || []).filter((c) => c.down).length;
         lab.append(cb, h("span", "", `Hide down cameras (${n})`));
         list.append(lab);
       }
-      this.panel.replaceChildren(head, list);
+      panel.replaceChildren(head);
+      if (this.perEvent()) panel.append(this.eventRow());
+      panel.append(list);
       if (!d) this.panel.append(h("div", "dim small", "Loading…"));
       else if (!d.configured) this.panel.append(h("div", "dim small", "No camera or incident source is on: " + (d.note || "not configured on the hub")));
       if (d && !d.highway_places) this.panel.append(h("div", "dim small", "Mileposts and exits: not in the places database yet"));
@@ -414,8 +540,34 @@ window.MapLayers = (() => {
       if (d && d.configured && d.note) this.panel.append(h("div", "dim small", d.note));
       if (window.AirportLayer && AirportLayer.credit()) this.panel.append(h("div", "dim small", AirportLayer.credit()));
       for (const g of this.groups) {
-        try { const el = g.panel && g.panel(); if (el) this.panel.append(el); } catch (e) { console.error(e); }
+        try { const el = g.panel && g.panel(folds); if (el) panel.append(el); } catch (e) { console.error(e); }
       }
+      panel.scrollTop = scroll;
+      if (active) {
+        const el = panel.querySelector(`[data-key="${CSS.escape(active)}"]`);
+        if (el) el.focus({ preventScroll: true });
+      }
+    }
+
+    // on an event's map (#111): whose set this is, "Reset to default" and "Use as default" when the event has its own
+    eventRow() {
+      const row = h("div", "ml-event");
+      if (!this.override) {
+        row.append(h("span", "dim small", canWrite() && OPEN.includes(this.focused.status) ? "A change here is kept on this event" : "A change here is yours for this event"));
+        return row;
+      }
+      row.append(h("span", "dim small", this.overrideLocal ? "Your layers for this event" : "Kept on this event for everyone"));
+      const reset = h("button", "quiet sm", "Reset to default");
+      reset.type = "button";
+      reset.dataset.key = "reset";
+      reset.addEventListener("click", () => this.resetOverride());
+      const keep = h("button", "quiet sm", "Use as default");
+      keep.type = "button";
+      keep.dataset.key = "default";
+      keep.title = "These layers on every event's map for you";
+      keep.addEventListener("click", () => this.useAsDefault());
+      row.append(reset, keep);
+      return row;
     }
 
     clicked(key, id) {
@@ -441,8 +593,9 @@ window.MapLayers = (() => {
       this.showInfo(title, sub, lines, `${e.source || "511NY"}` + (t ? ` updated ${when(t)}` : ""), "");
     }
 
-    showInfo(title, sub, lines, foot, cls) {
+    showInfo(title, sub, lines, foot, cls, icon) {
       const head = h("div", "ml-head");
+      if (icon) head.append(icon);
       head.append(h("b", "", title));
       const x = h("button", "icon quiet sm");
       x.type = "button";
@@ -462,14 +615,27 @@ window.MapLayers = (() => {
     closeInfo() { this.info.hidden = true; }
   }
 
-  function setLayer(key, on) {
-    prefs[key] = !!on;
+  // a viewer's set changed from outside a map's box (profile: "overview" | "incident")
+  function setLayer(key, on, profile = "overview") {
+    if (!PROFILES[profile] || !KEY_RE.test(key)) return;
+    prefs[profile][key] = !!on;
+    savePrefs();
+    for (const m of maps) if (m.profile === profile && !m.override) m.refresh();
+  }
+  function setHideDown(on) {
+    prefs.hideDown = !!on;
     savePrefs();
     for (const m of maps) {
-      if (key === "hideDown") { m.sigs.cameras = ""; if (store.data) m.update(store.data); }
-      m.applyVisibility();
-      if (!m.panel.hidden) m.renderPanel();
+      m.sigs.cameras = "";
+      if (store.data) m.update(store.data);
+      m.refresh();
     }
+  }
+  // a group's fold in the box (the County GIS sub-headings), remembered per viewer: true / false, undefined when never touched
+  const fold = (name) => prefs.folds[name];
+  function setFold(name, open) {
+    prefs.folds[name] = !!open;
+    savePrefs();
   }
 
   // ---- times ------------------------------------------------------------------------------------------------
@@ -950,6 +1116,6 @@ window.MapLayers = (() => {
     try { return new MapRoads(map, host, ctrls, opts); } catch (e) { console.error("map layers:", e); return null; }
   }
 
-  return { attach, addGroup, openCamera, closeCamera, cameras, nearby, nearest, searchPlaces, openPlace, prefs, setLayer, LAYERS,
-           load, data: () => store.data, maps };
+  return { attach, addGroup, openCamera, closeCamera, cameras, nearby, nearest, searchPlaces, openPlace, prefs, setLayer, setHideDown,
+           fold, setFold, PROFILES, LAYERS, load, data: () => store.data, maps };
 })();

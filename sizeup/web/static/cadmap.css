@@ -86,11 +86,17 @@
   /* ---- highway layers (maplayers.js, #73): the Layers box, an event / sign box, the camera viewer -------- */
   .ml-panel, .ml-info {
     position: absolute; inset-block-start: calc(var(--ctl-sm) + var(--s-4)); inset-inline-start: var(--s-2); z-index: 6;
-    inline-size: min(20rem, calc(100% - var(--s-4))); max-block-size: calc(100% - var(--ctl-sm) - var(--s-6)); overflow: auto;
+    inline-size: min(20rem, calc(100% - var(--s-4))); max-block-size: min(70vh, calc(100% - var(--ctl-sm) - var(--s-6))); overflow: auto;
     display: flex; flex-direction: column; gap: var(--s-1);
   }
   .ml-info { inline-size: min(24rem, calc(100% - var(--s-4))); }
   .ml-head { display: flex; align-items: center; gap: var(--s-2); }
+  /* the box scrolls inside itself (tall with County GIS, #111): its title and X stay put */
+  .ml-panel > .ml-head { position: sticky; inset-block-start: calc(-1 * var(--s-2)); z-index: 1; background: var(--raised);
+    margin-block: calc(-1 * var(--s-2)) 0; padding-block: var(--s-2) var(--s-1); }
+  .ml-head > .ico { color: var(--c, var(--text-2)); }
+  .ml-event { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1) var(--s-2); }
+  .ml-list .check > .ico, .ml-fold .check > .ico { color: var(--c, var(--text-2)); }
   .ml-list { display: flex; flex-direction: column; }
   .ml-list .check { justify-content: flex-start; }
   .ml-list .check .dim { margin-inline-start: auto; }

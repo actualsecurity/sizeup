@@ -1,7 +1,9 @@
 // County GIS layers on the CAD maps (GitHub #91): Westchester County GIS open data (tax parcels, fire
 // districts and municipal boundaries, hydrants, bridges, buildings, flood zones, rail ...) as one
 // "County GIS" group in every map's Layers box (maplayers.js MapLayers.addGroup), one toggle per
-// dataset under its group's sub-heading, each on / off per viewer (localStorage "sizeup.gisLayers").
+// dataset under its group's sub-heading, each on / off through the box's control (control.on / setLayer,
+// key "gis:<layer>": the viewer's "overview" or "incident" set, or the event's own, #111); the folds too
+// (MapLayers.fold / setFold). Nothing is kept here.
 //
 //   The data     only ever from the hub: GET /api/cad/gis (the catalog: what layers there are, their style,
 //                fields, zoom and when each was fetched; sizeup/gis.py) and GET /api/cad/gis/<key> (GeoJSON,
@@ -10,16 +12,22 @@
 //                padded, again only when the map leaves the box it last asked for. The browser never talks
 //                to the county.
 //   The look     from the catalog's style: colors are design tokens ("--info") or hex; polygons a faint
-//                fill with an outline, lines a stroke, points a dot with a label from zoom 15; a feature
+//                fill with an outline, lines a stroke, points a mark with a label from zoom 15; a feature
 //                marked ours (_ours: our fire district) is drawn in the department's accent. A layer with a
 //                height field (the buildings) can be extruded: the "3D" button tilts the map.
+//   The marks    a point layer with an icon (the catalog's icon: "hydrant", "fire-station", ...; #111) is a
+//                symbol layer: the silhouette from /static/icons.svg (i-gis-<icon>, read once, drawn with
+//                Path2D) in the layer's color with a light rim, ours in the accent; small at the layer's
+//                minimum zoom and full two zooms up (the style's size scales it); collision-aware, so a
+//                dense block of hydrants thins out rather than smears; its label beside it when there is
+//                room. The same icon stands by the layer's toggle and at the top of its click box
+//                (icons.js Icon). A point layer without one is a dot.
 //   A click      on a feature opens the same small box the highway layers use (the control's showInfo):
-//                the configured fields, as the county names them, and the source line.
+//                the configured fields, as the county names them, the layer's sub line, and the source.
 //   Attribution  "Westchester County GIS" on the group and in the map's corner (the sources' attribution).
 "use strict";
 
 window.GisLayers = (() => {
-  const PREF_KEY = "sizeup.gisLayers";
   const CATALOG_MS = 300000;            // the catalog again every 5 min (refresh times, a re-fetched layer)
   const PAD = 0.35;                     // a tiled layer's box: the viewport plus this much each way
   const MOVE_MS = 250;
@@ -38,21 +46,11 @@ window.GisLayers = (() => {
   const color = (v, fallback) => (typeof v === "string" && v.startsWith("--") ? token(v, fallback) : (v || fallback));
   const num = (v, fallback) => (typeof v === "number" && isFinite(v) ? v : fallback);
 
-  // ---- per-viewer choices ------------------------------------------------------------------------------------
-  const prefs = {};
-  let prefsLoaded = false;
-  function loadPrefs() {
-    if (prefsLoaded) return;
-    prefsLoaded = true;
-    try {
-      const saved = JSON.parse(localStorage.getItem(PREF_KEY) || "null");
-      if (saved && typeof saved === "object") for (const [k, v] of Object.entries(saved)) if (typeof v === "boolean") prefs[k] = v;
-    } catch (_) { /* defaults */ }
-  }
-  function savePrefs() {
-    try { localStorage.setItem(PREF_KEY, JSON.stringify(prefs)); } catch (_) { /* not remembered */ }
-  }
-  const isOn = (l) => (typeof prefs[l.key] === "boolean" ? prefs[l.key] : !!l.on);   // "_open:<group>": a fold's state
+  // ---- which are on: the box's control decides (the viewer's set for its map, or the event's own, #111) ------------
+  // On for a viewer who never chose: the catalog's on (fire districts) and, on an event's map, these.
+  const PROFILE_ON = { overview: [], incident: ["hydrants", "buildings"] };
+  const gisKey = (l) => `gis:${l.key}`;
+  const dflt = (l, profile) => !!l.on || (PROFILE_ON[profile] || []).includes(l.key);
 
   // ---- the catalog and the layers' data: one copy for every map on the page ----------------------------------------
   const store = { cat: null, timer: null, loading: null, layers: {}, subs: new Set() };
@@ -115,10 +113,64 @@ window.GisLayers = (() => {
     return slot.loading;
   }
 
+  // ---- the marks: the sprite's silhouettes, drawn once per layer in its color ---------------------------------------
+  const sprite = { paths: null, loading: null };          // "gis-hydrant" -> {body: [d, ...], cut: [d, ...]}
+  function loadSprite() {
+    if (sprite.paths) return Promise.resolve(sprite.paths);
+    if (sprite.loading) return sprite.loading;
+    sprite.loading = fetch("/static/icons.svg", { credentials: "same-origin" })
+      .then((r) => (r.ok ? r.text() : Promise.reject(new Error(`${r.status}`))))
+      .then((text) => {
+        const doc = new DOMParser().parseFromString(text, "image/svg+xml");
+        const out = {};
+        for (const sym of doc.querySelectorAll('symbol[id^="i-gis-"]')) {
+          const body = [], cut = [];
+          for (const el of sym.querySelectorAll("path")) (el.classList.contains("cut") ? cut : body).push(el.getAttribute("d") || "");
+          out[sym.id.slice(2)] = { body, cut };
+        }
+        return out;
+      })
+      .catch((e) => { console.error("county GIS marks", e); return {}; })           // no sprite: dots
+      .then((paths) => { sprite.paths = paths; sprite.loading = null; return paths; });
+    return sprite.loading;
+  }
+  const ICON_PX = 24;                                     // a mark at full size, css px (drawn at 2x)
+  const LIGHT = "#F2F3F5";
+  function iconImage(shape, fill) {
+    const px = ICON_PX * 2, pad = 3;
+    const c = document.createElement("canvas");
+    c.width = c.height = px;
+    const g = c.getContext("2d");
+    const k = (px - 2 * pad) / 24;
+    g.translate(pad, pad);
+    g.scale(k, k);
+    g.lineJoin = "round";
+    g.lineCap = "round";
+    g.strokeStyle = LIGHT;
+    g.lineWidth = 3 / k;                                  // a light rim, 1.5 css px outside the silhouette (the fill covers the rest)
+    const body = shape.body.map((d) => new Path2D(d));
+    for (const path of body) g.stroke(path);
+    g.fillStyle = fill;
+    for (const path of body) g.fill(path);
+    g.fillStyle = DARK;                                   // the cuts (a door, a window, a band): the map's dark
+    for (const d of shape.cut) g.fill(new Path2D(d));
+    return g.getImageData(0, 0, px, px);
+  }
+  // the same mark in the box: Icon("gis-<icon>") from the sprite, in the layer's color (ours: the accent)
+  function iconEl(l, accent) {
+    if (!l.icon || !window.Icon) return null;
+    const el = Icon(`gis-${l.icon}`);
+    const c = l.style && l.style.color;
+    el.style.setProperty("--c", accent ? "var(--accent-text)" : (typeof c === "string" && c.startsWith("--") ? `var(${c})` : (c || "var(--ok)")));
+    return el;
+  }
+
   // ---- the look: the catalog's style on the design's tokens -------------------------------------------------------
   const DARK = "#15181B";
   const ours = (plain, accent) => ["case", ["boolean", ["get", "_ours"], false], accent, plain];
-  function mapLayers(l, src, vis) {
+  const labelField = (l) => (l.style && l.style.label) || (l.kind === "point" && l.fields && l.fields[0] ? l.fields[0][0] : "");
+  const TEXT = { "text-color": "#C9CED4", "text-halo-color": DARK, "text-halo-width": 1.4 };
+  function mapLayers(l, src, vis, glyphs, icon) {
     const s = l.style || {}, kind = l.kind || "point";
     const accent = token("--accent", "#C8102E");
     const out = [];
@@ -143,6 +195,19 @@ window.GisLayers = (() => {
       out.push({ id: `${src}-line`, type: "line", ...base, layout: { ...base.layout, "line-join": "round", "line-cap": "round" },
         paint: { "line-color": ours(c, accent), "line-width": ["interpolate", ["linear"], ["zoom"], 10, num(s.width, 2) * 0.6, 15, num(s.width, 2)],
                  "line-opacity": num(s.opacity, 0.9), ...(s.dash ? { "line-dasharray": [2, 2] } : {}) } });
+    } else if (icon) {
+      // the mark: small at the layer's first zoom, full two zooms up; placed only where it fits (a dense block
+      // thins out), its label beside it when there is room for that too
+      const minzoom = l.minzoom || 0, size = num(s.size, 1), f = labelField(l);
+      const layout = { ...base.layout, "icon-image": ours(icon, `${icon}-ours`), "icon-allow-overlap": false, "icon-ignore-placement": false,
+                       "icon-padding": 1, "icon-size": ["interpolate", ["linear"], ["zoom"], minzoom, 0.55 * size, minzoom + 2, size] };
+      if (glyphs && f) {
+        const lz = Math.max(minzoom, num(s.labelzoom, LABEL_ZOOM));
+        Object.assign(layout, { "text-field": ["step", ["zoom"], "", lz, ["to-string", ["get", f]]], "text-font": ["Noto Sans Regular"],
+                                "text-size": 11, "text-anchor": "left", "text-offset": [0.95 * size + 0.25, 0], "text-optional": true,
+                                "text-max-width": 8 });
+      }
+      out.push({ id: `${src}-pt`, type: "symbol", ...base, layout, paint: { "icon-opacity": num(s.opacity, 1), ...(glyphs && f ? TEXT : {}) } });
     } else {
       const c = color(s.color, token("--ok", "#3FB86B"));
       out.push({ id: `${src}-pt`, type: "circle", ...base,
@@ -151,17 +216,17 @@ window.GisLayers = (() => {
     }
     return out;
   }
-  function labelLayer(l, src, vis, glyphs) {
+  function labelLayer(l, src, vis, glyphs, icon) {
     const s = l.style || {};
-    const f = s.label || (l.kind === "point" && l.fields && l.fields[0] ? l.fields[0][0] : "");
-    if (!f || !glyphs) return null;
+    const f = labelField(l);
+    if (!f || !glyphs || (icon && l.kind === "point")) return null;       // a mark carries its own label
     const minzoom = Math.max(l.minzoom || 0, num(s.labelzoom, LABEL_ZOOM));
     const point = l.kind === "point";
     return { id: `${src}-label`, type: "symbol", source: src, minzoom,
       layout: { visibility: vis, "text-field": ["to-string", ["get", f]], "text-font": ["Noto Sans Regular"], "text-size": 11,
                 ...(point ? { "text-anchor": "left", "text-offset": [0.8, 0] } : { "symbol-placement": l.kind === "line" ? "line" : "point" }),
                 "text-optional": true, "text-max-width": 8 },
-      paint: { "text-color": "#C9CED4", "text-halo-color": DARK, "text-halo-width": 1.4 } };
+      paint: { ...TEXT } };
   }
 
   // ---- one map's County GIS layers -------------------------------------------------------------------------------------
@@ -178,8 +243,26 @@ window.GisLayers = (() => {
       this.map.on("moveend", () => { clearTimeout(this.moveTimer); this.moveTimer = setTimeout(() => this.viewport(), MOVE_MS); });
       this.map.on("click", (e) => this.clicked(e));
       maps.add(this);
-      loadPrefs();
       subscribe(() => this.sync());
+    }
+
+    // on here? the control: the event's own set, else the viewer's set for this map, else the default
+    isOn(l) { return this.control.on(gisKey(l), dflt(l, this.control.profile)); }
+    keys() { return layersOf(store.cat).map((l) => [gisKey(l), dflt(l, this.control.profile)]); }   // for the event's set
+    refresh() { this.sync(); }
+
+    // the layer's mark on this map (its image registered once per layer: the plain and the accent); "" = a dot
+    iconFor(l) {
+      const shape = l.icon && sprite.paths && sprite.paths[`gis-${l.icon}`];
+      if (!shape) return "";
+      const id = `gis-${l.key}`;
+      try {
+        if (!this.map.hasImage(id)) {
+          this.map.addImage(id, iconImage(shape, color((l.style || {}).color, token("--ok", "#3FB86B"))), { pixelRatio: 2 });
+          this.map.addImage(`${id}-ours`, iconImage(shape, token("--accent", "#C8102E")), { pixelRatio: 2 });
+        }
+      } catch (e) { console.error("county GIS mark", l.key, e); return ""; }
+      return id;
     }
 
     // the style is up (once our sources are in it, it stays so: loaded() is false again while tiles load)
@@ -190,16 +273,18 @@ window.GisLayers = (() => {
       const cat = store.cat;
       if (!cat || !cat.configured) return;
       if (!this.ready()) { this.map.once("idle", () => this.sync()); return; }
+      if (!sprite.paths) { if (!this.spriteWait) { this.spriteWait = true; loadSprite().then(() => this.sync()); } return; }   // the marks first
       const glyphs = !!(this.map.getStyle() && this.map.getStyle().glyphs);
       for (const l of layersOf(cat)) {
         const src = `gis-${l.key}`;
         if (!this.map.getSource(src)) {
           try {
             this.map.addSource(src, { type: "geojson", data: empty(), attribution: ATTR });
-            const vis = isOn(l) ? "visible" : "none";
+            const vis = this.isOn(l) ? "visible" : "none";
             const ids = [];
-            for (const spec of mapLayers(l, src, vis)) { this.map.addLayer(spec, this.before(l, spec)); ids.push(spec.id); }
-            const lab = labelLayer(l, src, vis, glyphs);
+            const icon = l.kind === "point" ? this.iconFor(l) : "";
+            for (const spec of mapLayers(l, src, vis, glyphs, icon)) { this.map.addLayer(spec, this.before(l, spec)); ids.push(spec.id); }
+            const lab = labelLayer(l, src, vis, glyphs, icon);
             if (lab) { this.map.addLayer(lab, this.before(l, lab)); ids.push(lab.id); }
             this.added[l.key] = ids;
             this.styled = true;
@@ -210,7 +295,7 @@ window.GisLayers = (() => {
             }
           } catch (e) { console.error("county GIS layer", l.key, e); continue; }
         }
-        if (isOn(l)) this.feed(l);
+        if (this.isOn(l)) this.feed(l);
       }
       this.applyVisibility();
     }
@@ -226,7 +311,7 @@ window.GisLayers = (() => {
       if (l.tiled) return this.viewport(l);
       const data = await layerData(l);
       const src = this.map.getSource(`gis-${l.key}`);
-      if (src && isOn(l)) src.setData(data);
+      if (src && this.isOn(l)) src.setData(data);
     }
 
     // a tiled layer: the viewport (padded) from the hub, when the map has left the last box
@@ -235,7 +320,7 @@ window.GisLayers = (() => {
       if (!cat) return;
       if (!this.ready()) { this.map.once("idle", () => this.viewport(only)); return; }
       for (const l of layersOf(cat)) {
-        if (!l.tiled || (only && only.key !== l.key) || !isOn(l) || !this.map.getSource(`gis-${l.key}`)) continue;
+        if (!l.tiled || (only && only.key !== l.key) || !this.isOn(l) || !this.map.getSource(`gis-${l.key}`)) continue;
         if (this.map.getZoom() < (l.minzoom || 0)) continue;
         const b = this.map.getBounds();
         const w = b.getWest(), s = b.getSouth(), e = b.getEast(), n = b.getNorth();
@@ -262,7 +347,7 @@ window.GisLayers = (() => {
       for (const l of layersOf(cat)) {
         for (const id of this.added[l.key] || []) {
           if (!this.map.getLayer(id)) continue;
-          const on = isOn(l) && (!id.endsWith("-3d") || this.tilted);
+          const on = this.isOn(l) && (!id.endsWith("-3d") || this.tilted);
           this.map.setLayoutProperty(id, "visibility", on ? "visible" : "none");
         }
       }
@@ -286,14 +371,14 @@ window.GisLayers = (() => {
       if (theirs.length && this.map.queryRenderedFeatures(e.point, { layers: theirs }).length) return;
       const ours = [];
       for (const l of layersOf(cat)) {
-        if (!isOn(l)) continue;
+        if (!this.isOn(l)) continue;
         for (const id of this.added[l.key] || []) if (!id.endsWith("-label") && this.map.getLayer(id)) ours.push(id);
       }
       if (!ours.length) return;
       const hits = this.map.queryRenderedFeatures(e.point, { layers: ours });
       if (!hits.length) return;
       // points first, then lines, then polygons (queryRenderedFeatures: the topmost first within a kind)
-      const rank = (f) => ({ circle: 0, line: 1 }[f.layer.type] ?? 2);
+      const rank = (f) => ({ circle: 0, symbol: 0, line: 1 }[f.layer.type] ?? 2);
       hits.sort((a, b) => rank(a) - rank(b));
       const f = hits[0];
       const key = f.layer.id.replace(/^gis-/, "").replace(/-(fill|line|pt|3d)$/, "");
@@ -318,11 +403,12 @@ window.GisLayers = (() => {
       if (l.note) lines.push(l.note);
       const foot = `${store.cat.attribution || "Westchester County GIS"}${l.asof ? `, ${l.asof}` : ""}${l.at ? `, fetched ${day(l.at)}` : ""}`;
       this.control.close();
-      this.control.showInfo(title || l.label, (props._ours ? "Ours: " : "") + l.label, lines.length ? lines : ["(no details)"], foot, "");
+      this.control.showInfo(title || l.label, (props._ours ? "Ours: " : "") + (l.sub || l.label), lines.length ? lines : ["(no details)"], foot, "",
+                            iconEl(l, !!props._ours));
     }
 
-    // the group in the Layers box
-    panel() {
+    // the group in the Layers box; folds: each group's open state as the box had it before this rebuild
+    panel(folds = {}) {
       const cat = store.cat;
       const box = h("div", "ml-group");
       const head = h("div", "ml-ghead");
@@ -341,23 +427,30 @@ window.GisLayers = (() => {
         if (l.group !== group) {
           group = l.group;
           fold = h("details", "ml-fold");
+          fold.dataset.fold = group;
           const sum = h("summary", "ml-sub");
           sum.append(group, h("span", "ml-count dim small", ""));
           fold.append(sum);
-          const on = layersOf(cat).filter((x) => x.group === group && isOn(x)).length;
+          const on = layersOf(cat).filter((x) => x.group === group && this.isOn(x)).length;
           sum.lastChild.textContent = on ? `${on} on` : "";
-          fold.open = typeof prefs[`_open:${group}`] === "boolean" ? prefs[`_open:${group}`] : on > 0 || group === "Parcels";
-          const g = group;                 // a person's click (not the open set above, whose toggle event comes later)
-          sum.addEventListener("click", () => setTimeout(() => { prefs[`_open:${g}`] = fold.open; savePrefs(); }, 0));
+          // open as it was in the box a moment ago, else as this viewer left it, else when something in it is on
+          const was = typeof folds[group] === "boolean" ? folds[group] : MapLayers.fold(group);
+          fold.open = typeof was === "boolean" ? was : on > 0 || group === "Parcels";
+          const g = group;
+          let touched = false;             // a person's click or key on the heading (not the open set above, whose toggle comes later)
+          sum.addEventListener("click", () => { touched = true; });
+          fold.addEventListener("toggle", () => { if (touched) MapLayers.setFold(g, fold.open); });
           box.append(fold);
         }
         const lab = h("label", "check");
         const cb = h("input");
         cb.type = "checkbox";
-        cb.checked = isOn(l);
+        cb.checked = this.isOn(l);
         cb.disabled = !l.at && !!l.error;
-        cb.addEventListener("change", () => setLayer(l.key, cb.checked));
-        lab.append(cb, h("span", "", l.label));
+        cb.dataset.key = gisKey(l);
+        cb.addEventListener("change", () => this.control.setLayer(gisKey(l), cb.checked));
+        const mark = iconEl(l, false);
+        lab.append(cb, ...(mark ? [mark] : []), h("span", "", l.label));
         if (l.asof) lab.append(h("span", "ml-note", l.asof));
         if (l.error && !l.at) lab.append(h("span", "ml-err small", "not loaded"));
         else if (l.minzoom > 0 && zoom < l.minzoom) lab.append(h("span", "dim small", "zoom in"));
@@ -371,6 +464,7 @@ window.GisLayers = (() => {
         const cb = h("input");
         cb.type = "checkbox";
         cb.checked = this.tilted;
+        cb.dataset.key = "gis:3d";
         cb.addEventListener("change", () => this.tilt(cb.checked));
         row.append(cb, h("span", "", "3D: tilt the map, buildings by height"));
         box.append(row);
@@ -388,12 +482,6 @@ window.GisLayers = (() => {
     }
   }
 
-  function setLayer(key, on) {
-    prefs[key] = !!on;
-    savePrefs();
-    for (const m of maps) { m.sync(); m.applyVisibility(); if (!m.control.panel.hidden) m.control.renderPanel(); }
-  }
-
   function fmt(v) {
     if (typeof v === "number" && v > 1e11 && v < 1e14) return day(v / 1000);     // an ArcGIS date (epoch ms)
     if (typeof v === "number") return Number.isInteger(v) ? String(v) : (Math.abs(v) >= 100 ? v.toFixed(0) : v.toFixed(2));
@@ -409,5 +497,5 @@ window.GisLayers = (() => {
 
   if (window.MapLayers && MapLayers.addGroup) MapLayers.addGroup({ attach: (control) => new GisMap(control) });
 
-  return { prefs, setLayer, catalog: () => store.cat, load: loadCatalog, maps };
+  return { catalog: () => store.cat, load: loadCatalog, loadSprite, maps, PROFILE_ON };
 })();

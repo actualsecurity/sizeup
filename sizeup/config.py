@@ -403,7 +403,10 @@ def _bbox(v, what: str, max_deg: float = 3.0) -> tuple[float, float, float, floa
 
 
 GIS_LAYER_KEYS = {"key", "label", "url", "group", "kind", "style", "minzoom", "fields", "refresh", "bbox", "where", "on",
-                  "tiled", "simplify_m", "licence", "page", "enabled", "asof", "ours_field", "note"}
+                  "tiled", "simplify_m", "licence", "page", "enabled", "asof", "ours_field", "note", "icon", "sub"}
+
+
+ICON_RE = re.compile(r"[a-z][a-z0-9-]{0,31}")
 
 
 def _gis_layer(raw: dict, i: int, base=None):
@@ -451,13 +454,16 @@ def _gis_layer(raw: dict, i: int, base=None):
         if not isinstance(d.get(k, False), bool):
             raise ConfigError(f"{where}.{k}: true or false")
     bbox = _bbox(d["bbox"], f"{where}.bbox") if d.get("bbox") else None
-    text = {k: str(d.get(k, "")).strip() for k in ("group", "where", "licence", "page", "asof", "ours_field", "note")}
+    text = {k: str(d.get(k, "")).strip() for k in ("group", "where", "licence", "page", "asof", "ours_field", "note", "icon", "sub")}
     if not text["group"]:
         text["group"] = "County GIS"
+    if text["icon"] and not ICON_RE.fullmatch(text["icon"]):
+        raise ConfigError(f"{where}.icon: a mark from static/icons.svg (\"hydrant\", \"fire-station\", ... : i-gis-<icon>)")
     return Layer(key=key, label=label, url=url, group=text["group"], kind=kind, style=dict(style), minzoom=minzoom,
                  fields=tuple(fields), refresh=refresh, bbox=bbox, where=text["where"], on=bool(d.get("on", False)),
                  tiled=bool(d.get("tiled", False)), simplify_m=simplify_m, licence=text["licence"], page=text["page"],
-                 enabled=bool(d.get("enabled", True)), asof=text["asof"], ours_field=text["ours_field"], note=text["note"])
+                 enabled=bool(d.get("enabled", True)), asof=text["asof"], ours_field=text["ours_field"], note=text["note"],
+                 icon=text["icon"], sub=text["sub"])
 
 
 def _gis(data: dict) -> dict:
