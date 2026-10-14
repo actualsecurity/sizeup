@@ -74,7 +74,8 @@
         play.type = "button";
         play.title = "Play";
         play.disabled = p.has_audio === false;
-        play.addEventListener("click", () => window.play(`/api/audio/${encodeURIComponent(p.id)}.wav`));
+        const url = `/api/audio/${encodeURIComponent(p.id)}.wav`;
+        if (window.playBtn) window.playBtn(play, url); else play.addEventListener("click", () => window.play(url));
         meta.append(play, el("span", "t", fmtTime(p.start, true)), el("span", "chip src", p.label || "?"));
         const d = p.dispatch;
         if (d && d.incident_type) meta.append(el("b", "ptype", d.incident_type));

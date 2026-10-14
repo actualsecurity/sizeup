@@ -180,15 +180,25 @@ def test_one_play_button_on_page_rows_skips_the_tones():
     assert "voiceButton" not in scripts and '"mini", "Voice")' not in scripts and "Voice, no tones" not in scripts
     assert "function clipUrl(t, withTones)" in cad and "#t=${Number(t.voice_at).toFixed(2)}" in cad
     row = re.search(r"^function radioRow\(t, ctx = \{\}\) \{(.*?)^\}", cad, re.S | re.M).group(1)
-    assert row.count('el("button", "play")') == 1 and "play(clipUrl(t, false))" in row
+    assert row.count('el("button", "play")') == 1 and "playBtn(b, clipUrl(t, false))" in row
     assert "pageNote(t)" in row and 'nameTonesButton(t)' in row and 'canDo("admin")' in row.split("nameTonesButton")[0]
     items = re.search(r"^function txMenuItems\(t\) \{(.*?)^\}", cad, re.S | re.M).group(1)
     assert "pageMenuItems(t)" in items and '"Play with tones"' in cad
     pages = re.search(r"^function renderSourcePages\(inc\) \{(.*?)^\}", cad, re.S | re.M).group(1)
-    assert pages.count('el("button", "play")') == 1 and "play(clipUrl(t, false))" in pages and "pageMenuItems(t)" in pages
+    assert pages.count('el("button", "play")') == 1 and "playBtn(b, clipUrl(t, false))" in pages and "pageMenuItems(t)" in pages
     for note in ('"unknown tones"', '"no tones"', '"not ours"', '"Name these tones"', '"/api/cad/tones"'):
         assert note in cad, note
     station = js("station.js")
     assert "function play(btn, id, at = 0)" in station and "voice_offset_s" in station and '"Play with tones"' in station
     assert '"no tones"' in station and '"unknown tones"' in station
     assert 'id="settings-tones"' in (STATIC / "cad.html").read_text() and "function sTonePage" in js("settings.js")
+
+
+def test_a_play_button_toggles_play_and_stop():
+    # 2026-10-14: the CAD's play buttons started audio but couldn't stop it (the station page's already could).
+    js = (STATIC / "cad.js").read_text()
+    assert "function playBtn(b, url)" in js and 'Icon.play(nowPlaying.btn, "stop")' in js
+    assert "if (nowPlaying.url === url && !player.paused) { player.pause(); return stopPlay(); }" in js
+    assert 'player.addEventListener("ended", stopPlay)' in js
+    assert js.count("playBtn(b, ") >= 4                     # the page row, radio rows and both dispatch audios
+    assert 'addEventListener("click", () => play(clipUrl' not in js
