@@ -590,7 +590,7 @@ class Alarms:
     def state(self, now: float | None = None) -> dict:
         """The screens' part of the CAD state: open alarms (until acknowledged), notices, the just acknowledged."""
         now = self.clock() if now is None else now
-        return {"time": now, "drill": bool(self.config()["drill"]),
+        return {"drill": bool(self.config()["drill"]),   # no clock here: the state has it, and the push sends what changed (#137)
                 "open": self._rows("a.ack_at IS NULL AND a.level = 'alarm'", (), 20),
                 "notices": self._rows("a.ack_at IS NULL AND a.level = 'notice' AND a.created_at >= ?", (now - NOTICE_S,), 10),
                 "recent": self._rows("a.ack_at >= ?", (now - RECENT_S,), 10)}
