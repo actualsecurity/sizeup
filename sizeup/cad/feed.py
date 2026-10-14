@@ -43,6 +43,8 @@ MAX_LIMIT = 50
 DEFAULT_PHRASES = ("Port Chester", "Rye Brook", "PC dispatch", "Port Chester dispatch", "PCFD", "headquarters")
 PREALERT_BEFORE_S, PREALERT_AFTER_S = 10 * 60, 60      # a ring this long before (after) a flagged page goes with it
 BARE = re.compile(r"(?<![\w.,])(\d{2}|\d{4})(?![\w])")
+# After "64," a list goes on with another number, a unit word or "to"; anything else ends the clause.
+LIST_NEXT = re.compile(r"\s*[.,;:]\s*(?:\d{2,4}\b|(?:to|and|&|engine|ladder|tower|rescue|utility|marine|medic|car)\b|$)", re.I)
 BARE_OK_AFTER = re.compile(r"\s*(?:$|[.,;:]|(?:to|and|&)\b|\d{2,3}\b|(?:engine|ladder|tower|rescue|utility|marine|medic|car)\b)", re.I)
 
 
@@ -132,10 +134,10 @@ class Matcher:
                       for c, sp in units.items()]
         self.codes = set(units)
         num = {}
-        for c in units:                                    # a bare number: an engine's first, else one unit's alone
-            m = re.fullmatch(r"([A-Z]*)(\d+)", c)
-            if m:
-                num.setdefault(m[2], []).append(c)
+        for c in units:                                    # a bare number: an engine, or a chief's 239x
+            m = re.fullmatch(r"(E|)(\d+)", c)             # 60 Control says "Ladder 30", "Rescue 40" in words: a bare
+            if m:                                          # "30" is never L30 (2026-10-14: "…122. 30, that's 30
+                num.setdefault(m[2], []).append(c)         # Manhattan Avenue" on a Fairview page read as Rye Brook's L30)
         self.bare = {n: next((c for c in cs if c.startswith("E")), cs[0] if len(cs) == 1 else "") for n, cs in num.items()}
 
     def units_named(self, text: str) -> list[str]:
@@ -148,7 +150,11 @@ class Matcher:
             n, after, before = m[1], text[m.end():], text[:m.start()].rstrip()
             if re.match(r"\s*control\b", after, re.I) or re.search(r"(?:number|no\.?|#)$", before, re.I):
                 continue
-            if not (BARE_OK_AFTER.match(after) or (found and re.search(r"\d\s*(?:,|and|&)\s*$", before))):
+            in_list = bool(found and re.search(r"\d\s*(?:,|and|&)\s*$", before))
+            ok = BARE_OK_AFTER.match(after)
+            if ok and re.match(r"\s*[.,;:]", after) and not in_list and not LIST_NEXT.match(after):
+                ok = None                                  # "30, that's 30 Manhattan": a number ending a clause, not a list
+            if not (ok or in_list):
                 continue
             parts = [n] if len(n) == 2 or n in self.bare else [n[:2], n[2:]]
             codes = [self.bare.get(x, "") for x in parts]

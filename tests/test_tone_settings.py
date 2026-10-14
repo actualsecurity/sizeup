@@ -174,3 +174,19 @@ def test_units_named_as_said(tmp_path):
     for none in ("64 King Street, structure fire", "Sixty Control, 60 Control to all units", "time out 1432",
                  "Fairview 34 Longdale Avenue", "Engine 25, 42 Stratton Road"):
         assert f(none) == [], none
+
+
+def test_a_bare_number_is_an_engine_or_a_chief_never_a_ladder(tmp_path):
+    # 2026-10-14 11:38 South 2, Fairview tones: STT garbled "Ladder 12, 1230 Manhattan Avenue" and the repeat
+    # "...Ladder 12 122. 30, that's 30 Manhattan Avenue": the bare "30" was read as Rye Brook's L30.
+    app = app_with_list(tmp_path)
+    f = app.cad.feed.names_ours
+    fairview = ("174, 175, Ladder 1,212,230 Manhattan Avenue. The Greenberg Alcohol Treatment Center Warren Avenue "
+                "and West Grand Street for a commercial alarm. 17 175 Ladder 12 122. 30, that's 30 Manhattan Avenue. "
+                "Greenberg Alcohol Treatment Center. Warren Avenue, West Grand Street, commercial arm, 1138.")
+    assert f(fairview) == []
+    assert f("30, 31 to the alarm") == []                  # no engine 30/31: bare numbers never become ladders
+    assert f("Ladder 30 and Engine 60") == ["L30", "E60"]  # said as a unit, it counts
+    assert f("64, 62, Rescue 40") == ["E64", "E62", "R40"]
+    assert f("62. 64 to 100 King Street") == ["E62", "E64"]
+    assert f("we have 64, that's on Westchester Ave") == []
