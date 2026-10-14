@@ -409,6 +409,10 @@ class App:
             from sizeup.notify import Notifier
             self.cad.alarms.notifier = Notifier(cfg.alerts_ntfy_server, cfg.alerts_ntfy_topic, log)
         self.cad.alarms.public_url = cfg.cloud_public_url
+        # An aircraft emergency near HPN (a 7500 / 7600 / 7700 squawk, #155) raises the same alarm and push, on the
+        # CAD of record only (a station forwarding to the hub leaves it to the hub).
+        self.aircraft.on_emergency = lambda ev: None if self.forwarding() else self.cad.alarms.on_aircraft(ev)
+        self.aircraft.on_clear = lambda ev, aid, why: self.cad.alarms.aircraft_cleared(ev, aid, why)
         if self.recorder is not None:
             self.recorder.on_line = self.live.feed_line
         self._fm_live: dict[str, dict] = {}

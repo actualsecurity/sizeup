@@ -284,28 +284,38 @@ heartbeat_stale_min = 90             # no heartbeat (or restart) this long: "Tap
 
 # [aircraft]: aircraft near HPN on the CAD maps (sizeup/aircraft.py, docs/cloud.md "Aircraft near HPN", #155):
 # shortfinal's PCFD-focused picture (arrivals, departures, ground traffic at HPN, low traffic in the area,
-# emergencies; overflights left out), read by the hub (or all-in-one) only while someone has the layer on.
-# feeds, in order of preference (the next one carries on while one fails):
-#   "adsblol"   adsb.lol, keyless, ODbL (attribution on the map): the default
-#   "adsbfi"    adsb.fi: its terms say personal, non-commercial use only; off unless listed here
-#   "receiver"  our own ADS-B receiver ([aircraft.receiver] below)
-# OpenSky is not offered: its licence needs a written agreement for live operational use.
+# emergencies; overflights left out), read by the hub (or all-in-one).
+# feeds, combined (the union by aircraft, the freshest position each; user, 2026-10-14: "adsb.lol as primary or
+# adsb.fi whichever gives the most data, and then keep that data, but poll between the two as needed if one loses
+# or is rate limited"):
+#   "adsblol"   adsb.lol, keyless, ODbL (credited on the map)
+#   "adsbfi"    adsb.fi: its terms say personal, non-commercial use only. The user's decision, 2026-10-14: this is
+#               personal, non-commercial use ("we are not charging for this"). Credited on the map.
+#   the busier of the two is primary (every 5 s while the layer is open), the other every 10 s; one that errors or
+#   is rate-limited rests (Retry-After, else exponential) and the other carries on.
+#   "receiver"  our own ADS-B receiver ([aircraft.receiver] below): when enabled it is always first ("primary local
+#               SDR on ADSB, secondary the above sources").
+# OpenSky is not used (a written agreement for operational use; far too few credits for a 5 s refresh).
+# alarms: a squawk 7500 / 7600 / 7700 (or the aircraft's own emergency status) within radius_nm below 18,000 ft
+# raises the emergency alarm on every console, and its push through [alerts] ntfy_topic when one is set; the hub
+# then reads the primary feed every 15 s even when nobody has the map open.
 # registry: types (make / model) from the FAA Releasable Aircraft Database, public domain, ~70 MB a week once
-# someone has looked; never the owner's name. Leave the section out: on, adsb.lol, 15 nm around HPN.
+# someone has looked; never the owner's name. Leave the section out: on, both APIs, 15 nm around HPN, alarms on.
 # [aircraft]
 # enabled = true
-# feeds = ["adsblol"]
-# radius_nm = 15          # around HPN: the feed's query, and what counts as "in the area"
+# feeds = ["adsblol", "adsbfi"]
+# alarms = true
+# radius_nm = 15          # around HPN: the feeds' query, what counts as "in the area", the alarm's area
 # ceiling_ft = 6000       # MSL: below this inside the radius is "low traffic" (shortfinal's focus)
 # registry = true
 #
-# Our own receiver, when there is one (off: no SDR is assigned to ADS-B yet). sizeup only READS the decoders'
-# aircraft.json: run readsb / dump1090 (1090 MHz) and dump978-fa (978 MHz UAT) yourself, on an SDR with an LNA
-# and a 1090 filter in front (readsb --gain auto: an LNA makes a fixed high gain overload), and let whatever
-# starts the decoder hold the dongle's claim (~/.local/state/rtl-claims). sizeup never opens or claims it.
+# Our own receiver, when there is one (off: no SDR is assigned to ADS-B yet). Enabled, its positions win for every
+# aircraft it hears; adsb.lol / adsb.fi fill in the rest, and take over when it is stale or down. sizeup only READS
+# the decoders' aircraft.json: run readsb / dump1090 (1090 MHz) and dump978-fa (978 MHz UAT) yourself, on an SDR
+# with an LNA and a 1090 filter in front (readsb with --gain auto: an LNA makes a fixed high gain overload), and let
+# whatever starts the decoder hold the dongle's claim (~/.local/state/rtl-claims). sizeup never opens or claims it.
 # sdr: that dongle's exact USB serial (give it a name first: rtl_eeprom -s adsb); naming it keeps sizeup's own
 # radios off it (added to [radio] sdr_ignore) and the layer says whether it is plugged in and who holds it.
-# Put "receiver" first in feeds to prefer it, adsb.lol after it as the fallback.
 # [aircraft.receiver]
 # enabled = false
 # sdr = ""                                   # e.g. "adsb": not yet

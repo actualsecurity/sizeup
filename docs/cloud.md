@@ -1355,17 +1355,33 @@ data since ..." when the hub stops answering.
 
 ### Feeds and their terms
 
-One interface (`Feed.read()`), tried in the order `[aircraft] feeds` gives; a feed that fails rests (its
-Retry-After, else 5 s) while the next one carries on.
+The user, 2026-10-14 (#161): *"adsb.lol as primary or adsb.fi whichever gives the most data, and then keep that
+data, but poll between the two as needed if one loses or is rate limited, this is personal non commercial use, we
+are not charging for this"*, and *"primary local SDR on ADSB, secondary the above sources"*. So:
+
+* **Every feed's latest answer is kept and combined** (`combine()`): the union by ICAO address, one record per
+  aircraft with **the freshest position** any feed has, except that **our receiver's position wins for any
+  aircraft it hears** while it is healthy (an answer within 10 s). A field only one feed has (callsign, type) is
+  kept. Each aircraft says which feed its position came from: *our receiver*, *adsb.lol* or *adsb.fi*.
+* **The primary API** is whichever has been giving more aircraft with a fresh position (a running average over
+  its answers; config order on a tie). While someone has the layer on: **the primary every 5 s, the other every
+  10 s, our receiver every 2 s** (adsb.fi's public limit is 1 request a second; adsb.lol limits by load and was
+  fine at 5 s in shortfinal; at most 18 requests a minute to the two together). Nobody looking: only the
+  emergency watch, **the primary every 15 s** (and the receiver), nothing from the other.
+* **Failover:** a feed that errors, times out or answers 429 **rests** — its `Retry-After` when it sends one
+  (adsb.lol's 429 sent none in our tests), else 5 s doubling to 5 min (a 429 at least 10 s) — and the other API
+  becomes the primary at 5 s; the first good answer brings it back. Both down: the box says *"no feed answering"*
+  with each one's reason, and the aircraft on the map go stale (hollow, with their age).
+* **Our receiver stale or down:** the two APIs carry everything, as above.
 
 | Feed | Terms (checked 2026-10-14) | Use |
 |---|---|---|
-| **adsb.lol** `api.adsb.lol/v2/point/<lat>/<lon>/<nm>` | keyless; the data under the **ODbL 1.0** (use, operational too, with attribution; share-alike only if we published a derived database) | **the default.** Attribution in the map corner and the box. Rate-limited by load: asked at most every 5 s, Retry-After honoured. Note: it rate-limits per address, and shortfinal on the same machine polls it too |
-| adsb.fi `opendata.adsb.fi/api/v3/...` | "personal, non-commercial use only", attribution | **off** unless listed: a fire department's dispatch isn't plainly personal use |
-| OpenSky Network | non-profit research / education, internal evaluation, "government purposes"; live operational use needs a **written agreement** | **not used** (an open question for the department) |
+| **adsb.lol** `api.adsb.lol/v2/point/<lat>/<lon>/<nm>` | keyless; the data under the **ODbL 1.0** (use, operational too, with attribution; share-alike only if we published a derived database) | **on.** Credited in the map corner and the box. It rate-limits per address, and shortfinal on the same machine polls it too |
+| **adsb.fi** `opendata.adsb.fi/api/v3/lat/<lat>/lon/<lon>/dist/<nm>` | "personal, non-commercial use only", cite adsb.fi; 1 request a second | **on: the user's decision, 2026-10-14, that this is personal, non-commercial use (the department charges nothing for it).** Credited in the map corner and the box |
+| OpenSky Network | non-profit research / education, internal evaluation, "government purposes"; live operational use needs a written agreement; its credits are far too few for a 5 s refresh | **not used** (user, 2026-10-14: it adds nothing over adsb.lol, adsb.fi and our receiver) |
 | FAA Releasable Aircraft Database `registry.faa.gov/database/ReleasableAircraft.zip` | public domain (US government) | types by ICAO address for US aircraft: weekly once someone has looked (~70 MB), kept in SQLite (`aircraft/faa_registry.sqlite` in the state dir). Only the N-number, make, model, year, kind and engines are kept: **never the owner's name or address** |
 | FAA JO 7340.2 airline designators | public domain | `data/airport/airlines.csv` (shortfinal's `tools/fetch_airlines.py`) |
-| **our receiver** | ours | below |
+| **our receiver** | ours | below: first, when there is one |
 
 ### Our own receiver (later; nothing assigned now)
 
@@ -1389,9 +1405,9 @@ only one band heard is kept). A file whose own clock stops for 30 s says its dec
 
 `sizeup/aircraft.py` (`AircraftLayer`), on the hub (or all-in-one; never a station):
 
-* **Only while someone looks.** The page asks `GET /api/cad/aircraft` every 5 s while a map has the layer on
-  and the page is visible; each ask keeps the feed coming for 60 s; nothing is fetched otherwise. A first
-  ask with nothing fresh waits up to 5 s for the read it wakes.
+* **While someone looks.** The page asks `GET /api/cad/aircraft` every 5 s while a map has the layer on and
+  the page is visible; each ask keeps the feeds at their full rates for 60 s. Otherwise only the emergency watch
+  reads (below). A first ask with nothing fresh waits up to 5 s for the read it wakes.
 * **Never in the state push** (#146 kept the idle stream tiny). Each answer carries an ETag from its body:
   an unchanged answer is a 304. The recorded traffic (6 aircraft drawn) is 3.1 KB, 1.1 KB gzipped (positions
   to 5 decimals; trails to 4, for arrivals, departures and emergencies only, at most 20 points).
@@ -1399,27 +1415,59 @@ only one band heard is kept). A file whose own clock stops for 30 s says its dec
   paths already in `data/airport/khpn_procedures.geojson`, the track store's glitch filter (a jump faster
   than max(300 kt, 2 x speed + 100 kt) is held back until it repeats three times) and fade / drop by the
   feed's own clock. Left in shortfinal: ATC audio and speech-to-text, callsign attribution, adsb.im routes,
-  the window view, ntfy pushes, recording / replay, the readsb supervisor.
+  the window view, recording / replay, the readsb supervisor.
+
+### Emergency squawks: the alarm and the push
+
+User, 2026-10-14 (#161): *"yes they should"* (raise sizeup's alarm and send a push). A **squawk 7500 / 7600 /
+7700**, or the aircraft's **own emergency status** (minimum fuel, no radio, medical ...), **within 15 nm of HPN
+below 18,000 ft** (or on the ground), from a message no older than 15 s, raises **the emergency alarm**
+(`sizeup/cad/alarms.py`, #128: every console and wall board, the alarm sound, acknowledged by a dispatcher)
+and **its push** through `[alerts] ntfy_topic` when one is set (never Tapout's `pcfd-phone-prealert` or
+`pcfd-status`: refused in three places; no topic: the alarm only). It works while nobody looks at the map:
+the emergency watch reads the primary feed every 15 s (`[aircraft] alarms = false` turns it off).
+
+* **One alarm per aircraft per emergency.** Still squawking: the same alarm. Not seen in emergency for a
+  minute: it **ends** — acknowledged as *"ADS-B: squawk ended (now 1200)"* (or *"no longer reported"*), with an
+  *Ended* push; a flicker inside the minute changes nothing. The same aircraft and emergency again within 30
+  minutes raises nothing new. At most 6 aircraft alarms an hour (more are logged).
+* **Drill mode** (Settings > System > Alarms) marks it like any other alarm: *DRILL* on the screens, *"DRILL:"*
+  and *"not a real emergency"* in the push, priority 3.
+* With exactly one open **Airport** event, the alarm joins it (its chronology).
+* **What it says** (the push; the alarm card shows the same line), always marked as public data (here with the
+  FAA registry loaded, which adds the make and model):
+
+  ```
+  AIRCRAFT EMERGENCY: SQUAWK 7700 (EMERGENCY) · N41DW (SR22) on ADS-B (public data)
+  14:38:30 · N41DW, SR22, Cirrus Design Corp SR22 · squawk 7700 (emergency) · 900 ft, descending 500 ft/min ·
+  1.9 nm SE of HPN · arriving HPN on the ILS 34, 1.4 nm to go · via adsb.lol. From public ADS-B data, not an
+  official notification.
+  ```
+
+  Priority 5 (an alarm), tags airplane + rotating_light; *Ended: ...* priority 3; *Acknowledged: ...* when a
+  dispatcher acknowledges it.
 
 | | |
 |---|---|
-| `GET /api/cad/aircraft` | `{configured, note, feed: {key, label, link, licence, terms, credit}, feeds, at (the feed's time), fetched, error, stale_s, airport, registry: {at, n, error, credit}, receiver: null \| {enabled, sdr, name, present, held_by, bands, note}, aircraft: [{hex, cs, flight, reg, reg_src, type, model, model_src, kind, airline, lat, lon, alt, gs, trk, vr, sq, emerg, phase, rwy, appr, dist, eta, age, pos, band, trail}], counts}` |
+| `GET /api/cad/aircraft` | `{configured, note, feed: the primary {key, label, link, licence, terms, credit}, feeds: [{key, label, credit, terms, role: receiver \| primary \| secondary, n, fresh, ok, at, shown, resting, healthy}], credit, at (the newest feed's time), fetched, error, stale_s, airport, registry: {at, n, error, credit}, receiver: null \| {enabled, sdr, name, present, held_by, bands, note}, aircraft: [{hex, cs, flight, reg, reg_src, type, model, model_src, kind, airline, lat, lon, alt, gs, trk, vr, sq, emerg, phase, rwy, appr, dist, eta, age, pos, band, src, trail}], counts}` |
 
 ```toml
-[aircraft]                       # sizeup/aircraft.py; leave out: on, adsb.lol, 15 nm around HPN
-feeds = ["adsblol"]              # in order: "receiver", "adsblol", "adsbfi"
+[aircraft]                       # sizeup/aircraft.py; leave out: on, adsb.lol + adsb.fi, 15 nm, the alarm on
+feeds = ["adsblol", "adsbfi"]    # combined; "receiver" (when enabled) always first
+alarms = true                    # a 7500 / 7600 / 7700 squawk near HPN raises the alarm (and the push)
 radius_nm = 15
 ceiling_ft = 6000
 registry = true
 
-[aircraft.receiver]              # off: no SDR is assigned to ADS-B yet
+[aircraft.receiver]              # off: no SDR is assigned to ADS-B yet; enabled, its positions come first
 enabled = false
 sdr = ""
 json_1090 = ""                   # readsb / dump1090 aircraft.json: a path or http(s) URL
 json_978 = ""                    # dump978-fa aircraft.json
 ```
 
-Tests: `tests/test_aircraft.py` on adsb.lol answers recorded 2026-10-14 14:38 EDT and the FAA registry of
+Tests: `tests/test_aircraft.py` on adsb.lol answers recorded 2026-10-14 14:38 EDT, adsb.lol and adsb.fi answers
+recorded together at 15:44 EDT, and the FAA registry of
 2026-10-13 trimmed to those aircraft, owner columns blanked (`tests/fixtures/aircraft/`,
 `tools/record_aircraft_fixtures.py`); the receiver fixtures are derived (readsb) or hand-built (dump978)
 until there is a receiver to record.
