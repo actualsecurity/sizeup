@@ -484,9 +484,9 @@ class StationHealth:
             if c["stuck"]:
                 out[f"stuck:{c['label']}"] = {
                     "severity": "warning", "title": f"{c['label']} stuck open",
-                    "text": f"{c['label']} squelch open {_dur(c['open_s'] or 0)} without a break: likely noise "
-                            "holding it (check the squelch, the antenna)",
-                    "since": now - float(c["open_s"] or 0)}
+                    "text": f"{c['label']} squelch open without a break since {_hhmm(now - float(c['open_s'] or 0))}: "
+                            "likely noise holding it (check the squelch, the antenna)",
+                    "since": now - float(c["open_s"] or 0)}      # (no running duration in the text: the banner counts)
         ob = m["outbox"]
         if ob["pending"] and ob["age_s"] is not None and ob["age_s"] >= self.outbox_s:
             out["outbox"] = {"severity": "warning", "title": "Station's events backing up",
