@@ -441,7 +441,7 @@ def _bbox(v, what: str, max_deg: float = 3.0) -> tuple[float, float, float, floa
 
 
 GIS_LAYER_KEYS = {"key", "label", "url", "group", "kind", "style", "minzoom", "fields", "refresh", "bbox", "where", "on",
-                  "tiled", "simplify_m", "licence", "page", "enabled", "asof", "ours_field", "note", "icon", "sub"}
+                  "tiled", "simplify_m", "licence", "page", "enabled", "asof", "ours_field", "drop_ours", "note", "icon", "sub"}
 
 
 ICON_RE = re.compile(r"[a-z][a-z0-9-]{0,31}")
@@ -500,8 +500,8 @@ def _gis_layer(raw: dict, i: int, base=None):
     return Layer(key=key, label=label, url=url, group=text["group"], kind=kind, style=dict(style), minzoom=minzoom,
                  fields=tuple(fields), refresh=refresh, bbox=bbox, where=text["where"], on=bool(d.get("on", False)),
                  tiled=bool(d.get("tiled", False)), simplify_m=simplify_m, licence=text["licence"], page=text["page"],
-                 enabled=bool(d.get("enabled", True)), asof=text["asof"], ours_field=text["ours_field"], note=text["note"],
-                 icon=text["icon"], sub=text["sub"])
+                 enabled=bool(d.get("enabled", True)), asof=text["asof"], ours_field=text["ours_field"],
+                 drop_ours=bool(d.get("drop_ours", False)), note=text["note"], icon=text["icon"], sub=text["sub"])
 
 
 def _gis(data: dict) -> dict:

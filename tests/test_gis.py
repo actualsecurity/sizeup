@@ -516,3 +516,24 @@ def test_the_county_gis_group_is_in_every_layers_box_and_only_ever_asks_the_hub(
     assert "zoom in" in js and "control.showInfo(" in js and "fill-extrusion" in js
     for cls in ("ml-group", "ml-ghead", "ml-sub", "ml-note"):
         assert re.search(rf"\.{cls}\b", (STATIC / "cadmap.css").read_text()), cls
+
+
+def test_the_county_fire_stations_leave_out_our_own_departments():
+    # 2026-10-14: the county's 2015 layer has a "PORT CHESTER F.D." at Don Bosco Place, which isn't a firehouse; the map
+    # draws ours from our own firehouse data, so the county's copies of ours are left out (drop_ours).
+    layer = BY_KEY["fire_stations"]
+    assert layer.drop_ours and layer.public()["drop_ours"] is True
+    raw = json.loads((Path(__file__).parent / "fixtures" / "wcgis" / "fire_stations.geojson").read_text())
+    names = [f["properties"].get("NAME", "") for f in raw["features"]]
+    assert any("PORT CHESTER" in n.upper() for n in names)                 # the fixture has one of ours
+    from dataclasses import replace
+    g = make(layers=[layer], ours=("Port Chester FD", "Rye Brook FD"))
+    assert g.refresh("fire_stations")
+    kept = [f["properties"].get("NAME", "") for f in g.data["fire_stations"]]
+    assert not any(g.is_ours(layer, {"NAME": n}) for n in kept)
+    keep = replace(layer, drop_ours=False)
+    k = make(layers=[keep], ours=("Port Chester FD", "Rye Brook FD"))
+    assert k.refresh("fire_stations")
+    assert len(k.data["fire_stations"]) > len(kept)                       # the same fixture keeps ours without it
+    plain = make(layers=[layer], ours=())                                   # the left-out set is part of the cache key
+    assert g._signature(layer) != plain._signature(layer)

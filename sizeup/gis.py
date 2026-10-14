@@ -106,6 +106,8 @@ class Layer:
     enabled: bool = True
     asof: str = ""                    # the data's date as the county states it ("as of Oct 2015"): shown
     ours_field: str = ""              # the field naming the department: features matching ours are marked _ours
+    drop_ours: bool = False           # leave out our own departments' features: the map draws ours from our own data
+                                      # (the county's 2015 fire stations put a "PORT CHESTER F.D." at Don Bosco Pl, 2026-10-14)
     note: str = ""                    # what the data doesn't say, shown with every feature ("catenary: 12.5 kV")
     icon: str = ""                    # the mark for a point layer (#111): static/icons.svg "i-gis-<icon>" ("hydrant",
                                       # "fire-station"), in the style's color on the map, by its toggle, in the click box; "": a dot
@@ -120,7 +122,7 @@ class Layer:
         return {"key": self.key, "label": self.label, "group": self.group, "kind": self.kind, "style": dict(self.style),
                 "minzoom": self.minzoom, "fields": [list(f) for f in self.fields], "on": self.on, "refresh": self.refresh,
                 "tiled": self.tiled, "licence": self.licence, "page": self.page, "asof": self.asof,
-                "ours_field": self.ours_field, "note": self.note, "icon": self.icon, "sub": self.sub}
+                "ours_field": self.ours_field, "drop_ours": self.drop_ours, "note": self.note, "icon": self.icon, "sub": self.sub}
 
 
 # ---- the starter set: docs/cloud.md "County GIS layers" has each dataset's source and terms -------------------
@@ -190,7 +192,7 @@ DEFAULT_LAYERS: tuple[Layer, ...] = (
     Layer("fire_stations", "Fire stations", f"{_WC}/DataHub_CommunityFacilities/MapServer/183", group="Facilities", kind="point", icon="fire-station",
           style={"color": "--err", "radius": 5}, minzoom=11, refresh="monthly",
           fields=(("NAME", "Department"), ("ADDRESS", "Address"), ("CITY", "City"), ("PHONE", "Phone")), ours_field="NAME",
-          licence=COUNTY_TERMS, page=f"{_HUB}7b13a73e7a564c648d95529cebc10061_183", asof="as of Dec 2015"),
+          drop_ours=True, licence=COUNTY_TERMS, page=f"{_HUB}7b13a73e7a564c648d95529cebc10061_183", asof="as of Dec 2015"),
     Layer("police", "Police stations", f"{_WC}/DataHub_CommunityFacilities/MapServer/167", group="Facilities", kind="point", icon="police",
           style={"color": "--info", "radius": 5}, minzoom=11, refresh="monthly",
           fields=(("NAME", "Station"), ("ADDRESS", "Address"), ("CITY", "City"), ("PHONE", "Phone")),
@@ -620,6 +622,8 @@ class Gis:
                 if t is None:
                     continue
                 if self.is_ours(layer, t["properties"]):
+                    if layer.drop_ours:
+                        continue
                     t["properties"]["_ours"] = True
                 fid = t.get("id")
                 if fid is not None:
@@ -669,6 +673,8 @@ class Gis:
         """What a cached file must have been fetched with to still be this layer's."""
         doc = {"url": layer.url, "bbox": [round(x, 4) for x in self.layer_bbox(layer)], "where": layer.where,
                "fields": [f for f, _ in layer.fields], "simplify_m": layer.simplify_m}
+        if layer.drop_ours:                               # which features were left out is part of the cache
+            doc["drop_ours"] = sorted(self.ours)
         return hashlib.sha256(json.dumps(doc, sort_keys=True).encode()).hexdigest()[:16]
 
     def _path(self, key: str) -> Path | None:
