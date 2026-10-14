@@ -210,10 +210,11 @@ class Config:
     weather_tide_station: tuple[str, str] = ("8518091", "Rye Beach")
     weather_gauge_station: tuple[str, str] = ("8516945", "Kings Point")
     # [aircraft] (sizeup/aircraft.py, #155): aircraft near HPN, shortfinal's PCFD-focused design, read by the hub
-    # (or all-in-one) only while someone looks. feeds in order of preference: "adsblol" (ODbL, the default),
-    # "adsbfi" (personal, non-commercial use only: off unless listed), "receiver" (our own ADS-B receiver).
+    # (or all-in-one). feeds: "receiver" (our own ADS-B receiver: its positions first), "adsblol" (ODbL) and
+    # "adsbfi" (personal, non-commercial use: the user's decision, 2026-10-14), combined; the busier API is primary.
     aircraft_enabled: bool = True
-    aircraft_feeds: tuple[str, ...] = ("adsblol",)
+    aircraft_feeds: tuple[str, ...] = ("adsblol", "adsbfi")
+    aircraft_alarms: bool = True      # a 7500 / 7600 / 7700 squawk near HPN raises the alarm (and the push)
     aircraft_radius_nm: float = 15.0
     aircraft_ceiling_ft: float = 6000.0
     aircraft_adsblol_url: str = ""    # "" = adsb.lol's public API (sizeup/aircraft.py ADSBLOL_URL)
@@ -518,19 +519,22 @@ AIRCRAFT_FEEDS = ("receiver", "adsblol", "adsbfi")
 
 
 def _aircraft(data: dict, base: Path, sdrs: tuple[str, ...]) -> dict:
-    """[aircraft] and [aircraft.receiver] -> Config fields. No section: on, adsb.lol, 15 nm around HPN, no receiver.
+    """[aircraft] and [aircraft.receiver] -> Config fields. No section: on, adsb.lol + adsb.fi, 15 nm around HPN, the
+    emergency alarm on, no receiver. An enabled receiver is always a feed, and its positions come first.
     The receiver's sdr (a dongle for ADS-B) is never one of sizeup's own radios ([radio] sdrs / shared_device)."""
     ac = _take(data.get("aircraft", {}), "aircraft", {"enabled", "feeds", "radius_nm", "ceiling_ft", "adsblol_url",
-                                                      "adsbfi_url", "registry", "receiver"})
+                                                      "adsbfi_url", "registry", "receiver", "alarms"})
     if not isinstance(ac.get("receiver", {}), dict):
         raise ConfigError("aircraft.receiver: a table ([aircraft.receiver])")
     rc = _take(ac.get("receiver", {}), "aircraft.receiver", {"enabled", "sdr", "json_1090", "json_978"})
     enabled, registry, receiver = ac.get("enabled", True), ac.get("registry", True), rc.get("enabled", False)
-    if not all(isinstance(x, bool) for x in (enabled, registry, receiver)):
-        raise ConfigError("aircraft.enabled / aircraft.registry / aircraft.receiver.enabled: true or false")
-    feeds = ac.get("feeds", ["adsblol"])
+    alarms = ac.get("alarms", True)
+    if not all(isinstance(x, bool) for x in (enabled, registry, receiver, alarms)):
+        raise ConfigError("aircraft.enabled / registry / alarms / aircraft.receiver.enabled: true or false")
+    feeds = ac.get("feeds", ["adsblol", "adsbfi"])
     if not (isinstance(feeds, list) and feeds and all(f in AIRCRAFT_FEEDS for f in feeds) and len(set(feeds)) == len(feeds)):
-        raise ConfigError('aircraft.feeds: in order of preference, from "receiver", "adsblol", "adsbfi" (each once)')
+        raise ConfigError('aircraft.feeds: from "receiver", "adsblol", "adsbfi" (each once; the APIs in the order to '
+                          'prefer on a tie)')
     try:
         radius, ceiling = float(ac.get("radius_nm", 15)), float(ac.get("ceiling_ft", 6000))
     except (TypeError, ValueError):
@@ -553,10 +557,10 @@ def _aircraft(data: dict, base: Path, sdrs: tuple[str, ...]) -> dict:
             raise ConfigError(f"aircraft.receiver.{k}: the decoder's aircraft.json: a file path or an http(s):// address")
         srcs[f"aircraft_receiver_{k.split('_')[1]}"] = (u if not u or "://" in u or Path(u).is_absolute()
                                                          else str((base / u).resolve()))
-    if "receiver" in feeds and not (receiver and any(srcs.values())):
+    if ("receiver" in feeds or receiver) and not (receiver and any(srcs.values())):
         raise ConfigError('aircraft.feeds: "receiver" needs [aircraft.receiver] enabled = true and json_1090 or json_978')
     if receiver and "receiver" not in feeds:
-        raise ConfigError('aircraft.receiver.enabled: list "receiver" in aircraft.feeds too (first, to prefer it)')
+        feeds = ["receiver", *feeds]      # user, 2026-10-14: "primary local SDR on ADSB, secondary the above sources"
     sdr = str(rc.get("sdr", "")).strip()
     if sdr:
         if not re.fullmatch(r"[\w.-]{1,32}", sdr):
@@ -566,7 +570,8 @@ def _aircraft(data: dict, base: Path, sdrs: tuple[str, ...]) -> dict:
                               "tools; give the dongle a name first (rtl_eeprom -s adsb)")
         if sdr in sdrs:
             raise ConfigError(f"aircraft.receiver.sdr: {sdr} is one of sizeup's own radios ([radio] sdrs / shared_device)")
-    return dict(aircraft_enabled=enabled, aircraft_feeds=tuple(feeds), aircraft_radius_nm=radius, aircraft_ceiling_ft=ceiling,
+    return dict(aircraft_enabled=enabled, aircraft_feeds=tuple(feeds), aircraft_alarms=alarms, aircraft_radius_nm=radius,
+                aircraft_ceiling_ft=ceiling,
                 aircraft_registry=registry, aircraft_receiver=receiver, aircraft_sdr=sdr, **urls, **srcs)
 
 
