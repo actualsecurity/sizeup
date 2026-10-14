@@ -393,6 +393,7 @@ class Updater:
         self.clock, self.sleep = clock, sleep
         self.out = out or (lambda line: print(line, flush=True))
         self._settings: dict | None = None
+        self._line = ""                 # the last result() line: saved with "last" (the hub's deploy check prints it)
 
     # -- the outside world (tests replace these) ---------------------------------------------------------
 
@@ -555,6 +556,8 @@ class Updater:
         return read_state(self.p.state)
 
     def save(self, st: dict, **kw) -> None:
+        if isinstance(kw.get("last"), dict) and self._line:
+            kw["last"] = dict(kw["last"], line=self._line[:500])
         st.update(kw)
         if "state" in kw:
             st["since"] = self.clock()
@@ -569,7 +572,8 @@ class Updater:
         self.out(line)
 
     def result(self, line: str) -> None:
-        """The one line per attempt: the journal and /var/log/sizeup-update.log."""
+        """The one line per attempt: the journal and /var/log/sizeup-update.log (and state.json's "last")."""
+        self._line = line
         self.out(line)
         try:
             with self.p.log.open("a") as f:

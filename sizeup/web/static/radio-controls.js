@@ -164,6 +164,13 @@ window.RadioControls = (() => {
         }
         lines.push(`state: ${state}${r.open ? " · squelch open" : ""}`);
         node.title = lines.join("\n");
+        if (r.link) {                       // the hub's Station row: opens Settings > System > Station health (#79)
+          node.classList.add("link");
+          node.tabIndex = 0;
+          node.setAttribute("role", "link");
+          node.onclick = () => { location.hash = r.link; };
+          node.onkeydown = (e) => { if (e.key === "Enter") location.hash = r.link; };
+        }
       },
       empty: "No radios",
     });
