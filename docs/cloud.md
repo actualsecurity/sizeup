@@ -687,6 +687,30 @@ says which it shows: **Live** (only once the video is actually playing), or **Sn
 every N s** with the source's real cadence (the county 8 s, the Thruway and 511NY about 60 s).
 Thumbnails (the Cameras panel, the board) stay snapshots.
 
+**Smoothness** (refs #101, after a user report of a "stop-motion" feed on *I-287 Just East of
+Interchange 9*): measured at the origin, that camera (TA_012) encodes at **1 fps** (4 frames per 4 s
+segment, ~3 KB/s) while a smooth one (TA_006) is 15 fps: the source itself is low-rate (a night /
+low-light setting). The hub now measures each open stream's frame rate from the segments it relays
+(`ts_frames`: PES starts on the video PID; `GET .../stream/status` → `{open, fps, ahead, target_s,
+source_down}`), and the viewer says *Live · low frame rate from the source (~1 fps)* rather than
+pretending. Failed playlists before a success were **origin outages on particular cameras**: idle
+Thruway streams answered their first playlist with the origin's own 504 after 30 s or hung (TA_005,
+TA_011, TA_057 one night), which the hub turned into a 502 after its 10 s timeout and hls.js retried.
+Now the first playlist gets 6 s (`STREAM_OPEN_TIMEOUT_S`); a source that doesn't answer is
+remembered for 5 min (`STREAM_RETRY_S`, 503 `{source_down: true}` at once) and the viewer shows
+snapshots immediately with "no live video from the source right now"; the player doesn't retry the
+manifest. **Relay latency**: while a stream is open a pump thread keeps its chunklist fresh (served
+from the hub's copy when under 2 s old) and the newest 3 segments fetched ahead of the player
+(`Roads.pump_once`), so a segment is one local hop rather than a fetch from the origin per 6 s; the
+player sits 3 segments behind the live edge with up to 30 s buffered, and a stall shows *Buffering…*
+instead of silent stop-motion.
+
+**Snapshots at the source's cadence**: a snapshot-only camera is polled at its own cadence (the
+county's 8 s, the Thruway's about a minute when no stream plays), with `If-None-Match` against the
+proxy's `ETag` (the picture's time; also `Last-Modified` and `?since=`): 304 when the hub's picture
+is no newer, so no bytes move for nothing; the hub itself asks a camera again after half its cadence
+(`Roads.image_ttl`: the county's every 4 s, 15 s at most). The age under the picture ticks.
+
 Measured 2026-10-13 on a Mac, a hub with the real Thruway feeds and two streams open for 60 s
 through the proxy (a client polling each chunklist every 6 s and fetching each new segment, like
 hls.js): 13 segments, 1.15 MB served, 18.7 KB/s; the hub process used 2.7 s of CPU over the 95 s run
