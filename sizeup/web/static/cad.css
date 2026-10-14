@@ -184,6 +184,23 @@
   /* #115: a page not ours whose text names our units (still not an event): the row stands out, the note says why;
      every tone heard in order under a page's tags */
   .rt.names-ours { border-inline-start: var(--bw-mark) solid var(--warn); }
+  /* the emergency button / a mayday on a transmission (#128, cad.js emergencyChip): ours red like the alarm
+     overlay (a filled chip, a red edge and tint on the row), someone else's (a notice) amber like the notices'
+     strip; a folded talkgroup with one says so on its head (radio-view.js otherGroups) and goes first */
+  :is(.list, .feed-list) > li.rt.emergency { padding-inline-start: var(--s-2); }
+  :is(.list, .feed-list) > li.rt.emergency.em-ours { border-inline-start: var(--bw-mark) solid var(--accent);
+    background: color-mix(in srgb, var(--accent) 12%, transparent); }
+  :is(.list, .feed-list) > li.rt.emergency.em-other { border-inline-start: var(--bw-mark) solid var(--warn); }
+  .chip.emergency { color: var(--on-accent); background: var(--accent); border-color: var(--accent); letter-spacing: 0.04em; }
+  .chip.emergency.em-other { color: var(--warn); background: color-mix(in srgb, var(--warn) 13%, transparent);
+    border-color: color-mix(in srgb, var(--warn) 55%, transparent); letter-spacing: 0.02em; }
+  .em-ack { white-space: nowrap; }
+  /* kept only for an emergency (its talkgroup's Record is off: the emergency window), and the window still running */
+  .chip.kept { --c: var(--warn); border-style: dashed; }
+  .og.emergency.em-ours > .og-head { box-shadow: inset var(--bw-mark) 0 0 var(--accent); }
+  .og.emergency.em-other > .og-head { box-shadow: inset var(--bw-mark) 0 0 var(--warn); }
+  .og-flags { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--s-1); min-inline-size: 0; }
+  #rv-other-em { margin-inline-start: var(--s-2); }
   .feed-list > li.skipped.names-ours { margin-inline-end: 0; }
   .names-ours-note { margin-block: var(--s-1) 0; padding-block: var(--s-1); overflow-wrap: anywhere; }
   .tone-seq { overflow-wrap: anywhere; margin-block-start: var(--s-0); }
@@ -606,6 +623,11 @@
     border-block-end: var(--bw-mark) solid var(--err); box-shadow: var(--elev-dialog); }
   .alarm-notice { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); }
   .alarm-notice b { color: var(--err); }
+  /* the emergency window (alarms.Windows): "Recording until 20:09 (emergency)", All clear next to Acknowledge */
+  .alarm-window { color: var(--warn); font-weight: 700; }
+  .alarm-card .alarm-window { color: var(--accent-text); }
+  .alarm-notice.alarm-window-row b { color: var(--warn); }
+  .alarm-clear { min-inline-size: 12rem; }
   .alarm-chans { inline-size: 22rem; max-inline-size: 100%; }
   .alarm-kw { inline-size: 100%; max-inline-size: 40rem; font-family: var(--mono); }
   @media (max-width: 640px) {

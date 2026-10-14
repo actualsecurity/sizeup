@@ -121,6 +121,19 @@ back as `POST /api/station/jobs/<id>`), handed out once, dropped if not picked u
 | `call` `set_mode`, `set_talkgroup`, `set_talkgroup_group` | the hub's SDR / talkgroup switches | runs it, returns its own refusal if any | the switch is refused with the reason ("station offline since 12:03") |
 | `call` `retranscribe` | Re-transcribe on the hub for a channel on the local model (one on "aws" runs Amazon Transcribe on the hub's clip; "both": AWS here, this for the alternative, args `[ids, true]`; AWS unavailable: here, said in the result), or Amazon Transcribe failing for a clip the station didn't run whisper on | queues it; new text comes back as `retext`, then always a `rerun` (changed / same / failed) | refused: speech-to-text runs on the station (a failed AWS clip then says "transcription failed"; a re-run ends "failed: ...") |
 | `call` `set_channel_prefs` | Settings > Radios > Channels on the hub, or the station reporting other choices than the hub's (`channels.sig` in its state) | applies the whole map + whether AWS can take audio now, keeps it (its own Settings overrides, audited as "hub"), reports `{prefs, aws, sig}` | sent when it's back: the Channels card says "Station offline ...: these apply when it's back" |
+| `call` `emergency_all_clear` | an alarm's **All clear** on the hub (`Alarms.all_clear` → `HubApp._all_clear_sent`, in the background) | closes its emergency window for that talkgroup and radio (`App.emergency_all_clear`) | logged on the hub; the station's window then ends on its own (`[p25] emergency_window_min` after the last emergency key-up). A station from before refuses it the same way |
+
+**The emergency window** (#128, 2026-10-14). trunk-recorder records every talkgroup (`recordUnknown`, every
+row of `talkgroups.csv` mode `T`); the **station** drops the calls of a talkgroup whose Record switch is off
+(`App._call`). The P25 emergency button opens a window there: every call on its talkgroup, and every call of
+the radio that pressed it on any talkgroup, is kept until `[p25] emergency_window_min` (10) after its last
+emergency key-up, Record off or on; another emergency key-up extends it. The hub opens the same windows from
+the alarms (to show "Recording until 20:09 (emergency)" on the alarm, the strip and the Radio view's talkgroup
+head) and sends All clear to the station. Acknowledge (seen) leaves the window running; All clear (resolved)
+ends it. Calls kept only by the window carry `kept: "emergency"` (the row says "kept: emergency window").
+Windows live in memory: a restart of the station forgets an open one. An emergency call's own trunk-recorder
+JSON is kept in `captures/emergency/` on the station (90 days) and its contents ride with the flagged
+transmission to the hub (`radio_traffic.evidence`).
 
 Settings, run cards, units, radio IDs and every CAD record stay on the hub. The station has no CAD
 pages of its own ([the station page](#the-station-page)).

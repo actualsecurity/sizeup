@@ -57,6 +57,7 @@ from __future__ import annotations
 import json
 import re
 import threading
+import time
 from datetime import datetime
 from typing import Callable
 
@@ -74,11 +75,13 @@ MAX_AGE_S = 30 * 60                        # a transmission that ended longer ag
 REPEAT_S = 120                             # the same radio's button again on the same channel, its alarm still open:
                                            # the same alarm (radios repeat the emergency burst, key after key)
 NOTICE_S = 15 * 60                         # a notice nobody acknowledged drops off after this
+WINDOW_S = 10 * 60                         # the emergency window: its talkgroup and radio kept this long ([p25])
 RECENT_S = 10 * 60                         # acknowledged alarms listed this long (the screens say who and when)
 KEEP_S = 90 * 86400
 ADSB_CHANNEL = "ADS-B (public data)"
 ADSB_NOTE = "From public ADS-B data, not an official notification"
-COLUMNS = (("source", "TEXT NOT NULL DEFAULT ''"), ("subject", "TEXT NOT NULL DEFAULT ''"))   # added after #128
+COLUMNS = (("source", "TEXT NOT NULL DEFAULT ''"), ("subject", "TEXT NOT NULL DEFAULT ''"),   # added after #128
+           ("clear_by", "TEXT NOT NULL DEFAULT ''"), ("clear_at", "REAL"))                    # All clear, 2026-10-14
 TOKEN = re.compile(r"(?:[A-Za-z]\.){2,}|[A-Za-z0-9]+(?:['’][A-Za-z0-9]+)*")
 CHANNEL = re.compile(r"tg:\d{1,9}|[A-Za-z0-9][A-Za-z0-9 ./_-]{0,39}")
 
@@ -107,7 +110,9 @@ CREATE TABLE IF NOT EXISTS alarms (
   ack_by TEXT NOT NULL DEFAULT '',
   ack_at REAL,
   source TEXT NOT NULL DEFAULT '',      -- "" (a transmission) | "adsb" (an aircraft emergency, sizeup/aircraft.py)
-  subject TEXT NOT NULL DEFAULT ''      -- adsb: what the emergency is ("squawk 7700 (emergency)")
+  subject TEXT NOT NULL DEFAULT '',     -- adsb: what the emergency is ("squawk 7700 (emergency)")
+  clear_by TEXT NOT NULL DEFAULT '',    -- All clear: resolved (its emergency window closed), who and when
+  clear_at REAL
 );
 CREATE INDEX IF NOT EXISTS alarms_ack ON alarms(ack_at);
 """
@@ -311,23 +316,113 @@ def aircraft_text(ev: dict) -> str:
 # -- the alarms ------------------------------------------------------------------------------------------
 
 
+class Windows:
+    """The emergency window (user, 2026-10-14: "if emergencies bypass that record switch, it should record for 10
+    minutes or so after the incident too or until an indication is made that things are 'ok' even if the record
+    switch is off"). The P25 emergency button on a talkgroup opens it: every call on that talkgroup, and every call
+    of the radio that pressed it on any talkgroup, is kept (recorded, transcribed, logged) until keep_s after the
+    last emergency key-up, whatever the talkgroup's Record switch says ([p25] emergency_window_min, 10). Another
+    emergency key-up extends it; the alarm's All clear ends it (Acknowledge doesn't: seen is not resolved).
+
+    The keep / drop decision is the station's (App._call, where trunk-recorder's calls arrive; trunk-recorder records
+    every talkgroup, sizeup drops the ones switched off): it opens its own windows from the call JSON's flag. The
+    CAD of record (the hub, or all-in-one) opens the same windows from the alarms (on_traffic) to show them, and
+    sends All clear to the station (App.emergency_all_clear). Kept in memory: a restart forgets an open window."""
+
+    def __init__(self, keep_s: float = WINDOW_S, clock: Callable[[], float] | None = None):
+        self.keep_s = float(keep_s)
+        self.clock = clock or time.time
+        self._lock = threading.Lock()
+        self._tg: dict[int, dict] = {}            # talkgroup -> {talkgroup, channel, since, until, radios, alarm_id}
+        self._radio: dict[str, dict] = {}         # radio ID -> {until, talkgroup}: the radio that pressed it
+
+    def open(self, tg, channel: str = "", radio_ids=(), at: float | None = None, alarm_id: int | None = None) -> dict | None:
+        """An emergency key-up on talkgroup tg (at: when it ended): its window opened or extended."""
+        if self.keep_s <= 0 or tg is None or not str(tg).lstrip("-").isdigit():
+            return None
+        tg = int(tg)
+        at = self.clock() if at is None else float(at)
+        until = at + self.keep_s
+        ids = [str(r).strip() for r in radio_ids if str(r).strip()]
+        with self._lock:
+            w = self._tg.get(tg)
+            if w is None or w["until"] < at:
+                w = self._tg[tg] = {"talkgroup": tg, "channel": channel, "since": at, "until": until, "radios": [],
+                                    "alarm_id": alarm_id}
+            w["until"] = max(w["until"], until)
+            w["channel"] = w["channel"] or channel
+            w["alarm_id"] = alarm_id or w["alarm_id"]
+            for r in ids:
+                if r not in w["radios"]:
+                    w["radios"].append(r)
+                cur = self._radio.get(r)
+                self._radio[r] = {"until": max(until, cur["until"] if cur else 0.0), "talkgroup": tg}
+            return dict(w, radios=list(w["radios"]))
+
+    def link(self, tg, alarm_id: int) -> None:
+        """The alarm the window's button raised (the screens' All clear goes to it)."""
+        with self._lock:
+            w = self._tg.get(int(tg)) if tg is not None and str(tg).lstrip("-").isdigit() else None
+            if w is not None and not w["alarm_id"]:
+                w["alarm_id"] = alarm_id
+
+    def keeps(self, tg, radio_ids=(), at: float | None = None) -> str:
+        """Why a call on tg (radio_ids talking, starting at `at`) is kept by a window: "talkgroup", "radio" or ""."""
+        at = self.clock() if at is None else float(at)
+        with self._lock:
+            w = self._tg.get(int(tg)) if tg is not None else None
+            if w is not None and at <= w["until"]:
+                return "talkgroup"
+            for r in radio_ids:
+                x = self._radio.get(str(r).strip())
+                if x is not None and at <= x["until"]:
+                    return "radio"
+        return ""
+
+    def clear(self, tg=None, radio_ids=()) -> bool:
+        """All clear: the talkgroup's window and its radios (and these radios) closed now. True if one was open."""
+        now = self.clock()
+        ids = {str(r).strip() for r in radio_ids if str(r).strip()}
+        with self._lock:
+            w = self._tg.pop(int(tg), None) if tg is not None and str(tg).lstrip("-").isdigit() else None
+            if w is not None:
+                ids |= set(w["radios"])
+            gone = [r for r in ids if r in self._radio]
+            for r in gone:
+                del self._radio[r]
+            return (w is not None and w["until"] >= now) or bool(gone)
+
+    def state(self, now: float | None = None) -> list[dict]:
+        """The open windows, soonest to end first: [{talkgroup, channel, since, until, radios, alarm_id}]."""
+        now = self.clock() if now is None else now
+        with self._lock:
+            for tg in [k for k, w in self._tg.items() if w["until"] < now]:
+                del self._tg[tg]
+            for r in [k for k, x in self._radio.items() if x["until"] < now]:
+                del self._radio[r]
+            return sorted((dict(w, radios=list(w["radios"])) for w in self._tg.values()), key=lambda w: w["until"])
+
+
 class Alarms:
     """One per Cad (sizeup/cad/service.py: cad.alarms). The app feeds it transmissions (on_traffic) on the
-    CAD of record and sets notifier ([alerts] ntfy_topic) and on_change (push the screens now)."""
+    CAD of record and sets notifier ([alerts] ntfy_topic), on_change (push the screens now) and on_clear (an All
+    clear: the station's window closed too). windows: the emergency windows (Windows)."""
 
     def __init__(self, cad, log: Callable[[str], None] = print):
         self.cad, self.store, self.log = cad, cad.store, log
         self.clock = cad.clock
         self._lock = threading.RLock()
         self.on_change: Callable[[], None] = lambda: None
+        self.on_clear: Callable[[dict], None] = lambda a: None
         self.notifier = None                      # sizeup/notify.py Notifier, or None: no pushes
         self.public_url = ""                      # the CAD's address, for the push's link
+        self.windows = Windows(clock=self.clock)
         with self.store.lock:
             for stmt in SCHEMA.split(";"):
                 if stmt.strip():
                     self.store.db.execute(stmt)
             have = {r[1] for r in self.store.db.execute("PRAGMA table_info(alarms)")}
-            for col, decl in COLUMNS:                   # a database from before the aircraft alarms
+            for col, decl in COLUMNS:                   # a database from before the aircraft alarms / the All clear
                 if col not in have:
                     self.store.db.execute(f"ALTER TABLE alarms ADD COLUMN {col} {decl}")
             self.store.db.execute("DELETE FROM alarms WHERE created_at < ?", (self.clock() - KEEP_S,))
@@ -424,7 +519,20 @@ class Alarms:
 
     def on_traffic(self, t: dict) -> dict | None:
         """A transmission (new, or with new text): the alarm it raises or updates, None for none.
-        t: {id, start, end, source, talkgroup, unit, rig, radio_id, text, emergency?}."""
+        t: {id, start, end, source, talkgroup, unit, rig, radio_id, text, emergency?}. The emergency button on a
+        talkgroup also opens (or extends) its emergency window (Windows), whatever becomes of the alarm."""
+        emergency = bool(t.get("emergency")) and bool(t.get("id"))
+        if emergency and not self.store.one("SELECT 1 AS x FROM alarms WHERE traffic_id = ? AND clear_at IS NOT NULL",
+                                            (str(t["id"]),)):        # (its transcript after the All clear: still clear)
+            ids = [x.strip() for x in str(t.get("radio_id") or "").split(",") if x.strip()]
+            self.windows.open(t.get("talkgroup"), str(t.get("source") or ""), ids,
+                              float(t.get("end") or t.get("start") or self.clock()))
+        a = self._on_traffic(t)
+        if emergency and a is not None and a.get("emergency") and not a.get("clear_at"):
+            self.windows.link(t.get("talkgroup"), a["id"])
+        return a
+
+    def _on_traffic(self, t: dict) -> dict | None:
         tid = str(t.get("id") or "")
         if not tid:
             return None
@@ -642,6 +750,42 @@ class Alarms:
         self.on_change()
         return a
 
+    def all_clear(self, aid: int, body: dict) -> dict:
+        """POST /api/cad/alarm/<id>/clear {operator}: resolved ("things are ok"): who and when, in the event's
+        chronology; its emergency window ends now (here and, through on_clear, on the station). Acknowledges it
+        too when nobody had. Dispatchers and admins."""
+        op = body.get("operator")
+        if not isinstance(op, str) or not op.strip():
+            raise CadError("operator: who is giving the all clear (enter your name)")
+        op = op.strip()[:OPERATOR_MAX]
+        with self._lock:
+            cur = self.store.one("SELECT * FROM alarms WHERE id = ?", (aid,))
+            if cur is None:
+                raise CadError(f"no alarm {aid}")
+            if cur["clear_at"] is not None:
+                raise CadError(f"alarm {aid} was already cleared by {cur['clear_by']} at {_hms(cur['clear_at'])}")
+            now = self.clock()
+            with self.store.tx() as db:
+                db.execute("UPDATE alarms SET clear_by = ?, clear_at = ?, ack_by = CASE WHEN ack_at IS NULL THEN ? "
+                           "ELSE ack_by END, ack_at = COALESCE(ack_at, ?), updated_at = ? WHERE id = ?",
+                           (op, now, op, now, now, aid))
+            a = self.get(aid)
+            if a["incident_id"]:
+                with self.store.tx() as db:
+                    self.store._event(db, a["incident_id"], "alarm", f"{line(a)}; all clear from {op} at {_hms(now)}",
+                                      op, at=now)
+        radio = a.get("source") != "adsb"      # an aircraft's alarm (#155) has no talkgroup or radio window
+        closed = radio and self.windows.clear(a["talkgroup"], [x.strip() for x in (a["radio_id"] or "").split(",")])
+        self.log(f"alarms: {a['level']} {aid} all clear from {op}: {line(a)}"
+                 + (" (its emergency window closed)" if closed else ""))
+        try:
+            if radio:
+                self.on_clear(a)
+        except Exception as e:  # noqa: BLE001 - the station's window then ends on its own
+            self.log(f"alarms: all clear {aid}: the station's window: {type(e).__name__}: {e}")
+        self.on_change()
+        return a
+
     # -- the push (sizeup/notify.py) --------------------------------------------------------------------------
 
     def _push(self, a: dict, ack: bool = False, ended: str = "", who=None) -> None:
@@ -715,7 +859,8 @@ class Alarms:
         return {"drill": bool(self.config()["drill"]),   # no clock here: the state has it, and the push sends what changed (#137)
                 "open": self._rows("a.ack_at IS NULL AND a.level = 'alarm'", (), 20),
                 "notices": self._rows("a.ack_at IS NULL AND a.level = 'notice' AND a.created_at >= ?", (now - NOTICE_S,), 10),
-                "recent": self._rows("a.ack_at >= ?", (now - RECENT_S,), 10)}
+                "recent": self._rows("a.ack_at >= ?", (now - RECENT_S,), 10),
+                "windows": self.windows.state(now)}
 
     def history(self, limit: int = 200) -> list[dict]:
         rows = self._rows("1 = 1", (), 100000)

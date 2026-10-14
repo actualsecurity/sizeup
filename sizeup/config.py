@@ -71,6 +71,7 @@ class Config:
     p25_incident_talkgroups: frozenset[int] = frozenset({307, 333})
     p25_tg_info: dict[int, dict] = field(default_factory=dict)   # tg -> {name, group, encrypted}  # attach to our incident (others: context)
     p25_aliases: dict[str, str] = field(default_factory=dict)
+    p25_emergency_window_min: float = 10.0   # the emergency button keeps its talkgroup and radio this long (#128)
     mdc_aliases: dict[str, str] = field(default_factory=dict)   # MDC-1200 unit ID ("0611") -> name
     unit_departments: dict[str, str] = field(default_factory=dict)  # "Engine 60" -> "Port Chester FD"
     unit_callsigns: dict[str, str] = field(default_factory=dict)    # "2398" -> "2398 Duty Officer"
@@ -799,7 +800,13 @@ def load(path: str | Path) -> Config:
         raise ConfigError('stt.talker_prompt: "off", "ids" or "ids+time"')
     aws_stt = _stt_aws(stt)
     p25 = _take(data.get("p25", {}), "p25", {"capture_dir", "talkgroups", "talkgroups_file", "incident_talkgroups",
-                                             "aliases", "recorder", "recorder_dir"})
+                                             "aliases", "recorder", "recorder_dir", "emergency_window_min"})
+    try:
+        em_window = float(p25.get("emergency_window_min", 10))
+    except (TypeError, ValueError):
+        em_window = -1.0
+    if not 0 <= em_window <= 120:
+        raise ConfigError("p25.emergency_window_min: minutes from 0 to 120 (10: the default)")
     p25_tgs = {int(k): v for k, v in p25.get("talkgroups", {"307": "Fire/EMS 15"}).items()}
     p25_info: dict[int, dict] = {k: {"name": v, "group": "", "encrypted": False} for k, v in p25_tgs.items()}
     if p25.get("talkgroups_file"):  # trunk-recorder's talkgroups.csv: one list for both programs
@@ -899,7 +906,7 @@ def load(path: str | Path) -> Config:
         p25_dir=rel(p25.get("capture_dir", "")),
         p25_talkgroups=p25_tgs, p25_tg_info=p25_info,
         p25_incident_talkgroups=frozenset(int(x) for x in p25.get("incident_talkgroups", [307, 333])),
-        p25_aliases={str(k): v for k, v in p25.get("aliases", {}).items()},
+        p25_aliases={str(k): v for k, v in p25.get("aliases", {}).items()}, p25_emergency_window_min=em_window,
         mdc_aliases={str(k).upper(): v for k, v in mdc.get("aliases", {}).items()},
         unit_departments=unit_departments, unit_callsigns=unit_callsigns,
         shared_device=radio.get("shared_device", "") or (sdrs[0] if sdrs else ""), start_mode=radio.get("start_mode", ""),

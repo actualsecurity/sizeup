@@ -53,7 +53,8 @@
     setText($("#b-radio-sum"), [...new Set(r.rows.map((t) => t.channel))].join(" · ") || "Main channels");
     syncList($("#b-radio"), r.rows, {
       key: (t) => t.id,
-      sig: (t) => JSON.stringify([t.text, t.status, t.rig, t.talker, t.has_audio, t.model, t.alt_text, fireground(t), talkSig(t.rig)]),
+      sig: (t) => JSON.stringify([t.text, t.status, t.rig, t.talker, t.has_audio, t.model, t.alt_text, fireground(t), talkSig(t.rig),
+                                  emSig(t)]),
       make: () => el("li"),
       fill: (li, t) => {
         const n = radioRow(t);                     // cad.js: play, time, rig, channel, duration, the transcript

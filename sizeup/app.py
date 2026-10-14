@@ -42,6 +42,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import signal
 import socket
 import subprocess
@@ -103,6 +104,7 @@ SWITCH_PAUSE_S = 1.0       # between stopping one program on the shared dongle a
 SDR_WATCH_S = 3.0          # [radio] auto_assign: how often the plugged-in dongles are looked at
 SDR_FAILING_RESTARTS = 3   # an auto job that has restarted this often and is down: logged once, left as is
 SDR_SETTLE_S = 60.0        # after startup, Off dongles wait this long for the ones that had jobs (USB attach order)
+EVIDENCE_LIST = 200        # an emergency call's record (App._p25_evidence): at most this many srcList / freqList entries
 MIN_SPEECH_S = 0.15      # less sound than this above the dead-air floor (and no tones) = a mic click
 LIVE_WATCH_S = 0.2       # FG1 talking watcher: how often the squelch is looked at (the MDC ID: radio/tap.py)
 ID_EDGE_S = 1.0          # an FG1 key-up with no ID: a burst is looked for this close to either end of the carrier (#163)
@@ -409,6 +411,9 @@ class App:
             from sizeup.notify import Notifier
             self.cad.alarms.notifier = Notifier(cfg.alerts_ntfy_server, cfg.alerts_ntfy_topic, log)
         self.cad.alarms.public_url = cfg.cloud_public_url
+        # The emergency window (alarms.Windows): the button's talkgroup and radio kept this long, Record off or on
+        self.cad.alarms.windows.keep_s = cfg.p25_emergency_window_min * 60
+        self.cad.alarms.on_clear = self._all_clear_sent
         # An aircraft emergency near HPN (a 7500 / 7600 / 7700 squawk, #155) raises the same alarm and push, on the
         # CAD of record only (a station forwarding to the hub leaves it to the hub).
         self.aircraft.on_emergency = lambda ev: None if self.forwarding() else self.cad.alarms.on_aircraft(ev)
@@ -819,13 +824,28 @@ class App:
 
     def _call(self, call: Call) -> None:
         emergency = call.emergency or any(t.emergency for t in call.turns)
+        windows = self.cad.alarms.windows
         if emergency:
             log(f"p25: {call.label} {call.id}: EMERGENCY flag (radio {', '.join(call.units) or 'unknown'})")
-        if not self.tg.record(call.talkgroup) and not emergency:  # switched off in the web app: dropped on arrival
-            # (an emergency call is kept whatever the switch says: issue #128)
-            self.tg.seen(call.talkgroup, dropped=True)
-            self._drop_recorder_files(call)
-            return
+            # The emergency window (alarms.Windows): this talkgroup, and the radio that pressed it anywhere, kept for
+            # [p25] emergency_window_min after this call. 5.2.0's flag is the call's (its first key-up's radio).
+            first = next((t.src for t in call.turns if t.src), "") if call.emergency else ""
+            pressed = list(dict.fromkeys([t.src for t in call.turns if t.emergency and t.src] + ([first] if first else [])))
+            windows.open(call.talkgroup, call.label, pressed, call.end)
+        kept = ""
+        if not self.tg.record(call.talkgroup):  # switched off in the web app: dropped on arrival ...
+            # ... but an emergency call is kept whatever the switch says (issue #128), and so is everything on its
+            # talkgroup or from its radio until the window ends (All clear, or emergency_window_min later)
+            why = "button" if emergency else windows.keeps(call.talkgroup, [t.src for t in call.turns if t.src], call.start)
+            if not why:
+                self.tg.seen(call.talkgroup, dropped=True)
+                self._drop_recorder_files(call)
+                return
+            kept = "emergency"
+            if not emergency:
+                log(f"p25: {call.label} {call.id}: Record is off, kept: emergency window "
+                    f"({'its talkgroup' if why == 'talkgroup' else 'the radio that pressed it'})")
+        evidence = self._p25_evidence(call) if emergency else None
         self.tg.seen(call.talkgroup)
         for _name, (src, tag) in call.ids.items():      # radio ID <-> alias, kept for lookups without the alias
             self._heard("p25", src, tag, call.start, call.label)
@@ -842,8 +862,12 @@ class App:
                 t.pairs = pc.pairs  # (radio ID, alias) per talker, for the hub's own rig lookup  # type: ignore[attr-defined]
                 self._keep_clip(t.id, radio_voice(pc.audio, deemph=False), processed=True)
                 self._keep_source(t.id, pc.audio)
+                if kept:
+                    t.kept = kept  # on a talkgroup switched off: kept for the emergency  # type: ignore[attr-defined]
                 if pc.emergency:
                     t.emergency = True  # the P25 emergency button (#128)  # type: ignore[attr-defined]
+                    if evidence:
+                        t.evidence = evidence  # trunk-recorder's call record, for audit  # type: ignore[attr-defined]
                     self._alarm_now(t)      # before speech-to-text: the alarm doesn't wait for the words
                 if pc.stt:
                     self._stt(t, pc.audio, eng, key)
@@ -901,14 +925,58 @@ class App:
         return key
 
     def _drop_recorder_files(self, call: Call) -> None:
+        """trunk-recorder's WAV and JSON, once sizeup has its own clip. An emergency call's JSON is kept instead, in
+        captures/emergency/ (janitor.EMERGENCY_KEEP_S, 90 days, like its alarm): the raw record to audit it by."""
         if not self.clips_dir or not call.wav_path:  # without our own clip store, keep the originals
             return
         wav = Path(call.wav_path)
-        for f in (wav, wav.with_suffix(".json")):
+        meta = wav.with_suffix(".json")
+        if call.emergency or any(t.emergency for t in call.turns):
+            keep = self.clips_dir.parent / janitor.EMERGENCY_DIR
+            try:
+                keep.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(meta), str(keep / meta.name))
+                log(f"p25: {call.id}: emergency call record kept: {keep / meta.name}")
+            except OSError as e:
+                log(f"p25: {call.id}: emergency call record not kept: {type(e).__name__}: {e}")
+        for f in (wav, meta):
             try:
                 f.unlink()
             except OSError:
                 pass
+
+    @staticmethod
+    def _p25_evidence(call: Call) -> dict | None:
+        """An emergency call's own record from trunk-recorder (its JSON: srcList with every radio ID and its emergency
+        flag, freqList, the call's flags), carried with the flagged transmission to the CAD (radio_traffic.evidence)
+        so it can be audited on the hub too; the lists at most EVIDENCE_LIST entries."""
+        if not call.wav_path:
+            return None
+        meta = Path(call.wav_path).with_suffix(".json")
+        try:
+            d = json.loads(meta.read_text())
+        except (OSError, ValueError):
+            return None
+        if not isinstance(d, dict):
+            return None
+        for k in ("srcList", "freqList"):
+            if isinstance(d.get(k), list):
+                d[k] = d[k][:EVIDENCE_LIST]
+        d["file"] = meta.name
+        return d
+
+    def emergency_all_clear(self, tg=None, radio_ids=None) -> bool:
+        """The alarm's All clear (from the hub, or this CAD): the emergency window on talkgroup tg and its radio(s)
+        closed now, so a talkgroup switched off is dropped again. True when one was open here."""
+        ids = [str(r) for r in radio_ids or [] if str(r).strip()]
+        closed = self.cad.alarms.windows.clear(tg, ids)
+        log(f"emergency window: all clear for TG {tg}" + (f", radio {', '.join(ids)}" if ids else "")
+            + ("" if closed else " (none open here)"))
+        return closed
+
+    def _all_clear_sent(self, a: dict) -> None:
+        """Alarms.on_clear: all-in-one, the window here is the alarms' own (closed already); a hub sends it on."""
+        return None
 
     def _transcribed(self, item) -> None:
         self._transcribed_one(item)
@@ -1097,7 +1165,10 @@ class App:
             self.cad.record_traffic({"id": t.id, "start": t.start, "end": t.end, "source": t.source,
                                      "talkgroup": t.talkgroup, "unit": t.unit, "rig": t.rig, "radio_id": t.radio_id,
                                      "text": t.text, "status": t.status, "model": getattr(t, "model", ""),
-                                     "id_note": getattr(t, "id_note", "")},
+                                     "id_note": getattr(t, "id_note", ""),
+                                     # the emergency button (#128), its raw call record, kept by its window
+                                     "emergency": bool(getattr(t, "emergency", False)),
+                                     "evidence": getattr(t, "evidence", None), "kept": getattr(t, "kept", "")},
                                     replace=replace)
         except Exception as e:  # the CAD must never stop the monitor
             log(f"CAD: could not log a transmission: {type(e).__name__}: {e}")

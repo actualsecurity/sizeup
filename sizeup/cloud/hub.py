@@ -27,6 +27,7 @@ no token configured the hub refuses them all. Jobs (the station only connects ou
            20 s for the station to render it with its Kokoro; offline or too slow -> text only,
            said so ("Voice unavailable — station offline"), never a hung request
     call   set_mode / set_talkgroup / set_talkgroup_group / retranscribe from this UI, run there;
+           emergency_all_clear: an alarm's All clear, closing the station's emergency window (#128);
            set_channel_prefs: Settings > Radios > Channels (record / transcribe / engine), the tone pairs
            named from the console (#80), and whether
            Amazon Transcribe can take audio now, sent whenever the station's reported copy (its
@@ -588,7 +589,8 @@ class HubApp(App):
             self.audio.put(tid, audio, "clip", at=float(d.get("end") or time.time()))
         t = self._traffic_of(d)
         t.text = ""
-        t.emergency = True  # type: ignore[attr-defined]
+        # the event's own flag (every station sends "emergency": true with an alarm; one without it is taken as one)
+        t.emergency = bool(d.get("emergency", True))  # type: ignore[attr-defined]
         self._alarm(t, "")
 
     def _apply_traffic(self, d: dict, audio: bytes | None) -> None:
@@ -785,6 +787,20 @@ class HubApp(App):
 
     def set_talkgroup(self, tg: int, record: bool | None = None, main: bool | None = None) -> str | None:
         return self._switch("set_talkgroup", int(tg), record, main)
+
+    def _all_clear_sent(self, a: dict) -> None:
+        """An alarm's All clear here: the station decides what is kept (App._call), so its emergency window closes
+        too (in the background: the person isn't kept waiting on the station). Offline or an older station: its
+        window ends on its own ([p25] emergency_window_min)."""
+        if a.get("talkgroup") is None or not a.get("emergency"):
+            return
+        ids = [x.strip() for x in str(a.get("radio_id") or "").split(",") if x.strip()]
+
+        def send() -> None:
+            err = self._switch("emergency_all_clear", int(a["talkgroup"]), ids)
+            if isinstance(err, str):
+                self.hub.log(f"hub: all clear {a.get('id')}: not sent to the station ({err}); its window ends on its own")
+        threading.Thread(target=send, name="all-clear", daemon=True).start()
 
     def set_talkgroup_group(self, group: str, record: bool | None = None, main: bool | None = None) -> str | None:
         return self._switch("set_talkgroup_group", str(group), record, main)

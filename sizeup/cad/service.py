@@ -333,6 +333,9 @@ class Cad:
     def alarm_ack(self, aid: int, body: dict) -> dict:
         return self.alarms.acknowledge(aid, body)
 
+    def alarm_clear(self, aid: int, body: dict) -> dict:
+        return self.alarms.all_clear(aid, body)
+
     def alarms_page(self) -> dict:
         """GET /api/cad/alarms: the state, the settings, the last 200 (newest first)."""
         return {**(self.alarms_state() or {}), "settings": self.alarms.settings_page(), "history": self.alarms.history()}
@@ -1076,7 +1079,8 @@ class Cad:
         """GET /api/cad/comms: {rows, rev, channels, rigs, pcfd, talking}. ?rev=N: {unchanged: true}
         when nothing was logged since N (the CAD's Radio view polls). ?q=: words in the transcript or
         note. Each row says whether it is "main" (FG1 and the like, a talkgroup marked Main, a note):
-        the Radio view puts those up front and folds the rest by talkgroup."""
+        the Radio view puts those up front and folds the rest by talkgroup. ?emergency=1: only transmissions
+        with the emergency button or an alarm (comms.with_alarms puts the alarm on every row)."""
         def one(k: str) -> str:
             v = (q.get(k) or [""])[0].strip()
             if len(v) > 60:
@@ -1103,7 +1107,8 @@ class Cad:
         rows = self.comms.query(unit=one("unit"), channel=one("channel"), event=one("event"),
                                 pcfd=pcfd if one("pcfd") in ("1", "true", "on") else None,
                                 since=when("since"), until=when("until"), limit=limit,
-                                kind={"radio": "radio", "notes": "notes"}.get(one("type"), ""), text=one("q"))
+                                kind={"radio": "radio", "notes": "notes"}.get(one("type"), ""), text=one("q"),
+                                emergency=one("emergency") in ("1", "true", "on"))
         for r in rows:
             r["has_audio"] = r["kind"] == "radio" and self.has_clip(r["id"])
             r["main"] = r["talkgroup"] is None or bool(self.main_tg(r["talkgroup"]))

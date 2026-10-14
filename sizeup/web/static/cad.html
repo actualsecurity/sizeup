@@ -149,6 +149,7 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
         <select id="rv-event" aria-label="Incident"><option value="">Any incident</option></select>
         <select id="rv-type" aria-label="Show"><option value="">All</option><option value="radio">Transmissions</option><option value="notes">Notes</option></select>
         <label class="inline check"><input id="rv-pcfd" type="checkbox"> <span>PCFD only</span></label>
+        <label class="inline check" title="Only transmissions with the emergency button or an alarm (a mayday heard) on them"><input id="rv-emergency" type="checkbox"> <span>Emergency</span></label>
         <label class="inline"><span class="dim">From</span> <input id="rv-since" type="datetime-local"></label>
         <label class="inline"><span class="dim">To</span> <input id="rv-until" type="datetime-local"></label>
         <button id="rv-clear" type="button">Clear</button>
@@ -161,7 +162,7 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
       <section id="rv-other-sec" class="rv-sec other-section">
         <div class="sec-head">
           <button id="rv-other-toggle" class="sec-toggle" type="button" aria-expanded="false" aria-controls="rv-other">
-            <span class="caret" aria-hidden="true">▸</span><span class="h2">Other talkgroups</span><span id="rv-other-sum" class="dim sum"></span>
+            <span class="caret" aria-hidden="true">▸</span><span class="h2">Other talkgroups</span><span id="rv-other-em" class="chip emergency" hidden></span><span id="rv-other-sum" class="dim sum"></span>
           </button>
         </div>
         <ol id="rv-other" class="list other" hidden></ol>

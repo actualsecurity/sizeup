@@ -116,8 +116,9 @@ POST /api/cad/radio-id                    {system: mdc | fleetsync, radio_id, un
                                           new FG1 radio is (#163, the state's radio_ids; sizeup/cad/newids.py): unit
                                           names it (its transmissions go on that unit's events), label just says who,
                                           ignore stops asking; dispatchers and admins, only for an ID nobody has set
-GET  /api/cad/comms?unit=&channel=&event=&pcfd=1&since=&until=&limit=&rev=
-                                          every transmission (newest first) with its rig, radio ID, events
+GET  /api/cad/comms?unit=&channel=&event=&pcfd=1&emergency=1&since=&until=&limit=&rev=
+                                          every transmission (newest first) with its rig, radio ID, events, the
+                                          emergency button and its alarm (emergency=1: only those, #128)
 GET  /api/cad/feed?limit=&tg=307,333      the pinned 60 Control feed: newest transmissions on the incident
                                           talkgroup(s), pc = why it is talking to us (sizeup/cad/feed.py)
 POST /api/cad/incident/<id>/link          {traffic_id, operator}  put a transmission on the event (why manual)
@@ -136,6 +137,9 @@ GET  /api/cad/alarms                      the emergency alarms (sizeup/cad/alarm
                                           settings: {keywords, channels, other, drill, defaults, edited, push}, history}
 POST /api/cad/alarm/<id>/ack              {operator?}  an emergency alarm (or notice) seen: who and when, in the linked
                                           event's chronology too; dispatchers and admins (viewers see it, can't)
+POST /api/cad/alarm/<id>/clear            {operator?}  all clear (resolved, not just seen): its emergency window ends
+                                          (the talkgroup and radio no longer kept with Record off); acknowledges it
+                                          too; in the chronology; dispatchers and admins
 POST /api/cad/settings/alarms             {action: set | reset, key: keywords | channels | other | drill, value}: admins
 """
 
@@ -164,6 +168,7 @@ SETTINGS = re.compile(r"/api/cad/settings/([a-z_]{1,30})")
 PREALERT = re.compile(r"/api/cad/prealert/(\d{1,9})/dismiss")
 HINT = re.compile(r"/api/cad/hint/(\d{1,9})/(accept|dismiss)")
 ALARM_ACK = re.compile(r"/api/cad/alarm/(\d{1,9})/ack")
+ALARM_CLEAR = re.compile(r"/api/cad/alarm/(\d{1,9})/clear")
 
 # Who may POST what (enforced only with a verified sign-in, see above): "dispatch" = dispatchers and
 # admins (running calls), "admin" = admins only (Settings in every form, and the radios), "read" =
@@ -175,6 +180,7 @@ WRITES = (
     (PREALERT, "dispatch"),                                                 # a phone pre-alert that is nothing
     (HINT, "dispatch"),                                                     # a status suggested from the radio (#37)
     (ALARM_ACK, "dispatch"),                                                # an emergency alarm seen (#128)
+    (ALARM_CLEAR, "dispatch"),                                              # ... and resolved: its window closed
     (re.compile(r"/api/cad/radio-id"), "dispatch"),                          # who a new FG1 radio is (#163)
     (re.compile(r"/api/incident/[^/]{1,80}/close"), "dispatch"),            # the monitor's incident list (server.py)
     (UNIT_STATION, "admin"),                                                # a unit's home station: Settings > Units
@@ -328,6 +334,8 @@ DOES = (
                                + (f" on {o['incident_number']}" if o.get("incident_number") else ""), o.get("incident_number") or "")),
     (ALARM_ACK, lambda m, b, o, c: (f"Acknowledged the emergency alarm: {_clip(o.get('who'), 30)} {o.get('what', '')} "
                                     f"on {o.get('channel', '')}".rstrip(), o.get("incident_number") or "")),
+    (ALARM_CLEAR, lambda m, b, o, c: (f"All clear on the emergency alarm: {_clip(o.get('who'), 30)} {o.get('what', '')} "
+                                      f"on {o.get('channel', '')}".rstrip(), o.get("incident_number") or "")),
     (re.compile(r"/api/cad/radio-id"), lambda m, b, o, c: (
         f"Radio {b.get('system', '')} {_clip(b.get('radio_id'), 12)} "
         + ("ignored" if b.get("ignore") is True else f"named {_clip(b.get('unit') or b.get('label'), 40)}")
@@ -561,6 +569,8 @@ class CadApi:
             return c.hint(int(m.group(1)), m.group(2), body)
         if m := ALARM_ACK.fullmatch(path):
             return c.alarm_ack(int(m.group(1)), body)
+        if m := ALARM_CLEAR.fullmatch(path):
+            return c.alarm_clear(int(m.group(1)), body)
         if m := UNIT_STATION.fullmatch(path):
             return c.unit_station(int(m.group(1)), body)
         if path == "/api/cad/runcards":

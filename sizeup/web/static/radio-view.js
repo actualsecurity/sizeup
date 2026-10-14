@@ -96,7 +96,8 @@ window.RadioView = (() => {
   const SAFETY_MS = 30000;              // with it: in case a push was missed
   const RETRY_MS = 5000;                // after a failed ask, before the push may ask again
   const OTHER_KEY = "sizeup.cad.radio.other";
-  const FIELDS = ["q", "unit", "channel", "event", "type", "pcfd", "since", "until"];
+  const FIELDS = ["q", "unit", "channel", "event", "type", "pcfd", "emergency", "since", "until"];
+  const CHECKS = new Set(["pcfd", "emergency"]);   // checkboxes: "1" or nothing
   const st = { open: false, rev: "", rows: [], facets: "", busy: false, again: false, timer: 0, lastOk: 0, error: "", failAt: 0,
                other: { open: false, tgs: new Set() }, qTimer: 0 };
   try {
@@ -114,7 +115,7 @@ window.RadioView = (() => {
     const out = {};
     for (const k of FIELDS) {
       const n = f(k);
-      out[k] = k === "pcfd" ? (n.checked ? "1" : "") : k === "since" || k === "until" ? (fromLocalInput(n.value) || "") : n.value.trim();
+      out[k] = CHECKS.has(k) ? (n.checked ? "1" : "") : k === "since" || k === "until" ? (fromLocalInput(n.value) || "") : n.value.trim();
     }
     return out;
   }
@@ -135,6 +136,7 @@ window.RadioView = (() => {
     for (const k of ["unit", "channel", "event"]) pickOption(f(k), q.get(k) || "");
     f("type").value = q.get("type") || "";
     f("pcfd").checked = q.get("pcfd") === "1";
+    f("emergency").checked = q.get("emergency") === "1";
     f("since").value = toLocalInput(Number(q.get("since")) || 0);
     f("until").value = toLocalInput(Number(q.get("until")) || 0);
   }
@@ -184,7 +186,8 @@ window.RadioView = (() => {
     return li;
   }
   const rowSig = (t) => JSON.stringify([t.text, t.status, t.model, t.alt_text, t.alt_model, t.rig, t.has_audio,
-                                       (t.events || []).map((e) => [e.id, e.why]), t.rerun_at, talkSig(t.rig), cad.txRev]);
+                                       (t.events || []).map((e) => [e.id, e.why]), t.rerun_at, talkSig(t.rig), cad.txRev,
+                                       emSig(t)]);
   const fillRow = (li, t) => {
     const n = row(t);
     li.className = n.className;
@@ -193,7 +196,12 @@ window.RadioView = (() => {
 
   // ---- Main up front, the other talkgroups folded -------------------------------------------------
 
-  function otherGroups(rows) {
+  // The emergency on a folded talkgroup can't hide (#128, user 2026-10-14: "where is the bus emergency here?"):
+  // a group with the emergency button or an alarm on it (emergency: "ours" | "other") goes first and its header says
+  // so; one whose emergency window is open (the CAD state's alarms.windows) says "Recording until 20:09 (emergency)".
+  const windows = () => (typeof cad !== "undefined" && cad.state && cad.state.alarms && cad.state.alarms.windows) || [];
+  const isEm = (t) => !!(t.emergency || t.alarm_id);
+  function otherGroups(rows, wins = windows()) {
     const by = new Map();
     for (const t of rows) {
       const k = String(t.talkgroup ?? t.channel);
@@ -206,9 +214,20 @@ window.RadioView = (() => {
       const said = g.calls.find((t) => t.text);
       g.snippet = said ? said.text : g.calls[0].status === "no_speech" ? "Key-up, no speech" : "—";
       g.muted = !said;
+      const em = g.calls.filter(isEm);
+      g.emergency = !em.length ? "" : em.some((t) => t.alarm_level === "alarm") ? "ours" : "other";
+      if (em.length) {                              // the snippet: the emergency, not whatever came last
+        const e = em[0];
+        g.snippet = `${e.rig || e.talker || e.radio_id || "Radio"}: ${e.text || "emergency button, no speech"}`;
+        g.muted = false;
+      }
+      const w = g.tg !== null && g.tg !== undefined ? wins.find((x) => x.talkgroup === g.tg) : null;
+      g.until = w ? w.until : null;
     }
-    return groups.sort((a, b) => b.last - a.last);
+    const rank = (g) => (g.emergency === "ours" ? 3 : g.emergency ? 2 : g.until ? 1 : 0);
+    return groups.sort((a, b) => (rank(b) - rank(a)) || (b.last - a.last));
   }
+  const emText = (g) => (g.emergency === "ours" ? "EMERGENCY" : "Emergency (not ours)");
 
   // A page going out now (South 2), over Main until its finished row is in the list.
   function renderPaging() {
@@ -236,18 +255,25 @@ window.RadioView = (() => {
     sec.classList.toggle("open", open);
     tog.setAttribute("aria-expanded", String(open));
     setText($("#rv-other-sum"), rest.length ? `${rest.length} TX, ${groups.length} TG${groups.length === 1 ? "" : "s"}` : "None");
+    const emg = groups.filter((g) => g.emergency);       // the whole section folded: its head says so too
+    const badge = $("#rv-other-em");
+    if (badge) {
+      show(badge, emg.length > 0);
+      badge.classList.toggle("em-other", emg.length > 0 && !emg.some((g) => g.emergency === "ours"));
+      setText(badge, emg.length ? `${emText(emg[0])}: ${emg.map((g) => g.name).join(", ")}` : "");
+    }
     show(box, open);
     if (!open) return;
     const few = groups.length <= 2 && active();    // filtered down to a talkgroup or two: open them
     syncList(box, groups, {
       key: (g) => g.key,
-      sig: (g) => JSON.stringify([st.other.tgs.has(g.key) || few, g.name, g.calls.length, g.last, g.snippet,
+      sig: (g) => JSON.stringify([st.other.tgs.has(g.key) || few, g.name, g.calls.length, g.last, g.snippet, g.emergency, g.until,
                                   (st.other.tgs.has(g.key) || few) ? g.calls.map(rowSig) : 0, g.calls.map((t) => t.id)]),
       make: () => {
         const li = el("li", "og");
         const head = el("button", "og-head");
         head.type = "button";
-        head.append(el("span", "caret"), el("b", "og-name"), el("span", "og-n"), el("span", "spacer"), el("span", "og-last"),
+        head.append(el("span", "caret"), el("b", "og-name"), el("span", "og-n"), el("span", "og-flags"), el("span", "og-last"),
                     el("span", "og-snip"));
         li.append(head, el("ol", "list og-calls radio-log"));
         return li;
@@ -255,8 +281,17 @@ window.RadioView = (() => {
       fill: (li, g) => {
         const isOpen = st.other.tgs.has(g.key) || few;
         const [head, calls] = li.children;
-        const [caret, name, num, , last, snip] = head.children;
-        li.className = isOpen ? "og open" : "og";
+        const [caret, name, num, flags, last, snip] = head.children;
+        const fl = [];
+        if (g.emergency) fl.push(el("span", `chip emergency${g.emergency === "ours" ? "" : " em-other"}`, emText(g)));
+        if (g.until) {
+          const u = el("span", "chip kept", `Recording until ${fmtTime(g.until)} (emergency)`);
+          u.title = "The emergency window: everything on this talkgroup is kept until then, even with Record off "
+            + "(the alarm's All clear ends it)";
+          fl.push(u);
+        }
+        flags.replaceChildren(...fl);
+        li.className = (isOpen ? "og open" : "og") + (g.emergency ? ` emergency em-${g.emergency}` : "");
         head.setAttribute("aria-expanded", String(isOpen));
         setText(caret, isOpen ? "▾" : "▸");
         setText(name, g.name);
@@ -312,6 +347,8 @@ window.RadioView = (() => {
   }
   // Each state push: ask only if the hub's comms_rev moved past what is on screen.
   function onPush() {
+    const ws = JSON.stringify(windows().map((w) => [w.talkgroup, w.until]));
+    if (ws !== st.ws) { st.ws = ws; if (st.open) render(); }      // an emergency window opened, moved or ended
     const rev = pushed();
     if (!rev || rev === st.rev || st.busy || (st.failAt && Date.now() - st.failAt < RETRY_MS)) return;
     if (shown()) poll();
@@ -331,7 +368,7 @@ window.RadioView = (() => {
 
   // ---- wiring -------------------------------------------------------------------------------------
 
-  for (const k of ["unit", "channel", "event", "type", "pcfd", "since", "until"]) f(k).addEventListener("change", changed);
+  for (const k of ["unit", "channel", "event", "type", "pcfd", "emergency", "since", "until"]) f(k).addEventListener("change", changed);
   f("q").addEventListener("input", () => { clearTimeout(st.qTimer); st.qTimer = setTimeout(changed, 350); });
   $("#rv-filters").addEventListener("submit", (e) => { e.preventDefault(); clearTimeout(st.qTimer); changed(); });
   $("#rv-clear").addEventListener("click", () => {
@@ -365,5 +402,5 @@ window.RadioView = (() => {
     else if (st.open) poll();
   });
 
-  return { open, close, render, get polling() { return !!st.timer || st.busy; } };
+  return { open, close, render, otherGroups, get polling() { return !!st.timer || st.busy; } };
 })();

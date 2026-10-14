@@ -91,6 +91,10 @@ recorder_dir = "deploy/trunk-recorder"  # its config.json + talkgroups.csv
 talkgroups_file = "deploy/trunk-recorder/talkgroups.csv"   # names for all recorded talkgroups
 incident_talkgroups = [307, 333]   # Fire/EMS 15 (Battalion 15) + Airport Incident attach to our incident
 aliases = {}                       # radio ID -> unit name, e.g. { "2391001" = "2391" }
+# The emergency button opens a window: every call on that talkgroup, and the radio that pressed it on any
+# talkgroup, is kept this long after its last emergency key-up, even with the talkgroup's Record switched
+# off (sizeup/cad/alarms.py Windows). The alarm's "All clear" ends it early. 0 = keep only the flagged call.
+emergency_window_min = 10
 
 [mdc]
 # MDC-1200 PTT-ID (Motorola radios send it on key-up/release): radio ID -> unit name shown on traffic.

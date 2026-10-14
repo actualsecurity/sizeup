@@ -4,6 +4,7 @@
     trunk-recorder call metadata (*.json next to its WAVs)                    -> with its audio
     page records (<clips>/<id>.page.json)                                     -> history_hours (24 h)
     trunk-recorder temp files (p25-tmp)                                       -> 1 h
+    an emergency call's trunk-recorder JSON (emergency/*.json, App._drop_recorder_files) -> EMERGENCY_KEEP_S (90 days)
     empty date folders under the P25 capture dir                              -> removed
 
 Runs at startup and every few minutes from the app. Age is file modification time. Returns
@@ -17,6 +18,8 @@ import time
 from pathlib import Path
 
 TMP_KEEP_S = 3600
+EMERGENCY_DIR = "emergency"            # under captures/: emergency calls' records, kept for audit (#128)
+EMERGENCY_KEEP_S = 90 * 86400          # as long as their alarms (sizeup/cad/alarms.py KEEP_S)
 
 
 def _older(p: Path, cutoff: float) -> bool:
@@ -49,13 +52,18 @@ def clean(captures: Path, clips: Path | None, p25: Path | None, audio_s: float, 
         for f in clips.glob("*.json"):                      # older clip metadata (non-page)
             if not f.name.endswith(".page.json") and _older(f, history_cut):
                 deleted += _rm(f)
+    kept = captures / EMERGENCY_DIR
+    if kept.is_dir():
+        for f in kept.glob("*.json"):
+            if _older(f, now - EMERGENCY_KEEP_S):
+                deleted += _rm(f)
     if p25 and p25.is_dir():
         for f in p25.rglob("*.wav"):
             if _older(f, audio_cut):
                 deleted += _rm(f)
                 deleted += _rm(f.with_suffix(".json"))
         for f in p25.rglob("*.json"):                       # metadata whose audio is gone or never came
-            if _older(f, audio_cut) and not f.with_suffix(".wav").exists():
+            if _older(f, audio_cut) and not f.with_suffix(".wav").exists() and kept not in f.parents:
                 deleted += _rm(f)
         for d in sorted((d for d in p25.rglob("*") if d.is_dir()), key=lambda d: len(d.parts), reverse=True):
             try:

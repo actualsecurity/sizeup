@@ -32,7 +32,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from sizeup.cad.comms import _tones, events_of
+from sizeup.cad.comms import _tones, events_of, with_alarms
 from sizeup.cad.lists import Lists, ListsError
 from sizeup.cad.radios import PCFD_KINDS
 
@@ -230,7 +230,7 @@ class Feed:
             r["pc"] = self.page_pc(r) if r["page"] else self.pc(r, turns)
             r["events"] = ev.get(r["id"], [])
             r["has_audio"] = self.has_clip(r["id"])
-        return rows
+        return with_alarms(self.store, rows)       # the emergency button / a mayday on the row (#128)
 
     def page_pc(self, r: dict) -> str:
         """Why a page is to us: its tones' department(s) when they are ours; '' for any other page, whatever
