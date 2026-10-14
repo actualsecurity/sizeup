@@ -1151,8 +1151,22 @@ function sDispatch(panel) {
     sVoice(d.voice), sTones(d.tones), ...(d.dept_tones || []).map(sDeptTones), sChannels(d.channels),
     d.eta ? sEta(d.eta) : null,
     sCard(sCardHead("Transmit", "", sHelp(`${d.transmit.note}. Read-only here.`)),
-      el("span", "pill tx-off", d.transmit.enabled ? "Transmit on" : "Transmit off"), el("p", "dim small", "No radio interface")));
+      el("span", "pill tx-off", d.transmit.enabled ? "Transmit on" : "Transmit off"), el("p", "dim small", "No radio interface")),
+    d.weather_speak ? sWeatherSpeak(d.weather_speak) : null);
   sPreview();
+}
+
+// A National Weather Service warning said once by the dispatch voice (weather.js, #132): played where a console is
+// open (and the wall board with its Sound on), never keyed. Off by default.
+function sWeatherSpeak(w) {
+  const [lab, cb] = sCheck("Say NWS warnings with the dispatch voice", w.value,
+    "A warning for our zones (not a watch or advisory), once, played on the consoles: never transmitted");
+  cb.addEventListener("change", () => sPost("dispatch", { action: "set", key: "weather_speak", value: cb.checked },
+    cb.checked ? "Weather warnings will be spoken" : "Weather warnings: banner only"));
+  return sCard(sCardHead("Weather warnings", w.value ? "spoken" : "banner only",
+    sHelp("National Weather Service warnings for Southern Westchester show as a red banner on the console and the wall board. "
+      + "With this on, each one is also said once by the dispatch voice where the console is open (the board: with its Sound on). "
+      + "Played here only: nothing is keyed on a radio.")), lab);
 }
 
 function sJointOnly(j) {
@@ -1582,6 +1596,8 @@ function sSystem(panel) {
   const station = sCard(null);
   station.id = "s-station";
   station.hidden = true;
+  const alarms = sCard(null);                  // the emergency alarms' words, channels, drill (alarm.js, #128)
+  alarms.id = "s-alarms";
   // the department, with its patch (static/brand)
   const patch = el("img", "s-patch");
   patch.src = "/static/brand/pcfd-patch.svg";
@@ -1593,7 +1609,7 @@ function sSystem(panel) {
   const about = sCard(patch, dept);
   about.classList.add("s-dept");
   panel.replaceChildren(...sHead("System"),
-    about, station,
+    about, station, alarms,
     sCard(sCardHead("Records"), recs, counts),
     ...(S.data.camera_wall ? [sCameraWall(S.data.camera_wall)] : []),
     sCard(sCardHead("Data file"), file),
@@ -1611,6 +1627,7 @@ function sSystem(panel) {
   sCounts();
   sAudit();
   sStation();
+  if (window.Alarm) Alarm.mountSettings($("#s-alarms"));
 }
 
 // ---- system: the camera wall's area (#125; sizeup/roads.py Roads.area, settings.py _wall_op) ----------------

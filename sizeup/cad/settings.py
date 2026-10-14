@@ -19,7 +19,9 @@ Reset to default = drop the override (one item, or a whole section).
     dispatch_tones                 key joint town -> [[Hz, s], ...] | null (not set: PCFD's are played)
     dispatch                       key "tones" -> PCFD's tone groups, "channels" -> [labels], "voice", "speed";
                                    the ETA estimates (sizeup/cad/eta.py): "road_factor", "speed_mph", "turnout_min",
-                                   "return_margin_min", "order" (nearest | card), "quarters_status"
+                                   "return_margin_min", "order" (nearest | card), "quarters_status"; "weather_speak"
+                                   (true: an NWS warning is said once by the dispatch voice where a console plays
+                                   it, never keyed; sizeup/weather.py, #132)
     channels                       key "FG1" | "South 2" | "tg:307" -> {record?, transcribe?, engine?}: which channel is
                                    kept, transcribed, and by what (sizeup/channels.py; Settings > Radios)
     stt                            key "vocabulary" -> [phrases] (Amazon Transcribe's custom vocabulary),
@@ -53,6 +55,7 @@ from datetime import datetime
 from pathlib import Path
 
 from sizeup import channels as channels_mod
+from sizeup.cad import alarms as alarms_mod
 from sizeup.cad import dispatcher, eta, runcards, tonelist
 from sizeup.cad import lists as lists_mod
 from sizeup.cad.lists import CLASSES, CODE, COLOR, LIST_SECTIONS, LONG_CODE, RESPONSES, ROLES, ListsError
@@ -70,7 +73,7 @@ EMAIL = re.compile(r"[^@\s<>]{1,64}@[^@\s<>]{1,190}\.[^@\s<>]{1,63}")
 PAGE_SECTION = {**{s: "lists" for s in LIST_SECTIONS}, "event_class": "lists", "geo_town_order": "lists", "status_flow": "lists",
                 "type_subtypes": "lists",
                 "units": "units", "dispatch_wording": "dispatch", "dispatch_tones": "dispatch", "dispatch": "dispatch",
-                "channels": "radios", "stt": "radios", "places": "lists", "tones": "radios"}
+                "channels": "radios", "stt": "radios", "places": "lists", "tones": "radios", "alarms": "system"}
 # The camera wall's area (#125, sizeup/roads.py Roads.area): Settings > System.
 WALL_SECTION, WALL_KEYS, WALL_MARGIN = "camera_wall", ("margin_m", "include", "exclude"), (0, 5000, 1000)
 PAGE_SECTION[WALL_SECTION] = "system"
@@ -315,6 +318,7 @@ class Editor:
             self.cad.s.voice = d.get("voice", self.config_voice[0])
             self.cad.s.speed = float(d.get("speed", self.config_voice[1]))
         self.cad.eta = eta.Params().with_overrides(d)
+        self.cad.weather_speak = bool(d.get("weather_speak", False))     # sizeup/weather.py (#132): off by default
         self.cad._state = None
 
     def _commit(self, changes: list[tuple[str, str, object]], operator: str, audit: list[tuple[str, str, object, object]],
@@ -520,6 +524,7 @@ class Editor:
                           "speed": getattr(self.cad.s, "speed", 1.0), "rate_wpm": getattr(self.cad.s, "rate_wpm", 0),
                           "fallback": getattr(self.cad.s, "fallback_voice", ""), "repeat": getattr(self.cad.s, "repeat", 0)},
                 "transmit": {"enabled": self.cad.transmitter.enabled, "note": "Transmit is off: logged and played here only"},
+                "weather_speak": {"value": bool(d.get("weather_speak", False)), "default": False, "edited": "weather_speak" in d},
                 "department": self.cad.s.department,
                 "eta": self._eta_page(L, d)}
 
@@ -558,7 +563,8 @@ class Editor:
         fn = {"event_class": self._class_op, "status_flow": self._flow_op, "type_subtypes": self._map_op, "geo_town_order": self._towns_op, "units": self._units_op,
               "dispatch": self._dispatch_op, "users": self._users_op, "runcards": self._cards_op,
               "import": self._import_op, "channels": self._channels_op, "stt": self._stt_op,
-              "places": self._places_op, TONES_SECTION: self._tones_op, WALL_SECTION: self._wall_op}.get(section)
+              "places": self._places_op, TONES_SECTION: self._tones_op, WALL_SECTION: self._wall_op,
+              "alarms": lambda a, b, o: self.cad.alarms.settings_op(a, b, o)}.get(section)
         if fn is None:
             raise CadError(f"no settings section {section!r}")
         if section in ("users", "import"):
@@ -1160,6 +1166,15 @@ class Editor:
                 return self._commit([("dispatch", key, REMOVE if v == dflt else v)], op, [("dispatch", f"eta/{key}", cur, v)])
             if action == "reset":
                 return self._commit([("dispatch", key, REMOVE)], op, [("dispatch", f"eta/{key}", cur, dflt)])
+        elif key == "weather_speak":                  # an NWS warning said once by the dispatch voice (#132)
+            cur = bool((ov.get("dispatch") or {}).get("weather_speak", False))
+            if action == "set":
+                v = body.get("value")
+                if not isinstance(v, bool):
+                    raise CadError("weather_speak: true or false")
+                return self._commit([("dispatch", key, v if v else REMOVE)], op, [("dispatch", key, cur, v)])
+            if action == "reset":
+                return self._commit([("dispatch", key, REMOVE)], op, [("dispatch", key, cur, False)])
         elif key in ("tones", "channels"):
             cur = tone_groups(self.cad.s.tones) if key == "tones" else list(self.cad.s.channels)
             dflt = self.config_tones if key == "tones" else list(self.config_channels)
@@ -1170,7 +1185,7 @@ class Editor:
                 return self._commit([("dispatch", key, REMOVE)], op, [("dispatch", key, cur, dflt)])
         else:
             raise CadError(f"key: a template ({', '.join(k for k, _ in WORDING)}), tones, tones/<town>, "
-                           f"lead_in_joint_only/<town>, channels, voice, speed or {', '.join(eta.KEYS)}")
+                           f"lead_in_joint_only/<town>, channels, voice, speed, weather_speak or {', '.join(eta.KEYS)}")
         raise CadError("action: set, reset, reset_section, preview or voice_preview")
 
     def _voice_ids(self) -> list[str]:
@@ -1914,8 +1929,10 @@ class Editor:
             self._tones(d["tones"])
         if "channels" in d:
             self._channels(d["channels"])
-        if set(d) - {"tones", "channels", "voice", "speed", *eta.KEYS}:
-            raise CadError(f"overrides.dispatch: tones, channels, voice, speed and {', '.join(eta.KEYS)} only")
+        if set(d) - {"tones", "channels", "voice", "speed", "weather_speak", *eta.KEYS}:
+            raise CadError(f"overrides.dispatch: tones, channels, voice, speed, weather_speak and {', '.join(eta.KEYS)} only")
+        if "weather_speak" in d and not isinstance(d["weather_speak"], bool):
+            raise CadError("overrides.dispatch.weather_speak: true or false")
         for k, v in (ov.get(channels_mod.SECTION) or {}).items():
             try:
                 channels_mod.clean(k, v)
@@ -1927,6 +1944,8 @@ class Editor:
                 raise CadError(f"overrides.tones.{k}: the key is the pair, {key}")
             ov[TONES_SECTION][k] = val
         self._wall_check(ov.get(WALL_SECTION) or {})
+        for k, v in (ov.get("alarms") or {}).items():         # sizeup/cad/alarms.py (#128)
+            ov["alarms"][k] = alarms_mod.clean(k, v)
         st = ov.get("stt") or {}
         if set(st) - {"vocabulary", "aws_monthly_limit_usd"}:
             raise CadError("overrides.stt: vocabulary and aws_monthly_limit_usd only")

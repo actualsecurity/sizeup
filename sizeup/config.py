@@ -151,6 +151,10 @@ class Config:
     prealert_status_topic: str = "pcfd-status"
     prealert_expire_min: float = 5.0
     prealert_heartbeat_stale_min: float = 90.0
+    # [alerts] (sizeup/notify.py): our own ntfy topic for pushes that page a person: the emergency alarms
+    # (sizeup/cad/alarms.py, #128) and station health (#79). "" = no pushes. Never Tapout's topics.
+    alerts_ntfy_server: str = "https://ntfy.sh"
+    alerts_ntfy_topic: str = ""
     # [station] auto_update: a Linux station installed by deploy/station/install-linux.sh follows the
     # hub's build (sizeup/cloud/autoupdate.py); false keeps it where it is (also: sizeup-station autoupdate off)
     station_auto_update: bool = True
@@ -184,6 +188,15 @@ class Config:
     trains_rt_url: str = ""
     trains_gtfs_url: str = ""
     trains_bbox: tuple[float, float, float, float] = (-73.745, 40.945, -73.595, 41.035)
+    # [weather] (sizeup/weather.py, #132): NWS alerts, conditions and radar, NOAA tides, fetched by the hub.
+    weather_enabled: bool = True
+    weather_radar: bool = True
+    weather_zones: tuple[str, ...] = ("NYZ071", "NYC119", "NYZ211")   # forecast, county, fire weather zone
+    weather_marine_zones: tuple[str, ...] = ("ANZ335",)                # Long Island Sound west
+    weather_area: str = "Southern Westchester"                         # how a spoken warning names it
+    weather_station: str = "KHPN"
+    weather_tide_station: tuple[str, str] = ("8518091", "Rye Beach")
+    weather_gauge_station: tuple[str, str] = ("8516945", "Kings Point")
 
 
 def _take(d: dict, path: str, allowed: set[str]) -> dict:
@@ -233,6 +246,7 @@ def hub_url_problem(url: str) -> str:
 #   SIZEUP_PUBLIC_URL, SIZEUP_HUB_URL [cloud] public_url / hub_url
 #   SIZEUP_ACCESS_TEAM / _AUD         [cloud] access_team / access_aud (hub: Cloudflare Access identity)
 #   SIZEUP_PREALERT_SERVER            [prealert] server (a local test server instead of ntfy.sh)
+#   SIZEUP_ALERT_TOPIC / _SERVER [alerts] ntfy_topic / ntfy_server (our push topic: a name is its only secret)
 #   SIZEUP_511NY_KEY                  [roads] key: the 511NY developer key (never in a file on the hub)
 #   (no [gis] secrets: the county's open data needs no key)
 #   SIZEUP_MTA_KEY                    [trains] key: only should the MTA require one again (none needed, 2026-10-14)
@@ -300,6 +314,19 @@ def _cloud(data: dict) -> dict:
                 cloud_audio_max_mb=nums["audio_max_mb"],
                 cloud_public_url=_env("SIZEUP_PUBLIC_URL", str(cl.get("public_url", ""))).rstrip("/"),
                 cloud_access_team=team, cloud_access_aud=aud, **_keychain(cl))
+
+
+def _alerts(data: dict) -> dict:
+    """[alerts] -> Config fields: our ntfy topic for pushes (sizeup/notify.py). No topic = no pushes."""
+    from sizeup.notify import server_problem, topic_problem
+    al = _take(data.get("alerts", {}), "alerts", {"ntfy_topic", "ntfy_server"})
+    topic = _env("SIZEUP_ALERT_TOPIC", str(al.get("ntfy_topic", ""))).strip()
+    server = _env("SIZEUP_ALERT_SERVER", str(al.get("ntfy_server", "https://ntfy.sh"))).rstrip("/")
+    if topic and (why := topic_problem(topic)):
+        raise ConfigError(f"alerts.ntfy_topic: {why}")
+    if why := server_problem(server):
+        raise ConfigError(f"alerts.ntfy_server: {why}")
+    return dict(alerts_ntfy_topic=topic, alerts_ntfy_server=server)
 
 
 def _prealert(data: dict) -> dict:
@@ -440,6 +467,35 @@ def _bbox(v, what: str, max_deg: float = 3.0) -> tuple[float, float, float, floa
     return (w, s, e, n)
 
 
+def _weather(data: dict) -> dict:
+    """[weather] -> Config fields (sizeup/weather.py). No section: our zones, KHPN, Rye Beach and Kings Point."""
+    w = _take(data.get("weather", {}), "weather", {"enabled", "radar", "zones", "marine_zones", "area", "station",
+                                                   "tide_station", "tide_name", "gauge_station", "gauge_name"})
+    enabled, radar = w.get("enabled", True), w.get("radar", True)
+    if not isinstance(enabled, bool) or not isinstance(radar, bool):
+        raise ConfigError("weather.enabled / weather.radar: true or false")
+    out = {}
+    for k, dflt in (("zones", ["NYZ071", "NYC119", "NYZ211"]), ("marine_zones", ["ANZ335"])):
+        v = w.get(k, dflt)
+        if not isinstance(v, list) or not all(isinstance(z, str) and re.fullmatch(r"[A-Z]{2}[CZ]\d{3}", z) for z in v):
+            raise ConfigError(f'weather.{k}: NWS zone codes, e.g. ["NYZ071", "NYC119"]')
+        out[k] = tuple(v)
+    if not out["zones"]:
+        raise ConfigError("weather.zones: at least one NWS zone")
+    station = str(w.get("station", "KHPN")).strip().upper()
+    if not re.fullmatch(r"[A-Z0-9]{3,5}", station):
+        raise ConfigError('weather.station: an NWS observation station id, e.g. "KHPN"')
+    tides = []
+    for k, dflt, name in (("tide_station", "8518091", "Rye Beach"), ("gauge_station", "8516945", "Kings Point")):
+        sid = str(w.get(k, dflt)).strip()
+        if not re.fullmatch(r"\d{7}", sid):
+            raise ConfigError(f"weather.{k}: a NOAA CO-OPS station id (7 digits)")
+        tides.append((sid, str(w.get(k.replace("station", "name"), name if sid == dflt else sid))[:60]))
+    return dict(weather_enabled=enabled, weather_radar=radar, weather_zones=out["zones"], weather_marine_zones=out["marine_zones"],
+                weather_area=str(w.get("area", "Southern Westchester"))[:60], weather_station=station,
+                weather_tide_station=tides[0], weather_gauge_station=tides[1])
+
+
 GIS_LAYER_KEYS = {"key", "label", "url", "group", "kind", "style", "minzoom", "fields", "refresh", "bbox", "where", "on",
                   "tiled", "simplify_m", "licence", "page", "enabled", "asof", "ours_field", "drop_ours", "note", "icon", "sub"}
 
@@ -554,7 +610,7 @@ def load(path: str | Path) -> Config:
     except tomllib.TOMLDecodeError as e:
         raise ConfigError(f"{path}: {e}") from e
     _take(data, "config", {"station", "web", "radio", "tones", "stt", "p25", "mdc", "units", "storage", "map",
-                           "cad", "dispatch", "cloud", "prealert", "roads", "gis", "trains"})
+                           "cad", "dispatch", "cloud", "prealert", "roads", "gis", "trains", "weather", "alerts"})
     st = _take(data.get("station", {}), "station", {"id", "name", "auto_update"})
     if not isinstance(st.get("auto_update", True), bool):
         raise ConfigError("station.auto_update: true or false")
@@ -746,5 +802,5 @@ def load(path: str | Path) -> Config:
         dispatch_repeat=d_repeat, dispatch_transmit=False, dispatch_channels=d_channels, dispatch_polly_region=d_region,
         **(dict(cloud, cloud_outbox=rel_state(cloud["cloud_outbox"])) if cloud else {}),
         cloud_state="" if cloud.get("cloud_role") == "hub" else rel_state("state/cloud.json"),
-        **_prealert(data), **_roads(data), **_gis(data), **_trains(data),
+        **_prealert(data), **_roads(data), **_gis(data), **_trains(data), **_weather(data), **_alerts(data),
     )

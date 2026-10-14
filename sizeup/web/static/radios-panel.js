@@ -137,7 +137,7 @@ window.RadiosPanel = (() => {
   function addForm() {
     const f = el("form", "rp-add row");
     const sys = el("select");
-    sys.append(new Option("MDC (FG1)", "mdc"), new Option("P25 (county)", "p25"));
+    sys.append(new Option("MDC (FG1)", "mdc"), new Option("FleetSync (FG1, Kenwood)", "fleetsync"), new Option("P25 (county)", "p25"));
     const id = el("input");
     id.placeholder = "Radio ID";
     id.maxLength = 12;
@@ -201,7 +201,7 @@ window.RadiosPanel = (() => {
     show.value = p.show;
     show.addEventListener("change", () => { p.show = show.value; drawTable(); });
     const sys = el("select");
-    for (const [v, t] of [["", "MDC + P25"], ["mdc", "MDC (FG1)"], ["p25", "P25"]]) sys.append(new Option(t, v));
+    for (const [v, t] of [["", "All"], ["mdc", "MDC (FG1)"], ["fleetsync", "FleetSync (FG1)"], ["p25", "P25"]]) sys.append(new Option(t, v));
     sys.value = p.sys;
     sys.addEventListener("change", () => { p.sys = sys.value; drawTable(); });
     show.className = sys.className = "ro-ok";      // filters: still there when Settings are read-only (cad.js)

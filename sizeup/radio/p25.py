@@ -29,6 +29,14 @@ of an unknown talker, never folded into the previous one. Where the live grants 
 the unit script) name the radio that keyed at that moment, apply_grants() names the unknown turn,
 and splits a transmission that the voice channel ran into the next one (no terminator decoded:
 trunk-recorder then credits the whole transmission to the later radio).
+
+The P25 emergency button (issue #128): the call JSON's top-level "emergency" (1 when the control channel
+granted the call as an emergency: trunk-recorder 5.2.0 takes it from the grant that set the call up, so it
+is the call's first key-up) and each srcList entry's "emergency" (always 0 in 5.2.0, which writes false
+there; read anyway, for a later trunk-recorder that fills it). Call.emergency / Turn.emergency carry them;
+split_call() marks the piece the button belongs to (Piece.emergency). The unit script gets no emergency
+flag in 5.2.0 (plugins/unit_script passes only the system, radio ID, talkgroup and patches), so the
+button is known when the call's JSON is written, not at the key-up.
 """
 
 from __future__ import annotations
@@ -58,6 +66,7 @@ class Turn:
     at: float | None = None       # wall-clock start (estimated: srcList "time" is whole seconds)
     errors: int = 0               # freqList error_count
     via: str = "srclist"          # srclist | grant (talker named by a live grant) | split (cut at a grant)
+    emergency: bool = False       # srcList "emergency": this key-up was an emergency (P25 emergency button)
 
 
 @dataclass
@@ -73,6 +82,7 @@ class Call:
     turns: list[Turn] = field(default_factory=list)  # one per key-up, in order ((pos, talker) tuples are taken too)
     ids: dict[str, tuple[str, str]] = field(default_factory=dict)  # talker -> (radio ID, alias tag) as sent
     system: str = ""           # trunk-recorder's shortName ("westchester")
+    emergency: bool = False    # the call JSON's "emergency": granted as an emergency call (the button, #128)
 
     def __post_init__(self) -> None:
         self.turns = [t if isinstance(t, Turn) else Turn(float(t[0]), str(t[1])) for t in self.turns]
@@ -111,6 +121,13 @@ def _num(v, default: float | None = None) -> float | None:
     return x if x == x else default                          # NaN
 
 
+def _flag(v) -> bool:
+    """trunk-recorder's 0 / 1 (or true / false) flags."""
+    if isinstance(v, str):
+        return v.strip().lower() in ("1", "true", "yes")
+    return bool(v) if isinstance(v, (int, float, bool)) else False
+
+
 def talker_name(src: str, tag: str, aliases: dict[str, str]) -> str:
     return aliases.get(src) or aliases.get(tag) or tag or src
 
@@ -146,7 +163,7 @@ def parse_call(meta_path: Path, labels: dict[int, str], aliases: dict[str, str] 
             units.append(t.talker)
     wav = meta_path.with_suffix(".wav")
     return Call(meta_path.stem, int(tg), labels.get(tg) or f"TG {tg}", start, stop, units, None, str(wav), turns,
-                ids, str(d.get("short_name") or ""))
+                ids, str(d.get("short_name") or ""), _flag(d.get("emergency")))
 
 
 def _turns(d: dict, aliases: dict[str, str]) -> list[Turn]:
@@ -167,7 +184,8 @@ def _turns(d: dict, aliases: dict[str, str]) -> list[Turn]:
         tag = str(s.get("tag") or "").strip() if src else ""
         f = freqs.get(pos) or {}
         turns.append(Turn(pos, talker_name(src, tag, aliases) if src else "", src, tag, _num(f.get("len")),
-                          _num(s.get("time")), int(_num(f.get("error_count"), 0) or 0)))
+                          _num(s.get("time")), int(_num(f.get("error_count"), 0) or 0),
+                          emergency=_flag(s.get("emergency"))))
     have = {t.pos for t in turns}
     for pos, f in freqs.items():
         if pos not in have:
@@ -295,7 +313,7 @@ def apply_grants(call: Call, grants: list[tuple[float, str]], aliases: dict[str,
             if src and src == t.src and k == len(segs) - 1:
                 talker, tag, via = t.talker, t.tag, "srclist"     # as the call JSON named it
             out.append(Turn(pos, talker, src, tag, round(nxt - pos, 2), t.at + (pos - t.pos),
-                            t.errors if k == 0 else 0, via))
+                            t.errors if k == 0 else 0, via, t.emergency and k == 0))
         changed = True
     if changed:
         call.turns = out + [t for t in call.turns if t.at is None]
@@ -329,6 +347,7 @@ class Piece:
     pairs: list[tuple[str, str]] = field(default_factory=list)   # (radio ID, alias) per talker
     stt: bool = True           # False: too short and silent to transcribe (a key-up, nothing said)
     via: str = "srclist"
+    emergency: bool = False    # the P25 emergency button: its srcList entry, or the call's flag on its first key-up
 
 
 def has_voice(audio: np.ndarray, rate: int = RATE) -> bool:
@@ -357,7 +376,8 @@ def split_call(call: Call, rate: int = RATE) -> list[Piece]:
     if not turns or (len(turns) > 1 and all(t.pos <= 0 for t in turns)):
         # No positions (an old JSON shape): the talkers can't be placed in the audio.
         names = list(call.units)
-        return [Piece(call.id, call.start, call.end, ", ".join(names), audio, pairs_of(None, names))]
+        return [Piece(call.id, call.start, call.end, ", ".join(names), audio, pairs_of(None, names),
+                      emergency=call.emergency or any(t.emergency for t in turns))]
     cuts = [(min(n, max(0, int(round(t.pos * rate)))), t) for t in turns]
     raw: list[list] = []                                     # [a, b, turn]
     for i, (a, t) in enumerate(cuts):
@@ -366,30 +386,37 @@ def split_call(call: Call, rate: int = RATE) -> list[Piece]:
             raw.append([a, b, t])
     if not raw:
         t = turns[-1]
-        return [Piece(call.id, call.start, call.end, t.talker, audio, pairs_of(t, [t.talker]), via=t.via)]
+        return [Piece(call.id, call.start, call.end, t.talker, audio, pairs_of(t, [t.talker]), via=t.via,
+                      emergency=call.emergency or any(x.emergency for x in turns))]
     raw[0][0] = 0
     short = SHORT_TURN_S * rate
-    kept: list[list] = []
+    kept: list[list] = []                                    # [a, b, turn, emergency]
     carry = None                                             # a leading fragment, for the next piece
+    carry_em = False
     for a, b, t in raw:
         if len(raw) > 1 and b - a < short and not t.src and not t.talker and not has_voice(audio[a:b], rate):
             if kept:
                 kept[-1][1] = b
+                kept[-1][3] = kept[-1][3] or t.emergency
             else:
                 carry = a if carry is None else carry
+                carry_em = carry_em or t.emergency
             continue
+        em = t.emergency
         if carry is not None:
-            a, carry = carry, None
-        kept.append([a, b, t])
+            a, carry, em = carry, None, em or carry_em
+        kept.append([a, b, t, em])
+    if kept and call.emergency:      # 5.2.0: the call's flag, from the grant that opened it: its first key-up
+        kept[0][3] = True
     out: list[Piece] = []
-    for k, (a, b, t) in enumerate(kept):
+    for k, (a, b, t, em) in enumerate(kept):
         cid = call.id if len(kept) == 1 else f"{call.id}-t{k}"
         start = t.at if t.at is not None else call.start + a / rate
         if out and start < out[-1].start:
             start = out[-1].start
         clip = audio[a:b]
         stt = not ((b - a) < short and not has_voice(clip, rate))
-        out.append(Piece(cid, start, start + (b - a) / rate, t.talker, clip, pairs_of(t, [t.talker]), stt, t.via))
+        out.append(Piece(cid, start, start + (b - a) / rate, t.talker, clip, pairs_of(t, [t.talker]), stt, t.via, em))
     return out
 
 

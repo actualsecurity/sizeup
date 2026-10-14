@@ -187,6 +187,16 @@ status_topic = "pcfd-status"         # boot, hourly heartbeat, errors, OTA (Tapo
 expire_min = 5                       # an unanswered pre-alert ends after this long
 heartbeat_stale_min = 90             # no heartbeat (or restart) this long: "Tapout: no heartbeat for ..." in warning
 
+# [alerts]: our own ntfy topic for pushes that page a person (sizeup/notify.py): the emergency alarms
+# (the P25 emergency button, a mayday heard on our fire channels: sizeup/cad/alarms.py, #128), each at
+# max priority with who and where, and their acknowledgement; station health (#79). ntfy topics are
+# public by name: a long random one (e.g. `openssl rand -hex 12`). NEVER Tapout's topics
+# (pcfd-phone-prealert pages the fire crew; pcfd-status): refused here and again before every send.
+# Empty or left out: no pushes. Env SIZEUP_ALERT_TOPIC / SIZEUP_ALERT_SERVER win.
+# [alerts]
+# ntfy_topic = ""
+# ntfy_server = "https://ntfy.sh"
+
 # [roads]: the CAD maps' highway layers (sizeup/roads.py, docs/cloud.md "Highway layers"): traffic
 # cameras, incidents and closures, roadwork and message signs for our area, from the NYS Thruway
 # Authority's public feeds (I-95, I-287; no key; on by default) and from 511NY once it approves
@@ -206,6 +216,19 @@ heartbeat_stale_min = 90             # no heartbeat (or restart) this long: "Tap
 # stream_max = 8                          # live camera streams through the hub at once (a camera watched by several
 #                                         # pages is one); each ~26 KB/s and ~1.4 % of a core: 8 is safe on 0.25 vCPU
 # wall_streams = 0                        # the camera wall's live tiles per page; 0: every streaming camera in our area
+
+# [weather]: NWS alerts (the banner), conditions (the header), radar (the maps' Layers) and NOAA tides (marine
+# calls, the board's marine block): sizeup/weather.py, docs/cloud.md "Weather and water". Public data, no key,
+# fetched by the hub (or all-in-one), cached under the state dir (weather.json). Leave the section out: these.
+# [weather]
+# enabled = true
+# radar = true
+# zones = ["NYZ071", "NYC119", "NYZ211"]  # Southern Westchester (forecast), Westchester (county), fire weather
+# marine_zones = ["ANZ335"]               # Long Island Sound west of New Haven / Port Jefferson: the marine block
+# area = "Southern Westchester"           # how a spoken warning names us
+# station = "KHPN"                        # NWS observation station: Westchester County Airport
+# tide_station = "8518091"                # CO-OPS predictions: Rye Beach
+# gauge_station = "8516945"               # CO-OPS water-level gauge: Kings Point
 
 # [gis]: the CAD maps' "County GIS" layers (sizeup/gis.py, docs/cloud.md "County GIS layers"): Westchester
 # County GIS open data (tax parcels, fire and EMS districts, hydrants, buildings, flood plains, rail ...),

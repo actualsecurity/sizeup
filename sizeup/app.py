@@ -27,6 +27,8 @@
         snapshots proxied by this process (sizeup/roads.py)
     [gis]: Westchester County GIS datasets (parcels, boundaries, utilities ...) for the maps' Layers,
         fetched and served by this process (sizeup/gis.py)
+    [weather]: NWS alerts, conditions and radar, NOAA tides for the banner, the header, the maps and
+        marine calls, fetched and served by this process (sizeup/weather.py)
     [prealert]: Tapout's ntfy feed (the HQ phone ringing), read only, on the CAD of record (all-in-one
         or the hub) -> a pre-alert at the top of the CAD's 60 Control column (sizeup/prealert.py)
     per channel (Settings > Radios, sizeup/channels.py): record / transcribe / engine (local whisper,
@@ -62,6 +64,8 @@ from sizeup.dispatch import parse
 from sizeup.incidents import IncidentStore, Traffic
 from sizeup.radio.fm import FRAME, RATE, Channel, NfmReceiver, Segment, data_frames, speech_seconds
 from sizeup.radio.mdc1200 import decode as mdc_decode
+from sizeup.radio import fleetsync
+from sizeup.cad.radios import fm_system
 from sizeup.radio.p25 import Call, CallIngest, Piece, split_call
 from sizeup.radio import claims
 from sizeup.radio.live import LiveTalk
@@ -328,6 +332,7 @@ class App:
                                  hold_s=max(HOLD_S, max(cont, default=0.0) + 1.0))
         self.paging_state: Callable[[], list[dict]] = self.paging.state    # the hub: the station's (cloud/hub.py)
         self.tap = LiveTap(lambda label: self._kind.get(label, ""), self.paging, self.live, mdc=lambda a: self._mdc(a), log=log)
+        self.tap.on_emergency = self._fm_emergency      # the emergency button at the key-up (#128)
         for r in self.receivers:
             self.tap.attach(r)
         self.cad.paging = lambda: self.paging_state()
@@ -379,11 +384,22 @@ class App:
         # someone looks at the Trains layer or an event near the tracks.
         from sizeup.trains import Trains
         self.trains = Trains.from_config(cfg, log=log)
+        # Weather and water (sizeup/weather.py, #132): NWS alerts, conditions and radar, NOAA tides; a warning
+        # said by the dispatch voice when Settings > Dispatch allows it (played where the console is open).
+        from sizeup.weather import Weather
+        self.weather = Weather.from_config(cfg, log=log)
+        self.weather.speak_on = lambda: bool(getattr(self.cad, "weather_speak", False))
+        self.weather.speaker = self._weather_voice
         if cfg.prealert_enabled:
             from sizeup.prealert import PreAlerts
             self.prealert = PreAlerts(self.cad, cfg.prealert_server, cfg.prealert_ring_topic, cfg.prealert_status_topic,
                                       cfg.prealert_expire_min, cfg.prealert_heartbeat_stale_min, log=log)
             self.prealert_sync()
+        # The emergency alarms' pushes (sizeup/cad/alarms.py, #128): our own ntfy topic ([alerts], sizeup/notify.py).
+        if cfg.alerts_ntfy_topic:
+            from sizeup.notify import Notifier
+            self.cad.alarms.notifier = Notifier(cfg.alerts_ntfy_server, cfg.alerts_ntfy_topic, log)
+        self.cad.alarms.public_url = cfg.cloud_public_url
         if self.recorder is not None:
             self.recorder.on_line = self.live.feed_line
         self._fm_live: dict[str, dict] = {}
@@ -562,16 +578,27 @@ class App:
     # -- radio events -----------------------------------------------------------------------------
 
     def _mdc(self, *audios) -> list[tuple[str, bool]]:
-        """(MDC-1200 unit ID, emergency) for each radio ID found in these pieces of audio, in order."""
+        """(radio ID, emergency) for each radio ID found in these pieces of audio, in order: MDC-1200 (Motorola,
+        "6401") and FleetSync (Kenwood, "167-1002": radio/fleetsync.py). An emergency packet is the radio's
+        emergency button (#128); MDC's emergency acknowledge (the console's answer) is not."""
         out: list[tuple[str, bool]] = []
         for b in audios:
+            found: list[tuple[str, bool]] = []
             try:
-                pkts = mdc_decode(b, RATE)
+                found += [(p.unit_hex, p.kind == "emergency") for p in mdc_decode(b, RATE)
+                          if p.kind in ("pre-id", "post-id", "emergency")]
             except Exception:
-                continue
-            for p in pkts:
-                if p.kind in ("pre-id", "post-id", "emergency") and (p.unit_hex, p.kind == "emergency") not in out:
-                    out.append((p.unit_hex, p.kind == "emergency"))
+                pass
+            try:            # a long transmission: its first and last 3 s (where a radio sends its ID)
+                edge = 3 * RATE
+                for part in ([b] if len(b) <= 2 * edge else [b[:edge], b[-edge:]]):
+                    found += [(p.id, p.emergency) for p in fleetsync.decode(part, RATE)
+                              if p.kind in ("pre-id", "post-id", "emergency")]
+            except Exception:
+                pass
+            for x in found:
+                if x not in out:
+                    out.append(x)
         return out
 
     def _units(self, seg: Segment, found: list[tuple[str, bool]] | None = None) -> list[str]:
@@ -633,9 +660,13 @@ class App:
         low_energy = speech_seconds(seg.audio) < MIN_SPEECH_S
         ids = list(dict.fromkeys(h for h, _e in found))
         for h in ids:
-            self._heard("mdc", h, at=seg.end)
+            self._heard(fm_system(h), h, at=seg.end)
         self.live.fm_segment(ch.label, ids, seg.start, seg.end)
+        emergency = any(e for _h, e in found)        # the radio's emergency button (MDC / FleetSync, #128)
+        live_key = self.tap.alarm_key(ch.label, seg.start, seg.end) if emergency else ""
         if not record:              # squelch, MDC IDs and "talking now" stay live; nothing is kept
+            if emergency and not live_key:      # ... but the button still alarms (the tap missed it live)
+                self._fm_emergency(ch.label, seg.start, found)
             return
         t = Traffic(f"{ch.label.replace(' ', '')}-{int(seg.start * 1000)}", ch.label, seg.start, seg.end,
                     "", status="pending", unit=", ".join(units), rig=self.radios.rig_mdc(ids), radio_id=", ".join(ids))
@@ -646,6 +677,12 @@ class App:
         t.raw_audio = seg.audio    # type: ignore[attr-defined]  (saved if it turns out to be a click)
         self._keep_clip(t.id, seg.audio)
         self._keep_source(t.id, seg.audio)
+        if emergency:
+            t.emergency = True                                   # type: ignore[attr-defined]
+            t.emergency_via = self._via(found)                   # type: ignore[attr-defined]
+            if live_key:
+                t.alarm_key = live_key                           # type: ignore[attr-defined]  (the alarm raised at key-up)
+            self._alarm_now(t)          # its clip now; one alarm per transmission (the key-up's, if there was one)
         self._stt(t, seg.audio, self.stt_engine(ch.label), ch.label)
 
     def _page_segment(self, ch: Channel, seg: Segment) -> None:
@@ -751,7 +788,11 @@ class App:
             log(f"CAD: could not log a page: {type(e).__name__}: {e}")
 
     def _call(self, call: Call) -> None:
-        if not self.tg.record(call.talkgroup):  # switched off in the web app: dropped on arrival
+        emergency = call.emergency or any(t.emergency for t in call.turns)
+        if emergency:
+            log(f"p25: {call.label} {call.id}: EMERGENCY flag (radio {', '.join(call.units) or 'unknown'})")
+        if not self.tg.record(call.talkgroup) and not emergency:  # switched off in the web app: dropped on arrival
+            # (an emergency call is kept whatever the switch says: issue #128)
             self.tg.seen(call.talkgroup, dropped=True)
             self._drop_recorder_files(call)
             return
@@ -771,6 +812,9 @@ class App:
                 t.pairs = pc.pairs  # (radio ID, alias) per talker, for the hub's own rig lookup  # type: ignore[attr-defined]
                 self._keep_clip(t.id, radio_voice(pc.audio, deemph=False), processed=True)
                 self._keep_source(t.id, pc.audio)
+                if pc.emergency:
+                    t.emergency = True  # the P25 emergency button (#128)  # type: ignore[attr-defined]
+                    self._alarm_now(t)      # before speech-to-text: the alarm doesn't wait for the words
                 if pc.stt:
                     self._stt(t, pc.audio, eng, key)
                 else:                   # a sub-0.3 s key-up with no voice: kept, not transcribed
@@ -778,6 +822,53 @@ class App:
                     t.stt = ""  # type: ignore[attr-defined]
                     self._transcribed(t)
         self._drop_recorder_files(call)  # sizeup's clip is the one copy kept
+
+    # -- the emergency alarms (sizeup/cad/alarms.py, #128) ------------------------------------------------
+
+    def _alarm(self, t: Traffic, text: str | None = None) -> None:
+        """A transmission (new, or new text) to the alarms: the CAD of record raises them. A station forwarding
+        to a hub doesn't (the hub does, from the same transmission)."""
+        if self.forwarding():
+            return
+        d = {"id": t.id, "start": t.start, "end": t.end, "source": t.source, "talkgroup": t.talkgroup, "unit": t.unit,
+             "rig": t.rig, "radio_id": t.radio_id, "text": t.text if text is None else text,
+             "emergency": bool(getattr(t, "emergency", False)), "via": getattr(t, "emergency_via", ""),
+             "alarm_key": getattr(t, "alarm_key", "")}
+        d["unit"] = ", ".join(x.removesuffix(" EMERGENCY") for x in (t.unit or "").split(", ") if x)
+        try:
+            self.cad.alarms.on_traffic(d)
+        except Exception as e:  # the alarms must never stop the monitor (it logs; the next text tries again)
+            log(f"alarms: {t.id}: {type(e).__name__}: {e}")
+
+    def _alarm_now(self, t: Traffic) -> None:
+        """The emergency button (P25 at the end of its call; MDC / FleetSync at the key-up and again at the end
+        of the transmission): raised here, or sent to the hub at once (an "alarm" event with its clip when
+        there is one yet, ahead of the transcript)."""
+        if self.forwarding():
+            self._emit("alarm", {k: v for k, v in t.as_dict().items() if k not in ("pairs", "raw_audio")}
+                       | {"pairs": [list(p) for p in getattr(t, "pairs", None) or []]},
+                       t.id if self.has_clip(t.id) else None)
+        else:
+            self._alarm(t, "")
+
+    @staticmethod
+    def _via(found: list[tuple[str, bool]]) -> str:
+        em = [h for h, e in found if e]
+        return "FleetSync" if em and fm_system(em[0]) == "fleetsync" else "MDC"
+
+    def _fm_emergency(self, label: str, since: float, found: list[tuple[str, bool]]) -> str:
+        """An emergency packet on an analog channel (the live tap, at the key-up; or the end of a transmission
+        that isn't kept): the alarm now. Its key is the carrier's; the finished transmission takes it over."""
+        ids = list(dict.fromkeys(h for h, _e in found))
+        em = [h for h, e in found if e]
+        names = list(dict.fromkeys(self.cfg.mdc_aliases.get(h, h) for h in em + ids))
+        key = f"{label.replace(' ', '')}-live-{int(since * 1000)}"
+        t = Traffic(key, label, since, max(since, time.time()), "", status="pending", unit=", ".join(names[:1]),
+                    rig=self.radios.rig_mdc(em or ids), radio_id=", ".join(em or ids))
+        t.emergency, t.emergency_via = True, self._via(found)   # type: ignore[attr-defined]
+        log(f"{label}: EMERGENCY button ({t.emergency_via}) from {', '.join(em)} at key-up")
+        self._alarm_now(t)
+        return key
 
     def _drop_recorder_files(self, call: Call) -> None:
         if not self.clips_dir or not call.wav_path:  # without our own clip store, keep the originals
@@ -816,6 +907,7 @@ class App:
             self._emit("traffic", dict(item.as_dict(), attach=attach, pairs=pairs), item.id)
             self.store.on_traffic(item, attach=attach)
             self._to_cad(item)
+            self._alarm(item)
             if item.status != "no_speech":
                 log(f"{item.source}: {'[' + item.unit + '] ' if item.unit else ''}{item.text or '(' + item.status + ')'}")
             return
@@ -1263,6 +1355,10 @@ class App:
             self.cad.comms.retext(cid, text, status, model, alt)
         except Exception as e:  # the CAD must never stop the monitor
             log(f"CAD: could not update the communications log: {type(e).__name__}: {e}")
+        t = next((x for x in list(self.store.loose) + [x for i in self.store.incidents for x in i.traffic]
+                  if x.id == cid), None)
+        if t is not None and text:
+            self._alarm(t, text)                       # the words came later (Amazon Transcribe, a re-run)
         if changed:
             log(f"{why} {cid}: {text or '(no speech)'}")
         self._emit("retext", {"id": cid, "text": text, "status": status, "confidence": confidence, "model": model,
@@ -1977,6 +2073,7 @@ class App:
             self.roads.start()
             self.gis.start()
             self.trains.start()
+            self.weather.start()
         return self
 
     def forwarding(self) -> bool:
@@ -2030,6 +2127,13 @@ class App:
         self.roads.stop()
         self.gis.stop()
         self.trains.stop()
+        self.weather.stop()
+
+    def _weather_voice(self, text: str) -> tuple[str | None, str]:
+        """A weather warning said by the dispatch voice, no tones (sizeup/weather.py Weather.speech): (its
+        audio URL, which voice) or (None, why not). Played in the browser; never keyed."""
+        path, note = self.cad._render(text, tones=[])
+        return (self.cad._audio_url(path), note) if path else (None, note)
 
 
 def channels_model() -> str:
@@ -2058,7 +2162,7 @@ def make_server(app: App) -> WebServer:
                        station=getattr(app, "hub", None), health=health_info(cfg), access=access_verifier(cfg),
                        access_log=log if cfg.cloud_role == "hub" else None, station_mode=app.station,
                        role=cfg.cloud_role, roads=app.roads, gis=app.gis,
-                       trains=app.trains)
+                       trains=app.trains, weather=app.weather)
 
     def changed() -> None:             # a new talker is pushed at once, not on the next second
         server.poke()
@@ -2069,6 +2173,7 @@ def make_server(app: App) -> WebServer:
     app.paging.on_change = changed     # each tone pair of a page going out, as it decodes
     if app.prealert is not None:
         app.prealert.on_change = server.poke             # so is the phone ringing
+    app.cad.alarms.on_change = server.poke               # and an emergency alarm (#128)
     return server
 
 

@@ -1402,7 +1402,7 @@ function playForEvent(inc, e) {
   const d = (inc.dispatches || []).find((x) => Math.abs(x.at - e.at) < 0.001);
   return d && d.has_audio ? d.id : null;
 }
-const EVENT_KINDS = { note: "comment", status: "status", system: "system", attach: "attached", prealert: "pre-alert", reopened: "reopened" };
+const EVENT_KINDS = { note: "comment", status: "status", system: "system", attach: "attached", prealert: "pre-alert", reopened: "reopened", alarm: "EMERGENCY" };
 // The latest entry, one line, for the folded Timeline's header: "19:34:21 status · 2392 on location"
 function eventLine(e) {
   const text = e.kind === "note" && e.units ? noteText(e) : e.text;
