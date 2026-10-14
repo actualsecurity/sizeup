@@ -1296,6 +1296,108 @@ bbox = [-73.745, 40.945, -73.595, 41.035]   # the stretch of line the map shows 
 Tests: `tests/test_trains.py` on fixtures recorded 2026-10-14 11:33 EDT (`tests/fixtures/mta/`, trimmed
 by `tools/record_trains_fixtures.py`; run it to re-record).
 
+## Aircraft near HPN (shortfinal's picture)
+
+> "can we pull in the shortfinal components into this as additional layers? the way we implemented the data
+> and airplane tracking in there was focused on PCFD so we should keep to that design here, and include both
+> api data and specific SDR adsb with LNA if / when we get there, we might need to name an SDR specifically
+> for that in the future as well, but not yet" (GitHub #155; builds on #88 and the Airport layer, #87)
+
+**What it shows.** An *Aircraft* group in every map's Layers box (off by default; in the viewer's or the
+event's set like the rest; **on by itself for an event at the airport**, like the Airport layer). It shows
+what matters to Port Chester / Rye Brook and HPN, as shortfinal does, not a world flight tracker:
+
+| Phase (shortfinal's rules) | Drawn | |
+|---|---|---|
+| **arriving** | green | on a published approach (FAA CIFP, incl. the curved RNAV (RNP) Z lineups over Port Chester), lined up on a runway end within 12 nm, or inbound, descending, slow and low enough to land here (the altitude-for-distance gate that tells HPN arrivals from LGA arrivals passing over); an arrival turning or climbing close in stays an arrival (vectors, the pattern, a go-around) |
+| **departing** | blue | close in, low and climbing away, or seen on our ground / departing and still climbing out (15 min, under 18,000 ft, inside the radius) |
+| **ground** | grey | on the surface within 2 nm of HPN |
+| **low** | amber | below 6,000 ft MSL inside 15 nm: LGA arrivals over Port Chester, helicopters, light aircraft |
+| emergency | red, first | squawk 7500 / 7600 / 7700 or the aircraft's own emergency status, whatever it is doing |
+| overflight, other airports' ground traffic | not drawn | |
+
+Each aircraft is drawn **where the feed last placed it**, turned to its track, with its callsign, altitude
+and type; arrivals and departures with their last few minutes as a trail. **A position older than 15 s is
+drawn hollow and labelled with its age** ("position 44 s old"); nothing is moved on by guesswork (no dead
+reckoning); the hub drops an aircraft 60 s after its last position. A click: what it is (the feed's ICAO
+type designator; the FAA registry's make and model, marked so; the airline from FAA JO 7340.2), what it is
+doing (the approach, the distance to go; the ETA as distance / speed, labelled an estimate; never from a
+stale position), altitude, vertical rate, speed, squawk, registration, and how it was located (ADS-B, MLAT
+or TIS-B). The box lists emergencies first, then HPN's movements (arriving, departing, on the ground: a click
+opens one), how many are low in the area, the source and its licence and the feed's time; "No new aircraft
+data since ..." when the hub stops answering.
+
+### Feeds and their terms
+
+One interface (`Feed.read()`), tried in the order `[aircraft] feeds` gives; a feed that fails rests (its
+Retry-After, else 5 s) while the next one carries on.
+
+| Feed | Terms (checked 2026-10-14) | Use |
+|---|---|---|
+| **adsb.lol** `api.adsb.lol/v2/point/<lat>/<lon>/<nm>` | keyless; the data under the **ODbL 1.0** (use, operational too, with attribution; share-alike only if we published a derived database) | **the default.** Attribution in the map corner and the box. Rate-limited by load: asked at most every 5 s, Retry-After honoured. Note: it rate-limits per address, and shortfinal on the same machine polls it too |
+| adsb.fi `opendata.adsb.fi/api/v3/...` | "personal, non-commercial use only", attribution | **off** unless listed: a fire department's dispatch isn't plainly personal use |
+| OpenSky Network | non-profit research / education, internal evaluation, "government purposes"; live operational use needs a **written agreement** | **not used** (an open question for the department) |
+| FAA Releasable Aircraft Database `registry.faa.gov/database/ReleasableAircraft.zip` | public domain (US government) | types by ICAO address for US aircraft: weekly once someone has looked (~70 MB), kept in SQLite (`aircraft/faa_registry.sqlite` in the state dir). Only the N-number, make, model, year, kind and engines are kept: **never the owner's name or address** |
+| FAA JO 7340.2 airline designators | public domain | `data/airport/airlines.csv` (shortfinal's `tools/fetch_airlines.py`) |
+| **our receiver** | ours | below |
+
+### Our own receiver (later; nothing assigned now)
+
+For when there is an ADS-B SDR with an LNA (and a 1090 MHz filter) on the station or the hub's network:
+`[aircraft.receiver]` reads **readsb / dump1090's `aircraft.json` (1090 MHz) and dump978-fa's (978 MHz
+UAT)**, each a file path or an http(s) URL, and merges them by ICAO address (the fresher position wins; what
+only one band heard is kept). A file whose own clock stops for 30 s says its decoder has stopped.
+
+* **sizeup never opens, starts or claims anything for it.** Whatever runs the decoder holds the dongle and
+  its claim (`~/.local/state/rtl-claims/<serial>.json`, the format shared with shortfinal). Run readsb with
+  `--gain auto`: with an LNA a fixed high gain overloads (shortfinal's bench, 2026-10-02).
+* `sdr` names the dongle meant for ADS-B (its exact USB serial; an all-digit serial is refused, as readsb
+  and the rtl tools read it as an index: `rtl_eeprom -s adsb` first). Naming it **keeps sizeup's own radios
+  off it** (it is added to `[radio] sdr_ignore`, so auto-assign never grabs it) and the box says whether it
+  is plugged in and who holds it ("held by shortfinal (ADS-B)"). It can't be one of `[radio] sdrs`.
+* **Not yet:** on the cloud setup the receiver would be on the station while the map is on the hub; the
+  station forwarding aircraft to the hub (#88's outbox, throttled) comes with the hardware. Until then the
+  receiver feed works all-in-one, or wherever the hub can reach the decoder's URL.
+
+### How it works
+
+`sizeup/aircraft.py` (`AircraftLayer`), on the hub (or all-in-one; never a station):
+
+* **Only while someone looks.** The page asks `GET /api/cad/aircraft` every 5 s while a map has the layer on
+  and the page is visible; each ask keeps the feed coming for 60 s; nothing is fetched otherwise. A first
+  ask with nothing fresh waits up to 5 s for the read it wakes.
+* **Never in the state push** (#146 kept the idle stream tiny). Each answer carries an ETag from its body:
+  an unchanged answer is a 304. The recorded traffic (6 aircraft drawn) is 3.1 KB, 1.1 KB gzipped (positions
+  to 5 decimals; trails to 4, for arrivals, departures and emergencies only, at most 20 points).
+* Ported from shortfinal (branch `plan`): `classify()` and its memory, `Procedures.match()` on the CIFP
+  paths already in `data/airport/khpn_procedures.geojson`, the track store's glitch filter (a jump faster
+  than max(300 kt, 2 x speed + 100 kt) is held back until it repeats three times) and fade / drop by the
+  feed's own clock. Left in shortfinal: ATC audio and speech-to-text, callsign attribution, adsb.im routes,
+  the window view, ntfy pushes, recording / replay, the readsb supervisor.
+
+| | |
+|---|---|
+| `GET /api/cad/aircraft` | `{configured, note, feed: {key, label, link, licence, terms, credit}, feeds, at (the feed's time), fetched, error, stale_s, airport, registry: {at, n, error, credit}, receiver: null \| {enabled, sdr, name, present, held_by, bands, note}, aircraft: [{hex, cs, flight, reg, reg_src, type, model, model_src, kind, airline, lat, lon, alt, gs, trk, vr, sq, emerg, phase, rwy, appr, dist, eta, age, pos, band, trail}], counts}` |
+
+```toml
+[aircraft]                       # sizeup/aircraft.py; leave out: on, adsb.lol, 15 nm around HPN
+feeds = ["adsblol"]              # in order: "receiver", "adsblol", "adsbfi"
+radius_nm = 15
+ceiling_ft = 6000
+registry = true
+
+[aircraft.receiver]              # off: no SDR is assigned to ADS-B yet
+enabled = false
+sdr = ""
+json_1090 = ""                   # readsb / dump1090 aircraft.json: a path or http(s) URL
+json_978 = ""                    # dump978-fa aircraft.json
+```
+
+Tests: `tests/test_aircraft.py` on adsb.lol answers recorded 2026-10-14 14:38 EDT and the FAA registry of
+2026-10-13 trimmed to those aircraft, owner columns blanked (`tests/fixtures/aircraft/`,
+`tools/record_aircraft_fixtures.py`); the receiver fixtures are derived (readsb) or hand-built (dump978)
+until there is a receiver to record.
+
 ## Weather and water (NWS alerts, conditions, radar; NOAA tides)
 
 > "Public, free data: National Weather Service alerts ... as a banner on /cad and /monitor ... spoken once
@@ -1440,5 +1542,6 @@ the model, the alerts, `/api/cad/health`, `/api/station/status`; `sizeup/notify.
 `tests/test_station_install.py`. The county GIS layers: `sizeup/gis.py` (`tests/test_gis.py`, fixtures
 `tests/fixtures/wcgis/`), `sizeup/web/static/gislayers.js` (a group in maplayers.js's Layers box). Metro-North's
 trains: `sizeup/trains.py` (`tests/test_trains.py`, fixtures `tests/fixtures/mta/`), `sizeup/web/static/trains.js` (a group in
-the Layers box, and the event's "Trains approaching" panel). Weather and water: `sizeup/weather.py` (`tests/test_weather.py`, fixtures `tests/fixtures/weather/`), `sizeup/web/static/weather.js`
+the Layers box, and the event's "Trains approaching" panel). Aircraft near HPN: `sizeup/aircraft.py` (`tests/test_aircraft.py`, fixtures
+`tests/fixtures/aircraft/`), `sizeup/web/static/aircraft.js` (a group in the Layers box). Weather and water: `sizeup/weather.py` (`tests/test_weather.py`, fixtures `tests/fixtures/weather/`), `sizeup/web/static/weather.js`
 (the banner, the header, the tides, a group in the Layers box).

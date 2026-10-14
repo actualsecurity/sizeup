@@ -209,6 +209,23 @@ class Config:
     weather_station: str = "KHPN"
     weather_tide_station: tuple[str, str] = ("8518091", "Rye Beach")
     weather_gauge_station: tuple[str, str] = ("8516945", "Kings Point")
+    # [aircraft] (sizeup/aircraft.py, #155): aircraft near HPN, shortfinal's PCFD-focused design, read by the hub
+    # (or all-in-one) only while someone looks. feeds in order of preference: "adsblol" (ODbL, the default),
+    # "adsbfi" (personal, non-commercial use only: off unless listed), "receiver" (our own ADS-B receiver).
+    aircraft_enabled: bool = True
+    aircraft_feeds: tuple[str, ...] = ("adsblol",)
+    aircraft_radius_nm: float = 15.0
+    aircraft_ceiling_ft: float = 6000.0
+    aircraft_adsblol_url: str = ""    # "" = adsb.lol's public API (sizeup/aircraft.py ADSBLOL_URL)
+    aircraft_adsbfi_url: str = ""
+    aircraft_registry: bool = True    # types from the FAA Releasable Aircraft Database (public domain)
+    # [aircraft.receiver]: our own receiver, read only (readsb / dump1090 1090 MHz, dump978-fa 978 MHz UAT
+    # aircraft.json, a path or an http(s) URL); sdr: the dongle meant for ADS-B (exact USB serial), kept out of
+    # sizeup's own radios. Off, and no dongle named, until there is one.
+    aircraft_receiver: bool = False
+    aircraft_receiver_1090: str = ""
+    aircraft_receiver_978: str = ""
+    aircraft_sdr: str = ""
 
 
 def _take(d: dict, path: str, allowed: set[str]) -> dict:
@@ -497,6 +514,62 @@ def _bbox(v, what: str, max_deg: float = 3.0) -> tuple[float, float, float, floa
     return (w, s, e, n)
 
 
+AIRCRAFT_FEEDS = ("receiver", "adsblol", "adsbfi")
+
+
+def _aircraft(data: dict, base: Path, sdrs: tuple[str, ...]) -> dict:
+    """[aircraft] and [aircraft.receiver] -> Config fields. No section: on, adsb.lol, 15 nm around HPN, no receiver.
+    The receiver's sdr (a dongle for ADS-B) is never one of sizeup's own radios ([radio] sdrs / shared_device)."""
+    ac = _take(data.get("aircraft", {}), "aircraft", {"enabled", "feeds", "radius_nm", "ceiling_ft", "adsblol_url",
+                                                      "adsbfi_url", "registry", "receiver"})
+    if not isinstance(ac.get("receiver", {}), dict):
+        raise ConfigError("aircraft.receiver: a table ([aircraft.receiver])")
+    rc = _take(ac.get("receiver", {}), "aircraft.receiver", {"enabled", "sdr", "json_1090", "json_978"})
+    enabled, registry, receiver = ac.get("enabled", True), ac.get("registry", True), rc.get("enabled", False)
+    if not all(isinstance(x, bool) for x in (enabled, registry, receiver)):
+        raise ConfigError("aircraft.enabled / aircraft.registry / aircraft.receiver.enabled: true or false")
+    feeds = ac.get("feeds", ["adsblol"])
+    if not (isinstance(feeds, list) and feeds and all(f in AIRCRAFT_FEEDS for f in feeds) and len(set(feeds)) == len(feeds)):
+        raise ConfigError('aircraft.feeds: in order of preference, from "receiver", "adsblol", "adsbfi" (each once)')
+    try:
+        radius, ceiling = float(ac.get("radius_nm", 15)), float(ac.get("ceiling_ft", 6000))
+    except (TypeError, ValueError):
+        raise ConfigError("aircraft.radius_nm / aircraft.ceiling_ft: numbers") from None
+    if not (3 <= radius <= 40 and 1000 <= ceiling <= 18000):
+        raise ConfigError("aircraft.radius_nm: 3 to 40 (around HPN); aircraft.ceiling_ft: 1000 to 18000 (MSL)")
+    urls = {}
+    for k in ("adsblol_url", "adsbfi_url"):
+        u = str(ac.get(k, "")).strip()
+        m = re.fullmatch(r"(https?)://([^/:?#\s]+)(:\d+)?([^\s]*)", u) if u else None
+        if u and (not m or (m.group(1) == "http" and m.group(2) not in ("127.0.0.1", "localhost", "::1"))
+                  or not all(f"{{{x}}}" in u for x in ("lat", "lon", "radius"))):
+            raise ConfigError(f"aircraft.{k}: an https:// address with {{lat}}, {{lon}} and {{radius}} (plain http only to "
+                              "this machine); leave it out for the public API")
+        urls[f"aircraft_{k}"] = u
+    srcs = {}
+    for k in ("json_1090", "json_978"):
+        u = str(rc.get(k, "")).strip()
+        if u and re.match(r"^[a-z][a-z0-9+.-]*://", u, re.I) and not re.fullmatch(r"https?://[^\s]+", u, re.I):
+            raise ConfigError(f"aircraft.receiver.{k}: the decoder's aircraft.json: a file path or an http(s):// address")
+        srcs[f"aircraft_receiver_{k.split('_')[1]}"] = (u if not u or "://" in u or Path(u).is_absolute()
+                                                         else str((base / u).resolve()))
+    if "receiver" in feeds and not (receiver and any(srcs.values())):
+        raise ConfigError('aircraft.feeds: "receiver" needs [aircraft.receiver] enabled = true and json_1090 or json_978')
+    if receiver and "receiver" not in feeds:
+        raise ConfigError('aircraft.receiver.enabled: list "receiver" in aircraft.feeds too (first, to prefer it)')
+    sdr = str(rc.get("sdr", "")).strip()
+    if sdr:
+        if not re.fullmatch(r"[\w.-]{1,32}", sdr):
+            raise ConfigError("aircraft.receiver.sdr: the ADS-B dongle's exact USB serial (letters, digits, . _ -)")
+        if sdr.isdigit():
+            raise ConfigError("aircraft.receiver.sdr: an all-digit serial is read as a device index by readsb and rtl "
+                              "tools; give the dongle a name first (rtl_eeprom -s adsb)")
+        if sdr in sdrs:
+            raise ConfigError(f"aircraft.receiver.sdr: {sdr} is one of sizeup's own radios ([radio] sdrs / shared_device)")
+    return dict(aircraft_enabled=enabled, aircraft_feeds=tuple(feeds), aircraft_radius_nm=radius, aircraft_ceiling_ft=ceiling,
+                aircraft_registry=registry, aircraft_receiver=receiver, aircraft_sdr=sdr, **urls, **srcs)
+
+
 def _weather(data: dict) -> dict:
     """[weather] -> Config fields (sizeup/weather.py). No section: our zones, KHPN, Rye Beach and Kings Point."""
     w = _take(data.get("weather", {}), "weather", {"enabled", "radar", "zones", "marine_zones", "area", "station",
@@ -640,7 +713,7 @@ def load(path: str | Path) -> Config:
     except tomllib.TOMLDecodeError as e:
         raise ConfigError(f"{path}: {e}") from e
     _take(data, "config", {"station", "web", "radio", "tones", "stt", "p25", "mdc", "units", "storage", "map",
-                           "cad", "dispatch", "cloud", "prealert", "roads", "gis", "trains", "weather", "alerts"})
+                           "cad", "dispatch", "cloud", "prealert", "roads", "gis", "trains", "weather", "alerts", "aircraft"})
     st = _take(data.get("station", {}), "station", {"id", "name", "auto_update"})
     if not isinstance(st.get("auto_update", True), bool):
         raise ConfigError("station.auto_update: true or false")
@@ -660,6 +733,7 @@ def load(path: str | Path) -> Config:
     sdrs = (() if sdr_auto else tuple(str(x) for x in raw_sdrs)) or ((str(radio["shared_device"]),) if radio.get("shared_device") else ())
     if len(set(sdrs)) != len(sdrs):
         raise ConfigError("radio.sdrs: a serial is listed twice")
+    aircraft = _aircraft(data, base, sdrs + ((str(radio["shared_device"]),) if radio.get("shared_device") else ()))
     channels = []
     for i, c in enumerate(radio.get("channels", [])):
         _take(c, f"radio.channels[{i}]", {"label", "mhz", "kind", "device", "gain_db", "squelch_db",
@@ -818,7 +892,9 @@ def load(path: str | Path) -> Config:
         unit_departments=unit_departments, unit_callsigns=unit_callsigns,
         shared_device=radio.get("shared_device", "") or (sdrs[0] if sdrs else ""), start_mode=radio.get("start_mode", ""),
         sdrs=sdrs, sdr_names={str(k): str(v) for k, v in radio.get("sdr_names", {}).items()},
-        sdr_ignore=tuple(str(x) for x in radio.get("sdr_ignore", ())), sdr_auto=sdr_auto,
+        # the dongle named for ADS-B ([aircraft.receiver] sdr) is never one of sizeup's radios
+        sdr_ignore=tuple(dict.fromkeys([*(str(x) for x in radio.get("sdr_ignore", ())), *([aircraft["aircraft_sdr"]] if aircraft["aircraft_sdr"] else [])])),
+        sdr_auto=sdr_auto,
         **_auto_assign(radio, channels),
         p25_recorder=p25.get("recorder", ""), p25_recorder_dir=rel(p25.get("recorder_dir", "")),
         clips_dir=rel_state(storage.get("clips_dir", "captures/clips")), keep_hours=float(storage.get("keep_hours", 24)),
@@ -833,5 +909,5 @@ def load(path: str | Path) -> Config:
         dispatch_repeat=d_repeat, dispatch_transmit=False, dispatch_channels=d_channels, dispatch_polly_region=d_region,
         **(dict(cloud, cloud_outbox=rel_state(cloud["cloud_outbox"])) if cloud else {}),
         cloud_state="" if cloud.get("cloud_role") == "hub" else rel_state("state/cloud.json"),
-        **pa, **_alerts(data, pa), **_roads(data), **_gis(data), **_trains(data), **_weather(data),
+        **pa, **_alerts(data, pa), **_roads(data), **_gis(data), **_trains(data), **_weather(data), **aircraft,
     )

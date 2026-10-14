@@ -34,6 +34,9 @@ licences and fetch dates are in its `meta` table):
   domain) already in the gazetteer
 
 Map tiles: OpenFreeMap / OpenMapTiles, © OpenStreetMap contributors.
+Aircraft near HPN (the Aircraft layer, `docs/cloud.md` "Aircraft near HPN", #155): adsb.lol, ODbL, through the hub;
+types from the FAA Releasable Aircraft Database and airlines from FAA JO 7340.2 (`data/airport/airlines.csv`),
+public domain.
 Weather, radar and tides (the alert banner, the header's conditions, the Radar layer, the marine block):
 NOAA / National Weather Service and NOAA CO-OPS, public domain, through the hub (`docs/cloud.md` "Weather and water").
 

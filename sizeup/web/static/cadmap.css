@@ -186,6 +186,19 @@
   .tr-what { min-inline-size: 0; overflow-wrap: anywhere; }
   .tr-est { color: var(--info); font-style: italic; }
   .tr-none, .tr-note { padding-inline: var(--s-1); }
+  /* the Aircraft group (aircraft.js, #155): HPN's movements, one row each (a click opens the aircraft), emergencies first */
+  .ac-list { display: flex; flex-direction: column; }
+  .ac-row { display: flex; justify-content: flex-start; align-items: baseline; gap: var(--s-2); inline-size: 100%;
+    min-block-size: var(--ctl-sm); padding-inline: var(--s-1);
+    font: inherit; font-size: var(--fs-sm); line-height: var(--lh-sm); color: var(--text); text-align: start;
+    background: none; border: 0; border-radius: var(--radius-s); cursor: pointer; }
+  .ac-row:hover { background: var(--hover); }
+  .ac-row > .dim { min-inline-size: 0; overflow-wrap: anywhere; }
+  .ac-tag { flex: none; min-inline-size: 3em; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--text-2); }
+  .ac-tag.arriving { color: var(--ok-text); }
+  .ac-tag.departing { color: var(--info); }
+  .ac-stale { margin-inline-start: auto; color: var(--warn); }
+  .ac-emerg { color: var(--err); font-weight: 700; }
 
   /* Expand: the large map, a dialog */
   .cm-big { inline-size: min(96vw, 112rem); block-size: 92vh; border-radius: var(--radius); border: var(--bw) solid var(--line-strong);

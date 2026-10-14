@@ -383,6 +383,7 @@ window.MapLayers = (() => {
       }
       const on = !!(window.AirportLayer && AirportLayer.near(inc));
       if (on !== !!this.force.airport) { this.force.airport = on; changed = true; }
+      if (on !== !!this.force.aircraft) { this.force.aircraft = on; changed = true; }    // its traffic too (aircraft.js, #155)
       if (changed) this.refresh();
     }
     // every layer as it shows on this map now: the event's set when one is made

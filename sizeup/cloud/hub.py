@@ -865,6 +865,7 @@ class HubApp(App):
         self.roads.start()                        # 511NY's layers for the maps (sizeup/roads.py)
         self.gis.start()                          # the county GIS layers (sizeup/gis.py)
         self.trains.start()                       # Metro-North's trains (sizeup/trains.py)
+        self.aircraft.start()                     # aircraft near HPN, while someone looks (sizeup/aircraft.py)
         self.weather.start()                      # NWS alerts, conditions, radar; NOAA tides (sizeup/weather.py)
         if self.vocab is not None and self.vocab.state()["state"] == "PENDING":
             self.vocab.poll()
@@ -881,6 +882,7 @@ class HubApp(App):
         self.roads.stop()
         self.gis.stop()
         self.trains.stop()
+        self.aircraft.stop()
         self.weather.stop()
         if self.aws is not None:
             self.aws.stop()
