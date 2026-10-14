@@ -387,6 +387,8 @@ class App:
         # someone looks at the Trains layer or an event near the tracks.
         from sizeup.trains import Trains
         self.trains = Trains.from_config(cfg, log=log)
+        # one station, one mark (#162): the county's Train stations leave out the ones the Trains layer draws
+        self.gis.train_stations = self.trains.stations
         # Aircraft near HPN (sizeup/aircraft.py, #155): shortfinal's PCFD-focused picture, read by the CAD of record
         # while someone looks at the Aircraft layer. It never opens a dongle: a receiver's aircraft.json is only read.
         from sizeup.aircraft import AircraftLayer

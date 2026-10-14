@@ -967,6 +967,14 @@ class Trains:
         out["trains"] = m.trains(self.feed, self.clock())
         return out
 
+    def stations(self) -> list[dict]:
+        """The stations the layer draws ({id, name, lat, lon}, in our area): [] while it draws none (off, or the
+        static feed not loaded). The county GIS layer leaves out its own copies of these (sizeup/gis.py, #162)."""
+        m = self.model
+        if not self.configured or m is None:
+            return []
+        return [{k: s[k] for k in ("id", "name", "lat", "lon")} for s in m.area_stations]
+
     def near(self, lat: float, lon: float) -> dict:
         """The event panel: {near: false}, or the trains approaching the point in the next WINDOW_S."""
         m = self.model

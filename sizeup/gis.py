@@ -33,6 +33,16 @@ HTTP (sizeup/web/server.py; any signed-in person, viewers too; GET only):
     GET /api/cad/gis/<key>?bbox=w,s,e,n   only the features touching that box: how a tiled layer (the parcels:
                                      too big to send whole) is served, the browser asking for its viewport
                                      at the layer's minzoom and up; the box may be at most TILE_MAX_DEG a side
+
+One station, one mark (#162): the county's train stations include the New Haven Line's, which the Trains
+layer (sizeup/trains.py) draws from the MTA's own data with the line's details. A layer with trains_field
+(the field naming the station) has the county's copy of each station the Trains layer draws marked
+_trains when it is served (same_station: within SAME_STATION_M, or within SAME_NAME_M under the same
+name), and the map leaves those out while its Trains layer is on (gislayers.js). The rest (the Harlem
+Line's: White Plains, North White Plains ...) always show; so does every station while the
+Trains layer is off, or the provider is (no stations: nothing is marked). The MTA's list loads and changes
+on its own schedule, so the mark is made when served, never stored: the county's cached file is as the
+county gave it, and a change in the MTA's list is a new rev of the layer (the pages fetch it again).
 """
 
 from __future__ import annotations
@@ -80,6 +90,12 @@ DEFAULT_BBOX = (-73.80, 40.92, -73.56, 41.10)
 # The parcels: only Port Chester, Rye Brook, Rye and Harrison, with a margin (the issue: "parcels only
 # at zoom 15+ and only for Port Chester, Rye Brook, Rye, Harrison, Greenwich edge").
 PARCELS_BBOX = (-73.77, 40.94, -73.63, 41.07)
+# The same station in the county's layer and the MTA's (#162): measured 2026-10-14, the county's New Haven Line
+# stations are 20 m (Mt Vernon East) to 215 m (Larchmont) from the MTA's stop; the nearest other station is
+# 1.5 km away (Mt Vernon West, Harlem Line). The name ("Mt. Vernon East" / "Mt Vernon East") carries a match
+# a little further, in case either side moves its point to the far end of a platform.
+SAME_STATION_M = 250.0
+SAME_NAME_M = 1000.0
 GEOM_KIND = {"esriGeometryPoint": "point", "esriGeometryMultipoint": "point", "esriGeometryPolyline": "line",
              "esriGeometryPolygon": "polygon"}
 
@@ -113,6 +129,8 @@ class Layer:
                                       # "fire-station"), in the style's color on the map, by its toggle, in the click box; "": a dot
     sub: str = ""                     # what a feature is, under its title in the click box ("Petroleum bulk storage (NYSDEC PBS)");
                                       # "": the label
+    trains_field: str = ""            # the field naming a station: the county's copy of a station the Trains layer draws is
+                                      # marked _trains, and the map leaves it out while that layer is on (#162: Rye twice)
 
     @property
     def every_s(self) -> float:
@@ -122,7 +140,8 @@ class Layer:
         return {"key": self.key, "label": self.label, "group": self.group, "kind": self.kind, "style": dict(self.style),
                 "minzoom": self.minzoom, "fields": [list(f) for f in self.fields], "on": self.on, "refresh": self.refresh,
                 "tiled": self.tiled, "licence": self.licence, "page": self.page, "asof": self.asof,
-                "ours_field": self.ours_field, "drop_ours": self.drop_ours, "note": self.note, "icon": self.icon, "sub": self.sub}
+                "ours_field": self.ours_field, "drop_ours": self.drop_ours, "note": self.note, "icon": self.icon, "sub": self.sub,
+                "trains_field": self.trains_field}
 
 
 # ---- the starter set: docs/cloud.md "County GIS layers" has each dataset's source and terms -------------------
@@ -268,7 +287,8 @@ DEFAULT_LAYERS: tuple[Layer, ...] = (
                "the county's data names no owner or electrification"),
     Layer("train_stations", "Train stations", f"{_WC}/DataHub_Transportation/MapServer/156", group="Transportation", kind="point", icon="train",
           style={"color": "--text-2", "radius": 5.5}, minzoom=11, refresh="monthly",
-          fields=(("STATNAME", "Station"),), licence=COUNTY_TERMS, page=f"{_HUB}bdf8a8439d294e3b9ef107d49b6a6743_156"),
+          fields=(("STATNAME", "Station"),), trains_field="STATNAME",
+          licence=COUNTY_TERMS, page=f"{_HUB}bdf8a8439d294e3b9ef107d49b6a6743_156"),
     Layer("bus_routes", "Bee-Line bus routes", f"{_WC}/DataHub_Transportation/MapServer/154", group="Transportation", kind="line",
           style={"color": "--ok", "width": 1.8}, minzoom=12, refresh="monthly", simplify_m=2.0,
           fields=(("LINEABBR", "Route"), ("LINENAME", "Name")), licence=COUNTY_TERMS, page=f"{_HUB}7305a04a5aa24fd5957301d554f55c24_154",
@@ -415,6 +435,29 @@ def _dept_key(name: str) -> str:
     return re.sub(r"[^a-z0-9]", "", t)
 
 
+def _station_key(name) -> str:
+    """"Mt. Vernon East" / "Mount Vernon East Station" -> "mtvernoneast"."""
+    t = re.sub(r"\bmount\b", "mt", str(name or "").lower())
+    t = re.sub(r"\b(station|stn)\b", " ", t)
+    return re.sub(r"[^a-z0-9]", "", t)
+
+
+def _metres(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    k = math.cos(math.radians((lat1 + lat2) / 2))
+    return math.hypot((lon2 - lon1) * k, lat2 - lat1) * 111_320.0
+
+
+def same_station(name, lat: float, lon: float, stations) -> bool:
+    """The county's station (its name, where it is) is one of these (({name key}, lat, lon), ...: the stations the
+    Trains layer draws): within SAME_STATION_M of one, or within SAME_NAME_M of one with the same name."""
+    key = _station_key(name)
+    for k, slat, slon in stations:
+        d = _metres(lat, lon, slat, slon)
+        if d <= SAME_STATION_M or (key and key == k and d <= SAME_NAME_M):
+            return True
+    return False
+
+
 def parse_bbox(text: str, max_deg: float | None = None) -> tuple[float, float, float, float]:
     """"w,s,e,n" -> the box; ValueError when it isn't one (or is bigger than max_deg a side)."""
     try:
@@ -536,6 +579,9 @@ class Gis:
         self._bytes: dict[str, tuple[int, bytes, bytes]] = {}     # key -> (rev, json, gzip) of the whole layer
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        # the stations the Trains layer draws now ([{name, lat, lon}]; app.py: Trains.stations); none: nothing is marked
+        self.train_stations: Callable[[], list[dict]] = lambda: []
+        self._trains: tuple = ()                   # as last seen: ((name key, lat, lon), ...)
         self._load()
 
     @classmethod
@@ -577,6 +623,42 @@ class Gis:
         ours" checks a later issue wires in (the "fire_districts" layer), else None."""
         p = self.feature_at("fire_districts", lat, lon)
         return p
+
+    # -- one station, one mark (#162) ---------------------------------------------------------------------
+
+    def _trains_now(self) -> tuple:
+        """The stations the Trains layer draws now; when they differ from the last look, each trains_field
+        layer is a new rev (its marks change: the pages fetch it again)."""
+        try:
+            now = tuple(sorted((_station_key(s.get("name")), round(float(s["lat"]), 6), round(float(s["lon"]), 6))
+                               for s in self.train_stations() or ()))
+        except Exception as e:  # the Trains provider's trouble must not stop the county layers
+            if self._trains:
+                self.log(f"gis: the Trains layer's stations not read ({type(e).__name__}: {e}); none marked")
+            now = ()
+        with self._lock:
+            if now != self._trains:
+                self._trains = now
+                for key, layer in self.layers.items():
+                    if layer.trains_field:
+                        self._changed(key)
+        return now
+
+    def _trains_for(self, key: str) -> tuple:
+        return self._trains_now() if self.layers[key].trains_field else ()
+
+    def _marked(self, key: str, feats: list[dict], stations: tuple) -> list[dict]:
+        """The features as served: the Trains layer's stations marked _trains (copies; the stored ones stay as fetched)."""
+        field_ = self.layers[key].trains_field
+        if not field_ or not stations:
+            return feats
+        out = []
+        for f in feats:
+            b = geometry_bbox(f.get("geometry") or {})
+            if b and same_station((f.get("properties") or {}).get(field_), (b[1] + b[3]) / 2, (b[0] + b[2]) / 2, stations):
+                f = {**f, "properties": {**f["properties"], "_trains": True}}
+            out.append(f)
+        return out
 
     # -- the schedule ------------------------------------------------------------------------------------
 
@@ -722,6 +804,7 @@ class Gis:
     # -- what the pages get -----------------------------------------------------------------------------------
 
     def public(self) -> dict:
+        self._trains_now()
         with self._lock:
             layers = []
             for key, layer in self.layers.items():
@@ -732,11 +815,13 @@ class Gis:
                     "terms": TERMS_URL, "rev": self.rev, "bbox": list(self.bbox), "layers": layers}
 
     def _layer_bytes(self, key: str) -> tuple[int, bytes, bytes]:
+        stations = self._trains_for(key)
         with self._lock:
             cur = self._bytes.get(key)
             if cur is not None and cur[0] == self.status[key]["rev"]:
                 return cur
             rev, feats = self.status[key]["rev"], list(self.data[key])
+        feats = self._marked(key, feats, stations)
         body = json.dumps({"type": "FeatureCollection", "key": key, "rev": rev, "features": feats}, separators=(",", ":")).encode()
         cur = (rev, body, gzip.compress(body, 6))
         with self._lock:
@@ -744,13 +829,19 @@ class Gis:
         return cur
 
     def features(self, key: str) -> list[dict]:
-        """The layer's features as loaded ([] when it isn't, or isn't configured)."""
+        """The layer's features as served ([] when it isn't loaded, or isn't configured)."""
+        if key not in self.layers:
+            return []
+        stations = self._trains_for(key)
         with self._lock:
-            return list(self.data.get(key) or [])
+            feats = list(self.data.get(key) or [])
+        return self._marked(key, feats, stations)
 
     def features_in(self, key: str, bbox) -> list[dict]:
+        stations = self._trains_for(key)
         with self._lock:
-            return [f for f, b in zip(self.data[key], self._boxes[key]) if b and _touches(b, bbox)]
+            feats = [f for f, b in zip(self.data[key], self._boxes[key]) if b and _touches(b, bbox)]
+        return self._marked(key, feats, stations)
 
     # -- HTTP -----------------------------------------------------------------------------------------------------
 
@@ -775,7 +866,7 @@ class Gis:
                 bbox = parse_bbox(bbox_s, TILE_MAX_DEG)
             except ValueError as e:
                 return 400, json.dumps({"error": str(e)}).encode(), JSON, {}
-            feats = self.features_in(key, bbox)
+            feats = self.features_in(key, bbox)                   # (a new rev first when the Trains layer's stations changed)
             body = json.dumps({"type": "FeatureCollection", "key": key, "rev": st["rev"], "bbox": list(bbox), "features": feats},
                               separators=(",", ":")).encode()
             etag = f'W/"{key}-{st["rev"]}-{hashlib.sha1(bbox_s.encode()).hexdigest()[:10]}"'

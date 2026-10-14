@@ -261,6 +261,8 @@ heartbeat_stale_min = 90             # no heartbeat (or restart) this long: "Tap
 # icon = "hydrant"                       # a point layer's mark (static/icons.svg i-gis-<icon>: hydrant, fire-station, police,
                                         # hospital, nursing-home, school, worship, ambulance, train, bus, petroleum, tank); none: a dot
 # sub = "Petroleum bulk storage (NYSDEC PBS)"   # under a feature's title in the click box (none: the label)
+# trains_field = "STATNAME"              # a station layer: the field naming the station; its copies of the stations the
+                                        # Trains layer draws (within 250 m, or 1 km by name) are left out while that layer is on
 # minzoom = 13                            # drawn from this zoom ("zoom in" below it)
 # refresh = "monthly"                     # hourly | daily | weekly | monthly
 # tiled = false                           # true: served by viewport (a big layer: the parcels, the buildings)
