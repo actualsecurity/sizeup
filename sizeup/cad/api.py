@@ -123,6 +123,11 @@ GET  /api/cad/rigs                        board units (PCFD's own flagged), for 
 POST /api/cad/prealert/<id>/dismiss       {operator?, reason?}  a phone pre-alert from Tapout that is nothing
                                           (sizeup/prealert.py; the state's "prealert"); dispatchers and admins
 GET  /api/cad/export/prealerts.csv        every ring kept (90 days) with its outcome: matched / dismissed / expired
+POST /api/cad/hint/<id>/accept            {operator?}  a unit status suggested from the radio (#37, the state's
+                                          status_hints; sizeup/cad/statushints.py): set, with "Status from radio
+                                          (heard 14:32:10 “...”)" in the chronology; dispatchers and admins
+POST /api/cad/hint/<id>/dismiss           {operator?}  not so: that transmission never suggests it again
+GET  /api/cad/export/status-hints.csv     every suggestion and how it ended (accepted / dismissed / expired ...)
 """
 
 from __future__ import annotations
@@ -148,6 +153,7 @@ DISPATCH_WAV = re.compile(r"/api/cad/dispatch/(\d{1,9})\.wav")
 PREVIEW_WAV = re.compile(r"/api/cad/audio/([0-9a-f]{20})\.wav")
 SETTINGS = re.compile(r"/api/cad/settings/([a-z_]{1,30})")
 PREALERT = re.compile(r"/api/cad/prealert/(\d{1,9})/dismiss")
+HINT = re.compile(r"/api/cad/hint/(\d{1,9})/(accept|dismiss)")
 
 # Who may POST what (enforced only with a verified sign-in, see above): "dispatch" = dispatchers and
 # admins (running calls), "admin" = admins only (Settings in every form, and the radios), "read" =
@@ -157,6 +163,7 @@ WRITES = (
                 r"|attach|link|unlink|return))?)?"), "dispatch"),                # events, notes, dispatches, radio links
     (UNIT, "dispatch"),                                                     # unit status on the board
     (PREALERT, "dispatch"),                                                 # a phone pre-alert that is nothing
+    (HINT, "dispatch"),                                                     # a status suggested from the radio (#37)
     (re.compile(r"/api/incident/[^/]{1,80}/close"), "dispatch"),            # the monitor's incident list (server.py)
     (UNIT_STATION, "admin"),                                                # a unit's home station: Settings > Units
     (re.compile(r"/api/cad/settings/(?:channels|stt)"), "admin"),           # Settings > Radios: record / transcribe /
@@ -304,6 +311,9 @@ DOES = (
     (UNIT, _unit_status),
     (PREALERT, lambda m, b, o, c: (f"Dismissed the phone pre-alert of {_prealert_at(o)}"
                                    + (f": {_clip(b.get('reason'))}" if b.get("reason") else ""), "")),
+    (HINT, lambda m, b, o, c: (f"{'Accepted' if m.group(2) == 'accept' else 'Dismissed'} the radio's "
+                               f"{o.get('name') or o.get('unit') or ''} {o.get('status', '')}".replace("  ", " ")
+                               + (f" on {o['incident_number']}" if o.get("incident_number") else ""), o.get("incident_number") or "")),
     (UNIT_STATION, lambda m, b, o, c: (f"Changed settings: {o.get('name', '')} station {_clip(b.get('station'), 40) or 'unset'}", "")),
     (re.compile(r"/api/cad/settings/channels"), _channels),
     (re.compile(r"/api/cad/settings/stt"), _stt),
@@ -526,6 +536,8 @@ class CadApi:
             return c.unit_status(int(m.group(1)), body)
         if m := PREALERT.fullmatch(path):
             return c.prealert_dismiss(int(m.group(1)), body)
+        if m := HINT.fullmatch(path):
+            return c.hint(int(m.group(1)), m.group(2), body)
         if m := UNIT_STATION.fullmatch(path):
             return c.unit_station(int(m.group(1)), body)
         if path == "/api/cad/runcards":
