@@ -321,6 +321,15 @@
   .ulist > li.urow.talked .talk-badge { background: transparent; color: var(--ok); border-color: var(--ok); }
   @keyframes urowpulse { 50% { outline-color: color-mix(in srgb, var(--ok) 35%, transparent); } }
 
+  /* a status suggested from the radio (status-hints.js, #37): dashed, a question, never a status chip */
+  .hint-chip { display: inline-flex; align-items: center; gap: var(--s-1); min-inline-size: 0; max-inline-size: 100%;
+    padding-inline: var(--s-1); border: var(--bw) dashed var(--info); border-radius: var(--radius-s);
+    color: var(--info); font-size: var(--fs-xs); line-height: var(--lh-xs); }
+  .hint-q { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-inline-size: 0; font-style: italic; }
+  .hint-chip .hint-ok { color: var(--ok-text); border-color: var(--ok); }
+  .hint-chip .hint-no { color: var(--dim); }
+  .hint-line { color: var(--info); font-style: italic; margin-block-start: var(--s-1); }
+
   /* the pinned 60 Control feed (cad-feed.js): top of the units column, the board scrolls under it */
   .units > .feed {
     flex: none; position: sticky; inset-block-start: calc(-1 * var(--gutter)); z-index: var(--z-sticky);

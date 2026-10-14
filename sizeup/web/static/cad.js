@@ -717,6 +717,7 @@ const RADIO_WHY = { unit: "Unit", channel: "FG1", dispatcher: "60 Control", manu
 function radioRow(t, ctx = {}) {
   const li = el("li", "rt");
   const meta = el("div", "meta");
+  if (t.id) meta.dataset.tx = t.id;      // which transmission (status-hints.js: "Suggests E64 on location" under it)
   const b = Icon.play(el("button", "play"));
   b.title = t.has_audio === false ? "Recording expired (12 h)" : t.voice_at > 0 ? "Play (tones skipped)" : "Play";
   b.disabled = t.has_audio === false;

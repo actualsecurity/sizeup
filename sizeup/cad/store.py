@@ -747,9 +747,10 @@ class Store:
         was = [h["name"] for h in held]
         return f"Command: {name}" + (f" (from {', '.join(was)})" if was else ""), was
 
-    def set_unit_status(self, uid: int, status: str, operator: str = "", note: str = "") -> dict:
+    def set_unit_status(self, uid: int, status: str, operator: str = "", note: str = "", why: str = "") -> dict:
         """The status dropdown. A free or out-of-service status clears the unit off its event;
-        dispatched, en route and on scene stamp the assignment's times."""
+        dispatched, en route and on scene stamp the assignment's times. why: where the status came from, after the
+        chronology line ("Status from radio (heard ...)": a suggestion accepted, sizeup/cad/statushints.py)."""
         L = self.lists
         if status not in L.status_ids:
             raise CadError(f"unknown status {status!r}; one of {', '.join(L.status_ids)}")
@@ -775,21 +776,22 @@ class Store:
             relieved = []
             if iid is not None and status == L.command_status:      # one line: "Command: E63 (from 2392)"
                 text, relieved = self._take_command(db, iid, uid, u["name"], operator, now)
-            self._event(db, iid, "status", text, operator, uid, now)
+            self._event(db, iid, "status", f"{text}. {why}" if why else text, operator, uid, now)
             self._history(db, uid, u["status"], status, iid, operator, now, note if role == "oos" else "")
         out = self.unit(uid)
         if relieved:
             out["command_from"] = relieved
         return out
 
-    def set_unit_status_on(self, uid: int, status: str, incident_id: int, operator: str = "", note: str = "") -> dict:
+    def set_unit_status_on(self, uid: int, status: str, incident_id: int, operator: str = "", note: str = "",
+                           why: str = "") -> dict:
         """The board's working statuses ask which call (user, 2026-10-07: "it should prompt us ... to
         select the call they are now responding to and remove them from the old call if they were
         on one"). incident_id > 0: put the unit on that call first (moved off any other, noted on both
         chronologies); 0: on no call (cleared off the one it was on). Then the status."""
         L = self.lists
         if L.role(status) in ("free", "oos"):
-            return self.set_unit_status(uid, status, operator, note)
+            return self.set_unit_status(uid, status, operator, note, why)
         u = self.unit(uid)
         now = self.clock()
         if incident_id:
@@ -809,7 +811,7 @@ class Store:
                     db.execute("UPDATE assignments SET cleared_at = ? WHERE id = ?", (now, a["id"]))
                     self._event(db, a["incident_id"], "status", f"{u['name']} off this call ({L.status_phrase(status)} elsewhere)",
                                 operator, uid, now)
-        return self.set_unit_status(uid, status, operator, note)
+        return self.set_unit_status(uid, status, operator, note, why)
 
     def return_statuses(self) -> tuple[str, ...]:
         """What a cleared unit can go back to a still-open call as: the responding / on-location statuses."""

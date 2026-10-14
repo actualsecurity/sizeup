@@ -27,6 +27,7 @@ from sizeup.cad import airport, dispatcher, eta, export, mapview, runcards
 from sizeup.cad.activity import Activity
 from sizeup.cad.comms import Comms
 from sizeup.cad.feed import Feed
+from sizeup.cad.statushints import StatusHints
 from sizeup.cad.radios import Registry, RadioError, is_pcfd
 from sizeup.cad import settings as settings_mod
 from sizeup.cad import lists as lists_mod
@@ -186,6 +187,10 @@ class Cad:
         self.comms.prune()
         # The 60 Control feed: the incident talkgroup(s) and every page on the paging channel(s) (#80).
         self.feed = Feed(self.store, lambda: self.lists, has_clip=lambda cid: self.has_clip(cid), paging=s.paging)
+        # Unit statuses suggested from what is heard on our fire channels (#37): a dispatcher accepts or dismisses each.
+        self.hints = StatusHints(self.store, lambda: self.lists, channels=s.tactical,
+                                 talkgroups=tuple(dict.fromkeys((*s.incident_talkgroups, *s.airport_talkgroups))), log=log)
+        self.comms.on_text = self.hints.consider
         # Set by the app: who is transmitting now (sizeup/radio/live.py) and whether a clip's audio is still kept.
         self.live: Callable[[], list[dict]] = lambda: []
         self.paging: Callable[[], list[dict]] = lambda: []      # a page going out now (sizeup/radio/livepage.py)
@@ -271,7 +276,21 @@ class Cad:
         pos = self._positions(now)
         units = [dict(u, position=pos[u["name"]]) if u["name"] in pos else u for u in st["units"]] if pos else st["units"]
         return dict(st, units=units, map=self.map_slice(units, st["incidents"], pos, now), time=now, rev=rev,
-                    talking=self.live(), paging=self.paging(), cloud=self.cloud(), prealert=self.prealert_state(now))
+                    talking=self.live(), paging=self.paging(), cloud=self.cloud(), prealert=self.prealert_state(now),
+                    status_hints=self.status_hints())
+
+    def status_hints(self) -> list[dict]:
+        """The radio's status suggestions to show now (#37); a broken one never breaks the console."""
+        try:
+            return self.hints.active()
+        except Exception as e:  # noqa: BLE001
+            self.log(f"CAD: status suggestions: {type(e).__name__}: {e}")
+            return []
+
+    def hint(self, hid: int, action: str, body: dict) -> dict:
+        """POST /api/cad/hint/<id>/accept | dismiss {operator}: a radio status suggestion taken or turned down."""
+        op = _text(body, "operator", OPERATOR_MAX)
+        return self.hints.accept(hid, op) if action == "accept" else self.hints.dismiss(hid, op)
 
     def prealert_state(self, now: float | None = None) -> dict | None:
         """The phone pre-alerts and Tapout's health (a broken feed never breaks the console)."""
@@ -532,6 +551,8 @@ class Cad:
     def export(self, name: str) -> bytes | None:
         if name == "prealerts.csv":
             return self.prealert.csv() if self.prealert is not None else None
+        if name == "status-hints.csv":
+            return self.hints.csv()
         return export.export(self.store, name)
 
     # -- dispatch -------------------------------------------------------------------------------

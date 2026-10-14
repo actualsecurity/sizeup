@@ -74,6 +74,7 @@ class Comms:
         self.airport_tgs = set(airport_tgs)      # the Airport Incident talkgroup(s): an open Airport event's (#87)
         self.rev = 0            # bumped on every new or changed transmission (the /comms page polls it)
         self.names_ours = None  # text -> [our unit codes] (the feed's matcher, #115): a page not ours naming them
+        self.on_text = None     # traffic id -> None: a transcript arrived or changed (status suggestions, #37)
         self._drop_bad_channel_links()
 
     def _drop_bad_channel_links(self) -> None:
@@ -138,7 +139,16 @@ class Comms:
             if p25 and turn is not None and t.get("talkgroup") in self.incident_tgs:
                 self._dispatcher_links(db, tid, call_id, turn, bool(disp), links)
             self.rev += 1
-            return sorted(r[0] for r in db.execute("SELECT incident_id FROM radio_links WHERE traffic_id = ?", (tid,)))
+            out = sorted(r[0] for r in db.execute("SELECT incident_id FROM radio_links WHERE traffic_id = ?", (tid,)))
+        self._heard(tid)
+        return out
+
+    def _heard(self, tid: str) -> None:
+        if self.on_text is not None:
+            try:
+                self.on_text(tid)
+            except Exception as e:  # noqa: BLE001 - a suggestion never stops the log
+                print(f"CAD: status suggestion for {tid}: {type(e).__name__}: {e}")
 
     # A unit's assignment covering time T: from when it was put on the event until it cleared.
     ON_EVENT_BY_UNIT = ("SELECT DISTINCT a.incident_id FROM assignments a JOIN units u ON u.id = a.unit_id "
@@ -264,6 +274,8 @@ class Comms:
                            (text, status, model, self.clock(), tid)).rowcount
             if n:
                 self.rev += 1
+        if n:
+            self._heard(tid)
         return bool(n)
 
     def set_alt(self, tid: str, alt: dict) -> bool:
