@@ -232,7 +232,10 @@ class Hub:
         if self.connected():
             ago = 0 if self.polling else int(now - (self.last_seen or now))
             q = ((self.status or {}).get("outbox") or {}).get("pending") or 0
-            detail = (f"{name}: connected, last seen {ago} s ago" + (f" · {q} event(s) still on their way up" if q else "")
+            # the seconds only once they matter (as the word does): a count ticking every second between two
+            # polls would change the pushed state every second for nothing (#146)
+            detail = (f"{name}: connected" + (f", last seen {ago} s ago" if ago >= 5 else "")
+                      + (f" · {q} event(s) still on their way up" if q else "")
                       + (f" · clocks differ by {self.skew:+.0f} s (set both to network time)" if abs(self.skew) > 5 else "")
                       + (f" · {self.errors} event(s) failed to apply, last: {self.last_error}" if self.errors else ""))
             v = self.version()
