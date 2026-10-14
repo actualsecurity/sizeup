@@ -14,6 +14,14 @@ Source: the MTA's public data feeds (https://www.mta.info/developers, checked 20
             the vehicle label). No key since 2024 (the developer page: real-time subway, LIRR and
             Metro-North feeds need none; bus feeds still do). If the MTA brings a key back, set
             SIZEUP_MTA_KEY (the hub: SSM /sizeup-hub/mta-key) and it goes as the x-api-key header.
+            What a vehicle position carries (decoded 2026-10-14, 310 entities, 30 with a position): the
+            trip id, lat / lon, the timestamp, the vehicle's id and label (the train number), and for a
+            few the current status and stop id. No bearing, no speed, no odometer, no occupancy, and no
+            consist (multi_carriage_details): the feed never says how many cars a train has, nor does the
+            static feed (trips.txt has no vehicle or length column). A train's heading on the map is the
+            line's own, the way it is going (Line.heading); its mark is a plain cab-led train of a fixed
+            length. Should the MTA add multi_carriage_details, its count is passed on as "cars" and the
+            map draws that many.
   static    GTFS for Metro-North, GTFS_URL (rrgtfsfeeds.s3.amazonaws.com/gtfsmnr.zip, about 4 MB, updated
             about weekly): stops, routes, trips and shapes. Only those four files are read (never the
             26 MB stop_times): the New Haven Line's longest shape is the line (Grand Central to New Haven),
@@ -42,14 +50,18 @@ every RT_EVERY_S (30 s) while asked within DEMAND_S, otherwise idle (nothing fet
 weekly. A failure backs off (30 s doubling to 15 min; a refusal 30 min; a 429 5 min). The shared
 User-Agent names sizeup and a contact.
 
-The area: the map shows trains and stations on the line inside bbox (Mamaroneck to Cos Cob: Rye to
-Greenwich plus a station each side). "Trains approaching" works anywhere on the line.
+The area: the map shows trains and stations on the line inside bbox ([trains] bbox; the default Mount
+Vernon East to Stamford, about 31 km of the line either side of Rye and Port Chester: a train shows some
+ten to twenty minutes before it gets here). "Trains approaching" works anywhere on the line.
 
 HTTP (sizeup/web/server.py; any signed-in person, GET only):
-    GET /api/cad/trains                 the layer: {configured, note, source, label, link, terms, at (the feed's
+    GET /api/cad/trains[?have=static_at] the layer: {configured, note, source, label, link, terms, at (the feed's
                                         time), fetched, static_at, line: [[lon, lat]...], stations: [...],
                                         trains: [{id, train, line, headsign, dir, dir_label, lat, lon, bearing,
-                                        estimated, next_stop, next_time, track, delay_s, status}], catenary}
+                                        estimated, next_stop, next_time, track, delay_s, status[, cars]}],
+                                        catenary}. have: the static_at the page already holds the line and
+                                        stations of: then they are left out ("static_same": true), so a poll
+                                        is only the trains (the line is most of the answer)
     GET /api/cad/trains/near?lat=&lon=  the event panel: {near: false} when the point is more than NEAR_M from
                                         the tracks and any station; else {near: true, ref: {kind: station | track,
                                         name, station, m, lat, lon}, at, window_min, inbound: [...], outbound:
@@ -87,8 +99,9 @@ DISCLAIMER = "Times from the MTA; may not be real time"
 # The New Haven Line and its branches (their trains run the main line through our area).
 LINES = ("New Haven", "New Canaan", "Danbury", "Waterbury")
 MAIN = "New Haven"
-# West, south, east, north: the line from Mamaroneck to Cos Cob (Rye to Greenwich, a station each side).
-DEFAULT_BBOX = (-73.745, 40.945, -73.595, 41.035)
+# West, south, east, north: the line from Mount Vernon East to Stamford (New Rochelle, Rye, Port Chester,
+# Greenwich), about 31 km of it ([trains] bbox).
+DEFAULT_BBOX = (-73.845, 40.900, -73.530, 41.060)
 RT_EVERY_S = 30.0
 DEMAND_S = 120.0                 # a viewer's ask keeps the realtime feed coming this long
 STATIC_EVERY_S = 7 * 86400.0
@@ -107,6 +120,9 @@ PER_DIR = 3
 GONE_S = 120.0                   # a train whose last stop was this long ago has finished
 PASSED_M = 50.0                  # a reported position this far beyond the point: already passed
 SIMPLIFY_M = 3.0
+HEADING_M = 150.0                # a train's heading: the line's direction over this much of it (about a train long)
+DP = 5                           # decimals of a position the page gets (about 1 m)
+MAX_CARS = 16
 FALLBACK_MPS = 20.0             # a pair of stations no train runs between: about 45 mph
 TOP_MPS = 40.0                  # no faster than about 90 mph between two stations
 STOP_COST_MAX_S = 120.0
@@ -267,6 +283,9 @@ def parse_feed(body: bytes) -> dict:
                 lat, lon = _float(pm, 1), _float(pm, 2)
                 if lat is not None and lon is not None and -90 <= lat <= 90 and -180 <= lon <= 180 and (lat or lon):
                     t["pos"] = {"lat": round(lat, 6), "lon": round(lon, 6), "bearing": _float(pm, 3), "ts": _int(vp, 5)}
+            cars = len(vp.get(11, []))                   # multi_carriage_details: one per car (not in the feed today)
+            if cars:
+                t["cars"] = min(cars, MAX_CARS)
     for t in trains.values():
         t["train"] = t["train"] or t["id"]
     return {"timestamp": ts, "trains": trains}
@@ -364,16 +383,25 @@ class Line:
         bearing = (math.degrees(math.atan2(x1 - x0, y1 - y0)) + 360) % 360
         return lat0 + t * (lat1 - lat0), lon0 + t * (lon1 - lon0), bearing
 
-    def clip(self, lo: float, hi: float) -> list[list[float]]:
+    def heading(self, ch: float, span: float = HEADING_M) -> float:
+        """The line's bearing (degrees, the way ch grows) over span of it centred on ch: what a train that long
+        lies along, steadier than one short segment's."""
+        a, b = self.at(max(0.0, ch - span / 2)), self.at(min(self.length, ch + span / 2))
+        if a[:2] == b[:2]:
+            return self.at(ch)[2]
+        dx, dy = (b[1] - a[1]) * MX, (b[0] - a[0]) * MY
+        return (math.degrees(math.atan2(dx, dy)) + 360) % 360
+
+    def clip(self, lo: float, hi: float, dp: int = 6) -> list[list[float]]:
         """The line between ch lo and hi as [[lon, lat]]."""
         out = []
         a = self.at(lo)
-        out.append([round(a[1], 6), round(a[0], 6)])
+        out.append([round(a[1], dp), round(a[0], dp)])
         for (lon, lat), c in zip(self.pts, self.ch):
             if lo < c < hi:
-                out.append([round(lon, 6), round(lat, 6)])
+                out.append([round(lon, dp), round(lat, dp)])
         b = self.at(hi)
-        out.append([round(b[1], 6), round(b[0], 6)])
+        out.append([round(b[1], dp), round(b[0], dp)])
         return out
 
 
@@ -565,7 +593,7 @@ class Model:
         p = t.get("pos")
         if p:
             dist, ch = self.line.project(p["lat"], p["lon"])
-            _, _, b = self.line.at(ch)
+            b = self.line.heading(ch)
             bearing = p["bearing"] if p.get("bearing") is not None else (b if d > 0 else (b + 180) % 360)
             return {"ch": ch, "lat": p["lat"], "lon": p["lon"], "bearing": round(bearing), "estimated": False,
                     "off_line": dist > MAIN_M}
@@ -591,7 +619,8 @@ class Model:
                     break
             else:
                 ch = last[1]
-        lat, lon, b = self.line.at(ch)
+        lat, lon, _ = self.line.at(ch)
+        b = self.line.heading(ch)
         return {"ch": ch, "lat": round(lat, 6), "lon": round(lon, 6), "bearing": round(b if d > 0 else (b + 180) % 360),
                 "estimated": True, "off_line": False}
 
@@ -633,8 +662,9 @@ class Model:
             if p is None or p["off_line"] or not self.in_area(p["ch"], 200.0):
                 continue
             key, label = DIRS[d]
-            out.append(self.facts(t, now) | {"id": t["id"], "dir": key, "dir_label": label, "lat": p["lat"], "lon": p["lon"],
-                                              "bearing": p["bearing"], "estimated": p["estimated"]})
+            out.append(self.facts(t, now) | {"id": t["id"], "dir": key, "dir_label": label, "lat": round(p["lat"], DP),
+                                              "lon": round(p["lon"], DP), "bearing": p["bearing"], "estimated": p["estimated"]}
+                       | ({"cars": t["cars"]} if t.get("cars") else {}))
         out.sort(key=lambda x: (x["dir"], x["train"]))
         return out
 
@@ -920,15 +950,20 @@ class Trains:
                 "terms": TERMS_URL, "disclaimer": DISCLAIMER, "at": self.feed.get("timestamp"), "fetched": self.rt["at"],
                 "error": self.rt["error"], "static_at": self.st["at"]}
 
-    def public(self) -> dict:
-        """The layer: the line and stations in our area, the trains on it now."""
+    def public(self, have: float | None = None) -> dict:
+        """The layer: the line and stations in our area, the trains on it now. have: the static_at the page
+        already holds the line and stations of: then only the trains (the line doesn't change between them)."""
         out = self._base() | {"line": [], "stations": [], "trains": [], "catenary": CATENARY, "bbox": list(self.bbox)}
         m = self.model
         if m is None:
             return out
-        lo, hi = m.area
-        out["line"] = m.line.clip(max(0.0, lo - 1500), min(m.line.length, hi + 1500))
-        out["stations"] = [{k: s[k] for k in ("id", "name", "code", "lat", "lon", "url")} for s in m.area_stations]
+        if have is not None and self.st["at"] is not None and have == self.st["at"]:
+            del out["line"], out["stations"]
+            out["static_same"] = True
+        else:
+            lo, hi = m.area
+            out["line"] = m.line.clip(max(0.0, lo - 1500), min(m.line.length, hi + 1500), DP)
+            out["stations"] = [{k: s[k] for k in ("id", "name", "code", "lat", "lon", "url")} for s in m.area_stations]
         out["trains"] = m.trains(self.feed, self.clock())
         return out
 
@@ -948,7 +983,11 @@ class Trains:
         one = lambda k: (q.get(k) or [""])[0].strip()
         if path == "/api/cad/trains":
             self.ask()
-            return 200, json.dumps(self.public(), separators=(",", ":")).encode(), JSON, {}
+            try:
+                have = float(one("have")) if one("have") else None
+            except ValueError:
+                have = None
+            return 200, json.dumps(self.public(have), separators=(",", ":")).encode(), JSON, {}
         if path == NEAR_PATH:
             try:
                 lat, lon = float(one("lat")), float(one("lon"))
