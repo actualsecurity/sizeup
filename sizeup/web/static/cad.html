@@ -371,9 +371,15 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
         <ol id="d-radio" class="list log radio-log"></ol>
       </div>
 
-      <div class="card">
-        <div class="card-head"><h2>Timeline</h2></div>
-        <ol id="d-events" class="list events"></ol>
+      <!-- folded to start, with the count and the latest entry (#107); remembered per browser (cad.js timelineFold).
+           The note box stays out of the fold: usable while the list is hidden -->
+      <div id="d-timeline" class="card tl-fold">
+        <div class="card-head">
+          <button id="d-events-toggle" class="sec-toggle" type="button" aria-expanded="false" aria-controls="d-events" title="Every status, note and system entry">
+            <span class="caret" aria-hidden="true">▸</span><span class="h2">Timeline</span><span id="d-events-n" class="dim sum"></span><span id="d-events-last" class="dim sum tl-last" hidden></span>
+          </button>
+        </div>
+        <ol id="d-events" class="list events" hidden></ol>
         <form id="note-form" class="row note" autocomplete="off">
           <div class="note-box">
             <input id="note-text" type="text" maxlength="2000" placeholder="Note  (@E63 tags a unit, @ a place)"
