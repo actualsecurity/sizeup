@@ -25,12 +25,14 @@ const StationHealth = (() => {
 
   function bannerNode() {
     if (banner) return banner;
+    banner = document.getElementById("health-banner");      // cad.html's, first in #alert-banners
+    if (banner) return banner;
     banner = el("div", "health-banner");
     banner.id = "health-banner";
     banner.setAttribute("role", "alert");
     banner.hidden = true;
-    const head = document.querySelector("body > header");
-    if (head) head.after(banner); else document.body.prepend(banner);
+    const box = document.getElementById("alert-banners"), head = document.querySelector("body > header");
+    if (box) box.prepend(banner); else if (head) head.after(banner); else document.body.prepend(banner);
     return banner;
   }
 
