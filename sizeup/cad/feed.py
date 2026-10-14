@@ -17,6 +17,12 @@ A transmission is "talking to us" (rows[i]["pc"] says why) when its transcript o
 phrase, or one of PCFD's or Rye Brook's units by code or as said ("E60", "Engine 60", "23 91"),
 or it is 60 Control's turn right before or after such a unit's turn in the same P25 call (looking past
 the key-ups of unknown radios in between).
+
+A page whose tones aren't ours but whose text names our units (#115, South 2 2026-10-14 07:04: "6462 to rescue
+40, ... Westchester County Airport", tones nobody's code matched) is flagged (rows[i]["names_ours"]: the unit
+codes, Matcher.units_named: as written or said, "Engine 64", "Rescue 40", "23 91", and 60 Control's bare engine
+numbers "64", "6462" = 64 and 62): it still never queues an event (ours by our tones only, #80), but the desk sees
+it, with a phone pre-alert that rang in the minutes before it and went unanswered (rows[i]["prealert"]).
 """
 
 from __future__ import annotations
@@ -35,6 +41,9 @@ DEFAULT_TGS = (307,)
 DEFAULT_LIMIT = 6
 MAX_LIMIT = 50
 DEFAULT_PHRASES = ("Port Chester", "Rye Brook", "PC dispatch", "Port Chester dispatch", "PCFD", "headquarters")
+PREALERT_BEFORE_S, PREALERT_AFTER_S = 10 * 60, 60      # a ring this long before (after) a flagged page goes with it
+BARE = re.compile(r"(?<![\w.,])(\d{2}|\d{4})(?![\w])")
+BARE_OK_AFTER = re.compile(r"\s*(?:$|[.,;:]|(?:to|and|&)\b|\d{2,3}\b|(?:engine|ladder|tower|rescue|utility|marine|medic|car)\b)", re.I)
 
 
 def _phrase_re(p: str) -> str:
@@ -122,6 +131,30 @@ class Matcher:
         self.units = [(c, re.compile(r"(?<![\w])(?:" + "|".join(unit_forms(c, sp)) + r")(?![\w])", re.I))
                       for c, sp in units.items()]
         self.codes = set(units)
+        num = {}
+        for c in units:                                    # a bare number: an engine's first, else one unit's alone
+            m = re.fullmatch(r"([A-Z]*)(\d+)", c)
+            if m:
+                num.setdefault(m[2], []).append(c)
+        self.bare = {n: next((c for c in cs if c.startswith("E")), cs[0] if len(cs) == 1 else "") for n, cs in num.items()}
+
+    def units_named(self, text: str) -> list[str]:
+        """Every unit of ours the text names, in order, once each: as written or said ("E64", "Engine 64", "Rescue 40",
+        "23 91"), and 60 Control's bare numbers in a list of units ("64, 62 to ...", "6462 to Rescue 40": 64 and 62), never
+        "60 Control" or a house number before a street ("64 King Street")."""
+        text = text or ""
+        found = [(m.start(), c) for c, rx in self.units for m in rx.finditer(text)]
+        for m in BARE.finditer(text):
+            n, after, before = m[1], text[m.end():], text[:m.start()].rstrip()
+            if re.match(r"\s*control\b", after, re.I) or re.search(r"(?:number|no\.?|#)$", before, re.I):
+                continue
+            if not (BARE_OK_AFTER.match(after) or (found and re.search(r"\d\s*(?:,|and|&)\s*$", before))):
+                continue
+            parts = [n] if len(n) == 2 or n in self.bare else [n[:2], n[2:]]
+            codes = [self.bare.get(x, "") for x in parts]
+            if all(codes):
+                found += [(m.start() + i, c) for i, c in enumerate(codes)]
+        return list(dict.fromkeys(c for _, c in sorted(found)))
 
     def match(self, text: str = "", talker: str = "", rig: str = "") -> str:
         for r in (x.strip() for x in (rig or "").split(",")):
@@ -143,6 +176,18 @@ class Feed:
         self._lists = lists if callable(lists) else (lambda: lists)
         self._for = None
         self._refresh()
+
+    def names_ours(self, text: str) -> list[str]:
+        self._refresh()
+        return self.matcher.units_named(text)
+
+    def _rings(self, start: float) -> list[dict]:
+        """Phone pre-alerts (sizeup/prealert.py) that rang in the minutes around a flagged page and weren't matched."""
+        try:
+            return self.store.q("SELECT id, at, status FROM prealerts WHERE test = 0 AND status IN ('open', 'expired') "
+                                "AND at BETWEEN ? AND ? ORDER BY at", (start - PREALERT_BEFORE_S, start + PREALERT_AFTER_S))
+        except Exception:
+            return []                     # no pre-alerts here (a station, or not set up)
 
     def _refresh(self) -> None:
         L = self._lists()
@@ -172,7 +217,10 @@ class Feed:
                     turns[(s["call_id"], s["turn"])] = s
         ev = events_of(self.store, [r["id"] for r in rows])
         for r in rows:
-            _tones(r, pg)
+            _tones(r, pg, self.matcher.units_named)
+            if r["names_ours"]:
+                rings = self._rings(r["start"])
+                r["prealert"] = rings[-1] if rings else None
             r["pc"] = self.page_pc(r) if r["page"] else self.pc(r, turns)
             r["events"] = ev.get(r["id"], [])
             r["has_audio"] = self.has_clip(r["id"])

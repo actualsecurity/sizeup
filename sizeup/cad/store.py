@@ -429,7 +429,8 @@ class Store:
         for col, decl in (("rerun_at", "REAL"), ("rerun_result", "TEXT NOT NULL DEFAULT ''")):   # re-transcribe's
             if tcols and col not in tcols:                                                        # result, 2026-10-08
                 self.db.execute(f"ALTER TABLE radio_traffic ADD COLUMN {col} {decl}")
-        for col, decl in (("tones", "TEXT NOT NULL DEFAULT ''"), ("voice_at", "REAL")):   # pages in the log (#64)
+        for col, decl in (("tones", "TEXT NOT NULL DEFAULT ''"), ("voice_at", "REAL"),   # pages in the log (#64)
+                          ("tone_seq", "TEXT NOT NULL DEFAULT ''")):                      # every tone heard (#115)
             if tcols and col not in tcols:
                 self.db.execute(f"ALTER TABLE radio_traffic ADD COLUMN {col} {decl}")
         cols = {r["name"] for r in self.db.execute("PRAGMA table_info(operators)")}

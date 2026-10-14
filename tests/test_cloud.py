@@ -252,7 +252,7 @@ def test_a_page_going_out_reaches_the_hub_pair_by_pair_and_ends(tmp_path):
         assert wait(lambda: hub.app.hub.status is not None, 10)
         since = time.time()
         frames = lambda x: [x[i:i + 800] for i in range(0, len(x) - 799, 800)]
-        for f in frames(np.concatenate([tone(349.1, 1.0), tone(311.1, 0.8)])):
+        for f in frames(np.concatenate([tone(349.1, 1.0), tone(311.1, 1.6)])):     # B past any A's length (#115)
             st.paging.feed("South 2", since, f)
         t0 = time.time()
         names = lambda: [p["names"] for e in hub.app.cad.state()["paging"] for p in e["pairs"]]
@@ -260,7 +260,7 @@ def test_a_page_going_out_reaches_the_hub_pair_by_pair_and_ends(tmp_path):
         assert time.time() - t0 < 1.0
         e = hub.app.state()["paging"][0]                               # the monitor's state too
         assert (e["channel"], e["phase"], e["ours"], e["ended"]) == ("South 2", "tones", True, False)
-        for f in frames(np.concatenate([tone(311.1, 2.2), tone(741.3, 1.0), tone(623.7, 3.0), np.zeros(4000), voice(2.0)])):
+        for f in frames(np.concatenate([tone(311.1, 1.4), tone(741.3, 1.0), tone(623.7, 3.0), np.zeros(4000), voice(2.0)])):
             st.paging.feed("South 2", since, f)
         assert wait(lambda: names() == [["Port Chester FD"], []], 3)     # an unknown pair: its tones, no name
         assert wait(lambda: hub.app.cad.state()["paging"][0]["phase"] == "voice", 3)

@@ -564,13 +564,14 @@ def load(path: str | Path) -> Config:
             for r in csv.DictReader(rows):
                 tag = {"1": " (est.)", "2": " (heard)"}.get(r.get("estimated", "0"), "")
                 tones.append(ToneCode(r["name"] + tag,
-                                      float(r["a_hz"]), float(r["b_hz"]) if r.get("b_hz") else None))
+                                      float(r["a_hz"]), float(r["b_hz"]) if r.get("b_hz") else None,
+                                      source=(r.get("source") or "list").strip(), fetched=(r.get("fetched") or "").strip()))
         elif "tones_file" in radio:
             raise ConfigError(f"radio.tones_file: {tf} not found")
     for i, t in enumerate(data.get("tones", [])):
         _take(t, f"tones[{i}]", {"name", "a_hz", "b_hz", "agency", "ours"})
         tones.append(ToneCode(t["name"], float(t["a_hz"]), float(t["b_hz"]) if t.get("b_hz") else None,
-                              t.get("agency", "")))
+                              t.get("agency", ""), source="config"))
         if t.get("ours", False):
             ours.add(t["name"])
     stt = _take(data.get("stt", {}), "stt", {"server_binary", "model", "port", "threads", "prompt", "talker_prompt", "beam_size",

@@ -60,6 +60,8 @@ class Page:
     raw: str = ""                  # speech-to-text output
     confidence: float | None = None
     parts: list = field(default_factory=list, repr=False)  # per transmission in it: squelch diagnostics
+    # Every tone heard, in order (#115): {hz, start (s into audio), dur, role: A | B | AB | long | "" (in no pair)}
+    tone_seq: list = field(default_factory=list)
 
     @property
     def departments(self) -> list[str]:
@@ -83,7 +85,8 @@ class Page:
                 "tones": [{"kind": t.kind, "a_hz": round(t.a_hz, 1),
                            "b_hz": round(t.b_hz, 1) if t.b_hz else None, "names": list(t.names)}
                           for t in self.tones],
-                "raw": self.raw, "confidence": self.confidence, "voice_offset_s": round(self.voice_offset_s, 3)}
+                "raw": self.raw, "confidence": self.confidence, "voice_offset_s": round(self.voice_offset_s, 3),
+                "tone_seq": list(self.tone_seq)}
 
 
 def page_from_dict(d: dict) -> Page:
@@ -92,6 +95,7 @@ def page_from_dict(d: dict) -> Page:
              for t in d.get("tones", [])]
     p = Page(d["id"], d["label"], d["mhz"], d["start"], d["end"], d["kind"], tones, d.get("voice_offset_s", 0.0), None,
              d.get("quieting_db", 0.0), d.get("status", "done"), d.get("raw", ""), d.get("confidence"))
+    p.tone_seq = list(d.get("tone_seq") or [])
     p.dispatch = d.get("dispatch")  # type: ignore[attr-defined]
     p.history = d.get("history") or []  # type: ignore[attr-defined]
     p.rerun_at = d.get("rerun_at")  # type: ignore[attr-defined]
@@ -102,9 +106,14 @@ def page_from_dict(d: dict) -> Page:
     return p
 
 
-def _tones(seg: Segment, plan: TonePlan) -> list[ToneEvent]:
+def decode_tones(audio: np.ndarray, plan: TonePlan) -> tuple[list[ToneEvent], list[dict]]:
+    """The pairs in a clip, matched against the plan, and every tone heard in order (ToneDetector.sequence)."""
     det = ToneDetector(RATE)
-    return plan.match_all(det.feed(seg.audio) + det.flush())
+    return plan.match_all(det.feed(audio) + det.flush()), det.sequence()
+
+
+def _tones(seg: Segment, plan: TonePlan) -> tuple[list[ToneEvent], list[dict]]:
+    return decode_tones(seg.audio, plan)
 
 
 def _part(seg: Segment, gap: float | None = None) -> dict:
@@ -113,11 +122,12 @@ def _part(seg: Segment, gap: float | None = None) -> dict:
 
 
 def assemble(label: str, mhz: float, seg: Segment, plan: TonePlan,
-             tones: list[ToneEvent] | None = None) -> Page:
+             tones: list[ToneEvent] | None = None, seq: list[dict] | None = None) -> Page:
     """Classify one squelched transmission into a page (with tones) or plain voice."""
-    tones = _tones(seg, plan) if tones is None else tones
+    if tones is None:
+        tones, seq = _tones(seg, plan)
     page = Page(uuid.uuid4().hex[:10], label, mhz, seg.start, seg.end, "page" if tones else "voice",
-                tones, 0.0, seg.audio, seg.quieting_db, parts=[_part(seg)])
+                tones, 0.0, seg.audio, seg.quieting_db, parts=[_part(seg)], tone_seq=list(seq or []))
     if tones:
         page.voice_offset_s = min(len(seg.audio) / RATE, max(t.end for t in tones) + VOICE_GUARD_S)
         if len(seg.audio) / RATE - page.voice_offset_s < MIN_VOICE_S:
@@ -197,12 +207,12 @@ class PageHold:
     def add(self, label: str, mhz: float, seg: Segment) -> tuple[list[Page], list[tuple[Page, bool]]]:
         """-> (pages finished now, in order; [(page, joined)] for each piece of this transmission:
         joined = appended to the held page, else a new page, held or in the finished list)."""
-        tones = _tones(seg, self.plan)
+        tones, seq = _tones(seg, self.plan)
         pieces = split_at_new_tones(seg, tones)
         done: list[Page] = []
         touched: list[tuple[Page, bool]] = []
         for piece in pieces:
-            page = assemble(label, mhz, piece, self.plan, tones if len(pieces) == 1 else None)
+            page = assemble(label, mhz, piece, self.plan, *((tones, seq) if len(pieces) == 1 else (None, None)))
             with self._lock:
                 prev, _until = self.held.pop(label, (None, 0.0))
                 joined = (prev is not None and piece.cont and not page.tones

@@ -51,7 +51,7 @@ def test_pages_load_only_scripts_that_exist_and_nothing_points_at_the_old_pages(
     html = (STATIC / "cad.html").read_text()
     assert 'id="settings-radios"' in html and 'id="settings-radio-controls"' in html
     assert 'RadiosPanel.mount($("#settings-radios")' in js("settings.js")
-    assert 'RadioControls.mount($("#settings-radio-controls"))' in js("settings.js")
+    assert 'const rc = $("#settings-radio-controls");' in js("settings.js") and "RadioControls.mount(rc)" in js("settings.js")
     # one header: the console's tabs and the board's links on the same bar
     for tab in ("dispatch-open", "overview-open", "radio-open", "settings-open"):
         assert f'id="{tab}" class="tab' in html
@@ -191,4 +191,4 @@ def test_one_play_button_on_page_rows_skips_the_tones():
     station = js("station.js")
     assert "function play(btn, id, at = 0)" in station and "voice_offset_s" in station and '"Play with tones"' in station
     assert '"no tones"' in station and '"unknown tones"' in station
-    assert 'id="settings-tone-names"' in (STATIC / "cad.html").read_text() and "function sToneNames" in js("settings.js")
+    assert 'id="settings-tones"' in (STATIC / "cad.html").read_text() and "function sTonePage" in js("settings.js")

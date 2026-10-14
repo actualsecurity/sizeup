@@ -27,7 +27,10 @@
     into the clip: play skips the tones). Read back, each row says what kind of page it is (page, #80):
     "ours" (a pair names PCFD / Rye Brook: the event it opened is on it), "other" (another department's),
     "unknown" (a pair nobody's code matches: "Name these tones"), "none" (a paging channel's transmission
-    with no tones decoded: voice only, or a missed decode), "" (not a page).
+    with no tones decoded: voice only, or a missed decode), "" (not a page). tone_seq: every tone heard in
+    order, {hz, start, dur, role: A | B | AB | long | ""} (#115: "" = in no pair, a broken one), read back as a
+    list; names_ours: a page that isn't ours whose text names PCFD's or Rye Brook's units (#115's safety net,
+    Comms.names_ours set by the app from the feed's unit matcher): [unit codes], else [].
     radio_link_exclusions  transmission x event a person took off ("Remove from 26-000007", user,
                     2026-10-08: "how do i remove things from an inc if it was added"): an auto link
                     (unit / channel / dispatcher) removed is remembered here so the auto-linker never
@@ -70,6 +73,7 @@ class Comms:
         self.tactical, self.incident_tgs, self.paging = set(tactical), set(incident_tgs), set(paging)
         self.airport_tgs = set(airport_tgs)      # the Airport Incident talkgroup(s): an open Airport event's (#87)
         self.rev = 0            # bumped on every new or changed transmission (the /comms page polls it)
+        self.names_ours = None  # text -> [our unit codes] (the feed's matcher, #115): a page not ours naming them
         self._drop_bad_channel_links()
 
     def _drop_bad_channel_links(self) -> None:
@@ -102,17 +106,18 @@ class Comms:
             if have and not replace:
                 return []
             tones = json.dumps(t["tones"]) if t.get("tones") else ""
+            seq = json.dumps(t["tone_seq"]) if t.get("tone_seq") else ""
             vals = (call_id, turn, start, float(t.get("end") or start), t.get("source") or "", t.get("talkgroup"),
                     talker, t.get("radio_id") or "", ", ".join(rigs), disp, t.get("text") or "", t.get("status") or "",
-                    t.get("model") or "", tones, t.get("voice_at"), now)
+                    t.get("model") or "", tones, t.get("voice_at"), seq, now)
             if have:
                 db.execute("UPDATE radio_traffic SET call_id = ?, turn = ?, start = ?, end = ?, channel = ?, talkgroup = ?, "
                            "talker = ?, radio_id = ?, rig = ?, dispatcher = ?, text = ?, status = ?, model = ?, tones = ?, "
-                           "voice_at = ?, updated_at = ? WHERE id = ?", (*vals, tid))
+                           "voice_at = ?, tone_seq = ?, updated_at = ? WHERE id = ?", (*vals, tid))
             else:
                 db.execute("INSERT INTO radio_traffic (call_id, turn, start, end, channel, talkgroup, talker, radio_id, rig, "
-                           "dispatcher, text, status, model, tones, voice_at, updated_at, id) "
-                           "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (*vals, tid))
+                           "dispatcher, text, status, model, tones, voice_at, tone_seq, updated_at, id) "
+                           "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (*vals, tid))
             off = {r[0] for r in db.execute("SELECT incident_id FROM radio_link_exclusions WHERE traffic_id = ?", (tid,))}
             links: dict[int, tuple[str, str]] = {}
             for rig in rigs:
@@ -321,7 +326,7 @@ class Comms:
         for r in rows:
             lst = out[r.pop("incident_id")]
             if len(lst) < limit:
-                lst.append(_tones(r, self.paging))
+                lst.append(_tones(r, self.paging, self.names_ours))
         shown = [r for lst in out.values() for r in lst]
         ev = self.events_of(list({r["id"] for r in shown}))
         for r in shown:
@@ -407,7 +412,7 @@ class Comms:
             ev = self.events_of([r["id"] for r in rows])
             for r in rows:
                 r["events"] = ev.get(r["id"], [])
-                _tones(r, self.paging)
+                _tones(r, self.paging, self.names_ours)
         return rows
 
     def facets(self) -> dict:
@@ -453,13 +458,17 @@ def page_kind(tones: list[dict], channel: str = "", paging=()) -> str:
     return "none" if channel in paging else ""
 
 
-def _tones(r: dict, paging=()) -> dict:
-    """A row's tone pairs as a list ([] for anything but a page), and its page kind (page, #80)."""
-    try:
-        r["tones"] = json.loads(r["tones"]) if r.get("tones") else []
-    except (TypeError, ValueError):
-        r["tones"] = []
+def _tones(r: dict, paging=(), names_ours=None) -> dict:
+    """A row's tone pairs as a list ([] for anything but a page), its page kind (page, #80), every tone heard
+    (tone_seq) and, for a page that isn't ours, the units of ours its text names (names_ours, #115)."""
+    for k in ("tones", "tone_seq"):
+        try:
+            r[k] = json.loads(r[k]) if r.get(k) else []
+        except (TypeError, ValueError):
+            r[k] = []
     r["page"] = page_kind(r["tones"], r.get("channel") or "", paging)
+    r["names_ours"] = (names_ours(r.get("text") or "") if names_ours and r["page"] in ("other", "unknown", "none")
+                       else [])
     return r
 
 

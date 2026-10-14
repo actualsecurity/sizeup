@@ -687,7 +687,22 @@ function clipUrl(t, withTones) {
   return !withTones && t.voice_at > 0 ? `${url}#t=${Number(t.voice_at).toFixed(2)}` : url;
 }
 function pageMenuItems(t) {
-  return t.voice_at > 0 ? [{ label: "Play with tones", disabled: t.has_audio === false, run: () => play(clipUrl(t, true)) }] : [];
+  const out = t.voice_at > 0 ? [{ label: "Play with tones", disabled: t.has_audio === false, run: () => play(clipUrl(t, true)) }] : [];
+  if (t.page && canDo("admin")) out.push({ label: "Re-read tones", disabled: t.has_audio === false, run: () => rereadTones(t) });
+  return out;
+}
+// The page's recording through the tone decoder again (#115: a page decoded before a decoder fix): its pairs matched
+// against the tone list as it is now, and the page read again (ours: its event is queued). Admins (a Settings POST).
+async function rereadTones(t) {
+  try {
+    const r = await api("POST", "/api/cad/settings/tones", { action: "reread", page: t.id, operator: operator() });
+    const pairs = (r.pairs || []).map((x) => `${Number(x.a_hz).toFixed(1)}/${x.b_hz ? Number(x.b_hz).toFixed(1) : "-"}`
+      + ((x.names || []).length ? ` ${x.names.join(", ")}` : " unknown"));
+    UI.toast(`Tones re-read: ${pairs.join("; ") || "no pair"}`, "ok", toneSeqText(r.sequence), 12000);
+    txChanged();
+  } catch (e) {
+    UI.toast(`Re-read tones: ${e.message}`, "err");
+  }
 }
 
 // ---- the incident's radio traffic (sizeup/cad/comms.py) ------------------------------------------
@@ -734,14 +749,18 @@ function radioRow(t, ctx = {}) {
   if (!BOARD) {
     const acts = el("span", "feed-acts");
     for (const e of t.events || []) if (e.id !== ctx.current) acts.append(evChip(e));
-    if (t.page === "unknown" && canDo("admin")) acts.append(nameTonesButton(t));
+    if ((t.page === "unknown" || oursNamed(t)) && canDo("admin")) acts.append(nameTonesButton(t));
     const m = txMenu(t, ctx);
     if (busy) { m.setAttribute("aria-busy", "true"); m.title = "Re-transcribing…"; }
     acts.append(m);
     meta.append(acts);
   }
   const txt = el("div", "txt" + (t.text ? "" : " muted"), t.text || sttSaid(t));
-  li.append(meta, txt);
+  li.append(meta);
+  const flag = oursNamedNote(t);
+  if (flag) { li.classList.add("names-ours"); li.append(flag); }
+  if ((t.tone_seq || []).length && (ctx.scope !== "feed" || t.page !== "ours")) li.append(toneSeqLine(t.tone_seq));
+  li.append(txt);
   if (t.alt_model) {                     // "both": the other engine's text, to compare (Settings > Radios > Engine)
     const alt = el("div", "txt alt-txt");
     alt.append(el("span", "dim", `${t.alt_model}: `), document.createTextNode(t.alt_text || "(nothing)"));
@@ -773,21 +792,56 @@ function pageNote(t) {
   n.title = PAGE_WHAT[t.page];
   return n;
 }
+// #115's safety net: a page that isn't ours whose text names our units (sizeup/cad/feed.py units_named). It still
+// isn't an event (ours by our tones only); the row says so loudly, with the phone pre-alert that rang before it.
+function oursNamed(t) {
+  return !!(t.page && t.page !== "ours" && (t.names_ours || []).length);
+}
+function oursNamedText(t) {
+  const why = t.page === "none" ? "no tones decoded" : t.page === "unknown" ? "its tones are unknown" : "its tones aren't ours";
+  return `Names PCFD units (${t.names_ours.join(", ")}); ${why}`;
+}
+function oursNamedNote(t) {
+  if (!oursNamed(t)) return null;
+  const n = el("div", "names-ours-note warnbox small", oursNamedText(t));
+  n.setAttribute("role", "note");
+  if (t.prealert) n.append(el("span", "", ` · Phone rang ${fmtTime(t.prealert.at, true)}, `
+    + `${t.prealert.status === "expired" ? "expired unmatched" : "still open"}`));
+  n.title = "Not an event: only PCFD's or Rye Brook's tones open one. If these were our tones, Name these tones (Ours).";
+  return n;
+}
+// Every tone heard on a page, in order (#115: the decoder pairs a short A with the long B after it; a tone in no
+// pair is marked): "767.4 (1.0 s) → 928.1 (3.0 s) → ..."
+function toneSeqText(seq) {
+  return (seq || []).map((x) => `${Number(x.hz).toFixed(1)} (${Number(x.dur).toFixed(1)} s)${x.role ? "" : " ?"}`).join(" → ");
+}
+function toneSeqLine(seq) {
+  const d = el("div", "tone-seq dim small mono", toneSeqText(seq));
+  d.title = "Every tone heard, in order (Hz, how long). ? = in no pair: a short tone with no long one after it, or a "
+    + "long one with no short one before it";
+  return d;
+}
 function nameTonesButton(t) {
   const b = el("button", "mini", "Name these tones");
   b.type = "button";
   b.title = "Say whose tones these are: the pair goes in the tone list and this page is read again";
-  b.addEventListener("click", () => nameTonesDialog(t));
+  b.addEventListener("click", () => nameTonesDialog(t, oursNamed(t) ? { ours: true } : {}));
   return b;
 }
-// The small form: one row per unknown pair (the department's name, picked from the names known or typed; Ours
-// when it is PCFD's or Rye Brook's), saved to Settings (section tones, audited, exported) and the page re-read.
-async function nameTonesDialog(t) {
-  const pairs = (t.tones || []).filter((x) => !(x.names || []).length);
-  if (!pairs.length) return;
-  let known = { names: [], ours: [] };
+const TONE_TYPES = [["fire", "Fire"], ["ems", "EMS"], ["police", "Police"], ["other", "Other"]];
+// The small form: one row per unknown pair (the department's name, picked from every name known (the tone list's,
+// the county's fire and EMS agencies) or typed; its agency type; Ours when it is PCFD's or Rye Brook's), saved to
+// Settings (section tones, audited, exported) and the page re-read. opts.ours (a page naming our units, #115):
+// every pair, pre-filled Port Chester / Rye Brook and Ours, to check. The tones heard in order: pick an A and a B
+// from them to name a pair the decoder didn't make.
+async function nameTonesDialog(t, opts = {}) {
+  const pairs = (t.tones || []).filter((x) => opts.ours || !(x.names || []).length);
+  const seq = t.tone_seq || [];
+  if (!pairs.length && seq.length < 2) return;
+  let known = { names: [], ours: [], suggest: [] };
   try { known = await api("GET", "/api/cad/tones"); } catch (e) { /* type the name */ }
   const oursSet = new Set(known.ours || []);
+  const typeOf = new Map((known.suggest || []).map((x) => [x.name.toLowerCase(), x.type]));
   const ov = el("div", "overlay");
   const panel = el("div", "dialog narrow tone-form");
   panel.setAttribute("role", "dialog");
@@ -801,28 +855,67 @@ async function nameTonesDialog(t) {
   list.id = "tone-form-names";
   list.append(...(known.names || []).map((n) => new Option(n)));
   body.append(el("p", "dim small", `Page ${fmtTime(t.start, true)} ${t.channel}. A name goes in the tone list; this page is read again.`), list);
-  const rows = pairs.map((x) => {
+  if (opts.ours) body.append(el("p", "warnbox small", `${oursNamedText(t)}. Filled in as Port Chester and Rye Brook: check which pair is whose before saving.`));
+  const prefill = ["Port Chester FD", "Rye Brook FD"];
+  const box = el("div", "tone-pairs");
+  const rows = [];
+  const addRow = (x, guess) => {
     const row = el("div", "tone-pair");
     const hz = `${Number(x.a_hz).toFixed(1)}/${x.b_hz ? Number(x.b_hz).toFixed(1) : "-"}`;
     const f = el("label", "field");
     const name = el("input");
     name.type = "text";
     name.maxLength = 60;
-    name.placeholder = "Department";
+    name.placeholder = "Department or agency";
     name.setAttribute("list", list.id);
     name.autocomplete = "off";
     name.spellcheck = false;
-    f.append(el("span", "mono", `${hz} Hz`), name);
+    name.value = guess || "";
+    f.append(el("span", "mono", `${hz} Hz` + ((x.names || []).length ? ` (now: ${x.names.join(", ")})` : "")), name);
+    const type = el("select");
+    type.setAttribute("aria-label", "Agency type");
+    for (const [k, label] of TONE_TYPES) type.append(new Option(label, k));
+    let typed = false;
+    type.addEventListener("change", () => { typed = true; });
     const ours = el("label", "check");
     const cb = el("input");
     cb.type = "checkbox";
+    cb.checked = !!guess && oursSet.has(guess);
     ours.append(cb, el("span", "", "Ours"));
     ours.title = "One of ours (PCFD, Rye Brook): its pages become pending events";
-    name.addEventListener("input", () => { cb.checked = oursSet.has(name.value.trim()); });
-    row.append(f, ours);
-    return { x, name, cb, row };
-  });
-  body.append(...rows.map((r) => r.row));
+    const fit = () => {
+      const v = name.value.trim();
+      cb.checked = oursSet.has(v) || (cb.checked && !!opts.ours && !v);
+      if (!typed) type.value = typeOf.get(v.toLowerCase()) || "fire";
+    };
+    name.addEventListener("input", fit);
+    fit();
+    row.append(f, type, ours);
+    box.append(row);
+    rows.push({ x, name, cb, type, row });
+  };
+  pairs.forEach((x, i) => addRow(x, opts.ours ? prefill[i] || "" : ""));
+  body.append(box);
+  if (seq.length >= 2) {                // the tones heard, in order: pick an A and a B to name a pair of your own
+    const pick = el("div", "tone-seq-pick");
+    const tip = el("span", "dim small", "Heard, in order: pick an A, then its B");
+    let a = null;
+    const btns = seq.map((x) => {
+      const b = el("button", "mini mono", `${Number(x.hz).toFixed(1)} (${Number(x.dur).toFixed(1)} s)`);
+      b.type = "button";
+      b.title = x.role ? `${x.role === "AB" ? "A=B" : x.role} of a pair the decoder made` : "In no pair";
+      b.addEventListener("click", () => {
+        if (a === null) { a = x; b.setAttribute("aria-pressed", "true"); tip.textContent = `A ${Number(x.hz).toFixed(1)}: now its B`; return; }
+        btns.forEach((y) => y.removeAttribute("aria-pressed"));
+        addRow({ a_hz: a.hz, b_hz: x === a ? a.hz : x.hz, names: [] }, "");
+        a = null;
+        tip.textContent = "Added below the pairs. Pick another A, then its B";
+      });
+      return b;
+    });
+    pick.append(tip, ...btns);
+    body.append(pick);
+  }
   const err = el("p", "error small");
   err.hidden = true;
   const foot = el("div", "dialog-foot");
@@ -839,11 +932,11 @@ async function nameTonesDialog(t) {
   body.addEventListener("submit", async (e) => {
     e.preventDefault();
     const todo = rows.filter((r) => r.name.value.trim());
-    if (!todo.length) { err.textContent = "Type a department"; err.hidden = false; rows[0].name.focus(); return; }
+    if (!todo.length) { err.textContent = "Type a department"; err.hidden = false; if (rows[0]) rows[0].name.focus(); return; }
     try {
       for (const r of todo) {
         await api("POST", "/api/cad/settings/tones", { action: "set", a_hz: r.x.a_hz, b_hz: r.x.b_hz || null,
-          name: r.name.value.trim(), ours: r.cb.checked, page: t.id, operator: operator() });
+          name: r.name.value.trim(), type: r.type.value, ours: r.cb.checked, page: t.id, operator: operator() });
       }
       UI.toast(`Named: ${todo.map((r) => r.name.value.trim()).join(", ")}`);
       UI.dialog.close(ov);
@@ -853,7 +946,7 @@ async function nameTonesDialog(t) {
       err.hidden = false;
     }
   });
-  UI.dialog.open(ov, { focus: rows[0].name, onClose: () => ov.remove() });
+  UI.dialog.open(ov, { focus: rows[0] ? rows[0].name : panel.querySelector("button"), onClose: () => ov.remove() });
 }
 
 // An incident a transmission (or note) is on: a chip; a click shows that incident (the Radio view: only its
