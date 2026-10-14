@@ -281,3 +281,33 @@ heartbeat_stale_min = 90             # no heartbeat (or restart) this long: "Tap
 # bbox = [-73.845, 40.900, -73.530, 41.060]   # west, south, east, north: the stretch of line the map shows
 # rt_url = ""                                  # "" = the MTA's (sizeup/trains.py RT_URL); a test feed's address
 # gtfs_url = ""                                # "" = the MTA's (GTFS_URL)
+
+# [aircraft]: aircraft near HPN on the CAD maps (sizeup/aircraft.py, docs/cloud.md "Aircraft near HPN", #155):
+# shortfinal's PCFD-focused picture (arrivals, departures, ground traffic at HPN, low traffic in the area,
+# emergencies; overflights left out), read by the hub (or all-in-one) only while someone has the layer on.
+# feeds, in order of preference (the next one carries on while one fails):
+#   "adsblol"   adsb.lol, keyless, ODbL (attribution on the map): the default
+#   "adsbfi"    adsb.fi: its terms say personal, non-commercial use only; off unless listed here
+#   "receiver"  our own ADS-B receiver ([aircraft.receiver] below)
+# OpenSky is not offered: its licence needs a written agreement for live operational use.
+# registry: types (make / model) from the FAA Releasable Aircraft Database, public domain, ~70 MB a week once
+# someone has looked; never the owner's name. Leave the section out: on, adsb.lol, 15 nm around HPN.
+# [aircraft]
+# enabled = true
+# feeds = ["adsblol"]
+# radius_nm = 15          # around HPN: the feed's query, and what counts as "in the area"
+# ceiling_ft = 6000       # MSL: below this inside the radius is "low traffic" (shortfinal's focus)
+# registry = true
+#
+# Our own receiver, when there is one (off: no SDR is assigned to ADS-B yet). sizeup only READS the decoders'
+# aircraft.json: run readsb / dump1090 (1090 MHz) and dump978-fa (978 MHz UAT) yourself, on an SDR with an LNA
+# and a 1090 filter in front (readsb --gain auto: an LNA makes a fixed high gain overload), and let whatever
+# starts the decoder hold the dongle's claim (~/.local/state/rtl-claims). sizeup never opens or claims it.
+# sdr: that dongle's exact USB serial (give it a name first: rtl_eeprom -s adsb); naming it keeps sizeup's own
+# radios off it (added to [radio] sdr_ignore) and the layer says whether it is plugged in and who holds it.
+# Put "receiver" first in feeds to prefer it, adsb.lol after it as the fallback.
+# [aircraft.receiver]
+# enabled = false
+# sdr = ""                                   # e.g. "adsb": not yet
+# json_1090 = ""                             # e.g. "/run/readsb/aircraft.json" or "http://127.0.0.1/tar1090/data/aircraft.json"
+# json_978 = ""                              # e.g. "/run/skyaware978/aircraft.json"
