@@ -678,7 +678,8 @@ heartbeat_stale_min = 90
 Every CAD map (the event's, the large map, the Overview, `/monitor`) has a **Layers** button:
 *Cameras*, *Incidents & closures*, *Roadwork*, *Message signs* (from the sources below), *Mileposts*
 and *Exits* (from the gazetteer, #67, #83), and *Airport* with *Approaches*
-([the airport](#the-airport-hpn-the-airport-layer-places-alerts), #87). Each is on or off per viewer (this browser's
+([the airport](#the-airport-hpn-the-airport-layer-places-alerts), #87); the Overview's map adds *Camera overlay*
+(live camera views on the map, off at first; [Camera wall](#camera-wall-125), #168). Each is on or off per viewer (this browser's
 `localStorage`, key `sizeup.mapLayers`); cameras and incidents start on. Signs show from zoom 11,
 exits and whole mileposts from 12, the tenths from 14. A camera opens the **camera viewer**: live video where the source streams
 (the Thruway's cameras; muted, see below), else the snapshot, with its name, road, direction and
@@ -857,23 +858,30 @@ answered 502 at open during the run: that is the fallback path (snapshots) worki
 > jurisdiction that are purely live".
 
 The Overview (the console's and the wall board's, `/monitor`) can show a grid of every camera in our area
-in place of the map, beside it, under it or on it (*Layouts*, below). The grid takes
+in place of the map, beside it or under it (*Layouts*, below), or on it (*Camera overlay*). The grid takes
 its columns from its own width: 2 (3 on a wide one) on the dispatch screen, 4 to 6 on the wall board (whose
 cards column narrows while the cameras are on), 1 on a phone (`static/camwall.js`, `cadmap.css` `.cw-*`).
 
 **Layouts** (#147: "I'd like to be able to show them side by side: map/cameras/incidents, or map/cameras on
 the left above/below and incidents on the right... or overlay the cameras on the map too"): the button became a
 picker in the Overview's head, the same on the wall board: **Map** · **Cameras** · **Side by side** (map | cameras |
-events) · **Stacked** (map over the cameras, or under them with *Swap*; events on the right) · **Overlay** (each
-camera as a small tile at its spot on the map, `static/camoverlay.js`: nudged apart with a leader line to the
-exact spot, sized by zoom from 72 px at zoom 10 to 208 px at 15, hidden under zoom 10, live where it streams under
-the same budget and rules, down cameras as the dim "!" only). Remembered per screen (`localStorage`
-`sizeup.overviewLayout` `{overview, monitor: {mode, swap, side, stacked}}`; #125's switch is read once as
-*Cameras*). Side by side and Stacked have a divider between the map and the cameras (the #139 separator: drag,
+events) · **Stacked** (map over the cameras, or under them with *Swap*; events on the right). Remembered per screen
+(`localStorage` `sizeup.overviewLayout` `{overview, monitor: {mode, swap, side, stacked}}`; #125's switch is read
+once as *Cameras*). Side by side and Stacked have a divider between the map and the cameras (the #139 separator: drag,
 the arrow keys, Home or a double-click for half and half, each pane at least 200 px, the map resizing live), its
 share remembered per layout. A phone (640 px and under) has Map and Cameras only. An active highway event's
 before / after cameras stand out in every layout: highlighted tiles on the wall and the overlay, ringed and
-labelled on the map otherwise.
+labelled on the map without the overlay.
+
+**Camera overlay** (#147, a Layers toggle since #168: "overlay should only be an option in layers, not here"):
+*Camera overlay* at the top of the Overview map's Layers box (the console's and the wall board's), off by default,
+per viewer (the box's "overview" set in `sizeup.mapLayers`, key `camoverlay`). On, each camera in our area is a
+small tile at its spot on the map wherever the map shows (Map, Side by side, Stacked; `static/camoverlay.js`):
+nudged apart with a leader line to the exact spot, sized by zoom from 72 px at zoom 10 to 208 px at 15, hidden
+under zoom 10, live where it streams under the same budget and rules as the wall (a camera live on the wall is a
+snapshot on the map, one stream and one slot), down cameras as the dim "!" only. The event's map has no overlay
+(its Cameras panel shows the event's own). A screen whose saved layout was the old *Overlay* opens as *Map* with
+the toggle on, once.
 
 **The area** (`GET /api/cad/cameras?area=ours`, `Roads.area`): every camera inside our fire districts (the
 county GIS layer, ours by `[cad] monitor_departments`; the county's 2011 polygons put Rye Brook inside
@@ -1085,6 +1093,15 @@ FD, Rye Brook FD) is drawn in the department's red; a fire station of ours likew
 be extruded by their height: the "3D" row in the group tilts the map. The attribution "Westchester
 County GIS" is on the group and in the map's corner.
 
+**One station, one mark** (#162). While a map's Trains layer is on, the county's *Train stations* leave
+out the stations that layer draws from the MTA's data: a county station within 250 m of one, or within
+1 km of one with the same name (`trains_field`; measured 2026-10-14, the New Haven Line's are 20 m to
+215 m from the MTA's stop, and the nearest other station is 1.5 km away). So Rye and Port Chester show
+once, as the Trains layer's station with the line's details. The Harlem Line's (White Plains, North
+White Plains) always show, and with the Trains layer off, or `[trains] enabled = false`, every county
+station does. The hub marks the copies when it serves the layer (`_trains`); the cached file stays as
+the county gave it.
+
 **Source: Westchester County GIS** (<https://gis.westchestercountyny.gov>, an ArcGIS Hub; the data
 from the county's ArcGIS Server at `giswww.westchestergov.com/arcgis/rest/services/`). Surveyed
 2026-10-13; the portal's categories are Basemap Planimetrics, Boundary, Tax Parcels, Infrastructure,
@@ -1131,7 +1148,7 @@ the data is for general reference and the tax maps of record are each assessor's
 | | Streams | `DataHub_BasemapPlanimetrics/0` | | stream, kind |
 | | Lakes & ponds | `DataHub_BasemapPlanimetrics/11` | | water, kind |
 | Transportation | Railroads (zoom 13+) | `DataHub_BasemapPlanimetrics/1` (the county's rail lines; no owner or electrification field: the New Haven Line's catenary is a fixed note) | | line, kind |
-| | Train stations | `DataHub_Transportation/156` | | station |
+| | Train stations (the New Haven Line's left out while the Trains layer is on: it draws them) | `DataHub_Transportation/156` | | station |
 | | Bee-Line bus routes | `DataHub_Transportation/154` | Apr 2022 | route, name |
 | | Bee-Line bus stops (zoom 15+) | `DataHub_Transportation/153` | | stop, on, at, routes |
 
@@ -1260,15 +1277,52 @@ sends it.
 * **Real (from the MTA):** a train's position when the feed has one (about 17 of 120 New Haven Line trains
   in the recorded feed: those running), its predicted arrival and departure at the stations it stops at
   (the schedule plus the delay), the delay, track and status (*On-Time*, *Arriving*, *Departed*, *Late*).
-* **Estimated (ours):** a train's position when the feed has none, placed on the line between the two
-  stations it is between by its times there; and the time a train passes a point it doesn't stop at (an
-  express through Port Chester, or any train at an event's point between stations). Both use the line's
+* **Estimated (ours):** a train's position when the feed has none we accept, on its run from the stop it
+  left to the next (`profile_s`: away from the stop at its departure, up to speed, braking into the next at
+  its predicted arrival; an express cruises past the stations it doesn't stop at), and only once the feed
+  says it left (the stop's *Departed*, or the vehicle *in transit* to the next): until then it stands at the
+  stop. A train the feed doesn't follow at all (no vehicle, no status) runs on its predicted times. And the
+  time a train passes a point it doesn't stop at (an express through Port Chester, or any train at an
+  event's point between stations), by the line's
   run times: from the static schedule, how long a train that doesn't stop takes between each pair of
   neighbouring stations (the locals' median run less what a stop costs, about a minute, measured from the
   expresses), so an express's time between its stops is shared out the way the line runs (Park Avenue and
   the Bronx slow, Connecticut fast). When the MTA reports the train's position between those stations, the
   passing time is worked out from there. A stop marked *Departed*, or a reported position already beyond
   the point, means the train has passed.
+
+### Positions: what the feed really gives, and what we do with it
+
+Decoded 2026-10-14 (the fixtures in `tests/fixtures/mta/`, and 40 minutes of live reads):
+
+* **Quantized:** a vehicle position is not a GPS track. It snaps to fixed reporting points on the line, about
+  1 to 1.6 km apart (3.3 km at most), the same points both ways; about 75 between Grand Central and New
+  Haven seen in 40 minutes.
+* **No age:** the vehicle's timestamp is always the header's, and the MTA rebuilds the feed about every 12 s
+  (no ETag or Last-Modified), so how old a position is the feed never says. We stamp each one ourselves:
+  `fix_at`, the feed time it first appeared (unchanged while it stays; `fix_age_unknown` when it was already
+  there at our first read).
+* **Bogus fixes:** a point by Stamford (41.047958, -73.539017) given for trains really at Rye or Port
+  Chester (a 12 to 14 km jump and back), a point 3.2 km off the line by Mount Vernon West (40.941681,
+  -73.835236, on the Harlem Line), and steps back of 0.5 to 1 km. Each read, each position is judged
+  (`Tracker`): refused when more than 300 m off the line, outside the stretch between the stop the train
+  last left and the one it is going to (the vehicle's stop id, else the trip's statuses) by more than
+  500 m, more than 100 m backwards, or faster than 45 m/s once one reporting point's spacing (3.5 km) is
+  allowed for. A refused position is never drawn: the train stays at its last good fix (3 minutes at most;
+  then it is estimated), counted (`rejected`, `rejected_why`) and logged now and then. The vehicle's
+  current status (STOPPED_AT, INCOMING_AT, IN_TRANSIT_TO) and stop id are read too.
+* **Reporting points learned:** every good fix that appeared while we watched teaches us a point (fixes
+  within 25 m along the line are one); seen twice, it is known. Kept in `trains/points.json` under the state
+  dir, seeded from `data/mnr_reporting_points.json` (`tools/learn_trains_points.py` over recorded reads).
+  `hold_s`, how far the page may carry a train on past its last fix: the next known point ahead (within
+  3 km), never past the next stop it stops at; no point known, 1.5 km on, still not past the stop
+  (`hold_kind`: reporting_point, stop, fallback). The page also stops 120 s after the fix
+  (`predict_until`), and freezes the trains when the feed is a minute old (`stale`).
+* **Each direction on its own track:** `data/mnr_tracks.json` (`tools/fetch_train_tracks.py`; OpenStreetMap,
+  ODbL): the New Haven Line's outer tracks through our area, sampled along the MTA's line. The MTA's own
+  track numbers at our stations say inbound trains stop on track 3 (the north side) and outbound on 4 (the
+  south), so each train is drawn on its direction's track at its distance along the line (`s`), never two
+  directions on one centre line. A train is drawn once (a reported one over an estimate of it).
 
 ### How it works
 
@@ -1280,17 +1334,18 @@ sends it.
   the run times are built from the stop times. What we keep is cached in `trains/static.json` under the
   state dir, so a restart fetches nothing.
 * **The realtime feed only while someone looks:** a page with the Trains layer on (it asks the hub every
-  30 s) or an event panel near the tracks keeps it coming every 30 s for two minutes after the last ask;
-  otherwise nothing is fetched. A first ask with nothing fresh waits up to 5 s for the fetch it wakes.
+  5 s) or an event panel near the tracks keeps it coming every 5 s (`[trains] rt_every_s`, 5 to 300) for
+  two minutes after the last ask; otherwise nothing is fetched. About 170 KB a read; a read whose header
+  time hasn't moved changes nothing. A first ask with nothing fresh waits up to 5 s for the fetch it wakes.
 * Protobuf: a small reader for the few GTFS-realtime fields used (no protobuf dependency). Trains are known
   by their number (the MTA's realtime trip ids don't match the static feed's).
-* Backoff: realtime 30 s doubling to 15 min, static 5 min doubling to 6 h; a 401 / 403 waits 30 min and
+* Backoff: realtime 10 s doubling to a minute (the page's poll too), static 5 min doubling to 6 h; a 401 / 403 waits 30 min and
   says a key may now be needed; a 429 5 min. Every request carries the shared User-Agent (sizeup and a
   contact).
 
 | | |
 |---|---|
-| `GET /api/cad/trains[?have=static_at]` | `{configured, note, source, label, link, terms, disclaimer, at (the feed's time), fetched, error, static_at, line, stations, trains: [{id, train, line, headsign, dir, dir_label, lat, lon, bearing, estimated, next_stop, next_time, track, delay_s, status[, cars]}], catenary, bbox}`; with `have` the static_at the page already holds: no `line` or `stations` (`static_same: true`). Positions to 5 decimals (about 1 m). A poll is then only the trains: about 2.5 KB every 30 s while the layer is on (the first, with the line, about 7 KB). Not on the event stream: nothing is pushed |
+| `GET /api/cad/trains[?have=static_at]` | `{configured, note, source, label, link, terms, disclaimer, at (the feed's time), fetched (= fetched_at), age, stale, every_s, error, rejected, rejected_why, points (known reporting points), points_seen, profile {accel, decel, vmax, predict_s, stale_s}, static_at, line, stations, lanes {outbound, inbound: [[lon, lat, s]...]}, trains: [{id, train, line, headsign, dir, dir_label, d, lat, lon, bearing, estimated, mode (reported \| estimated \| stopped), s, fix_at, fix_age_unknown, vehicle_status, vehicle_stop_id, next {stop_id, name, s, arr, dep, status, track}, prev_s, hold_s, hold_kind, predict_until, segment {from, to, s0, s1, t_dep, t_arr, accel, decel, vmax}, lag_s, next_stop, next_time, track, delay_s, status[, cars]}], catenary, bbox}`; with `have` the static_at the page already holds: no `line`, `stations` or `lanes` (`static_same: true`). Positions to 5 decimals (about 1 m), on the train's own track. A poll is then only the trains: a few KB every 5 s while the layer is on (the first, with the line and lanes, about 30 KB). Not on the event stream: nothing is pushed |
 | `GET /api/cad/trains/near?lat=&lon=` | `{near: false}` (more than 150 m from the tracks and any station), or `{near: true, ref: {kind: station \| track, name, station, m, lat, lon[, station_m, side]}, window_min, inbound, outbound, dir_labels}`; each train `{train, headsign, line, eta, min, stops, estimated, delay_s, track, status, reported}` |
 
 **Setup:** nothing: on by default, no key. `[trains] enabled = false` turns it off (the box says so). Should
@@ -1334,7 +1389,7 @@ what matters to Port Chester / Rye Brook and HPN, as shortfinal does, not a worl
 | overflight, other airports' ground traffic | not drawn | |
 
 Each aircraft is drawn as shortfinal draws it: a jet, light-aircraft or helicopter silhouette (by the feed's
-emitter category) turned to its track and sized by phase, the callsign with the approach or departure and the
+emitter category) turned to its track and sized by phase (an emergency largest and red, over the other aircraft), the callsign with the approach or departure and the
 altitude, speed and type beneath it on a dark chip, and **a short trail for every aircraft drawn** (its real
 fixes over the last 90 s: a point every 60 m or 15 s, as shortfinal's track store keeps them; shortfinal shows 10
 minutes) while the layer is on. They stay beneath the apparatus, stations and events.
@@ -1356,17 +1411,33 @@ data since ..." when the hub stops answering.
 
 ### Feeds and their terms
 
-One interface (`Feed.read()`), tried in the order `[aircraft] feeds` gives; a feed that fails rests (its
-Retry-After, else 5 s) while the next one carries on.
+The user, 2026-10-14 (#161): *"adsb.lol as primary or adsb.fi whichever gives the most data, and then keep that
+data, but poll between the two as needed if one loses or is rate limited, this is personal non commercial use, we
+are not charging for this"*, and *"primary local SDR on ADSB, secondary the above sources"*. So:
+
+* **Every feed's latest answer is kept and combined** (`combine()`): the union by ICAO address, one record per
+  aircraft with **the freshest position** any feed has, except that **our receiver's position wins for any
+  aircraft it hears** while it is healthy (an answer within 10 s). A field only one feed has (callsign, type) is
+  kept. Each aircraft says which feed its position came from: *our receiver*, *adsb.lol* or *adsb.fi*.
+* **The primary API** is whichever has been giving more aircraft with a fresh position (a running average over
+  its answers; config order on a tie). While someone has the layer on: **the primary every 5 s, the other every
+  10 s, our receiver every 2 s** (adsb.fi's public limit is 1 request a second; adsb.lol limits by load and was
+  fine at 5 s in shortfinal; at most 18 requests a minute to the two together). Nobody looking: only the
+  emergency watch, **the primary every 15 s** (and the receiver), nothing from the other.
+* **Failover:** a feed that errors, times out or answers 429 **rests** — its `Retry-After` when it sends one
+  (adsb.lol's 429 sent none in our tests), else 5 s doubling to 5 min (a 429 at least 10 s) — and the other API
+  becomes the primary at 5 s; the first good answer brings it back. Both down: the box says *"no feed answering"*
+  with each one's reason, and the aircraft on the map go stale (hollow, with their age).
+* **Our receiver stale or down:** the two APIs carry everything, as above.
 
 | Feed | Terms (checked 2026-10-14) | Use |
 |---|---|---|
-| **adsb.lol** `api.adsb.lol/v2/point/<lat>/<lon>/<nm>` | keyless; the data under the **ODbL 1.0** (use, operational too, with attribution; share-alike only if we published a derived database) | **the default.** Attribution in the map corner and the box. Rate-limited by load: asked at most every 5 s, Retry-After honoured. Note: it rate-limits per address, and shortfinal on the same machine polls it too |
-| adsb.fi `opendata.adsb.fi/api/v3/...` | "personal, non-commercial use only", attribution | **off** unless listed: a fire department's dispatch isn't plainly personal use |
-| OpenSky Network | non-profit research / education, internal evaluation, "government purposes"; live operational use needs a **written agreement** | **not used** (an open question for the department) |
+| **adsb.lol** `api.adsb.lol/v2/point/<lat>/<lon>/<nm>` | keyless; the data under the **ODbL 1.0** (use, operational too, with attribution; share-alike only if we published a derived database) | **on.** Credited in the map corner and the box. It rate-limits per address, and shortfinal on the same machine polls it too |
+| **adsb.fi** `opendata.adsb.fi/api/v3/lat/<lat>/lon/<lon>/dist/<nm>` | "personal, non-commercial use only", cite adsb.fi; 1 request a second | **on: the user's decision, 2026-10-14, that this is personal, non-commercial use (the department charges nothing for it).** Credited in the map corner and the box |
+| OpenSky Network | non-profit research / education, internal evaluation, "government purposes"; live operational use needs a written agreement; its credits are far too few for a 5 s refresh | **not used** (user, 2026-10-14: it adds nothing over adsb.lol, adsb.fi and our receiver) |
 | FAA Releasable Aircraft Database `registry.faa.gov/database/ReleasableAircraft.zip` | public domain (US government) | types by ICAO address for US aircraft: weekly once someone has looked (~70 MB), kept in SQLite (`aircraft/faa_registry.sqlite` in the state dir). Only the N-number, make, model, year, kind and engines are kept: **never the owner's name or address** |
 | FAA JO 7340.2 airline designators | public domain | `data/airport/airlines.csv` (shortfinal's `tools/fetch_airlines.py`) |
-| **our receiver** | ours | below |
+| **our receiver** | ours | below: first, when there is one |
 
 ### Our own receiver (later; nothing assigned now)
 
@@ -1390,10 +1461,11 @@ only one band heard is kept). A file whose own clock stops for 30 s says its dec
 
 `sizeup/aircraft.py` (`AircraftLayer`), on the hub (or all-in-one; never a station):
 
-* **Only while someone looks.** The page asks `GET /api/cad/aircraft` every 2 s while a map has the layer on
-  and the page is visible; each ask keeps the feed coming for 60 s; nothing is fetched otherwise. A first
-  ask with nothing fresh waits up to 5 s for the read it wakes. The feed itself is still read at most every
-  5 s (adsb.lol), 2 s (our receiver): the 2 s ask only shortens the wait for a read already made (a 304 between).
+* **While someone looks.** The page asks `GET /api/cad/aircraft` every 2 s while a map has the layer on and
+  the page is visible; each ask keeps the feeds at their full rates for 60 s. Otherwise only the emergency watch
+  reads (below). A first ask with nothing fresh waits up to 5 s for the read it wakes. The feeds themselves are
+  still read at their own rates (the primary API every 5 s, the secondary every 10 s, our receiver every 2 s): the
+  2 s ask only shortens the wait for a read already made (a 304 between).
 * **Never in the state push** (#146 kept the idle stream tiny). Each answer carries an ETag from its body:
   an unchanged answer is a 304. The recorded traffic (6 aircraft drawn) is 3.1 KB, 1.1 KB gzipped (positions
   to 5 decimals; trails to 4, for every aircraft drawn, the last 90 s, at most 30 points, thinned keeping the
@@ -1402,27 +1474,59 @@ only one band heard is kept). A file whose own clock stops for 30 s says its dec
   paths already in `data/airport/khpn_procedures.geojson`, the track store's glitch filter (a jump faster
   than max(300 kt, 2 x speed + 100 kt) is held back until it repeats three times) and fade / drop by the
   feed's own clock. Left in shortfinal: ATC audio and speech-to-text, callsign attribution, adsb.im routes,
-  the window view, ntfy pushes, recording / replay, the readsb supervisor.
+  the window view, recording / replay, the readsb supervisor.
+
+### Emergency squawks: the alarm and the push
+
+User, 2026-10-14 (#161): *"yes they should"* (raise sizeup's alarm and send a push). A **squawk 7500 / 7600 /
+7700**, or the aircraft's **own emergency status** (minimum fuel, no radio, medical ...), **within 15 nm of HPN
+below 18,000 ft** (or on the ground), from a message no older than 15 s, raises **the emergency alarm**
+(`sizeup/cad/alarms.py`, #128: every console and wall board, the alarm sound, acknowledged by a dispatcher)
+and **its push** through `[alerts] ntfy_topic` when one is set (never Tapout's `pcfd-phone-prealert` or
+`pcfd-status`: refused in three places; no topic: the alarm only). It works while nobody looks at the map:
+the emergency watch reads the primary feed every 15 s (`[aircraft] alarms = false` turns it off).
+
+* **One alarm per aircraft per emergency.** Still squawking: the same alarm. Not seen in emergency for a
+  minute: it **ends** — acknowledged as *"ADS-B: squawk ended (now 1200)"* (or *"no longer reported"*), with an
+  *Ended* push; a flicker inside the minute changes nothing. The same aircraft and emergency again within 30
+  minutes raises nothing new. At most 6 aircraft alarms an hour (more are logged).
+* **Drill mode** (Settings > System > Alarms) marks it like any other alarm: *DRILL* on the screens, *"DRILL:"*
+  and *"not a real emergency"* in the push, priority 3.
+* With exactly one open **Airport** event, the alarm joins it (its chronology).
+* **What it says** (the push; the alarm card shows the same line), always marked as public data (here with the
+  FAA registry loaded, which adds the make and model):
+
+  ```
+  AIRCRAFT EMERGENCY: SQUAWK 7700 (EMERGENCY) · N41DW (SR22) on ADS-B (public data)
+  14:38:30 · N41DW, SR22, Cirrus Design Corp SR22 · squawk 7700 (emergency) · 900 ft, descending 500 ft/min ·
+  1.9 nm SE of HPN · arriving HPN on the ILS 34, 1.4 nm to go · via adsb.lol. From public ADS-B data, not an
+  official notification.
+  ```
+
+  Priority 5 (an alarm), tags airplane + rotating_light; *Ended: ...* priority 3; *Acknowledged: ...* when a
+  dispatcher acknowledges it.
 
 | | |
 |---|---|
-| `GET /api/cad/aircraft` | `{configured, note, feed: {key, label, link, licence, terms, credit}, feeds, at (the feed's time), fetched, error, stale_s, drop_s, airport, registry: {at, n, error, credit}, receiver: null \| {enabled, sdr, name, present, held_by, bands, note}, aircraft: [{hex, cs, flight, reg, reg_src, type, model, model_src, kind, cat, airline, lat, lon, alt, gs, trk, tr, vr, sq, emerg, phase, rwy, appr, dist, eta, age, pos, band, trail}], counts}` |
+| `GET /api/cad/aircraft` | `{configured, note, feed: the primary {key, label, link, licence, terms, credit}, feeds: [{key, label, credit, terms, role: receiver \| primary \| secondary, n, fresh, ok, at, shown, resting, healthy}], credit, at (the newest feed's time), fetched, error, stale_s, drop_s, airport, registry: {at, n, error, credit}, receiver: null \| {enabled, sdr, name, present, held_by, bands, note}, aircraft: [{hex, cs, flight, reg, reg_src, type, model, model_src, kind, cat, airline, lat, lon, alt, gs, trk, tr, vr, sq, emerg, phase, rwy, appr, dist, eta, age, pos, band, src, trail}], counts}` |
 
 ```toml
-[aircraft]                       # sizeup/aircraft.py; leave out: on, adsb.lol, 15 nm around HPN
-feeds = ["adsblol"]              # in order: "receiver", "adsblol", "adsbfi"
+[aircraft]                       # sizeup/aircraft.py; leave out: on, adsb.lol + adsb.fi, 15 nm, the alarm on
+feeds = ["adsblol", "adsbfi"]    # combined; "receiver" (when enabled) always first
+alarms = true                    # a 7500 / 7600 / 7700 squawk near HPN raises the alarm (and the push)
 radius_nm = 15
 ceiling_ft = 6000
 registry = true
 
-[aircraft.receiver]              # off: no SDR is assigned to ADS-B yet
+[aircraft.receiver]              # off: no SDR is assigned to ADS-B yet; enabled, its positions come first
 enabled = false
 sdr = ""
 json_1090 = ""                   # readsb / dump1090 aircraft.json: a path or http(s) URL
 json_978 = ""                    # dump978-fa aircraft.json
 ```
 
-Tests: `tests/test_aircraft.py` on adsb.lol answers recorded 2026-10-14 14:38 EDT and the FAA registry of
+Tests: `tests/test_aircraft.py` on adsb.lol answers recorded 2026-10-14 14:38 EDT, adsb.lol and adsb.fi answers
+recorded together at 15:44 EDT, and the FAA registry of
 2026-10-13 trimmed to those aircraft, owner columns blanked (`tests/fixtures/aircraft/`,
 `tools/record_aircraft_fixtures.py`); the receiver fixtures are derived (readsb) or hand-built (dump978)
 until there is a receiver to record.

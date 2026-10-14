@@ -4,7 +4,9 @@
 //   Layer        "Trains" in every map's Layers box (maplayers.js MapLayers.addGroup; key "trains", off by
 //                default, in the viewer's or the event's set like the rest, #111): the line from Mount Vernon
 //                East to Stamford (the hub's [trains] bbox), its stations, and each train on it now, drawn as a
-//                train lying along the line the way it is going (#151): a cab with its windscreen at the
+//                train lying along its own direction's track (the hub's lanes: outbound on track 4, the south
+//                side, inbound on track 3, the north, as the MTA's stops say) the way it is going (#151): a cab
+//                with its windscreen at the
 //                front, the body behind; its number and where it is headed beside it, on the side away from
 //                the other direction's trains. One length for every train: the MTA's feed says nothing of how
 //                many cars a train has (no consist, sizeup/trains.py); should it ("cars"), that many cars are
@@ -12,9 +14,10 @@
 //                (between the stations it is between, by its times). The heading is the line's own there (the
 //                feed has no bearing). A click: the train's line and destination, direction, next stop and time,
 //                track, delay, status and whether the position is reported or estimated; a station or the
-//                line: its name and the catenary note. Polled every 30 s only while a map has it on and the
-//                page is visible (the hub reads the MTA only while someone asks); a poll names the line it
-//                already has (?have=static_at), so the answer is only the trains (about 2 KB).
+//                line: its name and the catenary note. Polled every 5 s only while a map has it on and the
+//                page is visible (the hub reads the MTA only while someone asks, as often); a poll names the
+//                line it already has (?have=static_at), so the answer is only the trains (a few KB). A failed
+//                poll waits longer each time (10 s doubling to a minute) and says so in the console.
 //   Panel        TrainLayer.panel(inc, host) (cadmap.js, under the event's map): for an event within 150 m of
 //                the tracks or a station, the next trains each way in the next 15 minutes at the nearest
 //                station (or the event's point on the tracks): minutes away, stops or passes, delay, track;
@@ -28,13 +31,14 @@
 window.TrainLayer = (() => {
   const URL = "/api/cad/trains", NEAR = "/api/cad/trains/near";
   const KEY = "trains";
-  const POLL_MS = 30000, PANEL_MS = 30000;
+  const POLL_MS = 5000, PANEL_MS = 30000;
+  const BACKOFF_MS = [10000, 60000];         // a failed poll: 10 s doubling to a minute
   const SRC_LINE = "tr-line", SRC_ST = "tr-stations", SRC_TR = "tr-trains", SRC_CARS = "tr-cars";
-  const CAR_IDS = ["tr-car-case", "tr-car", "tr-cab-case", "tr-cab"];
+  const CAR_IDS = ["tr-car-case", "tr-cab-case", "tr-car", "tr-cab", "tr-gap"];
   const IDS = ["tr-line", "tr-station", "tr-station-label", ...CAR_IDS, "tr-train", "tr-train-label"];
   const MAX_CARS = 16;
-  const CLICKABLE = ["tr-train", "tr-car", "tr-cab", "tr-station", "tr-line"];
-  const TRAIN_HIT = ["tr-train", "tr-car", "tr-cab"];
+  const CLICKABLE = ["tr-train", "tr-car", "tr-cab", "tr-gap", "tr-station", "tr-line"];
+  const TRAIN_HIT = ["tr-train", "tr-car", "tr-cab", "tr-gap"];
   const HALO = "#15181B";
 
   function h(tag, cls, text) {
@@ -63,7 +67,7 @@ window.TrainLayer = (() => {
   const pt = (lon, lat, props) => ({ type: "Feature", geometry: { type: "Point", coordinates: [lon, lat] }, properties: props });
 
   // ---- the layer's data: one copy for every map on the page, fetched only while one has it on --------------------
-  const store = { data: null, timer: null, loading: null, subs: new Set(), at: 0 };
+  const store = { data: null, timer: null, loading: null, subs: new Set(), at: 0, fails: 0 };
   const maps = new Set();
   const anyOn = () => { for (const m of maps) if (m.isOn()) return true; return false; };
   function notify() { for (const fn of store.subs) { try { fn(store.data); } catch (e) { console.error(e); } } }
@@ -74,18 +78,22 @@ window.TrainLayer = (() => {
         const had = store.data;                // the line and stations we hold: the hub leaves them out when unchanged
         const have = had && had.static_at != null && had.line && had.line.length ? `?have=${encodeURIComponent(had.static_at)}` : "";
         const r = await fetch(URL + have, { credentials: "same-origin" });
-        if (r.ok) {
-          const d = await r.json();
-          if (d.static_same && had) { d.line = had.line; d.stations = had.stations; }
-          store.data = d;
-          store.at = Date.now();
-        }
-      } catch (_) { /* the hub is away: keep what we have */ }
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const d = await r.json();
+        if (d.static_same && had) { d.line = had.line; d.stations = had.stations; d.lanes = had.lanes; }
+        store.data = d;
+        store.at = Date.now();
+        store.fails = 0;
+      } catch (e) {                            // the hub is away: keep what we have, ask less often
+        store.fails += 1;
+        console.warn(`trains: ${e.message || e}; next poll in ${Math.round(nextPoll() / 1000)} s`);
+      }
       finally { store.loading = null; notify(); }
     })();
     return store.loading;
   }
-  function kick() {                         // a map turned it on (or the page came back): fetch now, then every 30 s
+  const nextPoll = () => (store.fails ? Math.min(BACKOFF_MS[1], BACKOFF_MS[0] * 2 ** (store.fails - 1)) : POLL_MS);
+  function kick() {                         // a map turned it on (or the page came back): fetch now, then every 5 s
     clearTimeout(store.timer);
     store.timer = null;
     if (!anyOn() || document.visibilityState === "hidden") return;
@@ -93,8 +101,8 @@ window.TrainLayer = (() => {
     store.timer = setTimeout(function tick() {
       store.timer = null;
       if (!anyOn() || document.visibilityState === "hidden") return;
-      load().then(() => { if (!store.timer && anyOn()) store.timer = setTimeout(tick, POLL_MS); });
-    }, POLL_MS);
+      load().then(() => { if (!store.timer && anyOn()) store.timer = setTimeout(tick, nextPoll()); });
+    }, nextPoll());
   }
   document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") kick(); });
 
@@ -161,59 +169,76 @@ window.TrainLayer = (() => {
   const iconHalf = (t, size) => [(size * (TOP * 2 + carsOf(t) * CAR - 3)) / 4, (size * W) / 4];   // css px
   const trackHalf = (t, z) => [(carsOf(t) * M_PER_CAR) / 2 / (MPP0 / 2 ** z), 4];
 
-  // ---- the cars along the track (#164): each an 85 ft piece of the line behind the train's front, so the train is
-  // as long on the map as on the ground and bends with the track; its width stays legible. A train the line doesn't
-  // pass within NEAR_M of keeps its icon (above).
-  const GAP_M = 2, NEAR_M = 100, R_EARTH = 6371008.8, RAD = Math.PI / 180;
-  const track = { coords: null, xy: null, at: null, k: 1 };
-  function trackOf(coords) {                    // the line in local metres and the distance along it at each point
-    if (track.coords === coords) return track;
-    Object.assign(track, { coords, xy: null, at: null });
-    if (!coords || coords.length < 2) return track;
-    track.k = Math.cos(coords[Math.floor(coords.length / 2)][1] * RAD);
-    track.xy = coords.map(([lon, lat]) => [lon * RAD * R_EARTH * track.k, lat * RAD * R_EARTH]);
-    track.at = [0];
-    for (let i = 1; i < track.xy.length; i++) track.at.push(track.at[i - 1] + Math.hypot(track.xy[i][0] - track.xy[i - 1][0], track.xy[i][1] - track.xy[i - 1][1]));
-    return track;
+  // ---- the cars along the track (#164): the train is as long on the map as on the ground and bends with the track;
+  // its width stays legible. Each direction on its own track (the hub's lanes: the outer track each way, from
+  // OpenStreetMap, measured in the line's own s), so an inbound and an outbound train never share one line; a train
+  // is laid back from its front (t.s) along its lane, the way it came. One smooth body for the whole consist (no
+  // joints to kink on a curve), the cab's rounded nose over its front, and thin gaps across it at each car's end from
+  // street zoom (GAP_ZOOM); zoomed out, one solid body. Without lanes (or s), the nearest point of the line itself;
+  // a train no line passes within NEAR_M of keeps its icon (above).
+  const GAP_M = 1.2, GAP_ZOOM = 16, NEAR_M = 100, R_EARTH = 6371008.8, RAD = Math.PI / 180;
+  const tracks = new WeakMap();
+  function trackOf(coords) {                    // a line in local metres, and where along it each point is
+    if (!coords || coords.length < 2) return { xy: null };
+    let tr = tracks.get(coords);
+    if (tr) return tr;
+    const k = Math.cos(coords[Math.floor(coords.length / 2)][1] * RAD);
+    const xy = coords.map(([lon, lat]) => [lon * RAD * R_EARTH * k, lat * RAD * R_EARTH]);
+    let at = [0];                               // a lane: the line's s at each point; the line: metres along it
+    if (coords[0].length > 2) at = coords.map((c) => c[2]);
+    else for (let i = 1; i < xy.length; i++) at.push(at[i - 1] + Math.hypot(xy[i][0] - xy[i - 1][0], xy[i][1] - xy[i - 1][1]));
+    tr = { xy, at, k };
+    tracks.set(coords, tr);
+    return tr;
   }
-  const toLonLat = ([x, y]) => [x / (R_EARTH * track.k * RAD), y / (R_EARTH * RAD)];
-  function along(tr, s) {                       // the point s metres along the line
+  const toLonLat = (tr, [x, y]) => [x / (R_EARTH * tr.k * RAD), y / (R_EARTH * RAD)];
+  function along(tr, s) {                       // the point s along the line
     const at = tr.at, xy = tr.xy;
-    s = Math.max(0, Math.min(at[at.length - 1], s));
-    let i = 1;
-    while (i < at.length - 1 && at[i] < s) i++;
+    s = Math.max(at[0], Math.min(at[at.length - 1], s));
+    let lo = 1, hi = at.length - 1;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (at[mid] < s) lo = mid + 1; else hi = mid; }
+    const i = lo;
     const f = at[i] > at[i - 1] ? (s - at[i - 1]) / (at[i] - at[i - 1]) : 0;
     return [i, [xy[i - 1][0] + f * (xy[i][0] - xy[i - 1][0]), xy[i - 1][1] + f * (xy[i][1] - xy[i - 1][1])]];
   }
-  function piece(tr, a, b) {                    // the line from a to b metres along it, as lon/lat
+  function piece(tr, a, b) {                    // the line from a to b along it, as lon/lat
     const [i, p] = along(tr, a), [j, q] = along(tr, b);
     const out = [p];
     for (let k = i; k < j; k++) out.push(tr.xy[k]);
     out.push(q);
-    return out.map(toLonLat);
+    return out.map((c) => toLonLat(tr, c));
   }
-  // {cars: [features], mid: [lon, lat]} for a train on the line, or null: its front where the MTA (or the estimate)
-  // puts it, the cars behind it the way it came
-  function onTrack(t, tr) {
-    if (!tr.xy) return null;
-    const P = [t.lon * RAD * R_EARTH * tr.k, t.lat * RAD * R_EARTH];
+  // where the train's front is on which track, and which way its cars lie: its own lane at its s; else the nearest
+  // point of the line, the cars back the way its bearing says it came
+  function frontOf(t, line, lanes) {
+    const lane = lanes && (t.d > 0 ? lanes.outbound : t.d < 0 ? lanes.inbound : null);
+    const tr = trackOf(lane);
+    if (tr.xy && typeof t.s === "number" && t.s >= tr.at[0] && t.s <= tr.at[tr.at.length - 1]) return { tr, s: t.s, back: -Math.sign(t.d) };
+    const lt = trackOf(line);
+    if (!lt.xy) return null;
+    const P = [t.lon * RAD * R_EARTH * lt.k, t.lat * RAD * R_EARTH];
     let best = null;
-    for (let i = 1; i < tr.xy.length; i++) {
-      const [ax, ay] = tr.xy[i - 1], [bx, by] = tr.xy[i], dx = bx - ax, dy = by - ay, L2 = dx * dx + dy * dy;
+    for (let i = 1; i < lt.xy.length; i++) {
+      const [ax, ay] = lt.xy[i - 1], [bx, by] = lt.xy[i], dx = bx - ax, dy = by - ay, L2 = dx * dx + dy * dy;
       const f = L2 ? Math.max(0, Math.min(1, ((P[0] - ax) * dx + (P[1] - ay) * dy) / L2)) : 0;
       const d = Math.hypot(ax + f * dx - P[0], ay + f * dy - P[1]);
-      if (!best || d < best.d) best = { d, s: tr.at[i - 1] + f * Math.sqrt(L2), dx, dy };
+      if (!best || d < best.d) best = { d, s: lt.at[i - 1] + f * Math.sqrt(L2), dx, dy };
     }
     if (!best || best.d > NEAR_M) return null;
     const segB = Math.atan2(best.dx, best.dy), b = (Number(t.bearing) || 0) * RAD;
     const back = Math.cos(segB - b) >= 0 ? -1 : 1;           // going up the line: its cars lie down the line
-    const n = carsOf(t), cars = [];
-    for (let k = 0; k < n; k++) {
-      const s1 = best.s + back * k * M_PER_CAR, s2 = best.s + back * ((k + 1) * M_PER_CAR - GAP_M);
-      cars.push({ type: "Feature", geometry: { type: "LineString", coordinates: piece(tr, Math.min(s1, s2), Math.max(s1, s2)) },
-                  properties: { id: t.id, estimated: !!t.estimated, cab: k === 0 } });
-    }
-    return { cars, mid: toLonLat(along(tr, best.s + (back * n * M_PER_CAR) / 2)[1]) };
+    return { tr: lt, s: best.s, back };
+  }
+  // {cars: [features], mid: [lon, lat]} for a train on a track, or null
+  function onTrack(t, line, lanes) {
+    const f = frontOf(t, line, lanes);
+    if (!f) return null;
+    const { tr, s, back } = f, n = carsOf(t), len = n * M_PER_CAR;
+    const part = (a, b, kind) => ({ type: "Feature", geometry: { type: "LineString", coordinates: piece(tr, Math.min(a, b), Math.max(a, b)) },
+                                    properties: { id: t.id, estimated: !!t.estimated, kind } });
+    const cars = [part(s, s + back * len, "body"), part(s, s + back * M_PER_CAR, "cab")];
+    for (let k = 1; k < n; k++) cars.push(part(s + back * (k * M_PER_CAR - GAP_M / 2), s + back * (k * M_PER_CAR + GAP_M / 2), "gap"));
+    return { cars, mid: toLonLat(tr, along(tr, s + (back * len) / 2)[1]) };
   }
 
   const towards = (t) => (t.headsign ? `to ${t.headsign}` : t.dir_label || "");
@@ -258,19 +283,24 @@ window.TrainLayer = (() => {
       map.addLayer({ id: "tr-station-label", type: "symbol", source: SRC_ST, minzoom: 12,
                      layout: { ...vis, ...label(["get", "name"], 11, { "text-anchor": "top", "text-offset": [0, 0.8] }) },
                      paint: { "text-color": line, "text-halo-color": HALO, "text-halo-width": 1.5 } }, before);
-      // a train on the line: its cars along the track, to scale; filled when the MTA reported it, an outline when
-      // it is our estimate; the front car's ends rounded (the cab)
+      // a train on its track: one body along it, to scale; filled when the MTA reported it, an outline when it is our
+      // estimate; the front car's nose rounded (the cab); the cars' ends as thin gaps across it from GAP_ZOOM. Every
+      // outline under every body, so the cab's outline never shows on the car behind it.
       const dark = token("--bg", HALO);
       const carW = ["interpolate", ["linear"], ["zoom"], 10, 4, 15, 6, 17, 9, 19, 28];
       const caseW = ["interpolate", ["linear"], ["zoom"], 10, 7, 15, 9, 17, 12, 19, 32];
-      for (const cab of [false, true]) {
-        const id = cab ? "tr-cab" : "tr-car", filter = ["==", ["get", "cab"], cab];
-        const layout = { ...vis, "line-cap": cab ? "round" : "butt", "line-join": "round" };
-        map.addLayer({ id: `${id}-case`, type: "line", source: SRC_CARS, filter, layout,
-                       paint: { "line-color": ["case", ["get", "estimated"], warn, HALO], "line-width": caseW } }, before);
-        map.addLayer({ id, type: "line", source: SRC_CARS, filter, layout,
-                       paint: { "line-color": ["case", ["get", "estimated"], dark, warn], "line-width": carW } }, before);
-      }
+      const part = (kind) => ["==", ["get", "kind"], kind];
+      const lay = (cap) => ({ ...vis, "line-cap": cap, "line-join": "round" });
+      map.addLayer({ id: "tr-car-case", type: "line", source: SRC_CARS, filter: part("body"), layout: lay("butt"),
+                     paint: { "line-color": ["case", ["get", "estimated"], warn, HALO], "line-width": caseW } }, before);
+      map.addLayer({ id: "tr-cab-case", type: "line", source: SRC_CARS, filter: part("cab"), layout: lay("round"),
+                     paint: { "line-color": ["case", ["get", "estimated"], warn, HALO], "line-width": caseW } }, before);
+      map.addLayer({ id: "tr-car", type: "line", source: SRC_CARS, filter: part("body"), layout: lay("butt"),
+                     paint: { "line-color": ["case", ["get", "estimated"], dark, warn], "line-width": carW } }, before);
+      map.addLayer({ id: "tr-cab", type: "line", source: SRC_CARS, filter: part("cab"), layout: lay("round"),
+                     paint: { "line-color": ["case", ["get", "estimated"], dark, warn], "line-width": carW } }, before);
+      map.addLayer({ id: "tr-gap", type: "line", source: SRC_CARS, filter: part("gap"), minzoom: GAP_ZOOM, layout: lay("butt"),
+                     paint: { "line-color": ["case", ["get", "estimated"], warn, HALO], "line-width": carW } }, before);
       // a train off the line: an icon lying flat along its heading, to scale once zoomed in (ICON_SIZE)
       map.addLayer({ id: "tr-train", type: "symbol", source: SRC_TR, filter: ["!", ["get", "onTrack"]],
                      layout: { ...vis, "icon-image": ["get", "icon"], "icon-rotate": ["get", "bearing"],
@@ -303,16 +333,20 @@ window.TrainLayer = (() => {
       if (on && d) {
         if (d.line !== this.line) {             // the line and stations: only when the hub sent new ones
           this.line = d.line;
+          this.lanes = d.lanes && d.lanes.outbound && d.lanes.inbound ? d.lanes : null;
           this.sig = "";                        // the cars lie along it: lay them again
-          this.map.getSource(SRC_LINE).setData(fc(d.line && d.line.length > 1 ? [{ type: "Feature", geometry: { type: "LineString", coordinates: d.line }, properties: {} }] : []));
+          const ln = (coords, dir) => ({ type: "Feature", geometry: { type: "LineString", coordinates: coords.map((c) => [c[0], c[1]]) }, properties: { dir } });
+          const drawn = this.lanes ? [ln(this.lanes.outbound, "outbound"), ln(this.lanes.inbound, "inbound")]   // each way's own track
+            : d.line && d.line.length > 1 ? [ln(d.line, "")] : [];
+          this.map.getSource(SRC_LINE).setData(fc(drawn));
           this.map.getSource(SRC_ST).setData(fc((d.stations || []).map((s) => pt(s.lon, s.lat, { id: s.id, name: s.name }))));
         }
         const sig = JSON.stringify(d.trains || []);
         if (sig !== this.sig) {
           this.sig = sig;
-          const tr = trackOf(this.line), cars = [];
+          const cars = [];
           this.map.getSource(SRC_TR).setData(fc((d.trains || []).map((t) => {
-            const on = onTrack(t, tr);
+            const on = onTrack(t, this.line, this.lanes);
             if (on) cars.push(...on.cars);
             const half = on ? (z) => trackHalf(t, z) : (z) => iconHalf(t, z === SCALE_TO ? sizeAt(SCALE_TO) : MIN_SIZE);
             const [anchor, off_lo] = labelPlace(t.bearing, ...half(SCALE_FROM)), off_hi = labelPlace(t.bearing, ...half(SCALE_TO))[1];
@@ -351,7 +385,9 @@ window.TrainLayer = (() => {
         const said = (t.status || "").toLowerCase();         // the MTA's word, unless the delay already says it
         const status = [late(t.delay_s), said && said !== "on-time" && !(said === "late" && t.delay_s > 0) ? t.status : ""].filter(Boolean).join(" · ");
         if (status) lines.push(status);
-        lines.push(t.estimated ? "Position estimated (between its stations, by its times)" : "Position reported by the MTA");
+        lines.push(!t.estimated ? "Position reported by the MTA"
+          : t.mode === "stopped" ? "Position estimated (at the station: the MTA hasn't said it left)"
+            : "Position estimated (on its run between its stations, by the MTA's times)");
         lines.push(t.cars ? `${t.cars} car${t.cars === 1 ? "" : "s"} (from the MTA)` : `Length not given by the MTA (drawn as ${LOOK_CARS} cars for every train)`);
         lines.push(d.catenary);
         this.control.showInfo(`Train ${t.train}`, `${t.line ? `${t.line} Line` : "Metro-North"} to ${t.headsign}`, lines, foot, "", icon);

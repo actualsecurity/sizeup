@@ -1,0 +1,50 @@
+{
+ "recorded": "2026-10-14T16:39:45-0400",
+ "source": "the MTA realtime feed (sizeup/trains.py RT_URL) read every 6 s, 2026-10-14 16:23:52 to 16:25:54 EDT, saved and trimmed (--seq FILES)",
+ "reads": [
+  {
+   "feed_timestamp": 1792009432,
+   "entities": 24
+  },
+  {
+   "feed_timestamp": 1792009445,
+   "entities": 24
+  },
+  {
+   "feed_timestamp": 1792009457,
+   "entities": 24
+  },
+  {
+   "feed_timestamp": 1792009469,
+   "entities": 24
+  },
+  {
+   "feed_timestamp": 1792009481,
+   "entities": 24
+  },
+  {
+   "feed_timestamp": 1792009493,
+   "entities": 24
+  },
+  {
+   "feed_timestamp": 1792009506,
+   "entities": 23
+  },
+  {
+   "feed_timestamp": 1792009518,
+   "entities": 23
+  },
+  {
+   "feed_timestamp": 1792009530,
+   "entities": 23
+  },
+  {
+   "feed_timestamp": 1792009542,
+   "entities": 23
+  },
+  {
+   "feed_timestamp": 1792009554,
+   "entities": 23
+  }
+ ]
+}

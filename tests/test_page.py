@@ -158,6 +158,63 @@ def background(s):      # another, weaker carrier on the channel: ~26 dB quietin
     return 0.02 * rng.standard_normal(int(RATE * s))
 
 
+def vowel(s, f1=500.0, f2=1900.0, f0=125.0, amp=0.3):
+    """An "eh" as the discriminator hears it (pre-emphasised, nothing de-emphasised yet): harmonics of f0 under two
+    formants, most of the energy at 1.5-2 kHz. On its own it passes the MDC data-frame rule (data_frames)."""
+    t = np.arange(int(RATE * s)) / RATE
+    ph = 2 * np.pi * np.cumsum(f0 + 8 * np.sin(2 * np.pi * 3 * t)) / RATE
+    out = np.zeros_like(t)
+    for k in range(1, int(3400 / f0)):
+        f = k * f0
+        g = (1 / (1 + ((f - f1) / 90) ** 2) + 1 / (1 + ((f - f2) / 110) ** 2)) * np.sqrt(1 + (f / 212) ** 2) / k ** 0.5
+        out += g * np.sin(k * ph)
+    return amp * out / np.abs(out).max() * np.sin(np.pi * np.clip(t / s, 0, 1)) ** 0.5
+
+
+def kept(seg, part, at):
+    """Whether a segment from run_squelch (stream time t is clock 1000 + t) has this piece of audio, as it was fed
+    in at stream time `at` (s), in it whole."""
+    off = round((1000.0 + at - seg.start) * RATE)
+    got = seg.audio[off:off + len(part)] if off >= 0 else np.zeros(0)
+    return len(got) == len(part) and np.corrcoef(got, part)[0, 1] > 0.95
+
+
+def test_the_last_second_of_speech_is_not_cut_off_as_an_id_burst():
+    # FG1 2026-10-14 16:14 ("this one got cut off ... we need to make sure we dont cut off"): every clip of a
+    # conversation ended mid-word ("parent teacher conferences from 4th"), each "ID not decoded". A vowel in the
+    # last second passed the data-frame rule, and the squelch cut it off as a post-ID burst with all the speech
+    # after it. A post-ID only has dead air after it (the PTT is released): speech after it means it isn't one.
+    from sizeup.radio.fm import data_frames
+    eh = vowel(0.3)
+    assert any(data_frames([eh[i:i + FRAME] for i in range(0, len(eh) - FRAME + 1, FRAME)] + [dead(0.3)[:FRAME]] * 6))
+    end = voice_like(0.8)
+    for release in (dead(0.15), np.concatenate([dead(0.1), mdc_burst(), dead(0.15)])):   # no ID / an old radio's post-ID
+        talk = np.concatenate([dead(0.3), voice_like(1.5), eh, end])
+        segs = run_squelch(np.concatenate([hiss(3.0), strong(np.concatenate([talk, release])), hiss(2.0)]), drop_db=10)
+        assert len(segs) == 1
+        seg = segs[0]
+        assert len(seg.bursts) == (len(release) > len(dead(0.15)))       # the real post-ID is still cut off
+        assert kept(seg, eh, 3.0 + 1.8) and kept(seg, end, 3.0 + 2.1)    # the vowel and the last 0.8 s, as said
+        assert seg.end >= 1000.0 + 3.0 + len(talk) / RATE
+
+
+def test_speech_before_a_vowel_in_the_first_second_is_kept_and_the_pre_id_still_cut():
+    # The same at the key-up: a pre-ID only has dead air before it (APX 6000s send theirs 0.3-0.8 s in). Speech
+    # before a data-like vowel stays; a real pre-ID, and the dead air before it, still goes.
+    start, eh = voice_like(0.4), vowel(0.3)
+    for key_up in (dead(0.3), np.concatenate([dead(0.4), mdc_burst(), dead(0.1)])):
+        talk = np.concatenate([start, eh, voice_like(1.5)])
+        segs = run_squelch(np.concatenate([hiss(3.0), strong(np.concatenate([key_up, talk, dead(0.15)])), hiss(2.0)]),
+                           drop_db=10)
+        assert len(segs) == 1
+        seg = segs[0]
+        at = 3.0 + len(key_up) / RATE
+        assert kept(seg, start, at) and kept(seg, eh, at + 0.4)          # the first words, and the vowel
+        assert len(seg.bursts) == (len(key_up) > len(dead(0.3)))         # the real pre-ID is still cut off ...
+        if seg.bursts:
+            assert seg.start > 1000.0 + 3.0 + 0.4 + 0.2                  # ... with the dead air before it
+
+
 def test_a_weaker_carrier_under_ours_does_not_hold_the_squelch_open():
     # FG1 2026-10-07 17:17-17:21: short key-ups were logged as 21-28 s. PCFD radios quieted the
     # receiver ~40 dB; something else on the frequency held it at 21-28 dB for 20-30 s afterwards.

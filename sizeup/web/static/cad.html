@@ -106,14 +106,14 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
         <span id="ov-counts" class="dim small"></span>
         <span class="spacer"></span>
         <div id="ov-talk" class="ov-talk" aria-live="polite"></div>
-        <!-- the Overview's layout (camwall.js, #125, #147): the map, the cameras in our area, both side by side or stacked,
-             or the cameras on the map (camoverlay.js); remembered per screen. A phone: Map and Cameras only -->
+        <!-- the Overview's layout (camwall.js, #125, #147): the map, the cameras in our area, or both side by side or
+             stacked; remembered per screen. A phone: Map and Cameras only. The cameras on the map (camoverlay.js) are
+             a toggle in the map's Layers box (#168), not a layout -->
         <span id="ov-layout" class="seg ov-layout" role="group" aria-label="Overview layout">
           <button type="button" data-layout="map" aria-pressed="true" title="The map">Map</button>
           <button type="button" data-layout="cameras" aria-pressed="false" title="Every camera in our area"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-camera"/></svg>Cameras</button>
           <button type="button" data-layout="side" aria-pressed="false" title="Map | cameras | events">Side by side</button>
           <button type="button" data-layout="stacked" aria-pressed="false" title="Map and cameras one over the other; events on the right">Stacked</button>
-          <button type="button" data-layout="overlay" aria-pressed="false" title="The cameras on the map">Overlay</button>
         </span>
         <button id="ov-swap" class="sm" type="button" aria-pressed="false" hidden title="Cameras above the map">Swap</button>
       </div>

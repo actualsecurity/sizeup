@@ -40,6 +40,14 @@ name, radio ID), every unit of ours the transcript names, the channel, and the e
 when it is linked: title "MAYDAY · E64 P1 (Engine 64) on FG1 · 26-000015 100 S Ridge St" (notify.Who),
 body "heard: “mayday mayday, Engine 64 …” · units named: E64, L31". The screens show the same.
 
+aircraft    an aircraft emergency near HPN from public ADS-B data (sizeup/aircraft.py, #155; user, 2026-10-14: "yes they
+            should"): a squawk 7500 / 7600 / 7700 or the aircraft's own emergency status, inside the aircraft layer's
+            radius below 18,000 ft. One alarm per aircraft per emergency (source "adsb", channel ADSB_CHANNEL), with its
+            callsign or registration, type, what the squawk means, altitude, where it is from HPN and what it is doing
+            (on_aircraft); when the emergency has not been seen for a minute it ends (aircraft_cleared): acknowledged as
+            "ADS-B: squawk ended", with an "Ended" push. Marked everywhere as public ADS-B data, not an official
+            notification. Drill mode marks it like any other alarm.
+
 Runs on the CAD of record (all-in-one or the hub). A station forwarding to a hub raises nothing itself: it
 sends the hub an "alarm" event for the button at the end of the call, and the transcripts as always.
 """
@@ -68,6 +76,9 @@ REPEAT_S = 120                             # the same radio's button again on th
 NOTICE_S = 15 * 60                         # a notice nobody acknowledged drops off after this
 RECENT_S = 10 * 60                         # acknowledged alarms listed this long (the screens say who and when)
 KEEP_S = 90 * 86400
+ADSB_CHANNEL = "ADS-B (public data)"
+ADSB_NOTE = "From public ADS-B data, not an official notification"
+COLUMNS = (("source", "TEXT NOT NULL DEFAULT ''"), ("subject", "TEXT NOT NULL DEFAULT ''"))   # added after #128
 TOKEN = re.compile(r"(?:[A-Za-z]\.){2,}|[A-Za-z0-9]+(?:['’][A-Za-z0-9]+)*")
 CHANNEL = re.compile(r"tg:\d{1,9}|[A-Za-z0-9][A-Za-z0-9 ./_-]{0,39}")
 
@@ -94,7 +105,9 @@ CREATE TABLE IF NOT EXISTS alarms (
   drill INTEGER NOT NULL DEFAULT 0,
   incident_id INTEGER,
   ack_by TEXT NOT NULL DEFAULT '',
-  ack_at REAL
+  ack_at REAL,
+  source TEXT NOT NULL DEFAULT '',      -- "" (a transmission) | "adsb" (an aircraft emergency, sizeup/aircraft.py)
+  subject TEXT NOT NULL DEFAULT ''      -- adsb: what the emergency is ("squawk 7700 (emergency)")
 );
 CREATE INDEX IF NOT EXISTS alarms_ack ON alarms(ack_at);
 """
@@ -233,7 +246,10 @@ def who(a: dict) -> str:
 
 
 def what(a: dict) -> str:
-    """"emergency button", "emergency button (MDC)", "mayday", "emergency button + mayday", "firefighter down"."""
+    """"emergency button", "emergency button (MDC)", "mayday", "emergency button + mayday", "firefighter down";
+    an aircraft: "aircraft emergency: squawk 7700 (emergency)"."""
+    if a.get("source") == "adsb":
+        return f"aircraft emergency: {a.get('subject') or 'emergency'}"
     kws = a.get("keywords") or []
     words = []
     for k in kws:
@@ -249,6 +265,47 @@ def line(a: dict) -> str:
     """The chronology's line: "EMERGENCY: E64 P1 mayday on FG1 at 14:32:10"."""
     return (("DRILL — " if a.get("drill") else "") + f"EMERGENCY: {who(a)} {what(a)} on {a.get('channel') or '?'} "
             f"at {_hms(a.get('at'))}")
+
+
+PHASES = {"departing": "departing HPN", "ground": "on the ground at HPN", "low": "low in the area",
+          "overflight": "passing over", "other_ground": "on the ground elsewhere"}
+
+
+def aircraft_label(ev: dict) -> str:
+    """The aircraft as the alarm names it: its callsign, else its registration, else its ICAO address."""
+    return ev.get("callsign") or ev.get("reg") or str(ev.get("hex") or "?").lstrip("~").upper()
+
+
+def aircraft_type(ev: dict) -> str:
+    """"SR22, Cirrus Design Corp SR22" (the feed's designator, the FAA registry's make and model), or "type not known"."""
+    return ", ".join(x for x in (ev.get("type"), ev.get("model")) if x) or "type not known"
+
+
+def aircraft_text(ev: dict) -> str:
+    """The alarm's line about the aircraft: who, what kind, the emergency, how high, where from HPN, what it is
+    doing, which feed, and that this is public ADS-B data."""
+    alt = ev.get("alt")
+    alt_s = "on the ground" if alt == "ground" else f"{alt:,} ft" if isinstance(alt, (int, float)) else "altitude not reported"
+    vr = ev.get("vr")
+    if isinstance(vr, (int, float)) and alt != "ground":
+        alt_s += ", level" if abs(vr) <= 300 else f", {'climbing' if vr > 0 else 'descending'} {abs(vr):,} ft/min"
+    label = aircraft_label(ev)
+    if ev.get("callsign") and ev.get("reg") and ev["reg"] != ev["callsign"]:
+        label += f" ({ev['reg']})"
+    ph = ev.get("phase") or ""
+    if ph == "arriving":
+        doing = "arriving HPN"
+        if ev.get("approach") and ev["approach"] != "maneuvering":
+            doing += f" on the {ev['approach']}"
+        elif ev.get("runway"):
+            doing += f", runway {ev['runway']}"
+        if ev.get("dist_nm") is not None:
+            doing += f", {ev['dist_nm']} nm to go"
+    else:
+        doing = PHASES.get(ph, ph)
+    parts = [f"{label}, {aircraft_type(ev)}", ev.get("meaning") or "emergency", alt_s, ev.get("where") or "",
+             doing, f"via {ev.get('feed') or 'ADS-B'}"]
+    return " · ".join(x for x in parts if x) + f". {ADSB_NOTE}."
 
 
 # -- the alarms ------------------------------------------------------------------------------------------
@@ -269,6 +326,10 @@ class Alarms:
             for stmt in SCHEMA.split(";"):
                 if stmt.strip():
                     self.store.db.execute(stmt)
+            have = {r[1] for r in self.store.db.execute("PRAGMA table_info(alarms)")}
+            for col, decl in COLUMNS:                   # a database from before the aircraft alarms
+                if col not in have:
+                    self.store.db.execute(f"ALTER TABLE alarms ADD COLUMN {col} {decl}")
             self.store.db.execute("DELETE FROM alarms WHERE created_at < ?", (self.clock() - KEEP_S,))
 
     # -- settings (Settings > System > Alarms; POST /api/cad/settings/alarms) -------------------------------
@@ -460,12 +521,65 @@ class Alarms:
         self.on_change()
         return a
 
+    # -- an aircraft emergency near HPN (sizeup/aircraft.py's watch) -------------------------------------------
+
+    def on_aircraft(self, ev: dict) -> int:
+        """A squawk 7500 / 7600 / 7700 or an aircraft's own emergency status near HPN (AircraftLayer calls this once
+        per aircraft per emergency): its alarm's id. On every console and wall board until acknowledged or ended,
+        and pushed through [alerts] ntfy_topic when one is set."""
+        now = self.clock()
+        cfg = self.config()
+        at = float(ev.get("at") or now)
+        tid = f"adsb:{ev.get('hex')}:{ev.get('code')}:{int(at)}"
+        with self._lock:
+            cur = self.store.one("SELECT id FROM alarms WHERE traffic_id = ?", (tid,))
+            if cur is not None:
+                return cur["id"]
+            with self.store.tx() as db:
+                aid = db.execute(
+                    "INSERT INTO alarms (traffic_id, at, end, created_at, updated_at, level, emergency, text, channel, unit, "
+                    "drill, source, subject) VALUES (?, ?, ?, ?, ?, 'alarm', 0, ?, ?, ?, ?, 'adsb', ?)",
+                    (tid, at, at, now, now, aircraft_text(ev), ADSB_CHANNEL, aircraft_label(ev), int(bool(cfg["drill"])),
+                     str(ev.get("meaning") or "emergency"))).lastrowid
+            a = self._link(self.get(aid))
+        self.log(f"alarms: {'DRILL ' if a['drill'] else ''}ALARM {line(a)}: {a['text']}")
+        self._push(a, who={"units": [(aircraft_label(ev), ev.get("type") or "")], "channel": ADSB_CHANNEL,
+                           "incident": str(a.get("incident_number") or ""), "address": str(a.get("incident_address") or "")})
+        self.on_change()
+        return aid
+
+    def aircraft_cleared(self, ev: dict, aid: int, why: str) -> dict | None:
+        """The aircraft's emergency ended (its squawk changed back, or it is no longer reported, for a minute): an
+        alarm nobody acknowledged is acknowledged as "ADS-B: <why>"; an "Ended" push either way."""
+        now = self.clock()
+        with self._lock:
+            cur = self.store.one("SELECT * FROM alarms WHERE id = ? AND source = 'adsb'", (aid,))
+            if cur is None:
+                return None
+            if cur["ack_at"] is None:
+                with self.store.tx() as db:
+                    db.execute("UPDATE alarms SET ack_by = ?, ack_at = ?, updated_at = ?, end = ? WHERE id = ?",
+                               (f"ADS-B: {why}"[:OPERATOR_MAX], now, now, now, aid))
+                a = self.get(aid)
+                if a["incident_id"]:
+                    with self.store.tx() as db:
+                        self.store._event(db, a["incident_id"], "alarm", self._ack_line(a), "ADS-B", at=now)
+            else:
+                a = self.get(aid)
+        self.log(f"alarms: aircraft alarm {aid} ended: {why}")
+        self._push(a, ended=why, who={"units": [(aircraft_label(ev), ev.get("type") or "")], "channel": ADSB_CHANNEL})
+        self.on_change()
+        return a
+
     # -- the event it belongs to ------------------------------------------------------------------------
 
     OPEN = "i.status NOT IN ('closed', 'dismissed')"
 
     def _incident_for(self, a: dict) -> int | None:
         st = self.store
+        if a.get("source") == "adsb":            # an aircraft: the one open Airport event, when there is exactly one
+            rows = st.q(f"SELECT i.id FROM incidents i WHERE {self.OPEN} AND i.type = 'AIRPORT' ORDER BY i.created_at DESC")
+            return rows[0]["id"] if len(rows) == 1 else None
         r = st.one(f"SELECT l.incident_id AS id FROM radio_links l JOIN incidents i ON i.id = l.incident_id "
                    f"WHERE l.traffic_id = ? AND {self.OPEN} ORDER BY i.created_at DESC LIMIT 1", (a["traffic_id"],))
         if r:
@@ -530,16 +644,22 @@ class Alarms:
 
     # -- the push (sizeup/notify.py) --------------------------------------------------------------------------
 
-    def _push(self, a: dict, ack: bool = False) -> None:
+    def _push(self, a: dict, ack: bool = False, ended: str = "", who=None) -> None:
         """Title: what, then who / where (notify.compose: "MAYDAY · E64 P1 (Engine 64) on FG1 · 26-000015 100 S Ridge St");
-        body: when, what was heard, the units it names, who acknowledged."""
+        body: when, what was heard, the units it names, who acknowledged. An aircraft (source "adsb"): its line
+        (aircraft_text), "Ended: ..." when its emergency ended. Never Tapout's topics (notify.py refuses them)."""
         n = self.notifier
         if n is None or not n.enabled:
             return
+        adsb = a.get("source") == "adsb"
         head = what(a).upper()
-        title = ("DRILL: " if a["drill"] else "") + ("Acknowledged: " if ack else "") + head
+        title = ("DRILL: " if a["drill"] else "") + ("Ended: " if ended else "Acknowledged: " if ack else "") + head
         body = [f"{_hms(a['at'])}" + (f" · radio {a['radio_id']}" if a["radio_id"] else "")]
-        if a["text"]:
+        if ended:
+            body = [f"{ended} at {_hms(self.clock())}"]
+        if a["text"] and adsb:
+            body.append(a["text"][:600])
+        elif a["text"]:
             body.append(f"heard: \u201c{a['text'][:500]}\u201d")
         if a.get("named"):
             body.append(f"units named: {', '.join(a['named'])}")
@@ -547,11 +667,13 @@ class Alarms:
             body.append(f"acknowledged by {a['ack_by']} at {_hms(a['ack_at'])}")
         if a["drill"]:
             body.append("DRILL (training): not a real emergency")
-        prio = 3 if a["drill"] else (4 if ack else 5)
-        tags = ["white_check_mark"] if ack else (["construction"] if a["drill"] else ["rotating_light"])
+        prio = 3 if a["drill"] or ended else (4 if ack else 5)
+        tags = ["white_check_mark"] if ack or ended else (["construction"] if a["drill"] else ["rotating_light"])
+        if adsb:
+            tags = ["airplane", *tags]
         click = f"{self.public_url.rstrip('/')}/cad" if self.public_url else ""
         try:
-            n.send(title, " · ".join(body), prio, tags, click, who=self.who_of(a))
+            n.send(title, " · ".join(body), prio, tags, click, who=who if who is not None else self.who_of(a))
         except Exception as e:  # noqa: BLE001 - a push never stands in the way of the alarm
             self.log(f"alarms: push not sent: {type(e).__name__}: {e}")
 

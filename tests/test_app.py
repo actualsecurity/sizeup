@@ -619,6 +619,40 @@ def test_apx6000_id_sent_late_in_the_transmission_is_found(tmp_path):
     assert app._id_note("FG1", Segment(0, 1, hiss, 20.0, []), []) == "none"
 
 
+def test_fg1_clip_keeps_the_last_second_of_speech_and_the_post_id_still_names_the_radio(tmp_path):
+    # FG1 2026-10-14 16:14: clips ended mid-word, "ID not decoded". Receiver to saved clip: a vowel in the last second
+    # looked like an MDC burst and the speech after it was cut off with it. The real post-ID after the release is
+    # still cut off (not heard as words) and decoded.
+    import io
+    import wave
+    from sizeup.radio.mdc1200 import encode as mdc_encode
+    from tests.test_page import dead, run_squelch, vowel, voice_like   # (its noise helpers share test_page's RNG)
+    noise = np.random.default_rng(16).standard_normal
+    end = voice_like(0.6)
+    talk = np.concatenate([dead(0.3), voice_like(1.2), vowel(0.3), end])
+    post = np.concatenate([dead(0.1), mdc_encode(0x01, 0x00, 0x0611), dead(0.15)])
+    tx = np.concatenate([talk, post])
+    segs = run_squelch(np.concatenate([0.4 * noise(3 * RATE), tx + 0.002 * noise(len(tx)), 0.4 * noise(2 * RATE)]),
+                       drop_db=10)                                  # hiss, a strong carrier (~45 dB), hiss
+    assert len(segs) == 1 and len(segs[0].bursts) == 1
+    app = App(cfg(tmp_path))
+    app._kind = {"FG1": "traffic"}
+    heard = []
+    app.stt.client = type("W", (), {"transcribe": lambda self, a, prompt="": (heard.append(len(a)) or "Engine 61 to command", 0.9)})()
+    app.stt.start()
+    app._segment(Channel(453.0375, "FG1"), segs[0])
+    assert wait(lambda: len(app.state()["loose_traffic"]) == 1)
+    row = app.state()["loose_traffic"][0]
+    assert (row["radio_id"], row.get("id_note")) == ("0611", None)
+    with wave.open(io.BytesIO(app.clip(row["id"]))) as w:
+        clip = np.frombuffer(w.readframes(w.getnframes()), "<i2").astype(float) / 32768
+    assert len(clip) >= len(talk) - int(0.35 * RATE)                       # (dead air at key-up may go)
+    last = clip[-len(end):]
+    blk = RATE // 50
+    loud = np.sqrt((last[: len(last) // blk * blk].reshape(-1, blk) ** 2).mean(axis=1))
+    assert (20 * np.log10(loud + 1e-9) > -30).mean() > 0.8                  # speech to the end of the clip
+
+
 def test_a_page_that_fades_and_comes_back_is_one_page_sent_once(tmp_path, capsys):
     # GitHub #61: the squelch closed in a fade and the page came back 2 s later as a continuation. The
     # page shows as pending at once, goes to the hub and speech-to-text once, after the window, whole.

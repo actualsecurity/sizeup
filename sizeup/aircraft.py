@@ -30,25 +30,38 @@ What comes from shortfinal (the PCFD firehouse ADS-B + KHPN display; its branch 
 Left in shortfinal: ATC audio and speech-to-text, callsign attribution, adsb.im routes (community data), the
 "window" view, ntfy pushes, the replay/recorder, the readsb supervisor.
 
-Feeds, behind one interface (Feed.read() -> Snapshot), tried in the configured order ([aircraft] feeds); a feed
-that fails rests (its Retry-After, else backing off) while the next one carries on:
+Feeds, behind one interface (Feed.read() -> Snapshot). User, 2026-10-14 (#161): "adsb.lol as primary or adsb.fi
+whichever gives the most data, and then keep that data, but poll between the two as needed if one loses or is rate
+limited, this is personal non commercial use, we are not charging for this"; and "primary local SDR on ADSB,
+secondary the above sources". So every feed's latest answer is kept and combined (combine(): the union by ICAO
+address, the freshest position per aircraft, our receiver's position first for any aircraft it hears):
 
-  adsblol   adsb.lol's point query (https://api.adsb.lol/v2/point/<lat>/<lon>/<nm>): keyless, the data under
-            the Open Database License (ODbL 1.0): free to use, also operationally, with attribution (the layer
-            names adsb.lol and the licence). Rate-limited by load: never asked more often than every POLL_S.
-            The default.
-  adsbfi    adsb.fi's open data API, same JSON: its terms are "personal, non-commercial use only" with
-            attribution. A fire department's dispatch isn't plainly personal use, so it is OFF unless listed.
-  receiver  our own ADS-B receiver, when there is one: readsb / dump1090's aircraft.json (1090 MHz) and
-            dump978-fa's (978 MHz UAT), each a file path or an http(s) URL, merged by ICAO address (the fresher
-            position wins). Assumes an SDR with an LNA and a 1090 filter in front (run readsb with --gain auto:
-            an LNA makes a fixed high gain overload, shortfinal bench 2026-10-02). sizeup only READS those
+  receiver  our own ADS-B receiver, when there is one (none yet: off): readsb / dump1090's aircraft.json (1090 MHz)
+            and dump978-fa's (978 MHz UAT), each a file path or an http(s) URL, merged by ICAO address. Read every
+            RECEIVER_POLL_S; its positions win while it is healthy (an answer within RECEIVER_KEEP_S); stale or
+            down, the APIs carry everything. Assumes an SDR with an LNA and a 1090 filter in front (run readsb with --gain
+            auto: an LNA makes a fixed high gain overload, shortfinal bench 2026-10-02). sizeup only READS those
             files: it never starts a decoder, never opens a dongle and never writes a claim. [aircraft.receiver]
             sdr names the dongle meant for ADS-B (an exact USB serial): sizeup's own radios then never use it
             (it is added to [radio] sdr_ignore), and the layer says whether it is plugged in and who holds it
-            (the shared claims, ~/.local/state/rtl-claims, sizeup/radio/claims.py). None is named yet: off.
-  (OpenSky) not used: its licence allows non-profit research and education, internal evaluation and "government
-            purposes"; live operational use needs a written agreement with OpenSky. Asked of the user (#155).
+            (the shared claims, ~/.local/state/rtl-claims, sizeup/radio/claims.py).
+  adsblol   adsb.lol's point query (https://api.adsb.lol/v2/point/<lat>/<lon>/<nm>): keyless, the data under the
+            Open Database License (ODbL 1.0): attribution (the map corner and the box name it and the licence).
+  adsbfi    adsb.fi's open data API, same JSON: "personal, non-commercial use only", attribution. The user decided
+            (2026-10-14) that this is personal, non-commercial use: the department charges nothing for it. On.
+  The two APIs: the PRIMARY is whichever has been giving more aircraft with a fresh position (a running average,
+  SCORE_ALPHA), asked every PRIMARY_S while someone looks; the other every SECONDARY_S (its aircraft join the
+  union and its count stays known). A feed that errors, times out or answers 429 rests (its Retry-After when it
+  sends one, else 5 s doubling to 5 min) and the other becomes the primary; it comes back on its first good answer.
+  Both stay well inside their limits (adsb.fi: 1 request a second; adsb.lol: by load, 5 s was fine for shortfinal).
+  (OpenSky) not used: its licence needs a written agreement for live operational use, its credits are far too
+            few for a 5 s refresh, and it adds nothing over these.
+
+The emergency watch: a squawk 7500 / 7600 / 7700, or the aircraft's own emergency status, inside RADIUS_NM of HPN
+below WATCH_CEILING_FT, from a message no older than STALE_S, raises one alarm (sizeup/cad/alarms.py, its push
+through [alerts] ntfy_topic when one is set) per aircraft per emergency, cleared when it has not been seen for
+CLEAR_HOLD_S (a flicker doesn't re-alarm), not raised again within REALARM_S, at most MAX_ALARMS an hour. So the
+alarm works while nobody looks at the map, the primary feed (and the receiver) are read every WATCH_S then.
 
 Types: the feed's ICAO type designator ("t": E75L) when it has one; the make and model from the FAA Releasable
 Aircraft Database (public domain, registry.faa.gov/database/ReleasableAircraft.zip) by the aircraft's ICAO
@@ -66,14 +79,16 @@ fading until the hub drops it after DROP_S. The ETA is distance / ground speed, 
 reading of the track (shortfinal's rules), never ATC's word.
 
 Traffic (#146 kept the state push tiny): aircraft never go into the state push. The page asks GET
-/api/cad/aircraft every 2 s only while a map has the layer on and the page is visible; the hub reads the feed
-only while asked (DEMAND_S), at most every POLL_S; every answer has an ETag (304 when nothing changed).
+/api/cad/aircraft every 2 s only while a map has the layer on and the page is visible (the feeds are still read at
+their own rates: the ask only shortens the wait for a read already made); the hub reads the feeds at the rates above
+while asked (DEMAND_S), else only the emergency watch's; every answer has an ETag (304 when unchanged).
 
 HTTP (sizeup/web/server.py; any signed-in person, GET only):
-    GET /api/cad/aircraft   {configured, note, feed: {key, label, link, licence, terms, credit} | null, feeds,
-                            at (the feed's time), fetched, error, stale_s, drop_s, airport, registry, receiver,
+    GET /api/cad/aircraft   {configured, note, feed: the primary {key, label, link, licence, terms, credit} | null,
+                            feeds: [{... role, n, fresh, ok, at, shown, resting, healthy}], credit, at (the newest feed
+                            time), fetched, error, stale_s, drop_s, airport, registry, receiver,
                             aircraft: [{hex, cs, flight, reg, reg_src, type, model, model_src, kind, cat, airline, lat, lon,
-                            alt, gs, trk, tr, vr, sq, emerg, phase, rwy, appr, dist, eta, age, pos, band, trail}],
+                            alt, gs, trk, tr, vr, sq, emerg, phase, rwy, appr, dist, eta, age, pos, band, src, trail}],
                             counts}
 """
 
@@ -125,15 +140,13 @@ RADIUS_NM = 15.0              # the feed is asked for this much around HPN; "low
 CEILING_FT = 6000.0           # below this (MSL) inside the radius: low traffic (shortfinal's focus.ceiling_ft)
 FINAL_NM = 12.0               # lined up on a runway end this close: on final
 ARRIVAL_NM = 15.0             # inbound, descending and low enough this close: arriving
-POLL_S = 5.0                  # an API feed: at most this often (adsb.lol rate-limits faster polling)
-RECEIVER_POLL_S = 2.0         # our receiver's files: cheap, local
+RECEIVER_POLL_S = 2.0         # our receiver's files: cheap, local (the API feeds' rates: PRIMARY_S, SECONDARY_S below)
 DEMAND_S = 60.0               # a viewer's ask keeps the feed coming this long
 WAIT_FIRST_S = 5.0            # an ask with nothing fresh waits this long for the read it wakes
 STALE_S = 15.0                # a position older than this is drawn hollow, with its age
 DROP_S = 60.0                 # ... and gone after this (shortfinal's drop_after_s)
 FEED_STALE_S = 30.0           # a receiver file whose own clock is older than this: its decoder has stopped
-BACKOFF_S = (5.0, 120.0)
-RATE_LIMITED_S = 30.0
+BACKOFF_S = (5.0, 300.0)      # a feed that fails: 5 s doubling to 5 min (a 429: its Retry-After when it sends one)
 TIMEOUT_S = 10.0
 MAX_FEED_BYTES = 4 * 1024 * 1024
 REGISTRY_EVERY_S = 7 * 86400.0
@@ -217,6 +230,7 @@ class Plane:
     track_rate: float | None = None   # deg/s, + right: the feed's own, when it sends one (readsb "track_rate")
     source: str = ""                  # how the position was found: adsb, mlat, tisb, adsr ...
     band: str = ""                    # our receiver: "1090" or "978"
+    feed: str = ""                    # the feed the position came from: receiver, adsblol, adsbfi (combine())
 
     @classmethod
     def from_json(cls, d: dict, band: str = "") -> Plane:
@@ -554,9 +568,9 @@ class Tracks:
                 t.turn = self._turn(None, None, ac, pos_time)
             else:
                 if pos_time is not None and t.pos_time is not None and pos_time < t.pos_time:
-                    ac, pos_time = replace(ac, lat=t.plane.lat, lon=t.plane.lon), None   # an older fix than ours
+                    ac, pos_time = replace(ac, lat=t.plane.lat, lon=t.plane.lon, source=t.plane.source, band=t.plane.band, feed=t.plane.feed), None   # an older fix than ours
                 elif pos_time is not None and self._jumped(t, ac, pos_time):
-                    ac, pos_time = replace(ac, lat=t.plane.lat, lon=t.plane.lon), None   # a glitch: keep the last good
+                    ac, pos_time = replace(ac, lat=t.plane.lat, lon=t.plane.lon, source=t.plane.source, band=t.plane.band, feed=t.plane.feed), None   # a glitch: keep the last good
                 if pos_time is not None and pos_time != t.pos_time:      # a new fix (none across a jump: its trail is gone)
                     t.turn = self._turn(t.plane, t.pos_time, ac, pos_time) if t.trail else self._turn(None, None, ac, pos_time)
                 t.plane = ac
@@ -797,15 +811,17 @@ class Registry:
 
 
 class RateLimited(Exception):
-    def __init__(self, retry_after_s: float):
-        super().__init__(f"rate limited, retry in {retry_after_s:.0f} s")
+    """HTTP 429. retry_after_s: the server's Retry-After, None when it sent none (then we back off exponentially)."""
+
+    def __init__(self, retry_after_s: float | None):
+        super().__init__("rate limited (HTTP 429)" + (f", Retry-After {retry_after_s:.0f} s" if retry_after_s else ""))
         self.retry_after_s = retry_after_s
 
 
 class Feed:
-    """One source of aircraft: read() -> Snapshot, or raises."""
+    """One source of aircraft: read() -> Snapshot, or raises. st: its schedule and health (AircraftLayer)."""
     key = ""
-    poll_s = POLL_S
+    st: dict = {}
 
     def read(self) -> Snapshot:
         raise NotImplementedError
@@ -831,10 +847,10 @@ class ApiFeed(Feed):
                     retry = float((e.headers or {}).get("Retry-After", "") or 0)
                 except (TypeError, ValueError):
                     retry = 0.0
-                raise RateLimited(max(retry, RATE_LIMITED_S)) from e
+                raise RateLimited(retry if retry > 0 else None) from e
             raise
         if code == 429:
-            raise RateLimited(RATE_LIMITED_S)
+            raise RateLimited(None)
         if code != 200:
             raise HTTPError(self.url, code, f"HTTP {code}", None, None)
         return parse_snapshot(json.loads(body))
@@ -844,7 +860,6 @@ class ReceiverFeed(Feed):
     """Our receiver: readsb / dump1090 (1090 MHz) and dump978-fa (978 MHz UAT) aircraft.json, each a path or an
     http(s) URL, merged by ICAO address. Read only: never a decoder started, never a dongle opened."""
     key = "receiver"
-    poll_s = RECEIVER_POLL_S
 
     def __init__(self, src_1090: str, src_978: str, fetch: Callable, clock: Callable[[], float] = time.time):
         self.srcs = {b: s for b, s in (("1090", src_1090), ("978", src_978)) if s}
@@ -912,14 +927,74 @@ def _r(x: float | None, nd: int = 0):
     return round(x, nd) if nd else int(round(x))
 
 
+COMPASS = ("N", "NE", "E", "SE", "S", "SW", "W", "NW")
+
+
+def where_from_hpn(lat: float, lon: float) -> str:
+    """"1.4 nm SE of HPN"; "over the field" inside a quarter mile."""
+    d = nm(ARP[0], ARP[1], lat, lon)
+    if d < 0.25:
+        return "over the field at HPN"
+    return f"{d:.1f} nm {COMPASS[int((bearing(ARP[0], ARP[1], lat, lon) + 22.5) // 45) % 8]} of HPN"
+
+
+def combine(snaps: list[tuple[str, Snapshot]], prefer: str = "receiver") -> Snapshot:
+    """The union of every feed's latest snapshot, one record per ICAO address: `prefer`'s (our receiver's) position
+    for any aircraft it hears, else the freshest position any feed has; a field only another feed has is kept.
+    Each record says which feed its position came from (Plane.feed). Ages are rebased onto the newest clock."""
+    if not snaps:
+        raise ValueError("no snapshot")
+    now = max(s.now for _, s in snaps)
+    best: dict[str, tuple[tuple, Plane]] = {}
+    for key, snap in snaps:
+        for pl in snap.planes:
+            shift = now - snap.now
+            pl = replace(pl, seen=pl.seen + shift, seen_pos=None if pl.seen_pos is None else pl.seen_pos + shift, feed=key)
+            if pl.has_position:
+                when = now - (pl.seen_pos if pl.seen_pos is not None else pl.seen)
+                rank = (1, 1 if key == prefer else 0, when)      # positioned; ours first; then the freshest
+            else:
+                rank = (0, 1 if key == prefer else 0, now - pl.seen)
+            have = best.get(pl.hex)
+            if have is None:
+                best[pl.hex] = (rank, pl)
+                continue
+            keep, other = (pl, have[1]) if rank > have[0] else (have[1], pl)
+            keep = replace(keep, **{k: getattr(other, k) for k in ("flight", "squawk", "category", "reg", "type", "desc")
+                                     if not getattr(keep, k) and getattr(other, k)})
+            best[pl.hex] = (max(rank, have[0]), keep)
+    return Snapshot(now, tuple(p for _, p in best.values()))
+
+
+# How often each feed is asked (rate limits: adsb.fi's public API allows 1 request a second; adsb.lol limits by load
+# and refused 1-second polling in shortfinal's tests). Someone looking at the layer: the primary API feed every
+# PRIMARY_S, the other every SECONDARY_S (so its data joins and its count stays known), our receiver every
+# RECEIVER_POLL_S. Nobody looking, with the emergency watch on: the primary every WATCH_S, the receiver too.
+PRIMARY_S = 5.0
+SECONDARY_S = 10.0
+WATCH_S = 15.0
+SCORE_ALPHA = 0.3                  # the running count of aircraft with a fresh position that picks the primary
+FEED_KEEP_S = 20.0                 # an API feed's last answer joins the union this long
+RECEIVER_KEEP_S = 10.0             # our receiver's: older than this, it is stale and the APIs take over
+RATE_LIMITED_MIN_S = 10.0          # a 429 without Retry-After: at least this, then doubling
+
+# The emergency watch (alarms): a squawk 7500 / 7600 / 7700 or the aircraft's own emergency status, inside the
+# radius and below WATCH_CEILING_FT (or on the ground), from a message no older than STALE_S.
+WATCH_CEILING_FT = 18000.0
+CLEAR_HOLD_S = 60.0                # not seen in emergency this long: ended (a flicker in between doesn't re-alarm)
+REALARM_S = 30 * 60.0              # the same aircraft and emergency again within this after it ended: no new alarm
+MAX_ALARMS = 6                     # at most this many aircraft alarms ...
+MAX_ALARMS_S = 3600.0              # ... an hour (more are logged, not raised)
+
+
 class AircraftLayer:
-    def __init__(self, enabled: bool = True, feeds: tuple[str, ...] = ("adsblol",), radius_nm: float = RADIUS_NM,
+    def __init__(self, enabled: bool = True, feeds: tuple[str, ...] = ("adsblol", "adsbfi"), radius_nm: float = RADIUS_NM,
                  ceiling_ft: float = CEILING_FT, adsblol_url: str = "", adsbfi_url: str = "", receiver: bool = False,
                  receiver_1090: str = "", receiver_978: str = "", sdr: str = "", sdr_name: str = "", registry: bool = True,
                  registry_url: str = "", cache_dir: str | Path | None = None, fetch: Callable | None = None,
                  devices: Callable[[], list] | None = None, holder: Callable[[str], dict | None] | None = None,
                  log: Callable[[str], None] = print, clock: Callable[[], float] = time.time,
-                 airlines: dict[str, str] | None = None, procedures: Procedures | None = None):
+                 airlines: dict[str, str] | None = None, procedures: Procedures | None = None, watch: bool = True):
         self.enabled = bool(enabled)
         self.radius_nm, self.ceiling_ft = float(radius_nm), float(ceiling_ft)
         self.fetch = fetch or http_get
@@ -936,6 +1011,9 @@ class AircraftLayer:
                     self.feeds.append(ApiFeed("adsbfi", adsbfi_url or ADSBFI_URL, self.radius_nm, self.fetch))
                 elif key == "receiver" and receiver and (receiver_1090 or receiver_978):
                     self.feeds.append(ReceiverFeed(receiver_1090, receiver_978, self.fetch, clock))
+        for f in self.feeds:
+            f.st = {"next": 0.0, "fails": 0, "rest_until": 0.0, "why": "", "ok": None, "at": None, "n": 0, "fresh": 0,
+                    "score": None, "snap": None, "reads": 0}
         url = (registry_url or FAA_URL) if registry and self.enabled else ""
         self.registry = Registry(url, cache_dir, self.fetch if url else None, log, clock)
         self.airlines = load_airlines() if airlines is None else airlines
@@ -948,10 +1026,16 @@ class AircraftLayer:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self.asked = 0.0
-        self.used: Feed | None = None
         self.view: list[dict] = []
-        self.st = {"at": None, "fetched": None, "error": "", "next": 0.0, "fails": 0, "seq": 0}
-        self.resting: dict[str, tuple[float, str]] = {}      # feed key -> (until, why)
+        self.phases: dict[str, Phase] = {}
+        self.st = {"at": None, "fetched": None, "error": "", "seq": 0}
+        # the emergency watch: on_emergency(event) -> alarm id | None, on_clear(event, alarm id, why) (sizeup/cad/alarms.py)
+        self.watch = bool(watch)
+        self.on_emergency: Callable[[dict], object] | None = None
+        self.on_clear: Callable[[dict, object, str], None] | None = None
+        self.emerg: dict[str, dict] = {}            # key (hex:code) -> {event, alarm, since, seen}
+        self.ended: dict[str, float] = {}           # key -> when it ended (no re-alarm within REALARM_S)
+        self.raised: deque = deque()                # when each aircraft alarm was raised (MAX_ALARMS an hour)
 
     @classmethod
     def from_config(cls, cfg, log: Callable[[str], None] = print, devices: Callable[[], list] | None = None) -> AircraftLayer:
@@ -959,13 +1043,14 @@ class AircraftLayer:
         from sizeup.radio import claims
         sdr = getattr(cfg, "aircraft_sdr", "")
         hub = getattr(cfg, "cloud_role", "") == "hub"
-        return cls(getattr(cfg, "aircraft_enabled", True), tuple(getattr(cfg, "aircraft_feeds", ("adsblol",))),
+        return cls(getattr(cfg, "aircraft_enabled", True), tuple(getattr(cfg, "aircraft_feeds", ("adsblol", "adsbfi"))),
                    getattr(cfg, "aircraft_radius_nm", RADIUS_NM), getattr(cfg, "aircraft_ceiling_ft", CEILING_FT),
                    getattr(cfg, "aircraft_adsblol_url", ""), getattr(cfg, "aircraft_adsbfi_url", ""),
                    getattr(cfg, "aircraft_receiver", False), getattr(cfg, "aircraft_receiver_1090", ""),
                    getattr(cfg, "aircraft_receiver_978", ""), sdr, (getattr(cfg, "sdr_names", {}) or {}).get(sdr, sdr),
                    getattr(cfg, "aircraft_registry", True), "", (state / "aircraft") if state else None,
-                   devices=None if hub else devices, holder=None if hub else claims.holder, log=log)
+                   devices=None if hub else devices, holder=None if hub else claims.holder, log=log,
+                   watch=getattr(cfg, "aircraft_alarms", True))
 
     @property
     def configured(self) -> bool:
@@ -988,8 +1073,9 @@ class AircraftLayer:
             self._stop.clear()
             self._thread = threading.Thread(target=self._run, name="aircraft", daemon=True)
             self._thread.start()
-            self.log(f"aircraft: {' then '.join(FEEDS[f.key]['label'] for f in self.feeds)}, {self.radius_nm:g} nm around HPN, "
-                     f"while the layer is open (every {self.feeds[0].poll_s:g} s at most)")
+            self.log(f"aircraft: {' + '.join(FEEDS[f.key]['label'] for f in self.feeds)}, {self.radius_nm:g} nm around HPN; "
+                     f"while the layer is open the primary every {PRIMARY_S:g} s, the other every {SECONDARY_S:g} s"
+                     + (f"; emergency watch every {WATCH_S:g} s" if self.watching() else ""))
         return self
 
     def stop(self) -> None:
@@ -998,79 +1084,211 @@ class AircraftLayer:
 
     def _run(self) -> None:
         while not self._stop.is_set():
-            self.tick()
+            try:
+                self.tick()
+            except Exception as e:  # never let one bad answer stop the layer for good
+                self.log(f"aircraft: {type(e).__name__}: {e}")
             self._wake.wait(1.0)
             self._wake.clear()
 
     def demanded(self) -> bool:
         return self.clock() - self.asked <= DEMAND_S
 
+    def watching(self) -> bool:
+        """The emergency watch: reads go on (slower) while nobody looks, so an emergency still raises the alarm."""
+        return self.watch and self.on_emergency is not None
+
+    def api_feeds(self) -> list[Feed]:
+        return [f for f in self.feeds if not isinstance(f, ReceiverFeed)]
+
+    def primary(self) -> Feed | None:
+        """The API feed that has been giving the most aircraft with fresh positions lately (config order on a tie),
+        among those not resting."""
+        now = self.clock()
+        up = [f for f in self.api_feeds() if f.st["rest_until"] <= now]
+        if not up:
+            return None
+        return max(up, key=lambda f: (f.st["score"] if f.st["score"] is not None else -1.0, -self.feeds.index(f)))
+
+    def interval(self, f: Feed, demanded: bool) -> float | None:
+        if isinstance(f, ReceiverFeed):
+            return RECEIVER_POLL_S if demanded else WATCH_S
+        if f is self.primary():
+            return PRIMARY_S if demanded else WATCH_S
+        return SECONDARY_S if demanded else None
+
     def tick(self) -> None:
-        if not self.configured or not self.demanded():
+        if not self.configured:
             return
-        if self.registry.due():          # its own thread (a large download); not again while it runs
-            self.registry.st["next"] = self.clock() + REGISTRY_BACKOFF_S[0]
+        demanded = self.demanded()
+        if not demanded and not self.watching():
+            return
+        now = self.clock()
+        if demanded and self.registry.due():      # its own thread (a large download); not again while it runs
+            self.registry.st["next"] = now + REGISTRY_BACKOFF_S[0]
             threading.Thread(target=self.registry.refresh, name="aircraft-registry", daemon=True).start()
-        if self.clock() >= self.st["next"]:
-            self.refresh()
+        read = False
+        for f in list(self.feeds):
+            iv = self.interval(f, demanded)
+            if iv is None or now < f.st["rest_until"] or now < f.st["next"]:
+                continue
+            read = self._read(f, now, iv) or read
+        if read:
+            self._combine(now)
+        elif self.st["fetched"] is None or now - self.st["fetched"] > FEED_KEEP_S:
+            self._no_data(now)
+
+    def refresh(self) -> bool:
+        """Read every feed that may be asked now, and combine. True when one answered. Never raises."""
+        if not self.configured:
+            return False
+        now = self.clock()
+        read = False
+        for f in self.feeds:
+            if now >= f.st["rest_until"]:
+                read = self._read(f, now, self.interval(f, True) or SECONDARY_S) or read
+        if read:
+            self._combine(now)
+        else:
+            self._no_data(now)
+        return read
+
+    def _read(self, f: Feed, now: float, iv: float) -> bool:
+        st = f.st
+        try:
+            snap = f.read()
+        except Exception as e:  # network, a 429, a file, JSON: this feed rests, the others carry on
+            st["fails"] += 1
+            exp = min(BACKOFF_S[1], BACKOFF_S[0] * 2 ** (st["fails"] - 1))
+            if isinstance(e, RateLimited):
+                wait = e.retry_after_s if e.retry_after_s else max(RATE_LIMITED_MIN_S, exp)
+            else:
+                wait = exp
+            why = str(e) if isinstance(e, RateLimited) else f"{type(e).__name__}: {getattr(e, 'reason', e)}"[:160]
+            st.update(rest_until=now + wait, next=now + wait, why=why)
+            self.log(f"aircraft: {FEEDS[f.key]['label']}: {why}; resting {wait:.0f} s")
+            return False
+        fresh = sum(1 for p in snap.planes if p.has_position and (p.seen_pos if p.seen_pos is not None else p.seen) <= STALE_S
+                    and nm(ARP[0], ARP[1], p.lat, p.lon) <= self.radius_nm)
+        score = fresh if st["score"] is None else (1 - SCORE_ALPHA) * st["score"] + SCORE_ALPHA * fresh
+        st.update(fails=0, rest_until=0.0, why="", ok=now, at=snap.now, n=len(snap.planes), fresh=fresh, score=score,
+                  snap=snap, next=now + iv, reads=st["reads"] + 1)
+        return True
+
+    def receiver_healthy(self, now: float | None = None) -> bool:
+        now = self.clock() if now is None else now
+        return any(isinstance(f, ReceiverFeed) and f.st["ok"] is not None and now - f.st["ok"] <= RECEIVER_KEEP_S
+                   for f in self.feeds)
+
+    def _combine(self, now: float) -> None:
+        snaps = []
+        for f in self.feeds:
+            keep = RECEIVER_KEEP_S if isinstance(f, ReceiverFeed) else FEED_KEEP_S
+            if f.st["snap"] is not None and f.st["ok"] is not None and now - f.st["ok"] <= keep:
+                snaps.append((f.key, f.st["snap"]))
+        if not snaps:
+            self._no_data(now)
+            return
+        snap = combine(snaps)
+        with self._lock:
+            self.tracks.update(snap)
+            view = self._view()
+        with self._fresh:
+            self.view = view
+            self.st.update(at=snap.now, fetched=now, error="", seq=self.st["seq"] + 1)
+            self._fresh.notify_all()
+        self._watch(now)
+
+    def _no_data(self, now: float) -> None:
+        why = "; ".join(f"{FEEDS[f.key]['label']}: {f.st['why']}" for f in self.feeds if f.st["why"])
+        with self._fresh:
+            self.st["error"] = ("no feed answering: " + why if why else "no feed answering")[:300]
+            self._fresh.notify_all()
 
     def ask(self) -> None:
-        """A viewer looks: keep the feed coming; wake the read now when the data is stale and wait a moment for it."""
+        """A viewer looks: keep the feeds coming; wake the read now when the data is stale and wait a moment for it."""
         now = self.clock()
         self.asked = now
-        stale = self.st["fetched"] is None or now - self.st["fetched"] > 2 * POLL_S
+        stale = self.st["fetched"] is None or now - self.st["fetched"] > 2 * PRIMARY_S
         if not stale or not self.configured:
             return
         self._wake.set()
         if self._thread is not None and self._thread.is_alive():
             with self._fresh:
-                self._fresh.wait_for(lambda: (self.st["fetched"] is not None and self.clock() - self.st["fetched"] <= 2 * POLL_S)
+                self._fresh.wait_for(lambda: (self.st["fetched"] is not None and self.clock() - self.st["fetched"] <= 2 * PRIMARY_S)
                                      or bool(self.st["error"]), timeout=WAIT_FIRST_S)
 
-    def refresh(self) -> bool:
-        """Read the first feed that answers, in order. True when one did. Never raises."""
-        if not self.configured:
-            return False
-        now = self.clock()
-        why = []
-        for feed in self.feeds:
-            until, err = self.resting.get(feed.key, (0.0, ""))
-            if until > now:
-                why.append(f"{FEEDS[feed.key]['label']}: {err}")
-                continue
-            try:
-                snap = feed.read()
-            except RateLimited as e:
-                self.resting[feed.key] = (now + e.retry_after_s, str(e))
-                why.append(f"{FEEDS[feed.key]['label']}: {e}")
-                continue
-            except Exception as e:  # network, a file, JSON: the next feed carries on
-                err = f"{type(e).__name__}: {getattr(e, 'reason', e)}"[:160]
-                self.resting[feed.key] = (now + BACKOFF_S[0], err)
-                why.append(f"{FEEDS[feed.key]['label']}: {err}")
-                continue
-            self.resting.pop(feed.key, None)
-            self._take(feed, snap, now)
-            return True
-        self.st["fails"] += 1
-        wait = min(BACKOFF_S[1], BACKOFF_S[0] * 2 ** (self.st["fails"] - 1))
-        with self._fresh:
-            self.st.update(error="; ".join(why)[:300], next=now + wait)
-            self._fresh.notify_all()
-        self.log(f"aircraft: no feed answered ({self.st['error']}); next try in {wait:.0f} s")
-        return False
+    # -- the emergency watch (alarm + push: sizeup/cad/alarms.py on_aircraft / aircraft_cleared) -------------------------
 
-    def _take(self, feed: Feed, snap: Snapshot, now: float) -> None:
-        with self._lock:
-            if self.used is not None and self.used is not feed:
-                self.tracks.tracks.clear()        # another feed: its own ages and glitches, no trail spikes
-            self.tracks.update(snap)
-            view = self._view()
-        with self._fresh:
-            self.used = feed
-            self.view = view
-            self.st.update(at=snap.now, fetched=now, error="", fails=0, next=now + feed.poll_s, seq=self.st["seq"] + 1)
-            self._fresh.notify_all()
+    def _event(self, t: Track, code: str, meaning: str) -> dict:
+        ac = t.plane
+        reg = self.registry.lookup(ac.hex) if not ac.hex.startswith("~") else None
+        ph = self.phases.get(ac.hex) or Phase(OVERFLIGHT)
+        model = " ".join(x for x in ((reg or {}).get("make", ""), (reg or {}).get("model", "")) if x) or ac.desc
+        return {"key": f"{ac.hex}:{code}", "hex": ac.hex, "callsign": ac.flight, "reg": ac.reg or (reg or {}).get("n", ""),
+                "type": ac.type, "model": model, "code": code, "meaning": meaning, "squawk": ac.squawk,
+                "alt": ac.alt_baro if ac.alt_baro is not None else _r(ac.alt_geom), "vr": _r(ac.vertical_rate), "gs": _r(ac.gs),
+                "lat": round(ac.lat, 5), "lon": round(ac.lon, 5), "where": where_from_hpn(ac.lat, ac.lon),
+                "phase": ph.kind, "runway": ph.runway, "approach": ph.approach,
+                "dist_nm": _r(ph.dist_nm, 1), "feed": FEEDS.get(ac.feed, {}).get("label", ac.feed or "ADS-B"),
+                "at": self.tracks.now}
+
+    def _watch(self, now: float) -> None:
+        if self.on_emergency is None:
+            return
+        seen: dict[str, tuple[Track, str, str]] = {}
+        for t in self.tracks.live():
+            ac = t.plane
+            meaning = ac.emergency_text
+            if not meaning or ac.seen > STALE_S:
+                continue
+            alt = ac.altitude_ft
+            if nm(ARP[0], ARP[1], ac.lat, ac.lon) > self.radius_nm or (alt is not None and alt >= WATCH_CEILING_FT):
+                continue                         # outside the PCFD / HPN area of interest
+            code = ac.squawk if ac.squawk in EMERGENCY_SQUAWKS else ac.emergency
+            seen[f"{ac.hex}:{code}"] = (t, code, meaning)
+        for key, (t, code, meaning) in seen.items():
+            cur = self.emerg.get(key)
+            if cur is not None:
+                cur["seen"] = now
+                cur["event"] = self._event(t, code, meaning)
+                continue
+            ev = self._event(t, code, meaning)
+            if now - self.ended.get(key, -1e18) < REALARM_S:
+                self.emerg[key] = {"event": ev, "alarm": None, "since": now, "seen": now}
+                self.log(f"aircraft: {key} {meaning} again within {REALARM_S / 60:.0f} min of ending: no new alarm")
+                continue
+            while self.raised and now - self.raised[0] > MAX_ALARMS_S:
+                self.raised.popleft()
+            if len(self.raised) >= MAX_ALARMS:
+                self.emerg[key] = {"event": ev, "alarm": None, "since": now, "seen": now}
+                self.log(f"aircraft: {key} {meaning}: {MAX_ALARMS} aircraft alarms in the last hour already: logged, not raised")
+                continue
+            self.raised.append(now)
+            try:
+                aid = self.on_emergency(ev)
+            except Exception as e:  # the watch goes on
+                aid = None
+                self.log(f"aircraft: alarm not raised: {type(e).__name__}: {e}")
+            self.emerg[key] = {"event": ev, "alarm": aid, "since": now, "seen": now}
+            self.log(f"aircraft: EMERGENCY {ev['callsign'] or ev['reg'] or ev['hex']} {meaning} {ev['where']} (alarm {aid})")
+        for key in [k for k, v in self.emerg.items() if k not in seen and now - v["seen"] > CLEAR_HOLD_S]:
+            cur = self.emerg.pop(key)
+            self.ended[key] = now
+            t = self.tracks.tracks.get(cur["event"]["hex"])
+            if t is not None and t.plane.seen <= STALE_S:
+                sq = t.plane.squawk
+                why = f"squawk ended (now {sq})" if sq else "emergency ended"
+            else:
+                why = "no longer reported"
+            if cur["alarm"] is not None and self.on_clear is not None:
+                try:
+                    self.on_clear(cur["event"], cur["alarm"], why)
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"aircraft: alarm not cleared: {type(e).__name__}: {e}")
+            self.log(f"aircraft: {key} {why}")
+        for key in [k for k, at in self.ended.items() if now - at > REALARM_S]:
+            del self.ended[key]
 
     # -- what the pages get ---------------------------------------------------------------------------------------------
 
@@ -1078,10 +1296,11 @@ class AircraftLayer:
         now = self.tracks.now or 0.0
         out = []
         live = set()
+        phases = {}
         for t in self.tracks.live():
             ac = t.plane
             live.add(ac.hex)
-            ph = self.memory.phase(ac, now)
+            ph = phases[ac.hex] = self.memory.phase(ac, now)
             emerg = ac.emergency_text
             if ph.kind not in SHOWN and not emerg:
                 continue
@@ -1099,9 +1318,11 @@ class AircraftLayer:
                 "gs": _r(ac.gs), "trk": _r(ac.track), "tr": _r(t.turn, 1), "vr": _r(ac.vertical_rate), "sq": ac.squawk, "emerg": emerg,
                 "phase": ph.kind, "rwy": ph.runway, "appr": ph.approach, "dist": _r(ph.dist_nm, 1),
                 "eta": _r(ph.eta_s) if now - t.pos_time <= STALE_S else None,      # never from an old position
-                "age": round(max(0.0, now - t.pos_time), 1), "pos": ac.source, "band": ac.band, "trail": trail,
+                "age": round(max(0.0, now - t.pos_time), 1), "pos": ac.source, "band": ac.band, "src": ac.feed,
+                "trail": trail,
             })
         self.memory.forget(live)
+        self.phases = phases
         order = {ARRIVING: 0, DEPARTING: 1, GROUND: 2, LOW: 3}
         out.sort(key=lambda a: (not a["emerg"], order.get(a["phase"], 4), a["dist"] if a["dist"] is not None else 1e9, a["hex"]))
         return out
@@ -1136,16 +1357,34 @@ class AircraftLayer:
             out["note"] = "No dongle named for ADS-B yet ([aircraft.receiver] sdr)"
         return out
 
+    def feeds_public(self, view: list[dict]) -> list[dict]:
+        """Each feed: its role now (receiver / primary / secondary), how many aircraft it gave last time and with a
+        fresh position, how many on the map came from it, and why it is resting."""
+        now = self.clock()
+        prim = self.primary()
+        healthy = self.receiver_healthy(now)
+        out = []
+        for f in self.feeds:
+            st = f.st
+            role = "receiver" if isinstance(f, ReceiverFeed) else ("primary" if f is prim else "secondary")
+            out.append(f.meta() | {"role": role, "n": st["n"], "fresh": st["fresh"], "ok": st["ok"], "at": st["at"],
+                                   "shown": sum(1 for a in view if a.get("src") == f.key),
+                                   "resting": st["why"] if st["rest_until"] > now else "",
+                                   "healthy": healthy if role == "receiver" else (st["ok"] is not None and now - st["ok"] <= FEED_KEEP_S)})
+        return out
+
     def public(self) -> dict:
         with self._lock:
             view = list(self.view)
-            used = self.used
         counts: dict[str, int] = {}
         for a in view:
             counts[a["phase"]] = counts.get(a["phase"], 0) + 1
         counts["emergency"] = sum(1 for a in view if a["emerg"])
-        return {"configured": self.configured, "note": self.why_not(), "feed": used.meta() if used else None,
-                "feeds": [f.meta() | {"resting": self.resting.get(f.key, (0, ""))[1]} for f in self.feeds],
+        feeds = self.feeds_public(view)
+        used = [f for f in feeds if f["shown"]]
+        prim = self.primary()
+        return {"configured": self.configured, "note": self.why_not(), "feed": prim.meta() if prim else None,
+                "feeds": feeds, "credit": " + ".join(f["credit"] for f in (used or feeds) if f["credit"]),
                 "at": self.st["at"], "fetched": self.st["fetched"], "error": self.st["error"], "stale_s": STALE_S,
                 "drop_s": DROP_S, "airport": {"icao": ICAO, "lat": ARP[0], "lon": ARP[1]}, "registry": self.registry.public(),
                 "receiver": self.receiver_status(), "aircraft": view, "counts": counts}

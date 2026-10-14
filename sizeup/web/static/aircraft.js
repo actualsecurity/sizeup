@@ -7,7 +7,7 @@
 //                LGA arrivals over Port Chester, helicopters), an emergency (red) whatever it is doing. Overflights
 //                and other airports' ground traffic are left out. Drawn as shortfinal draws them (its map page:
 //                renderPlanes / renderTrails, map-style.js): a jet, light-aircraft or helicopter silhouette by the
-//                feed's emitter category, turned to its track and sized by phase (EMPHASIS); the callsign, then
+//                feed's emitter category, turned to its track and sized by phase (EMPHASIS; an emergency largest); the callsign, then
 //                the approach or departure and the altitude, speed and type, on a dark chip up and to the right;
 //                and every one with a short trail of its real fixes (the hub's last TRAIL_S, aircraft.py), in its
 //                colour, while the layer is on. Kept beneath the apparatus, the stations and the events.
@@ -18,11 +18,12 @@
 //                A click: what it is (the feed's type, the FAA registry's make and model), what it is doing, how
 //                it was located.
 //   Box          the group's note: emergencies first, the HPN movements (arriving, departing, on the ground),
-//                how many are low in the area, the source and its licence, the feed's time, our receiver's
-//                state when one is set up.
+//                how many are low in the area, each feed (our receiver, adsb.lol, adsb.fi) with how many it gave and
+//                which is primary or resting, the credits and licence, the feed's time, our receiver's state.
 //   Data         only ever from the hub: GET /api/cad/aircraft (sizeup/aircraft.py), every 2 s while a map has the
-//                layer on and the page is visible (an unchanged answer is a 304; the hub reads adsb.lol at most
-//                every 5 s); never in the state push (#146). The browser never talks to adsb.lol or the FAA.
+//                layer on and the page is visible (an unchanged answer is a 304; the hub still reads each feed at its
+//                own rate: the primary API every 5 s); never in the state push (#146). The browser never talks to
+//                adsb.lol, adsb.fi or the FAA.
 //
 // Colours come from the design's tokens (style.css); nothing here is a raw colour but the halo and the chip.
 "use strict";
@@ -51,7 +52,13 @@ window.AircraftLayer = (() => {
     departing: { scale: 1.05, label: 1.0, trail: 1.2 },
     ground: { scale: 0.85, label: 0.9, trail: 0.8 },
     low: { scale: 1.0, label: 1.0, trail: 1.0 },
+    // a squawk 7500 / 7600 / 7700 or its own emergency status (the hub raises the alarm and pushes): never drawn
+    // smaller than the busiest phase, whatever it is doing; red, first (rank 0), its emergency on the label
+    emergency: { scale: 1.3, label: 1.1, trail: 1.5 },
   };
+  function emphasis(a) { return a.emerg ? EMPHASIS.emergency : (EMPHASIS[a.phase] || EMPHASIS.low); }
+  // which feed each position came from (sizeup/aircraft.py combine(): our receiver first, then the freshest of the APIs)
+  const SRC_NAME = { receiver: "our receiver", adsblol: "adsb.lol", adsbfi: "adsb.fi" };
   const POS = { adsb: "ADS-B (its own GPS position)", mlat: "MLAT (located by receivers' timing)", tisb: "TIS-B (a radar position rebroadcast)",
                 adsr: "ADS-R (rebroadcast from the other band)", modes: "Mode S", adsc: "ADS-C", other: "other" };
 
@@ -232,7 +239,8 @@ window.AircraftLayer = (() => {
       const ids = (map.getStyle().layers || []).map((x) => x.id);
       const before = ids.find((id) => id.startsWith("ml-") || id === "cm-lines" || id === "firehouse");
       map.addSource(SRC_TRAIL, { type: "geojson", data: fc([]) });
-      map.addSource(SRC, { type: "geojson", data: fc([]), attribution: '<a href="https://adsb.lol" target="_blank" rel="noopener">adsb.lol (ODbL)</a>' });
+      map.addSource(SRC, { type: "geojson", data: fc([]),
+                           attribution: '<a href="https://adsb.lol" target="_blank" rel="noopener">adsb.lol (ODbL)</a> · <a href="https://adsb.fi" target="_blank" rel="noopener">adsb.fi</a>' });
       for (const kind of ["jet", "light", "heli"]) {
         for (const hollow of [false, true]) {
           const name = `ac-${kind}${hollow ? "-old" : ""}`;
@@ -278,7 +286,7 @@ window.AircraftLayer = (() => {
       if (on && d) {
         const trails = [];
         for (const a of d.aircraft || []) {
-          const em = EMPHASIS[a.phase] || EMPHASIS.low;
+          const em = emphasis(a);
           const pts = [...(a.trail || [])];
           const last = pts[pts.length - 1];
           if (!last || last[0] !== a.lon || last[1] !== a.lat) pts.push([a.lon, a.lat]);   // its last real fix, not the drawn mark
@@ -301,7 +309,7 @@ window.AircraftLayer = (() => {
       for (const a of d.aircraft || []) {
         const age = ageNow(d, a), at = motion ? motion.where(a.hex, now) : null;
         const stale = motion ? motion.stale(a.hex) : age > staleS(d);
-        const em = EMPHASIS[a.phase] || EMPHASIS.low;
+        const em = emphasis(a);
         const [kind, size] = iconFor(a);
         const basics = [fmtAlt(a.alt) + trend(a.vr), a.gs !== null && a.gs !== undefined ? `${a.gs} kt` : "", a.type].filter(Boolean).join("  ");
         const detail = [a.emerg ? a.emerg.toUpperCase() : "", phaseLine(a), basics].filter(Boolean).join("\n");
@@ -347,10 +355,11 @@ window.AircraftLayer = (() => {
       if (a.sq) lines.push(`Squawk ${a.sq}`);
       const reg = a.reg ? `Registration ${a.reg}${a.reg_src === "faa" ? " (FAA registry)" : ""}` : "Registration not known";
       lines.push([reg, a.airline].filter(Boolean).join(" · "));
-      lines.push(`Position: ${POS[a.pos] || "as the feed gives it"}${a.band ? `, ${a.band} MHz` : ""}${age > staleS(d) ? " (stale)" : ""}`);
+      lines.push(`Position: ${POS[a.pos] || "as the feed gives it"}, via ${SRC_NAME[a.src] || a.src || "the feed"}${a.band ? ` (${a.band} MHz)` : ""}`
+                 + `${age > staleS(d) ? " (stale)" : ""}`);
       lines.push("Arriving / departing / low is sizeup's reading of its track (shortfinal's rules), not ATC's word.");
       const what = [a.type, a.model ? `${a.model}${a.model_src === "faa" ? " (FAA registry)" : ""}` : "", a.kind].filter(Boolean);
-      const foot = [d.feed ? `Data: ${d.feed.credit}` : "", d.at ? `feed ${hms(d.at)}` : "", (d.registry && d.registry.credit) || ""].filter(Boolean).join(" · ");
+      const foot = [d.credit ? `Data: ${d.credit}` : "", d.at ? `feed ${hms(d.at)}` : "", (d.registry && d.registry.credit) || ""].filter(Boolean).join(" · ");
       const icon = window.Icon ? Icon("aircraft") : null;
       this.control.close();
       this.control.showInfo(callsign(a), what.length ? what.join(" · ") : "Type not known", lines, foot, a.emerg ? "ac-emerg" : "", icon);
@@ -362,11 +371,14 @@ window.AircraftLayer = (() => {
       const box = h("div", "ml-group");
       const head = h("div", "ml-ghead");
       head.append(h("b", "", "Aircraft"));
-      const src = h("a", "dim small", (d && d.feed && d.feed.label) || "adsb.lol");
-      src.href = (d && d.feed && d.feed.link) || "https://adsb.lol";
-      src.target = "_blank";
-      src.rel = "noopener";
-      head.append(h("span", "spacer"), src);
+      head.append(h("span", "spacer"));
+      for (const [label, link] of [["adsb.lol", "https://adsb.lol"], ["adsb.fi", "https://adsb.fi"]]) {
+        const src = h("a", "dim small", label);
+        src.href = link;
+        src.target = "_blank";
+        src.rel = "noopener";
+        head.append(src);
+      }
       box.append(head);
       const lab = h("label", "check");
       const cb = h("input");
@@ -400,16 +412,20 @@ window.AircraftLayer = (() => {
       const low = list.filter((a) => a.phase === "low").length;
       const note = h("div", "ml-note");
       note.append(`${low ? `${low} low in the area` : "Nothing low in the area"}. Hollow: position older than ${staleS(d)} s. `
-                  + `Data: ${d.feed ? `${d.feed.credit}` : "none yet"}${d.at ? `, feed ${hms(d.at)}` : ""}. `
+                  + `Data: ${d.credit || "none yet"}${d.at ? `, feed ${hms(d.at)}` : ""}. `
                   + `${(d.registry && d.registry.credit) || ""}`);
-      if (d.feed && d.feed.terms) {
-        const t = h("a", "", "Licence");
-        t.href = d.feed.terms;
+      for (const f of (d.feeds || []).filter((x) => x.terms)) {
+        const t = h("a", "", `${f.label} terms`);
+        t.href = f.terms;
         t.target = "_blank";
         t.rel = "noopener";
         note.append(" ", t);
       }
       box.append(note);
+      // each feed: our receiver first, then the primary and the other API; how many it gave, or why it rests
+      const feeds = (d.feeds || []).map((f) => `${SRC_NAME[f.key] || f.label}${f.role === "primary" ? " (primary)" : ""}: `
+        + (f.resting ? `resting (${f.resting})` : f.ok ? `${f.n} aircraft, ${f.shown} shown` : "no answer yet"));
+      if (feeds.length) box.append(h("div", "ml-note", feeds.join(" · ")));
       if (d.fetched && Date.now() / 1000 - d.fetched > 30) box.append(h("div", "ml-note ac-emerg", `No new aircraft data since ${hms(d.fetched)}`));
       if (d.error) box.append(h("div", "ml-note", `(${d.error})`));
       const rx = d.receiver;

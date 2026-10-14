@@ -1,5 +1,5 @@
-// The camera wall (GitHub #125) and the Overview's layouts (#147): every camera in our area at once, on the Overview
-// (/cad) and the wall board (/monitor).
+// The camera wall (GitHub #125) and the Overview's layouts (#147, #168): every camera in our area at once, on the
+// Overview (/cad) and the wall board (/monitor).
 //
 // User, 2026-10-14: "on the monitor page and the overview page, can we add a way to look at all of the cameras
 // in our jurisdiction live? somehow turn that on and off so we can visually see all of them"; then "we should
@@ -9,17 +9,20 @@
 //
 //   Layouts       a picker in the Overview's head (a segmented control, the same on the wall board): Map · Cameras ·
 //                 Side by side (map | cameras | events) · Stacked (map over cameras, or under them: the swap button;
-//                 events on the right) · Overlay (the cameras on the map: camoverlay.js). Remembered per screen
-//                 (localStorage "sizeup.overviewLayout" {overview, monitor: {mode, swap, side, stacked}}; the wall
-//                 board and the dispatch screen can differ; #125's "sizeup.cameraWall" on is read once as Cameras).
-//                 On a phone (640 px and under) Map and Cameras only: the others show as the map.
+//                 events on the right). Remembered per screen (localStorage "sizeup.overviewLayout" {overview,
+//                 monitor: {mode, swap, side, stacked}}; the wall board and the dispatch screen can differ; #125's
+//                 "sizeup.cameraWall" on is read once as Cameras). On a phone (640 px and under) Map and Cameras
+//                 only: the others show as the map.
+//   The overlay   the cameras on the map (camoverlay.js) is a toggle in the map's Layers box, not a layout (#168:
+//                 "overlay should only be an option in layers, not here"). A screen whose saved layout was the old
+//                 Overlay (#147) opens as Map with that toggle on (MapLayers.setLayer(OVERLAY, true)), once.
 //   The divider   between the map and the cameras in Side by side and Stacked: panels.js's separator (#139: drag,
 //                 the arrow keys, Home or a double-click resets to half; the map resizes live), its share of the
 //                 view remembered per layout, each pane at least SPLIT_MIN px.
 //   The cameras   GET /api/cad/cameras?area=ours[&for=lat,lon&label=&address=] (sizeup/roads.py Roads.area): inside
 //                 our fire districts plus a margin (Settings > System > Camera wall), by road then mileage; an
 //                 active highway event's camera just before / at / just after it pinned first and highlighted (in
-//                 every layout: the wall's tiles, the overlay's, a ring on the map in the others).
+//                 every layout: the wall's tiles, the overlay's, a ring on the map without it).
 //   A tile        live video where the source streams (the Thruway's HLS, through the hub, muted, hls.js: the
 //                 camera viewer's own loader in maplayers.js), else the snapshot at the source's cadence, fetched
 //                 only when newer (If-None-Match against the proxy's ETag). Its name, road, direction and mileage,
@@ -31,18 +34,21 @@
 //                 tile off screen for STOP_MS stops its stream at the hub too (GET .../stream/close?v=<this page>),
 //                 so the hub's prefetch stops; everything stops while the page or the Overview is hidden. At most
 //                 the hub's per-screen budget of live tiles at once (streams.per_viewer), across the wall and the
-//                 overlay; a stream the hub refuses (its cap: 429) or the source can't give (503) shows snapshots
-//                 and tries again later.
+//                 overlay; a camera live in one set is a snapshot in the other (Side by side or Stacked with the
+//                 overlay on: one stream, one slot); a stream the hub refuses (its cap: 429) or the source can't
+//                 give (503) shows snapshots and tries again later.
 //
 // CamWall.engine is the tiles for camoverlay.js: list() (the area's cameras, as above), subscribe(fn) (the list or
-// the layout changed), tile(c, set, opts) / drop(t) (a tile in a set: "wall" | "overlay"), layout() (the mode now).
+// the layout changed), tile(c, set, opts) / drop(t) (a tile in a set: "wall" | "overlay"), layout() (the mode now),
+// OVERLAY (the overlay's layer key in the Layers box).
 "use strict";
 
 window.CamWall = (() => {
   if (!document.getElementById("cw-wall") || !window.MapLayers) return null;
   const KEY = "sizeup.overviewLayout", OLD_KEY = "sizeup.cameraWall";
   const SCREEN = BOARD ? "monitor" : "overview";
-  const MODES = ["map", "cameras", "side", "stacked", "overlay"];
+  const MODES = ["map", "cameras", "side", "stacked"];
+  const OVERLAY = "camoverlay";       // the overlay's toggle in the Layers box (MapLayers, the "overview" set; camoverlay.js)
   const PHONE = matchMedia("(max-width: 640px)");
   const SPLIT_MIN = 200;
   const LIST_MS = 60000, TICK_MS = 1000, STATUS_MS = 20000, RETRY_MS = 60000, START_MS = 25000, STOP_MS = 2500, MAX_FETCHES = 4;
@@ -61,6 +67,7 @@ window.CamWall = (() => {
       s = (JSON.parse(localStorage.getItem(KEY) || "{}") || {})[SCREEN] || {};
       if (!s.mode && (JSON.parse(localStorage.getItem(OLD_KEY) || "{}") || {})[SCREEN]) s = { mode: "cameras" };   // #125's switch
     } catch (_) { /* the default */ }
+    if (s.mode === "overlay") { s = { ...s, mode: "map" }; wasOverlay = true; }     // #147's Overlay layout: Map, the toggle on (#168)
     return { mode: MODES.includes(s.mode) ? s.mode : "map", swap: !!s.swap,
              side: Number.isFinite(s.side) ? s.side : 0.5, stacked: Number.isFinite(s.stacked) ? s.stacked : 0.5 };
   }
@@ -71,7 +78,9 @@ window.CamWall = (() => {
       localStorage.setItem(KEY, JSON.stringify(all));
     } catch (_) { /* this page view only */ }
   }
+  let wasOverlay = false;
   const L = load();
+  if (wasOverlay) { MapLayers.setLayer(OVERLAY, true, "overview"); save(); }    // once: the layout saved as Map from now on
   // what shows now: a phone has Map and Cameras only
   const mode = () => (PHONE.matches && !["map", "cameras"].includes(L.mode) ? "map" : L.mode);
   const split2 = () => mode() === "side" || mode() === "stacked";
@@ -115,7 +124,7 @@ window.CamWall = (() => {
     swapBtn.setAttribute("aria-pressed", String(L.swap));
     swapBtn.title = L.swap ? "Map above the cameras" : "Cameras above the map";
     show(wall, wallShown());
-    if (!wallShown()) for (const t of w.tiles.values()) if (t.set === "wall") stopLive(t);    // its live slots to the overlay now
+    if (!wallShown()) for (const t of w.tiles.values()) if (t.set === "wall") stopLive(t);    // its live slots to the overlay, if on
     show(mapbox, m !== "cameras");
     show(split, split2());
     split.dataset.orient = m === "side" ? "vertical" : "horizontal";
@@ -202,7 +211,8 @@ window.CamWall = (() => {
   }
 
   // A tile in a set ("wall": with its caption; "overlay": opts.compact, the name only). The same camera can be a tile
-  // in both sets (only one shows at a time); each is its own element, its own stream use and budget slot.
+  // in both sets (Side by side or Stacked with the overlay on): each is its own element, but only one of the two plays
+  // live (twin(): the other shows snapshots), so a camera is one stream use and one budget slot.
   function tile(c, set, opts = {}) {
     const key = `${set}:${c.id}`;
     let t = w.tiles.get(key);
@@ -249,6 +259,7 @@ window.CamWall = (() => {
     t.img.alt = `Traffic camera: ${c.name}`;
     return t;
   }
+  const twin = (t) => { for (const x of w.tiles.values()) if (x !== t && x.id === t.id && (x.live || x.starting)) return true; return false; };
   function drop(t) {
     observer.unobserve(t.el);
     stopLive(t);
@@ -323,7 +334,7 @@ window.CamWall = (() => {
       if (t.live || t.starting) live++;
     }
     for (const t of w.tiles.values()) {
-      if (!t.visible) continue;
+      if (!t.visible || (t.set === "wall" && !wallShown())) continue;    // the wall just hidden: before the observer says so
       const c = t.cam;
       if (t.starting && now - t.startedAt > START_MS) {      // never got going: snapshots, and its live slot back
         stopLive(t);
@@ -331,7 +342,7 @@ window.CamWall = (() => {
         live--;
       }
       const canLive = c.has_video && !isDown(c) && now >= t.blockedUntil;
-      if (canLive && !t.live && !t.starting && live < budget()) { live++; startLive(t); }
+      if (canLive && !t.live && !t.starting && live < budget() && !twin(t)) { live++; startLive(t); }
       if (!t.live && now >= t.next) snapshot(t);
       showAge(t);
     }
@@ -446,7 +457,7 @@ window.CamWall = (() => {
     t.badge.hidden = true;
     t.img.hidden = !t.url;
     t.next = 0;
-    if (was) fetch(streamUrl(t, "close"), { credentials: "same-origin", cache: "no-store", keepalive: true }).catch(() => {});
+    if (was && !twin(t)) fetch(streamUrl(t, "close"), { credentials: "same-origin", cache: "no-store", keepalive: true }).catch(() => {});
   }
   async function liveStatus(t) {
     try {
@@ -469,7 +480,7 @@ window.CamWall = (() => {
 
   layout();
   const engine = {
-    list: () => w.list, subscribe: (fn) => w.subs.add(fn), tile, drop, layout: mode, isDown, pinText,
+    list: () => w.list, subscribe: (fn) => w.subs.add(fn), tile, drop, layout: mode, isDown, pinText, OVERLAY,
     tick: () => { if (w.running) tick(); },
   };
   return { choose, layout: mode, state: w, prefs: L, token: TOKEN, engine };
