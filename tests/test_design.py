@@ -223,3 +223,80 @@ def test_every_class_the_page_uses_exists():
         defined |= classes_in_css(css(f))
     stray = sorted(c for c in used_classes() - defined - HOOKS if not c.startswith("maplibregl"))
     assert not stray, f"classes used but defined nowhere (style them, or list them in HOOKS): {stray}"
+
+
+# -- filled states: readable text on the fill (GitHub #116) ---------------------------------------------------
+
+FILLS = ("ok", "ok-text", "warn", "err", "info", "accent")     # the state and accent colors a pill, badge or button is filled with
+# Under 4.5:1 but not the fill's hue, known: the map's "down" badge, white on --err (3.1:1; the map layers' work).
+LOW_CONTRAST_KNOWN = {("cadmap.css", ".ml-down-badge")}
+
+
+def color_tokens():
+    """Token -> #RRGGBB (the one theme, dark), var() aliases (--on-ok: var(--on-fill)) resolved."""
+    raw = dict(re.findall(r"^\s+--([\w-]+):\s*([^;]+);", layer_block(strip_comments(css("style.css")), "tokens"), re.M))
+
+    def res(v, depth=0):
+        m = re.fullmatch(r"var\(--([\w-]+)\)", v.strip())
+        return res(raw[m.group(1)], depth + 1) if m and m.group(1) in raw and depth < 10 else v.strip()
+    return {k: res(v) for k, v in raw.items() if re.fullmatch(r"#[0-9A-Fa-f]{6}", res(v))}
+
+
+def filled_rules():
+    """(file, selector, text token, fill token) for every rule that fills with a state / accent token and sets
+    the text color on it."""
+    out = []
+    for f in ("style.css", *VIEWS):
+        rules: dict[str, dict] = {}
+        for sel, prop, val in declarations(css(f)):
+            rules.setdefault(sel, {})[prop] = val
+        for sel, d in rules.items():
+            bg = re.fullmatch(r"var\(--([\w-]+)\)", d.get("background-color", d.get("background", "")).strip())
+            fg = re.fullmatch(r"var\(--([\w-]+)\)", d.get("color", "").strip())
+            if bg and fg and bg.group(1) in FILLS:
+                out.append((f, sel, fg.group(1), bg.group(1)))
+    return out
+
+
+def test_filled_states_never_put_text_in_the_fills_hue():
+    import colorsys
+
+    def rgb(h):
+        return [int(h[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+
+    def lum(h):
+        c = [x / 12.92 if x <= 0.03928 else ((x + 0.055) / 1.055) ** 2.4 for x in rgb(h)]
+        return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
+
+    tok = color_tokens()
+    rules = filled_rules()
+    sels = {s for _f, s, _c, _b in rules}
+    # the ones #116 was about are found (the parse sees them): an open receiver, one open too long, the SDR's job
+    assert {":where(.pill.radio.open)", ":where(.pill.radio.open.stuck)", ":where(.badge.ok, .talk-badge)"} <= sels
+    assert any(s.startswith(":where(.seg) button:where(.active") for s in sels)
+    bad = []
+    for f, sel, fg, bg in rules:
+        a, b = tok[fg], tok[bg]
+        hi, lo = sorted((lum(a), lum(b)), reverse=True)
+        ratio = (hi + 0.05) / (lo + 0.05)
+        ha, la, sa = colorsys.rgb_to_hls(*rgb(a))
+        hb, _lb, _sb = colorsys.rgb_to_hls(*rgb(b))
+        same_hue = sa > 0.3 and min(abs(ha - hb), 1 - abs(ha - hb)) < 30 / 360
+        if fg == bg or same_hue or (ratio < 4.5 and (f, sel) not in LOW_CONTRAST_KNOWN):
+            bad.append(f"{f}: {sel} {{ color: --{fg} {a}; background: --{bg} {b} }} contrast {ratio:.1f}")
+    assert not bad, "filled states with text in the fill's hue or under 4.5:1:\n" + "\n".join(bad)
+    # the text tokens for the fills: dark on the light state colors
+    for on, fill in (("on-ok", "ok"), ("on-warn", "warn")):
+        assert lum(tok[on]) < 0.05 and lum(tok[fill]) > 0.3, on
+
+
+def test_state_utilities_never_recolor_a_filled_pill_or_badge():
+    # The utilities layer wins over every component whatever the specificity: `.ok { color: var(--ok) }` there
+    # turned the text of an open receiver (class "pill radio ok open") green on its green fill (#116).
+    util = layer_block(strip_comments(css("style.css")), "utilities")
+    for sel, prop, _val in declarations(util):
+        for part in re.split(r",(?![^(]*\))", sel):          # top-level commas only
+            if prop == "color" and re.match(r"\s*\.(ok|warn|err|info)\b", part):
+                assert re.search(r":not\([^)]*\.pill\b[^)]*\.badge\b", part), part
+    js = (STATIC / "radio-controls.js").read_text()
+    assert "pill radio ${state}" in js          # the receiver pill carries its state class ("ok"): see above

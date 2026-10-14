@@ -65,6 +65,13 @@ class TapSquelch:
         self._tap.frame(self._ch, frame, self._sq)
         return seg
 
+    def flush(self, reason: str = "stopped"):
+        """The audio stopped (a stall, rtl_fm ended): the squelch closes with no frame after it, so the
+        tap is told here (a live page would otherwise stay "going out" with nothing to end it, #116)."""
+        seg = self._sq.flush(reason)
+        self._tap.stopped(self._ch)
+        return seg
+
     def __getattr__(self, name):
         return getattr(self._sq, name)
 
@@ -91,6 +98,23 @@ class LiveTap:
         """One frame, after squelch.feed(frame) (TapSquelch). Never raises."""
         try:
             self._frame(channel.label, frame, bool(squelch.open), float(getattr(squelch, "_start", 0.0)))
+        except Exception as e:  # the tap must never stop the receiver
+            self._errors += 1
+            if self.log is not None and self._errors in (1, 10, 100):
+                self.log(f"live tap error ({self._errors}): {type(e).__name__}: {e}")
+
+    def stopped(self, channel) -> None:
+        """The receiver's audio stopped (TapSquelch.flush): whatever was open there is closed. Never raises."""
+        try:
+            with self._lock:
+                c = self._ch.get(channel.label)
+                was = c is not None and c.open
+                if was:
+                    self._ended(c)
+                    c.open, c.buf = False, []
+                    c.pre.clear()
+            if was and self.kind(channel.label) == "paging" and self.paging is not None:
+                self.paging.close(channel.label)
         except Exception as e:  # the tap must never stop the receiver
             self._errors += 1
             if self.log is not None and self._errors in (1, 10, 100):
