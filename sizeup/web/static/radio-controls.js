@@ -103,11 +103,14 @@ window.RadioControls = (() => {
   async function poll() {
     clearTimeout(st.timer);
     if (!st.box || !st.box.isConnected || st.box.offsetParent === null) return;   // the section closed: stop
+    if (document.visibilityState === "hidden") { st.timer = setTimeout(poll, POLL_MS); return; }   // nobody looking
     try {
-      const r = await fetch("/api/state");
+      // only what changed since the last answer (#137: live.js liveMerge, the server's ?since=)
+      const r = await fetch("/api/state" + (st.stateId ? `?since=${encodeURIComponent(st.stateId)}` : ""), { cache: "no-store" });
       if (r.ok) {
-        const s = await r.json();
-        if (!s.error) { st.state = s; settle(); render(); }
+        const s = liveMerge(st.state, await r.json());
+        st.stateId = s ? r.headers.get("X-State-Id") || "" : "";
+        if (s && !s.error) { st.state = s; settle(); render(); }
       }
     } catch (_) { /* the next poll tries again */ }
     st.timer = setTimeout(poll, POLL_MS);

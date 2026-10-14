@@ -12,6 +12,7 @@ a 400 with the reason), keeps the lists, store, run cards, dispatch audio and th
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shutil
@@ -272,6 +273,7 @@ class Cad:
                           "tones": [list(t) for t in self.s.tones]},
                 "geocoder": self.geocoder is not None,
                 "operators": self.settings.operator_names(),
+                "users_rev": self._users_rev(),
                 "feed": self.feed.state(),
                 "overview": mapview.overview(incs, self.s.tactical),
             })
@@ -279,7 +281,9 @@ class Cad:
         now = self.clock()
         pos = self._positions(now)
         units = [dict(u, position=pos[u["name"]]) if u["name"] in pos else u for u in st["units"]] if pos else st["units"]
+        # comms_rev: what GET /api/cad/comms calls its rev; the Radio view and the board ask again only when it moves (#137)
         return dict(st, units=units, map=self.map_slice(units, st["incidents"], pos, now), time=now, rev=rev,
+                    comms_rev=f"{self.comms.rev}.{rev}",
                     talking=self.live(), paging=self.paging(), cloud=self.cloud(), prealert=self.prealert_state(now),
                     status_hints=self.status_hints(), alarms=self.alarms_state(now))
 
@@ -310,6 +314,11 @@ class Cad:
     def alarms_page(self) -> dict:
         """GET /api/cad/alarms: the state, the settings, the last 200 (newest first)."""
         return {**(self.alarms_state() or {}), "settings": self.alarms.settings_page(), "history": self.alarms.history()}
+
+    def _users_rev(self) -> str:
+        """Settings > Users as a short hash: the page asks whoami again only when it moves (a role changed, #137)."""
+        rows = self.store.q("SELECT id, name, role, active, email, callsign FROM operators ORDER BY id")
+        return hashlib.sha1(json.dumps(rows, separators=(",", ":"), default=str).encode()).hexdigest()[:12]
 
     def prealert_state(self, now: float | None = None) -> dict | None:
         """The phone pre-alerts and Tapout's health (a broken feed never breaks the console)."""

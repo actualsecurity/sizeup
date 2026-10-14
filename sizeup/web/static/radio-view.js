@@ -8,8 +8,10 @@
 // talkgroups, opened on a click. The pinned 60 Control feed stays at the top of the units column.
 //
 // Filters live in the URL hash, so a link from an event (#radio?event=26-000012) or the feed's More
-// (#radio?channel=Fire/EMS 15) opens filtered. Polls /api/cad/comms every 2 s while open (unchanged:
-// cheap, ?rev). Each row is cad.js's radioRow, as on the incident's Radio card and the feed: play, the
+// (#radio?channel=Fire/EMS 15) opens filtered. Asks /api/cad/comms only while the view is on screen
+// (#137: it went on polling every 2 s after the tab was left), and then only when the state push's
+// comms_rev moves (a transmission or note logged or changed), with a slow safety poll (SAFETY_MS) and at
+// once on sizeup:tx-changed; an older hub without comms_rev: every POLL_MS (?rev: cheap). Each row is cad.js's radioRow, as on the incident's Radio card and the feed: play, the
 // incidents it is on (a click: only that one's traffic), its "⋯" menu (Add to event ▸, Remove from ...,
 // Re-transcribe, Copy text). Uses cad.js's helpers (el, syncList, radioRow, evChip, api ...): loaded after it.
 //
@@ -90,10 +92,12 @@ window.RadioLive = (() => {
 })();
 
 window.RadioView = (() => {
-  const POLL_MS = 2000;
+  const POLL_MS = 2000;                 // a hub without comms_rev in its state
+  const SAFETY_MS = 30000;              // with it: in case a push was missed
+  const RETRY_MS = 5000;                // after a failed ask, before the push may ask again
   const OTHER_KEY = "sizeup.cad.radio.other";
   const FIELDS = ["q", "unit", "channel", "event", "type", "pcfd", "since", "until"];
-  const st = { open: false, rev: "", rows: [], facets: "", busy: false, again: false, timer: 0, lastOk: 0, error: "",
+  const st = { open: false, rev: "", rows: [], facets: "", busy: false, again: false, timer: 0, lastOk: 0, error: "", failAt: 0,
                other: { open: false, tgs: new Set() }, qTimer: 0 };
   try {
     const v = JSON.parse(localStorage.getItem(OTHER_KEY) || "null");
@@ -270,9 +274,19 @@ window.RadioView = (() => {
 
   // ---- polling ------------------------------------------------------------------------------------
 
+  // On screen: open, the page visible, the view shown and the address still #radio. Anything else stops
+  // the asking (and an open view whose address moved on is closed: however it was left).
+  function shown() {
+    if (!st.open) return false;
+    if (!location.hash.startsWith("#radio") || $("#radio-view").hidden) { close(); return false; }
+    return document.visibilityState !== "hidden";
+  }
+  const pushed = () => (typeof cad !== "undefined" && cad.state && cad.state.comms_rev) || "";
+
   async function poll() {
     clearTimeout(st.timer);
-    if (!st.open) return;
+    st.timer = 0;
+    if (!shown()) return;
     if (st.busy) { st.again = true; return; }      // a filter changed mid-request: ask again when it's back
     st.busy = true;
     st.again = false;
@@ -289,11 +303,18 @@ window.RadioView = (() => {
       }
     } catch (e) {
       st.error = e.message;
+      st.failAt = Date.now();
     } finally {
       st.busy = false;
       render();
-      if (st.again) { st.rev = ""; poll(); } else if (st.open) st.timer = setTimeout(poll, POLL_MS);
+      if (st.again) { st.rev = ""; poll(); } else if (shown()) st.timer = setTimeout(poll, pushed() ? SAFETY_MS : POLL_MS);
     }
+  }
+  // Each state push: ask only if the hub's comms_rev moved past what is on screen.
+  function onPush() {
+    const rev = pushed();
+    if (!rev || rev === st.rev || st.busy || (st.failAt && Date.now() - st.failAt < RETRY_MS)) return;
+    if (shown()) poll();
   }
 
   function open(qs) {
@@ -305,6 +326,7 @@ window.RadioView = (() => {
   function close() {
     st.open = false;
     clearTimeout(st.timer);
+    st.timer = 0;
   }
 
   // ---- wiring -------------------------------------------------------------------------------------
@@ -336,7 +358,12 @@ window.RadioView = (() => {
   let drawnRev = -1;
   cad.hooks.push(() => { if (st.open && drawnRev !== cad.txRev) { drawnRev = cad.txRev; render(); } });   // a row's own state
   cad.hooks.push(() => { if (st.open) renderPaging(); });          // each tone pair as it decodes (the state push)
+  cad.hooks.push(onPush);
   window.addEventListener("sizeup:tx-changed", () => { st.rev = ""; poll(); });   // a link added or removed: ask now
+  document.addEventListener("visibilitychange", () => {                            // hidden: stop; back: ask at once
+    if (document.visibilityState === "hidden") { clearTimeout(st.timer); st.timer = 0; }
+    else if (st.open) poll();
+  });
 
-  return { open, close, render };
+  return { open, close, render, get polling() { return !!st.timer || st.busy; } };
 })();

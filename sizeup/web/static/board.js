@@ -16,14 +16,21 @@
 
   // ---- the main channels' radio: FG1 (fireground, marked), Fire/EMS 15, every Main talkgroup -----------------
 
-  const RADIO_N = 8, RADIO_POLL_MS = 2000;      // the newest 8: pages and units stay on the screen below
-  const r = { rev: "", rows: [], error: "" };
+  // Asked again when the CAD state's comms_rev moves (#137), else every SAFETY_MS; an older hub without
+  // it: every RADIO_POLL_MS. Not while the page is hidden.
+  const RADIO_N = 8, RADIO_POLL_MS = 2000, SAFETY_MS = 30000, RETRY_MS = 5000;   // the newest 8: pages and units stay on the screen below
+  const r = { rev: "", rows: [], error: "", busy: false, timer: 0, failAt: 0 };
+  const pushed = () => (cad.state && cad.state.comms_rev) || "";
   const fireground = (t) => {           // an FM traffic channel (FG1), not a talkgroup or the paging channel
     const fm = (((b.state && b.state.channels) || {}).fm || []);
     const ch = fm.find((c) => c.key === t.channel);
     return ch ? ch.kind === "traffic" : (t.talkgroup === null || t.talkgroup === undefined) && /^FG/i.test(t.channel || "");
   };
   async function pollRadio() {
+    clearTimeout(r.timer);
+    r.timer = 0;
+    if (r.busy || document.visibilityState === "hidden") return;
+    r.busy = true;
     try {
       const q = new URLSearchParams({ type: "radio" });
       if (r.rev) q.set("rev", r.rev);
@@ -36,9 +43,11 @@
       r.error = "";
     } catch (e) {
       r.error = e.message;
+      r.failAt = Date.now();
     }
+    r.busy = false;
     renderRadio();
-    setTimeout(pollRadio, RADIO_POLL_MS);
+    if (document.visibilityState !== "hidden") r.timer = setTimeout(pollRadio, pushed() ? SAFETY_MS : RADIO_POLL_MS);
   }
   function renderRadio() {
     setText($("#b-radio-sum"), [...new Set(r.rows.map((t) => t.channel))].join(" · ") || "Main channels");
@@ -147,6 +156,11 @@
 
   RadioLive.button($("#sound"), "Sound");
   cad.hooks.push(renderStrip);
+  cad.hooks.push(() => {                         // the state push: a transmission logged or changed
+    const rev = pushed();
+    if (rev && rev !== r.rev && !r.busy && !(r.failAt && Date.now() - r.failAt < RETRY_MS)) pollRadio();
+  });
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState !== "hidden") pollRadio(); });
   liveState("/api/stream", "/api/state", onMonitor);
   pollRadio();
 })();
