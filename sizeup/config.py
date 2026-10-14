@@ -183,7 +183,7 @@ class Config:
     trains_key: str = ""
     trains_rt_url: str = ""
     trains_gtfs_url: str = ""
-    trains_bbox: tuple[float, float, float, float] = (-73.745, 40.945, -73.595, 41.035)
+    trains_bbox: tuple[float, float, float, float] = (-73.845, 40.900, -73.530, 41.060)
 
 
 def _take(d: dict, path: str, allowed: set[str]) -> dict:
@@ -411,7 +411,7 @@ def _roads(data: dict) -> dict:
 
 
 def _trains(data: dict) -> dict:
-    """[trains] -> Config fields. No section: on, the MTA's feeds, our stretch of the line."""
+    """[trains] -> Config fields. No section: on, the MTA's feeds, our stretch of the line (Mount Vernon East to Stamford)."""
     tr = _take(data.get("trains", {}), "trains", {"enabled", "key", "rt_url", "gtfs_url", "bbox"})
     enabled = tr.get("enabled", True)
     if not isinstance(enabled, bool):
@@ -426,7 +426,7 @@ def _trains(data: dict) -> dict:
         if u and (not m or (m.group(1) == "http" and m.group(2) not in ("127.0.0.1", "localhost", "::1"))):
             raise ConfigError(f"trains.{k}: an https:// address (plain http only to this machine); leave it out for the MTA's")
         urls[f"trains_{k}"] = u
-    bbox = _bbox(tr.get("bbox", [-73.745, 40.945, -73.595, 41.035]), "trains.bbox", 1.0)
+    bbox = _bbox(tr.get("bbox", [-73.845, 40.900, -73.530, 41.060]), "trains.bbox", 1.0)
     return dict(trains_enabled=enabled, trains_key=key, trains_bbox=bbox, **urls)
 
 

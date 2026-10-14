@@ -1066,9 +1066,14 @@ on = true                        # one line changes one thing
 > Show approaching trains for calls on or near the tracks." (GitHub #131)
 
 **What it shows.** A *Trains* group in every map's Layers box (off by default; in the viewer's or the
-event's layer set like the rest): the New Haven Line from Mamaroneck to Cos Cob (Rye to Greenwich, a
-station each side), its stations, and every train on it now as an arrow the way it is going with its
-number: **filled** when the MTA reports where it is, **hollow** when the position is our estimate. A click
+event's layer set like the rest): the New Haven Line from Mount Vernon East to Stamford (about 31 km, New
+Rochelle to Greenwich either side of Rye and Port Chester, so a train shows ten to twenty minutes before it
+gets here; `[trains] bbox`), its stations, and every train on it now **drawn as a train** (#151): a cab with
+its windscreen and the body behind, lying flat along the line the way it is going, its number and (from
+zoom 13) where it is headed beside it, the two directions' labels on opposite sides. **Filled** when the
+MTA reports where it is, **hollow** when the position is our estimate. Every train is drawn the same
+length: the feed doesn't say how many cars a train has (see *What the feed gives* below); should it, that
+many cars are drawn. The heading is the line's own over about a train's length there. A click
 on a train: line and destination, direction (*Toward New York* / *Toward New Haven*), next stop and time,
 track, delay, status, reported or estimated; on a station or the line: the catenary note (overhead
 catenary, 12.5 kV AC, plus the third rail at stations; the same note as the county *Railroads* layer,
@@ -1099,6 +1104,18 @@ licenses or endorses us and show no MTA logo (the source is named as text: *MTA 
 where the data may lag more than a minute we must say it may not be real time: the layer and the panel say
 *"Times from the MTA; may not be real time"* with the feed's own time. Provided as is; the MTA may end
 access at any time (the layer then says why: the fetch error).
+
+### What the feed gives (decoded 2026-10-14)
+
+A vehicle position (30 of 310 entities in the live feed that afternoon) carries the trip id, latitude and
+longitude, the time, the vehicle's id and label (the train number), and for a few the current status
+(*incoming at* / *stopped at* / *in transit to*) and the stop. **No bearing, no speed, no odometer, no
+occupancy, and no consist** (`multi_carriage_details`): nothing says how many cars a train has, and the
+static GTFS has no length either (`trips.txt`: route, service, trip, headsign, train number, direction,
+shape, wheelchair access, peak / off-peak). A trip update carries every remaining stop's predicted arrival
+and departure and the MTA railroad extension's track and status; no stop sequence. So the map's heading is
+the line's, and every train one length; `cars` is read from `multi_carriage_details` only if the MTA ever
+sends it.
 
 ### Real and estimated
 
@@ -1135,7 +1152,7 @@ access at any time (the layer then says why: the fetch error).
 
 | | |
 |---|---|
-| `GET /api/cad/trains` | `{configured, note, source, label, link, terms, disclaimer, at (the feed's time), fetched, error, static_at, line, stations, trains: [{id, train, line, headsign, dir, dir_label, lat, lon, bearing, estimated, next_stop, next_time, track, delay_s, status}], catenary, bbox}` |
+| `GET /api/cad/trains[?have=static_at]` | `{configured, note, source, label, link, terms, disclaimer, at (the feed's time), fetched, error, static_at, line, stations, trains: [{id, train, line, headsign, dir, dir_label, lat, lon, bearing, estimated, next_stop, next_time, track, delay_s, status[, cars]}], catenary, bbox}`; with `have` the static_at the page already holds: no `line` or `stations` (`static_same: true`). Positions to 5 decimals (about 1 m). A poll is then only the trains: about 2.5 KB every 30 s while the layer is on (the first, with the line, about 7 KB). Not on the event stream: nothing is pushed |
 | `GET /api/cad/trains/near?lat=&lon=` | `{near: false}` (more than 150 m from the tracks and any station), or `{near: true, ref: {kind: station \| track, name, station, m, lat, lon[, station_m, side]}, window_min, inbound, outbound, dir_labels}`; each train `{train, headsign, line, eta, min, stops, estimated, delay_s, track, status, reported}` |
 
 **Setup:** nothing: on by default, no key. `[trains] enabled = false` turns it off (the box says so). Should
@@ -1151,7 +1168,7 @@ needed now"*):
 ```toml
 [trains]                         # sizeup/trains.py; leave out: on, the MTA's feeds
 enabled = true
-bbox = [-73.745, 40.945, -73.595, 41.035]   # the stretch of line the map shows (Mamaroneck to Cos Cob)
+bbox = [-73.845, 40.900, -73.530, 41.060]   # the stretch of line the map shows (Mount Vernon East to Stamford)
 # rt_url, gtfs_url: "" = the MTA's; key: env SIZEUP_MTA_KEY (the hub: SSM /sizeup-hub/mta-key)
 ```
 

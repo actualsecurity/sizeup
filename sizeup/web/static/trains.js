@@ -2,13 +2,19 @@
 // Greenwich, and "Trains approaching" for an event on or near the tracks.
 //
 //   Layer        "Trains" in every map's Layers box (maplayers.js MapLayers.addGroup; key "trains", off by
-//                default, in the viewer's or the event's set like the rest, #111): the line, its stations, and
-//                each train on it now: an arrow the way it is going, its number, filled when the MTA reports
-//                where it is, hollow when the position is our estimate (between the stations it is between,
-//                by its times). A click: the train's line and destination, direction, next stop and time,
+//                default, in the viewer's or the event's set like the rest, #111): the line from Mount Vernon
+//                East to Stamford (the hub's [trains] bbox), its stations, and each train on it now, drawn as a
+//                train lying along the line the way it is going (#151): a cab with its windscreen at the
+//                front, the body behind; its number and where it is headed beside it, on the side away from
+//                the other direction's trains. One length for every train: the MTA's feed says nothing of how
+//                many cars a train has (no consist, sizeup/trains.py); should it ("cars"), that many cars are
+//                drawn. Filled when the MTA reports where it is, hollow when the position is our estimate
+//                (between the stations it is between, by its times). The heading is the line's own there (the
+//                feed has no bearing). A click: the train's line and destination, direction, next stop and time,
 //                track, delay, status and whether the position is reported or estimated; a station or the
 //                line: its name and the catenary note. Polled every 30 s only while a map has it on and the
-//                page is visible (the hub reads the MTA only while someone asks).
+//                page is visible (the hub reads the MTA only while someone asks); a poll names the line it
+//                already has (?have=static_at), so the answer is only the trains (about 2 KB).
 //   Panel        TrainLayer.panel(inc, host) (cadmap.js, under the event's map): for an event within 150 m of
 //                the tracks or a station, the next trains each way in the next 15 minutes at the nearest
 //                station (or the event's point on the tracks): minutes away, stops or passes, delay, track;
@@ -25,6 +31,7 @@ window.TrainLayer = (() => {
   const POLL_MS = 30000, PANEL_MS = 30000;
   const SRC_LINE = "tr-line", SRC_ST = "tr-stations", SRC_TR = "tr-trains";
   const IDS = ["tr-line", "tr-station", "tr-station-label", "tr-train", "tr-train-label"];
+  const MAX_CARS = 16;
   const CLICKABLE = ["tr-train", "tr-station", "tr-line"];
   const HALO = "#15181B";
 
@@ -62,8 +69,15 @@ window.TrainLayer = (() => {
     if (store.loading) return store.loading;
     store.loading = (async () => {
       try {
-        const r = await fetch(URL, { credentials: "same-origin" });
-        if (r.ok) { store.data = await r.json(); store.at = Date.now(); }
+        const had = store.data;                // the line and stations we hold: the hub leaves them out when unchanged
+        const have = had && had.static_at != null && had.line && had.line.length ? `?have=${encodeURIComponent(had.static_at)}` : "";
+        const r = await fetch(URL + have, { credentials: "same-origin" });
+        if (r.ok) {
+          const d = await r.json();
+          if (d.static_same && had) { d.line = had.line; d.stations = had.stations; }
+          store.data = d;
+          store.at = Date.now();
+        }
       } catch (_) { /* the hub is away: keep what we have */ }
       finally { store.loading = null; notify(); }
     })();
@@ -82,20 +96,54 @@ window.TrainLayer = (() => {
   }
   document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") kick(); });
 
-  // ---- the marks: an arrow in a rounded tile, filled (reported) or hollow (estimated) -------------------------------
-  function trainIcon(filled) {
+  // ---- the marks: a train, pointing up (icon-rotate turns it to its heading), filled (reported) or hollow ----------
+  // (estimated). Plain: one length, a cab with its windscreen and a row of windows, no car joints (we don't know
+  // the cars). With the MTA's car count: that many cars, the first with the cab. Drawn at pixelRatio 2.
+  const CAR = 26, W = 28, X0 = 5, X1 = 23, TOP = 3, PLAIN = 96;
+  function trainIcon(filled, cars) {
+    const n = Math.max(0, Math.min(MAX_CARS, cars | 0));
+    const H = n ? TOP * 2 + n * CAR - 3 : PLAIN;
     const c = document.createElement("canvas");
-    c.width = c.height = 40;
+    c.width = W;
+    c.height = H;
     const g = c.getContext("2d");
-    const col = token("--warn", "#E0A030");
+    const col = token("--warn", "#E0A030"), dark = token("--bg", HALO);
     g.lineJoin = "round";
-    g.beginPath();                          // the arrow (pointing up: icon-rotate turns it to the bearing)
-    g.moveTo(20, 3); g.lineTo(33, 19); g.lineTo(26, 19); g.lineTo(26, 36); g.lineTo(14, 36); g.lineTo(14, 19); g.lineTo(7, 19); g.closePath();
-    g.lineWidth = 4; g.strokeStyle = HALO; g.stroke();
-    if (filled) { g.fillStyle = col; g.fill(); }
-    else { g.fillStyle = HALO; g.fill(); g.lineWidth = 2.5; g.strokeStyle = col; g.stroke(); }
-    return g.getImageData(0, 0, 40, 40);
+    const body = (top, bottom, cab) => {      // one car (or the whole plain train): a rounded nose when it is the cab
+      g.beginPath();
+      if (cab) { g.moveTo(X0, top + 14); g.bezierCurveTo(X0, top + 5, X0 + 4, top, 14, top); g.bezierCurveTo(X1 - 4, top, X1, top + 5, X1, top + 14); }
+      else { g.moveTo(X0, top + 3); g.quadraticCurveTo(X0, top, X0 + 3, top); g.lineTo(X1 - 3, top); g.quadraticCurveTo(X1, top, X1, top + 3); }
+      g.lineTo(X1, bottom - 3); g.quadraticCurveTo(X1, bottom, X1 - 3, bottom);
+      g.lineTo(X0 + 3, bottom); g.quadraticCurveTo(X0, bottom, X0, bottom - 3);
+      g.closePath();
+      g.lineWidth = 4; g.strokeStyle = HALO; g.stroke();
+      if (filled) { g.fillStyle = col; g.fill(); }
+      else { g.fillStyle = dark; g.fill(); g.lineWidth = 2.5; g.strokeStyle = col; g.stroke(); }
+      g.fillStyle = filled ? dark : col;      // the windows
+      if (cab) g.fillRect(X0 + 4, top + 8, X1 - X0 - 8, 4);
+      for (let y = top + (cab ? 18 : 6); y + 4 <= bottom - 5; y += 8) g.fillRect(12, y, 4, 4);
+    };
+    if (!n) body(TOP, H - TOP, true);
+    for (let i = 0; i < n; i++) body(TOP + i * CAR, TOP + i * CAR + CAR - 3, i === 0);
+    return g.getImageData(0, 0, W, H);
   }
+  const iconName = (t) => `tr-${t.estimated ? "est" : "rep"}-${Math.max(0, Math.min(MAX_CARS, t.cars | 0))}`;
+  function ensureIcon(map, t) {
+    const name = iconName(t);
+    if (!map.hasImage(name)) map.addImage(name, trainIcon(!t.estimated, t.cars), { pixelRatio: 2 });
+    return name;
+  }
+  // The label beside the train, on the side its right hand is (so the two directions' labels part): the anchor on
+  // the screen axis nearest that side, further out the more the train lies diagonally (clear of its ends).
+  function labelPlace(bearing, cars) {
+    const b = ((Number(bearing) || 0) * Math.PI) / 180;
+    const nx = Math.cos(b), ny = Math.sin(b);  // the train's right (screen x east, y down)
+    const long = Math.max(1, ((cars | 0) * CAR) / PLAIN);      // a longer train (the MTA's cars) reaches further
+    const r = 0.8 + 1.2 * long * Math.min(Math.abs(nx), Math.abs(ny));
+    if (Math.abs(ny) >= Math.abs(nx)) return ny > 0 ? ["top", [0, r]] : ["bottom", [0, -r]];
+    return nx > 0 ? ["left", [r, 0]] : ["right", [-r, 0]];
+  }
+  const towards = (t) => (t.headsign ? `to ${t.headsign}` : t.dir_label || "");
 
   class TrainMap {
     constructor(control) {
@@ -123,8 +171,8 @@ window.TrainLayer = (() => {
       map.addSource(SRC_LINE, { type: "geojson", data: fc([]), attribution });
       map.addSource(SRC_ST, { type: "geojson", data: fc([]) });
       map.addSource(SRC_TR, { type: "geojson", data: fc([]) });
-      if (!map.hasImage("tr-reported")) map.addImage("tr-reported", trainIcon(true), { pixelRatio: 2 });
-      if (!map.hasImage("tr-estimated")) map.addImage("tr-estimated", trainIcon(false), { pixelRatio: 2 });
+      ensureIcon(map, { estimated: false });
+      ensureIcon(map, { estimated: true });
       const label = (field, size, extra) => (glyphs ? { "text-field": field, "text-font": ["Noto Sans Bold"], "text-size": size,
                                                         "text-optional": true, ...extra } : {});
       const vis = { visibility: "none" };
@@ -136,12 +184,18 @@ window.TrainLayer = (() => {
       map.addLayer({ id: "tr-station-label", type: "symbol", source: SRC_ST, minzoom: 12,
                      layout: { ...vis, ...label(["get", "name"], 11, { "text-anchor": "top", "text-offset": [0, 0.8] }) },
                      paint: { "text-color": line, "text-halo-color": HALO, "text-halo-width": 1.5 } }, before);
+      // the train lies flat on the map along its heading; legible from the whole stretch (zoom 10) to a crossing (17)
       map.addLayer({ id: "tr-train", type: "symbol", source: SRC_TR,
-                     layout: { ...vis, "icon-image": ["case", ["get", "estimated"], "tr-estimated", "tr-reported"], "icon-rotate": ["get", "bearing"],
-                               "icon-rotation-alignment": "map", "icon-allow-overlap": true, "icon-ignore-placement": true,
-                               "icon-size": ["interpolate", ["linear"], ["zoom"], 10, 0.6, 15, 1] } }, before);
+                     layout: { ...vis, "icon-image": ["get", "icon"], "icon-rotate": ["get", "bearing"],
+                               "icon-rotation-alignment": "map", "icon-pitch-alignment": "map",
+                               "icon-allow-overlap": true, "icon-ignore-placement": true,
+                               "icon-size": ["interpolate", ["linear"], ["zoom"], 10, 0.55, 13, 0.85, 16, 1.3] } }, before);
+      // its number from zoom 11; where it is headed under it from 13 (the whole stretch would be a crowd of words)
+      const num = ["format", ["get", "train"], {}];
+      const both = ["format", ["get", "train"], {}, "\n", {}, ["get", "towards"], { "font-scale": 0.85 }];
       map.addLayer({ id: "tr-train-label", type: "symbol", source: SRC_TR, minzoom: 11,
-                     layout: { ...vis, ...label(["get", "train"], 11, { "text-anchor": "left", "text-offset": [1.1, 0] }) },
+                     layout: { ...vis, ...label(["step", ["zoom"], num, 13, both], 11,
+                                                { "text-anchor": ["get", "anchor"], "text-offset": ["get", "offset"] }) },
                      paint: { "text-color": ["case", ["get", "estimated"], text, warn], "text-halo-color": HALO, "text-halo-width": 1.6 } }, before);
       for (const id of CLICKABLE) {
         map.on("mouseenter", id, () => { map.getCanvas().style.cursor = "pointer"; });
@@ -157,12 +211,19 @@ window.TrainLayer = (() => {
       const d = store.data, on = this.isOn();
       for (const id of IDS) if (this.map.getLayer(id)) this.map.setLayoutProperty(id, "visibility", on ? "visible" : "none");
       if (on && d) {
-        const sig = JSON.stringify([d.fetched, d.static_at, (d.trains || []).length]);
-        if (sig !== this.sig) {
-          this.sig = sig;
+        if (d.line !== this.line) {             // the line and stations: only when the hub sent new ones
+          this.line = d.line;
           this.map.getSource(SRC_LINE).setData(fc(d.line && d.line.length > 1 ? [{ type: "Feature", geometry: { type: "LineString", coordinates: d.line }, properties: {} }] : []));
           this.map.getSource(SRC_ST).setData(fc((d.stations || []).map((s) => pt(s.lon, s.lat, { id: s.id, name: s.name }))));
-          this.map.getSource(SRC_TR).setData(fc((d.trains || []).map((t) => pt(t.lon, t.lat, { id: t.id, train: t.train, bearing: t.bearing || 0, estimated: !!t.estimated }))));
+        }
+        const sig = JSON.stringify(d.trains || []);
+        if (sig !== this.sig) {
+          this.sig = sig;
+          this.map.getSource(SRC_TR).setData(fc((d.trains || []).map((t) => {
+            const [anchor, offset] = labelPlace(t.bearing, t.cars);
+            return pt(t.lon, t.lat, { id: t.id, train: t.train, towards: towards(t), bearing: t.bearing || 0, estimated: !!t.estimated,
+                                      icon: ensureIcon(this.map, t), anchor, offset });
+          })));
         }
       }
       this.panelChanged();
@@ -194,6 +255,7 @@ window.TrainLayer = (() => {
         const status = [late(t.delay_s), said && said !== "on-time" && !(said === "late" && t.delay_s > 0) ? t.status : ""].filter(Boolean).join(" · ");
         if (status) lines.push(status);
         lines.push(t.estimated ? "Position estimated (between its stations, by its times)" : "Position reported by the MTA");
+        lines.push(t.cars ? `${t.cars} car${t.cars === 1 ? "" : "s"} (from the MTA)` : "Length not given by the MTA (drawn the same for every train)");
         lines.push(d.catenary);
         this.control.showInfo(`Train ${t.train}`, `${t.line ? `${t.line} Line` : "Metro-North"} to ${t.headsign}`, lines, foot, "", icon);
         return;
@@ -232,7 +294,10 @@ window.TrainLayer = (() => {
       if (!d.configured || d.note) { box.append(h("div", "ml-note", d.note || "Trains not configured on the hub")); return box; }
       const n = (d.trains || []).length;
       const note = h("div", "ml-note");
-      note.append(`${n ? `${n} train${n === 1 ? "" : "s"} on the line here` : "No train on the line here now"}. Hollow: position estimated. `
+      const span = (d.stations || []).length > 1 ? ` (${d.stations[0].name} to ${d.stations[d.stations.length - 1].name})` : "";
+      note.append(`${n ? `${n} train${n === 1 ? "" : "s"} on the line${span}` : `No train on the line${span} now`}. Hollow: position estimated. `
+                  + ((d.trains || []).some((t) => t.cars) ? "Each drawn the way it is going, its cars as the MTA gives them. "
+                     : "Each drawn the way it is going, one length for all (the MTA doesn't say how many cars). ")
                   + `Data: ${d.label || "MTA"}${d.at ? `, feed ${hm(d.at, true)}` : ""}. ${d.disclaimer || ""}. `);
       if (d.error) note.append(`(${d.error}) `);
       const terms = h("a", "", "Terms");

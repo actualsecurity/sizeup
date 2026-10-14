@@ -9,6 +9,7 @@ trimmed by tools/record_trains_fixtures.py (the New Haven Line's trains; the lin
 train number)."""
 
 import json
+import re
 import struct
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -28,6 +29,9 @@ RT = (FIX / "mnr-rt.pb").read_bytes()
 GTFS = (FIX / "gtfsmnr.zip").read_bytes()
 NOW = 1_791_992_007                      # the recorded feed's own time: 2026-10-14 11:33:27 EDT
 PC = (41.000732, -73.6647)               # Port Chester station
+# The default area (#151): the line from Mount Vernon East to Stamford, about 31 km of it
+AREA = ["Mt Vernon East", "Pelham", "New Rochelle", "Larchmont", "Mamaroneck", "Harrison", "Rye", "Port Chester", "Greenwich",
+             "Cos Cob", "Riverside", "Old Greenwich", "Stamford"]
 RT_URL, GTFS_URL = "https://mta.example/rt", "https://mta.example/gtfs.zip"
 
 
@@ -114,6 +118,39 @@ def test_the_recorded_feed(feed):
     assert all(s["arr"] or s["dep"] for t in feed["trains"].values() for s in t["stops"])
 
 
+def test_what_a_vehicle_position_carries_no_bearing_and_no_car_count(feed):
+    """#151: the recorded feed (like the live one, decoded 2026-10-14) gives a train's lat / lon, time and number,
+    never its bearing or how many cars it has (no multi_carriage_details): nothing to draw cars from."""
+    pos = [t["pos"] for t in feed["trains"].values() if t["pos"]]
+    assert pos and all(p["bearing"] is None and p["ts"] for p in pos)
+    assert not any("cars" in t for t in feed["trains"].values())
+    for ent_b in pb(RT).get(2, []):
+        vp = pb(ent_b).get(4)
+        if vp:
+            fields = set(pb(vp[0]))
+            assert 11 not in fields and 9 not in fields and 10 not in fields      # no consist, no occupancy
+            p = pb(vp[0]).get(2)
+            assert p is None or set(pb(p[0])) <= {1, 2}                           # latitude, longitude: no bearing, speed
+
+
+def test_a_car_count_comes_only_from_the_feed(model):
+    """Should the MTA add multi_carriage_details (one per car), that count goes to the map; without it, none."""
+    tu = msg((1, msg((1, "T1"), (5, "3"))), (3, msg((1, "1350"), (2, "1350"))),
+             (2, msg((4, "114"), (2, msg((2, NOW + 60))))), (2, msg((4, "115"), (2, msg((2, NOW + 300))))))
+
+    def feed_with(*cars):
+        vp = msg((1, msg((1, "T1"))), (2, msg((1, 40.98612), (2, -73.68225))), (5, NOW), (8, msg((1, "1350"), (2, "1350"))),
+                 *[(11, msg((1, f"c{i}"), (5, i))) for i in cars])
+        return parse_feed(msg((1, msg((1, "2.0"), (3, NOW))), (2, msg((1, "a"), (3, tu), (4, vp)))))
+    f = feed_with(*range(1, 9))
+    assert f["trains"]["1350"]["cars"] == 8
+    [t] = model.trains(f, NOW)
+    assert t["train"] == "1350" and t["cars"] == 8
+    [u] = model.trains(feed_with(), NOW)
+    assert "cars" not in u
+    assert feed_with(*range(40))["trains"]["1350"]["cars"] == T.MAX_CARS
+
+
 # ---- the static feed: the line, its stations, the run times ------------------------------------------------------
 
 
@@ -121,7 +158,7 @@ def test_the_line_runs_from_grand_central_with_our_stations_on_it_in_order(stati
     first = static["line"][0]
     assert T.metres(first[1], first[0], 40.752998, -73.977056) < 300            # Grand Central first
     names = [s["name"] for s in model.area_stations]
-    assert names == ["Mamaroneck", "Harrison", "Rye", "Port Chester", "Greenwich", "Cos Cob"]
+    assert names == AREA
     st = {s["name"]: s for s in static["stations"].values()}
     assert "Glenbrook" not in st and "White Plains" not in st                      # branches and the Harlem Line: not on it
     assert 40_000 < st["Port Chester"]["ch"] < 42_000
@@ -129,7 +166,9 @@ def test_the_line_runs_from_grand_central_with_our_stations_on_it_in_order(stati
     assert all(a["tc"] < b["tc"] for a, b in zip(order, order[1:]))               # the time coordinate only grows
     # Rye to Port Chester (2.3 km): a couple of minutes for a train that doesn't stop
     assert 60 < st["Port Chester"]["tc"] - st["Rye"]["tc"] < 300
-    assert model.in_area(st["Port Chester"]["ch"]) and not model.in_area(st["Stamford"]["ch"])
+    assert model.in_area(st["Port Chester"]["ch"]) and model.in_area(st["Stamford"]["ch"]) and model.in_area(st["New Rochelle"]["ch"])
+    assert not model.in_area(st["Noroton Heights"]["ch"]) and not model.in_area(st["Wakefield"]["ch"])
+    assert 30_000 < model.area[1] - model.area[0] < 33_000
 
 
 def test_the_static_feed_without_the_new_haven_line_is_refused():
@@ -152,7 +191,10 @@ def test_the_static_feed_without_the_new_haven_line_is_refused():
 
 def test_the_trains_in_our_area_now_reported_by_the_mta(model, feed):
     trains = {t["train"]: t for t in model.trains(feed, NOW)}
-    assert set(trains) == {"1351", "1322"}
+    # Mount Vernon East to Stamford: those two by Rye and Port Chester, and four more out along the line
+    assert set(trains) == {"1351", "1322", "1353", "1553", "1324", "1522"}
+    assert trains["1324"]["next_stop"] == "Mt Vernon East" and trains["1553"]["dir"] == "inbound"
+    assert trains["1522"]["headsign"] == "New Haven" and trains["1522"]["next_stop"] == "Stamford"   # the express, at New Rochelle
     a = trains["1351"]
     assert a["dir"] == "inbound" and a["dir_label"] == "Toward New York" and a["headsign"] == "Grand Central"
     assert a["next_stop"] == "Mamaroneck" and a["track"] == "3" and a["delay_s"] == 240 and a["status"] == "Arriving"
@@ -160,6 +202,24 @@ def test_the_trains_in_our_area_now_reported_by_the_mta(model, feed):
     b = trains["1322"]
     assert b["dir"] == "outbound" and b["headsign"] == "Stamford" and b["next_stop"] == "Riverside" and b["delay_s"] is None
     assert 20 < b["bearing"] < 120
+
+
+def test_each_train_lies_along_the_line_the_way_it_is_going(model, feed):
+    """#151: the feed has no bearing, so a train's heading is the line's own over about a train's length there,
+    turned the way it is going; positions to about a metre."""
+    import math
+    for t in model.trains(feed, NOW):
+        _, ch = model.line.project(t["lat"], t["lon"])
+        h = model.line.heading(ch)
+        want = h if t["dir"] == "outbound" else (h + 180) % 360
+        assert abs((t["bearing"] - want + 180) % 360 - 180) <= 1, t["train"]
+        assert t["lat"] == round(t["lat"], T.DP) and t["lon"] == round(t["lon"], T.DP)
+    east = T.Line([(-73.70, 41.0), (-73.69, 41.0), (-73.68, 41.0)])
+    assert east.heading(800) == pytest.approx(90, abs=0.5)
+    # a kink: over 150 m the heading is the chord's, between the two segments' (not the short one's alone)
+    kink = T.Line([(-73.70, 41.0), (-73.69, 41.0), (-73.689, 41.0006)])
+    k = kink.heading(kink.ch[1])
+    assert 50 < k < 90 and not math.isclose(k, kink.at(kink.ch[1] + 1)[2], abs_tol=5)
 
 
 def test_a_train_without_a_position_is_estimated_between_its_stations(model, feed):
@@ -180,7 +240,7 @@ def test_a_train_without_a_position_is_estimated_between_its_stations(model, fee
     assert model.line.project(x["lat"], x["lon"])[0] < 5
     [y] = model.trains(one, pc)                                           # at the station
     assert T.metres(y["lat"], y["lon"], st["Port Chester"]["lat"], st["Port Chester"]["lon"]) < 150
-    assert model.trains(one, stops["124"]["arr"] + 600) == []             # long gone (Stamford: not our area)
+    assert model.trains(one, stops["124"]["arr"] + 600) == []             # long gone (its last stop, Stamford, 10 min ago)
     assert model.trains({"timestamp": NOW, "trains": {"x": dict(t, stops=t["stops"][:1])}}, NOW) == []
 
 
@@ -344,11 +404,29 @@ def test_the_layer_says_what_it_shows(tmp_path):
     d = json.loads(tr.get("/api/cad/trains", "")[1])
     assert d["configured"] and d["note"] == "" and d["source"] == "MTA" and d["terms"].startswith("https://www.mta.info/")
     assert d["at"] == NOW and d["fetched"] == clock.t and d["static_at"] == clock.t and "may not be real time" in d["disclaimer"]
-    assert [s["name"] for s in d["stations"]][2:4] == ["Rye", "Port Chester"] and len(d["line"]) > 20
+    assert [s["name"] for s in d["stations"]] == AREA and len(d["line"]) > 20
     w, s, e, n = T.DEFAULT_BBOX
     assert all(w - 0.03 < lon < e + 0.03 and s - 0.03 < lat < n + 0.03 for lon, lat in d["line"])
-    assert {t["train"] for t in d["trains"]} == {"1351", "1322"} and "catenary" in d["catenary"]
+    assert {t["train"] for t in d["trains"]} >= {"1351", "1322"} and "catenary" in d["catenary"]
     assert "mta.example" not in json.dumps(d)                                               # the feed addresses stay here
+
+
+def test_a_poll_that_holds_the_line_gets_only_the_trains(tmp_path):
+    """#151: the line and stations are most of the answer and change weekly: a page that has them says so
+    (?have=static_at) and gets the trains alone."""
+    tr, clock, fetch = provider(tmp_path)
+    tr.get("/api/cad/trains", "")
+    tr.tick()
+    full = tr.get("/api/cad/trains", "")[1]
+    d = json.loads(full)
+    assert d["line"] and d["stations"] and "static_same" not in d
+    assert all(c == round(c, T.DP) for pt in d["line"] for c in pt)                    # about a metre
+    lean = tr.get("/api/cad/trains", f"have={d['static_at']}")[1]
+    e = json.loads(lean)
+    assert e["static_same"] is True and "line" not in e and "stations" not in e and e["trains"] == d["trains"]
+    assert len(lean) < len(full) / 2 and len(lean) < 4000
+    for other in (f"have={d['static_at'] - 1}", "have=x", "have="):                     # another week's, or nonsense: all of it
+        assert json.loads(tr.get("/api/cad/trains", other)[1])["line"] == d["line"]
 
 
 def test_the_static_feed_is_cached_and_a_restart_fetches_nothing(tmp_path):
@@ -425,6 +503,8 @@ def test_the_trains_section(tmp_path, monkeypatch):
     p.write_text("")
     c = load(p)
     assert c.trains_enabled and c.trains_rt_url == "" and c.trains_key == "" and c.trains_bbox == T.DEFAULT_BBOX
+    w, s, e, n = c.trains_bbox                                                  # #151: Mount Vernon East to Stamford
+    assert w < -73.832 < -73.5428 < e and s < 40.912 < 41.0466 < n and w > -73.8557   # (not Wakefield: the Harlem Line's)
     p.write_text('[trains]\nenabled = false\nrt_url = "https://x.example/rt"\nbbox = [-73.8, 40.9, -73.5, 41.1]\n')
     c = load(p)
     assert not c.trains_enabled and c.trains_rt_url == "https://x.example/rt" and c.trains_bbox == (-73.8, 40.9, -73.5, 41.1)
@@ -475,7 +555,7 @@ def test_the_hub_serves_trains_and_never_fetches_the_realtime_feed_unasked(tmp_p
         assert h.app.trains.model is not None and mta.hits == ["/gtfs.zip"]
         d = h.get("/api/cad/trains")                    # the first look waits for the feed it wakes
         assert d["configured"] and d["fetched"] and mta.hits.count("/rt") == 1
-        assert [s["name"] for s in d["stations"]] == ["Mamaroneck", "Harrison", "Rye", "Port Chester", "Greenwich", "Cos Cob"]
+        assert [s["name"] for s in d["stations"]] == AREA
         n = h.get(f"/api/cad/trains/near?lat={PC[0]}&lon={PC[1]}")
         assert n["near"] and n["ref"]["name"] == "Port Chester"
         assert (tmp_path / "hub" / "trains" / "static.json").is_file()
@@ -510,3 +590,17 @@ def test_the_trains_layer_and_panel_only_ever_ask_the_hub():
     assert "estimated" in js.lower() and "may not be real time" in js.lower() or "disclaimer" in js
     cadmap = (STATIC / "cadmap.js").read_text()
     assert "TrainLayer.panel(" in cadmap
+
+
+def test_trains_are_drawn_as_trains_along_the_line():
+    """#151: each train a train lying flat along its heading (a cab and body, filled or hollow), its number and
+    destination beside it; cars only from the MTA's count, never made up; the poll names the line it holds."""
+    js = (STATIC / "trains.js").read_text()
+    assert "function trainIcon(filled, cars)" in js and "ensureIcon(this.map, t)" in js
+    assert '"icon-rotation-alignment": "map"' in js and '"icon-pitch-alignment": "map"' in js and '["get", "bearing"]' in js
+    assert '"icon-image": ["get", "icon"]' in js and "trainIcon(!t.estimated, t.cars)" in js
+    assert re.search(r"cars:\s*\d", js) is None and "t.cars" in js                     # no car count of our own
+    assert '"text-anchor": ["get", "anchor"]' in js and '["get", "towards"]' in js and "labelPlace(t.bearing, t.cars)" in js
+    assert "?have=" in js and "static_same" in js
+    assert "doesn't say how many cars" in js and "Length not given by the MTA" in js
+    assert "localStorage" not in js
