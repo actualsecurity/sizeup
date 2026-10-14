@@ -384,6 +384,8 @@ class App:
         # someone looks at the Trains layer or an event near the tracks.
         from sizeup.trains import Trains
         self.trains = Trains.from_config(cfg, log=log)
+        # one station, one mark (#162): the county's Train stations leave out the ones the Trains layer draws
+        self.gis.train_stations = self.trains.stations
         # Weather and water (sizeup/weather.py, #132): NWS alerts, conditions and radar, NOAA tides; a warning
         # said by the dispatch voice when Settings > Dispatch allows it (played where the console is open).
         from sizeup.weather import Weather

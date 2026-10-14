@@ -1085,6 +1085,15 @@ FD, Rye Brook FD) is drawn in the department's red; a fire station of ours likew
 be extruded by their height: the "3D" row in the group tilts the map. The attribution "Westchester
 County GIS" is on the group and in the map's corner.
 
+**One station, one mark** (#162). While a map's Trains layer is on, the county's *Train stations* leave
+out the stations that layer draws from the MTA's data: a county station within 250 m of one, or within
+1 km of one with the same name (`trains_field`; measured 2026-10-14, the New Haven Line's are 20 m to
+215 m from the MTA's stop, and the nearest other station is 1.5 km away). So Rye and Port Chester show
+once, as the Trains layer's station with the line's details. The Harlem Line's (White Plains, North
+White Plains) always show, and with the Trains layer off, or `[trains] enabled = false`, every county
+station does. The hub marks the copies when it serves the layer (`_trains`); the cached file stays as
+the county gave it.
+
 **Source: Westchester County GIS** (<https://gis.westchestercountyny.gov>, an ArcGIS Hub; the data
 from the county's ArcGIS Server at `giswww.westchestergov.com/arcgis/rest/services/`). Surveyed
 2026-10-13; the portal's categories are Basemap Planimetrics, Boundary, Tax Parcels, Infrastructure,
@@ -1131,7 +1140,7 @@ the data is for general reference and the tax maps of record are each assessor's
 | | Streams | `DataHub_BasemapPlanimetrics/0` | | stream, kind |
 | | Lakes & ponds | `DataHub_BasemapPlanimetrics/11` | | water, kind |
 | Transportation | Railroads (zoom 13+) | `DataHub_BasemapPlanimetrics/1` (the county's rail lines; no owner or electrification field: the New Haven Line's catenary is a fixed note) | | line, kind |
-| | Train stations | `DataHub_Transportation/156` | | station |
+| | Train stations (the New Haven Line's left out while the Trains layer is on: it draws them) | `DataHub_Transportation/156` | | station |
 | | Bee-Line bus routes | `DataHub_Transportation/154` | Apr 2022 | route, name |
 | | Bee-Line bus stops (zoom 15+) | `DataHub_Transportation/153` | | stop, on, at, routes |
 

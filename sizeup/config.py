@@ -527,7 +527,8 @@ def _weather(data: dict) -> dict:
 
 
 GIS_LAYER_KEYS = {"key", "label", "url", "group", "kind", "style", "minzoom", "fields", "refresh", "bbox", "where", "on",
-                  "tiled", "simplify_m", "licence", "page", "enabled", "asof", "ours_field", "drop_ours", "note", "icon", "sub"}
+                  "tiled", "simplify_m", "licence", "page", "enabled", "asof", "ours_field", "drop_ours", "note", "icon", "sub",
+                  "trains_field"}
 
 
 ICON_RE = re.compile(r"[a-z][a-z0-9-]{0,31}")
@@ -578,7 +579,8 @@ def _gis_layer(raw: dict, i: int, base=None):
         if not isinstance(d.get(k, False), bool):
             raise ConfigError(f"{where}.{k}: true or false")
     bbox = _bbox(d["bbox"], f"{where}.bbox") if d.get("bbox") else None
-    text = {k: str(d.get(k, "")).strip() for k in ("group", "where", "licence", "page", "asof", "ours_field", "note", "icon", "sub")}
+    text = {k: str(d.get(k, "")).strip() for k in ("group", "where", "licence", "page", "asof", "ours_field", "note", "icon", "sub",
+                                          "trains_field")}
     if not text["group"]:
         text["group"] = "County GIS"
     if text["icon"] and not ICON_RE.fullmatch(text["icon"]):
@@ -587,7 +589,8 @@ def _gis_layer(raw: dict, i: int, base=None):
                  fields=tuple(fields), refresh=refresh, bbox=bbox, where=text["where"], on=bool(d.get("on", False)),
                  tiled=bool(d.get("tiled", False)), simplify_m=simplify_m, licence=text["licence"], page=text["page"],
                  enabled=bool(d.get("enabled", True)), asof=text["asof"], ours_field=text["ours_field"],
-                 drop_ours=bool(d.get("drop_ours", False)), note=text["note"], icon=text["icon"], sub=text["sub"])
+                 drop_ours=bool(d.get("drop_ours", False)), note=text["note"], icon=text["icon"], sub=text["sub"],
+                 trains_field=text["trains_field"])
 
 
 def _gis(data: dict) -> dict:
