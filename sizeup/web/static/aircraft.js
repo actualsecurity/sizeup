@@ -5,25 +5,36 @@
 //                on by itself for an event at the airport, like the Airport layer: maplayers.js focus): arrivals
 //                (green), departures (blue), aircraft on the ground at HPN (grey) and low traffic in the area (amber:
 //                LGA arrivals over Port Chester, helicopters), an emergency (red) whatever it is doing. Overflights
-//                and other airports' ground traffic are left out. Each one is drawn where the feed last placed it,
-//                turned to its track, with its callsign, altitude and type; an arrival's or departure's last few
-//                minutes as a trail. A position older than the hub's stale_s (15 s) is drawn hollow and says how
-//                old it is: nothing is moved on by guesswork (no dead reckoning). A click: what it is (the feed's
-//                type, the FAA registry's make and model), what it is doing, how it was located.
+//                and other airports' ground traffic are left out. Drawn as shortfinal draws them (its map page:
+//                renderPlanes / renderTrails, map-style.js): a jet, light-aircraft or helicopter silhouette by the
+//                feed's emitter category, turned to its track and sized by phase (EMPHASIS; an emergency largest); the callsign, then
+//                the approach or departure and the altitude, speed and type, on a dark chip up and to the right;
+//                and every one with a short trail of its real fixes (the hub's last TRAIL_S, aircraft.py), in its
+//                colour, while the layer is on. Kept beneath the apparatus, the stations and the events.
+//   Motion       motion.js: between fixes the mark moves on along its track and speed, round its turn, for at most
+//                HORIZON_S after the fix (shortfinal's MAX_EXTRAPOLATE_S), redrawn every ANIMATE_MS (shortfinal's),
+//                and eases onto each new fix. A position older than the hub's stale_s (15 s) is not moved: it is
+//                drawn hollow where it really was, fading until the hub drops it (drop_s). No age is printed (the click says stale).
+//                A click: what it is (the feed's type, the FAA registry's make and model), what it is doing, how
+//                it was located.
 //   Box          the group's note: emergencies first, the HPN movements (arriving, departing, on the ground),
 //                how many are low in the area, each feed (our receiver, adsb.lol, adsb.fi) with how many it gave and
 //                which is primary or resting, the credits and licence, the feed's time, our receiver's state.
-//   Data         only ever from the hub: GET /api/cad/aircraft (sizeup/aircraft.py), every 5 s while a map has the
-//                layer on and the page is visible (an unchanged answer is a 304); never in the state push (#146).
-//                The browser never talks to adsb.lol or the FAA.
+//   Data         only ever from the hub: GET /api/cad/aircraft (sizeup/aircraft.py), every 2 s while a map has the
+//                layer on and the page is visible (an unchanged answer is a 304; the hub still reads each feed at its
+//                own rate: the primary API every 5 s); never in the state push (#146). The browser never talks to
+//                adsb.lol, adsb.fi or the FAA.
 //
-// Colours come from the design's tokens (style.css); nothing here is a raw colour but the halo.
+// Colours come from the design's tokens (style.css); nothing here is a raw colour but the halo and the chip.
 "use strict";
 
 window.AircraftLayer = (() => {
   const URL = "/api/cad/aircraft";
   const KEY = "aircraft";
-  const POLL_MS = 5000;
+  const POLL_MS = 2000;
+  const ANIMATE_MS = 100;                   // shortfinal's ANIMATE_MS: ~10 redraws a second while something moves
+  const HORIZON_S = 10;                     // shortfinal's MAX_EXTRAPOLATE_S: never further past a fix than this
+  const EASE_MS = 1000;                     // a new fix is eased into over this, not jumped to
   const SRC = "ac-aircraft", SRC_TRAIL = "ac-trails";
   const IDS = ["ac-trail", "ac-mark", "ac-label"];
   const HALO = "#15181B";
@@ -35,6 +46,17 @@ window.AircraftLayer = (() => {
     overflight: { token: "--dim", text: "Overflight", tag: "" },
     other_ground: { token: "--dim", text: "On the ground elsewhere", tag: "" },
   };
+  // shortfinal's EMPHASIS (its map page): how strongly each phase is drawn (the mark's size, the label's, the trail's)
+  const EMPHASIS = {
+    arriving: { scale: 1.15, label: 1.0, trail: 1.3 },
+    departing: { scale: 1.05, label: 1.0, trail: 1.2 },
+    ground: { scale: 0.85, label: 0.9, trail: 0.8 },
+    low: { scale: 1.0, label: 1.0, trail: 1.0 },
+    // a squawk 7500 / 7600 / 7700 or its own emergency status (the hub raises the alarm and pushes): never drawn
+    // smaller than the busiest phase, whatever it is doing; red, first (rank 0), its emergency on the label
+    emergency: { scale: 1.3, label: 1.1, trail: 1.5 },
+  };
+  function emphasis(a) { return a.emerg ? EMPHASIS.emergency : (EMPHASIS[a.phase] || EMPHASIS.low); }
   // which feed each position came from (sizeup/aircraft.py combine(): our receiver first, then the freshest of the APIs)
   const SRC_NAME = { receiver: "our receiver", adsblol: "adsb.lol", adsbfi: "adsb.fi" };
   const POS = { adsb: "ADS-B (its own GPS position)", mlat: "MLAT (located by receivers' timing)", tisb: "TIS-B (a radar position rebroadcast)",
@@ -75,13 +97,14 @@ window.AircraftLayer = (() => {
         const r = await fetch(URL, { credentials: "same-origin" });
         if (r.ok) { store.data = await r.json(); store.at = Date.now(); store.failed = false; } else store.failed = true;
       } catch (_) { store.failed = true; /* the hub is away: keep what we have; it goes stale on screen */ }
-      finally { store.loading = null; notify(); }
+      finally { store.loading = null; moved(); notify(); animate(); }
     })();
     return store.loading;
   }
-  function kick() {                         // a map turned it on (or the page came back): now, then every 5 s
+  function kick() {                         // a map turned it on (or the page came back): now, then every 2 s
     clearTimeout(store.timer);
     store.timer = null;
+    animate();
     if (!anyOn() || document.visibilityState === "hidden") return;
     if (Date.now() - store.at > POLL_MS / 2) load();
     store.timer = setTimeout(function tick() {
@@ -90,7 +113,7 @@ window.AircraftLayer = (() => {
       load().then(() => { if (!store.timer && anyOn()) store.timer = setTimeout(tick, POLL_MS); });
     }, POLL_MS);
   }
-  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") kick(); });
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") kick(); else animate(); });
 
   // how old each position is now: its age at the feed's read, plus the time since that read
   function ageNow(d, a) {
@@ -98,6 +121,11 @@ window.AircraftLayer = (() => {
     return (a.age || 0) + since;
   }
   const staleS = (d) => (d && d.stale_s) || 15;
+  // shortfinal's fade (TrackStore.alpha): full until stale, then down to a quarter by the time the hub drops it
+  function alpha(d, age) {
+    const s = staleS(d), drop = (d && d.drop_s) || 60;
+    return age <= s ? 1 : Math.max(0.25, 1 - 0.75 * (age - s) / Math.max(1, drop - s));
+  }
   function colour(a) { return a.emerg ? token("--err", "#EE6475") : token((PHASE[a.phase] || PHASE.low).token, "#9AA3AD"); }
   function callsign(a) { return a.cs || (a.hex || "").replace(/^~/, "").toUpperCase(); }
   function phaseLine(a) {
@@ -109,28 +137,84 @@ window.AircraftLayer = (() => {
     return "";
   }
 
-  // ---- the marks: a plane or a helicopter, drawn white for MapLibre to tint (SDF); hollow when old ------------------
+  // ---- the motion: one tracker for every map (motion.js), fed each real fix ----------------------------------------
+  const motion = window.Motion ? Motion.tracker(Motion.arc, { horizonS: HORIZON_S, easeMs: EASE_MS }) : null;
+  function moved() {
+    const d = store.data;
+    if (!motion || !d) return;
+    motion.staleS = staleS(d);
+    const keep = new Set();
+    for (const a of d.aircraft || []) {
+      keep.add(a.hex);
+      motion.set(a.hex, { lon: a.lon, lat: a.lat, rot: a.trk || 0, at: Date.now() - ageNow(d, a) * 1000,
+                          gs: a.gs, trk: a.trk, tr: a.tr, ground: a.alt === "ground" });
+    }
+    motion.forget(keep);
+  }
+  let animTimer = null;
+  function animate() {                      // redraw ~10 a second only while something moves on a visible map
+    const want = !!motion && anyOn() && document.visibilityState !== "hidden" && motion.busy();
+    if (want && !animTimer) {
+      animTimer = setInterval(() => { for (const m of maps) m.draw(); animate(); }, ANIMATE_MS);
+    } else if (!want && animTimer) {
+      clearInterval(animTimer);
+      animTimer = null;
+    }
+  }
+
+  // ---- the marks: shortfinal's silhouettes (jetPath / lightPath / heliPath), white for MapLibre to tint
+  // (SDF); hollow when old. Nose up: icon-rotate turns them to the track. ------------------------------------------
+  const SHAPES = {
+    jet: [[32, 3], [35, 8], [35.5, 22], [60, 36], [60, 40], [35.5, 33], [35, 48], [43, 55], [43, 58],
+          [32, 55], [21, 58], [21, 55], [29, 48], [28.5, 33], [4, 40], [4, 36], [28.5, 22], [29, 8]],
+    light: [[32, 6], [35, 12], [35, 24], [61, 25], [61, 31], [35, 32], [34, 48], [43, 50], [43, 55],
+            [32, 54], [21, 55], [21, 50], [30, 48], [29, 32], [3, 31], [3, 25], [29, 24], [29, 12]],
+  };
   function mark(kind, hollow) {
-    const S = 48, c = document.createElement("canvas");
+    const S = 64, c = document.createElement("canvas");
     c.width = c.height = S;
     const g = c.getContext("2d");
     g.fillStyle = g.strokeStyle = "#fff";
     g.lineJoin = "round";
-    g.lineWidth = 3;
+    g.lineWidth = 4;
     g.beginPath();
-    if (kind === "heli") {                  // a round cabin, a tail boom, the rotor across
-      g.arc(24, 22, 8, 0, Math.PI * 2);
-      g.moveTo(22.5, 30); g.lineTo(22.5, 42); g.lineTo(25.5, 42); g.lineTo(25.5, 30);
-      g.moveTo(9, 22); g.lineTo(39, 22);
-      g.moveTo(24, 7); g.lineTo(24, 37);
-    } else {                                // nose up: icon-rotate turns it to the track
-      g.moveTo(24, 4); g.lineTo(27, 10); g.lineTo(27, 19); g.lineTo(43, 27); g.lineTo(43, 31); g.lineTo(27, 27);
-      g.lineTo(26, 37); g.lineTo(32, 41); g.lineTo(32, 44); g.lineTo(24, 42); g.lineTo(16, 44); g.lineTo(16, 41);
-      g.lineTo(22, 37); g.lineTo(21, 27); g.lineTo(5, 31); g.lineTo(5, 27); g.lineTo(21, 19); g.lineTo(21, 10); g.closePath();
+    if (kind === "heli") {                  // a cabin, the tail boom and its rotor, the main rotor across
+      g.ellipse(32, 30, 8, 12, 0, 0, Math.PI * 2);
+      g.rect(30.5, 38, 3, 20);
+      g.rect(25, 55, 14, 3);
+    } else {
+      SHAPES[kind].forEach(([x, y], i) => (i ? g.lineTo(x, y) : g.moveTo(x, y)));
+      g.closePath();
     }
     if (hollow) g.stroke();
-    else { g.fill(); if (kind === "heli") g.stroke(); }
+    else g.fill();
+    if (kind === "heli") {
+      g.lineWidth = 3;
+      g.beginPath(); g.moveTo(8, 8); g.lineTo(56, 52); g.moveTo(56, 8); g.lineTo(8, 52); g.stroke();
+    }
     return g.getImageData(0, 0, S, S);
+  }
+  // shortfinal's label chip (chipImage), in the halo's colour: stretched behind the text by icon-text-fit
+  function chip() {
+    const S = 32, c = document.createElement("canvas");
+    c.width = c.height = S;
+    const g = c.getContext("2d");
+    g.globalAlpha = 0.8;
+    g.fillStyle = HALO;
+    g.beginPath(); g.roundRect(1, 1, S - 2, S - 2, 8); g.fill();
+    g.globalAlpha = 0.16;
+    g.strokeStyle = "#fff";
+    g.lineWidth = 2;
+    g.stroke();
+    return g.getImageData(0, 0, S, S);
+  }
+  // shortfinal's iconFor(): the emitter category picks the silhouette and its size
+  function iconFor(a) {
+    if (a.kind === "helicopter" || a.cat === "A7") return ["heli", 0.85];
+    if (a.cat === "A1") return ["light", 0.7];
+    if (a.cat === "A2") return ["jet", 0.8];
+    if (a.cat === "A5") return ["jet", 1.3];
+    return ["jet", 1.0];
   }
 
   class AircraftMap {
@@ -157,25 +241,36 @@ window.AircraftLayer = (() => {
       map.addSource(SRC_TRAIL, { type: "geojson", data: fc([]) });
       map.addSource(SRC, { type: "geojson", data: fc([]),
                            attribution: '<a href="https://adsb.lol" target="_blank" rel="noopener">adsb.lol (ODbL)</a> · <a href="https://adsb.fi" target="_blank" rel="noopener">adsb.fi</a>' });
-      for (const [name, kind, hollow] of [["ac-plane", "plane", false], ["ac-plane-old", "plane", true],
-                                          ["ac-heli", "heli", false], ["ac-heli-old", "heli", true]]) {
-        if (!map.hasImage(name)) map.addImage(name, mark(kind, hollow), { pixelRatio: 2, sdf: true });
+      for (const kind of ["jet", "light", "heli"]) {
+        for (const hollow of [false, true]) {
+          const name = `ac-${kind}${hollow ? "-old" : ""}`;
+          if (!map.hasImage(name)) map.addImage(name, mark(kind, hollow), { pixelRatio: 2, sdf: true });
+        }
       }
+      if (!map.hasImage("ac-chip")) map.addImage("ac-chip", chip(), { pixelRatio: 2, stretchX: [[8, 24]], stretchY: [[8, 24]], content: [8, 8, 24, 24] });
       const vis = { visibility: "none" };
+      // shortfinal's "trails" layer: each in its colour, width and opacity by phase (renderTrails)
       map.addLayer({ id: "ac-trail", type: "line", source: SRC_TRAIL, layout: { ...vis, "line-cap": "round", "line-join": "round" },
-                     paint: { "line-color": ["get", "color"], "line-width": 2, "line-opacity": 0.55 } }, before);
+                     paint: { "line-color": ["get", "color"], "line-width": ["get", "width"], "line-opacity": ["get", "opacity"] } }, before);
       map.addLayer({ id: "ac-mark", type: "symbol", source: SRC,
                      layout: { ...vis, "icon-image": ["get", "icon"], "icon-rotate": ["get", "rot"], "icon-rotation-alignment": "map",
                                "icon-allow-overlap": true, "icon-ignore-placement": true, "symbol-sort-key": ["get", "rank"],
-                               "icon-size": ["interpolate", ["linear"], ["zoom"], 9, 0.55, 14, 0.95] },
-                     paint: { "icon-color": ["get", "color"], "icon-halo-color": HALO, "icon-halo-width": 1.5,
-                              "icon-opacity": ["case", ["get", "old"], 0.75, 1] } }, before);
+                               "icon-size": ["interpolate", ["linear"], ["zoom"], 9, ["*", 0.5, ["get", "scale"]],
+                                             12, ["*", 0.7, ["get", "scale"]], 15, ["*", 0.95, ["get", "scale"]]] },
+                     paint: { "icon-color": ["get", "color"], "icon-halo-color": HALO, "icon-halo-width": 1,
+                              "icon-opacity": ["get", "opacity"] } }, before);
       if (glyphs) {
+        // shortfinal's "aircraft-label": the callsign, the rest smaller beneath it, on a chip up and to the right
         map.addLayer({ id: "ac-label", type: "symbol", source: SRC, minzoom: 9,
-                       layout: { ...vis, "text-field": ["get", "label"], "text-font": ["Noto Sans Bold"], "text-size": 11,
-                                 "text-anchor": "left", "text-offset": [1.3, 0], "text-justify": "left", "text-optional": true,
-                                 "symbol-sort-key": ["get", "rank"] },
-                       paint: { "text-color": ["get", "color"], "text-halo-color": HALO, "text-halo-width": 1.6 } }, before);
+                       layout: { ...vis,
+                                 "text-field": ["format", ["get", "cs"], { "font-scale": 1.0 }, "\n", {},
+                                                ["get", "detail"], { "font-scale": 0.82, "text-font": ["literal", ["Noto Sans Regular"]] }],
+                                 "text-font": ["Noto Sans Bold"], "text-size": ["*", 12, ["get", "lscale"]],
+                                 "text-anchor": "bottom-left", "text-justify": "left", "text-offset": [1.1, -0.6],
+                                 "icon-image": "ac-chip", "icon-text-fit": "both", "icon-text-fit-padding": [4, 7, 3, 7],
+                                 "text-optional": false, "symbol-sort-key": ["get", "rank"] },
+                       paint: { "text-color": ["get", "color"], "text-opacity": ["get", "opacity"],
+                                "icon-opacity": ["*", 0.85, ["get", "opacity"]] } }, before);
       }
       map.on("mouseenter", "ac-mark", () => { map.getCanvas().style.cursor = "pointer"; });
       map.on("mouseleave", "ac-mark", () => { map.getCanvas().style.cursor = ""; });
@@ -189,28 +284,43 @@ window.AircraftLayer = (() => {
       const d = store.data, on = this.isOn();
       for (const id of IDS) if (this.map.getLayer(id)) this.map.setLayoutProperty(id, "visibility", on ? "visible" : "none");
       if (on && d) {
-        const marks = [], trails = [];
-        const old = staleS(d);
+        const trails = [];
         for (const a of d.aircraft || []) {
-          const age = ageNow(d, a), stale = age > old, col = colour(a);
-          const heli = a.kind === "helicopter";
-          const lines = [callsign(a), [fmtAlt(a.alt) + trend(a.vr), a.type].filter(Boolean).join("  ")];
-          if (a.emerg) lines.push(a.emerg.toUpperCase());
-          const ph = phaseLine(a);
-          if (ph) lines.push(ph);
-          if (stale) lines.push(`position ${Math.round(age)} s old`);
-          const rank = (a.emerg ? 0 : 10) + ({ arriving: 1, departing: 2, ground: 3, low: 4 }[a.phase] || 5);
-          marks.push({ type: "Feature", geometry: { type: "Point", coordinates: [a.lon, a.lat] },
-                       properties: { hex: a.hex, icon: (heli ? "ac-heli" : "ac-plane") + (stale ? "-old" : ""), rot: heli ? 0 : (a.trk || 0),
-                                     color: col, old: stale, label: lines.join("\n"), rank } });
-          if (a.trail && a.trail.length > 1) {
-            trails.push({ type: "Feature", geometry: { type: "LineString", coordinates: [...a.trail, [a.lon, a.lat]] }, properties: { color: col } });
-          }
+          const em = emphasis(a);
+          const pts = [...(a.trail || [])];
+          const last = pts[pts.length - 1];
+          if (!last || last[0] !== a.lon || last[1] !== a.lat) pts.push([a.lon, a.lat]);   // its last real fix, not the drawn mark
+          if (pts.length < 2) continue;
+          trails.push({ type: "Feature", geometry: { type: "LineString", coordinates: pts },
+                        properties: { color: colour(a), width: 2 * Math.min(em.trail, 1.2),
+                                      opacity: Math.min(0.8, 0.45 * em.trail) * alpha(d, ageNow(d, a)) } });
         }
-        this.map.getSource(SRC).setData(fc(marks));
         this.map.getSource(SRC_TRAIL).setData(fc(trails));
+        this.draw(true);
       }
       this.panelChanged();
+    }
+    // the marks where motion.js has them now: every ANIMATE_MS while something moves, and on each answer
+    draw(force) {
+      const d = store.data;
+      if (!d || !this.added || !this.isOn()) return;
+      if (!force && !this.map.getContainer().offsetParent) return;         // a map not on screen (the Expand closed)
+      const marks = [], now = Date.now();
+      for (const a of d.aircraft || []) {
+        const age = ageNow(d, a), at = motion ? motion.where(a.hex, now) : null;
+        const stale = motion ? motion.stale(a.hex) : age > staleS(d);
+        const em = emphasis(a);
+        const [kind, size] = iconFor(a);
+        const basics = [fmtAlt(a.alt) + trend(a.vr), a.gs !== null && a.gs !== undefined ? `${a.gs} kt` : "", a.type].filter(Boolean).join("  ");
+        const detail = [a.emerg ? a.emerg.toUpperCase() : "", phaseLine(a), basics].filter(Boolean).join("\n");
+        const rank = (a.emerg ? 0 : 10) + ({ arriving: 1, departing: 2, ground: 3, low: 4 }[a.phase] || 5);
+        marks.push({ type: "Feature", geometry: { type: "Point", coordinates: at ? [at.lon, at.lat] : [a.lon, a.lat] },
+                     properties: { hex: a.hex, icon: `ac-${kind}${stale ? "-old" : ""}`, rot: at ? at.rot : (a.trk || 0),
+                                   scale: size * em.scale, color: colour(a), opacity: alpha(d, age), cs: callsign(a), detail,
+                                   lscale: em.label, rank } });
+      }
+      const src = this.map.getSource(SRC);
+      if (src) src.setData(fc(marks));
     }
     panelChanged() { if (!this.control.panel.hidden) this.control.renderPanel(); }
 
@@ -237,7 +347,7 @@ window.AircraftLayer = (() => {
           : a.appr ? `, on the ${a.appr}` : a.rwy ? `, lined up on runway ${a.rwy}` : ", inbound";
         if (a.dist !== null && a.dist !== undefined) doing += ` · ${a.dist.toFixed(1)} nm to go`;
       } else if (a.dist !== null && a.dist !== undefined) doing += ` · ${a.dist.toFixed(1)} nm from the field`;
-      if (age > staleS(d)) doing += ` (at its last position, ${Math.round(age)} s ago)`;
+      if (age > staleS(d)) doing += " (at its last position: no newer one)";
       lines.push(doing);
       if (a.eta !== null && a.eta !== undefined) lines.push(`ETA ${eta(a.eta)} at its present speed (an estimate)`);
       const vs = a.vr === null || a.vr === undefined ? "" : Math.abs(a.vr) <= 300 ? "level" : `${a.vr > 0 ? "climbing" : "descending"} ${Math.abs(a.vr).toLocaleString("en-US")} ft/min`;
@@ -245,8 +355,8 @@ window.AircraftLayer = (() => {
       if (a.sq) lines.push(`Squawk ${a.sq}`);
       const reg = a.reg ? `Registration ${a.reg}${a.reg_src === "faa" ? " (FAA registry)" : ""}` : "Registration not known";
       lines.push([reg, a.airline].filter(Boolean).join(" · "));
-      lines.push(`Position: ${POS[a.pos] || "as the feed gives it"}, via ${SRC_NAME[a.src] || a.src || "the feed"}${a.band ? ` (${a.band} MHz)` : ""}, `
-                 + `${Math.round(age)} s old${age > staleS(d) ? " (stale)" : ""}`);
+      lines.push(`Position: ${POS[a.pos] || "as the feed gives it"}, via ${SRC_NAME[a.src] || a.src || "the feed"}${a.band ? ` (${a.band} MHz)` : ""}`
+                 + `${age > staleS(d) ? " (stale)" : ""}`);
       lines.push("Arriving / departing / low is sizeup's reading of its track (shortfinal's rules), not ATC's word.");
       const what = [a.type, a.model ? `${a.model}${a.model_src === "faa" ? " (FAA registry)" : ""}` : "", a.kind].filter(Boolean);
       const foot = [d.credit ? `Data: ${d.credit}` : "", d.at ? `feed ${hms(d.at)}` : "", (d.registry && d.registry.credit) || ""].filter(Boolean).join(" · ");
