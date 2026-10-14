@@ -856,11 +856,24 @@ answered 502 at open during the run: that is the fallback path (snapshots) worki
 > then "we should show all the live feeds we can, more is better; there are not that many in our
 > jurisdiction that are purely live".
 
-A **Cameras** button in the Overview's head (the console's Overview and the wall board, `/monitor`) swaps
-the map column for a grid of every camera in our area; the same button (or *Map* on the wall) brings the
-map back. Remembered per screen (`localStorage` `sizeup.cameraWall` `{overview, monitor}`). The grid takes
+The Overview (the console's and the wall board's, `/monitor`) can show a grid of every camera in our area
+in place of the map, beside it, under it or on it (*Layouts*, below). The grid takes
 its columns from its own width: 2 (3 on a wide one) on the dispatch screen, 4 to 6 on the wall board (whose
 cards column narrows while the cameras are on), 1 on a phone (`static/camwall.js`, `cadmap.css` `.cw-*`).
+
+**Layouts** (#147: "I'd like to be able to show them side by side: map/cameras/incidents, or map/cameras on
+the left above/below and incidents on the right... or overlay the cameras on the map too"): the button became a
+picker in the Overview's head, the same on the wall board: **Map** · **Cameras** · **Side by side** (map | cameras |
+events) · **Stacked** (map over the cameras, or under them with *Swap*; events on the right) · **Overlay** (each
+camera as a small tile at its spot on the map, `static/camoverlay.js`: nudged apart with a leader line to the
+exact spot, sized by zoom from 72 px at zoom 10 to 208 px at 15, hidden under zoom 10, live where it streams under
+the same budget and rules, down cameras as the dim "!" only). Remembered per screen (`localStorage`
+`sizeup.overviewLayout` `{overview, monitor: {mode, swap, side, stacked}}`; #125's switch is read once as
+*Cameras*). Side by side and Stacked have a divider between the map and the cameras (the #139 separator: drag,
+the arrow keys, Home or a double-click for half and half, each pane at least 200 px, the map resizing live), its
+share remembered per layout. A phone (640 px and under) has Map and Cameras only. An active highway event's
+before / after cameras stand out in every layout: highlighted tiles on the wall and the overlay, ringed and
+labelled on the map otherwise.
 
 **The area** (`GET /api/cad/cameras?area=ours`, `Roads.area`): every camera inside our fire districts (the
 county GIS layer, ours by `[cad] monitor_departments`; the county's 2011 polygons put Rye Brook inside
