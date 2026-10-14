@@ -3,6 +3,8 @@
 
     python tools/record_trains_fixtures.py                 # fetch both feeds now (the shared User-Agent)
     python tools/record_trains_fixtures.py RT.pb GTFS.zip  # or trim files already downloaded
+    python tools/record_trains_fixtures.py --seq N [S]     # N reads of the realtime feed S s apart (12): a sequence
+    python tools/record_trains_fixtures.py --seq A.pb ...  # or trim a sequence already downloaded
 
 Writes tests/fixtures/mta/:
   mnr-rt.pb         the GTFS-realtime feed, only the New Haven Line's trains (and its branches'): the header
@@ -11,6 +13,11 @@ Writes tests/fixtures/mta/:
                     shape and one shorter one; one trip per train number in the realtime feed, with its
                     stop_times (what the line's run times are built from)
   recorded.json     when and from where
+  seq/<time>.pb     (--seq) a run of realtime reads, one file a feed time (a read whose header time hasn't
+                    moved is skipped): the header and the New Haven Line's trains that carry a vehicle position
+                    in any of the reads (in every read, with or without one), byte for byte; what the fixes
+                    across reads are tested on (bogus positions, fix_at)
+  seq/recorded.json when and from where
 
 Sources and terms: sizeup/trains.py (MTA developer data, https://www.mta.info/developers).
 """
@@ -64,7 +71,44 @@ def write_csv(z: zipfile.ZipFile, name: str, fields: list[str], data: list[dict]
     z.writestr(name, buf.getvalue())
 
 
+def trim_seq(bodies: list[bytes], src: str) -> int:
+    """--seq: each read's header and the New Haven Line's trains with a vehicle position in any read, into OUT/seq/."""
+    out = OUT / "seq"
+    out.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(OUT / "gtfsmnr.zip") as z:      # the routes the static fixture says are ours
+        ours = {r["route_id"] for r in rows(z, "routes.txt")[1] if r["route_long_name"] in T.LINES}
+    moving = {t["train"] for rt in bodies for t in T.parse_feed(rt)["trains"].values() if t["route_id"] in ours and t["pos"]}
+    kept, seen = [], set()
+    for rt in bodies:
+        header, ents = entities(rt)
+        ts = T.parse_feed(rt)["timestamp"]
+        if ts in seen:
+            continue
+        seen.add(ts)
+        keep = [e for e in ents if any(t["train"] in moving and t["route_id"] in ours for t in T.parse_feed(e)["trains"].values())]
+        (out / f"{ts}.pb").write_bytes(header + b"".join(keep))
+        kept.append({"feed_timestamp": ts, "entities": len(keep)})
+    (out / "recorded.json").write_text(json.dumps({"recorded": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "source": src, "reads": kept},
+                                                  indent=1) + "\n")
+    print(f"{out}: {len(kept)} reads")
+    return 0
+
+
+
+
 def main(argv: list[str]) -> int:
+    if argv[:1] == ["--seq"]:
+        rest = argv[1:]
+        if rest and all(a.endswith(".pb") for a in rest):
+            return trim_seq([Path(a).read_bytes() for a in sorted(rest)], "local files")
+        n, every = int(rest[0]) if rest else 20, float(rest[1]) if len(rest) > 1 else 12.0
+        bodies = []
+        for k in range(n):
+            t0 = time.time()
+            bodies.append(T.http_get(T.RT_URL, 30, T.MAX_RT_BYTES)[2])
+            if k < n - 1:
+                time.sleep(max(0.0, every - (time.time() - t0)))
+        return trim_seq(bodies, T.RT_URL)
     if len(argv) == 2:
         rt, gtfs = Path(argv[0]).read_bytes(), Path(argv[1]).read_bytes()
         src = "local files"

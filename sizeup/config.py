@@ -200,6 +200,7 @@ class Config:
     trains_rt_url: str = ""
     trains_gtfs_url: str = ""
     trains_bbox: tuple[float, float, float, float] = (-73.845, 40.900, -73.530, 41.060)
+    trains_rt_every_s: float = 5.0          # the realtime feed this often while someone looks (5 to 300 s)
     # [weather] (sizeup/weather.py, #132): NWS alerts, conditions and radar, NOAA tides, fetched by the hub.
     weather_enabled: bool = True
     weather_radar: bool = True
@@ -487,7 +488,7 @@ def _roads(data: dict) -> dict:
 
 def _trains(data: dict) -> dict:
     """[trains] -> Config fields. No section: on, the MTA's feeds, our stretch of the line (Mount Vernon East to Stamford)."""
-    tr = _take(data.get("trains", {}), "trains", {"enabled", "key", "rt_url", "gtfs_url", "bbox"})
+    tr = _take(data.get("trains", {}), "trains", {"enabled", "key", "rt_url", "gtfs_url", "bbox", "rt_every_s"})
     enabled = tr.get("enabled", True)
     if not isinstance(enabled, bool):
         raise ConfigError("trains.enabled: true or false")
@@ -502,7 +503,10 @@ def _trains(data: dict) -> dict:
             raise ConfigError(f"trains.{k}: an https:// address (plain http only to this machine); leave it out for the MTA's")
         urls[f"trains_{k}"] = u
     bbox = _bbox(tr.get("bbox", [-73.845, 40.900, -73.530, 41.060]), "trains.bbox", 1.0)
-    return dict(trains_enabled=enabled, trains_key=key, trains_bbox=bbox, **urls)
+    every = tr.get("rt_every_s", 5.0)
+    if isinstance(every, bool) or not isinstance(every, (int, float)) or not 5 <= every <= 300:
+        raise ConfigError("trains.rt_every_s: seconds between reads of the MTA's realtime feed while someone looks, 5 to 300")
+    return dict(trains_enabled=enabled, trains_key=key, trains_bbox=bbox, trains_rt_every_s=float(every), **urls)
 
 
 def _bbox(v, what: str, max_deg: float = 3.0) -> tuple[float, float, float, float]:

@@ -1277,15 +1277,52 @@ sends it.
 * **Real (from the MTA):** a train's position when the feed has one (about 17 of 120 New Haven Line trains
   in the recorded feed: those running), its predicted arrival and departure at the stations it stops at
   (the schedule plus the delay), the delay, track and status (*On-Time*, *Arriving*, *Departed*, *Late*).
-* **Estimated (ours):** a train's position when the feed has none, placed on the line between the two
-  stations it is between by its times there; and the time a train passes a point it doesn't stop at (an
-  express through Port Chester, or any train at an event's point between stations). Both use the line's
+* **Estimated (ours):** a train's position when the feed has none we accept, on its run from the stop it
+  left to the next (`profile_s`: away from the stop at its departure, up to speed, braking into the next at
+  its predicted arrival; an express cruises past the stations it doesn't stop at), and only once the feed
+  says it left (the stop's *Departed*, or the vehicle *in transit* to the next): until then it stands at the
+  stop. A train the feed doesn't follow at all (no vehicle, no status) runs on its predicted times. And the
+  time a train passes a point it doesn't stop at (an express through Port Chester, or any train at an
+  event's point between stations), by the line's
   run times: from the static schedule, how long a train that doesn't stop takes between each pair of
   neighbouring stations (the locals' median run less what a stop costs, about a minute, measured from the
   expresses), so an express's time between its stops is shared out the way the line runs (Park Avenue and
   the Bronx slow, Connecticut fast). When the MTA reports the train's position between those stations, the
   passing time is worked out from there. A stop marked *Departed*, or a reported position already beyond
   the point, means the train has passed.
+
+### Positions: what the feed really gives, and what we do with it
+
+Decoded 2026-10-14 (the fixtures in `tests/fixtures/mta/`, and 40 minutes of live reads):
+
+* **Quantized:** a vehicle position is not a GPS track. It snaps to fixed reporting points on the line, about
+  1 to 1.6 km apart (3.3 km at most), the same points both ways; about 75 between Grand Central and New
+  Haven seen in 40 minutes.
+* **No age:** the vehicle's timestamp is always the header's, and the MTA rebuilds the feed about every 12 s
+  (no ETag or Last-Modified), so how old a position is the feed never says. We stamp each one ourselves:
+  `fix_at`, the feed time it first appeared (unchanged while it stays; `fix_age_unknown` when it was already
+  there at our first read).
+* **Bogus fixes:** a point by Stamford (41.047958, -73.539017) given for trains really at Rye or Port
+  Chester (a 12 to 14 km jump and back), a point 3.2 km off the line by Mount Vernon West (40.941681,
+  -73.835236, on the Harlem Line), and steps back of 0.5 to 1 km. Each read, each position is judged
+  (`Tracker`): refused when more than 300 m off the line, outside the stretch between the stop the train
+  last left and the one it is going to (the vehicle's stop id, else the trip's statuses) by more than
+  500 m, more than 100 m backwards, or faster than 45 m/s once one reporting point's spacing (3.5 km) is
+  allowed for. A refused position is never drawn: the train stays at its last good fix (3 minutes at most;
+  then it is estimated), counted (`rejected`, `rejected_why`) and logged now and then. The vehicle's
+  current status (STOPPED_AT, INCOMING_AT, IN_TRANSIT_TO) and stop id are read too.
+* **Reporting points learned:** every good fix that appeared while we watched teaches us a point (fixes
+  within 25 m along the line are one); seen twice, it is known. Kept in `trains/points.json` under the state
+  dir, seeded from `data/mnr_reporting_points.json` (`tools/learn_trains_points.py` over recorded reads).
+  `hold_s`, how far the page may carry a train on past its last fix: the next known point ahead (within
+  3 km), never past the next stop it stops at; no point known, 1.5 km on, still not past the stop
+  (`hold_kind`: reporting_point, stop, fallback). The page also stops 120 s after the fix
+  (`predict_until`), and freezes the trains when the feed is a minute old (`stale`).
+* **Each direction on its own track:** `data/mnr_tracks.json` (`tools/fetch_train_tracks.py`; OpenStreetMap,
+  ODbL): the New Haven Line's outer tracks through our area, sampled along the MTA's line. The MTA's own
+  track numbers at our stations say inbound trains stop on track 3 (the north side) and outbound on 4 (the
+  south), so each train is drawn on its direction's track at its distance along the line (`s`), never two
+  directions on one centre line. A train is drawn once (a reported one over an estimate of it).
 
 ### How it works
 
@@ -1297,17 +1334,18 @@ sends it.
   the run times are built from the stop times. What we keep is cached in `trains/static.json` under the
   state dir, so a restart fetches nothing.
 * **The realtime feed only while someone looks:** a page with the Trains layer on (it asks the hub every
-  30 s) or an event panel near the tracks keeps it coming every 30 s for two minutes after the last ask;
-  otherwise nothing is fetched. A first ask with nothing fresh waits up to 5 s for the fetch it wakes.
+  5 s) or an event panel near the tracks keeps it coming every 5 s (`[trains] rt_every_s`, 5 to 300) for
+  two minutes after the last ask; otherwise nothing is fetched. About 170 KB a read; a read whose header
+  time hasn't moved changes nothing. A first ask with nothing fresh waits up to 5 s for the fetch it wakes.
 * Protobuf: a small reader for the few GTFS-realtime fields used (no protobuf dependency). Trains are known
   by their number (the MTA's realtime trip ids don't match the static feed's).
-* Backoff: realtime 30 s doubling to 15 min, static 5 min doubling to 6 h; a 401 / 403 waits 30 min and
+* Backoff: realtime 10 s doubling to a minute (the page's poll too), static 5 min doubling to 6 h; a 401 / 403 waits 30 min and
   says a key may now be needed; a 429 5 min. Every request carries the shared User-Agent (sizeup and a
   contact).
 
 | | |
 |---|---|
-| `GET /api/cad/trains[?have=static_at]` | `{configured, note, source, label, link, terms, disclaimer, at (the feed's time), fetched, error, static_at, line, stations, trains: [{id, train, line, headsign, dir, dir_label, lat, lon, bearing, estimated, next_stop, next_time, track, delay_s, status[, cars]}], catenary, bbox}`; with `have` the static_at the page already holds: no `line` or `stations` (`static_same: true`). Positions to 5 decimals (about 1 m). A poll is then only the trains: about 2.5 KB every 30 s while the layer is on (the first, with the line, about 7 KB). Not on the event stream: nothing is pushed |
+| `GET /api/cad/trains[?have=static_at]` | `{configured, note, source, label, link, terms, disclaimer, at (the feed's time), fetched (= fetched_at), age, stale, every_s, error, rejected, rejected_why, points (known reporting points), points_seen, profile {accel, decel, vmax, predict_s, stale_s}, static_at, line, stations, lanes {outbound, inbound: [[lon, lat, s]...]}, trains: [{id, train, line, headsign, dir, dir_label, d, lat, lon, bearing, estimated, mode (reported \| estimated \| stopped), s, fix_at, fix_age_unknown, vehicle_status, vehicle_stop_id, next {stop_id, name, s, arr, dep, status, track}, prev_s, hold_s, hold_kind, predict_until, segment {from, to, s0, s1, t_dep, t_arr, accel, decel, vmax}, lag_s, next_stop, next_time, track, delay_s, status[, cars]}], catenary, bbox}`; with `have` the static_at the page already holds: no `line`, `stations` or `lanes` (`static_same: true`). Positions to 5 decimals (about 1 m), on the train's own track. A poll is then only the trains: a few KB every 5 s while the layer is on (the first, with the line and lanes, about 30 KB). Not on the event stream: nothing is pushed |
 | `GET /api/cad/trains/near?lat=&lon=` | `{near: false}` (more than 150 m from the tracks and any station), or `{near: true, ref: {kind: station \| track, name, station, m, lat, lon[, station_m, side]}, window_min, inbound, outbound, dir_labels}`; each train `{train, headsign, line, eta, min, stops, estimated, delay_s, track, status, reported}` |
 
 **Setup:** nothing: on by default, no key. `[trains] enabled = false` turns it off (the box says so). Should
