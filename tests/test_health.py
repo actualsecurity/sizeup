@@ -1,5 +1,6 @@
 """Station health (sizeup/cloud/health.py, #79/#35): each alert condition starts, is rate-limited, clears;
 the hints; the panel and status endpoints' permissions; the config's refusal of Tapout's topics."""
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -455,3 +456,19 @@ def test_a_real_station_reports_its_health_in_the_state_post(tmp_path):
             st.link.stop()
             st.stop()
         hub.close()
+
+
+def test_the_connected_line_holds_still_between_polls():
+    """Between two of the station's polls the row's text stays the same, so the state push has nothing to send (#146)."""
+    from sizeup.cloud.hub import Hub
+    now = time.time()
+    link = SimpleNamespace(token="t", status={"name": "PC station"}, polling=0, skew=0.0, errors=0, last_error="",
+                           connected=lambda: True, version=lambda: None)
+    rows = []
+    for ago in (0, 1, 2, 4):
+        link.last_seen = now - ago
+        rows.append(Hub.health(link))
+    assert all(r == {"state": "ok", "word": "", "detail": "PC station: connected"} for r in rows)
+    link.last_seen = now - 8
+    late = Hub.health(link)
+    assert late["word"] == "8 s" and late["detail"] == "PC station: connected, last seen 8 s ago"
