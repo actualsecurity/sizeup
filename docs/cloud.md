@@ -134,7 +134,9 @@ pages of its own ([the station page](#the-station-page)).
   while the station is connected. A dongle whose job the station gave it by itself (`[radio]
   auto_assign`, deploy/station/README.md) reads "· FG1 · auto" (the row's `set_by`: "person", "auto",
   or missing from an older station, which then shows no "auto").
-* Hub, CAD header: "Station connected" / "Station offline 12:03".
+* Hub, CAD header: "Station connected" / "Station offline 12:03". Under it, on `/cad` and `/monitor`, a banner
+  for each station health alert ([Station health and alerts](#station-health-and-alerts)); the Station row
+  opens Settings → System → Station health.
 * Station page, Radios, Receivers: a **Hub** row (connected, or offline with how many events are waiting;
   "not sending" when forwarding is on without a token; its version against the hub's, as above). Its header: the "Hub connected" / "Hub
   unreachable" / "Not forwarding" pill and a link to the CAD on the hub. Settings: the last contact
@@ -158,6 +160,7 @@ pages of its own ([the station page](#the-station-page)).
 | Late delivery | Events that arrive after an outage are applied as they arrive: the monitor attaches traffic to whatever incident is active then; the CAD links by the transmission's own time. |
 | A station update doesn't come up | Switched back to the release that ran before within 90 s; that build isn't tried again until the hub moves on. The Station row says "update to ... failed". |
 | A station update fails its preflight | Never switched to: the station keeps running, untouched. Same report. |
+| The station goes quiet, falls behind, a dongle or program stops | An alert: banner, log, push to the alert topic, a recovery notice when it's back ([Station health and alerts](#station-health-and-alerts)). |
 
 ## Station updates: it follows the hub's build
 
@@ -186,6 +189,127 @@ The Linux station (deploy/station/README.md "Updating") runs exactly the commit 
 * Nothing heard is lost across the restart: the outbox is on disk (`state/outbox.sqlite`, committed
   per event) and goes up first. whisper-server runs as its own service on the station, so an update
   doesn't reload the model; trunk-recorder still restarts with sizeup (#71).
+
+## Station health and alerts
+
+> "make it so we are aware/know when the station is updated/not, if it's behind, etc, so we know if/when we
+> push changes if there are issues… add some better healthchecking" (user, 2026-10-13; GitHub #79, #35)
+
+The hub watches the station (`sizeup/cloud/health.py`) from what it already sends: every 5 s the station's
+state post carries its radio and SDR rows, its version and the updater's last result, its outbox, and now
+`health`: this machine's CPU (Linux; the load average elsewhere), memory, disk, temperature (where the
+machine has a sensor), when sizeup and the machine last started, and each radio program as it really runs
+(each dongle's job, trunk-recorder, whisper). A station from before this sends no `health`: the hub then
+works from the rows alone and the panel says so.
+
+**Alerts.** Each has a text, a severity, a start time, and clears by itself with a recovery notice:
+
+| alert | when | severity |
+|---|---|---|
+| Station silent | no state post for `silent_min` (3 min); after a hub restart, 3 min with no station at all | critical |
+| Station behind the hub | on another build than the hub's (behind, still updating, paused, failed) for `behind_min` (15 min); a docs-only build the station recorded as equivalent is not behind | warning |
+| Station update failed | the update to the hub's build failed or was rolled back (critical when the rollback failed too); the text has the updater's log line | warning |
+| SDR gone | a dongle the station had isn't plugged in / not found | critical |
+| *job* not running | a dongle's job (a channel) isn't running for 60 s (a restart or a switch is quicker); one dongle per channel: each channel | critical |
+| Speech-to-text down | whisper-server not up for `down_min` (2 min) | warning |
+| trunk-recorder down | trunk-recorder not up for `down_min` while its dongle job is on | critical |
+| *channel* stuck open | the squelch open without a break (#116's `stuck`, 2 min) | warning |
+| Station's events backing up | the oldest event waiting on the station is `outbox_min` (5 min) old: it couldn't reach the hub. The hub can't see that while it happens, so it shows when the station is back, from the age of the oldest event it reports, and clears as it drains | warning |
+| Station disk full | over `disk_pct` (90%) full; critical from 97% | warning |
+
+While the station is silent (or before it first reports after a hub restart) the other alerts keep the
+state they had: nothing starts or clears on old data. **Per-channel silence** is a hint, not an alert: each
+channel's gaps between transmissions are learned (the last 200, kept across redeploys), and a channel quiet
+for 3 times its usual gap (90th percentile) and at least 30 min says so in the panel: "nothing heard for
+2 h; it usually hears something within 25 min: check its antenna and dongle".
+
+**Where they show.**
+
+* A banner under the header on `/cad` and `/monitor`, one row per alert, critical (red) first, with its
+  start time and how long, and a link to the panel.
+* The hub's log: `health: ALERT ...` once when it starts, `health: cleared ...` once when it clears.
+* A push to the alert topic (below): at most one per alert per `repeat_min` (15 min), plus its recovery
+  ("Recovered: ..."); an alert that came back within the 15 min shows on screen at once and is pushed when
+  the 15 min are up if it is still on. The title says who and where (`sizeup/notify.py` Who), e.g.
+  "Station silent 4 min · Port Chester FD · last heard 14:32", "South 2 not running · PCFD · SDR 101 on South 2";
+  the push opens the panel (with `[cloud] public_url` set).
+* Alerts and 24 h of their history are in `hub.sqlite`: a redeploy neither forgets an alert nor pushes it again.
+
+**The panel:** Settings → System → **Station health** (also the Station row in Settings → Radios →
+Receivers, and every banner row): the alerts now, the hints, then the station (connected, last state post,
+clock difference, sizeup and machine up since), the version (station and hub builds, the state, the last
+update with its timings and log line, failed builds), the outbox and the system (CPU, load, memory, disk,
+temperature), the programs (whisper, trunk-recorder), each dongle (plugged in, job, running, restarts),
+each channel (state, last heard, quiet for, its usual gap, squelch open / stuck, quieting, restarts, hint),
+and the alert history of the last 24 h (started, cleared, how long, where, whether it was pushed).
+`GET /api/cad/health`: anyone signed in (behind Cloudflare Access like the rest of the CAD).
+
+### The alert topic (ntfy)
+
+Pushes go to a **new topic of our own** on ntfy.sh, never Tapout's: `pcfd-phone-prealert` pages the fire
+crew's phones and `pcfd-status` is Tapout's own health feed. The config refuses both (and whatever
+`[prealert]` names), and `sizeup/notify.py` refuses them again before any request. No topic: no push
+(banner and log only); that is the default.
+
+1. **Choose the name.** ntfy topics are public by name: anyone who knows it can read and post. Make it long
+   and random, e.g. `python3 -c "import secrets; print('sizeup-health-' + secrets.token_hex(8))"` →
+   `sizeup-health-3f9c27d1a0b84e65`. At least 12 characters (letters, digits, `-`, `_`).
+2. **Subscribe on your phone:** the ntfy app (iOS / Android) → **+** → topic name → server `ntfy.sh` →
+   Subscribe. Allow its notifications; a critical alert is sent at high priority. To test, publish one by
+   hand to *your* topic only: `curl -d "test" ntfy.sh/<your topic>`.
+3. **Give it to the hub** (it's a secret by name, so not in the repo):
+   `aws ssm put-parameter --name /sizeup-hub/alert-topic --type SecureString --value '<your topic>'`, then,
+   and only then (a task whose secret is missing doesn't start), add to the hub container's `secrets` in
+   `deploy/aws/taskdef.json` (and `sizeup-aws/7-deploy-pr.sh`'s copy):
+   `{"name":"SIZEUP_ALERT_TOPIC","valueFrom":"arn:aws:ssm:us-east-1:504804195561:parameter/sizeup-hub/alert-topic"}`.
+   Elsewhere: `SIZEUP_ALERT_TOPIC=...` or `[alerts] ntfy_topic` in the config. The panel says "Push on" once
+   the hub has it.
+
+```toml
+[alerts]                           # sizeup/cloud/health.py; leave out: these defaults, no push
+ntfy_topic = ""                    # or env SIZEUP_ALERT_TOPIC (the hub: SSM /sizeup-hub/alert-topic); never Tapout's
+ntfy_server = "https://ntfy.sh"
+silent_min = 3                     # no state post from the station this long
+behind_min = 15                    # on another build than the hub this long
+down_min = 2                       # whisper or trunk-recorder down this long
+outbox_min = 5                     # the oldest event waiting on the station this old
+disk_pct = 90                      # the station's disk this full
+repeat_min = 15                    # at most one push per alert this often (plus its recovery)
+```
+
+`sizeup/notify.py` is the one place sizeup publishes anything: `publish()` / `Notifier.send()` with a title,
+a body, a priority, tags, a click URL and a `who` (units with their names, the talker, the channel, the
+incident number and address, the station, the dongle, a detail), rendered after the title the same way for
+every caller ("MAYDAY · E64 P1 (Engine 64) on FG1 · 26-000015 100 S Ridge St"). The mayday alarm (#128)
+uses it too.
+
+### A deploy that checks itself
+
+After the hub is deployed, `.github/workflows/deploy.yml` waits up to 15 min for the station to report the
+new build (`tools/deploy_check.py`, polling `GET /api/station/status` every 15 s) and prints the station's
+update log line ("update abc1234 -> def5678: ok in 74 s (built 40 s, waited 0 s for a quiet moment, web back
+6 s after the switch)"). A docs-only deploy counts as soon as the station records it as "no runtime change".
+The step **fails** when the update failed or was rolled back, when auto-update is paused on the station, when
+the token is refused, or when 15 min pass; a failed workflow emails as usual, and the hub's own "behind"
+alert follows. Without the secrets the step is skipped with a warning.
+
+`GET /api/station/status` is read only: the hub's build, the station's build, update state, last update
+(with its log line) and the alerts; nothing else. It takes the station token or the **status token**, which
+opens nothing else (posting events, state or jobs with it is a 401). The status token is derived from the
+station token (HMAC-SHA256), so nothing new needs deploying; `SIZEUP_STATUS_TOKEN` / `[cloud] status_token`
+sets another one instead.
+
+**GitHub secrets to add** (Settings → Secrets and variables → Actions → New repository secret):
+
+| secret | value |
+|---|---|
+| `SIZEUP_STATUS_TOKEN` | the status token: `SIZEUP_STATION_TOKEN="$(aws ssm get-parameter --name /sizeup-hub/station-token --with-decryption --query Parameter.Value --output text)" python -m sizeup.cloud.health status-token` (or `printf %s sizeup-status-token-v1 \| openssl dgst -sha256 -hmac "$SIZEUP_STATION_TOKEN"`) |
+| `SIZEUP_ACCESS_CLIENT_ID` | a Cloudflare Access service token's Client ID that the `/api/station/` Access application lets through (the station's, or better a second one for CI: Zero Trust → Access → Service auth → Create, then add it to that application's Service Auth policy) |
+| `SIZEUP_ACCESS_CLIENT_SECRET` | its Client Secret |
+
+The hub's URL is `https://sizeup.actualsecurity.org` unless the repository variable `SIZEUP_HUB_URL` says
+otherwise. With a Bypass policy on `/api/station/` instead of a service token, only `SIZEUP_STATUS_TOKEN` is
+needed.
 
 ## Auth and security
 
@@ -1288,7 +1412,9 @@ namespace, a named volume for `/data`, no Litestream).
 `sizeup/cloud/`: `station.py` (StationLink: outbox, forwarder, state, jobs), `autoupdate.py` (the
 station follows the hub's build: `Watch` in the station, the root updater), `stationmode.py`
 (Settings → System → Station and the station page's hub link: on / off at runtime, state/cloud.json, the Keychain), `outbox.py`,
-`client.py` (kept-alive HTTPS), `hub.py` (Hub: ingest, health, jobs; HubApp), `hubstore.py`
+`client.py` (kept-alive HTTPS), `hub.py` (Hub: ingest, health, jobs; HubApp), `health.py` (station health:
+the model, the alerts, `/api/cad/health`, `/api/station/status`; `sizeup/notify.py` the pushes, `health.js` /
+`health.css` the banner and panel, `tools/deploy_check.py` the deploy check), `hubstore.py`
 (hub.sqlite, audio.sqlite), `access.py` (Cloudflare Access identity; the gate is in
 `sizeup/web/server.py`, the operator in `sizeup/cad/api.py` and `Settings.person`; the activity log in
 `sizeup/cad/activity.py`). Seams in `sizeup/app.py`: `_emit`, `_heard`, `_page_heard`, `_retext`, `_stt`,

@@ -19,7 +19,7 @@ and their first request of each Access login a "signed in" (visit(); sizeup/cad/
 Without Access nothing is recorded there.
 
 GET  /api/cad/state                       lists, units, events (open, recently closed), run cards
-GET  /api/cad/stream                      SSE: the state, pushed every second (server.py)
+GET  /api/cad/stream                      SSE: the state, then each second only what changed (server.py Broadcaster)
 GET  /api/cad/geocode?q=209 westchester   location suggestions, Port Chester / Rye Brook first, each with its town
                                           (with the place search's mile markers, exits and named places, #67)
 GET  /api/cad/places?q=287 eb mm 10&near=lat,lon&iid=&limit=

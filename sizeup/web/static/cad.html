@@ -12,6 +12,7 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
 <link rel="stylesheet" href="/static/cad.css">
 <link rel="stylesheet" href="/static/settings.css">
 <link rel="stylesheet" href="/static/cadmap.css">
+<link rel="stylesheet" href="/static/health.css">
 </head>
 <body class="cad">
 <!-- One header for the console and the wall board (style.css "header"): the board hides .console-only, the console .board-only -->
@@ -48,9 +49,10 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
 </header>
 <div id="cloud-banner" class="notice info cloud-banner" hidden></div>
 <div id="role-banner" class="notice role-banner" role="status" hidden></div>
-<!-- the alert banners, under the header on the console and the board: the NWS alerts (weather.js, #132); the
-     station-health banner (#79) goes in this same box -->
+<!-- the alert banners, under the header on the console and the board: station health (health.js, #79) first,
+     then the NWS alerts (weather.js, #132) -->
 <div id="alert-banners" class="alert-banners">
+  <div id="health-banner" class="health-banner" role="alert" hidden></div>
   <div id="wx-banner" class="wx-banner" hidden aria-live="polite" aria-label="Weather alerts"></div>
 </div>
 
@@ -531,6 +533,7 @@ Slots go in order. A kind takes the next available unit of that kind (regular ap
 <script src="/static/radio-view.js"></script>
 <script src="/static/radio-controls.js"></script>
 <script src="/static/hublink.js"></script>
+<script src="/static/health.js"></script>
 <script src="/static/settings.js"></script>
 <script src="/static/board.js"></script>
 <script src="/static/camwall.js"></script>

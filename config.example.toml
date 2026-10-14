@@ -189,13 +189,22 @@ heartbeat_stale_min = 90             # no heartbeat (or restart) this long: "Tap
 
 # [alerts]: our own ntfy topic for pushes that page a person (sizeup/notify.py): the emergency alarms
 # (the P25 emergency button, a mayday heard on our fire channels: sizeup/cad/alarms.py, #128), each at
-# max priority with who and where, and their acknowledgement; station health (#79). ntfy topics are
-# public by name: a long random one (e.g. `openssl rand -hex 12`). NEVER Tapout's topics
-# (pcfd-phone-prealert pages the fire crew; pcfd-status): refused here and again before every send.
-# Empty or left out: no pushes. Env SIZEUP_ALERT_TOPIC / SIZEUP_ALERT_SERVER win.
+# max priority with who and where, and their acknowledgement; and station health (the hub, #79; docs/cloud.md
+# "Station health and alerts"): the station silent, behind, failed to update, a dongle / program down, its
+# outbox backing up, its disk filling, shown as a banner on /cad and /monitor, logged, and pushed (at most once
+# per alert per repeat_min, plus its recovery). ntfy topics are public by name: a long random one (e.g.
+# `openssl rand -hex 12`). NEVER Tapout's topics (pcfd-phone-prealert pages the fire crew; pcfd-status):
+# refused here and again before every send. Empty or left out: no pushes. Env SIZEUP_ALERT_TOPIC /
+# SIZEUP_ALERT_SERVER win.
 # [alerts]
 # ntfy_topic = ""
 # ntfy_server = "https://ntfy.sh"
+# silent_min = 3                     # station health: no state post from the station this long
+# behind_min = 15                    # on another build than the hub this long
+# down_min = 2                       # whisper or trunk-recorder down this long
+# outbox_min = 5                     # the oldest event waiting on the station this old
+# disk_pct = 90                      # the station's disk this full
+# repeat_min = 15                    # at most one push per alert this often (plus its recovery)
 
 # [roads]: the CAD maps' highway layers (sizeup/roads.py, docs/cloud.md "Highway layers"): traffic
 # cameras, incidents and closures, roadwork and message signs for our area, from the NYS Thruway

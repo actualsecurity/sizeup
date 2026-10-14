@@ -2162,7 +2162,7 @@ def make_server(app: App) -> WebServer:
                        station=getattr(app, "hub", None), health=health_info(cfg), access=access_verifier(cfg),
                        access_log=log if cfg.cloud_role == "hub" else None, station_mode=app.station,
                        role=cfg.cloud_role, roads=app.roads, gis=app.gis,
-                       trains=app.trains, weather=app.weather)
+                       trains=app.trains, weather=app.weather, station_health=getattr(app, "health", None))
 
     def changed() -> None:             # a new talker is pushed at once, not on the next second
         server.poke()

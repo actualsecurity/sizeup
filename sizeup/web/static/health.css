@@ -1,0 +1,40 @@
+/* Station health (GitHub #79, health.js): the alert banner under the header on /cad and /monitor, and the
+   Settings > System > Station health card. Layout and composition on the tokens only (style.css). */
+
+@layer views {
+
+  /* ---- the banner: one row per alert, worst first, stacked ------------------------------------------- */
+  /* in the shared box under the header (cad.html #alert-banners, cad.css), above the NWS alerts (#132) */
+  .health-banner { display: grid; gap: var(--s-1); }
+  .hb-row {
+    display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s-1) var(--s-2);
+    padding: var(--s-1) var(--s-3); font-size: var(--fs-sm); line-height: var(--lh-sm);
+    border: var(--bw) solid color-mix(in srgb, var(--warn) 55%, transparent);
+    border-inline-start: var(--bw-mark) solid var(--warn); border-radius: var(--radius);
+    background: color-mix(in srgb, var(--warn) 10%, var(--bg)); color: var(--text);
+  }
+  .hb-row.warning .hb-title { color: var(--warn); }
+  .hb-row.critical {
+    border-color: color-mix(in srgb, var(--err) 60%, transparent); border-inline-start-color: var(--err);
+    background: color-mix(in srgb, var(--err) 14%, var(--bg));
+  }
+  .hb-row.critical .hb-title { color: var(--err); }
+  .hb-title { font-weight: 700; }
+  .hb-text { flex: 1 1 20rem; min-inline-size: 0; overflow-wrap: anywhere; }
+  .hb-when { white-space: nowrap; }
+  .hb-link { color: inherit; font-weight: 600; white-space: nowrap; }
+
+  /* ---- the card ------------------------------------------------------------------------------------------- */
+  .hl-card .hl-sub { margin: var(--s-4) 0 var(--s-2); font-size: var(--fs-sm); line-height: var(--lh-sm); color: var(--dim); font-weight: 700; }
+  .hl-card .card-head .chip { margin-inline-start: var(--s-2); }
+  .hl-alerts, .hl-hints { display: grid; gap: var(--s-1); }
+  .hl-table td { vertical-align: top; }
+  .hl-ok { color: var(--ok-text); }
+  .hl-bad { color: var(--err); font-weight: 600; }
+  .hl-warn { color: var(--warn); }
+  .chip.hl-ok { --c: var(--ok); }
+  .chip.hl-bad { --c: var(--err); }
+
+  /* the hub's Station row (Settings > Radios > Receivers): opens the card */
+  .pill.radio.link { cursor: pointer; }
+}

@@ -57,7 +57,7 @@ def test_a_station_serves_its_page_and_refuses_the_cad(tmp_path):
         page = (STATIC / "station.html").read_bytes()
         for path in ("/", "/index.html", "/station", "/monitor", "/?from=cad"):
             code, _, body = raw(port, path)
-            assert (code, body) == (200, page), path
+            assert (code, re.sub(rb"\?v=[0-9a-f]{10}", b"", body)) == (200, page), path   # its /static/ names versioned (#137)
         for path, where in (("/cad", "/?from=cad"), ("/cad.html", "/?from=cad"), ("/comms", "/#monitor")):
             code, headers, _ = raw(port, path)
             assert (code, headers["Location"]) == (302, where), path

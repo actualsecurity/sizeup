@@ -1598,6 +1598,8 @@ function sSystem(panel) {
   station.hidden = true;
   const alarms = sCard(null);                  // the emergency alarms' words, channels, drill (alarm.js, #128)
   alarms.id = "s-alarms";
+  const health = sCard(null);         // Station health (health.js, #79): the hub only, shown once it answers
+  health.hidden = true;
   // the department, with its patch (static/brand)
   const patch = el("img", "s-patch");
   patch.src = "/static/brand/pcfd-patch.svg";
@@ -1609,7 +1611,7 @@ function sSystem(panel) {
   const about = sCard(patch, dept);
   about.classList.add("s-dept");
   panel.replaceChildren(...sHead("System"),
-    about, station, alarms,
+    about, health, station, alarms,
     sCard(sCardHead("Records"), recs, counts),
     ...(S.data.camera_wall ? [sCameraWall(S.data.camera_wall)] : []),
     sCard(sCardHead("Data file"), file),
@@ -1628,6 +1630,7 @@ function sSystem(panel) {
   sAudit();
   sStation();
   if (window.Alarm) Alarm.mountSettings($("#s-alarms"));
+  if (window.StationHealth) StationHealth.mount(health);
 }
 
 // ---- system: the camera wall's area (#125; sizeup/roads.py Roads.area, settings.py _wall_op) ----------------

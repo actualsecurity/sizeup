@@ -143,6 +143,9 @@ class Config:
     # but /healthz and /api/station/ needs a verified Access token, and its email is the operator.
     cloud_access_team: str = ""       # "yoda.cloudflareaccess.com" (env SIZEUP_ACCESS_TEAM)
     cloud_access_aud: str = ""        # the Access application's AUD tag (env SIZEUP_ACCESS_AUD)
+    # hub: the read-only bearer for GET /api/station/status (the deploy check, sizeup/cloud/health.py);
+    # env SIZEUP_STATUS_TOKEN; "" = derived from the station token (health.status_token)
+    cloud_status_token: str = ""
     # [prealert] (sizeup/prealert.py): Tapout's ntfy feed, read only, on the CAD of record (hub or
     # all-in-one; never a station forwarding to a hub). Off unless the section is in the config.
     prealert_enabled: bool = False
@@ -151,10 +154,19 @@ class Config:
     prealert_status_topic: str = "pcfd-status"
     prealert_expire_min: float = 5.0
     prealert_heartbeat_stale_min: float = 90.0
-    # [alerts] (sizeup/notify.py): our own ntfy topic for pushes that page a person: the emergency alarms
-    # (sizeup/cad/alarms.py, #128) and station health (#79). "" = no pushes. Never Tapout's topics.
-    alerts_ntfy_server: str = "https://ntfy.sh"
+    # [alerts] (sizeup/notify.py; docs/cloud.md "Station health and alerts"): our OWN ntfy topic for pushes that
+    # page a person: the emergency alarms (sizeup/cad/alarms.py, #128) and station health (sizeup/cloud/health.py,
+    # #79: banner on /cad and /monitor, the log, the push), and station health's thresholds. Topic: env
+    # SIZEUP_ALERT_TOPIC (the hub: SSM /sizeup-hub/alert-topic) else ntfy_topic; "" = no pushes. Never Tapout's
+    # topics (pcfd-phone-prealert, pcfd-status, whatever [prealert] names): refused here and in sizeup/notify.py.
     alerts_ntfy_topic: str = ""
+    alerts_ntfy_server: str = "https://ntfy.sh"
+    alerts_silent_min: float = 3.0       # no state post from the station this long
+    alerts_behind_min: float = 15.0      # the station on another build than the hub this long
+    alerts_down_min: float = 2.0         # whisper or trunk-recorder down this long
+    alerts_outbox_min: float = 5.0       # the oldest event still waiting on the station this old
+    alerts_disk_pct: float = 90.0        # the station's disk this full
+    alerts_repeat_min: float = 15.0      # at most one push per condition this often (plus its recovery)
     # [station] auto_update: a Linux station installed by deploy/station/install-linux.sh follows the
     # hub's build (sizeup/cloud/autoupdate.py); false keeps it where it is (also: sizeup-station autoupdate off)
     station_auto_update: bool = True
@@ -246,8 +258,10 @@ def hub_url_problem(url: str) -> str:
 #   SIZEUP_PUBLIC_URL, SIZEUP_HUB_URL [cloud] public_url / hub_url
 #   SIZEUP_ACCESS_TEAM / _AUD         [cloud] access_team / access_aud (hub: Cloudflare Access identity)
 #   SIZEUP_PREALERT_SERVER            [prealert] server (a local test server instead of ntfy.sh)
-#   SIZEUP_ALERT_TOPIC / _SERVER [alerts] ntfy_topic / ntfy_server (our push topic: a name is its only secret)
+#   SIZEUP_ALERT_TOPIC / _SERVER [alerts] ntfy_topic / ntfy_server (our push topic: a name is its only secret;
+#                                the hub: SSM /sizeup-hub/alert-topic)
 #   SIZEUP_511NY_KEY                  [roads] key: the 511NY developer key (never in a file on the hub)
+#   SIZEUP_STATUS_TOKEN               [cloud] status_token: the deploy check's read-only bearer
 #   (no [gis] secrets: the county's open data needs no key)
 #   SIZEUP_MTA_KEY                    [trains] key: only should the MTA require one again (none needed, 2026-10-14)
 def _env(name: str, default):
@@ -276,7 +290,7 @@ def _cloud(data: dict) -> dict:
     cl = _take(data.get("cloud", {}), "cloud", {"role", "hub_url", "token", "access_client_id", "access_client_secret",
                                                 "outbox", "outbox_max_mb", "public_url", "offline_after_s", "audio_max_mb",
                                                 "access_team", "access_aud", "keychain_prefix", "keychain_token",
-                                                "keychain_access_id", "keychain_access_secret"})
+                                                "keychain_access_id", "keychain_access_secret", "status_token"})
     if not cl:
         return {}                      # all-in-one: no environment variable changes anything here
     role = str(cl.get("role", ""))
@@ -292,6 +306,9 @@ def _cloud(data: dict) -> dict:
     # anywhere the link waits, and Settings > System > Station says what is missing.
     if token and len(token) < 16:
         raise ConfigError("cloud.token: at least 16 characters (e.g. `openssl rand -hex 32`)")
+    status_token = _env("SIZEUP_STATUS_TOKEN", str(cl.get("status_token", "")))
+    if status_token and (len(status_token) < 16 or status_token == token):
+        raise ConfigError("cloud.status_token / SIZEUP_STATUS_TOKEN: at least 16 characters, not the station token")
     team_raw = _env("SIZEUP_ACCESS_TEAM", str(cl.get("access_team", "")))
     team = team_host(team_raw)
     if team_raw and not team:
@@ -313,20 +330,7 @@ def _cloud(data: dict) -> dict:
                 cloud_outbox_max_mb=nums["outbox_max_mb"], cloud_offline_s=nums["offline_after_s"],
                 cloud_audio_max_mb=nums["audio_max_mb"],
                 cloud_public_url=_env("SIZEUP_PUBLIC_URL", str(cl.get("public_url", ""))).rstrip("/"),
-                cloud_access_team=team, cloud_access_aud=aud, **_keychain(cl))
-
-
-def _alerts(data: dict) -> dict:
-    """[alerts] -> Config fields: our ntfy topic for pushes (sizeup/notify.py). No topic = no pushes."""
-    from sizeup.notify import server_problem, topic_problem
-    al = _take(data.get("alerts", {}), "alerts", {"ntfy_topic", "ntfy_server"})
-    topic = _env("SIZEUP_ALERT_TOPIC", str(al.get("ntfy_topic", ""))).strip()
-    server = _env("SIZEUP_ALERT_SERVER", str(al.get("ntfy_server", "https://ntfy.sh"))).rstrip("/")
-    if topic and (why := topic_problem(topic)):
-        raise ConfigError(f"alerts.ntfy_topic: {why}")
-    if why := server_problem(server):
-        raise ConfigError(f"alerts.ntfy_server: {why}")
-    return dict(alerts_ntfy_topic=topic, alerts_ntfy_server=server)
+                cloud_access_team=team, cloud_access_aud=aud, cloud_status_token=status_token, **_keychain(cl))
 
 
 def _prealert(data: dict) -> dict:
@@ -354,6 +358,32 @@ def _prealert(data: dict) -> dict:
     return dict(prealert_enabled=enabled, prealert_server=server, prealert_ring_topic=topics["ring_topic"],
                 prealert_status_topic=topics["status_topic"], prealert_expire_min=expire,
                 prealert_heartbeat_stale_min=stale)
+
+
+def _alerts(data: dict, prealert: dict) -> dict:
+    """[alerts] -> Config fields: our ntfy topic for pushes (sizeup/notify.py: the emergency alarms, #128, and
+    station health, #79) and station health's thresholds (sizeup/cloud/health.py). No section: the defaults, no
+    push unless SIZEUP_ALERT_TOPIC is set. Tapout's topics (and whatever [prealert] names) are refused."""
+    from sizeup.notify import server_problem, topic_problem
+    al = _take(data.get("alerts", {}), "alerts", {"ntfy_topic", "ntfy_server", "silent_min", "behind_min", "down_min",
+                                                  "outbox_min", "disk_pct", "repeat_min"})
+    topic = _env("SIZEUP_ALERT_TOPIC", str(al.get("ntfy_topic", ""))).strip()
+    if topic:
+        why = topic_problem(topic, (prealert.get("prealert_ring_topic", ""), prealert.get("prealert_status_topic", "")))
+        if why:
+            raise ConfigError(f"alerts.ntfy_topic / SIZEUP_ALERT_TOPIC: {why}")
+    server = _env("SIZEUP_ALERT_SERVER", str(al.get("ntfy_server", "https://ntfy.sh"))).strip().rstrip("/")
+    if server_problem(server):
+        raise ConfigError(f"alerts.ntfy_server: {server_problem(server)}")
+    limits = {"silent_min": (3, 1, 120), "behind_min": (15, 5, 1440), "down_min": (2, 0.5, 120),
+              "outbox_min": (5, 1, 1440), "disk_pct": (90, 50, 99.9), "repeat_min": (15, 1, 1440)}
+    out = {}
+    for k, (d, lo, hi) in limits.items():
+        v = al.get(k, d)
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not lo <= float(v) <= hi:
+            raise ConfigError(f"alerts.{k}: a number from {lo:g} to {hi:g}")
+        out[f"alerts_{k}"] = float(v)
+    return dict(alerts_ntfy_topic=topic, alerts_ntfy_server=server, **out)
 
 
 P25_JOB = "Fire/EMS 15"   # the dongle job that runs trunk-recorder (sizeup/app.py P25_MODE)
@@ -621,6 +651,7 @@ def load(path: str | Path) -> Config:
     except ValueError:
         raise ConfigError("SIZEUP_PORT: a port number") from None
     cloud = _cloud(data)
+    pa = _prealert(data)
     state_dir = Path(os.environ["SIZEUP_STATE_DIR"]).expanduser() if os.environ.get("SIZEUP_STATE_DIR", "").strip() else base
     radio = _take(data.get("radio", {}), "radio", {"rtl_fm", "channels", "tones_file", "shared_device", "start_mode", "sdrs", "sdr_names", "sdr_ignore",
                                                  "auto_assign", "auto_assign_order"})
@@ -802,5 +833,5 @@ def load(path: str | Path) -> Config:
         dispatch_repeat=d_repeat, dispatch_transmit=False, dispatch_channels=d_channels, dispatch_polly_region=d_region,
         **(dict(cloud, cloud_outbox=rel_state(cloud["cloud_outbox"])) if cloud else {}),
         cloud_state="" if cloud.get("cloud_role") == "hub" else rel_state("state/cloud.json"),
-        **_prealert(data), **_roads(data), **_gis(data), **_trains(data), **_weather(data), **_alerts(data),
+        **pa, **_alerts(data, pa), **_roads(data), **_gis(data), **_trains(data), **_weather(data),
     )

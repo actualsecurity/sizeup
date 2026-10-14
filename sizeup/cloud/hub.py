@@ -15,6 +15,9 @@ runs on a bare Linux box with Python + numpy.
     GET  /api/station/jobs?wait=25   long poll: jobs for the station -> {jobs: [{id, type, args}]}
     POST /api/station/jobs/<id>   the station's answer {ok, error?, result?, label?, audio?}
     GET  /api/station/hello      {ok}: the token works (the station's Test connection; not counted as "seen")
+    GET  /api/station/status     read only, for the deploy check (tools/deploy_check.py): the hub's build, the
+                                 station's version and last update, the health alerts (sizeup/cloud/health.py).
+                                 The station token or the status token, which opens nothing else; not "seen"
 
 Every request needs `Authorization: Bearer <SIZEUP_STATION_TOKEN>` (constant-time compare); with
 no token configured the hub refuses them all. Jobs (the station only connects out):
@@ -58,6 +61,7 @@ from sizeup.app import CLIP_ID, App, AwsJob, channels_model
 from sizeup.cad.dispatcher import AudioUnavailable
 from sizeup.cad.radios import fm_system
 from sizeup.cloud.autoupdate import describe
+from sizeup.cloud.health import StationHealth, status_token
 from sizeup.cloud.hubstore import AudioDb, MonitorDb
 from sizeup.incidents import Traffic
 from sizeup.radio.page import page_from_dict
@@ -197,6 +201,9 @@ class Hub:
         self.jobs = Jobs()
         self.live = RemoteLive(app.radios.resolve)
         self.last_seen: float | None = None
+        self.last_state: float | None = None     # the station's last state post (station health: "silent")
+        self.status_token = status_token(self.token, getattr(cfg, "cloud_status_token", ""))
+        self.health_: StationHealth | None = None  # station health and alerts (HubApp sets it)
         self.polling = 0
         self.status: dict | None = None          # the station's last report (state "status")
         self.talkgroups: list[dict] = []
@@ -256,8 +263,11 @@ class Hub:
 
     def station_row(self) -> dict:
         h = self.health()
-        return {"label": "Station", "mhz": None, "state": h["state"], "word": h["word"], "detail": h["detail"],
-                "open": False, "quieting_db": None, "restarts": 0, "last_heard": self.last_seen}
+        n = len(self.health_.alerts()) if self.health_ is not None else 0
+        return {"label": "Station", "mhz": None, "state": h["state"], "word": h["word"],
+                "detail": h["detail"] + (f" · {n} health alert(s)" if n else "") + " · Station health: Settings > System",
+                "open": False, "quieting_db": None, "restarts": 0, "last_heard": self.last_seen,
+                "link": "#settings/system/health"}
 
     def radio_rows(self) -> list[dict]:
         """The Station row, then the station's own rows as it reported them, or, offline, marked
@@ -283,7 +293,9 @@ class Hub:
 
     def cad_cloud(self) -> dict:
         h = self.health()
-        return {"role": "hub", "state": h["state"], "word": h["word"], "detail": h["detail"]}
+        return {"role": "hub", "state": h["state"], "word": h["word"], "detail": h["detail"],
+                "alerts": self.health_.alerts() if self.health_ is not None else [],
+                "health_url": "/cad#settings/system/health"}
 
     # -- jobs ------------------------------------------------------------------------------------------
 
@@ -326,17 +338,29 @@ class Hub:
 
     # -- HTTP --------------------------------------------------------------------------------------------
 
-    def _auth(self, headers) -> tuple[int, bytes, str] | None:
+    def _auth(self, headers, read_only: bool = False) -> tuple[int, bytes, str] | None:
+        """None when the bearer is the station token (or, read_only, the status token); else the refusal."""
         if not self.token:
             return _json(403, {"error": "station ingest is off: no station token configured on the hub "
                                         "(SIZEUP_STATION_TOKEN)"})
         h = (headers.get("Authorization") or "").strip()
         given = h[7:].strip() if h[:7].lower() == "bearer " else ""
-        if not given or not hmac.compare_digest(given.encode(), self.token.encode()):
+        ok = bool(given) and hmac.compare_digest(given.encode(), self.token.encode())
+        if read_only and given and self.status_token:
+            ok = hmac.compare_digest(given.encode(), self.status_token.encode()) or ok
+        if not ok:
             return _json(401, {"error": "bad or missing station token"})
         return None
 
     def handle(self, method: str, path: str, query: str, headers, body: Callable[[int], bytes | None] | None):
+        if path == "/api/station/status":            # read only (the deploy check): not "seen", nothing changes
+            refused = self._auth(headers, read_only=True)
+            if refused:
+                return refused
+            if method != "GET":
+                return _json(405, {"error": "GET only"})
+            return _json(200, self.health_.status() if self.health_ is not None else
+                         {"ok": True, "hub_build": self.build, "station": None, "alerts": []})
         refused = self._auth(headers)
         if refused:
             return refused
@@ -385,6 +409,7 @@ class Hub:
         if not isinstance(d, dict):
             raise ValueError("a JSON object")
         now = time.time()
+        self.last_state = now
         if isinstance(d.get("at"), (int, float)):
             self.skew = now - float(d["at"])
         if isinstance(d.get("status"), dict):
@@ -393,6 +418,8 @@ class Hub:
             if isinstance(tgs, list):
                 self.talkgroups = tgs
             self.status = st
+            if self.health_ is not None:
+                self.health_.observe(st)           # each channel's gaps, for the silence hints
             self.app.channels_check()          # the station runs other channel choices than these: send them
         if isinstance(d.get("talking"), list):
             self.live.update(d["talking"], now, d.get("paging") if isinstance(d.get("paging"), list) else None)
@@ -446,6 +473,12 @@ class HubApp(App):
                                  shared_device="", dispatch_tts_python=""))
         self.receivers, self.modes = [], []
         self.hub = Hub(self, cfg, log)
+        # station health (GitHub #79): the alerts, the banner, the push to [alerts] ntfy_topic (never Tapout's),
+        # through the same Notifier as the emergency alarms (App: self.cad.alarms.notifier), one queue in order
+        notifier = getattr(getattr(self.cad, "alarms", None), "notifier", None)
+        self.health = self.hub.health_ = StationHealth(self.hub, cfg, self.mdb, notifier, log)
+        if notifier is None:
+            log("health: no push for station alerts ([alerts] ntfy_topic / SIZEUP_ALERT_TOPIC unset): banner and log only")
         self.live = self.hub.live                      # main() sets on_change to push the display
         self.cad.live = self.live.state
         self.paging_state = self.live.paging_state     # the station's page going out now
@@ -826,6 +859,7 @@ class HubApp(App):
 
     def start(self) -> HubApp:
         threading.Thread(target=self._hub_janitor, name="hub-janitor", daemon=True).start()
+        threading.Thread(target=self.health.run, args=(self._stopping,), name="station-health", daemon=True).start()
         self._started = True                      # the phone pre-alert: the hub's own subscription
         self.prealert_sync()
         self.roads.start()                        # 511NY's layers for the maps (sizeup/roads.py)

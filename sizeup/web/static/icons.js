@@ -4,6 +4,11 @@
 //   Icon.play(button, state)   a play button's face: "play", "stop" or "none" (no recording: a dash)
 "use strict";
 
+// The sprite's address as the page names it: /static/icons.svg?v=<its version> (the hub versions what a page
+// names, #137), so every icon drawn here is the one copy the browser already has, kept until the next deploy.
+window.ICONS_SVG = ((document.querySelector('use[href^="/static/icons.svg"]') || { getAttribute: () => "" })
+  .getAttribute("href") || "/static/icons.svg").split("#")[0];
+
 window.Icon = (() => {
   const NS = "http://www.w3.org/2000/svg";
   function Icon(name, cls = "") {
@@ -12,7 +17,7 @@ window.Icon = (() => {
     s.setAttribute("aria-hidden", "true");
     s.setAttribute("focusable", "false");
     const u = document.createElementNS(NS, "use");
-    u.setAttribute("href", `/static/icons.svg#i-${name}`);
+    u.setAttribute("href", `${window.ICONS_SVG}#i-${name}`);
     s.append(u);
     return s;
   }
