@@ -388,6 +388,23 @@
   .hint-chip .hint-no { color: var(--dim); }
   .hint-line { color: var(--info); font-style: italic; margin-block-start: var(--s-1); }
 
+  /* a transmission with no radio ID (#163): what was found, dashed, never in the talker's place */
+  .chip.noid { color: var(--dim); border-style: dashed; background: transparent; }
+  .chip.noid-none { color: var(--text-2); }
+  .chip.noid-undecoded { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 55%, transparent); }
+  .chip.noid-weak { color: var(--dim); }
+
+  /* FG1 radio IDs nobody has named (radio-ids.js, #163): a question in the queue, dashed like a suggestion */
+  .nid-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--s-1); }
+  .nid { display: flex; flex-direction: column; gap: var(--s-1); min-inline-size: 0; padding: var(--s-1) var(--s-2);
+    border: var(--bw) dashed var(--info); border-radius: var(--radius); background: var(--raised); }
+  .nid-head { display: flex; align-items: center; gap: var(--s-1); min-inline-size: 0; }
+  .nid-q { min-inline-size: 0; overflow-wrap: anywhere; color: var(--info); }
+  .nid-when { overflow-wrap: anywhere; }
+  .nid-form { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1); min-inline-size: 0; }
+  .nid-unit { flex: 0 1 auto; min-inline-size: 0; }
+  .nid-who { flex: 1 1 8em; min-inline-size: 0; }
+
   /* the pinned 60 Control feed (cad-feed.js): top of the units column, the board scrolls under it */
   .units > .feed {
     flex: none; position: sticky; inset-block-start: calc(-1 * var(--gutter)); z-index: var(--z-sticky);
@@ -465,6 +482,7 @@
   .rp-table tr.heard td:first-child { box-shadow: inset var(--bw-mark) 0 0 var(--info); }
   .rp-table .rp-edit :is(input, select) { inline-size: 100%; min-inline-size: 6rem; }
   .rp-sum > span + span { margin-inline-start: var(--s-4); }
+  .rp-ids { overflow-wrap: anywhere; }      /* FG1's last 24 h: how many key-ups had an ID (#163) */
   .chip.src-confirmed { --c: var(--ok); }
   .chip.src-guessed { --c: var(--warn); }
   .chip.src-heard { --c: var(--info); }

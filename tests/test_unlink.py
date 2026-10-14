@@ -63,21 +63,21 @@ def test_an_auto_link_removed_stays_removed_until_someone_adds_it(c, tmp_path):
     c.clock_.t += 10
     t0 = c.clock_.t
     assert c.record_traffic(tx("FG1-2", t0, rig="E63", radio_id="6301")) == [a["id"]]            # unit
-    assert c.record_traffic(tx("FG1-3", t0 + 1)) == [a["id"]]                                     # channel
+    assert c.record_traffic(tx("FG1-3", t0 + 1, rig="E60", radio_id="6001")) == [a["id"]]          # unit
     assert c.record_traffic(tx("307-9-call_4-t1", t0 + 2, "Fire/EMS 15", "E60", "E60", 307)) == [a["id"]]   # unit
     assert c.record_traffic(tx("307-9-call_4-t0", t0 + 1, "Fire/EMS 15", "", "60 Ctrl OP 6", 307)) == [a["id"]]
-    assert radio(c, a["id"]) == {"FG1-2": "unit", "FG1-3": "channel", "307-9-call_4-t1": "unit", "307-9-call_4-t0": "dispatcher"}
+    assert radio(c, a["id"]) == {"FG1-2": "unit", "FG1-3": "unit", "307-9-call_4-t1": "unit", "307-9-call_4-t0": "dispatcher"}
     for tid in ("FG1-2", "FG1-3", "307-9-call_4-t0"):
         code, r = post(c, f"/api/cad/incident/{a['id']}/unlink", {"traffic_id": tid, "operator": "Lt. Ruiz"})
         assert code == 200 and r["unlinked"] and r["excluded"], tid
     assert radio(c, a["id"]) == {"307-9-call_4-t1": "unit"}
     lines = chronology(c, a["id"])
     assert any(x.endswith("E63 on FG1 removed from this event (auto: E63 assigned) by Lt. Ruiz") for x in lines)
-    assert any("(auto: FG1, the only call with units)" in x for x in lines)
+    assert any(x.endswith("E60 on FG1 removed from this event (auto: E60 assigned) by Lt. Ruiz") for x in lines)
     assert any("(auto: 60 Control answering E60)" in x for x in lines)
     # the auto-linker sees them again (the transcript comes again, the unit's turn re-recorded): not put back
     assert c.record_traffic(tx("FG1-2", t0, rig="E63", radio_id="6301", text="again")) == []
-    assert c.record_traffic(tx("FG1-3", t0 + 1, text="again")) == []
+    assert c.record_traffic(tx("FG1-3", t0 + 1, rig="E60", radio_id="6001", text="again")) == []
     c.record_traffic(tx("307-9-call_4-t1", t0 + 2, "Fire/EMS 15", "E60", "E60", 307, "again"))
     assert radio(c, a["id"]) == {"307-9-call_4-t1": "unit"}
     # a new transmission from the same rig is its own: linked as always

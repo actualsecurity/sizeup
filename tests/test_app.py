@@ -554,14 +554,20 @@ def test_unreadable_mdc_burst_is_noted_and_kept(tmp_path):
     app._kind = {"FG1": "traffic"}
     app.stt.client = FakeWhisper({2: "Testing one two"})
     app.stt.start()
-    rng = np.random.default_rng(5)
-    burst = (0.3 * rng.standard_normal(RATE // 4)).astype(np.float32)          # noise where the ID was
+    # #163: "ID not decoded" only for something that is an ID burst (both MDC tones), "No ID sent" only with no burst
+    # at all on a strong carrier; noise the squelch cut off as a burst says neither.
+    from sizeup.radio.mdc1200 import encode as mdc_encode
+    burst = mdc_encode(0x01, 0x00, 0x6301).astype(np.float32)
+    a, n = int(106 * RATE / 1200), int(90 * RATE / 1200)
+    burst[a: a + n] = 0.5 * np.sin(2 * np.pi * 1500 * np.arange(n) / RATE)     # its block destroyed: won't decode
+    noise = (0.3 * np.random.default_rng(5).standard_normal(RATE // 4)).astype(np.float32)
     now = time.time()
     app._segment(Channel(453.0375, "FG1"), Segment(now, now + 2, voice(2.0), 20.0, [burst]))
     app._segment(Channel(453.0375, "FG1"), Segment(now + 5, now + 7, voice(2.0, 3), 20.0, []))
-    assert wait(lambda: len(app.state()["loose_traffic"]) == 2)
+    app._segment(Channel(453.0375, "FG1"), Segment(now + 10, now + 12, voice(2.0, 4), 20.0, [noise]))
+    assert wait(lambda: len(app.state()["loose_traffic"]) == 3)
     rows = app.state()["loose_traffic"]
-    assert [t.get("id_note") for t in rows] == ["ID burst unreadable", "no ID burst"]
+    assert [t.get("id_note") for t in rows] == ["undecoded", "none", None]
     assert (tmp_path / "clips" / f"{rows[0]['id']}.mdc.wav").is_file()
 
 
@@ -610,7 +616,7 @@ def test_apx6000_id_sent_late_in_the_transmission_is_found(tmp_path):
     seg = Segment(0, len(audio) / RATE, audio, 20.0, [])                 # as stored: nothing cut
     assert app._units(seg) == ["6301"] and app._id_note("FG1", seg, ["6301"]) == ""
     hiss = (0.05 * np.random.default_rng(1).standard_normal(len(audio))).astype(np.float32)
-    assert app._id_note("FG1", Segment(0, 1, hiss, 20.0, []), []) == "no ID burst"
+    assert app._id_note("FG1", Segment(0, 1, hiss, 20.0, []), []) == "none"
 
 
 def test_a_page_that_fades_and_comes_back_is_one_page_sent_once(tmp_path, capsys):

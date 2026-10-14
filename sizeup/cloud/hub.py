@@ -527,7 +527,8 @@ class HubApp(App):
             self._apply_alarm(d, audio)
         elif kind == "heard":
             if d.get("system") in ("mdc", "p25", "fleetsync"):
-                self.radios.heard(d["system"], str(d.get("radio_id") or ""), str(d.get("alias") or ""), d.get("at"))
+                self.radios.heard(d["system"], str(d.get("radio_id") or ""), str(d.get("alias") or ""), d.get("at"),
+                                  str(d.get("channel") or ""))
         else:
             self.hub.log(f"hub: ignoring event type {kind!r} (a newer station?)")
 

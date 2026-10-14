@@ -15,8 +15,10 @@
     not       the unit's status already is that (or, for available, any available status); a step backwards
               (responding after on location) unless said so ("now", "again", "back"); on location, staging or command
               for a unit on no call with no call on the channel; a status set after the transmission was made
-    where     the event the unit is on, else the one open event the transmission is linked to (comms.py: the FG1
-              channel rule, the Airport talkgroup); accepting then puts the unit on it
+    where     the event the unit is on, else the one open event the transmission is linked to (comms.py: a manual
+              link, the Airport talkgroup), else on FG1 the one emergency event with units on it then (as the FG1
+              channel link did before #163: the suggestion still knows the call, the transmission isn't put on it);
+              accepting then puts the unit on it
     gone      after expire_s (5 minutes from when it was heard), when the unit's status changes by any means, or when
               a newer suggestion for the unit comes
 
@@ -388,6 +390,12 @@ class StatusHints:
             linked = self.store.q("SELECT DISTINCT i.id FROM radio_links l JOIN incidents i ON i.id = l.incident_id "
                                   "WHERE l.traffic_id = ? AND i.status IN ('pending', 'active')", (t["id"],))
             iid = linked[0]["id"] if len(linked) == 1 else None
+        if iid is None and t["talkgroup"] is None and t["channel"] in self.default_channels:
+            # FG1 with exactly one call running on it: that call's (a suggestion a person takes or not; the
+            # transmission itself is not put on the call without its radio's ID, comms.py #163)
+            from sizeup.cad.comms import Comms
+            active = self.store.q(Comms.ACTIVE_EVENTS, (t["start"], t["start"]))
+            iid = active[0]["incident_id"] if len(active) == 1 else None
         if iid is None and f.intent in NEEDS_CALL:
             return None
         if self.store.one("SELECT 1 FROM status_hints WHERE unit = ? AND status = ? AND outcome = 'pending' "
