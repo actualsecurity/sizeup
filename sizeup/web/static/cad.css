@@ -9,11 +9,12 @@
   html.cad, body.cad { overflow: hidden; }
   /* each page shows its own: the board hides the console's controls, the console the board's */
   html:not(.board) .board-only, html.board .console-only { display: none !important; }
-  body.cad { grid-template-rows: auto auto auto minmax(0, 1fr); }
+  body.cad { grid-template-rows: auto auto auto auto minmax(0, 1fr); }
   body.cad > header { grid-row: 1; }
   body.cad > .cloud-banner { grid-row: 2; }
   body.cad > .role-banner { grid-row: 3; }
-  body.cad > main { grid-row: 4; }
+  body.cad > .alert-banners { grid-row: 4; }
+  body.cad > main { grid-row: 5; }
   body.stale aside { opacity: 0.55; filter: saturate(0.4); }
   body.ro-dispatch .cad-main [data-ro] { cursor: not-allowed; }
 
@@ -120,6 +121,48 @@
   .d-airport .ap-fact { display: inline-flex; gap: var(--s-1); align-items: baseline; white-space: nowrap; }
   .d-airport .ap-fact .dim { font-size: var(--fs-xs); line-height: var(--lh-xs); }
   .d-airport .ap-none { color: var(--dim); font-size: var(--fs-sm); line-height: var(--lh-sm); }
+
+  /* ---- weather and water (weather.js, #132) ---------------------------------------------------------------
+     the alert banners under the header (the NWS's; the station-health banner shares the box), the conditions in
+     the header, an alert's full text, and the tides on a marine call and the board's marine block */
+  .alert-banners { display: flex; flex-direction: column; gap: var(--s-1); margin: var(--s-2) var(--gutter) 0; }
+  .alert-banners:not(:has(> :not([hidden]))) { display: none; }
+  .wx-banner { display: flex; flex-direction: column; gap: var(--s-1); }
+  .wx-alert {
+    display: flex; align-items: baseline; gap: var(--s-2); inline-size: 100%; min-block-size: var(--ctl-sm);
+    padding-block: var(--s-1); text-align: start; white-space: nowrap; cursor: pointer;
+  }
+  .wx-alert:hover { filter: brightness(1.15); }
+  .wx-alert .wx-event { flex: none; }
+  .wx-alert .wx-head { flex: 1 1 auto; min-inline-size: 0; overflow: hidden; text-overflow: ellipsis; font-weight: 500; color: var(--text-2); }
+  .wx-alert .wx-until { flex: none; margin-inline-start: auto; }
+  .wx-more { align-self: flex-start; }
+  .wx-now { display: inline-flex; align-items: center; gap: var(--s-1); color: var(--text-2); font-variant-numeric: tabular-nums; }
+  .wx-now.stale { color: var(--dim); }
+  .wx-arrow { inline-size: var(--ico-sm); block-size: var(--ico-sm); flex: none; color: var(--info); transition: transform var(--dur-2) var(--ease); }
+  .wx-arrow.lg { inline-size: var(--ico); block-size: var(--ico); }
+  .wx-dialog { inline-size: min(48rem, 100%); }
+  .wx-text h3 { margin: 0; font-size: var(--fs-sm); line-height: var(--lh-sm); color: var(--dim); }
+  .wx-text p { margin: 0; }
+  .wx-pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: var(--fs-sm)/var(--lh-sm) var(--font); color: var(--text); }
+  .wx-facts { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: var(--s-0) var(--s-3); margin: 0; font-size: var(--fs-sm); line-height: var(--lh-sm); }
+  .wx-facts dd { margin: 0; overflow-wrap: anywhere; }
+  .wx-level { font-weight: 700; }
+  .wx-level.err { color: var(--err); }
+  .wx-level.warn { color: var(--warn); }
+  .wx-level.info { color: var(--info); }
+  .wx-nwshead { color: var(--text-2); font-size: var(--fs-sm); line-height: var(--lh-sm); }
+  .d-tides { margin-block-start: var(--s-2); }
+  .wx-tides-in { display: flex; flex-direction: column; gap: var(--s-1); font-size: var(--fs-sm); line-height: var(--lh-sm); }
+  .wx-tide-now, .wx-tide-next { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s-1) var(--s-3); }
+  .wx-tide-now b { font-size: var(--fs-md); line-height: var(--lh-md); }
+  .wx-ext { display: inline-flex; gap: var(--s-1); align-items: baseline; white-space: nowrap; }
+  .wx-trend { font-weight: 600; }
+  .wx-trend.rising { color: var(--info); }
+  .wx-trend.falling { color: var(--text-2); }
+  .wx-tides-in .wx-marine { white-space: normal; }
+  .d-tides .wx-tides-body, .b-marine .wx-tides-body { min-inline-size: 0; }
+  @container hdr (width < 1100px) { .wx-now { display: none; } }
   .ap-line { color: var(--info); overflow-wrap: anywhere; }
   .ap-fields { display: grid; grid-template-columns: repeat(auto-fill, minmax(9rem, 1fr)); gap: var(--s-2) var(--s-3); margin: 0;
     padding: var(--s-2) var(--s-3); border: var(--bw) solid var(--line); border-radius: var(--radius); min-inline-size: 0; }
@@ -447,7 +490,7 @@
   html.board .ov-page .dim { display: none; }          /* "Accept / Dismiss": the console's, not the board's */
   html.board :is(.feed-more, .menu-btn) { display: none; }
   html.board .ov-grid { grid-template-columns: minmax(0, 1.6fr) minmax(18rem, 1fr); }
-  html.board .ov-mapbox { block-size: calc(100dvh - var(--hdr-h) - 2 * var(--gutter) - var(--ctl) - var(--gutter)); }
+  html.board .ov-view { block-size: calc(100dvh - var(--hdr-h) - 2 * var(--gutter) - var(--ctl) - var(--gutter)); }
   .b-sec { margin-block-start: var(--s-3); }
   html.board #feed { display: none !important; }       /* the board's radio is the main channels (.b-radio), not this */
   .b-radio { margin-block-start: 0; }
@@ -473,8 +516,8 @@
     .queue > section > :is(h2, .q-head) { position: static; }
     .units > .feed { position: static; margin: 0 0 var(--s-3); border: var(--bw) solid var(--line); border-radius: var(--radius); }
     html.board .cad-main { --zoom: 1.1; }
-    html.board .ov-grid { grid-template-columns: minmax(0, 1fr); }
-    html.board .ov-mapbox { block-size: 50vh; }
+    html.board .ov-grid, html.board .ov-grid[data-layout] { grid-template-columns: minmax(0, 1fr); }
+    html.board .ov-grid:is([data-layout="map"], [data-layout="overlay"]) .ov-view { block-size: 50vh; }
   }
   /* a phone: the header is two rows, the same on every view (brand, state, clock / views, tools) */
   @media (max-width: 640px) {
@@ -509,5 +552,50 @@
     .overlay { padding: 0; align-items: stretch; }
     .dialog { block-size: 100%; border-radius: 0; border: 0; }
     .alerts-panel { inset: auto 0 0 0 !important; inline-size: auto !important; border-radius: var(--radius) var(--radius) 0 0; }
+  }
+
+  /* ---- the emergency alarm (alarm.js, #128): over everything but the toasts, red, large type ------------- */
+  .alarm-overlay { position: fixed; inset: 0; z-index: calc(var(--z-toast) - 1); overflow: auto; display: flex; flex-direction: column;
+    gap: var(--s-4); padding: var(--s-6); background: var(--accent); color: var(--on-accent); }
+  .alarm-overlay[hidden], .alarm-notices[hidden], .alarm-pill[hidden] { display: none; }
+  .alarm-overlay.drill { background: var(--warn); color: var(--on-warn); }
+  .alarm-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-3) var(--s-4); }
+  .alarm-title { margin: 0; font-size: calc(var(--fs-2xl) * 2); line-height: calc(var(--lh-2xl) * 2); font-weight: 800;
+    letter-spacing: 0.04em; }
+  .alarm-count { font-size: var(--fs-2xl); line-height: var(--lh-2xl); font-weight: 700; }
+  .alarm-list { display: flex; flex-direction: column; gap: var(--s-4); }
+  .alarm-card { display: flex; flex-direction: column; gap: var(--s-2); padding: var(--s-4) var(--s-5); background: var(--bg);
+    color: var(--text); border: var(--bw-mark) solid var(--on-accent); border-radius: var(--radius); box-shadow: var(--elev-dialog); }
+  .alarm-card.drill { border-color: var(--warn); }
+  .alarm-what { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-3); font-size: calc(var(--fs-2xl) * 1.5);
+    line-height: calc(var(--lh-2xl) * 1.5); font-weight: 800; color: var(--accent-text); }
+  .alarm-card.drill .alarm-what { color: var(--warn); }
+  .alarm-drill { padding: var(--s-0) var(--s-2); border-radius: var(--radius-s); background: var(--warn); color: var(--on-warn);
+    font-size: var(--fs-xl); line-height: var(--lh-xl); }
+  .alarm-who { font-size: var(--fs-2xl); line-height: var(--lh-2xl); }
+  .alarm-where { font-size: var(--fs-xl); line-height: var(--lh-xl); color: var(--text-2); }
+  .alarm-text { margin: 0; font-size: var(--fs-xl); line-height: var(--lh-xl); }
+  .alarm-mark { padding-inline: var(--s-0); border-radius: var(--radius-s); background: var(--warn); color: var(--on-warn); font-weight: 700; }
+  .alarm-meta { font-size: var(--fs-lg); line-height: var(--lh-lg); }
+  .alarm-ev { align-self: flex-start; font-size: var(--fs-lg); }
+  .alarm-btns { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-3); padding-block-start: var(--s-2); }
+  .alarm-btns button { min-inline-size: 9rem; min-block-size: calc(var(--ctl-lg) * 1.25); font-size: var(--fs-lg); }
+  .alarm-ack { min-inline-size: 14rem; font-weight: 800; }
+  .alarm-unlock { min-block-size: calc(var(--ctl-lg) * 1.25); padding-inline: var(--s-4); background: var(--on-accent);
+    color: var(--accent); font-weight: 800; font-size: var(--fs-xl); }
+  .alarm-notices { position: fixed; inset-block-start: var(--hdr-h); inset-inline: 0; z-index: var(--z-popover); display: flex;
+    flex-direction: column; gap: var(--s-1); padding: var(--s-2) var(--gutter); background: var(--raised);
+    border-block-end: var(--bw-mark) solid var(--err); box-shadow: var(--elev-dialog); }
+  .alarm-notice { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); }
+  .alarm-notice b { color: var(--err); }
+  .alarm-chans { inline-size: 22rem; max-inline-size: 100%; }
+  .alarm-kw { inline-size: 100%; max-inline-size: 40rem; font-family: var(--mono); }
+  @media (max-width: 640px) {
+    .alarm-overlay { padding: var(--s-3); gap: var(--s-3); }
+    .alarm-title { font-size: calc(var(--fs-2xl) * 1.5); line-height: calc(var(--lh-2xl) * 1.5); }
+    .alarm-what { font-size: var(--fs-2xl); line-height: var(--lh-2xl); }
+    .alarm-who { font-size: var(--fs-xl); line-height: var(--lh-xl); }
+    .alarm-card { padding: var(--s-3); }
+    .alarm-btns button { flex: 1 1 auto; min-inline-size: 0; }
   }
 }

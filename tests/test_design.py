@@ -1,12 +1,12 @@
 """The design system (static/style.css) holds: cascade layers in order, one token set, the views (cad.css,
-cadmap.css, settings.css, station.css) only lay out on the tokens, every component the pages and scripts use is defined
+cadmap.css, settings.css, station.css, health.css) only lay out on the tokens, every component the pages and scripts use is defined
 once in the components layer, and every class they use exists. tools/ui_consistency.py checks the rendered
 result in a browser; this is the static half (no browser)."""
 import re
 from pathlib import Path
 
 STATIC = Path(__file__).resolve().parent.parent / "sizeup" / "web" / "static"
-VIEWS = ("cad.css", "cadmap.css", "settings.css", "station.css")
+VIEWS = ("cad.css", "cadmap.css", "settings.css", "station.css", "health.css")
 LAYERS = ["vendor", "reset", "tokens", "base", "components", "views", "utilities"]
 
 # The components (style.css @layer components): the vocabulary the views and scripts build with.

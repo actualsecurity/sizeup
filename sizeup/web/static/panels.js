@@ -13,14 +13,88 @@
 //              move it 16 px, Home resets.
 //   The maps   follow during a drag (MapLibre's resize() once a frame) and once more after it.
 //   Narrow     under 1101 px the columns stack (cad.css): the handles are hidden and the widths not applied.
+//
+// Panels.separator(handle, opts) is the separator itself, for any divider (the Overview's map | cameras split,
+// camwall.js, #147): {orient: "vertical" (a left | right divider) | "horizontal" (top / bottom), label, controls,
+// min(), max(), value() -> px, set(px, done) (done: the drag or key ended: remember it), reset(), enabled(), step
+// (16), grow (+1: dragging right / down grows the value, -1: shrinks it)}; orient and grow may be functions. It takes the pointer (captured, so a drag
+// carries on over a map), the keys (the arrows of its orientation, Home), the double-click, keeps aria-valuenow /
+// min / max, and resizes the maps once a frame while dragging and once after.
 "use strict";
 
 window.Panels = (() => {
+  const STEP = 16;
+  let frame = 0;
+  function resizeMaps() {
+    if (window.MapLayers && MapLayers.maps) for (const m of MapLayers.maps) { try { m.map.resize(); } catch (_) { /* gone */ } }
+  }
+
+  function separator(hd, o) {
+    // the orientation and the direction may change with the layout (camwall.js): functions are asked each time
+    const vert = () => ((typeof o.orient === "function" ? o.orient() : o.orient) || "vertical") === "vertical";
+    const growBy = () => (typeof o.grow === "function" ? o.grow() : o.grow) || 1;
+    const step = o.step || STEP;
+    hd.setAttribute("role", "separator");
+    if (o.label) hd.setAttribute("aria-label", o.label);
+    if (o.controls) hd.setAttribute("aria-controls", o.controls);
+    hd.tabIndex = 0;
+    if (o.label && !hd.title) hd.title = `${o.label}: drag, or arrow keys; double-click to reset`;
+    const sync = () => {
+      hd.setAttribute("aria-orientation", vert() ? "vertical" : "horizontal");
+      hd.setAttribute("aria-valuemin", String(Math.round(o.min())));
+      hd.setAttribute("aria-valuemax", String(Math.round(o.max())));
+      hd.setAttribute("aria-valuenow", String(Math.round(o.value())));
+    };
+    const reset = () => { o.reset(); sync(); resizeMaps(); };
+    hd.addEventListener("dblclick", reset);
+    hd.addEventListener("keydown", (e) => {
+      if (e.key === "Home") { e.preventDefault(); reset(); return; }
+      if (o.enabled && !o.enabled()) return;
+      const dir = (vert() ? { ArrowLeft: -1, ArrowRight: 1 } : { ArrowUp: -1, ArrowDown: 1 })[e.key];
+      if (!dir) return;
+      e.preventDefault();
+      o.set(o.value() + growBy() * dir * step, true);
+      sync();
+      resizeMaps();
+    });
+    hd.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0 || (o.enabled && !o.enabled())) return;
+      e.preventDefault();
+      const vertical = vert(), grow = growBy();
+      const p0 = vertical ? e.clientX : e.clientY, v0 = o.value();
+      hd.setPointerCapture(e.pointerId);
+      hd.classList.add("on");
+      document.body.classList.add(vertical ? "col-dragging" : "row-dragging");
+      const move = (ev) => {
+        o.set(v0 + grow * ((vertical ? ev.clientX : ev.clientY) - p0), false);
+        sync();
+        if (!frame) frame = requestAnimationFrame(() => { frame = 0; resizeMaps(); });
+      };
+      const end = (ev) => {
+        hd.removeEventListener("pointermove", move);
+        hd.removeEventListener("pointerup", end);
+        hd.removeEventListener("pointercancel", end);
+        try { hd.releasePointerCapture(ev.pointerId); } catch (_) { /* released */ }
+        hd.classList.remove("on");
+        document.body.classList.remove("col-dragging", "row-dragging");
+        o.set(o.value(), true);
+        sync();
+        resizeMaps();
+      };
+      hd.addEventListener("pointermove", move);
+      hd.addEventListener("pointerup", end);
+      hd.addEventListener("pointercancel", end);
+    });
+    sync();
+    return { sync, reset };
+  }
+
+  // ---- the side columns -----------------------------------------------------------------------------------------
   const main = document.querySelector("main.cad-main");
-  if (!main) return null;
+  if (!main) return { separator, resizeMaps };
   const KEY = "sizeup.panels";
   const SCREEN = BOARD ? "monitor" : "cad";
-  const STEP = 16, MID_MIN = 560, NARROW = matchMedia("(max-width: 1100px)");
+  const MID_MIN = 560, NARROW = matchMedia("(max-width: 1100px)");
   const SIDES = {
     left: { col: main.querySelector(":scope > .queue"), min: 220, max: 480, prop: "--rail-w", label: "Resize the queue column" },
     right: { col: main.querySelector(":scope > .units"), min: 280, max: 560, prop: "--side-w", label: "Resize the radio and units column" },
@@ -58,20 +132,25 @@ window.Panels = (() => {
   for (const [side, s] of Object.entries(SIDES)) {
     const hd = document.createElement("div");
     hd.className = `col-handle col-handle-${side}`;
-    hd.setAttribute("role", "separator");
-    hd.setAttribute("aria-orientation", "vertical");
-    hd.setAttribute("aria-label", s.label);
-    hd.setAttribute("aria-valuemin", String(s.min));
-    hd.setAttribute("aria-valuemax", String(s.max));
-    hd.tabIndex = 0;
-    hd.title = `${s.label}: drag, or arrow keys; double-click to reset`;
     if (s.col && !s.col.id) s.col.id = `col-${side}`;
-    if (s.col) hd.setAttribute("aria-controls", s.col.id);
     main.append(hd);
     s.handle = hd;
-    hd.addEventListener("pointerdown", (e) => drag(side, e));
-    hd.addEventListener("dblclick", () => reset(side));
-    hd.addEventListener("keydown", (e) => key(side, e));
+    s.sep = separator(hd, {
+      orient: "vertical", label: s.label, controls: s.col && s.col.id, grow: side === "left" ? 1 : -1,   // the right one grows leftwards
+      min: () => s.min, max: () => s.max, value: () => current(side), enabled: () => !NARROW.matches,
+      set: (px, done) => {
+        widths[side] = clamp(side, px);
+        main.style.setProperty(s.prop, `${widths[side]}px`);
+        place();
+        if (done) remember({ ...widths });
+      },
+      reset: () => {
+        delete widths[side];
+        main.style.removeProperty(s.prop);
+        remember({ ...widths });
+        place();
+      },
+    });
   }
   function place() {
     const m = main.getBoundingClientRect();
@@ -83,64 +162,9 @@ window.Panels = (() => {
     }
   }
 
-  function set(side, px, keep = true) {
-    widths[side] = clamp(side, px);
-    main.style.setProperty(SIDES[side].prop, `${widths[side]}px`);
-    place();
-    if (keep) remember({ ...widths });
-  }
-  function reset(side) {
-    delete widths[side];
-    main.style.removeProperty(SIDES[side].prop);
-    remember({ ...widths });
-    place();
-    resizeMaps();
-  }
-  function key(side, e) {
-    const dir = { ArrowLeft: -1, ArrowRight: 1 }[e.key];
-    if (e.key === "Home") { e.preventDefault(); reset(side); return; }
-    if (!dir) return;
-    e.preventDefault();
-    set(side, current(side) + (side === "left" ? dir : -dir) * STEP);       // the right column grows leftwards
-    resizeMaps();
-  }
-
-  // ---- dragging: pointer capture, so the drag carries on over the map ---------------------------------------------
-  let frame = 0;
-  function resizeMaps() {
-    if (window.MapLayers && MapLayers.maps) for (const m of MapLayers.maps) { try { m.map.resize(); } catch (_) { /* gone */ } }
-  }
-  function drag(side, e) {
-    if (e.button !== 0 || NARROW.matches) return;
-    e.preventDefault();
-    const hd = SIDES[side].handle;
-    const x0 = e.clientX, w0 = current(side);
-    hd.setPointerCapture(e.pointerId);
-    hd.classList.add("on");
-    document.body.classList.add("col-dragging");
-    const move = (ev) => {
-      const dx = ev.clientX - x0;
-      set(side, w0 + (side === "left" ? dx : -dx), false);
-      if (!frame) frame = requestAnimationFrame(() => { frame = 0; resizeMaps(); });
-    };
-    const end = (ev) => {
-      hd.removeEventListener("pointermove", move);
-      hd.removeEventListener("pointerup", end);
-      hd.removeEventListener("pointercancel", end);
-      try { hd.releasePointerCapture(ev.pointerId); } catch (_) { /* released */ }
-      hd.classList.remove("on");
-      document.body.classList.remove("col-dragging");
-      remember({ ...widths });
-      resizeMaps();
-    };
-    hd.addEventListener("pointermove", move);
-    hd.addEventListener("pointerup", end);
-    hd.addEventListener("pointercancel", end);
-  }
-
   // the window (or the board's zoom) changed: the widths re-clamped, the handles re-placed
   new ResizeObserver(() => apply()).observe(main);
   NARROW.addEventListener("change", apply);
   apply();
-  return { widths, set, reset, SIDES };
+  return { widths, SIDES, separator, resizeMaps };
 })();

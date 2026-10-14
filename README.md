@@ -34,6 +34,8 @@ licences and fetch dates are in its `meta` table):
   domain) already in the gazetteer
 
 Map tiles: OpenFreeMap / OpenMapTiles, © OpenStreetMap contributors.
+Weather, radar and tides (the alert banner, the header's conditions, the Radar layer, the marine block):
+NOAA / National Weather Service and NOAA CO-OPS, public domain, through the hub (`docs/cloud.md` "Weather and water").
 
 ```sh
 /opt/homebrew/bin/python3.14 -m venv .venv && .venv/bin/pip install -e '.[dev]'

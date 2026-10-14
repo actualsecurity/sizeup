@@ -15,6 +15,9 @@ runs on a bare Linux box with Python + numpy.
     GET  /api/station/jobs?wait=25   long poll: jobs for the station -> {jobs: [{id, type, args}]}
     POST /api/station/jobs/<id>   the station's answer {ok, error?, result?, label?, audio?}
     GET  /api/station/hello      {ok}: the token works (the station's Test connection; not counted as "seen")
+    GET  /api/station/status     read only, for the deploy check (tools/deploy_check.py): the hub's build, the
+                                 station's version and last update, the health alerts (sizeup/cloud/health.py).
+                                 The station token or the status token, which opens nothing else; not "seen"
 
 Every request needs `Authorization: Bearer <SIZEUP_STATION_TOKEN>` (constant-time compare); with
 no token configured the hub refuses them all. Jobs (the station only connects out):
@@ -56,7 +59,9 @@ from typing import Callable
 from sizeup import channels
 from sizeup.app import CLIP_ID, App, AwsJob, channels_model
 from sizeup.cad.dispatcher import AudioUnavailable
+from sizeup.cad.radios import fm_system
 from sizeup.cloud.autoupdate import describe
+from sizeup.cloud.health import StationHealth, status_token
 from sizeup.cloud.hubstore import AudioDb, MonitorDb
 from sizeup.incidents import Traffic
 from sizeup.radio.page import page_from_dict
@@ -177,7 +182,7 @@ class RemoteLive:
             rid = str(e.get("radio_id") or "")
             if rid:
                 try:
-                    r = self.resolve("mdc" if e.get("system") == "fm" else "p25", rid, str(e.get("alias") or ""))
+                    r = self.resolve(fm_system(rid) if e.get("system") == "fm" else "p25", rid, str(e.get("alias") or ""))
                 except Exception:  # the registry must never break the indicator
                     r = None
                 e["rig"], e["label"] = (r or {}).get("unit", e.get("rig", "")), (r or {}).get("label", e.get("label", ""))
@@ -196,6 +201,9 @@ class Hub:
         self.jobs = Jobs()
         self.live = RemoteLive(app.radios.resolve)
         self.last_seen: float | None = None
+        self.last_state: float | None = None     # the station's last state post (station health: "silent")
+        self.status_token = status_token(self.token, getattr(cfg, "cloud_status_token", ""))
+        self.health_: StationHealth | None = None  # station health and alerts (HubApp sets it)
         self.polling = 0
         self.status: dict | None = None          # the station's last report (state "status")
         self.talkgroups: list[dict] = []
@@ -255,8 +263,11 @@ class Hub:
 
     def station_row(self) -> dict:
         h = self.health()
-        return {"label": "Station", "mhz": None, "state": h["state"], "word": h["word"], "detail": h["detail"],
-                "open": False, "quieting_db": None, "restarts": 0, "last_heard": self.last_seen}
+        n = len(self.health_.alerts()) if self.health_ is not None else 0
+        return {"label": "Station", "mhz": None, "state": h["state"], "word": h["word"],
+                "detail": h["detail"] + (f" · {n} health alert(s)" if n else "") + " · Station health: Settings > System",
+                "open": False, "quieting_db": None, "restarts": 0, "last_heard": self.last_seen,
+                "link": "#settings/system/health"}
 
     def radio_rows(self) -> list[dict]:
         """The Station row, then the station's own rows as it reported them, or, offline, marked
@@ -282,7 +293,9 @@ class Hub:
 
     def cad_cloud(self) -> dict:
         h = self.health()
-        return {"role": "hub", "state": h["state"], "word": h["word"], "detail": h["detail"]}
+        return {"role": "hub", "state": h["state"], "word": h["word"], "detail": h["detail"],
+                "alerts": self.health_.alerts() if self.health_ is not None else [],
+                "health_url": "/cad#settings/system/health"}
 
     # -- jobs ------------------------------------------------------------------------------------------
 
@@ -325,17 +338,29 @@ class Hub:
 
     # -- HTTP --------------------------------------------------------------------------------------------
 
-    def _auth(self, headers) -> tuple[int, bytes, str] | None:
+    def _auth(self, headers, read_only: bool = False) -> tuple[int, bytes, str] | None:
+        """None when the bearer is the station token (or, read_only, the status token); else the refusal."""
         if not self.token:
             return _json(403, {"error": "station ingest is off: no station token configured on the hub "
                                         "(SIZEUP_STATION_TOKEN)"})
         h = (headers.get("Authorization") or "").strip()
         given = h[7:].strip() if h[:7].lower() == "bearer " else ""
-        if not given or not hmac.compare_digest(given.encode(), self.token.encode()):
+        ok = bool(given) and hmac.compare_digest(given.encode(), self.token.encode())
+        if read_only and given and self.status_token:
+            ok = hmac.compare_digest(given.encode(), self.status_token.encode()) or ok
+        if not ok:
             return _json(401, {"error": "bad or missing station token"})
         return None
 
     def handle(self, method: str, path: str, query: str, headers, body: Callable[[int], bytes | None] | None):
+        if path == "/api/station/status":            # read only (the deploy check): not "seen", nothing changes
+            refused = self._auth(headers, read_only=True)
+            if refused:
+                return refused
+            if method != "GET":
+                return _json(405, {"error": "GET only"})
+            return _json(200, self.health_.status() if self.health_ is not None else
+                         {"ok": True, "hub_build": self.build, "station": None, "alerts": []})
         refused = self._auth(headers)
         if refused:
             return refused
@@ -384,6 +409,7 @@ class Hub:
         if not isinstance(d, dict):
             raise ValueError("a JSON object")
         now = time.time()
+        self.last_state = now
         if isinstance(d.get("at"), (int, float)):
             self.skew = now - float(d["at"])
         if isinstance(d.get("status"), dict):
@@ -392,6 +418,8 @@ class Hub:
             if isinstance(tgs, list):
                 self.talkgroups = tgs
             self.status = st
+            if self.health_ is not None:
+                self.health_.observe(st)           # each channel's gaps, for the silence hints
             self.app.channels_check()          # the station runs other channel choices than these: send them
         if isinstance(d.get("talking"), list):
             self.live.update(d["talking"], now, d.get("paging") if isinstance(d.get("paging"), list) else None)
@@ -445,6 +473,12 @@ class HubApp(App):
                                  shared_device="", dispatch_tts_python=""))
         self.receivers, self.modes = [], []
         self.hub = Hub(self, cfg, log)
+        # station health (GitHub #79): the alerts, the banner, the push to [alerts] ntfy_topic (never Tapout's),
+        # through the same Notifier as the emergency alarms (App: self.cad.alarms.notifier), one queue in order
+        notifier = getattr(getattr(self.cad, "alarms", None), "notifier", None)
+        self.health = self.hub.health_ = StationHealth(self.hub, cfg, self.mdb, notifier, log)
+        if notifier is None:
+            log("health: no push for station alerts ([alerts] ntfy_topic / SIZEUP_ALERT_TOPIC unset): banner and log only")
         self.live = self.hub.live                      # main() sets on_change to push the display
         self.cad.live = self.live.state
         self.paging_state = self.live.paging_state     # the station's page going out now
@@ -486,8 +520,10 @@ class HubApp(App):
             self._rerun_finish(self._id(d), str(d.get("result") or "")[:200], str(d.get("model") or "")[:80])
         elif kind == "alt_text":                      # "both" re-run: the station's whisper text, to compare
             self._set_alt(self._id(d), str(d.get("text") or ""), str(d.get("model") or "")[:80])
+        elif kind == "alarm":                         # the P25 emergency button, ahead of its transcript (#128)
+            self._apply_alarm(d, audio)
         elif kind == "heard":
-            if d.get("system") in ("mdc", "p25"):
+            if d.get("system") in ("mdc", "p25", "fleetsync"):
                 self.radios.heard(d["system"], str(d.get("radio_id") or ""), str(d.get("alias") or ""), d.get("at"))
         else:
             self.hub.log(f"hub: ignoring event type {kind!r} (a newer station?)")
@@ -527,6 +563,30 @@ class HubApp(App):
         if str(d.get("stt") or "") == "both" and page.status in ("done", "no_speech"):
             self._aws_from_clip(page, self.audio.get(pid), page.label, both=True)
 
+    def _traffic_of(self, d: dict) -> Traffic:
+        """The station's transmission as sent, its rig from the hub's radio registry (edited here)."""
+        t = Traffic.from_dict({k: v for k, v in d.items() if EXTRA.fullmatch(str(k))})
+        ids = [x.strip() for x in (t.radio_id or "").split(",") if x.strip()]
+        pairs = d.get("pairs")
+        if t.talkgroup is None:
+            t.rig = self.radios.rig_mdc(ids)
+        elif isinstance(pairs, list):
+            t.rig = self.radios.rig_p25([(str(p[0]), str(p[1])) for p in pairs if isinstance(p, list) and len(p) == 2])
+        else:
+            t.rig = self.radios.rig_for_names(t.unit, False)[0]
+        return t
+
+    def _apply_alarm(self, d: dict, audio: bytes | None) -> None:
+        """The station flagged an emergency at the end of the call: the alarm now (and its clip, for Replay);
+        the "traffic" event with the transcript follows and updates it."""
+        tid = self._id(d)
+        if audio and not self.audio.get(tid):
+            self.audio.put(tid, audio, "clip", at=float(d.get("end") or time.time()))
+        t = self._traffic_of(d)
+        t.text = ""
+        t.emergency = True  # type: ignore[attr-defined]
+        self._alarm(t, "")
+
     def _apply_traffic(self, d: dict, audio: bytes | None) -> None:
         tid = self._id(d)
         if any(t.id == tid for t in list(self.store.loose) + [t for i in self.store.incidents for t in i.traffic]):
@@ -534,16 +594,7 @@ class HubApp(App):
         if audio:
             self.audio.put(tid, audio, "clip", at=float(d.get("end") or time.time()))
         # with the station's extras (raw, confidence, model, attach, pairs, ...): plain names only
-        t = Traffic.from_dict({k: v for k, v in d.items() if EXTRA.fullmatch(str(k))})
-        ids = [x.strip() for x in (t.radio_id or "").split(",") if x.strip()]
-        pairs = d.get("pairs")
-        # The rig from the hub's radio registry (edited here, in the CAD of record).
-        if t.talkgroup is None:
-            t.rig = self.radios.rig_mdc(ids)
-        elif isinstance(pairs, list):
-            t.rig = self.radios.rig_p25([(str(p[0]), str(p[1])) for p in pairs if isinstance(p, list) and len(p) == 2])
-        else:
-            t.rig = self.radios.rig_for_names(t.unit, False)[0]
+        t = self._traffic_of(d)
         key = channels.tg_key(t.talkgroup) if t.talkgroup is not None else t.source
         if d.get("transcript_pending") == "aws":            # the station skipped whisper: Amazon Transcribe here
             return self._aws_from_clip(t, audio, key)
@@ -808,11 +859,13 @@ class HubApp(App):
 
     def start(self) -> HubApp:
         threading.Thread(target=self._hub_janitor, name="hub-janitor", daemon=True).start()
+        threading.Thread(target=self.health.run, args=(self._stopping,), name="station-health", daemon=True).start()
         self._started = True                      # the phone pre-alert: the hub's own subscription
         self.prealert_sync()
         self.roads.start()                        # 511NY's layers for the maps (sizeup/roads.py)
         self.gis.start()                          # the county GIS layers (sizeup/gis.py)
         self.trains.start()                       # Metro-North's trains (sizeup/trains.py)
+        self.weather.start()                      # NWS alerts, conditions, radar; NOAA tides (sizeup/weather.py)
         if self.vocab is not None and self.vocab.state()["state"] == "PENDING":
             self.vocab.poll()
         try:
@@ -828,6 +881,7 @@ class HubApp(App):
         self.roads.stop()
         self.gis.stop()
         self.trains.stop()
+        self.weather.stop()
         if self.aws is not None:
             self.aws.stop()
         try:

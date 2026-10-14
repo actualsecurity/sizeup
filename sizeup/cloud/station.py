@@ -13,7 +13,8 @@
     state thread       POST /api/station/state: who is talking now and a page going out now (paging:
                        each tone pair as it decodes), pushed the moment it changes
                        (sub-second; latest wins, never queued) and every 5 s the radio / SDR / STT /
-                       voice status, re-run progress and the outbox size (also the heartbeat)
+                       voice status, re-run progress, the outbox size and this machine's health
+                       (sizeup/cloud/health.py: CPU, memory, disk, uptime, each radio program; also the heartbeat)
                        The hub answers with its build: Watch (autoupdate.py) passes it to the
                        station's auto-updater once it holds still; this station's version and the
                        updater's last result go up in the status ("version")
@@ -44,6 +45,7 @@ from sizeup.cad import dispatcher
 from sizeup.cad.dispatcher import AudioUnavailable
 from sizeup.cloud.autoupdate import Watch
 from sizeup.cloud.client import HubClient, HubError
+from sizeup.cloud.health import Metrics, station_metrics
 from sizeup.cloud.outbox import Outbox
 from sizeup.tts import VoiceCfg
 
@@ -96,6 +98,10 @@ class StationLink:
         self.last_ok: float | None = None       # the hub's last answer (any thread)
         self.last_error, self.error_since = "", None
         self.sent = 0
+        # this machine (CPU, memory, disk, temperature, uptime) and its radio programs: status["health"]
+        # (sizeup/cloud/health.py; the hub's station health and alerts)
+        disk = cfg.cloud_outbox if cfg.cloud_outbox and cfg.cloud_outbox != ":memory:" else (cfg.clips_dir or ".")
+        self.metrics = Metrics(str(Path(disk).parent) if disk != "." else ".")
         self._threads: list[threading.Thread] = []
         app.events, app.link = self.emit, self
         app.cad.cloud = self.cad_cloud
@@ -225,6 +231,10 @@ class StationLink:
                "channels": app.channels_applied(),
                "outbox": {"pending": n, "oldest": oldest, "dropped_audio": self.outbox.dropped_audio},
                "version": self.updates.status()}
+        try:
+            out["health"] = station_metrics(app, self.metrics)
+        except Exception as e:  # health is a report: never in the way of the status itself
+            out["health"] = {"error": f"{type(e).__name__}: {e}"[:200]}
         if talkgroups:
             out["talkgroups"] = app.tg.state() if app.p25 else []
         return out

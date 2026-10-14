@@ -164,6 +164,7 @@ async function apiCall(method, path, body) {
   const r = await fetch(path, opts);
   let data = null;
   try { data = await r.json(); } catch (e) { /* not JSON */ }
+  if ((r.status === 401 || r.status === 403) && cad.who) loadWho(true);   // signed out, or the role changed: who now?
   if (!r.ok) throw new Error((data && data.error) || `${r.status} ${r.statusText}`);
   return data;
 }
@@ -1402,7 +1403,7 @@ function playForEvent(inc, e) {
   const d = (inc.dispatches || []).find((x) => Math.abs(x.at - e.at) < 0.001);
   return d && d.has_audio ? d.id : null;
 }
-const EVENT_KINDS = { note: "comment", status: "status", system: "system", attach: "attached", prealert: "pre-alert", reopened: "reopened" };
+const EVENT_KINDS = { note: "comment", status: "status", system: "system", attach: "attached", prealert: "pre-alert", reopened: "reopened", alarm: "EMERGENCY" };
 // The latest entry, one line, for the folded Timeline's header: "19:34:21 status · 2392 on location"
 function eventLine(e) {
   const text = e.kind === "note" && e.units ? noteText(e) : e.text;
@@ -2770,7 +2771,7 @@ function renderOperators() {
   if (cad.who) {
     show(pick, false);
     show(input, true);
-    if (pick._sig !== sig) { pick._sig = sig; loadWho(); }   // renamed in Settings: show the new name
+    pick._sig = sig;                    // renamed in Settings: users_rev moves and onState asks whoami again
     return;
   }
   show(pick, ops.length > 0);
@@ -2796,7 +2797,8 @@ function onState(data) {
   setText($("#tx-note"), tx.enabled ? "" : "Transmit off: logged only");
   $("#tx-note").title = tx.enabled ? "" : tx.note || "";
   if (changed) cad.dbAt = 0;
-  if (changed && cad.who) loadWho();          // a role changed in Settings > Users: show it at once
+  if (cad.who && data.users_rev !== undefined && cad.usersRev !== undefined && data.users_rev !== cad.usersRev) loadWho(true);   // Settings > Users changed: a role?
+  cad.usersRev = data.users_rev;
   renderConn();
   renderCloud();
   renderTalking();
@@ -3010,13 +3012,21 @@ if (!BOARD) {
 
 // user, 2026-10-07: "can we get the auth info from the cloudflare access auth to identify email that
 // was authed with one time code to set the operators name dynamically?"
-async function loadWho() {
-  let w;
-  try {
-    const r = await fetch("/api/cad/whoami");
-    if (!r.ok) return;
-    w = await r.json();
-  } catch (e) { return; }
+// whoami (#137: it was asked on every state change, 4 at once): once per page load, one request shared by
+// every caller; again (fresh) only when the page comes back into view, after a 401/403, or when
+// Settings > Users changed (the state's users_rev).
+const whoFetch = { p: null, busy: false };
+function whoami(fresh) {
+  if (whoFetch.p && (whoFetch.busy || !fresh)) return whoFetch.p;
+  whoFetch.busy = true;
+  whoFetch.p = fetch("/api/cad/whoami", { credentials: "same-origin", cache: "no-store" })
+    .then((r) => (r.ok ? r.json() : null))
+    .catch(() => null)
+    .finally(() => { whoFetch.busy = false; });
+  return whoFetch.p;
+}
+async function loadWho(fresh) {
+  const w = await whoami(fresh);
   if (!w || w.source !== "access") return;
   cad.who = w;
   const input = $("#operator"), tip = w.email + (w.name === w.email ? " (no name yet: Settings, Users)" : "");
@@ -3091,6 +3101,9 @@ function applyRoles() {
   }
   roLockAll();
 }
+document.addEventListener("visibilitychange", () => {     // back from another tab or a sleep: who now?
+  if (document.visibilityState === "visible" && cad.who) loadWho(true);
+});
 // Settings, the Radios editor and the feed draw on their own too: lock what appears.
 new MutationObserver(() => { if (cad.who && cad.who.enforced && !canDo("admin")) roLockAll(); })
   .observe(document.body, { childList: true, subtree: true });

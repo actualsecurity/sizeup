@@ -56,7 +56,7 @@ def test_every_point_layer_has_a_mark_and_the_sprite_has_each_one():
 
 def test_the_marks_are_drawn_from_the_sprite_in_the_layers_color_and_thin_out_when_dense():
     g = js("gislayers.js")
-    assert 'fetch("/static/icons.svg"' in g and "symbol[id^=\"i-gis-\"]" in g and "new Path2D(" in g
+    assert 'fetch(window.ICONS_SVG || "/static/icons.svg"' in g and "symbol[id^=\"i-gis-\"]" in g and "new Path2D(" in g
     assert 'classList.contains("cut")' in g and "g.fillStyle = DARK" in g
     assert "this.map.addImage(id, iconImage(shape, color((l.style || {}).color" in g
     assert "this.map.addImage(`${id}-ours`, iconImage(shape, token(\"--accent\"" in g       # ours: the accent

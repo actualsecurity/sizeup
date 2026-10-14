@@ -95,6 +95,7 @@ same App code, so the hub's monitor and CAD come out as they would locally.
 | `rerun` | `_rerun_finish` | a re-run is over, whatever came of it: `result` changed / same / failed: why | `_rerun_finish`: the transmission's `rerun_at` / `rerun_result` (the ⋯ menu's Re-transcribe waits for it) |
 | `alt_text` | `_set_alt` | "both" re-run: the station's whisper text as the alternative | `_set_alt`: kept to compare, the text (AWS's) stays |
 | `heard` | `_heard` | a radio ID (and P25 alias) heard on the air | the hub's radio registry learns it |
+| `alarm` | `_call`, `_fm_emergency`, `_segment` (`_alarm_now`) | the emergency button: a P25 key-up trunk-recorder flagged (the call JSON's `emergency`), at the end of its call; an MDC-1200 / FleetSync emergency packet on FG1 at the key-up (the live tap; id `FG1-live-<ms>`, no clip yet), then the finished transmission (`alarm_key`: the key-up's) with its clip; before speech-to-text | the emergency alarm at once (sizeup/cad/alarms.py, #128); its `traffic` event follows with the words and updates the same alarm. An older hub ignores it (the `traffic` event still carries `emergency`) |
 
 Clips go as 8 kHz mono WAV (already band-limited to 300-3300 Hz, so nothing audible changes; half
 the upload). Each event has a `seq` from the station's outbox; the hub remembers the last one applied
@@ -133,7 +134,9 @@ pages of its own ([the station page](#the-station-page)).
   while the station is connected. A dongle whose job the station gave it by itself (`[radio]
   auto_assign`, deploy/station/README.md) reads "· FG1 · auto" (the row's `set_by`: "person", "auto",
   or missing from an older station, which then shows no "auto").
-* Hub, CAD header: "Station connected" / "Station offline 12:03".
+* Hub, CAD header: "Station connected" / "Station offline 12:03". Under it, on `/cad` and `/monitor`, a banner
+  for each station health alert ([Station health and alerts](#station-health-and-alerts)); the Station row
+  opens Settings → System → Station health.
 * Station page, Radios, Receivers: a **Hub** row (connected, or offline with how many events are waiting;
   "not sending" when forwarding is on without a token; its version against the hub's, as above). Its header: the "Hub connected" / "Hub
   unreachable" / "Not forwarding" pill and a link to the CAD on the hub. Settings: the last contact
@@ -157,6 +160,7 @@ pages of its own ([the station page](#the-station-page)).
 | Late delivery | Events that arrive after an outage are applied as they arrive: the monitor attaches traffic to whatever incident is active then; the CAD links by the transmission's own time. |
 | A station update doesn't come up | Switched back to the release that ran before within 90 s; that build isn't tried again until the hub moves on. The Station row says "update to ... failed". |
 | A station update fails its preflight | Never switched to: the station keeps running, untouched. Same report. |
+| The station goes quiet, falls behind, a dongle or program stops | An alert: banner, log, push to the alert topic, a recovery notice when it's back ([Station health and alerts](#station-health-and-alerts)). |
 
 ## Station updates: it follows the hub's build
 
@@ -185,6 +189,127 @@ The Linux station (deploy/station/README.md "Updating") runs exactly the commit 
 * Nothing heard is lost across the restart: the outbox is on disk (`state/outbox.sqlite`, committed
   per event) and goes up first. whisper-server runs as its own service on the station, so an update
   doesn't reload the model; trunk-recorder still restarts with sizeup (#71).
+
+## Station health and alerts
+
+> "make it so we are aware/know when the station is updated/not, if it's behind, etc, so we know if/when we
+> push changes if there are issues… add some better healthchecking" (user, 2026-10-13; GitHub #79, #35)
+
+The hub watches the station (`sizeup/cloud/health.py`) from what it already sends: every 5 s the station's
+state post carries its radio and SDR rows, its version and the updater's last result, its outbox, and now
+`health`: this machine's CPU (Linux; the load average elsewhere), memory, disk, temperature (where the
+machine has a sensor), when sizeup and the machine last started, and each radio program as it really runs
+(each dongle's job, trunk-recorder, whisper). A station from before this sends no `health`: the hub then
+works from the rows alone and the panel says so.
+
+**Alerts.** Each has a text, a severity, a start time, and clears by itself with a recovery notice:
+
+| alert | when | severity |
+|---|---|---|
+| Station silent | no state post for `silent_min` (3 min); after a hub restart, 3 min with no station at all | critical |
+| Station behind the hub | on another build than the hub's (behind, still updating, paused, failed) for `behind_min` (15 min); a docs-only build the station recorded as equivalent is not behind | warning |
+| Station update failed | the update to the hub's build failed or was rolled back (critical when the rollback failed too); the text has the updater's log line | warning |
+| SDR gone | a dongle the station had isn't plugged in / not found | critical |
+| *job* not running | a dongle's job (a channel) isn't running for 60 s (a restart or a switch is quicker); one dongle per channel: each channel | critical |
+| Speech-to-text down | whisper-server not up for `down_min` (2 min) | warning |
+| trunk-recorder down | trunk-recorder not up for `down_min` while its dongle job is on | critical |
+| *channel* stuck open | the squelch open without a break (#116's `stuck`, 2 min) | warning |
+| Station's events backing up | the oldest event waiting on the station is `outbox_min` (5 min) old: it couldn't reach the hub. The hub can't see that while it happens, so it shows when the station is back, from the age of the oldest event it reports, and clears as it drains | warning |
+| Station disk full | over `disk_pct` (90%) full; critical from 97% | warning |
+
+While the station is silent (or before it first reports after a hub restart) the other alerts keep the
+state they had: nothing starts or clears on old data. **Per-channel silence** is a hint, not an alert: each
+channel's gaps between transmissions are learned (the last 200, kept across redeploys), and a channel quiet
+for 3 times its usual gap (90th percentile) and at least 30 min says so in the panel: "nothing heard for
+2 h; it usually hears something within 25 min: check its antenna and dongle".
+
+**Where they show.**
+
+* A banner under the header on `/cad` and `/monitor`, one row per alert, critical (red) first, with its
+  start time and how long, and a link to the panel.
+* The hub's log: `health: ALERT ...` once when it starts, `health: cleared ...` once when it clears.
+* A push to the alert topic (below): at most one per alert per `repeat_min` (15 min), plus its recovery
+  ("Recovered: ..."); an alert that came back within the 15 min shows on screen at once and is pushed when
+  the 15 min are up if it is still on. The title says who and where (`sizeup/notify.py` Who), e.g.
+  "Station silent 4 min · Port Chester FD · last heard 14:32", "South 2 not running · PCFD · SDR 101 on South 2";
+  the push opens the panel (with `[cloud] public_url` set).
+* Alerts and 24 h of their history are in `hub.sqlite`: a redeploy neither forgets an alert nor pushes it again.
+
+**The panel:** Settings → System → **Station health** (also the Station row in Settings → Radios →
+Receivers, and every banner row): the alerts now, the hints, then the station (connected, last state post,
+clock difference, sizeup and machine up since), the version (station and hub builds, the state, the last
+update with its timings and log line, failed builds), the outbox and the system (CPU, load, memory, disk,
+temperature), the programs (whisper, trunk-recorder), each dongle (plugged in, job, running, restarts),
+each channel (state, last heard, quiet for, its usual gap, squelch open / stuck, quieting, restarts, hint),
+and the alert history of the last 24 h (started, cleared, how long, where, whether it was pushed).
+`GET /api/cad/health`: anyone signed in (behind Cloudflare Access like the rest of the CAD).
+
+### The alert topic (ntfy)
+
+Pushes go to a **new topic of our own** on ntfy.sh, never Tapout's: `pcfd-phone-prealert` pages the fire
+crew's phones and `pcfd-status` is Tapout's own health feed. The config refuses both (and whatever
+`[prealert]` names), and `sizeup/notify.py` refuses them again before any request. No topic: no push
+(banner and log only); that is the default.
+
+1. **Choose the name.** ntfy topics are public by name: anyone who knows it can read and post. Make it long
+   and random, e.g. `python3 -c "import secrets; print('sizeup-health-' + secrets.token_hex(8))"` →
+   `sizeup-health-3f9c27d1a0b84e65`. At least 12 characters (letters, digits, `-`, `_`).
+2. **Subscribe on your phone:** the ntfy app (iOS / Android) → **+** → topic name → server `ntfy.sh` →
+   Subscribe. Allow its notifications; a critical alert is sent at high priority. To test, publish one by
+   hand to *your* topic only: `curl -d "test" ntfy.sh/<your topic>`.
+3. **Give it to the hub** (it's a secret by name, so not in the repo):
+   `aws ssm put-parameter --name /sizeup-hub/alert-topic --type SecureString --value '<your topic>'`, then,
+   and only then (a task whose secret is missing doesn't start), add to the hub container's `secrets` in
+   `deploy/aws/taskdef.json` (and `sizeup-aws/7-deploy-pr.sh`'s copy):
+   `{"name":"SIZEUP_ALERT_TOPIC","valueFrom":"arn:aws:ssm:us-east-1:504804195561:parameter/sizeup-hub/alert-topic"}`.
+   Elsewhere: `SIZEUP_ALERT_TOPIC=...` or `[alerts] ntfy_topic` in the config. The panel says "Push on" once
+   the hub has it.
+
+```toml
+[alerts]                           # sizeup/cloud/health.py; leave out: these defaults, no push
+ntfy_topic = ""                    # or env SIZEUP_ALERT_TOPIC (the hub: SSM /sizeup-hub/alert-topic); never Tapout's
+ntfy_server = "https://ntfy.sh"
+silent_min = 3                     # no state post from the station this long
+behind_min = 15                    # on another build than the hub this long
+down_min = 2                       # whisper or trunk-recorder down this long
+outbox_min = 5                     # the oldest event waiting on the station this old
+disk_pct = 90                      # the station's disk this full
+repeat_min = 15                    # at most one push per alert this often (plus its recovery)
+```
+
+`sizeup/notify.py` is the one place sizeup publishes anything: `publish()` / `Notifier.send()` with a title,
+a body, a priority, tags, a click URL and a `who` (units with their names, the talker, the channel, the
+incident number and address, the station, the dongle, a detail), rendered after the title the same way for
+every caller ("MAYDAY · E64 P1 (Engine 64) on FG1 · 26-000015 100 S Ridge St"). The mayday alarm (#128)
+uses it too.
+
+### A deploy that checks itself
+
+After the hub is deployed, `.github/workflows/deploy.yml` waits up to 15 min for the station to report the
+new build (`tools/deploy_check.py`, polling `GET /api/station/status` every 15 s) and prints the station's
+update log line ("update abc1234 -> def5678: ok in 74 s (built 40 s, waited 0 s for a quiet moment, web back
+6 s after the switch)"). A docs-only deploy counts as soon as the station records it as "no runtime change".
+The step **fails** when the update failed or was rolled back, when auto-update is paused on the station, when
+the token is refused, or when 15 min pass; a failed workflow emails as usual, and the hub's own "behind"
+alert follows. Without the secrets the step is skipped with a warning.
+
+`GET /api/station/status` is read only: the hub's build, the station's build, update state, last update
+(with its log line) and the alerts; nothing else. It takes the station token or the **status token**, which
+opens nothing else (posting events, state or jobs with it is a 401). The status token is derived from the
+station token (HMAC-SHA256), so nothing new needs deploying; `SIZEUP_STATUS_TOKEN` / `[cloud] status_token`
+sets another one instead.
+
+**GitHub secrets to add** (Settings → Secrets and variables → Actions → New repository secret):
+
+| secret | value |
+|---|---|
+| `SIZEUP_STATUS_TOKEN` | the status token: `SIZEUP_STATION_TOKEN="$(aws ssm get-parameter --name /sizeup-hub/station-token --with-decryption --query Parameter.Value --output text)" python -m sizeup.cloud.health status-token` (or `printf %s sizeup-status-token-v1 \| openssl dgst -sha256 -hmac "$SIZEUP_STATION_TOKEN"`) |
+| `SIZEUP_ACCESS_CLIENT_ID` | a Cloudflare Access service token's Client ID that the `/api/station/` Access application lets through (the station's, or better a second one for CI: Zero Trust → Access → Service auth → Create, then add it to that application's Service Auth policy) |
+| `SIZEUP_ACCESS_CLIENT_SECRET` | its Client Secret |
+
+The hub's URL is `https://sizeup.actualsecurity.org` unless the repository variable `SIZEUP_HUB_URL` says
+otherwise. With a Bypass policy on `/api/station/` instead of a service token, only `SIZEUP_STATUS_TOKEN` is
+needed.
 
 ## Auth and security
 
@@ -731,11 +856,24 @@ answered 502 at open during the run: that is the fallback path (snapshots) worki
 > then "we should show all the live feeds we can, more is better; there are not that many in our
 > jurisdiction that are purely live".
 
-A **Cameras** button in the Overview's head (the console's Overview and the wall board, `/monitor`) swaps
-the map column for a grid of every camera in our area; the same button (or *Map* on the wall) brings the
-map back. Remembered per screen (`localStorage` `sizeup.cameraWall` `{overview, monitor}`). The grid takes
+The Overview (the console's and the wall board's, `/monitor`) can show a grid of every camera in our area
+in place of the map, beside it, under it or on it (*Layouts*, below). The grid takes
 its columns from its own width: 2 (3 on a wide one) on the dispatch screen, 4 to 6 on the wall board (whose
 cards column narrows while the cameras are on), 1 on a phone (`static/camwall.js`, `cadmap.css` `.cw-*`).
+
+**Layouts** (#147: "I'd like to be able to show them side by side: map/cameras/incidents, or map/cameras on
+the left above/below and incidents on the right... or overlay the cameras on the map too"): the button became a
+picker in the Overview's head, the same on the wall board: **Map** · **Cameras** · **Side by side** (map | cameras |
+events) · **Stacked** (map over the cameras, or under them with *Swap*; events on the right) · **Overlay** (each
+camera as a small tile at its spot on the map, `static/camoverlay.js`: nudged apart with a leader line to the
+exact spot, sized by zoom from 72 px at zoom 10 to 208 px at 15, hidden under zoom 10, live where it streams under
+the same budget and rules, down cameras as the dim "!" only). Remembered per screen (`localStorage`
+`sizeup.overviewLayout` `{overview, monitor: {mode, swap, side, stacked}}`; #125's switch is read once as
+*Cameras*). Side by side and Stacked have a divider between the map and the cameras (the #139 separator: drag,
+the arrow keys, Home or a double-click for half and half, each pane at least 200 px, the map resizing live), its
+share remembered per layout. A phone (640 px and under) has Map and Cameras only. An active highway event's
+before / after cameras stand out in every layout: highlighted tiles on the wall and the overlay, ringed and
+labelled on the map otherwise.
 
 **The area** (`GET /api/cad/cameras?area=ours`, `Roads.area`): every camera inside our fire districts (the
 county GIS layer, ours by `[cad] monitor_departments`; the county's 2011 polygons put Rye Brook inside
@@ -1175,6 +1313,86 @@ bbox = [-73.845, 40.900, -73.530, 41.060]   # the stretch of line the map shows 
 Tests: `tests/test_trains.py` on fixtures recorded 2026-10-14 11:33 EDT (`tests/fixtures/mta/`, trimmed
 by `tools/record_trains_fixtures.py`; run it to re-record).
 
+## Weather and water (NWS alerts, conditions, radar; NOAA tides)
+
+> "Public, free data: National Weather Service alerts ... as a banner on /cad and /monitor ... spoken once
+> for warnings. Current conditions ... in the header; wind arrow on the map near an active fire. A radar
+> layer ... NOAA tides & currents for the nearest stations ... All through the hub (cache, shared
+> USER_AGENT)." (GitHub #132)
+
+**On screen.** The NWS's alerts for our zones show as a **banner** under the header on the console and
+the wall board (in the shared alert-banner box, `#alert-banners`, where the station-health banner sits
+too): one line per alert, most serious first, in its level's colour (a *warning* red, a *watch* or an
+*advisory* amber, a *statement* blue), the headline and when it ends; more than two fold behind
+"+N more"; a click opens the full text (what, what to do, onset, until, area, issuing office). The
+**header** shows the current conditions at Westchester County Airport, "75°F · W 10 G 18 mph", with an
+arrow the way the wind blows (the time, humidity, visibility and sky in its tooltip; dimmed when the
+observation is over 2 h old). Every map's **Layers** box has a **Weather** group: **Radar** (off by
+default; in the viewer's or the event's layer set as `wx:radar`) and **Animate the last hour** (a frame
+every 10 min, per viewer); an active or pending event's map has a small **wind** indicator in its corner.
+A **marine call** (RESCUE / WATER, AIRPORT / ACFT-WATER, a BOAT fire, or any marine unit on it: Marine
+40) shows the **tides** on the event, and the wall board has a **Marine** block: the level at Rye Beach
+now, rising or falling, the next high and low with times, the Kings Point gauge and how far the water
+runs above or below the table, and any marine alert (a Small Craft Advisory: marine alerts stay out of
+the banner).
+
+**Spoken warnings.** Settings → Dispatch → *Weather warnings* (off by default; the CAD's settings,
+`dispatch.weather_speak`, audited like any setting). With it on, each **warning** (not a watch, advisory
+or statement) is said once by the dispatch voice, no tones: "Weather alert. The National Weather Service
+has issued a Severe Thunderstorm Warning for Southern Westchester, until 1745." The hub renders it with
+the CAD's own voice (Polly, or the station's); it is played by the browser where the console is open
+(and on the wall board while its Sound is on), once per alert per browser (`localStorage`
+`sizeup.wxSpoken`). Nothing is keyed on a radio: transmit stays off.
+
+**Sources** (surveyed 2026-10-14):
+
+| | source | where | how often |
+|---|---|---|---|
+| Alerts | api.weather.gov `/alerts/active?zone=NYZ071,NYC119,NYZ211,ANZ335` | `/points/41.00,-73.67` puts Port Chester in forecast zone **NYZ071** (Southern Westchester), county zone **NYC119** (Westchester) and fire weather zone **NYZ211** (Red Flag Warnings); the harbour opens on marine zone **ANZ335** (Long Island Sound west of New Haven CT / Port Jefferson NY). WFO Upton (OKX) | every 2 min |
+| Conditions | api.weather.gov `/stations/KHPN/observations/latest` | **KHPN**, Westchester County Airport: the first of the gridpoint's (OKX 43,57) stations, 7 km from Port Chester | every 10 min |
+| Tide predictions | CO-OPS `datagetter` `product=predictions` (`interval=hilo`, `h`), MLLW, ft, GMT | **8518091 Rye Beach NY**, 4 km south (Playland): the nearest station; a harmonic one, so hourly predictions too. There is no CO-OPS station in Port Chester harbour or the Byram River (Cos Cob Harbor 8469549, 6 km, is a subordinate station: highs and lows only) | every 6 h (3 days around now) |
+| Water level | CO-OPS `product=water_level&date=latest`, and the gauge's own 6-min predictions | **8516945 Kings Point NY**, 23 km: the nearest live water-level gauge on the Sound (the next: The Battery, Bridgeport, 45 km). Its reading minus its table is the surge or set-down now | every 10 min |
+| Radar | NWS OGC service `opengeo.ncep.noaa.gov/geoserver/conus/conus_bref_qcd/ows` (WMS 1.3.0, `GetMap`, EPSG:3857) | **MRMS base reflectivity**, the quality-controlled CONUS composite radar.weather.gov draws, 1 km; time-enabled (a frame every 2 min, 2 h kept) | tiles as the maps ask (the latest kept 2 min, a past frame 1 h); the frame list at most every 5 min |
+
+**Terms.** All NOAA / NWS data is a US Government work, in the public domain (weather.gov's disclaimer:
+"The information on government servers are in the public domain, unless specifically annotated
+otherwise"); no key, no fee. api.weather.gov asks every client for a User-Agent that identifies the
+application with contact details (ours: `sizeup.USER_AGENT`, the department's mailbox) and to cache (we
+poll at most every 2 min and keep what we read). CO-OPS asks API users to name their application
+(`application=sizeup_pcfd`). The radar WMS's capabilities say `Fees: none`, `AccessConstraints: none`.
+Attribution, given though not required: "NOAA/NWS MRMS radar" (linked to radar.weather.gov) in the map's
+corner and the Layers box; "National Weather Service" on an alert's text and the conditions' tooltip; "NOAA
+Tides & Currents, MLLW" (linked to the station) under the tides. Not used: **RainViewer** (its API is
+"available for personal and educational use only", with no availability guarantee: not for a fire
+department's console), and mapservices.weather.noaa.gov's radar (the same MRMS composite but not
+time-enabled: no animation).
+
+**How it works** (`sizeup/weather.py`): the hub (or all-in-one; a station has no maps) reads each feed on
+its own schedule with its own backoff (1 min doubling to 15; 30 min after a 403), keeps the last good
+answer through a failure, and caches what it read on disk (`weather.json` under the state dir, with the
+zones and stations it was read for: another config reads afresh), so a restart spends no calls. Only
+alerts with status *Actual* are kept; a *Cancel*, an expired one and one another message replaces are
+dropped, and a cached alert ages out when it ends. The browser never talks to NOAA: everything comes from
+the hub, to anyone signed in (viewers too; all GET):
+
+| | |
+|---|---|
+| `GET /api/cad/weather` | `{configured, alerts, marine_alerts, banner, conditions, tides, radar, speak, sources, link, ...}` (the pages poll it every minute) |
+| `GET /api/cad/weather/speech?id=<alert>` | `{id, text, audio_url, audio_note}`: an active warning said by the dispatch voice, rendered once (403 while the setting is off) |
+| `GET /api/cad/weather/radar/frames` | `{frames: [{id, t}], at, error}`: the animation's frames, oldest first |
+| `GET /api/cad/weather/radar/<now or frame>/<z>/<x>/<y>.png` | a 256 px radar tile, zoom 3 to 10 (the maps overzoom past 10); the last good one if NOAA doesn't answer |
+
+```toml
+[weather]                        # sizeup/weather.py; leave out: these
+enabled = true
+radar = true
+zones = ["NYZ071", "NYC119", "NYZ211"]
+marine_zones = ["ANZ335"]
+station = "KHPN"
+tide_station = "8518091"         # Rye Beach (predictions)
+gauge_station = "8516945"        # Kings Point (the gauge)
+```
+
 ## The hub's storage
 
 Everything the hub keeps is SQLite under `SIZEUP_STATE_DIR`, so Litestream can replicate it:
@@ -1224,7 +1442,9 @@ namespace, a named volume for `/data`, no Litestream).
 `sizeup/cloud/`: `station.py` (StationLink: outbox, forwarder, state, jobs), `autoupdate.py` (the
 station follows the hub's build: `Watch` in the station, the root updater), `stationmode.py`
 (Settings → System → Station and the station page's hub link: on / off at runtime, state/cloud.json, the Keychain), `outbox.py`,
-`client.py` (kept-alive HTTPS), `hub.py` (Hub: ingest, health, jobs; HubApp), `hubstore.py`
+`client.py` (kept-alive HTTPS), `hub.py` (Hub: ingest, health, jobs; HubApp), `health.py` (station health:
+the model, the alerts, `/api/cad/health`, `/api/station/status`; `sizeup/notify.py` the pushes, `health.js` /
+`health.css` the banner and panel, `tools/deploy_check.py` the deploy check), `hubstore.py`
 (hub.sqlite, audio.sqlite), `access.py` (Cloudflare Access identity; the gate is in
 `sizeup/web/server.py`, the operator in `sizeup/cad/api.py` and `Settings.person`; the activity log in
 `sizeup/cad/activity.py`). Seams in `sizeup/app.py`: `_emit`, `_heard`, `_page_heard`, `_retext`, `_stt`,
@@ -1237,4 +1457,5 @@ station follows the hub's build: `Watch` in the station, the root updater), `sta
 `tests/test_station_install.py`. The county GIS layers: `sizeup/gis.py` (`tests/test_gis.py`, fixtures
 `tests/fixtures/wcgis/`), `sizeup/web/static/gislayers.js` (a group in maplayers.js's Layers box). Metro-North's
 trains: `sizeup/trains.py` (`tests/test_trains.py`, fixtures `tests/fixtures/mta/`), `sizeup/web/static/trains.js` (a group in
-the Layers box, and the event's "Trains approaching" panel).
+the Layers box, and the event's "Trains approaching" panel). Weather and water: `sizeup/weather.py` (`tests/test_weather.py`, fixtures `tests/fixtures/weather/`), `sizeup/web/static/weather.js`
+(the banner, the header, the tides, a group in the Layers box).

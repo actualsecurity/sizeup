@@ -238,6 +238,7 @@ def test_the_station_moves_to_the_hubs_build_side_by_side(station):
     st = u.load()
     assert st["state"] == "current" and st["current"] == new and st["last"]["result"] == "ok"
     assert st["last"]["waited_s"] == 15                             # three polls with a carrier open
+    assert ": ok in " in st["last"]["line"]                          # the log line, for the deploy check (#79)
     log = (u.p.log).read_text().splitlines()
     assert len(log) == 1 and f"-> {new[:7]}: ok in" in log[0]
     u.calls.clear()
@@ -308,6 +309,7 @@ def test_an_unhealthy_release_is_switched_back_and_not_retried_until_the_hub_mov
     assert u.current() == (old, old)
     st = u.load()
     assert st["state"] == "failed" and st["last"]["result"] == "rolled back" and bad in st["failed"]
+    assert "FAILED" in st["last"]["line"] and "back on" in st["last"]["line"]
     assert "FAILED" in u.p.log.read_text() and "back on" in u.p.log.read_text()
     assert describe(old, bad, u.load())["state"] == "failed"
     u.calls.clear()

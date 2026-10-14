@@ -12,6 +12,7 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
 <link rel="stylesheet" href="/static/cad.css">
 <link rel="stylesheet" href="/static/settings.css">
 <link rel="stylesheet" href="/static/cadmap.css">
+<link rel="stylesheet" href="/static/health.css">
 </head>
 <body class="cad">
 <!-- One header for the console and the wall board (style.css "header"): the board hides .console-only, the console .board-only -->
@@ -42,10 +43,18 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
   <button id="fullscreen" class="nav board-only" type="button" title="Full screen (f)" aria-label="Full screen"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-expand"/></svg><span class="lbl">Full screen</span></button>
   <a class="nav console-only" href="/monitor" target="sizeup-monitor" title="Wall board: opens in its own window"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-monitor"/></svg><span class="lbl">Monitor</span></a>
   <a class="nav board-only" href="/cad" title="Dispatch console"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-dispatch"/></svg><span class="lbl">CAD</span></a>
+  <!-- current conditions at KHPN (weather.js, #132): "54°F · NW 12 G 22 mph" with a wind arrow -->
+  <span id="wx-now" class="wx-now" hidden></span>
   <span id="clock" class="clock"><span id="clock-date" class="dim"></span> <b id="clock-local"></b> <span id="clock-z" class="dim"></span></span>
 </header>
 <div id="cloud-banner" class="notice info cloud-banner" hidden></div>
 <div id="role-banner" class="notice role-banner" role="status" hidden></div>
+<!-- the alert banners, under the header on the console and the board: station health (health.js, #79) first,
+     then the NWS alerts (weather.js, #132) -->
+<div id="alert-banners" class="alert-banners">
+  <div id="health-banner" class="health-banner" role="alert" hidden></div>
+  <div id="wx-banner" class="wx-banner" hidden aria-live="polite" aria-label="Weather alerts"></div>
+</div>
 
 <main class="cad-main">
   <!-- queue: from 60 Control, pending, active, non-emergency, recently closed -->
@@ -92,13 +101,24 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
         <span id="ov-counts" class="dim small"></span>
         <span class="spacer"></span>
         <div id="ov-talk" class="ov-talk" aria-live="polite"></div>
-        <!-- the camera wall (camwall.js, #125): every camera in our area instead of the map; remembered per screen -->
-        <button id="cw-toggle" class="sm" type="button" aria-pressed="false" aria-controls="cw-wall" title="Every camera in our area"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-camera"/></svg><span class="lbl">Cameras</span></button>
+        <!-- the Overview's layout (camwall.js, #125, #147): the map, the cameras in our area, both side by side or stacked,
+             or the cameras on the map (camoverlay.js); remembered per screen. A phone: Map and Cameras only -->
+        <span id="ov-layout" class="seg ov-layout" role="group" aria-label="Overview layout">
+          <button type="button" data-layout="map" aria-pressed="true" title="The map">Map</button>
+          <button type="button" data-layout="cameras" aria-pressed="false" title="Every camera in our area"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-camera"/></svg>Cameras</button>
+          <button type="button" data-layout="side" aria-pressed="false" title="Map | cameras | events">Side by side</button>
+          <button type="button" data-layout="stacked" aria-pressed="false" title="Map and cameras one over the other; events on the right">Stacked</button>
+          <button type="button" data-layout="overlay" aria-pressed="false" title="The cameras on the map">Overlay</button>
+        </span>
+        <button id="ov-swap" class="sm" type="button" aria-pressed="false" hidden title="Cameras above the map">Swap</button>
       </div>
       <div id="ov-pages" class="ov-pages" hidden></div>
-      <div class="ov-grid">
-        <div class="ov-mapbox"><div id="ov-map"></div></div>
-        <section id="cw-wall" class="cw-wall" hidden aria-label="Cameras in our area"></section>
+      <div class="ov-grid" data-layout="map">
+        <div id="ov-view" class="ov-view">
+          <div class="ov-mapbox"><div id="ov-map"></div></div>
+          <div id="ov-split" class="ov-split" hidden></div>
+          <section id="cw-wall" class="cw-wall" hidden aria-label="Cameras in our area"></section>
+        </div>
         <div class="ov-side">
           <div id="ov-cams" class="ml-cams ml-cams-small board-only" hidden aria-label="Cameras"></div>
           <ol id="ov-cards" class="ov-cards"></ol>
@@ -232,6 +252,7 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
             <div id="d-caller" class="d-caller"></div>
             <!-- an Airport event (#105): what the tower passed, one compact row; the subtype's FAA definition behind "?" -->
             <div id="d-airport" class="d-airport" hidden aria-label="Airport: what the tower passed"></div>
+            <div id="d-tides" class="d-tides" hidden aria-label="Tides"><div class="wx-tides-body"></div></div>
             <div id="d-pages" class="d-pages" hidden aria-label="The 60 Control page"></div>
             <pre id="d-narr" class="narr"></pre>
           </div>
@@ -411,6 +432,8 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
     <!-- the wall board (board.js): recent pages and every unit's status in one strip, instead of the board's buttons -->
     <section class="board-only b-sec"><h2>Pages</h2><div id="b-paging" class="paging-live" hidden aria-live="polite"></div><ol id="b-pages" class="list pages"></ol></section>
     <section class="board-only b-sec"><h2>Units</h2><div id="b-units" class="b-strip"></div></section>
+    <!-- the wall board's marine block (weather.js, #132): the tide at Rye Beach, Kings Point's gauge, marine alerts -->
+    <section id="b-marine" class="board-only b-sec b-marine" hidden aria-label="Marine"><h2>Marine</h2><div class="wx-tides-body"></div></section>
     <h2 class="console-only">Units</h2>
     <div id="units" class="unit-groups console-only"></div>
     <h2 class="mt console-only" title="Status changes off an incident">Unit log</h2>
@@ -506,6 +529,7 @@ Slots go in order. A kind takes the next available unit of that kind (regular ap
 <script src="/static/maplayers.js"></script>
 <script src="/static/gislayers.js"></script>
 <script src="/static/trains.js"></script>
+<script src="/static/weather.js"></script>
 <script src="/static/icons.js"></script>
 <script src="/static/ui.js"></script>
 <script src="/static/help.js"></script>
@@ -520,10 +544,13 @@ Slots go in order. A kind takes the next available unit of that kind (regular ap
 <script src="/static/radio-view.js"></script>
 <script src="/static/radio-controls.js"></script>
 <script src="/static/hublink.js"></script>
+<script src="/static/health.js"></script>
 <script src="/static/settings.js"></script>
 <script src="/static/board.js"></script>
-<script src="/static/camwall.js"></script>
 <script src="/static/panels.js"></script>
+<script src="/static/alarm.js"></script>
+<script src="/static/camwall.js"></script>
+<script src="/static/camoverlay.js"></script>
 <script src="/static/styleguide.js"></script>
 </body>
 </html>

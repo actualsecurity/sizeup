@@ -6,6 +6,7 @@
 #   SIZEUP_ACCESS_TEAM, SIZEUP_ACCESS_AUD   Cloudflare Access identity (below)
 #   SIZEUP_511NY_KEY       the 511NY feeds' key (SSM /sizeup-hub/511ny-key; [roads] below)
 #   SIZEUP_MTA_KEY         only should the MTA require a key again (SSM /sizeup-hub/mta-key; [trains]: none needed today)
+#   SIZEUP_ALERT_TOPIC     station health pushes: our own ntfy topic (SSM /sizeup-hub/alert-topic; [alerts] below)
 # Run it on a Mac or Linux box without radios:
 #   SIZEUP_STATE_DIR=$(mktemp -d) SIZEUP_STATION_TOKEN=... python -m sizeup --config deploy/hub/config.hub.toml
 
@@ -107,3 +108,15 @@ bbox = [-73.80, 40.92, -73.56, 41.10]   # west, south, east, north: Port Chester
 
 # [gis]: the maps' County GIS layers (sizeup/gis.py, docs/cloud.md "County GIS layers"): the starter set
 # from Westchester County GIS, fetched here on its schedule, cached under /data/gis. No key. Nothing to set.
+
+# [alerts]: station health (sizeup/cloud/health.py, docs/cloud.md "Station health and alerts"): banner on /cad
+# and /monitor, the log, and a push to our OWN ntfy topic: env SIZEUP_ALERT_TOPIC (SSM /sizeup-hub/alert-topic),
+# never in this file (ntfy topics are public by name). Never Tapout's pcfd-phone-prealert / pcfd-status
+# (refused). No topic: no push. The thresholds below are the defaults.
+[alerts]
+silent_min = 3                     # no state post from the station this long
+behind_min = 15                    # on another build than the hub this long
+down_min = 2                       # whisper or trunk-recorder down this long
+outbox_min = 5                     # the oldest event waiting on the station this old
+disk_pct = 90                      # the station's disk this full
+repeat_min = 15                    # at most one push per alert this often (plus its recovery)

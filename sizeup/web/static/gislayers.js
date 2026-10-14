@@ -98,7 +98,9 @@ window.GisLayers = (() => {
     if (slot.loading) return slot.loading;
     slot.loading = (async () => {
       try {
-        const r = await fetch(`/api/cad/gis/${encodeURIComponent(l.key)}`, { credentials: "same-origin" });
+        // ?rev: each version of a layer its own address, so the browser's copy (ETag, max-age) is never a stale one
+        const r = await fetch(`/api/cad/gis/${encodeURIComponent(l.key)}${l.rev !== undefined && l.rev !== null ? `?rev=${encodeURIComponent(l.rev)}` : ""}`,
+                              { credentials: "same-origin" });
         if (!r.ok) throw new Error(`${r.status}`);
         slot.data = await r.json();
         slot.rev = l.rev;
@@ -118,7 +120,7 @@ window.GisLayers = (() => {
   function loadSprite() {
     if (sprite.paths) return Promise.resolve(sprite.paths);
     if (sprite.loading) return sprite.loading;
-    sprite.loading = fetch("/static/icons.svg", { credentials: "same-origin" })
+    sprite.loading = fetch(window.ICONS_SVG || "/static/icons.svg", { credentials: "same-origin" })   // icons.js: the page's copy
       .then((r) => (r.ok ? r.text() : Promise.reject(new Error(`${r.status}`))))
       .then((text) => {
         const doc = new DOMParser().parseFromString(text, "image/svg+xml");

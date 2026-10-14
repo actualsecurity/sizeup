@@ -19,7 +19,7 @@ and their first request of each Access login a "signed in" (visit(); sizeup/cad/
 Without Access nothing is recorded there.
 
 GET  /api/cad/state                       lists, units, events (open, recently closed), run cards
-GET  /api/cad/stream                      SSE: the state, pushed every second (server.py)
+GET  /api/cad/stream                      SSE: the state, then each second only what changed (server.py Broadcaster)
 GET  /api/cad/geocode?q=209 westchester   location suggestions, Port Chester / Rye Brook first, each with its town
                                           (with the place search's mile markers, exits and named places, #67)
 GET  /api/cad/places?q=287 eb mm 10&near=lat,lon&iid=&limit=
@@ -128,6 +128,11 @@ POST /api/cad/hint/<id>/accept            {operator?}  a unit status suggested f
                                           (heard 14:32:10 “...”)" in the chronology; dispatchers and admins
 POST /api/cad/hint/<id>/dismiss           {operator?}  not so: that transmission never suggests it again
 GET  /api/cad/export/status-hints.csv     every suggestion and how it ended (accepted / dismissed / expired ...)
+GET  /api/cad/alarms                      the emergency alarms (sizeup/cad/alarms.py, #128): {open, notices, recent, drill,
+                                          settings: {keywords, channels, other, drill, defaults, edited, push}, history}
+POST /api/cad/alarm/<id>/ack              {operator?}  an emergency alarm (or notice) seen: who and when, in the linked
+                                          event's chronology too; dispatchers and admins (viewers see it, can't)
+POST /api/cad/settings/alarms             {action: set | reset, key: keywords | channels | other | drill, value}: admins
 """
 
 from __future__ import annotations
@@ -154,6 +159,7 @@ PREVIEW_WAV = re.compile(r"/api/cad/audio/([0-9a-f]{20})\.wav")
 SETTINGS = re.compile(r"/api/cad/settings/([a-z_]{1,30})")
 PREALERT = re.compile(r"/api/cad/prealert/(\d{1,9})/dismiss")
 HINT = re.compile(r"/api/cad/hint/(\d{1,9})/(accept|dismiss)")
+ALARM_ACK = re.compile(r"/api/cad/alarm/(\d{1,9})/ack")
 
 # Who may POST what (enforced only with a verified sign-in, see above): "dispatch" = dispatchers and
 # admins (running calls), "admin" = admins only (Settings in every form, and the radios), "read" =
@@ -164,6 +170,7 @@ WRITES = (
     (UNIT, "dispatch"),                                                     # unit status on the board
     (PREALERT, "dispatch"),                                                 # a phone pre-alert that is nothing
     (HINT, "dispatch"),                                                     # a status suggested from the radio (#37)
+    (ALARM_ACK, "dispatch"),                                                # an emergency alarm seen (#128)
     (re.compile(r"/api/incident/[^/]{1,80}/close"), "dispatch"),            # the monitor's incident list (server.py)
     (UNIT_STATION, "admin"),                                                # a unit's home station: Settings > Units
     (re.compile(r"/api/cad/settings/(?:channels|stt)"), "admin"),           # Settings > Radios: record / transcribe /
@@ -314,6 +321,8 @@ DOES = (
     (HINT, lambda m, b, o, c: (f"{'Accepted' if m.group(2) == 'accept' else 'Dismissed'} the radio's "
                                f"{o.get('name') or o.get('unit') or ''} {o.get('status', '')}".replace("  ", " ")
                                + (f" on {o['incident_number']}" if o.get("incident_number") else ""), o.get("incident_number") or "")),
+    (ALARM_ACK, lambda m, b, o, c: (f"Acknowledged the emergency alarm: {_clip(o.get('who'), 30)} {o.get('what', '')} "
+                                    f"on {o.get('channel', '')}".rstrip(), o.get("incident_number") or "")),
     (UNIT_STATION, lambda m, b, o, c: (f"Changed settings: {o.get('name', '')} station {_clip(b.get('station'), 40) or 'unset'}", "")),
     (re.compile(r"/api/cad/settings/channels"), _channels),
     (re.compile(r"/api/cad/settings/stt"), _stt),
@@ -467,6 +476,8 @@ class CadApi:
                 return _json(200, self.cad.feed_query(parse_qs(query)))
             if path == "/api/cad/rigs":
                 return _json(200, self.cad.rigs())
+            if path == "/api/cad/alarms":
+                return _json(200, self.cad.alarms_page())
             if m := SUGGEST.fullmatch(path):
                 return _json(200, {"units": self.cad.suggest_units(int(m.group(1)), (parse_qs(query).get("q") or [""])[0][:20])})
             if m := INCIDENT.fullmatch(path):
@@ -538,6 +549,8 @@ class CadApi:
             return c.prealert_dismiss(int(m.group(1)), body)
         if m := HINT.fullmatch(path):
             return c.hint(int(m.group(1)), m.group(2), body)
+        if m := ALARM_ACK.fullmatch(path):
+            return c.alarm_ack(int(m.group(1)), body)
         if m := UNIT_STATION.fullmatch(path):
             return c.unit_station(int(m.group(1)), body)
         if path == "/api/cad/runcards":

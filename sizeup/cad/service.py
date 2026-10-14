@@ -12,6 +12,7 @@ a 400 with the reason), keeps the lists, store, run cards, dispatch audio and th
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shutil
@@ -25,6 +26,7 @@ from typing import Callable
 from sizeup import polly
 from sizeup.cad import airport, dispatcher, eta, export, mapview, runcards
 from sizeup.cad.activity import Activity
+from sizeup.cad.alarms import Alarms
 from sizeup.cad.comms import Comms
 from sizeup.cad.feed import Feed
 from sizeup.cad.statushints import StatusHints
@@ -191,6 +193,9 @@ class Cad:
         self.hints = StatusHints(self.store, lambda: self.lists, channels=s.tactical,
                                  talkgroups=tuple(dict.fromkeys((*s.incident_talkgroups, *s.airport_talkgroups))), log=log)
         self.comms.on_text = self.hints.consider
+        # The emergency button and a mayday heard on our fire channels (sizeup/cad/alarms.py, #128): the app feeds it
+        # transmissions on the CAD of record; every console and wall board shows them until acknowledged.
+        self.alarms = Alarms(self, lambda m: self.log(m))
         # Set by the app: who is transmitting now (sizeup/radio/live.py) and whether a clip's audio is still kept.
         self.live: Callable[[], list[dict]] = lambda: []
         self.paging: Callable[[], list[dict]] = lambda: []      # a page going out now (sizeup/radio/livepage.py)
@@ -268,6 +273,7 @@ class Cad:
                           "tones": [list(t) for t in self.s.tones]},
                 "geocoder": self.geocoder is not None,
                 "operators": self.settings.operator_names(),
+                "users_rev": self._users_rev(),
                 "feed": self.feed.state(),
                 "overview": mapview.overview(incs, self.s.tactical),
             })
@@ -275,9 +281,11 @@ class Cad:
         now = self.clock()
         pos = self._positions(now)
         units = [dict(u, position=pos[u["name"]]) if u["name"] in pos else u for u in st["units"]] if pos else st["units"]
+        # comms_rev: what GET /api/cad/comms calls its rev; the Radio view and the board ask again only when it moves (#137)
         return dict(st, units=units, map=self.map_slice(units, st["incidents"], pos, now), time=now, rev=rev,
+                    comms_rev=f"{self.comms.rev}.{rev}",
                     talking=self.live(), paging=self.paging(), cloud=self.cloud(), prealert=self.prealert_state(now),
-                    status_hints=self.status_hints())
+                    status_hints=self.status_hints(), alarms=self.alarms_state(now))
 
     def status_hints(self) -> list[dict]:
         """The radio's status suggestions to show now (#37); a broken one never breaks the console."""
@@ -291,6 +299,26 @@ class Cad:
         """POST /api/cad/hint/<id>/accept | dismiss {operator}: a radio status suggestion taken or turned down."""
         op = _text(body, "operator", OPERATOR_MAX)
         return self.hints.accept(hid, op) if action == "accept" else self.hints.dismiss(hid, op)
+
+    def alarms_state(self, now: float | None = None) -> dict | None:
+        """Open alarms, notices and the just acknowledged (sizeup/cad/alarms.py; a fault never breaks the console)."""
+        try:
+            return self.alarms.state(now)
+        except Exception as e:  # noqa: BLE001
+            self.log(f"CAD: alarms: {type(e).__name__}: {e}")
+            return None
+
+    def alarm_ack(self, aid: int, body: dict) -> dict:
+        return self.alarms.acknowledge(aid, body)
+
+    def alarms_page(self) -> dict:
+        """GET /api/cad/alarms: the state, the settings, the last 200 (newest first)."""
+        return {**(self.alarms_state() or {}), "settings": self.alarms.settings_page(), "history": self.alarms.history()}
+
+    def _users_rev(self) -> str:
+        """Settings > Users as a short hash: the page asks whoami again only when it moves (a role changed, #137)."""
+        rows = self.store.q("SELECT id, name, role, active, email, callsign FROM operators ORDER BY id")
+        return hashlib.sha1(json.dumps(rows, separators=(",", ":"), default=str).encode()).hexdigest()[:12]
 
     def prealert_state(self, now: float | None = None) -> dict | None:
         """The phone pre-alerts and Tapout's health (a broken feed never breaks the console)."""

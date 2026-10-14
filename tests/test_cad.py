@@ -1173,7 +1173,7 @@ def test_api_event_lifecycle(server):
 
 def test_api_stream_pushes_cad_state(server):
     with urllib.request.urlopen(server.base + "/api/cad/stream", timeout=5) as r:
-        for _ in range(6):                     # the first push can be the empty one from before the first tick
+        for _ in range(12):                    # the first push can be the empty one from before the first tick (each has an id: line)
             line = r.readline()
             if line.startswith(b"data: ") and b"department" in line:
                 break

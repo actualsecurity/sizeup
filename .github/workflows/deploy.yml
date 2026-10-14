@@ -2,6 +2,10 @@ name: deploy
 
 # After the tests pass on main: build the arm64 hub image, push it to ECR and roll the ECS
 # service (one task at a time). AWS access is a short-lived OIDC role, no stored keys.
+# Then the deploy checks itself (#79): it waits up to 15 min for the station to report the new build
+# (tools/deploy_check.py) and fails if it doesn't. Secrets (docs/cloud.md "Station health and alerts"):
+# SIZEUP_STATUS_TOKEN (read only), SIZEUP_ACCESS_CLIENT_ID / _SECRET (a Cloudflare Access service token);
+# without SIZEUP_STATUS_TOKEN the check is skipped with a warning. vars.SIZEUP_HUB_URL overrides the URL.
 on:
   workflow_run:
     workflows: [test]
@@ -21,7 +25,7 @@ jobs:
   deploy:
     if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 50
     env:
       SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
     steps:
@@ -66,3 +70,17 @@ jobs:
         run: |
           aws ecs register-task-definition --cli-input-json "file://${{ steps.td.outputs.task-definition }}" >/dev/null
           echo "::notice::Task definition registered; the ECS service isn't created yet (sizeup-aws/9-service.sh)."
+      - name: Wait for the station to run this build
+        if: steps.svc.outputs.exists == '1'
+        timeout-minutes: 17
+        env:
+          SIZEUP_STATUS_TOKEN: ${{ secrets.SIZEUP_STATUS_TOKEN }}
+          SIZEUP_ACCESS_CLIENT_ID: ${{ secrets.SIZEUP_ACCESS_CLIENT_ID }}
+          SIZEUP_ACCESS_CLIENT_SECRET: ${{ secrets.SIZEUP_ACCESS_CLIENT_SECRET }}
+          SIZEUP_HUB_URL: ${{ vars.SIZEUP_HUB_URL || 'https://sizeup.actualsecurity.org' }}
+        run: |
+          if [ -z "$SIZEUP_STATUS_TOKEN" ]; then
+            echo "::warning title=Station check skipped::Add the SIZEUP_STATUS_TOKEN secret (and SIZEUP_ACCESS_CLIENT_ID / SIZEUP_ACCESS_CLIENT_SECRET) to check that the station follows: docs/cloud.md, Station health and alerts"
+            exit 0
+          fi
+          python3 tools/deploy_check.py --url "$SIZEUP_HUB_URL" --build "$SHA" --timeout 900
