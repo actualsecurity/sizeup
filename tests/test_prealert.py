@@ -561,3 +561,38 @@ def test_the_shipped_configs_read_tapout_and_say_never_to_publish():
         text = (ROOT / f).read_text()
         sec = text[text.index("[prealert]"):]
         assert 'ring_topic = "pcfd-phone-prealert"' in sec and "never" in text[text.index("prealert") - 600:].lower(), f
+
+
+def test_an_unexpected_error_on_the_stream_never_kills_the_listener(monkeypatch):
+    # 2026-10-13: http.client raised AttributeError ("'NoneType' object has no attribute 'peek'") from
+    # readline() on a socket closed under it, and the uncaught error ended the ring thread for good.
+    import sizeup.prealert as pa
+    calls = {"n": 0}
+
+    class Broken:
+        fp = None
+
+        def readline(self):
+            raise AttributeError("'NoneType' object has no attribute 'peek'")
+
+        def close(self):
+            pass
+
+    def fake_get(url, timeout):
+        calls["n"] += 1
+        return Broken()
+
+    monkeypatch.setattr(pa, "_get", fake_get)
+    monkeypatch.setattr(pa.NtfyStream, "BACKOFF_START", 0.01)
+    monkeypatch.setattr(pa.NtfyStream, "BACKOFF_MAX", 0.01)
+    lines = []
+    s = pa.NtfyStream("https://ntfy.example", "pcfd-test", lambda m: None, lines.append).start()
+    try:
+        deadline = time.time() + 3
+        while calls["n"] < 3 and time.time() < deadline:
+            time.sleep(0.01)
+        assert calls["n"] >= 3                                  # it kept reconnecting
+        assert s._thread.is_alive()
+        assert "AttributeError" in s.last_error and not s.connected
+    finally:
+        s.stop()
