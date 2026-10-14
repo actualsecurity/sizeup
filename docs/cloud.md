@@ -678,7 +678,8 @@ heartbeat_stale_min = 90
 Every CAD map (the event's, the large map, the Overview, `/monitor`) has a **Layers** button:
 *Cameras*, *Incidents & closures*, *Roadwork*, *Message signs* (from the sources below), *Mileposts*
 and *Exits* (from the gazetteer, #67, #83), and *Airport* with *Approaches*
-([the airport](#the-airport-hpn-the-airport-layer-places-alerts), #87). Each is on or off per viewer (this browser's
+([the airport](#the-airport-hpn-the-airport-layer-places-alerts), #87); the Overview's map adds *Camera overlay*
+(live camera views on the map, off at first; [Camera wall](#camera-wall-125), #168). Each is on or off per viewer (this browser's
 `localStorage`, key `sizeup.mapLayers`); cameras and incidents start on. Signs show from zoom 11,
 exits and whole mileposts from 12, the tenths from 14. A camera opens the **camera viewer**: live video where the source streams
 (the Thruway's cameras; muted, see below), else the snapshot, with its name, road, direction and
@@ -857,23 +858,30 @@ answered 502 at open during the run: that is the fallback path (snapshots) worki
 > jurisdiction that are purely live".
 
 The Overview (the console's and the wall board's, `/monitor`) can show a grid of every camera in our area
-in place of the map, beside it, under it or on it (*Layouts*, below). The grid takes
+in place of the map, beside it or under it (*Layouts*, below), or on it (*Camera overlay*). The grid takes
 its columns from its own width: 2 (3 on a wide one) on the dispatch screen, 4 to 6 on the wall board (whose
 cards column narrows while the cameras are on), 1 on a phone (`static/camwall.js`, `cadmap.css` `.cw-*`).
 
 **Layouts** (#147: "I'd like to be able to show them side by side: map/cameras/incidents, or map/cameras on
 the left above/below and incidents on the right... or overlay the cameras on the map too"): the button became a
 picker in the Overview's head, the same on the wall board: **Map** · **Cameras** · **Side by side** (map | cameras |
-events) · **Stacked** (map over the cameras, or under them with *Swap*; events on the right) · **Overlay** (each
-camera as a small tile at its spot on the map, `static/camoverlay.js`: nudged apart with a leader line to the
-exact spot, sized by zoom from 72 px at zoom 10 to 208 px at 15, hidden under zoom 10, live where it streams under
-the same budget and rules, down cameras as the dim "!" only). Remembered per screen (`localStorage`
-`sizeup.overviewLayout` `{overview, monitor: {mode, swap, side, stacked}}`; #125's switch is read once as
-*Cameras*). Side by side and Stacked have a divider between the map and the cameras (the #139 separator: drag,
+events) · **Stacked** (map over the cameras, or under them with *Swap*; events on the right). Remembered per screen
+(`localStorage` `sizeup.overviewLayout` `{overview, monitor: {mode, swap, side, stacked}}`; #125's switch is read
+once as *Cameras*). Side by side and Stacked have a divider between the map and the cameras (the #139 separator: drag,
 the arrow keys, Home or a double-click for half and half, each pane at least 200 px, the map resizing live), its
 share remembered per layout. A phone (640 px and under) has Map and Cameras only. An active highway event's
 before / after cameras stand out in every layout: highlighted tiles on the wall and the overlay, ringed and
-labelled on the map otherwise.
+labelled on the map without the overlay.
+
+**Camera overlay** (#147, a Layers toggle since #168: "overlay should only be an option in layers, not here"):
+*Camera overlay* at the top of the Overview map's Layers box (the console's and the wall board's), off by default,
+per viewer (the box's "overview" set in `sizeup.mapLayers`, key `camoverlay`). On, each camera in our area is a
+small tile at its spot on the map wherever the map shows (Map, Side by side, Stacked; `static/camoverlay.js`):
+nudged apart with a leader line to the exact spot, sized by zoom from 72 px at zoom 10 to 208 px at 15, hidden
+under zoom 10, live where it streams under the same budget and rules as the wall (a camera live on the wall is a
+snapshot on the map, one stream and one slot), down cameras as the dim "!" only. The event's map has no overlay
+(its Cameras panel shows the event's own). A screen whose saved layout was the old *Overlay* opens as *Map* with
+the toggle on, once.
 
 **The area** (`GET /api/cad/cameras?area=ours`, `Roads.area`): every camera inside our fire districts (the
 county GIS layer, ours by `[cad] monitor_departments`; the county's 2011 polygons put Rye Brook inside
