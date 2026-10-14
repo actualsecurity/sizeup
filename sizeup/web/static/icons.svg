@@ -65,5 +65,51 @@
     <symbol id="i-camera" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
       <path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/>
     </symbol>
+    <!-- County GIS point marks (#111; gislayers.js): filled 24×24 silhouettes, no stroke. Each is drawn on the map in the
+         layer's color with a light outline (the sprite read once, Path2D), and beside its toggle / in the click box as
+         <use>. A class="cut" path is a detail in the box's surface color (a window, a door, a band): on the map, the dark. -->
+    <symbol id="i-gis-hydrant" viewBox="0 0 24 24" fill="currentColor" stroke="none">
+      <path d="M8 7V6a4 4 0 0 1 8 0v1h1v2H7V7zM9 9h6v10H9zM3 10h2v.5h4v3H5v.5H3zM15 10.5h4V10h2v4h-2v-.5h-4zM7 19h10v3H7z"/>
+    </symbol>
+    <symbol id="i-gis-fire-station" viewBox="0 0 24 24" fill="currentColor" stroke="none">
+      <path d="M2 4h20v2h-1v16H3V6H2z"/>
+      <path class="cut" fill="var(--raised, #1F2328)" d="M8.5 22v-7a3.5 3.5 0 0 1 7 0v7z"/>
+    </symbol>
+    <symbol id="i-gis-police" viewBox="0 0 24 24" fill="currentColor" stroke="none">
+      <path d="M12 2l8 3v6c0 5.5-3.4 9.2-8 11-4.6-1.8-8-5.5-8-11V5z"/>
+      <path class="cut" fill="var(--raised, #1F2328)" d="M12 7.5l1 2.62 2.8.14-2.18 1.77.73 2.71L12 13.2l-2.35 1.54.73-2.71L8.2 10.26l2.8-.14z"/>
+    </symbol>
+    <symbol id="i-gis-hospital" viewBox="0 0 24 24" fill="currentColor" stroke="none">
+      <path d="M9 2h6v7h7v6h-7v7H9v-7H2V9h7z"/>
+    </symbol>
+    <symbol id="i-gis-nursing-home" viewBox="0 0 24 24" fill="currentColor" stroke="none">
+      <path d="M2 5h2.5v7H9V9a1.5 1.5 0 0 1 1.5-1.5H17a5 5 0 0 1 5 5V20h-2.5v-3h-15v3H2z"/>
+    </symbol>
+    <symbol id="i-gis-school" viewBox="0 0 24 24" fill="currentColor" stroke="none">
+      <path d="M12 3l11 5.5L12 14 1 8.5zM5 11l7 3.5 7-3.5v4.5c0 2-3.5 3.5-7 3.5s-7-1.5-7-3.5z"/>
+    </symbol>
+    <symbol id="i-gis-worship" viewBox="0 0 24 24" fill="currentColor" stroke="none">
+      <path d="M4 22V12l5.5-3.44V5L12 1l2.5 4v3.56L20 12v10z"/>
+      <path class="cut" fill="var(--raised, #1F2328)" d="M10 22v-5a2 2 0 0 1 4 0v5z"/>
+    </symbol>
+    <symbol id="i-gis-ambulance" viewBox="0 0 24 24" fill="currentColor" stroke="none">
+      <path d="M2 16V8a2 2 0 0 1 2-2h9l4 3h2.5a2.5 2.5 0 0 1 2.5 2.5V16h-2a2.5 2.5 0 0 0-5 0h-6a2.5 2.5 0 0 0-5 0zM15.7 16a1.8 1.8 0 1 1 3.6 0 1.8 1.8 0 1 1-3.6 0zM4.7 16a1.8 1.8 0 1 1 3.6 0 1.8 1.8 0 1 1-3.6 0z"/>
+      <path class="cut" fill="var(--raised, #1F2328)" d="M7.5 7.5h2v2h2v2h-2v2h-2v-2h-2v-2h2z"/>
+    </symbol>
+    <symbol id="i-gis-train" viewBox="0 0 24 24" fill="currentColor" stroke="none">
+      <path d="M6 2h12a3 3 0 0 1 3 3v10a3 3 0 0 1-3 3l2.5 4h-2.6l-1.3-2H7.4l-1.3 2H3.5L6 18a3 3 0 0 1-3-3V5a3 3 0 0 1 3-3z"/>
+      <path class="cut" fill="var(--raised, #1F2328)" d="M6.5 5.5h11V11h-11zM6.5 13.5H9V16H6.5zM15 13.5h2.5V16H15z"/>
+    </symbol>
+    <symbol id="i-gis-bus" viewBox="0 0 24 24" fill="currentColor" stroke="none">
+      <path d="M4 3h16a2 2 0 0 1 2 2v14h-1v2a1 1 0 0 1-1 1h-2a1 1 0 0 1-1-1v-2H7v2a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-2H2V5a2 2 0 0 1 2-2z"/>
+      <path class="cut" fill="var(--raised, #1F2328)" d="M4.5 6h15v6h-15zM4.5 14.5h3V17h-3zM16.5 14.5h3V17h-3z"/>
+    </symbol>
+    <symbol id="i-gis-petroleum" viewBox="0 0 24 24" fill="currentColor" stroke="none">
+      <path d="M4 5a8 2 0 0 1 16 0v14a8 2 0 0 1-16 0z"/>
+      <path class="cut" fill="var(--raised, #1F2328)" d="M4.5 9h15v1.5h-15zM4.5 15h15v1.5h-15z"/>
+    </symbol>
+    <symbol id="i-gis-tank" viewBox="0 0 24 24" fill="currentColor" stroke="none">
+      <path d="M7 2h10a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2zM8.5 12h7l3 10h-2l-1.2-4H8.7L7.5 22h-2z"/>
+    </symbol>
   </defs>
 </svg>

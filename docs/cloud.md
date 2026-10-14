@@ -951,7 +951,7 @@ too; all GET), with an `ETag` (a 304 for `If-None-Match`) and gzip when the brow
 
 | | |
 |---|---|
-| `GET /api/cad/gis` | the catalog: `{configured, source, attribution, link, terms, rev, layers: [{key, label, group, kind, style, minzoom, fields, on, refresh, tiled, licence, page, asof, note, at, n, bytes, error, updated, rev}]}` (the pages poll it every 5 min) |
+| `GET /api/cad/gis` | the catalog: `{configured, source, attribution, link, terms, rev, layers: [{key, label, group, kind, style, icon, sub, minzoom, fields, on, refresh, tiled, licence, page, asof, note, at, n, bytes, error, updated, rev}]}` (the pages poll it every 5 min) |
 | `GET /api/cad/gis/<key>` | the whole layer as GeoJSON (`Cache-Control: private, max-age=300`), one fetch for every map on the page |
 | `GET /api/cad/gis/<key>?bbox=w,s,e,n` | only the features touching the box (`max-age=60`): how a **tiled** layer is served. The parcels and the planimetrics are too big to send whole (21 k parcels, 42 k buildings in our area), so the page asks for its viewport, padded, from the layer's minimum zoom, and again only when the map leaves that box; a box over 0.25° a side is refused |
 
@@ -959,7 +959,9 @@ too; all GET), with an `ETag` (a 304 for `If-None-Match`) and gzip when the brow
 layer's REST URL (`.../MapServer/<n>` or `.../FeatureServer/<n>`), the fields to show (the first is the
 title), a style (colors as design tokens: `--info`, `--warn`, `--err`, `--ok`, `--dim`, `--text-2`, or
 hex; `fill`, `width`, `radius`, `dash`, a `label` field and `labelzoom`, a `height` field with
-`height_scale` for 3D), `minzoom`, `refresh`, `tiled` for a big one, `simplify_m`, a `bbox` or `where`,
+`height_scale` for 3D), an `icon` for a point layer (a mark from `static/icons.svg`: `hydrant`, `fire-station`,
+`police`, `hospital`, `nursing-home`, `school`, `worship`, `ambulance`, `train`, `bus`, `petroleum`, `tank`; none: a
+dot; `size` in the style scales it), a `sub` line for the click box, `minzoom`, `refresh`, `tiled` for a big one, `simplify_m`, a `bbox` or `where`,
 `on`, and its `licence`, `page`, `asof` and `note`. An entry with a starter key changes only what it
 sets; `enabled = false` drops one. `config.example.toml` has a worked example. The config refuses a
 plain-http URL, an unknown key, a bad zoom or refresh.

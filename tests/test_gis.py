@@ -504,17 +504,14 @@ def test_the_county_gis_group_is_in_every_layers_box_and_only_ever_asks_the_hub(
     order = [html.index(f'src="/static/{n}"') for n in ("maplayers.js", "gislayers.js", "cad.js", "cadmap.js")]
     assert order == sorted(order)                                     # registered before the maps are made
     ml = (STATIC / "maplayers.js").read_text()
-    assert "function addGroup(g)" in ml and "g.attach(this)" in ml and "g.panel()" in ml and "addGroup," in ml
+    assert "function addGroup(g)" in ml and "g.attach(this)" in ml and "g.panel(folds)" in ml and "addGroup," in ml
     js = (STATIC / "gislayers.js").read_text()
     assert "MapLayers.addGroup({ attach: (control) => new GisMap(control) })" in js
     assert '"/api/cad/gis"' in js and "/api/cad/gis/${encodeURIComponent(l.key)}" in js
     assert not re.search(r"westchestergov|westchestercountyny\.gov/(arcgis|wcgis)|/rest/services|arcgis\.com", js)   # never the county
     assert "Westchester County GIS" in js and 'h("b", "", "County GIS")' in js
-    lines = js.splitlines()                                           # each viewer's choice, localStorage only ever inside a try
-    uses = [i for i, ln in enumerate(lines) if "localStorage." in ln]
-    assert len(uses) == 2
-    for i in uses:
-        assert any("try {" in lines[j] for j in range(i - 2, i + 1)), f"localStorage outside a try: {lines[i].strip()}"
+    # each viewer's choice through the box's control (its remembered sets, an event's own; #111): nothing kept here
+    assert "localStorage" not in js and "this.control.on(gisKey(l)" in js and "this.control.setLayer(gisKey(l), cb.checked)" in js
     assert "?bbox=" in js and "getBounds()" in js and "l.tiled" in js        # tiled layers by viewport
     assert "zoom in" in js and "control.showInfo(" in js and "fill-extrusion" in js
     for cls in ("ml-group", "ml-ghead", "ml-sub", "ml-note"):

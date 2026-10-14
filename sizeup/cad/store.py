@@ -102,6 +102,7 @@ CREATE TABLE incidents (
   acft_level INTEGER,                   -- the Westchester Level 1-5 (from the souls, or as said)
   acft_fuel TEXT NOT NULL DEFAULT '',   -- "12,000 lb"
   acft_cargo TEXT NOT NULL DEFAULT '',  -- dangerous goods: "none", "lithium batteries"
+  map_layers TEXT NOT NULL DEFAULT '',  -- this event's map layer set (#111): JSON {layer: on}, '' = the viewer's default
   source TEXT NOT NULL,                 -- manual | 60 Control page
   source_ref TEXT UNIQUE,               -- the monitor incident id (dedupe)
   status TEXT NOT NULL,                 -- queued | pending | active | closed | dismissed
@@ -422,6 +423,8 @@ class Store:
         for col, decl in AIRPORT_COLUMNS:                 # an Airport event's facts (#105), 2026-10-13: old events have none
             if icols and col not in icols:
                 self.db.execute(f"ALTER TABLE incidents ADD COLUMN {col} {decl}")
+        if icols and "map_layers" not in icols:          # an event's own map layers (#111), 2026-10-13
+            self.db.execute("ALTER TABLE incidents ADD COLUMN map_layers TEXT NOT NULL DEFAULT ''")
         tcols = {r["name"] for r in self.db.execute("PRAGMA table_info(radio_traffic)")}
         for col in ("alt_text", "alt_model"):            # the second transcript ("both": whisper next to AWS), 2026-10-08
             if tcols and col not in tcols:
@@ -919,8 +922,8 @@ class Store:
 
     EDITABLE = ("type", "subtype", "type_note", "emergency", "received_via", "until_at", "priority", "address",
                 "cross_street", "lat", "lon", "geo_label", "caller_name", "caller_address", "phone", "remarks",
-                *(c for c, _ in AIRPORT_COLUMNS))
-    QUIET = ("lat", "lon", "geo_label", "remarks", "type_note", "until_at")   # changed, not spelled out in the log
+                *(c for c, _ in AIRPORT_COLUMNS), "map_layers")
+    QUIET = ("lat", "lon", "geo_label", "remarks", "type_note", "until_at", "map_layers")   # changed, not spelled out in the log
 
     def update_incident(self, iid: int, fields: dict, operator: str = "", log: bool = True) -> dict:
         """Edit an open event. A new TYPE/SUBTYPE re-sorts it emergency / non-emergency from the
@@ -968,6 +971,8 @@ class Store:
                       for k in changes if k not in self.QUIET and k not in ("type", "subtype", "emergency")]
             if "remarks" in changes:
                 parts.append("remarks updated")
+            if "map_layers" in changes:                   # the set itself stays out of the log (#111)
+                parts.append("map layers: " + ("chosen for this event" if changes["map_layers"] else "the default again"))
             if "until_at" in changes:
                 parts.append("until: " + (datetime.fromtimestamp(changes["until_at"], TZ).strftime("%m/%d %H:%M")
                                           if changes["until_at"] else "(none)"))
@@ -1147,7 +1152,8 @@ class Store:
         events = self.q(f"SELECT * FROM events WHERE incident_id IN ({marks}) ORDER BY at, id", ids)
         disp = self.q(f"SELECT id, incident_id, at, operator, kind, text, unit_ids, audio_path != '' AS has_audio, audio_note, "
                       f"transmitted, channel, tx_note FROM dispatches WHERE incident_id IN ({marks}) ORDER BY at, id", ids)
-        by = {r["id"]: dict(r, emergency=bool(r["emergency"]), assignments=[], events=[], dispatches=[]) for r in rows}
+        by = {r["id"]: dict(r, emergency=bool(r["emergency"]), assignments=[], events=[], dispatches=[],
+                            map_layers=json.loads(r["map_layers"]) if r.get("map_layers") else None) for r in rows}   # (#111)
         latest = {}                        # (incident, unit) -> its last assignment row
         for a in assigns:
             latest[(a["incident_id"], a["unit_id"])] = a["id"]

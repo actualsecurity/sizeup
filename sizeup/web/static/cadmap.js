@@ -396,7 +396,7 @@ window.CadMap = (() => {
       this.map.on("movestart", (e) => { if (e.originalEvent) this.userMoved = true; });
       this.layer = new RigLayer(this.map, { ...opts, host });
       // Cameras, incidents, roadwork, signs, mileposts, exits and their Layers button (maplayers.js, #73)
-      this.roads = window.MapLayers ? MapLayers.attach(this.map, host, ctrls) : null;
+      this.roads = window.MapLayers ? MapLayers.attach(this.map, host, ctrls, { layers: opts.layers }) : null;   // its set: "overview" | "incident" (#111)
       this.focusId = undefined;
       this.fitKey = null;
       this.userMoved = false;
@@ -509,7 +509,7 @@ window.CadMap = (() => {
     if (window.MapLayers) MapLayers.cameras(inc, $("#d-cams"));          // the Cameras panel under the map (#73, #95)
     if (!views.detail) {
       views.detail = new RigMap(box, { scene: cad.scene, pins: true, unset: true, editable: () => canDo("admin"), operator,
-                                       onPick: (id) => selectIncident(id), onExpand: openBig });
+                                       onPick: (id) => selectIncident(id), onExpand: openBig, layers: "incident" });
     }
     views.detail.update(mapData(), inc, noPoint(inc));
     if (views.bigOpen) views.big.update(mapData(), inc, noPoint(inc));
@@ -534,7 +534,7 @@ window.CadMap = (() => {
       document.body.append(ov);
       ov.hidden = false;
       views.big = new RigMap(panel, { scene: cad.scene, pins: true, unset: true, editable: () => canDo("admin"), operator,
-                                      onPick: (id) => { closeBig(); selectIncident(id); }, onClose: closeBig });
+                                      onPick: (id) => { closeBig(); selectIncident(id); }, onClose: closeBig, layers: "overview" });
     }
     UI.dialog.open(ov, { onClose: () => { views.bigOpen = false; } });   // focus in, Esc / the scrim close (ui.js)
     views.bigOpen = true;
@@ -684,7 +684,7 @@ window.CadMap = (() => {
     if (mapsOk()) {
       if (!views.overview) {
         views.overview = new RigMap($("#ov-map"), { scene: cad.scene, pins: true, unset: !BOARD, editable: () => canDo("admin") && !BOARD, operator,
-                                                    onPick: (id) => selectIncident(id) });
+                                                    onPick: (id) => selectIncident(id), layers: "overview" });
       }
       views.overview.update(mapData(), null, "");
     } else setText($("#ov-map"), "No map");

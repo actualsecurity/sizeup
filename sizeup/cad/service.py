@@ -12,6 +12,7 @@ a 400 with the reason), keeps the lists, store, run cards, dispatch audio and th
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import threading
@@ -115,6 +116,19 @@ def _count(body: dict, key: str, hi: int) -> int | None:
         raise CadError(f"{key}: a whole number up to {hi}")
     return v
 
+
+MAP_LAYER_KEY = re.compile(r"[a-z][a-z0-9_:-]{0,47}")      # "cameras", "gis:hydrants"
+
+
+def _map_layers(v) -> str:
+    """An event's own map layer set (#111): {layer: true | false}, stored as sorted JSON; null / {} clears it
+    (the viewer's default set again)."""
+    if v is None or v == {}:
+        return ""
+    if not isinstance(v, dict) or len(v) > 64 or not all(isinstance(k, str) and MAP_LAYER_KEY.fullmatch(k) and isinstance(b, bool)
+                                                         for k, b in v.items()):
+        raise CadError("map_layers: {layer: true | false} (up to 64 layers), or null for the default")
+    return json.dumps(dict(sorted(v.items())), separators=(",", ":"))
 
 def _priority(body: dict) -> int | None:
     v = body.get("priority")
@@ -349,6 +363,8 @@ class Cad:
             if lat is None:
                 out["geo_label"] = ""
         self._airport_fields(body, partial, out)
+        if "map_layers" in body:
+            out["map_layers"] = _map_layers(body["map_layers"])
         return out
 
     @staticmethod
