@@ -47,7 +47,8 @@ segments, on nysdot.skyvdn.com, answering a plain client with no key; CORS open)
 it, muted, through the hub (Roads.stream: the playlist, its chunklist and the segments, nothing the
 playlist didn't name and only from the stream's own folder), only while that viewer is open: a
 closed viewer stops asking for the playlist and the hub stops serving the segments after
-STREAM_IDLE_S; STREAM_MAX streams at once hub-wide, a 5th viewer gets snapshots. The terms are the
+STREAM_IDLE_S (or at once: GET .../stream/close?v=, #125); stream_max (STREAM_MAX, [roads] stream_max) streams at once
+hub-wide (a camera watched by several pages is one), the next viewer gets snapshots. The terms are the
 same as for the pictures (the Thruway's disclaimer: no resale or redistribution for profit). 511NY's
 camera inventory has a VideoUrl too (kept as "video"); the county's cameras are JPEG only. The
 viewer always says which it shows: "Live", or "Snapshot, updated every N s" with the source's cadence.
@@ -76,6 +77,12 @@ HTTP (sizeup/web/server.py, any signed-in person: viewers too, all GET):
                                            only while a viewer keeps asking for the playlist; a pump keeps the newest
                                            segments fetched ahead of the player (pump_once)
     GET /api/cad/cameras/<id>/stream/status   {open, fps (measured from the segments), ahead, target_s, source_down}
+    GET /api/cad/cameras/<id>/stream/close?v=  this page stopped watching (close_stream): the stream ends unless another
+                                           page is watching it
+    GET /api/cad/cameras?area=ours[&for=lat,lon&label=&address=]   the camera wall (#125, area): every camera in our
+                                           area (our fire districts plus a margin; Settings "camera_wall"), down ones
+                                           flagged, by road then mileage, an event's before / after pinned first; and
+                                           the live-video budget {max, per_viewer, open, streaming}
     GET /api/cad/cameras/<id>/image       If-None-Match / If-Modified-Since / ?since=: 304 when the hub's picture
                                            is no newer; ETag, Last-Modified, X-Image-Cadence on every answer
 
@@ -154,9 +161,15 @@ IMAGE_PARALLEL = 4               # fetches to the cameras at once
 CAMERA_ID = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
 CAMERA_PATH = re.compile(r"/api/cad/cameras/([A-Za-z0-9_.:-]{1,64})/image")
 # Live video (#101): a camera's HLS stream through the hub, only while a viewer is open
-STREAM_PATH = re.compile(r"/api/cad/cameras/([A-Za-z0-9_.:-]{1,64})/stream/(status|[A-Za-z0-9_-]{1,80}\.(?:m3u8|ts))")
+STREAM_PATH = re.compile(r"/api/cad/cameras/([A-Za-z0-9_.:-]{1,64})/stream/(status|close|[A-Za-z0-9_-]{1,80}\.(?:m3u8|ts))")
 STREAM_IDLE_S = 30.0             # no playlist request this long: the stream's segments stop (a viewer polls every few s)
-STREAM_MAX = 4                   # live streams open at once, hub-wide (each about 26 KB/s): the 5th is refused
+# Live streams open at once, hub-wide (a camera watched by several pages is one): the next is refused ([roads]
+# stream_max). #125 measured (docs/cloud.md "Camera wall"): each stream is about 26 KB/s in from the source and
+# 1.4 % of a core on the hub, so 8 is about 45 % of the hub's 0.25 vCPU at most; our area streams 3 (the wall's
+# per-page budget, [roads] wall_streams = 0), which leaves 5 for viewer dialogs of other cameras.
+STREAM_MAX = 8
+STREAM_MAX_LIMIT = 64
+VIEWER_RE = re.compile(r"[A-Za-z0-9_-]{1,32}")   # a page's stream token (?v=): its close ends only its own use
 STREAM_TIMEOUT_S = 10.0          # a chunklist or segment
 STREAM_OPEN_TIMEOUT_S = 6.0      # the first playlist: a stream that doesn't answer this fast is down at the source
 STREAM_RETRY_S = 300.0           # ... and is not asked again for this long (the viewer shows snapshots at once)
@@ -173,6 +186,14 @@ MARKER_M = 300.0                 # a camera (or a labelled event) this close to 
 FACING_MI = 0.3                  # a camera on the event's side of the road wins over a nearer one this much nearer
 AT_MI = 0.05                     # closer than this along the road: "at the location"
 NEARBY_KM = 0.3                  # off the highway (or besides the two): cameras this close, as the crow flies
+# The camera wall (#125): every camera in our area. The area is our fire districts (the county GIS layer, ours by
+# [cad] monitor_departments; the county's 2011 polygons put Rye Brook inside "PORT CHESTER FD"), else our municipal
+# boundaries, else AREA_BBOX, plus a margin so the I-95 / I-287 / Hutch cameras at our edges count; Settings > System
+# (section "camera_wall": margin_m, include, exclude) adjusts it.
+AREA_MARGIN_M = 1000
+AREA_MARGIN_MAX_M = 5000
+AREA_BBOX = (-73.7067, 40.9866, -73.6552, 41.0739)     # Port Chester and Rye Brook (the county's municipal boundaries)
+AREA_PIN = {"at": 0, "before": 1, "after": 2}          # an active highway event's cameras, pinned first in this order
 JSON = "application/json"
 
 # Field names, any case, in the order tried: the developer API's (ID, RoadwayName, ...), the camera
@@ -292,6 +313,35 @@ def km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     a = (math.sin((lat2 - lat1) * p / 2) ** 2
          + math.cos(lat1 * p) * math.cos(lat2 * p) * math.sin((lon2 - lon1) * p / 2) ** 2)
     return 12742 * math.asin(min(1.0, math.sqrt(a)))
+
+
+def polygon_m(g: dict, lat: float, lon: float) -> float:
+    """Metres from the point to a Polygon / MultiPolygon: 0 inside it, else to its nearest edge (a local flat
+    projection: our area is a few km across). inf for anything else."""
+    from sizeup.gis import contains
+    if contains(g, lat, lon):
+        return 0.0
+    polys = g.get("coordinates") or []
+    if g.get("type") == "Polygon":
+        polys = [polys]
+    elif g.get("type") != "MultiPolygon":
+        return math.inf
+    kx, ky = 111320.0 * math.cos(math.radians(lat)), 110540.0
+    best = math.inf
+    for rings in polys:
+        for ring in rings or []:
+            for i in range(len(ring) - 1):
+                ax, ay = (ring[i][0] - lon) * kx, (ring[i][1] - lat) * ky
+                bx, by = (ring[i + 1][0] - lon) * kx, (ring[i + 1][1] - lat) * ky
+                dx, dy = bx - ax, by - ay
+                t = 0.0 if not (dx or dy) else max(0.0, min(1.0, -(ax * dx + ay * dy) / (dx * dx + dy * dy)))
+                best = min(best, math.hypot(ax + t * dx, ay + t * dy))
+    return best
+
+
+def bbox_polygon(bbox) -> dict:
+    w, s, e, n = bbox
+    return {"type": "Polygon", "coordinates": [[[w, s], [e, s], [e, n], [w, n], [w, s]]]}
 
 
 def _xml_record(e: ET.Element) -> dict:
@@ -846,8 +896,16 @@ class Roads:
                  every: dict | None = None, gazetteer: str | Path | None = None,
                  fetch: Callable[[str, float, int], tuple[int, dict, bytes]] = http_get,
                  log: Callable[[str], None] = print, clock: Callable[[], float] = time.time,
-                 thruway: bool = True, thruway_urls: dict | None = None, county: bool = True, county_urls: dict | None = None):
+                 thruway: bool = True, thruway_urls: dict | None = None, county: bool = True, county_urls: dict | None = None,
+                 stream_max: int = STREAM_MAX, wall_streams: int = 0):
         self.bbox = tuple(float(x) for x in bbox)
+        self.stream_max = max(1, min(int(stream_max), STREAM_MAX_LIMIT))   # live streams at once, hub-wide
+        self.wall_streams = max(0, int(wall_streams))   # a camera wall's live tiles at once per page (0: the area's streams)
+        # The camera wall's area (#125): the app hands in the county GIS layers (the fire districts), the
+        # Settings edits ("camera_wall": margin_m, include, exclude) and our departments' names.
+        self.gis = None
+        self.wall_settings: Callable[[], dict] = dict
+        self.ours: tuple[str, ...] = ()
         self.cache = Path(cache) if cache else None
         self.fetch, self.log, self.clock = fetch, log, clock
         self._lock = threading.Lock()
@@ -888,7 +946,8 @@ class Roads:
                    {"cameras": cfg.roads_cameras_url, "events": cfg.roads_events_url, "signs": cfg.roads_signs_url} if on else {},
                    cfg.roads_bbox, (state / "roads511.json") if state else None,
                    {"cameras": cfg.roads_cameras_s, "events": cfg.roads_events_s, "signs": cfg.roads_signs_s}, log=log,
-                   thruway=on and cfg.roads_thruway, county=on and cfg.roads_county)
+                   thruway=on and cfg.roads_thruway, county=on and cfg.roads_county,
+                   stream_max=getattr(cfg, "roads_stream_max", STREAM_MAX), wall_streams=getattr(cfg, "roads_wall_streams", 0))
 
     @property
     def configured(self) -> bool:
@@ -1236,6 +1295,113 @@ class Roads:
         down.sort(key=lambda c: c["km"])
         return {"configured": self.configured, "highway": where, "cameras": out, "down": down}
 
+    # -- the camera wall (#125): every camera in our area ------------------------------------------------------
+
+    def wall_config(self) -> dict:
+        """The Settings edits ("camera_wall") as the area uses them: {margin_m, include, exclude}."""
+        try:
+            raw = self.wall_settings() or {}
+        except Exception as e:  # a settings store that can't be read: the defaults
+            self.log(f"roads: camera wall settings not read ({type(e).__name__}); the defaults")
+            raw = {}
+        m = raw.get("margin_m")
+        margin = float(m) if isinstance(m, (int, float)) and not isinstance(m, bool) and 0 <= m <= AREA_MARGIN_MAX_M else AREA_MARGIN_M
+        ids = lambda k: [str(x) for x in (raw.get(k) or []) if isinstance(x, str) and CAMERA_ID.fullmatch(x)]
+        return {"margin_m": margin, "include": ids("include"), "exclude": ids("exclude")}
+
+    def area_shapes(self) -> dict:
+        """Our area: {basis: fire_districts | municipalities | bbox, names, note, shapes: [geometry]}. The fire
+        districts marked ours (gis.py _ours); before that layer is loaded, our municipal boundaries; before
+        those, AREA_BBOX. The note says which when it isn't the districts."""
+        from sizeup.gis import _dept_key
+        g = self.gis
+        feats = g.features("fire_districts") if g is not None else []
+        ours = [f for f in feats if (f.get("properties") or {}).get("_ours") and f.get("geometry")]
+        if ours:
+            names = sorted({str(f["properties"].get("FIRENAME") or "") for f in ours} - {""})
+            return {"basis": "fire_districts", "names": names, "note": "", "shapes": [f["geometry"] for f in ours]}
+        keys = tuple(k for k in (getattr(g, "ours", ()) or tuple(_dept_key(d) for d in self.ours)) if k)
+        munis = g.features("municipalities") if g is not None else []
+        mine = [f for f in munis if f.get("geometry") and keys
+                and any(_dept_key((f.get("properties") or {}).get("NAME", "")).startswith(k) for k in keys)]
+        if mine:
+            names = sorted({str(f["properties"].get("NAME") or "") for f in mine} - {""})
+            return {"basis": "municipalities", "names": names, "shapes": [f["geometry"] for f in mine],
+                    "note": "The fire-district layer isn't loaded yet: our municipal boundaries instead"}
+        return {"basis": "bbox", "names": ["Port Chester", "Rye Brook"], "shapes": [bbox_polygon(AREA_BBOX)],
+                "note": "Neither the fire districts nor the municipal boundaries are loaded yet: a box around Port Chester and Rye Brook"}
+
+    def _road_order(self, c: dict) -> tuple:
+        """Road, then mileage (our mile markers, as the before / after picker reads them; else the camera's own
+        milepost), then name: the highways first, in HIGHWAY_WORDS's order."""
+        on = highway_from_text(c.get("road", ""))
+        mile = None
+        if on:
+            at = self._mileage(on[0], c["lat"], c["lon"])
+            if at and at[1] <= MARKER_M:
+                mile = at[0]
+        if mile is None:
+            mile = _f(c.get("mile"))
+        rank = next((i for i, (_, r) in enumerate(HIGHWAY_WORDS) if on and r == on[0]), len(HIGHWAY_WORDS))
+        road = on[0] if on else (c.get("road") or "").lower() or "~"
+        return (rank, road, mile if mile is not None else math.inf, c.get("name", ""))
+
+    def area_rows(self) -> tuple[dict, list[dict]]:
+        """(the area, every camera with where it falls): {camera, dist_m, auto: inside | margin | outside, mode:
+        auto | include | exclude, in: on the wall}. For Settings and for area()."""
+        cfg, shape = self.wall_config(), self.area_shapes()
+        inc, exc = set(cfg["include"]), set(cfg["exclude"])
+        rows = []
+        for c in self.merged("cameras"):
+            d = min((polygon_m(g, c["lat"], c["lon"]) for g in shape["shapes"]), default=math.inf)
+            auto = "inside" if d == 0 else "margin" if d <= cfg["margin_m"] else "outside"
+            mode = "exclude" if c["id"] in exc else "include" if c["id"] in inc else "auto"
+            rows.append({"camera": c, "dist_m": None if math.isinf(d) else round(d), "auto": auto, "mode": mode,
+                         "in": mode == "include" or (mode == "auto" and auto != "outside")})
+        area = {k: shape[k] for k in ("basis", "names", "note")} | cfg
+        return area, rows
+
+    def settings_rows(self) -> dict:
+        """Settings > System's camera wall: the area, its settings, and every camera we have with where it falls."""
+        area, rows = self.area_rows()
+        rows.sort(key=lambda r: (0, self._road_order(r["camera"])) if r["in"]           # the wall's first, in its order
+                  else (1, (r["dist_m"] if r["dist_m"] is not None else math.inf, r["camera"].get("name", ""))))   # then the nearest
+        return {"area": area, "default_margin_m": AREA_MARGIN_M, "max_margin_m": AREA_MARGIN_MAX_M,
+                "cameras": [{k: r["camera"].get(k, "") for k in ("id", "name", "road", "dir", "source", "has_video")}
+                            | {"auto": r["auto"], "dist_m": r["dist_m"], "mode": r["mode"], "in": r["in"]} for r in rows],
+                "n": sum(1 for r in rows if r["in"]),
+                "streams": {"max": self.stream_max, "per_viewer": self.wall_streams,
+                            "streaming": sum(1 for r in rows if r["in"] and r["camera"].get("has_video") and not r["camera"]["off"])}}
+
+    def area(self, lat: float | None = None, lon: float | None = None, label: str = "", address: str = "") -> dict:
+        """GET /api/cad/cameras?area=ours[&for=lat,lon&label=&address=]: every camera in our area (down ones too,
+        flagged), sorted by road then mileage; with an event's location, its cameras just before / at / just
+        after along the road (cameras_for) pinned first ("pin": the rel), even from outside the area. And the
+        live-video budget: {max (hub-wide), per_viewer (a page's live tiles at once), open, streaming (the area's)}."""
+        area, rows = self.area_rows()
+        pins: dict[str, dict] = {}
+        where = None
+        if lat is not None and lon is not None:
+            near = self.cameras_for(lat, lon, label, address)
+            where = near["highway"]
+            if where:
+                for c in near["cameras"]:
+                    if c["rel"] in AREA_PIN and c["id"] not in pins:
+                        pins[c["id"]] = {"pin": c["rel"], "miles": c["miles"]}
+        out = []
+        for r in rows:
+            c = r["camera"]
+            if not (r["in"] or c["id"] in pins):
+                continue
+            out.append(self._cam_public(c) | {"area": r["auto"] if r["mode"] == "auto" else r["mode"], "dist_m": r["dist_m"],
+                                              "pin": None, "miles": None} | pins.get(c["id"], {}))
+        orders = {r["camera"]["id"]: self._road_order(r["camera"]) for r in rows}
+        out.sort(key=lambda c: (AREA_PIN.get(c["pin"], 9), orders[c["id"]]))
+        streaming = sum(1 for c in out if c["has_video"] and not c["off"])
+        return {"configured": self.configured, "area": area, "highway": where, "cameras": out,
+                "streams": {"max": self.stream_max, "per_viewer": min(self.stream_max, self.wall_streams or streaming),
+                            "open": self.streams_open(), "streaming": streaming}}
+
     # -- the snapshot proxy ----------------------------------------------------------------------------
 
     @staticmethod
@@ -1311,12 +1477,15 @@ class Roads:
         now = self.clock() if now is None else now
         return sum(1 for st in self._streams.values() if now - st["last"] <= STREAM_IDLE_S)
 
-    def stream(self, cid: str, name: str) -> tuple[int, bytes, str, dict]:
+    def stream(self, cid: str, name: str, viewer: str = "") -> tuple[int, bytes, str, dict]:
         """GET /api/cad/cameras/<id>/stream/<name>: playlist.m3u8 (the camera's master playlist, its chunklist
         named as the hub serves it), <chunklist>.m3u8 (the segment names likewise), <segment>.ts (the bytes).
-        A playlist request opens or keeps the camera's stream (STREAM_MAX at once, hub-wide; a 5th is 429);
+        A playlist request opens or keeps the camera's stream (stream_max at once, hub-wide; the next is 429);
         segments are served only while one was asked for within STREAM_IDLE_S: a closed viewer stops the
-        flow by itself. Nothing is fetched that a playlist didn't name, and only from the stream's own folder."""
+        flow by itself. Nothing is fetched that a playlist didn't name, and only from the stream's own folder.
+        viewer (?v=, a page's token, #125): the master playlist names its chunklist with it, so each page's use
+        is known; close (GET .../stream/close?v=) ends that page's use at once, and the stream (its pump too)
+        when nobody else is watching, instead of after STREAM_IDLE_S."""
         cam = self.camera(cid)
         if cam is None or not self.configured:
             return 404, b'{"error":"no such camera"}', JSON, {}
@@ -1329,6 +1498,8 @@ class Roads:
         hdr = {"Cache-Control": "no-store"}
         if name == "status":
             return 200, json.dumps(self.stream_status(cid)).encode(), JSON, hdr
+        if name == "close":
+            return 200, json.dumps({"open": self.close_stream(cid, viewer)}).encode(), JSON, hdr
         failed_at = self._stream_down.get(cid)
         if failed_at is not None and now - failed_at < STREAM_RETRY_S:        # its source refused lately: don't wait again
             return 503, json.dumps({"error": "no live video from the source right now", "source_down": True,
@@ -1338,15 +1509,20 @@ class Roads:
             st = self._streams.get(cid)
             if name.endswith(".m3u8"):
                 if st is None or now - st["last"] > STREAM_IDLE_S:
-                    if self.streams_open(now) >= STREAM_MAX:
-                        return 429, json.dumps({"error": f"too many live streams open ({STREAM_MAX}); snapshots instead"}).encode(), JSON, hdr
+                    if self.streams_open(now) >= self.stream_max:
+                        return 429, json.dumps({"error": f"too many live streams open ({self.stream_max}); snapshots instead"}).encode(), JSON, hdr
                     st = self._streams[cid] = {"last": now, "base": base, "chunk": "", "list": None, "list_at": 0.0,
-                                               "target": 6.0, "frames": 0, "seconds": 0.0, "fps": None, "ahead": 0}
+                                               "target": 6.0, "frames": 0, "seconds": 0.0, "fps": None, "ahead": 0, "viewers": {}}
                     opened = True
                 st["last"] = now
+                st.setdefault("viewers", {})[viewer] = now
             elif st is None or now - st["last"] > STREAM_IDLE_S:
                 return 404, b'{"error":"the stream is not open: ask for its playlist first"}', JSON, hdr
         src = cam["video"] if name == "playlist.m3u8" else base + name
+        if name == "playlist.m3u8" and not opened and st.get("master"):
+            # Another page already watches it: the same origin session (its chunklist name), so every page's
+            # chunklist is the pump's one copy and the origin sees one viewer (#125: many tiles, many pages).
+            return 200, self._for_viewer(st["master"], viewer), "application/vnd.apple.mpegurl", hdr
         if name.endswith(".ts"):
             key = f"{cid}/{name}"
             hit = self._segments.get(key)
@@ -1383,11 +1559,40 @@ class Roads:
             if st is not None:
                 if name == "playlist.m3u8":
                     st["chunk"] = next((t for t in clean.decode().splitlines() if t and not t.startswith("#")), "")
+                    st["master"] = clean
                 elif name == st.get("chunk"):
                     self._note_list(st, clean, now)
         if opened and st is not None:
             self._start_pump(cid)
+        if name == "playlist.m3u8":
+            clean = self._for_viewer(clean, viewer)
         return 200, clean, "application/vnd.apple.mpegurl", hdr
+
+    @staticmethod
+    def _for_viewer(master: bytes, viewer: str) -> bytes:
+        """The master playlist with its chunklist asked for with the page's token too (?v=)."""
+        if not viewer:
+            return master
+        return re.sub(rb"(?m)^([A-Za-z0-9_-]{1,80}\.m3u8)$", lambda m: m.group(1) + b"?v=" + viewer.encode(), master)
+
+    def close_stream(self, cid: str, viewer: str) -> bool:
+        """A page stopped watching (its tile scrolled away, the wall or the page hidden, the viewer closed): its use
+        ends now; nobody else watching within STREAM_IDLE_S, the stream closes (its slot free, its pump stops).
+        True while the stream stays open for someone else."""
+        now = self.clock()
+        with self._stream_lock:
+            st = self._streams.get(cid)
+            if st is None:
+                return False
+            views = st.setdefault("viewers", {})
+            views.pop(viewer, None)
+            for v in [v for v, t in views.items() if now - t > STREAM_IDLE_S]:
+                views.pop(v)
+            if views:
+                st["last"] = max(views.values())
+                return True
+            self._streams.pop(cid, None)
+            return False
 
     @staticmethod
     def _clean_playlist(body: bytes) -> bytes | None:
@@ -1516,6 +1721,17 @@ class Roads:
                 return 200, json.dumps({"rev": self.rev, "same": True}).encode(), JSON, {}
             return 200, self._public_bytes(), JSON, {}
         if path == "/api/cad/cameras":
+            if one("area"):                                  # the camera wall (#125): every camera in our area
+                if one("area") != "ours":
+                    return 400, b'{"error":"area: ours"}', JSON, {}
+                lat = lon = None
+                if one("for"):
+                    try:
+                        lat, lon = (float(x) for x in one("for").split(","))
+                    except ValueError:
+                        return 400, b'{"error":"for: lat,lon"}', JSON, {}
+                return 200, json.dumps(self.area(lat, lon, one("label")[:200], one("address")[:200])).encode(), JSON, \
+                    {"Cache-Control": "no-store"}
             if one("for"):                                   # the incident viewer's cameras (#95)
                 try:
                     lat, lon = (float(x) for x in one("for").split(","))
@@ -1543,5 +1759,6 @@ class Roads:
         if m := CAMERA_PATH.fullmatch(path):
             return self.image(m.group(1), _since(headers, one("since")))
         if m := STREAM_PATH.fullmatch(path):
-            return self.stream(m.group(1), m.group(2))
+            v = one("v")
+            return self.stream(m.group(1), m.group(2), v if VIEWER_RE.fullmatch(v) else "")
         return 404, b"not found\n", "text/plain", {}

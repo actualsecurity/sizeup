@@ -30,6 +30,8 @@ Reset to default = drop the override (one item, or a whole section).
                                    places, service, role?, confirmed?} or {list, deleted: true}; "entity:<places>|<service>"
                                    -> an entity {places, service, ours?, notes?, aliases?, merged_into?}. Read over the
                                    list, never written into it (sizeup/app.py _apply_named_tones)
+    camera_wall                    key "margin_m" -> metres around our fire districts, "include" / "exclude" -> [camera
+                                   ids]: the camera wall's area (#125, Settings > System; sizeup/roads.py Roads.area)
 
 Codes never change (they are stored on events and exported): a rename changes the name only. An
 item in use can't be deleted, only retired (named on old events, off the pick lists). Every change
@@ -69,6 +71,11 @@ PAGE_SECTION = {**{s: "lists" for s in LIST_SECTIONS}, "event_class": "lists", "
                 "type_subtypes": "lists",
                 "units": "units", "dispatch_wording": "dispatch", "dispatch_tones": "dispatch", "dispatch": "dispatch",
                 "channels": "radios", "stt": "radios", "places": "lists", "tones": "radios"}
+# The camera wall's area (#125, sizeup/roads.py Roads.area): Settings > System.
+WALL_SECTION, WALL_KEYS, WALL_MARGIN = "camera_wall", ("margin_m", "include", "exclude"), (0, 5000, 1000)
+PAGE_SECTION[WALL_SECTION] = "system"
+WALL_ID = re.compile(r"[A-Za-z0-9_.:-]{1,64}")      # sizeup/roads.py CAMERA_ID
+MAX_WALL_IDS = 200
 AUDIT_SECTIONS = ("lists", "run cards", "units", "dispatch", "users", "system", "radios")
 LIST_FIELDS = {"event_types": ("color",), "event_subtypes": (), "dispositions": (), "received_via": (),
                "unit_statuses": ("role", "bg", "fg")}
@@ -455,6 +462,7 @@ class Editor:
         out["operators"] = self.operators()
         out["system"] = self._system(ov)
         out["tones"] = self.tones_page()
+        out["camera_wall"] = self.wall_page()
         return out
 
     def _unit_rows(self, L, ov: dict) -> dict:
@@ -550,7 +558,7 @@ class Editor:
         fn = {"event_class": self._class_op, "status_flow": self._flow_op, "type_subtypes": self._map_op, "geo_town_order": self._towns_op, "units": self._units_op,
               "dispatch": self._dispatch_op, "users": self._users_op, "runcards": self._cards_op,
               "import": self._import_op, "channels": self._channels_op, "stt": self._stt_op,
-              "places": self._places_op, TONES_SECTION: self._tones_op}.get(section)
+              "places": self._places_op, TONES_SECTION: self._tones_op, WALL_SECTION: self._wall_op}.get(section)
         if fn is None:
             raise CadError(f"no settings section {section!r}")
         if section in ("users", "import"):
@@ -1623,6 +1631,85 @@ class Editor:
                           "edited": "aws_monthly_limit_usd" in cur},
                 "aws": ctx.aws_status() if ctx is not None else {"enabled": False}}
 
+    # -- the camera wall's area (#125): the margin around our fire districts, cameras always / never on it ---------
+    # Kept as overrides (section "camera_wall": margin_m -> metres, include / exclude -> [camera ids]) so they are
+    # audited, exported and imported with the rest; sizeup/roads.py Roads.area reads them on every request.
+
+    def wall_values(self) -> dict:
+        return dict(self.overrides().get(WALL_SECTION) or {})
+
+    @staticmethod
+    def _wall_margin(v) -> int:
+        lo, hi, _ = WALL_MARGIN
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not lo <= v <= hi:
+            raise CadError(f"margin_m: {lo} to {hi} (metres)")
+        return int(round(v))
+
+    @staticmethod
+    def _wall_ids(v, what: str) -> list[str]:
+        if not isinstance(v, list) or len(v) > MAX_WALL_IDS or not all(isinstance(x, str) and WALL_ID.fullmatch(x) for x in v):
+            raise CadError(f"{what}: a list of camera ids (at most {MAX_WALL_IDS})")
+        return sorted(set(v))
+
+    def _wall_check(self, d: dict) -> None:
+        if set(d) - set(WALL_KEYS):
+            raise CadError(f"overrides.{WALL_SECTION}: {', '.join(WALL_KEYS)} only")
+        if "margin_m" in d:
+            self._wall_margin(d["margin_m"])
+        for k in ("include", "exclude"):
+            if k in d:
+                self._wall_ids(d[k], f"overrides.{WALL_SECTION}.{k}")
+        if set(d.get("include") or []) & set(d.get("exclude") or []):
+            raise CadError(f"overrides.{WALL_SECTION}: a camera both included and excluded")
+
+    def wall_page(self) -> dict:
+        """Settings > System > Camera wall: the margin, every camera with where it falls (the app's Roads), the edits."""
+        cur = self.wall_values()
+        out = {"margin_m": cur.get("margin_m", WALL_MARGIN[2]), "default_margin_m": WALL_MARGIN[2], "max_margin_m": WALL_MARGIN[1],
+               "include": list(cur.get("include") or []), "exclude": list(cur.get("exclude") or []), "edited": bool(cur),
+               "cameras": None}
+        fn = getattr(self.cad, "camera_area", None)
+        if fn is not None:
+            try:
+                out |= {k: v for k, v in fn().items() if k in ("area", "cameras", "n", "streams")}
+            except Exception as e:  # the cameras can't be listed now: the settings still can be edited
+                out["error"] = f"{type(e).__name__}: {e}"
+        return out
+
+    def _wall_op(self, action: str, body: dict, op: str) -> dict:
+        """set {key: margin_m, value} | camera {id, mode: auto | include | exclude} | reset (everything to the default)."""
+        cur = self.wall_values()
+        if action == "reset":
+            if not cur:
+                raise CadError("the camera wall is already the default")
+            return self._commit([(WALL_SECTION, k, REMOVE) for k in cur], op, [("system", WALL_SECTION, cur, "default")])
+        if action == "set":
+            if body.get("key") != "margin_m":
+                raise CadError("key: margin_m")
+            v = self._wall_margin(body.get("value"))
+            old = cur.get("margin_m", WALL_MARGIN[2])
+            return self._commit([(WALL_SECTION, "margin_m", REMOVE if v == WALL_MARGIN[2] else v)], op,
+                                [("system", f"{WALL_SECTION}/margin_m", old, v)])
+        if action == "camera":
+            cid = _text(body.get("id"), "id", 64)
+            if not WALL_ID.fullmatch(cid):
+                raise CadError("id: a camera id")
+            mode = body.get("mode")
+            if mode not in ("auto", "include", "exclude"):
+                raise CadError("mode: auto, include or exclude")
+            inc, exc = set(cur.get("include") or []), set(cur.get("exclude") or [])
+            was = "include" if cid in inc else "exclude" if cid in exc else "auto"
+            if was == mode:
+                return {"ok": True}
+            inc.discard(cid)
+            exc.discard(cid)
+            (inc if mode == "include" else exc if mode == "exclude" else set()).add(cid)
+            if len(inc) > MAX_WALL_IDS or len(exc) > MAX_WALL_IDS:
+                raise CadError(f"at most {MAX_WALL_IDS} cameras each way")
+            return self._commit([(WALL_SECTION, "include", sorted(inc) or REMOVE), (WALL_SECTION, "exclude", sorted(exc) or REMOVE)], op,
+                                [("system", f"{WALL_SECTION}/camera/{cid}", was, mode)])
+        raise CadError("action: set, camera or reset")
+
     # -- run cards: reset ------------------------------------------------------------------------------
 
     def _cards_op(self, action: str, body: dict, op: str) -> dict:
@@ -1839,6 +1926,7 @@ class Editor:
             if key != k:
                 raise CadError(f"overrides.tones.{k}: the key is the pair, {key}")
             ov[TONES_SECTION][k] = val
+        self._wall_check(ov.get(WALL_SECTION) or {})
         st = ov.get("stt") or {}
         if set(st) - {"vocabulary", "aws_monthly_limit_usd"}:
             raise CadError("overrides.stt: vocabulary and aws_monthly_limit_usd only")

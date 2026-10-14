@@ -680,8 +680,13 @@ The viewer plays a stream **muted** (hls.js 1.6 from cdnjs, or Safari's own HLS)
 in the stream's own folder; a playlist that names anything else is refused. A playlist request opens
 or keeps the camera's stream; segments are served only while one was asked for within 30 s, so a
 closed viewer stops the flow by itself (the player stops polling); a hidden tab pauses the player
-and its polling. **At most 4 streams at once, hub-wide** (the 5th gets 429 and that viewer shows
-snapshots); the viewer itself shows one camera at a time. Any failure (no HLS support, a stream that
+and its polling. **At most `[roads] stream_max` streams at once, hub-wide** (8 by default since #125, was 4; a
+camera watched by several pages is one stream: the next camera gets 429 and that viewer shows snapshots); the
+viewer itself shows one camera at a time. Each page names itself (`?v=<token>` on the playlist; the hub names
+the chunklist with it) and says when it stops watching (`GET .../stream/close?v=`): the stream and its pump
+stop at once when nobody else watches, instead of after the 30 s idle timeout. A second page watching a
+camera already open gets the same origin session (the hub's copy of the master playlist), so every page's
+chunklist is the pump's one copy. Any failure (no HLS support, a stream that
 won't play, the cap) falls back to the snapshots and says so for a few seconds. The viewer always
 says which it shows: **Live** (only once the video is actually playing), or **Snapshot, updated
 every N s** with the source's real cadence (the county 8 s, the Thruway and 511NY about 60 s).
@@ -718,6 +723,57 @@ including its feed refreshes and health sweep, about 3% of one core; memory stea
 RSS. Each stream is at most ~26 KB/s (205 kbit/s) each way, so the 4-stream cap is ~105 KB/s out
 and in, well within a 0.25 vCPU Fargate task; the pass-through does no decoding. One stream origin
 answered 502 at open during the run: that is the fallback path (snapshots) working.
+
+### Camera wall (#125)
+
+> "on the monitor page and the overview page, can we add a way to look at all of the cameras in our
+> jurisdiction live? somehow turn that on and off so we can visually see all of them" (user, 2026-10-14);
+> then "we should show all the live feeds we can, more is better; there are not that many in our
+> jurisdiction that are purely live".
+
+A **Cameras** button in the Overview's head (the console's Overview and the wall board, `/monitor`) swaps
+the map column for a grid of every camera in our area; the same button (or *Map* on the wall) brings the
+map back. Remembered per screen (`localStorage` `sizeup.cameraWall` `{overview, monitor}`). The grid takes
+its columns from its own width: 2 (3 on a wide one) on the dispatch screen, 4 to 6 on the wall board (whose
+cards column narrows while the cameras are on), 1 on a phone (`static/camwall.js`, `cadmap.css` `.cw-*`).
+
+**The area** (`GET /api/cad/cameras?area=ours`, `Roads.area`): every camera inside our fire districts (the
+county GIS layer, ours by `[cad] monitor_departments`; the county's 2011 polygons put Rye Brook inside
+"PORT CHESTER FD") or within a margin of them (1000 m by default) so the I-95 cameras at interchange 21 and
+the ramp count; down cameras too, flagged. Before the district layer is loaded: our municipal boundaries
+(Port Chester, Rye Brook), else a box around both, and the wall says so. **Settings > System > Camera
+wall** (admins; overrides section `camera_wall`, audited, exported and imported with the rest): the margin,
+and any camera put on (*Always*) or taken off (*Never*) by hand, with every camera we have listed with
+where it falls. With the cached data on 2026-10-14: **9 cameras** (3 Thruway on I-95, all streaming; 6
+county DPW at King St / Willett Ave / N. Pearl St and Westchester Ave at Purchase St, snapshots every 8 s);
+the next one out is *I-287 Just East of Interchange 9* at 1.25 km (*Always*, or a 1300 m margin, adds it).
+
+**A tile** plays live video where the source streams (muted, `playsinline`, hls.js through the hub with the
+page's token), else the snapshot at the source's cadence, fetched only when newer (`If-None-Match`); its
+name, road, direction and milepost, the picture's age, *Live* only while the video plays, a small note when
+the source's frame rate is low or the stream fell back to snapshots (the hub's cap: 429, retried in a
+minute; the source down: 503, retried after the hub's 5 min). A click opens the camera viewer. Sorted by
+road then mileage (our mile markers, the before / after picker's); an active (else pending) emergency on a
+highway pins its camera just before / at / just after first, highlighted ("Before · 0.2 mi"), even from
+outside the area. Down cameras fold into one *N cameras down* tile that opens in place.
+
+**Bandwidth**: only tiles on screen play or refresh (an `IntersectionObserver`); a tile that leaves the
+screen stops its stream at the hub too (`stream/close`), and the whole wall stops while the page is hidden
+or the Overview isn't shown (an incident open). At most `streams.per_viewer` live tiles per page: `[roads]
+wall_streams`, or 0 (the default) for every streaming camera in the area (3 today).
+
+**Measured** 2026-10-14 on a Mac (M5 Pro), the hub's `Roads` with the real Thruway origins, a simulated
+player per stream polling its chunklist every 2 s and fetching each new segment, for 60 s
+(`/tmp`-only script, not in the repo): the area's **3 streams**: 0.31 s of CPU (0.5 % of a core; 0.17 % per
+stream for the relay alone), 64 KB/s in from the origins (21 KB/s per stream, the first minute's
+prefetch included), 56 KB/s out to one page; **every streaming Thruway camera in our bbox** (15 listed, 11
+answering; 4 dead at the source got 503 and held no slot): 3.2 % of a core, 608 KB/s in during the first
+minute (the pump's start-up prefetch; ~26 KB/s per stream steady), 308 KB/s out. The earlier #101 figure,
+a whole hub process with its feeds, sweep and HTTP serving, was ~1.4 % of a core per stream; on the hub's
+0.25 vCPU Fargate task that makes 16 streams ~90 % of the task, which is too much, so the cap is **8**
+(~45 % of the task at worst; the area's 3 streams are ~17 %, about 80 KB/s in and 80 KB/s out per page
+watching). Several pages watching the same cameras (the console and the wall board) share the streams: one
+origin session each, the output scales with the pages (~26 KB/s per stream per page).
 
 ### How it works
 

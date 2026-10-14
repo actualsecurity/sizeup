@@ -1224,7 +1224,7 @@ def test_cad_page_buttons_have_handlers():
     html = (ROOT / "sizeup" / "web" / "static" / "cad.html").read_text()
     js = (ROOT / "sizeup" / "web" / "static" / "cad.js").read_text()
     js_all = js + "".join((ROOT / "sizeup" / "web" / "static" / f).read_text()
-                          for f in ("settings.js", "cadmap.js", "radio-view.js", "radio-controls.js", "board.js"))
+                          for f in ("settings.js", "cadmap.js", "radio-view.js", "radio-controls.js", "board.js", "camwall.js"))
     for bid, rest in re.findall(r'<button id="([\w-]+)"([^>]*)>', html):
         assert (f'$("#{bid}").addEventListener' in js_all or f'RadioLive.button($("#{bid}")' in js_all
                 or 'type="submit"' in rest), f"#{bid} has no handler"

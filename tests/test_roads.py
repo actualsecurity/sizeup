@@ -844,9 +844,9 @@ class StreamFetch(FakeFetch):
         return super().__call__(url, timeout, limit)
 
 
-def streaming(clock=None):
+def streaming(clock=None, **kw):
     f = StreamFetch()
-    r = make(key="", urls={}, fetch=f, clock=clock or Clock(), thruway=True)
+    r = make(key="", urls={}, fetch=f, clock=clock or Clock(), thruway=True, **kw)
     assert r.refresh("cameras")
     return r, f
 
@@ -893,9 +893,10 @@ def test_segments_stop_when_nobody_asks_for_the_playlist():
     assert r.streams_open() == 1
 
 
-def test_at_most_four_streams_at_once_then_snapshots():
+def test_at_most_stream_max_streams_at_once_then_snapshots():
     clock = Clock()
-    r, f = streaming(clock)
+    r, f = streaming(clock, stream_max=4)                  # [roads] stream_max (8 by default, #125)
+    assert streaming()[0].stream_max == roads_mod.STREAM_MAX == 8
     cams = [c["id"] for c in r.merged("cameras") if c["has_video"]][:5]
     for cid in cams[:4]:
         assert r.get(f"/api/cad/cameras/{cid}/stream/playlist.m3u8", "")[0] == 200

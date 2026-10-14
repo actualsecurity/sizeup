@@ -737,6 +737,11 @@ class Gis:
             self._bytes[key] = cur
         return cur
 
+    def features(self, key: str) -> list[dict]:
+        """The layer's features as loaded ([] when it isn't, or isn't configured)."""
+        with self._lock:
+            return list(self.data.get(key) or [])
+
     def features_in(self, key: str, bbox) -> list[dict]:
         with self._lock:
             return [f for f, b in zip(self.data[key], self._boxes[key]) if b and _touches(b, bbox)]

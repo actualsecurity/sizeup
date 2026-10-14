@@ -214,6 +214,8 @@
   #s-radio-tabs { margin-block-end: calc(-1 * var(--s-2)); }
   .s-tone-tools { flex-wrap: wrap; gap: var(--s-2); margin-block-end: var(--s-2); }
   .s-tone-q { flex: 1 1 14rem; max-inline-size: 22rem; }
+  .s-wall td { vertical-align: middle; }
+  .s-wall .s-wall-name { min-inline-size: 12rem; overflow-wrap: anywhere; }
   .s-tones td { vertical-align: middle; }
   .s-tones .s-t-hz, .s-tones .s-t-last, .s-tones .s-t-n { white-space: nowrap; }
   .s-tones .s-t-name { min-inline-size: 10rem; }

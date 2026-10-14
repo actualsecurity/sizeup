@@ -203,6 +203,9 @@ heartbeat_stale_min = 90             # no heartbeat (or restart) this long: "Tap
 # events_every_s = 90                     # at least 60 (511NY: 10 calls a minute per key)
 # signs_every_min = 5                     # at least 1
 # cameras_every_min = 60                  # at least 10
+# stream_max = 8                          # live camera streams through the hub at once (a camera watched by several
+#                                         # pages is one); each ~26 KB/s and ~1.4 % of a core: 8 is safe on 0.25 vCPU
+# wall_streams = 0                        # the camera wall's live tiles per page; 0: every streaming camera in our area
 
 # [gis]: the CAD maps' "County GIS" layers (sizeup/gis.py, docs/cloud.md "County GIS layers"): Westchester
 # County GIS open data (tax parcels, fire and EMS districts, hydrants, buildings, flood plains, rail ...),

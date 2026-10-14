@@ -213,10 +213,53 @@
   .ov-nelist > li.ov-ne { display: flex; align-items: baseline; flex-wrap: wrap; gap: var(--s-2); padding: var(--s-2); border-radius: var(--radius-s); }
   .ov-addr-s { overflow-wrap: anywhere; min-inline-size: 0; }
 
+  /* the camera wall (camwall.js, #125): in the map's place, the same height, scrolling inside; columns by its own
+     width (2-3 on the dispatch screen, 4-6 on the wall board's big screen, 1 on a phone) */
+  .cw-wall {
+    container-type: inline-size; display: flex; flex-direction: column; gap: var(--s-2); min-inline-size: 0; overflow-y: auto;
+    block-size: calc(100dvh - var(--hdr-h) - 2 * var(--gutter) - var(--ctl) - var(--gutter)); min-block-size: var(--map-h-min);
+    padding: var(--s-2); border: var(--bw) solid var(--line); border-radius: var(--radius); background: var(--panel);
+  }
+  .cw-head { display: flex; align-items: center; flex-wrap: wrap; gap: var(--s-1) var(--s-2); }
+  .cw-basis { color: var(--warn); }
+  .cw-foot { margin-block-start: auto; }
+  .cw-grid { --cw-cols: 2; display: grid; grid-template-columns: repeat(var(--cw-cols), minmax(0, 1fr)); gap: var(--s-2); align-content: start; }
+  @container (width < 30rem) { .cw-grid { --cw-cols: 1; } }
+  @container (width >= 54rem) { .cw-grid { --cw-cols: 3; } }
+  /* the wall board reads from across the room on a big screen: more, smaller tiles (4 at 1920, 6 on a 4K wall) */
+  @container (width >= 60rem) { html.board .cw-grid { --cw-cols: 4; } }
+  @container (width >= 80rem) { html.board .cw-grid { --cw-cols: 5; } }
+  @container (width >= 100rem) { html.board .cw-grid { --cw-cols: 6; } }
+  .cw-tile {
+    display: flex; flex-direction: column; align-items: stretch; gap: var(--s-1); padding: var(--s-1); block-size: auto; min-inline-size: 0;
+    white-space: normal; text-align: start; font-weight: 400; background: var(--card); border-color: var(--line);
+  }
+  .cw-tile.pinned { border-color: var(--warn); outline: var(--bw) solid var(--warn); outline-offset: calc(-1 * var(--bw)); }
+  .cw-frame { position: relative; display: block; aspect-ratio: 16 / 9; overflow: hidden; background: #000; border-radius: var(--radius-s); }
+  .cw-img, .cw-video { position: absolute; inset: 0; inline-size: 100%; block-size: 100%; object-fit: contain; }
+  .cw-pin { position: absolute; inset-block-start: var(--s-1); inset-inline-end: var(--s-1); padding: 0 var(--s-2);
+    font-size: var(--fs-2xs); line-height: var(--lh-2xs); font-weight: 700; color: var(--on-warn); background: var(--warn); border-radius: var(--radius-s); }
+  .cw-tile .ml-live { inset-block-start: var(--s-1); inset-inline-start: var(--s-1); }
+  .cw-note { position: absolute; inset-inline: var(--s-1); inset-block-end: var(--s-1); padding: 0 var(--s-1); text-align: center;
+    font-size: var(--fs-2xs); line-height: var(--lh-2xs); color: var(--text-2); background: color-mix(in srgb, var(--panel) 88%, transparent);
+    border-radius: var(--radius-s); }
+  .cw-cap { display: flex; flex-direction: column; min-inline-size: 0; }
+  .cw-name { font-size: var(--fs-sm); line-height: var(--lh-sm); font-weight: 700; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cw-where { font-size: var(--fs-xs); line-height: var(--lh-xs); color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cw-age { font-size: var(--fs-xs); line-height: var(--lh-xs); color: var(--dim); font-variant-numeric: tabular-nums; }
+  .cw-down { display: flex; flex-direction: column; gap: var(--s-1); min-inline-size: 0; padding: var(--s-1); align-self: start;
+    border: var(--bw) dashed var(--line-strong); border-radius: var(--radius); }
+  .cw-down.open { grid-column: 1 / -1; }
+  .cw-down-head { display: flex; align-items: center; gap: var(--s-2); justify-content: flex-start; inline-size: 100%;
+    font-weight: 400; color: var(--text-2); background: none; border-color: transparent; }
+  .ov-grid.cw-on .ov-mapbox { display: none; }
+  html.board .ov-grid.cw-on { grid-template-columns: minmax(0, 3fr) minmax(16rem, 1fr); }
+
   @container (width < 60rem) {
     .ov-grid { grid-template-columns: minmax(0, 1fr); }
+    .cw-wall { block-size: auto; min-block-size: 0; overflow: visible; }
     .ov-mapbox { position: relative; block-size: 46vh; min-block-size: var(--map-h); }
   }
-  @media (max-width: 1100px) { .ov-mapbox { block-size: var(--map-h); } }
+  @media (max-width: 1100px) { .ov-mapbox { block-size: var(--map-h); } .cw-wall { block-size: auto; min-block-size: 0; overflow: visible; } }
   @media (max-width: 640px) { .cm-big { inline-size: 100vw; block-size: 100%; border-radius: 0; } }
 }
