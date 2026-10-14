@@ -34,6 +34,8 @@ GET  /api/cad/trains, /api/cad/trains/near?lat=&lon=
                                Metro-North's trains on the map, and those approaching an event (sizeup/trains.py, #131)
 GET  /api/cad/weather[/speech?id=, /radar/frames, /radar/<frame>/<z>/<x>/<y>.png]
                                NWS alerts, conditions, radar tiles, NOAA tides (sizeup/weather.py, #132)
+GET  /api/cad/aircraft         aircraft near HPN, shortfinal's PCFD-focused picture (sizeup/aircraft.py, #155): polled by
+                               the page only while the layer is on; ETag (304), never in the state push
 GET  /api/cad/health           the hub only: Settings > System > Station health (sizeup/cloud/health.py, #79):
                                the station's health, its alerts and 24 h of their history; anyone signed in
 
@@ -289,7 +291,8 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                  set_talkgroup_group: Callable[..., str | None] | None = None, retranscribe=None,
                  cad=None, cad_b: Broadcaster | None = None, station=None, health: bytes = b'{"ok":true}',
                  access=None, access_log: Callable[[str], None] | None = None, station_mode=None,
-                 role: str = "", roads=None, gis=None, trains=None, weather=None, station_health=None, stream_gzip: bool = True):
+                 role: str = "", roads=None, gis=None, trains=None, weather=None, station_health=None, stream_gzip: bool = True,
+                 aircraft=None):
     """cad: a CadApi (sizeup/cad/api.py) and cad_b its own broadcaster (the console's state is
     small and separate from the monitor's, so neither page carries the other's). station: the hub's
     ingest (sizeup/cloud/hub.py Hub), which checks the station's token before reading any body.
@@ -300,6 +303,7 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
     gis: the county GIS layers (sizeup/gis.py Gis): /api/cad/gis..., GET only (ETag, gzip).
     trains: Metro-North's trains (sizeup/trains.py Trains): /api/cad/trains..., GET only.
     weather: weather and water (sizeup/weather.py Weather): /api/cad/weather..., GET only.
+    aircraft: aircraft near HPN (sizeup/aircraft.py AircraftLayer): /api/cad/aircraft, GET only (ETag -> 304).
     stream_gzip: the state streams gzipped to a browser that takes it (#137).
     station_health: the hub's StationHealth (sizeup/cloud/health.py): GET /api/cad/health."""
     assets = Assets(STATIC_DIR)
@@ -461,6 +465,8 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 return self._send(*trains.get(path, url.query, self.headers))
             if weather is not None and weather.handles(path):    # NWS alerts, conditions, radar; NOAA tides (#132)
                 return self._send(*weather.get(path, url.query, self.headers))
+            if aircraft is not None and aircraft.handles(path):  # aircraft near HPN (#155)
+                return self._send(*aircraft.get(path, url.query, self.headers))
             if path == "/api/cad/health" and station_health is not None:
                 return self._send(200, json.dumps(station_health.panel(), separators=(",", ":"), default=str).encode(),
                                   "application/json")
@@ -646,7 +652,8 @@ class WebServer:
                  set_talkgroup_group: Callable[..., str | None] | None = None,
                  retranscribe: Callable[[list[str] | None], int] | None = None, cad=None, station=None,
                  health: dict | None = None, access=None, access_log: Callable[[str], None] | None = None,
-                 station_mode=None, role: str = "", roads=None, gis=None, trains=None, weather=None, station_health=None):
+                 station_mode=None, role: str = "", roads=None, gis=None, trains=None, weather=None, station_health=None,
+                 aircraft=None):
         self.access = access
         self.broadcaster = Broadcaster(state_fn)
         # The CAD's own state push (the whole console rebuilt and sent once a second): not on a station,
@@ -656,7 +663,7 @@ class WebServer:
             json.dumps(scene, separators=(",", ":")).encode(), self.broadcaster, clip, close_incident, set_mode,
             set_talkgroup, set_talkgroup_group, retranscribe, cad, self.cad_broadcaster, station,
             json.dumps(health or {"ok": True}, separators=(",", ":")).encode(), access, access_log, station_mode, role,
-            roads, gis, trains, weather, station_health))
+            roads, gis, trains, weather, station_health, aircraft=aircraft))
         self.httpd.daemon_threads = True
 
     @property

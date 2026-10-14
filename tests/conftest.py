@@ -128,3 +128,23 @@ def _notify_stays_local(monkeypatch):
         assert host in ("127.0.0.1", "localhost", "::1"), f"a test tried to reach {host} (notify: local fake ntfy only)"
         return real(req, *a, **kw)
     monkeypatch.setattr(notify, "urlopen", local_only)
+
+
+@pytest.fixture(autouse=True)
+def _aircraft_stays_local(monkeypatch):
+    """Aircraft near HPN (sizeup/aircraft.py) never reach adsb.lol, adsb.fi or the FAA from a test: their default
+    addresses are off (an AircraftLayer built with none says not configured, and fetches no registry), and the real
+    fetch only to this machine (tests hand in recorded fixtures, tests/fixtures/aircraft/)."""
+    from urllib.parse import urlsplit
+
+    import sizeup.aircraft as aircraft
+    monkeypatch.setattr(aircraft, "ADSBLOL_URL", "")
+    monkeypatch.setattr(aircraft, "ADSBFI_URL", "")
+    monkeypatch.setattr(aircraft, "FAA_URL", "")
+    real = aircraft.urlopen
+
+    def local_only(req, *a, **kw):
+        host = urlsplit(req.full_url if hasattr(req, "full_url") else str(req)).hostname
+        assert host in ("127.0.0.1", "localhost", "::1"), f"a test tried to reach {host} (aircraft: fixtures only)"
+        return real(req, *a, **kw)
+    monkeypatch.setattr(aircraft, "urlopen", local_only)

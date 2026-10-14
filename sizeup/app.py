@@ -384,6 +384,10 @@ class App:
         # someone looks at the Trains layer or an event near the tracks.
         from sizeup.trains import Trains
         self.trains = Trains.from_config(cfg, log=log)
+        # Aircraft near HPN (sizeup/aircraft.py, #155): shortfinal's PCFD-focused picture, read by the CAD of record
+        # while someone looks at the Aircraft layer. It never opens a dongle: a receiver's aircraft.json is only read.
+        from sizeup.aircraft import AircraftLayer
+        self.aircraft = AircraftLayer.from_config(cfg, log=log, devices=lambda: sdr_lookup.devices(cfg.rtl_fm))
         # Weather and water (sizeup/weather.py, #132): NWS alerts, conditions and radar, NOAA tides; a warning
         # said by the dispatch voice when Settings > Dispatch allows it (played where the console is open).
         from sizeup.weather import Weather
@@ -2073,6 +2077,7 @@ class App:
             self.roads.start()
             self.gis.start()
             self.trains.start()
+            self.aircraft.start()
             self.weather.start()
         return self
 
@@ -2127,6 +2132,7 @@ class App:
         self.roads.stop()
         self.gis.stop()
         self.trains.stop()
+        self.aircraft.stop()
         self.weather.stop()
 
     def _weather_voice(self, text: str) -> tuple[str | None, str]:
@@ -2162,7 +2168,8 @@ def make_server(app: App) -> WebServer:
                        station=getattr(app, "hub", None), health=health_info(cfg), access=access_verifier(cfg),
                        access_log=log if cfg.cloud_role == "hub" else None, station_mode=app.station,
                        role=cfg.cloud_role, roads=app.roads, gis=app.gis,
-                       trains=app.trains, weather=app.weather, station_health=getattr(app, "health", None))
+                       trains=app.trains, weather=app.weather, station_health=getattr(app, "health", None),
+                       aircraft=app.aircraft)
 
     def changed() -> None:             # a new talker is pushed at once, not on the next second
         server.poke()
