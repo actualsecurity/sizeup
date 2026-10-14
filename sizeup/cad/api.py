@@ -55,14 +55,15 @@ POST /api/cad/settings/<section>          {action, ..., operator?}: event_types 
                                           record?, transcribe?, engine?: local | aws | both} (Settings > Radios) |
                                           stt {action: set | reset, key: vocabulary | aws_monthly_limit_usd, value}
                                           | {action: push}: the vocabulary to Amazon Transcribe (sizeup/channels.py)
-                                          tones {action: set, a_hz, b_hz, name, ours?, page?, type?, confirmed?, list?} |
-                                          {action: delete | reset, key} | {action: reread, page}: a tone pair named from a
-                                          page row ("Name these tones", #80) or edited in Settings > Radios > Tones (#115;
-                                          list: a row of the tone list, kept over it); page: that page is read again with
-                                          the name; reread: the page's recording through the tone decoder again
-GET  /api/cad/tones                       {named: [{key, name, a_hz, b_hz, ours, page?, type?, at, operator}], names: the
-                                          names to pick from, suggest: [{name, type}] (the plan's, the county's fire and
-                                          EMS agencies), types, ours: PCFD's and Rye Brook's}
+                                          tones (the tone book, #80/#115/#122): {action: set, a_hz, b_hz, places, service,
+                                          role?, confirmed?, ours?, page?, list?} a pair named or edited (page: read again) |
+                                          {action: move, key, places, service} a pair under another entity (or a new one) |
+                                          {action: entity, key, ours?, notes?, aliases?} | {action: merge, key, into:
+                                          {places, service}} | {action: delete | reset, key} | {action: reread, page}: the
+                                          page's recording through the tone decoder again
+GET  /api/cad/tones                       {named: [pairs named here], choices: [{key, name, places, service, aliases,
+                                          ours}] (the tone book's entities, the county's agencies), places (one canonical
+                                          list), services, names, ours: the ours entities' names}
 GET  /api/cad/stt                         Settings > Radios > Vocabulary: {vocabulary: {phrases, edited, suggestions,
                                           aws (as sent), skipped, sig, state}, limit, aws (where it runs, this month's cost)}
 GET  /api/cad/export/<name>.csv           incidents | calls | unit-history | event-log, the sheet's columns

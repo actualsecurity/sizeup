@@ -61,17 +61,28 @@ window.Radio = (() => {
   // on the air); "(est.)" stays (an estimated code).
 
   const hz = (x) => Number(x).toFixed(1);
-  const pairName = (p) => (p.names || []).map((n) => n.replace(/ \(heard\)$/, "")).join(" / ");
+  // The tone book's names (#122): "Places · Service[ · Role]"; several places shortened to the first one and "+N" in a
+  // tag ("Port Chester +2 · EMS"), the whole name in its title. Two names on one pair: a conflict in the tone book.
+  const SERVICES = ["Fire", "EMS", "Police", "Other"];
+  function shortName(n) {
+    const parts = n.split(" · ");
+    const i = parts.findIndex((p, k) => k > 0 && SERVICES.includes(p.replace(/ \((heard|est\.)\)$/, "")));
+    return i > 1 ? [`${parts[0]} +${i - 1}`, ...parts.slice(i)].join(" · ") : n;
+  }
+  const pairName = (p, short = false) => (p.names || []).map((n) => n.replace(/ \(heard\)$/, ""))
+    .map((n) => (short ? shortName(n) : n)).join(" / ");
   const pairTones = (p) => hz(p.a ?? p.a_hz) + ((p.b ?? p.b_hz) ? `/${hz(p.b ?? p.b_hz)}` : "");
   function pageWords(p) {
-    return [p.channel, p.ended ? "Paged" : "Paging", ...(p.pairs || []).map((x) => pairName(x) || pairTones(x)),
+    return [p.channel, p.ended ? "Paged" : "Paging", ...(p.pairs || []).map((x) => pairName(x, true) || pairTones(x)),
             ...(p.phase === "voice" ? ["voice"] : [])].join(" · ");
   }
   function pageTags(tones) {
     return (tones || []).map((x) => {
-      const name = pairName(x);
-      const t = el("span", "page-dept" + (x.ours ? " ours" : "") + (name ? "" : " unk"), name || pairTones(x));
+      const name = pairName(x), conflict = (x.names || []).length > 1;
+      const t = el("span", "page-dept" + (x.ours ? " ours" : "") + (name ? "" : " unk") + (conflict ? " conflict" : ""),
+        pairName(x, true) || pairTones(x));
       t.title = name ? `${name}: ${pairTones(x)} Hz` : `${pairTones(x)} Hz: no department has this code yet`;
+      if (conflict) t.title += "\nConflict: this pair is under each of these in the tone book (Settings > Radios > Tones)";
       return t;
     });
   }
@@ -368,6 +379,6 @@ window.Radio = (() => {
     return box.childNodes.length ? box : null;
   }
 
-  return { update, talkingFor, rigTag, mountAlerts, label, chipClass, who, shown, toast, prealert, fillPaging, pageTags,
+  return { update, talkingFor, rigTag, mountAlerts, label, chipClass, who, shown, toast, prealert, fillPaging, pageTags, shortName,
            get talking() { return st.talking; }, get paging() { return st.paging; } };
 })();

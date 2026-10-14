@@ -383,7 +383,7 @@ def test_named_tones_reach_the_station_with_the_channel_choices(tmp_path):
         st = station(station_cfg(tmp_path, hub.url), {})
         assert wait(lambda: st.cad.settings.tone_overrides().get("832.5/1201.0", {}).get("name") == "Fairview", 10)
         assert wait(lambda: hub.get("/api/state")["channels"]["sync"]["state"] == "applied", 10)
-        assert st.plan.match(ToneEvent("two_tone", 832.5, 1201.0, 0, 4)).names == ("Fairview",)
+        assert st.plan.match(ToneEvent("two_tone", 832.5, 1201.0, 0, 4)).names == ("Fairview · Fire",)
         assert st.cad.settings.audit_log("radios")[0]["operator"] == "hub"
         assert hub_post(hub, "tones", {"action": "set", "a_hz": 669.9, "b_hz": 1092.4, "name": "Rye Brook FD"})[0] == 200
         assert wait(lambda: st.paging.is_ours(st.plan.match(ToneEvent("two_tone", 669.9, 1092.4, 0, 4)).names), 10)

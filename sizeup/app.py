@@ -857,13 +857,17 @@ class App:
     # -- tone pairs named from the console (Settings "tones", #80) ------------------------------------------
 
     def _apply_named_tones(self) -> None:
-        """The plan = the config's codes with the edits from Settings > Radios > Tones on them (#115: list rows renamed or
-        taken out) + the pairs named there; ours = the config's + the names marked ours (sizeup/cad/tonelist.py)."""
+        """The plan = the tone book (sizeup/cad/tonelist.py, #122): the config's codes read as entities (places +
+        service), with the edits from Settings > Radios > Tones on them and the pairs named there, each pair named
+        "Places · Service[ · Role]"; ours = the ours entities' names (+ the config's), the CAD's queue = PCFD's and
+        Rye Brook's (monitor_names)."""
         self._tone_ov = self.cad.settings.tone_overrides()
-        self.plan.replace(tonelist.effective(self.cfg.tones, self._tone_ov))
-        ours = tonelist.ours_names(set(self.cfg.ours) | set(self.cfg.cad_monitor_departments), self._tone_ov)
+        book = self.cad.settings.tone_book(self._tone_ov)
+        self.plan.replace(book.codes())
+        ours = book.ours_names()
         self.store.ours = ours
         self.paging.ours = {base_name(n) for n in ours}
+        self.cad.monitor_names = {base_name(n) for n in book.monitor_names()}
         self._rematch_pages()
 
     def _rematch_pages(self) -> None:
@@ -881,7 +885,9 @@ class App:
         so a page of ours becomes a pending event)."""
         self._apply_named_tones()
         log("tone pairs named or edited from the console: " + (", ".join(
-            f"{k} " + ("taken out" if v.get("deleted") else str(v.get("name", ""))) + (" (ours)" if v.get("ours") else "")
+            f"{k} " + ("taken out" if v.get("deleted") else str(v.get("name") or tonelist.display(v.get("places") or [],
+                                                                                                  v.get("service", ""), v.get("role", ""))))
+            + (" (ours)" if v.get("ours") else "")
             for k, v in sorted(self._tone_ov.items())) or "none"))
         try:
             n = self.cad.comms.retag_pages(self._match_pair, self.paging.is_ours)
@@ -945,12 +951,12 @@ class App:
                           for t in tones], "sequence": seq}
 
     def tone_names(self) -> dict:
-        """GET /api/cad/tones: the pairs named here and the names to pick from (suggest: [{name, type}], every name in
-        the plan, the console's departments and the county's agencies, EMS included, #115)."""
-        ours = sorted(set(self.cfg.ours) | set(self.cfg.cad_monitor_departments))
-        suggest = self.cad.settings.tone_suggestions()
-        return {"named": self.cad.settings.tone_rows(), "names": [x["name"] for x in suggest], "suggest": suggest,
-                "ours": ours, "types": list(tonelist.TYPES)}
+        """GET /api/cad/tones: the pairs named here and what to pick from (#122): choices (every entity, the county's
+        agencies: [{key, name, places, service, aliases, ours}]), places (one canonical list), services; names: the
+        choices' names; ours: the ours entities'."""
+        got = self.cad.settings.tone_choices()
+        return {"named": self.cad.settings.tone_rows(), "names": [c["name"] for c in got["choices"]], **got,
+                "ours": sorted(c["name"] for c in got["choices"] if c["ours"])}
 
     def _to_cad(self, t: Traffic, replace: bool = True) -> None:
         """A transmission into the CAD's communications log (linked to its rig's events)."""
