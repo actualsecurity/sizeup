@@ -18,7 +18,8 @@ const S = {
   previewT: null, previewSeq: 0, tsOpen: new Set(),
   act: null, actEmail: "", actKind: "", actKey: "", actAt: 0,
   rtab: store("sizeup.cad.settings.radios") || "receivers",        // Settings > Radios: the tab (#settings/radios/<tab>)
-  toneQ: "", toneShow: "", toneType: "", toneEdit: null, unnamedEdit: null,
+  toneQ: "", toneShow: "", toneType: "", toneEdit: null, unnamedEdit: null,      // Radios > Tones (#115, #122)
+  toneOpen: new Set(), entEdit: null, entMerge: null, toneMove: null, toneAdd: null,
 };
 const S_SECTIONS = [["lists", "Lists"], ["runcards", "Run cards"], ["units", "Units"], ["dispatch", "Dispatch"],
   ["users", "Users"], ["system", "System"], ["radios", "Radios"]];
@@ -27,7 +28,7 @@ const S_SECTIONS = [["lists", "Lists"], ["runcards", "Run cards"], ["units", "Un
 const S_RADIO_TABS = [["receivers", "Receivers"], ["channels", "Channels"], ["tones", "Tones"], ["ids", "Radio IDs"],
   ["vocabulary", "Vocabulary"], ["stt", "Speech-to-text"]];
 const S_RC_TABS = new Set(["receivers", "channels", "vocabulary", "stt"]);    // radio-controls.js's cards
-const S_TONE_TYPES = [["fire", "Fire"], ["ems", "EMS"], ["police", "Police"], ["other", "Other"]];
+const S_TONE_TYPES = [["fire", "Fire"], ["ems", "EMS"], ["police", "Police"], ["other", "Other"]];   // the services (#122)
 const S_LISTS = [["event_types", "Event types"], ["event_subtypes", "Event subtypes"], ["type_subtypes", "Subtypes per type"],
   ["dispositions", "Dispositions"],
   ["received_via", "Received via"], ["unit_statuses", "Unit statuses"], ["event_class", "Emergency rules"],
@@ -248,15 +249,14 @@ function sRadios() {
 
 const sHz = (v) => (v ? Number(v).toFixed(1) : "—");
 const sPair = (a, b) => `${sHz(a)}/${b ? sHz(b) : "-"}`;
-const sTypeName = (k) => (S_TONE_TYPES.find(([x]) => x === k) || [k, k])[1];
-function sToneSource(r) {
-  const by = r.operator ? opParts(r.operator)[0] : "";
-  if (r.origin === "named") return `Named by ${by || "—"}${r.at ? `, ${fmtTime(r.at)}` : ""}`;
-  if (r.origin === "config") return "Config ([[tones]])";
-  const src = `${r.origin === "heard" ? "Heard on air" : "County list"} (${r.source || "?"}${r.fetched ? `, ${r.fetched}` : ""})`;
-  return r.state === "edited" || r.state === "deleted" ? `${src}; ${r.state} by ${by || "—"}${r.at ? `, ${fmtTime(r.at)}` : ""}` : src;
+const sNoBreakDates = (t) => t.replace(/(\d{4})-(\d\d)-(\d\d)/g, "$1‑$2‑$3");   // a date never wraps
+function sPairSource(p) {
+  const by = p.operator ? opParts(p.operator)[0] : "";
+  if (p.origin === "named") return `Named by ${by || "—"}${p.at ? `, ${fmtTime(p.at)}` : ""}`;
+  if (p.origin === "config") return "Config ([[tones]])";
+  const src = `${p.origin === "heard" ? "Heard on air" : "County list"} (${p.source || "?"}${p.fetched ? `, ${p.fetched}` : ""})`;
+  return (p.state === "edited" || p.state === "deleted") ? `${src}; ${p.state} by ${by || "—"}${p.at ? `, ${fmtTime(p.at)}` : ""}` : src;
 }
-const sNoBreakDates = (t) => t.replace(/(\d{4})-(\d\d)-(\d\d)/g, "$1\u2011$2\u2011$3");   // a date never wraps
 function sTd(cls, label, ...kids) {
   const td = el("td", cls);
   if (label) td.dataset.l = label;
@@ -272,148 +272,250 @@ function sCheck(label, checked, title) {
   if (title) l.title = title;
   return [l, cb];
 }
-function sTypeSelect(value) {
-  return sSelect(S_TONE_TYPES, value || "fire", null, "Agency type");
+function sServiceSelect(value) {
+  return sSelect(S_TONE_TYPES, value || "fire", null, "Service");
 }
-function sNamesList(d) {
-  const list = el("datalist");
-  list.id = "s-tone-names";
-  list.append(...(d.suggest || []).map((x) => new Option(x.name)));
-  return list;
+// Places + service + role, the way the dialog takes them (cad.js tonePicker): places from the one canonical list
+// (new ones allowed), an entity's name or alias fills both.
+function sPicker(d, init) {
+  return tonePicker({ places: d.places || [], choices: d.choices || [] }, init || {});
 }
-function sNameInput(value, typeSel, oursCb, locked) {
-  const name = sInput(value, 60, "Department or agency", null, "s-name");
-  name.setAttribute("list", "s-tone-names");
-  const types = new Map((S.data.tones.suggest || []).map((x) => [x.name.toLowerCase(), x.type]));
-  let typed = false;
-  typeSel.addEventListener("change", () => { typed = true; });
-  name.addEventListener("input", () => {
-    const v = name.value.trim();
-    if (!typed && types.has(v.toLowerCase())) typeSel.value = types.get(v.toLowerCase());
-    if (oursCb && locked.has(v)) oursCb.checked = true;
-  });
-  return name;
-}
+const sEntOf = (d, key) => (d.entities || []).find((e) => e.key === key);
 
+// The tone book (#122): one row per entity (its places and service, aliases, ours, pairs, last heard), opened to its
+// pairs (A, B, role, status, source, heard). Search finds an entity by name, alias or Hz.
 function sTonePage(d) {
   if (!d) return [el("div", "empty", "No tone list here")];
-  const locked = new Set(d.locked || []);
-  const rows = d.rows || [];
-  const t = el("table", "evtable s-tones");
+  const ents = d.entities || [];
+  const t = el("table", "evtable s-tones s-ents");
   const head = el("tr");
-  for (const h of ["A", "B", "Name", "Type", "Ours", "Source", "Status", "Last heard", "Heard", ""]) head.append(el("th", "", h));
+  for (const h of ["", "Entity", "Aliases", "Ours", "Pairs", "Last heard", "Heard", ""]) head.append(el("th", "", h));
   t.append(el("thead"), el("tbody"));
   t.tHead.append(head);
   const body = t.tBodies[0];
-  if (S.toneEdit === "new") body.append(sToneEditRow(null, locked));
-  for (const r of rows) body.append(S.toneEdit === r.id ? sToneEditRow(r, locked) : sToneRow(r));
+  for (const e of ents) {
+    body.append(S.entEdit === e.key ? sEntEditRow(d, e) : sEntRow(d, e));
+    if (S.entMerge === e.key) body.append(sMergeRow(d, e));
+    if (S.toneOpen.has(e.key) || S.toneQ.trim()) for (const p of e.pairs) {
+      body.append(S.toneEdit === p.id ? sPairEditRow(d, e, p) : sPairRow(d, e, p));
+      if (S.toneMove && S.toneMove.id === p.id) body.append(sMoveRow(d, e, p));
+    }
+  }
   const count = el("span", "dim small");
   const filter = () => {
     const q = S.toneQ.trim().toLowerCase();
     let n = 0;
     for (const tr of body.rows) {
-      if (!tr.dataset.id || tr.classList.contains("s-tedit")) continue;
-      const r = rows.find((x) => x.id === tr.dataset.id);
-      const ok = (!q || tr.dataset.q.includes(q))
-        && (!S.toneType || r.type === S.toneType)
-        && (!S.toneShow || (S.toneShow === "ours" ? r.ours : S.toneShow === "unconfirmed" ? !r.confirmed && r.state !== "deleted"
-          : r.state === S.toneShow));
+      const e = sEntOf(d, tr.dataset.ent);
+      if (!e) continue;
+      const pairs = tr.dataset.pair ? e.pairs.filter((p) => p.id === tr.dataset.pair) : e.pairs;
+      const hit = (p) => `${sPair(p.a_hz, p.b_hz)} ${p.a_hz} ${p.b_hz || ""} ${p.role}`.toLowerCase().includes(q);
+      const entHit = `${e.name} ${e.aliases.join(" ")} ${e.notes}`.toLowerCase().includes(q);
+      const ok = (!q || entHit || pairs.some(hit))
+        && (!S.toneType || e.service === S.toneType)
+        && (!S.toneShow || (S.toneShow === "ours" ? e.ours : S.toneShow === "conflict" ? (tr.dataset.pair ? pairs.some((p) => p.conflicts.length) : e.conflict)
+          : S.toneShow === "unconfirmed" ? pairs.some((p) => !p.confirmed && p.state !== "deleted")
+            : S.toneShow === "edited" ? e.edited || pairs.some((p) => ["edited", "named"].includes(p.state))
+              : pairs.some((p) => p.state === "deleted")));
       tr.hidden = !ok;
-      n += ok ? 1 : 0;
+      if (ok && !tr.dataset.pair) n++;
     }
-    count.textContent = n === rows.length ? `${rows.length} pairs` : `${n} of ${rows.length} pairs`;
+    count.textContent = n === ents.length ? `${ents.length} entities` : `${n} of ${ents.length} entities`;
   };
   const q = el("input", "s-tone-q");
-  Object.assign(q, { type: "search", placeholder: "Search name or Hz", value: S.toneQ, spellcheck: false });
-  q.setAttribute("aria-label", "Search tone pairs");
-  q.addEventListener("input", () => { S.toneQ = q.value; filter(); });
-  const show = sSelect([["", "All pairs"], ["ours", "Ours"], ["unconfirmed", "Unconfirmed"], ["named", "Named here"],
-    ["edited", "Edited"], ["deleted", "Taken out"]], S.toneShow, (v) => { S.toneShow = v; filter(); }, "Show");
-  const type = sSelect([["", "Any type"], ...S_TONE_TYPES], S.toneType, (v) => { S.toneType = v; filter(); }, "Agency type");
-  show.classList.add("ro-ok");
-  type.classList.add("ro-ok");
+  Object.assign(q, { type: "search", placeholder: "Search a name, alias or Hz", value: S.toneQ, spellcheck: false });
+  q.setAttribute("aria-label", "Search the tone book");
+  q.addEventListener("input", () => {
+    const had = !!S.toneQ.trim();
+    S.toneQ = q.value;
+    if (had !== !!S.toneQ.trim()) { sRender(true); setTimeout(() => { const n = $(".s-tone-q"); if (n) { n.focus(); n.setSelectionRange(n.value.length, n.value.length); } }, 0); return; }
+    filter();
+  });
+  const showSel = sSelect([["", "All"], ["ours", "Ours"], ["conflict", "Conflicts"], ["unconfirmed", "Unconfirmed"],
+    ["edited", "Edited here"], ["deleted", "Taken out"]], S.toneShow, (v) => { S.toneShow = v; filter(); }, "Show");
+  const typeSel = sSelect([["", "Any service"], ...S_TONE_TYPES], S.toneType, (v) => { S.toneType = v; filter(); }, "Service");
+  showSel.classList.add("ro-ok");
+  typeSel.classList.add("ro-ok");
   const tools = el("div", "row s-tone-tools");
-  tools.append(q, show, type, count);
+  tools.append(q, showSel, typeSel, count);
   filter();
-  const add = S.toneEdit === "new" ? null : sBtn("Add pair", "A pair the list doesn't have", () => { S.toneEdit = "new"; sRender(true); }, "primary");
-  const card = sCard(sCardHead("Tone pairs", "", sHelp("Every two-tone pair the decoder knows: the county list "
-    + "(data/westchester_tones.csv, its source and date), the pairs named here or from a page row (Name these tones), "
-    + "the config's. Edits to a list row are kept over the list, never written into it: Reset to list takes them off. "
-    + "Ours goes by the name: PCFD's and Rye Brook's pages become pending events. Unconfirmed: an estimate; a heard or "
-    + "listed name wins over it. Last heard and Heard: the pages in Radio (90 days) and the unknown-tones log. Changes "
-    + "go to the station with the channel choices: its live paging display names them."), add),
-  sNamesList(d), tools, el("div", "tscroll").appendChild(t).parentNode);
-  return [card, sUnnamed(d, locked)];
+  const conflicts = (d.report && d.report.conflicts) || [];
+  const add = S.toneAdd ? null : sBtn("Add pair", "A pair for an entity (or a new one)", () => { S.toneAdd = {}; sRender(true); }, "primary");
+  const card = sCard(sCardHead("Tone book", "", sHelp("Every agency the decoder knows as its places and a service "
+    + "(Port Chester · Fire; Port Chester · Rye · Rye Brook · EMS), each with its tone pairs and a role for each pair "
+    + "(All call, Chiefs, Station 1). Read from the county list (data/westchester_tones.csv: a name with no service word "
+    + "is Fire) and the pairs named here; edits are kept over the list, never written into it: Reset takes them off. "
+    + "Ours is the entity's: PCFD's and Rye Brook's pages become pending events. A pair under two entities is a "
+    + "conflict: it matches both until you move, merge or take one out. Changes go to the station with the channel "
+    + "choices: its live paging display names them."), add),
+  ...(conflicts.length ? [el("p", "warnbox small", `${conflicts.length} pair${conflicts.length === 1 ? "" : "s"} under two entities: ${conflicts.join("; ")}`)] : []),
+  ...(S.toneAdd ? [sToneAddForm(d)] : []), tools, el("div", "tscroll").appendChild(t).parentNode);
+  return [card, sUnnamed(d)];
 }
 
-function sToneRow(r) {
-  const tr = el("tr", `s-trow ${r.state}`);
-  tr.dataset.id = r.id;
-  tr.dataset.q = `${r.name} ${sPair(r.a_hz, r.b_hz)} ${r.a_hz} ${r.b_hz || ""} ${sToneSource(r)}`.toLowerCase();
-  const stateChip = { edited: ["edited", "edited"], named: ["added", "named here"], deleted: ["deleted", "taken out"] }[r.state];
-  const name = sTd("s-t-name", "", el("b", "", r.name), stateChip ? el("span", `chip s-state ${stateChip[0]}`, stateChip[1]) : null);
-  if (r.page) name.title = `Named from page ${r.page}`;
-  const ours = r.ours ? el("span", "chip s-state added", "ours") : el("span", "dim", "—");
-  if (r.ours_locked) ours.title = "PCFD's or Rye Brook's name: always ours";
-  const status = r.confirmed ? el("span", "dim", "confirmed") : sConfirm("An estimate (the list's estimated table, or marked unconfirmed here)");
-  if (!r.confirmed) status.textContent = "estimated";
+function sEntRow(d, e) {
+  const tr = el("tr", "s-erow" + (e.conflict ? " conflict" : ""));
+  tr.dataset.ent = e.key;
+  const open = S.toneOpen.has(e.key) || !!S.toneQ.trim();
+  const tog = sBtn(open ? "▾" : "▸", open ? "Close" : "Its pairs", () => {
+    if (S.toneOpen.has(e.key)) S.toneOpen.delete(e.key); else S.toneOpen.add(e.key);
+    sRender(true);
+  }, "mini icon quiet ro-ok");
+  tog.setAttribute("aria-expanded", String(open));
+  const name = sTd("s-t-name", "", el("b", "", e.name), e.edited ? el("span", "chip s-state edited", "edited") : null,
+    e.conflict ? el("span", "chip s-confirm", "conflict") : null);
+  if (e.notes) name.title = e.notes;
+  const ours = e.ours ? el("span", "chip s-state added", "ours") : el("span", "dim", "—");
+  if (e.ours_locked) ours.title = "PCFD's or Rye Brook's: always ours";
   const acts = sTd("s-t-act");
-  if (r.state === "deleted") {
-    acts.append(sBtn("Reset to list", "Back in the plan as the list has it", () => sPost("tones", { action: "reset", key: r.id }, `${r.name} back as listed`)));
-  } else {
-    acts.append(sBtn("Edit", "", () => { S.toneEdit = r.id; sRender(true); }, "mini"));
-    if (r.state === "edited") acts.append(sBtn("Reset to list", `As the list has it: ${r.list.name}`, () =>
-      sPost("tones", { action: "reset", key: r.id }, `${r.list.name} as listed`), "mini"));
-    acts.append(sBtn(r.origin === "named" ? "Delete" : "Take out", r.origin === "named" ? "Forget the name: the pair is unknown again"
-      : "Out of the plan (kept over the list: Reset to list brings it back)", () => sAsk(r.origin === "named"
-      ? `Forget that ${sPair(r.a_hz, r.b_hz)} Hz is ${r.name}?` : `Take ${r.name} ${sPair(r.a_hz, r.b_hz)} Hz out of the tone plan?`,
-    () => sPost("tones", { action: "delete", key: r.id }, `${r.name} ${r.origin === "named" ? "removed" : "taken out"}`),
-    r.origin === "named" ? "Delete" : "Take out"), "mini danger-quiet"));
-  }
-  tr.append(sTd("s-t-hz mono", "A", sHz(r.a_hz)), sTd("s-t-hz mono", "B", r.b_hz ? sHz(r.b_hz) : "-"), name,
-    sTd("s-t-type", "", el("span", "chip", sTypeName(r.type))), sTd("s-t-ours", "", ours),
-    sTd("s-t-src dim small", "", sNoBreakDates(sToneSource(r))), sTd("s-t-conf", "", status),
-    sTd("s-t-last t", "Last heard", r.last ? fmtTime(r.last) : "—"), sTd("s-t-n", "Heard", String(r.heard || 0)), acts);
+  acts.append(sBtn("Edit", "Ours, notes, aliases", () => { S.entEdit = e.key; sRender(true); }, "mini"),
+    sBtn("Merge", "Its pairs under another entity", () => { S.entMerge = e.key; sRender(true); }, "mini"),
+    sBtn("Add pair", "", () => { S.toneAdd = { places: e.places, service: e.service }; sRender(true); }, "mini"));
+  if (e.edited) acts.append(sBtn("Reset", "As the list reads it", () => sPost("tones", { action: "reset", key: `entity:${e.key}` }, `${e.name} reset`), "mini"));
+  tr.append(sTd("s-t-tog", "", tog), name, sTd("s-t-src dim small", "Also", e.aliases.join(", ") || "—"), sTd("s-t-ours", "", ours),
+    sTd("s-t-n", "Pairs", String(e.count)), sTd("s-t-last t", "Last heard", e.last ? fmtTime(e.last) : "—"),
+    sTd("s-t-n", "Heard", String(e.heard || 0)), acts);
   return tr;
 }
 
-// A row being edited (r null: a new pair): A and B for a new one; name (every name known, or typed), type, ours,
-// confirmed. A list row's edit is kept over the list.
-function sToneEditRow(r, locked) {
-  const tr = el("tr", "s-trow s-tedit");
-  tr.dataset.id = r ? r.id : "new";
-  const type = sTypeSelect(r ? r.type : "fire");
-  const [oursL, ours] = sCheck("Ours", r ? r.ours : false, "Ours goes by the name: its pages become pending events");
-  const name = sNameInput(r ? r.name : "", type, ours, locked);
-  if (r && r.ours_locked) ours.disabled = true;
-  const [confL, conf] = sCheck("Confirmed", r ? r.confirmed : true, "Unticked: an estimate (a heard or listed name wins over it)");
-  const hz = (v, label) => {
+function sEntEditRow(d, e) {
+  const tr = el("tr", "s-erow s-tedit");
+  tr.dataset.ent = e.key;
+  const [oursL, ours] = sCheck("Ours", e.ours, "Its pages become pending events");
+  if (e.ours_locked) ours.disabled = true;
+  const notes = sInput(e.notes, 300, "Notes", null, "s-name");
+  const al = sInput(e.aliases.filter((a) => !e.pairs.some((p) => p.list && p.list.name === a)).join(", "), 600, "Other names, comma-separated", null, "s-name");
+  const save = () => sPost("tones", { action: "entity", key: e.key, ...(e.ours_locked ? {} : { ours: ours.checked }), notes: notes.value.trim(),
+    aliases: al.value.split(",").map((x) => x.trim()).filter(Boolean) }, `${e.name} saved`).then((r) => { if (r) { S.entEdit = null; sRender(true); } });
+  tr.append(sTd("s-t-tog", ""), sTd("s-t-name", "", el("b", "", e.name), notes), sTd("s-t-src", "", al), sTd("s-t-ours", "", oursL),
+    sTd("s-t-n", "", ""), sTd("s-t-last", "", ""), sTd("s-t-n", "", ""),
+    sTd("s-t-act", "", sBtn("Cancel", "", () => { S.entEdit = null; sRender(true); }, "mini"), sBtn("Save", "", save, "mini primary")));
+  setTimeout(() => notes.focus(), 0);
+  return tr;
+}
+
+function sMergeRow(d, e) {
+  const tr = el("tr", "s-prow s-tedit");
+  tr.dataset.ent = e.key;
+  const others = (d.entities || []).filter((x) => x.key !== e.key);
+  const sel = sSelect(others.map((x) => [x.key, x.name]), "", null, "Merge into");
+  const go = () => {
+    const into = sEntOf(d, sel.value);
+    if (!into) return;
+    sAsk(`Put ${e.name}'s ${e.count} pair${e.count === 1 ? "" : "s"} under ${into.name}? (Reset on ${into.name}'s aliases undoes it.)`,
+      () => sPost("tones", { action: "merge", key: e.key, into: { places: into.places, service: into.service } }, `${e.name} merged into ${into.name}`)
+        .then((r) => { if (r) { S.entMerge = null; sRender(true); } }), "Merge");
+  };
+  const td = sTd("s-t-naming", "", el("span", "dim small", `Merge ${e.name} into`), sel,
+    sBtn("Cancel", "", () => { S.entMerge = null; sRender(true); }, "mini"), sBtn("Merge", "", go, "mini primary"));
+  td.colSpan = 8;
+  tr.append(td);
+  return tr;
+}
+
+function sPairRow(d, e, p) {
+  const tr = el("tr", `s-prow ${p.state}` + (p.conflicts.length ? " conflict" : ""));
+  tr.dataset.ent = e.key;
+  tr.dataset.pair = p.id;
+  const stateChip = { edited: ["edited", "edited"], named: ["added", "named here"], deleted: ["deleted", "taken out"] }[p.state];
+  const status = p.confirmed ? el("span", "dim", "confirmed") : sConfirm("An estimate: a heard or listed name wins over it");
+  if (!p.confirmed) status.textContent = "estimated";
+  const role = sTd("s-t-name", "", el("span", "mono", sPair(p.a_hz, p.b_hz)), el("span", "", p.role ? ` · ${p.role}` : ""),
+    stateChip ? el("span", `chip s-state ${stateChip[0]}`, stateChip[1]) : null,
+    p.conflicts.length ? el("span", "chip s-confirm", `also ${p.conflicts.join(", ")}`) : null);
+  const acts = sTd("s-t-act");
+  if (p.state === "deleted") {
+    acts.append(sBtn("Reset to list", "Back in the plan as the list has it", () => sPost("tones", { action: "reset", key: p.id }, `${sPair(p.a_hz, p.b_hz)} back`), "mini"));
+  } else {
+    acts.append(sBtn("Edit", "Role, confirmed", () => { S.toneEdit = p.id; sRender(true); }, "mini"),
+      sBtn("Move", "Under another entity", () => { S.toneMove = { id: p.id, mode: "move" }; sRender(true); }, "mini"),
+      sBtn("Split", "Into a new entity", () => { S.toneMove = { id: p.id, mode: "split" }; sRender(true); }, "mini"));
+    if (p.state === "edited") acts.append(sBtn("Reset to list", `As the list has it: ${p.list ? p.list.name : ""}`, () =>
+      sPost("tones", { action: "reset", key: p.id }, `${sPair(p.a_hz, p.b_hz)} as listed`), "mini"));
+    acts.append(sBtn(p.origin === "named" ? "Remove" : "Take out", p.origin === "named" ? "Forget it: the pair is unknown again"
+      : "Out of the plan (Reset to list brings it back)", () => sAsk(`${p.origin === "named" ? "Forget" : "Take out"} ${sPair(p.a_hz, p.b_hz)} Hz of ${e.name}?`,
+      () => sPost("tones", { action: "delete", key: p.id }, `${sPair(p.a_hz, p.b_hz)} ${p.origin === "named" ? "removed" : "taken out"}`),
+      p.origin === "named" ? "Remove" : "Take out"), "mini danger-quiet"));
+  }
+  const src = sTd("s-t-src dim small", "", sNoBreakDates(sPairSource(p)) + (p.list && p.list.name ? ` · listed as ${p.list.name}` : ""));
+  tr.append(sTd("s-t-tog", ""), role, src, sTd("s-t-conf", "", status), sTd("s-t-n", "", ""),
+    sTd("s-t-last t", "Last heard", p.last ? fmtTime(p.last) : "—"), sTd("s-t-n", "Heard", String(p.heard || 0)), acts);
+  return tr;
+}
+
+function sPairEditRow(d, e, p) {
+  const tr = el("tr", "s-prow s-tedit");
+  tr.dataset.ent = e.key;
+  tr.dataset.pair = p.id;
+  const role = sInput(p.role, 40, "Role (All call, Chiefs, Station 1 …)", null, "s-name");
+  const [confL, conf] = sCheck("Confirmed", p.confirmed, "Unticked: an estimate");
+  const save = () => sPost("tones", { action: "set", a_hz: p.a_hz, b_hz: p.b_hz || null, places: e.places, service: e.service,
+    role: role.value.trim(), confirmed: conf.checked, ...(p.origin === "named" ? {} : { list: p.id.split("@")[1] }) }, `${sPair(p.a_hz, p.b_hz)} saved`)
+    .then((r) => { if (r) { S.toneEdit = null; sRender(true); } });
+  role.addEventListener("keydown", (ev) => { if (ev.key === "Enter") { ev.preventDefault(); save(); } });
+  tr.append(sTd("s-t-tog", ""), sTd("s-t-name", "", el("span", "mono", sPair(p.a_hz, p.b_hz)), role), sTd("s-t-src dim small", "", sNoBreakDates(sPairSource(p))),
+    sTd("s-t-conf", "", confL), sTd("s-t-n", "", ""), sTd("s-t-last", "", ""), sTd("s-t-n", "", ""),
+    sTd("s-t-act", "", sBtn("Cancel", "", () => { S.toneEdit = null; sRender(true); }, "mini"), sBtn("Save", "", save, "mini primary")));
+  setTimeout(() => role.focus(), 0);
+  return tr;
+}
+
+// Move a pair under another entity (pick it), or split it into a new one (places + service).
+function sMoveRow(d, e, p) {
+  const tr = el("tr", "s-prow s-tedit");
+  tr.dataset.ent = e.key;
+  tr.dataset.pair = p.id;
+  let what, value;
+  if (S.toneMove.mode === "move") {
+    const sel = sSelect((d.entities || []).filter((x) => x.key !== e.key).map((x) => [x.key, x.name]), "", null, "Move to");
+    what = sel;
+    value = () => { const x = sEntOf(d, sel.value); return x ? { places: x.places, service: x.service } : null; };
+  } else {
+    const pk = sPicker(d, { places: [], service: e.service });
+    what = pk.box;
+    value = () => (pk.places().length ? { places: pk.places(), service: pk.service() } : null);
+  }
+  const go = () => {
+    const v = value();
+    if (!v) { sMsg("Pick where it goes"); return; }
+    sPost("tones", { action: "move", key: p.id, ...v }, `${sPair(p.a_hz, p.b_hz)} moved`).then((r) => { if (r) { S.toneMove = null; sRender(true); } });
+  };
+  const td = sTd("s-t-naming", "", el("span", "dim small", `${S.toneMove.mode === "move" ? "Move" : "Split"} ${sPair(p.a_hz, p.b_hz)} to`), what,
+    sBtn("Cancel", "", () => { S.toneMove = null; sRender(true); }, "mini"), sBtn(S.toneMove.mode === "move" ? "Move" : "Split", "", go, "mini primary"));
+  td.colSpan = 8;
+  tr.append(td);
+  return tr;
+}
+
+// Add a pair: A, B, the entity (places + service, or an existing one by name), role, confirmed.
+function sToneAddForm(d) {
+  const box = el("div", "s-add s-tone-add");
+  const hz = (label) => {
     const i = el("input", "s-num");
-    Object.assign(i, { type: "number", min: 250, max: 3500, step: 0.1, value: v || "", placeholder: label });
+    Object.assign(i, { type: "number", min: 250, max: 3500, step: 0.1, placeholder: label });
     i.setAttribute("aria-label", `${label} (Hz)`);
     return i;
   };
-  const a = r ? null : hz("", "A Hz"), b = r ? null : hz("", "B Hz");
+  const a = hz("A Hz"), b = hz("B Hz");
+  const pk = sPicker(d, S.toneAdd || {});
+  const [confL, conf] = sCheck("Confirmed", true, "Unticked: an estimate");
   const save = () => {
-    const body = { action: "set", name: name.value.trim(), type: type.value, ours: ours.checked, confirmed: conf.checked };
-    if (r) Object.assign(body, { a_hz: r.a_hz, b_hz: r.b_hz || null }, r.origin === "named" ? {} : { list: r.id.split("@")[1] });
-    else Object.assign(body, { a_hz: Number(a.value), b_hz: b.value ? Number(b.value) : null });
-    if (!body.name) { sMsg("Type a name"); name.focus(); return; }
-    if (!r && !(body.a_hz > 0)) { sMsg("A tone: 250 to 3500 Hz"); a.focus(); return; }
-    sPost("tones", body, `${body.name} saved`).then((res) => { if (res) { S.toneEdit = null; sRender(true); } });
+    const places = pk.places();
+    if (!(Number(a.value) > 0)) { sMsg("A tone: 250 to 3500 Hz"); a.focus(); return; }
+    if (!places.length) { sMsg("Pick a place"); return; }
+    sPost("tones", { action: "set", a_hz: Number(a.value), b_hz: b.value ? Number(b.value) : null, places, service: pk.service(),
+      role: pk.role(), ours: pk.ours(), confirmed: conf.checked }, "Pair added").then((r) => { if (r) { S.toneAdd = null; sRender(true); } });
   };
-  for (const i of [name, a, b].filter(Boolean)) i.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); save(); } });
-  tr.append(sTd("s-t-hz mono", "A", r ? sHz(r.a_hz) : a), sTd("s-t-hz mono", "B", r ? (r.b_hz ? sHz(r.b_hz) : "-") : b),
-    sTd("s-t-name", "", name), sTd("s-t-type", "", type), sTd("s-t-ours", "", oursL), sTd("s-t-src dim small", "", r ? sToneSource(r) : "New pair"),
-    sTd("s-t-conf", "", confL), sTd("s-t-last t", "", ""), sTd("s-t-n", "", ""),
-    sTd("s-t-act", "", sBtn("Cancel", "", () => { S.toneEdit = null; sRender(true); }, "mini"), sBtn("Save", "", save, "mini primary")));
-  setTimeout(() => (a || name).focus(), 0);
-  return tr;
+  const row = el("div", "row");
+  row.append(a, b, confL, el("span", "spacer"), sBtn("Cancel", "", () => { S.toneAdd = null; sRender(true); }, "mini"), sBtn("Save", "", save, "mini primary"));
+  box.append(el("b", "small", "New pair"), pk.box, row);
+  setTimeout(() => a.focus(), 0);
+  return box;
 }
 
 // Heard but unnamed: the pairs heard on the air nobody's code matches, newest first, each with its latest page to
 // play (with the tones) and Name in place (the dialog's flow: that page is read again; ours: its event is queued).
-function sUnnamed(d, locked) {
+function sUnnamed(d) {
   const rows = d.unnamed || [];
   const t = el("table", "evtable s-tones s-unnamed");
   const head = el("tr");
@@ -430,19 +532,15 @@ function sUnnamed(d, locked) {
     playB.addEventListener("click", () => play(clipUrl({ id: u.page }, true)));
     const acts = sTd("s-t-act");
     if (S.unnamedEdit === key) {
-      const type = sTypeSelect("fire");
-      const [oursL, ours] = sCheck("Ours", false, "One of ours (PCFD, Rye Brook): its pages become pending events");
-      const name = sNameInput("", type, ours, locked);
+      const pk = sPicker(d, {});
       const save = () => {
-        const v = name.value.trim();
-        if (!v) { sMsg("Type a name"); name.focus(); return; }
-        sPost("tones", { action: "set", a_hz: u.a_hz, b_hz: u.b_hz || null, name: v, type: type.value, ours: ours.checked,
-          page: u.page }, `${key} Hz is ${v}`).then((res) => { if (res) { S.unnamedEdit = null; sRender(true); } });
+        const places = pk.places();
+        if (!places.length) { sMsg("Pick a place"); return; }
+        sPost("tones", { action: "set", a_hz: u.a_hz, b_hz: u.b_hz || null, places, service: pk.service(), role: pk.role(),
+          ours: pk.ours(), page: u.page }, `${key} Hz named`).then((res) => { if (res) { S.unnamedEdit = null; sRender(true); } });
       };
-      name.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); save(); } });
-      acts.append(name, type, oursL, sBtn("Cancel", "", () => { S.unnamedEdit = null; sRender(true); }, "mini"), sBtn("Save", "", save, "mini primary"));
+      acts.append(pk.box, sBtn("Cancel", "", () => { S.unnamedEdit = null; sRender(true); }, "mini"), sBtn("Save", "", save, "mini primary"));
       acts.classList.add("s-t-naming");
-      setTimeout(() => name.focus(), 0);
     } else {
       acts.append(sBtn("Name", "Say whose tones these are: in the plan, and its latest page read again", () => { S.unnamedEdit = key; sRender(true); }, "mini"));
     }
@@ -458,8 +556,9 @@ function sUnnamed(d, locked) {
   }
   return sCard(sCardHead("Heard but unnamed", rows.length ? `${rows.length}` : "", sHelp("Pairs heard on the air that no "
     + "code in the plan matches (within 1.5 %), one row per pair, newest first: when it was first and last heard, on how "
-    + "many pages, and its latest page to play. Name it here as from a page row: the pair goes in the plan, every page "
-    + "row with it says the name, and its latest page is read again (a pair of ours: its event is queued).")),
+    + "many pages, and its latest page to play. Name it here as from a page row (places, service, an optional role): the "
+    + "pair goes in the tone book, every page row with it says the name, and its latest page is read again (an entity "
+    + "of ours: its event is queued).")),
   el("div", "tscroll").appendChild(t).parentNode);
 }
 

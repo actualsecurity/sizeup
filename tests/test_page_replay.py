@@ -42,7 +42,7 @@ def test_a_page_is_a_radio_row_and_plays_from_the_event_it_opened(tmp_path):
     rows = app.cad.comms_query({})["rows"]
     row = next(r for r in rows if r["id"] == pid)
     assert row["channel"] == "South 2" and row["talker"] == "60 Control" and row["has_audio"] and row["main"]
-    assert [t["names"] for t in row["tones"]] == [["Port Chester FD"], []]
+    assert [t["names"] for t in row["tones"]] == [["Port Chester · Fire"], []]
     assert row["tones"][1]["a_hz"] == np.round(row["tones"][1]["a_hz"], 1) and abs(row["tones"][1]["a_hz"] - 741.3) < 2
     assert 8.0 < row["voice_at"] < 8.5                                       # "voice only" starts after the tones
     assert wait(lambda: queued(app))
@@ -112,7 +112,7 @@ def test_unknown_pairs_are_logged_once_per_page_with_time_and_channel(tmp_path):
     rows = [json.loads(x) for x in log.read_text().splitlines()]
     assert len(rows) == 1 and rows[0]["page"] == pid and rows[0]["channel"] == "South 2" and rows[0]["time"]
     assert [[round(a), round(b)] for a, b in rows[0]["pairs"]] == [[741, 624], [1700, 1100]]
-    assert rows[0]["named"] == ["Scarsdale EMS (heard)"]                      # who it was stacked with
+    assert rows[0]["named"] == ["Scarsdale · EMS (heard)"]                    # who it was stacked with
     send_page(app, page_audio((349.1, 311.1)), at=time.time() + 60)            # a known page: no line
     time.sleep(0.2)
     assert len(log.read_text().splitlines()) == 1

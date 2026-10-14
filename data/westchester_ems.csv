@@ -1,35 +1,32 @@
-# Westchester County (NY) EMS agencies: names for the tone list (Settings > Radios > Tones and the "Name these tones"
-# dialog's suggestions, #115). The fire mutual aid plan behind westchester_departments.csv and westchester_apparatus.csv
-# lists fire departments only (its one EMS entry, "Ossining PD/EMS", a boat, is read from the apparatus roster), so the
-# EMS agencies are kept here. These are suggestions to pick from (free text is always allowed), not tone codes.
-# source: user = named by the department (2026-10-14, #115); tones = already a name in westchester_tones.csv (the
-#   county tone list's own spelling, kept so a pick matches it); local = known locally, to verify.
-# area: the towns it covers, as far as known (blank: not known here).
-name,area,source
-Port Chester-Rye-Rye Brook EMS,"Port Chester, Rye Brook, Rye",user
-Harrison EMS,Harrison,user
-Armonk FD/EMS,North Castle (Armonk),user
-Westchester EMS,,user
-Westchester EMS (45 Medics),,tones
-PCVAC,Port Chester,tones
-Scarsdale EMS,Scarsdale,tones
-Eastchester VAC,Eastchester,tones
-Eastchester EMS,Eastchester,tones
-Larchmont EMS,Larchmont,tones
-Mamaroneck Village EMS,Mamaroneck Village,tones
-Chappaqua VAC,New Castle (Chappaqua),tones
-Cortlandt EMS,Cortlandt,tones
-Cortlandt VAC,Cortlandt,tones
-Croton EMS,Croton-on-Hudson,tones
-Bedford EMS,Bedford,tones
-Hawthorne EMS,Mount Pleasant (Hawthorne),tones
-Katonah-Bedford Hills VAC,"Bedford (Katonah, Bedford Hills)",tones
-Northern Westchester Medics,,tones
-Empress EMS,"Yonkers, Mount Vernon, New Rochelle",local
-Greenburgh Police EMS,Greenburgh,local
-Larchmont-Mamaroneck VAC,"Larchmont, Mamaroneck",local
-Ardsley-Secor VAC,"Ardsley, Greenburgh",local
-Ossining VAC,Ossining,local
-Yorktown VAC,Yorktown,local
-Somers VAC,Somers,local
-Lewisboro VAC,Lewisboro,local
+# Westchester County (NY) EMS agencies, as the places they serve with an EMS service: the tone book's place list and
+# the "Name these tones" dialog (#115, #122: an agency is <places> · <service>, never a free name with the service in
+# it). The fire mutual aid plan behind westchester_departments.csv and westchester_apparatus.csv lists fire departments
+# only.
+# places: the municipalities / communities the agency is named for, "+"-separated when it serves several (the county's
+#   spelling, as westchester_departments.csv), in the order the agency says them.
+# aliases: the agency's own names, "|"-separated, so a page or a person saying them finds it.
+# source: user = named by the department (2026-10-14, #115, #122); tones = a name in westchester_tones.csv; local =
+#   known locally, to verify.
+places,service,aliases,source
+Port Chester+Rye+Rye Brook,ems,Port Chester-Rye-Rye Brook EMS|PCVAC|Port Chester EMS|PC-Rye-Rye Brook EMS,user
+Harrison,ems,Harrison EMS,user
+Armonk,ems,Armonk FD/EMS,user
+Westchester County,ems,Westchester EMS|Westchester EMS (45 Medics)|45 Medics,user
+Scarsdale,ems,Scarsdale EMS|Scarsdale VAC,tones
+Eastchester,ems,Eastchester VAC|Eastchester EMS|EVAC,tones
+Larchmont,ems,Larchmont EMS,tones
+Mamaroneck Village,ems,Mamaroneck Village EMS,tones
+Chappaqua,ems,Chappaqua VAC,tones
+Cortlandt,ems,Cortlandt EMS|Cortlandt VAC|Cortlandt Community VAC,tones
+Croton-on-Hudson,ems,Croton EMS,tones
+Bedford,ems,Bedford EMS,tones
+Hawthorne,ems,Hawthorne EMS,tones
+Katonah+Bedford Hills,ems,Katonah-Bedford Hills VAC,local
+Northern Westchester,ems,Northern Westchester Medics,local
+Larchmont+Mamaroneck Town,ems,Larchmont-Mamaroneck VAC|LMVAC,local
+Greenburgh,ems,Greenburgh Police EMS,local
+Ardsley,ems,Ardsley-Secor VAC,local
+Ossining,ems,Ossining VAC|Ossining PD/EMS,local
+Yorktown,ems,Yorktown VAC,local
+Somers,ems,Somers VAC,local
+Lewisboro,ems,Lewisboro VAC,local

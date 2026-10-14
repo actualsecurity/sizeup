@@ -228,6 +228,18 @@
   .s-trow.s-tedit { background: var(--hover); }
   .s-trow.s-tedit .s-name { inline-size: 100%; min-inline-size: 10rem; }
   .s-trow[hidden] { display: none; }
+  /* the tone book (#122): an entity's row, its pairs under it (indented, quieter), an edit row */
+  .s-ents .s-t-tog { inline-size: 1%; }
+  .s-erow .s-t-name > b { white-space: normal; }
+  .s-erow.conflict, .s-prow.conflict { box-shadow: inset var(--bw-mark) 0 0 var(--warn); }
+  .s-prow { background: var(--bg); }
+  .s-prow .s-t-name { padding-inline-start: var(--s-4); }
+  .s-prow.deleted .s-t-name > .mono { text-decoration: line-through; color: var(--dim); }
+  .s-prow.s-tedit, .s-erow.s-tedit { background: var(--hover); }
+  .s-prow.s-tedit .s-name, .s-erow.s-tedit .s-name { inline-size: 100%; min-inline-size: 10rem; }
+  .s-ents tr[hidden] { display: none; }
+  .s-ents .s-t-naming { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1) var(--s-2); }
+  .s-tone-add { display: flex; flex-direction: column; gap: var(--s-2); margin-block: 0 var(--s-2); padding-block-start: 0; border-block-start: 0; }
   .s-unnamed .s-t-play { inline-size: 1%; }
 
   /* ---- the style guide (styleguide.js) ------------------------------------------------------------ */
@@ -273,6 +285,9 @@
     .s-tones .s-t-act > * + * { margin-inline-start: 0; }
     .s-tone-q { max-inline-size: none; }
     .s-unnamed .s-t-play { inline-size: auto; }
+    .s-ents .s-t-tog { order: -2; inline-size: auto; }
+    .s-ents .s-erow .s-t-name { flex: 1 1 0; }
+    .s-prow .s-t-name { padding-inline-start: 0; }
     .s-unnamed .s-t-act:not(.s-t-naming) { flex: 0 0 auto; margin-inline-start: auto; }
   }
 }

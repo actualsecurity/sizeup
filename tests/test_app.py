@@ -60,7 +60,8 @@ def test_page_opens_incident_and_traffic_attaches(tmp_path):
     app._segment(Channel(470.2, "South 2"), Segment(now, now + len(audio) / RATE, audio, 25.0))
     assert wait(lambda: app.store.active() is not None)
     inc = app.store.active()
-    assert inc.incident_type == "Fire alarm" and inc.departments == ["Port Chester FD"] and inc.time_out == "14:32"
+    assert inc.incident_type == "Fire alarm" and inc.time_out == "14:32"
+    assert inc.departments == ["Port Chester · Fire", "Port Chester FD"]        # the tones' entity (#122), the text's
     fg = voice(3.0, seed=1)
     app._segment(Channel(453.0375, "FG1"), Segment(now + 60, now + 63, fg, 20.0))
     app._call(Call("307-x-call_1", 307, "Fire/EMS 15", now + 70, now + 72, ["2391"],
@@ -128,22 +129,23 @@ def test_unknown_tones_are_a_page_row_until_an_admin_names_them(tmp_path):
     assert row["page"] == "unknown" and row["pc"] == "" and row["events"] == [] and row["tones"][0]["names"] == []
     assert row["voice_at"] > 0 and row["channel"] == "South 2"
     names = app.tone_names()
-    assert names["named"] == [] and names["ours"] == ["Port Chester FD", "Rye Brook FD"] and "Port Chester FD" in names["names"]
+    assert names["named"] == [] and names["ours"] == ["Port Chester · Fire", "Rye Brook · Fire"]
+    assert "Port Chester · Fire" in names["names"] and "Port Chester" in names["places"]
     # Named as another department: in the plan, the row says who, still not an event
     app.cad.settings.post("tones", {"action": "set", "a_hz": 741.3, "b_hz": 623.7, "name": "Purchase", "page": pid, "operator": "Dana"})
     row = next(r for r in app.cad.feed.rows(limit=20) if r["id"] == pid)
-    assert row["page"] == "other" and row["tones"][0]["names"] == ["Purchase"] and app.store.active() is None
-    assert app.state()["pages"][0]["departments"] == ["Purchase"]
+    assert row["page"] == "other" and row["tones"][0]["names"] == ["Purchase · Fire"] and app.store.active() is None
+    assert app.state()["pages"][0]["departments"] == ["Purchase · Fire"]      # a #84 name, read as place + service
     assert app.cad.settings.audit_log("radios")[0]["key"] == "tones/741.3/623.7"
     # Renamed as ours: the page is read again, the incident opens and the CAD has it queued
     app.cad.settings.post("tones", {"action": "set", "a_hz": 741.3, "b_hz": 623.7, "name": "Port Chester FD", "page": pid, "operator": "Dana"})
     inc = app.store.active()
-    assert inc is not None and inc.tone_departments == ["Port Chester FD"] and inc.incident_type == "Chest pain"
+    assert inc is not None and inc.tone_departments == ["Port Chester · Fire"] and inc.incident_type == "Chest pain"
     assert inc.location == "209 westchester avenue" and inc.pages == [pid]
     ev = app.cad.store.incidents()
     assert len(ev) == 1 and ev[0]["status"] == "queued" and ev[0]["source_ref"] == f"monitor:{inc.id}"
     row = next(r for r in app.cad.feed.rows(limit=20) if r["id"] == pid)
-    assert row["page"] == "ours" and row["pc"] == "Port Chester FD" and [e["why"] for e in row["events"]] == ["page"]
+    assert row["page"] == "ours" and row["pc"] == "Port Chester · Fire" and [e["why"] for e in row["events"]] == ["page"]
     named = app.tone_names()["named"]
     assert [(t["key"], t["name"], t["ours"], t["operator"]) for t in named] == [("741.3/623.7", "Port Chester FD", True, "Dana")]
     assert app.cad.settings_export()["overrides"]["tones"]["741.3/623.7"]["name"] == "Port Chester FD"
@@ -155,7 +157,7 @@ def test_unknown_tones_are_a_page_row_until_an_admin_names_them(tmp_path):
     assert app.state()["pages"][0]["tones"][0]["ours"] is True
     # Forgotten: unknown again on the next page
     app.cad.settings.post("tones", {"action": "delete", "key": "741.3/623.7", "operator": "Dana"})
-    assert app.plan.names() == ["Port Chester FD"] and app.tone_names()["named"] == []
+    assert app.plan.names() == ["Port Chester · Fire"] and app.tone_names()["named"] == []
 
 
 def test_a_town_is_claimed_only_when_the_gazetteer_is_sure():
@@ -634,7 +636,7 @@ def test_a_page_that_fades_and_comes_back_is_one_page_sent_once(tmp_path, capsys
     assert sent == []
     app._release_pages(now=cont.hold_until + 1.0)
     assert [k for k, _d, _c in sent] == ["page"] and sent[0][2] == page.id
-    assert sent[0][1]["departments"] == ["Port Chester FD"] and sent[0][1]["end"] == pytest.approx(cont.end, abs=0.01)
+    assert sent[0][1]["departments"] == ["Port Chester · Fire"] and sent[0][1]["end"] == pytest.approx(cont.end, abs=0.01)
     assert wait(lambda: page.status == "done") and page.raw == PAGE_TEXT       # the voice, transcribed whole
     assert len(page.audio) / RATE == pytest.approx(cont.end - first.start, abs=0.01)
     assert app.clip(page.id) is not None and len(app.clip(page.id)) > 2 * RATE * 13

@@ -210,9 +210,19 @@ class ToneDetector:
         return []
 
 
+SERVICE_LABELS = ("Fire", "EMS", "Police", "Other")       # the tone book's services (sizeup/cad/tonelist.py, #122)
+
+
 def base_name(n: str) -> str:
-    """'Rye Brook FD (est.)' / 'Fairview (heard)' -> the department's name as the config and the CAD say it."""
-    return n.removesuffix(" (heard)").removesuffix(" (est.)")
+    """'Rye Brook FD (est.)' / 'Fairview (heard)' -> the department's name as the config and the CAD say it; a tone
+    book name 'Port Chester · Fire · Chiefs (est.)' -> its entity, 'Port Chester · Fire' (the role dropped)."""
+    n = n.removesuffix(" (heard)").removesuffix(" (est.)")
+    if " · " in n:
+        parts = n.split(" · ")
+        for i in range(1, len(parts)):
+            if parts[i] in SERVICE_LABELS:
+                return " · ".join(parts[:i + 1])
+    return n
 
 
 def pair_key(a_hz: float, b_hz: float | None) -> str:
@@ -246,10 +256,9 @@ class TonePlan:
         hits = [c.name for c in self.codes if self._near(ev.a_hz, c.a_hz) and self._near(ev.b_hz, c.b_hz)]
         # One name per department, from the strongest evidence: heard on the air > listed > estimated.
         rank = lambda n: 0 if n.endswith(" (heard)") else 2 if n.endswith(" (est.)") else 1
-        base = lambda n: n.removesuffix(" (heard)").removesuffix(" (est.)")
         best: dict[str, str] = {}
-        for n in hits:
-            b = base(n)
+        for n in hits:                  # one per entity: "Port Chester · Fire · Chiefs" and "... · All call" are one
+            b = base_name(n)
             if b not in best or rank(n) < rank(best[b]):
                 best[b] = n
         ev.names = tuple(best.values())

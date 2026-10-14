@@ -137,6 +137,16 @@
   .tone-form .dialog-foot { margin-block-start: var(--s-1); }
   .tone-form .tone-pairs { display: flex; flex-direction: column; gap: var(--s-2); }
   .tone-form .tone-pair select { flex: 0 1 8rem; }
+  .tone-form .tone-pair { flex-direction: column; align-items: stretch; gap: var(--s-1); }
+  /* an entity in the tone book (#122): places as chips over one list, the service, a pair's role, ours */
+  .tone-picker { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1) var(--s-2); min-inline-size: 0; }
+  .tone-picker .place-pick { flex: 1 1 16rem; display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1);
+    min-inline-size: 0; }
+  .tone-picker .place-pick > input { flex: 1 1 10rem; min-inline-size: 8rem; }
+  .tone-picker > select { flex: 0 1 7rem; }
+  .tone-picker > input { flex: 1 1 10rem; }
+  .place-chip { display: inline-flex; align-items: center; gap: var(--s-0); }
+  .place-chip > button { min-block-size: 0; block-size: auto; padding: 0 var(--s-1); }
   .tone-seq-pick { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1) var(--s-2); }
   .tone-seq-pick > .dim { flex: 1 1 100%; }
   /* a page going out now, over the lists it will join (radio.js fillPaging) */

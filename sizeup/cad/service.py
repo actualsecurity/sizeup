@@ -215,6 +215,8 @@ class Cad:
         # (App) answers channels_locked(), set_talkgroup(tg, record), channels_changed(), aws_channels(),
         # vocabulary_suggestions() / _push(phrases) / _state(), aws_status(), aws_limit_default(). None: alone.
         self.radio_ctx = None
+        # The tone book's names for PCFD and Rye Brook ("Port Chester · Fire", #122): their pages are queued. The app sets it.
+        self.monitor_names: set[str] = set()
         # GET /api/cad/tones (#80): the pairs named from the console and the names to pick from; the app sets it.
         self.tone_names: Callable[[], dict] = lambda: {"named": self.settings.tone_rows(), "names": list(s.monitor_departments),
                                                         "ours": list(s.monitor_departments)}
@@ -1185,7 +1187,8 @@ class Cad:
         """A page for us: its tones name one of our departments (inc.tone_departments: PCFD, Rye Brook). Units
         or departments only heard in the text don't count (user, 2026-10-08), and the address never does
         (#80: a Fairview page geocoded weakly to Port Chester was queued; the monitor departments' tones only)."""
-        return any(base_name(d) in self.s.monitor_departments for d in getattr(inc, "tone_departments", []))
+        mine = set(self.s.monitor_departments) | self.monitor_names
+        return any(base_name(d) in mine for d in getattr(inc, "tone_departments", []))
 
     def from_monitor(self, inc) -> dict | None:
         """A monitor incident (60 Control page) for one of our departments -> a queued CAD event,

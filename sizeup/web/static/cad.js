@@ -828,20 +828,92 @@ function nameTonesButton(t) {
   b.addEventListener("click", () => nameTonesDialog(t, oursNamed(t) ? { ours: true } : {}));
   return b;
 }
-const TONE_TYPES = [["fire", "Fire"], ["ems", "EMS"], ["police", "Police"], ["other", "Other"]];
-// The small form: one row per unknown pair (the department's name, picked from every name known (the tone list's,
-// the county's fire and EMS agencies) or typed; its agency type; Ours when it is PCFD's or Rye Brook's), saved to
-// Settings (section tones, audited, exported) and the page re-read. opts.ours (a page naming our units, #115):
-// every pair, pre-filled Port Chester / Rye Brook and Ours, to check. The tones heard in order: pick an A and a B
-// from them to name a pair the decoder didn't make.
+const TONE_TYPES = [["fire", "Fire"], ["ems", "EMS"], ["police", "Police"], ["other", "Other"]];   // the services
+const toneKey = (places, service) => [...new Set(places.map((p) => p.trim().replace(/\s+/g, " ").toLowerCase()))].sort().join("+") + `|${service}`;
+// An entity in the tone book (#122): its places (chips over the one canonical list; a new place allowed), its service,
+// and a pair's role. Typing an entity's name or alias ("PCVAC", "Port Chester · Rye · Rye Brook · EMS") fills both.
+// Ours ticks itself for an entity that is ours. known: GET /api/cad/tones (places, choices). init: {places, service,
+// role, ours}. -> {box, places(), service(), role(), ours()}
+function tonePicker(known, init = {}) {
+  const all = known.places || [];
+  const choices = known.choices || [];
+  const byName = new Map();
+  for (const c of choices) for (const n of [c.name, ...(c.aliases || [])]) byName.set(n.toLowerCase(), c);
+  const ours = new Set(choices.filter((c) => c.ours).map((c) => c.key));
+  const box = el("div", "tone-picker");
+  const placesBox = el("div", "place-pick");
+  const chips = el("span", "chips");
+  const input = el("input");
+  Object.assign(input, { type: "text", maxLength: 60, placeholder: "Place (or an agency's name)", autocomplete: "off", spellcheck: false });
+  input.setAttribute("aria-label", "Places");
+  const list = el("datalist");
+  list.id = `tone-places-${tonePicker.n = (tonePicker.n || 0) + 1}`;
+  list.append(...all.map((p) => new Option(p)), ...choices.map((c) => new Option(c.name)));
+  input.setAttribute("list", list.id);
+  const service = el("select");
+  service.setAttribute("aria-label", "Service");
+  for (const [k, label] of TONE_TYPES) service.append(new Option(label, k));
+  service.value = init.service || "fire";
+  const role = el("input");
+  Object.assign(role, { type: "text", maxLength: 40, placeholder: "Role (optional: All call, Chiefs …)", value: init.role || "", spellcheck: false });
+  role.setAttribute("aria-label", "Role");
+  const oursL = el("label", "check");
+  const cb = el("input");
+  cb.type = "checkbox";
+  oursL.append(cb, el("span", "", "Ours"));
+  oursL.title = "One of ours (PCFD, Rye Brook): its pages become pending events";
+  const val = [...(init.places || [])];
+  let touched = false;
+  cb.addEventListener("change", () => { touched = true; });
+  const fit = () => { if (!touched) cb.checked = !!init.ours || (val.length > 0 && ours.has(toneKey(val, service.value))); };
+  const draw = () => {
+    chips.replaceChildren(...val.map((p, i) => {
+      const c = el("span", "chip place-chip", p);
+      const x = el("button", "mini icon quiet", "×");
+      x.type = "button";
+      x.setAttribute("aria-label", `Remove ${p}`);
+      x.addEventListener("click", () => { val.splice(i, 1); draw(); });
+      c.append(x);
+      return c;
+    }));
+    fit();
+  };
+  const add = () => {
+    const v = input.value.trim();
+    if (!v) return;
+    const ent = byName.get(v.toLowerCase());
+    if (ent) {                              // an entity by its name or alias: its places and service
+      val.splice(0, val.length, ...ent.places);
+      service.value = ent.service;
+    } else {
+      const p = all.find((x) => x.toLowerCase() === v.toLowerCase()) || v;
+      if (!val.some((x) => x.toLowerCase() === p.toLowerCase())) val.push(p);
+    }
+    input.value = "";
+    draw();
+  };
+  input.addEventListener("change", add);
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && input.value.trim()) { e.preventDefault(); add(); }
+    if (e.key === "Backspace" && !input.value && val.length) { val.pop(); draw(); }
+  });
+  service.addEventListener("change", fit);
+  placesBox.append(chips, input, list);
+  box.append(placesBox, service, role, oursL);
+  draw();
+  return { box, input, places: () => { add(); return [...val]; }, service: () => service.value, role: () => role.value.trim(),
+           ours: () => cb.checked };
+}
+// The small form: one row per unknown pair: its entity (places + service, picked from the tone book or new) and an
+// optional role, Ours when it is PCFD's or Rye Brook's; saved to Settings (section tones, audited, exported) and the
+// page re-read. opts.ours (a page naming our units, #115): every pair, pre-filled Port Chester / Rye Brook · Fire, to
+// check. The tones heard in order: pick an A and a B from them to name a pair the decoder didn't make.
 async function nameTonesDialog(t, opts = {}) {
   const pairs = (t.tones || []).filter((x) => opts.ours || !(x.names || []).length);
   const seq = t.tone_seq || [];
   if (!pairs.length && seq.length < 2) return;
-  let known = { names: [], ours: [], suggest: [] };
-  try { known = await api("GET", "/api/cad/tones"); } catch (e) { /* type the name */ }
-  const oursSet = new Set(known.ours || []);
-  const typeOf = new Map((known.suggest || []).map((x) => [x.name.toLowerCase(), x.type]));
+  let known = { places: [], choices: [] };
+  try { known = await api("GET", "/api/cad/tones"); } catch (e) { /* type the place */ }
   const ov = el("div", "overlay");
   const panel = el("div", "dialog narrow tone-form");
   panel.setAttribute("role", "dialog");
@@ -851,50 +923,20 @@ async function nameTonesDialog(t, opts = {}) {
   head.append(el("h2", "dialog-title", "Name these tones"));
   head.querySelector("h2").id = "tone-form-title";
   const body = el("form", "dialog-body");
-  const list = el("datalist");
-  list.id = "tone-form-names";
-  list.append(...(known.names || []).map((n) => new Option(n)));
-  body.append(el("p", "dim small", `Page ${fmtTime(t.start, true)} ${t.channel}. A name goes in the tone list; this page is read again.`), list);
+  body.append(el("p", "dim small", `Page ${fmtTime(t.start, true)} ${t.channel}. Each pair goes in the tone book under its places and service; this page is read again.`));
   if (opts.ours) body.append(el("p", "warnbox small", `${oursNamedText(t)}. Filled in as Port Chester and Rye Brook: check which pair is whose before saving.`));
-  const prefill = ["Port Chester FD", "Rye Brook FD"];
+  const prefill = [["Port Chester"], ["Rye Brook"]];
   const box = el("div", "tone-pairs");
   const rows = [];
-  const addRow = (x, guess) => {
+  const addRow = (x, places) => {
     const row = el("div", "tone-pair");
     const hz = `${Number(x.a_hz).toFixed(1)}/${x.b_hz ? Number(x.b_hz).toFixed(1) : "-"}`;
-    const f = el("label", "field");
-    const name = el("input");
-    name.type = "text";
-    name.maxLength = 60;
-    name.placeholder = "Department or agency";
-    name.setAttribute("list", list.id);
-    name.autocomplete = "off";
-    name.spellcheck = false;
-    name.value = guess || "";
-    f.append(el("span", "mono", `${hz} Hz` + ((x.names || []).length ? ` (now: ${x.names.join(", ")})` : "")), name);
-    const type = el("select");
-    type.setAttribute("aria-label", "Agency type");
-    for (const [k, label] of TONE_TYPES) type.append(new Option(label, k));
-    let typed = false;
-    type.addEventListener("change", () => { typed = true; });
-    const ours = el("label", "check");
-    const cb = el("input");
-    cb.type = "checkbox";
-    cb.checked = !!guess && oursSet.has(guess);
-    ours.append(cb, el("span", "", "Ours"));
-    ours.title = "One of ours (PCFD, Rye Brook): its pages become pending events";
-    const fit = () => {
-      const v = name.value.trim();
-      cb.checked = oursSet.has(v) || (cb.checked && !!opts.ours && !v);
-      if (!typed) type.value = typeOf.get(v.toLowerCase()) || "fire";
-    };
-    name.addEventListener("input", fit);
-    fit();
-    row.append(f, type, ours);
+    const pk = tonePicker(known, { places: places || [], service: "fire", ours: !!(places && opts.ours) });
+    row.append(el("span", "mono small", `${hz} Hz` + ((x.names || []).length ? ` (now: ${x.names.join(", ")})` : "")), pk.box);
     box.append(row);
-    rows.push({ x, name, cb, type, row });
+    rows.push({ x, pk, row });
   };
-  pairs.forEach((x, i) => addRow(x, opts.ours ? prefill[i] || "" : ""));
+  pairs.forEach((x, i) => addRow(x, opts.ours ? prefill[i] : null));
   body.append(box);
   if (seq.length >= 2) {                // the tones heard, in order: pick an A and a B to name a pair of your own
     const pick = el("div", "tone-seq-pick");
@@ -907,7 +949,7 @@ async function nameTonesDialog(t, opts = {}) {
       b.addEventListener("click", () => {
         if (a === null) { a = x; b.setAttribute("aria-pressed", "true"); tip.textContent = `A ${Number(x.hz).toFixed(1)}: now its B`; return; }
         btns.forEach((y) => y.removeAttribute("aria-pressed"));
-        addRow({ a_hz: a.hz, b_hz: x === a ? a.hz : x.hz, names: [] }, "");
+        addRow({ a_hz: a.hz, b_hz: x === a ? a.hz : x.hz, names: [] }, null);
         a = null;
         tip.textContent = "Added below the pairs. Pick another A, then its B";
       });
@@ -931,14 +973,14 @@ async function nameTonesDialog(t, opts = {}) {
   no.addEventListener("click", () => UI.dialog.close(ov));
   body.addEventListener("submit", async (e) => {
     e.preventDefault();
-    const todo = rows.filter((r) => r.name.value.trim());
-    if (!todo.length) { err.textContent = "Type a department"; err.hidden = false; if (rows[0]) rows[0].name.focus(); return; }
+    const todo = rows.map((r) => ({ ...r, places: r.pk.places() })).filter((r) => r.places.length);
+    if (!todo.length) { err.textContent = "Pick a place"; err.hidden = false; if (rows[0]) rows[0].pk.input.focus(); return; }
     try {
       for (const r of todo) {
-        await api("POST", "/api/cad/settings/tones", { action: "set", a_hz: r.x.a_hz, b_hz: r.x.b_hz || null,
-          name: r.name.value.trim(), type: r.type.value, ours: r.cb.checked, page: t.id, operator: operator() });
+        await api("POST", "/api/cad/settings/tones", { action: "set", a_hz: r.x.a_hz, b_hz: r.x.b_hz || null, places: r.places,
+          service: r.pk.service(), role: r.pk.role(), ours: r.pk.ours(), page: t.id, operator: operator() });
       }
-      UI.toast(`Named: ${todo.map((r) => r.name.value.trim()).join(", ")}`);
+      UI.toast(`Named: ${todo.map((r) => `${r.places.join(" · ")} · ${TONE_TYPES.find(([k]) => k === r.pk.service())[1]}`).join(", ")}`);
       UI.dialog.close(ov);
       txChanged();
     } catch (ex) {
@@ -946,7 +988,7 @@ async function nameTonesDialog(t, opts = {}) {
       err.hidden = false;
     }
   });
-  UI.dialog.open(ov, { focus: rows[0] ? rows[0].name : panel.querySelector("button"), onClose: () => ov.remove() });
+  UI.dialog.open(ov, { focus: rows[0] ? rows[0].pk.input : panel.querySelector("button"), onClose: () => ov.remove() });
 }
 
 // An incident a transmission (or note) is on: a chip; a click shows that incident (the Radio view: only its

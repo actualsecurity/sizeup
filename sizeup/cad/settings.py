@@ -24,14 +24,12 @@ Reset to default = drop the override (one item, or a whole section).
                                    kept, transcribed, and by what (sizeup/channels.py; Settings > Radios)
     stt                            key "vocabulary" -> [phrases] (Amazon Transcribe's custom vocabulary),
                                    "aws_monthly_limit_usd" -> the monthly AWS limit (sizeup/transcribe.py)
-    tones                          key "832.5/1201.0" (A/B Hz) -> {name, a_hz, b_hz, ours, page?, type?, confirmed?}: a
-                                   tone pair named from an unknown-tones page row ("Name these tones", #80) or added
-                                   in Settings > Radios > Tones (#115), merged into the tone plan over
-                                   data/westchester_tones.csv (sizeup/app.py _apply_named_tones); ours: the name
-                                   counts as one of ours (PCFD, Rye Brook: their pages become pending events);
-                                   key "A/B@<name in the list>" -> {list, a_hz, b_hz, name, ours, type?, confirmed?} |
-                                   {list, a_hz, b_hz, deleted: true}: an edit to a row of the tone list (the file is
-                                   never rewritten; Reset to list drops it). sizeup/cad/tonelist.py
+    tones                          the tone book (#80, #115, #122; sizeup/cad/tonelist.py): key "A/B" -> a pair named
+                                   here {a_hz, b_hz, places, service, role?, confirmed?, page?} (#84/#115: {name, ...});
+                                   "A/B@<name in the list>" -> an edit to a row of data/westchester_tones.csv {list,
+                                   places, service, role?, confirmed?} or {list, deleted: true}; "entity:<places>|<service>"
+                                   -> an entity {places, service, ours?, notes?, aliases?, merged_into?}. Read over the
+                                   list, never written into it (sizeup/app.py _apply_named_tones)
 
 Codes never change (they are stored on events and exported): a rename changes the name only. An
 item in use can't be deleted, only retired (named on old events, off the pick lists). Every change
@@ -240,6 +238,16 @@ def overlay(d: dict, ov: dict) -> dict:
 class LastAdmin(CadError):
     """A change that would leave no active admin with a sign-in email (409: nobody could change
     Settings again). Only checked where roles are enforced (the hub with Cloudflare Access)."""
+
+
+def body_places(body: dict) -> list[str]:
+    """A request's places: places [names] or place (one)."""
+    raw = body.get("places")
+    if raw is None and body.get("place") not in (None, ""):
+        raw = [body["place"]]
+    if not isinstance(raw, list) or not raw:
+        raise CadError("places: one or more place names")
+    return tonelist._places({"places": raw}, "")
 
 
 def _is_admin(o: dict) -> bool:
@@ -1297,16 +1305,17 @@ class Editor:
         return dict(self.overrides().get(TONES_SECTION) or {})
 
     def tone_rows(self) -> list[dict]:
-        """GET /api/cad/tones: each pair named here (not the edits to list rows), who named it and when."""
+        """GET /api/cad/tones: each pair named here (not the edits to list rows or entities), who named it and when."""
         rows = self.store.q("SELECT key, value, updated_at, operator FROM settings_overrides WHERE section = ? ORDER BY key",
                             (TONES_SECTION,))
         return [dict(json.loads(r["value"]), key=r["key"], at=r["updated_at"], operator=r["operator"] or "") for r in rows
-                if not tonelist.is_list_key(r["key"])]
+                if not tonelist.is_list_key(r["key"]) and not r["key"].startswith(tonelist.ENTITY)]
 
     @staticmethod
     def _clean_tone(v, where: str = "") -> tuple[str, dict]:
-        """{a_hz, b_hz, name, ours?, page?, type?, confirmed?, list?} | {list, a_hz, b_hz, deleted} checked -> (key,
-        the value stored). CadError. sizeup/cad/tonelist.py clean()."""
+        """A pair {a_hz, b_hz, places, service, role?, confirmed?, page?, list?} (or #84's / #115's {name, ...}), a list
+        row taken out {list, a_hz, b_hz, deleted}, or an entity {places, service, ours?, notes?, aliases?, merged_into?}
+        checked -> (key, the value stored). CadError. sizeup/cad/tonelist.py clean()."""
         return tonelist.clean(v, where)
 
     def use_tone_list(self, codes, ours, unknown_log: Path | None = None) -> None:
@@ -1330,80 +1339,166 @@ class Editor:
             self._heard_cache = (sig, tonelist.heard(rows, self.unknown_log))
         return self._heard_cache[1]
 
+    def tone_book(self, ov: dict | None = None) -> tonelist.Book:
+        """The tone book (#122): the list read as entities (places + service) with their pairs, the overrides on it."""
+        return tonelist.Book(self.base_tones, self.tone_overrides() if ov is None else ov, self._locked())
+
     def tone_plan(self, ov: dict | None = None):
         from sizeup.radio.tones import TonePlan
-        return TonePlan(tonelist.effective(self.base_tones, self.tone_overrides() if ov is None else ov))
+        return TonePlan(self.tone_book(ov).codes())
 
-    def tone_suggestions(self, ov: dict | None = None) -> list[dict]:
-        """The names to pick from (Tones, Name these tones): every name in the plan, the console's departments, the
-        county's agencies (EMS included). [{name, type}]."""
-        ov = self.tone_overrides() if ov is None else ov
-        return tonelist.suggestions(tonelist.effective(self.base_tones, ov), ov,
-                                    sorted(self._locked()) + list(self.cad.lists.departments), tonelist.county_agencies())
+    def tone_choices(self, book: tonelist.Book | None = None) -> dict:
+        """What the dialog and the unnamed list pick from: the entities (and the county's agencies), the places, the
+        services."""
+        book = book or self.tone_book()
+        return {"choices": tonelist.entity_choices(book), "places": tonelist.places(book),
+                "services": [[s, tonelist.LABEL[s]] for s in tonelist.SERVICES]}
 
     def tones_page(self) -> dict:
-        """Settings > Radios > Tones: every pair (the list's and the ones named here) and the pairs heard that nobody's
-        code matches."""
+        """Settings > Radios > Tones: every entity with its pairs, the pairs heard that nobody's code matches, what the
+        list's reading did (report)."""
         ov = self.tone_overrides()
         meta = {r["key"]: {"operator": r["operator"] or "", "at": r["updated_at"]} for r in
                 self.store.q("SELECT key, operator, updated_at FROM settings_overrides WHERE section = ?", (TONES_SECTION,))}
         events = self._heard()
-        locked = self._locked()
-        ours = tonelist.ours_names(locked, ov)
-        plan = self.tone_plan(ov)
+        book = self.tone_book(ov)
+        from sizeup.radio.tones import TonePlan
+        plan = TonePlan(book.codes())
         has_clip = getattr(self.cad, "has_clip", None)
-        return {"rows": tonelist.table(self.base_tones, ov, meta, events, ours, locked, plan.tolerance),
+        return {"entities": book.table(events, meta),
                 "unnamed": tonelist.unnamed(events, plan, has_clip if callable(has_clip) else None),
-                "suggest": self.tone_suggestions(ov), "types": list(tonelist.TYPES), "locked": sorted(locked),
-                "max": MAX_NAMED_TONES}
+                **self.tone_choices(book), "locked": sorted(self._locked()), "report": book.report(), "max": MAX_NAMED_TONES}
 
     def _list_row(self, key: str):
         return next((c for c in self.base_tones if tonelist.list_key(c) == key), None)
 
+    def _tone_commit(self, changes: list, op: str, cur: dict) -> dict | None:
+        changes = [c for c in changes if (c[2] is REMOVE and c[1] in cur) or (c[2] is not REMOVE and cur.get(c[1]) != c[2])]
+        if not changes:
+            return None
+        return self._commit(changes, op, [("radios", f"tones/{k}", cur.get(k), None if v is REMOVE else v)
+                                          for _s, k, v in changes])
+
+    def _pair_value(self, book: tonelist.Book, key: str, cur: dict, places, service: str, role: str | None = None,
+                    confirmed: bool | None = None, page: str = "") -> tuple[str, object]:
+        """The override for a pair as it should be now (REMOVE when a list row is back to what the list says)."""
+        p = book.pair(key)
+        if p is None:
+            raise CadError(f"no tone pair {key!r}")
+        body = {"a_hz": p.a_hz, "b_hz": p.b_hz, "places": list(places), "service": service,
+                "role": p.role if role is None else role}
+        if p.origin != "named":
+            body["list"] = p.list_name
+        old = cur.get(key) or {}
+        conf = old.get("confirmed") if confirmed is None else confirmed
+        if conf is not None:
+            body["confirmed"] = conf
+        if p.origin == "named" and (page or old.get("page")):
+            body["page"] = page or old["page"]
+        k, val = self._clean_tone(body)
+        orig = p.parsed
+        if p.origin != "named" and orig is not None and self._as_listed(key, val, orig):
+            return k, REMOVE
+        return k, val
+
+    def _as_listed(self, key: str, val: dict, orig) -> bool:
+        """A list row's edit that says what the list says (no edit left)."""
+        return (tonelist.ekey(val["places"], val["service"]) == tonelist.ekey(orig.places, orig.service)
+                and val.get("role", "") == orig.role
+                and val.get("confirmed", self._list_confirmed(key)) == self._list_confirmed(key))
+
+    def _list_confirmed(self, key: str) -> bool:
+        row = self._list_row(key)
+        return row is not None and not row.name.endswith(" (est.)")
+
+    def _entity_value(self, book: tonelist.Book, ekey: str, cur: dict, **change) -> tuple[str, object]:
+        """The entity's override with these fields changed (REMOVE when nothing is left to keep)."""
+        e = book.entities.get(ekey)
+        old = dict(cur.get(tonelist.ENTITY + ekey) or {})
+        if e is None and not old:
+            raise CadError(f"no entity {ekey!r}")
+        body = {k: v for k, v in old.items() if k not in ("places", "service")}
+        body.update({"places": list(e.places if e else old["places"]), "service": e.service if e else old["service"]})
+        for k, v in change.items():
+            if v is None:
+                body.pop(k, None)
+            else:
+                body[k] = v
+        if e is not None and e.ours_locked:
+            body.pop("ours", None)                # PCFD's / Rye Brook's: ours whatever is set
+        k, val = self._clean_tone(body)
+        return k, (REMOVE if set(val) <= {"places", "service"} else val)
+
     def _tones_op(self, action: str, body: dict, op: str) -> dict:
-        """set {a_hz, b_hz, name, ours?, type?, confirmed?, page?, list?}: name a pair (page: the page it was heard on,
-        read again) or, with list (its name in the tone list), edit that row | delete {key}: forget a name (the pair is
-        unknown again) or take a list row out of the plan | reset {key}: a list row as the list has it | reread {page}:
-        that page's recording through the tone decoder again (App.reread_tones; changes no setting)."""
+        """The tone book (#115, #122). set {a_hz, b_hz, places, service, role?, confirmed?, ours?, page?, list?}: a pair
+        named or edited (page: the page it was heard on, read again; ours: its entity is ours) | move {key, places,
+        service}: a pair to another entity (or a new one: split) | entity {key, ours?, notes?, aliases?} | merge {key,
+        into: {places, service}}: an entity's pairs under another | delete {key}: forget a pair named here, take a list
+        row out | reset {key}: a list row as the list has it, an entity as read | reread {page}: that page's recording
+        through the tone decoder again (App.reread_tones; changes no setting)."""
         cur = self.tone_overrides()
-        page = ""
+        book = self.tone_book(cur)
+        page, key = "", ""
         if action in ("delete", "reset"):
-            key = _text(body.get("key"), "key", 90)
+            key = _text(body.get("key"), "key", 200)
             row = self._list_row(key) if tonelist.is_list_key(key) else None
             if action == "reset" or row is None:
                 if key not in cur:
                     raise CadError(f"no {'edit to' if action == 'reset' else 'named tones'} {key!r}")
-                out = self._commit([(TONES_SECTION, key, REMOVE)], op, [("radios", f"tones/{key}", cur[key], None)])
+                out = self._tone_commit([(TONES_SECTION, key, REMOVE)], op, cur)
             else:
                 k, val = self._clean_tone({"list": key.split("@", 1)[1], "a_hz": row.a_hz, "b_hz": row.b_hz, "deleted": True})
-                if cur.get(key) == val:
-                    return {"ok": True, "key": key}
-                out = self._commit([(TONES_SECTION, key, val)], op, [("radios", f"tones/{key}", cur.get(key), val)])
+                out = self._tone_commit([(TONES_SECTION, key, val)], op, cur)
         elif action == "set":
             key, val = self._clean_tone(body)
             if key not in cur and len(cur) >= MAX_NAMED_TONES:
                 raise CadError(f"at most {MAX_NAMED_TONES} edited or named tone pairs")
-            if val.get("ours") is False and val["name"] in self._locked():
-                val["ours"] = True                    # PCFD's / Rye Brook's name: theirs are ours whatever the box said
-            if "page" not in val and cur.get(key, {}).get("page") and not val.get("list"):
-                val["page"] = cur[key]["page"]        # an edit keeps the page it was named from
-            changes = [(TONES_SECTION, key, val)]
-            row = self._list_row(key) if val.get("list") else None
-            if row is not None:                       # back to what the list says: no edit left
-                d = tonelist.table([row], {}, {}, [], self._locked(), self._locked())[0]
-                same = (val["name"] == d["name"] and val.get("type", d["type"]) == d["type"]
-                        and val.get("confirmed", d["confirmed"]) == d["confirmed"] and val["ours"] == d["ours"])
-                if same:
-                    changes = [(TONES_SECTION, key, REMOVE)] if key in cur else []
-            if not val["ours"]:                       # ours goes by the name: every pair with it stops being ours
-                changes += [(TONES_SECTION, k, dict(v, ours=False)) for k, v in cur.items()
-                            if k != key and v.get("ours") and v.get("name") == val["name"]]
-            changes = [c for c in changes if c[2] is REMOVE or cur.get(c[1]) != c[2]]
-            if not changes:
-                return {"ok": True, "key": key}
-            out = self._commit(changes, op, [("radios", f"tones/{k}", cur.get(k), None if v is REMOVE else v)
-                                             for _s, k, v in changes])
-            page = val.get("page", "") if body.get("page") else ""
+            changes = []
+            if "places" in val:
+                ours = val.pop("ours", None)
+                if "page" not in val and cur.get(key, {}).get("page") and not val.get("list"):
+                    val["page"] = cur[key]["page"]        # an edit keeps the page it was named from
+                row = self._list_row(key) if val.get("list") else None
+                if row is not None and self._as_listed(key, val, tonelist.parse_name(val["list"])):
+                    val = REMOVE                          # back to what the list says: no edit left
+                changes.append((TONES_SECTION, key, val))
+                ek = book.resolve(tonelist.ekey(body_places(body), body["service"]))
+                if ours and ek not in book.locked_keys and not (book.entities.get(ek) and book.entities[ek].ours):
+                    if ek in book.entities or tonelist.ENTITY + ek in cur:
+                        changes.append((TONES_SECTION, *self._entity_value(book, ek, cur, ours=True)))
+                    else:
+                        changes.append((TONES_SECTION, *self._clean_tone({"places": body_places(body),
+                                                                          "service": body["service"], "ours": True})))
+            else:                                         # #84 / #115: by name, as before
+                if val.get("ours") is False and val["name"] in self._locked():
+                    val["ours"] = True                    # PCFD's / Rye Brook's name: ours whatever the box said
+                if "page" not in val and cur.get(key, {}).get("page") and not val.get("list"):
+                    val["page"] = cur[key]["page"]
+                changes.append((TONES_SECTION, key, val))
+            out = self._tone_commit(changes, op, cur)
+            page = body.get("page") or "" if out else ""
+        elif action == "move":
+            key = _text(body.get("key"), "key", 200)
+            places = body_places(body)
+            k, val = self._pair_value(book, key, cur, places, tonelist._service(body.get("service"), "service"))
+            out = self._tone_commit([(TONES_SECTION, k, val)], op, cur)
+        elif action == "entity":
+            key = _text(body.get("key"), "key", 200)
+            change = {k: body[k] for k in ("ours", "notes", "aliases") if k in body}
+            if change.get("notes") == "":
+                change["notes"] = None
+            if change.get("aliases") == []:
+                change["aliases"] = None
+            k, val = self._entity_value(book, key, cur, **change)
+            out = self._tone_commit([(TONES_SECTION, k, val)], op, cur)
+        elif action == "merge":
+            key = _text(body.get("key"), "key", 200)
+            into = body.get("into") if isinstance(body.get("into"), dict) else {}
+            target = book.resolve(tonelist.ekey(body_places(into), tonelist._service(into.get("service"), "into.service")))
+            if target == book.resolve(key):
+                raise CadError("merge: into another entity")
+            k, val = self._entity_value(book, key, cur, merged_into={"places": body_places(into), "service": into["service"]})
+            out = self._tone_commit([(TONES_SECTION, k, val)], op, cur)
         elif action == "reread":
             pid = _text(body.get("page"), "page", 80)
             ctx = self.cad.radio_ctx
@@ -1414,7 +1509,9 @@ class Editor:
             except ValueError as e:
                 raise CadError(str(e)) from None
         else:
-            raise CadError("action: set, delete, reset or reread")
+            raise CadError("action: set, move, entity, merge, delete, reset or reread")
+        if out is None:
+            return {"ok": True, "key": key}
         ctx = self.cad.radio_ctx
         if ctx is not None:
             ctx.tones_changed(page)
