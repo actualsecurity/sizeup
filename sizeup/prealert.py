@@ -186,6 +186,11 @@ class NtfyStream:
             except (URLError, OSError, ValueError) as e:
                 err = e
                 self.last_error = f"{type(e).__name__}: {getattr(e, 'reason', None) or e}"
+            except Exception as e:  # noqa: BLE001 - e.g. http.client on a socket closed under it
+                # (AttributeError "'NoneType' object has no attribute 'peek'", seen 2026-10-13): never let
+                # the listener thread die, or rings stop arriving until the hub restarts.
+                err = e
+                self.last_error = f"{type(e).__name__}: {e}"
             if self.connected or self.down_since is None:
                 self.down_since = self.clock()
             self.connected = False
