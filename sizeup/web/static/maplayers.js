@@ -101,9 +101,9 @@ window.MapLayers = (() => {
     } catch (_) { /* defaults */ }
     return p;
   })();
-  function savePrefs() {
-    try { localStorage.setItem(PREF_KEY, JSON.stringify(prefs)); } catch (_) { /* not remembered */ }
-  }
+  // keep a value for this viewer (or not, when storage is missing or refuses)
+  function remember(key, v) { try { localStorage.setItem(key, v); } catch (_) { /* not remembered */ } }
+  function savePrefs() { remember(PREF_KEY, JSON.stringify(prefs)); }
 
   // ---- the data: one poll for every map on the page ------------------------------------------------------
   const store = { data: null, rev: "", timer: null, subs: new Set(), loading: null };
@@ -995,7 +995,10 @@ window.MapLayers = (() => {
     const ok = inc && inc.lat != null && inc.lon != null && store.data && store.data.configured;
     const key = ok ? JSON.stringify([inc.id, inc.lat, inc.lon, inc.geo_label || "", inc.address || ""]) : "";
     if (!ok) { st.key = ""; st.data = null; host.hidden = true; host.replaceChildren(); return; }
-    if (inc.id !== st.openFor) { st.openFor = inc.id; st.open = isOpenEvent(inc); }   // open by default while the event is open
+    if (inc.id !== st.openFor) {                   // the incident tab's panel starts folded to its one-line summary
+      st.openFor = inc.id;                         // unless this viewer opened it last time (#149); the small one
+      st.open = st.small ? isOpenEvent(inc) : stored(CAMS_OPEN_KEY) === "1";   // stays open while the event is
+    }
     if (key === st.key) { drawCams(host, st, false); return; }
     st.key = key;
     const p = new URLSearchParams({ for: `${inc.lat},${inc.lon}`, label: inc.geo_label || "", address: inc.address || "" });
@@ -1006,6 +1009,7 @@ window.MapLayers = (() => {
     }).catch(() => { if (st.key === key) { st.data = null; host.hidden = true; } });
   }
   const isOpenEvent = (inc) => !["closed", "dismissed"].includes(inc.status);
+  const CAMS_OPEN_KEY = "sizeup.cad.camsOpen";
   function camLabel(c) {
     if (c.rel === "nearby") return c.km != null ? `${Math.round(c.km * 1000)} m away` : "nearby";
     const mi = c.miles != null ? `${c.miles.toFixed(1)} mi ` : "";
@@ -1037,8 +1041,18 @@ window.MapLayers = (() => {
     head.append(h("b", "", title));
     if (hw) head.append(h("span", "dim small", `MP ${hw.mile.toFixed(1)}`));
     const srcs = [...new Set(shown.map((c) => c.source || "511NY"))].join(" · ");
+    if (!st.open) {                                        // folded: just how many, so it is one line
+      const n = shown.length, parts = [];
+      if (n) parts.push(n === 1 ? "1 camera" : `${n} cameras`);
+      if (down.length) parts.push(`${down.length} down`);
+      head.append(h("span", "dim small ml-cams-count", parts.join(" · ")));
+    }
     head.append(h("span", "spacer"), h("span", "dim small", srcs), h("span", "car dim", st.open ? "▾" : "▸"));
-    head.addEventListener("click", () => { st.open = !st.open; st.sig = ""; drawCams(host, st, true); });
+    head.addEventListener("click", () => {
+      st.open = !st.open; st.sig = "";
+      if (!st.small) remember(CAMS_OPEN_KEY, st.open ? "1" : "0");
+      drawCams(host, st, true);
+    });
     host.replaceChildren(head);
     if (!st.open) return;
     const along = shown.filter((c) => c.rel !== "nearby"), near = shown.filter((c) => c.rel === "nearby");
