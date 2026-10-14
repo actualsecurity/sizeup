@@ -37,12 +37,13 @@ def test_remembered_per_screen_in_try_catch():
 
 def test_a_keyboard_separator_with_its_value():
     src = js()
-    for attr in ('"role", "separator"', '"aria-orientation", "vertical"', '"aria-valuemin"', '"aria-valuemax"', '"aria-valuenow"',
+    assert 'vert() ? "vertical" : "horizontal"' in src
+    for attr in ('"role", "separator"', '"aria-orientation"', '"aria-valuemin"', '"aria-valuemax"', '"aria-valuenow"',
                  '"aria-controls"', '"aria-label"'):
         assert f"setAttribute({attr}" in src, attr
     assert "hd.tabIndex = 0" in src
     assert "ArrowLeft: -1, ArrowRight: 1" in src and "STEP = 16" in src and 'e.key === "Home"' in src
-    assert 'addEventListener("dblclick", () => reset(side))' in src
+    assert 'hd.addEventListener("dblclick", reset)' in src
 
 
 def test_drag_with_pointer_capture_and_the_maps_follow():
@@ -50,7 +51,7 @@ def test_drag_with_pointer_capture_and_the_maps_follow():
     assert "setPointerCapture(e.pointerId)" in src and "releasePointerCapture" in src and '"pointercancel"' in src
     assert "requestAnimationFrame(() => { frame = 0; resizeMaps(); })" in src             # during the drag, once a frame
     end = src[src.index("const end = (ev) =>"):src.index('hd.addEventListener("pointermove", move)')]
-    assert "resizeMaps()" in end and "remember(" in end                                 # and after it, then kept
+    assert "resizeMaps()" in end and "o.set(o.value(), true)" in end                   # and after it, then kept
     assert "m.map.resize()" in src
     assert "new ResizeObserver(() => apply()).observe(main)" in src                      # the window changed: re-clamped
 

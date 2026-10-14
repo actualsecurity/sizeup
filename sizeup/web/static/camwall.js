@@ -1,66 +1,136 @@
-// The camera wall (GitHub #125): every camera in our area at once, on the Overview (/cad) and the wall board
-// (/monitor), switched on and off with the Cameras button in the Overview's head (remembered per screen:
-// localStorage "sizeup.cameraWall" {overview, monitor}). On, the map column shows the wall instead of the map;
-// the same button brings the map back.
+// The camera wall (GitHub #125) and the Overview's layouts (#147): every camera in our area at once, on the Overview
+// (/cad) and the wall board (/monitor).
 //
 // User, 2026-10-14: "on the monitor page and the overview page, can we add a way to look at all of the cameras
 // in our jurisdiction live? somehow turn that on and off so we can visually see all of them"; then "we should
-// show all the live feeds we can, more is better".
+// show all the live feeds we can, more is better"; then (#147) "I'd like to be able to show them side by side:
+// map/cameras/incidents, or map/cameras on the left above/below and incidents on the right... or overlay the
+// cameras on the map too".
 //
+//   Layouts       a picker in the Overview's head (a segmented control, the same on the wall board): Map · Cameras ·
+//                 Side by side (map | cameras | events) · Stacked (map over cameras, or under them: the swap button;
+//                 events on the right) · Overlay (the cameras on the map: camoverlay.js). Remembered per screen
+//                 (localStorage "sizeup.overviewLayout" {overview, monitor: {mode, swap, side, stacked}}; the wall
+//                 board and the dispatch screen can differ; #125's "sizeup.cameraWall" on is read once as Cameras).
+//                 On a phone (640 px and under) Map and Cameras only: the others show as the map.
+//   The divider   between the map and the cameras in Side by side and Stacked: panels.js's separator (#139: drag,
+//                 the arrow keys, Home or a double-click resets to half; the map resizes live), its share of the
+//                 view remembered per layout, each pane at least SPLIT_MIN px.
 //   The cameras   GET /api/cad/cameras?area=ours[&for=lat,lon&label=&address=] (sizeup/roads.py Roads.area): inside
 //                 our fire districts plus a margin (Settings > System > Camera wall), by road then mileage; an
-//                 active highway event's camera just before / at / just after it pinned first and highlighted.
+//                 active highway event's camera just before / at / just after it pinned first and highlighted (in
+//                 every layout: the wall's tiles, the overlay's, a ring on the map in the others).
 //   A tile        live video where the source streams (the Thruway's HLS, through the hub, muted, hls.js: the
 //                 camera viewer's own loader in maplayers.js), else the snapshot at the source's cadence, fetched
 //                 only when newer (If-None-Match against the proxy's ETag). Its name, road, direction and mileage,
 //                 the picture's age, "Live" only while the video plays, a small note when the source's frame rate
 //                 is low. A click opens the camera viewer.
 //   Down          cameras the hub calls down (or the source marks out of service) fold into one "N cameras down"
-//                 tile, opened in place.
-//   Bandwidth     only tiles on screen play or refresh (IntersectionObserver); a tile that leaves the screen stops
-//                 its stream at the hub too (GET .../stream/close?v=<this page>), so the hub's prefetch stops; the
-//                 whole wall stops while the page or the wall is hidden. At most the hub's per-screen budget of
-//                 live tiles at once (streams.per_viewer: the area's streaming cameras by default); a stream the
-//                 hub refuses (its cap: 429) or the source can't give (503) shows snapshots and tries again later.
+//                 tile, opened in place (on the overlay: the dim "!" mark only).
+//   Bandwidth     only tiles on screen play or refresh (IntersectionObserver, the wall's and the overlay's alike); a
+//                 tile off screen for STOP_MS stops its stream at the hub too (GET .../stream/close?v=<this page>),
+//                 so the hub's prefetch stops; everything stops while the page or the Overview is hidden. At most
+//                 the hub's per-screen budget of live tiles at once (streams.per_viewer), across the wall and the
+//                 overlay; a stream the hub refuses (its cap: 429) or the source can't give (503) shows snapshots
+//                 and tries again later.
+//
+// CamWall.engine is the tiles for camoverlay.js: list() (the area's cameras, as above), subscribe(fn) (the list or
+// the layout changed), tile(c, set, opts) / drop(t) (a tile in a set: "wall" | "overlay"), layout() (the mode now).
 "use strict";
 
 window.CamWall = (() => {
   if (!document.getElementById("cw-wall") || !window.MapLayers) return null;
-  const KEY = "sizeup.cameraWall";
+  const KEY = "sizeup.overviewLayout", OLD_KEY = "sizeup.cameraWall";
   const SCREEN = BOARD ? "monitor" : "overview";
-  const LIST_MS = 60000, TICK_MS = 1000, STATUS_MS = 20000, RETRY_MS = 60000, START_MS = 25000, MAX_FETCHES = 4;
+  const MODES = ["map", "cameras", "side", "stacked", "overlay"];
+  const PHONE = matchMedia("(max-width: 640px)");
+  const SPLIT_MIN = 200;
+  const LIST_MS = 60000, TICK_MS = 1000, STATUS_MS = 20000, RETRY_MS = 60000, START_MS = 25000, STOP_MS = 2500, MAX_FETCHES = 4;
   const TOKEN = Array.from(crypto.getRandomValues(new Uint8Array(9)), (b) => b.toString(36).padStart(2, "0")).join("").slice(0, 16);
   const w = {
-    on: false, list: null, error: "", tiles: new Map(), seen: new Set(), downOpen: false, sig: "", key: "", loading: false,
-    listAt: 0, timer: null, statusAt: 0, fetching: 0, running: false,
+    list: null, error: "", tiles: new Map(), downOpen: false, sig: "", key: "", loading: false,
+    listAt: 0, timer: null, statusAt: 0, fetching: 0, running: false, subs: new Set(),
   };
-  const wall = $("#cw-wall"), btn = $("#cw-toggle"), mapbox = $("#ov-map").closest(".ov-mapbox"), grid = $("#ov-map").closest(".ov-grid");
+  const wall = $("#cw-wall"), view = $("#ov-view"), split = $("#ov-split"), mapbox = view.querySelector(".ov-mapbox");
+  const grid = view.closest(".ov-grid"), picker = $("#ov-layout"), swapBtn = $("#ov-swap");
 
-  // ---- remembered per screen (storage may be missing or refuse: then this page view only) ----------------
-  function saved() { try { return JSON.parse(localStorage.getItem(KEY) || "{}") || {}; } catch (_) { return {}; } }
-  function remember(on) {
-    try { localStorage.setItem(KEY, JSON.stringify({ ...saved(), [SCREEN]: on })); } catch (_) { /* this page view only */ }
+  // ---- the layout, remembered per screen (storage may be missing or refuse: then this page view only) -------------
+  function load() {
+    let s = {};
+    try {
+      s = (JSON.parse(localStorage.getItem(KEY) || "{}") || {})[SCREEN] || {};
+      if (!s.mode && (JSON.parse(localStorage.getItem(OLD_KEY) || "{}") || {})[SCREEN]) s = { mode: "cameras" };   // #125's switch
+    } catch (_) { /* the default */ }
+    return { mode: MODES.includes(s.mode) ? s.mode : "map", swap: !!s.swap,
+             side: Number.isFinite(s.side) ? s.side : 0.5, stacked: Number.isFinite(s.stacked) ? s.stacked : 0.5 };
   }
+  function save() {
+    try {
+      const all = JSON.parse(localStorage.getItem(KEY) || "{}") || {};
+      all[SCREEN] = { ...L };
+      localStorage.setItem(KEY, JSON.stringify(all));
+    } catch (_) { /* this page view only */ }
+  }
+  const L = load();
+  // what shows now: a phone has Map and Cameras only
+  const mode = () => (PHONE.matches && !["map", "cameras"].includes(L.mode) ? "map" : L.mode);
+  const split2 = () => mode() === "side" || mode() === "stacked";
+  const wallShown = () => ["cameras", "side", "stacked"].includes(mode());
 
-  function toggle(on) {
-    w.on = on;
-    remember(on);
+  function choose(m) {
+    if (!MODES.includes(m)) return;
+    L.mode = m;
+    save();
+    layout();
+  }
+  for (const b of picker.querySelectorAll("button[data-layout]")) b.addEventListener("click", () => choose(b.dataset.layout));
+  $("#ov-swap").addEventListener("click", () => { L.swap = !L.swap; save(); layout(); });
+
+  // the divider: the map's share of the view (side: its width, stacked: its height), each pane at least SPLIT_MIN
+  const along = () => (mode() === "side" ? view.clientWidth : view.clientHeight) - (mode() === "side" ? split.offsetWidth : split.offsetHeight);
+  const mapPx = () => Math.round((mode() === "side" ? mapbox.offsetWidth : mapbox.offsetHeight));
+  function setShare(px) {
+    const total = along();
+    if (total <= 0) return;
+    const lo = Math.min(SPLIT_MIN, total / 2), hi = Math.max(total - SPLIT_MIN, total / 2);
+    L[mode()] = Math.round((Math.max(lo, Math.min(hi, px)) / total) * 1000) / 1000;
+    grid.style.setProperty("--ov-split", `${L[mode()] * 100}%`);
+  }
+  // stacked with the cameras on top: dragging down grows the cameras, so the map shrinks
+  const sep = Panels.separator(split, {
+    label: "Resize the map and the cameras", controls: "cw-wall",
+    orient: () => (mode() === "side" ? "vertical" : "horizontal"), grow: () => (mode() === "stacked" && L.swap ? -1 : 1),
+    min: () => Math.min(SPLIT_MIN, along() / 2), max: () => Math.max(along() - SPLIT_MIN, along() / 2),
+    value: mapPx, enabled: split2,
+    set: (px, done) => { setShare(px); if (done) save(); },
+    reset: () => { L[mode()] = 0.5; grid.style.setProperty("--ov-split", "50%"); save(); },
+  });
+  function layout() {
+    const m = mode();
+    grid.dataset.layout = m;
+    grid.dataset.swap = String(m === "stacked" && L.swap);
+    grid.style.setProperty("--ov-split", `${(L[m] || 0.5) * 100}%`);
+    for (const b of picker.querySelectorAll("button[data-layout]")) b.setAttribute("aria-pressed", String(b.dataset.layout === m));
+    show(swapBtn, m === "stacked");
+    swapBtn.setAttribute("aria-pressed", String(L.swap));
+    swapBtn.title = L.swap ? "Map above the cameras" : "Cameras above the map";
+    show(wall, wallShown());
+    if (!wallShown()) for (const t of w.tiles.values()) if (t.set === "wall") stopLive(t);    // its live slots to the overlay now
+    show(mapbox, m !== "cameras");
+    show(split, split2());
+    split.dataset.orient = m === "side" ? "vertical" : "horizontal";
+    sep.sync();
+    w.sig = "";
+    render();
+    requestAnimationFrame(() => { Panels.resizeMaps(); window.dispatchEvent(new Event("resize")); });
+    for (const fn of w.subs) { try { fn(); } catch (e) { console.error(e); } }
     sync();
   }
-  $("#cw-toggle").addEventListener("click", () => toggle(!w.on));
+  PHONE.addEventListener("change", layout);
 
-  // Shown: the switch on, the Overview on screen, the page visible. Anything else: everything stops.
-  const shown = () => w.on && !$("#overview").hidden && document.visibilityState !== "hidden";
-  function sync() {
-    btn.setAttribute("aria-pressed", String(w.on));
-    btn.classList.toggle("on", w.on);
-    btn.title = w.on ? "Back to the map" : "Every camera in our area";
-    show(wall, w.on);
-    show(mapbox, !w.on);
-    grid.classList.toggle("cw-on", w.on);
-    if (!w.on) window.dispatchEvent(new Event("resize"));            // the map back at its size (MapLibre tracks the window)
-    if (shown()) start(); else stop();
-  }
+  // Running: the Overview on screen and the page visible (the list feeds the rings and the overlay in every layout).
+  const shown = () => !$("#overview").hidden && document.visibilityState !== "hidden";
+  function sync() { if (shown()) start(); else stop(); }
 
   // ---- the list --------------------------------------------------------------------------------------------
   function highwayEvent() {          // the event whose cameras are pinned: an active one with a point, else a pending one
@@ -87,6 +157,7 @@ window.CamWall = (() => {
       w.listAt = Date.now();
     }
     render();
+    for (const fn of w.subs) { try { fn(); } catch (e) { console.error(e); } }
   }
 
   // ---- the tiles -------------------------------------------------------------------------------------------
@@ -94,9 +165,10 @@ window.CamWall = (() => {
   const PIN = { before: "Before", after: "After", at: "At the event" };
   const ago = (t) => { const s = Math.max(0, Math.round(Date.now() / 1000 - t)); return s < 60 ? `${s} s ago` : s < 3600 ? `${Math.floor(s / 60)} min ago` : `${Math.floor(s / 3600)} h ago`; };
   const whereText = (c) => [c.road, c.dir, c.mile ? `MP ${c.mile}` : ""].filter(Boolean).join(" · ");
+  const pinText = (c) => `${PIN[c.pin] || c.pin}${c.miles != null && c.pin !== "at" ? ` · ${c.miles.toFixed(1)} mi` : ""}`;
 
   function render() {
-    if (!w.on) return;
+    if (!wallShown()) return;
     const d = w.list;
     const cams = (d && d.cameras) || [];
     const up = cams.filter((c) => !isDown(c)), down = cams.filter(isDown);
@@ -110,21 +182,15 @@ window.CamWall = (() => {
     head.append(el("b", "", "Cameras in our area"),
                 el("span", "dim small", d ? `${up.length} up${live ? `, ${live} live` : ""}${down.length ? `, ${down.length} down` : ""}` : ""));
     if (area && area.basis !== "fire_districts" && area.note) head.append(el("span", "cw-basis small", area.note));
-    head.append(el("span", "spacer"));
-    const back = el("button", "sm", "Map");
-    back.type = "button";
-    back.title = "Back to the map";
-    back.addEventListener("click", () => toggle(false));
-    head.append(back);
     const g = el("div", "cw-grid");
     const keep = new Set();
     for (const c of up) {
-      const t = tileFor(c);
-      keep.add(c.id);
+      const t = tile(c, "wall");
+      keep.add(t.key);
       g.append(t.el);
     }
     if (down.length) g.append(downTile(down));
-    for (const [id, t] of w.tiles) if (!keep.has(id)) dropTile(id, t);
+    for (const [k, t] of w.tiles) if (t.set === "wall" && !keep.has(k)) drop(t);
     const kids = [head];
     if (w.error) kids.push(el("div", "error", w.error));
     if (d && !d.configured) kids.push(el("div", "empty", "No camera source is on at the hub"));
@@ -132,15 +198,18 @@ window.CamWall = (() => {
     kids.push(g);
     if (d && d.cameras && cams.some((c) => c.has_video)) kids.push(el("div", "dim small cw-foot", "Live video through the hub, muted; only the tiles on screen play."));
     wall.replaceChildren(...kids);
-    for (const t of w.tiles.values()) if (t.live || t.starting) t.video.play().catch(() => {});   // a moved video pauses
+    for (const t of w.tiles.values()) if (t.set === "wall" && (t.live || t.starting)) t.video.play().catch(() => {});   // a moved video pauses
   }
 
-  function tileFor(c) {
-    let t = w.tiles.get(c.id);
+  // A tile in a set ("wall": with its caption; "overlay": opts.compact, the name only). The same camera can be a tile
+  // in both sets (only one shows at a time); each is its own element, its own stream use and budget slot.
+  function tile(c, set, opts = {}) {
+    const key = `${set}:${c.id}`;
+    let t = w.tiles.get(key);
     if (!t) {
-      const b = el("button", "cw-tile");
+      const b = el("button", opts.compact ? "cw-tile co-tile" : "cw-tile");
       b.type = "button";
-      b.dataset.camera = c.id;
+      b.dataset.camera = c.id;                               // a click opens the viewer (maplayers.js: any [data-camera])
       const frame = el("span", "cw-frame");
       const img = el("img", "cw-img");
       img.alt = "";
@@ -163,11 +232,11 @@ window.CamWall = (() => {
       const where = el("span", "cw-where");
       const age = el("span", "cw-age");
       const cap = el("span", "cw-cap");
-      cap.append(name, where, age);
-      b.append(frame, cap);                                  // a click opens the viewer (maplayers.js: any [data-camera])
-      t = { id: c.id, el: b, img, video, badge, pin, note, name, where, age, cam: c, visible: false, etag: null, taken: 0, url: null,
-            next: 0, busy: false, hls: null, live: false, starting: false, blockedUntil: 0, fps: null };
-      w.tiles.set(c.id, t);
+      cap.append(name, ...(opts.compact ? [] : [where, age]));
+      b.append(frame, cap);
+      t = { key, set, id: c.id, el: b, img, video, badge, pin, note, name, where, age, cam: c, visible: false, etag: null, taken: 0, url: null,
+            next: 0, busy: false, hls: null, live: false, starting: false, blockedUntil: 0, fps: null, away: 0 };
+      w.tiles.set(key, t);
       observer.observe(b);
     }
     t.cam = c;
@@ -176,15 +245,16 @@ window.CamWall = (() => {
     t.el.title = `${c.name}${c.road ? `, ${c.road}` : ""}${c.dir ? ` ${c.dir}` : ""} (${c.source || "511NY"}). Open the viewer`;
     t.el.classList.toggle("pinned", !!c.pin);
     t.pin.hidden = !c.pin;
-    if (c.pin) t.pin.textContent = `${PIN[c.pin] || c.pin}${c.miles != null && c.pin !== "at" ? ` · ${c.miles.toFixed(1)} mi` : ""}`;
+    if (c.pin) t.pin.textContent = pinText(c);
     t.img.alt = `Traffic camera: ${c.name}`;
     return t;
   }
-  function dropTile(id, t) {
+  function drop(t) {
     observer.unobserve(t.el);
     stopLive(t);
     if (t.url) URL.revokeObjectURL(t.url);
-    w.tiles.delete(id);
+    w.tiles.delete(t.key);
+    t.el.remove();
   }
 
   function downTile(down) {
@@ -212,14 +282,14 @@ window.CamWall = (() => {
     return box;
   }
 
-  // ---- on screen: IntersectionObserver ------------------------------------------------------------------------
+  // ---- on screen: IntersectionObserver (a tile off screen a moment stops; a map pan past it doesn't churn) --------
   const observer = new IntersectionObserver((entries) => {
     for (const e of entries) {
-      const t = w.tiles.get(e.target.dataset.camera);
+      const t = [...w.tiles.values()].find((x) => x.el === e.target);
       if (!t) continue;
       t.visible = e.isIntersecting;
-      if (!t.visible) stopLive(t);
-      else t.next = 0;
+      if (t.visible) { t.away = 0; if (!t.taken) t.next = 0; }
+      else t.away = Date.now();
     }
     if (w.running) tick();
   }, { rootMargin: "100px 0px" });
@@ -248,7 +318,10 @@ window.CamWall = (() => {
     if (Date.now() - w.listAt >= LIST_MS) loadList(false);
     const now = Date.now();
     let live = 0;
-    for (const t of w.tiles.values()) if (t.live || t.starting) live++;
+    for (const t of w.tiles.values()) {
+      if ((t.live || t.starting) && !t.visible && t.away && now - t.away >= STOP_MS) stopLive(t);
+      if (t.live || t.starting) live++;
+    }
     for (const t of w.tiles.values()) {
       if (!t.visible) continue;
       const c = t.cam;
@@ -265,7 +338,15 @@ window.CamWall = (() => {
     if (now - w.statusAt >= STATUS_MS) { w.statusAt = now; for (const t of w.tiles.values()) if (t.live && t.visible) liveStatus(t); }
   }
   function showAge(t) {
-    if (t.live) { t.age.textContent = t.fps != null && t.fps < 5 ? `Live · ~${t.fps} fps at the source` : "Live"; return; }
+    if (t.live) {
+      const low = t.fps != null && t.fps < 5;
+      t.age.textContent = low ? `Live · ~${t.fps} fps at the source` : "Live";
+      if (!t.age.isConnected) {                              // a compact tile (the overlay): the note on the picture
+        t.note.hidden = !low;
+        if (low) t.note.textContent = `~${t.fps} fps at the source`;
+      }
+      return;
+    }
     const cad_ = t.cam.cadence || 60;
     t.age.textContent = t.taken ? `Image ${ago(t.taken)}` : t.failed ? t.failed : "Loading…";
     t.age.title = cad_ >= 60 ? "Snapshot, updated about every minute" : `Snapshot, updated every ${cad_} s`;
@@ -384,8 +465,12 @@ window.CamWall = (() => {
     if (w.running) loadList(false);
   });
   MapLayers.subscribe(() => { if (w.running) loadList(true); });     // the hub's camera list or health changed
+  new ResizeObserver(() => { if (split2()) { setShare(along() * L[mode()]); sep.sync(); } }).observe(view);
 
-  w.on = !!saved()[SCREEN];
-  sync();
-  return { toggle, state: w, token: TOKEN };
+  layout();
+  const engine = {
+    list: () => w.list, subscribe: (fn) => w.subs.add(fn), tile, drop, layout: mode, isDown, pinText,
+    tick: () => { if (w.running) tick(); },
+  };
+  return { choose, layout: mode, state: w, prefs: L, token: TOKEN, engine };
 })();

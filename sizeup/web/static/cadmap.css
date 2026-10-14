@@ -202,10 +202,34 @@
   .ov-page { display: block; text-align: start; white-space: normal; overflow-wrap: anywhere; padding-block: var(--s-1);
     border-color: var(--warn); background: color-mix(in srgb, var(--warn) 12%, var(--card)); }
   .ov-grid { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(19rem, 1fr); gap: var(--gutter); align-items: start; }
-  .ov-mapbox {
-    position: sticky; inset-block-start: 0; min-block-size: var(--map-h-min); border-radius: var(--radius); overflow: hidden; border: var(--bw) solid var(--line);
+  /* the map and the cameras (camwall.js, #147): one view the height of the screen, its panes by the layout
+     (data-layout on .ov-grid: map | cameras | side | stacked | overlay; data-swap: the cameras on top) */
+  .ov-view {
+    position: sticky; inset-block-start: 0; display: flex; flex-direction: column; min-inline-size: 0; min-block-size: var(--map-h-min);
     block-size: calc(100dvh - var(--hdr-h) - 2 * var(--gutter) - var(--ctl) - var(--gutter));
   }
+  .ov-mapbox { position: relative; flex: 1 1 auto; min-block-size: 0; border-radius: var(--radius); overflow: hidden; border: var(--bw) solid var(--line); }
+  .ov-view > .cw-wall { flex: 1 1 0; }
+  .ov-grid:is([data-layout="side"], [data-layout="stacked"]) .ov-mapbox { flex: 0 0 var(--ov-split, 50%); }
+  .ov-grid[data-layout="side"] .ov-view { flex-direction: row; }
+  .ov-grid[data-layout="side"] .ov-view > .cw-wall { min-inline-size: 0; }
+  .ov-grid[data-swap="true"] .ov-mapbox { order: 3; }
+  .ov-grid[data-swap="true"] .ov-split { order: 2; }
+  .ov-grid[data-layout="side"] { grid-template-columns: minmax(0, 2.4fr) minmax(16rem, 1fr); }
+  .ov-grid[data-layout="stacked"] { grid-template-columns: minmax(0, 1.4fr) minmax(17rem, 1fr); }
+  /* the divider: a 24 px target, a line in the middle while hovered, focused or dragged (panels.js's separator) */
+  .ov-split { position: relative; flex: 0 0 var(--s-6); cursor: row-resize; touch-action: none; }
+  .ov-split[data-orient="vertical"] { cursor: col-resize; }
+  .ov-split::before {
+    content: ""; position: absolute; inset-inline: 0; inset-block-start: calc(50% - var(--bw)); block-size: calc(2 * var(--bw));
+    background: var(--line); border-radius: var(--radius-s); transition: background-color 0.12s;
+  }
+  .ov-split[data-orient="vertical"]::before { inset-block: 0; inset-inline: calc(50% - var(--bw)) auto; inline-size: calc(2 * var(--bw)); block-size: auto; }
+  .ov-split:is(:hover, :focus-visible, .on)::before { background: var(--accent); }
+  .ov-split:focus-visible { outline: none; }
+  body.row-dragging { cursor: row-resize; user-select: none; }
+  body:is(.row-dragging, .col-dragging) .ov-view > :not(.ov-split) { pointer-events: none; }
+  .ov-layout button { gap: var(--s-1); }
   #ov-map { position: absolute; inset: 0; }
   .ov-side { min-inline-size: 0; display: flex; flex-direction: column; gap: var(--s-2); }
   .ov-cards { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(19rem, 100%), 1fr)); gap: var(--s-3); }
@@ -236,8 +260,7 @@
   /* the camera wall (camwall.js, #125): in the map's place, the same height, scrolling inside; columns by its own
      width (2-3 on the dispatch screen, 4-6 on the wall board's big screen, 1 on a phone) */
   .cw-wall {
-    container-type: inline-size; display: flex; flex-direction: column; gap: var(--s-2); min-inline-size: 0; overflow-y: auto;
-    block-size: calc(100dvh - var(--hdr-h) - 2 * var(--gutter) - var(--ctl) - var(--gutter)); min-block-size: var(--map-h-min);
+    container-type: inline-size; display: flex; flex-direction: column; gap: var(--s-2); min-inline-size: 0; min-block-size: 0; overflow-y: auto;
     padding: var(--s-2); border: var(--bw) solid var(--line); border-radius: var(--radius); background: var(--panel);
   }
   .cw-head { display: flex; align-items: center; flex-wrap: wrap; gap: var(--s-1) var(--s-2); }
@@ -272,14 +295,55 @@
   .cw-down.open { grid-column: 1 / -1; }
   .cw-down-head { display: flex; align-items: center; gap: var(--s-2); justify-content: flex-start; inline-size: 100%;
     font-weight: 400; color: var(--text-2); background: none; border-color: transparent; }
-  .ov-grid.cw-on .ov-mapbox { display: none; }
-  html.board .ov-grid.cw-on { grid-template-columns: minmax(0, 3fr) minmax(16rem, 1fr); }
+  /* the Overlay layout (camoverlay.js, #147): tiles over the map at their cameras, leader lines to the spot */
+  .co-layer { position: absolute; inset: 0; z-index: 1; pointer-events: none; overflow: hidden; }
+  .co-lines { position: absolute; inset: 0; inline-size: 100%; block-size: 100%; overflow: visible; }
+  .co-leader line { stroke: var(--text); stroke-width: 1.5; stroke-opacity: 0.85; }
+  .co-leader circle { fill: var(--text); stroke: var(--bg); stroke-width: 1.5; }
+  .co-leader.pinned line, .co-leader.pinned circle { stroke: var(--warn); fill: var(--warn); }
+  .co-far .co-tile, .co-far .co-leader { display: none; }
+  .co-tile { position: absolute; inset-block-start: 0; inset-inline-start: 0; pointer-events: auto; padding: var(--s-0); gap: var(--s-0);
+    box-shadow: 0 1px 6px rgba(0, 0, 0, 0.6); will-change: transform; }
+  .co-tile .cw-name { font-size: var(--fs-2xs); line-height: var(--lh-2xs); }
+  .co-tile :is(.cw-pin, .ml-live, .cw-note) { padding: 0 var(--s-1); font-size: var(--fs-2xs); line-height: var(--lh-2xs); white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis; letter-spacing: 0; }
+  .co-tile .cw-pin { inset-inline: auto var(--s-0); inset-block-start: var(--s-0); max-inline-size: calc(100% - 2 * var(--s-0)); }
+  .co-tile .ml-live { inset-block-start: auto; inset-block-end: var(--s-0); inset-inline-start: var(--s-0); }
+  .co-tile .cw-note { inset-inline: var(--s-0); inset-block-end: var(--s-0); }
+  .co-mark { position: absolute; inset-block-start: 0; inset-inline-start: 0; pointer-events: auto; display: flex; align-items: center;
+    gap: var(--s-1); inline-size: auto; min-inline-size: var(--s-6); block-size: var(--s-6); min-block-size: 0; padding: 0;
+    margin: calc(-1 * var(--s-3)) 0 0 calc(-1 * var(--s-3)); background: none; border: 0; justify-content: flex-start; }
+  @media (pointer: coarse) { .co-mark { min-inline-size: var(--ctl); block-size: var(--ctl); margin-block-start: calc(-0.5 * var(--ctl)); } }   /* a finger's target */
+  .co-down { opacity: 0.6; }
+  .co-down .ml-down-badge { margin-inline-start: var(--s-1); }
+  .co-ring-dot { flex: 0 0 auto; inline-size: var(--s-6); block-size: var(--s-6); border: calc(2 * var(--bw)) solid var(--warn); border-radius: 50%;
+    box-shadow: 0 0 0 calc(2 * var(--bw)) color-mix(in srgb, var(--bg) 70%, transparent); }
+  .co-ring-lbl { padding: 0 var(--s-1); font-size: var(--fs-2xs); line-height: var(--lh-2xs); font-weight: 700; white-space: nowrap;
+    color: var(--on-warn); background: var(--warn); border-radius: var(--radius-s); }
+  html.board .ov-grid[data-layout="cameras"] { grid-template-columns: minmax(0, 3fr) minmax(16rem, 1fr); }
+  html.board .ov-grid[data-layout="side"] { grid-template-columns: minmax(0, 3.2fr) minmax(16rem, 1fr); }
+  html.board .ov-grid[data-layout="stacked"] { grid-template-columns: minmax(0, 2fr) minmax(16rem, 1fr); }
 
   @container (width < 60rem) {
-    .ov-grid { grid-template-columns: minmax(0, 1fr); }
-    .cw-wall { block-size: auto; min-block-size: 0; overflow: visible; }
-    .ov-mapbox { position: relative; block-size: 46vh; min-block-size: var(--map-h); }
+    .ov-grid:is([data-layout="map"], [data-layout="cameras"], [data-layout="overlay"]) { grid-template-columns: minmax(0, 1fr); }
+    .ov-grid:is([data-layout="map"], [data-layout="overlay"]) .ov-view { position: relative; block-size: 46vh; min-block-size: var(--map-h); }
+    .ov-grid[data-layout="cameras"] .ov-view { position: relative; block-size: auto; min-block-size: 0; }
+    .ov-grid[data-layout="cameras"] .cw-wall { flex: 0 0 auto; overflow: visible; }
+    /* side by side and stacked keep the events on the right down to a narrower middle column (the user's ask) */
+    .ov-grid[data-layout="side"] { grid-template-columns: minmax(0, 2.2fr) minmax(14rem, 1fr); }
+    .ov-grid[data-layout="stacked"] { grid-template-columns: minmax(0, 1.6fr) minmax(14rem, 1fr); }
   }
-  @media (max-width: 1100px) { .ov-mapbox { block-size: var(--map-h); } .cw-wall { block-size: auto; min-block-size: 0; overflow: visible; } }
+  @container (width < 40rem) {
+    .ov-grid[data-layout] { grid-template-columns: minmax(0, 1fr); }
+    .ov-grid:is([data-layout="side"], [data-layout="stacked"]) .ov-view { position: relative; block-size: 80vh; }
+  }
+  @media (max-width: 1100px) {
+    .ov-view { position: relative; block-size: var(--map-h); min-block-size: 0; }
+    .ov-grid:is([data-layout="side"], [data-layout="stacked"]) .ov-view { block-size: 80vh; }
+    .ov-grid[data-layout="cameras"] .ov-view { block-size: auto; }
+    .ov-grid[data-layout="cameras"] .cw-wall { flex: 0 0 auto; overflow: visible; }
+  }
+  /* a phone: Map and Cameras only (camwall.js shows the map for the others) */
+  @media (max-width: 640px) { .ov-layout button:is([data-layout="side"], [data-layout="stacked"], [data-layout="overlay"]) { display: none; } }
   @media (max-width: 640px) { .cm-big { inline-size: 100vw; block-size: 100%; border-radius: 0; } }
 }

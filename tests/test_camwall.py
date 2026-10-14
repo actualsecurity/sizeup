@@ -276,21 +276,26 @@ def test_the_settings_are_audited_exported_and_imported(tmp_path):
 # ---- the page (static; tools/ui_consistency.py and the Playwright check render it) ------------------------------------
 
 
-def test_the_toggle_is_on_the_overview_and_the_wall_board():
+def in_try(js: str, at: int) -> bool:
+    """The code at `at` is inside a try { } block (its braces still open there)."""
+    t = js.rfind("try {", 0, at)
+    return t >= 0 and js.count("{", t, at) > js.count("}", t, at)
+
+
+def test_the_layouts_are_on_the_overview_and_the_wall_board():
     html = (STATIC / "cad.html").read_text()
     head = re.search(r'<div class="ov-head view-head">(.*?)</div>\s*<div id="ov-pages"', html, re.S).group(1)
-    assert 'id="cw-toggle"' in head and 'aria-pressed="false"' in head and "console-only" not in head   # both screens
-    grid = re.search(r'<div class="ov-grid">(.*?)<div class="ov-side">', html, re.S).group(1)
-    assert 'class="ov-mapbox"' in grid and 'id="cw-wall"' in grid                   # in the map's place
+    assert 'id="ov-layout"' in head and "console-only" not in head and "board-only" not in head   # both screens
+    grid = re.search(r'<div class="ov-grid" data-layout="map">(.*?)<div class="ov-side">', html, re.S).group(1)
+    assert 'class="ov-mapbox"' in grid and 'id="cw-wall"' in grid and 'id="ov-split"' in grid
     assert html.index('src="/static/camwall.js"') > html.index('src="/static/maplayers.js"')
 
 
 def test_the_wall_is_remembered_per_screen_and_stops_when_hidden():
     js = (STATIC / "camwall.js").read_text()
-    assert 'const KEY = "sizeup.cameraWall"' in js and 'BOARD ? "monitor" : "overview"' in js
+    assert 'const KEY = "sizeup.overviewLayout", OLD_KEY = "sizeup.cameraWall"' in js and 'BOARD ? "monitor" : "overview"' in js
     for m in re.finditer(r"localStorage\.\w+Item", js):                              # storage may refuse: never throws
-        before = js[:m.start()]
-        assert before.rfind("try {") > before.rfind("}"), m.group(0)
+        assert in_try(js, m.start()), m.group(0)
     assert "new IntersectionObserver(" in js and "observer.observe(" in js and "observer.unobserve(" in js
     assert 'document.addEventListener("visibilitychange"' in js and 'document.visibilityState !== "hidden"' in js
     assert '$("#overview").hidden' in js                                            # the wall hidden (an incident open): stopped
@@ -308,6 +313,6 @@ def test_the_wall_lays_out_on_the_tokens():
     assert "container-type: inline-size" in block
     cols = dict(re.findall(r"@container \(width ([<>]=? \d+rem)\) \{ (?:html\.board )?\.cw-grid \{ --cw-cols: (\d); \}", block))
     assert cols == {"< 30rem": "1", ">= 54rem": "3", ">= 60rem": "4", ">= 80rem": "5", ">= 100rem": "6"}
-    assert "html.board .ov-grid.cw-on" in block
+    assert 'html.board .ov-grid[data-layout="cameras"]' in block
     for v in re.findall(r"(?:font-size|padding|gap|line-height):\s*([^;]+);", block):
         assert "px" not in v and "rem" not in v, v                                  # tokens only

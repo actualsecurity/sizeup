@@ -490,7 +490,7 @@
   html.board .ov-page .dim { display: none; }          /* "Accept / Dismiss": the console's, not the board's */
   html.board :is(.feed-more, .menu-btn) { display: none; }
   html.board .ov-grid { grid-template-columns: minmax(0, 1.6fr) minmax(18rem, 1fr); }
-  html.board .ov-mapbox { block-size: calc(100dvh - var(--hdr-h) - 2 * var(--gutter) - var(--ctl) - var(--gutter)); }
+  html.board .ov-view { block-size: calc(100dvh - var(--hdr-h) - 2 * var(--gutter) - var(--ctl) - var(--gutter)); }
   .b-sec { margin-block-start: var(--s-3); }
   html.board #feed { display: none !important; }       /* the board's radio is the main channels (.b-radio), not this */
   .b-radio { margin-block-start: 0; }
@@ -516,8 +516,8 @@
     .queue > section > :is(h2, .q-head) { position: static; }
     .units > .feed { position: static; margin: 0 0 var(--s-3); border: var(--bw) solid var(--line); border-radius: var(--radius); }
     html.board .cad-main { --zoom: 1.1; }
-    html.board .ov-grid { grid-template-columns: minmax(0, 1fr); }
-    html.board .ov-mapbox { block-size: 50vh; }
+    html.board .ov-grid, html.board .ov-grid[data-layout] { grid-template-columns: minmax(0, 1fr); }
+    html.board .ov-grid:is([data-layout="map"], [data-layout="overlay"]) .ov-view { block-size: 50vh; }
   }
   /* a phone: the header is two rows, the same on every view (brand, state, clock / views, tools) */
   @media (max-width: 640px) {
