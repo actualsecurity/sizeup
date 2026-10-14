@@ -319,12 +319,36 @@ function fillListSelects() {
 
 // ---- audio ----------------------------------------------------------------------------
 
+// One player. A play button toggles: press it again (or another one) to stop. Rows are redrawn as the state
+// changes, so the playing button is found again by its URL (playBtn) and keeps its stop icon.
 const player = new Audio();
-function play(url) {
-  if (!url) return;
-  player.src = url;
-  player.play().catch((e) => console.warn("audio:", e));
+const nowPlaying = { url: "", btn: null };
+function stopPlay() {
+  if (nowPlaying.btn) Icon.play(nowPlaying.btn, "play");
+  nowPlaying.url = "";
+  nowPlaying.btn = null;
 }
+player.addEventListener("ended", stopPlay);
+player.addEventListener("error", stopPlay);
+function play(url, btn = null) {
+  if (!url) return;
+  if (nowPlaying.url === url && !player.paused) { player.pause(); return stopPlay(); }
+  if (!player.paused) player.pause();
+  stopPlay();
+  nowPlaying.url = url;
+  nowPlaying.btn = btn;
+  player.src = url;
+  player.play().then(() => { if (nowPlaying.url === url && nowPlaying.btn) Icon.play(nowPlaying.btn, "stop"); })
+    .catch((e) => { console.warn("audio:", e); if (nowPlaying.url === url) stopPlay(); });
+}
+window.play = play;
+// Wire a play button for url: a click toggles it; a redrawn button for what is playing shows stop.
+function playBtn(b, url) {
+  b.addEventListener("click", () => play(url, b));
+  if (url && nowPlaying.url === url && !player.paused) { nowPlaying.btn = b; Icon.play(b, "stop"); }
+  return b;
+}
+window.playBtn = playBtn;
 
 // ---- connection / clock ------------------------------------------------------------------
 
@@ -673,7 +697,7 @@ function renderSourcePages(inc) {
     b.type = "button";
     b.disabled = t.has_audio === false;
     b.title = t.has_audio === false ? "Recording expired (12 h)" : `Play the page (${fmtTime(t.start, true)})${t.voice_at > 0 ? ", tones skipped" : ""}`;
-    b.addEventListener("click", () => play(clipUrl(t, false)));
+    playBtn(b, clipUrl(t, false));
     r.append(b, el("span", "dim", `Page ${fmtTime(t.start)}`), ...Radio.pageTags(t.tones));
     if (!BOARD) r.append(UI.menu.button(`Actions: page ${fmtTime(t.start, true)}`, () => pageMenuItems(t), { key: `inc-page:${t.id}` }));
     return r;
@@ -720,7 +744,7 @@ function radioRow(t, ctx = {}) {
   const b = Icon.play(el("button", "play"));
   b.title = t.has_audio === false ? "Recording expired (12 h)" : t.voice_at > 0 ? "Play (tones skipped)" : "Play";
   b.disabled = t.has_audio === false;
-  b.addEventListener("click", () => play(clipUrl(t, false)));
+  playBtn(b, clipUrl(t, false));
   meta.append(b, el("span", "t", fmtTime(t.start, true)));
   const tag = Radio.rigTag({ rig: t.rig, radio_id: t.radio_id, unit: t.talker });
   if (tag) meta.append(tag);
@@ -1413,7 +1437,7 @@ function renderEvents(inc) {
       if (did) {
         const b = Icon.play(el("button", "play mini"));
         b.title = "Play";
-        b.addEventListener("click", () => play(`/api/cad/dispatch/${did}.wav`));
+        playBtn(b, `/api/cad/dispatch/${did}.wav`);
         txt.append(b);
       }
       if (e.kind === "note" && e.units) {
@@ -1445,7 +1469,7 @@ function renderDispatches(inc) {
       if (d.has_audio) {
         const b = Icon.play(el("button", "play"));
         b.title = "Play";
-        b.addEventListener("click", () => play(`/api/cad/dispatch/${d.id}.wav`));
+        playBtn(b, `/api/cad/dispatch/${d.id}.wav`);
         row.append(b);
       }
       row.append(el("div", "txt", d.text));
