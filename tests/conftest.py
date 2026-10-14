@@ -90,3 +90,23 @@ def _trains_stay_local(monkeypatch):
         assert host in ("127.0.0.1", "localhost", "::1"), f"a test tried to reach {host} (trains: fixtures only)"
         return real(req, *a, **kw)
     monkeypatch.setattr(trains, "urlopen", local_only)
+
+
+@pytest.fixture(autouse=True)
+def _weather_stays_local(monkeypatch):
+    """Weather and water (sizeup/weather.py) never reach NOAA from a test: the real fetch only to this
+    machine, and an app's Weather (the real fetch) is never started; a test hands in recorded fixtures."""
+    from urllib.parse import urlsplit
+
+    import sizeup.weather as weather
+    real, start = weather.urlopen, weather.Weather.start
+
+    def local_only(req, *a, **kw):
+        host = urlsplit(req.full_url if hasattr(req, "full_url") else str(req)).hostname
+        assert host in ("127.0.0.1", "localhost", "::1"), f"a test tried to reach {host} (weather: fixtures only)"
+        return real(req, *a, **kw)
+
+    def fixtures_only(self):
+        return self if self.fetch is weather.http_get else start(self)
+    monkeypatch.setattr(weather, "urlopen", local_only)
+    monkeypatch.setattr(weather.Weather, "start", fixtures_only)

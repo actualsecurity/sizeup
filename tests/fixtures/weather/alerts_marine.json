@@ -1,0 +1,122 @@
+{
+ "@context": [
+  "https://geojson.org/geojson-ld/geojson-context.jsonld",
+  {
+   "@version": "1.1",
+   "wx": "https://api.weather.gov/ontology#",
+   "@vocab": "https://api.weather.gov/ontology#"
+  }
+ ],
+ "type": "FeatureCollection",
+ "title": "Current watches, warnings, and advisories",
+ "updated": "2026-10-14T15:35:36+00:00",
+ "features": [
+  {
+   "id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.aaaaaa19a560e1bae91c3b37d1b5a6ae1f38811f.003.1",
+   "type": "Feature",
+   "geometry": null,
+   "properties": {
+    "@id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.aaaaaa19a560e1bae91c3b37d1b5a6ae1f38811f.003.1",
+    "@type": "wx:Alert",
+    "id": "urn:oid:2.49.0.1.840.0.aaaaaa19a560e1bae91c3b37d1b5a6ae1f38811f.003.1",
+    "areaDesc": "Coastal Waters from Eastport, ME to Schoodic Point, ME out 25 NM; Coastal Waters from Schoodic Point, ME to Stonington, ME out 25 NM",
+    "geocode": {
+     "SAME": [
+      "073050",
+      "073051"
+     ],
+     "UGC": [
+      "ANZ050",
+      "ANZ051"
+     ]
+    },
+    "affectedZones": [
+     "https://api.weather.gov/zones/forecast/ANZ050",
+     "https://api.weather.gov/zones/forecast/ANZ051"
+    ],
+    "references": [
+     {
+      "@id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.3e1fd22ba4479e3dd3502bd77abb7634fb0ed7bf.002.1",
+      "identifier": "urn:oid:2.49.0.1.840.0.3e1fd22ba4479e3dd3502bd77abb7634fb0ed7bf.002.1",
+      "sender": "w-nws.webmaster@noaa.gov",
+      "sent": "2026-10-14T02:45:00-04:00"
+     },
+     {
+      "@id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.5e2b84f973c2eb1cf09a07c267ae3e37461869cd.001.1",
+      "identifier": "urn:oid:2.49.0.1.840.0.5e2b84f973c2eb1cf09a07c267ae3e37461869cd.001.1",
+      "sender": "w-nws.webmaster@noaa.gov",
+      "sent": "2026-10-14T04:48:00-04:00"
+     },
+     {
+      "@id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.b33fe173f32933d545dcd2b80348114da3df418d.001.1",
+      "identifier": "urn:oid:2.49.0.1.840.0.b33fe173f32933d545dcd2b80348114da3df418d.001.1",
+      "sender": "w-nws.webmaster@noaa.gov",
+      "sent": "2026-10-14T04:50:00-04:00"
+     },
+     {
+      "@id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.b33fe173f32933d545dcd2b80348114da3df418d.002.1",
+      "identifier": "urn:oid:2.49.0.1.840.0.b33fe173f32933d545dcd2b80348114da3df418d.002.1",
+      "sender": "w-nws.webmaster@noaa.gov",
+      "sent": "2026-10-14T04:50:00-04:00"
+     }
+    ],
+    "sent": "2026-10-14T11:21:00-04:00",
+    "effective": "2026-10-14T11:21:00-04:00",
+    "onset": "2026-10-14T11:21:00-04:00",
+    "expires": "2026-10-14T19:30:00-04:00",
+    "ends": "2026-10-15T10:00:00-04:00",
+    "status": "Actual",
+    "messageType": "Update",
+    "category": "Met",
+    "severity": "Minor",
+    "certainty": "Likely",
+    "urgency": "Expected",
+    "event": "Small Craft Advisory",
+    "sender": "w-nws.webmaster@noaa.gov",
+    "senderName": "NWS Caribou ME",
+    "headline": "Small Craft Advisory issued October 14 at 11:21AM EDT until October 15 at 10:00AM EDT by NWS Caribou ME",
+    "description": "* WHAT...Northwest winds 15 to 25 kt with gusts up to 30 kt and\nseas 3 to 6 ft.\n\n* WHERE...Coastal Waters from Eastport, ME to Schoodic Point, ME\nout 25 NM and Coastal Waters from Schoodic Point, ME to\nStonington, ME out 25 NM.\n\n* WHEN...Until 10 AM EDT Thursday.\n\n* IMPACTS...Conditions will be hazardous to small craft.",
+    "instruction": "Inexperienced mariners, especially those operating smaller\nvessels, should avoid navigating in hazardous conditions.",
+    "response": "Avoid",
+    "note": null,
+    "parameters": {
+     "AWIPSidentifier": [
+      "MWWCAR"
+     ],
+     "WMOidentifier": [
+      "WHUS71 KCAR 141521"
+     ],
+     "NWSheadline": [
+      "SMALL CRAFT ADVISORY NOW IN EFFECT UNTIL 10 AM EDT THURSDAY"
+     ],
+     "BLOCKCHANNEL": [
+      "EAS",
+      "NWEM",
+      "CMAS"
+     ],
+     "VTEC": [
+      "/O.EXT.KCAR.SC.Y.0073.000000T0000Z-261015T1400Z/"
+     ],
+     "eventEndingTime": [
+      "2026-10-15T10:00:00-04:00"
+     ],
+     "expiredReferences": [
+      "w-nws.webmaster@noaa.gov,urn:oid:2.49.0.1.840.0.61033eb2150a832a29fc317c0cd7cbd8d8c8a46b.002.1,2026-10-13T20:48:00-04:00 w-nws.webmaster@noaa.gov,urn:oid:2.49.0.1.840.0.acb5dfc8f7023d785f51f94a9c593a446acd166a.003.1,2026-10-13T13:46:00-04:00 w-nws.webmaster@noaa.gov,urn:oid:2.49.0.1.840.0.acb5dfc8f7023d785f51f94a9c593a446acd166a.001.1,2026-10-13T13:46:00-04:00 w-nws.webmaster@noaa.gov,urn:oid:2.49.0.1.840.0.3ba823e4b8d8878a75b21f983a68ec03398451f8.001.1,2026-10-13T05:35:00-04:00 w-nws.webmaster@noaa.gov,urn:oid:2.49.0.1.840.0.a89d5f5cafd82e857d6cf9f90756ee0d7267e87d.002.1,2026-10-13T02:23:00-04:00 w-nws.webmaster@noaa.gov,urn:oid:2.49.0.1.840.0.eae913ff4abfb103dc9295f9528eabc85f41553c.002.1,2026-10-12T12:41:00-04:00 w-nws.webmaster@noaa.gov,urn:oid:2.49.0.1.840.0.f2248c4c72ae4f94b95021952e3675946ccb7a0d.001.1,2026-10-12T03:18:00-04:00"
+     ]
+    },
+    "scope": "Public",
+    "code": "IPAWSv1.0",
+    "language": "en-US",
+    "web": "http://www.weather.gov",
+    "eventCode": {
+     "SAME": [
+      "NWS"
+     ],
+     "NationalWeatherService": [
+      "SCY"
+     ]
+    }
+   }
+  }
+ ]
+}

@@ -27,6 +27,8 @@
         snapshots proxied by this process (sizeup/roads.py)
     [gis]: Westchester County GIS datasets (parcels, boundaries, utilities ...) for the maps' Layers,
         fetched and served by this process (sizeup/gis.py)
+    [weather]: NWS alerts, conditions and radar, NOAA tides for the banner, the header, the maps and
+        marine calls, fetched and served by this process (sizeup/weather.py)
     [prealert]: Tapout's ntfy feed (the HQ phone ringing), read only, on the CAD of record (all-in-one
         or the hub) -> a pre-alert at the top of the CAD's 60 Control column (sizeup/prealert.py)
     per channel (Settings > Radios, sizeup/channels.py): record / transcribe / engine (local whisper,
@@ -379,6 +381,12 @@ class App:
         # someone looks at the Trains layer or an event near the tracks.
         from sizeup.trains import Trains
         self.trains = Trains.from_config(cfg, log=log)
+        # Weather and water (sizeup/weather.py, #132): NWS alerts, conditions and radar, NOAA tides; a warning
+        # said by the dispatch voice when Settings > Dispatch allows it (played where the console is open).
+        from sizeup.weather import Weather
+        self.weather = Weather.from_config(cfg, log=log)
+        self.weather.speak_on = lambda: bool(getattr(self.cad, "weather_speak", False))
+        self.weather.speaker = self._weather_voice
         if cfg.prealert_enabled:
             from sizeup.prealert import PreAlerts
             self.prealert = PreAlerts(self.cad, cfg.prealert_server, cfg.prealert_ring_topic, cfg.prealert_status_topic,
@@ -1977,6 +1985,7 @@ class App:
             self.roads.start()
             self.gis.start()
             self.trains.start()
+            self.weather.start()
         return self
 
     def forwarding(self) -> bool:
@@ -2030,6 +2039,13 @@ class App:
         self.roads.stop()
         self.gis.stop()
         self.trains.stop()
+        self.weather.stop()
+
+    def _weather_voice(self, text: str) -> tuple[str | None, str]:
+        """A weather warning said by the dispatch voice, no tones (sizeup/weather.py Weather.speech): (its
+        audio URL, which voice) or (None, why not). Played in the browser; never keyed."""
+        path, note = self.cad._render(text, tones=[])
+        return (self.cad._audio_url(path), note) if path else (None, note)
 
 
 def channels_model() -> str:
@@ -2058,7 +2074,7 @@ def make_server(app: App) -> WebServer:
                        station=getattr(app, "hub", None), health=health_info(cfg), access=access_verifier(cfg),
                        access_log=log if cfg.cloud_role == "hub" else None, station_mode=app.station,
                        role=cfg.cloud_role, roads=app.roads, gis=app.gis,
-                       trains=app.trains)
+                       trains=app.trains, weather=app.weather)
 
     def changed() -> None:             # a new talker is pushed at once, not on the next second
         server.poke()

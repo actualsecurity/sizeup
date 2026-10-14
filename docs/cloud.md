@@ -1158,6 +1158,86 @@ bbox = [-73.745, 40.945, -73.595, 41.035]   # the stretch of line the map shows 
 Tests: `tests/test_trains.py` on fixtures recorded 2026-10-14 11:33 EDT (`tests/fixtures/mta/`, trimmed
 by `tools/record_trains_fixtures.py`; run it to re-record).
 
+## Weather and water (NWS alerts, conditions, radar; NOAA tides)
+
+> "Public, free data: National Weather Service alerts ... as a banner on /cad and /monitor ... spoken once
+> for warnings. Current conditions ... in the header; wind arrow on the map near an active fire. A radar
+> layer ... NOAA tides & currents for the nearest stations ... All through the hub (cache, shared
+> USER_AGENT)." (GitHub #132)
+
+**On screen.** The NWS's alerts for our zones show as a **banner** under the header on the console and
+the wall board (in the shared alert-banner box, `#alert-banners`, where the station-health banner sits
+too): one line per alert, most serious first, in its level's colour (a *warning* red, a *watch* or an
+*advisory* amber, a *statement* blue), the headline and when it ends; more than two fold behind
+"+N more"; a click opens the full text (what, what to do, onset, until, area, issuing office). The
+**header** shows the current conditions at Westchester County Airport, "75°F · W 10 G 18 mph", with an
+arrow the way the wind blows (the time, humidity, visibility and sky in its tooltip; dimmed when the
+observation is over 2 h old). Every map's **Layers** box has a **Weather** group: **Radar** (off by
+default; in the viewer's or the event's layer set as `wx:radar`) and **Animate the last hour** (a frame
+every 10 min, per viewer); an active or pending event's map has a small **wind** indicator in its corner.
+A **marine call** (RESCUE / WATER, AIRPORT / ACFT-WATER, a BOAT fire, or any marine unit on it: Marine
+40) shows the **tides** on the event, and the wall board has a **Marine** block: the level at Rye Beach
+now, rising or falling, the next high and low with times, the Kings Point gauge and how far the water
+runs above or below the table, and any marine alert (a Small Craft Advisory: marine alerts stay out of
+the banner).
+
+**Spoken warnings.** Settings → Dispatch → *Weather warnings* (off by default; the CAD's settings,
+`dispatch.weather_speak`, audited like any setting). With it on, each **warning** (not a watch, advisory
+or statement) is said once by the dispatch voice, no tones: "Weather alert. The National Weather Service
+has issued a Severe Thunderstorm Warning for Southern Westchester, until 1745." The hub renders it with
+the CAD's own voice (Polly, or the station's); it is played by the browser where the console is open
+(and on the wall board while its Sound is on), once per alert per browser (`localStorage`
+`sizeup.wxSpoken`). Nothing is keyed on a radio: transmit stays off.
+
+**Sources** (surveyed 2026-10-14):
+
+| | source | where | how often |
+|---|---|---|---|
+| Alerts | api.weather.gov `/alerts/active?zone=NYZ071,NYC119,NYZ211,ANZ335` | `/points/41.00,-73.67` puts Port Chester in forecast zone **NYZ071** (Southern Westchester), county zone **NYC119** (Westchester) and fire weather zone **NYZ211** (Red Flag Warnings); the harbour opens on marine zone **ANZ335** (Long Island Sound west of New Haven CT / Port Jefferson NY). WFO Upton (OKX) | every 2 min |
+| Conditions | api.weather.gov `/stations/KHPN/observations/latest` | **KHPN**, Westchester County Airport: the first of the gridpoint's (OKX 43,57) stations, 7 km from Port Chester | every 10 min |
+| Tide predictions | CO-OPS `datagetter` `product=predictions` (`interval=hilo`, `h`), MLLW, ft, GMT | **8518091 Rye Beach NY**, 4 km south (Playland): the nearest station; a harmonic one, so hourly predictions too. There is no CO-OPS station in Port Chester harbour or the Byram River (Cos Cob Harbor 8469549, 6 km, is a subordinate station: highs and lows only) | every 6 h (3 days around now) |
+| Water level | CO-OPS `product=water_level&date=latest`, and the gauge's own 6-min predictions | **8516945 Kings Point NY**, 23 km: the nearest live water-level gauge on the Sound (the next: The Battery, Bridgeport, 45 km). Its reading minus its table is the surge or set-down now | every 10 min |
+| Radar | NWS OGC service `opengeo.ncep.noaa.gov/geoserver/conus/conus_bref_qcd/ows` (WMS 1.3.0, `GetMap`, EPSG:3857) | **MRMS base reflectivity**, the quality-controlled CONUS composite radar.weather.gov draws, 1 km; time-enabled (a frame every 2 min, 2 h kept) | tiles as the maps ask (the latest kept 2 min, a past frame 1 h); the frame list at most every 5 min |
+
+**Terms.** All NOAA / NWS data is a US Government work, in the public domain (weather.gov's disclaimer:
+"The information on government servers are in the public domain, unless specifically annotated
+otherwise"); no key, no fee. api.weather.gov asks every client for a User-Agent that identifies the
+application with contact details (ours: `sizeup.USER_AGENT`, the department's mailbox) and to cache (we
+poll at most every 2 min and keep what we read). CO-OPS asks API users to name their application
+(`application=sizeup_pcfd`). The radar WMS's capabilities say `Fees: none`, `AccessConstraints: none`.
+Attribution, given though not required: "NOAA/NWS MRMS radar" (linked to radar.weather.gov) in the map's
+corner and the Layers box; "National Weather Service" on an alert's text and the conditions' tooltip; "NOAA
+Tides & Currents, MLLW" (linked to the station) under the tides. Not used: **RainViewer** (its API is
+"available for personal and educational use only", with no availability guarantee: not for a fire
+department's console), and mapservices.weather.noaa.gov's radar (the same MRMS composite but not
+time-enabled: no animation).
+
+**How it works** (`sizeup/weather.py`): the hub (or all-in-one; a station has no maps) reads each feed on
+its own schedule with its own backoff (1 min doubling to 15; 30 min after a 403), keeps the last good
+answer through a failure, and caches what it read on disk (`weather.json` under the state dir, with the
+zones and stations it was read for: another config reads afresh), so a restart spends no calls. Only
+alerts with status *Actual* are kept; a *Cancel*, an expired one and one another message replaces are
+dropped, and a cached alert ages out when it ends. The browser never talks to NOAA: everything comes from
+the hub, to anyone signed in (viewers too; all GET):
+
+| | |
+|---|---|
+| `GET /api/cad/weather` | `{configured, alerts, marine_alerts, banner, conditions, tides, radar, speak, sources, link, ...}` (the pages poll it every minute) |
+| `GET /api/cad/weather/speech?id=<alert>` | `{id, text, audio_url, audio_note}`: an active warning said by the dispatch voice, rendered once (403 while the setting is off) |
+| `GET /api/cad/weather/radar/frames` | `{frames: [{id, t}], at, error}`: the animation's frames, oldest first |
+| `GET /api/cad/weather/radar/<now or frame>/<z>/<x>/<y>.png` | a 256 px radar tile, zoom 3 to 10 (the maps overzoom past 10); the last good one if NOAA doesn't answer |
+
+```toml
+[weather]                        # sizeup/weather.py; leave out: these
+enabled = true
+radar = true
+zones = ["NYZ071", "NYC119", "NYZ211"]
+marine_zones = ["ANZ335"]
+station = "KHPN"
+tide_station = "8518091"         # Rye Beach (predictions)
+gauge_station = "8516945"        # Kings Point (the gauge)
+```
+
 ## The hub's storage
 
 Everything the hub keeps is SQLite under `SIZEUP_STATE_DIR`, so Litestream can replicate it:
@@ -1220,4 +1300,5 @@ station follows the hub's build: `Watch` in the station, the root updater), `sta
 `tests/test_station_install.py`. The county GIS layers: `sizeup/gis.py` (`tests/test_gis.py`, fixtures
 `tests/fixtures/wcgis/`), `sizeup/web/static/gislayers.js` (a group in maplayers.js's Layers box). Metro-North's
 trains: `sizeup/trains.py` (`tests/test_trains.py`, fixtures `tests/fixtures/mta/`), `sizeup/web/static/trains.js` (a group in
-the Layers box, and the event's "Trains approaching" panel).
+the Layers box, and the event's "Trains approaching" panel). Weather and water: `sizeup/weather.py` (`tests/test_weather.py`, fixtures `tests/fixtures/weather/`), `sizeup/web/static/weather.js`
+(the banner, the header, the tides, a group in the Layers box).

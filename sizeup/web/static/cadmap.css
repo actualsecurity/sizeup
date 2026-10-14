@@ -102,6 +102,17 @@
   .ml-list .check .dim { margin-inline-start: auto; }
   .ml-list .ml-sub { padding-inline-start: var(--s-6); }        /* a sub-toggle (Approaches under Airport, #87) */
   .ml-err { color: var(--warn); margin-inline-start: auto; }
+  .ml-group .ml-sub-check { padding-inline-start: var(--s-6); }   /* Animate, under Radar (weather.js, #132) */
+  /* the wind on an active event's map, and the radar animation's time (weather.js, #132) */
+  .wx-wind, .wx-frame {
+    position: absolute; inset-inline-start: var(--s-2); z-index: var(--z-map); display: inline-flex; align-items: center; gap: var(--s-1);
+    padding: var(--s-0) var(--s-2); font: 700 var(--fs-xs)/var(--lh-xs) var(--font); color: var(--text); white-space: nowrap;
+    background: color-mix(in srgb, var(--panel) 90%, transparent); border: var(--bw) solid var(--line-strong); border-radius: var(--radius);
+    pointer-events: none;
+  }
+  .wx-wind { inset-block-start: calc(var(--ctl-sm) + var(--s-4)); }            /* under the map's buttons, clear of the corner chips */
+  .wx-wind.stale { color: var(--dim); }
+  .wx-frame { inset-block-start: calc(var(--ctl-sm) * 2 + var(--s-6)); color: var(--info); }
   .ml-source a { color: var(--text-2); }
   .ml-lines { display: flex; flex-direction: column; gap: var(--s-0); overflow-wrap: anywhere; }
   .ml-sign-text { font-family: var(--mono); font-weight: 700; color: var(--warn); text-transform: uppercase;

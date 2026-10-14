@@ -1151,8 +1151,22 @@ function sDispatch(panel) {
     sVoice(d.voice), sTones(d.tones), ...(d.dept_tones || []).map(sDeptTones), sChannels(d.channels),
     d.eta ? sEta(d.eta) : null,
     sCard(sCardHead("Transmit", "", sHelp(`${d.transmit.note}. Read-only here.`)),
-      el("span", "pill tx-off", d.transmit.enabled ? "Transmit on" : "Transmit off"), el("p", "dim small", "No radio interface")));
+      el("span", "pill tx-off", d.transmit.enabled ? "Transmit on" : "Transmit off"), el("p", "dim small", "No radio interface")),
+    d.weather_speak ? sWeatherSpeak(d.weather_speak) : null);
   sPreview();
+}
+
+// A National Weather Service warning said once by the dispatch voice (weather.js, #132): played where a console is
+// open (and the wall board with its Sound on), never keyed. Off by default.
+function sWeatherSpeak(w) {
+  const [lab, cb] = sCheck("Say NWS warnings with the dispatch voice", w.value,
+    "A warning for our zones (not a watch or advisory), once, played on the consoles: never transmitted");
+  cb.addEventListener("change", () => sPost("dispatch", { action: "set", key: "weather_speak", value: cb.checked },
+    cb.checked ? "Weather warnings will be spoken" : "Weather warnings: banner only"));
+  return sCard(sCardHead("Weather warnings", w.value ? "spoken" : "banner only",
+    sHelp("National Weather Service warnings for Southern Westchester show as a red banner on the console and the wall board. "
+      + "With this on, each one is also said once by the dispatch voice where the console is open (the board: with its Sound on). "
+      + "Played here only: nothing is keyed on a radio.")), lab);
 }
 
 function sJointOnly(j) {

@@ -1,0 +1,673 @@
+{
+ "@context": [
+  "https://geojson.org/geojson-ld/geojson-context.jsonld",
+  {
+   "@version": "1.1",
+   "wx": "https://api.weather.gov/ontology#",
+   "@vocab": "https://api.weather.gov/ontology#"
+  }
+ ],
+ "type": "FeatureCollection",
+ "title": "Current watches, warnings, and advisories",
+ "updated": "2026-10-14T15:35:36+00:00",
+ "features": [
+  {
+   "id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.0436421071feb454db489423eb85f42894853c22.001.1",
+   "type": "Feature",
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       -97.67,
+       35.34
+      ],
+      [
+       -97.57,
+       35.3
+      ],
+      [
+       -97.56,
+       35.27
+      ],
+      [
+       -97.3,
+       35.37
+      ],
+      [
+       -97.3,
+       35.2
+      ],
+      [
+       -98.09,
+       34.94
+      ],
+      [
+       -98.1,
+       35.38
+      ],
+      [
+       -98.02,
+       35.38
+      ],
+      [
+       -97.96,
+       35.35
+      ],
+      [
+       -97.94,
+       35.38
+      ],
+      [
+       -97.9,
+       35.35
+      ],
+      [
+       -97.86,
+       35.36
+      ],
+      [
+       -97.84,
+       35.33
+      ],
+      [
+       -97.76,
+       35.34
+      ],
+      [
+       -97.74,
+       35.32
+      ],
+      [
+       -97.67,
+       35.34
+      ]
+     ]
+    ]
+   },
+   "properties": {
+    "@id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.0436421071feb454db489423eb85f42894853c22.001.1",
+    "@type": "wx:Alert",
+    "id": "urn:oid:2.49.0.1.840.0.0436421071feb454db489423eb85f42894853c22.001.1",
+    "areaDesc": "Cleveland, OK; Grady, OK; McClain, OK",
+    "geocode": {
+     "SAME": [
+      "040027",
+      "040051",
+      "040087"
+     ],
+     "UGC": [
+      "OKC027",
+      "OKC051",
+      "OKC087"
+     ]
+    },
+    "affectedZones": [
+     "https://api.weather.gov/zones/county/OKC027",
+     "https://api.weather.gov/zones/county/OKC051",
+     "https://api.weather.gov/zones/county/OKC087"
+    ],
+    "references": [
+     {
+      "@id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.e095914c40b3bde1e25c9ccaf7e6feaa01e3cc98.001.1",
+      "identifier": "urn:oid:2.49.0.1.840.0.e095914c40b3bde1e25c9ccaf7e6feaa01e3cc98.001.1",
+      "sender": "w-nws.webmaster@noaa.gov",
+      "sent": "2026-10-14T07:49:00-05:00"
+     }
+    ],
+    "sent": "2026-10-14T10:32:00-05:00",
+    "effective": "2026-10-14T10:32:00-05:00",
+    "onset": "2026-10-14T10:32:00-05:00",
+    "expires": "2026-10-14T12:45:00-05:00",
+    "ends": "2026-10-14T12:45:00-05:00",
+    "status": "Actual",
+    "messageType": "Update",
+    "category": "Met",
+    "severity": "Severe",
+    "certainty": "Likely",
+    "urgency": "Immediate",
+    "event": "Flash Flood Warning",
+    "sender": "w-nws.webmaster@noaa.gov",
+    "senderName": "NWS Norman OK",
+    "headline": "Flash Flood Warning issued October 14 at 10:32AM CDT until October 14 at 12:45PM CDT by NWS Norman OK",
+    "description": "FFWOUN\n\nThe National Weather Service in Norman has extended the\n\n* Flash Flood Warning for...\nNorthwestern Cleveland County in central Oklahoma...\nNorthern Grady County in central Oklahoma...\nNorthwestern McClain County in central Oklahoma...\n\n* Until 1245 PM CDT.\n\n* At 1032 AM CDT, broadcast media reported widespread flash flooding\nfrom thunderstorms in the area. Between 2 and 5 inches of rain have\nfallen. Additional rainfall amounts of 1 to 2 inches are possible\nin the warned area. Flash flooding is ongoing or expected to begin\nshortly.\n\nHAZARD...Flash flooding caused by thunderstorms.\n\nSOURCE...Broadcast media reported.\n\nIMPACT...Flash flooding of small creeks and streams, urban areas,\nhighways, streets and underpasses as well as other poor\ndrainage and low-lying areas.\n\n* Some locations that will experience flash flooding include...\nSouthwestern Oklahoma City, Norman, Moore, Chickasha, Newcastle,\nBlanchard, Tuttle, Goldsby, Union City, Minco, Verden, Amber,\nBridge Creek, Pocasset, Norge, Middleberg, Tabler, Stanley Draper\nLake, southwestern Lake Thunderbird and Ninnekah.",
+    "instruction": "Turn around, don't drown when encountering flooded roads. Most flood\ndeaths occur in vehicles.\n\nPlease report observed flooding to local emergency services or law\nenforcement and request they pass this information to the National\nWeather Service when you can do so safely.",
+    "response": "Avoid",
+    "note": null,
+    "parameters": {
+     "AWIPSidentifier": [
+      "FFWOUN"
+     ],
+     "WMOidentifier": [
+      "WGUS54 KOUN 141532"
+     ],
+     "flashFloodDetection": [
+      "OBSERVED"
+     ],
+     "BLOCKCHANNEL": [
+      "EAS",
+      "NWEM",
+      "CMAS"
+     ],
+     "EAS-ORG": [
+      "WXR"
+     ],
+     "VTEC": [
+      "/O.EXT.KOUN.FF.W.0107.000000T0000Z-261014T1745Z/"
+     ],
+     "eventEndingTime": [
+      "2026-10-14T12:45:00-05:00"
+     ]
+    },
+    "scope": "Public",
+    "code": "IPAWSv1.0",
+    "language": "en-US",
+    "web": "http://www.weather.gov",
+    "eventCode": {
+     "SAME": [
+      "FFW"
+     ],
+     "NationalWeatherService": [
+      "FFW"
+     ]
+    }
+   }
+  },
+  {
+   "id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.f3181b0e8a5a2c3b042e0aa663aaaa8d1a5d37a4.002.1",
+   "type": "Feature",
+   "geometry": null,
+   "properties": {
+    "@id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.f3181b0e8a5a2c3b042e0aa663aaaa8d1a5d37a4.002.1",
+    "@type": "wx:Alert",
+    "id": "urn:oid:2.49.0.1.840.0.f3181b0e8a5a2c3b042e0aa663aaaa8d1a5d37a4.002.1",
+    "areaDesc": "Ventura County Beaches; Ventura County Inland Coast; Central Ventura County Valleys; Malibu Coast; Calabasas and Agoura Hills; Western San Fernando Valley; Eastern San Fernando Valley; Southeastern Ventura County Valleys; Los Angeles County San Gabriel Valley",
+    "geocode": {
+     "SAME": [
+      "006111",
+      "006037"
+     ],
+     "UGC": [
+      "CAZ088",
+      "CAZ354",
+      "CAZ355",
+      "CAZ358",
+      "CAZ362",
+      "CAZ371",
+      "CAZ372",
+      "CAZ373",
+      "CAZ374",
+      "CAZ548"
+     ]
+    },
+    "affectedZones": [
+     "https://api.weather.gov/zones/fire/CAZ088",
+     "https://api.weather.gov/zones/fire/CAZ354",
+     "https://api.weather.gov/zones/fire/CAZ355",
+     "https://api.weather.gov/zones/fire/CAZ358",
+     "https://api.weather.gov/zones/fire/CAZ362",
+     "https://api.weather.gov/zones/fire/CAZ371",
+     "https://api.weather.gov/zones/fire/CAZ372",
+     "https://api.weather.gov/zones/fire/CAZ373",
+     "https://api.weather.gov/zones/fire/CAZ374",
+     "https://api.weather.gov/zones/fire/CAZ548"
+    ],
+    "references": [
+     {
+      "@id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.d7644b38a9cd245f0a9eb34d57b97a36b3983615.002.2",
+      "identifier": "urn:oid:2.49.0.1.840.0.d7644b38a9cd245f0a9eb34d57b97a36b3983615.002.2",
+      "sender": "w-nws.webmaster@noaa.gov",
+      "sent": "2026-10-13T13:43:00-07:00"
+     },
+     {
+      "@id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.5756e1dea16eee6767839fdb95f031f35e142dbf.002.1",
+      "identifier": "urn:oid:2.49.0.1.840.0.5756e1dea16eee6767839fdb95f031f35e142dbf.002.1",
+      "sender": "w-nws.webmaster@noaa.gov",
+      "sent": "2026-10-13T13:49:00-07:00"
+     }
+    ],
+    "sent": "2026-10-13T14:38:00-07:00",
+    "effective": "2026-10-13T14:38:00-07:00",
+    "onset": "2026-10-15T06:00:00-07:00",
+    "expires": "2026-10-14T15:00:00-07:00",
+    "ends": "2026-10-16T22:00:00-07:00",
+    "status": "Actual",
+    "messageType": "Update",
+    "category": "Met",
+    "severity": "Severe",
+    "certainty": "Likely",
+    "urgency": "Expected",
+    "event": "Red Flag Warning",
+    "sender": "w-nws.webmaster@noaa.gov",
+    "senderName": "NWS Los Angeles/Oxnard CA",
+    "headline": "Red Flag Warning issued October 13 at 2:38PM PDT until October 16 at 10:00PM PDT by NWS Los Angeles/Oxnard CA",
+    "description": "***CORRECTED HEADLINE FOR SANTA BARBARA AND SAN LUIS OBISPO\nCOUNTIES***\n\n...HIGH RISK FOR EXTREME FIRE BEHAVIOR WITH ANY NEW FIRE STARTS\nTHURSDAY THROUGH FRIDAY DUE TO MODERATE TO LOCALLY STRONG SANTA\nANA WINDS AND LOW RELATIVE HUMIDITY...\n\n.Moderate to locally strong Santa Ana winds will quickly develop\non Thursday, peak Thursday afternoon through Friday afternoon,\nthen weaken through the weekend. Meanwhile, dry air will settle\nover the region and dry out any helpful effects of the recent\nrains. The previous Fire Weather Watches were upgraded to Red\nFlag Warnings. Some of the windiest areas may see Red Flag\nconditions linger into Saturday. As the winds expand Thursday\nNight into Friday, Red Flag conditions may form over the interior\nmountains of Santa Barbara and San Luis Obispo Counties on\nFriday, where a Fire Weather Watch is now in effect.\n\n* AFFECTED AREA...Most valleys and coasts of Los Angeles and\nVentura Counties.\n\n* TIMING...From 6 AM Thursday to 10 PM PDT Friday.\n\n* WINDS...Northeast to east 20 to 30 mph with gusts of 40 to 50\nmph. Isolated gusts of 50 to 60 mph possible in the hills.\n\n* RELATIVE HUMIDITY...Minimums of 5 to 15 percent common.\n\n* IMPACTS...If fire ignition occurs, conditions are favorable\nfor extreme fire behavior which would threaten life and\nproperty.",
+    "instruction": "A Red Flag Warning means that critical fire weather conditions\nare either occurring now, or will shortly. Use extreme caution\nwith anything that can spark a wildfire. Residents near wildland\ninterfaces should be prepared to evacuate if a wildfire breaks\nout. See readyforwildfire.org and wildfirerisk.org for\ninformation.",
+    "response": "Prepare",
+    "note": null,
+    "parameters": {
+     "AWIPSidentifier": [
+      "RFWLOX"
+     ],
+     "WMOidentifier": [
+      "WWUS86 KLOX 132138 AAB"
+     ],
+     "NWSheadline": [
+      "RED FLAG WARNING REMAINS IN EFFECT FROM 6 AM THURSDAY TO 10 PM PDT FRIDAY FOR WIND AND LOW RELATIVE HUMIDITY FOR MOST VALLEYS AND COASTS OF LOS ANGELES AND VENTURA COUNTIES"
+     ],
+     "BLOCKCHANNEL": [
+      "EAS",
+      "NWEM",
+      "CMAS"
+     ],
+     "VTEC": [
+      "/O.CON.KLOX.FW.W.0005.261015T1300Z-261017T0500Z/"
+     ],
+     "eventEndingTime": [
+      "2026-10-16T22:00:00-07:00"
+     ]
+    },
+    "scope": "Public",
+    "code": "IPAWSv1.0",
+    "language": "en-US",
+    "web": "http://www.weather.gov",
+    "eventCode": {
+     "SAME": [
+      "NWS"
+     ],
+     "NationalWeatherService": [
+      "FWW"
+     ]
+    }
+   }
+  },
+  {
+   "id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.a4e8acffbdc2e262eb15d10721b076373b1190e2.002.1",
+   "type": "Feature",
+   "geometry": null,
+   "properties": {
+    "@id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.a4e8acffbdc2e262eb15d10721b076373b1190e2.002.1",
+    "@type": "wx:Alert",
+    "id": "urn:oid:2.49.0.1.840.0.a4e8acffbdc2e262eb15d10721b076373b1190e2.002.1",
+    "areaDesc": "Lake Havasu and Fort Mohave; Lake Mohave - AZ side; Eastern Mojave Desert, Including the Mojave National Preserve; Cadiz Basin; San Bernardino County-Upper Colorado River Valley; Southern Clark County; Lake Mohave - NV side",
+    "geocode": {
+     "SAME": [
+      "004015",
+      "006071",
+      "032003"
+     ],
+     "UGC": [
+      "AZZ002",
+      "AZZ571",
+      "CAZ524",
+      "CAZ526",
+      "CAZ527",
+      "NVZ022",
+      "NVZ026"
+     ]
+    },
+    "affectedZones": [
+     "https://api.weather.gov/zones/forecast/AZZ002",
+     "https://api.weather.gov/zones/forecast/AZZ571",
+     "https://api.weather.gov/zones/forecast/CAZ524",
+     "https://api.weather.gov/zones/forecast/CAZ526",
+     "https://api.weather.gov/zones/forecast/CAZ527",
+     "https://api.weather.gov/zones/forecast/NVZ022",
+     "https://api.weather.gov/zones/forecast/NVZ026"
+    ],
+    "references": [
+     {
+      "@id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.e53e06516daf923465c06313f696f49f9a31ceb0.003.1",
+      "identifier": "urn:oid:2.49.0.1.840.0.e53e06516daf923465c06313f696f49f9a31ceb0.003.1",
+      "sender": "w-nws.webmaster@noaa.gov",
+      "sent": "2026-10-13T23:30:00-07:00"
+     }
+    ],
+    "sent": "2026-10-14T07:49:00-07:00",
+    "effective": "2026-10-14T07:49:00-07:00",
+    "onset": "2026-10-15T08:00:00-07:00",
+    "expires": "2026-10-15T03:00:00-07:00",
+    "ends": "2026-10-16T11:00:00-07:00",
+    "status": "Actual",
+    "messageType": "Update",
+    "category": "Met",
+    "severity": "Moderate",
+    "certainty": "Likely",
+    "urgency": "Expected",
+    "event": "Wind Advisory",
+    "sender": "w-nws.webmaster@noaa.gov",
+    "senderName": "NWS Las Vegas NV",
+    "headline": "Wind Advisory issued October 14 at 7:49AM PDT until October 16 at 11:00AM PDT by NWS Las Vegas NV",
+    "description": "* WHAT...North-to-northeast winds 20 to 30 mph with gusts up to 50\nmph expected.\n\n* WHERE...Lake Mohave, Lower Colorado River Valley / Lake Havasu,\nEastern Mojave Desert, Cadiz Basin, and Southern Clark County.\n\n* WHEN...From 8 AM PDT / MST Thursday to 11 AM PDT / MST Friday.\n\n* IMPACTS...Gusty winds will blow around unsecured objects. Tree\nlimbs could be blown down and a few power outages may result.",
+    "instruction": "Winds this strong can make driving difficult, especially for high\nprofile vehicles. Use extra caution.\n\nStrong winds and rough waves on area lakes will create hazardous\nconditions for small craft.",
+    "response": "Execute",
+    "note": null,
+    "parameters": {
+     "AWIPSidentifier": [
+      "NPWVEF"
+     ],
+     "WMOidentifier": [
+      "WWUS75 KVEF 141449"
+     ],
+     "NWSheadline": [
+      "WIND ADVISORY REMAINS IN EFFECT FROM 8 AM PDT / MST THURSDAY TO 11 AM PDT / MST FRIDAY"
+     ],
+     "BLOCKCHANNEL": [
+      "EAS",
+      "NWEM",
+      "CMAS"
+     ],
+     "VTEC": [
+      "/O.CON.KVEF.WI.Y.0020.261015T1500Z-261016T1800Z/"
+     ],
+     "eventEndingTime": [
+      "2026-10-16T11:00:00-07:00"
+     ]
+    },
+    "scope": "Public",
+    "code": "IPAWSv1.0",
+    "language": "en-US",
+    "web": "http://www.weather.gov",
+    "eventCode": {
+     "SAME": [
+      "NWS"
+     ],
+     "NationalWeatherService": [
+      "WIY"
+     ]
+    }
+   }
+  },
+  {
+   "id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.f708b2a0651060bbd010cebe6fd595d4a7a96e5e.001.1",
+   "type": "Feature",
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       -99.21,
+       34.71
+      ],
+      [
+       -99.17,
+       34.81
+      ],
+      [
+       -99.12,
+       34.86
+      ],
+      [
+       -99.02,
+       34.68
+      ],
+      [
+       -99.11,
+       34.54
+      ],
+      [
+       -99.24,
+       34.58
+      ],
+      [
+       -99.21,
+       34.71
+      ]
+     ]
+    ]
+   },
+   "properties": {
+    "@id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.f708b2a0651060bbd010cebe6fd595d4a7a96e5e.001.1",
+    "@type": "wx:Alert",
+    "id": "urn:oid:2.49.0.1.840.0.f708b2a0651060bbd010cebe6fd595d4a7a96e5e.001.1",
+    "areaDesc": "Kiowa; Jackson; Tillman",
+    "geocode": {
+     "SAME": [
+      "040075",
+      "040065",
+      "040141"
+     ],
+     "UGC": [
+      "OKZ035",
+      "OKZ036",
+      "OKZ037"
+     ]
+    },
+    "affectedZones": [
+     "https://api.weather.gov/zones/forecast/OKZ035",
+     "https://api.weather.gov/zones/forecast/OKZ036",
+     "https://api.weather.gov/zones/forecast/OKZ037"
+    ],
+    "references": [],
+    "sent": "2026-10-14T08:18:00-05:00",
+    "effective": "2026-10-14T08:18:00-05:00",
+    "onset": "2026-10-15T18:24:00-05:00",
+    "expires": "2026-10-14T22:30:00-05:00",
+    "ends": "2026-10-18T06:00:00-05:00",
+    "status": "Actual",
+    "messageType": "Alert",
+    "category": "Met",
+    "severity": "Severe",
+    "certainty": "Possible",
+    "urgency": "Future",
+    "event": "Flood Watch",
+    "sender": "w-nws.webmaster@noaa.gov",
+    "senderName": "NWS Norman OK",
+    "headline": "Flood Watch issued October 14 at 8:18AM CDT until October 18 at 6:00AM CDT by NWS Norman OK",
+    "description": "...The National Weather Service in Norman has issued a Flood Watch\nfor the following rivers in Oklahoma...\n\nNorth Fork Red River near Headrick affecting Jackson, Tillman and\nKiowa Counties.\n\nFor the North Fork Red River...including Carter, Headrick...flooding\nis possible.\n\nAdditional information is available at www.weather.gov.\n\nThe next statement will be issued this evening at 1030 PM CDT.\n\n* WHAT...Flooding is possible.\n\n* WHERE...North Fork Red River near Headrick.\n\n* WHEN...From Thursday evening to Sunday morning.\n\n* ADDITIONAL DETAILS...\n- At 8:00 AM CDT Wednesday the stage was 5.1 feet.\n- Forecast...Flood stage may be reached tomorrow evening.\n- Flood stage is 14.0 feet.\n- http://www.weather.gov/safety/flood",
+    "instruction": null,
+    "response": "Prepare",
+    "note": null,
+    "parameters": {
+     "AWIPSidentifier": [
+      "FFAOUN"
+     ],
+     "WMOidentifier": [
+      "WGUS64 KOUN 141318"
+     ],
+     "NWSheadline": [
+      "FLOOD WATCH IN EFFECT FROM THURSDAY EVENING TO SUNDAY MORNING"
+     ],
+     "BLOCKCHANNEL": [
+      "EAS",
+      "NWEM",
+      "CMAS"
+     ],
+     "EAS-ORG": [
+      "WXR"
+     ],
+     "VTEC": [
+      "/O.NEW.KOUN.FL.A.0002.261015T2324Z-261018T1100Z/"
+     ],
+     "eventEndingTime": [
+      "2026-10-18T06:00:00-05:00"
+     ]
+    },
+    "scope": "Public",
+    "code": "IPAWSv1.0",
+    "language": "en-US",
+    "web": "http://www.weather.gov",
+    "eventCode": {
+     "SAME": [
+      "FLA"
+     ],
+     "NationalWeatherService": [
+      "FLA"
+     ]
+    }
+   }
+  },
+  {
+   "id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.9ff48ba9c0a846e188b91c089988ae12ece7fba5.001.1",
+   "type": "Feature",
+   "geometry": null,
+   "properties": {
+    "@id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.9ff48ba9c0a846e188b91c089988ae12ece7fba5.001.1",
+    "@type": "wx:Alert",
+    "id": "urn:oid:2.49.0.1.840.0.9ff48ba9c0a846e188b91c089988ae12ece7fba5.001.1",
+    "areaDesc": "Pohnpei Coastal Waters; Kosrae Coastal Waters",
+    "geocode": {
+     "SAME": [
+      "065173",
+      "065174"
+     ],
+     "UGC": [
+      "PMZ173",
+      "PMZ174"
+     ]
+    },
+    "affectedZones": [
+     "https://api.weather.gov/zones/forecast/PMZ173",
+     "https://api.weather.gov/zones/forecast/PMZ174"
+    ],
+    "references": [],
+    "sent": "2026-10-14T16:17:00+10:00",
+    "effective": "2026-10-14T16:17:00+10:00",
+    "onset": "2026-10-14T16:17:00+10:00",
+    "expires": "2026-10-15T16:30:00+10:00",
+    "ends": null,
+    "status": "Actual",
+    "messageType": "Alert",
+    "category": "Met",
+    "severity": "Moderate",
+    "certainty": "Observed",
+    "urgency": "Expected",
+    "event": "Special Weather Statement",
+    "sender": "w-nws.webmaster@noaa.gov",
+    "senderName": "NWS Tiyan GU",
+    "headline": "Special Weather Statement issued October 14 at 4:17PM ChST by NWS Tiyan GU",
+    "description": "Invest 96W is currently rated as \"High\" for development by the Joint\nTyphoon Warning Center, and is the subject of a Tropical Cyclone\nFormation Alert, meaning development into a significant tropical\ncyclone (a tropical depression) is expected within 24 hours. 96W is\ncurrently located northeast of Pohnpei near 8.7N 160.7E, and\ncontinues to develop and strengthen just north of the region.\nConvergent fresh to strong westerlies south of 96W's center are\nproducing bands of scattered to numerous showers capable of strong\ngusts and locally heavy rainfall, across Kosrae, Pohnpei, and their\nadjacent coastal waters. Ensemble model guidance suggests rainfall\namounts of 2 to 4 inches will be possible for Pohnpei through late\nFriday night as 96W strengthens and passes north of the island, with\nan additional 1 to 2 inches possible for Kosrae through early\nThursday morning as conditions start to ease there. Gusts to 30 knots\nwill be possible near heavier showers.\n\nGusty winds and elevated, choppy seas will make marine conditions\nhazardous to small craft, and inter-island travel is discouraged.\nKeep up to date with the latest information from the National Weather\nService in Tiyan, Guam, and your local emergency management.",
+    "instruction": null,
+    "response": "Execute",
+    "note": null,
+    "parameters": {
+     "AWIPSidentifier": [
+      "SPSPQ1"
+     ],
+     "WMOidentifier": [
+      "WWPQ81 PGUM 140617"
+     ],
+     "NWSheadline": [
+      "LOCALLY HEAVY RAINFALL AND GUSTY WINDS THROUGH THURSDAY NIGHT AS INVEST 96W PASSES TO THE NORTH"
+     ],
+     "BLOCKCHANNEL": [
+      "EAS",
+      "NWEM",
+      "CMAS"
+     ],
+     "EAS-ORG": [
+      "WXR"
+     ]
+    },
+    "scope": "Public",
+    "code": "IPAWSv1.0",
+    "language": "en-US",
+    "web": "http://www.weather.gov",
+    "eventCode": {
+     "SAME": [
+      "SPS"
+     ],
+     "NationalWeatherService": [
+      "SPS"
+     ]
+    }
+   }
+  },
+  {
+   "id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.b7eb7f73ccd6bc85d4076674d866f0b8577d3096.001.1",
+   "type": "Feature",
+   "geometry": null,
+   "properties": {
+    "@id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.b7eb7f73ccd6bc85d4076674d866f0b8577d3096.001.1",
+    "@type": "wx:Alert",
+    "id": "urn:oid:2.49.0.1.840.0.b7eb7f73ccd6bc85d4076674d866f0b8577d3096.001.1",
+    "areaDesc": "Monroe Upper Keys; Monroe Middle Keys; Monroe Lower Keys",
+    "geocode": {
+     "SAME": [
+      "012087"
+     ],
+     "UGC": [
+      "FLZ076",
+      "FLZ077",
+      "FLZ078"
+     ]
+    },
+    "affectedZones": [
+     "https://api.weather.gov/zones/forecast/FLZ076",
+     "https://api.weather.gov/zones/forecast/FLZ077",
+     "https://api.weather.gov/zones/forecast/FLZ078"
+    ],
+    "references": [
+     {
+      "@id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.7121961d0e2f5377cef9985384357279399a8d6f.001.1",
+      "identifier": "urn:oid:2.49.0.1.840.0.7121961d0e2f5377cef9985384357279399a8d6f.001.1",
+      "sender": "w-nws.webmaster@noaa.gov",
+      "sent": "2026-10-13T14:17:00-04:00"
+     },
+     {
+      "@id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.429d1620c8c0b42cdc9019b21efa3a50545c189a.001.1",
+      "identifier": "urn:oid:2.49.0.1.840.0.429d1620c8c0b42cdc9019b21efa3a50545c189a.001.1",
+      "sender": "w-nws.webmaster@noaa.gov",
+      "sent": "2026-10-13T22:31:00-04:00"
+     }
+    ],
+    "sent": "2026-10-14T04:00:00-04:00",
+    "effective": "2026-10-14T04:00:00-04:00",
+    "onset": "2026-10-14T04:00:00-04:00",
+    "expires": "2026-10-14T17:00:00-04:00",
+    "ends": "2026-10-15T05:00:00-04:00",
+    "status": "Actual",
+    "messageType": "Update",
+    "category": "Met",
+    "severity": "Minor",
+    "certainty": "Likely",
+    "urgency": "Expected",
+    "event": "Coastal Flood Statement",
+    "sender": "w-nws.webmaster@noaa.gov",
+    "senderName": "NWS Key West FL",
+    "headline": "Coastal Flood Statement issued October 14 at 4:00AM EDT until October 15 at 5:00AM EDT by NWS Key West FL",
+    "description": "* WHAT...Minor saltwater flooding.\n\n* WHERE...Florida Keys.\n\n* WHEN...Through late tonight.\n\n* IMPACTS...Minor saltwater flooding of low elevation streets and\nlots is likely. Some storm drains will overflow, and some\nseawalls and docks will be overtopped. Boaters can expect less\nclearance under fixed bridges. Motorists should remember that\npersistent puddles around the times of high tide are almost\ncertain to contain a mix of saltwater.",
+    "instruction": "Do not drive through flooded roadways.",
+    "response": "Monitor",
+    "note": null,
+    "parameters": {
+     "AWIPSidentifier": [
+      "CFWKEY"
+     ],
+     "WMOidentifier": [
+      "WHUS42 KKEY 140800"
+     ],
+     "NWSheadline": [
+      "COASTAL FLOOD STATEMENT NOW IN EFFECT THROUGH LATE TONIGHT"
+     ],
+     "BLOCKCHANNEL": [
+      "EAS",
+      "NWEM",
+      "CMAS"
+     ],
+     "VTEC": [
+      "/O.EXT.KKEY.CF.S.0009.000000T0000Z-261015T0900Z/"
+     ],
+     "eventEndingTime": [
+      "2026-10-15T05:00:00-04:00"
+     ],
+     "expiredReferences": [
+      "w-nws.webmaster@noaa.gov,urn:oid:2.49.0.1.840.0.17873631199cef18b8e35952111715a4e26d8613.001.1,2026-10-13T04:00:00-04:00 w-nws.webmaster@noaa.gov,urn:oid:2.49.0.1.840.0.4acea8f3e57eb87d3defc452862a592e1c1a534b.001.1,2026-10-12T22:34:00-04:00 w-nws.webmaster@noaa.gov,urn:oid:2.49.0.1.840.0.5325f4b942983e5b7a9ce43f948c2bf02f0d8078.001.1,2026-10-12T13:44:00-04:00 w-nws.webmaster@noaa.gov,urn:oid:2.49.0.1.840.0.271426c8d154dbcd7c3a51a7eca091f5e41bfdbf.001.1,2026-10-12T04:00:00-04:00 w-nws.webmaster@noaa.gov,urn:oid:2.49.0.1.840.0.e1e3ad8ef30298c8c894b7fcd2b3d145dcd474af.001.1,2026-10-11T22:07:00-04:00 w-nws.webmaster@noaa.gov,urn:oid:2.49.0.1.840.0.ccab4e768dbb76efef708db1af476371f12f6924.001.1,2026-10-11T14:23:00-04:00 w-nws.webmaster@noaa.gov,urn:oid:2.49.0.1.840.0.108b707535776353bbe179f5d9d2f18dc8447709.001.1,2026-10-11T04:00:00-04:00 w-nws.webmaster@noaa.gov,urn:oid:2.49.0.1.840.0.bea9f780f10151164949311460aaf510b14bd846.001.1,2026-10-10T17:34:00-04:00 w-nws.webmaster@noaa.gov,urn:oid:2.49.0.1.840.0.8de5f8af631a9139744f11f2b30269b398be3ceb.001.1,2026-10-10T14:40:00-04:00 w-nws.webmaster@noaa.gov,urn:oid:2.49.0.1.840.0.edb7b7fb7653415482265c4b97d3f091913977fd.001.1,2026-10-10T04:00:00-04:00 w-nws.webmaster@noaa.gov,urn:oid:2.49.0.1.840.0.a74bb80ccd075c5116781cbb0d06cd812f576fc3.001.1,2026-10-09T22:23:00-04:00 w-nws.webmaster@noaa.gov,urn:oid:2.49.0.1.840.0.016d17b3009b4a7c30d6c84d4c5f7b00fe02aa09.001.1,2026-10-09T16:08:00-04:00 w-nws.webmaster@noaa.gov,urn:oid:2.49.0.1.840.0.61578063fe0ea4000e159416f3f19fc90ea6703a.001.1,2026-10-09T04:01:00-04:00 w-nws.webmaster@noaa.gov,urn:oid:2.49.0.1.840.0.2fc3c8cb194cbeafa69591a20305b4409752058b.001.1,2026-10-08T18:07:00-04:00 w-nws.webmaster@noaa.gov,urn:oid:2.49.0.1.840.0.618424f8897e5d280f94972d0fce117a7e93b2ef.001.1,2026-10-08T04:04:00-04:00 w-nws.webmaster@noaa.gov,urn:oid:2.49.0.1.840.0.122c4ec5cadc06321fb97da045c89db0039967f7.001.1,2026-10-07T16:33:00-04:00 w-nws.webmaster@noaa.gov,urn:oid:2.49.0.1.840.0.d780b5ea9aca7cca7484d70012204340525359cc.001.1,2026-10-07T09:12:00-04:00"
+     ]
+    },
+    "scope": "Public",
+    "code": "IPAWSv1.0",
+    "language": "en-US",
+    "web": "http://www.weather.gov",
+    "eventCode": {
+     "SAME": [
+      "NWS"
+     ],
+     "NationalWeatherService": [
+      "CFS"
+     ]
+    }
+   }
+  }
+ ]
+}
