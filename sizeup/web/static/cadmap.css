@@ -155,6 +155,7 @@
     padding-inline: var(--s-1); font-size: var(--fs-sm); line-height: var(--lh-sm); font-weight: 400; background: none; border-color: transparent; }
   .ml-cams-head b { font-weight: 700; }
   .ml-cams-head .car { margin-inline-start: var(--s-1); }
+  .ml-cams-head .ml-cams-count { white-space: nowrap; }              /* the folded summary: "2 cameras · 3 down" (#149) */
   .ml-cams-sub { padding-inline: var(--s-1); }
   .ml-near-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(9rem, 100%), 1fr)); gap: var(--s-2); }
   .ml-thumb { display: flex; flex-direction: column; align-items: stretch; gap: var(--s-0); padding: var(--s-0); block-size: auto;
