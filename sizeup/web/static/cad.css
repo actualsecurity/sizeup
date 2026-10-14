@@ -22,10 +22,25 @@
   #operator.access:focus { outline: none; }
 
   .cad-main {
-    min-block-size: 0;
+    position: relative; min-block-size: 0;
     display: grid;
     grid-template-columns: var(--rail-w) minmax(0, 1fr) var(--side-w);
   }
+  /* the side columns' drag handles (panels.js, #126): over each column's inner edge, out of the grid's flow; a
+     24 px target from just before the edge into the next column's padding (clear of the left column's
+     scrollbar), a line on the edge while hovered, focused or dragged */
+  .cad-main > .col-handle {
+    position: absolute; inset-block: 0; z-index: var(--z-map); inline-size: var(--s-6); margin-inline-start: calc(-1 * var(--s-1));
+    padding: 0; overflow: visible; container-type: normal; cursor: col-resize; touch-action: none; background: none;
+  }
+  .col-handle::before {
+    content: ""; position: absolute; inset-block: 0; inset-inline-start: calc(var(--s-1) - var(--bw)); inline-size: calc(2 * var(--bw));
+    background: transparent; transition: background-color 0.12s;
+  }
+  .col-handle:is(:hover, :focus-visible, .on)::before { background: var(--accent); }
+  .col-handle:focus-visible { outline: none; }
+  body.col-dragging { cursor: col-resize; user-select: none; }
+  body.col-dragging .cad-main > :not(.col-handle) { pointer-events: none; }
   /* every column: its own scroll, the same gutter, sized by its own width (container queries) */
   .cad-main > * {
     container-type: inline-size;
@@ -444,6 +459,7 @@
     body.cad > header { position: sticky; inset-block-start: 0; }
     .cad-main { grid-template-columns: minmax(0, 1fr); }
     .cad-main > * { overflow: visible; }
+    .cad-main > .col-handle { display: none; }
     .queue, .units { border: 0; }
     .queue > section > :is(h2, .q-head) { position: static; }
     .units > .feed { position: static; margin: 0 0 var(--s-3); border: var(--bw) solid var(--line); border-radius: var(--radius); }
