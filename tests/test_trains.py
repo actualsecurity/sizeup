@@ -600,7 +600,29 @@ def test_trains_are_drawn_as_trains_along_the_line():
     assert '"icon-rotation-alignment": "map"' in js and '"icon-pitch-alignment": "map"' in js and '["get", "bearing"]' in js
     assert '"icon-image": ["get", "icon"]' in js and "trainIcon(!t.estimated, t.cars)" in js
     assert re.search(r"cars:\s*\d", js) is None and "t.cars" in js                     # no car count of our own
-    assert '"text-anchor": ["get", "anchor"]' in js and '["get", "towards"]' in js and "labelPlace(t.bearing, t.cars)" in js
+    assert '"text-anchor": ["get", "anchor"]' in js and '["get", "towards"]' in js and "labelPlace(t.bearing, ...half(SCALE_FROM))" in js
     assert "?have=" in js and "static_same" in js
     assert "doesn't say how many cars" in js and "Length not given by the MTA" in js
     assert "localStorage" not in js
+
+
+def test_a_train_without_the_mtas_count_looks_like_a_train_of_cars():
+    """#164: not one long body but the look of a typical train, the same for every one, and the box says so."""
+    js = (STATIC / "trains.js").read_text()
+    assert "LOOK_CARS = 6" in js and "(cars | 0) || LOOK_CARS" in js
+    assert "Length not given by the MTA (drawn as ${LOOK_CARS} cars for every train)" in js
+    assert "PLAIN" not in js                                                         # no single-body train left
+
+
+def test_a_train_on_the_line_is_its_cars_along_the_track_to_scale():
+    """#164: on the line, each car an 85 ft piece of the track behind the train's front (to scale, bending with the
+    track), filled when reported and an outline when estimated; off the line, the icon, also to scale when zoomed in."""
+    js = (STATIC / "trains.js").read_text()
+    assert "const M_PER_CAR = 25.9" in js and "NEAR_M = 100" in js
+    assert "function onTrack(t, tr)" in js and "if (!best || best.d > NEAR_M) return null;" in js
+    assert "piece(tr, Math.min(s1, s2), Math.max(s1, s2))" in js and "const back = Math.cos(segB - b) >= 0 ? -1 : 1;" in js
+    assert 'filter: ["!", ["get", "onTrack"]]' in js and "map.getSource(SRC_CARS).setData(fc(cars));" in js
+    assert '"line-color": ["case", ["get", "estimated"], warn, HALO]' in js and '"line-color": ["case", ["get", "estimated"], dark, warn]' in js
+    assert 'const ICON_SIZE = ["interpolate", ["exponential", 2], ["zoom"], SCALE_FROM, MIN_SIZE, SCALE_TO, sizeAt(SCALE_TO)];' in js
+    assert '"text-offset": ["interpolate", ["exponential", 2], ["zoom"],' in js                 # the label clears it as it grows
+    assert "this.sig = \"\";                        // the cars lie along it" in js
