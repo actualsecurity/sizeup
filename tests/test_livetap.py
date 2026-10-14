@@ -101,14 +101,16 @@ def test_a_pair_shows_before_its_b_tone_ends_and_stacked_ones_are_added():
     lp = LivePaging(PLAN, OURS, clock=clock, on_change=lambda: changes.append(1))
     live_feed(lp, carrier(np.concatenate([quiet(0.2), tone(349.1, 1.0)])), clock=clock)
     assert lp.state() == []                                        # an A alone is nothing yet
-    live_feed(lp, carrier(tone(311.1, 0.8)), clock=clock)          # 0.8 s into B: Port Chester, 2.2 s early
+    live_feed(lp, carrier(tone(311.1, 0.8)), clock=clock)          # 0.8 s in: could still be another A (#115)
+    assert lp.state() == []
+    live_feed(lp, carrier(tone(311.1, 0.8)), clock=clock)          # 1.6 s into B: longer than an A, Port Chester, 1.4 s early
     [st] = lp.state()
     assert [(p["names"], p["ours"]) for p in st["pairs"]] == [(["Port Chester FD"], True)]
     assert st["channel"] == "South 2" and st["phase"] == "tones" and not st["ended"] and changes
     n = len(changes)
-    live_feed(lp, carrier(tone(311.1, 2.2)), clock=clock)          # the rest of B: no churn on screen
+    live_feed(lp, carrier(tone(311.1, 1.4)), clock=clock)          # the rest of B: no churn on screen
     assert len(changes) - n <= 1
-    live_feed(lp, carrier(np.concatenate([tone(741.3, 1.0), tone(623.7, 1.0)])), clock=clock)
+    live_feed(lp, carrier(np.concatenate([tone(741.3, 1.0), tone(623.7, 1.6)])), clock=clock)
     assert [p["names"] for p in lp.state()[0]["pairs"]] == [["Port Chester FD"], []]
 
 
@@ -149,7 +151,7 @@ def test_a_short_fade_does_not_end_the_page_and_a_dead_one_expires():
     clock.t += 1.0
     assert lp.state() == []                                        # nothing came: gone
     # A carrier long after an ended page is a new page.
-    live_feed(lp, carrier(np.concatenate([tone(349.1, 1.0), tone(311.1, 1.0)])), since=clock.t + 30, clock=clock)
+    live_feed(lp, carrier(np.concatenate([tone(349.1, 1.0), tone(311.1, 1.6)])), since=clock.t + 30, clock=clock)
     assert lp.state()[0]["key"] != key
 
 
@@ -273,7 +275,7 @@ def test_south2_through_the_tap_live_then_finished(tmp_path):
     x = np.concatenate([hiss(3.0), keyed(np.concatenate([tone(349.1, 1.0), tone(311.1, 3.0), quiet(0.3), voice(2.0)])),
                         hiss(1.0)])
     t = r.feed(x, until=lambda r: bool(r.paging.state()))
-    assert t is not None and r.sq.open and t - 1003.0 < 2.2          # Port Chester shown ~0.8 s into its B tone
+    assert t is not None and r.sq.open and t - 1003.0 < 2.9          # Port Chester shown ~1.6 s into its B tone
     t = r.feed(x[int((t - 1000.0) * RATE):], until=lambda r: r.paging.state()[0]["phase"] == "voice")
     assert t is not None and r.sq.open
     r.feed(x[int((t - 1000.0) * RATE):])

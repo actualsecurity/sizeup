@@ -10,6 +10,8 @@
 // Every page on South 2 is a row too (#80): one with our tones is an event (its chip is on the row, pc = the
 // department); any other page says what it was ("not ours", "unknown tones" with Name these tones for an admin,
 // "no tones") and is never an event: the row is quieter, nothing is lost.
+// A page that isn't ours whose text names our units (#115's safety net, rows[i].names_ours): flagged on the row
+// (with the phone pre-alert that rang before it) and a toast whatever the talk alerts say; still not an event.
 // Each row: the incidents it is on as chips (a click: that incident) and its "⋯" menu (cad.js txMenu: Add to
 // event ▸, Remove from ..., Re-transcribe, Copy text).
 // Collapsed to a one-line ticker: remembered in this browser (default: collapsed on a phone).
@@ -82,6 +84,7 @@ window.CadFeed = (() => {
     const rows = f.rows || [];
     const sig = JSON.stringify([st.collapsed, st.deps.rev(),
       rows.map((t) => [t.id, t.text, t.status, t.rig, t.pc, t.has_audio, t.alt_text, t.rerun_at, t.page, t.tones,
+                       t.names_ours, t.tone_seq, t.prealert && t.prealert.status,
                        (t.events || []).map((e) => [e.id, e.why])])]);
     if (sig !== st.sig) {
       st.sig = sig;
@@ -156,8 +159,15 @@ window.CadFeed = (() => {
     const first = st.seen === null;
     if (first) st.seen = new Set();
     for (const t of rows) {
-      if (st.seen.has(t.id)) continue;
-      st.seen.add(t.id);
+      const flag = (t.names_ours || []).length && t.page && t.page !== "ours";
+      const key = flag ? `${t.id}!` : t.id;          // a page flagged once its text is in: its own alert
+      if (st.seen.has(key)) continue;
+      st.seen.add(key);
+      if (flag && (!first || Date.now() / 1000 - t.start < 600) && typeof oursNamedText === "function") {
+        UI.toast(oursNamedText(t) + ": not an event", "err", `${hhmmss(t.start)} ${t.channel}`
+          + (t.prealert ? `, phone rang ${hhmmss(t.prealert.at)}` : ""), 30000);
+        continue;
+      }
       if (first || !t.pc || !alertsOn() || !window.Radio) continue;
       const head = t.dispatcher ? "60 Control → Port Chester" : `${who(t)} → 60 Control`;
       Radio.toast(`${head}: ${said(t)}`, `${hhmmss(t.start)} ${t.channel}, ${t.pc}`);

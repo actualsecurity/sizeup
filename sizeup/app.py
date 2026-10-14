@@ -68,9 +68,10 @@ from sizeup.radio.live import LiveTalk
 from sizeup.radio.livepage import HOLD_S, LivePaging
 from sizeup.radio import sdr as sdr_lookup
 from sizeup.radio.recorder import TrunkRecorder
-from sizeup.radio.page import Page, PageHold, assemble, page_from_dict, recording_note
+from sizeup.radio.page import Page, PageHold, assemble, decode_tones, page_from_dict, recording_note
 from sizeup.radio.tap import LiveTap
-from sizeup.radio.tones import ToneCode, ToneEvent, TonePlan, base_name, pair_key
+from sizeup.cad import tonelist
+from sizeup.radio.tones import ToneEvent, TonePlan, base_name
 from sizeup.talkers import talker_prompt
 from sizeup import channels
 from sizeup.stt import LIVE, RERUN, Transcriber, WhisperClient, radio_voice, wav_bytes
@@ -331,6 +332,9 @@ class App:
             self.tap.attach(r)
         self.cad.paging = lambda: self.paging_state()
         self.cad.has_clip = self.has_clip
+        # A page that isn't ours naming our units is flagged (#115's safety net): the feed's unit matcher, for the
+        # Radio view's rows too.
+        self.cad.comms.names_ours = self.cad.feed.names_ours
         self.cad.main_tg = self.tg.main
         # Per-channel record / transcribe / engine (Settings > Radios, sizeup/channels.py) and Amazon
         # Transcribe where this process may call it ([stt] aws: the hub; sizeup/transcribe.py).
@@ -339,6 +343,8 @@ class App:
         # Tone pairs named from the console (Settings "tones", #80): merged into the plan, with the names
         # that count as ours; the hub sends them to the station with the channel choices.
         self._tone_ov: dict = {}
+        self.cad.settings.use_tone_list(cfg.tones, set(cfg.ours) | set(cfg.cad_monitor_departments),
+                                        (self.clips_dir.parent / "unknown_tones.jsonl") if self.clips_dir else None)
         self._apply_named_tones()
         self.cad.tone_names = self.tone_names
         self._hub_aws = self._load_hub_aws()
@@ -727,6 +733,7 @@ class App:
                                      "tones": [{"a_hz": round(t.a_hz, 1), "b_hz": round(t.b_hz, 1) if t.b_hz else None,
                                                 "names": list(t.names), "ours": self.paging.is_ours(t.names)}
                                                for t in page.tones],
+                                     "tone_seq": list(getattr(page, "tone_seq", None) or []),
                                      "voice_at": round(page.voice_offset_s, 2) if page.tones else None},
                                     replace=replace)
         except Exception as e:  # the CAD must never stop the monitor
@@ -850,13 +857,11 @@ class App:
     # -- tone pairs named from the console (Settings "tones", #80) ------------------------------------------
 
     def _apply_named_tones(self) -> None:
-        """The plan = the config's codes + the named pairs; ours = the config's + the named pairs marked ours."""
+        """The plan = the config's codes with the edits from Settings > Radios > Tones on them (#115: list rows renamed or
+        taken out) + the pairs named there; ours = the config's + the names marked ours (sizeup/cad/tonelist.py)."""
         self._tone_ov = self.cad.settings.tone_overrides()
-        named = [ToneCode(str(v["name"]), float(v["a_hz"]), float(v["b_hz"]) if v.get("b_hz") else None)
-                 for v in self._tone_ov.values()]
-        self.plan.replace(list(self.cfg.tones) + named)
-        ours = set(self.cfg.ours) | set(self.cfg.cad_monitor_departments) | {c.name for c in named
-                                                                               if self._tone_ov[pair_key(c.a_hz, c.b_hz)].get("ours")}
+        self.plan.replace(tonelist.effective(self.cfg.tones, self._tone_ov))
+        ours = tonelist.ours_names(set(self.cfg.ours) | set(self.cfg.cad_monitor_departments), self._tone_ov)
         self.store.ours = ours
         self.paging.ours = {base_name(n) for n in ours}
         self._rematch_pages()
@@ -875,8 +880,9 @@ class App:
         pair says the name, and the page it was named from is read again (its tones now say who it was for,
         so a page of ours becomes a pending event)."""
         self._apply_named_tones()
-        log("tone pairs named from the console: " + (", ".join(f"{k} {v['name']}" + (" (ours)" if v.get("ours") else "")
-                                                                for k, v in sorted(self._tone_ov.items())) or "none"))
+        log("tone pairs named or edited from the console: " + (", ".join(
+            f"{k} " + ("taken out" if v.get("deleted") else str(v.get("name", ""))) + (" (ours)" if v.get("ours") else "")
+            for k, v in sorted(self._tone_ov.items())) or "none"))
         try:
             n = self.cad.comms.retag_pages(self._match_pair, self.paging.is_ours)
             if n:
@@ -907,11 +913,44 @@ class App:
                 self._page_incident(page, page.departments, d)
         return True
 
+    def reread_tones(self, page_id: str) -> dict:
+        """Settings "tones" reread (#115): the page's recording through the tone decoder again (a page decoded before
+        a decoder fix), its pairs matched against the plan as it is now and the page read again (reevaluate_page:
+        a page of ours queues its event). {pairs, sequence}. ValueError: no such page, or no recording of it."""
+        with self._lock:
+            page = next((p for p in self.pages if p.id == page_id), None)
+        if page is None:
+            raise ValueError(f"no page {page_id!r} here")
+        wav = self.clip(page_id)
+        audio = None
+        if wav:
+            import io
+            try:
+                with wave.open(io.BytesIO(wav)) as w:
+                    if w.getframerate() == RATE and w.getsampwidth() == 2 and w.getnchannels() == 1:
+                        audio = np.frombuffer(w.readframes(w.getnframes()), "<i2").astype(np.float32) / 32768.0
+            except (wave.Error, EOFError):
+                audio = None
+        if audio is None:
+            raise ValueError("no recording of that page left (audio is kept 12 h)")
+        tones, seq = decode_tones(audio, self.plan)
+        before = [(round(t.a_hz, 1), round(t.b_hz, 1) if t.b_hz else None) for t in page.tones]
+        page.tones, page.tone_seq = tones, seq
+        if tones:
+            page.kind = "page"
+        log(f"{page.label}: page {page_id} tones re-read: " + (", ".join(t.describe() for t in tones) or "none")
+            + f" (were {before})")
+        self.reevaluate_page(page_id)
+        return {"pairs": [{"a_hz": round(t.a_hz, 1), "b_hz": round(t.b_hz, 1) if t.b_hz else None, "names": list(t.names)}
+                          for t in tones], "sequence": seq}
+
     def tone_names(self) -> dict:
-        """GET /api/cad/tones: the pairs named here and the department names to pick from."""
+        """GET /api/cad/tones: the pairs named here and the names to pick from (suggest: [{name, type}], every name in
+        the plan, the console's departments and the county's agencies, EMS included, #115)."""
         ours = sorted(set(self.cfg.ours) | set(self.cfg.cad_monitor_departments))
-        names = list(dict.fromkeys(ours + self.plan.names() + list(self.cad.lists.departments)))
-        return {"named": self.cad.settings.tone_rows(), "names": sorted(names), "ours": ours}
+        suggest = self.cad.settings.tone_suggestions()
+        return {"named": self.cad.settings.tone_rows(), "names": [x["name"] for x in suggest], "suggest": suggest,
+                "ours": ours, "types": list(tonelist.TYPES)}
 
     def _to_cad(self, t: Traffic, replace: bool = True) -> None:
         """A transmission into the CAD's communications log (linked to its rig's events)."""

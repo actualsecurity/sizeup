@@ -469,7 +469,8 @@ def test_named_tones_are_settings_audited_exported_and_imported(tmp_path):
             post(a, "tones", action="set", **bad)
     with pytest.raises(CadError, match="no named tones"):
         post(a, "tones", action="delete", key="1.0/2.0")
-    assert a.settings.page()["tone_names"][2]["name"] == "Fairview"
+    named = [r for r in a.settings.page()["tones"]["rows"] if r["state"] == "named"]
+    assert [(r["name"], r["origin"], r["operator"]) for r in named][0] == ("Fairview", "named", "Dana")
     data = json.loads(json.dumps(a.settings_export()))
     assert set(data["overrides"]["tones"]) == {"832.5/1201.0", "349.1/311.1", "1201.0/-"}
     b = make_cad(tmp_path / "b")

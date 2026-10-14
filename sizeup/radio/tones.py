@@ -11,8 +11,16 @@ group / all-call. We find the tones from the audio itself:
   -> a frame is "tonal" when most of the 250-3500 Hz energy sits around one frequency
      (voice and static spread it out, so they don't count)
   -> consecutive tonal frames at the same frequency (within 1%) form a run
-  -> runs pair up: a short run (A) followed straight away by a longer one (B) = two-tone page;
-     a single run of 5 s or more = long tone
+  -> runs pair up by their length, not their order (#115): a short run (A, ~1 s) and the long run (B, ~3 s) that
+     follows it straight away = two-tone page; a single run of 5 s or more = long tone. A short run followed by
+     another short one, or a long one with no short one before it, is a broken pair: kept in the sequence
+     (sequence(): every run with its Hz, start, length and role), never forced into a pair.
+
+A stacked page (two departments) is A1 B1 A2 B2. Pairing by order alone split South 2's 2026-10-14 07:04 page
+across the departments: a fade in the middle of B1 cut it into two runs, the second half was taken as the next
+pair's A (928.1/903.2) and B2 alone as an A=B code. Now a run bridges up to FADE_S of fade at the same frequency,
+B must be long (over A_MAX_S), and A=B codes are one run of SAME_AB_S or more (A 1 s + B 3 s merged, ~4 s;
+a lone 3 s B is not one).
 
 TonePlan matches decoded pairs against configured departments (+/- 1.5 %, about the spacing
 between neighbouring Motorola tone codes / 2). The codes come from data/westchester_tones.csv (and
@@ -33,12 +41,13 @@ BAND = (250.0, 3500.0)
 PURITY = 0.6          # share of in-band energy within ~±25 Hz of the peak
 SAME_TONE = 0.01      # relative frequency change still counted as the same tone
 MIN_RUN_S = 0.3       # shorter tonal runs are ignored (voice harmonics, blips)
-A_MAX_S = 2.0         # an A tone is at most this long
-B_MIN_S = 0.6         # a B tone is at least this long
-PAIR_GAP_S = 0.35     # B must start within this of A ending
+A_MAX_S = 1.5         # an A tone is at most this long (Quick Call II: 1 s); longer is a B
+B_MIN_S = A_MAX_S     # a B tone is longer than this (Quick Call II: 3 s)
+PAIR_GAP_S = 0.6      # B must start within this of A ending
 LONG_TONE_S = 5.0     # a single run this long is a long tone (group / all-call)
-SAME_AB_S = 2.5       # a single run 2.5-5 s is an A=B code (Larchmont 435.1/435.1: A 1 s + B 3 s merge)
-DROPOUT_FRAMES = 1    # a run survives this many non-tonal frames (fades, the A->B switch)
+SAME_AB_S = 3.5       # a single run 3.5-5 s is an A=B code (Larchmont 435.1/435.1: A 1 s + B 3 s merge into ~4 s)
+FADE_S = 0.3          # a run survives this much non-tonal audio (a fade on a distant repeater, the A->B switch)
+DROPOUT_FRAMES = int(round(FADE_S / HOP_S))
 
 
 @dataclass
@@ -46,6 +55,7 @@ class Run:
     hz: float
     start: float
     end: float
+    role: str = ""            # "A" | "B" | "AB" (an A=B code) | "long" | "" (in no pair: a broken one)
 
     @property
     def dur(self) -> float:
@@ -87,6 +97,7 @@ class ToneDetector:
         self._run_end = 0.0
         self._miss = 0
         self._pending_a: Run | None = None
+        self.runs: list[Run] = []    # every tone heard, in order (sequence())
 
     # -- frame analysis ----------------------------------------------------------------------
 
@@ -129,13 +140,13 @@ class ToneDetector:
 
     def pending(self) -> ToneEvent | None:
         """The page the tone ringing now already makes, before it ends (the live display,
-        radio/livepage.py): an A then 0.6 s of B is that pair whatever B's length (only B's frequency
-        can still move a little); a single run past 2.5 s is an A=B code, a long tone from 5 s."""
+        radio/livepage.py): an A then more than 1.5 s of B (longer than any A) is that pair whatever B's length (only B's frequency
+        can still move a little); a single run past 3.5 s is an A=B code, a long tone from 5 s."""
         if self._run is None:
             return None
         hz, start, end = float(np.median(self._run)), self._run_start, self._run_end
         a = self._pending_a
-        if a is not None and end - start >= B_MIN_S and start - a.end <= PAIR_GAP_S:
+        if a is not None and end - start > B_MIN_S and start - a.end <= PAIR_GAP_S:
             return ToneEvent("two_tone", a.hz, hz, a.start, end)
         if a is None and end - start >= SAME_AB_S:
             return (ToneEvent("long_tone", hz, None, start, end) if end - start >= LONG_TONE_S
@@ -170,18 +181,27 @@ class ToneDetector:
         self._run = None
         if run.dur < MIN_RUN_S:
             return []
+        self.runs.append(run)
         a = self._pending_a
-        if a is not None and run.dur >= B_MIN_S and run.start - a.end <= PAIR_GAP_S:
+        if a is not None and run.dur > B_MIN_S and run.start - a.end <= PAIR_GAP_S:
             self._pending_a = None
+            a.role, run.role = "A", "B"
             return [ToneEvent("two_tone", a.hz, run.hz, a.start, run.end)]
         events = self._expire_a(run.start)
+        self._pending_a = None              # a short run after a short one: the first is a broken pair
         if run.dur >= LONG_TONE_S:
+            run.role = "long"
             return events + [ToneEvent("long_tone", run.hz, None, run.start, run.end)]
         if run.dur >= SAME_AB_S:
+            run.role = "AB"
             return events + [ToneEvent("two_tone", run.hz, run.hz, run.start, run.end)]
         if run.dur <= A_MAX_S:
             self._pending_a = run
-        return events
+        return events                       # a B with no A before it: a broken pair, in the sequence only
+
+    def sequence(self) -> list[dict]:
+        """Every tone heard so far, in order: {hz, start, dur, role} (role "" = in no pair)."""
+        return [{"hz": round(r.hz, 1), "start": round(r.start, 2), "dur": round(r.dur, 2), "role": r.role} for r in self.runs]
 
     def _expire_a(self, now: float) -> list[ToneEvent]:
         # An A tone with no B after it isn't a page (or its B was lost): drop it quietly.
@@ -206,6 +226,10 @@ class ToneCode:
     a_hz: float
     b_hz: float | None = None  # None: a long (single) tone
     agency: str = ""          # grouping key, e.g. "PCFD"
+    # Where the code comes from (Settings > Radios > Tones, #115): the tone list's source column ("rr-wiki+nf2g",
+    # "air"), "config" for [[tones]]; fetched: the date it was last seen there. Not part of the code's identity.
+    source: str = field(default="", compare=False)
+    fetched: str = field(default="", compare=False)
 
 
 @dataclass
@@ -230,6 +254,10 @@ class TonePlan:
                 best[b] = n
         ev.names = tuple(best.values())
         return ev
+
+    def match_pair(self, a_hz: float, b_hz: float | None) -> tuple[str, ...]:
+        """The names a pair (as logged: A, B or None for a long tone) matches now."""
+        return self.match(ToneEvent("two_tone" if b_hz else "long_tone", float(a_hz), b_hz, 0.0, 0.0)).names
 
     def match_all(self, events: Iterable[ToneEvent]) -> list[ToneEvent]:
         return [self.match(e) for e in events]

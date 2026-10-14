@@ -24,10 +24,14 @@ Reset to default = drop the override (one item, or a whole section).
                                    kept, transcribed, and by what (sizeup/channels.py; Settings > Radios)
     stt                            key "vocabulary" -> [phrases] (Amazon Transcribe's custom vocabulary),
                                    "aws_monthly_limit_usd" -> the monthly AWS limit (sizeup/transcribe.py)
-    tones                          key "832.5/1201.0" (A/B Hz) -> {name, a_hz, b_hz, ours, page}: a tone pair named
-                                   from an unknown-tones page row ("Name these tones", #80), merged into the tone plan
-                                   over data/westchester_tones.csv (sizeup/app.py _apply_named_tones); ours: the
-                                   name counts as one of ours (PCFD, Rye Brook: their pages become pending events)
+    tones                          key "832.5/1201.0" (A/B Hz) -> {name, a_hz, b_hz, ours, page?, type?, confirmed?}: a
+                                   tone pair named from an unknown-tones page row ("Name these tones", #80) or added
+                                   in Settings > Radios > Tones (#115), merged into the tone plan over
+                                   data/westchester_tones.csv (sizeup/app.py _apply_named_tones); ours: the name
+                                   counts as one of ours (PCFD, Rye Brook: their pages become pending events);
+                                   key "A/B@<name in the list>" -> {list, a_hz, b_hz, name, ours, type?, confirmed?} |
+                                   {list, a_hz, b_hz, deleted: true}: an edit to a row of the tone list (the file is
+                                   never rewritten; Reset to list drops it). sizeup/cad/tonelist.py
 
 Codes never change (they are stored on events and exported): a rename changes the name only. An
 item in use can't be deleted, only retired (named on old events, off the pick lists). Every change
@@ -49,7 +53,7 @@ from datetime import datetime
 from pathlib import Path
 
 from sizeup import channels as channels_mod
-from sizeup.cad import dispatcher, eta, runcards
+from sizeup.cad import dispatcher, eta, runcards, tonelist
 from sizeup.cad import lists as lists_mod
 from sizeup.cad.lists import CLASSES, CODE, COLOR, LIST_SECTIONS, LONG_CODE, RESPONSES, ROLES, ListsError
 from sizeup.cad.store import OPERATOR_MAX, SCHEMA_VERSION, TZ, CadError
@@ -83,7 +87,7 @@ WORDING = (("new", "First dispatch"), ("add_on", "Added to the assignment"), ("u
 MAX_TONES, MAX_GROUPS, MAX_CHANNELS = 8, 4, 8
 MAX_VOCAB, MAX_PHRASE_CHARS = 500, 100
 MAX_PLACE_NAMES = 300
-TONES_SECTION, MAX_NAMED_TONES, TONE_HZ = "tones", 200, (250.0, 3500.0)     # the decoder's band (radio/tones.py)
+TONES_SECTION, MAX_NAMED_TONES, TONE_HZ = "tones", 400, tonelist.TONE_HZ     # the decoder's band (radio/tones.py)
 
 
 def tone_groups(tones) -> list[list[list[float]]]:
@@ -253,6 +257,12 @@ class Editor:
         self.config_tones = tone_groups(cad.s.tones)
         self.config_channels = tuple(cad.s.channels)
         self.config_voice = (getattr(cad.s, "voice", ""), getattr(cad.s, "speed", 1.0))
+        # The tone list under the "tones" overrides (Settings > Radios > Tones, #115): the app sets it (use_tone_list):
+        # the config's codes (data/westchester_tones.csv + [[tones]]), the names ours by config, unknown_tones.jsonl.
+        self.base_tones: list = []
+        self.base_ours: set[str] = set()
+        self.unknown_log: Path | None = None
+        self._heard_cache: tuple = ((), [])
 
     # -- overrides ------------------------------------------------------------------------------------
 
@@ -436,7 +446,7 @@ class Editor:
         out["dispatch"] = self._dispatch_page(L, ov)
         out["operators"] = self.operators()
         out["system"] = self._system(ov)
-        out["tone_names"] = self.tone_rows()
+        out["tones"] = self.tones_page()
         return out
 
     def _unit_rows(self, L, ov: dict) -> dict:
@@ -1287,60 +1297,124 @@ class Editor:
         return dict(self.overrides().get(TONES_SECTION) or {})
 
     def tone_rows(self) -> list[dict]:
-        """Settings > Radios > Named tones and GET /api/cad/tones: each named pair, who named it and when."""
+        """GET /api/cad/tones: each pair named here (not the edits to list rows), who named it and when."""
         rows = self.store.q("SELECT key, value, updated_at, operator FROM settings_overrides WHERE section = ? ORDER BY key",
                             (TONES_SECTION,))
-        return [dict(json.loads(r["value"]), key=r["key"], at=r["updated_at"], operator=r["operator"] or "") for r in rows]
+        return [dict(json.loads(r["value"]), key=r["key"], at=r["updated_at"], operator=r["operator"] or "") for r in rows
+                if not tonelist.is_list_key(r["key"])]
 
     @staticmethod
     def _clean_tone(v, where: str = "") -> tuple[str, dict]:
-        """{a_hz, b_hz, name, ours?, page?} checked -> (key, the value stored). CadError."""
-        what = f"{where}: " if where else ""
-        if not isinstance(v, dict):
-            raise CadError(f"{what}an object {{a_hz, b_hz, name, ours}}")
-        hz = {}
-        for k in ("a_hz", "b_hz"):
-            x = v.get(k)
-            if k == "b_hz" and x in (None, ""):
-                hz[k] = None
-                continue
-            if isinstance(x, bool) or not isinstance(x, (int, float)) or not TONE_HZ[0] <= x <= TONE_HZ[1]:
-                raise CadError(f"{what}{k}: {TONE_HZ[0]:.0f} to {TONE_HZ[1]:.0f} Hz")
-            hz[k] = round(float(x), 1)
-        name = _text(v.get("name"), f"{what}name", 60)
-        if any(name.endswith(t) for t in (" (heard)", " (est.)")):
-            raise CadError(f"{what}name: the department's name alone")
-        ours = v.get("ours", False)
-        if not isinstance(ours, bool):
-            raise CadError(f"{what}ours: true or false")
-        page = _text(v.get("page"), f"{what}page", 80, required=False)
-        out = {"name": name, "a_hz": hz["a_hz"], "b_hz": hz["b_hz"], "ours": ours}
-        if page:
-            out["page"] = page
-        return pair_key(hz["a_hz"], hz["b_hz"]), out
+        """{a_hz, b_hz, name, ours?, page?, type?, confirmed?, list?} | {list, a_hz, b_hz, deleted} checked -> (key,
+        the value stored). CadError. sizeup/cad/tonelist.py clean()."""
+        return tonelist.clean(v, where)
+
+    def use_tone_list(self, codes, ours, unknown_log: Path | None = None) -> None:
+        self.base_tones, self.base_ours, self.unknown_log = list(codes), set(ours), unknown_log
+
+    def _locked(self) -> set[str]:
+        """The names that are ours whatever is set here: PCFD's and Rye Brook's (the config's ours)."""
+        return set(self.base_ours) | set(self.cad.s.monitor_departments)
+
+    def _heard(self) -> list:
+        """Every pair heard (tonelist.heard), kept until a page row or unknown_tones.jsonl changes."""
+        r = self.store.q("SELECT COUNT(*) AS n, MAX(updated_at) AS u FROM radio_traffic WHERE tones != ''")[0]
+        try:
+            st = self.unknown_log.stat() if self.unknown_log else None
+            log = (st.st_size, st.st_mtime) if st else None
+        except OSError:
+            log = None
+        sig = (r["n"], r["u"], log)
+        if self._heard_cache[0] != sig:
+            rows = self.store.q("SELECT id, start, channel, tones, voice_at FROM radio_traffic WHERE tones != ''")
+            self._heard_cache = (sig, tonelist.heard(rows, self.unknown_log))
+        return self._heard_cache[1]
+
+    def tone_plan(self, ov: dict | None = None):
+        from sizeup.radio.tones import TonePlan
+        return TonePlan(tonelist.effective(self.base_tones, self.tone_overrides() if ov is None else ov))
+
+    def tone_suggestions(self, ov: dict | None = None) -> list[dict]:
+        """The names to pick from (Tones, Name these tones): every name in the plan, the console's departments, the
+        county's agencies (EMS included). [{name, type}]."""
+        ov = self.tone_overrides() if ov is None else ov
+        return tonelist.suggestions(tonelist.effective(self.base_tones, ov), ov,
+                                    sorted(self._locked()) + list(self.cad.lists.departments), tonelist.county_agencies())
+
+    def tones_page(self) -> dict:
+        """Settings > Radios > Tones: every pair (the list's and the ones named here) and the pairs heard that nobody's
+        code matches."""
+        ov = self.tone_overrides()
+        meta = {r["key"]: {"operator": r["operator"] or "", "at": r["updated_at"]} for r in
+                self.store.q("SELECT key, operator, updated_at FROM settings_overrides WHERE section = ?", (TONES_SECTION,))}
+        events = self._heard()
+        locked = self._locked()
+        ours = tonelist.ours_names(locked, ov)
+        plan = self.tone_plan(ov)
+        has_clip = getattr(self.cad, "has_clip", None)
+        return {"rows": tonelist.table(self.base_tones, ov, meta, events, ours, locked, plan.tolerance),
+                "unnamed": tonelist.unnamed(events, plan, has_clip if callable(has_clip) else None),
+                "suggest": self.tone_suggestions(ov), "types": list(tonelist.TYPES), "locked": sorted(locked),
+                "max": MAX_NAMED_TONES}
+
+    def _list_row(self, key: str):
+        return next((c for c in self.base_tones if tonelist.list_key(c) == key), None)
 
     def _tones_op(self, action: str, body: dict, op: str) -> dict:
-        """set {a_hz, b_hz, name, ours?, page?}: name a pair (page: the page it was heard on, read again) |
-        delete {key}: forget a name (the pair is unknown again)."""
+        """set {a_hz, b_hz, name, ours?, type?, confirmed?, page?, list?}: name a pair (page: the page it was heard on,
+        read again) or, with list (its name in the tone list), edit that row | delete {key}: forget a name (the pair is
+        unknown again) or take a list row out of the plan | reset {key}: a list row as the list has it | reread {page}:
+        that page's recording through the tone decoder again (App.reread_tones; changes no setting)."""
         cur = self.tone_overrides()
-        if action == "delete":
-            key = _text(body.get("key"), "key", 20)
-            if key not in cur:
-                raise CadError(f"no named tones {key!r}")
-            out = self._commit([(TONES_SECTION, key, REMOVE)], op, [("radios", f"tones/{key}", cur[key], None)])
-            page = ""
+        page = ""
+        if action in ("delete", "reset"):
+            key = _text(body.get("key"), "key", 90)
+            row = self._list_row(key) if tonelist.is_list_key(key) else None
+            if action == "reset" or row is None:
+                if key not in cur:
+                    raise CadError(f"no {'edit to' if action == 'reset' else 'named tones'} {key!r}")
+                out = self._commit([(TONES_SECTION, key, REMOVE)], op, [("radios", f"tones/{key}", cur[key], None)])
+            else:
+                k, val = self._clean_tone({"list": key.split("@", 1)[1], "a_hz": row.a_hz, "b_hz": row.b_hz, "deleted": True})
+                if cur.get(key) == val:
+                    return {"ok": True, "key": key}
+                out = self._commit([(TONES_SECTION, key, val)], op, [("radios", f"tones/{key}", cur.get(key), val)])
         elif action == "set":
             key, val = self._clean_tone(body)
             if key not in cur and len(cur) >= MAX_NAMED_TONES:
-                raise CadError(f"at most {MAX_NAMED_TONES} named tone pairs")
-            if val.get("ours") is False and val["name"] in self.cad.s.monitor_departments:
+                raise CadError(f"at most {MAX_NAMED_TONES} edited or named tone pairs")
+            if val.get("ours") is False and val["name"] in self._locked():
                 val["ours"] = True                    # PCFD's / Rye Brook's name: theirs are ours whatever the box said
-            if cur.get(key) == val:
+            if "page" not in val and cur.get(key, {}).get("page") and not val.get("list"):
+                val["page"] = cur[key]["page"]        # an edit keeps the page it was named from
+            changes = [(TONES_SECTION, key, val)]
+            row = self._list_row(key) if val.get("list") else None
+            if row is not None:                       # back to what the list says: no edit left
+                d = tonelist.table([row], {}, {}, [], self._locked(), self._locked())[0]
+                same = (val["name"] == d["name"] and val.get("type", d["type"]) == d["type"]
+                        and val.get("confirmed", d["confirmed"]) == d["confirmed"] and val["ours"] == d["ours"])
+                if same:
+                    changes = [(TONES_SECTION, key, REMOVE)] if key in cur else []
+            if not val["ours"]:                       # ours goes by the name: every pair with it stops being ours
+                changes += [(TONES_SECTION, k, dict(v, ours=False)) for k, v in cur.items()
+                            if k != key and v.get("ours") and v.get("name") == val["name"]]
+            changes = [c for c in changes if c[2] is REMOVE or cur.get(c[1]) != c[2]]
+            if not changes:
                 return {"ok": True, "key": key}
-            out = self._commit([(TONES_SECTION, key, val)], op, [("radios", f"tones/{key}", cur.get(key), val)])
-            page = val.get("page", "")
+            out = self._commit(changes, op, [("radios", f"tones/{k}", cur.get(k), None if v is REMOVE else v)
+                                             for _s, k, v in changes])
+            page = val.get("page", "") if body.get("page") else ""
+        elif action == "reread":
+            pid = _text(body.get("page"), "page", 80)
+            ctx = self.cad.radio_ctx
+            if ctx is None or not hasattr(ctx, "reread_tones"):
+                raise CadError("no radios here to read the page's tones again")
+            try:
+                return {"ok": True, **ctx.reread_tones(pid)}
+            except ValueError as e:
+                raise CadError(str(e)) from None
         else:
-            raise CadError("action: set or delete")
+            raise CadError("action: set, delete, reset or reread")
         ctx = self.cad.radio_ctx
         if ctx is not None:
             ctx.tones_changed(page)

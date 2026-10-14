@@ -5,8 +5,8 @@ runs the same tone decoder (radio/tones.py ToneDetector) on the channel's audio 
 live tap (radio/tap.py) hands it each 50 ms frame of an open carrier as the receiver reads it, so it
 costs one 100 ms FFT per 50 ms of audio, only while the carrier is up.
 
-    tones   a pair is shown as soon as it is certain: A, then 0.6 s of B (B's frequency is settled when
-            B ends; a single run past 2.5 s is an A=B code); stacked departments are added one by one
+    tones   a pair is shown as soon as it is certain: A, then 1.5 s of B (longer than any A, #115; B's frequency is settled when
+            B ends; a single run past 3.5 s is an A=B code); stacked departments are added one by one
     voice   the tones have stopped and someone is talking (speech over the carrier's dead air)
     ended   the page is built (App._segment -> finished()): kept RECENT_S as "ended" so the screens
             can hand over to the finished page row without a gap

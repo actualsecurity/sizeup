@@ -456,13 +456,16 @@ Slots go in order. A kind takes the next available unit of that kind (regular ap
     <section id="s-system" class="s-panel" data-s="system" hidden></section>
     <section id="s-radios" class="s-panel" data-s="radios" hidden>
       <div class="s-head view-head"><h2 class="view-title">Radios</h2></div>
+      <div id="s-radio-tabs" class="s-tabs tabs" aria-label="Radios"></div>
       <div id="settings-radio-controls" class="radio-controls"></div>
-      <div id="settings-tone-names"></div>
-      <div class="s-note notice">Radios editor unavailable</div>
-      <section class="card">
-        <div class="card-head"><h2>Radio IDs</h2><button type="button" class="help" aria-label="Help" aria-expanded="false" data-help="Which rig each radio ID is (MDC on FG1, P25 unit IDs): confirmed by hand, guessed from the numbering, or heard on the air.">?</button></div>
-        <div id="settings-radios" class="settings-radios"></div>
-      </section>
+      <div id="settings-tones" class="radio-controls" data-rtab="tones" hidden></div>
+      <div class="radio-controls" data-rtab="ids" hidden>
+        <div class="s-note notice">Radios editor unavailable</div>
+        <section class="card">
+          <div class="card-head"><h2>Radio IDs</h2><button type="button" class="help" aria-label="Help" aria-expanded="false" data-help="Which rig each radio ID is (MDC on FG1, P25 unit IDs): confirmed by hand, guessed from the numbering, or heard on the air.">?</button></div>
+          <div id="settings-radios" class="settings-radios"></div>
+        </section>
+      </div>
     </section>
   </div>
 </main>

@@ -35,12 +35,17 @@ window.RadioControls = (() => {
 
   // ---- the section ----------------------------------------------------------------------------------
 
-  function card(title, help, ...body) {
+  function card(title, help, ...body) {     // tab: Settings > Radios's tab it goes under (settings.js; the station shows all)
     const c = el("div", "card s-card");
     const h = el("div", "card-head");
     h.append(el("h2", "", title));
     if (help) h.append(Help.button(help));
     c.append(h, ...body);
+    return c;
+  }
+
+  function tab(k, c) {
+    c.dataset.rtab = k;
     return c;
   }
 
@@ -77,19 +82,19 @@ window.RadioControls = (() => {
       const rerunRow = el("div", "row");
       rerunRow.append(n.rerun, n.rerunMsg);
       box.replaceChildren(
-        card("Receivers", "Each radio, speech-to-text and the dispatch voice.\nSDR: one dongle hears one of these at a time; "
-             + "pick what it listens to. Plug in another dongle to run two at once.", n.radios, n.sdr, n.storage),
-        card("Paged incident", "The incident the station opened from the last page: Main traffic attaches to it until it "
-             + "goes quiet. Close it when the call is over.", n.inc),
-        card("Channels", "Record: keeps its transmissions (off for FG1 / South 2: the receiver keeps running, squelch, "
+        tab("receivers", card("Receivers", "Each radio, speech-to-text and the dispatch voice.\nSDR: one dongle hears one of these at a time; "
+             + "pick what it listens to. Plug in another dongle to run two at once.", n.radios, n.sdr, n.storage)),
+        tab("receivers", card("Paged incident", "The incident the station opened from the last page: Main traffic attaches to it until it "
+             + "goes quiet. Close it when the call is over.", n.inc)),
+        tab("channels", card("Channels", "Record: keeps its transmissions (off for FG1 / South 2: the receiver keeps running, squelch, "
              + "MDC IDs and Talking now stay live, nothing is kept).\nMain: up front in Radio and on our incident; "
              + "the rest are folded under Other talkgroups.\nTranscribe: speech-to-text at all.\nEngine:\n" + ENGINE_HELP,
-             n.sync, n.cost, tools, n.tgErr, n.groups),
-        card("Vocabulary", "Words Amazon Transcribe should expect: unit names, places, streets. AWS takes letters only, "
+             n.sync, n.cost, tools, n.tgErr, n.groups)),
+        tab("vocabulary", card("Vocabulary", "Words Amazon Transcribe should expect: unit names, places, streets. AWS takes letters only, "
              + "so numbers go spelled out (Engine 60 \u2192 Engine-sixty) and come back as written. Saved here, sent to "
-             + "AWS with Push (the hub's vocabulary sizeup-pcfd), used by new streams once it is Ready.", ...vocabCard()),
-        card("Speech-to-text", "Runs every recording still on disk through speech-to-text again (newest first, behind live "
-             + "traffic), with the local model.\n" + ENGINE_HELP, rerunRow));
+             + "AWS with Push (the hub's vocabulary sizeup-pcfd), used by new streams once it is Ready.", ...vocabCard())),
+        tab("stt", card("Speech-to-text", "Runs every recording still on disk through speech-to-text again (newest first, behind live "
+             + "traffic), with the local model.\n" + ENGINE_HELP, rerunRow)));
     }
     loadStt();
     poll();

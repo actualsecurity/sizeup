@@ -209,6 +209,26 @@
     padding: var(--s-2) var(--s-3); background: var(--bg); border: var(--bw) solid var(--line); border-radius: var(--radius); }
   .vocab-limit { inline-size: 6rem; }
   .tg-row.confirm .sw[data-field="record"] { color: var(--warn); }
+  /* Radios > Tones (settings.js sTones, #115): every pair in one table, search and filters over it, a row edited in
+     place; Heard but unnamed under it. On a phone (below) each row is a card. */
+  #s-radio-tabs { margin-block-end: calc(-1 * var(--s-2)); }
+  .s-tone-tools { flex-wrap: wrap; gap: var(--s-2); margin-block-end: var(--s-2); }
+  .s-tone-q { flex: 1 1 14rem; max-inline-size: 22rem; }
+  .s-tones td { vertical-align: middle; }
+  .s-tones .s-t-hz, .s-tones .s-t-last, .s-tones .s-t-n { white-space: nowrap; }
+  .s-tones .s-t-name { min-inline-size: 10rem; }
+  .s-tones .s-t-name > .chip { margin-inline-start: var(--s-1); }
+  .s-tones .s-t-src { min-inline-size: 10rem; overflow-wrap: anywhere; }
+  .s-tones .s-t-act { white-space: nowrap; text-align: end; }
+  .s-tones .s-t-act > * + * { margin-inline-start: var(--s-1); }
+  .s-tones .s-t-act.s-t-naming { white-space: normal; display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1); }
+  .s-tones .s-t-act.s-t-naming > * + * { margin-inline-start: 0; }
+  .s-tones .s-t-naming .s-name { flex: 1 1 12rem; }
+  .s-trow.deleted :is(.s-t-hz, .s-t-name > b) { text-decoration: line-through; color: var(--dim); }
+  .s-trow.s-tedit { background: var(--hover); }
+  .s-trow.s-tedit .s-name { inline-size: 100%; min-inline-size: 10rem; }
+  .s-trow[hidden] { display: none; }
+  .s-unnamed .s-t-play { inline-size: 1%; }
 
   /* ---- the style guide (styleguide.js) ------------------------------------------------------------ */
   .sg-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(22rem, 100%), 1fr)); gap: var(--gutter); }
@@ -238,5 +258,21 @@
     .s-act-ip { justify-self: end; }
     .s-seen { white-space: normal; flex: 1 1 100%; }
     .sm-lab, .sm-url { flex: 1 1 100%; max-inline-size: none; }
+    /* Tones: a card a pair (name first, then its tones and marks, its actions at the end) */
+    .s-tones thead { display: none; }
+    .s-tones, .s-tones tbody { display: block; }
+    .s-tones tr { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1) var(--s-2); padding-block: var(--s-2);
+      border-block-end: var(--bw) solid var(--line); }
+    .s-tones tr[hidden] { display: none; }
+    .s-tones td { display: block; padding: 0; border: 0; min-inline-size: 0; }
+    .s-tones td:empty { display: none; }
+    .s-tones td[data-l]::before { content: attr(data-l) " "; color: var(--dim); }
+    .s-tones .s-t-name { order: -1; flex: 1 1 100%; }
+    .s-tones .s-t-src { flex: 1 1 100%; min-inline-size: 0; }
+    .s-tones .s-t-act { flex: 1 1 100%; display: flex; flex-wrap: wrap; gap: var(--s-1); justify-content: flex-end; white-space: normal; }
+    .s-tones .s-t-act > * + * { margin-inline-start: 0; }
+    .s-tone-q { max-inline-size: none; }
+    .s-unnamed .s-t-play { inline-size: auto; }
+    .s-unnamed .s-t-act:not(.s-t-naming) { flex: 0 0 auto; margin-inline-start: auto; }
   }
 }
