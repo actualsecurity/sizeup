@@ -217,6 +217,9 @@ class Cad:
         self.radio_ctx = None
         # The tone book's names for PCFD and Rye Brook ("Port Chester · Fire", #122): their pages are queued. The app sets it.
         self.monitor_names: set[str] = set()
+        # Settings > System > Camera wall (#125): every camera with where it falls in our area (sizeup/roads.py
+        # Roads.settings_rows); the app sets it. None: no highway layers here.
+        self.camera_area: Callable[[], dict] | None = None
         # GET /api/cad/tones (#80): the pairs named from the console and the names to pick from; the app sets it.
         self.tone_names: Callable[[], dict] = lambda: {"named": self.settings.tone_rows(), "names": list(s.monitor_departments),
                                                         "ours": list(s.monitor_departments)}

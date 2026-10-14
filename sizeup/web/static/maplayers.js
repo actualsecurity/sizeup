@@ -665,6 +665,9 @@ window.MapLayers = (() => {
   // with hls.js from cdnjs (or the browser's own HLS, Safari); anything wrong falls back to the snapshots. The
   // page says "Live" only while the stream plays; a snapshot is always "Snapshot, updated every N s".
   const HLS_JS = "https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.6.16/hls.min.js";
+  // This page's viewer token (?v=, #125): the hub knows whose use a request is, and the viewer's close ends it at once
+  // (GET .../stream/close?v=) instead of after the hub's idle timeout; the camera wall (camwall.js) has its own.
+  const VIEWER = "dlg" + Array.from(crypto.getRandomValues(new Uint8Array(6)), (b) => b.toString(36).padStart(2, "0")).join("").slice(0, 12);
   let hlsLoad = null;
   function loadHls() {
     if (window.Hls) return Promise.resolve(window.Hls);
@@ -700,6 +703,10 @@ window.MapLayers = (() => {
     } catch (_) { /* next time */ }
   }
   function stopLive() {
+    if (viewer.liveId) {
+      fetch(`/api/cad/cameras/${encodeURIComponent(viewer.liveId)}/stream/close?v=${VIEWER}`, { credentials: "same-origin", cache: "no-store", keepalive: true }).catch(() => {});
+      viewer.liveId = null;
+    }
     clearInterval(viewer.statusTimer);
     viewer.statusTimer = null;
     viewer.fps = null;
@@ -719,7 +726,8 @@ window.MapLayers = (() => {
     if (document.visibilityState !== "hidden") startRefresh();
   }
   function startLive(id) {
-    const url = `/api/cad/cameras/${encodeURIComponent(id)}/stream/playlist.m3u8`;
+    const url = `/api/cad/cameras/${encodeURIComponent(id)}/stream/playlist.m3u8?v=${VIEWER}`;
+    viewer.liveId = String(id);
     const v = viewer.el.video;
     const playing = () => {
       if (viewer.id !== String(id)) return;
@@ -1117,5 +1125,6 @@ window.MapLayers = (() => {
   }
 
   return { attach, addGroup, openCamera, closeCamera, cameras, nearby, nearest, searchPlaces, openPlace, prefs, setLayer, setHideDown,
+           loadHls, subscribe,
            fold, setFold, PROFILES, LAYERS, load, data: () => store.data, maps };
 })();

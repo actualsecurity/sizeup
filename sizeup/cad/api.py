@@ -61,6 +61,8 @@ POST /api/cad/settings/<section>          {action, ..., operator?}: event_types 
                                           {action: entity, key, ours?, notes?, aliases?} | {action: merge, key, into:
                                           {places, service}} | {action: delete | reset, key} | {action: reread, page}: the
                                           page's recording through the tone decoder again
+                                          camera_wall {action: set, key: margin_m, value} | {action: camera, id, mode: auto |
+                                          include | exclude} | {action: reset}: the camera wall's area (#125, Settings > System)
 GET  /api/cad/tones                       {named: [pairs named here], choices: [{key, name, places, service, aliases,
                                           ours}] (the tone book's entities, the county's agencies), places (one canonical
                                           list), services, names, ours: the ours entities' names}

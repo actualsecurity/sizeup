@@ -92,10 +92,13 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
         <span id="ov-counts" class="dim small"></span>
         <span class="spacer"></span>
         <div id="ov-talk" class="ov-talk" aria-live="polite"></div>
+        <!-- the camera wall (camwall.js, #125): every camera in our area instead of the map; remembered per screen -->
+        <button id="cw-toggle" class="sm" type="button" aria-pressed="false" aria-controls="cw-wall" title="Every camera in our area"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-camera"/></svg><span class="lbl">Cameras</span></button>
       </div>
       <div id="ov-pages" class="ov-pages" hidden></div>
       <div class="ov-grid">
         <div class="ov-mapbox"><div id="ov-map"></div></div>
+        <section id="cw-wall" class="cw-wall" hidden aria-label="Cameras in our area"></section>
         <div class="ov-side">
           <div id="ov-cams" class="ml-cams ml-cams-small board-only" hidden aria-label="Cameras"></div>
           <ol id="ov-cards" class="ov-cards"></ol>
@@ -516,6 +519,7 @@ Slots go in order. A kind takes the next available unit of that kind (regular ap
 <script src="/static/hublink.js"></script>
 <script src="/static/settings.js"></script>
 <script src="/static/board.js"></script>
+<script src="/static/camwall.js"></script>
 <script src="/static/styleguide.js"></script>
 </body>
 </html>

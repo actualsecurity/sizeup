@@ -169,6 +169,8 @@ class Config:
     roads_signs_url: str = ""
     roads_thruway: bool = True        # the NYS Thruway Authority's public feeds (no key): I-95, I-287 (#86)
     roads_county: bool = True         # Westchester County DPW's cameras (a public ArcGIS layer, no key) (#99)
+    roads_stream_max: int = 8         # live camera streams open at once, hub-wide (sizeup/roads.py STREAM_MAX, #125)
+    roads_wall_streams: int = 0       # the camera wall's live tiles at once per page; 0: every camera in our area that streams
     # [gis] (sizeup/gis.py, #91): Westchester County GIS datasets as map layers, fetched by the hub.
     # load() ships the starter set (gis.DEFAULT_LAYERS); built directly (tests), none.
     gis_enabled: bool = True
@@ -355,7 +357,8 @@ def _roads(data: dict) -> dict:
     area, the default schedule. The key never needs to be in a file (the environment wins); the
     addresses hold "{key}" instead."""
     rd = _take(data.get("roads", {}), "roads", {"enabled", "key", "bbox", "cameras_every_min", "events_every_s",
-                                                "signs_every_min", "events_url", "cameras_url", "signs_url", "thruway", "county"})
+                                                "signs_every_min", "events_url", "cameras_url", "signs_url", "thruway", "county",
+                                                "stream_max", "wall_streams"})
     enabled, thruway, county = rd.get("enabled", True), rd.get("thruway", True), rd.get("county", True)
     if not all(isinstance(x, bool) for x in (enabled, thruway, county)):
         raise ConfigError("roads.enabled / roads.thruway / roads.county: true or false")
@@ -378,6 +381,11 @@ def _roads(data: dict) -> dict:
     if not (cams >= 600 and events >= 60 and signs >= 60):
         raise ConfigError("roads: cameras_every_min at least 10, events_every_s at least 60, signs_every_min at least 1 "
                           "(511NY allows 10 calls a minute)")
+    smax, wall = rd.get("stream_max", 8), rd.get("wall_streams", 0)
+    if not (isinstance(smax, int) and not isinstance(smax, bool) and 1 <= smax <= 64):
+        raise ConfigError("roads.stream_max: live camera streams at once through the hub, 1 to 64")
+    if not (isinstance(wall, int) and not isinstance(wall, bool) and 0 <= wall <= 64):
+        raise ConfigError("roads.wall_streams: the camera wall's live tiles per page, 0 (every camera in our area that streams) to 64")
     urls = {}
     for k in ("events_url", "cameras_url", "signs_url"):
         u = str(rd.get(k, "")).strip()
@@ -389,7 +397,8 @@ def _roads(data: dict) -> dict:
             raise ConfigError(f"roads.{k}: put {{key}} where the key goes, never the key itself (SIZEUP_511NY_KEY)")
         urls[f"roads_{k}"] = u
     return dict(roads_enabled=enabled, roads_key=key, roads_bbox=(w, s, e, n), roads_cameras_s=cams,
-                roads_events_s=events, roads_signs_s=signs, roads_thruway=thruway, roads_county=county, **urls)
+                roads_events_s=events, roads_signs_s=signs, roads_thruway=thruway, roads_county=county,
+                roads_stream_max=smax, roads_wall_streams=wall, **urls)
 
 
 def _bbox(v, what: str, max_deg: float = 3.0) -> tuple[float, float, float, float]:

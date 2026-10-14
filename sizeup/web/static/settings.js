@@ -1595,6 +1595,7 @@ function sSystem(panel) {
   panel.replaceChildren(...sHead("System"),
     about, station,
     sCard(sCardHead("Records"), recs, counts),
+    ...(S.data.camera_wall ? [sCameraWall(S.data.camera_wall)] : []),
     sCard(sCardHead("Data file"), file),
     backup,
     sCard(sCardHead("Audit log", "", sel), audit),
@@ -1610,6 +1611,68 @@ function sSystem(panel) {
   sCounts();
   sAudit();
   sStation();
+}
+
+// ---- system: the camera wall's area (#125; sizeup/roads.py Roads.area, settings.py _wall_op) ----------------
+// The Overview's and the wall board's Cameras show every camera in our fire districts plus this margin; a camera
+// can be put on (Always) or taken off (Never) by hand. Every camera we have is listed with where it falls.
+
+const S_WALL_MODES = [["auto", "Auto"], ["include", "Always"], ["exclude", "Never"]];
+const sDist = (m) => (m == null ? "—" : m < 1000 ? `${m} m` : `${(m / 1000).toFixed(1)} km`);
+function sCameraWall(w) {
+  const a = w.area || {};
+  const margin = el("input", "s-num");
+  margin.type = "number"; margin.min = "0"; margin.max = String(w.max_margin_m); margin.step = "50";
+  margin.value = String(w.margin_m);
+  margin.setAttribute("aria-label", "Margin around our fire districts (m)");
+  margin.addEventListener("change", () => sPost("camera_wall", { action: "set", key: "margin_m", value: Number(margin.value) },
+    `Camera wall margin: ${margin.value} m`));
+  const row = el("div", "row");
+  row.append(el("span", "s-eta-l", "Margin around our area"), margin, el("span", "dim small", "m"),
+    sState(w.margin_m !== w.default_margin_m ? "edited" : "default"), el("span", "spacer"));
+  if (w.edited) row.append(sBtn("Reset", `Default: ${w.default_margin_m} m, no cameras chosen by hand`,
+    () => sAsk("Reset the camera wall to the default margin, with no cameras chosen by hand?", () => sPost("camera_wall", { action: "reset" }, "Camera wall reset"), "Reset")));
+  const basis = { fire_districts: "Our fire districts", municipalities: "Our municipal boundaries", bbox: "A box around Port Chester and Rye Brook" }[a.basis] || "—";
+  const facts = el("dl", "admin");
+  const st = w.streams || {};
+  for (const [k, v] of [["Area", `${basis}${a.names && a.names.length ? `: ${a.names.join(", ")}` : ""}`],
+                        ["On the wall", w.n != null ? `${w.n} camera${w.n === 1 ? "" : "s"}${st.streaming != null ? `, ${st.streaming} with live video` : ""}` : "—"],
+                        ["Live streams", st.max ? `${st.max} at once through the hub; ${st.per_viewer || st.streaming || 0} per screen` : "—"]]) {
+    const d = el("div");
+    d.append(el("dt", "", k), el("dd", "", v));
+    facts.append(d);
+  }
+  const kids = [row, facts];
+  if (a.note) kids.push(el("div", "notice warn", a.note));
+  if (w.error) kids.push(el("div", "error", `Cameras not listed: ${w.error}`));
+  if (w.cameras && w.cameras.length) {
+    const t = el("table", "evtable s-wall");
+    const head = el("tr");
+    for (const h of ["Camera", "Road", "Source", "Where", "On the wall", "Choice"]) head.append(el("th", "", h));
+    t.append(el("thead"), el("tbody"));
+    t.tHead.append(head);
+    for (const c of w.cameras) {
+      const tr = el("tr");
+      const name = el("td", "s-wall-name");
+      name.append(el("span", "", c.name), el("span", "dim small mono", ` ${c.id}`));
+      const where = c.auto === "inside" ? "Inside" : c.auto === "margin" ? `${sDist(c.dist_m)} out (in the margin)` : `${sDist(c.dist_m)} out`;
+      const pick = sSelect(S_WALL_MODES, c.mode, (v) => sPost("camera_wall", { action: "camera", id: c.id, mode: v },
+        `${c.name}: ${S_WALL_MODES.find(([k]) => k === v)[1]}`), `On the camera wall: ${c.name}`);
+      const choice = el("td");
+      choice.append(pick);
+      tr.append(name, el("td", "", [c.road, c.dir].filter(Boolean).join(" ") || "—"), el("td", "", c.source || ""),
+        el("td", c.auto === "outside" ? "dim" : "", where), el("td", c.in ? "" : "dim", c.in ? (c.has_video ? "Yes, live" : "Yes") : "No"), choice);
+      t.tBodies[0].append(tr);
+    }
+    const sc = el("div", "tscroll");
+    sc.append(t);
+    kids.push(sc);
+  } else if (w.cameras) kids.push(el("div", "empty", "No cameras from the highway sources yet"));
+  return sCard(sCardHead("Camera wall", w.n != null ? `${w.n} on the wall` : "",
+    sHelp("The Cameras button on the Overview and the wall board shows every camera in our area: inside our fire districts "
+      + "(the county's, Port Chester FD's includes Rye Brook) or within the margin around them, so the I-95 and I-287 cameras "
+      + "at our edges count. Always and Never put a camera on or take it off by hand. Down cameras stay on, folded into one tile.")),
+    ...kids);
 }
 
 // ---- system: Station (forwarding to the hub, sizeup/cloud/stationmode.py) ---------------------------

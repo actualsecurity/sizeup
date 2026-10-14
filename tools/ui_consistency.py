@@ -65,7 +65,7 @@ MEASURE = r"""() => {
     if (b.matches(".tab, [role=tab]")) return b.closest("header") ? "tab-header" : "tab";
     if (b.matches(".sw")) return "switch";
     if (b.matches(".seg button")) return "segmented";
-    if (b.matches(".cm-rig, .cm-pin, .unit-tag, .ov-page, .og-head, .sec-toggle, .cm-unset-head, .feed-ev, .chip, .ml-thumb, .ml-cams-head, .ml-cams-down, .ml-down-item")) return null;   // .ml-*: the Cameras panel (a picture, a fold, a one-line row)
+    if (b.matches(".cm-rig, .cm-pin, .unit-tag, .ov-page, .og-head, .sec-toggle, .cm-unset-head, .feed-ev, .chip, .ml-thumb, .ml-cams-head, .ml-cams-down, .ml-down-item, .cw-tile, .cw-down-head")) return null;   // .ml-*: the Cameras panel (a picture, a fold, a one-line row); .cw-*: the camera wall's (#125)
     if (b.closest("header")) return "button-header";
     const size = b.matches(".sm, .mini, .play") ? "-sm" : b.matches(".lg") ? "-lg" : "";
     const icon = b.matches(".icon, .play") ? "-icon" : "";

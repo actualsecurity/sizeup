@@ -368,6 +368,13 @@ class App:
         # from Westchester County GIS by the CAD of record, served to the maps from here.
         from sizeup.gis import Gis
         self.gis = Gis.from_config(cfg, log=log)
+        # The camera wall's area (#125): our fire districts from the county layer, the Settings edits
+        # ("camera_wall": margin, include, exclude), our departments for the municipal fallback; Settings >
+        # System shows every camera with where it falls (cad.camera_area).
+        self.roads.gis = self.gis
+        self.roads.ours = tuple(cfg.cad_monitor_departments)
+        self.roads.wall_settings = lambda: self.cad.settings.overrides().get("camera_wall") or {}
+        self.cad.camera_area = self.roads.settings_rows
         if cfg.prealert_enabled:
             from sizeup.prealert import PreAlerts
             self.prealert = PreAlerts(self.cad, cfg.prealert_server, cfg.prealert_ring_topic, cfg.prealert_status_topic,
