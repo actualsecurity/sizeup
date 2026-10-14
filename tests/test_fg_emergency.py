@@ -11,7 +11,18 @@ from sizeup.radio import fleetsync as fs
 from sizeup.radio.fm import RATE
 from sizeup.radio.mdc1200 import encode
 from tests.test_app import FakeWhisper, cfg, wait
-from tests.test_livetap import Rig, hiss, keyed, quiet, voice
+from tests.test_livetap import Rig, quiet, voice
+
+rng = np.random.default_rng(128)     # our own: test_livetap's module rng drives its paging tests' tone phases
+
+
+def hiss(s):
+    return 0.4 * rng.standard_normal(int(RATE * s))
+
+
+def keyed(x):
+    t = np.arange(len(x)) / RATE
+    return x + 0.1 * np.sin(2 * np.pi * 156.7 * t) + 0.02 * rng.standard_normal(len(x))
 
 
 @pytest.fixture
