@@ -5,6 +5,7 @@
 #   SIZEUP_PORT, SIZEUP_HOST, SIZEUP_PUBLIC_URL
 #   SIZEUP_ACCESS_TEAM, SIZEUP_ACCESS_AUD   Cloudflare Access identity (below)
 #   SIZEUP_511NY_KEY       the 511NY feeds' key (SSM /sizeup-hub/511ny-key; [roads] below)
+#   SIZEUP_MTA_KEY         only should the MTA require a key again (SSM /sizeup-hub/mta-key; [trains]: none needed today)
 # Run it on a Mac or Linux box without radios:
 #   SIZEUP_STATE_DIR=$(mktemp -d) SIZEUP_STATION_TOKEN=... python -m sizeup --config deploy/hub/config.hub.toml
 

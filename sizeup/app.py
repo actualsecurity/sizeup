@@ -375,6 +375,10 @@ class App:
         self.roads.ours = tuple(cfg.cad_monitor_departments)
         self.roads.wall_settings = lambda: self.cad.settings.overrides().get("camera_wall") or {}
         self.cad.camera_area = self.roads.settings_rows
+        # Metro-North's trains (sizeup/trains.py, #131): the MTA's feeds, read by the CAD of record while
+        # someone looks at the Trains layer or an event near the tracks.
+        from sizeup.trains import Trains
+        self.trains = Trains.from_config(cfg, log=log)
         if cfg.prealert_enabled:
             from sizeup.prealert import PreAlerts
             self.prealert = PreAlerts(self.cad, cfg.prealert_server, cfg.prealert_ring_topic, cfg.prealert_status_topic,
@@ -1972,6 +1976,7 @@ class App:
         if self.cfg.cloud_role != "station":   # the station page has no maps: don't spend 511NY calls there
             self.roads.start()
             self.gis.start()
+            self.trains.start()
         return self
 
     def forwarding(self) -> bool:
@@ -2024,6 +2029,7 @@ class App:
             self.prealert.stop()
         self.roads.stop()
         self.gis.stop()
+        self.trains.stop()
 
 
 def channels_model() -> str:
@@ -2051,7 +2057,8 @@ def make_server(app: App) -> WebServer:
                        app.set_talkgroup, app.set_talkgroup_group, app.retranscribe, cad=CadApi(app.cad),
                        station=getattr(app, "hub", None), health=health_info(cfg), access=access_verifier(cfg),
                        access_log=log if cfg.cloud_role == "hub" else None, station_mode=app.station,
-                       role=cfg.cloud_role, roads=app.roads, gis=app.gis)
+                       role=cfg.cloud_role, roads=app.roads, gis=app.gis,
+                       trains=app.trains)
 
     def changed() -> None:             # a new talker is pushed at once, not on the next second
         server.poke()

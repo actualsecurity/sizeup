@@ -812,6 +812,7 @@ class HubApp(App):
         self.prealert_sync()
         self.roads.start()                        # 511NY's layers for the maps (sizeup/roads.py)
         self.gis.start()                          # the county GIS layers (sizeup/gis.py)
+        self.trains.start()                       # Metro-North's trains (sizeup/trains.py)
         if self.vocab is not None and self.vocab.state()["state"] == "PENDING":
             self.vocab.poll()
         try:
@@ -826,6 +827,7 @@ class HubApp(App):
             self.prealert.stop()
         self.roads.stop()
         self.gis.stop()
+        self.trains.stop()
         if self.aws is not None:
             self.aws.stop()
         try:

@@ -497,6 +497,7 @@ window.CadMap = (() => {
 
   function detail(inc) {
     const box = $("#d-map"), nomap = $("#d-nomap");
+    if (window.TrainLayer) TrainLayer.panel(inc, $("#d-trains"));      // "Trains approaching" near the tracks (#131)
     if (!mapsOk()) {
       show(box, false);
       show(nomap, true);

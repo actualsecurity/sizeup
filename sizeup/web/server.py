@@ -26,6 +26,8 @@ GET  /api/cad/roads, /api/cad/cameras, /api/cad/cameras/<id>/image
                                the map's highway layers and camera snapshots, proxied (sizeup/roads.py, #73)
 GET  /api/cad/gis, /api/cad/gis/<key>[?bbox=]
                                the county GIS layers' catalog and each layer's GeoJSON (sizeup/gis.py, #91)
+GET  /api/cad/trains, /api/cad/trains/near?lat=&lon=
+                               Metro-North's trains on the map, and those approaching an event (sizeup/trains.py, #131)
 
 [cloud] role = "station" (the PC with the dongles; user, 2026-10-13: "the local system doesnt show the cad
 bits just things relevant to the sdr station"): the station page instead of the CAD (static/station.html):
@@ -131,7 +133,7 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                  set_talkgroup_group: Callable[..., str | None] | None = None, retranscribe=None,
                  cad=None, cad_b: Broadcaster | None = None, station=None, health: bytes = b'{"ok":true}',
                  access=None, access_log: Callable[[str], None] | None = None, station_mode=None,
-                 role: str = "", roads=None, gis=None):
+                 role: str = "", roads=None, gis=None, trains=None):
     """cad: a CadApi (sizeup/cad/api.py) and cad_b its own broadcaster (the console's state is
     small and separate from the monitor's, so neither page carries the other's). station: the hub's
     ingest (sizeup/cloud/hub.py Hub), which checks the station's token before reading any body.
@@ -139,7 +141,8 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
     station_mode: Settings > System > Station (sizeup/cloud/stationmode.py StationMode), not on the hub.
     role: [cloud] role; "station" serves the station page and refuses the CAD's (see the top).
     roads: the highway layers (sizeup/roads.py Roads): /api/cad/roads, /api/cad/cameras..., GET only.
-    gis: the county GIS layers (sizeup/gis.py Gis): /api/cad/gis..., GET only (ETag, gzip)."""
+    gis: the county GIS layers (sizeup/gis.py Gis): /api/cad/gis..., GET only (ETag, gzip).
+    trains: Metro-North's trains (sizeup/trains.py Trains): /api/cad/trains..., GET only."""
     hub_says = json.dumps({"error": "this is the hub: station forwarding is switched on the station"}).encode()
     station_ui = role == "station"
 
@@ -252,6 +255,8 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 return self._send(*roads.get(path, url.query, self.headers))
             if gis is not None and gis.handles(path):            # the county GIS layers (#91)
                 return self._send(*gis.get(path, url.query, self.headers))
+            if trains is not None and trains.handles(path):      # Metro-North's trains (#131)
+                return self._send(*trains.get(path, url.query, self.headers))
             if path.startswith("/api/cad/") and cad is not None:
                 return self._send(*cad.get(path, url.query, self.who))
             if path.startswith("/static/"):
@@ -419,7 +424,7 @@ class WebServer:
                  set_talkgroup_group: Callable[..., str | None] | None = None,
                  retranscribe: Callable[[list[str] | None], int] | None = None, cad=None, station=None,
                  health: dict | None = None, access=None, access_log: Callable[[str], None] | None = None,
-                 station_mode=None, role: str = "", roads=None, gis=None):
+                 station_mode=None, role: str = "", roads=None, gis=None, trains=None):
         self.access = access
         self.broadcaster = Broadcaster(state_fn)
         # The CAD's own state push (the whole console rebuilt and sent once a second): not on a station,
@@ -429,7 +434,7 @@ class WebServer:
             json.dumps(scene, separators=(",", ":")).encode(), self.broadcaster, clip, close_incident, set_mode,
             set_talkgroup, set_talkgroup_group, retranscribe, cad, self.cad_broadcaster, station,
             json.dumps(health or {"ok": True}, separators=(",", ":")).encode(), access, access_log, station_mode, role,
-            roads, gis))
+            roads, gis, trains))
         self.httpd.daemon_threads = True
 
     @property

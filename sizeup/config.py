@@ -176,6 +176,14 @@ class Config:
     gis_enabled: bool = True
     gis_bbox: tuple[float, float, float, float] = (-73.80, 40.92, -73.56, 41.10)
     gis_layers: tuple = ()            # sizeup.gis.Layer, in panel order
+    # [trains] (sizeup/trains.py, #131): Metro-North's New Haven Line from the MTA's public feeds (no key
+    # today; one, should the MTA bring keys back: env SIZEUP_MTA_KEY, the hub: SSM /sizeup-hub/mta-key).
+    # The feed addresses: "" = the MTA's (sizeup/trains.py RT_URL, GTFS_URL).
+    trains_enabled: bool = True
+    trains_key: str = ""
+    trains_rt_url: str = ""
+    trains_gtfs_url: str = ""
+    trains_bbox: tuple[float, float, float, float] = (-73.745, 40.945, -73.595, 41.035)
 
 
 def _take(d: dict, path: str, allowed: set[str]) -> dict:
@@ -227,6 +235,7 @@ def hub_url_problem(url: str) -> str:
 #   SIZEUP_PREALERT_SERVER            [prealert] server (a local test server instead of ntfy.sh)
 #   SIZEUP_511NY_KEY                  [roads] key: the 511NY developer key (never in a file on the hub)
 #   (no [gis] secrets: the county's open data needs no key)
+#   SIZEUP_MTA_KEY                    [trains] key: only should the MTA require one again (none needed, 2026-10-14)
 def _env(name: str, default):
     v = os.environ.get(name, "").strip()
     return v if v else default
@@ -401,6 +410,26 @@ def _roads(data: dict) -> dict:
                 roads_stream_max=smax, roads_wall_streams=wall, **urls)
 
 
+def _trains(data: dict) -> dict:
+    """[trains] -> Config fields. No section: on, the MTA's feeds, our stretch of the line."""
+    tr = _take(data.get("trains", {}), "trains", {"enabled", "key", "rt_url", "gtfs_url", "bbox"})
+    enabled = tr.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise ConfigError("trains.enabled: true or false")
+    key = _env("SIZEUP_MTA_KEY", str(tr.get("key", ""))).strip()
+    if key and not re.fullmatch(r"[!-~]{8,256}", key):
+        raise ConfigError("trains.key / SIZEUP_MTA_KEY: the MTA developer key (8 or more characters, no spaces)")
+    urls = {}
+    for k in ("rt_url", "gtfs_url"):
+        u = str(tr.get(k, "")).strip()
+        m = re.fullmatch(r"(https?)://([^/:?#\s]+)(:\d+)?([^\s]*)", u) if u else None
+        if u and (not m or (m.group(1) == "http" and m.group(2) not in ("127.0.0.1", "localhost", "::1"))):
+            raise ConfigError(f"trains.{k}: an https:// address (plain http only to this machine); leave it out for the MTA's")
+        urls[f"trains_{k}"] = u
+    bbox = _bbox(tr.get("bbox", [-73.745, 40.945, -73.595, 41.035]), "trains.bbox", 1.0)
+    return dict(trains_enabled=enabled, trains_key=key, trains_bbox=bbox, **urls)
+
+
 def _bbox(v, what: str, max_deg: float = 3.0) -> tuple[float, float, float, float]:
     try:
         w, s, e, n = (float(x) for x in v)
@@ -525,7 +554,7 @@ def load(path: str | Path) -> Config:
     except tomllib.TOMLDecodeError as e:
         raise ConfigError(f"{path}: {e}") from e
     _take(data, "config", {"station", "web", "radio", "tones", "stt", "p25", "mdc", "units", "storage", "map",
-                           "cad", "dispatch", "cloud", "prealert", "roads", "gis"})
+                           "cad", "dispatch", "cloud", "prealert", "roads", "gis", "trains"})
     st = _take(data.get("station", {}), "station", {"id", "name", "auto_update"})
     if not isinstance(st.get("auto_update", True), bool):
         raise ConfigError("station.auto_update: true or false")
@@ -717,5 +746,5 @@ def load(path: str | Path) -> Config:
         dispatch_repeat=d_repeat, dispatch_transmit=False, dispatch_channels=d_channels, dispatch_polly_region=d_region,
         **(dict(cloud, cloud_outbox=rel_state(cloud["cloud_outbox"])) if cloud else {}),
         cloud_state="" if cloud.get("cloud_role") == "hub" else rel_state("state/cloud.json"),
-        **_prealert(data), **_roads(data), **_gis(data),
+        **_prealert(data), **_roads(data), **_gis(data), **_trains(data),
     )
