@@ -147,7 +147,8 @@ def overlay(d: dict, ov: dict) -> dict:
                 continue
             if code not in by:
                 order.append(code)
-            by[code] = {**v, "code": code}
+            keep = {"help": by[code]["help"]} if code in by and by[code].get("help") and "help" not in v else {}   # the definition stays (#105)
+            by[code] = {**keep, **v, "code": code}
         if isinstance(o.get("_order"), list):
             want = [c for c in o["_order"] if c in by]
             order = want + [c for c in order if c not in want]

@@ -162,6 +162,17 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
       <label id="f-until-w" class="field span2" hidden title="Optional: closures, hydrants out of service">Until
         <input id="f-until" type="datetime-local">
       </label>
+      <fieldset id="f-airport" class="span2 ap-fields" hidden>
+        <legend>Airport: what the tower passed <button type="button" class="help" aria-label="Help" aria-expanded="false" data-help="The ARFF notification (FAA AC 150/5200-31C): aircraft type, the nature of the emergency, minutes out, runway (16/34, 11/29), souls on board, fuel on board, dangerous goods. Filled from the 60 Control page when it says them; edit as the tower passes more. Level 1–5 is the Westchester souls-on-board scale (1–2 / 3–10 / 11–25 / 26–50 / 51+), set from the souls unless said; the Alert (1/2/3) is the FAA alert, a different scale: pick it as the subtype.">?</button></legend>
+        <label class="field">Aircraft <input id="f-acft-type" type="text" maxlength="40" placeholder="Boeing 737" spellcheck="false"></label>
+        <label class="field">Nature <input id="f-acft-nature" type="text" maxlength="120" placeholder="unsafe gear" spellcheck="false"></label>
+        <label class="field">Minutes out <input id="f-acft-eta" type="number" min="0" max="600" inputmode="numeric"></label>
+        <label class="field">Runway <select id="f-acft-runway"><option value="">—</option><option value="16">16</option><option value="34">34</option><option value="11">11</option><option value="29">29</option></select></label>
+        <label class="field">Souls on board <input id="f-acft-souls" type="number" min="0" max="999" inputmode="numeric"></label>
+        <label class="field">Level <select id="f-acft-level"><option value="">—</option><option value="1">1 (1–2 souls)</option><option value="2">2 (3–10)</option><option value="3">3 (11–25)</option><option value="4">4 (26–50)</option><option value="5">5 (51+)</option></select></label>
+        <label class="field">Fuel on board <input id="f-acft-fuel" type="text" maxlength="40" placeholder="12,000 lb" spellcheck="false"></label>
+        <label class="field">Dangerous goods <input id="f-acft-cargo" type="text" maxlength="120" placeholder="none" spellcheck="false"></label>
+      </fieldset>
       <label class="field span2">Remarks <textarea id="f-remarks" rows="3" maxlength="4000"></textarea></label>
       <div class="span2 row"><span id="f-error" class="error"></span><span class="spacer"></span>
         <button id="new-create" type="submit" class="primary">Create</button></div>
@@ -216,6 +227,8 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
               <span id="d-disp-w"><span class="dim">Disposition</span> <b id="d-disp"></b></span>
             </div>
             <div id="d-caller" class="d-caller"></div>
+            <!-- an Airport event (#105): what the tower passed, one compact row; the subtype's FAA definition behind "?" -->
+            <div id="d-airport" class="d-airport" hidden aria-label="Airport: what the tower passed"></div>
             <div id="d-pages" class="d-pages" hidden aria-label="The 60 Control page"></div>
             <pre id="d-narr" class="narr"></pre>
           </div>
@@ -239,6 +252,17 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
           <label class="field">Received via <select id="e-via"></select></label>
           <label class="check"><input id="e-emergency" type="checkbox"> <span>Emergency</span></label>
           <label class="field span2">Until <input id="e-until" type="datetime-local"></label>
+          <fieldset id="e-airport" class="span2 ap-fields" hidden>
+            <legend>Airport: what the tower passed <button type="button" class="help" aria-label="Help" aria-expanded="false" data-help="The ARFF notification (FAA AC 150/5200-31C): aircraft type, the nature of the emergency, minutes out, runway (16/34, 11/29), souls on board, fuel on board, dangerous goods. Filled from the 60 Control page when it says them; edit as the tower passes more. Level 1–5 is the Westchester souls-on-board scale (1–2 / 3–10 / 11–25 / 26–50 / 51+), set from the souls unless said; the Alert (1/2/3) is the FAA alert, a different scale: pick it as the subtype.">?</button></legend>
+            <label class="field">Aircraft <input id="e-acft-type" type="text" maxlength="40" placeholder="Boeing 737" spellcheck="false"></label>
+            <label class="field">Nature <input id="e-acft-nature" type="text" maxlength="120" placeholder="unsafe gear" spellcheck="false"></label>
+            <label class="field">Minutes out <input id="e-acft-eta" type="number" min="0" max="600" inputmode="numeric"></label>
+            <label class="field">Runway <select id="e-acft-runway"><option value="">—</option><option value="16">16</option><option value="34">34</option><option value="11">11</option><option value="29">29</option></select></label>
+            <label class="field">Souls on board <input id="e-acft-souls" type="number" min="0" max="999" inputmode="numeric"></label>
+            <label class="field">Level <select id="e-acft-level"><option value="">—</option><option value="1">1 (1–2 souls)</option><option value="2">2 (3–10)</option><option value="3">3 (11–25)</option><option value="4">4 (26–50)</option><option value="5">5 (51+)</option></select></label>
+            <label class="field">Fuel on board <input id="e-acft-fuel" type="text" maxlength="40" placeholder="12,000 lb" spellcheck="false"></label>
+            <label class="field">Dangerous goods <input id="e-acft-cargo" type="text" maxlength="120" placeholder="none" spellcheck="false"></label>
+          </fieldset>
           <label class="field span2">Remarks <textarea id="e-remarks" rows="3" maxlength="4000"></textarea></label>
           <div class="span2 row"><span id="e-error" class="error"></span><span class="spacer"></span>
             <button id="edit-cancel" type="button">Cancel</button>

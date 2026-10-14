@@ -383,6 +383,7 @@ function sItemRow(sec, x, i, n) {
     const flag = x.role === "oos" ? "unavailable" : x.role === "free" ? "available" : "committed";
     li.append(el("span", `chip s-flag ${flag}`, flag));
   }
+  if (x.help) li.append(Help.button(x.help, `${x.name}: definition`));     // the FAA wording and the like (#105)
   li.append(sState(x.state, x.retired));
   if (x.confirm && !deleted) {
     li.append(sConfirm(x.confirm));

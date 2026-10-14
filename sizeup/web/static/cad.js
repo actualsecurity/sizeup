@@ -287,6 +287,10 @@ function fillTypes(sel, blank = "—") {
 function fillSubtypes(sel, t, blank = "—") {
   const subs = subtypesFor(t);
   fillSelect(sel, subs.map((s) => [s.code, s.name]), blank);
+  for (const o of sel.options) {          // the definition (an airport alert's FAA wording, #105) on hover
+    const s = subs.find((x) => x.code === o.value);
+    o.title = s && s.help ? s.help : "";
+  }
   sel.disabled = !subs.length;           // a type with no subtypes (BRUSH, BLS...): nothing to pick
   sel.title = t && !subs.length ? `${nameOf("event_types", t)} takes no subtype` : "";
 }
@@ -424,6 +428,8 @@ function fillQueueItem(li, inc) {
   head.append(el("span", "spacer"), right);
   const addr = el("div", "qa" + (inc.address ? "" : " dim"), inc.address || "No location");
   li.replaceChildren(head, addr);
+  const ap = airportLine(inc);
+  if (ap) li.append(el("div", "qs ap-line", ap));       // the tower's facts on an airport event (#105)
   if (inc.status === "queued") {
     if (inc.type_note) li.append(el("div", "qs warn", inc.type_note));
     li.append(el("div", "qs dim", "Accept or Dismiss"));
@@ -458,7 +464,7 @@ function renderQueue() {
   const byAge = (a, b) => a.created_at - b.created_at;        // oldest first
   const sig = (i) => JSON.stringify([i.status, i.number, i.type, i.subtype, i.address, i.id === cad.sel, i.emergency,
     i.until_at, i.disposition, i.type_note, i.joint_call, openAssignments(i).map((a) => [a.name, a.status]), i.closed_at, cad.listSig.length,
-    canDo("dispatch")]);
+    canDo("dispatch"), airportLine(i)]);
   const opts = { key: (i) => String(i.id), sig, make: queueItem, fill: fillQueueItem };
   syncList($("#q-queued"), all.filter((i) => i.status === "queued").sort(byAge), { ...opts, empty: "None" });
   syncList($("#q-pending"), all.filter((i) => i.status === "pending" && i.emergency).sort(byAge),
@@ -582,6 +588,7 @@ function renderDetail() {
   setText($("#d-disp"), inc.disposition ? nameOf("dispositions", inc.disposition) : "");
   const caller = [inc.caller_name, inc.phone, inc.caller_address].filter(Boolean).join(" / ");
   setText($("#d-caller"), caller ? `Caller: ${caller}` : "");
+  renderAirport(inc, open);
   setText($("#d-narr"), inc.remarks || "");
   show($("#d-narr"), !!inc.remarks);
   renderSourcePages(inc);
@@ -595,6 +602,59 @@ function renderDetail() {
   renderDispatches(inc);
   renderRadio(inc);
   renderEvents(inc);
+}
+
+// An Airport event (#105): what the tower passed, one compact row (Aircraft Boeing 737 · Nature unsafe gear · ETA 12 min ·
+// RWY 16 · 140 souls (Level 5) · fuel · DG), the subtype's FAA definition behind "?"; nothing passed yet: says so while
+// the event is open (Edit fills them in). Any other type: hidden.
+function airportLine(inc) {
+  return inc.type === "AIRPORT" ? AirportLayer.summary(inc, inc.subtype ? nameOf("event_subtypes", inc.subtype) : "") : "";
+}
+function subtypeHelp(t, s) {
+  const x = s && (L().event_subtypes || []).find((i) => i.code === s);
+  return x && x.help ? x.help : "";
+}
+function renderAirport(inc, open) {
+  const box = $("#d-airport");
+  const on = inc.type === "AIRPORT";
+  show(box, on);
+  if (!on) return;
+  const facts = AirportLayer.facts(inc), help = subtypeHelp(inc.type, inc.subtype);
+  const sig = JSON.stringify([facts, help, open]);
+  if (box._sig === sig) return;
+  box._sig = sig;
+  box.replaceChildren();
+  for (const [k, v] of facts) {
+    const f = el("span", "ap-fact");
+    f.append(el("span", "dim", k), el("b", "", v));
+    box.append(f);
+  }
+  if (!facts.length) box.append(el("span", "ap-none", open ? "Tower: nothing passed yet (Edit: aircraft, nature, minutes out, runway, souls, fuel, dangerous goods)" : "Tower: nothing passed"));
+  if (help) box.append(Help.button(help, `${nameOf("event_subtypes", inc.subtype)}: definition`));
+}
+// The fields on the new / edit forms (prefix "f" or "e"): shown for type Airport; the Level follows the souls.
+function airportForm(pre, inc) {
+  const on = $(`#${pre}-type`).value === "AIRPORT";
+  show($(`#${pre}-airport`), on);
+  if (inc) {
+    for (const k of AirportLayer.FIELDS) {
+      const v = inc[k];
+      $(`#${pre}-${k.replace("_", "-")}`).value = v === null || v === undefined ? "" : String(v);
+    }
+  }
+}
+function airportBody(pre, body) {
+  if ($(`#${pre}-type`).value !== "AIRPORT" || $(`#${pre}-airport`).hidden) return body;
+  const num = (id) => { const v = $(id).value.trim(); return v === "" ? null : Number(v); };
+  return Object.assign(body, {
+    acft_type: $(`#${pre}-acft-type`).value.trim(), acft_nature: $(`#${pre}-acft-nature`).value.trim(),
+    acft_eta: num(`#${pre}-acft-eta`), acft_runway: $(`#${pre}-acft-runway`).value, acft_souls: num(`#${pre}-acft-souls`),
+    acft_level: num(`#${pre}-acft-level`), acft_fuel: $(`#${pre}-acft-fuel`).value.trim(), acft_cargo: $(`#${pre}-acft-cargo`).value.trim(),
+  });
+}
+function airportSoulsToLevel(pre) {
+  const lv = AirportLayer.level($(`#${pre}-acft-souls`).value);
+  $(`#${pre}-acft-level`).value = lv ? String(lv) : "";
 }
 
 // The 60 Control page(s) an event came from (comms.py why "page", #64): play over the page's text, from the
@@ -2062,6 +2122,7 @@ function openNew() {
   newAddr.set("", null);
   cad.emergTouched = false;
   fillSubtypes($("#f-subtype"), "");
+  airportForm("f", Object.fromEntries(AirportLayer.FIELDS.map((k) => [k, ""])));
   entryClass();
   flash($("#f-error"));
   render();
@@ -2080,6 +2141,7 @@ async function createIncident(e) {
     until_at: $("#f-emergency").checked ? null : fromLocalInput($("#f-until").value),
     operator: operator(), ...newAddr.geo(),
   };
+  airportBody("f", body);
   if (!body.type) { $("#f-type").focus(); return flash($("#f-error"), "Pick a type"); }
   try {
     const inc = await api("POST", "/api/cad/incident", body);
@@ -2119,6 +2181,7 @@ function openEdit() {
   $("#e-emergency").checked = !!inc.emergency;
   $("#e-until").value = toLocalInput(inc.until_at);
   $("#e-remarks").value = inc.remarks || "";
+  airportForm("e", inc);
   flash($("#e-error"));
   show($("#edit-form"), true);
 }
@@ -2131,6 +2194,7 @@ async function saveEdit(e) {
     caller_name: $("#e-name").value.trim(), caller_address: $("#e-caddr").value.trim(), phone: $("#e-phone").value.trim(),
     received_via: $("#e-via").value, remarks: $("#e-remarks").value.trim(), until_at: fromLocalInput($("#e-until").value),
     operator: operator() };
+  airportBody("e", body);
   if ($("#e-emergency").checked !== !!inc.emergency) body.emergency = $("#e-emergency").checked;
   const addr = $("#e-address").value.trim();
   if (addr !== (inc.address || "") || (editAddr.picked && editAddr.picked.kind !== "current")) {
@@ -2369,7 +2433,7 @@ function renderRunCards() {
   show($("#rc-banner"), !!(cad.state && cad.state.run_cards_default));
   syncList($("#rc-list"), cards, {
     key: (c) => String(c.id),
-    sig: (c) => JSON.stringify([c.type, c.slots, c.is_default, c.label, c.phrase, c.remarks, cad.rcEditing === c.type, cad.listSig.length]),
+    sig: (c) => JSON.stringify([c.type, c.slots, c.is_default, c.label, c.phrase, c.remarks, c.confirmed, cad.rcEditing === c.type, cad.listSig.length]),
     make: () => {
       const li = el("li", "rc item");
       li.tabIndex = 0;
@@ -2383,7 +2447,9 @@ function renderRunCards() {
       const h = el("div", "row");
       const [t, s] = c.type.split("/");
       h.append(el("b", "", typeLabel(t, s)), el("span", "spacer"));
-      h.append(c.is_default ? el("span", "chip default", "default") : el("span", "chip edited", "edited"));
+      const chip = c.confirmed ? el("span", "chip confirmed", "department") : c.is_default ? el("span", "chip default", "default") : el("span", "chip edited", "edited");
+      if (c.confirmed) chip.title = `Confirmed: ${c.confirmed}`;      // the department's own card (#105)
+      h.append(chip);
       li.replaceChildren(h, el("div", "dim small", c.slots.map(describeSlot).join(", ")), el("div", "dim small", `“…for ${c.phrase}”`));
       if (c.remarks) li.append(el("div", "small rc-remarks", c.remarks));
     },
@@ -2594,7 +2660,9 @@ const editAddr = addressBox($("#e-address"), $("#e-geo"), $("#e-sugg"));
 $("#new-incident").addEventListener("click", openNew);
 $("#new-cancel").addEventListener("click", () => { cad.mode = cad.sel ? "view" : "none"; render(); });
 $("#new-form").addEventListener("submit", createIncident);
-$("#f-type").addEventListener("change", () => { fillSubtypes($("#f-subtype"), $("#f-type").value); entryClass(); });
+$("#f-type").addEventListener("change", () => { fillSubtypes($("#f-subtype"), $("#f-type").value); airportForm("f"); entryClass(); });
+$("#f-acft-souls").addEventListener("input", () => airportSoulsToLevel("f"));
+$("#e-acft-souls").addEventListener("input", () => airportSoulsToLevel("e"));
 $("#f-subtype").addEventListener("change", entryClass);
 $("#f-emergency").addEventListener("change", () => { cad.emergTouched = true; entryClass(); });
 $("#d-acc-type").addEventListener("change", () => fillSubtypes($("#d-acc-sub"), $("#d-acc-type").value));
@@ -2618,6 +2686,7 @@ $("#e-type").addEventListener("change", () => {     // a new type offers only it
   const inc = selected(), t = $("#e-type").value;
   fillSubtypes($("#e-subtype"), t);
   if (inc && t === inc.type) keepSubtype($("#e-subtype"), t, inc.subtype);
+  airportForm("e");
 });
 $("#edit-cancel").addEventListener("click", () => show($("#edit-form"), false));
 $("#edit-form").addEventListener("submit", saveEdit);

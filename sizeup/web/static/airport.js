@@ -160,5 +160,34 @@ window.AirportLayer = (() => {
     for (const id of APPROACH_LAYERS) if (map.getLayer(id)) map.setLayoutProperty(id, "visibility", airportOn && approachesOn ? "visible" : "none");
   }
 
-  return { load, subscribe, ready, note, credit, near, focusBounds, init, apply, data: () => store.data };
+  // An Airport event's facts (#105), the same line as sizeup/cad/airport.py summary(): "Alert 2 · Boeing 737 · unsafe gear ·
+  // 12 min · RWY 16 · 140 souls (Level 5) · 12,000 lb fuel · DG: none". level(): the Westchester souls Level 1-5.
+  const FIELDS = ["acft_type", "acft_nature", "acft_eta", "acft_runway", "acft_souls", "acft_level", "acft_fuel", "acft_cargo"];
+  function level(souls) {
+    const n = Number(souls);
+    if (souls === null || souls === undefined || souls === "" || !Number.isFinite(n) || n < 1) return null;
+    return n <= 2 ? 1 : n <= 10 ? 2 : n <= 25 ? 3 : n <= 50 ? 4 : 5;
+  }
+  function facts(inc) {               // [label, value] pairs, only what is set
+    const out = [];
+    if (inc.acft_type) out.push(["Aircraft", inc.acft_type]);
+    if (inc.acft_nature) out.push(["Nature", inc.acft_nature]);
+    if (inc.acft_eta !== null && inc.acft_eta !== undefined && inc.acft_eta !== "") out.push(["ETA", `${inc.acft_eta} min`]);
+    if (inc.acft_runway) out.push(["Runway", `RWY ${inc.acft_runway}`]);
+    const lv = inc.acft_souls !== null && inc.acft_souls !== undefined ? (inc.acft_level || level(inc.acft_souls)) : inc.acft_level;
+    if (inc.acft_souls !== null && inc.acft_souls !== undefined && inc.acft_souls !== "") out.push(["Souls", `${inc.acft_souls} souls${lv ? ` (Level ${lv})` : ""}`]);
+    else if (lv) out.push(["Level", `Level ${lv}`]);
+    if (inc.acft_fuel) out.push(["Fuel", `${inc.acft_fuel} fuel`]);
+    if (inc.acft_cargo) out.push(["Dangerous goods", `DG: ${inc.acft_cargo}`]);
+    return out;
+  }
+  function summary(inc, subtypeName = "") {
+    const f = facts(inc);
+    if (!f.length) return "";
+    const sub = inc.subtype || "";
+    const head = /^ALERT-[123]$/.test(sub) ? `Alert ${sub.slice(-1)}` : subtypeName;
+    return (head ? [head] : []).concat(f.map((x) => x[1])).join(" · ");
+  }
+
+  return { load, subscribe, ready, note, credit, near, focusBounds, init, apply, data: () => store.data, FIELDS, level, facts, summary };
 })();

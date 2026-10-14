@@ -198,7 +198,7 @@ def test_lists_file_has_the_sheets_vocabulary():
 def test_unit_boards_in_the_sheets_order_with_gaps():
     L = lists.load()
     boards = {b["id"]: b for b in L.unit_boards}
-    assert list(boards) == ["main", "ems", "ma-rye", "ma-purchase", "ma-harrison", "ma-west-harrison", "ma-requests",
+    assert list(boards) == ["main", "ems", "ma-rye", "ma-purchase", "ma-harrison", "ma-west-harrison", "ma-airport", "ma-requests",
                             "res-coned", "res-keyholder", "res-knox", "res-pd", "res-bat", "agencies"]
     main = boards["main"]
     # PCFD's codes in the sheet's order, then Rye Brook's; grouped by kind on the board, code-only ones last.
@@ -215,7 +215,7 @@ def test_unit_boards_in_the_sheets_order_with_gaps():
     assert boards["res-bat"]["units"] == [f"BAT{n}" for n in range(10, 20)]
     assert boards["agencies"]["units"][:2] == ["BLDG_DPT", "BLDG_DPT1"] and "MAR_RPD" in boards["agencies"]["units"]
     codes = [c for c, _, _ in L.board_units()]
-    assert len(codes) == len(set(codes)) == 250
+    assert len(codes) == len(set(codes)) == 254          # 250 from the sheet + the airport's ARFF units (#105)
     # Off the department's sheet: retired (kept with their history), not on a board.
     for c in ("CODE_ENFORCE", "60CAD", "60CAD1", "60CAD2"):
         assert c not in codes and L.units[c]["retired"]
@@ -369,7 +369,7 @@ def test_close_needs_a_disposition_and_clears_units(tmp_path):
 def test_units_follow_the_boards_and_sync_keeps_status(tmp_path):
     cad = make_cad(tmp_path)
     units = cad.store.units()
-    assert names(units)[:6] == ["2391", "2392", "2393", "2394", "2395", "2396"] and len(units) == 250
+    assert names(units)[:6] == ["2391", "2392", "2393", "2394", "2395", "2396"] and len(units) == 254
     assert {u["status"] for u in units} == {"AV"}                       # a new unit starts in free_status
     assert by_name(cad, "77A1")["spoken"] == "77 Alpha 1" and by_name(cad, "CONED-G")["board"] == "res-coned"
     assert by_name(cad, "242_eNG")["board"] == "ma-requests" and by_name(cad, "L25")["board"] == "ma-rye"
@@ -411,8 +411,10 @@ def test_run_card_resolution_type_subtype_beats_type():
     cards = {c["type"]: c for c in runcards.cards(cad.store)}
     assert set(cards) == {"STRU", "ALARM/COMM", "ALARM/RESD", "ALARM/CO-COMM", "ALARM/CO-RESD", "HAZARD/GAS",
                           "HAZARD/WIRES", "BRUSH", "MVA", "MVA/EXTRI", "RESCUE/WATER", "SERVICE", "ALS", "BLS", "MA",
-                          "INVEST", "AIRPORT/ALERT-2", "AIRPORT/ALERT-3"}
-    assert all(c["is_default"] for c in cards.values()) and cards["ALARM/COMM"]["phrase"] == "a commercial fire alarm"
+                          "INVEST", "AIRPORT/ALERT-2", "AIRPORT/ALERT-3", "AIRPORT/ACFT-OFF", "AIRPORT/ACFT-WATER"}
+    # every card a stand-in but the airport's Alert 2 and 3, the department's own (#105)
+    assert all(c["is_default"] or c["confirmed"] for c in cards.values()) and cards["ALARM/COMM"]["phrase"] == "a commercial fire alarm"
+    assert {k for k, c in cards.items() if c["confirmed"]} == {"AIRPORT/ALERT-2", "AIRPORT/ALERT-3"}
     assert runcards.resolve(cad.store, "MVA", "EXTRI")["type"] == "MVA/EXTRI"
     assert runcards.resolve(cad.store, "MVA", "CAR")["type"] == "MVA"          # no MVA/CAR card: the type's
     assert runcards.resolve(cad.store, "ALARM", "TROUB") is None               # no ALARM card at all
@@ -980,10 +982,10 @@ def test_csv_exports_have_the_sheets_columns_and_codes():
     assert rows[0] == export.INCIDENT_COLUMNS == ["Incident #", "Unused", "Event Type", "Event Sub-Type", "Location",
                                                  "Municipality", "Received", "Status", "Assigned Units", "Dispatch",
                                                  "First Enroute", "First On Scene", "Clear", "Duration", "Disposition",
-                                                 "Cross Streets", "Narrative Summary", "Closed?"]
+                                                 "Cross Streets", "Narrative Summary", "Closed?", "Airport"]
     assert rows[1] == ["26-000001", "", "SERVICE", "LIFT", "209 Westchester Ave", "Port Chester", "10/07/2026 18:58:00",
                        "CLOSED", "E63", "10/07/2026 18:58:00", "10/07/2026 18:59:30", "", "10/07/2026 19:59:30",
-                       "1:01:30", "SERVICE", "", "boat adrift", "TRUE"]
+                       "1:01:30", "SERVICE", "", "boat adrift", "TRUE", ""]
     calls = read_csv(cad.export("calls.csv"))
     assert calls[0] == ["Incident #", "Event Type", "Event Sub-Type", "Location", "Received", "Clear", "Duration",
                         "Disposition", "Units"] and calls[1][0] == "26-000001" and calls[1][-1] == "E63"
@@ -1044,7 +1046,7 @@ def test_migrates_a_v1_database(tmp_path):
     assert units["2398"]["status"] == "DP" and units["2398"]["incident_number"] == "26-000007"
     assert (units["E60"]["status"], units["M40"]["status"], units["M40"]["kind"], units["TL2"]["status"], units["R40"]["status"]) == (
         "OL", "OS", "marine", "AV", "DP")
-    assert len(units) == 250 and units["2398"]["spoken"] == "23 98"          # the rest of the boards added
+    assert len(units) == 254 and units["2398"]["spoken"] == "23 98"          # the rest of the boards added
     cards = {c["type"]: c for c in runcards.cards(st)}
     assert cards["ALARM"]["slots"] == [{"kind": "engine", "count": 1}, {"unit": "2398"}, {"kind": "marine", "count": 1}]
     assert not cards["ALARM"]["is_default"] and cards["STRU"]["is_default"] and "Lockout" not in cards
@@ -1110,7 +1112,7 @@ def test_api_event_lifecycle(server):
     code, page, ctype = server.call("GET", "/cad")
     assert code == 200 and b"cad.js" in page and ctype.startswith("text/html")
     code, st = server.j("GET", "/api/cad/state")
-    assert code == 200 and len(st["units"]) == 250 and st["incidents"] == [] and st["run_cards_default"]
+    assert code == 200 and len(st["units"]) == 254 and st["incidents"] == [] and st["run_cards_default"]
     assert st["lists"]["source"] == "data/cad_lists.json" and st["lists"]["unit_boards"][1]["folded"] is True
     assert st["transmit"] == {"enabled": False, "transmitter": "null", "channels": ["FG1", "PC repeater"],
                               "note": "Transmit is off: logged and played here only"}

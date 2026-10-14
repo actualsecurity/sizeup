@@ -99,6 +99,18 @@
   .d-cross { color: var(--text-2); }
   .d-caller { margin-block-start: var(--s-2); overflow-wrap: anywhere; }
   .d-caller:empty, .geo:empty { display: none; }
+  /* an Airport event's facts (#105): one compact row of label + value, the subtype's definition behind "?" */
+  .d-airport { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1) var(--s-3); margin-block-start: var(--s-2); }
+  .d-airport[hidden] { display: none; }
+  .d-airport .ap-fact { display: inline-flex; gap: var(--s-1); align-items: baseline; white-space: nowrap; }
+  .d-airport .ap-fact .dim { font-size: var(--fs-xs); line-height: var(--lh-xs); }
+  .d-airport .ap-none { color: var(--dim); font-size: var(--fs-sm); line-height: var(--lh-sm); }
+  .ap-line { color: var(--info); overflow-wrap: anywhere; }
+  .ap-fields { display: grid; grid-template-columns: repeat(auto-fill, minmax(9rem, 1fr)); gap: var(--s-2) var(--s-3); margin: 0;
+    padding: var(--s-2) var(--s-3); border: var(--bw) solid var(--line); border-radius: var(--radius); min-inline-size: 0; }
+  .ap-fields[hidden] { display: none; }
+  .ap-fields > legend { display: flex; align-items: center; gap: var(--s-1); padding-inline: var(--s-1); font-size: var(--fs-sm); line-height: var(--lh-sm); color: var(--text-2); }
+  .ap-fields > .field { min-inline-size: 0; }
   .geo { font-size: var(--fs-xs); line-height: var(--lh-xs); color: var(--dim); margin-block-start: var(--s-1); }
   .geo.warn { color: var(--warn); }
   .facts { display: flex; flex-wrap: wrap; gap: var(--s-1) var(--s-5); margin-block-start: var(--s-2); }
@@ -372,6 +384,7 @@
   .chip.spare, .chip.dept, .chip.s-flag { --c: var(--dim); }
   .chip.default, .chip.unknown, .chip.addon, .chip.unit { --c: var(--warn); }
   .chip.edited { --c: var(--ok); }
+  .chip.confirmed { --c: var(--info); }         /* the department's own card (#105) */
   .chip.joint { --c: var(--info); }
   .chip.live { --c: var(--err); }
 
