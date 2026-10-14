@@ -749,6 +749,42 @@ function noIdChip(t) {
   c.title = why;
   return c;
 }
+// The emergency button / a mayday on a transmission (#128; sizeup/cad/comms.py with_alarms puts its alarm on the
+// row): ours (the alarm, alarm_level "alarm") a red EMERGENCY chip (MAYDAY ... for words alone) and a red row;
+// someone else's (a notice) amber "Emergency (not ours)" and an amber edge; then who acknowledged it and when, and
+// the all clear. A flag with no alarm of its own (the same radio again, its alarm still open): amber, "Emergency button".
+function emergencyChip(t) {
+  if (!t.emergency && !t.alarm_id) return null;
+  const ours = t.alarm_level === "alarm";
+  const said = (t.keywords || []).map((k) => String(k).replace(/ \.\.\. /g, " … ")).join(", ");
+  const text = ours ? (t.emergency ? "EMERGENCY" : (said || "alarm").toUpperCase())
+    : t.alarm_level === "notice" ? "Emergency (not ours)" : "Emergency button";
+  const c = el("span", `chip emergency${ours ? "" : " em-other"}`, `${t.drill ? "DRILL · " : ""}${text}`);
+  const how = !t.emergency ? `Heard on the radio: ${said}`
+    : t.alarm_via ? `The radio's emergency button (${t.alarm_via})`
+    : t.talkgroup !== null && t.talkgroup !== undefined ? "The radio's emergency button (P25: flagged by the system)"
+    : "The radio's emergency button";
+  c.title = how + (t.alarm_level === "notice" ? ". Not our talkgroup or radio: a notice"
+    : t.alarm_level ? "" : ". Its alarm is on an earlier transmission");
+  return c;
+}
+function alarmDone(t) {
+  const who = (x) => (x || "").replace(/\s*<[^>]*>\s*$/, "");
+  const out = [];
+  if (t.clear_at) out.push(`all clear ${who(t.clear_by)} ${fmtTime(t.clear_at)}`);
+  else if (t.ack_at) out.push(`acked by ${who(t.ack_by)} ${fmtTime(t.ack_at)}`);
+  return out.length ? el("span", "dim small em-ack", `· ${out.join(" · ")}`) : null;
+}
+// What of the emergency a row's redraw depends on (every list's signature: Radio, the feed, an event's Radio card)
+const emSig = (t) => [t.emergency, t.alarm_id, t.alarm_level, t.keywords, t.ack_at, t.clear_at, t.drill, t.kept];
+// A transmission kept only because of an emergency (its talkgroup's Record is off): why it is in the log at all
+function keptChip(t) {
+  if (t.kept !== "emergency") return null;
+  const c = el("span", "chip kept", "kept: emergency window");
+  c.title = "Record is off for this talkgroup: kept because of an emergency (the emergency window: its talkgroup and "
+    + "the radio that pressed it, until the alarm's All clear or a few minutes after the last emergency key-up)";
+  return c;
+}
 // One transmission: play first, then time, rig, channel, duration; the incidents it is on as chips (a click:
 // that incident) and its "⋯" menu (txMenu) at the end; the transcript under it. ctx: {scope: "feed" | "rv" |
 // "inc" (where it is drawn: the menu's identity across redraws), current: the incident whose list this is
@@ -765,6 +801,15 @@ function radioRow(t, ctx = {}) {
   const tag = Radio.rigTag({ rig: t.rig, radio_id: t.radio_id, unit: t.talker });
   if (tag) meta.append(tag);
   meta.append(el("span", "chip src", t.channel));        // the channel once; never in the talker's place
+  const em = emergencyChip(t);                            // the emergency button / a mayday (#128): can't be missed
+  if (em) {
+    li.classList.add("emergency", t.alarm_level === "alarm" ? "em-ours" : "em-other");
+    meta.append(em);
+    const done = alarmDone(t);
+    if (done) meta.append(done);
+  }
+  const kept = keptChip(t);
+  if (kept) meta.append(kept);
   if (!tag && t.kind !== "note" && !t.page && !t.dispatcher) meta.append(noIdChip(t));
   if (t.page && t.why !== "page") {       // a page (#80): what it was, and whether it is an event or just a page
     li.classList.add(`page-${t.page}`);
@@ -1234,7 +1279,8 @@ function renderRadio(inc) {
   syncList($("#d-radio"), shownItems, {
     key: (x) => x.key,
     sig: (x) => x.kind === "radio" ? JSON.stringify([x.t.text, x.t.status, x.t.rig, x.t.why, x.t.has_audio, talkSig(x.t.rig),
-                                                     x.t.alt_text, x.t.rerun_at, (x.t.events || []).map((e) => [e.id, e.why]), cad.txRev])
+                                                     x.t.alt_text, x.t.rerun_at, (x.t.events || []).map((e) => [e.id, e.why]), cad.txRev,
+                                                     emSig(x.t)])
       : JSON.stringify([x.e.text, x.e.units]),
     make: () => el("li"),
     fill: (li, x) => {

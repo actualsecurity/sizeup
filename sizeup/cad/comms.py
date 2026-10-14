@@ -4,7 +4,14 @@
                     /api/audio/<id>.wav until the 12 h audio limit; the transcript is copied here
                     and kept), with the rig(s) the registry resolved and the raw radio ID(s); an FG1
                     key-up with no ID says why (id_note, #163): none (no ID burst: the radio sent
-                    none), undecoded (a burst that didn't decode), weak (too weak to tell), '' (not known)
+                    none), undecoded (a burst that didn't decode), weak (too weak to tell), '' (not known).
+                    emergency: the radio's emergency button was on it (the P25 call JSON's flag, an MDC-1200 /
+                    FleetSync emergency packet: #128), kept on the row so the log shows it whatever became of
+                    its alarm; evidence: for an emergency P25 call, trunk-recorder's own call record (its JSON:
+                    srcList, freqList, the flags), kept for audit after the recorder's files are gone.
+                    Read back, each row also carries its alarm when it raised one (with_alarms: alarm_id,
+                    alarm_level alarm | notice, keywords, alarm_via, ack_by, ack_at, drill), so rows
+                    logged before the flag was kept light up too.
     radio_links     transmission x event, and why:
                       unit        from a radio of a unit assigned to the event (dispatched or
                                   attached, until it cleared) at the time of the transmission: the
@@ -66,6 +73,9 @@ KEEP_UNLINKED_S = 90 * 24 * 3600     # transmissions on no event: kept 90 days (
 MAX_ROWS = 500
 ID_NOTES = ("none", "undecoded", "weak")    # why an FG1 key-up has no radio ID (radio_traffic.id_note, #163)
 RELINK_MAX = 2000                           # a radio just named: at most this many of its unnamed transmissions
+EVIDENCE_MAX = 64 * 1024                    # an emergency's raw call record (radio_traffic.evidence), at most
+# A transmission that had the emergency button or raised an alarm (the Radio view's Emergency filter)
+EMERGENCY_WHERE = "(t.emergency = 1 OR t.id IN (SELECT traffic_id FROM alarms))"
 
 
 def split_call(tid: str, p25: bool) -> tuple[str, int | None]:
@@ -100,8 +110,9 @@ class Comms:
 
     def record(self, t: dict, replace: bool = True) -> list[int]:
         """One transmission: {id, start, end, source, talkgroup, unit (talker as heard), rig, radio_id,
-        text, status, model}. Returns the event ids it is linked to. replace=False: skip one already
-        logged (the startup backfill)."""
+        text, status, model, emergency?, evidence?}. Returns the event ids it is linked to. replace=False: skip
+        one already logged (the startup backfill). An emergency once logged stays (a later write without the
+        flag never clears it), and so does its evidence."""
         tid = str(t["id"])
         p25 = t.get("talkgroup") is not None
         call_id, turn = split_call(tid, p25)
@@ -119,17 +130,22 @@ class Comms:
             known = bool(rigs) or bool(t.get("radio_id")) or bool(talker)
             note = "" if known else str(t.get("id_note") or "")
             note = note if note in ID_NOTES else ""
+            ev = evidence_json(t.get("evidence"))
             vals = (call_id, turn, start, float(t.get("end") or start), t.get("source") or "", t.get("talkgroup"),
                     talker, t.get("radio_id") or "", ", ".join(rigs), disp, t.get("text") or "", t.get("status") or "",
-                    t.get("model") or "", tones, t.get("voice_at"), seq, note, now)
+                    t.get("model") or "", tones, t.get("voice_at"), seq, note, int(bool(t.get("emergency"))),
+                    str(t.get("kept") or "")[:40], ev, now)
             if have:
                 db.execute("UPDATE radio_traffic SET call_id = ?, turn = ?, start = ?, end = ?, channel = ?, talkgroup = ?, "
                            "talker = ?, radio_id = ?, rig = ?, dispatcher = ?, text = ?, status = ?, model = ?, tones = ?, "
-                           "voice_at = ?, tone_seq = ?, id_note = ?, updated_at = ? WHERE id = ?", (*vals, tid))
+                           "voice_at = ?, tone_seq = ?, id_note = ?, emergency = MAX(emergency, ?), "
+                           "kept = COALESCE(NULLIF(?, ''), kept), evidence = COALESCE(NULLIF(?, ''), evidence), "
+                           "updated_at = ? WHERE id = ?", (*vals, tid))
             else:
                 db.execute("INSERT INTO radio_traffic (call_id, turn, start, end, channel, talkgroup, talker, radio_id, rig, "
-                           "dispatcher, text, status, model, tones, voice_at, tone_seq, id_note, updated_at, id) "
-                           "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (*vals, tid))
+                           "dispatcher, text, status, model, tones, voice_at, tone_seq, id_note, emergency, kept, evidence, "
+                           "updated_at, id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                           (*vals, tid))
             off = {r[0] for r in db.execute("SELECT incident_id FROM radio_link_exclusions WHERE traffic_id = ?", (tid,))}
             links: dict[int, tuple[str, str]] = {}
             for rig in rigs:
@@ -404,6 +420,7 @@ class Comms:
         ev = self.events_of(list({r["id"] for r in shown}))
         for r in shown:
             r["events"] = ev.get(r["id"], [])
+        with_alarms(self.store, shown)
         return out
 
     def events_of(self, tids: list[str]) -> dict[str, list[dict]]:
@@ -411,15 +428,18 @@ class Comms:
 
     def query(self, unit: str = "", channel: str = "", event: str = "", pcfd: list[str] | None = None,
               since: float | None = None, until: float | None = None, limit: int = 300, kind: str = "",
-              text: str = "") -> list[dict]:
+              text: str = "", emergency: bool = False) -> list[dict]:
         """The CAD's Radio view: newest first, with the event numbers each transmission is linked to, and
         (kind '' or 'notes') the event notes tagged with a unit ("E63 stated that ..."), as kind 'note'
         rows on channel "Notes". pcfd: only these rigs (PCFD's own units). text: every word in the
-        transcript / note (any case)."""
+        transcript / note (any case). emergency: only transmissions with the emergency button or an alarm
+        (a mayday heard) on them, no notes."""
         limit = max(1, min(int(limit), MAX_ROWS))
         words = [w.lower() for w in text.split()][:8]
-        notes = self._notes(unit, event, pcfd, since, until, limit, words) if kind in ("", "notes") and channel in ("", NOTES) else []
-        radio = self._radio(unit, channel, event, pcfd, since, until, limit, words) if kind in ("", "radio") and channel != NOTES else []
+        notes = (self._notes(unit, event, pcfd, since, until, limit, words)
+                 if kind in ("", "notes") and channel in ("", NOTES) and not emergency else [])
+        radio = (self._radio(unit, channel, event, pcfd, since, until, limit, words, emergency)
+                 if kind in ("", "radio") and channel != NOTES else [])
         return sorted(radio + notes, key=lambda r: -r["start"])[:limit]
 
     def _notes(self, unit, event, pcfd, since, until, limit, words=()) -> list[dict]:
@@ -453,8 +473,10 @@ class Comms:
                  "events": [{"id": r["iid"], "number": r["number"], "type": r["type"], "subtype": r["subtype"],
                              "address": r["address"], "why": "note", "unit": r["units"]}]} for r in rows]
 
-    def _radio(self, unit, channel, event, pcfd, since, until, limit, words=()) -> list[dict]:
+    def _radio(self, unit, channel, event, pcfd, since, until, limit, words=(), emergency=False) -> list[dict]:
         where, args = [], []
+        if emergency:
+            where.append(EMERGENCY_WHERE if has_alarms(self.store) else "t.emergency = 1")
         for w in words:
             where.append("LOWER(t.text) LIKE ? ESCAPE '\\'")
             args.append(f"%{_like(w)}%")
@@ -486,6 +508,7 @@ class Comms:
             for r in rows:
                 r["events"] = ev.get(r["id"], [])
                 _tones(r, self.paging, self.names_ours)
+            with_alarms(self.store, rows)
         return rows
 
     def facets(self) -> dict:
@@ -505,6 +528,65 @@ def events_of(store, tids: list[str]) -> dict[str, list[dict]]:
                          f"WHERE l.traffic_id IN ({','.join('?' * len(part))}) ORDER BY i.id", part):
             ev.setdefault(l.pop("traffic_id"), []).append(l)
     return ev
+
+
+def evidence_json(ev) -> str:
+    """An emergency's raw call record as kept (radio_traffic.evidence): JSON, at most EVIDENCE_MAX (too big: its
+    lists left out, the flags kept); '' for none."""
+    if not isinstance(ev, dict) or not ev:
+        return ""
+    try:
+        s = json.dumps(ev, separators=(",", ":"))
+        if len(s) > EVIDENCE_MAX:
+            s = json.dumps({k: v for k, v in ev.items() if not isinstance(v, (list, dict))} | {"trimmed": True},
+                           separators=(",", ":"))
+    except (TypeError, ValueError):
+        return ""
+    return s if len(s) <= EVIDENCE_MAX else ""
+
+
+def has_alarms(store) -> bool:
+    """The alarms table is there (sizeup/cad/alarms.py makes it when the CAD starts)."""
+    return store.one("SELECT 1 AS x FROM sqlite_master WHERE type = 'table' AND name = 'alarms'") is not None
+
+
+ALARM_COLS = {"alarm_id": None, "alarm_level": "", "alarm_via": "", "ack_by": "", "ack_at": None, "clear_by": "",
+              "clear_at": None, "drill": False}
+
+
+def with_alarms(store, rows: list[dict]) -> list[dict]:
+    """Each transmission row with the alarm it raised (one per transmission: alarms.traffic_id is unique):
+    alarm_id, alarm_level (alarm | notice), keywords (the words heard), alarm_via (MDC / FleetSync / '' for P25),
+    ack_by / ack_at (seen), clear_by / clear_at (all clear), drill (ALARM_COLS when none); emergency (0/1) from
+    the row or its alarm; evidence as a dict (None when not kept)."""
+    got: dict[str, dict] = {}
+    tids = [r["id"] for r in rows if r.get("kind", "radio") == "radio"]
+    if tids and has_alarms(store):
+        cols = {r["name"] for r in store.q("PRAGMA table_info(alarms)")}
+        clear = "clear_by, clear_at" if "clear_at" in cols else "'' AS clear_by, NULL AS clear_at"
+        for k in range(0, len(tids), 500):
+            part = tids[k:k + 500]
+            for a in store.q(f"SELECT traffic_id, id, level, emergency, keywords, via, ack_by, ack_at, {clear}, drill "
+                             f"FROM alarms WHERE traffic_id IN ({','.join('?' * len(part))})", part):
+                got[a["traffic_id"]] = a
+    for r in rows:
+        a = got.get(r["id"])
+        r.update(ALARM_COLS)
+        r["keywords"] = []
+        if a is not None:
+            try:
+                kws = json.loads(a["keywords"] or "[]")
+            except (TypeError, ValueError):
+                kws = []
+            r.update(alarm_id=a["id"], alarm_level=a["level"], keywords=kws if isinstance(kws, list) else [],
+                     alarm_via=a["via"] or "", ack_by=a["ack_by"] or "", ack_at=a["ack_at"],
+                     clear_by=a["clear_by"] or "", clear_at=a["clear_at"], drill=bool(a["drill"]))
+        r["emergency"] = int(bool(r.get("emergency")) or bool(a and a["emergency"]))
+        try:
+            r["evidence"] = json.loads(r["evidence"]) if r.get("evidence") else None
+        except (TypeError, ValueError):
+            r["evidence"] = None
+    return rows
 
 
 def why_text(why: str, unit: str = "") -> str:

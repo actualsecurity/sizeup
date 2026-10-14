@@ -85,7 +85,7 @@ window.CadFeed = (() => {
     const sig = JSON.stringify([st.collapsed, st.deps.rev(),
       rows.map((t) => [t.id, t.text, t.status, t.rig, t.pc, t.has_audio, t.alt_text, t.rerun_at, t.page, t.tones,
                        t.names_ours, t.tone_seq, t.prealert && t.prealert.status,
-                       (t.events || []).map((e) => [e.id, e.why])])]);
+                       (t.events || []).map((e) => [e.id, e.why]), emSig(t)])]);
     if (sig !== st.sig) {
       st.sig = sig;
       st.box.classList.toggle("collapsed", st.collapsed);

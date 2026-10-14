@@ -199,6 +199,9 @@ CREATE TABLE IF NOT EXISTS radio_traffic (
   dispatcher INTEGER NOT NULL DEFAULT 0,
   text TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '',
   id_note TEXT NOT NULL DEFAULT '',     -- an analog key-up with no radio ID: none | undecoded | weak (#163)
+  emergency INTEGER NOT NULL DEFAULT 0, -- the radio's emergency button (P25 call JSON, MDC-1200, FleetSync: #128)
+  evidence TEXT NOT NULL DEFAULT '',    -- an emergency's raw P25 call record (trunk-recorder's JSON, JSON), for audit
+  kept TEXT NOT NULL DEFAULT '',        -- why it was kept on a talkgroup switched off: emergency (the window, #128)
   updated_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS radio_traffic_start ON radio_traffic(start);
@@ -440,6 +443,15 @@ class Store:
                 self.db.execute(f"ALTER TABLE radio_traffic ADD COLUMN {col} {decl}")
         if tcols and "id_note" not in tcols:              # why an FG1 key-up has no radio ID (#163), 2026-10-14
             self.db.execute("ALTER TABLE radio_traffic ADD COLUMN id_note TEXT NOT NULL DEFAULT ''")
+        if tcols and "emergency" not in tcols:            # the emergency button on the row itself, 2026-10-14
+            self.db.execute("ALTER TABLE radio_traffic ADD COLUMN emergency INTEGER NOT NULL DEFAULT 0")
+            # rows logged before it was kept: from their alarms (not in self.migrated: that refills run cards)
+            if self.db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'alarms'").fetchone():
+                self.db.execute("UPDATE radio_traffic SET emergency = 1 WHERE id IN "
+                                "(SELECT traffic_id FROM alarms WHERE emergency = 1)")
+        for col in ("evidence", "kept"):                  # an emergency's raw P25 call record; kept by its window, 2026-10-14
+            if tcols and col not in tcols:
+                self.db.execute(f"ALTER TABLE radio_traffic ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
         radcols = {r["name"] for r in self.db.execute("PRAGMA table_info(radios)")}
         if radcols and "last_channel" not in radcols:        # where a radio was last heard (#163), 2026-10-14
             self.db.execute("ALTER TABLE radios ADD COLUMN last_channel TEXT NOT NULL DEFAULT ''")

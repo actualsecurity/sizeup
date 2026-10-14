@@ -11,13 +11,17 @@
 //   Browsers play sound only after a click or key on the page: any one unlocks it, and until then the header
 //   and the overlay say "Tap to enable alarm sound".
 //   Notices (the button on someone else's talkgroup): a strip under the header, no sound, until acknowledged.
+//   The emergency window ("windows": the button's talkgroup and radio kept, Record on or off, until
+//   [p25] emergency_window_min after its last key-up): "Recording until 20:09" on the card, the notice, and
+//   after the acknowledgement its own line in the strip, each with All clear (dispatchers and admins: resolved,
+//   not just seen; the window closes, here and on the station). Acknowledge leaves the window running.
 //
 //   Alarm.mountSettings(card)   Settings > System: the keywords, the fire channels, other talkgroups, drill
 "use strict";
 
 window.Alarm = (() => {
-  const st = { ctx: null, timer: null, open: [], notices: [], acked: new Set(), seen: null, busy: new Set(),
-               playing: null, audio: null, overlay: null, strip: null, pill: null };
+  const st = { ctx: null, timer: null, open: [], notices: [], windows: [], acked: new Set(), cleared: new Set(), seen: null,
+               busy: new Set(), playing: null, audio: null, overlay: null, strip: null, pill: null };
 
   function mk(tag, cls, text) {
     const n = document.createElement(tag);
@@ -32,6 +36,14 @@ window.Alarm = (() => {
     return b;
   }
   const hms = (t) => (t ? new Date(t * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }) : "");
+  const hm = (t) => (t ? new Date(t * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }) : "");
+  // the emergency window an alarm opened (its talkgroup's), and how it reads: "Recording until 20:09 (emergency)"
+  const windowOf = (a) => st.windows.find((w) => w.alarm_id === a.id)
+    || (a.emergency && a.talkgroup !== null && a.talkgroup !== undefined ? st.windows.find((w) => w.talkgroup === a.talkgroup) : null);
+  const untilText = (w) => `Recording until ${hm(w.until)} (emergency)`;
+  const windowTitle = (w) => `Everything on ${w.channel || `TG ${w.talkgroup}`}${(w.radios || []).length ? `, and radio `
+    + `${w.radios.join(", ")} on any talkgroup,` : ""} is kept until ${hm(w.until)}, even with Record off: the emergency `
+    + "window. All clear ends it now; Acknowledge doesn't.";
   const dispatcher = () => (typeof canDo === "function" ? canDo("dispatch") : true);
   const signedIn = () => !!(typeof cad !== "undefined" && cad.who && cad.who.email);
   const opName = () => (typeof operator === "function" ? operator() : "");
@@ -121,6 +133,38 @@ window.Alarm = (() => {
     }
   }
 
+  // All clear: resolved ("things are ok"), not just seen: the emergency window closes (acknowledged too)
+  async function allClear(a, b) {
+    if (!signedIn() && !opName()) {
+      UI.toast("Enter your name (Operator, top right) to give the all clear", "alert");
+      return;
+    }
+    st.busy.add(a.id);
+    b.disabled = true;
+    try {
+      await api("POST", `/api/cad/alarm/${a.id}/clear`, { operator: opName() });
+      st.acked.add(a.id);
+      st.cleared.add(a.id);
+      st.open = st.open.filter((x) => x.id !== a.id);
+      st.notices = st.notices.filter((x) => x.id !== a.id);
+      st.windows = st.windows.filter((w) => w.alarm_id !== a.id);
+      draw();
+      sound();
+    } catch (e) {
+      UI.toast(`No all clear: ${e.message}`, "alert");
+      b.disabled = false;
+    } finally {
+      st.busy.delete(a.id);
+    }
+  }
+  function clearButton(a, cls) {
+    const b = btn("All clear", cls, (x) => allClear(a, x));
+    b.title = "Resolved: ends the emergency window now (its talkgroup and radio are no longer kept with Record off). "
+      + "Acknowledge only says it was seen.";
+    b.disabled = st.busy.has(a.id);
+    return b;
+  }
+
   function replay(a, b) {
     if (st.playing === a.id && st.audio) {
       st.audio.pause();
@@ -151,6 +195,12 @@ window.Alarm = (() => {
     if (a.radio_id) who.append(mk("span", "", ` · radio ${a.radio_id}`));
     c.append(who);
     c.append(mk("div", "alarm-where", `${a.channel}${a.talkgroup !== null && a.talkgroup !== undefined ? ` (TG ${a.talkgroup})` : ""} · ${hms(a.at)}`));
+    const w = windowOf(a);
+    if (w) {
+      const r = mk("div", "alarm-meta alarm-window", untilText(w));
+      r.title = windowTitle(w);
+      c.append(r);
+    }
     c.append(marked(a.text, a.spans));
     if ((a.named || []).length) c.append(mk("div", "alarm-meta", `Units named: ${a.named.join(", ")}`));
     if (a.incident_id) {
@@ -169,6 +219,7 @@ window.Alarm = (() => {
       const b = btn("Acknowledge", "lg primary alarm-ack", (x) => ack(a, x));
       b.disabled = st.busy.has(a.id);
       row.append(b);
+      if (a.emergency) row.append(clearButton(a, "lg alarm-clear"));
     } else {
       row.append(mk("span", "alarm-meta", "Dispatchers acknowledge it (you can't: viewer)"));
     }
@@ -193,8 +244,8 @@ window.Alarm = (() => {
     st.overlay.hidden = !open.length;
     st.overlay.classList.toggle("drill", open.length > 0 && open.every((a) => a.drill));
     if (open.length) {
-      const sig = JSON.stringify([open.map((a) => [a.id, a.text, a.incident_id, a.has_clip, a.what, a.named, st.busy.has(a.id)]),
-        soundOk(), dispatcher(), st.playing]);
+      const sig = JSON.stringify([open.map((a) => [a.id, a.text, a.incident_id, a.has_clip, a.what, a.named, st.busy.has(a.id),
+        (windowOf(a) || {}).until]), soundOk(), dispatcher(), st.playing]);
       if (st.overlay._sig !== sig) {
         st.overlay._sig = sig;
         const top = mk("div", "alarm-head");
@@ -216,15 +267,37 @@ window.Alarm = (() => {
       document.body.append(st.strip);
     }
     const ns = st.notices;
-    st.strip.hidden = !ns.length || open.length > 0;
-    const nsig = JSON.stringify([ns.map((a) => [a.id, a.text, st.busy.has(a.id)]), dispatcher()]);
+    // windows still running whose alarm isn't on screen any more (acknowledged): a line of their own
+    const shownIds = new Set([...open, ...ns].map((a) => a.id));
+    const ws = st.windows.filter((w) => !shownIds.has(w.alarm_id) && !ns.some((a) => windowOf(a) === w));
+    st.strip.hidden = (!ns.length && !ws.length) || open.length > 0;
+    const nsig = JSON.stringify([ns.map((a) => [a.id, a.text, st.busy.has(a.id), (windowOf(a) || {}).until]),
+      ws.map((w) => [w.talkgroup, w.until, w.alarm_id, st.busy.has(w.alarm_id)]), dispatcher()]);
     if (st.strip._sig !== nsig) {
       st.strip._sig = nsig;
       st.strip.replaceChildren(...ns.map((a) => {
         const r = mk("div", "alarm-notice");
         r.append(mk("b", "", `${a.drill ? "DRILL · " : ""}Emergency button (not ours)`),
-          mk("span", "", ` ${a.who} on ${a.channel} at ${hms(a.at)}${a.text ? `: “${a.text}”` : ""}`), mk("span", "spacer"));
-        if (dispatcher()) r.append(btn("Acknowledge", "sm", (b) => ack(a, b)));
+          mk("span", "", ` ${a.who} on ${a.channel} at ${hms(a.at)}${a.text ? `: “${a.text}”` : ""}`));
+        const w = windowOf(a);
+        if (w) {
+          const u = mk("span", "alarm-window", ` · ${untilText(w)}`);
+          u.title = windowTitle(w);
+          r.append(u);
+        }
+        r.append(mk("span", "spacer"));
+        if (dispatcher()) {
+          r.append(btn("Acknowledge", "sm", (b) => ack(a, b)));
+          if (a.emergency) r.append(clearButton(a, "sm"));
+        }
+        return r;
+      }), ...ws.map((w) => {
+        const r = mk("div", "alarm-notice alarm-window-row");
+        r.title = windowTitle(w);
+        r.append(mk("b", "alarm-window", "Emergency window"),
+          mk("span", "", ` ${w.channel || `TG ${w.talkgroup}`}${w.radios && w.radios.length ? ` · radio ${w.radios.join(", ")}` : ""}`
+            + ` · ${untilText(w)}`), mk("span", "spacer"));
+        if (dispatcher() && w.alarm_id) r.append(clearButton({ id: w.alarm_id }, "sm"));
         return r;
       }));
     }
@@ -246,6 +319,7 @@ window.Alarm = (() => {
     const fresh = st.seen ? open.filter((a) => !st.seen.has(a.id)) : [];
     st.open = open;
     st.notices = (s.notices || []).filter((a) => !st.acked.has(a.id));
+    st.windows = (s.windows || []).filter((w) => !st.cleared.has(w.alarm_id));
     for (const a of s.recent || []) {
       if (st.seen && st.seen.has(a.id) && !st.acked.has(a.id)) {
         UI.toast(`Alarm acknowledged by ${(a.ack_by || "").replace(/\s*<[^>]*>\s*$/, "")}`, "ok",
