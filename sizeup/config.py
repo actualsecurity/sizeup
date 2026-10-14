@@ -246,7 +246,7 @@ def hub_url_problem(url: str) -> str:
 #   SIZEUP_PUBLIC_URL, SIZEUP_HUB_URL [cloud] public_url / hub_url
 #   SIZEUP_ACCESS_TEAM / _AUD         [cloud] access_team / access_aud (hub: Cloudflare Access identity)
 #   SIZEUP_PREALERT_SERVER            [prealert] server (a local test server instead of ntfy.sh)
-#   SIZEUP_ALERTS_NTFY_TOPIC / _SERVER [alerts] ntfy_topic / ntfy_server (our push topic: a name is its only secret)
+#   SIZEUP_ALERT_TOPIC / _SERVER [alerts] ntfy_topic / ntfy_server (our push topic: a name is its only secret)
 #   SIZEUP_511NY_KEY                  [roads] key: the 511NY developer key (never in a file on the hub)
 #   (no [gis] secrets: the county's open data needs no key)
 #   SIZEUP_MTA_KEY                    [trains] key: only should the MTA require one again (none needed, 2026-10-14)
@@ -320,8 +320,8 @@ def _alerts(data: dict) -> dict:
     """[alerts] -> Config fields: our ntfy topic for pushes (sizeup/notify.py). No topic = no pushes."""
     from sizeup.notify import server_problem, topic_problem
     al = _take(data.get("alerts", {}), "alerts", {"ntfy_topic", "ntfy_server"})
-    topic = _env("SIZEUP_ALERTS_NTFY_TOPIC", str(al.get("ntfy_topic", ""))).strip()
-    server = _env("SIZEUP_ALERTS_NTFY_SERVER", str(al.get("ntfy_server", "https://ntfy.sh"))).rstrip("/")
+    topic = _env("SIZEUP_ALERT_TOPIC", str(al.get("ntfy_topic", ""))).strip()
+    server = _env("SIZEUP_ALERT_SERVER", str(al.get("ntfy_server", "https://ntfy.sh"))).rstrip("/")
     if topic and (why := topic_problem(topic)):
         raise ConfigError(f"alerts.ntfy_topic: {why}")
     if why := server_problem(server):

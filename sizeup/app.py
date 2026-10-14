@@ -64,6 +64,8 @@ from sizeup.dispatch import parse
 from sizeup.incidents import IncidentStore, Traffic
 from sizeup.radio.fm import FRAME, RATE, Channel, NfmReceiver, Segment, data_frames, speech_seconds
 from sizeup.radio.mdc1200 import decode as mdc_decode
+from sizeup.radio import fleetsync
+from sizeup.cad.radios import fm_system
 from sizeup.radio.p25 import Call, CallIngest, Piece, split_call
 from sizeup.radio import claims
 from sizeup.radio.live import LiveTalk
@@ -330,6 +332,7 @@ class App:
                                  hold_s=max(HOLD_S, max(cont, default=0.0) + 1.0))
         self.paging_state: Callable[[], list[dict]] = self.paging.state    # the hub: the station's (cloud/hub.py)
         self.tap = LiveTap(lambda label: self._kind.get(label, ""), self.paging, self.live, mdc=lambda a: self._mdc(a), log=log)
+        self.tap.on_emergency = self._fm_emergency      # the emergency button at the key-up (#128)
         for r in self.receivers:
             self.tap.attach(r)
         self.cad.paging = lambda: self.paging_state()
@@ -575,16 +578,27 @@ class App:
     # -- radio events -----------------------------------------------------------------------------
 
     def _mdc(self, *audios) -> list[tuple[str, bool]]:
-        """(MDC-1200 unit ID, emergency) for each radio ID found in these pieces of audio, in order."""
+        """(radio ID, emergency) for each radio ID found in these pieces of audio, in order: MDC-1200 (Motorola,
+        "6401") and FleetSync (Kenwood, "167-1002": radio/fleetsync.py). An emergency packet is the radio's
+        emergency button (#128); MDC's emergency acknowledge (the console's answer) is not."""
         out: list[tuple[str, bool]] = []
         for b in audios:
+            found: list[tuple[str, bool]] = []
             try:
-                pkts = mdc_decode(b, RATE)
+                found += [(p.unit_hex, p.kind == "emergency") for p in mdc_decode(b, RATE)
+                          if p.kind in ("pre-id", "post-id", "emergency")]
             except Exception:
-                continue
-            for p in pkts:
-                if p.kind in ("pre-id", "post-id", "emergency") and (p.unit_hex, p.kind == "emergency") not in out:
-                    out.append((p.unit_hex, p.kind == "emergency"))
+                pass
+            try:            # a long transmission: its first and last 3 s (where a radio sends its ID)
+                edge = 3 * RATE
+                for part in ([b] if len(b) <= 2 * edge else [b[:edge], b[-edge:]]):
+                    found += [(p.id, p.emergency) for p in fleetsync.decode(part, RATE)
+                              if p.kind in ("pre-id", "post-id", "emergency")]
+            except Exception:
+                pass
+            for x in found:
+                if x not in out:
+                    out.append(x)
         return out
 
     def _units(self, seg: Segment, found: list[tuple[str, bool]] | None = None) -> list[str]:
@@ -646,9 +660,13 @@ class App:
         low_energy = speech_seconds(seg.audio) < MIN_SPEECH_S
         ids = list(dict.fromkeys(h for h, _e in found))
         for h in ids:
-            self._heard("mdc", h, at=seg.end)
+            self._heard(fm_system(h), h, at=seg.end)
         self.live.fm_segment(ch.label, ids, seg.start, seg.end)
+        emergency = any(e for _h, e in found)        # the radio's emergency button (MDC / FleetSync, #128)
+        live_key = self.tap.alarm_key(ch.label, seg.start, seg.end) if emergency else ""
         if not record:              # squelch, MDC IDs and "talking now" stay live; nothing is kept
+            if emergency and not live_key:      # ... but the button still alarms (the tap missed it live)
+                self._fm_emergency(ch.label, seg.start, found)
             return
         t = Traffic(f"{ch.label.replace(' ', '')}-{int(seg.start * 1000)}", ch.label, seg.start, seg.end,
                     "", status="pending", unit=", ".join(units), rig=self.radios.rig_mdc(ids), radio_id=", ".join(ids))
@@ -659,6 +677,12 @@ class App:
         t.raw_audio = seg.audio    # type: ignore[attr-defined]  (saved if it turns out to be a click)
         self._keep_clip(t.id, seg.audio)
         self._keep_source(t.id, seg.audio)
+        if emergency:
+            t.emergency = True                                   # type: ignore[attr-defined]
+            t.emergency_via = self._via(found)                   # type: ignore[attr-defined]
+            if live_key:
+                t.alarm_key = live_key                           # type: ignore[attr-defined]  (the alarm raised at key-up)
+            self._alarm_now(t)          # its clip now; one alarm per transmission (the key-up's, if there was one)
         self._stt(t, seg.audio, self.stt_engine(ch.label), ch.label)
 
     def _page_segment(self, ch: Channel, seg: Segment) -> None:
@@ -808,20 +832,43 @@ class App:
             return
         d = {"id": t.id, "start": t.start, "end": t.end, "source": t.source, "talkgroup": t.talkgroup, "unit": t.unit,
              "rig": t.rig, "radio_id": t.radio_id, "text": t.text if text is None else text,
-             "emergency": bool(getattr(t, "emergency", False))}
+             "emergency": bool(getattr(t, "emergency", False)), "via": getattr(t, "emergency_via", ""),
+             "alarm_key": getattr(t, "alarm_key", "")}
+        d["unit"] = ", ".join(x.removesuffix(" EMERGENCY") for x in (t.unit or "").split(", ") if x)
         try:
             self.cad.alarms.on_traffic(d)
         except Exception as e:  # the alarms must never stop the monitor (it logs; the next text tries again)
             log(f"alarms: {t.id}: {type(e).__name__}: {e}")
 
     def _alarm_now(self, t: Traffic) -> None:
-        """The emergency button, at the end of its call: raised here, or sent to the hub at once (an "alarm"
-        event with its clip, ahead of the transcript)."""
+        """The emergency button (P25 at the end of its call; MDC / FleetSync at the key-up and again at the end
+        of the transmission): raised here, or sent to the hub at once (an "alarm" event with its clip when
+        there is one yet, ahead of the transcript)."""
         if self.forwarding():
-            self._emit("alarm", {k: v for k, v in t.as_dict().items() if k != "pairs"}
-                       | {"pairs": [list(p) for p in getattr(t, "pairs", None) or []]}, t.id)
+            self._emit("alarm", {k: v for k, v in t.as_dict().items() if k not in ("pairs", "raw_audio")}
+                       | {"pairs": [list(p) for p in getattr(t, "pairs", None) or []]},
+                       t.id if self.has_clip(t.id) else None)
         else:
             self._alarm(t, "")
+
+    @staticmethod
+    def _via(found: list[tuple[str, bool]]) -> str:
+        em = [h for h, e in found if e]
+        return "FleetSync" if em and fm_system(em[0]) == "fleetsync" else "MDC"
+
+    def _fm_emergency(self, label: str, since: float, found: list[tuple[str, bool]]) -> str:
+        """An emergency packet on an analog channel (the live tap, at the key-up; or the end of a transmission
+        that isn't kept): the alarm now. Its key is the carrier's; the finished transmission takes it over."""
+        ids = list(dict.fromkeys(h for h, _e in found))
+        em = [h for h, e in found if e]
+        names = list(dict.fromkeys(self.cfg.mdc_aliases.get(h, h) for h in em + ids))
+        key = f"{label.replace(' ', '')}-live-{int(since * 1000)}"
+        t = Traffic(key, label, since, max(since, time.time()), "", status="pending", unit=", ".join(names[:1]),
+                    rig=self.radios.rig_mdc(em or ids), radio_id=", ".join(em or ids))
+        t.emergency, t.emergency_via = True, self._via(found)   # type: ignore[attr-defined]
+        log(f"{label}: EMERGENCY button ({t.emergency_via}) from {', '.join(em)} at key-up")
+        self._alarm_now(t)
+        return key
 
     def _drop_recorder_files(self, call: Call) -> None:
         if not self.clips_dir or not call.wav_path:  # without our own clip store, keep the originals

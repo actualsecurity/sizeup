@@ -56,6 +56,7 @@ from typing import Callable
 from sizeup import channels
 from sizeup.app import CLIP_ID, App, AwsJob, channels_model
 from sizeup.cad.dispatcher import AudioUnavailable
+from sizeup.cad.radios import fm_system
 from sizeup.cloud.autoupdate import describe
 from sizeup.cloud.hubstore import AudioDb, MonitorDb
 from sizeup.incidents import Traffic
@@ -177,7 +178,7 @@ class RemoteLive:
             rid = str(e.get("radio_id") or "")
             if rid:
                 try:
-                    r = self.resolve("mdc" if e.get("system") == "fm" else "p25", rid, str(e.get("alias") or ""))
+                    r = self.resolve(fm_system(rid) if e.get("system") == "fm" else "p25", rid, str(e.get("alias") or ""))
                 except Exception:  # the registry must never break the indicator
                     r = None
                 e["rig"], e["label"] = (r or {}).get("unit", e.get("rig", "")), (r or {}).get("label", e.get("label", ""))
@@ -489,7 +490,7 @@ class HubApp(App):
         elif kind == "alarm":                         # the P25 emergency button, ahead of its transcript (#128)
             self._apply_alarm(d, audio)
         elif kind == "heard":
-            if d.get("system") in ("mdc", "p25"):
+            if d.get("system") in ("mdc", "p25", "fleetsync"):
                 self.radios.heard(d["system"], str(d.get("radio_id") or ""), str(d.get("alias") or ""), d.get("at"))
         else:
             self.hub.log(f"hub: ignoring event type {kind!r} (a newer station?)")

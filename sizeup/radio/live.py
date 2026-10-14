@@ -309,7 +309,7 @@ class LiveTalk:
     def _fm_entry(self, channel: str, rid: str, since: float, talk_since: float, ended: bool = False) -> dict:
         """id_on_release: the carrier is open and no MDC ID yet. PCFD's APX radios send theirs after the
         PTT is let go (a post-ID: 6301 comes at the end), so FG1 says "ID on release", never a guess."""
-        r = self.resolve("mdc", rid, "") if rid else None
+        r = self.resolve("fleetsync" if "-" in rid else "mdc", rid, "") if rid else None
         return {"key": f"fm:{channel}:{since:.2f}:{rid}", "system": "fm", "channel": channel, "tg": None,
                 "radio_id": rid, "alias": "", "rig": (r or {}).get("unit", ""), "label": (r or {}).get("label", ""),
                 "since": since, "talk_since": talk_since, "ended": ended,

@@ -192,7 +192,7 @@ heartbeat_stale_min = 90             # no heartbeat (or restart) this long: "Tap
 # max priority with who and where, and their acknowledgement; station health (#79). ntfy topics are
 # public by name: a long random one (e.g. `openssl rand -hex 12`). NEVER Tapout's topics
 # (pcfd-phone-prealert pages the fire crew; pcfd-status): refused here and again before every send.
-# Empty or left out: no pushes. Env SIZEUP_ALERTS_NTFY_TOPIC / SIZEUP_ALERTS_NTFY_SERVER win.
+# Empty or left out: no pushes. Env SIZEUP_ALERT_TOPIC / SIZEUP_ALERT_SERVER win.
 # [alerts]
 # ntfy_topic = ""
 # ntfy_server = "https://ntfy.sh"

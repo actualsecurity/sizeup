@@ -346,7 +346,7 @@ def test_each_alarm_and_its_acknowledgement_is_pushed_with_who_and_where(tmp_pat
 
 
 def test_the_push_topic_is_config_and_never_tapouts(tmp_path, monkeypatch):
-    for k in ("SIZEUP_ALERTS_NTFY_TOPIC", "SIZEUP_ALERTS_NTFY_SERVER"):
+    for k in ("SIZEUP_ALERT_TOPIC", "SIZEUP_ALERT_SERVER"):
         monkeypatch.delenv(k, raising=False)
     cfg = tmp_path / "config.toml"
     cfg.write_text('[alerts]\nntfy_topic = "sizeup-test-alarms-0123"\n')

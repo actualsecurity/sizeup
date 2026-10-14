@@ -1,6 +1,11 @@
 """Life-safety alarms (GitHub #128): the P25 emergency button, and a mayday heard on our fire channels.
 
-    emergency   a P25 transmission trunk-recorder flagged as an emergency (radio/p25.py: the call JSON's
+    emergency   the radio's emergency button. On an analog channel (FG1, and the PC fireground repeater
+                when it is received: any FM traffic channel) an MDC-1200 emergency packet (Motorola) or a
+                FleetSync one (Kenwood: radio/fleetsync.py), decoded by the live tap at the key-up
+                (radio/tap.py) and again from the finished transmission: the alarm comes at the key-up,
+                "emergency button (MDC)" / "(FleetSync)"; the transmission's clip and words join it.
+                On P25, a transmission trunk-recorder flagged as an emergency (radio/p25.py: the call JSON's
                 "emergency", or its srcList entry's). trunk-recorder 5.2.0 knows it from the control
                 channel's grant, but the unit script it runs at the grant isn't told (plugins/unit_script
                 passes the radio ID and talkgroup only), so sizeup learns it when the call's JSON is
@@ -58,6 +63,8 @@ KEYWORDS = ("mayday", "may day may day", "emergency traffic", "firefighter down"
 OTHER = ("notice", "alarm", "off")         # the emergency button on a talkgroup that isn't ours, by someone not ours
 MAX_KEYWORDS, MAX_PHRASE_CHARS, MAX_PHRASE_WORDS, MAX_CHANNELS = 50, 60, 8, 20
 MAX_AGE_S = 30 * 60                        # a transmission that ended longer ago than this raises nothing
+REPEAT_S = 120                             # the same radio's button again on the same channel, its alarm still open:
+                                           # the same alarm (radios repeat the emergency burst, key after key)
 NOTICE_S = 15 * 60                         # a notice nobody acknowledged drops off after this
 RECENT_S = 10 * 60                         # acknowledged alarms listed this long (the screens say who and when)
 KEEP_S = 90 * 86400
@@ -73,7 +80,8 @@ CREATE TABLE IF NOT EXISTS alarms (
   created_at REAL NOT NULL,
   updated_at REAL NOT NULL,
   level TEXT NOT NULL,                  -- alarm | notice
-  emergency INTEGER NOT NULL DEFAULT 0, -- the P25 emergency button
+  emergency INTEGER NOT NULL DEFAULT 0, -- the emergency button (P25, MDC-1200, FleetSync)
+  via TEXT NOT NULL DEFAULT '',         -- how the button came: "" (P25) | "MDC" | "FleetSync"
   keywords TEXT NOT NULL DEFAULT '[]',  -- the phrases heard (JSON list)
   spans TEXT NOT NULL DEFAULT '[]',     -- where in text: [[start, end], ...] (JSON)
   text TEXT NOT NULL DEFAULT '',
@@ -217,13 +225,15 @@ def _hms(at: float | None) -> str:
 def who(a: dict) -> str:
     """The talker as the alarm names it: "E64 P1", "E64 (77A4)", "radio 41228", "an unidentified radio"."""
     unit, rig, rid = (a.get("unit") or "").strip(), (a.get("rig") or "").strip(), (a.get("radio_id") or "").strip()
+    if unit == rid and rig:              # an analog radio's raw ID (no alias for it): the rig names it
+        unit = ""
     if unit and rig and not unit.upper().startswith(rig.split(",")[0].strip().upper()):
         return f"{rig} ({unit})"
     return unit or rig or (f"radio {rid}" if rid else "an unidentified radio")
 
 
 def what(a: dict) -> str:
-    """"emergency button", "mayday", "emergency button + mayday", "“firefighter down”"."""
+    """"emergency button", "emergency button (MDC)", "mayday", "emergency button + mayday", "firefighter down"."""
     kws = a.get("keywords") or []
     words = []
     for k in kws:
@@ -231,7 +241,8 @@ def what(a: dict) -> str:
         if w not in words:
             words.append(w)
     said = ", ".join(words)
-    return " + ".join(x for x in ("emergency button" if a.get("emergency") else "", said) if x)
+    button = f"emergency button ({a['via']})" if a.get("via") else "emergency button"
+    return " + ".join(x for x in (button if a.get("emergency") else "", said) if x)
 
 
 def line(a: dict) -> str:
@@ -331,6 +342,8 @@ class Alarms:
         (and talkgroup), the event's number and address."""
         rig = (a.get("rig") or "").split(",")[0].strip()
         alias = (a.get("unit") or "").strip()
+        if alias == (a.get("radio_id") or "").strip() and rig:   # a raw analog ID: the rig names it
+            alias = ""
         label = alias or rig
         name = self.unit_name(rig) if rig else ""
         if alias and rig and not alias.upper().startswith(rig.upper()):
@@ -340,7 +353,7 @@ class Alarms:
         channel = a.get("channel") or ""
         if a.get("talkgroup") is not None and f"TG {a['talkgroup']}" not in channel:
             channel = f"{channel} (TG {a['talkgroup']})" if channel else f"TG {a['talkgroup']}"
-        return {"units": units, "talker": f"radio {rid}" if rid else ("" if units else "an unidentified radio"),
+        return {"units": units, "talker": f"radio {rid}" if rid and rid != label else ("" if units else "an unidentified radio"),
                 "channel": channel, "incident": str(a.get("incident_number") or ""),
                 "address": str(a.get("incident_address") or "")}
 
@@ -365,8 +378,26 @@ class Alarms:
         end = float(t.get("end") or start)
         rig = str(t.get("rig") or "")
         pushed = acked_line = None
+        via = str(t.get("via") or "")
         with self._lock:
             cur = self.store.one("SELECT * FROM alarms WHERE traffic_id = ?", (tid,))
+            key = str(t.get("alarm_key") or "")
+            if cur is None and key and key != tid:      # raised at the key-up: the finished transmission takes it over
+                cur = self.store.one("SELECT * FROM alarms WHERE traffic_id = ?", (key,))
+                if cur is not None:
+                    with self.store.tx() as db:
+                        db.execute("UPDATE alarms SET traffic_id = ?, end = ? WHERE id = ?", (tid, end, cur["id"]))
+                    cur = self.store.one("SELECT * FROM alarms WHERE id = ?", (cur["id"],))
+            rid = str(t.get("radio_id") or "")
+            if cur is None and emergency and rid:       # the same radio's button again, its alarm still open
+                cur = self.store.one("SELECT * FROM alarms WHERE emergency = 1 AND ack_at IS NULL AND radio_id = ? "
+                                     "AND channel = ? AND created_at >= ? ORDER BY id DESC LIMIT 1",
+                                     (rid, str(t.get("source") or ""), now - REPEAT_S))
+                if cur is not None:
+                    self.log(f"alarms: {tid}: radio {rid}'s emergency button again: alarm {cur['id']}")
+                    if not heard:
+                        return self.get(cur["id"])
+                    cur = None                          # new words: their own alarm
             if cur is None:
                 if not emergency and not heard:
                     return None
@@ -381,10 +412,11 @@ class Alarms:
                     return None
                 with self.store.tx() as db:
                     aid = db.execute(
-                        "INSERT INTO alarms (traffic_id, at, end, created_at, updated_at, level, emergency, keywords, spans, "
+                        "INSERT INTO alarms (traffic_id, at, end, created_at, updated_at, level, emergency, via, keywords, spans, "
                         "text, named, channel, talkgroup, unit, rig, radio_id, drill) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        (tid, start, end, now, now, level, int(emergency), json.dumps(heard), json.dumps(spans), text,
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (tid, start, end, now, now, level, int(emergency), via if emergency else "", json.dumps(heard),
+                         json.dumps(spans), text,
                          json.dumps(named), str(t.get("source") or ""), t.get("talkgroup"), str(t.get("unit") or ""), rig,
                          str(t.get("radio_id") or ""), int(bool(cfg["drill"])))).lastrowid
                 a = self.get(aid)
@@ -408,9 +440,11 @@ class Alarms:
                     return a
                 with self.store.tx() as db:
                     db.execute("UPDATE alarms SET keywords = ?, spans = ?, text = ?, named = ?, emergency = ?, level = ?, "
-                               "updated_at = ?, rig = CASE WHEN rig = '' THEN ? ELSE rig END, "
+                               "updated_at = ?, via = CASE WHEN via = '' THEN ? ELSE via END, "
+                               "rig = CASE WHEN rig = '' THEN ? ELSE rig END, "
                                "unit = CASE WHEN unit = '' THEN ? ELSE unit END WHERE id = ?",
-                               (json.dumps(kws), json.dumps(new_spans), new_text, json.dumps(new_named), int(em), level, now, rig,
+                               (json.dumps(kws), json.dumps(new_spans), new_text, json.dumps(new_named), int(em), level, now,
+                                via if emergency else "", rig,
                                 str(t.get("unit") or ""), a["id"]))
                 if level == "alarm" and a["level"] == "notice":
                     pushed = self.get(a["id"])

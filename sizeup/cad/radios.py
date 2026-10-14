@@ -1,6 +1,8 @@
 """Radio IDs -> rigs: which unit (the CAD's board code, "E63") a transmission came from.
 
     FG1 (analog)  MDC-1200 PTT-ID, 4 hex digits as decoded ("6301", "0611")    system "mdc"
+                  Kenwood FleetSync PTT-ID, fleet-unit ("167-1002")               system "fleetsync"
+                  (radio/fleetsync.py; shown raw until a row here names its unit, never guessed)
     county P25    the radio's numeric ID ("41228") and the talker alias the     system "p25"
                   system sends with it ("77A4", "E60", "60 Ctrl OP 3")
 
@@ -26,12 +28,19 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 SEED = ROOT / "data" / "radio_ids.json"
-SYSTEMS = ("mdc", "p25")
+SYSTEMS = ("mdc", "p25", "fleetsync")
 SOURCES = ("confirmed", "guessed", "heard")
 PCFD_KINDS = ("chief", "engine", "ladder", "tower", "rescue", "utility", "marine")
 DISPATCHER = re.compile(r"\bCtrl\b|\bControl\b|\bDispatch", re.I)
 MDC_ID = re.compile(r"[0-9A-F]{4}")
 P25_ID = re.compile(r"\d{1,9}")
+FS_ID = re.compile(r"\d{3}-\d{4}")
+ID_OF = {"mdc": MDC_ID, "p25": P25_ID, "fleetsync": FS_ID}
+
+
+def fm_system(radio_id: str) -> str:
+    """The registry system of an ID decoded on an analog channel: FleetSync "167-1002", else MDC "0611"."""
+    return "fleetsync" if FS_ID.fullmatch(str(radio_id or "").strip()) else "mdc"
 HEARD_WRITE_S = 60.0        # last-heard times are written at most this often per radio
 
 
@@ -242,7 +251,7 @@ class Registry:
     def rig_mdc(self, ids: list[str]) -> str:
         out: list[str] = []
         for i in ids:
-            r = self.resolve("mdc", i)
+            r = self.resolve(fm_system(i), i)
             if r and r["unit"] not in out:
                 out.append(r["unit"])
         return ", ".join(out)
@@ -263,7 +272,10 @@ class Registry:
         rigs, ids = [], []
         for n in [x.strip() for x in (names or "").split(",") if x.strip()]:
             n = n.removesuffix(" EMERGENCY")
-            if fm:
+            if fm and FS_ID.fullmatch(n):
+                rid = n
+                r = self.resolve("fleetsync", rid)
+            elif fm:
                 rid = n.upper() if MDC_ID.fullmatch(n.upper()) else back.get(n, "")
                 r = self.resolve("mdc", rid, "" if rid else n)
             else:
@@ -336,9 +348,10 @@ class Registry:
             raise RadioError(f"system: one of {', '.join(SYSTEMS)}")
         rid = str(body.get("radio_id") or "").strip()
         rid = rid.upper() if system == "mdc" else rid
-        if not (MDC_ID if system == "mdc" else P25_ID).fullmatch(rid):
-            raise RadioError("radio_id: 4 hex digits (MDC, as decoded: 0611)" if system == "mdc"
-                             else "radio_id: the P25 radio's number (digits)")
+        if not ID_OF[system].fullmatch(rid):
+            raise RadioError({"mdc": "radio_id: 4 hex digits (MDC, as decoded: 0611)",
+                              "fleetsync": "radio_id: fleet-unit (FleetSync, as decoded: 167-1002)"}.get(
+                                  system, "radio_id: the P25 radio's number (digits)"))
         f: dict = {}
         if "unit" in body:
             unit = str(body.get("unit") or "").strip()

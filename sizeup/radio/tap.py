@@ -6,8 +6,10 @@ goes on to App._segment), with no change to the receiver or the squelch themselv
     paging  (South 2)   every frame of an open carrier -> LivePaging (radio/livepage.py): who is
                         being paged, pair by pair, then "voice"
     traffic (FG1)       the first MDC_WINDOW_S of an open carrier, with the PREROLL_FRAMES read just
-                        before the squelch opened -> the MDC-1200 decoder every MDC_EVERY frames until
-                        an ID decodes -> LiveTalk.fm_ids: the talker shown at key-up (a pre-ID)
+                        before the squelch opened -> the MDC-1200 and FleetSync decoders every MDC_EVERY
+                        frames until an ID decodes -> LiveTalk.fm_ids: the talker shown at key-up (a
+                        pre-ID); an emergency packet (the radio's emergency button) -> on_emergency at
+                        once, once per carrier: the alarm at the key-up (sizeup/cad/alarms.py, #128)
 
 Why the pre-roll: the squelch opens one frame (50 ms) or more after the carrier comes up, and a radio
 that sends its pre-ID at key-up starts the burst with the carrier. The burst's preamble is 47 ms; lose
@@ -50,7 +52,8 @@ class _Chan:
     n: int = 0                                  # frames of this carrier so far
     ids: list = field(default_factory=list)     # [(unit hex, emergency)] decoded live
     done: bool = False                          # stop decoding (found, or past the window)
-    last: list = field(default_factory=list)    # [(since, ids, at)] finished carriers, for ids()
+    last: list = field(default_factory=list)    # [(since, ids, at, alarm)] finished carriers, for ids()
+    alarm: str = ""                             # the emergency alarm raised for this carrier (its key)
 
 
 class TapSquelch:
@@ -85,6 +88,8 @@ class LiveTap:
                  clock: Callable[[], float] = time.time, log: Callable[[str], None] | None = None):
         self.kind, self.paging, self.live, self.mdc, self.clock, self.log = kind, paging, live, mdc, clock, log
         self._ch: dict[str, _Chan] = {}
+        # An emergency packet decoded live: on_emergency(channel, carrier start, [(ID, emergency)]) -> the alarm's key
+        self.on_emergency: Callable[[str, float, list[tuple[str, bool]]], str] | None = None
         self._lock = threading.Lock()
         self._errors = 0
 
@@ -126,7 +131,7 @@ class LiveTap:
             c = self._ch.setdefault(label, _Chan())
             if is_open and (not c.open or abs(since - c.since) > 0.01):
                 self._ended(c)
-                c.open, c.since, c.n, c.ids, c.done = True, since, 0, [], False
+                c.open, c.since, c.n, c.ids, c.done, c.alarm = True, since, 0, [], False, ""
                 c.buf = list(c.pre)
                 c.pre.clear()
                 opened = True
@@ -166,19 +171,30 @@ class LiveTap:
             c.done, c.buf = True, []
         if found:
             c.ids, c.done, c.buf = list(found), True, []
+            if any(e for _h, e in found) and not c.alarm and self.on_emergency is not None:
+                c.alarm = self.on_emergency(label, c.since, list(found)) or "raised"
             self.live.fm_ids(label, list(dict.fromkeys(h for h, _e in found)))
 
     def _ended(self, c: _Chan) -> None:
         if c.open and c.ids:
             now = self.clock()
-            c.last = [x for x in c.last if now - x[2] < KEEP_S] + [(c.since, list(c.ids), now)]
+            c.last = [x for x in c.last if now - x[2] < KEEP_S] + [(c.since, list(c.ids), now, c.alarm)]
 
     def ids(self, label: str, start: float, end: float) -> list[tuple[str, bool]]:
         """The IDs decoded live from the carrier that made the transmission start..end (its pre-ID)."""
+        got = self._carrier(label, start, end)
+        return list(got[1]) if got else []
+
+    def alarm_key(self, label: str, start: float, end: float) -> str:
+        """The emergency alarm raised live for the carrier that made this transmission ("" none)."""
+        got = self._carrier(label, start, end)
+        return got[3] if got and got[3] != "raised" else ""
+
+    def _carrier(self, label: str, start: float, end: float):
         with self._lock:
             c = self._ch.get(label)
             if c is None:
-                return []
-            cands = list(c.last) + ([(c.since, list(c.ids), 0.0)] if c.open and c.ids else [])
-        mine = [(since, ids) for since, ids, _at in cands if since <= start + 1.0 and since < end and start - since < 150]
-        return list(max(mine)[1]) if mine else []      # the latest carrier that began before it
+                return None
+            cands = list(c.last) + ([(c.since, list(c.ids), 0.0, c.alarm)] if c.open and c.ids else [])
+        mine = [x for x in cands if x[0] <= start + 1.0 and x[0] < end and start - x[0] < 150]
+        return max(mine, key=lambda x: x[0]) if mine else None      # the latest carrier that began before it

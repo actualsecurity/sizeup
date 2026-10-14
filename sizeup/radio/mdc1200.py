@@ -19,7 +19,9 @@ https://github.com/atmatthewat/mdc-encode-decode -- mdc_encode.c (_enc_leader, _
 _enc_get_samp), mdc_decode.c (_procbits, _gofix single-error syndrome fixer, sync
 0x07092A446F / inverse), mdc_common.c (_docrc).  Op/arg meanings follow the notes in the
 OneOfEleven UV-K5 firmware (mdc1200.h): op 0x01 arg 0x80 = PTT ID (pre-ID, on key-up),
-op 0x01 arg 0x00 = POST ID (on release), op 0x00 = emergency, 0x35/0x55 = double packets.
+op 0x01 arg 0x00 = POST ID (on release), op 0x00 = emergency (arg 0x80 / 0x81; radios repeat it, some as
+double packets), op 0x20 = emergency acknowledge (the console's answer: not an emergency itself),
+0x35/0x55 = double packets.
 
 Demodulation here differs from the reference (which slices the audio level at a few clock
 phases): we band-pass 900-2300 Hz with an FFT mask, take the analytic signal, and measure
@@ -60,11 +62,12 @@ class MdcPacket:
     start_s: float                    # time of the sync word's first bit
     extra: tuple[int, ...] | None = None  # 4 bytes of the second block (double packets)
     unit_hex: str = field(init=False)     # "0611" -- how radios / consoles display the ID
-    kind: str = field(init=False)         # "pre-id" | "post-id" | "emergency" | "other"
+    kind: str = field(init=False)         # "pre-id" | "post-id" | "emergency" | "emergency-ack" | "other"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "unit_hex", f"{self.unit_id:04X}")
-        kind = "emergency" if self.op == 0x00 else KINDS.get((self.op, self.arg), "other")
+        kind = ("emergency" if self.op == 0x00 else "emergency-ack" if self.op == 0x20
+                else KINDS.get((self.op, self.arg), "other"))
         object.__setattr__(self, "kind", kind)
 
     def __str__(self) -> str:
