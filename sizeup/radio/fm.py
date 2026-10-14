@@ -46,6 +46,13 @@ DATA_SHARE = 0.75              # a frame with this much of its voice-band energy
 DATA_OVER_DB = 15.0            # ... and this far over the dead air is an MDC-1200 data burst
 EDGE_SEARCH = 20               # look for a burst within 1 s of either end of the carrier (PCFD's APX
                                # 6000s send it 0.3-0.8 s in, 2026-10-07; 0.3 s missed every one)
+# A PTT-ID is the first thing on the carrier (pre-ID: only dead air before it) or the last (post-ID: the PTT is
+# already released, only dead air after it). A vowel can pass the data rule too (pre-emphasised, most of an "eh" is
+# at 1.5-2 kHz): FG1 2026-10-14 16:14, every clip of a conversation ended mid-word ("... conferences from 4th"),
+# the speech after a vowel in its last second cut off with it. Data-like frames with this much speech between them
+# and the carrier's edge are left in the transmission (an ID in them is still decoded from the audio).
+SPEECH_DB = 8.0                # a speech frame: voice band this far over the dead air (speech_seconds' margin) ...
+EDGE_SPEECH_FRAMES = 2         # ... 0.1 s of them between a data-like run and the edge: not a PTT-ID
 MAX_FRAMES = 20 * 120          # split anything over 2 minutes (a long page is ~30-60 s)
 STALL_S = 5.0
 STUCK_S = 120.0                # open continuously this long: shown as "open 4:12 (stuck?)", logged once (#116)
@@ -121,6 +128,20 @@ def data_frames(frames: list[np.ndarray]) -> list[bool]:
     db = 10 * np.log10(ev)
     floor = np.percentile(db, 5)
     return list((ef / ev >= DATA_SHARE) & (db >= floor + DATA_OVER_DB))
+
+
+def speech_frames(frames: list[np.ndarray]) -> list[bool]:
+    """Which 50 ms frames have speech (or anything else in the voice band) on them: voice band SPEECH_DB over the
+    transmission's dead air (5th percentile, as data_frames) and STEADY_DB over the frame's own 4-7.5 kHz. Dead
+    carrier is neither (FG1: the voice band 5-6 dB under the HF band); the hiss of a carrier coming up or going down
+    is loud but flat or rising toward the HF band, so not speech either."""
+    if not frames:
+        return []
+    S = np.abs(np.fft.rfft(np.stack(frames) * np.hanning(FRAME), axis=1)) ** 2
+    hf = (_F >= HF_BAND[0]) & (_F <= HF_BAND[1])
+    v, h = S[:, _VOICE].mean(axis=1) + 1e-20, S[:, hf].mean(axis=1) + 1e-20
+    db = 10 * np.log10(v)
+    return list((db >= np.percentile(db, 5) + SPEECH_DB) & (v >= h * 10 ** (STEADY_DB / 10)))
 
 
 # A PTT-ID burst, told from anything else in the voice band (#163: "no ID sent" vs "ID not decoded" on an FG1
@@ -499,14 +520,16 @@ class NoiseSquelch:
         quieting = float(np.median(qs[i0:i1 + 1]))
         body = frames[i0:i1 + 1]
         data = data_frames(body)
+        talk = speech_frames(body)
         bursts: list[np.ndarray] = []
         # Cut data bursts off both ends. Radios hold the carrier a moment around the ID
         # (FG1 bench: up to ~0.15 s of dead air beyond it), and the frames where the burst
-        # starts/ends are only partly burst, so one more frame goes with it.
+        # starts/ends are only partly burst, so one more frame goes with it. What lies between a
+        # burst and the edge goes too, so it must be that dead air, not speech (SPEECH_DB).
         lo, hi = 0, len(body) - 1
         for _ in range(2):
             k = next((j for j in range(lo, min(lo + EDGE_SEARCH, hi + 1)) if data[j]), None)
-            if k is None:
+            if k is None or sum(talk[lo:max(lo, k - 1)]) >= EDGE_SPEECH_FRAMES:
                 break
             e = k
             while e + 1 <= hi and data[e + 1]:
@@ -515,7 +538,7 @@ class NoiseSquelch:
             lo = e + 2
         for _ in range(2):
             k = next((j for j in range(hi, max(hi - EDGE_SEARCH, lo - 1), -1) if data[j]), None)
-            if k is None:
+            if k is None or sum(talk[k + 2:hi + 1]) >= EDGE_SPEECH_FRAMES:
                 break
             b = k
             while b - 1 >= lo and data[b - 1]:
