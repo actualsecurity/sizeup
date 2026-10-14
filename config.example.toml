@@ -279,6 +279,7 @@ heartbeat_stale_min = 90             # no heartbeat (or restart) this long: "Tap
 # bbox = [-73.845, 40.900, -73.530, 41.060]   # west, south, east, north: the stretch of line the map shows
 # rt_url = ""                                  # "" = the MTA's (sizeup/trains.py RT_URL); a test feed's address
 # gtfs_url = ""                                # "" = the MTA's (GTFS_URL)
+# rt_every_s = 5                               # the realtime feed this often while someone looks (5 to 300 s)
 
 # [aircraft]: aircraft near HPN on the CAD maps (sizeup/aircraft.py, docs/cloud.md "Aircraft near HPN", #155):
 # shortfinal's PCFD-focused picture (arrivals, departures, ground traffic at HPN, low traffic in the area,
