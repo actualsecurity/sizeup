@@ -3,6 +3,8 @@
 
     adsblol   two answers of adsb.lol's point query around HPN (the radius sizeup asks), ~25 s apart:
               tests/fixtures/aircraft/adsblol_hpn_1.json, adsblol_hpn_2.json (as served, untouched).
+    both      adsb.lol's and adsb.fi's answers for the same 15 nm, asked half a second apart: adsblol_hpn_3.json,
+              adsbfi_hpn_3.json (as served): the two feeds combined (sizeup/aircraft.py combine()).
     faa       the FAA Releasable Aircraft Database (ReleasableAircraft.zip) trimmed to the US aircraft in
               those two answers plus two others: MASTER.txt and ACFTREF.txt with their real headers, the
               owner's name and address columns blanked (sizeup never reads them; the fixture shouldn't
@@ -14,6 +16,7 @@ ADS-B receiver yet. readsb_aircraft.json is adsblol_hpn_2.json in readsb's file 
 fields dump978-fa's skyaware writer emits (skyaware_writer.cc). The tests say so.
 
 Run:  .venv/bin/python tools/record_aircraft_fixtures.py adsblol
+      .venv/bin/python tools/record_aircraft_fixtures.py both
       .venv/bin/python tools/record_aircraft_fixtures.py faa [ReleasableAircraft.zip]   (else downloaded, ~70 MB)
 """
 
@@ -32,10 +35,10 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from sizeup import USER_AGENT  # noqa: E402
-from sizeup.aircraft import ADSBLOL_URL, ARP, FAA_URL  # noqa: E402
+from sizeup.aircraft import ADSBFI_URL, ADSBLOL_URL, ARP, FAA_URL  # noqa: E402
 
 OUT = ROOT / "tests" / "fixtures" / "aircraft"
-RADIUS_NM = 20
+RADIUS_NM = 15
 EXTRA = ("A00001", "A00002")                      # two more rows, so a lookup has something to miss
 REDACT = ("NAME", "STREET", "STREET2", "CITY", "STATE", "ZIP CODE", "COUNTY", "OTHER NAMES(1)", "OTHER NAMES(2)",
           "OTHER NAMES(3)", "OTHER NAMES(4)", "OTHER NAMES(5)")
@@ -61,6 +64,13 @@ def adsblol() -> None:
         print(f"adsblol_hpn_{n}.json: {len(json.loads(body).get('ac') or [])} aircraft")
         if n == 1:
             time.sleep(25)
+
+
+def both() -> None:
+    for name, tmpl in (("adsbfi_hpn_3.json", ADSBFI_URL), ("adsblol_hpn_3.json", ADSBLOL_URL)):
+        body = get(tmpl.format(lat=f"{ARP[0]:.4f}", lon=f"{ARP[1]:.4f}", radius=RADIUS_NM))
+        (OUT / name).write_bytes(body)
+        print(f"{name}: {len(json.loads(body).get('ac') or [])} aircraft")
 
 
 def faa(path: str | None) -> None:
@@ -102,6 +112,8 @@ if __name__ == "__main__":
     what = sys.argv[1] if len(sys.argv) > 1 else ""
     if what == "adsblol":
         adsblol()
+    elif what == "both":
+        both()
     elif what == "faa":
         faa(sys.argv[2] if len(sys.argv) > 2 else None)
     else:

@@ -22,6 +22,9 @@
 //                dense block of hydrants thins out rather than smears; its label beside it when there is
 //                room. The same icon stands by the layer's toggle and at the top of its click box
 //                (icons.js Icon). A point layer without one is a dot.
+//   One station  one mark (#162): a station layer's copies of the stations the Trains layer draws (trains.js:
+//                the New Haven Line's, from the MTA, with the line's details) come from the hub marked _trains
+//                and are left out while this map's Trains layer is on; with it off, every station shows.
 //   A click      on a feature opens the same small box the highway layers use (the control's showInfo):
 //                the configured fields, as the county names them, the layer's sub line, and the source.
 //   Attribution  "Westchester County GIS" on the group and in the map's corner (the sources' attribution).
@@ -172,6 +175,8 @@ window.GisLayers = (() => {
   const ours = (plain, accent) => ["case", ["boolean", ["get", "_ours"], false], accent, plain];
   const labelField = (l) => (l.style && l.style.label) || (l.kind === "point" && l.fields && l.fields[0] ? l.fields[0][0] : "");
   const TEXT = { "text-color": "#C9CED4", "text-halo-color": DARK, "text-halo-width": 1.4 };
+  // one station, one mark (#162): what a station layer (trains_field) shows while the map's Trains layer is on
+  const NOT_TRAINS = ["!", ["boolean", ["get", "_trains"], false]];
   function mapLayers(l, src, vis, glyphs, icon) {
     const s = l.style || {}, kind = l.kind || "point";
     const accent = token("--accent", "#C8102E");
@@ -250,6 +255,8 @@ window.GisLayers = (() => {
 
     // on here? the control: the event's own set, else the viewer's set for this map, else the default
     isOn(l) { return this.control.on(gisKey(l), dflt(l, this.control.profile)); }
+    // the Trains layer on this map (trains.js): it draws the stations marked _trains
+    trainsOn() { return !!(window.TrainLayer && TrainLayer.KEY) && this.control.on(TrainLayer.KEY, false); }
     keys() { return layersOf(store.cat).map((l) => [gisKey(l), dflt(l, this.control.profile)]); }   // for the event's set
     refresh() { this.sync(); }
 
@@ -346,11 +353,13 @@ window.GisLayers = (() => {
     applyVisibility() {
       const cat = store.cat;
       if (!cat || !this.ready()) return;
+      const trains = this.trainsOn();
       for (const l of layersOf(cat)) {
         for (const id of this.added[l.key] || []) {
           if (!this.map.getLayer(id)) continue;
           const on = this.isOn(l) && (!id.endsWith("-3d") || this.tilted);
           this.map.setLayoutProperty(id, "visibility", on ? "visible" : "none");
+          if (l.trains_field) this.map.setFilter(id, trains ? NOT_TRAINS : null);   // the Trains layer's stations: there, not here too
         }
       }
     }
@@ -457,7 +466,8 @@ window.GisLayers = (() => {
         if (l.error && !l.at) lab.append(h("span", "ml-err small", "not loaded"));
         else if (l.minzoom > 0 && zoom < l.minzoom) lab.append(h("span", "dim small", "zoom in"));
         else if (l.at && l.n === 0) lab.append(h("span", "dim small", "nothing here"));
-        if (l.note) lab.title = l.note;
+        const tip = [l.note, l.trains_field && this.trainsOn() ? "Stations the Trains layer shows are drawn there, not here too" : ""];
+        if (tip.some(Boolean)) lab.title = tip.filter(Boolean).join(". ");
         fold.append(lab);
         if (l.style && l.style.height) any3d = true;
       }

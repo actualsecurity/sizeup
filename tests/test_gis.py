@@ -114,6 +114,8 @@ def test_the_starter_set_is_complete_and_each_dataset_has_its_terms_and_a_fixtur
             assert name in names, f"{l.key}: {name} isn't a field of the service ({sorted(names)})"
         if l.ours_field:
             assert l.ours_field in names
+        if l.trains_field:
+            assert l.trains_field in names
         assert gis_mod.GEOM_KIND[info["geometryType"]] == (l.kind or gis_mod.GEOM_KIND[info["geometryType"]]), l.key
     parcels = BY_KEY["parcels"]
     assert parcels.tiled and parcels.minzoom >= 15 and parcels.refresh == "weekly" and parcels.simplify_m > 0
@@ -465,6 +467,9 @@ def test_gis_config_ships_the_starter_set_and_one_entry_changes_one_thing(tmp_pa
     c = load_cfg(tmp_path, '[[gis.layers]]\nkey = "parcels"\non = true\nrefresh = "daily"\n')
     p = {l.key: l for l in c.gis_layers}["parcels"]
     assert p.on and p.refresh == "daily" and p.url == BY_KEY["parcels"].url and p.fields == BY_KEY["parcels"].fields
+    assert {l.key: l for l in c.gis_layers}["train_stations"].trains_field == "STATNAME"
+    c = load_cfg(tmp_path, '[[gis.layers]]\nkey = "train_stations"\ntrains_field = ""\n')      # every county station, always
+    assert {l.key: l for l in c.gis_layers}["train_stations"].trains_field == ""
     c = load_cfg(tmp_path, '[[gis.layers]]\nkey = "parcels"\nenabled = false\n'
                            '[[gis.layers]]\nkey = "dams"\nlabel = "Dams"\ngroup = "Hazards"\n'
                            'url = "https://giswww.westchestergov.com/wcgis/rest/services/OpenData/MapServer/40/"\n'
@@ -518,6 +523,16 @@ def test_the_county_gis_group_is_in_every_layers_box_and_only_ever_asks_the_hub(
         assert re.search(rf"\.{cls}\b", (STATIC / "cadmap.css").read_text()), cls
 
 
+def test_the_map_leaves_the_trains_layers_stations_to_it():
+    """#162: a station layer's features marked _trains are filtered out while the map's Trains layer is on (it draws
+    them, with the line's details), and shown again when it is off; on a page without the Trains layer, never."""
+    js = (STATIC / "gislayers.js").read_text()
+    assert 'const NOT_TRAINS = ["!", ["boolean", ["get", "_trains"], false]];' in js
+    assert "window.TrainLayer && TrainLayer.KEY) && this.control.on(TrainLayer.KEY, false)" in js
+    assert "if (l.trains_field) this.map.setFilter(id, trains ? NOT_TRAINS : null);" in js
+    assert "return { panel, load, maps, data: () => store.data, KEY };" in (STATIC / "trains.js").read_text()
+
+
 def test_the_county_fire_stations_leave_out_our_own_departments():
     # 2026-10-14: the county's 2015 layer has a "PORT CHESTER F.D." at Don Bosco Place, which isn't a firehouse; the map
     # draws ours from our own firehouse data, so the county's copies of ours are left out (drop_ours).
@@ -537,3 +552,91 @@ def test_the_county_fire_stations_leave_out_our_own_departments():
     assert len(k.data["fire_stations"]) > len(kept)                       # the same fixture keeps ours without it
     plain = make(layers=[layer], ours=())                                   # the left-out set is part of the cache key
     assert g._signature(layer) != plain._signature(layer)
+
+
+# The county's train stations as the service gave them on 2026-10-14 (STATNAME, lon, lat): the New Haven Line's
+# in our part of the county (Larchmont the farthest from the MTA's stop: 215 m) and the Harlem Line's beside them.
+COUNTY_STATIONS = [("Port Chester", -73.66364, 41.002059), ("Rye", -73.682965, 40.986034), ("Harrison", -73.711333, 40.969902),
+                   ("Larchmont", -73.757983, 40.93476), ("Mamaroneck", -73.73636, 40.953952), ("Mt. Vernon East", -73.831948, 40.912205),
+                   ("Mt. Vernon West", -73.850084, 40.913001), ("White Plains", -73.775143, 41.033323),
+                   ("North White Plains", -73.772508, 41.051247)]
+NEW_HAVEN = {"Port Chester", "Rye", "Harrison", "Larchmont", "Mamaroneck", "Mt. Vernon East"}
+
+
+def station_layer(tmp_path=None):
+    """The starter Train stations layer over a wider box (Mount Vernon too), with COUNTY_STATIONS as the county's answer."""
+    fetch = FakeFetch(["train_stations"])
+    fetch.fixtures["train_stations"]["features"] = [
+        {"type": "Feature", "id": i + 1, "properties": {"STATNAME": n}, "geometry": {"type": "Point", "coordinates": [lon, lat]}}
+        for i, (n, lon, lat) in enumerate(COUNTY_STATIONS)]
+    g = make(tmp_path, layers=[BY_KEY["train_stations"]], fetch=fetch, bbox=(-73.90, 40.90, -73.50, 41.10))
+    assert g.refresh("train_stations")
+    return g
+
+
+def served(g) -> dict:
+    """The layer as a page gets it: {station: marked _trains}."""
+    code, body, _, _ = g.get("/api/cad/gis/train_stations", "")
+    assert code == 200
+    return {f["properties"]["STATNAME"]: bool(f["properties"].get("_trains")) for f in json.loads(body)["features"]}
+
+
+def test_the_county_train_stations_leave_out_the_ones_the_trains_layer_draws(tmp_path):
+    """#162: Rye twice on the map: the Trains layer's "Rye station" (the MTA's, with the catenary) and the county's
+    "Rye" (no details). One station, one mark: the county's copies of the Trains layer's stations come marked _trains
+    (gislayers.js leaves them out while that layer is on); the Harlem Line's are the county's alone."""
+    from tests.test_trains import provider
+    layer = BY_KEY["train_stations"]
+    assert layer.trains_field == "STATNAME" and layer.public()["trains_field"] == "STATNAME"
+    g = station_layer(tmp_path)
+    assert set(served(g)) == {n for n, _, _ in COUNTY_STATIONS} and not any(served(g).values())   # no Trains layer: all show
+    rev = g.status["train_stations"]["rev"]
+    tr, _, _ = provider(tmp_path)
+    tr.tick()                                                        # the MTA's stations and line
+    assert {s["name"] for s in tr.stations()} >= {"Rye", "Port Chester", "Larchmont", "Mt Vernon East"}
+    g.train_stations = tr.stations
+    marked = served(g)
+    assert {n for n, m in marked.items() if m} == NEW_HAVEN
+    assert {n for n, m in marked.items() if not m} == {"Mt. Vernon West", "White Plains", "North White Plains"}
+    assert g.status["train_stations"]["rev"] != rev                  # a new rev: the pages fetch the layer again
+    assert [l for l in g.public()["layers"] if l["key"] == "train_stations"][0]["rev"] == g.status["train_stations"]["rev"]
+    assert not any("_trains" in f["properties"] for f in g.data["train_stations"])     # stored as the county gave it
+    cached = json.loads((tmp_path / "gis" / "train_stations.geojson").read_text())
+    assert "_trains" not in json.dumps(cached) and cached["sizeup"]["signature"] == g._signature(layer)
+    other = make(layers=[BY_KEY["fire_stations"]], ours=("Port Chester FD",))       # only a station layer is marked
+    other.train_stations = tr.stations
+    assert other.refresh("fire_stations") and not any("_trains" in f["properties"] for f in other.features("fire_stations"))
+    # its trouble is not the county layer's (said once)
+    g.train_stations = lambda: 1 / 0
+    assert not any(served(g).values())
+    assert not any(served(g).values())                              # asked again: no second line
+    assert sum("Trains layer's stations not read" in m for m in g.logs) == 1
+    # the Trains provider off ([trains] enabled = false): it draws no stations, so every county station shows
+    g.train_stations = tr.stations
+    assert any(served(g).values())
+    off, _, _ = provider(tmp_path, enabled=False)
+    assert off.stations() == []
+    g.train_stations = off.stations
+    assert not any(served(g).values())
+
+
+def test_the_same_station_is_near_or_named_alike_nearby():
+    rye = (gis_mod._station_key("Rye"), 40.985922, -73.682553)                     # the MTA's stop
+    mve = (gis_mod._station_key("Mt Vernon East"), 40.912161, -73.832185)
+    st = (rye, mve)
+    assert gis_mod.same_station("Rye", 40.986034, -73.682965, st)                  # the county's, 37 m off
+    assert gis_mod.same_station("", 40.9880, -73.6826, st)                         # 230 m, any name
+    assert not gis_mod.same_station("Elsewhere", 40.9900, -73.6826, st)            # 450 m, another name
+    assert gis_mod.same_station("Mount Vernon East Station", 40.9165, -73.8322, st)   # 480 m, the same name
+    assert gis_mod.same_station("MT. VERNON EAST", 40.9165, -73.8322, st)
+    assert not gis_mod.same_station("Mt Vernon East", 40.9230, -73.8322, st)       # 1.2 km: not even by name
+    assert not gis_mod.same_station("Mt. Vernon West", 40.913001, -73.850084, st)  # the Harlem Line's, 1.5 km
+    assert not gis_mod.same_station("Rye", 40.986034, -73.682965, ())              # no Trains layer stations
+
+
+def test_the_hub_hands_the_county_layer_the_trains_layers_stations(tmp_path):
+    h = HubRun(hub_cfg(tmp_path, trains_enabled=False))
+    try:
+        assert h.app.gis.train_stations == h.app.trains.stations and h.app.gis.train_stations() == []
+    finally:
+        h.close()

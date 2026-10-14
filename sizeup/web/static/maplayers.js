@@ -34,7 +34,9 @@
 // layers, #91); attach() gets each map's control (its map, on(key, default), setLayer(key, on),
 // showInfo(title, sub, lines, foot, cls, icon), close()); panel() is asked at every render, with each
 // <details data-fold> group's open state from the box as it was (the rebuild keeps the scroll, the focus
-// and the folds, #111); keys() the group's layers for the event's set; refresh() after a change.
+// and the folds, #111); keys() the group's layers for the event's set; refresh() after a change. An attached
+// group with top: true is drawn right under the layer list (camoverlay.js's Camera overlay, #168: by Cameras),
+// the rest at the foot of the box; attach() may return {} for a map the group isn't on.
 "use strict";
 
 window.MapLayers = (() => {
@@ -522,9 +524,11 @@ window.MapLayers = (() => {
         lab.append(cb, h("span", "", `Hide down cameras (${n})`));
         list.append(lab);
       }
+      const groupPanel = (g) => { try { return (g.panel && g.panel(folds)) || null; } catch (e) { console.error(e); return null; } };
       panel.replaceChildren(head);
       if (this.perEvent()) panel.append(this.eventRow());
       panel.append(list);
+      for (const g of this.groups) { const el = g.top ? groupPanel(g) : null; if (el) panel.append(el); }
       if (!d) this.panel.append(h("div", "dim small", "Loading…"));
       else if (!d.configured) this.panel.append(h("div", "dim small", "No camera or incident source is on: " + (d.note || "not configured on the hub")));
       if (d && !d.highway_places) this.panel.append(h("div", "dim small", "Mileposts and exits: not in the places database yet"));
@@ -540,9 +544,7 @@ window.MapLayers = (() => {
       }
       if (d && d.configured && d.note) this.panel.append(h("div", "dim small", d.note));
       if (window.AirportLayer && AirportLayer.credit()) this.panel.append(h("div", "dim small", AirportLayer.credit()));
-      for (const g of this.groups) {
-        try { const el = g.panel && g.panel(folds); if (el) panel.append(el); } catch (e) { console.error(e); }
-      }
+      for (const g of this.groups) { const el = g.top ? null : groupPanel(g); if (el) panel.append(el); }
       panel.scrollTop = scroll;
       if (active) {
         const el = panel.querySelector(`[data-key="${CSS.escape(active)}"]`);

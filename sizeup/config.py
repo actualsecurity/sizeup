@@ -201,6 +201,7 @@ class Config:
     trains_rt_url: str = ""
     trains_gtfs_url: str = ""
     trains_bbox: tuple[float, float, float, float] = (-73.845, 40.900, -73.530, 41.060)
+    trains_rt_every_s: float = 5.0          # the realtime feed this often while someone looks (5 to 300 s)
     # [weather] (sizeup/weather.py, #132): NWS alerts, conditions and radar, NOAA tides, fetched by the hub.
     weather_enabled: bool = True
     weather_radar: bool = True
@@ -211,10 +212,11 @@ class Config:
     weather_tide_station: tuple[str, str] = ("8518091", "Rye Beach")
     weather_gauge_station: tuple[str, str] = ("8516945", "Kings Point")
     # [aircraft] (sizeup/aircraft.py, #155): aircraft near HPN, shortfinal's PCFD-focused design, read by the hub
-    # (or all-in-one) only while someone looks. feeds in order of preference: "adsblol" (ODbL, the default),
-    # "adsbfi" (personal, non-commercial use only: off unless listed), "receiver" (our own ADS-B receiver).
+    # (or all-in-one). feeds: "receiver" (our own ADS-B receiver: its positions first), "adsblol" (ODbL) and
+    # "adsbfi" (personal, non-commercial use: the user's decision, 2026-10-14), combined; the busier API is primary.
     aircraft_enabled: bool = True
-    aircraft_feeds: tuple[str, ...] = ("adsblol",)
+    aircraft_feeds: tuple[str, ...] = ("adsblol", "adsbfi")
+    aircraft_alarms: bool = True      # a 7500 / 7600 / 7700 squawk near HPN raises the alarm (and the push)
     aircraft_radius_nm: float = 15.0
     aircraft_ceiling_ft: float = 6000.0
     aircraft_adsblol_url: str = ""    # "" = adsb.lol's public API (sizeup/aircraft.py ADSBLOL_URL)
@@ -487,7 +489,7 @@ def _roads(data: dict) -> dict:
 
 def _trains(data: dict) -> dict:
     """[trains] -> Config fields. No section: on, the MTA's feeds, our stretch of the line (Mount Vernon East to Stamford)."""
-    tr = _take(data.get("trains", {}), "trains", {"enabled", "key", "rt_url", "gtfs_url", "bbox"})
+    tr = _take(data.get("trains", {}), "trains", {"enabled", "key", "rt_url", "gtfs_url", "bbox", "rt_every_s"})
     enabled = tr.get("enabled", True)
     if not isinstance(enabled, bool):
         raise ConfigError("trains.enabled: true or false")
@@ -502,7 +504,10 @@ def _trains(data: dict) -> dict:
             raise ConfigError(f"trains.{k}: an https:// address (plain http only to this machine); leave it out for the MTA's")
         urls[f"trains_{k}"] = u
     bbox = _bbox(tr.get("bbox", [-73.845, 40.900, -73.530, 41.060]), "trains.bbox", 1.0)
-    return dict(trains_enabled=enabled, trains_key=key, trains_bbox=bbox, **urls)
+    every = tr.get("rt_every_s", 5.0)
+    if isinstance(every, bool) or not isinstance(every, (int, float)) or not 5 <= every <= 300:
+        raise ConfigError("trains.rt_every_s: seconds between reads of the MTA's realtime feed while someone looks, 5 to 300")
+    return dict(trains_enabled=enabled, trains_key=key, trains_bbox=bbox, trains_rt_every_s=float(every), **urls)
 
 
 def _bbox(v, what: str, max_deg: float = 3.0) -> tuple[float, float, float, float]:
@@ -519,19 +524,22 @@ AIRCRAFT_FEEDS = ("receiver", "adsblol", "adsbfi")
 
 
 def _aircraft(data: dict, base: Path, sdrs: tuple[str, ...]) -> dict:
-    """[aircraft] and [aircraft.receiver] -> Config fields. No section: on, adsb.lol, 15 nm around HPN, no receiver.
+    """[aircraft] and [aircraft.receiver] -> Config fields. No section: on, adsb.lol + adsb.fi, 15 nm around HPN, the
+    emergency alarm on, no receiver. An enabled receiver is always a feed, and its positions come first.
     The receiver's sdr (a dongle for ADS-B) is never one of sizeup's own radios ([radio] sdrs / shared_device)."""
     ac = _take(data.get("aircraft", {}), "aircraft", {"enabled", "feeds", "radius_nm", "ceiling_ft", "adsblol_url",
-                                                      "adsbfi_url", "registry", "receiver"})
+                                                      "adsbfi_url", "registry", "receiver", "alarms"})
     if not isinstance(ac.get("receiver", {}), dict):
         raise ConfigError("aircraft.receiver: a table ([aircraft.receiver])")
     rc = _take(ac.get("receiver", {}), "aircraft.receiver", {"enabled", "sdr", "json_1090", "json_978"})
     enabled, registry, receiver = ac.get("enabled", True), ac.get("registry", True), rc.get("enabled", False)
-    if not all(isinstance(x, bool) for x in (enabled, registry, receiver)):
-        raise ConfigError("aircraft.enabled / aircraft.registry / aircraft.receiver.enabled: true or false")
-    feeds = ac.get("feeds", ["adsblol"])
+    alarms = ac.get("alarms", True)
+    if not all(isinstance(x, bool) for x in (enabled, registry, receiver, alarms)):
+        raise ConfigError("aircraft.enabled / registry / alarms / aircraft.receiver.enabled: true or false")
+    feeds = ac.get("feeds", ["adsblol", "adsbfi"])
     if not (isinstance(feeds, list) and feeds and all(f in AIRCRAFT_FEEDS for f in feeds) and len(set(feeds)) == len(feeds)):
-        raise ConfigError('aircraft.feeds: in order of preference, from "receiver", "adsblol", "adsbfi" (each once)')
+        raise ConfigError('aircraft.feeds: from "receiver", "adsblol", "adsbfi" (each once; the APIs in the order to '
+                          'prefer on a tie)')
     try:
         radius, ceiling = float(ac.get("radius_nm", 15)), float(ac.get("ceiling_ft", 6000))
     except (TypeError, ValueError):
@@ -554,10 +562,10 @@ def _aircraft(data: dict, base: Path, sdrs: tuple[str, ...]) -> dict:
             raise ConfigError(f"aircraft.receiver.{k}: the decoder's aircraft.json: a file path or an http(s):// address")
         srcs[f"aircraft_receiver_{k.split('_')[1]}"] = (u if not u or "://" in u or Path(u).is_absolute()
                                                          else str((base / u).resolve()))
-    if "receiver" in feeds and not (receiver and any(srcs.values())):
+    if ("receiver" in feeds or receiver) and not (receiver and any(srcs.values())):
         raise ConfigError('aircraft.feeds: "receiver" needs [aircraft.receiver] enabled = true and json_1090 or json_978')
     if receiver and "receiver" not in feeds:
-        raise ConfigError('aircraft.receiver.enabled: list "receiver" in aircraft.feeds too (first, to prefer it)')
+        feeds = ["receiver", *feeds]      # user, 2026-10-14: "primary local SDR on ADSB, secondary the above sources"
     sdr = str(rc.get("sdr", "")).strip()
     if sdr:
         if not re.fullmatch(r"[\w.-]{1,32}", sdr):
@@ -567,7 +575,8 @@ def _aircraft(data: dict, base: Path, sdrs: tuple[str, ...]) -> dict:
                               "tools; give the dongle a name first (rtl_eeprom -s adsb)")
         if sdr in sdrs:
             raise ConfigError(f"aircraft.receiver.sdr: {sdr} is one of sizeup's own radios ([radio] sdrs / shared_device)")
-    return dict(aircraft_enabled=enabled, aircraft_feeds=tuple(feeds), aircraft_radius_nm=radius, aircraft_ceiling_ft=ceiling,
+    return dict(aircraft_enabled=enabled, aircraft_feeds=tuple(feeds), aircraft_alarms=alarms, aircraft_radius_nm=radius,
+                aircraft_ceiling_ft=ceiling,
                 aircraft_registry=registry, aircraft_receiver=receiver, aircraft_sdr=sdr, **urls, **srcs)
 
 
@@ -601,7 +610,8 @@ def _weather(data: dict) -> dict:
 
 
 GIS_LAYER_KEYS = {"key", "label", "url", "group", "kind", "style", "minzoom", "fields", "refresh", "bbox", "where", "on",
-                  "tiled", "simplify_m", "licence", "page", "enabled", "asof", "ours_field", "drop_ours", "note", "icon", "sub"}
+                  "tiled", "simplify_m", "licence", "page", "enabled", "asof", "ours_field", "drop_ours", "note", "icon", "sub",
+                  "trains_field"}
 
 
 ICON_RE = re.compile(r"[a-z][a-z0-9-]{0,31}")
@@ -652,7 +662,8 @@ def _gis_layer(raw: dict, i: int, base=None):
         if not isinstance(d.get(k, False), bool):
             raise ConfigError(f"{where}.{k}: true or false")
     bbox = _bbox(d["bbox"], f"{where}.bbox") if d.get("bbox") else None
-    text = {k: str(d.get(k, "")).strip() for k in ("group", "where", "licence", "page", "asof", "ours_field", "note", "icon", "sub")}
+    text = {k: str(d.get(k, "")).strip() for k in ("group", "where", "licence", "page", "asof", "ours_field", "note", "icon", "sub",
+                                          "trains_field")}
     if not text["group"]:
         text["group"] = "County GIS"
     if text["icon"] and not ICON_RE.fullmatch(text["icon"]):
@@ -661,7 +672,8 @@ def _gis_layer(raw: dict, i: int, base=None):
                  fields=tuple(fields), refresh=refresh, bbox=bbox, where=text["where"], on=bool(d.get("on", False)),
                  tiled=bool(d.get("tiled", False)), simplify_m=simplify_m, licence=text["licence"], page=text["page"],
                  enabled=bool(d.get("enabled", True)), asof=text["asof"], ours_field=text["ours_field"],
-                 drop_ours=bool(d.get("drop_ours", False)), note=text["note"], icon=text["icon"], sub=text["sub"])
+                 drop_ours=bool(d.get("drop_ours", False)), note=text["note"], icon=text["icon"], sub=text["sub"],
+                 trains_field=text["trains_field"])
 
 
 def _gis(data: dict) -> dict:

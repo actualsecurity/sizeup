@@ -217,7 +217,7 @@
     border-color: var(--warn); background: color-mix(in srgb, var(--warn) 12%, var(--card)); }
   .ov-grid { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(19rem, 1fr); gap: var(--gutter); align-items: start; }
   /* the map and the cameras (camwall.js, #147): one view the height of the screen, its panes by the layout
-     (data-layout on .ov-grid: map | cameras | side | stacked | overlay; data-swap: the cameras on top) */
+     (data-layout on .ov-grid: map | cameras | side | stacked; data-swap: the cameras on top) */
   .ov-view {
     position: sticky; inset-block-start: 0; display: flex; flex-direction: column; min-inline-size: 0; min-block-size: var(--map-h-min);
     block-size: calc(100dvh - var(--hdr-h) - 2 * var(--gutter) - var(--ctl) - var(--gutter));
@@ -309,7 +309,7 @@
   .cw-down.open { grid-column: 1 / -1; }
   .cw-down-head { display: flex; align-items: center; gap: var(--s-2); justify-content: flex-start; inline-size: 100%;
     font-weight: 400; color: var(--text-2); background: none; border-color: transparent; }
-  /* the Overlay layout (camoverlay.js, #147): tiles over the map at their cameras, leader lines to the spot */
+  /* the camera overlay (camoverlay.js, #147; a Layers toggle, #168): tiles over the map at their cameras, leader lines to the spot */
   .co-layer { position: absolute; inset: 0; z-index: 1; pointer-events: none; overflow: hidden; }
   .co-lines { position: absolute; inset: 0; inline-size: 100%; block-size: 100%; overflow: visible; }
   .co-leader line { stroke: var(--text); stroke-width: 1.5; stroke-opacity: 0.85; }
@@ -339,8 +339,8 @@
   html.board .ov-grid[data-layout="stacked"] { grid-template-columns: minmax(0, 2fr) minmax(16rem, 1fr); }
 
   @container (width < 60rem) {
-    .ov-grid:is([data-layout="map"], [data-layout="cameras"], [data-layout="overlay"]) { grid-template-columns: minmax(0, 1fr); }
-    .ov-grid:is([data-layout="map"], [data-layout="overlay"]) .ov-view { position: relative; block-size: 46vh; min-block-size: var(--map-h); }
+    .ov-grid:is([data-layout="map"], [data-layout="cameras"]) { grid-template-columns: minmax(0, 1fr); }
+    .ov-grid[data-layout="map"] .ov-view { position: relative; block-size: 46vh; min-block-size: var(--map-h); }
     .ov-grid[data-layout="cameras"] .ov-view { position: relative; block-size: auto; min-block-size: 0; }
     .ov-grid[data-layout="cameras"] .cw-wall { flex: 0 0 auto; overflow: visible; }
     /* side by side and stacked keep the events on the right down to a narrower middle column (the user's ask) */
@@ -358,6 +358,6 @@
     .ov-grid[data-layout="cameras"] .cw-wall { flex: 0 0 auto; overflow: visible; }
   }
   /* a phone: Map and Cameras only (camwall.js shows the map for the others) */
-  @media (max-width: 640px) { .ov-layout button:is([data-layout="side"], [data-layout="stacked"], [data-layout="overlay"]) { display: none; } }
+  @media (max-width: 640px) { .ov-layout button:is([data-layout="side"], [data-layout="stacked"]) { display: none; } }
   @media (max-width: 640px) { .cm-big { inline-size: 100vw; block-size: 100%; border-radius: 0; } }
 }

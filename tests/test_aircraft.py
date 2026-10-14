@@ -24,13 +24,13 @@ import threading
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 
 import pytest
 
 from sizeup import aircraft as A
 from sizeup.aircraft import (ARRIVING, DEPARTING, DROP_S, GROUND, LOW, OVERFLIGHT, STALE_S, AircraftLayer, Plane,
-                             Procedures, ReceiverFeed, Registry, Snapshot, Tracks, build_registry, classify, merge,
+                             Procedures, ReceiverFeed, Registry, Snapshot, Tracks, build_registry, classify, combine, merge,
                              parse_snapshot)
 from sizeup.config import ConfigError, load
 from tests.test_cloud import HubRun, hub_cfg
@@ -260,18 +260,6 @@ def test_nothing_is_fetched_until_someone_looks():
     assert len(fetch.calls) == n                                   # nobody looking any more: idle
 
 
-def test_a_rate_limited_feed_rests_and_the_next_one_carries_on():
-    fetch, clock = FakeFetch(codes={"https://lol.example": 429}), Clock()
-    ly = layer(clock, fetch, feeds=("adsblol", "adsbfi"), adsbfi_url=FI_URL)
-    assert ly.refresh() and ly.public()["feed"]["key"] == "adsbfi" and "40 s" in ly.resting["adsblol"][1]
-    n = sum("lol.example" in c for c in fetch.calls)
-    clock.t += 10
-    ly.refresh()
-    assert sum("lol.example" in c for c in fetch.calls) == n       # still resting
-    alone = layer(Clock(), FakeFetch(codes={"https://lol.example": 500}))
-    assert alone.refresh() is False and "adsb.lol" in alone.public()["error"] and alone.st["next"] > alone.clock()
-
-
 def test_off_or_unconfigured_says_so():
     off = AircraftLayer(enabled=False, fetch=FakeFetch(), log=lambda m: None)
     assert not off.configured and "off" in off.why_not() and off.start() is off and off._thread is None
@@ -322,7 +310,7 @@ def test_a_named_adsb_dongle_is_reported_never_claimed(tmp_path):
     held = {"adsb": {"app": "shortfinal", "pid": 1, "mode": "ADS-B"}}
     ly = layer(Clock(r["now"] + 1), feeds=("receiver", "adsblol"), receiver=True, receiver_1090=str(tmp_path / "a.json"),
                sdr="adsb", sdr_name="V3", devices=lambda: [(0, "RTL2838UHIDIR", "adsb")], holder=held.get)
-    assert ly.refresh() and ly.public()["feed"]["key"] == "receiver"
+    assert ly.refresh() and ly.public()["feeds"][0]["role"] == "receiver" and ly.public()["feeds"][0]["healthy"]
     rx = ly.public()["receiver"]
     assert rx["present"] is True and rx["held_by"] == {"app": "shortfinal", "mode": "ADS-B"} and rx["name"] == "V3"
     assert rx["bands"]["1090"]["n"] == 9
@@ -343,7 +331,7 @@ def test_the_aircraft_section(tmp_path):
     p = tmp_path / "config.toml"
     p.write_text("")
     c = load(p)
-    assert c.aircraft_enabled and c.aircraft_feeds == ("adsblol",) and not c.aircraft_receiver and c.aircraft_sdr == ""
+    assert c.aircraft_enabled and c.aircraft_feeds == ("adsblol", "adsbfi") and c.aircraft_alarms and not c.aircraft_receiver and c.aircraft_sdr == ""
     assert c.aircraft_radius_nm == 15 and c.aircraft_registry and "adsb" not in c.sdr_ignore
     p.write_text('[radio]\nsdrs = ["v4"]\nsdr_ignore = ["x1"]\n[aircraft]\nfeeds = ["receiver", "adsblol"]\n'
                  '[aircraft.receiver]\nenabled = true\nsdr = "adsb"\njson_1090 = "run/aircraft.json"\n'
@@ -353,9 +341,11 @@ def test_the_aircraft_section(tmp_path):
     assert c.sdr_ignore == ("x1", "adsb")                                   # sizeup's radios never use the ADS-B dongle
     assert c.aircraft_receiver_1090 == str((tmp_path / "run" / "aircraft.json").resolve())
     assert c.aircraft_receiver_978.startswith("http://192.168.1.20/")
+    p.write_text('[aircraft.receiver]\nenabled = true\njson_1090 = "/run/readsb/aircraft.json"\n')
+    assert load(p).aircraft_feeds == ("receiver", "adsblol", "adsbfi")     # an enabled receiver comes first by itself
     for bad in ('[aircraft]\nfeeds = ["opensky"]', '[aircraft]\nfeeds = []', '[aircraft]\nfeeds = ["receiver"]',
                 '[aircraft]\nradius_nm = 200', '[aircraft]\nenabled = "yes"', '[aircraft]\nadsblol_url = "http://x.example/{lat}"',
-                '[aircraft.receiver]\nenabled = true\njson_1090 = "/x.json"',
+                '[aircraft.receiver]\nenabled = true', '[aircraft]\nalarms = "on"',
                 '[aircraft.receiver]\nsdr = "00000001"', '[radio]\nsdrs = ["adsb"]\n[aircraft.receiver]\nsdr = "adsb"',
                 '[aircraft.receiver]\njson_978 = "ftp://x/aircraft.json"', '[aircraft]\ncolour = 1', '[aircraft]\nreceiver = 1'):
         p.write_text(bad + "\n")
@@ -396,7 +386,7 @@ def test_the_hub_serves_aircraft_only_when_asked_and_answers_304_when_unchanged(
     lol = FakeLol()
     monkeypatch.setattr(A, "WAIT_FIRST_S", 10.0)
     h = HubRun(hub_cfg(tmp_path, aircraft_adsblol_url=f"http://127.0.0.1:{lol.port}/v2/point/{{lat}}/{{lon}}/{{radius}}",
-                       aircraft_registry=False))
+                       aircraft_registry=False, aircraft_alarms=False))       # no emergency watch: nothing unasked
     try:
         time.sleep(1.5)
         assert lol.hits == []                                     # nobody looking: nothing fetched
@@ -431,7 +421,7 @@ def test_the_aircraft_layer_only_ever_asks_the_hub_and_never_moves_a_plane_by_gu
     assert '<script src="/static/aircraft.js"></script>' in html
     assert html.index("/static/maplayers.js") < html.index("/static/aircraft.js")
     assert "MapLayers.addGroup" in js and '"/api/cad/aircraft"' in js
-    assert "api.adsb.lol" not in js and "adsb.fi" not in js and "faa.gov" not in js and "opensky" not in js.lower()
+    assert "api.adsb.lol" not in js and "opendata.adsb.fi" not in js and "faa.gov" not in js and "opensky" not in js.lower()
     code = re.sub(r"//.*", "", js)
     assert "localStorage" not in code and "EventSource" not in code
     # positions are the feed's: no dead reckoning, no extrapolation from speed and track
@@ -444,3 +434,315 @@ def test_the_aircraft_layer_only_ever_asks_the_hub_and_never_moves_a_plane_by_gu
     assert 'id="i-aircraft"' in (STATIC / "icons.svg").read_text()
     for cls in ("ac-list", "ac-row", "ac-tag", "ac-stale", "ac-emerg"):
         assert f".{cls}" in (STATIC / "cadmap.css").read_text()
+
+
+# ---- two APIs combined, the busier one primary, failover (user, 2026-10-14, #161) ------------------------------------------
+# adsbfi_hpn_3.json and adsblol_hpn_3.json: the two answers for 15 nm around HPN recorded half a second apart on
+# 2026-10-14 at 15:44:00 EDT: the same ten aircraft, each feed fresher for some of them.
+
+LOL3 = (FIX / "adsblol_hpn_3.json").read_bytes()
+FI3 = (FIX / "adsbfi_hpn_3.json").read_bytes()
+T3 = 1792007040.501
+
+
+class Feeds:
+    """adsb.lol and adsb.fi by address: each a list of answers (the last repeats), or an HTTP code to refuse with."""
+
+    def __init__(self, lol=(LOL3,), fi=(FI3,)):
+        self.answers = {"lol.example": list(lol), "fi.example": list(fi)}
+        self.calls: list[str] = []
+        self.retry_after: str | None = None
+
+    def __call__(self, url, timeout, limit, headers=None):
+        host = url.split("/")[2]
+        self.calls.append(host)
+        if url.endswith(".zip"):
+            return 200, {}, FAA
+        q = self.answers[host]
+        a = q.pop(0) if len(q) > 1 else q[0]
+        if isinstance(a, int):
+            if a == 0:
+                raise URLError("timed out")
+            raise HTTPError(url, a, f"HTTP {a}", {"Retry-After": self.retry_after} if self.retry_after else {}, None)
+        return 200, {}, a
+
+
+def dual(clock=None, fetch=None, **kw):
+    return layer(clock or Clock(T3 + 0.5), fetch or Feeds(), feeds=("adsblol", "adsbfi"), adsbfi_url=FI_URL, **kw)
+
+
+def lol_without(hexes) -> bytes:
+    d = json.loads(LOL3)
+    d["ac"] = [a for a in d["ac"] if a["hex"] not in hexes]
+    return json.dumps(d).encode()
+
+
+def test_both_feeds_are_combined_and_the_freshest_position_wins():
+    lol, fi = parse_snapshot(json.loads(LOL3)), parse_snapshot(json.loads(FI3))
+    m = {p.hex: p for p in combine([("adsblol", lol), ("adsbfi", fi)]).planes}
+    assert len(m) == 10
+    L, F = {p.hex: p for p in lol.planes}, {p.hex: p for p in fi.planes}
+    for h, p in m.items():
+        t_lol, t_fi = lol.now - L[h].seen_pos, fi.now - F[h].seen_pos
+        assert p.feed == ("adsblol" if t_lol > t_fi else "adsbfi"), h
+    assert m["a5263e"].feed == "adsbfi" and m["a5b829"].feed == "adsblol"     # 1.7 s vs 0.1 s; 0.0 s vs 0.3 s
+
+
+def test_an_aircraft_only_one_feed_has_is_kept():
+    ly = dual(fetch=Feeds(lol=(lol_without({"ab282b", "a5263e"}),)))
+    ly.refresh()
+    src = {a["hex"]: a["src"] for a in ly.public()["aircraft"]}
+    assert src.get("ab282b") == "adsbfi"                                       # RPA5623 3 nm out: only adsb.fi had it
+    d = ly.public()
+    assert {f["key"]: f["n"] for f in d["feeds"]} == {"adsblol": 8, "adsbfi": 10}
+    assert d["credit"] == "adsb.lol (ODbL) + adsb.fi open data" or d["credit"] == "adsb.fi open data + adsb.lol (ODbL)" \
+        or d["credit"] in ("adsb.lol (ODbL)", "adsb.fi open data")
+
+
+def test_the_feed_giving_more_aircraft_is_primary_and_a_tie_goes_to_the_config_order():
+    ly = dual(fetch=Feeds(lol=(lol_without({"ab282b", "a5263e", "a09101"}),)))
+    assert ly.primary().key == "adsblol"                                       # nothing read yet: config order
+    ly.refresh()
+    assert ly.primary().key == "adsbfi"                                        # 10 against 7
+    assert ly.interval(ly.feeds[1], True) == A.PRIMARY_S == 5 and ly.interval(ly.feeds[0], True) == A.SECONDARY_S == 10
+    tie = dual()
+    tie.refresh()
+    assert tie.primary().key == "adsblol"
+
+
+def test_a_429_rests_that_feed_and_the_other_carries_on_then_it_comes_back():
+    clock = Clock(T3 + 0.5)
+    fetch = Feeds(lol=(429, 429, LOL3))
+    ly = dual(clock, fetch)
+    assert ly.refresh()                                                        # adsb.fi answered
+    st = ly.feeds[0].st
+    assert st["rest_until"] - clock.t == A.RATE_LIMITED_MIN_S and "429" in st["why"]   # no Retry-After: 10 s
+    assert ly.primary().key == "adsbfi" and {a["src"] for a in ly.public()["aircraft"]} == {"adsbfi"}
+    assert ly.public()["feeds"][0]["resting"]
+    clock.t += 3
+    n = fetch.calls.count("lol.example")
+    ly.asked = clock.t
+    ly.tick()
+    assert fetch.calls.count("lol.example") == n                               # still resting
+    clock.t += 8
+    ly.feeds[1].st["next"] = 0
+    ly.tick()                                                                  # second 429: 5 s x 2, at least 10 s
+    assert st["fails"] == 2 and st["rest_until"] - clock.t == 10
+    clock.t += 11
+    ly.tick()
+    assert st["fails"] == 0 and not st["why"] and st["ok"] == clock.t           # back
+    fetch2 = Feeds(lol=(429,))
+    fetch2.retry_after = "40"
+    ly2 = dual(fetch=fetch2)
+    ly2.refresh()
+    assert ly2.feeds[0].st["rest_until"] - ly2.clock() == 40                    # its Retry-After
+
+
+def test_errors_and_timeouts_back_off_exponentially_and_with_both_down_the_layer_says_so():
+    clock = Clock(T3 + 0.5)
+    ly = dual(clock, Feeds(lol=(0,), fi=(503,)))
+    assert ly.refresh() is False
+    waits = []
+    for _ in range(4):
+        clock.t = max(f.st["rest_until"] for f in ly.feeds) + 0.1
+        ly.refresh()
+        waits.append(round(ly.feeds[0].st["rest_until"] - clock.t))
+    assert waits == [10, 20, 40, 80] and "no feed answering" in ly.public()["error"]
+    assert "timed out" in ly.public()["error"] and "503" in ly.public()["error"]
+
+
+def test_while_nobody_looks_only_the_emergency_watch_reads_and_slower():
+    clock = Clock(T3 + 0.5)
+    fetch = Feeds()
+    ly = dual(clock, fetch)
+    ly.tick()
+    assert fetch.calls == []                                                   # no watch: nothing
+    ly.on_emergency = lambda ev: 1
+    ly.tick()
+    assert fetch.calls == ["lol.example"]                                      # the primary only
+    assert ly.interval(ly.feeds[0], False) == A.WATCH_S == 15 and ly.interval(ly.feeds[1], False) is None
+    off = dual(clock, Feeds(), watch=False)
+    off.on_emergency = lambda ev: 1
+    off.tick()
+    assert off.fetch.calls == []
+
+
+def test_our_receiver_comes_first_and_the_apis_fill_in_and_take_over_when_it_is_stale(tmp_path):
+    # our receiver hearing two of the recorded aircraft (adsb.lol's records in readsb's layout), with older fixes
+    r = {"now": T3, "aircraft": [dict(a, seen_pos=5.0, lat=a["lat"] + 0.001) for a in json.loads(LOL3)["ac"]
+                                 if a["hex"] in ("ab282b", "a35692")]}
+    (tmp_path / "a.json").write_text(json.dumps(r))
+    clock = Clock(T3 + 0.5)
+    ly = layer(clock, Feeds(), feeds=("receiver", "adsblol", "adsbfi"), adsbfi_url=FI_URL, receiver=True,
+               receiver_1090=str(tmp_path / "a.json"))
+    ly.refresh()
+    src = {a["hex"]: a["src"] for a in ly.public()["aircraft"]}
+    assert src["ab282b"] == "receiver"                                         # it hears it: its position, though older
+    assert src["a90a5f"] in ("adsblol", "adsbfi")                              # it doesn't: the APIs fill in
+    assert ly.receiver_healthy()
+    (tmp_path / "a.json").unlink()
+    clock.t += A.RECEIVER_KEEP_S + 1
+    for f in ly.feeds:
+        f.st["rest_until"] = f.st["next"] = 0
+    ly.refresh()
+    assert not ly.receiver_healthy() and "receiver" not in {a["src"] for a in ly.public()["aircraft"]}
+
+
+def test_the_layer_says_which_feed_each_aircraft_came_from():
+    js = (STATIC / "aircraft.js").read_text()
+    assert "our receiver" in js and "adsb.fi" in js and "adsb.lol" in js and "a.src" in js and "d.credit" in js
+
+
+# ---- the emergency alarm and push (user, 2026-10-14: "yes they should") --------------------------------------------------
+
+from sizeup.cad import alarms as alarms_mod                                 # noqa: E402
+from sizeup.notify import Notifier                                          # noqa: E402
+from tests.test_alarms import FakeNtfy                                     # noqa: E402
+from tests.test_cad import make_cad                                        # noqa: E402
+
+
+@pytest.fixture
+def ntfy():
+    f = FakeNtfy()
+    yield f
+    f.close()
+
+
+def squawking(hex_="a4d227", squawk="7700", t=T1, lat=41.0400, lon=-73.6860, alt=900, seen=0.2, **kw) -> Snapshot:
+    """N41DW (from the recording) on the ILS 34 at 900 ft, squawking `squawk`."""
+    return Snapshot(t, (Plane(hex=hex_, flight="N41DW", reg="N41DW", type="SR22", alt_baro=alt, gs=80.0, track=330.0,
+                              baro_rate=-500.0, squawk=squawk, lat=lat, lon=lon, seen=seen, seen_pos=seen, category="A1",
+                              source="adsb", feed="adsblol", **kw),))
+
+
+class Watch:
+    """An AircraftLayer's watch driven by hand: snapshot in, the CAD's alarms out."""
+
+    def __init__(self, tmp_path, notifier=None, drill=False):
+        self.cad = make_cad(tmp_path)
+        if drill:
+            self.cad.settings_post("alarms", {"action": "set", "key": "drill", "value": True, "operator": "Corey"})
+        self.cad.alarms.notifier = notifier
+        self.clock = Clock(T1)
+        self.ly = layer(self.clock)
+        self.ly.on_emergency = self.cad.alarms.on_aircraft
+        self.ly.on_clear = self.cad.alarms.aircraft_cleared
+
+    def feed(self, snap: Snapshot, dt: float = 5.0):
+        self.clock.t += dt
+        snap = Snapshot(self.clock.t, snap.planes)
+        self.ly.tracks.update(snap)
+        self.ly.view = self.ly._view()
+        self.ly._watch(self.clock.t)
+
+    def alarms(self):
+        return self.cad.alarms.history()
+
+
+def test_a_7700_near_hpn_raises_one_alarm_with_what_and_where_and_a_push(tmp_path, ntfy):
+    w = Watch(tmp_path, Notifier(ntfy.url, "sizeup-test-alarms-0123", lambda m: None, sleep=lambda s: None))
+    for _ in range(4):
+        w.feed(squawking())
+    al = w.alarms()
+    assert len(al) == 1 and al[0]["level"] == "alarm" and al[0]["source"] == "adsb" and al[0]["channel"] == "ADS-B (public data)"
+    a = al[0]
+    assert a["what"] == "aircraft emergency: squawk 7700 (emergency)" and a["who"] == "N41DW"
+    assert a["text"].startswith("N41DW, SR22 · squawk 7700 (emergency) · 900 ft, descending 500 ft/min · ")
+    assert "nm SE of HPN" in a["text"] and "arriving HPN on the ILS 34" in a["text"] and "via adsb.lol" in a["text"]
+    assert a["text"].endswith("From public ADS-B data, not an official notification.")
+    assert w.cad.state()["alarms"]["open"][0]["id"] == a["id"]
+    assert w.cad.alarms.notifier.flush(5) and len(ntfy.got) == 1
+    m = ntfy.got[0]
+    assert m["title"] == "AIRCRAFT EMERGENCY: SQUAWK 7700 (EMERGENCY) · N41DW (SR22) on ADS-B (public data)"
+    assert m["priority"] == 5 and "airplane" in m["tags"] and "From public ADS-B data, not an official notification" in m["message"]
+    assert m["topic"] == "sizeup-test-alarms-0123"
+
+
+def test_a_flicker_does_not_re_alarm_and_the_end_clears_it_with_a_push(tmp_path, ntfy):
+    w = Watch(tmp_path, Notifier(ntfy.url, "sizeup-test-alarms-0123", lambda m: None, sleep=lambda s: None))
+    w.feed(squawking())
+    w.feed(squawking(squawk="1200"), 20)                    # one answer without it ...
+    w.feed(squawking(), 20)                                 # ... and back within the hold: the same alarm
+    assert len(w.alarms()) == 1 and w.alarms()[0]["ack_at"] is None
+    w.feed(squawking(squawk="1200"), 30)
+    w.feed(squawking(squawk="1200"), A.CLEAR_HOLD_S)          # a minute without it: ended
+    a = w.alarms()[0]
+    assert a["ack_by"] == "ADS-B: squawk ended (now 1200)" and a["ack_at"] and not w.cad.state()["alarms"]["open"]
+    w.feed(squawking(), 60)                                 # 7700 again within half an hour: no new alarm
+    assert len(w.alarms()) == 1
+    assert w.cad.alarms.notifier.flush(5) and [m["title"].split(" · ")[0] for m in ntfy.got] == [
+        "AIRCRAFT EMERGENCY: SQUAWK 7700 (EMERGENCY)", "Ended: AIRCRAFT EMERGENCY: SQUAWK 7700 (EMERGENCY)"]
+    assert ntfy.got[1]["priority"] == 3 and ntfy.got[1]["message"].startswith("squawk ended (now 1200) at ")
+
+
+def test_each_emergency_kind_and_the_aircrafts_own_status(tmp_path):
+    w = Watch(tmp_path)
+    w.feed(squawking(squawk="7500"))
+    w.feed(Snapshot(0, squawking(squawk="7600").planes + squawking(hex_="a53c44", squawk="4655", emergency="minfuel",
+                                                                  lat=41.03).planes))
+    whats = sorted(a["what"] for a in w.alarms())
+    assert whats == ["aircraft emergency: minimum fuel", "aircraft emergency: squawk 7500 (hijack)",
+                     "aircraft emergency: squawk 7600 (radio failure)"]
+
+
+def test_only_inside_the_area_below_18000_ft_and_from_a_fresh_message(tmp_path):
+    w = Watch(tmp_path)
+    w.feed(squawking(lat=41.40, lon=-73.70))                # 20 nm north
+    w.feed(squawking(alt=35000))                            # over the top at FL350
+    w.feed(squawking(seen=40.0))                            # a 40 s old message
+    assert w.alarms() == []
+
+
+def test_alarms_are_rate_limited(tmp_path):
+    w = Watch(tmp_path)
+    planes = tuple(squawking(hex_=f"a0000{i}", lat=41.03 + i * 0.005).planes[0] for i in range(8))
+    w.feed(Snapshot(0, planes))
+    assert len(w.alarms()) == A.MAX_ALARMS == 6
+
+
+def test_drill_mode_marks_the_aircraft_alarm_and_its_push(tmp_path, ntfy):
+    w = Watch(tmp_path, Notifier(ntfy.url, "sizeup-test-alarms-0123", lambda m: None, sleep=lambda s: None), drill=True)
+    w.feed(squawking())
+    assert w.alarms()[0]["drill"] and alarms_mod.line(w.alarms()[0]).startswith("DRILL — EMERGENCY: N41DW aircraft emergency")
+    assert w.cad.alarms.notifier.flush(5) and ntfy.got[0]["title"].startswith("DRILL: AIRCRAFT EMERGENCY")
+    assert ntfy.got[0]["priority"] == 3 and "not a real emergency" in ntfy.got[0]["message"]
+
+
+def test_no_topic_raises_the_alarm_only_and_tapouts_topics_are_never_used(tmp_path):
+    w = Watch(tmp_path, None)
+    w.feed(squawking())
+    assert len(w.alarms()) == 1                             # the alarm, no push
+    for topic in ("pcfd-phone-prealert", "pcfd-status"):
+        n = Notifier("http://127.0.0.1:9", topic, lambda m: None)
+        assert not n.enabled and n.send("x", "y") is False
+
+
+def test_an_airport_event_takes_the_aircraft_alarm(tmp_path):
+    w = Watch(tmp_path)
+    inc = w.cad.create({"type": "AIRPORT", "address": "240 Airport Rd", "operator": "Lt. Ruiz"})
+    w.feed(squawking())
+    a = w.alarms()[0]
+    assert a["incident_id"] == inc["id"]
+    assert any("aircraft emergency: squawk 7700" in e.get("text", "") for e in w.cad.full(inc["id"])["events"] if e["kind"] == "alarm")
+
+
+def test_an_old_alarms_table_gets_the_new_columns(tmp_path):
+    import sqlite3
+    db = sqlite3.connect(tmp_path / "cad.sqlite")
+    db.execute("CREATE TABLE alarms (id INTEGER PRIMARY KEY, traffic_id TEXT NOT NULL UNIQUE, at REAL NOT NULL, end REAL, "
+               "created_at REAL NOT NULL, updated_at REAL NOT NULL, level TEXT NOT NULL, emergency INTEGER NOT NULL DEFAULT 0, "
+               "via TEXT NOT NULL DEFAULT '', keywords TEXT NOT NULL DEFAULT '[]', spans TEXT NOT NULL DEFAULT '[]', "
+               "text TEXT NOT NULL DEFAULT '', named TEXT NOT NULL DEFAULT '[]', channel TEXT NOT NULL DEFAULT '', talkgroup "
+               "INTEGER, unit TEXT NOT NULL DEFAULT '', rig TEXT NOT NULL DEFAULT '', radio_id TEXT NOT NULL DEFAULT '', drill "
+               "INTEGER NOT NULL DEFAULT 0, incident_id INTEGER, ack_by TEXT NOT NULL DEFAULT '', ack_at REAL)")
+    db.commit()
+    db.close()
+    w = Watch(tmp_path)
+    w.feed(squawking())
+    assert w.alarms()[0]["source"] == "adsb"
+
+
+def test_the_app_wires_the_watch_to_the_alarms_on_the_cad_of_record_only():
+    src = (Path(A.__file__).parent / "app.py").read_text()
+    assert "self.aircraft.on_emergency = lambda ev: None if self.forwarding() else self.cad.alarms.on_aircraft(ev)" in src
+    assert "self.aircraft.on_clear" in src
