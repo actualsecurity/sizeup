@@ -252,9 +252,11 @@ def test_a_key_up_into_the_background_is_not_held_open_by_its_id(over_db):
     assert 1.1 < segs[0].end - segs[0].start < 1.7
     assert [p.unit_hex for b in segs[0].bursts for p in decode(b.astype(np.float32), RATE)] == ["6301"]
     assert not lit[end + int(4.5 * RATE / FRAME):].any()                       # closed within 4.5 s, and stays
-    # Without drop_db (what the station ran: NfmReceiver dropped it on start) it is the 16:32 log.
-    segs, _, _ = squelch_trace(audio)
-    assert len(segs) == 1 and segs[0].end - segs[0].start > 50
+    # Without drop_db (what the station ran: NfmReceiver dropped it on start) it was the 16:32 log (51 s).
+    # Since #116 nothing on the carrier for 30 s ends it there too: the key-up is kept, the rest dropped.
+    segs, lit, _ = squelch_trace(audio)
+    assert len(segs) == 1 and segs[0].reason == "steady" and 1.1 < segs[0].end - segs[0].start < 1.9
+    assert not lit[end + int(31 * RATE / FRAME):].any()
 
 
 def test_keying_up_silently_then_talking_keeps_the_talking():

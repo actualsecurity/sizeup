@@ -1808,7 +1808,7 @@ class App:
         for r in self.receivers:
             st = r.status()
             if self.shared and r.channel.label not in self.assign.values():
-                st.update(state="off", detail=self._off_detail(), open=False, quieting_db=None)
+                st.update(state="off", detail=self._off_detail(), open=False, quieting_db=None, open_s=None, stuck=False)
             out.append(st)
         if self.p25:
             st = self.p25.status()

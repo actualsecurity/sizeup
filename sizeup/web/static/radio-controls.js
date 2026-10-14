@@ -119,22 +119,43 @@ window.RadioControls = (() => {
 
   // ---- receivers, SDR, disk -------------------------------------------------------------------------
 
+  // m:ss for how long a receiver's squelch has been open
+  const mmss = (s) => { const n = Math.max(0, Math.floor(s || 0)); return `${Math.floor(n / 60)}:${String(n % 60).padStart(2, "0")}`; };
+
   function renderRadios() {
     const radios = (st.state && st.state.radios) || [];
     syncList(st.n.radios, radios, {
       key: (r) => r.label,
-      sig: (r) => JSON.stringify([r.state, r.open, r.detail, r.mhz, r.quieting_db, r.restarts, r.word]),
+      sig: (r) => JSON.stringify([r.state, r.open, r.detail, r.mhz, r.quieting_db, r.restarts, r.word, r.open_s, r.stuck,
+                                  r.hiss_db, r.floor_db, r.open_db, r.close_db]),
       make: () => el("span", "pill radio"),
       fill: (node, r) => {
         const state = r.state || "unknown";
-        node.className = `pill radio ${state}${r.open && state === "ok" ? " open" : ""}`;
-        const word = r.open && state === "ok" ? "● RX" : r.word || (RADIO_STATE[state] ?? state);
+        const on = !!r.open && state === "ok";
+        // Open without a break for over 2 minutes (the station's STUCK_S): longer than any page, so most likely
+        // noise holding the squelch (GitHub #116). Amber, with how long; the station logged it once.
+        const stuck = on && !!r.stuck;
+        node.className = `pill radio ${state}${on ? " open" : ""}${stuck ? " stuck" : ""}`;
+        const word = stuck ? `open ${mmss(r.open_s)} (stuck?)` : on ? "● RX" : r.word || (RADIO_STATE[state] ?? state);
         node.replaceChildren(el("b", null, r.label), ...(word ? [el("span", "st", word)] : []));
         const bits = [r.detail || r.label];
         if (r.mhz) bits.push(`${r.mhz} MHz`);
-        if (r.quieting_db !== null && r.quieting_db !== undefined) bits.push(`quieting ${r.quieting_db} dB`);
         if (r.restarts) bits.push(`${r.restarts} restarts`);
-        node.title = `${bits.join(" · ")}\nstate: ${state}${r.open ? " · squelch open" : ""}`;
+        const lines = [bits.join(" · ")];
+        if (on && r.open_s !== null && r.open_s !== undefined) {
+          lines.push(`open ${mmss(r.open_s)}` + (stuck ? " without a break: longer than any page, likely noise holding the squelch" : ""));
+        }
+        const has = (v) => v !== null && v !== undefined;
+        if (has(r.quieting_db) || has(r.open_db)) {
+          // quieting: how far a carrier pushes the hiss down from its idle level (the floor); RX opens at open_db
+          const lv = [`quieting ${has(r.quieting_db) ? r.quieting_db : "?"} dB`];
+          if (has(r.open_db)) lv.push(`opens at ${r.open_db} dB, closes under ${r.close_db} dB`);
+          if (has(r.hiss_db)) lv.push(`idle hiss (floor) ${r.hiss_db} dB`);
+          if (has(r.floor_db)) lv.push(`background carrier ${r.floor_db} dB`);
+          lines.push(lv.join(" · "));
+        }
+        lines.push(`state: ${state}${r.open ? " · squelch open" : ""}`);
+        node.title = lines.join("\n");
       },
       empty: "No radios",
     });

@@ -53,6 +53,8 @@
     --accent: #C8102E;
     --accent-text: #EE6475;
     --on-accent: #FFFFFF;
+    --on-ok: var(--on-fill);                 /* text on an --ok fill (a receiver open, the SDR's job): dark, never green */
+    --on-warn: var(--on-fill);               /* text on a --warn fill (a receiver open too long) */
     --focus: #EE6475;                        /* the focus ring: PCFD red, light enough for 3:1 on every surface */
     /* states (meaning only) */
     --ok: #3FB86B;
@@ -376,7 +378,7 @@
   :where(.seg) button + button { margin-inline-start: calc(-1 * var(--bw)); }
   :where(.seg) button:first-of-type { border-start-start-radius: var(--radius); border-end-start-radius: var(--radius); }
   :where(.seg) button:last-of-type { border-start-end-radius: var(--radius); border-end-end-radius: var(--radius); }
-  :where(.seg) button:where(.active, [aria-pressed="true"]) { background: var(--ok); color: var(--on-fill); border-color: var(--ok); font-weight: 600; position: relative; }
+  :where(.seg) button:where(.active, [aria-pressed="true"]) { background: var(--ok); color: var(--on-ok); border-color: var(--ok); font-weight: 600; position: relative; }
   :where(.seg) button:where(.elsewhere) { border-style: dashed; color: var(--dim); }
   :where(.seg.absent) { opacity: 0.5; }
   :where(.seg.held) .sdr-label { color: var(--warn); }
@@ -436,10 +438,12 @@
   :where(.pill.radio) .st { font-weight: 600; opacity: 0.85; text-transform: uppercase; letter-spacing: 0.05em; }
   :where(.pill.radio.down) { color: var(--err); }
   :where(.pill.radio:is(.absent, .off, .unknown)) { color: var(--dim); border-color: var(--line-strong); border-style: solid; }
-  :where(.pill.radio.open) { color: var(--on-fill); background: var(--ok); border-color: var(--ok); }
+  :where(.pill.radio.open) { color: var(--on-ok); background: var(--ok); border-color: var(--ok); }
+  /* open without a break for over 2 minutes: "open 4:12 (stuck?)" in amber (radio/fm.py STUCK_S, #116) */
+  :where(.pill.radio.open.stuck) { color: var(--on-warn); background: var(--warn); border-color: var(--warn); }
   /* badge: filled */
   :where(.badge, .pc-badge, .tg-badge) { color: var(--on-accent); background: var(--accent); border-color: var(--accent); }
-  :where(.badge.ok, .talk-badge) { color: var(--on-fill); background: var(--ok); border-color: var(--ok); }
+  :where(.badge.ok, .talk-badge) { color: var(--on-ok); background: var(--ok); border-color: var(--ok); }
   :where(.badge.info, .talk-badge.disp) { color: var(--on-fill); background: var(--info); border-color: var(--info); }
   :where(.talk-badge.ended) { color: var(--ok); background: transparent; border-color: var(--ok); }
   /* why a transmission is on an incident; which incident it is on */
@@ -767,9 +771,11 @@
 @layer utilities {
   .dim { color: var(--dim); }
   .small { font-size: var(--fs-xs); line-height: var(--lh-xs); }
-  .warn { color: var(--warn); }
-  .ok { color: var(--ok); }
-  .err { color: var(--err); }
+  /* text in a state's color; not on a pill or a badge, whose state classes are the component's own (this
+     layer wins over every component: `.ok` here made an open receiver green text on its green fill, #116) */
+  .warn:not(.pill, .badge) { color: var(--warn); }
+  .ok:not(.pill, .badge) { color: var(--ok); }
+  .err:not(.pill, .badge) { color: var(--err); }
   .spacer { flex: 1 1 0; }
   .row { display: flex; align-items: center; gap: var(--s-2); flex-wrap: wrap; min-inline-size: 0; }
   .inline { display: inline-flex; align-items: center; gap: var(--s-2); }

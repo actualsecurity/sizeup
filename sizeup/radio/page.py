@@ -40,7 +40,8 @@ HOLD_SLACK_S = 0.5     # finalise this long after the squelch's window ends (fra
 TONES_AFTER_BREAK_S = 1.5   # tones this soon after the carrier came back inside the hang: a new page
 REASONS = {"quiet": "quiet after hang", "max length": "max length", "stall": "stall (rtl_fm sent no audio)",
            "stopped": "receiver stopped", "rtl_fm ended": "rtl_fm ended", "tones": "new page's tones",
-           "drop": "dropped to a weaker carrier", "background": "background carrier"}
+           "drop": "dropped to a weaker carrier", "background": "background carrier",
+           "steady": "nothing on the carrier for 30 s (noise held the squelch)"}
 
 
 @dataclass

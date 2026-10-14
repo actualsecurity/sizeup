@@ -12,6 +12,12 @@ a longer hang (`hang_s`), and for `continue_s` after it closes the squelch reope
 threshold, not `open_db`; what comes back in that window is marked as a continuation (Segment.cont)
 and joined to the page it belongs to (radio/page.py PageHold). GitHub #61.
 
+Nothing keeps it open on its own (GitHub #116): a squelch open 30 s with nothing in the voice band (no tones,
+speech or data, only hiss or a dead carrier) closes and relearns the hiss reference from that level; a
+continuation only opens another window if it had something of its own, and never once the page and its
+continuations span 2 minutes. A channel still open without a break after STUCK_S is reported ("stuck":
+NfmReceiver.status, logged once).
+
 One rtl_fm per channel; if it dies, stalls or the dongle is unplugged, the loop restarts it
 with backoff, forever (same pattern as shortfinal's receivers).
 """
@@ -42,6 +48,7 @@ EDGE_SEARCH = 20               # look for a burst within 1 s of either end of th
                                # 6000s send it 0.3-0.8 s in, 2026-10-07; 0.3 s missed every one)
 MAX_FRAMES = 20 * 120          # split anything over 2 minutes (a long page is ~30-60 s)
 STALL_S = 5.0
+STUCK_S = 120.0                # open continuously this long: shown as "open 4:12 (stuck?)", logged once (#116)
 HF_BAND = (4000.0, 7500.0)
 # A second, weaker carrier on a simplex channel. FG1 2026-10-07 17:17-17:21: PCFD radios quiet the
 # receiver ~40 dB; something else on the frequency (no tone, pulsing ~1 Hz) held it at 21-28 dB for
@@ -66,6 +73,19 @@ VOICE_BAND = (300.0, 3000.0)
 CONTENT_DB = 10.0              # a frame whose voice-band energy is this far over its own 4-7.5 kHz energy
 CONTENT_FRAMES = 6             # carries tones or speech; 0.3 s of those: the long hang applies
 CONT_FRAMES = 3                # in the continuation window, 0.15 s at the close threshold reopens
+CHAIN_S = MAX_FRAMES * FRAME / RATE   # a page and its continuations: no window once they span 2 minutes
+# Held open with nothing on it (GitHub #116, South 2 on the station PC: "● RX" all the time). The idle hiss
+# is only learned while the squelch is closed, so anything that sat steadily above close_db relative to it
+# (a hiss level learned high, a weak unmodulated carrier or a PC spur on the antenna, noise after a page
+# had opened the long hang) held the squelch open with the reference frozen: split every 2 minutes and
+# reopened at once. An open squelch with nothing in the voice band over the hiss band for STEADY_FRAMES is
+# not a transmission: it ends where the content did, and the hiss reference is relearned from what held it.
+STEADY_FRAMES = 20 * 30        # 30 s with no tones, speech or data
+STEADY_DB = 3.0                # content: voice-band energy this far over the frame's own 4-7.5 kHz energy.
+                               # Hiss is flat or falls toward the voice band (0 dB or under); voice under a
+                               # weak carrier (8 dB of quieting, test_long_page_with_quieting_dips) 2-8 dB.
+DENSE_FRAMES = 3               # content in 3 of the last 20 frames (an MDC burst is ~3.5): not a stray frame
+BUSY_GAP_FRAMES = 20           # closed this briefly (a max-length split, a flicker): still "open continuously"
 
 
 @dataclass
@@ -76,7 +96,7 @@ class Segment:
     quieting_db: float = 0.0   # how far the carrier quieted the hiss (signal quality)
     bursts: list = field(default_factory=list, repr=False)  # MDC-1200 data bursts cut from the edges
     # Paging (GitHub #61): why it ended, and whether it belongs with the transmission before it.
-    reason: str = ""           # "quiet" (under close_db for the hang) | "max length" | "stall" | "stopped" | ...
+    reason: str = ""           # "quiet" (under close_db for the hang) | "max length" | "steady" | "stall" | ...
     cont: bool = False         # opened within continue_s of the last transmission closing: may continue it
     hold_until: float = 0.0    # wall clock until which the squelch watches for a continuation (0: none)
     # (start, end) s into audio of each drop the long hang held through that the short one would have
@@ -159,17 +179,37 @@ class NoiseSquelch:
         self._held: deque[tuple[np.ndarray, float]] = deque(maxlen=REOPEN_FRAMES)  # closed: the last 1 s
         self._up_db = open_db               # quieting that counts as carrier-up in this transmission
         self._content = 0                   # frames with tones / speech in this transmission
+        self._recent: deque[bool] = deque(maxlen=20)   # STEADY_DB content in the last 20 frames
+        self._last_content = -1             # frame index (in _frames) of the last dense content, -1: none yet
         self._live = False                  # ... enough of them: the long hang applies
         self._breaks: list[tuple[int, int]] = []   # (first quiet frame, frame the carrier came back)
         self._cont_left = 0                 # closed: frames left in the continuation window
         self._cont_run: list[tuple[np.ndarray, float]] = []
         self._cont_live = False             # the window's transmission was live
         self.continuing = False             # open, and opened inside a continuation window
+        self._chain_start = 0.0             # wall clock: the first transmission of this page and its continuations
+        self._cont_chain = 0.0              # ... of the one the window is open for
+        self.open_since: float | None = None   # wall clock: open continuously since (brief closes bridged)
+        self._closed_n = 0                  # frame count when the squelch last closed
+        self.relearned = 0                  # times the hiss reference was relearned from a steady hold (#116)
 
     @property
     def holding(self) -> bool:
         """Closed, but still watching for the last transmission to come back (continuation window)."""
         return not self.open and self._cont_left > 0
+
+    @property
+    def busy_since(self) -> float | None:
+        """When the channel went busy, while it is open (or closed for under BUSY_GAP_FRAMES, as at a
+        max-length split): how long "RX" has been lit without a break. None when idle."""
+        if self.open_since is None or (not self.open and self._n - self._closed_n > BUSY_GAP_FRAMES):
+            return None
+        return self.open_since
+
+    @property
+    def hiss_db(self) -> float | None:
+        """The idle hiss reference (relative dB): quieting is measured down from it."""
+        return float(10 * np.log10(self.hiss)) if self.hiss > 0 else None
 
     def hf_level(self, frame: np.ndarray) -> float:
         spec = np.abs(np.fft.rfft(frame * self._win)) ** 2
@@ -219,10 +259,16 @@ class NoiseSquelch:
             k = len(self._frames) - 1                       # back inside the long hang (closed before #61)
             self._breaks.append((k - self._quiet_run, k))
         self._quiet_run = 0 if q >= self.close_db else self._quiet_run + 1
-        if self._paging and not self._live and q >= self.close_db:
-            if float(spec[self._vb].mean()) >= lvl * 10 ** (CONTENT_DB / 10):
+        vband = float(spec[self._vb].mean())
+        self._recent.append(vband >= lvl * 10 ** (STEADY_DB / 10))
+        if self._recent[-1] and sum(self._recent) >= DENSE_FRAMES:
+            self._last_content = len(self._frames) - 1
+        if self._paging and self._content < CONTENT_FRAMES and q >= self.close_db:
+            # (counted on a continuation too, which starts live: only one with tones or speech of its own
+            # may open another window, so noise at the close threshold can't chain them, #116)
+            if vband >= lvl * 10 ** (CONTENT_DB / 10):
                 self._content += 1
-                self._live = self._content >= CONTENT_FRAMES
+                self._live = self._live or self._content >= CONTENT_FRAMES
         if self.drop_db is not None:
             if self._level is None and len(self._qs) >= LEVEL_FRAMES:
                 self._level = float(np.median(self._qs[:LEVEL_FRAMES]))
@@ -255,6 +301,8 @@ class NoiseSquelch:
                     while n < len(self._qs) and self._qs[n] > self.floor + EDGE_DB:
                         n += 1
                     return self._close(n, "drop")
+        if len(self._frames) - 1 - self._last_content >= STEADY_FRAMES:
+            return self._steady(min(len(self._frames), self._last_content + 1 + HANG_FRAMES))
         if len(self._frames) >= MAX_FRAMES:
             return self._close(len(self._frames), "max length")
         if self._quiet_run > (self._hang_live if self._live else HANG_FRAMES):
@@ -262,39 +310,66 @@ class NoiseSquelch:
         return None
 
     def _begin(self, frame: np.ndarray, q: float, start: float, up_db: float | None = None) -> None:
-        self.open, self._start = True, start
+        if not self.open and (self.open_since is None or self._n - self._closed_n > BUSY_GAP_FRAMES):
+            self.open_since = start
+        self.open, self._start, self._chain_start = True, start, start
         self._frames, self._qs, self._quiet_run = [frame], [q], 0
         self._level, self._drop_run, self._rise_run = None, 0, 0
         self._up_db = self.open_db if up_db is None else up_db
         self._content, self._live, self._breaks, self.continuing = 0, False, [], False
+        self._recent.clear()
+        self._last_content = -1
         self._cont_left, self._cont_run = 0, []
 
     def _resume(self) -> None:
         """The transmission just opened came back inside the continuation window: it continues the last."""
-        self.continuing, self._live = True, self._cont_live
+        self.continuing, self._live, self._chain_start = True, self._cont_live, self._cont_chain
 
     def flush(self, reason: str = "stopped") -> Segment | None:
         """The audio stopped (rtl_fm stalled, died, or was stopped) with the squelch open: what was
         heard so far is a transmission (it used to be dropped with the squelch)."""
         self._cont_left = 0
-        return self._close(len(self._frames), reason) if self.open else None
+        seg = self._close(len(self._frames), reason) if self.open else None
+        self.open_since = None          # no more audio: nothing to bridge
+        return seg
 
     def _close(self, n: int, reason: str = "") -> Segment | None:
         """Close the squelch; the transmission is its first n frames (the rest is dropped)."""
         frames, qs, start = self._frames[:n], self._qs[:n], self._start
         live, cont, breaks = self._live, self.continuing, [b for b in self._breaks if b[1] < n]
         self._frames, self._qs, self.open, self.continuing = [], [], False, False
+        self._closed_n = self._n
         for g0, g1 in breaks:   # carrier gone (hiss) inside the hang: silence, as a radio's squelch would
             frames[g0:g1] = [np.zeros_like(f) for f in frames[g0:g1]]
         seg = self._segment(frames, qs, start, self._up_db, breaks)
-        window = live and self._cont_frames > 0 and reason in ("quiet", "max length")
+        # A window only after a page (or a continuation with tones / speech of its own) went quiet, and
+        # only while the page and its continuations span under 2 minutes: they can't chain on noise at
+        # the close threshold (#116). After a max-length split the next part has to reach open_db.
+        window = (live and self._cont_frames > 0 and reason == "quiet" and (not cont or 0 <= self._last_content < n)
+                  and self.clock() - self._chain_start < CHAIN_S)
         self._cont_left, self._cont_run, self._cont_live = (self._cont_frames if window else 0), [], live
+        self._cont_chain = self._chain_start
         if seg is not None:
             seg.reason, seg.cont = reason, cont
-            # After a max-length split the window still lets a weak carrier back in (as its own page),
-            # but nothing waits for it: hold_until stays 0.
-            if window and reason == "quiet":
+            if window:
                 seg.hold_until = self.clock() + self._cont_frames * FRAME / RATE
+        return seg
+
+    def _steady(self, n: int) -> Segment | None:
+        """The squelch has been open STEADY_FRAMES with nothing on it (#116): not a carrier anyone is using.
+        The transmission, if it had tones, speech or data, ended at frame n (the last of them + the hang);
+        the rest is dropped. The hiss reference is relearned from what held it open, so that level can't
+        open the squelch again (it comes back up by itself, as the idle level is learned, once that goes)."""
+        hold = [self.hiss * 10 ** (-v / 10) for v in self._qs[n:]]
+        if self._last_content >= 0:
+            seg = self._close(n, "steady")
+        else:                                       # nothing at all since it opened
+            self._frames, self._qs, self.open, self.continuing = [], [], False, False
+            self._closed_n, self._cont_left, self._cont_run = self._n, 0, []
+            seg = None
+        self.levels = deque(hold, maxlen=HISTORY_FRAMES)
+        self.hiss = float(np.percentile(np.fromiter(self.levels, float), 80))
+        self.relearned += 1
         return seg
 
     def _set_floor(self, q: float | None) -> None:
@@ -311,6 +386,7 @@ class NoiseSquelch:
                           or speech_seconds(np.concatenate(self._frames[:n])) >= BACKGROUND_SPEECH_S
                           or sum(v >= floor + self.drop_db for v in qs) >= MIN_FRAMES):
             self._frames, self._qs, self.open = [], [], False      # the background all along
+            self._closed_n = self._n
             return None
         if max(qs) >= floor + 2 * EDGE_DB:  # a stronger key-up: the background's start isn't part of it
             stop = max(1, n - BACKGROUND_STEP)
@@ -410,6 +486,19 @@ class NoiseSquelch:
         return seg
 
 
+def _mmss(s: float) -> str:
+    s = max(0, int(s))
+    return f"{s // 60}:{s % 60:02d}"
+
+
+def squelch_levels(sq: NoiseSquelch) -> str:
+    """Quieting against the thresholds and the idle hiss it is measured from, for a log line."""
+    q, hiss = sq.quieting_db, sq.hiss_db
+    floor = f" · background carrier {sq.floor:.1f} dB" if sq.floor is not None else ""
+    return (f"quieting {'?' if q is None else f'{q:.1f}'} dB (opens at {sq.open_db:g}, closes under {sq.close_db:g})"
+            f" · idle hiss {'?' if hiss is None else f'{hiss:.1f}'} dB (relative){floor}")
+
+
 @dataclass
 class Channel:
     mhz: float
@@ -434,6 +523,8 @@ class NfmReceiver:
         self._stderr: deque[str] = deque(maxlen=20)
         self._stop = threading.Event()
         self._proc: subprocess.Popen | None = None
+        self.clock: Callable[[], float] = time.time
+        self._stuck: float | None = None        # busy_since of the open spell logged as stuck
 
     def new_squelch(self) -> NoiseSquelch:
         # Fresh on every rtl_fm start. (It used to be made here without drop_db, so FG1 ran with none
@@ -466,10 +557,21 @@ class NfmReceiver:
     def status(self) -> dict:
         sq = self.squelch
         q = sq.quieting_db
+        hiss = sq.hiss_db
+        since = sq.busy_since if sq.open else None
+        open_s = max(0.0, self.clock() - since) if since is not None else None
         out = {"label": self.channel.label, "mhz": self.channel.mhz, "state": self.state,
                "detail": self.detail, "restarts": self.restarts, "open": sq.open,
                "last_heard": self.last_heard,
-               "quieting_db": round(q, 1) if q is not None else None}
+               "quieting_db": round(q, 1) if q is not None else None,
+               # how long RX has been lit without a break, and whether that's too long to be a
+               # transmission (station health can alert on "stuck", #116); the squelch's thresholds,
+               # in quieting dB down from the idle hiss (hiss_db: that reference, relative dB)
+               "open_s": round(open_s, 1) if open_s is not None else None,
+               "stuck": bool(open_s is not None and open_s >= STUCK_S and self.state == "ok"),
+               "open_db": sq.open_db, "close_db": sq.close_db,
+               "hiss_db": round(hiss, 1) if hiss is not None else None,
+               "floor_db": round(sq.floor, 1) if sq.floor is not None else None}
         if sq.holding and self.state == "ok":
             # Between a page's carrier dropping and the continuation window ending: not "RX" (nothing
             # is on the air), but not idle either; RX comes back if the page does (GitHub #61).
@@ -516,10 +618,12 @@ class NfmReceiver:
             self.state, self.detail = "ok", f"{self.channel.label} {self.channel.mhz:.4f}"
             self.squelch = self.new_squelch()
             got = self._pump(self._proc)
-            self._kill()
-            # Mid-transmission when the audio stopped: keep what was heard (and say why it ended).
+            # Mid-transmission when the audio stopped: keep what was heard (and say why it ended). Before
+            # the kill (up to 3 s for a hung rtl_fm), so RX goes out as soon as the audio is known gone.
             self._deliver(self.squelch.flush("stopped" if self._stop.is_set() else
                                              "stall" if self.detail == "rtl_fm stalled" else "rtl_fm ended"))
+            self._watch_open()
+            self._kill()
             if self._stop.is_set():
                 break
             err = " ".join(self._stderr)
@@ -558,7 +662,23 @@ class NfmReceiver:
                 frame = np.frombuffer(buf[:need], dtype="<i2").astype(np.float64) / 32768.0
                 buf = buf[need:]
                 self._deliver(self.squelch.feed(frame))
+            self._watch_open()
         return got
+
+    def _watch_open(self) -> None:
+        """Log once when the squelch has been open continuously for STUCK_S (#116), and once when it
+        closes after that, with what held it: enough to tell a long page from a squelch held by noise."""
+        sq = self.squelch
+        since = sq.busy_since
+        if since is None:
+            if self._stuck is not None:
+                self.on_event(f"{self.channel.label}: squelch closed after {_mmss(self.clock() - self._stuck)} open")
+                self._stuck = None
+            return
+        if self._stuck != since and self.clock() - since >= STUCK_S:
+            self._stuck = since
+            self.on_event(f"{self.channel.label}: squelch open {_mmss(self.clock() - since)} continuously (stuck?): "
+                          f"{squelch_levels(sq)}")
 
     def _deliver(self, seg: Segment | None) -> None:
         if seg is None:
