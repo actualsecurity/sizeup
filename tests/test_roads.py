@@ -88,6 +88,7 @@ def make(tmp_path=None, key=KEY, urls=URLS, fetch=None, clock=None, thruway=Fals
               log=logs.append, clock=clock or Clock(), gazetteer=kw.pop("gazetteer", Path("/nonexistent")),
               thruway=thruway, thruway_urls=kw.pop("thruway_urls", TURLS if thruway else {}), county=county, **kw)
     r.logs = logs
+    r.pump_threads = False                  # the stream pump runs when a test calls pump_once (no threads here)
     return r
 
 
@@ -851,7 +852,8 @@ def streaming(clock=None):
 
 
 def test_the_playlist_opens_the_stream_and_names_only_what_the_hub_serves():
-    r, f = streaming()
+    clock = Clock()
+    r, f = streaming(clock)
     code, body, ctype, headers = r.get("/api/cad/cameras/1ne01370s/stream/playlist.m3u8", "")
     assert (code, ctype, headers["Cache-Control"]) == (200, "application/vnd.apple.mpegurl", "no-store")
     assert body == PLAYLIST and f.urls[-1] == "https://s58.nysdot.skyvdn.com:443/rtplive/TA_058/playlist.m3u8"
@@ -864,9 +866,12 @@ def test_the_playlist_opens_the_stream_and_names_only_what_the_hub_serves():
     n = len(f.urls)
     assert r.get("/api/cad/cameras/1ne01370s/stream/media_w1849562454_1225.ts", "")[1] == SEG and len(f.urls) == n
     # a playlist naming a file the hub won't fetch (another folder, a URL): refused, nothing fetched
+    # (asked again within 2 s the hub would answer from its fresh copy, so the clock moves on)
     f.chunklist = b"#EXTM3U\n#EXTINF:6,\n../other/x.ts\n"
+    clock.t += 3
     assert r.get("/api/cad/cameras/1ne01370s/stream/chunklist_w1849562454.m3u8", "")[0] == 502
     f.chunklist = b"#EXTM3U\n#EXTINF:6,\nhttps://evil.example/x.ts\n"
+    clock.t += 3
     assert r.get("/api/cad/cameras/1ne01370s/stream/chunklist_w1849562454.m3u8", "")[0] == 502
     # names the hub won't ask for at all
     assert r.get("/api/cad/cameras/1ne01370s/stream/..%2Fx.ts", "")[0] == 404
@@ -930,8 +935,122 @@ def test_no_stream_for_a_camera_without_one_a_down_one_or_an_unknown_one():
             raise OSError("reset")
         return orig(url, timeout, limit)
     r.fetch = failing
-    assert r.get("/api/cad/cameras/1ne01370s/stream/playlist.m3u8", "")[0] == 502
-    assert r.streams_open() == 0                                                      # it holds no slot
+    code, body, _, _ = r.get("/api/cad/cameras/1ne01370s/stream/playlist.m3u8", "")
+    assert code == 503 and json.loads(body)["source_down"] and r.streams_open() == 0   # a source that won't stream: holds no slot
+    # ... and isn't asked again for a while: the viewer shows snapshots at once
+    r.fetch = orig
+    code, body, _, _ = r.get("/api/cad/cameras/1ne01370s/stream/playlist.m3u8", "")
+    assert code == 503 and 0 < json.loads(body)["retry_s"] <= 300
+    assert "1ne01370s: no live video from the source" in "\n".join(r.logs)
+    clock.t += 301
+    assert r.get("/api/cad/cameras/1ne01370s/stream/playlist.m3u8", "")[0] == 200
+
+
+# ---- the stream pump, the frame rate, the status; snapshots at the source's cadence (hls-smooth, refs #101) ------
+
+
+def synthetic_ts(frames: int) -> bytes:
+    """An MPEG-TS with a PAT (PMT on PID 0x100), a PMT (H.264 video on PID 0x101) and `frames` PES starts."""
+    def packet(pid: int, payload: bytes, pusi: int) -> bytes:
+        hdr = bytes([0x47, (pusi << 6) | (pid >> 8), pid & 0xFF, 0x10])
+        return (hdr + payload).ljust(188, b"\xff")
+    pat = b"\x00" + b"\x00\xb0\x0d\x00\x01\xc1\x00\x00\x00\x01\xe1\x00" + b"\x00\x00\x00\x00"
+    pmt = b"\x00" + b"\x02\xb0\x12\x00\x01\xc1\x00\x00\xe1\x01\xf0\x00" + b"\x1b\xe1\x01\xf0\x00" + b"\x00\x00\x00\x00"
+    out = packet(0, pat, 1) + packet(0x100, pmt, 1)
+    for _ in range(frames):
+        out += packet(0x101, b"\x00\x00\x01\xe0\x00\x00\x80\x80\x05" + b"\x21\x00\x01\x00\x01" + b"\x00\x00\x00\x01\x65", 1)
+        out += packet(0x101, b"\x11" * 100, 0)
+    return out
+
+
+def test_frames_are_counted_from_the_transport_stream():
+    from sizeup.roads import ts_frames
+    assert ts_frames(synthetic_ts(4)) == 4 and ts_frames(synthetic_ts(93)) == 93 and ts_frames(b"garbage") == 0
+
+
+class PumpFetch(StreamFetch):
+    """A live chunklist that moves on: three segments, the sequence advancing when `advance()` is called."""
+
+    def __init__(self, fps=15):
+        super().__init__()
+        self.seq, self.fps = 1225, fps
+
+    def advance(self):
+        self.seq += 1
+
+    def __call__(self, url, timeout, limit):
+        m = re.fullmatch(r"https://s58\.nysdot\.skyvdn\.com:443/rtplive/(TA_\d+)/(.+)", url)
+        if m and m.group(2).startswith("chunklist_"):
+            self.urls.append(url)
+            names = "".join(f"#EXTINF:4.0,\nmedia_w1_{self.seq + i}.ts\n" for i in range(3))
+            return 200, {"content-type": "application/vnd.apple.mpegurl"}, (
+                f"#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:{self.seq}\n{names}").encode()
+        if m and m.group(2).endswith(".ts"):
+            self.urls.append(url)
+            return 200, {"content-type": "video/MP2T"}, synthetic_ts(4 * self.fps)
+        return super().__call__(url, timeout, limit)
+
+
+def pumping(fps=15, clock=None):
+    clock = clock or Clock()
+    f = PumpFetch(fps)
+    r = make(key="", urls={}, fetch=f, clock=clock, thruway=True)
+    assert r.refresh("cameras")
+    assert r.get("/api/cad/cameras/1ne01370s/stream/playlist.m3u8", "")[0] == 200
+    f.urls.clear()
+    return r, f, clock
+
+
+def test_the_pump_keeps_the_newest_segments_fetched_ahead_and_the_player_never_waits():
+    r, f, clock = pumping()
+    assert r.pump_once("1ne01370s") == 3                                            # the chunklist, then its three segments
+    assert [u.rsplit("/", 1)[1] for u in f.urls] == ["chunklist_w1849562454.m3u8", "media_w1_1225.ts", "media_w1_1226.ts", "media_w1_1227.ts"]
+    st = r.stream_status("1ne01370s")
+    assert st["open"] and st["ahead"] == 3 and st["target_s"] == 4.0 and st["fps"] == 15.0
+    f.urls.clear()
+    # what the player asks for now comes from the hub's copy: nothing fetched from the origin
+    code, body, ctype, _ = r.get("/api/cad/cameras/1ne01370s/stream/chunklist_w1849562454.m3u8", "")
+    assert code == 200 and b"media_w1_1227.ts" in body and ctype == "application/vnd.apple.mpegurl"
+    assert r.get("/api/cad/cameras/1ne01370s/stream/media_w1_1226.ts", "")[0] == 200
+    assert f.urls == []
+    # the stream moves on: the next round fetches only the new segment
+    f.advance()
+    clock.t += 2.5
+    assert r.pump_once("1ne01370s") == 1 and [u.rsplit("/", 1)[1] for u in f.urls] == ["chunklist_w1849562454.m3u8", "media_w1_1228.ts"]
+    # closed viewer: the pump has nothing to do (the thread would end)
+    clock.t += 31
+    assert r.pump_once("1ne01370s") == 0 or r.stream_status("1ne01370s")["open"] is False
+
+
+def test_a_low_frame_rate_at_the_source_is_measured_and_reported():
+    r, f, clock = pumping(fps=1)
+    r.pump_once("1ne01370s")
+    st = json.loads(r.get("/api/cad/cameras/1ne01370s/stream/status", "")[1])
+    assert st["fps"] == 1.0 and st["open"] and st["source_down"] is False
+    assert json.loads(r.get("/api/cad/cameras/1cw00250w/stream/status", "")[1]) == {
+        "open": False, "fps": None, "ahead": 0, "target_s": None, "source_down": False}
+
+
+def test_a_snapshot_is_served_again_only_when_the_hub_has_a_newer_one(tmp_path):
+    clock = Clock()
+    r, f = county(tmp_path, clock)
+    code, body, ctype, h = r.get("/api/cad/cameras/wc23/image", "")
+    taken = int(h["X-Image-Time"])
+    assert code == 200 and h["ETag"] == f'"{taken}"' and h["Last-Modified"] == formatdate(taken, usegmt=True) and h["X-Image-Cadence"] == "8"
+    assert h["Cache-Control"] == "private, max-age=4"                               # the county's 8 s pictures: asked every 4 s
+    for cond in ({"If-None-Match": f'"{taken}"'}, {"If-Modified-Since": formatdate(taken, usegmt=True)}):
+        code, body, _, h2 = r.get("/api/cad/cameras/wc23/image", "", cond)
+        assert code == 304 and body == b"" and h2["ETag"] == f'"{taken}"'
+    assert r.get("/api/cad/cameras/wc23/image", f"since={taken}")[0] == 304
+    assert r.get("/api/cad/cameras/wc23/image", "", {"If-None-Match": f'"{taken - 10}"'})[0] == 200   # an older one: the picture
+    n = len(f.urls)
+    clock.t += 3
+    assert r.get("/api/cad/cameras/wc23/image", "", {"If-None-Match": f'"{taken}"'})[0] == 304 and len(f.urls) == n   # within the TTL
+    clock.t += 2
+    code, body, _, h3 = r.get("/api/cad/cameras/wc23/image", "", {"If-None-Match": f'"{taken}"'})   # asked again: newer
+    assert code == 200 and int(h3["X-Image-Time"]) > taken and len(f.urls) == n + 1
+    # the Thruway's minute-ish pictures: the ttl stays 15 s
+    assert r.image_ttl({"cadence": 60}) == 15.0 and r.image_ttl({"cadence": 8}) == 4.0 and r.image_ttl({}) == 15.0
 
 
 # ---- config ------------------------------------------------------------------------------------------------
@@ -1140,5 +1259,7 @@ def test_the_layers_control_is_on_every_map_with_its_six_layers():
     assert not re.search(r"https://(?!cdnjs\.cloudflare\.com)[a-z0-9.-]+/[^\"']*\.js", js)
     assert "video.muted = true" in js and 'setAttribute("playsinline"' in js and "/stream/playlist.m3u8" in js
     assert 'viewer.el.time.textContent = "Live"' in js and "liveFailed(" in js
+    assert "liveSyncDurationCount: 3" in js and "manifestLoadingMaxRetry: 0" in js and "Buffering…" in js   # hls-smooth
+    assert "low frame rate from the source" in js and "/stream/status" in js and "If-None-Match" in js
     sprite = (STATIC / "icons.svg").read_text()
     assert 'id="i-layers"' in sprite and 'id="i-camera"' in sprite

@@ -494,7 +494,7 @@ window.MapLayers = (() => {
   // ---- the camera viewer --------------------------------------------------------------------------------------
   const viewer = { ov: null, id: null, timer: null, url: null, taken: 0, busy: false, tick: null, down: null, cadence: 60,
                    live: false, hls: null, video: null };
-  const cadenceText = (c) => `Snapshot, updated every ${c && c.cadence ? c.cadence : 60} s`;
+  const cadenceText = (c) => { const n = (c && c.cadence) || 60; return n >= 60 ? "Snapshot, updated about every minute" : `Snapshot, updated every ${n} s`; };
   // Live video (#101): a camera with a stream plays it, muted, through the hub (/api/cad/cameras/<id>/stream/...),
   // with hls.js from cdnjs (or the browser's own HLS, Safari); anything wrong falls back to the snapshots. The
   // page says "Live" only while the stream plays; a snapshot is always "Snapshot, updated every N s".
@@ -514,7 +514,29 @@ window.MapLayers = (() => {
     }
     return hlsLoad;
   }
+  function note(text) {                      // a small line over the picture (connecting, buffering, low frame rate)
+    if (!viewer.el) return;
+    viewer.el.msg.hidden = false;
+    viewer.el.msg.textContent = text;
+  }
+  async function pollStatus() {              // while live: the hub's measure of the stream (its frame rate at the source)
+    const id = viewer.id;
+    if (!id || !viewer.live) return;
+    try {
+      const r = await fetch(`/api/cad/cameras/${encodeURIComponent(id)}/stream/status`, { credentials: "same-origin", cache: "no-store" });
+      if (!r.ok || id !== viewer.id) return;
+      const st = await r.json();
+      viewer.fps = st.fps;
+      if (st.fps != null && st.fps < 5) {
+        viewer.el.time.textContent = `Live · low frame rate from the source (~${st.fps} fps)`;
+        if (viewer.el.msg.hidden || viewer.el.msg.textContent.startsWith("Buffering")) note(`Low frame rate from the source (~${st.fps} fps): the picture updates about ${st.fps >= 1 ? "once a second" : "every few seconds"}`);
+      } else if (viewer.el.msg.textContent.startsWith("Low frame rate")) viewer.el.msg.hidden = true;
+    } catch (_) { /* next time */ }
+  }
   function stopLive() {
+    clearInterval(viewer.statusTimer);
+    viewer.statusTimer = null;
+    viewer.fps = null;
     if (viewer.hls) { try { viewer.hls.destroy(); } catch (_) { /* gone */ } viewer.hls = null; }
     if (viewer.video) { try { viewer.video.pause(); viewer.video.removeAttribute("src"); viewer.video.load(); } catch (_) { /* gone */ } }
     if (viewer.el) { viewer.el.video.hidden = true; viewer.el.live.hidden = true; }
@@ -539,10 +561,11 @@ window.MapLayers = (() => {
       stopRefresh();
       v.hidden = false;
       viewer.el.img.hidden = true;
-      viewer.el.msg.hidden = true;
+      if (!viewer.el.msg.textContent.startsWith("Low frame rate")) viewer.el.msg.hidden = true;
       viewer.el.live.hidden = false;
-      viewer.el.time.textContent = "Live";
+      viewer.el.time.textContent = "Live" + (viewer.fps != null && viewer.fps < 5 ? ` · low frame rate from the source (~${viewer.fps} fps)` : "");
       showFoot();
+      if (!viewer.statusTimer) viewer.statusTimer = setInterval(pollStatus, 5000);
     };
     v.onplaying = playing;
     v.onerror = () => liveFailed("the stream stopped");
@@ -554,18 +577,29 @@ window.MapLayers = (() => {
     loadHls().then((Hls) => {
       if (viewer.id !== String(id)) return;
       if (!Hls.isSupported()) return native();
-      const hls = new Hls({ enableWorker: false, lowLatencyMode: false, liveSyncDurationCount: 2, maxBufferLength: 20,
-                            manifestLoadingMaxRetry: 1, levelLoadingMaxRetry: 2, fragLoadingMaxRetry: 2 });
+      // Live tuning: sit 3 segments behind the edge with up to 30 s buffered (the hub keeps the newest segments
+      // fetched ahead, so a segment is one local hop); a playlist that doesn't come in 8 s is a source that is
+      // down (the hub already gave up at 6 s and says so): no retries, snapshots at once.
+      const hls = new Hls({ enableWorker: false, lowLatencyMode: false, liveSyncDurationCount: 3, liveMaxLatencyDurationCount: 8,
+                            maxBufferLength: 30, backBufferLength: 10, manifestLoadingTimeOut: 8000, manifestLoadingMaxRetry: 0,
+                            levelLoadingTimeOut: 12000, levelLoadingMaxRetry: 2, fragLoadingTimeOut: 15000, fragLoadingMaxRetry: 2 });
       viewer.hls = hls;
+      note("Connecting to the live stream…");
       hls.on(Hls.Events.ERROR, (_, data) => {
-        if (data && data.fatal) {
-          const r = data.response && data.response.code === 429 ? "the hub has enough streams open" : data.details || "stream error";
+        if (!data) return;
+        const code = data.response && data.response.code;
+        if (data.fatal) {
+          const r = code === 429 ? "the hub has enough streams open" : code === 503 ? "no live video from the source right now"
+            : data.details === "manifestLoadTimeOut" ? "the source didn't answer" : data.details || "stream error";
           liveFailed(r);
+        } else if (data.details === "bufferStalledError" || data.details === "bufferNudgeOnStall" || data.details === "bufferSeekOverHole") {
+          note("Buffering…");
         }
       });
       hls.loadSource(url);
       hls.attachMedia(v);
       hls.on(Hls.Events.MANIFEST_PARSED, () => v.play().catch(() => liveFailed("not allowed to play")));
+      v.onwaiting = () => { if (viewer.live) note("Buffering…"); };
     }).catch(() => native());                                       // hls.js didn't load: the browser's own, or snapshots
   }
   function showFoot() {
@@ -575,7 +609,7 @@ window.MapLayers = (() => {
     a.href = src ? src.link : "#";
     a.target = "_blank";
     a.rel = "noopener";
-    if (viewer.live) viewer.el.foot.replaceChildren("Live video through the hub (", a, "), muted. Only while this is open.");
+    if (viewer.live) viewer.el.foot.replaceChildren("Live video through the hub (", a, "), muted, the newest segments fetched ahead. Only while this is open.");
     else viewer.el.foot.replaceChildren(`${cadenceText(c)}, through the hub (`, a, "). Looked at every 10 s while this is open.");
   }
 
@@ -637,9 +671,11 @@ window.MapLayers = (() => {
     });
   }
 
-  function startRefresh() {
+  function startRefresh() {                  // snapshots: at the source's own cadence (the county's 8 s, the Thruway's minute)
     stopRefresh();
-    viewer.timer = setInterval(refreshCamera, CAM_REFRESH_MS);
+    const c = camById(viewer.id);
+    const every = Math.max(4000, ((c && c.cadence) || 60) * 1000);
+    viewer.timer = setInterval(refreshCamera, Math.min(every, 60000));
     viewer.tick = setInterval(showTime, 1000);
   }
   function stopRefresh() {
@@ -664,8 +700,10 @@ window.MapLayers = (() => {
     if (!id || viewer.busy) return;
     viewer.busy = true;
     try {
-      const r = await fetch(`/api/cad/cameras/${encodeURIComponent(id)}/image`, { credentials: "same-origin", cache: "no-store" });
+      const cond = viewer.etag ? { "If-None-Match": viewer.etag } : {};
+      const r = await fetch(`/api/cad/cameras/${encodeURIComponent(id)}/image`, { credentials: "same-origin", cache: "no-store", headers: cond });
       if (id !== viewer.id) return;
+      if (r.status === 304) return;                           // the hub's picture is the one we show
       if (!r.ok) {
         const e = await r.json().catch(() => null);
         if (e && e.down) {                                   // down (#99): say so, not the old picture
@@ -688,6 +726,7 @@ window.MapLayers = (() => {
       viewer.el.img.hidden = false;
       if (old) setTimeout(() => URL.revokeObjectURL(old), 1000);
       viewer.taken = Number(r.headers.get("X-Image-Time")) || Date.now() / 1000;
+      viewer.etag = r.headers.get("ETag") || null;
       viewer.stale = r.headers.get("X-Image-Stale") === "1";
       viewer.el.msg.hidden = true;
       showTime();
@@ -706,6 +745,7 @@ window.MapLayers = (() => {
     const c = camById(id);
     viewer.id = String(id);
     viewer.taken = 0;
+    viewer.etag = null;
     viewer.stale = false;
     viewer.down = c && c.down ? { down: true, down_since: c.down_since, last_image: c.last_image } : null;
     viewer.cadence = (c && c.cadence) || 60;

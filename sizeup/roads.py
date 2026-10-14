@@ -73,7 +73,11 @@ HTTP (sizeup/web/server.py, any signed-in person: viewers too, all GET):
                                            (the camera's Last-Modified, else when the hub fetched it)
     GET /api/cad/cameras/<id>/stream/playlist.m3u8, .../<chunklist>.m3u8, .../<segment>.ts
                                            live video (#101, Roads.stream): the camera's HLS stream through the hub,
-                                           only while a viewer keeps asking for the playlist
+                                           only while a viewer keeps asking for the playlist; a pump keeps the newest
+                                           segments fetched ahead of the player (pump_once)
+    GET /api/cad/cameras/<id>/stream/status   {open, fps (measured from the segments), ahead, target_s, source_down}
+    GET /api/cad/cameras/<id>/image       If-None-Match / If-Modified-Since / ?since=: 304 when the hub's picture
+                                           is no newer; ETag, Last-Modified, X-Image-Cadence on every answer
 
 Place search (#67's "@"): Roads.search_places(q, near, limit) answers in the place search's own
 shape ({kind: "camera", label, sub, lat, lon, source, camera}); the app hands it to the CAD as
@@ -90,7 +94,7 @@ import threading
 import time
 import xml.etree.ElementTree as ET
 from collections import OrderedDict
-from email.utils import parsedate_to_datetime
+from email.utils import formatdate, parsedate_to_datetime
 from pathlib import Path
 from typing import Callable
 from urllib.error import HTTPError, URLError
@@ -150,10 +154,14 @@ IMAGE_PARALLEL = 4               # fetches to the cameras at once
 CAMERA_ID = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
 CAMERA_PATH = re.compile(r"/api/cad/cameras/([A-Za-z0-9_.:-]{1,64})/image")
 # Live video (#101): a camera's HLS stream through the hub, only while a viewer is open
-STREAM_PATH = re.compile(r"/api/cad/cameras/([A-Za-z0-9_.:-]{1,64})/stream/([A-Za-z0-9_-]{1,80}\.(?:m3u8|ts))")
+STREAM_PATH = re.compile(r"/api/cad/cameras/([A-Za-z0-9_.:-]{1,64})/stream/(status|[A-Za-z0-9_-]{1,80}\.(?:m3u8|ts))")
 STREAM_IDLE_S = 30.0             # no playlist request this long: the stream's segments stop (a viewer polls every few s)
 STREAM_MAX = 4                   # live streams open at once, hub-wide (each about 26 KB/s): the 5th is refused
-STREAM_TIMEOUT_S = 10.0
+STREAM_TIMEOUT_S = 10.0          # a chunklist or segment
+STREAM_OPEN_TIMEOUT_S = 6.0      # the first playlist: a stream that doesn't answer this fast is down at the source
+STREAM_RETRY_S = 300.0           # ... and is not asked again for this long (the viewer shows snapshots at once)
+STREAM_AHEAD = 3                 # segments the pump keeps fetched ahead of the player, from the latest chunklist
+STREAM_LIST_FRESH_S = 2.0        # a chunklist younger than this is served from the pump's copy
 STREAM_MAX_BYTES = 4 * 1024 * 1024
 STREAM_SEG_TTL_S = 60.0          # a segment kept this long (two viewers of one camera: one fetch)
 STREAM_SEG_KEEP = 40
@@ -639,6 +647,72 @@ def cam_dir(text: str) -> str:
     return (m.group(1)[0].upper() + "B") if m else ""
 
 
+def _since(headers, since_q: str) -> float | None:
+    """The time of the picture the caller already has: If-None-Match ("<unix s>"), If-Modified-Since, ?since=."""
+    h = headers or {}
+    get = h.get if hasattr(h, "get") else (lambda k, d=None: d)
+    for raw in (since_q, (get("If-None-Match") or "").strip('" W/'), get("If-Modified-Since") or ""):
+        if not raw:
+            continue
+        if re.fullmatch(r"\d{9,11}", str(raw)):
+            return float(raw)
+        try:
+            return parsedate_to_datetime(str(raw)).timestamp()
+        except (TypeError, ValueError, IndexError):
+            continue
+    return None
+
+
+def ts_frames(b: bytes) -> int:
+    """Video frames in an MPEG-TS segment: the PES starts on the video PID (from the PAT and PMT)."""
+    pmt_pid = video_pid = None
+    n = 0
+    for i in range(0, len(b) - 187, 188):
+        if b[i] != 0x47:
+            continue
+        pid = ((b[i + 1] & 0x1F) << 8) | b[i + 2]
+        pusi = (b[i + 1] >> 6) & 1
+        afc = (b[i + 3] >> 4) & 3
+        off = 4 + (1 + b[i + 4] if afc & 2 else 0)
+        if off >= 188:
+            continue
+        try:
+            if pid == 0 and pmt_pid is None:
+                p = off + 1 + b[i + off]
+                pmt_pid = ((b[i + p + 10] & 0x1F) << 8) | b[i + p + 11]
+            elif pid == pmt_pid and video_pid is None:
+                p = off + 1 + b[i + off]
+                sl = ((b[i + p + 1] & 0x0F) << 8) | b[i + p + 2]
+                pil = ((b[i + p + 10] & 0x0F) << 8) | b[i + p + 11]
+                j, end = p + 12 + pil, p + 3 + sl - 4
+                while j < end:
+                    stype = b[i + j]
+                    epid = ((b[i + j + 1] & 0x1F) << 8) | b[i + j + 2]
+                    eil = ((b[i + j + 3] & 0x0F) << 8) | b[i + j + 4]
+                    if stype in (0x1B, 0x24, 0x02):
+                        video_pid = epid
+                    j += 5 + eil
+            elif pid == video_pid and pusi:
+                n += 1
+        except IndexError:
+            continue
+    return n
+
+
+def _segment_duration(chunklist: bytes, name: str) -> float:
+    """The #EXTINF before `name` in a chunklist, or 0."""
+    dur = 0.0
+    for t in chunklist.decode(errors="replace").splitlines():
+        if t.startswith("#EXTINF:"):
+            try:
+                dur = float(t[8:].split(",")[0])
+            except ValueError:
+                dur = 0.0
+        elif t.strip() == name:
+            return dur
+    return 0.0
+
+
 def highway_places(path: str | Path | None, bbox=DEFAULT_BBOX) -> dict:
     """The mile markers and exits in the gazetteer's places table (#67: NYSDOT reference markers, OSM
     motorway junctions), in our area. {} when that table isn't there yet (before #67)."""
@@ -795,6 +869,8 @@ class Roads:
         self._streams: dict[str, dict] = {}           # camera id -> {last (playlist request), base (the stream's folder)}
         self._segments: OrderedDict[str, dict] = OrderedDict()   # "cid/name" -> {body, ctype, fetched}
         self._stream_lock = threading.Lock()
+        self._stream_down: dict[str, float] = {}      # camera id -> when its source last refused to stream
+        self._pumps: dict[str, threading.Thread] = {}
         self._swept = 0.0
         self._images: OrderedDict[str, dict] = OrderedDict()
         self._image_locks: dict[str, threading.Lock] = {}
@@ -1162,8 +1238,15 @@ class Roads:
 
     # -- the snapshot proxy ----------------------------------------------------------------------------
 
-    def image(self, cid: str) -> tuple[int, bytes, str, dict]:
-        """(code, body, content type, headers) for GET /api/cad/cameras/<id>/image."""
+    @staticmethod
+    def image_ttl(cam: dict) -> float:
+        """How long a snapshot is served before the camera is asked again: half its cadence (the county's
+        8 s pictures every 4 s), never over IMAGE_TTL_S."""
+        return min(IMAGE_TTL_S, max(2.0, float(cam.get("cadence") or 60) / 2))
+
+    def image(self, cid: str, since: float | None = None) -> tuple[int, bytes, str, dict]:
+        """(code, body, content type, headers) for GET /api/cad/cameras/<id>/image. since: the time of the
+        picture the caller has (If-None-Match / If-Modified-Since / ?since=): 304 when the hub's is no newer."""
         if not self.configured:
             return 404, b'{"error":"no camera source is configured"}', JSON, {}
         cam = self.camera(cid)
@@ -1175,9 +1258,9 @@ class Roads:
         with lock:                                   # many viewers, one fetch
             hit = self._images.get(cid)
             now = self.clock()
-            if hit and now - hit["fetched"] < IMAGE_TTL_S:
+            if hit and now - hit["fetched"] < self.image_ttl(cam):
                 self._images.move_to_end(cid)
-                return self._image_out(hit, False)
+                return self._image_out(hit, False, since, cam)
             try:
                 with self._parallel:
                     code, headers, body = self.fetch(cam["url"], IMAGE_TIMEOUT_S, IMAGE_MAX_BYTES)
@@ -1200,7 +1283,7 @@ class Roads:
                 self._images.move_to_end(cid)
                 while len(self._images) > IMAGE_KEEP:
                     self._images.popitem(last=False)
-                return self._image_out(hit, False)
+                return self._image_out(hit, False, since, cam)
             except (HTTPError, URLError, OSError, ValueError) as e:
                 why = _redact(f"{type(e).__name__}: {getattr(e, 'reason', e)}", self.ny.key)
                 self._note_image(cid, False, None, now)
@@ -1208,14 +1291,18 @@ class Roads:
                     self._images.pop(cid, None)
                     return self._down_answer(cid)
                 if hit and now - hit["fetched"] < IMAGE_STALE_S:
-                    return self._image_out(hit, True)
+                    return self._image_out(hit, True, since, cam)
                 return 502, json.dumps({"error": f"the camera didn't answer ({why})"}).encode(), JSON, {}
 
-    @staticmethod
-    def _image_out(hit: dict, stale: bool) -> tuple[int, bytes, str, dict]:
-        h = {"Cache-Control": f"private, max-age={int(IMAGE_TTL_S)}", "X-Image-Time": str(int(hit["taken"]))}
+    def _image_out(self, hit: dict, stale: bool, since: float | None = None, cam: dict | None = None) -> tuple[int, bytes, str, dict]:
+        taken = int(hit["taken"])
+        h = {"Cache-Control": f"private, max-age={int(self.image_ttl(cam) if cam else IMAGE_TTL_S)}",
+             "X-Image-Time": str(taken), "ETag": f'"{taken}"', "Last-Modified": formatdate(taken, usegmt=True),
+             "X-Image-Cadence": str(int((cam or {}).get("cadence") or 60))}
         if stale:
             h["X-Image-Stale"] = "1"
+        if since is not None and taken <= int(since):      # the caller has this picture already
+            return 304, b"", hit["ctype"], h
         return 200, hit["body"], hit["ctype"], h
 
     # -- live video (#101): the camera's HLS stream through the hub, only while a viewer is open --------------
@@ -1240,6 +1327,12 @@ class Roads:
         now = self.clock()
         base = cam["video"].rsplit("/", 1)[0] + "/"
         hdr = {"Cache-Control": "no-store"}
+        if name == "status":
+            return 200, json.dumps(self.stream_status(cid)).encode(), JSON, hdr
+        failed_at = self._stream_down.get(cid)
+        if failed_at is not None and now - failed_at < STREAM_RETRY_S:        # its source refused lately: don't wait again
+            return 503, json.dumps({"error": "no live video from the source right now", "source_down": True,
+                                    "retry_s": int(STREAM_RETRY_S - (now - failed_at))}).encode(), JSON, hdr
         opened = False
         with self._stream_lock:
             st = self._streams.get(cid)
@@ -1247,7 +1340,8 @@ class Roads:
                 if st is None or now - st["last"] > STREAM_IDLE_S:
                     if self.streams_open(now) >= STREAM_MAX:
                         return 429, json.dumps({"error": f"too many live streams open ({STREAM_MAX}); snapshots instead"}).encode(), JSON, hdr
-                    st = self._streams[cid] = {"last": now, "base": base}
+                    st = self._streams[cid] = {"last": now, "base": base, "chunk": "", "list": None, "list_at": 0.0,
+                                               "target": 6.0, "frames": 0, "seconds": 0.0, "fps": None, "ahead": 0}
                     opened = True
                 st["last"] = now
             elif st is None or now - st["last"] > STREAM_IDLE_S:
@@ -1258,9 +1352,12 @@ class Roads:
             hit = self._segments.get(key)
             if hit and now - hit["fetched"] < STREAM_SEG_TTL_S:
                 return 200, hit["body"], hit["ctype"], {**hdr, "Cache-Control": "private, max-age=60"}
+        elif name != "playlist.m3u8" and st.get("list") and name == st.get("chunk") and now - st["list_at"] < STREAM_LIST_FRESH_S:
+            return 200, st["list"], "application/vnd.apple.mpegurl", hdr          # the pump's fresh copy
         try:
             with self._parallel:
-                code, headers, body = self.fetch(src, STREAM_TIMEOUT_S, STREAM_MAX_BYTES)
+                code, headers, body = self.fetch(src, STREAM_OPEN_TIMEOUT_S if name == "playlist.m3u8" else STREAM_TIMEOUT_S,
+                                                 STREAM_MAX_BYTES)
             if code != 200 or not body:
                 raise ValueError(f"HTTP {code}")
         except (HTTPError, URLError, OSError, ValueError) as e:
@@ -1268,16 +1365,32 @@ class Roads:
             if opened:                                           # a stream that never answered holds no slot
                 with self._stream_lock:
                     self._streams.pop(cid, None)
+                    self._stream_down[cid] = now                 # ... and isn't asked again for a while
+                self.log(f"roads: {cid}: no live video from the source ({why}); snapshots for {STREAM_RETRY_S:.0f} s")
+                return 503, json.dumps({"error": "no live video from the source right now", "source_down": True,
+                                        "retry_s": int(STREAM_RETRY_S)}).encode(), JSON, hdr
             return 502, json.dumps({"error": f"the stream didn't answer ({why})"}).encode(), JSON, hdr
+        self._stream_down.pop(cid, None)
         if name.endswith(".ts"):
-            ctype = (headers.get("content-type") or "video/MP2T").split(";")[0].strip() or "video/MP2T"
-            with self._stream_lock:
-                self._segments[key] = {"body": body, "ctype": ctype, "fetched": now}
-                self._segments.move_to_end(key)
-                while len(self._segments) > STREAM_SEG_KEEP:
-                    self._segments.popitem(last=False)
+            ctype = self._keep_segment(cid, name, headers, body, now)
             return 200, body, ctype, {**hdr, "Cache-Control": "private, max-age=60"}
         # a playlist: every line that names a file must be a plain name in the stream's own folder
+        clean = self._clean_playlist(body)
+        if clean is None:
+            return 502, b'{"error":"the stream names files the hub will not fetch"}', JSON, hdr
+        with self._stream_lock:
+            st = self._streams.get(cid)
+            if st is not None:
+                if name == "playlist.m3u8":
+                    st["chunk"] = next((t for t in clean.decode().splitlines() if t and not t.startswith("#")), "")
+                elif name == st.get("chunk"):
+                    self._note_list(st, clean, now)
+        if opened and st is not None:
+            self._start_pump(cid)
+        return 200, clean, "application/vnd.apple.mpegurl", hdr
+
+    @staticmethod
+    def _clean_playlist(body: bytes) -> bytes | None:
         lines = []
         for ln in body.decode("utf-8", errors="replace").splitlines():
             t = ln.strip()
@@ -1285,9 +1398,109 @@ class Roads:
                 lines.append(t)
                 continue
             if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}\.(?:m3u8|ts)", t):
-                return 502, b'{"error":"the stream names files the hub will not fetch"}', JSON, hdr
+                return None
             lines.append(t)
-        return 200, ("\n".join(lines) + "\n").encode(), "application/vnd.apple.mpegurl", hdr
+        return ("\n".join(lines) + "\n").encode()
+
+    @staticmethod
+    def _note_list(st: dict, clean: bytes, now: float) -> None:
+        st["list"], st["list_at"] = clean, now
+        m = re.search(rb"#EXT-X-TARGETDURATION:(\d+(?:\.\d+)?)", clean)
+        if m:
+            st["target"] = max(1.0, float(m.group(1)))
+
+    def _keep_segment(self, cid: str, name: str, headers: dict, body: bytes, now: float) -> str:
+        """A fetched segment into the cache; its frames into the stream's frame-rate estimate."""
+        ctype = (headers.get("content-type") or "video/MP2T").split(";")[0].strip() or "video/MP2T"
+        with self._stream_lock:
+            self._segments[f"{cid}/{name}"] = {"body": body, "ctype": ctype, "fetched": now}
+            self._segments.move_to_end(f"{cid}/{name}")
+            while len(self._segments) > STREAM_SEG_KEEP:
+                self._segments.popitem(last=False)
+            st = self._streams.get(cid)
+            if st is not None and st.get("list"):
+                dur = _segment_duration(st["list"], name)
+                if dur:
+                    st["frames"] += ts_frames(body)
+                    st["seconds"] += dur
+                    if st["seconds"] >= 4:
+                        st["fps"] = round(st["frames"] / st["seconds"], 1)
+        return ctype
+
+    def stream_status(self, cid: str) -> dict:
+        """{open, fps, ahead, target_s, source_down}: for the viewer's notes (a low frame rate at the source)."""
+        now = self.clock()
+        st = self._streams.get(cid)
+        is_open = st is not None and now - st["last"] <= STREAM_IDLE_S
+        failed_at = self._stream_down.get(cid)
+        return {"open": is_open, "fps": st["fps"] if is_open else None, "ahead": st["ahead"] if is_open else 0,
+                "target_s": st["target"] if is_open else None,
+                "source_down": failed_at is not None and now - failed_at < STREAM_RETRY_S}
+
+    # The pump: while a stream is open, keep its chunklist fresh and the newest segments fetched ahead of
+    # the player, so the player never waits on the origin per segment (the origin's latency per 6 s
+    # segment, two hops away, is what drains a buffer).
+    pump_threads = True                     # tests: False, and they call pump_once themselves
+
+    def _start_pump(self, cid: str) -> None:
+        if not self.pump_threads:
+            return
+        t = self._pumps.get(cid)
+        if t is not None and t.is_alive():
+            return
+        t = threading.Thread(target=self._pump, args=(cid,), name=f"stream-{cid}", daemon=True)
+        self._pumps[cid] = t
+        t.start()
+
+    def _pump(self, cid: str) -> None:
+        while not self._stop.is_set():
+            st = self._streams.get(cid)
+            if st is None or self.clock() - st["last"] > STREAM_IDLE_S:
+                return
+            try:
+                self.pump_once(cid)
+            except Exception as e:  # pragma: no cover - never lets the thread die on a surprise
+                self.log(f"roads: stream {cid}: pump error {type(e).__name__}: {e}")
+            st = self._streams.get(cid)
+            self._stop.wait(max(1.0, (st["target"] if st else 6.0) / 3))
+
+    def pump_once(self, cid: str) -> int:
+        """One round: the chunklist (unless fresh), then up to STREAM_AHEAD of its newest segments not yet
+        cached, oldest first. The number of segments fetched."""
+        st = self._streams.get(cid)
+        if st is None or not st.get("chunk"):
+            return 0
+        now = self.clock()
+        if not st.get("list") or now - st["list_at"] >= STREAM_LIST_FRESH_S:
+            try:
+                code, _, body = self.fetch(st["base"] + st["chunk"], STREAM_TIMEOUT_S, STREAM_MAX_BYTES)
+                clean = self._clean_playlist(body) if code == 200 and body else None
+            except (HTTPError, URLError, OSError, ValueError):
+                clean = None
+            if clean is not None:
+                with self._stream_lock:
+                    self._note_list(st, clean, now)
+        if not st.get("list"):
+            return 0
+        names = [t for t in st["list"].decode().splitlines() if t and not t.startswith("#") and t.endswith(".ts")]
+        wanted = names[-STREAM_AHEAD:]
+        n = 0
+        for name in wanted:
+            key = f"{cid}/{name}"
+            hit = self._segments.get(key)
+            if hit and now - hit["fetched"] < STREAM_SEG_TTL_S:
+                continue
+            try:
+                with self._parallel:
+                    code, headers, body = self.fetch(st["base"] + name, STREAM_TIMEOUT_S, STREAM_MAX_BYTES)
+                if code != 200 or not body:
+                    continue
+            except (HTTPError, URLError, OSError, ValueError):
+                continue
+            self._keep_segment(cid, name, headers, body, now)
+            n += 1
+        st["ahead"] = sum(1 for name in wanted if f"{cid}/{name}" in self._segments)
+        return n
 
     # -- HTTP ------------------------------------------------------------------------------------------
 
@@ -1295,7 +1508,7 @@ class Roads:
         return (path == "/api/cad/roads" or path == "/api/cad/cameras" or bool(CAMERA_PATH.fullmatch(path))
                 or bool(STREAM_PATH.fullmatch(path)))
 
-    def get(self, path: str, query: str) -> tuple[int, bytes, str, dict]:
+    def get(self, path: str, query: str, headers=None) -> tuple[int, bytes, str, dict]:
         q = parse_qs(query or "")
         one = lambda k: (q.get(k) or [""])[0].strip()
         if path == "/api/cad/roads":
@@ -1328,7 +1541,7 @@ class Roads:
                 return 400, b'{"error":"q or near"}', JSON, {}
             return 200, json.dumps({"configured": self.configured, "cameras": cams}).encode(), JSON, {}
         if m := CAMERA_PATH.fullmatch(path):
-            return self.image(m.group(1))
+            return self.image(m.group(1), _since(headers, one("since")))
         if m := STREAM_PATH.fullmatch(path):
             return self.stream(m.group(1), m.group(2))
         return 404, b"not found\n", "text/plain", {}

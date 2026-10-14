@@ -249,7 +249,7 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
             if path == "/api/cad/stream" and cad_b is not None:
                 return self._stream(cad_b)
             if roads is not None and roads.handles(path):        # the highway layers, camera snapshots (#73)
-                return self._send(*roads.get(path, url.query))
+                return self._send(*roads.get(path, url.query, self.headers))
             if gis is not None and gis.handles(path):            # the county GIS layers (#91)
                 return self._send(*gis.get(path, url.query, self.headers))
             if path.startswith("/api/cad/") and cad is not None:
