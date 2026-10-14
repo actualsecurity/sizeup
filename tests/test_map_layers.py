@@ -109,6 +109,18 @@ def test_the_layers_box_keeps_scroll_focus_and_folds_on_a_toggle():
     assert "max-block-size: min(70vh, calc(100% - var(--ctl-sm) - var(--s-6)))" in css
 
 
+
+def test_the_incident_cameras_start_folded_to_a_count_and_remember_the_viewer():
+    """The incident tab's Cameras panel is one line until opened (#149); the Overview's small one is unchanged."""
+    ml = js("maplayers.js")
+    assert 'const CAMS_OPEN_KEY = "sizeup.cad.camsOpen";' in ml
+    assert 'st.open = st.small ? isOpenEvent(inc) : stored(CAMS_OPEN_KEY) === "1";' in ml
+    assert 'if (!st.small) remember(CAMS_OPEN_KEY, st.open ? "1" : "0");' in ml
+    body = re.search(r"  function drawCams\(host, st, fresh\) \{(.*?)\n  \}\n", ml, re.S).group(1)
+    fold = body.index("if (!st.open) {")
+    assert "ml-cams-count" in body[fold:] and 'parts.push(`${down.length} down`)' in body
+    assert body.index("host.replaceChildren(head);\n    if (!st.open) return;") > fold     # nothing but the header when folded
+
 # ---- the sets: the viewer's two, and an event's own ---------------------------------------------------------------
 
 
