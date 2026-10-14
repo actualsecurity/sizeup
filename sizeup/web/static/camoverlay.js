@@ -1,7 +1,13 @@
-// The cameras on the Overview's map (GitHub #147, the Overlay layout): each camera in our area as a small tile pinned at
-// its spot, live where the source streams (camwall.js's tiles: the same stream budget and rules, only tiles on screen
-// play), snapshots otherwise. User, 2026-10-14: "... or overlay the cameras on the map too".
+// The cameras on the Overview's map (GitHub #147; a Layers toggle since #168): each camera in our area as a small tile
+// pinned at its spot, live where the source streams (camwall.js's tiles: the same stream budget and rules, only tiles
+// on screen play), snapshots otherwise. User, 2026-10-14: "... or overlay the cameras on the map too"; then (#168)
+// "overlay should only be an option in layers, not here".
 //
+//   The toggle  "Camera overlay" in the Overview map's Layers box (MapLayers.addGroup, at the top: next to Cameras),
+//               off by default, per viewer in the box's "overview" set (MapLayers.prefs, key CamWall.engine.OVERLAY;
+//               the wall board's Overview shares it). The Overview's map only: the event's map has its Cameras panel,
+//               and the tiles run on the Overview's camera list (camwall.js: polled only while the Overview shows).
+//               On in Map, Side by side and Stacked (wherever the map shows).
 //   Placing     a DOM layer over the map (not markers: one pass places every tile), re-placed once a frame while the
 //               map moves. A tile sits just above its camera; when that would overlap a tile already placed it is
 //               nudged (below, beside, further out: CANDIDATES, the first free spot) and a leader line runs to the
@@ -9,8 +15,7 @@
 //   Size        by zoom (SIZES: 72 px wide at zoom 10 to 208 at 15 and in); under MIN_ZOOM the tiles hide (the
 //               camera icons and the marks stay).
 //   Down        a down camera is the dim "!" mark only (a click opens the viewer, which says since when).
-//   Other       layouts with the map (Map, Side by side, Stacked): no tiles, the event's before / after cameras ringed
-//               and labelled on the map, so they stand out in every layout.
+//   Off         no tiles: the event's before / after cameras ringed and labelled on the map, so they stand out either way.
 // CamOverlay.place() re-places now; CamOverlay.state for the tests.
 "use strict";
 
@@ -34,13 +39,45 @@ window.CamOverlay = (() => {
     return out;
   };
   const SVG = "http://www.w3.org/2000/svg";
-  const o = { map: null, layer: null, svg: null, tiles: new Map(), marks: new Map(), lines: new Map(), frame: 0, sig: "" };
+  const KEY = E.OVERLAY;
+  const o = { control: null, map: null, layer: null, svg: null, tiles: new Map(), marks: new Map(), lines: new Map(), frame: 0, sig: "" };
+  const isOverview = (control) => { try { return !!control.map.getContainer().closest("#ov-map"); } catch (_) { return false; } };
+  const isOn = () => !!(o.control && o.control.on(KEY, false));
+
+  // ---- the toggle: a group in the Overview map's Layers box (maplayers.js addGroup); other maps get none ------------
+  class OverlayGroup {
+    constructor(control) { this.control = control; this.top = true; o.control = control; }
+    keys() { return [[KEY, false]]; }
+    refresh() { render(); }
+    panel() {
+      const box = el("div", "ml-group");
+      const head = el("div", "ml-ghead");
+      head.append(el("b", "", "Camera overlay"));
+      box.append(head);
+      const lab = el("label", "check");
+      const cb = el("input");
+      cb.type = "checkbox";
+      cb.checked = isOn();
+      cb.dataset.key = KEY;
+      cb.addEventListener("change", () => this.control.setLayer(KEY, cb.checked));
+      lab.append(cb, ...(window.Icon ? [Icon("camera")] : []), el("span", "", "Live camera views on the map"));
+      box.append(lab);
+      if (!isOn()) return box;
+      const d = E.list(), s = (d && d.streams) || {};
+      const cams = ((d && d.cameras) || []).filter((c) => !E.isDown(c));
+      const n = Math.max(0, Number(s.per_viewer ?? s.streaming ?? 0));
+      if (E.layout() === "cameras") box.append(el("div", "ml-note", "Shows with the map: Map, Side by side or Stacked"));
+      else if (d && !d.configured) box.append(el("div", "ml-note", "No camera source is on at the hub"));
+      else if (d) box.append(el("div", "ml-note", `${cams.length} in our area${n ? `, up to ${n} live at once` : ""}; from zoom ${MIN_ZOOM}`));
+      return box;
+    }
+  }
+  MapLayers.addGroup({ attach: (control) => (isOverview(control) ? new OverlayGroup(control) : {}) });
 
   function attach() {
     if (o.map) return true;
-    const m = [...MapLayers.maps].find((x) => { try { return !!x.map.getContainer().closest("#ov-map"); } catch (_) { return false; } });
-    if (!m) return false;
-    o.map = m.map;
+    if (!o.control) return false;
+    o.map = o.control.map;
     o.layer = el("div", "co-layer");
     o.svg = document.createElementNS(SVG, "svg");
     o.svg.setAttribute("class", "co-lines");
@@ -54,15 +91,15 @@ window.CamOverlay = (() => {
     if (!o.frame) o.frame = requestAnimationFrame(() => { o.frame = 0; place(); });
   }
 
-  // ---- what is on the map: tiles (Overlay), "!" marks for down cameras (Overlay), rings for the pinned (the rest) -----
+  // ---- what is on the map: tiles and "!" marks for down cameras (the overlay on), rings for the pinned (off) ----------
   function render() {
     if (!attach()) return;
     const mode = E.layout(), d = E.list();
     const cams = (d && d.cameras) || [];
-    const overlay = mode === "overlay";
+    const overlay = mode !== "cameras" && isOn();
     const want = overlay ? cams.filter((c) => !E.isDown(c)) : [];
     const marks = overlay ? cams.filter(E.isDown) : mode === "cameras" ? [] : cams.filter((c) => c.pin);
-    const sig = JSON.stringify([mode, want.map((c) => [c.id, c.pin, c.lat, c.lon]), marks.map((c) => [c.id, c.pin, E.isDown(c)])]);
+    const sig = JSON.stringify([mode, overlay, want.map((c) => [c.id, c.pin, c.lat, c.lon]), marks.map((c) => [c.id, c.pin, E.isDown(c)])]);
     if (sig === o.sig) return schedule();
     o.sig = sig;
     const keep = new Set();
@@ -172,5 +209,5 @@ window.CamOverlay = (() => {
   E.subscribe(render);
   cad.hooks.push(() => { if (!o.map && attach()) render(); });     // the Overview's map is made on its first show
   render();
-  return { place, render, state: o, MIN_ZOOM, SIZES };
+  return { place, render, isOn, state: o, MIN_ZOOM, SIZES, KEY };
 })();

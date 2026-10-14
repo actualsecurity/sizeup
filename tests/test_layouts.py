@@ -1,13 +1,15 @@
-"""The Overview's layouts (GitHub #147): Map · Cameras · Side by side · Stacked · Overlay, picked in the Overview's head
+"""The Overview's layouts (GitHub #147): Map · Cameras · Side by side · Stacked, picked in the Overview's head
 (the console and the wall board), remembered per screen; the map | cameras divider (panels.js's separator, #139); the
-cameras on the map (camoverlay.js); a phone with Map and Cameras only. Static checks: the page, the scripts and the
-styles agree. The layouts themselves are checked in a browser at 1366, 1920 and 390 (the PR has the numbers)."""
+cameras on the map (camoverlay.js), a toggle in the Overview map's Layers box since #168, not a layout ("overlay
+should only be an option in layers, not here"), a saved Overlay layout read once as Map with the toggle on; a phone
+with Map and Cameras only. Static checks: the page, the scripts and the styles agree. The layouts themselves are
+checked in a browser at 1366, 1920 and 390 (the PR has the numbers)."""
 
 import re
 from pathlib import Path
 
 STATIC = Path(__file__).resolve().parent.parent / "sizeup" / "web" / "static"
-MODES = ["map", "cameras", "side", "stacked", "overlay"]
+MODES = ["map", "cameras", "side", "stacked"]
 
 
 def read(name):
@@ -36,7 +38,7 @@ def test_remembered_per_screen_with_the_old_switch_read_once():
     js = read("camwall.js")
     assert 'const KEY = "sizeup.overviewLayout", OLD_KEY = "sizeup.cameraWall"' in js
     assert 'const SCREEN = BOARD ? "monitor" : "overview"' in js
-    assert 'const MODES = ["map", "cameras", "side", "stacked", "overlay"]' in js
+    assert 'const MODES = ["map", "cameras", "side", "stacked"]' in js
     assert 'if (!s.mode && (JSON.parse(localStorage.getItem(OLD_KEY)' in js and 's = { mode: "cameras" }' in js
     for m in re.finditer(r"localStorage\.\w+Item", js):
         assert in_try(js, m.start()), m.group(0)
@@ -48,8 +50,8 @@ def test_a_phone_has_map_and_cameras_only():
     assert 'const PHONE = matchMedia("(max-width: 640px)")' in js
     assert 'PHONE.matches && !["map", "cameras"].includes(L.mode) ? "map" : L.mode' in js
     css = read("cadmap.css")
-    assert re.search(r'@media \(max-width: 640px\) \{ \.ov-layout button:is\(\[data-layout="side"\], \[data-layout="stacked"\], '
-                     r'\[data-layout="overlay"\]\) \{ display: none; \} \}', css)
+    assert ('@media (max-width: 640px) { .ov-layout button:is([data-layout="side"], [data-layout="stacked"]) { display: none; } }'
+            in css)
 
 
 def test_each_layout_lays_out():
@@ -80,6 +82,52 @@ def test_the_divider_is_the_139_separator():
     assert '.ov-split[data-orient="vertical"] { cursor: col-resize; }' in css
 
 
+def test_overlay_is_not_a_layout():
+    html = read("cad.html")
+    assert 'data-layout="overlay"' not in html and ">Overlay<" not in html
+    for name in ("cadmap.css", "cad.css"):
+        assert 'data-layout="overlay"' not in read(name), name                     # no CSS left for the old layout
+    js = read("camwall.js")
+    assert '"overlay"' not in js[js.index("const MODES"):js.index("\n", js.index("const MODES"))]
+
+
+def test_a_saved_overlay_layout_opens_as_map_with_the_toggle_on():
+    js = read("camwall.js")
+    load = js[js.index("  function load() {"):js.index("  function save() {")]
+    assert 'if (s.mode === "overlay") { s = { ...s, mode: "map" }; wasOverlay = true; }' in load
+    assert load.index('s.mode === "overlay"') < load.index("MODES.includes(s.mode)")   # before the unknown-mode default
+    assert 'const OVERLAY = "camoverlay"' in js
+    assert 'if (wasOverlay) { MapLayers.setLayer(OVERLAY, true, "overview"); save(); }' in js   # once: saved as Map from then on
+    ml = read("maplayers.js")
+    assert 'function setLayer(key, on, profile = "overview")' in ml and "const KEY_RE = /^[a-z][a-z0-9_:-]{0,47}$/;" in ml
+    assert re.match(r"^[a-z][a-z0-9_:-]{0,47}$", "camoverlay")
+
+
+def test_the_overlay_is_a_layers_toggle_on_the_overview_map():
+    js = read("camoverlay.js")
+    assert "const KEY = E.OVERLAY;" in js and "OVERLAY," in read("camwall.js")
+    assert 'MapLayers.addGroup({ attach: (control) => (isOverview(control) ? new OverlayGroup(control) : {}) });' in js
+    assert 'closest("#ov-map")' in js                                               # the Overview's map only
+    assert "const isOn = () => !!(o.control && o.control.on(KEY, false));" in js    # off by default, the viewer's set
+    assert "keys() { return [[KEY, false]]; }" in js and "refresh() { render(); }" in js
+    assert "this.control.setLayer(KEY, cb.checked)" in js and "cb.dataset.key = KEY;" in js
+    assert "this.top = true;" in js                                                 # drawn by Cameras, not at the box's foot
+    assert "localStorage" not in js                                                 # remembered by maplayers.js's prefs
+    assert 'const overlay = mode !== "cameras" && isOn();' in js                      # wherever the map shows
+    ml = read("maplayers.js")
+    assert "for (const g of this.groups) { const el = g.top ? groupPanel(g) : null; if (el) panel.append(el); }" in ml
+    assert "for (const g of this.groups) { const el = g.top ? null : groupPanel(g); if (el) panel.append(el); }" in ml
+    assert ml.index("g.top ? groupPanel(g)") > ml.index("panel.append(list);")
+
+
+def test_a_camera_is_one_stream_across_the_wall_and_the_overlay():
+    js = read("camwall.js")
+    assert "x !== t && x.id === t.id && (x.live || x.starting)" in js
+    assert "live < budget() && !twin(t)) { live++; startLive(t); }" in js           # the hub's per-screen budget, one slot
+    assert 'if (was && !twin(t)) fetch(streamUrl(t, "close")' in js                 # the twin's use isn't closed under it
+    assert 'if (!t.visible || (t.set === "wall" && !wallShown())) continue;' in js   # a hidden wall's tiles don't restart
+
+
 def test_the_overlay():
     js = read("camoverlay.js")
     assert "const MIN_ZOOM = 10" in js and "SIZES = [[15, 208], [14, 176], [13, 144], [12, 112], [11, 88], [MIN_ZOOM, 72]]" in js
@@ -89,7 +137,7 @@ def test_the_overlay():
     assert "CANDIDATES(W, H)" in js and "inside(r, box) && !placed.some((q) => overlaps(r, q))" in js   # nudged, kept on the map
     assert 'document.createElementNS(SVG, "line")' in js                            # the leader to the exact spot
     assert '"co-mark co-down"' in js and 'el("span", "ml-down-badge", "!")' in js    # down: the dim "!" only
-    assert 'mode === "cameras" ? [] : cams.filter((c) => c.pin)' in js               # the event's cameras ringed in the other layouts
+    assert 'mode === "cameras" ? [] : cams.filter((c) => c.pin)' in js               # the event's cameras ringed without the overlay
     assert "t.el.hidden = !on" in js                                                # off the map or too far out: no tile, no stream
     wall = read("camwall.js")
     assert 'if (!wallShown()) for (const t of w.tiles.values()) if (t.set === "wall") stopLive(t)' in wall

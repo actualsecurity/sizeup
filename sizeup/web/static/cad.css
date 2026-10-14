@@ -535,7 +535,7 @@
     .units > .feed { position: static; margin: 0 0 var(--s-3); border: var(--bw) solid var(--line); border-radius: var(--radius); }
     html.board .cad-main { --zoom: 1.1; }
     html.board .ov-grid, html.board .ov-grid[data-layout] { grid-template-columns: minmax(0, 1fr); }
-    html.board .ov-grid:is([data-layout="map"], [data-layout="overlay"]) .ov-view { block-size: 50vh; }
+    html.board .ov-grid[data-layout="map"] .ov-view { block-size: 50vh; }
   }
   /* a phone: the header is two rows, the same on every view (brand, state, clock / views, tools) */
   @media (max-width: 640px) {
