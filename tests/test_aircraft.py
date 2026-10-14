@@ -201,6 +201,91 @@ def test_a_position_jump_is_held_back_until_it_repeats():
     assert tr.tracks["abc123"].plane.lat == pytest.approx(41.25)           # three times: it really is there
 
 
+# ---- trails: every aircraft drawn, short, real fixes only; the turn rate the page bends its prediction by ------------------
+
+
+def test_every_aircraft_drawn_has_a_short_trail_of_real_fixes(tmp_path):
+    clock = Clock()
+    ly = layer(clock, cache_dir=tmp_path)
+    d = both(ly, clock)
+    assert d["drop_s"] == DROP_S and d["stale_s"] == STALE_S
+    for a in d["aircraft"]:
+        t = ly.tracks.tracks[a["hex"]]
+        assert a["trail"] == [[round(lon, 4), round(lat, 4)] for _, lat, lon in t.trail]          # what the store accepted
+        assert len(a["trail"]) <= A.TRAIL_POINTS and all(t.pos_time - w <= A.TRAIL_S for w, _, _ in t.trail)
+        assert a["cat"] == t.plane.category and "tr" in a
+    a = by_cs(d)
+    # not only arrivals, departures and emergencies now: low traffic too, once it has moved
+    assert len(a["RPA4546"]["trail"]) == 2 and a["RPA4546"]["phase"] == LOW
+    assert len(a["N41DW"]["trail"]) == 2 and a["N41DW"]["phase"] == ARRIVING
+
+
+def test_a_trail_point_every_60_m_or_15_s_and_kept_short():
+    tr = Tracks()
+    north = 60.0 / 111195                                   # 60 m north, in degrees
+    for k in range(40):                                     # 5 s apart, 30 m each: a point every other fix
+        tr.update(Snapshot(T1 + 5 * k, (plane(lat=41.06 + k * north / 2, seen_pos=0.0),)))
+    t = tr.tracks["abc123"]
+    assert all(T1 + 5 * 39 - w <= A.TRAIL_S for w, _, _ in t.trail)          # the last 90 s only
+    assert 6 <= len(t.trail) <= 10 and t.trail[-1][0] >= T1 + 5 * 37
+    assert all(A.metres(a[1], a[2], b[1], b[2]) >= 59 for a, b in zip(t.trail, list(t.trail)[1:]))
+    # parked: one point, its time refreshed, not a stack (shortfinal's _extend_trail)
+    tr = Tracks()
+    for k in range(10):
+        tr.update(Snapshot(T1 + 20 * k, (plane(alt_baro="ground", gs=0.0, seen_pos=0.0),)))
+    assert len(tr.tracks["abc123"].trail) == 1 and tr.tracks["abc123"].trail[0][0] == T1 + 180
+    # slow: 20 m in 20 s is past the 15 s gap: a point anyway
+    tr = Tracks()
+    for k in range(4):
+        tr.update(Snapshot(T1 + 20 * k, (plane(lat=41.06 + k * north / 3, gs=2.0, seen_pos=0.0),)))
+    assert len(tr.tracks["abc123"].trail) == 4
+
+
+def test_the_newest_fixes_are_kept_when_a_trail_is_thinned():
+    pts = tuple((T1 + k, 41.0 + k / 1000, -73.7) for k in range(100))
+    thin = A._thin(pts, A.TRAIL_POINTS)
+    assert len(thin) == A.TRAIL_POINTS and thin[-1] == pts[-1] and thin[0] == pts[0]
+    assert A._thin(pts[:5], A.TRAIL_POINTS) == pts[:5]
+
+
+def test_a_trail_starts_over_on_a_jump_and_on_another_feed():
+    tr = Tracks()
+    tr.update(Snapshot(T1, (plane(seen_pos=0.0),)))
+    tr.update(Snapshot(T1 + 5, (plane(lat=41.065, seen_pos=0.0),)))
+    assert len(tr.tracks["abc123"].trail) == 2
+    far = dict(lat=41.25, lon=-73.70, seen_pos=0.0)
+    for k in range(3):
+        tr.update(Snapshot(T1 + 10 + 5 * k, (plane(**far),)))
+    t = tr.tracks["abc123"]
+    assert [(lat, lon) for _, lat, lon in t.trail] == [(41.25, -73.70)] and t.turn is None     # no spike, no turn across it
+    clock = Clock()
+    ly = layer(clock, fetch=FakeFetch(), adsbfi_url=FI_URL, feeds=("adsblol", "adsbfi"))
+    ly.refresh()
+    first = ly.used
+    ly.tracks.tracks["a8ca15"] = A.Track(plane(hex="a8ca15"), T1, T1)
+    ly.resting["adsblol"] = (clock.t + 60, "rate limited")
+    ly.refresh()
+    assert ly.used is not first and "a8ca15" not in ly.tracks.tracks       # the other feed's ages: start afresh
+
+
+def test_the_turn_rate_is_the_feeds_or_from_the_last_two_fixes_and_clamped():
+    tr = Tracks()
+    tr.update(Snapshot(T1, (plane(track=330.0, seen_pos=0.0),)))
+    assert tr.tracks["abc123"].turn is None                                 # one fix: nothing to say
+    tr.update(Snapshot(T1 + 5, (plane(lat=41.062, track=340.0, seen_pos=0.0),)))
+    assert tr.tracks["abc123"].turn == pytest.approx(2.0)                   # 10 deg right in 5 s
+    tr.update(Snapshot(T1 + 10, (plane(lat=41.064, track=300.0, seen_pos=0.0),)))
+    assert tr.tracks["abc123"].turn == -A.MAX_TURN_DPS                      # 40 deg left in 5 s: clamped to standard rate
+    tr.update(Snapshot(T1 + 40, (plane(lat=41.070, track=320.0, seen_pos=0.0),)))
+    assert tr.tracks["abc123"].turn is None                                 # 30 s apart: it may have turned back
+    tr.update(Snapshot(T1 + 45, (plane(lat=41.072, track=320.0, track_rate=-1.5, seen_pos=0.0),)))
+    assert tr.tracks["abc123"].turn == -1.5                                 # the feed's own wins
+    assert Plane.from_json({"hex": "x", "track_rate": 0.75}).track_rate == 0.75
+    ly = layer()
+    ly.tracks = tr
+    assert ly._view()[0]["tr"] == -1.5
+
+
 # ---- the FAA registry: types by ICAO address, never an owner -------------------------------------------------------------
 
 
@@ -425,20 +510,28 @@ def test_the_hub_serves_aircraft_only_when_asked_and_answers_304_when_unchanged(
 STATIC = Path(__file__).resolve().parent.parent / "sizeup" / "web" / "static"
 
 
-def test_the_aircraft_layer_only_ever_asks_the_hub_and_never_moves_a_plane_by_guesswork():
+def test_the_aircraft_layer_only_asks_the_hub_and_predicts_only_briefly_between_real_fixes():
     js = (STATIC / "aircraft.js").read_text()
+    mo = (STATIC / "motion.js").read_text()
     html = (STATIC / "cad.html").read_text()
-    assert '<script src="/static/aircraft.js"></script>' in html
-    assert html.index("/static/maplayers.js") < html.index("/static/aircraft.js")
+    assert '<script src="/static/aircraft.js"></script>' in html and '<script src="/static/motion.js"></script>' in html
+    assert html.index("/static/maplayers.js") < html.index("/static/motion.js") < html.index("/static/aircraft.js")
     assert "MapLayers.addGroup" in js and '"/api/cad/aircraft"' in js
-    assert "api.adsb.lol" not in js and "adsb.fi" not in js and "faa.gov" not in js and "opensky" not in js.lower()
+    for src in (js, mo):
+        assert "api.adsb.lol" not in src and "adsb.fi" not in src and "faa.gov" not in src and "opensky" not in src.lower()
     code = re.sub(r"//.*", "", js)
-    assert "localStorage" not in code and "EventSource" not in code
-    # positions are the feed's: no dead reckoning, no extrapolation from speed and track
-    assert "destination(" not in code and "extrapolat" not in code.lower() and "gs * " not in code
-    # polled only while a map has it on and the page is visible; old positions hollow, with their age
-    assert 'document.visibilityState === "hidden"' in code and "anyOn()" in code and "POLL_MS = 5000" in code
-    assert "-old" in code and "s old" in code and "stale_s" in code
+    mcode = re.sub(r"//.*", "", mo)
+    assert "localStorage" not in code and "EventSource" not in code and "fetch(" not in mcode
+    # shortfinal's motion (app.js positionNow): at most 10 s past a fix, redrawn ~10 a second, only while something moves
+    assert "HORIZON_S = 10" in code and "ANIMATE_MS = 100" in code and "motion.busy()" in code
+    assert "Math.min(this.horizonS" in mcode and "age > this.staleS" in mcode and "gs < 30" in mcode
+    assert "Motion.tracker(Motion.arc" in code                    # the aircraft predictor, plugged into the tracker
+    # polled only while a map has it on and the page is visible; old positions hollow and fading, no age printed
+    assert 'document.visibilityState === "hidden"' in code and "anyOn()" in code and "POLL_MS = 2000" in code
+    assert "-old" in code and "stale_s" in code and "drop_s" in code
+    assert "s old" not in code and "s ago" not in code and "Math.round(age)" not in code
+    # every aircraft's trail, from the hub's real fixes, while the layer is on
+    assert "a.trail" in code and '"ac-trail"' in code and "EMPHASIS" in code
     ml = (STATIC / "maplayers.js").read_text()
     assert "this.force.aircraft = on" in ml and "this.force.airport = on" in ml
     assert 'id="i-aircraft"' in (STATIC / "icons.svg").read_text()

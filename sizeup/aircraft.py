@@ -21,7 +21,8 @@ What comes from shortfinal (the PCFD firehouse ADS-B + KHPN display; its branch 
                   khpn_procedures.geojson (finals and transitions, incl. the curved RNAV (RNP) Z lineups over
                   Port Chester): "ILS 34", "RNAV (RNP) Z 34" ...
   the track store the glitch filter (a position jump faster than max(300 kt, 2 x speed + 100 kt) is held back
-                  until it repeats 3 times), fade and drop by the feed's own clock, short trails.
+                  until it repeats 3 times), fade and drop by the feed's own clock, and its trails (a point every
+                  60 m or 15 s, a parked one not stacked) for every aircraft drawn, kept short here: TRAIL_S.
   the alerts      squawk 7500 / 7600 / 7700 and the aircraft's own emergency status: always shown, first.
   the airlines    data/airport/airlines.csv: FAA JO 7340.2 designators (public domain, shortfinal's
                   tools/fetch_airlines.py): JBU123 -> "JetBlue Airways".
@@ -55,20 +56,24 @@ address, for US aircraft: Registry, fetched by the hub weekly once someone has l
 SQLite (aircraft/faa_registry.sqlite in the state folder). Only the N-number, the make / model, the year and the
 kind are kept: never the owner's name or address. Nothing is guessed: no type, no registration -> none shown.
 
-Nothing fake: positions are the feed's (ADS-B, MLAT or TIS-B as it says); no dead reckoning. Each aircraft
-carries the age of its position at the feed's time ("at"); the page adds the time since and draws anything older
-than STALE_S hollow, labelled with its age; the hub drops it after DROP_S. The ETA is distance / ground speed,
-labelled as such. The phase is our reading of the track (shortfinal's rules), never ATC's word.
+Nothing fake: positions are the feed's (ADS-B, MLAT or TIS-B as it says), and so are the trails (only the fixes
+the track store accepted). Each aircraft carries the age of its position at the feed's time ("at") and how fast it
+is turning ("tr", deg/s: the feed's track_rate, else from its last two fixes, clamped to a standard-rate turn).
+Between fixes the page moves the mark on along its track and speed, bent by that turn, for at most 10 s after the
+fix and never once it is stale (shortfinal's dead reckoning, web/static/app.js positionNow; motion.js), easing it
+onto each new fix instead of jumping. Anything older than STALE_S is drawn hollow, at its last real position,
+fading until the hub drops it after DROP_S. The ETA is distance / ground speed, labelled as such. The phase is our
+reading of the track (shortfinal's rules), never ATC's word.
 
 Traffic (#146 kept the state push tiny): aircraft never go into the state push. The page asks GET
-/api/cad/aircraft every 5 s only while a map has the layer on and the page is visible; the hub reads the feed
+/api/cad/aircraft every 2 s only while a map has the layer on and the page is visible; the hub reads the feed
 only while asked (DEMAND_S), at most every POLL_S; every answer has an ETag (304 when nothing changed).
 
 HTTP (sizeup/web/server.py; any signed-in person, GET only):
     GET /api/cad/aircraft   {configured, note, feed: {key, label, link, licence, terms, credit} | null, feeds,
-                            at (the feed's time), fetched, error, stale_s, airport, registry, receiver,
-                            aircraft: [{hex, cs, flight, reg, reg_src, type, model, model_src, kind, airline, lat, lon,
-                            alt, gs, trk, vr, sq, emerg, phase, rwy, appr, dist, eta, age, pos, band, trail}],
+                            at (the feed's time), fetched, error, stale_s, drop_s, airport, registry, receiver,
+                            aircraft: [{hex, cs, flight, reg, reg_src, type, model, model_src, kind, cat, airline, lat, lon,
+                            alt, gs, trk, tr, vr, sq, emerg, phase, rwy, appr, dist, eta, age, pos, band, trail}],
                             counts}
 """
 
@@ -134,9 +139,12 @@ MAX_FEED_BYTES = 4 * 1024 * 1024
 REGISTRY_EVERY_S = 7 * 86400.0
 REGISTRY_BACKOFF_S = (600.0, 86400.0)
 MAX_REGISTRY_BYTES = 200 * 1024 * 1024
-TRAIL_S = 300.0               # trail history kept (feed seconds)
-TRAIL_SPACING_M = 100.0
-TRAIL_POINTS = 20             # per aircraft per answer, for arrivals, departures and emergencies
+TRAIL_S = 90.0                # trail kept and sent (feed seconds): short (shortfinal keeps 10 min; this map is busier)
+TRAIL_SPACING_M = 60.0        # a trail point after moving this far (shortfinal's TRAIL_SPACING_M) ...
+TRAIL_MAX_GAP_S = 15.0        # ... or after this long, so slow movers still get points (shortfinal's TRAIL_MAX_GAP_S)
+TRAIL_POINTS = 30             # per aircraft per answer, every one drawn; more are thinned, the newest kept
+TURN_GAP_S = (1.0, 20.0)      # a turn rate from two fixes this far apart (closer: noise; further: it may have turned back)
+MAX_TURN_DPS = 3.0            # a standard-rate turn; a sharper reading is clamped to it
 JUMP_MIN_M = 1500.0
 JUMP_KT_FLOOR = 300.0
 JUMP_ACCEPT_AFTER = 3
@@ -206,6 +214,7 @@ class Plane:
     emergency: str = ""
     category: str = ""
     sel_heading: float | None = None
+    track_rate: float | None = None   # deg/s, + right: the feed's own, when it sends one (readsb "track_rate")
     source: str = ""                  # how the position was found: adsb, mlat, tisb, adsr ...
     band: str = ""                    # our receiver: "1090" or "978"
 
@@ -232,7 +241,7 @@ class Plane:
                    baro_rate=_num(d, "baro_rate"), geom_rate=_num(d, "geom_rate"), squawk=str(d.get("squawk") or "").strip(),
                    lat=lat, lon=lon, seen=_num(d, "seen") or 0.0, seen_pos=_num(d, "seen_pos"),
                    emergency=str(d.get("emergency") or "").strip().lower(), category=str(d.get("category") or "").strip(),
-                   sel_heading=_num(d, "nav_heading"), source=src or ("adsb" if band else ""), band=band)
+                   sel_heading=_num(d, "nav_heading"), track_rate=_num(d, "track_rate"), source=src or ("adsb" if band else ""), band=band)
 
     @property
     def has_position(self) -> bool:
@@ -521,6 +530,7 @@ class Track:
     msg_time: float
     trail: deque = field(default_factory=deque)        # (feed time, lat, lon), oldest first
     jumps: int = 0
+    turn: float | None = None                           # deg/s (+ right): the feed's, else from its last two fixes
 
 
 class Tracks:
@@ -541,11 +551,14 @@ class Tracks:
             t = self.tracks.get(ac.hex)
             if t is None:
                 t = self.tracks[ac.hex] = Track(ac, pos_time, snap.now - ac.seen)
+                t.turn = self._turn(None, None, ac, pos_time)
             else:
                 if pos_time is not None and t.pos_time is not None and pos_time < t.pos_time:
                     ac, pos_time = replace(ac, lat=t.plane.lat, lon=t.plane.lon), None   # an older fix than ours
                 elif pos_time is not None and self._jumped(t, ac, pos_time):
                     ac, pos_time = replace(ac, lat=t.plane.lat, lon=t.plane.lon), None   # a glitch: keep the last good
+                if pos_time is not None and pos_time != t.pos_time:      # a new fix (none across a jump: its trail is gone)
+                    t.turn = self._turn(t.plane, t.pos_time, ac, pos_time) if t.trail else self._turn(None, None, ac, pos_time)
                 t.plane = ac
                 t.msg_time = snap.now - ac.seen
                 if pos_time is not None:
@@ -580,13 +593,30 @@ class Tracks:
         return False
 
     @staticmethod
+    def _turn(prev: Plane | None, prev_time: float | None, ac: Plane, when: float | None) -> float | None:
+        """How fast it is turning, deg/s (+ right): the feed's track_rate, else the change of track between its last
+        two fixes. None when neither says (no track, the fixes too close or too far apart in time). The page bends
+        its short prediction by it (aircraft.js); it is never shown as a number."""
+        if ac.track_rate is not None:
+            return max(-MAX_TURN_DPS, min(MAX_TURN_DPS, ac.track_rate))
+        if prev is None or prev_time is None or when is None or prev.track is None or ac.track is None:
+            return None
+        dt = when - prev_time
+        if not TURN_GAP_S[0] <= dt <= TURN_GAP_S[1]:
+            return None
+        return max(-MAX_TURN_DPS, min(MAX_TURN_DPS, wrap180(ac.track - prev.track) / dt))
+
+    @staticmethod
     def _trail(t: Track, when: float, ac: Plane) -> None:
+        """shortfinal's TrackStore._extend_trail: a point after TRAIL_SPACING_M or TRAIL_MAX_GAP_S, a parked one
+        refreshed in place (no stack of points), the oldest let go after TRAIL_S."""
         trail = t.trail
-        if trail:
-            _, lat, lon = trail[-1]
-            if metres(lat, lon, ac.lat, ac.lon) < TRAIL_SPACING_M:
-                return
-        trail.append((when, ac.lat, ac.lon))
+        last = trail[-1] if trail else None
+        moved = metres(last[1], last[2], ac.lat, ac.lon) if last else None
+        if last is None or (moved >= 1.0 and (moved >= TRAIL_SPACING_M or when - last[0] >= TRAIL_MAX_GAP_S)):
+            trail.append((when, ac.lat, ac.lon))
+        elif moved < 1.0 and when - last[0] >= TRAIL_MAX_GAP_S:
+            trail[-1] = (when, last[1], last[2])
         while trail and when - trail[0][0] > TRAIL_S:
             trail.popleft()
 
@@ -868,6 +898,14 @@ def http_get(url: str, timeout: float, limit: int, headers: dict | None = None) 
 # ---- the provider -----------------------------------------------------------------------------------------------------
 
 
+def _thin(points: tuple, limit: int) -> tuple:
+    """At most `limit` points, evenly thinned, always keeping the newest (shortfinal core/state.py _thin)."""
+    if len(points) <= limit:
+        return points
+    step = len(points) / (limit - 1)
+    return tuple(points[int(i * step)] for i in range(limit - 1)) + (points[-1],)
+
+
 def _r(x: float | None, nd: int = 0):
     if x is None:
         return None
@@ -1051,17 +1089,14 @@ class AircraftLayer:
             m = AIRLINE_CALLSIGN.match(ac.flight or "")
             model = " ".join(x for x in ((reg or {}).get("make", ""), (reg or {}).get("model", "")) if x)
             kind = "helicopter" if ac.category == "A7" else (reg or {}).get("kind", "")
-            trail = []
-            if ph.kind in (ARRIVING, DEPARTING) or emerg:
-                pts = list(t.trail)[-TRAIL_POINTS:]
-                trail = [[round(lon, 4), round(lat, 4)] for _, lat, lon in pts]
+            trail = [[round(lon, 4), round(lat, 4)] for _, lat, lon in _thin(tuple(t.trail), TRAIL_POINTS)]
             out.append({
                 "hex": ac.hex, "cs": ac.flight or ac.reg or (reg or {}).get("n", ""), "flight": ac.flight,
                 "reg": ac.reg or (reg or {}).get("n", ""), "reg_src": "feed" if ac.reg else ("faa" if reg else ""),
                 "type": ac.type, "model": model or ac.desc, "model_src": "faa" if model else ("feed" if ac.desc else ""),
-                "kind": kind, "airline": self.airlines.get(m.group(1), "") if m else "",
+                "kind": kind, "cat": ac.category, "airline": self.airlines.get(m.group(1), "") if m else "",
                 "lat": round(ac.lat, 5), "lon": round(ac.lon, 5), "alt": ac.alt_baro if ac.alt_baro is not None else _r(ac.alt_geom),
-                "gs": _r(ac.gs), "trk": _r(ac.track), "vr": _r(ac.vertical_rate), "sq": ac.squawk, "emerg": emerg,
+                "gs": _r(ac.gs), "trk": _r(ac.track), "tr": _r(t.turn, 1), "vr": _r(ac.vertical_rate), "sq": ac.squawk, "emerg": emerg,
                 "phase": ph.kind, "rwy": ph.runway, "appr": ph.approach, "dist": _r(ph.dist_nm, 1),
                 "eta": _r(ph.eta_s) if now - t.pos_time <= STALE_S else None,      # never from an old position
                 "age": round(max(0.0, now - t.pos_time), 1), "pos": ac.source, "band": ac.band, "trail": trail,
@@ -1112,7 +1147,7 @@ class AircraftLayer:
         return {"configured": self.configured, "note": self.why_not(), "feed": used.meta() if used else None,
                 "feeds": [f.meta() | {"resting": self.resting.get(f.key, (0, ""))[1]} for f in self.feeds],
                 "at": self.st["at"], "fetched": self.st["fetched"], "error": self.st["error"], "stale_s": STALE_S,
-                "airport": {"icao": ICAO, "lat": ARP[0], "lon": ARP[1]}, "registry": self.registry.public(),
+                "drop_s": DROP_S, "airport": {"icao": ICAO, "lat": ARP[0], "lon": ARP[1]}, "registry": self.registry.public(),
                 "receiver": self.receiver_status(), "aircraft": view, "counts": counts}
 
     def handles(self, path: str) -> bool:

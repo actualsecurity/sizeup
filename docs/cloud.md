@@ -1333,10 +1333,20 @@ what matters to Port Chester / Rye Brook and HPN, as shortfinal does, not a worl
 | emergency | red, first | squawk 7500 / 7600 / 7700 or the aircraft's own emergency status, whatever it is doing |
 | overflight, other airports' ground traffic | not drawn | |
 
-Each aircraft is drawn **where the feed last placed it**, turned to its track, with its callsign, altitude
-and type; arrivals and departures with their last few minutes as a trail. **A position older than 15 s is
-drawn hollow and labelled with its age** ("position 44 s old"); nothing is moved on by guesswork (no dead
-reckoning); the hub drops an aircraft 60 s after its last position. A click: what it is (the feed's ICAO
+Each aircraft is drawn as shortfinal draws it: a jet, light-aircraft or helicopter silhouette (by the feed's
+emitter category) turned to its track and sized by phase, the callsign with the approach or departure and the
+altitude, speed and type beneath it on a dark chip, and **a short trail for every aircraft drawn** (its real
+fixes over the last 90 s: a point every 60 m or 15 s, as shortfinal's track store keeps them; shortfinal shows 10
+minutes) while the layer is on. They stay beneath the apparatus, stations and events.
+
+**Motion** (`static/motion.js`, shortfinal's `web/static/app.js` `positionNow`): between fixes the mark moves on
+along its track at its ground speed, bent round its turn (the hub's `tr`: the feed's `track_rate`, else the
+change of track between its last two fixes, clamped to a standard-rate 3 °/s), redrawn ~10 times a second, never
+more than 10 s past the fix, not on the ground or under 30 kt; each new fix is eased into over a second instead of
+jumped to (a correction over 2 km jumps: a re-acquired target). **A position older than 15 s is not moved on**: it
+is drawn hollow where it really was, fading until the hub drops it 60 s after its last position. No age is
+printed on the map; the click says when a position is stale. The trails are only ever the hub's real fixes,
+never the prediction. A click: what it is (the feed's ICAO
 type designator; the FAA registry's make and model, marked so; the airline from FAA JO 7340.2), what it is
 doing (the approach, the distance to go; the ETA as distance / speed, labelled an estimate; never from a
 stale position), altitude, vertical rate, speed, squawk, registration, and how it was located (ADS-B, MLAT
@@ -1380,12 +1390,14 @@ only one band heard is kept). A file whose own clock stops for 30 s says its dec
 
 `sizeup/aircraft.py` (`AircraftLayer`), on the hub (or all-in-one; never a station):
 
-* **Only while someone looks.** The page asks `GET /api/cad/aircraft` every 5 s while a map has the layer on
+* **Only while someone looks.** The page asks `GET /api/cad/aircraft` every 2 s while a map has the layer on
   and the page is visible; each ask keeps the feed coming for 60 s; nothing is fetched otherwise. A first
-  ask with nothing fresh waits up to 5 s for the read it wakes.
+  ask with nothing fresh waits up to 5 s for the read it wakes. The feed itself is still read at most every
+  5 s (adsb.lol), 2 s (our receiver): the 2 s ask only shortens the wait for a read already made (a 304 between).
 * **Never in the state push** (#146 kept the idle stream tiny). Each answer carries an ETag from its body:
   an unchanged answer is a 304. The recorded traffic (6 aircraft drawn) is 3.1 KB, 1.1 KB gzipped (positions
-  to 5 decimals; trails to 4, for arrivals, departures and emergencies only, at most 20 points).
+  to 5 decimals; trails to 4, for every aircraft drawn, the last 90 s, at most 30 points, thinned keeping the
+  newest).
 * Ported from shortfinal (branch `plan`): `classify()` and its memory, `Procedures.match()` on the CIFP
   paths already in `data/airport/khpn_procedures.geojson`, the track store's glitch filter (a jump faster
   than max(300 kt, 2 x speed + 100 kt) is held back until it repeats three times) and fade / drop by the
@@ -1394,7 +1406,7 @@ only one band heard is kept). A file whose own clock stops for 30 s says its dec
 
 | | |
 |---|---|
-| `GET /api/cad/aircraft` | `{configured, note, feed: {key, label, link, licence, terms, credit}, feeds, at (the feed's time), fetched, error, stale_s, airport, registry: {at, n, error, credit}, receiver: null \| {enabled, sdr, name, present, held_by, bands, note}, aircraft: [{hex, cs, flight, reg, reg_src, type, model, model_src, kind, airline, lat, lon, alt, gs, trk, vr, sq, emerg, phase, rwy, appr, dist, eta, age, pos, band, trail}], counts}` |
+| `GET /api/cad/aircraft` | `{configured, note, feed: {key, label, link, licence, terms, credit}, feeds, at (the feed's time), fetched, error, stale_s, drop_s, airport, registry: {at, n, error, credit}, receiver: null \| {enabled, sdr, name, present, held_by, bands, note}, aircraft: [{hex, cs, flight, reg, reg_src, type, model, model_src, kind, cat, airline, lat, lon, alt, gs, trk, tr, vr, sq, emerg, phase, rwy, appr, dist, eta, age, pos, band, trail}], counts}` |
 
 ```toml
 [aircraft]                       # sizeup/aircraft.py; leave out: on, adsb.lol, 15 nm around HPN
