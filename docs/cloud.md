@@ -95,6 +95,7 @@ same App code, so the hub's monitor and CAD come out as they would locally.
 | `rerun` | `_rerun_finish` | a re-run is over, whatever came of it: `result` changed / same / failed: why | `_rerun_finish`: the transmission's `rerun_at` / `rerun_result` (the ⋯ menu's Re-transcribe waits for it) |
 | `alt_text` | `_set_alt` | "both" re-run: the station's whisper text as the alternative | `_set_alt`: kept to compare, the text (AWS's) stays |
 | `heard` | `_heard` | a radio ID (and P25 alias) heard on the air | the hub's radio registry learns it |
+| `alarm` | `_call` (`_alarm_now`) | a P25 key-up trunk-recorder flagged as an emergency (the call JSON's `emergency`), at the end of its call, before speech-to-text, + its clip | the emergency alarm at once (sizeup/cad/alarms.py, #128); its `traffic` event follows with the words and updates the same alarm. An older hub ignores it (the `traffic` event still carries `emergency`) |
 
 Clips go as 8 kHz mono WAV (already band-limited to 300-3300 Hz, so nothing audible changes; half
 the upload). Each event has a `seq` from the station's outbox; the hub remembers the last one applied

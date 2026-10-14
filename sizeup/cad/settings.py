@@ -55,6 +55,7 @@ from datetime import datetime
 from pathlib import Path
 
 from sizeup import channels as channels_mod
+from sizeup.cad import alarms as alarms_mod
 from sizeup.cad import dispatcher, eta, runcards, tonelist
 from sizeup.cad import lists as lists_mod
 from sizeup.cad.lists import CLASSES, CODE, COLOR, LIST_SECTIONS, LONG_CODE, RESPONSES, ROLES, ListsError
@@ -72,7 +73,7 @@ EMAIL = re.compile(r"[^@\s<>]{1,64}@[^@\s<>]{1,190}\.[^@\s<>]{1,63}")
 PAGE_SECTION = {**{s: "lists" for s in LIST_SECTIONS}, "event_class": "lists", "geo_town_order": "lists", "status_flow": "lists",
                 "type_subtypes": "lists",
                 "units": "units", "dispatch_wording": "dispatch", "dispatch_tones": "dispatch", "dispatch": "dispatch",
-                "channels": "radios", "stt": "radios", "places": "lists", "tones": "radios"}
+                "channels": "radios", "stt": "radios", "places": "lists", "tones": "radios", "alarms": "system"}
 # The camera wall's area (#125, sizeup/roads.py Roads.area): Settings > System.
 WALL_SECTION, WALL_KEYS, WALL_MARGIN = "camera_wall", ("margin_m", "include", "exclude"), (0, 5000, 1000)
 PAGE_SECTION[WALL_SECTION] = "system"
@@ -562,7 +563,8 @@ class Editor:
         fn = {"event_class": self._class_op, "status_flow": self._flow_op, "type_subtypes": self._map_op, "geo_town_order": self._towns_op, "units": self._units_op,
               "dispatch": self._dispatch_op, "users": self._users_op, "runcards": self._cards_op,
               "import": self._import_op, "channels": self._channels_op, "stt": self._stt_op,
-              "places": self._places_op, TONES_SECTION: self._tones_op, WALL_SECTION: self._wall_op}.get(section)
+              "places": self._places_op, TONES_SECTION: self._tones_op, WALL_SECTION: self._wall_op,
+              "alarms": lambda a, b, o: self.cad.alarms.settings_op(a, b, o)}.get(section)
         if fn is None:
             raise CadError(f"no settings section {section!r}")
         if section in ("users", "import"):
@@ -1942,6 +1944,8 @@ class Editor:
                 raise CadError(f"overrides.tones.{k}: the key is the pair, {key}")
             ov[TONES_SECTION][k] = val
         self._wall_check(ov.get(WALL_SECTION) or {})
+        for k, v in (ov.get("alarms") or {}).items():         # sizeup/cad/alarms.py (#128)
+            ov["alarms"][k] = alarms_mod.clean(k, v)
         st = ov.get("stt") or {}
         if set(st) - {"vocabulary", "aws_monthly_limit_usd"}:
             raise CadError("overrides.stt: vocabulary and aws_monthly_limit_usd only")

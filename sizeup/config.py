@@ -151,6 +151,10 @@ class Config:
     prealert_status_topic: str = "pcfd-status"
     prealert_expire_min: float = 5.0
     prealert_heartbeat_stale_min: float = 90.0
+    # [alerts] (sizeup/notify.py): our own ntfy topic for pushes that page a person: the emergency alarms
+    # (sizeup/cad/alarms.py, #128) and station health (#79). "" = no pushes. Never Tapout's topics.
+    alerts_ntfy_server: str = "https://ntfy.sh"
+    alerts_ntfy_topic: str = ""
     # [station] auto_update: a Linux station installed by deploy/station/install-linux.sh follows the
     # hub's build (sizeup/cloud/autoupdate.py); false keeps it where it is (also: sizeup-station autoupdate off)
     station_auto_update: bool = True
@@ -242,6 +246,7 @@ def hub_url_problem(url: str) -> str:
 #   SIZEUP_PUBLIC_URL, SIZEUP_HUB_URL [cloud] public_url / hub_url
 #   SIZEUP_ACCESS_TEAM / _AUD         [cloud] access_team / access_aud (hub: Cloudflare Access identity)
 #   SIZEUP_PREALERT_SERVER            [prealert] server (a local test server instead of ntfy.sh)
+#   SIZEUP_ALERTS_NTFY_TOPIC / _SERVER [alerts] ntfy_topic / ntfy_server (our push topic: a name is its only secret)
 #   SIZEUP_511NY_KEY                  [roads] key: the 511NY developer key (never in a file on the hub)
 #   (no [gis] secrets: the county's open data needs no key)
 #   SIZEUP_MTA_KEY                    [trains] key: only should the MTA require one again (none needed, 2026-10-14)
@@ -309,6 +314,19 @@ def _cloud(data: dict) -> dict:
                 cloud_audio_max_mb=nums["audio_max_mb"],
                 cloud_public_url=_env("SIZEUP_PUBLIC_URL", str(cl.get("public_url", ""))).rstrip("/"),
                 cloud_access_team=team, cloud_access_aud=aud, **_keychain(cl))
+
+
+def _alerts(data: dict) -> dict:
+    """[alerts] -> Config fields: our ntfy topic for pushes (sizeup/notify.py). No topic = no pushes."""
+    from sizeup.notify import server_problem, topic_problem
+    al = _take(data.get("alerts", {}), "alerts", {"ntfy_topic", "ntfy_server"})
+    topic = _env("SIZEUP_ALERTS_NTFY_TOPIC", str(al.get("ntfy_topic", ""))).strip()
+    server = _env("SIZEUP_ALERTS_NTFY_SERVER", str(al.get("ntfy_server", "https://ntfy.sh"))).rstrip("/")
+    if topic and (why := topic_problem(topic)):
+        raise ConfigError(f"alerts.ntfy_topic: {why}")
+    if why := server_problem(server):
+        raise ConfigError(f"alerts.ntfy_server: {why}")
+    return dict(alerts_ntfy_topic=topic, alerts_ntfy_server=server)
 
 
 def _prealert(data: dict) -> dict:
@@ -592,7 +610,7 @@ def load(path: str | Path) -> Config:
     except tomllib.TOMLDecodeError as e:
         raise ConfigError(f"{path}: {e}") from e
     _take(data, "config", {"station", "web", "radio", "tones", "stt", "p25", "mdc", "units", "storage", "map",
-                           "cad", "dispatch", "cloud", "prealert", "roads", "gis", "trains", "weather"})
+                           "cad", "dispatch", "cloud", "prealert", "roads", "gis", "trains", "weather", "alerts"})
     st = _take(data.get("station", {}), "station", {"id", "name", "auto_update"})
     if not isinstance(st.get("auto_update", True), bool):
         raise ConfigError("station.auto_update: true or false")
@@ -784,5 +802,5 @@ def load(path: str | Path) -> Config:
         dispatch_repeat=d_repeat, dispatch_transmit=False, dispatch_channels=d_channels, dispatch_polly_region=d_region,
         **(dict(cloud, cloud_outbox=rel_state(cloud["cloud_outbox"])) if cloud else {}),
         cloud_state="" if cloud.get("cloud_role") == "hub" else rel_state("state/cloud.json"),
-        **_prealert(data), **_roads(data), **_gis(data), **_trains(data), **_weather(data),
+        **_prealert(data), **_roads(data), **_gis(data), **_trains(data), **_weather(data), **_alerts(data),
     )

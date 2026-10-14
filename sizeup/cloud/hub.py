@@ -486,6 +486,8 @@ class HubApp(App):
             self._rerun_finish(self._id(d), str(d.get("result") or "")[:200], str(d.get("model") or "")[:80])
         elif kind == "alt_text":                      # "both" re-run: the station's whisper text, to compare
             self._set_alt(self._id(d), str(d.get("text") or ""), str(d.get("model") or "")[:80])
+        elif kind == "alarm":                         # the P25 emergency button, ahead of its transcript (#128)
+            self._apply_alarm(d, audio)
         elif kind == "heard":
             if d.get("system") in ("mdc", "p25"):
                 self.radios.heard(d["system"], str(d.get("radio_id") or ""), str(d.get("alias") or ""), d.get("at"))
@@ -527,6 +529,30 @@ class HubApp(App):
         if str(d.get("stt") or "") == "both" and page.status in ("done", "no_speech"):
             self._aws_from_clip(page, self.audio.get(pid), page.label, both=True)
 
+    def _traffic_of(self, d: dict) -> Traffic:
+        """The station's transmission as sent, its rig from the hub's radio registry (edited here)."""
+        t = Traffic.from_dict({k: v for k, v in d.items() if EXTRA.fullmatch(str(k))})
+        ids = [x.strip() for x in (t.radio_id or "").split(",") if x.strip()]
+        pairs = d.get("pairs")
+        if t.talkgroup is None:
+            t.rig = self.radios.rig_mdc(ids)
+        elif isinstance(pairs, list):
+            t.rig = self.radios.rig_p25([(str(p[0]), str(p[1])) for p in pairs if isinstance(p, list) and len(p) == 2])
+        else:
+            t.rig = self.radios.rig_for_names(t.unit, False)[0]
+        return t
+
+    def _apply_alarm(self, d: dict, audio: bytes | None) -> None:
+        """The station flagged an emergency at the end of the call: the alarm now (and its clip, for Replay);
+        the "traffic" event with the transcript follows and updates it."""
+        tid = self._id(d)
+        if audio and not self.audio.get(tid):
+            self.audio.put(tid, audio, "clip", at=float(d.get("end") or time.time()))
+        t = self._traffic_of(d)
+        t.text = ""
+        t.emergency = True  # type: ignore[attr-defined]
+        self._alarm(t, "")
+
     def _apply_traffic(self, d: dict, audio: bytes | None) -> None:
         tid = self._id(d)
         if any(t.id == tid for t in list(self.store.loose) + [t for i in self.store.incidents for t in i.traffic]):
@@ -534,16 +560,7 @@ class HubApp(App):
         if audio:
             self.audio.put(tid, audio, "clip", at=float(d.get("end") or time.time()))
         # with the station's extras (raw, confidence, model, attach, pairs, ...): plain names only
-        t = Traffic.from_dict({k: v for k, v in d.items() if EXTRA.fullmatch(str(k))})
-        ids = [x.strip() for x in (t.radio_id or "").split(",") if x.strip()]
-        pairs = d.get("pairs")
-        # The rig from the hub's radio registry (edited here, in the CAD of record).
-        if t.talkgroup is None:
-            t.rig = self.radios.rig_mdc(ids)
-        elif isinstance(pairs, list):
-            t.rig = self.radios.rig_p25([(str(p[0]), str(p[1])) for p in pairs if isinstance(p, list) and len(p) == 2])
-        else:
-            t.rig = self.radios.rig_for_names(t.unit, False)[0]
+        t = self._traffic_of(d)
         key = channels.tg_key(t.talkgroup) if t.talkgroup is not None else t.source
         if d.get("transcript_pending") == "aws":            # the station skipped whisper: Amazon Transcribe here
             return self._aws_from_clip(t, audio, key)

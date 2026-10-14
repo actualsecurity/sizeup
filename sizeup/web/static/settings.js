@@ -1596,6 +1596,8 @@ function sSystem(panel) {
   const station = sCard(null);
   station.id = "s-station";
   station.hidden = true;
+  const alarms = sCard(null);                  // the emergency alarms' words, channels, drill (alarm.js, #128)
+  alarms.id = "s-alarms";
   // the department, with its patch (static/brand)
   const patch = el("img", "s-patch");
   patch.src = "/static/brand/pcfd-patch.svg";
@@ -1607,7 +1609,7 @@ function sSystem(panel) {
   const about = sCard(patch, dept);
   about.classList.add("s-dept");
   panel.replaceChildren(...sHead("System"),
-    about, station,
+    about, station, alarms,
     sCard(sCardHead("Records"), recs, counts),
     ...(S.data.camera_wall ? [sCameraWall(S.data.camera_wall)] : []),
     sCard(sCardHead("Data file"), file),
@@ -1625,6 +1627,7 @@ function sSystem(panel) {
   sCounts();
   sAudit();
   sStation();
+  if (window.Alarm) Alarm.mountSettings($("#s-alarms"));
 }
 
 // ---- system: the camera wall's area (#125; sizeup/roads.py Roads.area, settings.py _wall_op) ----------------

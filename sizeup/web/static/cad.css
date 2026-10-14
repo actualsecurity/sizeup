@@ -553,4 +553,49 @@
     .dialog { block-size: 100%; border-radius: 0; border: 0; }
     .alerts-panel { inset: auto 0 0 0 !important; inline-size: auto !important; border-radius: var(--radius) var(--radius) 0 0; }
   }
+
+  /* ---- the emergency alarm (alarm.js, #128): over everything but the toasts, red, large type ------------- */
+  .alarm-overlay { position: fixed; inset: 0; z-index: calc(var(--z-toast) - 1); overflow: auto; display: flex; flex-direction: column;
+    gap: var(--s-4); padding: var(--s-6); background: var(--accent); color: var(--on-accent); }
+  .alarm-overlay[hidden], .alarm-notices[hidden], .alarm-pill[hidden] { display: none; }
+  .alarm-overlay.drill { background: var(--warn); color: var(--on-warn); }
+  .alarm-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-3) var(--s-4); }
+  .alarm-title { margin: 0; font-size: calc(var(--fs-2xl) * 2); line-height: calc(var(--lh-2xl) * 2); font-weight: 800;
+    letter-spacing: 0.04em; }
+  .alarm-count { font-size: var(--fs-2xl); line-height: var(--lh-2xl); font-weight: 700; }
+  .alarm-list { display: flex; flex-direction: column; gap: var(--s-4); }
+  .alarm-card { display: flex; flex-direction: column; gap: var(--s-2); padding: var(--s-4) var(--s-5); background: var(--bg);
+    color: var(--text); border: var(--bw-mark) solid var(--on-accent); border-radius: var(--radius); box-shadow: var(--elev-dialog); }
+  .alarm-card.drill { border-color: var(--warn); }
+  .alarm-what { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-3); font-size: calc(var(--fs-2xl) * 1.5);
+    line-height: calc(var(--lh-2xl) * 1.5); font-weight: 800; color: var(--accent-text); }
+  .alarm-card.drill .alarm-what { color: var(--warn); }
+  .alarm-drill { padding: var(--s-0) var(--s-2); border-radius: var(--radius-s); background: var(--warn); color: var(--on-warn);
+    font-size: var(--fs-xl); line-height: var(--lh-xl); }
+  .alarm-who { font-size: var(--fs-2xl); line-height: var(--lh-2xl); }
+  .alarm-where { font-size: var(--fs-xl); line-height: var(--lh-xl); color: var(--text-2); }
+  .alarm-text { margin: 0; font-size: var(--fs-xl); line-height: var(--lh-xl); }
+  .alarm-mark { padding-inline: var(--s-0); border-radius: var(--radius-s); background: var(--warn); color: var(--on-warn); font-weight: 700; }
+  .alarm-meta { font-size: var(--fs-lg); line-height: var(--lh-lg); }
+  .alarm-ev { align-self: flex-start; font-size: var(--fs-lg); }
+  .alarm-btns { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-3); padding-block-start: var(--s-2); }
+  .alarm-btns button { min-inline-size: 9rem; min-block-size: calc(var(--ctl-lg) * 1.25); font-size: var(--fs-lg); }
+  .alarm-ack { min-inline-size: 14rem; font-weight: 800; }
+  .alarm-unlock { min-block-size: calc(var(--ctl-lg) * 1.25); padding-inline: var(--s-4); background: var(--on-accent);
+    color: var(--accent); font-weight: 800; font-size: var(--fs-xl); }
+  .alarm-notices { position: fixed; inset-block-start: var(--hdr-h); inset-inline: 0; z-index: var(--z-popover); display: flex;
+    flex-direction: column; gap: var(--s-1); padding: var(--s-2) var(--gutter); background: var(--raised);
+    border-block-end: var(--bw-mark) solid var(--err); box-shadow: var(--elev-dialog); }
+  .alarm-notice { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); }
+  .alarm-notice b { color: var(--err); }
+  .alarm-chans { inline-size: 22rem; max-inline-size: 100%; }
+  .alarm-kw { inline-size: 100%; max-inline-size: 40rem; font-family: var(--mono); }
+  @media (max-width: 640px) {
+    .alarm-overlay { padding: var(--s-3); gap: var(--s-3); }
+    .alarm-title { font-size: calc(var(--fs-2xl) * 1.5); line-height: calc(var(--lh-2xl) * 1.5); }
+    .alarm-what { font-size: var(--fs-2xl); line-height: var(--lh-2xl); }
+    .alarm-who { font-size: var(--fs-xl); line-height: var(--lh-xl); }
+    .alarm-card { padding: var(--s-3); }
+    .alarm-btns button { flex: 1 1 auto; min-inline-size: 0; }
+  }
 }

@@ -392,6 +392,11 @@ class App:
             self.prealert = PreAlerts(self.cad, cfg.prealert_server, cfg.prealert_ring_topic, cfg.prealert_status_topic,
                                       cfg.prealert_expire_min, cfg.prealert_heartbeat_stale_min, log=log)
             self.prealert_sync()
+        # The emergency alarms' pushes (sizeup/cad/alarms.py, #128): our own ntfy topic ([alerts], sizeup/notify.py).
+        if cfg.alerts_ntfy_topic:
+            from sizeup.notify import Notifier
+            self.cad.alarms.notifier = Notifier(cfg.alerts_ntfy_server, cfg.alerts_ntfy_topic, log)
+        self.cad.alarms.public_url = cfg.cloud_public_url
         if self.recorder is not None:
             self.recorder.on_line = self.live.feed_line
         self._fm_live: dict[str, dict] = {}
@@ -759,7 +764,11 @@ class App:
             log(f"CAD: could not log a page: {type(e).__name__}: {e}")
 
     def _call(self, call: Call) -> None:
-        if not self.tg.record(call.talkgroup):  # switched off in the web app: dropped on arrival
+        emergency = call.emergency or any(t.emergency for t in call.turns)
+        if emergency:
+            log(f"p25: {call.label} {call.id}: EMERGENCY flag (radio {', '.join(call.units) or 'unknown'})")
+        if not self.tg.record(call.talkgroup) and not emergency:  # switched off in the web app: dropped on arrival
+            # (an emergency call is kept whatever the switch says: issue #128)
             self.tg.seen(call.talkgroup, dropped=True)
             self._drop_recorder_files(call)
             return
@@ -779,6 +788,9 @@ class App:
                 t.pairs = pc.pairs  # (radio ID, alias) per talker, for the hub's own rig lookup  # type: ignore[attr-defined]
                 self._keep_clip(t.id, radio_voice(pc.audio, deemph=False), processed=True)
                 self._keep_source(t.id, pc.audio)
+                if pc.emergency:
+                    t.emergency = True  # the P25 emergency button (#128)  # type: ignore[attr-defined]
+                    self._alarm_now(t)      # before speech-to-text: the alarm doesn't wait for the words
                 if pc.stt:
                     self._stt(t, pc.audio, eng, key)
                 else:                   # a sub-0.3 s key-up with no voice: kept, not transcribed
@@ -786,6 +798,30 @@ class App:
                     t.stt = ""  # type: ignore[attr-defined]
                     self._transcribed(t)
         self._drop_recorder_files(call)  # sizeup's clip is the one copy kept
+
+    # -- the emergency alarms (sizeup/cad/alarms.py, #128) ------------------------------------------------
+
+    def _alarm(self, t: Traffic, text: str | None = None) -> None:
+        """A transmission (new, or new text) to the alarms: the CAD of record raises them. A station forwarding
+        to a hub doesn't (the hub does, from the same transmission)."""
+        if self.forwarding():
+            return
+        d = {"id": t.id, "start": t.start, "end": t.end, "source": t.source, "talkgroup": t.talkgroup, "unit": t.unit,
+             "rig": t.rig, "radio_id": t.radio_id, "text": t.text if text is None else text,
+             "emergency": bool(getattr(t, "emergency", False))}
+        try:
+            self.cad.alarms.on_traffic(d)
+        except Exception as e:  # the alarms must never stop the monitor (it logs; the next text tries again)
+            log(f"alarms: {t.id}: {type(e).__name__}: {e}")
+
+    def _alarm_now(self, t: Traffic) -> None:
+        """The emergency button, at the end of its call: raised here, or sent to the hub at once (an "alarm"
+        event with its clip, ahead of the transcript)."""
+        if self.forwarding():
+            self._emit("alarm", {k: v for k, v in t.as_dict().items() if k != "pairs"}
+                       | {"pairs": [list(p) for p in getattr(t, "pairs", None) or []]}, t.id)
+        else:
+            self._alarm(t, "")
 
     def _drop_recorder_files(self, call: Call) -> None:
         if not self.clips_dir or not call.wav_path:  # without our own clip store, keep the originals
@@ -824,6 +860,7 @@ class App:
             self._emit("traffic", dict(item.as_dict(), attach=attach, pairs=pairs), item.id)
             self.store.on_traffic(item, attach=attach)
             self._to_cad(item)
+            self._alarm(item)
             if item.status != "no_speech":
                 log(f"{item.source}: {'[' + item.unit + '] ' if item.unit else ''}{item.text or '(' + item.status + ')'}")
             return
@@ -1271,6 +1308,10 @@ class App:
             self.cad.comms.retext(cid, text, status, model, alt)
         except Exception as e:  # the CAD must never stop the monitor
             log(f"CAD: could not update the communications log: {type(e).__name__}: {e}")
+        t = next((x for x in list(self.store.loose) + [x for i in self.store.incidents for x in i.traffic]
+                  if x.id == cid), None)
+        if t is not None and text:
+            self._alarm(t, text)                       # the words came later (Amazon Transcribe, a re-run)
         if changed:
             log(f"{why} {cid}: {text or '(no speech)'}")
         self._emit("retext", {"id": cid, "text": text, "status": status, "confidence": confidence, "model": model,
@@ -2085,6 +2126,7 @@ def make_server(app: App) -> WebServer:
     app.paging.on_change = changed     # each tone pair of a page going out, as it decodes
     if app.prealert is not None:
         app.prealert.on_change = server.poke             # so is the phone ringing
+    app.cad.alarms.on_change = server.poke               # and an emergency alarm (#128)
     return server
 
 
