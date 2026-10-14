@@ -236,3 +236,14 @@ heartbeat_stale_min = 90             # no heartbeat (or restart) this long: "Tap
 # where = "MUN = 'Port Chester'"          # an extra SQL filter; bbox = [...] its own box
 # licence = "Westchester County GIS disclaimer: public, as is"   # recorded here and in docs/cloud.md
 # page = "https://gis.westchestercountyny.gov/datasets/<item>_207"
+
+# [trains]: Metro-North's New Haven Line on the CAD maps and "Trains approaching" for an event near the
+# tracks (sizeup/trains.py, docs/cloud.md "Metro-North trains"): the MTA's public GTFS-realtime and static
+# GTFS feeds, read by the hub (or all-in-one); the realtime one only while someone looks. No key needed
+# (2026-10-14); should the MTA require one again: env SIZEUP_MTA_KEY (the hub: SSM /sizeup-hub/mta-key).
+# Leave the section out: on, the MTA's feeds, Mamaroneck to Cos Cob on the map.
+# [trains]
+# enabled = true
+# bbox = [-73.745, 40.945, -73.595, 41.035]   # west, south, east, north: the stretch of line the map shows
+# rt_url = ""                                  # "" = the MTA's (sizeup/trains.py RT_URL); a test feed's address
+# gtfs_url = ""                                # "" = the MTA's (GTFS_URL)

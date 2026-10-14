@@ -166,6 +166,15 @@
   .ml-cams-small .ml-near-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .ml-cams-small .ml-thumb-cap { -webkit-line-clamp: 1; }
   @container (width < 44rem) { .ml-cams { grid-column: auto; } }
+  /* the event's "Trains approaching" panel (trains.js, #131): the two directions side by side, one column when narrow */
+  .tr-panel { gap: var(--s-1); }
+  .tr-dirs { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(16rem, 100%), 1fr)); gap: var(--s-1) var(--s-3); }
+  .tr-dir { display: flex; flex-direction: column; gap: var(--s-0); min-inline-size: 0; }
+  .tr-row { display: flex; align-items: baseline; gap: var(--s-2); padding-inline: var(--s-1); font-size: var(--fs-sm); line-height: var(--lh-sm); }
+  .tr-min { flex: none; min-inline-size: 3.5em; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--warn); }
+  .tr-what { min-inline-size: 0; overflow-wrap: anywhere; }
+  .tr-est { color: var(--info); font-style: italic; }
+  .tr-none, .tr-note { padding-inline: var(--s-1); }
 
   /* Expand: the large map, a dialog */
   .cm-big { inline-size: min(96vw, 112rem); block-size: 92vh; border-radius: var(--radius); border: var(--bw) solid var(--line-strong);

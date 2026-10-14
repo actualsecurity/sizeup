@@ -1060,6 +1060,104 @@ key = "hydrants"
 on = true                        # one line changes one thing
 ```
 
+## Metro-North trains (the MTA)
+
+> "Metro-North New Haven Line runs through Port Chester and Rye (stations, grade crossings, catenary).
+> Show approaching trains for calls on or near the tracks." (GitHub #131)
+
+**What it shows.** A *Trains* group in every map's Layers box (off by default; in the viewer's or the
+event's layer set like the rest): the New Haven Line from Mamaroneck to Cos Cob (Rye to Greenwich, a
+station each side), its stations, and every train on it now as an arrow the way it is going with its
+number: **filled** when the MTA reports where it is, **hollow** when the position is our estimate. A click
+on a train: line and destination, direction (*Toward New York* / *Toward New Haven*), next stop and time,
+track, delay, status, reported or estimated; on a station or the line: the catenary note (overhead
+catenary, 12.5 kV AC, plus the third rail at stations; the same note as the county *Railroads* layer,
+whose drawing of the tracks stays where it is in *County GIS*).
+
+**Trains approaching.** Under an open event's map, for an event within **150 m of the tracks or a
+station** (measured against the line's GTFS shape and the stations): the next trains each way in the next
+**15 minutes**, at most three a direction, at the nearest station (within 150 m) or else the event's own
+point on the tracks (*"on the tracks 820 m east of Rye station"*): minutes away, *stops* (with its track)
+or *passes, no stop*, the time, the delay. Asked again every 30 s while the event is open and the page is
+visible; hidden for any other event. The tracks are the reference whatever is there (a crossing, a bridge,
+an embankment), so the panel doesn't depend on a list of crossings.
+
+### Source and terms
+
+| | |
+|---|---|
+| Realtime | GTFS-realtime for Metro-North: <https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/mnr%2Fgtfs-mnr> (protobuf, about 150 KB; trip updates **and** vehicle positions, plus the MTA railroad extension's track and status per stop) |
+| Static | GTFS for Metro-North: <https://rrgtfsfeeds.s3.amazonaws.com/gtfsmnr.zip> (about 4 MB, updated about weekly) |
+| Developer page | <https://www.mta.info/developers> (checked 2026-10-14) |
+| Terms | <https://www.mta.info/developers/terms-and-conditions> (updated 2024-03-13) |
+| Key | **none** (2026-10-14: the developer page says the subway, LIRR and Metro-North realtime feeds need no key; bus feeds still do) |
+
+The terms, and how we keep them: the data is free; we **keep it on our own server and serve our users
+from it** (the hub fetches; the browsers only ever ask the hub, never the MTA's server); we don't alter it
+(we select from it, and what we work out ourselves is labelled *estimated*); we don't say or imply the MTA
+licenses or endorses us and show no MTA logo (the source is named as text: *MTA Metro-North Railroad*);
+where the data may lag more than a minute we must say it may not be real time: the layer and the panel say
+*"Times from the MTA; may not be real time"* with the feed's own time. Provided as is; the MTA may end
+access at any time (the layer then says why: the fetch error).
+
+### Real and estimated
+
+* **Real (from the MTA):** a train's position when the feed has one (about 17 of 120 New Haven Line trains
+  in the recorded feed: those running), its predicted arrival and departure at the stations it stops at
+  (the schedule plus the delay), the delay, track and status (*On-Time*, *Arriving*, *Departed*, *Late*).
+* **Estimated (ours):** a train's position when the feed has none, placed on the line between the two
+  stations it is between by its times there; and the time a train passes a point it doesn't stop at (an
+  express through Port Chester, or any train at an event's point between stations). Both use the line's
+  run times: from the static schedule, how long a train that doesn't stop takes between each pair of
+  neighbouring stations (the locals' median run less what a stop costs, about a minute, measured from the
+  expresses), so an express's time between its stops is shared out the way the line runs (Park Avenue and
+  the Bronx slow, Connecticut fast). When the MTA reports the train's position between those stations, the
+  passing time is worked out from there. A stop marked *Departed*, or a reported position already beyond
+  the point, means the train has passed.
+
+### How it works
+
+`sizeup/trains.py` (`Trains`), on the hub (or all-in-one; never a station):
+
+* **The static feed weekly** (and at start when there is no cache): only `routes`, `trips`, `shapes`,
+  `stops` and `stop_times` are read; the New Haven Line's longest shape is the line (Grand Central to New
+  Haven, simplified to 3 m), every station within 300 m of it is on it (its distance along the line), and
+  the run times are built from the stop times. What we keep is cached in `trains/static.json` under the
+  state dir, so a restart fetches nothing.
+* **The realtime feed only while someone looks:** a page with the Trains layer on (it asks the hub every
+  30 s) or an event panel near the tracks keeps it coming every 30 s for two minutes after the last ask;
+  otherwise nothing is fetched. A first ask with nothing fresh waits up to 5 s for the fetch it wakes.
+* Protobuf: a small reader for the few GTFS-realtime fields used (no protobuf dependency). Trains are known
+  by their number (the MTA's realtime trip ids don't match the static feed's).
+* Backoff: realtime 30 s doubling to 15 min, static 5 min doubling to 6 h; a 401 / 403 waits 30 min and
+  says a key may now be needed; a 429 5 min. Every request carries the shared User-Agent (sizeup and a
+  contact).
+
+| | |
+|---|---|
+| `GET /api/cad/trains` | `{configured, note, source, label, link, terms, disclaimer, at (the feed's time), fetched, error, static_at, line, stations, trains: [{id, train, line, headsign, dir, dir_label, lat, lon, bearing, estimated, next_stop, next_time, track, delay_s, status}], catenary, bbox}` |
+| `GET /api/cad/trains/near?lat=&lon=` | `{near: false}` (more than 150 m from the tracks and any station), or `{near: true, ref: {kind: station \| track, name, station, m, lat, lon[, station_m, side]}, window_min, inbound, outbound, dir_labels}`; each train `{train, headsign, line, eta, min, stops, estimated, delay_s, track, status, reported}` |
+
+**Setup:** nothing: on by default, no key. `[trains] enabled = false` turns it off (the box says so). Should
+the MTA require a key again (the layer's note then says *"the MTA refused the request ... a key may be
+needed now"*):
+
+1. Register at <https://api.mta.info/> and copy the key.
+2. Into SSM: `aws ssm put-parameter --name /sizeup-hub/mta-key --type SecureString --value '<the key>'`.
+3. Add it to the hub's task definition secrets (`deploy/aws/taskdef.json`):
+   `{"name":"SIZEUP_MTA_KEY","valueFrom":"arn:aws:ssm:us-east-1:504804195561:parameter/sizeup-hub/mta-key"}`,
+   and redeploy. It is sent as the `x-api-key` header.
+
+```toml
+[trains]                         # sizeup/trains.py; leave out: on, the MTA's feeds
+enabled = true
+bbox = [-73.745, 40.945, -73.595, 41.035]   # the stretch of line the map shows (Mamaroneck to Cos Cob)
+# rt_url, gtfs_url: "" = the MTA's; key: env SIZEUP_MTA_KEY (the hub: SSM /sizeup-hub/mta-key)
+```
+
+Tests: `tests/test_trains.py` on fixtures recorded 2026-10-14 11:33 EDT (`tests/fixtures/mta/`, trimmed
+by `tools/record_trains_fixtures.py`; run it to re-record).
+
 ## The hub's storage
 
 Everything the hub keeps is SQLite under `SIZEUP_STATE_DIR`, so Litestream can replicate it:
@@ -1120,4 +1218,6 @@ station follows the hub's build: `Watch` in the station, the root updater), `sta
 `tests/test_access.py`, `tests/test_roles.py`, `tests/test_activity.py`, `tests/test_channels.py`,
 `tests/test_transcribe.py` (fakes: `tests/fake_transcribe.py`), `tests/test_autoupdate.py`,
 `tests/test_station_install.py`. The county GIS layers: `sizeup/gis.py` (`tests/test_gis.py`, fixtures
-`tests/fixtures/wcgis/`), `sizeup/web/static/gislayers.js` (a group in maplayers.js's Layers box).
+`tests/fixtures/wcgis/`), `sizeup/web/static/gislayers.js` (a group in maplayers.js's Layers box). Metro-North's
+trains: `sizeup/trains.py` (`tests/test_trains.py`, fixtures `tests/fixtures/mta/`), `sizeup/web/static/trains.js` (a group in
+the Layers box, and the event's "Trains approaching" panel).

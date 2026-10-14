@@ -1,0 +1,11 @@
+{
+ "recorded": "2026-10-14T11:33:34-0400",
+ "source": "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/mnr%2Fgtfs-mnr and https://rrgtfsfeeds.s3.amazonaws.com/gtfsmnr.zip (Last-Modified Mon, 12 Oct 2026 16:25:40 GMT), fetched with the sizeup User-Agent, trimmed by tools/record_trains_fixtures.py",
+ "feed_timestamp": 1791992007,
+ "entities": 122,
+ "trips": 120,
+ "shapes": [
+  "16",
+  "5"
+ ]
+}

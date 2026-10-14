@@ -70,3 +70,23 @@ def _gis_stays_local(monkeypatch):
         assert host in ("127.0.0.1", "localhost", "::1"), f"a test tried to reach {host} (gis: fixtures only)"
         return real(req, *a, **kw)
     monkeypatch.setattr(gis, "urlopen", local_only)
+
+
+@pytest.fixture(autouse=True)
+def _trains_stay_local(monkeypatch):
+    """Metro-North's trains (sizeup/trains.py) never reach the MTA from a test: its default addresses are
+    off (a Trains built with none says not configured), no key from the environment, and the real fetch
+    only to this machine (tests hand in recorded fixtures, tests/fixtures/mta/)."""
+    from urllib.parse import urlsplit
+
+    import sizeup.trains as trains
+    monkeypatch.delenv("SIZEUP_MTA_KEY", raising=False)
+    monkeypatch.setattr(trains, "RT_URL", "")
+    monkeypatch.setattr(trains, "GTFS_URL", "")
+    real = trains.urlopen
+
+    def local_only(req, *a, **kw):
+        host = urlsplit(req.full_url if hasattr(req, "full_url") else str(req)).hostname
+        assert host in ("127.0.0.1", "localhost", "::1"), f"a test tried to reach {host} (trains: fixtures only)"
+        return real(req, *a, **kw)
+    monkeypatch.setattr(trains, "urlopen", local_only)
