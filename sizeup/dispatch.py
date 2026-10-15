@@ -34,8 +34,10 @@ INCIDENT_TYPES: list[tuple[str, str, tuple[str, ...]]] = [
                             "commercial alarm", "residential alarm", "commercial line",  # ASR of "commercial alarm"
                             "smoke detector", "smoke alarm", "pull station", "water flow alarm", "waterflow")),
     ("CO alarm", "hazard", ("carbon monoxide", "co alarm", "c o alarm", "co detector", "c o detector")),
+    # "inside order gas" (60 Control 2026-10-15, #176): STT hears "odor of gas" as "order gas", "order of gas"
     ("Gas leak", "hazard", ("gas leak", "odor of gas", "smell of gas", "natural gas", "gas condition",
-                            "propane")),
+                            "propane", "odor gas", "order of gas", "order gas", "odor of natural gas", "gas odor",
+                            "smell gas", "odors of gas", "orders of gas")),
     ("Smoke / odor", "fire", ("smoke condition", "odor of smoke", "smell of smoke", "odor investigation",
                               "smoke in the building", "smoke investigation")),
     ("Wires down", "hazard", ("wires down", "wire down", "transformer fire", "transformer", "pole fire",

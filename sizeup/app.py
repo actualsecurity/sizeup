@@ -434,16 +434,18 @@ class App:
             log(f"geocoder unavailable ({type(e).__name__}: {e}); incidents won't be placed on the map")
             return None
 
-    def _geocode(self, d) -> dict | None:
+    def _geocode(self, d, tone_departments=()) -> dict | None:
+        """A page's location (#176, sizeup/geo/pagegeo.py): every address, read-back and named place in the page,
+        checked against its cross streets and held to the towns of its tones; "confirmed" False = the card offers
+        the readings to pick from and doesn't set the map."""
         if self.gaz is None or not d.location:
             return None
-        q = d.location + (f" cross of {d.cross_street}" if d.cross_street else "")
         try:
-            m = self.gaz.geocode(q) or self.gaz.find_in_text(d.text)
+            from sizeup.geo.pagegeo import locate_page
+            return locate_page(self.gaz, d.text, tone_departments).as_geo()
         except Exception as e:
-            log(f"geocode error for {q!r}: {type(e).__name__}: {e}")
+            log(f"geocode error for {d.location!r}: {type(e).__name__}: {e}")
             return None
-        return geo_of(m)
 
     def _geocode_text(self, q: str) -> list[dict]:
         """The CAD location box: every reading of what was typed, best first (the CAD orders them by town)."""
@@ -1046,6 +1048,8 @@ class App:
         inc = self.store.on_page(page.id, depts, d, at=page.start)
         if inc:
             where = inc.geo["label"] if inc.geo else (inc.location or "location not found")
+            if inc.geo and inc.geo.get("confirmed") is False:
+                where = f"{inc.location or where} (location unconfirmed: {inc.geo.get('why') or 'not sure'}; best {where})"
             log(f"INCIDENT {inc.incident_type} · {where} · {', '.join(inc.departments)}")
             try:
                 ev = self.cad.from_monitor(inc)
