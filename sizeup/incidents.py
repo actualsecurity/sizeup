@@ -15,6 +15,7 @@ has no map point and the map stays on the home view.
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import threading
@@ -23,7 +24,7 @@ import uuid
 from dataclasses import fields
 from pathlib import Path
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable
 
 from sizeup.dispatch import Dispatch
@@ -71,7 +72,7 @@ class Incident:
     location: str
     cross_street: str
     time_out: str
-    geo: dict | None = None             # {lat, lon, label, kind, town, confidence}
+    geo: dict | None = None             # {lat, lon, label, kind, town, confidence, confirmed, alts, ...}: sizeup/geo/pagegeo.py
     units: list[str] = field(default_factory=list)   # dispatched apparatus, "Engine 61"
     code: str = ""                      # priority dispatch code, "69-D-6"
     status: str = "active"              # active | closed
@@ -107,6 +108,11 @@ class IncidentStore:
                  keep_s: float = 24 * 3600):
         self.ours = ours                    # department names that are "us" (from the tone plan)
         self.geocode, self.clock = geocode, clock
+        # geocode(d) or geocode(d, tone_departments): the page's tones hold its location to their towns (#176)
+        try:
+            self._geo_tones = len(inspect.signature(geocode).parameters) >= 2
+        except (TypeError, ValueError):
+            self._geo_tones = False
         self._lock = threading.Lock()
         self.incidents: deque[Incident] = deque(maxlen=HISTORY)
         self.loose: deque[Traffic] = deque(maxlen=1000)  # traffic with no active incident / other talkgroups
@@ -193,8 +199,12 @@ class IncidentStore:
                     for u in getattr(d, "units", []):
                         if u not in inc.units:
                             inc.units.append(u)
-                    if inc.geo is None and d.location:
-                        inc.geo = self.geocode(d)
+                    if d.location and (inc.geo is None or inc.geo.get("confirmed") is False):
+                        # the repeat read too: every reading of the location competes again (#176)
+                        g = self._geocode(replace(d, text=" ... ".join(inc.page_text)), tone_departments)
+                        if g is not None and (inc.geo is None or g.get("confirmed") or
+                                              g.get("confidence", 0) >= inc.geo.get("confidence", 0)):
+                            inc.geo = g
                     for x in depts:
                         if x not in inc.departments:
                             inc.departments.append(x)
@@ -209,7 +219,7 @@ class IncidentStore:
             self.save()
             return merged
         inc = Incident(uuid.uuid4().hex[:10], at, at, depts, d.incident_type, d.category, d.location,
-                       d.cross_street, d.time_out, self.geocode(d) if d.location else None,
+                       d.cross_street, d.time_out, self._geocode(d, tone_departments) if d.location else None,
                        pages=[page_id], page_text=[d.text], page_starts=[at],
                        units=list(getattr(d, "units", [])), code=getattr(d, "code", ""),
                        tone_departments=list(tone_departments))
@@ -217,6 +227,9 @@ class IncidentStore:
             self.incidents.append(inc)
         self.save()
         return inc
+
+    def _geocode(self, d: Dispatch, tone_departments: list[str]) -> dict | None:
+        return self.geocode(d, list(tone_departments)) if self._geo_tones else self.geocode(d)
 
     def on_traffic(self, t: Traffic, attach: bool = True) -> Incident | None:
         """attach=False: context traffic (another battalion's talkgroup) goes to the loose list."""

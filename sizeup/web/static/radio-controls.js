@@ -266,7 +266,9 @@ window.RadioControls = (() => {
       st.closing = null;
       return;
     }
-    const where = (inc.geo && inc.geo.label) || inc.location || "No location";
+    const g = inc.geo;               // a location the page doesn't confirm is said so (#176)
+    const where = (g && g.label && (g.confirmed === false ? `${inc.location || g.label} (location unconfirmed)` : g.label))
+      || inc.location || "No location";
     const sig = JSON.stringify([inc.id, inc.incident_type, where, inc.opened, st.closing === inc.id]);
     if (n.inc.dataset.id !== sig) {
       n.inc.dataset.id = sig;

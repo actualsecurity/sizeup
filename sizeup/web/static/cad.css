@@ -113,6 +113,10 @@
   .d-type { font-size: var(--fs-2xl); line-height: var(--lh-2xl); font-weight: 700; color: color-mix(in srgb, var(--c, #ff7a5c) 62%, #fff); overflow-wrap: anywhere; }
   .d-addr { font-size: var(--fs-xl); line-height: var(--lh-xl); font-weight: 600; margin-block-start: var(--s-1); overflow-wrap: anywhere; }
   .d-cross { color: var(--text-2); }
+  /* a page's unconfirmed location (#176): the readings to pick from, one per row */
+  .geo-alts { display: flex; flex-direction: column; align-items: flex-start; gap: var(--s-1); margin-block-start: var(--s-1); }
+  .geo-alts[hidden] { display: none; }
+  .geo-alt { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 var(--s-2); text-align: start; max-inline-size: 100%; overflow-wrap: anywhere; }
   .d-caller { margin-block-start: var(--s-2); overflow-wrap: anywhere; }
   .d-caller:empty, .geo:empty { display: none; }
   /* an Airport event's facts (#105): one compact row of label + value, the subtype's definition behind "?" */

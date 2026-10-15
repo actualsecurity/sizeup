@@ -255,9 +255,12 @@ def tokenize(text: str) -> list[str]:
             continue
         out.append(STREET_TYPES.get(w, w))
         i += 1
-    # merge adjacent digit tokens ("1 2 3" or "one 23")
+    # merge adjacent digit tokens ("1 2 3" or "one 23"); a number said twice is a repeat, not one number
+    # ("135 135 South Regent Street", 60 Control 2026-10-15: not 135135)
     merged: list[str] = []
     for t in out:
+        if t.isdigit() and len(t) >= 2 and merged and merged[-1] == t:
+            continue
         if t.isdigit() and merged and merged[-1].isdigit() and len(merged[-1]) < 5:
             merged[-1] += t
         else:
