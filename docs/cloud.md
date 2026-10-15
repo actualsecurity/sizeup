@@ -1407,14 +1407,25 @@ altitude, speed and type beneath it on a dark chip, and **a short trail for ever
 fixes over the last 90 s: a point every 60 m or 15 s, as shortfinal's track store keeps them; shortfinal shows 10
 minutes) while the layer is on. They stay beneath the apparatus, stations and events.
 
-**Motion** (`static/motion.js`, shortfinal's `web/static/app.js` `positionNow`): between fixes the mark moves on
-along its track at its ground speed, bent round its turn (the hub's `tr`: the feed's `track_rate`, else the
-change of track between its last two fixes, clamped to a standard-rate 3 °/s), redrawn ~10 times a second, never
-more than 10 s past the fix, not on the ground or under 30 kt; each new fix is eased into over a second instead of
-jumped to (a correction over 2 km jumps: a re-acquired target). **A position older than 15 s is not moved on**: it
-is drawn hollow where it really was, fading until the hub drops it 60 s after its last position. No age is
-printed on the map; the click says when a position is stale. The trails are only ever the hub's real fixes,
-never the prediction. A click: what it is (the feed's ICAO
+**Motion** (`static/glide.js` with `static/motion.js`'s predictor, shortfinal's `web/static/app.js` `positionNow`;
+#179): between fixes the mark moves on along its track at its ground speed, bent round its turn (the hub's `tr`:
+the feed's `track_rate`, else the change of track between its last two fixes, clamped to a standard-rate 3 °/s),
+from the time the fix was true, never more than 10 s past it, not on the ground or under 30 kt. A new fix moves
+that estimate, not the mark: the mark is drawn on from where it was, **slower while it is ahead of the estimate
+(down to half its speed, never backwards) and faster while it is behind (up to half as fast again)**, drifting
+across onto the track, closing the miss over about 3 s. Only a real reason jumps: a miss over 0.3 nm or 4 s of
+its travel (whichever is less: a re-acquired target or a bad fix, which would still be being worked off at the
+next fix), a heading off by more than 45°, a new aircraft, or going stale / fresh. It is redrawn on animation
+frames while something moves on a visible map: as often as the fastest mark moves ¾ px at that map's zoom, at
+most 20 times a second, at least 4. **A position older than 15 s is not moved on**: it is drawn hollow where it
+really was, fading until the hub drops it 60 s after its last position. No age is printed on the map; the click
+says when a position is stale, and when the mark is drawn at an estimate between reports. **The trail** is the
+hub's reported fixes joined to the mark where it is drawn, every frame (no gap; the newest fixes wait while the
+mark is still catching up to them), smoothed by Chaikin's corner cutting (corners rounded, the curve always
+inside them, never overshooting a reported fix), with the marks in one source so the two move together. The hub
+stamps each answer when the feeds answered, not before it asked them (stamped before, a slow answer made every
+position look older and the page drew each aircraft too far on, then pulled it back).
+A click: what it is (the feed's ICAO
 type designator; the FAA registry's make and model, marked so; the airline from FAA JO 7340.2), what it is
 doing (the approach, the distance to go; the ETA as distance / speed, labelled an estimate; never from a
 stale position), altitude, vertical rate, speed, squawk, registration, and how it was located (ADS-B, MLAT

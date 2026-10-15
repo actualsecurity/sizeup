@@ -211,7 +211,7 @@ def test_every_aircraft_drawn_has_a_short_trail_of_real_fixes(tmp_path):
     assert d["drop_s"] == DROP_S and d["stale_s"] == STALE_S
     for a in d["aircraft"]:
         t = ly.tracks.tracks[a["hex"]]
-        assert a["trail"] == [[round(lon, 4), round(lat, 4)] for _, lat, lon in t.trail]          # what the store accepted
+        assert a["trail"] == [[round(lon, 5), round(lat, 5)] for _, lat, lon in t.trail]          # what the store accepted
         assert len(a["trail"]) <= A.TRAIL_POINTS and all(t.pos_time - w <= A.TRAIL_S for w, _, _ in t.trail)
         assert a["cat"] == t.plane.category and "tr" in a
     a = by_cs(d)
@@ -495,30 +495,61 @@ STATIC = Path(__file__).resolve().parent.parent / "sizeup" / "web" / "static"
 def test_the_aircraft_layer_only_asks_the_hub_and_predicts_only_briefly_between_real_fixes():
     js = (STATIC / "aircraft.js").read_text()
     mo = (STATIC / "motion.js").read_text()
+    gl = (STATIC / "glide.js").read_text()
     html = (STATIC / "cad.html").read_text()
-    assert '<script src="/static/aircraft.js"></script>' in html and '<script src="/static/motion.js"></script>' in html
-    assert html.index("/static/maplayers.js") < html.index("/static/motion.js") < html.index("/static/aircraft.js")
+    for name in ("motion.js", "glide.js", "aircraft.js"):
+        assert f'<script src="/static/{name}"></script>' in html
+    assert html.index("/static/maplayers.js") < html.index("/static/motion.js") < html.index("/static/glide.js") \
+        < html.index("/static/aircraft.js")
     assert "MapLayers.addGroup" in js and '"/api/cad/aircraft"' in js
-    for src in (js, mo):
+    for src in (js, mo, gl):
         assert "api.adsb.lol" not in src and "opendata.adsb.fi" not in src and "faa.gov" not in src and "opensky" not in src.lower()
     code = re.sub(r"//.*", "", js)
     mcode = re.sub(r"//.*", "", mo)
-    assert "localStorage" not in code and "EventSource" not in code and "fetch(" not in mcode
-    # shortfinal's motion (app.js positionNow): at most 10 s past a fix, redrawn ~10 a second, only while something moves
-    assert "HORIZON_S = 10" in code and "ANIMATE_MS = 100" in code and "motion.busy()" in code
-    assert "Math.min(this.horizonS" in mcode and "age > this.staleS" in mcode and "gs < 30" in mcode
-    assert "Motion.tracker(Motion.arc" in code                    # the aircraft predictor, plugged into the tracker
+    gcode = re.sub(r"//.*", "", gl)
+    assert "localStorage" not in code + gcode and "EventSource" not in code + gcode and "fetch(" not in mcode + gcode
+    # shortfinal's motion (app.js positionNow): at most 10 s past a fix, never once stale, not on the ground or slow
+    assert "HORIZON_S = 10" in code and "horizonS: HORIZON_S" in code
+    assert "Math.min(this.horizonS" in gcode and "age > this.staleS" in gcode and "gs < 30" in mcode
+    assert "Glide.follower(Motion.arc" in code                   # the aircraft predictor, followed without jumping back
+    # redrawn on animation frames (each time the fastest mark has moved STEP_PX at that map's zoom, at most 20 a second)
+    # only while a map has it on, the page is visible and something moves (#179)
+    assert "requestAnimationFrame(frame)" in code and "glide.busy()" in code
+    assert "FRAME_MS = 50" in code and "MAX_FRAME_MS = 250" in code and "STEP_PX = 0.75" in code and "frameMs()" in code
+    assert "setInterval" not in code
     # polled only while a map has it on and the page is visible; old positions hollow and fading, no age printed
     assert 'document.visibilityState === "hidden"' in code and "anyOn()" in code and "POLL_MS = 2000" in code
     assert "-old" in code and "stale_s" in code and "drop_s" in code
     assert "s old" not in code and "s ago" not in code and "Math.round(age)" not in code
-    # every aircraft's trail, from the hub's real fixes, while the layer is on
+    # every aircraft's trail, from the hub's real fixes up to the mark, smoothed, in the marks' own source (#179)
     assert "a.trail" in code and '"ac-trail"' in code and "EMPHASIS" in code
+    assert "Glide.smooth(Glide.line(" in code and '"line-cap": "round", "line-join": "round"' in code
+    assert code.count("addSource(") == 1 and '["geometry-type"], "LineString"' in code and '["geometry-type"], "Point"' in code
+    # the click still says when the mark is an estimate between reports, and when a position is stale
+    assert "glide.estimated(a.hex)" in code and "Drawn at an estimate between reports" in code and '" (stale)"' in code
     ml = (STATIC / "maplayers.js").read_text()
     assert "this.force.aircraft = on" in ml and "this.force.airport = on" in ml
     assert 'id="i-aircraft"' in (STATIC / "icons.svg").read_text()
     for cls in ("ac-list", "ac-row", "ac-tag", "ac-stale", "ac-emerg"):
         assert f".{cls}" in (STATIC / "cadmap.css").read_text()
+
+
+def test_the_answer_is_stamped_when_the_feeds_answered_not_before_the_reads(tmp_path):
+    """#179: the page dead-reckons from each position's age ("age", at the feed's time) plus the time since
+    "fetched". Stamped before the reads, a slow answer (0.3 s to over 10 s) made every position that much older
+    than it was, and the page drew each aircraft too far on, then had to bring it back at the next fix."""
+    clock = Clock(T1 + 0.5)
+    slow = FakeFetch()
+
+    def fetch(url, timeout, limit, headers=None):
+        clock.t += 3.0                                           # adsb.lol takes 3 s to answer
+        return slow(url, timeout, limit, headers)
+
+    ly = layer(clock, fetch)
+    started = clock.t
+    assert ly.refresh()
+    d = ly.public()
+    assert d["fetched"] == clock.t == started + 3.0            # not `started`: no 3 s added to every age on the page
 
 
 # ---- two APIs combined, the busier one primary, failover (user, 2026-10-14, #161) ------------------------------------------

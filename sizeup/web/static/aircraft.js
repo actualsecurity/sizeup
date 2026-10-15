@@ -9,14 +9,24 @@
 //                renderPlanes / renderTrails, map-style.js): a jet, light-aircraft or helicopter silhouette by the
 //                feed's emitter category, turned to its track and sized by phase (EMPHASIS; an emergency largest); the callsign, then
 //                the approach or departure and the altitude, speed and type, on a dark chip up and to the right;
-//                and every one with a short trail of its real fixes (the hub's last TRAIL_S, aircraft.py), in its
-//                colour, while the layer is on. Kept beneath the apparatus, the stations and the events.
-//   Motion       motion.js: between fixes the mark moves on along its track and speed, round its turn, for at most
-//                HORIZON_S after the fix (shortfinal's MAX_EXTRAPOLATE_S), redrawn every ANIMATE_MS (shortfinal's),
-//                and eases onto each new fix. A position older than the hub's stale_s (15 s) is not moved: it is
-//                drawn hollow where it really was, fading until the hub drops it (drop_s). No age is printed (the click says stale).
-//                A click: what it is (the feed's type, the FAA registry's make and model), what it is doing, how
-//                it was located.
+//                and every one with a short trail of its reported fixes (the hub's last TRAIL_S, aircraft.py) up
+//                to the mark, in its colour, while the layer is on. Kept beneath the apparatus, the stations and the events.
+//   Motion       glide.js (#179): between fixes the mark moves on along its track and speed, round its turn
+//                (motion.js's Motion.arc, from the fix's own time), for at most HORIZON_S after the fix (shortfinal's
+//                MAX_EXTRAPOLATE_S). A new fix moves that estimate, not the mark: the mark is drawn on from where it
+//                was, slower while it is ahead of the estimate (never backwards) and faster while it is behind,
+//                drifting across onto the track, until it meets it; only a miss over 0.3 nm (or 4 s of its travel),
+//                a hard turn, or a change between fresh and stale jumps. Redrawn on animation frames while
+//                something moves on a visible map, never while the page is hidden: as often as the fastest mark
+//                moves STEP_PX on that map at its zoom (at most one every FRAME_MS, at least one every MAX_FRAME_MS),
+//                so a zoomed-out map isn't redrawn 20 times a second for marks that move a pixel a second. A
+//                position older than the hub's stale_s (15 s) is not moved: it is drawn hollow where it really
+//                was, fading until the hub drops it (drop_s). No age is printed (the click says stale, or estimated).
+//   Trails       its reported positions joined to the mark where it is drawn, every frame (no gap), as a
+//                smoothed curve, its corners rounded inside (glide.js smooth()); one source with the marks, so they
+//                move together.
+//   Click        what it is (the feed's type, the FAA registry's make and model), what it is doing, how it was
+//                located, and whether the mark is where it was reported or an estimate between reports.
 //   Box          the group's note: emergencies first, the HPN movements (arriving, departing, on the ground),
 //                how many are low in the area, each feed (our receiver, adsb.lol, adsb.fi) with how many it gave and
 //                which is primary or resting, the credits and licence, the feed's time, our receiver's state.
@@ -32,10 +42,11 @@ window.AircraftLayer = (() => {
   const URL = "/api/cad/aircraft";
   const KEY = "aircraft";
   const POLL_MS = 2000;
-  const ANIMATE_MS = 100;                   // shortfinal's ANIMATE_MS: ~10 redraws a second while something moves
+  const FRAME_MS = 50;                      // at most 20 redraws a second (on animation frames, while something moves) ...
+  const MAX_FRAME_MS = 250;                 // ... at least 4
+  const STEP_PX = 0.75;                     // ... in between, one each time the fastest mark has moved this far on screen
   const HORIZON_S = 10;                     // shortfinal's MAX_EXTRAPOLATE_S: never further past a fix than this
-  const EASE_MS = 1000;                     // a new fix is eased into over this, not jumped to
-  const SRC = "ac-aircraft", SRC_TRAIL = "ac-trails";
+  const SRC = "ac-aircraft";                // marks and trails in one source: one setData a frame, drawn together
   const IDS = ["ac-trail", "ac-mark", "ac-label"];
   const HALO = "#15181B";
   const PHASE = {
@@ -137,29 +148,62 @@ window.AircraftLayer = (() => {
     return "";
   }
 
-  // ---- the motion: one tracker for every map (motion.js), fed each real fix ----------------------------------------
-  const motion = window.Motion ? Motion.tracker(Motion.arc, { horizonS: HORIZON_S, easeMs: EASE_MS }) : null;
+  // ---- the motion: one follower for every map (glide.js, motion.js's predictor), fed each real fix ------------------
+  const glide = window.Glide && window.Motion ? Glide.follower(Motion.arc, { horizonS: HORIZON_S }) : null;
+  let looks = null;                         // what each aircraft looks like this answer (look())
   function moved() {
     const d = store.data;
-    if (!motion || !d) return;
-    motion.staleS = staleS(d);
+    if (!glide || !d) return;
+    glide.staleS = staleS(d);
     const keep = new Set();
     for (const a of d.aircraft || []) {
       keep.add(a.hex);
-      motion.set(a.hex, { lon: a.lon, lat: a.lat, rot: a.trk || 0, at: Date.now() - ageNow(d, a) * 1000,
-                          gs: a.gs, trk: a.trk, tr: a.tr, ground: a.alt === "ground" });
+      // the fix as it was when it was true (its age at the hub's read, plus the time since): the estimate runs from there
+      glide.set(a.hex, { lon: a.lon, lat: a.lat, rot: a.trk || 0, at: Date.now() - ageNow(d, a) * 1000,
+                         gs: a.gs, trk: a.trk, tr: a.tr, ground: a.alt === "ground" });
     }
-    motion.forget(keep);
+    glide.forget(keep);
+    looks = null;
   }
-  let animTimer = null;
-  function animate() {                      // redraw ~10 a second only while something moves on a visible map
-    const want = !!motion && anyOn() && document.visibilityState !== "hidden" && motion.busy();
-    if (want && !animTimer) {
-      animTimer = setInterval(() => { for (const m of maps) m.draw(); animate(); }, ANIMATE_MS);
-    } else if (!want && animTimer) {
-      clearInterval(animTimer);
-      animTimer = null;
+  // a frame: each map on screen redrawn once its fastest mark has moved STEP_PX there, only while something moves on
+  // a visible map
+  let raf = 0;
+  const wanted = () => !!glide && anyOn() && document.visibilityState !== "hidden" && glide.busy();
+  function animate() {
+    if (wanted() && !raf && window.requestAnimationFrame) raf = requestAnimationFrame(frame);
+  }
+  function frame(ts) {
+    raf = 0;
+    if (!wanted()) return;
+    for (const m of maps) {
+      if (ts - (m.drawnAt || 0) >= m.frameMs() - 2) {
+        m.drawnAt = ts;
+        m.draw();
+      }
     }
+    raf = requestAnimationFrame(frame);
+  }
+
+  // what each aircraft looks like, worked out once an answer (colours read from the tokens), not every frame; and the
+  // fastest of them (m/s, as it may be drawn while catching up)
+  let fastest = 0;
+  function look(d) {
+    if (looks) return looks;
+    looks = new Map();
+    fastest = Math.max(0, ...(d.aircraft || []).filter((a) => a.alt !== "ground").map((a) => (a.gs || 0) * 1852 / 3600)) * 1.5;
+    for (const a of d.aircraft || []) {
+      const em = emphasis(a);
+      const [kind, size] = iconFor(a);
+      const basics = [fmtAlt(a.alt) + trend(a.vr), a.gs !== null && a.gs !== undefined ? `${a.gs} kt` : "", a.type].filter(Boolean).join("  ");
+      const reported = [...(a.trail || [])];
+      const last = reported[reported.length - 1];
+      if (!last || last[0] !== a.lon || last[1] !== a.lat) reported.push([a.lon, a.lat]);   // its latest fix
+      looks.set(a.hex, { kind, scale: size * em.scale, color: colour(a), cs: callsign(a), lscale: em.label, reported,
+                         detail: [a.emerg ? a.emerg.toUpperCase() : "", phaseLine(a), basics].filter(Boolean).join("\n"),
+                         rank: (a.emerg ? 0 : 10) + ({ arriving: 1, departing: 2, ground: 3, low: 4 }[a.phase] || 5),
+                         width: 2 * Math.min(em.trail, 1.2), trailOpacity: Math.min(0.8, 0.45 * em.trail) });
+    }
+    return looks;
   }
 
   // ---- the marks: shortfinal's silhouettes (jetPath / lightPath / heliPath), white for MapLibre to tint
@@ -238,7 +282,6 @@ window.AircraftLayer = (() => {
       const glyphs = !!(map.getStyle() && map.getStyle().glyphs);
       const ids = (map.getStyle().layers || []).map((x) => x.id);
       const before = ids.find((id) => id.startsWith("ml-") || id === "cm-lines" || id === "firehouse");
-      map.addSource(SRC_TRAIL, { type: "geojson", data: fc([]) });
       map.addSource(SRC, { type: "geojson", data: fc([]),
                            attribution: '<a href="https://adsb.lol" target="_blank" rel="noopener">adsb.lol (ODbL)</a> · <a href="https://adsb.fi" target="_blank" rel="noopener">adsb.fi</a>' });
       for (const kind of ["jet", "light", "heli"]) {
@@ -249,10 +292,11 @@ window.AircraftLayer = (() => {
       }
       if (!map.hasImage("ac-chip")) map.addImage("ac-chip", chip(), { pixelRatio: 2, stretchX: [[8, 24]], stretchY: [[8, 24]], content: [8, 8, 24, 24] });
       const vis = { visibility: "none" };
-      // shortfinal's "trails" layer: each in its colour, width and opacity by phase (renderTrails)
-      map.addLayer({ id: "ac-trail", type: "line", source: SRC_TRAIL, layout: { ...vis, "line-cap": "round", "line-join": "round" },
+      const lines = ["==", ["geometry-type"], "LineString"], points = ["==", ["geometry-type"], "Point"];
+      // shortfinal's "trails" layer: each in its colour, width and opacity by phase (renderTrails), up to the mark
+      map.addLayer({ id: "ac-trail", type: "line", source: SRC, filter: lines, layout: { ...vis, "line-cap": "round", "line-join": "round" },
                      paint: { "line-color": ["get", "color"], "line-width": ["get", "width"], "line-opacity": ["get", "opacity"] } }, before);
-      map.addLayer({ id: "ac-mark", type: "symbol", source: SRC,
+      map.addLayer({ id: "ac-mark", type: "symbol", source: SRC, filter: points,
                      layout: { ...vis, "icon-image": ["get", "icon"], "icon-rotate": ["get", "rot"], "icon-rotation-alignment": "map",
                                "icon-allow-overlap": true, "icon-ignore-placement": true, "symbol-sort-key": ["get", "rank"],
                                "icon-size": ["interpolate", ["linear"], ["zoom"], 9, ["*", 0.5, ["get", "scale"]],
@@ -261,7 +305,7 @@ window.AircraftLayer = (() => {
                               "icon-opacity": ["get", "opacity"] } }, before);
       if (glyphs) {
         // shortfinal's "aircraft-label": the callsign, the rest smaller beneath it, on a chip up and to the right
-        map.addLayer({ id: "ac-label", type: "symbol", source: SRC, minzoom: 9,
+        map.addLayer({ id: "ac-label", type: "symbol", source: SRC, filter: points, minzoom: 9,
                        layout: { ...vis,
                                  "text-field": ["format", ["get", "cs"], { "font-scale": 1.0 }, "\n", {},
                                                 ["get", "detail"], { "font-scale": 0.82, "text-font": ["literal", ["Noto Sans Regular"]] }],
@@ -283,44 +327,43 @@ window.AircraftLayer = (() => {
       try { this.add(); } catch (e) { console.error("aircraft layer", e); return; }
       const d = store.data, on = this.isOn();
       for (const id of IDS) if (this.map.getLayer(id)) this.map.setLayoutProperty(id, "visibility", on ? "visible" : "none");
-      if (on && d) {
-        const trails = [];
-        for (const a of d.aircraft || []) {
-          const em = emphasis(a);
-          const pts = [...(a.trail || [])];
-          const last = pts[pts.length - 1];
-          if (!last || last[0] !== a.lon || last[1] !== a.lat) pts.push([a.lon, a.lat]);   // its last real fix, not the drawn mark
-          if (pts.length < 2) continue;
-          trails.push({ type: "Feature", geometry: { type: "LineString", coordinates: pts },
-                        properties: { color: colour(a), width: 2 * Math.min(em.trail, 1.2),
-                                      opacity: Math.min(0.8, 0.45 * em.trail) * alpha(d, ageNow(d, a)) } });
-        }
-        this.map.getSource(SRC_TRAIL).setData(fc(trails));
-        this.draw(true);
-      }
+      if (on && d) this.draw(true);
       this.panelChanged();
     }
-    // the marks where motion.js has them now: every ANIMATE_MS while something moves, and on each answer
+    // each mark where glide.js draws it now, and its trail from its reported fixes up to it, as a curve: every frame
+    // while something moves, and on each answer
     draw(force) {
       const d = store.data;
       if (!d || !this.added || !this.isOn()) return;
       if (!force && !this.map.getContainer().offsetParent) return;         // a map not on screen (the Expand closed)
-      const marks = [], now = Date.now();
+      const trails = [], marks = [], now = Date.now(), lk = look(d);
       for (const a of d.aircraft || []) {
-        const age = ageNow(d, a), at = motion ? motion.where(a.hex, now) : null;
-        const stale = motion ? motion.stale(a.hex) : age > staleS(d);
-        const em = emphasis(a);
-        const [kind, size] = iconFor(a);
-        const basics = [fmtAlt(a.alt) + trend(a.vr), a.gs !== null && a.gs !== undefined ? `${a.gs} kt` : "", a.type].filter(Boolean).join("  ");
-        const detail = [a.emerg ? a.emerg.toUpperCase() : "", phaseLine(a), basics].filter(Boolean).join("\n");
-        const rank = (a.emerg ? 0 : 10) + ({ arriving: 1, departing: 2, ground: 3, low: 4 }[a.phase] || 5);
-        marks.push({ type: "Feature", geometry: { type: "Point", coordinates: at ? [at.lon, at.lat] : [a.lon, a.lat] },
-                     properties: { hex: a.hex, icon: `ac-${kind}${stale ? "-old" : ""}`, rot: at ? at.rot : (a.trk || 0),
-                                   scale: size * em.scale, color: colour(a), opacity: alpha(d, age), cs: callsign(a), detail,
-                                   lscale: em.label, rank } });
+        const l = lk.get(a.hex);
+        if (!l) continue;
+        const age = ageNow(d, a), at = glide ? glide.where(a.hex, now) : null;
+        const stale = glide ? glide.stale(a.hex) : age > staleS(d);
+        const fade = alpha(d, age);
+        const mark = at || { lon: a.lon, lat: a.lat, rot: a.trk || 0 };
+        const pts = window.Glide ? Glide.smooth(Glide.line(l.reported, mark)) : l.reported;
+        if (pts.length >= 2) {
+          trails.push({ type: "Feature", geometry: { type: "LineString", coordinates: pts },
+                        properties: { color: l.color, width: l.width, opacity: l.trailOpacity * fade } });
+        }
+        marks.push({ type: "Feature", geometry: { type: "Point", coordinates: [mark.lon, mark.lat] },
+                     properties: { hex: a.hex, icon: `ac-${l.kind}${stale ? "-old" : ""}`, rot: mark.rot,
+                                   scale: l.scale, color: l.color, opacity: fade, cs: l.cs, detail: l.detail,
+                                   lscale: l.lscale, rank: l.rank } });
       }
       const src = this.map.getSource(SRC);
-      if (src) src.setData(fc(marks));
+      if (src) src.setData(fc(trails.concat(marks)));
+    }
+    // how often to redraw this map: each time the fastest mark has moved STEP_PX on it, at its zoom
+    frameMs() {
+      try {
+        const metresPerPx = 40075016.686 * Math.cos(this.map.getCenter().lat * Math.PI / 180) / (512 * 2 ** this.map.getZoom());
+        const pxPerS = fastest / metresPerPx;
+        return Math.max(FRAME_MS, Math.min(MAX_FRAME_MS, pxPerS > 0 ? 1000 * STEP_PX / pxPerS : MAX_FRAME_MS));
+      } catch (_) { return FRAME_MS; }
     }
     panelChanged() { if (!this.control.panel.hidden) this.control.renderPanel(); }
 
@@ -348,6 +391,8 @@ window.AircraftLayer = (() => {
         if (a.dist !== null && a.dist !== undefined) doing += ` · ${a.dist.toFixed(1)} nm to go`;
       } else if (a.dist !== null && a.dist !== undefined) doing += ` · ${a.dist.toFixed(1)} nm from the field`;
       if (age > staleS(d)) doing += " (at its last position: no newer one)";
+      // reported or estimated: the mark moves on between reports; say so (the trail is its reported fixes up to it)
+      const between = glide && glide.estimated(a.hex) && age <= staleS(d);
       lines.push(doing);
       if (a.eta !== null && a.eta !== undefined) lines.push(`ETA ${eta(a.eta)} at its present speed (an estimate)`);
       const vs = a.vr === null || a.vr === undefined ? "" : Math.abs(a.vr) <= 300 ? "level" : `${a.vr > 0 ? "climbing" : "descending"} ${Math.abs(a.vr).toLocaleString("en-US")} ft/min`;
@@ -357,6 +402,7 @@ window.AircraftLayer = (() => {
       lines.push([reg, a.airline].filter(Boolean).join(" · "));
       lines.push(`Position: ${POS[a.pos] || "as the feed gives it"}, via ${SRC_NAME[a.src] || a.src || "the feed"}${a.band ? ` (${a.band} MHz)` : ""}`
                  + `${age > staleS(d) ? " (stale)" : ""}`);
+      if (between) lines.push(`Drawn at an estimate between reports: on from its last reported position by its track and speed (at most ${HORIZON_S} s), meeting each new report without jumping back`);
       lines.push("Arriving / departing / low is sizeup's reading of its track (shortfinal's rules), not ATC's word.");
       const what = [a.type, a.model ? `${a.model}${a.model_src === "faa" ? " (FAA registry)" : ""}` : "", a.kind].filter(Boolean);
       const foot = [d.credit ? `Data: ${d.credit}` : "", d.at ? `feed ${hms(d.at)}` : "", (d.registry && d.registry.credit) || ""].filter(Boolean).join(" · ");
