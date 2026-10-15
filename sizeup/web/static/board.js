@@ -93,7 +93,7 @@
         else for (const name of p.departments || []) meta.append(el("span", "chip dept", name));
         const done = p.status === "done" && p.raw;
         li.replaceChildren(meta, el("div", done ? "txt clamp" : "txt muted", done ? p.raw
-          : { pending: "Transcribing", no_voice: "Tones only", no_speech: "No speech", error: "Transcription failed" }[p.status] || p.status));
+          : { pending: "Transcribing", no_voice: "Tones only, no message", no_speech: "No speech", error: "Transcription failed" }[p.status] || p.status));
       },
       empty: "None",
     });

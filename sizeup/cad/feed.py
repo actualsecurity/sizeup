@@ -237,7 +237,8 @@ class Feed:
         its text says ("Port Chester" on a Fairview page is mutual aid, not an event), so the accent means
         one thing in the feed: an event of ours."""
         if r["page"] == "ours":
-            return ", ".join(dict.fromkeys(n for t in r["tones"] if t.get("ours") for n in t.get("names") or []))
+            return ", ".join(dict.fromkeys(n for t in r["tones"] if t.get("ours") and not t.get("other_page")
+                                           for n in t.get("names") or []))
         return ""
 
     def pc(self, r: dict, turns: dict[tuple[str, int], dict]) -> str:

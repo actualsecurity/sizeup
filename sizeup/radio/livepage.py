@@ -7,7 +7,8 @@ costs one 100 ms FFT per 50 ms of audio, only while the carrier is up.
 
     tones   a pair is shown as soon as it is certain: A, then 1.5 s of B (longer than any A, #115; B's frequency is settled when
             B ends; a single run past 3.5 s is an A=B code); stacked departments are added one by one
-    voice   the tones have stopped and someone is talking (speech over the carrier's dead air)
+    voice   the tones have stopped and someone is talking (speech over the carrier's dead air); a pair after
+            that is the next page's (#183): shown as a page of its own, from its tones
     ended   the page is built (App._segment -> finished()): kept RECENT_S as "ended" so the screens
             can hand over to the finished page row without a gap
 
@@ -39,6 +40,7 @@ VOICE_MIN_S = 0.5     # this much audio after the last tone before "voice" is co
 VOICE_SPEECH_S = 0.3  # ... and this much of it speech over the dead air
 TAIL_S = 4.0          # the audio after the last tone kept for that check
 VOICE_STEP_S = 0.2    # how often it is checked
+NEXT_PAGE_VOICE_S = 1.0   # a pair after this much "voice": the next page's tones (#183, page.SPLIT_VOICE_S)
 
 
 def _noop() -> None:
@@ -60,6 +62,7 @@ class _Live:
     closed_at: float | None = None
     ended: float | None = None
     page_id: str = ""
+    voice_s: float = 0.0               # audio heard since "voice" (no tone ringing)
 
 
 class LivePaging:
@@ -122,11 +125,13 @@ class LivePaging:
             self.on_change()
         return changed
 
-    def finished(self, channel: str, page_id: str = "") -> bool:
-        """The page on `channel` is built (App._segment): shown as ended for RECENT_S."""
+    def finished(self, channel: str, page_id: str = "", end: float | None = None) -> bool:
+        """The page on `channel` is built (App._segment): shown as ended for RECENT_S. end (wall clock): where that
+        page ended; one that ended before the page shown now started is an earlier page of the same carrier (cut
+        off by these tones, #183), and the one shown now goes on."""
         with self._lock:
             cur = self._ch.get(channel)
-            if cur is None or cur.ended is not None:
+            if cur is None or cur.ended is not None or (end is not None and end <= cur.started):
                 return False
             if not cur.pairs:
                 del self._ch[channel]       # never shown: nothing to hand over
@@ -181,10 +186,12 @@ class LivePaging:
                                    or abs((q["b"] or 0) - (b or 0)) > 1.0):
                 cur.pairs[i] = p        # settled, or it moved enough to say so
             return
+        if cur.phase == "voice" and cur.voice_s >= NEXT_PAGE_VOICE_S:
+            # Tones after the message: the next page (#183), not more of this one; the finished pages say the rest
+            cur.pairs, cur.started = [], ev.start
+        cur.phase, cur.voice_s = "tones", 0.0
         cur.pairs.append(p)
         cur.tail = np.zeros(0)
-        if cur.phase == "voice":
-            cur.phase = "tones"         # more tones after the voice (a second stack)
 
     def _phase(self, cur: _Live, x: np.ndarray) -> None:
         if not cur.pairs:
@@ -192,6 +199,8 @@ class LivePaging:
         if cur.det.ringing:
             cur.tail = np.zeros(0)
             return
+        if cur.phase == "voice":
+            cur.voice_s += len(x) / self.rate
         n0 = len(cur.tail)
         cur.tail = np.concatenate([cur.tail, x])[-int(TAIL_S * self.rate):]
         step = int(VOICE_STEP_S * self.rate)       # looked at every 0.2 s of audio, not every frame

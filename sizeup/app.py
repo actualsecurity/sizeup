@@ -73,7 +73,7 @@ from sizeup.radio.live import LiveTalk
 from sizeup.radio.livepage import HOLD_S, LivePaging
 from sizeup.radio import sdr as sdr_lookup
 from sizeup.radio.recorder import TrunkRecorder
-from sizeup.radio.page import Page, PageHold, assemble, decode_tones, page_from_dict, recording_note
+from sizeup.radio.page import Page, PageHold, assemble, decode_tones, page_from_dict, read_twice, recording_note
 from sizeup.radio.tap import LiveTap
 from sizeup.cad import tonelist
 from sizeup.radio.tones import ToneEvent, TonePlan, base_name
@@ -509,7 +509,8 @@ class App:
         d = dict(page.as_dict(), dispatch=getattr(page, "dispatch", None),
                  history=getattr(page, "history", None) or [], rerun_at=getattr(page, "rerun_at", None),
                  rerun_result=getattr(page, "rerun_result", ""),
-                 model=getattr(page, "model", ""), stt=getattr(page, "stt", ""))
+                 model=getattr(page, "model", ""), stt=getattr(page, "stt", ""),
+                 read_twice=getattr(page, "read_twice", None))
         if getattr(page, "alt_model", ""):
             d.update(alt_text=getattr(page, "alt_text", ""), alt_model=page.alt_model)  # type: ignore[attr-defined]
         return d
@@ -778,16 +779,17 @@ class App:
         """A page just off the air (here, or on the hub from the station). False = tones only:
         nothing to transcribe (kept as the tones half of a page whose voice comes separately)."""
         self._show_page(page)
-        self.paging.finished(page.label, page.id)       # the page going out live hands over to this one
+        self.paging.finished(page.label, page.id, page.end)   # the page going out live hands over to this one
         if any(not t.names for t in page.tones):
             self._unknown_tones(page)                   # once per page (the live display never logs)
         self._page_to_cad(page)                         # a row in Radio, with play, from now on (#64)
+        if page.tones:
+            # The tones a voice-only transmission after this may belong to: the last tones heard, whoever's (#183: a
+            # voice after West Harrison's tones-only page never takes Port Chester's from the one before it)
+            self._last_tones_only = page if page.status == "no_voice" else None
         if page.status != "no_voice":
             return True
-        names = page.departments
         self._save_page(page)
-        if any(n in self.cfg.ours for n in names):
-            self._last_tones_only = page
         return False
 
     def _unknown_tones(self, page: Page) -> None:
@@ -810,13 +812,17 @@ class App:
 
     def _page_to_cad(self, page: Page, replace: bool = True) -> None:
         """A page into the CAD's communications log: a row in Radio like any transmission (talker 60
-        Control, its tone pairs, where the voice starts), so it plays there and from the event it opens."""
+        Control, its tone pairs, where the voice starts), so it plays there and from the event it opens. A pair from
+        a page before this one's message (one recording of two pages, made before #183) is marked other_page: shown,
+        never what makes the row ours (comms.page_kind)."""
+        own = page.message_tones
         try:
             self.cad.record_traffic({"id": page.id, "start": page.start, "end": page.end, "source": page.label,
                                      "talkgroup": None, "unit": "60 Control" if page.tones else "", "rig": "", "radio_id": "",
                                      "text": page.raw, "status": page.status, "model": getattr(page, "model", ""),
                                      "tones": [{"a_hz": round(t.a_hz, 1), "b_hz": round(t.b_hz, 1) if t.b_hz else None,
                                                 "names": list(t.names), "ours": self.paging.is_ours(t.names)}
+                                               | ({} if any(t is m for m in own) else {"other_page": True})
                                                for t in page.tones],
                                      "tone_seq": list(getattr(page, "tone_seq", None) or []),
                                      "voice_at": round(page.voice_offset_s, 2) if page.tones else None},
@@ -1017,18 +1023,25 @@ class App:
         page.model = getattr(page, "model", "") or Path(self.cfg.stt_model).name  # type: ignore[attr-defined]
         d = self._dispatch(page.raw)
         page.dispatch = d.as_dict() if d else None  # type: ignore[attr-defined]
+        if page.kind == "page":
+            page.read_twice = read_twice(page.raw)  # type: ignore[attr-defined]   (a confirming signal, #183)
         self._save_page(page)
         self._page_to_cad(page)                     # its text in the log (before an event links it)
         self._emit("page_text", self._page_doc(page))
-        log(f"{page.label} {page.kind}: {page.raw or '(' + page.status + ')'}")
+        log(f"{page.label} {page.kind}: {page.raw or '(' + page.status + ')'}"
+            + {True: " [read twice]", False: " [not read twice]"}.get(getattr(page, "read_twice", None), ""))
         if d is None:
             return
-        depts = page.departments
+        # Ours by this page's own tones (#183): the group its message answers, never a page's before it
+        depts = page.message_departments
+        if len(page.message_tones) < len(page.tones):
+            log(f"  {page.label}: tones of an earlier page in this recording left out: "
+                + ", ".join(t.describe() for t in page.tones if not any(t is m for m in page.message_tones)))
         tones_half = None
         if page.kind == "voice":
             prev = self._last_tones_only
-            if prev and page.start - prev.end < SPLIT_PAGE_S:
-                depts = prev.departments  # the voice half of a tones-only page
+            if prev and prev.label == page.label and page.start - prev.end < SPLIT_PAGE_S:
+                depts = prev.message_departments  # the voice half of a tones-only page
                 self._last_tones_only = None
                 tones_half = prev
         # Ours only by our tones (#80: never by the address or the units named); anything else stays a page
@@ -1121,7 +1134,7 @@ class App:
             d = self._dispatch(page.raw)
             if d is not None:
                 page.dispatch = d.as_dict()  # type: ignore[attr-defined]
-                self._page_incident(page, page.departments, d)
+                self._page_incident(page, page.message_departments, d)
         return True
 
     def reread_tones(self, page_id: str) -> dict:

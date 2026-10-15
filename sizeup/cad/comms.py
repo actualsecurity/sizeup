@@ -605,9 +605,10 @@ def why_text(why: str, unit: str = "") -> str:
 
 
 def page_kind(tones: list[dict], channel: str = "", paging=()) -> str:
-    """What a page's tones say (#80): ours | other | unknown | none; '' for a row that isn't a page."""
+    """What a page's tones say (#80): ours | other | unknown | none; '' for a row that isn't a page. A pair marked
+    other_page (an earlier page's tones in the same recording, #183) never makes it ours."""
     if tones:
-        if any(t.get("ours") for t in tones):
+        if any(t.get("ours") and not t.get("other_page") for t in tones):
             return "ours"
         return "unknown" if any(not t.get("names") for t in tones) else "other"
     return "none" if channel in paging else ""
