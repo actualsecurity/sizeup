@@ -271,7 +271,7 @@ window.Alarm = (() => {
     const shownIds = new Set([...open, ...ns].map((a) => a.id));
     const ws = st.windows.filter((w) => !shownIds.has(w.alarm_id) && !ns.some((a) => windowOf(a) === w));
     st.strip.hidden = (!ns.length && !ws.length) || open.length > 0;
-    const nsig = JSON.stringify([ns.map((a) => [a.id, a.text, st.busy.has(a.id), (windowOf(a) || {}).until]),
+    const nsig = JSON.stringify([ns.map((a) => [a.id, a.text, a.stuck, st.busy.has(a.id), (windowOf(a) || {}).until]),
       ws.map((w) => [w.talkgroup, w.until, w.alarm_id, st.busy.has(w.alarm_id)]), dispatcher()]);
     if (st.strip._sig !== nsig) {
       st.strip._sig = nsig;
@@ -279,6 +279,12 @@ window.Alarm = (() => {
         const r = mk("div", "alarm-notice");
         r.append(mk("b", "", `${a.drill ? "DRILL · " : ""}Emergency button (not ours)`),
           mk("span", "", ` ${a.who} on ${a.channel} at ${hms(a.at)}${a.text ? `: “${a.text}”` : ""}`));
+        if (a.stuck) {                // #190: it went on flagging routine calls: said once, its later flags not alarms
+          const s = mk("span", "alarm-stuck", ` · emergency flag stuck on ${a.stuck}`);
+          s.title = "The same flag on call after call of routine traffic: a radio left in emergency mode, or a talkgroup "
+            + "the system holds in emergency. Its later flags are not emergencies: no new alarm, the window not renewed.";
+          r.append(s);
+        }
         const w = windowOf(a);
         if (w) {
           const u = mk("span", "alarm-window", ` · ${untilText(w)}`);

@@ -456,7 +456,7 @@ def test_the_row_chip_and_the_folded_group_in_the_pages_own_code(tmp_path):
     h.write_text(GROUPS_HARNESS)
     groups = json.loads(subprocess.run([NODE, str(h), str(STATIC / "radio-view.js")], capture_output=True, text=True,
                                        check=True, timeout=30).stdout)
-    # the bus's talkgroup first (its newest row is older than WCPD's), its emergency as the snippet; then the one
-    # with a window open; then the rest, newest first
+    # the bus's talkgroup above the quiet ones (its newest row is older than WCPD's), with the one with a window open;
+    # then the rest, newest first. Someone else's emergency doesn't take over the snippet (#190: low-key)
     assert [(x["name"], x["emergency"]) for x in groups] == [("DOT Dispatch 1", "other"), ("WCPD PSD", ""), ("WCPD Ch 1", "")]
-    assert groups[0]["snippet"] == "BUS514: emergency button, no speech" and groups[1]["until"] == 999
+    assert groups[0]["snippet"] == "go ahead" and groups[1]["until"] == 999

@@ -98,15 +98,31 @@ window.RadioView = (() => {
   const OTHER_KEY = "sizeup.cad.radio.other";
   const FIELDS = ["q", "unit", "channel", "event", "type", "pcfd", "emergency", "since", "until"];
   const CHECKS = new Set(["pcfd", "emergency"]);   // checkboxes: "1" or nothing
+  // Folded or open, each viewer's own (#190: "i cant minimize this"): open / tgs, opened with a click; shut / shutTgs,
+  // folded with a click. A filter opens Other talkgroups and a talkgroup or two by itself, but never one this viewer
+  // folded; nothing else opens them (an emergency neither: its chip says so on the folded head), and a redraw or a
+  // live update keeps what was chosen.
+  const MAX_KEYS = 100;
   const st = { open: false, rev: "", rows: [], facets: "", busy: false, again: false, timer: 0, lastOk: 0, error: "", failAt: 0,
-               other: { open: false, tgs: new Set() }, qTimer: 0 };
+               other: { open: false, shut: false, tgs: new Set(), shutTgs: new Set() }, qTimer: 0 };
   try {
     const v = JSON.parse(localStorage.getItem(OTHER_KEY) || "null");
-    if (v) { st.other.open = !!v.open; st.other.tgs = new Set((v.tgs || []).map(String)); }
+    if (v) {
+      st.other.open = !!v.open;
+      st.other.shut = !!v.shut;
+      st.other.tgs = new Set((v.tgs || []).map(String));
+      st.other.shutTgs = new Set((v.shut_tgs || []).map(String));
+    }
   } catch (_) { /* start folded */ }
   const saveOther = () => {
-    try { localStorage.setItem(OTHER_KEY, JSON.stringify({ open: st.other.open, tgs: [...st.other.tgs] })); } catch (_) { /* fine */ }
+    const last = (set) => [...set].slice(-MAX_KEYS);
+    try {
+      localStorage.setItem(OTHER_KEY, JSON.stringify({ open: st.other.open, shut: st.other.shut, tgs: last(st.other.tgs),
+                                                       shut_tgs: last(st.other.shutTgs) }));
+    } catch (_) { /* fine */ }
   };
+  const otherOpen = (rest) => !st.other.shut && (st.other.open || (active() && rest.length > 0));
+  const groupOpen = (g, few) => !st.other.shutTgs.has(g.key) && (st.other.tgs.has(g.key) || few);
   const f = (k) => $(`#rv-${k}`);
 
   // ---- filters <-> the hash -----------------------------------------------------------------------
@@ -197,8 +213,10 @@ window.RadioView = (() => {
   // ---- Main up front, the other talkgroups folded -------------------------------------------------
 
   // The emergency on a folded talkgroup can't hide (#128, user 2026-10-14: "where is the bus emergency here?"):
-  // a group with the emergency button or an alarm on it (emergency: "ours" | "other") goes first and its header says
-  // so; one whose emergency window is open (the CAD state's alarms.windows) says "Recording until 20:09 (emergency)".
+  // a group with the emergency button or an alarm on it (emergency: "ours" | "other") says so on its head; one whose
+  // emergency window is open (the CAD state's alarms.windows) says "Recording until 20:09 (emergency)". Ours goes
+  // first, marked, its emergency as the snippet; someone else's (#190: DOT Dispatch 1's buses, a flag that turned out
+  // stuck) only above the quiet ones, with its chip and no mark: it shouldn't take over the view. stuck: on whom.
   const windows = () => (typeof cad !== "undefined" && cad.state && cad.state.alarms && cad.state.alarms.windows) || [];
   const isEm = (t) => !!(t.emergency || t.alarm_id);
   function otherGroups(rows, wins = windows()) {
@@ -216,7 +234,8 @@ window.RadioView = (() => {
       g.muted = !said;
       const em = g.calls.filter(isEm);
       g.emergency = !em.length ? "" : em.some((t) => t.alarm_level === "alarm") ? "ours" : "other";
-      if (em.length) {                              // the snippet: the emergency, not whatever came last
+      g.stuck = g.emergency === "other" ? ((em.find((t) => t.alarm_stuck) || {}).alarm_stuck || "") : "";
+      if (g.emergency === "ours") {                 // the snippet: our emergency, not whatever came last
         const e = em[0];
         g.snippet = `${e.rig || e.talker || e.radio_id || "Radio"}: ${e.text || "emergency button, no speech"}`;
         g.muted = false;
@@ -224,10 +243,10 @@ window.RadioView = (() => {
       const w = g.tg !== null && g.tg !== undefined ? wins.find((x) => x.talkgroup === g.tg) : null;
       g.until = w ? w.until : null;
     }
-    const rank = (g) => (g.emergency === "ours" ? 3 : g.emergency ? 2 : g.until ? 1 : 0);
+    const rank = (g) => (g.emergency === "ours" ? 2 : g.emergency || g.until ? 1 : 0);
     return groups.sort((a, b) => (rank(b) - rank(a)) || (b.last - a.last));
   }
-  const emText = (g) => (g.emergency === "ours" ? "EMERGENCY" : "Emergency (not ours)");
+  const emText = (g) => (g.emergency === "ours" ? "EMERGENCY" : g.stuck ? `Emergency flag stuck on ${g.stuck}` : "Emergency (not ours)");
 
   // A page going out now (South 2), over Main until its finished row is in the list.
   function renderPaging() {
@@ -250,7 +269,7 @@ window.RadioView = (() => {
     RadioLive.offer(main.filter((t) => t.kind !== "note").map((t) => ({ id: t.id, start: t.start, has: t.has_audio, keyup: t.status === "no_speech" })));
 
     const groups = otherGroups(rest);
-    const open = st.other.open || (active() && rest.length > 0);
+    const open = otherOpen(rest);
     const sec = $("#rv-other-sec"), box = $("#rv-other"), tog = $("#rv-other-toggle");
     sec.classList.toggle("open", open);
     tog.setAttribute("aria-expanded", String(open));
@@ -267,8 +286,8 @@ window.RadioView = (() => {
     const few = groups.length <= 2 && active();    // filtered down to a talkgroup or two: open them
     syncList(box, groups, {
       key: (g) => g.key,
-      sig: (g) => JSON.stringify([st.other.tgs.has(g.key) || few, g.name, g.calls.length, g.last, g.snippet, g.emergency, g.until,
-                                  (st.other.tgs.has(g.key) || few) ? g.calls.map(rowSig) : 0, g.calls.map((t) => t.id)]),
+      sig: (g) => JSON.stringify([groupOpen(g, few), g.name, g.calls.length, g.last, g.snippet, g.emergency, g.stuck, g.until,
+                                  groupOpen(g, few) ? g.calls.map(rowSig) : 0, g.calls.map((t) => t.id)]),
       make: () => {
         const li = el("li", "og");
         const head = el("button", "og-head");
@@ -279,11 +298,11 @@ window.RadioView = (() => {
         return li;
       },
       fill: (li, g) => {
-        const isOpen = st.other.tgs.has(g.key) || few;
+        const isOpen = groupOpen(g, few);
         const [head, calls] = li.children;
         const [caret, name, num, flags, last, snip] = head.children;
         const fl = [];
-        if (g.emergency) fl.push(el("span", `chip emergency${g.emergency === "ours" ? "" : " em-other"}`, emText(g)));
+        if (g.emergency) fl.push(el("span", `chip emergency${g.emergency === "ours" ? "" : " em-other"}${g.stuck ? " em-stuck" : ""}`, emText(g)));
         if (g.until) {
           const u = el("span", "chip kept", `Recording until ${fmtTime(g.until)} (emergency)`);
           u.title = "The emergency window: everything on this talkgroup is kept until then, even with Record off "
@@ -376,12 +395,21 @@ window.RadioView = (() => {
     for (const k of ["unit", "channel", "event"]) f(k).value = "";
     changed();
   });
-  $("#rv-other-toggle").addEventListener("click", () => { st.other.open = !$("#rv-other-sec").classList.contains("open"); saveOther(); render(); });
+  // A caret click folds what is open (whatever opened it: a filter, an emergency, an earlier click) and opens what
+  // is folded; remembered (saveOther) and kept through every redraw.
+  $("#rv-other-toggle").addEventListener("click", () => {
+    const was = $("#rv-other-sec").classList.contains("open");
+    st.other.open = !was;
+    st.other.shut = was;
+    saveOther();
+    render();
+  });
   $("#rv-other").addEventListener("click", (e) => {
     const head = e.target.closest(".og-head");
     if (!head) return;
     const k = head.parentElement.dataset.key;
-    if (st.other.tgs.has(k)) st.other.tgs.delete(k); else st.other.tgs.add(k);
+    if (head.getAttribute("aria-expanded") === "true") { st.other.tgs.delete(k); st.other.shutTgs.add(k); }
+    else { st.other.shutTgs.delete(k); st.other.tgs.add(k); }
     saveOther();
     render();
   });
