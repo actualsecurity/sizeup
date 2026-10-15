@@ -57,6 +57,26 @@ def _roads_stay_local(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _roadwork_stays_local(monkeypatch):
+    """Road projects & closures (sizeup/roadprojects.py) never reach a source from a test: the default addresses off
+    (the Thruway's, NYSDOT's and CTDOT's capital programs, the villages' RSS), the real fetch only to this machine."""
+    from urllib.parse import urlsplit
+
+    import sizeup.roadprojects as rw
+    monkeypatch.setattr(rw, "THRUWAY_CAPITAL_URL", "")
+    monkeypatch.setattr(rw, "NYSDOT_URL", "")
+    monkeypatch.setattr(rw, "CTDOT_URL", "")
+    monkeypatch.setattr(rw, "NOTICE_FEEDS", ())
+    real = rw.urlopen
+
+    def local_only(req, *a, **kw):
+        host = urlsplit(req.full_url if hasattr(req, "full_url") else str(req)).hostname
+        assert host in ("127.0.0.1", "localhost", "::1"), f"a test tried to reach {host} (roadwork: fixtures only)"
+        return real(req, *a, **kw)
+    monkeypatch.setattr(rw, "urlopen", local_only)
+
+
+@pytest.fixture(autouse=True)
 def _gis_stays_local(monkeypatch):
     """The county GIS layers (sizeup/gis.py) never reach the county from a test: the real fetch only to
     this machine (tests hand in recorded fixtures)."""

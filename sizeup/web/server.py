@@ -30,6 +30,8 @@ GET  /api/cad/roads, /api/cad/cameras, /api/cad/cameras/<id>/image
                                the map's highway layers and camera snapshots, proxied (sizeup/roads.py, #73)
 GET  /api/cad/gis, /api/cad/gis/<key>[?bbox=]
                                the county GIS layers' catalog and each layer's GeoJSON (sizeup/gis.py, #91)
+GET  /api/cad/roadprojects, /api/cad/roadprojects/near?lat=&lon=&address=&from=&to=
+                               road projects & closures on the maps, and those near an event (sizeup/roadprojects.py, #185)
 GET  /api/cad/trains, /api/cad/trains/near?lat=&lon=
                                Metro-North's trains on the map, and those approaching an event (sizeup/trains.py, #131)
 GET  /api/cad/weather[/speech?id=, /radar/frames, /radar/<frame>/<z>/<x>/<y>.png]
@@ -292,7 +294,7 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                  cad=None, cad_b: Broadcaster | None = None, station=None, health: bytes = b'{"ok":true}',
                  access=None, access_log: Callable[[str], None] | None = None, station_mode=None,
                  role: str = "", roads=None, gis=None, trains=None, weather=None, station_health=None, stream_gzip: bool = True,
-                 aircraft=None):
+                 aircraft=None, roadwork=None):
     """cad: a CadApi (sizeup/cad/api.py) and cad_b its own broadcaster (the console's state is
     small and separate from the monitor's, so neither page carries the other's). station: the hub's
     ingest (sizeup/cloud/hub.py Hub), which checks the station's token before reading any body.
@@ -304,6 +306,7 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
     trains: Metro-North's trains (sizeup/trains.py Trains): /api/cad/trains..., GET only.
     weather: weather and water (sizeup/weather.py Weather): /api/cad/weather..., GET only.
     aircraft: aircraft near HPN (sizeup/aircraft.py AircraftLayer): /api/cad/aircraft, GET only (ETag -> 304).
+    roadwork: road projects & closures (sizeup/roadprojects.py RoadProjects): /api/cad/roadprojects..., GET only (ETag -> 304).
     stream_gzip: the state streams gzipped to a browser that takes it (#137).
     station_health: the hub's StationHealth (sizeup/cloud/health.py): GET /api/cad/health."""
     assets = Assets(STATIC_DIR)
@@ -461,6 +464,8 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 return self._send(*self._data(path, url.query, roads.get(path, url.query, self.headers)))
             if gis is not None and gis.handles(path):            # the county GIS layers (#91)
                 return self._send(*self._data(path, url.query, gis.get(path, url.query, self.headers)))
+            if roadwork is not None and roadwork.handles(path):  # road projects & closures (#185)
+                return self._send(*roadwork.get(path, url.query, self.headers))
             if trains is not None and trains.handles(path):      # Metro-North's trains (#131)
                 return self._send(*trains.get(path, url.query, self.headers))
             if weather is not None and weather.handles(path):    # NWS alerts, conditions, radar; NOAA tides (#132)
@@ -653,7 +658,7 @@ class WebServer:
                  retranscribe: Callable[[list[str] | None], int] | None = None, cad=None, station=None,
                  health: dict | None = None, access=None, access_log: Callable[[str], None] | None = None,
                  station_mode=None, role: str = "", roads=None, gis=None, trains=None, weather=None, station_health=None,
-                 aircraft=None):
+                 aircraft=None, roadwork=None):
         self.access = access
         self.broadcaster = Broadcaster(state_fn)
         # The CAD's own state push (the whole console rebuilt and sent once a second): not on a station,
@@ -663,7 +668,7 @@ class WebServer:
             json.dumps(scene, separators=(",", ":")).encode(), self.broadcaster, clip, close_incident, set_mode,
             set_talkgroup, set_talkgroup_group, retranscribe, cad, self.cad_broadcaster, station,
             json.dumps(health or {"ok": True}, separators=(",", ":")).encode(), access, access_log, station_mode, role,
-            roads, gis, trains, weather, station_health, aircraft=aircraft))
+            roads, gis, trains, weather, station_health, aircraft=aircraft, roadwork=roadwork))
         self.httpd.daemon_threads = True
 
     @property

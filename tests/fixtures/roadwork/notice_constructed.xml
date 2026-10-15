@@ -1,0 +1,26 @@
+<?xml version="1.0"?><rss version="2.0"><channel>
+	<!-- constructed for tests in the shape of the Village of Port Chester's CivicPlus Alert Center feed (pc_alerts.xml is the recording) -->
+	<title>Port Chester, NY - Alert Center</title>
+	<link>https://www.portchesterny.gov/AlertCenter.aspx</link>
+	<item>
+		<title>Westchester Avenue Closure for Festa Colon</title>
+		<link>https://www.portchesterny.gov/AlertCenter.aspx?AID=900</link>
+		<pubDate>Wed, 14 Oct 2026 09:00:00 -0500</pubDate>
+		<description>Westchester Avenue will be closed between N Pearl Street and King Street on Sunday, October 18, from 8 AM to 6 PM.</description>
+		<guid isPermaLink="false">https://www.portchesterny.gov/AlertCenter.aspx?AID=900/1</guid>
+	</item>
+	<item>
+		<title>Water Main Work</title>
+		<link>https://www.portchesterny.gov/AlertCenter.aspx?AID=901</link>
+		<pubDate>Wed, 14 Oct 2026 09:30:00 -0500</pubDate>
+		<description>Excavation in front of 222 Grace Church Street this week; expect delays.</description>
+		<guid isPermaLink="false">https://www.portchesterny.gov/AlertCenter.aspx?AID=901/1</guid>
+	</item>
+	<item>
+		<title>Main Street paving</title>
+		<link>https://www.portchesterny.gov/AlertCenter.aspx?AID=902</link>
+		<pubDate>Wed, 14 Oct 2026 10:00:00 -0500</pubDate>
+		<description>Paving on Main Street between Adee Street and Westchester Avenue next week.</description>
+		<guid isPermaLink="false">https://www.portchesterny.gov/AlertCenter.aspx?AID=902/1</guid>
+	</item>
+</channel></rss>

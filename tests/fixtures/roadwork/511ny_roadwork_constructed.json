@@ -1,0 +1,17 @@
+[
+ {"ID":"NYSDOT-2001","Organization":"NYSDOT","RoadwayName":"N Main St","DirectionOfTravel":"Northbound",
+  "Description":"Roadwork on N Main St northbound between Westchester Ave and Willett Ave, right lane closed 9 PM to 5 AM weeknights",
+  "Reported":1791700000,"LastUpdated":1791986400,"StartDate":1791777600,"PlannedEndDate":1793354400,
+  "LanesAffected":"1 Right lane","LanesStatus":"closed","Latitude":41.0003,"Longitude":-73.66386,
+  "EventType":"roadwork","EventSubType":"Paving","IsFullClosure":false,"Severity":"Minor",
+  "Recurrence":"Weeknights 9:00 PM - 5:00 AM",
+  "RecurrenceSchedules":[{"StartDate":"2026-10-12","EndDate":"2026-10-30",
+                          "Times":[{"StartTime":"21:00","EndTime":"05:00"}],
+                          "DaysOfWeek":["Monday","Tuesday","Wednesday","Thursday","Friday"]}],
+  "DetourInstructions":"Northbound traffic use S Regent St to Willett Ave",
+  "EncodedPolyline":"ovfyFfpr`MkCcAsAgBcEiDoDyC"},
+ {"ID":"NYSDOT-2002","Organization":"NYSDOT","RoadwayName":"I-87","DirectionOfTravel":"Southbound",
+  "Description":"Roadwork on I-87 at Exit 6 (Albany)","Reported":1791914000,"LastUpdated":1791914100,
+  "StartDate":1791914000,"PlannedEndDate":"Until further notice","Latitude":42.7452,"Longitude":-73.7731,
+  "EventType":"roadwork","EventSubType":"Construction","Severity":"Minor"}
+]

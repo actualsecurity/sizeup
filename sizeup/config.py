@@ -188,6 +188,13 @@ class Config:
     roads_county: bool = True         # Westchester County DPW's cameras (a public ArcGIS layer, no key) (#99)
     roads_stream_max: int = 8         # live camera streams open at once, hub-wide (sizeup/roads.py STREAM_MAX, #125)
     roads_wall_streams: int = 0       # the camera wall's live tiles at once per page; 0: every camera in our area that streams
+    # [roadwork] (sizeup/roadprojects.py, #185): road projects & closures for the maps and the incident view: the
+    # Thruway's and 511NY's roadwork (through [roads]), the capital programs (Thruway, NYSDOT, CTDOT), the villages'
+    # road notices; a WZDx feed when one is set ("{key}": the 511NY key, SIZEUP_511NY_KEY).
+    roadwork_enabled: bool = True
+    roadwork_projects: bool = True
+    roadwork_notices: bool = True
+    roadwork_wzdx_url: str = ""
     # [gis] (sizeup/gis.py, #91): Westchester County GIS datasets as map layers, fetched by the hub.
     # load() ships the starter set (gis.DEFAULT_LAYERS); built directly (tests), none.
     gis_enabled: bool = True
@@ -488,6 +495,22 @@ def _roads(data: dict) -> dict:
                 roads_stream_max=smax, roads_wall_streams=wall, **urls)
 
 
+def _roadwork(data: dict) -> dict:
+    """[roadwork] -> Config fields. No section: on, every public source; WZDx off (no address)."""
+    rw = _take(data.get("roadwork", {}), "roadwork", {"enabled", "projects", "notices", "wzdx_url"})
+    flags = {k: rw.get(k, True) for k in ("enabled", "projects", "notices")}
+    if not all(isinstance(v, bool) for v in flags.values()):
+        raise ConfigError("roadwork.enabled / roadwork.projects / roadwork.notices: true or false")
+    u = str(rw.get("wzdx_url", "")).strip()
+    m = re.fullmatch(r"(https?)://([^/:?#\s]+)(:\d+)?([^\s]*)", u) if u else None
+    if u and (not m or (m.group(1) == "http" and m.group(2) not in ("127.0.0.1", "localhost", "::1"))):
+        raise ConfigError("roadwork.wzdx_url: the WZDx feed's https:// address, {key} where a key goes (plain http only to this machine)")
+    if u and re.search(r"(key|token)=", u, re.I) and "{key}" not in u:
+        raise ConfigError("roadwork.wzdx_url: put {key} where the key goes, never the key itself (SIZEUP_511NY_KEY)")
+    return dict(roadwork_enabled=flags["enabled"], roadwork_projects=flags["projects"], roadwork_notices=flags["notices"],
+                roadwork_wzdx_url=u)
+
+
 def _trains(data: dict) -> dict:
     """[trains] -> Config fields. No section: on, the MTA's feeds, our stretch of the line (Mount Vernon East to Stamford)."""
     tr = _take(data.get("trains", {}), "trains", {"enabled", "key", "rt_url", "gtfs_url", "bbox", "rt_every_s"})
@@ -727,7 +750,8 @@ def load(path: str | Path) -> Config:
     except tomllib.TOMLDecodeError as e:
         raise ConfigError(f"{path}: {e}") from e
     _take(data, "config", {"station", "web", "radio", "tones", "stt", "p25", "mdc", "units", "storage", "map",
-                           "cad", "dispatch", "cloud", "prealert", "roads", "gis", "trains", "weather", "alerts", "aircraft"})
+                           "cad", "dispatch", "cloud", "prealert", "roads", "roadwork", "gis", "trains", "weather", "alerts",
+                           "aircraft"})
     st = _take(data.get("station", {}), "station", {"id", "name", "auto_update"})
     if not isinstance(st.get("auto_update", True), bool):
         raise ConfigError("station.auto_update: true or false")
@@ -929,5 +953,5 @@ def load(path: str | Path) -> Config:
         dispatch_repeat=d_repeat, dispatch_transmit=False, dispatch_channels=d_channels, dispatch_polly_region=d_region,
         **(dict(cloud, cloud_outbox=rel_state(cloud["cloud_outbox"])) if cloud else {}),
         cloud_state="" if cloud.get("cloud_role") == "hub" else rel_state("state/cloud.json"),
-        **pa, **_alerts(data, pa), **_roads(data), **_gis(data), **_trains(data), **_weather(data), **aircraft,
+        **pa, **_alerts(data, pa), **_roads(data), **_roadwork(data), **_gis(data), **_trains(data), **_weather(data), **aircraft,
     )

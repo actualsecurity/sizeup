@@ -25,6 +25,8 @@
         (sizeup/cloud/stationmode.py; state/cloud.json then wins over the role here).
     [roads]: 511NY's cameras, incidents, roadwork and message signs for the maps' Layers, camera
         snapshots proxied by this process (sizeup/roads.py)
+    [roadwork]: road projects & closures for the maps and the incident view: the Thruway's and 511NY's
+        roadwork, the villages' road notices, WZDx feeds (sizeup/roadprojects.py)
     [gis]: Westchester County GIS datasets (parcels, boundaries, utilities ...) for the maps' Layers,
         fetched and served by this process (sizeup/gis.py)
     [weather]: NWS alerts, conditions and radar, NOAA tides for the banner, the header, the maps and
@@ -385,6 +387,10 @@ class App:
         self.roads.ours = tuple(cfg.cad_monitor_departments)
         self.roads.wall_settings = lambda: self.cad.settings.overrides().get("camera_wall") or {}
         self.cad.camera_area = self.roads.settings_rows
+        # Road projects & closures (sizeup/roadprojects.py, #185): the Thruway's and 511NY's roadwork through roads,
+        # the villages' road notices (placed by the gazetteer, or listed), any WZDx feed configured; read while someone looks.
+        from sizeup.roadprojects import RoadProjects
+        self.roadwork = RoadProjects.from_config(cfg, roads=self.roads, gaz=self.gaz, log=log)
         # Metro-North's trains (sizeup/trains.py, #131): the MTA's feeds, read by the CAD of record while
         # someone looks at the Trains layer or an event near the tracks.
         from sizeup.trains import Trains
@@ -2177,6 +2183,7 @@ class App:
         self.prealert_sync()
         if self.cfg.cloud_role != "station":   # the station page has no maps: don't spend 511NY calls there
             self.roads.start()
+            self.roadwork.start()
             self.gis.start()
             self.trains.start()
             self.aircraft.start()
@@ -2232,6 +2239,7 @@ class App:
         if self.prealert is not None:
             self.prealert.stop()
         self.roads.stop()
+        self.roadwork.stop()
         self.gis.stop()
         self.trains.stop()
         self.aircraft.stop()
@@ -2271,7 +2279,7 @@ def make_server(app: App) -> WebServer:
                        access_log=log if cfg.cloud_role == "hub" else None, station_mode=app.station,
                        role=cfg.cloud_role, roads=app.roads, gis=app.gis,
                        trains=app.trains, weather=app.weather, station_health=getattr(app, "health", None),
-                       aircraft=app.aircraft)
+                       aircraft=app.aircraft, roadwork=app.roadwork)
 
     def changed() -> None:             # a new talker is pushed at once, not on the next second
         server.poke()

@@ -131,6 +131,20 @@
   .ml-fold[open] > .ml-sub::before { content: "▾"; }
   .ml-sub .ml-count { margin-inline-start: auto; text-transform: none; letter-spacing: 0; font-weight: 400; }
   .ml-note { color: var(--dim); font-size: var(--fs-2xs); line-height: var(--lh-2xs); }
+  /* Road projects & closures (roadprojects.js, #185): the Today / This week / All filter, the key, the unplaced notices */
+  .rw-filter { margin-block: var(--s-1); }
+  .rw-legend { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1); }
+  .rw-key { display: inline-block; inline-size: var(--s-4); block-size: var(--s-1); border-radius: var(--radius-s); }
+  .rw-key-closed { background: var(--err); }
+  .rw-key-work { background: var(--warn); }
+  .rw-key-next { background: none; border-block-start: var(--bw-mark) dashed var(--info); }      /* upcoming: dashed, as on the map */
+  .rw-source a { color: var(--text-2); }
+  .rw-source.rw-err { color: var(--warn); }
+  .rw-notices .rw-notice { padding-block: var(--s-0); font-size: var(--fs-xs); line-height: var(--lh-xs); overflow-wrap: anywhere; }
+  .rw-notice a { color: var(--text); }
+  .rw-group .ml-fold { margin-block-start: var(--s-1); }
+  .rw-info { font-size: var(--fs-sm); line-height: var(--lh-sm); }
+  .rw-link a { color: var(--info); }
 
   .ml-cam-dialog { inline-size: min(48rem, 100%); }
   .ml-cam-title { overflow-wrap: anywhere; min-inline-size: 0; flex: 1 1 12rem; }
