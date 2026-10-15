@@ -86,7 +86,7 @@ class Config:
     stt_aws_idle_s: float = 120.0     # a channel's stream ends this long after its last transmission
     stt_aws_pace: float = 2.0         # audio sent this many times faster than real time
     stt_aws_limit_usd: float = 25.0   # the monthly limit until Settings > Radios sets one
-    stt_aws_channels: tuple[str, ...] = ("South 2", "FG1", "tg:307")   # engine "aws" by default
+    stt_aws_channels: tuple[str, ...] = ("South 2", "FG1", "FG2", "tg:307")   # engine "aws" by default
     stt_aws_vocabulary: str = "sizeup-pcfd"
     shared_device: str = ""      # one dongle for everything (bench): switch channel / P25 in the web app
     start_mode: str = ""         # with shared_device: what the dongle does at startup ("South 2", "FG1", "Fire/EMS 15")
@@ -97,7 +97,7 @@ class Config:
     # A dongle that appears with no job a person chose gets the first job in auto_assign_order that no
     # other dongle has (sizeup/app.py _auto_assign). load() defaults it on; built directly (tests), off.
     sdr_auto_assign: bool = False
-    sdr_auto_order: tuple[str, ...] = ("FG1", "Fire/EMS 15", "South 2")   # channel labels / "Fire/EMS 15" (P25)
+    sdr_auto_order: tuple[str, ...] = ("FG1", "Fire/EMS 15", "South 2", "FG2")   # channel labels / "Fire/EMS 15" (P25)
     p25_recorder: str = ""       # trunk-recorder command line, started/stopped by sizeup
     p25_recorder_dir: str = ""   # its working directory (config.json + talkgroups.csv)
     clips_dir: str = ""
@@ -407,7 +407,8 @@ def _alerts(data: dict, prealert: dict) -> dict:
 
 
 P25_JOB = "Fire/EMS 15"   # the dongle job that runs trunk-recorder (sizeup/app.py P25_MODE)
-AUTO_ORDER = ("FG1", P25_JOB, "South 2")
+# FG2 (#119) last: only a 4th free dongle takes it by itself; a job with no channel in the config is skipped.
+AUTO_ORDER = ("FG1", P25_JOB, "South 2", "FG2")
 
 
 def _job_key(name: str) -> str:
@@ -704,7 +705,7 @@ def _stt_aws(stt: dict) -> dict:
         raise ConfigError("stt.aws_idle_s, aws_pace, aws_monthly_limit_usd: numbers") from None
     if not 1 <= idle <= 3600 or not 0.5 <= pace <= 10 or not 0 <= limit <= 10000:
         raise ConfigError("stt.aws_idle_s: 1 to 3600; aws_pace: 0.5 to 10; aws_monthly_limit_usd: 0 to 10000")
-    chans = stt.get("aws_channels", ["South 2", "FG1", 307])
+    chans = stt.get("aws_channels", ["South 2", "FG1", "FG2", 307])
     if not isinstance(chans, list):
         raise ConfigError('stt.aws_channels: a list of channel labels and talkgroups, e.g. ["South 2", "FG1", 307]')
     names = tuple(f"tg:{c}" if isinstance(c, int) else str(c) for c in chans)

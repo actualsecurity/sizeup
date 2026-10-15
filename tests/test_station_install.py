@@ -50,7 +50,8 @@ def test_station_template_is_a_linux_station(tmp_path, monkeypatch):
     assert (c.cloud_role, c.cloud_hub_url) == ("station", "https://sizeup.actualsecurity.org")
     assert (c.host, c.port) == ("127.0.0.1", 8091)
     assert c.rtl_fm == "/opt/sizeup/rtl-sdr/bin/rtl_fm" and c.sdr_auto and c.start_mode == "South 2"
-    assert [(ch.label, ch.mhz, ch.kind) for ch in c.channels] == [("South 2", 470.2, "paging"), ("FG1", 453.0375, "traffic")]
+    assert [(ch.label, ch.mhz, ch.kind) for ch in c.channels] == [("South 2", 470.2, "paging"), ("FG1", 453.0375, "traffic"),
+                                                                 ("FG2", 458.0375, "traffic")]
     assert (c.stt_server, c.stt_model, c.stt_port) == ("/opt/sizeup/whisper/bin/whisper-server",
                                                        "/opt/sizeup/models/whisper.bin", 8179)
     assert c.p25_dir == "/var/lib/sizeup/captures/p25" and c.p25_recorder_dir == "/var/lib/sizeup/trunk-recorder"

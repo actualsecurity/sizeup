@@ -45,6 +45,7 @@ through a splitter/LNA feeds every fire dongle. RTL-SDR V4, one per band:
 | fire-page | 470.2 MHz | South 2 paging (+ 470.2125 if South 1 appears) |
 | fire-p25 | ~477.2 MHz, 2.4–2.56 MS/s | P25 South site: control channel + both voice channels (span 2.24 MHz, at the edge of one dongle; a second dongle is the fallback) |
 | fire-fg | ~453.46 MHz | Fireground 1 453.0375 + FG3 453.8875 (FG2/FG4 at 458 need another dongle) |
+| fire-fg2 | 458.0375 MHz | Fireground 2 (#119): received like FG1; a 4th dongle, or picked by hand on one of the three |
 
 Plus shortfinal's three if both run on one firehouse box (7 dongles: USB bandwidth ~5 MB/s
 each — a Pi 5's two USB3 controllers or a mini PC, not one USB2 hub).

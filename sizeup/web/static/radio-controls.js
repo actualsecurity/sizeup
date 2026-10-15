@@ -1,7 +1,7 @@
 // Settings > Radios, the station's receivers (moved here from the old monitor page, user 2026-10-08:
 // the console is where things are done, the monitor only shows): each receiver's state, the SDR
 // switch (one dongle hears one thing at a time), the incident the station opened from the last page
-// (closed by hand here), the Channels table (FG1, South 2, then every talkgroup): Record, Main (up
+// (closed by hand here), the Channels table (FG1, FG2, South 2, then every talkgroup): Record, Main (up
 // front in Radio, attached to that incident), Transcribe and the speech-to-text Engine (Local =
 // whisper on the station, AWS = Amazon Transcribe from the hub, Both = compare; sizeup/channels.py),
 // with whether the station applied them and what AWS cost this month; the AWS custom vocabulary;
@@ -86,7 +86,7 @@ window.RadioControls = (() => {
              + "pick what it listens to. Plug in another dongle to run two at once.", n.radios, n.sdr, n.storage)),
         tab("receivers", card("Paged incident", "The incident the station opened from the last page: Main traffic attaches to it until it "
              + "goes quiet. Close it when the call is over.", n.inc)),
-        tab("channels", card("Channels", "Record: keeps its transmissions (off for FG1 / South 2: the receiver keeps running, squelch, "
+        tab("channels", card("Channels", "Record: keeps its transmissions (off for FG1, FG2 or South 2: the receiver keeps running, squelch, "
              + "MDC IDs and Talking now stay live, nothing is kept).\nMain: up front in Radio and on our incident; "
              + "the rest are folded under Other talkgroups.\nTranscribe: speech-to-text at all.\nEngine:\n" + ENGINE_HELP,
              n.sync, n.cost, tools, n.tgErr, n.groups)),
