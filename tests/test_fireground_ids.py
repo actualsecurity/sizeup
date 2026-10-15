@@ -168,6 +168,17 @@ def test_who_may_answer(tmp_path):
     assert '<script src="/static/radio-ids.js"></script>' in html and 'id="q-newids"' in html
 
 
+def test_the_question_sits_with_the_units_and_the_radio():
+    # #177: in the right column, under the radio (the 60 Control feed) and above the units; not in the incident queue
+    html = (STATIC / "cad.html").read_text()
+    queue = html[html.index('<aside class="queue">'):html.index("</aside>")]
+    side = html[html.index('<aside class="units">'):]
+    side = side[:side.index("</aside>")]
+    assert 'id="newids"' not in queue and "q-newids" not in queue
+    assert side.index('id="feed"') < side.index('id="newids"') < side.index('id="q-newids"') < side.index('id="units"')
+    assert '<section id="newids" class="nid-sec console-only" hidden>' in side      # hidden until there is a question
+
+
 def test_the_question_does_not_churn_the_push(tmp_path):
     # #146: only changed sections go out. The questions change when something is heard or answered, not by the second.
     clock = Clock()
