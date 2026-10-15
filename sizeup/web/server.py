@@ -38,6 +38,9 @@ GET  /api/cad/aircraft         aircraft near HPN, shortfinal's PCFD-focused pict
                                the page only while the layer is on; ETag (304), never in the state push
 GET  /api/cad/health           the hub only: Settings > System > Station health (sizeup/cloud/health.py, #79):
                                the station's health, its alerts and 24 h of their history; anyone signed in
+GET  /api/cad/datasources, POST /api/cad/datasources/<key>/refresh
+                               Settings > Data sources (sizeup/datasources.py, #186): every data pull, Refresh now
+                               (sizeup/cad/api.py); polled by the panel while open, never in the state push
 
 [cloud] role = "station" (the PC with the dongles; user, 2026-10-13: "the local system doesnt show the cad
 bits just things relevant to the sdr station"): the station page instead of the CAD (static/station.html):
@@ -334,7 +337,8 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
             if access_log is None:
                 return
             path, code = urlsplit(self.path).path, int(code) if str(code).isdigit() else 0
-            if path == "/healthz" or (code < 400 and (path in ("/api/state", "/api/cad/state", "/api/cad/whoami", "/api/cad/health")
+            if path == "/healthz" or (code < 400 and (path in ("/api/state", "/api/cad/state", "/api/cad/whoami", "/api/cad/health",
+                                                                   "/api/cad/datasources")
                                                       or path.startswith("/api/station/"))):
                 return
             h = self.headers

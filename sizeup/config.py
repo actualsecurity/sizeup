@@ -68,6 +68,7 @@ class Config:
     stt_prompt: str
     p25_dir: str
     p25_talkgroups: dict[int, str] = field(default_factory=dict)
+    tones_file: str = ""                       # the tone list file read into tones ([radio] tones_file), "" for none
     p25_incident_talkgroups: frozenset[int] = frozenset({307, 333})
     p25_tg_info: dict[int, dict] = field(default_factory=dict)   # tg -> {name, group, encrypted}  # attach to our incident (others: context)
     p25_aliases: dict[str, str] = field(default_factory=dict)
@@ -229,6 +230,19 @@ class Config:
     aircraft_receiver_1090: str = ""
     aircraft_receiver_978: str = ""
     aircraft_sdr: str = ""
+
+
+def read_tones_file(path: str | Path) -> list[ToneCode]:
+    """The tone list file (data/westchester_tones.csv: name, a_hz, b_hz, estimated, source, fetched; # comments):
+    read at start, and again by Settings > Data sources' Reload (sizeup/datasources.py, #186)."""
+    import csv
+    rows = (ln for ln in Path(path).read_text().splitlines() if ln.strip() and not ln.startswith("#"))
+    out = []
+    for r in csv.DictReader(rows):
+        tag = {"1": " (est.)", "2": " (heard)"}.get(r.get("estimated", "0"), "")
+        out.append(ToneCode(r["name"] + tag, float(r["a_hz"]), float(r["b_hz"]) if r.get("b_hz") else None,
+                            source=(r.get("source") or "list").strip(), fetched=(r.get("fetched") or "").strip()))
+    return out
 
 
 def _take(d: dict, path: str, allowed: set[str]) -> dict:
@@ -771,20 +785,15 @@ def load(path: str | Path) -> Config:
                                    float(drop) if drop else None,
                                    float(hang) if hang is not None else None,
                                    float(cont) if cont is not None else None))
-    tones, ours = [], set()
+    tones, ours, tones_file = [], set(), ""
     tf = radio.get("tones_file", "data/westchester_tones.csv")
     if tf:
         tf_path = Path(tf) if Path(tf).is_absolute() else (base / tf)
         if not tf_path.is_file():
             tf_path = Path(__file__).resolve().parent.parent / tf   # repo data/ when run from elsewhere
         if tf_path.is_file():
-            import csv
-            rows = (ln for ln in tf_path.read_text().splitlines() if ln.strip() and not ln.startswith("#"))
-            for r in csv.DictReader(rows):
-                tag = {"1": " (est.)", "2": " (heard)"}.get(r.get("estimated", "0"), "")
-                tones.append(ToneCode(r["name"] + tag,
-                                      float(r["a_hz"]), float(r["b_hz"]) if r.get("b_hz") else None,
-                                      source=(r.get("source") or "list").strip(), fetched=(r.get("fetched") or "").strip()))
+            tones.extend(read_tones_file(tf_path))
+            tones_file = str(tf_path)
         elif "tones_file" in radio:
             raise ConfigError(f"radio.tones_file: {tf} not found")
     for i, t in enumerate(data.get("tones", [])):
@@ -899,7 +908,7 @@ def load(path: str | Path) -> Config:
         station_id=st.get("id", "pcfd"), station_name=st.get("name", "Port Chester FD"),
         station_auto_update=st.get("auto_update", True),
         host=web.get("host", "127.0.0.1"), port=int(web.get("port", 8090)),
-        rtl_fm=radio.get("rtl_fm", "rtl_fm"), channels=tuple(channels), tones=tuple(tones),
+        rtl_fm=radio.get("rtl_fm", "rtl_fm"), channels=tuple(channels), tones=tuple(tones), tones_file=tones_file,
         ours=frozenset(ours | {"Port Chester FD", "Rye Brook FD"}),
         stt_server=stt.get("server_binary", "whisper-server"), stt_model=rel(stt.get("model", "models/ggml-large-v3-turbo.bin")),
         stt_port=int(stt.get("port", 8179)), stt_threads=int(stt.get("threads", 8)), stt_prompt=stt.get("prompt", ""),

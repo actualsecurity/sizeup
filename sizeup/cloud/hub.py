@@ -887,6 +887,7 @@ class HubApp(App):
         self.trains.start()                       # Metro-North's trains (sizeup/trains.py)
         self.aircraft.start()                     # aircraft near HPN, while someone looks (sizeup/aircraft.py)
         self.weather.start()                      # NWS alerts, conditions, radar; NOAA tides (sizeup/weather.py)
+        self.datasources.start()                  # the slow pulls' schedule, Settings > Data sources (sizeup/datasources.py)
         if self.vocab is not None and self.vocab.state()["state"] == "PENDING":
             self.vocab.poll()
         try:
@@ -904,6 +905,7 @@ class HubApp(App):
         self.trains.stop()
         self.aircraft.stop()
         self.weather.stop()
+        self.datasources.stop()
         if self.aws is not None:
             self.aws.stop()
         try:
