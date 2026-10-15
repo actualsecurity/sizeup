@@ -18,6 +18,17 @@
 //                page is visible (the hub reads the MTA only while someone asks, as often); a poll names the
 //                line it already has (?have=static_at), so the answer is only the trains (a few KB). A failed
 //                poll waits longer each time (10 s doubling to a minute) and says so in the console.
+//   Motion       between the MTA's reports a train glides on along its own track (motion.js Motion.railTracker,
+//                the aircraft's tracker with the trains' predictor): in s, its distance along the line, on the
+//                hub's run profile (profile_s, ported 1:1), never past hold_s (its next known reporting point),
+//                never past its next stop, never backwards, never after predict_until; then it is held. A train
+//                stopped at a station stays there until the hub says it left. A new report is caught up along
+//                the track (never across it); one behind what is drawn holds the train until the prediction
+//                meets it; a big jump, the other way or another train number is drawn at once. A feed older
+//                than the hub's stale_s (or one the hub calls stale): frozen and drawn faded. Redrawn about 10
+//                times a second (ANIMATE_MS) only while one moves, a map has the layer on and the page is
+//                visible: one setData for the cars and one for the labels a frame, none when nothing changed.
+//                The click box says "predicted" while the train is drawn ahead of the MTA's report.
 //   Panel        TrainLayer.panel(inc, host) (cadmap.js, under the event's map): for an event within 150 m of
 //                the tracks or a station, the next trains each way in the next 15 minutes at the nearest
 //                station (or the event's point on the tracks): minutes away, stops or passes, delay, track;
@@ -32,6 +43,9 @@ window.TrainLayer = (() => {
   const URL = "/api/cad/trains", NEAR = "/api/cad/trains/near";
   const KEY = "trains";
   const POLL_MS = 5000, PANEL_MS = 30000;
+  const ANIMATE_MS = 100;                    // ~10 redraws a second while a train moves (motion.js)
+  const PREDICTED_M = 5;                     // drawn this far ahead of the MTA's report: "predicted"
+  const STALE_OPACITY = 0.45;                // a train frozen on an old feed: faded
   const BACKOFF_MS = [10000, 60000];         // a failed poll: 10 s doubling to a minute
   const SRC_LINE = "tr-line", SRC_ST = "tr-stations", SRC_TR = "tr-trains", SRC_CARS = "tr-cars";
   const CAR_IDS = ["tr-car-case", "tr-cab-case", "tr-car", "tr-cab", "tr-gap"];
@@ -84,11 +98,12 @@ window.TrainLayer = (() => {
         store.data = d;
         store.at = Date.now();
         store.fails = 0;
+        moved(d, store.at);
       } catch (e) {                            // the hub is away: keep what we have, ask less often
         store.fails += 1;
         console.warn(`trains: ${e.message || e}; next poll in ${Math.round(nextPoll() / 1000)} s`);
       }
-      finally { store.loading = null; notify(); }
+      finally { store.loading = null; notify(); animate(); }
     })();
     return store.loading;
   }
@@ -96,6 +111,7 @@ window.TrainLayer = (() => {
   function kick() {                         // a map turned it on (or the page came back): fetch now, then every 5 s
     clearTimeout(store.timer);
     store.timer = null;
+    animate();
     if (!anyOn() || document.visibilityState === "hidden") return;
     if (Date.now() - store.at > POLL_MS / 2) load();
     store.timer = setTimeout(function tick() {
@@ -104,7 +120,62 @@ window.TrainLayer = (() => {
       load().then(() => { if (!store.timer && anyOn()) store.timer = setTimeout(tick, nextPoll()); });
     }, nextPoll());
   }
-  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") kick(); });
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") kick(); else animate(); });
+
+  // ---- the motion: one tracker for every map (motion.js Motion.railTracker), fed each answer's trains ---------------
+  // The hub's times are its clock's: the feed's time t0 on this browser's clock is t0 + skew, skew the smallest
+  // (least delayed) of the last few answers' Date.now() - (at + age), so a browser clock that is off moves nothing.
+  const motion = window.Motion && Motion.railTracker ? Motion.railTracker() : null;
+  const skews = [];
+  function fixOf(t, d, at) {
+    if (typeof t.s !== "number" || !(t.d === 1 || t.d === -1)) return null;
+    const prof = d.profile || {};
+    return { s: t.s, d: t.d, train: t.train, mode: t.mode || (t.estimated ? "estimated" : "reported"), t0: d.at, at,
+             fixAt: t.fix_at != null ? t.fix_at : null, hold: t.hold_s, stop: t.next && typeof t.next.s === "number" ? t.next.s : null,
+             until: typeof t.predict_until === "number" ? t.predict_until : d.at + (prof.predict_s || 120),
+             seg: t.segment ? { accel: prof.accel, decel: prof.decel, vmax: prof.vmax, ...t.segment } : null, lag: t.lag_s };
+  }
+  function moved(d, got) {
+    if (!d) return;
+    if (motion) motion.staleS = (d.profile && d.profile.stale_s) || 60;
+    let at = -Infinity;                         // no feed time, or the hub says the feed is stale: frozen
+    if (!d.stale && typeof d.at === "number" && typeof d.age === "number") {
+      skews.push(got - (d.at + d.age) * 1000);
+      if (skews.length > 12) skews.shift();
+      at = d.at * 1000 + Math.min(...skews);
+    }
+    store.feedAt = at;
+    if (!motion) return;
+    const keep = new Set();
+    for (const t of d.trains || []) {
+      const f = fixOf(t, d, at);
+      if (!f) continue;
+      keep.add(t.id);
+      motion.set(t.id, f, got);
+    }
+    motion.forget(keep);
+    frame.at = -1;
+  }
+  // where each train is drawn now: one where() a train a frame, whichever maps draw it
+  const frame = { at: -1, pos: new Map() };
+  function positions(now) {
+    if (frame.at === now) return frame.pos;
+    frame.at = now;
+    frame.pos = new Map();
+    const d = store.data;
+    if (motion && d) for (const t of d.trains || []) { const p = motion.where(t.id, now); if (p) frame.pos.set(t.id, p); }
+    return frame.pos;
+  }
+  let animTimer = null;
+  function animate() {                         // redraw ~10 a second only while a train moves on a visible map
+    const want = !!motion && anyOn() && document.visibilityState !== "hidden" && motion.busy();
+    if (want && !animTimer) {
+      animTimer = setInterval(() => { const now = Date.now(); for (const m of maps) m.draw(false, now); animate(); }, ANIMATE_MS);
+    } else if (!want && animTimer) {
+      clearInterval(animTimer);
+      animTimer = null;
+    }
+  }
 
   // ---- the marks: a train, pointing up (icon-rotate turns it to its heading), filled (reported) or hollow ----------
   // (estimated). Cars, the first with the cab's windscreen: the MTA's count when it gives one, otherwise the look of
@@ -227,7 +298,7 @@ window.TrainLayer = (() => {
     if (!best || best.d > NEAR_M) return null;
     const segB = Math.atan2(best.dx, best.dy), b = (Number(t.bearing) || 0) * RAD;
     const back = Math.cos(segB - b) >= 0 ? -1 : 1;           // going up the line: its cars lie down the line
-    return { tr: lt, s: best.s, back };
+    return { tr: lt, s: best.s + (t.ds || 0), back };         // (ds: carried on along the line since the hub's s)
   }
   // {cars: [features], mid: [lon, lat]} for a train on a track, or null
   function onTrack(t, line, lanes) {
@@ -235,7 +306,7 @@ window.TrainLayer = (() => {
     if (!f) return null;
     const { tr, s, back } = f, n = carsOf(t), len = n * M_PER_CAR;
     const part = (a, b, kind) => ({ type: "Feature", geometry: { type: "LineString", coordinates: piece(tr, Math.min(a, b), Math.max(a, b)) },
-                                    properties: { id: t.id, estimated: !!t.estimated, kind } });
+                                    properties: { id: t.id, estimated: !!t.estimated, stale: !!t.stale, kind } });
     const cars = [part(s, s + back * len, "body"), part(s, s + back * M_PER_CAR, "cab")];
     for (let k = 1; k < n; k++) cars.push(part(s + back * (k * M_PER_CAR - GAP_M / 2), s + back * (k * M_PER_CAR + GAP_M / 2), "gap"));
     return { cars, mid: toLonLat(tr, along(tr, s + (back * len) / 2)[1]) };
@@ -287,26 +358,27 @@ window.TrainLayer = (() => {
       // estimate; the front car's nose rounded (the cab); the cars' ends as thin gaps across it from GAP_ZOOM. Every
       // outline under every body, so the cab's outline never shows on the car behind it.
       const dark = token("--bg", HALO);
+      const fade = ["case", ["get", "stale"], STALE_OPACITY, 1];        // frozen on an old feed: faded
       const carW = ["interpolate", ["linear"], ["zoom"], 10, 4, 15, 6, 17, 9, 19, 28];
       const caseW = ["interpolate", ["linear"], ["zoom"], 10, 7, 15, 9, 17, 12, 19, 32];
       const part = (kind) => ["==", ["get", "kind"], kind];
       const lay = (cap) => ({ ...vis, "line-cap": cap, "line-join": "round" });
       map.addLayer({ id: "tr-car-case", type: "line", source: SRC_CARS, filter: part("body"), layout: lay("butt"),
-                     paint: { "line-color": ["case", ["get", "estimated"], warn, HALO], "line-width": caseW } }, before);
+                     paint: { "line-color": ["case", ["get", "estimated"], warn, HALO], "line-width": caseW, "line-opacity": fade } }, before);
       map.addLayer({ id: "tr-cab-case", type: "line", source: SRC_CARS, filter: part("cab"), layout: lay("round"),
-                     paint: { "line-color": ["case", ["get", "estimated"], warn, HALO], "line-width": caseW } }, before);
+                     paint: { "line-color": ["case", ["get", "estimated"], warn, HALO], "line-width": caseW, "line-opacity": fade } }, before);
       map.addLayer({ id: "tr-car", type: "line", source: SRC_CARS, filter: part("body"), layout: lay("butt"),
-                     paint: { "line-color": ["case", ["get", "estimated"], dark, warn], "line-width": carW } }, before);
+                     paint: { "line-color": ["case", ["get", "estimated"], dark, warn], "line-width": carW, "line-opacity": fade } }, before);
       map.addLayer({ id: "tr-cab", type: "line", source: SRC_CARS, filter: part("cab"), layout: lay("round"),
-                     paint: { "line-color": ["case", ["get", "estimated"], dark, warn], "line-width": carW } }, before);
+                     paint: { "line-color": ["case", ["get", "estimated"], dark, warn], "line-width": carW, "line-opacity": fade } }, before);
       map.addLayer({ id: "tr-gap", type: "line", source: SRC_CARS, filter: part("gap"), minzoom: GAP_ZOOM, layout: lay("butt"),
-                     paint: { "line-color": ["case", ["get", "estimated"], warn, HALO], "line-width": carW } }, before);
+                     paint: { "line-color": ["case", ["get", "estimated"], warn, HALO], "line-width": carW, "line-opacity": fade } }, before);
       // a train off the line: an icon lying flat along its heading, to scale once zoomed in (ICON_SIZE)
       map.addLayer({ id: "tr-train", type: "symbol", source: SRC_TR, filter: ["!", ["get", "onTrack"]],
                      layout: { ...vis, "icon-image": ["get", "icon"], "icon-rotate": ["get", "bearing"],
                                "icon-rotation-alignment": "map", "icon-pitch-alignment": "map",
                                "icon-allow-overlap": true, "icon-ignore-placement": true,
-                               "icon-size": ICON_SIZE } }, before);
+                               "icon-size": ICON_SIZE }, paint: { "icon-opacity": fade } }, before);
       // its number from zoom 11; where it is headed under it from 13 (the whole stretch would be a crowd of words)
       const num = ["format", ["get", "train"], {}];
       const both = ["format", ["get", "train"], {}, "\n", {}, ["get", "towards"], { "font-scale": 0.85 }];
@@ -316,7 +388,7 @@ window.TrainLayer = (() => {
                                                   "text-offset": ["interpolate", ["exponential", 2], ["zoom"],
                                                                   SCALE_FROM, ["array", "number", 2, ["get", "off_lo"]],
                                                                   SCALE_TO, ["array", "number", 2, ["get", "off_hi"]]] }) },
-                     paint: { "text-color": ["case", ["get", "estimated"], text, warn], "text-halo-color": HALO, "text-halo-width": 1.6 } }, before);
+                     paint: { "text-color": ["case", ["get", "estimated"], text, warn], "text-halo-color": HALO, "text-halo-width": 1.6, "text-opacity": fade } }, before);
       for (const id of CLICKABLE) {
         map.on("mouseenter", id, () => { map.getCanvas().style.cursor = "pointer"; });
         map.on("mouseleave", id, () => { map.getCanvas().style.cursor = ""; });
@@ -341,25 +413,63 @@ window.TrainLayer = (() => {
           this.map.getSource(SRC_LINE).setData(fc(drawn));
           this.map.getSource(SRC_ST).setData(fc((d.stations || []).map((s) => pt(s.lon, s.lat, { id: s.id, name: s.name }))));
         }
-        const sig = JSON.stringify(d.trains || []);
-        if (sig !== this.sig) {
-          this.sig = sig;
-          const cars = [];
-          this.map.getSource(SRC_TR).setData(fc((d.trains || []).map((t) => {
-            const on = onTrack(t, this.line, this.lanes);
-            if (on) cars.push(...on.cars);
-            const half = on ? (z) => trackHalf(t, z) : (z) => iconHalf(t, z === SCALE_TO ? sizeAt(SCALE_TO) : MIN_SIZE);
-            const [anchor, off_lo] = labelPlace(t.bearing, ...half(SCALE_FROM)), off_hi = labelPlace(t.bearing, ...half(SCALE_TO))[1];
-            const [lon, lat] = on ? on.mid : [t.lon, t.lat];
-            return pt(lon, lat, { id: t.id, train: t.train, towards: towards(t), bearing: t.bearing || 0, estimated: !!t.estimated,
-                                  onTrack: !!on, icon: on ? "" : ensureIcon(this.map, t), anchor, off_lo, off_hi });
-          })));
-          this.map.getSource(SRC_CARS).setData(fc(cars));
-        }
+        if (d.trains !== this.trains) { this.trains = d.trains; this.sig = ""; }   // a new answer: draw it
+        this.draw(true, Date.now());
       }
       this.panelChanged();
     }
+    // The trains where motion.js has them now (each answer, then every ANIMATE_MS while one moves): each train's
+    // cars rebuilt along its track at the drawn s; its label and click target with it. One setData for the cars and
+    // one for the labels, and none when nothing drawn has changed.
+    draw(force, now = Date.now()) {
+      const d = store.data;
+      if (!d || !this.added || !this.isOn()) return;
+      if (!force && !this.map.getContainer().offsetParent) return;          // a map not on screen (the Expand closed)
+      const pos = positions(now), drawn = new Map(), key = [];
+      const old = !!d.stale || (typeof store.feedAt === "number"                            // the feed's age
+                                && !((now - store.feedAt) / 1000 <= ((d.profile && d.profile.stale_s) || 60)));
+      for (const t of d.trains || []) {
+        const p = pos.get(t.id), stale = motion && pos.has(t.id) ? motion.stale(t.id) : old;
+        const s = p ? Math.round(p.s * 10) / 10 : t.s;
+        // ahead of the MTA's report while on its way (a stopped train held at its station's mark isn't a prediction)
+        drawn.set(t.id, { s, stale, ahead: !t.estimated && t.mode !== "stopped" && typeof t.s === "number" && (s - t.s) * t.d > PREDICTED_M });
+        key.push(`${t.id}:${s}:${stale ? 1 : 0}`);
+      }
+      const sig = key.join("|");
+      this.drawn = drawn;
+      if (sig === this.sig) return;                                          // nothing moved: no setData
+      this.sig = sig;
+      const cars = [];
+      this.map.getSource(SRC_TR).setData(fc((d.trains || []).map((x) => {
+        const w = drawn.get(x.id), t = { ...x, s: w.s, ds: typeof x.s === "number" ? w.s - x.s : 0, stale: w.stale };
+        const on = onTrack(t, this.line, this.lanes);
+        if (on) cars.push(...on.cars);
+        const half = on ? (z) => trackHalf(t, z) : (z) => iconHalf(t, z === SCALE_TO ? sizeAt(SCALE_TO) : MIN_SIZE);
+        const [anchor, off_lo] = labelPlace(t.bearing, ...half(SCALE_FROM)), off_hi = labelPlace(t.bearing, ...half(SCALE_TO))[1];
+        const [lon, lat] = on ? on.mid : [t.lon, t.lat];
+        return pt(lon, lat, { id: t.id, train: t.train, towards: towards(t), bearing: t.bearing || 0, estimated: !!t.estimated,
+                              stale: w.stale, onTrack: !!on, icon: on ? "" : ensureIcon(this.map, t), anchor, off_lo, off_hi });
+      })));
+      this.map.getSource(SRC_CARS).setData(fc(cars));
+    }
     panelChanged() { if (!this.control.panel.hidden) this.control.renderPanel(); }
+    // what the click box says of where the train is drawn: reported (the MTA's time for it), predicted (carried on
+    // past that report, and how far it may go), estimated, or frozen on an old feed. No distances: nothing finer
+    // than the data has.
+    where(t, d) {
+      const w = (this.drawn && this.drawn.get(t.id)) || {};
+      const upTo = t.hold_kind === "stop" && t.next && t.next.name ? `not past ${t.next.name}` : "not past its next reporting point";
+      const when = t.fix_at ? `${t.fix_age_unknown ? "by" : "at"} ${hm(t.fix_at, true)}` : "";
+      let say;
+      if (!t.estimated) {
+        say = w.ahead ? `Position predicted: on its run since the MTA reported it ${when}, ${upTo}`
+          : `Position reported by the MTA ${when}${t.mode === "stopped" ? " (stopped)" : ""}`;
+      } else {
+        say = t.mode === "stopped" ? "Position estimated (at the station: the MTA hasn't said it left)"
+          : "Position estimated (on its run between its stations, by the MTA's times)";
+      }
+      return w.stale ? `${say}. Feed out of date${d.at ? ` (${hm(d.at, true)})` : ""}: held where it was, not moved on` : say;
+    }
 
     clicked(e) {
       if (!this.isOn() || !this.added || !store.data) return;
@@ -385,9 +495,7 @@ window.TrainLayer = (() => {
         const said = (t.status || "").toLowerCase();         // the MTA's word, unless the delay already says it
         const status = [late(t.delay_s), said && said !== "on-time" && !(said === "late" && t.delay_s > 0) ? t.status : ""].filter(Boolean).join(" · ");
         if (status) lines.push(status);
-        lines.push(!t.estimated ? "Position reported by the MTA"
-          : t.mode === "stopped" ? "Position estimated (at the station: the MTA hasn't said it left)"
-            : "Position estimated (on its run between its stations, by the MTA's times)");
+        lines.push(this.where(t, d));
         lines.push(t.cars ? `${t.cars} car${t.cars === 1 ? "" : "s"} (from the MTA)` : `Length not given by the MTA (drawn as ${LOOK_CARS} cars for every train)`);
         lines.push(d.catenary);
         this.control.showInfo(`Train ${t.train}`, `${t.line ? `${t.line} Line` : "Metro-North"} to ${t.headsign}`, lines, foot, "", icon);
@@ -428,7 +536,7 @@ window.TrainLayer = (() => {
       const n = (d.trains || []).length;
       const note = h("div", "ml-note");
       const span = (d.stations || []).length > 1 ? ` (${d.stations[0].name} to ${d.stations[d.stations.length - 1].name})` : "";
-      note.append(`${n ? `${n} train${n === 1 ? "" : "s"} on the line${span}` : `No train on the line${span} now`}. Hollow: position estimated. `
+      note.append(`${n ? `${n} train${n === 1 ? "" : "s"} on the line${span}` : `No train on the line${span} now`}. Hollow: position estimated. Between reports a train runs on along its track, never past its next reporting point or stop; faded: the feed is out of date and it is held where it was. `
                   + ((d.trains || []).some((t) => t.cars) ? "Each drawn the way it is going, its cars as the MTA gives them. "
                      : `Each drawn the way it is going, as ${LOOK_CARS} cars for all (the MTA doesn't say how many cars). `)
                   + `Data: ${d.label || "MTA"}${d.at ? `, feed ${hm(d.at, true)}` : ""}. ${d.disclaimer || ""}. `);
