@@ -1283,7 +1283,19 @@ class Cad:
         ref = f"monitor:{inc.id}"
         geo = inc.geo or {}
         heard = (inc.location or "").title()
-        address = geo.get("label") if geo.get("kind") in ("address", "intersection", "landmark") else heard
+        # A location the page's own words don't confirm (#176: no cross street fits, another town, two readings, a
+        # sound-alike) is never placed: the card says "location unconfirmed" and offers the readings to pick.
+        sure = bool(geo.get("label")) and geo.get("confirmed", True) is not False
+        if sure:
+            placed = ("address", "intersection", "landmark") + (("street",) if geo.get("confirmed") else ())   # a block
+            address = geo.get("label") if geo.get("kind") in placed else heard
+        else:
+            address = heard or geo.get("label") or ""
+        alts = [] if sure else [{k: a.get(k) for k in ("label", "lat", "lon", "town", "confidence", "why")}
+                                for a in (geo.get("alts") or []) if a.get("label") and a.get("lat") is not None][:4]
+        cross = (inc.cross_street or "").title()
+        if sure and geo.get("checked") == "all" and len(geo.get("crosses") or []) >= 2:
+            cross = " and ".join(geo["crosses"][:2])          # as the map names them: "Clinton St and W William St"
         lines = []
         for pid_text, start in zip(inc.page_text, inc.page_starts or [inc.opened] * len(inc.page_text)):
             lines.append(f"60 Control page {datetime.fromtimestamp(start, TZ):%H:%M}: {pid_text}")
@@ -1293,8 +1305,16 @@ class Cad:
         if inc.units:
             facts.append(f"units named on the page: {', '.join(inc.units)}")
         if heard:
-            facts.append(f"location as heard: {heard}" + (f" (map: {geo['label']}, {geo.get('confidence', 0):.2f})"
-                                                         if geo.get("label") else " (not found on the map)"))
+            if sure:
+                checked = {"all": "cross streets " + " and ".join(geo.get("crosses") or []),
+                           "partial": f"only {', '.join(geo.get('crosses') or [])} of the cross streets"}.get(geo.get("checked"), "")
+                where = f" (map: {geo['label']}, {geo.get('confidence', 0):.2f}" + (f", {checked}" if checked else "") + ")"
+            elif geo.get("label"):
+                where = (f" (location unconfirmed: {geo.get('why') or 'not sure'}; best reading {geo['label']}, "
+                         f"{geo.get('confidence', 0):.2f}: pick on the card)")
+            else:
+                where = " (not found on the map)"
+            facts.append(f"location as heard: {heard}{where}")
         if inc.time_out:
             facts.append(f"county time out {inc.time_out}")
         remarks = "\n".join(lines + ["; ".join(facts)])[:4000]
@@ -1308,8 +1328,9 @@ class Cad:
             except ValueError:                         # a data file without that code: leave it to the operator
                 typ, sub, note = "", "", note or f"type heard: {inc.incident_type}"
         f = {"type": typ, "subtype": sub, "type_note": note,
-             "address": (address or "")[:200], "cross_street": (inc.cross_street or "").title()[:200],
-             "remarks": remarks, "lat": geo.get("lat"), "lon": geo.get("lon"), "geo_label": (geo.get("label") or "")[:200]}
+             "address": (address or "")[:200], "cross_street": cross[:200], "remarks": remarks,
+             "lat": geo.get("lat") if sure else None, "lon": geo.get("lon") if sure else None,
+             "geo_label": (geo.get("label") or "")[:200] if sure else "", "geo_alts": json.dumps(alts) if alts else ""}
         if typ == airport.TYPE:                        # the tower's facts as the page says them (#105)
             f.update(airport.fields(" ".join(inc.page_text)))
         old = self.store.by_source_ref(ref)
@@ -1327,7 +1348,12 @@ class Cad:
         if old["status"] != "queued":
             return old
         fill = {k: v for k, v in f.items() if k == "remarks" or
-                (k not in ("type", "subtype", "type_note") and v not in (None, "") and old[k] in (None, ""))}
+                (k not in ("type", "subtype", "type_note", "geo_alts") and v not in (None, "") and old[k] in (None, ""))}
+        if old["geo_alts"] and sure:                   # the repeat confirmed what the first reading couldn't (#176)
+            fill.update(address=f["address"], cross_street=f["cross_street"], lat=f["lat"], lon=f["lon"],
+                        geo_label=f["geo_label"], geo_alts="")
+        elif old["geo_alts"] and alts:                 # still unconfirmed: the readings as they stand now
+            fill["geo_alts"] = f["geo_alts"]
         if not old["type"] and typ:                    # the repeat said what it is
             fill.update(type=typ, subtype=sub, type_note=note)
         return self.store.update_incident(old["id"], fill, log=False)

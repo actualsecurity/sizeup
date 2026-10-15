@@ -384,7 +384,8 @@ def test_config_auto_assign_defaults_on_and_reads_the_order(tmp_path):
     p = tmp_path / "c.toml"
     p.write_text(base)
     c = load(p)
-    assert c.sdr_auto_assign is True and c.sdr_auto_order == ("FG1", P25, "South 2")
+    # the default order ends with FG2 (#119): skipped here, where there's no FG2 channel to run
+    assert c.sdr_auto_assign is True and c.sdr_auto_order == ("FG1", P25, "South 2", "FG2")
     p.write_text(base.replace('sdrs = "auto"\n', 'sdrs = "auto"\nauto_assign = false\n'
                               'auto_assign_order = ["south2", "p25", "fg1", "FG1"]\n'))
     c = load(p)
@@ -398,7 +399,7 @@ def test_config_auto_assign_defaults_on_and_reads_the_order(tmp_path):
 def test_station_config_turns_it_on(tmp_path, monkeypatch):
     from tests.test_station_install import station_config
     c = station_config(tmp_path, monkeypatch)
-    assert c.sdr_auto and c.sdr_auto_assign and c.sdr_auto_order == ("FG1", P25, "South 2")
+    assert c.sdr_auto and c.sdr_auto_assign and c.sdr_auto_order == ("FG1", P25, "South 2", "FG2")
 
 
 def test_the_hub_shows_who_set_each_dongle(tmp_path):

@@ -478,8 +478,8 @@ class Line:
 
 
 # ---- the run between two stops: away slowly, up to speed, braking into the next ---------------------------------
-# One pure function (and its inverse) the page ports line for line (trains.js), so where the hub estimates a
-# train and where the page carries it on between reports agree.
+# One pure function (and its inverse) the page ports line for line (motion.js Motion.profileS / profileT), so where the
+# hub estimates a train and where the page carries it on between reports agree (tests/test_train_motion.py).
 
 
 def _shape(seg: dict) -> tuple[float, int, float, float, float, float, float, float]:

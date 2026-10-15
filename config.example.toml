@@ -25,10 +25,11 @@ start_mode = "South 2"            # first listed SDR at a fresh start; after tha
 # (shortfinal, ~/.local/state/rtl-claims), never over a person's choice (Off included), and running
 # dongles are never moved. Shown as "FG1 · auto" in the web app. deploy/station/README.md has the rules.
 # Jobs: channel labels (any case/spacing: "fg1", "south2") or "p25" (Fire/EMS 15, trunk-recorder:
-# one dongle covers the county system's control and voice channels). false = new dongles start Off
-# and sizeup never opens one until you pick a mode for it.
+# one dongle covers the county system's control and voice channels). FG2 comes last: only a 4th free
+# dongle takes it by itself, else pick it by hand. false = new dongles start Off and sizeup never
+# opens one until you pick a mode for it.
 auto_assign = true
-auto_assign_order = ["fg1", "p25", "south2"]
+auto_assign_order = ["fg1", "p25", "south2", "fg2"]
 
 # One rtl_fm per channel, one dongle each (serials set with `rtl_eeprom -s <serial>`).
 [[radio.channels]]
@@ -53,6 +54,13 @@ drop_db = 10                       # end a transmission when quieting falls this
                                    # level (another, weaker carrier on the channel); 0 = off.
                                    # Default 10 for traffic channels, off for paging.
 
+[[radio.channels]]
+label = "FG2"                      # county Fireground 2, PCFD / Rye Brook secondary (county list 2024-11-06,
+mhz = 458.0375                     # docs/PLAN.md; GitHub #119): set up like FG1 (MDC / FleetSync IDs,
+kind = "traffic"                   # mayday and emergency alarms, attach by radio ID)
+device = "fire-fg2"
+gain_db = 40
+
 # Two-tone codes. UNVERIFIED until heard on the air: every decoded pair is shown with its page
 # so the real codes can be confirmed and named here. `ours = true` = opens incidents.
 [[tones]]
@@ -75,7 +83,7 @@ talker_prompt = "off"              # "ids": hint each call with who keyed up ("7
 # All-in-one with AWS credentials in the environment could set aws = true too.
 # aws = false
 # aws_region = ""                  # "" = AWS_REGION / AWS_DEFAULT_REGION, else us-east-1
-# aws_channels = ["South 2", "FG1", 307]   # engine "aws" by default; Settings > Radios changes any channel
+# aws_channels = ["South 2", "FG1", "FG2", 307]   # engine "aws" by default; Settings > Radios changes any channel
 # aws_monthly_limit_usd = 25       # until Settings > Radios sets one; reached: AWS channels use whisper
 # aws_idle_s = 120                 # a channel's stream ends this long after its last transmission
 # aws_pace = 2.0                   # audio sent this many times faster than real time

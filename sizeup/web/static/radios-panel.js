@@ -1,14 +1,15 @@
 // The Radios editor: radio ID -> rig (sizeup/cad/radios.py), as a self-contained panel.
 //   RadiosPanel.mount(box, { operator: () => "name" })   draws into box (any page: the CAD's
 //   "📻 Radios" overlay now; Settings -> Radios later). Its API is /api/cad/radios; every edit is
-//   kept in settings_audit (who, key, old -> new), shown at the bottom. FG1's IDs (MDC, FleetSync) are heard like
-//   P25's (#163): a new one is a "heard" row, every one has its last-heard time and channel; the list puts the
-//   radios heard most recently first in each system, and says how many FG1 transmissions had an ID (id_stats).
+//   kept in settings_audit (who, key, old -> new), shown at the bottom. The fireground's IDs (FG1, FG2: MDC,
+//   FleetSync) are heard like P25's (#163): a new one is a "heard" row, every one has its last-heard time and
+//   channel; the list puts the radios heard most recently first in each system, and says how many transmissions
+//   on each fireground channel had an ID (id_stats).
 "use strict";
 
 window.RadiosPanel = (() => {
   const SOURCE_TEXT = { confirmed: "confirmed", guessed: "guessed", heard: "heard" };
-  const FM = new Set(["mdc", "fleetsync"]);         // FG1's: every one listed by default, named or not
+  const FM = new Set(["mdc", "fleetsync"]);         // the fireground's (FG1, FG2): every one listed by default, named or not
   const p = { box: null, opts: {}, data: null, filter: "", show: "mapped", sys: "", editing: null, error: "" };
 
   function el(tag, cls, text) {
@@ -146,7 +147,7 @@ window.RadiosPanel = (() => {
   function addForm() {
     const f = el("form", "rp-add row");
     const sys = el("select");
-    sys.append(new Option("MDC (FG1)", "mdc"), new Option("FleetSync (FG1, Kenwood)", "fleetsync"), new Option("P25 (county)", "p25"));
+    sys.append(new Option("MDC (fireground)", "mdc"), new Option("FleetSync (fireground, Kenwood)", "fleetsync"), new Option("P25 (county)", "p25"));
     const id = el("input");
     id.placeholder = "Radio ID";
     id.maxLength = 12;
@@ -183,7 +184,7 @@ window.RadiosPanel = (() => {
       [n((r) => r.source === "heard"), "heard"], [n((r) => !r.unit), "no rig"]].map(([k, t]) => el("span", "", `${k} ${t}`)));
     sum.title = `Seeded from ${d.seed.file} v${d.seed.version}. A person's edit always wins over what is heard.`;
     out.push(sum);
-    for (const x of d.id_stats || []) {           // FG1 in the last 24 h: how many key-ups had an ID, and why not (#163)
+    for (const x of d.id_stats || []) {           // each fireground channel in the last 24 h: how many key-ups had an ID, and why not (#163)
       if (!x.n) continue;
       const parts = [`${x.with_id} with an ID`, x.none && `${x.none} no ID sent`, x.undecoded && `${x.undecoded} ID not decoded`,
                      x.weak && `${x.weak} too weak to tell`, x.unknown && `${x.unknown} not checked`].filter(Boolean);
@@ -214,12 +215,12 @@ window.RadiosPanel = (() => {
     q.setAttribute("aria-label", "Filter radios");
     q.addEventListener("input", () => { p.filter = q.value; drawTable(); });
     const show = el("select");
-    for (const [v, t] of [["mapped", "On a rig + all FG1"], ["all", "All (incl. P25 heard)"],
+    for (const [v, t] of [["mapped", "On a rig + all fireground"], ["all", "All (incl. P25 heard)"],
                           ["unassigned", "On no rig"], ["confirmed", "Confirmed only"]]) show.append(new Option(t, v));
     show.value = p.show;
     show.addEventListener("change", () => { p.show = show.value; drawTable(); });
     const sys = el("select");
-    for (const [v, t] of [["", "All"], ["mdc", "MDC (FG1)"], ["fleetsync", "FleetSync (FG1)"], ["p25", "P25"]]) sys.append(new Option(t, v));
+    for (const [v, t] of [["", "All"], ["mdc", "MDC (fireground)"], ["fleetsync", "FleetSync (fireground)"], ["p25", "P25"]]) sys.append(new Option(t, v));
     sys.value = p.sys;
     sys.addEventListener("change", () => { p.sys = sys.value; drawTable(); });
     show.className = sys.className = "ro-ok";      // filters: still there when Settings are read-only (cad.js)

@@ -95,7 +95,7 @@ same App code, so the hub's monitor and CAD come out as they would locally.
 | `rerun` | `_rerun_finish` | a re-run is over, whatever came of it: `result` changed / same / failed: why | `_rerun_finish`: the transmission's `rerun_at` / `rerun_result` (the ⋯ menu's Re-transcribe waits for it) |
 | `alt_text` | `_set_alt` | "both" re-run: the station's whisper text as the alternative | `_set_alt`: kept to compare, the text (AWS's) stays |
 | `heard` | `_heard` | a radio ID (and P25 alias) heard on the air | the hub's radio registry learns it |
-| `alarm` | `_call`, `_fm_emergency`, `_segment` (`_alarm_now`) | the emergency button: a P25 key-up trunk-recorder flagged (the call JSON's `emergency`), at the end of its call; an MDC-1200 / FleetSync emergency packet on FG1 at the key-up (the live tap; id `FG1-live-<ms>`, no clip yet), then the finished transmission (`alarm_key`: the key-up's) with its clip; before speech-to-text | the emergency alarm at once (sizeup/cad/alarms.py, #128); its `traffic` event follows with the words and updates the same alarm. An older hub ignores it (the `traffic` event still carries `emergency`) |
+| `alarm` | `_call`, `_fm_emergency`, `_segment` (`_alarm_now`) | the emergency button: a P25 key-up trunk-recorder flagged (the call JSON's `emergency`), at the end of its call; an MDC-1200 / FleetSync emergency packet on a fireground channel (FG1, FG2) at the key-up (the live tap; id `FG1-live-<ms>`, no clip yet), then the finished transmission (`alarm_key`: the key-up's) with its clip; before speech-to-text | the emergency alarm at once (sizeup/cad/alarms.py, #128); its `traffic` event follows with the words and updates the same alarm. An older hub ignores it (the `traffic` event still carries `emergency`) |
 
 Clips go as 8 kHz mono WAV (already band-limited to 300-3300 Hz, so nothing audible changes; half
 the upload). Each event has a `seq` from the station's outbox; the hub remembers the last one applied
@@ -546,7 +546,7 @@ SIZEUP_STATE_DIR=$(mktemp -d) SIZEUP_STATION_TOKEN=$(openssl rand -hex 32) \
 > test aws transcribe on the important channels like South 2 paging, Fire/EMS 15 and our fireground for
 > now, and use the existing model infra for the other channels" (user, 2026-10-08)
 
-**Settings → Radios → Channels** (admins; `sizeup/channels.py`): one row per FM channel (FG1, South 2,
+**Settings → Radios → Channels** (admins; `sizeup/channels.py`): one row per FM channel (FG1, FG2, South 2,
 at the top) and per talkgroup, each with
 
 | switch | on | off |
@@ -556,7 +556,7 @@ at the top) and per talkgroup, each with
 | Transcribe | speech-to-text with the Engine | kept without text ("Not transcribed") |
 | Engine | **Local**: whisper.cpp large-v3 on the station (whisper-server, `127.0.0.1:8179`). **AWS**: Amazon Transcribe streaming, called from the hub with its task role; the station skips whisper and sends the clip with `transcript_pending: "aws"`. **Both**: whisper on the station and AWS on the hub; AWS's text is the transcript, whisper's is kept (`alt_text`, `alt_model`) and shown with ⇄ in the Radio view | |
 
-Defaults (`[stt] aws_channels`): **South 2, FG1 and Fire/EMS 15 (TG 307): record, transcribe, AWS**;
+Defaults (`[stt] aws_channels`): **South 2, FG1, FG2 and Fire/EMS 15 (TG 307): record, transcribe, AWS**;
 every other talkgroup as before (its Record switch, transcribe, local). Stored as CAD settings
 overrides (section `channels`: only what differs from the default), audited under Radios, in the
 settings export / import. Group switches (Record: all / none per talkgroup section) work as before.
