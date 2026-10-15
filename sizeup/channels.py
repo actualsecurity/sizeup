@@ -1,7 +1,7 @@
 """Per-channel speech-to-text choices (user, 2026-10-08: "make it configurable, which channel in the
 settings gets recorded ... and of which, which gets transcribed, and which transcription to use").
 
-One model for the FM channels (FG1, South 2) and every P25 talkgroup, keyed "FG1" / "South 2" /
+One model for the FM channels (FG1, FG2, South 2) and every P25 talkgroup, keyed "FG1" / "South 2" /
 "tg:307":
 
     record       keep it: the clip is kept and forwarded, and it can be transcribed. Off for an FM
@@ -15,7 +15,7 @@ One model for the FM channels (FG1, South 2) and every P25 talkgroup, keyed "FG1
                  "both":  whisper on the station and Transcribe on the hub: Transcribe's text is the
                           transcript, whisper's is kept as the alternative to compare
 
-Defaults: [stt] aws_channels (South 2, FG1, Fire/EMS 15 = tg:307) record + transcribe with "aws";
+Defaults: [stt] aws_channels (South 2, FG1, FG2, Fire/EMS 15 = tg:307) record + transcribe with "aws";
 everything else as before (record as it was, transcribe on, "local"). An edit is a CAD settings
 override (section "channels", key as above, value {record?, transcribe?, engine?}: only what differs
 from the default), audited (Settings section "radios"), admins only where roles are enforced.
@@ -39,7 +39,7 @@ import re
 ENGINES = ("local", "aws", "both")
 FIELDS = ("record", "transcribe", "engine")
 KEY = re.compile(r"tg:\d{1,9}|[A-Za-z0-9][A-Za-z0-9 ./_-]{0,39}")
-DEFAULT_AWS = ("South 2", "FG1", "tg:307")
+DEFAULT_AWS = ("South 2", "FG1", "FG2", "tg:307")
 SECTION = "channels"
 
 
@@ -124,8 +124,8 @@ def vocabulary_suggestions(units: dict, streets: list[str], top_streets: int = 6
     PCFD words, and the busiest street names of Port Chester / Rye Brook as said ("North Main Street")."""
     from sizeup.transcribe import street_spoken
     out: list[str] = ["60 Control", "Port Chester", "Rye Brook", "Fire EMS 15", "Port Chester Fire", "Rye Brook Fire",
-                      "Westchester", "Fireground", "Battalion 15", "Airport Incident", "Command", "Mayday",
-                      "Tower Ladder", "Ladder", "Engine", "Rescue", "Marine", "Utility"]
+                      "Westchester", "Fireground", "Fireground 1", "Fireground 2", "Battalion 15", "Airport Incident",
+                      "Command", "Mayday", "Tower Ladder", "Ladder", "Engine", "Rescue", "Marine", "Utility"]
     for code, u in units.items():
         s = (u or {}).get("spoken") if isinstance(u, dict) else None
         if s and s not in out:

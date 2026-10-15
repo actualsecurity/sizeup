@@ -781,6 +781,15 @@ activate() {
     sed -i "s#$LEGACY_APP/deploy/trunk-recorder/talkgroups.csv#$TR_DIR/talkgroups.csv#" "$CONF"
     say "config: [p25] talkgroups_file is now $TR_DIR/talkgroups.csv (trunk-recorder's copy, from the release)"
   fi
+  # What this release adds to the config (#119: the FG2 channel), once per station; the old file is kept
+  # beside it, one taken out by hand stays out (sizeup/cloud/configupdate.py, $ETC/config-updates).
+  if [ -f "$rel/sizeup/cloud/configupdate.py" ] && [ -f "$CONF" ]; then
+    if out=$(python3 -I "$rel/sizeup/cloud/configupdate.py" "$CONF" "$ETC/config-updates" 2>&1); then
+      [ -z "$out" ] || printf '%s\n' "$out" | while IFS= read -r line; do say "config: $line"; done
+    else
+      warn "config: additions not applied, $CONF unchanged: $(printf '%s' "$out" | tail -n 1)"
+    fi
+  fi
   if [ -f "$rel/deploy/station/config.station.toml" ]; then
     install -m 0640 -o root -g "$SVC_USER" "$rel/deploy/station/config.station.toml" "$CONF.dist"
   fi

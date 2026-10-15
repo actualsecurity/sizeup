@@ -47,7 +47,7 @@ window.Radio = (() => {
     return "talk-chip" + (e.ended ? " ended" : "") + (e.rig ? " rig" : "") + (e.dispatcher ? " disp" : "")
       + (e.id_on_release && !e.rig ? " unid" : "");
   }
-  function shown(e) {             // the strip: our rigs, FG1, and the Main talkgroups
+  function shown(e) {             // the strip: our rigs, FG1 / FG2, and the Main talkgroups
     return !!e.rig || e.system === "fm" || e.main;
   }
 
@@ -353,7 +353,7 @@ window.Radio = (() => {
     }
     if (!st.rigs.length) grid.append(el("div", "dim", "No unit list"));
     const note = el("div", "dim small", "This browser only");
-    note.title = "A toast when a chosen unit keys up (P25: when the radio is named; FG1: when its MDC ID decodes). "
+    note.title = "A toast when a chosen unit keys up (P25: when the radio is named; FG1 / FG2: when its MDC or FleetSync ID decodes). "
       + "Phone pre-alert: a toast (and the chime, when on) when Tapout hears the HQ phone ring, even with talk alerts off.";
     p.replaceChildren(head, opts, quick, grid, note);
     if (!a.on) grid.classList.add("off");
