@@ -401,8 +401,8 @@ def from_page(incident_type: str, category: str, text: str) -> tuple[str, str, s
         if has("residential", "residence"):
             return "ALARM", "CO-RESD", ""
         return "ALARM", "", "CO alarm: commercial or residential not stated on the page"
-    if incident_type == "Gas leak":
-        return "HAZARD", "GAS", ""
+    if incident_type == "Gas leak":           # odor of gas inside / a leak: the department's HAZARD/GAS ("Odor of gas
+        return "HAZARD", "GAS", ""            # inside" before the sheet's vocabulary, store.V1_TYPES; its run card)
     if incident_type == "Wires down":
         return "HAZARD", "WIRES", ""
     if incident_type == "Hazmat":

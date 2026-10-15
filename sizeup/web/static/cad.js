@@ -458,6 +458,7 @@ function fillQueueItem(li, inc) {
   if (ap) li.append(el("div", "qs ap-line", ap));       // the tower's facts on an airport event (#105)
   if (inc.status === "queued") {
     if (inc.type_note) li.append(el("div", "qs warn", inc.type_note));
+    if (unconfirmed(inc)) li.append(el("div", "qs warn", "Location unconfirmed: pick it on the event"));   // (#176)
     li.append(el("div", "qs dim", "Accept or Dismiss"));
   } else if (!inc.emergency && isOpen(inc)) {
     if (inc.until_at) li.append(el("div", "qs dim", `Until ${fmtTime(inc.until_at)}`));
@@ -489,7 +490,7 @@ function renderQueue() {
   const all = incidents();
   const byAge = (a, b) => a.created_at - b.created_at;        // oldest first
   const sig = (i) => JSON.stringify([i.status, i.number, i.type, i.subtype, i.address, i.id === cad.sel, i.emergency,
-    i.until_at, i.disposition, i.type_note, i.joint_call, openAssignments(i).map((a) => [a.name, a.status]), i.closed_at, cad.listSig.length,
+    i.until_at, i.disposition, i.type_note, unconfirmed(i), i.joint_call, openAssignments(i).map((a) => [a.name, a.status]), i.closed_at, cad.listSig.length,
     canDo("dispatch"), airportLine(i)]);
   const opts = { key: (i) => String(i.id), sig, make: queueItem, fill: fillQueueItem };
   syncList($("#q-queued"), all.filter((i) => i.status === "queued").sort(byAge), { ...opts, empty: "None" });
@@ -599,8 +600,9 @@ function renderDetail() {
   setText(addr, inc.address || "No location");
   setText($("#d-cross"), inc.cross_street ? `Cross: ${inc.cross_street}` : "");
   setText($("#d-geo"), inc.lat != null ? `Map: ${inc.geo_label || `${inc.lat.toFixed(5)}, ${inc.lon.toFixed(5)}`}`
-    : "No map point");
+    : unconfirmed(inc) ? "Location unconfirmed: not on the map" : "No map point");
   $("#d-geo").className = "geo" + (inc.lat != null ? "" : " warn");
+  renderGeoAlts(inc);
   setText($("#d-created"), fmtTime(inc.created_at, true));
   const elapsed = $("#d-elapsed");
   setText($("#d-elapsed-l"), open ? "Elapsed" : "Duration");
@@ -2451,6 +2453,39 @@ async function saveEdit(e) {
     if (body.type !== inc.type || body.subtype !== inc.subtype || "emergency" in body) setTimeout(() => recommend(), 300);
   } catch (err) {
     flash($("#e-error"), err.message);
+  }
+}
+
+// A page's location its own words don't confirm (#176: no cross street fits, another town, two readings, a sound-alike):
+// not on the map; the readings to pick from, best first. Picking one places the event (an edit like any other).
+function unconfirmed(inc) {
+  return inc.lat == null && Array.isArray(inc.geo_alts) && inc.geo_alts.length > 0;
+}
+function renderGeoAlts(inc) {
+  const box = $("#d-geo-alts");
+  const alts = isOpen(inc) && unconfirmed(inc) ? inc.geo_alts : [];
+  const can = !BOARD && canDo("dispatch");
+  const sig = JSON.stringify([inc.id, alts, can]);
+  show(box, alts.length > 0);
+  if (box._sig === sig) return;
+  box._sig = sig;
+  box.replaceChildren();
+  if (!alts.length) return;
+  box.append(el("div", "dim small", can ? "Which one did the page mean?" : "Readings of the page:"));
+  for (const a of alts) {
+    const b = el("button", "mini geo-alt");
+    b.type = "button";
+    b.append(el("span", "", a.label), el("span", "dim small", [a.why, `${Number(a.confidence || 0).toFixed(2)}`].filter(Boolean).join(" · ")));
+    b.disabled = !can;
+    b.addEventListener("click", () => pickGeoAlt(inc.id, a));
+    box.append(b);
+  }
+}
+async function pickGeoAlt(id, a) {
+  try {
+    await api("POST", `/api/cad/incident/${id}`, { address: a.label, lat: a.lat, lon: a.lon, geo_label: a.label, operator: operator() });
+  } catch (err) {
+    UI.toast(err.message, "err");
   }
 }
 
