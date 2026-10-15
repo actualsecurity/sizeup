@@ -69,9 +69,9 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
       <h2 title="Not dispatched">Pending</h2>
       <ol id="q-pending" class="list q"></ol>
     </section>
-    <!-- FG1 radio IDs nobody has named (radio-ids.js, #163): who is this? -->
+    <!-- fireground (FG1, FG2) radio IDs nobody has named (radio-ids.js, #163): who is this? -->
     <section id="newids" class="console-only" hidden>
-      <h2 title="Radio IDs heard on FG1 that the registry doesn't know: say who each is (nothing is guessed)">New radio IDs</h2>
+      <h2 title="Radio IDs heard on a fireground channel (FG1, FG2) that the registry doesn't know: say who each is (nothing is guessed)">New radio IDs</h2>
       <ol id="q-newids" class="nid-list" aria-live="polite" aria-label="New radio IDs"></ol>
     </section>
     <section class="grow">
@@ -155,7 +155,7 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
         <button id="rv-clear" type="button">Clear</button>
       </form>
       <section class="rv-sec">
-        <div class="sec-head"><h2>Main</h2><span id="rv-main-sum" class="dim small sum"></span><button type="button" class="help" aria-label="Help" aria-expanded="false" data-help="FG1, Fire/EMS 15 and every talkgroup marked Main (Settings, Radios), and notes tagged with a unit. The rest: Other talkgroups.">?</button></div>
+        <div class="sec-head"><h2>Main</h2><span id="rv-main-sum" class="dim small sum"></span><button type="button" class="help" aria-label="Help" aria-expanded="false" data-help="FG1, FG2, Fire/EMS 15 and every talkgroup marked Main (Settings, Radios), and notes tagged with a unit. The rest: Other talkgroups.">?</button></div>
         <div id="rv-paging" class="paging-live" hidden aria-live="polite"></div>
         <ol id="rv-main" class="list log radio-log rv-list"></ol>
       </section>
@@ -429,7 +429,7 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
     <!-- the wall board: the phone pre-alert (prealert.js) above the 60 Control feed, read-only -->
     <ol id="b-prealert" class="pa-list board-only" hidden aria-live="assertive" aria-label="Phone pre-alerts"></ol>
     <div id="feed" hidden></div>
-    <!-- the wall board's radio (board.js): the main channels (FG1, Fire/EMS 15, every talkgroup marked Main), not the
+    <!-- the wall board's radio (board.js): the main channels (FG1, FG2, Fire/EMS 15, every talkgroup marked Main), not the
          console's pinned 60 Control feed (user, 2026-10-08: "isnt showing the radio traffic from FireGround 1") -->
     <section class="board-only b-sec b-radio" aria-label="Radio: main channels">
       <div class="sec-head"><h2>Radio</h2><span id="b-radio-sum" class="dim small trunc"></span></div>
@@ -495,7 +495,7 @@ Slots go in order. A kind takes the next available unit of that kind (regular ap
       <div class="radio-controls" data-rtab="ids" hidden>
         <div class="s-note notice">Radios editor unavailable</div>
         <section class="card">
-          <div class="card-head"><h2>Radio IDs</h2><button type="button" class="help" aria-label="Help" aria-expanded="false" data-help="Which rig each radio ID is (MDC on FG1, P25 unit IDs): confirmed by hand, guessed from the numbering, or heard on the air.">?</button></div>
+          <div class="card-head"><h2>Radio IDs</h2><button type="button" class="help" aria-label="Help" aria-expanded="false" data-help="Which rig each radio ID is (MDC and FleetSync on FG1 / FG2, P25 unit IDs): confirmed by hand, guessed from the numbering, or heard on the air.">?</button></div>
           <div id="settings-radios" class="settings-radios"></div>
         </section>
       </div>

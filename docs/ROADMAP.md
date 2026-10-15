@@ -30,8 +30,9 @@ county dispatch (60 Control); it doesn't replace it.
   hub or the internet is down. It runs on the Mac today, and an installer for Windows (WSL2) and
   Linux / Raspberry Pi is merged (#28).
 - **Radio:**
-  - Channels: South 2 paging (tones and pages), Fire/EMS 15 (P25, talker at keypress) and FG1
-    (MDC-1200 IDs).
+  - Channels: South 2 paging (tones and pages), Fire/EMS 15 (P25, talker at keypress), FG1 and
+    FG2 (MDC-1200 / FleetSync IDs). Next (#119): the Port Chester repeater and PC local fireground,
+    then several channels per dongle.
   - Speech-to-text per channel: Amazon Transcribe on the main channels, whisper elsewhere.
   - Pre-alert: the phone pre-alert from Tapout's ntfy feed (read only).
 - **CAD:**

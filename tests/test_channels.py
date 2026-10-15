@@ -73,7 +73,7 @@ def test_defaults_and_what_runs_without_aws(tmp_path):
     # no AWS here: an AWS channel runs the local model, and says why
     assert app.stt_engine("FG1") == "local" and "isn't set up here" in app.aws_ok()[1]
     st = app.state()["channels"]
-    assert st["aws_ok"] is False and st["aws_channels"] == ["South 2", "FG1", "tg:307"]
+    assert st["aws_ok"] is False and st["aws_channels"] == ["South 2", "FG1", "FG2", "tg:307"]
     assert [f["key"] for f in st["fm"]] == ["South 2", "FG1"] and st["aws"]["enabled"] is False
     assert channels.effective({"transcribe": False, "engine": "aws"}, True) == "off"
     assert channels.effective({"transcribe": True, "engine": "both"}, False) == "local"

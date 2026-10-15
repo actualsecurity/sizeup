@@ -1,12 +1,12 @@
 # The station
 
 The station is the computer with the RTL-SDR dongles. It runs sizeup with `[cloud] role = "station"`:
-the radios (rtl_fm for South 2 and FG1, trunk-recorder for the county P25 system with Fire/EMS 15),
+the radios (rtl_fm for South 2, FG1 and FG2, trunk-recorder for the county P25 system with Fire/EMS 15),
 MDC-1200 decoding, local speech-to-text (whisper.cpp) for whatever the hub doesn't transcribe, and a
 link that **calls home**: everything it hears goes to the hub (https://sizeup.actualsecurity.org) over
 outbound HTTPS, through an outbox that keeps it all while the hub or the internet is down. No port
 forwarding, no inbound firewall rule. The hub is the CAD of record and says the dispatches (Amazon
-Polly); the main channels (South 2, FG1, Fire/EMS 15) can be transcribed there with Amazon
+Polly); the main channels (South 2, FG1, FG2, Fire/EMS 15) can be transcribed there with Amazon
 Transcribe (Settings > Radios, synced to the station). The station's own page
 (http://localhost:8091, [below](#the-station-page)) is about the station only: its radios, what it
 heard and the hub link. It has no CAD. Architecture and failure behaviour: [docs/cloud.md](../../docs/cloud.md).
@@ -143,7 +143,10 @@ sizeup-station autoupdate status     # this station's build, the hub's, the last
 ```
 
 Updates come by themselves ([below](#updating)). The config file is never overwritten: compare it
-with `/etc/sizeup/config.toml.dist` after an update. Another model:
+with `/etc/sizeup/config.toml.dist` after an update. The one exception is a channel a release adds
+(FG2, #119): the switch to that release appends it to the config once (`sizeup/cloud/configupdate.py`),
+keeps the old file beside it (`config.toml.before-fg2`) and notes it in `/etc/sizeup/config-updates`,
+so a channel taken out by hand stays out. The install log says what it added. Another model:
 `sudo sizeup-station update --model base.en`.
 
 ## Updating
@@ -265,7 +268,7 @@ Only one station should forward at a time (two would send everything twice).
 2. Move the dongles to the new station (all at once, or one by one: a dongle the Mac still has is
    simply not there for the PC). The PC's `sizeup-station status` lists each one as it arrives.
 3. On the new station: `sizeup-station status` shows the hub connected; each dongle takes the next
-   job as it arrives (FG1, then Fire/EMS 15, then South 2). Check or change them at
+   job as it arrives (FG1, then Fire/EMS 15, then South 2, then FG2). Check or change them at
    http://localhost:8091, Radios (or from the hub's monitor). The hub's Station row says "connected".
 
 Both use station id `pcfd-hq`: to the hub it is the same station, moved. Going back is the reverse.
@@ -281,8 +284,11 @@ running, and no person has picked a job for it, it gets the first job in `auto_a
    477.19375 MHz covers the control channels 476.075-476.2375 and the voice channels); it is skipped
    when trunk-recorder isn't installed or its config.json has more than one source.
 3. `south2`: South 2, 470.2 NFM, paging tones
+4. `fg2`: FG2, the county's Fireground 2, 458.0375 NFM, MDC-1200 / FleetSync IDs like FG1 (#119). Last,
+   so it takes a 4th free dongle and never one of the first three's; with three dongles, pick FG2 by
+   hand on one of them (station page, Radios, or the hub's Settings > Radios)
 
-With all three covered, another dongle stays Off. The log says `sdr: V3 #2 (00000001) → FG1 (auto)`,
+With all four covered, another dongle stays Off. The log says `sdr: V3 #2 (00000001) → FG1 (auto)`,
 and the station page and the hub's monitor show the row as "· FG1 · auto".
 
 * **FG1 first, even after a dongle dies.** A job whose dongle is unplugged or missing isn't covered:
@@ -327,7 +333,7 @@ and the station page and the hub's monitor show the row as "· FG1 · auto".
 Four cores at 2.2 GHz, no GPU for whisper. trunk-recorder following the P25 control channel takes
 about one core all the time; each rtl_fm a little. So:
 
-* Keep the **main channels on AWS Transcribe** (South 2, FG1, Fire/EMS 15: the default; Settings >
+* Keep the **main channels on AWS Transcribe** (South 2, FG1, FG2, Fire/EMS 15: the default; Settings >
   Radios on the hub): fast and accurate, and the station's CPU stays free.
 * whisper on the station does the rest with **small.en (q5_1)**, the default, on 3 threads.
   `large-v3-turbo-q5_0` is more accurate but several times slower: only if the station transcribes
