@@ -69,11 +69,6 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
       <h2 title="Not dispatched">Pending</h2>
       <ol id="q-pending" class="list q"></ol>
     </section>
-    <!-- fireground (FG1, FG2) radio IDs nobody has named (radio-ids.js, #163): who is this? -->
-    <section id="newids" class="console-only" hidden>
-      <h2 title="Radio IDs heard on a fireground channel (FG1, FG2) that the registry doesn't know: say who each is (nothing is guessed)">New radio IDs</h2>
-      <ol id="q-newids" class="nid-list" aria-live="polite" aria-label="New radio IDs"></ol>
-    </section>
     <section class="grow">
       <h2>Active</h2>
       <ol id="q-active" class="list q"></ol>
@@ -430,6 +425,12 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
     <!-- the wall board: the phone pre-alert (prealert.js) above the 60 Control feed, read-only -->
     <ol id="b-prealert" class="pa-list board-only" hidden aria-live="assertive" aria-label="Phone pre-alerts"></ol>
     <div id="feed" hidden></div>
+    <!-- fireground (FG1, FG2) radio IDs nobody has named (radio-ids.js, #163): who is this? Under the radio, above the
+         units it names (#177: with the units and the radio, not in the incident queue); hidden while there is nothing to ask -->
+    <section id="newids" class="nid-sec console-only" hidden>
+      <h2 title="Radio IDs heard on a fireground channel (FG1, FG2) that the registry doesn't know: say who each is (nothing is guessed)">New radio IDs</h2>
+      <ol id="q-newids" class="nid-list" aria-live="polite" aria-label="New radio IDs"></ol>
+    </section>
     <!-- the wall board's radio (board.js): the main channels (FG1, FG2, Fire/EMS 15, every talkgroup marked Main), not the
          console's pinned 60 Control feed (user, 2026-10-08: "isnt showing the radio traffic from FireGround 1") -->
     <section class="board-only b-sec b-radio" aria-label="Radio: main channels">

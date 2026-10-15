@@ -1,5 +1,5 @@
-/* New radio IDs heard on FG1 / FG2 (GitHub #163; sizeup/cad/newids.py): the state's radio_ids, in the queue under
-   "New radio IDs": "Radio 1234 (MDC) on FG1: who is this?", when and how often it was heard, the call it was
+/* New radio IDs heard on FG1 / FG2 (GitHub #163; sizeup/cad/newids.py): the state's radio_ids, in the units column
+   under the radio and above the units (#177), as "New radio IDs": "Radio 1234 (MDC) on FG1: who is this?", when and how often it was heard, the call it was
    heard during, and a pick: a unit (the call's units first), or who it is with no unit, or Ignore. Dispatchers and
    admins answer (POST /api/cad/radio-id); a viewer, and the wall board, see the question and nothing to press.
    Naming it puts its transmissions on that unit's calls, the ones already heard too; nothing is ever guessed.
