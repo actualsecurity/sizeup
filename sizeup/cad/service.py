@@ -60,7 +60,7 @@ class Settings:
     department: str = "Port Chester Fire"          # first words of every dispatch
     monitor_departments: tuple[str, ...] = ("Port Chester FD", "Rye Brook FD")   # their tones -> queued (#80)
     paging: tuple[str, ...] = ("South 2",)        # the paging channels: their rows are pages (the feed, Radio)
-    tones: tuple[tuple[float, float], ...] = ((349.1, 1.0), (311.1, 3.0))
+    tones: tuple[tuple[float, float], ...] = ((903.2, 1.0), (810.2, 3.0))
     voice: str = "Samantha"                        # tts_engine "say": a `say -v` voice; "kokoro": a Kokoro voice; "polly": "Matthew"
     rate_wpm: int = 0
     tts_engine: str = "say"                        # "kokoro" | "polly" | "say" | "none"; the config's default is kokoro, "say" here

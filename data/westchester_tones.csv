@@ -37,9 +37,17 @@
 #   so the 2015 estimate was probably a 3rd-harmonic misread)
 # also listed by rr-wiki-est-2015/2019 within ~3 Hz of existing rows (not duplicated): Ardsley 1032/763, Bedford Hills 2360/1080,
 #   Fairview 1199/1199; rr-wiki-est 2019-2021 had Westchester EMS (45 Medics) 832.5/1034.7 (main table now 832.9/1031.8).
-# Not found anywhere public (2026-10-13): Rye Brook FD, Rye FD, Scarsdale FD, White Plains, Yonkers, Mount Vernon,
-#   Tuckahoe, Bronxville, Elmsford, Hastings, Tarrytown, Pelham Manor, Greenburgh EMS. Port Chester FD 349.1/311.1
-#   appears only in the current rr-wiki main table (added after the 2021 revision); no second source.
+# Not found anywhere public (2026-10-13): Rye FD, Scarsdale FD, White Plains, Yonkers, Mount Vernon,
+#   Tuckahoe, Bronxville, Elmsford, Hastings, Tarrytown, Pelham Manor, Greenburgh EMS.
+# Heard on air, 60 Control tone tests 10-20 and 10-23-2026 (GitHub #47; 18 days of stored South 2 pages,
+#   10-08 to 10-26, 1,036 toned transmissions):
+#   Rye Brook FD 767.4/928.1 - 10-23 14:59 "Rye Brook on a test, test only" on this pair alone; 20 of its 24 pages
+#   at Rye Brook addresses, the voice saying "Rye Brook" every time. No public source had Rye Brook's tones.
+#   Port Chester FD 903.2/810.2 - 10-20 "Port Chester on a test, test only" on this pair alone, four times; never on
+#   a Rye Brook address unless 767.4/928.1 is stacked with it. 19 pages carry both pairs ("Rye Brook with Port
+#   Chester ..."): PCFD answers both villages. Port Chester-Rye-Rye Brook EMS is 928.1/510.5 (not PCFD).
+#   The rr-wiki main table's Port Chester FD 349.1/311.1 (added after the 2021 revision, no second source) never
+#   appeared in those 18 days: its row is taken out, so a stray decode near it can't open a PCFD event.
 #   Broadcastify feed 45033 (https://www.broadcastify.com/listen/feed/45033) lists Port Chester, Rye Brook and Rye
 #   among the departments paged on 470.2000 (South), but publishes no tones.
 name,a_hz,b_hz,estimated,source,fetched
@@ -87,7 +95,6 @@ Peekskill Volunteer,457.1,435.1,0,rr-wiki,2026-10-13
 Pelham,602.3,570,0,rr-wiki,2026-10-13
 Pleasantville,2574.2,1129.7,0,rr-wiki,2026-10-13
 Pocantico Hills,1742.1,1079.7,0,rr-wiki,2026-10-13
-Port Chester FD,349.1,311.1,0,rr-wiki,2026-10-13
 Pound Ridge,602.3,832.9,0,rr-wiki,2026-10-13
 Purchase,364.9,349.1,0,rr-wiki,2026-10-13
 Somers,2575.0,1232.0,0,rr-wiki+nf2g,2026-10-13
@@ -127,6 +134,8 @@ West Harrison,1048,387,1,rr-wiki-est,2026-10-13
 Scarsdale EMS,928.1,810.2,2,air,2026-10-01
 Fairview,832.5,1201.0,2,air,2026-10-01
 Eastchester VAC,496.8,767.4,2,air,2026-10-01
+Port Chester FD,903.2,810.2,2,air,2026-10-20
+Rye Brook FD,767.4,928.1,2,air,2026-10-23
 Mohegan,313.0,358.6,0,nf2g+rr-wiki-2011,2026-10-13
 Montrose,2271.7,368.5,0,nf2g+rr-wiki-2011,2026-10-13
 Northern Westchester Medics,2495,1032,1,rr-wiki-est-2019,2026-10-13

@@ -72,7 +72,7 @@ def test_edits_persist_across_a_restart_and_survive_a_changed_data_file(tmp_path
     assert cad2.settings_get()["dispatch"]["tones"]["value"] == [[[800.0, 1.0], [1000.0, 2.0]], [[349.1, 1.0], [311.1, 3.0]]]
     assert cad2.state()["transmit"]["channels"] == ["FG1", "FG2"]
     post(cad2, "dispatch", action="reset", key="tones")
-    assert cad2.s.tones == ((349.1, 1.0), (311.1, 3.0))
+    assert cad2.s.tones == ((903.2, 1.0), (810.2, 3.0))                 # Port Chester Fire, heard on air (#47)
     # edits that no longer fit the data file (a code it dropped) are left out, said in the log, not lost
     cad2.store.db.execute("INSERT INTO settings_overrides (section, key, value, updated_at) VALUES "
                           "('event_class', 'NOPE', '\"emergency\"', 0)")
@@ -417,7 +417,8 @@ def test_dispatch_lead_ins_remarks_department_tones_and_voice():
     cad = make_cad()
     d = cad.settings_get()["dispatch"]
     assert {"remarks", "lead_in", "lead_in_joint"} <= {w["key"] for w in d["wording"]}
-    assert d["dept_tones"] == [{"town": "Rye Brook", "value": None, "default": None, "edited": False}]   # not set
+    rb = [[767.4, 1.0], [928.1, 3.0]]                                   # Rye Brook Fire, heard on air (#47)
+    assert d["dept_tones"] == [{"town": "Rye Brook", "value": rb, "default": rb, "edited": False}]
     assert d["lead_in_joint_only"][0]["value"] == "Rye Brook Fire"
     pv = post(cad, "dispatch", action="preview", wording={"remarks": "Caller says: {remarks}"})
     assert "Caller says: Smoke showing from the second floor" in pv["texts"]["new"] or \
@@ -429,8 +430,11 @@ def test_dispatch_lead_ins_remarks_department_tones_and_voice():
     assert cad.store.q("SELECT * FROM settings_overrides") == []
     post(cad, "dispatch", action="set", key="tones/Rye Brook", value=[[600, 1], [700, 3]])
     assert cad.lists.dispatch_tones["Rye Brook"] == [(600.0, 1.0), (700.0, 3.0)]
-    post(cad, "dispatch", action="set", key="tones/Rye Brook", value=None)
-    assert cad.lists.dispatch_tones["Rye Brook"] is None and cad.store.q("SELECT * FROM settings_overrides") == []
+    post(cad, "dispatch", action="set", key="tones/Rye Brook", value=None)              # not set: PCFD's played
+    assert cad.lists.dispatch_tones["Rye Brook"] is None and len(cad.store.q("SELECT * FROM settings_overrides")) == 1
+    post(cad, "dispatch", action="set", key="tones/Rye Brook", value=rb)                # the default again: no override
+    assert cad.lists.dispatch_tones["Rye Brook"] == [(767.4, 1.0), (928.1, 3.0)]
+    assert cad.store.q("SELECT * FROM settings_overrides") == []
     with pytest.raises(CadError, match="joint-response"):
         post(cad, "dispatch", action="set", key="tones/Rye", value=[[600, 1]])
     post(cad, "dispatch", action="set", key="speed", value=0.85)

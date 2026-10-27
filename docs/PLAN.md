@@ -26,10 +26,12 @@ it on a map — applied to our own calls.
 | Fireground 2 (secondary fire) | 458.0375 MHz | same | same |
 | Fireground 3 / 4 (EMS) | 453.8875 / 458.8875 MHz | same | same |
 
-**Tone codes:** only hobbyist-sourced so far — Port Chester A 349.1 Hz / B 311.1 Hz
-(RadioReference wiki, edited 2025-07); Rye Brook not listed. Treat as unverified: sizeup
-logs *every* decoded tone pair with its voice page, so the real codes are learned from the
-air (a member confirms which page was which) and then named in the config.
+**Tone codes:** learned from the air (#47; 60 Control tone tests 10-20 and 10-23-2026, 18 days of
+stored South 2 pages): Port Chester Fire 903.2/810.2, Rye Brook Fire 767.4/928.1, often stacked on
+one page; both are ours. Port Chester–Rye–Rye Brook EMS is 928.1/510.5 (not ours). The
+RadioReference wiki's Port Chester pair 349.1/311.1 was never heard. sizeup logs *every* decoded
+tone pair with its voice page, so other codes are learned the same way and named in Settings >
+Radios > Tones.
 
 **Incident data:** no public CAD/RSS/PulsePoint. 60 Control's "CAD Times" needs an agency
 login and its guide forbids redistribution, so it is out of scope unless the department gets

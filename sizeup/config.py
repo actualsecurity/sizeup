@@ -110,7 +110,7 @@ class Config:
     cad_department: str = "Port Chester Fire"           # first words of every dispatch, as said on the air
     cad_lists: str = ""               # the CAD's lists / boards / wording ("" = data/cad_lists.json)
     cad_monitor_departments: tuple[str, ...] = ("Port Chester FD", "Rye Brook FD")   # their tones or towns: wait to be accepted
-    dispatch_tones: tuple[tuple[float, float], ...] = ((349.1, 1.0), (311.1, 3.0))   # (Hz, s) in order
+    dispatch_tones: tuple[tuple[float, float], ...] = ((903.2, 1.0), (810.2, 3.0))   # (Hz, s) in order
     # The dispatch voice. load() defaults to Kokoro af_heart at 0.92; built directly (tests), `say` Samantha.
     dispatch_tts_engine: str = "say"  # "kokoro" (sizeup/tts_server.py; `say` as fallback) | "say" | "polly" | "none"
     dispatch_voice: str = "Samantha"  # kokoro: a Kokoro voice ("af_heart"); say: macOS `say -v`; polly: "Matthew"
@@ -873,7 +873,7 @@ def load(path: str | Path) -> Config:
         raise ConfigError("dispatch.transmit: must be false: this version has no radio interface (M2), "
                           "so dispatches are logged and played locally only")
     try:
-        d_tones = tuple((float(hz), float(sec)) for hz, sec in dsp.get("tones", [[349.1, 1.0], [311.1, 3.0]]))
+        d_tones = tuple((float(hz), float(sec)) for hz, sec in dsp.get("tones", [[903.2, 1.0], [810.2, 3.0]]))
     except (TypeError, ValueError):
         raise ConfigError("dispatch.tones: a list of [hz, seconds] pairs") from None
     if any(not (50 <= hz <= 4000 and 0 < sec <= 10) for hz, sec in d_tones) or sum(s for _, s in d_tones) > 20:

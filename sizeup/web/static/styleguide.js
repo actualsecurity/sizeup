@@ -141,16 +141,17 @@
     row("Badges", chip("PC", "badge"), chip("TX FG1", "talk-badge"), chip("Ended", "talk-badge ended"), chip("MAIN", "tg-badge")),
     row("Why / link", chip("Unit", "why unit"), chip("60 Control", "why dispatcher"), chip("Added", "why manual"), ev, ub),
     row("Talking", chip("TX E60 FG1", "talk-chip rig"), chip("60 Control", "talk-chip disp"), chip("E61 ended", "talk-chip ended"), chip("FG1 · ID on release", "talk-chip unid")),
-    row("Paging", chip("South 2 · Paging · Port Chester FD", "talk-chip paging ours"), chip("South 2 · Paging · Ardsley · voice", "talk-chip paging"),
+    row("Paging", chip("South 2 · Paging · Rye Brook · Fire + Port Chester · Fire", "talk-chip paging ours"), chip("South 2 · Paging · Ardsley · voice", "talk-chip paging"),
       chip("South 2 · Paged · Ardsley", "talk-chip paging ended"),
-      ...Radio.pageTags([{ a: 349.1, b: 311.1, names: ["Port Chester FD"], ours: true }, { a: 1031.8, b: 763.3, names: ["Ardsley"] },
+      ...Radio.pageTags([{ a: 767.4, b: 928.1, names: ["Rye Brook · Fire"], ours: true }, { a: 903.2, b: 810.2, names: ["Port Chester · Fire"], ours: true },
+                         { a: 1031.8, b: 763.3, names: ["Ardsley"] },
                          { a: 741.3, b: 623.7, names: [] }])),
     row("Page now", pagingSample()));
   }
   function pagingSample() {                 // radio.js's row for a page going out (the feed, Radio, the board)
     const box = el("div", "paging-live");
     Radio.fillPaging(box, [{ key: "sg", channel: "South 2", phase: "voice", ours: true, ended: false,
-      pairs: [{ a: 349.1, b: 311.1, names: ["Port Chester FD"], ours: true }, { a: 741.3, b: 623.7, names: [], ours: false }] }]);
+      pairs: [{ a: 903.2, b: 810.2, names: ["Port Chester · Fire"], ours: true }, { a: 741.3, b: 623.7, names: [], ours: false }] }]);
     return box;
   }
 
