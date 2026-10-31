@@ -171,6 +171,33 @@ const StationHealth = (() => {
       [["whisper", pr.whisper], ["trunk-recorder", pr.recorder]].filter(([, p]) => p).map(([k, p]) => [
         k, [p.state || "?", stateCls(p.state)], p.restarts ?? "", p.down_since ? when(p.down_since) : "", p.detail || ""]),
       "Not reported"));
+    const sq = h.stt_queue;
+    if (sq) {             // the station's whisper queue (#195): depth, the oldest live clip's wait, what was dropped
+      kids.push(el("h3", "hl-sub", "Speech-to-text queue (station)"), dl([
+        ["Waiting", `${sq.queued} of ${sq.max} (${sq.urgent} pages / Fire/EMS 15 / firegrounds, ${sq.live - sq.urgent} other live, ${sq.rerun} re-runs)`],
+        ["Oldest live clip", sq.oldest_s !== null && sq.oldest_s !== undefined ? `waiting ${longDur(sq.oldest_s)}` : "none",
+          (sq.oldest_s || 0) >= 600 ? "hl-bad" : ""],
+        ["Dropped / skipped", `${sq.dropped || 0} / ${sq.skipped || 0}` + (sq.last_drop ? ` (last: ${sq.last_drop.why})` : ""),
+          sq.dropped || sq.skipped ? "hl-warn" : ""],
+      ]));
+    }
+    const tr = h.transcribe;
+    if (tr) {             // Amazon Transcribe on the hub (#195): its health, AWS's reason, the breaker
+      const br = tr.breaker || {};
+      kids.push(el("h3", "hl-sub", "Amazon Transcribe (hub)"), dl([
+        ["State", tr.text || tr.state, stateCls(tr.state === "ok" ? "ok" : "bad")],
+        ["Last answer", tr.last_ok ? `${when(tr.last_ok)} (${longDur(serverNow() - tr.last_ok)} ago)` : "none since the hub started"],
+        ["Failing since", tr.failing_since ? `${when(tr.failing_since)}: ${tr.failures} failure(s), ${tr.reason_text || tr.reason}` : ""],
+        ["Breaker", br.state === "open" ? `open since ${when(br.since)}: new clips go to the station's whisper; AWS tried again ${when(br.retry_at)}`
+          : br.state === "half-open" ? "half-open: trying AWS with the next clips" : "closed", br.state && br.state !== "closed" ? "hl-bad" : ""],
+        ["Waiting for AWS", tr.open_jobs ? `${tr.open_jobs} (the oldest ${longDur(tr.oldest_s)})` : "none"],
+        ["Counts", `${tr.done} answered, ${tr.timeouts} timed out, ${tr.late} late, ${tr.failed} failed over`],
+        ["This month", tr.budget && tr.budget.limit_usd !== undefined ? `$${(tr.budget.usd || 0).toFixed(2)} of the $${tr.budget.limit_usd} limit (${tr.budget.pct}%)`
+          + (tr.budget.reserve_text ? `; ${tr.budget.reserve_text}` : "") : "", tr.budget && tr.budget.pct >= 80 ? "hl-bad" : ""],
+      ]));
+      if ((tr.recent || []).length) kids.push(table(["When", "Channel", "Reason", "AWS said"],
+        tr.recent.map((r) => [when(r.at), r.channel, r.reason, r.why]), ""));
+    }
     kids.push(el("h3", "hl-sub", "Dongles"), table(["SDR", "Serial", "Plugged in", "Job", "Running", "Restarts", "Detail"],
       (h.dongles || []).map((x) => [x.name, x.serial, [x.present ? "yes" : "no", x.present ? "" : "hl-bad"], x.job,
         [x.job === "Off" ? "—" : x.running ? "yes" : (x.state || "no"), x.job === "Off" ? "dim" : x.running ? "hl-ok" : "hl-bad"],

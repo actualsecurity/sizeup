@@ -8,7 +8,10 @@ spread over the burst's time in the stream (StartTime / EndTime, Items with Conf
 holds each final until the next burst and sends the two as one result (to check that words are split
 between transmissions by time). An empty AudioEvent ends the stream: what is open is finalized and the
 connection closed. fail_after_s: a ServiceUnavailableException once that much audio came in.
-refuse: answer the handshake with that HTTP status instead.
+refuse: answer the handshake with that HTTP status instead (refuse_body: its JSON body, refuse_type: an
+x-amzn-ErrorType header, as AWS says AccessDeniedException or SubscriptionRequiredException). late_s:
+every final result held back until the stream is ended, then sent this much later (an answer that comes
+after the job's deadline).
 
 FakeTranscribeApi: the JSON API (Transcribe.CreateVocabulary / UpdateVocabulary / GetVocabulary):
 the vocabulary is PENDING for `pending_polls` GetVocabulary calls, then READY.
@@ -61,9 +64,12 @@ class Conn:
 
 class FakeTranscribe:
     def __init__(self, phrases: dict | None = None, merge: bool = False, fail_after_s: float | None = None,
-                 refuse: int = 0, threshold: int = 200, port: int = 0):
+                 refuse: int = 0, threshold: int = 200, port: int = 0, refuse_body: dict | None = None,
+                 refuse_type: str = "", late_s: float | None = None):
         self.phrases = dict(phrases or DEFAULT_PHRASES)
         self.merge, self.fail_after_s, self.refuse, self.threshold = merge, fail_after_s, refuse, threshold
+        self.refuse_body, self.refuse_type, self.late_s = refuse_body, refuse_type, late_s
+        self.handshakes = 0
         self.conns: list[Conn] = []
         self.lock = threading.Lock()
         fake = self
@@ -133,10 +139,14 @@ class FakeTranscribe:
         h = {k.strip().lower(): v.strip() for k, _, v in (x.partition(":") for x in hdrs)}
         missing = [k for k in ("language-code", "media-encoding", "sample-rate", "X-Amz-Algorithm", "X-Amz-Credential",
                                "X-Amz-Date", "X-Amz-Expires", "X-Amz-SignedHeaders", "X-Amz-Signature") if k not in query]
+        with self.lock:
+            self.handshakes += 1
         status = self.refuse or (400 if missing or u.path != "/stream-transcription-websocket" else 0)
         if status:
-            body = json.dumps({"message": "refused" if self.refuse else f"missing {missing}"}).encode()
-            sock.sendall(f"HTTP/1.1 {status} Refused\r\nContent-Length: {len(body)}\r\n\r\n".encode() + body)
+            body = json.dumps(self.refuse_body if self.refuse and self.refuse_body is not None else
+                              {"message": "refused" if self.refuse else f"missing {missing}"}).encode()
+            extra = f"x-amzn-ErrorType: {self.refuse_type}\r\n" if self.refuse and self.refuse_type else ""
+            sock.sendall(f"HTTP/1.1 {status} Refused\r\n{extra}Content-Length: {len(body)}\r\n\r\n".encode() + body)
             return
         accept = base64.b64encode(hashlib.sha1((h["sec-websocket-key"] + WS_GUID).encode()).digest()).decode()
         sock.sendall(("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
@@ -166,6 +176,8 @@ class FakeTranscribe:
                 assert headers.get(":event-type") == "AudioEvent" and headers.get(":message-type") == "event"
                 if not audio:                                   # end of stream
                     conn.ended = True
+                    if self.late_s is not None:
+                        time.sleep(self.late_s)
                     self._close_burst(sock, st, rate, final=True)
                     self._flush_held(sock, st)
                     self._send(sock, OP_CLOSE, struct.pack(">H", 1000))
@@ -234,6 +246,9 @@ class FakeTranscribe:
         items.append({"Content": ".", "StartTime": round(t1, 3), "EndTime": round(t1, 3), "Type": "punctuation"})
         res = {"ResultId": f"r{st['rid']}", "IsPartial": False, "StartTime": t0, "EndTime": t1,
                "Alternatives": [{"Transcript": text + ".", "Items": items}]}
+        if self.late_s is not None and not final:      # held until the stream is ended (then late_s more)
+            st["held"].append(res)
+            return
         if self.merge and not final:
             st["held"].append(res)
             if len(st["held"]) >= 2:

@@ -28,8 +28,13 @@ NOISE_LABEL = re.compile(r"^[\[(*].*[\])*]$")  # "(static)", "[MUSIC]" — not s
 HALLUCINATIONS = {"thank you", "thanks", "thank you very much", "yes", "you", "bye", "bye bye", "okay",
                   "ok", "thanks for watching", "thank you for watching", "so", "oh", "the end"}
 SHORT_S = 1.5
-LIVE, RERUN = 0, 1          # queue priority: live traffic is never held up by a re-run batch
-QUEUE_MAX = 2000
+# Queue priority (SttQueue): what matters for dispatch first, a person's re-run next, anything that has waited
+# too long last. #195: the station's whisper fell 9 h behind and the newest clips were refused and lost.
+URGENT, LIVE, RERUN, STALE = -1, 0, 1, 2    # pages, Fire/EMS 15 and the firegrounds | other live traffic | re-runs
+QUEUE_MAX = 2000            # items waiting at most: past it the worst one goes (lowest priority, then oldest)
+CHANNEL_CAP = 400           # one channel's items waiting at most: past it that channel's worst one goes
+STALE_S = 600.0             # a live item waiting this long goes behind everything fresh (newest stale first) ...
+MAX_WAIT_S = 3 * 3600.0     # ... and one waiting this long is skipped (said on it), never transcribed hours late
 
 
 def wav_bytes(audio: np.ndarray, rate: int = 16000) -> bytes:
@@ -162,15 +167,134 @@ class WhisperClient:
         return text, (round(float(np.mean(probs)), 2) if probs else None)
 
 
+class SttQueue:
+    """The whisper queue (#195): never refuses the newest clip silently. put() past QUEUE_MAX (or past a
+    channel's CHANNEL_CAP) drops the worst item instead (the lowest class, in it the oldest: a re-run before
+    live traffic, a stale clip before a fresh one), the new one only when it is the worst; get() takes
+    URGENT, then LIVE in order, then RERUN; a live item that has waited STALE_S goes after those (the newest
+    stale first), and one that waited MAX_WAIT_S is skipped. Every item dropped or skipped goes to
+    on_drop(item, why): nothing is lost without a word on it."""
+
+    def __init__(self, on_drop: Callable[[object, str], None] = lambda item, why: None,
+                 clock: Callable[[], float] = time.time, maxsize: int = QUEUE_MAX, channel_cap: int = CHANNEL_CAP):
+        self.on_drop, self.clock, self.maxsize, self.channel_cap = on_drop, clock, maxsize, channel_cap
+        self._items: list[list] = []              # [priority, seq, item, audio, channel, at]
+        self._cv = threading.Condition()
+        self._seq = itertools.count()
+        self.dropped = self.skipped = 0
+        self.last_drop: dict | None = None
+
+    def _key(self, e: list, now: float) -> tuple:
+        prio, seq, at = e[0], e[1], e[5]
+        if prio in (URGENT, LIVE) and now - at >= STALE_S:
+            return (STALE, prio, -seq)            # waited too long: after the fresh ones, the newest first
+        return (prio, 0, seq)
+
+    def _worst(self, items: list[list], now: float) -> list:
+        """The one to drop: the lowest class (re-runs, then what waited too long), in it the oldest."""
+        def rank(x: list) -> tuple:
+            k = self._key(x, now)
+            return (k[0], k[1], -x[1])
+        return max(items, key=rank)
+
+    def qsize(self) -> int:
+        with self._cv:
+            return len(self._items)
+
+    def put(self, entry: tuple) -> bool:
+        """entry (priority, seq-or-None, item, audio[, channel]). False: this item was the one dropped."""
+        prio, _seq, item, audio = entry[:4]
+        channel = entry[4] if len(entry) > 4 else None
+        now = self.clock()
+        e = [prio, next(self._seq), item, audio, channel, now]
+        out: list[tuple[object, str]] = []
+        with self._cv:
+            self._items.append(e)
+            mine = [x for x in self._items if channel is not None and x[4] == channel]
+            if channel is not None and len(mine) > self.channel_cap:
+                worst = self._worst(mine, now)
+                self._items.remove(worst)
+                out.append((worst[2], f"{channel}: {self.channel_cap} clips already waiting for speech-to-text"))
+            if len(self._items) > self.maxsize:
+                worst = self._worst(self._items, now)
+                self._items.remove(worst)
+                out.append((worst[2], f"speech-to-text queue full ({self.maxsize} waiting)"))
+            self._cv.notify()
+        self._dropped(out, "dropped")
+        return all(x is not item for x, _ in out)
+
+    def _dropped(self, out: list[tuple[object, str]], kind: str) -> None:
+        for item, why in out:
+            if kind == "dropped":
+                self.dropped += 1
+            else:
+                self.skipped += 1
+            self.last_drop = {"at": self.clock(), "why": why}
+            try:
+                self.on_drop(item, why)
+            except Exception:  # the caller's trouble must not stop the queue
+                pass
+
+    def _take(self, now: float, skips: list) -> tuple | None:
+        old = [e for e in self._items if e[0] in (URGENT, LIVE) and now - e[5] >= MAX_WAIT_S]
+        for e in old:
+            self._items.remove(e)
+        skips.extend((e[2], f"waited {int((now - e[5]) // 60)} min for speech-to-text: skipped, "
+                                    "too far behind (Re-transcribe it if it matters)") for e in old)
+        if not self._items:
+            return None
+        e = min(self._items, key=lambda x: self._key(x, now))
+        self._items.remove(e)
+        return (e[0], e[1], e[2], e[3])
+
+    def get(self, timeout: float | None = None) -> tuple:
+        """(priority, seq, item, audio): the best item; queue.Empty after timeout (None: wait for one)."""
+        skips: list[tuple[object, str]] = []
+        end = None if timeout is None else time.monotonic() + timeout
+        try:
+            with self._cv:
+                while True:
+                    got = self._take(self.clock(), skips)
+                    if got is not None:
+                        return got
+                    left = None if end is None else end - time.monotonic()
+                    if left is not None and left <= 0:
+                        raise queue.Empty
+                    self._cv.wait(left)
+        finally:
+            self._dropped(skips, "skipped")
+
+    def get_nowait(self) -> tuple:
+        return self.get(timeout=0)
+
+    def stats(self) -> dict:
+        """Depth by kind and the oldest live item's wait: station status and health (the backlog alert)."""
+        now = self.clock()
+        with self._cv:
+            items = list(self._items)
+        live = [e for e in items if e[0] in (URGENT, LIVE)]
+        oldest = min((e[5] for e in live), default=None)
+        return {"queued": len(items), "urgent": sum(1 for e in live if e[0] == URGENT),
+                "live": len(live), "rerun": sum(1 for e in items if e[0] == RERUN),
+                "stale": sum(1 for e in live if now - e[5] >= STALE_S),
+                "oldest_at": oldest, "oldest_s": round(now - oldest, 1) if oldest is not None else None,
+                "dropped": self.dropped, "skipped": self.skipped, "last_drop": self.last_drop,
+                "max": self.maxsize, "stale_s": STALE_S, "max_wait_s": MAX_WAIT_S}
+
+
 class Transcriber:
     """One worker thread: items with an `audio_for_stt()`-style accessor are transcribed in
-    order and handed to on_done. whisper-server restarting -> retry with backoff."""
+    order and handed to on_done. whisper-server restarting -> retry with backoff. on_drop(item, why):
+    an item the queue dropped or skipped (SttQueue), never transcribed."""
 
     def __init__(self, client: WhisperClient, on_done: Callable[[object], None],
-                 prompt: Callable[[object], str] = lambda item: ""):
+                 prompt: Callable[[object], str] = lambda item: "",
+                 on_drop: Callable[[object, str], None] = lambda item, why: None):
         self.client, self.on_done, self.prompt = client, on_done, prompt
-        self._q: queue.PriorityQueue = queue.PriorityQueue()
-        self._seq = itertools.count()
+        self._q = SttQueue(self._dropped)
+        self.on_drop = on_drop
+        self._drops: queue.Queue = queue.Queue()
+        self._drop_thread: threading.Thread | None = None
         self.last_error = ""
         self._working = False
 
@@ -178,11 +302,27 @@ class Transcriber:
         """Transcriptions queued or running (the station's auto-update waits for none before a restart)."""
         return self._q.qsize() + (1 if self._working else 0)
 
-    def submit(self, item, audio: np.ndarray, priority: int = LIVE) -> bool:
-        if self._q.qsize() >= QUEUE_MAX:
-            return False
-        self._q.put((priority, next(self._seq), item, audio))
-        return True
+    def submit(self, item, audio: np.ndarray, priority: int = LIVE, channel: str | None = None) -> bool:
+        """Queue it. False: it was dropped at once (the queue full of better items): on_drop has it already."""
+        return self._q.put((priority, None, item, audio, channel))
+
+    def stats(self) -> dict:
+        return dict(self._q.stats(), working=self._working, last_error=self.last_error)
+
+    def _dropped(self, item, why: str) -> None:
+        """on_drop on its own thread: never in the context of submit(), whose caller may hold its own locks."""
+        self._drops.put((item, why))
+        if self._drop_thread is None:
+            self._drop_thread = threading.Thread(target=self._drop_loop, name="stt-drops", daemon=True)
+            self._drop_thread.start()
+
+    def _drop_loop(self) -> None:
+        while True:
+            item, why = self._drops.get()
+            try:
+                self.on_drop(item, why)
+            except Exception:  # the caller's trouble must not stop the next one
+                pass
 
     def start(self) -> Transcriber:
         threading.Thread(target=self._run, name="stt", daemon=True).start()

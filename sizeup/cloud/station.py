@@ -20,7 +20,8 @@
                        updater's last result go up in the status ("version")
     jobs thread        GET /api/station/jobs?wait=25 (long poll: the station never takes inbound
                        connections): "tts" renders a dispatch with the local voice; "call" runs
-                       set_mode / set_talkgroup / set_talkgroup_group / retranscribe / set_channel_prefs
+                       set_mode / set_talkgroup / set_talkgroup_group / retranscribe / transcribe_now /
+                       set_channel_prefs
                        (Settings > Radios > Channels, as the hub has them) / emergency_all_clear (an
                        alarm's All clear: the emergency window here, App._call's keep decision) here
 
@@ -56,7 +57,8 @@ TALKGROUPS_S = 30.0      # the talkgroup list (big, slow to change): this often,
 JOB_WAIT_S = 25          # long poll; Cloudflare allows 100 s
 CONNECTED_S = 15.0       # no answer from the hub this long = not connected (the station's own header)
 CALLS = ("set_mode", "set_talkgroup", "set_talkgroup_group", "retranscribe", "set_channel_prefs",
-         "emergency_all_clear")       # an alarm's All clear on the hub: the emergency window here closes (#128)
+         "emergency_all_clear",       # an alarm's All clear on the hub: the emergency window here closes (#128)
+         "transcribe_now")            # the hub's fallback when Amazon Transcribe can't: whisper at live priority (#195)
 
 
 def clip_8k(wav: bytes | None) -> bytes | None:

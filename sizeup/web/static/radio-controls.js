@@ -68,6 +68,8 @@ window.RadioControls = (() => {
       n.groups.addEventListener("change", onEngine);
       n.sync = el("div", "small rc-sync");
       n.cost = el("div", "dim small rc-cost");
+      n.limitHit = el("p", "notice rc-limit");     // the monthly AWS limit reached (#195): not just a dim line
+      n.limitHit.hidden = true;
       n.rerun = el("button", "", "Re-run all");
       n.rerun.type = "button";
       n.rerun.title = "Re-transcribe every recording still on disk";
@@ -89,7 +91,7 @@ window.RadioControls = (() => {
         tab("channels", card("Channels", "Record: keeps its transmissions (off for FG1, FG2 or South 2: the receiver keeps running, squelch, "
              + "MDC IDs and Talking now stay live, nothing is kept).\nMain: up front in Radio and on our incident; "
              + "the rest are folded under Other talkgroups.\nTranscribe: speech-to-text at all.\nEngine:\n" + ENGINE_HELP,
-             n.sync, n.cost, tools, n.tgErr, n.groups)),
+             n.sync, n.limitHit, n.cost, tools, n.tgErr, n.groups)),
         tab("vocabulary", card("Vocabulary", "Words Amazon Transcribe should expect: unit names, places, streets. AWS takes letters only, "
              + "so numbers go spelled out (Engine 60 \u2192 Engine-sixty) and come back as written. Saved here, sent to "
              + "AWS with Push (the hub's vocabulary sizeup-pcfd), used by new streams once it is Ready.", ...vocabCard())),
@@ -343,7 +345,8 @@ window.RadioControls = (() => {
                 ...((c.prefs || {})[key] || {}) };
     const q = st.cpending.get(key);
     if (q) Object.assign(p, q.vals, { cpending: true });
-    p.effective = !p.transcribe ? "off" : p.engine === "local" || c.aws_ok ? p.engine : "local";
+    const aws = c.aws_ok || (c.aws_reserve || []).includes(key);     // past the limit: the reserve channels keep AWS
+    p.effective = !p.transcribe ? "off" : p.engine === "local" || aws ? p.engine : "local";
     return p;
   }
   function fmRows() {
@@ -508,6 +511,11 @@ window.RadioControls = (() => {
     }
     setText(n.cost, cost);
     n.cost.classList.toggle("warn", !!(a.enabled && !a.ok));
+    const why = a.enabled ? a.why : c.aws_why;
+    const hit = !c.aws_ok && /monthly AWS limit/.test(why || "");
+    setText(n.limitHit, hit ? `Monthly AWS limit reached: ${why}. The AWS channels use whisper until next month or a higher limit`
+      + ((c.aws_reserve || []).length ? ` (still on AWS from the reserve: ${c.aws_reserve.join(", ")})` : "") + "." : "");
+    show(n.limitHit, hit);
   }
 
   function renderTalkgroups() {

@@ -47,7 +47,7 @@ def test_p25_call_kept_once_and_recorder_log_capped(tmp_path):
     meta = touch(day / "307-9.json", 5, json.dumps({"talkgroup": 307}).encode())
     app = App(replace(cfg(tmp_path), p25_dir=str(tmp_path / "p25"), p25_talkgroups={307: "Fire/EMS 15"},
                       p25_tg_info={307: {"name": "Fire/EMS 15", "group": "Fire/EMS", "encrypted": False}}))
-    app.stt.submit = lambda item, audio: None
+    app.stt.submit = lambda item, audio, *a, **k: None
     now = time.time()
     app._call(Call("307-9", 307, "Fire/EMS 15", now, now + 2, [], np.zeros(RATE * 2, np.float32), str(wav)))
     assert not wav.exists() and not meta.exists()                 # trunk-recorder's original is gone ...
