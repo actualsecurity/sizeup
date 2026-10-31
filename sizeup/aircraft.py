@@ -73,8 +73,8 @@ Nothing fake: positions are the feed's (ADS-B, MLAT or TIS-B as it says), and so
 the track store accepted). Each aircraft carries the age of its position at the feed's time ("at") and how fast it
 is turning ("tr", deg/s: the feed's track_rate, else from its last two fixes, clamped to a standard-rate turn).
 Between fixes the page moves the mark on along its track and speed, bent by that turn, for at most 10 s after the
-fix and never once it is stale (shortfinal's dead reckoning, web/static/app.js positionNow; motion.js), easing it
-onto each new fix instead of jumping. Anything older than STALE_S is drawn hollow, at its last real position,
+fix and never once it is stale (shortfinal's dead reckoning, web/static/app.js positionNow; motion.js), and meets
+each new fix by drawing it a little slower or faster, never backwards (glide.js, #179), unless it is far off. Anything older than STALE_S is drawn hollow, at its last real position,
 fading until the hub drops it after DROP_S. The ETA is distance / ground speed, labelled as such. The phase is our
 reading of the track (shortfinal's rules), never ATC's word.
 
@@ -1193,9 +1193,14 @@ class AircraftLayer:
         with self._lock:
             self.tracks.update(snap)
             view = self._view()
+        # "fetched" is when the answer came in, not when the tick began: the page reads each aircraft's age as its
+        # "age" (at the feed's time) plus the time since "fetched", so stamping it before the reads (an API answer
+        # takes 0.3 s to over 10 s) made every position look older than it was and the page drew the aircraft that
+        # much further on, then had to bring it back at the next fix (#179)
+        done = self.clock()
         with self._fresh:
             self.view = view
-            self.st.update(at=snap.now, fetched=now, error="", seq=self.st["seq"] + 1)
+            self.st.update(at=snap.now, fetched=done, error="", seq=self.st["seq"] + 1)
             self._fresh.notify_all()
         self._watch(now)
 
@@ -1308,7 +1313,8 @@ class AircraftLayer:
             m = AIRLINE_CALLSIGN.match(ac.flight or "")
             model = " ".join(x for x in ((reg or {}).get("make", ""), (reg or {}).get("model", "")) if x)
             kind = "helicopter" if ac.category == "A7" else (reg or {}).get("kind", "")
-            trail = [[round(lon, 4), round(lat, 4)] for _, lat, lon in _thin(tuple(t.trail), TRAIL_POINTS)]
+            # to 5 places (~1 m) like the position: 4 (~10 m) put kinks in the page's smoothed curve (#179)
+            trail = [[round(lon, 5), round(lat, 5)] for _, lat, lon in _thin(tuple(t.trail), TRAIL_POINTS)]
             out.append({
                 "hex": ac.hex, "cs": ac.flight or ac.reg or (reg or {}).get("n", ""), "flight": ac.flight,
                 "reg": ac.reg or (reg or {}).get("n", ""), "reg_src": "feed" if ac.reg else ("faa" if reg else ""),
