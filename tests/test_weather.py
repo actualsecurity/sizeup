@@ -472,6 +472,7 @@ def test_the_hub_serves_weather_and_the_setting_gates_the_voice(tmp_path):
         w = h.app.weather
         assert w._thread is None                                         # tests: never the real NOAA
         w.fetch = FakeNoaa()
+        w.clock = Clock()                                                # the fixtures' day: their alerts in effect, whatever today is
         for f in wx.FEEDS:
             assert w.refresh(f)
         d = h.get("/api/cad/weather")
