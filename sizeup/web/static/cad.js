@@ -1222,7 +1222,7 @@ function repaintTx() {                   // the rows' busy state changed: draw t
 }
 // What a transmission without text says (its status): sizeup/app.py, sizeup/channels.py.
 function sttSaid(t) {
-  return { no_speech: "Key-up, no speech", no_voice: "Tones only", pending: "Transcribing", remote: "Transcribing on the hub (AWS)", off: "Not transcribed",
+  return { no_speech: "Key-up, no speech", no_voice: "Tones only, no message", pending: "Transcribing", remote: "Transcribing on the hub (AWS)", off: "Not transcribed",
            error: "Transcription failed" }[t.status] || "—";
 }
 // A note tagged with units ("E63 stated that ..."), as a row among the transmissions.
