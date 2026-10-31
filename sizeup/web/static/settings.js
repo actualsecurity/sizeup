@@ -22,7 +22,7 @@ const S = {
   toneOpen: new Set(), entEdit: null, entMerge: null, toneMove: null, toneAdd: null,
 };
 const S_SECTIONS = [["lists", "Lists"], ["runcards", "Run cards"], ["units", "Units"], ["dispatch", "Dispatch"],
-  ["users", "Users"], ["system", "System"], ["radios", "Radios"]];
+  ["users", "Users"], ["system", "System"], ["radios", "Radios"], ["data", "Data sources"]];
 // Settings > Radios, one tab per part (#115; the Lists page's tabs): which RadioControls card, the Tones page and the
 // Radio IDs editor each go under (data-rtab on each).
 const S_RADIO_TABS = [["receivers", "Receivers"], ["channels", "Channels"], ["tones", "Tones"], ["ids", "Radio IDs"],
@@ -213,7 +213,7 @@ function sRender(force) {
     return;
   }
   S.deferred = false;
-  const fn = { lists: sLists, units: sUnits, dispatch: sDispatch, users: sUsers, system: sSystem, radios: sRadios }[S.section];
+  const fn = { lists: sLists, units: sUnits, dispatch: sDispatch, users: sUsers, system: sSystem, radios: sRadios, data: sData }[S.section];
   if (fn) fn(panel);
 }
 
@@ -1631,6 +1631,12 @@ function sSystem(panel) {
   sStation();
   if (window.Alarm) Alarm.mountSettings($("#s-alarms"));
   if (window.StationHealth) StationHealth.mount(health);
+}
+
+// ---- data sources (#186): every data pull, Refresh now, how often (datasources.js; sizeup/datasources.py) -------------
+
+function sData(panel) {
+  if (window.DataSourcesPanel) DataSourcesPanel.mount(panel, { msg: sMsg });
 }
 
 // ---- system: the camera wall's area (#125; sizeup/roads.py Roads.area, settings.py _wall_op) ----------------

@@ -233,6 +233,9 @@ class Cad:
         # Settings > System > Camera wall (#125): every camera with where it falls in our area (sizeup/roads.py
         # Roads.settings_rows); the app sets it. None: no highway layers here.
         self.camera_area: Callable[[], dict] | None = None
+        # Settings > Data sources (#186): the hub's data pulls (sizeup/datasources.py DataSources); the app sets it.
+        # None: no data sources here (GET /api/cad/datasources says so).
+        self.datasources = None
         # GET /api/cad/tones (#80): the pairs named from the console and the names to pick from; the app sets it.
         self.tone_names: Callable[[], dict] = lambda: {"named": self.settings.tone_rows(), "names": list(s.monitor_departments),
                                                         "ours": list(s.monitor_departments)}

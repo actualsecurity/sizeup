@@ -34,6 +34,9 @@ Reset to default = drop the override (one item, or a whole section).
                                    list, never written into it (sizeup/app.py _apply_named_tones)
     camera_wall                    key "margin_m" -> metres around our fire districts, "include" / "exclude" -> [camera
                                    ids]: the camera wall's area (#125, Settings > System; sizeup/roads.py Roads.area)
+    datasources                    key a data source ("gis:hydrants", "aircraft:registry") -> off | hourly | daily | weekly |
+                                   monthly: how often the registry refreshes it (#186, Settings > Data sources;
+                                   sizeup/datasources.py); not set: the source's default
 
 Codes never change (they are stored on events and exported): a rename changes the name only. An
 item in use can't be deleted, only retired (named on old events, off the pick lists). Every change
@@ -77,6 +80,9 @@ PAGE_SECTION = {**{s: "lists" for s in LIST_SECTIONS}, "event_class": "lists", "
 # The camera wall's area (#125, sizeup/roads.py Roads.area): Settings > System.
 WALL_SECTION, WALL_KEYS, WALL_MARGIN = "camera_wall", ("margin_m", "include", "exclude"), (0, 5000, 1000)
 PAGE_SECTION[WALL_SECTION] = "system"
+# How often each data source is refreshed (#186, sizeup/datasources.py): Settings > Data sources, audited as System.
+DS_SECTION = "datasources"
+PAGE_SECTION[DS_SECTION] = "system"
 WALL_ID = re.compile(r"[A-Za-z0-9_.:-]{1,64}")      # sizeup/roads.py CAMERA_ID
 MAX_WALL_IDS = 200
 AUDIT_SECTIONS = ("lists", "run cards", "units", "dispatch", "users", "system", "radios")
@@ -563,7 +569,7 @@ class Editor:
         fn = {"event_class": self._class_op, "status_flow": self._flow_op, "type_subtypes": self._map_op, "geo_town_order": self._towns_op, "units": self._units_op,
               "dispatch": self._dispatch_op, "users": self._users_op, "runcards": self._cards_op,
               "import": self._import_op, "channels": self._channels_op, "stt": self._stt_op,
-              "places": self._places_op, TONES_SECTION: self._tones_op, WALL_SECTION: self._wall_op,
+              "places": self._places_op, TONES_SECTION: self._tones_op, WALL_SECTION: self._wall_op, DS_SECTION: self._ds_op,
               "alarms": lambda a, b, o: self.cad.alarms.settings_op(a, b, o)}.get(section)
         if fn is None:
             raise CadError(f"no settings section {section!r}")
@@ -1725,6 +1731,52 @@ class Editor:
                                 [("system", f"{WALL_SECTION}/camera/{cid}", was, mode)])
         raise CadError("action: set, camera or reset")
 
+    # -- data sources (#186): how often each is refreshed (sizeup/datasources.py; Settings > Data sources) ------------
+    # Kept as overrides (section "datasources": source key -> a CHOICES key) so they survive a restart and are audited,
+    # exported and imported with the rest; the registry reads them on every turn of its schedule.
+
+    @staticmethod
+    def _ds_check(d: dict) -> None:
+        from sizeup.datasources import CHOICES, KEY_RE
+        for k, v in d.items():
+            if not isinstance(k, str) or not KEY_RE.fullmatch(k) or v not in CHOICES:
+                raise CadError(f"overrides.{DS_SECTION}.{k}: one of {', '.join(CHOICES)}")
+
+    def _ds_op(self, action: str, body: dict, op: str) -> dict:
+        """set {key, value: off | hourly | daily | weekly | monthly} | reset {key} (that one) | reset (all): admins."""
+        from sizeup.datasources import CHOICES
+        ds = getattr(self.cad, "datasources", None)
+        cur = dict(self.overrides().get(DS_SECTION) or {})
+        if action == "reset" and not body.get("key"):
+            if not cur:
+                raise CadError("every data source is on its default schedule already")
+            return self._commit([(DS_SECTION, k, REMOVE) for k in cur], op, [("system", DS_SECTION, cur, "default")])
+        key = _text(body.get("key"), "key", 64)
+        src = ds.get(key) if ds is not None else None
+        if ds is not None and src is None:
+            raise CadError(f"no data source {key!r}")
+        if src is not None and not src.managed:
+            raise CadError(f"{src.name} keeps its own schedule ({src.builtin or 'refreshed by hand'})")
+        default = src.every if src is not None else None
+        old = cur.get(key, default or "default")
+        if action == "reset":
+            if key not in cur:
+                raise CadError(f"{src.name if src else key} is on its default schedule already")
+            return self._commit([(DS_SECTION, key, REMOVE)], op, [("system", f"{DS_SECTION}/{key}", old, default or "default")])
+        if action != "set":
+            raise CadError("action: set or reset")
+        v = body.get("value")
+        if v not in CHOICES:
+            raise CadError(f"value: one of {', '.join(CHOICES)}")
+        if v == old:
+            return {"ok": True}
+        return self._commit([(DS_SECTION, key, REMOVE if v == default else v)], op, [("system", f"{DS_SECTION}/{key}", old, v)])
+
+    def note(self, operator: str, section: str, key: str, old, new) -> None:
+        """An audit row for something done from Settings that isn't a setting (a data source's Refresh now, #186)."""
+        with self.store.tx() as db:
+            self._audit(db, self.store.clock(), operator, section, key, old, new)
+
     # -- run cards: reset ------------------------------------------------------------------------------
 
     def _cards_op(self, action: str, body: dict, op: str) -> dict:
@@ -1944,6 +1996,7 @@ class Editor:
                 raise CadError(f"overrides.tones.{k}: the key is the pair, {key}")
             ov[TONES_SECTION][k] = val
         self._wall_check(ov.get(WALL_SECTION) or {})
+        self._ds_check(ov.get(DS_SECTION) or {})
         for k, v in (ov.get("alarms") or {}).items():         # sizeup/cad/alarms.py (#128)
             ov["alarms"][k] = alarms_mod.clean(k, v)
         st = ov.get("stt") or {}

@@ -420,6 +420,11 @@ class App:
         self.aircraft.on_clear = lambda ev, aid, why: self.cad.alarms.aircraft_cleared(ev, aid, why)
         if self.recorder is not None:
             self.recorder.on_line = self.live.feed_line
+        # Settings > Data sources (sizeup/datasources.py, #186): every pull above with its status, Refresh now and,
+        # for the slow ones, the schedule the registry keeps (the admins' choices in the CAD settings).
+        from sizeup import datasources
+        self.datasources = datasources.build(self, log=log, choices=lambda: self.cad.settings.overrides().get(datasources.SECTION) or {})
+        self.cad.datasources = self.datasources
         self._fm_live: dict[str, dict] = {}
         self._stopping = threading.Event()
         self._backfill()
@@ -1116,6 +1121,20 @@ class App:
         if page_id:
             self.reevaluate_page(page_id)
         self.channels_check_tones()
+
+    def tone_list_source(self) -> tuple:
+        """Settings > Data sources' Tone list row (sizeup/datasources.py tones_source): (the file, the codes now, its
+        Reload: the file read again under the config's [[tones]], then applied as a Settings edit is)."""
+        path = Path(self.cfg.tones_file) if self.cfg.tones_file else None
+
+        def reload() -> bool:
+            from sizeup.config import read_tones_file
+            st = self.cad.settings
+            codes = read_tones_file(path) + [c for c in st.base_tones if c.source == "config"]
+            st.use_tone_list(codes, st.base_ours, st.unknown_log)
+            self.tones_changed()
+            return True
+        return path, lambda: list(self.cad.settings.base_tones), reload if path is not None else None
 
     def channels_check_tones(self) -> None:
         """The hub sends the named pairs to the station with the channel choices (HubApp)."""
@@ -2194,6 +2213,7 @@ class App:
             self.trains.start()
             self.aircraft.start()
             self.weather.start()
+            self.datasources.start()
         return self
 
     def forwarding(self) -> bool:
@@ -2249,6 +2269,7 @@ class App:
         self.trains.stop()
         self.aircraft.stop()
         self.weather.stop()
+        self.datasources.stop()
 
     def _weather_voice(self, text: str) -> tuple[str | None, str]:
         """A weather warning said by the dispatch voice, no tones (sizeup/weather.py Weather.speech): (its

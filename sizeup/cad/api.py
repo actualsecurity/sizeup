@@ -141,19 +141,32 @@ POST /api/cad/alarm/<id>/clear            {operator?}  all clear (resolved, not 
                                           (the talkgroup and radio no longer kept with Record off); acknowledges it
                                           too; in the chronology; dispatchers and admins
 POST /api/cad/settings/alarms             {action: set | reset, key: keywords | channels | other | drill, value}: admins
+GET  /api/cad/datasources[?rev=]          Settings > Data sources (#186, sizeup/datasources.py): every data pull with
+                                          {key, name, group, source, last_fetched, next_due, ok, error, items, bytes,
+                                          schedule (managed | builtin | none), every, running, ...}, rev; ?rev= the same:
+                                          {rev, same: true}. Admins and dispatchers (a viewer: 403). Polled by the panel
+                                          while it is open: never in the state push
+POST /api/cad/datasources/<key>/refresh   {operator?}  Refresh now: runs in the background, the answer at once
+                                          ({ok, source: the row, running}); 429 {error} when refused (refreshing already,
+                                          too soon after the last, or the source is resting); admins; in the person's
+                                          activity and the Settings audit log
+POST /api/cad/settings/datasources        {action: set, key, value: off | hourly | daily | weekly | monthly} | {action:
+                                          reset, key?}: how often a data source is refreshed; admins
 """
 
 from __future__ import annotations
 
 import json
 import re
-from urllib.parse import parse_qs
+from datetime import datetime
+from urllib.parse import parse_qs, unquote
 
 from sizeup.cad import airport
 from sizeup.cad.activity import CSV_MAX_ROWS, KINDS, MAX_ROWS
 from sizeup.cad.service import Cad
 from sizeup.cad.settings import LastAdmin
-from sizeup.cad.store import CadError
+from sizeup.cad.store import TZ, CadError
+from sizeup.datasources import TooSoon
 
 JSON = "application/json"
 MAX_BODY = 65536
@@ -169,6 +182,8 @@ PREALERT = re.compile(r"/api/cad/prealert/(\d{1,9})/dismiss")
 HINT = re.compile(r"/api/cad/hint/(\d{1,9})/(accept|dismiss)")
 ALARM_ACK = re.compile(r"/api/cad/alarm/(\d{1,9})/ack")
 ALARM_CLEAR = re.compile(r"/api/cad/alarm/(\d{1,9})/clear")
+DATASOURCE = re.compile(r"/api/cad/datasources/([A-Za-z0-9_.:%-]{1,200})/refresh")
+DS_READERS = ("admin", "dispatcher")      # who may see Settings > Data sources (#186)
 
 # Who may POST what (enforced only with a verified sign-in, see above): "dispatch" = dispatchers and
 # admins (running calls), "admin" = admins only (Settings in every form, and the radios), "read" =
@@ -189,6 +204,7 @@ WRITES = (
     (SETTINGS, "admin"),                                                    # lists, units, dispatch, users, import ...
     (re.compile(r"/api/cad/runcards(?:/delete)?"), "admin"),
     (re.compile(r"/api/cad/radios(?:/delete)?"), "admin"),                 # the radio-ID registry
+    (DATASOURCE, "admin"),                                                  # a data source's Refresh now (#186)
     (re.compile(r"/api/(?:talkgroup|talkgroup-group|mode|retranscribe)"), "admin"),   # the station's radios (server.py)
 )
 READ_ACTIONS = {("/api/cad/settings/dispatch", "preview")}                  # the wording on a sample event
@@ -352,6 +368,7 @@ DOES = (
     (re.compile(r"/api/cad/radios/delete"), lambda m, b, o, c: (f"Changed settings: radio {b.get('system', '')} "
                                                                 f"{_clip(b.get('radio_id'), 12)} deleted", "")),
     (re.compile(r"/api/incident/([^/]{1,80})/close"), lambda m, b, o, c: (f"Closed monitor incident {m.group(1)}", "")),
+    (DATASOURCE, lambda m, b, o, c: (f"Refreshed data source: {_clip((o.get('source') or {}).get('name') or unquote(m.group(1)), 60)}", "")),
     (re.compile(r"/api/talkgroup"), lambda m, b, o, c: (f"Talkgroup {b.get('tg')}: {_toggles(b) or 'no change'}", "")),
     (re.compile(r"/api/talkgroup-group"), lambda m, b, o, c: (f"Talkgroups {_clip(b.get('group'), 40)}: {_toggles(b) or 'no change'}", "")),
     (re.compile(r"/api/mode"), lambda m, b, o, c: (f"Radio mode: {_clip(b.get('mode'), 30)}" + (f" ({_clip(b['sdr'], 30)})" if b.get("sdr") else ""), "")),
@@ -460,8 +477,36 @@ class CadApi:
             return 200, act.csv(rows), "text/csv; charset=utf-8"
         return _json(200, {"rows": rows, "seen": act.seen("" if everyone else who.email), "all": everyone, "email": email})
 
+    def _datasources(self, q: dict, who) -> tuple[int, bytes, str]:
+        """GET /api/cad/datasources: admins and dispatchers (Settings > Data sources, #186)."""
+        if who is not None and who.email and self.cad.settings.standing(who.email)["may"] not in DS_READERS:
+            return _json(403, {"error": "Admins and dispatchers only"})
+        ds = self.cad.datasources
+        if ds is None:
+            return _json(200, {"configured": False, "rev": "", "sources": [], "groups": [], "choices": []})
+        out = ds.public() | {"configured": True}
+        if (q.get("rev") or [""])[0] == out["rev"]:
+            return _json(200, {"rev": out["rev"], "same": True})
+        return _json(200, out)
+
+    def _ds_refresh(self, key: str, body: dict) -> dict:
+        """POST /api/cad/datasources/<key>/refresh: started (the row), in the Settings audit log too."""
+        ds = self.cad.datasources
+        if ds is None:
+            raise CadError("no data sources here (the CAD of record has them)")
+        src = ds.get(key)
+        if src is None:
+            raise CadError(f"no data source {key!r}")
+        before = ds.row(key)["last_fetched"]
+        row = ds.refresh(key, by=str(body.get("operator") or ""))
+        was = datetime.fromtimestamp(before, TZ).isoformat(timespec="seconds") if before else "never"
+        self.cad.settings.note(str(body.get("operator") or ""), "system", f"datasources/{key}", f"last fetched {was}", src.action)
+        return {"ok": True, "running": row["running"], "source": row}
+
     def get(self, path: str, query: str, who=None) -> tuple[int, bytes, str]:
         try:
+            if path == "/api/cad/datasources":
+                return self._datasources(parse_qs(query), who)
             if path == "/api/cad/whoami":
                 return _json(200, self.cad.settings.whoami(who.email if who is not None else ""))
             if path in ("/api/cad/activity", "/api/cad/export/activity.csv"):
@@ -540,6 +585,10 @@ class CadApi:
             if signed:
                 self.refused(path, who, "the last admin", client)
             return _json(409, {"error": str(e)})
+        except TooSoon as e:                   # a data source's Refresh now, refused (#186): rate limit, running, resting
+            if signed:
+                self.refused(path, who, str(e), client)
+            return _json(429, {"error": str(e)})
         except CadError as e:
             return _json(400, {"error": str(e)})
         if out is None:
@@ -583,4 +632,6 @@ class CadApi:
             return c.delete_radio(body)
         if path == "/api/cad/radio-id":
             return c.name_radio(body)
+        if m := DATASOURCE.fullmatch(path):
+            return self._ds_refresh(unquote(m.group(1)), body)
         return None
