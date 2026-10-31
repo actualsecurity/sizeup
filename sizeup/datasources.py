@@ -32,8 +32,8 @@ returns at once; the panel polls GET /api/cad/datasources while it is open (noth
 is in the person's activity and the Settings audit log. "Clears the cache" means the provider fetches afresh,
 ignoring what it holds, and replaces it only with a good answer: a failed refresh never empties a layer.
 
-Registering a new pull (road projects, #185, and whatever comes after): one register() call where the app builds
-the providers (build() below), e.g.
+Registering a new pull (whatever comes after; road projects, #185, is roadwork_source below): one register() call
+where the app builds the providers (build() below), e.g.
 
     ds.register(Source("roadwork", "Road projects", "Map layers", source="NYSDOT", link="https://...",
                        status=lambda: {"at": p.at, "error": p.error, "n": len(p.items)},
@@ -433,6 +433,50 @@ def roads_sources(roads) -> list[Source]:
     return out
 
 
+def roadwork_source(rw) -> Source:
+    """Road projects & closures (sizeup/roadprojects.py, #185): one row for the sources it reads itself (the capital
+    programs, the villages' notices, WZDx), on the provider's own loop (each source on its own cadence, only while the
+    layer or an incident view is open). The Thruway's and 511NY's roadwork come with their events rows (Cameras).
+    Refresh now reads every source that is on at once, afresh (no If-None-Match), except one resting after a
+    refusal or a rate limit; the row waits only when all of them are resting."""
+    from sizeup import roadprojects as r
+
+    def on() -> list:
+        return [f for f in rw.feeds if f.on]
+
+    def status() -> dict:
+        if not rw.configured:
+            return {"on": False, "why": rw.why_not() or "Road projects off"}
+        fs = on()
+        ats = [f.status["at"] for f in fs if isinstance(f.status["at"], (int, float))]
+        err = "; ".join(f"{f.short}: {f.status['error']}" for f in fs if f.status["error"])
+        nxt = [f.status["next"] for f in fs]
+        looked = rw.clock() - rw.asked <= r.DEMAND_S
+        return {"at": max(ats) if ats else None, "error": err, "n": len(rw.items()) + len(rw.notices()),
+                "next": min(nxt) if nxt and looked else None,
+                "note": f"{len(ats)} of {len(fs)} sources read; the Thruway's and 511NY's roadwork come with their events"}
+
+    def refresh() -> bool:
+        ok = False
+        for f in on():
+            if _resting(f.status, rw.clock):
+                continue
+            f.status.update(etag="", modified="")         # afresh: a manual refresh never gets a 304
+            ok = rw.refresh(f) or ok
+        return ok
+
+    def blocked() -> str:
+        fs = on()
+        why = [_resting(f.status, rw.clock) for f in fs]
+        return why[0] if fs and all(why) else ""
+    secs = sorted({f.every_s for f in rw.feeds if f.on}) or [r.NOTICE_EVERY_S]
+    every = f"every {_dur(secs[0])}" + (f" to {_dur(secs[-1])} by source" if len(secs) > 1 else "")
+    return Source("roadwork", "Road projects & closures", "Map layers", "NYSDOT, CTDOT, Thruway, the villages",
+                  "https://gis.dot.ny.gov/hostingny/rest/services/Projects/CapitalProgramProjects/FeatureServer",
+                  "NYSDOT, CTDOT, NYS Thruway Authority, Port Chester, Rye Brook, Greenwich", status, refresh,
+                  builtin=f"{every}, while the layer or an incident view is open", blocked=blocked)
+
+
 def trains_sources(trains) -> list[Source]:
     """Metro-North (sizeup/trains.py): the static GTFS (stations, line; the MTA updates it about weekly) daily in the
     quiet hours, on the registry's schedule; the realtime positions on the provider's own while someone looks."""
@@ -608,6 +652,7 @@ def build(app, log: Callable[[str], None] = print, choices: Callable[[], dict] |
         lambda: [airport_source()],
         lambda: [gazetteer_source(getattr(app, "gaz", None))],
         lambda: roads_sources(app.roads),
+        lambda: [roadwork_source(app.roadwork)] if getattr(app, "roadwork", None) is not None else [],
         lambda: trains_sources(app.trains),
         lambda: weather_sources(app.weather),
         lambda: aircraft_sources(app.aircraft),
