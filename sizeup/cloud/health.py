@@ -23,6 +23,15 @@ notice when it clears:
                   oldest event it reports)
     disk          the station's disk over disk_pct (90) full                               warning (critical
                                                                                            from DISK_CRITICAL)
+    stt_backlog   the station's whisper queue: its oldest live clip waiting STT_BACKLOG_S   warning
+                  (10 min) or more, or clips dropped / skipped (sizeup/stt.py SttQueue, #195)
+    transcribe    Amazon Transcribe on the hub failing long enough that its breaker is     warning
+                  open (sizeup/transcribe.py, #195): AWS's reason (timed out, AccessDenied,
+                  credentials, throttled, billing); the AWS channels run the station's
+                  whisper meanwhile. Decided on the hub's own data, the station silent or not
+    aws_budget80  this month's Amazon Transcribe cost at BUDGET_WARN (80 %) of the limit   warning
+    aws_budget    ... at the limit: the AWS channels use the station's whisper (pages and   critical
+                  Fire/EMS 15 keep AWS within the reserve, sizeup/transcribe.py)
 
 While the station is silent (or before it first reports) the other conditions keep the state they had:
 nothing starts or clears on old data. Per-channel silence (nothing heard for much longer than that channel
@@ -74,6 +83,8 @@ SAVE_GAPS_S = 600.0
 NOT_CHANNELS = ("STT", "Voice", "Hub", "Station", "trunk-recorder")
 STATUS_KEY = b"sizeup-status-token-v1"
 P25_JOB = "Fire/EMS 15"
+STT_BACKLOG_S = 600.0       # the station's whisper: its oldest live clip waiting this long is an alert (#195)
+BUDGET_WARN = 0.8           # this month's AWS cost at this share of the limit: a warning (and a push)
 
 
 def status_token(station_token: str, configured: str = "") -> str:
@@ -221,6 +232,12 @@ def station_metrics(app, metrics: Metrics) -> dict:
     w = getattr(app, "whisper", None)
     if w is not None:
         out["whisper"] = {"state": getattr(w, "state", None), "detail": str(getattr(w, "detail", "") or "")[:200]}
+    stt = getattr(app, "stt", None)
+    if stt is not None and hasattr(stt, "stats"):
+        try:
+            out["stt_queue"] = stt.stats()          # depth, the oldest live clip's wait, what was dropped (#195)
+        except Exception:
+            pass
     out["jobs"] = jobs
     return out
 
@@ -387,6 +404,9 @@ class StationHealth:
         rec = hl.get("recorder") if isinstance(hl.get("recorder"), dict) else None
         out["processes"] = {"whisper": dict(wh, down_since=self._first.get("whisper")) if wh else None,
                             "recorder": dict(rec, down_since=self._first.get("recorder")) if rec else None}
+        sq = hl.get("stt_queue") if isinstance(hl.get("stt_queue"), dict) else None
+        out["stt_queue"] = {k: sq.get(k) for k in ("queued", "urgent", "live", "rerun", "stale", "oldest_s", "dropped",
+                                                   "skipped", "last_drop", "max", "working")} if sq else None
         started = hl.get("started")
         out["system"] = {k: hl.get(k) for k in ("host", "cpu_pct", "load1", "cpus", "mem_pct", "mem_total", "temp_c",
                                                  "disk_pct", "disk_free", "disk_total", "disk_path")}
@@ -395,7 +415,19 @@ class StationHealth:
             uptime_s=round(snow - started) if isinstance(started, (int, float)) else None,
             boot=hl["boot"] + hub.skew if isinstance(hl.get("boot"), (int, float)) else None)
         out["hints"] = [{"channel": c["label"], "text": c["hint"]} for c in chans if c["hint"]]
+        out["transcribe"] = self._transcribe()
         return out
+
+    def _transcribe(self) -> dict | None:
+        """Amazon Transcribe's health on the hub (HubApp.aws_health()), None when it isn't set up here."""
+        fn = getattr(getattr(self.hub, "app", None), "aws_health", None)
+        if fn is None:
+            return None
+        try:
+            h = fn()
+        except Exception as e:  # never in the way of the rest
+            return {"on": True, "state": "unknown", "text": f"health: {type(e).__name__}: {e}"}
+        return h if isinstance(h, dict) and h.get("on") else None
 
     # -- conditions ------------------------------------------------------------------------------------------------
 
@@ -413,6 +445,24 @@ class StationHealth:
         while it's silent or hasn't reported, when only "silent" itself is decided)."""
         name = m["station"]["name"] or "the station"
         out: dict[str, dict] = {}
+        tr = m.get("transcribe")                                 # the hub's own: decided even while the station is silent
+        if tr and tr.get("state") in ("down", "retrying"):
+            out["transcribe"] = {"severity": "warning", "title": "Amazon Transcribe failing",
+                                 "text": f"{tr.get('text') or ''}: the AWS channels use the station's whisper meanwhile",
+                                 "since": float(tr.get("failing_since") or now)}
+        bud = (tr or {}).get("budget") or {}
+        pct = bud.get("pct")
+        if isinstance(pct, (int, float)) and pct >= BUDGET_WARN * 100:
+            spent = f"${bud.get('usd', 0):.2f} of the ${bud.get('limit_usd', 0):g} limit in {bud.get('month', '')}"
+            out["aws_budget80"] = {"severity": "warning", "title": f"Amazon Transcribe at {BUDGET_WARN:.0%} of its monthly limit",
+                                   "text": f"{spent}: at the limit the AWS channels go to the station's whisper",
+                                   "since": float(bud.get("warn_since") or now)}
+            if pct >= 100:
+                out["aws_budget"] = {"severity": "critical", "title": "Amazon Transcribe monthly limit reached",
+                                     "text": f"{spent}: the AWS channels use the station's whisper until next month or a "
+                                             "higher limit (Settings > Radios)" + (f"; {bud['reserve_text']}"
+                                                                                  if bud.get("reserve_text") else ""),
+                                     "since": float(bud.get("limit_since") or now)}
         silent, since = self._silent(now)
         if silent:
             out["silent"] = {"severity": "critical", "title": "Station silent",
@@ -474,6 +524,13 @@ class StationHealth:
                                           "text": f"whisper-server: {wh.get('state')}"
                                                   + (f" ({wh['detail']})" if wh.get("detail") else "")
                                                   + ": transmissions come up without text"})
+        sq = m.get("stt_queue")
+        if sq and ((sq.get("oldest_s") or 0) >= STT_BACKLOG_S):
+            out["stt_backlog"] = {"severity": "warning", "title": "Speech-to-text behind",
+                                  "text": f"the station's whisper is behind: its oldest waiting clip is from "
+                                          f"{_hhmm(now - float(sq.get('oldest_s') or 0))} (pages, Fire/EMS 15 and the "
+                                          "firegrounds go first; clips waiting too long are skipped and say so)",
+                                  "since": now - float(sq.get("oldest_s") or 0)}
         rec = m["processes"]["recorder"]
         if rec and rec.get("expected") and rec.get("state") != "ok":
             held("recorder", self.down_s, {"severity": "critical", "title": "trunk-recorder down",
@@ -533,6 +590,9 @@ class StationHealth:
             w["detail"] = f"{m['outbox']['pending']} event(s) waiting"
         elif kind == "disk" and isinstance(m["system"].get("disk_pct"), (int, float)):
             w["detail"] = f"disk {m['system']['disk_pct']:.0f}% full"
+        elif kind == "transcribe":
+            w["detail"] = "Amazon Transcribe" + (f": {(m.get('transcribe') or {}).get('reason_text')}"
+                                                 if (m.get("transcribe") or {}).get("reason_text") else "")
         return w
 
     # -- the loop ---------------------------------------------------------------------------------------------------
@@ -559,7 +619,7 @@ class StationHealth:
             for key in list(self.active):
                 if key in conds:
                     continue
-                if key != "silent" and not judged:
+                if key not in ("silent", "transcribe", "aws_budget80", "aws_budget") and not judged:
                     continue                             # the station's data is old: leave it as it was
                 a = self.active.pop(key)
                 a["cleared"] = now

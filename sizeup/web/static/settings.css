@@ -195,7 +195,7 @@
   .rc-groups .tg-row.aws { border-inline-start-color: var(--info); }
   .rc-groups .tg-row.main.aws { border-inline-start-color: var(--accent); }
   .tg-heard.dim { color: var(--dim); }
-  .rc-sync, .rc-cost { margin-block-end: var(--s-1); }
+  .rc-sync, .rc-cost, .rc-limit { margin-block-end: var(--s-1); }
   .rc-sync:is(.applied, .local) { color: var(--ok); }
   .rc-sync:is(.pending, .offline), .rc-cost.warn { color: var(--warn); }
   /* Vocabulary: the phrases, Save / Suggestions / Push, its state on AWS, what AWS got, the monthly limit */

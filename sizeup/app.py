@@ -82,7 +82,7 @@ from sizeup.cad import tonelist
 from sizeup.radio.tones import ToneEvent, TonePlan, base_name
 from sizeup.talkers import talker_prompt
 from sizeup import channels
-from sizeup.stt import LIVE, RERUN, Transcriber, WhisperClient, radio_voice, wav_bytes
+from sizeup.stt import LIVE, RERUN, URGENT, Transcriber, WhisperClient, radio_voice, wav_bytes
 from sizeup.talkgroups import TalkgroupPrefs
 from sizeup.tts import TtsService
 from sizeup.web.server import WebServer
@@ -108,6 +108,8 @@ SDR_WATCH_S = 3.0          # [radio] auto_assign: how often the plugged-in dongl
 SDR_FAILING_RESTARTS = 3   # an auto job that has restarted this often and is down: logged once, left as is
 SDR_SETTLE_S = 60.0        # after startup, Off dongles wait this long for the ones that had jobs (USB attach order)
 EVIDENCE_LIST = 200        # an emergency call's record (App._p25_evidence): at most this many srcList / freqList entries
+# Speech-to-text first on the station's whisper (#195): pages, Fire/EMS 15 and our firegrounds, ahead of the rest.
+STT_FIRST = ("tg:307", "FG1", "FG2")
 MIN_SPEECH_S = 0.15      # less sound than this above the dead-air floor (and no tones) = a mic click
 LIVE_WATCH_S = 0.2       # FG1 talking watcher: how often the squelch is looked at (the MDC ID: radio/tap.py)
 ID_EDGE_S = 1.0          # an FG1 key-up with no ID: a burst is looked for this close to either end of the carrier (#163)
@@ -222,6 +224,7 @@ class AwsJob:
     alt: dict | None = None   # "both": the local model's {text, model}, kept next to AWS's text
     page: object = None
     rerun: bool = False       # a person asked for it again (re-transcribe): the text is replaced, the result said
+    recovered: bool = False   # left waiting by a restart (the hub): its fallback waits for the station to reconnect
 
 
 @dataclass
@@ -249,7 +252,7 @@ class App:
                                (Path(cfg.clips_dir).parent / "tts-server.json") if cfg.clips_dir else None, log=log)
                     if cfg.dispatch_tts_engine == "kokoro" and cfg.dispatch_tts_python else None)
         self.stt = Transcriber(WhisperClient(f"http://127.0.0.1:{cfg.stt_port}/inference"), self._transcribed,
-                               prompt=self._prompt)
+                               prompt=self._prompt, on_drop=self._stt_dropped)
         self.gaz = self._load_gazetteer()
         self.keep_s = cfg.keep_hours * 3600
         self._lock = threading.Lock()
@@ -1429,9 +1432,15 @@ class App:
             log(f"speech-to-text re-run: {n} recording(s) to Amazon Transcribe")
         return n, local, alt
 
-    def _rerun_local(self, ids: list[str] | None = None, as_alt: bool = False) -> int:
+    def transcribe_now(self, ids: list[str]) -> int:
+        """The hub's fallback for live clips Amazon Transcribe couldn't do (#195): the local model on them at
+        live priority (pages, Fire/EMS 15 and the firegrounds first), not behind live traffic like a re-run."""
+        return self._rerun_local(list(ids or []), live=True)
+
+    def _rerun_local(self, ids: list[str] | None = None, as_alt: bool = False, live: bool = False) -> int:
         """The local model again on recordings still on disk (ids=None: all of them). Queued behind live
-        traffic; results replace the text and keep the old one in history."""
+        traffic (live: as live traffic, for the hub's fallback); results replace the text and keep the old
+        one in history."""
         want = set(ids) if ids is not None else None
         jobs: list[tuple[float, Rerun, np.ndarray]] = []
         seen: set[str] = set()
@@ -1445,8 +1454,10 @@ class App:
                     jobs.append((p.start, Rerun(p.id, "page", got[1], start=p.start, as_alt=as_alt), got[0]))
                     seen.add(p.id)
         traffic = list(self.store.loose) + [t for i in self.store.incidents for t in i.traffic]
+        first: dict[str, bool] = {}         # live: Fire/EMS 15 and the firegrounds ahead (STT_FIRST)
         for t in traffic:
             if (want is None or t.id in want) and t.id not in busy and t.id not in seen:
+                first[t.id] = (channels.tg_key(t.talkgroup) if t.talkgroup is not None else t.source) in STT_FIRST
                 got = self._rerun_audio(t.id, getattr(t, "fm", True))
                 if got:
                     low = speech_seconds(got[0]) < MIN_SPEECH_S  # same mic-click rule as the live pass
@@ -1458,7 +1469,8 @@ class App:
                 self.rerun = {"total": 0, "done": 0, "changed": 0, "failed": 0}
             n = 0
             for _start, job, audio in jobs:
-                if self.stt.submit(job, audio, priority=RERUN):
+                prio = RERUN if not live else URGENT if job.kind == "page" or first.get(job.id) else LIVE
+                if self.stt.submit(job, audio, priority=prio):
                     self._rerun_ids.add(job.id)
                     n += 1
             self.rerun["total"] += n
@@ -1568,18 +1580,20 @@ class App:
             p["record"] = self.tg.record(int(key[3:]))
         return p
 
-    def aws_ok(self) -> tuple[bool, str]:
-        """Can Amazon Transcribe take audio now? Forwarding to a hub: what the hub last said (it runs it);
+    def aws_ok(self, key: str | None = None) -> tuple[bool, str]:
+        """Can Amazon Transcribe take audio now (from that channel: past the monthly limit the pages and
+        Fire/EMS 15 keep it within the reserve)? Forwarding to a hub: what the hub last said (it runs it);
         else this process's own (the hub; all-in-one with [stt] aws and credentials)."""
         if self.forwarding():
-            return bool(self._hub_aws.get("ok")), str(self._hub_aws.get("why") or "")
+            ok = bool(self._hub_aws.get("ok")) or (key is not None and key in (self._hub_aws.get("reserve") or ()))
+            return ok, "" if ok else str(self._hub_aws.get("why") or "")
         if self.aws is None:
             return False, "Amazon Transcribe isn't set up here ([stt] aws): the local model is used"
-        return self.aws.available()
+        return self.aws.available(key)
 
     def stt_engine(self, key: str) -> str:
         """off | local | aws | both: what runs for this channel now ("aws" falls back to local without AWS)."""
-        return channels.effective(self.channel_pref(key), self.aws_ok()[0])
+        return channels.effective(self.channel_pref(key), self.aws_ok(key)[0])
 
     def _stt(self, item, audio: np.ndarray, eng: str, key: str) -> None:
         """One transmission or page to speech-to-text the way its channel says (audio: whisper's 16 kHz input)."""
@@ -1601,7 +1615,30 @@ class App:
             if eng == "aws":
                 return self._aws_start(item, pcm, key)
             self._aws_wait[item.id] = (pcm, key)
-        self.stt.submit(item, audio)
+        self.stt.submit(item, audio, self._stt_priority(item, key), key)    # (dropped: _stt_dropped says so on it)
+
+    @staticmethod
+    def _stt_priority(item, key: str) -> int:
+        """Pages, Fire/EMS 15 and the firegrounds ahead of other live traffic on the whisper queue."""
+        return URGENT if not isinstance(item, (Traffic, Rerun)) or key in STT_FIRST else LIVE
+
+    def _stt_dropped(self, item, why: str) -> None:
+        """The whisper queue dropped or skipped it (sizeup/stt.py SttQueue, #195): it says so ("Transcription
+        failed", the reason in its model line), never left "Transcribing"; Re-transcribe can still run it."""
+        log(f"speech-to-text: {getattr(item, 'id', '?')} not transcribed: {why}")
+        if isinstance(item, Rerun):
+            with self._lock:
+                had = item.id in self._rerun_ids
+                self._rerun_ids.discard(item.id)
+                if had:
+                    self.rerun["done"] += 1
+                    self.rerun["failed"] += 1
+            if not item.as_alt:
+                self._rerun_finish(item.id, f"failed: {why}"[:200])
+            return
+        item.raw, item.confidence, item.status = "", None, "error"
+        item.model = f"{Path(self.cfg.stt_model).name} (not transcribed: {why})"[:200]
+        self._transcribed(item)
 
     # -- Amazon Transcribe (the hub; all-in-one with [stt] aws) ---------------------------------------------
 
@@ -1617,7 +1654,8 @@ class App:
                                               idle_s=cfg.stt_aws_idle_s, pace=cfg.stt_aws_pace, vocabulary=cfg.stt_aws_vocabulary),
                                   self.aws_usage, self._aws_done, self._aws_failed, log=log,
                                   limit_usd=self.cad.settings.aws_limit,
-                                  respell=lambda t: respell(t, self.vocab.state()["respell"]))
+                                  respell=lambda t: respell(t, self.vocab.state()["respell"]),
+                                  on_late=self._aws_late, on_change=self._aws_changed)
         if self.vocab.ready():
             self.aws.vocabulary = cfg.stt_aws_vocabulary
         log(f"speech-to-text: Amazon Transcribe streaming ({reg}) for the channels set to AWS in Settings > Radios")
@@ -1639,7 +1677,7 @@ class App:
         else:
             self._save_page(item)
             job = AwsJob("page", item.id, key, page=item)
-        ok, why = self.aws.available() if self.aws is not None else (False, "Amazon Transcribe isn't set up here")
+        ok, why = self.aws.available(key) if self.aws is not None else (False, "Amazon Transcribe isn't set up here")
         if not ok:
             return self._aws_failed(job, why)
         self.aws.submit(key, job, pcm)
@@ -1680,13 +1718,40 @@ class App:
             page = job.page
             if page.audio is not None:
                 page.status, page.model, page.stt = "pending", "", ""
-                self.stt.submit(page, page.voice)
+                self.stt.submit(page, page.voice, URGENT, job.channel)
                 return
             page.status = "error"
             self._save_page(page)
             return
         if not self._rerun_local([job.id]):
             self._retext(job.id, "", "error", None, f"{channels_model()} (failed: {why[:80]})", why="AWS Transcribe")
+
+    def _aws_late(self, job: AwsJob, text: str, conf: float | None) -> None:
+        """AWS answered after the job's deadline (#195): its fallback ran already, so the late text never takes
+        the place of whisper's. It is kept as the alternative transcript (alt_text, model "aws-transcribe
+        (late)"), next to whisper's, like a "both" channel; only when the fallback found no text at all (the
+        item says "transcription failed") does it become the text. Nothing said: dropped."""
+        if not text:
+            log(f"aws transcribe: {job.kind} {job.id}: a late answer with no words: dropped")
+            return
+        item, _key = self._find(job.id)
+        if item is None:
+            return
+        if getattr(item, "status", "") == "error" and job.alt is None and not job.rerun:
+            log(f"aws transcribe: {job.kind} {job.id}: a late answer, and the fallback had none: it is the text")
+            return self._aws_done(job, text, conf)
+        log(f"aws transcribe: {job.kind} {job.id}: a late answer, kept as the alternative: {text}")
+        self._set_alt(job.id, text, f"{channels_model()} (late)")
+
+    def _aws_changed(self) -> None:
+        """Amazon Transcribe's breaker opened or closed (sizeup/transcribe.py): aws_ok() says so from now on."""
+
+    def aws_health(self) -> dict:
+        """Amazon Transcribe's health (AwsTranscriber.health()): station health and Settings > Data sources."""
+        if self.aws is not None:
+            return self.aws.health()
+        return {"on": False, "state": "off",
+                "why": "runs on the hub" if self.forwarding() else "Amazon Transcribe isn't set up here ([stt] aws)"}
 
     # -- the radios' side of Settings > Radios (Cad.radio_ctx) ---------------------------------------------
 
@@ -1744,7 +1809,8 @@ class App:
             d = json.loads(self.cad.store.meta_get("hub_aws") or "{}")
         except ValueError:
             d = {}
-        return {"ok": bool(d.get("ok")), "why": str(d.get("why") or "the hub hasn't said whether it can use AWS yet")}
+        return {"ok": bool(d.get("ok")), "why": str(d.get("why") or "the hub hasn't said whether it can use AWS yet"),
+                "reserve": [str(k) for k in (d.get("reserve") or [])]}
 
     def set_channel_prefs(self, prefs: dict, aws: dict | None = None, tones: dict | None = None) -> dict:
         """From the hub (CAD of record): its whole channel map, whether it can take AWS audio now, and the
@@ -1757,7 +1823,8 @@ class App:
             self._apply_named_tones()
             changed = True
         if isinstance(aws, dict):
-            new = {"ok": bool(aws.get("ok")), "why": str(aws.get("why") or "")[:300]}
+            new = {"ok": bool(aws.get("ok")), "why": str(aws.get("why") or "")[:300],
+                   "reserve": [str(k)[:40] for k in (aws.get("reserve") or [])][:8]}
             if new != self._hub_aws:
                 self._hub_aws = new
                 self.cad.store.meta_put("hub_aws", json.dumps(new))
@@ -1770,7 +1837,7 @@ class App:
     def channels_applied(self) -> dict:
         """What this station runs (its state push: the hub compares sig)."""
         return {"prefs": self._chan_ov, "aws": dict(self._hub_aws), "tones": len(self._tone_ov),
-                "sig": channels.sig(self._chan_ov, self._hub_aws["ok"], self._tone_ov)}
+                "sig": channels.sig(self._chan_ov, self._hub_aws["ok"], self._tone_ov, self._hub_aws.get("reserve"))}
 
     def channels_sync(self) -> dict:
         if self.forwarding():
@@ -1780,7 +1847,9 @@ class App:
     def channels_state(self) -> dict:
         """Settings > Radios > Channels: the choices, what AWS can do, where they stand, the cost."""
         ok, why = self.aws_ok()
+        reserve = ([k for k in channels_reserve(self) if self.aws_ok(k)[0]] if not ok else [])
         return {"prefs": self._chan_ov, "aws_channels": list(self.cfg.stt_aws_channels), "aws_ok": ok, "aws_why": why,
+                "aws_reserve": reserve,
                 "fm": [{"key": c.label, "kind": c.kind, "mhz": c.mhz} for c in self.cfg.channels],
                 "sync": self.channels_sync(), "aws": self.aws_status()}
 
@@ -2333,6 +2402,15 @@ class App:
         audio URL, which voice) or (None, why not). Played in the browser; never keyed."""
         path, note = self.cad._render(text, tones=[])
         return (self.cad._audio_url(path), note) if path else (None, note)
+
+
+def channels_reserve(app) -> tuple:
+    """The channels that keep AWS past the monthly limit (sizeup/transcribe.py RESERVE_CHANNELS)."""
+    aws = getattr(app, "aws", None)
+    if aws is not None:
+        return tuple(aws.s.reserve_channels)
+    from sizeup.transcribe import RESERVE_CHANNELS
+    return RESERVE_CHANNELS
 
 
 def channels_model() -> str:

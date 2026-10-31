@@ -274,7 +274,7 @@ def test_talkgroup_record_and_main_switches(tmp_path):
                 p25_tg_info=info, p25_incident_talkgroups=frozenset({307}))
     app = App(c)
     sent = []
-    app.stt.submit = lambda item, audio: sent.append(item)
+    app.stt.submit = lambda item, audio, *a, **k: sent.append(item)
     rows = {r["tg"]: r for r in app.state()["talkgroups"]}
     assert rows[307]["main"] and rows[307]["record"] and not rows[383]["main"] and rows[383]["record"]
     assert not rows[391]["record"]                                   # encrypted: off by default
@@ -427,7 +427,7 @@ def test_call_is_split_into_one_row_per_talker(tmp_path):
 
 def test_p25_clip_ids_with_dots_play_and_paths_dont(tmp_path):
     app = App(replace(cfg(tmp_path), p25_talkgroups={307: "Fire/EMS 15"}))
-    app.stt.submit = lambda item, audio, priority=0: True
+    app.stt.submit = lambda item, audio, *a, **k: True
     cid = "307-1790954731.970_476112500.0-call_11"
     app._call(Call(cid, 307, "Fire/EMS 15", time.time(), time.time() + 2, ["77A4"], voice(2.0), ""))
     app.clips.clear()                                   # served from disk, as after a restart

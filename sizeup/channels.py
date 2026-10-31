@@ -90,12 +90,15 @@ def effective(p: dict, aws_ok: bool) -> str:
     return eng if eng == "local" or aws_ok else "local"
 
 
-def sig(overrides: dict, aws_ok: bool, tones: dict | None = None) -> str:
-    """The same choices + the same AWS availability (+ the same named tone pairs, #80) -> the same short
-    signature (hub and station). No named pairs: the signature from before them."""
+def sig(overrides: dict, aws_ok: bool, tones: dict | None = None, reserve=None) -> str:
+    """The same choices + the same AWS availability (+ the same named tone pairs, #80; + the channels that keep
+    AWS past the monthly limit, #195) -> the same short signature (hub and station). None of those: the
+    signature from before them."""
     d = {"prefs": {k: {f: v for f, v in sorted(o.items())} for k, o in sorted(overrides.items())}, "aws": bool(aws_ok)}
     if tones:
         d["tones"] = {k: tones[k] for k in sorted(tones)}
+    if reserve and not aws_ok:
+        d["reserve"] = sorted(str(k) for k in reserve)
     raw = json.dumps(d, sort_keys=True, separators=(",", ":"))
     return hashlib.sha1(raw.encode()).hexdigest()[:12]
 

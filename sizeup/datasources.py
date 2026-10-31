@@ -600,6 +600,33 @@ def tones_source(path: Path | None, codes: Callable[[], list], reload: Callable[
                   status, reload, every="off", action="Reload")
 
 
+def transcribe_source(app) -> Source:
+    """Amazon Transcribe (sizeup/transcribe.py, #195): no data pull, but the outside service whose trouble leaves
+    transmissions "Transcribing", so it is here with the rest: the last answer, the failure with AWS's reason
+    (timed out, AccessDenied, credentials, throttled, billing), the breaker. Try AWS now: an open breaker
+    half-opens, so the next clips go to AWS again."""
+    def status() -> dict:
+        h = app.aws_health()
+        if not h.get("on"):
+            return {"on": False, "why": h.get("why") or "Amazon Transcribe off"}
+        bad = h.get("state") not in ("ok", None)
+        b = h.get("breaker") or {}
+        note = (f"{h.get('done', 0)} answered, {h.get('timeouts', 0)} timed out, {h.get('late', 0)} late"
+                + (f"; breaker {b.get('state')}" if b.get("state") not in (None, "closed") else ""))
+        return {"at": h.get("last_ok"), "error": str(h.get("text") or "failing") if bad else "",
+                "n": h.get("open_jobs"), "note": note}
+
+    def retry() -> bool:
+        aws = getattr(app, "aws", None)
+        return bool(aws is not None and aws.retry_now())
+    return Source("transcribe", "Amazon Transcribe (speech-to-text)", "Radio", "Amazon Web Services",
+                  "https://console.aws.amazon.com/billing/home", "", status, retry,
+                  builtin="streams on demand; while failing, tried again every "
+                          f"{_dur(getattr(getattr(getattr(app, 'aws', None), 's', None), 'breaker_retry_s', 300.0))}",
+                  min_gap_s=30.0, action="Try AWS now",
+                  note="items: jobs waiting for AWS now; the AWS channels use whisper while it fails")
+
+
 def build(app, log: Callable[[str], None] = print, choices: Callable[[], dict] | None = None) -> DataSources:
     """Every pull the app has (sizeup/app.py), registered. A new provider: one more register() here."""
     ds = DataSources(choices or (lambda: {}), log=log)
@@ -612,6 +639,7 @@ def build(app, log: Callable[[str], None] = print, choices: Callable[[], dict] |
         lambda: weather_sources(app.weather),
         lambda: aircraft_sources(app.aircraft),
         lambda: [tones_source(*app.tone_list_source())] if hasattr(app, "tone_list_source") else [],
+        lambda: [transcribe_source(app)] if hasattr(app, "aws_health") else [],
     )
     for add in adders:
         try:

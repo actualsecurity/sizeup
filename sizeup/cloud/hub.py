@@ -36,6 +36,18 @@ Amazon Transcribe ([stt] aws, sizeup/transcribe.py) runs here: a "traffic" / "pa
 transcript_pending "aws" (the station skipped whisper) is shown as "Transcribing" and gets AWS's text
 (_aws_start -> _retext); "both" gets AWS's text with the station's kept as alt_text. If AWS can't, the
 station's whisper is asked for it (retranscribe), else it says "transcription failed".
+Never left "Transcribing" (#195): an AWS job past its deadline fails as "AWS timed out" (sizeup/transcribe.py's
+watchdog) and goes the same way; a late AWS answer is then kept as alt_text (App._aws_late). Every SWEEP_S the
+hub also looks for anything still pending "aws" (_aws_sweep): past its deadline + SWEEP_GRACE_S with no job
+answering for it (a job lost, a thread gone) it is failed over too (the station's whisper, at live priority:
+transcribe_now), and one the station's whisper was asked for that has no text FALLBACK_WAIT_S later says
+"transcription failed" (flagged: its text still comes up if it arrives); a page waiting for the station's own
+whisper is flagged the same way after PENDING_FLAG_S. After a restart (_aws_recover) what was waiting goes to
+AWS again (less than RECOVER_S old) or to the station's whisper (waiting up to RECOVER_WAIT_S for the station
+to reconnect). While AWS keeps failing its breaker is open, and past the monthly limit only the reserve
+channels (pages, Fire/EMS 15) keep it: aws_ok() says so, the station is told (channels_check), and it runs
+whisper on new clips itself. When AWS can take audio again (a new month, a higher limit, the breaker
+closed) what is still waiting or failed from the last RESEND_S on an AWS channel goes to it (_aws_resend).
 
 The monitor's state lives in hub.sqlite and the clips in audio.sqlite (hubstore.py), next to the
 CAD's cad.sqlite: all of it under one state dir that Litestream replicates (deploy/hub/).
@@ -66,6 +78,7 @@ from sizeup.cloud.health import StationHealth, status_token
 from sizeup.cloud.hubstore import AudioDb, MonitorDb
 from sizeup.incidents import Traffic
 from sizeup.radio.page import page_from_dict
+from sizeup.transcribe import deadline_for
 
 JSON = "application/json"
 MAX_EVENTS_BODY = 32 * 1024 * 1024
@@ -74,6 +87,14 @@ MAX_RESULT_BODY = 16 * 1024 * 1024
 LIVE_STALE_S = 8.0       # a "talking now" snapshot older than this is dropped (the station resends every 2 s)
 TTS_WAIT_S = 20.0        # the dispatch voice: the station renders it; longer than this = text only
 CALL_WAIT_S = 12.0       # an SDR / talkgroup switch (the monitor's switch gives up at 15 s)
+SWEEP_S = 15.0           # Amazon Transcribe (#195): how often the hub looks for what is still "Transcribing" ...
+SWEEP_GRACE_S = 15.0     # ... failed over this long past its job's own deadline (the job's watchdog goes first)
+FALLBACK_WAIT_S = 120.0  # the station's whisper asked and no text this long after: flagged "transcription failed"
+PENDING_FLAG_S = 120.0   # a page waiting this long for the station's own whisper: flagged the same way
+RESEND_S = 6 * 3600.0    # AWS back (a new month, a higher limit): what failed or waits from this far back goes to it
+RESEND_MAX = 200         # ... at most this many, the newest first
+RECOVER_S = 3600.0       # after a restart: what waited for AWS less than this goes to AWS again, older to whisper
+RECOVER_WAIT_S = 120.0   # ... to whisper: waiting this long for the station to reconnect first
 JOB_PATH = re.compile(r"/api/station/jobs/([0-9a-f]{16})")
 EXTRA = re.compile(r"[a-z][a-z0-9_]{0,30}")      # a transmission's field names, as the station sends them
 
@@ -468,6 +489,10 @@ class HubApp(App):
     switches through jobs, and the state lives in SQLite (hubstore.py)."""
 
     def __init__(self, cfg, log: Callable[[str], None] = print):
+        self._aws_since: dict[str, float] = {}         # id -> when Amazon Transcribe got it (the sweep's clock)
+        self._aws_asked: dict[str, float] = {}         # id -> when the station's whisper was asked instead
+        self._pending_seen: dict[str, float] = {}      # page id -> when the sweep first saw it waiting for whisper
+        self._aws_was_ok: bool | None = None           # AWS could take audio at the last sweep (_aws_resend)
         state = Path(cfg.cad_db).parent if cfg.cad_db else None
         self.mdb = MonitorDb(state / "hub.sqlite" if state else ":memory:")
         self.audio = AudioDb(state / "audio.sqlite" if state else ":memory:", int(cfg.cloud_audio_max_mb * 1024 * 1024))
@@ -510,11 +535,12 @@ class HubApp(App):
             pid = self._id(d)
             with self._lock:
                 page = next((p for p in self.pages if p.id == pid), None)
-            if page is not None and page.status == "pending" and getattr(page, "stt", "") == "aws":
+            if page is not None and getattr(page, "stt", "") == "aws" and (
+                    page.status == "pending" or getattr(page, "flagged", False)):
                 # the station's whisper standing in for Amazon Transcribe: the page is read now
                 page.raw, page.confidence = str(d.get("text") or ""), d.get("confidence")
                 page.status, page.model = str(d.get("status") or "done"), str(d.get("model") or "")  # type: ignore[attr-defined]
-                page.stt = ""  # type: ignore[attr-defined]
+                page.stt, page.flagged = "", False  # type: ignore[attr-defined]
                 self._transcribed(page)
                 return
             alt = d.get("alt") if isinstance(d.get("alt"), dict) else None
@@ -560,8 +586,9 @@ class HubApp(App):
             page = page_from_dict(d)
             with self._lock:
                 self.pages.appendleft(page)
-        elif page.status != "pending" or getattr(page, "stt", "") == "aws":
+        elif (page.status != "pending" and not getattr(page, "flagged", False)) or getattr(page, "stt", "") == "aws":
             return                                    # applied before (or Amazon Transcribe reads it here)
+        page.flagged = False  # type: ignore[attr-defined]   (flagged by the sweep: its text came after all)
         page.raw, page.confidence = str(d.get("raw") or ""), d.get("confidence")
         page.status, page.model = str(d.get("status") or "done"), str(d.get("model") or "")  # type: ignore[attr-defined]
         self._transcribed(page)
@@ -626,9 +653,26 @@ class HubApp(App):
                                            page=None if isinstance(item, Traffic) else item), "no audio came with it")
         self._aws_start(item, pcm, key)
 
+    def _aws_start(self, item, pcm, key: str) -> None:
+        self._aws_since[item.id] = time.time()
+        self._aws_asked.pop(item.id, None)
+        super()._aws_start(item, pcm, key)
+
     def _aws_done(self, job, text: str, conf) -> None:
         super()._aws_done(job, text, conf)
+        if job.alt is None and not job.rerun:
+            self._aws_since.pop(job.id, None)
+            self._aws_asked.pop(job.id, None)
         self.sync()
+
+    def _aws_late(self, job, text: str, conf) -> None:
+        super()._aws_late(job, text, conf)
+        self.sync()
+
+    def _aws_changed(self) -> None:
+        """The breaker opened or closed: the station hears it now (AWS channels run its whisper, or AWS again)."""
+        if getattr(self, "hub", None) is not None:
+            self.channels_check(force=True)
 
     def _aws_failed(self, job, why: str) -> None:
         """Amazon Transcribe couldn't: the station's whisper does it (retranscribe, the text comes back as
@@ -641,11 +685,21 @@ class HubApp(App):
             return
         if job.alt is not None:                    # "both": the station's text stays
             return
+        self._aws_asked[job.id] = time.time()      # (the sweep: no text from the station either -> failed)
 
         def ask() -> None:
             err = ""
+            if job.recovered:                      # just restarted: the station is usually back within seconds
+                end = time.time() + RECOVER_WAIT_S
+                while not self.hub.connected() and time.time() < end and not self._stopping.wait(1.0):
+                    pass
             try:
-                n = int(self.hub.remote("retranscribe", [job.id], timeout=CALL_WAIT_S) or 0)
+                try:                               # whisper at live priority, not behind live traffic (#195)
+                    n = int(self.hub.remote("transcribe_now", [job.id], timeout=CALL_WAIT_S) or 0)
+                except RuntimeError as e:
+                    if "not allowed" not in str(e):
+                        raise
+                    n = int(self.hub.remote("retranscribe", [job.id], timeout=CALL_WAIT_S) or 0)   # an older station
             except (StationOffline, RuntimeError, TypeError, ValueError) as e:
                 n, err = 0, str(e)
             if n:
@@ -659,24 +713,150 @@ class HubApp(App):
                 self.sync()
         threading.Thread(target=ask, name="aws-fallback", daemon=True).start()
 
-    def _aws_recover(self) -> None:
-        """After a redeploy: what was waiting for Amazon Transcribe goes to it again (or the station)."""
-        if self.aws is None:
-            return
-        cutoff = time.time() - 3600
+    def _aws_pending(self) -> list[tuple[object, str, str]]:
+        """Every page and transmission still waiting for Amazon Transcribe: (item, its channel key, kind)."""
         with self._lock:
-            pages = [p for p in self.pages if p.status == "pending" and getattr(p, "stt", "") == "aws" and p.end > cutoff]
-        for p in pages:
-            self._aws_from_clip(p, self.audio.get(p.id), p.label)
+            out = [(p, p.label, "page") for p in self.pages if p.status == "pending" and getattr(p, "stt", "") == "aws"]
         for t in list(self.store.loose) + [t for i in self.store.incidents for t in i.traffic]:
-            if t.status == "pending" and getattr(t, "stt", "") == "aws" and t.end > cutoff:
-                from sizeup.transcribe import wav_pcm
-                pcm = wav_pcm(self.audio.get(t.id) or b"")
-                key = channels.tg_key(t.talkgroup) if t.talkgroup is not None else t.source
-                if pcm is not None and self.aws.available()[0]:
-                    self.aws.submit(key, AwsJob("traffic", t.id, key), pcm)
-                else:
-                    self._aws_failed(AwsJob("traffic", t.id, key), "the hub restarted")
+            if t.status == "pending" and getattr(t, "stt", "") == "aws":
+                out.append((t, channels.tg_key(t.talkgroup) if t.talkgroup is not None else t.source, "traffic"))
+        return out
+
+    def _aws_recover(self) -> int:
+        """After a restart (a redeploy, a crash) nothing that waited for Amazon Transcribe is left
+        "Transcribing": less than RECOVER_S old with its clip here, to AWS again when it can take it; the
+        rest (and all of it when AWS can't: the breaker, the limit, not set up) to the station's whisper."""
+        from sizeup.transcribe import wav_pcm
+        now = time.time()
+        ok, why = self.aws.available() if self.aws is not None else (False, "Amazon Transcribe isn't set up on the hub")
+        again = whisper = 0
+        for item, key, kind in self._aws_pending():
+            page = item if kind == "page" else None
+            wav = self.audio.get(item.id)
+            pcm = wav_pcm(wav, getattr(item, "voice_offset_s", 0.0) if page is not None else 0.0) if wav else None
+            if ok and pcm is not None and item.end > now - RECOVER_S:
+                self._aws_since[item.id] = now
+                self.aws.submit(key, AwsJob(kind, item.id, key, page=page), pcm)
+                again += 1
+                continue
+            reason = why if not ok else "no clip on the hub" if pcm is None else f"waiting over {RECOVER_S / 60:.0f} min"
+            self._aws_failed(AwsJob(kind, item.id, key, page=page, recovered=True), f"the hub restarted ({reason})")
+            whisper += 1
+        if again or whisper:
+            self.hub.log(f"hub: after the restart, {again} waiting for Amazon Transcribe sent to it again, "
+                         f"{whisper} to the station's whisper")
+        return again + whisper
+
+    def _aws_sweep(self, now: float | None = None) -> int:
+        """Anything still pending "aws" past its deadline (+ SWEEP_GRACE_S) is failed over, whatever became of
+        its job (a thread gone, a job lost, a hub restart); one the station's whisper was asked for and that has
+        no text FALLBACK_WAIT_S later says "transcription failed". How many it moved on."""
+        now = time.time() if now is None else now
+        n = self._flag_waiting(now)
+        pending = self._aws_pending()
+        ids = {item.id for item, _k, _kind in pending}
+        for d in (self._aws_since, self._aws_asked):
+            for cid in [c for c in d if c not in ids]:
+                d.pop(cid, None)
+        for item, key, kind in pending:
+            asked = self._aws_asked.get(item.id)
+            if asked is not None:
+                if now - asked >= FALLBACK_WAIT_S:
+                    self._aws_give_up(item, kind, f"AWS failed and the station's whisper sent no text in "
+                                                  f"{FALLBACK_WAIT_S / 60:.0f} min; it comes up if it arrives")
+                    n += 1
+                continue
+            since = self._aws_since.setdefault(item.id, now)    # (one nobody tracked: counted from now)
+            clip_s = max(0.0, float(item.end) - float(item.start))
+            limit = (self.aws.deadline_for(clip_s) if self.aws is not None else deadline_for(clip_s)) + SWEEP_GRACE_S
+            if now - since < limit:
+                continue
+            why = f"AWS timed out: still no text after {now - since:.0f} s"
+            self.hub.log(f"aws transcribe: {kind} {item.id}: {why} (the hub's sweep)")
+            mine = (lambda x, cid=item.id: getattr(x, "id", None) == cid and getattr(x, "alt", None) is None
+                    and not getattr(x, "rerun", False))
+            if self.aws is None or not self.aws.give_up(mine, why):
+                self._aws_failed(AwsJob(kind, item.id, key, page=item if kind == "page" else None), why)
+            n += 1
+        return n
+
+    def _aws_give_up(self, item, kind: str, why: str, model: str = "") -> None:
+        """Flag it: "Transcription failed" with why, never "Transcribing" for good. flagged: a text that still
+        comes (the station's whisper, late) is taken as it would have been."""
+        self._aws_asked.pop(item.id, None)
+        self._aws_since.pop(item.id, None)
+        note = f"{model or channels_model()} failed ({why[:160]})"
+        self.hub.log(f"{'aws transcribe' if not model else 'speech-to-text'}: {kind} {item.id}: {why}: flagged as failed")
+        item.flagged = True
+        if kind == "page":
+            item.status, item.model = "error", note
+        else:
+            self._retext(item.id, "", "error", None, note, why="transcription failed:")
+        self.sync()
+
+    def _flag_waiting(self, now: float) -> int:
+        """A page waiting for the station's own whisper (not AWS) PENDING_FLAG_S after the hub got it: flagged."""
+        with self._lock:
+            waiting = [p for p in self.pages if p.status == "pending" and getattr(p, "stt", "") != "aws"]
+        ids = {p.id for p in waiting}
+        for cid in [c for c in self._pending_seen if c not in ids]:
+            self._pending_seen.pop(cid, None)
+        n = 0
+        for p in waiting:
+            seen = self._pending_seen.setdefault(p.id, now)
+            if now - seen >= PENDING_FLAG_S:
+                self._pending_seen.pop(p.id, None)
+                self._aws_give_up(p, "page", f"no text from the station's speech-to-text in {PENDING_FLAG_S / 60:.0f} min "
+                                             "(it may be behind: Settings > System > Station health); it comes up if it arrives",
+                                  model="speech-to-text")
+                n += 1
+        return n
+
+    def _aws_resend(self, now: float | None = None) -> int:
+        """AWS can take audio again (a new month, a higher limit, the breaker closed): what is still waiting or
+        failed (no text) from the last RESEND_S on a channel set to AWS goes to it, the newest first, at most
+        RESEND_MAX. Its text, when it comes, takes the place of the failure."""
+        from sizeup.transcribe import wav_pcm
+        if self.aws is None:
+            return 0
+        now = time.time() if now is None else now
+        with self._lock:
+            pages = [(p, p.label, "page") for p in self.pages]
+        items = pages + [(t, channels.tg_key(t.talkgroup) if t.talkgroup is not None else t.source, "traffic")
+                         for t in list(self.store.loose) + [t for i in self.store.incidents for t in i.traffic]]
+        todo = [(it, key, kind) for it, key, kind in items
+                if it.end > now - RESEND_S and (it.status == "pending" or (it.status == "error" and not getattr(it, "text", "")
+                                                                           and not getattr(it, "raw", "")))
+                and self.channel_pref(key)["engine"] == "aws"
+                and (it.id not in self._aws_since or it.id in self._aws_asked)]     # (not one AWS is doing now)
+        todo.sort(key=lambda x: -x[0].end)
+        n = 0
+        for it, key, kind in todo[:RESEND_MAX]:
+            if not self.aws.available(key)[0]:
+                continue
+            wav = self.audio.get(it.id)
+            pcm = wav_pcm(wav, getattr(it, "voice_offset_s", 0.0) if kind == "page" else 0.0) if wav else None
+            if pcm is None:
+                continue
+            self._aws_since[it.id] = now
+            self._aws_asked.pop(it.id, None)
+            self.aws.submit(key, AwsJob(kind, it.id, key, page=it if kind == "page" else None), pcm)
+            n += 1
+        if n:
+            self.hub.log(f"aws transcribe: AWS can take audio again: {n} waiting or failed from the last "
+                         f"{RESEND_S / 3600:.0f} h sent to it")
+        return n
+
+    def _aws_watch(self) -> None:
+        while not self._stopping.wait(SWEEP_S):
+            try:
+                self._aws_sweep()
+                ok = self.aws is not None and self.aws.available()[0]
+                if ok and self._aws_was_ok is False:
+                    self._aws_resend()
+                self._aws_was_ok = ok
+            except Exception as e:  # the sweep must never die
+                self.hub.log(f"hub: Amazon Transcribe sweep: {type(e).__name__}: {e}")
 
     # -- Settings > Radios > Channels on the station ----------------------------------------------------
 
@@ -686,8 +866,9 @@ class HubApp(App):
 
     def channel_desired(self) -> dict:
         ok, why = self.aws_ok()
-        return {"prefs": dict(self._chan_ov), "aws": {"ok": ok, "why": why}, "tones": dict(self._tone_ov),
-                "sig": channels.sig(self._chan_ov, ok, self._tone_ov)}
+        reserve = [] if ok or self.aws is None else [k for k in self.aws.s.reserve_channels if self.aws.available(k)[0]]
+        return {"prefs": dict(self._chan_ov), "aws": {"ok": ok, "why": why, "reserve": reserve}, "tones": dict(self._tone_ov),
+                "sig": channels.sig(self._chan_ov, ok, self._tone_ov, reserve)}
 
     def channels_check_tones(self) -> None:
         """A pair named here: the station gets it with the next channel push (the signature changed)."""
@@ -880,6 +1061,7 @@ class HubApp(App):
     def start(self) -> HubApp:
         threading.Thread(target=self._hub_janitor, name="hub-janitor", daemon=True).start()
         threading.Thread(target=self.health.run, args=(self._stopping,), name="station-health", daemon=True).start()
+        threading.Thread(target=self._aws_watch, name="aws-sweep", daemon=True).start()
         self._started = True                      # the phone pre-alert: the hub's own subscription
         self.prealert_sync()
         self.roads.start()                        # 511NY's layers for the maps (sizeup/roads.py)
