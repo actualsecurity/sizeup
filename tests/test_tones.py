@@ -83,7 +83,9 @@ def test_same_frequency_code_and_county_list():
     # Real South 2 pages 2026-10-01: PCFD's code, an estimated-list match, codes learned on the air,
     # and a pair nobody has (stays unknown).
     from sizeup.radio.tones import ToneEvent
-    assert plan.match(ToneEvent("two_tone", 349.1, 311.1, 0, 1)).names == ("Port Chester FD",)
+    assert plan.match(ToneEvent("two_tone", 903.2, 810.2, 0, 1)).names == ("Port Chester FD (heard)",)   # #47
+    assert plan.match(ToneEvent("two_tone", 767.4, 928.1, 0, 1)).names == ("Rye Brook FD (heard)",)
+    assert plan.match(ToneEvent("two_tone", 349.1, 311.1, 0, 1)).names == ()          # the wiki's, never heard
     assert plan.match(ToneEvent("two_tone", 496.8, 767.4, 0, 1)).names == ("Eastchester VAC (heard)",)  # 16:00 "EVAC"
     assert plan.match(ToneEvent("two_tone", 928.1, 810.2, 0, 1)).names == ("Scarsdale EMS (heard)",)
     assert plan.match(ToneEvent("two_tone", 741.3, 623.7, 0, 1)).names == ()  # heard, owner not known yet
@@ -105,7 +107,8 @@ def test_tone_list_has_a_source_and_date_per_row_and_keeps_the_air_rows():
         assert r["estimated"] in ("0", "1", "2") and r["source"] and re.fullmatch(r"\d{4}-\d\d-\d\d", r["fetched"]), r
         float(r["a_hz"]), float(r["b_hz"]) if r["b_hz"] else None
     air = {(r["name"], r["a_hz"], r["b_hz"]) for r in rows if r["estimated"] == "2"}
-    assert air == {("Scarsdale EMS", "928.1", "810.2"), ("Fairview", "832.5", "1201.0"), ("Eastchester VAC", "496.8", "767.4")}
+    assert air == {("Scarsdale EMS", "928.1", "810.2"), ("Fairview", "832.5", "1201.0"), ("Eastchester VAC", "496.8", "767.4"),
+                   ("Port Chester FD", "903.2", "810.2"), ("Rye Brook FD", "767.4", "928.1")}       # #47
     assert all(r["source"] == "air" for r in rows if r["estimated"] == "2")
     legend = {k for r in rows for k in r["source"].split("+")}
     for key in legend:

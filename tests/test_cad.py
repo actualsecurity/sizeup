@@ -782,12 +782,22 @@ def test_lead_in_says_rye_brook_when_their_units_go(monkeypatch):
         "Port Chester and Rye Brook Fire")                                # no joint_only text: the joint lead-in
 
 
-PC = [(349.1, 1.0), (311.1, 3.0)]
+PC = [(903.2, 1.0), (810.2, 3.0)]        # Port Chester Fire, heard on air (#47)
+RB = [(767.4, 1.0), (928.1, 3.0)]        # Rye Brook Fire, heard on air (#47)
 
 
-def test_tone_plan_by_department(monkeypatch):
+def test_tone_plan_by_department(tmp_path, monkeypatch):
     monkeypatch.setattr(shutil, "which", lambda name: None)
+    # The shipped defaults (#47): PCFD's pair, then Rye Brook's own when its units go; only theirs when only theirs go.
     cad = make_cad(clock=Clock(local(2026, 10, 7, 15, 13)))
+    assert cad.s.tones == tuple(PC) and cad.lists.dispatch_tones["Rye Brook"] == RB
+    iid = cad.create({"type": "STRU", "address": "122 South Regent St"})["id"]
+    p = cad._plan(cad.store.incident(iid), [by_name(cad, "E63"), by_name(cad, "L30")], "new", False)[1]
+    assert p == {"groups": [PC, RB], "label": "Port Chester + Rye Brook", "warnings": []}
+    assert cad._plan(cad.store.incident(iid), [by_name(cad, "E14")], "new", False)[1]["groups"] == [RB]
+    # A department whose tones aren't set (null): PCFD's are played in their place, and it says so.
+    p = write_lists(tmp_path, dispatch_tones={"Rye Brook": None})
+    cad = make_cad(tmp_path, lists=str(p), clock=Clock(local(2026, 10, 7, 15, 13)))
     iid = cad.create({"type": "STRU", "address": "122 South Regent St"})["id"]
     p = cad._plan(cad.store.incident(iid), [by_name(cad, "E63")], "new", False)[1]
     assert p == {"groups": [PC], "label": "Port Chester", "warnings": []}
@@ -829,7 +839,7 @@ def test_joint_tones_follow_ours_in_the_audio(tmp_path, monkeypatch):
 
     def at(a, b):
         return peak_hz(x[int(a * 16000):int(b * 16000)])
-    assert abs(at(0.1, 0.9) - 349.1) < 2 and abs(at(1.2, 3.8) - 311.1) < 2
+    assert abs(at(0.1, 0.9) - 903.2) < 2 and abs(at(1.2, 3.8) - 810.2) < 2
     assert np.max(np.abs(x[int(4.05 * 16000):int(4.45 * 16000)])) < 0.01               # the gap between departments
     assert abs(at(4.55, 4.95) - 600) < 3 and abs(at(5.05, 5.45) - 800) < 3
 
@@ -1209,7 +1219,7 @@ def test_only_the_null_transmitter_exists_in_m1(tmp_path):
 
 def test_config_cad_sections(tmp_path):
     c = load(ROOT / "config.example.toml")
-    assert c.cad_db == str((ROOT / "state" / "cad.sqlite").resolve()) and c.dispatch_tones == ((349.1, 1.0), (311.1, 3.0))
+    assert c.cad_db == str((ROOT / "state" / "cad.sqlite").resolve()) and c.dispatch_tones == ((903.2, 1.0), (810.2, 3.0))
     assert c.dispatch_channels == ("FG1", "PC repeater") and c.dispatch_transmit is False
     assert c.cad_lists == str(DATA.resolve())
     for bad in ('[dispatch]\nvolume = 3\n', '[dispatch]\ntones = [[10, 1]]\n', '[cad]\nnope = 1\n', '[cad]\nlists = "nope.json"\n'):

@@ -103,10 +103,13 @@ def test_the_0704_pairs_against_the_list_and_scarsdale_ems():
     and B are those two matches Scarsdale EMS."""
     plan = TonePlan(list(LIST))
     assert plan.tolerance == 0.015
-    assert plan.match_pair(767.4, 928.1) == () and plan.match_pair(903.2, 810.2) == ()
+    # #47: the two pairs of the 07:04 stack are Rye Brook's and Port Chester's, heard on air (60 Control tone tests)
+    assert plan.match_pair(767.4, 928.1) == ("Rye Brook FD (heard)",)
+    assert plan.match_pair(903.2, 810.2) == ("Port Chester FD (heard)",)
     assert plan.match_pair(928.1, 810.2) == ("Scarsdale EMS (heard)",)
-    assert plan.match_pair(349.1 * 1.014, 311.1 * 0.986) == ("Port Chester FD",)
-    assert plan.match_pair(349.1 * 1.02, 311.1) == ()
+    assert plan.match_pair(928.1, 903.2) == ()                    # B1 + A2 of the stack: nobody's
+    assert plan.match_pair(903.2 * 0.986, 810.2 * 1.014) == ("Port Chester FD (heard)",)
+    assert plan.match_pair(903.2 * 0.98, 810.2) == ()
 
 
 def test_reread_tones_runs_the_decoder_again_and_queues_a_page_of_ours(tmp_path):
@@ -151,9 +154,10 @@ def test_a_page_naming_our_units_with_tones_not_ours_is_flagged_with_the_ring_be
     t0 = time.time() - 3600
     pa.ring(ring_msg("r1", at=t0 - 77))
     pa.tick(t0 + 600)                                                     # nothing came: expired
-    page_row(app, "p0704", t0, [(767.4, 928.1), (903.2, 810.2)], TEXT_0704)
+    # 07:04's stack was Rye Brook's and Port Chester's pairs (#47: ours now); as a page on a pair nobody has named yet
+    page_row(app, "p0704", t0, [(741.3, 623.7), (1700.0, 1100.0)], TEXT_0704)
     page_row(app, "pfv", t0 + 60, [(832.5, 1201.0)], "Fairview, 34 Longdale Avenue, smoke in the building")
-    page_row(app, "pmine", t0 + 120, [(349.1, 311.1)], "Engine 64, 209 Westchester Avenue")
+    page_row(app, "pmine", t0 + 120, [(903.2, 810.2)], "Engine 64, 209 Westchester Avenue")
     rows = {r["id"]: r for r in app.cad.feed.rows(limit=10)}
     r = rows["p0704"]
     assert r["page"] == "unknown" and r["names_ours"] == ["E64", "E62", "R40"] and r["events"] == []

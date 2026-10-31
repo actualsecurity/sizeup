@@ -322,6 +322,42 @@ def test_camera_lists_are_on_the_registry_and_the_live_feeds_keep_their_own(tmp_
     assert fetch.urls[-1] == TURLS["events"] and r.row("roads:thruway:events")["ok"]
 
 
+def test_road_projects_one_row_on_its_own_loop_refresh_reads_afresh_and_waits_out_a_rate_limit():
+    from sizeup.roadprojects import RoadProjects
+    from tests.test_roadprojects import provider
+    rp, fetch = provider(None)
+    r = registry(clock=rp.clock)                                                 # one clock for both
+    r.register(ds.roadwork_source(rp))
+    feeds = {f.name: f for f in rp.feeds}
+    row = r.row("roadwork")
+    assert row["group"] == "Map layers" and row["schedule"] == "builtin"
+    assert row["builtin"] == "every 5 min to 24 h by source, while the layer or an incident view is open"
+    assert row["next_due"] is None and row["last_fetched"] is None              # nobody looked: its loop reads nothing
+    assert r.tick() == 0 and all(f.status["at"] is None for f in feeds.values())  # and the registry never runs it
+    r.refresh("roadwork")
+    assert all(f.status["at"] == r.t() for f in feeds.values())
+    row = r.row("roadwork")
+    assert row["ok"] and row["items"] > 0 and row["last_fetched"] == r.t()
+    # Refresh now reads afresh (never a conditional 304) and a source that rate-limits us rests
+    fetch.bodies["https://nysdot.example/"] = 429
+    r.t.t += ds.MANUAL_GAP_S + 1
+    n = len(fetch.calls)
+    r.refresh("roadwork")
+    assert len(fetch.calls) - n == 3 and not any(h.get("If-None-Match") for _, h in fetch.calls[n:])
+    assert "NYSDOT: NYSDOT rate limit" in r.row("roadwork")["error"]
+    r.t.t += ds.MANUAL_GAP_S + 1
+    n = len(fetch.calls)
+    r.refresh("roadwork")
+    assert [u for u, _ in fetch.calls[n:] if "nysdot" in u] == [] and len(fetch.calls) - n == 2   # resting: not asked
+    for f in feeds.values():                                                     # every source resting: the row waits
+        f.status.update(error=f"{f.short} rate limit (HTTP 429)", next=r.t() + 900)
+    r.t.t += ds.MANUAL_GAP_S + 1
+    with pytest.raises(TooSoon, match="resting after"):
+        r.refresh("roadwork")
+    off = ds.roadwork_source(RoadProjects([], enabled=False, log=lambda m: None)).status()
+    assert off["on"] is False and "enabled = false" in off["why"]
+
+
 def test_metro_north_static_daily_overnight_and_the_live_feed_by_hand(tmp_path):
     from tests.test_trains import GTFS_URL, RT_URL, provider
     tr, clock, fetch = provider(tmp_path)
