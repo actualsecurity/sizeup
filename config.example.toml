@@ -238,6 +238,17 @@ heartbeat_stale_min = 90             # no heartbeat (or restart) this long: "Tap
 #                                         # pages is one); each ~26 KB/s and ~1.4 % of a core: 8 is safe on 0.25 vCPU
 # wall_streams = 0                        # the camera wall's live tiles per page; 0: every streaming camera in our area
 
+# [roadwork]: the maps' "Road projects & closures" layer and the incident view's closure lines (sizeup/roadprojects.py,
+# #185): the Thruway's and 511NY's roadwork (read by [roads]), the capital programs in construction (the Thruway, NYSDOT,
+# CTDOT in Greenwich), and the road notices in the public RSS feeds of Port Chester, Rye Brook and Greenwich (placed on
+# the map only when their words name a block, an address or a corner the gazetteer confirms). Read by the hub only
+# while someone looks. Leave the section out: all of these.
+# [roadwork]
+# enabled = true
+# projects = true                        # the capital programs (public ArcGIS / XML, no key)
+# notices = true                         # the villages' RSS road notices
+# wzdx_url = ""                          # a WZDx feed, {key} where the key goes (511NY's key, SIZEUP_511NY_KEY): off until set
+
 # [weather]: NWS alerts (the banner), conditions (the header), radar (the maps' Layers) and NOAA tides (marine
 # calls, the board's marine block): sizeup/weather.py, docs/cloud.md "Weather and water". Public data, no key,
 # fetched by the hub (or all-in-one), cached under the state dir (weather.json). Leave the section out: these.

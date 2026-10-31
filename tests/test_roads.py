@@ -1225,7 +1225,7 @@ def test_the_hub_shows_the_thruway_without_any_key(tmp_path, monkeypatch, fake51
 STATIC = Path(__file__).resolve().parent.parent / "sizeup" / "web" / "static"
 
 
-def test_the_layers_control_is_on_every_map_with_its_six_layers():
+def test_the_layers_control_is_on_every_map_with_its_five_layers():
     import re
     html = (STATIC / "cad.html").read_text()
     order = [html.index(f'src="/static/{n}"') for n in ("map-style.js", "maplayers.js", "cad.js", "cadmap.js")]
@@ -1233,8 +1233,9 @@ def test_the_layers_control_is_on_every_map_with_its_six_layers():
     js = (STATIC / "maplayers.js").read_text()
     layers = re.findall(r'\{ key: "(\w+)", label: "([^"]+)", feed: (true|false), minzoom: (\d+), on: (true|false) \}', js)
     assert [(k, label, on) for k, label, _, _, on in layers] == [
-        ("cameras", "Cameras", "true"), ("incidents", "Incidents & closures", "true"), ("roadwork", "Roadwork", "false"),
+        ("cameras", "Cameras", "true"), ("incidents", "Incidents & closures", "true"),
         ("signs", "Message signs", "false"), ("mileposts", "Mileposts", "false"), ("exits", "Exits", "false")]
+    # roadwork is the Road projects & closures group's (roadprojects.js, #185), key "roadwork": drawn once
     zooms = dict((k, int(z)) for k, _, _, z, _ in layers)
     assert zooms["mileposts"] == zooms["exits"] >= 12          # whole miles with the exits, only when zoomed in
     assert 'minzoom: 14, filter: ["!", ["get", "whole"]]' in js                      # the tenths later still

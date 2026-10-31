@@ -1,0 +1,23 @@
+{"feed_info":{"publisher":"constructed for tests from the WZDx v4.2 specification (no WZDx feed covers our area: 2026-10-15)","version":"4.2"},
+ "type":"FeatureCollection","features":[
+ {"id":"wz-1","type":"Feature",
+  "properties":{"core_details":{"event_type":"work-zone","data_source_id":"x","road_names":["Westchester Ave"],"direction":"eastbound",
+                                "name":"Water main replacement","description":"Westchester Ave closed between N Pearl St and King St",
+                                "update_date":"2026-10-14T10:00:00-04:00"},
+                "start_date":"2026-10-15T09:00:00-04:00","end_date":"2026-10-15T15:00:00-04:00",
+                "is_start_date_verified":true,"is_end_date_verified":false,"location_method":"channel-device-method",
+                "vehicle_impact":"all-lanes-closed","beginning_cross_street":"N Pearl St","ending_cross_street":"King St",
+                "lanes":[{"order":1,"type":"general","status":"closed"},{"order":2,"type":"general","status":"closed"}]},
+  "geometry":{"type":"LineString","coordinates":[[-73.665828,41.00157],[-73.665198,41.001051],[-73.664657,41.000656],[-73.663861,41.000296]]}},
+ {"id":"wz-2","type":"Feature",
+  "properties":{"core_details":{"event_type":"work-zone","data_source_id":"x","road_names":["N Main St"],"direction":"northbound",
+                                "description":"Paving","update_date":"2026-10-14T10:00:00-04:00"},
+                "start_date":"2026-10-12T00:00:00-04:00","end_date":"2026-10-30T06:00:00-04:00",
+                "is_start_date_verified":true,"is_end_date_verified":true,"location_method":"channel-device-method",
+                "vehicle_impact":"some-lanes-closed","lanes":[{"order":1,"type":"general","status":"open"},{"order":2,"type":"general","status":"closed"}]},
+  "geometry":{"type":"LineString","coordinates":[[-73.66386,41.0003],[-73.66334,41.00072],[-73.66249,41.0017]]}},
+ {"id":"wz-far","type":"Feature",
+  "properties":{"core_details":{"event_type":"work-zone","data_source_id":"x","road_names":["I-90"],"direction":"eastbound","update_date":"2026-10-14T10:00:00-04:00"},
+                "start_date":"2026-10-01T00:00:00-04:00","end_date":"2026-12-01T00:00:00-05:00","vehicle_impact":"some-lanes-closed"},
+  "geometry":{"type":"LineString","coordinates":[[-74.01,42.79],[-74.0,42.8]]}}
+]}

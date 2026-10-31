@@ -1,0 +1,98 @@
+<?xml version='1.0' encoding='utf-8'?>
+<capitalprogram>
+  <activecapprojects>
+    <longitude>-73.726006</longitude>
+    <latitude>40.96931</latitude>
+    <locationdescription>NE - MP: 610.8 to 613</locationdescription>
+    <numlocations>2</numlocations>
+    <description>MP 608.8 to MP 610.8 (SB): 2" Mill and Inlay and MP 610.8 to MP 613.0: Pavement Resurfacing</description>
+    <contractor>JRCruz C orp</contractor>
+    <contractno>TANE 25-25/D215047</contractno>
+    <division>New York</division>
+    <id>H371.1</id>
+    <projectclass>T</projectclass>
+    <lowbidamount>$39,677,374.92</lowbidamount>
+    <estimatedcompletiondate>2027</estimatedcompletiondate>
+    <lettingdate>12/10/2025</lettingdate>
+  </activecapprojects>
+  <completedcapprojects>
+    <longitude>-73.672963</longitude>
+    <latitude>40.987516</latitude>
+    <locationdescription>NE - MP: 614.1 to 615</locationdescription>
+    <numlocations>1</numlocations>
+    <constructionamount>$144,009,454.25</constructionamount>
+    <description>I-95 (New England Thruway), Port Chester (MP NE14.1) to Connecticut State Line (MP NE15.0): Pavement Replacement</description>
+    <completiondate>06/15/2022</completiondate>
+    <lettingdate>04/11/2018</lettingdate>
+    <contractor>Ecco III Enterprises, Inc</contractor>
+    <contractno>TANE 18-7/D214568</contractno>
+    <contractno>TANE 18-7/D214568</contractno>
+    <division>New York</division>
+    <id>H14.1</id>
+    <projectclass>T</projectclass>
+  </completedcapprojects>
+  <completedcapprojects>
+    <longitude>-73.741739</longitude>
+    <latitude>40.956969</latitude>
+    <locationdescription>OLD WHITE PLAINS ROAD BRIDGE</locationdescription>
+    <numlocations>3</numlocations>
+    <constructionamount>$20,228,907.00</constructionamount>
+    <description>I-95, New England Thruway: North of Larchmont (Exit 17) to north of White Plains (Exit 18B) Northbound Only and north of Rye (Exit 19) to north of I-287 (Exit 21): Pavement Resurfacing</description>
+    <completiondate>08/26/2022</completiondate>
+    <lettingdate>05/05/2021</lettingdate>
+    <contractor>Yonkers Contracting Company, Inc.</contractor>
+    <contractno>TANE 21-9/D214781</contractno>
+    <contractno>TANE 21-9/D214781</contractno>
+    <division>New York</division>
+    <id>H343.1</id>
+    <projectclass>T</projectclass>
+  </completedcapprojects>
+  <completedcapprojects>
+    <longitude>-73.691364</longitude>
+    <latitude>40.981721</latitude>
+    <locationdescription>NE - MP: 613 to 614.1</locationdescription>
+    <numlocations>2</numlocations>
+    <constructionamount>$20,228,907.00</constructionamount>
+    <description>I-95, New England Thruway: North of Exit 17 to north of Exit 18B Northbound Only and north of Exit 19 to north of Exit 21: Pavement Resurfacing</description>
+    <completiondate>08/26/2022</completiondate>
+    <lettingdate>05/05/2021</lettingdate>
+    <contractor>Yonkers Contracting Company, Inc.</contractor>
+    <contractno>TANE 21-9/D214781</contractno>
+    <contractno>TANE 21-9/D214781</contractno>
+    <division>New York</division>
+    <id>H343.1</id>
+    <projectclass>T</projectclass>
+  </completedcapprojects>
+  <completedcapprojects>
+    <longitude>-73.728434</longitude>
+    <latitude>40.965724</latitude>
+    <locationdescription>WEST STREET BRIDGE</locationdescription>
+    <numlocations>3</numlocations>
+    <constructionamount>$20,228,907.00</constructionamount>
+    <description>I-95, New England Thruway: North of Larchmont (Exit 17) to north of White Plains (Exit 18B) Northbound Only and north of Rye (Exit 19) to north of I-287 (Exit 21): Pavement Resurfacing</description>
+    <completiondate>08/26/2022</completiondate>
+    <lettingdate>05/05/2021</lettingdate>
+    <contractor>Yonkers Contracting Company, Inc.</contractor>
+    <contractno>TANE 21-9/D214781</contractno>
+    <contractno>TANE 21-9/D214781</contractno>
+    <division>New York</division>
+    <id>H343.1</id>
+    <projectclass>T</projectclass>
+  </completedcapprojects>
+  <completedcapprojects>
+    <longitude>-73.680271</longitude>
+    <latitude>40.987414</latitude>
+    <locationdescription>BOSTON POST ROAD RT. 1 BRIDGE</locationdescription>
+    <numlocations>3</numlocations>
+    <constructionamount>$20,228,907.00</constructionamount>
+    <description>I-95, New England Thruway: North of Larchmont (Exit 17) to north of White Plains (Exit 18B) Northbound Only and north of Rye (Exit 19) to north of I-287 (Exit 21): Pavement Resurfacing</description>
+    <completiondate>08/26/2022</completiondate>
+    <lettingdate>05/05/2021</lettingdate>
+    <contractor>Yonkers Contracting Company, Inc.</contractor>
+    <contractno>TANE 21-9/D214781</contractno>
+    <contractno>TANE 21-9/D214781</contractno>
+    <division>New York</division>
+    <id>H343.1</id>
+    <projectclass>T</projectclass>
+  </completedcapprojects>
+  </capitalprogram>

@@ -2,9 +2,10 @@
 // large map, the Overview and /monitor), the camera viewer, the event's "Cameras nearby" row, and the
 // hook the "@" place search uses for cameras.
 //
-//   Layers        Cameras, Incidents & closures, Roadwork, Message signs (the NYS Thruway Authority's public
+//   Layers        Cameras, Incidents & closures, Message signs (the NYS Thruway Authority's public
 //                 feeds and 511NY's, through the hub: GET /api/cad/roads, sizeup/roads.py; each item says its
-//                 source), Mileposts, Exits (the gazetteer's, #67), Airport with its Approaches sub-toggle (airport.js,
+//                 source; their roadwork is in the "Road projects & closures" group, roadprojects.js, #185),
+//                 Mileposts, Exits (the gazetteer's, #67), Airport with its Approaches sub-toggle (airport.js,
 //                 #87: drawn by that module, listed and switched here; on by itself for an event at the airport,
 //                 focus(inc)). Each one on / off per viewer (localStorage "sizeup.mapLayers"), as two remembered
 //                 sets (#111): "overview" (the Overview map, the large map, the wall board) and "incident" (an
@@ -46,7 +47,6 @@ window.MapLayers = (() => {
   const LAYERS = [      // key, label, from 511NY?, min zoom, default on
     { key: "cameras", label: "Cameras", feed: true, minzoom: 0, on: true },
     { key: "incidents", label: "Incidents & closures", feed: true, minzoom: 0, on: true },
-    { key: "roadwork", label: "Roadwork", feed: true, minzoom: 0, on: false },
     { key: "signs", label: "Message signs", feed: true, minzoom: 11, on: false },
     { key: "mileposts", label: "Mileposts", feed: false, minzoom: 12, on: false },
     { key: "exits", label: "Exits", feed: false, minzoom: 12, on: false },
@@ -177,14 +177,6 @@ window.MapLayers = (() => {
       g.beginPath(); g.arc(20, 20, 17, 0, 2 * Math.PI); g.fill(); g.stroke();
       g.fillStyle = white; g.fillRect(9, 16.5, 22, 7);
     });
-    const work = canvas(42, 42, (g) => {                                               // a work-zone diamond
-      g.translate(21, 21); g.rotate(Math.PI / 4);
-      g.fillStyle = warn; g.strokeStyle = DARK; g.lineWidth = 3;
-      g.beginPath(); g.roundRect(-12.5, -12.5, 25, 25, 3); g.fill(); g.stroke();
-      g.rotate(-Math.PI / 4); g.fillStyle = DARK;
-      g.beginPath(); g.arc(-1, -6, 2.6, 0, 2 * Math.PI); g.fill();
-      g.fillRect(-3.5, -2.5, 5, 7.5); g.fillRect(-8, 6, 16, 2.4);
-    });
     const sign = (lit) => canvas(46, 30, (g) => {                                      // a message board
       g.fillStyle = DARK; g.strokeStyle = lit ? warn : dim; g.lineWidth = 3;
       g.beginPath(); g.roundRect(2, 2, 42, 26, 3); g.fill(); g.stroke();
@@ -207,7 +199,7 @@ window.MapLayers = (() => {
       g.beginPath(); g.arc(13, -13, 7.5, 0, 2 * Math.PI); g.fill(); g.stroke();
       g.fillStyle = white; g.fillRect(12, -17.5, 2.2, 6); g.fillRect(12, -10.5, 2.2, 2.2);
     });
-    return { "ml-cam": cam(info), "ml-cam-off": cam(dim), "ml-cam-down": camDown, "ml-inc": tri(err), "ml-closed": closed, "ml-work": work,
+    return { "ml-cam": cam(info), "ml-cam-off": cam(dim), "ml-cam-down": camDown, "ml-inc": tri(err), "ml-closed": closed,
              "ml-sign": sign(true), "ml-sign-blank": sign(false), "ml-mp": tag(ok), "ml-exit": tag("#1F7A45") };
   }
 
@@ -221,9 +213,9 @@ window.MapLayers = (() => {
         id: c.id, icon: c.down ? "ml-cam-down" : c.off ? "ml-cam-off" : "ml-cam", off: !!c.off, down: !!c.down,
         label: c.down ? "camera down" : "" })));
     }
-    if (key === "incidents" || key === "roadwork") {
+    if (key === "incidents") {                // roadwork is the Road projects & closures layer's (roadprojects.js, #185)
       return fc((d.events || []).filter((e) => e.layer === key).map((e) => pt(e, {
-        id: e.id, icon: key === "roadwork" ? "ml-work" : e.closed ? "ml-closed" : "ml-inc" })));
+        id: e.id, icon: e.closed ? "ml-closed" : "ml-inc" })));
     }
     if (key === "signs") return fc((d.signs || []).map((s) => pt(s, { id: s.id, icon: (s.lines || []).length ? "ml-sign" : "ml-sign-blank" })));
     if (key === "mileposts") {                // whole miles from zoom 12 (with the exits), the tenths from 14
@@ -263,7 +255,7 @@ window.MapLayers = (() => {
       this.btn.type = "button";
       if (window.Icon) this.btn.append(Icon("layers"));
       this.btn.append("Layers");
-      this.btn.title = "Map layers: cameras, incidents, roadwork, signs, mileposts, exits, the airport";
+      this.btn.title = "Map layers: cameras, incidents, road projects and closures, signs, mileposts, exits, the airport";
       this.btn.setAttribute("aria-expanded", "false");
       this.btn.setAttribute("aria-haspopup", "true");
       this.btn.addEventListener("click", (e) => { e.stopPropagation(); this.toggle(); });
@@ -507,7 +499,7 @@ window.MapLayers = (() => {
         if (l.key === "airport" && this.force.airport && !prefs[this.profile].airport) lab.append(h("span", "dim small", "event here"));
         if (l.plugin && plugin(l) && !plugin(l).ready() && plugin(l).note()) lab.title = plugin(l).note();
         if (ok && l.minzoom > 0 && this.map && this.map.getZoom() < l.minzoom) lab.append(h("span", "dim small", "zoom in"));
-        const feed = l.key === "incidents" || l.key === "roadwork" ? "events" : l.key;
+        const feed = l.key === "incidents" ? "events" : l.key;
         if (ok && l.feed && (d.sources || []).some((s) => s.status && s.status[feed] && s.status[feed].error)) {
           lab.append(h("span", "ml-err small", "feed error"));
         }
@@ -586,7 +578,7 @@ window.MapLayers = (() => {
       }
       const e = (d.events || []).find((x) => String(x.id) === String(id));
       if (!e) return;
-      const kind = e.layer === "roadwork" ? "Roadwork" : e.closed ? "Closure" : "Incident";
+      const kind = e.closed ? "Closure" : "Incident";
       const title = kind + (e.subtype && e.subtype.toLowerCase() !== kind.toLowerCase() ? `: ${e.subtype}` : "");
       const sub = [e.road, e.dir, e.mile ? `MP ${e.mile}` : ""].filter(Boolean).join(" ");
       const lines = [e.description || "(no description)"];
@@ -607,7 +599,7 @@ window.MapLayers = (() => {
       x.addEventListener("click", () => this.closeInfo());
       head.append(h("span", "spacer"), x);
       const body = h("div", "ml-lines" + (cls ? ` ${cls}` : ""));
-      for (const l of lines) body.append(h("div", "", l));
+      for (const l of lines) body.append(l instanceof Node ? l : h("div", "", l));      // a line may be an element (a link)
       this.info.replaceChildren(head);
       if (sub) this.info.append(h("div", "dim small", sub));
       this.info.append(body);

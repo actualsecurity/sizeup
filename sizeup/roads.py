@@ -476,7 +476,7 @@ def parse_events(doc, bbox=DEFAULT_BBOX) -> list[dict]:
                     "description": _s(_pick(r, "description", ""), 600), "lanes": lanes, "closed": closed,
                     "severity": _s(_pick(r, "severity", ""), 30), "start": _when(_pick(r, "start")),
                     "end": _when(_pick(r, "end")), "updated": _when(_pick(r, "updated")),
-                    "lat": round(pt[0], 6), "lon": round(pt[1], 6)})
+                    "lat": round(pt[0], 6), "lon": round(pt[1], 6)} | _schedule(r))
     out.sort(key=lambda e: (e["layer"], -(e["updated"] or e["start"] or 0)))
     return out
 
@@ -507,6 +507,50 @@ def parse_signs(doc, bbox=DEFAULT_BBOX) -> list[dict]:
                     "dir": _direction(_pick(r, "dir", "")), "lines": _sign_lines(r), "updated": _when(_pick(r, "updated")),
                     "lat": round(pt[0], 6), "lon": round(pt[1], 6)})
     out.sort(key=lambda s: (s["road"], s["name"]))
+    return out
+
+
+def _schedule(r: dict) -> dict:
+    """What a 511 event says of when and where, beyond start and end (the road projects layer, sizeup/roadprojects.py,
+    #185), only what is there: full_closure (IsFullClosure), hours from RecurrenceSchedules ([{..., DaysOfWeek, Times:
+    [{StartTime, EndTime}]}]: any field naming days and start / end times of day), hours_text (Recurrence, as given),
+    detour (DetourInstructions), line (EncodedPolyline, decoded), end_text (a planned end that isn't a time)."""
+    from sizeup.roadprojects import day_numbers, decode_polyline, hhmm
+    out: dict = {}
+    if _truthy(_pick(r, "full_closure", False)):
+        out["full_closure"] = True
+    low = {str(k).lower(): v for k, v in r.items() if k != "_lower"}
+    rec = low.get("recurrence")
+    if rec not in (None, "", [], {}):
+        out["hours_text"] = _s(rec if isinstance(rec, str) else json.dumps(rec, separators=(",", ":")), 200)
+    hours = []
+    for sch in low.get("recurrenceschedules") or []:
+        if not isinstance(sch, dict):
+            continue
+        sl = {str(k).lower(): v for k, v in sch.items()}
+        days = day_numbers(next((v for k, v in sl.items() if "day" in k), []))
+        times = next((v for k, v in sl.items() if "time" in k and isinstance(v, list)), None) or [sch]
+        for t in times:
+            if not isinstance(t, dict):
+                continue
+            tl = {str(k).lower(): v for k, v in t.items()}
+            a = hhmm(next((v for k, v in tl.items() if "start" in k and hhmm(v)), ""))
+            b = hhmm(next((v for k, v in tl.items() if "end" in k and hhmm(v)), ""))
+            if a and b:
+                hours.append({"days": days, "from": a, "to": b})
+    if hours:
+        out["hours"] = hours[:14]
+    detour = _s(low.get("detourinstructions"), 400)
+    if detour:
+        out["detour"] = detour
+    poly = low.get("encodedpolyline")
+    if isinstance(poly, str) and poly:
+        line = decode_polyline(poly)
+        if len(line) >= 2:
+            out["line"] = line[:2000]
+    end = _pick(r, "end")
+    if end not in (None, "") and _when(end) is None:
+        out["end_text"] = _s(end, 80)
     return out
 
 
@@ -596,6 +640,7 @@ def parse_thruway_events(doc, bbox=DEFAULT_BBOX) -> list[dict]:
                     "description": desc, "lanes": lanes.group(1).strip() if lanes else "",
                     "closed": "clos" in cat or bool(THRUWAY_CLOSED.search(desc)), "severity": "",
                     "mile": _s(r.get("milepost"), 10), "start": None, "end": _when(r.get("expirationdatetime")),
+                    "end_text": "" if _when(r.get("expirationdatetime")) else _s(r.get("expirationdatetime"), 80),
                     "updated": _when(r.get("updatetime")), "lat": round(pt[0], 6), "lon": round(pt[1], 6)})
     out.sort(key=lambda e: (e["layer"], -(e["updated"] or 0)))
     return out

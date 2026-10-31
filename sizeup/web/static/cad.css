@@ -125,6 +125,15 @@
   .d-airport .ap-fact { display: inline-flex; gap: var(--s-1); align-items: baseline; white-space: nowrap; }
   .d-airport .ap-fact .dim { font-size: var(--fs-xs); line-height: var(--lh-xs); }
   .d-airport .ap-none { color: var(--dim); font-size: var(--fs-sm); line-height: var(--lh-sm); }
+  /* road closures and projects in effect near the event (roadprojects.js, #185): a line each, the colour its state */
+  .d-roads { display: flex; flex-direction: column; gap: var(--s-0); margin-block-start: var(--s-2); font-size: var(--fs-sm); line-height: var(--lh-sm); }
+  .d-roads[hidden] { display: none; }
+  .d-roads .rw-line { padding-inline-start: var(--s-2); border-inline-start: var(--bw-mark) solid var(--warn); overflow-wrap: anywhere; }
+  .d-roads .rw-now b { color: var(--warn); }
+  .d-roads .rw-later { border-inline-start-color: var(--info); }
+  .d-roads .rw-later b { color: var(--text-2); font-weight: 600; }
+  .d-roads .rw-closed { border-inline-start-color: var(--err); }
+  .d-roads .rw-closed b { color: var(--err); }
 
   /* ---- weather and water (weather.js, #132) ---------------------------------------------------------------
      the alert banners under the header (the NWS's; the station-health banner shares the box), the conditions in

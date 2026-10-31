@@ -689,7 +689,8 @@ heartbeat_stale_min = 90
 > able to enumerate them without ny511".
 
 Every CAD map (the event's, the large map, the Overview, `/monitor`) has a **Layers** button:
-*Cameras*, *Incidents & closures*, *Roadwork*, *Message signs* (from the sources below), *Mileposts*
+*Cameras*, *Incidents & closures*, *Message signs* (from the sources below; their roadwork is in
+*Road projects & closures*, [below](#road-projects--closures-185)), *Mileposts*
 and *Exits* (from the gazetteer, #67, #83), and *Airport* with *Approaches*
 ([the airport](#the-airport-hpn-the-airport-layer-places-alerts), #87); the Overview's map adds *Camera overlay*
 (live camera views on the map, off at first; [Camera wall](#camera-wall-125), #168). Each is on or off per viewer (this browser's
@@ -697,7 +698,7 @@ and *Exits* (from the gazetteer, #67, #83), and *Airport* with *Approaches*
 exits and whole mileposts from 12, the tenths from 14. A camera opens the **camera viewer**: live video where the source streams
 (the Thruway's cameras; muted, see below), else the snapshot, with its name, road, direction and
 milepost, which source it is from and when the image was taken, a new snapshot every 10 s while it
-is open and the tab is visible (paused when hidden); it fits a 390 px phone. An incident, closure, roadwork or sign opens a small box with what the source says and
+is open and the tab is visible (paused when hidden); it fits a 390 px phone. An incident, closure or sign opens a small box with what the source says and
 when it was updated. An event with a map point has a **Cameras** panel under its map (#95: "add
 that as an automatic option on the incident viewer to show the camera live feed, even if it's just
 past or just before where it came in, as immediate reference points"): on a highway we have mile
@@ -996,6 +997,44 @@ signs_every_min = 5              # at least 1
 cameras_every_min = 60           # at least 10
 # key: env SIZEUP_511NY_KEY (the hub: SSM /sizeup-hub/511ny-key); enabled = false turns everything off
 ```
+
+## Road projects & closures (#185)
+
+> "can we add road projects/etc when roads might be closed etc what dates/times and all that and include that as a
+> layer?" (user, 2026-10-15)
+
+A **Road projects & closures** group in every map's Layers box (`roadprojects.js`, key `roadwork`: the old *Roadwork*
+layer's, so each viewer's and event's choice carries over; the Thruway's roadwork is drawn here, once). A stretch of road
+is a line, a project's footprint a faint area with a dashed edge, a point a mark. **Active now** is solid in the
+closure's colour (full closure `--err`, lanes and the rest `--warn`); **upcoming** is dashed / hollow in `--info`. A
+**Today / This week / All** filter (per viewer). A click: what, where, in effect now or when it starts, its dates and
+daily hours exactly as the source gives them ("start not given", "no end time given (Until further notice)"), lanes,
+detour, the source's own text, the source and when it updated the item, a link to the source's page. Notices that name
+no place we can find are listed in the box (title, date, link), never put on the map by guess.
+
+**Incident view:** under the address, a line for each closure or project in effect during the event within 300 m of
+its point, or on its own street within 1.5 km: *Road closed: Westchester Ave between N Pearl St and King St until
+3:00 PM (511NY)*; *Notice: ... (Port Chester, posted Oct 14 10:00 AM): "..." (dates in the notice)*; *Construction
+project: ... (NYSDOT: in construction, completion date Oct 26, 2027; no closure times given)*.
+
+| Source | Endpoint | Auth | Status |
+|---|---|---|---|
+| Thruway roadwork | `webdataapi.thruway.ny.gov/api/data/events/xml` (through `roads.py`, no second read) | none | used |
+| Thruway capital program | `webdataapi.thruway.ny.gov/api/data/capitalprogram/xml` (active projects, completion year) | none | used |
+| NYSDOT capital projects | `gis.dot.ny.gov/.../CapitalProgramProjects/FeatureServer/4` (In Construction footprints) | none | used |
+| CTDOT project work areas | `services1.arcgis.com/.../CTDOT_Project_Work_Areas/FeatureServer/0` (Greenwich, in construction) | none | used |
+| Village notices | Port Chester (CivicPlus Alert Center, News Flash), Rye Brook (WordPress), Greenwich (CivicPlus) RSS | none | used |
+| 511NY events | `[roads] events_url` + `SIZEUP_511NY_KEY` (start, planned end, lanes, recurring hours, detour, line) | key | waiting |
+| 511NY WZDx | `[roadwork] wzdx_url` (`{key}`) | key | waiting |
+| Thruway lane-closure schedule | `content3.thruway.ny.gov/travelers/laneclosures/` (HTML only) | n/a | not read: ask the Thruway for a feed |
+| CTroads events | `ctroads.org/api/v2/get/event?key=` | key + CTDOT's written consent | waiting |
+| Waze for Cities | partner feed | agreement | waiting |
+
+Read only while someone looks (an ask within an hour), with `If-None-Match` / `If-Modified-Since`: the notices every
+20 min, the capital programs daily, a WZDx feed every 5 min. Cached under the state dir (`roadprojects.json`: items,
+never a key or an address). Nothing goes into the CAD's state push (#146). Two sources' records of one work zone (the
+same road, within 60 m, at overlapping times) are drawn once, 511NY's first; a notice is never folded into another.
+`GET /api/cad/roadprojects` (ETag, 304) and `GET /api/cad/roadprojects/near?lat=&lon=&address=&from=&to=`.
 
 ## The airport (HPN): the Airport layer, places, alerts
 

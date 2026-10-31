@@ -254,6 +254,7 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
             <div id="d-caller" class="d-caller"></div>
             <!-- an Airport event (#105): what the tower passed, one compact row; the subtype's FAA definition behind "?" -->
             <div id="d-airport" class="d-airport" hidden aria-label="Airport: what the tower passed"></div>
+            <div id="d-roads" class="d-roads" hidden aria-label="Road closures and projects nearby"></div>
             <div id="d-tides" class="d-tides" hidden aria-label="Tides"><div class="wx-tides-body"></div></div>
             <div id="d-pages" class="d-pages" hidden aria-label="The 60 Control page"></div>
             <pre id="d-narr" class="narr"></pre>
@@ -542,6 +543,7 @@ Slots go in order. A kind takes the next available unit of that kind (regular ap
 <script src="/static/glide.js"></script>
 <script src="/static/aircraft.js"></script>
 <script src="/static/weather.js"></script>
+<script src="/static/roadprojects.js"></script>
 <script src="/static/icons.js"></script>
 <script src="/static/ui.js"></script>
 <script src="/static/help.js"></script>
