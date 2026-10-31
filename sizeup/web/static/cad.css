@@ -211,7 +211,10 @@
   /* kept only for an emergency (its talkgroup's Record is off: the emergency window), and the window still running */
   .chip.kept { --c: var(--warn); border-style: dashed; }
   .og.emergency.em-ours > .og-head { box-shadow: inset var(--bw-mark) 0 0 var(--accent); }
-  .og.emergency.em-other > .og-head { box-shadow: inset var(--bw-mark) 0 0 var(--warn); }
+  /* someone else's emergency on a folded talkgroup (#190): its chip says so, the head isn't marked like ours */
+  .og.emergency.em-other > .og-head { box-shadow: none; }
+  /* a flag that turned out stuck (#190): still said, quieter than an emergency */
+  .chip.emergency.em-other.em-stuck { color: var(--text-2); background: transparent; border-style: dashed; letter-spacing: normal; }
   .og-flags { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--s-1); min-inline-size: 0; }
   #rv-other-em { margin-inline-start: var(--s-2); }
   .feed-list > li.skipped.names-ours { margin-inline-end: 0; }
@@ -641,6 +644,7 @@
   .alarm-notice b { color: var(--err); }
   /* the emergency window (alarms.Windows): "Recording until 20:09 (emergency)", All clear next to Acknowledge */
   .alarm-window { color: var(--warn); font-weight: 700; }
+  .alarm-stuck { color: var(--text-2); }               /* "emergency flag stuck on BUS237 (21237)" (#190) */
   .alarm-card .alarm-window { color: var(--accent-text); }
   .alarm-notice.alarm-window-row b { color: var(--warn); }
   .alarm-clear { min-inline-size: 12rem; }

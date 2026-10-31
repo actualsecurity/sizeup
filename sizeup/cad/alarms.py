@@ -76,12 +76,31 @@ REPEAT_S = 120                             # the same radio's button again on th
                                            # the same alarm (radios repeat the emergency burst, key after key)
 NOTICE_S = 15 * 60                         # a notice nobody acknowledged drops off after this
 WINDOW_S = 10 * 60                         # the emergency window: its talkgroup and radio kept this long ([p25])
+                                           # after the last real flag (user, 2026-10-14: "10 minutes or so")
+# A flag that won't go away (#190: DOT Dispatch 1, TG 1325, kept 300 routine bus TX as an "emergency"). trunk-recorder
+# 5.2.0 sets a call's flag from the grant that opened it (Call_impl's constructor; nothing sets it later, and every call
+# is a new Call), so a flag on call after call is the system's: a radio left in emergency mode (each PTT is granted as
+# an emergency until its user cancels it), or the talkgroup held in emergency until its console clears it. Someone
+# else's (not our fire channel, not our rig): the first flags are real, then it is "stuck", raised once, and no longer
+# renews the window. Our own flags are never second-guessed.
+STUCK_WITHIN_S = 10 * 60                   # N: flags this close together are one radio (or talkgroup) repeating it
+STUCK_REPEATS = 3                          # a radio's 3rd routine-length flag within N: stuck (the 1st and 2nd count:
+                                           # an emergency is the alarm and a key-up or two, not a stream of them)
+STUCK_TG_FLAGS = 6                         # 6 routine-length flags on one talkgroup within N, whatever radios: the
+                                           # talkgroup is held in emergency (every grant flagged), not 6 emergencies
+ROUTINE_CALL_S = 30                        # a flagged key-up this long or shorter is ordinary talk (#190's: 0-16 s);
+                                           # a longer one (a hot mic held open) always counts as real
+WINDOW_MAX_KEPT = 40                       # someone else's window keeps at most this many calls (with Record off):
+                                           # 10 minutes of a busy dispatch talkgroup (DOT Dispatch 1: ~3 calls a
+                                           # minute in #190) with room to spare; past it, routine traffic the Record
+                                           # switch was set to drop. Ours: no cap.
 RECENT_S = 10 * 60                         # acknowledged alarms listed this long (the screens say who and when)
 KEEP_S = 90 * 86400
 ADSB_CHANNEL = "ADS-B (public data)"
 ADSB_NOTE = "From public ADS-B data, not an official notification"
 COLUMNS = (("source", "TEXT NOT NULL DEFAULT ''"), ("subject", "TEXT NOT NULL DEFAULT ''"),   # added after #128
-           ("clear_by", "TEXT NOT NULL DEFAULT ''"), ("clear_at", "REAL"))                    # All clear, 2026-10-14
+           ("clear_by", "TEXT NOT NULL DEFAULT ''"), ("clear_at", "REAL"),                    # All clear, 2026-10-14
+           ("stuck", "TEXT NOT NULL DEFAULT ''"))                                            # #190
 TOKEN = re.compile(r"(?:[A-Za-z]\.){2,}|[A-Za-z0-9]+(?:['’][A-Za-z0-9]+)*")
 CHANNEL = re.compile(r"tg:\d{1,9}|[A-Za-z0-9][A-Za-z0-9 ./_-]{0,39}")
 
@@ -112,7 +131,8 @@ CREATE TABLE IF NOT EXISTS alarms (
   source TEXT NOT NULL DEFAULT '',      -- "" (a transmission) | "adsb" (an aircraft emergency, sizeup/aircraft.py)
   subject TEXT NOT NULL DEFAULT '',     -- adsb: what the emergency is ("squawk 7700 (emergency)")
   clear_by TEXT NOT NULL DEFAULT '',    -- All clear: resolved (its emergency window closed), who and when
-  clear_at REAL
+  clear_at REAL,
+  stuck TEXT NOT NULL DEFAULT ''        -- the flag turned out stuck (#190): on whom, "BUS237 (21237)"
 );
 CREATE INDEX IF NOT EXISTS alarms_ack ON alarms(ack_at);
 """
@@ -327,17 +347,59 @@ class Windows:
     The keep / drop decision is the station's (App._call, where trunk-recorder's calls arrive; trunk-recorder records
     every talkgroup, sizeup drops the ones switched off): it opens its own windows from the call JSON's flag. The
     CAD of record (the hub, or all-in-one) opens the same windows from the alarms (on_traffic) to show them, and
-    sends All clear to the station (App.emergency_all_clear). Kept in memory: a restart forgets an open window."""
+    sends All clear to the station (App.emergency_all_clear). Kept in memory: a restart forgets an open window.
 
-    def __init__(self, keep_s: float = WINDOW_S, clock: Callable[[], float] | None = None):
+    Someone else's emergency (#190; `ours` False: not our fire channel, not our rig) is bounded: the station asks
+    flag() about each flagged call first, and a flag that is stuck (a radio's STUCK_REPEATS-th routine-length flag
+    within STUCK_WITHIN_S, or a talkgroup's STUCK_TG_FLAGS-th) neither opens nor extends a window; and its window
+    keeps at most WINDOW_MAX_KEPT calls. Ours (open(ours=True)): as before, no cap and nothing called stuck."""
+
+    def __init__(self, keep_s: float = WINDOW_S, clock: Callable[[], float] | None = None,
+                 log: Callable[[str], None] = lambda m: None):
         self.keep_s = float(keep_s)
         self.clock = clock or time.time
+        self.log = log
         self._lock = threading.Lock()
-        self._tg: dict[int, dict] = {}            # talkgroup -> {talkgroup, channel, since, until, radios, alarm_id}
+        self._tg: dict[int, dict] = {}            # talkgroup -> {talkgroup, channel, since, until, radios, alarm_id,
+                                                  #               ours, kept}
         self._radio: dict[str, dict] = {}         # radio ID -> {until, talkgroup}: the radio that pressed it
+        self._flags: dict[tuple, dict] = {}       # ("radio", id) | ("tg", tg) -> {last, times, stuck}: flag() history
 
-    def open(self, tg, channel: str = "", radio_ids=(), at: float | None = None, alarm_id: int | None = None) -> dict | None:
-        """An emergency key-up on talkgroup tg (at: when it ended): its window opened or extended."""
+    def flag(self, tg, radio_ids=(), at: float | None = None, length: float | None = None, ours: bool = False) -> dict:
+        """A P25 call trunk-recorder flagged as an emergency, before it opens anything (the station, App._call):
+        {"stuck": "" | "radio" | "talkgroup", "radios": the stuck radio IDs, "first": True the first time it is
+        called stuck (log it, mark its alarm once)}. Not stuck: a real emergency (open() it). Ours: never stuck.
+        A radio or talkgroup stays stuck until it has gone STUCK_WITHIN_S without a flag."""
+        out = {"stuck": "", "radios": [], "first": False}
+        if ours or tg is None or not str(tg).lstrip("-").isdigit():
+            return out
+        at = self.clock() if at is None else float(at)
+        routine = length is None or float(length) <= ROUTINE_CALL_S
+        ids = list(dict.fromkeys(str(r).strip() for r in radio_ids if str(r).strip()))
+        with self._lock:
+            for k in [k for k, h in self._flags.items() if at - h["last"] > STUCK_WITHIN_S]:
+                del self._flags[k]                # quiet long enough: the next flag is a new emergency
+
+            def note(key, limit):
+                h = self._flags.setdefault(key, {"last": at, "times": [], "stuck": False})
+                h["last"] = max(h["last"], at)
+                if routine:
+                    h["times"] = [x for x in h["times"] if at - x <= STUCK_WITHIN_S] + [at]
+                was = h["stuck"]
+                h["stuck"] = was or len(h["times"]) >= limit
+                return h["stuck"], h["stuck"] and not was
+            tg_stuck, tg_first = note(("tg", int(tg)), STUCK_TG_FLAGS)
+            got = [(r, *note(("radio", r), STUCK_REPEATS)) for r in ids]
+        if got and all(s for _r, s, _f in got):
+            return {"stuck": "radio", "radios": ids, "first": any(f for _r, _s, f in got) and not tg_stuck}
+        if tg_stuck:
+            return {"stuck": "talkgroup", "radios": [], "first": tg_first}
+        return out
+
+    def open(self, tg, channel: str = "", radio_ids=(), at: float | None = None, alarm_id: int | None = None,
+             ours: bool = True) -> dict | None:
+        """An emergency key-up on talkgroup tg (at: when it ended): its window opened or extended. ours: our fire
+        channel or rig (no cap on what it keeps); someone else's: at most WINDOW_MAX_KEPT calls."""
         if self.keep_s <= 0 or tg is None or not str(tg).lstrip("-").isdigit():
             return None
         tg = int(tg)
@@ -348,10 +410,11 @@ class Windows:
             w = self._tg.get(tg)
             if w is None or w["until"] < at:
                 w = self._tg[tg] = {"talkgroup": tg, "channel": channel, "since": at, "until": until, "radios": [],
-                                    "alarm_id": alarm_id}
+                                    "alarm_id": alarm_id, "ours": bool(ours), "kept": 0}
             w["until"] = max(w["until"], until)
             w["channel"] = w["channel"] or channel
             w["alarm_id"] = alarm_id or w["alarm_id"]
+            w["ours"] = w["ours"] or bool(ours)
             for r in ids:
                 if r not in w["radios"]:
                     w["radios"].append(r)
@@ -366,16 +429,30 @@ class Windows:
             if w is not None and not w["alarm_id"]:
                 w["alarm_id"] = alarm_id
 
+    def _room(self, w: dict | None) -> bool:
+        """The window may keep one more call (and counts it): ours always; someone else's up to WINDOW_MAX_KEPT."""
+        if w is None or w["ours"]:
+            return True
+        if w["kept"] >= WINDOW_MAX_KEPT:
+            if w["kept"] == WINDOW_MAX_KEPT:      # said once
+                self.log(f"emergency window on TG {w['talkgroup']} ({w['channel'] or '?'}): {WINDOW_MAX_KEPT} calls "
+                         "kept, the most for someone else's emergency: Record off applies again")
+                w["kept"] += 1
+            return False
+        w["kept"] += 1
+        return True
+
     def keeps(self, tg, radio_ids=(), at: float | None = None) -> str:
-        """Why a call on tg (radio_ids talking, starting at `at`) is kept by a window: "talkgroup", "radio" or ""."""
+        """Why a call on tg (radio_ids talking, starting at `at`) is kept by a window: "talkgroup", "radio" or "".
+        Each call kept counts toward its window's cap (someone else's: WINDOW_MAX_KEPT)."""
         at = self.clock() if at is None else float(at)
         with self._lock:
             w = self._tg.get(int(tg)) if tg is not None else None
-            if w is not None and at <= w["until"]:
+            if w is not None and at <= w["until"] and self._room(w):
                 return "talkgroup"
             for r in radio_ids:
                 x = self._radio.get(str(r).strip())
-                if x is not None and at <= x["until"]:
+                if x is not None and at <= x["until"] and self._room(self._tg.get(x["talkgroup"])):
                     return "radio"
         return ""
 
@@ -393,7 +470,7 @@ class Windows:
             return (w is not None and w["until"] >= now) or bool(gone)
 
     def state(self, now: float | None = None) -> list[dict]:
-        """The open windows, soonest to end first: [{talkgroup, channel, since, until, radios, alarm_id}]."""
+        """The open windows, soonest to end first: [{talkgroup, channel, since, until, radios, alarm_id, ours, kept}]."""
         now = self.clock() if now is None else now
         with self._lock:
             for tg in [k for k, w in self._tg.items() if w["until"] < now]:
@@ -416,7 +493,7 @@ class Alarms:
         self.on_clear: Callable[[dict], None] = lambda a: None
         self.notifier = None                      # sizeup/notify.py Notifier, or None: no pushes
         self.public_url = ""                      # the CAD's address, for the push's link
-        self.windows = Windows(clock=self.clock)
+        self.windows = Windows(clock=self.clock, log=log)
         with self.store.lock:
             for stmt in SCHEMA.split(";"):
                 if stmt.strip():
@@ -517,6 +594,11 @@ class Alarms:
         pcfd = set(getattr(self.cad.radios, "pcfd", ()) or ())
         return any(r.strip() in pcfd for r in (rig or "").split(",") if r.strip())
 
+    def counts_as_ours(self, t: dict) -> bool:
+        """Our emergency, whatever happens: on one of our fire channels (`channels`), or a radio on one of our rigs.
+        Anyone else's (DOT Dispatch 1's buses, #190) is a notice, and its flag may turn out stuck (Windows.flag)."""
+        return self.channel_key(t) in self.config()["channels"] or self._ours(str(t.get("rig") or ""))
+
     def on_traffic(self, t: dict) -> dict | None:
         """A transmission (new, or with new text): the alarm it raises or updates, None for none.
         t: {id, start, end, source, talkgroup, unit, rig, radio_id, text, emergency?}. The emergency button on a
@@ -526,7 +608,9 @@ class Alarms:
                                             (str(t["id"]),)):        # (its transcript after the All clear: still clear)
             ids = [x.strip() for x in str(t.get("radio_id") or "").split(",") if x.strip()]
             self.windows.open(t.get("talkgroup"), str(t.get("source") or ""), ids,
-                              float(t.get("end") or t.get("start") or self.clock()))
+                              float(t.get("end") or t.get("start") or self.clock()), ours=self.counts_as_ours(t))
+        if t.get("stuck") and t.get("id"):
+            self.stuck(t)
         a = self._on_traffic(t)
         if emergency and a is not None and a.get("emergency") and not a.get("clear_at"):
             self.windows.link(t.get("talkgroup"), a["id"])
@@ -562,6 +646,11 @@ class Alarms:
                 cur = self.store.one("SELECT * FROM alarms WHERE emergency = 1 AND ack_at IS NULL AND radio_id = ? "
                                      "AND channel = ? AND created_at >= ? ORDER BY id DESC LIMIT 1",
                                      (rid, str(t.get("source") or ""), now - REPEAT_S))
+                if cur is None and not heard and not fire and not self._ours(rig):
+                    # someone else's (#190): raised once while that radio keeps flagging, seen or not (not after All clear)
+                    cur = self.store.one("SELECT * FROM alarms WHERE emergency = 1 AND clear_at IS NULL AND radio_id = ? "
+                                         "AND channel = ? AND created_at >= ? ORDER BY id DESC LIMIT 1",
+                                         (rid, str(t.get("source") or ""), now - STUCK_WITHIN_S))
                 if cur is not None:
                     self.log(f"alarms: {tid}: radio {rid}'s emergency button again: alarm {cur['id']}")
                     if not heard:
@@ -626,6 +715,35 @@ class Alarms:
                 a = self._link(a, acked_line is not None)
         if pushed is not None:
             self._push(self.get(pushed["id"]))
+        self.on_change()
+        return a
+
+    def stuck(self, t: dict) -> dict | None:
+        """A transmission whose emergency flag the station called stuck (Windows.flag; t["stuck"]: on whom,
+        "BUS237 (21237)" or "DOT Dispatch 1 (TG 1325)"): not an emergency, no alarm of its own. The alarm its first
+        flags raised is marked "emergency flag stuck on ..." once (a later one on the same alarm changes nothing).
+        None when there is no such alarm (notices off, or it was given All clear)."""
+        who_ = str(t.get("stuck") or "")[:80]
+        tg = t.get("talkgroup")
+        if not who_ or tg is None:
+            return None
+        since = self.clock() - STUCK_REPEATS * STUCK_WITHIN_S       # the flags that made it stuck: no older than this
+        ids = [x.strip() for x in str(t.get("radio_id") or "").split(",") if x.strip()]
+        with self._lock:
+            rows = [r for r in self.store.q("SELECT * FROM alarms WHERE emergency = 1 AND talkgroup = ? AND clear_at IS NULL "
+                                            "AND created_at >= ? ORDER BY id DESC", (tg, since))
+                    if not self._ours(r["rig"])]           # never one of our rigs' alarms
+            cur = next((r for r in rows if set(ids) & {x.strip() for x in (r["radio_id"] or "").split(",")}), None) \
+                or (rows[0] if rows else None)
+            if cur is None:
+                self.log(f"alarms: emergency flag stuck on {who_} (TG {tg}): no alarm of it to mark")
+                return None
+            if cur["stuck"]:
+                return self.get(cur["id"])
+            with self.store.tx() as db:
+                db.execute("UPDATE alarms SET stuck = ?, updated_at = ? WHERE id = ?", (who_, self.clock(), cur["id"]))
+        a = self.get(cur["id"])
+        self.log(f"alarms: {a['level']} {a['id']}: emergency flag stuck on {who_}: its later flags are not emergencies")
         self.on_change()
         return a
 

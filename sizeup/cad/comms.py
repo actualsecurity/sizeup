@@ -551,19 +551,20 @@ def has_alarms(store) -> bool:
 
 
 ALARM_COLS = {"alarm_id": None, "alarm_level": "", "alarm_via": "", "ack_by": "", "ack_at": None, "clear_by": "",
-              "clear_at": None, "drill": False}
+              "clear_at": None, "drill": False, "alarm_stuck": ""}
 
 
 def with_alarms(store, rows: list[dict]) -> list[dict]:
     """Each transmission row with the alarm it raised (one per transmission: alarms.traffic_id is unique):
     alarm_id, alarm_level (alarm | notice), keywords (the words heard), alarm_via (MDC / FleetSync / '' for P25),
-    ack_by / ack_at (seen), clear_by / clear_at (all clear), drill (ALARM_COLS when none); emergency (0/1) from
-    the row or its alarm; evidence as a dict (None when not kept)."""
+    ack_by / ack_at (seen), clear_by / clear_at (all clear), drill, alarm_stuck (its flag turned out stuck, #190: on
+    whom) (ALARM_COLS when none); emergency (0/1) from the row or its alarm; evidence as a dict (None when not kept)."""
     got: dict[str, dict] = {}
     tids = [r["id"] for r in rows if r.get("kind", "radio") == "radio"]
     if tids and has_alarms(store):
         cols = {r["name"] for r in store.q("PRAGMA table_info(alarms)")}
         clear = "clear_by, clear_at" if "clear_at" in cols else "'' AS clear_by, NULL AS clear_at"
+        clear += ", stuck" if "stuck" in cols else ", '' AS stuck"
         for k in range(0, len(tids), 500):
             part = tids[k:k + 500]
             for a in store.q(f"SELECT traffic_id, id, level, emergency, keywords, via, ack_by, ack_at, {clear}, drill "
@@ -580,7 +581,8 @@ def with_alarms(store, rows: list[dict]) -> list[dict]:
                 kws = []
             r.update(alarm_id=a["id"], alarm_level=a["level"], keywords=kws if isinstance(kws, list) else [],
                      alarm_via=a["via"] or "", ack_by=a["ack_by"] or "", ack_at=a["ack_at"],
-                     clear_by=a["clear_by"] or "", clear_at=a["clear_at"], drill=bool(a["drill"]))
+                     clear_by=a["clear_by"] or "", clear_at=a["clear_at"], drill=bool(a["drill"]),
+                     alarm_stuck=a["stuck"] or "")
         r["emergency"] = int(bool(r.get("emergency")) or bool(a and a["emergency"]))
         try:
             r["evidence"] = json.loads(r["evidence"]) if r.get("evidence") else None

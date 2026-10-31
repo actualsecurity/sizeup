@@ -759,15 +759,18 @@ function emergencyChip(t) {
   if (!t.emergency && !t.alarm_id) return null;
   const ours = t.alarm_level === "alarm";
   const said = (t.keywords || []).map((k) => String(k).replace(/ \.\.\. /g, " … ")).join(", ");
+  const stuck = !ours && t.alarm_stuck;            // its flag turned out stuck (#190): said, and quieter
   const text = ours ? (t.emergency ? "EMERGENCY" : (said || "alarm").toUpperCase())
-    : t.alarm_level === "notice" ? "Emergency (not ours)" : "Emergency button";
-  const c = el("span", `chip emergency${ours ? "" : " em-other"}`, `${t.drill ? "DRILL · " : ""}${text}`);
+    : stuck ? "Emergency flag stuck" : t.alarm_level === "notice" ? "Emergency (not ours)" : "Emergency button";
+  const c = el("span", `chip emergency${ours ? "" : " em-other"}${stuck ? " em-stuck" : ""}`, `${t.drill ? "DRILL · " : ""}${text}`);
   const how = !t.emergency ? `Heard on the radio: ${said}`
     : t.alarm_via ? `The radio's emergency button (${t.alarm_via})`
     : t.talkgroup !== null && t.talkgroup !== undefined ? "The radio's emergency button (P25: flagged by the system)"
     : "The radio's emergency button";
   c.title = how + (t.alarm_level === "notice" ? ". Not our talkgroup or radio: a notice"
-    : t.alarm_level ? "" : ". Its alarm is on an earlier transmission");
+    : t.alarm_level ? "" : ". Its alarm is on an earlier transmission")
+    + (stuck ? `. Emergency flag stuck on ${t.alarm_stuck}: it went on flagging routine calls, so its later flags `
+      + "are not emergencies (no new alarm, the emergency window not renewed)" : "");
   return c;
 }
 function alarmDone(t) {
@@ -778,7 +781,7 @@ function alarmDone(t) {
   return out.length ? el("span", "dim small em-ack", `· ${out.join(" · ")}`) : null;
 }
 // What of the emergency a row's redraw depends on (every list's signature: Radio, the feed, an event's Radio card)
-const emSig = (t) => [t.emergency, t.alarm_id, t.alarm_level, t.keywords, t.ack_at, t.clear_at, t.drill, t.kept];
+const emSig = (t) => [t.emergency, t.alarm_id, t.alarm_level, t.keywords, t.ack_at, t.clear_at, t.drill, t.kept, t.alarm_stuck];
 // A transmission kept only because of an emergency (its talkgroup's Record is off): why it is in the log at all
 function keptChip(t) {
   if (t.kept !== "emergency") return null;

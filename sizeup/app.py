@@ -62,6 +62,7 @@ import numpy as np
 from sizeup.config import P25_JOB, Config, ConfigError, load
 from sizeup import janitor
 from sizeup.cad import Cad
+from sizeup.cad.alarms import STUCK_WITHIN_S
 from sizeup.cad.api import CadApi
 from sizeup.dispatch import parse
 from sizeup.incidents import IncidentStore, Traffic
@@ -842,15 +843,40 @@ class App:
             log(f"CAD: could not log a page: {type(e).__name__}: {e}")
 
     def _call(self, call: Call) -> None:
-        emergency = call.emergency or any(t.emergency for t in call.turns)
+        flagged = call.emergency or any(t.emergency for t in call.turns)    # trunk-recorder's flag on this call itself
         windows = self.cad.alarms.windows
-        if emergency:
-            log(f"p25: {call.label} {call.id}: EMERGENCY flag (radio {', '.join(call.units) or 'unknown'})")
-            # The emergency window (alarms.Windows): this talkgroup, and the radio that pressed it anywhere, kept for
-            # [p25] emergency_window_min after this call. 5.2.0's flag is the call's (its first key-up's radio).
-            first = next((t.src for t in call.turns if t.src), "") if call.emergency else ""
-            pressed = list(dict.fromkeys([t.src for t in call.turns if t.emergency and t.src] + ([first] if first else [])))
-            windows.open(call.talkgroup, call.label, pressed, call.end)
+        emergency, stuck, keep_record = flagged, "", flagged
+        if flagged:
+            # 5.2.0's flag is the call's, from the grant that opened it: its first key-up's radio (srcList's own
+            # flags, when a later trunk-recorder fills them, name theirs)
+            first = next((t for t in call.turns if t.src), None) if call.emergency else None
+            turns = [t for t in call.turns if t.emergency and t.src] + ([first] if first is not None else [])
+            pressed = list(dict.fromkeys(t.src for t in turns))
+            ours = self._p25_ours(call, turns)
+            v = windows.flag(call.talkgroup, pressed, call.end, self._flag_length(call), ours)
+            if v["stuck"]:
+                # Someone else's flag on call after call (#190): a radio left in emergency mode, or a talkgroup the
+                # system holds in emergency. Raised once (its first flags); now it is ordinary traffic, kept only as
+                # Record (or a window still running) says, and it renews nothing.
+                emergency = False
+                names = {t.src: t.talker for t in call.turns if t.src}
+                stuck = (f"{call.label} (TG {call.talkgroup})" if v["stuck"] == "talkgroup"
+                         else ", ".join(f"{names[r]} ({r})" if names.get(r) and names[r] != r else r for r in v["radios"]))
+                keep_record = v["first"]                # its record: the one that showed it stuck, for audit
+                if v["first"]:
+                    log(f"p25: {call.label} {call.id}: emergency flag STUCK on {stuck}: not an emergency from now on "
+                        f"(no new alarm, the window not renewed) until it has been quiet {STUCK_WITHIN_S // 60:.0f} min")
+                    # its alarm marked now, whether or not this call is kept (here, or the hub: an "alarm" event that
+                    # says it isn't one, carrying the mark)
+                    mark = Traffic(call.id, call.label, call.start, call.end, "", status="pending",
+                                   unit=", ".join(call.units), talkgroup=call.talkgroup, radio_id=", ".join(v["radios"]))
+                    mark.emergency, mark.flag_stuck = False, stuck  # type: ignore[attr-defined]
+                    self._alarm_now(mark)
+            else:
+                log(f"p25: {call.label} {call.id}: EMERGENCY flag (radio {', '.join(call.units) or 'unknown'})")
+                # The emergency window (alarms.Windows): this talkgroup, and the radio that pressed it anywhere, kept
+                # for [p25] emergency_window_min after this call (someone else's: at most WINDOW_MAX_KEPT calls).
+                windows.open(call.talkgroup, call.label, pressed, call.end, ours=ours)
         kept = ""
         if not self.tg.record(call.talkgroup):  # switched off in the web app: dropped on arrival ...
             # ... but an emergency call is kept whatever the switch says (issue #128), and so is everything on its
@@ -858,7 +884,7 @@ class App:
             why = "button" if emergency else windows.keeps(call.talkgroup, [t.src for t in call.turns if t.src], call.start)
             if not why:
                 self.tg.seen(call.talkgroup, dropped=True)
-                self._drop_recorder_files(call)
+                self._drop_recorder_files(call, keep_record)
                 return
             kept = "emergency"
             if not emergency:
@@ -883,7 +909,9 @@ class App:
                 self._keep_source(t.id, pc.audio)
                 if kept:
                     t.kept = kept  # on a talkgroup switched off: kept for the emergency  # type: ignore[attr-defined]
-                if pc.emergency:
+                if pc.emergency and stuck:
+                    t.flag_stuck = stuck  # flagged, but stuck (#190): its alarm is marked, once  # type: ignore[attr-defined]
+                elif pc.emergency:
                     t.emergency = True  # the P25 emergency button (#128)  # type: ignore[attr-defined]
                     if evidence:
                         t.evidence = evidence  # trunk-recorder's call record, for audit  # type: ignore[attr-defined]
@@ -894,7 +922,25 @@ class App:
                     t.raw, t.confidence, t.status, t.model = "", None, "no_speech", ""  # type: ignore[attr-defined]
                     t.stt = ""  # type: ignore[attr-defined]
                     self._transcribed(t)
-        self._drop_recorder_files(call)  # sizeup's clip is the one copy kept
+        self._drop_recorder_files(call, keep_record)  # sizeup's clip is the one copy kept
+
+    def _p25_ours(self, call: Call, turns) -> bool:
+        """The flag is ours (alarms.counts_as_ours): its talkgroup is one of our fire channels, or the radio that
+        flagged is on one of our rigs. Never second-guessed (Windows.flag)."""
+        rig = self.radios.rig_p25([(t.src, t.tag or t.talker) for t in turns if t.src])
+        try:
+            return self.cad.alarms.counts_as_ours({"talkgroup": call.talkgroup, "source": call.label, "rig": rig})
+        except Exception as e:  # noqa: BLE001 - when in doubt, ours: an emergency is never dropped for a lookup
+            log(f"p25: {call.id}: ours? {type(e).__name__}: {e}")
+            return True
+
+    @staticmethod
+    def _flag_length(call: Call) -> float:
+        """How long the flagged key-up ran (5.2.0: the call's first; srcList's own flags: the longest of them), the
+        whole call when the key-ups have no lengths: a routine-length one counts toward a stuck flag."""
+        first = call.turns[0] if call.emergency and call.turns else None
+        lens = [t.length for t in call.turns if (t.emergency or t is first) and t.length is not None]
+        return max(lens) if lens else max(0.0, call.end - call.start)
 
     # -- the emergency alarms (sizeup/cad/alarms.py, #128) ------------------------------------------------
 
@@ -906,7 +952,7 @@ class App:
         d = {"id": t.id, "start": t.start, "end": t.end, "source": t.source, "talkgroup": t.talkgroup, "unit": t.unit,
              "rig": t.rig, "radio_id": t.radio_id, "text": t.text if text is None else text,
              "emergency": bool(getattr(t, "emergency", False)), "via": getattr(t, "emergency_via", ""),
-             "alarm_key": getattr(t, "alarm_key", "")}
+             "alarm_key": getattr(t, "alarm_key", ""), "stuck": getattr(t, "flag_stuck", "")}
         d["unit"] = ", ".join(x.removesuffix(" EMERGENCY") for x in (t.unit or "").split(", ") if x)
         try:
             self.cad.alarms.on_traffic(d)
@@ -943,14 +989,17 @@ class App:
         self._alarm_now(t)
         return key
 
-    def _drop_recorder_files(self, call: Call) -> None:
+    def _drop_recorder_files(self, call: Call, keep_record: bool | None = None) -> None:
         """trunk-recorder's WAV and JSON, once sizeup has its own clip. An emergency call's JSON is kept instead, in
-        captures/emergency/ (janitor.EMERGENCY_KEEP_S, 90 days, like its alarm): the raw record to audit it by."""
+        captures/emergency/ (janitor.EMERGENCY_KEEP_S, 90 days, like its alarm): the raw record to audit it by.
+        keep_record: whether to (None: any flagged call; a stuck flag's: only the call that showed it stuck)."""
         if not self.clips_dir or not call.wav_path:  # without our own clip store, keep the originals
             return
         wav = Path(call.wav_path)
         meta = wav.with_suffix(".json")
-        if call.emergency or any(t.emergency for t in call.turns):
+        if keep_record is None:
+            keep_record = call.emergency or any(t.emergency for t in call.turns)
+        if keep_record:
             keep = self.clips_dir.parent / janitor.EMERGENCY_DIR
             try:
                 keep.mkdir(parents=True, exist_ok=True)
