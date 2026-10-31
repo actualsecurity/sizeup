@@ -134,9 +134,9 @@ def test_a_conflict_matches_both_until_resolved_and_the_page_says_so(tmp_path):
 
 def test_matching_gives_entity_and_role_and_ours_is_the_entitys(tmp_path):
     app = app_with(tmp_path, FIXTURE)
-    tset(app, a_hz=767.4, b_hz=928.1, places=["Port Chester"], service="fire", role="Chiefs")
+    tset(app, a_hz=1153.4, b_hz=669.9, places=["Port Chester"], service="fire", role="Chiefs")
     tset(app, a_hz=349.1, b_hz=311.1, list="Port Chester FD", places=["Port Chester"], service="fire", role="All call")
-    assert match(app, 767.4, 928.1) == ("Port Chester · Fire · Chiefs",)
+    assert match(app, 1153.4, 669.9) == ("Port Chester · Fire · Chiefs",)
     assert match(app, 349.1, 311.1) == ("Port Chester · Fire · All call",)
     pc = ent(app, "Port Chester · Fire")
     assert [p["role"] for p in pc["pairs"]] == ["All call", "Chiefs"] and pc["ours"]
@@ -222,7 +222,7 @@ def test_export_import_old_and_new(tmp_path):
     assert match(b, 832.5, 1201.0) == ("Fairview · Fire (heard)",)          # #84's Fairview and the list's: one entity
     assert match(b, 435.1, 435.1)[0] == "Larchmont · Fire (est.)" and match(b, 349.1, 387.0) == ()
     # the new shapes: a role, a move, an entity with ours and notes, a merge
-    tset(b, a_hz=767.4, b_hz=928.1, places=["Port Chester"], service="fire", role="Chiefs")
+    tset(b, a_hz=1153.4, b_hz=669.9, places=["Port Chester"], service="fire", role="Chiefs")
     tset(b, action="move", key="1031.8/763.3@Ardsley", places=["Ardsley", "Greenburgh"], service="fire")
     tset(b, action="entity", key="archville|fire", ours=True, notes="mutual aid", aliases=["Archville FD"])
     tset(b, action="merge", key="chappaqua|ems", into={"places": ["Chappaqua"], "service": "fire"})
@@ -232,7 +232,7 @@ def test_export_import_old_and_new(tmp_path):
     assert any(x["key"] == "entity:chappaqua|ems" for x in dry["changes"])
     c.cad.settings.post("import", {"action": "apply", "settings": exp, "operator": "Dana"})
     assert c.cad.settings.tone_overrides() == b.cad.settings.tone_overrides()
-    assert match(c, 767.4, 928.1) == ("Port Chester · Fire · Chiefs",) and match(c, 1031.8, 763.3) == ("Ardsley · Greenburgh · Fire",)
+    assert match(c, 1153.4, 669.9) == ("Port Chester · Fire · Chiefs",) and match(c, 1031.8, 763.3) == ("Ardsley · Greenburgh · Fire",)
     assert c.paging.is_ours(["Archville · Fire"]) and match(c, 747.3, 408.2) == ("Chappaqua · Fire",)
     for k, v in (("entity:x|fire", {"places": ["Y"], "service": "fire"}),                       # the key isn't its places
                  ("entity:x|fire", {"places": ["X"], "service": "fd"}),
@@ -296,7 +296,7 @@ def test_heard_but_unnamed_and_naming_as_ours_queues_its_page(tmp_path):
 
 def test_the_station_takes_the_book_with_the_channel_push(tmp_path):
     hub = app_with(tmp_path / "hub", LIST)
-    tset(hub, a_hz=767.4, b_hz=928.1, places=["Port Chester"], service="fire", role="Chiefs")
+    tset(hub, a_hz=1153.4, b_hz=669.9, places=["Port Chester"], service="fire", role="Chiefs")
     tset(hub, action="move", key="580.0/2382.0@Bedford EMS", places=["Bedford"], service="fire")
     tset(hub, action="merge", key="chappaqua|ems", into={"places": ["Chappaqua", "New Castle"], "service": "ems"})
     tset(hub, action="entity", key="archville|fire", ours=True)
@@ -304,9 +304,9 @@ def test_the_station_takes_the_book_with_the_channel_push(tmp_path):
     st = app_with(tmp_path / "st", LIST)
     res = st.set_channel_prefs({}, {"ok": False, "why": ""}, sent)
     assert st.cad.settings.tone_overrides() == sent and res["sig"] == hub.channels_applied()["sig"]
-    assert st.plan.match_pair(767.4, 928.1) == ("Port Chester · Fire · Chiefs",)      # the live paging display's names
+    assert st.plan.match_pair(1153.4, 669.9) == ("Port Chester · Fire · Chiefs",)      # the live paging display's names
     assert st.plan.match_pair(747.3, 408.2) == ("Chappaqua · New Castle · EMS",)
-    assert st.paging.is_ours(st.plan.match_pair(767.4, 928.1)) and st.paging.is_ours(["Archville · Fire"])
+    assert st.paging.is_ours(st.plan.match_pair(1153.4, 669.9)) and st.paging.is_ours(["Archville · Fire"])
     assert st.plan.match_pair(580.0, 2382.0) == ("Bedford · Fire (est.)",)
     n = len(st.cad.settings.audit_log("radios"))
     st.set_channel_prefs({}, {"ok": False, "why": ""}, sent)

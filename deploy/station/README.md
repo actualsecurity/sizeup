@@ -146,7 +146,10 @@ Updates come by themselves ([below](#updating)). The config file is never overwr
 with `/etc/sizeup/config.toml.dist` after an update. The one exception is a channel a release adds
 (FG2, #119): the switch to that release appends it to the config once (`sizeup/cloud/configupdate.py`),
 keeps the old file beside it (`config.toml.before-fg2`) and notes it in `/etc/sizeup/config-updates`,
-so a channel taken out by hand stays out. The install log says what it added. Another model:
+so a channel taken out by hand stays out. Likewise our tones as heard on the air (#47): a `[[tones]]`
+entry still on the unverified Port Chester pair 349.1/311.1 becomes 903.2/810.2 and Rye Brook FD
+767.4/928.1 (ours) is added after it (`config.toml.before-tones-47`); tones set by hand are left alone.
+The install log says what it added. Another model:
 `sudo sizeup-station update --model base.en`.
 
 ## Updating

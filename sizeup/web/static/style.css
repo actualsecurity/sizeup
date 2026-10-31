@@ -494,11 +494,12 @@
   :where(.paging-row .pg-what) { font-weight: 700; color: var(--info); }
   :where(.paging-row.ours .pg-what) { color: var(--accent-text); }
   :where(.paging-row.ended .pg-what) { color: var(--dim); }
-  /* who a page is for: one tag per tone pair; ours filled in the accent, an unknown pair as its tones (mono, dashed) */
+  /* who a page is for: one tag per tone pair with its own tones in it; ours filled in the accent, an unknown pair dashed */
   :where(.page-dept) { color: var(--info); border-color: color-mix(in srgb, var(--info) 55%, transparent); background: transparent; }
   :where(.page-dept.ours) { color: var(--on-accent); background: var(--accent); border-color: var(--accent); }
   :where(.page-dept.conflict) { color: var(--warn); border-color: var(--warn); border-style: dashed; }
-  :where(.page-dept.unk) { font-family: var(--mono); color: var(--text-2); border-style: dashed; border-color: var(--line-hover); }
+  :where(.page-dept.unk) { color: var(--text-2); border-style: dashed; border-color: var(--line-hover); }
+  :where(.page-dept) > :where(.mono) { font-weight: 500; }   /* the pair's own tones, inside its tag (#47) */
 
   /* ---- card, panel and section heads --------------------------------------------------------------- */
   :where(.card, .s-card, .rv-sec) {

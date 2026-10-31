@@ -6,7 +6,8 @@
 //   Radio.update(talking, paging)  every state push: redraws #talking (a page going out first), raises alerts
 //   Radio.fillPaging(box, paging, done)  a page going out now as a row (the pinned feed, Radio, the board's
 //                               Pages); `done`: finished page ids already listed there (the row hands over)
-//   Radio.pageTags(tones)       one tag per tone pair: the department(s), or the tones when nobody's code
+//   Radio.pageTags(tones)       one tag per tone pair: the department(s) and that pair's own tones ("Unknown" and
+//                               the tones when nobody's code matches)
 //   Radio.talkingFor(rig)       the entry for a rig transmitting now (unit board highlight), or null
 //   Radio.rigTag(t)             "E63 · 6301" for a transmission row
 //   Radio.mountAlerts(box)      the "🔔 Alerts" button + its settings (kept in this browser)
@@ -57,8 +58,8 @@ window.Radio = (() => {
 
   // ---- a page going out now (South 2, sizeup/radio/livepage.py) ------------------------------------
   // {channel, started, pairs: [{a, b, names, ours}], phase: "tones" | "voice", ours, ended, page_id}. A pair
-  // nobody's code matches is shown as its tones ("741.3/623.7"), never a guess. "(heard)" is dropped (confirmed
-  // on the air); "(est.)" stays (an estimated code).
+  // nobody's code matches is shown as "Unknown" and its tones ("741.3/623.7"), never a guess. "(heard)" is
+  // dropped (confirmed on the air); "(est.)" stays (an estimated code).
 
   const hz = (x) => Number(x).toFixed(1);
   // The tone book's names (#122): "Places · Service[ · Role]"; several places shortened to the first one and "+N" in a
@@ -72,15 +73,21 @@ window.Radio = (() => {
   const pairName = (p, short = false) => (p.names || []).map((n) => n.replace(/ \(heard\)$/, ""))
     .map((n) => (short ? shortName(n) : n)).join(" / ");
   const pairTones = (p) => hz(p.a ?? p.a_hz) + ((p.b ?? p.b_hz) ? `/${hz(p.b ?? p.b_hz)}` : "");
+  // A stacked page (#47: "Rye Brook with Port Chester ...", 767.4/928.1 then 903.2/810.2) is one tag per pair, each with
+  // its own tones in it, so a name never sits beside another pair's tones: an unknown pair says so ("Unknown
+  // 767.4/928.1") rather than a bare "767.4/928.1" that reads as the next tag's. The live chip joins pairs with " + "
+  // (" · " is inside the names).
+  const pairWord = (x) => pairName(x, true) || `unknown ${pairTones(x)}`;
   function pageWords(p) {
-    return [p.channel, p.ended ? "Paged" : "Paging", ...(p.pairs || []).map((x) => pairName(x, true) || pairTones(x)),
+    const pairs = p.pairs || [];
+    return [p.channel, p.ended ? "Paged" : "Paging", ...(pairs.length ? [pairs.map(pairWord).join(" + ")] : []),
             ...(p.phase === "voice" ? ["voice"] : [])].join(" · ");
   }
   function pageTags(tones) {
     return (tones || []).map((x) => {
       const name = pairName(x), conflict = (x.names || []).length > 1;
-      const t = el("span", "page-dept" + (x.ours ? " ours" : "") + (name ? "" : " unk") + (conflict ? " conflict" : ""),
-        pairName(x, true) || pairTones(x));
+      const t = el("span", "page-dept" + (x.ours ? " ours" : "") + (name ? "" : " unk") + (conflict ? " conflict" : ""));
+      t.append(el("span", "", name ? pairName(x, true) : "Unknown"), el("span", "mono", pairTones(x)));
       t.title = name ? `${name}: ${pairTones(x)} Hz` : `${pairTones(x)} Hz: no department has this code yet`;
       if (conflict) t.title += "\nConflict: this pair is under each of these in the tone book (Settings > Radios > Tones)";
       return t;

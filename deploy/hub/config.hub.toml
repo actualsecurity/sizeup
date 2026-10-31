@@ -79,7 +79,7 @@ monitor_departments = ["Port Chester FD", "Rye Brook FD"]
 # The voice is made here, by Amazon Polly (sizeup/polly.py; the task role needs polly:SynthesizeSpeech,
 # sizeup-aws/11-polly.sh). Region: AWS_REGION from the task (polly_region overrides). If Polly fails,
 # the station renders it (its Kokoro, a man's voice: am_michael); no station either: text only, said so.
-tones = [[349.1, 1.0], [311.1, 3.0]]
+tones = [[903.2, 1.0], [810.2, 3.0]]  # Port Chester Fire, heard on air (60 Control tone tests 10-20 and 10-23-2026, #47)
 tts_engine = "polly"
 voice = "Matthew"                  # US English men: Matthew, Stephen, Gregory, Joey (generative, else neural)
 speed = 0.92                       # said as SSML <prosody rate="92%">; 1.0 = Polly's own pace

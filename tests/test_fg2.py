@@ -283,7 +283,8 @@ def test_an_installed_station_config_gains_fg2_once_and_keeps_everything_else(tm
     before = load(conf)
     assert [c.label for c in before.channels] == ["South 2", "FG1"] and before.sdr_auto_order == ("FG1", P25, "South 2")
     said = configupdate.run(conf, marks)
-    assert len(said) == 1 and said[0].startswith("fg2: FG2 (458.0375 MHz, traffic) added") and '"fg2"' in said[0]
+    assert len(said) == 2 and said[0].startswith("fg2: FG2 (458.0375 MHz, traffic) added") and '"fg2"' in said[0]
+    assert said[1] == "tones-47: no [[tones]] entry on the unverified 349.1/311.1: nothing changed"                  # this template's tones are already the heard ones (#47)
     text, kept = conf.read_text(), conf.with_name("config.toml.before-fg2").read_text()
     assert kept == own.replace("/var/lib/sizeup/trunk-recorder/talkgroups.csv", f"{ROOT}/deploy/trunk-recorder/talkgroups.csv")
     assert text.replace(', "fg2"]', "]") == kept + configupdate.FG2_BLOCK                         # only added to
@@ -293,7 +294,7 @@ def test_an_installed_station_config_gains_fg2_once_and_keeps_everything_else(tm
                                                                   ("FG1", 453.0375, "traffic"), ("FG2", 458.0375, "traffic")]
     assert after.sdr_auto_order == ("FG1", P25, "South 2", "FG2") and after.sdr_names["spare"] == "V3 #3"
     assert replace(after, channels=before.channels, sdr_auto_order=before.sdr_auto_order) == before   # nothing else
-    assert marks.read_text() == "fg2\n"
+    assert marks.read_text() == "fg2\ntones-47\n"
     # once: taken out by hand, it stays out at the next update
     conf.write_text(conf.with_name("config.toml.before-fg2").read_text())
     assert configupdate.run(conf, marks) == [] and [c.label for c in load(conf).channels] == ["South 2", "FG1"]
@@ -303,8 +304,8 @@ def test_the_template_and_odd_configs_are_left_alone(tmp_path, monkeypatch):
     marks = tmp_path / "marks"
     conf = installed(tmp_path, monkeypatch, (STATION / "config.station.toml").read_text())   # a new install: has it
     same = conf.read_text()
-    assert configupdate.run(conf, marks) == ["fg2: already has 'FG2' on 458.0375 MHz: nothing added"]
-    assert conf.read_text() == same and marks.read_text() == "fg2\n"
+    assert configupdate.run(conf, marks) == ["fg2: already has 'FG2' on 458.0375 MHz: nothing added", "tones-47: no [[tones]] entry on the unverified 349.1/311.1: nothing changed"]
+    assert conf.read_text() == same and marks.read_text() == "fg2\ntones-47\n"
     # no radios (a hub-like config): nothing; no auto_assign_order: the channel only (the code's order ends with it)
     assert configupdate.add_fg2('[web]\nport = 8091\n')[1] == "fg2: no [[radio.channels]] here (no radios): nothing added"
     text, said = configupdate.add_fg2('[radio]\nsdrs = "auto"\n[[radio.channels]]\nlabel = "FG1"\nmhz = 453.0375\n')
@@ -316,10 +317,12 @@ def test_the_template_and_odd_configs_are_left_alone(tmp_path, monkeypatch):
                                                                   'auto_assign_order = [\n  "fg1",\n  "p25",\n]'))
     m2 = tmp_path / "marks2"
     keep = odd.read_text()
-    [said] = configupdate.run(odd, m2)
-    assert said.startswith("fg2: not applied:") and "by hand" in said and odd.read_text() == keep and not m2.exists()
+    said, tones = configupdate.run(odd, m2)
+    assert said.startswith("fg2: not applied:") and "by hand" in said and odd.read_text() == keep
+    assert tones.startswith("tones-47: no [[tones]]") and m2.read_text() == "tones-47\n"     # fg2 not marked
     odd.write_text("[radio\n")
-    assert configupdate.run(odd, m2)[0].startswith("fg2: not applied:") and not m2.exists()
+    out = configupdate.run(odd, m2)
+    assert len(out) == 1 and out[0].startswith("fg2: not applied:") and m2.read_text() == "tones-47\n"
 
 
 def test_the_installer_runs_it_with_the_system_python_at_the_switch(tmp_path, monkeypatch):

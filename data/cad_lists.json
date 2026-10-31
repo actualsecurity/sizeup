@@ -791,9 +791,10 @@
   "_dispatch_tones": [
     "A joint_response department's alert tones, [[hz, seconds], ...], played after PCFD's (PCFD's are the config's",
     "[dispatch] tones) when its units go; only theirs when only theirs go. null = not known yet: PCFD's are",
-    "played in their place, with a warning on the preview and the dispatch. Rye Brook's are NOT known: don't guess."
+    "played in their place, with a warning on the preview and the dispatch. Rye Brook Fire's 767.4/928.1: heard on",
+    "air, 60 Control tone tests 10-20 and 10-23-2026 (GitHub #47)."
   ],
-  "dispatch_tones": {"Rye Brook": null},
+  "dispatch_tones": {"Rye Brook": [[767.4, 1.0], [928.1, 3.0]]},
   "_comms_feed": [
     "The pinned feed at the top of the units column: the last transmissions on the county's incident",
     "talkgroup(s), so the desk always sees what 60 Control said. talkgroups: P25 talkgroups shown (307 =",

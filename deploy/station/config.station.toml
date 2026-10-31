@@ -62,11 +62,20 @@ kind = "traffic"
 device = "fire-fg2"
 gain_db = 40
 
+# Our two-tone codes (an installed station gets these once from sizeup/cloud/configupdate.py "tones-47").
+# PCFD answers both villages: both are ours, often stacked on one page.
 [[tones]]
-name = "Port Chester FD"
-a_hz = 349.1                       # RadioReference wiki (2025-07), unverified
-b_hz = 311.1
+name = "Port Chester FD"           # Port Chester · Fire
+a_hz = 903.2                       # heard on air, 60 Control tone tests 10-20 and 10-23-2026 (#47)
+b_hz = 810.2
 agency = "PCFD"
+ours = true
+
+[[tones]]
+name = "Rye Brook FD"              # Rye Brook · Fire
+a_hz = 767.4                       # heard on air, 60 Control tone tests 10-20 and 10-23-2026 (#47)
+b_hz = 928.1
+agency = "RBFD"
 ours = true
 
 [stt]
