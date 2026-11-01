@@ -209,17 +209,23 @@ status_topic = "pcfd-status"         # boot, hourly heartbeat, errors, OTA (Tapo
 expire_min = 5                       # an unanswered pre-alert ends after this long
 heartbeat_stale_min = 90             # no heartbeat (or restart) this long: "Tapout: no heartbeat for ..." in warning
 
-# [alerts]: our own ntfy topic for pushes that page a person (sizeup/notify.py): the emergency alarms
-# (the P25 emergency button, a mayday heard on our fire channels: sizeup/cad/alarms.py, #128), each at
-# max priority with who and where, and their acknowledgement; and station health (the hub, #79; docs/cloud.md
-# "Station health and alerts"): the station silent, behind, failed to update, a dongle / program down, its
-# outbox backing up, its disk filling, shown as a banner on /cad and /monitor, logged, and pushed (at most once
-# per alert per repeat_min, plus its recovery). ntfy topics are public by name: a long random one (e.g.
+# [alerts]: our own ntfy topics for pushes that page a person (sizeup/notify.py), two kinds:
+#   ntfy_topic    the alarms: the emergency buttons (P25, MDC, FleetSync), a mayday heard on our fire channels
+#                 (sizeup/cad/alarms.py, #128), an aircraft emergency squawk near HPN, each at max priority with
+#                 who and where, and their acknowledgement, all clear and "Ended" notices
+#   status_topic  the system's health: station health (the hub, #79; docs/cloud.md "Station health and alerts"):
+#                 the station silent, behind, failed to update, a dongle / program down, a stuck channel, its
+#                 outbox backing up, its disk filling, its whisper queue behind; Amazon Transcribe failing and
+#                 its monthly budget at 80 % / 100 %; shown as a banner on /cad and /monitor, logged, and pushed
+#                 (at most once per alert per repeat_min, plus its recovery)
+# Only one set: everything goes to it. ntfy topics are public by name: long random ones (e.g.
 # `openssl rand -hex 12`). NEVER Tapout's topics (pcfd-phone-prealert pages the fire crew; pcfd-status):
-# refused here and again before every send. Empty or left out: no pushes. Env SIZEUP_ALERT_TOPIC /
-# SIZEUP_ALERT_SERVER win.
+# refused (by exact name) here and again before every send. Empty or left out: no pushes. Env
+# SIZEUP_ALERT_TOPIC / SIZEUP_STATUS_TOPIC / SIZEUP_ALERT_SERVER win, and Settings > System > Push
+# notifications (admins) wins over both, live.
 # [alerts]
 # ntfy_topic = ""
+# status_topic = ""
 # ntfy_server = "https://ntfy.sh"
 # silent_min = 3                     # station health: no state post from the station this long
 # behind_min = 15                    # on another build than the hub this long

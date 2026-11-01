@@ -156,12 +156,18 @@ class Config:
     prealert_status_topic: str = "pcfd-status"
     prealert_expire_min: float = 5.0
     prealert_heartbeat_stale_min: float = 90.0
-    # [alerts] (sizeup/notify.py; docs/cloud.md "Station health and alerts"): our OWN ntfy topic for pushes that
-    # page a person: the emergency alarms (sizeup/cad/alarms.py, #128) and station health (sizeup/cloud/health.py,
-    # #79: banner on /cad and /monitor, the log, the push), and station health's thresholds. Topic: env
-    # SIZEUP_ALERT_TOPIC (the hub: SSM /sizeup-hub/alert-topic) else ntfy_topic; "" = no pushes. Never Tapout's
-    # topics (pcfd-phone-prealert, pcfd-status, whatever [prealert] names): refused here and in sizeup/notify.py.
+    # [alerts] (sizeup/notify.py; docs/cloud.md "Station health and alerts"): our OWN ntfy topics for pushes that
+    # page a person, two kinds (notify.route()): ntfy_topic for the incident alarms (sizeup/cad/alarms.py, #128:
+    # emergency buttons, mayday, aircraft squawks; env SIZEUP_ALERT_TOPIC, the hub: SSM /sizeup-hub/alert-topic),
+    # status_topic for the system's health (sizeup/cloud/health.py, #79: station health, Amazon Transcribe and its
+    # budget; env SIZEUP_STATUS_TOPIC, the hub: SSM /sizeup-hub/status-topic). Only one set: everything goes there;
+    # neither: no pushes. And station health's thresholds. Never Tapout's topics (pcfd-phone-prealert, pcfd-status,
+    # whatever [prealert] names): refused here and in sizeup/notify.py.
     alerts_ntfy_topic: str = ""
+    alerts_status_topic: str = ""
+    alerts_ntfy_topic_source: str = ""     # where each came from: "env" (the hub: SSM) | "config" | "" (unset)
+    alerts_status_topic_source: str = ""   # (Settings > System > Push notifications shows it; Settings win over both)
+    alerts_ntfy_server_source: str = "default"
     alerts_ntfy_server: str = "https://ntfy.sh"
     alerts_silent_min: float = 3.0       # no state post from the station this long
     alerts_behind_min: float = 15.0      # the station on another build than the hub this long
@@ -299,8 +305,10 @@ def hub_url_problem(url: str) -> str:
 #   SIZEUP_PUBLIC_URL, SIZEUP_HUB_URL [cloud] public_url / hub_url
 #   SIZEUP_ACCESS_TEAM / _AUD         [cloud] access_team / access_aud (hub: Cloudflare Access identity)
 #   SIZEUP_PREALERT_SERVER            [prealert] server (a local test server instead of ntfy.sh)
-#   SIZEUP_ALERT_TOPIC / _SERVER [alerts] ntfy_topic / ntfy_server (our push topic: a name is its only secret;
-#                                the hub: SSM /sizeup-hub/alert-topic)
+#   SIZEUP_ALERT_TOPIC / _SERVER [alerts] ntfy_topic / ntfy_server (our alarms' push topic: a name is its only
+#                                secret; the hub: SSM /sizeup-hub/alert-topic)
+#   SIZEUP_STATUS_TOPIC          [alerts] status_topic (our status / health push topic; the hub: SSM
+#                                /sizeup-hub/status-topic)
 #   SIZEUP_511NY_KEY                  [roads] key: the 511NY developer key (never in a file on the hub)
 #   SIZEUP_STATUS_TOKEN               [cloud] status_token: the deploy check's read-only bearer
 #   (no [gis] secrets: the county's open data needs no key)
@@ -402,17 +410,23 @@ def _prealert(data: dict) -> dict:
 
 
 def _alerts(data: dict, prealert: dict) -> dict:
-    """[alerts] -> Config fields: our ntfy topic for pushes (sizeup/notify.py: the emergency alarms, #128, and
-    station health, #79) and station health's thresholds (sizeup/cloud/health.py). No section: the defaults, no
-    push unless SIZEUP_ALERT_TOPIC is set. Tapout's topics (and whatever [prealert] names) are refused."""
+    """[alerts] -> Config fields: our ntfy topics for pushes (sizeup/notify.py route(): ntfy_topic for the
+    emergency alarms, #128; status_topic for station health, #79, and Amazon Transcribe) and station health's
+    thresholds (sizeup/cloud/health.py). No section: the defaults, no push unless SIZEUP_ALERT_TOPIC or
+    SIZEUP_STATUS_TOPIC is set. Tapout's topics (and whatever [prealert] names) are refused, by exact name."""
     from sizeup.notify import server_problem, topic_problem
-    al = _take(data.get("alerts", {}), "alerts", {"ntfy_topic", "ntfy_server", "silent_min", "behind_min", "down_min",
-                                                  "outbox_min", "disk_pct", "repeat_min"})
-    topic = _env("SIZEUP_ALERT_TOPIC", str(al.get("ntfy_topic", ""))).strip()
-    if topic:
-        why = topic_problem(topic, (prealert.get("prealert_ring_topic", ""), prealert.get("prealert_status_topic", "")))
+    al = _take(data.get("alerts", {}), "alerts", {"ntfy_topic", "status_topic", "ntfy_server", "silent_min",
+                                                  "behind_min", "down_min", "outbox_min", "disk_pct", "repeat_min"})
+    tapout = (prealert.get("prealert_ring_topic", ""), prealert.get("prealert_status_topic", ""))
+    topics, sources = {}, {}
+    for key, env in (("ntfy_topic", "SIZEUP_ALERT_TOPIC"), ("status_topic", "SIZEUP_STATUS_TOPIC")):
+        t = _env(env, str(al.get(key, ""))).strip()
+        why = topic_problem(t, tapout) if t else ""
         if why:
-            raise ConfigError(f"alerts.ntfy_topic / SIZEUP_ALERT_TOPIC: {why}")
+            raise ConfigError(f"alerts.{key} / {env}: {why}")
+        topics[key] = t
+        sources[key] = ("env" if os.environ.get(env, "").strip() else "config") if t else ""
+    topic = topics["ntfy_topic"]
     server = _env("SIZEUP_ALERT_SERVER", str(al.get("ntfy_server", "https://ntfy.sh"))).strip().rstrip("/")
     if server_problem(server):
         raise ConfigError(f"alerts.ntfy_server: {server_problem(server)}")
@@ -424,7 +438,11 @@ def _alerts(data: dict, prealert: dict) -> dict:
         if isinstance(v, bool) or not isinstance(v, (int, float)) or not lo <= float(v) <= hi:
             raise ConfigError(f"alerts.{k}: a number from {lo:g} to {hi:g}")
         out[f"alerts_{k}"] = float(v)
-    return dict(alerts_ntfy_topic=topic, alerts_ntfy_server=server, **out)
+    server_source = ("env" if os.environ.get("SIZEUP_ALERT_SERVER", "").strip() else
+                     "config" if str(al.get("ntfy_server", "")).strip() else "default")
+    return dict(alerts_ntfy_topic=topic, alerts_status_topic=topics["status_topic"], alerts_ntfy_server=server,
+                alerts_ntfy_topic_source=sources["ntfy_topic"], alerts_status_topic_source=sources["status_topic"],
+                alerts_ntfy_server_source=server_source, **out)
 
 
 P25_JOB = "Fire/EMS 15"   # the dongle job that runs trunk-recorder (sizeup/app.py P25_MODE)

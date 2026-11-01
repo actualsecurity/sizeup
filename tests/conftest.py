@@ -135,11 +135,12 @@ def _weather_stays_local(monkeypatch):
 @pytest.fixture(autouse=True)
 def _notify_stays_local(monkeypatch):
     """Push notifications (sizeup/notify.py) only ever reach a local fake ntfy from a test: never ntfy.sh, and
-    never a topic from the environment (SIZEUP_ALERT_TOPIC on a developer's machine)."""
+    never a topic from the environment (SIZEUP_ALERT_TOPIC / SIZEUP_STATUS_TOPIC on a developer's machine)."""
     from urllib.parse import urlsplit
 
     import sizeup.notify as notify
     monkeypatch.delenv("SIZEUP_ALERT_TOPIC", raising=False)
+    monkeypatch.delenv("SIZEUP_STATUS_TOPIC", raising=False)
     monkeypatch.delenv("SIZEUP_STATUS_TOKEN", raising=False)
     real = notify.urlopen
 

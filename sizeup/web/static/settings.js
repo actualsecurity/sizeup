@@ -1598,6 +1598,9 @@ function sSystem(panel) {
   station.hidden = true;
   const alarms = sCard(null);                  // the emergency alarms' words, channels, drill (alarm.js, #128)
   alarms.id = "s-alarms";
+  const pushes = sCard(null);                  // the ntfy topics by kind (sPushes): admins only, the names are secret
+  pushes.id = "s-pushes";
+  pushes.hidden = true;
   const health = sCard(null);         // Station health (health.js, #79): the hub only, shown once it answers
   health.hidden = true;
   // the department, with its patch (static/brand)
@@ -1611,7 +1614,7 @@ function sSystem(panel) {
   const about = sCard(patch, dept);
   about.classList.add("s-dept");
   panel.replaceChildren(...sHead("System"),
-    about, health, station, alarms,
+    about, health, station, alarms, pushes,
     sCard(sCardHead("Records"), recs, counts),
     ...(S.data.camera_wall ? [sCameraWall(S.data.camera_wall)] : []),
     sCard(sCardHead("Data file"), file),
@@ -1630,7 +1633,82 @@ function sSystem(panel) {
   sAudit();
   sStation();
   if (window.Alarm) Alarm.mountSettings($("#s-alarms"));
+  sPushes(pushes);
   if (window.StationHealth) StationHealth.mount(health);
+}
+
+// ---- system: push notifications (sizeup/notify.py Pushes, settings.py _notify_op) ----------------------------------
+// The two ntfy topics by kind: status & health (station health, Amazon Transcribe and its budget) and alerts (the
+// emergency buttons, mayday, aircraft squawks). Admins only: a topic's name is its only secret on ntfy.sh, so the
+// server shows them to nobody else. Empty = the default (SSM / the config); Turn off = no pushes of that kind.
+
+const S_PUSH_FROM = { settings: "Settings", ssm: "SSM", env: "Environment", config: "Config file", default: "Default",
+  fallback: "Shared", off: "Turned off", none: "Not set" };
+async function sPushes(card) {
+  if (!card) return;
+  if (!canDo("admin")) { card.hidden = true; return; }
+  let d;
+  try {
+    d = await api("GET", "/api/cad/notify");
+  } catch (e) {
+    card.hidden = false;
+    card.replaceChildren(sCardHead("Push notifications"), el("div", "error", `Push notifications: ${e.message}`));
+    return;
+  }
+  if (!d || !d.configured) { card.hidden = true; return; }
+  const when = (t) => (t ? fmtTime(t, true) : "");
+  const kids = [];
+  for (const k of d.kinds) {
+    const head = el("div", "row");
+    head.append(el("b", "s-eta-l", k.label), el("span", `chip s-state ${k.topic ? "edited" : "default"}`, S_PUSH_FROM[k.source] || k.source));
+    const now = el("div", "dim small");
+    now.append(k.topic ? el("span", "", "In effect: ") : el("span", "", k.source === "off" ? "Off: no pushes of this kind" : "Not set: no pushes of this kind"),
+      ...(k.topic ? [el("span", "mono", k.topic), el("span", "", ` (${k.source_text})`)] : []));
+    const input = sInput(k.settings.topic, d.max_len, `${k.label} (empty: the default)`, null, "mono");
+    input.minLength = d.min_len;
+    const row = el("div", "row");
+    row.append(input,
+      sBtn("Save", "This topic, from Settings", () => sPost("notify", { action: "set", key: k.kind, topic: input.value.trim() }, `${k.label}: saved`), "primary"),
+      ...(k.settings.topic || k.settings.off ? [sBtn("Use default", `The default: ${k.default.topic ? k.default.source_text : "not set"}`,
+        () => sPost("notify", { action: "reset", key: k.kind }, `${k.label}: back to the default`))] : []),
+      ...(k.settings.off ? [] : [sBtn("Turn off", "No pushes of this kind until it is set again",
+        () => sAsk(`Turn off pushes to the ${k.label.toLowerCase()}? Nothing of this kind reaches a phone until it is set again.`,
+          () => sPost("notify", { action: "off", key: k.kind }, `${k.label}: off`), "Turn off"), "danger-quiet")]),
+      el("span", "spacer"),
+      sBtn("Send test push", k.topic ? `“sizeup test: ${k.kind} topic” to the topic in effect` : "No topic in effect", () => sPushTest(card, k), k.topic ? "" : "quiet"));
+    const last = el("div", "dim small");
+    const lp = k.last;
+    last.textContent = [lp ? `Last push ${when(lp.at)}: ${lp.ok ? "sent" : `not sent (${lp.error})`} · ${lp.sent} sent, ${lp.failed} failed`
+      : "No push since this server started",
+    k.test ? `Last test ${when(k.test.at)}: ${k.test.ok ? "sent" : `not sent (${k.test.error})`}` : ""].filter(Boolean).join(" · ");
+    kids.push(head, now, row, last);
+  }
+  const srv = sInput(d.server.settings, 200, `ntfy server (empty: ${d.server.default})`, null, "mono");
+  const sRow = el("div", "row");
+  sRow.append(el("span", "s-eta-l", "ntfy server"), srv,
+    sBtn("Save", "This server, from Settings (empty: the default)", () => sPost("notify", { action: "server", key: "server", value: srv.value.trim() }, "ntfy server saved"), "primary"),
+    el("span", "dim small", `In effect: ${d.server.value} (${S_PUSH_FROM[d.server.source] || d.server.source})`));
+  kids.push(sRow);
+  card.hidden = false;
+  card.replaceChildren(sCardHead("Push notifications", "", sHelp("Pushes go to our own ntfy topics, by kind. Status & health: "
+    + "station health (silent, behind, a dongle or program down, the disk, the whisper queue), Amazon Transcribe failing and its "
+    + "monthly limit, and their recoveries. Alerts: the emergency buttons, a mayday, an aircraft emergency, their acknowledgements "
+    + "and all clears. Only one topic set: everything goes to it. A name set here wins over SSM and the config file; empty uses "
+    + `them. Never Tapout's topics (${d.forbidden.join(", ")}): refused. ${d.min_len} to ${d.max_len} letters, digits, - and _; `
+    + "ntfy topics are public by name, so make them long and random. Only admins see the names.")), ...kids);
+}
+async function sPushTest(card, k) {
+  const op = operator();
+  if (!op) { sMsg("Enter operator name (top right)"); return; }
+  try {
+    const r = await api("POST", "/api/cad/settings/notify", { action: "test", key: k.kind, operator: op });
+    sMsg(r.test.ok ? `Test push sent to the ${k.label.toLowerCase()}` : `Test push not sent: ${r.test.error}`, r.test.ok);
+  } catch (e) {
+    sMsg(e.message);
+  }
+  S.auditFor = "";
+  sAudit();
+  sPushes(card);
 }
 
 // ---- data sources (#186): every data pull, Refresh now, how often (datasources.js; sizeup/datasources.py) -------------

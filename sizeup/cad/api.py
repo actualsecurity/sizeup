@@ -150,6 +150,11 @@ POST /api/cad/datasources/<key>/refresh   {operator?}  Refresh now: runs in the 
                                           ({ok, source: the row, running}); 429 {error} when refused (refreshing already,
                                           too soon after the last, or the source is resting); admins; in the person's
                                           activity and the Settings audit log
+GET  /api/cad/notify                      Settings > System > Push notifications (sizeup/notify.py Pushes): each kind's
+                                          topic in effect and where it came from (Settings / SSM / config / off), the
+                                          last push and test; admins only (the names are secret)
+POST /api/cad/settings/notify             {action: set {key: alerts | status, topic ("" = the default)} | off {key} |
+                                          reset {key} | server {value} | test {key}}: admins; audited without the names
 POST /api/cad/settings/datasources        {action: set, key, value: off | hourly | daily | weekly | monthly} | {action:
                                           reset, key?}: how often a data source is refreshed; admins
 """
@@ -489,6 +494,13 @@ class CadApi:
             return _json(200, {"rev": out["rev"], "same": True})
         return _json(200, out)
 
+    def _notify(self, who) -> tuple[int, bytes, str]:
+        """GET /api/cad/notify: Settings > System > Push notifications, admins only (a topic's name is its only secret)."""
+        if who is not None and who.email and self.cad.settings.standing(who.email)["may"] != "admin":
+            return _json(403, {"error": "Admins only: the push topics' names are secret"})
+        p = getattr(self.cad, "pushes", None)
+        return _json(200, {"configured": False} if p is None else {"configured": True, **p.page()})
+
     def _ds_refresh(self, key: str, body: dict) -> dict:
         """POST /api/cad/datasources/<key>/refresh: started (the row), in the Settings audit log too."""
         ds = self.cad.datasources
@@ -507,6 +519,8 @@ class CadApi:
         try:
             if path == "/api/cad/datasources":
                 return self._datasources(parse_qs(query), who)
+            if path == "/api/cad/notify":
+                return self._notify(who)
             if path == "/api/cad/whoami":
                 return _json(200, self.cad.settings.whoami(who.email if who is not None else ""))
             if path in ("/api/cad/activity", "/api/cad/export/activity.csv"):

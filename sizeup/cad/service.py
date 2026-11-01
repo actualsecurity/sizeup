@@ -199,6 +199,7 @@ class Cad:
         # The emergency button and a mayday heard on our fire channels (sizeup/cad/alarms.py, #128): the app feeds it
         # transmissions on the CAD of record; every console and wall board shows them until acknowledged.
         self.alarms = Alarms(self, lambda m: self.log(m))
+        self.pushes = None             # sizeup/notify.py Pushes (the app sets it): Settings > System > Push notifications
         # Set by the app: who is transmitting now (sizeup/radio/live.py) and whether a clip's audio is still kept.
         self.live: Callable[[], list[dict]] = lambda: []
         self.paging: Callable[[], list[dict]] = lambda: []      # a page going out now (sizeup/radio/livepage.py)

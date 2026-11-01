@@ -109,6 +109,7 @@ def test_every_post_the_scripts_make_is_in_the_permission_map():
                                 ("/api/cad/incident/12/link", "`/api/cad/incident/${inc.id}/link`", "dispatch"),
                                 ("/api/cad/incident/12/unlink", "`/api/cad/incident/${e.id}/unlink`", "dispatch"),
                                 ("/api/cad/settings/tones", '"/api/cad/settings/tones"', "admin"),
+                                ("/api/cad/settings/notify", '"/api/cad/settings/notify"', "admin"),   # the push topics' test push
                                 ("/api/cad/datasources/gis:hydrants/refresh",
                                  "`/api/cad/datasources/${encodeURIComponent(s.key)}/refresh`", "admin"),
                                 ("/api/incident/abc/close", "`/api/incident/${encodeURIComponent(id)}/close`", "dispatch")):

@@ -257,12 +257,33 @@ each channel (state, last heard, quiet for, its usual gap, squelch open / stuck,
 and the alert history of the last 24 h (started, cleared, how long, where, whether it was pushed).
 `GET /api/cad/health`: anyone signed in (behind Cloudflare Access like the rest of the CAD).
 
-### The alert topic (ntfy)
+### The alert and status topics (ntfy)
 
-Pushes go to a **new topic of our own** on ntfy.sh, never Tapout's: `pcfd-phone-prealert` pages the fire
+Pushes go to **topics of our own** on ntfy.sh, never Tapout's: `pcfd-phone-prealert` pages the fire
 crew's phones and `pcfd-status` is Tapout's own health feed. The config refuses both (and whatever
-`[prealert]` names), and `sizeup/notify.py` refuses them again before any request. No topic: no push
-(banner and log only); that is the default.
+`[prealert]` names), and `sizeup/notify.py` refuses them again before any request. The refusal is by
+exact name: a topic of ours with "status" in it is fine. No topic: no push (banner and log only); that is
+the default.
+
+Two kinds, two topics (`sizeup/notify.py` `route()`):
+
+| Kind | Setting (hub: SSM) | What |
+|---|---|---|
+| alerts | `[alerts] ntfy_topic` / `SIZEUP_ALERT_TOPIC` (`/sizeup-hub/alert-topic`) | Emergency buttons (P25, MDC, FleetSync), the fireground mayday, aircraft emergency squawks; their acknowledgements, all clears and "Ended" notices |
+| status | `[alerts] status_topic` / `SIZEUP_STATUS_TOPIC` (`/sizeup-hub/status-topic`) | Station health (silent, behind, update failed, dongle gone, job / whisper / trunk-recorder down, stuck channel, outbox, disk, whisper queue), "Amazon Transcribe failing", its monthly budget at 80 % / 100 %, and every recovery notice |
+
+Only one of the two set: both kinds go to it. The app logs at startup where each kind goes
+("notify: alerts → topic set (SSM), status → topic set (SSM)"), never the names.
+
+**Settings > System > Push notifications** (admins only) changes either topic, and the ntfy server, without a
+restart: a value set there wins over SSM / the environment, which win over the config file; empty means "use
+that default"; **Turn off** stops that kind's pushes. Each kind shows the topic in effect, where it came from
+(Settings, SSM, config file, shared with the other kind, off), and its last push and result. **Send test push**
+sends "sizeup test: status topic" (or alerts) to the topic in effect. The same validation as the config: Tapout's
+topics and the `[prealert]` ones refused by exact name, 12 to 64 letters, digits, `-` and `_`. Every change
+and every test push goes into the Settings audit log with who and when, the topic as a fingerprint
+("topic #3f9c27"): the audit log, the activity, the settings export (which leaves the section out; an import
+keeps it), `/api/station/status` and the logs never carry a name. `GET /api/cad/notify` is admins only.
 
 1. **Choose the name.** ntfy topics are public by name: anyone who knows it can read and post. Make it long
    and random, e.g. `python3 -c "import secrets; print('sizeup-health-' + secrets.token_hex(8))"` →
@@ -270,17 +291,20 @@ crew's phones and `pcfd-status` is Tapout's own health feed. The config refuses 
 2. **Subscribe on your phone:** the ntfy app (iOS / Android) → **+** → topic name → server `ntfy.sh` →
    Subscribe. Allow its notifications; a critical alert is sent at high priority. To test, publish one by
    hand to *your* topic only: `curl -d "test" ntfy.sh/<your topic>`.
-3. **Give it to the hub** (it's a secret by name, so not in the repo):
-   `aws ssm put-parameter --name /sizeup-hub/alert-topic --type SecureString --value '<your topic>'`, then,
-   and only then (a task whose secret is missing doesn't start), add to the hub container's `secrets` in
-   `deploy/aws/taskdef.json` (and `sizeup-aws/7-deploy-pr.sh`'s copy):
-   `{"name":"SIZEUP_ALERT_TOPIC","valueFrom":"arn:aws:ssm:us-east-1:504804195561:parameter/sizeup-hub/alert-topic"}`.
-   Elsewhere: `SIZEUP_ALERT_TOPIC=...` or `[alerts] ntfy_topic` in the config. The panel says "Push on" once
-   the hub has it.
+3. **Give them to the hub** (secrets by name, so not in the repo):
+   `aws ssm put-parameter --name /sizeup-hub/alert-topic --type SecureString --value '<your alerts topic>'`
+   and the same for `/sizeup-hub/status-topic`, then, and only then (a task whose secret is missing doesn't
+   start), the hub container's `secrets` in `deploy/aws/taskdef.json` (and `sizeup-aws/7-deploy-pr.sh`'s copy)
+   name both:
+   `{"name":"SIZEUP_ALERT_TOPIC","valueFrom":"arn:aws:ssm:us-east-1:504804195561:parameter/sizeup-hub/alert-topic"}`,
+   `{"name":"SIZEUP_STATUS_TOPIC","valueFrom":"arn:aws:ssm:us-east-1:504804195561:parameter/sizeup-hub/status-topic"}`.
+   Elsewhere: `SIZEUP_ALERT_TOPIC=...` / `SIZEUP_STATUS_TOPIC=...` or `[alerts] ntfy_topic` / `status_topic`
+   in the config. The health panel says "Push on" once the hub has a topic for status.
 
 ```toml
 [alerts]                           # sizeup/cloud/health.py; leave out: these defaults, no push
-ntfy_topic = ""                    # or env SIZEUP_ALERT_TOPIC (the hub: SSM /sizeup-hub/alert-topic); never Tapout's
+ntfy_topic = ""                    # the alarms; or env SIZEUP_ALERT_TOPIC (the hub: SSM /sizeup-hub/alert-topic); never Tapout's
+status_topic = ""                  # health / status; or env SIZEUP_STATUS_TOPIC (the hub: SSM /sizeup-hub/status-topic)
 ntfy_server = "https://ntfy.sh"
 silent_min = 3                     # no state post from the station this long
 behind_min = 15                    # on another build than the hub this long
@@ -1545,7 +1569,7 @@ User, 2026-10-14 (#161): *"yes they should"* (raise sizeup's alarm and send a pu
 7700**, or the aircraft's **own emergency status** (minimum fuel, no radio, medical ...), **within 15 nm of HPN
 below 18,000 ft** (or on the ground), from a message no older than 15 s, raises **the emergency alarm**
 (`sizeup/cad/alarms.py`, #128: every console and wall board, the alarm sound, acknowledged by a dispatcher)
-and **its push** through `[alerts] ntfy_topic` when one is set (never Tapout's `pcfd-phone-prealert` or
+and **its push** to the alerts topic (`[alerts] ntfy_topic`, else `status_topic`) when one is set (never Tapout's `pcfd-phone-prealert` or
 `pcfd-status`: refused in three places; no topic: the alarm only). It works while nobody looks at the map:
 the emergency watch reads the primary feed every 15 s (`[aircraft] alarms = false` turns it off).
 
