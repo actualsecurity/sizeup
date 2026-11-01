@@ -51,6 +51,8 @@ from typing import Callable
 
 import numpy as np
 
+from sizeup import tz
+
 
 UNKNOWN_SRC = ("", "-1", "0")     # srcList "src" when no radio ID was decoded
 
@@ -508,7 +510,7 @@ class CallIngest:
             else:
                 self.state = "ok"
                 self.detail = f"watching {self.dir.name}" + (
-                    f" · last call {time.strftime('%H:%M', time.localtime(self.last_call))}" if self.last_call else "")
+                    f" · last call {tz.hhmm(self.last_call)}" if self.last_call else "")
                 try:
                     calls = self.scan()
                 except Exception as e:                       # never let one bad file stop ingest

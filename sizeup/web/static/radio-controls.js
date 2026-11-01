@@ -338,10 +338,12 @@ window.RadioControls = (() => {
     const rows = ((st.state && st.state.talkgroups) || []).map((r) => ({ ...r, ...chan(`tg:${r.tg}`), record: r.record }));
     return st.pending.size ? rows.map((r) => (st.pending.has(r.tg) ? { ...r, ...st.pending.get(r.tg).vals, pending: true } : r)) : rows;
   }
-  // Channel choices (sizeup/channels.py): the default (AWS for [stt] aws_channels), what is saved, what was just clicked.
+  // Channel choices (sizeup/channels.py): the default (AWS for [stt] aws_channels, no text for [stt] record_only),
+  // what is saved, what was just clicked.
   function chan(key) {
     const c = (st.state && st.state.channels) || {};
-    const p = { record: true, transcribe: true, engine: (c.aws_channels || []).includes(key) ? "aws" : "local",
+    const p = { record: true, transcribe: !(c.record_only || []).includes(key),
+                engine: (c.aws_channels || []).includes(key) ? "aws" : "local",
                 ...((c.prefs || {})[key] || {}) };
     const q = st.cpending.get(key);
     if (q) Object.assign(p, q.vals, { cpending: true });
@@ -361,7 +363,8 @@ window.RadioControls = (() => {
     }
     const c = (st.state && st.state.channels) || {};
     for (const [key, p] of st.cpending) {
-      const saved = { record: true, transcribe: true, engine: (c.aws_channels || []).includes(key) ? "aws" : "local",
+      const saved = { record: true, transcribe: !(c.record_only || []).includes(key),
+                      engine: (c.aws_channels || []).includes(key) ? "aws" : "local",
                       ...((c.prefs || {})[key] || {}) };
       if (now > p.until || Object.entries(p.vals).every(([k, v]) => saved[k] === v)) st.cpending.delete(key);
     }

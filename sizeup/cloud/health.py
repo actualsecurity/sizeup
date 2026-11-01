@@ -68,6 +68,7 @@ import time
 from pathlib import Path
 from typing import Callable
 
+from sizeup import tz
 from sizeup.cloud.autoupdate import same_build, short
 
 TICK_S = 5.0
@@ -98,7 +99,7 @@ def status_token(station_token: str, configured: str = "") -> str:
 
 
 def _hhmm(t: float | None) -> str:
-    return time.strftime("%H:%M", time.localtime(t)) if t else "?"
+    return tz.hhmm(t)          # the console's time zone, not the container's UTC (#200)
 
 
 def _dur(s: float) -> str:

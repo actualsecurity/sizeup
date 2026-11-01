@@ -641,6 +641,13 @@ written to be shared with the Polly voice. Config: `[stt] aws = true` on the hub
 `aws_pace`, `aws_vocabulary`; `aws_endpoint` / `aws_api_endpoint` point at a local fake
 (`python -m tests.fake_transcribe`) for tests and dev.
 
+`[stt] record_only` (#201): channels and talkgroups recorded but not transcribed unless Settings >
+Radios > Channels says otherwise. The hub ships `[383, 3127]` (WCPD Ch 1, LLT Supervisor 1: about
+1,800 clips a day off the station's whisper). The station's own config doesn't carry it: the hub
+folds it into the channel map of the `set_channel_prefs` job (`channels.for_station()`, as
+`{"transcribe": false}` per channel unless a Settings choice says otherwise), so any station,
+including one on an older build, applies it as a plain choice and reports the same signature.
+
 ## Phone pre-alert (Tapout)
 
 > "can we bake in the ntfy.sh feed from tapout into this? lets receive that feed as a possible
