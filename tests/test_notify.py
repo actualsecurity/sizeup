@@ -114,3 +114,49 @@ def test_the_notifier_sends_in_order_from_its_own_thread(ntfy):
     assert [m["body"]["title"] for m in ntfy.got] == ["t0 · FG1", "t1 · FG1", "t2 · FG1"]
     off = Notifier(ntfy.url, "", log=lambda m: None)
     assert not off.enabled and not off.send("x", "y")
+
+
+# -- two topics, by kind (route(), notifiers()) -------------------------------------------------------------------
+# Stand-ins shaped like the hub's real topics (which live only in SSM: ntfy topics are readable by name, and this
+# repository is public): "status" / "alerts" inside a longer name of our own.
+OUR_ALERTS, OUR_STATUS = "pcfd-xmpl-alerts", "pcfd-xmpl-status"
+
+
+def test_each_kind_goes_to_its_own_topic_and_one_topic_takes_both():
+    assert notify.route(OUR_ALERTS, OUR_STATUS) == {notify.ALERTS: OUR_ALERTS, notify.STATUS: OUR_STATUS}
+    assert notify.route(OUR_ALERTS, "") == {notify.ALERTS: OUR_ALERTS, notify.STATUS: OUR_ALERTS}   # as before
+    assert notify.route("", OUR_STATUS) == {notify.ALERTS: OUR_STATUS, notify.STATUS: OUR_STATUS}
+    assert notify.route("", " ") == {notify.ALERTS: "", notify.STATUS: ""}                          # no pushes
+
+
+def test_the_startup_line_says_where_each_kind_goes_never_the_names():
+    both = notify.route_line(OUR_ALERTS, OUR_STATUS)
+    assert both == "notify: alerts → topic set, status → topic set"
+    assert notify.route_line(OUR_ALERTS, "") == "notify: alerts → topic set, status → the alerts topic (no status topic set)"
+    assert notify.route_line("", OUR_STATUS) == "notify: alerts → the status topic (no alerts topic set), status → topic set"
+    assert notify.route_line("", "").startswith("notify: no pushes")
+    for line in (both, notify.route_line(OUR_ALERTS, ""), notify.route_line("", OUR_STATUS)):
+        assert OUR_ALERTS not in line and OUR_STATUS not in line
+
+
+def test_notifiers_by_kind_share_one_queue_when_one_topic_serves_both(ntfy):
+    n = notify.notifiers(ntfy.url, OUR_ALERTS, OUR_STATUS, log=lambda m: None)
+    assert n[notify.ALERTS].topic == OUR_ALERTS and n[notify.STATUS].topic == OUR_STATUS
+    assert n[notify.ALERTS] is not n[notify.STATUS]
+    n[notify.ALERTS].send("MAYDAY", "Emergency button", priority=5)
+    n[notify.STATUS].send("Station silent 4 min", "no word since 14:32")
+    assert n[notify.ALERTS].flush(5) and n[notify.STATUS].flush(5)
+    assert sorted((m["body"]["topic"], m["body"]["title"]) for m in ntfy.got) == [
+        (OUR_ALERTS, "MAYDAY"), (OUR_STATUS, "Station silent 4 min")]
+    for only in ((OUR_ALERTS, ""), ("", OUR_STATUS)):
+        one = notify.notifiers(ntfy.url, *only, log=lambda m: None)
+        assert one[notify.ALERTS] is one[notify.STATUS] and one[notify.ALERTS].topic == (only[0] or only[1])
+    assert notify.notifiers(ntfy.url, "", "", log=lambda m: None) == {notify.ALERTS: None, notify.STATUS: None}
+
+
+@pytest.mark.parametrize("ours", [OUR_STATUS, OUR_ALERTS, "pcfd-sizeup-health", "x-pcfd-status", "pcfd-status-2",
+                                  "pcfd-phone-prealert-test", "my-firehouse-ring-xyz"])
+def test_tapouts_topics_are_refused_by_exact_name_not_by_a_word_in_ours(ours):
+    assert topic_problem(ours, ("firehouse-ring-xyz",)) == ""
+    for theirs in ("pcfd-status", "pcfd-phone-prealert", "firehouse-ring-xyz"):
+        assert "Tapout" in topic_problem(theirs, ("firehouse-ring-xyz",))

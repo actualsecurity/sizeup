@@ -59,8 +59,8 @@ address, the freshest position per aircraft, our receiver's position first for a
 
 The emergency watch: a squawk 7500 / 7600 / 7700, or the aircraft's own emergency status, inside RADIUS_NM of HPN
 below WATCH_CEILING_FT, from a message no older than STALE_S, raises one alarm (sizeup/cad/alarms.py, its push
-through [alerts] ntfy_topic when one is set) per aircraft per emergency, cleared when it has not been seen for
-CLEAR_HOLD_S (a flicker doesn't re-alarm), not raised again within REALARM_S, at most MAX_ALARMS an hour. So the
+to the alerts topic, [alerts] ntfy_topic, when one is set) per aircraft per emergency, cleared when it has not
+been seen for CLEAR_HOLD_S (a flicker doesn't re-alarm), not raised again within REALARM_S, at most MAX_ALARMS an hour. So the
 alarm works while nobody looks at the map, the primary feed (and the receiver) are read every WATCH_S then.
 
 Types: the feed's ICAO type designator ("t": E75L) when it has one; the make and model from the FAA Releasable

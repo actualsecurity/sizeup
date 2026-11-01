@@ -19,10 +19,25 @@ Publishing is ntfy's JSON form (POST <server>/ with {topic, title, message, prio
 titles and bodies can be any UTF-8. ntfy topics are public by name: whoever knows the name can read and
 post, so a topic of ours is a long random name (docs/cloud.md "Station health and alerts").
 
+Two topics, by kind (route(), notifiers(); user, 2026-11-01):
+
+    ALERTS  [alerts] ntfy_topic / SIZEUP_ALERT_TOPIC (the hub: SSM /sizeup-hub/alert-topic): incident-level
+            alarms: the emergency buttons (P25, MDC, FleetSync) and the fireground mayday (sizeup/cad/alarms.py),
+            aircraft emergency squawks (sizeup/aircraft.py through the alarms), their acknowledgements, all
+            clears and "Ended" notices
+    STATUS  [alerts] status_topic / SIZEUP_STATUS_TOPIC (the hub: SSM /sizeup-hub/status-topic): the system's
+            own health: station health (sizeup/cloud/health.py: silent, behind, update failed, a dongle gone, a
+            job / whisper / trunk-recorder down, a stuck channel, the outbox, the disk, the whisper queue), Amazon
+            Transcribe failing, its monthly budget at 80 % / 100 %, and their recovery notices
+
+Only one of them set: every kind goes there (as before the split). Neither: no pushes. The app logs at startup
+where each kind goes (route_line(): "set" or "off", never a topic's name).
+
 NEVER Tapout's topics: pcfd-phone-prealert pages the fire crew's phones, pcfd-status is Tapout's own
 health feed. sizeup only reads those (sizeup/prealert.py). topic_problem() refuses them (and anything that
 isn't a plain topic name), the config refuses them ([alerts] ntfy_topic), and publish() refuses them again
-right before a request is made: a mistake in one place can't page the crew.
+right before a request is made: a mistake in one place can't page the crew. The match is the whole name
+(case aside): a topic of ours that merely contains "status" or "prealert" is fine.
 """
 
 from __future__ import annotations
@@ -44,6 +59,8 @@ FORBIDDEN = frozenset({"pcfd-phone-prealert", "pcfd-status"})
 TOPIC = re.compile(r"[-_A-Za-z0-9]{1,64}")
 MIN_TOPIC_LEN = 12          # a short name is easy to guess (and to read along with)
 PRIORITIES = {"min": 1, "low": 2, "default": 3, "high": 4, "urgent": 5, "max": 5}
+ALERTS, STATUS = "alerts", "status"     # the kinds of push (route()): incident alarms; the system's own health
+KINDS = (ALERTS, STATUS)
 TIMEOUT_S = 10.0
 RETRIES = (2.0, 10.0, 30.0)     # Notifier: waits between attempts after a network error or a 5xx/429
 
@@ -127,6 +144,39 @@ def topic_problem(topic: str, also_forbidden: Iterable[str] = ()) -> str:
     if len(t) < MIN_TOPIC_LEN:
         return f"at least {MIN_TOPIC_LEN} characters: ntfy topics are public by name, so make it long and random"
     return ""
+
+
+def route(alert_topic: str = "", status_topic: str = "") -> dict[str, str]:
+    """Which topic each kind of push goes to: {ALERTS: topic, STATUS: topic}, "" for none. Only one topic set:
+    both kinds go to it. Neither: {ALERTS: "", STATUS: ""} (no pushes)."""
+    a, s = (alert_topic or "").strip(), (status_topic or "").strip()
+    return {ALERTS: a or s, STATUS: s or a}
+
+
+def route_line(alert_topic: str = "", status_topic: str = "") -> str:
+    """The startup line, by kind and never with a topic's name: "notify: alerts \u2192 topic set, status \u2192
+    topic set"; a kind without a topic of its own says it shares the other's; neither: no pushes."""
+    a, s = bool((alert_topic or "").strip()), bool((status_topic or "").strip())
+    if not a and not s:
+        return "notify: no pushes (no [alerts] ntfy_topic / status_topic set)"
+    alerts = "topic set" if a else "the status topic (no alerts topic set)"
+    status = "topic set" if s else "the alerts topic (no status topic set)"
+    return f"notify: alerts \u2192 {alerts}, status \u2192 {status}"
+
+
+def notifiers(server: str, alert_topic: str = "", status_topic: str = "", log: Callable[[str], None] = print,
+              **kw) -> dict[str, Notifier | None]:
+    """{ALERTS: Notifier | None, STATUS: Notifier | None} by route(): one Notifier (one queue, in order) when
+    both kinds go to the same topic, None for a kind with nowhere to go. kw: Notifier's (sleep, retries)."""
+    r = route(alert_topic, status_topic)
+    made: dict[str, Notifier] = {}
+    out: dict[str, Notifier | None] = {}
+    for kind in KINDS:
+        t = r[kind]
+        if t and t not in made:
+            made[t] = Notifier(server, t, log, **kw)
+        out[kind] = made.get(t) if t else None
+    return out
 
 
 def server_problem(server: str) -> str:

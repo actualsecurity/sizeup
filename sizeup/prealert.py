@@ -16,7 +16,7 @@ incoming call").
 READ ONLY. The ring topic is the fire crew's real alert channel: sizeup never publishes to it, or to
 Tapout's status topic (user, 2026-10-08: "never send to it, we can read from it though"). Every request in
 this module is a GET (_get, the only place a request is made; tests/test_prealert.py checks it). The one
-place sizeup publishes is sizeup/notify.py, to a topic of our own ([alerts] ntfy_topic), and it refuses these.
+place sizeup publishes is sizeup/notify.py, to topics of our own ([alerts] ntfy_topic, status_topic), and it refuses these.
 
 Subscribing: one thread per topic on ntfy's JSON stream (GET <server>/<topic>/json, one JSON
 object per line: "open", "keepalive" about every 45 s, "message"). A dropped stream reconnects with

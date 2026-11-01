@@ -416,10 +416,13 @@ class App:
             self.prealert = PreAlerts(self.cad, cfg.prealert_server, cfg.prealert_ring_topic, cfg.prealert_status_topic,
                                       cfg.prealert_expire_min, cfg.prealert_heartbeat_stale_min, log=log)
             self.prealert_sync()
-        # The emergency alarms' pushes (sizeup/cad/alarms.py, #128): our own ntfy topic ([alerts], sizeup/notify.py).
-        if cfg.alerts_ntfy_topic:
-            from sizeup.notify import Notifier
-            self.cad.alarms.notifier = Notifier(cfg.alerts_ntfy_server, cfg.alerts_ntfy_topic, log)
+        # Pushes (sizeup/notify.py, [alerts]): our own ntfy topics by kind (notify.route()): the emergency alarms
+        # (sizeup/cad/alarms.py, #128, aircraft squawks too) to the alerts topic; station health and Amazon
+        # Transcribe (sizeup/cloud/health.py, the hub) to the status topic. Only one set: both go there.
+        from sizeup import notify
+        self.notifiers = notify.notifiers(cfg.alerts_ntfy_server, cfg.alerts_ntfy_topic, cfg.alerts_status_topic, log)
+        self.cad.alarms.notifier = self.notifiers[notify.ALERTS]
+        log(notify.route_line(cfg.alerts_ntfy_topic, cfg.alerts_status_topic))
         self.cad.alarms.public_url = cfg.cloud_public_url
         # The emergency window (alarms.Windows): the button's talkgroup and radio kept this long, Record off or on
         self.cad.alarms.windows.keep_s = cfg.p25_emergency_window_min * 60

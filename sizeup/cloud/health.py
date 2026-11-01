@@ -38,8 +38,8 @@ nothing starts or clears on old data. Per-channel silence (nothing heard for muc
 usually goes, from its own gaps between transmissions) is a hint in the panel, never an alert.
 
 Each alert is logged once when it starts and once when it clears, shown as a banner on /cad and /monitor
-(the CAD state's cloud.alerts, static/health.js), and pushed to [alerts] ntfy_topic (sizeup/notify.py): at
-most one push per condition per repeat_min (15), plus its recovery (only for an episode that was pushed).
+(the CAD state's cloud.alerts, static/health.js), and pushed to the status topic ([alerts] status_topic, else
+ntfy_topic: sizeup/notify.py route()): at most one push per condition per repeat_min (15), plus its recovery (only for an episode that was pushed).
 Alerts and 24 h of their history are kept in hub.sqlite (meta "health"), so a redeploy neither forgets nor
 repeats them.
 

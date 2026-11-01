@@ -118,7 +118,7 @@ const StationHealth = (() => {
     const pr = h.processes || {}, n = d.notify || {}, th = d.thresholds || {};
     const last = b.last || null;
     const push = n.on ? `Push on (${(n.server || "").replace(/^https?:\/\//, "")})` + (n.failed ? `, ${n.failed} failed: ${n.last_error}` : "")
-      : "Push off: no alert topic set ([alerts] ntfy_topic / SSM /sizeup-hub/alert-topic)";
+      : "Push off: no status topic set ([alerts] status_topic / SSM /sizeup-hub/status-topic, or ntfy_topic)";
     const head = el("div", "card-head");
     head.append(el("h2", "", "Station health"),
       el("span", `chip ${d.alerts.length ? "hl-bad" : "hl-ok"}`, d.alerts.length ? `${d.alerts.length} alert${d.alerts.length === 1 ? "" : "s"}` : "No alerts"),

@@ -365,7 +365,7 @@ window.Alarm = (() => {
         + "alarm with sound on every console and wall board until a dispatcher acknowledges it (who and when go on the "
         + "event's chronology). The button on another agency's talkgroup, by a radio not ours, is a notice. "
         + "\"...\" in a phrase: up to " + d.gap_words + " words in between that don't say no.")] : []),
-      mk("span", "dim small", d.push ? "Pushed to the alerts topic (ntfy)" : "No push topic ([alerts] ntfy_topic)"));
+      mk("span", "dim small", d.push ? "Pushed to the alerts topic (ntfy)" : "No push topic ([alerts] ntfy_topic / status_topic)"));
     // drill
     const drill = mk("label", "check");
     const dIn = mk("input");

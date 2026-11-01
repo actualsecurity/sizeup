@@ -1,5 +1,6 @@
 """Station health (sizeup/cloud/health.py, #79/#35): each alert condition starts, is rate-limited, clears;
 the hints; the panel and status endpoints' permissions; the config's refusal of Tapout's topics."""
+import json
 import time
 from types import SimpleNamespace
 
@@ -436,7 +437,123 @@ def test_alerts_config_defaults_env_and_limits(tmp_path, monkeypatch):
 def test_the_hub_config_ships_without_a_topic():
     from pathlib import Path
     c = load(Path(__file__).resolve().parent.parent / "deploy" / "hub" / "config.hub.toml")
-    assert c.alerts_ntfy_topic == "" and c.alerts_silent_min == 3 and c.alerts_behind_min == 15
+    assert c.alerts_ntfy_topic == "" and c.alerts_status_topic == "" and c.alerts_silent_min == 3 and c.alerts_behind_min == 15
+
+
+# -- two topics: the alarms to [alerts] ntfy_topic, health / status to status_topic (sizeup/notify.py route()) --------
+# Stand-ins shaped like the hub's real topics, which live only in SSM (a topic is readable by its name; this
+# repository is public).
+OUR_ALERTS, OUR_STATUS = "pcfd-xmpl-alerts", "pcfd-xmpl-status"
+
+
+def test_the_status_topic_from_the_config_or_the_env_validated_like_the_alert_topic(tmp_path, monkeypatch):
+    c = load(_toml(tmp_path, f'[alerts]\nntfy_topic = "{OUR_ALERTS}"\nstatus_topic = "{OUR_STATUS}"\n'))
+    assert (c.alerts_ntfy_topic, c.alerts_status_topic) == (OUR_ALERTS, OUR_STATUS)
+    assert load(_toml(tmp_path, "")).alerts_status_topic == ""
+    monkeypatch.setenv("SIZEUP_STATUS_TOPIC", "pcfd-xmpl-status-from-ssm")
+    c = load(_toml(tmp_path, f'[alerts]\nstatus_topic = "{OUR_STATUS}"\n'))
+    assert c.alerts_status_topic == "pcfd-xmpl-status-from-ssm" and c.alerts_ntfy_topic == ""
+    monkeypatch.delenv("SIZEUP_STATUS_TOPIC")
+    with pytest.raises(ConfigError, match="status_topic"):
+        load(_toml(tmp_path, '[alerts]\nstatus_topic = "short"\n'))
+
+
+@pytest.mark.parametrize("topic", ["pcfd-phone-prealert", "pcfd-status", "PCFD-Status"])
+def test_the_status_topic_refuses_tapouts_topics(tmp_path, monkeypatch, topic):
+    with pytest.raises(ConfigError, match="Tapout"):
+        load(_toml(tmp_path, f'[alerts]\nstatus_topic = "{topic}"\n'))
+    monkeypatch.setenv("SIZEUP_STATUS_TOPIC", topic)
+    with pytest.raises(ConfigError, match="SIZEUP_STATUS_TOPIC: .*Tapout"):
+        load(_toml(tmp_path, ""))
+
+
+def test_the_status_topic_refuses_the_configured_prealert_topics_too(tmp_path):
+    with pytest.raises(ConfigError, match="Tapout"):
+        load(_toml(tmp_path, '[prealert]\nstatus_topic = "firehouse-status-xyz"\n[alerts]\nstatus_topic = "firehouse-status-xyz"\n'))
+    with pytest.raises(ConfigError, match="Tapout"):
+        load(_toml(tmp_path, '[prealert]\nring_topic = "firehouse-ring-xyz"\n[alerts]\nstatus_topic = "firehouse-ring-xyz"\n'))
+
+
+def test_a_topic_of_ours_with_status_in_its_name_is_not_tapouts(tmp_path, monkeypatch):
+    """The refusal is the whole name: "status" (or "prealert") inside a name of ours is fine, for either topic."""
+    for name in (OUR_STATUS, "pcfd-status-of-ours", "pcfd-phone-prealert-ours"):
+        monkeypatch.setenv("SIZEUP_STATUS_TOPIC", name)
+        monkeypatch.setenv("SIZEUP_ALERT_TOPIC", name.replace("status", "alerts"))
+        c = load(_toml(tmp_path, '[prealert]\n'))                     # Tapout's default topics are the ones refused
+        assert c.alerts_status_topic == name and c.alerts_ntfy_topic == name.replace("status", "alerts")
+
+
+def _hub_pushes(tmp_path, ntfy, capsys, alerts, status):
+    """A hub (not serving) with these topics: its startup lines, its alarms' and station health's notifiers, and
+    the topic each kind's push landed on (a mayday on FG1, a station-health alert and its recovery)."""
+    from sizeup.cloud.hub import HubApp
+    from tests.test_alarms import tx
+    app = HubApp(hub_cfg(tmp_path, alerts_ntfy_server=ntfy.url, alerts_ntfy_topic=alerts, alerts_status_topic=status),
+                 log=print)
+    try:
+        lines = capsys.readouterr().out
+        al, hn = app.cad.alarms.notifier, app.health.notifier
+        t = tx("FG1-7", "mayday mayday mayday, Engine 64", rig="E64", unit="E64 P1", radio_id="6401", at=time.time())
+        app.cad.record_traffic(t)
+        app.cad.alarms.on_traffic(t)
+        now = time.time()
+        a = {"key": "silent", "severity": "critical", "title": "Station silent", "text": "no state post",
+             "since": now - 300, "raised": now, "pushed": False, "who": {}}
+        app.health._push(a, now)
+        a["cleared"] = now
+        app.health._push(a, now, recovered=True)
+        for n in {id(x): x for x in (al, hn) if x is not None}.values():
+            assert n.flush(5)
+        got = [(m["body"] if "body" in m else m)["topic"] for m in ntfy.got]
+        titles = [(m["body"] if "body" in m else m)["title"].split(" · ")[0] for m in ntfy.got]
+        return lines, al, hn, sorted(zip(titles, got))
+    finally:
+        app.stop()
+
+
+@pytest.fixture
+def ntfy():
+    from tests.test_notify import FakeNtfy
+    f = FakeNtfy()
+    yield f
+    f.close()
+
+
+def test_the_hub_routes_alarms_to_the_alerts_topic_and_health_to_the_status_topic(tmp_path, ntfy, capsys):
+    lines, al, hn, got = _hub_pushes(tmp_path, ntfy, capsys, OUR_ALERTS, OUR_STATUS)
+    assert al.topic == OUR_ALERTS and hn.topic == OUR_STATUS and al is not hn
+    assert got == [("MAYDAY", OUR_ALERTS), ("Recovered: Station silent", OUR_STATUS), ("Station silent 5 min", OUR_STATUS)]
+    assert "notify: alerts \u2192 topic set, status \u2192 topic set" in lines
+    assert OUR_ALERTS not in lines and OUR_STATUS not in lines            # the names stay secret
+
+
+@pytest.mark.parametrize("which", ["alerts", "status"])
+def test_with_one_topic_every_kind_goes_to_it(tmp_path, ntfy, capsys, which):
+    only = OUR_ALERTS if which == "alerts" else OUR_STATUS
+    lines, al, hn, got = _hub_pushes(tmp_path, ntfy, capsys, only if which == "alerts" else "",
+                                     only if which == "status" else "")
+    assert al is hn and al.topic == only                                   # one queue, in order, as before the split
+    assert got == [("MAYDAY", only), ("Recovered: Station silent", only), ("Station silent 5 min", only)]
+    other = "status" if which == "alerts" else "alerts"
+    assert f"{other} \u2192 the {which} topic (no {other} topic set)" in lines and only not in lines
+
+
+def test_with_no_topic_there_are_no_pushes(tmp_path, ntfy, capsys):
+    lines, al, hn, got = _hub_pushes(tmp_path, ntfy, capsys, "", "")
+    assert al is None and hn is None and got == []
+    assert "notify: no pushes" in lines and "health: no push for station alerts" in lines
+
+
+def test_the_taskdef_gives_the_hub_both_topics_from_ssm():
+    from pathlib import Path
+    td = json.loads((Path(__file__).resolve().parent.parent / "deploy" / "aws" / "taskdef.json").read_text())
+    (hub,) = [c for c in td["containerDefinitions"] if c["name"] == "hub"]
+    secrets = {s["name"]: s["valueFrom"] for s in hub["secrets"]}
+    ssm = "arn:aws:ssm:us-east-1:504804195561:parameter/sizeup-hub/"
+    assert secrets["SIZEUP_ALERT_TOPIC"] == ssm + "alert-topic"
+    assert secrets["SIZEUP_STATUS_TOPIC"] == ssm + "status-topic"
+    env = {e["name"] for e in hub.get("environment", [])}
+    assert not env & {"SIZEUP_ALERT_TOPIC", "SIZEUP_STATUS_TOPIC"}       # never a plain value in the task definition
 
 
 def test_a_real_station_reports_its_health_in_the_state_post(tmp_path):

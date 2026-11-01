@@ -33,8 +33,9 @@ acknowledged, "...; acknowledged by Corey at 14:32:40" (kind "alarm").
 
 An alarm stays on every console and wall board (/cad, /monitor: static/alarm.js) until someone acknowledges
 it (POST /api/cad/alarm/<id>/ack: dispatchers and admins); a notice can be acknowledged the same way and
-otherwise drops off after NOTICE_S. With [alerts] ntfy_topic each alarm, and its acknowledgement, is also
-pushed through ntfy (sizeup/notify.py; never Tapout's topics), set by the app as `notifier`. Who is in it
+otherwise drops off after NOTICE_S. With an alerts topic ([alerts] ntfy_topic, else status_topic: notify.route())
+each alarm, and its acknowledgement, is also pushed through ntfy (sizeup/notify.py; never Tapout's topics), set
+by the app as `notifier` (App.notifiers' ALERTS one). Who is in it
 (user, 2026-10-14: "we want it to include info on who was called or mentioned"): the talker (unit code and
 name, radio ID), every unit of ours the transcript names, the channel, and the event's number and address
 when it is linked: title "MAYDAY · E64 P1 (Engine 64) on FG1 · 26-000015 100 S Ridge St" (notify.Who),
