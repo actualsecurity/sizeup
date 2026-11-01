@@ -89,6 +89,7 @@ class Config:
     stt_aws_limit_usd: float = 25.0   # the monthly limit until Settings > Radios sets one
     stt_aws_channels: tuple[str, ...] = ("South 2", "FG1", "FG2", "tg:307")   # engine "aws" by default
     stt_aws_vocabulary: str = "sizeup-pcfd"
+    stt_record_only: tuple[str, ...] = ()     # recorded, not transcribed by default ([stt] record_only, #201)
     shared_device: str = ""      # one dongle for everything (bench): switch channel / P25 in the web app
     start_mode: str = ""         # with shared_device: what the dongle does at startup ("South 2", "FG1", "Fire/EMS 15")
     sdrs: tuple[str, ...] = ()   # dongles (exact USB serials) sizeup may use, each switched in the web app
@@ -752,7 +753,8 @@ def _gis(data: dict) -> dict:
 
 
 def _stt_aws(stt: dict) -> dict:
-    """[stt] aws*: Amazon Transcribe (sizeup/transcribe.py). aws_channels: labels or talkgroup numbers."""
+    """[stt] aws*: Amazon Transcribe (sizeup/transcribe.py). aws_channels: labels or talkgroup numbers. Also
+    record_only (labels or talkgroups): recorded, not transcribed unless Settings > Radios says so (#201)."""
     try:
         idle, pace = float(stt.get("aws_idle_s", 120)), float(stt.get("aws_pace", 2.0))
         limit = float(stt.get("aws_monthly_limit_usd", 25))
@@ -764,6 +766,10 @@ def _stt_aws(stt: dict) -> dict:
     if not isinstance(chans, list):
         raise ConfigError('stt.aws_channels: a list of channel labels and talkgroups, e.g. ["South 2", "FG1", 307]')
     names = tuple(f"tg:{c}" if isinstance(c, int) else str(c) for c in chans)
+    ro = stt.get("record_only", [])
+    if not isinstance(ro, list) or not all(isinstance(c, (int, str)) and not isinstance(c, bool) for c in ro):
+        raise ConfigError('stt.record_only: a list of channel labels and talkgroups, e.g. [383, 3127]')
+    record_only = tuple(f"tg:{c}" if isinstance(c, int) else str(c) for c in ro)
     vocab = str(stt.get("aws_vocabulary", "sizeup-pcfd"))
     if not re.fullmatch(r"[0-9a-zA-Z._-]{1,200}", vocab):
         raise ConfigError("stt.aws_vocabulary: letters, digits, . _ -")
@@ -771,7 +777,7 @@ def _stt_aws(stt: dict) -> dict:
                 stt_aws_endpoint=str(stt.get("aws_endpoint", "")).rstrip("/"),
                 stt_aws_api_endpoint=str(stt.get("aws_api_endpoint", "")).rstrip("/"),
                 stt_aws_idle_s=idle, stt_aws_pace=pace, stt_aws_limit_usd=limit, stt_aws_channels=names,
-                stt_aws_vocabulary=vocab)
+                stt_aws_vocabulary=vocab, stt_record_only=record_only)
 
 
 def load(path: str | Path) -> Config:
@@ -846,7 +852,8 @@ def load(path: str | Path) -> Config:
             ours.add(t["name"])
     stt = _take(data.get("stt", {}), "stt", {"server_binary", "model", "port", "threads", "prompt", "talker_prompt", "beam_size",
                                              "aws", "aws_region", "aws_endpoint", "aws_api_endpoint", "aws_idle_s", "aws_pace",
-                                             "aws_monthly_limit_usd", "aws_channels", "aws_vocabulary"})
+                                             "aws_monthly_limit_usd", "aws_channels", "aws_vocabulary",
+                                             "record_only"})
     talker_mode = str(stt.get("talker_prompt", "off"))
     if talker_mode not in ("off", "ids", "ids+time"):
         raise ConfigError('stt.talker_prompt: "off", "ids" or "ids+time"')

@@ -70,6 +70,7 @@ from pathlib import Path
 from typing import Callable
 
 from sizeup import channels
+from sizeup import tz
 from sizeup.app import CLIP_ID, App, AwsJob, channels_model
 from sizeup.cad.dispatcher import AudioUnavailable
 from sizeup.cad.radios import fm_system
@@ -108,7 +109,7 @@ def _json(code: int, obj) -> tuple[int, bytes, str]:
 
 
 def _hhmm(t: float | None) -> str:
-    return time.strftime("%H:%M", time.localtime(t)) if t else "?"
+    return tz.hhmm(t)          # the console's time zone, not the container's UTC (#200)
 
 
 class Jobs:
@@ -272,7 +273,7 @@ class Hub:
                     "detail": f"no station has connected since the hub started ({_hhmm(self.started)})"}
         since = self.last_seen
         return {"state": "down", "word": f"offline {_hhmm(since)}",
-                "detail": f"{name}: offline since {time.strftime('%H:%M:%S', time.localtime(since))} "
+                "detail": f"{name}: offline since {tz.hhmmss(since)} "
                           f"(no contact for {int((now - since) // 60)} min): radios"
                           + (" and speech-to-text are" if self.own_voice else ", speech-to-text and the dispatch voice are")
                           + " unavailable until it's back; what it heard meanwhile comes up then"}
@@ -869,8 +870,9 @@ class HubApp(App):
     def channel_desired(self) -> dict:
         ok, why = self.aws_ok()
         reserve = [] if ok or self.aws is None else [k for k in self.aws.s.reserve_channels if self.aws.available(k)[0]]
-        return {"prefs": dict(self._chan_ov), "aws": {"ok": ok, "why": why, "reserve": reserve}, "tones": dict(self._tone_ov),
-                "sig": channels.sig(self._chan_ov, ok, self._tone_ov, reserve)}
+        prefs = channels.for_station(self._chan_ov, self.cfg.stt_record_only)   # + the hub's record_only (#201)
+        return {"prefs": prefs, "aws": {"ok": ok, "why": why, "reserve": reserve}, "tones": dict(self._tone_ov),
+                "sig": channels.sig(prefs, ok, self._tone_ov, reserve)}
 
     def channels_check_tones(self) -> None:
         """A pair named here: the station gets it with the next channel push (the signature changed)."""

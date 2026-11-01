@@ -43,12 +43,12 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
+from sizeup import tz
 from sizeup.cad import lists as lists_mod
 from sizeup.cad.lists import Lists
 
-TZ = ZoneInfo("America/New_York")
+TZ = tz.TZ                  # America/New_York: the console's time zone (sizeup/tz.py)
 # "Name <email>" when the operator signed in through Cloudflare Access (sizeup/cloud/access.py).
 OPERATOR_MAX = 320
 SCHEMA_VERSION = 10        # 6-9 unused (other branches); v10: the department's own codes

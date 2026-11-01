@@ -6,6 +6,7 @@ Amazon Transcribe is always the local fake (tests/fake_transcribe.py)."""
 
 import json
 import time
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -305,6 +306,73 @@ def test_a_station_that_was_offline_gets_the_choices_when_it_connects(tmp_path):
         assert wait(lambda: st.channel_pref("tg:333")["engine"] == "both", 10)
         assert wait(lambda: hub.get("/api/state")["channels"]["sync"]["state"] == "applied", 10)
         assert st.stt_engine("tg:333") == "local"            # the hub has no AWS: both runs the local model
+    finally:
+        if st is not None:
+            st.link.stop()
+        hub.close()
+
+
+# -- record-only by default ([stt] record_only, #201) ----------------------------------------------------------
+
+RECORD_ONLY = ("tg:383", "tg:3127")              # WCPD Ch 1, LLT Supervisor 1 (deploy/hub/config.hub.toml)
+
+
+def test_record_only_is_a_default_and_a_settings_choice_wins(tmp_path):
+    app = App(base(clips_dir=str(tmp_path / "clips"), stt_record_only=RECORD_ONLY))
+    assert app.channel_pref("tg:383") == {"record": True, "transcribe": False, "engine": "local"}
+    assert app.stt_engine("tg:3127") == "off" and app.stt_engine("tg:301") == "local"
+    assert app.state()["channels"]["record_only"] == list(RECORD_ONLY)
+    s = app.cad.settings
+    s.post("channels", {"action": "set", "key": "tg:383", "transcribe": False, "operator": "Corey"})  # the default
+    assert s.channel_overrides() == {}
+    s.post("channels", {"action": "set", "key": "tg:383", "transcribe": True, "operator": "Corey"})
+    assert s.channel_overrides() == {"tg:383": {"transcribe": True}} and app.stt_engine("tg:383") == "local"
+    s.post("channels", {"action": "reset", "key": "tg:383"})
+    assert app.stt_engine("tg:383") == "off"
+    # the map for the station: the default folded in, a choice left as it is
+    assert channels.for_station({}, RECORD_ONLY) == {"tg:383": {"transcribe": False}, "tg:3127": {"transcribe": False}}
+    ov = {"tg:383": {"transcribe": True}, "tg:3127": {"engine": "both"}, "FG1": {"record": False}}
+    assert channels.for_station(ov, RECORD_ONLY) == {"tg:383": {"transcribe": True},
+                                                     "tg:3127": {"engine": "both", "transcribe": False},
+                                                     "FG1": {"record": False}}
+    assert ov["tg:3127"] == {"engine": "both"}                  # not changed in place
+    # a station (of any build) checks the map the same way: nothing dropped, so its signature agrees
+    want = channels.for_station(ov, RECORD_ONLY)
+    assert channels.check_map(want) == want
+
+
+def test_config_reads_record_only(tmp_path):
+    from sizeup.config import ConfigError, load
+    hub = load(Path(__file__).resolve().parent.parent / "deploy" / "hub" / "config.hub.toml")
+    assert hub.stt_record_only == RECORD_ONLY
+    assert load(Path(__file__).resolve().parent.parent / "config.example.toml").stt_record_only == ()
+    bad = tmp_path / "bad.toml"
+    bad.write_text((Path(__file__).resolve().parent.parent / "config.example.toml").read_text()
+                   .replace("[stt]\n", "[stt]\nrecord_only = 383\n", 1))
+    with pytest.raises(ConfigError, match="record_only"):
+        load(bad)
+
+
+def test_the_station_gets_the_hubs_record_only_and_skips_whisper(tmp_path):
+    hub = HubRun(hub_cfg(tmp_path, stt_record_only=(*RECORD_ONLY, "FG1")))
+    st = None
+    try:
+        st = station(station_cfg(tmp_path, hub.url), {3: "whisper heard this"})
+        whisper = st.stt.client = CountingWhisper({3: "whisper heard this"})
+        assert st.cfg.stt_record_only == ()                         # the station's own config doesn't have it
+        assert wait(lambda: hub.get("/api/state")["channels"]["sync"]["state"] == "applied", 10)
+        assert st.stt_engine("tg:383") == "off" and st.stt_engine("tg:3127") == "off" and st.stt_engine("FG1") == "off"
+        assert st.channel_pref("tg:301")["transcribe"] is True
+        assert hub.get("/api/state")["channels"]["prefs"] == {}    # the hub's own Settings: nothing changed
+        # recorded and forwarded, no whisper
+        tid = fm_segment(st)
+        assert wait(lambda: any(t["id"] == tid and t["status"] == "off" for t in all_traffic(hub.get("/api/state"))), 15)
+        assert whisper.calls == 0 and st.has_clip(tid)
+        # a Settings choice on the hub wins, and reaches the station
+        assert hub_post(hub, "channels", {"action": "set", "key": "tg:383", "transcribe": True})[0] == 200
+        assert wait(lambda: st.stt_engine("tg:383") == "local", 10)
+        assert wait(lambda: hub.get("/api/state")["channels"]["sync"]["state"] == "applied", 10)
+        assert st.stt_engine("tg:3127") == "off"
     finally:
         if st is not None:
             st.link.stop()

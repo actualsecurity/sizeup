@@ -80,11 +80,11 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Callable
-from zoneinfo import ZoneInfo
 
 import numpy as np
 
 from sizeup import aws
+from sizeup import tz
 
 RATE = 8000
 MODEL = "aws-transcribe"
@@ -106,7 +106,7 @@ BREAKER_AFTER_S = 120.0          # AWS failing this long with no success in betw
 BREAKER_MIN_FAILS = 3            # ... and at least this many times: the breaker opens (new clips go to whisper)
 BREAKER_RETRY_S = 300.0          # open: AWS is tried again (the next clips) this long after it last failed
 RECENT_MAX = 20                  # failures kept for health()
-BUDGET_TZ = ZoneInfo("America/New_York")   # the month the budget counts (the console's time zone)
+BUDGET_TZ = tz.TZ                # the month the budget counts (the console's time zone)
 RESERVE_FRACTION = 0.2           # past the monthly limit, the reserve channels keep AWS until the limit x 1.2 ...
 RESERVE_CHANNELS = ("South 2", "tg:307")   # ... the pages (South 2) and Fire/EMS 15; everything else goes to whisper
 
@@ -164,7 +164,7 @@ def deadline_for(clip_s: float, min_s: float = DEADLINE_MIN_S, factor: float = D
 
 
 def _hhmm(t: float | None) -> str:
-    return time.strftime("%H:%M", time.localtime(t)) if t else "?"
+    return tz.hhmm(t)          # the console's time zone, not the container's UTC (#200)
 
 
 # -- AWS event stream (application/vnd.amazon.eventstream) ---------------------------------------------------

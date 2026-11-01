@@ -33,6 +33,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Callable
 
+from sizeup import tz
 from sizeup.cloud.autoupdate import Watch
 from sizeup.cloud.client import HubClient, HubError
 from sizeup.cloud.outbox import Outbox
@@ -65,7 +66,7 @@ def keychain(service: str) -> str:
 
 
 def _hhmm(t: float | None) -> str:
-    return time.strftime("%H:%M", time.localtime(t)) if t else ""
+    return tz.hhmm(t, "")
 
 
 class StationMode:

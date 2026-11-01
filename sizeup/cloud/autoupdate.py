@@ -60,8 +60,10 @@ import tomllib
 import urllib.request
 from collections import deque
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Callable
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 STABLE_S = 30.0            # the hub says the same build this long before the station asks for it
 REFRESH_S = 600.0          # the want is rewritten this often while the hub answers
@@ -87,6 +89,25 @@ NOT_RUNTIME = ("docs/", "tests/", ".github/", "deploy/hub/", "deploy/aws/", "Doc
                ".gitignore", "deploy/station/install-windows.ps1", "deploy/station/uninstall-windows.ps1")
 NOT_RADIOS = ("Hub", "STT")
 WINDOWS_STALE = "Windows scripts out of date: run install-windows.ps1"
+
+
+def _console_tz():
+    """The console's time zone (sizeup/tz.py, #200; this file is stdlib only, so its own copy): times in the
+    update lines the hub shows are in America/New_York, not the machine's zone. No tz data: the machine's."""
+    try:
+        return ZoneInfo("America/New_York")
+    except (ZoneInfoNotFoundError, ValueError, OSError):
+        return None
+
+
+CONSOLE_TZ = _console_tz()
+
+
+def _clock(t, fmt: str = "%H:%M") -> str:
+    try:
+        return datetime.fromtimestamp(float(t), CONSOLE_TZ).strftime(fmt) if t else "?"
+    except (TypeError, ValueError, OverflowError, OSError):
+        return "?"
 
 
 # -- builds ------------------------------------------------------------------------------------------
@@ -204,7 +225,7 @@ def describe(build: str, hub: str, upd: dict | None, now: float | None = None) -
     r = (upd.get("retry") or {}) if isinstance(upd.get("retry"), dict) else {}
     rt = next((v for k, v in r.items() if same_build(k, hub) and isinstance(v, dict)), None)
     if rt is not None:
-        at = time.strftime("%H:%M", time.localtime(float(rt.get("next_at") or now)))
+        at = _clock(rt.get("next_at") or now)
         return {"state": "updating", "text": f"update to {short(hub)} not built yet (try {rt.get('n', '?')} of "
                                              f"{MAX_STAGES}: {rt.get('why') or '?'}); again after {at}{win}"}
     if upd.get("paused"):
@@ -749,7 +770,7 @@ class Updater:
                                     seconds=round(secs)))
                 return 1
             st["retry"][sha]["why"] = str(e)[:200]
-            at = time.strftime("%H:%M", time.localtime(st["retry"][sha]["next_at"]))
+            at = _clock(st["retry"][sha]["next_at"])
             self.result(f"{tag}: couldn't build it yet ({e}); still on {short(build)}; trying again after {at} "
                         f"(try {n} of {MAX_STAGES})")
             self.save(st, state="behind", current=build,
@@ -910,10 +931,7 @@ def _dict(x) -> dict:
 
 
 def _when(t) -> str:
-    try:
-        return time.strftime("%Y-%m-%d %H:%M", time.localtime(float(t))) if t else "?"
-    except (TypeError, ValueError, OverflowError, OSError):
-        return "?"
+    return _clock(t, "%Y-%m-%d %H:%M")
 
 
 def status_lines(r: dict) -> list[str]:
