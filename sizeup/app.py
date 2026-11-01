@@ -416,13 +416,24 @@ class App:
             self.prealert = PreAlerts(self.cad, cfg.prealert_server, cfg.prealert_ring_topic, cfg.prealert_status_topic,
                                       cfg.prealert_expire_min, cfg.prealert_heartbeat_stale_min, log=log)
             self.prealert_sync()
-        # Pushes (sizeup/notify.py, [alerts]): our own ntfy topics by kind (notify.route()): the emergency alarms
+        # Pushes (sizeup/notify.py Pushes, [alerts]): our own ntfy topics by kind: the emergency alarms
         # (sizeup/cad/alarms.py, #128, aircraft squawks too) to the alerts topic; station health and Amazon
         # Transcribe (sizeup/cloud/health.py, the hub) to the status topic. Only one set: both go there.
+        # Settings > System > Push notifications (the CAD settings' "notify") win over env / SSM over the file,
+        # looked up at every push: a change there needs no restart.
         from sizeup import notify
-        self.notifiers = notify.notifiers(cfg.alerts_ntfy_server, cfg.alerts_ntfy_topic, cfg.alerts_status_topic, log)
-        self.cad.alarms.notifier = self.notifiers[notify.ALERTS]
-        log(notify.route_line(cfg.alerts_ntfy_topic, cfg.alerts_status_topic))
+        env_is = "ssm" if cfg.cloud_role == "hub" else "env"      # the hub's env comes from SSM (deploy/aws/taskdef.json)
+        def src(s: str) -> str:
+            return env_is if s == "env" else (s or "config")
+        self.pushes = notify.Pushes(
+            cfg.alerts_ntfy_server, cfg.alerts_ntfy_topic, cfg.alerts_status_topic,
+            sources={notify.ALERTS: src(cfg.alerts_ntfy_topic_source), notify.STATUS: src(cfg.alerts_status_topic_source)},
+            server_source=src(cfg.alerts_ntfy_server_source) if cfg.alerts_ntfy_server_source != "default" else "default",
+            settings=lambda: self.cad.settings.section(notify.SECTION),
+            also_forbidden=(cfg.prealert_ring_topic, cfg.prealert_status_topic), log=log)
+        self.cad.pushes = self.pushes
+        self.cad.alarms.notifier = self.pushes.notifier(notify.ALERTS)
+        log(self.pushes.line())
         self.cad.alarms.public_url = cfg.cloud_public_url
         # The emergency window (alarms.Windows): the button's talkgroup and radio kept this long, Record off or on
         self.cad.alarms.windows.keep_s = cfg.p25_emergency_window_min * 60

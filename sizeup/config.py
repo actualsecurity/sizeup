@@ -165,6 +165,9 @@ class Config:
     # whatever [prealert] names): refused here and in sizeup/notify.py.
     alerts_ntfy_topic: str = ""
     alerts_status_topic: str = ""
+    alerts_ntfy_topic_source: str = ""     # where each came from: "env" (the hub: SSM) | "config" | "" (unset)
+    alerts_status_topic_source: str = ""   # (Settings > System > Push notifications shows it; Settings win over both)
+    alerts_ntfy_server_source: str = "default"
     alerts_ntfy_server: str = "https://ntfy.sh"
     alerts_silent_min: float = 3.0       # no state post from the station this long
     alerts_behind_min: float = 15.0      # the station on another build than the hub this long
@@ -415,13 +418,14 @@ def _alerts(data: dict, prealert: dict) -> dict:
     al = _take(data.get("alerts", {}), "alerts", {"ntfy_topic", "status_topic", "ntfy_server", "silent_min",
                                                   "behind_min", "down_min", "outbox_min", "disk_pct", "repeat_min"})
     tapout = (prealert.get("prealert_ring_topic", ""), prealert.get("prealert_status_topic", ""))
-    topics = {}
+    topics, sources = {}, {}
     for key, env in (("ntfy_topic", "SIZEUP_ALERT_TOPIC"), ("status_topic", "SIZEUP_STATUS_TOPIC")):
         t = _env(env, str(al.get(key, ""))).strip()
         why = topic_problem(t, tapout) if t else ""
         if why:
             raise ConfigError(f"alerts.{key} / {env}: {why}")
         topics[key] = t
+        sources[key] = ("env" if os.environ.get(env, "").strip() else "config") if t else ""
     topic = topics["ntfy_topic"]
     server = _env("SIZEUP_ALERT_SERVER", str(al.get("ntfy_server", "https://ntfy.sh"))).strip().rstrip("/")
     if server_problem(server):
@@ -434,7 +438,11 @@ def _alerts(data: dict, prealert: dict) -> dict:
         if isinstance(v, bool) or not isinstance(v, (int, float)) or not lo <= float(v) <= hi:
             raise ConfigError(f"alerts.{k}: a number from {lo:g} to {hi:g}")
         out[f"alerts_{k}"] = float(v)
-    return dict(alerts_ntfy_topic=topic, alerts_status_topic=topics["status_topic"], alerts_ntfy_server=server, **out)
+    server_source = ("env" if os.environ.get("SIZEUP_ALERT_SERVER", "").strip() else
+                     "config" if str(al.get("ntfy_server", "")).strip() else "default")
+    return dict(alerts_ntfy_topic=topic, alerts_status_topic=topics["status_topic"], alerts_ntfy_server=server,
+                alerts_ntfy_topic_source=sources["ntfy_topic"], alerts_status_topic_source=sources["status_topic"],
+                alerts_ntfy_server_source=server_source, **out)
 
 
 P25_JOB = "Fire/EMS 15"   # the dongle job that runs trunk-recorder (sizeup/app.py P25_MODE)

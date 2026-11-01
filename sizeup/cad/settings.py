@@ -34,6 +34,10 @@ Reset to default = drop the override (one item, or a whole section).
                                    list, never written into it (sizeup/app.py _apply_named_tones)
     camera_wall                    key "margin_m" -> metres around our fire districts, "include" / "exclude" -> [camera
                                    ids]: the camera wall's area (#125, Settings > System; sizeup/roads.py Roads.area)
+    notify                         key "alerts" | "status" -> {"topic": name} | {"off": true}, "server" -> the ntfy URL:
+                                   the push topics by kind over env / SSM / the config (sizeup/notify.py Pushes;
+                                   Settings > System > Push notifications, admins). Secret by name: never exported,
+                                   kept through an import, a fingerprint in the audit log
     datasources                    key a data source ("gis:hydrants", "aircraft:registry") -> off | hourly | daily | weekly |
                                    monthly: how often the registry refreshes it (#186, Settings > Data sources;
                                    sizeup/datasources.py); not set: the source's default
@@ -83,6 +87,9 @@ PAGE_SECTION[WALL_SECTION] = "system"
 # How often each data source is refreshed (#186, sizeup/datasources.py): Settings > Data sources, audited as System.
 DS_SECTION = "datasources"
 PAGE_SECTION[DS_SECTION] = "system"
+# The push topics by kind (sizeup/notify.py Pushes): Settings > System > Push notifications, audited as System.
+NOTIFY_SECTION = "notify"
+PAGE_SECTION[NOTIFY_SECTION] = "system"
 WALL_ID = re.compile(r"[A-Za-z0-9_.:-]{1,64}")      # sizeup/roads.py CAMERA_ID
 MAX_WALL_IDS = 200
 AUDIT_SECTIONS = ("lists", "run cards", "units", "dispatch", "users", "system", "radios")
@@ -295,6 +302,11 @@ class Editor:
         for r in self.store.q("SELECT section, key, value FROM settings_overrides ORDER BY section, key"):
             out.setdefault(r["section"], {})[r["key"]] = json.loads(r["value"])
         return out
+
+    def section(self, name: str) -> dict:
+        """One section's overrides only (the push topics, read at every push: sizeup/notify.py Pushes)."""
+        return {r["key"]: json.loads(r["value"])
+                for r in self.store.q("SELECT key, value FROM settings_overrides WHERE section = ?", (name,))}
 
     def build(self, ov: dict) -> lists_mod.Lists:
         try:
@@ -570,7 +582,7 @@ class Editor:
               "dispatch": self._dispatch_op, "users": self._users_op, "runcards": self._cards_op,
               "import": self._import_op, "channels": self._channels_op, "stt": self._stt_op,
               "places": self._places_op, TONES_SECTION: self._tones_op, WALL_SECTION: self._wall_op, DS_SECTION: self._ds_op,
-              "alarms": lambda a, b, o: self.cad.alarms.settings_op(a, b, o)}.get(section)
+              NOTIFY_SECTION: self._notify_op, "alarms": lambda a, b, o: self.cad.alarms.settings_op(a, b, o)}.get(section)
         if fn is None:
             raise CadError(f"no settings section {section!r}")
         if section in ("users", "import"):
@@ -1772,6 +1784,72 @@ class Editor:
             return {"ok": True}
         return self._commit([(DS_SECTION, key, REMOVE if v == default else v)], op, [("system", f"{DS_SECTION}/{key}", old, v)])
 
+    # -- push notifications: the ntfy topics by kind (sizeup/notify.py Pushes; Settings > System, admins) ----------
+    # Kept as overrides (section "notify": "alerts" / "status" -> {"topic"} | {"off": true}, "server" -> URL) over the
+    # env / SSM / config values; read at every push, so a change takes effect at once. The names are secret (ntfy
+    # topics are public by name): never in the export, the audit log (a fingerprint there), the activity or the logs.
+
+    def _notify_op(self, action: str, body: dict, op: str) -> dict:
+        """set {key: alerts | status, topic} ("" = the default) | off {key} | reset {key} | server {value} ("" = the
+        default) | test {key}: a marked test push to the topic in effect. Admins (sizeup/cad/api.py WRITES)."""
+        from sizeup import notify
+        p = getattr(self.cad, "pushes", None)
+        if p is None:
+            raise CadError("no push notifications here")
+        cur = dict(self.overrides().get(NOTIFY_SECTION) or {})
+        key = body.get("key")
+        if key == "server" or action == "server":
+            v = _text(body.get("value"), "value", 200, required=False).rstrip("/")
+            if v and notify.server_problem(v):
+                raise CadError(f"ntfy server: {notify.server_problem(v)}")
+            old = cur.get("server") or f"default {p.default_server[0]}"
+            if v == (cur.get("server") or ""):
+                return {"ok": True}
+            out = self._commit([(NOTIFY_SECTION, "server", v or REMOVE)], op,
+                               [("system", f"{NOTIFY_SECTION}/server", old, v or f"default {p.default_server[0]}")])
+            self.cad.log(p.line() + " (Settings changed)")
+            return out
+        if key not in notify.KINDS:
+            raise CadError("key: alerts or status")
+        def said(v) -> str:                          # never the name: the audit log is open to everyone signed in
+            if not isinstance(v, dict):
+                d, src = p.defaults[key]
+                return f"default ({notify.SOURCES[src]}: {notify.fingerprint(d)})" if d else "default (not set)"
+            return "off" if v.get("off") else f"Settings: {notify.fingerprint(str(v.get('topic') or ''))}"
+        old = cur.get(key)
+        if action == "test":
+            try:
+                r = p.test(key)
+            except notify.NotifyError as e:
+                raise CadError(str(e)) from None
+            eff = p.effective(key)
+            self.note(op, "system", f"{NOTIFY_SECTION}/{key}/test", notify.fingerprint(eff["topic"]),
+                      "test push sent" if r["ok"] else f"test push not sent: {r['error'][:200]}")
+            return {"ok": True, "test": r}
+        if action == "set":
+            t = _text(body.get("topic"), "topic", 64, required=False)
+            if t:
+                why = p.problem(t)
+                if why:
+                    raise CadError(f"{notify.LABELS[key]}: {why}")
+                new = {"topic": t}
+            else:
+                new = REMOVE
+        elif action == "off":
+            new = {"off": True}
+        elif action == "reset":
+            if old is None:
+                raise CadError(f"{notify.LABELS[key]} is on its default already")
+            new = REMOVE
+        else:
+            raise CadError("action: set, off, reset, server or test")
+        if (old is None and new is REMOVE) or old == new:
+            return {"ok": True}
+        out = self._commit([(NOTIFY_SECTION, key, new)], op,
+                           [("system", f"{NOTIFY_SECTION}/{key}", said(old), said(None if new is REMOVE else new))])
+        self.cad.log(p.line() + " (Settings changed)")
+        return out
+
     def note(self, operator: str, section: str, key: str, old, new) -> None:
         """An audit row for something done from Settings that isn't a setting (a data source's Refresh now, #186)."""
         with self.store.tx() as db:
@@ -1958,7 +2036,7 @@ class Editor:
         return {"format": FORMAT, "version": FORMAT_VERSION,
                 "exported_at": datetime.fromtimestamp(self.store.clock(), TZ).isoformat(timespec="seconds"),
                 "data_file": lists_mod._shown_path(str(self.path)), "defaults_version": str(self.defaults.get("version") or ""),
-                "overrides": self.overrides(),
+                "overrides": {k: v for k, v in self.overrides().items() if k != NOTIFY_SECTION},   # names secret
                 "run_cards": [{"type": c["type"], "spoken": c["spoken"], "is_default": c["is_default"], "slots": c["slots"],
                                "remarks": c["remarks"]} for c in runcards.cards(self.store)],
                 "operators": [{"name": o["name"], "role": o["role"], "active": o["active"], "email": o["email"],
@@ -1972,6 +2050,7 @@ class Editor:
         ov = data.get("overrides") or {}
         if not isinstance(ov, dict) or any(s not in PAGE_SECTION or not isinstance(v, dict) for s, v in ov.items()):
             raise CadError(f"overrides: sections from {', '.join(PAGE_SECTION)}")
+        ov = {k: v for k, v in ov.items() if k != NOTIFY_SECTION}    # the push topics: set in Settings only, kept
         try:
             json.dumps(ov)
         except (TypeError, ValueError):
@@ -2099,7 +2178,7 @@ class Editor:
                                     "email": o["email"]}
             self._keep_an_admin(list(after.values()), "the file leaves no active admin with a sign-in email "
                                 f"({', '.join(a['name'] for a in self.admins())} now): nobody could change Settings after it")
-        cur = self.overrides()
+        cur = {k: v for k, v in self.overrides().items() if k != NOTIFY_SECTION}
         changes = []
         for sec in sorted(set(cur) | set(ov)):
             a, b = cur.get(sec, {}), ov.get(sec, {})
@@ -2134,7 +2213,7 @@ class Editor:
                     "note": "Nothing changed yet. Operators not in the file are kept; run cards and edits are replaced."}
         now = self.store.clock()
         with self.store.tx() as db:
-            db.execute("DELETE FROM settings_overrides")
+            db.execute("DELETE FROM settings_overrides WHERE section != ?", (NOTIFY_SECTION,))
             for sec, kv in ov.items():
                 for k, v in kv.items():
                     db.execute("INSERT INTO settings_overrides (section, key, value, updated_at, operator) VALUES (?, ?, ?, ?, ?)",

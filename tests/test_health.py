@@ -502,8 +502,7 @@ def _hub_pushes(tmp_path, ntfy, capsys, alerts, status):
         app.health._push(a, now)
         a["cleared"] = now
         app.health._push(a, now, recovered=True)
-        for n in {id(x): x for x in (al, hn) if x is not None}.values():
-            assert n.flush(5)
+        assert al.flush(5) and hn.flush(5)
         got = [(m["body"] if "body" in m else m)["topic"] for m in ntfy.got]
         titles = [(m["body"] if "body" in m else m)["title"].split(" · ")[0] for m in ntfy.got]
         return lines, al, hn, sorted(zip(titles, got))
@@ -521,9 +520,9 @@ def ntfy():
 
 def test_the_hub_routes_alarms_to_the_alerts_topic_and_health_to_the_status_topic(tmp_path, ntfy, capsys):
     lines, al, hn, got = _hub_pushes(tmp_path, ntfy, capsys, OUR_ALERTS, OUR_STATUS)
-    assert al.topic == OUR_ALERTS and hn.topic == OUR_STATUS and al is not hn
+    assert al.topic == OUR_ALERTS and hn.topic == OUR_STATUS and al.current() is not hn.current()
     assert got == [("MAYDAY", OUR_ALERTS), ("Recovered: Station silent", OUR_STATUS), ("Station silent 5 min", OUR_STATUS)]
-    assert "notify: alerts \u2192 topic set, status \u2192 topic set" in lines
+    assert "notify: alerts \u2192 topic set (config file), status \u2192 topic set (config file)" in lines
     assert OUR_ALERTS not in lines and OUR_STATUS not in lines            # the names stay secret
 
 
@@ -532,7 +531,7 @@ def test_with_one_topic_every_kind_goes_to_it(tmp_path, ntfy, capsys, which):
     only = OUR_ALERTS if which == "alerts" else OUR_STATUS
     lines, al, hn, got = _hub_pushes(tmp_path, ntfy, capsys, only if which == "alerts" else "",
                                      only if which == "status" else "")
-    assert al is hn and al.topic == only                                   # one queue, in order, as before the split
+    assert al.current() is hn.current() and al.topic == only               # one queue, in order, as before the split
     assert got == [("MAYDAY", only), ("Recovered: Station silent", only), ("Station silent 5 min", only)]
     other = "status" if which == "alerts" else "alerts"
     assert f"{other} \u2192 the {which} topic (no {other} topic set)" in lines and only not in lines
@@ -540,7 +539,7 @@ def test_with_one_topic_every_kind_goes_to_it(tmp_path, ntfy, capsys, which):
 
 def test_with_no_topic_there_are_no_pushes(tmp_path, ntfy, capsys):
     lines, al, hn, got = _hub_pushes(tmp_path, ntfy, capsys, "", "")
-    assert al is None and hn is None and got == []
+    assert not al.enabled and not hn.enabled and got == []
     assert "notify: no pushes" in lines and "health: no push for station alerts" in lines
 
 

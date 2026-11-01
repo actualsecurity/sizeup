@@ -502,14 +502,14 @@ class HubApp(App):
                                  shared_device="", dispatch_tts_python=""))
         self.receivers, self.modes = [], []
         self.hub = Hub(self, cfg, log)
-        # station health (GitHub #79): the alerts, the banner, the push to the status topic ([alerts] status_topic,
-        # else ntfy_topic: notify.route(); never Tapout's), App.notifiers' STATUS one (the same Notifier as the
-        # emergency alarms when both kinds share a topic: one queue in order)
+        # station health (GitHub #79): the alerts, the banner, the push to the status topic in effect (Settings, else
+        # [alerts] status_topic, else ntfy_topic: notify.Pushes; never Tapout's): App.pushes' STATUS kind (the same
+        # Notifier as the emergency alarms when both kinds share a topic: one queue in order)
         from sizeup.notify import STATUS
-        notifier = (getattr(self, "notifiers", None) or {}).get(STATUS)
+        notifier = self.pushes.notifier(STATUS)
         self.health = self.hub.health_ = StationHealth(self.hub, cfg, self.mdb, notifier, log)
-        if notifier is None:
-            log("health: no push for station alerts ([alerts] status_topic / ntfy_topic unset): banner and log only")
+        if not notifier.enabled:
+            log("health: no push for station alerts (no status or alerts topic in effect): banner and log only")
         self.live = self.hub.live                      # main() sets on_change to push the display
         self.cad.live = self.live.state
         self.paging_state = self.live.paging_state     # the station's page going out now

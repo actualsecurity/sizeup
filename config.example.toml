@@ -221,7 +221,8 @@ heartbeat_stale_min = 90             # no heartbeat (or restart) this long: "Tap
 # Only one set: everything goes to it. ntfy topics are public by name: long random ones (e.g.
 # `openssl rand -hex 12`). NEVER Tapout's topics (pcfd-phone-prealert pages the fire crew; pcfd-status):
 # refused (by exact name) here and again before every send. Empty or left out: no pushes. Env
-# SIZEUP_ALERT_TOPIC / SIZEUP_STATUS_TOPIC / SIZEUP_ALERT_SERVER win.
+# SIZEUP_ALERT_TOPIC / SIZEUP_STATUS_TOPIC / SIZEUP_ALERT_SERVER win, and Settings > System > Push
+# notifications (admins) wins over both, live.
 # [alerts]
 # ntfy_topic = ""
 # status_topic = ""

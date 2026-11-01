@@ -273,7 +273,17 @@ Two kinds, two topics (`sizeup/notify.py` `route()`):
 | status | `[alerts] status_topic` / `SIZEUP_STATUS_TOPIC` (`/sizeup-hub/status-topic`) | Station health (silent, behind, update failed, dongle gone, job / whisper / trunk-recorder down, stuck channel, outbox, disk, whisper queue), "Amazon Transcribe failing", its monthly budget at 80 % / 100 %, and every recovery notice |
 
 Only one of the two set: both kinds go to it. The app logs at startup where each kind goes
-("notify: alerts → topic set, status → topic set"), never the names.
+("notify: alerts → topic set (SSM), status → topic set (SSM)"), never the names.
+
+**Settings > System > Push notifications** (admins only) changes either topic, and the ntfy server, without a
+restart: a value set there wins over SSM / the environment, which win over the config file; empty means "use
+that default"; **Turn off** stops that kind's pushes. Each kind shows the topic in effect, where it came from
+(Settings, SSM, config file, shared with the other kind, off), and its last push and result. **Send test push**
+sends "sizeup test: status topic" (or alerts) to the topic in effect. The same validation as the config: Tapout's
+topics and the `[prealert]` ones refused by exact name, 12 to 64 letters, digits, `-` and `_`. Every change
+and every test push goes into the Settings audit log with who and when, the topic as a fingerprint
+("topic #3f9c27"): the audit log, the activity, the settings export (which leaves the section out; an import
+keeps it), `/api/station/status` and the logs never carry a name. `GET /api/cad/notify` is admins only.
 
 1. **Choose the name.** ntfy topics are public by name: anyone who knows it can read and post. Make it long
    and random, e.g. `python3 -c "import secrets; print('sizeup-health-' + secrets.token_hex(8))"` →
