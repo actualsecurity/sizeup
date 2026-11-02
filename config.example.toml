@@ -94,6 +94,7 @@ talker_prompt = "off"              # "ids": hint each call with who keyed up ("7
 # aws = false
 # aws_region = ""                  # "" = AWS_REGION / AWS_DEFAULT_REGION, else us-east-1
 # aws_channels = ["South 2", "FG1", "FG2", 307]   # engine "aws" by default; Settings > Radios changes any channel
+# record_only = []                # e.g. [383, 3127]: recorded, not transcribed unless Settings says so
 # aws_monthly_limit_usd = 25       # until Settings > Radios sets one; reached: AWS channels use whisper
 # aws_idle_s = 120                 # a channel's stream ends this long after its last transmission
 # aws_pace = 2.0                   # audio sent this many times faster than real time

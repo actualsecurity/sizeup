@@ -64,6 +64,10 @@ incident_talkgroups = [307, 333]
 # and the sizeup-* vocabularies); region: the task's AWS_REGION. No whisper here: the station runs it.
 aws = true
 aws_channels = ["South 2", "FG1", "FG2", 307]   # South 2 paging, FG1, FG2, Fire/EMS 15 default to AWS
+# Recorded, not transcribed, unless Settings > Radios > Channels says otherwise (#201): WCPD Ch 1 (383) and
+# LLT Supervisor 1 (3127), about 1,800 clips a day off the station's whisper. The hub folds this into the
+# channel choices it sends the station (sizeup/channels.py for_station()).
+record_only = [383, 3127]
 aws_monthly_limit_usd = 25               # Settings > Radios can change it; reached: whisper on the station
 aws_idle_s = 120
 

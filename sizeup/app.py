@@ -60,7 +60,7 @@ from typing import Callable
 import numpy as np
 
 from sizeup.config import P25_JOB, Config, ConfigError, load
-from sizeup import janitor
+from sizeup import janitor, tz
 from sizeup.cad import Cad
 from sizeup.cad.alarms import STUCK_WITHIN_S
 from sizeup.cad.api import CadApi
@@ -829,7 +829,7 @@ class App:
             + ", ".join(f"{t.a_hz:.1f}/{(t.b_hz or 0):.1f} Hz" for t in unknown))
         if not self.clips_dir:
             return
-        row = {"at": round(page.start, 2), "time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(page.start)),
+        row = {"at": round(page.start, 2), "time": tz.clock(page.start, "%Y-%m-%d %H:%M:%S"),
                "channel": page.label, "page": page.id,
                "pairs": [[round(t.a_hz, 1), round(t.b_hz, 1) if t.b_hz else None] for t in unknown],
                "named": [n for t in page.tones for n in t.names]}       # stacked with these (who else was paged)
@@ -1589,7 +1589,7 @@ class App:
 
     def channel_pref(self, key: str) -> dict:
         """{record, transcribe, engine} for "FG1" / "South 2" / "tg:307" (a talkgroup's record is its own switch)."""
-        p = channels.pref(key, self._chan_ov, self.cfg.stt_aws_channels)
+        p = channels.pref(key, self._chan_ov, self.cfg.stt_aws_channels, self.cfg.stt_record_only)
         if channels.is_tg(key):
             p["record"] = self.tg.record(int(key[3:]))
         return p
@@ -1778,6 +1778,9 @@ class App:
     def aws_channels(self) -> tuple[str, ...]:
         return self.cfg.stt_aws_channels
 
+    def record_only(self) -> tuple[str, ...]:
+        return self.cfg.stt_record_only
+
     def aws_limit_default(self) -> float:
         return float(self.cfg.stt_aws_limit_usd)
 
@@ -1862,7 +1865,8 @@ class App:
         """Settings > Radios > Channels: the choices, what AWS can do, where they stand, the cost."""
         ok, why = self.aws_ok()
         reserve = ([k for k in channels_reserve(self) if self.aws_ok(k)[0]] if not ok else [])
-        return {"prefs": self._chan_ov, "aws_channels": list(self.cfg.stt_aws_channels), "aws_ok": ok, "aws_why": why,
+        return {"prefs": self._chan_ov, "aws_channels": list(self.cfg.stt_aws_channels),
+                "record_only": list(self.cfg.stt_record_only), "aws_ok": ok, "aws_why": why,
                 "aws_reserve": reserve,
                 "fm": [{"key": c.label, "kind": c.kind, "mhz": c.mhz} for c in self.cfg.channels],
                 "sync": self.channels_sync(), "aws": self.aws_status()}
@@ -2306,7 +2310,7 @@ class App:
         fh = json.loads((ROOT / "data" / "firehouses.json").read_text())["firehouses"]
         lon, lat, zoom = self.cfg.home
         return {"station": {"id": self.cfg.station_id, "name": self.cfg.station_name},
-                "timezone": "America/New_York",
+                "timezone": tz.TZ_NAME,
                 "home": {"center": [lon, lat], "zoom": zoom}, "incident_zoom": 17.2,
                 "tiles": "https://tiles.openfreemap.org/planet",
                 "glyphs": "https://tiles.openfreemap.org/fonts/{fontstack}/{range}.pbf",

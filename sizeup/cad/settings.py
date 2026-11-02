@@ -1269,7 +1269,7 @@ class Editor:
 
     def _channel_value(self, key: str, cur: dict, vals: dict):
         """The override to store for key: only what differs from the default (REMOVE: nothing does)."""
-        dflt = channels_mod.defaults(key, self._aws_channels())
+        dflt = channels_mod.defaults(key, self._aws_channels(), self._record_only())
         new = {k: v for k, v in {**cur, **vals}.items() if k in channels_mod.FIELDS and v != dflt.get(k)}
         if channels_mod.is_tg(key):
             new.pop("record", None)
@@ -1279,6 +1279,12 @@ class Editor:
         ctx = self.cad.radio_ctx
         return tuple(ctx.aws_channels()) if ctx is not None else channels_mod.DEFAULT_AWS
 
+    def _record_only(self) -> tuple:
+        """[stt] record_only (#201): recorded, not transcribed unless a choice here says otherwise."""
+        ctx = self.cad.radio_ctx
+        f = getattr(ctx, "record_only", None)
+        return tuple(f()) if callable(f) else channels_mod.DEFAULT_RECORD_ONLY
+
     def _channels_op(self, action: str, body: dict, op: str) -> dict:
         """set {key, record?, transcribe?, engine?} | set_many {keys, transcribe?, engine?} | reset {key}.
         A talkgroup's record goes to its own Record switch (the station's TalkgroupPrefs)."""
@@ -1287,7 +1293,7 @@ class Editor:
         if locked:
             raise CadError(locked)
         ov = self.channel_overrides()
-        aws = self._aws_channels()
+        aws, ro = self._aws_channels(), self._record_only()
         if action in ("set", "set_many"):
             keys = [body.get("key")] if action == "set" else body.get("keys")
             if not isinstance(keys, list) or not 1 <= len(keys) <= 2000:
@@ -1307,7 +1313,8 @@ class Editor:
                     continue
                 cur = ov.get(key) or {}
                 new = self._channel_value(key, cur, v)
-                before, after = channels_mod.pref(key, ov, aws), channels_mod.pref(key, {key: {} if new is REMOVE else new}, aws)
+                before = channels_mod.pref(key, ov, aws, ro)
+                after = channels_mod.pref(key, {key: {} if new is REMOVE else new}, aws, ro)
                 if before != after:
                     changes.append((channels_mod.SECTION, key, new))
                     audit.append(("radios", f"channel/{key}", {k: before[k] for k in v}, {k: after[k] for k in v}))

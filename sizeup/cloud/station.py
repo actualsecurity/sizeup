@@ -43,6 +43,7 @@ from typing import Callable
 
 import numpy as np
 
+from sizeup import tz
 from sizeup.cad import dispatcher
 from sizeup.cad.dispatcher import AudioUnavailable
 from sizeup.cloud.autoupdate import Watch
@@ -169,7 +170,7 @@ class StationLink:
     def status_row(self) -> dict:
         """The station's own header: a "Hub" row next to the radios."""
         n, oldest = self.outbox.pending()
-        queued = f"{n} event(s) waiting to go up" + (f", oldest {time.strftime('%H:%M', time.localtime(oldest))}"
+        queued = f"{n} event(s) waiting to go up" + (f", oldest {tz.hhmm(oldest)}"
                                                      if oldest else "") if n else "nothing waiting"
         if self.connected():
             state, word = "ok", (f"{n} queued" if n > 5 else "")
@@ -178,8 +179,8 @@ class StationLink:
             state, word, detail = "starting", "", f"connecting to the hub {self.cfg.cloud_hub_url}"
         else:
             since = self.error_since or self.last_ok
-            state, word = "down", f"offline {time.strftime('%H:%M', time.localtime(since))}"
-            detail = (f"can't reach the hub {self.cfg.cloud_hub_url} since {time.strftime('%H:%M:%S', time.localtime(since))}"
+            state, word = "down", f"offline {tz.hhmm(since)}"
+            detail = (f"can't reach the hub {self.cfg.cloud_hub_url} since {tz.hhmmss(since)}"
                       + (f" ({self.last_error})" if self.last_error else "") + f" · {queued}: nothing is lost, "
                       "it goes up when the hub is back")
         if self.outbox.dropped_audio:

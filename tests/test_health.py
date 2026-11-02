@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from sizeup import tz
 from sizeup.cloud.autoupdate import describe
 from sizeup.cloud.health import JOB_GRACE_S, Metrics, StationHealth, status_token
 from sizeup.cloud.hubstore import MonitorDb
@@ -124,8 +125,7 @@ def test_silent_starts_after_three_minutes_pushes_once_and_clears_with_a_recover
     assert r.keys() == ["silent"] and r.h.alerts()[0]["since"] == T0 + 300
     assert len(r.n.msgs) == 2                                              # within 15 min of the last push: not again yet
     r.at(181 + 900, post=False)
-    assert r.n.msgs[-1]["title"] == "Station silent 13 min · PCFD station · last heard " + \
-        __import__("time").strftime("%H:%M", __import__("time").localtime(T0 + 300))
+    assert r.n.msgs[-1]["title"] == "Station silent 13 min · PCFD station · last heard " + tz.hhmm(T0 + 300)
 
 
 def test_while_silent_nothing_else_starts_or_clears():

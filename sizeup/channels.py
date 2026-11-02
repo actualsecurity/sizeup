@@ -16,7 +16,8 @@ One model for the FM channels (FG1, FG2, South 2) and every P25 talkgroup, keyed
                           transcript, whisper's is kept as the alternative to compare
 
 Defaults: [stt] aws_channels (South 2, FG1, FG2, Fire/EMS 15 = tg:307) record + transcribe with "aws";
-everything else as before (record as it was, transcribe on, "local"). An edit is a CAD settings
+[stt] record_only (the hub: WCPD Ch 1 = tg:383, LLT Supervisor 1 = tg:3127, #201) recorded, not
+transcribed; everything else as before (record as it was, transcribe on, "local"). An edit is a CAD settings
 override (section "channels", key as above, value {record?, transcribe?, engine?}: only what differs
 from the default), audited (Settings section "radios"), admins only where roles are enforced.
 
@@ -24,7 +25,10 @@ Where the choices are made and applied (docs/cloud.md): the CAD of record edits 
 all-in-one); the hub sends them to the station as a `call` job (set_channel_prefs: the whole map
 and whether AWS can take audio now) whenever the station's reported copy differs, so the station
 applies them even if it was offline when they were changed; the station reports what it applied
-(sig) in its state push, and the hub shows "applied on the station" or "waiting".
+(sig) in its state push, and the hub shows "applied on the station" or "waiting". The station works
+from its own config's defaults, so the map the hub sends has the hub's record_only defaults folded in
+(for_station(): {"transcribe": false} unless Settings says otherwise): a plain choice that any station
+applies, one from before record_only included.
 
 An "aws" or "both" channel uses the local model whenever AWS can't take audio (no AWS here or on the
 hub, no credentials, the monthly limit reached): effective().
@@ -40,6 +44,7 @@ ENGINES = ("local", "aws", "both")
 FIELDS = ("record", "transcribe", "engine")
 KEY = re.compile(r"tg:\d{1,9}|[A-Za-z0-9][A-Za-z0-9 ./_-]{0,39}")
 DEFAULT_AWS = ("South 2", "FG1", "FG2", "tg:307")
+DEFAULT_RECORD_ONLY: tuple[str, ...] = ()
 SECTION = "channels"
 
 
@@ -51,8 +56,8 @@ def is_tg(key: str) -> bool:
     return key.startswith("tg:")
 
 
-def defaults(key: str, aws_channels=DEFAULT_AWS) -> dict:
-    return {"record": True, "transcribe": True, "engine": "aws" if key in aws_channels else "local"}
+def defaults(key: str, aws_channels=DEFAULT_AWS, record_only=DEFAULT_RECORD_ONLY) -> dict:
+    return {"record": True, "transcribe": key not in record_only, "engine": "aws" if key in aws_channels else "local"}
 
 
 def clean(key: str, raw: dict) -> dict:
@@ -74,12 +79,23 @@ def clean(key: str, raw: dict) -> dict:
     return out
 
 
-def pref(key: str, overrides: dict, aws_channels=DEFAULT_AWS) -> dict:
-    p = defaults(key, aws_channels)
+def pref(key: str, overrides: dict, aws_channels=DEFAULT_AWS, record_only=DEFAULT_RECORD_ONLY) -> dict:
+    p = defaults(key, aws_channels, record_only)
     o = overrides.get(key)
     if isinstance(o, dict):
         p.update({k: v for k, v in o.items() if k in FIELDS})
     return p
+
+
+def for_station(overrides: dict, record_only=DEFAULT_RECORD_ONLY) -> dict:
+    """The map the hub sends the station (set_channel_prefs): its Settings overrides, plus {"transcribe": false}
+    for each record_only channel whose override doesn't say (the station's defaults don't know the hub's
+    record_only; a Settings choice wins). Only fields a station keeps (check_map), so its sig agrees."""
+    out = {k: dict(v) for k, v in overrides.items() if isinstance(v, dict)}
+    for key in record_only:
+        if KEY.fullmatch(key) and "transcribe" not in out.get(key, {}):
+            out[key] = {**out.get(key, {}), "transcribe": False}
+    return out
 
 
 def effective(p: dict, aws_ok: bool) -> str:

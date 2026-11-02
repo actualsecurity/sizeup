@@ -226,7 +226,7 @@ class Cad:
         self._place_ix = None
         self._place_lock = threading.Lock()
         # The radios' side of Settings > Radios > Channels / Vocabulary (sizeup/channels.py): the app
-        # (App) answers channels_locked(), set_talkgroup(tg, record), channels_changed(), aws_channels(),
+        # (App) answers channels_locked(), set_talkgroup(tg, record), channels_changed(), aws_channels(), record_only(),
         # vocabulary_suggestions() / _push(phrases) / _state(), aws_status(), aws_limit_default(). None: alone.
         self.radio_ctx = None
         # The tone book's names for PCFD and Rye Brook ("Port Chester · Fire", #122): their pages are queued. The app sets it.
