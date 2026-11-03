@@ -245,6 +245,8 @@
   .ov-grid[data-swap="true"] .ov-split { order: 2; }
   .ov-grid[data-layout="side"] { grid-template-columns: minmax(0, 2.4fr) minmax(16rem, 1fr); }
   .ov-grid[data-layout="stacked"] { grid-template-columns: minmax(0, 1.4fr) minmax(17rem, 1fr); }
+  /* the console has no calls column (#217: the queue lists them): the map and the cameras take the width */
+  html:not(.board) .ov-grid, html:not(.board) .ov-grid[data-layout] { grid-template-columns: minmax(0, 1fr); }
   /* the divider: a 24 px target, a line in the middle while hovered, focused or dragged (panels.js's separator) */
   .ov-split { position: relative; flex: 0 0 var(--s-6); cursor: row-resize; touch-action: none; }
   .ov-split[data-orient="vertical"] { cursor: col-resize; }
@@ -355,9 +357,16 @@
   @container (width < 60rem) {
     .ov-grid:is([data-layout="map"], [data-layout="cameras"]) { grid-template-columns: minmax(0, 1fr); }
     .ov-grid[data-layout="map"] .ov-view { position: relative; block-size: 46vh; min-block-size: var(--map-h); }
+    /* the console's wide screen: nothing under the map (#217), so it keeps the screen's height */
+    @media (min-width: 1101px) {
+      html:not(.board) .ov-grid[data-layout="map"] .ov-view {
+        position: sticky; min-block-size: var(--map-h-min); block-size: calc(100dvh - var(--hdr-h) - 2 * var(--gutter) - var(--ctl) - var(--gutter));
+      }
+    }
     .ov-grid[data-layout="cameras"] .ov-view { position: relative; block-size: auto; min-block-size: 0; }
     .ov-grid[data-layout="cameras"] .cw-wall { flex: 0 0 auto; overflow: visible; }
-    /* side by side and stacked keep the events on the right down to a narrower middle column (the user's ask) */
+    /* side by side and stacked keep the events on the right down to a narrower middle column (the user's ask; the
+       wall board's now, #217) */
     .ov-grid[data-layout="side"] { grid-template-columns: minmax(0, 2.2fr) minmax(14rem, 1fr); }
     .ov-grid[data-layout="stacked"] { grid-template-columns: minmax(0, 1.6fr) minmax(14rem, 1fr); }
   }

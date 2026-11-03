@@ -21,8 +21,9 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
   <span id="page-title" class="cad-title">CAD</span>
   <span id="station" class="station"></span>
   <nav class="tabs console-only" aria-label="Views">
-    <button id="dispatch-open" class="tab" type="button" title="The open incident"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-dispatch"/></svg><span class="lbl">Dispatch</span></button>
     <button id="overview-open" class="tab" type="button" title="All open calls"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-grid"/></svg><span class="lbl">Overview</span></button>
+    <!-- the Incident view (#216: it was "Dispatch"; the id and the view's key, "dispatch", are unchanged) -->
+    <button id="dispatch-open" class="tab" type="button" title="The open incident"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-dispatch"/></svg><span class="lbl">Incident</span></button>
     <a id="radio-open" class="tab" href="#radio" title="All transmissions"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-radio"/></svg><span class="lbl">Radio</span></a>
     <a id="settings-open" class="tab" href="#settings" title="Settings"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-settings"/></svg><span class="lbl">Settings</span></a>
   </nav>
@@ -93,7 +94,7 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
       <div class="big dim">No incident</div>
     </div>
 
-    <!-- Overview (cadmap.js): the landing view with no incident open; every open call at once -->
+    <!-- Overview (cadmap.js): the landing view with no incident open; every open call at once, on the map of our area -->
     <div id="overview" class="overview" hidden>
       <div class="ov-head view-head">
         <h2 class="view-title">Overview</h2>
@@ -106,8 +107,8 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
         <span id="ov-layout" class="seg ov-layout" role="group" aria-label="Overview layout">
           <button type="button" data-layout="map" aria-pressed="true" title="The map">Map</button>
           <button type="button" data-layout="cameras" aria-pressed="false" title="Every camera in our area"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-camera"/></svg>Cameras</button>
-          <button type="button" data-layout="side" aria-pressed="false" title="Map | cameras | events">Side by side</button>
-          <button type="button" data-layout="stacked" aria-pressed="false" title="Map and cameras one over the other; events on the right">Stacked</button>
+          <button type="button" data-layout="side" aria-pressed="false" title="The map and the cameras side by side">Side by side</button>
+          <button type="button" data-layout="stacked" aria-pressed="false" title="The map and the cameras one over the other">Stacked</button>
         </span>
         <button id="ov-swap" class="sm" type="button" aria-pressed="false" hidden title="Cameras above the map">Swap</button>
       </div>
@@ -118,8 +119,9 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
           <div id="ov-split" class="ov-split" hidden></div>
           <section id="cw-wall" class="cw-wall" hidden aria-label="Cameras in our area"></section>
         </div>
-        <div class="ov-side">
-          <div id="ov-cams" class="ml-cams ml-cams-small board-only" hidden aria-label="Cameras"></div>
+        <!-- the calls: the wall board's only (#217: on the console the queue lists them, the same on every view) -->
+        <div class="ov-side board-only">
+          <div id="ov-cams" class="ml-cams ml-cams-small" hidden aria-label="Cameras"></div>
           <ol id="ov-cards" class="ov-cards"></ol>
           <h3 class="ov-sub">Non-emergency</h3>
           <ol id="ov-nonemerg" class="list ov-nelist"></ol>

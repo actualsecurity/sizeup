@@ -150,7 +150,8 @@ def test_the_page_passes_dispatch_as_off_and_the_feed_has_no_timer_of_its_own():
     assert '<div id="feed" hidden></div>' in side()
     css = text("cad.css")
     assert "html.board #feed { display: none !important; }" in css
-    assert not re.search(r'data-view="(overview|radio)"', css)                       # the Overview is untouched
+    # the Overview is untouched but for the queue's newest transmission and note, on the Overview only (#217)
+    assert re.findall(r'^.*data-view="(?:overview|radio)".*$', css, re.M) == ['  body:not([data-view="overview"]) .q-last { display: none; }']
 
 
 # -- the rigs, big, on Dispatch ----------------------------------------------------------------------------------

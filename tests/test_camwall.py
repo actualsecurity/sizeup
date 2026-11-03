@@ -286,7 +286,7 @@ def test_the_layouts_are_on_the_overview_and_the_wall_board():
     html = (STATIC / "cad.html").read_text()
     head = re.search(r'<div class="ov-head view-head">(.*?)</div>\s*<div id="ov-pages"', html, re.S).group(1)
     assert 'id="ov-layout"' in head and "console-only" not in head and "board-only" not in head   # both screens
-    grid = re.search(r'<div class="ov-grid" data-layout="map">(.*?)<div class="ov-side">', html, re.S).group(1)
+    grid = re.search(r'<div class="ov-grid" data-layout="map">(.*?)<div class="ov-side board-only">', html, re.S).group(1)
     assert 'class="ov-mapbox"' in grid and 'id="cw-wall"' in grid and 'id="ov-split"' in grid
     assert html.index('src="/static/camwall.js"') > html.index('src="/static/maplayers.js"')
 

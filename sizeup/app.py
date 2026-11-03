@@ -2325,11 +2325,14 @@ class App:
         return st
 
     def scene(self) -> dict:
+        from sizeup.roads import AREA_BBOX
         fh = json.loads((ROOT / "data" / "firehouses.json").read_text())["firehouses"]
         lon, lat, zoom = self.cfg.home
+        # home.bounds [w, s, e, n]: our area, Port Chester and Rye Brook; the Overview frames it and the open calls in
+        # it (cadmap.js areaBounds, #218)
         return {"station": {"id": self.cfg.station_id, "name": self.cfg.station_name},
                 "timezone": tz.TZ_NAME,
-                "home": {"center": [lon, lat], "zoom": zoom}, "incident_zoom": 17.2,
+                "home": {"center": [lon, lat], "zoom": zoom, "bounds": list(AREA_BBOX)}, "incident_zoom": 17.2,
                 "tiles": "https://tiles.openfreemap.org/planet",
                 "glyphs": "https://tiles.openfreemap.org/fonts/{fontstack}/{range}.pbf",
                 "firehouses": fh, "categories": CATEGORIES}

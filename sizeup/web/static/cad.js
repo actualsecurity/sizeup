@@ -399,7 +399,9 @@ function renderClock() {              // the same clock on the console and the b
   setText($("#clock-z"), `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}Z`);
 }
 
-// ---- views: Dispatch / Overview / Radio (Settings: settings.js) ---------------------------------------
+// ---- views: Overview / Incident / Radio (Settings: settings.js) ---------------------------------------
+// The Incident tab (#216: it was "Dispatch") keeps its id (#dispatch-open) and its key ("dispatch": viewTab,
+// body[data-view]); it never had a URL of its own, so there is no #dispatch to keep.
 
 function leaveView() {               // an incident or the form opens: out of Radio and Settings
   if (location.hash) history.pushState(null, "", location.pathname);
@@ -416,7 +418,7 @@ function route() {                    // #radio?filters: the Radio view; anythin
     if (radio && window.innerWidth <= 1100) $("#detail").scrollIntoView({ block: "start" });   // stacked: under the queue
   }
 }
-function viewTab() {                 // the view on screen: dispatch | overview | radio | settings
+function viewTab() {                 // the view on screen: overview | dispatch (the Incident tab) | radio | settings
   const settings = !$("#settings").hidden || !$("#styleguide").hidden;
   return settings ? "settings" : cad.radio ? "radio" : cad.mode === "none" ? "overview" : "dispatch";
 }
@@ -424,13 +426,13 @@ function renderTabs() {
   const tab = viewTab();
   // body[data-view]: Dispatch drops the 60 Control feed and shows the rigs big (#205); the board has no tabs
   if (!BOARD && document.body.dataset.view !== tab) document.body.dataset.view = tab;
-  for (const [id, k] of [["#dispatch-open", "dispatch"], ["#overview-open", "overview"], ["#radio-open", "radio"], ["#settings-open", "settings"]]) {
+  for (const [id, k] of [["#overview-open", "overview"], ["#dispatch-open", "dispatch"], ["#radio-open", "radio"], ["#settings-open", "settings"]]) {
     const b = $(id);
     b.classList.toggle("on", tab === k);
     if (tab === k) b.setAttribute("aria-current", "page"); else b.removeAttribute("aria-current");
   }
 }
-function openDispatch() {             // the Dispatch tab: the incident last open, else the oldest working one
+function openDispatch() {             // the Incident tab: the incident last open, else the oldest working one
   leaveView();
   if (cad.mode === "new" || (cad.mode === "view" && selected())) return render();
   const order = { queued: 0, active: 1, pending: 2 };
@@ -464,6 +466,19 @@ function isOpen(inc) {
 function incTitle(inc) {
   return inc.number || (inc.status === "queued" ? "Page" : "—");
 }
+// An open call's summary (state.overview, sizeup/cad/mapview.py overview): its units, the newest transmission and
+// note, the channels its traffic comes over; null for a closed one.
+function callSummary(id) {
+  return ((cad.state && cad.state.overview) || []).find((o) => o.id === id) || null;
+}
+// Who is talking now on a call (a summary): one of its rigs, or on its channel. The queue and the wall board's cards.
+function callLive(o) {
+  if (!o) return [];
+  const names = new Set(o.units.map((u) => u.name));
+  return ((cad.state && cad.state.talking) || []).filter((e) => !e.ended && (
+    (e.rig && e.rig.split(/,\s*/).some((r) => names.has(r))) || (!e.rig && o.channels.includes(e.channel))));
+}
+const txNow = (name) => { const t = window.Radio && Radio.talkingFor(name); return !!t && !t.ended; };
 
 function queueItem() {
   const li = el("li", "qi item");
@@ -472,8 +487,12 @@ function queueItem() {
   li.addEventListener("keydown", (e) => { if (e.key === "Enter" && e.target === li) selectIncident(Number(li.dataset.key)); });
   return li;
 }
+// The queue's card is the one list of calls on the console (#217: the Overview's own cards went; the wall board, with
+// no queue, keeps them). From them: who is talking on the call now (the card lit, a TX line, the rig's chip ringed) and,
+// on the Overview, its newest transmission and note (.q-last).
 function fillQueueItem(li, inc) {
-  li.className = `qi item ${inc.status}` + (inc.emergency ? "" : " nonemerg") + (inc.id === cad.sel ? " sel" : "");
+  const o = isOpen(inc) ? callSummary(inc.id) : null, live = callLive(o);
+  li.className = `qi item ${inc.status}` + (inc.emergency ? "" : " nonemerg") + (inc.id === cad.sel ? " sel" : "") + (live.length ? " live" : "");
   if (inc.id === cad.sel) li.setAttribute("aria-current", "true"); else li.removeAttribute("aria-current");
   const head = el("div", "qh");
   const t = el("span", "qt", typeLabel(inc.type, inc.subtype) || "No type");
@@ -506,8 +525,27 @@ function fillQueueItem(li, inc) {
   const on = openAssignments(inc);
   if (on.length) {
     const chips = el("div", "chips");
-    for (const a of on) chips.append(statusChip(a.status, `${a.name} ${a.status}`));
+    for (const a of on) {
+      const c = statusChip(a.status, `${a.name} ${a.status}`);
+      if (txNow(a.name)) c.classList.add("talking");
+      chips.append(c);
+    }
     li.append(chips);
+  }
+  if (live.length) li.append(el("div", "qs q-live", `TX ${live.map((e) => `${Radio.who(e) || "Radio"} ${e.channel}`).join(", ")}`));
+  if (o && o.radio) {
+    const r = el("div", "qs q-last");
+    const who = o.radio.rig || o.radio.talker || (o.radio.dispatcher ? "60 Control" : "radio");
+    r.append(el("span", "t", fmtTime(o.radio.start)), el("b", "", who), el("span", "dim", ` ${o.radio.channel}`),
+             o.radio.text ? el("span", "q", ` “${o.radio.text}”`) : el("span", "dim", " —"));
+    r.title = r.textContent;
+    li.append(r);
+  }
+  if (o && o.note) {
+    const n = el("div", "qs q-last");
+    n.append(el("span", "t", fmtTime(o.note.at)), el("span", "k", o.note.kind === "note" ? "note" : o.note.kind), el("span", "", o.note.text));
+    n.title = o.note.text;
+    li.append(n);
   }
 }
 // The phone pre-alert (prealert.js, sizeup/prealert.py): Tapout heard the HQ phone ring.
@@ -519,12 +557,16 @@ function renderPrealert() {
   PreAlert.notify(pa);
   show($("#csv-prealerts"), !!pa);
 }
+function queueExtra(i) {              // what the queue card shows from the call's summary (#217), for its signature
+  const o = isOpen(i) ? callSummary(i.id) : null;
+  return o ? [o.radio, o.note, callLive(o).map((e) => [e.key, e.rig, e.channel, e.alias])] : null;
+}
 function renderQueue() {
   const all = incidents();
   const byAge = (a, b) => a.created_at - b.created_at;        // oldest first
   const sig = (i) => JSON.stringify([i.status, i.number, i.type, i.subtype, i.address, i.id === cad.sel, i.emergency,
-    i.until_at, i.disposition, i.type_note, unconfirmed(i), i.joint_call, openAssignments(i).map((a) => [a.name, a.status]), i.closed_at, cad.listSig.length,
-    canDo("dispatch"), airportLine(i)]);
+    i.until_at, i.disposition, i.type_note, unconfirmed(i), i.joint_call, openAssignments(i).map((a) => [a.name, a.status, txNow(a.name)]),
+    i.closed_at, cad.listSig.length, canDo("dispatch"), airportLine(i), queueExtra(i)]);
   const opts = { key: (i) => String(i.id), sig, make: queueItem, fill: fillQueueItem };
   syncList($("#q-queued"), all.filter((i) => i.status === "queued").sort(byAge), { ...opts, empty: "None" });
   syncList($("#q-pending"), all.filter((i) => i.status === "pending" && i.emergency).sort(byAge),
@@ -3450,8 +3492,9 @@ window.addEventListener("keydown", (e) => {        // Esc: the unit's "why?" box
 });
 
 // ---- keyboard shortcuts (ui.js: "?" shows them; never while typing) ----------------------------------
-// N new incident, / search, G then D / O / R / S a view, J / K the next / previous incident in the queue,
-// Esc closes what is open (a dialog, the incident's open form, the new-incident form, an opened unit row).
+// N new incident, / search, G then O / I / R / S a view (G D: the Incident tab too, its old letter), J / K the
+// next / previous incident in the queue, Esc closes what is open (a dialog, the incident's open form, the
+// new-incident form, an opened unit row).
 function queueStep(dir) {
   const items = [...document.querySelectorAll(".queue .q > li.qi")].filter((n) => n.getClientRects().length);
   if (!items.length) return;
@@ -3491,8 +3534,9 @@ if (!BOARD) {
     "/": focusSearch,
     j: () => queueStep(1),
     k: () => queueStep(-1),
-    gd: () => $("#dispatch-open").click(),
     go: () => $("#overview-open").click(),
+    gi: () => $("#dispatch-open").click(),
+    gd: () => $("#dispatch-open").click(),        // the tab was "Dispatch" (#216)
     gr: () => { location.hash = "#radio"; },
     gs: () => { location.hash = "#settings"; },
     escape: escapeView,
