@@ -13,6 +13,7 @@ from sizeup.cloud.hubstore import MonitorDb
 from sizeup.config import ConfigError, load
 from tests.test_access import TEAM, AUD, jwt, keys, jwks, req  # noqa: F401  (fixtures)
 from tests.test_cloud import TOKEN, HubRun, call, hub_cfg
+from tests.test_roles import COREY, DEE, JULIAN, VAL, people
 
 HUB = "a" * 40
 OLD = "b" * 40
@@ -369,10 +370,10 @@ def test_status_token_is_read_only_and_the_panel_needs_no_station_token(tmp_path
         # the panel: a person's page (no Access configured here: open like the rest of the CAD API)
         code, p = call(hub.url + "/api/cad/health", token=None)
         assert code == 200 and p["health"]["station"]["name"] == "PCFD station" and "history" in p
-        # the banner's data: the CAD state's cloud
-        assert hub.get("/api/cad/state")["cloud"]["alerts"] == []
+        # no banner's data in the state (#203): the cloud is the connection only, the Station row links Settings > Health
+        assert hub.get("/api/cad/state")["cloud"].keys() == {"role", "state", "word", "detail", "health_url"}
         row = hub.get("/api/state")["radios"][0]
-        assert row["label"] == "Station" and row["link"] == "#settings/system/health"
+        assert row["label"] == "Station" and row["link"] == "#settings/health"
     finally:
         hub.close()
 
@@ -394,6 +395,40 @@ def test_with_access_the_panel_needs_a_person_and_the_status_a_bearer(keys, acce
     assert code == 200 and "health" in p
     assert req(h.url + "/api/station/status")[0] == 401
     assert req(h.url + "/api/station/status", headers={"Authorization": f"Bearer {status_token(TOKEN)}"})[0] == 200
+
+
+def test_only_an_admin_sees_station_health_and_it_is_never_in_the_state_push(keys, access_hub):  # noqa: F811
+    """#203: no health banner for anyone; Settings > Health is the admins'. A dispatcher or a viewer gets a 403 from
+    GET /api/cad/health, and nothing of an alert reaches anyone through the CAD state (the stream and its polls) or the
+    monitor state: not its title, its text, nor how many there are."""
+    h = access_hub
+    people(h.app.cad)
+    as_ = lambda email: {"Cf-Access-Jwt-Assertion": jwt(keys[0], email=email)}
+    st = station_status()
+    st["sdr"]["sdrs"][1]["present"] = False                        # SDR 102 unplugged: a critical alert at once
+    assert call(h.url + "/api/station/state", "POST", {"at": 1, "status": st})[0] == 200
+    h.app.health.tick()
+    (a,) = h.app.health.alerts()
+    assert a["key"] == "sdr:00000102"
+    for who in (JULIAN, VAL, DEE):
+        code, out = req(h.url + "/api/cad/health", headers=as_(who))
+        assert code == 403 and out["error"].startswith("Admins only") and a["title"] not in json.dumps(out), who
+    code, p = req(h.url + "/api/cad/health", headers=as_(COREY))
+    assert code == 200 and [x["key"] for x in p["alerts"]] == [a["key"]] and p["alerts"][0]["pushed"] is False
+    for who in (COREY, JULIAN, VAL):                               # the state is everyone's: none of it there, admins' too
+        for path in ("/api/cad/state", "/api/state"):
+            code, s = req(h.url + path, headers=as_(who))
+            text = json.dumps(s)
+            assert code == 200 and a["title"] not in text and a["text"] not in text and "health alert" not in text, (who, path)
+        code, s = req(h.url + "/api/cad/state", headers=as_(who))
+        assert "alerts" not in s["cloud"] and s["cloud"]["role"] == "hub"
+    assert a["title"] not in json.dumps(h.app.cad.state(), default=str)   # what the stream pushes, built the same way
+    # an incident-level alarm is not a health banner: an aircraft's 7700 still reaches everyone's state (alarm.js)
+    aid = h.app.cad.alarms.on_aircraft({"hex": "a1b2c3", "code": "7700", "at": time.time(), "meaning": "emergency",
+                                        "flight": "TST123"})
+    for who in (JULIAN, VAL):
+        code, s = req(h.url + "/api/cad/state", headers=as_(who))
+        assert code == 200 and aid in [x["id"] for x in s["alarms"]["open"]], who
 
 
 # -- config ------------------------------------------------------------------------------------------------------

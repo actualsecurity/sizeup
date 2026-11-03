@@ -166,7 +166,8 @@ window.RadioControls = (() => {
         }
         lines.push(`state: ${state}${r.open ? " · squelch open" : ""}`);
         node.title = lines.join("\n");
-        if (r.link) {                       // the hub's Station row: opens Settings > System > Station health (#79)
+        // the hub's Station row: opens Settings > Health (#79), an admin's only (#203)
+        if (r.link && (typeof canDo !== "function" || canDo("admin"))) {
           node.classList.add("link");
           node.tabIndex = 0;
           node.setAttribute("role", "link");

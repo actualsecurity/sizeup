@@ -4,7 +4,7 @@ and every POST a script makes is in the permission map with the role it should n
 import re
 from pathlib import Path
 
-from sizeup.cad.api import needs
+from sizeup.cad.api import ADMIN_READS, needs
 
 STATIC = Path(__file__).resolve().parent.parent / "sizeup" / "web" / "static"
 PAGES = ("cad.html", "station.html")       # /cad and /monitor; the station's own page (comms.html, index.html are gone)
@@ -115,6 +115,49 @@ def test_every_post_the_scripts_make_is_in_the_permission_map():
                                 ("/api/incident/abc/close", "`/api/incident/${encodeURIComponent(id)}/close`", "dispatch")):
         assert literal in scripts, f"no script posts to {path}"
         assert needs(path) == role, path
+
+
+def test_every_admin_only_get_the_scripts_make_is_in_the_read_map():
+    """The admin-only GETs (sizeup/cad/api.py ADMIN_READS, checked by CadApi.get and server.py's /api/cad/health): the push
+    topics (Settings > System) and station health (Settings > Health, #203). A dispatcher or viewer gets a 403."""
+    scripts = "".join(js(n) for n in JS_FILES)
+    for path, literal, script in (("/api/cad/notify", '"/api/cad/notify"', "settings.js"),
+                                  ("/api/cad/health", '"/api/cad/health"', "health.js")):
+        assert literal in js(script), f"{script} doesn't read {path}"
+        assert path in ADMIN_READS, path
+    assert set(ADMIN_READS) == {"/api/cad/notify", "/api/cad/health"}
+    assert "/api/cad/health" not in scripts.replace(js("health.js"), "")      # only the tab reads it
+
+
+def test_no_health_banner_on_the_console_or_the_board_and_health_is_an_admins_tab():
+    """#203: station health (silent, behind, update failed, a dongle or job, whisper / trunk-recorder, a stuck channel, the
+    outbox, the disk, the whisper queue, Amazon Transcribe and its budget) is never a banner under the header, for anyone;
+    it is Settings > Health, shown to admins on the hub, polled only while open. The NWS banner and the alarms stay."""
+    html = (STATIC / "cad.html").read_text()
+    box = re.search(r'<div id="alert-banners"[^>]*>(.*?)\n</div>', html, re.S).group(1)
+    assert 'id="wx-banner"' in box and "health" not in re.sub(r"<!--.*?-->", "", box, flags=re.S)
+    assert "health-banner" not in html and "health-banner" not in "".join(js(n) for n in JS_FILES)
+    assert "health-banner" not in (STATIC / "health.css").read_text() and ".hb-link" not in (STATIC / "health.css").read_text()
+    health = js("health.js")
+    assert "cad.hooks" not in health and "renderBanner" not in health and "alert-banners" not in health
+    assert not re.search(r"cloud\)?\.alerts|cloud && c\.alerts", "".join(js(n) for n in JS_FILES))   # nothing reads it
+    # the tab: a section of its own, its nav item an admin's on the hub, its content refused to anyone else
+    s = js("settings.js")
+    assert '["health", "Health"]' in s and '<section id="s-health" class="s-panel" data-s="health" hidden>' in html
+    tab = re.search(r"^function sHealthTab\(\) \{(.*?)^\}", s, re.S | re.M).group(1)
+    assert 'canDo("admin")' in tab and "sIsHub()" in tab
+    body = re.search(r"^function sHealth\(panel\) \{(.*?)^\}", s, re.S | re.M).group(1)
+    assert body.index('canDo("admin")') < body.index("StationHealth.mount(panel)")
+    assert 'm[2] === "health"' in s and '"#settings/health"' in s        # the pushes' old link lands on the tab
+    assert "StationHealth.mount" not in re.search(r"^function sSystem\(panel\) \{(.*?)^\}", s, re.S | re.M).group(1)
+    # the links to the related Data sources row and Push notifications
+    for href in ("#settings/system/pushes", "#settings/data/transcribe"):
+        assert f'"{href}"' in health, href
+    # the Station row (Settings > Radios > Receivers) links there for an admin only
+    rc = js("radio-controls.js")
+    assert 'if (r.link && (typeof canDo !== "function" || canDo("admin")))' in rc
+    # the alarms keep their own on-screen alarm for everyone: alarm.js on every page of cad.html, on each state push
+    assert '<script src="/static/alarm.js"></script>' in html and "cad.hooks.push(update)" in js("alarm.js")
 
 
 def test_one_menu_component_with_its_keys_on_every_transmission_row():

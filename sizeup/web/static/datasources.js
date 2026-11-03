@@ -8,6 +8,7 @@ const DataSourcesPanel = (() => {
   const POLL_MS = 15000, RUN_MS = 2000;
   const EVERY = [["off", "Off"], ["hourly", "Hourly"], ["daily", "Daily"], ["weekly", "Weekly"], ["monthly", "Monthly"]];
   let panel = null, box = null, data = null, timer = null, busy = false, opts = {}, err = "", watching = new Set();
+  let focused = "";                 // opts.focus (#settings/data/<key>, e.g. from Settings > Health): scrolled to once
 
   const isOpen = () => !!panel && !panel.hidden && !document.hidden && document.body.contains(panel);
 
@@ -80,7 +81,7 @@ const DataSourcesPanel = (() => {
   }
 
   function row(s, now) {
-    const tr = el("tr", s.running ? "ds-row run" : "ds-row");
+    const tr = el("tr", ["ds-row", s.running ? "run" : "", s.key === opts.focus ? "ds-focus" : ""].filter(Boolean).join(" "));
     tr.dataset.key = s.key;
     const name = el("td", "ds-name");
     name.append(el("b", "", s.name));
@@ -138,6 +139,8 @@ const DataSourcesPanel = (() => {
       }
     } else if (!err) kids.push(el("div", "loading", "Loading…"));
     box.replaceChildren(...kids);
+    const f = opts.focus && focused !== opts.focus && [...box.querySelectorAll("tr.ds-row")].find((r) => r.dataset.key === opts.focus);
+    if (f) { focused = opts.focus; f.scrollIntoView({ block: "center" }); }
   }
 
   function finished() {             // a refresh started from this page has ended: say how it went
@@ -195,6 +198,7 @@ const DataSourcesPanel = (() => {
 
   // settings.js, every render of the section: the list in place (once), then fresh data and the poll.
   function mount(node, o = {}) {
+    if (o.focus !== opts.focus) focused = "";
     opts = o;
     if (panel !== node || !box || !node.contains(box)) {
       panel = node;

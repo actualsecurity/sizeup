@@ -20,9 +20,12 @@ const S = {
   rtab: store("sizeup.cad.settings.radios") || "receivers",        // Settings > Radios: the tab (#settings/radios/<tab>)
   toneQ: "", toneShow: "", toneType: "", toneEdit: null, unnamedEdit: null,      // Radios > Tones (#115, #122)
   toneOpen: new Set(), entEdit: null, entMerge: null, toneMove: null, toneAdd: null,
+  dsFocus: "", pushScrolled: "",                     // #settings/data/<key>: that row; #settings/system/pushes: that card
 };
+// Health (#203): the station's health and alerts, its tab shown to admins on the hub only (sHealthTab; the server refuses
+// its data to anyone else).
 const S_SECTIONS = [["lists", "Lists"], ["runcards", "Run cards"], ["units", "Units"], ["dispatch", "Dispatch"],
-  ["users", "Users"], ["system", "System"], ["radios", "Radios"], ["data", "Data sources"]];
+  ["users", "Users"], ["system", "System"], ["health", "Health"], ["radios", "Radios"], ["data", "Data sources"]];
 // Settings > Radios, one tab per part (#115; the Lists page's tabs): which RadioControls card, the Tones page and the
 // Radio IDs editor each go under (data-rtab on each).
 const S_RADIO_TABS = [["receivers", "Receivers"], ["channels", "Channels"], ["tones", "Tones"], ["ids", "Radio IDs"],
@@ -175,6 +178,12 @@ function sRoute() {
   }
   let sec = m[1];
   if (sec === "tones") { sec = "radios"; S.rtab = "tones"; }          // #settings/tones: Radios > Tones
+  if (sec === "system" && m[2] === "health") {                       // the old place (a push's link): Settings > Health
+    sec = "health";
+    history.replaceState(null, "", "#settings/health");
+  }
+  S.dsFocus = sec === "data" ? m[2] || "" : "";
+  if (location.hash !== "#settings/system/pushes") S.pushScrolled = "";
   if (sec === "radios") {
     if (S_RADIO_TABS.some(([k]) => k === m[2])) S.rtab = m[2];
     if (!S_RADIO_TABS.some(([k]) => k === S.rtab)) S.rtab = "receivers";
@@ -187,7 +196,8 @@ function sRoute() {
     history.replaceState(null, "", `#settings/${sec}`);
   }
   S.section = sec;
-  store("sizeup.cad.settings", sec);
+  if (sec !== "health") store("sizeup.cad.settings", sec);       // (Health is never where Settings opens by itself)
+  sHealthTab();
   for (const a of document.querySelectorAll("#s-sections a")) {
     a.classList.toggle("on", a.dataset.s === sec);
     if (a.dataset.s === sec) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
@@ -213,7 +223,9 @@ function sRender(force) {
     return;
   }
   S.deferred = false;
-  const fn = { lists: sLists, units: sUnits, dispatch: sDispatch, users: sUsers, system: sSystem, radios: sRadios, data: sData }[S.section];
+  sHealthTab();
+  const fn = { lists: sLists, units: sUnits, dispatch: sDispatch, users: sUsers, system: sSystem, health: sHealth, radios: sRadios,
+    data: sData }[S.section];
   if (fn) fn(panel);
 }
 
@@ -563,6 +575,7 @@ function sUnnamed(d) {
 }
 
 function sHook() {                 // every render (cad.js): keep up with edits made elsewhere
+  sHealthTab();
   if (!S.section) return;
   if (S.section === "runcards") sRunTools();
   if (cad.state && S.data && cad.state.rev !== S.data.rev && !S.loading) sLoad();
@@ -1601,8 +1614,6 @@ function sSystem(panel) {
   const pushes = sCard(null);                  // the ntfy topics by kind (sPushes): admins only, the names are secret
   pushes.id = "s-pushes";
   pushes.hidden = true;
-  const health = sCard(null);         // Station health (health.js, #79): the hub only, shown once it answers
-  health.hidden = true;
   // the department, with its patch (static/brand)
   const patch = el("img", "s-patch");
   patch.src = "/static/brand/pcfd-patch.svg";
@@ -1614,7 +1625,7 @@ function sSystem(panel) {
   const about = sCard(patch, dept);
   about.classList.add("s-dept");
   panel.replaceChildren(...sHead("System"),
-    about, health, station, alarms, pushes,
+    about, station, alarms, pushes,
     sCard(sCardHead("Records"), recs, counts),
     ...(S.data.camera_wall ? [sCameraWall(S.data.camera_wall)] : []),
     sCard(sCardHead("Data file"), file),
@@ -1634,7 +1645,21 @@ function sSystem(panel) {
   sStation();
   if (window.Alarm) Alarm.mountSettings($("#s-alarms"));
   sPushes(pushes);
-  if (window.StationHealth) StationHealth.mount(health);
+}
+
+// ---- health: the station's health and alerts (health.js, #79), admins only (#203) --------------------------------------
+
+const sIsHub = () => !!(cad.state && cad.state.cloud && cad.state.cloud.role === "hub");
+function sHealthTab() {            // the tab: an admin's, on the hub
+  const a = document.querySelector('#s-sections a[data-s="health"]');
+  if (a) show(a.parentNode, canDo("admin") && sIsHub());
+}
+function sHealth(panel) {
+  if (!canDo("admin")) {
+    panel.replaceChildren(...sHead("Health"), el("p", "empty", `Admins only. ${askAdmin()}`));
+    return;
+  }
+  if (window.StationHealth) StationHealth.mount(panel);
 }
 
 // ---- system: push notifications (sizeup/notify.py Pushes, settings.py _notify_op) ----------------------------------
@@ -1690,6 +1715,10 @@ async function sPushes(card) {
     el("span", "dim small", `In effect: ${d.server.value} (${S_PUSH_FROM[d.server.source] || d.server.source})`));
   kids.push(sRow);
   card.hidden = false;
+  if (location.hash === "#settings/system/pushes" && S.pushScrolled !== location.hash) {     // from Settings > Health
+    S.pushScrolled = location.hash;
+    requestAnimationFrame(() => card.scrollIntoView({ block: "start" }));
+  }
   card.replaceChildren(sCardHead("Push notifications", "", sHelp("Pushes go to our own ntfy topics, by kind. Status & health: "
     + "station health (silent, behind, a dongle or program down, the disk, the whisper queue), Amazon Transcribe failing and its "
     + "monthly limit, and their recoveries. Alerts: the emergency buttons, a mayday, an aircraft emergency, their acknowledgements "
@@ -1714,7 +1743,7 @@ async function sPushTest(card, k) {
 // ---- data sources (#186): every data pull, Refresh now, how often (datasources.js; sizeup/datasources.py) -------------
 
 function sData(panel) {
-  if (window.DataSourcesPanel) DataSourcesPanel.mount(panel, { msg: sMsg });
+  if (window.DataSourcesPanel) DataSourcesPanel.mount(panel, { msg: sMsg, focus: S.dsFocus });
 }
 
 // ---- system: the camera wall's area (#125; sizeup/roads.py Roads.area, settings.py _wall_op) ----------------

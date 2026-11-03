@@ -2,7 +2,7 @@
 // (GET /api/cad/weather, sizeup/weather.py): the browser never talks to NOAA.
 //
 //   Banner       the National Weather Service's alerts for our zones (NYZ071, NYC119, NYZ211) under the header, in
-//                the shared alert-banner box (#alert-banners: the station-health banner sits there too, #79): one line
+//                the shared alert-banner box (#alert-banners; station health is never there, #203): one line
 //                per alert, most serious first, in its level's colour (a warning red, a watch or advisory amber, a
 //                statement info), with the headline and when it ends; a click opens the full text (description,
 //                what to do, onset, area). More than two: the rest behind "+N more". A marine-only alert (a Small
