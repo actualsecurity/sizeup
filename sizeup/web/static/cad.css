@@ -414,6 +414,13 @@
   .note-box input { flex: 1; min-inline-size: 0; }
   .note-sugg { position: absolute; inset-inline: 0; inset-block-start: 100%; margin-block-start: var(--s-1); z-index: var(--z-popover); }
   .note-tags { flex-basis: 100%; display: flex; align-items: center; flex-wrap: wrap; gap: var(--s-1); }
+  /* Assigned > Add unit, several at once (#220): what each word typed matched */
+  .add-chips { margin-block-start: var(--s-1); }
+  .add-chip { --c: var(--ok); }
+  .add-chip.moving { --c: var(--warn); }
+  .add-chip.skip { --c: var(--dim); text-decoration: line-through; }
+  .add-chip.nomatch { --c: var(--err); border-style: dashed; }
+  .add-chip.typing { --c: var(--dim); border-style: dashed; }
   /* a note's "@place" (#67): a chip in the text that shows the spot on the map */
   .place-tag { --c: var(--info); font-weight: 600; white-space: normal; text-align: start; }
   .place-tag .ico { inline-size: var(--ico-sm); block-size: var(--ico-sm); }

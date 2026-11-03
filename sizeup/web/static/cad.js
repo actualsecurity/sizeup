@@ -272,6 +272,16 @@ function statusColors(node, st) {  // a status button (style.css .stat): its col
   if (st.fg) node.style.setProperty("--fg", st.fg);
   return node;
 }
+// Another agency's unit (#219): the statuses it goes through (cad_lists.json agency_status_sets, the server's
+// status_set on the unit and its assignment rows), and what its set calls one (a keyholder's DP: "Notified").
+function agencySet(u) {
+  const id = u && u.status_set;
+  return (id && ((L().agency_status_sets || {}).sets || {})[id]) || null;
+}
+function statusLabel(u, code) {
+  const s = agencySet(u);
+  return (s && s.labels && s.labels[code]) || unitStatus(code).name;
+}
 function eventStatus(inc) {         // Pending / Open / Active / Closed, with the data file's color
   const es = L().event_statuses || {};
   const k = inc.status === "pending" && !inc.emergency ? "open" : inc.status;
@@ -1345,12 +1355,21 @@ function callPicker(u, where, box) {
   const form = el("form", "ask row pick");
   const sel = el("select");
   const open = incidents().filter((i) => ["pending", "active"].includes(i.status));
-  const add = (value, text) => { const o = el("option", "", text); o.value = String(value); sel.append(o); };
+  let n = 0;
+  const add = (value, text) => { const o = el("option", "", text); o.value = String(value); sel.append(o); n++; };
   const cur = open.find((i) => i.id === now.incident_id);
+  // then the incident being worked (#219: a status from the right column goes on it), then the other open calls
+  const sel0 = !cur && open.find((i) => i.id === cad.sel);
   if (cur) add(cur.id, `${incTitle(cur)} ${typeLabel(cur.type, cur.subtype) || "No type"}, ${cur.address || ""} (current)`);
-  for (const i of open) if (i !== cur) add(i.id, `${incTitle(i)} ${typeLabel(i.type, i.subtype) || "No type"}, ${i.address || ""}`);
-  add(0, "No call");
-  const ok = el("button", "mini on", `${st.name}`);
+  if (sel0) add(sel0.id, `${incTitle(sel0)} ${typeLabel(sel0.type, sel0.subtype) || "No type"}, ${sel0.address || ""} (this incident)`);
+  for (const i of open) if (i !== cur && i !== sel0) add(i.id, `${incTitle(i)} ${typeLabel(i.type, i.subtype) || "No type"}, ${i.address || ""}`);
+  const agency = !!agencySet(now);
+  if (!agency) add(0, "No call");              // another agency's unit is only ever on a call
+  if (!n) {
+    box.append(el("span", "dim small", "No open call"));
+    return box;
+  }
+  const ok = el("button", "mini on", statusLabel(now, st.code));
   ok.type = "submit";
   statusColors(ok, st);
   const cancel = el("button", "mini", "Cancel");
@@ -1365,7 +1384,7 @@ function callPicker(u, where, box) {
     } catch (err) { UI.toast(err.message, "err"); }
   });
   form.addEventListener("click", (e) => e.stopPropagation());
-  form.append(el("span", "small", `${now.name || ""} ${st.code} on`), sel, ok, cancel);
+  form.append(el("span", "small", `${now.name || ""} ${agency ? statusLabel(now, st.code) : st.code} on`), sel, ok, cancel);
   box.append(form);
   setTimeout(() => { if (document.activeElement !== sel) sel.focus(); }, 0);
   return box;
@@ -1401,13 +1420,13 @@ function statusButtons(u, where) {
     setTimeout(() => { if (document.activeElement !== input) input.focus(); }, 0);
     return box;
   }
-  if ((unitById(u.id) || u).response === "agency") return agencyButtons(u, where, box);
-  for (const s of statusChoices(u, where)) {
+  const who = { ...(unitById(u.id) || {}), ...u };     // its status set (another agency's unit) from either
+  for (const s of statusChoices(who, where)) {
     if (where === "inc" && s.code === u.status) continue;
     if (s.retired) continue;
     // Incident command is one unit's per event (the server moves it): on the event, "Take command" when another has it.
     const take = where === "inc" && u.cmd && s.code === L().command_status;
-    const b = el("button", "mini" + (s.code === u.status ? " on" : ""), take ? "Take command" : s.name);
+    const b = el("button", "mini" + (s.code === u.status ? " on" : ""), take ? "Take command" : statusLabel(who, s.code));
     statusColors(b, s);
     b.title = take ? `Command from ${u.cmd}` : s.code;
     b.disabled = s.code === u.status;
@@ -1423,36 +1442,21 @@ function statusButtons(u, where) {
 }
 
 // On an incident only the next steps (cad_lists.json status_flow, sent per assignment as `next`):
-// Dispatched -> Responding, On location, Available, Out of service ... The board offers every status.
+// Dispatched -> Responding, On location, Available, Out of service ... The board offers every status;
+// another agency's unit, its set's (#219: EMS, PD, ConEd ... like our rigs; a keyholder Notified ... Done).
 function statusChoices(u, where) {
   const all = L().unit_statuses || [];
-  if (where !== "inc") return all;
+  const set = agencySet(u);
+  const mine = set ? set.statuses.map((c) => all.find((s) => s.code === c)).filter(Boolean) : all;
+  if (where !== "inc") return mine;
   const flow = L().status_flow || {};
-  const next = u.next || flow[u.status] || flow["*"];
-  if (!next) return all;                               // a server without the flow: as before
+  const next = u.next || (!set && (flow[u.status] || flow["*"]));
+  if (!next) return mine;                              // a server without the flow: as before
   return next.map((c) => all.find((s) => s.code === c)).filter(Boolean);
 }
 function talkSig(name) {
   const t = Radio.talkingFor(name);
   return t ? `${t.key}|${t.ended ? 1 : 0}` : "";
-}
-
-// Another agency's unit (EMS, PD): on location when it shows up, then cleared. Nothing else.
-function agencyButtons(u, where, box) {
-  const now = unitById(u.id) || u;
-  if (!now.incident_id) {
-    if (where === "board") box.append(el("span", "dim small", "Attach only"));
-    return box;
-  }
-  const codes = L().agency_statuses || [];
-  codes.forEach((code, i) => {
-    const s = unitStatus(code);
-    if (code === now.status) return;
-    const b = statusColors(el("button", "mini", i === codes.length - 1 && s.role === "free" ? "Cleared" : s.name), s);
-    b.addEventListener("click", (e) => { e.stopPropagation(); setUnitStatus(u.id, code); });
-    box.append(b);
-  });
-  return box;
 }
 
 function renderOnUnits(inc) {
@@ -1469,7 +1473,7 @@ function renderOnUnits(inc) {
       li.className = "ou" + (a.cleared_at ? " cleared" : "");
       const head = el("div", "ouh");
       head.append(el("b", "", a.name));
-      if (!a.cleared_at) head.append(statusChip(a.status));
+      if (!a.cleared_at) head.append(statusChip(a.status, agencySet(a) ? statusLabel(a, a.status) : undefined));
       const times = el("span", "dim small times");
       times.append(...[["Disp", a.dispatched_at], ["Resp", a.enroute_at], ["OnLoc", a.onscene_at], ["Clr", a.cleared_at]]
         .filter(([, t]) => t).map(([k, t]) => el("span", "", `${k} ${fmtTime(t, true)}`)));
@@ -1477,7 +1481,8 @@ function renderOnUnits(inc) {
       const talk = !a.cleared_at && Radio.talkingFor(a.name);
       if (talk) head.append(el("span", "talk-badge", `${talk.ended ? "Ended" : "TX"} ${talk.channel}`));
       if (!a.cleared_at && isOpen(inc)) {
-        head.append(statusButtons({ id: a.unit_id, status: a.status, next: a.next, cmd: cmd !== a.name && cmd }, "inc"));
+        head.append(statusButtons({ id: a.unit_id, status: a.status, next: a.next, cmd: cmd !== a.name && cmd,
+          status_set: a.status_set || "" }, "inc"));
       }
       else if (a.cleared_at && isOpen(inc) && (a.return || []).length) head.append(returnButtons(inc, a));
       li.replaceChildren(head);
@@ -2191,7 +2196,8 @@ function renderAttach(inc) {
   if (!inc || !isOpen(inc)) return;
   // An emergency event: only other agencies (EMS, PD) that show up; they are never dispatched.
   setText($("#a-title"), inc.emergency ? "Other agencies" : "Attach");
-  $("#a-hint").dataset.help = inc.emergency ? "EMS, PD, utilities: attach them when they arrive. Never dispatched or toned out."
+  $("#a-hint").dataset.help = inc.emergency ? "EMS, PD, utilities, keyholders: attached as Dispatched (a keyholder or the Knox box: Notified), "
+    + "then their statuses like our units, here and in the right column. Never toned out or said on the air."
     : "Non-emergency: no run card, no dispatch.";
   const others = units().filter((u) => u.incident_id !== inc.id && (u.board || u.incident_id)
     && (!inc.emergency || u.response === "agency"));
@@ -2250,29 +2256,104 @@ function returnButtons(inc, a) {
   const box = el("div", "ubtns");
   for (const code of a.return || []) {
     const s = unitStatus(code);
-    const b = statusColors(el("button", "mini", s.name), s);
-    b.title = `${a.name} back to this call: ${s.name}`;
+    const b = statusColors(el("button", "mini", statusLabel(a, code)), s);
+    b.title = `${a.name} back to this call: ${statusLabel(a, code)}`;
     b.addEventListener("click", (e) => { e.stopPropagation(); returnUnit(inc.id, a.unit_id, code); });
     box.append(b);
   }
   return box;
 }
 
-// ---- Assigned > Add unit: a unit nobody dispatched (heard responding, or on location) ---------------
+// ---- Assigned > Add unit: units nobody dispatched (heard responding, or on location) ---------------
 // The units on this event first, then the fire units, then the rest (the server's tag order, as the note's
-// @-tags and /incident/<id>/units). Not the units already on it, nor other agencies (Attach has those).
-// Nothing is said on the air; the server logs it as "2395 added responding (not dispatched)".
+// @-tags and /incident/<id>/units): other agencies' units too (#220: "E60 E62 L31 RBPD"). Not the units already
+// on it. Nothing is said on the air; the server logs it as "2395 added responding (not dispatched)".
+// Several at once (#220): the words typed, split on spaces or commas, each matched (any case) to a unit, the
+// chips under the box saying what each matched as it is typed. Enter adds every unit found; a word that
+// matched nothing stays in the box, with a note, to fix or clear (the rest are added: nothing is lost, nothing
+// asks); a unit already on the event, or typed twice, is skipped with a note.
 
-const addUnit = { items: [], idx: 0, iid: null };
+const addUnit = { items: [], idx: 0, iid: null, moved: false };
 function addStatuses() {                  // Responding, On location: the first of each role
   const all = L().unit_statuses || [];
   return ["enroute", "onscene"].map((r) => all.find((s) => s.role === r && !s.retired)).filter(Boolean);
 }
 function addCandidates(inc) {
   const on = new Set(openAssignments(inc).map((a) => a.name));
-  return tagOrder(inc).filter((c) => !on.has(c)).map((c) => units().find((u) => u.name === c))
-    .filter((u) => u && u.response !== "agency");
+  return tagOrder(inc).filter((c) => !on.has(c)).map((c) => units().find((u) => u.name === c)).filter(Boolean);
 }
+
+// "E60 E62, l31  rbpd" -> ["E60", "E62", "l31", "rbpd"]
+function unitWords(text) {
+  return String(text || "").split(/[\s,;]+/).filter(Boolean);
+}
+function unitKey(s) {                     // "KNOX_BOX" "knox box" -> "knoxbox"; "Engine 60" -> "engine60"
+  return String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+// The ways a unit is typed: its code (any case), its code without the punctuation ("coned g1", "knoxbox"),
+// its spoken name run together ("engine 60", "77 alpha 4"). A key two units share matches neither (null).
+function unitIndex(list) {
+  const code = new Map(), loose = new Map(), said = new Map();
+  const put = (m, k, u) => { if (k) m.set(k, m.has(k) && m.get(k) !== u ? null : u); };
+  for (const u of list) {
+    put(code, u.name.toLowerCase(), u);
+    put(loose, unitKey(u.name), u);
+    if (u.spoken && u.spoken !== u.name) put(said, unitKey(u.spoken), u);
+  }
+  return { code, loose, said, list };
+}
+function matchWord(ix, w) {
+  return ix.code.get(w.toLowerCase()) || ix.loose.get(unitKey(w)) || ix.said.get(unitKey(w)) || null;
+}
+// -> [{text, unit, why}]: why "" (to add), "here" (on this event already), "twice" (typed before), "unknown",
+// "typing" (the last word, still being typed, the start of some unit's code). A word that is no unit is tried
+// with the next ones ("engine 60", "23 98"); one that is a unit is taken as it is.
+function parseUnitList(text, list, here = new Set()) {
+  const ix = unitIndex(list), words = unitWords(text), out = [], seen = new Set();
+  const open = /[^\s,;]$/.test(String(text || ""));
+  for (let i = 0; i < words.length; i++) {
+    let u = matchWord(ix, words[i]), n = 1;
+    for (let k = Math.min(4, words.length - i); !u && k >= 2; k--) {
+      const j = unitKey(words.slice(i, i + k).join(""));
+      const m = ix.loose.get(j) || ix.said.get(j);
+      if (m) { u = m; n = k; }
+    }
+    const t = words.slice(i, i + n).join(" ");
+    i += n - 1;
+    if (!u) {
+      const last = i === words.length - 1 && open, p = t.toLowerCase();
+      out.push({ text: t, unit: null, why: last && list.some((x) => x.name.toLowerCase().startsWith(p)) ? "typing" : "unknown" });
+    } else if (seen.has(u.name)) out.push({ text: t, unit: u, why: "twice" });
+    else {
+      seen.add(u.name);
+      out.push({ text: t, unit: u, why: here.has(u.name) ? "here" : "" });
+    }
+  }
+  return out;
+}
+function addParse(inc) {
+  const here = new Set(openAssignments(inc).map((a) => a.name));
+  return parseUnitList($("#o-unit").value, units().filter((u) => u.board || u.incident_id), here);
+}
+// The preview: a chip per word, what it matched
+function renderAddPreview() {
+  const inc = selected(), box = $("#o-preview");
+  const got = inc ? addParse(inc) : [];
+  show(box, got.length > 0);
+  box.replaceChildren(...got.map((g) => {
+    const u = g.unit, away = u && !g.why && u.incident_id && u.incident_id !== inc.id;
+    const oos = u && !g.why && roleOf(u.status) === "oos" && u.response !== "agency";
+    const c = el("span", "chip add-chip" + (g.why === "unknown" ? " nomatch" : g.why === "typing" ? " typing"
+      : g.why ? " skip" : away || oos ? " moving" : ""), u ? u.name : g.text);
+    c.title = g.why === "unknown" ? `No unit ${g.text}` : g.why === "typing" ? "Still typing"
+      : g.why === "here" ? `${u.name}: already on this event` : g.why === "twice" ? `${u.name}: typed twice`
+      : oos ? `${u.name}: ${unitStatus(u.status).name}` : away ? `${u.name}: on ${u.incident_number || "another call"} (moved here)`
+      : [u.name, u.title || u.department].filter(Boolean).join(", ");
+    if (u && u.name.toLowerCase() !== g.text.toLowerCase()) c.title += ` (typed "${g.text}")`;
+    return c;
+  }));
+}
+
 function renderAddUnit(inc) {
   const ok = !BOARD && isOpen(inc) && inc.status !== "queued";
   if (!$("#o-form").hidden && (!ok || addUnit.iid !== inc.id)) closeAddUnit();    // another event, or this one closed
@@ -2302,6 +2383,7 @@ function closeAddUnit(refocus = false) {
   addUnit.iid = null;
   $("#o-unit").value = "";
   hideAddSugg();
+  renderAddPreview();
   show($("#o-form"), false);
   flash($("#o-error"));
   const inc = selected();
@@ -2313,12 +2395,18 @@ function hideAddSugg() {
   show($("#o-sugg"), false);
   $("#o-unit").setAttribute("aria-expanded", "false");
 }
+function addLastWord(input) {            // the word being typed: the last one, when the box doesn't end in a space or comma
+  const m = input.value.match(/[^\s,;]+$/);
+  return m ? { text: m[0], start: m.index } : null;
+}
 function suggestAddUnit() {
-  const inc = selected(), input = $("#o-unit"), q = input.value.trim().toLowerCase();
+  const inc = selected(), input = $("#o-unit"), w = addLastWord(input), q = w ? w.text.toLowerCase() : "";
   if (!inc || !q) return hideAddSugg();
-  const items = addCandidates(inc).filter((u) => u.name.toLowerCase().startsWith(q)).slice(0, 8);
+  const before = new Set(unitWords(input.value.slice(0, w.start)).map((x) => x.toLowerCase()));
+  const items = addCandidates(inc).filter((u) => u.name.toLowerCase().startsWith(q) && !before.has(u.name.toLowerCase()))
+    .sort((a, b) => (b.name.toLowerCase() === q) - (a.name.toLowerCase() === q)).slice(0, 8);   // what was typed, first
   if (!items.length || (items.length === 1 && items[0].name.toLowerCase() === q)) return hideAddSugg();
-  if (addUnit.items.map((u) => u.id).join() !== items.map((u) => u.id).join()) addUnit.idx = 0;
+  if (addUnit.items.map((u) => u.id).join() !== items.map((u) => u.id).join()) { addUnit.idx = 0; addUnit.moved = false; }
   addUnit.items = items;
   const box = $("#o-sugg");
   box.replaceChildren(...items.map((u, i) => {
@@ -2337,20 +2425,27 @@ function suggestAddUnit() {
   input.setAttribute("aria-expanded", "true");
   input.setAttribute("aria-activedescendant", `o-sugg-${addUnit.idx}`);
 }
-function takeAddUnit(name) {
-  $("#o-unit").value = name;
+function takeAddUnit(name) {             // the suggestion in place of the word being typed
+  const input = $("#o-unit"), w = addLastWord(input);
+  input.value = w ? input.value.slice(0, w.start) + name : name;
   hideAddSugg();
+  renderAddPreview();
 }
 function addUnitKeys(e) {
+  const input = $("#o-unit"), w = addLastWord(input);
+  // Enter on a word that is a unit as typed ("RBPD", with RBPD1, RBPD2 offered) adds, unless a suggestion was picked
+  const exact = !addUnit.moved && w && addUnit.items.some((u) => u.name.toLowerCase() === w.text.toLowerCase());
   if (addUnit.items.length && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
     e.preventDefault();
     addUnit.idx = (addUnit.idx + (e.key === "ArrowDown" ? 1 : -1) + addUnit.items.length) % addUnit.items.length;
+    addUnit.moved = true;
     suggestAddUnit();
-  } else if (addUnit.items.length && (e.key === "Tab" || e.key === "Enter")) {
+  } else if (addUnit.items.length && (e.key === "Tab" || (e.key === "Enter" && !exact))) {
     e.preventDefault();
     takeAddUnit(addUnit.items[addUnit.idx].name);
-  } else if (e.key === "Enter") {                 // a whole code typed or taken: Responding
+  } else if (e.key === "Enter") {                 // the units typed (or taken): Responding
     e.preventDefault();
+    hideAddSugg();
     const first = addStatuses()[0];
     if (first) submitAddUnit(first.code);
   } else if (e.key === "Escape") {
@@ -2363,18 +2458,43 @@ async function submitAddUnit(status) {
   const inc = selected(), err = $("#o-error");
   flash(err);
   if (!inc) return;
-  const code = $("#o-unit").value.trim().toLowerCase();
-  if (!code) return flash(err, "Enter a unit");
-  const u = units().find((x) => x.name.toLowerCase() === code);
-  if (!u) return flash(err, `No unit ${$("#o-unit").value.trim()}`);
+  const typed = $("#o-unit").value.trim();
+  if (!typed) return flash(err, "Enter a unit");
+  const got = addParse(inc).map((g) => (g.why === "typing" ? { ...g, why: "unknown" } : g));
+  const unknown = got.filter((g) => g.why === "unknown").map((g) => g.text);
+  const here = got.filter((g) => g.why === "here").map((g) => g.unit.name);
+  let take = got.filter((g) => !g.why).map((g) => g.unit);
+  const notes = [];
+  // several: one out of service is left out (said), not the reason none go; one alone, the server says why
+  const oos = take.length > 1 ? take.filter((u) => roleOf(u.status) === "oos" && u.response !== "agency") : [];
+  if (oos.length) {
+    take = take.filter((u) => !oos.includes(u));
+    notes.push(`Not available: ${oos.map((u) => `${u.name} ${u.status}`).join(", ")}`);
+  }
+  if (here.length) notes.push(`Already on this event: ${here.join(", ")}`);
+  if (!take.length) {
+    if (unknown.length) notes.unshift(unknown.length === 1 && got.length === 1 ? `No unit ${unknown[0]}` : `Not found: ${unknown.join(", ")}`);
+    return flash(err, notes.join(". "));
+  }
   const op = needOperator(err);
   if (!op) return;
-  if (u.incident_id && u.incident_id !== inc.id
-      && !await UI.confirm(`${u.name} is on ${u.incident_number || "another call"}. Move it here?`, { ok: "Move", danger: false })) return;
+  const away = take.filter((u) => u.incident_id && u.incident_id !== inc.id);
+  if (away.length && !await UI.confirm(away.length === 1
+    ? `${away[0].name} is on ${away[0].incident_number || "another call"}. Move it here?`
+    : `${away.map((u) => `${u.name} is on ${u.incident_number || "another call"}`).join(", ")}. Move them here?`,
+  { ok: "Move", danger: false })) return;
   try {
-    const r = await api("POST", `/api/cad/incident/${inc.id}/attach`, { unit_ids: [u.id], status, operator: op });
-    closeAddUnit();
+    const r = await api("POST", `/api/cad/incident/${inc.id}/attach`, { unit_ids: take.map((u) => u.id), status, operator: op });
     if (r.moved && r.moved.length) UI.toast(`Moved ${r.moved.join(", ")}`, "info");
+    if (unknown.length) {                         // the rest stay in the box, to fix: the note says so
+      $("#o-unit").value = unknown.join(" ");
+      renderAddPreview();
+      flash(err, [`Added ${take.map((u) => u.name).join(", ")}`, `Not found: ${unknown.join(", ")} (fix or clear)`, ...notes].join(". "));
+      $("#o-unit").focus();
+      return;
+    }
+    closeAddUnit();
+    if (notes.length) UI.toast(`Added ${take.map((u) => u.name).join(", ")}. ${notes.join(". ")}`, "info");
   } catch (e) {
     flash(err, e.message);
   }
@@ -2829,7 +2949,7 @@ function renderUnits() {
           head.append(tb);
         }
         const ust = el("span", "ust");                                        // the status and its time: one piece (#205)
-        ust.append(statusChip(u.status), since(el("span", "ut"), u.status_at, true));   // compact, exact on hover (#209)
+        ust.append(statusChip(u.status, agencySet(u) ? statusLabel(u, u.status) : undefined), since(el("span", "ut"), u.status_at, true));   // compact, exact on hover (#209)
         head.append(el("span", "spacer"), ust);
         li.replaceChildren(head);
         const sub = [];
@@ -3247,7 +3367,7 @@ $("#a-add").addEventListener("click", attach);
 $("#o-open").addEventListener("click", openAddUnit);
 $("#o-cancel").addEventListener("click", () => closeAddUnit(true));
 $("#o-form").addEventListener("submit", (e) => e.preventDefault());
-$("#o-unit").addEventListener("input", () => { flash($("#o-error")); suggestAddUnit(); });
+$("#o-unit").addEventListener("input", () => { flash($("#o-error")); suggestAddUnit(); renderAddPreview(); });
 $("#o-unit").addEventListener("keydown", addUnitKeys);
 $("#o-unit").addEventListener("blur", () => setTimeout(hideAddSugg, 150));
 $("#note-form").addEventListener("submit", async (e) => {

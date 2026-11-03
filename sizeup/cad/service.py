@@ -981,11 +981,11 @@ class Cad:
         ours = [u["id"] for u in units if u["response"] != "agency"]
         agency = [u["id"] for u in units if u["response"] == "agency"]
         moved = self.store.assign(iid, ours, op, attach=True) if ours else []
-        if agency:          # another agency's unit that showed up: "77A4 on location", never "dispatched"
-            moved += self.store.assign(iid, agency, op, attach=True, quiet=True)
-            onscene = self.lists.agency_statuses()[0]
-            for i in agency:
-                self.store.set_unit_status(i, onscene, op)
+        if agency:          # another agency's unit: on the event assigned, not yet responding (#219: never
+            moved += self.store.assign(iid, agency, op, attach=True)    # straight to On location), then its statuses
+            by = {u["id"]: u for u in units}
+            for i in agency:                                            # "RBPD dispatched", "KEYHOLDER notified"
+                self.store.set_unit_status(i, self.lists.agency_attach_status(by[i]["status_set"]), op)
         return {"ok": True, "moved": moved}
 
     def _add_responding(self, iid: int, units: list[dict], body: dict) -> dict:
@@ -1000,9 +1000,9 @@ class Cad:
         here = [u["name"] for u in units if u["incident_id"] == iid]
         if here:
             raise CadError(f"Already on this event: {', '.join(here)}")
-        agency = [u["name"] for u in units if u["response"] == "agency" and status not in L.agency_statuses()]
+        agency = [u["name"] for u in units if u["response"] == "agency" and status not in L.unit_statuses_for(u["name"], u["board"])]
         if agency:
-            raise CadError(f"Another agency's unit, only on location: {', '.join(agency)}")
+            raise CadError(f"Another agency's unit, not {L.name('unit_statuses', status)}: {', '.join(agency)}")
         moved = self.store.assign(iid, [u["id"] for u in units], op, status=status)
         return {"ok": True, "moved": moved, "status": status}
 

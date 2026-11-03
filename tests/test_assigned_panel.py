@@ -98,8 +98,8 @@ def test_already_assigned_out_of_service_and_bad_requests(quiet):
             c.attach(iid, {"unit_ids": [l31], "status": bad, "operator": "x"})
     with pytest.raises(CadError, match="operator"):
         c.attach(iid, {"unit_ids": [l31], "status": "RS"})
-    with pytest.raises(CadError, match="Another agency"):
-        c.attach(iid, {"unit_ids": [uid(c, "77A4")], "status": "RS", "operator": "x"})
+    with pytest.raises(CadError, match="Another agency"):          # not in its set (#219): EMS has no Enroute to
+        c.attach(iid, {"unit_ids": [uid(c, "77A4")], "status": "ET", "operator": "x"})
     q = c.store.create_incident(source="60 Control page", status="queued")
     with pytest.raises(CadError, match="Accept first"):
         c.attach(q, {"unit_ids": [l31], "status": "RS", "operator": "x"})

@@ -15,6 +15,9 @@ shows). A new export can replace the file without a code change:
     unit_statuses                    {code, name, role, bg, fg}: the status dropdown; the role is what
                                      the store does with it (free, oos, dispatched, enroute, onscene);
                                      free_status: the free one Close event sets (else the first free)
+    agency_status_sets               the statuses other agencies' units go through (#219): set id ->
+                                     {statuses (the first: what Attach puts one on as), labels (a status
+                                     named otherwise for that set)}; boards: board id -> set, default
     event_statuses                   name + colors per event status
     unit_kinds, unit_boards, units   the status boards (null = a blank separator row; group_by kind,
                                      rest_title, folded: how the board shows them) and per-unit kind /
@@ -48,7 +51,10 @@ Units answer one of three ways (units.<code>.response, else from the flags): "fi
 joint-response department's apparatus: run cards by kind, "tick all", the dispatch), "mutual_aid"
 (another department's: only when named or picked by hand) and "agency" (EMS, PD, utilities: the
 unit_kinds marked attach_only; never on a run card, never dispatched or said on the air, only
-attached to an event when they show up, with a short status set).
+attached to an event when they show up). Attached, one starts Dispatched (assigned, not yet
+responding) and goes through its board's agency_status_sets set like our rigs (#219): Port Chester EMS
+the whole run of them, PD and the utilities the same but Out of service, a keyholder or the Knox box
+Notified / En route / On location / Done.
 """
 
 from __future__ import annotations
@@ -111,12 +117,22 @@ class Lists:
     free_status: str = ""                                  # the free status Close event sets ('' = the first free)
     type_subtypes_partial: dict = field(default_factory=dict)  # {"given": [types], "confirm": {type: why}}
     dispatch_tones: dict = field(default_factory=dict)     # joint town -> [(hz, s), ...] | None (not known yet)
+    agency_status_sets: dict = field(default_factory=dict) # {"default", "sets": {id: {statuses, labels}}, "boards"}
     path: str = ""
     _names: dict[str, dict[str, str]] = field(default_factory=dict, repr=False)
+    _board_of: dict[str, str] = field(default_factory=dict, repr=False)
 
     def __post_init__(self):
         for k in LIST_SECTIONS:
             self._names[k] = {x["code"]: x["name"] for x in getattr(self, k)}
+        self._board_of = {c: b["id"] for b in self.unit_boards for c in b["units"] if c}
+        if not self.agency_status_sets:          # a data file without them: assigned, responding, on location, cleared
+            self.agency_status_sets = {"default": "all", "boards": {}, "sets": {"all": {"statuses": tuple(
+                c for c in (self._first("dispatched"), self._first("enroute"), self._first("onscene"), self._first("free")) if c),
+                "labels": {}}}}
+
+    def _first(self, role: str) -> str:
+        return next((s["code"] for s in self.unit_statuses if s.get("role") == role and not s.get("retired")), "")
 
     # -- codes and names ----------------------------------------------------------------------------
 
@@ -244,21 +260,62 @@ class Lists:
         one inc commander"); '' when the list has no such status."""
         return COMMAND if COMMAND in self.status_ids else ""
 
+    # -- other agencies' units (#219) ----------------------------------------------------------------
+
+    def agency_set(self, code: str, board: str | None = None) -> str:
+        """The agency_status_sets set another agency's unit goes through ('' for ours): its board's, else the
+        default. board: where the units table has it (Settings may have moved it), else the data file's."""
+        if self.response(code) != "agency":
+            return ""
+        a = self.agency_status_sets
+        b = self._board_of.get(code, "") if board is None else board
+        s = a["boards"].get(b) or a["default"]
+        return s if s in a["sets"] else next(iter(a["sets"]))
+
+    def agency_codes(self, set_id: str) -> tuple[str, ...]:
+        """The set's statuses that are active now (one retired in Settings drops out)."""
+        sets = self.agency_status_sets["sets"]
+        live = set(self.status_ids)
+        return tuple(c for c in (sets.get(set_id) or {}).get("statuses", ()) if c in live)
+
+    def agency_attach_status(self, set_id: str) -> str:
+        """What Attach puts the unit on the event as: its set's first working status (Dispatched)."""
+        return next((c for c in self.agency_codes(set_id) if self.role(c) not in ("free", "oos")),
+                    self.status_for("dispatched"))
+
     def agency_statuses(self) -> tuple[str, ...]:
-        """Another agency's unit on an event (EMS, PD): on location, then cleared (the free status)."""
-        return tuple(self.status_for(r) for r in ("onscene", "free") if any(
-            s.get("role") == r and not s.get("retired") for s in self.unit_statuses))
+        """Every status some agency unit may be put in (the sets together, in status order)."""
+        every = {c for s in self.agency_status_sets["sets"] for c in self.agency_codes(s)}
+        return tuple(c for c in self.status_ids if c in every)
 
-    def next_statuses(self, status: str) -> tuple[str, ...]:
+    def unit_statuses_for(self, code: str, board: str | None = None) -> tuple[str, ...]:
+        """What the unit may be put in: ours every status, another agency's its set."""
+        s = self.agency_set(code, board)
+        return self.agency_codes(s) if s else self.status_ids
+
+    def label(self, status: str, code: str = "", board: str | None = None) -> str:
+        """The status's name, or its set's label for another agency's unit (KEYHOLDER: DP 'Notified')."""
+        s = self.agency_set(code, board) if code else ""
+        return (s and self.agency_status_sets["sets"][s].get("labels", {}).get(status)) or self.name("unit_statuses", status)
+
+    def next_statuses(self, status: str, code: str = "", board: str | None = None) -> tuple[str, ...]:
         """The buttons on a unit that is on an incident (status_flow): what can come next. Without a
-        flow in the data file: every status but the current one."""
+        flow in the data file: every status but the current one. Another agency's unit (code): the
+        flow's steps in its set, else the rest of its set."""
         if not self.status_flow:
-            return tuple(c for c in self.status_ids if c != status)
-        return tuple(c for c in self.status_flow.get(status, self.status_flow.get("*", ())) if c != status)
+            nxt = tuple(c for c in self.status_ids if c != status)
+        else:
+            nxt = tuple(c for c in self.status_flow.get(status, self.status_flow.get("*", ())) if c != status)
+        s = self.agency_set(code, board) if code else ""
+        if not s:
+            return nxt
+        mine = self.agency_codes(s)
+        return tuple(c for c in nxt if c in mine) or tuple(c for c in mine if c != status)
 
-    def status_phrase(self, status: str) -> str:
-        """'On location' -> 'on location' (for 'E63 on location')."""
-        n = self.name("unit_statuses", status)
+    def status_phrase(self, status: str, code: str = "", board: str | None = None) -> str:
+        """'On location' -> 'on location' (for 'E63 on location'); another agency's unit: its set's label
+        ('KEYHOLDER notified')."""
+        n = self.label(status, code, board)
         return n[:1].lower() + n[1:] if n[1:2].islower() or len(n) < 2 else n
 
     # -- units ------------------------------------------------------------------------------------
@@ -376,6 +433,10 @@ class Lists:
                 "received_via": [dict(x) for x in self.received_via], "event_class": self.event_class,
                 "unit_statuses": [dict(s) for s in self.unit_statuses], "event_statuses": self.event_statuses,
                 "agency_statuses": list(self.agency_statuses()), "command_status": self.command_status,
+                "agency_status_sets": {"default": self.agency_status_sets["default"],
+                                       "boards": dict(self.agency_status_sets["boards"]),
+                                       "sets": {k: {"statuses": list(self.agency_codes(k)), "labels": dict(v.get("labels", {}))}
+                                                for k, v in self.agency_status_sets["sets"].items()}},
                 "unit_event_cell": self.unit_event_cell, "unit_kinds": [dict(k) for k in self.unit_kinds],
                 "unit_boards": [dict(b, units=list(b["units"])) for b in self.unit_boards],
                 "spoken": self.spoken, "geo_town_order": list(self.geo_town_order),
@@ -641,6 +702,8 @@ def build(d: dict, where: str, path: str | Path = "") -> Lists:
     if not set(fr_kinds) <= kind_ids - attach_kinds:
         raise ListsError(f"{where}: dispatch_wording.full_response_kinds: fire apparatus ids from unit_kinds")
 
+    agency_sets = _agency_sets(d.get("agency_status_sets"), statuses, {b["id"] for b in boards}, where)
+
     joint = {}
     for town, j in (d.get("joint_response") or {}).items():
         if isinstance(j, list):
@@ -685,5 +748,40 @@ def build(d: dict, where: str, path: str | Path = "") -> Lists:
                  wording=dict(WORDING, **wording), already_statuses=already, joint_response=joint, full_response_kinds=fr_kinds,
                  status_flow=flow,
                  lead_in_joint_only={str(t): str(v) for t, v in only.items()}, dispatch_tones=tones,
-                 free_status=free_status, type_subtypes_partial=tsp,
+                 free_status=free_status, type_subtypes_partial=tsp, agency_status_sets=agency_sets,
                  path=str(path))
+
+
+def _agency_sets(v, statuses: tuple[dict, ...], board_ids: set[str], where: str) -> dict:
+    """agency_status_sets checked: {default, sets: {id: {statuses, labels}}, boards: {board: set}} ({} = none given)."""
+    if not v:
+        return {}
+    w = f"{where}: agency_status_sets"
+    if not isinstance(v, dict) or not isinstance(v.get("sets"), dict) or not v["sets"]:
+        raise ListsError(f"{w}: {{default, sets: {{id: {{statuses, labels}}}}, boards: {{board: set}}}}")
+    role = {s["code"]: s.get("role", "") for s in statuses}
+    sets = {}
+    for k, s in v["sets"].items():
+        if not isinstance(s, dict) or not isinstance(s.get("statuses"), list) or not s["statuses"]:
+            raise ListsError(f"{w}.sets[{k!r}]: {{statuses: [codes], labels?}}")
+        bad = [c for c in s["statuses"] if c not in role]
+        if bad:
+            raise ListsError(f"{w}.sets[{k!r}]: {', '.join(map(str, bad))} not in unit_statuses")
+        if len(set(s["statuses"])) != len(s["statuses"]):
+            raise ListsError(f"{w}.sets[{k!r}]: a status twice")
+        if role[s["statuses"][0]] in ("free", "oos"):
+            raise ListsError(f"{w}.sets[{k!r}]: the first status (what Attach sets) can't be free or out of service")
+        if not any(role[c] == "free" for c in s["statuses"]):
+            raise ListsError(f"{w}.sets[{k!r}]: needs a free status (to clear the unit)")
+        labels = s.get("labels") or {}
+        if not isinstance(labels, dict) or not all(c in s["statuses"] and isinstance(t, str) and 0 < len(t.strip()) <= 40
+                                                   for c, t in labels.items()):
+            raise ListsError(f"{w}.sets[{k!r}].labels: a status of the set -> its name there (text)")
+        sets[str(k)] = {"statuses": tuple(s["statuses"]), "labels": {c: t.strip() for c, t in labels.items()}}
+    default = v.get("default") or next(iter(sets))
+    if default not in sets:
+        raise ListsError(f"{w}.default: {default!r} is not one of the sets")
+    boards = v.get("boards") or {}
+    if not isinstance(boards, dict) or not all(b in board_ids and s in sets for b, s in boards.items()):
+        raise ListsError(f"{w}.boards: a unit_boards id -> one of the sets")
+    return {"default": default, "sets": sets, "boards": dict(boards)}

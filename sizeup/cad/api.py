@@ -104,11 +104,13 @@ POST /api/cad/incident/<id>/preview       {unit_ids, full?, remarks?} -> {text, 
 POST /api/cad/incident/<id>/dispatch      {unit_ids, operator, channel?, full?, remarks?} -> {dispatch_id, text, ...}
                                           remarks: said as "Reported: ..." (at most 500 characters)
 POST /api/cad/incident/<id>/upgrade       {type?, subtype?, info?, remarks?, unit_ids?, full?, operator, channel?, preview?}
-POST /api/cad/incident/<id>/attach        {unit_ids, operator?}  units on a non-emergency event, no dispatch
+POST /api/cad/incident/<id>/attach        {unit_ids, operator?}  units on a non-emergency event, no dispatch;
+                                          another agency's unit (any event): on it Dispatched (its set's first
+                                          status: a keyholder Notified), then its statuses (#219)
                                           {unit_ids, status: RS | OL | ET | IC, operator} -> {ok, moved, status}: on
                                           any open event in that status, not dispatched (no Disp time, no dispatch
                                           logged, nothing said); 400 for a unit already on it, out of service, or
-                                          another agency's (on location only); one on another call is moved (moved)
+                                          another agency's in a status not in its set; one on another call is moved
 POST /api/cad/unit/<id>/status            {status, operator?, note?}  IC (incident command): one unit per event,
                                           whoever held it there goes back to OL (command_from: [names])
 POST /api/cad/unit/<id>/station           {station, operator?}  home firehouse (data/firehouses.json name; '' unsets)

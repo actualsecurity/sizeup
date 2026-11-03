@@ -179,7 +179,8 @@ def test_the_tile_takes_its_color_from_the_status_and_keeps_the_board_as_it_was(
     cad = text("cad.js")
     body = cad[cad.index("function renderUnits() {"):cad.index("function renderUnitLog() {")]
     assert 'li.style.setProperty("--st", unitStatus(u.status).bg || "#9AA3AD");' in body
-    assert 'ust.append(statusChip(u.status), since(el("span", "ut"), u.status_at, true));' in body   # compact (#209)
+    assert ('ust.append(statusChip(u.status, agencySet(u) ? statusLabel(u, u.status) : undefined), '   # compact (#209),
+            'since(el("span", "ut"), u.status_at, true));') in body                    # an agency's own label (#219)
     assert 'head.append(el("span", "spacer"), ust);' in body
     assert 'el("span", "chip joint", j.tag)' in body                     # the RB tag
     assert 'statusButtons(u, "board")' in body and "cad.openUnit = cad.openUnit === id ? null : id;" in body
