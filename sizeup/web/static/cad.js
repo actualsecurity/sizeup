@@ -107,11 +107,27 @@ function fmtDur(s) {
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
   return h ? `${h}:${pad(m)}:${pad(sec)}` : `${pad(m)}:${pad(sec)}`;
 }
-function since(node, unix) {        // a ticking "elapsed" (tick() updates every [data-since])
+function fmtAge(s) {                // a unit's time in its status, compact (#209): "m:ss", then "h:mm", then "4d 6h"
+  if (s === null || s === undefined || !isFinite(s)) return "";
+  s = Math.max(0, Math.floor(s));
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+  return s < 3600 ? `${m}:${pad(s % 60)}` : s < 86400 ? `${h}:${pad(m)}` : `${Math.floor(h / 24)}d ${h % 24}h`;
+}
+function since(node, unix, age) {   // a ticking "elapsed" (tick() updates every [data-since]); age: fmtAge, exact on the title
   if (unix) node.dataset.since = String(unix);
   else delete node.dataset.since;
-  setText(node, unix ? fmtDur(serverNow() - unix) : "");
+  if (age) node.dataset.age = ""; else delete node.dataset.age;
+  if (!unix) { setText(node, ""); if (age) node.removeAttribute("title"); return node; }
+  sinceText(node, serverNow());
   return node;
+}
+function sinceText(node, now, hover) {  // the text only when it changes (past an hour, once a minute); the title with it
+  const at = Number(node.dataset.since), s = now - at;
+  if (!("age" in node.dataset)) return setText(node, fmtDur(s));
+  const t = fmtAge(s);
+  if (node.textContent === t && !hover) return;
+  setText(node, t);
+  node.title = `${fmtDur(s)} in this status, since ${fmtTime(at, true)}`;
 }
 // datetime-local <-> unix, in the station's time zone
 function toLocalInput(unix) {
@@ -417,7 +433,7 @@ function tick() {
   renderClock();
   renderConn();
   const now = serverNow();
-  for (const n of document.querySelectorAll("[data-since]")) setText(n, fmtDur(now - Number(n.dataset.since)));
+  for (const n of document.querySelectorAll("[data-since]")) sinceText(n, now);
 }
 
 // ---- incidents: queue --------------------------------------------------------------------
@@ -2736,7 +2752,7 @@ function renderUnits() {
           head.append(tb);
         }
         const ust = el("span", "ust");                                        // the status and its time: one piece (#205)
-        ust.append(statusChip(u.status), since(el("span", "ut"), u.status_at));
+        ust.append(statusChip(u.status), since(el("span", "ut"), u.status_at, true));   // compact, exact on hover (#209)
         head.append(el("span", "spacer"), ust);
         li.replaceChildren(head);
         const sub = [];
@@ -2746,7 +2762,7 @@ function renderUnits() {
           a.addEventListener("click", (e) => { e.preventDefault(); selectIncident(u.incident_id); });
           sub.push(a);
         }
-        if (oos && u.out_of_service) sub.push(el("span", "why", u.out_of_service));
+        if (oos && u.out_of_service) { const w = el("span", "why", u.out_of_service); w.title = u.out_of_service; sub.push(w); }
         if (sub.length) { const d = el("div", "usub"); d.append(...sub); li.append(d); }
         if (cad.openUnit === u.id) li.append(statusButtons(u, "board"));
       },
@@ -3381,6 +3397,10 @@ async function boot() {
   cad.live = liveState("/api/cad/stream", "/api/cad/state", onState);
   tick();
   setInterval(tick, 1000);
+  document.addEventListener("pointerover", (e) => {      // a unit's time: its title exact to the second when pointed at
+    const n = e.target instanceof Element && e.target.closest("[data-since][data-age]");
+    if (n) sinceText(n, serverNow(), true);
+  });
 }
 
 boot().catch((err) => {
