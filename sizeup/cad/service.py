@@ -233,6 +233,7 @@ class Cad:
         # (once, on first use); "N Main St / Westchester Ave" in the location box. None: not here.
         self.cross_source: Callable[[], object] | None = None
         self._cross_ix = None
+        self._cross_lock = threading.Lock()      # its own: the PlaceIndex is built with it (under _place_lock)
         self._details: dict[tuple, dict] = {}
         self._place_lock = threading.Lock()
         # The radios' side of Settings > Radios > Channels / Vocabulary (sizeup/channels.py): the app
@@ -1268,7 +1269,7 @@ class Cad:
     def crossings(self):
         """The IntersectionSearch (built on first use: cross_source), or None without a gazetteer."""
         if self._cross_ix is None and self.cross_source is not None:
-            with self._place_lock:
+            with self._cross_lock:
                 if self._cross_ix is None:
                     try:
                         self._cross_ix = self.cross_source()

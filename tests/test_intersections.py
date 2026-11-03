@@ -288,6 +288,15 @@ def test_the_location_box(tmp_path, gaz):
     assert "more" not in cad.geocode("King St @ Whole Foods Market")        # the place, not a street
 
 
+def test_the_place_search_built_with_the_intersection_search_does_not_wait_on_itself(tmp_path, gaz):
+    import threading
+    cad = wired(tmp_path, gaz)                    # place_source asks crossings(), as the app wires it
+    t = threading.Thread(target=cad.place_index, daemon=True)
+    t.start()
+    t.join(5)
+    assert not t.is_alive() and cad.place_index().crossings is cad.crossings()
+
+
 def test_at_most_25_in_the_box(tmp_path, gaz, monkeypatch):
     cad = wired(tmp_path, gaz)
     real = IntersectionSearch.search
