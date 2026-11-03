@@ -2366,25 +2366,31 @@ function addressBox(input, geoNote, list, opts = {}) {
       li.id = `${list.id}-${i}`;
       li.setAttribute("role", "option");
       li.setAttribute("aria-selected", String(i === box.idx));
+      const meet = m.kind === "intersection" && m.name && m.exact != null;   // two streets typed (#213): where they meet
       if (m.place) {                    // "Whole Foods Market · 575 Boston Post Rd" (the address from the data, or none)
         li.append(el("b", "", m.place));
         li.append(el("span", m.street_address ? "sg-addr" : "sg-addr dim", m.street_address ? `· ${m.street_address}` : "· no street address"));
-      } else li.append(el("b", "", m.label));
+      } else li.append(el("b", "", meet ? m.name : m.label));         // "N Main St & Westchester Ave" · its town
       if (m.town) li.append(el("span", "town" + (ours().includes(m.town) ? " ours" : ""), m.town));
-      li.append(el("span", "dim small", `${m.kind} ${Math.round(m.confidence * 100)}%`));
-      if (m.cross) li.append(el("span", "dim small sg-cross", `x ${m.cross}`));
+      li.append(el("span", "dim small", meet ? "intersection" : `${m.kind} ${Math.round(m.confidence * 100)}%`));
+      if (m.cross && !meet) li.append(el("span", "dim small sg-cross", `x ${m.cross}`));
       li.addEventListener("mousedown", (e) => { e.preventDefault(); box.take(m); });
       li.addEventListener("mouseenter", () => { if (box.idx !== i) { box.idx = i; mark(); } });
       return li;
     }));
     if (!ms.length) list.replaceChildren(el("li", "dim", box.error || "No match"));
-    else list.append(el("li", "hint dim small", "↑ ↓ to choose, Tab to take and go on, Esc to close"));
+    else {
+      if (box.more) list.append(el("li", "hint dim small", `more… ${box.more} more of ${box.total}: type more of a street name`));
+      list.append(el("li", "hint dim small", "↑ ↓ to choose, Tab to take and go on, Esc to close"));
+    }
     show(list, true);
     input.setAttribute("aria-expanded", "true");
     mark();
   };
   const mark = () => {
     [...list.children].forEach((li, i) => { li.classList.toggle("on", i === box.idx && i < box.items.length); li.setAttribute("aria-selected", String(i === box.idx)); });
+    const on = list.children[box.idx];
+    if (on && box.items.length && on.scrollIntoView) on.scrollIntoView({ block: "nearest" });   // a long list (#213) scrolls
     if (box.items.length) input.setAttribute("aria-activedescendant", `${list.id}-${box.idx}`);
     if (map()) map().candidates(box.items, box.idx);
   };
@@ -2397,6 +2403,8 @@ function addressBox(input, geoNote, list, opts = {}) {
       if (my !== box.seq) return;
       box.items = r.matches || [];
       box.error = r.error || "";
+      box.more = r.more || 0;
+      box.total = r.total || box.items.length;
       box.idx = 0;
       if (document.activeElement === input) draw(); else close();
     } catch (e) {

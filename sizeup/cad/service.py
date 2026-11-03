@@ -229,6 +229,10 @@ class Cad:
         # here_source(lat, lon, places) -> what is at a point on the map (what_is_here). None: not here.
         self.detail_source: Callable[[dict], dict] | None = None
         self.here_source: Callable[..., dict] | None = None
+        # The intersection search (#213, sizeup/geo/intersections.py): cross_source builds it over the same gazetteer
+        # (once, on first use); "N Main St / Westchester Ave" in the location box. None: not here.
+        self.cross_source: Callable[[], object] | None = None
+        self._cross_ix = None
         self._details: dict[tuple, dict] = {}
         self._place_lock = threading.Lock()
         # The radios' side of Settings > Radios > Channels / Vocabulary (sizeup/channels.py): the app
@@ -1228,6 +1232,9 @@ class Cad:
             raise CadError("q: 1 to 200 characters")
         if self.geocoder is None:
             return {"matches": [], "error": "geocoder unavailable"}
+        cross = self._crossings(q)
+        if cross is not None:
+            return cross
         ms = [m for m in self._ranked(q) if m["confidence"] >= 0.2]
         hits = self._place_hits(q, limit=8) if len(q) <= 120 else []
         highway = [self._as_match(h) for h in hits if h["kind"] in ("milemarker", "exit")]
@@ -1235,6 +1242,45 @@ class Cad:
         named = [self._as_match(h) for h in hits if h["kind"] == "place" and h["label"].lower() not in known]
         rest = sorted(ms + named, key=lambda m: -m["confidence"]) if named else ms
         return {"matches": [self._detailed(m) for m in (highway + rest)[:6]]}
+
+    def _crossings(self, q: str) -> dict | None:
+        """Two streets typed ("N Main St / Westchester Ave", "n main & west": #213): where they meet in our area,
+        ours first, at most LIMIT with how many more ({matches, total, more}); a side under two letters: the error
+        (what to type). None: not two streets, or nowhere they meet (the box's usual suggestions then)."""
+        ix = self.crossings()
+        if ix is None:
+            return None
+        try:
+            found = ix.search(q, is_place=self._names_place)
+        except Exception as e:                   # the usual suggestions, as before
+            self.log(f"CAD: intersection search failed ({type(e).__name__}: {e})")
+            return None
+        if found is None:
+            return None
+        if found.get("error"):
+            return {"matches": [], "error": found["error"]}
+        if not found["results"]:
+            return None
+        L = self.lists
+        ms = [self._detailed(dict(r, town=L.town_of(r["municipality"]))) for r in found["results"]]
+        return {"matches": ms, "total": found["total"], "more": found["more"]}
+
+    def crossings(self):
+        """The IntersectionSearch (built on first use: cross_source), or None without a gazetteer."""
+        if self._cross_ix is None and self.cross_source is not None:
+            with self._place_lock:
+                if self._cross_ix is None:
+                    try:
+                        self._cross_ix = self.cross_source()
+                    except Exception as e:           # no intersection search, everything else as before
+                        self.log(f"CAD: intersection search unavailable ({type(e).__name__}: {e})")
+                        self.cross_source = None
+        return self._cross_ix
+
+    def _names_place(self, text: str) -> bool:
+        """What follows an "@" names a place (a named place's whole name, or one of the department's own)."""
+        ix = self.place_index()
+        return bool(ix is not None and getattr(ix, "names_place", None) and ix.names_place(text, self.local_places()))
 
     def _detailed(self, m: dict) -> dict:
         """A suggestion with what the new call's form fills from it (#204): place (a named place's name),
@@ -1247,6 +1293,8 @@ class Cad:
             base["street_address"] = f"{m.get('house_number') or ''} {m.get('street') or ''}".strip()
         elif kind in ("landmark", "place"):
             base["street_address"] = (m.get("place_address") or "").strip()
+        elif kind == "intersection" and m.get("streets"):    # its two streets are the cross streets (#213)
+            base["cross"] = " and ".join(s for s in m["streets"] if s)
         if self.detail_source is not None and kind in ("address", "landmark", "place"):
             key = (kind, m.get("label"), m.get("lat"), m.get("lon"), m.get("place_address"), m.get("street"))
             got = self._details.get(key)

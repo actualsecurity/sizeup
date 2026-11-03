@@ -174,7 +174,7 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
       <div id="nc-body" class="nc-body">
         <div id="nc-fields" class="form nc-fields">
           <label class="field span2">Location
-            <input id="f-address" type="text" maxlength="200" placeholder="Address, place or intersection" spellcheck="false"
+            <input id="f-address" type="text" maxlength="200" placeholder="Address, place or intersection (e.g. N Main / Westchester)" spellcheck="false"
                    role="combobox" aria-autocomplete="list" aria-controls="f-sugg" aria-expanded="false">
           </label>
           <ol id="f-sugg" class="sugg span2" role="listbox" hidden></ol>
@@ -295,7 +295,8 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
         <form id="edit-form" class="form" hidden autocomplete="off">
           <label class="field">Type <select id="e-type"></select></label>
           <label class="field">Subtype <select id="e-subtype"></select></label>
-          <label class="field span2">Location <input id="e-address" type="text" maxlength="200" spellcheck="false"></label>
+          <label class="field span2">Location <input id="e-address" type="text" maxlength="200" spellcheck="false"
+                 placeholder="Address, place or intersection (e.g. N Main / Westchester)"></label>
           <div id="e-geo" class="geo span2"></div>
           <ol id="e-sugg" class="sugg span2" hidden></ol>
           <label class="field span2">Cross streets <input id="e-cross" type="text" maxlength="200" spellcheck="false"></label>

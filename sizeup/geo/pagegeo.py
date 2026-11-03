@@ -1027,7 +1027,7 @@ def what_is_here(gaz: Gazetteer, lat: float, lon: float, places: list[dict] = ()
             a, b, la, lo, muni = rows[k]
             na, nb = gaz.streets[a].name, gaz.streets[b].name
             out["intersection"] = {"kind": "intersection", "label": f"{na} & {nb}" + (f", {muni}" if muni else ""),
-                                   "lat": la, "lon": lo, "municipality": muni, "precision": "intersection",
+                                   "streets": [na, nb], "lat": la, "lon": lo, "municipality": muni, "precision": "intersection",
                                    "confidence": 1.0, "metres": round(float(d[k]))}
     best = None
     for p in places:
