@@ -189,7 +189,6 @@
   /* the 60 Control page the event came from: play (and its voice only) over the page's text */
   .d-pages { display: flex; flex-direction: column; gap: var(--s-1); margin-block-start: var(--s-3); }
   .d-page { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1) var(--s-2); min-inline-size: 0; }
-  .d-pages + .narr { margin-block-start: var(--s-1); }
   /* a page that isn't an event (#80): its note, and the row a step quieter than the events and the talk */
   .page-note { white-space: nowrap; }
   .rt.page-other, .rt.page-unknown, .rt.page-none { border-inline-start: var(--bw-mark) solid var(--line); }
@@ -244,10 +243,34 @@
   /* a page going out now, over the lists it will join (radio.js fillPaging) */
   .paging-live { margin-block-end: var(--s-2); }
   .feed > .paging-live { margin-block: var(--s-1) 0; }
-  .narr {
-    white-space: pre-wrap; font-size: var(--fs-sm); line-height: var(--lh-sm); color: var(--text-2); overflow-wrap: anywhere;
-    margin-block-start: var(--s-3); padding: var(--s-2) var(--s-3); background: var(--bg); border: var(--bw) solid var(--line); border-radius: var(--radius);
+  /* the comments box (#221), where the remarks sat: the dark box, now a list that scrolls on its own (about a third of
+     the details column: 0.6 of the map's height, ~220 px), the newest at the bottom, the field right under it */
+  .cmts { margin-block-start: var(--s-3); display: flex; flex-direction: column; gap: var(--s-1); min-inline-size: 0; }
+  .d-pages + .cmts { margin-block-start: var(--s-2); }
+  .cmts-head { display: flex; align-items: center; gap: var(--s-2); min-inline-size: 0; }
+  .cmts-title { font-size: var(--fs-sm); line-height: var(--lh-sm); font-weight: 600; color: var(--text-2); }
+  .cmts-seg button { min-block-size: var(--ctl-sm); padding-block: 0; font-size: var(--fs-xs); }
+  .cmts-wrap { position: relative; min-inline-size: 0; }
+  .cmts-list {
+    list-style: none; margin: 0; padding: var(--s-1) var(--s-3); max-block-size: calc(var(--map-h) * 0.6); overflow-y: auto;
+    overscroll-behavior: contain; background: var(--bg); border: var(--bw) solid var(--line); border-radius: var(--radius);
+    font-size: var(--fs-sm); line-height: var(--lh-sm);
   }
+  .cmts-list:focus-visible { outline-offset: calc(-1 * var(--focus-w)); }
+  .cmts-list > li { padding-block: var(--s-1); min-inline-size: 0; }
+  .cmts-list > li + li { border-block-start: var(--bw) solid var(--line); }
+  .cmts-list > li.empty { color: var(--dim); }
+  .cm .meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 var(--s-2); font-size: var(--fs-xs); line-height: var(--lh-xs); color: var(--dim); }
+  .cm .meta .t { font-variant-numeric: tabular-nums; }
+  .cm .txt { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); }
+  .cm.cm-remarks .txt { color: var(--text-2); font-weight: 600; }
+  .cm.cm-sys .txt { color: var(--text-2); }
+  .ek.remarks { color: var(--text-2); }
+  .cmts-new { position: absolute; inset-block-end: var(--s-2); inset-inline-end: var(--s-3); z-index: var(--z-raised); background: var(--raised); box-shadow: var(--elev-1); }
+  .cmts-new[hidden] { display: none; }
+  .note-form { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--s-1) var(--s-2); }
+  .note-form .note-box textarea { flex: 1; min-inline-size: 0; resize: vertical; min-block-size: var(--ctl); max-block-size: calc(var(--map-h) * 0.4);
+    font: inherit; line-height: var(--lh-sm); }
   .mapbox { position: relative; block-size: var(--dmap-h, var(--map-h)); border-radius: var(--radius); border: var(--bw) solid var(--line); }
   .mapbox > :is(#d-map, .nomap) { border-radius: calc(var(--radius) - var(--bw)); overflow: hidden; }   /* the map clips itself: the handles reach out */
   /* its drag handles (incident-map.js, #210): the left edge (wider, the details give way), the bottom edge (taller)

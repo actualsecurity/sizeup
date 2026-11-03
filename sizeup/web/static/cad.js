@@ -48,6 +48,7 @@ const cad = {
   listSig: "", rcEditing: null, openUnit: null,
   closedOpen: false,         // the queue's Closed 12h section unfolded (#89; remembered: closedFold)
   timelineOpen: false,       // the incident's Timeline unfolded (#107; remembered: timelineFold)
+  commentsAll: false,        // the comments box shows every Timeline entry too (#221; remembered: commentsAll)
   ask: null,                 // {uid, status, where}: asking why (out of service / unmanned)
   hooks: [],                 // more renderers (settings.js), called on every render
   txRev: 0,                  // bumped when a transmission row's own state changes (re-transcribe waiting): redraw them
@@ -639,9 +640,8 @@ function renderDetail() {
   const caller = [inc.caller_name, inc.phone, inc.caller_address].filter(Boolean).join(" / ");
   setText($("#d-caller"), caller ? `Caller: ${caller}` : "");
   renderAirport(inc, open);
-  setText($("#d-narr"), inc.remarks || "");
-  show($("#d-narr"), !!inc.remarks);
   renderSourcePages(inc);
+  renderComments(inc);
   renderMap(inc);
   renderOnUnits(inc);
   renderAddUnit(inc);
@@ -1505,8 +1505,25 @@ function timelineFold(open) {
   const inc = selected();
   if (inc) renderEvents(inc);
 }
+// An entry's text: a dispatch's play button, a note's unit tags (chips that show that unit's radio) and its "@places"
+// (chips that show the spot); the Timeline's and the comments box's.
+function eventTxt(inc, e) {
+  const txt = el("div", "txt");
+  const did = playForEvent(inc, e);
+  if (did) {
+    const b = Icon.play(el("button", "play mini"));
+    b.title = "Play";
+    playBtn(b, `/api/cad/dispatch/${did}.wav`);
+    txt.append(b);
+  }
+  if (e.kind === "note" && e.units) {
+    for (const u of tagsOf(e)) txt.append(unitChip(u), document.createTextNode(" "));
+    txt.append(...noteNodes(e, noteText(e)));
+  } else txt.append(...(e.kind === "note" ? noteNodes(e, e.text) : [document.createTextNode(e.text)]));
+  return txt;
+}
 function renderEvents(inc) {
-  // Folded to start: the count and the latest entry in the header, the list hidden; the note box below stays (#107)
+  // Folded to start: the count and the latest entry in the header, the list hidden; comments are typed up top (#221)
   const events = inc.events || [], last = events[events.length - 1], open = cad.timelineOpen;
   $("#d-timeline").classList.toggle("open", open);
   $("#d-events-toggle").setAttribute("aria-expanded", String(open));
@@ -1522,22 +1539,74 @@ function renderEvents(inc) {
       const meta = el("div", "meta");
       meta.append(el("span", "t", fmtTime(e.at, true)), el("span", `ek ${e.kind}`, EVENT_KINDS[e.kind] || e.kind));
       if (e.operator) meta.append(opSpan(e.operator));
-      const txt = el("div", "txt");
-      const did = playForEvent(inc, e);
-      if (did) {
-        const b = Icon.play(el("button", "play mini"));
-        b.title = "Play";
-        playBtn(b, `/api/cad/dispatch/${did}.wav`);
-        txt.append(b);
-      }
-      if (e.kind === "note" && e.units) {
-        for (const u of tagsOf(e)) txt.append(unitChip(u), document.createTextNode(" "));
-        txt.append(...noteNodes(e, noteText(e)));
-      } else txt.append(...(e.kind === "note" ? noteNodes(e, e.text) : [document.createTextNode(e.text)]));
-      li.replaceChildren(meta, txt);
+      li.replaceChildren(meta, eventTxt(inc, e));
     },
     empty: "None",
   });
+}
+
+// ---- the comments box (#221) ------------------------------------------------------------------
+// Dispatcher, 2026-11: "move timeline up higher to see all the comments. Like where it says Zone 1 - General at the
+// top ... scroll down in a box there with a typing area". Under the caller line: the event's remarks first (the
+// call-taker's, or the 60 Control page's: who took it, at the call's time), then every comment (kind "note": typed
+// here, or tagged with a unit, "E63 stated that ...") in time order, the newest at the bottom, each with its time
+// (the console's zone), who and the text. "Everything" mixes in the Timeline's other entries (statuses, dispatches,
+// system); the Timeline below stays as it was. Nothing new by the second (#146): the rows are synced on the state
+// push like the Timeline's, and the box scrolls only when they change.
+const CMTS_SLACK = 24;          // px from the bottom that still counts as "at the newest"
+function commentsAll(on) {      // the "Comments / Everything" choice, remembered per browser like the Timeline's fold
+  if (on === undefined) return store("sizeup.cad.commentsAll") === "1";
+  cad.commentsAll = on;
+  store("sizeup.cad.commentsAll", on ? "1" : "0");
+  const inc = selected();
+  if (inc) renderComments(inc);
+}
+function commentItems(inc, all) {
+  const events = inc.events || [];
+  const made = events.find((e) => e.kind === "created" || e.kind === "accepted");
+  const who = (made && made.operator) || (inc.source && inc.source !== "manual" ? inc.source : "");
+  const first = inc.remarks ? [{ id: "remarks", kind: "remarks", at: inc.created_at, operator: who, text: inc.remarks }] : [];
+  return [...first, ...events.filter((e) => all || e.kind === "note")];
+}
+const cmtsAtEnd = (box) => box.scrollHeight - box.scrollTop - box.clientHeight <= CMTS_SLACK;
+// After the rows change: follow the newest (a new event or choice starts there, and so does a box the reader left at
+// the bottom), else stay where the reader scrolled up to and say something came in (true: show "New").
+function cmtsFollow(box, fresh, grew) {
+  if (fresh) box._follow = true;
+  if (box._follow !== false) {
+    if (!cmtsAtEnd(box)) box.scrollTop = box.scrollHeight;
+    return false;
+  }
+  return grew;
+}
+function renderComments(inc) {
+  const list = $("#d-cmts-list"), all = cad.commentsAll, items = commentItems(inc, all);
+  const n = items.filter((e) => e.kind === "note").length;
+  setText($("#d-cmts-n"), n ? `· ${n}` : "");
+  $("#d-cmts-only").setAttribute("aria-pressed", String(!all));
+  $("#d-cmts-all").setAttribute("aria-pressed", String(all));
+  const view = `${inc.id}|${all}`, last = items.length ? String(items[items.length - 1].id) : "";
+  const fresh = list._view !== view, grew = !fresh && last !== list._last;
+  list._view = view;
+  list._last = last;
+  syncList(list, items, {
+    key: (e) => String(e.id),
+    sig: (e) => `${e.id}|${e.units || ""}|${e.kind === "remarks" ? `${e.text}|${e.operator}` : ""}`,
+    make: (e) => el("li", `cm${e.kind === "remarks" ? " cm-remarks" : e.kind === "note" ? "" : " cm-sys"}`),
+    fill: (li, e) => {
+      const meta = el("div", "meta");
+      meta.append(el("span", "t", fmtTime(e.at, true)));
+      if (e.kind !== "note") meta.append(el("span", `ek ${e.kind}`, e.kind === "remarks" ? "remarks" : EVENT_KINDS[e.kind] || e.kind));
+      if (e.operator) meta.append(opSpan(e.operator));
+      li.replaceChildren(meta, e.kind === "remarks" ? el("div", "txt", e.text) : eventTxt(inc, e));
+    },
+    empty: all ? "Nothing yet" : "No comments yet",
+  });
+  if (cmtsFollow(list, fresh, grew)) show($("#d-cmts-new"), true);
+  else if (fresh || list._follow !== false) show($("#d-cmts-new"), false);
+  const ph = canDo("dispatch") ? "Comment: Enter adds, Shift+Enter a new line  (@E63 tags a unit, @ a place)"
+    : "View only: comments need a dispatcher";
+  if ($("#note-text").placeholder !== ph) $("#note-text").placeholder = ph;
 }
 
 const DISPATCH_KINDS = { dispatch: "dispatch", "add-on": "add-on", upgrade: "upgrade" };
@@ -3185,7 +3254,8 @@ $("#note-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const inc = selected(), input = $("#note-text");
   if (!inc || !input.value.trim()) return;
-  try {
+  $("#d-cmts-list")._follow = true;                // your own comment: to the newest, wherever the box was (before the
+  try {                                            // answer: the state push with it may come first)
     const units = noteUnits(input.value), places = notePlaces(input.value);
     await api("POST", `/api/cad/incident/${inc.id}/note`, Object.assign({ text: input.value.trim(), operator: operator() },
                                                                        units.length ? { units } : {}, places.length ? { places } : {}));
@@ -3198,6 +3268,27 @@ $("#note-form").addEventListener("submit", async (e) => {
 });
 $("#note-text").addEventListener("input", () => { syncNoteTags(); suggestNote(); });
 $("#note-text").addEventListener("keydown", noteKeys);
+// Enter adds the comment, Shift+Enter is a new line; an open @ pick list takes Enter first (noteKeys), and so does
+// an IME composing a character
+$("#note-text").addEventListener("keydown", (e) => {
+  if (e.key !== "Enter" || e.shiftKey || e.isComposing || e.defaultPrevented) return;
+  e.preventDefault();
+  $("#note-form").requestSubmit();
+});
+$("#d-cmts-list").addEventListener("scroll", () => {          // the reader's place: following the newest or not
+  const list = $("#d-cmts-list");
+  if (!list.clientHeight) return;                            // hidden (another view): not the reader's doing
+  list._follow = cmtsAtEnd(list);
+  if (list._follow) show($("#d-cmts-new"), false);
+}, { passive: true });
+$("#d-cmts-new").addEventListener("click", () => {
+  const list = $("#d-cmts-list");
+  list._follow = true;
+  list.scrollTop = list.scrollHeight;
+  show($("#d-cmts-new"), false);
+});
+$("#d-cmts-only").addEventListener("click", () => commentsAll(false));
+$("#d-cmts-all").addEventListener("click", () => commentsAll(true));
 $("#note-text").addEventListener("blur", () => setTimeout(hideSugg, 150));
 $("#note-text").addEventListener("click", suggestNote);
 $("#runcards-open").addEventListener("click", openRunCards);
@@ -3401,6 +3492,7 @@ async function boot() {
   await loadWho();
   cad.closedOpen = closedFold();
   cad.timelineOpen = timelineFold();
+  cad.commentsAll = commentsAll();
   route();
   cad.live = liveState("/api/cad/stream", "/api/cad/state", onState);
   tick();
