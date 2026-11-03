@@ -21,14 +21,36 @@ ArcGIS REST query API, f=geojson, paged with resultOffset (never more than the s
 maxRecordCount a page), clipped to the layer's bbox (the county is big; our area is small), the
 geometry rounded to 6 decimals and simplified (Douglas-Peucker, simplify_m metres) and only the
 configured fields kept; the result is cached on disk (state dir, gis/<key>.geojson) so a restart
-fetches nothing, and fetched again on the layer's schedule (daily / weekly / monthly) with a backoff
-after a failure (5 min doubling to 6 h). A User-Agent names sizeup. The browser never talks to the
-county: it gets everything from the hub.
+fetches nothing, and looked at again on the layer's schedule (daily / weekly / monthly; Settings >
+Data sources runs it, sizeup/datasources.py) with a backoff after a failure (5 min doubling to 6 h).
+A User-Agent names sizeup. The browser never talks to the county: it gets everything from the hub.
+
+Only what changed (#229). A scheduled look at a layer we hold reads its description first (<layer>?f=json):
+  unchanged    the layer's editingInfo (dataLastEditDate, else lastEditDate) is the one recorded with our
+               copy: nothing is downloaded; the look is recorded (checked, "unchanged"), `at` stays when the
+               data was fetched.
+  incremental  the layer has editor tracking (editFieldsInfo.editDateField, or a date field named like one:
+               EDIT_FIELDS) and object ids: only the features edited since our copy's newest edit (less
+               EDIT_SLACK_MS, for the service's time zone; paged as fetch_features does) and the ids now in our
+               box (returnIdsOnly) are read; edits replace ours by id, ids gone are deleted, and each one is
+               tidied, marked _ours or left out (drop_ours) as a full download would. An id there that we have
+               no copy of (or left out) means our copy drifted: a full download instead. The service refusing
+               the query (an ArcGIS error) is a full download too; a network error keeps the old copy.
+  full         anything else: no copy yet, no editingInfo (all the county's own MapServer layers, surveyed
+               2026-11-03; only the NYS DOH layers on ArcGIS Online have a lastEditDate, none editor
+               tracking), a full re-check every FULL_EVERY_S (drift), or Refresh now (refresh(full=True)).
+No count-only / id-hash check for the layers without editingInfo: ids and a count catch features added or
+removed, not a hydrant moved or a parcel's new owner, so they could only ever say "changed", never
+"unchanged"; those layers are fetched whole on their schedule, as before.
+The copies survive a new hub task: sizeup/cachesync.py keeps them (and gis/checks.json: when each layer was
+last looked at, and how) in the S3 backups bucket and puts them back before the hub serves.
 
 HTTP (sizeup/web/server.py; any signed-in person, viewers too; GET only):
     GET /api/cad/gis                 the catalog: {configured, source, attribution, link, rev, layers: [{key, label,
                                      group, kind, style, minzoom, fields, on, refresh, tiled, at, n, bytes, error,
-                                     updated, licence, page}]}
+                                     updated, licence, page, checked, how, loading}]}  (at: the data's fetch;
+                                     checked: the last look; how: unchanged | incremental | full; loading: no
+                                     data yet and no error: the Layers box says "loading")
     GET /api/cad/gis/<key>           the layer as GeoJSON (gzip when accepted; ETag / If-None-Match -> 304)
     GET /api/cad/gis/<key>?bbox=w,s,e,n   only the features touching that box: how a tiled layer (the parcels:
                                      too big to send whole) is served, the browser asking for its viewport
@@ -79,6 +101,10 @@ MAX_FEATURES = 250_000              # a runaway layer stops here
 TILE_MAX_DEG = 0.25                 # a bbox query at most this many degrees a side (zoom 13 on a wide screen)
 TILE_TTL_S = 60.0
 LAYER_TTL_S = 300.0
+FULL_EVERY_S = 90 * 86400.0         # a layer read incrementally (or found unchanged) is downloaded whole this often
+EDIT_SLACK_MS = 36 * 3600 * 1000    # an incremental read asks for edits from this long before our newest (time zones)
+EDIT_FIELDS = ("last_edited_date", "editdate", "edit_date", "last_edit_date", "lastedited", "date_modified")
+HOW = ("unchanged", "incremental", "full")
 KINDS = ("point", "line", "polygon")
 KEY_RE = re.compile(r"[a-z][a-z0-9_]{0,31}")
 LAYER_PATH = re.compile(r"/api/cad/gis/([a-z][a-z0-9_]{0,31})")
@@ -515,20 +541,33 @@ def layer_info(fetch: Callable, url: str) -> dict:
     caps = str(doc.get("capabilities", ""))
     if "Query" not in caps:
         raise ValueError(f"the layer doesn't allow queries (capabilities: {caps or 'none'})")
-    edit = (doc.get("editingInfo") or {}).get("lastEditDate")
+    ei = doc.get("editingInfo") or {}
+    edit = ei.get("dataLastEditDate") or ei.get("lastEditDate")       # the data's (not a schema change's), else the layer's
+    edit = int(edit) if isinstance(edit, (int, float)) and not isinstance(edit, bool) and edit > 0 else None
+    fields = [f for f in doc.get("fields") or [] if isinstance(f, dict)]
+    names = [str(f.get("name", "")) for f in fields]
+    dates = [str(f.get("name", "")) for f in fields if f.get("type") == "esriFieldTypeDate"]
+    edit_field = str((doc.get("editFieldsInfo") or {}).get("editDateField") or "")
+    if edit_field not in names:
+        edit_field = next((n for n in dates if n.lower() in EDIT_FIELDS), "")
+    oid = str(doc.get("objectIdField") or next((f.get("name") for f in fields if f.get("type") == "esriFieldTypeOID"), "") or "")
     return {"name": str(doc.get("name", ""))[:120], "kind": GEOM_KIND.get(str(doc.get("geometryType", "")), ""),
-            "max": int(doc.get("maxRecordCount") or PAGE), "updated": float(edit) / 1000.0 if edit else None,
-            "fields": [str(f.get("name", "")) for f in doc.get("fields") or [] if isinstance(f, dict)],
-            "copyright": str(doc.get("copyrightText", ""))[:300]}
+            "max": int(doc.get("maxRecordCount") or PAGE), "updated": edit / 1000.0 if edit else None, "edit": edit,
+            "edit_field": edit_field, "oid": oid, "fields": names, "copyright": str(doc.get("copyrightText", ""))[:300]}
 
 
-def fetch_features(fetch: Callable, layer: Layer, bbox, page: int = PAGE) -> list[dict]:
+def fetch_features(fetch: Callable, layer: Layer, bbox, page: int = PAGE, where: str | None = None,
+                   extra: tuple[str, ...] = ()) -> list[dict]:
     """Every feature of the layer in the box, page by page (resultOffset), until the service says there
-    are no more (no exceededTransferLimit and a short page)."""
+    are no more (no exceededTransferLimit and a short page). where: instead of the layer's (an incremental
+    read); extra: fields asked for besides the shown ones (the edit date)."""
     fields = tuple(f for f, _ in layer.fields)
+    if fields:
+        fields += tuple(x for x in extra if x and x not in fields)
     out, offset = [], 0
     while True:
-        code, _, body = fetch(query_url(layer.url, bbox, layer.where, fields, offset, page), TIMEOUT_S, MAX_PAGE_BYTES)
+        code, _, body = fetch(query_url(layer.url, bbox, layer.where if where is None else where, fields, offset, page),
+                              TIMEOUT_S, MAX_PAGE_BYTES)
         if code != 200:
             raise HTTPError(layer.url, code, f"HTTP {code}", None, None)
         doc = _json(body)
@@ -538,6 +577,35 @@ def fetch_features(fetch: Callable, layer: Layer, bbox, page: int = PAGE) -> lis
         if not feats or (not more and len(feats) < page) or len(out) >= MAX_FEATURES:
             return out
         offset += len(feats)
+
+
+def fetch_ids(fetch: Callable, layer: Layer, bbox) -> set:
+    """The object ids of every feature of the layer in the box (returnIdsOnly: not limited by the service's
+    maxRecordCount). ValueError when the answer has none (an incremental read can't tell what was deleted)."""
+    params = [("f", "json"), ("where", layer.where or "1=1"), ("returnIdsOnly", "true")]
+    if bbox:
+        w, s, e, n = bbox
+        params += [("geometry", f"{w},{s},{e},{n}"), ("geometryType", "esriGeometryEnvelope"), ("inSR", "4326"),
+                   ("spatialRel", "esriSpatialRelIntersects")]
+    code, _, body = fetch(f"{layer.url}/query?{urlencode(params)}", TIMEOUT_S, MAX_PAGE_BYTES)
+    if code != 200:
+        raise HTTPError(layer.url, code, f"HTTP {code}", None, None)
+    doc = _json(body)
+    if doc.get("exceededTransferLimit") or "objectIds" not in doc:
+        raise ValueError("the service gave no complete list of object ids")
+    ids = doc.get("objectIds") or []                      # null: nothing in the box
+    if not isinstance(ids, list):
+        raise ValueError("object ids: not a list")
+    return set(ids)
+
+
+def arcgis_time(ms: int) -> str:
+    """An ArcGIS standardized-query timestamp literal (UTC) for epoch milliseconds."""
+    return "TIMESTAMP '" + time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(max(0, ms) / 1000.0)) + "'"
+
+
+class Drift(Exception):
+    """An incremental read found our copy can't be brought up to date by merging: download it whole."""
 
 
 def tidy_feature(f: dict, layer: Layer) -> dict | None:
@@ -573,8 +641,14 @@ class Gis:
         self._lock = threading.Lock()
         self.data: dict[str, list[dict]] = {k: [] for k in self.layers}
         self._boxes: dict[str, list] = {k: [] for k in self.layers}
+        # at: when the data we hold was fetched (whole or incrementally); checked: when the county was last asked
+        # (an unchanged layer moves only that); how: what that look did (HOW); full_at: the last whole download
         self.status: dict[str, dict] = {k: {"at": None, "n": 0, "bytes": 0, "error": "", "next": 0.0, "fails": 0,
-                                            "updated": None, "kind": "", "rev": 0} for k in self.layers}
+                                            "updated": None, "kind": "", "rev": 0, "checked": None, "how": "",
+                                            "full_at": None} for k in self.layers}
+        self.meta: dict[str, dict] = {k: {} for k in self.layers}   # what our copy was fetched with (the file's "sizeup")
+        # a cache file written (sizeup/cachesync.py looks at the files itself; a hook for whoever wants to know)
+        self.saved: Callable[[Path], None] = lambda p: None
         self.rev = 0
         self._bytes: dict[str, tuple[int, bytes, bytes]] = {}     # key -> (rev, json, gzip) of the whole layer
         self._stop = threading.Event()
@@ -689,30 +763,32 @@ class Gis:
         now = self.clock()
         return [k for k in self.layers if self.configured and now >= self.status[k]["next"]]
 
-    def refresh(self, key: str) -> bool:
-        """Fetch one layer now; True when it was read. Never raises."""
+    def refresh(self, key: str, full: bool = False) -> bool:
+        """Look at one layer now (the module doc's "only what changed"); True when our copy is current
+        (unchanged, or read). full: download it whole whatever the county says (Refresh now). Never raises."""
         layer = self.layers.get(key)
         if layer is None or not self.enabled:
             return False
         st, now = self.status[key], self.clock()
         try:
             info = layer_info(self.fetch, layer.url)
-            raw = fetch_features(self.fetch, layer, self.layer_bbox(layer), min(PAGE, max(1, info["max"])))
-            feats, seen = [], set()
-            for f in raw:
-                t = tidy_feature(f, layer)
-                if t is None:
-                    continue
-                if self.is_ours(layer, t["properties"]):
-                    if layer.drop_ours:
-                        continue
-                    t["properties"]["_ours"] = True
-                fid = t.get("id")
-                if fid is not None:
-                    if fid in seen:
-                        continue
-                    seen.add(fid)
-                feats.append(t)
+            meta = dict(self.meta.get(key) or {})
+            have = st["at"] is not None and meta.get("signature") == self._signature(layer)
+            stale = not isinstance(meta.get("full_at"), (int, float)) or now - meta["full_at"] >= FULL_EVERY_S
+            if have and not full and not stale and info["edit"] is not None and meta.get("edit") == info["edit"]:
+                return self._unchanged(key, now, info)
+            got = None
+            if have and not full and not stale and self._incremental_ok(meta, info):
+                try:
+                    got = self._incremental(key, layer, info, meta)
+                except Drift as e:
+                    self.log(f"gis: {key}: incremental read not used ({e}); downloading it whole")
+                except ValueError as e:            # the service refused the query (an ArcGIS error): whole
+                    self.log(f"gis: {key}: incremental read refused ({e}); downloading it whole")
+            how = "incremental" if got is not None else "full"
+            if got is None:
+                got = self._full(key, layer, info)
+            feats, skipped, edit_max, changes = got
             boxes = [geometry_bbox(f["geometry"]) for f in feats]
             body = json.dumps({"type": "FeatureCollection", "features": feats}, separators=(",", ":")).encode()
         except HTTPError as e:
@@ -721,16 +797,123 @@ class Gis:
             return self._failed(key, now, f"{type(e).__name__}: {getattr(e, 'reason', e)}")
         except Exception as e:  # a surprise in one layer must not stop the others
             return self._failed(key, now, f"{type(e).__name__}: {e}")
+        meta = {"signature": self._signature(layer), "edit": info["edit"], "edit_field": info["edit_field"], "edit_max": edit_max,
+                "full_at": now if how == "full" else meta.get("full_at"), "skipped": sorted(skipped, key=str), "how": how}
         with self._lock:
             self.data[key], self._boxes[key] = feats, boxes
             st.update(at=now, n=len(feats), bytes=len(body), error="", fails=0, next=now + layer.every_s,
-                      updated=info["updated"], kind=info["kind"] or st["kind"])
+                      updated=info["updated"], kind=info["kind"] or st["kind"], checked=now, how=how, full_at=meta["full_at"])
+            self.meta[key] = meta
             self._changed(key)
         self._save(key, feats, info)
+        self._save_checks()
         gz = len(gzip.compress(body, 6))
-        self.log(f"gis: {key}: {len(feats)} features, {len(body) / 1e6:.2f} MB ({gz / 1e6:.2f} MB gzip), "
-                 f"next in {layer.every_s / 3600:.0f} h")
+        self.log(f"gis: {key}: {len(feats)} features ({how}{f': {changes}' if how == 'incremental' else ''}), "
+                 f"{len(body) / 1e6:.2f} MB ({gz / 1e6:.2f} MB gzip), next in {layer.every_s / 3600:.0f} h")
         return True
+
+    def _unchanged(self, key: str, now: float, info: dict) -> bool:
+        layer, st = self.layers[key], self.status[key]
+        with self._lock:
+            changed = bool(st["error"])
+            st.update(checked=now, how="unchanged", error="", fails=0, next=now + layer.every_s,
+                      updated=info["updated"], kind=info["kind"] or st["kind"])
+            if changed:
+                self.rev += 1
+        self._save_checks()
+        self.log(f"gis: {key}: unchanged since {time.strftime('%Y-%m-%d', time.gmtime(info['edit'] / 1000))} "
+                 f"(the county's last edit); nothing downloaded, next look in {layer.every_s / 3600:.0f} h")
+        return True
+
+    @staticmethod
+    def _incremental_ok(meta: dict, info: dict) -> bool:
+        """Our copy can be brought up to date by edit date: the layer has editor tracking (the same field as when
+        we read it) and our copy knows its newest edit and every feature's id."""
+        return (bool(info["edit_field"]) and meta.get("edit_field") == info["edit_field"]
+                and isinstance(meta.get("edit_max"), (int, float)) and isinstance(meta.get("skipped"), list))
+
+    def _keep(self, layer: Layer, raw: dict) -> dict | None:
+        """A fetched feature as we keep it (tidied, marked _ours), None when it is left out."""
+        t = tidy_feature(raw, layer)
+        if t is None:
+            return None
+        if self.is_ours(layer, t["properties"]):
+            if layer.drop_ours:
+                return None
+            t["properties"]["_ours"] = True
+        return t
+
+    @staticmethod
+    def _edit_of(raw: dict, field_: str) -> int | None:
+        v = (raw.get("properties") or {}).get(field_) if field_ else None
+        return int(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+    def _full(self, key: str, layer: Layer, info: dict) -> tuple[list, set, int | None, str]:
+        """The whole layer: (features, the ids left out, the newest edit, "")."""
+        ef = info["edit_field"]
+        raw = fetch_features(self.fetch, layer, self.layer_bbox(layer), min(PAGE, max(1, info["max"])), extra=(ef,))
+        feats, seen, skipped, edit_max = [], set(), set(), None
+        for f in raw:
+            e = self._edit_of(f, ef)
+            if e is not None:
+                edit_max = e if edit_max is None else max(edit_max, e)
+            fid = f.get("id")
+            t = self._keep(layer, f)
+            if t is None:
+                if fid is not None:
+                    skipped.add(fid)
+                continue
+            if fid is not None:
+                if fid in seen:
+                    continue
+                seen.add(fid)
+            feats.append(t)
+        if ef and (edit_max is None or any(f.get("id") is None for f in raw)):
+            edit_max = None                         # no edit dates or no ids: never incremental (whole each time)
+        return feats, skipped - seen, edit_max, ""
+
+    def _incremental(self, key: str, layer: Layer, info: dict, meta: dict) -> tuple[list, set, int | None, str]:
+        """Only what changed since our copy (the module doc). Drift: merging can't make it right."""
+        ef, bbox = info["edit_field"], self.layer_bbox(layer)
+        since = int(meta["edit_max"]) - EDIT_SLACK_MS
+        where = f"({layer.where or '1=1'}) AND {ef} >= {arcgis_time(since)}"
+        raw = fetch_features(self.fetch, layer, bbox, min(PAGE, max(1, info["max"])), where=where, extra=(ef,))
+        ids = fetch_ids(self.fetch, layer, bbox)
+        with self._lock:
+            cur = list(self.data[key])
+        by_id: dict = {}
+        for f in cur:
+            if f.get("id") is None:
+                raise Drift("a feature of ours has no id")
+            by_id[f["id"]] = f
+        skipped = set(meta.get("skipped") or [])
+        edit_max, edited, added = int(meta["edit_max"]), 0, 0
+        for f in raw:
+            fid = f.get("id")
+            if fid is None:
+                raise Drift("an edited feature has no id")
+            e = self._edit_of(f, ef)
+            if e is not None:
+                edit_max = max(edit_max, e)
+            t = self._keep(layer, f)
+            if t is None:
+                by_id.pop(fid, None)
+                skipped.add(fid)
+                continue
+            skipped.discard(fid)
+            if fid in by_id:
+                edited += 1
+            else:
+                added += 1
+            by_id[fid] = t                          # an edit stays where it was; a new one goes last
+        gone = [i for i in by_id if i not in ids]
+        for i in gone:
+            del by_id[i]
+        skipped &= ids
+        missing = ids - by_id.keys() - skipped
+        if missing:
+            raise Drift(f"{len(missing)} feature(s) in the county's layer that we have no copy of")
+        return list(by_id.values()), skipped, edit_max, f"{edited} edited, {added} new, {len(gone)} deleted"
 
     def _failed(self, key: str, now: float, why: str) -> bool:
         st = self.status[key]
@@ -762,6 +945,9 @@ class Gis:
     def _path(self, key: str) -> Path | None:
         return (self.cache_dir / f"{key}.geojson") if self.cache_dir else None
 
+    def _checks_path(self) -> Path | None:
+        return (self.cache_dir / "checks.json") if self.cache_dir else None
+
     def _load(self) -> None:
         for key, layer in self.layers.items():
             p = self._path(key)
@@ -778,28 +964,71 @@ class Gis:
                     continue
                 self.data[key] = feats
                 self._boxes[key] = [geometry_bbox(f["geometry"]) for f in feats]
+                full_at = meta.get("full_at", at)         # (a copy from before #229: whole)
                 self.status[key].update(at=at, n=len(feats), next=at + layer.every_s, updated=meta.get("updated"),
-                                        kind=meta.get("kind", ""), bytes=meta.get("bytes", 0))
+                                        kind=meta.get("kind", ""), bytes=meta.get("bytes", 0), checked=at,
+                                        how=str(meta.get("how") or "full"), full_at=full_at)
+                self.meta[key] = {k: meta.get(k) for k in ("signature", "edit", "edit_field", "edit_max", "skipped", "how")} | {
+                    "full_at": full_at}
+                if "edit" not in meta and isinstance(meta.get("updated"), (int, float)):   # a copy from before #229: its date
+                    self.meta[key]["edit"] = round(meta["updated"] * 1000)
                 self._changed(key)
             except (OSError, ValueError, TypeError, AttributeError, KeyError) as e:
                 self.log(f"gis: cache {p.name} not read ({type(e).__name__}); fetching afresh")
+        # the looks since (an unchanged layer's: its data file isn't written again for one)
+        p = self._checks_path()
+        if p is None or not p.is_file():
+            return
+        try:
+            doc = json.loads(p.read_text())
+            now = self.clock()
+            for key, c in (doc.get("layers") or {}).items():
+                st = self.status.get(key)
+                if st is None or st["at"] is None or not isinstance(c, dict):
+                    continue
+                t = c.get("checked")
+                if isinstance(t, (int, float)) and st["at"] <= t <= now + 60 and c.get("how") in HOW:
+                    st.update(checked=t, how=c["how"], next=t + self.layers[key].every_s)
+        except (OSError, ValueError, TypeError, AttributeError) as e:
+            self.log(f"gis: {p.name} not read ({type(e).__name__})")
+
+    def _write(self, p: Path, doc: dict) -> None:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps(doc, separators=(",", ":")))
+        tmp.replace(p)
+        try:
+            self.saved(p)
+        except Exception as e:  # whoever listens: never this layer's trouble
+            self.log(f"gis: saved hook: {type(e).__name__}: {e}")
 
     def _save(self, key: str, feats: list[dict], info: dict) -> None:
         p = self._path(key)
         if p is None:
             return
-        st = self.status[key]
+        st, meta = self.status[key], self.meta[key]
         doc = {"type": "FeatureCollection", "features": feats,
                "sizeup": {"source": SOURCE, "at": st["at"], "signature": self._signature(self.layers[key]),
                           "updated": info.get("updated"), "kind": info.get("kind", ""), "name": info.get("name", ""),
-                          "bytes": st["bytes"]}}
+                          "bytes": st["bytes"], "edit": meta.get("edit"), "edit_field": meta.get("edit_field", ""),
+                          "edit_max": meta.get("edit_max"), "skipped": meta.get("skipped") or [],
+                          "full_at": meta.get("full_at"), "how": meta.get("how", "full")}}
         try:
-            p.parent.mkdir(parents=True, exist_ok=True)
-            tmp = p.with_suffix(".tmp")
-            tmp.write_text(json.dumps(doc, separators=(",", ":")))
-            tmp.replace(p)
+            self._write(p, doc)
         except OSError as e:
             self.log(f"gis: cache {p.name} not saved ({type(e).__name__}: {e})")
+
+    def _save_checks(self) -> None:
+        p = self._checks_path()
+        if p is None:
+            return
+        with self._lock:
+            doc = {"layers": {k: {"checked": st["checked"], "how": st["how"]} for k, st in self.status.items()
+                              if st["checked"] is not None and st["how"]}}
+        try:
+            self._write(p, doc)
+        except OSError as e:
+            self.log(f"gis: {p.name} not saved ({type(e).__name__}: {e})")
 
     # -- what the pages get -----------------------------------------------------------------------------------
 
@@ -810,7 +1039,9 @@ class Gis:
             for key, layer in self.layers.items():
                 st = self.status[key]
                 layers.append(layer.public() | {"kind": self.kind(key), "at": st["at"], "n": st["n"], "bytes": st["bytes"],
-                                                "error": st["error"], "updated": st["updated"], "rev": st["rev"]})
+                                                "error": st["error"], "updated": st["updated"], "rev": st["rev"],
+                                                "checked": st["checked"], "how": st["how"],
+                                                "loading": self.configured and st["at"] is None and not st["error"]})
             return {"configured": self.configured, "source": SOURCE, "attribution": ATTRIBUTION, "link": LINK_URL,
                     "terms": TERMS_URL, "rev": self.rev, "bbox": list(self.bbox), "layers": layers}
 

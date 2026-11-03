@@ -169,3 +169,16 @@ def _aircraft_stays_local(monkeypatch):
         assert host in ("127.0.0.1", "localhost", "::1"), f"a test tried to reach {host} (aircraft: fixtures only)"
         return real(req, *a, **kw)
     monkeypatch.setattr(aircraft, "urlopen", local_only)
+
+
+@pytest.fixture(autouse=True)
+def _cache_copies_stay_local(monkeypatch):
+    """The map caches' S3 copies (sizeup/cachesync.py) are off in tests (no bucket from the environment), and the
+    real S3 call refuses: a test hands in its own fake S3."""
+    import sizeup.cachesync as cachesync
+    for k in ("LITESTREAM_BUCKET", "LITESTREAM_PATH", "LITESTREAM_REGION", "SIZEUP_CACHE_S3"):
+        monkeypatch.delenv(k, raising=False)
+
+    def refuse(method, url, *a, **kw):
+        raise AssertionError(f"a test tried to reach S3 ({method} {url.split('?')[0]}): fakes only")
+    monkeypatch.setattr(cachesync, "_send", refuse)

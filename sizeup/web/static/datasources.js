@@ -1,8 +1,9 @@
 // Settings > Data sources (GitHub #186, sizeup/datasources.py): every data pull the hub keeps (the county GIS layers,
 // the camera lists and highway feeds, Metro-North, weather, aircraft and the FAA registry, the airport layer, the tone
-// list), each with when it was last fetched, when it is due next, its status and size, how often it is refreshed
-// (an admin picks it for the slow ones; the rest keep the provider's own) and Refresh now (admins; rate-limited by
-// the hub). GET /api/cad/datasources is polled only while this section is on screen (every POLL_MS, every RUN_MS
+// list), each with when it was last fetched (a county GIS layer also when it was last checked, and whether that found
+// it unchanged or downloaded only the changes or the whole layer: #229), when it is due next, its status and size,
+// how often it is refreshed (an admin picks it for the slow ones; the rest keep the provider's own) and Refresh now
+// (admins; rate-limited by the hub). GET /api/cad/datasources is polled only while this section is on screen (every POLL_MS, every RUN_MS
 // while a refresh runs): nothing goes in the state push. Self-contained: settings.js mounts it (sRender).
 const DataSourcesPanel = (() => {
   const POLL_MS = 15000, RUN_MS = 2000;
@@ -80,6 +81,16 @@ const DataSourcesPanel = (() => {
     return td;
   }
 
+  // A county GIS layer (#229): the last look at the county, when later than the download, and what it did.
+  const HOW = { unchanged: "unchanged", incremental: "only the changes downloaded", full: "downloaded whole" };
+  function howLine(s, now) {
+    const later = s.checked && (!s.last_fetched || s.checked - s.last_fetched >= 1);
+    const d = el("div", "dim small", (later ? `checked ${ago(s.checked, now)}: ` : "") + (HOW[s.how] || s.how));
+    d.title = (s.last_fetched ? `Downloaded ${fmtTime(s.last_fetched, true)}` : "Not downloaded")
+      + (s.checked ? `; checked ${fmtTime(s.checked, true)}` : "");
+    return d;
+  }
+
   function row(s, now) {
     const tr = el("tr", ["ds-row", s.running ? "run" : "", s.key === opts.focus ? "ds-focus" : ""].filter(Boolean).join(" "));
     tr.dataset.key = s.key;
@@ -101,6 +112,7 @@ const DataSourcesPanel = (() => {
     nextTd.append(next);
     const lastTd = el("td");
     lastTd.append(when(s.last_fetched, now));
+    if (s.how) lastTd.append(howLine(s, now));
     tr.append(name, lastTd, nextTd, statusCell(s, now), el("td", "ds-size", size(s)), scheduleCell(s), actionCell(s));
     return tr;
   }
