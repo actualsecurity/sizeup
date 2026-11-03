@@ -450,10 +450,13 @@ def roadwork_source(rw) -> Source:
         fs = on()
         ats = [f.status["at"] for f in fs if isinstance(f.status["at"], (int, float))]
         err = "; ".join(f"{f.short}: {f.status['error']}" for f in fs if f.status["error"])
+        stuck = rw.reader_problem()                 # the provider's own loop not running (#225): said first
+        if stuck:
+            err = f"Road projects: {stuck}; nothing is being read" + (f"; {err}" if err else "")
         nxt = [f.status["next"] for f in fs]
         looked = rw.clock() - rw.asked <= r.DEMAND_S
         return {"at": max(ats) if ats else None, "error": err, "n": len(rw.items()) + len(rw.notices()),
-                "next": min(nxt) if nxt and looked else None,
+                "next": min(nxt) if nxt and looked and not stuck else None,
                 "note": f"{len(ats)} of {len(fs)} sources read; the Thruway's and 511NY's roadwork come with their events"}
 
     def refresh() -> bool:

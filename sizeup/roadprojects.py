@@ -998,6 +998,8 @@ class RoadProjects:
         self._wake = threading.Event()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._started = False                     # start() ran (a reader that is on and not alive then: it died)
+        self.loop_error = ""                      # the reader's last surprise outside refresh (kept on, #225)
         self._out: tuple | None = None
         self._load()
 
@@ -1023,8 +1025,9 @@ class RoadProjects:
         for f in self.feeds:
             if not f.on:
                 self.log(f"roadwork: {f.short} off ({f.why()})")
-        if not any(f.on for f in self.feeds) or (self._thread is not None and self._thread.is_alive()):
+        if not any(f.on for f in self.feeds) or self.running:
             return self
+        self._started = True
         self._stop.clear()
         self._thread = threading.Thread(target=self._run, name="roadwork", daemon=True)
         self._thread.start()
@@ -1036,16 +1039,44 @@ class RoadProjects:
         self._stop.set()
         self._wake.set()
 
+    @property
+    def running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    def reader_problem(self) -> str:
+        """Why the sources this module reads aren't being read, for the layer panel and Settings > Data sources:
+        "" while the reader runs (or nothing is on to read). Never started: said once someone looks (the layer
+        asks), as on the hub before #225; a provider nobody serves has nothing to say."""
+        if not self.enabled or not any(f.on for f in self.feeds):
+            return ""
+        if not self.running:
+            if self._started:
+                return "the reader stopped" + (f" ({self.loop_error})" if self.loop_error else "")
+            return "the reader isn't running" if self.asked and self.clock() - self.asked <= DEMAND_S else ""
+        return f"the reader's last pass failed ({self.loop_error})" if self.loop_error else ""
+
     def _run(self) -> None:
         while not self._stop.is_set():
-            self.tick()
+            try:
+                self.tick()
+                self.loop_error = ""
+            except Exception as e:  # never the end of the reader: logged, tried again on the next pass
+                self.loop_error = f"{type(e).__name__}: {e}"[:200]
+                self.log(f"roadwork: reader error ({self.loop_error}); trying again in 30 s")
             self._wake.wait(30.0)
             self._wake.clear()
+
+    def _max_wait(self, f: Feed) -> float:
+        """The longest a source ever waits: its interval, or the longest backoff."""
+        return max(f.every_s, BACKOFF_S[1], REFUSED_S, RATE_LIMITED_S)
 
     def due(self) -> list[Feed]:
         now = self.clock()
         if now - self.asked > DEMAND_S:
             return []
+        for f in self.feeds:                                     # a "next" no schedule could set (a clock step): now
+            if not isinstance(f.status["next"], (int, float)) or f.status["next"] > now + self._max_wait(f) + 60:
+                f.status["next"] = 0.0
         return [f for f in self.feeds if f.on and now >= f.status["next"]]
 
     def tick(self) -> int:
@@ -1059,7 +1090,7 @@ class RoadProjects:
     def ask(self) -> None:
         """Someone looks (the layer, an incident view): keep the sources coming; a source never read is read now."""
         self.asked = self.clock()
-        if any(f.on and f.status["at"] is None and self.clock() >= f.status["next"] for f in self.feeds):
+        if any(f.on and f.status["at"] is None and self.asked >= f.status["next"] for f in self.feeds):
             self._wake.set()
 
     def refresh(self, f: Feed) -> bool:
@@ -1171,22 +1202,24 @@ class RoadProjects:
                 if not isinstance(at, (int, float)) or at > now + 60 or not isinstance(c.get("items"), list):
                     continue
                 f.items, f.notices = c["items"], list(c.get("notices") or [])
-                f.status.update(at=at, n=len(f.items) + len(f.notices), next=at + f.every_s,
+                # never further off than one interval from now, whatever the file's clock said
+                f.status.update(at=at, n=len(f.items) + len(f.notices), next=min(at + f.every_s, now + f.every_s),
                                 etag=str(c.get("etag") or ""), modified=str(c.get("modified") or ""))
-        except (OSError, ValueError, TypeError, AttributeError) as e:
+        except Exception as e:  # a bad cache is never the end of the reader: read afresh
             self.log(f"roadwork: cache {self.cache.name} not read ({type(e).__name__}); reading afresh")
 
     def _save(self) -> None:
+        """Never raises: a cache not written is logged, the items stay in memory."""
         if not self.cache:
             return
-        doc = {"feeds": {f.name: {"at": f.status["at"], "items": f.items, "notices": f.notices, "etag": f.status["etag"],
-                                  "modified": f.status["modified"]} for f in self.feeds}}
         try:
+            doc = {"feeds": {f.name: {"at": f.status["at"], "items": f.items, "notices": f.notices,
+                                      "etag": f.status["etag"], "modified": f.status["modified"]} for f in self.feeds}}
             self.cache.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.cache.with_suffix(".tmp")
-            tmp.write_text(json.dumps(doc, separators=(",", ":")))
+            tmp.write_text(json.dumps(doc, separators=(",", ":"), default=str))
             tmp.replace(self.cache)
-        except OSError as e:
+        except Exception as e:  # a full disk, a read-only state dir, something that won't serialize
             self.log(f"roadwork: cache not saved ({type(e).__name__}: {e})")
 
     # -- what the pages get ------------------------------------------------------------------------------------------
@@ -1253,7 +1286,8 @@ class RoadProjects:
         return [n for f in self.feeds for n in f.notices]
 
     def sources(self) -> list[dict]:
-        return self._roads_sources() + [f.public() for f in self.feeds]
+        why = self.reader_problem()
+        return self._roads_sources() + [f.public() | ({"reader": why} if why and f.on else {}) for f in self.feeds]
 
     def public(self, now: float | None = None) -> dict:
         now = self.clock() if now is None else now
@@ -1264,7 +1298,7 @@ class RoadProjects:
                 continue                                          # ended
             items.append(r | {"windows": w, "state": state(w, now)})
         return {"configured": self.configured, "note": self.why_not(), "tz": TZ_NAME, "at": now,
-                "sources": self.sources(), "items": items,
+                "reader": self.reader_problem(), "sources": self.sources(), "items": items,
                 "notices": [n | {"windows": windows(n, now)} for n in self.notices()]}
 
     def near(self, lat: float, lon: float, address: str = "", t0: float | None = None, t1: float | None = None) -> dict:

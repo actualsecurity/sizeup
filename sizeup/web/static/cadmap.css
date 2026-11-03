@@ -139,7 +139,7 @@
   .rw-key-work { background: var(--warn); }
   .rw-key-next { background: none; border-block-start: var(--bw-mark) dashed var(--info); }      /* upcoming: dashed, as on the map */
   .rw-source a { color: var(--text-2); }
-  .rw-source.rw-err { color: var(--warn); }
+  .rw-source.rw-err, .rw-reader { color: var(--warn); }
   .rw-notices .rw-notice { padding-block: var(--s-0); font-size: var(--fs-xs); line-height: var(--lh-xs); overflow-wrap: anywhere; }
   .rw-notice a { color: var(--text); }
   .rw-group .ml-fold { margin-block-start: var(--s-1); }

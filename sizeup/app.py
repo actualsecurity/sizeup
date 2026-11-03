@@ -2371,14 +2371,28 @@ class App:
         self._started = True
         self.prealert_sync()
         if self.cfg.cloud_role != "station":   # the station page has no maps: don't spend 511NY calls there
-            self.roads.start()
-            self.roadwork.start()
-            self.gis.start()
-            self.trains.start()
-            self.aircraft.start()
-            self.weather.start()
-            self.datasources.start()
+            self.start_layers()
         return self
+
+    def start_layers(self) -> None:
+        """The maps' data: one list for the all-in-one app and the hub (sizeup/cloud/hub.py HubApp), so
+        neither can miss one (#225: the hub never started the road projects reader)."""
+        self.roads.start()                        # 511NY's and the Thruway's layers (sizeup/roads.py)
+        self.roadwork.start()                     # road projects & closures (sizeup/roadprojects.py)
+        self.gis.start()                          # the county GIS layers (sizeup/gis.py)
+        self.trains.start()                       # Metro-North's trains (sizeup/trains.py)
+        self.aircraft.start()                     # aircraft near HPN, while someone looks (sizeup/aircraft.py)
+        self.weather.start()                      # NWS alerts, conditions, radar; NOAA tides (sizeup/weather.py)
+        self.datasources.start()                  # the slow pulls' schedule, Settings > Data sources
+
+    def stop_layers(self) -> None:
+        self.roads.stop()
+        self.roadwork.stop()
+        self.gis.stop()
+        self.trains.stop()
+        self.aircraft.stop()
+        self.weather.stop()
+        self.datasources.stop()
 
     def forwarding(self) -> bool:
         """This app sends what it hears to a hub, which is then the CAD of record."""
@@ -2428,13 +2442,7 @@ class App:
             self.link.stop()
         if self.prealert is not None:
             self.prealert.stop()
-        self.roads.stop()
-        self.roadwork.stop()
-        self.gis.stop()
-        self.trains.stop()
-        self.aircraft.stop()
-        self.weather.stop()
-        self.datasources.stop()
+        self.stop_layers()
 
     def _weather_voice(self, text: str) -> tuple[str | None, str]:
         """A weather warning said by the dispatch voice, no tones (sizeup/weather.py Weather.speech): (its

@@ -306,15 +306,18 @@ window.RoadProjects = (() => {
       sw("rw-key-work", `lanes / work now`);
       sw("rw-key-next", `upcoming`);
       box.append(h("div", "ml-note", `${nAct} in effect now, ${nNext} upcoming${f === "all" ? "" : f === "today" ? " today" : " this week"}.`), legend);
+      if (d.reader) box.append(h("div", "ml-note rw-reader", `Road projects: ${d.reader}, so the sources below aren't being read. Settings > Data sources has the details.`));
       for (const s of d.sources || []) {
         const line = h("div", "ml-note rw-source");
         const a = h("a", "", s.label);
         a.href = s.link;
         a.target = "_blank";
         a.rel = "noopener";
-        const what = !s.on ? `: ${s.why || "off"}` : s.error ? `: ${s.error}` : s.at ? `, updated ${dayClock(s.at)} (${s.n})` : ", waiting for the first read";
+        // s.reader: this hub's reader isn't reading it (#225), said rather than "waiting" forever
+        const what = !s.on ? `: ${s.why || "off"}` : s.error ? `: ${s.error}` : s.at ? `, updated ${dayClock(s.at)} (${s.n})${s.reader ? ", not being read now" : ""}`
+          : s.reader ? `: not being read (${s.reader})` : ", waiting for the first read";
         line.append(a, what);
-        if (s.on && s.error) line.classList.add("rw-err");
+        if (s.on && (s.error || s.reader)) line.classList.add("rw-err");
         box.append(line);
       }
       const unplaced = d.notices || [];
