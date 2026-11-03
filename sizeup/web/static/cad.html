@@ -425,9 +425,11 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
   <aside class="units">
     <!-- the wall board: the phone pre-alert (prealert.js) above the 60 Control feed, read-only -->
     <ol id="b-prealert" class="pa-list board-only" hidden aria-live="assertive" aria-label="Phone pre-alerts"></ol>
+    <!-- the 60 Control feed (cad-feed.js): on the Overview and Radio, not on Dispatch (#205: the rigs, big) -->
     <div id="feed" hidden></div>
     <!-- fireground (FG1, FG2) radio IDs nobody has named (radio-ids.js, #163): who is this? Under the radio, above the
-         units it names (#177: with the units and the radio, not in the incident queue); hidden while there is nothing to ask -->
+         units it names (#177: with the units and the radio, not in the incident queue); on Dispatch, with no feed, the
+         top of the column above the rigs (#205); hidden while there is nothing to ask -->
     <section id="newids" class="nid-sec console-only" hidden>
       <h2 title="Radio IDs heard on a fireground channel (FG1, FG2) that the registry doesn't know: say who each is (nothing is guessed)">New radio IDs</h2>
       <ol id="q-newids" class="nid-list" aria-live="polite" aria-label="New radio IDs"></ol>

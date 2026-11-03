@@ -2,8 +2,13 @@
 // the last transmissions on the county's incident talkgroup(s), newest first, so the desk always
 // sees what 60 Control said, even when it was talking to the internal dispatcher.
 //
-//   CadFeed.mount(box, deps)   once; deps: {state, radioRow, time, rev (cad.txRev: rows' own state)}
+//   CadFeed.mount(box, deps)   once; deps: {state, radioRow, time, rev (cad.txRev: rows' own state), off (true: not
+//                              shown here, the Dispatch view: #205)}
 //   CadFeed.render()           on every state push and selection change (cheap when nothing changed)
+//
+// On Dispatch (#205: "on the dispatch page we just want to show the rigs in big on the right and their statuses") the
+// panel is hidden and nothing in it is drawn: no rows, no head, no paging line; the Overview and Radio keep it. Its
+// toasts still go (a page not ours that names our units, the talk alerts): they are alerts, not the panel.
 //
 // A row "talking to us" (pc: a phrase from the data file, a PCFD / Rye Brook unit, or 60 Control's
 // turn next to one) gets the accent border and a "PC" badge, and a toast when the talk alerts are on.
@@ -77,8 +82,10 @@ window.CadFeed = (() => {
     if (!st.box) return;
     const s = st.deps.state();
     const f = s && s.feed;
-    st.box.hidden = !f;
+    const off = !!(st.deps.off && st.deps.off());
+    st.box.hidden = !f || off;
     if (!f) return;
+    if (off) { alertNew(f.rows || []); return; }       // Dispatch: not drawn; the toasts still go
     renderHead(f, (s && s.talking) || []);
     if (window.Radio) Radio.fillPaging(st.paging, s.paging, null);
     const rows = f.rows || [];

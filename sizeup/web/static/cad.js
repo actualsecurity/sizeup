@@ -241,10 +241,11 @@ function unitStatus(code) {
 function roleOf(code) {
   return unitStatus(code).role || "";
 }
-function statusChip(code, text) {   // the old outline chip, in the data file's status color
+function statusChip(code, text) {   // the old outline chip, in the data file's status color (filled on Dispatch's rigs, #205)
   const st = unitStatus(code);
   const c = el("span", "chip st", text ?? st.name);
   c.style.setProperty("--c", st.bg || "#9AA3AD");
+  if (st.fg) c.style.setProperty("--fg", st.fg);
   c.title = st.code === (text ?? st.name) ? st.code : `${st.code}: ${st.name}`;
   return c;
 }
@@ -388,9 +389,14 @@ function route() {                    // #radio?filters: the Radio view; anythin
     if (radio && window.innerWidth <= 1100) $("#detail").scrollIntoView({ block: "start" });   // stacked: under the queue
   }
 }
-function renderTabs() {
+function viewTab() {                 // the view on screen: dispatch | overview | radio | settings
   const settings = !$("#settings").hidden || !$("#styleguide").hidden;
-  const tab = settings ? "settings" : cad.radio ? "radio" : cad.mode === "none" ? "overview" : "dispatch";
+  return settings ? "settings" : cad.radio ? "radio" : cad.mode === "none" ? "overview" : "dispatch";
+}
+function renderTabs() {
+  const tab = viewTab();
+  // body[data-view]: Dispatch drops the 60 Control feed and shows the rigs big (#205); the board has no tabs
+  if (!BOARD && document.body.dataset.view !== tab) document.body.dataset.view = tab;
   for (const [id, k] of [["#dispatch-open", "dispatch"], ["#overview-open", "overview"], ["#radio-open", "radio"], ["#settings-open", "settings"]]) {
     const b = $(id);
     b.classList.toggle("on", tab === k);
@@ -2597,6 +2603,7 @@ function renderUnits() {
         const talk = Radio.talkingFor(u.name);
         li.className = "urow item" + (cad.openUnit === u.id ? " open" : "") + (oos ? " oos" : "")
           + (talk ? (talk.ended ? " talked" : " talking") : "");
+        li.style.setProperty("--st", unitStatus(u.status).bg || "#9AA3AD");     // Dispatch's rig tile: its status edge (#205)
         const head = el("div", "uh");
         const name = el("b", "un", u.name);
         name.title = [u.title, u.spoken && u.spoken !== u.name ? `said "${u.spoken}"` : "", u.department, u.spare ? "spare" : ""]
@@ -2616,7 +2623,9 @@ function renderUnits() {
           tb.title = [talk.radio_id ? `Radio ${talk.radio_id}` : "", talk.label || talk.alias || ""].filter(Boolean).join(", ");
           head.append(tb);
         }
-        head.append(el("span", "spacer"), statusChip(u.status), since(el("span", "dim small ut"), u.status_at));
+        const ust = el("span", "ust");                                        // the status and its time: one piece (#205)
+        ust.append(statusChip(u.status), since(el("span", "ut"), u.status_at));
+        head.append(el("span", "spacer"), ust);
         li.replaceChildren(head);
         const sub = [];
         if (u.incident_number) {
@@ -3035,7 +3044,8 @@ $("#dispatch-open").addEventListener("click", openDispatch);
 window.addEventListener("hashchange", route);
 if (BOARD) setText($("#page-title"), "Monitor");
 Radio.mountAlerts($("#alerts"));
-CadFeed.mount($("#feed"), { state: () => cad.state, radioRow, time: (u) => fmtTime(u, true), rev: () => cad.txRev });
+CadFeed.mount($("#feed"), { state: () => cad.state, radioRow, time: (u) => fmtTime(u, true), rev: () => cad.txRev,
+                            off: () => !BOARD && viewTab() === "dispatch" });     // Dispatch: no feed, the rigs (#205)
 cad.hooks.push(CadFeed.render);
 $("#rc-form").addEventListener("submit", saveCard);
 $("#rc-type").addEventListener("change", () => {
