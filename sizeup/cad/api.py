@@ -152,7 +152,9 @@ POST /api/cad/datasources/<key>/refresh   {operator?}  Refresh now: runs in the 
                                           activity and the Settings audit log
 GET  /api/cad/notify                      Settings > System > Push notifications (sizeup/notify.py Pushes): each kind's
                                           topic in effect and where it came from (Settings / SSM / config / off), the
-                                          last push and test; admins only (the names are secret)
+                                          last push and test; admins only (the names are secret; ADMIN_READS)
+GET  /api/cad/health                      the hub only, served by server.py: Settings > Health (sizeup/cloud/health.py);
+                                          admins only (ADMIN_READS, #203: nobody else sees station health)
 POST /api/cad/settings/notify             {action: set {key: alerts | status, topic ("" = the default)} | off {key} |
                                           reset {key} | server {value} | test {key}}: admins; audited without the names
 POST /api/cad/settings/datasources        {action: set, key, value: off | hourly | daily | weekly | monthly} | {action:
@@ -189,6 +191,12 @@ ALARM_ACK = re.compile(r"/api/cad/alarm/(\d{1,9})/ack")
 ALARM_CLEAR = re.compile(r"/api/cad/alarm/(\d{1,9})/clear")
 DATASOURCE = re.compile(r"/api/cad/datasources/([A-Za-z0-9_.:%-]{1,200})/refresh")
 DS_READERS = ("admin", "dispatcher")      # who may see Settings > Data sources (#186)
+# The GETs only an admin may read (with a verified sign-in, like WRITES): path -> why, in the 403. The rest of the
+# GETs are anyone signed in's (Data sources: DS_READERS). server.py asks the same for the ones it serves itself.
+ADMIN_READS = {
+    "/api/cad/notify": "the push topics' names are secret",                  # Settings > System > Push notifications
+    "/api/cad/health": "station health is for admins (Settings > Health)",   # #203: off the header, on an admin tab
+}
 
 # Who may POST what (enforced only with a verified sign-in, see above): "dispatch" = dispatchers and
 # admins (running calls), "admin" = admins only (Settings in every form, and the radios), "read" =
@@ -494,10 +502,22 @@ class CadApi:
             return _json(200, {"rev": out["rev"], "same": True})
         return _json(200, out)
 
+    def read_refused(self, path: str, who) -> tuple[int, bytes, str] | None:
+        """A GET in ADMIN_READS from someone signed in who isn't an admin: the 403; else None (nothing is checked
+        without a verified person, as with the POSTs)."""
+        why = ADMIN_READS.get(path)
+        if why is None or who is None or not who.email:
+            return None
+        try:
+            if self.cad.settings.standing(who.email)["may"] == "admin":
+                return None
+        except CadError:
+            pass
+        return _json(403, {"error": f"Admins only: {why}"})
+
     def _notify(self, who) -> tuple[int, bytes, str]:
-        """GET /api/cad/notify: Settings > System > Push notifications, admins only (a topic's name is its only secret)."""
-        if who is not None and who.email and self.cad.settings.standing(who.email)["may"] != "admin":
-            return _json(403, {"error": "Admins only: the push topics' names are secret"})
+        """GET /api/cad/notify: Settings > System > Push notifications, admins only (ADMIN_READS: a topic's name is its
+        only secret)."""
         p = getattr(self.cad, "pushes", None)
         return _json(200, {"configured": False} if p is None else {"configured": True, **p.page()})
 
@@ -516,6 +536,8 @@ class CadApi:
         return {"ok": True, "running": row["running"], "source": row}
 
     def get(self, path: str, query: str, who=None) -> tuple[int, bytes, str]:
+        if (no := self.read_refused(path, who)) is not None:
+            return no
         try:
             if path == "/api/cad/datasources":
                 return self._datasources(parse_qs(query), who)

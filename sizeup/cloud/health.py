@@ -37,14 +37,14 @@ While the station is silent (or before it first reports) the other conditions ke
 nothing starts or clears on old data. Per-channel silence (nothing heard for much longer than that channel
 usually goes, from its own gaps between transmissions) is a hint in the panel, never an alert.
 
-Each alert is logged once when it starts and once when it clears, shown as a banner on /cad and /monitor
-(the CAD state's cloud.alerts, static/health.js), and pushed to the status topic ([alerts] status_topic, else
-ntfy_topic: sizeup/notify.py route()): at most one push per condition per repeat_min (15), plus its recovery (only for an episode that was pushed).
+Each alert is logged once when it starts and once when it clears, shown to admins on Settings > Health
+(GET /api/cad/health, static/health.js; never in the state push nor as a banner, #203), and pushed to the
+status topic ([alerts] status_topic, else ntfy_topic: sizeup/notify.py route()): at most one push per condition per repeat_min (15), plus its recovery (only for an episode that was pushed).
 Alerts and 24 h of their history are kept in hub.sqlite (meta "health"), so a redeploy neither forgets nor
 repeats them.
 
-    GET /api/cad/health        the panel (Settings > System > Station health): the model, the alerts, the
-                               history, the thresholds; anyone signed in (Cloudflare Access on the hub)
+    GET /api/cad/health        the panel (Settings > Health): the model, the alerts, the history, the
+                               thresholds; admins only (sizeup/cad/api.py ADMIN_READS, #203)
     GET /api/station/status    the deploy check (tools/deploy_check.py): the hub's build, the station's, its
                                update state and last update line, the alerts. Read only: the station token
                                or the status token (status_token()), which can do nothing else
@@ -544,7 +544,7 @@ class StationHealth:
                     "severity": "warning", "title": f"{c['label']} stuck open",
                     "text": f"{c['label']} squelch open without a break since {_hhmm(now - float(c['open_s'] or 0))}: "
                             "likely noise holding it (check the squelch, the antenna)",
-                    "since": now - float(c["open_s"] or 0)}      # (no running duration in the text: the banner counts)
+                    "since": now - float(c["open_s"] or 0)}      # (no running duration in the text: the panel counts)
         ob = m["outbox"]
         if ob["pending"] and ob["age_s"] is not None and ob["age_s"] >= self.outbox_s:
             out["outbox"] = {"severity": "warning", "title": "Station's events backing up",
@@ -644,6 +644,7 @@ class StationHealth:
         n = self.notifier
         if n is None or not n.enabled:
             return
+        # (the old address, kept so the pushes are as they were: settings.js opens Settings > Health from it, #203)
         click = f"{self.public_url}/cad#settings/system/health" if self.public_url else ""
         who = a.get("who") or None
         if recovered:
@@ -669,7 +670,7 @@ class StationHealth:
     # -- what people and CI read ------------------------------------------------------------------------------------
 
     def alerts(self) -> list[dict]:
-        """The active alerts, worst first then oldest: the banner (the CAD state's cloud.alerts)."""
+        """The active alerts, worst first then oldest (Settings > Health, the deploy check)."""
         with self._lock:
             out = [dict({k: a[k] for k in ("key", "severity", "title", "text", "since")}, who=a.get("who") or {})
                    for a in self.active.values()]
@@ -681,8 +682,9 @@ class StationHealth:
             hist = sorted(self.history, key=lambda h: -(h.get("cleared") or 0))
             hist = [h for h in hist if (h.get("cleared") or now) >= now - HISTORY_S]
             pushed = dict(self.last_push)
+            pushed_now = {k for k, a in self.active.items() if a.get("pushed")}     # this episode reached the topic
         n = self.notifier
-        return {"health": self.model(now), "alerts": self.alerts(),
+        return {"health": self.model(now), "alerts": [dict(a, pushed=a["key"] in pushed_now) for a in self.alerts()],
                 "history": [{k: h.get(k) for k in ("key", "severity", "title", "text", "since", "cleared", "pushed", "who")}
                             for h in hist],
                 "notify": {"on": bool(n is not None and n.enabled),

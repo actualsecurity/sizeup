@@ -1,11 +1,9 @@
-/* Station health (GitHub #79, health.js): the alert banner under the header on /cad and /monitor, and the
-   Settings > System > Station health card. Layout and composition on the tokens only (style.css). */
+/* Station health (GitHub #79, health.js): Settings > Health, the admins' tab (#203; no banner under the header).
+   Layout and composition on the tokens only (style.css). */
 
 @layer views {
 
-  /* ---- the banner: one row per alert, worst first, stacked ------------------------------------------- */
-  /* in the shared box under the header (cad.html #alert-banners, cad.css), above the NWS alerts (#132) */
-  .health-banner { display: grid; gap: var(--s-1); }
+  /* ---- the alerts now: one row per alert, worst first, stacked ---------------------------------------- */
   .hb-row {
     display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s-1) var(--s-2);
     padding: var(--s-1) var(--s-3); font-size: var(--fs-sm); line-height: var(--lh-sm);
@@ -22,7 +20,7 @@
   .hb-title { font-weight: 700; }
   .hb-text { flex: 1 1 20rem; min-inline-size: 0; overflow-wrap: anywhere; }
   .hb-when { white-space: nowrap; }
-  .hb-link { color: inherit; font-weight: 600; white-space: nowrap; }
+  .hb-detail { flex: 1 1 100%; overflow-wrap: anywhere; }
 
   /* ---- the card ------------------------------------------------------------------------------------------- */
   .hl-card .hl-sub { margin: var(--s-4) 0 var(--s-2); font-size: var(--fs-sm); line-height: var(--lh-sm); color: var(--dim); font-weight: 700; }
@@ -34,7 +32,8 @@
   .hl-warn { color: var(--warn); }
   .chip.hl-ok { --c: var(--ok); }
   .chip.hl-bad { --c: var(--err); }
+  .chip.hl-warn { --c: var(--warn); }
 
-  /* the hub's Station row (Settings > Radios > Receivers): opens the card */
+  /* the hub's Station row (Settings > Radios > Receivers): opens Settings > Health, for an admin */
   .pill.radio.link { cursor: pointer; }
 }

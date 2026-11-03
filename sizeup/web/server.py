@@ -38,8 +38,9 @@ GET  /api/cad/weather[/speech?id=, /radar/frames, /radar/<frame>/<z>/<x>/<y>.png
                                NWS alerts, conditions, radar tiles, NOAA tides (sizeup/weather.py, #132)
 GET  /api/cad/aircraft         aircraft near HPN, shortfinal's PCFD-focused picture (sizeup/aircraft.py, #155): polled by
                                the page only while the layer is on; ETag (304), never in the state push
-GET  /api/cad/health           the hub only: Settings > System > Station health (sizeup/cloud/health.py, #79):
-                               the station's health, its alerts and 24 h of their history; anyone signed in
+GET  /api/cad/health           the hub only: Settings > Health (sizeup/cloud/health.py, #79, #203): the station's
+                               health, its alerts and 24 h of their history; admins only (sizeup/cad/api.py
+                               ADMIN_READS), polled by the tab while open, never in the state push
 GET  /api/cad/datasources, POST /api/cad/datasources/<key>/refresh
                                Settings > Data sources (sizeup/datasources.py, #186): every data pull, Refresh now
                                (sizeup/cad/api.py); polled by the panel while open, never in the state push
@@ -477,6 +478,8 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
             if aircraft is not None and aircraft.handles(path):  # aircraft near HPN (#155)
                 return self._send(*aircraft.get(path, url.query, self.headers))
             if path == "/api/cad/health" and station_health is not None:
+                if cad is not None and (no := cad.read_refused(path, self.who)) is not None:
+                    return self._send(*no)
                 return self._send(200, json.dumps(station_health.panel(), separators=(",", ":"), default=str).encode(),
                                   "application/json")
             if path.startswith("/api/cad/") and cad is not None:

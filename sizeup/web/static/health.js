@@ -1,11 +1,10 @@
-// Station health (GitHub #79, sizeup/cloud/health.py): on the hub, the alert banner on /cad and /monitor
-// (the CAD state's cloud.alerts, stacked, worst first, each with its start time and how long) and the
-// Settings > System > Station health card (GET /api/cad/health: the station's health, the alerts, 24 h of
-// their history). Self-contained: cad.js runs its hooks every state push; settings.js mounts the card.
+// Station health (GitHub #79, sizeup/cloud/health.py) on the hub: Settings > Health, an admins' tab (#203: no banner
+// under the header for anyone, nothing of it in the state push). GET /api/cad/health (admins only: sizeup/cad/api.py
+// ADMIN_READS) has the station's health, the alerts now and 24 h of their history; polled every POLL_MS while the tab is
+// on screen, and not at all otherwise. Self-contained: settings.js mounts it on the section (sHealth).
 const StationHealth = (() => {
   const POLL_MS = 5000;
-  const PANEL_HASH = "#settings/system/health";
-  let banner = null, card = null, timer = null, last = null, scrolled = "";
+  let panel = null, card = null, timer = null, last = null, busy = false;
 
   const when = (t) => (t ? fmtTime(t, true) : "—");
   const longDur = (s) => {
@@ -19,51 +18,9 @@ const StationHealth = (() => {
   const short = (b) => (b ? String(b).slice(0, 7) : "?");
   const gb = (n) => (n ? `${(n / 1e9).toFixed(1)} GB` : "—");
   const pct = (v) => (v === null || v === undefined ? "—" : `${Math.round(v)}%`);
-  const panelHref = () => (BOARD ? `/cad${PANEL_HASH}` : PANEL_HASH);
+  const isOpen = () => !!panel && panel.isConnected && !panel.closest("[hidden]") && !document.hidden;
 
-  // ---- the banner ---------------------------------------------------------------------------------
-
-  function bannerNode() {
-    if (banner) return banner;
-    banner = document.getElementById("health-banner");      // cad.html's, first in #alert-banners
-    if (banner) return banner;
-    banner = el("div", "health-banner");
-    banner.id = "health-banner";
-    banner.setAttribute("role", "alert");
-    banner.hidden = true;
-    const box = document.getElementById("alert-banners"), head = document.querySelector("body > header");
-    if (box) box.prepend(banner); else if (head) head.after(banner); else document.body.prepend(banner);
-    return banner;
-  }
-
-  function renderBanner() {
-    const c = cad.state && cad.state.cloud;
-    const alerts = (c && c.role === "hub" && c.alerts) || [];
-    const box = bannerNode();
-    show(box, alerts.length > 0);
-    if (!alerts.length) { box.dataset.sig = ""; return; }
-    const sig = JSON.stringify(alerts.map((a) => [a.key, a.severity, a.title, a.text, a.since]));
-    if (box.dataset.sig !== sig) {
-      box.dataset.sig = sig;
-      box.replaceChildren(...alerts.map((a) => {
-        const row = el("div", `hb-row ${a.severity === "critical" ? "critical" : "warning"}`);
-        row.dataset.key = a.key;
-        const link = el("a", "hb-link", "Station health");
-        link.href = panelHref();
-        if (BOARD) { link.target = "sizeup-cad"; link.rel = "noopener"; }
-        row.append(el("b", "hb-title", a.title), el("span", "hb-text", a.text),
-          el("span", "hb-when dim", ""), link);
-        row.title = `${a.title}: ${a.text}`;
-        return row;
-      }));
-    }
-    for (const row of box.children) {        // the durations tick with every state push
-      const a = alerts.find((x) => x.key === row.dataset.key);
-      if (a) setText(row.querySelector(".hb-when"), `since ${when(a.since)} (${longDur(serverNow() - a.since)})`);
-    }
-  }
-
-  // ---- the panel ---------------------------------------------------------------------------------------
+// ---- the panel ---------------------------------------------------------------------------------------
 
   function dl(pairs) {
     const d = el("dl", "admin");
@@ -103,11 +60,19 @@ const StationHealth = (() => {
   const stateCls = (s) => (s === "ok" ? "hl-ok" : s === "off" || s === null || s === undefined ? "dim" : "hl-bad");
   const whoText = (w) => (w ? [w.channel, w.dongle, w.detail].filter(Boolean).join(" · ") : "");
 
-  function alertRows(alerts) {
+  const sevChip = (s) => el("span", `chip ${s === "critical" ? "hl-bad" : "hl-warn"}`, s === "critical" ? "Critical" : "Warning");
+
+  // The alerts now: severity, what, since when (and how long), where, and what happens at recovery.
+  function alertRows(alerts, n) {
     return alerts.map((a) => {
       const r = el("div", `hb-row ${a.severity === "critical" ? "critical" : "warning"}`);
-      r.append(el("b", "hb-title", a.title), el("span", "hb-text", a.text),
-        el("span", "hb-when dim", `since ${when(a.since)} (${longDur(serverNow() - a.since)})`));
+      const where = whoText(a.who);
+      const rec = !n.on ? "Push off: it clears here and in the log only"
+        : a.pushed ? "Pushed to the status topic; a recovery notice follows when it clears"
+          : "Not pushed yet; once pushed, a recovery notice follows when it clears";
+      r.append(sevChip(a.severity), el("b", "hb-title", a.title), el("span", "hb-text", a.text),
+        el("span", "hb-when dim", `since ${when(a.since)} (${longDur(serverNow() - a.since)})`),
+        el("span", "hb-detail dim small", [where ? `Where: ${where}` : "", `Recovery: ${rec}`].filter(Boolean).join(" · ")));
       return r;
     });
   }
@@ -120,7 +85,7 @@ const StationHealth = (() => {
     const push = n.on ? `Push on (${(n.server || "").replace(/^https?:\/\//, "")})` + (n.failed ? `, ${n.failed} failed: ${n.last_error}` : "")
       : "Push off: no status topic in effect (Settings > System > Push notifications, SSM /sizeup-hub/status-topic or [alerts])";
     const head = el("div", "card-head");
-    head.append(el("h2", "", "Station health"),
+    head.append(el("h2", "", "Now"),
       el("span", `chip ${d.alerts.length ? "hl-bad" : "hl-ok"}`, d.alerts.length ? `${d.alerts.length} alert${d.alerts.length === 1 ? "" : "s"}` : "No alerts"),
       el("span", "spacer"), el("span", "dim small", push));
     const kids = [head];
@@ -128,7 +93,7 @@ const StationHealth = (() => {
     else if (!h.health_reported) kids.push(el("p", "notice", "The station runs an older sizeup: CPU, memory, disk and its programs show once it updates."));
     kids.push(el("h3", "hl-sub", "Alerts now"),
       ...(d.alerts.length ? [el("div", "hl-alerts")] : [el("p", "dim small", "None")]));
-    if (d.alerts.length) kids[kids.length - 1].append(...alertRows(d.alerts));
+    if (d.alerts.length) kids[kids.length - 1].append(...alertRows(d.alerts, n));
     if ((h.hints || []).length) {
       const box = el("div", "hl-hints");
       for (const x of h.hints) box.append(el("p", "notice info", `${x.channel}: ${x.text}`));
@@ -210,44 +175,69 @@ const StationHealth = (() => {
         [c.stuck ? `stuck open ${fmtDur(c.open_s)}` : c.open ? `open ${fmtDur(c.open_s)}` : "closed", c.stuck ? "hl-bad" : ""],
         c.quieting_db !== null && c.quieting_db !== undefined ? `${c.quieting_db} dB` : "", c.restarts || 0, [c.hint || "", c.hint ? "hl-warn" : ""]]),
       "No channels reported"));
-    kids.push(el("h3", "hl-sub", "Alert history (24 h)"), table(["Started", "Cleared", "Lasted", "Severity", "Alert", "Where", "Pushed"],
-      [...d.alerts.map((a) => [when(a.since), "active", longDur(serverNow() - a.since), [a.severity, a.severity === "critical" ? "hl-bad" : "hl-warn"],
-        `${a.title}: ${a.text}`, whoText(a.who), ""]),
+    kids.push(el("h3", "hl-sub", "Alert history (24 h)"), table(["Started", "Recovered", "Lasted", "Severity", "Alert", "Where", "Pushed"],
+      [...d.alerts.map((a) => [when(a.since), ["not yet", "hl-bad"], longDur(serverNow() - a.since), [a.severity, a.severity === "critical" ? "hl-bad" : "hl-warn"],
+        `${a.title}: ${a.text}`, whoText(a.who), a.pushed ? "yes" : "no"]),
       ...(d.history || []).map((a) => [when(a.since), when(a.cleared), longDur((a.cleared || 0) - (a.since || 0)),
         [a.severity, a.severity === "critical" ? "hl-bad" : "hl-warn"], `${a.title}: ${a.text}`, whoText(a.who), a.pushed ? "yes" : "no"])],
       "No alerts in the last 24 h"));
     kids.push(el("p", "dim small", `Alerts: silent ${th.silent_min} min · behind ${th.behind_min} min · whisper / trunk-recorder down ${th.down_min} min · `
       + `a dongle's job down ${Math.round(th.job_grace_s || 60)} s · outbox ${th.outbox_min} min · disk ${th.disk_pct}% · at most one push per alert per ${th.repeat_min} min, plus its recovery.`));
     card.replaceChildren(...kids);
-    card.hidden = false;
-    if (location.hash.startsWith(PANEL_HASH) && scrolled !== location.hash) {
-      scrolled = location.hash;
-      card.scrollIntoView({ block: "start" });
-    }
+  }
+
+  function say(text) {               // not the hub, or not an admin: one line, no poll
+    if (card) card.replaceChildren(el("p", "empty", text));
   }
 
   async function poll() {
     clearTimeout(timer);
-    if (!card || !card.isConnected || card.closest("[hidden]:not(#s-health)")) { timer = null; return; }
+    timer = null;
+    if (busy || !isOpen()) return;         // (one in flight schedules the next)
+    busy = true;
+    let again = true;
     try {
       const r = await fetch("/api/cad/health", { headers: { Accept: "application/json" } });
-      if (r.status === 404 || r.status === 409) { card.hidden = true; timer = null; return; }   // not the hub
-      if (r.ok) { last = await r.json(); render(last); }
+      if (r.status === 403) { again = false; say("Admins only: station health is shown to admins."); }
+      else if (r.status === 404 || r.status === 409) { again = false; say("No station health here: the hub (the CAD of record) has it."); }
+      else if (r.ok) { last = await r.json(); render(last); }
     } catch (_) { /* the next poll tries again */ }
-    timer = setTimeout(poll, POLL_MS);
+    busy = false;
+    if (again && isOpen()) timer = setTimeout(poll, POLL_MS);
   }
 
-  // Settings > System: the card (settings.js sSystem); polls while it is on screen.
+  // The links to what goes with it: the push topics, Amazon Transcribe's row in Data sources, the receivers.
+  function links() {
+    const r = el("div", "row");
+    for (const [text, href, title] of [
+      ["Push notifications", "#settings/system/pushes", "Where these alerts are pushed: the status topic (Settings > System)"],
+      ["Amazon Transcribe", "#settings/data/transcribe", "Its row in Data sources: the last answer, the breaker, Try AWS now"],
+      ["Data sources", "#settings/data", "Every data pull the hub keeps"],
+      ["Receivers", "#settings/radios/receivers", "The Station row and the station's radios (Settings > Radios)"]]) {
+      const a = el("a", "nav", text);
+      a.href = href;
+      a.title = title;
+      r.append(a);
+    }
+    return r;
+  }
+
+  // settings.js, every render of Settings > Health (admins): the section in place (once), then the poll.
   function mount(node) {
-    card = node;
-    card.id = "s-health";
-    card.classList.add("hl-card");
+    if (panel !== node || !card || !node.contains(card)) {
+      panel = node;
+      card = el("div", "card s-card hl-card");
+      card.append(el("div", "loading", "Loading…"));
+      node.replaceChildren(...sHead("Health", "The station's health and the hub's own checks (Amazon Transcribe and its "
+        + "monthly limit): what is wrong now, since when and where, then the station, its programs, dongles and channels, "
+        + "and 24 h of alerts with when each recovered. Each alert and its recovery are pushed to the status topic "
+        + "(Push notifications). Admins only: nobody else sees these, on the console or the wall board."), links(), card);
+    }
     if (last) render(last);
     poll();
   }
 
-  if (typeof cad !== "undefined" && cad.hooks) cad.hooks.push(renderBanner);
-  window.addEventListener("hashchange", () => { if (!location.hash.startsWith(PANEL_HASH)) scrolled = ""; });
-  return { mount, renderBanner, render };
+  document.addEventListener("visibilitychange", () => { if (isOpen() && !timer) poll(); });
+  return { mount, render };
 })();
 window.StationHealth = StationHealth;

@@ -264,7 +264,7 @@
     .s-msg { inset-block-start: var(--hdr-h); }
   }
   /* Data sources (#186, datasources.js): a table a group; each row its times, status, size, schedule, Refresh now */
-  #s-data { max-inline-size: none; }
+  #s-data, #s-health { max-inline-size: none; }     /* (Health: health.css, its wide tables) */
   .ds-body { display: flex; flex-direction: column; gap: var(--gutter); }
   .ds-sum { gap: var(--s-2); }
   .ds-table td { vertical-align: top; }
@@ -277,6 +277,7 @@
   .ds-sched select { max-inline-size: 11rem; }
   .ds-act { text-align: end; white-space: nowrap; }
   .ds-row.run { background: var(--hover); }
+  .ds-row.ds-focus { background: color-mix(in srgb, var(--info) 14%, transparent); }   /* the row a link opened (#settings/data/<key>) */
   .chip.ds-st.ok { --c: var(--ok); }
   .chip.ds-st.err { --c: var(--err); }
   .chip.ds-st.run { --c: var(--info); }
