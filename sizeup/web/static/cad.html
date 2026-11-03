@@ -278,7 +278,35 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
             <div id="d-roads" class="d-roads" hidden aria-label="Road closures and projects nearby"></div>
             <div id="d-tides" class="d-tides" hidden aria-label="Tides"><div class="wx-tides-body"></div></div>
             <div id="d-pages" class="d-pages" hidden aria-label="The 60 Control page"></div>
-            <pre id="d-narr" class="narr"></pre>
+            <!-- the comments (#221), where the remarks used to sit: the event's remarks first, then every comment in time
+                 order, the newest at the bottom, in a box that scrolls on its own (to the newest as one comes in, unless
+                 scrolled up: then "New"); typed into right under it, Enter adds, Shift+Enter a new line (cad.js
+                 renderComments). "Everything" mixes in the Timeline's other entries; the Timeline itself stays below -->
+            <section id="d-cmts" class="cmts" aria-label="Comments">
+              <div class="cmts-head">
+                <span class="cmts-title">Comments</span><span id="d-cmts-n" class="dim small"></span>
+                <span class="spacer"></span>
+                <span class="seg cmts-seg" role="group" aria-label="Show in the comments box">
+                  <button id="d-cmts-only" type="button" class="sm" aria-pressed="true" title="The remarks and the comments">Comments</button>
+                  <button id="d-cmts-all" type="button" class="sm" aria-pressed="false" title="With every status, dispatch and system entry">Everything</button>
+                </span>
+              </div>
+              <div class="cmts-wrap">
+                <ol id="d-cmts-list" class="cmts-list" tabindex="0" aria-label="Comments, oldest first" aria-live="polite"></ol>
+                <button id="d-cmts-new" type="button" class="sm cmts-new" hidden>New comments ▾</button>
+              </div>
+              <form id="note-form" class="note-form" autocomplete="off">
+                <div class="note-box">
+                  <textarea id="note-text" rows="2" maxlength="2000" spellcheck="true"
+                            placeholder="Comment: Enter adds, Shift+Enter a new line  (@E63 tags a unit, @ a place)"
+                            role="combobox" aria-autocomplete="list" aria-controls="note-sugg" aria-expanded="false"
+                            aria-label="Add a comment"></textarea>
+                  <ol id="note-sugg" class="sugg note-sugg" role="listbox" hidden></ol>
+                </div>
+                <button id="note-add" type="submit">Add</button>
+                <div id="note-tags" class="note-tags" hidden></div>
+              </form>
+            </section>
           </div>
           <div id="d-mapbox" class="mapbox">
             <div id="d-map"></div>
@@ -426,7 +454,7 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
       </div>
 
       <!-- folded to start, with the count and the latest entry (#107); remembered per browser (cad.js timelineFold).
-           The note box stays out of the fold: usable while the list is hidden -->
+           Every entry, newest first; comments are typed into the comments box up top (#221) -->
       <div id="d-timeline" class="card tl-fold">
         <div class="card-head">
           <button id="d-events-toggle" class="sec-toggle" type="button" aria-expanded="false" aria-controls="d-events" title="Every status, note and system entry">
@@ -434,15 +462,6 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
           </button>
         </div>
         <ol id="d-events" class="list events" hidden></ol>
-        <form id="note-form" class="row note" autocomplete="off">
-          <div class="note-box">
-            <input id="note-text" type="text" maxlength="2000" placeholder="Note  (@E63 tags a unit, @ a place)"
-                   role="combobox" aria-autocomplete="list" aria-controls="note-sugg" aria-expanded="false">
-            <ol id="note-sugg" class="sugg note-sugg" role="listbox" hidden></ol>
-          </div>
-          <button id="note-add" type="submit">Add note</button>
-          <div id="note-tags" class="note-tags" hidden></div>
-        </form>
       </div>
     </div>
   </section>
