@@ -109,7 +109,8 @@
   .d-empty { margin: var(--s-8) auto; text-align: center; }
   .d-empty .big { font-size: var(--fs-xl); line-height: var(--lh-xl); font-weight: 600; }
   .number { font-size: var(--fs-lg); line-height: var(--lh-lg); font-weight: 700; }
-  .inc-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(18rem, 48%); gap: var(--s-4); }
+  /* the map's column: the layout's own, or the width the viewer dragged it to (--dmap-w, incident-map.js, #210) */
+  .inc-grid { display: grid; grid-template-columns: minmax(0, 1fr) var(--dmap-w, minmax(18rem, 48%)); gap: var(--s-4); }
   .d-type { font-size: var(--fs-2xl); line-height: var(--lh-2xl); font-weight: 700; color: color-mix(in srgb, var(--c, #ff7a5c) 62%, #fff); overflow-wrap: anywhere; }
   .d-addr { font-size: var(--fs-xl); line-height: var(--lh-xl); font-weight: 600; margin-block-start: var(--s-1); overflow-wrap: anywhere; }
   .d-cross { color: var(--text-2); }
@@ -247,7 +248,39 @@
     white-space: pre-wrap; font-size: var(--fs-sm); line-height: var(--lh-sm); color: var(--text-2); overflow-wrap: anywhere;
     margin-block-start: var(--s-3); padding: var(--s-2) var(--s-3); background: var(--bg); border: var(--bw) solid var(--line); border-radius: var(--radius);
   }
-  .mapbox { position: relative; block-size: var(--map-h); border-radius: var(--radius); overflow: hidden; border: var(--bw) solid var(--line); }
+  .mapbox { position: relative; block-size: var(--dmap-h, var(--map-h)); border-radius: var(--radius); border: var(--bw) solid var(--line); }
+  .mapbox > :is(#d-map, .nomap) { border-radius: calc(var(--radius) - var(--bw)); overflow: hidden; }   /* the map clips itself: the handles reach out */
+  /* its drag handles (incident-map.js, #210): the left edge (wider, the details give way), the bottom edge (taller)
+     and the bottom-left corner (both). Each a control-sized target astride the edge, out into the grid's gap (--s-4)
+     and in over the map; a line on the edge while hovered, focused or dragged; the corner's mark and a short bar on
+     the bottom edge always show, so the handles can be found */
+  .dmap-handle { position: absolute; z-index: var(--z-map); padding: 0; touch-action: none; background: none; }
+  .dmap-handle[hidden] { display: none; }
+  .dmap-handle:focus-visible { outline: none; }
+  .dmap-w { inset-block: 0; inset-inline-start: calc(-1 * var(--s-4)); inline-size: var(--ctl); cursor: col-resize; }
+  .dmap-h { inset-inline: 0; inset-block-end: calc(-1 * var(--s-4)); block-size: var(--ctl); cursor: row-resize; }
+  .dmap-c {
+    inset-inline-start: calc(-1 * var(--s-4)); inset-block-end: calc(-1 * var(--s-4)); inline-size: var(--ctl); block-size: var(--ctl);
+    cursor: nesw-resize; z-index: calc(var(--z-map) + 1);
+  }
+  .dmap-handle::before { content: ""; position: absolute; background: transparent; transition: background-color 0.12s, border-color 0.12s; }
+  .dmap-w::before { inset-block: 0; inset-inline-start: calc(var(--s-4) - var(--bw)); inline-size: calc(2 * var(--bw)); }
+  .dmap-h::before { inset-inline: 0; inset-block-end: calc(var(--s-4) - var(--bw)); block-size: calc(2 * var(--bw)); }
+  .dmap-h::after {
+    content: ""; position: absolute; inset-block-end: calc(var(--s-4) + var(--s-0)); inset-inline-start: 50%; transform: translateX(-50%);
+    inline-size: var(--s-8); block-size: var(--s-1); border-radius: var(--s-1); background: color-mix(in srgb, var(--text-2) 75%, transparent);
+    box-shadow: 0 0 0 var(--bw) rgba(0, 0, 0, 0.55);
+  }
+  .dmap-c::before {
+    inset-block-end: calc(var(--s-4) + var(--s-1)); inset-inline-start: calc(var(--s-4) + var(--s-1)); inline-size: var(--s-3); block-size: var(--s-3);
+    border-inline-start: calc(3 * var(--bw)) solid var(--text-2); border-block-end: calc(3 * var(--bw)) solid var(--text-2);
+    filter: drop-shadow(0 0 var(--bw) rgba(0, 0, 0, 0.9));
+  }
+  .dmap-handle:is(:hover, :focus-visible, .on):not(.dmap-c)::before, .dmap-h:is(:hover, :focus-visible, .on)::after { background: var(--accent); }
+  .dmap-c:is(:hover, :focus-visible, .on)::before { border-color: var(--accent); }
+  body:is(.col-dragging, .row-dragging, .dmap-dragging) .mapbox > :not(.dmap-handle) { pointer-events: none; }
+  body:is(.col-dragging, .row-dragging, .dmap-dragging) .dmap-handle.on { pointer-events: auto; }
+  body.dmap-dragging { cursor: nesw-resize; user-select: none; }
   #d-map, .nomap { position: absolute; inset: 0; }
   .nomap { display: flex; align-items: center; justify-content: center; text-align: center; padding: var(--s-4); }
   .closebox {
