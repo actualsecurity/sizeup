@@ -392,7 +392,8 @@
   .uh { display: flex; align-items: center; gap: var(--s-2); min-inline-size: 0; min-block-size: var(--ctl-sm); }
   .un { font-weight: 700; }
   .utitle { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-inline-size: 0; }
-  .ut { min-inline-size: 3.25rem; text-align: end; }
+  .ust { display: inline-flex; align-items: center; gap: var(--s-2); flex: none; min-inline-size: 0; }
+  .ut { min-inline-size: 3.25rem; text-align: end; color: var(--dim); font-size: var(--fs-xs); line-height: var(--lh-xs); }
   .usub { display: flex; flex-wrap: wrap; gap: var(--s-2); font-size: var(--fs-xs); line-height: var(--lh-xs); }
   .usub .why { overflow-wrap: anywhere; }
   .inc-link { display: inline-flex; align-items: center; min-block-size: var(--ctl-sm); color: var(--warn); font-family: var(--mono); }
@@ -441,7 +442,37 @@
   .nid-unit { flex: 0 1 auto; min-inline-size: 0; }
   .nid-who { flex: 1 1 8em; min-inline-size: 0; }
 
-  /* the pinned 60 Control feed (cad-feed.js): top of the units column, the board scrolls under it */
+  /* ---- Dispatch's rigs (#205): no feed on Dispatch (cad-feed.js); the right column is the units, big, to read from
+     across the room. Each a tile edged and tinted in its status color (--st, the data file's), the unit ID large, the
+     status a band in its own colors (--c / --fg) with its time (.ust, one piece: on the ID's line while it fits, else
+     the next). The groups, the RB tags and a click for the status buttons (the open one across the column) as on the
+     Overview's compact board. As many tiles a row as fit: one in the column as it starts, two dragged wide, three or
+     more when the columns stack. */
+  body[data-view="dispatch"] .units .ugroup h3 { margin-block: var(--s-4) var(--s-2); font-size: var(--fs-md); line-height: var(--lh-md); color: var(--text-2); }
+  body[data-view="dispatch"] .units .ugroup h3.fold { margin-block: var(--s-2) 0; }
+  body[data-view="dispatch"] .units .ulist { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 15rem), 1fr)); gap: var(--s-2); }
+  body[data-view="dispatch"] .units .ulist > li { border: 0; }
+  body[data-view="dispatch"] .units .ulist > li.empty { grid-column: 1 / -1; }
+  body[data-view="dispatch"] .units .ulist > li.urow {
+    display: flex; flex-direction: column; gap: var(--s-1); padding: var(--s-1) var(--s-3);
+    background: color-mix(in srgb, var(--st) 12%, var(--raised)); border: var(--bw) solid color-mix(in srgb, var(--st) 40%, var(--line));
+    border-inline-start: calc(2 * var(--bw-mark)) solid var(--st); border-radius: var(--radius);
+  }
+  body[data-view="dispatch"] .units .ulist > li.urow.open { grid-column: 1 / -1; background: var(--hover); }
+  body[data-view="dispatch"] .units .ulist > li.urow.oos { background: var(--raised); }
+  body[data-view="dispatch"] .units .ulist > li.urow.talking { background: color-mix(in srgb, var(--ok) 14%, var(--raised)); }
+  body[data-view="dispatch"] .units .uh { flex-wrap: wrap; row-gap: var(--s-1); column-gap: var(--s-3); }
+  body[data-view="dispatch"] .units .uh > :is(.spacer, .utitle) { display: none; }       /* the title: on the ID's tooltip */
+  body[data-view="dispatch"] .units .uh > .ust { flex: 1 0 8.5rem; gap: var(--s-3); }
+  body[data-view="dispatch"] .units .un { font-size: calc(var(--fs-2xl) * 1.25); line-height: calc(var(--lh-2xl) * 1.25); }
+  body[data-view="dispatch"] .units .ust > .chip.st {
+    flex: 1 1 0; justify-content: flex-start; min-inline-size: 0; overflow: hidden; text-overflow: ellipsis; block-size: auto; min-block-size: var(--ctl-sm);
+    padding-inline: var(--s-2); font-size: var(--fs-md); color: var(--fg, var(--text)); background: var(--c); border-color: var(--c);
+  }
+  body[data-view="dispatch"] .units .ut { flex: none; min-inline-size: 0; color: var(--text-2); font-size: var(--fs-md); line-height: var(--lh-md); font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  body[data-view="dispatch"] .units .usub { font-size: var(--fs-sm); line-height: var(--lh-sm); }
+
+  /* the pinned 60 Control feed (cad-feed.js): top of the units column (not on Dispatch, #205), the board scrolls under it */
   .units > .feed {
     flex: none; position: sticky; inset-block-start: calc(-1 * var(--gutter)); z-index: var(--z-sticky);
     margin: calc(-1 * var(--gutter)) calc(-1 * var(--gutter)) var(--s-3); padding: var(--s-2) var(--gutter);
