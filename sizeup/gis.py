@@ -183,7 +183,7 @@ DEFAULT_LAYERS: tuple[Layer, ...] = (
           page=f"{_HUB}278ce38ecd784b79993af098f81809ed_163"),
     # -- Utilities (the county's infrastructure layers) ---------------------------------------------------------------
     Layer("hydrants", "Hydrants", f"{_WC}/DataHub_Infrastructure/MapServer/147", group="Utilities", kind="point", icon="hydrant",
-          style={"color": "--info", "radius": 4.5, "label": "HYD_NUMBER", "labelzoom": 17}, minzoom=14, refresh="monthly",
+          style={"color": "--err", "radius": 4.5, "label": "HYD_NUMBER", "labelzoom": 17}, minzoom=14, refresh="monthly",
           fields=(("FIRENAME", "Fire district"), ("HYD_NUMBER", "Hydrant no."), ("MUNCIPALIT", "Municipality")),
           licence=COUNTY_TERMS, page=f"{_HUB}b1766f745f954027936f74e7b0d2de65_147", asof="as of Oct 2015",
           note="Positions from the departments that contributed them (some partial); no flow or size data"),
