@@ -22,6 +22,10 @@ GET  /api/cad/state                       lists, units, events (open, recently c
 GET  /api/cad/stream                      SSE: the state, then each second only what changed (server.py Broadcaster)
 GET  /api/cad/geocode?q=209 westchester   location suggestions, Port Chester / Rye Brook first, each with its town
                                           (with the place search's mile markers, exits and named places, #67)
+                                          each with place, street_address, cross (the streets at each end of its block)
+                                          and block (for the map), #204
+GET  /api/cad/geocode/here?lat=&lon=      the new call's map (#204): the address point, intersection and named place
+                                          nearest a click (each a suggestion as above), and the street under it; read only
 GET  /api/cad/places?q=287 eb mm 10&near=lat,lon&iid=&limit=
                                           place search (#67: a note's "@"): {places: [{kind (address | intersection |
                                           street | place | milemarker | exit), label, sub (town), lat, lon, source,
@@ -591,6 +595,8 @@ class CadApi:
                 return _json(200, self.cad.search_places(parse_qs(query)))
             if path == "/api/cad/geocode":
                 return _json(200, self.cad.geocode((parse_qs(query).get("q") or [""])[0]))
+            if path == "/api/cad/geocode/here":
+                return _json(200, self.cad.here(parse_qs(query)))
             if m := DISPATCH_WAV.fullmatch(path):
                 wav = self.cad.dispatch_audio(int(m.group(1)))
                 return (200, wav, "audio/wav") if wav else (404, b"no audio for that dispatch\n", "text/plain")

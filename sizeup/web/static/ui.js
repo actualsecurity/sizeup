@@ -286,6 +286,8 @@ window.UI = (() => {
   // ---- keyboard shortcuts ----------------------------------------------------------------------------
   const SHEET = [
     [["N"], "New incident"],
+    [["Tab"], "New incident: the next field (Location, caller, type, subtype, comments); in a list, take the highlighted one"],
+    [["Ctrl/⌘ Enter"], "New incident: create it (from any of its fields)"],
     [["/"], "Search (the Radio view, or this page's filter)"],
     [["G", "D"], "Go to Dispatch"],
     [["G", "O"], "Go to Overview"],

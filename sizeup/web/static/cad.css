@@ -272,6 +272,44 @@
     .form > .check { min-block-size: var(--ctl-sm); }
   }
 
+  /* a new call (#204): the fields in the order the call is taken | a splitter | a big map (newcall-map.js) */
+  .nc-form[hidden] { display: none; }
+  .nc-keys { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .nc-body { display: grid; grid-template-columns: var(--nc-fields, minmax(19rem, 38%)) var(--s-3) minmax(0, 1fr); align-items: stretch;
+    margin-block-start: var(--s-3); }
+  .nc-body > .nc-fields { margin-block-start: 0; align-content: start; min-inline-size: 0; }
+  .nc-split { position: relative; cursor: col-resize; touch-action: none; }
+  .nc-split::before { content: ""; position: absolute; inset-block: 0; inset-inline-start: 50%; inline-size: var(--bw);
+    background: var(--line); border-radius: var(--radius-s); }
+  .nc-split:is(:hover, :focus-visible, .on)::before { background: var(--accent); inline-size: calc(var(--bw) * 3); }
+  .nc-split:focus-visible { outline: none; }
+  body.col-dragging .nc-map-pane { pointer-events: none; }
+  body.col-dragging .nc-split.on { pointer-events: auto; }
+  .nc-split[hidden] { display: none; }
+  .nc-map-pane { position: relative; min-block-size: max(calc(var(--s-8) * 17), 72vh); border-radius: var(--radius); overflow: hidden;
+    border: var(--bw) solid var(--line); }
+  .nc-map { position: absolute; inset: 0; }
+  .nc-map[hidden] { display: none; }
+  .nc-body.nc-stacked { grid-template-columns: minmax(0, 1fr); gap: var(--s-3); }
+  .nc-body.nc-stacked > .nc-map-pane { min-block-size: max(calc(var(--s-8) * 10), 60vh); }
+  .nc-body.nc-nomap { grid-template-columns: minmax(0, 1fr); }
+  .nc-body.nc-nomap > .nc-map-pane { display: none; }
+  .nc-caddr > input { inline-size: 100%; }
+  .nc-lab { display: flex; align-items: center; justify-content: space-between; gap: var(--s-2); }
+  .nc-gap { display: block; }
+  .sugg .sg-addr { color: var(--text-2); }
+  .sugg .sg-cross { flex-basis: 100%; }
+  /* the map's own marks: the pin (drag to move the point), where a click asked, and the "here" box */
+  .nc-pin { inline-size: var(--s-5); block-size: var(--s-5); border-radius: 50% 50% 50% 0; transform: rotate(-45deg); cursor: grab;
+    background: var(--accent); border: 2px solid #fff; box-shadow: 0 1px 6px rgba(0, 0, 0, 0.7); margin-block-end: var(--s-1); }
+  .nc-probe { inline-size: var(--s-3); block-size: var(--s-3); border-radius: 50%; border: 2px solid var(--info);
+    background: color-mix(in srgb, var(--info) 30%, transparent); }
+  .cm-pop.nc-here { inset-block-start: auto; inset-block-end: var(--s-8); max-block-size: 60%; overflow: auto; gap: var(--s-1); }
+  .nc-choice { display: flex; align-items: center; gap: var(--s-2); padding-block: var(--s-1); border-block-start: var(--bw) solid var(--line); }
+  .nc-choice > button { flex: none; }
+  .nc-what { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 var(--s-2); flex: 1 1 auto; min-inline-size: 0; overflow-wrap: anywhere; }
+  .nc-what > .dim.small:first-child { flex-basis: 100%; }
+
   /* assigned units: name, status, times ... their next-step buttons at the end */
   .on-units .ouh { display: flex; align-items: center; flex-wrap: wrap; gap: var(--s-1) var(--s-2); min-block-size: var(--ctl-sm); }
   .on-units .times > span + span { margin-inline-start: var(--s-3); }
