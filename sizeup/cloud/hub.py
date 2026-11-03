@@ -288,12 +288,13 @@ class Hub:
         return describe(str(v.get("build") or ""), self.build, v.get("update") if isinstance(v.get("update"), dict) else {})
 
     def station_row(self) -> dict:
+        """The Station row of the radios (everyone's state push): its connection only. Its health alerts are the
+        admins' (Settings > Health, GET /api/cad/health, #203); the page links the row there for an admin."""
         h = self.health()
-        n = len(self.health_.alerts()) if self.health_ is not None else 0
         return {"label": "Station", "mhz": None, "state": h["state"], "word": h["word"],
-                "detail": h["detail"] + (f" · {n} health alert(s)" if n else "") + " · Station health: Settings > System",
+                "detail": h["detail"] + " · Station health: Settings > Health (admins)",
                 "open": False, "quieting_db": None, "restarts": 0, "last_heard": self.last_seen,
-                "link": "#settings/system/health"}
+                "link": "#settings/health"}
 
     def radio_rows(self) -> list[dict]:
         """The Station row, then the station's own rows as it reported them, or, offline, marked
@@ -318,10 +319,11 @@ class Hub:
         return dict(r) if isinstance(r, dict) else {"total": 0, "done": 0, "changed": 0, "failed": 0, "pending": 0}
 
     def cad_cloud(self) -> dict:
+        """The CAD state's cloud (everyone's state push): the station's connection, for the header pill. No health
+        alerts here (#203): those are on the admins' Settings > Health, from GET /api/cad/health."""
         h = self.health()
         return {"role": "hub", "state": h["state"], "word": h["word"], "detail": h["detail"],
-                "alerts": self.health_.alerts() if self.health_ is not None else [],
-                "health_url": "/cad#settings/system/health"}
+                "health_url": "/cad#settings/health"}
 
     # -- jobs ------------------------------------------------------------------------------------------
 
@@ -503,14 +505,14 @@ class HubApp(App):
                                  shared_device="", dispatch_tts_python=""))
         self.receivers, self.modes = [], []
         self.hub = Hub(self, cfg, log)
-        # station health (GitHub #79): the alerts, the banner, the push to the status topic in effect (Settings, else
+        # station health (GitHub #79): the alerts, the admins' Settings > Health (#203), the push to the status topic in effect (Settings, else
         # [alerts] status_topic, else ntfy_topic: notify.Pushes; never Tapout's): App.pushes' STATUS kind (the same
         # Notifier as the emergency alarms when both kinds share a topic: one queue in order)
         from sizeup.notify import STATUS
         notifier = self.pushes.notifier(STATUS)
         self.health = self.hub.health_ = StationHealth(self.hub, cfg, self.mdb, notifier, log)
         if not notifier.enabled:
-            log("health: no push for station alerts (no status or alerts topic in effect): banner and log only")
+            log("health: no push for station alerts (no status or alerts topic in effect): Settings > Health and log only")
         self.live = self.hub.live                      # main() sets on_change to push the display
         self.cad.live = self.live.state
         self.paging_state = self.live.paging_state     # the station's page going out now
@@ -810,7 +812,7 @@ class HubApp(App):
             if now - seen >= PENDING_FLAG_S:
                 self._pending_seen.pop(p.id, None)
                 self._aws_give_up(p, "page", f"no text from the station's speech-to-text in {PENDING_FLAG_S / 60:.0f} min "
-                                             "(it may be behind: Settings > System > Station health); it comes up if it arrives",
+                                             "(it may be behind: Settings > Health); it comes up if it arrives",
                                   model="speech-to-text")
                 n += 1
         return n

@@ -147,9 +147,9 @@ pages of its own ([the station page](#the-station-page)).
   while the station is connected. A dongle whose job the station gave it by itself (`[radio]
   auto_assign`, deploy/station/README.md) reads "· FG1 · auto" (the row's `set_by`: "person", "auto",
   or missing from an older station, which then shows no "auto").
-* Hub, CAD header: "Station connected" / "Station offline 12:03". Under it, on `/cad` and `/monitor`, a banner
-  for each station health alert ([Station health and alerts](#station-health-and-alerts)); the Station row
-  opens Settings → System → Station health.
+* Hub, CAD header: "Station connected" / "Station offline 12:03". No health banner under it, for anyone
+  (#203): the station health alerts are on the admins' Settings → **Health** ([Station health and
+  alerts](#station-health-and-alerts)); for an admin the Station row opens it.
 * Station page, Radios, Receivers: a **Hub** row (connected, or offline with how many events are waiting;
   "not sending" when forwarding is on without a token; its version against the hub's, as above). Its header: the "Hub connected" / "Hub
   unreachable" / "Not forwarding" pill and a link to the CAD on the hub. Settings: the last contact
@@ -173,7 +173,7 @@ pages of its own ([the station page](#the-station-page)).
 | Late delivery | Events that arrive after an outage are applied as they arrive: the monitor attaches traffic to whatever incident is active then; the CAD links by the transmission's own time. |
 | A station update doesn't come up | Switched back to the release that ran before within 90 s; that build isn't tried again until the hub moves on. The Station row says "update to ... failed". |
 | A station update fails its preflight | Never switched to: the station keeps running, untouched. Same report. |
-| The station goes quiet, falls behind, a dongle or program stops | An alert: banner, log, push to the alert topic, a recovery notice when it's back ([Station health and alerts](#station-health-and-alerts)). |
+| The station goes quiet, falls behind, a dongle or program stops | An alert: Settings → Health (admins), log, push to the status topic, a recovery notice when it's back ([Station health and alerts](#station-health-and-alerts)). |
 
 ## Station updates: it follows the hub's build
 
@@ -238,8 +238,10 @@ for 3 times its usual gap (90th percentile) and at least 30 min says so in the p
 
 **Where they show.**
 
-* A banner under the header on `/cad` and `/monitor`, one row per alert, critical (red) first, with its
-  start time and how long, and a link to the panel.
+* Settings → **Health**, admins only (#203: "we dont need things like that shown to other people"): one row
+  per alert, critical (red) first, with its severity, start time and how long, where, and whether it was
+  pushed (a recovery notice follows one that was). Never a banner under the header on `/cad` or `/monitor`,
+  and nothing of it in the state push: a dispatcher or a viewer neither sees nor receives it.
 * The hub's log: `health: ALERT ...` once when it starts, `health: cleared ...` once when it clears.
 * A push to the alert topic (below): at most one per alert per `repeat_min` (15 min), plus its recovery
   ("Recovered: ..."); an alert that came back within the 15 min shows on screen at once and is pushed when
@@ -248,14 +250,16 @@ for 3 times its usual gap (90th percentile) and at least 30 min says so in the p
   the push opens the panel (with `[cloud] public_url` set).
 * Alerts and 24 h of their history are in `hub.sqlite`: a redeploy neither forgets an alert nor pushes it again.
 
-**The panel:** Settings → System → **Station health** (also the Station row in Settings → Radios →
-Receivers, and every banner row): the alerts now, the hints, then the station (connected, last state post,
+**The panel:** Settings → **Health**, a tab of its own shown to admins on the hub (also the Station row in
+Settings → Radios → Receivers, for an admin; the pushes' old link `#settings/system/health` lands there): links
+to Push notifications and Amazon Transcribe's row in Data sources, then the alerts now, the hints, then the station (connected, last state post,
 clock difference, sizeup and machine up since), the version (station and hub builds, the state, the last
 update with its timings and log line, failed builds), the outbox and the system (CPU, load, memory, disk,
 temperature), the programs (whisper, trunk-recorder), each dongle (plugged in, job, running, restarts),
 each channel (state, last heard, quiet for, its usual gap, squelch open / stuck, quieting, restarts, hint),
-and the alert history of the last 24 h (started, cleared, how long, where, whether it was pushed).
-`GET /api/cad/health`: anyone signed in (behind Cloudflare Access like the rest of the CAD).
+and the alert history of the last 24 h (started, recovered, how long, where, whether it was pushed).
+`GET /api/cad/health`: admins only (`sizeup/cad/api.py` `ADMIN_READS`; a 403 for a dispatcher or a viewer),
+polled every 5 s while the tab is open and not otherwise.
 
 ### The alert and status topics (ntfy)
 
@@ -1633,8 +1637,7 @@ until there is a receiver to record.
 > USER_AGENT)." (GitHub #132)
 
 **On screen.** The NWS's alerts for our zones show as a **banner** under the header on the console and
-the wall board (in the shared alert-banner box, `#alert-banners`, where the station-health banner sits
-too): one line per alert, most serious first, in its level's colour (a *warning* red, a *watch* or an
+the wall board (in the shared alert-banner box, `#alert-banners`; station health is never there, #203): one line per alert, most serious first, in its level's colour (a *warning* red, a *watch* or an
 *advisory* amber, a *statement* blue), the headline and when it ends; more than two fold behind
 "+N more"; a click opens the full text (what, what to do, onset, until, area, issuing office). The
 **header** shows the current conditions at Westchester County Airport, "75°F · W 10 G 18 mph", with an
@@ -1756,7 +1759,7 @@ station follows the hub's build: `Watch` in the station, the root updater), `sta
 (Settings → System → Station and the station page's hub link: on / off at runtime, state/cloud.json, the Keychain), `outbox.py`,
 `client.py` (kept-alive HTTPS), `hub.py` (Hub: ingest, health, jobs; HubApp), `health.py` (station health:
 the model, the alerts, `/api/cad/health`, `/api/station/status`; `sizeup/notify.py` the pushes, `health.js` /
-`health.css` the banner and panel, `tools/deploy_check.py` the deploy check), `hubstore.py`
+`health.css` Settings → Health, `tools/deploy_check.py` the deploy check), `hubstore.py`
 (hub.sqlite, audio.sqlite), `access.py` (Cloudflare Access identity; the gate is in
 `sizeup/web/server.py`, the operator in `sizeup/cad/api.py` and `Settings.person`; the activity log in
 `sizeup/cad/activity.py`). Seams in `sizeup/app.py`: `_emit`, `_heard`, `_page_heard`, `_retext`, `_stt`,
