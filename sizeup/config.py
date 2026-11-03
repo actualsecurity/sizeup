@@ -107,6 +107,11 @@ class Config:
     audio_keep_hours: float = 12.0    # every audio file under captures/ (clips, P25 calls, skipped clicks)
     home: tuple[float, float, float] = (-73.6640, 41.0130, 13.4)   # lon, lat, zoom
     apparatus_path: str = ""          # the roster CSV actually found ("" = repo data/)
+    # [geo]: the intersection search of the CAD's location box (#213, sizeup/geo/intersections.py): the towns it
+    # searches (the gazetteer's town labels) and where "nearest" is measured from (PCFD Headquarters)
+    geo_search_towns: tuple[str, ...] = ("Port Chester", "Rye Brook", "Rye", "Harrison", "Greenwich", "Mamaroneck",
+                                         "Larchmont", "Town of Mamaroneck")
+    geo_hq: tuple[float, float] = (41.00253, -73.66692)            # lat, lon: 209 Westchester Ave
     # CAD ([cad], [dispatch]): see sizeup/cad/
     cad_db: str = ""                  # "" = in memory (tests); load() defaults to state/cad.sqlite
     cad_department: str = "Port Chester Fire"           # first words of every dispatch, as said on the air
@@ -544,6 +549,26 @@ def _roadwork(data: dict) -> dict:
                 roadwork_wzdx_url=u)
 
 
+def _geo(data: dict) -> dict:
+    """[geo] search_towns (the intersection search's towns, #213), hq_lat / hq_lon (results nearest this first)."""
+    g = _take(data.get("geo", {}), "geo", {"search_towns", "hq_lat", "hq_lon"})
+    out: dict = {}
+    if "search_towns" in g:
+        towns = g["search_towns"]
+        if not isinstance(towns, list) or not towns or not all(isinstance(t, str) and t.strip() for t in towns):
+            raise ConfigError('geo.search_towns: a list of town names ("Port Chester", "Rye Brook", ...)')
+        out["geo_search_towns"] = tuple(dict.fromkeys(t.strip() for t in towns))
+    if "hq_lat" in g or "hq_lon" in g:
+        try:
+            lat, lon = float(g["hq_lat"]), float(g["hq_lon"])
+        except (KeyError, TypeError, ValueError):
+            raise ConfigError("geo.hq_lat and geo.hq_lon: both, in degrees") from None
+        if not (40.0 <= lat <= 42.0 and -75.0 <= lon <= -72.0):
+            raise ConfigError("geo.hq_lat / hq_lon: in the area")
+        out["geo_hq"] = (lat, lon)
+    return out
+
+
 def _trains(data: dict) -> dict:
     """[trains] -> Config fields. No section: on, the MTA's feeds, our stretch of the line (Mount Vernon East to Stamford)."""
     tr = _take(data.get("trains", {}), "trains", {"enabled", "key", "rt_url", "gtfs_url", "bbox", "rt_every_s"})
@@ -789,7 +814,7 @@ def load(path: str | Path) -> Config:
         raise ConfigError(f"{path}: {e}") from e
     _take(data, "config", {"station", "web", "radio", "tones", "stt", "p25", "mdc", "units", "storage", "map",
                            "cad", "dispatch", "cloud", "prealert", "roads", "roadwork", "gis", "trains", "weather", "alerts",
-                           "aircraft"})
+                           "aircraft", "geo"})
     st = _take(data.get("station", {}), "station", {"id", "name", "auto_update"})
     if not isinstance(st.get("auto_update", True), bool):
         raise ConfigError("station.auto_update: true or false")
@@ -987,5 +1012,6 @@ def load(path: str | Path) -> Config:
         dispatch_repeat=d_repeat, dispatch_transmit=False, dispatch_channels=d_channels, dispatch_polly_region=d_region,
         **(dict(cloud, cloud_outbox=rel_state(cloud["cloud_outbox"])) if cloud else {}),
         cloud_state="" if cloud.get("cloud_role") == "hub" else rel_state("state/cloud.json"),
+        **_geo(data),
         **pa, **_alerts(data, pa), **_roads(data), **_roadwork(data), **_gis(data), **_trains(data), **_weather(data), **aircraft,
     )

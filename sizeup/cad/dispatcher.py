@@ -151,9 +151,13 @@ def join_and(names: list[str]) -> str:
 
 def where(incident: dict) -> str:
     # a named place (#204): "575 Boston Post Rd @ Whole Foods Market" is said "575 Boston Post Road, Whole Foods Market"
-    w = spoken_street(re.sub(r"\s*@\s*", ", ", incident.get("address") or "").strip(" ,"))
-    if w and incident.get("cross_street"):
-        w += f", cross of {spoken_street(incident['cross_street'])}"
+    address = incident.get("address") or ""
+    w = spoken_street(re.sub(r"\s*@\s*", ", ", address).strip(" ,"))
+    cross = incident.get("cross_street") or ""
+    # an intersection picked (#213): its cross streets are its own two streets, already said
+    named = [c.strip().lower() for c in re.split(r"\s+and\s+|\s*[/&]\s*", cross) if c.strip()]
+    if w and cross and not (len(named) >= 2 and all(c in address.lower() for c in named)):
+        w += f", cross of {spoken_street(cross)}"
     return w
 
 

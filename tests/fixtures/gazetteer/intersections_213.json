@@ -1,0 +1,553 @@
+{
+"about": "Recorded from data/gazetteer.sqlite (US Census TIGER/Line 2025 roads, public domain) for the #213 intersection search tests: a few streets of Port Chester, Rye Brook and the towns around, and every place two of them meet. Streets only (no address points, lines or landmarks).",
+"streets": [
+[
+72,
+"arbor dr",
+"Arbor Dr"
+],
+[
+160,
+"beechwood blvd",
+"Beechwood Blvd"
+],
+[
+234,
+"boston post rd",
+"Boston Post Rd"
+],
+[
+473,
+"clinton st",
+"Clinton St"
+],
+[
+711,
+"e william st",
+"E William St"
+],
+[
+1115,
+"high st",
+"High St"
+],
+[
+1126,
+"highland st",
+"Highland St"
+],
+[
+1308,
+"king st",
+"King St"
+],
+[
+1488,
+"macri ave",
+"Macri Ave"
+],
+[
+1503,
+"main st",
+"Main St"
+],
+[
+1504,
+"main st e",
+"Main St E"
+],
+[
+1512,
+"manor pl",
+"Manor Pl"
+],
+[
+1517,
+"maple ave",
+"Maple Ave"
+],
+[
+1660,
+"n main st",
+"N Main St"
+],
+[
+1665,
+"n regent st",
+"N Regent St"
+],
+[
+1677,
+"n westchester ave",
+"N Westchester Ave"
+],
+[
+1985,
+"purchase st",
+"Purchase St"
+],
+[
+1991,
+"putnam ave",
+"Putnam Ave"
+],
+[
+1993,
+"putnam dr",
+"Putnam Dr"
+],
+[
+2094,
+"roanoke ave",
+"Roanoke Ave"
+],
+[
+2160,
+"s main st",
+"S Main St"
+],
+[
+2165,
+"s regent st",
+"S Regent St"
+],
+[
+2170,
+"s westchester ave",
+"S Westchester Ave"
+],
+[
+2334,
+"state rte 120a",
+"State Rte 120A"
+],
+[
+2497,
+"us hwy 1",
+"US Hwy 1"
+],
+[
+2556,
+"w main st",
+"W Main St"
+],
+[
+2562,
+"w william st",
+"W William St"
+],
+[
+2600,
+"weaver st",
+"Weaver St"
+],
+[
+2625,
+"west st",
+"West St"
+],
+[
+2629,
+"westchester ave",
+"Westchester Ave"
+],
+[
+2634,
+"westerleigh rd",
+"Westerleigh Rd"
+],
+[
+2640,
+"westview ave",
+"Westview Ave"
+],
+[
+2668,
+"willett ave",
+"Willett Ave"
+],
+[
+2678,
+"willow run rd",
+"Willow Run Rd"
+],
+[
+2717,
+"woodland dr",
+"Woodland Dr"
+]
+],
+"intersections": [
+[
+72,
+1308,
+41.033911,
+-73.673097,
+"Rye Brook"
+],
+[
+72,
+1308,
+41.033911,
+-73.673097,
+"Greenwich"
+],
+[
+160,
+1308,
+41.02171,
+-73.670146,
+"Port Chester"
+],
+[
+160,
+2717,
+41.022436,
+-73.671538,
+"Port Chester"
+],
+[
+160,
+2717,
+41.022436,
+-73.671538,
+"Rye Brook"
+],
+[
+160,
+2717,
+41.02425,
+-73.674533,
+"Rye Brook"
+],
+[
+234,
+1115,
+40.99289,
+-73.676289,
+"Port Chester"
+],
+[
+234,
+1512,
+40.926749,
+-73.752747,
+"Larchmont"
+],
+[
+234,
+1985,
+40.981252,
+-73.68383,
+"Rye"
+],
+[
+234,
+2165,
+40.995012,
+-73.673364,
+"Port Chester"
+],
+[
+234,
+2600,
+40.935209,
+-73.747706,
+"Town of Mamaroneck"
+],
+[
+234,
+2717,
+40.955553,
+-73.713169,
+"Rye"
+],
+[
+473,
+2165,
+41.000175,
+-73.675557,
+"Port Chester"
+],
+[
+1115,
+1517,
+40.981569,
+-73.695829,
+"Rye"
+],
+[
+1126,
+1308,
+41.006812,
+-73.664299,
+"Port Chester"
+],
+[
+1126,
+1660,
+41.00359,
+-73.660842,
+"Port Chester"
+],
+[
+1126,
+2668,
+41.006757,
+-73.663077,
+"Port Chester"
+],
+[
+1308,
+1517,
+40.968573,
+-73.714755,
+"Harrison"
+],
+[
+1308,
+1660,
+41.000296,
+-73.663861,
+"Port Chester"
+],
+[
+1308,
+1665,
+41.013981,
+-73.667822,
+"Port Chester"
+],
+[
+1308,
+1991,
+41.013981,
+-73.667822,
+"Port Chester"
+],
+[
+1308,
+2160,
+41.000296,
+-73.663861,
+"Port Chester"
+],
+[
+1308,
+2629,
+41.000296,
+-73.663861,
+"Port Chester"
+],
+[
+1308,
+2668,
+41.003492,
+-73.663626,
+"Port Chester"
+],
+[
+1308,
+2678,
+41.049442,
+-73.684022,
+"Greenwich"
+],
+[
+1488,
+1504,
+41.036519,
+-73.747449,
+"Harrison"
+],
+[
+1503,
+1512,
+40.926749,
+-73.752747,
+"Larchmont"
+],
+[
+1503,
+2600,
+40.935209,
+-73.747706,
+"Town of Mamaroneck"
+],
+[
+1517,
+2497,
+41.03492,
+-73.622882,
+"Greenwich"
+],
+[
+1660,
+1991,
+41.011837,
+-73.655859,
+"Port Chester"
+],
+[
+1660,
+2160,
+41.000296,
+-73.663861,
+"Port Chester"
+],
+[
+1660,
+2629,
+41.000296,
+-73.663861,
+"Port Chester"
+],
+[
+1660,
+2668,
+41.002576,
+-73.661718,
+"Port Chester"
+],
+[
+1665,
+1991,
+41.013981,
+-73.667822,
+"Port Chester"
+],
+[
+1665,
+2165,
+41.005287,
+-73.674137,
+"Port Chester"
+],
+[
+1665,
+2629,
+41.005287,
+-73.674137,
+"Port Chester"
+],
+[
+1677,
+1985,
+41.012634,
+-73.7022,
+"Harrison"
+],
+[
+1677,
+2170,
+41.00827,
+-73.696158,
+"Harrison"
+],
+[
+1677,
+2170,
+41.013618,
+-73.71125,
+"Harrison"
+],
+[
+1677,
+2170,
+41.013892,
+-73.716722,
+"Harrison"
+],
+[
+1677,
+2634,
+41.013316,
+-73.703738,
+"Harrison"
+],
+[
+1985,
+2170,
+41.008698,
+-73.698817,
+"Harrison"
+],
+[
+1985,
+2634,
+41.013713,
+-73.703372,
+"Harrison"
+],
+[
+1991,
+1993,
+41.01286,
+-73.661322,
+"Port Chester"
+],
+[
+1991,
+1993,
+41.014397,
+-73.663299,
+"Port Chester"
+],
+[
+1991,
+2668,
+41.012961,
+-73.659874,
+"Port Chester"
+],
+[
+2094,
+2640,
+41.000281,
+-73.682765,
+"Rye Brook"
+],
+[
+2094,
+2640,
+41.001943,
+-73.683714,
+"Rye Brook"
+],
+[
+2160,
+2629,
+41.000296,
+-73.663861,
+"Port Chester"
+],
+[
+2165,
+2562,
+41.001844,
+-73.674693,
+"Port Chester"
+],
+[
+2165,
+2625,
+40.999917,
+-73.675521,
+"Port Chester"
+],
+[
+2165,
+2629,
+41.005287,
+-73.674137,
+"Port Chester"
+],
+[
+2334,
+2668,
+41.003495,
+-73.663607,
+"Port Chester"
+]
+]
+}

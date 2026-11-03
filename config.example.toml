@@ -138,6 +138,15 @@ home_lon = -73.6640
 home_lat = 41.0130
 home_zoom = 13.4
 
+[geo]
+# The CAD location box's intersection search (#213): "N Main St / Westchester Ave", "n main & west". The towns it
+# searches (as the gazetteer names them); results in Port Chester and Rye Brook first, then the rest nearest
+# headquarters first. Leave out for these defaults.
+search_towns = ["Port Chester", "Rye Brook", "Rye", "Harrison", "Greenwich", "Mamaroneck", "Larchmont",
+                "Town of Mamaroneck"]
+hq_lat = 41.00253                  # PCFD Headquarters, 209 Westchester Ave
+hq_lon = -73.66692
+
 [cad]
 # PCFD self-dispatch console (/cad). Incidents, units, run cards and the dispatch log live in one
 # SQLite file, outside captures/ (whose cleaner deletes old files).

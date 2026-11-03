@@ -257,9 +257,11 @@ class _Ctx:
 
 
 class PlaceIndex:
-    def __init__(self, gaz, priority: tuple[str, ...] | None = None):
+    def __init__(self, gaz, priority: tuple[str, ...] | None = None, crossings=None):
         from .gazetteer import TOWN_PRIORITY
         self.gaz = gaz
+        # two streets typed ("n main / west"): the intersection search's answer (#213, intersections.py), when set
+        self.crossings = crossings
         self.priority = tuple(priority or TOWN_PRIORITY)
         self.places: list[dict] = []           # landmarks first, then the places table's "place" rows
         for lm in gaz.landmarks:
@@ -298,6 +300,7 @@ class PlaceIndex:
         for pair, pts in gaz._inters.items():
             for sid in pair:
                 self._cross.setdefault(sid, []).append((pair, pts))
+        self._names = {toks for toks, _o in aliases}
         self.counts = {"places": len(self.places), "markers": sum(len(v) for v in self.markers.values()),
                        "streets": len(self.street_ids)}
 
@@ -319,6 +322,15 @@ class PlaceIndex:
             r["aliases"] = [a for a in (r["aliases"] or "").split("|") if a]
         return rows
 
+    def names_place(self, text: str, extra: list[dict] = ()) -> bool:
+        """text is a named place's whole name or alias ("Whole Foods Market"), or one of the department's own."""
+        q = tuple(norm_tokens(text))
+        if not q:
+            return False
+        if q in self._names:
+            return True
+        return any(q == tuple(norm_tokens(n)) for r in (extra or ()) for n in [r.get("name") or "", *(r.get("aliases") or [])])
+
     # -------------------------------------------------------------------------- search
 
     def search(self, text: str, near: tuple[float, float] | None = None, limit: int = 8,
@@ -331,6 +343,13 @@ class PlaceIndex:
         q = norm_tokens(text)
         if not q or (len(q) == 1 and len(q[0]) < 2 and not q[0].isdigit()):
             return []
+        if self.crossings is not None:          # "n main / west": where they meet, the location box's order
+            found = self.crossings.search(text, limit=limit, is_place=lambda t: self.names_place(t, extra))
+            if found and found["results"]:
+                n = len(found["results"])
+                return [dict(self._item("intersection", r["name"], r["town"], r["lat"], r["lon"], "tiger",
+                                        r["confidence"], near), score=round(float(n - k), 3))
+                        for k, r in enumerate(found["results"])]
         out: list[dict] = []
         hw = parse_highway(q)
         if hw is not None:

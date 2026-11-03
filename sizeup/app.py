@@ -318,8 +318,11 @@ class App:
         # PCFD's own dispatch console: incidents, units, run cards (state/cad.sqlite).
         self.cad = Cad.from_config(cfg, geocoder=self._geocode_text if self.gaz is not None else None, log=log)
         if self.gaz is not None:           # the place search over the same gazetteer (a note's "@", #67)
+            from sizeup.geo.intersections import IntersectionSearch
             from sizeup.geo.places import PlaceIndex
-            self.cad.place_source = lambda: PlaceIndex(self.gaz)
+            # two streets typed, "N Main St / Westchester Ave" (#213): where they meet, in [geo] search_towns
+            self.cad.cross_source = lambda: IntersectionSearch(self.gaz, towns=cfg.geo_search_towns, hq=cfg.geo_hq)
+            self.cad.place_source = lambda: PlaceIndex(self.gaz, crossings=self.cad.crossings())
             # a new call's location: its place's address, its block's cross streets, what is at a map click (#204)
             from sizeup.geo.pagegeo import location_detail, what_is_here
             self.cad.detail_source = lambda m: location_detail(self.gaz, m)
@@ -496,6 +499,8 @@ class App:
             town = f", {m.municipality}" if m.municipality else ""
             name = m.label[:-len(town)] if town and m.label.endswith(town) else m.label
             return {"place": name, "place_address": m.street or ""}
+        if m.kind == "intersection":         # both streets: the cross streets when it is picked (#213)
+            return {"street": m.street or "", "house_number": "", "streets": [m.street or "", m.cross_street or ""]}
         return {"street": m.street or "", "house_number": m.house_number or ""}
 
     # -- persistence ----------------------------------------------------------------------------

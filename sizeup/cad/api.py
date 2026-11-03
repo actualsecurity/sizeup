@@ -23,7 +23,9 @@ GET  /api/cad/stream                      SSE: the state, then each second only 
 GET  /api/cad/geocode?q=209 westchester   location suggestions, Port Chester / Rye Brook first, each with its town
                                           (with the place search's mile markers, exits and named places, #67)
                                           each with place, street_address, cross (the streets at each end of its block)
-                                          and block (for the map), #204
+                                          and block (for the map), #204; two streets typed ("N Main St / Westchester
+                                          Ave", "n main & west", #213): where they meet in our towns, at most 25 (total,
+                                          more), cross = both streets; a street under two letters: error
 GET  /api/cad/geocode/here?lat=&lon=      the new call's map (#204): the address point, intersection and named place
                                           nearest a click (each a suggestion as above), and the street under it; read only
 GET  /api/cad/places?q=287 eb mm 10&near=lat,lon&iid=&limit=
