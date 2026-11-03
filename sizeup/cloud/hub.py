@@ -1070,12 +1070,7 @@ class HubApp(App):
         threading.Thread(target=self._aws_watch, name="aws-sweep", daemon=True).start()
         self._started = True                      # the phone pre-alert: the hub's own subscription
         self.prealert_sync()
-        self.roads.start()                        # 511NY's layers for the maps (sizeup/roads.py)
-        self.gis.start()                          # the county GIS layers (sizeup/gis.py)
-        self.trains.start()                       # Metro-North's trains (sizeup/trains.py)
-        self.aircraft.start()                     # aircraft near HPN, while someone looks (sizeup/aircraft.py)
-        self.weather.start()                      # NWS alerts, conditions, radar; NOAA tides (sizeup/weather.py)
-        self.datasources.start()                  # the slow pulls' schedule, Settings > Data sources (sizeup/datasources.py)
+        self.start_layers()                       # the maps' data, as App starts it (road projects too: #225)
         if self.vocab is not None and self.vocab.state()["state"] == "PENDING":
             self.vocab.poll()
         try:
@@ -1088,12 +1083,7 @@ class HubApp(App):
         self._stopping.set()
         if self.prealert is not None:
             self.prealert.stop()
-        self.roads.stop()
-        self.gis.stop()
-        self.trains.stop()
-        self.aircraft.stop()
-        self.weather.stop()
-        self.datasources.stop()
+        self.stop_layers()
         if self.aws is not None:
             self.aws.stop()
         try:

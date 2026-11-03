@@ -396,6 +396,127 @@ def test_the_hub_serves_the_layer(tmp_path):
         h.close()
 
 
+def wait_for(cond, timeout=10.0):
+    import time
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if cond():
+            return True
+        time.sleep(0.05)
+    return cond()
+
+
+def test_the_hub_starts_the_reader_and_a_look_reads_the_sources(tmp_path):
+    """#225: HubApp.start() never started the roadwork thread, so on the hub every source this module reads said
+    "waiting for the first read" forever (only the Thruway's, read by roads.py, came). The hub's own start, a
+    source on (a local WZDx feed), the layer's GET: the reader runs and the source is read."""
+    import http.server
+    import threading
+    from tests.test_cloud import HubRun, hub_cfg
+    body = fx("wzdx_constructed.geojson")
+    hits = []
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            hits.append(self.path)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/geo+json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+    feed = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=feed.serve_forever, daemon=True).start()
+    h = HubRun(hub_cfg(tmp_path, roadwork_wzdx_url=f"http://127.0.0.1:{feed.server_address[1]}/wzdx"))
+    try:
+        assert h.app.roadwork.running                                   # started by the hub, as by App
+        assert hits == []                                               # nobody looked yet: nothing read
+        d = h.get("/api/cad/roadprojects")
+        assert d["reader"] == "" and not {s["name"]: s for s in d["sources"]}["wzdx"].get("reader")
+        assert wait_for(lambda: {s["name"]: s for s in h.get("/api/cad/roadprojects")["sources"]}["wzdx"]["at"])
+        assert hits == ["/wzdx"]
+        row = next(r for r in h.app.datasources.public()["sources"] if r["key"] == "roadwork")
+        assert row["last_fetched"] and "reader" not in row["error"]
+    finally:
+        h.close()
+        feed.shutdown()
+    assert wait_for(lambda: not h.app.roadwork.running, 5.0)          # and the hub stops it
+
+
+def test_the_reader_survives_a_surprise_and_says_so_while_it_lasts(gaz, monkeypatch):
+    """Anything raised outside refresh's own try (the cache, a bad schedule): logged, the thread carries on, the
+    panel and Settings > Data sources say it; the next good pass clears it."""
+    logs = []
+    p, f = provider(gaz)
+    p.log = logs.append
+    passes, real = [], p.due
+
+    def due():
+        passes.append(1)
+        if len(passes) == 1:
+            raise TypeError("Object of type bytes is not JSON serializable")
+        return real()
+    monkeypatch.setattr(p, "due", due)
+    p.ask()                                                             # wakes it at once after the first pass
+    p.start()
+    try:
+        assert wait_for(lambda: (p.ask(), all(x.status["at"] for x in p.feeds))[1])
+        assert p.running and len(passes) >= 2                          # the surprise didn't end it
+        assert any(m.startswith("roadwork: reader error (TypeError: Object of type bytes") for m in logs)
+        assert p.loop_error == "" and p.reader_problem() == "" and p.public()["reader"] == ""
+    finally:
+        p.stop()
+    assert wait_for(lambda: not p.running, 5.0)
+
+    q, _ = provider(gaz)
+    assert q.reader_problem() == ""                                     # never started, nobody looked: nothing to say
+    q.get("/api/cad/roadprojects", "")
+    assert q.reader_problem() == "the reader isn't running"             # the hub before #225, as its panel now says
+    q._started, q.loop_error = True, "TypeError: boom"
+    assert q.reader_problem() == "the reader stopped (TypeError: boom)"  # started, then gone
+    d = q.public()
+    assert d["reader"].startswith("the reader stopped") and all(s["reader"] for s in d["sources"] if s["name"] in
+                                                                ("pc_alerts", "nysdot"))
+    from sizeup.datasources import roadwork_source
+    st = roadwork_source(q).status()
+    assert st["error"].startswith("Road projects: the reader stopped") and st["next"] is None
+
+
+def test_a_save_that_fails_is_logged_and_the_read_kept(gaz, tmp_path, monkeypatch):
+    logs = []
+    p, f = provider(gaz)
+    p.log = logs.append
+    p.cache = tmp_path / "roadprojects.json"
+    from types import SimpleNamespace
+
+    def dumps(*a, **k):
+        raise TypeError("Object of type bytes is not JSON serializable")
+    monkeypatch.setattr(rw, "json", SimpleNamespace(dumps=dumps, loads=json.loads))
+    p.ask()
+    assert p.tick() == 3                                                # every source read, none raised
+    assert all(x.status["at"] == NOW for x in p.feeds) and not p.cache.exists()
+    assert any(m.startswith("roadwork: cache not saved (TypeError") for m in logs)
+
+
+def test_a_next_from_the_cache_or_a_clock_step_is_never_beyond_a_schedule(gaz, tmp_path):
+    """A cached read stamped ahead of this clock (a host clock behind the file's): next at most one interval off;
+    a next no schedule could set (a wall-clock step back): the source is due now."""
+    p, f = provider(gaz)
+    p.cache = tmp_path / "roadprojects.json"
+    p.ask()
+    p.tick()
+    clock = Clock(NOW - 50)                                             # the file's "at" 50 s ahead of this host
+    q = RoadProjects([Feed(x.name, x.short, x.label, x.link, "", x.url, x.kind, x.every_s, key=x.key, towns=x.towns) for x in p.feeds],
+                     cache=p.cache, clock=clock, fetch=f, log=lambda m: None)
+    assert all(x.status["at"] == NOW and x.status["next"] <= clock() + x.every_s for x in q.feeds)
+    q.ask()
+    assert q.due() == []                                                # just read: nothing due
+    q.feeds[0].status["next"] = clock() + 30 * 86400                    # a clock that stepped back a month
+    assert [x.name for x in q.due()] == [q.feeds[0].name]
+
+
 def test_the_page_draws_the_group_the_filter_and_the_incident_line():
     js = (STATIC / "roadprojects.js").read_text()
     html = (STATIC / "cad.html").read_text()
