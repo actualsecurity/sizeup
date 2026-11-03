@@ -224,6 +224,12 @@ class Cad:
         # PlaceIndex over its gazetteer (once, on first use); None: no gazetteer, no place suggestions.
         self.place_source: Callable[[], object] | None = None
         self._place_ix = None
+        # A new call's location (#204), set by the app over the same gazetteer (sizeup/geo/pagegeo.py):
+        # detail_source(suggestion) -> {place, street_address, address_checked, cross, block} (location_detail) and
+        # here_source(lat, lon, places) -> what is at a point on the map (what_is_here). None: not here.
+        self.detail_source: Callable[[dict], dict] | None = None
+        self.here_source: Callable[..., dict] | None = None
+        self._details: dict[tuple, dict] = {}
         self._place_lock = threading.Lock()
         # The radios' side of Settings > Radios > Channels / Vocabulary (sizeup/channels.py): the app
         # (App) answers channels_locked(), set_talkgroup(tg, record), channels_changed(), aws_channels(), record_only(),
@@ -428,6 +434,9 @@ class Cad:
                      ("phone", 40), ("remarks", 4000), ("geo_label", 200)):
             if not partial or k in body:
                 out[k] = _text(body, k, n)
+        for k, n in (("place", 120), ("place_address", 200)):
+            if k in body:
+                out[k] = _text(body, k, n)
         if "emergency" in body:
             e = _bool(body, "emergency")
             if e is not None:
@@ -482,9 +491,32 @@ class Cad:
         if h:
             f["lat"], f["lon"], f["geo_label"] = h["lat"], h["lon"], h["label"]
 
+    @staticmethod
+    def _place(f: dict, old: dict | None = None) -> None:
+        """A named place's location (#204): the address is shown "<street address> @ <place>" ("575 Boston Post Rd @
+        Whole Foods Market"; "@ Whole Foods Market" when the data has no street address), and the place and its street
+        address are kept on their own (place, place_address). place given: the address made from it (place_address,
+        else what the address says before the "@", else the address typed). An edit of the address alone keeps the place
+        while the address still ends with "@ <place>" (the street address typed in front of it); else the place goes."""
+        if "place" not in f and ("address" not in f or not (old or {}).get("place")):
+            if old is None:                                 # a new event without one
+                f["place"] = f["place_address"] = ""
+            return
+        place = f["place"] if "place" in f else old["place"]
+        addr = f.get("address", old["address"] if old else "") or ""
+        tail = f"@ {place}"
+        before = addr[:-len(tail)].strip() if place and addr.lower().endswith(tail.lower()) else None
+        if not place or ("place" not in f and before is None):     # none, or the address no longer names it
+            f["place"] = f["place_address"] = ""
+            return
+        street = (before if before is not None else (f.get("place_address") or addr)).strip()[:200]
+        f["place"], f["place_address"] = place, street
+        f["address"] = (f"{street} {tail}" if street else tail)[:200]
+
     def create(self, body: dict) -> dict:
         """Accept event (Event info): numbered at once; emergency -> Pending events, else Non-emergency."""
         f = self._fields(body, partial=False)
+        self._place(f)
         airport.default_location(f)            # an Airport event with no location: the terminal (#87)
         self._auto_geo(f)
         iid = self.store.create_incident(**f, source="manual", status="pending", operator=_text(body, "operator", OPERATOR_MAX))
@@ -494,6 +526,8 @@ class Cad:
 
     def update(self, iid: int, body: dict) -> dict:
         f = self._fields(body, partial=True)
+        if "place" in f or "address" in f:
+            self._place(f, self.store.incident(iid))
         if "address" in f and "lat" not in f:      # moved without a picked point: re-place or unpin
             f["lat"] = f["lon"] = None
             f["geo_label"] = ""
@@ -1200,7 +1234,63 @@ class Cad:
         known = {(m["label"].split(",")[0].strip().lower()) for m in ms}
         named = [self._as_match(h) for h in hits if h["kind"] == "place" and h["label"].lower() not in known]
         rest = sorted(ms + named, key=lambda m: -m["confidence"]) if named else ms
-        return {"matches": (highway + rest)[:6]}
+        return {"matches": [self._detailed(m) for m in (highway + rest)[:6]]}
+
+    def _detailed(self, m: dict) -> dict:
+        """A suggestion with what the new call's form fills from it (#204): place (a named place's name),
+        street_address (an address's, or the place's from the places data; '' when there is none), address_checked
+        (found in the address points), cross (the streets at each end of its block) and block (the map's)."""
+        m = dict(m)
+        kind = m.get("kind") or ""
+        base = {"place": m.get("place") or "", "street_address": "", "address_checked": False, "cross": "", "block": None}
+        if kind == "address":
+            base["street_address"] = f"{m.get('house_number') or ''} {m.get('street') or ''}".strip()
+        elif kind in ("landmark", "place"):
+            base["street_address"] = (m.get("place_address") or "").strip()
+        if self.detail_source is not None and kind in ("address", "landmark", "place"):
+            key = (kind, m.get("label"), m.get("lat"), m.get("lon"), m.get("place_address"), m.get("street"))
+            got = self._details.get(key)
+            if got is None:
+                try:
+                    got = self.detail_source(m) or {}
+                except Exception as e:              # the suggestion as it was, without them
+                    self.log(f"CAD: location detail failed for {m.get('label')!r} ({type(e).__name__}: {e})")
+                    got = {}
+                if len(self._details) > 500:
+                    self._details.clear()
+                self._details[key] = got
+            base.update({k: v for k, v in got.items() if k in base and (v or k in ("cross", "block"))})
+        m.update(base)
+        return m
+
+    def here(self, query: dict) -> dict:
+        """GET /api/cad/geocode/here?lat=&lon=: what is at a point of the new call's map (#204): the nearest address
+        point, intersection and named place, each a location suggestion (with its cross streets), and the street under
+        it (offered as a cross street). Read only."""
+        def num(k: str, lo: float, hi: float) -> float:
+            try:
+                v = float((query.get(k) or [""])[0])
+            except ValueError:
+                raise CadError(f"{k}: a number") from None
+            if not lo <= v <= hi:
+                raise CadError(f"{k}: in the area")
+            return v
+        lat, lon = num("lat", 40.0, 42.0), num("lon", -75.0, -72.0)
+        if self.here_source is None:
+            return {"address": None, "intersection": None, "place": None, "street": None, "error": "geocoder unavailable"}
+        ix = self.place_index()
+        places = [{"name": p["name"], "address": p.get("address") or "", "muni": p.get("muni") or "", "lat": p["lat"],
+                   "lon": p["lon"]} for p in (getattr(ix, "places", None) or [])]
+        places += [{"name": r.get("label") or r["name"], "address": "", "muni": r.get("muni") or "", "lat": r["lat"],
+                    "lon": r["lon"]} for r in self.local_places() if r.get("lat") is not None and r.get("lon") is not None]
+        got = self.here_source(lat, lon, places)
+        L = self.lists
+        for k in ("address", "intersection", "place"):
+            m = got.get(k)
+            if m:
+                m["town"] = L.town_of(m.get("municipality") or "")
+                got[k] = self._detailed(m)
+        return got
 
     # -- the place search: a note's "@", the location box (#67) -------------------------------------
 
@@ -1234,8 +1324,12 @@ class Cad:
         """A place-search hit as a location box suggestion (the gazetteer's shape)."""
         conf = round(min(0.99, max(0.2, h.get("quality", 0.6))), 2)
         kind = {"milemarker": "mile marker"}.get(h["kind"], h["kind"])       # as the box shows it
-        return {"label": h["label"], "lat": h["lat"], "lon": h["lon"], "kind": kind, "municipality": h["sub"],
-                "town": h["sub"], "precision": h.get("category") or h["kind"], "confidence": conf}
+        out = {"label": h["label"], "lat": h["lat"], "lon": h["lon"], "kind": kind, "municipality": h["sub"],
+               "town": h["sub"], "precision": h.get("category") or h["kind"], "confidence": conf}
+        if h["kind"] == "place":         # a named place: its name, and its street address from the data (#204)
+            out["place"] = h["label"]
+            out["place_address"] = "" if h.get("source") == "local" else (h.get("detail") or "")
+        return out
 
     def search_places(self, query: dict) -> dict:
         """GET /api/cad/places?q=&near=lat,lon&iid=: ranked places of every kind (addresses, intersections,

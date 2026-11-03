@@ -39,6 +39,8 @@ from __future__ import annotations
 
 import collections
 import difflib
+import heapq
+import json
 import math
 import re
 import sqlite3
@@ -657,3 +659,387 @@ def locate_page(gaz: Gazetteer, text: str, departments=()) -> PageGeo:
     """A page's location, held to the towns of its tones (``departments``: the tone names of ours; one that names no
     town, "PCFD", holds it to the DISTRICT). No departments: no town to hold it to."""
     return locator(gaz).locate(text, home_towns(departments) or (DISTRICT if departments else ()))
+
+
+# ------------------------------------------------------------------ a typed location's block (#204)
+#
+# A new call's location, picked in the CAD's location box (or on its map), fills "Cross streets" with the streets at
+# each end of its block: the street's TIGER centrelines (data/gazetteer.sqlite ``lines``) walked from the point both
+# ways to the first place another street meets it (``intersections``: the same meeting points the page check uses,
+# ``PageLocator._meets``). A name that only continues the street ("S Regent St" -> "N Regent St") is no cross street.
+# The data can't tell (no centreline near the point, an end that runs out with nothing meeting it, a place set back
+# between streets): that side is left out, never guessed.
+
+BLOCK_SNAP_M = 25             # where a cross street meets the street: on its line within this
+BLOCK_NEAR_M = 80             # an address point at most this far from its street's line
+PLACE_STREET_M = 60           # a place's own point (no address): the nearest street this close ...
+PLACE_STREET_GAP_M = 15       # ... and the next street at least this much farther (else: a corner, can't tell)
+HERE_ADDRESS_M = 35           # a map click (what_is_here): the address point this close
+HERE_INTERSECTION_M = 30      # ... the intersection
+HERE_PLACE_M = 40             # ... the named place
+HERE_STREET_M = 25            # ... the street centreline (offered as a cross street)
+_DIR = {"n", "s", "e", "w", "north", "south", "east", "west"}
+
+
+def _base(name: str) -> str:
+    """'S Regent St' -> 'regent st': a street and its continuation share it."""
+    w = name.lower().split()
+    while w and w[0] in _DIR:
+        w = w[1:]
+    return " ".join(w)
+
+
+def _seg_project(P, A, B):
+    """-> (distance, t 0..1, the point) from P to the segment A-B (metres)."""
+    ax, ay = A
+    vx, vy = B[0] - ax, B[1] - ay
+    L2 = vx * vx + vy * vy
+    t = 0.0 if L2 == 0 else max(0.0, min(1.0, ((P[0] - ax) * vx + (P[1] - ay) * vy) / L2))
+    Q = (ax + t * vx, ay + t * vy)
+    return math.hypot(P[0] - Q[0], P[1] - Q[1]), t, Q
+
+
+class _Blocks:
+    """Each street's centreline as a graph (vertices in metres; the meeting points marked), built on first use."""
+
+    def __init__(self, loc: PageLocator):
+        self.loc, self.gaz = loc, loc.gaz
+        self.lines: dict[int, list[np.ndarray]] = collections.defaultdict(list)
+        try:
+            db = sqlite3.connect(f"file:{self.gaz.path}?mode=ro", uri=True)
+            try:
+                rows = db.execute("SELECT street_id, coords FROM lines").fetchall()
+            finally:
+                db.close()
+        except sqlite3.Error:
+            rows = []
+        for sid, coords in rows:
+            arr = np.asarray(json.loads(coords), dtype=float)
+            if len(arr) >= 2:
+                x, y = _xy(arr[:, 1], arr[:, 0])
+                self.lines[sid].append(np.column_stack([x, y]))
+        self.bbox = {sid: (np.min([a.min(axis=0) for a in ls], axis=0), np.max([a.max(axis=0) for a in ls], axis=0))
+                     for sid, ls in self.lines.items()}
+        self.graphs: dict[int, tuple] = {}
+        self._addr = None
+        self._inter = None
+
+    # -- the graph
+
+    def graph(self, sid: int):
+        g = self.graphs.get(sid)
+        if g is not None:
+            return g
+        pos: list[tuple[float, float]] = []
+        index: dict[tuple[float, float], int] = {}
+        adj: list[dict[int, float]] = []
+
+        def vertex(x: float, y: float) -> int:
+            k = (round(x, 1), round(y, 1))
+            if k not in index:
+                index[k] = len(pos)
+                pos.append((float(x), float(y)))
+                adj.append({})
+            return index[k]
+
+        def link(a: int, b: int) -> None:
+            if a != b:
+                d = math.hypot(pos[a][0] - pos[b][0], pos[a][1] - pos[b][1])
+                adj[a][b] = adj[b][a] = d
+
+        for arr in self.lines.get(sid, ()):
+            prev = vertex(*arr[0])
+            for x, y in arr[1:]:
+                cur = vertex(x, y)
+                link(prev, cur)
+                prev = cur
+        marks: dict[int, set[int]] = collections.defaultdict(set)
+        for c in sorted(self.loc.adj.get(sid, ())):
+            for M in self.loc._meets(sid, c):
+                best = None
+                for a in range(len(adj)):
+                    for b in adj[a]:
+                        if b < a:
+                            continue
+                        d, t, Q = _seg_project(M, pos[a], pos[b])
+                        if best is None or d < best[0]:
+                            best = (d, a, b, Q)
+                if best is None or best[0] > BLOCK_SNAP_M:
+                    continue
+                _d, a, b, Q = best
+                if math.hypot(Q[0] - pos[a][0], Q[1] - pos[a][1]) < 3:
+                    w = a
+                elif math.hypot(Q[0] - pos[b][0], Q[1] - pos[b][1]) < 3:
+                    w = b
+                else:                                   # the meeting point mid-segment: split it there
+                    w = vertex(*Q)
+                    del adj[a][b], adj[b][a]
+                    link(a, w)
+                    link(w, b)
+                marks[w].add(c)
+        g = (pos, adj, dict(marks))
+        self.graphs[sid] = g
+        return g
+
+    def near_line(self, sid: int, P) -> tuple[float, int, int, tuple[float, float]] | None:
+        """The closest point of street sid's centreline to P: (distance, a, b, the point) on its edge a-b."""
+        pos, adj, _m = self.graph(sid)
+        best = None
+        for a in range(len(adj)):
+            for b in adj[a]:
+                if b < a:
+                    continue
+                d, _t, Q = _seg_project(P, pos[a], pos[b])
+                if best is None or d < best[0]:
+                    best = (d, a, b, Q)
+        return best
+
+    def _end(self, sid: int, start: int, cost: float, banned: tuple[int, int]):
+        """From vertex start (cost metres from the point), along the street away from edge ``banned``: the first
+        vertex another street meets it (not one that only continues it) -> (vertex, [street ids], path) or None."""
+        pos, adj, marks = self.graph(sid)
+        own = _base(self.gaz.streets[sid].name)
+        dist = {start: cost}
+        prev: dict[int, int] = {}
+        heap = [(cost, start)]
+        while heap:
+            d, v = heapq.heappop(heap)
+            if d > dist.get(v, math.inf) or d > BLOCK_MAX_M:
+                continue
+            cross = [c for c in marks.get(v, ()) if _base(self.gaz.streets[c].name) != own]
+            if cross:
+                path = [v]
+                while path[-1] in prev:
+                    path.append(prev[path[-1]])
+                return v, cross, path[::-1]
+            for w, L in adj[v].items():
+                if {v, w} == set(banned):
+                    continue
+                nd = d + L
+                if nd < dist.get(w, math.inf):
+                    dist[w], prev[w] = nd, v
+                    heapq.heappush(heap, (nd, w))
+        return None
+
+    def _number_near(self, sid: int, P) -> int | None:
+        st = self.gaz.streets[sid]
+        best = None
+        for lst in st.addrs.values():
+            for num, _suf, lat, lon in lst:
+                x, y = _xy(lat, lon)
+                d = math.hypot(float(x) - P[0], float(y) - P[1])
+                if best is None or d < best[0]:
+                    best = (d, num)
+        return best[1] if best and best[0] <= 150 else None
+
+    def block(self, sid: int, lat: float, lon: float, max_off: float = BLOCK_NEAR_M) -> dict | None:
+        """The block of street sid that (lat, lon) is on: {street, crosses: [one name per end, lower house numbers
+        first; "E William St / W William St" when two meet at that end], ends: [{name, lat, lon}], path: [[lon, lat],
+        ...] from one end to the other}, or None when the point is off the street or neither end can be told."""
+        if sid not in self.lines:
+            return None
+        P = tuple(float(v) for v in _xy(lat, lon))
+        near = self.near_line(sid, P)
+        if near is None or near[0] > max_off:
+            return None
+        _d, a, b, Q = near
+        pos, _adj, _m = self.graph(sid)
+        sides = []
+        for s, o in ((a, b), (b, a)):
+            r = self._end(sid, s, math.hypot(Q[0] - pos[s][0], Q[1] - pos[s][1]), (s, o))
+            if r is not None:
+                sides.append(r)
+        if len(sides) == 2 and sides[0][0] == sides[1][0]:
+            sides = sides[:1]                          # both ways round to the same corner (a loop)
+        if not sides:
+            return None
+        if len(sides) == 2:
+            nums = [self._number_near(sid, pos[v]) for v, _c, _p in sides]
+            if None not in nums and nums[1] < nums[0]:
+                sides = sides[::-1]
+        names = []
+        for _v, cross, _p in sides:
+            n = " / ".join(sorted({self.gaz.streets[c].name for c in cross}))
+            if n not in names:
+                names.append(n)
+        ends = []
+        for v, _c, _p in sides:
+            la, lo = _latlon(*pos[v])
+            ends.append({"name": " / ".join(sorted({self.gaz.streets[c].name for c in _c})),
+                         "lat": round(la, 6), "lon": round(lo, 6)})
+        pts = [pos[v] for v in sides[0][2][::-1]] + [Q] + ([pos[v] for v in sides[1][2]] if len(sides) == 2 else [])
+        path = []
+        for x, y in pts:
+            la, lo = _latlon(x, y)
+            if not path or path[-1] != [round(lo, 6), round(la, 6)]:
+                path.append([round(lo, 6), round(la, 6)])
+        return {"street": self.gaz.streets[sid].name, "crosses": names, "ends": ends, "path": path}
+
+    # -- what is near a point
+
+    def streets_near(self, lat: float, lon: float, within: float) -> list[tuple[float, int]]:
+        """[(metres to its centreline, street id)] for the streets within ``within``, nearest first."""
+        P = tuple(float(v) for v in _xy(lat, lon))
+        out = []
+        for sid, (lo, hi) in self.bbox.items():
+            if not (lo[0] - within <= P[0] <= hi[0] + within and lo[1] - within <= P[1] <= hi[1] + within):
+                continue
+            n = self.near_line(sid, P)
+            if n is not None and n[0] <= within:
+                out.append((n[0], sid))
+        return sorted(out)
+
+    def addresses(self):
+        if self._addr is None:
+            rows = [(sid, num, suf, muni, la, lo) for sid, st in self.gaz.streets.items()
+                    for muni, lst in st.addrs.items() for num, suf, la, lo in lst]
+            xy = np.column_stack(_xy([r[4] for r in rows], [r[5] for r in rows])) if rows else np.zeros((0, 2))
+            self._addr = (rows, xy)
+        return self._addr
+
+    def intersections(self):
+        if self._inter is None:
+            rows = [(a, b, la, lo, muni) for (a, b), pts in self.gaz._inters.items() for la, lo, muni in pts]
+            xy = np.column_stack(_xy([r[2] for r in rows], [r[3] for r in rows])) if rows else np.zeros((0, 2))
+            self._inter = (rows, xy)
+        return self._inter
+
+
+def _blocks(gaz: Gazetteer) -> _Blocks:
+    loc = locator(gaz)
+    b = getattr(loc, "_blocks", None)
+    if b is None:
+        b = loc._blocks = _Blocks(loc)
+    return b
+
+
+def street_named(gaz: Gazetteer, name: str, lat: float, lon: float) -> int | None:
+    """The street called ``name`` (as the gazetteer names it) nearest the point."""
+    want = (name or "").strip().lower()
+    ids = [sid for sid, st in gaz.streets.items() if st.name.lower() == want]
+    if not ids:
+        return None
+    return min(ids, key=lambda sid: gaz._dist_to_street(sid, lat, lon))
+
+
+def block_of(gaz: Gazetteer, lat: float, lon: float, street: str | None = None) -> dict | None:
+    """The block a location is on (see ``_Blocks.block``) and ``cross``: its cross streets as the CAD writes them
+    ("Clinton St and William St"). street: the address's street; none (a place's own point): the street nearest the
+    point, when it is near (PLACE_STREET_M) and plainly the nearest (PLACE_STREET_GAP_M: not on a corner)."""
+    B = _blocks(gaz)
+    if street:
+        sid = street_named(gaz, street, lat, lon)
+        res = B.block(sid, lat, lon) if sid is not None else None
+    else:
+        near = B.streets_near(lat, lon, PLACE_STREET_M + PLACE_STREET_GAP_M)
+        near = [(d, s) for k, (d, s) in enumerate(near) if k == 0 or _base(gaz.streets[s].name)
+                != _base(gaz.streets[near[0][1]].name)]
+        if not near or near[0][0] > PLACE_STREET_M or (len(near) > 1 and near[1][0] - near[0][0] < PLACE_STREET_GAP_M):
+            return None
+        res = B.block(near[0][1], lat, lon, max_off=PLACE_STREET_M)
+    if res is None:
+        return None
+    res["cross"] = " and ".join(res["crosses"])
+    return res
+
+
+_HOUSE = re.compile(r"^\s*(\d+[A-Za-z]?)\s+(.+?)\s*$")
+
+
+def place_address(gaz: Gazetteer, raw: str, muni: str, lat: float, lon: float) -> dict | None:
+    """A named place's street address as the places data gives it ("575 Boston Post Road"), checked against the
+    address points: the same number on a street of that name in its town, within 400 m of the place ->
+    {address: "575 Boston Post Rd" (the gazetteer's spelling), street, lat, lon} (the address point); else None."""
+    m = _HOUSE.match(raw or "")
+    if not m:
+        return None
+    for c in gaz.candidates(f"{raw}, {muni}" if muni else raw):
+        if c.kind != "address" or c.precision != "exact" or (muni and c.municipality != muni):
+            continue
+        if (c.house_number or "").lower() != m.group(1).lower() or _dist(c.lat, c.lon, lat, lon) > 400:
+            continue
+        return {"address": f"{c.house_number} {c.street}", "street": c.street, "lat": c.lat, "lon": c.lon}
+    return None
+
+
+def location_detail(gaz: Gazetteer, m: dict) -> dict:
+    """What the CAD's location box adds to a suggestion (#204), from the gazetteer only:
+
+        place           the place's name (a named place: a landmark or the places table), else ''
+        street_address  "135 S Regent St"; a place's own address from the places data (OSM addr:*, the county's
+                        facilities), in the gazetteer's spelling when the address points have it (address_checked),
+                        else as the data says it; '' when the data has none (never made up)
+        cross           the streets at each end of its block ("Clinton St and William St", ``block_of``); '' for an
+                        intersection, a street, a mile marker or an exit, or when the data can't tell
+        block           {ends: [{name, lat, lon}], path} for the map, or None
+    """
+    kind = m.get("kind") or ""
+    lat, lon = m.get("lat"), m.get("lon")
+    out = {"place": "", "street_address": "", "address_checked": False, "cross": "", "block": None}
+    if lat is None or lon is None:
+        return out
+    blk = None
+    if kind == "address":
+        out["street_address"] = f"{m.get('house_number') or ''} {m.get('street') or ''}".strip()
+        out["address_checked"] = True
+        if m.get("street"):
+            blk = block_of(gaz, lat, lon, m["street"])
+    elif kind in ("landmark", "place"):
+        out["place"] = m.get("place") or ""
+        raw = (m.get("place_address") or "").strip()
+        checked = place_address(gaz, raw, m.get("municipality") or "", lat, lon) if raw else None
+        if checked:
+            out["street_address"], out["address_checked"] = checked["address"], True
+            blk = block_of(gaz, checked["lat"], checked["lon"], checked["street"])
+        else:
+            out["street_address"] = raw
+            blk = block_of(gaz, lat, lon)
+    if blk:
+        out["cross"] = blk["cross"]
+        out["block"] = {"ends": blk["ends"], "path": blk["path"]}
+    return out
+
+
+def what_is_here(gaz: Gazetteer, lat: float, lon: float, places: list[dict] = ()) -> dict:
+    """A click on the new call's map (#204): the nearest address point, intersection and named place to it, each as a
+    location box suggestion (kind, label, lat, lon, municipality, ...), and the street centreline under it (to offer
+    as a cross street). Each only when close (HERE_*_M); places: the named places to look through
+    [{name, address, muni, lat, lon}] (the place search's)."""
+    B = _blocks(gaz)
+    P = np.array([float(v) for v in _xy(lat, lon)])
+    out: dict = {"address": None, "intersection": None, "place": None, "street": None}
+    rows, xy = B.addresses()
+    if len(rows):
+        d = np.hypot(xy[:, 0] - P[0], xy[:, 1] - P[1])
+        k = int(np.argmin(d))
+        if d[k] <= HERE_ADDRESS_M:
+            sid, num, suf, muni, la, lo = rows[k]
+            st = gaz.streets[sid]
+            hn = f"{num}{suf.upper()}"
+            out["address"] = {"kind": "address", "label": f"{hn} {st.name}, {muni}", "lat": la, "lon": lo,
+                              "municipality": muni, "street": st.name, "house_number": hn, "precision": "exact",
+                              "confidence": 1.0, "metres": round(float(d[k]))}
+    rows, xy = B.intersections()
+    if len(rows):
+        d = np.hypot(xy[:, 0] - P[0], xy[:, 1] - P[1])
+        k = int(np.argmin(d))
+        if d[k] <= HERE_INTERSECTION_M:
+            a, b, la, lo, muni = rows[k]
+            na, nb = gaz.streets[a].name, gaz.streets[b].name
+            out["intersection"] = {"kind": "intersection", "label": f"{na} & {nb}" + (f", {muni}" if muni else ""),
+                                   "lat": la, "lon": lo, "municipality": muni, "precision": "intersection",
+                                   "confidence": 1.0, "metres": round(float(d[k]))}
+    best = None
+    for p in places:
+        dd = _dist(lat, lon, p["lat"], p["lon"])
+        if dd <= HERE_PLACE_M and (best is None or dd < best[0]):
+            best = (dd, p)
+    if best:
+        p = best[1]
+        out["place"] = {"kind": "place", "label": p["name"], "place": p["name"], "place_address": p.get("address") or "",
+                        "lat": p["lat"], "lon": p["lon"], "municipality": p.get("muni") or "", "precision": "place",
+                        "confidence": 1.0, "metres": round(best[0])}
+    near = B.streets_near(lat, lon, HERE_STREET_M)
+    if near:
+        out["street"] = {"name": gaz.streets[near[0][1]].name, "metres": round(near[0][0])}
+    return out

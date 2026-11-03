@@ -164,42 +164,64 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
       </section>
     </div>
 
-    <form id="new-form" class="card form" hidden autocomplete="off">
-      <div class="card-head"><h2>New incident</h2><span class="spacer"></span>
-        <button id="new-cancel" type="button">Cancel</button></div>
-      <label class="field">Type <select id="f-type"></select></label>
-      <label class="field">Subtype <select id="f-subtype"></select></label>
-      <label class="field span2">Location
-        <input id="f-address" type="text" maxlength="200" placeholder="Address, place or intersection" spellcheck="false">
-      </label>
-      <div id="f-geo" class="geo span2"></div>
-      <ol id="f-sugg" class="sugg span2" hidden></ol>
-      <label class="field span2">Cross street <input id="f-cross" type="text" maxlength="200" spellcheck="false"></label>
-      <label class="field">Caller name <input id="f-name" type="text" maxlength="120" spellcheck="false"></label>
-      <label class="field">Phone <input id="f-phone" type="tel" maxlength="40"></label>
-      <label class="field span2">Caller address <input id="f-caddr" type="text" maxlength="200" spellcheck="false"></label>
-      <label class="field">Received via <select id="f-via"></select></label>
-      <label class="check" title="Off: non-emergency, logged until closed, no dispatch. Set from the type.">
-        <input id="f-emergency" type="checkbox" checked> <span>Emergency</span>
-        <span id="f-class" class="dim small"></span>
-      </label>
-      <label id="f-until-w" class="field span2" hidden title="Optional: closures, hydrants out of service">Until
-        <input id="f-until" type="datetime-local">
-      </label>
-      <fieldset id="f-airport" class="span2 ap-fields" hidden>
-        <legend>Airport: what the tower passed <button type="button" class="help" aria-label="Help" aria-expanded="false" data-help="The ARFF notification (FAA AC 150/5200-31C): aircraft type, the nature of the emergency, minutes out, runway (16/34, 11/29), souls on board, fuel on board, dangerous goods. Filled from the 60 Control page when it says them; edit as the tower passes more. Level 1–5 is the Westchester souls-on-board scale (1–2 / 3–10 / 11–25 / 26–50 / 51+), set from the souls unless said; the Alert (1/2/3) is the FAA alert, a different scale: pick it as the subtype.">?</button></legend>
-        <label class="field">Aircraft <input id="f-acft-type" type="text" maxlength="40" placeholder="Boeing 737" spellcheck="false"></label>
-        <label class="field">Nature <input id="f-acft-nature" type="text" maxlength="120" placeholder="unsafe gear" spellcheck="false"></label>
-        <label class="field">Minutes out <input id="f-acft-eta" type="number" min="0" max="600" inputmode="numeric"></label>
-        <label class="field">Runway <select id="f-acft-runway"><option value="">—</option><option value="16">16</option><option value="34">34</option><option value="11">11</option><option value="29">29</option></select></label>
-        <label class="field">Souls on board <input id="f-acft-souls" type="number" min="0" max="999" inputmode="numeric"></label>
-        <label class="field">Level <select id="f-acft-level"><option value="">—</option><option value="1">1 (1–2 souls)</option><option value="2">2 (3–10)</option><option value="3">3 (11–25)</option><option value="4">4 (26–50)</option><option value="5">5 (51+)</option></select></label>
-        <label class="field">Fuel on board <input id="f-acft-fuel" type="text" maxlength="40" placeholder="12,000 lb" spellcheck="false"></label>
-        <label class="field">Dangerous goods <input id="f-acft-cargo" type="text" maxlength="120" placeholder="none" spellcheck="false"></label>
-      </fieldset>
-      <label class="field span2">Remarks <textarea id="f-remarks" rows="3" maxlength="4000"></textarea></label>
-      <div class="span2 row"><span id="f-error" class="error"></span><span class="spacer"></span>
-        <button id="new-create" type="submit" class="primary">Create</button></div>
+    <!-- A new call (#204), in the order the dispatcher takes it: Location > Caller name > Caller address > Caller # >
+         Event type > Event subtype > Comments. Tab / Shift+Tab go through exactly those (nothing else in between takes
+         focus: tabindex -1); the rest come after Comments. On the right, a big map (newcall-map.js) plots the location
+         as it is typed or picked, before the call is created; the splitter between them resizes it. -->
+    <form id="new-form" class="card nc-form" hidden autocomplete="off">
+      <div class="card-head"><h2>New incident</h2>
+        <span class="dim small nc-keys">Tab next field · Ctrl/⌘ Enter create · Esc closes the list</span><span class="spacer"></span>
+        <button id="new-cancel" type="button" tabindex="-1" title="Cancel (Esc, outside a field)">Cancel</button></div>
+      <div id="nc-body" class="nc-body">
+        <div id="nc-fields" class="form nc-fields">
+          <label class="field span2">Location
+            <input id="f-address" type="text" maxlength="200" placeholder="Address, place or intersection" spellcheck="false"
+                   role="combobox" aria-autocomplete="list" aria-controls="f-sugg" aria-expanded="false">
+          </label>
+          <ol id="f-sugg" class="sugg span2" role="listbox" hidden></ol>
+          <div id="f-geo" class="geo span2"></div>
+          <label class="field span2" title="Filled from the location: the streets at each end of its block. Edit as needed.">Cross streets
+            <input id="f-cross" type="text" maxlength="200" spellcheck="false" tabindex="-1" placeholder="From the location">
+          </label>
+          <label class="field span2">Caller name <input id="f-name" type="text" maxlength="120" spellcheck="false"></label>
+          <div class="field span2 nc-caddr">
+            <span class="nc-lab"><label for="f-caddr">Caller address</label>
+              <button id="f-caddr-same" type="button" class="mini quiet" tabindex="-1" title="The location's street address (or ↓ in the empty field)">Same as location</button></span>
+            <input id="f-caddr" type="text" maxlength="200" spellcheck="false" placeholder="↓ same as location">
+          </div>
+          <label class="field">Caller # <input id="f-phone" type="tel" maxlength="40"></label>
+          <span class="nc-gap" aria-hidden="true"></span>
+          <label class="field">Event type <select id="f-type"></select></label>
+          <label class="field">Event subtype <select id="f-subtype"></select></label>
+          <label class="field span2">Comments <textarea id="f-remarks" rows="3" maxlength="4000"></textarea></label>
+          <label class="field">Received via <select id="f-via"></select></label>
+          <label class="check" title="Off: non-emergency, logged until closed, no dispatch. Set from the type.">
+            <input id="f-emergency" type="checkbox" checked> <span>Emergency</span>
+            <span id="f-class" class="dim small"></span>
+          </label>
+          <label id="f-until-w" class="field span2" hidden title="Optional: closures, hydrants out of service">Until
+            <input id="f-until" type="datetime-local">
+          </label>
+          <fieldset id="f-airport" class="span2 ap-fields" hidden>
+            <legend>Airport: what the tower passed <button type="button" class="help" aria-label="Help" aria-expanded="false" data-help="The ARFF notification (FAA AC 150/5200-31C): aircraft type, the nature of the emergency, minutes out, runway (16/34, 11/29), souls on board, fuel on board, dangerous goods. Filled from the 60 Control page when it says them; edit as the tower passes more. Level 1–5 is the Westchester souls-on-board scale (1–2 / 3–10 / 11–25 / 26–50 / 51+), set from the souls unless said; the Alert (1/2/3) is the FAA alert, a different scale: pick it as the subtype.">?</button></legend>
+            <label class="field">Aircraft <input id="f-acft-type" type="text" maxlength="40" placeholder="Boeing 737" spellcheck="false"></label>
+            <label class="field">Nature <input id="f-acft-nature" type="text" maxlength="120" placeholder="unsafe gear" spellcheck="false"></label>
+            <label class="field">Minutes out <input id="f-acft-eta" type="number" min="0" max="600" inputmode="numeric"></label>
+            <label class="field">Runway <select id="f-acft-runway"><option value="">—</option><option value="16">16</option><option value="34">34</option><option value="11">11</option><option value="29">29</option></select></label>
+            <label class="field">Souls on board <input id="f-acft-souls" type="number" min="0" max="999" inputmode="numeric"></label>
+            <label class="field">Level <select id="f-acft-level"><option value="">—</option><option value="1">1 (1–2 souls)</option><option value="2">2 (3–10)</option><option value="3">3 (11–25)</option><option value="4">4 (26–50)</option><option value="5">5 (51+)</option></select></label>
+            <label class="field">Fuel on board <input id="f-acft-fuel" type="text" maxlength="40" placeholder="12,000 lb" spellcheck="false"></label>
+            <label class="field">Dangerous goods <input id="f-acft-cargo" type="text" maxlength="120" placeholder="none" spellcheck="false"></label>
+          </fieldset>
+          <div class="span2 row"><span id="f-error" class="error"></span><span class="spacer"></span>
+            <button id="new-create" type="submit" class="primary" title="Create (Ctrl/⌘ Enter)">Create</button></div>
+        </div>
+        <div id="nc-split" class="nc-split" hidden></div>
+        <div id="nc-map-pane" class="nc-map-pane" aria-label="Map of the new call's location">
+          <div id="nc-map" class="nc-map"></div>
+          <div id="nc-nomap" class="nomap dim" hidden></div>
+        </div>
+      </div>
     </form>
 
     <div id="d-body" hidden>
@@ -273,9 +295,9 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
           <label class="field span2">Location <input id="e-address" type="text" maxlength="200" spellcheck="false"></label>
           <div id="e-geo" class="geo span2"></div>
           <ol id="e-sugg" class="sugg span2" hidden></ol>
-          <label class="field span2">Cross street <input id="e-cross" type="text" maxlength="200" spellcheck="false"></label>
+          <label class="field span2">Cross streets <input id="e-cross" type="text" maxlength="200" spellcheck="false"></label>
           <label class="field">Caller name <input id="e-name" type="text" maxlength="120" spellcheck="false"></label>
-          <label class="field">Phone <input id="e-phone" type="tel" maxlength="40"></label>
+          <label class="field">Caller # <input id="e-phone" type="tel" maxlength="40"></label>
           <label class="field span2">Caller address <input id="e-caddr" type="text" maxlength="200" spellcheck="false"></label>
           <label class="field">Received via <select id="e-via"></select></label>
           <label class="check"><input id="e-emergency" type="checkbox"> <span>Emergency</span></label>
@@ -291,7 +313,7 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
             <label class="field">Fuel on board <input id="e-acft-fuel" type="text" maxlength="40" placeholder="12,000 lb" spellcheck="false"></label>
             <label class="field">Dangerous goods <input id="e-acft-cargo" type="text" maxlength="120" placeholder="none" spellcheck="false"></label>
           </fieldset>
-          <label class="field span2">Remarks <textarea id="e-remarks" rows="3" maxlength="4000"></textarea></label>
+          <label class="field span2">Comments <textarea id="e-remarks" rows="3" maxlength="4000"></textarea></label>
           <div class="span2 row"><span id="e-error" class="error"></span><span class="spacer"></span>
             <button id="edit-cancel" type="button">Cancel</button>
             <button id="edit-save" type="submit" class="primary">Save</button></div>
@@ -556,6 +578,7 @@ Slots go in order. A kind takes the next available unit of that kind (regular ap
 <script src="/static/status-hints.js"></script>
 <script src="/static/radio-ids.js"></script>
 <script src="/static/cadmap.js"></script>
+<script src="/static/newcall-map.js"></script>
 <script src="/static/radio-view.js"></script>
 <script src="/static/radio-controls.js"></script>
 <script src="/static/hublink.js"></script>

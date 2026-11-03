@@ -85,7 +85,9 @@ CREATE TABLE incidents (
   received_via TEXT NOT NULL DEFAULT '',   -- PHONE | WALK-IN | RADIO | 60 CONTROL | ... (cad_lists.json)
   until_at REAL,                        -- a closure / hydrant out of service: until when (optional)
   priority INTEGER,
-  address TEXT NOT NULL DEFAULT '',     -- LOCATION
+  address TEXT NOT NULL DEFAULT '',     -- LOCATION, as shown: "575 Boston Post Rd @ Whole Foods Market" for a named place (#204)
+  place TEXT NOT NULL DEFAULT '',       -- the named place picked ("Whole Foods Market"), '' for a plain address
+  place_address TEXT NOT NULL DEFAULT '',   -- that place's street address ("575 Boston Post Rd"), '' when the data has none
   cross_street TEXT NOT NULL DEFAULT '',
   lat REAL, lon REAL, geo_label TEXT NOT NULL DEFAULT '',
   geo_alts TEXT NOT NULL DEFAULT '',    -- a page's location not confirmed (#176): JSON [{label, lat, lon, town, confidence, why}] to pick from
@@ -442,6 +444,9 @@ class Store:
             self.db.execute("ALTER TABLE incidents ADD COLUMN map_layers TEXT NOT NULL DEFAULT ''")
         if icols and "geo_alts" not in icols:            # a page's unconfirmed location and its readings (#176), 2026-10-15
             self.db.execute("ALTER TABLE incidents ADD COLUMN geo_alts TEXT NOT NULL DEFAULT ''")
+        for col in ("place", "place_address"):           # a location's named place and its street address (#204), 2026-11-02
+            if icols and col not in icols:
+                self.db.execute(f"ALTER TABLE incidents ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
         tcols = {r["name"] for r in self.db.execute("PRAGMA table_info(radio_traffic)")}
         for col in ("alt_text", "alt_model"):            # the second transcript ("both": whisper next to AWS), 2026-10-08
             if tcols and col not in tcols:
@@ -900,7 +905,8 @@ class Store:
                         priority: int | None = None, source: str = "manual", source_ref: str | None = None,
                         status: str = "pending", operator: str = "", acft_type: str = "", acft_nature: str = "",
                         acft_eta: int | None = None, acft_runway: str = "", acft_souls: int | None = None,
-                        acft_level: int | None = None, acft_fuel: str = "", acft_cargo: str = "", geo_alts: str = "") -> int:
+                        acft_level: int | None = None, acft_fuel: str = "", acft_cargo: str = "", geo_alts: str = "",
+                        place: str = "", place_address: str = "") -> int:
         """ACCEPT EVENT: entered by a person, numbered at once, PENDING until units go (or, a
         non-emergency one, listed under NON-EMERGENCY EVENTS until closed). One from a 60 Control
         page waits as queued, with no number, until someone accepts it. emergency None = from the
@@ -924,12 +930,12 @@ class Store:
                 "INSERT INTO incidents (number, type, subtype, type_note, emergency, received_via, until_at, priority, "
                 "address, cross_street, lat, lon, geo_label, caller_name, caller_address, phone, remarks, source, "
                 "source_ref, status, created_at, accepted_at, acft_type, acft_nature, acft_eta, acft_runway, acft_souls, "
-                "acft_level, acft_fuel, acft_cargo, geo_alts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-                "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "acft_level, acft_fuel, acft_cargo, geo_alts, place, place_address) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+                "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (number, type, subtype, type_note, int(bool(emergency)), received_via, until_at, priority, address,
                  cross_street, lat, lon, geo_label, caller_name, caller_address, phone, remarks, source, source_ref,
                  status, now, now if number else None, acft_type, acft_nature, acft_eta, acft_runway, acft_souls,
-                 acft_level, acft_fuel, acft_cargo, geo_alts))
+                 acft_level, acft_fuel, acft_cargo, geo_alts, place, place_address))
             iid = cur.lastrowid
             L = self.lists
             what = (L.type_label(type, subtype) or "type not set") + (f" at {address}" if address else "")
@@ -956,8 +962,9 @@ class Store:
 
     EDITABLE = ("type", "subtype", "type_note", "emergency", "received_via", "until_at", "priority", "address",
                 "cross_street", "lat", "lon", "geo_label", "caller_name", "caller_address", "phone", "remarks",
-                *(c for c, _ in AIRPORT_COLUMNS), "map_layers", "geo_alts")
-    QUIET = ("lat", "lon", "geo_label", "remarks", "type_note", "until_at", "map_layers", "geo_alts")   # changed, not spelled out in the log
+                *(c for c, _ in AIRPORT_COLUMNS), "map_layers", "geo_alts", "place", "place_address")
+    # changed, not spelled out in the log (place / place_address: the location's own line says them, #204)
+    QUIET = ("lat", "lon", "geo_label", "remarks", "type_note", "until_at", "map_layers", "geo_alts", "place", "place_address")
 
     def update_incident(self, iid: int, fields: dict, operator: str = "", log: bool = True) -> dict:
         """Edit an open event. A new TYPE/SUBTYPE re-sorts it emergency / non-emergency from the

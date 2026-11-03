@@ -2298,56 +2298,153 @@ async function setUnitStatus(uid, status, note = "") {
 }
 
 // ---- location box with gazetteer suggestions -------------------------------------------------
+// #204: the keys of a picker: ↑ / ↓ move the highlight, Tab takes the highlighted suggestion and goes on to the next
+// field, Esc closes the list and stays, Enter does what it always did (the form's submit). A named place is shown with
+// its street address ("Whole Foods Market · 575 Boston Post Rd") and taken as "<street address> @ <place>" ("@ <place>"
+// when the data has no address: type it in front of the @); its cross streets fill the form's Cross streets (unless
+// edited by hand). opts: {cross: the cross street input, map: the new call's map (newcall-map.js) follows}.
 
-function addressBox(input, geoNote, list) {
-  const box = { picked: null, timer: null, seq: 0 };
+function locationText(m) {             // what the location field says for a suggestion
+  if (m && m.place) return m.street_address ? `${m.street_address} @ ${m.place}` : `@ ${m.place}`;
+  return (m && m.label) || "";
+}
+function placeKept(box, value) {       // the picked place still named at the end of the field ("... @ Whole Foods Market")?
+  const p = box.picked && box.picked.place;
+  return !!p && value.trim().toLowerCase().endsWith(`@ ${p}`.toLowerCase());
+}
+
+function addressBox(input, geoNote, list, opts = {}) {
+  const box = { picked: null, timer: null, seq: 0, items: [], idx: 0, autoCross: "" };
   const ours = () => ((L().geo_town_order || []).slice(0, 2));
+  const map = () => (opts.map && window.NewCallMap ? NewCallMap : null);
   const note = () => {
-    geoNote.className = "geo span2" + (box.picked ? "" : " warn");
-    if (box.picked) setText(geoNote, `Map: ${box.picked.label} (${box.picked.kind}, ${Math.round(box.picked.confidence * 100)}%)`);
-    else if (!input.value.trim()) setText(geoNote, "");
+    const p = box.picked;
+    geoNote.className = "geo span2" + (p ? "" : " warn");
+    if (p) {
+      let t = `Map: ${p.label} (${p.kind}${p.confidence != null ? `, ${Math.round(p.confidence * 100)}%` : ""})`;
+      if (p.moved) t += " · point moved on the map";
+      if (p.place && !p.street_address && !input.value.trim().replace(/@.*$/, "").trim()) {
+        t += ` · ${p.lat.toFixed(5)}, ${p.lon.toFixed(5)} · no street address in the data: type it before the @`;
+      }
+      setText(geoNote, t);
+    } else if (!input.value.trim()) setText(geoNote, "");
     else if (cad.state && !cad.state.geocoder) setText(geoNote, "No geocoder: no map point");
     else setText(geoNote, "No match picked: saved as typed");
+  };
+  const close = () => {
+    show(list, false);
+    input.setAttribute("aria-expanded", "false");
+    input.removeAttribute("aria-activedescendant");
+    if (map()) map().candidates([], -1);
+  };
+  const draw = () => {
+    const ms = box.items;
+    list.replaceChildren(...ms.map((m, i) => {
+      const li = el("li", i === box.idx ? "on" : "");
+      li.id = `${list.id}-${i}`;
+      li.setAttribute("role", "option");
+      li.setAttribute("aria-selected", String(i === box.idx));
+      if (m.place) {                    // "Whole Foods Market · 575 Boston Post Rd" (the address from the data, or none)
+        li.append(el("b", "", m.place));
+        li.append(el("span", m.street_address ? "sg-addr" : "sg-addr dim", m.street_address ? `· ${m.street_address}` : "· no street address"));
+      } else li.append(el("b", "", m.label));
+      if (m.town) li.append(el("span", "town" + (ours().includes(m.town) ? " ours" : ""), m.town));
+      li.append(el("span", "dim small", `${m.kind} ${Math.round(m.confidence * 100)}%`));
+      if (m.cross) li.append(el("span", "dim small sg-cross", `x ${m.cross}`));
+      li.addEventListener("mousedown", (e) => { e.preventDefault(); box.take(m); });
+      li.addEventListener("mouseenter", () => { if (box.idx !== i) { box.idx = i; mark(); } });
+      return li;
+    }));
+    if (!ms.length) list.replaceChildren(el("li", "dim", box.error || "No match"));
+    else list.append(el("li", "hint dim small", "↑ ↓ to choose, Tab to take and go on, Esc to close"));
+    show(list, true);
+    input.setAttribute("aria-expanded", "true");
+    mark();
+  };
+  const mark = () => {
+    [...list.children].forEach((li, i) => { li.classList.toggle("on", i === box.idx && i < box.items.length); li.setAttribute("aria-selected", String(i === box.idx)); });
+    if (box.items.length) input.setAttribute("aria-activedescendant", `${list.id}-${box.idx}`);
+    if (map()) map().candidates(box.items, box.idx);
   };
   const lookup = async () => {
     const q = input.value.trim();
     const my = ++box.seq;
-    if (q.length < 3) { show(list, false); return note(); }
+    if (q.length < 3) { box.items = []; close(); return note(); }
     try {
       const r = await api("GET", `/api/cad/geocode?q=${encodeURIComponent(q)}`);
       if (my !== box.seq) return;
-      const ms = r.matches || [];
-      list.replaceChildren(...ms.map((m) => {
-        const li = el("li", "");
-        li.append(el("b", "", m.label));
-        if (m.town) li.append(el("span", "town" + (ours().includes(m.town) ? " ours" : ""), m.town));
-        li.append(el("span", "dim small", `${m.kind} ${Math.round(m.confidence * 100)}%`));
-        li.addEventListener("mousedown", (e) => {
-          e.preventDefault();
-          box.picked = m;
-          input.value = m.label;
-          show(list, false);
-          note();
-        });
-        return li;
-      }));
-      if (!ms.length) list.replaceChildren(el("li", "dim", r.error || "No match"));
-      show(list, true);
+      box.items = r.matches || [];
+      box.error = r.error || "";
+      box.idx = 0;
+      if (document.activeElement === input) draw(); else close();
     } catch (e) {
-      show(list, false);
+      box.items = [];
+      close();
     }
     note();
   };
+  box.take = (m, how) => {              // a suggestion (or a map pick) becomes the location
+    box.picked = m;
+    input.value = locationText(m);
+    box.items = [];
+    close();
+    note();
+    if (opts.cross) {                   // the block's cross streets, unless the dispatcher wrote their own
+      const c = opts.cross;
+      if (!c.value.trim() || c.value.trim() === box.autoCross) { c.value = m.cross || ""; box.autoCross = c.value; }
+    }
+    if (map()) map().chosen(m, how);
+  };
   input.addEventListener("input", () => {
+    if (box.picked && placeKept(box, input.value)) {        // the street address typed in front of "@ <place>": still it
+      note();
+      return;
+    }
     box.picked = null;
     note();
+    if (map()) map().chosen(null);
     clearTimeout(box.timer);
     box.timer = setTimeout(lookup, 250);
   });
-  input.addEventListener("blur", () => setTimeout(() => show(list, false), 150));
-  input.addEventListener("focus", () => { if (list.children.length && !box.picked && input.value.trim()) show(list, true); });
-  box.set = (value, picked) => { input.value = value || ""; box.picked = picked; show(list, false); note(); };
-  box.geo = () => (box.picked ? { lat: box.picked.lat, lon: box.picked.lon, geo_label: box.picked.label } : {});
+  input.addEventListener("keydown", (e) => {
+    const open = !list.hidden && box.items.length > 0;
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      if (!open) return;
+      e.preventDefault();
+      box.idx = (box.idx + (e.key === "ArrowDown" ? 1 : -1) + box.items.length) % box.items.length;
+      mark();
+    } else if (e.key === "Tab") {        // take the highlighted one, then the browser moves on (Shift+Tab: back, nothing taken)
+      if (open && !e.shiftKey) box.take(box.items[box.idx]);
+      else close();
+    } else if (e.key === "Escape" && !list.hidden) {
+      e.preventDefault();               // ui.js: a list closes first, the field stays
+      e.stopPropagation();
+      close();
+    }
+  });
+  input.addEventListener("blur", () => setTimeout(() => { if (document.activeElement !== input) close(); }, 150));
+  input.addEventListener("focus", () => { if (box.items.length && !box.picked && input.value.trim()) draw(); });
+  box.set = (value, picked) => {
+    input.value = value || "";
+    box.picked = picked;
+    box.items = [];
+    box.autoCross = "";
+    close();
+    note();
+    if (map()) map().chosen(picked && picked.lat != null ? picked : null, "set");
+  };
+  box.move = (lat, lon) => {            // the pin dragged: the point moves, the address stays as typed
+    const p = box.picked || { label: input.value.trim() || "Point on the map", kind: "point", confidence: null };
+    box.picked = { ...p, lat, lon, moved: true };
+    note();
+  };
+  box.geo = () => {
+    const p = box.picked;
+    if (!p) return {};
+    const out = { lat: p.lat, lon: p.lon, geo_label: p.moved ? `${p.label} (moved on the map)` : p.label };
+    if (p.place && placeKept(box, input.value)) out.place = p.place;
+    return out;
+  };
   return box;
 }
 
@@ -2375,8 +2472,18 @@ function openNew() {
   entryClass();
   flash($("#f-error"));
   render();
+  if (window.NewCallMap) NewCallMap.open();          // the big map beside the fields (#204): made once, reused
   if (window.innerWidth <= 1100) $("#detail").scrollIntoView({ behavior: "smooth", block: "start" });
-  $("#f-type").focus();
+  $("#f-address").focus();                            // the call is taken Location first (#204)
+}
+
+// The new call's fields in the order the call is taken (#204); Tab / Shift+Tab go through these and nothing between them.
+const NEW_CALL_ORDER = ["#f-address", "#f-name", "#f-caddr", "#f-phone", "#f-type", "#f-subtype", "#f-remarks"];
+
+function callerSameAsLocation() {      // the caller is at the location: its street address (not the "@ place" part)
+  const p = newAddr.picked, v = $("#f-address").value.trim();
+  const street = p && p.place && placeKept(newAddr, v) ? v.replace(/\s*@.*$/, "").trim() : v;
+  $("#f-caddr").value = street;
 }
 
 async function createIncident(e) {
@@ -2392,11 +2499,15 @@ async function createIncident(e) {
   };
   airportBody("f", body);
   if (!body.type) { $("#f-type").focus(); return flash($("#f-error"), "Pick a type"); }
+  if (createIncident.busy) return;
+  createIncident.busy = true;
   try {
     const inc = await api("POST", "/api/cad/incident", body);
     selectIncident(inc.id);
   } catch (err) {
     flash($("#f-error"), err.message);
+  } finally {
+    createIncident.busy = false;
   }
 }
 
@@ -2421,7 +2532,8 @@ function openEdit() {
   keepOption($("#e-type"), inc.type, typeLabel(inc.type));
   fillSubtypes($("#e-subtype"), inc.type);
   keepSubtype($("#e-subtype"), inc.type, inc.subtype);
-  editAddr.set(inc.address, inc.lat != null ? { lat: inc.lat, lon: inc.lon, label: inc.geo_label || inc.address, kind: "current", confidence: 1 } : null);
+  editAddr.set(inc.address, inc.lat != null ? { lat: inc.lat, lon: inc.lon, label: inc.geo_label || inc.address, kind: "current", confidence: 1,
+                                                place: inc.place || "", street_address: inc.place_address || "" } : null);
   $("#e-cross").value = inc.cross_street || "";
   $("#e-name").value = inc.caller_name || "";
   $("#e-caddr").value = inc.caller_address || "";
@@ -2937,8 +3049,33 @@ function renderTalking() {
   Radio.update((cad.state && cad.state.talking) || [], (cad.state && cad.state.paging) || []);
 }
 
-const newAddr = addressBox($("#f-address"), $("#f-geo"), $("#f-sugg"));
-const editAddr = addressBox($("#e-address"), $("#e-geo"), $("#e-sugg"));
+const newAddr = addressBox($("#f-address"), $("#f-geo"), $("#f-sugg"), { cross: $("#f-cross"), map: true });
+const editAddr = addressBox($("#e-address"), $("#e-geo"), $("#e-sugg"), { cross: $("#e-cross") });
+$("#f-caddr-same").addEventListener("click", () => { callerSameAsLocation(); $("#f-caddr").focus(); });
+$("#f-caddr").addEventListener("keydown", (e) => {     // ↓ in the empty field: same as the location
+  if (e.key === "ArrowDown" && !$("#f-caddr").value.trim() && $("#f-address").value.trim()) { e.preventDefault(); callerSameAsLocation(); }
+});
+$("#new-form").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && !e.altKey) {     // Ctrl/⌘ Enter: create, from any field
+    e.preventDefault();
+    $("#new-form").requestSubmit();
+    return;
+  }
+  // Tab / Shift+Tab: the next (previous) of the call's fields in NEW_CALL_ORDER, a disabled one (no subtypes) skipped;
+  // past Comments (or before Location) the browser's own order (the rest of the form, then Create, then the map)
+  if (e.key !== "Tab" || e.ctrlKey || e.metaKey || e.altKey || e.defaultPrevented) return;
+  const order = NEW_CALL_ORDER.map((q) => $(q));
+  const at = order.indexOf(e.target);
+  if (at < 0) return;
+  const step = e.shiftKey ? -1 : 1;
+  for (let i = at + step; i >= 0 && i < order.length; i += step) {
+    if (!order[i].disabled && order[i].getClientRects().length) {
+      e.preventDefault();
+      order[i].focus();
+      return;
+    }
+  }
+});
 
 $("#new-incident").addEventListener("click", openNew);
 $("#new-cancel").addEventListener("click", () => { cad.mode = cad.sel ? "view" : "none"; render(); });
@@ -3092,12 +3229,20 @@ function escapeView(fromField) {
     ["#o-form", "#o-cancel"]]) {
     if (!$(form).hidden && !$("#d-body").hidden) { $(cancel).click(); return; }
   }
-  if (cad.mode === "new") { $("#new-cancel").click(); return; }
+  if (cad.mode === "new") {
+    const at = document.activeElement;            // on the new call's map (a click there): leave the map, keep the call
+    if (at && at.closest && at.closest("#nc-map-pane")) { at.blur(); return; }
+    $("#new-cancel").click();
+    return;
+  }
   if (cad.openUnit !== null) { cad.openUnit = null; renderUnits(); }
 }
 if (!BOARD) {
   UI.keys({
-    n: () => { if (!$("#new-incident").disabled) openNew(); },
+    n: () => {                       // already taking a call (the map clicked, say): back to its Location, nothing lost
+      if (cad.mode === "new" && !$("#new-form").hidden) { $("#f-address").focus(); return; }
+      if (!$("#new-incident").disabled) openNew();
+    },
     "/": focusSearch,
     j: () => queueStep(1),
     k: () => queueStep(-1),

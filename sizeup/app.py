@@ -320,6 +320,10 @@ class App:
         if self.gaz is not None:           # the place search over the same gazetteer (a note's "@", #67)
             from sizeup.geo.places import PlaceIndex
             self.cad.place_source = lambda: PlaceIndex(self.gaz)
+            # a new call's location: its place's address, its block's cross streets, what is at a map click (#204)
+            from sizeup.geo.pagegeo import location_detail, what_is_here
+            self.cad.detail_source = lambda m: location_detail(self.gaz, m)
+            self.cad.here_source = lambda lat, lon, places: what_is_here(self.gaz, lat, lon, places)
         # Radio ID -> rig, and who is transmitting right now (both pages' "talking").
         self.radios = self.cad.radios
         self.live = LiveTalk(resolve=self.radios.resolve, tg_name=self.tg.name, main=self.tg.main,
@@ -480,10 +484,19 @@ class App:
         """The CAD location box: every reading of what was typed, best first (the CAD orders them by town)."""
         try:
             return [{k: getattr(m, k) for k in ("label", "lat", "lon", "kind", "municipality", "precision")}
-                    | {"confidence": round(float(m.confidence), 2)} for m in self.gaz.candidates(q)[:20]]
+                    | {"confidence": round(float(m.confidence), 2)} | self._geocode_parts(m) for m in self.gaz.candidates(q)[:20]]
         except Exception as e:
             log(f"geocode error for {q!r}: {type(e).__name__}: {e}")
             return []
+
+    @staticmethod
+    def _geocode_parts(m) -> dict:
+        """An address's street and number; a landmark's name and its street address as the data has it (#204)."""
+        if m.kind == "landmark":
+            town = f", {m.municipality}" if m.municipality else ""
+            name = m.label[:-len(town)] if town and m.label.endswith(town) else m.label
+            return {"place": name, "place_address": m.street or ""}
+        return {"street": m.street or "", "house_number": m.house_number or ""}
 
     # -- persistence ----------------------------------------------------------------------------
 

@@ -355,7 +355,8 @@ window.CadMap = (() => {
   // ---- RigMap: a map of its own with the layer, Recenter / Expand / Close and a note ---------------
 
   class RigMap {
-    // opts: {scene, pins, unset, editable, operator, onPick, onExpand, onClose}
+    // opts: {scene, pins, unset, editable, operator, onPick, onExpand, onClose, manual, onRecenter}; manual: the owner
+    // moves the camera (the new call's map, newcall-map.js: #204), update() never fits; Recenter asks onRecenter
     constructor(host, opts) {
       this.host = host;
       this.opts = opts;
@@ -374,7 +375,10 @@ window.CadMap = (() => {
         ctrls.append(b);
         return b;
       };
-      btn("Recenter", "Back to the call and its rigs", () => { this.userMoved = false; this.fit(true); }, "locate");
+      btn("Recenter", opts.manual ? "Back to the location" : "Back to the call and its rigs", () => {
+        this.userMoved = false;
+        if (opts.onRecenter) opts.onRecenter(); else this.fit(true);
+      }, "locate");
       if (opts.onExpand) btn("Expand", "Large map (Esc closes)", opts.onExpand, "expand");
       if (opts.onClose) btn("Close", "Esc", opts.onClose, "x");
       host.append(this.canvas, ctrls, this.note);
@@ -427,7 +431,7 @@ window.CadMap = (() => {
       if (key !== this.fitKey && this.canvas.clientWidth) {
         const first = this.fitKey === null;
         this.fitKey = key;
-        if (!this.userMoved) this.fit(!first);
+        if (!this.userMoved && !this.opts.manual) this.fit(!first);
       }
     }
 
