@@ -1,6 +1,6 @@
 {
   "station": {"id": "pcfd-hq", "name": "Port Chester FD Headquarters"},
-  "home": {"center": [-73.6640, 41.0130], "zoom": 13.4},
+  "home": {"center": [-73.6640, 41.0130], "zoom": 13.4, "bounds": [-73.7067, 40.9866, -73.6552, 41.0739]},
   "incident_zoom": 17.2,
   "tiles": "https://tiles.openfreemap.org/planet",
   "glyphs": "https://tiles.openfreemap.org/fonts/{fontstack}/{range}.pbf",

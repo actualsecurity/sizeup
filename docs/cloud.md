@@ -8,7 +8,7 @@ same code and the same entry point (`python -m sizeup --config ...`), chosen by 
 | Radios, trunk-recorder, MDC decode | yes | none: nothing opens an SDR or starts a program |
 | whisper (3.8 GB), Kokoro voice (1.4 GB) | yes | none |
 | Dispatch voice | its Kokoro (all-in-one; the hub's fallback) | **Amazon Polly**, made on the hub ([below](#the-dispatch-voice-amazon-polly)) |
-| Web UI | the **station page** `/` ([below](#the-station-page)): Radios, Monitor, Settings (the hub link). No CAD | CAD `/cad` (Dispatch, Overview, Radio, Settings), wall board `/monitor`: **the CAD of record** |
+| Web UI | the **station page** `/` ([below](#the-station-page)): Radios, Monitor, Settings (the hub link). No CAD | CAD `/cad` (Overview, Incident, Radio, Settings), wall board `/monitor`: **the CAD of record** |
 | CAD database | its own `state/cad.sqlite`, not synced: the radio-ID registry (talker names), the channel and speech-to-text settings the hub sends, the vocabulary | `cad.sqlite` (+ `hub.sqlite`, `audio.sqlite`) |
 | Network | outbound HTTPS to the hub only | reached only through Cloudflare Tunnel |
 
@@ -723,6 +723,13 @@ heartbeat_stale_min = 90
 > Thruway's traveler map; GitHub #73). Then, #86: "they exist on that other website so we should be
 > able to enumerate them without ny511".
 
+**What a map looks at** (#218): an event's map frames the call and the stations its rigs come from. A map with no
+call open (the Overview, `/monitor`) frames our area, Port Chester and Rye Brook (`/api/scene` `home.bounds`,
+`roads.AREA_BBOX`), and the open calls with a real point within 12 km of home: never a layer's features (the county's
+district polygons run out over the Sound), never a point at 0 or one across the water (a call placed on Long Island
+had the Overview showing all of it). It frames again when the calls change, as *Recenter* does; a map the viewer moved
+stays where it was across a view switch.
+
 Every CAD map (the event's, the large map, the Overview, `/monitor`) has a **Layers** button:
 *Cameras*, *Incidents & closures*, *Message signs* (from the sources below; their roadwork is in
 *Road projects & closures*, [below](#road-projects--closures-185)), *Mileposts*
@@ -913,8 +920,10 @@ cards column narrows while the cameras are on), 1 on a phone (`static/camwall.js
 
 **Layouts** (#147: "I'd like to be able to show them side by side: map/cameras/incidents, or map/cameras on
 the left above/below and incidents on the right... or overlay the cameras on the map too"): the button became a
-picker in the Overview's head, the same on the wall board: **Map** · **Cameras** · **Side by side** (map | cameras |
-events) · **Stacked** (map over the cameras, or under them with *Swap*; events on the right). Remembered per screen
+picker in the Overview's head, the same on the wall board: **Map** · **Cameras** · **Side by side** (map | cameras) ·
+**Stacked** (map over the cameras, or under them with *Swap*). The wall board keeps its events column on the right;
+the console's Overview has none (#217: the queue on the left lists the calls on every view, with who is talking on
+each and, on the Overview, its newest transmission and note), so the map and the cameras take its width. Remembered per screen
 (`localStorage` `sizeup.overviewLayout` `{overview, monitor: {mode, swap, side, stacked}}`; #125's switch is read
 once as *Cameras*). Side by side and Stacked have a divider between the map and the cameras (the #139 separator: drag,
 the arrow keys, Home or a double-click for half and half, each pane at least 200 px, the map resizing live), its
@@ -1133,7 +1142,7 @@ the **Level** it implies (set from the souls unless said), **fuel on board**, **
 view shows them in one compact row under the location ("Aircraft Boeing 737 · Nature unsafe gear · ETA 12 min
 · RWY 16 · 140 souls (Level 5) · 12,000 lb fuel · DG: none"), with the subtype's definition behind "?"; Edit
 (dispatchers and admins; the new-event form too) has a field for each, the Level following the souls as they
-are typed. The queue, the Overview's cards and the wall board show the same line ("Alert 2 · Boeing 737 ·
+are typed. The queue and the wall board's cards show the same line ("Alert 2 · Boeing 737 ·
 unsafe gear · 12 min · RWY 16 · 140 souls (Level 5)"); `incidents.csv` has it as a last column, *Airport*.
 Stored on the event (`acft_*` columns, added to an older database on open; older events have none) and in
 `POST /api/cad/incident` as `acft_type`, `acft_nature`, `acft_eta`, `acft_runway`, `acft_souls`, `acft_level`,

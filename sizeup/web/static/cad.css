@@ -1,4 +1,4 @@
-/* sizeup's views (cad.html): the console (/cad: Dispatch, Overview, Radio; Settings in settings.css, the maps
+/* sizeup's views (cad.html): the console (/cad: Overview, Incident, Radio; Settings in settings.css, the maps
    and the Overview in cadmap.css) and the wall board (/monitor, html.board). Layout and composition only:
    every size, space and color is a token, and every control a component (style.css). Type and status
    colors come from the data file (set inline by cad.js as --c). */
@@ -102,6 +102,16 @@
   .qnote { font-weight: 700; margin-block: var(--s-1); }
   .qnote:empty { display: none; }
   .qi .chips { margin-block-start: var(--s-1); }
+  /* from the Overview's old cards (#217): a rig on the call talking now lights the card and rings its chip, with a TX
+     line; the call's newest transmission and note, one line each, on the Overview only */
+  .q > li.qi.live { border-color: var(--ok); outline: var(--bw) solid var(--ok); outline-offset: calc(-1 * var(--bw)); }
+  .qi .chip.talking { outline: 2px solid var(--ok); outline-offset: 1px; }
+  .q-live { margin-block-start: var(--s-1); color: var(--ok); overflow-wrap: anywhere; }
+  .q-last { margin-block-start: var(--s-0); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .q-last .t { color: var(--dim); margin-inline-end: var(--s-1); }
+  .q-last .q { color: var(--text-2); }
+  .q-last .k { color: var(--info); font-weight: 700; margin-inline-end: var(--s-1); }
+  body:not([data-view="overview"]) .q-last { display: none; }
 
   /* ---- detail (middle): the incident, the new-incident form, or a view ------------------------------- */
   .detail, #d-body { display: flex; flex-direction: column; gap: var(--gutter); }

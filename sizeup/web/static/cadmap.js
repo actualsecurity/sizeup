@@ -31,6 +31,11 @@ window.CadMap = (() => {
   const LINE = "#E0A030", HOME_LINE = "#AEB6C0";      // to a call | a returning rig's way home (thin)
   const LOOK_NAMES = { available: "available", oos: "out of service", dispatched: "dispatched",
                        responding: "responding", onscene: "on location" };
+  // No call open: a call farther than this from home is not framed (#218). Our mutual-aid neighbours (Rye, Harrison,
+  // Greenwich, Mamaroneck, White Plains, Stamford, the airport) are within it; Long Island's shore (14 km and more,
+  // across the Sound: a bad pick or geocode) is not.
+  const AREA_KM = 12;
+  const HOME_PAD = 0.02;               // no home bounds in the scene (an older hub): this much around its centre, degrees
 
   function h(tag, cls, text) {
     const n = document.createElement(tag);
@@ -43,6 +48,43 @@ window.CadMap = (() => {
   function talkState(name) {
     const t = window.Radio && Radio.talkingFor(name);
     return t ? (t.ended ? "talked" : "talking") : "";
+  }
+
+  // ---- the area's frame (#218): what a map with no call open (the Overview, the wall board) looks at ---------------
+  // Our area (scene.home.bounds: Port Chester and Rye Brook, roads.AREA_BBOX) and every open call with a real point
+  // within AREA_KM of home. Never a layer's features (a district's polygon runs out over the Sound), a far point (a
+  // pick or a geocode across the water had the Overview showing Long Island) or a missing one read as 0.
+  function goodLL(lon, lat) {          // a point that can be on our map: numbers, in range, neither one 0
+    return typeof lon === "number" && typeof lat === "number" && Number.isFinite(lon) && Number.isFinite(lat)
+      && Math.abs(lon) <= 180 && Math.abs(lat) <= 90 && lon !== 0 && lat !== 0;
+  }
+  function km([lon1, lat1], [lon2, lat2]) {
+    const r = Math.PI / 180, a = Math.sin(((lat2 - lat1) * r) / 2) ** 2
+      + Math.cos(lat1 * r) * Math.cos(lat2 * r) * Math.sin(((lon2 - lon1) * r) / 2) ** 2;
+    return 12742 * Math.asin(Math.min(1, Math.sqrt(a)));
+  }
+  function homeBox(home) {             // [w, s, e, n]: the scene's bounds, else a box around its centre
+    const b = home && home.bounds, c = home && home.center;
+    if (Array.isArray(b) && b.length === 4 && goodLL(b[0], b[1]) && goodLL(b[2], b[3]) && b[0] < b[2] && b[1] < b[3]) return b.slice();
+    if (Array.isArray(c) && goodLL(c[0], c[1])) return [c[0] - HOME_PAD, c[1] - HOME_PAD, c[0] + HOME_PAD, c[1] + HOME_PAD];
+    return null;
+  }
+  // [[lon, lat], ...] of the calls that count: a real point within `within` km of home (its centre, else its box's)
+  function areaCalls(home, calls, within = AREA_KM) {
+    const box = homeBox(home);
+    if (!box) return [];
+    const c = home.center && goodLL(home.center[0], home.center[1]) ? home.center : [(box[0] + box[2]) / 2, (box[1] + box[3]) / 2];
+    return (calls || []).filter((p) => p && goodLL(p.lon, p.lat) && km(c, [p.lon, p.lat]) <= within).map((p) => [p.lon, p.lat]);
+  }
+  // [[w, s], [e, n]]: our area and the calls in it; null with no home at all
+  function areaBounds(home, calls, within = AREA_KM) {
+    const box = homeBox(home);
+    if (!box) return null;
+    let [w, s, e, n] = box;
+    for (const [lon, lat] of areaCalls(home, calls, within)) {
+      w = Math.min(w, lon); e = Math.max(e, lon); s = Math.min(s, lat); n = Math.max(n, lat);
+    }
+    return [[w, s], [e, n]];
   }
 
   // ---- RigLayer: pins, rig chips, lines and the station box on a MapLibre map -------------------
@@ -335,19 +377,16 @@ window.CadMap = (() => {
       this.pop.replaceChildren();
     }
 
-    // Where the map should look: the focused call and the stations its rigs come from (live positions
-    // too); no focus: every open call and the firehouses.
+    // Where a map with a call open should look: the call and the stations its rigs come from (live positions
+    // too), the firehouses when it has none of those; points that can't be on the map left out. No call open: the
+    // area (RigMap.framePoints, areaBounds).
     focusPoints() {
       const M = (this.data && this.data.map) || {};
       const f = this.focus, pts = [];
-      if (f) {
-        if (f.lat != null && f.lon != null) pts.push([f.lon, f.lat]);
-        for (const m of M.markers || []) if (m.incident_id === f.id && m.place !== "incident") pts.push([m.lon, m.lat]);
-        if (!pts.length) for (const s of M.stations || []) pts.push(s.ll);
-      } else {
-        for (const p of M.incidents || []) pts.push([p.lon, p.lat]);
-        for (const s of M.stations || []) pts.push(s.ll);
-      }
+      if (!f) return pts;
+      if (goodLL(f.lon, f.lat)) pts.push([f.lon, f.lat]);
+      for (const m of M.markers || []) if (m.incident_id === f.id && m.place !== "incident" && goodLL(m.lon, m.lat)) pts.push([m.lon, m.lat]);
+      if (!pts.length) for (const s of M.stations || []) pts.push(s.ll);
       return pts;
     }
   }
@@ -420,19 +459,28 @@ window.CadMap = (() => {
       this.note.textContent = note || "";
       this.note.hidden = !note;
       const fid = focus ? focus.id : null;
-      if (fid !== this.focusId) {                     // another call: look at it whatever was done before
+      if (fid !== this.focusId) {                     // another call (or none): look at it whatever was done before
         this.focusId = fid;
         this.userMoved = false;
         this.fitKey = null;
         this.layer.closePicker();
         this.clearPlace();
       }
-      const key = JSON.stringify(this.layer.focusPoints());
+      const key = JSON.stringify(this.framePoints());
+      if (!this.focus) {                              // no call open: the calls changed, so all of them again, as
+        if (this.callsKey !== undefined && key !== this.callsKey) this.userMoved = false;   // Recenter does (#218)
+        this.callsKey = key;                          // (a view switch or a resize leaves a map the viewer moved)
+      } else this.callsKey = undefined;
       if (key !== this.fitKey && this.canvas.clientWidth) {
         const first = this.fitKey === null;
         this.fitKey = key;
         if (!this.userMoved && !this.opts.manual) this.fit(!first);
       }
+    }
+
+    framePoints() {                  // what the frame is made of: the call's points, or the open calls in our area
+      if (this.focus) return this.layer.focusPoints();
+      return areaCalls(this.opts.scene.home, ((this.layer.data && this.layer.data.map) || {}).incidents);
     }
 
     // A place named in a note ("@Lyon Park", #67): a pin, the map moved to it, its name in a box at the
@@ -478,6 +526,13 @@ window.CadMap = (() => {
       const w = this.canvas.clientWidth, ht = this.canvas.clientHeight;
       if (!w || !ht) return;
       const dur = animate ? 600 : 0;
+      if (!this.focus) {                               // no call open: our area and the open calls in it (#218)
+        const area = areaBounds(sc.home, ((this.layer.data && this.layer.data.map) || {}).incidents);
+        if (!area) return this.map.jumpTo({ center: sc.home.center, zoom: sc.home.zoom });
+        const p = Math.max(8, Math.min(40, Math.floor(Math.min(w, ht) / 10)));     // the buttons above, a pin's label below
+        return this.map.fitBounds(area, { padding: { top: Math.min(p + 34, Math.floor(ht / 3)), bottom: Math.min(p + 28, Math.floor(ht / 3)),
+                                                     left: p, right: p }, maxZoom: FOCUS_MAX_ZOOM, duration: dur });
+      }
       if (!pts.length) return this.map.jumpTo({ center: sc.home.center, zoom: sc.home.zoom });
       const b = new maplibregl.LngLatBounds(pts[0], pts[0]);
       pts.forEach((p) => b.extend(p));
@@ -485,7 +540,7 @@ window.CadMap = (() => {
       if (field) { b.extend(field[0]); b.extend(field[1]); }
       const pad = Math.max(10, Math.min(90, Math.floor(Math.min(w, ht) / 3.5)));   // room for the chips around the edge
       if (!field && (pts.length === 1 || (b.getEast() - b.getWest() < 1e-4 && b.getNorth() - b.getSouth() < 1e-4))) {
-        return this.map.easeTo({ center: b.getCenter(), zoom: this.focusId != null ? 16 : sc.home.zoom, duration: dur });
+        return this.map.easeTo({ center: b.getCenter(), zoom: 16, duration: dur });
       }
       const top = Math.min(pad + 34, Math.floor(ht / 2.5));        // below the Recenter / Expand buttons
       this.map.fitBounds(b, { padding: { top, bottom: pad, left: pad, right: pad }, maxZoom: FOCUS_MAX_ZOOM, duration: dur });
@@ -555,17 +610,13 @@ window.CadMap = (() => {
   }
 
   // ---- Overview: every open call at once ---------------------------------------------------------
+  // The console's Overview is the map (or the cameras) beside the queue, which lists the calls (#217: its own cards
+  // repeated them); the wall board, with no queue, keeps a card per call and the Non-emergency list (.ov-side).
 
   const ACTIVE_FIRST = { active: 0, pending: 1, queued: 2 };
 
-  function liveFor(o) {               // who is talking now on this call: one of its rigs, or its channel
-    const names = new Set(o.units.map((u) => u.name));
-    return ((cad.state && cad.state.talking) || []).filter((e) => !e.ended && (
-      (e.rig && e.rig.split(/,\s*/).some((r) => names.has(r))) || (!e.rig && o.channels.includes(e.channel))));
-  }
-
   function cardFill(li, o) {
-    const live = liveFor(o);
+    const live = callLive(o);
     const color = typeColor(o.type) || "#9AA3AD";
     li.className = `ov-card item ${o.status}` + (live.length ? " live" : "");
     li.style.setProperty("--c", color);
@@ -635,7 +686,7 @@ window.CadMap = (() => {
       for (const e of talk) {
         const c = el("span", Radio.chipClass(e));
         c.append(el("span", "", Radio.label(e)));
-        const on = ov.filter((o) => liveFor(o).includes(e) || (e.rig && o.units.some((u) => e.rig.split(/,\s*/).includes(u.name))));
+        const on = ov.filter((o) => callLive(o).includes(e) || (e.rig && o.units.some((u) => e.rig.split(/,\s*/).includes(u.name))));
         if (on.length) c.append(el("span", "on", on.map((o) => incTitle(o)).join(", ")));
         tbox.append(c);
       }
@@ -650,9 +701,9 @@ window.CadMap = (() => {
                                         el("span", "dim", " Accept / Dismiss")),
       empty: "",
     });
-    syncList($("#ov-cards"), emerg, {
+    if (BOARD) syncList($("#ov-cards"), emerg, {
       key: (o) => String(o.id),
-      sig: (o) => JSON.stringify([o, liveFor(o).map((e) => [e.key, e.rig]), o.units.map((u) => talkState(u.name)), cad.listSig.length]),
+      sig: (o) => JSON.stringify([o, callLive(o).map((e) => [e.key, e.rig]), o.units.map((u) => talkState(u.name)), cad.listSig.length]),
       make: () => {
         const li = el("li", "ov-card item");
         li.tabIndex = 0;
@@ -664,7 +715,7 @@ window.CadMap = (() => {
       fill: cardFill,
       empty: "None",
     });
-    syncList($("#ov-nonemerg"), ne, {
+    if (BOARD) syncList($("#ov-nonemerg"), ne, {
       key: (o) => String(o.id), sig: (o) => JSON.stringify([o.number, o.type, o.subtype, o.address, o.units.map((u) => u.name)]),
       make: () => {
         const li = el("li", "ov-ne item");
@@ -714,5 +765,5 @@ window.CadMap = (() => {
   }
 
   const detailMap = () => views.detail;   // the working event's map, for its resize handles (incident-map.js, #210)
-  return { RigLayer, RigMap, detail, detailMap, place, overview, goOverview, openBig, closeBig };
+  return { RigLayer, RigMap, detail, detailMap, place, overview, goOverview, openBig, closeBig, areaBounds, areaCalls, AREA_KM };
 })();
