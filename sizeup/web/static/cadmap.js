@@ -713,5 +713,6 @@ window.CadMap = (() => {
     $("#d-back").addEventListener("click", goOverview);
   }
 
-  return { RigLayer, RigMap, detail, place, overview, goOverview, openBig, closeBig };
+  const detailMap = () => views.detail;   // the working event's map, for its resize handles (incident-map.js, #210)
+  return { RigLayer, RigMap, detail, detailMap, place, overview, goOverview, openBig, closeBig };
 })();
