@@ -255,6 +255,13 @@ def overlay(d: dict, ov: dict) -> dict:
     o = ov.get("dispatch_tones") or {}
     if o:
         d["dispatch_tones"] = dict(d.get("dispatch_tones") or {}, **o)
+    ag = d.get("agency_status_sets")
+    if isinstance(ag, dict) and isinstance(ag.get("sets"), dict):   # a status deleted, a board gone: out of the sets (#219)
+        ids = {b.get("id") for b in d.get("unit_boards") or [] if isinstance(b, dict)}
+        sets = {k: dict(v, statuses=[c for c in v.get("statuses") or [] if c not in gone_st],
+                        labels={c: t for c, t in (v.get("labels") or {}).items() if c not in gone_st})
+                for k, v in ag["sets"].items() if isinstance(v, dict)}
+        d["agency_status_sets"] = dict(ag, sets=sets, boards={b: x for b, x in (ag.get("boards") or {}).items() if b in ids})
     return d
 
 

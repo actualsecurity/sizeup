@@ -748,6 +748,7 @@ class Store:
         for r in rows:
             r["spare"], r["mutual_aid"] = bool(r["spare"]), bool(r["mutual_aid"])
             r["response"] = self.lists.response(r["name"])       # fire | mutual_aid | agency
+            r["status_set"] = self.lists.agency_set(r["name"], r["board"])   # another agency's: its statuses (#219)
             r["station"] = self.lists.station(r["name"])    # home firehouse: the data file, or Settings
         return rows
 
@@ -792,9 +793,10 @@ class Store:
             raise CadError(f"unknown status {status!r}; one of {', '.join(L.status_ids)}")
         role = L.role(status)
         u = self.unit(uid)
-        if u["response"] == "agency" and status not in L.agency_statuses():
-            raise CadError(f"{u['name']} is another agency's unit: only "
-                           + " or ".join(L.name("unit_statuses", s) for s in L.agency_statuses()))
+        if u["response"] == "agency" and status not in L.unit_statuses_for(u["name"], u["board"]):
+            ok = [L.label(s, u["name"], u["board"]) for s in L.unit_statuses_for(u["name"], u["board"])]
+            raise CadError(f"{u['name']} is another agency's unit: {', '.join(ok[:-1])} or {ok[-1]}" if len(ok) > 1
+                           else f"{u['name']} is another agency's unit: only {''.join(ok)}")
         now = self.clock()
         with self.tx() as db:
             a = db.execute("SELECT * FROM assignments WHERE unit_id = ? AND cleared_at IS NULL", (uid,)).fetchone()
@@ -806,7 +808,7 @@ class Store:
                                "WHERE id = ?", (now, a["id"]))
                 elif role in ("free", "oos"):
                     db.execute("UPDATE assignments SET cleared_at = ? WHERE id = ?", (now, a["id"]))
-            text = f"{u['name']} {'cleared' if u['response'] == 'agency' and role == 'free' else L.status_phrase(status)}" \
+            text = f"{u['name']} {'cleared' if u['response'] == 'agency' and role == 'free' else L.status_phrase(status, u['name'], u['board'])}" \
                 + (f" ({note})" if note and role == "oos" else "")
             iid = a["incident_id"] if a is not None else None
             relieved = []
@@ -864,6 +866,8 @@ class Store:
             raise CadError("a unit goes back to a call as " + " or ".join(L.name("unit_statuses", s)
                                                                            for s in self.return_statuses()))
         u = self.unit(uid)
+        if status not in L.unit_statuses_for(u["name"], u["board"]):
+            raise CadError(f"{u['name']} is another agency's unit: not {L.name('unit_statuses', status)}")
         now = self.clock()
         with self.tx() as db:
             inc = db.execute("SELECT status FROM incidents WHERE id = ?", (iid,)).fetchone()
@@ -884,7 +888,7 @@ class Store:
             col = ON_TIMES[L.role(status)]
             db.execute(f"UPDATE assignments SET cleared_at = NULL, {col} = COALESCE({col}, ?) WHERE id = ?", (now, a["id"]))
             db.execute("UPDATE units SET status = ?, status_at = ?, out_of_service = '' WHERE id = ?", (status, now, uid))
-            self._event(db, iid, "status", f"{u['name']} returned ({L.status_phrase(status)})", operator, uid, now)
+            self._event(db, iid, "status", f"{u['name']} returned ({L.status_phrase(status, u['name'], u['board'])})", operator, uid, now)
             self._history(db, uid, u["status"], status, iid, operator, now)
             if status == L.command_status:
                 self._event(db, iid, "status", self._take_command(db, iid, uid, u["name"], operator, now)[0], operator, uid, now)
@@ -1143,7 +1147,7 @@ class Store:
                     col = ON_TIMES[self.lists.role(status)]
                     db.execute(f"UPDATE assignments SET {col} = ? WHERE id = ?", (now, cur.lastrowid))
                     db.execute("UPDATE units SET status = ?, status_at = ?, out_of_service = '' WHERE id = ?", (status, now, uid))
-                    self._event(db, iid, "status", f"{u['name']} added {self.lists.status_phrase(status)} (not dispatched)",
+                    self._event(db, iid, "status", f"{u['name']} added {self.lists.status_phrase(status, u['name'], u['board'])} (not dispatched)",
                                 operator, uid, now)
                     self._history(db, uid, u["status"], status, iid, operator, now)
                     if status == self.lists.command_status:
@@ -1151,7 +1155,7 @@ class Store:
                                     operator, uid, now)
                 elif not attach:
                     db.execute("UPDATE units SET status = ?, status_at = ? WHERE id = ?", (dispatched, now, uid))
-                    self._event(db, iid, "status", f"{u['name']} {verb or self.lists.status_phrase(dispatched)}",
+                    self._event(db, iid, "status", f"{u['name']} {verb or self.lists.status_phrase(dispatched, u['name'], u['board'])}",
                                 operator, uid, now)
                     self._history(db, uid, u["status"], dispatched, iid, operator, now)
                 added.append(u["name"])
@@ -1190,7 +1194,7 @@ class Store:
             return rows
         ids = [r["id"] for r in rows]
         marks = ",".join("?" * len(ids))
-        assigns = self.q(f"SELECT a.*, u.name, u.kind, u.status FROM assignments a JOIN units u ON u.id = a.unit_id "
+        assigns = self.q(f"SELECT a.*, u.name, u.kind, u.status, u.board FROM assignments a JOIN units u ON u.id = a.unit_id "
                          f"WHERE a.incident_id IN ({marks}) ORDER BY a.id", ids)
         events = self.q(f"SELECT * FROM events WHERE incident_id IN ({marks}) ORDER BY at, id", ids)
         disp = self.q(f"SELECT id, incident_id, at, operator, kind, text, unit_ids, audio_path != '' AS has_audio, audio_note, "
@@ -1203,11 +1207,13 @@ class Store:
             latest[(a["incident_id"], a["unit_id"])] = a["id"]
         back = list(self.return_statuses())
         for a in assigns:
-            a["next"] = [] if a["cleared_at"] else list(self.lists.next_statuses(a["status"]))   # the row's buttons
-            # A cleared unit, now free, on a call that is still open: it can go back to it.
-            a["return"] = back if (a["cleared_at"] and latest[(a["incident_id"], a["unit_id"])] == a["id"]
-                                   and by[a["incident_id"]]["status"] not in ("closed", "dismissed")
-                                   and self.lists.role(a["status"]) == "free") else []
+            a["next"] = [] if a["cleared_at"] else list(self.lists.next_statuses(a["status"], a["name"], a["board"]))
+            a["status_set"] = self.lists.agency_set(a["name"], a["board"])    # another agency's (#219): its labels
+            # A cleared unit, now free, on a call that is still open: it can go back to it (an agency's: in its set).
+            mine = self.lists.unit_statuses_for(a["name"], a["board"])
+            a["return"] = [c for c in back if c in mine] if (a["cleared_at"] and latest[(a["incident_id"], a["unit_id"])] == a["id"]
+                                                             and by[a["incident_id"]]["status"] not in ("closed", "dismissed")
+                                                             and self.lists.role(a["status"]) == "free") else []
             by[a["incident_id"]]["assignments"].append(a)
         for e in events:
             e["places"] = json.loads(e["places"]) if e.get("places") else []     # a note's "@" places (#67)

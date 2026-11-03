@@ -269,6 +269,26 @@
     "IC": ["OL", "AV", "OS"],
     "*": ["AV", "OS"]
   },
+  "_agency_status_sets": ["Other agencies' units (response agency: EMS, PD, utilities, keyholders ... GitHub #219): they go",
+                          "through statuses like our rigs, set by the dispatcher. sets: id -> {statuses, labels}; the first",
+                          "status is what Attach puts the unit on the event as (Dispatched: assigned, not yet responding;",
+                          "never On location straight away). On the event the buttons are the status_flow's next steps, only",
+                          "the set's; the unit board offers the whole set. labels: a status named otherwise for that set",
+                          "(its buttons, chips and the timeline; stored, logged and exported as the code). boards: unit_boards",
+                          "id -> set; an agency unit on any other board takes default. full: Port Chester EMS (its",
+                          "ambulances go out of service, the desk wants to know). responder: PD, ConEd, BATs, the other",
+                          "agencies (like our rigs, without Out of service: their availability is not ours to run). contact:",
+                          "Keyholders and the Knox box (someone called to come and open up): Notified, En route, On location,",
+                          "Done. Proposed (sizeup): to confirm with the department."],
+  "agency_status_sets": {
+    "default": "responder",
+    "sets": {
+      "full": {"statuses": ["DP", "RS", "OL", "ST", "AV", "CN", "CE", "OS"]},
+      "responder": {"statuses": ["DP", "RS", "OL", "ST", "AV", "CN", "CE"]},
+      "contact": {"statuses": ["DP", "RS", "OL", "AV"], "labels": {"DP": "Notified", "RS": "En route", "AV": "Done"}}
+    },
+    "boards": {"ems": "full", "res-keyholder": "contact", "res-knox": "contact"}
+  },
   "unit_event_cell": {"bg": "#1E4766", "fg": "#EAF4F9"},
   "unit_kinds": [
     {"id": "engine", "label": "Engine"},

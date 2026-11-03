@@ -326,18 +326,20 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
 
       <div class="card">
         <div class="card-head"><h2>Assigned</h2><span id="d-cmd" class="dim small"></span><span class="spacer"></span>
-          <button id="o-open" type="button" class="sm" hidden title="A unit nobody dispatched: heard responding, or on location. Nothing said on the air."><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-plus"/></svg>Add unit</button></div>
+          <button id="o-open" type="button" class="sm" hidden title="Units nobody dispatched: heard responding, or on location (one, or several: E60 E62 L31 RBPD). Nothing said on the air."><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-plus"/></svg>Add unit</button></div>
         <ol id="d-units" class="list on-units"></ol>
-        <!-- a unit that wasn't dispatched: on the event as Responding or On location (POST attach {status}) -->
+        <!-- units that weren't dispatched (one or several, #220): on the event as Responding or On location (POST attach {status}) -->
         <form id="o-form" class="row add-unit" hidden autocomplete="off">
           <div class="note-box">
-            <input id="o-unit" type="text" maxlength="20" placeholder="Unit (2395, E63)" spellcheck="false" autocapitalize="characters"
+            <input id="o-unit" type="text" maxlength="200" placeholder="Units (2395, or E60 E62 L31 RBPD)" spellcheck="false" autocapitalize="characters"
                    role="combobox" aria-label="Unit" aria-autocomplete="list" aria-controls="o-sugg" aria-expanded="false">
             <ol id="o-sugg" class="sugg note-sugg" role="listbox" hidden></ol>
           </div>
           <span id="o-status" class="row"></span>
           <button id="o-cancel" type="button">Cancel</button>
         </form>
+        <!-- what the words typed matched (#220): a chip each; Enter adds every unit found -->
+        <div id="o-preview" class="chips add-chips" aria-live="polite" aria-label="Units to add" hidden></div>
         <div id="o-error" class="error"></div>
       </div>
 

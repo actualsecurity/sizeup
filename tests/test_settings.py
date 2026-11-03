@@ -202,22 +202,23 @@ def test_ems_and_pd_never_on_run_cards_tick_all_or_the_air_but_can_be_attached()
         with pytest.raises(CadError, match="don't dispatch.*77A4"):
             fn(iid, {"unit_ids": [uid(cad, "E60"), a4], "operator": "JD"})
     cad.dispatch(iid, {"unit_ids": [uid(cad, "E60")], "operator": "JD"})
-    # attached when it shows up: "77A4 on location", not "dispatched"
+    # attached: on the event Dispatched (assigned, not yet responding: #219, never straight to On location), and
+    # never in the dispatch log or said
     cad.attach(iid, {"unit_ids": [a4], "operator": "JD"})
     u = next(x for x in cad.store.units() if x["id"] == a4)
-    assert u["status"] == "OL" and u["incident_id"] == iid
+    assert u["status"] == "DP" and u["incident_id"] == iid
     ev = [e["text"] for e in cad.store.full(iid)["events"]]
-    assert "77A4 on location" in ev and not any("77A4" in t and "dispatched" in t for t in ev)
-    assert not any(t.startswith("Attached") for t in ev)
+    assert ev[-2:] == ["Attached 77A4", "77A4 dispatched"] and "77A4 on location" not in ev
     assert cad.store.full(iid)["dispatches"][0]["unit_ids"] == [uid(cad, "E60")]
     # an add-on doesn't say it on the air
     r = cad.dispatch(iid, {"unit_ids": [uid(cad, "E61")], "operator": "JD"})
     assert "77" not in r["text"] and "Engine 60 dispatched" in r["text"]
-    with pytest.raises(CadError, match="only On location or Available"):
-        cad.unit_status(a4, {"status": "RS"})
+    with pytest.raises(CadError, match="another agency's unit"):     # not in its set (incident command is ours)
+        cad.unit_status(a4, {"status": "IC"})
+    cad.unit_status(a4, {"status": "RS", "operator": "JD"})
     cad.unit_status(a4, {"status": "AV", "operator": "JD"})
-    assert "77A4 cleared" in [e["text"] for e in cad.store.full(iid)["events"]]
-    assert cad.state()["lists"]["agency_statuses"] == ["OL", "AV"]
+    assert [e["text"] for e in cad.store.full(iid)["events"]][-2:] == ["77A4 responding", "77A4 cleared"]
+    assert cad.state()["lists"]["agency_statuses"] == ["AV", "DP", "RS", "OL", "ST", "CN", "CE", "OS"]
 
 
 def test_mutual_aid_only_by_name_and_said_when_sent():
