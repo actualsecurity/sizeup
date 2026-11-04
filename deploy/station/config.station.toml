@@ -124,6 +124,16 @@ db = "state/cad.sqlite"            # under SIZEUP_STATE_DIR; the hub's is the CA
 # here (no Kokoro, no macOS `say` on Linux); if Polly fails, the hub goes text only and says so.
 tts_engine = "none"
 
+# Our own ADS-B receiver (GitHub #235, deploy/station/README.md "ADS-B receiver"): the dongle behind the 1090 MHz
+# filter and LNA, by its exact USB serial, never all digits (give it one first: rtl_eeprom -d <index> -s adsb1090).
+# Named here or in Settings > Radios (admins, with a confirm; that choice wins and is kept in state/): the decoder
+# (sizeup-adsb.service, readsb) runs on that dongle and only on it, sizeup's radios and auto-assign never take it,
+# and this station sends what it hears to the hub every second or two. "" = no ADS-B receiver: nothing runs.
+[aircraft.receiver]
+sdr = ""
+gain = "auto"                      # readsb --gain: auto (an LNA in front makes a fixed high gain overload), or dB
+bias_tee = false                   # true ONLY for an LNA powered up the coax (4.5 V); false for its own supply or none
+
 [cloud]
 role = "station"                   # forward to the hub (Settings > System > Station switches it, kept in state/cloud.json)
 hub_url = "https://sizeup.actualsecurity.org"

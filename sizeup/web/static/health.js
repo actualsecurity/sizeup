@@ -136,6 +136,23 @@ const StationHealth = (() => {
       [["whisper", pr.whisper], ["trunk-recorder", pr.recorder]].filter(([, p]) => p).map(([k, p]) => [
         k, [p.state || "?", stateCls(p.state)], p.restarts ?? "", p.down_since ? when(p.down_since) : "", p.detail || ""]),
       "Not reported"));
+    const ad = h.adsb;
+    if (ad) {             // our ADS-B receiver on the station (#235): its decoder, and its aircraft reaching the hub
+      const fw = ad.forward || {}, hb = ad.hub || {};
+      kids.push(el("h3", "hl-sub", "ADS-B receiver (station)"), dl([
+        ["Dongle", `${ad.name || ad.sdr}${ad.name && ad.name !== ad.sdr ? ` (serial ${ad.sdr})` : ""}`
+          + (ad.present === false ? ": not plugged in" : ""), ad.present === false ? "hl-bad" : ""],
+        ["Decoder", `${ad.state || "?"}${ad.detail ? `: ${ad.detail}` : ""}`, stateCls(ad.state === "ok" ? "ok" : ad.state === "off" ? "off" : "bad")],
+        ["Held by", ad.held_by ? `${ad.held_by.app} (${ad.held_by.mode})` : ""],
+        ["Messages", ad.messages_per_s !== null && ad.messages_per_s !== undefined ? `${ad.messages_per_s} a second` : ""],
+        ["Aircraft", ad.aircraft !== null && ad.aircraft !== undefined ? `${ad.aircraft} (${ad.with_pos ?? 0} with a position)` : ""],
+        ["Last message", ad.last_message_at ? `${when(ad.last_message_at)} (${longDur(serverNow() - ad.last_message_at)} ago)` : "none yet"],
+        ["Gain, bias-tee", `${ad.gain || "auto"}, bias-tee ${ad.bias_tee ? "ON" : "off"}`],
+        ["To the hub", fw.posts !== undefined ? `${fw.ok ? "ok" : "not reaching it"}${fw.error ? ` (${fw.error})` : ""}, every ${fw.every_s} s, `
+          + `${fw.posts} posts, ${((fw.bytes || 0) / 1e6).toFixed(1)} MB` : "", fw.ok === false ? "hl-bad" : ""],
+        ["On the hub", hb.last ? `${hb.aircraft} aircraft, last ${longDur(hb.age_s)} ago, ${hb.bytes_per_s} B/s` : "nothing received yet"],
+      ]));
+    }
     const sq = h.stt_queue;
     if (sq) {             // the station's whisper queue (#195): depth, the oldest live clip's wait, what was dropped
       kids.push(el("h3", "hl-sub", "Speech-to-text queue (station)"), dl([

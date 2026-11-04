@@ -556,6 +556,13 @@ function renderPrealert() {
   PreAlert.badge($("#prealert"), pa);
   PreAlert.notify(pa);
   show($("#csv-prealerts"), !!pa);
+  // airport pre-alerts (airport-prealert.js): an emergency squawk near HPN, HPN ATC; above the phone's
+  const ap = cad.state && cad.state.airport_prealert;
+  if (window.AirportPreAlert) {
+    AirportPreAlert.column($(BOARD ? "#b-airport" : "#q-airport"), ap, cad.state && cad.state.alarms, deps);
+    AirportPreAlert.notify(ap);
+  }
+  show($("#csv-airport-prealerts"), !!ap);
 }
 function queueExtra(i) {              // what the queue card shows from the call's summary (#217), for its signature
   const o = isOpen(i) ? callSummary(i.id) : null;

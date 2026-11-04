@@ -307,17 +307,18 @@ def aircraft_type(ev: dict) -> str:
     return ", ".join(x for x in (ev.get("type"), ev.get("model")) if x) or "type not known"
 
 
-def aircraft_text(ev: dict) -> str:
-    """The alarm's line about the aircraft: who, what kind, the emergency, how high, where from HPN, what it is
-    doing, which feed, and that this is public ADS-B data."""
+def aircraft_alt(ev: dict) -> str:
+    """"900 ft, descending 500 ft/min", "on the ground", "altitude not reported"."""
     alt = ev.get("alt")
     alt_s = "on the ground" if alt == "ground" else f"{alt:,} ft" if isinstance(alt, (int, float)) else "altitude not reported"
     vr = ev.get("vr")
     if isinstance(vr, (int, float)) and alt != "ground":
         alt_s += ", level" if abs(vr) <= 300 else f", {'climbing' if vr > 0 else 'descending'} {abs(vr):,} ft/min"
-    label = aircraft_label(ev)
-    if ev.get("callsign") and ev.get("reg") and ev["reg"] != ev["callsign"]:
-        label += f" ({ev['reg']})"
+    return alt_s
+
+
+def aircraft_doing(ev: dict) -> str:
+    """"arriving HPN on the ILS 34, 1.4 nm to go", "departing HPN", "low in the area" (sizeup's reading of its track)."""
     ph = ev.get("phase") or ""
     if ph == "arriving":
         doing = "arriving HPN"
@@ -327,10 +328,23 @@ def aircraft_text(ev: dict) -> str:
             doing += f", runway {ev['runway']}"
         if ev.get("dist_nm") is not None:
             doing += f", {ev['dist_nm']} nm to go"
-    else:
-        doing = PHASES.get(ph, ph)
-    parts = [f"{label}, {aircraft_type(ev)}", ev.get("meaning") or "emergency", alt_s, ev.get("where") or "",
-             doing, f"via {ev.get('feed') or 'ADS-B'}"]
+        return doing
+    return PHASES.get(ph, ph)
+
+
+def aircraft_who(ev: dict) -> str:
+    """"N41DW", "JBU123 (N123JB)": its callsign, with its registration when that differs."""
+    label = aircraft_label(ev)
+    if ev.get("callsign") and ev.get("reg") and ev["reg"] != ev["callsign"]:
+        label += f" ({ev['reg']})"
+    return label
+
+
+def aircraft_text(ev: dict) -> str:
+    """The alarm's line about the aircraft: who, what kind, the emergency, how high, where from HPN, what it is
+    doing, which feed, and that this is public ADS-B data."""
+    parts = [f"{aircraft_who(ev)}, {aircraft_type(ev)}", ev.get("meaning") or "emergency", aircraft_alt(ev),
+             ev.get("where") or "", aircraft_doing(ev), f"via {ev.get('feed') or 'ADS-B'}"]
     return " · ".join(x for x in parts if x) + f". {ADSB_NOTE}."
 
 

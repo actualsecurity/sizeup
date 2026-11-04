@@ -83,6 +83,21 @@
   .pa-t { color: var(--text); }
   .pa-src { display: block; color: var(--text-2); font-size: var(--fs-xs); line-height: var(--lh-xs); overflow: hidden; text-overflow: ellipsis; }
   .pa-age { font-weight: 700; }
+  /* an airport pre-alert (airport-prealert.js, sizeup/cad/airportalert.py): an emergency squawk near HPN (#235), HPN
+     ATC (#233); the alarm stays the alarm, this is the event in the queue with what is known */
+  .pa.ap { align-items: flex-start; border-color: var(--err); background: color-mix(in srgb, var(--err) 14%, var(--raised)); }
+  .pa.ap.drill { border-color: var(--info); background: color-mix(in srgb, var(--info) 10%, var(--raised)); animation: none; }
+  .pa.ap .ico { color: var(--err); flex: none; }
+  .pa.ap.drill .ico { color: var(--info); }
+  .ap-what { white-space: normal; }
+  .ap-title { display: block; }
+  .ap-alarm { color: var(--warn); }
+  .ap-lines { display: grid; grid-template-columns: auto 1fr; gap: 0 var(--s-2); margin: var(--s-1) 0 0;
+    font-size: var(--fs-xs); line-height: var(--lh-xs); }
+  .ap-lines dt { color: var(--text-2); }
+  .ap-lines dd { margin: 0; color: var(--text); overflow-wrap: anywhere; }
+  .ap-tools { display: flex; flex-direction: column; gap: var(--s-1); flex: none; }
+  .ap-more { white-space: nowrap; }
   .q { display: flex; flex-direction: column; gap: var(--s-1); }
   .q > li.qi { padding: var(--s-2); border: var(--bw) solid var(--line); background: var(--raised); }
   .q > li.qi:hover { border-color: var(--line-hover); background: var(--hover); }

@@ -13,6 +13,9 @@ POST /api/incident/<id>/close  close an incident by hand
 POST /api/talkgroup {"tg": 307, "record": bool?, "main": bool?}  per-talkgroup switches (state "talkgroups")
 POST /api/talkgroup-group {"group": "County Police", "record": bool?, "main": bool?}  a whole section
 POST /api/mode {"mode": ...}  one shared dongle: hand it to a channel or trunk-recorder (state "sdr")
+POST /api/adsb-receiver {"sdr": serial | "", "confirm": true}  admins: name (or unname) the station's ADS-B dongle
+                        (#235; App.set_adsb_receiver; the hub sends it to the station): reserved for its decoder,
+                        never one of the radios (state "sdr".adsb). Without "confirm": true it is refused
 GET  /healthz                   {"ok": true, version, build, role}: cheap, for the container health check
 GET|POST /api/station/...      [cloud] role = "hub" only: the station's ingest and job queue, bearer token
                                (sizeup/cloud/hub.py)
@@ -298,7 +301,7 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                  cad=None, cad_b: Broadcaster | None = None, station=None, health: bytes = b'{"ok":true}',
                  access=None, access_log: Callable[[str], None] | None = None, station_mode=None,
                  role: str = "", roads=None, gis=None, trains=None, weather=None, station_health=None, stream_gzip: bool = True,
-                 aircraft=None, roadwork=None):
+                 aircraft=None, roadwork=None, set_adsb: Callable[[str], str | None] | None = None):
     """cad: a CadApi (sizeup/cad/api.py) and cad_b its own broadcaster (the console's state is
     small and separate from the monitor's, so neither page carries the other's). station: the hub's
     ingest (sizeup/cloud/hub.py Hub), which checks the station's token before reading any body.
@@ -574,6 +577,21 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                     return self._send(400, json.dumps({"error": err}).encode(), "application/json")
                 self._did(path, body)
                 return self._send(200, b'{"ok":true}', "application/json")
+            if path == "/api/adsb-receiver" and set_adsb is not None:
+                try:
+                    n = int(self.headers.get("Content-Length") or 0)
+                    body = json.loads(self.rfile.read(min(n, 1024)) or b"{}")
+                    if not isinstance(body, dict) or not isinstance(body.get("sdr", ""), str):
+                        raise ValueError("{sdr: the dongle's serial, or \"\" for none, confirm: true}")
+                    err = None if body.get("confirm") is True else \
+                        "confirm: true (naming or unnaming the ADS-B dongle stops or frees a radio)"
+                    err = err or set_adsb(body.get("sdr", ""))
+                except (ValueError, TypeError) as e:
+                    err = f"bad request: {e}"
+                if err:
+                    return self._send(400, json.dumps({"error": err}).encode(), "application/json")
+                self._did(path, body)
+                return self._send(200, b'{"ok":true}', "application/json")
             if path == "/api/retranscribe" and retranscribe is not None:
                 # {"ids": ["307-...", ...]} re-runs those; {"all": true} every recording still on disk
                 try:
@@ -665,7 +683,7 @@ class WebServer:
                  retranscribe: Callable[[list[str] | None], int] | None = None, cad=None, station=None,
                  health: dict | None = None, access=None, access_log: Callable[[str], None] | None = None,
                  station_mode=None, role: str = "", roads=None, gis=None, trains=None, weather=None, station_health=None,
-                 aircraft=None, roadwork=None):
+                 aircraft=None, roadwork=None, set_adsb=None):
         self.access = access
         self.broadcaster = Broadcaster(state_fn)
         # The CAD's own state push (the whole console rebuilt and sent once a second): not on a station,
@@ -675,7 +693,7 @@ class WebServer:
             json.dumps(scene, separators=(",", ":")).encode(), self.broadcaster, clip, close_incident, set_mode,
             set_talkgroup, set_talkgroup_group, retranscribe, cad, self.cad_broadcaster, station,
             json.dumps(health or {"ok": True}, separators=(",", ":")).encode(), access, access_log, station_mode, role,
-            roads, gis, trains, weather, station_health, aircraft=aircraft, roadwork=roadwork))
+            roads, gis, trains, weather, station_health, aircraft=aircraft, roadwork=roadwork, set_adsb=set_adsb))
         self.httpd.daemon_threads = True
 
     @property

@@ -1,0 +1,43 @@
+# The station's ADS-B decoder (GitHub #235, deploy/station/README.md "ADS-B receiver"): readsb on the ONE dongle
+# named for ADS-B ([aircraft.receiver] sdr in /etc/sizeup/config.toml, or Settings > Radios), supervised by
+# /usr/local/lib/sizeup/adsbd.py (sizeup/radio/adsbd.py). With no dongle named it runs nothing and touches no
+# dongle. Its own service: an update restarts it only when adsbd.py, readsb or this unit changed (install-linux.sh),
+# so the aircraft keep coming while sizeup-station restarts. aircraft.json goes to /run/sizeup-adsb/json (tmpfs).
+# Installed by install-linux.sh; edit there, not here.
+[Unit]
+Description=sizeup station: ADS-B decoder (readsb on the dongle named for ADS-B)
+Documentation=file:///opt/sizeup/current/deploy/station/README.md
+After=systemd-udevd.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=sizeup
+Group=sizeup
+SupplementaryGroups=plugdev
+WorkingDirectory=/opt/sizeup
+# HOME: the shared dongle claims (~/.local/state/rtl-claims) are the sizeup user's, as sizeup-station's
+Environment=HOME=/var/lib/sizeup
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=LD_LIBRARY_PATH=/opt/sizeup/rtl-sdr/lib
+RuntimeDirectory=sizeup-adsb
+RuntimeDirectoryMode=0755
+ExecStart=/usr/bin/python3 -I /usr/local/lib/sizeup/adsbd.py run
+Restart=always
+RestartSec=5
+TimeoutStopSec=15
+# readsb is its child: stopped with it
+KillMode=control-group
+# Reception, like the radios (sizeup-station: Nice=-5, CPUWeight=500): ahead of whisper
+Nice=-5
+CPUWeight=400
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=yes
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sizeup-adsb
+
+[Install]
+WantedBy=multi-user.target

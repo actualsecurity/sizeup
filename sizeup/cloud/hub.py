@@ -14,6 +14,11 @@ runs on a bare Linux box with Python + numpy.
                                   build (SIZEUP_BUILD), which the station follows (autoupdate.py)
     GET  /api/station/jobs?wait=25   long poll: jobs for the station -> {jobs: [{id, type, args}]}
     POST /api/station/jobs/<id>   the station's answer {ok, error?, result?, label?, audio?}
+    POST /api/station/aircraft    our ADS-B receiver on the station (#235, sizeup/cloud/aircraftlink.py): {v, epoch, seq,
+                                  full, ac: [[hex, lat, lon, alt, gs, trk, vr, squawk, emergency, flight, seen_pos, seen,
+                                  rssi, ...]], gone: [hex], rx?}, gzipped, every 1 s while someone looks at the map (or an
+                                  emergency is on), else every 5 s; only what changed -> {ok, full, every}. Into the
+                                  aircraft layer's "receiver" feed (sizeup/aircraft.py StationFeed), never the state push
     GET  /api/station/hello      {ok}: the token works (the station's Test connection; not counted as "seen")
     GET  /api/station/status     read only, for the deploy check (tools/deploy_check.py): the hub's build, the
                                  station's version and last update, the health alerts (sizeup/cloud/health.py).
@@ -85,6 +90,7 @@ JSON = "application/json"
 MAX_EVENTS_BODY = 32 * 1024 * 1024
 MAX_STATE_BODY = 4 * 1024 * 1024
 MAX_RESULT_BODY = 16 * 1024 * 1024
+MAX_AIRCRAFT_BODY = 512 * 1024        # 300 aircraft as JSON are ~30 KB; gzipped, a few
 LIVE_STALE_S = 8.0       # a "talking now" snapshot older than this is dropped (the station resends every 2 s)
 TTS_WAIT_S = 20.0        # the dispatch voice: the station renders it; longer than this = text only
 CALL_WAIT_S = 12.0       # an SDR / talkgroup switch (the monitor's switch gives up at 15 s)
@@ -402,6 +408,8 @@ class Hub:
                 return self._events(body(MAX_EVENTS_BODY))
             if method == "POST" and path == "/api/station/state":
                 return self._state(body(MAX_STATE_BODY))
+            if method == "POST" and path == "/api/station/aircraft":
+                return self._aircraft(body(MAX_AIRCRAFT_BODY), headers)
             if method == "POST" and (m := JOB_PATH.fullmatch(path)):
                 raw = body(MAX_RESULT_BODY)
                 if raw is None:
@@ -452,6 +460,25 @@ class Hub:
         if isinstance(d.get("talking"), list):
             self.live.update(d["talking"], now, d.get("paging") if isinstance(d.get("paging"), list) else None)
         return _json(200, {"ok": True, "build": self.build})
+
+    def _aircraft(self, raw: bytes | None, headers) -> tuple[int, bytes, str]:
+        """Our receiver's aircraft, forwarded by the station (#235): into the aircraft layer, nothing else."""
+        if raw is None:
+            return _json(413, {"error": "too large"})
+        size = len(raw)
+        if (headers.get("Content-Encoding") or "").strip().lower() == "gzip":
+            import zlib
+            z = zlib.decompressobj(wbits=31)
+            try:
+                raw = z.decompress(raw, MAX_AIRCRAFT_BODY * 4)
+            except zlib.error as e:
+                return _json(400, {"error": f"bad gzip: {e}"})
+            if z.unconsumed_tail:
+                return _json(413, {"error": "too large"})
+        layer = getattr(self.app, "aircraft", None)
+        if layer is None:
+            return _json(404, {"error": "no aircraft layer here"})
+        return _json(200, layer.station_ingest(json.loads(raw or b"{}"), size))
 
     def _events(self, raw: bytes | None) -> tuple[int, bytes, str]:
         if raw is None:
@@ -971,6 +998,10 @@ class HubApp(App):
 
     def set_mode(self, mode: str, sdr: str | None = None) -> str | None:
         return self._switch("set_mode", mode, sdr)
+
+    def set_adsb_receiver(self, serial: str | None) -> str | None:
+        """Settings > Radios here: the station's ADS-B dongle is named (or unnamed) on the station (#235)."""
+        return self._switch("set_adsb_receiver", serial or "")
 
     def set_talkgroup(self, tg: int, record: bool | None = None, main: bool | None = None) -> str | None:
         return self._switch("set_talkgroup", int(tg), record, main)

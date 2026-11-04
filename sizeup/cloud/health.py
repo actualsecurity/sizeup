@@ -240,7 +240,33 @@ def station_metrics(app, metrics: Metrics) -> dict:
         except Exception:
             pass
     out["jobs"] = jobs
+    adsb = adsb_health(app)
+    if adsb is not None:
+        out["adsb"] = adsb
     return out
+
+
+def adsb_health(app) -> dict | None:
+    """Our ADS-B receiver (#235): the dongle named for it, its decoder (sizeup-adsb.service: running, messages / s,
+    aircraft, the last message) and the forwarding to the hub. None while no dongle is named."""
+    fn = getattr(app, "adsb_row", None)
+    if fn is None or not getattr(app, "adsb_sdr", ""):
+        return None
+    try:
+        row = fn()
+    except Exception as e:  # noqa: BLE001 - a report, never in the way
+        return {"state": "unknown", "detail": f"{type(e).__name__}: {e}"[:200]}
+    dec = row.get("decoder") or {}
+    fwd = row.get("forward") or {}
+    return {"sdr": row.get("serial"), "name": row.get("name"), "present": row.get("present"), "held_by": row.get("held_by"),
+            "installed": row.get("installed"), "state": dec.get("state") or ("down" if row.get("installed") else "missing"),
+            "detail": str(dec.get("detail") or ("the decoder hasn't reported (systemctl status sizeup-adsb)"
+                                                if row.get("installed") else "the decoder isn't installed here"))[:200],
+            "messages_per_s": dec.get("messages_per_s"), "aircraft": dec.get("aircraft"),
+            "with_pos": dec.get("with_pos"), "last_message_at": dec.get("last_message_at"), "restarts": dec.get("restarts"),
+            "since": dec.get("since"), "gain": row.get("gain"), "bias_tee": row.get("bias_tee"),
+            "forward": {k: fwd.get(k) for k in ("ok", "every_s", "posts", "bytes", "dropped_posts", "aircraft", "error",
+                                                 "last_ok")} if fwd else None}
 
 
 # -- the hub's side ----------------------------------------------------------------------------------------------
@@ -416,6 +442,15 @@ class StationHealth:
             uptime_s=round(snow - started) if isinstance(started, (int, float)) else None,
             boot=hl["boot"] + hub.skew if isinstance(hl.get("boot"), (int, float)) else None)
         out["hints"] = [{"channel": c["label"], "text": c["hint"]} for c in chans if c["hint"]]
+        ad = hl.get("adsb") if isinstance(hl.get("adsb"), dict) else None
+        if ad is not None:                       # our ADS-B receiver (#235), its times on the hub's clock
+            ad = dict(ad)
+            for k in ("last_message_at", "since"):
+                if isinstance(ad.get(k), (int, float)):
+                    ad[k] = ad[k] + hub.skew
+            sf = getattr(getattr(getattr(hub, "app", None), "aircraft", None), "station_feed", lambda: None)()
+            ad["hub"] = sf.stats() if sf is not None else None
+        out["adsb"] = ad
         out["transcribe"] = self._transcribe()
         return out
 
@@ -525,6 +560,13 @@ class StationHealth:
                                           "text": f"whisper-server: {wh.get('state')}"
                                                   + (f" ({wh['detail']})" if wh.get("detail") else "")
                                                   + ": transmissions come up without text"})
+        ad = m.get("adsb")
+        if ad and ad.get("state") in ("down", "missing", "unplugged", "refused", "no_signal"):
+            # (held by another app is a handover, not a fault: the panel says who has it)
+            held("adsb", self.down_s, {"severity": "warning", "title": "ADS-B receiver down",
+                                       "text": f"the ADS-B decoder on {ad.get('name') or ad.get('sdr')}: {ad.get('state')}"
+                                               + (f" ({ad['detail']})" if ad.get("detail") else "")
+                                               + ": the map uses adsb.lol / adsb.fi meanwhile"})
         sq = m.get("stt_queue")
         if sq and ((sq.get("oldest_s") or 0) >= STT_BACKLOG_S):
             out["stt_backlog"] = {"severity": "warning", "title": "Speech-to-text behind",
@@ -583,6 +625,10 @@ class StationHealth:
                 w["dongle"] = f"SDR {d['name']}"
         elif kind == "stuck":
             w["channel"] = arg
+        elif kind == "adsb":
+            ad = m.get("adsb") or {}
+            w["dongle"] = f"SDR {ad.get('name') or ad.get('sdr') or '?'}"
+            w["channel"] = "ADS-B"
         elif kind == "recorder":
             w["channel"] = P25_JOB
         elif kind in ("update", "behind"):

@@ -285,7 +285,8 @@ def test_the_registry_gives_make_and_model_and_never_an_owner(tmp_path):
     reg = Registry(FAA_URL, tmp_path, FakeFetch(), log=lambda m: None, clock=Clock())
     assert reg.lookup("a19e97") is None and reg.refresh()
     assert reg.lookup("a19e97") == {"n": "N203QS", "make": "Bombardier Inc", "model": "CL-600-2B16", "year": "2025",
-                                    "kind": "airplane", "engine": "turbofan", "engines": 2}
+                                    "kind": "airplane", "engine": "turbofan", "engines": 2, "company": ""}   # co-owned
+    assert reg.lookup("a4d227")["company"] == "LLC"         # the kind of registrant only (#235), never who
     assert reg.lookup("ab56b8")["kind"] == "helicopter" and reg.lookup("c04051") is None and reg.lookup("~2b0c4d") is None
     con = reg.con
     cols = {r[1] for t in ("aircraft", "models") for r in con.execute(f"PRAGMA table_info({t})")}

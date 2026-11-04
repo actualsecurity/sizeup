@@ -400,8 +400,12 @@ window.AircraftLayer = (() => {
       if (a.sq) lines.push(`Squawk ${a.sq}`);
       const reg = a.reg ? `Registration ${a.reg}${a.reg_src === "faa" ? " (FAA registry)" : ""}` : "Registration not known";
       lines.push([reg, a.airline].filter(Boolean).join(" · "));
-      lines.push(`Position: ${POS[a.pos] || "as the feed gives it"}, via ${SRC_NAME[a.src] || a.src || "the feed"}${a.band ? ` (${a.band} MHz)` : ""}`
+      // the operator: the airline its callsign names, else a company's or government's from the feeds (never a person's)
+      if (a.op && a.op !== a.airline) lines.push(`Operator: ${a.op}${a.op_src && a.op_src !== "airline" ? ` (${SRC_NAME[a.op_src] || a.op_src})` : ""}`);
+      // where its position came from: our receiver while it hears it, adsb.lol / adsb.fi when we lose it (#235)
+      lines.push(`Position from ${SRC_NAME[a.src] || a.src || "the feed"}: ${POS[a.pos] || "as the feed gives it"}${a.band ? ` (${a.band} MHz)` : ""}`
                  + `${age > staleS(d) ? " (stale)" : ""}`);
+      if (a.det) lines.push(`Type and registration from ${SRC_NAME[a.det] || a.det}, matched by its ICAO address`);
       if (between) lines.push(`Drawn at an estimate between reports: on from its last reported position by its track and speed (at most ${HORIZON_S} s), meeting each new report without jumping back`);
       lines.push("Arriving / departing / low is sizeup's reading of its track (shortfinal's rules), not ATC's word.");
       const what = [a.type, a.model ? `${a.model}${a.model_src === "faa" ? " (FAA registry)" : ""}` : "", a.kind].filter(Boolean);
@@ -477,8 +481,11 @@ window.AircraftLayer = (() => {
       const rx = d.receiver;
       if (rx) {
         const bands = Object.entries(rx.bands || {}).map(([b, s]) => `${b} MHz ${s.error ? `: ${s.error}` : `${s.n} aircraft`}`);
-        const who = rx.held_by ? `held by ${rx.held_by.app}${rx.held_by.mode ? ` (${rx.held_by.mode})` : ""}` : "";
-        box.append(h("div", "ml-note", ["Our receiver" + (rx.sdr ? ` on ${rx.name || rx.sdr}` : ""), who, ...bands, rx.note].filter(Boolean).join(" · ")));
+        const who = rx.held_by && !(rx.held_by.app === "sizeup" && rx.held_by.mode === "adsb")
+          ? `held by ${rx.held_by.app}${rx.held_by.mode ? ` (${rx.held_by.mode})` : ""}` : "";
+        const dec = rx.decoder && rx.decoder.state === "ok" ? `${rx.decoder.messages_per_s ?? 0} messages/s` : "";
+        box.append(h("div", "ml-note", ["Our receiver" + (rx.station ? " (station)" : "") + (rx.sdr ? ` on ${rx.name || rx.sdr}` : ""),
+                                         who, dec, ...bands, rx.note].filter(Boolean).join(" · ")));
       }
       return box;
     }

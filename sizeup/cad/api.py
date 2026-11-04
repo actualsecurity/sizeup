@@ -136,6 +136,10 @@ GET  /api/cad/rigs                        board units (PCFD's own flagged), for 
 POST /api/cad/prealert/<id>/dismiss       {operator?, reason?}  a phone pre-alert from Tapout that is nothing
                                           (sizeup/prealert.py; the state's "prealert"); dispatchers and admins
 GET  /api/cad/export/prealerts.csv        every ring kept (90 days) with its outcome: matched / dismissed / expired
+POST /api/cad/airport-prealert/<id>/dismiss  {operator?, reason?}  an airport pre-alert (an emergency squawk near HPN,
+                                          HPN ATC: sizeup/cad/airportalert.py; the state's "airport_prealert") that
+                                          needs nothing from us; dispatchers and admins
+GET  /api/cad/export/airport-prealerts.csv   every airport pre-alert kept (90 days) with its outcome
 POST /api/cad/hint/<id>/accept            {operator?}  a unit status suggested from the radio (#37, the state's
                                           status_hints; sizeup/cad/statushints.py): set, with "Status from radio
                                           (heard 14:32:10 “...”)" in the chronology; dispatchers and admins
@@ -194,6 +198,7 @@ DISPATCH_WAV = re.compile(r"/api/cad/dispatch/(\d{1,9})\.wav")
 PREVIEW_WAV = re.compile(r"/api/cad/audio/([0-9a-f]{20})\.wav")
 SETTINGS = re.compile(r"/api/cad/settings/([a-z_]{1,30})")
 PREALERT = re.compile(r"/api/cad/prealert/(\d{1,9})/dismiss")
+AIRPORT_PREALERT = re.compile(r"/api/cad/airport-prealert/(\d{1,9})/dismiss")
 HINT = re.compile(r"/api/cad/hint/(\d{1,9})/(accept|dismiss)")
 ALARM_ACK = re.compile(r"/api/cad/alarm/(\d{1,9})/ack")
 ALARM_CLEAR = re.compile(r"/api/cad/alarm/(\d{1,9})/clear")
@@ -214,6 +219,7 @@ WRITES = (
                 r"|attach|link|unlink|return))?)?"), "dispatch"),                # events, notes, dispatches, radio links
     (UNIT, "dispatch"),                                                     # unit status on the board
     (PREALERT, "dispatch"),                                                 # a phone pre-alert that is nothing
+    (AIRPORT_PREALERT, "dispatch"),                                         # an airport pre-alert that needs nothing
     (HINT, "dispatch"),                                                     # a status suggested from the radio (#37)
     (ALARM_ACK, "dispatch"),                                                # an emergency alarm seen (#128)
     (ALARM_CLEAR, "dispatch"),                                              # ... and resolved: its window closed
@@ -226,7 +232,7 @@ WRITES = (
     (re.compile(r"/api/cad/runcards(?:/delete)?"), "admin"),
     (re.compile(r"/api/cad/radios(?:/delete)?"), "admin"),                 # the radio-ID registry
     (DATASOURCE, "admin"),                                                  # a data source's Refresh now (#186)
-    (re.compile(r"/api/(?:talkgroup|talkgroup-group|mode|retranscribe)"), "admin"),   # the station's radios (server.py)
+    (re.compile(r"/api/(?:talkgroup|talkgroup-group|mode|retranscribe|adsb-receiver)"), "admin"),   # the station's radios (server.py)
 )
 READ_ACTIONS = {("/api/cad/settings/dispatch", "preview")}                  # the wording on a sample event
 MAY = {"admin": ("read", "dispatch", "admin"), "dispatcher": ("read", "dispatch"), "viewer": ("read",)}
@@ -366,6 +372,8 @@ DOES = (
     (UNIT, _unit_status),
     (PREALERT, lambda m, b, o, c: (f"Dismissed the phone pre-alert of {_prealert_at(o)}"
                                    + (f": {_clip(b.get('reason'))}" if b.get("reason") else ""), "")),
+    (AIRPORT_PREALERT, lambda m, b, o, c: (f"Dismissed the airport pre-alert of {_prealert_at(o)}: {_clip(o.get('title'), 50)}"
+                                           + (f": {_clip(b.get('reason'))}" if b.get("reason") else ""), "")),
     (HINT, lambda m, b, o, c: (f"{'Accepted' if m.group(2) == 'accept' else 'Dismissed'} the radio's "
                                f"{o.get('name') or o.get('unit') or ''} {o.get('status', '')}".replace("  ", " ")
                                + (f" on {o['incident_number']}" if o.get("incident_number") else ""), o.get("incident_number") or "")),
@@ -393,6 +401,8 @@ DOES = (
     (re.compile(r"/api/talkgroup"), lambda m, b, o, c: (f"Talkgroup {b.get('tg')}: {_toggles(b) or 'no change'}", "")),
     (re.compile(r"/api/talkgroup-group"), lambda m, b, o, c: (f"Talkgroups {_clip(b.get('group'), 40)}: {_toggles(b) or 'no change'}", "")),
     (re.compile(r"/api/mode"), lambda m, b, o, c: (f"Radio mode: {_clip(b.get('mode'), 30)}" + (f" ({_clip(b['sdr'], 30)})" if b.get("sdr") else ""), "")),
+    (re.compile(r"/api/adsb-receiver"), lambda m, b, o, c: ((f"Named SDR {_clip(b.get('sdr'), 30)} the ADS-B receiver"
+                                                            if b.get("sdr") else "Unnamed the ADS-B receiver's SDR"), "")),
     (re.compile(r"/api/retranscribe"), lambda m, b, o, c: ("Retranscribe: every recording" if b.get("all")
                                                            else f"Retranscribe: {len(b.get('ids') or [])} recordings", "")),
 )
@@ -660,6 +670,8 @@ class CadApi:
             return c.unit_status(int(m.group(1)), body)
         if m := PREALERT.fullmatch(path):
             return c.prealert_dismiss(int(m.group(1)), body)
+        if m := AIRPORT_PREALERT.fullmatch(path):
+            return c.airport_prealert_dismiss(int(m.group(1)), body)
         if m := HINT.fullmatch(path):
             return c.hint(int(m.group(1)), m.group(2), body)
         if m := ALARM_ACK.fullmatch(path):

@@ -220,6 +220,9 @@ class Cad:
         # The phone pre-alert from Tapout (sizeup/prealert.py PreAlerts), set by the app on the CAD of
         # record (hub, all-in-one) when [prealert] is on; None: no pre-alerts here.
         self.prealert = None
+        # Airport pre-alerts (sizeup/cad/airportalert.py, #235 / #233): an emergency squawk near HPN, HPN ATC; set by
+        # the app. None: none here.
+        self.airport_prealert = None
         # The place search (sizeup/geo/places.py, #67): the app sets place_source, a function that builds the
         # PlaceIndex over its gazetteer (once, on first use); None: no gazetteer, no place suggestions.
         self.place_source: Callable[[], object] | None = None
@@ -303,6 +306,7 @@ class Cad:
         return dict(st, units=units, map=self.map_slice(units, st["incidents"], pos, now), time=now, rev=rev,
                     comms_rev=f"{self.comms.rev}.{rev}",
                     talking=self.live(), paging=self.paging(), cloud=self.cloud(), prealert=self.prealert_state(now),
+                    airport_prealert=self.airport_prealert_state(now),
                     status_hints=self.status_hints(), alarms=self.alarms_state(now), radio_ids=self.radio_ids(now))
 
     def radio_ids(self, now: float | None = None) -> list[dict]:
@@ -376,6 +380,26 @@ class Cad:
                 self.prealert.match(inc)
             except Exception as e:  # noqa: BLE001 - the event stands whatever the pre-alert does
                 self.log(f"CAD: pre-alert match: {type(e).__name__}: {e}")
+        if self.airport_prealert is not None:
+            try:
+                self.airport_prealert.match(inc)
+            except Exception as e:  # noqa: BLE001
+                self.log(f"CAD: airport pre-alert match: {type(e).__name__}: {e}")
+
+    def airport_prealert_state(self, now: float | None = None) -> dict | None:
+        """The airport pre-alerts (an emergency squawk, HPN ATC: sizeup/cad/airportalert.py); a fault never breaks the console."""
+        if self.airport_prealert is None:
+            return None
+        try:
+            return self.airport_prealert.state(now)
+        except Exception as e:  # noqa: BLE001
+            self.log(f"CAD: airport pre-alert: {type(e).__name__}: {e}")
+            return None
+
+    def airport_prealert_dismiss(self, pid: int, body: dict) -> dict:
+        if self.airport_prealert is None:
+            raise CadError("no airport pre-alerts here (this is a station: the hub has them)")
+        return self.airport_prealert.dismiss(pid, body)
 
     def prealert_dismiss(self, pid: int, body: dict) -> dict:
         if self.prealert is None:
@@ -647,6 +671,8 @@ class Cad:
     def export(self, name: str) -> bytes | None:
         if name == "prealerts.csv":
             return self.prealert.csv() if self.prealert is not None else None
+        if name == "airport-prealerts.csv":
+            return self.airport_prealert.csv() if self.airport_prealert is not None else None
         if name == "status-hints.csv":
             return self.hints.csv()
         return export.export(self.store, name)

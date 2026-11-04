@@ -18,6 +18,8 @@
                        The hub answers with its build: Watch (autoupdate.py) passes it to the
                        station's auto-updater once it holds still; this station's version and the
                        updater's last result go up in the status ("version")
+    aircraft thread    POST /api/station/aircraft: our ADS-B receiver's aircraft (#235, aircraftlink.py), read every
+                       second, what changed, every 1-5 s as the hub asks; dropped (never queued) while it's offline
     jobs thread        GET /api/station/jobs?wait=25 (long poll: the station never takes inbound
                        connections): "tts" renders a dispatch with the local voice; "call" runs
                        set_mode / set_talkgroup / set_talkgroup_group / retranscribe / transcribe_now /
@@ -46,6 +48,7 @@ import numpy as np
 from sizeup import tz
 from sizeup.cad import dispatcher
 from sizeup.cad.dispatcher import AudioUnavailable
+from sizeup.cloud.aircraftlink import AircraftForwarder
 from sizeup.cloud.autoupdate import Watch
 from sizeup.cloud.client import HubClient, HubError
 from sizeup.cloud.health import Metrics, station_metrics
@@ -59,7 +62,8 @@ JOB_WAIT_S = 25          # long poll; Cloudflare allows 100 s
 CONNECTED_S = 15.0       # no answer from the hub this long = not connected (the station's own header)
 CALLS = ("set_mode", "set_talkgroup", "set_talkgroup_group", "retranscribe", "set_channel_prefs",
          "emergency_all_clear",       # an alarm's All clear on the hub: the emergency window here closes (#128)
-         "transcribe_now")            # the hub's fallback when Amazon Transcribe can't: whisper at live priority (#195)
+         "transcribe_now",            # the hub's fallback when Amazon Transcribe can't: whisper at live priority (#195)
+         "set_adsb_receiver")         # Settings > Radios on the hub: the dongle reserved for ADS-B (#235)
 
 
 def clip_8k(wav: bytes | None) -> bytes | None:
@@ -108,6 +112,8 @@ class StationLink:
         disk = cfg.cloud_outbox if cfg.cloud_outbox and cfg.cloud_outbox != ":memory:" else (cfg.clips_dir or ".")
         self.metrics = Metrics(str(Path(disk).parent) if disk != "." else ".")
         self._threads: list[threading.Thread] = []
+        # our ADS-B receiver's aircraft, straight to the hub (#235, sizeup/cloud/aircraftlink.py): live data, never queued
+        self.aircraft = AircraftForwarder(app, cfg, self._client, log)
         app.events, app.link = self.emit, self
         app.cad.cloud = self.cad_cloud
         n, _ = self.outbox.pending()
@@ -131,6 +137,7 @@ class StationLink:
             t = threading.Thread(target=fn, name=name, daemon=True)
             t.start()
             self._threads.append(t)
+        self.aircraft.start()
         return self
 
     @property
@@ -146,6 +153,7 @@ class StationLink:
         self._stop.set()
         self._wake.set()
         self._live_wake.set()
+        self.aircraft.stop()
 
     # -- health -------------------------------------------------------------------------------------
 
