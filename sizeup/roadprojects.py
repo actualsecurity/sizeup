@@ -32,15 +32,22 @@ its dates, cut into its daily hours when it has them, for the next WINDOW_DAYS. 
 (a window around now), "upcoming" (a later window) and the Today / This week / All filter from these alone, in
 the console's timezone; the hub works them out in TZ (the console's, America/New_York).
 
+dated(rec) (#237): the item's dates are known, so it can be said to fall in a window: the source gives its start (a
+date or a time). With an end or daily hours its windows are those dates; with neither it is open-ended, from that
+start on. Only dated items are shown under Today / This week and named on the incident view's line; an item with no
+start, or only a completion or target date (the capital programs' projects, a village notice whose dates are in its
+words, the Thruway's "Until further notice" roadwork), is listed under All only (the panel counts them).
+
 HTTP (sizeup/web/server.py; any signed-in person, GET only):
     GET /api/cad/roadprojects         {configured, note, sources: [{name, short, label, link, terms, status, on,
-                                       at, n, error, why}], tz, at, items: [record + windows], notices: [unplaced]};
+                                       at, n, error, why}], tz, at, items: [record + windows, state, dated],
+                                       notices: [unplaced + windows, dated]};
                                        ETag (304 when unchanged); asking keeps the sources coming (DEMAND_S)
     GET /api/cad/roadprojects/near?lat=&lon=&address=&from=&to=
                                       the incident view's lines: {items: [{id, text, source, distance_m, how,
-                                       active_now}]}: items within NEAR_M of the point, or on the incident's street
-                                       within STREET_M, in effect at some time between from and to (unix s; default
-                                       now)
+                                       active_now}]}: dated items within NEAR_M of the point, or on the incident's
+                                       street within STREET_M, in effect at some time between from and to (unix s;
+                                       default now)
 
 Nothing per-second: none of this is in the CAD's state push (#146); the page polls the layer every few minutes
 only while a map has it on, and the incident view asks once per event and every few minutes while it is open.
@@ -297,8 +304,17 @@ def state(wins: list, now: float) -> str:
     return "upcoming" if wins else "ended"
 
 
+def dated(rec: dict) -> bool:
+    """Its dates are known (#237): the source gives its start. No start (a project's completion date alone, a notice's
+    dates in its words, "Until further notice"): not dated, never in Today / This week or the incident's line."""
+    return rec.get("start") is not None
+
+
 def in_effect(rec: dict, t0: float, t1: float) -> list[float | None] | None:
-    """The window of the item that overlaps [t0, t1] (the latest such), or None."""
+    """The window of the item that overlaps [t0, t1] (the latest such), or None; None for an item not dated (its
+    dates aren't known, so nothing says it was in effect then)."""
+    if not dated(rec):
+        return None
     hit = None
     for s, e in windows(rec, t0):
         if (s is None or s <= t1) and (e is None or e > t0):
@@ -766,7 +782,8 @@ class Placer:
             return None
         loc = self.loc()
         hits = []
-        for idx, sim in self.gaz._lookup(spaceless(toks), "street", True, 0.9):
+        # every near match, not the first six: a tie between two streets at the cut is seen (#215)
+        for idx, sim in self.gaz._lookup(spaceless(toks), "street", True, 0.9, limit=40):
             _a, _k, sid, _typed, pen = self.gaz._entries[idx]
             if sim * pen >= 0.9 and (not towns or loc.towns_of.get(sid, set()) & set(towns)):
                 hits.append((sim * pen, sid))
@@ -1296,14 +1313,15 @@ class RoadProjects:
             w = windows(r, now)
             if not w:
                 continue                                          # ended
-            items.append(r | {"windows": w, "state": state(w, now)})
+            items.append(r | {"windows": w, "state": state(w, now), "dated": dated(r)})
         return {"configured": self.configured, "note": self.why_not(), "tz": TZ_NAME, "at": now,
                 "reader": self.reader_problem(), "sources": self.sources(), "items": items,
-                "notices": [n | {"windows": windows(n, now)} for n in self.notices()]}
+                "notices": [n | {"windows": windows(n, now), "dated": dated(n)} for n in self.notices()]}
 
     def near(self, lat: float, lon: float, address: str = "", t0: float | None = None, t1: float | None = None) -> dict:
         """The incident view's lines: items in effect at some time in [t0, t1] (default now) within NEAR_M of the
-        point, or on the incident's own street within STREET_M; nearest first."""
+        point, or on the incident's own street within STREET_M; nearest first. Only dated items (in_effect): a project
+        known only by its completion date, or a notice with its dates in its words, is never named (#237)."""
         now = self.clock()
         t1 = now if t1 is None else t1
         t0 = min(t1, now if t0 is None else t0)

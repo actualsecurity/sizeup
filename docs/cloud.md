@@ -1051,15 +1051,19 @@ A **Road projects & closures** group in every map's Layers box (`roadprojects.js
 layer's, so each viewer's and event's choice carries over; the Thruway's roadwork is drawn here, once). A stretch of road
 is a line, a project's footprint a faint area with a dashed edge, a point a mark. **Active now** is solid in the
 closure's colour (full closure `--err`, lanes and the rest `--warn`); **upcoming** is dashed / hollow in `--info`. A
-**Today / This week / All** filter (per viewer). A click: what, where, in effect now or when it starts, its dates and
+**Today / This week / All** filter (per viewer). Today and This week show only **dated** items (#237): the source gives a
+start (a date or a time), and its dates (with an end, its daily hours, or open-ended from that start) overlap the window.
+An item with no start, or only a completion or target date (the NYSDOT, Thruway and CTDOT capital projects, a village
+notice whose dates are in its words, the Thruway's "Until further notice" roadwork), is shown under **All** only; the
+panel's line counts dated items only and adds how many are without dates (*2 in effect now, 1 upcoming this week. 2
+long-term projects and 3 notices without dates (under All).*). A click: what, where, in effect now or when it starts, its dates and
 daily hours exactly as the source gives them ("start not given", "no end time given (Until further notice)"), lanes,
 detour, the source's own text, the source and when it updated the item, a link to the source's page. Notices that name
 no place we can find are listed in the box (title, date, link), never put on the map by guess.
 
-**Incident view:** under the address, a line for each closure or project in effect during the event within 300 m of
-its point, or on its own street within 1.5 km: *Road closed: Westchester Ave between N Pearl St and King St until
-3:00 PM (511NY)*; *Notice: ... (Port Chester, posted Oct 14 10:00 AM): "..." (dates in the notice)*; *Construction
-project: ... (NYSDOT: in construction, completion date Oct 26, 2027; no closure times given)*.
+**Incident view:** under the address, a line for each dated closure whose window covers the event's time, within 300 m
+of its point, or on its own street within 1.5 km: *Road closed: Westchester Ave between N Pearl St and King St until
+3:00 PM (511NY)*. Undated projects and notices are never named there (#237).
 
 | Source | Endpoint | Auth | Status |
 |---|---|---|---|

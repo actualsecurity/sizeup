@@ -7,16 +7,21 @@
 //                gives a stretch of road, a mark where it gives a point. Active now: solid, in the closure's colour
 //                (a full closure --err, lanes and the rest --warn); upcoming: dashed / hollow, --info. A filter:
 //                Today (active now, or starting before midnight), This week (the next 7 days), All; per viewer.
+//                Today and This week show only dated items (the hub's "dated", #237: the source gives a start):
+//                a project known only by its completion date, a notice with its dates in its words, "Until further
+//                notice" roadwork: under All only, and the panel says how many.
 //                Polled every POLL_MS only while a map has it on and the page is visible; the state (active /
 //                upcoming) is worked out here from the hub's windows every minute, in the console's timezone.
 //   Click        the item's box: what, where, active now or when it starts, its dates and daily hours exactly as
 //                the source gives them ("no end time given" when it gives none), the closure and lanes, the detour,
 //                the source's own text, the source and when it updated the item.
-//   Panel        sources and when each read; notices that name no place we can find (a village's road notices):
-//                listed with their date and link, never put on the map by guess.
-//   Incident     #d-roads under the event's address: a line per closure or project in effect near it (the hub's
-//                near(): 300 m, or on its street): "Road closed: Westchester Ave between X and Y until 3:00 PM
-//                (Port Chester)". Asked once per event and every NOTE_MS while it is shown.
+//   Panel        how many in effect now and upcoming (dated items only), how many without dates (under All);
+//                sources and when each read; notices that name no place we can find (a village's road notices):
+//                listed with their date and link (under Today / This week only when dated), never put on the map
+//                by guess.
+//   Incident     #d-roads under the event's address: a line per dated closure in effect near it (the hub's near():
+//                300 m, or on its street; never an undated project or notice): "Road closed: Westchester Ave between
+//                X and Y until 3:00 PM (Port Chester)". Asked once per event and every NOTE_MS while it is shown.
 "use strict";
 
 window.RoadProjects = (() => {
@@ -80,14 +85,34 @@ window.RoadProjects = (() => {
   function current(it, now) {
     return (it.windows || []).find(([s, e]) => (s == null || s <= now) && (e == null || now < e)) || null;
   }
+  // its dates are known (the hub's dated(), #237): the source gives its start; no start, or only a completion date: All only
+  const dated = (it) => (it.dated != null ? it.dated === true : it.start != null);
   function shown(it, filter, now) {
     const st = stateOf(it, now);
     if (st === "ended") return false;
     if (filter === "all") return true;
-    if (it.kind === "notice" && !(it.windows || []).some(([s, e]) => s != null || e != null)) return false;   // no dates: All only
+    if (!dated(it)) return false;
     if (st === "active") return true;
     const s = nextStart(it, now);
     return s != null && s < (filter === "today" ? endOfToday(now) : now + 7 * 86400);
+  }
+  // the panel's line: dated items in effect now and upcoming in the filter's window, and the undated ones (under All)
+  function summary(d, filter, now) {
+    const items = ((d && d.items) || []).filter((it) => it.geometry), notices = (d && d.notices) || [];
+    const live = items.filter((it) => dated(it) && shown(it, filter, now));
+    const nAct = live.filter((it) => stateOf(it, now) === "active").length;
+    const nNext = live.filter((it) => stateOf(it, now) === "upcoming").length;
+    let text = `${nAct} in effect now, ${nNext} upcoming${filter === "all" ? "" : filter === "today" ? " today" : " this week"}.`;
+    const undated = [...items, ...notices].filter((it) => !dated(it) && stateOf(it, now) !== "ended");
+    const n = { project: 0, notice: 0, other: 0 };
+    for (const it of undated) n[it.kind === "project" || it.kind === "notice" ? it.kind : "other"] += 1;
+    const parts = [[n.project, "long-term project", "long-term projects"], [n.other, "roadwork item", "roadwork items"],
+                   [n.notice, "notice", "notices"]].filter(([k]) => k).map(([k, one, many]) => `${k} ${k === 1 ? one : many}`);
+    if (parts.length) {
+      const list = parts.length === 1 ? parts[0] : `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
+      text += ` ${list} without dates${filter === "all" ? "" : " (under All)"}.`;
+    }
+    return { nAct, nNext, undated: undated.length, text };
   }
   const filter = () => { const f = stored(FILTER_KEY); return FILTERS.some(([k]) => k === f) ? f : "week"; };
 
@@ -297,15 +322,12 @@ window.RoadProjects = (() => {
       box.append(seg);
       if (!d) { box.append(h("div", "ml-note", st.err ? `Unavailable here (${st.err})` : "Loading…")); return box; }
       const now = Date.now() / 1000;
-      const items = d.items || [];
-      const nAct = items.filter((it) => it.geometry && shown(it, f, now) && stateOf(it, now) === "active").length;
-      const nNext = items.filter((it) => it.geometry && shown(it, f, now) && stateOf(it, now) === "upcoming").length;
       const legend = h("div", "ml-note rw-legend");
       const sw = (cls, text) => { const s = h("span", `rw-key ${cls}`); legend.append(s, ` ${text}  `); };
       sw("rw-key-closed", `closed now`);
       sw("rw-key-work", `lanes / work now`);
       sw("rw-key-next", `upcoming`);
-      box.append(h("div", "ml-note", `${nAct} in effect now, ${nNext} upcoming${f === "all" ? "" : f === "today" ? " today" : " this week"}.`), legend);
+      box.append(h("div", "ml-note", summary(d, f, now).text), legend);
       if (d.reader) box.append(h("div", "ml-note rw-reader", `Road projects: ${d.reader}, so the sources below aren't being read. Settings > Data sources has the details.`));
       for (const s of d.sources || []) {
         const line = h("div", "ml-note rw-source");
@@ -320,7 +342,7 @@ window.RoadProjects = (() => {
         if (s.on && (s.error || s.reader)) line.classList.add("rw-err");
         box.append(line);
       }
-      const unplaced = d.notices || [];
+      const unplaced = (d.notices || []).filter((n) => shown(n, f, now));      // undated: under All only (#237)
       if (unplaced.length) {
         const fold = h("details", "ml-fold rw-notices");
         const sum = h("summary", "ml-sub", "Notices not on the map");
@@ -395,7 +417,7 @@ window.RoadProjects = (() => {
 
   if (window.MapLayers && MapLayers.addGroup) MapLayers.addGroup({ attach: (control) => new RoadMap(control) });
 
-  // ---- the incident view: a line per closure or project in effect near the event ----------------------------------
+  // ---- the incident view: a line per dated closure in effect near the event (never an undated project, #237) ------
   const note = { key: "", data: null, seq: 0, timer: null, inc: null };
   function ask(host) {
     const inc = note.inc, key = note.key, seq = ++note.seq;
@@ -445,5 +467,5 @@ window.RoadProjects = (() => {
     try { if (typeof cad !== "undefined" && Array.isArray(cad.hooks)) cad.hooks.push(renderIncident); } catch (_) { /* not the CAD page */ }
   });
 
-  return { load, maps, data: () => st.data, KEY, stateOf, shown, describe, renderIncident };
+  return { load, maps, data: () => st.data, KEY, stateOf, shown, dated, summary, describe, renderIncident };
 })();
