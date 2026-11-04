@@ -182,11 +182,14 @@
     for (const [n, sel] of [["26-000002", true], ["26-000003", false]]) {
       const li = el("li", "qi item" + (sel ? " sel" : ""));
       li.tabIndex = 0;
-      const head = el("div", "qh");
+      const head = el("div", "qh");          // as cad.js fillQueueItem: number and time, then the type line (#231)
+      head.append(el("b", "qn", n), el("span", "qe", "02:41"));
       const t = el("span", "qt", "Alarm / Commercial");
       t.style.setProperty("--c", "#E0362C");
-      head.append(el("b", "qn", n), t, el("span", "spacer"), el("span", "qe", "02:41"));
-      li.append(head, el("div", "qa", "1 Gateway Plz, Port Chester"));
+      const type = el("div", "qtl");
+      type.append(t);
+      if (!sel) type.append(el("span", "chip joint", "Rye Brook"));
+      li.append(head, type, el("div", "qa", sel ? "1 Gateway Plz, Port Chester" : "800 Westchester Ave, Rye Brook"));
       q.append(li);
     }
     // a real transmission row (cad.js radioRow): play, an incident it is on (a chip), the "⋯" menu (ui.js UI.menu:
