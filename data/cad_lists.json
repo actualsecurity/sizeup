@@ -244,6 +244,16 @@
     {"code": "UNMANNED", "name": "Unmanned", "role": "oos", "bg": "#7F7F7F", "fg": "#FFFFFF", "confirm": "not in the department's list: keep or retire?"}
   ],
   "free_status": "AV",
+  "_release_on_close": [
+    "GitHub #232. The free statuses that say how a unit left a call rather than where it is: Cancelled,",
+    "Cancelled enroute, Failure to respond, Notified not responding. Like AV they clear the unit off its",
+    "call at once (it can be recommended and dispatched again straight away) and the board shows the code",
+    "while that call is open, so the dispatcher sees who was cancelled. When the call is closed (or",
+    "dismissed) a unit still in one of them, set on that call, goes to free_status with the call's other",
+    "units. At quarters is not here: it says where the rig is and stays. The same for other agencies' units",
+    "(agency_status_sets: CN / CE; a keyholder's Done is AV already)."
+  ],
+  "release_on_close": ["CN", "CE", "FR", "NR"],
   "_event_statuses": [
     "pending and active are the sheet's (with its colors). The rest are sizeup's: queued = from a",
     "60 Control page waiting to be accepted (no number yet); open = a non-emergency event with no units."

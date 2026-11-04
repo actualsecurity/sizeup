@@ -494,18 +494,22 @@ function fillQueueItem(li, inc) {
   const o = isOpen(inc) ? callSummary(inc.id) : null, live = callLive(o);
   li.className = `qi item ${inc.status}` + (inc.emergency ? "" : " nonemerg") + (inc.id === cad.sel ? " sel" : "") + (live.length ? " live" : "");
   if (inc.id === cad.sel) li.setAttribute("aria-current", "true"); else li.removeAttribute("aria-current");
+  // The top row: the number and the time, the time at the end. The type on its own line under them, the card's
+  // width, wrapping as text does, the town's chip after it on that line (#231: all four on one row squeezed the type
+  // to a word a line, drew the chip over it and pushed the time past the card's edge).
   const head = el("div", "qh");
-  const t = el("span", "qt", typeLabel(inc.type, inc.subtype) || "No type");
-  if (inc.type) t.style.setProperty("--c", typeColor(inc.type) || "#9AA3AD");
-  else t.classList.add("warn");
-  head.append(el("b", "qn", incTitle(inc)), t);
-  if (inc.joint_call) head.append(el("span", "chip joint", inc.joint_call));
   const right = el("span", "qe");
   if (isOpen(inc)) since(right, inc.created_at);
   else right.textContent = fmtTime(inc.closed_at);
-  head.append(el("span", "spacer"), right);
+  head.append(el("b", "qn", incTitle(inc)), right);
+  const type = el("div", "qtl");
+  const t = el("span", "qt", typeLabel(inc.type, inc.subtype) || "No type");
+  if (inc.type) t.style.setProperty("--c", typeColor(inc.type) || "#9AA3AD");
+  else t.classList.add("warn");
+  type.append(t);
+  if (inc.joint_call) type.append(el("span", "chip joint", inc.joint_call));
   const addr = el("div", "qa" + (inc.address ? "" : " dim"), inc.address || "No location");
-  li.replaceChildren(head, addr);
+  li.replaceChildren(head, type, addr);
   const ap = airportLine(inc);
   if (ap) li.append(el("div", "qs ap-line", ap));       // the tower's facts on an airport event (#105)
   if (inc.status === "queued") {
