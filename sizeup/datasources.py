@@ -40,8 +40,11 @@ where the app builds the providers (build() below), e.g.
                        refresh=p.refresh, every="daily", hold=lambda: p.status.update(next=HELD)))
 
 status() keys: at (unix s, last good fetch), error ("" when fine), n (items), bytes, next (the provider's own next
-fetch: built-in only), on (False: not configured, with why), note. refresh() -> bool (True: read), never raises
-(an exception is caught and shown as the error).
+fetch: built-in only), on (False: not configured, with why), note; checked (unix s: the last time the source was
+asked, when that can be later than the data: a county GIS layer found unchanged, #229) and how ("unchanged",
+"incremental", "full": what that look did). A managed pull is next due from the later of at and checked.
+refresh() -> bool (True: read), never raises (an exception is caught and shown as the error). force(): what Refresh
+now runs instead, when that differs (a GIS layer downloaded whole).
 """
 
 from __future__ import annotations
@@ -95,6 +98,7 @@ class Source:
     blocked: Callable[[], str] | None = None  # why a refresh must wait now (the source rate-limited us), else ""
     note: str = ""
     action: str = "Refresh now"               # the button ("Reload" for a file read from disk)
+    force: Callable[[], bool] | None = None   # Refresh now, when it differs from the scheduled run (a GIS layer: whole)
 
     @property
     def managed(self) -> bool:
@@ -201,6 +205,9 @@ class DataSources:
         if iv is None:
             return None
         at = _num(ps.get("at"))
+        checked = _num(ps.get("checked"))
+        if at is not None and checked is not None:
+            at = max(at, checked)                 # looked at since (unchanged): the schedule runs from the look
         if at is None and st["ok"]:
             at = st["tried"]                      # read, though the provider keeps no time of its own
         if st["fails"] and st["tried"] is not None:
@@ -280,7 +287,7 @@ class DataSources:
     def _run(self, key: str) -> None:
         src, st = self.sources[key], self.state[key]
         try:
-            ok = bool(src.refresh())
+            ok = bool((src.force if src.force is not None and st["why"] == "manual" else src.refresh)())
             err = "" if ok else (str(_safe(src.status).get("error") or "") or "the source gave nothing")
         except Exception as e:  # the provider's fetch should never raise; if it does, it is this row's error
             ok, err = False, f"{type(e).__name__}: {e}"
@@ -338,6 +345,7 @@ class DataSources:
                 "attribution": src.attribution, "note": str(ps.get("note") or src.note or ""),
                 "on": on, "why": str(ps.get("why") or "") if not on else "",
                 "last_fetched": _num(ps.get("at")), "next_due": nd if on else None,
+                "checked": _num(ps.get("checked")), "how": str(ps.get("how") or ""),
                 "items": ps.get("n") if isinstance(ps.get("n"), int) else None,
                 "bytes": ps.get("bytes") if isinstance(ps.get("bytes"), int) and ps.get("bytes") else None,
                 "ok": not err, "error": err[:300],
@@ -386,7 +394,8 @@ def _hold(st: dict) -> Callable[[], None]:
 
 def gis_sources(gis) -> list[Source]:
     """The county GIS layers (sizeup/gis.py): one row per layer, on the layer's own cadence ([gis] layers' refresh:
-    the county updates these rarely), in the quiet hours; Refresh now refetches the layer (Gis.refresh)."""
+    the county updates these rarely), in the quiet hours; a scheduled run downloads only what changed (unchanged /
+    incremental / full, sizeup/gis.py), Refresh now the whole layer (Gis.refresh(full=True))."""
     from sizeup import gis as g
     out = []
     for key, layer in gis.layers.items():
@@ -395,9 +404,11 @@ def gis_sources(gis) -> list[Source]:
         def status(key=key, st=st) -> dict:
             if not gis.configured:
                 return {"on": False, "why": "County GIS off ([gis])"}
-            return {"at": st["at"], "error": st["error"], "n": st["n"], "bytes": st["bytes"]}
+            return {"at": st["at"], "error": st["error"], "n": st["n"], "bytes": st["bytes"], "checked": st["checked"],
+                    "how": st["how"]}
         out.append(Source(f"gis:{key}", f"{layer.label}", "Map layers", g.SOURCE, g.LINK_URL, g.ATTRIBUTION, status,
-                          refresh=lambda key=key: gis.refresh(key), every=layer.refresh if layer.refresh in CHOICES else "monthly",
+                          refresh=lambda key=key: gis.refresh(key), force=lambda key=key: gis.refresh(key, full=True),
+                          every=layer.refresh if layer.refresh in CHOICES else "monthly",
                           hold=_hold(st), quiet=True, min_gap_s=600.0 if layer.tiled else MANUAL_GAP_S,
                           note=f"County GIS · {layer.group}"))
     return out

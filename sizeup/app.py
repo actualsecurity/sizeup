@@ -381,6 +381,16 @@ class App:
         # subscribes: one alert): prealert_sync() follows Settings > System > Station.
         self.prealert = None
         self._started = False
+        # The map caches kept across hub restarts (sizeup/cachesync.py, #229): on a new Fargate task, the county GIS
+        # layers, the camera lists, Metro-North's stations and the FAA registry come back from the S3 backups bucket
+        # here, before the providers below read their caches, so the maps have them at once. The hub only
+        # (LITESTREAM_BUCKET set); local only everywhere else.
+        self.cache_mirror = None
+        if cfg.cloud_role != "station" and cfg.cad_db:
+            from sizeup.cachesync import CacheMirror
+            self.cache_mirror = CacheMirror.from_env(Path(cfg.cad_db).parent, log=log)
+            if self.cache_mirror is not None:
+                self.cache_mirror.restore()
         # The map's highway layers (sizeup/roads.py, #73): 511NY's cameras, incidents and signs where
         # it is configured, the gazetteer's mile markers and exits everywhere. Its place search is a
         # provider for the "@" place search (#67's Cad.search_places asks cad.place_providers).
@@ -2384,6 +2394,8 @@ class App:
         self.aircraft.start()                     # aircraft near HPN, while someone looks (sizeup/aircraft.py)
         self.weather.start()                      # NWS alerts, conditions, radar; NOAA tides (sizeup/weather.py)
         self.datasources.start()                  # the slow pulls' schedule, Settings > Data sources
+        if self.cache_mirror is not None:
+            self.cache_mirror.start()             # their caches kept in S3 as they change (sizeup/cachesync.py)
 
     def stop_layers(self) -> None:
         self.roads.stop()
@@ -2393,6 +2405,8 @@ class App:
         self.aircraft.stop()
         self.weather.stop()
         self.datasources.stop()
+        if self.cache_mirror is not None:
+            self.cache_mirror.stop()
 
     def forwarding(self) -> bool:
         """This app sends what it hears to a hub, which is then the CAD of record."""
