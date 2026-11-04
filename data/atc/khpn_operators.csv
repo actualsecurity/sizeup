@@ -1,0 +1,31 @@
+designator,telephony,operator,kind,confidence,note
+JBU,JETBLUE,jetBlue,scheduled,high,FLL RSW MCO SJU TPA PBI ACK(seasonal)
+DAL,DELTA,Delta,scheduled,high,ATL (B712)
+EDV,ENDEAVOR,Delta Connection (Endeavor),regional,high,ATL DTW MSP (CRJ9)
+JIA,BLUE STREAK,American Eagle (PSA),regional,high,DCA CLT (CRJ7/CRJ9)
+ENY,ENVOY,American Eagle (Envoy),regional,high,ORD (E170/E175)
+MXY,MOXY,Breeze,scheduled,high,CHS MYR RDU VRB + seasonal (BCS3)
+BMA,GOSLING,BermudAir,scheduled,high,BDA 3x weekly - KHPN's scheduled international service
+KAP,CAIR,Cape Air,scheduled,high,LEB; MVY ACK PVC seasonal (C402/P212)
+JSX,BIGSTRIPE,JSX public charter,scheduled,high,OPF FXE PBI APF (E145)
+GPD,GOODSPEED,Tradewind Aviation,scheduled,high,ACK MVY shuttle (PC12)
+RPA,BRICKYARD,Republic (AA/DL fill-in),regional,low,not seen in sample
+SKW,SKYWEST,SkyWest (DL fill-in),regional,low,not seen in sample
+EJA,EXECJET,NetJets,fractional,high,most common operator at HPN
+LXJ,FLEXJET,Flexjet,fractional,high,
+WUP,UP JET,Wheels Up,charter,high,
+GAJ,GAMA JET,Gama Aviation,charter,medium,
+VJA,ICONIC,Vista America / XO,charter,high,
+VJT,VISTA JET,VistaJet (Malta),charter,medium,international private
+EDG,JET EDGE,Jet Edge,charter,medium,
+TWY,TWILIGHT,Solairus (Sunset Aviation),charter,high,
+EJM,JET SPEED,Executive Jet Management,charter,high,
+KOW,RODEO,Baker Aviation,charter,high,telephony RODEO
+RLI,RELIANT,Reliant Air Charter,charter,high,Danbury CT
+JTL,JET LINX,Jet Linx,charter,medium,
+CLY,CLAY-LACY,Clay Lacy,charter,medium,
+CNS,CHRONOS,PlaneSense,fractional,medium,
+XFL,EX-FLIGHT,Executive Fliteways,charter,medium,
+TFF,TALON FLIGHT,Talon Air,charter,medium,
+JAS,JET SETTER,Jet Aviation,charter,medium,
+TMB,TOMBO,Volato,fractional,low,

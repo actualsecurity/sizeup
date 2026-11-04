@@ -25,11 +25,11 @@ start_mode = "South 2"            # first listed SDR at a fresh start; after tha
 # (shortfinal, ~/.local/state/rtl-claims), never over a person's choice (Off included), and running
 # dongles are never moved. Shown as "FG1 · auto" in the web app. deploy/station/README.md has the rules.
 # Jobs: channel labels (any case/spacing: "fg1", "south2") or "p25" (Fire/EMS 15, trunk-recorder:
-# one dongle covers the county system's control and voice channels). FG2 comes last: only a 4th free
-# dongle takes it by itself, else pick it by hand. false = new dongles start Off and sizeup never
-# opens one until you pick a mode for it.
+# one dongle covers the county system's control and voice channels). FG2, then HPN Tower come last:
+# only a 4th / 5th free dongle takes them by themselves, else pick them by hand. false = new dongles
+# start Off and sizeup never opens one until you pick a mode for it.
 auto_assign = true
-auto_assign_order = ["fg1", "p25", "south2", "fg2"]
+auto_assign_order = ["fg1", "p25", "south2", "fg2", "hpn tower"]
 
 # One rtl_fm per channel, one dongle each (serials set with `rtl_eeprom -s <serial>`).
 [[radio.channels]]
@@ -60,6 +60,22 @@ mhz = 458.0375                     # docs/PLAN.md; GitHub #119): set up like FG1
 kind = "traffic"                   # mayday and emergency alarms, attach by radio ID)
 device = "fire-fg2"
 gain_db = 40
+
+# HPN ATC (GitHub #233): Westchester County Airport tower, AM. Its transcripts feed the airport
+# pre-alerts (sizeup/atc.py, the [atc] section below). Frequencies (FAA Chart Supplement via
+# airnav.com/airport/KHPN, effective 2026-10-29): Tower 118.575 (0600-2300; CTAF when closed),
+# Ground 121.825, Clearance Delivery 126.4 (127.25 when the tower is closed), D-ATIS 133.8,
+# New York Approach 126.4 (0700-2300) / 120.8 (2300-0700) / 124.65, New York Departure 120.55.
+# One RTL-SDR covers ~2 MHz, so Tower and Ground (3.25 MHz apart) need a dongle each: one channel
+# per dongle here (several per dongle is #119). Another one is another [[radio.channels]] entry with
+# kind = "airband" and its own label ("HPN Ground", 121.825), picked for a dongle by hand.
+[[radio.channels]]
+label = "HPN Tower"
+mhz = 118.575
+kind = "airband"                   # AM, carrier squelch (sizeup/radio/am.py, shortfinal's settings)
+device = "hpn-twr"
+gain_db = 36.4                     # shortfinal's airband gain
+squelch_db = 3.5                   # open this far over the noise floor (bench: noise +2, voice +6..+28)
 
 # Two-tone codes: every decoded pair is shown with its page so the real codes can be confirmed and
 # named here (or in Settings > Radios > Tones). `ours = true` = opens incidents. A name is read as
@@ -93,7 +109,8 @@ talker_prompt = "off"              # "ids": hint each call with who keyed up ("7
 # All-in-one with AWS credentials in the environment could set aws = true too.
 # aws = false
 # aws_region = ""                  # "" = AWS_REGION / AWS_DEFAULT_REGION, else us-east-1
-# aws_channels = ["South 2", "FG1", "FG2", 307]   # engine "aws" by default; Settings > Radios changes any channel
+# aws_channels = ["South 2", "FG1", "FG2", 307, "HPN Tower"]   # engine "aws" by default; Settings > Radios changes any
+#                                  # channel (left out: every airband channel is added, #233)
 # record_only = []                # e.g. [383, 3127]: recorded, not transcribed unless Settings says so
 # aws_monthly_limit_usd = 25       # until Settings > Radios sets one; reached: AWS channels use whisper
 # aws_idle_s = 120                 # a channel's stream ends this long after its last transmission
@@ -218,6 +235,23 @@ ring_topic = "pcfd-phone-prealert"   # real rings only (Tapout's ntfy_call)
 status_topic = "pcfd-status"         # boot, hourly heartbeat, errors, OTA (Tapout's ntfy_status)
 expire_min = 5                       # an unanswered pre-alert ends after this long
 heartbeat_stale_min = 90             # no heartbeat (or restart) this long: "Tapout: no heartbeat for ..." in warning
+
+# [atc]: airport pre-alerts from HPN ATC (GitHub #233, sizeup/atc.py): every transcript of an airband channel
+# (above: HPN Tower), read with the few transmissions before it, through the rules in data/atc/rules.json
+# (fire / smoke / brush fire, MAYDAY, PAN-PAN, declaring an emergency, souls on board, ARFF / roll the trucks,
+# disabled aircraft, gear, engine, bird strike, fuel, medical, laser). A hit is an airport pre-alert at the
+# top of the CAD's 60 Control column with the transcript and its audio, the aircraft (the callsign matched to
+# the Aircraft layer), the location words and an approximate point only when the words give one; Accept
+# makes a pending event (nothing is dispatched), Dismiss says it's nothing. Pushed once to [alerts]
+# ntfy_topic. On the CAD of record only (the hub, or all-in-one). Leave it out for the defaults.
+# [atc]
+# enabled = true
+# rules = ""                         # "" = data/atc/rules.json (weights, words, what never counts)
+# context = 4                        # earlier transmissions on the channel read with each one (the exchange) ...
+# context_s = 120                    # ... no older than this
+# dedupe_min = 5                     # the same subject again within this: added to the open pre-alert
+# expire_min = 30                    # nobody answered: expired
+# max_per_hour = 8                   # new pre-alerts an hour at most (more: added to the latest open one)
 
 # [alerts]: our own ntfy topics for pushes that page a person (sizeup/notify.py), two kinds:
 #   ntfy_topic    the alarms: the emergency buttons (P25, MDC, FleetSync), a mayday heard on our fire channels

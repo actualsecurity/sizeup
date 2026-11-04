@@ -584,8 +584,11 @@ at the top) and per talkgroup, each with
 | Transcribe | speech-to-text with the Engine | kept without text ("Not transcribed") |
 | Engine | **Local**: whisper.cpp large-v3 on the station (whisper-server, `127.0.0.1:8179`). **AWS**: Amazon Transcribe streaming, called from the hub with its task role; the station skips whisper and sends the clip with `transcript_pending: "aws"`. **Both**: whisper on the station and AWS on the hub; AWS's text is the transcript, whisper's is kept (`alt_text`, `alt_model`) and shown with ⇄ in the Radio view | |
 
-Defaults (`[stt] aws_channels`): **South 2, FG1, FG2 and Fire/EMS 15 (TG 307): record, transcribe, AWS**;
-every other talkgroup as before (its Record switch, transcribe, local). Stored as CAD settings
+Defaults (`[stt] aws_channels`): **South 2, FG1, FG2, Fire/EMS 15 (TG 307) and HPN Tower (#233): record,
+transcribe, AWS**; HPN Tower (every airband channel) streams with its own vocabulary `sizeup-atc`
+(data/atc/vocabulary.json, pushed with the PCFD one) and keeps AWS past the monthly limit with the pages and
+Fire/EMS 15, because its transcripts are the airport pre-alerts, made on the hub (sizeup/atc.py: never on a station
+that forwards); every other talkgroup as before (its Record switch, transcribe, local). Stored as CAD settings
 overrides (section `channels`: only what differs from the default), audited under Radios, in the
 settings export / import. Group switches (Record: all / none per talkgroup section) work as before.
 

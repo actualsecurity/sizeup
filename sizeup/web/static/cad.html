@@ -63,6 +63,7 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
     <section>
       <div class="q-head"><h2 title="Pages to accept or dismiss">60 Control</h2><span id="tapout" class="tapout" hidden></span></div>
       <ol id="q-prealert" class="pa-list" hidden aria-live="assertive" aria-label="Phone pre-alerts"></ol>
+      <ol id="q-airport" class="pa-list" hidden aria-live="assertive" aria-label="Airport pre-alerts"></ol>
       <ol id="q-queued" class="list q"></ol>
     </section>
     <section>
@@ -474,6 +475,7 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
   <aside class="units">
     <!-- the wall board: the phone pre-alert (prealert.js) above the 60 Control feed, read-only -->
     <ol id="b-prealert" class="pa-list board-only" hidden aria-live="assertive" aria-label="Phone pre-alerts"></ol>
+    <ol id="b-airport" class="pa-list board-only" hidden aria-live="assertive" aria-label="Airport pre-alerts"></ol>
     <!-- the 60 Control feed (cad-feed.js): on the Overview and Radio, not on Dispatch (#205: the rigs, big) -->
     <div id="feed" hidden></div>
     <!-- fireground (FG1, FG2) radio IDs nobody has named (radio-ids.js, #163): who is this? Under the radio, above the
@@ -604,6 +606,7 @@ Slots go in order. A kind takes the next available unit of that kind (regular ap
 <script src="/static/radios-panel.js"></script>
 <script src="/static/cad-feed.js"></script>
 <script src="/static/prealert.js"></script>
+<script src="/static/airport-alerts.js"></script>
 <script src="/static/cad.js"></script>
 <script src="/static/status-hints.js"></script>
 <script src="/static/radio-ids.js"></script>

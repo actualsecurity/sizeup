@@ -757,7 +757,7 @@ swap_link() {     # swap_link TARGET LINK: a rename over the old link, never a m
 whisper_argv() { timeout 5 runuser -u "$SVC_USER" -- head -c 8192 /run/sizeup-whisper/argv 2>/dev/null || true; }
 
 activate() {
-  local name=$1 rel="$RELEASES/$1" sys pair t want have t0 t1
+  local name=$1 rel="$RELEASES/$1" sys pair t want have t0 t1 leaving
   [ -f "$rel/.complete" ] || die "no staged release $name in $RELEASES"
   step "switch to release $name"
   # The system files: the release's own, or (a release from before #58) this installer's.
@@ -781,10 +781,13 @@ activate() {
     sed -i "s#$LEGACY_APP/deploy/trunk-recorder/talkgroups.csv#$TR_DIR/talkgroups.csv#" "$CONF"
     say "config: [p25] talkgroups_file is now $TR_DIR/talkgroups.csv (trunk-recorder's copy, from the release)"
   fi
-  # What this release adds to the config (#119: the FG2 channel; #47: our tones as heard), once per station; the old file is kept
-  # beside it, one taken out by hand stays out (sizeup/cloud/configupdate.py, $ETC/config-updates).
+  # What this release adds to the config (#119: the FG2 channel; #47: our tones as heard; #233: HPN Tower), once per station;
+  # the old file is kept beside it, one taken out by hand stays out (sizeup/cloud/configupdate.py, $ETC/config-updates).
+  # --leaving: the release running now, which a failed switch goes back to: an addition it couldn't read waits.
   if [ -f "$rel/sizeup/cloud/configupdate.py" ] && [ -f "$CONF" ]; then
-    if out=$(python3 -I "$rel/sizeup/cloud/configupdate.py" "$CONF" "$ETC/config-updates" 2>&1); then
+    leaving=$(readlink -f "$CURRENT" 2>/dev/null || true)
+    [ "$leaving" != "$(readlink -f "$rel")" ] || leaving=""
+    if out=$(python3 -I "$rel/sizeup/cloud/configupdate.py" "$CONF" "$ETC/config-updates" --leaving "$leaving" 2>&1); then
       [ -z "$out" ] || printf '%s\n' "$out" | while IFS= read -r line; do say "config: $line"; done
     else
       warn "config: additions not applied, $CONF unchanged: $(printf '%s' "$out" | tail -n 1)"

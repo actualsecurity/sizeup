@@ -26,13 +26,20 @@ HOME_DEPARTMENTS = {"Port Chester": "Port Chester FD", "Rye Brook": "Rye Brook F
 
 PAGING_HANG_S = 1.5        # see ChannelCfg.hang_s / continue_s
 PAGING_CONTINUE_S = 3.0
+KINDS = ("paging", "traffic", "airband")
+# Airband (#233: HPN ATC, AM): shortfinal's tested receiver settings (sizeup/radio/am.py): the carrier squelch opens
+# 3.5 dB over the noise floor, 36.4 dB of gain. hang_s / drop_db / continue_s are the FM squelch's: not used here.
+AIRBAND_SQUELCH_DB = 3.5
+AIRBAND_GAIN_DB = 36.4
+AIRBAND_MHZ = (118.0, 137.0)   # VHF airband voice (AM)
 
 
 @dataclass(frozen=True)
 class ChannelCfg:
     label: str                 # "South 2", "FG1"
     mhz: float
-    kind: str                  # "paging" (tones + pages) | "traffic" (voice traffic, e.g. fireground)
+    kind: str                  # "paging" (tones + pages) | "traffic" (voice traffic, e.g. fireground) |
+                               # "airband" (AM aviation voice: HPN ATC, #233; sizeup/radio/am.py, sizeup/atc.py)
     device: str = ""           # dongle serial ("" = first found)
     gain_db: float | None = 40.0
     squelch_db: float = 10.0   # FM quieting needed to open
@@ -99,7 +106,7 @@ class Config:
     # A dongle that appears with no job a person chose gets the first job in auto_assign_order that no
     # other dongle has (sizeup/app.py _auto_assign). load() defaults it on; built directly (tests), off.
     sdr_auto_assign: bool = False
-    sdr_auto_order: tuple[str, ...] = ("FG1", "Fire/EMS 15", "South 2", "FG2")   # channel labels / "Fire/EMS 15" (P25)
+    sdr_auto_order: tuple[str, ...] = ("FG1", "Fire/EMS 15", "South 2", "FG2", "HPN Tower")   # labels / "Fire/EMS 15" (P25)
     p25_recorder: str = ""       # trunk-recorder command line, started/stopped by sizeup
     p25_recorder_dir: str = ""   # its working directory (config.json + talkgroups.csv)
     clips_dir: str = ""
@@ -184,6 +191,15 @@ class Config:
     # [station] auto_update: a Linux station installed by deploy/station/install-linux.sh follows the
     # hub's build (sizeup/cloud/autoupdate.py); false keeps it where it is (also: sizeup-station autoupdate off)
     station_auto_update: bool = True
+    # [atc] (sizeup/atc.py, #233): the airport pre-alert from HPN ATC (the airband channels' transcripts), on the CAD of
+    # record: a rule hit -> an airport pre-alert (sizeup/cad/airport_alerts.py) and a push to the alerts topic
+    atc_enabled: bool = True
+    atc_rules: str = ""                # the rule set ("" = data/atc/rules.json)
+    atc_context: int = 4               # earlier transmissions on the channel read with each one (the exchange)
+    atc_context_s: float = 120.0       # ... no older than this
+    atc_dedupe_min: float = 5.0        # the same subject again within this: added to the open pre-alert
+    atc_expire_min: float = 30.0       # an open pre-alert nobody answered: expired after this
+    atc_max_per_hour: int = 8          # new pre-alerts an hour at most (more: added to the latest open one)
     # [roads] (sizeup/roads.py, #73, #86): the highway layers on the CAD maps: the Thruway's public feeds
     # (on by default) and 511NY's (a key: env SIZEUP_511NY_KEY, the hub: SSM /sizeup-hub/511ny-key, else
     # [roads] key, and the feed addresses below; none: 511NY off).
@@ -452,8 +468,54 @@ def _alerts(data: dict, prealert: dict) -> dict:
 
 
 P25_JOB = "Fire/EMS 15"   # the dongle job that runs trunk-recorder (sizeup/app.py P25_MODE)
-# FG2 (#119) last: only a 4th free dongle takes it by itself; a job with no channel in the config is skipped.
-AUTO_ORDER = ("FG1", P25_JOB, "South 2", "FG2")
+# FG2 (#119), then HPN Tower (#233, ATC): only a 4th / 5th free dongle takes them by themselves; a job with no channel
+# in the config is skipped.
+AUTO_ORDER = ("FG1", P25_JOB, "South 2", "FG2", "HPN Tower")
+
+
+def _airband(c: dict, i: int) -> ChannelCfg:
+    """One [[radio.channels]] entry with kind = "airband": AM, the carrier squelch (squelch_db over the floor), no
+    FM-only keys. The frequency must be VHF airband voice (118-137 MHz)."""
+    where = f"radio.channels[{i}]"
+    for k in ("drop_db", "hang_s", "continue_s"):
+        if k in c:
+            raise ConfigError(f"{where}.{k}: FM channels only (an airband channel's squelch is the AM carrier's)")
+    try:
+        mhz, sq = float(c["mhz"]), float(c.get("squelch_db", AIRBAND_SQUELCH_DB))
+    except (KeyError, TypeError, ValueError):
+        raise ConfigError(f"{where}: label, mhz (and squelch_db) as numbers") from None
+    if not AIRBAND_MHZ[0] <= mhz <= AIRBAND_MHZ[1]:
+        raise ConfigError(f"{where}.mhz: airband voice is {AIRBAND_MHZ[0]:g} to {AIRBAND_MHZ[1]:g} MHz (AM)")
+    if not 1.0 <= sq <= 20.0:
+        raise ConfigError(f"{where}.squelch_db: 1 to 20 dB over the noise floor (3.5: shortfinal's, tested)")
+    return ChannelCfg(str(c["label"]), mhz, "airband", c.get("device", ""), c.get("gain_db", AIRBAND_GAIN_DB), sq)
+
+
+def _atc(data: dict, base: Path) -> dict:
+    """[atc] -> Config fields (#233). No section: on, data/atc/rules.json, the defaults."""
+    a = _take(data.get("atc", {}), "atc", {"enabled", "rules", "context", "context_s", "dedupe_min", "expire_min",
+                                         "max_per_hour"})
+    on = a.get("enabled", True)
+    if not isinstance(on, bool):
+        raise ConfigError("atc.enabled: true or false")
+    rules = str(a.get("rules", "") or "")
+    if rules:
+        rp = Path(rules) if Path(rules).is_absolute() else base / rules
+        if not rp.is_file():
+            rp = Path(__file__).resolve().parent.parent / rules
+        if not rp.is_file():
+            raise ConfigError(f"atc.rules: {rules} not found")
+        rules = str(rp.resolve())
+    nums = {}
+    for k, d, lo, hi in (("context", 4, 0, 12), ("context_s", 120, 10, 900), ("dedupe_min", 5, 0.5, 60),
+                         ("expire_min", 30, 1, 240), ("max_per_hour", 8, 1, 60)):
+        v = a.get(k, d)
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not lo <= float(v) <= hi:
+            raise ConfigError(f"atc.{k}: a number from {lo:g} to {hi:g}")
+        nums[k] = v
+    return dict(atc_enabled=on, atc_rules=rules, atc_context=int(nums["context"]), atc_context_s=float(nums["context_s"]),
+                atc_dedupe_min=float(nums["dedupe_min"]), atc_expire_min=float(nums["expire_min"]),
+                atc_max_per_hour=int(nums["max_per_hour"]))
 
 
 def _job_key(name: str) -> str:
@@ -814,7 +876,7 @@ def load(path: str | Path) -> Config:
         raise ConfigError(f"{path}: {e}") from e
     _take(data, "config", {"station", "web", "radio", "tones", "stt", "p25", "mdc", "units", "storage", "map",
                            "cad", "dispatch", "cloud", "prealert", "roads", "roadwork", "gis", "trains", "weather", "alerts",
-                           "aircraft", "geo"})
+                           "aircraft", "geo", "atc"})
     st = _take(data.get("station", {}), "station", {"id", "name", "auto_update"})
     if not isinstance(st.get("auto_update", True), bool):
         raise ConfigError("station.auto_update: true or false")
@@ -839,9 +901,12 @@ def load(path: str | Path) -> Config:
     for i, c in enumerate(radio.get("channels", [])):
         _take(c, f"radio.channels[{i}]", {"label", "mhz", "kind", "device", "gain_db", "squelch_db",
                                                  "drop_db", "hang_s", "continue_s"})
-        if c.get("kind", "traffic") not in ("paging", "traffic"):
-            raise ConfigError(f"radio.channels[{i}].kind: 'paging' or 'traffic'")
+        if c.get("kind", "traffic") not in KINDS:
+            raise ConfigError(f"radio.channels[{i}].kind: 'paging', 'traffic' or 'airband'")
         kind = c.get("kind", "traffic")
+        if kind == "airband":
+            channels.append(_airband(c, i))
+            continue
         # Simplex fireground: a weaker carrier can sit under ours (FG1 2026-10-07), so traffic channels
         # end a transmission on a 10 dB drop. Paging stays off: a distant repeater fades (South 2).
         drop = c.get("drop_db", 10.0 if kind == "traffic" else 0)
@@ -858,6 +923,9 @@ def load(path: str | Path) -> Config:
                                    float(drop) if drop else None,
                                    float(hang) if hang is not None else None,
                                    float(cont) if cont is not None else None))
+    labels = [c.label for c in channels]
+    if len(set(labels)) != len(labels):
+        raise ConfigError("radio.channels: two channels have the same label")
     tones, ours, tones_file = [], set(), ""
     tf = radio.get("tones_file", "data/westchester_tones.csv")
     if tf:
@@ -883,6 +951,9 @@ def load(path: str | Path) -> Config:
     if talker_mode not in ("off", "ids", "ids+time"):
         raise ConfigError('stt.talker_prompt: "off", "ids" or "ids+time"')
     aws_stt = _stt_aws(stt)
+    if "aws_channels" not in stt:     # an airband channel (HPN ATC, #233) is a priority channel: AWS by default
+        aws_stt["stt_aws_channels"] = tuple(dict.fromkeys([*aws_stt["stt_aws_channels"],
+                                                           *(c.label for c in channels if c.kind == "airband")]))
     p25 = _take(data.get("p25", {}), "p25", {"capture_dir", "talkgroups", "talkgroups_file", "incident_talkgroups",
                                              "aliases", "recorder", "recorder_dir", "emergency_window_min"})
     try:
@@ -1013,5 +1084,6 @@ def load(path: str | Path) -> Config:
         **(dict(cloud, cloud_outbox=rel_state(cloud["cloud_outbox"])) if cloud else {}),
         cloud_state="" if cloud.get("cloud_role") == "hub" else rel_state("state/cloud.json"),
         **_geo(data),
+        **_atc(data, base),
         **pa, **_alerts(data, pa), **_roads(data), **_roadwork(data), **_gis(data), **_trains(data), **_weather(data), **aircraft,
     )

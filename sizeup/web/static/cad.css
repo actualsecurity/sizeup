@@ -83,6 +83,29 @@
   .pa-t { color: var(--text); }
   .pa-src { display: block; color: var(--text-2); font-size: var(--fs-xs); line-height: var(--lh-xs); overflow: hidden; text-overflow: ellipsis; }
   .pa-age { font-weight: 700; }
+  /* the airport pre-alert (airport-alerts.js, #233): HPN ATC heard something that could become a call for us */
+  .aa {
+    display: flex; flex-direction: column; gap: var(--s-1); min-inline-size: 0; padding: var(--s-1) var(--s-2);
+    border: var(--bw) solid var(--warn); border-inline-start-width: var(--bw-mark); border-radius: var(--radius);
+    background: color-mix(in srgb, var(--warn) 12%, var(--raised));
+  }
+  .aa.aa-high { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 16%, var(--raised)); animation: pa-blink 1.2s steps(1) infinite; }
+  .aa.aa-low { border-color: var(--line-strong); background: var(--raised); }
+  .aa-head { display: flex; align-items: flex-start; gap: var(--s-2); min-inline-size: 0; }
+  .aa-head .ico { flex: none; color: var(--accent-text); }
+  .aa-title { flex: 1 1 auto; min-inline-size: 0; color: var(--text); overflow-wrap: anywhere; }
+  .aa-conf { flex: none; font-size: var(--fs-xs); line-height: var(--lh-xs); color: var(--text-2); white-space: nowrap; }
+  .aa-conf.high { color: var(--accent-text); font-weight: 700; }
+  .aa-conf.medium { color: var(--warn); }
+  .aa-conf.low { color: var(--dim); }
+  .aa-src, .aa-acft, .aa-loc { color: var(--text-2); font-size: var(--fs-xs); line-height: var(--lh-xs); overflow-wrap: anywhere; }
+  .aa-loc.approx { color: var(--warn); }
+  .aa-heard { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--s-1); }
+  .aa-snip { display: flex; align-items: baseline; gap: var(--s-1); min-inline-size: 0; font-size: var(--fs-sm); line-height: var(--lh-sm); }
+  .aa-snip.ctx { color: var(--text-2); }
+  .aa-t { flex: none; color: var(--dim); font-size: var(--fs-xs); line-height: var(--lh-xs); }
+  .aa-q { min-inline-size: 0; overflow-wrap: anywhere; }
+  .aa-btns { display: flex; gap: var(--s-1); justify-content: flex-end; }
   .q { display: flex; flex-direction: column; gap: var(--s-1); }
   .q > li.qi { padding: var(--s-2); border: var(--bw) solid var(--line); background: var(--raised); }
   .q > li.qi:hover { border-color: var(--line-hover); background: var(--hover); }
