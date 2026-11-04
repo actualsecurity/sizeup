@@ -176,9 +176,10 @@ def _signature(secret: str, day: str, reg: str, service: str, amz: str, creq: st
 
 
 def sign(method: str, url: str, headers: dict[str, str], body: bytes, creds: Credentials, reg: str,
-         service: str, at: datetime | None = None) -> dict[str, str]:
+         service: str, at: datetime | None = None, payload_sha: str | None = None) -> dict[str, str]:
     """The request's headers plus Host, X-Amz-Date, X-Amz-Security-Token (temporary credentials) and
-    Authorization (AWS Signature Version 4). Every header given is signed."""
+    Authorization (AWS Signature Version 4). Every header given is signed. payload_sha: the body's sha256
+    when it isn't in hand (S3: a file streamed up, its hash also in x-amz-content-sha256)."""
     amz, day = _stamp(at)
     u = urllib.parse.urlsplit(url)
     out = dict(headers)
@@ -190,7 +191,8 @@ def sign(method: str, url: str, headers: dict[str, str], body: bytes, creds: Cre
     names = sorted(canon)
     creq = "\n".join([method.upper(), _canonical_path(u.path),
                       _canonical_query(urllib.parse.parse_qsl(u.query, keep_blank_values=True)),
-                      "".join(f"{k}:{canon[k]}\n" for k in names), ";".join(names), hashlib.sha256(body).hexdigest()])
+                      "".join(f"{k}:{canon[k]}\n" for k in names), ";".join(names),
+                      payload_sha or hashlib.sha256(body).hexdigest()])
     sig = _signature(creds.secret_key, day, reg, service, amz, creq)
     out["Authorization"] = (f"{ALGORITHM} Credential={creds.access_key}/{day}/{reg}/{service}/aws4_request, "
                             f"SignedHeaders={';'.join(names)}, Signature={sig}")

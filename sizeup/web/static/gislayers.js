@@ -10,7 +10,8 @@
 //                one fetch for every map on the page). A "tiled" layer (the parcels, the buildings: too big
 //                to send whole) is asked for the map's viewport (?bbox=) from its minzoom up, a little
 //                padded, again only when the map leaves the box it last asked for. The browser never talks
-//                to the county.
+//                to the county. A layer the hub hasn't read yet (a new hub, #229) says "loading" by its
+//                toggle, and the catalog is asked again every LOADING_MS until it has.
 //   The look     from the catalog's style: colors are design tokens ("--info") or hex; polygons a faint
 //                fill with an outline, lines a stroke, points a mark with a label from zoom 15; a feature
 //                marked ours (_ours: our fire district) is drawn in the department's accent. A layer with a
@@ -32,6 +33,7 @@
 
 window.GisLayers = (() => {
   const CATALOG_MS = 300000;            // the catalog again every 5 min (refresh times, a re-fetched layer)
+  const LOADING_MS = 15000;             // ... every 15 s while a layer is still loading on the hub (#229)
   const PAD = 0.35;                     // a tiled layer's box: the viewport plus this much each way
   const MOVE_MS = 250;
   const LABEL_ZOOM = 15;
@@ -56,7 +58,7 @@ window.GisLayers = (() => {
   const dflt = (l, profile) => !!l.on || (PROFILE_ON[profile] || []).includes(l.key);
 
   // ---- the catalog and the layers' data: one copy for every map on the page ----------------------------------------
-  const store = { cat: null, timer: null, loading: null, layers: {}, subs: new Set() };
+  const store = { cat: null, timer: null, soon: null, loading: null, layers: {}, subs: new Set() };
   const layersOf = (cat) => ((cat && cat.layers) || []);
   async function loadCatalog() {
     if (store.loading) return store.loading;
@@ -73,6 +75,9 @@ window.GisLayers = (() => {
         }
         if (!was || JSON.stringify(layersOf(was).map((l) => [l.key, l.rev, l.error])) !== JSON.stringify(layersOf(d).map((l) => [l.key, l.rev, l.error]))) {
           for (const fn of store.subs) { try { fn(d); } catch (e) { console.error(e); } }
+        }
+        if (layersOf(d).some((l) => l.loading) && !store.soon) {     // ask again soon: "loading" gives way to the layer
+          store.soon = setTimeout(() => { store.soon = null; if (document.visibilityState !== "hidden") loadCatalog(); }, LOADING_MS);
         }
       } catch (e) {
         if (!store.cat) {                                 // an older hub, or offline: the box says so
@@ -464,6 +469,7 @@ window.GisLayers = (() => {
         lab.append(cb, ...(mark ? [mark] : []), h("span", "", l.label));
         if (l.asof) lab.append(h("span", "ml-note", l.asof));
         if (l.error && !l.at) lab.append(h("span", "ml-err small", "not loaded"));
+        else if (!l.at) lab.append(h("span", "dim small", "loading"));        // the hub hasn't read it yet (#229)
         else if (l.minzoom > 0 && zoom < l.minzoom) lab.append(h("span", "dim small", "zoom in"));
         else if (l.at && l.n === 0) lab.append(h("span", "dim small", "nothing here"));
         const tip = [l.note, l.trains_field && this.trainsOn() ? "Stations the Trains layer shows are drawn there, not here too" : ""];
