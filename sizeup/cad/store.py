@@ -430,6 +430,9 @@ class Store:
         for stmt in (ACTIVITY_SCHEMA + EXCLUSION_SCHEMA).split(";"):   # per-person activity, removed links (2026-10-08)
             if stmt.strip():
                 self.db.execute(stmt)
+        if self.db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'unit_history'").fetchone():
+            # a unit's latest status change (Close event's and the startup repair's look-up, #232), 2026-11-04
+            self.db.execute("CREATE INDEX IF NOT EXISTS unit_history_unit ON unit_history(unit_id, id)")
         ecols = {r["name"] for r in self.db.execute("PRAGMA table_info(events)")}
         if ecols and "places" not in ecols:              # a note's "@" places (#67), 2026-10-13: old notes keep ''
             self.db.execute("ALTER TABLE events ADD COLUMN places TEXT NOT NULL DEFAULT ''")
@@ -1050,12 +1053,95 @@ class Store:
             raise CadError(f"Event {inc['status']}: not a page")
         now = self.clock()
         with self.tx() as db:
+            names = self._release_all(db, iid, operator, now)      # a queued page has none: the same rule as Close
             db.execute("UPDATE incidents SET status = 'dismissed', closed_at = ? WHERE id = ?", (now, iid))
-            self._event(db, iid, "dismissed", "Dismissed" + (f": {reason}" if reason else ""), operator, at=now)
+            self._event(db, iid, "dismissed", "Dismissed" + (f": {reason}" if reason else "")
+                        + (f"; cleared {', '.join(names)}" if names else ""), operator, at=now)
         return self.incident(iid)
 
+    def _left_on(self, db, iid: int) -> list:
+        """The units off the call whose status is still the one they were put in on it (#232): E63 Cancelled
+        enroute there (cleared off the call at once, a free status) and on no call since. The unit's latest
+        history row is on this call and says its current status; a status that doesn't belong to a call
+        (Available, At quarters, Out of service: Lists.call_bound) is left alone."""
+        rows = db.execute("SELECT u.id, u.name, u.status, u.board FROM units u "
+                          "JOIN unit_history h ON h.id = (SELECT MAX(id) FROM unit_history WHERE unit_id = u.id) "
+                          "WHERE h.incident_id = ? AND h.new_status = u.status AND NOT EXISTS "
+                          "(SELECT 1 FROM assignments a WHERE a.unit_id = u.id AND a.cleared_at IS NULL) "
+                          "ORDER BY u.sort, u.id", (iid,)).fetchall()
+        return [r for r in rows if self.lists.call_bound(r["status"])]
+
+    def _release_all(self, db, iid: int, operator: str, now: float) -> list[str]:
+        """The call is closing (or dismissed): every unit still on it is cleared and back in service, out of
+        service ones keep that; and every unit left in a status set on it (Cancelled, Cancelled enroute: #232)
+        goes back to free too. In the caller's transaction. -> their names, for the closing line."""
+        L = self.lists
+        on = db.execute("SELECT a.id, a.unit_id, u.name, u.status, u.board FROM assignments a JOIN units u ON u.id = a.unit_id "
+                        "WHERE a.incident_id = ? AND a.cleared_at IS NULL", (iid,)).fetchall()
+        left = self._left_on(db, iid)
+        for a in on:
+            db.execute("UPDATE assignments SET cleared_at = ? WHERE id = ?", (now, a["id"]))
+        for r in [dict(a, id=a["unit_id"]) for a in on] + [dict(u) for u in left]:
+            free = L.free_for(r["name"], r["board"])
+            if L.role(r["status"]) != "oos" and r["status"] != free:
+                db.execute("UPDATE units SET status = ?, status_at = ? WHERE id = ?", (free, now, r["id"]))
+                self._history(db, r["id"], r["status"], free, iid, operator, now)
+        return [a["name"] for a in on] + [u["name"] for u in left]
+
+    def release_stale(self) -> list[dict]:
+        """The startup repair (#232): a unit left in a status that belongs to a call that is closed (or
+        dismissed, or no longer there): E63 on Cancelled enroute after its call was closed, from before Close
+        released those. Set back to free, "released: call 26-000123 was closed" in its history and on the unit
+        log. Conservative: only a unit on no open call whose status is call_bound (never Available, At
+        quarters, Out of service or a status that isn't the one its last history row set); a dangling
+        assignment on a closed call is cleared. Idempotent: run on every start, a second run finds nothing.
+        -> [{unit, from, to, number}] of what it changed."""
+        with self.lock:
+            return self._release_stale()
+
+    def _release_stale(self) -> list[dict]:
+        L = self.lists
+        closed = "(i.id IS NULL OR i.status IN ('closed', 'dismissed'))"
+        busy = ("EXISTS (SELECT 1 FROM assignments b JOIN incidents j ON j.id = b.incident_id "
+                "WHERE b.unit_id = u.id AND b.cleared_at IS NULL AND j.status NOT IN ('closed', 'dismissed'))")
+        dangling = self.q(f"SELECT a.id, a.incident_id, u.id AS unit_id, u.name, u.status, u.board, i.id AS iid, i.number, "
+                          f"i.status AS istatus FROM assignments a JOIN units u ON u.id = a.unit_id "
+                          f"LEFT JOIN incidents i ON i.id = a.incident_id WHERE a.cleared_at IS NULL AND {closed} "
+                          f"AND NOT {busy} ORDER BY a.id")
+        stale = self.q(f"SELECT u.id AS unit_id, u.name, u.status, u.board, h.incident_id, i.id AS iid, i.number, "
+                       f"i.status AS istatus FROM units u "
+                       f"JOIN unit_history h ON h.id = (SELECT MAX(id) FROM unit_history WHERE unit_id = u.id) "
+                       f"LEFT JOIN incidents i ON i.id = h.incident_id WHERE h.incident_id IS NOT NULL "
+                       f"AND h.new_status = u.status AND {closed} AND NOT {busy} "
+                       f"AND NOT EXISTS (SELECT 1 FROM assignments c WHERE c.unit_id = u.id AND c.cleared_at IS NULL) "
+                       f"ORDER BY u.sort, u.id")
+        todo: dict[int, dict] = {}
+        for r in dangling + stale:
+            free = L.free_for(r["name"], r["board"])
+            if L.call_bound(r["status"]) and r["status"] != free:
+                todo.setdefault(r["unit_id"], dict(r, to=free))
+        if not dangling and not todo:
+            return []
+        now = self.clock()
+        out = []
+        with self.tx() as db:
+            for r in dangling:
+                db.execute("UPDATE assignments SET cleared_at = ? WHERE id = ? AND cleared_at IS NULL", (now, r["id"]))
+            for r in todo.values():
+                call = r["number"] or (f"#{r['iid']}" if r["iid"] else "")
+                why = (f"released: call {call} was {'dismissed' if r['istatus'] == 'dismissed' else 'closed'}" if r["iid"]
+                       else "released: its call is no longer there")
+                db.execute("UPDATE units SET status = ?, status_at = ?, out_of_service = '' WHERE id = ? AND status = ?",
+                           (r["to"], now, r["unit_id"], r["status"]))
+                self._history(db, r["unit_id"], r["status"], r["to"], r["iid"], "", now, why)
+                self._event(db, None, "status", f"{r['name']} {L.status_phrase(r['to'], r['name'], r['board'])} ({why})",
+                            "", r["unit_id"], now)
+                out.append({"unit": r["name"], "from": r["status"], "to": r["to"], "number": r["number"] or ""})
+        return out
+
     def close(self, iid: int, disposition: str, operator: str = "") -> dict:
-        """CLOSE EVENT, with a DISPOSITION. Every unit still on it is cleared and back in service."""
+        """CLOSE EVENT, with a DISPOSITION. Every unit still on it is cleared and back in service, and so is one
+        left Cancelled / Cancelled enroute from it (#232: _release_all)."""
         inc = self.incident(iid)
         if inc["status"] not in ("pending", "active"):
             raise CadError(f"Event {inc['status']}" + (": accept or dismiss" if inc["status"] == "queued" else ""))
@@ -1063,19 +1149,11 @@ class Store:
             raise CadError("Pick a disposition")
         if disposition not in self.lists.disposition_codes:
             raise CadError(f"disposition: {disposition!r} is not one of the dispositions")
-        free = self.lists.status_for("free")
         now = self.clock()
         with self.tx() as db:
-            on = db.execute("SELECT a.id, a.unit_id, u.name, u.status FROM assignments a JOIN units u ON u.id = a.unit_id "
-                            "WHERE a.incident_id = ? AND a.cleared_at IS NULL", (iid,)).fetchall()
-            for a in on:
-                db.execute("UPDATE assignments SET cleared_at = ? WHERE id = ?", (now, a["id"]))
-                if self.lists.role(a["status"]) != "oos" and a["status"] != free:
-                    db.execute("UPDATE units SET status = ?, status_at = ? WHERE id = ?", (free, now, a["unit_id"]))
-                    self._history(db, a["unit_id"], a["status"], free, iid, operator, now)
+            names = ", ".join(self._release_all(db, iid, operator, now))
             db.execute("UPDATE incidents SET status = 'closed', closed_at = ?, disposition = ? WHERE id = ?",
                        (now, disposition, iid))
-            names = ", ".join(a["name"] for a in on)
             self._event(db, iid, "closed", f"Event closed: {self.lists.name('dispositions', disposition)}"
                         + (f"; cleared {names}" if names else ""), operator, at=now)
         return self.incident(iid)
