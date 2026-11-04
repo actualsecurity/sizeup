@@ -168,7 +168,7 @@ pages of its own ([the station page](#the-station-page)).
 | One event can't be applied | Logged and counted in the Station row; the ones behind it still apply. |
 | Station offline during a dispatch | Text-only dispatch with the reason, immediately. |
 | Station slow to render | After 20 s, text only; a late answer is discarded. |
-| Hub redeployed | Litestream restores the three SQLite files before the app starts. Lost: up to ~1 s of the newest writes, a tones-only page waiting for its separate voice transmission, the in-memory "talking now" and station status (back within 5 s). Received clips survive (in `audio.sqlite`, 12 h). |
+| Hub redeployed | Litestream restores the three SQLite files before the app starts. Lost: up to ~1 s of the newest writes, a tones-only page waiting for its separate voice transmission, the in-memory "talking now" and station status (back within 5 s). Received clips survive (in `audio.sqlite`, 12 h). The map caches (county GIS layers, camera lists, road projects, Metro-North's stations, the FAA registry) come back from their S3 copies before the hub serves (`sizeup/cachesync.py`): nothing is missing from the map while they would be fetched again. |
 | Clocks differ | Transmission times are the station's clock; the hub warns in the Station row above 5 s. Keep both on NTP. |
 | Late delivery | Events that arrive after an outage are applied as they arrive: the monitor attaches traffic to whatever incident is active then; the CAD links by the transmission's own time. |
 | A station update doesn't come up | Switched back to the release that ran before within 90 s; that build isn't tried again until the hub moves on. The Station row says "update to ... failed". |
@@ -1280,12 +1280,32 @@ buildings 42,352, 16.8 MB (2.6 MB); driveways 30,304, 12.9 MB (2.1 MB); parking 
 1.2 MB (0.08 MB); flood plains 747, 1.7 MB (0.4 MB); bus routes 41, 1.5 MB; the rest under 0.5 MB each; about
 40 MB on disk in all.
 
+**Only what changed** (#229). A scheduled look at a layer we hold reads its description (`<layer>?f=json`) first:
+
+| how | when | what is downloaded |
+|---|---|---|
+| unchanged | the layer's `editingInfo` (`dataLastEditDate`, else `lastEditDate`) is the one recorded with our copy | nothing: the look is recorded (`checked`), `at` stays the data's fetch time |
+| incremental | editor tracking: `editFieldsInfo.editDateField` (or a date field named like one, `last_edited_date` / `EditDate` ...) and object ids | the features edited since our copy's newest edit (less 36 h, for the service's time zone), paged, plus `returnIdsOnly` in our box for the deletions; merged by id, each tidied, marked `_ours` or left out (`drop_ours`) as in a full read. An id we can't account for (drift) or the service refusing the query: a full download instead; a network error keeps the old copy |
+| full | no copy yet, no `editingInfo`, every 90 days for a layer read the other two ways (drift), or Refresh now | the whole layer, as before |
+
+Surveyed 2026-11-03 (`?f=json` of each starter layer): none of the county's own MapServer layers has
+`editingInfo` or `editFieldsInfo`, so they stay "full" on their schedule; the NYS DOH layers on ArcGIS Online
+(nursing homes, adult care) have a `lastEditDate` (Sept 2020) and so are "unchanged" from the second look on.
+A `returnCountOnly` / id-hash check was not added for the rest: ids and a count see a feature added or
+removed, never a hydrant moved or a parcel's new owner, so they could never say "unchanged". Settings > Data
+sources shows each layer's download time, its last look and what that did; the next one is due from the look.
+
+**A new hub task starts with the layers** (#229): the cache files are kept in the S3 backups bucket and put
+back before the hub serves (`sizeup/cachesync.py`, [the hub's storage](#the-hubs-storage)). A layer the hub
+has no data for yet says **loading** by its toggle in the Layers box (the catalog's `loading`), and the page
+asks for the catalog every 15 s until it has it.
+
 **The browser never talks to the county.** Everything comes from the hub, to anyone signed in (viewers
 too; all GET), with an `ETag` (a 304 for `If-None-Match`) and gzip when the browser accepts it:
 
 | | |
 |---|---|
-| `GET /api/cad/gis` | the catalog: `{configured, source, attribution, link, terms, rev, layers: [{key, label, group, kind, style, icon, sub, minzoom, fields, on, refresh, tiled, licence, page, asof, note, at, n, bytes, error, updated, rev}]}` (the pages poll it every 5 min) |
+| `GET /api/cad/gis` | the catalog: `{configured, source, attribution, link, terms, rev, layers: [{key, label, group, kind, style, icon, sub, minzoom, fields, on, refresh, tiled, licence, page, asof, note, at, n, bytes, error, updated, rev, checked, how, loading}]}` (the pages poll it every 5 min; every 15 s while a layer is loading) |
 | `GET /api/cad/gis/<key>` | the whole layer as GeoJSON (`Cache-Control: private, max-age=300`), one fetch for every map on the page |
 | `GET /api/cad/gis/<key>?bbox=w,s,e,n` | only the features touching the box (`max-age=60`): how a **tiled** layer is served. The parcels and the planimetrics are too big to send whole (21 k parcels, 42 k buildings in our area), so the page asks for its viewport, padded, from the layer's minimum zoom, and again only when the map leaves that box; a box over 0.25° a side is refused |
 
@@ -1730,8 +1750,29 @@ Everything the hub keeps is SQLite under `SIZEUP_STATE_DIR`, so Litestream can r
 | `hub.sqlite` | the monitor: incidents, transmissions, pages (one row each, written only when changed), and the station events applied so far |
 | `audio.sqlite` | received clips (`storage.audio_keep_hours`, 12 h, and `audio_max_mb`, oldest first) and the dispatch audio (Polly's or the station's; kept with the dispatch log; unused previews a day) |
 
-The hub has no `captures/` and writes no JSON files. Dispatch WAVs are also cached in
-`dispatch-audio/` on the task's disk; after a redeploy they're served from `audio.sqlite`.
+The hub has no `captures/`. Dispatch WAVs are also cached in `dispatch-audio/` on the task's disk; after a
+redeploy they're served from `audio.sqlite`.
+
+**The map caches** (#229, `sizeup/cachesync.py`) are files beside them, fetched from their sources; each is
+kept gzipped in the same bucket, `s3://$LITESTREAM_BUCKET/$LITESTREAM_PATH/cache/<file>.gz`:
+
+| file | holds | uploaded |
+|---|---|---|
+| `gis/<key>.geojson` | a county GIS layer and what it was fetched with (its `lastEditDate`, newest edit, ids left out) | within a minute of a (re)download |
+| `gis/checks.json` | when each layer was last looked at, and how (unchanged / incremental / full) | at most every 10 min |
+| `roads511.json` | each highway provider's camera list, incidents and signs | at most hourly (it is saved on every events read) |
+| `roadprojects.json` | road projects & closures | at most hourly |
+| `trains/static.json`, `trains/points.json` | Metro-North's stations and line; the reporting points learned | at once; at most hourly |
+| `aircraft/faa_registry.sqlite` | the FAA registry as built (~weekly) | at once |
+
+On start (`App.__init__`, before the providers read their caches) every copy whose file is missing is fetched
+(six at once, 45 s at most in all; the rest are fetched from their sources as before). Afterwards a thread looks
+at the files every minute and uploads one whose sha256 isn't the one last uploaded or restored; a failed upload
+is logged and tried again later (5 min doubling to 6 h), never fatal. Credentials: the task role, signed with
+`sizeup/aws.py` (no boto, no keys). The task role's `backups` policy (`sizeup-aws/2-iam.sh`) already allows
+`s3:GetObject` / `s3:PutObject` on every key of the bucket and `s3:ListBucket` on it: **no IAM change**. Off
+without `LITESTREAM_BUCKET` (compose, a Mac) or with `SIZEUP_CACHE_S3=off`: the caches are then local only.
+Camera snapshots and the weather's radar tiles are not kept (minutes old at most, fetched again at once).
 
 ## Packaging and the Fargate task
 
@@ -1782,7 +1823,8 @@ the model, the alerts, `/api/cad/health`, `/api/station/status`; `sizeup/notify.
 `tests/test_access.py`, `tests/test_roles.py`, `tests/test_activity.py`, `tests/test_channels.py`,
 `tests/test_transcribe.py` (fakes: `tests/fake_transcribe.py`), `tests/test_autoupdate.py`,
 `tests/test_station_install.py`. The county GIS layers: `sizeup/gis.py` (`tests/test_gis.py`, fixtures
-`tests/fixtures/wcgis/`), `sizeup/web/static/gislayers.js` (a group in maplayers.js's Layers box). Metro-North's
+`tests/fixtures/wcgis/`; only what changed: `tests/test_gis_cache.py`), `sizeup/web/static/gislayers.js` (a group in
+maplayers.js's Layers box). The map caches' S3 copies: `sizeup/cachesync.py` (`tests/test_gis_cache.py`). Metro-North's
 trains: `sizeup/trains.py` (`tests/test_trains.py`, fixtures `tests/fixtures/mta/`), `sizeup/web/static/trains.js` (a group in
 the Layers box, and the event's "Trains approaching" panel). Aircraft near HPN: `sizeup/aircraft.py` (`tests/test_aircraft.py`, fixtures
 `tests/fixtures/aircraft/`), `sizeup/web/static/aircraft.js` (a group in the Layers box). Weather and water: `sizeup/weather.py` (`tests/test_weather.py`, fixtures `tests/fixtures/weather/`), `sizeup/web/static/weather.js`

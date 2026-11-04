@@ -115,11 +115,14 @@
   .q > li.qi.nonemerg { border-color: color-mix(in srgb, var(--info) 40%, transparent); }
   .q > li.qi:is(.dismissed, .closed) { opacity: 0.7; }
   @keyframes pendingblink { 50% { border-color: var(--line-strong); } }
+  /* a card's head (#231): the number and the time on the top row (a long number wraps in its own room, the time
+     stays whole at the end); the type on its own line, the card's width, the town's chip after it (wrapping with
+     it, never over it) */
   .qh { display: flex; align-items: baseline; gap: var(--s-2); min-inline-size: 0; }
-  .qh .qt { flex: 1 1 auto; min-inline-size: 0; }
-  .qh .spacer { display: none; }
-  .qn { font-size: var(--fs-sm); font-weight: 700; flex: none; white-space: nowrap; }
-  .qe { color: var(--dim); font-size: var(--fs-sm); flex: none; margin-inline-start: auto; }
+  .qn { font-size: var(--fs-sm); font-weight: 700; flex: 0 1 auto; min-inline-size: 0; overflow-wrap: anywhere; }
+  .qe { color: var(--dim); font-size: var(--fs-sm); flex: none; white-space: nowrap; margin-inline-start: auto; }
+  .qtl { min-inline-size: 0; overflow-wrap: break-word; }
+  .qtl .chip { margin-inline-start: var(--s-1); }
   .qa { margin-block-start: var(--s-0); overflow-wrap: anywhere; }
   .qs { font-size: var(--fs-xs); line-height: var(--lh-xs); }
   .qnote { font-weight: 700; margin-block: var(--s-1); }

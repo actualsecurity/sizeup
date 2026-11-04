@@ -14,7 +14,9 @@ shows). A new export can replace the file without a code change:
     event_class                      emergency / non-emergency by TYPE/SUBTYPE, */SUBTYPE or TYPE
     unit_statuses                    {code, name, role, bg, fg}: the status dropdown; the role is what
                                      the store does with it (free, oos, dispatched, enroute, onscene);
-                                     free_status: the free one Close event sets (else the first free)
+                                     free_status: the free one Close event sets (else the first free);
+                                     release_on_close: the free ones that say how a unit left a call
+                                     (Cancelled, Cancelled enroute ...): Close event sets them back too (#232)
     agency_status_sets               the statuses other agencies' units go through (#219): set id ->
                                      {statuses (the first: what Attach puts one on as), labels (a status
                                      named otherwise for that set)}; boards: board id -> set, default
@@ -115,6 +117,7 @@ class Lists:
     status_flow: dict = field(default_factory=dict)        # status | "*" -> (next statuses), the incident's unit buttons
     lead_in_joint_only: dict = field(default_factory=dict) # town -> the lead-in when only its units go
     free_status: str = ""                                  # the free status Close event sets ('' = the first free)
+    release_on_close: tuple[str, ...] = ()                 # free statuses tied to the call they were set on (#232)
     type_subtypes_partial: dict = field(default_factory=dict)  # {"given": [types], "confirm": {type: why}}
     dispatch_tones: dict = field(default_factory=dict)     # joint town -> [(hz, s), ...] | None (not known yet)
     agency_status_sets: dict = field(default_factory=dict) # {"default", "sets": {id: {statuses, labels}}, "boards"}
@@ -253,6 +256,21 @@ class Lists:
     @property
     def free(self) -> tuple[str, ...]:
         return tuple(s["code"] for s in self.unit_statuses if s.get("role") == "free" and not s.get("retired"))
+
+    def free_for(self, code: str, board: str | None = None) -> str:
+        """The free status a unit goes back to (Close event): free_status, or its agency set's first free one."""
+        mine, free = self.unit_statuses_for(code, board), self.status_for("free")
+        return free if free in mine else next((c for c in mine if self.role(c) == "free"), free)
+
+    def call_bound(self, status: str) -> bool:
+        """Does the status belong to the call it was set on, so that the unit goes back to free when that call
+        closes (#232)? The working ones (dispatched, en route, on scene, committed) and the free ones in
+        release_on_close (Cancelled, Cancelled enroute ...). Not out of service, not a plain free one (Available,
+        At quarters)."""
+        role = self.role(status)
+        if role == "free":
+            return status in self.release_on_close
+        return role != "oos" and status in self._names["unit_statuses"]       # an unknown code: leave it
 
     @property
     def command_status(self) -> str:
@@ -695,6 +713,12 @@ def build(d: dict, where: str, path: str | Path = "") -> Lists:
     free_status = d.get("free_status") or ""
     if free_status and free_status not in codes:
         raise ListsError(f"{where}: free_status: {free_status!r} is not in unit_statuses")
+    rel = d.get("release_on_close") or []
+    if not isinstance(rel, list) or not all(isinstance(c, str) for c in rel):
+        raise ListsError(f"{where}: release_on_close: a list of unit_statuses codes")
+    role_of = {s["code"]: s.get("role", "") for s in statuses}
+    # Lenient on purpose: a status deleted in Settings, or no longer free, simply drops out.
+    release = tuple(c for c in rel if role_of.get(c) == "free" and c != free_status)
     already = tuple(dw.get("already_statuses") or ())
     if not set(already) <= {s["code"] for s in statuses}:
         raise ListsError(f"{where}: dispatch_wording.already_statuses: codes from unit_statuses")
@@ -748,7 +772,7 @@ def build(d: dict, where: str, path: str | Path = "") -> Lists:
                  wording=dict(WORDING, **wording), already_statuses=already, joint_response=joint, full_response_kinds=fr_kinds,
                  status_flow=flow,
                  lead_in_joint_only={str(t): str(v) for t, v in only.items()}, dispatch_tones=tones,
-                 free_status=free_status, type_subtypes_partial=tsp, agency_status_sets=agency_sets,
+                 free_status=free_status, release_on_close=release, type_subtypes_partial=tsp, agency_status_sets=agency_sets,
                  path=str(path))
 
 

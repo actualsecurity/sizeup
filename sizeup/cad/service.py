@@ -180,6 +180,10 @@ class Cad:
         n = self.store.sync_units()
         if n:
             log(f"CAD: added {n} units from {Path(self.lists.path).name}")
+        released = self.store.release_stale()        # units left on a closed call's status (#232): back to free
+        if released:
+            log(f"CAD: released {len(released)} unit(s) left on a closed call's status: "
+                + ", ".join(f"{r['unit']} {r['from']} -> {r['to']} ({r['number'] or 'no number'})" for r in released))
         if runcards.seed(self.store, fill=bool(self.store.migrated)):
             log("CAD: seeded default run cards (a stand-in: edit them to PCFD policy)")
         self.radios = Registry(self.store, s.radio_seed or None)
