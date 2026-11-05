@@ -30,6 +30,12 @@
 //   Box          the group's note: emergencies first, the HPN movements (arriving, departing, on the ground),
 //                how many are low in the area, each feed (our receiver, adsb.lol, adsb.fi) with how many it gave and
 //                which is primary or resting, the credits and licence, the feed's time, our receiver's state.
+//   Talking      who is talking on HPN Tower (#252, sizeup/atc_talkers.py; the answer's "atc", while Settings > System >
+//                ATC talkers > "Show ATC talker on the map" is on): an aircraft whose callsign was heard and matched on
+//                ADS-B (confirmed or probable, never a guess) gets a pulsing ring while its transmission is in (TALK_HOLD_S
+//                on the hub) or plays here (cad.js sizeup:playing), a steady one while the tower is calling it; its box
+//                lists its recent transmissions with ▶. A Radio row's aircraft chip (cad.js) calls focus(hex): the layer
+//                on, the map centred on it, ringed for a while, its box open. Speech-derived: never a radio ID.
 //   Data         only ever from the hub: GET /api/cad/aircraft (sizeup/aircraft.py), every 2 s while a map has the
 //                layer on and the page is visible (an unchanged answer is a 304; the hub still reads each feed at its
 //                own rate: the primary API every 5 s); never in the state push (#146). The browser never talks to
@@ -47,7 +53,10 @@ window.AircraftLayer = (() => {
   const STEP_PX = 0.75;                     // ... in between, one each time the fastest mark has moved this far on screen
   const HORIZON_S = 10;                     // shortfinal's MAX_EXTRAPOLATE_S: never further past a fix than this
   const SRC = "ac-aircraft";                // marks and trails in one source: one setData a frame, drawn together
-  const IDS = ["ac-trail", "ac-mark", "ac-label"];
+  const IDS = ["ac-trail", "ac-ring", "ac-mark", "ac-label"];
+  const PING_MS = 1400;                     // one "talking" ring pulse (shortfinal's)
+  const HIGHLIGHT_MS = 12000;               // a chip's aircraft, ringed this long once centred
+  const FOCUS_WAIT_MS = 20000;              // ... waited for this long (the layer just turned on, the data coming)
   const HALO = "#15181B";
   const PHASE = {
     arriving: { token: "--ok", text: "Arriving HPN", tag: "▼" },
@@ -148,6 +157,34 @@ window.AircraftLayer = (() => {
     return "";
   }
 
+  // ---- who is talking (#252): the hub's "atc" (talking, tx by hex), what plays here, a chip's aircraft ---------------
+  const talk = { playing: "", highlight: null, pending: null };
+  const nowS = () => Date.now() / 1000 + ((window.cad && cad.skew) || 0);
+  const atcOf = (d) => (d && d.atc && !(window.cad && cad.state && cad.state.atc && cad.state.atc.map === false) ? d.atc : null);
+  window.addEventListener("sizeup:playing", (e) => {
+    const m = /\/api\/audio\/([^#?]+?)\.wav/.exec((e.detail && e.detail.url) || "");
+    talk.playing = m ? decodeURIComponent(m[1]) : "";
+    for (const mp of maps) mp.draw(true);
+    animate();
+  });
+  // talking (it is speaking: pulsing), called (the tower to it: steady), selected (a chip's), or ""
+  function ringFor(d, hex) {
+    const a = atcOf(d);
+    if (a) {
+      const mine = (a.tx && a.tx[hex]) || [];
+      const p = talk.playing && mine.find((x) => x.id === talk.playing);
+      if (p) return p.role === "speaking" ? "talking" : "called";
+      const live = (a.talking || []).find((x) => x.hex === hex && x.until > nowS());
+      if (live) return live.role === "speaking" ? "talking" : "called";
+    }
+    return talk.highlight && talk.highlight.hex === hex && Date.now() < talk.highlight.until ? "selected" : "";
+  }
+  function ringsOn(d) {
+    const a = atcOf(d);
+    return !!((a && ((a.talking || []).some((x) => x.until > nowS()) || talk.playing))
+              || (talk.highlight && Date.now() < talk.highlight.until));
+  }
+
   // ---- the motion: one follower for every map (glide.js, motion.js's predictor), fed each real fix ------------------
   const glide = window.Glide && window.Motion ? Glide.follower(Motion.arc, { horizonS: HORIZON_S }) : null;
   let looks = null;                         // what each aircraft looks like this answer (look())
@@ -168,7 +205,7 @@ window.AircraftLayer = (() => {
   // a frame: each map on screen redrawn once its fastest mark has moved STEP_PX there, only while something moves on
   // a visible map
   let raf = 0;
-  const wanted = () => !!glide && anyOn() && document.visibilityState !== "hidden" && glide.busy();
+  const wanted = () => anyOn() && document.visibilityState !== "hidden" && ((!!glide && glide.busy()) || ringsOn(store.data));
   function animate() {
     if (wanted() && !raf && window.requestAnimationFrame) raf = requestAnimationFrame(frame);
   }
@@ -296,6 +333,11 @@ window.AircraftLayer = (() => {
       // shortfinal's "trails" layer: each in its colour, width and opacity by phase (renderTrails), up to the mark
       map.addLayer({ id: "ac-trail", type: "line", source: SRC, filter: lines, layout: { ...vis, "line-cap": "round", "line-join": "round" },
                      paint: { "line-color": ["get", "color"], "line-width": ["get", "width"], "line-opacity": ["get", "opacity"] } }, before);
+      // who is talking (#252): a ring round the mark, pulsing while it speaks (shortfinal's ping)
+      map.addLayer({ id: "ac-ring", type: "circle", source: SRC, filter: ["all", points, ["has", "ring"]], layout: vis,
+                     paint: { "circle-radius": ["*", ["get", "rr"], ["interpolate", ["linear"], ["zoom"], 9, 9, 12, 13, 15, 18]],
+                              "circle-color": "rgba(0,0,0,0)", "circle-stroke-color": ["get", "ringc"], "circle-stroke-width": 2.5,
+                              "circle-stroke-opacity": ["get", "ringo"] } }, before);
       map.addLayer({ id: "ac-mark", type: "symbol", source: SRC, filter: points,
                      layout: { ...vis, "icon-image": ["get", "icon"], "icon-rotate": ["get", "rot"], "icon-rotation-alignment": "map",
                                "icon-allow-overlap": true, "icon-ignore-placement": true, "symbol-sort-key": ["get", "rank"],
@@ -349,10 +391,17 @@ window.AircraftLayer = (() => {
           trails.push({ type: "Feature", geometry: { type: "LineString", coordinates: pts },
                         properties: { color: l.color, width: l.width, opacity: l.trailOpacity * fade } });
         }
-        marks.push({ type: "Feature", geometry: { type: "Point", coordinates: [mark.lon, mark.lat] },
-                     properties: { hex: a.hex, icon: `ac-${l.kind}${stale ? "-old" : ""}`, rot: mark.rot,
-                                   scale: l.scale, color: l.color, opacity: fade, cs: l.cs, detail: l.detail,
-                                   lscale: l.lscale, rank: l.rank } });
+        const ring = ringFor(d, a.hex);
+        const props = { hex: a.hex, icon: `ac-${l.kind}${stale ? "-old" : ""}`, rot: mark.rot,
+                        scale: l.scale, color: l.color, opacity: fade, cs: l.cs, lscale: l.lscale, rank: l.rank - (ring ? 20 : 0),
+                        detail: ring === "talking" ? `» TALKING\n${l.detail}` : ring === "called" ? `« TWR calling\n${l.detail}` : l.detail };
+        if (ring) {
+          const ping = ring === "talking" ? (now % PING_MS) / PING_MS : 0;
+          Object.assign(props, { ring, rr: 1 + 0.6 * ping, ringo: ring === "talking" ? 1 - 0.7 * ping : 0.9,
+                                 ringc: ring === "talking" ? token("--ok", "#3FB950") : ring === "called" ? token("--info", "#58A6FF")
+                                   : token("--text", "#E6EDF3") });
+        }
+        marks.push({ type: "Feature", geometry: { type: "Point", coordinates: [mark.lon, mark.lat] }, properties: props });
       }
       const src = this.map.getSource(SRC);
       if (src) src.setData(fc(trails.concat(marks)));
@@ -408,11 +457,33 @@ window.AircraftLayer = (() => {
       if (a.det) lines.push(`Type and registration from ${SRC_NAME[a.det] || a.det}, matched by its ICAO address`);
       if (between) lines.push(`Drawn at an estimate between reports: on from its last reported position by its track and speed (at most ${HORIZON_S} s), meeting each new report without jumping back`);
       lines.push("Arriving / departing / low is sizeup's reading of its track (shortfinal's rules), not ATC's word.");
+      lines.push(...this.heardLines(d, a));
       const what = [a.type, a.model ? `${a.model}${a.model_src === "faa" ? " (FAA registry)" : ""}` : "", a.kind].filter(Boolean);
       const foot = [d.credit ? `Data: ${d.credit}` : "", d.at ? `feed ${hms(d.at)}` : "", (d.registry && d.registry.credit) || ""].filter(Boolean).join(" · ");
       const icon = window.Icon ? Icon("aircraft") : null;
       this.control.close();
       this.control.showInfo(callsign(a), what.length ? what.join(" · ") : "Type not known", lines, foot, a.emerg ? "ac-emerg" : "", icon);
+    }
+
+    // its recent transmissions on HPN Tower (#252): ▶, the time, who said it, the words; speech-derived, never a radio ID
+    heardLines(d, a) {
+      const at = atcOf(d), tx = (at && at.tx && at.tx[a.hex]) || [];
+      if (!tx.length) return [];
+      const head = h("div", "ac-heard-head", `Heard on HPN Tower (${tx.length}): the callsign from the words, not a radio ID`);
+      return [head, ...tx.map((x) => {
+        const row = h("div", "ac-tx");
+        const b = h("button", "play mini");
+        b.type = "button";
+        b.setAttribute("aria-label", "Play");
+        if (window.Icon && Icon.play) Icon.play(b); else b.textContent = "▶";
+        const url = `/api/audio/${encodeURIComponent(x.id)}.wav`;
+        if (window.playBtn) playBtn(b, url); else b.addEventListener("click", () => window.play && play(url));
+        const who = x.role === "speaking" ? "it, speaking" : x.role === "addressed" ? `${x.talker || "TWR"} to it` : "about it";
+        row.append(b, h("span", "dim small", hms(x.at)), h("span", `ac-tx-who ${x.status}`, who),
+                   h("span", "ac-tx-text", x.text || "…"));
+        if (x.status === "probable") row.title = "Probable: one near match on ADS-B (one character off), the only one near HPN";
+        return row;
+      })];
     }
 
     // the group in the Layers box
@@ -493,5 +564,30 @@ window.AircraftLayer = (() => {
 
   if (window.MapLayers && MapLayers.addGroup) MapLayers.addGroup({ attach: (control) => new AircraftMap(control) });
 
-  return { load, maps, data: () => store.data, KEY };
+  // A Radio row's aircraft chip (#252): that aircraft on a map on screen (else the Overview's), the layer turned on,
+  // centred, ringed for HIGHLIGHT_MS, its box open. Waits FOCUS_WAIT_MS for the layer's data; gone by then: nothing.
+  const shownMap = () => [...maps].find((m) => { try { return !!m.map.getContainer().offsetParent; } catch (_) { return false; } });
+  function focus(hex) {
+    if (!hex) return;
+    talk.pending = { hex, until: Date.now() + FOCUS_WAIT_MS };
+    if (!shownMap()) { const b = document.getElementById("overview-open"); if (b) b.click(); }
+    tryFocus();
+  }
+  function tryFocus() {
+    const p = talk.pending;
+    if (!p || Date.now() > p.until) { talk.pending = null; return; }
+    const m = shownMap();
+    if (m && !m.isOn()) { m.control.setLayer(KEY, true); kick(); }
+    const a = m && store.data && (store.data.aircraft || []).find((x) => x.hex === p.hex);
+    if (!a || !m.added) { setTimeout(tryFocus, 400); return; }
+    talk.pending = null;
+    talk.highlight = { hex: a.hex, until: Date.now() + HIGHLIGHT_MS };
+    const at = (glide && glide.where(a.hex, Date.now())) || a;
+    try { m.map.easeTo({ center: [at.lon, at.lat], zoom: Math.max(m.map.getZoom(), 12), duration: 600 }); } catch (_) { /* */ }
+    m.draw(true);
+    m.show(a.hex);
+    animate();
+  }
+
+  return { load, maps, data: () => store.data, KEY, focus, ringFor: (hex) => ringFor(store.data, hex) };
 })();

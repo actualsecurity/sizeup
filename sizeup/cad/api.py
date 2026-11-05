@@ -172,6 +172,8 @@ POST /api/cad/settings/notify             {action: set {key: alerts | status, to
                                           reset {key} | server {value} | test {key}}: admins; audited without the names
 POST /api/cad/settings/datasources        {action: set, key, value: off | hourly | daily | weekly | monthly} | {action:
                                           reset, key?}: how often a data source is refreshed; admins
+POST /api/cad/settings/atc                {action: set {key: identify | map, value: true | false} | reset {key}}: who is
+                                          talking on HPN Tower (#252, sizeup/atc_talkers.py) on the rows / the map; admins
 """
 
 from __future__ import annotations

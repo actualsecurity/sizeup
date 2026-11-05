@@ -38,6 +38,9 @@ county dispatch (60 Control); it doesn't replace it.
   - Pre-alerts: the phone pre-alert from Tapout's ntfy feed (read only); airport pre-alerts from HPN ATC
     (fire or smoke seen from the air, MAYDAY, ARFF rolling, a disabled aircraft ...: data/atc/rules.json),
     accepted into a pending event or dismissed, never dispatched by themselves (#233).
+  - Who is talking on HPN Tower (#252): the callsign heard, matched to ADS-B near HPN (confirmed / probable /
+    heard), tower or aircraft, as a chip on each row like a unit ID; exchanges folded together; the aircraft
+    ringed on the map while it talks. Speech-derived, never a radio ID; off in Settings > System.
 - **CAD:**
   - Events: from 60 Control pages (ours by tones or town) or entered by hand.
   - Run cards, including full department and "any apparatus".

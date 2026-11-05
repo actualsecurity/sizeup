@@ -193,6 +193,11 @@ class Cad:
         self.comms = Comms(self.store, s.tactical, s.incident_talkgroups, clock=clock, paging=s.paging,
                            airport_tgs=s.airport_talkgroups)
         self.comms.prune()
+        # Who is talking on HPN Tower (#252, sizeup/atc_talkers.py): the callsign heard, matched to ADS-B, on each airband
+        # row ("atc"), speech-derived (never a radio ID). The app hands it the transcripts and the Aircraft layer's pictures.
+        from sizeup.atc_talkers import AtcTalkers
+        self.atc_talkers = AtcTalkers(self, s.airband, log=log, clock=clock)
+        self.comms.atc = self.atc_talkers.decorate
         # The 60 Control feed: the incident talkgroup(s) and every page on the paging channel(s) (#80).
         self.feed = Feed(self.store, lambda: self.lists, has_clip=lambda cid: self.has_clip(cid), paging=s.paging)
         # Unit statuses suggested from what is heard on our fire channels (#37): a dispatcher accepts or dismisses each.
@@ -304,6 +309,9 @@ class Cad:
                 "users_rev": self._users_rev(),
                 "feed": self.feed.state(),
                 "overview": mapview.overview(incs, self.s.tactical),
+                # Settings > System > ATC talkers (#252): the switches, for the rows' chips and the map
+                "atc": {"identify": self.atc_talkers.identify, "map": self.atc_talkers.on_map,
+                        "channels": sorted(self.atc_talkers.channels)},
             })
         st = self._state[1]
         now = self.clock()

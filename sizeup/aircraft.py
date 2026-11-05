@@ -97,7 +97,7 @@ HTTP (sizeup/web/server.py; any signed-in person, GET only):
                             time), fetched, error, stale_s, drop_s, airport, registry, receiver,
                             aircraft: [{hex, cs, flight, reg, reg_src, type, model, model_src, kind, cat, airline, lat, lon,
                             alt, gs, trk, tr, vr, sq, emerg, phase, rwy, appr, dist, eta, age, pos, band, src, trail}],
-                            counts}
+                            counts, atc: who talked on HPN Tower (#252, sizeup/atc_talkers.py map_payload) | null}
 """
 
 from __future__ import annotations
@@ -1276,6 +1276,11 @@ class AircraftLayer:
         # type, registration, operator by ICAO address from the API feeds' records, kept so that an aircraft only our
         # receiver hears (or hears first) still has them (#235): hex -> {reg, type, desc, owner_op, year, feed, at}
         self.details: dict[str, dict] = {}
+        # Who is talking on HPN Tower (#252, sizeup/atc_talkers.py), set by the app on the CAD of record: on_view(view, now)
+        # gets every new picture (the transmissions are matched against what was near HPN around them), extra() -> {...} |
+        # None goes in the answer as "atc" (the "talking" ring, each aircraft's recent transmissions)
+        self.on_view: Callable[[list[dict], float], None] | None = None
+        self.extra: Callable[[], dict | None] | None = None
 
     @classmethod
     def from_config(cls, cfg, log: Callable[[str], None] = print, devices: Callable[[], list] | None = None) -> AircraftLayer:
@@ -1484,6 +1489,11 @@ class AircraftLayer:
             self.view = view
             self.st.update(at=snap.now, fetched=done, error="", seq=self.st["seq"] + 1)
             self._fresh.notify_all()
+        if self.on_view is not None:
+            try:
+                self.on_view(view, done)
+            except Exception as e:  # noqa: BLE001 - the layer goes on
+                self.log(f"aircraft: atc talkers: {type(e).__name__}: {e}")
         self._watch(now)
 
     def _no_data(self, now: float) -> None:
@@ -1733,7 +1743,16 @@ class AircraftLayer:
                 "feeds": feeds, "credit": " + ".join(f["credit"] for f in (used or feeds) if f["credit"]),
                 "at": self.st["at"], "fetched": self.st["fetched"], "error": self.st["error"], "stale_s": STALE_S,
                 "drop_s": DROP_S, "airport": {"icao": ICAO, "lat": ARP[0], "lon": ARP[1]}, "registry": self.registry.public(),
-                "receiver": self.receiver_status(), "aircraft": view, "counts": counts}
+                "receiver": self.receiver_status(), "aircraft": view, "counts": counts, "atc": self._extra()}
+
+    def _extra(self) -> dict | None:
+        if self.extra is None:
+            return None
+        try:
+            return self.extra()
+        except Exception as e:  # noqa: BLE001
+            self.log(f"aircraft: atc talkers: {type(e).__name__}: {e}")
+            return None
 
     def handles(self, path: str) -> bool:
         return path == PATH

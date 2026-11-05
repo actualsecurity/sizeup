@@ -352,10 +352,14 @@ function fillListSelects() {
 // changes, so the playing button is found again by its URL (playBtn) and keeps its stop icon.
 const player = new Audio();
 const nowPlaying = { url: "", btn: null };
+// sizeup:playing {url}: what plays now ("" stopped): the map rings an aircraft whose transmission it is (aircraft.js, #252)
+const playing = (url) => window.dispatchEvent(new CustomEvent("sizeup:playing", { detail: { url } }));
 function stopPlay() {
   if (nowPlaying.btn) Icon.play(nowPlaying.btn, "play");
+  const was = nowPlaying.url;
   nowPlaying.url = "";
   nowPlaying.btn = null;
+  if (was) playing("");
 }
 player.addEventListener("ended", stopPlay);
 player.addEventListener("error", stopPlay);
@@ -367,6 +371,7 @@ function play(url, btn = null) {
   nowPlaying.url = url;
   nowPlaying.btn = btn;
   player.src = url;
+  playing(url);
   player.play().then(() => { if (nowPlaying.url === url && nowPlaying.btn) Icon.play(nowPlaying.btn, "stop"); })
     .catch((e) => { console.warn("audio:", e); if (nowPlaying.url === url) stopPlay(); });
 }
@@ -836,6 +841,126 @@ function noIdChip(t) {
   c.title = why;
   return c;
 }
+// ---- who is talking on HPN Tower (#252, sizeup/atc_talkers.py) ----------------------------------------------------
+// An airband row's "atc": the callsign heard (speech-derived, never a radio ID), matched to ADS-B, and who said it, as a
+// chip like a unit's: "TWR → JBU1234 · A320 ✓" (the tower to it), "JBU1234 · A320 ✓" (it speaking), "probable: ..." (one
+// near match, unique), "heard: N41DW" (not on ADS-B). The statuses wear the radio IDs' colours (confirmed, guessed,
+// heard). A row with no callsign heard has no record: nothing labelled. Settings > System > ATC talkers turns it off.
+const ATC_STATUS = { confirmed: "src-confirmed", probable: "src-guessed", heard: "src-heard" };
+const ATC_WHAT = { confirmed: "Confirmed: ADS-B has this exact callsign near HPN", probable: "Probable: one near match on ADS-B "
+  + "(one character off), the only one near HPN, its phase fits the words", heard: "Heard: the callsign as said, not matched on ADS-B" };
+const ATC_SHUT = new Set();              // exchanges this viewer folded (kept across redraws)
+const atcOn = () => !(cad.state && cad.state.atc && cad.state.atc.identify === false);
+const atcMapOn = () => atcOn() && !(cad.state && cad.state.atc && cad.state.atc.map === false);
+function atcAcText(a) {
+  const cs = a.callsign || "?";
+  if (a.status === "confirmed") return `${cs}${a.type ? ` · ${a.type}` : ""} ✓`;
+  if (a.status === "probable") return `probable: ${cs}${a.type ? ` · ${a.type}` : ""}`;
+  return `heard: ${cs}`;
+}
+function atcTitle(a, rec) {
+  return [ATC_WHAT[a.status] || "", a.why || "", a.spoken && a.spoken !== a.callsign ? `Said: ${a.spoken}` : "",
+          (rec.phrases || []).length ? `Phrases: ${rec.phrases.join(", ")}` : "",
+          rec.carrier_db !== null && rec.carrier_db !== undefined ? `Carrier ${rec.carrier_db} dB` : "",
+          "Speech-derived (the words heard), not a radio ID"].filter(Boolean).join(". ");
+}
+function atcAcChip(a, rec) {
+  const go = a.hex && (a.status === "confirmed" || a.status === "probable") && atcMapOn() && !BOARD;
+  const c = el(go ? "button" : "span", `chip atc-ac ${ATC_STATUS[a.status] || "src-heard"}`, atcAcText(a));
+  if (go) {
+    c.type = "button";
+    c.dataset.hex = a.hex;
+    c.title = `${atcTitle(a, rec)}. Click: show it on the map`;
+  } else c.title = atcTitle(a, rec);
+  return c;
+}
+function atcFacChip(f, rec) {
+  const c = el("span", `chip atc-fac ${ATC_STATUS[f.status] || "src-heard"}`, f.callsign || "TWR");
+  c.title = [f.status === "heard" ? "The controller (said: its own name)" : "The controller (from the word order and phrases)",
+             f.why || "", (rec.phrases || []).length ? `Phrases: ${rec.phrases.join(", ")}` : "",
+             "Speech-derived, not a radio ID"].filter(Boolean).join(". ");
+  return c;
+}
+function atcChip(t) {
+  const r = t.atc;
+  if (!r || !atcOn() || !r.talker) return null;          // no callsign heard: nothing labelled
+  const box = el("span", "atc-talk");
+  const tk = r.talker, ad = r.addressed;
+  const arrow = (text, title) => { const a = el("span", "atc-arrow dim", text); a.title = title; return a; };
+  if (tk.kind === "aircraft") {
+    box.append(atcAcChip(tk, r));
+    if (ad) box.append(arrow("→", "Calling"), atcFacChip(ad, r));
+  } else if (tk.kind === "unknown") {
+    box.append(arrow("↔", "A callsign heard; whether the aircraft or the controller is speaking isn't clear"), atcAcChip(r.aircraft, r));
+  } else {
+    box.append(atcFacChip(tk, r));
+    if (ad) box.append(arrow("→", "To"), atcAcChip(ad, r));
+  }
+  return box;
+}
+const atcSig = (t) => (t.atc && atcOn() ? JSON.stringify([t.atc.talker, t.atc.addressed, t.atc.exchange, atcMapOn()]) : "");
+window.atcChip = atcChip;
+window.atcSig = atcSig;
+// Exchanges (#252): consecutive transmissions about the same aircraft, one folding group each ("JBU1234 landing 34:
+// 3 TX"), where its newest is. items: what a list shows (newest first); txOf(item): its transmission (null: a note).
+// A group of one is just its row.
+function atcExchanges(items, txOf = (x) => x) {
+  const xid = (x) => { const t = txOf(x); return atcOn() && t && t.atc && t.atc.exchange ? t.atc.exchange.id : ""; };
+  const n = new Map();
+  for (const x of items) { const id = xid(x); if (id) n.set(id, (n.get(id) || 0) + 1); }
+  const out = [], at = new Map();
+  for (const x of items) {
+    const id = xid(x);
+    if (id && n.get(id) >= 2) {
+      if (!at.has(id)) { const g = { kind: "xch", id, items: [], ex: txOf(x).atc.exchange }; at.set(id, g); out.push(g); }
+      at.get(id).items.push(x);
+    } else out.push({ kind: "one", x });
+  }
+  return out;
+}
+function atcExchangeText(g) {
+  const ex = g.ex || {};
+  return `${ex.subject || "?"}${ex.activity ? ` ${ex.activity}` : ""}${ex.runway ? ` ${ex.runway}` : ""}: ${g.items.length} TX`;
+}
+// One exchange's row: its head (a fold button) over its transmissions, each drawn by opts (syncList's key / sig / fill).
+function fillExchange(li, g, opts) {
+  li._xch = { g, opts };
+  let head = li.querySelector(":scope > .xch-head"), list = li.querySelector(":scope > .xch-calls");
+  if (!head || !list) {
+    head = el("button", "xch-head");
+    head.type = "button";
+    list = el("ol", "list xch-calls radio-log");
+    li.replaceChildren(head, list);
+    head.addEventListener("click", () => {
+      const id = li._xch.g.id;
+      if (ATC_SHUT.has(id)) ATC_SHUT.delete(id); else ATC_SHUT.add(id);
+      fillExchange(li, li._xch.g, li._xch.opts);
+    });
+  }
+  const open = !ATC_SHUT.has(g.id), ex = g.ex || {};
+  li.className = `xch${open ? " open" : ""}`;
+  head.setAttribute("aria-expanded", String(open));
+  const subj = el("span", `chip xch-subj ${ATC_STATUS[ex.status] || "src-heard"}`, atcExchangeText(g));
+  subj.title = "An exchange: consecutive transmissions about the same aircraft (speech-derived). Click to fold or open";
+  const newest = opts.tx(g.items[0]), oldest = opts.tx(g.items[g.items.length - 1]);
+  head.replaceChildren(el("span", "caret", open ? "▾" : "▸"), subj,
+                       el("span", "xch-when dim small", `${fmtTime(oldest.start, true)}–${fmtTime(newest.start, true)}`));
+  show(list, open);
+  if (open) syncList(list, g.items, { key: opts.key, sig: opts.sig, make: () => el("li"), fill: opts.fill, empty: "None" });
+  else if (list.children.length) list.replaceChildren();
+}
+const exchangeSig = (g, opts) => JSON.stringify([!ATC_SHUT.has(g.id), g.ex, g.items.map(opts.key), g.items.map(opts.sig)]);
+window.atcExchanges = atcExchanges;
+window.fillExchange = fillExchange;
+window.exchangeSig = exchangeSig;
+// An aircraft chip: that aircraft on the map (aircraft.js), the layer turned on, centred, its box open
+document.addEventListener("click", (e) => {
+  const c = e.target.closest && e.target.closest(".atc-ac[data-hex]");
+  if (!c || !window.AircraftLayer || !AircraftLayer.focus) return;
+  e.preventDefault();
+  AircraftLayer.focus(c.dataset.hex);
+});
+
 // The emergency button / a mayday on a transmission (#128; sizeup/cad/comms.py with_alarms puts its alarm on the
 // row): ours (the alarm, alarm_level "alarm") a red EMERGENCY chip (MAYDAY ... for words alone) and a red row;
 // someone else's (a notice) amber "Emergency (not ours)" and an amber edge; then who acknowledged it and when, and
@@ -900,7 +1025,9 @@ function radioRow(t, ctx = {}) {
   }
   const kept = keptChip(t);
   if (kept) meta.append(kept);
-  if (!tag && t.kind !== "note" && !t.page && !t.dispatcher) meta.append(noIdChip(t));
+  const atcTag = atcChip(t);                             // an airband row: who is talking, from the words (#252)
+  if (atcTag) meta.append(atcTag);
+  else if (!tag && t.kind !== "note" && !t.page && !t.dispatcher) meta.append(noIdChip(t));
   if (t.page && t.why !== "page") {       // a page (#80): what it was, and whether it is an event or just a page
     li.classList.add(`page-${t.page}`);
     const w = el("span", "why page", "Page");
@@ -1366,18 +1493,25 @@ function renderRadio(inc) {
     bar.replaceChildren(mk("", "All"), ...all.map((c) => mk(c, c)));
     show(bar, all.length > 0);
   }
-  syncList($("#d-radio"), shownItems, {
+  const one = {
     key: (x) => x.key,
     sig: (x) => x.kind === "radio" ? JSON.stringify([x.t.text, x.t.status, x.t.rig, x.t.why, x.t.has_audio, talkSig(x.t.rig),
                                                      x.t.alt_text, x.t.rerun_at, (x.t.events || []).map((e) => [e.id, e.why]), cad.txRev,
-                                                     emSig(x.t)])
+                                                     emSig(x.t), atcSig(x.t)])
       : JSON.stringify([x.e.text, x.e.units]),
-    make: () => el("li"),
     fill: (li, x) => {
       const n = x.kind === "radio" ? radioRow(x.t, { scope: "inc", current: inc.id }) : noteRow(x.e);
       li.className = n.className;
       li.replaceChildren(...n.childNodes);
     },
+    tx: (x) => x.t,
+  };
+  // HPN Tower's exchanges (#252) fold into one row each
+  syncList($("#d-radio"), atcExchanges(shownItems, (x) => (x.kind === "radio" ? x.t : null)), {
+    key: (g) => (g.kind === "xch" ? `x:${g.id}` : one.key(g.x)),
+    sig: (g) => (g.kind === "xch" ? exchangeSig(g, one) : one.sig(g.x)),
+    make: () => el("li"),
+    fill: (li, g) => (g.kind === "xch" ? fillExchange(li, g, one) : one.fill(li, g.x)),
     empty: "None",
   });
 }

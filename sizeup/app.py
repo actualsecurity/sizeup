@@ -509,6 +509,12 @@ class App:
         from sizeup.cad.airport_alerts import AircraftPreAlerts
         self.aircraft.prealerts = AircraftPreAlerts(self.cad.airport_alerts, self.cad)
         self.aircraft.active = lambda: not self.forwarding()
+        # Who is talking on HPN Tower (#252, sizeup/atc_talkers.py): every picture kept a few minutes (a callsign heard is
+        # matched against what was near HPN around its transmission), and the map's "talking" ring; the CAD of record only.
+        talkers = self.cad.atc_talkers
+        talkers.aircraft = self._atc_aircraft
+        self.aircraft.on_view = lambda view, now: None if self.forwarding() else talkers.observe(view, now)
+        self.aircraft.extra = lambda: None if self.forwarding() else talkers.map_payload()
         if self.recorder is not None:
             self.recorder.on_line = self.live.feed_line
         # Settings > Data sources (sizeup/datasources.py, #186): every pull above with its status, Refresh now and,
@@ -704,16 +710,25 @@ class App:
     def _atc(self, t: Traffic, text: str | None = None) -> None:
         """An airband transcript (new, or new text) to the HPN ATC pre-alert watch (sizeup/atc.py, #233): on the CAD of
         record only (a station forwarding to a hub leaves it to the hub, which has the same transcript)."""
-        w = self.atc
-        if w is None or self.forwarding() or not w.handles(t.source):
+        if self.forwarding():
             return
         txt = t.text if text is None else text
         if not txt:
             return
-        try:
-            w.heard({"id": t.id, "source": t.source, "start": t.start, "end": t.end, "text": txt})
-        except Exception as e:  # the pre-alerts must never stop the monitor
-            log(f"atc: {t.id}: {type(e).__name__}: {e}")
+        w = self.atc
+        if w is not None and w.handles(t.source):
+            try:
+                w.heard({"id": t.id, "source": t.source, "start": t.start, "end": t.end, "text": txt})
+            except Exception as e:  # the pre-alerts must never stop the monitor
+                log(f"atc: {t.id}: {type(e).__name__}: {e}")
+        # ... and who is talking (#252, sizeup/atc_talkers.py: the callsign heard, matched to ADS-B; speech-derived)
+        talkers = getattr(self.cad, "atc_talkers", None)
+        if talkers is not None and talkers.handles(t.source):
+            try:
+                talkers.heard({"id": t.id, "source": t.source, "start": t.start, "end": t.end, "text": txt,
+                               "carrier_db": getattr(t, "carrier_db", None)})
+            except Exception as e:  # never stops the monitor
+                log(f"atc talkers: {t.id}: {type(e).__name__}: {e}")
 
     def _keep_source(self, cid: str, audio: np.ndarray | None) -> None:
         """The exact audio speech-to-text was given (before the listening filter), kept with the
@@ -874,6 +889,7 @@ class App:
             return
         t = Traffic(f"{ch.label.replace(' ', '')}-{int(seg.start * 1000)}", ch.label, seg.start, seg.end, "", status="pending")
         t.fm = False                                      # type: ignore[attr-defined]
+        t.carrier_db = round(float(seg.quieting_db), 1)   # type: ignore[attr-defined]  (the tower's is steady: #252)
         t.low_energy = speech_seconds(seg.audio) < MIN_SPEECH_S   # type: ignore[attr-defined]
         self._keep_clip(t.id, radio_voice(seg.audio, deemph=False), processed=True)
         self._keep_source(t.id, seg.audio)

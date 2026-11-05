@@ -522,6 +522,22 @@
   .og-snip.muted { color: var(--dim); font-style: italic; }
   .og.open .og-snip { display: none; }
   .og-calls { margin: 0 0 var(--s-2) var(--s-5); padding-inline-start: var(--s-2); border-inline-start: 2px solid var(--line); }
+  /* who is talking on HPN Tower (#252, cad.js atcChip): TWR / GND, the aircraft heard (confirmed / probable / heard wear the
+     radio IDs' src-* colours), an arrow between them; an aircraft chip is a button (the map). Exchanges fold (fillExchange). */
+  .atc-talk { display: inline-flex; align-items: baseline; gap: var(--s-1); flex-wrap: wrap; }
+  .atc-arrow { font-size: var(--fs-xs); }
+  .chip.atc-fac { letter-spacing: 0.06em; }
+  button.chip.atc-ac:hover { background: color-mix(in srgb, var(--c, #fff) 24%, transparent); }
+  .chip.atc-ac.src-heard, .chip.xch-subj.src-heard { border-style: dashed; }
+  .xch { padding: 0; }
+  .xch-head {
+    inline-size: 100%; display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s-0) var(--s-2); padding: var(--s-1);
+    text-align: start; font-weight: 400; white-space: normal; background: none; border: 0; border-radius: var(--radius);
+  }
+  .xch-head:hover { background: var(--hover); }
+  .xch-head .caret { color: var(--dim); inline-size: var(--s-3); }
+  .xch-when { margin-inline-start: auto; font-variant-numeric: tabular-nums; }
+  .xch-calls { margin: 0 0 var(--s-1) var(--s-4); padding-inline-start: var(--s-2); border-inline-start: var(--bw-mark) solid var(--line); }
 
   /* ---- unit board (right) ---------------------------------------------------------------------------- */
   .units { background: var(--panel); border-inline-start: var(--bw) solid var(--line); display: flex; flex-direction: column; }

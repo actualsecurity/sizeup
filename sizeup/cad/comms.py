@@ -94,6 +94,8 @@ class Comms:
         self.tactical, self.incident_tgs, self.paging = set(tactical), set(incident_tgs), set(paging)
         self.airport_tgs = set(airport_tgs)      # the Airport Incident talkgroup(s): an open Airport event's (#87)
         self.rev = 0            # bumped on every new or changed transmission (the /comms page polls it)
+        # The airband rows' ATC talker (sizeup/atc_talkers.py AtcTalkers.decorate, #252): set by the CAD; rows in place
+        self.atc = None
         self.names_ours = None  # text -> [our unit codes] (the feed's matcher, #115): a page not ours naming them
         self.on_text = None     # traffic id -> None: a transcript arrived or changed (status suggestions, #37)
         self._drop_channel_links()
@@ -422,6 +424,8 @@ class Comms:
         for r in shown:
             r["events"] = ev.get(r["id"], [])
         with_alarms(self.store, shown)
+        if self.atc is not None:
+            self.atc(shown)
         return out
 
     def events_of(self, tids: list[str]) -> dict[str, list[dict]]:
@@ -560,6 +564,8 @@ class Comms:
                 r["events"] = ev.get(r["id"], [])
                 _tones(r, self.paging, self.names_ours)
             with_alarms(self.store, rows)
+            if self.atc is not None:
+                self.atc(rows)
 
     def talkgroups(self) -> list[int]:
         """Every talkgroup logged, by a skip along radio_traffic_tg_start (one look-up each, not a scan)."""
