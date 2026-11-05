@@ -14,6 +14,9 @@ on:
       - "deploy/station/**"
       - "deploy/trunk-recorder/**"
       - "sizeup/cloud/autoupdate.py"
+      - "sizeup/radio/adsbd.py"
+      - "sizeup/cloud/configupdate.py"
+      - "tests/test_system_python.py"
       - ".github/workflows/station-install.yml"
       - ".github/scripts/station-update.sh"
   pull_request:
@@ -21,6 +24,9 @@ on:
       - "deploy/station/**"
       - "deploy/trunk-recorder/**"
       - "sizeup/cloud/autoupdate.py"
+      - "sizeup/radio/adsbd.py"
+      - "sizeup/cloud/configupdate.py"
+      - "tests/test_system_python.py"
       - ".github/workflows/station-install.yml"
       - ".github/scripts/station-update.sh"
   workflow_dispatch:
@@ -69,6 +75,7 @@ jobs:
           grep -q "rtl-sdr-blog: up to date" second.log
           grep -q "trunk-recorder: up to date" second.log
           grep -q "whisper.cpp: up to date" second.log
+          grep -q "readsb: up to date" second.log
           grep -q "model: ggml-small.en-q5_1.bin verified" second.log
       - name: sizeup --init-state as the sizeup user
         run: |
@@ -81,7 +88,10 @@ jobs:
         run: |
           test -x /opt/sizeup/rtl-sdr/bin/rtl_fm
           ldd /opt/sizeup/rtl-sdr/bin/rtl_fm | grep -q "librtlsdr.so.0 => /opt/sizeup/builds/rtl-sdr-blog-"
-          readlink /opt/sizeup/rtl-sdr /opt/sizeup/trunk-recorder /opt/sizeup/whisper
+          readlink /opt/sizeup/rtl-sdr /opt/sizeup/trunk-recorder /opt/sizeup/whisper /opt/sizeup/readsb
+          LD_LIBRARY_PATH=/opt/sizeup/rtl-sdr/lib /opt/sizeup/readsb/bin/readsb --version
+          ldd /opt/sizeup/readsb/bin/readsb | grep -q "librtlsdr.so.0 => /opt/sizeup/"
+          test -f /usr/local/lib/sizeup/adsbd.py && python3 -I /usr/local/lib/sizeup/adsbd.py print
           LD_LIBRARY_PATH=/opt/sizeup/rtl-sdr/lib:/opt/sizeup/trunk-recorder/lib/trunk-recorder /opt/sizeup/trunk-recorder/bin/trunk-recorder --version
           find -L /opt/sizeup/trunk-recorder -name libunit_script.so | grep -q .
           /opt/sizeup/whisper/bin/whisper-server --help > /dev/null
@@ -89,11 +99,12 @@ jobs:
           sudo cat /var/lib/sizeup/trunk-recorder/config.json
           test "$(sudo stat -c '%U:%G %a' /etc/sizeup/config.toml)" = "root:sizeup 640"
           systemd-analyze verify /etc/systemd/system/sizeup-station.service /etc/systemd/system/sizeup-health.timer \
-            /etc/systemd/system/sizeup-whisper.service /etc/systemd/system/sizeup-update.path /etc/systemd/system/sizeup-update.timer
+            /etc/systemd/system/sizeup-whisper.service /etc/systemd/system/sizeup-adsb.service \
+            /etc/systemd/system/sizeup-update.path /etc/systemd/system/sizeup-update.timer
       - name: start the station (no dongles, no secrets)
         run: |
           sudo systemctl daemon-reload
-          sudo systemctl start sizeup-whisper.service sizeup-station.service
+          sudo systemctl start sizeup-whisper.service sizeup-station.service sizeup-adsb.service
           for i in $(seq 1 60); do curl -fsS http://127.0.0.1:8091/healthz && break; sleep 2; done
           curl -fsS http://127.0.0.1:8091/healthz
           sudo /usr/local/lib/sizeup/health-check
@@ -101,12 +112,15 @@ jobs:
           sudo sizeup-station doctor || true      # no dongles and no token here: some checks fail by design
           for i in $(seq 1 60); do curl -s -o /dev/null http://127.0.0.1:8179/ && break; sleep 2; done
           curl -s -o /dev/null -w 'whisper-server: HTTP %{http_code}\n' http://127.0.0.1:8179/
+          # the ADS-B decoder with no dongle named: up, idle, nothing opened
+          for i in $(seq 1 15); do sudo test -f /run/sizeup-adsb/decoder.json && break; sleep 1; done
+          sudo grep -q '"state":"off"' /run/sizeup-adsb/decoder.json
       - name: auto-update (side by side, switch back, preflight, rollback)
         timeout-minutes: 25
         run: sudo bash .github/scripts/station-update.sh
       - if: always()
         run: |
-          sudo journalctl -u sizeup-station -u sizeup-whisper --no-pager -n 200 || true
+          sudo journalctl -u sizeup-station -u sizeup-whisper -u sizeup-adsb --no-pager -n 200 || true
           sudo journalctl -u sizeup-update --no-pager -n 300 || true
           sudo cat /var/log/sizeup-update.log /var/lib/sizeup-update/state.json || true
           sudo tail -n 100 /var/log/sizeup-install.log || true
