@@ -125,6 +125,7 @@ class Jobs:
     def __init__(self):
         self._cond = threading.Condition()
         self._jobs: OrderedDict[str, dict] = OrderedDict()
+        self.closed = False             # the hub is draining (a deploy): the long polls return now, empty
 
     def put(self, kind: str, args: dict, ttl: float) -> dict:
         job = {"id": secrets.token_hex(8), "type": kind, "args": args, "expires": time.time() + ttl,
@@ -140,9 +141,18 @@ class Jobs:
             del self._jobs[jid]
         return [x for x in self._jobs.values() if not x["taken"]]
 
+    def close(self) -> None:
+        """Draining: every long poll returns at once with nothing; nothing more is handed out (a job waiting
+        here is the next task's to give: the clicker's request fails and is tried again)."""
+        with self._cond:
+            self.closed = True
+            self._cond.notify_all()
+
     def take(self, wait: float) -> list[dict]:
         with self._cond:
-            self._cond.wait_for(lambda: bool(self._open()), timeout=wait)
+            self._cond.wait_for(lambda: self.closed or bool(self._open()), timeout=wait)
+            if self.closed:
+                return []
             out = self._open()
             for x in out:
                 x["taken"] = True
@@ -525,20 +535,9 @@ class HubApp(App):
         self._aws_was_ok: bool | None = None           # AWS could take audio at the last sweep (_aws_resend)
         state = Path(cfg.cad_db).parent if cfg.cad_db else None
         self.mdb = MonitorDb(state / "hub.sqlite" if state else ":memory:")
-        # audio.sqlite: restored in the background when the entrypoint left it to us (#251, sizeup/cloud/lateaudio.py);
-        # the CAD serves meanwhile, a clip asked for says "audio loading"
-        from sizeup.cloud import lateaudio
-        audio_path = state / "audio.sqlite" if state else ":memory:"
-        cap = int(cfg.cloud_audio_max_mb * 1024 * 1024)
-        ls_audio = lateaudio.from_env() if state else ""
-        self.audio = lateaudio.LateAudio(lambda: AudioDb(audio_path, cap), audio_path if state else "", ls_audio, log=log,
-                                         replicate=os.environ.get("SIZEUP_AUDIO_REPLICATE", "1").strip() != "0")
-        self._recovered = False
-        self.audio.on_ready.append(self._audio_ready)
-        if ls_audio:
-            self.audio.start()
-        else:
-            self.audio.open_now()
+        # audio.sqlite: under the hub's supervisor (sizeup/handoff.py) the standby follows it with cad and hub, so
+        # on a takeover it is current and opened at once; retention keeps it small (_audio_retention, #251)
+        self.audio = AudioDb(state / "audio.sqlite" if state else ":memory:", int(cfg.cloud_audio_max_mb * 1024 * 1024))
         # Nothing that could open an SDR or start a program: no dongles, no trunk-recorder or its
         # capture dir, no voice server, and no captures/ (its JSON files and WAVs live in SQLite here).
         super().__init__(replace(cfg, clips_dir="", p25_dir="", p25_recorder="", sdrs=(), sdr_auto=False,
@@ -1113,9 +1112,10 @@ class HubApp(App):
         go, but the ones on a CAD event, with an alarm or an emergency (Comms.kept_for_events), kept
         audio_keep_event_days (0 = forever); the size cap drops only clips that aren't a record. In small transactions;
         outside the off-peak hours at most 10 of them a pass (the backlog waits for the night), and the free pages are
-        handed back (incremental vacuum) only off-peak. Nothing while audio.sqlite is still being restored."""
-        if not self.audio.ready.is_set():
-            return 0
+        handed back (incremental vacuum) only off-peak. Nothing while the lease isn't ours and fresh."""
+        fence = getattr(self, "fence", None)
+        if fence is not None and not fence.ok():
+            return 0                              # not the hub's leader with a fresh lease: no writes (sizeup/fence.py)
         cfg = self.cfg
         quiet = self.offpeak(now)
         days = cfg.audio_keep_event_days
@@ -1133,24 +1133,6 @@ class HubApp(App):
                 self.hub.log(f"audio: {freed} free page(s) of audio.sqlite handed back (incremental vacuum)")
         return n
 
-    def _audio_ready(self) -> None:
-        """audio.sqlite is open (at once, or after its background restore): what waited on the clips, now."""
-        if getattr(self, "_started", False):
-            self._recover_aws_once()
-
-    def _recover_aws_once(self) -> None:
-        with self._lock:
-            if self._recovered:
-                return
-            self._recovered = True
-        try:
-            self._aws_recover()
-        except Exception as e:  # never in the way of starting
-            self.hub.log(f"hub: could not resume Amazon Transcribe work: {type(e).__name__}: {e}")
-
-    def loading(self) -> list[str]:
-        return super().loading() + ([] if self.audio.ready.is_set() else ["audio"])
-
     def _hub_janitor(self) -> None:
         while not self._stopping.wait(600):
             try:
@@ -1167,8 +1149,10 @@ class HubApp(App):
         self.start_layers()                       # the maps' data, as App starts it (road projects too: #225)
         if self.vocab is not None and self.vocab.state()["state"] == "PENDING":
             self.vocab.poll()
-        if self.audio.ready.is_set():             # else once audio.sqlite is restored (_audio_ready): it needs the clips
-            self._recover_aws_once()
+        try:
+            self._aws_recover()
+        except Exception as e:  # never in the way of starting
+            self.hub.log(f"hub: could not resume Amazon Transcribe work: {type(e).__name__}: {e}")
         return self
 
     def stop(self) -> None:
@@ -1182,4 +1166,3 @@ class HubApp(App):
             self.sync()
         except Exception:
             pass
-        self.audio.stop()                         # the audio replicator's final sync (sizeup/cloud/lateaudio.py)

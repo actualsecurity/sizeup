@@ -1,5 +1,13 @@
-# Continuous backup of the hub's cad.sqlite and hub.sqlite to S3 (deploy/hub/entrypoint.sh, docs/cloud.md).
+# Continuous backup of the hub's SQLite files to S3 (sizeup/handoff.py, docs/cloud.md).
 # No credentials here: the ECS task role. ${...} are expanded from the environment by Litestream.
+# Run by the supervisor only: `replicate` while this task holds the leader lock, `restore -f` (following the
+# replica) while it stands by. The control socket is for `litestream sync -wait` at a handoff: every last change
+# in S3, and its position, before the lock is released.
+socket:
+  enabled: true
+  path: ${LITESTREAM_SOCKET}
+logging:
+  stderr: true            # stdout carries only the -json answers the supervisor reads
 dbs:
   - path: ${SIZEUP_STATE_DIR}/cad.sqlite          # the CAD of record: events, units, dispatch log, settings, radio IDs, comms
     replica:
@@ -13,4 +21,9 @@ dbs:
       bucket: ${LITESTREAM_BUCKET}
       path: ${LITESTREAM_PATH}/hub.sqlite
       region: ${LITESTREAM_REGION}
-# audio.sqlite has its own file (litestream-audio.yml): the app restores and replicates it after the CAD serves (#251).
+  - path: ${SIZEUP_STATE_DIR}/audio.sqlite        # clips (docs/cloud.md "Audio retention") and dispatch audio
+    replica:
+      type: s3
+      bucket: ${LITESTREAM_BUCKET}
+      path: ${LITESTREAM_PATH}/audio.sqlite
+      region: ${LITESTREAM_REGION}

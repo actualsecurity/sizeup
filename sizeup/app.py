@@ -414,9 +414,13 @@ class App:
         # providers below read (or read again) their caches once it is over. The hub only (LITESTREAM_BUCKET set);
         # local only everywhere else.
         self.cache_mirror = None
+        self.fence = None                         # the hub's single-writer lease (sizeup/fence.py), under its supervisor
         if cfg.cloud_role != "station" and cfg.cad_db:
             from sizeup.cachesync import CacheMirror
-            self.cache_mirror = CacheMirror.from_env(Path(cfg.cad_db).parent, log=log)
+            from sizeup.fence import Fence
+            fence = Fence.from_env(log=log)      # the hub's single-writer lock (sizeup/handoff.py): uploads only while ours
+            self.fence = fence
+            self.cache_mirror = CacheMirror.from_env(Path(cfg.cad_db).parent, log=log, fence=fence.ok if fence else None)
         self._layers_lock = threading.Lock()
         self._layers_on = False                   # start_layers() asked for, stop_layers() not since
         self._layers_thread: threading.Thread | None = None
@@ -2745,6 +2749,15 @@ class App:
             except Exception as e:  # one provider's cache: never the others'
                 log(f"layers: {name} cache not read again ({type(e).__name__}: {e})")
 
+    def health_extra(self, fence=None) -> dict:
+        """/healthz beyond the static part (#251): "hub_role" under the hub's supervisor (the app runs only as the
+        leader: "active", "fenced" once the lease isn't ours and fresh; a standby task has no app: its supervisor's
+        control port says "standby"), that the CAD serves, and what is still loading in the background."""
+        out: dict = {"serving": True, "loading": self.loading()}
+        if fence is not None:
+            out["hub_role"] = "active" if fence.ok() else "fenced"
+        return out
+
     def loading(self) -> list[str]:
         """What is still loading in the background (/healthz, the log): never the CAD itself."""
         return [] if self.layers_ready.is_set() or not self._layers_on else ["map layers"]
@@ -2858,7 +2871,7 @@ def make_app(cfg: Config) -> App:
     return app
 
 
-def make_server(app: App) -> WebServer:
+def make_server(app: App, fence=None) -> WebServer:
     cfg = app.cfg
     server = WebServer(cfg.host, cfg.port, app.scene(), app.state, app.clip, app.close_incident, app.set_mode,
                        app.set_talkgroup, app.set_talkgroup_group, app.retranscribe, cad=CadApi(app.cad),
@@ -2867,9 +2880,7 @@ def make_server(app: App) -> WebServer:
                        role=cfg.cloud_role, roads=app.roads, gis=app.gis,
                        trains=app.trains, weather=app.weather, station_health=getattr(app, "health", None),
                        aircraft=app.aircraft, roadwork=app.roadwork, set_adsb=app.set_adsb_receiver,
-                       health_fn=lambda: {"serving": True, "loading": app.loading()},
-                       audio_ready=audio.ready.is_set if (audio := getattr(app, "audio", None)) is not None
-                       and hasattr(audio, "ready") else None)
+                       fence=fence, health_fn=lambda: app.health_extra(fence))
 
     def changed() -> None:             # a new talker is pushed at once, not on the next second
         server.poke()
@@ -2916,9 +2927,8 @@ def health_info(cfg: Config) -> dict:
 
 def init_state(cfg: Config) -> list[str]:
     """--init-state: create / migrate the databases, nothing else (#251: it used to build the whole app, the GIS
-    layers and the S3 cache restore included, ~15 s on Fargate before Litestream even started). The hub's
-    audio.sqlite is left alone when the app restores it itself in the background (SIZEUP_AUDIO_LITESTREAM,
-    deploy/hub/entrypoint.sh): made here, it would stop that restore. The names of the databases made."""
+    layers and the S3 cache restore included, ~15 s on Fargate; the hub's supervisor runs it at every takeover,
+    sizeup/handoff.py). The names of the databases."""
     made: list[str] = []
     if not cfg.cad_db:
         return made
@@ -2928,10 +2938,8 @@ def init_state(cfg: Config) -> list[str]:
         from sizeup.cloud.hubstore import AudioDb, MonitorDb
         state = Path(cfg.cad_db).parent
         MonitorDb(state / "hub.sqlite").db.close()
-        made.append(str(state / "hub.sqlite"))
-        if not os.environ.get("SIZEUP_AUDIO_LITESTREAM", "").strip():
-            AudioDb(state / "audio.sqlite").db.close()
-            made.append(str(state / "audio.sqlite"))
+        AudioDb(state / "audio.sqlite").db.close()
+        made += [str(state / "hub.sqlite"), str(state / "audio.sqlite")]
     return made
 
 
@@ -2947,14 +2955,24 @@ def main(argv: list[str] | None = None) -> int:
     except (ConfigError, FileNotFoundError) as e:
         print(f"config: {e}", file=sys.stderr)
         return 2
+    # The hub under its supervisor (sizeup/handoff.py): the lease must stay ours and fresh, or this process
+    # stops writing at once (sizeup/fence.py); SIGTERM drains: new requests get 503 + Retry-After, those in
+    # flight finish, then it exits (the supervisor then puts the last changes in S3 and hands over).
+    from sizeup.fence import Fence
+    fence = Fence.from_env(log=log)
+    if fence is not None and not args.init_state:
+        if not fence.ok():
+            log("fence: started without a fresh lease: not starting")
+            return 75
+        fence.watch()
     if args.init_state:
         init_state(cfg)
         log(f"sizeup: databases ready ({cfg.cad_db or 'in memory'})")
         return 0
     app = make_app(cfg)
     app.start()
-    server = make_server(app)
-    signal.signal(signal.SIGTERM, lambda *_: server.shutdown())
+    server = make_server(app, fence)
+    signal.signal(signal.SIGTERM, lambda *_: server.drain())
     sm = app.station
     role = (" · hub (fed by the station, no radios)" if cfg.cloud_role == "hub"
             else f" · station, forwarding to {sm.hub_url}" if sm is not None and sm.forward else "")

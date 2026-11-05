@@ -616,20 +616,13 @@ class CadApi:
                 return _json(200, self.cad.here(parse_qs(query)))
             if m := DISPATCH_WAV.fullmatch(path):
                 wav = self.cad.dispatch_audio(int(m.group(1)))
-                return (200, wav, "audio/wav") if wav else self._no_audio(b"no audio for that dispatch\n")
+                return (200, wav, "audio/wav") if wav else (404, b"no audio for that dispatch\n", "text/plain")
             if m := PREVIEW_WAV.fullmatch(path):
                 wav = self.cad.preview_audio(m.group(1))
-                return (200, wav, "audio/wav") if wav else self._no_audio(b"no such preview\n")
+                return (200, wav, "audio/wav") if wav else (404, b"no such preview\n", "text/plain")
         except CadError as e:
             return _json(400, {"error": str(e)})
         return 404, b"not found\n", "text/plain"
-
-    def _no_audio(self, why: bytes) -> tuple:
-        """No such audio, or (the hub's audio.sqlite still being restored, #251) not yet: 503 with Retry-After."""
-        ready = getattr(getattr(self.cad, "audio_blobs", None), "ready", None)
-        if ready is not None and not ready.is_set():
-            return 503, b"audio loading\n", "text/plain", {"Retry-After": "5", "Cache-Control": "no-store"}
-        return 404, why, "text/plain"
 
     def post(self, path: str, raw: bytes, who=None, client: tuple[str, str] = NO_CLIENT) -> tuple[int, bytes, str]:
         try:

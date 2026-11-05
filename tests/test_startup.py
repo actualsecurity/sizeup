@@ -1,6 +1,6 @@
-"""#251: the hub serves the CAD before its map layers and its audio are loaded; audio retention; cachesync uploads
-only what changed; /healthz. Real HTTP on ephemeral ports, fakes with delays for the slow parts; nothing reaches
-AWS (Litestream is a fake here) and no production data is touched: every database is a fresh one under tmp_path."""
+"""#251: the hub serves the CAD before its map layers are loaded; audio retention; cachesync uploads only what
+changed; /healthz (the app's and the supervisor's, #247). Real HTTP on ephemeral ports, fakes with delays for the
+slow parts; nothing reaches AWS and no production data is touched: every database is a fresh one under tmp_path."""
 
 import hashlib
 import json
@@ -18,9 +18,7 @@ import pytest
 
 from sizeup import gis as gis_mod
 from sizeup.app import init_state, make_app, make_server
-from sizeup.cloud import lateaudio
 from sizeup.cloud.hubstore import AudioDb
-from sizeup.cloud.lateaudio import LateAudio
 from tests.test_cloud import ROOT, hub_cfg
 from tests.test_gis import BY_KEY
 from tests.test_radios import Clock, _event_with, cad, tx
@@ -124,141 +122,12 @@ def test_stop_layers_while_they_load_leaves_the_providers_stopped(tmp_path, monk
         app.stop()
 
 
-def test_init_state_makes_only_the_databases_and_leaves_audio_to_the_app(tmp_path, monkeypatch):
+def test_init_state_makes_only_the_databases(tmp_path):
     cfg = hub_cfg(tmp_path)
-    monkeypatch.setenv("SIZEUP_AUDIO_LITESTREAM", "/nonexistent/litestream-audio.yml")
     made = init_state(cfg)
-    names = sorted(Path(p).name for p in made)
-    assert names == ["cad.sqlite", "hub.sqlite"]
-    assert not (Path(cfg.cad_db).parent / "audio.sqlite").exists()        # else its restore would be skipped
+    assert sorted(Path(p).name for p in made) == ["audio.sqlite", "cad.sqlite", "hub.sqlite"]
     assert not (Path(cfg.cad_db).parent / "gis").exists()                  # no app built: no layers read
-    monkeypatch.delenv("SIZEUP_AUDIO_LITESTREAM")
-    assert sorted(Path(p).name for p in init_state(cfg)) == ["audio.sqlite", "cad.sqlite", "hub.sqlite"]
-
-
-# -- audio after the CAD -----------------------------------------------------------------------------------------------
-
-
-class FakeLitestream:
-    """`litestream restore` (blocks until released; can fail first) and `litestream replicate` (a fake process)."""
-
-    def __init__(self, fail: int = 0, path: Path | None = None, restored: bytes | None = None):
-        self.calls: list[list[str]] = []
-        self.release = threading.Event()
-        self.fail, self.path = fail, path
-        self.procs: list = []
-
-    def run(self, cmd):
-        self.calls.append(cmd)
-        assert self.release.wait(10)
-        if self.fail:
-            self.fail -= 1
-            return subprocess.CompletedProcess(cmd, 1, "", "cannot fetch generations: AccessDenied")
-        return subprocess.CompletedProcess(cmd, 0, "", "")
-
-    def popen(self, cmd):
-        self.calls.append(cmd)
-        p = FakeProc()
-        self.procs.append(p)
-        return p
-
-
-class FakeProc:
-    def __init__(self):
-        self.signals: list[int] = []
-        self.code = None
-
-    def poll(self):
-        return self.code
-
-    def send_signal(self, s):
-        self.signals.append(s)
-        self.code = 0
-
-    def wait(self, timeout=None):
-        return self.code
-
-    def kill(self):
-        self.code = -9
-
-
-def late(tmp_path, ls, **kw):
-    path = tmp_path / "audio.sqlite"
-    return LateAudio(lambda: AudioDb(path), path, "/app/deploy/hub/litestream-audio.yml", run=ls.run, popen=ls.popen,
-                     log=lambda m: None, **kw)
-
-
-def test_audio_is_restored_then_replicated_and_what_came_meanwhile_is_kept(tmp_path):
-    ls = FakeLitestream()
-    a = late(tmp_path, ls).start()
-    assert until(lambda: ls.calls)
-    assert ls.calls[0][:2] == ["litestream", "restore"] and "-if-db-not-exists" in ls.calls[0] and "-if-replica-exists" in ls.calls[0]
-    assert not a.ready.is_set() and a.db is None
-    a.put("c1", b"RIFF-one", "clip", at=100.0)                    # the station's clip while audio.sqlite is restored
-    assert a.get("c1") == b"RIFF-one" and a.has("c1") and a.has("anything")   # ▶ shows; the clip route says loading
-    assert a.prune_clips(1e12) == 0 and a.bytes() == 0            # retention waits
-    assert len(ls.calls) == 1                                     # no replication before the restore is over
-    ls.release.set()
-    assert a.ready.wait(5)
-    assert [c[:2] for c in ls.calls] == [["litestream", "restore"], ["litestream", "replicate"]]
-    assert a.get("c1") == b"RIFF-one" and a.has("c1") and not a.has("nope")
-    assert AudioDb(tmp_path / "audio.sqlite").get("c1") == b"RIFF-one"     # written to the file, after the restore
-    a.stop()
-    assert ls.procs[0].signals                                    # SIGTERM: Litestream's own final sync
-
-
-def test_a_failed_audio_restore_is_retried_and_nothing_is_made_or_replicated_meanwhile(tmp_path, monkeypatch):
-    monkeypatch.setattr(lateaudio, "RETRY_S", (0.05,))
-    ls = FakeLitestream(fail=2)
-    ls.release.set()
-    a = late(tmp_path, ls).start()
-    assert a.ready.wait(5)
-    assert [c[1] for c in ls.calls] == ["restore", "restore", "restore", "replicate"]
-
-
-def test_the_standby_restores_audio_but_does_not_replicate_it(tmp_path):
-    ls = FakeLitestream()
-    ls.release.set()
-    a = late(tmp_path, ls, replicate=False).start()
-    assert a.ready.wait(5)
-    assert [c[1] for c in ls.calls] == ["restore"]
-
-
-def test_the_pending_audio_is_bounded(tmp_path, monkeypatch):
-    monkeypatch.setattr(lateaudio, "PENDING_MAX", 10)
-    a = late(tmp_path, FakeLitestream())
-    a.put("a", b"123456")
-    a.put("b", b"123456")
-    assert a.get("a") is None and a.get("b") == b"123456"
-
-
-def test_the_hub_says_audio_loading_until_audio_sqlite_is_back(tmp_path, monkeypatch):
-    ls = FakeLitestream()
-    monkeypatch.setenv("SIZEUP_AUDIO_LITESTREAM", "/app/deploy/hub/litestream-audio.yml")
-    monkeypatch.setattr(lateaudio.subprocess, "run", lambda cmd, **k: ls.run(cmd))
-    monkeypatch.setattr(lateaudio.subprocess, "Popen", lambda cmd, **k: ls.popen(cmd))
-    monkeypatch.setattr(gis_mod.Gis, "_run", lambda self: None)
-    app = make_app(hub_cfg(tmp_path, gis_layers=()))
-    server, url = serve(app)
-    try:
-        app.start()
-        assert until(lambda: ls.calls)
-        assert get(url + "/api/cad/state")[0] == 200                     # the CAD, without audio
-        code, hdr, body = get(url + "/api/audio/p-1.wav")
-        assert code == 503 and body == b"audio loading\n" and hdr.get("Retry-After") == "5"
-        assert "audio" in json.loads(get(url + "/healthz")[2])["loading"]
-        app.audio.put("p-2", b"RIFFxxxx", "clip")
-        assert get(url + "/api/audio/p-2.wav")[0] == 200                 # what came meanwhile plays
-        ls.release.set()
-        assert app.audio.ready.wait(5)
-        assert get(url + "/api/audio/p-1.wav")[0] == 404                 # ready: a clip that isn't there is a 404
-        assert get(url + "/api/audio/p-2.wav")[0] == 200
-        assert "audio" not in json.loads(get(url + "/healthz")[2])["loading"]
-    finally:
-        ls.release.set()
-        server.shutdown()
-        app.stop()
-    assert ls.procs and ls.procs[0].signals                              # the audio replicator stopped with the app
+    assert AudioDb(Path(cfg.cad_db).parent / "audio.sqlite").auto_vacuum() == 2   # a new one: incremental vacuum
 
 
 # -- audio retention ----------------------------------------------------------------------------------------------------
@@ -348,7 +217,7 @@ def test_the_hub_prunes_off_peak_in_batches_and_vacuums_only_then(tmp_path, monk
         for k in range(80):
             app.audio.put(f"old-{k}", b"x" * 5000, "clip", at=noon - 2 * 86400)
         vac = []
-        monkeypatch.setattr(app.audio.db, "incremental_vacuum", lambda **k: vac.append(k) or 0)
+        monkeypatch.setattr(app.audio, "incremental_vacuum", lambda **k: vac.append(k) or 0)
         assert app._audio_retention(noon, background=True) == 50          # by day: at most 10 batches a pass
         assert vac == []
         assert app._audio_retention(three, background=True) == 30         # at night: the rest, then the vacuum
@@ -381,14 +250,71 @@ def test_the_task_health_check_is_quick_and_keeps_its_start_window():
     assert "/healthz" in " ".join(hc["command"])
 
 
-def test_the_entrypoint_restores_cad_and_hub_first_and_leaves_audio_to_the_app():
-    sh = (ROOT / "deploy/hub/entrypoint.sh").read_text()
-    assert "for db in cad hub; do" in sh and "SIZEUP_AUDIO_LITESTREAM=/app/deploy/hub/litestream-audio.yml" in sh
-    assert sh.index("SIZEUP_AUDIO_LITESTREAM=") < sh.index("--init-state")
-    main_ls = (ROOT / "deploy/hub/litestream.yml").read_text()
-    audio_ls = (ROOT / "deploy/hub/litestream-audio.yml").read_text()
-    assert "/audio.sqlite" not in main_ls.split("# audio.sqlite has its own file")[0]
-    assert "${LITESTREAM_PATH}/audio.sqlite" in audio_ls                 # the same replica as before
+def test_every_replicated_database_is_followed_by_the_standby_and_in_the_release():
+    # #251 + #247: one litestream.yml for all three (audio included): the standby follows them all, the leader's one
+    # `litestream replicate` ships them all, and the release carries a position for each
+    from sizeup import handoff
+    ls = (ROOT / "deploy/hub/litestream.yml").read_text()
+    for db in ("cad", "hub", "audio"):
+        assert f"${{LITESTREAM_PATH}}/{db}.sqlite" in ls
+    assert set(handoff.DBS) == {"cad", "hub", "audio"}
+    assert not (ROOT / "deploy/hub/litestream-audio.yml").exists()
+
+
+class FakeFence:
+    def __init__(self, ok=True):
+        self.fresh = ok
+
+    def ok(self):
+        return self.fresh
+
+
+def test_the_app_healthz_says_active_and_loading_under_the_supervisor(tmp_path, monkeypatch):
+    monkeypatch.setattr(gis_mod.Gis, "_run", lambda self: None)
+    app = make_app(hub_cfg(tmp_path, gis_layers=()))
+    try:
+        f = FakeFence()
+        assert app.health_extra(f) == {"serving": True, "loading": [], "hub_role": "active"}
+        f.fresh = False
+        assert app.health_extra(f)["hub_role"] == "fenced"
+        assert "hub_role" not in app.health_extra(None)
+    finally:
+        app.stop()
+
+
+def test_the_supervisors_healthz_reports_role_serving_and_loading(tmp_path):
+    from tests.test_handoff import Task, World
+    b = Task(World(), "A", tmp_path)
+    st = b.sup.status()
+    assert st["role"] == "starting" and st["serving"] is False and st["loading"] == []
+
+    class App:
+        def poll(self):
+            return None
+    b.sup.role, b.sup.app = "active", App()
+    b.sup.env.app_status = lambda: {"ok": True, "serving": True, "loading": ["map layers"]}
+    st = b.sup.status()
+    assert st["ok"] and st["role"] == "active" and st["serving"] and st["loading"] == ["map layers"]   # healthy while loading
+    b.sup.env.app_status = lambda: None
+    st = b.sup.status()
+    assert not st["ok"] and not st["serving"]
+    del b.sup.env.app_status                                       # a test Env without it: the plain health check
+    b.sup.env.app_healthy = lambda: True
+    assert b.sup.status()["serving"] and b.sup.status()["ok"]
+
+
+def test_no_retention_while_the_lease_is_not_fresh(tmp_path, monkeypatch):
+    monkeypatch.setattr(gis_mod.Gis, "_run", lambda self: None)
+    app = make_app(hub_cfg(tmp_path, gis_layers=()))
+    try:
+        now = time.time()
+        app.audio.put("old", b"x" * 100, "clip", at=now - 3 * 86400)
+        app.fence = FakeFence(ok=False)
+        assert app._audio_retention(now) == 0 and app.audio.has("old")
+        app.fence.fresh = True
+        assert app._audio_retention(now) == 1 and not app.audio.has("old")
+    finally:
+        app.stop()
 
 
 # -- cachesync: only what changed -----------------------------------------------------------------------------------

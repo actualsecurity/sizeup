@@ -168,7 +168,7 @@ pages of its own ([the station page](#the-station-page)).
 | One event can't be applied | Logged and counted in the Station row; the ones behind it still apply. |
 | Station offline during a dispatch | Text-only dispatch with the reason, immediately. |
 | Station slow to render | After 20 s, text only; a late answer is discarded. |
-| Hub redeployed | Litestream restores `cad.sqlite` and `hub.sqlite` before the app starts, `audio.sqlite` right after it serves (clips say "audio loading" meanwhile). Lost: up to ~1 s of the newest writes, a tones-only page waiting for its separate voice transmission, the in-memory "talking now" and station status (back within 5 s). Received clips survive (in `audio.sqlite`: [Audio retention](#audio-retention)). The map caches (county GIS layers, camera lists, road projects, Metro-North's stations, the FAA registry) come back from their S3 copies right after the hub serves (`sizeup/cachesync.py`; each layer says "loading" until then): nothing is fetched again from its source. |
+| Hub redeployed | A hot/cold handoff ([Deploys](#deploys-the-hotcold-handoff)): the new task waits warm beside the old one, which drains, puts its last changes in S3 and hands over. The page shows "Reconnecting… (update in progress)" for roughly 10–20 s and carries on; the station retries within seconds. Nothing written is lost (every change is confirmed in S3 before the lock is released). Lost: the in-memory "talking now" and station status (back within 5 s), a tones-only page waiting for its separate voice transmission. Received clips survive (in `audio.sqlite`: [Audio retention](#audio-retention)). The new app serves the CAD at once and reads the map layers' caches (already restored by the standby) in the background: each layer says "loading" for a few seconds. A hub that crashes: the lease runs out in 35 s and a standby (if any) takes over; else ECS starts a task that restores cold (as before: minutes), losing up to ~1 s of the newest writes. |
 | Clocks differ | Transmission times are the station's clock; the hub warns in the Station row above 5 s. Keep both on NTP. |
 | Late delivery | Events that arrive after an outage are applied as they arrive: the monitor attaches traffic to whatever incident is active then; the CAD links by the transmission's own time. |
 | A station update doesn't come up | Switched back to the release that ran before within 90 s; that build isn't tried again until the hub moves on. The Station row says "update to ... failed". |
@@ -1941,26 +1941,136 @@ Nothing here runs anywhere but in the hub, on its own schedule; the tests use th
 
 ### Starting: the CAD first (#251)
 
-The hub serves the CAD as soon as `cad.sqlite` and `hub.sqlite` are there; the rest follows in the background:
+The app serves the CAD as soon as its databases are open; the rest follows in the background. Under the hub's
+supervisor ([Deploys](#deploys-the-hotcold-handoff)) the app runs only after a takeover, so everything it writes
+(cache uploads, retention, the providers' cache files) is the leader's; the standby only reads and warms.
 
-* `--init-state` (the entrypoint, before Litestream) only creates and migrates the databases; it no longer
-  builds the whole app (the GIS layers, the S3 cache restore: ~15 s on Fargate before Litestream started).
-* The map caches' restore from S3, then the county GIS layers' cache (28 layers, ~50 MB of GeoJSON, paced so
-  the requests keep going), then the providers (roads, road projects, trains, aircraft, weather, the data
-  sources' schedule, the cache mirror): `App._load_layers`. Until a layer is read the catalog says
-  `"loading": true` (the Layers box: "loading", asked again every 5 s) and the layer itself answers 503
-  `{"error":"loading"}` with `Retry-After: 5` and `Cache-Control: no-store`, never an empty layer the browser
-  would keep.
-* `audio.sqlite`: restored by the app (`sizeup/cloud/lateaudio.py`) with `deploy/hub/litestream-audio.yml`,
-  then replicated by its own `litestream replicate`, started only after the restore (no replication of a file
-  not restored yet; a failed restore is retried, never replaced by an empty file). Meanwhile a clip or dispatch
-  audio asked for answers 503 "audio loading" (`Retry-After: 5`), ▶ shows, and what the station sends is held
-  in memory (64 MB at most) and written once the file is open. On SIGTERM the app stops that Litestream first
-  (its own final sync). `SIZEUP_AUDIO_REPLICATE=0` restores without replicating (#247's standby).
-* `/healthz` answers 200 as soon as the CAD serves, with `"serving": true` and `"loading": ["map layers",
-  "audio"]` (what is still on its way; `[]` once all is in): a slow layer is never a reason to fail the task's
-  health check (every 10 s, timeout 5 s, 3 retries, start period 300 s: `deploy/aws/taskdef.json`).
-* `tools/startup_bench.py --caches DIR` times a local start with recorded caches (no network, no AWS).
+* **The standby follows all three files**, `audio.sqlite` included (the big one: it has the time), so on a takeover
+  each needs only its last few changes and the app opens audio at once. All three are in `litestream.yml`, are
+  replicated by the leader's one `litestream replicate`, and are synced and given positions on the release. A cold
+  start (no standby before it) waits for the full restore of all three before the writer starts: the single-writer
+  rule (no replication of a file not restored yet) wins over the start time there.
+* **The standby warms the map caches** (`sizeup/cachesync.py` restore: read-only toward S3, files on its own disk;
+  the manifest and `cachesync.json` tell the app's mirror their sha256, so nothing is sent back).
+* `--init-state` (run at every takeover) only creates and migrates the databases; it no longer builds the whole
+  app (the GIS layers, the S3 cache restore: ~15 s on Fargate).
+* **In the app, after it serves**: the map caches' restore (whatever the standby didn't bring), the county GIS
+  layers' cache (28 layers, ~50 MB of GeoJSON, paced so requests keep going), then the providers (roads, road
+  projects, trains, aircraft, weather, the data sources' schedule, the cache mirror): `App._load_layers`. Until a
+  layer is read the catalog says `"loading": true` (the Layers box: "loading", asked again every 5 s) and the layer
+  answers 503 `{"error":"loading"}` with `Retry-After: 5` and `Cache-Control: no-store`, never an empty layer the
+  browser would keep.
+* **Writes only with the lease**: the cache mirror uploads nothing and the audio retention deletes nothing while
+  the fence says the lease isn't ours and fresh (`sizeup/fence.py`), on top of the app being SIGKILLed then.
+* **`/healthz`**: the app's answers 200 as soon as the CAD serves, with `"serving": true`, `"loading":
+  ["map layers"]` (`[]` once all is in) and, under the supervisor, `"hub_role": "active"`. The supervisor's
+  (port 8089, the task's health check: every 10 s, timeout 5 s, 3 retries, start period 300 s) has `"role"`
+  (`standby`, `takeover`, `active`, `draining`, ...), `"serving"` and the app's `"loading"`; a standby is healthy
+  once warm, an active task once its app serves the CAD, whatever is still loading.
+* `tools/startup_bench.py --caches DIR` times a local start of the app with recorded caches (no network, no AWS).
+
+## Deploys: the hot/cold handoff
+
+GitHub #247. A deploy used to stop the hub, then start the new one (minimum healthy 0 %, maximum 100 %: two hubs
+writing the same Litestream replica would corrupt it): 2–3 minutes of Cloudflare error 1033 and the station
+buffering. Now the ECS service runs the new task beside the old one (minimum healthy 100 %, maximum 200 %), and a
+**lock** in the backups bucket makes sure only one of them ever writes.
+
+**The lock** (`sizeup/leaderlock.py`): `s3://$LITESTREAM_BUCKET/$LITESTREAM_PATH/leader.json`, changed only with
+S3 conditional writes (`If-None-Match: *` to create, `If-Match: <ETag>` to renew or release; never a delete), signed
+with the task role (`sizeup/aws.py`). It holds the holder (the ECS task ARN), a fencing **generation** (+1 on
+every take), `expires_at`, the holder's phase (`starting`, `serving`, `draining`, `released`) and, on a release,
+the replica's final position of each file. The lease is 30 s, renewed every 10 s:
+
+* the holder may write until **20 s** after its last successful renew was *sent* (its own monotonic clock);
+* anyone else may take it only **35 s** after it (`expires_at` + 5 s), or at once once released;
+* a renew answered 412 (someone else wrote the lock) means the lease is lost **now** (unless the object there is
+  our own earlier write whose answer was lost: each write carries a nonce).
+
+The task role's `backups` policy already allows `s3:GetObject` and `s3:PutObject` on the bucket's keys, which is
+all conditional writes need: **no IAM change, no new AWS resource**. (The bucket is versioned: a renew every 10 s
+is ~8,600 small versions a day, expired after 30 days by the bucket's lifecycle rule.)
+
+**The roles** (`sizeup/handoff.py`, the hub container's main process):
+
+```mermaid
+stateDiagram-v2
+    [*] --> STARTING
+    STARTING --> TAKEOVER: lock free (none yet, released, expired) - take it, generation + 1
+    STARTING --> STANDBY: lock held by another
+    STANDBY --> TAKEOVER: lock released, or expired + 5 s
+    STANDBY --> [*]: SIGTERM (lock untouched)
+    TAKEOVER --> ACTIVE: followers caught up, promoted, init-state, litestream replicate, app healthy, leader file, "serving"
+    TAKEOVER --> RELEASED: can't (bad copy, no backup, replica moved) - released, exit 1
+    ACTIVE --> DRAINING: SIGTERM (ECS - the new task is healthy)
+    ACTIVE --> RELEASED: the app exited - drained, exit 1
+    DRAINING --> RELEASED: app exited, litestream sync -wait for each file, Litestream stopped, lock released with positions
+    RELEASED --> DONE: the new leader says "serving", or 45 s - leader file removed (the old connector stops)
+    RELEASED --> ACTIVE: nobody took it in 20 s, or it was given back unused - taken back until shortly before the SIGKILL
+    ACTIVE --> FENCED: lease not renewed for 20 s, or the lock written by another
+    TAKEOVER --> FENCED
+    DRAINING --> FENCED
+    FENCED --> [*]: app and Litestream SIGKILLed, leader file removed, exit 3
+    DONE --> [*]
+```
+
+* **STANDBY** never opens a database for writing, never runs `litestream replicate`, never starts the connector
+  and never writes the lock. It runs `litestream restore -f` (follow mode) for each file into `/data/standby/`,
+  which keeps applying the leader's changes, and restores the map caches (`sizeup/cachesync.py`; a manifest tells
+  the app's own mirror not to upload them again). Its `/healthz` (port 8089, the task's health check) answers 200
+  only once every file is restored and the caches are back: ECS stops the old task only then. That can take
+  minutes (`audio.sqlite` is the big one): the health check's start period is 300 s.
+* **TAKEOVER** reads the replica's last position (`litestream restore -dry-run`); the lock is held, so nothing can
+  move it. The followers need only the last few changes: **seconds, not a restore**. A follower that doesn't get
+  there in 30 s falls back to a full restore. Refused, never promoted: a replica behind the release; no backup at
+  all although a leader ran before (an empty start would be replicated over the real data); a replica that moves
+  while this task holds the lock (another writer: e.g. a hub from before the lock).
+* **DRAINING** confirms every change is in S3 (`litestream sync -wait`: the replica's position must reach the
+  database's) before the lock is released; port 8090 then answers 503 + Retry-After itself.
+* **RELEASED**: the old connector stays up (answering 503) until the new leader says "serving" (its own connector
+  connected), at most 45 s. If nobody took the lock within 20 s, or a new task took it and gave it back without
+  writing (the replica still exactly at our release), the old task takes it back and serves until shortly before
+  ECS kills it, then drains again. A new task that wrote and then failed: the old one never resumes from its own
+  (now older) files; ECS's next task restores.
+
+**Never two writers.** A task writes only between taking the lock and releasing it, and never past 20 s after its
+last successful renew; a taker waits 35 s. The supervisor SIGKILLs the app and Litestream the moment that runs
+out, and so does the app's own watchdog from inside (`sizeup/fence.py`, from the lease file the supervisor
+rewrites at each renew); the web server refuses writes (POST: 503) while the lease isn't fresh; the cache mirror
+uploads nothing. The release happens only after the app and Litestream have exited.
+
+**What a person sees.** About **10–20 s** of a small "Reconnecting… (update in progress)" pill on the CAD page
+(estimated, not yet measured: the drain and sync take a few seconds, the new app's start and its connector a few
+more). The page keeps what it shows; its state stream is opened again (a browser gives up on a 502 / 503 / 530
+answer), it polls meanwhile, and an API call the hub answered "updating" (refused before anything was done) is sent
+again; a write that may have reached the hub is never sent twice. A page loaded during the gap gets a short
+"Reconnecting…" page that reloads itself. The station's link retries 1, 2, 4, 5, 5 … s (the hub's Retry-After
+when it gives one) for the first 3 minutes of a failure, then backs off to 30–60 s; its outbox keeps everything.
+
+**Expected per deploy:** the deploy itself takes longer (the standby restores and warms first, minutes), the
+gap users see is the handoff only.
+
+**Fail-safe.**
+
+| what | what happens |
+|---|---|
+| The new task can't restore / warm | It never reports healthy; ECS never stops the old one; the circuit breaker rolls back. |
+| The new task fails after taking the lock | It hands the lock back (released). Unused: the old task takes it back. Used: ECS's next task (or the rollback's) restores and takes over. |
+| The leader crashes or freezes | Its lease runs out: it has stopped writing 20 s after its last renew; a standby takes over at 35 s, else ECS's replacement starts cold. |
+| S3 unreachable for the leader | The same: it fences itself (exit 3) after 20 s; nobody else can write either until the lock is readable. |
+| A stale leader (split brain) | Its next renew is refused (412): it is killed at once. Its generation is behind; it can't release or renew. |
+| A cold start (no lock object yet) | Created with `If-None-Match: *` (generation 1); the replica must hold still for 3 s first. |
+
+**Rolling out** (the order matters: old code with `maximumPercent=200` would run two writers):
+1. Deploy this code with the service still at minimum 0 % / maximum 100 % (stop, then start, as before). Check
+   the log: `leader: took the lock, generation 1 (created)`, then `handoff: active: serving`.
+2. Then: `aws ecs update-service --cluster sizeup-hub --service sizeup-hub --deployment-configuration
+   'minimumHealthyPercent=100,maximumPercent=200,deploymentCircuitBreaker={enable=true,rollback=true}'`
+3. The next deploy is hot/cold.
+
+**Back to stop-then-start**: the same command with `minimumHealthyPercent=0,maximumPercent=100`. The lock-aware
+code works either way (with 0/100 the old task releases, and the new one, started after it stopped, takes the
+lock at once). Set 0/100 **before** deploying any code without the lock.
 
 ## Packaging and the Fargate task
 
@@ -1974,22 +2084,21 @@ workflow passes it); stations follow it.
 One task, desired count 1, ephemeral disk:
 
 * **hub** container (this image); its task role may call `polly:SynthesizeSpeech` (`11-polly.sh`). Entrypoint `deploy/hub/entrypoint.sh`:
-  * `LITESTREAM_BUCKET` set: `litestream restore -if-db-not-exists -if-replica-exists` for `cad.sqlite`
-    and `hub.sqlite`, `python -m sizeup --init-state` (creates them on a first start), then
-    `exec litestream replicate -exec "python -m sizeup --config ..."` with `deploy/hub/litestream.yml`
-    (`audio.sqlite`: the app, after the CAD serves, with `litestream-audio.yml`: [Starting](#starting-the-cad-first-251))
-    (bucket from `LITESTREAM_BUCKET`, prefix `LITESTREAM_PATH` default `sizeup-hub`, region
-    `LITESTREAM_REGION` default `AWS_REGION`; credentials from the **task role**, no keys).
+  * `LITESTREAM_BUCKET` set: `python -m sizeup.handoff`, the supervisor ([Deploys](#deploys-the-hotcold-handoff)):
+    the leader lock, the standby's followers, then `litestream replicate` (no `-exec`) and `python -m sizeup` as
+    its children, with `deploy/hub/litestream.yml` (bucket from `LITESTREAM_BUCKET`, prefix `LITESTREAM_PATH`
+    default `sizeup-hub`, region `LITESTREAM_REGION` default `AWS_REGION`, a control socket for `litestream sync`;
+    credentials from the **task role**, no keys). Its `/healthz` is on port 8089 (the task's health check).
   * unset: just `python -m sizeup` (local dev).
-  * Environment: `SIZEUP_STATION_TOKEN` (secret from SSM), `SIZEUP_PUBLIC_URL`, optionally
+  * Environment: `SIZEUP_STATION_TOKEN` (secret from SSM), `SIZEUP_PUBLIC_URL`, `SIZEUP_SHARED_DIR`, optionally
     `SIZEUP_PORT`, `SIZEUP_511NY_USER` and `SIZEUP_511NY_PASS` (secrets from SSM, [the highway layers](#highway-layers-cameras-incidents-signs-mileposts-the-thruway-511ny));
     the image sets `SIZEUP_STATE_DIR=/data`, `SIZEUP_CONFIG`.
-* **cloudflared** sidecar: `cloudflare/cloudflared:latest tunnel --no-autoupdate run`, `TUNNEL_TOKEN`
-  secret from SSM. awsvpc: it reaches the hub at `http://localhost:8090` (the tunnel's public
-  hostname points there). No published ports, no load balancer.
-* Deploy so the old task stops before the new one starts (minimum healthy 0 %, maximum 100 %): two
-  hubs replicating to the same S3 prefix at once would corrupt the backup, and two would also split
-  the station's events.
+* **cloudflared** container: the same image, `deploy/hub/connector.sh` (cloudflared 2026.10.7, pinned and
+  sha256-checked in the Dockerfile), `TUNNEL_TOKEN` secret from SSM. It starts cloudflared only when the hub's
+  supervisor writes `/run/sizeup-shared/leader` (a task volume both mount). awsvpc: it reaches the hub at
+  `http://localhost:8090` (the tunnel's public hostname points there). No published ports, no load balancer.
+* `stopTimeout` 120 s on both (the handoff's bound), the init process on (signals, zombies), no `dependsOn`.
+* The deploy workflow puts the new image in both containers (`.github/workflows/deploy.yml`, two render steps).
 
 `deploy/hub/compose.yaml` is a local convenience only (hub + cloudflared sharing a network
 namespace, a named volume for `/data`, no Litestream).
@@ -2013,7 +2122,10 @@ the model, the alerts, `/api/cad/health`, `/api/station/status`; `sizeup/notify.
 `tests/test_transcribe.py` (fakes: `tests/fake_transcribe.py`), `tests/test_autoupdate.py`,
 `tests/test_station_install.py`. The county GIS layers: `sizeup/gis.py` (`tests/test_gis.py`, fixtures
 `tests/fixtures/wcgis/`; only what changed: `tests/test_gis_cache.py`), `sizeup/web/static/gislayers.js` (a group in
-maplayers.js's Layers box). The map caches' S3 copies: `sizeup/cachesync.py` (`tests/test_gis_cache.py`). Metro-North's
+maplayers.js's Layers box). The map caches' S3 copies: `sizeup/cachesync.py` (`tests/test_gis_cache.py`). The hot/cold deploy (#247): `sizeup/handoff.py` (the
+supervisor), `sizeup/leaderlock.py` (the S3 lock), `sizeup/fence.py` (the app's side), `deploy/hub/connector.sh`, the
+drain in `sizeup/web/server.py` (`Gate`, `WebServer.drain`), the pill in `sizeup/web/static/live.js` (`LiveConn`), the
+station's `Backoff` in `sizeup/cloud/client.py` (`tests/test_handoff.py`, `tests/test_deploy_handoff.py`). Metro-North's
 trains: `sizeup/trains.py` (`tests/test_trains.py`, fixtures `tests/fixtures/mta/`), `sizeup/web/static/trains.js` (a group in
 the Layers box, and the event's "Trains approaching" panel). Aircraft near HPN: `sizeup/aircraft.py` (`tests/test_aircraft.py`, fixtures
 `tests/fixtures/aircraft/`), `sizeup/web/static/aircraft.js` (a group in the Layers box). Weather and water: `sizeup/weather.py` (`tests/test_weather.py`, fixtures `tests/fixtures/weather/`), `sizeup/web/static/weather.js`

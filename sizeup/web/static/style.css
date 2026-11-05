@@ -686,6 +686,13 @@
     padding: var(--s-3) var(--s-4); border-block-start: var(--bw) solid var(--line);
   }
 
+  /* ---- reconnecting: the hub out of reach for a moment (a deploy's handoff, #247; live.js) ----------
+     Small, bottom centre, never in the way: the page keeps what it shows and retries by itself. */
+  :where(.reconnect-pill) {
+    position: fixed; inset-block-end: var(--s-4); inset-inline-start: 50%; transform: translateX(-50%);
+    z-index: var(--z-toast); background: var(--panel); box-shadow: var(--elev-dialog); pointer-events: none;
+  }
+
   /* ---- toast: short feedback, bottom right (role=status) ----------------------------------------- */
   :where(.toasts) {
     position: fixed; inset-inline-end: var(--s-4); inset-block-end: var(--s-4); z-index: var(--z-toast);

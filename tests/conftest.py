@@ -189,7 +189,7 @@ def _cache_copies_stay_local(monkeypatch):
     """The map caches' S3 copies (sizeup/cachesync.py) are off in tests (no bucket from the environment), and the
     real S3 call refuses: a test hands in its own fake S3."""
     import sizeup.cachesync as cachesync
-    for k in ("LITESTREAM_BUCKET", "LITESTREAM_PATH", "LITESTREAM_REGION", "SIZEUP_CACHE_S3", "SIZEUP_AUDIO_LITESTREAM"):
+    for k in ("LITESTREAM_BUCKET", "LITESTREAM_PATH", "LITESTREAM_REGION", "SIZEUP_CACHE_S3"):
         monkeypatch.delenv(k, raising=False)
 
     def refuse(method, url, *a, **kw):

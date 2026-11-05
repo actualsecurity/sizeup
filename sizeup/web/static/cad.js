@@ -172,18 +172,38 @@ function api(method, path, body) {
   const p = apiCall(method, path, body);
   return method === "GET" ? p : UI.busy(p);
 }
+// A deploy hands the hub over in seconds (#247). Meanwhile a call is tried again quietly, with the "Reconnecting…"
+// pill (live.js LiveConn), for up to API_RETRY_MS: any call the hub answered "updating" (503, refused before
+// anything was done), and a read that didn't reach it (the network, Cloudflare's 502 / 530). A write that may
+// have reached it is never sent twice: its error is shown.
+const API_RETRY_MS = [500, 1000, 2000, 3000, 5000, 5000, 5000, 5000, 5000];
 async function apiCall(method, path, body) {
   const opts = { method, headers: {} };
   if (body !== undefined) {
     opts.headers["Content-Type"] = "application/json";
     opts.body = JSON.stringify(body);
   }
-  const r = await fetch(path, opts);
-  let data = null;
-  try { data = await r.json(); } catch (e) { /* not JSON */ }
-  if ((r.status === 401 || r.status === 403) && cad.who) loadWho(true);   // signed out, or the role changed: who now?
-  if (!r.ok) throw new Error((data && data.error) || `${r.status} ${r.statusText}`);
-  return data;
+  for (let attempt = 0; ; attempt++) {
+    let r = null, data = null;
+    try {
+      r = await fetch(path, opts);
+    } catch (e) {
+      if (method !== "GET" || attempt >= API_RETRY_MS.length) throw e;
+    }
+    if (r) {
+      try { data = await r.json(); } catch (e) { /* not JSON */ }
+      const updating = r.status === 503 && data && data.updating;
+      const unreached = method === "GET" && LiveConn.unreachable(r.status);
+      if (!(updating || unreached) || attempt >= API_RETRY_MS.length) {
+        if (attempt) LiveConn.up();
+        if ((r.status === 401 || r.status === 403) && cad.who) loadWho(true);   // signed out, or the role changed: who now?
+        if (!r.ok) throw new Error((data && data.error) || `${r.status} ${r.statusText}`);
+        return data;
+      }
+    }
+    LiveConn.down(r ? r.status : 0);
+    await new Promise((ok) => setTimeout(ok, API_RETRY_MS[attempt]));
+  }
 }
 
 function syncList(box, items, { key, sig, make, fill, empty, cols }) {
