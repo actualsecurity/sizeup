@@ -584,8 +584,11 @@ at the top) and per talkgroup, each with
 | Transcribe | speech-to-text with the Engine | kept without text ("Not transcribed") |
 | Engine | **Local**: whisper.cpp large-v3 on the station (whisper-server, `127.0.0.1:8179`). **AWS**: Amazon Transcribe streaming, called from the hub with its task role; the station skips whisper and sends the clip with `transcript_pending: "aws"`. **Both**: whisper on the station and AWS on the hub; AWS's text is the transcript, whisper's is kept (`alt_text`, `alt_model`) and shown with ⇄ in the Radio view | |
 
-Defaults (`[stt] aws_channels`): **South 2, FG1, FG2 and Fire/EMS 15 (TG 307): record, transcribe, AWS**;
-every other talkgroup as before (its Record switch, transcribe, local). Stored as CAD settings
+Defaults (`[stt] aws_channels`): **South 2, FG1, FG2, Fire/EMS 15 (TG 307) and HPN Tower (#233): record,
+transcribe, AWS**; HPN Tower (every airband channel) streams with its own vocabulary `sizeup-atc`
+(data/atc/vocabulary.json, pushed with the PCFD one) and keeps AWS past the monthly limit with the pages and
+Fire/EMS 15, because its transcripts are the airport pre-alerts, made on the hub (sizeup/atc.py: never on a station
+that forwards); every other talkgroup as before (its Record switch, transcribe, local). Stored as CAD settings
 overrides (section `channels`: only what differs from the default), audited under Radios, in the
 settings export / import. Group switches (Record: all / none per talkgroup section) work as before.
 
@@ -1686,18 +1689,30 @@ the emergency watch reads the primary feed every 15 s (`[aircraft] alarms = fals
   Priority 5 (an alarm), tags airplane + rotating_light; *Ended: ...* priority 3; *Acknowledged: ...* when a
   dispatcher acknowledges it.
 
-### The airport pre-alert (#235; the kind shared with #233's HPN ATC pre-alerts)
+### The airport pre-alert (#235, in #233's model)
 
-The same emergency also puts **an airport pre-alert in the queue** (`sizeup/cad/airportalert.py`,
-`static/airport-prealert.js`), at the top of the 60 Control column on the console and above the feed on the wall
-board, beside the alarm, not instead of it. **One item per emergency**: a flicker, the end and the same emergency
-again within 30 minutes, or a hub restart while it still squawks all bring back the same item (by its key
-`adsb:<ICAO address>:<code>`), never a second; the item names its alarm and says whether that is still open or who
-acknowledged it. It keeps #169's limits (raised only with an alarm: 6 an hour; drill mode marks it *DRILL*). While
-the emergency lasts its altitude and position are brought up to date every 15 s; when it ends, the item ends
-(*"ADS-B: squawk ended (now 1200)"*). With one open Airport event it is on that event; an Airport event made while it
-is open takes it ("matched"). A dispatcher can dismiss it (`POST /api/cad/airport-prealert/<id>/dismiss`); every
-one is in `GET /api/cad/export/airport-prealerts.csv` (90 days). What it says (Details):
+The same emergency also raises **an airport pre-alert** with source `"adsb"`, in #233's model
+(`sizeup/cad/airport_alerts.py`, `static/airport-alerts.js`): the same queue card as HPN ATC's, at the top of the
+60 Control column on the console and above the feed on the wall board, beside the alarm, not instead of it.
+`AircraftPreAlerts` (the same module) turns the watch's event into one.
+
+* **One item per emergency**, its subject `<ICAO address>:<code>`. These all bring back the same item, never a second:
+  * a flicker;
+  * the end, then the same emergency again within 30 minutes (`reopen_s`);
+  * a hub restart while it still squawks.
+* **Its alarm.** The card says whether the alarm is still open or who acknowledged it, so one event shows once.
+  It isn't pushed, because the alarm already was.
+* **#169's limits and drill mode.** It is raised only with an alarm (6 an hour; it isn't counted against ATC's
+  `max_per_hour`), and drill mode marks it *DRILL*.
+* **While it lasts and after.** Its details are updated in place every 15 s (`update()`). When the emergency ends,
+  the item ends (`end()`: *"ADS-B: squawk ended (now 1200)"*).
+* **Airport events.** With one Airport event open it is on that event, still open. An Airport event made while it is
+  open takes it too (`match()`); ATC's are left to Accept.
+* **What a dispatcher does**, as with ATC's: **Accept** makes a pending Airport event whose remarks carry the details;
+  **Dismiss** says it is nothing.
+* **Export.** Every pre-alert, ATC's and ADS-B's, is in `GET /api/cad/export/airport-alerts.csv` (90 days).
+
+What it says:
 
 | | |
 |---|---|
@@ -1711,11 +1726,17 @@ one is in `GET /api/cad/export/airport-prealerts.csv` (90 days). What it says (D
 | Source | our receiver on the station, or adsb.lol / adsb.fi (public data); where the details came from |
 | Time | the data's time (and its position's) · the ICAO address |
 
-**The shared model** (whichever of #233 / #235 lands second adapts): one table `airport_prealerts`, one state key
-`airport_prealert`, one component. A trigger calls `raise_alert(key, trigger, title, lines, at=, source=, summary=,
-data=, alarm_id=, expire_s=)` (the open or recently ended item with that key comes back up to date), `update(key,
-...)`, `end(key, why)`; `match(inc)` and `dismiss(id, body)` are the CAD's. `trigger` is `"adsb"` here, `"atc"` for
-HPN ATC; `lines` are `[label, text]` pairs shown in order.
+**What #235 added to #233's model** (all optional, off by default, so ATC's pre-alerts are as before):
+* `AirportAlert` fields:
+  * `lines`: labelled details;
+  * `alarm_id`;
+  * `drill`;
+  * `reopen_s`: the same subject, even an ended one, is the same item;
+  * `join_event`;
+  * `limit=False`: the source limits itself;
+  * `push=False`, which `raise_alert` now honours.
+* Methods: `update(source, subject, ...)`, `end(source, subject, why)`, `match(inc)` and `csv()`.
+* The card shows `lines`, the alarm's state and DRILL.
 
 | | |
 |---|---|

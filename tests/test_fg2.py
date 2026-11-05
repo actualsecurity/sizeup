@@ -67,11 +67,11 @@ def test_fg2_is_a_traffic_channel_set_up_like_fg1_everywhere(path, tmp_path, mon
     assert [x.label for x in c.channels].index("FG2") == [x.label for x in c.channels].index("FG1") + 1
     assert "FG2" in c.stt_aws_channels and "FG1" in c.stt_aws_channels          # Amazon Transcribe by default, as FG1
     if "hub" not in path:
-        assert c.sdr_auto_order == ("FG1", P25, "South 2", "FG2")
+        assert c.sdr_auto_order == ("FG1", P25, "South 2", "FG2", "HPN Tower")     # HPN ATC after it (#233)
 
 
 def test_the_default_order_puts_fg2_last_and_skips_it_without_the_channel(tmp_path):
-    assert AUTO_ORDER == ("FG1", P25, "South 2", "FG2") and Config.__dataclass_fields__["sdr_auto_order"].default == AUTO_ORDER
+    assert AUTO_ORDER == ("FG1", P25, "South 2", "FG2", "HPN Tower") and Config.__dataclass_fields__["sdr_auto_order"].default == AUTO_ORDER
     p = tmp_path / "c.toml"
     p.write_text('[radio]\ntones_file = ""\n[[radio.channels]]\nlabel = "FG1"\nmhz = 453.0375\nkind = "traffic"\n')
     assert load(p).sdr_auto_order == AUTO_ORDER                       # no auto_assign_order: the default
@@ -262,7 +262,8 @@ def old_template() -> str:
     """The station template as it was before FG2 (what /etc/sizeup/config.toml was made from)."""
     t = (STATION / "config.station.toml").read_text()
     t = re.sub(r"\n\[\[radio\.channels\]\]\nlabel = \"FG2\".*?\n\n", "\n\n", t, flags=re.S)
-    t = t.replace('auto_assign_order = ["fg1", "p25", "south2", "fg2"]', 'auto_assign_order = ["fg1", "p25", "south2"]')
+    t = re.sub(r"\n\[\[radio\.channels\]\]\nlabel = \"HPN Tower\".*?\n\n", "\n\n", t, flags=re.S)   # (#233, later still)
+    t = t.replace('auto_assign_order = ["fg1", "p25", "south2", "fg2", "hpn tower"]', 'auto_assign_order = ["fg1", "p25", "south2"]')
     assert [c["label"] for c in tomllib.loads(t)["radio"]["channels"]] == ["South 2", "FG1"] and '"fg2"' not in t
     return t
 
@@ -283,19 +284,22 @@ def test_an_installed_station_config_gains_fg2_once_and_keeps_everything_else(tm
     before = load(conf)
     assert [c.label for c in before.channels] == ["South 2", "FG1"] and before.sdr_auto_order == ("FG1", P25, "South 2")
     said = configupdate.run(conf, marks)
-    assert len(said) == 3 and said[0].startswith("fg2: FG2 (458.0375 MHz, traffic) added") and '"fg2"' in said[0]
+    assert len(said) == 4 and said[0].startswith("fg2: FG2 (458.0375 MHz, traffic) added") and '"fg2"' in said[0]
+    assert said[2].startswith("hpn-atc: HPN Tower (118.575 MHz, airband AM) added")         # #233, the update after
     assert said[1] == "tones-47: no [[tones]] entry on the unverified 349.1/311.1: nothing changed"                  # this template's tones are already the heard ones (#47)
-    assert said[2] == "adsb-receiver: already has [aircraft.receiver]: nothing added"         # (#235: the template has it)
+    assert said[3] == "adsb-receiver: already has [aircraft.receiver]: nothing added"         # (#235: the template has it)
     text, kept = conf.read_text(), conf.with_name("config.toml.before-fg2").read_text()
     assert kept == own.replace("/var/lib/sizeup/trunk-recorder/talkgroups.csv", f"{ROOT}/deploy/trunk-recorder/talkgroups.csv")
-    assert text.replace(', "fg2"]', "]") == kept + configupdate.FG2_BLOCK                         # only added to
-    assert 'auto_assign_order = ["fg1", "p25", "south2", "fg2"]' in text and oct(conf.stat().st_mode & 0o777) == "0o640"
+    assert text.replace(', "fg2", "hpn tower"]', "]") == kept + configupdate.FG2_BLOCK + configupdate.HPN_BLOCK  # only added to
+    assert 'auto_assign_order = ["fg1", "p25", "south2", "fg2", "hpn tower"]' in text and oct(conf.stat().st_mode & 0o777) == "0o640"
     after = load(conf)
     assert [(c.label, c.mhz, c.kind) for c in after.channels] == [("South 2", 470.2, "paging"),
-                                                                  ("FG1", 453.0375, "traffic"), ("FG2", 458.0375, "traffic")]
-    assert after.sdr_auto_order == ("FG1", P25, "South 2", "FG2") and after.sdr_names["spare"] == "V3 #3"
-    assert replace(after, channels=before.channels, sdr_auto_order=before.sdr_auto_order) == before   # nothing else
-    assert marks.read_text() == "fg2\ntones-47\nadsb-receiver\n"
+                                                                  ("FG1", 453.0375, "traffic"), ("FG2", 458.0375, "traffic"),
+                                                                  ("HPN Tower", 118.575, "airband")]
+    assert after.sdr_auto_order == ("FG1", P25, "South 2", "FG2", "HPN Tower") and after.sdr_names["spare"] == "V3 #3"
+    assert replace(after, channels=before.channels, sdr_auto_order=before.sdr_auto_order,
+                   stt_aws_channels=before.stt_aws_channels) == before                      # nothing else
+    assert marks.read_text() == "fg2\ntones-47\nhpn-atc\nadsb-receiver\n"
     # once: taken out by hand, it stays out at the next update
     conf.write_text(conf.with_name("config.toml.before-fg2").read_text())
     assert configupdate.run(conf, marks) == [] and [c.label for c in load(conf).channels] == ["South 2", "FG1"]
@@ -306,8 +310,9 @@ def test_the_template_and_odd_configs_are_left_alone(tmp_path, monkeypatch):
     conf = installed(tmp_path, monkeypatch, (STATION / "config.station.toml").read_text())   # a new install: has it
     same = conf.read_text()
     assert configupdate.run(conf, marks) == ["fg2: already has 'FG2' on 458.0375 MHz: nothing added", "tones-47: no [[tones]] entry on the unverified 349.1/311.1: nothing changed",
+                                             "hpn-atc: already has 'HPN Tower' on 118.575 MHz: nothing added",
                                              "adsb-receiver: already has [aircraft.receiver]: nothing added"]
-    assert conf.read_text() == same and marks.read_text() == "fg2\ntones-47\nadsb-receiver\n"
+    assert conf.read_text() == same and marks.read_text() == "fg2\ntones-47\nhpn-atc\nadsb-receiver\n"
     # no radios (a hub-like config): nothing; no auto_assign_order: the channel only (the code's order ends with it)
     assert configupdate.add_fg2('[web]\nport = 8091\n')[1] == "fg2: no [[radio.channels]] here (no radios): nothing added"
     text, said = configupdate.add_fg2('[radio]\nsdrs = "auto"\n[[radio.channels]]\nlabel = "FG1"\nmhz = 453.0375\n')
@@ -319,13 +324,14 @@ def test_the_template_and_odd_configs_are_left_alone(tmp_path, monkeypatch):
                                                                   'auto_assign_order = [\n  "fg1",\n  "p25",\n]'))
     m2 = tmp_path / "marks2"
     keep = odd.read_text()
-    said, tones, adsb = configupdate.run(odd, m2)
+    said, tones, hpn, adsb = configupdate.run(odd, m2)
     assert said.startswith("fg2: not applied:") and "by hand" in said and odd.read_text() == keep
+    assert hpn.startswith("hpn-atc: not applied:") and "by hand" in hpn                       # the same order line
     assert tones.startswith("tones-47: no [[tones]]") and adsb.startswith("adsb-receiver: already has")
-    assert m2.read_text() == "tones-47\nadsb-receiver\n"                                      # fg2 not marked
+    assert m2.read_text() == "tones-47\nadsb-receiver\n"                                      # fg2, hpn-atc not marked
     odd.write_text("[radio\n")
     out = configupdate.run(odd, m2)
-    assert len(out) == 1 and out[0].startswith("fg2: not applied:") and m2.read_text() == "tones-47\nadsb-receiver\n"
+    assert len(out) == 2 and out[0].startswith("fg2: not applied:") and m2.read_text() == "tones-47\nadsb-receiver\n"
 
 
 def test_the_installer_runs_it_with_the_system_python_at_the_switch(tmp_path, monkeypatch):
@@ -340,4 +346,4 @@ def test_the_installer_runs_it_with_the_system_python_at_the_switch(tmp_path, mo
     r = subprocess.run([sys.executable, "-I", str(ROOT / "sizeup" / "cloud" / "configupdate.py"), str(conf),
                         str(tmp_path / "etc" / "config-updates")], capture_output=True, text=True, timeout=30)
     assert r.returncode == 0 and r.stdout.startswith("fg2: FG2 (458.0375 MHz, traffic) added") and r.stderr == ""
-    assert [c.label for c in load(conf).channels] == ["South 2", "FG1", "FG2"]
+    assert [c.label for c in load(conf).channels] == ["South 2", "FG1", "FG2", "HPN Tower"]

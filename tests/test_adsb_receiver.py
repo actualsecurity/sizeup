@@ -2,7 +2,7 @@
 dongle reserved for it (never a radio, never auto-assigned; named in Settings by an admin with a confirm), the station
 forwarding what it hears to the hub (sizeup/cloud/aircraftlink.py), the hub's merge (our receiver first while it hears
 a plane, adsb.lol / adsb.fi when we lose it), the details by ICAO address, and the squawk pre-alert beside the alarm
-(sizeup/cad/airportalert.py, shared with #233).
+(#238's sizeup/cad/airport_alerts.py, source "adsb").
 
 No network, no real dongle: readsb is a fake Popen, the dongles a list, the hub in-process; the claims folder is a tmp
 dir. Aircraft data: the recorded adsb.lol / adsb.fi answers of tests/test_aircraft.py (public data), and planes made up
@@ -23,7 +23,7 @@ import pytest
 
 from sizeup import aircraft as A
 from sizeup.aircraft import AircraftLayer, Plane, Snapshot, StationFeed, combine, parse_snapshot, unwire, wire
-from sizeup.cad.airportalert import AirportPreAlerts
+from sizeup.cad.airport_alerts import AircraftPreAlerts
 from sizeup.cloud import configupdate
 from sizeup.cloud.aircraftlink import REFRESH_S, AircraftForwarder, Deltas
 from sizeup.cloud.client import HubClient, HubError
@@ -248,6 +248,12 @@ def test_an_installed_station_gets_the_receiver_section_once(tmp_path):
         "/var/lib/sizeup/trunk-recorder/talkgroups.csv", f"{ROOT}/deploy/trunk-recorder/talkgroups.csv")
     assert configupdate.run(conf, marks) == []                        # once
     assert configupdate.add_adsb(text)[0] == text                     # the template has it already
+    old_release = tmp_path / "rel" / "sizeup"
+    old_release.mkdir(parents=True)
+    (old_release / "config.py").write_text("# a release from before #235: no gain / bias keys\n")
+    with pytest.raises(configupdate.Deferred):                        # a failed switch would go back to it: wait
+        configupdate.add_adsb(old, tmp_path / "rel")
+    assert configupdate.add_adsb(old, ROOT)[0] != old                 # this release reads it
 
 
 def test_the_receiver_config(tmp_path):
@@ -639,16 +645,17 @@ def squawk(hex_="a4d227", sq="7700", lat=41.0400, lon=-73.6860, alt=900, feed="r
 
 
 class PreWatch:
-    """The aircraft watch, the CAD's alarms and its airport pre-alerts, driven by hand."""
+    """The aircraft watch, the CAD's alarms and its airport pre-alerts (#233's model, source "adsb"), driven by hand."""
 
     def __init__(self, tmp_path, drill=False):
         from tests.test_cad import make_cad
         self.cad = make_cad(tmp_path)
         if drill:
             self.cad.settings_post("alarms", {"action": "set", "key": "drill", "value": True, "operator": "Corey"})
-        self.ap = AirportPreAlerts(self.cad, log=lambda m: None)
-        self.cad.airport_prealert = self.ap
+        self.aa = self.cad.airport_alerts
+        self.aa.notifier = self.pushed = PushLog()
         self.clock = Clock(T3)
+        self.cad.clock = self.aa.clock = lambda: self.clock.t
         self.ly = self.layer()
 
     def layer(self):
@@ -656,18 +663,28 @@ class PreWatch:
                            log=lambda m: None)
         ly.on_emergency = self.cad.alarms.on_aircraft
         ly.on_clear = self.cad.alarms.aircraft_cleared
-        ly.prealerts = self.ap
+        ly.prealerts = AircraftPreAlerts(self.aa, self.cad)
         return ly
 
     def feed(self, snap, dt=5.0):
         self.clock.t += dt
-        self.cad.clock = lambda: self.clock.t
         self.ly.tracks.update(Snapshot(self.clock.t, snap.planes))
         self.ly.view = self.ly._view()
         self.ly._watch(self.clock.t)
 
-    def items(self):
-        return self.ap._rows("1 = 1", (), 100)
+    def items(self, source="adsb"):
+        return [r for r in self.aa._rows("1 = 1", (), 100) if r["source"] == source]
+
+
+class PushLog:
+    enabled = True
+
+    def __init__(self):
+        self.sent = []
+
+    def send(self, title, body, *a, **k):
+        self.sent.append(title)
+        return True
 
 
 def test_a_squawk_puts_one_prealert_in_the_queue_beside_its_alarm_with_everything_known(tmp_path):
@@ -675,9 +692,10 @@ def test_a_squawk_puts_one_prealert_in_the_queue_beside_its_alarm_with_everythin
     for _ in range(4):
         w.feed(squawk())
     (p,), (al,) = w.items(), w.cad.alarms.history()
-    assert p["status"] == "open" and p["kind"] == "airport" and p["trigger"] == "adsb" and p["alarm_id"] == al["id"]
-    assert p["title"] == "AIRCRAFT EMERGENCY · N41DW · squawk 7700 (emergency)" and p["source"] == "ADS-B: our receiver"
-    lines = dict(p["lines"])
+    d = p["data"]
+    assert p["status"] == "open" and p["source"] == "adsb" and p["kind"] == "squawk" and d["alarm_id"] == al["id"]
+    assert p["title"] == "AIRCRAFT EMERGENCY · N41DW · squawk 7700 (emergency)" and p["detail"].startswith("ADS-B: our receiver")
+    lines = dict(d["lines"])
     assert lines["Aircraft"] == "N41DW · SR22"
     assert lines["Emergency"].startswith("squawk 7700 (emergency)")
     assert lines["Altitude"] == "900 ft, descending 500 ft/min, 80 kt"
@@ -685,10 +703,21 @@ def test_a_squawk_puts_one_prealert_in_the_queue_beside_its_alarm_with_everythin
     assert lines["Phase"].startswith("arriving HPN")
     assert lines["Source"].startswith("our receiver on the station") and lines["Time"] and lines["ICAO address"] == "A4D227"
     assert "private owner" in lines["Operator"]                       # no operator known: and never a person's name
-    st = w.cad.state()["airport_prealert"]
-    assert [x["id"] for x in st["open"]] == [p["id"]] and st["kind"] == "airport"
+    assert d["aircraft"][0]["hex"] == "a4d227" and d["aircraft"][0]["alt"] == 900
+    assert w.pushed.sent == []                                         # the alarm pushed already: not twice
+    st = w.cad.state()["airport_alerts"]
+    assert [x["id"] for x in st["open"]] == [p["id"]]
     assert any(e["kind"] == "prealert" and "Airport pre-alert (ADS-B)" in e["text"]
                for e in w.cad.store.q("SELECT * FROM events WHERE kind = 'prealert'"))
+
+
+def test_its_details_are_brought_up_to_date_while_the_emergency_lasts(tmp_path):
+    w = PreWatch(tmp_path)
+    w.feed(squawk())
+    w.feed(squawk(alt=700), A.PREALERT_UPDATE_S + 1)
+    (p,) = w.items()
+    assert dict(p["data"]["lines"])["Altitude"].startswith("700 ft") and p["data"]["aircraft"][0]["alt"] == 700
+    assert p["count"] == 1                                             # updated in place, not added to
 
 
 def test_one_event_shows_once_through_a_flicker_its_end_coming_back_and_a_hub_restart(tmp_path):
@@ -700,55 +729,74 @@ def test_one_event_shows_once_through_a_flicker_its_end_coming_back_and_a_hub_re
     w.feed(squawk(sq="1200"), 30)
     w.feed(squawk(sq="1200"), A.CLEAR_HOLD_S)                         # ended, as the alarm
     (p,) = w.items()
-    assert p["status"] == "ended" and p["note"] == "ADS-B: squawk ended (now 1200)"
+    assert p["status"] == "ended" and p["note"] == "ADS-B: squawk ended (now 1200)" and not w.cad.state()["airport_alerts"]["open"]
     w.feed(squawk(), 60)                                              # again within 30 min: the same item, open again
     (p2,) = w.items()
     assert p2["id"] == p["id"] and p2["status"] == "open" and len(w.cad.alarms.history()) == 1
+    w.clock.t += 400                                                  # (past #238's 5 min de-duplication window)
     w.ly = w.layer()                                                  # the hub restarts while it still squawks
     w.feed(squawk())
     assert len(w.items()) == 1 and w.items()[0]["status"] == "open"
-    assert w.items()[0]["alarm_id"] == max(a["id"] for a in w.cad.alarms.history())   # the newest alarm
+    assert w.items()[0]["data"]["alarm_id"] == max(a["id"] for a in w.cad.alarms.history())   # the newest alarm
 
 
 def test_the_prealert_keeps_the_alarms_rate_limit_and_drill_mode(tmp_path):
     w = PreWatch(tmp_path)
+    w.aa.max_per_hour = 2                                             # ATC's limit doesn't fold aircraft into each other
     planes = tuple(squawk(hex_=f"a0000{i}", lat=41.03 + i * 0.005).planes[0] for i in range(8))
     w.feed(Snapshot(0, planes))
-    assert len(w.cad.alarms.history()) == A.MAX_ALARMS == 6 and len(w.items()) == 6
+    assert len(w.cad.alarms.history()) == A.MAX_ALARMS == 6 and len(w.items()) == 6     # #169's: 6 an hour
+    assert len({r["subject"] for r in w.items()}) == 6
     (tmp_path / "drill").mkdir()
     d = PreWatch(tmp_path / "drill", drill=True)
     d.feed(squawk(feed="adsblol"))
     (p,) = d.items()
-    assert p["drill"] and p["source"] == "ADS-B: adsb.lol"
-    assert any(e["text"].startswith("DRILL — Airport pre-alert") for e in d.cad.store.q("SELECT * FROM events WHERE kind = 'prealert'"))
+    assert p["data"]["drill"] and p["detail"].startswith("ADS-B: adsb.lol")
 
 
-def test_a_prealert_is_dismissed_by_a_dispatcher_and_an_airport_event_takes_it(tmp_path):
+def test_an_airport_event_takes_it_and_a_dispatcher_accepts_or_dismisses_it(tmp_path):
     w = PreWatch(tmp_path)
     w.feed(squawk())
     (p,) = w.items()
     inc = w.cad.create({"type": "AIRPORT", "address": "240 Airport Rd", "operator": "Lt. Ruiz"})
-    assert w.ap.get(p["id"])["status"] == "matched" and w.ap.get(p["id"])["incident_id"] == inc["id"]
+    q = w.aa.get(p["id"])
+    assert q["incident_id"] == inc["id"] and q["status"] == "open"    # on the event, still open: it ends with the squawk
     w.feed(squawk(hex_="a0bead", lat=41.03))
-    q = next(x for x in w.items() if x["key"].startswith("adsb:a0bead"))
-    assert q["incident_id"] == inc["id"] and q["status"] == "open"    # the one open Airport event: on it, still open
-    from sizeup.cad.api import AIRPORT_PREALERT, WRITES
-    assert next(role for rx, role in WRITES if rx.fullmatch(f"/api/cad/airport-prealert/{q['id']}/dismiss")) == "dispatch"
-    assert AIRPORT_PREALERT.fullmatch(f"/api/cad/airport-prealert/{q['id']}/dismiss")
-    out = w.cad.airport_prealert_dismiss(q["id"], {"operator": "Lt. Ruiz", "reason": "landed safely"})
+    r = next(x for x in w.items() if x["subject"].startswith("a0bead"))
+    assert r["incident_id"] == inc["id"]                              # raised while that one Airport event is open
+    out = w.cad.airport_alert(r["id"], "dismiss", {"operator": "Lt. Ruiz", "reason": "landed safely"})
     assert out["status"] == "dismissed" and out["operator"] == "Lt. Ruiz"
-    assert b"landed safely" in w.cad.export("airport-prealerts.csv")
+    acc = w.cad.airport_alert(p["id"], "accept", {"operator": "Lt. Ruiz"})
+    assert acc["status"] == "accepted" and acc["incident"]["status"] == "pending"
+    assert "Emergency: squawk 7700" in acc["incident"]["remarks"] and "ICAO address: A4D227" in acc["incident"]["remarks"]
+    csv = w.cad.export("airport-alerts.csv").decode("utf-8-sig")
+    assert "landed safely" in csv and "AIRCRAFT EMERGENCY" in csv and "accepted" in csv
+
+
+def test_atc_and_adsb_share_one_queue_and_atc_is_unchanged(tmp_path):
+    from sizeup.cad.airport_alerts import AirportAlert
+    w = PreWatch(tmp_path)
+    w.feed(squawk())
+    a, new = w.aa.raise_alert(AirportAlert("atc", "fire_off", "fire:16", "HPN ATC: possible brush fire off runway 16",
+                                           confidence=0.85, channel="HPN Tower",
+                                           snippets=[{"id": "x1", "at": w.clock.t, "channel": "HPN Tower", "text": "smoke"}]))
+    assert new and w.pushed.sent == ["HPN ATC: possible brush fire off runway 16"]     # ATC still pushes
+    assert set(a["data"]) == {"snippets", "aircraft", "location", "phrases", "kinds", "event", "rank"}   # none of #235's
+    inc = w.cad.create({"type": "AIRPORT", "address": "240 Airport Rd", "operator": "Lt. Ruiz"})
+    assert w.aa.get(a["id"])["incident_id"] is None and w.aa.get(a["id"])["status"] == "open"   # ATC's: left to Accept
+    assert {r["source"] for r in w.cad.state()["airport_alerts"]["open"]} == {"atc", "adsb"}
+    assert w.aa.end("atc", "fire:16", "x")["status"] == "ended" and inc
 
 
 def test_a_forwarding_station_raises_no_prealert_and_the_app_wires_it_on_the_cad_of_record():
     src = (ROOT / "sizeup" / "app.py").read_text()
-    for want in ("self.aircraft.prealerts = self.airport_alerts", "self.aircraft.active = lambda: not self.forwarding()",
-                 "self.cad.airport_prealert = self.airport_alerts"):
+    for want in ("self.aircraft.prealerts = AircraftPreAlerts(self.cad.airport_alerts, self.cad)",
+                 "self.aircraft.active = lambda: not self.forwarding()"):
         assert want in src, want
-    js = (ROOT / "sizeup" / "web" / "static" / "airport-prealert.js").read_text()
-    html = (ROOT / "sizeup" / "web" / "static" / "cad.html").read_text()
-    assert "/static/airport-prealert.js" in html and 'id="q-airport"' in html and 'id="b-airport"' in html
-    assert "/api/cad/airport-prealert/" in js and "alarmWord" in js
+    js = (ROOT / "sizeup" / "web" / "static" / "airport-alerts.js").read_text()
+    assert "alarmWord" in js and "aa-lines" in js and "DRILL" in js
+    assert not (ROOT / "sizeup" / "cad" / "airportalert.py").exists()
+    assert not (ROOT / "sizeup" / "web" / "static" / "airport-prealert.js").exists()
 
 
 def test_a_prealert_with_the_watch_off_here_is_never_raised(tmp_path):

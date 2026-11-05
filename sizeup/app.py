@@ -67,6 +67,7 @@ from sizeup.cad.api import CadApi
 from sizeup.dispatch import parse
 from sizeup.incidents import IncidentStore, Traffic
 from sizeup.radio.fm import RATE, Channel, NfmReceiver, Segment, id_burst_frames, speech_seconds, voice_floor_db
+from sizeup.radio.am import AmReceiver
 from sizeup.radio.mdc1200 import decode as mdc_decode
 from sizeup.radio import fleetsync
 from sizeup.cad.radios import fm_system
@@ -111,6 +112,7 @@ SDR_SETTLE_S = 60.0        # after startup, Off dongles wait this long for the o
 EVIDENCE_LIST = 200        # an emergency call's record (App._p25_evidence): at most this many srcList / freqList entries
 # Speech-to-text first on the station's whisper (#195): pages, Fire/EMS 15 and our firegrounds, ahead of the rest.
 STT_FIRST = ("tg:307", "FG1", "FG2")
+AIRBAND_FIRST: set[str] = set()   # ... and the airband channels (HPN ATC, #233: the pre-alerts), filled by App
 MIN_SPEECH_S = 0.15      # less sound than this above the dead-air floor (and no tones) = a mic click
 LIVE_WATCH_S = 0.2       # FG1 talking watcher: how often the squelch is looked at (the MDC ID: radio/tap.py)
 ID_EDGE_S = 1.0          # an FG1 key-up with no ID: a burst is looked for this close to either end of the carrier (#163)
@@ -122,6 +124,15 @@ CATEGORIES = {"fire": "#ff4d3d", "ems": "#4da3ff", "rescue": "#ffb020", "hazard"
 
 def log(msg: str) -> None:
     print(f"{time.strftime('%H:%M:%S')} {msg}", flush=True)
+
+
+def make_receiver(cfg: Config, c, device, on_segment) -> NfmReceiver:
+    """The receiver for one [[radio.channels]] entry: AM with the carrier squelch on an airband channel (HPN ATC, #233:
+    sizeup/radio/am.py), else NFM with the noise squelch."""
+    if c.kind == "airband":
+        return AmReceiver(cfg.rtl_fm, device, c.gain_db, Channel(c.mhz, c.label), on_segment, log, open_db=c.squelch_db)
+    return NfmReceiver(cfg.rtl_fm, device, c.gain_db, Channel(c.mhz, c.label), on_segment, log, open_db=c.squelch_db,
+                       drop_db=c.drop_db, hang_s=c.hang_s, continue_s=c.continue_s)
 
 
 class WhisperService:
@@ -278,10 +289,7 @@ class App:
                 self.tg.seed(t.talkgroup, t.end)
         self._last_tones_only: Page | None = None
         self.pagehold = PageHold(self.plan)   # paging: a page waits out its continuation window
-        self.receivers = [NfmReceiver(cfg.rtl_fm, c.device, c.gain_db, Channel(c.mhz, c.label),
-                                      self._segment, log, open_db=c.squelch_db, drop_db=c.drop_db,
-                                      hang_s=c.hang_s, continue_s=c.continue_s)
-                          for c in cfg.channels]
+        self.receivers = [make_receiver(cfg, c, c.device, self._segment) for c in cfg.channels]
         self.recorder = (TrunkRecorder(cfg.p25_recorder, cfg.p25_recorder_dir or ".", log)
                          if cfg.p25_recorder else None)
         # Switchable dongles ([radio] sdrs, by exact serial): each runs one mode at a time, picked in
@@ -380,7 +388,7 @@ class App:
         self._hub_aws = self._load_hub_aws()
         self._aws_wait: dict[str, tuple[np.ndarray, str]] = {}
         self._vocab_suggest: list[str] | None = None
-        self.aws = self.vocab = None
+        self.aws = self.vocab = self.atc_vocab = None
         if cfg.stt_aws:
             self._aws_setup()
         # The phone pre-alert from Tapout's ntfy feed (sizeup/prealert.py), read only, on the CAD of
@@ -459,6 +467,23 @@ class App:
         self.cad.alarms.notifier = self.pushes.notifier(notify.ALERTS)
         log(self.pushes.line())
         self.cad.alarms.public_url = cfg.cloud_public_url
+        # Airport pre-alerts (sizeup/cad/airport_alerts.py, #233): pushed to the alerts topic; HPN ATC's watch
+        # (sizeup/atc.py) reads every airband transcript on the CAD of record (_atc).
+        aa = self.cad.airport_alerts
+        aa.dedupe_s, aa.expire_s, aa.max_per_hour = cfg.atc_dedupe_min * 60, cfg.atc_expire_min * 60, cfg.atc_max_per_hour
+        aa.notifier, aa.public_url = self.pushes.notifier(notify.ALERTS), cfg.cloud_public_url
+        self.atc = None
+        self._atc_vocab: dict | None = None
+        airband = [c.label for c in cfg.channels if c.kind == "airband"]
+        AIRBAND_FIRST.update(airband)
+        if airband and cfg.atc_enabled:
+            from sizeup.atc import AtcWatch, Rules
+            try:
+                self.atc = AtcWatch(aa, airband, Rules.load(cfg.atc_rules or None), aircraft=self._atc_aircraft,
+                                    context=cfg.atc_context, context_s=cfg.atc_context_s, log=log)
+                log(f"atc: airport pre-alerts from {', '.join(airband)} ({len(self.atc.rules.rules)} rules)")
+            except (OSError, ValueError, KeyError) as e:
+                log(f"atc: WARNING the pre-alert rules didn't load ({type(e).__name__}: {e}): no HPN ATC pre-alerts")
         # The emergency window (alarms.Windows): the button's talkgroup and radio kept this long, Record off or on
         self.cad.alarms.windows.keep_s = cfg.p25_emergency_window_min * 60
         self.cad.alarms.on_clear = self._all_clear_sent
@@ -466,13 +491,11 @@ class App:
         # CAD of record only (a station forwarding to the hub leaves it to the hub).
         self.aircraft.on_emergency = lambda ev: None if self.forwarding() else self.cad.alarms.on_aircraft(ev)
         self.aircraft.on_clear = lambda ev, aid, why: self.cad.alarms.aircraft_cleared(ev, aid, why)
-        # ... and a pre-alert in the queue with everything known about the aircraft (#235): one item per emergency, the
-        # same kind as HPN ATC's (#233; sizeup/cad/airportalert.py). The API feeds are read for the watch only on the
-        # CAD of record: a station forwarding to the hub leaves that to the hub.
-        from sizeup.cad.airportalert import AirportPreAlerts
-        self.airport_alerts = AirportPreAlerts(self.cad, log=log)
-        self.cad.airport_prealert = self.airport_alerts
-        self.aircraft.prealerts = self.airport_alerts
+        # ... and an airport pre-alert in the queue with everything known about the aircraft (#235): HPN ATC's kind
+        # (#233, sizeup/cad/airport_alerts.py, source "adsb"), one per emergency, beside its alarm. The API feeds are
+        # read for the watch only on the CAD of record: a station forwarding to the hub leaves that to the hub.
+        from sizeup.cad.airport_alerts import AircraftPreAlerts
+        self.aircraft.prealerts = AircraftPreAlerts(self.cad.airport_alerts, self.cad)
         self.aircraft.active = lambda: not self.forwarding()
         if self.recorder is not None:
             self.recorder.on_line = self.live.feed_line
@@ -640,11 +663,45 @@ class App:
     def _prompt(self, item) -> str:
         """whisper's prompt for one recording: the configured text, plus (stt.talker_prompt) the
         talkers on this call as they're said on the air."""
+        if self._kind.get(getattr(item, "source", "")) == "airband":
+            return self._atc_prompt()
         parts = [self.cfg.stt_prompt]
         if self.cfg.stt_talker_prompt != "off":
             parts.append(talker_prompt(getattr(item, "unit", "") or "", getattr(item, "start", None),
                                        with_time=self.cfg.stt_talker_prompt == "ids+time"))
         return " ".join(p for p in parts if p)
+
+    def _atc_prompt(self) -> str:
+        """whisper's prompt on an airband channel (#233): HPN's words, then the callsigns of the aircraft nearest the field
+        as said on the air (shortfinal stt_prompt.py), from the Aircraft layer when it has a fresh picture here."""
+        from sizeup import atc
+        if self._atc_vocab is None:
+            self._atc_vocab = atc.vocabulary()
+        return atc.whisper_prompt(self._atc_vocab["prompt"], self._atc_aircraft(), atc.telephony_words())
+
+    def _atc_aircraft(self) -> list[dict]:
+        """The aircraft the Aircraft layer has near HPN now (sizeup/aircraft.py: its last picture, read every 15 s while the
+        emergency watch runs), for matching a callsign heard on ATC; none when that picture is over a minute old."""
+        layer = getattr(self, "aircraft", None)
+        fetched = layer.st.get("fetched") if layer is not None else None
+        if not fetched or time.time() - fetched > 60:
+            return []
+        with layer._lock:
+            return [dict(a) for a in layer.view]
+
+    def _atc(self, t: Traffic, text: str | None = None) -> None:
+        """An airband transcript (new, or new text) to the HPN ATC pre-alert watch (sizeup/atc.py, #233): on the CAD of
+        record only (a station forwarding to a hub leaves it to the hub, which has the same transcript)."""
+        w = self.atc
+        if w is None or self.forwarding() or not w.handles(t.source):
+            return
+        txt = t.text if text is None else text
+        if not txt:
+            return
+        try:
+            w.heard({"id": t.id, "source": t.source, "start": t.start, "end": t.end, "text": txt})
+        except Exception as e:  # the pre-alerts must never stop the monitor
+            log(f"atc: {t.id}: {type(e).__name__}: {e}")
 
     def _keep_source(self, cid: str, audio: np.ndarray | None) -> None:
         """The exact audio speech-to-text was given (before the listening filter), kept with the
@@ -755,6 +812,8 @@ class App:
     def _segment(self, ch: Channel, seg: Segment) -> None:
         if self._kind.get(ch.label) == "paging":
             return self._page_segment(ch, seg)
+        if self._kind.get(ch.label) == "airband":
+            return self._airband_segment(ch, seg)
         found = self._mdc(*seg.bursts, seg.audio)
         # An ID decoded live at key-up (radio/tap.py: a pre-ID the squelch cut off the segment) first, then
         # the segment's own (its edges, a post-ID at release): different ones are all kept, never one picked.
@@ -793,6 +852,24 @@ class App:
             if live_key:
                 t.alarm_key = live_key                           # type: ignore[attr-defined]  (the alarm raised at key-up)
             self._alarm_now(t)          # its clip now; one alarm per transmission (the key-up's, if there was one)
+        self._stt(t, seg.audio, self.stt_engine(ch.label), ch.label)
+
+    def _airband_segment(self, ch: Channel, seg: Segment) -> None:
+        """A transmission on an airband channel (HPN ATC, #233): AM (no de-emphasis), no radio IDs, kept and transcribed
+        like traffic (Settings > Radios: AWS by default). A weak carrier (sizeup/radio/am.py MIN_CARRIER_DB) is kept and
+        playable but not transcribed: speech-to-text invents words from noise (shortfinal's rule); Re-transcribe can."""
+        if not self.channel_pref(ch.label)["record"]:
+            return
+        t = Traffic(f"{ch.label.replace(' ', '')}-{int(seg.start * 1000)}", ch.label, seg.start, seg.end, "", status="pending")
+        t.fm = False                                      # type: ignore[attr-defined]
+        t.low_energy = speech_seconds(seg.audio) < MIN_SPEECH_S   # type: ignore[attr-defined]
+        self._keep_clip(t.id, radio_voice(seg.audio, deemph=False), processed=True)
+        self._keep_source(t.id, seg.audio)
+        if getattr(seg, "weak", False):
+            t.stt = ""                                    # type: ignore[attr-defined]
+            t.raw, t.confidence, t.status = "", None, "off"   # type: ignore[attr-defined]
+            t.model = f"weak signal (carrier {seg.quieting_db:.1f} dB): not transcribed"   # type: ignore[attr-defined]
+            return self._transcribed(t)
         self._stt(t, seg.audio, self.stt_engine(ch.label), ch.label)
 
     def _page_segment(self, ch: Channel, seg: Segment) -> None:
@@ -1134,6 +1211,7 @@ class App:
             self.store.on_traffic(item, attach=attach)
             self._to_cad(item)
             self._alarm(item)
+            self._atc(item)
             if item.status != "no_speech":
                 log(f"{item.source}: {'[' + item.unit + '] ' if item.unit else ''}{item.text or '(' + item.status + ')'}")
             return
@@ -1515,7 +1593,7 @@ class App:
         for t in traffic:
             if (want is None or t.id in want) and t.id not in busy and t.id not in seen:
                 first[t.id] = (channels.tg_key(t.talkgroup) if t.talkgroup is not None else t.source) in STT_FIRST
-                got = self._rerun_audio(t.id, getattr(t, "fm", True))
+                got = self._rerun_audio(t.id, getattr(t, "fm", self._kind.get(t.source) != "airband"))
                 if got:
                     low = speech_seconds(got[0]) < MIN_SPEECH_S  # same mic-click rule as the live pass
                     jobs.append((t.start, Rerun(t.id, "traffic", got[1], low, t.unit, t.start, as_alt=as_alt), got[0]))
@@ -1621,6 +1699,7 @@ class App:
                   if x.id == cid), None)
         if t is not None and text:
             self._alarm(t, text)                       # the words came later (Amazon Transcribe, a re-run)
+            self._atc(t, text)
         if changed:
             log(f"{why} {cid}: {text or '(no speech)'}")
         self._emit("retext", {"id": cid, "text": text, "status": status, "confidence": confidence, "model": model,
@@ -1677,7 +1756,7 @@ class App:
     @staticmethod
     def _stt_priority(item, key: str) -> int:
         """Pages, Fire/EMS 15 and the firegrounds ahead of other live traffic on the whisper queue."""
-        return URGENT if not isinstance(item, (Traffic, Rerun)) or key in STT_FIRST else LIVE
+        return URGENT if not isinstance(item, (Traffic, Rerun)) or key in STT_FIRST or key in AIRBAND_FIRST else LIVE
 
     def _stt_dropped(self, item, why: str) -> None:
         """The whisper queue dropped or skipped it (sizeup/stt.py SttQueue, #195): it says so ("Transcription
@@ -1707,15 +1786,36 @@ class App:
         self.aws_usage = Usage(store.meta_get, store.meta_put)
         self.vocab = Vocabulary(reg, store.meta_get, store.meta_put, cfg.stt_aws_vocabulary, cfg.stt_aws_api_endpoint,
                                 log=log, on_ready=self._vocab_ready)
+        # HPN ATC (#233): the airband channels keep AWS past the monthly limit (with the pages and Fire/EMS 15), and
+        # stream with their own vocabulary (sizeup-atc: data/atc/vocabulary.json), pushed with the PCFD one
+        from sizeup.transcribe import RESERVE_CHANNELS
+        airband = tuple(c.label for c in cfg.channels if c.kind == "airband")
+        self.atc_vocab = None
+        if airband:
+            from sizeup.atc import VOCABULARY as ATC_VOCABULARY
+            self.atc_vocab = Vocabulary(reg, store.meta_get, store.meta_put, ATC_VOCABULARY, cfg.stt_aws_api_endpoint,
+                                        log=log, on_ready=self._atc_vocab_ready, key="aws_vocabulary_atc")
         self.aws = AwsTranscriber(AwsSettings(region=reg, endpoint=cfg.stt_aws_endpoint, api_endpoint=cfg.stt_aws_api_endpoint,
-                                              idle_s=cfg.stt_aws_idle_s, pace=cfg.stt_aws_pace, vocabulary=cfg.stt_aws_vocabulary),
+                                              idle_s=cfg.stt_aws_idle_s, pace=cfg.stt_aws_pace, vocabulary=cfg.stt_aws_vocabulary,
+                                              reserve_channels=tuple(dict.fromkeys((*RESERVE_CHANNELS, *airband)))),
                                   self.aws_usage, self._aws_done, self._aws_failed, log=log,
                                   limit_usd=self.cad.settings.aws_limit,
                                   respell=lambda t: respell(t, self.vocab.state()["respell"]),
                                   on_late=self._aws_late, on_change=self._aws_changed)
         if self.vocab.ready():
             self.aws.vocabulary = cfg.stt_aws_vocabulary
+        if self.atc_vocab is not None and self.atc_vocab.ready():
+            self._atc_vocab_ready(self.atc_vocab.name)
         log(f"speech-to-text: Amazon Transcribe streaming ({reg}) for the channels set to AWS in Settings > Radios")
+
+    def _atc_vocab_ready(self, name: str) -> None:
+        """The HPN ATC vocabulary is READY: the airband channels' next streams use it (the rest keep sizeup-pcfd)."""
+        if self.aws is None:
+            return
+        for c in self.cfg.channels:
+            if c.kind == "airband" and self.aws.channel_vocabulary.get(c.label) != name:
+                self.aws.channel_vocabulary[c.label] = name
+                log(f"aws transcribe: custom vocabulary {name} in use on {c.label} from its next stream")
 
     def _vocab_ready(self, name: str) -> None:
         if self.aws is not None and self.aws.vocabulary != name:
@@ -1845,13 +1945,21 @@ class App:
     def vocabulary_push(self, phrases: list[str]) -> dict:
         if self.vocab is None:
             return {"state": "error", "reason": "Amazon Transcribe isn't set up here: push the vocabulary on the hub"}
-        return self.vocab.push(phrases)
+        st = self.vocab.push(phrases)
+        if getattr(self, "atc_vocab", None) is not None:       # HPN ATC's own (#233), from data/atc/vocabulary.json
+            from sizeup import atc
+            st = dict(st, atc=self.atc_vocab.push(atc.vocabulary()["phrases"]))
+        return st
 
     def vocabulary_state(self) -> dict:
         if self.vocab is None:
             return {"name": self.cfg.stt_aws_vocabulary, "state": "none", "reason": "", "phrases": 0, "sig": ""}
         st = self.vocab.state()
         st.pop("respell", None)
+        if getattr(self, "atc_vocab", None) is not None:
+            a = self.atc_vocab.state()
+            a.pop("respell", None)
+            st["atc"] = a
         return st
 
     def aws_status(self) -> dict:
@@ -2243,9 +2351,7 @@ class App:
 
     def _fresh_receiver(self, old: NfmReceiver, serial: str) -> NfmReceiver:
         c = next(c for c in self.cfg.channels if c.label == old.channel.label)
-        r = NfmReceiver(self.cfg.rtl_fm, self._dongle(serial), c.gain_db, Channel(c.mhz, c.label),
-                        self._segment, log, open_db=c.squelch_db, drop_db=c.drop_db,
-                        hang_s=c.hang_s, continue_s=c.continue_s)
+        r = make_receiver(self.cfg, c, self._dongle(serial), self._segment)
         self.tap.attach(r)
         self.receivers[self.receivers.index(old)] = r
         return r
@@ -2473,6 +2579,8 @@ class App:
             self.p25.start()
         if self.vocab is not None and self.vocab.state()["state"] == "PENDING":
             self.vocab.poll()
+        if getattr(self, "atc_vocab", None) is not None and self.atc_vocab.state()["state"] == "PENDING":
+            self.atc_vocab.poll()
         if self.station is not None:
             self.station.start()
         elif self.link is not None:
@@ -2612,7 +2720,7 @@ def make_server(app: App) -> WebServer:
     if app.prealert is not None:
         app.prealert.on_change = server.poke             # so is the phone ringing
     app.cad.alarms.on_change = server.poke               # and an emergency alarm (#128)
-    app.airport_alerts.on_change = server.poke           # and an airport pre-alert (#235)
+    app.cad.airport_alerts.on_change = server.poke       # and an airport pre-alert (#233)
     return server
 
 

@@ -21,10 +21,20 @@ at the switch to a release that has it (deploy/station/install-linux.sh activate
              install's) are left as they are. Rye Brook is added only with that replacement, and not
              when an entry is already on 767.4/928.1 or called Rye Brook FD.
 
+    hpn-atc  HPN ATC (GitHub #233): Westchester Tower 118.575 MHz AM as an airband channel ("HPN Tower"), appended
+             after the config's channels, and "hpn tower" at the end of [radio] auto_assign_order when that list is
+             there, so only a 5th free dongle takes it by itself (pick it by hand for the airband dongle). Skipped: no
+             [[radio.channels]], or a channel already called HPN Tower, on 118.575, or of kind "airband".
+             Rollback-safe: a release from before #233 refuses kind = "airband" (and an order naming a channel it
+             doesn't have), so a switch back to it would leave the station down. So it is only applied when the
+             release being left (--leaving, the one a failed switch goes back to) reads airband channels; else it
+             waits ("deferred", not marked) for the next update, whose release to go back to is this one.
     adsb-receiver  the [aircraft.receiver] table for our own ADS-B receiver (GitHub #235): sdr = "" (no dongle
              named: nothing runs), gain = "auto", bias_tee = false, with the comments that say what each does, so
              naming the dongle (here or in Settings > Radios) and choosing bias-tee for its LNA is one line each.
-             Skipped: a config that already has an [aircraft.receiver] (or aircraft.receiver keys).
+             Skipped: a config that already has an [aircraft.receiver] (or aircraft.receiver keys). Rollback-safe like
+             hpn-atc: a release from before #235 refuses gain / bias_tee, so it waits ("deferred") until the
+             release being left reads them.
 
 Done ones are listed in a marks file (/etc/sizeup/config-updates, one name per line), so one taken out
 by hand stays out. The config is only ever added to (tones-47 also changes the two values of the one
@@ -34,7 +44,7 @@ entry it names): the text is kept as it is, the result must parse
 
 Run by the system python3 (stdlib only, like autoupdate.py), from the release being switched to:
 
-    python3 -I configupdate.py /etc/sizeup/config.toml /etc/sizeup/config-updates
+    python3 -I configupdate.py /etc/sizeup/config.toml /etc/sizeup/config-updates [--leaving /opt/sizeup/releases/<sha>]
 
 One line per change or skip on stdout; exit 0 unless something couldn't be read or written.
 """
@@ -92,6 +102,81 @@ def add_fg2(text: str) -> tuple[str, str]:
     new += FG2_BLOCK
     _check(new, order)
     return new, "fg2: " + "; ".join(did)
+
+
+HPN_MHZ = 118.575
+HPN_BLOCK = """
+# Added by the update to HPN ATC (GitHub #233): Westchester County Airport tower, 118.575 MHz AM (FAA Chart
+# Supplement via airnav.com/airport/KHPN). Its transcripts feed the airport pre-alerts. Pick it for the airband
+# dongle on the station page (Radios) or the hub's; only a 5th free dongle takes it by itself.
+[[radio.channels]]
+label = "HPN Tower"
+mhz = 118.575
+kind = "airband"
+device = "hpn-twr"
+gain_db = 36.4
+squelch_db = 3.5
+"""
+
+
+class Deferred(Exception):
+    """Not now (not marked): tried again at the next update."""
+
+
+def reads_airband(release: Path | None) -> bool:
+    """Whether the code of that release accepts kind = "airband" (None: no release to go back to)."""
+    if release is None:
+        return True
+    try:
+        return '"airband"' in (release / "sizeup" / "config.py").read_text(errors="replace")
+    except OSError:
+        return False
+
+
+def add_hpn_atc(text: str, leaving: Path | None = None) -> tuple[str, str]:
+    """(new text, what was done): the HPN Tower airband channel and "hpn tower" last in auto_assign_order. Deferred
+    while the release being left can't read it; ValueError when the config doesn't parse or it can't be done safely."""
+    data = tomllib.loads(text)
+    radio = data.get("radio") if isinstance(data.get("radio"), dict) else {}
+    chans = radio.get("channels") if isinstance(radio.get("channels"), list) else []
+    if not chans:
+        return text, "hpn-atc: no [[radio.channels]] here (no radios): nothing added"
+    for c in chans:
+        if isinstance(c, dict) and (_key(c.get("label", "")) == "hpntower" or _mhz(c.get("mhz")) == HPN_MHZ
+                                    or c.get("kind") == "airband"):
+            return text, f"hpn-atc: already has {c.get('label')!r} on {c.get('mhz')} MHz: nothing added"
+    if not reads_airband(leaving):
+        raise Deferred(f"the release this switch would go back to ({leaving.name}) can't read an airband channel: "
+                       "HPN Tower is added at the next update")
+    order = radio.get("auto_assign_order")
+    new = text if text.endswith("\n") else text + "\n"
+    did = ["HPN Tower (118.575 MHz, airband AM) added after the channels"]
+    if isinstance(order, list) and order and "hpntower" not in {_key(x) for x in order}:
+        found = list(ORDER_LINE.finditer(new))
+        if len(found) != 1:
+            raise ValueError('[radio] auto_assign_order is not on one line: add "hpn tower" to it by hand')
+        m = found[0]
+        items = m.group("items").rstrip()
+        sep = "" if items.rstrip().endswith(",") else ","
+        new = new[:m.start("items")] + f'{items}{sep} "hpn tower"' + new[m.end("items"):]
+        did.append('"hpn tower" at the end of auto_assign_order')
+    new += HPN_BLOCK
+    try:
+        d = tomllib.loads(new)
+    except tomllib.TOMLDecodeError as e:
+        raise ValueError(f"the result wouldn't parse ({e}): nothing changed") from None
+    r = d.get("radio") or {}
+    last = (r.get("channels") or [{}])[-1]
+    if (last.get("label"), last.get("mhz"), last.get("kind")) != ("HPN Tower", HPN_MHZ, "airband"):
+        raise ValueError("the result doesn't end with the HPN Tower channel: nothing changed")
+    if isinstance(order, list) and order:
+        got = r.get("auto_assign_order")
+        want = [*(_key(x) for x in order), *([] if "hpntower" in {_key(x) for x in order} else ["hpntower"])]
+        if not isinstance(got, list) or [_key(x) for x in got] != want:
+            raise ValueError("auto_assign_order came out wrong: nothing changed")
+    if {k: v for k, v in d.items() if k != "radio"} != {k: v for k, v in data.items() if k != "radio"}:
+        raise ValueError("the result doesn't say what was meant: nothing changed")
+    return new, "hpn-atc: " + "; ".join(did)
 
 
 def _mhz(v) -> float | None:
@@ -224,13 +309,27 @@ bias_tee = false                   # true ONLY for an LNA powered up the coax (4
 ADSB_WANT = {"sdr": "", "gain": "auto", "bias_tee": False}
 
 
-def add_adsb(text: str) -> tuple[str, str]:
+def reads_bias_tee(release: Path | None) -> bool:
+    """Whether the code of that release accepts [aircraft.receiver] gain / bias_tee (None: no release to go back to)."""
+    if release is None:
+        return True
+    try:
+        return '"bias_tee"' in (release / "sizeup" / "config.py").read_text(errors="replace")
+    except OSError:
+        return False
+
+
+def add_adsb(text: str, leaving: Path | None = None) -> tuple[str, str]:
     """(new text, what was done): an [aircraft.receiver] table with nothing named, at the end. The text unchanged when
-    the config has one already. ValueError when the config doesn't parse or the result wouldn't say what was meant."""
+    the config has one already. ValueError when the config doesn't parse or the result wouldn't say what was meant;
+    Deferred while the release a failed switch would go back to can't read it."""
     data = tomllib.loads(text)
     ac = data.get("aircraft")
     if isinstance(ac, dict) and "receiver" in ac:
         return text, "adsb-receiver: already has [aircraft.receiver]: nothing added"
+    if not reads_bias_tee(leaving):
+        raise Deferred(f"the release this switch would go back to ({leaving.name}) can't read [aircraft.receiver] "
+                       "gain / bias_tee: added at the next update")
     new = (text if text.endswith("\n") else text + "\n") + ADSB_BLOCK
     try:
         got = tomllib.loads(new)
@@ -244,11 +343,13 @@ def add_adsb(text: str) -> tuple[str, str]:
     return new, 'adsb-receiver: [aircraft.receiver] added (sdr = "": no ADS-B dongle named yet; bias_tee = false)'
 
 
-UPDATES = (("fg2", add_fg2), ("tones-47", fix_tones), ("adsb-receiver", add_adsb))
+UPDATES = (("fg2", add_fg2), ("tones-47", fix_tones), ("hpn-atc", add_hpn_atc), ("adsb-receiver", add_adsb))
+NEEDS_LEAVING = {"hpn-atc", "adsb-receiver"}   # given the release being left (rollback safety)
 
 
-def run(conf: Path, marks: Path) -> list[str]:
-    """Every update not in marks, applied to conf in turn. Lines to say."""
+def run(conf: Path, marks: Path, leaving: Path | None = None) -> list[str]:
+    """Every update not in marks, applied to conf in turn. Lines to say. leaving: the release the switch leaves
+    (a failed switch goes back to it), for the updates an older release couldn't read."""
     done = set(marks.read_text().split()) if marks.exists() else set()
     todo = [(n, f) for n, f in UPDATES if n not in done]
     if not todo:
@@ -257,7 +358,10 @@ def run(conf: Path, marks: Path) -> list[str]:
     out = []
     for name, fn in todo:
         try:
-            new, said = fn(text)
+            new, said = fn(text, leaving) if name in NEEDS_LEAVING else fn(text)
+        except Deferred as e:
+            out.append(f"{name}: deferred: {e}")
+            continue                                  # not marked: tried again at the next update
         except (ValueError, tomllib.TOMLDecodeError) as e:
             out.append(f"{name}: not applied: {e}")
             continue                                  # not marked: tried again at the next update
@@ -282,15 +386,19 @@ def run(conf: Path, marks: Path) -> list[str]:
 
 
 def main(argv: list[str]) -> int:
+    leaving = None
+    if len(argv) == 4 and argv[2] == "--leaving":
+        leaving = Path(argv[3]) if argv[3] else None
+        argv = argv[:2]
     if len(argv) != 2:
-        print("usage: configupdate.py CONFIG MARKS", file=sys.stderr)
+        print("usage: configupdate.py CONFIG MARKS [--leaving RELEASE_DIR]", file=sys.stderr)
         return 2
     conf, marks = Path(argv[0]), Path(argv[1])
     if not conf.is_file():
         print(f"no {conf}: nothing to update")
         return 0
     try:
-        for line in run(conf, marks):
+        for line in run(conf, marks, leaving):
             print(line)
     except OSError as e:
         print(f"couldn't update {conf}: {e}", file=sys.stderr)

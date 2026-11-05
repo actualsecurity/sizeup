@@ -74,6 +74,7 @@ class Settings:
     tactical: tuple[str, ...] = ("FG1",)          # analog fireground channels: their traffic goes on the active events
     incident_talkgroups: tuple[int, ...] = (307, 333)   # P25: where 60 Control answers our units
     airport_talkgroups: tuple[int, ...] = (333,)        # P25 Airport Incident: an open Airport event's (#87)
+    airband: tuple[str, ...] = ()                  # HPN ATC channels (#233): never Main in Radio (busy, not ours)
     radio_seed: str = ""                           # "" = data/radio_ids.json
 
 
@@ -224,9 +225,10 @@ class Cad:
         # The phone pre-alert from Tapout (sizeup/prealert.py PreAlerts), set by the app on the CAD of
         # record (hub, all-in-one) when [prealert] is on; None: no pre-alerts here.
         self.prealert = None
-        # Airport pre-alerts (sizeup/cad/airportalert.py, #235 / #233): an emergency squawk near HPN, HPN ATC; set by
-        # the app. None: none here.
-        self.airport_prealert = None
+        # Airport pre-alerts (sizeup/cad/airport_alerts.py, #233): HPN ATC's rule hits (sizeup/atc.py), and any other
+        # source that hands one in (#235: our ADS-B receiver). Shown with the phone pre-alerts; accept makes a pending event.
+        from sizeup.cad.airport_alerts import AirportAlerts
+        self.airport_alerts = AirportAlerts(self, log=log)
         # The place search (sizeup/geo/places.py, #67): the app sets place_source, a function that builds the
         # PlaceIndex over its gazetteer (once, on first use); None: no gazetteer, no place suggestions.
         self.place_source: Callable[[], object] | None = None
@@ -269,6 +271,7 @@ class Cad:
                             transmit=cfg.dispatch_transmit, channels=tuple(cfg.dispatch_channels),
                             tactical=tuple(c.label for c in cfg.channels if c.kind == "traffic") or ("FG1",),
                             paging=tuple(c.label for c in cfg.channels if c.kind == "paging") or ("South 2",),
+                            airband=tuple(c.label for c in cfg.channels if c.kind == "airband"),
                             incident_talkgroups=tuple(sorted(cfg.p25_incident_talkgroups))),
                    geocoder=geocoder, log=log)
 
@@ -310,7 +313,7 @@ class Cad:
         return dict(st, units=units, map=self.map_slice(units, st["incidents"], pos, now), time=now, rev=rev,
                     comms_rev=f"{self.comms.rev}.{rev}",
                     talking=self.live(), paging=self.paging(), cloud=self.cloud(), prealert=self.prealert_state(now),
-                    airport_prealert=self.airport_prealert_state(now),
+                    airport_alerts=self.airport_alerts_state(now),
                     status_hints=self.status_hints(), alarms=self.alarms_state(now), radio_ids=self.radio_ids(now))
 
     def radio_ids(self, now: float | None = None) -> list[dict]:
@@ -384,26 +387,23 @@ class Cad:
                 self.prealert.match(inc)
             except Exception as e:  # noqa: BLE001 - the event stands whatever the pre-alert does
                 self.log(f"CAD: pre-alert match: {type(e).__name__}: {e}")
-        if self.airport_prealert is not None:
-            try:
-                self.airport_prealert.match(inc)
-            except Exception as e:  # noqa: BLE001
-                self.log(f"CAD: airport pre-alert match: {type(e).__name__}: {e}")
-
-    def airport_prealert_state(self, now: float | None = None) -> dict | None:
-        """The airport pre-alerts (an emergency squawk, HPN ATC: sizeup/cad/airportalert.py); a fault never breaks the console."""
-        if self.airport_prealert is None:
-            return None
         try:
-            return self.airport_prealert.state(now)
+            self.airport_alerts.match(inc)          # an aircraft emergency's pre-alert joins an Airport event (#235)
         except Exception as e:  # noqa: BLE001
-            self.log(f"CAD: airport pre-alert: {type(e).__name__}: {e}")
+            self.log(f"CAD: airport pre-alert match: {type(e).__name__}: {e}")
+
+    def airport_alerts_state(self, now: float | None = None) -> dict | None:
+        """The airport pre-alerts (#233; a fault never breaks the console)."""
+        try:
+            return self.airport_alerts.state(now)
+        except Exception as e:  # noqa: BLE001
+            self.log(f"CAD: airport pre-alerts: {type(e).__name__}: {e}")
             return None
 
-    def airport_prealert_dismiss(self, pid: int, body: dict) -> dict:
-        if self.airport_prealert is None:
-            raise CadError("no airport pre-alerts here (this is a station: the hub has them)")
-        return self.airport_prealert.dismiss(pid, body)
+    def airport_alert(self, pid: int, action: str, body: dict) -> dict:
+        """POST /api/cad/airport-alert/<id>/accept | dismiss {operator, reason?}: accept makes a PENDING event (never
+        a dispatch); dismiss says it is nothing."""
+        return self.airport_alerts.accept(pid, body) if action == "accept" else self.airport_alerts.dismiss(pid, body)
 
     def prealert_dismiss(self, pid: int, body: dict) -> dict:
         if self.prealert is None:
@@ -675,8 +675,8 @@ class Cad:
     def export(self, name: str) -> bytes | None:
         if name == "prealerts.csv":
             return self.prealert.csv() if self.prealert is not None else None
-        if name == "airport-prealerts.csv":
-            return self.airport_prealert.csv() if self.airport_prealert is not None else None
+        if name == "airport-alerts.csv":
+            return self.airport_alerts.csv()
         if name == "status-hints.csv":
             return self.hints.csv()
         return export.export(self.store, name)
@@ -1184,7 +1184,8 @@ class Cad:
                                 emergency=one("emergency") in ("1", "true", "on"))
         for r in rows:
             r["has_audio"] = r["kind"] == "radio" and self.has_clip(r["id"])
-            r["main"] = r["talkgroup"] is None or bool(self.main_tg(r["talkgroup"]))
+            r["main"] = (r["talkgroup"] is None and r.get("channel") not in self.s.airband) or \
+                (r["talkgroup"] is not None and bool(self.main_tg(r["talkgroup"])))
         return {"rows": rows, "rev": f"{self.comms.rev}.{self.store.rev}", "pcfd": pcfd, "talking": talking, **self.comms.facets(),
                 "events": [{"id": r["id"], "number": r["number"], "type": r["type"], "address": r["address"]}
                            for r in self.store.q("SELECT DISTINCT i.id, i.number, i.type, i.address FROM radio_links l "

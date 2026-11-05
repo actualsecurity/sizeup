@@ -53,6 +53,11 @@ label = "FG2"
 mhz = 458.0375
 kind = "traffic"
 
+[[radio.channels]]
+label = "HPN Tower"                # HPN ATC (#233): the airport pre-alerts are made here, from its transcripts
+mhz = 118.575
+kind = "airband"
+
 [p25]
 capture_dir = ""                   # no trunk-recorder here: the station sends its calls
 talkgroups_file = "../trunk-recorder/talkgroups.csv"   # names for the talkgroups the station reports
@@ -63,7 +68,7 @@ incident_talkgroups = [307, 333]
 # Credentials: the task role (sizeup-aws/12-transcribe.sh adds transcribe:StartStreamTranscription*
 # and the sizeup-* vocabularies); region: the task's AWS_REGION. No whisper here: the station runs it.
 aws = true
-aws_channels = ["South 2", "FG1", "FG2", 307]   # South 2 paging, FG1, FG2, Fire/EMS 15 default to AWS
+aws_channels = ["South 2", "FG1", "FG2", 307, "HPN Tower"]   # South 2 paging, FG1, FG2, Fire/EMS 15, HPN ATC: AWS
 # Recorded, not transcribed, unless Settings > Radios > Channels says otherwise (#201): WCPD Ch 1 (383) and
 # LLT Supervisor 1 (3127), about 1,800 clips a day off the station's whisper. The hub folds this into the
 # channel choices it sends the station (sizeup/channels.py for_station()).

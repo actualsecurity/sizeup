@@ -109,6 +109,7 @@ RECENT_MAX = 20                  # failures kept for health()
 BUDGET_TZ = tz.TZ                # the month the budget counts (the console's time zone)
 RESERVE_FRACTION = 0.2           # past the monthly limit, the reserve channels keep AWS until the limit x 1.2 ...
 RESERVE_CHANNELS = ("South 2", "tg:307")   # ... the pages (South 2) and Fire/EMS 15; everything else goes to whisper
+# (the app adds the airband channels, HPN ATC: their transcripts are the airport pre-alerts, #233)
 
 # AWS's error types by what they mean for us (the streaming handshake's HTTP answer, the stream's exception
 # events, the JSON APIs). An account that can't pay, isn't signed up for Transcribe or is suspended: the AWS
@@ -665,6 +666,7 @@ class AwsTranscriber:
         self.on_late, self.on_change, self.clock = on_late, on_change, clock
         self.region = aws.region(s.region)
         self.vocabulary = ""                       # set once the custom vocabulary is READY
+        self.channel_vocabulary: dict[str, str] = {}   # channel -> its own vocabulary once READY (HPN ATC: sizeup-atc)
         self.pace = max(0.5, float(s.pace))
         self._workers: dict[str, ChannelWorker] = {}
         self._lock = threading.RLock()
@@ -685,11 +687,12 @@ class AwsTranscriber:
 
     # -- what the callers ask --------------------------------------------------------------------------
 
-    def url(self) -> str:
+    def url(self, channel: str | None = None) -> str:
         base = (self.s.endpoint or f"wss://transcribestreaming.{self.region}.amazonaws.com:8443").rstrip("/")
         q = {"language-code": self.s.language, "media-encoding": "pcm", "sample-rate": str(RATE)}
-        if self.vocabulary:
-            q["vocabulary-name"] = self.vocabulary
+        vocab = self.channel_vocabulary.get(channel or "") or self.vocabulary
+        if vocab:
+            q["vocabulary-name"] = vocab
         return aws.presign(f"{base}/stream-transcription-websocket?{urllib.parse.urlencode(q)}", self.creds(),
                            self.region, SERVICE, expires=300)
 
@@ -713,9 +716,14 @@ class AwsTranscriber:
         if channel in self.s.reserve_channels and cost < cap:
             return True, ""
         if channel in self.s.reserve_channels and cap > limit:
-            return False, (f"the monthly AWS limit and its reserve for pages and Fire/EMS 15 are used up "
+            return False, (f"the monthly AWS limit and its reserve for {self.reserve_words()} are used up "
                            f"(${sp['usd']:.2f} of ${cap:g} in {sp['month']})")
         return False, f"the monthly AWS limit is reached (${sp['usd']:.2f} of ${limit:g} in {sp['month']})"
+
+    def reserve_words(self) -> str:
+        """'pages and Fire/EMS 15' (+ the other reserve channels by name: 'pages, Fire/EMS 15 and HPN Tower')."""
+        extra = [c for c in self.s.reserve_channels if c not in RESERVE_CHANNELS]
+        return "pages and Fire/EMS 15" if not extra else "pages, Fire/EMS 15 and " + ", ".join(extra)
 
     def reserve_left(self) -> list[str]:
         """The channels that may still use AWS past the monthly limit (none once the reserve is used too)."""
@@ -729,8 +737,8 @@ class AwsTranscriber:
         left = self.reserve_left() if pct >= 100 else list(self.s.reserve_channels)
         cap = limit * (1 + max(0.0, self.s.reserve_fraction))
         return {"month": sp["month"], "usd": sp["usd"], "limit_usd": limit, "pct": pct, "cap_usd": round(cap, 2),
-                "reserve": left, "reserve_text": (f"pages and Fire/EMS 15 keep AWS up to ${cap:g} (the reserve)" if left
-                                                  else "the reserve for pages and Fire/EMS 15 is used up too")
+                "reserve": left, "reserve_text": (f"{self.reserve_words()} keep AWS up to ${cap:g} (the reserve)" if left
+                                                  else f"the reserve for {self.reserve_words()} is used up too")
                 if pct >= 100 else ""}
 
     def breaker_ok(self) -> tuple[bool, str]:
@@ -1131,7 +1139,7 @@ class ChannelWorker(threading.Thread):
     # -- the stream ------------------------------------------------------------------------------------
 
     def _open(self) -> None:
-        url = self.o.url()
+        url = self.o.url(self.channel)
         ws = self.o.connect(url, timeout=10.0)
         self.session = Session(ws, self.o.log)
         self.fed, self.pending = [], []
@@ -1447,8 +1455,11 @@ class Vocabulary:
 
     def __init__(self, region: str, get: Callable[[str], str | None], put: Callable[[str, str], None],
                  name: str = VOCABULARY, endpoint: str = "", call: Callable[..., dict] = aws.json_call,
-                 log: Callable[[str], None] = print, poll_s: float = 10.0, on_ready: Callable[[str], None] = lambda n: None):
+                 log: Callable[[str], None] = print, poll_s: float = 10.0, on_ready: Callable[[str], None] = lambda n: None,
+                 key: str = ""):
         self.region, self.name, self.endpoint, self.call, self.log = region, name, endpoint, call, log
+        if key:                                    # a second vocabulary (HPN ATC's, #233) keeps its state apart
+            self.KEY = key
         self._get, self._put, self.poll_s, self.on_ready = get, put, poll_s, on_ready
         self._lock = threading.Lock()
         self._polling = False

@@ -65,7 +65,7 @@ address, the freshest position per aircraft, our receiver's position first for a
 
 The emergency watch: a squawk 7500 / 7600 / 7700, or the aircraft's own emergency status, inside RADIUS_NM of HPN
 below WATCH_CEILING_FT, from a message no older than STALE_S, raises one alarm and one airport pre-alert in the queue
-(sizeup/cad/airportalert.py, #235: with everything known about the aircraft; the same item for the same emergency)
+(sizeup/cad/airport_alerts.py, source "adsb", #235: with everything known about the aircraft; the same item for the same emergency)
 (sizeup/cad/alarms.py, its push
 to the alerts topic, [alerts] ntfy_topic, when one is set) per aircraft per emergency, cleared when it has not
 been seen for CLEAR_HOLD_S (a flicker doesn't re-alarm), not raised again within REALARM_S, at most MAX_ALARMS an hour. So the
@@ -1268,7 +1268,7 @@ class AircraftLayer:
         self.ended: dict[str, float] = {}           # key -> when it ended (no re-alarm within REALARM_S)
         self.ended_prealert: dict[str, bool] = {}   # key -> it had a pre-alert (reopened if it comes back in that time)
         self.raised: deque = deque()                # when each aircraft alarm was raised (MAX_ALARMS an hour)
-        # its CAD pre-alert (sizeup/cad/airportalert.py, #235; one item per emergency, with the alarm): set by the app
+        # its CAD pre-alert (sizeup/cad/airport_alerts.py AircraftPreAlerts, #235; one per emergency, with the alarm): set by the app
         self.prealerts = None
         # this is the CAD of record (not a station forwarding to the hub): only then the emergency watch reads the
         # API feeds while nobody looks (the hub does it; a station doing it too would double the load for nothing)
@@ -1526,7 +1526,7 @@ class AircraftLayer:
                 "pos_at": t.pos_time, "at": self.tracks.now}
 
     def _prealert(self, what: str, ev: dict, aid=None, why: str = "") -> None:
-        """The CAD pre-alert beside the alarm (sizeup/cad/airportalert.py): start (with the alarm's id) | again (the
+        """The CAD pre-alert beside the alarm (sizeup/cad/airport_alerts.py AircraftPreAlerts): start (with the alarm's id) | again (the
         same emergency within REALARM_S: the same item, back open) | update (newer altitude / position) | end."""
         pa = self.prealerts
         if pa is None or not self.active():

@@ -788,7 +788,7 @@ whisper_argv() { timeout 5 runuser -u "$SVC_USER" -- head -c 8192 /run/sizeup-wh
 adsb_sig() { { cat "$LIB/adsbd.py" /etc/systemd/system/sizeup-adsb.service 2>/dev/null; readlink -f "$OPT/readsb" 2>/dev/null; } | sha256sum | cut -c1-16; }
 
 activate() {
-  local name=$1 rel="$RELEASES/$1" sys pair t want have t0 t1 adsb_was
+  local name=$1 rel="$RELEASES/$1" sys pair t want have t0 t1 adsb_was leaving
   [ -f "$rel/.complete" ] || die "no staged release $name in $RELEASES"
   step "switch to release $name"
   adsb_was=$(adsb_sig)
@@ -816,10 +816,13 @@ activate() {
     sed -i "s#$LEGACY_APP/deploy/trunk-recorder/talkgroups.csv#$TR_DIR/talkgroups.csv#" "$CONF"
     say "config: [p25] talkgroups_file is now $TR_DIR/talkgroups.csv (trunk-recorder's copy, from the release)"
   fi
-  # What this release adds to the config (#119: the FG2 channel; #47: our tones as heard), once per station; the old file is kept
-  # beside it, one taken out by hand stays out (sizeup/cloud/configupdate.py, $ETC/config-updates).
+  # What this release adds to the config (#119: the FG2 channel; #47: our tones as heard; #233: HPN Tower), once per station;
+  # the old file is kept beside it, one taken out by hand stays out (sizeup/cloud/configupdate.py, $ETC/config-updates).
+  # --leaving: the release running now, which a failed switch goes back to: an addition it couldn't read waits.
   if [ -f "$rel/sizeup/cloud/configupdate.py" ] && [ -f "$CONF" ]; then
-    if out=$(python3 -I "$rel/sizeup/cloud/configupdate.py" "$CONF" "$ETC/config-updates" 2>&1); then
+    leaving=$(readlink -f "$CURRENT" 2>/dev/null || true)
+    [ "$leaving" != "$(readlink -f "$rel")" ] || leaving=""
+    if out=$(python3 -I "$rel/sizeup/cloud/configupdate.py" "$CONF" "$ETC/config-updates" --leaving "$leaving" 2>&1); then
       [ -z "$out" ] || printf '%s\n' "$out" | while IFS= read -r line; do say "config: $line"; done
     else
       warn "config: additions not applied, $CONF unchanged: $(printf '%s' "$out" | tail -n 1)"

@@ -31,10 +31,13 @@ county dispatch (60 Control); it doesn't replace it.
   Linux / Raspberry Pi is merged (#28).
 - **Radio:**
   - Channels: South 2 paging (tones and pages), Fire/EMS 15 (P25, talker at keypress), FG1 and
-    FG2 (MDC-1200 / FleetSync IDs). Next (#119): the Port Chester repeater and PC local fireground,
-    then several channels per dongle.
-  - Speech-to-text per channel: Amazon Transcribe on the main channels, whisper elsewhere.
-  - Pre-alert: the phone pre-alert from Tapout's ntfy feed (read only).
+    FG2 (MDC-1200 / FleetSync IDs), HPN Tower (Westchester County Airport ATC, 118.575 AM, #233). Next
+    (#119): the Port Chester repeater and PC local fireground, then several channels per dongle.
+  - Speech-to-text per channel: Amazon Transcribe on the main channels (and HPN ATC, with an aviation
+    vocabulary), whisper elsewhere.
+  - Pre-alerts: the phone pre-alert from Tapout's ntfy feed (read only); airport pre-alerts from HPN ATC
+    (fire or smoke seen from the air, MAYDAY, ARFF rolling, a disabled aircraft ...: data/atc/rules.json),
+    accepted into a pending event or dismissed, never dispatched by themselves (#233).
 - **CAD:**
   - Events: from 60 Control pages (ours by tones or town) or entered by hand.
   - Run cards, including full department and "any apparatus".

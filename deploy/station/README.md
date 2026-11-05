@@ -291,8 +291,10 @@ running, and no person has picked a job for it, it gets the first job in `auto_a
 4. `fg2`: FG2, the county's Fireground 2, 458.0375 NFM, MDC-1200 / FleetSync IDs like FG1 (#119). Last,
    so it takes a 4th free dongle and never one of the first three's; with three dongles, pick FG2 by
    hand on one of them (station page, Radios, or the hub's Settings > Radios)
+5. `hpn tower`: HPN Tower, Westchester County Airport ATC, 118.575 AM (#233; [below](#hpn-atc-the-airband-dongle)).
+   Last of all: only a 5th free dongle takes it by itself; normally a person picks it for the airband dongle
 
-With all four covered, another dongle stays Off. The log says `sdr: V3 #2 (00000001) → FG1 (auto)`,
+With all five covered, another dongle stays Off. The log says `sdr: V3 #2 (00000001) → FG1 (auto)`,
 and the station page and the hub's monitor show the row as "· FG1 · auto".
 
 * **FG1 first, even after a dongle dies.** A job whose dongle is unplugged or missing isn't covered:
@@ -366,6 +368,56 @@ starts `readsb --device-type rtlsdr --device <its index> --gain auto [--enable-b
 change; `python3 -I /usr/local/lib/sizeup/adsbd.py print` shows the command line it would run now. It holds the
 dongle's claim in `~/.local/state/rtl-claims` while readsb runs, and never starts while another app holds it. An
 update restarts it only when the decoder or its unit changed.
+
+## HPN ATC: the airband dongle
+
+The airport pre-alerts (#233, `sizeup/atc.py`) listen to Westchester Tower on **118.575 MHz AM** (FAA Chart
+Supplement via [airnav.com/airport/KHPN](https://www.airnav.com/airport/KHPN), effective 2026-10-29; the tower is
+open 0600-2300, CTAF on the same frequency when it's closed). Its other frequencies, for another dongle and
+another `[[radio.channels]]` entry with `kind = "airband"` (picked by hand):
+
+| | MHz | |
+|---|---|---|
+| Westchester Tower | 118.575 | the default channel ("HPN Tower") |
+| Westchester Ground | 121.825 | 3.25 MHz from Tower: one RTL-SDR covers ~2 MHz, so its own dongle |
+| Clearance Delivery | 126.4 (127.25 when the tower is closed) | |
+| D-ATIS | 133.8 | continuous: a good receiver check, nothing for the pre-alerts |
+| New York Approach | 126.4 (0700-2300), 120.8 (2300-0700), 124.65 | N90, HPN arrivals |
+| New York Departure | 120.55 | N90, HPN departures (1.975 MHz from Tower: one dongle only with several channels per dongle, #119) |
+
+One dongle runs one channel today (several per dongle is #119). The receiver is shortfinal's (tested on the bench):
+`rtl_fm -M am -s 12000` at 36.4 dB gain, a carrier squelch 3.5 dB over the noise floor (1.5 dB hysteresis, 0.4 s
+hang, 0.6 s minimum, 30 s maximum), and a carrier under 5 dB is kept but not transcribed. Its transmissions go to
+Amazon Transcribe on the hub by default (a priority channel, kept within the reserve past the monthly limit, with its
+own vocabulary `sizeup-atc`: Settings > Radios > Vocabulary > Push sends it with the PCFD one).
+
+**Pick it:** plug the airband dongle in, then on the station page (Radios) or the hub's Settings > Radios set that
+dongle's row to **HPN Tower**. A dongle another app holds (shortfinal's rtl-claims) is never taken, by hand or by
+itself.
+
+**An installed station** gets the HPN Tower channel from the update once (`sizeup/cloud/configupdate.py`
+"hpn-atc", the old file kept as `config.toml.before-hpn-atc`), but only when the release it is switching from can
+read an airband channel: a release from before #233 can't, and a failed switch goes back to it. So the first update
+to this release says `config: hpn-atc: deferred ...`, and the next update after it adds the channel. To have it at
+once, add the block from `deploy/station/config.station.toml` to `/etc/sizeup/config.toml` by hand
+(`sudo nano /etc/sizeup/config.toml`, and "hpn tower" at the end of `auto_assign_order`), then
+`sudo systemctl restart sizeup-station`.
+
+**Serials.** Give every dongle a unique serial that isn't all digits, once, and write down the old one first:
+
+```
+rtl_test                          # lists the dongles: index, product, serial
+rtl_eeprom -d 0                   # shows dongle 0's EEPROM (serial, product): note it
+rtl_eeprom -d 0 -r nesdr-smart-factory.bin   # keep a copy of the EEPROM before changing it
+rtl_eeprom -d 0 -s hpn-twr        # the new serial; unplug and plug it back in
+```
+
+A Nooelec NESDR SMArt, like most RTL2832U dongles, ships with a default serial (often `00000001`, the same as the
+station's "V3 #2"). Two dongles with the same serial can't be told apart (sizeup finds a dongle by its exact
+serial), and an all-digit serial is easily read as a device index by the rtl-sdr tools. Stop sizeup (and shortfinal)
+before `rtl_eeprom`: it needs the dongle to itself. shortfinal keeps its dongles' factory EEPROMs in
+`deploy/eeprom-backups/`; keep the NESDR SMArt's next to them. Then name it in the web app with `[radio] sdr_names`
+(`hpn-twr = "NESDR SMArt"`).
 
 ## When things go wrong, it comes back by itself
 
