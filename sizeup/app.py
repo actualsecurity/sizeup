@@ -77,7 +77,7 @@ from sizeup.radio.live import LiveTalk
 from sizeup.radio.livepage import HOLD_S, LivePaging
 from sizeup.radio import sdr as sdr_lookup
 from sizeup.radio import adsbd
-from sizeup.radio.recorder import TrunkRecorder
+from sizeup.radio import recorder as trunk_recorder
 from sizeup.radio.page import Page, PageHold, assemble, decode_tones, page_from_dict, read_twice, recording_note
 from sizeup.radio.tap import LiveTap
 from sizeup.cad import tonelist
@@ -290,7 +290,9 @@ class App:
         self._last_tones_only: Page | None = None
         self.pagehold = PageHold(self.plan)   # paging: a page waits out its continuation window
         self.receivers = [make_receiver(cfg, c, c.device, self._segment) for c in cfg.channels]
-        self.recorder = (TrunkRecorder(cfg.p25_recorder, cfg.p25_recorder_dir or ".", log)
+        # trunk-recorder: sizeup's child, or on the Linux station its own service (sizeup-trunk-recorder, #71), which an
+        # update of sizeup leaves running on its control channel (sizeup/radio/recorder.py make)
+        self.recorder = (trunk_recorder.make(cfg.p25_recorder, cfg.p25_recorder_dir or ".", log)
                          if cfg.p25_recorder else None)
         # Switchable dongles ([radio] sdrs, by exact serial): each runs one mode at a time, picked in
         # the web app; a channel / Fire/EMS 15 runs on at most one of them.
@@ -2198,9 +2200,7 @@ class App:
     def _program_on(self, mode: str) -> str | None:
         """The dongle the program for `mode` (its rtl_fm, or trunk-recorder) is running on, if any."""
         if mode == P25_MODE:
-            rec = self.recorder
-            alive = rec is not None and rec._thread is not None and rec._thread.is_alive()
-            return getattr(rec.device_fn, "serial", None) if alive else None
+            return self.recorder.on() if self.recorder is not None else None
         r = self._receiver(mode)
         return getattr(r.device, "serial", None) if r is not None and not r._stop.is_set() else None
 
@@ -2566,6 +2566,9 @@ class App:
                     self.assign[sd] = OFF_MODE
                     self.set_by.pop(sd, None)
             self._save_modes()
+            if getattr(self.recorder, "unit", False) and P25_MODE not in self.assign.values():
+                # trunk-recorder's own service may still run what the sizeup before this one asked: no dongle has it now
+                self.recorder.stop(f"no dongle on {P25_MODE}")
             if self.cfg.sdr_auto_assign:                # unassigned ones now, new ones as they're plugged in
                 self._settle_until = time.monotonic() + SDR_SETTLE_S
                 self._sdr_arrivals()
@@ -2647,7 +2650,7 @@ class App:
             except Exception as e:
                 log(f"page hold: {page.label} page not finalised: {type(e).__name__}: {e}")
         if self.recorder:
-            self.recorder.stop()
+            self.recorder.shutdown()           # its own service (the station) keeps running: the next sizeup adopts it
         if self.p25:
             self.p25.stop()
         for sd in list(self.assign):

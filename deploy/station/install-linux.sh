@@ -22,7 +22,8 @@
 # code from git and its own venv, root-owned); /opt/sizeup/current points at the one that runs and is
 # swapped with one rename. rtl-sdr-blog, trunk-recorder, whisper.cpp and readsb are built into
 # /opt/sizeup/builds/<name>-<tag>-<commit>, once per pinned version, behind the links
-# /opt/sizeup/{rtl-sdr,trunk-recorder,whisper,readsb} the config and the units use.
+# /opt/sizeup/{rtl-sdr,trunk-recorder,whisper,readsb} the config and the units use. whisper-server,
+# trunk-recorder and readsb are services of their own: a switch restarts each only when what it runs changed.
 #
 # Everything it says goes to /var/log/sizeup-install.log too. Secrets are read with hidden input,
 # written only to /etc/sizeup/station.env (root:sizeup 0640) and never printed or logged.
@@ -87,6 +88,7 @@ INSTALL_CONF=$ETC/install.conf
 DEPLOY_KEY=$ETC/deploy_key
 KNOWN_HOSTS=$ETC/known_hosts
 LIB=/usr/local/lib/sizeup
+TR_UNIT=/etc/systemd/system/sizeup-trunk-recorder.service   # trunk-recorder's own service (#71)
 LOG=/var/log/sizeup-install.log
 SVC_USER=sizeup
 SELF_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -768,7 +770,7 @@ preflight() {
   # an error says what failed. (Not "adsbd.py help | grep -q usage": its usage exits 2, and under
   # pipefail that fails the pipeline even when grep matches. That refused 919cfc2.)
   local f
-  for f in sizeup/radio/adsbd.py sizeup/cloud/autoupdate.py sizeup/cloud/configupdate.py; do
+  for f in sizeup/radio/adsbd.py sizeup/radio/trunkrecd.py sizeup/cloud/autoupdate.py sizeup/cloud/configupdate.py; do
     [ -f "$rel/$f" ] || continue
     if out=$(python3 -I -B -c 'import importlib.util as u, sys
 s = u.spec_from_file_location("preflight_check", sys.argv[1]); m = u.module_from_spec(s)
@@ -799,12 +801,34 @@ swap_link() {     # swap_link TARGET LINK: a rename over the old link, never a m
 whisper_argv() { timeout 5 runuser -u "$SVC_USER" -- head -c 8192 /run/sizeup-whisper/argv 2>/dev/null || true; }
 # what sizeup-adsb runs: its supervisor, its unit and the readsb build behind the link (restarted only when one changed)
 adsb_sig() { { cat "$LIB/adsbd.py" /etc/systemd/system/sizeup-adsb.service 2>/dev/null; readlink -f "$OPT/readsb" 2>/dev/null; } | sha256sum | cut -c1-16; }
+# what sizeup-trunk-recorder runs (#71): its supervisor and its unit, the trunk-recorder and librtlsdr builds behind the
+# links, its config.json and talkgroups.csv (the sizeup user's directory: read as that user, bounded, never waiting
+# long). Restarted only when one of them changed: a Python-only update leaves P25 on its control channel.
+tr_sig() {
+  {
+    cat "$LIB/trunkrecd.py" "$TR_UNIT" 2>/dev/null
+    readlink -f "$OPT/trunk-recorder" "$OPT/rtl-sdr" 2>/dev/null
+    timeout 10 runuser -u "$SVC_USER" -- head -c 8388608 "$TR_DIR/config.json" "$TR_DIR/talkgroups.csv" 2>/dev/null || true
+  } | sha256sum | cut -c1-16
+}
+# trunk_recorder_service TR_WAS: (re)start sizeup-trunk-recorder unless it runs and tr_sig is still TR_WAS
+trunk_recorder_service() {
+  [ -f "$TR_UNIT" ] || return 0                                 # (a release from before #71)
+  systemctl enable --quiet sizeup-trunk-recorder.service
+  if systemctl is-active --quiet sizeup-trunk-recorder.service && [ "$1" = "$(tr_sig)" ]; then
+    say "trunk-recorder: unchanged, left running (Fire/EMS 15 keeps its control channel)"
+  else
+    systemctl restart sizeup-trunk-recorder.service
+    say "trunk-recorder: (re)started (sizeup-trunk-recorder: on the dongle sizeup gives Fire/EMS 15)"
+  fi
+}
 
 activate() {
-  local name=$1 rel="$RELEASES/$1" sys pair t want have t0 t1 adsb_was leaving
+  local name=$1 rel="$RELEASES/$1" sys pair t want have t0 t1 adsb_was tr_was leaving
   [ -f "$rel/.complete" ] || die "no staged release $name in $RELEASES"
   step "switch to release $name"
   adsb_was=$(adsb_sig)
+  tr_was=$(tr_sig)
   # The system files: the release's own, or (a release from before #58) this installer's.
   sys="$rel/deploy/station"
   [ -f "$sys/start-station" ] || sys=$SELF_DIR
@@ -816,9 +840,11 @@ activate() {
   install -D -m 0644 "$sys/../../sizeup/cloud/autoupdate.py" "$LIB/autoupdate.py"
   # the ADS-B decoder's supervisor (#235; a release from before it has none: the one installed stays)
   [ ! -f "$sys/../../sizeup/radio/adsbd.py" ] || install -D -m 0644 "$sys/../../sizeup/radio/adsbd.py" "$LIB/adsbd.py"
+  # trunk-recorder's supervisor (#71; a release from before it runs trunk-recorder inside sizeup-station)
+  [ ! -f "$sys/../../sizeup/radio/trunkrecd.py" ] || install -D -m 0644 "$sys/../../sizeup/radio/trunkrecd.py" "$LIB/trunkrecd.py"
   for t in sizeup-station.service sizeup-whisper.service sizeup-health.service sizeup-health.timer \
-           sizeup-update.service sizeup-update.path sizeup-update.timer sizeup-adsb.service; do
-    [ -f "$sys/systemd/$t" ] || continue                       # (sizeup-adsb: a release from before #235)
+           sizeup-update.service sizeup-update.path sizeup-update.timer sizeup-adsb.service sizeup-trunk-recorder.service; do
+    [ -f "$sys/systemd/$t" ] || continue                       # (sizeup-adsb: from before #235; sizeup-trunk-recorder: #71)
     install -m 0644 "$sys/systemd/$t" "/etc/systemd/system/$t"
   done
   install -D -m 0644 "$sys/systemd/journald-sizeup.conf" /etc/systemd/journald.conf.d/sizeup.conf
@@ -883,6 +909,9 @@ PY
   systemctl enable --quiet sizeup-station.service sizeup-whisper.service sizeup-health.timer \
     sizeup-update.path sizeup-update.timer
   [ ! -f /etc/systemd/system/sizeup-adsb.service ] || systemctl enable --quiet sizeup-adsb.service
+  # trunk-recorder first: sizeup-station then hands the dongle to (or adopts) the one that runs. Left running unless
+  # what it runs changed, so a Python-only update keeps Fire/EMS 15 on the air (same trunk-recorder PID).
+  trunk_recorder_service "$tr_was"
   t0=$(date +%s%N)
   systemctl restart sizeup-station.service
   t1=$(date +%s%N)
@@ -1063,7 +1092,8 @@ fi
 activate "$NAME"
 if command -v systemd-analyze >/dev/null; then
   systemd-analyze verify /etc/systemd/system/sizeup-station.service /etc/systemd/system/sizeup-whisper.service \
-    /etc/systemd/system/sizeup-adsb.service /etc/systemd/system/sizeup-health.timer /etc/systemd/system/sizeup-update.path \
+    /etc/systemd/system/sizeup-adsb.service /etc/systemd/system/sizeup-trunk-recorder.service \
+    /etc/systemd/system/sizeup-health.timer /etc/systemd/system/sizeup-update.path \
     /etc/systemd/system/sizeup-update.timer || warn "systemd-analyze verify complained (above)"
 fi
 

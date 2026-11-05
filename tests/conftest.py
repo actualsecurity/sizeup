@@ -6,6 +6,8 @@ def _private_claims_dir(tmp_path, monkeypatch):
     """Tests never touch the real ~/.local/state/rtl-claims shared with shortfinal."""
     import sizeup.radio.claims as claims
     monkeypatch.setattr(claims, "DIR", tmp_path / "rtl-claims")
+    monkeypatch.setattr(claims, "helpers", lambda: set())     # (a unit-mode test's trunk-recorder service: its own)
+    monkeypatch.delenv("SIZEUP_TRUNK_RECORDER_UNIT", raising=False)
 
 
 @pytest.fixture(autouse=True)

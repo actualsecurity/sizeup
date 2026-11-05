@@ -120,7 +120,7 @@ nothing enabled or started, no prompts); `--stage SHA` and `--activate NAME` are
 | secrets `SIZEUP_STATION_TOKEN`, `SIZEUP_ACCESS_CLIENT_ID`, `SIZEUP_ACCESS_CLIENT_SECRET` (root:sizeup 0640) | `/etc/sizeup/station.env` |
 | what `update` fetches (repo, ref), the model, auto-update on / off | `/etc/sizeup/install.conf` |
 | state: CAD, outbox, `cloud.json`, captures, trunk-recorder's working dir | `/var/lib/sizeup` |
-| `sizeup-station.service`, `sizeup-whisper.service`, `sizeup-adsb.service` (the ADS-B decoder: idle until a dongle is named for it), `sizeup-health.timer`, `sizeup-update.path` / `.timer` / `.service`, journald cap (200 MB, kept across reboots) | `/etc/systemd/...` |
+| `sizeup-station.service`, `sizeup-whisper.service`, `sizeup-trunk-recorder.service` (trunk-recorder on the dongle sizeup gives Fire/EMS 15: [below](#trunk-recorder-its-own-service)), `sizeup-adsb.service` (the ADS-B decoder: idle until a dongle is named for it), `sizeup-health.timer`, `sizeup-update.path` / `.timer` / `.service`, journald cap (200 MB, kept across reboots) | `/etc/systemd/...` |
 | the auto-updater's record (state, last result, failed builds) and its one-line-per-update log | `/var/lib/sizeup-update/state.json`, `/var/log/sizeup-update.log` |
 | the `sizeup-station` command; the launchers and the updater | `/usr/local/bin`; `/usr/local/lib/sizeup` |
 
@@ -178,7 +178,7 @@ How it goes, end to end:
 6. **Preflight**, before anything switches: the new code imports, `/etc/sizeup/config.toml` loads
    with it, `sizeup --init-state` brings the databases up in a scratch directory, its systemd units
    parse, rtl_fm / trunk-recorder `--version` / whisper-server / readsb run, and the scripts run with
-   the system python3 (adsbd.py, autoupdate.py, configupdate.py: stdlib only, Python 3.11+) load
+   the system python3 (adsbd.py, trunkrecd.py, autoupdate.py, configupdate.py: stdlib only, Python 3.11+) load
    with it. A failure: no switch, the sha is recorded as failed and reported to the hub, with the
    error (for a script, the system Python's version and its exception).
 7. **A quiet moment**: no carrier open, nobody talking, no transcription queued or running (the
@@ -187,7 +187,10 @@ How it goes, end to end:
 8. **The switch**: `install-linux.sh --activate <sha>` swaps the build links and `/opt/sizeup/current`
    (each one rename), installs the release's units and commands, and restarts sizeup-station once.
    whisper-server is its own service now (`sizeup-whisper.service`) and keeps its model loaded; it is
-   restarted only when its program, model or `[stt]` flags change.
+   restarted only when its program, model or `[stt]` flags change. trunk-recorder is too
+   (`sizeup-trunk-recorder.service`, #71): restarted only when its build, its `config.json` or
+   `talkgroups.csv`, its supervisor or its unit change, so a Python-only update leaves Fire/EMS 15 on
+   its control channel (the same trunk-recorder process before and after).
 9. `/healthz` must answer **with the new build** within 90 s. Otherwise the same swap back to the
    release that ran before (a rename and a restart: nothing rebuilt), and that sha is not tried again
    until the hub moves on to another one.
@@ -212,8 +215,9 @@ and stops `sizeup-update.path` / `.timer` until it is done (then looks once for 
 
 Timings: a Python-only update is about 10-20 s of building beside the running station (archive, venv
 links, bytecode, preflight), then the quiet-moment wait, then one restart. The radios are off the air
-only during that restart: the FM channels (rtl_fm) for a few seconds, Fire/EMS 15 until trunk-recorder
-has restarted and locked on to the control channel again (#71: trunk-recorder as its own service).
+only during that restart: the FM channels (rtl_fm) for a few seconds. Fire/EMS 15 isn't off at all:
+trunk-recorder is its own service and keeps running (#71); only an update that changes trunk-recorder's
+build or config restarts it, and then P25 is back once it has locked on to the control channel again.
 Each update logs those numbers (`sizeup-station autoupdate status`, `/var/log/sizeup-update.log`:
 "web back N s after the switch, radios M s"). Nothing heard is lost across a restart: the outbox
 (`/var/lib/sizeup/state/outbox.sqlite`) is on disk and goes up first when the station is back.
@@ -321,6 +325,43 @@ and the station page and the hub's monitor show the row as "· FG1 · auto".
   set by a person, so an Off left over from the old "new dongles start Off" is filled.
 * `auto_assign = false`: new dongles start Off until someone picks a job (the old behaviour).
 
+## trunk-recorder, its own service
+
+trunk-recorder (Fire/EMS 15, the county P25 system) runs under `sizeup-trunk-recorder.service`, not inside
+sizeup-station (GitHub #71), so a restart or a Python-only update of sizeup doesn't stop it: P25 keeps its control
+channel, and the Fire/EMS 15 row stays "ok" through the update.
+
+* **Who decides.** sizeup, as before: Settings > Radios, auto-assign and the hub's switch pick the dongle. sizeup writes
+  its choice to `/var/lib/sizeup/state/p25_recorder.json`; the service (`/usr/local/lib/sizeup/trunkrecd.py`, the
+  system python3, stdlib only) reads it every half second and runs trunk-recorder on that dongle's current index,
+  or nothing. Switching a dongle away from Fire/EMS 15 waits until trunk-recorder has stopped and let the dongle go.
+* **No privilege.** The service runs as the sizeup user, like sizeup-station and the ADS-B decoder: no sudo, no polkit
+  rule, no root helper. sizeup never starts or stops a unit; it writes a file the service reads.
+* **Across a restart.** sizeup-station leaves trunk-recorder running when it exits. The next sizeup hands it the same
+  dongle (it keeps its jobs in `sdr_modes.json`), which changes nothing: the same trunk-recorder runs on. A sizeup that
+  starts with no dongle on Fire/EMS 15 stops it.
+* **The dongle claim** (`~/.local/state/rtl-claims`, shared with shortfinal) is the service's while it runs Fire/EMS 15
+  (app `sizeup`, mode `Fire/EMS 15`, the service's pid), so it stays right while sizeup restarts. sizeup counts it as
+  its own. A dongle another app holds is never taken: the row says `held`.
+* **Who is talking** still comes from trunk-recorder's output and the unit script (`unit-event.sh`): the service
+  writes both to `/var/lib/sizeup/trunk-recorder/trunk-recorder.log` (5 MB, one old file kept), and sizeup reads it as
+  it grows. The calls go to the capture directory sizeup watches, as before.
+* **When it restarts.** Only when what it runs changed: an update with another trunk-recorder build (or librtlsdr), a
+  new `config.json` or `talkgroups.csv`, or a new `trunkrecd.py` or unit (`install-linux.sh` `tr_sig`). The install log
+  says `trunk-recorder: unchanged, left running` or `trunk-recorder: (re)started`. A change of `[p25] recorder` or
+  `recorder_dir` in `/etc/sizeup/config.toml` restarts trunk-recorder by itself within a second. After editing
+  `/var/lib/sizeup/trunk-recorder/config.json` by hand (it is remade from the repo at the next update):
+  `sudo systemctl restart sizeup-trunk-recorder`.
+* **Checking it.** `sizeup-station status` has a `p25:` line (the service, its state, the dongle, trunk-recorder's
+  pid); `doctor` checks it runs; `sizeup-station logs` includes it (`journalctl -u sizeup-trunk-recorder`: one line per
+  start, stop and exit). `python3 -I /usr/local/lib/sizeup/trunkrecd.py print` shows the command line it would run.
+* `sudo sizeup-station restart` restarts sizeup only; `stop` stops trunk-recorder's service too, `start` starts both.
+* **Going back to a release from before this** (the updater's switch back, or `sizeup-station rollback`): the updater
+  stops, disables and removes the service first, so that release's sizeup runs trunk-recorder itself, as it did. Going
+  back by hand with an old `install-linux.sh`: `sudo systemctl disable --now sizeup-trunk-recorder` first.
+* On a Mac or a bench (no `SIZEUP_TRUNK_RECORDER_UNIT=1`, which only sizeup-station.service sets) sizeup still runs
+  trunk-recorder as its own child.
+
 ## ADS-B receiver
 
 The station can run our own ADS-B receiver (GitHub #235): one RTL-SDR with a 1090 MHz filter and an LNA in front of
@@ -337,9 +378,9 @@ station").
    then (as root; the tool writes the dongle's EEPROM, then unplug and replug it):
 
    ```
-   sudo systemctl stop sizeup-station sizeup-adsb
+   sudo systemctl stop sizeup-station sizeup-trunk-recorder sizeup-adsb
    rtl_eeprom -d <index> -s adsb1090
-   sudo systemctl start sizeup-station sizeup-adsb
+   sudo systemctl start sizeup-station sizeup-trunk-recorder sizeup-adsb
    ```
 
    Skip this if it already has a unique name.
@@ -416,8 +457,8 @@ rtl_eeprom -d 0 -s hpn-twr        # the new serial; unplug and plug it back in
 
 A Nooelec NESDR SMArt, like most RTL2832U dongles, ships with a default serial (often `00000001`, the same as the
 station's "V3 #2"). Two dongles with the same serial can't be told apart (sizeup finds a dongle by its exact
-serial), and an all-digit serial is easily read as a device index by the rtl-sdr tools. Stop sizeup (and shortfinal)
-before `rtl_eeprom`: it needs the dongle to itself. shortfinal keeps its dongles' factory EEPROMs in
+serial), and an all-digit serial is easily read as a device index by the rtl-sdr tools. Stop sizeup (`sudo
+sizeup-station stop`: trunk-recorder's service too) and shortfinal before `rtl_eeprom`: it needs the dongle to itself. shortfinal keeps its dongles' factory EEPROMs in
 `deploy/eeprom-backups/`; keep the NESDR SMArt's next to them. Then name it in the web app with `[radio] sdr_names`
 (`hpn-twr = "NESDR SMArt"`).
 
@@ -425,7 +466,7 @@ before `rtl_eeprom`: it needs the dongle to itself. shortfinal keeps its dongles
 
 | What happens | What brings it back |
 |---|---|
-| sizeup crashes | systemd restarts it after 5 s, forever (`Restart=always`, no start limit). rtl_fm and trunk-recorder are its children and restart with it; whisper-server is its own service (`sizeup-whisper`, also `Restart=always`). |
+| sizeup crashes | systemd restarts it after 5 s, forever (`Restart=always`, no start limit). rtl_fm is its child and restarts with it; whisper-server and trunk-recorder are services of their own (`sizeup-whisper`, `sizeup-trunk-recorder`, also `Restart=always`) and keep running. |
 | An update doesn't come up | The updater switches back to the release that ran before within 90 s, and doesn't try that build again until the hub moves on ([Updating](#updating)). |
 | sizeup hangs (running, not answering) | `sizeup-health.timer` asks `/healthz` every minute; 3 failures in a row restart it. |
 | PC restart, Windows Update restart | The sizeup-wsl task starts WSL at boot, systemd starts the station, sizeup-usb attaches the dongles: a couple of minutes. |

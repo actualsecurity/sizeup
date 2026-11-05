@@ -2,8 +2,10 @@
 # sizeup-station: run the station installed by install-linux.sh (deploy/station/README.md).
 #
 #   sizeup-station status        service, dongles, hub link, what's waiting, CPU
-#   sizeup-station logs [-f]     the station's log, whisper-server's, the ADS-B decoder's and the updater's (journalctl options pass through)
-#   sizeup-station restart       restart it (also: start, stop); whisper-server too if its [stt] changed
+#   sizeup-station logs [-f]     the station's log, whisper-server's, trunk-recorder's service, the ADS-B decoder's and the
+#                                updater's (journalctl options pass through)
+#   sizeup-station restart       restart it (also: start, stop); whisper-server too if its [stt] changed. trunk-recorder
+#                                (sizeup-trunk-recorder) keeps running through a restart; stop stops it too
 #   sizeup-station update        fetch the configured ref, build its release beside the running one,
 #                                switch, restart (config, state and secrets are kept); options pass to
 #                                install-linux.sh (--ref REF: run a branch; auto-update pauses)
@@ -83,6 +85,15 @@ cmd_status() {
   echo "service:   $active${since:+ since $since} ($(systemctl is-enabled "$UNIT" 2>/dev/null || echo '?') at boot)"
   echo "health:    timer $(systemctl is-active sizeup-health.timer 2>/dev/null || true); last check $(journalctl -u sizeup-health.service -n 1 -o cat --no-pager 2>/dev/null | tail -n 1 || true)"
   echo "whisper:   sizeup-whisper.service $(systemctl is-active sizeup-whisper.service 2>/dev/null || true)"
+  if [ -f /etc/systemd/system/sizeup-trunk-recorder.service ]; then   # trunk-recorder's own service (#71)
+    echo "p25:       sizeup-trunk-recorder.service $(systemctl is-active sizeup-trunk-recorder.service 2>/dev/null || true); $(timeout 5 python3 -I -c 'import json, sys
+try:
+    d = json.load(open("/run/sizeup-trunk-recorder/status.json"))
+    print(d.get("state", "?") + ": " + (d.get("detail") or "") + (" (" + d["sdr"] + ")" if d.get("sdr") else "")
+          + (", trunk-recorder pid %s" % d["tr_pid"] if d.get("tr_pid") and d.get("state") == "ok" else ""))
+except (OSError, ValueError):
+    print("no status yet")' 2>/dev/null || true)"
+  fi
   if [ -f /usr/local/lib/sizeup/adsbd.py ]; then          # the ADS-B decoder (#235): readsb only on the dongle named for it
     echo "adsb:      sizeup-adsb.service $(systemctl is-active sizeup-adsb.service 2>/dev/null || true); $(python3 -I -c 'import json, sys
 try:
@@ -130,6 +141,9 @@ cmd_doctor() {
   if systemctl is-enabled --quiet "$UNIT"; then ok "sizeup-station starts at boot"; else no "sizeup-station isn't enabled: systemctl enable $UNIT"; fi
   if systemctl is-active --quiet sizeup-health.timer; then ok "health check timer is on"; else no "health timer off: systemctl enable --now sizeup-health.timer"; fi
   if systemctl is-active --quiet sizeup-whisper.service; then ok "sizeup-whisper is running"; else no "sizeup-whisper isn't running: systemctl enable --now sizeup-whisper.service"; fi
+  if [ -f /etc/systemd/system/sizeup-trunk-recorder.service ]; then
+    if systemctl is-active --quiet sizeup-trunk-recorder.service; then ok "sizeup-trunk-recorder is running (trunk-recorder on the dongle sizeup gives Fire/EMS 15)"; else no "sizeup-trunk-recorder isn't running: systemctl enable --now sizeup-trunk-recorder.service"; fi
+  fi
   if [ -f /etc/systemd/system/sizeup-adsb.service ]; then
     if systemctl is-active --quiet sizeup-adsb.service; then ok "sizeup-adsb is running (readsb only on the dongle named for ADS-B)"; else no "sizeup-adsb isn't running: systemctl enable --now sizeup-adsb.service"; fi
     if [ -x /opt/sizeup/readsb/bin/readsb ]; then ok "readsb installed"; else no "readsb missing: run install-linux.sh again"; fi
@@ -219,12 +233,17 @@ cmd="${1:-status}"
 case "$cmd" in
   status) cmd_status ;;
   logs)
-    units=(-u "$UNIT" -u sizeup-health.service -u sizeup-whisper.service -u sizeup-adsb.service -u sizeup-update.service)
+    units=(-u "$UNIT" -u sizeup-health.service -u sizeup-whisper.service -u sizeup-trunk-recorder.service -u sizeup-adsb.service
+           -u sizeup-update.service)
     if [ $# -eq 0 ]; then exec journalctl "${units[@]}" -n 200 --no-pager; fi
     exec journalctl "${units[@]}" "$@" ;;
   restart|start|stop)
     need_root "$cmd" "$@"
     systemctl "$cmd" "$UNIT"
+    # trunk-recorder's own service (#71): a restart leaves it on the control channel; stop stops the radios, it too
+    if [ -f /etc/systemd/system/sizeup-trunk-recorder.service ]; then
+      if [ "$cmd" = stop ]; then systemctl stop sizeup-trunk-recorder.service; else systemctl start sizeup-trunk-recorder.service; fi
+    fi
     if [ "$cmd" = stop ]; then
       echo "Stopped. It starts again at the next boot (systemctl disable $UNIT to keep it off)."
     elif [ "$(/usr/local/lib/sizeup/start-whisper --print 2>/dev/null || true)" != "$(timeout 5 runuser -u sizeup -- head -c 8192 /run/sizeup-whisper/argv 2>/dev/null || true)" ]; then
