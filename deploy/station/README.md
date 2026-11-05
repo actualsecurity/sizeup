@@ -140,6 +140,7 @@ sizeup-station logs -f      # the station's log (journalctl options pass through
 sizeup-station doctor       # every check, and what to do about each failure
 sudo sizeup-station restart
 sudo sizeup-station secrets # enter the token / Access service token again
+sudo sizeup-station sdr-serial 4 hpn-twr --dry-run   # give dongle #4 its own serial (below: Two dongles, one serial)
 sizeup-station autoupdate status     # this station's build, the hub's, the last update
 ```
 
@@ -333,15 +334,9 @@ station").
 **When you plug it in:**
 
 1. **Give it a serial that is unique and not all digits** (readsb and the rtl tools read `00000001` as "device #1").
-   Plug it in alone, or find its index with `sizeup-station status` ("dongles on USB"), stop whatever uses that index,
-   then (as root; the tool writes the dongle's EEPROM, then unplug and replug it):
-
-   ```
-   sudo systemctl stop sizeup-station sizeup-adsb
-   rtl_eeprom -d <index> -s adsb1090
-   sudo systemctl start sizeup-station sizeup-adsb
-   ```
-
+   Find its index with `sudo sizeup-station doctor` ("librtlsdr sees"), then
+   `sudo sizeup-station sdr-serial <index> adsb1090` ([Two dongles, one serial](#two-dongles-one-serial): it stops
+   the radios and the decoder, backs up the EEPROM, writes the serial, waits for the replug, starts them again).
    Skip this if it already has a unique name.
 2. **Name it**, either way:
    * **Settings > Radios** (an admin, on the hub or the station page): its row has **Use for ADS-B**; confirm. Whatever
@@ -405,21 +400,84 @@ once, add the block from `deploy/station/config.station.toml` to `/etc/sizeup/co
 (`sudo nano /etc/sizeup/config.toml`, and "hpn tower" at the end of `auto_assign_order`), then
 `sudo systemctl restart sizeup-station`.
 
-**Serials.** Give every dongle a unique serial that isn't all digits, once, and write down the old one first:
+**Serials.** Give every dongle a unique serial that isn't all digits, once: a Nooelec NESDR SMArt, like most RTL2832U
+dongles, ships with a default serial (often `00000001`, the same as the station's "V3 #2"). For the airband dongle,
+`sudo sizeup-station sdr-serial <its index> hpn-twr` ([Two dongles, one serial](#two-dongles-one-serial)), then
+name it in `[radio] sdr_names` (`hpn-twr = "NESDR SMArt"`). shortfinal keeps its dongles' factory EEPROMs in
+`deploy/eeprom-backups/`; copy the NESDR SMArt's backup (`~/sizeup-eeprom-backups/`) next to them.
 
-```
-rtl_test                          # lists the dongles: index, product, serial
-rtl_eeprom -d 0                   # shows dongle 0's EEPROM (serial, product): note it
-rtl_eeprom -d 0 -r nesdr-smart-factory.bin   # keep a copy of the EEPROM before changing it
-rtl_eeprom -d 0 -s hpn-twr        # the new serial; unplug and plug it back in
+## Two dongles, one serial
+
+sizeup opens every dongle by its exact USB serial. Two dongles with the same one can't be told apart, and a program
+asked for "serial 00000001" may open the wrong one: on 2026-11-04 a NESDR SMArt plugged in on its factory `00000001`,
+the same serial as "V3 #2", and Fire/EMS 15 (tg:307) stopped reaching the hub with nothing logged (#242). Now:
+
+* **The station says so, loudly.** A serial on two or more dongles is a **critical** alert on the hub (Settings >
+  Health, pushed to the status topic, a recovery notice once it's fixed): *Two dongles share serial 00000001
+  (indexes 1 and 4): sizeup can't tell them apart. Fix: sizeup-station sdr-serial 4 &lt;new-serial&gt; (renames #4,
+  NESDR SMArt); nothing opens 00000001 until then*. The index it suggests is the newcomer: the one whose product
+  isn't the one that serial had while it was the only one (`sdr_products.json`, next to `sdr_modes.json`); without a
+  product on record (none yet, or two different ones each seen alone under that serial), the last one. The station page (Radios) and the hub's Settings > Radios show a red box with the
+  commands above the dongles, and the dongle's row says *serial shared: not opened*. `sudo sizeup-station doctor`
+  FAILs on it, and the journal has `sdr: CRITICAL Two dongles share serial ...` once.
+* **Nothing guesses.** No job (rtl_fm), no trunk-recorder and no readsb is started on an ambiguous serial: the
+  program waits, its row says why (state *ambiguous*), and it starts by itself once the serial is on one dongle again.
+  A trunk-recorder source in `config.json` that names such a serial (`rtl=00000001`) is left out of
+  `config.runtime.json`; with none left it doesn't start. Auto-assign gives such a dongle no job, picking a job for it
+  (or Use for ADS-B) is refused with the same text, and a job saved for it is kept, not dropped, for after the fix.
+  A program already running keeps the dongle it opened while its serial was still its own (that handle is the right
+  dongle); it isn't restarted on it. Dongles with serials of their own keep working.
+* **A main channel gone silent is an alert too** (warning): tg:307, FG1, South 2 or HPN Tower running but silent far
+  beyond its usual gap for that time of day ([docs/cloud.md](../../docs/cloud.md#station-health-and-alerts)).
+
+**The fix: `sizeup-station sdr-serial <index|current-serial> <new-serial>`** gives one dongle a new serial, safely:
+
+```sh
+sudo sizeup-station doctor                            # "librtlsdr sees": index, serial, product of each dongle
+sudo sizeup-station sdr-serial 4 hpn-twr --dry-run    # the checks and the plan; nothing stopped or written
+sudo sizeup-station sdr-serial 4 hpn-twr              # do it: asks once, then tells you when to replug
 ```
 
-A Nooelec NESDR SMArt, like most RTL2832U dongles, ships with a default serial (often `00000001`, the same as the
-station's "V3 #2"). Two dongles with the same serial can't be told apart (sizeup finds a dongle by its exact
-serial), and an all-digit serial is easily read as a device index by the rtl-sdr tools. Stop sizeup (and shortfinal)
-before `rtl_eeprom`: it needs the dongle to itself. shortfinal keeps its dongles' factory EEPROMs in
-`deploy/eeprom-backups/`; keep the NESDR SMArt's next to them. Then name it in the web app with `[radio] sdr_names`
-(`hpn-twr = "NESDR SMArt"`).
+1. **Checks the new serial**: 3-16 characters of `A-Z a-z 0-9 -` with at least one letter (the rtl tools read a
+   number as a device index), not the serial of any dongle plugged in now. A serial on two dongles must be named by
+   index (`sdr-serial 00000001 ...` is refused and says which indexes).
+2. **Stops** `sizeup-station` (trunk-recorder and rtl_fm are its children) and `sizeup-adsb` (readsb), and holds the
+   updater and the health timer, so nothing opens a dongle while the EEPROM is written.
+3. **shortfinal**: if its claim (`~/.local/state/rtl-claims/<serial>.json`) holds that serial, it asks you to switch
+   that dongle Off in shortfinal and waits (Enter to look again, `q` to give up). shortfinal is never stopped or
+   killed from here.
+4. **Backs up the EEPROM**: `rtl_eeprom -d N -r ~/sizeup-eeprom-backups/<old>-<date>.bin` (your home under sudo).
+   No backup, or one that isn't a 256-byte RTL2832 EEPROM, and nothing is written. To undo later:
+   `rtl_eeprom -d <index> -w <that file>`.
+5. **Writes** `rtl_eeprom -d N -s <new>`, answering its *Write new configuration to device [y/n]?*.
+6. **Replug**: it asks you to unplug that dongle and plug it back in (WSL: sizeup-usb attaches it again within ~10
+   s), waits up to 5 minutes, and checks that the new serial is there, on one dongle.
+7. **References** to the old serial: the job saved for it (`sdr_modes.json`), the ADS-B choice
+   (`state/adsb_receiver.json`), `[radio] sdr_names` / `sdrs` / `sdr_ignore` / `shared_device`, a channel's
+   `device`, `[aircraft.receiver] sdr`, a trunk-recorder source. They are moved to the new serial only when it is
+   certain the renamed dongle is the one they meant: its serial was its own, or it has the product that serial had
+   before the second dongle turned up. Renaming the newcomer (the usual case) leaves them with the dongle that keeps
+   the old serial: nothing to change. When it can't be told (no product on record, two of the same model) nothing is
+   changed and it prints what to set either way. `/etc/sizeup/config.toml` is never edited: it prints the exact line
+   (`[radio] sdr_names: "hpn-twr" = "V3 #2" (in place of "00000001" = "V3 #2")`); then `sudo sizeup-station restart`.
+8. **Starts** what it stopped and lists the dongles: `#4  hpn-twr  NESDR SMArt: Off`, `#1  00000001 (V3 #2)
+   RTL2838UHIDIR: Fire/EMS 15 (trunk-recorder)`. Pick the new one's job on the station page or the hub's Settings >
+   Radios (HPN Tower for the airband dongle).
+
+If anything fails after the services were stopped, they are started again and it says what stopped it.
+
+**Examples.**
+
+* The new **NESDR SMArt** for HPN Tower, on `00000001` like V3 #2 (the alert names its index, e.g. 4):
+  `sudo sizeup-station sdr-serial 4 hpn-twr`, replug it, then `[radio] sdr_names`: `hpn-twr = "NESDR SMArt"` and
+  its row to **HPN Tower**. V3 #2 keeps `00000001` and its job.
+* The **ADS-B dongle** (behind the 1090 MHz filter), on a factory serial: `sudo sizeup-station sdr-serial <index>
+  adsb1090`, replug, then **Use for ADS-B** on its row (or `[aircraft.receiver] sdr = "adsb1090"`). sizeup-adsb is
+  stopped while it writes and started after.
+
+By hand, if you must (the same steps): `sudo systemctl stop sizeup-station sizeup-adsb`, stop shortfinal's use of
+it, `rtl_eeprom -d N -r ~/sizeup-eeprom-backups/<old>.bin`, `rtl_eeprom -d N -s <new>` (answer `y`), replug,
+`sudo systemctl start sizeup-station sizeup-adsb`.
 
 ## When things go wrong, it comes back by itself
 
@@ -478,7 +536,7 @@ station id (`pcfd-hq`), the hub link's state (Hub connected / Hub unreachable / 
 forwarding) and links to the CAD on the hub. Three views:
 
 * **Radios**: the receivers, speech-to-text and the Hub row; each dongle's job (and whether shortfinal
-  holds it); the paged incident; Channels (record, transcribe, engine: set on the hub while this
+  holds it; two dongles on one serial: a red box with the fix, [above](#two-dongles-one-serial)); the paged incident; Channels (record, transcribe, engine: set on the hub while this
   forwards, locked here); the AWS vocabulary; re-run speech-to-text; the disk.
 * **Monitor**: the pages and transmissions this station heard, newest first, with the audio, the talker
   (rig and radio ID), the channel and the transcript. Channels on AWS say "Transcribed on the hub

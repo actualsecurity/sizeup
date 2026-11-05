@@ -681,8 +681,10 @@ class NfmReceiver:
             dev = None
             if callable(self.device):  # a configured serial, looked up right now (never passed as-is)
                 dev = self.device()
-                if dev is None:
-                    self.state, self.detail = "absent", f"SDR '{self.device_name}' not plugged in"
+                if dev is None:          # not plugged in, or two dongles share its serial (#242): never a guess
+                    why = getattr(self.device, "why", "")
+                    self.state, self.detail = ("ambiguous", f"SDR '{self.device_name}': {why}") if why else (
+                        "absent", f"SDR '{self.device_name}' not plugged in")
                     self._stop.wait(15.0)
                     continue
             try:

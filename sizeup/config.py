@@ -188,6 +188,8 @@ class Config:
     alerts_outbox_min: float = 5.0       # the oldest event still waiting on the station this old
     alerts_disk_pct: float = 90.0        # the station's disk this full
     alerts_repeat_min: float = 15.0      # at most one push per condition this often (plus its recovery)
+    # the channels whose silence far beyond their usual gap is an alert, not just a hint (sizeup/cloud/health.py, #242)
+    alerts_main_channels: tuple[str, ...] = ("tg:307", "FG1", "South 2", "HPN Tower")
     # [station] auto_update: a Linux station installed by deploy/station/install-linux.sh follows the
     # hub's build (sizeup/cloud/autoupdate.py); false keeps it where it is (also: sizeup-station autoupdate off)
     station_auto_update: bool = True
@@ -448,7 +450,8 @@ def _alerts(data: dict, prealert: dict) -> dict:
     SIZEUP_STATUS_TOPIC is set. Tapout's topics (and whatever [prealert] names) are refused, by exact name."""
     from sizeup.notify import server_problem, topic_problem
     al = _take(data.get("alerts", {}), "alerts", {"ntfy_topic", "status_topic", "ntfy_server", "silent_min",
-                                                  "behind_min", "down_min", "outbox_min", "disk_pct", "repeat_min"})
+                                                  "behind_min", "down_min", "outbox_min", "disk_pct", "repeat_min",
+                                                  "main_channels"})
     tapout = (prealert.get("prealert_ring_topic", ""), prealert.get("prealert_status_topic", ""))
     topics, sources = {}, {}
     for key, env in (("ntfy_topic", "SIZEUP_ALERT_TOPIC"), ("status_topic", "SIZEUP_STATUS_TOPIC")):
@@ -470,6 +473,11 @@ def _alerts(data: dict, prealert: dict) -> dict:
         if isinstance(v, bool) or not isinstance(v, (int, float)) or not lo <= float(v) <= hi:
             raise ConfigError(f"alerts.{k}: a number from {lo:g} to {hi:g}")
         out[f"alerts_{k}"] = float(v)
+    mains = al.get("main_channels", ["tg:307", "FG1", "South 2", "HPN Tower"])
+    if not isinstance(mains, list) or not all(isinstance(x, (str, int)) and not isinstance(x, bool) for x in mains):
+        raise ConfigError('alerts.main_channels: a list of channel labels and talkgroups, e.g. ["tg:307", "FG1", "South 2"]')
+    out["alerts_main_channels"] = tuple(dict.fromkeys(f"tg:{x}" if isinstance(x, int) or str(x).strip().isdigit()
+                                                      else str(x).strip() for x in mains if str(x).strip()))
     server_source = ("env" if os.environ.get("SIZEUP_ALERT_SERVER", "").strip() else
                      "config" if str(al.get("ntfy_server", "")).strip() else "default")
     return dict(alerts_ntfy_topic=topic, alerts_status_topic=topics["status_topic"], alerts_ntfy_server=server,

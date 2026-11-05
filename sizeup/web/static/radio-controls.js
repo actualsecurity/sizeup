@@ -20,7 +20,7 @@ window.RadioControls = (() => {
   const GROUP_ORDER = ["Fire/EMS", "County Police", "DOT", "Hospital", "Operations", "Interop/Events", "OEM", ""];
   const GROUP_COLORS = { "Fire/EMS": "#ff7a59", "County Police": "#6aa8ff", "DOT": "#e8d84a", "Hospital": "#f27ad1",
                          "Operations": "#7ee07e", "Interop/Events": "#B8C0CA", "OEM": "#ffcf7a", "": "#9AA3AD" };
-  const RADIO_STATE = { ok: "", off: "off", absent: "absent", down: "down", starting: "starting" };
+  const RADIO_STATE = { ok: "", off: "off", absent: "absent", down: "down", starting: "starting", ambiguous: "serial shared" };
   const st = { box: null, state: null, timer: 0, pending: new Map(), cpending: new Map(), error: "", sdrBusy: false, sdrError: "",
                adsbBusy: false, adsbError: "",
                rerunBusy: false, rerunMsg: "", confirm: null, confirmTimer: 0, closing: null, closeTimer: 0, n: {},
@@ -58,6 +58,7 @@ window.RadioControls = (() => {
       n.radios = el("div", "radios");
       n.storage = el("div", "dim small");
       n.sdr = el("div", "sdrs");
+      n.dups = el("div", "sdr-dups");                // two dongles, one serial (#242): the fix
       n.adsb = el("div", "adsb-box");
       n.tgSum = el("span", "dim small");
       n.filter = el("input", "tg-filter");
@@ -90,7 +91,9 @@ window.RadioControls = (() => {
         tab("receivers", card("Receivers", "Each radio, speech-to-text and the dispatch voice.\nSDR: one dongle hears one of these at a time; "
              + "pick what it listens to. Plug in another dongle to run two at once.\nADS-B receiver (reserved): the dongle "
              + "behind the 1090 MHz filter and LNA, chosen by its serial. Only its decoder (readsb) uses it; no channel and "
-             + "no auto-assign ever do. Admins name it with Use for ADS-B on its row, or release it.", n.radios, n.sdr, n.adsb, n.storage)),
+             + "no auto-assign ever do. Admins name it with Use for ADS-B on its row, or release it.\nTwo dongles with one serial "
+             + "(a factory 00000001) can't be told apart: neither is opened by it until one is renamed; the box above the "
+             + "dongles says how.", n.radios, n.dups, n.sdr, n.adsb, n.storage)),
         tab("receivers", card("Paged incident", "The incident the station opened from the last page: Main traffic attaches to it until it "
              + "goes quiet. Close it when the call is over.", n.inc)),
         tab("channels", card("Channels", "Record: keeps its transmissions (off for FG1, FG2 or South 2: the receiver keeps running, squelch, "
@@ -189,8 +192,33 @@ window.RadioControls = (() => {
     });
   }
 
+  // Two dongles with one serial (#242): what can't run, and the fix (sizeup-station sdr-serial, rtl_eeprom underneath).
+  function renderDups(sdr) {
+    const box = st.n.dups, dups = (sdr && sdr.duplicates) || [];
+    const key = JSON.stringify(dups.map((d) => [d.serial, d.indexes, d.products, d.job, d.text]));
+    if (box.dataset.key === key) return;
+    box.dataset.key = key;
+    box.replaceChildren(...dups.map((d) => {
+      const p = el("div", "notice err sdr-dup");
+      const idx = d.rename ?? d.indexes[d.indexes.length - 1];
+      p.append(el("b", "", `Serial ${d.serial} is on ${d.indexes.length} dongles`),
+        el("div", "", d.text + (d.job && d.job !== "Off" ? ` ${d.name}'s job ${d.job} doesn't (re)start until then.` : "")),
+        el("div", "small", "On the station PC (it stops the radios, backs up the EEPROM, writes the serial with rtl_eeprom, "
+          + "waits for you to unplug and replug that dongle, then starts them again):"),
+        el("pre", "small", `sudo sizeup-station sdr-serial ${idx} <new-serial> --dry-run\nsudo sizeup-station sdr-serial ${idx} <new-serial>`),
+        el("div", "dim small", "A new serial: 3-16 letters, digits or -, with a letter, e.g. hpn-twr (the airband dongle) or adsb1090 "
+          + "(the ADS-B one)."),
+        el("div", "dim small", "By hand: rtl_eeprom -d " + idx + " -r ~/sizeup-eeprom-backups/" + d.serial + "-backup.bin, then rtl_eeprom -d "
+          + idx + " -s <new-serial> with sizeup-station and sizeup-adsb stopped (deploy/station/README.md \"Two dongles, one serial\")."
+          + (d.products && d.products.length ? ` Products: ${d.indexes.map((i, k) => `#${i} ${d.products[k] || "?"}`).join(", ")}.` : "")));
+      return p;
+    }));
+    box.hidden = !dups.length;
+  }
+
   function renderSdr() {
     const sdr = st.state && st.state.sdr, box = st.n.sdr;
+    renderDups(sdr);
     show(box, !!(sdr && sdr.shared));
     if (!sdr || !sdr.shared) return;
     const list = sdr.sdrs || [{ serial: "", mode: sdr.mode, present: true }];
@@ -223,14 +251,16 @@ window.RadioControls = (() => {
       if (!row) continue;
       row.classList.toggle("absent", !x.present);
       row.classList.toggle("held", !!x.held_by);
+      row.classList.toggle("ambiguous", !!x.ambiguous);
       setText(row.querySelector(".sdr-label"), (list.length > 1 ? `SDR ${x.name || x.serial}` : "SDR") + (x.present ? "" : " unplugged")
+              + (x.ambiguous ? " · serial shared: not opened" : "")
               + (x.held_by ? `: ${x.held_by.app} ${x.held_by.mode}` : "")
               + (x.set_by === "auto" && x.mode !== "Off" ? ` · ${x.mode} · auto` : ""));   // given by [radio] auto_assign
       setText(row.querySelector(".sdr-err"), st.sdrError);
       const nm = (x.name && x.name !== x.serial ? `${x.name} (serial ${x.serial})` : x.serial) + (x.product ? `, ${x.product}` : "");
       const who = x.set_by === "auto" ? `${x.mode} set automatically when it was plugged in`
                 : x.set_by === "person" ? `${x.mode} picked by a person` : "";
-      row.title = (x.present ? `SDR ${nm}` : `SDR ${nm}: not plugged in`) + (who ? `\n${who}` : "");
+      row.title = (x.present ? `SDR ${nm}` : `SDR ${nm}: not plugged in`) + (who ? `\n${who}` : "") + (x.ambiguous ? `\n${x.ambiguous}` : "");
       for (const b of row.querySelectorAll("button")) {
         const m = b.dataset.mode;
         const there = m !== "Off" && list.find((o) => o.serial !== x.serial && o.mode === m);

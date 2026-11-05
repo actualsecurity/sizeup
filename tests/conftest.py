@@ -9,6 +9,17 @@ def _private_claims_dir(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_real_dongles(monkeypatch):
+    """Tests never enumerate the real RTL-SDRs on this machine (librtlsdr opens each to read its serial): no librtlsdr,
+    so no dongle, unless a test hands in its own fake device list."""
+    import sizeup.radio.adsbd as adsbd
+    import sizeup.radio.sdr as sdr
+    monkeypatch.setattr(sdr, "_load", lambda rtl_fm="": None)
+    monkeypatch.setattr(sdr, "_cache", (0.0, []))
+    monkeypatch.setattr(adsbd, "_load", lambda: None)
+
+
+@pytest.fixture(autouse=True)
 def _no_real_keychain(monkeypatch):
     """Tests never read the real macOS Keychain (sizeup/cloud/stationmode.py): every lookup finds
     nothing unless a test hands in its own fake `security`."""
