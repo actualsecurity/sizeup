@@ -200,29 +200,34 @@ class Config:
     atc_dedupe_min: float = 5.0        # the same subject again within this: added to the open pre-alert
     atc_expire_min: float = 30.0       # an open pre-alert nobody answered: expired after this
     atc_max_per_hour: int = 8          # new pre-alerts an hour at most (more: added to the latest open one)
-    # [roads] (sizeup/roads.py, #73, #86): the highway layers on the CAD maps: the Thruway's public feeds
-    # (on by default) and 511NY's (a key: env SIZEUP_511NY_KEY, the hub: SSM /sizeup-hub/511ny-key, else
-    # [roads] key, and the feed addresses below; none: 511NY off).
+    # [roads] (sizeup/roads.py, #73, #86, #188): the highway layers on the CAD maps: the Thruway's public feeds
+    # and the county's cameras (on by default), and 511NY's on CARS: its public signs (on by default), the API's
+    # events and the CARS-Hub's CCTV feed with 511NY's username and password (env SIZEUP_511NY_USER / SIZEUP_511NY_PASS, the
+    # hub: SSM /sizeup-hub/511ny-user and /sizeup-hub/511ny-pass; never in a file): off until they are there.
     roads_enabled: bool = True
-    roads_key: str = ""
+    roads_ny511: bool = True
+    roads_511ny_user: str = ""
+    roads_511ny_pass: str = ""
     roads_bbox: tuple[float, float, float, float] = (-73.80, 40.92, -73.56, 41.10)   # west, south, east, north
     roads_cameras_s: float = 3600.0
-    roads_events_s: float = 90.0
+    roads_events_s: float = 300.0       # 511NY: "once every 5 minutes"
     roads_signs_s: float = 300.0
-    # Each feed's address from 511NY's access approval, "{key}" where the key goes ("" = that feed off).
+    # 511NY's addresses: "" = its own (sizeup/roads.py NY511_URLS), "off" = that feed off, else an https:// address
     roads_events_url: str = ""
-    roads_cameras_url: str = ""
     roads_signs_url: str = ""
+    roads_ny511_hub: str = ""           # the CARS-Hub's base address ("" = https://nysdot.carsprogram.org/hub/, "off" = none)
+    roads_carshub_imagery: bool = True   # CARS-Hub cameras on the map / wall / overlay (false: only counted against ours)
     roads_thruway: bool = True        # the NYS Thruway Authority's public feeds (no key): I-95, I-287 (#86)
     roads_county: bool = True         # Westchester County DPW's cameras (a public ArcGIS layer, no key) (#99)
     roads_stream_max: int = 8         # live camera streams open at once, hub-wide (sizeup/roads.py STREAM_MAX, #125)
     roads_wall_streams: int = 0       # the camera wall's live tiles at once per page; 0: every camera in our area that streams
     # [roadwork] (sizeup/roadprojects.py, #185): road projects & closures for the maps and the incident view: the
     # Thruway's and 511NY's roadwork (through [roads]), the capital programs (Thruway, NYSDOT, CTDOT), the villages'
-    # road notices; a WZDx feed when one is set ("{key}": the 511NY key, SIZEUP_511NY_KEY).
+    # road notices; 511NY's WZDx (the CARS API, with [roads]' username and password) and any other public WZDx feed.
     roadwork_enabled: bool = True
     roadwork_projects: bool = True
     roadwork_notices: bool = True
+    roadwork_wzdx: bool = True          # 511NY's WZDx (CARS API /wzdx): on once the credentials are there
     roadwork_wzdx_url: str = ""
     # [gis] (sizeup/gis.py, #91): Westchester County GIS datasets as map layers, fetched by the hub.
     # load() ships the starter set (gis.DEFAULT_LAYERS); built directly (tests), none.
@@ -335,7 +340,8 @@ def hub_url_problem(url: str) -> str:
 #                                secret; the hub: SSM /sizeup-hub/alert-topic)
 #   SIZEUP_STATUS_TOPIC          [alerts] status_topic (our status / health push topic; the hub: SSM
 #                                /sizeup-hub/status-topic)
-#   SIZEUP_511NY_KEY                  [roads] key: the 511NY developer key (never in a file on the hub)
+#   SIZEUP_511NY_USER / _PASS         [roads]: 511NY's username and password for the CARS API and CARS-Hub (only
+#                                     ever here; the hub: SSM /sizeup-hub/511ny-user, /sizeup-hub/511ny-pass)
 #   SIZEUP_STATUS_TOKEN               [cloud] status_token: the deploy check's read-only bearer
 #   (no [gis] secrets: the county's open data needs no key)
 #   SIZEUP_MTA_KEY                    [trains] key: only should the MTA require one again (none needed, 2026-10-14)
@@ -551,18 +557,27 @@ def _auto_assign(radio: dict, channels: list) -> dict:
 
 
 def _roads(data: dict) -> dict:
-    """[roads] -> Config fields. No section: the Thruway's feeds on, 511NY off (no feed addresses), our
-    area, the default schedule. The key never needs to be in a file (the environment wins); the
-    addresses hold "{key}" instead."""
-    rd = _take(data.get("roads", {}), "roads", {"enabled", "key", "bbox", "cameras_every_min", "events_every_s",
-                                                "signs_every_min", "events_url", "cameras_url", "signs_url", "thruway", "county",
-                                                "stream_max", "wall_streams"})
-    enabled, thruway, county = rd.get("enabled", True), rd.get("thruway", True), rd.get("county", True)
-    if not all(isinstance(x, bool) for x in (enabled, thruway, county)):
-        raise ConfigError("roads.enabled / roads.thruway / roads.county: true or false")
-    key = _env("SIZEUP_511NY_KEY", str(rd.get("key", ""))).strip()
-    if key and not re.fullmatch(r"[!-~]{8,256}", key):
-        raise ConfigError("roads.key / SIZEUP_511NY_KEY: the key from 511NY's access approval (8 or more characters, no spaces)")
+    """[roads] -> Config fields. No section: the Thruway's and the county's feeds on, 511NY's signs on and its
+    events and CARS-Hub waiting for the username and password (the environment only, never a file), our area, the
+    default schedule (511NY: every 5 minutes at most)."""
+    raw = data.get("roads", {})
+    if isinstance(raw, dict):
+        for gone, why in (("key", "511NY moved to CARS on 2026-09-30 and gives a username and password instead: env "
+                                  "SIZEUP_511NY_USER / SIZEUP_511NY_PASS (the hub: SSM /sizeup-hub/511ny-user, -pass)"),
+                          ("cameras_url", "511NY's cameras now come from the CARS-Hub's CCTV feed: [roads] ny511_hub"),
+                          ("carshub_url", "the CARS-Hub's base address: [roads] ny511_hub")):
+            if gone in raw:
+                raise ConfigError(f"roads.{gone}: no longer used ({why})")
+    rd = _take(raw, "roads", {"enabled", "ny511", "bbox", "cameras_every_min", "events_every_s", "signs_every_min",
+                              "events_url", "signs_url", "ny511_hub", "carshub_imagery", "thruway", "county",
+                              "stream_max", "wall_streams"})
+    flags = {k: rd.get(k, d) for k, d in (("enabled", True), ("ny511", True), ("thruway", True), ("county", True),
+                                          ("carshub_imagery", True))}
+    if not all(isinstance(x, bool) for x in flags.values()):
+        raise ConfigError("roads.enabled / ny511 / thruway / county / carshub_imagery: true or false")
+    user, password = _env("SIZEUP_511NY_USER", ""), os.environ.get("SIZEUP_511NY_PASS", "")
+    if bool(user) != bool(password):
+        raise ConfigError("SIZEUP_511NY_USER and SIZEUP_511NY_PASS: both (511NY's username and password), or neither")
     bbox = rd.get("bbox", [-73.80, 40.92, -73.56, 41.10])
     try:
         w, s, e, n = (float(x) for x in bbox)
@@ -571,48 +586,50 @@ def _roads(data: dict) -> dict:
     if not (-180 <= w < e <= 180 and -90 <= s < n <= 90) or e - w > 3 or n - s > 3:
         raise ConfigError("roads.bbox: [west, south, east, north], west < east and south < north, at most 3 degrees a side")
     try:
-        cams, events, signs = (float(rd.get("cameras_every_min", 60)) * 60, float(rd.get("events_every_s", 90)),
+        cams, events, signs = (float(rd.get("cameras_every_min", 60)) * 60, float(rd.get("events_every_s", 300)),
                                float(rd.get("signs_every_min", 5)) * 60)
     except (TypeError, ValueError):
         raise ConfigError("roads.cameras_every_min / events_every_s / signs_every_min: numbers") from None
-    # 511NY allows 10 calls a minute per key: these floors keep the three feeds at 5 at most.
-    if not (cams >= 600 and events >= 60 and signs >= 60):
-        raise ConfigError("roads: cameras_every_min at least 10, events_every_s at least 60, signs_every_min at least 1 "
-                          "(511NY allows 10 calls a minute)")
+    # 511NY recommends polling once every 5 minutes: never more often.
+    if not (cams >= 600 and events >= 300 and signs >= 300):
+        raise ConfigError("roads: cameras_every_min at least 10, events_every_s at least 300, signs_every_min at least 5 "
+                          "(511NY: once every 5 minutes)")
     smax, wall = rd.get("stream_max", 8), rd.get("wall_streams", 0)
     if not (isinstance(smax, int) and not isinstance(smax, bool) and 1 <= smax <= 64):
         raise ConfigError("roads.stream_max: live camera streams at once through the hub, 1 to 64")
     if not (isinstance(wall, int) and not isinstance(wall, bool) and 0 <= wall <= 64):
         raise ConfigError("roads.wall_streams: the camera wall's live tiles per page, 0 (every camera in our area that streams) to 64")
     urls = {}
-    for k in ("events_url", "cameras_url", "signs_url"):
+    for k in ("events_url", "signs_url", "ny511_hub"):
         u = str(rd.get(k, "")).strip()
-        m = re.fullmatch(r"(https?)://([^/:?#\s]+)(:\d+)?([^\s]*)", u) if u else None
-        if u and (not m or (m.group(1) == "http" and m.group(2) not in ("127.0.0.1", "localhost", "::1"))):
-            raise ConfigError(f"roads.{k}: the feed's https:// address from 511NY, with {{key}} where the key goes "
-                              "(plain http only to this machine)")
-        if u and "key=" in u.lower() and "{key}" not in u:
-            raise ConfigError(f"roads.{k}: put {{key}} where the key goes, never the key itself (SIZEUP_511NY_KEY)")
+        if u == "off":
+            urls[f"roads_{k}"] = u
+            continue
+        m = re.fullmatch(r"(https?)://([^/:?#\s@]+)(:\d+)?([^\s]*)", u) if u else None
+        if u and (not m or "@" in u.split("/")[2] or (m.group(1) == "http" and m.group(2) not in ("127.0.0.1", "localhost", "::1"))):
+            raise ConfigError(f'roads.{k}: an https:// address (plain http only to this machine; no user:password@), or "off"')
         urls[f"roads_{k}"] = u
-    return dict(roads_enabled=enabled, roads_key=key, roads_bbox=(w, s, e, n), roads_cameras_s=cams,
-                roads_events_s=events, roads_signs_s=signs, roads_thruway=thruway, roads_county=county,
+    return dict(roads_enabled=flags["enabled"], roads_ny511=flags["ny511"], roads_511ny_user=user, roads_511ny_pass=password,
+                roads_bbox=(w, s, e, n), roads_cameras_s=cams, roads_events_s=events, roads_signs_s=signs,
+                roads_thruway=flags["thruway"], roads_county=flags["county"], roads_carshub_imagery=flags["carshub_imagery"],
                 roads_stream_max=smax, roads_wall_streams=wall, **urls)
 
 
 def _roadwork(data: dict) -> dict:
     """[roadwork] -> Config fields. No section: on, every public source; WZDx off (no address)."""
-    rw = _take(data.get("roadwork", {}), "roadwork", {"enabled", "projects", "notices", "wzdx_url"})
-    flags = {k: rw.get(k, True) for k in ("enabled", "projects", "notices")}
+    rw = _take(data.get("roadwork", {}), "roadwork", {"enabled", "projects", "notices", "wzdx", "wzdx_url"})
+    flags = {k: rw.get(k, True) for k in ("enabled", "projects", "notices", "wzdx")}
     if not all(isinstance(v, bool) for v in flags.values()):
-        raise ConfigError("roadwork.enabled / roadwork.projects / roadwork.notices: true or false")
+        raise ConfigError("roadwork.enabled / roadwork.projects / roadwork.notices / roadwork.wzdx: true or false")
     u = str(rw.get("wzdx_url", "")).strip()
     m = re.fullmatch(r"(https?)://([^/:?#\s]+)(:\d+)?([^\s]*)", u) if u else None
     if u and (not m or (m.group(1) == "http" and m.group(2) not in ("127.0.0.1", "localhost", "::1"))):
-        raise ConfigError("roadwork.wzdx_url: the WZDx feed's https:// address, {key} where a key goes (plain http only to this machine)")
-    if u and re.search(r"(key|token)=", u, re.I) and "{key}" not in u:
-        raise ConfigError("roadwork.wzdx_url: put {key} where the key goes, never the key itself (SIZEUP_511NY_KEY)")
+        raise ConfigError("roadwork.wzdx_url: another WZDx feed's https:// address (plain http only to this machine)")
+    if u and (re.search(r"(key|token)=", u, re.I) or "{key}" in u):
+        raise ConfigError("roadwork.wzdx_url: another public WZDx feed's address, never a key in it "
+                          "(511NY's own WZDx: [roadwork] wzdx = true, with [roads]' username and password)")
     return dict(roadwork_enabled=flags["enabled"], roadwork_projects=flags["projects"], roadwork_notices=flags["notices"],
-                roadwork_wzdx_url=u)
+                roadwork_wzdx=flags["wzdx"], roadwork_wzdx_url=u)
 
 
 def _geo(data: dict) -> dict:

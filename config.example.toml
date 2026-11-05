@@ -280,19 +280,22 @@ heartbeat_stale_min = 90             # no heartbeat (or restart) this long: "Tap
 
 # [roads]: the CAD maps' highway layers (sizeup/roads.py, docs/cloud.md "Highway layers"): traffic
 # cameras, incidents and closures, roadwork and message signs for our area, from the NYS Thruway
-# Authority's public feeds (I-95, I-287; no key; on by default) and from 511NY once it approves
-# access (https://511ny.org/help/24: the approval brings the feed addresses and a key; the key: env
-# SIZEUP_511NY_KEY, never here; the addresses have {key} where it goes). Camera snapshots go through
-# this process, never from the browser to a provider. The mileposts and exits are the gazetteer's.
+# Authority's public feeds (I-95, I-287; no key; on by default) and from 511NY on CARS (#188): its public
+# message signs (on by default), and with its username and password (env SIZEUP_511NY_USER / SIZEUP_511NY_PASS,
+# never here) the CARS API's incidents, closures and roadwork and the CARS-Hub's CCTV cameras. 511NY asks
+# for once every 5 minutes at most. Camera snapshots go through this process, never from the browser to a
+# provider. The mileposts and exits are the gazetteer's. Try 511NY's feeds once by hand: tools/ny511_probe.py.
 # [roads]
 # thruway = true
 # county = true                          # Westchester County DPW's cameras (no key)
-# events_url = "https://.../events?key={key}&format=json"
-# cameras_url = "https://.../cameras?key={key}"
-# signs_url = "https://.../messagesigns?key={key}&format=json"
+# ny511 = true                           # 511NY's feeds (signs now; events and CARS-Hub with the credentials)
+# events_url = ""                        # "" = 511NY's (the CARS API's /events), "off" = none
+# signs_url = ""                         # "" = 511NY's (https://nyapi.carsprogram.org/signs.json), "off" = none
+# ny511_hub = ""                         # "" = https://nysdot.carsprogram.org/hub/ (its data/cctv.xml), "off" = none
+# carshub_imagery = true                 # the CARS-Hub's new cameras on the map, wall and overlay (false: only counted)
 # bbox = [-73.80, 40.92, -73.56, 41.10]   # west, south, east, north: Port Chester, Rye Brook, neighbours
-# events_every_s = 90                     # at least 60 (511NY: 10 calls a minute per key)
-# signs_every_min = 5                     # at least 1
+# events_every_s = 300                    # at least 300 (511NY: once every 5 minutes)
+# signs_every_min = 5                     # at least 5
 # cameras_every_min = 60                  # at least 10
 # stream_max = 8                          # live camera streams through the hub at once (a camera watched by several
 #                                         # pages is one); each ~26 KB/s and ~1.4 % of a core: 8 is safe on 0.25 vCPU
@@ -307,7 +310,8 @@ heartbeat_stale_min = 90             # no heartbeat (or restart) this long: "Tap
 # enabled = true
 # projects = true                        # the capital programs (public ArcGIS / XML, no key)
 # notices = true                         # the villages' RSS road notices
-# wzdx_url = ""                          # a WZDx feed, {key} where the key goes (511NY's key, SIZEUP_511NY_KEY): off until set
+# wzdx = true                            # 511NY's WZDx (the CARS API, [roads]' username and password): on with them
+# wzdx_url = ""                          # any other public WZDx feed: off until set
 
 # [weather]: NWS alerts (the banner), conditions (the header), radar (the maps' Layers) and NOAA tides (marine
 # calls, the board's marine block): sizeup/weather.py, docs/cloud.md "Weather and water". Public data, no key,

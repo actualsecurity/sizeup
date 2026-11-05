@@ -273,6 +273,10 @@ def windows(rec: dict, now: float, days: int = WINDOW_DAYS) -> list[list[float |
     start, end, hours = rec.get("start"), rec.get("end"), [h for h in rec.get("hours") or [] if h.get("from") and h.get("to")]
     if end is not None and end <= now:
         return []
+    occ = [o for o in rec.get("occurrences") or [] if isinstance(o, list) and len(o) == 2 and None not in o]
+    if occ:                                          # the source's own dated occurrences (511NY's scheduleOccurrences)
+        out = [[max(a, start) if start is not None else a, min(b, end) if end is not None else b] for a, b in occ]
+        return sorted([w for w in out if w[1] > w[0] and w[1] > now], key=lambda w: w[0])[:MAX_WINDOWS]
     if not hours:
         return [[start, end]]
     out: list[list[float | None]] = []
@@ -480,6 +484,8 @@ def from_roads_event(e: dict) -> dict | None:
     a, b = (m.group(1), m.group(2)) if m else ("", "")
     if not m and (m2 := AT.search(desc)):
         a = m2.group(1)
+    if e.get("cross_from"):                                # the source's own cross streets (511NY on CARS)
+        a, b = e["cross_from"], e.get("cross_to") or ""
     g = None
     if isinstance(e.get("line"), list) and len(e["line"]) >= 2:
         g = {"type": "LineString", "coordinates": e["line"]}
@@ -489,10 +495,11 @@ def from_roads_event(e: dict) -> dict | None:
             "title": _s(e.get("subtype") or e.get("type") or "Roadwork", 120).capitalize(), "description": desc,
             "road": _s(e.get("road"), 80), "dir": _s(e.get("dir"), 40), "cross_from": _s(a, 80), "cross_to": _s(b, 80),
             "mile": _s(e.get("mile"), 10),
-            "closure": closure_of(desc, e.get("lanes") or "", full=bool(e.get("full_closure"))),
+            "closure": e.get("closure") or closure_of(desc, e.get("lanes") or "", full=bool(e.get("full_closure"))),
             "lanes": _s(e.get("lanes"), 160), "detour": _s(e.get("detour"), 400), "geometry": g,
             "start": e.get("start"), "end": e.get("end"), "start_text": "", "end_text": _s(e.get("end_text"), 80),
             "no_end": e.get("end") is None, "hours": list(e.get("hours") or []), "hours_text": _s(e.get("hours_text"), 200),
+            "occurrences": [list(o) for o in e.get("occurrences") or []],
             "updated": e.get("updated"), "link": e.get("link") or "", "placed": g is not None, "place_how": ""}
 
 
@@ -878,8 +885,9 @@ SOURCES_DOC = """
   Thruway roadwork   sizeup/roads.py's Thruway events (webdataapi.thruway.ny.gov events/xml), roadwork only; no start
                      time, the end as the Thruway gives it ("Until further notice"). Disclaimer: no resale or
                      redistribution for profit (https://www.thruway.ny.gov/legal/disclaimer).
-  511NY roadwork     sizeup/roads.py's 511NY events once the key arrives ([roads] events_url, SIZEUP_511NY_KEY): start,
-                     planned end, lanes, full closure, recurring schedules, detour, the encoded line, when given.
+  511NY roadwork     sizeup/roads.py's 511NY events (the CARS API, once 511NY's username and password are there: SSM
+                     /sizeup-hub/511ny-user and -pass): planned closures and construction, with start, end (when
+                     the source gave one), lanes, full closure, scheduled occurrences, detour, the line, when given.
   Thruway projects   the Thruway's capital program (webdataapi.thruway.ny.gov capitalprogram/xml, public, no key):
                      active projects, a point and the estimated completion year. Same disclaimer.
   NYSDOT projects    NYSDOT's Capital Program Projects, In Construction (gis.dot.ny.gov ArcGIS, layer 4, public, no
@@ -892,8 +900,10 @@ SOURCES_DOC = """
                      Public Works news, Alert Center) and Rye Brook (WordPress): published for subscribers to read;
                      only their road notices, each linked to its page, placed only when its words name a block, an
                      address or a corner the gazetteer confirms.
-  WZDx               any Work Zone Data Exchange feed ([roadwork] wzdx_url, "{key}" for a key: 511NY's, when its
-                     post-2026-09-30 address is known). Off until set.
+  511NY WZDx         the CARS API's Work Zone Data Exchange feed (GET /carsapi_v1/api/wzdx, the same username and
+                     password; [roadwork] wzdx = true). Off until the credentials are there; folded into 511NY's
+                     events where they are the same work zone (511NY's events win).
+  WZDx               any other public Work Zone Data Exchange feed ([roadwork] wzdx_url). Off until set.
 """
 THRUWAY_CAPITAL_URL = "https://webdataapi.thruway.ny.gov/api/data/capitalprogram/xml"
 NYSDOT_URL = ("https://gis.dot.ny.gov/hostingny/rest/services/Projects/CapitalProgramProjects/FeatureServer/4/query"
@@ -945,9 +955,15 @@ def feeds_from_config(cfg) -> list[Feed]:
         for name, short, label, link, url, towns in NOTICE_FEEDS:
             if url:
                 out.append(Feed(name, short, label, link, link, url, "rss", NOTICE_EVERY_S, towns=towns))
-    out.append(Feed("wzdx", "511NY", "511NY work zones (WZDx)", "https://511ny.org/", "https://511ny.org/help/24",
-                    getattr(cfg, "roadwork_wzdx_url", ""), "wzdx", WZDX_EVERY_S, key=getattr(cfg, "roads_key", ""),
-                    why_off="waiting for 511NY's key and WZDx address ([roadwork] wzdx_url, SIZEUP_511NY_KEY)"))
+    from sizeup import roads as r
+    ny = getattr(cfg, "roads_ny511", True) and getattr(cfg, "roadwork_wzdx", True)
+    out.append(Feed("wzdx", r.SOURCE, "511NY work zones (WZDx)", r.LINK_URL, r.TERMS_URL,
+                    r.NY511_URLS.get("wzdx", "") if ny else "", "wzdx", WZDX_EVERY_S,
+                    auth=r.BasicAuth(getattr(cfg, "roads_511ny_user", ""), getattr(cfg, "roads_511ny_pass", "")),
+                    why_off=r.WAITING if ny else "off ([roadwork] wzdx = false)"))
+    if getattr(cfg, "roadwork_wzdx_url", ""):
+        out.append(Feed("wzdx_other", "WZDx", "Work zones (WZDx)", cfg.roadwork_wzdx_url, cfg.roadwork_wzdx_url,
+                        cfg.roadwork_wzdx_url, "wzdx", WZDX_EVERY_S))
     return out
 
 
@@ -959,9 +975,10 @@ class Feed:
     its kind (wzdx | rss), its schedule and how the last read went. A 304 (ETag / Last-Modified) changes nothing."""
 
     def __init__(self, name: str, short: str, label: str, link: str, terms: str, url: str, kind: str, every_s: float,
-                 key: str = "", towns: tuple[str, ...] = (), why_off: str = ""):
+                 key: str = "", towns: tuple[str, ...] = (), why_off: str = "", auth=None):
         self.name, self.short, self.label, self.link, self.terms = name, short, label, link, terms
         self.url, self.kind, self.every_s, self.key, self.towns = url, kind, float(every_s), (key or "").strip(), tuple(towns)
+        self.auth = auth                     # sizeup.roads.BasicAuth: a feed that needs a username and password
         self.why_off = why_off
         self.items: list[dict] = []
         self.notices: list[dict] = []
@@ -969,7 +986,10 @@ class Feed:
 
     @property
     def on(self) -> bool:
-        return bool(self.url) and ("{key}" not in self.url or bool(self.key))
+        return bool(self.url) and ("{key}" not in self.url or bool(self.key)) and (self.auth is None or bool(self.auth))
+
+    def headers(self) -> dict:
+        return dict(self.auth.header()) if self.auth else {}
 
     def why(self) -> str:
         if self.on:
@@ -984,8 +1004,9 @@ class Feed:
 
     def redact(self, text: str) -> str:
         text = str(text)
-        if self.key:
-            text = text.replace(self.key, "***")
+        for x in sorted((self.key, *(self.auth.secrets() if self.auth else ())), key=len, reverse=True):
+            if x:
+                text = text.replace(x, "***")
         return re.sub(r"((?:key|api_key|apikey|token)=)[^&\s'\"]+", r"\1***", text, flags=re.I)
 
     def public(self) -> dict:
@@ -1116,7 +1137,7 @@ class RoadProjects:
             return False
         now = self.clock()
         st = f.status
-        cond = {}
+        cond = f.headers()
         if st["etag"]:
             cond["If-None-Match"] = st["etag"]
         if st["modified"]:
@@ -1148,7 +1169,8 @@ class RoadProjects:
         why = f.redact(why)
         st["fails"] += 1
         if code in (401, 403):
-            wait, why = REFUSED_S, f"{f.short} refused the request ({why})"
+            wait, why = REFUSED_S, (f"{f.short} refused the username and password ({why})" if f.auth
+                                    else f"{f.short} refused the request ({why})")
         elif code == 429:
             wait, why = RATE_LIMITED_S, f"{f.short} rate limit ({why})"
         else:
@@ -1262,7 +1284,7 @@ class RoadProjects:
                 continue
             st = p.status["events"]
             on = p.feed_on("events")
-            why = "" if on else ("waiting for 511NY's key ([roads] events_url, SIZEUP_511NY_KEY)" if p.name == "511ny"
+            why = "" if on else (p.feed_why("events") or "off ([roads] ny511 = false)" if p.name == "511ny"
                                  else "off ([roads] thruway = false)")
             n = sum(1 for e in p.data["events"] if e.get("layer") == "roadwork")
             out.append({"name": p.name, "short": p.short, "label": "511NY (NYSDOT)" if p.name == "511ny" else p.label,

@@ -416,30 +416,45 @@ def gis_sources(gis) -> list[Source]:
 
 def roads_sources(roads) -> list[Source]:
     """The highway feeds (sizeup/roads.py): each provider's camera list on the registry's schedule (daily: it
-    rarely changes; was the Thruway's hourly), its events and signs on the provider's own (built in)."""
+    rarely changes; was the Thruway's hourly), its events and signs on the provider's own (built in). 511NY's (#188):
+    every 5 min (its recommendation; Refresh now no more often either), listed even while they wait for the
+    username and password ("waiting for credentials (SSM ...)"); the CARS-Hub's CCTV inventory hourly."""
     from sizeup import roads as r
     out = []
     for p in roads.providers:
-        group_name = {"511ny": "511NY", "thruway": "Thruway", "county": "County DPW"}.get(p.name, p.short)
+        ny = p.name in ("511ny", r.CARSHUB)
+        group_name = {"511ny": "511NY", r.CARSHUB: "511NY CARS-Hub", "thruway": "Thruway", "county": "County DPW"}.get(p.name, p.short)
         for feed in r.FEEDS:
-            if not p.feed_on(feed):
+            if p.name == r.CARSHUB and feed != "cameras":
+                continue
+            waiting = ny and not p.feed_on(feed) and (feed in p.auth_feeds or feed in p.why_off) and (
+                bool(p.urls.get(feed)) or p.name == r.CARSHUB)
+            if not p.feed_on(feed) and not waiting:
                 continue
             st = p.status[feed]
 
             def status(p=p, feed=feed, st=st) -> dict:
-                return {"at": st["at"], "error": st["error"], "n": st["n"], "next": st["next"]}
+                if not p.feed_on(feed):
+                    return {"on": False, "why": p.feed_why(feed)}
+                out = {"at": st["at"], "error": st["error"], "n": st["n"], "next": st["next"]}
+                if st.get("note"):
+                    out["note"] = st["note"]
+                return out
 
             def refresh(p=p, feed=feed) -> bool:
-                ok = roads.refresh(feed, p)
+                ok = roads.refresh(feed, p, fresh=True)
                 if ok and feed == "cameras":
                     roads._swept = 0.0                       # a new camera list: look at them now (Roads._run)
                 return ok
-            managed = feed == "cameras" and p.name != "511ny"     # 511NY's: as its access approval and [roads] set them
+            managed = feed == "cameras" and not ny
             what = {"cameras": "cameras (the list)", "events": "incidents and closures", "signs": "message signs"}[feed]
+            if p.name == r.CARSHUB:
+                what = "cameras (CCTV XML)"
             out.append(Source(f"roads:{p.name}:{feed}", f"{group_name} {what}", "Cameras", p.label, p.link,
-                              r.ATTRIBUTION if p.name == "511ny" else f"Data: {p.label}", status, refresh,
+                              r.ATTRIBUTION if ny else f"Data: {p.label}", status, refresh,
                               every="daily" if managed else "", hold=_hold(st) if managed else None,
                               builtin="" if managed else f"every {_dur(p.every[feed])}",
+                              min_gap_s=max(MANUAL_GAP_S, r.NY511_MIN_S[feed]) if ny else MANUAL_GAP_S,
                               blocked=lambda st=st: _resting(st, roads.clock)))
     return out
 

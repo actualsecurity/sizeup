@@ -1,0 +1,226 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- RECORDED 2026-11-04 from https://nysdot.carsprogram.org/hub/data/cctv.xml (HTTP Basic; public traveller data),
+     trimmed to seven NYSDOT cameras (six around Port Chester, one in Queens) and one NYC DOT camera -->
+<cctv:cctvInventories xmlns:cctv='http://www.northamericanhub.org/cctv'>
+      <cctvInventory>
+      <owner>
+         <organization-id>2</organization-id>
+         <organization-name>NYSDOT</organization-name>
+      </owner>
+      <inventory>
+         <inventory-item>
+            <device-id>34360</device-id>
+            <device-updated>
+               <date>20261104</date>
+               <time>134834</time>
+               <utc-offset>-0500</utc-offset>
+            </device-updated>
+            <device-name>I-678 at 133rd Avenue Northbound</device-name>
+            <video-url>https://s7.nysdot.skyvdn.com/rtplive/R11_159/playlist.m3u8</video-url>
+            <still-images>
+               <still-image>
+                  <name>I-678 at 133rd Avenue Northbound</name>
+                  <url>https://public.carsprogram.org/cameras/NYSDOT/R11_159.flv.png</url>
+               </still-image>
+            </still-images>
+            <location>
+               <geo-location>
+                  <latitude>40669245</latitude>
+                  <longitude>-73801084</longitude>
+               </geo-location>
+               <link-ownership>New York State</link-ownership>
+               <route-designator>I-678</route-designator>
+               <linear-reference>2.566958819923767</linear-reference>
+            </location>
+         </inventory-item>
+         <inventory-item>
+            <device-id>34353</device-id>
+            <device-updated>
+               <date>20261104</date>
+               <time>134834</time>
+               <utc-offset>-0500</utc-offset>
+            </device-updated>
+            <device-name>Exit 17 Lincoln Ave MM 17.41</device-name>
+            <video-url>https://s7.nysdot.skyvdn.com/rtplive/R8_038/playlist.m3u8</video-url>
+            <still-images>
+               <still-image>
+                  <name>Exit 17 Lincoln Ave MM 17.41</name>
+                  <url>https://public.carsprogram.org/cameras/NYSDOT/R8_038.flv.png</url>
+               </still-image>
+            </still-images>
+            <location>
+               <geo-location>
+                  <latitude>41023395</latitude>
+                  <longitude>-73695047</longitude>
+               </geo-location>
+               <link-ownership>New York State</link-ownership>
+               <route-designator>907W</route-designator>
+               <linear-reference>12.886910408165653</linear-reference>
+            </location>
+         </inventory-item>
+         <inventory-item>
+            <device-id>35589</device-id>
+            <device-updated>
+               <date>20261104</date>
+               <time>134840</time>
+               <utc-offset>-0500</utc-offset>
+            </device-updated>
+            <device-name>I-287 MP 007.80 WB Just East of Interchange 9 (Hutchinson River Parkway)</device-name>
+            <video-url>https://s52.nysdot.skyvdn.com/rtplive/TA_012/playlist.m3u8</video-url>
+            <still-images>
+               <still-image>
+                  <name>I-287 MP 007.80 WB Just East of Interchange 9 (Hutchinson River Parkway)</name>
+                  <url>https://public.carsprogram.org/cameras/NYSDOT/TA_012.flv.png</url>
+               </still-image>
+            </still-images>
+            <location>
+               <geo-location>
+                  <latitude>41013944</latitude>
+                  <longitude>-73709227</longitude>
+               </geo-location>
+               <link-ownership>New York State</link-ownership>
+               <route-designator>I-287</route-designator>
+               <linear-reference>27.340921887217753</linear-reference>
+            </location>
+         </inventory-item>
+         <inventory-item>
+            <device-id>34715</device-id>
+            <device-updated>
+               <date>20261104</date>
+               <time>134835</time>
+               <utc-offset>-0500</utc-offset>
+            </device-updated>
+            <device-name>At Exit 17 on Lincoln Avenue</device-name>
+            <video-url>https://s9.nysdot.skyvdn.com/rtplive/R8_CAMHRP4081/playlist.m3u8</video-url>
+            <still-images>
+               <still-image>
+                  <name>At Exit 17 on Lincoln Avenue</name>
+                  <url>https://public.carsprogram.org/cameras/NYSDOT/R8_CAMHRP4081.flv.png</url>
+               </still-image>
+            </still-images>
+            <location>
+               <geo-location>
+                  <latitude>41023395</latitude>
+                  <longitude>-73695047</longitude>
+               </geo-location>
+               <link-ownership>New York State</link-ownership>
+               <route-designator>907W</route-designator>
+               <linear-reference>12.886910408165653</linear-reference>
+            </location>
+         </inventory-item>
+         <inventory-item>
+            <device-id>35992</device-id>
+            <device-updated>
+               <date>20261104</date>
+               <time>134842</time>
+               <utc-offset>-0500</utc-offset>
+            </device-updated>
+            <device-name>Exit 16 Purchase St MM 16.6</device-name>
+            <video-url>https://s51.nysdot.skyvdn.com/rtplive/R8_039/playlist.m3u8</video-url>
+            <still-images>
+               <still-image>
+                  <name>Exit 16 Purchase St MM 16.6</name>
+                  <url>https://public.carsprogram.org/cameras/NYSDOT/R8_039.flv.png</url>
+               </still-image>
+            </still-images>
+            <location>
+               <geo-location>
+                  <latitude>41022393</latitude>
+                  <longitude>-73709693</longitude>
+               </geo-location>
+               <link-ownership>New York State</link-ownership>
+               <route-designator>907W</route-designator>
+               <linear-reference>12.075111784891702</linear-reference>
+            </location>
+         </inventory-item>
+         <inventory-item>
+            <device-id>36011</device-id>
+            <device-updated>
+               <date>20261104</date>
+               <time>134842</time>
+               <utc-offset>-0500</utc-offset>
+            </device-updated>
+            <device-name>I-95 MP 013.80 SB at Interchange 21 (Route1/I-287)</device-name>
+            <video-url>https://s53.nysdot.skyvdn.com/rtplive/TA_058/playlist.m3u8</video-url>
+            <still-images>
+               <still-image>
+                  <name>I-95 MP 013.80 SB at Interchange 21 (Route1/I-287)</name>
+                  <url>https://public.carsprogram.org/cameras/NYSDOT/TA_058.flv.png</url>
+               </still-image>
+            </still-images>
+            <location>
+               <geo-location>
+                  <latitude>40987337</latitude>
+                  <longitude>-73680267</longitude>
+               </geo-location>
+               <link-ownership>New York State</link-ownership>
+               <route-designator>I-95</route-designator>
+               <linear-reference>22.16798550642083</linear-reference>
+            </location>
+         </inventory-item>
+      </inventory>
+   </cctvInventory>
+   <cctvInventory>
+      <owner>
+         <organization-id>1</organization-id>
+         <organization-name>NYSDOT</organization-name>
+      </owner>
+      <inventory>
+         <inventory-item>
+            <device-id>34259</device-id>
+            <device-updated>
+               <date>20261026</date>
+               <time>151314</time>
+               <utc-offset>-0400</utc-offset>
+            </device-updated>
+            <device-name>SB King Approach - King St/Willett Ave/North Pearl St</device-name>
+            <still-images>
+               <still-image>
+                  <name>SB King Approach - King St/Willett Ave/North Pearl St</name>
+                  <url>https://public.carsprogram.org/cameras/NYSDOT/other/12.jpg</url>
+               </still-image>
+            </still-images>
+            <location>
+               <geo-location>
+                  <latitude>41003494</latitude>
+                  <longitude>-73663581</longitude>
+               </geo-location>
+               <link-ownership>New York State</link-ownership>
+               <route-designator>NY 120A</route-designator>
+               <linear-reference>2.03974351054483</linear-reference>
+            </location>
+         </inventory-item>
+      </inventory>
+   </cctvInventory>
+   <cctvInventory>
+      <owner>
+         <organization-id>3</organization-id>
+         <organization-name>NYC DOT</organization-name>
+      </owner>
+      <inventory>
+         <inventory-item>
+            <device-id>21576</device-id>
+            <device-updated>
+               <date>20261026</date>
+               <time>141617</time>
+               <utc-offset>-0400</utc-offset>
+            </device-updated>
+            <device-name>2 Ave @ 79 St</device-name>
+            <still-images>
+               <still-image>
+                  <name>2 Ave @ 79 St</name>
+                  <url>https://nyctmc.org/api/cameras/074b4e06-5090-47a5-b672-8b15780c9255/image</url>
+               </still-image>
+            </still-images>
+            <location>
+               <geo-location>
+                  <latitude>40773298</latitude>
+                  <longitude>-73955022</longitude>
+               </geo-location>
+               <link-ownership>New York State</link-ownership>
+               <route-designator>2 Ave @ 79 St</route-designator>
+            </location>
+         </inventory-item>
+      </inventory>
+   </cctvInventory>
+</cctv:cctvInventories>

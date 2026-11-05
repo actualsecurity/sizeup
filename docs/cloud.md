@@ -802,24 +802,37 @@ Each camera's direction comes from the layer's description ("Traffic Approaching
 going South on King St"). *Terms:* the ArcGIS item's disclaimer (a public service, no liability, not
 recorded), no reuse restriction; the county's own release says the cameras are for rapid response
 to accidents and weather emergencies. Attribution "Westchester County DPW" in the Layers box and the
-map. When 511NY arrives it wins the 50 m dedupe (the county's cameras are in 511NY too).
+map. 511NY's CARS-Hub lists some of the county's cameras too (the King St SB approach): the same camera
+(`same_camera`: within 150 m, the same name off a highway) is shown once, ours unless only 511NY's has live video.
 
-**511NY** (NYSDOT, <https://511ny.org/help/24>; off until approved): the Developer Access Agreement
-(updated 2026-09-18) lists traffic events (JSON), the camera inventory (XML), message signs (JSON)
-and winter road conditions. Access is by request (the *XML Data Feed Request Form* linked there,
-reviewed weekly); the approval brings the feed addresses, their documentation and a key. So the
-addresses are config (`[roads] events_url`, `cameras_url`, `signs_url`, each with `{key}` where the
-key goes) and the key a secret (`SIZEUP_511NY_KEY`; on the hub SSM `/sizeup-hub/511ny-key`). Each
-feed may be JSON or XML; records are read by field name (`ID`, `RoadwayName`, `DirectionOfTravel`,
-`Latitude`, the inventory's `Views [{Url, VideoUrl}]` ...), whatever the case. *Terms:* no fee; we
-may "redistribute, enhance, repackage, and add value to the data" but not alter what a report says;
-we "must display the time at which the data was published or last updated wherever [we] present it"
-(every event, sign and snapshot shows its time); the source may be acknowledged as "powered by 511NY"
-with a link to 511NY.org (the viewer, the Layers box, the map's attribution); the name and logo are
-not ours to brand with. NYSDOT may stop the feed or a use at any time. The old developer API
-(`511ny.org/api/getcameras?key=`) is gone since the site was rebuilt in 2026: those paths answer the
-site's HTML page. Schedule: events every 90 s, signs every 5 min, the inventory hourly; the config
-refuses anything faster than 5 calls a minute for all three (the old API's limit was 10 a minute).
+**511NY** (NYSDOT, on Castle Rock's **CARS** platform since 2026-09-30; #73, #188). One username and password for
+everything that needs a login (env `SIZEUP_511NY_USER` / `SIZEUP_511NY_PASS`; the hub: SSM `/sizeup-hub/511ny-user`,
+`/sizeup-hub/511ny-pass`, SecureString; locally the Keychain, account `pcfd`, `sizeup-511ny-carshub-user` /
+`-pass`, for `tools/ny511_probe.py --keychain`). Every feed at most once every 5 minutes (511NY's recommendation; the
+config refuses faster), with `If-None-Match` / `If-Modified-Since` where the feed serves validators, and gzip:
+
+| Feed | Address | Auth | What we take | Schedule |
+|---|---|---|---|---|
+| Message signs | `https://nyapi.carsprogram.org/signs.json` (~940 KB statewide, 110 KB gzipped; ETag, Last-Modified) | none | our area's signs: name, road, direction, mile, status (on / blank / fault), each page's lines, `lastUpdated` | every 5 min, on by default |
+| Events | `https://nysdot.carsprogram.org/carsapi_v1/api/events` (Swagger 2.0, `carsapi_v1/console/carsapi-definition.json`; filters only `eventClassifications`, `routeDesignator`, paging `limit` / `offset`) | HTTP Basic | incidents and closures (roads.py) and planned work and construction (roadprojects.py): times, lanes, full closure, detour, scheduled occurrences, line, cross streets | every 5 min |
+| WZDx | `.../carsapi_v1/api/wzdx` | HTTP Basic | work zones for road projects, folded into 511NY's events | every 5 min while someone looks |
+| CARS-Hub CCTV | `https://nysdot.carsprogram.org/hub/data/cctv.xml` (TMDD's `schemas/CCTV.xsd`; ~3 MB, no validators) | HTTP Basic (realm "Hub") | cameras: still (public.carsprogram.org JPEG), HLS (`*.nysdot.skyvdn.com`) | hourly |
+
+The CARS-Hub (`/hub/index.jsf`) is a public page listing its feeds and schemas, not a login: FEU-t/-g/-m/-w (the
+CARS events again as TMDD Full Event Updates), their indexed variants, CCTV and Waze CIFS. We read the CCTV feed; the
+events come from the API's JSON (the same CARS events). The signs' `lastUpdated` for New York City's region ran 5 h
+ahead of the file (Eastern time written as UTC) on 2026-11-04: each agency's times are put right against the file's
+Last-Modified. The public copy is CloudFront-cached and was 5.7 h old when read that day (`Age: 20600`): the Layers
+box says how old the signs are when the copy is older than 30 min. CARS events whose access level is for the
+originating agency or selected agencies only are left out (public-domain and all-agency ones are shown). The
+CARS-Hub's cameras are compared with ours (`same_camera`) and the count of new ones, by road, is logged and shown in
+Settings > Data sources; the new ones join the map, the camera wall and the overlay under the same snapshot proxy
+and stream cap (`[roads] carshub_imagery = false`: counted only). *Terms* (511NY's Developer Access Agreement,
+<https://511ny.org/help/24>): no fee; we may "redistribute, enhance, repackage, and add value to the data" but not
+alter what a report says; we "must display the time at which the data was published or last updated wherever [we]
+present it" (every event, sign and snapshot shows its time); acknowledged as "powered by 511NY" with a link. The old
+511ny.org developer API (`511ny.org/api/getcameras?key=`) and its key (`SIZEUP_511NY_KEY`, `[roads] key`,
+`cameras_url`) are gone: the config says so if they are still set.
 
 Considered and not used:
 
@@ -1011,38 +1024,35 @@ hands it to the CAD as `cad.place_providers`, for #67's `/api/cad/places` to ask
 `MapLayers.searchPlaces(q)` and `MapLayers.openPlace(place)` do the same, and any element with
 `data-camera="<id>"` (a camera chip in a note) opens the viewer.
 
-**Without any source** (`thruway = false` and no 511NY key) nothing is fetched, the log says so
-once, the four layers are greyed in the Layers box with the reason, and the mileposts and exits
-still work. With the Thruway alone (the default until 511NY approves), the layers are on and the
-box notes that 511NY isn't.
+**Without any source** (`thruway = false`, `county = false`, `ny511 = false`) nothing is fetched, the log says so
+once, the four layers are greyed in the Layers box with the reason, and the mileposts and exits still work. Without
+511NY's username and password the signs still come (public) and the box says *511NY incidents and closures: waiting
+for credentials (SSM /sizeup-hub/511ny-user and /sizeup-hub/511ny-pass)*; Settings > Data sources lists each 511NY
+feed (every 5 min; the CARS-Hub's cameras hourly) with the same words.
 
 **Setting up 511NY:**
 
-1. Request access: the *XML Data Feed Request Form* linked from <https://511ny.org/help/24> (reviewed
-   weekly). Describe the use: Port Chester FD's dispatch console, shown to its members behind sign-in;
-   cameras, events and signs for the area around Port Chester; no third parties. The approval brings
-   the feed addresses, their documentation and a key.
-2. The key into SSM (from the `sizeup-aws` folder's environment):
-   `aws ssm put-parameter --name /sizeup-hub/511ny-key --type SecureString --value '<the key>'`
-3. Then, and only then (a task whose secret is missing doesn't start), add it to the hub container's
-   `secrets` in `deploy/aws/taskdef.json` (and `sizeup-aws/7-deploy-pr.sh`'s copy):
-   `{"name":"SIZEUP_511NY_KEY","valueFrom":"arn:aws:ssm:us-east-1:504804195561:parameter/sizeup-hub/511ny-key"}`.
-   The execution role may already read `/sizeup-hub/*` (`2-iam.sh`).
-4. The addresses into `deploy/hub/config.hub.toml` `[roads]`, `{key}` where the key goes (never the
-   key itself: the config refuses it). Re-record `tests/fixtures/511ny/` from the real feeds.
+1. The username and password into SSM (done 2026-11-04): `/sizeup-hub/511ny-user`, `/sizeup-hub/511ny-pass`,
+   SecureString. `deploy/aws/taskdef.json` passes them to the hub as `SIZEUP_511NY_USER` / `SIZEUP_511NY_PASS`
+   (a task whose `secrets` name a missing parameter doesn't start: add a reference only once its parameter exists).
+   The execution role reads `/sizeup-hub/*` (`2-iam.sh`).
+2. Try them locally first, one request per feed: `.venv/bin/python tools/ny511_probe.py --keychain [--hub] [--save DIR]`.
+3. Nothing to set in `deploy/hub/config.hub.toml`: 511NY's addresses are the defaults.
 
 ```toml
-[roads]                          # sizeup/roads.py; leave out: the Thruway and the county on, 511NY off
+[roads]                          # sizeup/roads.py; leave out: the Thruway, the county and 511NY on
 thruway = true                   # the NYS Thruway Authority's public feeds: I-95, I-287 (no key)
 county = true                    # Westchester County DPW's cameras (no key)
-events_url = "https://.../events?key={key}&format=json"     # 511NY, from its approval
-cameras_url = "https://.../cameras?key={key}"
-signs_url = "https://.../messagesigns?key={key}&format=json"
+ny511 = true                     # 511NY: signs (public); events and CARS-Hub cameras with the username and password
+events_url = ""                  # "" = the CARS API's /events, "off" = none
+signs_url = ""                   # "" = https://nyapi.carsprogram.org/signs.json, "off" = none
+ny511_hub = ""                   # "" = https://nysdot.carsprogram.org/hub/ (its data/cctv.xml), "off" = none
+carshub_imagery = true           # the CARS-Hub's new cameras shown (false: counted against ours only)
 bbox = [-73.80, 40.92, -73.56, 41.10]   # west, south, east, north
-events_every_s = 90              # 511NY; at least 60 (the Thruway: every 2 min, fixed)
-signs_every_min = 5              # at least 1
-cameras_every_min = 60           # at least 10
-# key: env SIZEUP_511NY_KEY (the hub: SSM /sizeup-hub/511ny-key); enabled = false turns everything off
+events_every_s = 300             # 511NY; at least 300 (the Thruway: every 2 min, fixed)
+signs_every_min = 5              # at least 5
+cameras_every_min = 60           # at least 10 (the CARS-Hub's CCTV)
+# username, password: env SIZEUP_511NY_USER / SIZEUP_511NY_PASS only; enabled = false turns everything off
 ```
 
 ## Road projects & closures (#185)
@@ -1075,8 +1085,9 @@ of its point, or on its own street within 1.5 km: *Road closed: Westchester Ave 
 | NYSDOT capital projects | `gis.dot.ny.gov/.../CapitalProgramProjects/FeatureServer/4` (In Construction footprints) | none | used |
 | CTDOT project work areas | `services1.arcgis.com/.../CTDOT_Project_Work_Areas/FeatureServer/0` (Greenwich, in construction) | none | used |
 | Village notices | Port Chester (CivicPlus Alert Center, News Flash), Rye Brook (WordPress), Greenwich (CivicPlus) RSS | none | used |
-| 511NY events | `[roads] events_url` + `SIZEUP_511NY_KEY` (start, planned end, lanes, recurring hours, detour, line) | key | waiting |
-| 511NY WZDx | `[roadwork] wzdx_url` (`{key}`) | key | waiting |
+| 511NY events | the CARS API's `/carsapi_v1/api/events` through `roads.py` (start, end when given, lanes, full closure, scheduled occurrences, detour, line, cross streets) | HTTP Basic (`SIZEUP_511NY_USER` / `_PASS`) | with the credentials |
+| 511NY WZDx | the CARS API's `/carsapi_v1/api/wzdx` (`[roadwork] wzdx = true`) | HTTP Basic | with the credentials |
+| Another WZDx | `[roadwork] wzdx_url` (public) | none | off until set |
 | Thruway lane-closure schedule | `content3.thruway.ny.gov/travelers/laneclosures/` (HTML only) | n/a | not read: ask the Thruway for a feed |
 | CTroads events | `ctroads.org/api/v2/get/event?key=` | key + CTDOT's written consent | waiting |
 | Waze for Cities | partner feed | agreement | waiting |
@@ -1905,7 +1916,7 @@ One task, desired count 1, ephemeral disk:
     `LITESTREAM_REGION` default `AWS_REGION`; credentials from the **task role**, no keys).
   * unset: just `python -m sizeup` (local dev).
   * Environment: `SIZEUP_STATION_TOKEN` (secret from SSM), `SIZEUP_PUBLIC_URL`, optionally
-    `SIZEUP_PORT` and `SIZEUP_511NY_KEY` (secret from SSM, [the highway layers](#highway-layers-cameras-incidents-signs-mileposts-the-thruway-511ny));
+    `SIZEUP_PORT`, `SIZEUP_511NY_USER` and `SIZEUP_511NY_PASS` (secrets from SSM, [the highway layers](#highway-layers-cameras-incidents-signs-mileposts-the-thruway-511ny));
     the image sets `SIZEUP_STATE_DIR=/data`, `SIZEUP_CONFIG`.
 * **cloudflared** sidecar: `cloudflare/cloudflared:latest tunnel --no-autoupdate run`, `TUNNEL_TOKEN`
   secret from SSM. awsvpc: it reaches the hub at `http://localhost:8090` (the tunnel's public
