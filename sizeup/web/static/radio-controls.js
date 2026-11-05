@@ -156,7 +156,11 @@ window.RadioControls = (() => {
           lines.push(`open ${mmss(r.open_s)}` + (stuck ? " without a break: longer than any page, likely noise holding the squelch" : ""));
         }
         const has = (v) => v !== null && v !== undefined;
-        if (has(r.quieting_db) || has(r.open_db)) {
+        if (r.am && (has(r.quieting_db) || has(r.open_db))) {
+          // airband AM (#233, sizeup/radio/am.py): the carrier over the noise floor; RX opens at open_db over it
+          lines.push([`carrier ${has(r.quieting_db) ? r.quieting_db : "?"} dB over the floor`,
+                      `opens at ${r.open_db} dB, closes under ${r.close_db} dB`].join(" · "));
+        } else if (has(r.quieting_db) || has(r.open_db)) {
           // quieting: how far a carrier pushes the hiss down from its idle level (the floor); RX opens at open_db
           const lv = [`quieting ${has(r.quieting_db) ? r.quieting_db : "?"} dB`];
           if (has(r.open_db)) lv.push(`opens at ${r.open_db} dB, closes under ${r.close_db} dB`);
@@ -612,9 +616,9 @@ window.RadioControls = (() => {
             setText(mk, r.encrypted ? "🔒" : "");
             show(mk, !!r.encrypted);
             setText(name, r.name);
-            setText(num, r.fm ? `${r.mhz} MHz${r.kind === "paging" ? " · paging" : ""}` : `TG ${r.tg}`);
+            setText(num, r.fm ? `${r.mhz} MHz${r.kind === "paging" ? " · paging" : r.kind === "airband" ? " · AM" : ""}` : `TG ${r.tg}`);
             show(badge, !!r.main);
-            setText(heard, r.fm ? (r.kind === "paging" ? "60 Control pages" : "Fireground") : heardText(r));
+            setText(heard, r.fm ? (r.kind === "paging" ? "60 Control pages" : r.kind === "airband" ? "HPN ATC (airport pre-alerts)" : "Fireground") : heardText(r));
             heard.className = r.fm || r.count ? "tg-heard" : "tg-heard dim";
             let t = confirming ? "Encrypted: noise only. Tap Record again to record anyway." : r.encrypted ? "Encrypted" : "";
             if (r.dropped && !confirming) t += `${t ? ", " : ""}${r.dropped} dropped`;
@@ -706,7 +710,9 @@ window.RadioControls = (() => {
     const when = s.updated ? ` (sent ${fmtTime(s.updated)})` : "";
     const word = { READY: "Ready", PENDING: "Being built by AWS…", FAILED: "Failed", error: "Error", none: "Not on AWS yet" }[s.state] || s.state;
     setText(n.vocabState, `${s.name || "sizeup-pcfd"}: ${word}${when}` + (s.state === "READY" && s.sig && s.sig !== v.sig ? " · the saved list changed: Push again" : "")
-      + (s.reason ? ` · ${s.reason}` : ""));
+      + (s.reason ? ` · ${s.reason}` : "")
+      // HPN ATC's own vocabulary (#233, data/atc/vocabulary.json): pushed with this one, used on the airband channels
+      + (s.atc ? ` · ${s.atc.name}: ${{ READY: "Ready", PENDING: "Being built by AWS…", FAILED: "Failed", error: "Error", none: "Not on AWS yet" }[s.atc.state] || s.atc.state}` : ""));
     n.vocabState.className = `small vocab-state ${s.state === "READY" ? "ok" : s.state === "FAILED" || s.state === "error" ? "bad" : ""}`;
     setText(n.vocabMsg, st.vocabMsg || `${v.phrases.length} phrases${v.edited ? "" : " (the suggestions)"}`
       + (v.skipped.length ? `, ${v.skipped.length} can't go to AWS` : "") + (st.vocabDirty ? " · not saved" : ""));

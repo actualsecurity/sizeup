@@ -1,0 +1,113 @@
+{
+  "_about": "HPN ATC pre-alert rules (GitHub #233; read by sizeup/atc.py). Each transmission on an airband channel (and the few before it on the same channel: the exchange) is lower-cased, punctuation dropped, and each rule's regular expression is looked for with word boundaries. A rule's weight is how sure a hit alone makes us that the fire department should hear about it (0 to 1); several rules combine as 1 - (1 - w1)(1 - w2)..., the earlier transmissions at context_factor. A pre-alert is raised at threshold or over. 'not': patterns that, in the same transmission, mean the rule's words are something else (no smoking, a drill). 'always': still counts inside an ATIS / NOTAM readout (suppress). Change the weights here, not in the code; tests/test_atc.py has the transcripts that must and must not trigger.",
+  "version": 1,
+  "threshold": 0.5,
+  "context_factor": 0.5,
+  "categories": {
+    "fire":     {"label": "fire or smoke", "event_type": "INVEST", "event_subtype": ""},
+    "fire_off": {"label": "fire or smoke off the airport", "event_type": "INVEST", "event_subtype": ""},
+    "fire_acft": {"label": "fire or smoke on an aircraft", "event_type": "AIRPORT", "event_subtype": "ACFT-FIRE"},
+    "fire_field": {"label": "fire on the field", "event_type": "AIRPORT", "event_subtype": "OTHER"},
+    "emergency": {"label": "aircraft emergency", "event_type": "AIRPORT", "event_subtype": ""},
+    "arff":     {"label": "ARFF called", "event_type": "AIRPORT", "event_subtype": ""},
+    "accident": {"label": "possible aircraft accident", "event_type": "AIRPORT", "event_subtype": ""},
+    "runway":   {"label": "disabled aircraft / runway", "event_type": "AIRPORT", "event_subtype": "DISABLED"},
+    "gear":     {"label": "landing gear problem", "event_type": "AIRPORT", "event_subtype": ""},
+    "engine":   {"label": "engine problem", "event_type": "AIRPORT", "event_subtype": ""},
+    "bird":     {"label": "bird strike", "event_type": "AIRPORT", "event_subtype": ""},
+    "fuel":     {"label": "fuel problem", "event_type": "AIRPORT", "event_subtype": "FUEL"},
+    "medical":  {"label": "medical emergency on board", "event_type": "AIRPORT", "event_subtype": "OTHER"},
+    "laser":    {"label": "laser strike", "event_type": "INVEST", "event_subtype": ""}
+  },
+  "rules": [
+    {"id": "brush-fire", "category": "fire", "weight": 0.85, "thing": "brush fire",
+     "pattern": "(?:brush|grass|forest|woods?|wild|field|tree|trees) fires?|wildfires?|fire in the (?:woods|trees|brush|grass)|(?:woods|trees|brush|grass) (?:is |are )?(?:on fire|burning)",
+     "event_type": "BRUSH"},
+    {"id": "fire-on-field", "category": "fire", "weight": 0.85, "thing": "fire on the field",
+     "pattern": "fire (?:on|at) the (?:field|airport|ramp|apron)|fire (?:off|past|at) the (?:departure |approach )?end of (?:the )?runway"},
+    {"id": "smoke-aircraft", "category": "fire", "weight": 0.85, "thing": "smoke on board",
+     "pattern": "smoke (?:in|on) the (?:cockpit|cabin|flight deck|lav|lavatory|galley|aircraft|airplane|plane)|smoke (?:on board|onboard)|(?:smell|smelling) (?:of )?(?:smoke|something burning)|fumes in the (?:cockpit|cabin)|electrical (?:fire|smell)"},
+    {"id": "engine-fire", "category": "fire", "weight": 0.85, "thing": "engine fire",
+     "pattern": "(?:engine|apu|wheel|brake|brakes) (?:is )?(?:on )?fire|fire (?:light|warning|indication|bell)|(?:hot|smoking) brakes"},
+    {"id": "fire", "category": "fire", "weight": 0.55, "thing": "fire",
+     "pattern": "fires?|flames?|on fire|burning|ablaze",
+     "not": "fire (?:it|them|that|this|her|him|the \\w+) up|fire up|fired up|fire away|fire (?:drill|training|exercise|test)|fire tower|ceasefire|cease fire|fire hydrant|burning (?:fuel|daylight)|fuel burn|flame ?out"},
+    {"id": "smoke", "category": "fire", "weight": 0.5, "thing": "smoke",
+     "pattern": "smoke|smoking|smoky|plume",
+     "not": "no smoking|non ?smoking|smoking (?:sign|signs|light|lights|materials|section)|smoke (?:generator|detector test)|plume of exhaust"},
+
+    {"id": "mayday", "category": "emergency", "weight": 0.95, "always": true, "thing": "MAYDAY",
+     "pattern": "may ?day|maider"},
+    {"id": "pan-pan", "category": "emergency", "weight": 0.9, "always": true, "thing": "PAN-PAN",
+     "pattern": "pan pan|pan pan pan|pon pon|pawn pawn"},
+    {"id": "declaring", "category": "emergency", "weight": 0.95, "always": true, "thing": "emergency declared",
+     "pattern": "(?:declaring|declare|declared|declares) (?:an |a )?(?:emergency|fuel emergency|medical emergency)|(?:we are|we have an?|have an?) emergency"},
+    {"id": "emergency-aircraft", "category": "emergency", "weight": 0.7, "thing": "emergency aircraft",
+     "pattern": "emergency (?:aircraft|traffic|landing|return|in progress|on final|equipment)"},
+    {"id": "return", "category": "emergency", "weight": 0.5, "thing": "returning to the field",
+     "pattern": "(?:return|returning|come back|coming back) to (?:the field|the airport|westchester)|(?:need|request|requesting) (?:to )?(?:return|come back)"},
+    {"id": "souls", "category": "emergency", "weight": 0.75, "always": true, "thing": "souls on board",
+     "pattern": "souls on board|souls onboard|souls and fuel|people on board|persons on board|\\bsoles on board"},
+    {"id": "fuel-remaining", "category": "emergency", "weight": 0.55, "thing": "fuel remaining asked",
+     "pattern": "fuel remaining|fuel on board|hours? of fuel|minutes? of fuel"},
+    {"id": "emergency", "category": "emergency", "weight": 0.4, "thing": "emergency",
+     "pattern": "emergency|distress|urgent",
+     "not": "emergency (?:locator|frequency|beacon)|\\belts?\\b|guard frequency|one two one point five"},
+    {"id": "hydraulics", "category": "emergency", "weight": 0.6, "thing": "hydraulic problem",
+     "pattern": "hydraulic (?:failure|problem|problems|issue|issues|leak|pressure)|lost (?:our |the )?hydraulics|flight control (?:problem|issue)|controllability"},
+    {"id": "ditching", "category": "emergency", "weight": 0.85, "always": true, "thing": "ditching",
+     "pattern": "ditch(?:ing)?|in the water|into the (?:water|lake|reservoir|sound)"},
+
+    {"id": "roll-trucks", "category": "arff", "weight": 0.85, "thing": "trucks rolling",
+     "pattern": "roll (?:the )?(?:trucks|equipment|crash|arff|fire)|rolling (?:the )?(?:trucks|equipment)|(?:trucks|equipment) (?:are |is )?rolling|equipment (?:standing by|in position|on the runway|is out)|(?:fire|crash) trucks?",
+     "not": "drill|training|exercise|test|truck check|inspection"},
+    {"id": "arff", "category": "arff", "weight": 0.8, "thing": "ARFF",
+     "pattern": "arff|a r f f|air ?craft rescue|crash crew|crash fire rescue|crash rescue|c f r|fire rescue",
+     "not": "drill|training|exercise|test|truck check|inspection"},
+
+    {"id": "crash", "category": "accident", "weight": 0.75, "thing": "possible crash",
+     "pattern": "crash|crashed|went down|(?:aircraft|airplane|plane|helicopter) (?:is )?down|accident|impact(?:ed)? (?:the )?(?:ground|terrain|trees|water)|lost (?:contact|radar contact) with",
+     "not": "crash crew|crash fire|crash rescue|crash trucks?|crash (?:and|&) fire|no accident|(?:ils|localizer|glide ?slope|frequency|radio|radar|system|scope|lights?|website|computer) (?:went|is) down"},
+
+    {"id": "disabled", "category": "runway", "weight": 0.7, "thing": "disabled aircraft",
+     "pattern": "disabled (?:aircraft|airplane|plane|jet|on the runway)|(?:aircraft|airplane|plane) disabled|stuck on the runway|cant (?:taxi|move)|unable to (?:taxi|clear the runway)"},
+    {"id": "excursion", "category": "runway", "weight": 0.75, "thing": "aircraft off the runway",
+     "pattern": "(?:ran|went|slid|veered|run|go|gone|departed) off (?:the |of the )?(?:runway|taxiway|pavement|side)|runway excursion|in the (?:grass|mud|dirt)|overrun|over ran the runway|off the end of the runway"},
+    {"id": "go-around-disabled", "category": "runway", "weight": 0.6, "thing": "go-around for the runway",
+     "pattern": "go around (?:for|due to|because of) (?:a |the )?(?:disabled|aircraft on the runway|debris|vehicle)|foreign object|debris on the runway|fod on the runway"},
+    {"id": "runway-closed", "category": "runway", "weight": 0.4, "thing": "runway closed",
+     "pattern": "runway (?:is |will be )?closed|closing (?:the )?runway|close (?:the )?runway|airport (?:is )?closed|field (?:is )?closed",
+     "not": "closed (?:for|until) (?:maintenance|construction|the night|painting|mowing)|scheduled closure"},
+
+    {"id": "gear", "category": "gear", "weight": 0.75, "thing": "unsafe gear",
+     "pattern": "gear up landing|landed gear up|belly landing|unsafe gear|gear (?:is )?unsafe|(?:no|unsafe) (?:gear|nose gear|main gear) (?:indication|light)|(?:nose|main|landing) gear (?:problem|issue|malfunction|collapsed|failure|wont|will not)|gear (?:problem|issue|malfunction|collapsed|failure)|gear (?:wont|will not|didnt|did not) (?:come|go) down|blown tires?|blew a tire|tire blew"},
+
+    {"id": "engine", "category": "engine", "weight": 0.75, "thing": "engine failure",
+     "pattern": "engine (?:failure|failed|out|quit|shut ?down|shutdown|problems?|issues?)|lost (?:an|the|our|one|number (?:one|two)) engine|shut down (?:an|the|our|one|number (?:one|two)) engine|flame ?out|single engine (?:approach|landing)|loss of power|partial power|power loss|rough running engine"},
+
+    {"id": "bird", "category": "bird", "weight": 0.6, "thing": "bird strike",
+     "pattern": "bird ?strike|(?:hit|struck|ingested|took) (?:a |some |several |multiple |a couple of |a few |a flock of )?(?:bird|birds|goose|geese|flock)|bird ingestion",
+     "not": "bird activity|birds in the vicinity|caution birds"},
+
+    {"id": "fuel", "category": "fuel", "weight": 0.7, "thing": "fuel problem",
+     "pattern": "fuel (?:leak|leaking|spill|spilled|emergency|starvation|exhaustion)|leaking fuel|minimum fuel|low (?:on )?fuel|out of fuel|dumping fuel|fuel dump"},
+
+    {"id": "medical", "category": "medical", "weight": 0.65, "thing": "medical emergency",
+     "pattern": "medical emergency|passenger (?:is )?(?:unresponsive|unconscious|not breathing|having)|(?:need|request|requesting|have) (?:an )?(?:ambulance|paramedics|ems|medical)|medical (?:on board|onboard|personnel|assistance)|sick passenger|cardiac|chest pain|seizure|incapacitated",
+     "not": "medical (?:flight|helicopter|transport) (?:inbound|departing)"},
+
+    {"id": "laser", "category": "laser", "weight": 0.55, "thing": "laser strike",
+     "pattern": "lasered|laser (?:strike|illumination|attack|event|incident)|hit (?:us )?(?:with|by) a laser|(?:green|red|blue) laser|laser (?:from|on) the ground|laser pointed",
+     "not": "laser light (?:show|demonstration|activity)"}
+  ],
+  "cues": {
+    "aircraft": "cockpit|cabin|on board|onboard|flight deck|our (?:engine|engines|apu|cabin|cockpit)|the (?:engine|apu|brakes|wheel)|my (?:engine|aircraft)|lav|lavatory|galley",
+    "field": "on the field|at the field|on the airport|on the ramp|on the apron|on the runway|on taxiway|near the runway|on the taxiway",
+    "off_airport": "off the (?:departure |approach )?end|past the (?:departure |approach )?end|off (?:our|the|my) (?:left|right|nose|wing)|o ?clock|below us|beneath us|on the ground (?:below|beneath|off)|in the (?:woods|trees|brush|grass)|(?:north|south|east|west|northeast|northwest|southeast|southwest|north east|north west|south east|south west) of (?:the )?(?:field|airport|runway)|miles? (?:north|south|east|west|northeast|northwest|southeast|southwest)|by the (?:lake|reservoir|highway|parkway|interstate)|off (?:the )?airport|outside the (?:fence|airport)|near the (?:highway|parkway|interstate|lake|reservoir)|brush|grass|tree ?line|treeline|woods|house|building|neighborhood"
+  },
+  "suppress": {
+    "_about": "An ATIS or NOTAM readout, or the weather: only the 'always' rules count in it (a recorded runway closure is not news).",
+    "pattern": "\\batis\\b|\\bd ?atis\\b|information (?:alfa|alpha|bravo|charlie|delta|echo|foxtrot|golf|hotel|india|juliett?|kilo|lima|mike|november|oscar|papa|quebec|romeo|sierra|tango|uniform|victor|whiskey|x ?ray|yankee|zulu) (?:is )?current|advise (?:on initial contact|controller|the controller)|\\bnotams?\\b|notice to (?:airmen|air missions)|\\baltimeter\\b.*\\b(?:visibility|ceiling|sky)\\b|\\b(?:visibility|ceiling|sky)\\b.*\\baltimeter\\b|automated (?:weather|observation)|weather observation"
+  },
+  "landmarks": ["rye lake", "kensico", "the reservoir", "blind brook", "the hutch", "hutchinson", "684", "six eighty four", "287", "king street", "purchase", "armonk", "harrison", "rye brook", "port chester", "greenwich", "white plains", "west harrison", "manhattanville", "suny purchase", "the golf course", "the country club", "the highway", "the parkway", "the interstate", "the lake", "the cemetery"]
+}

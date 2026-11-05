@@ -24,7 +24,7 @@ Two topics, by kind (route(), Pushes; user, 2026-11-01):
     ALERTS  [alerts] ntfy_topic / SIZEUP_ALERT_TOPIC (the hub: SSM /sizeup-hub/alert-topic): incident-level
             alarms: the emergency buttons (P25, MDC, FleetSync) and the fireground mayday (sizeup/cad/alarms.py),
             aircraft emergency squawks (sizeup/aircraft.py through the alarms), their acknowledgements, all
-            clears and "Ended" notices
+            clears and "Ended" notices; the airport pre-alerts (sizeup/cad/airport_alerts.py, #233: HPN ATC), once each
     STATUS  [alerts] status_topic / SIZEUP_STATUS_TOPIC (the hub: SSM /sizeup-hub/status-topic): the system's
             own health: station health (sizeup/cloud/health.py: silent, behind, update failed, a dongle gone, a
             job / whisper / trunk-recorder down, a stuck channel, the outbox, the disk, the whisper queue), Amazon

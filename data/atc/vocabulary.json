@@ -1,0 +1,28 @@
+{
+  "_about": "HPN ATC speech-to-text words (GitHub #233; sizeup/atc.py). 'phrases': Amazon Transcribe's custom vocabulary for the airband channels (pushed as sizeup-atc with the PCFD one, Settings > Radios > Vocabulary > Push): written as said on the air, no digits (runway 'one six', not '16'), at most 256 characters each. 'prompt': whisper's prompt for an airband channel when it runs on the station's model; the callsigns of the aircraft nearest HPN (the Aircraft layer) are added after it. From shortfinal's stt_prompt.py (airport_vocabulary, PHRASES) and data/khpn_operators.csv (who actually flies at HPN; telephony from FAA JO 7340.2), with the fire department's words. Taxiways: data/airport/khpn_surface.geojson (OpenStreetMap).",
+  "version": 1,
+  "phrases": [
+    "Westchester Tower", "Westchester Ground", "Westchester Clearance", "Westchester", "White Plains",
+    "New York Approach", "New York Departure", "New York Center",
+    "runway one six", "runway three four", "runway one one", "runway two niner", "runway two nine",
+    "one six", "three four", "two niner", "niner",
+    "taxiway alfa", "taxiway bravo", "taxiway charlie", "taxiway delta", "taxiway echo", "taxiway foxtrot",
+    "taxiway golf", "taxiway hotel", "taxiway juliett", "taxiway kilo", "taxiway lima",
+    "alfa", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india", "juliett", "kilo", "lima",
+    "mike", "november", "oscar", "papa", "quebec", "romeo", "sierra", "tango", "uniform", "victor", "whiskey",
+    "x-ray", "yankee", "zulu",
+    "cleared to land", "cleared for takeoff", "line up and wait", "hold short", "go around", "going around",
+    "missed approach", "say again", "wilco", "roger", "squawk", "ident", "souls on board", "fuel remaining",
+    "minimum fuel", "pan-pan", "mayday", "declaring an emergency", "emergency aircraft", "ARFF", "crash crew",
+    "crash fire rescue", "roll the trucks", "roll the equipment", "equipment rolling", "disabled aircraft",
+    "runway closed", "unsafe gear", "gear up", "bird strike", "engine failure", "smoke in the cockpit",
+    "smoke in the cabin", "brush fire", "laser", "medical emergency", "departure end", "approach end",
+    "JetBlue", "Delta", "Endeavor", "Blue Streak", "Envoy", "Moxy", "Gosling", "Cair", "Bigstripe", "Goodspeed",
+    "Brickyard", "Republic", "SkyWest", "Cactus", "American", "United", "Southwest",
+    "Execjet", "Flexjet", "Up Jet", "Gama Jet", "Iconic", "Vista Jet", "Jet Edge", "Twilight", "Jet Speed",
+    "Rodeo", "Reliant", "Jet Linx", "Clay-Lacy", "Chronos", "Ex-Flight", "Talon Flight", "Jet Setter", "Tombo",
+    "Cessna", "Citation", "Gulfstream", "Challenger", "Learjet", "Phenom", "Pilatus", "Bonanza", "Cirrus",
+    "Skyhawk", "King Air", "helicopter", "Sikorsky"
+  ],
+  "prompt": "Westchester Tower, Westchester Ground, New York Approach. Runway one six, runway three four, runway one one, runway two niner. Taxiway alfa, bravo, charlie, delta, echo, foxtrot, golf, hotel, juliett, kilo. Cleared to land, cleared for takeoff, line up and wait, hold short, go around, souls on board, fuel remaining, declaring an emergency, roll the trucks."
+}

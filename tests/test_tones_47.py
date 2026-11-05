@@ -145,7 +145,8 @@ def test_an_installed_station_gets_the_heard_tones_once(tmp_path, monkeypatch):
     assert said[1].startswith("tones-47: Port Chester's 349.1/311.1 is now 903.2/810.2; Rye Brook FD 767.4/928.1 "
                               "(ours) added after it (the old file: ")
     assert conf.with_name("config.toml.before-tones-47").read_text() == kept        # the backup
-    assert marks.read_text() == "fg2\ntones-47\n"
+    assert said[2].startswith("hpn-atc: already has 'HPN Tower'")          # (#233: the template has it)
+    assert marks.read_text() == "fg2\ntones-47\nhpn-atc\n"
     after = load(conf)
     assert {t.name: (t.a_hz, t.b_hz) for t in after.tones if t.source == "config"} == {"Port Chester FD": PC,
                                                                                       "Rye Brook FD": RB}
