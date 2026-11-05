@@ -71,6 +71,7 @@ TURN = re.compile(r"^(?P<call>.+)-t(?P<k>\d+)$")
 NOTES = "Notes"          # the /comms "channel" of event notes tagged with a unit
 KEEP_UNLINKED_S = 90 * 24 * 3600     # transmissions on no event: kept 90 days (linked ones: always)
 MAX_ROWS = 500
+MAIN_LIMIT, OTHER_LIMIT = 200, 300    # the Radio view's Main and Other: each its own newest N (#241)
 ID_NOTES = ("none", "undecoded", "weak")    # why an FG1 key-up has no radio ID (radio_traffic.id_note, #163)
 RELINK_MAX = 2000                           # a radio just named: at most this many of its unnamed transmissions
 EVIDENCE_MAX = 64 * 1024                    # an emergency's raw call record (radio_traffic.evidence), at most
@@ -473,7 +474,50 @@ class Comms:
                  "events": [{"id": r["iid"], "number": r["number"], "type": r["type"], "subtype": r["subtype"],
                              "address": r["address"], "why": "note", "unit": r["units"]}]} for r in rows]
 
+    def split(self, main_tgs, not_main=(), unit: str = "", channel: str = "", event: str = "", pcfd: list[str] | None = None,
+              since: float | None = None, until: float | None = None, main_limit: int = MAIN_LIMIT, limit: int = OTHER_LIMIT,
+              kind: str = "", text: str = "", emergency: bool = False) -> tuple[list[dict], list[dict]]:
+        """The Radio view's two sections, each its own newest N with the same filters (#241: on a busy evening the
+        other talkgroups filled the shared newest 300 and Main showed None): (main, other), newest first.
+        Main: the FM channels (no talkgroup) but not_main (the airband, #233), the talkgroups in main_tgs and the
+        notes, at most main_limit; Other: every other transmission, at most limit. Main asks once per talkgroup
+        (and once for the FM channels) on radio_traffic_tg_start, so a quiet Main is found under any volume of
+        other traffic; Other walks radio_traffic_start (or radio_traffic_channel_start, one channel asked)."""
+        main_limit = max(1, min(int(main_limit), MAX_ROWS))
+        limit = max(1, min(int(limit), MAX_ROWS))
+        words = [w.lower() for w in text.split()][:8]
+        main_tgs, not_main = sorted({int(t) for t in main_tgs}), tuple(dict.fromkeys(not_main))
+        notes = (self._notes(unit, event, pcfd, since, until, main_limit, words)
+                 if kind in ("", "notes") and channel in ("", NOTES) and not emergency else [])
+        main, other = [], []
+        w = self._radio_where(unit, channel, event, pcfd, since, until, words, emergency) \
+            if kind in ("", "radio") and channel != NOTES else None
+        if w is not None:
+            where, args = w
+            fm = "t.talkgroup IS NULL" + (f" AND t.channel NOT IN ({','.join('?' * len(not_main))})" if not_main else "")
+            for cond, extra in [(fm, list(not_main))] + [("t.talkgroup = ?", [tg]) for tg in main_tgs]:
+                main += self._fetch(where + [cond], args + extra, main_limit)
+            # +t.talkgroup: no index on it, so the newest-first walk stays on the start (or channel) index; never NULL
+            # inside the NOT (NULL IN (...) is NULL, and NOT NULL would drop an airband row from both sections)
+            mine = "+t.talkgroup IS NULL" + (f" AND +t.channel NOT IN ({','.join('?' * len(not_main))})" if not_main else "")
+            if main_tgs:
+                mine = f"({mine}) OR (+t.talkgroup IS NOT NULL AND +t.talkgroup IN ({','.join('?' * len(main_tgs))}))"
+            other = self._fetch(where + [f"NOT ({mine})"], args + list(not_main) + main_tgs, limit)
+        main = sorted(main, key=lambda r: -r["start"])[:main_limit]
+        self._decorate(main + other)
+        main = sorted(main + notes, key=lambda r: -r["start"])[:main_limit]
+        return main, other
+
     def _radio(self, unit, channel, event, pcfd, since, until, limit, words=(), emergency=False) -> list[dict]:
+        w = self._radio_where(unit, channel, event, pcfd, since, until, words, emergency)
+        if w is None:
+            return []
+        rows = self._fetch(*w, limit)
+        self._decorate(rows)
+        return rows
+
+    def _radio_where(self, unit, channel, event, pcfd, since, until, words=(), emergency=False):
+        """The Radio view's filters as SQL (where, args); None: nothing can match (PCFD only, no PCFD units)."""
         where, args = [], []
         if emergency:
             where.append(EMERGENCY_WHERE if has_alarms(self.store) else "t.emergency = 1")
@@ -492,7 +536,7 @@ class Comms:
             args += [event, event]
         if pcfd is not None:
             if not pcfd:
-                return []
+                return None
             where.append("(" + " OR ".join(["(',' || REPLACE(t.rig, ' ', '') || ',') LIKE ?"] * len(pcfd)) + ")")
             args += [f"%,{u},%" for u in pcfd]
         if since is not None:
@@ -501,15 +545,28 @@ class Comms:
         if until is not None:
             where.append("t.start <= ?")
             args.append(until)
-        rows = self.store.q("SELECT t.*, 'radio' AS kind FROM radio_traffic t" + (" WHERE " + " AND ".join(where) if where else "")
+        return where, args
+
+    def _fetch(self, where, args, limit) -> list[dict]:
+        return self.store.q("SELECT t.*, 'radio' AS kind FROM radio_traffic t"
+                            + (" WHERE " + " AND ".join(f"({w})" for w in where) if where else "")
                             + " ORDER BY t.start DESC LIMIT ?", (*args, limit))
+
+    def _decorate(self, rows) -> None:
+        """Each row's events, its page kind and its alarm (in place)."""
         if rows:
             ev = self.events_of([r["id"] for r in rows])
             for r in rows:
                 r["events"] = ev.get(r["id"], [])
                 _tones(r, self.paging, self.names_ours)
             with_alarms(self.store, rows)
-        return rows
+
+    def talkgroups(self) -> list[int]:
+        """Every talkgroup logged, by a skip along radio_traffic_tg_start (one look-up each, not a scan)."""
+        return [r["tg"] for r in self.store.q(
+            "WITH RECURSIVE g(tg) AS (SELECT MIN(talkgroup) FROM radio_traffic UNION ALL "
+            "SELECT (SELECT MIN(talkgroup) FROM radio_traffic WHERE talkgroup > g.tg) FROM g WHERE g.tg IS NOT NULL) "
+            "SELECT tg FROM g WHERE tg IS NOT NULL")]
 
     def facets(self) -> dict:
         return {"channels": [r["channel"] for r in self.store.q(
