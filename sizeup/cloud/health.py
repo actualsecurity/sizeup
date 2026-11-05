@@ -14,10 +14,15 @@ notice when it clears:
     update        the update to the hub's build failed or was rolled back                  warning (critical:
                                                                                            the rollback failed too)
     sdr:<serial>  a dongle the station had is gone (unplugged)                             critical
+    dup:<serial>  two or more dongles on the station share one serial (#242): nothing of  critical
+                  ours opens that serial until one is renamed (sizeup-station sdr-serial)
     job:<job>     a dongle's job (a channel) not running for JOB_GRACE_S                   critical
     whisper       speech-to-text (whisper-server) down for down_min (2)                    warning
     recorder      trunk-recorder down for down_min while its dongle job is on              critical
     stuck:<chan>  a channel's squelch open without a break (#116's flag)                   warning
+    quiet:<chan>  a MAIN channel ([alerts] main_channels: tg:307 Fire/EMS 15, FG1, South   warning
+                  2, HPN Tower) running but silent far beyond its usual gap for that time
+                  of day (#242: Fire/EMS 15 was lost for hours with no alert): see QUIET_*
     outbox        events waiting on the station for outbox_min (5): it couldn't reach the  warning
                   hub (invisible here until it comes back: worked out from the age of the
                   oldest event it reports)
@@ -35,7 +40,19 @@ notice when it clears:
 
 While the station is silent (or before it first reports) the other conditions keep the state they had:
 nothing starts or clears on old data. Per-channel silence (nothing heard for much longer than that channel
-usually goes, from its own gaps between transmissions) is a hint in the panel, never an alert.
+usually goes, from its own gaps between transmissions) is a hint in the panel; on a main channel, silent far longer
+still, it is the quiet:<chan> warning. How far (conservative: a busy channel's real outage, not a slow night):
+
+    learned  from the channel's own gaps between transmissions (each one filed under the 6-hour part of the day it
+             started in, station time: 00-06, 06-12, 12-18, 18-24), at least QUIET_GAPS_MIN of them before any alert
+    usual    the 90th percentile gap (9 in 10 gaps are shorter) for each part of the day the silence spans, the
+             largest of them (a silence from 22:55 is judged by the night's gaps too); a part of the day with fewer
+             than QUIET_TOD_MIN gaps uses the whole day's
+    alert    silent longer than QUIET_FACTOR (4) times that, and at least QUIET_MIN_S (1 h); only while the channel's
+             program runs (state ok: a stopped one is the job / recorder alert's) and the station reports
+    clears   at the next transmission heard
+A talkgroup ("tg:307") is heard from the station's health["heard"] (its main talkgroups' last calls), its state the
+P25 job's: other talkgroups on the same system can keep recording while one goes silent (#242).
 
 Each alert is logged once when it starts and once when it clears, shown to admins on Settings > Health
 (GET /api/cad/health, static/health.js; never in the state push nor as a banner, #203), and pushed to the
@@ -81,6 +98,12 @@ GAPS_MIN = 10               # ... at least this many before a silence hint
 HINT_FACTOR = 3.0           # silent this many times its usual (90th percentile) gap
 HINT_MIN_S = 30 * 60.0      # and at least this long
 SAVE_GAPS_S = 600.0
+MAIN_CHANNELS = ("tg:307", "FG1", "South 2", "HPN Tower")   # [alerts] main_channels: the quiet:<chan> alert's
+QUIET_GAPS_MIN = 30         # gaps learned (the whole day) before a main channel's silence can alert
+QUIET_TOD_MIN = 10          # ... in a part of the day before its own gaps are used (else the whole day's)
+QUIET_FACTOR = 4.0          # silent this many times the usual gap for that time of day
+QUIET_MIN_S = 3600.0        # and at least this long
+TOD_PARTS = 4               # 6-hour parts of the day for the learned gaps
 NOT_CHANNELS = ("STT", "Voice", "Hub", "Station", "trunk-recorder")
 STATUS_KEY = b"sizeup-status-token-v1"
 P25_JOB = "Fire/EMS 15"
@@ -240,6 +263,18 @@ def station_metrics(app, metrics: Metrics) -> dict:
         except Exception:
             pass
     out["jobs"] = jobs
+    usb = getattr(app, "usb", None)
+    if callable(usb):
+        try:
+            out["usb"] = usb()                      # the dongles on USB, and serials two of them share (#242)
+        except Exception:  # noqa: BLE001 - a report, never in the way
+            pass
+    tg = getattr(app, "tg", None)
+    if tg is not None and hasattr(tg, "heard"):
+        try:
+            out["heard"] = tg.heard(getattr(getattr(app, "cfg", None), "p25_incident_talkgroups", ()))
+        except Exception:  # noqa: BLE001
+            pass
     adsb = adsb_health(app)
     if adsb is not None:
         out["adsb"] = adsb
@@ -271,6 +306,26 @@ def adsb_health(app) -> dict | None:
 
 # -- the hub's side ----------------------------------------------------------------------------------------------
 
+def _part(t: float) -> int:
+    """The 6-hour part of the day (station time zone) epoch t is in: 0 (00-06) .. 3 (18-24)."""
+    from datetime import datetime
+    return datetime.fromtimestamp(t, tz.TZ).hour * TOD_PARTS // 24
+
+
+def _parts(t0: float, t1: float) -> list[int]:
+    """The parts of the day a silence from t0 to t1 spans."""
+    if t1 - t0 >= 24 * 3600:
+        return list(range(TOD_PARTS))
+    out, t = [], t0
+    while True:
+        p = _part(t)
+        if p not in out:
+            out.append(p)
+        if t >= t1:
+            return out
+        t = min(t1, t + 3600.0)
+
+
 def _p90(xs: list[float]) -> float:
     s = sorted(xs)
     return s[min(len(s) - 1, int(round(0.9 * (len(s) - 1))))] if s else 0.0
@@ -297,6 +352,8 @@ class StationHealth:
         self._first: dict[str, float] = {}           # when each held-off condition was first seen
         self._heard: dict[str, float] = {}           # each channel's last_heard as last seen
         self.gaps: dict[str, list[float]] = {}
+        self.tod: dict[str, dict[str, list[float]]] = {}   # label -> part of the day -> gaps that started in it
+        self.main = tuple(getattr(cfg, "alerts_main_channels", MAIN_CHANNELS) or ())
         self._gaps_saved = 0.0
         self._load()
 
@@ -319,6 +376,10 @@ class StationHealth:
                          for k, v in g.items() if isinstance(v, list)}
             self._heard = {str(k): float(v) for k, v in (g.get("_heard") or {}).items()} if isinstance(g.get("_heard"), dict) else {}
             self.gaps.pop("_heard", None)
+            tod = g.get("_tod") if isinstance(g.get("_tod"), dict) else {}
+            self.tod = {str(k): {str(b): [float(x) for x in xs if isinstance(x, (int, float))][-GAPS_MAX:]
+                                 for b, xs in v.items() if isinstance(xs, list)}
+                        for k, v in tod.items() if isinstance(v, dict)}
 
     def _save(self) -> None:
         if self.db is None:
@@ -334,7 +395,7 @@ class StationHealth:
             return
         self._gaps_saved = now
         try:
-            self.db.put("health_gaps", json.dumps(dict(self.gaps, _heard=self._heard), separators=(",", ":")))
+            self.db.put("health_gaps", json.dumps(dict(self.gaps, _heard=self._heard, _tod=self.tod), separators=(",", ":")))
         except Exception:
             pass
 
@@ -344,17 +405,23 @@ class StationHealth:
         """A state post with a status: each channel's gap since it was last heard, for the silence hints."""
         if not isinstance(status, dict):
             return
+        hl = status.get("health") if isinstance(status.get("health"), dict) else {}
+        heard_tg = hl.get("heard") if isinstance(hl.get("heard"), dict) else {}
+        seen = [(str(r.get("label") or ""), r.get("last_heard")) for r in status.get("radios") or []
+                if isinstance(r, dict) and r.get("label") not in NOT_CHANNELS]
+        seen += [(str(k), v.get("at") if isinstance(v, dict) else None) for k, v in heard_tg.items()]
         with self._lock:
-            for r in status.get("radios") or []:
-                if not isinstance(r, dict) or r.get("label") in NOT_CHANNELS:
-                    continue
-                label, heard = str(r.get("label") or ""), r.get("last_heard")
+            for label, heard in seen:
                 if not label or not isinstance(heard, (int, float)) or heard <= 0:
                     continue
                 prev = self._heard.get(label)
                 if prev is not None and heard > prev + 1:
-                    self.gaps.setdefault(label, []).append(round(heard - prev, 1))
+                    gap = round(heard - prev, 1)
+                    self.gaps.setdefault(label, []).append(gap)
                     del self.gaps[label][:-GAPS_MAX]
+                    part = self.tod.setdefault(label, {}).setdefault(str(_part(prev)), [])
+                    part.append(gap)
+                    del part[:-GAPS_MAX]
                 if prev is None or heard > prev:
                     self._heard[label] = float(heard)
 
@@ -399,14 +466,29 @@ class StationHealth:
                 next((r for r in rows if r.get("label") == job), None) or {}
             dongles.append({"serial": str(d.get("serial") or ""), "name": str(d.get("name") or d.get("serial") or ""),
                             "present": bool(d.get("present")), "job": job, "set_by": d.get("set_by"),
-                            "held_by": d.get("held_by"),
+                            "held_by": d.get("held_by"), "ambiguous": str(d.get("ambiguous") or "")[:300],
                             "running": bool(d.get("present")) and job != "Off" and js.get("state") == "ok",
                             "state": js.get("state") if job != "Off" else "off", "restarts": js.get("restarts", 0),
                             "detail": str(js.get("detail") or "")[:200]})
         out["dongles"] = dongles
         out["shared"] = bool(sdr and sdr.get("shared"))
+        usb = hl.get("usb") if isinstance(hl.get("usb"), dict) else {}
+        dups = usb.get("duplicates") if isinstance(usb.get("duplicates"), list) else (sdr or {}).get("duplicates") or []
+        out["usb"] = [{k: x.get(k) for k in ("index", "product", "serial")} for x in usb.get("devices") or []
+                      if isinstance(x, dict)][:32]
+        out["duplicates"] = [{"serial": str(x.get("serial") or ""), "indexes": [i for i in x.get("indexes") or []
+                                                                                if isinstance(i, int)][:16],
+                              "products": [str(p)[:64] for p in x.get("products") or []][:16],
+                              "name": str(x.get("name") or x.get("serial") or "")[:64], "job": str(x.get("job") or "Off"),
+                              "text": str(x.get("text") or "")[:400]}
+                             for x in dups if isinstance(x, dict)][:8]
         chans = []
-        for r in rows:
+        p25row = next((r for r in rows if r.get("label") == P25_JOB), None) or {}
+        heard_tg = hl.get("heard") if isinstance(hl.get("heard"), dict) else {}
+        tg_rows = [{"label": str(k), "name": f"{v.get('name') or k} ({k})", "mhz": None, "state": p25row.get("state"),
+                    "detail": f"a talkgroup on {P25_JOB}'s system", "last_heard": v.get("at"), "restarts": 0}
+                   for k, v in list(heard_tg.items())[:40] if isinstance(v, dict)]
+        for r in rows + tg_rows:
             label = str(r.get("label") or "")
             if label in NOT_CHANNELS:
                 continue
@@ -419,7 +501,11 @@ class StationHealth:
                     and quiet > max(HINT_FACTOR * typical, HINT_MIN_S):
                 hint = (f"nothing heard for {_dur(quiet)}; it usually hears something within {_dur(typical)}: "
                         "check its antenna and dongle")
-            chans.append({"label": label, "mhz": r.get("mhz"), "state": r.get("state"), "word": r.get("word") or "",
+            main = label in self.main
+            limit, usual = self._quiet_limit(label, heard, snow) if main and heard else (None, None)
+            chans.append({"label": label, "name": r.get("name") or label, "main": main,
+                          "alert_after_s": limit, "usual_now_s": usual,
+                          "mhz": r.get("mhz"), "state": r.get("state"), "word": r.get("word") or "",
                           "detail": str(r.get("detail") or "")[:200], "open": bool(r.get("open")),
                           "open_s": r.get("open_s"), "stuck": bool(r.get("stuck")), "quieting_db": r.get("quieting_db"),
                           "restarts": r.get("restarts", 0), "last_heard": heard + hub.skew if heard else None,
@@ -453,6 +539,18 @@ class StationHealth:
         out["adsb"] = ad
         out["transcribe"] = self._transcribe()
         return out
+
+    def _quiet_limit(self, label: str, heard: float, snow: float) -> tuple[float | None, float | None]:
+        """(how long a main channel may be silent before quiet:<label> alerts, the usual gap that is from): the
+        largest 90th-percentile gap of the parts of the day the silence spans, times QUIET_FACTOR, at least
+        QUIET_MIN_S. (None, None) while fewer than QUIET_GAPS_MIN gaps are learned."""
+        allday = self.gaps.get(label) or []
+        if len(allday) < QUIET_GAPS_MIN:
+            return None, None
+        base, tod = _p90(allday), self.tod.get(label) or {}
+        usual = max((_p90(tod.get(str(p)) or []) if len(tod.get(str(p)) or []) >= QUIET_TOD_MIN else base)
+                    for p in _parts(heard, max(heard, snow)))
+        return max(QUIET_FACTOR * usual, QUIET_MIN_S), usual
 
     def _transcribe(self) -> dict | None:
         """Amazon Transcribe's health on the hub (HubApp.aws_health()), None when it isn't set up here."""
@@ -535,6 +633,12 @@ class StationHealth:
         if b["state"] in ("behind", "updating", "paused", "failed") and b["hub"]:
             held("behind", self.behind_s, {"severity": "warning", "title": "Station behind the hub",
                                            "text": f"{b['text']} (the hub runs {short(b['hub'])})"})
+        for x in m.get("duplicates") or []:
+            on = f" {x['name']}'s job {x['job']} doesn't (re)start until then." if x["job"] != "Off" else ""
+            out[f"dup:{x['serial']}"] = {"severity": "critical", "title": f"Duplicate dongle serial {x['serial']}",
+                                         "text": (x["text"] or f"{len(x['indexes'])} dongles share serial {x['serial']}: "
+                                                  "sizeup can't tell them apart") + "." + on,
+                                         "since": now}
         for d in m["dongles"]:
             if not d["present"]:
                 held(f"sdr:{d['serial']}", 0, {"severity": "critical", "title": f"SDR {d['name']} gone",
@@ -561,7 +665,7 @@ class StationHealth:
                                                   + (f" ({wh['detail']})" if wh.get("detail") else "")
                                                   + ": transmissions come up without text"})
         ad = m.get("adsb")
-        if ad and ad.get("state") in ("down", "missing", "unplugged", "refused", "no_signal"):
+        if ad and ad.get("state") in ("down", "missing", "unplugged", "refused", "no_signal", "ambiguous"):
             # (held by another app is a handover, not a fault: the panel says who has it)
             held("adsb", self.down_s, {"severity": "warning", "title": "ADS-B receiver down",
                                        "text": f"the ADS-B decoder on {ad.get('name') or ad.get('sdr')}: {ad.get('state')}"
@@ -581,6 +685,16 @@ class StationHealth:
                                                    + (f" ({rec['detail']})" if rec.get("detail") else "")
                                                    + f": {P25_JOB} (P25) isn't being heard"})
         for c in m["channels"]:
+            lim = c.get("alert_after_s")
+            if lim and c["state"] == "ok" and c["quiet_s"] is not None and c["quiet_s"] > lim:
+                heard_at = c["last_heard"] or (now - c["quiet_s"])
+                out[f"quiet:{c['label']}"] = {
+                    "severity": "warning", "title": f"{c['name']} silent",
+                    "text": f"nothing heard on {c['name']} since {_hhmm(heard_at)}; at this time of day it usually hears "
+                            f"something within {_dur(c['usual_now_s'] or 0)} (alert past {_dur(lim)}): check its dongle "
+                            "(two with one serial?), its antenna" + (" and trunk-recorder" if c["label"].startswith("tg:")
+                                                                     or c["label"] == P25_JOB else ""),
+                    "since": heard_at}
             if c["stuck"]:
                 out[f"stuck:{c['label']}"] = {
                     "severity": "warning", "title": f"{c['label']} stuck open",
@@ -623,8 +737,15 @@ class StationHealth:
             d = next((d for d in m["dongles"] if d["job"] == arg), None)
             if d:
                 w["dongle"] = f"SDR {d['name']}"
-        elif kind == "stuck":
-            w["channel"] = arg
+        elif kind in ("stuck", "quiet"):
+            w["channel"] = next((c["name"] for c in m["channels"] if c["label"] == arg), arg)
+        elif kind == "dup":
+            x = next((x for x in m.get("duplicates") or [] if x["serial"] == arg), None)
+            w["dongle"] = f"SDR {x['name'] if x else arg}"
+            if x and x["job"] != "Off":
+                w["channel"] = x["job"]
+            if x:
+                w["detail"] = "indexes " + ", ".join(str(i) for i in x["indexes"])
         elif kind == "adsb":
             ad = m.get("adsb") or {}
             w["dongle"] = f"SDR {ad.get('name') or ad.get('sdr') or '?'}"
@@ -740,7 +861,9 @@ class StationHealth:
                 "thresholds": {"silent_min": self.silent_s / 60, "behind_min": self.behind_s / 60,
                                "down_min": self.down_s / 60, "outbox_min": self.outbox_s / 60,
                                "disk_pct": self.disk_pct, "repeat_min": self.repeat_s / 60,
-                               "job_grace_s": JOB_GRACE_S}}
+                               "job_grace_s": JOB_GRACE_S,
+                               "quiet": {"channels": list(self.main), "factor": QUIET_FACTOR, "min_min": QUIET_MIN_S / 60,
+                                         "gaps_min": QUIET_GAPS_MIN}}}
 
     def status(self) -> dict:
         """GET /api/station/status: what the deploy check needs, nothing else (no names of people, no audio)."""

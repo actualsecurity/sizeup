@@ -223,10 +223,12 @@ works from the rows alone and the panel says so.
 | Station behind the hub | on another build than the hub's (behind, still updating, paused, failed) for `behind_min` (15 min); a docs-only build the station recorded as equivalent is not behind | warning |
 | Station update failed | the update to the hub's build failed or was rolled back (critical when the rollback failed too); the text has the updater's log line | warning |
 | SDR gone | a dongle the station had isn't plugged in / not found | critical |
+| Duplicate dongle serial | two or more dongles on the station share one serial (#242: a new dongle on its factory `00000001`): "Two dongles share serial 00000001 (indexes 1 and 4): sizeup can't tell them apart. Fix: sizeup-station sdr-serial 4 <new-serial> ...". Nothing of ours (a job, trunk-recorder, readsb) opens that serial until one is renamed ([the station's README](../deploy/station/README.md#two-dongles-one-serial)) | critical |
 | *job* not running | a dongle's job (a channel) isn't running for 60 s (a restart or a switch is quicker); one dongle per channel: each channel | critical |
 | Speech-to-text down | whisper-server not up for `down_min` (2 min) | warning |
 | trunk-recorder down | trunk-recorder not up for `down_min` while its dongle job is on | critical |
 | *channel* stuck open | the squelch open without a break (#116's `stuck`, 2 min) | warning |
+| *main channel* silent | a main channel (`[alerts] main_channels`: `tg:307` Fire/EMS 15, FG1, South 2, HPN Tower) running but silent 4 times its usual gap for that time of day, and at least 1 h (below) | warning |
 | Station's events backing up | the oldest event waiting on the station is `outbox_min` (5 min) old: it couldn't reach the hub. The hub can't see that while it happens, so it shows when the station is back, from the age of the oldest event it reports, and clears as it drains | warning |
 | Station disk full | over `disk_pct` (90%) full; critical from 97% | warning |
 
@@ -235,6 +237,22 @@ state they had: nothing starts or clears on old data. **Per-channel silence** is
 channel's gaps between transmissions are learned (the last 200, kept across redeploys), and a channel quiet
 for 3 times its usual gap (90th percentile) and at least 30 min says so in the panel: "nothing heard for
 2 h; it usually hears something within 25 min: check its antenna and dongle".
+
+**A main channel's silence is an alert** (#242: Fire/EMS 15 stopped reaching the hub at 19:28 while other
+talkgroups kept recording, and nothing said so). Conservative, so a slow night isn't an alert:
+
+* each gap is also filed under the part of the day it started in (00-06, 06-12, 12-18, 18-24, station time);
+  nothing alerts until the channel has 30 gaps learned;
+* the usual gap is the 90th percentile of that part of the day's gaps (the whole day's while it has fewer than
+  10), and for a silence that spans several parts the largest of them (a silence from 22:55 is judged by the
+  night's gaps too);
+* it alerts past 4 times that, and never before 1 h; only while the channel's program runs (a stopped one is
+  already the job / trunk-recorder alert) and the station reports; it clears at the next transmission.
+
+A talkgroup is a channel of its own here: the station's `health.heard` has each main talkgroup's last call
+(`tg:307`), with the P25 job's state, because the other talkgroups on the system can keep trunk-recorder busy
+while one goes silent. `[alerts] main_channels = ["tg:307", "FG1", "South 2", "HPN Tower"]` (labels, or
+talkgroup numbers) on the hub changes the list.
 
 **Where they show.**
 

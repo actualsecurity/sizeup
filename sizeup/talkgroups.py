@@ -55,6 +55,14 @@ class TalkgroupPrefs:
             s["count"] += 1
             s["last"] = max(s["last"] or 0.0, at)
 
+    def heard(self, extra=(), limit: int = 40) -> dict[str, dict]:
+        """{"tg:307": {"at": its last call, "name": "Fire/EMS 15"}} for the main talkgroups (and `extra`) heard since
+        the start: the station's health, for the hub's silent main channel alert (sizeup/cloud/health.py, #242)."""
+        with self._lock:
+            seen = {tg: s.get("last") for tg, s in self._seen.items() if s.get("last")}
+        tgs = sorted(tg for tg in seen if tg in set(extra) or self.main(tg))[:limit]
+        return {f"tg:{tg}": {"at": seen[tg], "name": self.name(tg)} for tg in tgs}
+
     def set(self, tg: int, record: bool | None = None, main: bool | None = None) -> None:
         with self._lock:
             p = self._prefs.setdefault(tg, {})

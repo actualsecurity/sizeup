@@ -193,7 +193,9 @@ def test_an_unplugged_dongle_or_two_with_one_serial_is_never_guessed(tmp_path):
     assert d.step(1000.0)["state"] == "unplugged" and pop.started == []
     d2, pop2 = decoder(tmp_path, lambda: [(0, "adsb1090"), (1, "adsb1090")])
     st = d2.step(1000.0)
-    assert st["state"] == "unplugged" and "two dongles" in st["detail"] and pop2.started == []
+    assert st["state"] == "ambiguous" and pop2.started == []          # #242: said so, with the fix
+    assert st["detail"].startswith("Two dongles share serial adsb1090 (indexes 0 and 1): sizeup can't tell them apart. "
+                                   "Fix: sizeup-station sdr-serial 1 <new-serial>")
     d3, _ = decoder(tmp_path, lambda: [(0, "00000001")], body='[aircraft.receiver]\nsdr = "00000001"\n')
     assert d3.step(1000.0)["state"] == "refused"
 

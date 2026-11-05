@@ -7,6 +7,10 @@ dongle for another receiver on a one-dongle bench), restart with backoff if it d
 It runs a copy of its config.json, config.runtime.json, with the dongle sizeup handed it and the
 unit script (unit-event.sh next to the config) on every system: trunk-recorder then prints each
 voice grant's radio ID to its output the moment the control channel sends it (radio/live.py).
+
+A dongle serial two dongles share (GitHub #242) is never handed to it: the app's lookup gives no index for it (the
+recorder waits, state "ambiguous", and says why), and a source config.json names by such a serial ("rtl=00000001")
+is left out of config.runtime.json (ambiguous_fn); with every source left out it doesn't start at all.
 """
 
 from __future__ import annotations
@@ -29,6 +33,19 @@ UNIT_SCRIPT = "unit-event.sh"
 # in a 200-byte buffer (cut there: a cut "&" only makes it wait for the script): an absolute path
 # longer than this leaves too little room, use ./ then (trunk-recorder's cwd is workdir).
 UNIT_SCRIPT_MAX = 140
+
+
+class AmbiguousSource(ValueError):
+    """Every source in config.json names a dongle serial two or more plugged-in dongles share."""
+
+
+def rtl_serial(device: str | None) -> str:
+    """The dongle an osmosdr device string names ("rtl=fire-p25,buflen=..." -> "fire-p25"), "" for none."""
+    for part in str(device or "").split(","):
+        k, _, v = part.strip().partition("=")
+        if k == "rtl":
+            return v.strip()
+    return ""
 
 
 def unit_script_command(workdir: str | Path, value: str | None = None) -> str:
@@ -64,6 +81,10 @@ class TrunkRecorder:
         # becomes "rtl=<index>" (never the serial: osmosdr reads all-digit serials as indexes).
         self.device_fn: Callable[[], int | str | None] | None = None
         self.device_name = ""
+        # Set by the app: serial -> why it can't be opened now (two dongles share it), "" if fine. A source of
+        # config.json that names such a serial is left out of config.runtime.json (self.left_out says which).
+        self.ambiguous_fn: Callable[[str], str] | None = None
+        self.left_out: list[str] = []
         # Every line of its output, as it comes (sizeup/radio/live.py reads who is keying up from it).
         self.on_line: Callable[[str], None] | None = None
 
@@ -80,6 +101,16 @@ class TrunkRecorder:
         if dev is not None:
             for s in conf.get("sources", []):
                 s["device"] = f"rtl={dev}"
+        elif self.ambiguous_fn is not None:
+            keep, out = [], []
+            for s in conf.get("sources", []):
+                ser = rtl_serial(s.get("device"))
+                why = self.ambiguous_fn(ser) if ser else ""
+                (out if why else keep).append(f"{s.get('device')}: {why}" if why else s)
+            self.left_out = out
+            if out and not keep:
+                raise AmbiguousSource("; ".join(out))
+            conf["sources"] = keep
         for s in conf.get("systems", []):
             cmd = unit_script_command(self.workdir, s.get("unitScript"))
             if cmd:
@@ -189,11 +220,19 @@ class TrunkRecorder:
             if self.device_fn is not None:
                 dev = self.device_fn()
                 if dev is None:
-                    self.state, self.detail = "absent", f"SDR '{self.device_name}' not plugged in"
+                    why = getattr(self.device_fn, "why", "")
+                    self.state, self.detail = ("ambiguous", f"SDR '{self.device_name}': {why}") if why else (
+                        "absent", f"SDR '{self.device_name}' not plugged in")
                     self._stop.wait(15.0)
                     continue
             try:
                 argv = self._argv_for(dev)
+            except AmbiguousSource as e:
+                if self.state != "ambiguous":
+                    self.on_event(f"trunk-recorder not started: {e}")
+                self.state, self.detail = "ambiguous", f"not started: {e}"
+                self._stop.wait(15.0)
+                continue
             except (OSError, ValueError) as e:
                 self.state, self.detail = "down", f"cannot write trunk-recorder config: {e}"
                 self._stop.wait(15.0)
@@ -210,6 +249,9 @@ class TrunkRecorder:
                 backoff = min(backoff * 2, 30)
                 continue
             self.state, self.detail = "ok", "trunk-recorder starting"
+            if self.left_out:
+                self.detail += f" (left out: {'; '.join(self.left_out)})"
+                self.on_event(f"trunk-recorder: source(s) left out: {'; '.join(self.left_out)}")
             threading.Thread(target=self._drain, args=(self._proc,), daemon=True).start()
             started = time.monotonic()
             while not self._stop.is_set() and self._proc.poll() is None:
