@@ -77,7 +77,10 @@ class Fetch:
 
 
 def roads_with(fetch, key="", thruway=True) -> Roads:
-    r = Roads(key, {"events": "https://feeds.example/events?key={key}"} if key else {}, county=False, thruway=thruway,
+    """511NY's events as the hub has them: with a key (the older fixtures' {key} address), else the CARS API's
+    address waiting for the username and password."""
+    urls = {"events": "https://feeds.example/events?key={key}"} if key else {"events": "https://cars.example/events"}
+    r = Roads(key, urls, county=False, thruway=thruway, auth_feeds=() if key else ("events",),
               thruway_urls={"events": "https://thruway.example/events"}, fetch=fetch, log=lambda m: None, clock=Clock())
     r.refresh("events")
     return r
@@ -151,7 +154,8 @@ def test_the_thruway_roadwork_comes_through_roads_not_a_second_fetch():
     assert len(f.calls) == 1                                               # roads read it once; this module read nothing
     src = {s["name"]: s for s in p.sources()}
     assert src["thruway"]["on"] and src["thruway"]["n"] == 1
-    assert not src["511ny"]["on"] and "511NY's key" in src["511ny"]["why"]
+    assert not src["511ny"]["on"] and src["511ny"]["why"] == \
+        "waiting for credentials (SSM /sizeup-hub/511ny-user and /sizeup-hub/511ny-pass)"
 
 
 def test_511ny_roadwork_lights_up_with_the_key_hours_detour_and_its_line():
@@ -465,9 +469,10 @@ def test_a_refused_key_is_never_logged_or_served(gaz):
     assert p.tick() == 0
     assert "refused" in feed.status["error"] and feed.status["next"] == NOW + rw.REFUSED_S
     assert KEY not in json.dumps(p.public()) and not any(KEY in m for m in logs)
-    off = Feed("wzdx", "511NY", "511NY work zones (WZDx)", "https://511ny.org/", "", "https://wzdx.example/feed?key={key}", "wzdx", 300,
-               why_off="waiting for 511NY's key and WZDx address ([roadwork] wzdx_url, SIZEUP_511NY_KEY)")
-    assert not off.on and off.public()["why"].startswith("waiting for 511NY's key")
+    from sizeup.roads import WAITING, BasicAuth
+    off = Feed("wzdx", "511NY", "511NY work zones (WZDx)", "https://511ny.org/", "", "https://cars.example/api/wzdx", "wzdx", 300,
+               auth=BasicAuth(), why_off=WAITING)
+    assert not off.on and off.public()["why"] == "waiting for credentials (SSM /sizeup-hub/511ny-user and /sizeup-hub/511ny-pass)"
 
 
 def test_the_cache_keeps_what_was_read_without_keys_or_addresses(gaz, tmp_path):
@@ -490,15 +495,17 @@ def test_config_roadwork_section(tmp_path):
     from tests.test_gis import load_cfg
     c = load_cfg(tmp_path, "")
     assert (c.roadwork_enabled, c.roadwork_projects, c.roadwork_notices, c.roadwork_wzdx_url) == (True, True, True, "")
-    c = load_cfg(tmp_path, '[roadwork]\nnotices = false\nwzdx_url = "https://511ny.example/api/wzdx?key={key}"\n')
-    assert not c.roadwork_notices and c.roadwork_wzdx_url.endswith("{key}")
+    assert c.roadwork_wzdx is True
+    c = load_cfg(tmp_path, '[roadwork]\nnotices = false\nwzdx_url = "https://wz.example/api/wzdx"\n')
+    assert not c.roadwork_notices and c.roadwork_wzdx_url == "https://wz.example/api/wzdx"
     for bad in ('[roadwork]\nwzdx_url = "http://511ny.example/wzdx"\n', '[roadwork]\nwzdx_url = "https://x.example/wzdx?key=abc12345"\n',
+                '[roadwork]\nwzdx_url = "https://x.example/wzdx?key={key}"\n', '[roadwork]\nwzdx = "yes"\n',
                 '[roadwork]\nprojects = "yes"\n', '[roadwork]\nother = 1\n'):
         with pytest.raises(ConfigError, match="roadwork"):
             load_cfg(tmp_path, bad)
     feeds = {f.name: f for f in rw.feeds_from_config(c)}
-    assert set(feeds) == {"wzdx"}                      # conftest turned the public addresses off; the wzdx one is set
-    assert feeds["wzdx"].url.endswith("{key}") and not feeds["wzdx"].on            # no key: off
+    assert set(feeds) == {"wzdx", "wzdx_other"}        # conftest turned the public addresses off (511NY's WZDx too)
+    assert not feeds["wzdx"].on and feeds["wzdx_other"].on and feeds["wzdx_other"].auth is None
 
 
 def test_the_default_sources(monkeypatch):
@@ -506,7 +513,6 @@ def test_the_default_sources(monkeypatch):
 
     class Cfg:
         roads_bbox = (-73.80, 40.92, -73.56, 41.10)
-        roads_key = ""
     feeds = {f.name: f for f in rw.feeds_from_config(Cfg())}
     assert set(feeds) == {"thruway_capital", "nysdot", "ctdot", "pc_alerts", "pc_news", "rb_news", "gw_dpw", "gw_alerts", "wzdx"}
     assert feeds["nysdot"].url.startswith("https://gis.dot.ny.gov/hostingny/rest/services/Projects/CapitalProgramProjects/FeatureServer/4/query")
@@ -514,7 +520,8 @@ def test_the_default_sources(monkeypatch):
     assert "Email" not in feeds["ctdot"].url and "ProjectManager" not in feeds["ctdot"].url
     assert all(f.url.startswith("https://") for f in feeds.values() if f.url)
     assert feeds["pc_alerts"].every_s == 1200 and feeds["nysdot"].every_s == 86400
-    assert not feeds["wzdx"].on
+    assert feeds["wzdx"].url == "https://nysdot.carsprogram.org/carsapi_v1/api/wzdx"     # 511NY's, on CARS
+    assert not feeds["wzdx"].on and feeds["wzdx"].why() == "waiting for credentials (SSM /sizeup-hub/511ny-user and /sizeup-hub/511ny-pass)"
 
 
 def test_the_hub_serves_the_layer(tmp_path):
@@ -569,8 +576,8 @@ def test_the_hub_starts_the_reader_and_a_look_reads_the_sources(tmp_path):
         assert h.app.roadwork.running                                   # started by the hub, as by App
         assert hits == []                                               # nobody looked yet: nothing read
         d = h.get("/api/cad/roadprojects")
-        assert d["reader"] == "" and not {s["name"]: s for s in d["sources"]}["wzdx"].get("reader")
-        assert wait_for(lambda: {s["name"]: s for s in h.get("/api/cad/roadprojects")["sources"]}["wzdx"]["at"])
+        assert d["reader"] == "" and not {s["name"]: s for s in d["sources"]}["wzdx_other"].get("reader")
+        assert wait_for(lambda: {s["name"]: s for s in h.get("/api/cad/roadprojects")["sources"]}["wzdx_other"]["at"])
         assert hits == ["/wzdx"]
         row = next(r for r in h.app.datasources.public()["sources"] if r["key"] == "roadwork")
         assert row["last_fetched"] and "reader" not in row["error"]

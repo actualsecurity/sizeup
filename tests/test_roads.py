@@ -182,19 +182,17 @@ def test_the_schedule_respects_the_limit(tmp_path):
     clock = Clock()
     r = make(tmp_path, clock=clock)
     everything(r)
-    clock.t += 89
+    clock.t += 299
     assert r.ny.due() == []
     clock.t += 2
-    assert r.ny.due() == ["events"]
-    clock.t += 300
-    assert r.ny.due() == ["events", "signs"]
+    assert r.ny.due() == ["events", "signs"]                                    # 511NY: every 5 minutes
     clock.t += 3600
     assert r.ny.due() == ["cameras", "events", "signs"]
-    with pytest.raises(ConfigError, match="10 calls a minute"):
-        load_cfg(tmp_path, "[roads]\nevents_every_s = 20\n")
-    # whatever is asked for, never faster than the floors (5 calls a minute for all three)
+    with pytest.raises(ConfigError, match="once every 5 minutes"):
+        load_cfg(tmp_path, "[roads]\nevents_every_s = 60\n")
+    # whatever is asked for, never faster than once every 5 minutes (511NY's recommendation)
     fast = make(every={"cameras": 1, "events": 1, "signs": 1})
-    assert fast.ny.every == {"cameras": 600.0, "events": 60.0, "signs": 60.0}
+    assert fast.ny.every == {"cameras": 300.0, "events": 300.0, "signs": 300.0}
 
 
 def test_the_disk_cache_saves_calls_after_a_restart(tmp_path):
@@ -219,12 +217,12 @@ def test_no_key_or_no_feed_address_fetches_nothing_and_says_so(tmp_path):
     assert r._thread is None and "no camera, incident or sign source" in r.logs[-1] and "no key" in r.logs[-2]
     pub = r.public()
     assert (pub["configured"], pub["cameras"], pub["events"], pub["signs"]) == (False, [], [], [])
-    assert "SIZEUP_511NY_KEY" in pub["note"]
+    assert "no key" in pub["note"]
     code, body, _, _ = r.get("/api/cad/cameras/4616/image", "")
     assert code == 404 and b"no camera source is configured" in body
     assert json.loads(r.get("/api/cad/roads", "")[1])["configured"] is False
     bare = make(urls={})
-    assert not bare.configured and "feed addresses" in bare.why_not()
+    assert not bare.configured and "511NY off" in bare.why_not()
     # a feed address with no {key} needs no key
     assert make(key="", urls={"events": "https://feeds.example/events?format=json"}).configured
     assert not (tmp_path / "roads511.json").exists()
@@ -241,11 +239,11 @@ def test_errors_back_off_and_never_show_the_key(tmp_path):
     f.fail["signs"] = HTTPError("", 429, "Too Many Requests", None, None)
     assert not r.refresh("signs") and "rate limit" in r.ny.status["signs"]["error"]
     f.fail["cameras"] = OSError(f"connection reset fetching ...?key={KEY}")
-    assert not r.refresh("cameras") and r.ny.status["cameras"]["next"] == clock.t + 600    # its floor, not an hour
+    assert not r.refresh("cameras") and r.ny.status["cameras"]["next"] == clock.t + 300    # its floor, not an hour
     f.feeds["events"] = b"<!doctype html><html></html>"
     del f.fail["events"]
     assert not r.refresh("events") and "HTML" in r.ny.status["events"]["error"]
-    assert r.ny.status["events"]["next"] == clock.t + 120                       # the second failure: 2 min
+    assert r.ny.status["events"]["next"] == clock.t + 300                       # never under 511NY's 5 minutes
     blob = json.dumps(r.public()) + "\n".join(r.logs)
     assert KEY not in blob and "***" in "\n".join(r.logs)
     # a good read clears the error
@@ -452,7 +450,7 @@ def test_the_thruway_alone_needs_no_key_and_the_layers_are_on(tmp_path):
     everything(r)
     assert sorted(f.urls) == sorted(TURLS.values())
     pub = r.public()
-    assert pub["configured"] and "511NY not configured" in pub["note"]      # said, but the layers are on
+    assert pub["configured"] and "511NY off" in pub["note"]                 # said, but the layers are on
     assert len(pub["cameras"]) == 15 and len(pub["events"]) == 2 and len(pub["signs"]) == 8
     assert {c["source"] for c in pub["cameras"]} == {e["source"] for e in pub["events"]} == {"Thruway"}
     srcs = {s["name"]: s for s in pub["sources"]}
@@ -461,7 +459,7 @@ def test_the_thruway_alone_needs_no_key_and_the_layers_are_on(tmp_path):
     assert not srcs["511ny"]["configured"]
     r.start()
     assert "Thruway on (cameras every 3600 s, events every 120 s, signs every 300 s)" in "\n".join(r.logs)
-    assert "511NY not configured" in "\n".join(r.logs)
+    assert "511NY off" in "\n".join(r.logs)
     r.stop()
     # the snapshot proxy, through the Thruway's redirecting thumbs address (start() swept them: forget that)
     f.urls.clear()
@@ -1065,37 +1063,53 @@ def load_cfg(tmp_path, text: str):
 
 def test_roads_config(tmp_path, monkeypatch):
     c = load_cfg(tmp_path, "")
-    assert (c.roads_key, c.roads_events_url, c.roads_bbox) == ("", "", (-73.80, 40.92, -73.56, 41.10))
-    c = load_cfg(tmp_path, '[roads]\nevents_url = "https://feeds.example/e?key={key}"\nbbox = [-73.9, 40.9, -73.5, 41.2]\n'
+    assert (c.roads_ny511, c.roads_511ny_user, c.roads_511ny_pass, c.roads_events_url, c.roads_signs_url, c.roads_ny511_hub,
+            c.roads_carshub_imagery, c.roads_bbox) == (True, "", "", "", "", "", True, (-73.80, 40.92, -73.56, 41.10))
+    assert (c.roads_events_s, c.roads_signs_s) == (300, 300)                     # 511NY: every 5 minutes
+    c = load_cfg(tmp_path, '[roads]\nevents_url = "https://feeds.example/e"\nsigns_url = "off"\nbbox = [-73.9, 40.9, -73.5, 41.2]\n'
                            "cameras_every_min = 30\n")
-    assert c.roads_events_url.endswith("{key}") and c.roads_bbox == (-73.9, 40.9, -73.5, 41.2) and c.roads_cameras_s == 1800
-    monkeypatch.setenv("SIZEUP_511NY_KEY", KEY)
-    assert load_cfg(tmp_path, '[roads]\nkey = "from-the-file-123"\n').roads_key == KEY       # the environment wins
+    assert c.roads_events_url == "https://feeds.example/e" and c.roads_signs_url == "off"
+    assert c.roads_bbox == (-73.9, 40.9, -73.5, 41.2) and c.roads_cameras_s == 1800
+    monkeypatch.setenv("SIZEUP_511NY_USER", "pcfd-user")
+    monkeypatch.setenv("SIZEUP_511NY_PASS", "pw with spaces & symbols!")
+    c = load_cfg(tmp_path, '[roads]\nny511_hub = "https://hub.example/hub/"\ncarshub_imagery = false\n')
+    assert (c.roads_511ny_user, c.roads_511ny_pass) == ("pcfd-user", "pw with spaces & symbols!")
+    assert c.roads_ny511_hub == "https://hub.example/hub/" and not c.roads_carshub_imagery
+    monkeypatch.delenv("SIZEUP_511NY_PASS")
+    with pytest.raises(ConfigError, match="both"):
+        load_cfg(tmp_path, "")
+    monkeypatch.delenv("SIZEUP_511NY_USER")
     assert load_cfg(tmp_path, "[roads]\nenabled = false\n").roads_enabled is False
+    assert load_cfg(tmp_path, "[roads]\nny511 = false\n").roads_ny511 is False
     assert c.roads_thruway is True and load_cfg(tmp_path, "[roads]\nthruway = false\n").roads_thruway is False
     with pytest.raises(ConfigError, match="thruway"):
         load_cfg(tmp_path, '[roads]\nthruway = "yes"\n')
     for bad, why in (('[roads]\nevents_url = "http://feeds.example/e"\n', "https://"),
-                     (f'[roads]\nevents_url = "https://feeds.example/e?key={KEY}"\n', "never the key itself"),
+                     ('[roads]\nny511_hub = "https://u:p@hub.example/x"\n', "no user:password@"),
+                     ('[roads]\nkey = "abcdefgh123"\n', "username and password"),        # 511NY's old key: gone
+                     ('[roads]\ncameras_url = "https://x.example/c"\n', "ny511_hub"),
+                     ('[roads]\ncarshub_url = "https://x.example/c"\n', "ny511_hub"),
                      ("[roads]\nbbox = [-73, 41, -74, 42]\n", "west < east"),
                      ("[roads]\nbbox = [-80, 40, -70, 45]\n", "3 degrees"),
-                     ("[roads]\nsigns_every_min = 0.5\n", "10 calls a minute"),
+                     ("[roads]\nsigns_every_min = 1\n", "once every 5 minutes"),
                      ("[roads]\nnope = 1\n", "unknown key")):
         with pytest.raises(ConfigError, match=why):
             load_cfg(tmp_path, bad)
-    monkeypatch.setenv("SIZEUP_511NY_KEY", "has space in it")
-    with pytest.raises(ConfigError, match="no spaces"):
-        load_cfg(tmp_path, "")
 
 
 # ---- through the hub: a local fake 511NY, Cloudflare Access, viewers ----------------------------------------------
 
 
+USER, PASS = "pcfd-511-user", "S3cret pass-for-511NY!"
+
+
 class Fake511:
-    """511NY and its cameras on this machine: the feeds from the fixtures, a JPEG for any camera."""
+    """511NY and its cameras on this machine: the feeds from the fixtures, a JPEG for any camera. As CARS does: the
+    API's events and the CARS-Hub only with the username and password (HTTP Basic), the signs public with an ETag."""
 
     def __init__(self):
         self.requests: list[str] = []
+        self.auths: dict[str, list[str]] = {}
         fake = self
 
         class H(BaseHTTPRequestHandler):
@@ -1103,9 +1117,35 @@ class Fake511:
                 pass
 
             def do_GET(self):
+                import base64
                 fake.requests.append(self.path)
                 name = self.path.split("?")[0].strip("/")
-                if name in ("events", "signs"):
+                auth = self.headers.get("Authorization", "")
+                fake.auths.setdefault(name, []).append(auth)
+                good = "Basic " + base64.b64encode(f"{USER}:{PASS}".encode()).decode()
+                extra = {}
+                if name in ("cars/events", "hub/data/cctv.xml") and auth != good:
+                    body, ctype, code = b'{"code":401,"message":"Unauthorized"}', "application/json", 401
+                    self.send_response(code)
+                    self.send_header("Content-Type", ctype)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                if name == "signs.json" and self.headers.get("If-None-Match") == '"s1"':
+                    self.send_response(304)
+                    self.end_headers()
+                    return
+                if name == "cars/events":
+                    body, ctype = fixture("cars_events_constructed.json"), "application/json"
+                elif name == "signs.json":
+                    body, ctype = fixture("cars_signs_recorded.json"), "application/json"
+                    extra = {"ETag": '"s1"', "Last-Modified": "Wed, 04 Nov 2026 21:44:39 GMT"}
+                elif name == "hub/data/cctv.xml":
+                    body, ctype = (fixture("cars_cctv_recorded.xml").replace(b"https://public.carsprogram.org/cameras/",
+                                                                            f"http://127.0.0.1:{fake.port}/cctv/".encode()),
+                                   "application/xml")
+                elif name in ("events", "signs"):
                     body, ctype = fixture(f"{name}.json"), "application/json"
                 elif name.startswith("api/data/"):                          # the Thruway's feeds, recorded
                     feed = name.split("/")[2]
@@ -1122,6 +1162,8 @@ class Fake511:
                 else:
                     body, ctype = b"no", "text/plain"
                 self.send_response(200 if ctype != "text/plain" else 404)
+                for k, v in extra.items():
+                    self.send_header(k, v)
                 self.send_header("Content-Type", ctype)
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
@@ -1153,34 +1195,42 @@ def wait_for(cond, timeout=5.0):
 
 
 def test_the_hub_serves_layers_and_snapshots_to_a_signed_in_viewer(tmp_path, keys, jwks, fake511):  # noqa: F811
+    """511NY on CARS through the hub: the API's events and the CARS-Hub with the username and password (the
+    Authorization header only), the public signs without; nothing of the credentials in an answer or the cache."""
+    import base64
     base = f"http://127.0.0.1:{fake511.port}"
-    h = HubRun(hub_cfg(tmp_path, cloud_access_team=TEAM, cloud_access_aud=AUD, roads_key=KEY,
-                       roads_events_url=base + "/events?key={key}&format=json", roads_cameras_url=base + "/cameras?key={key}",
-                       roads_signs_url=base + "/signs?key={key}&format=json"))
+    h = HubRun(hub_cfg(tmp_path, cloud_access_team=TEAM, cloud_access_aud=AUD, roads_511ny_user=USER, roads_511ny_pass=PASS,
+                       roads_events_url=base + "/cars/events", roads_signs_url=base + "/signs.json",
+                       roads_ny511_hub=base + "/hub/"))
     try:
         h.server.access.certs_url = jwks.url
         h.server.access.log = lambda m: None
         post(h.app.cad, "users", action="add", name="Corey", email="corey@example.org", role="admin")
         post(h.app.cad, "users", action="add", name="Val", email="val@example.org", role="viewer")
-        assert wait_for(lambda: all(h.app.roads.ny.status[f]["at"] for f in ("events", "signs", "cameras")))
-        assert all(f"key={KEY}" in p for p in fake511.requests if not p.startswith("/cctv/"))   # (the health sweep fetches images)
+        assert wait_for(lambda: all(h.app.roads.ny.status[f]["at"] for f in ("events", "signs"))
+                        and h.app.roads.carshub.status["cameras"]["at"])
+        token = base64.b64encode(f"{USER}:{PASS}".encode()).decode()
+        assert set(fake511.auths["cars/events"]) == set(fake511.auths["hub/data/cctv.xml"]) == {f"Basic {token}"}
+        assert fake511.auths["signs.json"] == [""]                                     # the public feed: no credentials
+        assert not any(USER in p or PASS in p or token in p for p in fake511.requests)   # never in an address
         assert req(h.url + "/api/cad/roads")[0] == 401                               # Access: a person only
-        assert req(h.url + "/api/cad/cameras/4616/image")[0] == 401
         val = {"Cf-Access-Jwt-Assertion": jwt(keys[0], email="val@example.org")}     # a viewer may look
         code, doc = req(h.url + "/api/cad/roads", headers=val)
-        assert code == 200 and doc["configured"] and len(doc["cameras"]) == 3 and len(doc["signs"]) == 2
-        code, img = req(h.url + "/api/cad/cameras/4616/image", headers=val)
+        assert code == 200 and doc["configured"] and "waiting" not in doc["note"]
+        assert doc["note"].startswith("511NY signs: 511NY's copy was published")      # the recording's Last-Modified: old
+        assert {e["id"] for e in doc["events"]} == {"NYSDOT-CARS-31001", "NYSDOT-CARS-31002", "NYSDOT-CARS-31003",
+                                                    "NYSDOT-CARS-31007"}
+        assert len(doc["signs"]) == 7 and {s["source"] for s in doc["signs"]} == {"511NY"}
+        assert {c["id"] for c in doc["cameras"]} == {"35992", "34715", "34353", "35589", "36011", "34259"}   # (no Thruway, county)
+        code, img = req(h.url + "/api/cad/cameras/35992/image", headers=val)
         assert code == 200 and img == JPEG
-        code, img = req(h.url + "/api/cad/cameras/4616/image", headers=val)
-        assert sum(p.startswith("/cctv/4616") for p in fake511.requests) == 1         # the second from the cache
-        code, near = req(h.url + "/api/cad/cameras?near=41.0006,-73.6739", headers=val)
-        assert [c["id"] for c in near["cameras"]] == ["4616"]
-        for path in ("/api/cad/roads", "/api/cad/cameras?q=camera", "/api/cad/cameras/4616/image"):
-            raw = req(h.url + path, headers=val)[1]
-            assert KEY not in (json.dumps(raw) if not isinstance(raw, bytes) else raw.decode("latin-1"))
-        assert h.app.cad.place_providers[0]("exit 21 camera")[0]["camera"] == "4616"
+        assert set(fake511.auths["cctv/NYSDOT/R8_039.flv.png"]) == {""}             # a picture: never the credentials
+        for path in ("/api/cad/roads", "/api/cad/cameras?q=camera", "/api/cad/roadprojects"):
+            raw = json.dumps(req(h.url + path, headers=val)[1])
+            assert USER not in raw and PASS not in raw and token not in raw and "cctv.xml" not in raw
         cache = (tmp_path / "hub" / "roads511.json").read_text()
-        assert KEY not in cache and "127.0.0.1" in cache                            # snapshot URLs only, no key
+        assert USER not in cache and PASS not in cache and token not in cache and "cctv.xml" not in cache
+        assert json.loads(cache)["providers"]["511ny"]["signs"]["etag"] == '"s1"'     # the signs' ETag, for the next ask
     finally:
         h.close()
 
@@ -1189,7 +1239,7 @@ def test_a_hub_without_a_key_still_serves_the_page_and_says_not_configured(tmp_p
     h = HubRun(hub_cfg(tmp_path))                 # (conftest: the Thruway's addresses are off in tests)
     try:
         doc = h.get("/api/cad/roads")
-        assert doc["configured"] is False and "not configured" in doc["note"]
+        assert doc["configured"] is False and "511NY off" in doc["note"]
         code, body = req(h.url + "/api/cad/cameras/4616/image")
         assert code == 404
         assert h.app.roads._thread is None
@@ -1207,7 +1257,7 @@ def test_the_hub_shows_the_thruway_without_any_key(tmp_path, monkeypatch, fake51
         assert h.app.roads.thruway is not None and h.app.roads.configured
         assert wait_for(lambda: all(h.app.roads.thruway.status[f]["at"] for f in ("events", "signs", "cameras")))
         doc = h.get("/api/cad/roads")
-        assert doc["configured"] is True and "511NY not configured" in doc["note"]
+        assert doc["configured"] is True and "511NY off" in doc["note"]
         assert len(doc["cameras"]) == 15 and len(doc["events"]) == 2 and len(doc["signs"]) == 8
         assert {c["source"] for c in doc["cameras"]} == {"Thruway"}
         src = {s["name"]: s for s in doc["sources"]}

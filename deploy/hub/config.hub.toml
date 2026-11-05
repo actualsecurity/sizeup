@@ -4,7 +4,8 @@
 #   SIZEUP_STATE_DIR       where cad.sqlite, hub.sqlite and audio.sqlite go (the image sets /data)
 #   SIZEUP_PORT, SIZEUP_HOST, SIZEUP_PUBLIC_URL
 #   SIZEUP_ACCESS_TEAM, SIZEUP_ACCESS_AUD   Cloudflare Access identity (below)
-#   SIZEUP_511NY_KEY       the 511NY feeds' key (SSM /sizeup-hub/511ny-key; [roads] below)
+#   SIZEUP_511NY_USER, SIZEUP_511NY_PASS   511NY's username and password for the CARS API and CARS-Hub
+#                          (SSM /sizeup-hub/511ny-user, /sizeup-hub/511ny-pass; [roads] below)
 #   SIZEUP_MTA_KEY         only should the MTA require a key again (SSM /sizeup-hub/mta-key; [trains]: none needed today)
 #   SIZEUP_ALERT_TOPIC     the alarms' pushes (emergency, mayday, aircraft): our own ntfy topic (SSM /sizeup-hub/alert-topic)
 #   SIZEUP_STATUS_TOPIC    station health / Amazon Transcribe pushes: our own ntfy topic (SSM /sizeup-hub/status-topic)
@@ -110,15 +111,16 @@ heartbeat_stale_min = 90
 
 [roads]
 # The maps' highway layers (sizeup/roads.py, docs/cloud.md "Highway layers"). thruway: the NYS Thruway
-# Authority's public feeds (cameras, incidents, signs on I-95 and I-287; no key). 511NY: off until it
-# approves access (https://511ny.org/help/24) and the key is in SSM /sizeup-hub/511ny-key
-# (SIZEUP_511NY_KEY in deploy/aws/taskdef.json); then the feed addresses from the approval go here,
-# {key} where the key goes (never the key itself). Mileposts and exits work without either.
+# Authority's public feeds (cameras, incidents, signs on I-95 and I-287; no key). ny511: 511NY on CARS (#188):
+# its public message signs, and with the username and password (SSM /sizeup-hub/511ny-user and -pass, in
+# deploy/aws/taskdef.json as SIZEUP_511NY_USER / SIZEUP_511NY_PASS) the API's incidents, closures and roadwork;
+# every 5 min; and the CARS-Hub's CCTV inventory (https://nysdot.carsprogram.org/hub/data/cctv.xml, the same pair):
+# hourly, the cameras we don't have yet joining ours. Mileposts and exits work without any of them.
 thruway = true
 county = true                           # Westchester County DPW's cameras (no key)
-# events_url = ""
-# cameras_url = ""
-# signs_url = ""
+ny511 = true
+# ny511_hub = "https://nysdot.carsprogram.org/hub/"   # (the default; "off" = none)
+# carshub_imagery = true                # false: the CARS-Hub's cameras only counted against ours, not shown
 bbox = [-73.80, 40.92, -73.56, 41.10]   # west, south, east, north: Port Chester, Rye Brook, the neighbours, Greenwich
 
 # [gis]: the maps' County GIS layers (sizeup/gis.py, docs/cloud.md "County GIS layers"): the starter set
