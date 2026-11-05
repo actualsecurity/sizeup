@@ -403,7 +403,9 @@ class App:
         self.cache_mirror = None
         if cfg.cloud_role != "station" and cfg.cad_db:
             from sizeup.cachesync import CacheMirror
-            self.cache_mirror = CacheMirror.from_env(Path(cfg.cad_db).parent, log=log)
+            from sizeup.fence import Fence
+            fence = Fence.from_env(log=log)      # the hub's single-writer lock (sizeup/handoff.py): uploads only while ours
+            self.cache_mirror = CacheMirror.from_env(Path(cfg.cad_db).parent, log=log, fence=fence.ok if fence else None)
             if self.cache_mirror is not None:
                 self.cache_mirror.restore()
         # The map's highway layers (sizeup/roads.py, #73): 511NY's cameras, incidents and signs where
@@ -2700,7 +2702,7 @@ def make_app(cfg: Config) -> App:
     return app
 
 
-def make_server(app: App) -> WebServer:
+def make_server(app: App, fence=None) -> WebServer:
     cfg = app.cfg
     server = WebServer(cfg.host, cfg.port, app.scene(), app.state, app.clip, app.close_incident, app.set_mode,
                        app.set_talkgroup, app.set_talkgroup_group, app.retranscribe, cad=CadApi(app.cad),
@@ -2708,7 +2710,8 @@ def make_server(app: App) -> WebServer:
                        access_log=log if cfg.cloud_role == "hub" else None, station_mode=app.station,
                        role=cfg.cloud_role, roads=app.roads, gis=app.gis,
                        trains=app.trains, weather=app.weather, station_health=getattr(app, "health", None),
-                       aircraft=app.aircraft, roadwork=app.roadwork, set_adsb=app.set_adsb_receiver)
+                       aircraft=app.aircraft, roadwork=app.roadwork, set_adsb=app.set_adsb_receiver,
+                       fence=fence)
 
     def changed() -> None:             # a new talker is pushed at once, not on the next second
         server.poke()
@@ -2763,13 +2766,23 @@ def main(argv: list[str] | None = None) -> int:
     except (ConfigError, FileNotFoundError) as e:
         print(f"config: {e}", file=sys.stderr)
         return 2
+    # The hub under its supervisor (sizeup/handoff.py): the lease must stay ours and fresh, or this process
+    # stops writing at once (sizeup/fence.py); SIGTERM drains: new requests get 503 + Retry-After, those in
+    # flight finish, then it exits (the supervisor then puts the last changes in S3 and hands over).
+    from sizeup.fence import Fence
+    fence = Fence.from_env(log=log)
+    if fence is not None and not args.init_state:
+        if not fence.ok():
+            log("fence: started without a fresh lease: not starting")
+            return 75
+        fence.watch()
     app = make_app(cfg)
     if args.init_state:
         log(f"sizeup: databases ready ({cfg.cad_db or 'in memory'})")
         return 0
     app.start()
-    server = make_server(app)
-    signal.signal(signal.SIGTERM, lambda *_: server.shutdown())
+    server = make_server(app, fence)
+    signal.signal(signal.SIGTERM, lambda *_: server.drain())
     sm = app.station
     role = (" · hub (fed by the station, no radios)" if cfg.cloud_role == "hub"
             else f" · station, forwarding to {sm.hub_url}" if sm is not None and sm.forward else "")

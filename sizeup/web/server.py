@@ -294,6 +294,39 @@ class Broadcaster:
             return self._seq
 
 
+DRAIN_S = 10.0          # SIGTERM: requests in flight get this long to finish
+UPDATING = json.dumps({"error": "the hub is updating: back in a few seconds", "updating": True}).encode()
+
+
+class Gate:
+    """Draining (SIGTERM: sizeup/handoff.py hands over to the next task) and the single-writer fence
+    (sizeup/fence.py, the hub only). While draining every new request gets 503 + Retry-After (the CAD page and
+    the station retry quietly) and those in flight finish; a write (POST) also gets it whenever the fence says
+    the lease isn't ours and fresh."""
+
+    def __init__(self, fence=None):
+        self.fence = fence
+        self.draining = threading.Event()
+        self._mu = threading.Condition()
+        self.inflight = 0
+
+    def enter(self) -> None:
+        with self._mu:
+            self.inflight += 1
+
+    def leave(self) -> None:
+        with self._mu:
+            self.inflight -= 1
+            self._mu.notify_all()
+
+    def wait_idle(self, timeout: float) -> bool:
+        with self._mu:
+            return self._mu.wait_for(lambda: self.inflight <= 0, timeout)
+
+    def refuse(self, write: bool) -> bool:
+        return self.draining.is_set() or (write and self.fence is not None and not self.fence.ok())
+
+
 def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | None],
                  close_incident: Callable[[str], bool], set_mode: Callable[[str], str | None] | None = None,
                  set_talkgroup: Callable[..., str | None] | None = None,
@@ -301,7 +334,8 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                  cad=None, cad_b: Broadcaster | None = None, station=None, health: bytes = b'{"ok":true}',
                  access=None, access_log: Callable[[str], None] | None = None, station_mode=None,
                  role: str = "", roads=None, gis=None, trains=None, weather=None, station_health=None, stream_gzip: bool = True,
-                 aircraft=None, roadwork=None, set_adsb: Callable[[str], str | None] | None = None):
+                 aircraft=None, roadwork=None, set_adsb: Callable[[str], str | None] | None = None,
+                 gate: Gate | None = None):
     """cad: a CadApi (sizeup/cad/api.py) and cad_b its own broadcaster (the console's state is
     small and separate from the monitor's, so neither page carries the other's). station: the hub's
     ingest (sizeup/cloud/hub.py Hub), which checks the station's token before reading any body.
@@ -315,8 +349,10 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
     aircraft: aircraft near HPN (sizeup/aircraft.py AircraftLayer): /api/cad/aircraft, GET only (ETag -> 304).
     roadwork: road projects & closures (sizeup/roadprojects.py RoadProjects): /api/cad/roadprojects..., GET only (ETag -> 304).
     stream_gzip: the state streams gzipped to a browser that takes it (#137).
-    station_health: the hub's StationHealth (sizeup/cloud/health.py): GET /api/cad/health."""
+    station_health: the hub's StationHealth (sizeup/cloud/health.py): GET /api/cad/health.
+    gate: draining and the hub's single-writer fence (Gate)."""
     assets = Assets(STATIC_DIR)
+    gate = gate or Gate()
     hub_says = json.dumps({"error": "this is the hub: station forwarding is switched on the station"}).encode()
     station_ui = role == "station"
 
@@ -444,7 +480,30 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
 
+        def _updating(self) -> None:
+            self.close_connection = True
+            self._send(503, UPDATING, "application/json", {"Retry-After": "2", "Cache-Control": "no-store",
+                                                           "Connection": "close"})
+
         def do_GET(self) -> None:
+            if gate.refuse(write=False):
+                return self._updating()
+            gate.enter()
+            try:
+                self._get()
+            finally:
+                gate.leave()
+
+        def do_POST(self) -> None:
+            if gate.refuse(write=True):
+                return self._updating()
+            gate.enter()
+            try:
+                self._post()
+            finally:
+                gate.leave()
+
+        def _get(self) -> None:
             url = urlsplit(self.path)
             path = url.path
             if not self._admit(path):
@@ -521,7 +580,7 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
         # with HEAD before loading it; it got 501 here (ECC workstation, 2026-10-08).
         do_HEAD = do_GET
 
-        def do_POST(self) -> None:
+        def _post(self) -> None:
             path = urlsplit(self.path).path
             if not self._admit(path):
                 return
@@ -683,8 +742,10 @@ class WebServer:
                  retranscribe: Callable[[list[str] | None], int] | None = None, cad=None, station=None,
                  health: dict | None = None, access=None, access_log: Callable[[str], None] | None = None,
                  station_mode=None, role: str = "", roads=None, gis=None, trains=None, weather=None, station_health=None,
-                 aircraft=None, roadwork=None, set_adsb=None):
+                 aircraft=None, roadwork=None, set_adsb=None, fence=None):
         self.access = access
+        self.gate = Gate(fence)
+        self.station = station
         self.broadcaster = Broadcaster(state_fn)
         # The CAD's own state push (the whole console rebuilt and sent once a second): not on a station,
         # whose page has no CAD (role = "station": its /api/cad/stream is refused).
@@ -693,7 +754,8 @@ class WebServer:
             json.dumps(scene, separators=(",", ":")).encode(), self.broadcaster, clip, close_incident, set_mode,
             set_talkgroup, set_talkgroup_group, retranscribe, cad, self.cad_broadcaster, station,
             json.dumps(health or {"ok": True}, separators=(",", ":")).encode(), access, access_log, station_mode, role,
-            roads, gis, trains, weather, station_health, aircraft=aircraft, roadwork=roadwork, set_adsb=set_adsb))
+            roads, gis, trains, weather, station_health, aircraft=aircraft, roadwork=roadwork, set_adsb=set_adsb,
+            gate=self.gate))
         self.httpd.daemon_threads = True
 
     @property
@@ -717,6 +779,26 @@ class WebServer:
         self.broadcaster.poke()
         if self.cad_broadcaster:
             self.cad_broadcaster.poke()
+
+    def drain(self, wait_s: float = DRAIN_S) -> None:
+        """SIGTERM: new requests get 503 + Retry-After at once, the state streams and the station's long poll end
+        (they reconnect, and get the 503 until the next task serves), what is in flight gets wait_s to finish;
+        then the server stops (serve_forever returns, main() stops the app). Returns at once (a signal handler)."""
+        if self.gate.draining.is_set():
+            return
+        self.gate.draining.set()
+
+        def run() -> None:
+            jobs = getattr(self.station, "jobs", None)
+            if jobs is not None and hasattr(jobs, "close"):
+                jobs.close()
+            self.broadcaster.stop()
+            if self.cad_broadcaster:
+                self.cad_broadcaster.stop()
+            if not self.gate.wait_idle(wait_s):
+                print(f"sizeup: {self.gate.inflight} request(s) still in flight after {wait_s:.0f} s: stopping anyway", flush=True)
+            self.httpd.shutdown()
+        threading.Thread(target=run, name="drain", daemon=True).start()
 
     def shutdown(self) -> None:
         self.broadcaster.stop()

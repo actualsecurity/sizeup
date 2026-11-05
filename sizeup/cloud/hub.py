@@ -125,6 +125,7 @@ class Jobs:
     def __init__(self):
         self._cond = threading.Condition()
         self._jobs: OrderedDict[str, dict] = OrderedDict()
+        self.closed = False             # the hub is draining (a deploy): the long polls return now, empty
 
     def put(self, kind: str, args: dict, ttl: float) -> dict:
         job = {"id": secrets.token_hex(8), "type": kind, "args": args, "expires": time.time() + ttl,
@@ -140,9 +141,18 @@ class Jobs:
             del self._jobs[jid]
         return [x for x in self._jobs.values() if not x["taken"]]
 
+    def close(self) -> None:
+        """Draining: every long poll returns at once with nothing; nothing more is handed out (a job waiting
+        here is the next task's to give: the clicker's request fails and is tried again)."""
+        with self._cond:
+            self.closed = True
+            self._cond.notify_all()
+
     def take(self, wait: float) -> list[dict]:
         with self._cond:
-            self._cond.wait_for(lambda: bool(self._open()), timeout=wait)
+            self._cond.wait_for(lambda: self.closed or bool(self._open()), timeout=wait)
+            if self.closed:
+                return []
             out = self._open()
             for x in out:
                 x["taken"] = True

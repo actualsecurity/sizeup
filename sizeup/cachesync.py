@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import gzip
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -59,6 +60,7 @@ FILES: tuple[tuple[re.Pattern, float], ...] = (
 )
 DIRS = ("", "gis", "trains", "aircraft")    # the folders of the state dir those are in
 SUB = "cache"                       # <prefix>/cache/...
+MANIFEST = ".cachesync-restored.json"  # in the state dir: what the hub's standby restored (sizeup/handoff.py)
 SCAN_S = 60.0
 RESTORE_S = 45.0                    # restore() at most this long in all (the health check's start period is 60 s)
 LIST_TIMEOUT_S = 10.0
@@ -100,8 +102,9 @@ class CacheMirror:
     def __init__(self, state_dir: str | Path, bucket: str, prefix: str = "sizeup-hub", region: str = "",
                  send: Callable[[str, str, dict, object, float], tuple[int, bytes]] | None = None,
                  creds: Callable[[], aws.Credentials] = aws.credentials, log: Callable[[str], None] = print,
-                 clock: Callable[[], float] = time.time, endpoint: str = ""):
+                 clock: Callable[[], float] = time.time, endpoint: str = "", fence: Callable[[], bool] | None = None):
         self.root = Path(state_dir)
+        self.fence = fence                    # the hub's single-writer lock (sizeup/fence.py): False = never upload
         self.bucket, self.region = bucket, aws.region(region)
         self.prefix = "/".join(p for p in (prefix.strip("/"), SUB) if p)
         self.endpoint = (endpoint or f"https://{bucket}.s3.{self.region}.amazonaws.com").rstrip("/")
@@ -114,13 +117,13 @@ class CacheMirror:
         self._thread: threading.Thread | None = None
 
     @classmethod
-    def from_env(cls, state_dir, log: Callable[[str], None] = print) -> CacheMirror | None:
+    def from_env(cls, state_dir, log: Callable[[str], None] = print, fence: Callable[[], bool] | None = None) -> CacheMirror | None:
         """The hub's: LITESTREAM_BUCKET / LITESTREAM_PATH / LITESTREAM_REGION (deploy/aws/taskdef.json), else None."""
         bucket = os.environ.get("LITESTREAM_BUCKET", "").strip()
         if not bucket or not state_dir or os.environ.get("SIZEUP_CACHE_S3", "").strip().lower() in ("0", "off", "no", "false"):
             return None
         return cls(state_dir, bucket, os.environ.get("LITESTREAM_PATH", "").strip() or "sizeup-hub",
-                   os.environ.get("LITESTREAM_REGION", "").strip(), log=log)
+                   os.environ.get("LITESTREAM_REGION", "").strip(), log=log, fence=fence)
 
     # -- S3 ---------------------------------------------------------------------------------------------------
 
@@ -161,10 +164,42 @@ class CacheMirror:
 
     # -- restore ----------------------------------------------------------------------------------------------
 
+    @property
+    def manifest(self) -> Path:
+        return self.root / MANIFEST
+
+    def save_manifest(self) -> None:
+        """What restore() put in place and its sha256: the hub's standby (sizeup/handoff.py) restores the caches
+        before the app runs; the app's own mirror then knows them (load_manifest) and doesn't upload them again."""
+        with self._lock:
+            done = {rel: st["sha"] for rel, st in self.files.items() if st.get("restored") and st.get("sha")}
+        try:
+            tmp = self.manifest.with_name(self.manifest.name + ".tmp")
+            tmp.write_text(json.dumps(done, sort_keys=True))
+            os.replace(tmp, self.manifest)
+        except OSError as e:
+            self.log(f"cachesync: manifest not written ({e})")
+
+    def load_manifest(self) -> int:
+        try:
+            d = json.loads(self.manifest.read_text())
+        except (OSError, ValueError):
+            return 0
+        n = 0
+        for rel, sha in (d.items() if isinstance(d, dict) else ()):
+            if gap_for(rel) is not None and isinstance(sha, str) and (self.root / rel).is_file():
+                with self._lock:
+                    self.files[rel] = {"sha": sha, "up": self.clock(), "fails": 0, "retry": 0.0, "error": "", "restored": True}
+                n += 1
+        return n
+
     def restore(self, deadline_s: float = RESTORE_S) -> int:
         """Every copy whose file is missing here, fetched and unpacked (a few at once, deadline_s in all). The
         number restored. Never raises: what isn't back is fetched from its source as before."""
         t0 = time.monotonic()
+        known = self.load_manifest()
+        if known:
+            self.log(f"cachesync: {known} cache copies already restored before the app started")
         try:
             have = self.listing()
         except Exception as e:  # no credentials, no network, no permission: local only
@@ -232,6 +267,8 @@ class CacheMirror:
     def scan(self) -> int:
         """Upload what changed since it was last uploaded (or restored). The number uploaded. Never raises."""
         n, now = 0, self.clock()
+        if self.fence is not None and not self.fence():
+            return 0                              # not the hub's leader (any more): nothing goes to S3
         for rel in self.candidates():
             if self._stop.is_set():
                 break
@@ -270,6 +307,8 @@ class CacheMirror:
             if size > MAX_BYTES:
                 raise ValueError(f"{size // (1024 * 1024)} MB: too big to keep a copy")
             gz.seek(0)
+            if self.fence is not None and not self.fence():
+                raise RuntimeError("not the hub's leader: not uploaded")
             self._call("PUT", self._url(self.key(rel)), gz, h.hexdigest(),
                        {"Content-Type": "application/gzip", "Content-Length": str(size), "x-amz-meta-sha256": sha_raw},
                        timeout=max(TIMEOUT_S, size / 200_000))
