@@ -15,6 +15,7 @@ on:
       - "deploy/trunk-recorder/**"
       - "sizeup/cloud/autoupdate.py"
       - "sizeup/radio/adsbd.py"
+      - "sizeup/radio/trunkrecd.py"
       - "sizeup/cloud/configupdate.py"
       - "tests/test_system_python.py"
       - ".github/workflows/station-install.yml"
@@ -25,6 +26,7 @@ on:
       - "deploy/trunk-recorder/**"
       - "sizeup/cloud/autoupdate.py"
       - "sizeup/radio/adsbd.py"
+      - "sizeup/radio/trunkrecd.py"
       - "sizeup/cloud/configupdate.py"
       - "tests/test_system_python.py"
       - ".github/workflows/station-install.yml"
@@ -92,6 +94,7 @@ jobs:
           LD_LIBRARY_PATH=/opt/sizeup/rtl-sdr/lib /opt/sizeup/readsb/bin/readsb --version
           ldd /opt/sizeup/readsb/bin/readsb | grep -q "librtlsdr.so.0 => /opt/sizeup/"
           test -f /usr/local/lib/sizeup/adsbd.py && python3 -I /usr/local/lib/sizeup/adsbd.py print
+          test -f /usr/local/lib/sizeup/trunkrecd.py && python3 -I /usr/local/lib/sizeup/trunkrecd.py print
           LD_LIBRARY_PATH=/opt/sizeup/rtl-sdr/lib:/opt/sizeup/trunk-recorder/lib/trunk-recorder /opt/sizeup/trunk-recorder/bin/trunk-recorder --version
           find -L /opt/sizeup/trunk-recorder -name libunit_script.so | grep -q .
           /opt/sizeup/whisper/bin/whisper-server --help > /dev/null
@@ -100,11 +103,12 @@ jobs:
           test "$(sudo stat -c '%U:%G %a' /etc/sizeup/config.toml)" = "root:sizeup 640"
           systemd-analyze verify /etc/systemd/system/sizeup-station.service /etc/systemd/system/sizeup-health.timer \
             /etc/systemd/system/sizeup-whisper.service /etc/systemd/system/sizeup-adsb.service \
+            /etc/systemd/system/sizeup-trunk-recorder.service \
             /etc/systemd/system/sizeup-update.path /etc/systemd/system/sizeup-update.timer
       - name: start the station (no dongles, no secrets)
         run: |
           sudo systemctl daemon-reload
-          sudo systemctl start sizeup-whisper.service sizeup-station.service sizeup-adsb.service
+          sudo systemctl start sizeup-whisper.service sizeup-trunk-recorder.service sizeup-station.service sizeup-adsb.service
           for i in $(seq 1 60); do curl -fsS http://127.0.0.1:8091/healthz && break; sleep 2; done
           curl -fsS http://127.0.0.1:8091/healthz
           sudo /usr/local/lib/sizeup/health-check
@@ -115,12 +119,16 @@ jobs:
           # the ADS-B decoder with no dongle named: up, idle, nothing opened
           for i in $(seq 1 15); do sudo test -f /run/sizeup-adsb/decoder.json && break; sleep 1; done
           sudo grep -q '"state":"off"' /run/sizeup-adsb/decoder.json
+          # trunk-recorder's own service (#71) with no dongle on Fire/EMS 15: up, idle, nothing opened
+          for i in $(seq 1 15); do sudo test -f /run/sizeup-trunk-recorder/status.json && break; sleep 1; done
+          sudo grep -q '"state":"off"' /run/sizeup-trunk-recorder/status.json
+          systemctl is-active sizeup-trunk-recorder.service
       - name: auto-update (side by side, switch back, preflight, rollback)
         timeout-minutes: 25
         run: sudo bash .github/scripts/station-update.sh
       - if: always()
         run: |
-          sudo journalctl -u sizeup-station -u sizeup-whisper -u sizeup-adsb --no-pager -n 200 || true
+          sudo journalctl -u sizeup-station -u sizeup-whisper -u sizeup-trunk-recorder -u sizeup-adsb --no-pager -n 200 || true
           sudo journalctl -u sizeup-update --no-pager -n 300 || true
           sudo cat /var/log/sizeup-update.log /var/lib/sizeup-update/state.json || true
           sudo tail -n 100 /var/log/sizeup-install.log || true
