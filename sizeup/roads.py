@@ -21,26 +21,43 @@ Two providers (Provider), read side by side and merged (Roads):
             done to look like a browser: if the host ever refuses plain clients, that feed stays off and
             the log says so. Its milepost and interchange feeds are not read here: the gazetteer's own
             mile markers (#67, #83) are the map's.
-  511NY     NYSDOT's 511NY data feeds (https://511ny.org/help/24, Developer Access Agreement updated
-            2026-09-18): events (JSON), the camera inventory (XML), message signs (JSON). Access is by
-            request; the approval brings the feed addresses and a key, so the addresses are config
-            ([roads] events_url, cameras_url, signs_url, "{key}" where the key goes) and the key a
-            secret (env SIZEUP_511NY_KEY; the hub: SSM /sizeup-hub/511ny-key). Records are read by
-            field name under any of the names 511NY has used (FIELDS). Terms: no fee; we may
-            "redistribute, enhance, repackage" but not alter a report; we "must display the time at
-            which the data was published or last updated" (every item and snapshot shows its time);
-            acknowledged as "powered by 511NY" with a link. Off until approved: the Layers box says so.
+  511NY     NYSDOT's 511NY, on Castle Rock's CARS platform since 2026-09-30 (#73, #188). Three feeds, each
+            polled once every 5 minutes at most (511NY's recommendation; NY511_MIN_S), conditional GET (ETag /
+            If-Modified-Since) and gzip:
+              signs    https://nyapi.carsprogram.org/signs.json: public, no login (about 940 KB statewide, 110 KB
+                       gzipped; parse_cars_signs reads it one record at a time and keeps our area only). On by
+                       default ([roads] ny511 = true). Its lastUpdated runs about 5 h ahead (Eastern wall time
+                       written as UTC): put right against the feed's Last-Modified (_cars_shift). The public copy
+                       is cached by CloudFront and can be hours old: the Layers box says how old (SIGNS_STALE_S).
+              events   the CARS API (https://nysdot.carsprogram.org/carsapi_v1/, Swagger 2.0 "New York State DOT
+                       511 API" 1.2.0): GET /api/events, HTTP Basic (the one 511NY username and password: env
+                       SIZEUP_511NY_USER / SIZEUP_511NY_PASS, the hub's SSM /sizeup-hub/511ny-user and -pass). No
+                       area filter (only eventClassifications and routeDesignator), so the statewide list, read
+                       one record at a time (parse_cars_events). Off until the credentials are there: the Layers
+                       box and Settings > Data sources say "waiting for credentials (SSM ...)".
+              cameras  the CARS-Hub (https://nysdot.carsprogram.org/hub/, [roads] ny511_hub): its CCTV inventory
+                       (data/cctv.xml, TMDD's schema, HTTP Basic, the same username and password; hourly, no
+                       validators served), read one camera at a time (parse_carshub_cctv). Compared with ours (the
+                       Thruway's and the county's, same_camera) and the count of new ones by road is logged and shown
+                       in Data sources; the new ones join the map, the camera wall and the overlay (stills through
+                       the snapshot proxy, video through the HLS one, under the same stream cap), and one replaces
+                       ours only where it has live video and ours hasn't ([roads] carshub_imagery = false: counted
+                       only). The hub's FEU (events) and Waze CIFS feeds aren't read: the API's JSON has the events.
+            The credentials are only ever in the Authorization header of the request this module makes (BasicAuth):
+            never in a URL, a response, the state, the cache, an error or the log (_redact). Terms (511NY's
+            Developer Access Agreement, https://511ny.org/help/24): no fee; we may "redistribute, enhance,
+            repackage" but not alter a report; we "must display the time at which the data was published or last
+            updated" (every item shows its time); acknowledged as "powered by 511NY" with a link.
 
-Both at once: 511NY, when it is configured, wins per item: a Thruway camera, sign or event within
-DEDUPE_M (50 m) of a 511NY one (same layer, for events) is left out (_merged). Every item carries its
-"source" ("511NY" | "Thruway"), shown on the map. The feeds are statewide, so only our area is kept
-(bbox: Port Chester, Rye Brook and the mutual-aid neighbours with a margin). Each provider has its
-own schedule and backoff (a refused key waits 30 min, a 429 5 min, anything else 1 min doubling to
-15, never under the feed's floor), and one disk cache holds what each kept (state dir, roads511.json:
-items only, never the key or a feed address), so a restart spends no calls.
-
-The 511NY key is only ever in the request this module makes to 511NY: never in a response, the state,
-the cache, an error or the log (_redact).
+Both at once: 511NY, when it is on, wins per item: a Thruway event within DEDUPE_M (50 m, the same layer)
+of a 511NY one is left out, and a Thruway sign within SIGN_DEDUPE_M (150 m) of a 511NY one that says the same
+thing (the same direction too, when both give one) is one sign (_merged). Cameras the other way round: ours
+first, a CARS-Hub camera only where we have none. Every item carries its "source" ("511NY" | "Thruway" |
+"County"), shown on the map. The feeds are statewide, so only our area is kept (bbox: Port Chester, Rye Brook and
+the mutual-aid neighbours with a margin). Each provider has its own schedule and backoff (refused credentials
+wait 30 min, a 429 5 min, anything else 1 min doubling to 15, never under the feed's floor), and one disk cache
+holds what each kept (state dir, roads511.json: items and validators only, never a credential or a feed
+address), so a restart spends no calls.
 
 Live video (#101): the Thruway's cameras each list an HLS stream (512x288, about 205 kbit/s, 6 s
 segments, on nysdot.skyvdn.com, answering a plain client with no key; CORS open). The viewer plays
@@ -111,9 +128,36 @@ from urllib.request import Request, urlopen
 from sizeup.geo.places import ROUTES          # each highway's positive direction (NB / EB: the mileage rises that way)
 
 SOURCE = "511NY"
+LABEL = "511NY (NYSDOT)"
 ATTRIBUTION = "powered by 511NY"
 TERMS_URL = "https://511ny.org/help/24"
 LINK_URL = "https://511ny.org/"
+# 511NY on CARS (2026-09-30): the API (HTTP Basic), the public signs feed, the API's WZDx (sizeup/roadprojects.py).
+# Tests set NY511_URLS to {} (tests/conftest.py): nothing reaches 511NY from a test.
+CARS_API = "https://nysdot.carsprogram.org/carsapi_v1/api"
+CARS_HUB = "https://nysdot.carsprogram.org/hub/"           # [roads] ny511_hub: the CARS-Hub (its feeds under data/)
+NY511_URLS = {"events": f"{CARS_API}/events", "signs": "https://nyapi.carsprogram.org/signs.json", "wzdx": f"{CARS_API}/wzdx",
+              "hub": CARS_HUB}
+
+
+def hub_cctv(base: str = "") -> str:
+    """The CARS-Hub's CCTV feed from its base address ("" = 511NY's, NY511_URLS "hub"; "off" = none)."""
+    if base == "off":
+        return ""
+    base = base or NY511_URLS.get("hub", "")
+    return (base.rstrip("/") + "/data/cctv.xml") if base else ""
+NY511_EVERY_S = {"cameras": 3600.0, "events": 300.0, "signs": 300.0}
+NY511_MIN_S = {"cameras": 300.0, "events": 300.0, "signs": 300.0}     # 511NY: "once every 5 minutes"
+SSM_USER, SSM_PASS = "/sizeup-hub/511ny-user", "/sizeup-hub/511ny-pass"
+ENV_USER, ENV_PASS = "SIZEUP_511NY_USER", "SIZEUP_511NY_PASS"
+WAITING = f"waiting for credentials (SSM {SSM_USER} and {SSM_PASS})"
+CARSHUB = "carshub"
+CARSHUB_LABEL = "511NY CARS-Hub (NYSDOT)"
+SIGN_DEDUPE_M = 150.0            # a Thruway sign this close to a 511NY one, saying the same, is the same sign
+CAMERA_MATCH_M = 150.0           # a CARS-Hub camera this close to one of ours is one we have
+SIGNS_STALE_S = 1800.0           # the signs feed published longer ago than this: the Layers box says how old
+# What each CARS event's access level allows: the public's and every agency's (we are one); the rest is not for us
+CARS_ACCESS = {"PUBLIC_DOMAIN", "ALL_AGENCIES"}
 THRUWAY = "Thruway"                                   # the short source name on each item
 THRUWAY_LABEL = "New York State Thruway Authority"    # "Data: ..." in the Layers box
 THRUWAY_LINK = "https://www.thruway.ny.gov/travelers/map"
@@ -554,7 +598,542 @@ def _schedule(r: dict) -> dict:
     return out
 
 
-PARSE = {"cameras": parse_cameras, "events": parse_events, "signs": parse_signs}
+# ---- 511NY on CARS (2026-09-30): the API's events, the public signs feed, the CARS-Hub's CCTV ----------------------
+#   signs.json  [{id: "nySigns:Region 3:*Region 3-201080", idForDisplay, name: "HRP NB South of Exit 16 [PVMS-170]",
+#                 agencyId, agencyName, status: DISPLAYING_MESSAGE | BLANK | ERROR_OR_FAILURE, lastUpdated (ms, about
+#                 5 h ahead: _cars_shift), location {routeId: "907W" (NYSDOT's reference route: the Hutch), linearReference,
+#                 fips, latitude, longitude, signFacingDirection: N | S | E | W | BOTH_DIRECTIONS, locationDescription,
+#                 cityReference}, display {pages: [{lines: [...], justification, hasImage}]} (only while lit),
+#                 properties {signType, maxLinesPerPage, ...}}, ...]  (recorded 2026-11-04: tests/fixtures/511ny/
+#                 cars_signs_recorded.json)
+#   /api/events [CARSEvent: {event-id, headline {category, code}, priority, status, category PLANNED | CURRENT |
+#                 FORECAST, update-time, estimated-re-opening-time, details [{element-id, access, start-time, end-time,
+#                 duration-was-specified, update-time, lanes [{lanes-type, total-affected, total-original,
+#                 link-direction}], descriptions [{description-type: PhraseDescription {kind {category, code}} |
+#                 AdditionalTextDescription {description} | DetourDescription {detour-type, locations-on-detour
+#                 [LinkLocation]} | ...}], locations [{location-type: LinkLocation {route-designator, link-direction,
+#                 primary-location {geo-location {latitude, longitude}, cross-street-name [..], point-name,
+#                 linear-reference}, secondary-location} | GeoLocation | Landmark}], scheduleOccurrences [{startTime,
+#                 endTime}], recurrent-times, effective-periods}], full-report-texts [{description}], geometry (GeoJSON),
+#                 communication-plans {web}, counties}]; every time a ZonedDateTime {time (ms), utcOffset, timeZoneId}.
+#                 From the API's Swagger definition (carsapi-definition.json, 1.2.0); the fixtures are constructed
+#                 from it (tests/fixtures/511ny/cars_events_constructed.json) until the credentials let us record one.
+
+CARS_ROUTES = {"907W": "Hutch"}              # NYSDOT reference routes that carry a parkway's name in the sign's name
+CARS_NAME_ROUTES = (("HRP", "Hutch"), ("BRP", "Bronx River Pkwy"), ("SBP", "Sprain Brook Pkwy"), ("TSP", "Taconic"),
+                    ("SMRP", "Saw Mill River Pkwy"))
+CARS_DIRS = {"N": "Northbound", "S": "Southbound", "E": "Eastbound", "W": "Westbound", "NORTHBOUND": "Northbound",
+             "SOUTHBOUND": "Southbound", "EASTBOUND": "Eastbound", "WESTBOUND": "Westbound"}
+CARS_SIGN_STATUS = {"DISPLAYING_MESSAGE": "on", "BLANK": "blank", "ERROR_OR_FAILURE": "fault"}
+CARS_ENDED = {"ended", "canceled", "cancelled", "deleted", "delete", "inactive", "archived"}
+CARS_ROADWORK = re.compile(r"road\s*work|roadwork|construction|maintenance|work\s*zone|paving|bridge work|utility work", re.I)
+CARS_FULL = re.compile(r"\b(road|roadway|highway|bridge|ramp|exit)s?\s+(is\s+|are\s+)?closed\b|\bclosed to (all )?traffic\b"
+                       r"|\ball lanes (closed|blocked)\b|\bfull(y)? clos", re.I)
+CARS_CLOSED = re.compile(r"\bclosed\b|\bclosure\b|\bblocked\b", re.I)
+JSON_GAP = re.compile(r"[\s,]*")
+
+
+def iter_json_array(text: str):
+    """The records of a JSON array one at a time (raw_decode): a big statewide feed is never all dicts at once.
+    ValueError for anything that isn't an array of values."""
+    i = JSON_GAP.match(text, 0).end()
+    if text[i:i + 1] != "[":
+        raise ValueError("not a JSON array")
+    dec, i, n = json.JSONDecoder(), i + 1, len(text)
+    while True:
+        i = JSON_GAP.match(text, i).end()
+        if i >= n:
+            raise ValueError("a JSON array cut short")
+        if text[i] == "]":
+            return
+        obj, i = dec.raw_decode(text, i)
+        yield obj
+
+
+def _body_text(body: bytes) -> str:
+    return body.decode("utf-8-sig", errors="replace")
+
+
+def _words_of(v) -> str:
+    """"ROAD_CONSTRUCTION" / "roadConstruction" -> "road construction"."""
+    t = re.sub(r"([a-z])([A-Z])", r"\1 \2", str(v or ""))
+    return _s(t.replace("_", " ").replace("-", " ").lower(), 120)
+
+
+def _cars_point(loc: dict) -> tuple[float, float] | None:
+    """A CARS location's point: a GeoLocation's latitude / longitude, a LinkLocation's primary-location, a Landmark's
+    geo-location (degrees; microdegrees too, as TMDD gives them)."""
+    if not isinstance(loc, dict):
+        return None
+    for g in (loc, loc.get("geo-location"), (loc.get("primary-location") or {}).get("geo-location")
+              if isinstance(loc.get("primary-location"), dict) else None):
+        if isinstance(g, dict):
+            lat, lon = _f(g.get("latitude")), _f(g.get("longitude"))
+            if lat is not None and lon is not None:
+                if abs(lat) > 90 or abs(lon) > 180:
+                    lat, lon = lat / 1e6, lon / 1e6
+                return lat, lon
+    return None
+
+
+def _geometry_line(g) -> list[list[float]]:
+    """A GeoJSON geometry's points as [[lon, lat], ...]: a LineString's, a MultiLineString's longest, a Point's one."""
+    if not isinstance(g, dict):
+        return []
+    c, t = g.get("coordinates"), g.get("type")
+    try:
+        if t == "Point":
+            return [[float(c[0]), float(c[1])]]
+        if t in ("LineString", "MultiPoint"):
+            return [[float(p[0]), float(p[1])] for p in c]
+        if t == "MultiLineString":
+            return [[float(p[0]), float(p[1])] for p in max(c, key=len)]
+    except (TypeError, ValueError, IndexError):
+        return []
+    return []
+
+
+def _zoned(v) -> float | None:
+    """A CARS ZonedDateTime {time (ms), utcOffset, timeZoneId} (or a plain time) -> unix seconds."""
+    if isinstance(v, dict):
+        v = v.get("time")
+    return _when(v)
+
+
+def _cars_shift(times: list[float], published: float | None, now: float | None) -> float:
+    """What to add to every lastUpdated of one agency's signs in a signs.json. Observed 2026-11-04: "NY Region 11 Signs"
+    (New York City) ran up to 5 h after the file's own Last-Modified, to the minute (Eastern wall time written as if it
+    were UTC); every other region's newest was 2 min before it. When an agency's newest is later than the file (or now,
+    with no Last-Modified) by more than 5 min and our UTC offset puts it back before then: that offset (-5 h / -4 h);
+    else 0."""
+    ref = published if published is not None else now
+    if not times or ref is None or max(times) <= ref + 300:
+        return 0.0
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    off = datetime.fromtimestamp(max(times), ZoneInfo("America/New_York")).utcoffset()
+    shift = off.total_seconds() if off else 0.0
+    return shift if max(times) + shift <= ref + 300 else 0.0
+
+
+def _cars_road(route: str, name: str = "") -> str:
+    """The road as we name it: "907W" (NYSDOT's reference route for the Hutch) / a sign named "HRP NB ..." -> "Hutch";
+    "I-287", "NY 120" as given."""
+    r = _s(route, 60)
+    if r in CARS_ROUTES:
+        return CARS_ROUTES[r]
+    if re.fullmatch(r"\d{3}[A-Z]", r):
+        head = (name or "").split(" ", 1)[0].upper()
+        return next((road for ab, road in CARS_NAME_ROUTES if head == ab), r)
+    return r
+
+
+def _cars_dir(v) -> str:
+    return CARS_DIRS.get(str(v or "").strip().upper(), "")
+
+
+def sign_text(s: dict) -> str:
+    """What a sign says, for "the same sign" (_merged): its lines, upper case, spaces folded."""
+    return " ".join(" ".join(s.get("lines") or []).upper().split())
+
+
+def parse_cars_sign(r: dict, bbox) -> dict | None:
+    """One signs.json record -> our sign, or None outside our area."""
+    loc = r.get("location") if isinstance(r.get("location"), dict) else {}
+    lat, lon = _f(loc.get("latitude")), _f(loc.get("longitude"))
+    sid = _s(r.get("id") or r.get("idForDisplay"), 120)
+    if not sid or not in_bbox(lat, lon, bbox):
+        return None
+    status = CARS_SIGN_STATUS.get(str(r.get("status") or "").upper(), _s(r.get("status"), 30).lower())
+    pages = []
+    if status == "on":
+        for pg in ((r.get("display") or {}).get("pages") or []):
+            lines = [t for t in (_s(x, 60) for x in (pg.get("lines") or [] if isinstance(pg, dict) else [])) if t]
+            if lines:
+                pages.append(lines)
+    mile = _f(loc.get("linearReference"))
+    name = _s(r.get("name") or sid, 120)
+    return {"id": sid, "name": name, "road": _cars_road(loc.get("routeId", ""), name),
+            "dir": _cars_dir(loc.get("signFacingDirection")), "mile": f"{mile:.1f}" if mile is not None else "",
+            "where": _s(loc.get("locationDescription"), 120), "agency": _s(r.get("agencyName"), 60), "status": status,
+            "pages": pages[:6], "lines": [t for pg in pages for t in pg][:12],
+            "updated": _when(r.get("lastUpdated")), "lat": round(lat, 6), "lon": round(lon, 6)}
+
+
+def _is_cars_sign(r) -> bool:
+    return isinstance(r, dict) and isinstance(r.get("location"), dict) and "status" in r and "routeId" in r["location"]
+
+
+def parse_cars_signs(body: bytes, bbox=DEFAULT_BBOX, meta: dict | None = None) -> list[dict]:
+    """signs.json (raw): one record at a time, our area kept. Any other shape: parse_signs (the older 511 names)."""
+    meta = meta if meta is not None else {}
+    text = _body_text(body)
+    del body
+    if JSON_GAP.match(text, 0).end() >= len(text) or text[JSON_GAP.match(text, 0).end()] != "[":
+        return parse_signs(decode(text.encode()), bbox)
+    out, other, seen, newest = [], [], set(), {}
+    for r in iter_json_array(text):
+        if not _is_cars_sign(r):
+            if isinstance(r, dict):
+                other.append(r)
+            continue
+        t, ag = _when(r.get("lastUpdated")), str(r.get("agencyId") or r.get("agencyName") or "")
+        if t is not None:
+            newest[ag] = max(newest.get(ag, t), t)
+        s = parse_cars_sign(r, bbox)
+        if s is not None and s["id"] not in seen:
+            seen.add(s["id"])
+            s["_agency"] = ag
+            out.append(s)
+    # each agency's times put right as one (_cars_shift: judged by that agency's newest anywhere in the file, not just
+    # in our area); a time still later than the file can't be right: none
+    shift = {ag: _cars_shift([t], meta.get("published"), meta.get("now")) for ag, t in newest.items()}
+    ref = meta.get("published") if meta.get("published") is not None else meta.get("now")
+    for s in out:
+        ag = s.pop("_agency", "")
+        if s["updated"] is not None:
+            s["updated"] += shift.get(ag, 0.0)
+            if ref is not None and s["updated"] > ref + 300:
+                s["updated"] = None
+    out.extend(parse_signs(other, bbox) if other else [])
+    out.sort(key=lambda s: (s["road"], _f(s.get("mile")) or 0, s["name"]))
+    return out
+
+
+parse_cars_signs.raw = True
+
+
+def _phrase(v) -> str:
+    """A CARS Phrase {category, code} as words: its code ("road construction")."""
+    if isinstance(v, dict):
+        return _words_of(v.get("code") or v.get("category"))
+    return _words_of(v)
+
+
+def _detail(r: dict) -> dict:
+    """The event's headline detail (headline-element), else its first."""
+    ds = [d for d in r.get("details") or [] if isinstance(d, dict)]
+    want = r.get("headline-element")
+    return next((d for d in ds if want is not None and d.get("element-id") == want), ds[0] if ds else {})
+
+
+def _lane_text(lanes: list) -> tuple[str, bool, str]:
+    """(the lanes in words, all through lanes affected, "lanes" | "ramp" | "")."""
+    parts, full, kind = [], False, ""
+    for ln in lanes:
+        if not isinstance(ln, dict):
+            continue
+        a, o = ln.get("total-affected"), ln.get("total-original")
+        lt = str(ln.get("lanes-type") or "").upper()
+        what = _words_of(lt) or "lanes"
+        if not isinstance(a, int) or a <= 0:
+            continue
+        d = _cars_dir(ln.get("link-direction"))
+        what = "" if lt in ("THROUGH_LANES", "") else what
+        notes = ", ".join(x for x in (what, d.lower()) if x)
+        parts.append((f"{a} of {o} lanes" if isinstance(o, int) and o > 0 else f"{a} lane" + ("s" if a > 1 else ""))
+                     + " affected" + (f" ({notes})" if notes else ""))
+        if "RAMP" in lt:
+            kind = kind or "ramp"
+        else:
+            kind = "lanes"
+            if lt == "THROUGH_LANES" and isinstance(o, int) and 0 < o <= a:
+                full = True
+    return "; ".join(parts)[:200], full, kind
+
+
+def _period_text(det: dict) -> str:
+    """Effective periods in words ("Mon-Fri, night"): only what is given; times of day come as scheduleOccurrences."""
+    names = ("Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat")       # CARS: Sunday is bit 0
+    out = []
+    for p in det.get("effective-periods") or []:
+        if not isinstance(p, dict):
+            continue
+        bits = (p.get("days-of-week") or {}).get("bits") if isinstance(p.get("days-of-week"), dict) else None
+        days = [names[i] for i in range(7) if isinstance(bits, int) and bits >> i & 1]
+        q = _words_of(p.get("effective-period-qualifier"))
+        bits_txt = "" if len(days) in (0, 7) else ", ".join(days)
+        out.append(", ".join(x for x in (bits_txt, "" if q == "not specified" else q) if x))
+    return _s("; ".join(x for x in out if x), 200)
+
+
+def parse_cars_event(r: dict, bbox=DEFAULT_BBOX) -> dict | None:
+    """One CARS event -> our event (the shape of parse_events plus the road projects' fields), None outside our area,
+    ended, or not for us (its access level: CARS_ACCESS)."""
+    eid = _s(r.get("event-id"), 80)
+    if not eid or str(r.get("status") or "").strip().lower() in CARS_ENDED:
+        return None
+    det = _detail(r)
+    if str(det.get("access") or "PUBLIC_DOMAIN").upper() not in CARS_ACCESS:
+        return None
+    locs = [x for x in det.get("locations") or [] if isinstance(x, dict)]
+    link = next((x for x in locs if x.get("location-type") == "LinkLocation" or "route-designator" in x), {})
+    line = _geometry_line(r.get("geometry"))
+    pt = next((p for p in (_cars_point(x) for x in locs) if p), None)
+    if pt is None and line:
+        mid = line[len(line) // 2]
+        pt = (mid[1], mid[0])
+    if pt is None or not (in_bbox(pt[0], pt[1], bbox) or any(in_bbox(p[1], p[0], bbox) for p in line)):
+        return None
+    descs = [x for x in det.get("descriptions") or [] if isinstance(x, dict)]
+    phrases = [_phrase(x.get("kind")) for x in descs if x.get("description-type") == "PhraseDescription"]
+    texts = [_s(x.get("description"), 300) for x in descs if x.get("description-type") == "AdditionalTextDescription"]
+    detours = []
+    for x in descs:
+        if x.get("description-type") != "DetourDescription":
+            continue
+        via = [_s(y.get("route-designator"), 40) for y in x.get("locations-on-detour") or [] if isinstance(y, dict)]
+        detours.append(_words_of(x.get("detour-type")).capitalize() + (" via " + ", ".join(v for v in via if v) if any(via) else ""))
+    detours += [t for t in texts if re.search(r"\bdetour", t, re.I)]
+    report = next((_s(x.get("description"), 600) for x in r.get("full-report-texts") or []
+                   if isinstance(x, dict) and x.get("description")), "")
+    head = _phrase(r.get("headline"))
+    cat = _words_of((r.get("headline") or {}).get("category") if isinstance(r.get("headline"), dict) else "")
+    lanes, all_through, lane_kind = _lane_text(det.get("lanes") or [])
+    words = " ".join([head, cat, *phrases, *texts, report])
+    planned = str(r.get("category") or "").upper() == "PLANNED"
+    roadwork = bool(CARS_ROADWORK.search(words)) or planned
+    full = all_through or bool(CARS_FULL.search(words))
+    closed = full or bool(CARS_CLOSED.search(" ".join([head, *phrases])))
+    prim = link.get("primary-location") if isinstance(link.get("primary-location"), dict) else {}
+    sec = link.get("secondary-location") if isinstance(link.get("secondary-location"), dict) else {}
+    cross = lambda p: _s(((p.get("cross-street-name") or [None])[0] if isinstance(p.get("cross-street-name"), list) else "")
+                         or p.get("point-name"), 80)
+    mile = _f(prim.get("linear-reference"))
+    start, end = _zoned(det.get("start-time")), _zoned(det.get("end-time"))
+    if det.get("duration-was-specified") is False:
+        end = None                                            # an end CARS filled in, not one anyone gave
+    occ = []
+    for o in det.get("scheduleOccurrences") or []:
+        if isinstance(o, dict):
+            a, b = _zoned(o.get("startTime")), _zoned(o.get("endTime"))
+            if a is not None and b is not None and b > a:
+                occ.append([a, b])
+    occ.sort()
+    reopen = _zoned(r.get("estimated-re-opening-time"))
+    web = _url((r.get("communication-plans") or {}).get("web") if isinstance(r.get("communication-plans"), dict) else "")
+    pr = r.get("priority")
+    desc = report or ". ".join(x for x in [head.capitalize(), *[p.capitalize() for p in phrases if p != head], *texts] if x)
+    out = {"id": eid, "layer": "roadwork" if roadwork else "incidents", "type": cat or ("planned" if planned else "event"),
+           "subtype": head, "road": _s(link.get("route-designator"), 80),
+           "dir": _cars_dir(link.get("link-direction")) or _cars_dir(link.get("link-alignment")),
+           "description": _s(desc, 600), "lanes": lanes, "closed": closed,
+           "severity": f"priority {pr}" if isinstance(pr, int) and not isinstance(pr, bool) else "",
+           "start": start if start is not None else (occ[0][0] if occ else None), "end": end,
+           "updated": _zoned(r.get("update-time")) or _zoned(det.get("update-time")),
+           "lat": round(pt[0], 6), "lon": round(pt[1], 6), "mile": f"{mile:.1f}" if mile is not None else "",
+           "cross_from": cross(prim), "cross_to": cross(sec), "category": _words_of(r.get("category")),
+           "closure": "full" if full else lane_kind or ("" if not closed else "lanes")}
+    if full:
+        out["full_closure"] = True
+    if occ:
+        out["occurrences"] = occ[:40]
+    if (ht := _period_text(det)):
+        out["hours_text"] = ht
+    if detours:
+        out["detour"] = _s("; ".join(detours), 400)
+    if len(line) >= 2:
+        out["line"] = line[:2000]
+    if reopen is not None:
+        out["reopen"] = reopen
+    if web:
+        out["link"] = web
+    return out
+
+
+def _is_cars_event(r) -> bool:
+    return isinstance(r, dict) and "event-id" in r
+
+
+def parse_cars_events(body: bytes, bbox=DEFAULT_BBOX, meta: dict | None = None) -> list[dict]:
+    """GET /api/events (raw): one record at a time, our area kept. Any other shape: parse_events (the older 511
+    names, the CARS-Hub's)."""
+    text = _body_text(body)
+    del body
+    i = JSON_GAP.match(text, 0).end()
+    if text[i:i + 1] != "[":
+        return parse_events(decode(text.encode()), bbox)
+    out, other, seen = [], [], set()
+    for r in iter_json_array(text):
+        if not _is_cars_event(r):
+            if isinstance(r, dict):
+                other.append(r)
+            continue
+        e = parse_cars_event(r, bbox)
+        if e is not None and e["id"] not in seen:
+            seen.add(e["id"])
+            out.append(e)
+    out.extend(parse_events(other, bbox) if other else [])
+    out.sort(key=lambda e: (e["layer"], -(e["updated"] or e["start"] or 0)))
+    return out
+
+
+parse_cars_events.raw = True
+
+
+# The CARS-Hub (https://nysdot.carsprogram.org/hub/index.jsf, 2026-11-04): a public page listing the XML feeds and
+# their schemas; every feed behind HTTP Basic (realm "Hub": the same username and password as the API). Its feeds:
+# FEU-t / -g / -m / -w (the CARS events as TMDD Full Event Updates: the same events as the API's JSON, which we read
+# instead; feu-t.xml was 6 MB), their indexed variants, CCTV (data/cctv.xml, 3 MB, no ETag or Last-Modified) and Waze
+# CIFS. We read the CCTV inventory, to schemas/CCTV.xsd (TMDD Volume 2, Castle Rock 2010):
+#   <cctvInventories><cctvInventory><owner><organization-id/></owner><inventory>
+#     <inventory-item><device-id/> (32 chars) <device-updated><date>YYYYMMDD</date><time>HHMMSS</time>
+#       <utc-offset>-0500</utc-offset></device-updated> <device-name/> <cctv-image>jpeg</cctv-image> <video-url/>
+#       <still-images><still-image><name/><url/></still-image>...</still-images>
+#       <location><geo-location><latitude>microdegrees</latitude><longitude/></geo-location><link-ownership/>
+#         <route-designator/><linear-reference/><link-direction>0..12 (TMDD: 1 n, 3 e, 5 s, 7 w, ...)</link-direction>
+#       </location> <views/> ...</inventory-item>
+# Recorded 2026-11-04 (tests/fixtures/511ny/cars_cctv_recorded.xml, trimmed): 2,901 cameras statewide (NYSDOT 1,825, NYC
+# DOT 1,076), 53 in our area, 40 with video; no link-direction given (the name's "NB" / "WB" is used); stills on
+# public.carsprogram.org (public JPEG with Last-Modified and ETag), video on *.nysdot.skyvdn.com (the HLS the Thruway's
+# cameras use: a master playlist naming a chunklist in its folder). The Thruway's cameras are in it too (TA_058 = the
+# Thruway's 1ne01370s, 7 m apart): same_camera, ours kept unless the CARS one has live video and ours hasn't.
+
+TMDD_DIRS = {"1": "Northbound", "3": "Eastbound", "5": "Southbound", "7": "Westbound", "n": "Northbound", "e": "Eastbound",
+             "s": "Southbound", "w": "Westbound"}
+
+
+def _tag(e: ET.Element) -> str:
+    return e.tag.split("}")[-1]
+
+
+def _kid(e: ET.Element | None, *path: str) -> ET.Element | None:
+    """The first descendant along path by local name (namespaces ignored)."""
+    for name in path:
+        if e is None:
+            return None
+        e = next((c for c in e if _tag(c) == name), None)
+    return e
+
+
+def _text(e: ET.Element | None, *path: str) -> str:
+    k = _kid(e, *path) if path else e
+    return (k.text or "").strip() if k is not None else ""
+
+
+def tmdd_time(e: ET.Element | None) -> float | None:
+    """A TMDD DateTimeZone {date YYYYMMDD, time HHMMSS, utc-offset [+-]HHMM} -> unix seconds (no offset: ours)."""
+    from datetime import datetime, timedelta, timezone
+    from zoneinfo import ZoneInfo
+    d, t, off = _text(e, "date"), _text(e, "time"), _text(e, "utc-offset")
+    if not re.fullmatch(r"\d{8}", d) or not re.fullmatch(r"\d{4}(\d{2})?", t):
+        return None
+    try:
+        when = datetime.strptime(d + t.ljust(6, "0"), "%Y%m%d%H%M%S")
+    except ValueError:
+        return None
+    m = re.fullmatch(r"([+-])(\d{2}):?(\d{2})", off)
+    if m:
+        sign = 1 if m.group(1) == "+" else -1
+        tz = timezone(sign * timedelta(hours=int(m.group(2)), minutes=int(m.group(3))))
+    else:
+        tz = ZoneInfo("America/New_York")
+    return when.replace(tzinfo=tz).timestamp()
+
+
+def _microdeg(v: str) -> float | None:
+    x = _f(v)
+    if x is None:
+        return None
+    return x / 1e6 if abs(x) > 180 else x
+
+
+def parse_carshub_cctv(body: bytes, bbox=DEFAULT_BBOX, meta: dict | None = None) -> list[dict]:
+    """The CARS-Hub's CCTV inventory (raw): one <inventory-item> at a time (iterparse, each cleared once read), our
+    area kept. Each camera: its first still image (the hub's snapshot proxy) and its video address, when given."""
+    import io
+    out, seen, owner = [], set(), ""
+    try:
+        for ev, e in ET.iterparse(io.BytesIO(body), events=("start", "end")):
+            name = _tag(e)
+            if ev == "start":
+                continue
+            if name == "organization-name" and not owner:
+                owner = (e.text or "").strip()
+            if name == "cctvInventory":
+                owner = ""
+                e.clear()
+                continue
+            if name != "inventory-item":
+                continue
+            geo = _kid(e, "location", "geo-location")
+            lat, lon = _microdeg(_text(geo, "latitude")), _microdeg(_text(geo, "longitude"))
+            cid = re.sub(r"[^A-Za-z0-9_.:-]", "-", _text(e, "device-id"))[:64]
+            if cid and cid not in seen and in_bbox(lat, lon, bbox):
+                seen.add(cid)
+                box = _kid(e, "still-images")
+                stills = [_url(_text(x, "url")) for x in (list(box) if box is not None else []) if _tag(x) == "still-image"]
+                url = next((u for u in stills if u), "")
+                video = _url(_text(e, "video-url"))
+                d = _text(e, "location", "link-direction").lower()
+                if d not in TMDD_DIRS:                       # (none given, 2026-11-04): the name's "NB", "Westbound"
+                    d = cam_dir(_text(e, "device-name"))[:1].lower()
+                mile = _f(_text(e, "location", "linear-reference"))
+                name_ = _s(_text(e, "device-name") or cid, 120)
+                out.append({"id": cid, "name": name_, "road": _cars_road(_text(e, "location", "route-designator"), name_),
+                            "dir": TMDD_DIRS.get(d, ""), "mile": f"{mile:.1f}" if mile is not None else "",
+                            "lat": round(lat, 6), "lon": round(lon, 6), "url": url, "video": video, "has_video": bool(video),
+                            "off": not url, "cadence": CADENCE_S[SOURCE], "owner": _s(owner, 60),
+                            "image_type": _s(_text(e, "cctv-image"), 10), "updated": tmdd_time(_kid(e, "device-updated"))})
+            e.clear()
+    except ET.ParseError as x:
+        raise ValueError(f"bad XML: {x}") from None
+    out.sort(key=lambda c: (c["road"], _f(c["mile"]) or 0, c["name"]))
+    return out
+
+
+parse_carshub_cctv.raw = True
+CARSHUB_PARSE = {"cameras": parse_carshub_cctv, "events": lambda doc, bbox=DEFAULT_BBOX: [],
+                 "signs": lambda doc, bbox=DEFAULT_BBOX: []}
+
+
+def _cam_key(c: dict) -> str:
+    """A camera's own name before its location ("SB King Approach - King St/Willett Ave/..." -> "sb king approach")."""
+    return " ".join(_words(re.split(r"\s+-\s+", c.get("name") or "")[0]))
+
+
+def same_camera(a: dict, b: dict, within_m: float = CAMERA_MATCH_M) -> bool:
+    """Two sources' records of one camera: within within_m, not facing different ways (when both say), and on a
+    highway (by its road or name) or with the same name: an intersection's several cameras (the county's King St /
+    Willett Ave approaches) are each their own."""
+    if km(a["lat"], a["lon"], b["lat"], b["lon"]) * 1000 > within_m:
+        return False
+    da, db = cam_dir(a.get("dir") or a.get("name", "")), cam_dir(b.get("dir") or b.get("name", ""))
+    if da and db and da != db:
+        return False
+    hw = lambda c: highway_from_text(f"{c.get('road', '')} {c.get('name', '')}") is not None
+    return (hw(a) and hw(b)) or (bool(_cam_key(a)) and _cam_key(a) == _cam_key(b))
+
+
+def compare_cameras(new: list[dict], ours: list[dict], within_m: float = CAMERA_MATCH_M) -> dict:
+    """A feed's cameras against the ones we have (the Thruway's, the county's): {n, known, known_by: {source: n},
+    new, new_by_road: {road: n}, new_ids}. A camera that is the same as one of ours (same_camera) is one we have."""
+    known_by: dict[str, int] = {}
+    fresh = []
+    for c in new:
+        twin = next((o for o in ours if same_camera(c, o, within_m)), None)
+        if twin is None:
+            fresh.append(c)
+        else:
+            src = twin.get("source") or "?"
+            known_by[src] = known_by.get(src, 0) + 1
+    by_road: dict[str, int] = {}
+    for c in fresh:
+        road = (highway_from_text(c.get("road", "") or c.get("name", "")) or (c.get("road") or "(no road)",))[0]
+        by_road[road] = by_road.get(road, 0) + 1
+    return {"n": len(new), "known": len(new) - len(fresh), "known_by": known_by, "new": len(fresh),
+            "new_by_road": dict(sorted(by_road.items(), key=lambda x: (-x[1], x[0]))), "new_ids": [c["id"] for c in fresh][:200]}
+
+
+def compare_text(cmp: dict) -> str:
+    """"12 cameras in our area: 9 we have (Thruway 6, County 3), 3 new (Hutch 2, I-287 1)"."""
+    known = ", ".join(f"{k} {v}" for k, v in sorted(cmp["known_by"].items()))
+    new = ", ".join(f"{k} {v}" for k, v in cmp["new_by_road"].items())
+    return (f"{cmp['n']} cameras in our area: {cmp['known']} we have" + (f" ({known})" if known else "")
+            + f", {cmp['new']} new" + (f" ({new})" if new else ""))
+
+
+PARSE = {"cameras": parse_cameras, "events": parse_cars_events, "signs": parse_cars_signs}
 
 
 # ---- the Thruway's feeds (XML, one element per record, everything in attributes) ------------------------
@@ -835,34 +1414,120 @@ def highway_places(path: str | Path | None, bbox=DEFAULT_BBOX) -> dict:
 # ---- the client ------------------------------------------------------------------------------------------
 
 
-def http_get(url: str, timeout: float, limit: int) -> tuple[int, dict, bytes]:
-    """(status, headers, body): urllib, GET only. Errors as HTTPError / URLError / OSError."""
-    req = Request(url, headers={"User-Agent": UA, "Accept": "application/json, image/*;q=0.9, */*;q=0.5"})
-    with urlopen(req, timeout=timeout) as r:
-        body = r.read(limit + 1)
-        if len(body) > limit:
-            raise ValueError(f"more than {limit // (1024 * 1024)} MB")
-        return r.status, {k.lower(): v for k, v in r.headers.items()}, body
+def _gunzip(body: bytes, limit: int) -> bytes:
+    import zlib
+    d = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    out = d.decompress(body, limit + 1)
+    if len(out) > limit or d.unconsumed_tail:
+        raise ValueError(f"more than {limit // (1024 * 1024)} MB unzipped")
+    return out
+
+
+def http_get(url: str, timeout: float, limit: int, headers: dict | None = None) -> tuple[int, dict, bytes]:
+    """(status, headers, body): urllib, GET only, gzip asked for and undone here; a 304 comes back as (304, headers,
+    b""). Errors as HTTPError / URLError / OSError. headers: the request's own (Authorization, If-None-Match, ...)."""
+    hdrs = dict(headers or {})
+    auth = hdrs.pop("Authorization", "")
+    req = Request(url, headers={"User-Agent": UA, "Accept": "application/json, image/*;q=0.9, */*;q=0.5",
+                                "Accept-Encoding": "gzip", **hdrs})
+    if auth:                    # never carried along a redirect (urllib copies the other headers to wherever it goes)
+        req.add_unredirected_header("Authorization", auth)
+    try:
+        with urlopen(req, timeout=timeout) as r:
+            body = r.read(limit + 1)
+            if len(body) > limit:
+                raise ValueError(f"more than {limit // (1024 * 1024)} MB")
+            hdrs = {k.lower(): v for k, v in r.headers.items()}
+            if hdrs.get("content-encoding", "").lower() == "gzip":
+                body = _gunzip(body, limit)
+            return r.status, hdrs, body
+    except HTTPError as e:
+        if e.code == 304:
+            return 304, {k.lower(): v for k, v in (e.headers or {}).items()}, b""
+        raise
+
+
+class BasicAuth:
+    """511NY's one username and password (env SIZEUP_511NY_USER / SIZEUP_511NY_PASS; the hub: SSM /sizeup-hub/511ny-user
+    and -pass), as the CARS API's Swagger definition asks: HTTP Basic (securityDefinitions basicAuth; the console's
+    swagger-oauth.js is Swagger UI's unused stock file: its client id is "your-client-id"). Only ever the Authorization
+    header of a request to a feed that needs it; never in repr, a URL, an error or the log (secrets(): what _redact
+    takes out)."""
+
+    def __init__(self, user: str = "", password: str = ""):
+        self._user, self._password = (user or "").strip(), (password or "")
+
+    def __bool__(self) -> bool:
+        return bool(self._user and self._password)
+
+    def __repr__(self) -> str:
+        return f"BasicAuth({'set' if self else 'not set'})"
+
+    __str__ = __repr__
+
+    def header(self) -> dict:
+        import base64
+        if not self:
+            return {}
+        tok = base64.b64encode(f"{self._user}:{self._password}".encode()).decode()
+        return {"Authorization": f"Basic {tok}"}
+
+    def secrets(self) -> tuple[str, ...]:
+        if not self:
+            return ()
+        out = [self._password, self.header()["Authorization"].split(" ", 1)[1]]
+        if len(self._user) >= 4:
+            out.append(self._user)
+        return tuple(out)
+
+
+def redact(text: str, secrets=()) -> str:
+    """_redact for any number of secrets (the key, a password, a Basic token), longest first."""
+    text = str(text)
+    for x in sorted((x for x in secrets if x), key=len, reverse=True):
+        text = text.replace(x, "***")
+    return _redact(text, "")
 
 
 class Provider:
     """One source's feeds: their addresses, parsers and schedule, what each last read and how it went.
-    511NY (a key, addresses from its approval) and the Thruway (fixed public addresses, no key)."""
+    511NY (CARS: the public signs, the API's events with the username and password), its CARS-Hub CCTV, the Thruway
+    and the county (fixed public addresses, no login). Feeds that share an address (the CARS-Hub's events and
+    cameras) are one request. Each feed remembers its ETag / Last-Modified and asks with them."""
 
     def __init__(self, name: str, short: str, label: str, link: str, urls: dict | None, parse: dict, every: dict | None,
-                 defaults: dict, floors: dict, key: str, bbox, fetch, log, clock, changed: Callable[[], None]):
+                 defaults: dict, floors: dict, key: str, bbox, fetch, log, clock, changed: Callable[[], None],
+                 auth: BasicAuth | None = None, auth_feeds: tuple[str, ...] = (), why_off: dict | None = None,
+                 after: Callable[[Provider, str], None] | None = None):
         self.name, self.short, self.label, self.link = name, short, label, link
         self.urls = {f: str((urls or {}).get(f) or "").strip() for f in FEEDS}
         self.parse, self.key, self.bbox = parse, (key or "").strip(), bbox
+        self.auth, self.auth_feeds = auth or BasicAuth(), tuple(auth_feeds)
+        self.why_off = dict(why_off or {})
+        self.after = after
         self.every = {f: max(floors[f], float((every or {}).get(f, defaults[f]))) for f in FEEDS}
         self.floors = floors
         self.fetch, self.log, self.clock, self.changed = fetch, log, clock, changed
         self.data: dict[str, list[dict]] = {f: [] for f in FEEDS}
-        self.status: dict[str, dict] = {f: {"at": None, "n": 0, "error": "", "next": 0.0, "fails": 0} for f in FEEDS}
+        self.status: dict[str, dict] = {f: {"at": None, "n": 0, "error": "", "next": 0.0, "fails": 0, "etag": "",
+                                            "modified": "", "published": None, "note": ""} for f in FEEDS}
+
+    def secrets(self) -> tuple[str, ...]:
+        return tuple(x for x in (self.key, *self.auth.secrets()) if x)
 
     def feed_on(self, feed: str) -> bool:
         u = self.urls.get(feed, "")
-        return bool(u) and ("{key}" not in u or bool(self.key))
+        return bool(u) and ("{key}" not in u or bool(self.key)) and (feed not in self.auth_feeds or bool(self.auth))
+
+    def feed_why(self, feed: str) -> str:
+        """Why a feed is off ("" when on): no address yet, or waiting for the credentials."""
+        if self.feed_on(feed):
+            return ""
+        if not self.urls.get(feed):
+            return self.why_off.get(feed, "") or f"{self.short} {feed}: no feed address"
+        if feed in self.auth_feeds and not self.auth:
+            return WAITING
+        return f"{self.short} {feed}: no key"
 
     @property
     def configured(self) -> bool:
@@ -874,9 +1539,12 @@ class Provider:
             return ""
         if self.name == "511ny":
             if not any(self.urls.values()):
-                return ("511NY not configured: no feed addresses ([roads] events_url, cameras_url, signs_url, "
-                        "from 511NY's access approval)")
-            return "511NY not configured: no key (SIZEUP_511NY_KEY)"
+                return "511NY off (no feed address: [roads] ny511 = false, or each one \"off\")"
+            if any(f in self.auth_feeds and self.urls[f] for f in FEEDS):
+                return f"511NY: {WAITING}"
+            return "511NY: no key for its feed addresses"
+        if self.name == CARSHUB:
+            return f"511NY CARS-Hub: {self.feed_why('cameras')}"
         return f"{self.short} cameras off"
 
     def url(self, feed: str) -> str:
@@ -890,50 +1558,112 @@ class Provider:
         now = self.clock()
         return [f for f in FEEDS if self.feed_on(f) and now >= self.status[f]["next"]]
 
-    def refresh(self, feed: str) -> bool:
-        """Fetch one feed now; True when it was read. Never raises."""
+    def _shared(self, feed: str) -> list[str]:
+        """The feeds read by this one request: feed, and any other on at the same address."""
+        return [feed] + [f for f in FEEDS if f != feed and self.feed_on(f) and self.urls[f] == self.urls[feed]]
+
+    def _ask(self, feed: str, fresh: bool = False) -> tuple[int, dict, bytes]:
+        headers = dict(self.auth.header()) if feed in self.auth_feeds else {}
+        st = self.status[feed]
+        if not fresh and st["at"] is not None:
+            if st["etag"]:
+                headers["If-None-Match"] = st["etag"]
+            if st["modified"]:
+                headers["If-Modified-Since"] = st["modified"]
+        if headers:
+            return self.fetch(self.url(feed), TIMEOUT_S, MAX_FEED_BYTES, headers)
+        return self.fetch(self.url(feed), TIMEOUT_S, MAX_FEED_BYTES)
+
+    def refresh(self, feed: str, fresh: bool = False) -> bool:
+        """Fetch one feed now (and the feeds at its address); True when it was read (a 304 too). Never raises.
+        fresh: without If-None-Match / If-Modified-Since (Refresh now)."""
         if not self.feed_on(feed):
             return False
         now = self.clock()
+        feeds = self._shared(feed)
         try:
-            code, _, body = self.fetch(self.url(feed), TIMEOUT_S, MAX_FEED_BYTES)
+            code, headers, body = self._ask(feed, fresh)
+            if code == 304:
+                for f in feeds:
+                    self.status[f].update(at=now, error="", fails=0, next=now + self.every[f], checked=now)
+                return True
             if code != 200:
                 raise HTTPError("", code, f"HTTP {code}", None, None)
-            items = self.parse[feed](decode(body), self.bbox)
+            published = None
+            if headers.get("last-modified"):
+                try:
+                    published = parsedate_to_datetime(headers["last-modified"]).timestamp()
+                except (TypeError, ValueError, IndexError):
+                    published = None
+            got = {}
+            doc = None
+            for f in feeds:
+                fn = self.parse[f]
+                if getattr(fn, "raw", False):
+                    got[f] = fn(body, self.bbox, {"published": published, "now": now})
+                else:
+                    doc = decode(body) if doc is None else doc
+                    got[f] = fn(doc, self.bbox)
+            del body, doc
         except HTTPError as e:
             return self._failed(feed, now, e.code, f"HTTP {e.code}")
         except (URLError, OSError, ValueError) as e:
             return self._failed(feed, now, 0, f"{type(e).__name__}: {getattr(e, 'reason', e)}")
         except Exception as e:  # a surprise in the feed must not stop the others
             return self._failed(feed, now, 0, f"{type(e).__name__}: {e}")
-        for it in items:
-            it["source"] = self.short
-        self.data[feed] = items
-        self.status[feed].update(at=now, n=len(items), error="", fails=0, next=now + self.every[feed])
+        for f, items in got.items():
+            for it in items:
+                it["source"] = self.short
+            self.data[f] = items
+            stale = published is not None and now - published > SIGNS_STALE_S
+            self.status[f].update(at=now, n=len(items), error="", fails=0, next=now + self.every[f], checked=now,
+                                  etag=headers.get("etag", "") or "", modified=headers.get("last-modified", "") or "",
+                                  published=published,
+                                  note=(f"{self.short}'s copy was published {_ago(now - published)} ago" if stale else ""))
+            if self.after is not None:
+                try:
+                    self.after(self, f)
+                except Exception as e:  # pragma: no cover - a comparison's trouble never stops the feed
+                    self.log(f"roads: {self.short} {f}: after-read error {type(e).__name__}")
         self.changed()
         return True
 
     def _failed(self, feed: str, now: float, code: int, why: str) -> bool:
         st = self.status[feed]
-        why = _redact(why, self.key)
+        why = redact(why, self.secrets())
         st["fails"] += 1
         if code in (401, 403):
-            wait, why = REFUSED_S, (f"{self.short} refused the key ({why})" if self.key else f"{self.short} refused the request ({why})")
+            wait = REFUSED_S
+            if feed in self.auth_feeds:
+                why = f"{self.short} refused the username and password ({why})"
+            else:
+                why = f"{self.short} refused the key ({why})" if self.key else f"{self.short} refused the request ({why})"
         elif code == 429:
             wait, why = RATE_LIMITED_S, f"{self.short} rate limit ({why})"
         else:
             wait = max(self.floors[feed], min(BACKOFF_S[1], BACKOFF_S[0] * 2 ** (st["fails"] - 1)))
         changed = st["error"] != why
-        st.update(error=why, next=now + wait)
+        for f in self._shared(feed):
+            self.status[f].update(error=why, next=now + wait)
+            if f != feed:
+                self.status[f]["fails"] += 1
         if changed:
             self.changed()
         self.log(f"roads: {self.short} {feed}: {why}; next try in {wait:.0f} s")
         return False
 
     def public(self) -> dict:
+        notes = [s["note"] for s in self.status.values() if s.get("note")]
         return {"name": self.name, "short": self.short, "label": self.label, "link": self.link, "configured": self.configured,
-                "at": self.updated_at(),
-                "status": {f: {"on": self.feed_on(f), "at": s["at"], "n": s["n"], "error": s["error"]} for f, s in self.status.items()}}
+                "at": self.updated_at(), "note": "; ".join(dict.fromkeys(notes)),
+                "status": {f: {"on": self.feed_on(f), "at": s["at"], "n": s["n"], "error": s["error"],
+                               "why": self.feed_why(f) if self.urls.get(f) or f in self.why_off else ""}
+                           for f, s in self.status.items()}}
+
+
+def _ago(s: float) -> str:
+    s = max(0, int(s))
+    return f"{s // 60} min" if s < 5400 else f"{s / 3600:.1f} h"
 
 
 class Roads:
@@ -942,7 +1672,9 @@ class Roads:
                  fetch: Callable[[str, float, int], tuple[int, dict, bytes]] = http_get,
                  log: Callable[[str], None] = print, clock: Callable[[], float] = time.time,
                  thruway: bool = True, thruway_urls: dict | None = None, county: bool = True, county_urls: dict | None = None,
-                 stream_max: int = STREAM_MAX, wall_streams: int = 0):
+                 stream_max: int = STREAM_MAX, wall_streams: int = 0, auth: BasicAuth | None = None,
+                 auth_feeds: tuple[str, ...] = (), carshub_url: str = "", carshub: bool = False,
+                 carshub_imagery: bool = True):
         self.bbox = tuple(float(x) for x in bbox)
         self.stream_max = max(1, min(int(stream_max), STREAM_MAX_LIMIT))   # live streams at once, hub-wide
         self.wall_streams = max(0, int(wall_streams))   # a camera wall's live tiles at once per page (0: the area's streams)
@@ -957,9 +1689,22 @@ class Roads:
         self.rev = 0
         self._public: tuple[int, bytes] | None = None
         self._merge: tuple[int, dict] | None = None
-        # 511NY first: when both are on, it wins a tie (the same camera, sign or event from both)
-        self.ny = Provider("511ny", SOURCE, SOURCE, LINK_URL, urls, PARSE, every, EVERY_S, MIN_EVERY_S, key,
-                           self.bbox, fetch, log, clock, self._changed)
+        # 511NY first: when both are on, it wins a tie (the same sign or event from both). urls: its feeds' addresses
+        # (from_config: NY511_URLS, [roads] events_url / signs_url); auth_feeds: those that need the username and
+        # password (the API's events).
+        self.auth = auth or BasicAuth()
+        self.carshub_imagery = bool(carshub_imagery)
+        self.camera_compare: dict | None = None
+        self.ny = Provider("511ny", SOURCE, LABEL, LINK_URL, urls, PARSE, every, NY511_EVERY_S, NY511_MIN_S, key,
+                           self.bbox, fetch, log, clock, self._changed, auth=self.auth, auth_feeds=auth_feeds,
+                           why_off={"events": WAITING} if "events" in auth_feeds else {})
+        # The CARS-Hub's CCTV inventory (data/cctv.xml, HTTP Basic, the same username and password): its cameras,
+        # counted against ours; on the map only with carshub_imagery
+        self.carshub = (Provider(CARSHUB, SOURCE, CARSHUB_LABEL, f"{CARS_HUB}index.jsf", {"cameras": carshub_url},
+                                 CARSHUB_PARSE, every, NY511_EVERY_S, NY511_MIN_S, "", self.bbox, fetch, log, clock,
+                                 self._changed, auth=self.auth, auth_feeds=("cameras",),
+                                 why_off={"cameras": "off ([roads] ny511_hub = \"off\")"}, after=self._carshub_read)
+                        if carshub else None)
         self.thruway = (Provider("thruway", THRUWAY, THRUWAY_LABEL, THRUWAY_LINK,
                                  THRUWAY_URLS if thruway_urls is None else thruway_urls, THRUWAY_PARSE, None,
                                  THRUWAY_EVERY_S, MIN_EVERY_S, "", self.bbox, fetch, log, clock, self._changed)
@@ -967,7 +1712,7 @@ class Roads:
         self.county = (Provider("county", COUNTY, COUNTY_LABEL, COUNTY_LINK, COUNTY_URLS if county_urls is None else county_urls,
                                 COUNTY_PARSE, None, COUNTY_EVERY_S, COUNTY_MIN_S, "", self.bbox, fetch, log, clock, self._changed)
                        if county else None)
-        self.providers = [p for p in (self.ny, self.thruway, self.county) if p is not None]
+        self.providers = [p for p in (self.ny, self.carshub, self.thruway, self.county) if p is not None]
         self._health: dict[str, dict] = {}            # camera id -> {fails, down_since, last_image, checked}
         self._streams: dict[str, dict] = {}           # camera id -> {last (playlist request), base (the stream's folder)}
         self._segments: OrderedDict[str, dict] = OrderedDict()   # "cid/name" -> {body, ctype, fetched}
@@ -987,12 +1732,18 @@ class Roads:
     def from_config(cls, cfg, log: Callable[[str], None] = print) -> Roads:
         state = Path(cfg.cad_db).parent if cfg.cad_db else None
         on = cfg.roads_enabled
-        return cls(cfg.roads_key if on else "",
-                   {"cameras": cfg.roads_cameras_url, "events": cfg.roads_events_url, "signs": cfg.roads_signs_url} if on else {},
-                   cfg.roads_bbox, (state / "roads511.json") if state else None,
+        ny = on and getattr(cfg, "roads_ny511", True)
+        pick = lambda v, feed: "" if v == "off" else (v or NY511_URLS.get(feed, ""))      # "": 511NY's own address
+        urls = {"events": pick(getattr(cfg, "roads_events_url", ""), "events"),
+                "signs": pick(getattr(cfg, "roads_signs_url", ""), "signs")} if ny else {}
+        return cls("", urls, cfg.roads_bbox, (state / "roads511.json") if state else None,
                    {"cameras": cfg.roads_cameras_s, "events": cfg.roads_events_s, "signs": cfg.roads_signs_s}, log=log,
                    thruway=on and cfg.roads_thruway, county=on and cfg.roads_county,
-                   stream_max=getattr(cfg, "roads_stream_max", STREAM_MAX), wall_streams=getattr(cfg, "roads_wall_streams", 0))
+                   stream_max=getattr(cfg, "roads_stream_max", STREAM_MAX), wall_streams=getattr(cfg, "roads_wall_streams", 0),
+                   auth=BasicAuth(getattr(cfg, "roads_511ny_user", ""), getattr(cfg, "roads_511ny_pass", "")),
+                   auth_feeds=("events",) if ny else (), carshub=ny,
+                   carshub_url=hub_cctv(getattr(cfg, "roads_ny511_hub", "")) if ny else "",
+                   carshub_imagery=getattr(cfg, "roads_carshub_imagery", True))
 
     @property
     def configured(self) -> bool:
@@ -1014,6 +1765,10 @@ class Roads:
         for p in self.providers:
             if not p.configured:
                 self.log(f"roads: {p.why_not()}")
+            else:
+                for f in p.auth_feeds:
+                    if not p.feed_on(f):
+                        self.log(f"roads: {p.short} {f}: {p.feed_why(f)}")
         if not self.configured:
             self.log("roads: no camera, incident or sign source: those layers off; mile markers and exits still shown")
             return self
@@ -1063,12 +1818,13 @@ class Roads:
         """(provider, feed) pairs to fetch now."""
         return [(p.name, f) for p in self.providers for f in p.due()]
 
-    def refresh(self, feed: str, provider: Provider | str | None = None) -> bool:
-        """Fetch one feed now, from one provider or all; True when any was read. Never raises."""
+    def refresh(self, feed: str, provider: Provider | str | None = None, fresh: bool = False) -> bool:
+        """Fetch one feed now, from one provider or all; True when any was read. Never raises. fresh: without
+        If-None-Match / If-Modified-Since (Settings > Data sources' Refresh now)."""
         ps = [self.provider(provider) if isinstance(provider, str) else provider] if provider else self.providers
         got = False
         for p in ps:
-            if p is not None and p.refresh(feed):
+            if p is not None and p.refresh(feed, fresh):
                 got = True
         if got:
             self._save()
@@ -1100,7 +1856,9 @@ class Roads:
                     for it in items:
                         it.setdefault("source", p.short)
                     p.data[feed] = items
-                    p.status[feed].update(at=at, n=len(items), next=at + p.every[feed])
+                    p.status[feed].update(at=at, n=len(items), next=at + p.every[feed], etag=str(f.get("etag") or ""),
+                                          modified=str(f.get("modified") or ""),
+                                          published=f.get("published") if isinstance(f.get("published"), (int, float)) else None)
             self._changed()
         except (OSError, ValueError, TypeError, AttributeError) as e:
             self.log(f"roads: cache {self.cache.name} not read ({type(e).__name__}); fetching afresh")
@@ -1109,7 +1867,9 @@ class Roads:
         if not self.cache:
             return
         doc = {"bbox": list(self.bbox),
-               "providers": {p.name: {f: {"at": p.status[f]["at"], "items": p.data[f]} for f in FEEDS} for p in self.providers}}
+               "providers": {p.name: {f: {"at": p.status[f]["at"], "items": p.data[f], "etag": p.status[f]["etag"],
+                                          "modified": p.status[f]["modified"], "published": p.status[f]["published"]}
+                                      for f in FEEDS} for p in self.providers}}
         try:
             self.cache.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.cache.with_suffix(".tmp")
@@ -1120,28 +1880,81 @@ class Roads:
 
     # -- what the pages get ----------------------------------------------------------------------------
 
+    def _order(self, feed: str) -> list[Provider]:
+        """Who wins a tie: 511NY first for events and signs; for cameras ours first (the Thruway's, the county's) and a
+        CARS-Hub camera where we have none, or in place of ours when only it has live video (merged); with
+        carshub_imagery off ([roads]), its cameras are only counted (camera_compare), not shown."""
+        if feed != "cameras":
+            return self.providers
+        out = [p for p in self.providers if p.name != CARSHUB]
+        if self.carshub is not None and self.carshub_imagery:
+            out.append(self.carshub)
+        return out
+
     def merged(self, feed: str) -> list[dict]:
-        """Every provider's items, 511NY first; a later provider's item within DEDUPE_M of one already
-        there (the same layer, for events), or with the same id, is the same thing and left out."""
+        """Every provider's items, in _order; a later provider's item that is already there is left out: the same id,
+        or within DEDUPE_M of another provider's (the same layer, for events), or for signs within SIGN_DEDUPE_M saying
+        the same thing (and facing the same way, when both say)."""
         with self._lock:
             cur = self._merge
             if cur is not None and cur[0] == self.rev and feed in cur[1]:
                 return cur[1][feed]
-        out, ids = [], set()
-        for p in self.providers:
+        out, ids, whose = [], set(), []
+
+        def same(it: dict, o: dict, mine: str, theirs: str) -> bool:
+            if feed == "cameras" and CARSHUB in (mine, theirs):
+                return same_camera(it, o)
+            d = km(it["lat"], it["lon"], o["lat"], o["lon"]) * 1000
+            if feed == "signs":
+                return (d <= SIGN_DEDUPE_M and sign_text(it) == sign_text(o)
+                        and not (it.get("dir") and o.get("dir") and it["dir"] != o["dir"]))
+            return d <= DEDUPE_M and (feed != "events" or it.get("layer") == o.get("layer"))
+        for p in self._order(feed):
             for it in p.data[feed]:
                 if it["id"] in ids:
                     continue
-                if any(km(it["lat"], it["lon"], o["lat"], o["lon"]) * 1000 <= DEDUPE_M
-                       and (feed != "events" or it.get("layer") == o.get("layer")) for o in out if o.get("source") != it.get("source")):
+                twin = next((i for i, (o, w) in enumerate(zip(out, whose)) if w != p.name and same(it, o, p.name, w)), None)
+                if twin is not None:
+                    o = out[twin]
+                    # the same camera: the one with live video (a CARS-Hub HLS camera over the county's JPEG one)
+                    if feed == "cameras" and it.get("has_video") and not o.get("has_video") and not it.get("off"):
+                        ids.discard(o["id"])
+                        out[twin], whose[twin] = it, p.name
+                        ids.add(it["id"])
                     continue
                 out.append(it)
+                whose.append(p.name)
                 ids.add(it["id"])
         with self._lock:
             if self._merge is None or self._merge[0] != self.rev:
                 self._merge = (self.rev, {})
             self._merge[1][feed] = out
         return out
+
+    def _carshub_read(self, p: Provider, feed: str) -> None:
+        """The CARS-Hub's cameras read: how many in our area are new against ours (the Thruway's, the county's,
+        within CAMERA_MATCH_M), by road; logged when it changes and shown in Settings > Data sources."""
+        if feed != "cameras":
+            return
+        ours = [c for q in (self.thruway, self.county) if q is not None for c in q.data["cameras"]]
+        cmp = compare_cameras(p.data["cameras"], ours)
+        text = compare_text(cmp) + ("" if self.carshub_imagery else "; not shown ([roads] carshub_imagery = false)")
+        if self.camera_compare is None or self.camera_compare.get("text") != text:
+            self.log(f"roads: 511NY CARS-Hub: {text}")
+        self.camera_compare = cmp | {"text": text}
+        p.status["cameras"]["note"] = text
+
+    def note(self) -> str:
+        """What the Layers box says of 511NY beyond "updated hh:mm": a feed still waiting (the credentials), a stale
+        copy of the signs."""
+        ny, out = self.ny, []
+        if not ny.configured:
+            out.append(ny.why_not())
+        elif "events" in ny.auth_feeds and not ny.feed_on("events"):
+            out.append(f"511NY incidents and closures: {ny.feed_why('events')}")
+        if ny.feed_on("signs") and ny.status["signs"].get("note"):
+            out.append(f"511NY signs: {ny.status['signs']['note']}")
+        return "; ".join(x for x in out if x)
 
     def _cam_public(self, c: dict) -> dict:
         out = {k: c.get(k, "") for k in ("id", "name", "road", "dir", "mile", "lat", "lon", "has_video", "off", "source")}
@@ -1180,7 +1993,7 @@ class Roads:
 
     def public(self) -> dict:
         """The layers for the maps. Camera image URLs stay here (the browser uses our proxy)."""
-        return {"configured": self.configured, "note": self.ny.why_not(), "source": SOURCE, "attribution": ATTRIBUTION,
+        return {"configured": self.configured, "note": self.note(), "source": SOURCE, "attribution": ATTRIBUTION,
                 "link": LINK_URL, "sources": [p.public() for p in self.providers], "rev": self.rev, "bbox": list(self.bbox),
                 "cameras": [self._cam_public(c) for c in self.merged("cameras")],
                 "events": list(self.merged("events")), "signs": list(self.merged("signs")),
@@ -1496,7 +2309,7 @@ class Roads:
                     self._images.popitem(last=False)
                 return self._image_out(hit, False, since, cam)
             except (HTTPError, URLError, OSError, ValueError) as e:
-                why = _redact(f"{type(e).__name__}: {getattr(e, 'reason', e)}", self.ny.key)
+                why = redact(f"{type(e).__name__}: {getattr(e, 'reason', e)}", self.ny.secrets())
                 self._note_image(cid, False, None, now)
                 if self.health(cid)["down"]:              # down: say so, never the old picture
                     self._images.pop(cid, None)
@@ -1582,7 +2395,7 @@ class Roads:
             if code != 200 or not body:
                 raise ValueError(f"HTTP {code}")
         except (HTTPError, URLError, OSError, ValueError) as e:
-            why = _redact(f"{type(e).__name__}: {getattr(e, 'reason', e)}", self.ny.key)
+            why = redact(f"{type(e).__name__}: {getattr(e, 'reason', e)}", self.ny.secrets())
             if opened:                                           # a stream that never answered holds no slot
                 with self._stream_lock:
                     self._streams.pop(cid, None)

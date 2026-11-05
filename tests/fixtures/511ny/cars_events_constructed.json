@@ -1,0 +1,731 @@
+[
+ {
+  "event-id": "NYSDOT-CARS-31001",
+  "headline": {
+   "category": "accidentsAndIncidents",
+   "code": "crash"
+  },
+  "editor": {
+   "editor-identifier": "R11"
+  },
+  "message-number": 1,
+  "message-type-version": 1,
+  "priority": 2,
+  "sender": {
+   "organization-id": "NYSDOT",
+   "organization-name": "New York State DOT"
+  },
+  "update-number": 1,
+  "update-time": {
+   "time": 1791919200000,
+   "utcOffset": -240,
+   "timeZoneId": "America/New_York"
+  },
+  "update-expiry-time": {
+   "time": 1792468800000,
+   "utcOffset": -240,
+   "timeZoneId": "America/New_York"
+  },
+  "category": "CURRENT",
+  "status": "ACTIVE",
+  "headline-element": 1,
+  "counties": [
+   "Westchester"
+  ],
+  "districts": [
+   "Region 8"
+  ],
+  "details": [
+   {
+    "access": "PUBLIC_DOMAIN",
+    "duration-was-specified": false,
+    "element-id": 1,
+    "start-time": {
+     "time": 1791918300000,
+     "utcOffset": -240,
+     "timeZoneId": "America/New_York"
+    },
+    "end-time": {
+     "time": 1791950340000,
+     "utcOffset": -240,
+     "timeZoneId": "America/New_York"
+    },
+    "update-time": {
+     "time": 1791918300000,
+     "utcOffset": -240,
+     "timeZoneId": "America/New_York"
+    },
+    "lanes": [
+     {
+      "lanes-type": "THROUGH_LANES",
+      "total-affected": 1,
+      "total-original": 3,
+      "link-direction": "W"
+     }
+    ],
+    "descriptions": [
+     {
+      "description-type": "PhraseDescription",
+      "is-cause": true,
+      "kind": {
+       "category": "accidentsAndIncidents",
+       "code": "crash"
+      }
+     },
+     {
+      "description-type": "PhraseDescription",
+      "is-cause": false,
+      "kind": {
+       "category": "closures",
+       "code": "right lane closed"
+      }
+     }
+    ],
+    "locations": [
+     {
+      "location-type": "LinkLocation",
+      "route-designator": "I-287",
+      "link-direction": "W",
+      "link-ownership": "NYSDOT",
+      "primary-location": {
+       "geo-location": {
+        "location-type": "GeoLocation",
+        "latitude": 41.0087,
+        "longitude": -73.6978
+       },
+       "cross-street-name": [
+        "Exit 10"
+       ],
+       "linear-reference": 8.7
+      }
+     }
+    ]
+   }
+  ],
+  "full-report-texts": [
+   {
+    "description": "Crash on I-287 westbound at Exit 10 (Rye Brook). Right lane closed.",
+    "report-medium": "CURRENT"
+   }
+  ]
+ },
+ {
+  "event-id": "NYSDOT-CARS-31002",
+  "headline": {
+   "category": "roadwork",
+   "code": "road construction"
+  },
+  "editor": {
+   "editor-identifier": "R11"
+  },
+  "message-number": 1,
+  "message-type-version": 1,
+  "priority": 3,
+  "sender": {
+   "organization-id": "NYSDOT",
+   "organization-name": "New York State DOT"
+  },
+  "update-number": 1,
+  "update-time": {
+   "time": 1791896400000,
+   "utcOffset": -240,
+   "timeZoneId": "America/New_York"
+  },
+  "update-expiry-time": {
+   "time": 1792468800000,
+   "utcOffset": -240,
+   "timeZoneId": "America/New_York"
+  },
+  "category": "PLANNED",
+  "status": "ACTIVE",
+  "headline-element": 1,
+  "counties": [
+   "Westchester"
+  ],
+  "districts": [
+   "Region 8"
+  ],
+  "details": [
+   {
+    "access": "PUBLIC_DOMAIN",
+    "duration-was-specified": true,
+    "element-id": 1,
+    "start-time": {
+     "time": 1791939600000,
+     "utcOffset": -240,
+     "timeZoneId": "America/New_York"
+    },
+    "end-time": {
+     "time": 1792054800000,
+     "utcOffset": -240,
+     "timeZoneId": "America/New_York"
+    },
+    "update-time": {
+     "time": 1791939600000,
+     "utcOffset": -240,
+     "timeZoneId": "America/New_York"
+    },
+    "lanes": [
+     {
+      "lanes-type": "THROUGH_LANES",
+      "total-affected": 1,
+      "total-original": 2,
+      "link-direction": "N"
+     }
+    ],
+    "descriptions": [
+     {
+      "description-type": "PhraseDescription",
+      "is-cause": true,
+      "kind": {
+       "category": "roadwork",
+       "code": "road construction"
+      }
+     },
+     {
+      "description-type": "AdditionalTextDescription",
+      "description": "Drainage work; flaggers on site."
+     },
+     {
+      "description-type": "DetourDescription",
+      "detour-type": "REQUIRED_DETOUR",
+      "locations-on-detour": [
+       {
+        "location-type": "LinkLocation",
+        "route-designator": "Glen Ave",
+        "link-direction": "N",
+        "link-ownership": "local"
+       },
+       {
+        "location-type": "LinkLocation",
+        "route-designator": "N Regent St",
+        "link-direction": "N",
+        "link-ownership": "local"
+       }
+      ]
+     }
+    ],
+    "locations": [
+     {
+      "location-type": "LinkLocation",
+      "route-designator": "NY 120A",
+      "link-direction": "N",
+      "link-ownership": "NYSDOT",
+      "primary-location": {
+       "geo-location": {
+        "location-type": "GeoLocation",
+        "latitude": 41.005,
+        "longitude": -73.6729
+       },
+       "cross-street-name": [
+        "Westchester Ave"
+       ]
+      },
+      "secondary-location": {
+       "geo-location": {
+        "location-type": "GeoLocation",
+        "latitude": 41.0089,
+        "longitude": -73.6744
+       },
+       "cross-street-name": [
+        "Glen Ave"
+       ]
+      }
+     }
+    ],
+    "scheduleOccurrences": [
+     {
+      "startTime": {
+       "time": 1791939600000,
+       "utcOffset": -240,
+       "timeZoneId": "America/New_York"
+      },
+      "endTime": {
+       "time": 1791968400000,
+       "utcOffset": -240,
+       "timeZoneId": "America/New_York"
+      }
+     },
+     {
+      "startTime": {
+       "time": 1792026000000,
+       "utcOffset": -240,
+       "timeZoneId": "America/New_York"
+      },
+      "endTime": {
+       "time": 1792054800000,
+       "utcOffset": -240,
+       "timeZoneId": "America/New_York"
+      }
+     }
+    ],
+    "effective-periods": [
+     {
+      "days-of-week": {
+       "bits": 62
+      },
+      "effective-period-qualifier": "NIGHT"
+     }
+    ]
+   }
+  ],
+  "geometry": {
+   "type": "LineString",
+   "coordinates": [
+    [
+     -73.6729,
+     41.005
+    ],
+    [
+     -73.6736,
+     41.007
+    ],
+    [
+     -73.6744,
+     41.0089
+    ]
+   ]
+  },
+  "communication-plans": {
+   "web": "https://511ny.org/"
+  }
+ },
+ {
+  "event-id": "NYSDOT-CARS-31003",
+  "headline": {
+   "category": "closures",
+   "code": "road closed"
+  },
+  "editor": {
+   "editor-identifier": "R11"
+  },
+  "message-number": 1,
+  "message-type-version": 1,
+  "priority": 1,
+  "sender": {
+   "organization-id": "NYSDOT",
+   "organization-name": "New York State DOT"
+  },
+  "update-number": 1,
+  "update-time": {
+   "time": 1791916200000,
+   "utcOffset": -240,
+   "timeZoneId": "America/New_York"
+  },
+  "update-expiry-time": {
+   "time": 1792468800000,
+   "utcOffset": -240,
+   "timeZoneId": "America/New_York"
+  },
+  "category": "CURRENT",
+  "status": "ACTIVE",
+  "headline-element": 1,
+  "counties": [
+   "Westchester"
+  ],
+  "districts": [
+   "Region 8"
+  ],
+  "details": [
+   {
+    "access": "PUBLIC_DOMAIN",
+    "duration-was-specified": true,
+    "element-id": 1,
+    "start-time": {
+     "time": 1791914400000,
+     "utcOffset": -240,
+     "timeZoneId": "America/New_York"
+    },
+    "end-time": {
+     "time": 1791928800000,
+     "utcOffset": -240,
+     "timeZoneId": "America/New_York"
+    },
+    "update-time": {
+     "time": 1791914400000,
+     "utcOffset": -240,
+     "timeZoneId": "America/New_York"
+    },
+    "lanes": [
+     {
+      "lanes-type": "THROUGH_LANES",
+      "total-affected": 2,
+      "total-original": 2,
+      "link-direction": "BOTH_DIRECTIONS"
+     }
+    ],
+    "descriptions": [
+     {
+      "description-type": "PhraseDescription",
+      "is-cause": false,
+      "kind": {
+       "category": "closures",
+       "code": "road closed"
+      }
+     },
+     {
+      "description-type": "PhraseDescription",
+      "is-cause": true,
+      "kind": {
+       "category": "obstruction",
+       "code": "downed wires"
+      }
+     }
+    ],
+    "locations": [
+     {
+      "location-type": "LinkLocation",
+      "route-designator": "Ridge St",
+      "link-direction": "BOTH_DIRECTIONS",
+      "link-ownership": "NYSDOT",
+      "primary-location": {
+       "geo-location": {
+        "location-type": "GeoLocation",
+        "latitude": 41.023,
+        "longitude": -73.683
+       },
+       "cross-street-name": [
+        "Hillandale Rd"
+       ]
+      }
+     }
+    ]
+   }
+  ],
+  "estimated-re-opening-time": {
+   "time": 1791928800000,
+   "utcOffset": -240,
+   "timeZoneId": "America/New_York"
+  }
+ },
+ {
+  "event-id": "NYSDOT-CARS-31004",
+  "headline": {
+   "category": "roadwork",
+   "code": "road maintenance operations"
+  },
+  "editor": {
+   "editor-identifier": "R11"
+  },
+  "message-number": 1,
+  "message-type-version": 1,
+  "priority": 3,
+  "sender": {
+   "organization-id": "NYSDOT",
+   "organization-name": "New York State DOT"
+  },
+  "update-number": 1,
+  "update-time": {
+   "time": 1791900000000,
+   "utcOffset": -240,
+   "timeZoneId": "America/New_York"
+  },
+  "update-expiry-time": {
+   "time": 1792468800000,
+   "utcOffset": -240,
+   "timeZoneId": "America/New_York"
+  },
+  "category": "CURRENT",
+  "status": "ACTIVE",
+  "headline-element": 1,
+  "counties": [
+   "Westchester"
+  ],
+  "districts": [
+   "Region 8"
+  ],
+  "details": [
+   {
+    "access": "ORIGINATING_AGENCY",
+    "duration-was-specified": true,
+    "element-id": 1,
+    "start-time": {
+     "time": 1791896400000,
+     "utcOffset": -240,
+     "timeZoneId": "America/New_York"
+    },
+    "end-time": {
+     "time": 1791921600000,
+     "utcOffset": -240,
+     "timeZoneId": "America/New_York"
+    },
+    "update-time": {
+     "time": 1791896400000,
+     "utcOffset": -240,
+     "timeZoneId": "America/New_York"
+    },
+    "locations": [
+     {
+      "location-type": "LinkLocation",
+      "route-designator": "NY 120",
+      "link-direction": "N",
+      "link-ownership": "NYSDOT",
+      "primary-location": {
+       "geo-location": {
+        "location-type": "GeoLocation",
+        "latitude": 41.03,
+        "longitude": -73.69
+       }
+      }
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "event-id": "NYSDOT-CARS-31005",
+  "headline": {
+   "category": "accidentsAndIncidents",
+   "code": "disabled vehicle"
+  },
+  "editor": {
+   "editor-identifier": "R11"
+  },
+  "message-number": 1,
+  "message-type-version": 1,
+  "priority": 3,
+  "sender": {
+   "organization-id": "NYSDOT",
+   "organization-name": "New York State DOT"
+  },
+  "update-number": 1,
+  "update-time": {
+   "time": 1791907200000,
+   "utcOffset": -240,
+   "timeZoneId": "America/New_York"
+  },
+  "update-expiry-time": {
+   "time": 1792468800000,
+   "utcOffset": -240,
+   "timeZoneId": "America/New_York"
+  },
+  "category": "CURRENT",
+  "status": "ENDED",
+  "headline-element": 1,
+  "counties": [
+   "Westchester"
+  ],
+  "districts": [
+   "Region 8"
+  ],
+  "details": [
+   {
+    "access": "PUBLIC_DOMAIN",
+    "duration-was-specified": true,
+    "element-id": 1,
+    "start-time": {
+     "time": 1791903600000,
+     "utcOffset": -240,
+     "timeZoneId": "America/New_York"
+    },
+    "end-time": {
+     "time": 1791907200000,
+     "utcOffset": -240,
+     "timeZoneId": "America/New_York"
+    },
+    "update-time": {
+     "time": 1791903600000,
+     "utcOffset": -240,
+     "timeZoneId": "America/New_York"
+    },
+    "locations": [
+     {
+      "location-type": "LinkLocation",
+      "route-designator": "I-95",
+      "link-direction": "N",
+      "link-ownership": "NYSDOT",
+      "primary-location": {
+       "geo-location": {
+        "location-type": "GeoLocation",
+        "latitude": 40.99,
+        "longitude": -73.68
+       }
+      }
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "event-id": "NYSDOT-CARS-31006",
+  "headline": {
+   "category": "roadwork",
+   "code": "road construction"
+  },
+  "editor": {
+   "editor-identifier": "R11"
+  },
+  "message-number": 1,
+  "message-type-version": 1,
+  "priority": 3,
+  "sender": {
+   "organization-id": "NYSDOT",
+   "organization-name": "New York State DOT"
+  },
+  "update-number": 1,
+  "update-time": {
+   "time": 1791892800000,
+   "utcOffset": -240,
+   "timeZoneId": "America/New_York"
+  },
+  "update-expiry-time": {
+   "time": 1792468800000,
+   "utcOffset": -240,
+   "timeZoneId": "America/New_York"
+  },
+  "category": "PLANNED",
+  "status": "ACTIVE",
+  "headline-element": 1,
+  "counties": [
+   "Westchester"
+  ],
+  "districts": [
+   "Region 8"
+  ],
+  "details": [
+   {
+    "access": "PUBLIC_DOMAIN",
+    "duration-was-specified": true,
+    "element-id": 1,
+    "start-time": {
+     "time": 1791802800000,
+     "utcOffset": -240,
+     "timeZoneId": "America/New_York"
+    },
+    "end-time": {
+     "time": 1796076000000,
+     "utcOffset": -300,
+     "timeZoneId": "America/New_York"
+    },
+    "update-time": {
+     "time": 1791802800000,
+     "utcOffset": -240,
+     "timeZoneId": "America/New_York"
+    },
+    "locations": [
+     {
+      "location-type": "LinkLocation",
+      "route-designator": "I-87",
+      "link-direction": "S",
+      "link-ownership": "NYSDOT",
+      "primary-location": {
+       "geo-location": {
+        "location-type": "GeoLocation",
+        "latitude": 42.7452,
+        "longitude": -73.7731
+       }
+      }
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "event-id": "NYSDOT-CARS-31007",
+  "headline": {
+   "category": "roadwork",
+   "code": "paving"
+  },
+  "editor": {
+   "editor-identifier": "R11"
+  },
+  "message-number": 1,
+  "message-type-version": 1,
+  "priority": 3,
+  "sender": {
+   "organization-id": "NYSDOT",
+   "organization-name": "New York State DOT"
+  },
+  "update-number": 1,
+  "update-time": {
+   "time": 1791892800000,
+   "utcOffset": -240,
+   "timeZoneId": "America/New_York"
+  },
+  "update-expiry-time": {
+   "time": 1792468800000,
+   "utcOffset": -240,
+   "timeZoneId": "America/New_York"
+  },
+  "category": "PLANNED",
+  "status": "ACTIVE",
+  "headline-element": 1,
+  "counties": [
+   "Westchester"
+  ],
+  "districts": [
+   "Region 8"
+  ],
+  "details": [
+   {
+    "access": "PUBLIC_DOMAIN",
+    "duration-was-specified": true,
+    "element-id": 1,
+    "start-time": {
+     "time": 1791777600000,
+     "utcOffset": -240,
+     "timeZoneId": "America/New_York"
+    },
+    "end-time": {
+     "time": 1793354400000,
+     "utcOffset": -240,
+     "timeZoneId": "America/New_York"
+    },
+    "update-time": {
+     "time": 1791777600000,
+     "utcOffset": -240,
+     "timeZoneId": "America/New_York"
+    },
+    "lanes": [
+     {
+      "lanes-type": "RIGHT_LANE",
+      "total-affected": 1,
+      "total-original": 2,
+      "link-direction": "N"
+     }
+    ],
+    "locations": [
+     {
+      "location-type": "LinkLocation",
+      "route-designator": "N Main St",
+      "link-direction": "N",
+      "link-ownership": "NYSDOT",
+      "primary-location": {
+       "geo-location": {
+        "location-type": "GeoLocation",
+        "latitude": 41.0003,
+        "longitude": -73.66386
+       },
+       "cross-street-name": [
+        "Westchester Ave"
+       ]
+      },
+      "secondary-location": {
+       "geo-location": {
+        "location-type": "GeoLocation",
+        "latitude": 41.00072,
+        "longitude": -73.66334
+       },
+       "cross-street-name": [
+        "Willett Ave"
+       ]
+      }
+     }
+    ]
+   }
+  ],
+  "geometry": {
+   "type": "LineString",
+   "coordinates": [
+    [
+     -73.66386,
+     41.0003
+    ],
+    [
+     -73.66334,
+     41.00072
+    ]
+   ]
+  }
+ }
+]

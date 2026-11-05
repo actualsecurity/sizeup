@@ -584,3 +584,24 @@ def test_going_back_to_a_release_from_before_the_service_removes_it_first(tmp_pa
     src = (ROOT / "sizeup" / "cloud" / "autoupdate.py").read_text()
     act = src[src.index("    def activate(self, name: str"):]
     assert act.index("self.before_switch(name)") < act.index("self.installer(")
+
+
+def test_two_dongles_with_its_serial_start_nothing(tmp_path):
+    """#242: never a guess between two dongles with one serial, by the service either."""
+    s, pop, _ = supervisor(tmp_path, found=lambda: [(1, "00000001"), (4, "00000001")])
+    ask(tmp_path, sdr="00000001", name="V3 #2")
+    st = s.step()
+    assert st["state"] == "ambiguous" and "Two dongles share serial 00000001 (indexes 1 and 4)" in st["detail"]
+    assert "sizeup-station sdr-serial 4" in st["detail"] and pop.started == []
+    u = rec.UnitRecorder("x", str(tmp_path), state_path=s.state, status_path=s.status_path)
+    u.serial = "00000001"
+    assert u.status()["state"] == "ambiguous"                         # the row says "serial shared"
+    u.shutdown()
+    # as configured (no dongle handed over): a source naming the shared serial is left out; none left: not started
+    work = tmp_path / "tr"
+    c = json.loads((work / "config.json").read_text())
+    c["sources"] = [dict(c["sources"][0], device="rtl=00000001")]
+    (work / "config.json").write_text(json.dumps(c))
+    ask(tmp_path, sdr="", seq=2)
+    st = s.step(time.time() + 100)
+    assert st["state"] == "ambiguous" and "not started" in st["detail"] and pop.started == []

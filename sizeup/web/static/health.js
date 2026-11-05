@@ -180,15 +180,26 @@ const StationHealth = (() => {
       if ((tr.recent || []).length) kids.push(table(["When", "Channel", "Reason", "AWS said"],
         tr.recent.map((r) => [when(r.at), r.channel, r.reason, r.why]), ""));
     }
-    kids.push(el("h3", "hl-sub", "Dongles"), table(["SDR", "Serial", "Plugged in", "Job", "Running", "Restarts", "Detail"],
+    kids.push(el("h3", "hl-sub", "Dongles"));
+    for (const x of h.duplicates || []) {        // two dongles, one serial (#242): neither is opened by it
+      kids.push(el("p", "notice err", `${x.text}. On the station: sudo sizeup-station sdr-serial <index> <new-serial> --dry-run, `
+        + "then without --dry-run (deploy/station/README.md \"Two dongles, one serial\")."));
+    }
+    kids.push(table(["SDR", "Serial", "Plugged in", "Job", "Running", "Restarts", "Detail"],
       (h.dongles || []).map((x) => [x.name, x.serial, [x.present ? "yes" : "no", x.present ? "" : "hl-bad"], x.job,
         [x.job === "Off" ? "—" : x.running ? "yes" : (x.state || "no"), x.job === "Off" ? "dim" : x.running ? "hl-ok" : "hl-bad"],
-        x.restarts || 0, x.held_by ? `held by ${x.held_by.app} (${x.held_by.mode})` : x.detail]),
+        x.restarts || 0, [x.ambiguous || (x.held_by ? `held by ${x.held_by.app} (${x.held_by.mode})` : x.detail), x.ambiguous ? "hl-bad" : ""]]),
       h.shared ? "No dongles" : "One dongle per channel (see Channels)"));
-    kids.push(el("h3", "hl-sub", "Channels"), table(["Channel", "MHz", "State", "Last heard", "Quiet for", "Usually within", "Squelch", "Quieting", "Restarts", "Hint"],
-      (h.channels || []).map((c) => [c.label, c.mhz || "", [c.word || c.state || "?", stateCls(c.state)],
+    if ((h.usb || []).length) {
+      const dup = new Set((h.duplicates || []).map((x) => x.serial));
+      kids.push(table(["Index", "Serial", "Product"], h.usb.map((u) => [`#${u.index}`, [u.serial || "(none)", dup.has(u.serial) ? "hl-bad" : ""],
+        u.product || ""]), ""));
+    }
+    kids.push(el("h3", "hl-sub", "Channels"), table(["Channel", "MHz", "State", "Last heard", "Quiet for", "Usually within", "Alert past", "Squelch", "Quieting", "Restarts", "Hint"],
+      (h.channels || []).map((c) => [c.name || c.label, c.mhz || "", [c.word || c.state || "?", stateCls(c.state)],
         c.last_heard ? when(c.last_heard) : "never", c.quiet_s !== null && c.quiet_s !== undefined ? longDur(c.quiet_s) : "",
         c.typical_gap_s ? longDur(c.typical_gap_s) : (c.gaps ? `learning (${c.gaps})` : ""),
+        [c.main ? (c.alert_after_s ? longDur(c.alert_after_s) : "learning") : "", c.main && c.alert_after_s && c.quiet_s > c.alert_after_s ? "hl-warn" : "dim"],
         [c.stuck ? `stuck open ${fmtDur(c.open_s)}` : c.open ? `open ${fmtDur(c.open_s)}` : "closed", c.stuck ? "hl-bad" : ""],
         c.quieting_db !== null && c.quieting_db !== undefined ? `${c.quieting_db} dB` : "", c.restarts || 0, [c.hint || "", c.hint ? "hl-warn" : ""]]),
       "No channels reported"));
@@ -199,7 +210,9 @@ const StationHealth = (() => {
         [a.severity, a.severity === "critical" ? "hl-bad" : "hl-warn"], `${a.title}: ${a.text}`, whoText(a.who), a.pushed ? "yes" : "no"])],
       "No alerts in the last 24 h"));
     kids.push(el("p", "dim small", `Alerts: silent ${th.silent_min} min · behind ${th.behind_min} min · whisper / trunk-recorder down ${th.down_min} min · `
-      + `a dongle's job down ${Math.round(th.job_grace_s || 60)} s · outbox ${th.outbox_min} min · disk ${th.disk_pct}% · at most one push per alert per ${th.repeat_min} min, plus its recovery.`));
+      + `a dongle's job down ${Math.round(th.job_grace_s || 60)} s · outbox ${th.outbox_min} min · disk ${th.disk_pct}% · at most one push per alert per ${th.repeat_min} min, plus its recovery.`
+      + (th.quiet ? ` A main channel (${th.quiet.channels.join(", ")}) silent ${th.quiet.factor}× its usual gap for that time of day (the 90th percentile, `
+        + `learned from ${th.quiet.gaps_min}+ gaps), and at least ${th.quiet.min_min} min, is a warning; a serial two dongles share is critical.` : "")));
     card.replaceChildren(...kids);
   }
 

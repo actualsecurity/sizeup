@@ -16,7 +16,7 @@ sizeup user's like state/adsb_receiver.json; this service, the same user, reads 
 
     STATE   {"on": true, "sdr": "<serial>", "name": "V4", "pid": <sizeup's pid>, "seq": <n>}   sizeup's wish
             "on": false: nothing runs. "sdr": "": trunk-recorder's config.json as it is (no shared dongles).
-    STATUS  {at, state: off | ok | absent | held | down, detail, on, sdr, name, seq, pid, tr_pid, index, restarts, argv,
+    STATUS  {at, state: off | ok | absent | ambiguous | held | down, detail, on, sdr, name, seq, pid, tr_pid, index, restarts, argv,
              held_by}: what runs. "seq" is the last STATE seq it acted on; "pid" is this supervisor's (the claim's).
 
 trunk-recorder is (re)started only when what it runs changes: the dongle in STATE, or [p25] recorder / recorder_dir in
@@ -104,9 +104,25 @@ def unit_script_command(workdir: str | Path, value: str | None = None) -> str:
     return cmd if os.access(path, os.X_OK) else f"/bin/sh {cmd}"
 
 
-def runtime_argv(argv: list[str], workdir: str | Path, dev: int | str | None = None) -> list[str]:
-    """argv with --config pointing at a copy of its config (config.runtime.json, written in workdir) whose sources use
-    dongle `dev` (None: as configured) and whose systems run the unit script."""
+class AmbiguousSource(ValueError):
+    """Every source in config.json names a dongle serial two or more plugged-in dongles share (#242)."""
+
+
+def rtl_serial(device: str | None) -> str:
+    """The dongle an osmosdr device string names ("rtl=fire-p25,buflen=..." -> "fire-p25"), "" for none."""
+    for part in str(device or "").split(","):
+        k, _, v = part.strip().partition("=")
+        if k == "rtl":
+            return v.strip()
+    return ""
+
+
+def runtime_argv(argv: list[str], workdir: str | Path, dev: int | str | None = None,
+                 ambiguous=None, left_out: list[str] | None = None) -> list[str]:
+    """argv with --config pointing at a copy of its config (config.runtime.json, written in workdir) whose sources
+    use dongle `dev` (None: as configured) and whose systems run the unit script. ambiguous(serial) -> why it can't be
+    opened now ("" if fine): with dev None, a source naming such a serial is left out (said in left_out), and with
+    every source left out AmbiguousSource is raised (#242: never a guess between two dongles with one serial)."""
     argv = list(argv)
     k = next((i for i, a in enumerate(argv) if a.startswith("--config")), None)
     name = (argv[k].split("=", 1)[1] if "=" in argv[k] else argv[k + 1]) if k is not None else "config.json"
@@ -117,6 +133,17 @@ def runtime_argv(argv: list[str], workdir: str | Path, dev: int | str | None = N
     if dev is not None:
         for s in conf.get("sources", []):
             s["device"] = f"rtl={dev}"
+    elif ambiguous is not None:
+        keep, out = [], []
+        for s in conf.get("sources", []):
+            ser = rtl_serial(s.get("device"))
+            why = ambiguous(ser) if ser else ""
+            (out if why else keep).append(f"{s.get('device')}: {why}" if why else s)
+        if left_out is not None:
+            left_out[:] = out
+        if out and not keep:
+            raise AmbiguousSource("; ".join(out))
+        conf["sources"] = keep
     for s in conf.get("systems", []):
         cmd = unit_script_command(workdir, s.get("unitScript"))
         if cmd:
@@ -206,6 +233,15 @@ def devices() -> list[tuple[int, str]] | None:
         if lib.rtlsdr_get_device_usb_strings(i, m, p, s) == 0:
             out.append((i, s.value.decode(errors="replace")))
     return out
+
+
+def duplicate_text(serial: str, indexes: list[int]) -> str:
+    """sizeup/radio/sdr.py duplicate_text()'s words (this file is stdlib only, installed on its own)."""
+    words = {2: "Two", 3: "Three", 4: "Four"}
+    ix = [str(i) for i in indexes]
+    listed = ix[0] if len(ix) == 1 else ", ".join(ix[:-1]) + " and " + ix[-1]
+    return (f"{words.get(len(ix), str(len(ix)))} dongles share serial {serial} (indexes {listed}): sizeup can't tell "
+            f"them apart. Fix: sizeup-station sdr-serial {ix[-1]} <new-serial>")
 
 
 def resolve(serial: str, found: list[tuple[int, str]] | None) -> int | None:
@@ -360,22 +396,32 @@ class Supervisor:
             self.status.update(base)
             return
         idx = None
+        try:
+            found = self.found()
+        except Exception as e:  # noqa: BLE001 - librtlsdr in a bad way: like not plugged in
+            found = None
+            self.log(f"p25: dongle lookup failed: {type(e).__name__}: {e}")
+
+        def ambiguous(serial: str) -> str:
+            same = [i for i, x in (found or []) if x == serial]
+            return duplicate_text(serial, same) if len(same) > 1 else ""
         if w["sdr"]:
-            try:
-                found = self.found()
-            except Exception as e:  # noqa: BLE001 - librtlsdr in a bad way: like not plugged in
-                found = None
-                self.log(f"p25: dongle lookup failed: {type(e).__name__}: {e}")
             idx = resolve(w["sdr"], found)
             if idx is None:
-                why = ("librtlsdr not found" if found is None else
-                       f"two dongles say {w['sdr']}: give one another serial"
-                       if sum(1 for _i, s in found if s == w["sdr"]) > 1 else f"SDR '{name}' not plugged in")
                 self.next_start = now + UNPLUGGED_S
-                self._set(now, "absent", why, **base)
+                if ambiguous(w["sdr"]):       # #242: never a guess between two dongles with one serial
+                    self._set(now, "ambiguous", f"SDR '{name}': {ambiguous(w['sdr'])}", **base)
+                else:
+                    self._set(now, "absent", "librtlsdr not found" if found is None else f"SDR '{name}' not plugged in",
+                              **base)
                 return
+        left_out: list[str] = []
         try:
-            argv = runtime_argv(r["argv"], r["workdir"], idx)
+            argv = runtime_argv(r["argv"], r["workdir"], idx, None if w["sdr"] else ambiguous, left_out)
+        except AmbiguousSource as e:
+            self.next_start = now + ABSENT_S
+            self._set(now, "ambiguous", f"not started: {e}", **base)
+            return
         except (OSError, ValueError) as e:
             self.next_start = now + ABSENT_S
             self._set(now, "down", f"cannot write trunk-recorder config: {e}", **base)
@@ -401,8 +447,10 @@ class Supervisor:
             self._drain_thread.start()
         where = f"{name} (device #{idx})" if w["sdr"] else "the dongle its config.json names"
         self.log(f"p25: trunk-recorder on {where}, pid {self.proc.pid}")
-        self._set(now, "ok", "trunk-recorder starting", tr_pid=self.proc.pid, index=idx, argv=argv, started=now,
-                  **base)
+        if left_out:
+            self.log(f"p25: source(s) left out: {'; '.join(left_out)}")
+        self._set(now, "ok", "trunk-recorder starting" + (f" (left out: {'; '.join(left_out)})" if left_out else ""),
+                  tr_pid=self.proc.pid, index=idx, argv=argv, started=now, **base)
 
     def _watch(self, now: float, base: dict) -> None:
         keep = {k: self.status.get(k) for k in ("tr_pid", "index", "argv", "started")}

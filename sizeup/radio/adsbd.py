@@ -35,8 +35,11 @@ to 30 s); one whose aircraft.json stops updating, or whose dongle stops deliveri
 that decodes nothing for NO_SIGNAL_S says "no signal" (an antenna or LNA fault, or a quiet sky) and is restarted on a
 slow schedule. A change of the dongle, gain or bias-tee (the config, or Settings) restarts it with the new settings.
 
-The status (STATUS, every STEP_S, atomically): {at, state: off | refused | missing | held | unplugged | starting | ok |
-no_signal | down, detail, sdr, source: config | settings, gain, bias_tee, pid, index, since, restarts, held_by,
+Two dongles with the dongle's serial (#242): nothing starts (state "ambiguous", the fix in its detail) until one is
+renamed: readsb never guesses between them.
+
+The status (STATUS, every STEP_S, atomically): {at, state: off | refused | missing | held | unplugged | ambiguous |
+starting | ok | no_signal | down, detail, sdr, source: config | settings, gain, bias_tee, pid, index, since, restarts, held_by,
 messages_per_s, aircraft, with_pos, last_message_at, json, argv}. sizeup-station reads it for Settings > Radios and the
 station health it sends the hub (sizeup/cloud/health.py)."""
 
@@ -167,6 +170,15 @@ def devices() -> list[tuple[int, str]] | None:
         if lib.rtlsdr_get_device_usb_strings(i, m, p, s) == 0:
             out.append((i, s.value.decode(errors="replace")))
     return out
+
+
+def duplicate_text(serial: str, indexes: list[int]) -> str:
+    """sizeup/radio/sdr.py duplicate_text()'s words (this file is stdlib only, installed on its own)."""
+    words = {2: "Two", 3: "Three", 4: "Four"}
+    ix = [str(i) for i in indexes]
+    listed = ix[0] if len(ix) == 1 else ", ".join(ix[:-1]) + " and " + ix[-1]
+    return (f"{words.get(len(ix), str(len(ix)))} dongles share serial {serial} (indexes {listed}): sizeup can't tell "
+            f"them apart. Fix: sizeup-station sdr-serial {ix[-1]} <new-serial>")
 
 
 def resolve(serial: str, found: list[tuple[int, str]] | None) -> int | None:
@@ -385,10 +397,12 @@ class Decoder:
             self.log(f"adsb: dongle lookup failed: {type(e).__name__}: {e}")
         idx = resolve(s["sdr"], found)
         if idx is None:
-            why = ("librtlsdr not found" if found is None else
-                   f"two dongles say {s['sdr']}: give one another serial" if sum(1 for _i, x in found if x == s["sdr"]) > 1
-                   else f"{s['sdr']} isn't plugged in")
+            same = [i for i, x in (found or []) if x == s["sdr"]]
             self.next_start = now + 5.0
+            if len(same) > 1:              # #242: never a guess between them (one may be a radio, not behind the filter)
+                self._set(now, "ambiguous", duplicate_text(s["sdr"], same) + ": readsb not started", present=True, **base)
+                return
+            why = "librtlsdr not found" if found is None else f"{s['sdr']} isn't plugged in"
             self._set(now, "unplugged", why, present=False, **base)
             return
         if not claim(s["sdr"], self.claims):

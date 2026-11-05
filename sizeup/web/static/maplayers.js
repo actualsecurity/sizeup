@@ -531,7 +531,7 @@ window.MapLayers = (() => {
         a.href = s.link;
         a.target = "_blank";
         a.rel = "noopener";
-        line.append(a, s.at ? `, updated ${hhmm(s.at)}` : ", waiting for the first read");
+        line.append(a, s.at ? `, updated ${hhmm(s.at)}` : ", waiting for the first read", s.note ? ` (${s.note})` : "");
         this.panel.append(line);
       }
       if (d && d.configured && d.note) this.panel.append(h("div", "dim small", d.note));
@@ -571,9 +571,14 @@ window.MapLayers = (() => {
       const d = store.data || {};
       if (key === "signs") {
         const s = (d.signs || []).find((x) => String(x.id) === String(id));
-        if (s) this.showInfo(s.name, [s.road, s.dir, s.mile ? `MP ${s.mile}` : ""].filter(Boolean).join(" "),
-                             (s.lines || []).length ? s.lines : ["(blank)"],
-                             `${s.source || "511NY"}` + (s.updated ? `, sign updated ${when(s.updated)}` : ""), "ml-sign-text");
+        if (!s) return;
+        // 511NY's signs (#188) come page by page, with the sign's own status; the Thruway's as lines
+        const pages = (s.pages || []).length ? s.pages : ((s.lines || []).length ? [s.lines] : []);
+        const lines = pages.length ? pages.flatMap((p, i) => (i ? ["·", ...p] : p))
+          : [s.status === "fault" ? "(the sign reports a fault: its message isn't known)" : "(blank)"];
+        this.showInfo(s.name, [s.road, s.dir, s.mile ? `MP ${s.mile}` : ""].filter(Boolean).join(" "), lines,
+                      `${s.source || "511NY"}` + (s.agency ? ` (${s.agency})` : "") + (s.updated ? `, sign updated ${when(s.updated)}` : ""),
+                      "ml-sign-text");
         return;
       }
       const e = (d.events || []).find((x) => String(x.id) === String(id));
