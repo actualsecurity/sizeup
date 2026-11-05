@@ -318,6 +318,18 @@ class App:
         # What was picked in the web app wins over start_mode, so a restart doesn't move a dongle.
         self._mode_file = (Path(cfg.clips_dir).parent / "sdr_modes.json") if cfg.clips_dir else None
         self._load_modes()
+        # Each serial's product while it was the only dongle with it (#242): {serial: product}. When a second dongle
+        # turns up with the same serial (a factory 00000001), the one whose product differs is the newcomer: the
+        # alert suggests renaming that one, and sizeup-station sdr-serial knows which physical dongle a job meant.
+        self._products_file = self._mode_file.with_name("sdr_products.json") if self._mode_file else None
+        self._products: dict[str, str] = self._load_products()
+        self._ambiguous: dict[str, str] = {}  # serials two or more plugged-in dongles share now -> why (logged once)
+        if self.recorder is not None:         # a config.json source naming a shared serial is left out (recorder.py)
+            self.recorder.ambiguous_fn = lambda serial: self._ambiguity(serial, sdr_lookup.devices(cfg.rtl_fm, fresh=True))
+        if not self.shared:                   # one dongle per channel: its serial is checked before each start too
+            for k, c in enumerate(cfg.channels):
+                if isinstance(c.device, str) and c.device and not c.device.isdigit():
+                    self.receivers[k].device = self._guarded(c.device)
         self._seen: set[str] = set()          # dongles plugged in at the last look (new ones = arrivals)
         self._auto_skip: set[str] = set()     # an auto job failed to start on it: not tried again this run
         self._failing: set[str] = set()       # auto job down after restarts: logged once
@@ -2075,6 +2087,73 @@ class App:
     def sdr_name(self, serial: str) -> str:
         return self.cfg.sdr_names.get(serial) or serial
 
+    # -- two dongles, one serial (#242) ---------------------------------------------------------------------
+
+    def _load_products(self) -> dict[str, str]:
+        try:
+            d = json.loads(self._products_file.read_text()) if self._products_file else {}
+        except (OSError, ValueError):
+            d = {}
+        return {str(k): str(v) for k, v in d.items() if isinstance(v, str)} if isinstance(d, dict) else {}
+
+    def _note_products(self, devs: list[tuple[int, str, str]]) -> None:
+        """Remember each serial's product while it is the only dongle with it (sdr_products.json). A serial seen alone
+        with two different products (a dongle swapped, or the old and the new one unplugged in turn) gets "": which
+        one it meant is then never guessed (sizeup/radio/sdrserial.py prints what to set instead)."""
+        dup = sdr_lookup.duplicates(devs)
+        new = {}
+        for _i, p, s in devs:
+            if s and p and s not in dup:
+                was = self._products.get(s)
+                want = p if was is None else was if was == p else ""
+                if want != was:
+                    new[s] = want
+        if not new or self._products_file is None:
+            return
+        self._products.update(new)
+        try:
+            tmp = self._products_file.with_name(f".{self._products_file.name}.{os.getpid()}")
+            tmp.write_text(json.dumps(self._products, indent=1, sort_keys=True))
+            os.replace(tmp, self._products_file)
+        except OSError:
+            pass
+
+    def usb(self, devs: list[tuple[int, str, str]] | None = None) -> dict:
+        """The dongles on USB now and the serials two or more of them share: {"devices": [{index, product, serial}],
+        "duplicates": [{serial, indexes, products, name, job, text}]} (the station's health, Settings > Radios)."""
+        devs = sdr_lookup.devices(self.cfg.rtl_fm) if devs is None else devs
+        self._note_products(devs)
+        dups = []
+        for serial, entries in sdr_lookup.duplicates(devs).items():
+            dups.append({"serial": serial, "indexes": [i for i, _p in entries], "products": [p for _i, p in entries],
+                         "name": self.sdr_name(serial), "job": self.assign.get(serial, OFF_MODE),
+                         "rename": sdr_lookup.rename_index(serial, entries, self._products),
+                         "was": self._products.get(serial, ""),
+                         "text": sdr_lookup.duplicate_text(serial, entries, self._products)})
+        return {"devices": [{"index": i, "product": p, "serial": s} for i, p, s in devs], "duplicates": dups}
+
+    def _ambiguity(self, serial: str, devs: list[tuple[int, str, str]] | None = None) -> str:
+        """Why nothing of ours may open `serial` now (two or more dongles have it), or ""."""
+        if not serial:
+            return ""
+        devs = sdr_lookup.devices(self.cfg.rtl_fm) if devs is None else devs
+        return sdr_lookup.ambiguity(serial, devs, self._products)
+
+    def _watch_ambiguous(self, devs: list[tuple[int, str, str]]) -> list[str]:
+        """Log each serial that turns ambiguous (once) and each that is unique again; the ones unique again."""
+        now = {s: sdr_lookup.duplicate_text(s, e, self._products) for s, e in sdr_lookup.duplicates(devs).items()}
+        for s, text in now.items():
+            if s not in self._ambiguous:
+                job = self.assign.get(s, OFF_MODE)
+                log(f"sdr: CRITICAL {text}"
+                    + (f". {job} doesn't (re)start on it until then: a program already running keeps the dongle it "
+                       "opened" if job != OFF_MODE else ""))
+        back = [s for s in self._ambiguous if s not in now]
+        for s in back:
+            log(f"sdr: serial {s} is on one dongle again ({self._sdr_tag(s)}): usable")
+        self._ambiguous = now
+        return back
+
     # -- the ADS-B dongle (#235) ------------------------------------------------------------------------------------
 
     def _sdr_ignored(self, sd: str) -> bool:
@@ -2105,6 +2184,8 @@ class App:
             held = claims.other(serial)
             if held and held.get("mode") != adsbd.MODE:
                 return f"SDR {self.sdr_name(serial)} is in use by {held.get('app', 'another app')} ({held.get('mode', '?')})"
+            if why := self._ambiguity(serial):
+                return f"SDR {self.sdr_name(serial)}: {why}"
         old = self.adsb_sdr
         if serial == old:
             return None
@@ -2173,7 +2254,9 @@ class App:
 
     def _plugged(self) -> list[str]:
         """Serials plugged in now that sizeup may use (listed, or any with sdrs = "auto"; not ignored)."""
-        here = dict.fromkeys(s for _i, _p, s in sdr_lookup.devices(self.cfg.rtl_fm))
+        devs = sdr_lookup.devices(self.cfg.rtl_fm)
+        self._note_products(devs)
+        here = dict.fromkeys(s for _i, _p, s in devs)
         return [s for s in here if s and not self._sdr_ignored(s) and (self.cfg.sdr_auto or s in self._listed)]
 
     def _covered(self, but: str = "") -> set[str]:
@@ -2223,6 +2306,9 @@ class App:
             held = claims.other(sd)
             if held:
                 log(f"{head} in use by {held.get('app', 'another app')} ({held.get('mode', '?')}), not auto-assigned")
+                return None
+            if self._ambiguity(sd):
+                log(f"{head} not auto-assigned: {self._ambiguity(sd)}")
                 return None
             job = self._next_job(sd)
             if job is None:
@@ -2284,7 +2370,8 @@ class App:
         Unplugging moves nothing. Right after startup, Off dongles wait (SDR_SETTLE_S) for the ones
         that had jobs, so the order USB attaches them in doesn't move jobs around. The jobs given."""
         here = self._plugged()
-        new = [s for s in here if s not in self._seen]
+        again = [s for s in self._watch_ambiguous(sdr_lookup.devices(self.cfg.rtl_fm)) if s in here and s in self._seen]
+        new = [s for s in here if s not in self._seen] + again
         gone = self._seen - set(here)
         self._seen = set(here)
         self._departures(gone)
@@ -2342,10 +2429,21 @@ class App:
 
     def _dongle(self, serial: str):
         def find() -> str | None:
-            i = sdr_lookup.resolve(serial, self.cfg.rtl_fm)
+            i, why = sdr_lookup.lookup(serial, self.cfg.rtl_fm)
+            find.why = self._ambiguity(serial) if why else ""  # type: ignore[attr-defined]
             return None if i is None else str(i)
         find.serial = serial  # type: ignore[attr-defined]
+        find.why = ""  # type: ignore[attr-defined]
         find.label = self.sdr_name(serial)  # type: ignore[attr-defined]
+        return find
+
+    def _guarded(self, serial: str):
+        """One dongle per channel ([[radio.channels]] device): passed to rtl_fm as configured, as before, unless two
+        plugged-in dongles share that serial (#242): then nothing starts (None, and why)."""
+        def find() -> str | None:
+            find.why = self._ambiguity(serial, sdr_lookup.devices(self.cfg.rtl_fm, fresh=True))  # type: ignore[attr-defined]
+            return None if find.why else serial  # type: ignore[attr-defined]
+        find.serial, find.label, find.why = serial, self.sdr_name(serial), ""  # type: ignore[attr-defined]
         return find
 
     def _receiver(self, label: str) -> NfmReceiver | None:
@@ -2404,6 +2502,9 @@ class App:
         held = claims.other(sdr) if mode != OFF_MODE else None
         if held:
             return f"SDR {self.sdr_name(sdr)} is in use by {held.get('app', 'another app')} ({held.get('mode', '?')})"
+        why = self._ambiguity(sdr) if mode != OFF_MODE else ""
+        if why:
+            return f"SDR {self.sdr_name(sdr)}: {why}"
         with self._mode_lock:
             dup = mode != OFF_MODE and any(o != sdr and m == mode for o, m in self.assign.items())
             if self.assign.get(sdr, OFF_MODE) == mode and not dup:
@@ -2460,12 +2561,16 @@ class App:
     def sdr(self) -> dict | None:
         if not self.shared:
             return None
-        plugged = {s: p for _i, p, s in sdr_lookup.devices(self.cfg.rtl_fm)}
+        devs = sdr_lookup.devices(self.cfg.rtl_fm)
+        plugged = {s: p for _i, p, s in devs}
         rows = self.sdrs
+        usb = self.usb(devs)
         return {"shared": True, "mode": self.assign.get(rows[0], OFF_MODE) if rows else OFF_MODE, "modes": self.modes,
                 "switching": self.switching, "adsb": self.adsb_row(plugged),
+                "duplicates": usb["duplicates"],          # two dongles, one serial (#242): Settings > Radios shows the fix
                 "sdrs": [{"serial": sd, "name": self.sdr_name(sd), "product": plugged.get(sd, ""),
                           "mode": self.assign.get(sd, OFF_MODE), "present": sd in plugged,
+                          "ambiguous": self._ambiguity(sd, devs),   # "" or why nothing of ours opens it now
                           "set_by": self.set_by.get(sd),       # "person", "auto" or None (a default / unknown)
                           "held_by": ({"app": c.get("app"), "mode": c.get("mode")} if (c := claims.other(sd)) else None)}
                          for sd in rows]}

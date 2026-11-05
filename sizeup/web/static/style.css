@@ -383,6 +383,9 @@
   :where(.seg.absent) { opacity: 0.5; }
   :where(.seg.held) .sdr-label { color: var(--warn); }
   :where(.seg.held) button { opacity: 0.55; }
+  :where(.seg.ambiguous) .sdr-label { color: var(--err); }
+  :where(.sdr-dups) { display: grid; gap: var(--s-2); }
+  :where(.sdr-dup) :where(pre) { white-space: pre-wrap; margin-block: var(--s-1); }
 
   /* ---- tabs (the header's views, Settings' sections and lists) --------------------------------------- */
   :where(.tabs) { display: flex; align-items: center; flex-wrap: wrap; gap: var(--s-1); }
@@ -436,7 +439,7 @@
   :where(.pill.on, .pill.tx-on) { color: var(--on-accent); background: var(--accent); border-color: var(--accent); }
   /* a receiver (Settings > Radios): its name, then its state word */
   :where(.pill.radio) .st { font-weight: 600; opacity: 0.85; text-transform: uppercase; letter-spacing: 0.05em; }
-  :where(.pill.radio.down) { color: var(--err); }
+  :where(.pill.radio:is(.down, .ambiguous)) { color: var(--err); }
   :where(.pill.radio:is(.absent, .off, .unknown)) { color: var(--dim); border-color: var(--line-strong); border-style: solid; }
   :where(.pill.radio.open) { color: var(--on-ok); background: var(--ok); border-color: var(--ok); }
   /* open without a break for over 2 minutes: "open 4:12 (stuck?)" in amber (radio/fm.py STUCK_S, #116) */

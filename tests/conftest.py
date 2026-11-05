@@ -9,6 +9,17 @@ def _private_claims_dir(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_real_dongles(monkeypatch):
+    """Tests never enumerate the real RTL-SDRs on this machine (librtlsdr opens each to read its serial): no librtlsdr,
+    so no dongle, unless a test hands in its own fake device list."""
+    import sizeup.radio.adsbd as adsbd
+    import sizeup.radio.sdr as sdr
+    monkeypatch.setattr(sdr, "_load", lambda rtl_fm="": None)
+    monkeypatch.setattr(sdr, "_cache", (0.0, []))
+    monkeypatch.setattr(adsbd, "_load", lambda: None)
+
+
+@pytest.fixture(autouse=True)
 def _no_real_keychain(monkeypatch):
     """Tests never read the real macOS Keychain (sizeup/cloud/stationmode.py): every lookup finds
     nothing unless a test hands in its own fake `security`."""
@@ -39,12 +50,14 @@ def _prealert_stays_local(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _roads_stay_local(monkeypatch):
-    """The highway layers (sizeup/roads.py) never reach 511NY or a camera from a test: no key from the
-    environment, and the real fetch only to this machine (tests hand in recorded fixtures)."""
+    """The highway layers (sizeup/roads.py) never reach 511NY or a camera from a test: no credentials from the
+    environment, none of 511NY's own addresses, and the real fetch only to this machine (tests hand in fixtures)."""
     from urllib.parse import urlsplit
 
     import sizeup.roads as roads
-    monkeypatch.delenv("SIZEUP_511NY_KEY", raising=False)
+    for name in ("SIZEUP_511NY_USER", "SIZEUP_511NY_PASS"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(roads, "NY511_URLS", {})        # 511NY's signs are on by default: not in tests
     monkeypatch.setattr(roads, "THRUWAY_URLS", {})      # the Thruway provider is on by default: not in tests
     monkeypatch.setattr(roads, "COUNTY_URLS", {})       # the county's too
     real = roads.urlopen

@@ -12,6 +12,10 @@
 #   sizeup-station rollback      back to the release that ran before (a rename and a restart)
 #   sizeup-station secrets       enter the hub token / Cloudflare Access service token again
 #   sizeup-station doctor        check everything, say what's wrong and what to do
+#   sizeup-station sdr-serial <index|serial> <new-serial> [--dry-run] [--yes]
+#                                give one dongle a new, unique serial (two with one serial can't be told
+#                                apart, #242): stops the radios, backs up its EEPROM to ~/sizeup-eeprom-backups,
+#                                writes it with rtl_eeprom, waits for the replug, starts them again
 #   sizeup-station version
 #
 # Never prints a secret: the hub check goes through the station itself (POST /api/station-mode/test).
@@ -72,8 +76,12 @@ rtl_usb() { lsusb 2>/dev/null | grep -Ei 'ID 0bda:(2838|2832)' || true; }
 rtl_serials() {
   runuser -u sizeup -- env HOME=/var/lib/sizeup PYTHONPATH="$APP" LD_LIBRARY_PATH="$RTLSDR_LIB" "$VENV/bin/python" -c '
 from sizeup.radio import sdr
-for i, product, serial in sdr.devices("/opt/sizeup/rtl-sdr/bin/rtl_fm", fresh=True):
-    print("  #%d %s  %s" % (i, serial or "(no serial)", product))' 2>/dev/null || true
+devs = sdr.devices("/opt/sizeup/rtl-sdr/bin/rtl_fm", fresh=True)
+dups = sdr.duplicates(devs)
+for i, product, serial in devs:
+    print("  #%d %s  %s%s" % (i, serial or "(no serial)", product, "   <- SHARED SERIAL" if serial in dups else ""))
+for serial, entries in dups.items():
+    print("  CRITICAL " + sdr.duplicate_text(serial, entries))' 2>/dev/null || true
 }
 
 cmd_status() {
@@ -112,6 +120,7 @@ except (OSError, ValueError):
   fi
   echo "dongles on USB: $(rtl_usb | wc -l)"
   rtl_usb | sed 's/^/  /'
+  rtl_serials
   echo "CPU:       load $(cut -d' ' -f1-3 /proc/loadavg) on $(nproc) CPU(s); memory $(free -m | awk '/Mem:/ {print $3 " of " $2 " MB used"}')"
   echo "disk:      $(df -h /var/lib/sizeup | awk 'NR==2 {print $4 " free on " $6}')"
 }
@@ -158,7 +167,10 @@ cmd_doctor() {
     no "no RTL-SDR on USB (lsusb): plugged in? powered hub?"
   fi
   out=$(rtl_serials)
-  if [ -n "$out" ]; then ok "librtlsdr sees:"; echo "$out"; else note "librtlsdr lists no dongle (or they're all busy)"; fi
+  if [ -n "$out" ]; then ok "librtlsdr sees:"; printf '%s\n' "$out" | grep -v '^  CRITICAL'; else note "librtlsdr lists no dongle (or they're all busy)"; fi
+  while IFS= read -r line; do
+    [ -n "$line" ] && no "${line#  CRITICAL }"
+  done < <(printf '%s\n' "$out" | grep '^  CRITICAL' || true)
   if [ -x /opt/sizeup/rtl-sdr/bin/rtl_fm ]; then ok "rtl_fm (rtl-sdr-blog) installed"; else no "rtl_fm missing: run install-linux.sh again"; fi
   if out=$(LD_LIBRARY_PATH="$RTLSDR_LIB:/opt/sizeup/trunk-recorder/lib/trunk-recorder" /opt/sizeup/trunk-recorder/bin/trunk-recorder --version 2>&1 | grep -iE 'version|[0-9]+\.[0-9]+' | head -n 1); then
     ok "trunk-recorder: ${out:-installed}"
@@ -265,6 +277,10 @@ case "$cmd" in
     exec python3 -I "$UPDATER" rollback ;;
   secrets) need_root secrets "$@"; exec bash "$INSTALLER" --secrets ;;
   doctor) need_root doctor "$@"; cmd_doctor ;;
+  sdr-serial)
+    need_root sdr-serial "$@"
+    cd /
+    exec env PYTHONPATH="$APP" PYTHONDONTWRITEBYTECODE=1 LD_LIBRARY_PATH="$RTLSDR_LIB" "$VENV/bin/python" -P -m sizeup.radio.sdrserial "$@" ;;
   version)
     echo "release: $(readlink -f /opt/sizeup/current 2>/dev/null || echo "none ($APP)") build $(cat "$APP/BUILD" 2>/dev/null || echo '?')"
     git --git-dir=/opt/sizeup/repo.git log -1 --format='%h %s (%cd)' --date=short "$(cat "$APP/BUILD" 2>/dev/null || echo HEAD)" 2>/dev/null || true
