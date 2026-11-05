@@ -168,7 +168,7 @@ pages of its own ([the station page](#the-station-page)).
 | One event can't be applied | Logged and counted in the Station row; the ones behind it still apply. |
 | Station offline during a dispatch | Text-only dispatch with the reason, immediately. |
 | Station slow to render | After 20 s, text only; a late answer is discarded. |
-| Hub redeployed | Litestream restores the three SQLite files before the app starts. Lost: up to ~1 s of the newest writes, a tones-only page waiting for its separate voice transmission, the in-memory "talking now" and station status (back within 5 s). Received clips survive (in `audio.sqlite`, 12 h). The map caches (county GIS layers, camera lists, road projects, Metro-North's stations, the FAA registry) come back from their S3 copies before the hub serves (`sizeup/cachesync.py`): nothing is missing from the map while they would be fetched again. |
+| Hub redeployed | Litestream restores `cad.sqlite` and `hub.sqlite` before the app starts, `audio.sqlite` right after it serves (clips say "audio loading" meanwhile). Lost: up to ~1 s of the newest writes, a tones-only page waiting for its separate voice transmission, the in-memory "talking now" and station status (back within 5 s). Received clips survive (in `audio.sqlite`: [Audio retention](#audio-retention)). The map caches (county GIS layers, camera lists, road projects, Metro-North's stations, the FAA registry) come back from their S3 copies right after the hub serves (`sizeup/cachesync.py`; each layer says "loading" until then): nothing is fetched again from its source. |
 | Clocks differ | Transmission times are the station's clock; the hub warns in the Station row above 5 s. Keep both on NTP. |
 | Late delivery | Events that arrive after an outage are applied as they arrive: the monitor attaches traffic to whatever incident is active then; the CAD links by the transmission's own time. |
 | A station update doesn't come up | Switched back to the release that ran before within 90 s; that build isn't tried again until the hub moves on. The Station row says "update to ... failed". |
@@ -1329,9 +1329,9 @@ removed, never a hydrant moved or a parcel's new owner, so they could never say 
 sources shows each layer's download time, its last look and what that did; the next one is due from the look.
 
 **A new hub task starts with the layers** (#229): the cache files are kept in the S3 backups bucket and put
-back before the hub serves (`sizeup/cachesync.py`, [the hub's storage](#the-hubs-storage)). A layer the hub
-has no data for yet says **loading** by its toggle in the Layers box (the catalog's `loading`), and the page
-asks for the catalog every 15 s until it has it.
+back right after the hub serves (`sizeup/cachesync.py`, [the hub's storage](#the-hubs-storage); the CAD first:
+[Starting](#starting-the-cad-first-251)). A layer the hub has no data for yet says **loading** by its toggle in
+the Layers box (the catalog's `loading`), and the page asks for the catalog every 5 s until it has it.
 
 **The browser never talks to the county.** Everything comes from the hub, to anyone signed in (viewers
 too; all GET), with an `ETag` (a 304 for `If-None-Match`) and gzip when the browser accepts it:
@@ -1889,7 +1889,7 @@ Everything the hub keeps is SQLite under `SIZEUP_STATE_DIR`, so Litestream can r
 |---|---|
 | `cad.sqlite` | the CAD: events, units, run cards, dispatch log, settings, radio registry, communications log, phone pre-alerts |
 | `hub.sqlite` | the monitor: incidents, transmissions, pages (one row each, written only when changed), and the station events applied so far |
-| `audio.sqlite` | received clips (`storage.audio_keep_hours`, 12 h, and `audio_max_mb`, oldest first) and the dispatch audio (Polly's or the station's; kept with the dispatch log; unused previews a day) |
+| `audio.sqlite` | received clips ([Audio retention](#audio-retention) below) and the dispatch audio (Polly's or the station's; kept with the dispatch log; unused previews a day) |
 
 The hub has no `captures/`. Dispatch WAVs are also cached in `dispatch-audio/` on the task's disk; after a
 redeploy they're served from `audio.sqlite`.
@@ -1906,14 +1906,61 @@ kept gzipped in the same bucket, `s3://$LITESTREAM_BUCKET/$LITESTREAM_PATH/cache
 | `trains/static.json`, `trains/points.json` | Metro-North's stations and line; the reporting points learned | at once; at most hourly |
 | `aircraft/faa_registry.sqlite` | the FAA registry as built (~weekly) | at once |
 
-On start (`App.__init__`, before the providers read their caches) every copy whose file is missing is fetched
-(six at once, 45 s at most in all; the rest are fetched from their sources as before). Afterwards a thread looks
-at the files every minute and uploads one whose sha256 isn't the one last uploaded or restored; a failed upload
-is logged and tried again later (5 min doubling to 6 h), never fatal. Credentials: the task role, signed with
+On start (in the background after the CAD serves, #251: `App.start_layers` → `_load_layers`, before the
+providers start and read their caches again) every copy whose file is missing is fetched (six at once, 45 s at
+most in all; the rest are fetched from their sources as before). Afterwards a thread looks at the files every
+minute and uploads one whose sha256 isn't the one last uploaded or restored; those sha256s are kept in
+`cachesync.json` in the state dir, and a file this process knows nothing about is first compared with S3's
+copy (its gzip is made the same way each time, so its MD5 is the plain ETag the listing gave): unchanged, it isn't
+sent. A failed upload is logged and tried again later (5 min doubling to 6 h), never fatal. Credentials: the task role, signed with
 `sizeup/aws.py` (no boto, no keys). The task role's `backups` policy (`sizeup-aws/2-iam.sh`) already allows
 `s3:GetObject` / `s3:PutObject` on every key of the bucket and `s3:ListBucket` on it: **no IAM change**. Off
 without `LITESTREAM_BUCKET` (compose, a Mac) or with `SIZEUP_CACHE_S3=off`: the caches are then local only.
 Camera snapshots and the weather's radar tiles are not kept (minutes old at most, fetched again at once).
+
+### Audio retention
+
+`audio.sqlite` (the hub; `sizeup/cloud/hub.py` `_audio_retention`, `hubstore.py` `AudioDb.prune_clips`), every
+10 min. **The defaults** (`[storage]`, #251; the policy itself is #46's, to be settled with the department):
+
+| what | kept | setting |
+|---|---|---|
+| a clip on no event | **12 hours** (unchanged) | `audio_keep_hours = 12` |
+| a clip that is a record: on a CAD event (any link: unit, dispatcher, airport, manual, page), with an alarm, or with the emergency button / an emergency window's keep | **365 days** (was 12 h like the rest) | `audio_keep_event_days = 365` (0 = forever) |
+| dispatch audio (with the dispatch log) | forever (unchanged); unused previews a day | |
+| the size cap `[cloud] audio_max_mb` (500) | drops the oldest clips **that aren't records** only; records over it are kept and the log says so | |
+
+Deletes go `audio_prune_batch` rows (200) per transaction with a short pause between, so the station's clips
+and the players never wait on a long write lock; outside the off-peak hours (`audio_offpeak = [2, 5]`, 2-5 am
+New York time) at most 10 transactions a pass, the backlog left to the night. Free pages are handed back to the
+file system (`PRAGMA incremental_vacuum`, 128 pages at a time) only off-peak, and only in an `audio.sqlite`
+made with `auto_vacuum = INCREMENTAL` (every new one since #251). An older file keeps `auto_vacuum` off: turning
+it on takes a whole `VACUUM` (a long lock and a full copy through Litestream), which is never done by itself;
+its free pages are reused by new clips instead, so it stops growing once the retention is in steady state.
+Nothing here runs anywhere but in the hub, on its own schedule; the tests use their own files.
+
+### Starting: the CAD first (#251)
+
+The hub serves the CAD as soon as `cad.sqlite` and `hub.sqlite` are there; the rest follows in the background:
+
+* `--init-state` (the entrypoint, before Litestream) only creates and migrates the databases; it no longer
+  builds the whole app (the GIS layers, the S3 cache restore: ~15 s on Fargate before Litestream started).
+* The map caches' restore from S3, then the county GIS layers' cache (28 layers, ~50 MB of GeoJSON, paced so
+  the requests keep going), then the providers (roads, road projects, trains, aircraft, weather, the data
+  sources' schedule, the cache mirror): `App._load_layers`. Until a layer is read the catalog says
+  `"loading": true` (the Layers box: "loading", asked again every 5 s) and the layer itself answers 503
+  `{"error":"loading"}` with `Retry-After: 5` and `Cache-Control: no-store`, never an empty layer the browser
+  would keep.
+* `audio.sqlite`: restored by the app (`sizeup/cloud/lateaudio.py`) with `deploy/hub/litestream-audio.yml`,
+  then replicated by its own `litestream replicate`, started only after the restore (no replication of a file
+  not restored yet; a failed restore is retried, never replaced by an empty file). Meanwhile a clip or dispatch
+  audio asked for answers 503 "audio loading" (`Retry-After: 5`), ▶ shows, and what the station sends is held
+  in memory (64 MB at most) and written once the file is open. On SIGTERM the app stops that Litestream first
+  (its own final sync). `SIZEUP_AUDIO_REPLICATE=0` restores without replicating (#247's standby).
+* `/healthz` answers 200 as soon as the CAD serves, with `"serving": true` and `"loading": ["map layers",
+  "audio"]` (what is still on its way; `[]` once all is in): a slow layer is never a reason to fail the task's
+  health check (every 10 s, timeout 5 s, 3 retries, start period 300 s: `deploy/aws/taskdef.json`).
+* `tools/startup_bench.py --caches DIR` times a local start with recorded caches (no network, no AWS).
 
 ## Packaging and the Fargate task
 
@@ -1927,9 +1974,10 @@ workflow passes it); stations follow it.
 One task, desired count 1, ephemeral disk:
 
 * **hub** container (this image); its task role may call `polly:SynthesizeSpeech` (`11-polly.sh`). Entrypoint `deploy/hub/entrypoint.sh`:
-  * `LITESTREAM_BUCKET` set: `litestream restore -if-db-not-exists -if-replica-exists` for each of
-    the three files, `python -m sizeup --init-state` (creates them on a first start), then
+  * `LITESTREAM_BUCKET` set: `litestream restore -if-db-not-exists -if-replica-exists` for `cad.sqlite`
+    and `hub.sqlite`, `python -m sizeup --init-state` (creates them on a first start), then
     `exec litestream replicate -exec "python -m sizeup --config ..."` with `deploy/hub/litestream.yml`
+    (`audio.sqlite`: the app, after the CAD serves, with `litestream-audio.yml`: [Starting](#starting-the-cad-first-251))
     (bucket from `LITESTREAM_BUCKET`, prefix `LITESTREAM_PATH` default `sizeup-hub`, region
     `LITESTREAM_REGION` default `AWS_REGION`; credentials from the **task role**, no keys).
   * unset: just `python -m sizeup` (local dev).

@@ -1,7 +1,8 @@
 """Communications log: every transmission the monitor transcribed, tied to a rig and to CAD events.
 
     radio_traffic   one row per transmission (the monitor's clip id: its audio plays from
-                    /api/audio/<id>.wav until the 12 h audio limit; the transcript is copied here
+                    /api/audio/<id>.wav while its audio is kept: 12 h, a year on an event, docs/cloud.md
+                    "Audio retention"; the transcript is copied here
                     and kept), with the rig(s) the registry resolved and the raw radio ID(s); an FG1
                     key-up with no ID says why (id_note, #163): none (no ID burst: the radio sent
                     none), undecoded (a burst that didn't decode), weak (too weak to tell), '' (not known).
@@ -380,6 +381,22 @@ class Comms:
         with self.store.tx() as db:
             return db.execute("DELETE FROM radio_traffic WHERE start < ? AND id NOT IN (SELECT traffic_id FROM radio_links)",
                               (cutoff,)).rowcount
+
+    def kept_for_events(self, ids: list[str]) -> set[str]:
+        """Of these clip ids, the ones whose audio is a record (the hub's audio retention, #251): on a CAD event
+        (radio_links, any why), with an alarm, or with the emergency button or an emergency window's keep."""
+        out: set[str] = set()
+        for k in range(0, len(ids), 500):
+            chunk = list(ids[k:k + 500])
+            marks = ",".join("?" * len(chunk))
+            sql = (f"SELECT traffic_id AS id FROM radio_links WHERE traffic_id IN ({marks}) "
+                   f"UNION SELECT id FROM radio_traffic WHERE id IN ({marks}) AND (emergency = 1 OR kept != '')")
+            out.update(r["id"] for r in self.store.q(sql, chunk * 2))
+            try:
+                out.update(r["id"] for r in self.store.q(f"SELECT traffic_id AS id FROM alarms WHERE traffic_id IN ({marks})", chunk))
+            except Exception:  # (a CAD without the alarms table yet)
+                pass
+        return out
 
     def retag_pages(self, match, is_ours) -> int:
         """Every page row's tone pairs matched again (#80: a pair named from one row is named on them all,

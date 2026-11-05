@@ -90,6 +90,7 @@ def test_the_finished_transmission_alarms_when_the_tap_missed_it(app):
     assert not alarms(app)["open"]
     for seg in r.segs:
         app._segment(r.ch, seg)
+    assert wait(lambda: app.store.loose, 10)     # the transmission is kept once its transcript is in (in the STT thread)
     [a] = alarms(app)["open"]
     assert a["what"].startswith("emergency button (MDC)") and a["traffic_id"] == next(t.id for t in app.store.loose)
 

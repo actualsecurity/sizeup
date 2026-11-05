@@ -362,8 +362,9 @@ class FakeS3:
             return 200, b""
         if method == "GET" and not key:
             prefix = parse_qs(u.query)["prefix"][0]
-            items = "".join(f"<Contents><Key>{k}</Key><Size>{len(v)}</Size></Contents>" for k, v in sorted(self.objects.items())
-                            if k.startswith(prefix))
+            items = "".join(f"<Contents><Key>{k}</Key><Size>{len(v)}</Size>"
+                            f"<ETag>&quot;{hashlib.md5(v).hexdigest()}&quot;</ETag></Contents>"   # (S3's: the MD5, quoted)
+                            for k, v in sorted(self.objects.items()) if k.startswith(prefix))
             return 200, (f'<?xml version="1.0"?><ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">'
                          f"{items}<IsTruncated>false</IsTruncated></ListBucketResult>").encode()
         if method == "GET":
@@ -471,6 +472,10 @@ def test_the_hub_restores_the_copies_before_its_providers_read_their_caches(tmp_
     app = make_app(hub_cfg(tmp_path / "new", gis_layers=layers))
     try:
         assert app.cache_mirror is not None
+        # #251: nothing restored or read while the app is made (the CAD serves first): every layer "loading"
+        assert all(l["loading"] for l in app.gis.public()["layers"]) and not app.layers_ready.is_set()
+        app._load_layers()                                          # start_layers()'s background loader, here
+        assert app.layers_ready.is_set()
         lay = {l["key"]: l for l in app.gis.public()["layers"]}
         assert lay["hydrants"]["at"] and lay["hydrants"]["n"] == old.status["hydrants"]["n"] and not lay["hydrants"]["loading"]
         assert lay["parcels"]["loading"]                            # never fetched: loading until the hub has it

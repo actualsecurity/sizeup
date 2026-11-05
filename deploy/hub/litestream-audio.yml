@@ -1,0 +1,12 @@
+# audio.sqlite's backup to S3 (#251): the same replica as before (<prefix>/audio.sqlite), in a file of its own so
+# that the app (sizeup/cloud/lateaudio.py) restores it after the CAD serves and only then starts its replication:
+#   litestream restore -config litestream-audio.yml -if-db-not-exists -if-replica-exists /data/audio.sqlite
+#   litestream replicate -config litestream-audio.yml        (stopped with SIGTERM before the app exits)
+# No credentials here: the ECS task role. ${...} are expanded from the environment by Litestream.
+dbs:
+  - path: ${SIZEUP_STATE_DIR}/audio.sqlite        # clips (see docs/cloud.md "Audio retention") and dispatch audio
+    replica:
+      type: s3
+      bucket: ${LITESTREAM_BUCKET}
+      path: ${LITESTREAM_PATH}/audio.sqlite
+      region: ${LITESTREAM_REGION}

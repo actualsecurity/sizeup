@@ -112,6 +112,12 @@ class Config:
     clips_dir: str = ""
     keep_hours: float = 24.0          # pages, incidents, transcripts
     audio_keep_hours: float = 12.0    # every audio file under captures/ (clips, P25 calls, skipped clicks)
+    # The hub's audio.sqlite retention (#251, docs/cloud.md "Audio retention"): clips on a CAD event, with an alarm or
+    # an emergency are a record, kept this many days (0 = forever) instead of audio_keep_hours; pruned audio_prune_batch
+    # rows per transaction; free pages handed back (incremental vacuum) only in the off-peak hours [start, end) local.
+    audio_keep_event_days: float = 365.0
+    audio_prune_batch: int = 200
+    audio_offpeak: tuple[int, int] = (2, 5)
     home: tuple[float, float, float] = (-73.6640, 41.0130, 13.4)   # lon, lat, zoom
     apparatus_path: str = ""          # the roster CSV actually found ("" = repo data/)
     # [geo]: the intersection search of the CAD's location box (#213, sizeup/geo/intersections.py): the towns it
@@ -1012,7 +1018,18 @@ def load(path: str | Path) -> Config:
             p25_tgs[int(r["Decimal"])] = r["Alpha Tag"]
             p25_info[int(r["Decimal"])] = {"name": r["Alpha Tag"], "group": r.get("Tag") or "",
                                            "encrypted": "E" in (r.get("Mode") or "").upper()}
-    storage = _take(data.get("storage", {}), "storage", {"clips_dir", "keep_hours", "audio_keep_hours"})
+    storage = _take(data.get("storage", {}), "storage", {"clips_dir", "keep_hours", "audio_keep_hours", "audio_keep_event_days",
+                                                         "audio_prune_batch", "audio_offpeak"})
+    try:
+        keep_event_days = float(storage.get("audio_keep_event_days", 365))
+        prune_batch = int(storage.get("audio_prune_batch", 200))
+        offpeak = tuple(int(h) for h in storage.get("audio_offpeak", (2, 5)))
+    except (TypeError, ValueError):
+        raise ConfigError("storage: audio_keep_event_days a number, audio_prune_batch a whole number, "
+                          "audio_offpeak two hours [start, end]") from None
+    if keep_event_days < 0 or not 1 <= prune_batch <= 10000 or len(offpeak) != 2 or not all(0 <= h <= 24 for h in offpeak):
+        raise ConfigError("storage: audio_keep_event_days >= 0 (0 = forever), audio_prune_batch 1..10000, "
+                          "audio_offpeak [start, end] hours 0..24")
     mdc = _take(data.get("mdc", {}), "mdc", {"aliases"})
     units = _take(data.get("units", {}), "units", {"departments", "apparatus_file", "callsigns"})
     unit_departments: dict[str, str] = {}
@@ -1111,6 +1128,7 @@ def load(path: str | Path) -> Config:
         p25_recorder=p25.get("recorder", ""), p25_recorder_dir=rel(p25.get("recorder_dir", "")),
         clips_dir=rel_state(storage.get("clips_dir", "captures/clips")), keep_hours=float(storage.get("keep_hours", 24)),
         audio_keep_hours=float(storage.get("audio_keep_hours", 12)),
+        audio_keep_event_days=keep_event_days, audio_prune_batch=prune_batch, audio_offpeak=offpeak,  # type: ignore[arg-type]
         home=(float(mp.get("home_lon", -73.6640)), float(mp.get("home_lat", 41.0130)), float(mp.get("home_zoom", 13.4))),
         apparatus_path=af_found,
         cad_db=rel_state(cad.get("db", "state/cad.sqlite")), cad_department=str(cad.get("department", "Port Chester Fire")),

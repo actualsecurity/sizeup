@@ -50,6 +50,6 @@ ENV PYTHONPATH=/app \
 
 USER sizeup
 EXPOSE 8090
-HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+HEALTHCHECK --interval=10s --timeout=5s --start-period=60s --retries=3 \
     CMD ["python", "-c", "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:%s/healthz' % os.environ.get('SIZEUP_PORT', '8090'), timeout=4)"]
 ENTRYPOINT ["/app/deploy/hub/entrypoint.sh"]

@@ -98,6 +98,7 @@ TIMEOUT_S = 60.0
 MAX_PAGE_BYTES = 64 * 1024 * 1024
 PAGE = 1000                         # features a query at most (less when the service's maxRecordCount is less)
 MAX_FEATURES = 250_000              # a runaway layer stops here
+PACE_WORK_S, PACE_REST_S = 0.02, 0.01   # the background cache read: 20 ms of work, then 10 ms for the requests (#251)
 TILE_MAX_DEG = 0.25                 # a bbox query at most this many degrees a side (zoom 13 on a wide screen)
 TILE_TTL_S = 60.0
 LAYER_TTL_S = 300.0
@@ -412,18 +413,28 @@ def tidy_geometry(g: dict | None, tol_m: float = 0.0) -> dict | None:
 
 def geometry_bbox(g: dict) -> tuple[float, float, float, float] | None:
     """(west, south, east, north) of a geometry."""
-    pts: list = []
-
-    def walk(c):
-        if isinstance(c, (list, tuple)) and c and isinstance(c[0], (int, float)):
-            pts.append(c)
-        elif isinstance(c, (list, tuple)):
-            for x in c:
-                walk(x)
-    walk(g.get("coordinates"))
-    if not pts:
-        return None
-    return (min(p[0] for p in pts), min(p[1] for p in pts), max(p[0] for p in pts), max(p[1] for p in pts))
+    w = s = float("inf")
+    e = n = float("-inf")
+    stack = [g.get("coordinates")]
+    while stack:                                  # (no recursion, no list of points: a hub start reads 120k of these)
+        c = stack.pop()
+        if not isinstance(c, (list, tuple)) or not c:
+            continue
+        if isinstance(c[0], (int, float)):
+            if len(c) < 2:
+                continue
+            x, y = c[0], c[1]
+            if x < w:
+                w = x
+            if x > e:
+                e = x
+            if y < s:
+                s = y
+            if y > n:
+                n = y
+        else:
+            stack.extend(c)
+    return None if w == float("inf") else (w, s, e, n)
 
 
 def _touches(a, b) -> bool:
@@ -632,7 +643,7 @@ class Gis:
     def __init__(self, layers=DEFAULT_LAYERS, bbox=DEFAULT_BBOX, cache_dir: str | Path | None = None,
                  fetch: Callable[[str, float, int], tuple[int, dict, bytes]] = http_get,
                  log: Callable[[str], None] = print, clock: Callable[[], float] = time.time, enabled: bool = True,
-                 ours: tuple[str, ...] = ()):
+                 ours: tuple[str, ...] = (), load: bool = True):
         self.layers: dict[str, Layer] = {l.key: l for l in layers if l.enabled}
         self.bbox = tuple(float(x) for x in bbox)
         self.ours = tuple(k for k in (_dept_key(d) for d in ours) if k)   # our departments (ours_field matches)
@@ -656,13 +667,27 @@ class Gis:
         # the stations the Trains layer draws now ([{name, lat, lon}]; app.py: Trains.stations); none: nothing is marked
         self.train_stations: Callable[[], list[dict]] = lambda: []
         self._trains: tuple = ()                   # as last seen: ((name key, lat, lon), ...)
-        self._load()
+        # The disk cache read (#251): load=False leaves it to load_cache(), which the app calls from its background
+        # loader, so the CAD serves while 28 layers are parsed; until then every layer says "loading".
+        self.cache_loaded = False
+        self._background, self._paced = not load, 0.0
+        if load:
+            self.load_cache()
 
     @classmethod
-    def from_config(cls, cfg, log: Callable[[str], None] = print) -> Gis:
+    def from_config(cls, cfg, log: Callable[[str], None] = print, load: bool = True) -> Gis:
         state = Path(cfg.cad_db).parent if cfg.cad_db else None
         return cls(cfg.gis_layers, cfg.gis_bbox, (state / "gis") if state else None, log=log, enabled=cfg.gis_enabled,
-                   ours=tuple(cfg.cad_monitor_departments))
+                   ours=tuple(cfg.cad_monitor_departments), load=load)
+
+    def load_cache(self) -> None:
+        """Read the disk cache (once; never raises). start() does it first in its thread when nobody has."""
+        if self.cache_loaded:
+            return
+        try:
+            self._load()
+        finally:
+            self.cache_loaded = True
 
     @property
     def configured(self) -> bool:
@@ -752,6 +777,7 @@ class Gis:
         self._stop.set()
 
     def _run(self) -> None:
+        self.load_cache()                       # before anything is due: what the cache has isn't fetched again
         while not self._stop.is_set():
             for key in self.due():
                 if self._stop.is_set():
@@ -948,8 +974,21 @@ class Gis:
     def _checks_path(self) -> Path | None:
         return (self.cache_dir / "checks.json") if self.cache_dir else None
 
+    def _pace(self) -> None:
+        """The cache read in the background gives way to the requests (#251): CPython hands the GIL over only every
+        5 ms, so a busy loader made each of a request's many small steps (sqlite rows) wait that long: every
+        PACE_WORK_S of work, a PACE_REST_S sleep."""
+        if not self._background:
+            return
+        now = time.monotonic()
+        if now - self._paced >= PACE_WORK_S:
+            time.sleep(PACE_REST_S)
+            self._paced = time.monotonic()
+
     def _load(self) -> None:
+        self._paced = time.monotonic()
         for key, layer in self.layers.items():
+            self._pace()
             p = self._path(key)
             if p is None or not p.is_file():
                 continue
@@ -962,9 +1001,13 @@ class Gis:
                     continue                              # fetched for another config: fetch afresh
                 if at > self.clock() + 60:
                     continue
-                self.data[key] = feats
-                self._boxes[key] = [geometry_bbox(f["geometry"]) for f in feats]
+                boxes = []
+                for k in range(0, len(feats), 256):
+                    boxes.extend(geometry_bbox(f["geometry"]) for f in feats[k:k + 256])
+                    self._pace()
                 full_at = meta.get("full_at", at)         # (a copy from before #229: whole)
+                with self._lock:                          # (the pages may be reading: load_cache() runs in the background)
+                    self.data[key], self._boxes[key] = feats, boxes
                 self.status[key].update(at=at, n=len(feats), next=at + layer.every_s, updated=meta.get("updated"),
                                         kind=meta.get("kind", ""), bytes=meta.get("bytes", 0), checked=at,
                                         how=str(meta.get("how") or "full"), full_at=full_at)
@@ -1041,7 +1084,8 @@ class Gis:
                 layers.append(layer.public() | {"kind": self.kind(key), "at": st["at"], "n": st["n"], "bytes": st["bytes"],
                                                 "error": st["error"], "updated": st["updated"], "rev": st["rev"],
                                                 "checked": st["checked"], "how": st["how"],
-                                                "loading": self.configured and st["at"] is None and not st["error"]})
+                                                "loading": self.configured and st["at"] is None and not st["error"]
+                                                           or (self.configured and not self.cache_loaded)})
             return {"configured": self.configured, "source": SOURCE, "attribution": ATTRIBUTION, "link": LINK_URL,
                     "terms": TERMS_URL, "rev": self.rev, "bbox": list(self.bbox), "layers": layers}
 
@@ -1090,6 +1134,8 @@ class Gis:
         q = parse_qs(query or "")
         bbox_s = (q.get("bbox") or [""])[0].strip()
         layer, st = self.layers[key], self.status[key]
+        if not self.cache_loaded and st["at"] is None:     # the hub is still reading its cache (#251): not an empty layer
+            return 503, b'{"error":"loading","loading":true}', JSON, {"Retry-After": "5", "Cache-Control": "no-store"}
         if layer.tiled and not bbox_s:
             return 400, b'{"error":"this layer is served by viewport: add ?bbox=west,south,east,north"}', JSON, {}
         if bbox_s:

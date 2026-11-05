@@ -525,7 +525,20 @@ class HubApp(App):
         self._aws_was_ok: bool | None = None           # AWS could take audio at the last sweep (_aws_resend)
         state = Path(cfg.cad_db).parent if cfg.cad_db else None
         self.mdb = MonitorDb(state / "hub.sqlite" if state else ":memory:")
-        self.audio = AudioDb(state / "audio.sqlite" if state else ":memory:", int(cfg.cloud_audio_max_mb * 1024 * 1024))
+        # audio.sqlite: restored in the background when the entrypoint left it to us (#251, sizeup/cloud/lateaudio.py);
+        # the CAD serves meanwhile, a clip asked for says "audio loading"
+        from sizeup.cloud import lateaudio
+        audio_path = state / "audio.sqlite" if state else ":memory:"
+        cap = int(cfg.cloud_audio_max_mb * 1024 * 1024)
+        ls_audio = lateaudio.from_env() if state else ""
+        self.audio = lateaudio.LateAudio(lambda: AudioDb(audio_path, cap), audio_path if state else "", ls_audio, log=log,
+                                         replicate=os.environ.get("SIZEUP_AUDIO_REPLICATE", "1").strip() != "0")
+        self._recovered = False
+        self.audio.on_ready.append(self._audio_ready)
+        if ls_audio:
+            self.audio.start()
+        else:
+            self.audio.open_now()
         # Nothing that could open an SDR or start a program: no dongles, no trunk-recorder or its
         # capture dir, no voice server, and no captures/ (its JSON files and WAVs live in SQLite here).
         super().__init__(replace(cfg, clips_dir="", p25_dir="", p25_recorder="", sdrs=(), sdr_auto=False,
@@ -1079,19 +1092,69 @@ class HubApp(App):
         wav = self.audio.get(item.id)
         return wav_pcm(wav, 0.0 if isinstance(item, Traffic) else getattr(item, "voice_offset_s", 0.0)) if wav else None
 
-    def _clean_hub(self) -> None:
-        now = time.time()
+    def _clean_hub(self, background: bool = False, now: float | None = None) -> None:
+        now = time.time() if now is None else now
         self.store.prune(now - self.keep_s)
         with self._lock:
             while self.pages and self.pages[-1].end < now - self.keep_s:
                 self.pages.pop()
-        self.audio.prune_clips(now - self.cfg.audio_keep_hours * 3600)
+        self._audio_retention(now, background)
         self.sync()
+
+    def offpeak(self, now: float) -> bool:
+        """[storage] audio_offpeak: [start, end) in the console's time zone (2-5 am by default)."""
+        from datetime import datetime
+        a, b = self.cfg.audio_offpeak
+        h = datetime.fromtimestamp(now, tz.TZ).hour
+        return a <= h < b if a <= b else (h >= a or h < b)
+
+    def _audio_retention(self, now: float, background: bool = False) -> int:
+        """The audio retention (docs/cloud.md "Audio retention", #251, #46): clips older than [storage] audio_keep_hours
+        go, but the ones on a CAD event, with an alarm or an emergency (Comms.kept_for_events), kept
+        audio_keep_event_days (0 = forever); the size cap drops only clips that aren't a record. In small transactions;
+        outside the off-peak hours at most 10 of them a pass (the backlog waits for the night), and the free pages are
+        handed back (incremental vacuum) only off-peak. Nothing while audio.sqlite is still being restored."""
+        if not self.audio.ready.is_set():
+            return 0
+        cfg = self.cfg
+        quiet = self.offpeak(now)
+        days = cfg.audio_keep_event_days
+        n = self.audio.prune_clips(now - cfg.audio_keep_hours * 3600, kept=self.cad.comms.kept_for_events,
+                                   kept_older_than=(now - days * 86400) if days else None, batch=cfg.audio_prune_batch,
+                                   pause_s=0.05 if background else 0.0, max_rows=None if quiet else 10 * cfg.audio_prune_batch)
+        over = getattr(self.audio, "over_cap", 0)
+        if over and over != getattr(self, "_over_said", 0):
+            self._over_said = over
+            self.hub.log(f"audio: the clips kept as records alone are {over / 1e6:.0f} MB, over [cloud] audio_max_mb: "
+                         "kept (lower [storage] audio_keep_event_days to keep less)")
+        if quiet and background:
+            freed = self.audio.incremental_vacuum(max_pages=8192, step=128, pause_s=0.05)
+            if freed:
+                self.hub.log(f"audio: {freed} free page(s) of audio.sqlite handed back (incremental vacuum)")
+        return n
+
+    def _audio_ready(self) -> None:
+        """audio.sqlite is open (at once, or after its background restore): what waited on the clips, now."""
+        if getattr(self, "_started", False):
+            self._recover_aws_once()
+
+    def _recover_aws_once(self) -> None:
+        with self._lock:
+            if self._recovered:
+                return
+            self._recovered = True
+        try:
+            self._aws_recover()
+        except Exception as e:  # never in the way of starting
+            self.hub.log(f"hub: could not resume Amazon Transcribe work: {type(e).__name__}: {e}")
+
+    def loading(self) -> list[str]:
+        return super().loading() + ([] if self.audio.ready.is_set() else ["audio"])
 
     def _hub_janitor(self) -> None:
         while not self._stopping.wait(600):
             try:
-                self._clean_hub()
+                self._clean_hub(background=True)
             except Exception as e:  # cleanup must never take the display down
                 self.hub.log(f"hub: cleanup error: {type(e).__name__}: {e}")
 
@@ -1104,10 +1167,8 @@ class HubApp(App):
         self.start_layers()                       # the maps' data, as App starts it (road projects too: #225)
         if self.vocab is not None and self.vocab.state()["state"] == "PENDING":
             self.vocab.poll()
-        try:
-            self._aws_recover()
-        except Exception as e:  # never in the way of starting
-            self.hub.log(f"hub: could not resume Amazon Transcribe work: {type(e).__name__}: {e}")
+        if self.audio.ready.is_set():             # else once audio.sqlite is restored (_audio_ready): it needs the clips
+            self._recover_aws_once()
         return self
 
     def stop(self) -> None:
@@ -1121,3 +1182,4 @@ class HubApp(App):
             self.sync()
         except Exception:
             pass
+        self.audio.stop()                         # the audio replicator's final sync (sizeup/cloud/lateaudio.py)

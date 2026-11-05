@@ -33,7 +33,7 @@
 
 window.GisLayers = (() => {
   const CATALOG_MS = 300000;            // the catalog again every 5 min (refresh times, a re-fetched layer)
-  const LOADING_MS = 15000;             // ... every 15 s while a layer is still loading on the hub (#229)
+  const LOADING_MS = 5000;              // ... every 5 s while a layer is still loading on the hub (#229)
   const PAD = 0.35;                     // a tiled layer's box: the viewport plus this much each way
   const MOVE_MS = 250;
   const LABEL_ZOOM = 15;

@@ -301,7 +301,8 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                  cad=None, cad_b: Broadcaster | None = None, station=None, health: bytes = b'{"ok":true}',
                  access=None, access_log: Callable[[str], None] | None = None, station_mode=None,
                  role: str = "", roads=None, gis=None, trains=None, weather=None, station_health=None, stream_gzip: bool = True,
-                 aircraft=None, roadwork=None, set_adsb: Callable[[str], str | None] | None = None):
+                 aircraft=None, roadwork=None, set_adsb: Callable[[str], str | None] | None = None,
+                 health_fn: Callable[[], dict] | None = None, audio_ready: Callable[[], bool] | None = None):
     """cad: a CadApi (sizeup/cad/api.py) and cad_b its own broadcaster (the console's state is
     small and separate from the monitor's, so neither page carries the other's). station: the hub's
     ingest (sizeup/cloud/hub.py Hub), which checks the station's token before reading any body.
@@ -315,7 +316,11 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
     aircraft: aircraft near HPN (sizeup/aircraft.py AircraftLayer): /api/cad/aircraft, GET only (ETag -> 304).
     roadwork: road projects & closures (sizeup/roadprojects.py RoadProjects): /api/cad/roadprojects..., GET only (ETag -> 304).
     stream_gzip: the state streams gzipped to a browser that takes it (#137).
-    station_health: the hub's StationHealth (sizeup/cloud/health.py): GET /api/cad/health."""
+    station_health: the hub's StationHealth (sizeup/cloud/health.py): GET /api/cad/health.
+    health_fn: more for /healthz, asked on every check (cheap): what is still loading in the background (#251).
+        /healthz is 200 as soon as this serves the CAD, whatever is still loading.
+    audio_ready: False while the hub's audio.sqlite is still being restored (#251): a clip not found then is a
+        503 "audio loading" (Retry-After), not a 404."""
     assets = Assets(STATIC_DIR)
     hub_says = json.dumps({"error": "this is the hub: station forwarding is switched on the station"}).encode()
     station_ui = role == "station"
@@ -497,8 +502,17 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 return self._stream(b)
             if path.startswith("/api/audio/") and path.endswith(".wav"):
                 wav = clip(path[len("/api/audio/"):-4])
+                if not wav and audio_ready is not None and not audio_ready():
+                    return self._send(503, b"audio loading\n", "text/plain", {"Retry-After": "5", "Cache-Control": "no-store"})
                 return self._send(200, wav, "audio/wav") if wav else self._send(404, b"no such clip\n", "text/plain")
             if path == "/healthz":
+                if health_fn is not None:
+                    try:
+                        more = health_fn()
+                    except Exception as e:  # the health check never fails on a detail
+                        more = {"loading_error": type(e).__name__}
+                    return self._send(200, health[:-1] + b"," + json.dumps(more, separators=(",", ":"))[1:].encode()
+                                      if more else health, "application/json")
                 return self._send(200, health, "application/json")
             if path.startswith("/api/station/") and station is not None:
                 return self._send(*station.handle("GET", path, url.query, self.headers, None))
@@ -683,7 +697,8 @@ class WebServer:
                  retranscribe: Callable[[list[str] | None], int] | None = None, cad=None, station=None,
                  health: dict | None = None, access=None, access_log: Callable[[str], None] | None = None,
                  station_mode=None, role: str = "", roads=None, gis=None, trains=None, weather=None, station_health=None,
-                 aircraft=None, roadwork=None, set_adsb=None):
+                 aircraft=None, roadwork=None, set_adsb=None, health_fn: Callable[[], dict] | None = None,
+                 audio_ready: Callable[[], bool] | None = None):
         self.access = access
         self.broadcaster = Broadcaster(state_fn)
         # The CAD's own state push (the whole console rebuilt and sent once a second): not on a station,
@@ -693,7 +708,8 @@ class WebServer:
             json.dumps(scene, separators=(",", ":")).encode(), self.broadcaster, clip, close_incident, set_mode,
             set_talkgroup, set_talkgroup_group, retranscribe, cad, self.cad_broadcaster, station,
             json.dumps(health or {"ok": True}, separators=(",", ":")).encode(), access, access_log, station_mode, role,
-            roads, gis, trains, weather, station_health, aircraft=aircraft, roadwork=roadwork, set_adsb=set_adsb))
+            roads, gis, trains, weather, station_health, aircraft=aircraft, roadwork=roadwork, set_adsb=set_adsb,
+            health_fn=health_fn, audio_ready=audio_ready))
         self.httpd.daemon_threads = True
 
     @property

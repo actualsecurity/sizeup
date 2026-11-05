@@ -189,9 +189,30 @@ def _cache_copies_stay_local(monkeypatch):
     """The map caches' S3 copies (sizeup/cachesync.py) are off in tests (no bucket from the environment), and the
     real S3 call refuses: a test hands in its own fake S3."""
     import sizeup.cachesync as cachesync
-    for k in ("LITESTREAM_BUCKET", "LITESTREAM_PATH", "LITESTREAM_REGION", "SIZEUP_CACHE_S3"):
+    for k in ("LITESTREAM_BUCKET", "LITESTREAM_PATH", "LITESTREAM_REGION", "SIZEUP_CACHE_S3", "SIZEUP_AUDIO_LITESTREAM"):
         monkeypatch.delenv(k, raising=False)
 
     def refuse(method, url, *a, **kw):
         raise AssertionError(f"a test tried to reach S3 ({method} {url.split('?')[0]}): fakes only")
     monkeypatch.setattr(cachesync, "_send", refuse)
+
+
+@pytest.fixture(autouse=True)
+def _module_rng_per_test(request):
+    """A test module's `rng` (np.random.default_rng(seed), the synthetic tones' phases and noise) starts afresh for
+    every test, seeded from the module's seed and the test's own id: the same numbers whichever tests ran before it,
+    serially or spread over pytest-xdist's workers (-n auto, #251)."""
+    import zlib
+
+    import numpy as np
+    mod = request.module
+    rng = getattr(mod, "rng", None)
+    if not isinstance(rng, np.random.Generator):
+        yield
+        return
+    seed = getattr(mod, "_RNG_SEED", None)
+    if seed is None:
+        seed = mod._RNG_SEED = int(rng.bit_generator.seed_seq.entropy)
+    mod.rng = np.random.default_rng([seed, zlib.crc32(request.node.nodeid.encode())])
+    yield
+    mod.rng = rng
