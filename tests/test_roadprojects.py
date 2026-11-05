@@ -19,6 +19,8 @@ The Thruway's events are tests/fixtures/thruway/events.xml (test_roads.py)."""
 
 import json
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -282,9 +284,10 @@ def test_an_incident_on_the_block_gets_the_line_and_one_far_away_does_not(gaz):
     texts = [x["text"] for x in near["items"]]
     assert texts[0] == "Road closed: Westchester Ave between N Pearl St and King St until 3:00 PM (511NY)"
     assert near["items"][0]["active_now"] and near["items"][0]["how"] == "at the location"
-    assert any(t.startswith('Notice: Westchester Ave between N Pearl St and King St (Port Chester, posted Oct 14 10:00 AM): '
-                            '"Westchester Avenue Closure for Festa Colon"') for t in texts)
-    assert texts.index(next(t for t in texts if t.startswith("Construction project:"))) > 0      # in effect, after the closures
+    # the village's notice of the same block (its dates in its words) and the US-1 project (a completion date only):
+    # not dated, so never named as in effect (#237)
+    assert not any(t.startswith(("Notice:", "Construction project:")) for t in texts)
+    assert {x["kind"] for x in near["items"]} <= {"roadwork", "closure", "detour", "event"}
     # on the incident's street, farther than NEAR_M but within STREET_M: "on <road>"
     far_on = p.near(41.0063, -73.6721, "300 Westchester Ave")
     wz = [x for x in far_on["items"] if x["id"] == "wzdx:wz-1"]
@@ -292,9 +295,141 @@ def test_an_incident_on_the_block_gets_the_line_and_one_far_away_does_not(gaz):
     assert all(x["id"] != "wzdx:wz-1" for x in p.near(41.0063, -73.6721, "12 Elm St")["items"])      # not its street: too far
     # a closed incident from yesterday morning: the closure (today 9 to 3) wasn't in effect then
     assert all(x["id"] != "wzdx:wz-1" for x in p.near(41.0010, -73.6651, "", 1791986400, 1791990000)["items"])
-    # US-1 project footprint: an incident on it gets the project's line
+    # on the US-1 project's footprint: the project has no start (only its completion date), so no line for it (#237)
     us1 = p.near(41.0021, -73.6634, "N Main St")
-    assert any(x["id"] == "nysdot:847316" and x["kind"] == "project" for x in us1["items"])
+    assert all(x["id"] != "nysdot:847316" and x["kind"] != "project" for x in us1["items"])
+
+
+# ---- #237: Today / This week and the incident's line: dated items only ------------------------------------------------
+
+NODE = shutil.which("node") or shutil.which("node", path="/opt/homebrew/bin:/usr/local/bin")
+needs_node = pytest.mark.skipif(NODE is None, reason="node not installed")
+
+PAGE = r"""
+const fs = require("fs");
+global.window = global;
+global.document = { getElementById: () => null, addEventListener: () => {} };
+eval(fs.readFileSync(process.argv[2], "utf8"));
+const IN = JSON.parse(fs.readFileSync(process.argv[3], "utf8"));
+const R = window.RoadProjects, out = {};
+for (const [name, d] of Object.entries(IN.data)) {
+  const now = d.at, ids = (list, f) => list.filter((it) => R.shown(it, f, now)).map((it) => it.id).sort();
+  out[name] = { today: ids(d.items, "today"), week: ids(d.items, "week"), all: ids(d.items, "all"),
+                notices: { today: ids(d.notices, "today"), week: ids(d.notices, "week"), all: ids(d.notices, "all") },
+                summary: { today: R.summary(d, "today", now), week: R.summary(d, "week", now), all: R.summary(d, "all", now) } };
+}
+console.log(JSON.stringify(out));
+"""
+
+
+def page(tmp_path, **data) -> dict:
+    """The page's own filter and panel line (roadprojects.js shown(), summary()) on the hub's answers, in node."""
+    h, d = tmp_path / "page.js", tmp_path / "in.json"
+    h.write_text(PAGE)
+    d.write_text(json.dumps({"data": data}, default=str))
+    r = subprocess.run([NODE, str(h), str(STATIC / "roadprojects.js"), str(d)], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, r.stderr
+    return json.loads(r.stdout)
+
+
+def open_ended_wzdx(start: str) -> dict:
+    """The recorded-shape WZDx work zone on Westchester Ave, its end date left out (an open closure) and its start moved."""
+    doc = json.loads(fx("wzdx_constructed.geojson"))
+    f = next(x for x in doc["features"] if x["id"] == "wz-1")
+    f["properties"].pop("end_date")
+    f["properties"]["start_date"] = start
+    return next(r for r in parse_wzdx(doc, "511NY") if r["id"] == "wzdx:wz-1")
+
+
+def test_dated_means_the_source_gives_a_start(gaz):
+    """A start given (a time, a date): dated, its windows decide. A completion date alone (NYSDOT, CTDOT), a completion
+    year (the Thruway's program), "Until further notice" roadwork, a village notice: not dated."""
+    nys = {r["id"]: r for r in parse_nysdot_capital(json.loads(fx("nysdot_capital.geojson")))}["nysdot:847316"]
+    assert not rw.dated(nys) and nys["end_day"] == "2027-10-26"
+    assert rw.in_effect(nys, NOW, NOW) is None                              # its footprint, but no dates: never "in effect"
+    assert not any(rw.dated(r) for r in parse_ctdot_projects(json.loads(fx("ctdot_projects.geojson"))))
+    assert not any(rw.dated(r) for r in parse_thruway_capital(fx("thruway_capitalprogram.xml")))
+    wz = {r["id"]: r for r in parse_wzdx(json.loads(fx("wzdx_constructed.geojson")), "511NY")}
+    assert all(rw.dated(r) for r in wz.values()) and rw.in_effect(wz["wzdx:wz-1"], NOW, NOW) == [1792069200, 1792090800]
+    assert rw.in_effect(wz["wzdx:wz-1"], NOW + 7200, NOW + 7200) is None    # 4 PM: it ended at 3
+    p, _ = provider(gaz)
+    p.ask()
+    p.tick()
+    d = p.public()
+    by = {i["id"]: i for i in d["items"]}
+    assert [k for k, i in sorted(by.items()) if i["dated"]] == ["511ny:NYSDOT-2001", "wzdx:wz-1"]
+    assert by["nysdot:847316"]["state"] == "active" and by["nysdot:847316"]["windows"] == [[None, by["nysdot:847316"]["end"]]]
+    assert not by["thruway:CAD-262740341"]["dated"] and all(not n["dated"] for n in d["notices"])
+    # an open closure with its start given: in effect from then on
+    oe = open_ended_wzdx("2026-10-15T09:00:00-04:00")
+    assert rw.dated(oe) and oe["end"] is None and rw.in_effect(oe, NOW + 30 * 86400, NOW + 30 * 86400) == [1792069200, None]
+
+
+def test_an_incident_line_names_only_dated_items_in_effect_at_its_time(gaz):
+    p, _ = provider(gaz)
+    p.ask()
+    p.tick()
+    # the US-1 project's footprint, on Westchester Ave by the closure: the closure (9 to 3 today) only
+    at = p.near(41.0010, -73.6651, "125 Westchester Ave, Port Chester")
+    assert [x["id"] for x in at["items"]] == ["wzdx:wz-1"]
+    assert p.near(41.0010, -73.6651, "125 Westchester Ave", NOW + 7200, NOW + 7200)["items"] == []     # 4 PM: nothing dated
+    # an incident from 1 to 10 PM tonight on N Main St: 511NY's lane closure (9 PM, weeknights) is in effect in it
+    ids = [x["id"] for x in p.near(41.0021, -73.6634, "N Main St", NOW - 3600, NOW + 8 * 3600)["items"]]
+    assert "511ny:NYSDOT-2001" in ids and "nysdot:847316" not in ids and not any(i.startswith("pc_alerts:") for i in ids)
+
+
+@needs_node
+def test_today_and_this_week_show_dated_items_in_their_window_and_all_shows_the_rest(gaz, tmp_path):
+    """The user's PIN 847316 (US Route 1 paving: "start not given to completion date Oct 26, 2027"): under All only.
+    The WZDx closure 9 to 3 today, 511NY's lane closure tonight 9 PM: Today and This week. The same closure seen from
+    two and eight days before: This week only, then neither (All: upcoming). An open closure with its start given:
+    shown from its start; the village's notices (dates in their words): All only."""
+    p, _ = provider(gaz)
+    p.ask()
+    p.tick()
+    oe = {"start": "2026-10-18T07:00:00-04:00", "later": "2026-10-29T07:00:00-04:00", "began": "2026-10-01T07:00:00-04:00"}
+    data = {"now": p.public(), "two_days": p.public(NOW - 2 * 86400), "eight_days": p.public(NOW - 8 * 86400)}
+    for k, v in oe.items():
+        r = open_ended_wzdx(v) | {"id": f"wzdx:open-{k}"}
+        w = windows(r, NOW)
+        data["now"]["items"].append(r | {"windows": w, "state": state(w, NOW), "dated": rw.dated(r)})
+    out = page(tmp_path, **data)
+    now = out["now"]
+    dated_now = ["511ny:NYSDOT-2001", "wzdx:open-began", "wzdx:wz-1"]
+    assert now["today"] == dated_now
+    assert now["week"] == sorted(dated_now + ["wzdx:open-start"])          # Sunday's start is this week, not today
+    assert "wzdx:open-later" not in now["week"]                              # starts in two weeks: All only
+    assert set(now["all"]) >= {"nysdot:847316", "nysdot:813132", "thruway:CAD-262740341", "wzdx:open-later"}
+    assert not any(i.startswith(("nysdot:", "thruway:", "pc_alerts:")) for i in now["today"] + now["week"])
+    assert now["notices"] == {"today": [], "week": [], "all": ["pc_alerts:6807ac8d93e8"]}      # "Main Street paving"
+    assert "wzdx:wz-1" not in out["two_days"]["today"] and "wzdx:wz-1" in out["two_days"]["week"]
+    assert "wzdx:wz-1" not in out["eight_days"]["week"] and "wzdx:wz-1" in out["eight_days"]["all"]
+    # the panel's line: dated items only; the undated ones counted, and where they are
+    s = now["summary"]
+    assert s["week"]["text"] == ("2 in effect now, 2 upcoming this week. 2 long-term projects, 1 roadwork item and "
+                                 "3 notices without dates (under All).")
+    assert s["today"]["text"].startswith("2 in effect now, 1 upcoming today. 2 long-term projects")
+    assert s["all"]["text"] == ("2 in effect now, 3 upcoming. 2 long-term projects, 1 roadwork item and 3 notices "
+                                "without dates.")
+    assert s["week"]["undated"] == 6
+    js = (STATIC / "roadprojects.js").read_text()
+    assert "(d.notices || []).filter((n) => shown(n, f, now))" in js and "summary(d, f, now).text" in js
+
+
+@pytest.mark.parametrize("seed", ["10", "14", "19", "20", "35", "38"])
+def test_main_street_is_never_placed_whatever_the_hash_seed(seed):
+    """#215: "Main Street" (N Main St and S Main St in Port Chester: neither) came out placed on N Main St for some
+    hash seeds: the gazetteer's near matches were cut at six in set order. The same answer for every seed."""
+    code = ("import sys; from pathlib import Path; from sizeup.geo.gazetteer import Gazetteer; "
+            "from sizeup.roadprojects import Placer, parse_rss; p = Placer(Gazetteer()); "
+            "rows = parse_rss(Path(sys.argv[1]).read_bytes()); "
+            "print([r['title'] for r in rows if p.place(r['title'] + '. ' + r['description'], ('Port Chester',)) is None])")
+    import os
+    import sys
+    r = subprocess.run([sys.executable, "-c", code, str(FIX / "notice_constructed.xml")], capture_output=True, text=True,
+                       timeout=120, cwd=Path(__file__).resolve().parent.parent, env=os.environ | {"PYTHONHASHSEED": seed})
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "['Main Street paving']"
 
 
 def test_http_etag_conditional_reads_demand_and_the_key_never_shown(gaz):

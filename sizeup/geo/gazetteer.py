@@ -17,6 +17,7 @@ from __future__ import annotations
 import bisect
 import collections
 import difflib
+import heapq
 import json
 import math
 import sqlite3
@@ -293,7 +294,8 @@ class Gazetteer:
             for idx in self._tri.get(g, ()):
                 counts[idx] += 1
         need = max(1, int(len(grams) * 0.35))
-        cands = [idx for idx, c in counts.most_common(60) if c >= need]
+        # ties broken by the entry's index, never by set order: the same answer for every hash seed (#215)
+        cands = [idx for idx, c in heapq.nsmallest(60, counts.items(), key=lambda kv: (-kv[1], kv[0])) if c >= need]
         sm = difflib.SequenceMatcher(autojunk=False)
         sm.set_seq2(s)
         for idx in cands:
@@ -308,7 +310,7 @@ class Gazetteer:
             r = sm.ratio()
             if r >= min_sim:
                 out[idx] = r
-        return sorted(out.items(), key=lambda kv: -kv[1])[:limit]
+        return sorted(out.items(), key=lambda kv: (-kv[1], kv[0]))[:limit]
 
     # ------------------------------------------------------------------ parsing
 
