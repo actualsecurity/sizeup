@@ -4,8 +4,10 @@ and one component for every source, so each new source only says what it saw:
 
     atc    HPN ATC on an airband channel (sizeup/atc.py): a transcript that matched the pre-alert rules
            (data/atc/rules.json): a brush fire seen from a departure, a MAYDAY, "roll the trucks" ...
-    adsb   an aircraft's own data (#235: our ADS-B receiver; a squawk 7700, an emergency status), through the
-           same raise_alert() with source "adsb"
+    adsb   an aircraft's own data (#235): a squawk 7500 / 7600 / 7700 or an emergency status near HPN (sizeup/aircraft.py's
+           watch, from our receiver or adsb.lol / adsb.fi), through the same raise_alert() with source "adsb", beside the
+           emergency alarm (#169) that already pushes (AircraftPreAlerts, below): one pre-alert per emergency, its
+           details brought up to date while it lasts (update()), ended when it ends (end())
 
 The model (AirportAlert, what a source hands in):
 
@@ -24,6 +26,22 @@ The model (AirportAlert, what a source hands in):
                         always said to be one), or {placed: false, basis} / None; never more precise than what was said
     phrases             the location words heard ("off the departure end of runway 16", "rye lake")
     event               {type, subtype}: what Accept puts on the new event
+  optional (#235; each off by default, so ATC's behaviour is unchanged):
+    lines               [[label, text], ...]: what is known, shown in order (ADS-B: aircraft, operator, emergency,
+                        altitude, position, phase, source, time)
+    alarm_id            the emergency alarm it goes with (sizeup/cad/alarms.py): the card says whether that is still
+                        open or who acknowledged it, so one event shows once; the newest when raised again
+    drill               drill mode (Settings > System > Alarms): marked DRILL
+    reopen_s            the same subject within this long, open OR ended / expired, is the same pre-alert (open again,
+                        never a second); 0: only an open one within dedupe_s, as before
+    join_event          with exactly one Airport event open, it is that event's (incident_id; still open); an Airport
+                        event made while it is open takes it too (match())
+    limit               counted against max_per_hour (False: the source limits itself, as the alarm's 6 an hour)
+    push                False: not pushed (the ADS-B alarm already pushed)
+
+Lifecycle for a source that knows when its trigger is over (ADS-B): update(source, subject, ...) replaces an open one's
+title, detail, lines and aircraft; end(source, subject, why) closes it as "ended" (reopened by the same subject within
+its reopen_s). Every pre-alert is in GET /api/cad/export/airport-alerts.csv (csv()).
 
 What a dispatcher does (POST /api/cad/airport-alert/<id>/accept | dismiss, dispatchers and admins):
 
@@ -87,6 +105,33 @@ def _hms(at: float | None) -> str:
     return datetime.fromtimestamp(at, TZ).strftime("%H:%M:%S") if at else ""
 
 
+def _ts(at: float | None) -> str:
+    return datetime.fromtimestamp(at, TZ).strftime("%m/%d/%Y %H:%M:%S") if at else ""
+
+
+def _lines(lines) -> list[list[str]]:
+    """[[label, text], ...] as shown (at most 16; empty texts left out)."""
+    out = []
+    for x in (lines or [])[:16]:
+        if isinstance(x, (list, tuple)) and len(x) == 2 and str(x[1]).strip():
+            out.append([str(x[0])[:40], str(x[1])[:300]])
+    return out
+
+
+def _extras(a) -> dict:
+    """The optional fields (#235) a new pre-alert keeps in its data; none for one that sets none (ATC's as before)."""
+    out = {}
+    if a.lines:
+        out["lines"] = _lines(a.lines)
+    if a.alarm_id is not None:
+        out["alarm_id"] = int(a.alarm_id)
+    if a.drill:
+        out["drill"] = True
+    if a.join_event:
+        out["join_event"] = True
+    return out
+
+
 def level(conf: float) -> str:
     return next(w for lo, w in LEVELS if conf >= lo)
 
@@ -111,6 +156,12 @@ class AirportAlert:
     rank: int = 1                  # how serious: an addition names the pre-alert only when it ranks higher (or the
                                    # same, more confident): "roll the trucks" after a brush fire stays the brush fire
     push: bool = True
+    lines: list = field(default_factory=list)      # #235 (the module doc's "optional")
+    alarm_id: int | None = None
+    drill: bool = False
+    reopen_s: float = 0.0
+    join_event: bool = False
+    limit: bool = True
 
 
 def _merge_list(old: list, new: list, key, limit: int) -> list:
@@ -164,11 +215,22 @@ class AirportAlerts:
         with self._lock:
             self.tick(now)
             row = self.store.one("SELECT * FROM airport_alerts WHERE status = 'open' AND source = ? AND subject = ? "
-                                 "AND updated_at >= ? ORDER BY updated_at DESC LIMIT 1", (a.source, a.subject, now - self.dedupe_s))
+                                 "AND updated_at >= ? ORDER BY updated_at DESC LIMIT 1",
+                                 (a.source, a.subject, now - max(self.dedupe_s, float(a.reopen_s or 0))))
+            if row is None and a.reopen_s:                 # ended (or expired) lately: the same one, open again
+                row = self.store.one("SELECT * FROM airport_alerts WHERE source = ? AND subject = ? AND status IN "
+                                     "('ended', 'expired') AND outcome_at >= ? ORDER BY id DESC LIMIT 1",
+                                     (a.source, a.subject, now - float(a.reopen_s)))
+                if row is not None:
+                    with self.store.tx() as db:
+                        db.execute("UPDATE airport_alerts SET status = 'open', outcome_at = NULL, note = '' WHERE id = ?",
+                                   (row["id"],))
+                        self._event(db, f"Airport pre-alert {_hms(row['at'])} again: {a.title}", at=now)
+                    row = dict(row, status="open")
             if row is None and a.group:
                 row = self.store.one("SELECT * FROM airport_alerts WHERE status = 'open' AND source = ? AND grp = ? "
                                      "AND updated_at >= ? ORDER BY updated_at DESC LIMIT 1", (a.source, a.group, now - GROUP_S))
-            if row is None:
+            if row is None and a.limit:
                 n = self.store.one("SELECT COUNT(*) AS n FROM airport_alerts WHERE source = ? AND at >= ?",
                                    (a.source, now - 3600))["n"]
                 if n >= self.max_per_hour:
@@ -184,7 +246,9 @@ class AirportAlerts:
             else:
                 out = self._new(a, at, now)
                 new = True
-        if new:
+            if new and a.join_event:
+                out = self._join_open_event(out)
+        if new and a.push:
             self._push(out)
         self.on_change()
         return out, new
@@ -192,7 +256,7 @@ class AirportAlerts:
     def _new(self, a: AirportAlert, at: float, now: float) -> dict:
         data = {"snippets": a.snippets[-MAX_SNIPPETS:], "aircraft": a.aircraft[:MAX_AIRCRAFT], "location": a.location,
                 "phrases": list(dict.fromkeys(a.phrases))[:MAX_PHRASES], "kinds": [a.kind], "event": dict(a.event),
-                "rank": int(a.rank)}
+                "rank": int(a.rank), **_extras(a)}
         conf = round(max(0.0, min(1.0, float(a.confidence))), 2)
         with self.store.tx() as db:
             cur = db.execute("INSERT INTO airport_alerts (source, kind, subject, grp, at, updated_at, title, detail, confidence, "
@@ -207,6 +271,9 @@ class AirportAlerts:
     def _add(self, row: dict, a: AirportAlert, now: float) -> dict:
         data = json.loads(row["data"] or "{}")
         data["snippets"] = _merge_list(data.get("snippets") or [], a.snippets, lambda s: s.get("id") or s.get("text"), MAX_SNIPPETS)
+        if a.lines and a.aircraft:                     # a source with live details (#235): the newest of each aircraft
+            newer = {x.get("hex") or x.get("callsign") for x in a.aircraft}
+            data["aircraft"] = [x for x in data.get("aircraft") or [] if (x.get("hex") or x.get("callsign")) not in newer]
         data["aircraft"] = _merge_list(data.get("aircraft") or [], a.aircraft, lambda x: x.get("hex") or x.get("callsign"),
                                        MAX_AIRCRAFT)
         data["phrases"] = list(dict.fromkeys([*(data.get("phrases") or []), *a.phrases]))[:MAX_PHRASES]
@@ -218,6 +285,13 @@ class AirportAlerts:
             data["rank"] = int(a.rank)
             if a.event:
                 data["event"] = dict(a.event)
+        if a.lines:                                    # the newest details (#235): replaced, not merged
+            data["lines"] = _lines(a.lines)
+        if a.alarm_id is not None:
+            data["alarm_id"] = int(a.alarm_id)
+        for k in ("drill", "join_event"):
+            if getattr(a, k):
+                data[k] = True
         conf = round(max(float(row["confidence"]), min(1.0, float(a.confidence))), 2)
         title, detail, kind = (a.title, a.detail, a.kind) if stronger else (row["title"], row["detail"], row["kind"])
         with self.store.tx() as db:
@@ -244,6 +318,104 @@ class AirportAlerts:
                    (self.public_url.rstrip("/") + "/cad") if self.public_url else "")
         except Exception as e:  # noqa: BLE001 - a push never stops the pre-alert
             self.log(f"airport pre-alert: push: {type(e).__name__}: {e}")
+
+    # -- a source that knows when its trigger is over (#235) ----------------------------------------------------------
+
+    def _latest_open(self, source: str, subject: str) -> dict | None:
+        return self.store.one("SELECT * FROM airport_alerts WHERE status = 'open' AND source = ? AND subject = ? "
+                              "ORDER BY id DESC LIMIT 1", (source, subject))
+
+    def update(self, source: str, subject: str, *, title: str | None = None, detail: str | None = None,
+               lines: list | None = None, aircraft: list | None = None) -> dict | None:
+        """The open pre-alert's newest details, in place (None: none open). The screens hear of it only when what they
+        show changed."""
+        with self._lock:
+            row = self._latest_open(source, subject)
+            if row is None:
+                return None
+            data = json.loads(row["data"] or "{}")
+            before = json.dumps([row["title"], row["detail"], data.get("lines"), data.get("aircraft")])
+            if lines is not None:
+                data["lines"] = _lines(lines)
+            if aircraft is not None:
+                data["aircraft"] = aircraft[:MAX_AIRCRAFT]
+            title = row["title"] if title is None else title[:200]
+            detail = row["detail"] if detail is None else detail[:400]
+            changed = before != json.dumps([title, detail, data.get("lines"), data.get("aircraft")])
+            with self.store.tx() as db:
+                db.execute("UPDATE airport_alerts SET updated_at = ?, title = ?, detail = ?, data = ? WHERE id = ?",
+                           (self.clock(), title, detail, json.dumps(data), row["id"]))
+        if changed:
+            self.on_change()
+        return self.get(row["id"])
+
+    def end(self, source: str, subject: str, why: str) -> dict | None:
+        """Its trigger is over ("ADS-B: squawk ended (now 1200)"): status "ended" (None: none open)."""
+        with self._lock:
+            row = self._latest_open(source, subject)
+            if row is None:
+                return None
+            now = self.clock()
+            with self.store.tx() as db:
+                db.execute("UPDATE airport_alerts SET status = 'ended', outcome_at = ?, note = ? WHERE id = ?",
+                           (now, why[:200], row["id"]))
+                self._event(db, f"Airport pre-alert {_hms(row['at'])} ended: {why}", iid=row["incident_id"], at=now)
+        self.on_change()
+        return self.get(row["id"])
+
+    def _open_airport_events(self) -> list[dict]:
+        return self.store.q("SELECT id, number FROM incidents WHERE status NOT IN ('closed', 'dismissed') AND type = 'AIRPORT' "
+                            "ORDER BY created_at DESC")
+
+    def _join_open_event(self, r: dict) -> dict:
+        rows = self._open_airport_events()
+        if len(rows) != 1:
+            return r
+        self._link([r["id"]], rows[0]["id"], rows[0]["number"] or "")
+        return self.get(r["id"])
+
+    def _link(self, ids: list[int], iid: int, number: str) -> None:
+        now = self.clock()
+        with self.store.tx() as db:
+            for pid in ids:
+                p = db.execute("SELECT at, title FROM airport_alerts WHERE id = ?", (pid,)).fetchone()
+                db.execute("UPDATE airport_alerts SET incident_id = ? WHERE id = ? AND incident_id IS NULL", (iid, pid))
+                self._event(db, f"Airport pre-alert {_hms(p['at'])} on this event: {p['title']}", iid=iid, at=now)
+        self.log(f"airport pre-alert: {len(ids)} on {number or f'event {iid}'}")
+
+    def match(self, inc: dict | None) -> list[int]:
+        """An Airport event was made (Cad.create): the open pre-alerts that join events (join_event: ADS-B) are its,
+        still open (they end with their emergency, or a dispatcher dismisses them). ATC's are left to Accept."""
+        if not inc or inc.get("type") != "AIRPORT" or inc.get("status") in ("closed", "dismissed"):
+            return []
+        with self._lock:
+            ids = [r["id"] for r in self.store.q("SELECT id, data FROM airport_alerts WHERE status = 'open' AND "
+                                                 "incident_id IS NULL ORDER BY at")
+                   if (json.loads(r["data"] or "{}") or {}).get("join_event")]
+            if ids:
+                self._link(ids, inc["id"], inc.get("number") or "")
+        if ids:
+            self.on_change()
+        return ids
+
+    def csv(self) -> bytes:
+        """GET /api/cad/export/airport-alerts.csv: every pre-alert kept (90 days), oldest first, with its outcome."""
+        import csv as csvmod
+        import io
+        rows = list(reversed(self._rows("1 = 1", (), 100000)))
+        buf = io.StringIO()
+        w = csvmod.writer(buf, lineterminator="\r\n")
+        w.writerow(["Raised", "Updated", "Source", "Kind", "Title", "Detail", "Confidence", "Outcome", "Outcome at",
+                    "Incident #", "Operator", "Note", "Alarm", "Drill", "Heard", "Details"])
+        for r in rows:
+            d = r["data"]
+            w.writerow([_ts(r["at"]), _ts(r["updated_at"]), r["source_name"], r["kind"], r["title"], r["detail"],
+                        r["confidence"], r["status"], _ts(r["outcome_at"]),
+                        r["incident_number"] or (f"#{r['incident_id']}" if r["incident_id"] else ""), r["operator"],
+                        r["note"], d.get("alarm_id") or "", "yes" if d.get("drill") else "",
+                        " | ".join(s.get("text", "") for s in d.get("snippets") or []),
+                        " · ".join(f"{k}: {v}" for k, v in d.get("lines") or [])])
+        return buf.getvalue().encode("utf-8-sig")
 
     # -- the dispatcher answers -------------------------------------------------------------------------------------
 
@@ -396,5 +568,90 @@ def remarks(r: dict) -> str:
                       else "Location as heard: ") + loc["basis"])
     if d.get("phrases"):
         lines.append("Heard: " + "; ".join(d["phrases"]))
+    for k, v in d.get("lines") or []:                 # an aircraft emergency's details (#235)
+        lines.append(f"{k}: {v}")
     lines.append("Not dispatched: made from the pre-alert, dispatch from here.")
     return "\n".join(lines)
+
+
+# -- an aircraft emergency (#235): sizeup/aircraft.py's watch, beside the #169 alarm --------------------------------------
+
+REOPEN_S = 30 * 60.0          # the same aircraft and emergency again this soon: the same pre-alert (#169's REALARM_S)
+
+
+class AircraftPreAlerts:
+    """What the aircraft layer calls (AircraftLayer.prealerts): aircraft(ev, alarm id) when its watch raises an alarm,
+    aircraft_again(ev) when the same emergency comes back within REALARM_S (no new alarm: the same pre-alert, open again),
+    aircraft_update(ev) every 15 s while it lasts, aircraft_ended(ev, why) when it ends. The #169 limits stay the layer's
+    (raised only with an alarm: 6 an hour; drill mode from the alarms' settings); the alarm already pushes, so this
+    doesn't."""
+
+    SOURCE = "adsb"
+
+    def __init__(self, alerts: AirportAlerts, cad=None):
+        self.alerts, self.cad = alerts, cad
+
+    @staticmethod
+    def subject(ev: dict) -> str:
+        return f"{ev.get('hex')}:{ev.get('code')}"
+
+    def _drill(self) -> bool:
+        try:
+            return bool(self.cad.alarms.config()["drill"])
+        except Exception:  # noqa: BLE001 - no alarms here (a test's CAD): not a drill
+            return False
+
+    @staticmethod
+    def describe(ev: dict) -> tuple[str, str, list[list[str]], dict]:
+        """(title, detail, lines, aircraft): everything known about the aircraft, in the alarm's words."""
+        from sizeup.cad import alarms as A
+        who = A.aircraft_who(ev)
+        meaning = ev.get("meaning") or "emergency"
+        rx = ev.get("src") == "receiver"
+        speed = f"{ev['gs']} kt" if isinstance(ev.get("gs"), (int, float)) else ""
+        where = " · ".join(x for x in (ev.get("where"), ev.get("runway_end")) if x)
+        op = ev.get("operator") or ""
+        op_from = "from its callsign" if ev.get("operator_src") == "airline" else \
+            f"from {ev.get('details_from') or ev.get('feed') or 'the feed'}"
+        src = "our receiver on the station" if rx else f"{ev.get('feed') or 'a public feed'} (public data)"
+        if ev.get("details_from"):
+            src += f"; type, registration and operator from {ev['details_from']} by its ICAO address"
+        pos_at = ev.get("pos_at")
+        when = A._hms(ev.get("at")) + (f" (position {A._hms(pos_at)})" if pos_at and abs((ev.get("at") or 0) - pos_at) >= 1 else "")
+        squawk = ev.get("squawk") or ""
+        lines = [["Aircraft", f"{who} · {A.aircraft_type(ev)}"],
+                 ["Operator", f"{op} ({op_from})" if op else "not known (a private owner's name is never shown)"],
+                 ["Emergency", meaning + (f" (squawk {squawk})" if squawk and squawk not in meaning else "")],
+                 ["Altitude", ", ".join(x for x in (A.aircraft_alt(ev), speed) if x)],
+                 ["Position", where or "not known"],
+                 ["Phase", A.aircraft_doing(ev) or "not known"],
+                 ["Source", src],
+                 ["Time", when],
+                 ["ICAO address", str(ev.get("hex") or "").lstrip("~").upper()]]
+        title = f"AIRCRAFT EMERGENCY · {who} · {meaning}"
+        detail = f"ADS-B: {'our receiver' if rx else ev.get('feed') or 'public data'} · {A.ADSB_NOTE}"
+        acft = {"callsign": who, "hex": ev.get("hex"), "type": ev.get("type"), "model": ev.get("model"), "reg": ev.get("reg"),
+                "lat": ev.get("lat"), "lon": ev.get("lon"), "alt": ev.get("alt"), "gs": ev.get("gs"),
+                "phase": ev.get("phase"), "rwy": ev.get("runway"), "dist": ev.get("dist_nm"), "match": 1.0}
+        return title, detail, lines, acft
+
+    def _alert(self, ev: dict, alarm_id=None) -> AirportAlert:
+        title, detail, lines, acft = self.describe(ev)
+        return AirportAlert(source=self.SOURCE, kind="squawk" if str(ev.get("code") or "").isdigit() else "emergency",
+                            subject=self.subject(ev), title=title, detail=detail, confidence=1.0, at=ev.get("at"),
+                            aircraft=[acft], lines=lines, alarm_id=alarm_id if isinstance(alarm_id, int) else None,
+                            drill=self._drill(), reopen_s=REOPEN_S, join_event=True, limit=False, push=False, rank=3,
+                            event={"type": "AIRPORT", "subtype": ""})
+
+    def aircraft(self, ev: dict, alarm_id=None) -> dict | None:
+        return self.alerts.raise_alert(self._alert(ev, alarm_id))[0]
+
+    def aircraft_again(self, ev: dict) -> dict | None:
+        return self.alerts.raise_alert(self._alert(ev))[0]
+
+    def aircraft_update(self, ev: dict) -> dict | None:
+        title, detail, lines, acft = self.describe(ev)
+        return self.alerts.update(self.SOURCE, self.subject(ev), title=title, detail=detail, lines=lines, aircraft=[acft])
+
+    def aircraft_ended(self, ev: dict, why: str) -> dict | None:
+        return self.alerts.end(self.SOURCE, self.subject(ev), f"ADS-B: {why}")

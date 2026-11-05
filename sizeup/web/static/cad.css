@@ -106,6 +106,13 @@
   .aa-t { flex: none; color: var(--dim); font-size: var(--fs-xs); line-height: var(--lh-xs); }
   .aa-q { min-inline-size: 0; overflow-wrap: anywhere; }
   .aa-btns { display: flex; gap: var(--s-1); justify-content: flex-end; }
+  /* an aircraft emergency's pre-alert (#235, ADS-B): its details and its alarm's state */
+  .aa.aa-drill { border-color: var(--info); background: color-mix(in srgb, var(--info) 10%, var(--raised)); animation: none; }
+  .aa-alarm { color: var(--warn); font-size: var(--fs-xs); line-height: var(--lh-xs); }
+  .aa-lines { display: grid; grid-template-columns: auto 1fr; gap: 0 var(--s-2); margin: 0;
+    font-size: var(--fs-xs); line-height: var(--lh-xs); }
+  .aa-lines dt { color: var(--text-2); }
+  .aa-lines dd { margin: 0; color: var(--text); overflow-wrap: anywhere; }
   .q { display: flex; flex-direction: column; gap: var(--s-1); }
   .q > li.qi { padding: var(--s-2); border: var(--bw) solid var(--line); background: var(--raised); }
   .q > li.qi:hover { border-color: var(--line-hover); background: var(--hover); }

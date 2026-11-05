@@ -76,6 +76,7 @@ from sizeup.radio import claims
 from sizeup.radio.live import LiveTalk
 from sizeup.radio.livepage import HOLD_S, LivePaging
 from sizeup.radio import sdr as sdr_lookup
+from sizeup.radio import adsbd
 from sizeup.radio.recorder import TrunkRecorder
 from sizeup.radio.page import Page, PageHold, assemble, decode_tones, page_from_dict, read_twice, recording_note
 from sizeup.radio.tap import LiveTap
@@ -297,8 +298,14 @@ class App:
         # hides a dongle for good. [radio] auto_assign (default on): a dongle that appears with no job
         # a person chose gets the first job in auto_assign_order no plugged-in dongle has (_arrive);
         # off, new ones start Off and sizeup never grabs a dongle by itself.
+        # The ADS-B dongle (#235: behind a 1090 MHz filter and an LNA, "cant auto assign"): [aircraft.receiver] sdr, or
+        # the one Settings > Radios named (an admin, with a confirm; state/adsb_receiver.json, which the station's
+        # decoder reads too: sizeup/radio/adsbd.py). Never shown as a radio, never auto-assigned, never given a job.
+        self._adsb_file = (Path(cfg.cad_db).parent / Path(adsbd.OVERRIDE).name) if cfg.cad_db else None
+        self.adsb_sdr = self._load_adsb()
+        self._ignore_base = frozenset(x for x in cfg.sdr_ignore if x != cfg.aircraft_sdr)
         self._listed: list[str] = [sd for sd in (list(cfg.sdrs) or ([cfg.shared_device] if cfg.shared_device else []))
-                                   if sd not in cfg.sdr_ignore]
+                                   if not self._sdr_ignored(sd)]
         self.shared = bool(self._listed) or cfg.sdr_auto
         self.modes = [c.label for c in cfg.channels] + ([P25_MODE] if self.recorder else [])
         if self.shared:
@@ -484,6 +491,12 @@ class App:
         # CAD of record only (a station forwarding to the hub leaves it to the hub).
         self.aircraft.on_emergency = lambda ev: None if self.forwarding() else self.cad.alarms.on_aircraft(ev)
         self.aircraft.on_clear = lambda ev, aid, why: self.cad.alarms.aircraft_cleared(ev, aid, why)
+        # ... and an airport pre-alert in the queue with everything known about the aircraft (#235): HPN ATC's kind
+        # (#233, sizeup/cad/airport_alerts.py, source "adsb"), one per emergency, beside its alarm. The API feeds are
+        # read for the watch only on the CAD of record: a station forwarding to the hub leaves that to the hub.
+        from sizeup.cad.airport_alerts import AircraftPreAlerts
+        self.aircraft.prealerts = AircraftPreAlerts(self.cad.airport_alerts, self.cad)
+        self.aircraft.active = lambda: not self.forwarding()
         if self.recorder is not None:
             self.recorder.on_line = self.live.feed_line
         # Settings > Data sources (sizeup/datasources.py, #186): every pull above with its status, Refresh now and,
@@ -2020,7 +2033,7 @@ class App:
         out = list(self._listed)
         here = [s for _i, _p, s in sdr_lookup.devices(self.cfg.rtl_fm)] if self.cfg.sdr_auto else []
         for sd in here + [sd for sd, m in self.assign.items() if m != OFF_MODE]:
-            if sd and sd not in out and sd not in self.cfg.sdr_ignore:
+            if sd and sd not in out and not self._sdr_ignored(sd):
                 out.append(sd)
         return out
 
@@ -2048,7 +2061,7 @@ class App:
         # Two dongles saved on one job (a person's kept while a replacement ran it): the person's wins,
         # the other starts Off (and auto-assign gives it the next job).
         for sd in sorted(dict.fromkeys([*self._listed, *saved]), key=lambda sd: by.get(sd) != "person"):
-            if sd in self.cfg.sdr_ignore:
+            if self._sdr_ignored(sd):
                 continue
             m = saved.get(sd, self.assign.get(sd, OFF_MODE))
             m = m if m in self.modes and (m == OFF_MODE or m not in taken) else OFF_MODE
@@ -2059,6 +2072,90 @@ class App:
 
     def sdr_name(self, serial: str) -> str:
         return self.cfg.sdr_names.get(serial) or serial
+
+    # -- the ADS-B dongle (#235) ------------------------------------------------------------------------------------
+
+    def _sdr_ignored(self, sd: str) -> bool:
+        """[radio] sdr_ignore, and the dongle named for ADS-B: never one of sizeup's radios."""
+        return sd in self._ignore_base or (bool(self.adsb_sdr) and sd == self.adsb_sdr)
+
+    def _load_adsb(self) -> str:
+        """The dongle named for ADS-B: Settings' choice (state/adsb_receiver.json), else [aircraft.receiver] sdr."""
+        try:
+            d = json.loads(self._adsb_file.read_text()) if self._adsb_file else None
+        except (OSError, ValueError):
+            d = None
+        if isinstance(d, dict) and isinstance(d.get("sdr"), str) and not adsbd.serial_problem(d["sdr"].strip()):
+            return d["sdr"].strip()
+        return self.cfg.aircraft_sdr
+
+    def set_adsb_receiver(self, serial: str | None) -> str | None:
+        """Settings > Radios (POST /api/adsb-receiver {sdr, confirm: true}; admins; the hub sends it here as a job):
+        name the dongle for ADS-B ("" = none). A job it was running stops first; from then on it is the decoder's only
+        (sizeup-adsb.service) and never one of the radios. A dongle unnamed is Off, set by a person: auto-assign never
+        gives it a job by itself (it still has the filter and LNA on it). None, or why not (like set_mode)."""
+        serial = (serial or "").strip()
+        if serial:
+            if why := adsbd.serial_problem(serial):
+                return why
+            if serial in (list(self.cfg.sdrs) + ([self.cfg.shared_device] if self.cfg.shared_device else [])):
+                return f"{serial} is one of the radios listed in [radio] sdrs: take it out there first"
+            held = claims.other(serial)
+            if held and held.get("mode") != adsbd.MODE:
+                return f"SDR {self.sdr_name(serial)} is in use by {held.get('app', 'another app')} ({held.get('mode', '?')})"
+        old = self.adsb_sdr
+        if serial == old:
+            return None
+        if self._adsb_file is None:
+            return "no state folder here to keep the choice in ([cad] db)"
+        with self._mode_lock:
+            if serial and self.shared and self.assign.get(serial, OFF_MODE) != OFF_MODE:
+                err = self.set_mode(OFF_MODE, serial, by="person")
+                if err:
+                    return f"its job couldn't be stopped first: {err}"
+            try:
+                tmp = self._adsb_file.with_name(f".{self._adsb_file.name}.{os.getpid()}")
+                tmp.write_text(json.dumps({"sdr": serial, "at": time.time(), "by": "settings"}))
+                os.replace(tmp, self._adsb_file)
+            except OSError as e:
+                return f"couldn't keep the choice: {e}"
+            self.adsb_sdr = serial
+            if serial:
+                self.assign.pop(serial, None)
+                self.set_by.pop(serial, None)
+                self._listed = [sd for sd in self._listed if sd != serial]
+            if old:
+                self._auto_skip.add(old)
+                if self.shared:
+                    self.assign[old], self.set_by[old] = OFF_MODE, "person"
+                self._seen.add(old)
+            self._save_modes()
+        log(f"sdr: ADS-B receiver: {self._sdr_tag(serial) if serial else 'none'}"
+            + (f" (was {self._sdr_tag(old)}, now Off: never given a job by itself)" if old else "")
+            + (" -> the decoder (sizeup-adsb) runs on it; sizeup's radios never use it" if serial else ""))
+        return None
+
+    def adsb_row(self, plugged: dict | None = None) -> dict:
+        """Settings > Radios' "ADS-B receiver (reserved)" row: the dongle (or none), its decoder's state
+        (sizeup/radio/adsbd.py's status), who holds it, and the forwarding to the hub."""
+        sd = self.adsb_sdr
+        if plugged is None:
+            plugged = {s: p for _i, p, s in sdr_lookup.devices(self.cfg.rtl_fm)}
+        st = adsbd.read_status() or {}
+        if st and st.get("sdr") != sd:
+            st = {}                                   # the decoder hasn't caught up with the change yet
+        h = claims.holder(sd) if sd else None
+        fwd = getattr(getattr(self, "link", None), "aircraft", None)
+        src = "settings" if self._adsb_file and self._adsb_file.is_file() and sd != self.cfg.aircraft_sdr else (
+            "config" if sd else "")
+        return {"serial": sd, "name": self.sdr_name(sd) if sd else "", "present": sd in plugged if sd else None,
+                "product": plugged.get(sd, "") if sd else "", "source": src,
+                "held_by": {"app": h.get("app"), "mode": h.get("mode")} if h else None,
+                "installed": Path(adsbd.READSB).exists() or bool(st),
+                "gain": self.cfg.aircraft_gain, "bias_tee": self.cfg.aircraft_bias_tee,
+                "decoder": {k: st.get(k) for k in ("state", "detail", "since", "messages_per_s", "aircraft", "with_pos",
+                                                    "last_message_at", "restarts", "gain", "bias_tee")} if st else None,
+                "forward": fwd.stats() if fwd is not None else None}
 
     def _save_modes(self) -> None:
         if self._mode_file:
@@ -2075,7 +2172,7 @@ class App:
     def _plugged(self) -> list[str]:
         """Serials plugged in now that sizeup may use (listed, or any with sdrs = "auto"; not ignored)."""
         here = dict.fromkeys(s for _i, _p, s in sdr_lookup.devices(self.cfg.rtl_fm))
-        return [s for s in here if s and s not in self.cfg.sdr_ignore and (self.cfg.sdr_auto or s in self._listed)]
+        return [s for s in here if s and not self._sdr_ignored(s) and (self.cfg.sdr_auto or s in self._listed)]
 
     def _covered(self, but: str = "") -> set[str]:
         """The jobs running now: on a dongle that is plugged in (a job whose dongle is gone is free)."""
@@ -2364,7 +2461,7 @@ class App:
         plugged = {s: p for _i, p, s in sdr_lookup.devices(self.cfg.rtl_fm)}
         rows = self.sdrs
         return {"shared": True, "mode": self.assign.get(rows[0], OFF_MODE) if rows else OFF_MODE, "modes": self.modes,
-                "switching": self.switching,
+                "switching": self.switching, "adsb": self.adsb_row(plugged),
                 "sdrs": [{"serial": sd, "name": self.sdr_name(sd), "product": plugged.get(sd, ""),
                           "mode": self.assign.get(sd, OFF_MODE), "present": sd in plugged,
                           "set_by": self.set_by.get(sd),       # "person", "auto" or None (a default / unknown)
@@ -2611,7 +2708,7 @@ def make_server(app: App) -> WebServer:
                        access_log=log if cfg.cloud_role == "hub" else None, station_mode=app.station,
                        role=cfg.cloud_role, roads=app.roads, gis=app.gis,
                        trains=app.trains, weather=app.weather, station_health=getattr(app, "health", None),
-                       aircraft=app.aircraft, roadwork=app.roadwork)
+                       aircraft=app.aircraft, roadwork=app.roadwork, set_adsb=app.set_adsb_receiver)
 
     def changed() -> None:             # a new talker is pushed at once, not on the next second
         server.poke()

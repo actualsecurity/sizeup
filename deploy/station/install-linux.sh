@@ -10,7 +10,7 @@
 #     --model NAME         whisper model: small.en-q5_1 (default) | large-v3-turbo-q5_0 | base.en
 #     --update             fetch the ref, build its release beside the running one, switch, restart
 #     --secrets            only (re)enter the hub token and the Cloudflare Access service token
-#     --rebuild            rebuild rtl-sdr, trunk-recorder and whisper.cpp even if up to date
+#     --rebuild            rebuild rtl-sdr, trunk-recorder, whisper.cpp and readsb even if up to date
 #     --ci                 CI: no systemd enable/start, no hardware, no prompts, no deploy key
 #     --wsl-prepare        (install-windows.ps1) only write /etc/wsl.conf (systemd on), then exit
 #     --stage SHA          (the auto-updater) build release SHA beside the running one and preflight
@@ -20,9 +20,9 @@
 #
 # Side-by-side releases (README "Updating"): each commit gets its own /opt/sizeup/releases/<sha> (the
 # code from git and its own venv, root-owned); /opt/sizeup/current points at the one that runs and is
-# swapped with one rename. rtl-sdr-blog, trunk-recorder and whisper.cpp are built into
+# swapped with one rename. rtl-sdr-blog, trunk-recorder, whisper.cpp and readsb are built into
 # /opt/sizeup/builds/<name>-<tag>-<commit>, once per pinned version, behind the links
-# /opt/sizeup/{rtl-sdr,trunk-recorder,whisper} the config uses.
+# /opt/sizeup/{rtl-sdr,trunk-recorder,whisper,readsb} the config and the units use.
 #
 # Everything it says goes to /var/log/sizeup-install.log too. Secrets are read with hidden input,
 # written only to /etc/sizeup/station.env (root:sizeup 0640) and never printed or logged.
@@ -43,6 +43,12 @@ TR_COMMIT="7f9e21ecfa445e568371cef3153a07887c36b380"
 WHISPER_REPO="https://github.com/ggml-org/whisper.cpp.git"
 WHISPER_TAG="v1.9.4"
 WHISPER_COMMIT="927cfce34f31707e17f2bff35c349632fb9e2c3a"
+# readsb (wiedehopf, GPLv3): the ADS-B decoder (#235), run by sizeup-adsb.service only on the dongle named for
+# ADS-B ([aircraft.receiver] sdr). shortfinal's choice too: auto gain for a dongle behind an LNA, bias-tee for an
+# LNA powered up the coax, the same aircraft.json. Built against the rtl-sdr-blog librtlsdr above.
+READSB_REPO="https://github.com/wiedehopf/readsb.git"
+READSB_TAG="v3.16.21"
+READSB_COMMIT="321931802d89f1695a38f6dfb0a64ba5c1211be4"
 # whisper models: huggingface.co/ggerganov/whisper.cpp at a fixed revision; SHA-256 = the LFS oid
 # in that revision's file listing (api/models/ggerganov/whisper.cpp/tree/<rev>).
 MODEL_REV="5359861c739e955e79d9a303bcbc70fb988958b1"
@@ -70,6 +76,7 @@ LEGACY_VENV=$OPT/venv
 RTLSDR_B="$BUILDS/rtl-sdr-blog-$RTLSDR_TAG-${RTLSDR_COMMIT:0:12}"
 TR_B="$BUILDS/trunk-recorder-$TR_TAG-${TR_COMMIT:0:12}"
 WHISPER_B="$BUILDS/whisper.cpp-$WHISPER_TAG-${WHISPER_COMMIT:0:12}-native"
+READSB_B="$BUILDS/readsb-$READSB_TAG-${READSB_COMMIT:0:12}"
 STATE=/var/lib/sizeup
 TR_DIR=$STATE/trunk-recorder
 UPDATE_STATE=/var/lib/sizeup-update
@@ -110,7 +117,7 @@ done
 # --rebuild: into new directories (the ones in use stay until the switch; pruned later)
 if [ "$REBUILD" -eq 1 ]; then
   rebuilt="rebuilt-$(date +%Y%m%d%H%M%S)"
-  RTLSDR_B="$RTLSDR_B-$rebuilt" TR_B="$TR_B-$rebuilt" WHISPER_B="$WHISPER_B-$rebuilt"
+  RTLSDR_B="$RTLSDR_B-$rebuilt" TR_B="$TR_B-$rebuilt" WHISPER_B="$WHISPER_B-$rebuilt" READSB_B="$READSB_B-$rebuilt"
 fi
 for v in "$STAGE_SHA" "$ACTIVATE_NAME"; do
   if [ -n "$v" ] && ! [[ "$v" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
@@ -446,6 +453,8 @@ PKGS=(
   # trunk-recorder (its Ubuntu 24.04 Dockerfile, minus the SDRs we don't use)
   gnuradio-dev gr-osmosdr libboost-all-dev libcurl4-openssl-dev libgmp-dev libhackrf-dev
   liborc-0.4-dev libpthread-stubs0-dev librtlsdr-dev libsndfile1-dev libssl-dev libuhd-dev libusb-dev
+  # readsb (its required_packages, minus librtlsdr: it's built against rtl-sdr-blog's)
+  libncurses-dev zlib1g-dev libzstd-dev
 )
 all_installed() {
   local states
@@ -579,8 +588,20 @@ builds() {
     install -D -m 0755 "$src/build/bin/whisper-server" "$WHISPER_B/bin/whisper-server"
     echo "$want" > "$WHISPER_B/.sizeup-build"
   fi
+  step "readsb $READSB_TAG"
+  want="readsb $READSB_TAG $READSB_COMMIT"
+  if up_to_date "$READSB_B/bin/readsb" "$READSB_B/.sizeup-build" "$want"; then
+    say "readsb: up to date"
+  else
+    src=$(fetch_source readsb "$READSB_REPO" "$READSB_TAG" "$READSB_COMMIT")
+    # RTL-SDR only (no other SDRs), with the bias-tee switch; rtl-sdr-blog's headers and librtlsdr
+    make -C "$src" -j "$JOBS" RTLSDR=yes HAVE_BIASTEE=yes RTLSDR_PREFIX="$RTLSDR_B" readsb
+    rm -rf "$READSB_B"
+    install -D -m 0755 "$src/readsb" "$READSB_B/bin/readsb"
+    echo "$want" > "$READSB_B/.sizeup-build"
+  fi
   # A new box gets its links now; an existing link moves only with a release (activate).
-  for pair in "rtl-sdr=$RTLSDR_B" "trunk-recorder=$TR_B" "whisper=$WHISPER_B"; do
+  for pair in "rtl-sdr=$RTLSDR_B" "trunk-recorder=$TR_B" "whisper=$WHISPER_B" "readsb=$READSB_B"; do
     [ -e "$OPT/${pair%%=*}" ] || ln -sfn "${pair#*=}" "$OPT/${pair%%=*}"
   done
 }
@@ -653,7 +674,7 @@ make_release() {
   # bytecode now, not at every start (the service runs with PYTHONDONTWRITEBYTECODE)
   "$tmp/venv/bin/python" -m compileall -q -j 0 "$tmp/sizeup" >/dev/null || warn "compileall complained"
   # the builds it runs with: this installer's pins (an older release keeps the ones it had)
-  printf 'rtl-sdr=%s\ntrunk-recorder=%s\nwhisper=%s\n' "$RTLSDR_B" "$TR_B" "$WHISPER_B" > "$tmp/BUILDS"
+  printf 'rtl-sdr=%s\ntrunk-recorder=%s\nwhisper=%s\nreadsb=%s\n' "$RTLSDR_B" "$TR_B" "$WHISPER_B" "$READSB_B" > "$tmp/BUILDS"
   chown -R root:root "$tmp"
   chmod -R u+rwX,go+rX,go-w "$tmp"
   mv "$tmp" "$rel"
@@ -679,6 +700,7 @@ legacy_release() {
       echo "rtl-sdr=$(readlink -f "$OPT/rtl-sdr")"
       echo "trunk-recorder=$(readlink -f "$OPT/trunk-recorder")"
       echo "whisper=$(readlink -f "$OPT/whisper")"
+      echo "readsb=$READSB_B"                      # (none before #235: this installer's)
     } > "$RELEASES/$name/BUILDS"
     say "release $(short "$name"): what ran before the switch to releases (to go back to)"
   fi
@@ -691,11 +713,12 @@ legacy_release() {
 builds_of() { sed -n "s/^$2=//p" "$1/BUILDS" 2>/dev/null | head -n 1; }
 
 preflight() {
-  local rel=$1 pf rtl tr wh out bad=0 conf=$CONF
+  local rel=$1 pf rtl tr wh rs out bad=0 conf=$CONF
   step "preflight $(basename "$rel")"
   rtl=$(builds_of "$rel" rtl-sdr)
   tr=$(builds_of "$rel" trunk-recorder)
   wh=$(builds_of "$rel" whisper)
+  rs=$(builds_of "$rel" readsb)
   [ -f "$conf" ] || conf="$rel/deploy/station/config.station.toml"
   pf=$(mktemp -d /tmp/sizeup-preflight.XXXXXX)
   chown "$SVC_USER:$SVC_USER" "$pf"
@@ -737,6 +760,12 @@ preflight() {
   if ! "$wh/bin/whisper-server" --help >/dev/null 2>&1; then
     warn "preflight: whisper-server --help fails"; bad=1
   fi
+  if [ -n "$rs" ] && ! out=$(LD_LIBRARY_PATH="$rtl/lib" "$rs/bin/readsb" --version 2>&1); then
+    warn "preflight: readsb --version: $(printf '%s' "$out" | tail -n 1)"; bad=1
+  fi
+  if [ -f "$rel/sizeup/radio/adsbd.py" ] && ! python3 -I "$rel/sizeup/radio/adsbd.py" help 2>&1 | grep -q 'usage: adsbd.py'; then
+    warn "preflight: adsbd.py doesn't run with the system python3"; bad=1
+  fi
   if [ "$bad" -ne 0 ]; then
     say "FAILED: preflight failed for $(basename "$rel"): not switching to it" >&2
     exit 87                                    # (only here: the updater won't retry a build that doesn't work)
@@ -755,11 +784,14 @@ swap_link() {     # swap_link TARGET LINK: a rename over the old link, never a m
 # what the running whisper-server was started with (written by start-whisper as the sizeup user):
 # read as that user, bounded, never waiting long
 whisper_argv() { timeout 5 runuser -u "$SVC_USER" -- head -c 8192 /run/sizeup-whisper/argv 2>/dev/null || true; }
+# what sizeup-adsb runs: its supervisor, its unit and the readsb build behind the link (restarted only when one changed)
+adsb_sig() { { cat "$LIB/adsbd.py" /etc/systemd/system/sizeup-adsb.service 2>/dev/null; readlink -f "$OPT/readsb" 2>/dev/null; } | sha256sum | cut -c1-16; }
 
 activate() {
-  local name=$1 rel="$RELEASES/$1" sys pair t want have t0 t1 leaving
+  local name=$1 rel="$RELEASES/$1" sys pair t want have t0 t1 adsb_was leaving
   [ -f "$rel/.complete" ] || die "no staged release $name in $RELEASES"
   step "switch to release $name"
+  adsb_was=$(adsb_sig)
   # The system files: the release's own, or (a release from before #58) this installer's.
   sys="$rel/deploy/station"
   [ -f "$sys/start-station" ] || sys=$SELF_DIR
@@ -769,8 +801,11 @@ activate() {
   install -D -m 0755 "$sys/start-station" "$LIB/start-station"
   install -D -m 0755 "$sys/start-whisper" "$LIB/start-whisper"
   install -D -m 0644 "$sys/../../sizeup/cloud/autoupdate.py" "$LIB/autoupdate.py"
+  # the ADS-B decoder's supervisor (#235; a release from before it has none: the one installed stays)
+  [ ! -f "$sys/../../sizeup/radio/adsbd.py" ] || install -D -m 0644 "$sys/../../sizeup/radio/adsbd.py" "$LIB/adsbd.py"
   for t in sizeup-station.service sizeup-whisper.service sizeup-health.service sizeup-health.timer \
-           sizeup-update.service sizeup-update.path sizeup-update.timer; do
+           sizeup-update.service sizeup-update.path sizeup-update.timer sizeup-adsb.service; do
+    [ -f "$sys/systemd/$t" ] || continue                       # (sizeup-adsb: a release from before #235)
     install -m 0644 "$sys/systemd/$t" "/etc/systemd/system/$t"
   done
   install -D -m 0644 "$sys/systemd/journald-sizeup.conf" /etc/systemd/journald.conf.d/sizeup.conf
@@ -818,7 +853,7 @@ PY
   as_user mkdir -p -m 0750 "$STATE/captures/p25" "$STATE/captures/p25-tmp" "$STATE/captures/clips"
   # The builds this release was staged with, then the release itself: renames, nothing rebuilt.
   while IFS= read -r pair; do
-    case "${pair%%=*}" in rtl-sdr|trunk-recorder|whisper) ;; *) continue ;; esac
+    case "${pair%%=*}" in rtl-sdr|trunk-recorder|whisper|readsb) ;; *) continue ;; esac
     [ -d "${pair#*=}" ] || die "release $name wants ${pair#*=}, which isn't there: stage it again"
     swap_link "${pair#*=}" "$OPT/${pair%%=*}"
   done < "$rel/BUILDS"
@@ -834,6 +869,7 @@ PY
   systemctl daemon-reload
   systemctl enable --quiet sizeup-station.service sizeup-whisper.service sizeup-health.timer \
     sizeup-update.path sizeup-update.timer
+  [ ! -f /etc/systemd/system/sizeup-adsb.service ] || systemctl enable --quiet sizeup-adsb.service
   t0=$(date +%s%N)
   systemctl restart sizeup-station.service
   t1=$(date +%s%N)
@@ -845,6 +881,15 @@ PY
   else
     systemctl restart sizeup-whisper.service
     say "whisper-server: (re)started"
+  fi
+  # the ADS-B decoder: idle with no dongle named; left running through an update unless it changed
+  if [ -f /etc/systemd/system/sizeup-adsb.service ]; then
+    if systemctl is-active --quiet sizeup-adsb.service && [ "$adsb_was" = "$(adsb_sig)" ]; then
+      say "sizeup-adsb: unchanged, left running"
+    else
+      systemctl restart sizeup-adsb.service
+      say "sizeup-adsb: (re)started (readsb runs only on the dongle named for ADS-B)"
+    fi
   fi
   systemctl restart sizeup-health.timer
   # (a run by hand stopped them: they start again when it ends)
@@ -952,7 +997,7 @@ fi
 REL="$RELEASES/$NAME"
 [ -z "$LEGACY_BUNDLE" ] || rm -f "$LEGACY_BUNDLE"
 if [ "$REBUILD" -eq 1 ]; then                 # (a release staged before: it runs with the rebuilt ones now)
-  printf 'rtl-sdr=%s\ntrunk-recorder=%s\nwhisper=%s\n' "$RTLSDR_B" "$TR_B" "$WHISPER_B" > "$REL/BUILDS"
+  printf 'rtl-sdr=%s\ntrunk-recorder=%s\nwhisper=%s\nreadsb=%s\n' "$RTLSDR_B" "$TR_B" "$WHISPER_B" "$READSB_B" > "$REL/BUILDS"
 fi
 
 # -- config ----------------------------------------------------------------------------------------
@@ -1005,7 +1050,7 @@ fi
 activate "$NAME"
 if command -v systemd-analyze >/dev/null; then
   systemd-analyze verify /etc/systemd/system/sizeup-station.service /etc/systemd/system/sizeup-whisper.service \
-    /etc/systemd/system/sizeup-health.timer /etc/systemd/system/sizeup-update.path \
+    /etc/systemd/system/sizeup-adsb.service /etc/systemd/system/sizeup-health.timer /etc/systemd/system/sizeup-update.path \
     /etc/systemd/system/sizeup-update.timer || warn "systemd-analyze verify complained (above)"
 fi
 

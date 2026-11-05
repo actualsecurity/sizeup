@@ -284,9 +284,10 @@ def test_an_installed_station_config_gains_fg2_once_and_keeps_everything_else(tm
     before = load(conf)
     assert [c.label for c in before.channels] == ["South 2", "FG1"] and before.sdr_auto_order == ("FG1", P25, "South 2")
     said = configupdate.run(conf, marks)
-    assert len(said) == 3 and said[0].startswith("fg2: FG2 (458.0375 MHz, traffic) added") and '"fg2"' in said[0]
+    assert len(said) == 4 and said[0].startswith("fg2: FG2 (458.0375 MHz, traffic) added") and '"fg2"' in said[0]
     assert said[2].startswith("hpn-atc: HPN Tower (118.575 MHz, airband AM) added")         # #233, the update after
     assert said[1] == "tones-47: no [[tones]] entry on the unverified 349.1/311.1: nothing changed"                  # this template's tones are already the heard ones (#47)
+    assert said[3] == "adsb-receiver: already has [aircraft.receiver]: nothing added"         # (#235: the template has it)
     text, kept = conf.read_text(), conf.with_name("config.toml.before-fg2").read_text()
     assert kept == own.replace("/var/lib/sizeup/trunk-recorder/talkgroups.csv", f"{ROOT}/deploy/trunk-recorder/talkgroups.csv")
     assert text.replace(', "fg2", "hpn tower"]', "]") == kept + configupdate.FG2_BLOCK + configupdate.HPN_BLOCK  # only added to
@@ -298,7 +299,7 @@ def test_an_installed_station_config_gains_fg2_once_and_keeps_everything_else(tm
     assert after.sdr_auto_order == ("FG1", P25, "South 2", "FG2", "HPN Tower") and after.sdr_names["spare"] == "V3 #3"
     assert replace(after, channels=before.channels, sdr_auto_order=before.sdr_auto_order,
                    stt_aws_channels=before.stt_aws_channels) == before                      # nothing else
-    assert marks.read_text() == "fg2\ntones-47\nhpn-atc\n"
+    assert marks.read_text() == "fg2\ntones-47\nhpn-atc\nadsb-receiver\n"
     # once: taken out by hand, it stays out at the next update
     conf.write_text(conf.with_name("config.toml.before-fg2").read_text())
     assert configupdate.run(conf, marks) == [] and [c.label for c in load(conf).channels] == ["South 2", "FG1"]
@@ -309,8 +310,9 @@ def test_the_template_and_odd_configs_are_left_alone(tmp_path, monkeypatch):
     conf = installed(tmp_path, monkeypatch, (STATION / "config.station.toml").read_text())   # a new install: has it
     same = conf.read_text()
     assert configupdate.run(conf, marks) == ["fg2: already has 'FG2' on 458.0375 MHz: nothing added", "tones-47: no [[tones]] entry on the unverified 349.1/311.1: nothing changed",
-                                             "hpn-atc: already has 'HPN Tower' on 118.575 MHz: nothing added"]
-    assert conf.read_text() == same and marks.read_text() == "fg2\ntones-47\nhpn-atc\n"
+                                             "hpn-atc: already has 'HPN Tower' on 118.575 MHz: nothing added",
+                                             "adsb-receiver: already has [aircraft.receiver]: nothing added"]
+    assert conf.read_text() == same and marks.read_text() == "fg2\ntones-47\nhpn-atc\nadsb-receiver\n"
     # no radios (a hub-like config): nothing; no auto_assign_order: the channel only (the code's order ends with it)
     assert configupdate.add_fg2('[web]\nport = 8091\n')[1] == "fg2: no [[radio.channels]] here (no radios): nothing added"
     text, said = configupdate.add_fg2('[radio]\nsdrs = "auto"\n[[radio.channels]]\nlabel = "FG1"\nmhz = 453.0375\n')
@@ -322,13 +324,14 @@ def test_the_template_and_odd_configs_are_left_alone(tmp_path, monkeypatch):
                                                                   'auto_assign_order = [\n  "fg1",\n  "p25",\n]'))
     m2 = tmp_path / "marks2"
     keep = odd.read_text()
-    said, tones, hpn = configupdate.run(odd, m2)
+    said, tones, hpn, adsb = configupdate.run(odd, m2)
     assert said.startswith("fg2: not applied:") and "by hand" in said and odd.read_text() == keep
     assert hpn.startswith("hpn-atc: not applied:") and "by hand" in hpn                       # the same order line
-    assert tones.startswith("tones-47: no [[tones]]") and m2.read_text() == "tones-47\n"     # fg2 not marked
+    assert tones.startswith("tones-47: no [[tones]]") and adsb.startswith("adsb-receiver: already has")
+    assert m2.read_text() == "tones-47\nadsb-receiver\n"                                      # fg2, hpn-atc not marked
     odd.write_text("[radio\n")
     out = configupdate.run(odd, m2)
-    assert len(out) == 2 and out[0].startswith("fg2: not applied:") and m2.read_text() == "tones-47\n"
+    assert len(out) == 2 and out[0].startswith("fg2: not applied:") and m2.read_text() == "tones-47\nadsb-receiver\n"
 
 
 def test_the_installer_runs_it_with_the_system_python_at_the_switch(tmp_path, monkeypatch):

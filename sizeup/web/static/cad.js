@@ -563,9 +563,10 @@ function renderPrealert() {
   // airport pre-alerts (airport-alerts.js, #233): HPN ATC; accept makes a pending event (never a dispatch)
   const aa = cad.state && cad.state.airport_alerts;
   if (window.AirportAlerts) {
-    AirportAlerts.column($(BOARD ? "#b-airport" : "#q-airport"), aa, { ...deps, readonly: BOARD || !canDo("dispatch"), select: selectIncident });
+    AirportAlerts.column($(BOARD ? "#b-airport" : "#q-airport"), aa, { ...deps, readonly: BOARD || !canDo("dispatch"), select: selectIncident, alarms: cad.state && cad.state.alarms });
     AirportAlerts.notify(aa);
   }
+  show($("#csv-airport-alerts"), !!aa);
 }
 function queueExtra(i) {              // what the queue card shows from the call's summary (#217), for its signature
   const o = isOpen(i) ? callSummary(i.id) : null;

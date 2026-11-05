@@ -139,6 +139,7 @@ GET  /api/cad/export/prealerts.csv        every ring kept (90 days) with its out
 POST /api/cad/airport-alert/<id>/accept   {operator?}  an airport pre-alert (HPN ATC, #233; the state's airport_alerts;
                                           sizeup/cad/airport_alerts.py) made into a PENDING event: never a dispatch
 POST /api/cad/airport-alert/<id>/dismiss  {operator?, reason?}  ... that is nothing; dispatchers and admins
+GET  /api/cad/export/airport-alerts.csv   every airport pre-alert kept (90 days), ATC and ADS-B, with its outcome
 POST /api/cad/hint/<id>/accept            {operator?}  a unit status suggested from the radio (#37, the state's
                                           status_hints; sizeup/cad/statushints.py): set, with "Status from radio
                                           (heard 14:32:10 “...”)" in the chronology; dispatchers and admins
@@ -231,7 +232,7 @@ WRITES = (
     (re.compile(r"/api/cad/runcards(?:/delete)?"), "admin"),
     (re.compile(r"/api/cad/radios(?:/delete)?"), "admin"),                 # the radio-ID registry
     (DATASOURCE, "admin"),                                                  # a data source's Refresh now (#186)
-    (re.compile(r"/api/(?:talkgroup|talkgroup-group|mode|retranscribe)"), "admin"),   # the station's radios (server.py)
+    (re.compile(r"/api/(?:talkgroup|talkgroup-group|mode|retranscribe|adsb-receiver)"), "admin"),   # the station's radios (server.py)
 )
 READ_ACTIONS = {("/api/cad/settings/dispatch", "preview")}                  # the wording on a sample event
 MAY = {"admin": ("read", "dispatch", "admin"), "dispatcher": ("read", "dispatch"), "viewer": ("read",)}
@@ -402,6 +403,8 @@ DOES = (
     (re.compile(r"/api/talkgroup"), lambda m, b, o, c: (f"Talkgroup {b.get('tg')}: {_toggles(b) or 'no change'}", "")),
     (re.compile(r"/api/talkgroup-group"), lambda m, b, o, c: (f"Talkgroups {_clip(b.get('group'), 40)}: {_toggles(b) or 'no change'}", "")),
     (re.compile(r"/api/mode"), lambda m, b, o, c: (f"Radio mode: {_clip(b.get('mode'), 30)}" + (f" ({_clip(b['sdr'], 30)})" if b.get("sdr") else ""), "")),
+    (re.compile(r"/api/adsb-receiver"), lambda m, b, o, c: ((f"Named SDR {_clip(b.get('sdr'), 30)} the ADS-B receiver"
+                                                            if b.get("sdr") else "Unnamed the ADS-B receiver's SDR"), "")),
     (re.compile(r"/api/retranscribe"), lambda m, b, o, c: ("Retranscribe: every recording" if b.get("all")
                                                            else f"Retranscribe: {len(b.get('ids') or [])} recordings", "")),
 )

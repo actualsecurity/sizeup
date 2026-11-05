@@ -30,6 +30,7 @@ class HubClient:
             self.headers.update({"CF-Access-Client-Id": access_id, "CF-Access-Client-Secret": access_secret})
         self._conn: http.client.HTTPConnection | None = None
         self._conn_timeout = 0.0
+        self.last_sent = 0                 # the last request's body, bytes as sent
 
     def _connect(self, timeout: float) -> http.client.HTTPConnection:
         if self._conn is None or self._conn_timeout != timeout:
@@ -50,11 +51,18 @@ class HubClient:
                 pass
         self._conn = None
 
-    def request(self, method: str, path: str, body: dict | None = None, timeout: float | None = None) -> dict:
-        """JSON in, JSON out. HubError on anything but a 2xx JSON answer (the connection is then dropped)."""
+    def request(self, method: str, path: str, body: dict | None = None, timeout: float | None = None,
+                gzip_body: bool = False) -> dict:
+        """JSON in, JSON out. HubError on anything but a 2xx JSON answer (the connection is then dropped). gzip_body:
+        the body gzipped (the aircraft posts, #235: an endpoint that takes it)."""
         data = (json.dumps(body, separators=(",", ":"), default=lambda o: o.item() if hasattr(o, "item") else str(o)).encode()
                 if body is not None else None)
         headers = dict(self.headers, **({"Content-Type": "application/json"} if data is not None else {}))
+        if gzip_body and data is not None:
+            import gzip
+            data = gzip.compress(data, 6)
+            headers["Content-Encoding"] = "gzip"
+        self.last_sent = len(data or b"")
         for attempt in (0, 1):     # a kept-alive connection the hub (or Cloudflare) closed: one quiet retry
             conn = self._connect(timeout or self.timeout)
             try:

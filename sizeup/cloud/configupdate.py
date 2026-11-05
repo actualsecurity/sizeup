@@ -29,6 +29,12 @@ at the switch to a release that has it (deploy/station/install-linux.sh activate
              doesn't have), so a switch back to it would leave the station down. So it is only applied when the
              release being left (--leaving, the one a failed switch goes back to) reads airband channels; else it
              waits ("deferred", not marked) for the next update, whose release to go back to is this one.
+    adsb-receiver  the [aircraft.receiver] table for our own ADS-B receiver (GitHub #235): sdr = "" (no dongle
+             named: nothing runs), gain = "auto", bias_tee = false, with the comments that say what each does, so
+             naming the dongle (here or in Settings > Radios) and choosing bias-tee for its LNA is one line each.
+             Skipped: a config that already has an [aircraft.receiver] (or aircraft.receiver keys). Rollback-safe like
+             hpn-atc: a release from before #235 refuses gain / bias_tee, so it waits ("deferred") until the
+             release being left reads them.
 
 Done ones are listed in a marks file (/etc/sizeup/config-updates, one name per line), so one taken out
 by hand stays out. The config is only ever added to (tones-47 also changes the two values of the one
@@ -289,8 +295,56 @@ def fix_tones(text: str) -> tuple[str, str]:
     return new, "tones-47: " + "; ".join(did)
 
 
-UPDATES = (("fg2", add_fg2), ("tones-47", fix_tones), ("hpn-atc", add_hpn_atc))
-NEEDS_LEAVING = {"hpn-atc"}           # given the release being left (rollback safety)
+ADSB_BLOCK = """
+# Added by the update to our own ADS-B receiver (GitHub #235, deploy/station/README.md "ADS-B receiver"): the dongle
+# behind the 1090 MHz filter and LNA, by its exact USB serial, never all digits (rtl_eeprom -d <index> -s adsb1090).
+# Named here or in Settings > Radios (admins, with a confirm; that choice wins and is kept in state/): the decoder
+# (sizeup-adsb.service, readsb) runs on that dongle and only on it, sizeup's radios and auto-assign never take it,
+# and this station sends what it hears to the hub every second or two. "" = no ADS-B receiver: nothing runs.
+[aircraft.receiver]
+sdr = ""
+gain = "auto"                      # readsb --gain: auto (an LNA in front makes a fixed high gain overload), or dB
+bias_tee = false                   # true ONLY for an LNA powered up the coax (4.5 V); false for its own supply or none
+"""
+ADSB_WANT = {"sdr": "", "gain": "auto", "bias_tee": False}
+
+
+def reads_bias_tee(release: Path | None) -> bool:
+    """Whether the code of that release accepts [aircraft.receiver] gain / bias_tee (None: no release to go back to)."""
+    if release is None:
+        return True
+    try:
+        return '"bias_tee"' in (release / "sizeup" / "config.py").read_text(errors="replace")
+    except OSError:
+        return False
+
+
+def add_adsb(text: str, leaving: Path | None = None) -> tuple[str, str]:
+    """(new text, what was done): an [aircraft.receiver] table with nothing named, at the end. The text unchanged when
+    the config has one already. ValueError when the config doesn't parse or the result wouldn't say what was meant;
+    Deferred while the release a failed switch would go back to can't read it."""
+    data = tomllib.loads(text)
+    ac = data.get("aircraft")
+    if isinstance(ac, dict) and "receiver" in ac:
+        return text, "adsb-receiver: already has [aircraft.receiver]: nothing added"
+    if not reads_bias_tee(leaving):
+        raise Deferred(f"the release this switch would go back to ({leaving.name}) can't read [aircraft.receiver] "
+                       "gain / bias_tee: added at the next update")
+    new = (text if text.endswith("\n") else text + "\n") + ADSB_BLOCK
+    try:
+        got = tomllib.loads(new)
+    except tomllib.TOMLDecodeError as e:
+        raise ValueError(f"the result wouldn't parse ({e}): nothing changed") from None
+    rest = {k: v for k, v in got.items() if k != "aircraft"}
+    gac = dict(got.get("aircraft") or {})
+    if gac.pop("receiver", None) != ADSB_WANT or rest != {k: v for k, v in data.items() if k != "aircraft"} \
+            or gac != (ac if isinstance(ac, dict) else {}):
+        raise ValueError("the result doesn't say what was meant: nothing changed")
+    return new, 'adsb-receiver: [aircraft.receiver] added (sdr = "": no ADS-B dongle named yet; bias_tee = false)'
+
+
+UPDATES = (("fg2", add_fg2), ("tones-47", fix_tones), ("hpn-atc", add_hpn_atc), ("adsb-receiver", add_adsb))
+NEEDS_LEAVING = {"hpn-atc", "adsb-receiver"}   # given the release being left (rollback safety)
 
 
 def run(conf: Path, marks: Path, leaving: Path | None = None) -> list[str]:

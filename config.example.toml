@@ -393,15 +393,19 @@ heartbeat_stale_min = 90             # no heartbeat (or restart) this long: "Tap
 # ceiling_ft = 6000       # MSL: below this inside the radius is "low traffic" (shortfinal's focus)
 # registry = true
 #
-# Our own receiver, when there is one (off: no SDR is assigned to ADS-B yet). Enabled, its positions win for every
-# aircraft it hears; adsb.lol / adsb.fi fill in the rest, and take over when it is stale or down. sizeup only READS
-# the decoders' aircraft.json: run readsb / dump1090 (1090 MHz) and dump978-fa (978 MHz UAT) yourself, on an SDR
-# with an LNA and a 1090 filter in front (readsb with --gain auto: an LNA makes a fixed high gain overload), and let
-# whatever starts the decoder hold the dongle's claim (~/.local/state/rtl-claims). sizeup never opens or claims it.
-# sdr: that dongle's exact USB serial (give it a name first: rtl_eeprom -s adsb); naming it keeps sizeup's own
-# radios off it (added to [radio] sdr_ignore) and the layer says whether it is plugged in and who holds it.
+# Our own receiver (GitHub #235): the dongle behind a 1090 MHz filter and an LNA, by its exact USB serial (never all
+# digits: rtl_eeprom -d <index> -s adsb1090), named here or in Settings > Radios (admins, with a confirm; that choice
+# wins). Named, it is never one of sizeup's radios and auto-assign never takes it; on the Linux station
+# sizeup-adsb.service runs readsb on it (and nothing else), with gain and bias_tee from here, and the station sends
+# what it hears to the hub, whose map puts our positions first while fresh (adsb.lol / adsb.fi when we lose a plane).
+# The decoder holds the dongle's claim (~/.local/state/rtl-claims) and never starts while another app holds it.
+# enabled: this process's own map reads the receiver (all-in-one); json_1090 / json_978: another decoder's
+# aircraft.json (readsb / dump1090, dump978-fa), a path or an http(s) URL; the default with a dongle named is the
+# decoder's /run/sizeup-adsb/json/aircraft.json.
 # [aircraft.receiver]
+# sdr = ""                                   # e.g. "adsb1090"
+# gain = "auto"                              # readsb --gain: auto (an LNA makes a fixed high gain overload), or dB
+# bias_tee = false                           # true ONLY for an LNA powered up the coax (4.5 V)
 # enabled = false
-# sdr = ""                                   # e.g. "adsb": not yet
 # json_1090 = ""                             # e.g. "/run/readsb/aircraft.json" or "http://127.0.0.1/tar1090/data/aircraft.json"
 # json_978 = ""                              # e.g. "/run/skyaware978/aircraft.json"

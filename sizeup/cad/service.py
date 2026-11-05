@@ -387,6 +387,10 @@ class Cad:
                 self.prealert.match(inc)
             except Exception as e:  # noqa: BLE001 - the event stands whatever the pre-alert does
                 self.log(f"CAD: pre-alert match: {type(e).__name__}: {e}")
+        try:
+            self.airport_alerts.match(inc)          # an aircraft emergency's pre-alert joins an Airport event (#235)
+        except Exception as e:  # noqa: BLE001
+            self.log(f"CAD: airport pre-alert match: {type(e).__name__}: {e}")
 
     def airport_alerts_state(self, now: float | None = None) -> dict | None:
         """The airport pre-alerts (#233; a fault never breaks the console)."""
@@ -671,6 +675,8 @@ class Cad:
     def export(self, name: str) -> bytes | None:
         if name == "prealerts.csv":
             return self.prealert.csv() if self.prealert is not None else None
+        if name == "airport-alerts.csv":
+            return self.airport_alerts.csv()
         if name == "status-hints.csv":
             return self.hints.csv()
         return export.export(self.store, name)

@@ -1551,8 +1551,9 @@ are not charging for this"*, and *"primary local SDR on ADSB, secondary the abov
 
 * **Every feed's latest answer is kept and combined** (`combine()`): the union by ICAO address, one record per
   aircraft with **the freshest position** any feed has, except that **our receiver's position wins for any
-  aircraft it hears** while it is healthy (an answer within 10 s). A field only one feed has (callsign, type) is
-  kept. Each aircraft says which feed its position came from: *our receiver*, *adsb.lol* or *adsb.fi*.
+  aircraft it has a position for no older than 10 s** (#235: "unless we lose the plane"), while it is healthy (an
+  answer within 10 s). A field only one feed has (callsign, type) is kept. Each aircraft says which feed its
+  position came from: *our receiver*, *adsb.lol* or *adsb.fi*.
 * **The primary API** is whichever has been giving more aircraft with a fresh position (a running average over
   its answers; config order on a tie). While someone has the layer on: **the primary every 5 s, the other every
   10 s, our receiver every 2 s** (adsb.fi's public limit is 1 request a second; adsb.lol limits by load and was
@@ -1573,23 +1574,75 @@ are not charging for this"*, and *"primary local SDR on ADSB, secondary the abov
 | FAA JO 7340.2 airline designators | public domain | `data/airport/airlines.csv` (shortfinal's `tools/fetch_airlines.py`) |
 | **our receiver** | ours | below: first, when there is one |
 
-### Our own receiver (later; nothing assigned now)
+### Our own receiver on the station (#235)
 
-For when there is an ADS-B SDR with an LNA (and a 1090 MHz filter) on the station or the hub's network:
-`[aircraft.receiver]` reads **readsb / dump1090's `aircraft.json` (1090 MHz) and dump978-fa's (978 MHz
-UAT)**, each a file path or an http(s) URL, and merges them by ICAO address (the fresher position wins; what
-only one band heard is kept). A file whose own clock stops for 30 s says its decoder has stopped.
+> "in a bit ill plug in another SDR for ADSB too, this one we will have to be specific about and cant auto assign
+> because itll have a filter LNA in line ... i want us to default to pull from live ADSB unless we lose the plane and
+> ADSB.lol or another source still has the plane, and also pull the plane details from adsb.lol ... and associating
+> it to the plane that we are location tracking from the raw local adsb... also squawk codes for emergencies should
+> give us a prealert with details" (user, GitHub #235)
 
-* **sizeup never opens, starts or claims anything for it.** Whatever runs the decoder holds the dongle and
-  its claim (`~/.local/state/rtl-claims/<serial>.json`, the format shared with shortfinal). Run readsb with
-  `--gain auto`: with an LNA a fixed high gain overloads (shortfinal's bench, 2026-10-02).
-* `sdr` names the dongle meant for ADS-B (its exact USB serial; an all-digit serial is refused, as readsb
-  and the rtl tools read it as an index: `rtl_eeprom -s adsb` first). Naming it **keeps sizeup's own radios
-  off it** (it is added to `[radio] sdr_ignore`, so auto-assign never grabs it) and the box says whether it
-  is plugged in and who holds it ("held by shortfinal (ADS-B)"). It can't be one of `[radio] sdrs`.
-* **Not yet:** on the cloud setup the receiver would be on the station while the map is on the hub; the
-  station forwarding aircraft to the hub (#88's outbox, throttled) comes with the hardware. Until then the
-  receiver feed works all-in-one, or wherever the hub can reach the decoder's URL.
+**The dongle.** One RTL-SDR, behind a 1090 MHz filter and an LNA, chosen **by its exact USB serial only**
+(`[aircraft.receiver] sdr` in the station's config, or Settings > Radios: an admin, with a confirm; that choice is
+kept in `state/adsb_receiver.json` and wins). An all-digit serial is refused (readsb and the rtl tools read it as
+an index: give it a name first, `rtl_eeprom -d <index> -s adsb1090`). Named, it is **never one of sizeup's radios**:
+not shown as a radio row, never given a job by auto-assign or by a button, its running job stopped when it is named.
+Released, it stays Off, set by a person, so auto-assign never gives it a job by itself either (it still has the
+filter on it). Settings > Radios shows it as **ADS-B receiver (reserved)** with its decoder's state.
+
+**The decoder** (`sizeup/radio/adsbd.py`, `sizeup-adsb.service`; deploy/station/README.md "ADS-B receiver"):
+**readsb** (wiedehopf v3.16.21, pinned to its commit and built by install-linux.sh against the rtl-sdr-blog
+librtlsdr, like trunk-recorder) on that dongle and no other: `--device <its index>` (looked up by its serial before
+every start; readsb would also match a serial by prefix), `--gain auto` unless `gain` says otherwise (an LNA makes a
+fixed high gain overload: shortfinal's bench), `--enable-biastee` only with `bias_tee = true` (power up the coax for
+an LNA that takes it; **off by default**), aircraft.json every second to `/run/sizeup-adsb/json` (tmpfs), no network
+ports. With no dongle named it runs nothing and touches no dongle. It holds the dongle's claim in
+`~/.local/state/rtl-claims` while readsb runs; **if shortfinal holds it, nothing starts**: the status says who has
+it, and it is tried again every few seconds. A readsb that exits is restarted (2 s doubling to 30 s), one that stops
+writing or whose dongle stops sending samples at once, one that decodes nothing for 2 minutes says *no signal* (check
+the antenna, the filter, the LNA, the bias-tee) and is restarted on a slow schedule. It is its own service: an update
+restarts it only when its supervisor, readsb or its unit changed. Readsb vs dump1090-fa: readsb is what shortfinal
+runs (the lessons came with it), has auto gain and the bias-tee switch built in, the same aircraft.json, and builds
+from one pinned source tree here; dump1090-fa is packaged for FlightAware's own repository.
+
+**Station health** reports it (the hub's Settings > Health, "ADS-B receiver (station)"): the dongle, the decoder's
+state, messages a second, aircraft (with a position), the last message, gain and bias-tee, and how the forwarding
+to the hub is doing. *ADS-B receiver down* is a warning after 2 minutes; a dongle shortfinal holds is shown, not
+alerted (a handover).
+
+**Forwarding to the hub** (`sizeup/cloud/aircraftlink.py`, `POST /api/station/aircraft` with the station token;
+`sizeup/aircraft.py` `StationFeed` on the hub). The station reads aircraft.json every second and sends what
+changed, gzipped: per aircraft its ICAO address, position (5 decimals), altitude, ground speed, track, vertical
+rate, squawk, emergency, callsign, the position's and the last message's age, signal, emitter category. Only what
+the map and the emergency watch can use (a position within 22.5 nm of HPN, below 20,000 ft or on the ground), at
+most 300, nearest first; an unchanged aircraft goes again only every 5 s; gone ones once. **Every 1 s while someone
+has the map open or an emergency is on, every 5 s otherwise** (the hub's answer says which); an emergency squawk
+goes at once. **About 55 bytes an aircraft gzipped** (the recorded 10: 550 bytes a post, plus the request's
+headers): 1 to 1.6 KB/s for 10 to 20 moving aircraft while someone looks, a fifth of that otherwise. **Hub
+offline: nothing queues** (live data; never the outbox): the post is dropped, the next try backs off (1 s doubling
+to 30 s) and the first one through is a full list. Never in any state push (#146).
+
+**The merge.** On the hub the forwarded aircraft are the **receiver** feed, first (#169's rules): **our position
+for any aircraft our receiver has a position for no older than 10 s**; older (we lost it: out of range, behind the
+hills, the dongle unplugged) the freshest position any feed has, so adsb.lol / adsb.fi take over that one aircraft
+and our receiver keeps the rest. No word from the station for 10 s: the APIs carry everything. The API feeds keep
+their rates while the map is open or the watch runs (5 s / 10 s, the watch's 15 s), receiver or not, so they have
+the plane when we lose it; the station feed is in memory (read every 1 to 2 s, free). A station forwarding to the
+hub no longer reads adsb.lol for the watch at all (the hub does). The click says where the position came from
+(*Position from our receiver* / *adsb.lol* / *adsb.fi*) and the box shows the station's receiver and its forwarding.
+
+**Details by ICAO address.** readsb's records carry no registration, type or owner. The API feeds' records do
+(adsb.lol / adsb.fi `r`, `t`, `desc`, `ownOp`, `year`): the hub keeps them by ICAO address for 6 hours, so a plane
+only our receiver hears (or hears first) gets its registration and type from them ("Type and registration from
+adsb.lol, matched by its ICAO address"), with the FAA registry's make and model as before. **Operator:** the airline
+its callsign names (FAA JO 7340.2); else the feeds' owner / operator **only when the FAA registry lists the
+registrant as a corporation, an LLC, a government or a non-citizen corporation** (the registry's *type of
+registrant*, kept now; never its name), so a private person's name is never shown (#161's rule). Routes: adsb.lol's
+point answers carry none, and the adsb.im route lookup stays out (#161: community data with unclear terms).
+
+**All-in-one** (no hub): `[aircraft.receiver] enabled = true` with the dongle named reads the decoder's file itself;
+`json_1090` / `json_978` still read any other decoder's aircraft.json (a path or an http(s) URL), merged by ICAO
+address.
 
 ### How it works
 
@@ -1640,9 +1693,60 @@ the emergency watch reads the primary feed every 15 s (`[aircraft] alarms = fals
   Priority 5 (an alarm), tags airplane + rotating_light; *Ended: ...* priority 3; *Acknowledged: ...* when a
   dispatcher acknowledges it.
 
+### The airport pre-alert (#235, in #233's model)
+
+The same emergency also raises **an airport pre-alert** with source `"adsb"`, in #233's model
+(`sizeup/cad/airport_alerts.py`, `static/airport-alerts.js`): the same queue card as HPN ATC's, at the top of the
+60 Control column on the console and above the feed on the wall board, beside the alarm, not instead of it.
+`AircraftPreAlerts` (the same module) turns the watch's event into one.
+
+* **One item per emergency**, its subject `<ICAO address>:<code>`. These all bring back the same item, never a second:
+  * a flicker;
+  * the end, then the same emergency again within 30 minutes (`reopen_s`);
+  * a hub restart while it still squawks.
+* **Its alarm.** The card says whether the alarm is still open or who acknowledged it, so one event shows once.
+  It isn't pushed, because the alarm already was.
+* **#169's limits and drill mode.** It is raised only with an alarm (6 an hour; it isn't counted against ATC's
+  `max_per_hour`), and drill mode marks it *DRILL*.
+* **While it lasts and after.** Its details are updated in place every 15 s (`update()`). When the emergency ends,
+  the item ends (`end()`: *"ADS-B: squawk ended (now 1200)"*).
+* **Airport events.** With one Airport event open it is on that event, still open. An Airport event made while it is
+  open takes it too (`match()`); ATC's are left to Accept.
+* **What a dispatcher does**, as with ATC's: **Accept** makes a pending Airport event whose remarks carry the details;
+  **Dismiss** says it is nothing.
+* **Export.** Every pre-alert, ATC's and ADS-B's, is in `GET /api/cad/export/airport-alerts.csv` (90 days).
+
+What it says:
+
 | | |
 |---|---|
-| `GET /api/cad/aircraft` | `{configured, note, feed: the primary {key, label, link, licence, terms, credit}, feeds: [{key, label, credit, terms, role: receiver \| primary \| secondary, n, fresh, ok, at, shown, resting, healthy}], credit, at (the newest feed's time), fetched, error, stale_s, drop_s, airport, registry: {at, n, error, credit}, receiver: null \| {enabled, sdr, name, present, held_by, bands, note}, aircraft: [{hex, cs, flight, reg, reg_src, type, model, model_src, kind, cat, airline, lat, lon, alt, gs, trk, tr, vr, sq, emerg, phase, rwy, appr, dist, eta, age, pos, band, src, trail}], counts}` |
+| title | AIRCRAFT EMERGENCY · N41DW · squawk 7700 (emergency) |
+| Aircraft | the callsign (registration) · the type designator, the FAA registry's make and model |
+| Operator | the airline its callsign names, or a company's / government's from the feeds; never a person's name |
+| Emergency | squawk 7500 (hijack) / 7600 (radio failure) / 7700 (emergency), or the aircraft's own status |
+| Altitude | 900 ft, descending 500 ft/min, 80 kt |
+| Position | 1.9 nm SE of HPN · 0.6 nm from the runway 34 end |
+| Phase | arriving HPN on the ILS 34, 1.4 nm to go (sizeup's reading of its track) |
+| Source | our receiver on the station, or adsb.lol / adsb.fi (public data); where the details came from |
+| Time | the data's time (and its position's) · the ICAO address |
+
+**What #235 added to #233's model** (all optional, off by default, so ATC's pre-alerts are as before):
+* `AirportAlert` fields:
+  * `lines`: labelled details;
+  * `alarm_id`;
+  * `drill`;
+  * `reopen_s`: the same subject, even an ended one, is the same item;
+  * `join_event`;
+  * `limit=False`: the source limits itself;
+  * `push=False`, which `raise_alert` now honours.
+* Methods: `update(source, subject, ...)`, `end(source, subject, why)`, `match(inc)` and `csv()`.
+* The card shows `lines`, the alarm's state and DRILL.
+
+| | |
+|---|---|
+| `GET /api/cad/aircraft` | `{configured, note, feed: the primary {key, label, link, licence, terms, credit}, feeds: [{key, label, credit, terms, role: receiver \| primary \| secondary, n, fresh, ok, at, shown, resting, healthy}], credit, at (the newest feed's time), fetched, error, stale_s, drop_s, airport, registry: {at, n, error, credit}, receiver: null \| {enabled, sdr, name, present, held_by, bands, note; on the hub: station, decoder, forwarding}, aircraft: [{hex, cs, flight, reg, reg_src, type, model, model_src, kind, cat, airline, op, op_src, det, year, lat, lon, alt, gs, trk, tr, vr, sq, emerg, phase, rwy, appr, dist, eta, age, pos, band, src, trail}], counts}` |
+| `POST /api/station/aircraft` | the station's receiver (station token, gzip): `{v, epoch, seq, full, ac: [[hex, lat, lon, alt, gs, trk, vr, squawk, emergency, flight, seen_pos, seen, rssi, category, pos, band, track_rate]], gone, rx?}` -> `{ok, full, every}` |
+| `POST /api/adsb-receiver` | `{sdr, confirm: true}`: admins name (or, `""`, release) the station's ADS-B dongle; the hub sends it to the station |
 
 ```toml
 [aircraft]                       # sizeup/aircraft.py; leave out: on, adsb.lol + adsb.fi, 15 nm, the alarm on
@@ -1652,10 +1756,12 @@ radius_nm = 15
 ceiling_ft = 6000
 registry = true
 
-[aircraft.receiver]              # off: no SDR is assigned to ADS-B yet; enabled, its positions come first
-enabled = false
-sdr = ""
-json_1090 = ""                   # readsb / dump1090 aircraft.json: a path or http(s) URL
+[aircraft.receiver]              # the station's ADS-B dongle (#235): named, the decoder runs on it and only on it
+sdr = ""                         # its exact serial, never all digits; or name it in Settings > Radios
+gain = "auto"                    # readsb --gain: auto, or dB
+bias_tee = false                 # true only for an LNA powered up the coax
+enabled = false                  # all-in-one: this process's map reads the receiver itself
+json_1090 = ""                   # default with a dongle named: the decoder's /run/sizeup-adsb/json/aircraft.json
 json_978 = ""                    # dump978-fa aircraft.json
 ```
 
@@ -1663,7 +1769,9 @@ Tests: `tests/test_aircraft.py` on adsb.lol answers recorded 2026-10-14 14:38 ED
 recorded together at 15:44 EDT, and the FAA registry of
 2026-10-13 trimmed to those aircraft, owner columns blanked (`tests/fixtures/aircraft/`,
 `tools/record_aircraft_fixtures.py`); the receiver fixtures are derived (readsb) or hand-built (dump978)
-until there is a receiver to record.
+until there is a receiver to record. `tests/test_adsb_receiver.py`: the decoder (a fake readsb, a list of dongles,
+a tmp claims folder), the reserved dongle, the forwarding (deltas, the cap, offline drops, its cost), the hub's
+merge, details by ICAO address, the pre-alert beside the alarm, station health, the station's config update.
 
 ## Weather and water (NWS alerts, conditions, radar; NOAA tides)
 

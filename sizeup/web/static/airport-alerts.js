@@ -9,7 +9,11 @@
 //   location   the words heard, and the approximate point's reason (always marked approximate) or "not placed"
 //   Accept     a new PENDING event (never a dispatch: a person dispatches from it); Dismiss: nothing to it
 //
-//   AirportAlerts.column(list, state, deps)   deps: {api, operator, time, readonly, select(id)}
+//   details    (#235, an aircraft emergency on ADS-B) what is known: aircraft, operator, emergency, altitude,
+//              position, phase, source, time; and its emergency alarm's state (open / acknowledged by): one event,
+//              shown once; DRILL in drill mode
+//
+//   AirportAlerts.column(list, state, deps)   deps: {api, operator, time, readonly, select(id), alarms: the state's}
 //   AirportAlerts.notify(state)               a toast (and the chime) per new pre-alert (radio.js's prealert setting)
 "use strict";
 
@@ -45,15 +49,29 @@ window.AirportAlerts = (() => {
     return parts.join(" · ");
   }
 
+  function alarmWord(d, alarms) {
+    if (!d.alarm_id || !alarms) return "";
+    if ((alarms.open || []).some((x) => x.id === d.alarm_id)) return "Alarm open: acknowledge it on the alarm";
+    const done = (alarms.recent || []).find((x) => x.id === d.alarm_id);
+    return done && done.ack_by ? `Alarm acknowledged by ${done.ack_by}` : "Alarm acknowledged";
+  }
+
   function card(a, deps) {
     const d = a.data || {};
-    const li = el("li", `aa aa-${a.level}`);
+    const li = el("li", `aa aa-${a.level}` + (d.drill ? " aa-drill" : ""));
     li.dataset.key = String(a.id);
     const head = el("div", "aa-head");
     if (window.Icon) head.append(Icon("aircraft"));
-    head.append(el("b", "aa-title", a.title),
-                el("span", `aa-conf ${a.level}`, `${a.level} ${Math.round(a.confidence * 100)}%`));
+    head.append(el("b", "aa-title", (d.drill ? "DRILL · " : "") + a.title),
+                el("span", `aa-conf ${a.level}`, a.source === "adsb" ? "ADS-B" : `${a.level} ${Math.round(a.confidence * 100)}%`));
     li.append(head);
+    const aw = alarmWord(d, deps.alarms);
+    if (aw) li.append(el("div", "aa-alarm", aw));
+    if ((d.lines || []).length) {
+      const dl = el("dl", "aa-lines");
+      for (const [k, v] of d.lines) dl.append(el("dt", "", k), el("dd", "", v));
+      li.append(dl);
+    }
     li.append(el("div", "aa-src", `${a.source_name}${a.channel ? ` · ${a.channel}` : ""} · ${deps.time(a.at)}`
                  + (a.count > 1 ? ` · ${a.count} transmissions` : "")));
     const heard = el("ol", "aa-heard");
@@ -70,7 +88,7 @@ window.AirportAlerts = (() => {
       heard.append(r);
     }
     if (heard.children.length) li.append(heard);
-    for (const x of d.aircraft || []) li.append(el("div", "aa-acft", aircraftLine(x)));
+    if (!(d.lines || []).length) for (const x of d.aircraft || []) li.append(el("div", "aa-acft", aircraftLine(x)));
     const loc = d.location;
     if (loc && loc.basis) {
       const placed = loc.lat !== undefined && loc.lat !== null;
@@ -117,7 +135,8 @@ window.AirportAlerts = (() => {
     if (!list) return;
     const items = open(s);
     list.hidden = !items.length;
-    const sig = JSON.stringify(items.map((a) => [a.id, a.title, a.count, a.confidence, st.busy.has(a.id), st.playing]));
+    const sig = JSON.stringify(items.map((a) => [a.id, a.title, a.count, a.confidence, st.busy.has(a.id), st.playing,
+                                                 (a.data || {}).lines, alarmWord(a.data || {}, deps.alarms)]));
     if (list._sig === sig) return;
     list._sig = sig;
     list.replaceChildren(...items.map((a) => card(a, deps)));

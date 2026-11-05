@@ -114,12 +114,13 @@ nothing enabled or started, no prompts); `--stage SHA` and `--activate NAME` are
 | rtl-sdr-blog v1.3.6 (RTL-SDR Blog V4 support): rtl_fm, rtl_test, rtl_eeprom, librtlsdr | `/opt/sizeup/rtl-sdr` -> `builds/rtl-sdr-blog-<tag>-<commit>` |
 | trunk-recorder v5.2.0 with its plugins (unit_script) | `/opt/sizeup/trunk-recorder` -> `builds/trunk-recorder-<tag>-<commit>` |
 | whisper.cpp v1.9.4 whisper-server, built for this CPU (AVX2 on the i5-6400T) | `/opt/sizeup/whisper` -> `builds/whisper.cpp-<tag>-<commit>-native` |
+| readsb v3.16.21 (wiedehopf), RTL-SDR with the bias-tee switch, against rtl-sdr-blog's librtlsdr: the ADS-B decoder (#235) | `/opt/sizeup/readsb` -> `builds/readsb-<tag>-<commit>` |
 | whisper model, SHA-256 checked; `whisper.bin` points at the one in use | `/opt/sizeup/models` |
 | config, from `config.station.toml` once and never overwritten (`config.toml.dist` = the current template) | `/etc/sizeup/config.toml` |
 | secrets `SIZEUP_STATION_TOKEN`, `SIZEUP_ACCESS_CLIENT_ID`, `SIZEUP_ACCESS_CLIENT_SECRET` (root:sizeup 0640) | `/etc/sizeup/station.env` |
 | what `update` fetches (repo, ref), the model, auto-update on / off | `/etc/sizeup/install.conf` |
 | state: CAD, outbox, `cloud.json`, captures, trunk-recorder's working dir | `/var/lib/sizeup` |
-| `sizeup-station.service`, `sizeup-whisper.service`, `sizeup-health.timer`, `sizeup-update.path` / `.timer` / `.service`, journald cap (200 MB, kept across reboots) | `/etc/systemd/...` |
+| `sizeup-station.service`, `sizeup-whisper.service`, `sizeup-adsb.service` (the ADS-B decoder: idle until a dongle is named for it), `sizeup-health.timer`, `sizeup-update.path` / `.timer` / `.service`, journald cap (200 MB, kept across reboots) | `/etc/systemd/...` |
 | the auto-updater's record (state, last result, failed builds) and its one-line-per-update log | `/var/lib/sizeup-update/state.json`, `/var/log/sizeup-update.log` |
 | the `sizeup-station` command; the launchers and the updater | `/usr/local/bin`; `/usr/local/lib/sizeup` |
 
@@ -317,6 +318,56 @@ and the station page and the hub's monitor show the row as "· FG1 · auto".
   "_set_by": {serial: "person" | "auto"}}`. Entries saved before this (no `"_set_by"`) count as not
   set by a person, so an Off left over from the old "new dongles start Off" is filled.
 * `auto_assign = false`: new dongles start Off until someone picks a job (the old behaviour).
+
+## ADS-B receiver
+
+The station can run our own ADS-B receiver (GitHub #235): one RTL-SDR with a 1090 MHz filter and an LNA in front of
+it. Because of that filter it is **never** a radio: it is chosen by its exact serial, never auto-assigned, never given
+a channel. `sizeup-adsb.service` runs readsb on it (and on nothing else), the station sends what it hears to the hub
+every second or two, and the hub's map uses our positions first, adsb.lol / adsb.fi when we lose a plane. An
+emergency squawk raises the alarm and an airport pre-alert in the queue (docs/cloud.md "Our own receiver on the
+station").
+
+**When you plug it in:**
+
+1. **Give it a serial that is unique and not all digits** (readsb and the rtl tools read `00000001` as "device #1").
+   Plug it in alone, or find its index with `sizeup-station status` ("dongles on USB"), stop whatever uses that index,
+   then (as root; the tool writes the dongle's EEPROM, then unplug and replug it):
+
+   ```
+   sudo systemctl stop sizeup-station sizeup-adsb
+   rtl_eeprom -d <index> -s adsb1090
+   sudo systemctl start sizeup-station sizeup-adsb
+   ```
+
+   Skip this if it already has a unique name.
+2. **Name it**, either way:
+   * **Settings > Radios** (an admin, on the hub or the station page): its row has **Use for ADS-B**; confirm. Whatever
+     it was running stops; it shows as **ADS-B receiver (reserved)**. **Release** gives it back (it stays Off, and
+     auto-assign never gives it a job by itself).
+   * or in `/etc/sizeup/config.toml`: `[aircraft.receiver] sdr = "adsb1090"`, then `sudo sizeup-station restart`.
+     (Settings' choice wins over the file once made.)
+3. **Bias-tee for the LNA:** `bias_tee = false` by default. Set `bias_tee = true` in `[aircraft.receiver]` **only if
+   the LNA is powered up the coax** (it has no power supply or USB lead of its own, and its maker says it takes 4.5 V
+   bias power); leave it false for an LNA with its own supply, a filter alone, or if you aren't sure. A change takes
+   effect within a few seconds (the decoder rereads the config), no restart needed. `gain = "auto"` stays unless you
+   have a reason (an LNA makes a fixed high gain overload).
+4. **Check it:**
+   * `sizeup-station status`: the `adsb:` line says `ok: N aircraft (M with a position), X messages/s (adsb1090)`.
+     `held` means shortfinal has the dongle (switch it Off there); `unplugged` means the serial isn't on USB;
+     `no signal` means nothing decoded for 2 minutes (antenna, filter, LNA, bias-tee).
+   * `sizeup-station logs` (`journalctl -u sizeup-adsb`): `adsb: readsb on adsb1090 (device #N), gain auto, bias-tee off`.
+   * Settings > Radios: *ADS-B receiver (reserved) · decoding: N aircraft, X messages/s · to the hub every 1 s*.
+   * The hub's Settings > Health: *ADS-B receiver (station)*, messages a second, last message, *To the hub: ok*.
+   * The CAD map's Aircraft layer: click an aircraft near HPN: *Position from our receiver: ADS-B ... (1090 MHz)*;
+     the layer box lists *Our receiver (station) on adsb1090*.
+
+What runs: `python3 -I /usr/local/lib/sizeup/adsbd.py run` as the sizeup user (stdlib only, like the updater), which
+starts `readsb --device-type rtlsdr --device <its index> --gain auto [--enable-biastee] --write-json
+/run/sizeup-adsb/json --write-json-every 1` (no network ports) and restarts it when it exits, stalls or the settings
+change; `python3 -I /usr/local/lib/sizeup/adsbd.py print` shows the command line it would run now. It holds the
+dongle's claim in `~/.local/state/rtl-claims` while readsb runs, and never starts while another app holds it. An
+update restarts it only when the decoder or its unit changed.
 
 ## HPN ATC: the airband dongle
 

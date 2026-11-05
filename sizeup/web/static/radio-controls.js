@@ -5,7 +5,8 @@
 // front in Radio, attached to that incident), Transcribe and the speech-to-text Engine (Local =
 // whisper on the station, AWS = Amazon Transcribe from the hub, Both = compare; sizeup/channels.py),
 // with whether the station applied them and what AWS cost this month; the AWS custom vocabulary;
-// re-running speech-to-text on every recording, and the disk. All from the monitor state (/api/state,
+// re-running speech-to-text on every recording, and the disk. The ADS-B dongle (#235) shows as "ADS-B receiver
+// (reserved)" with its decoder's state: never a radio; an admin names or releases it (with a confirm). All from the monitor state (/api/state,
 // polled every 2 s while this section is open) and /api/cad/stt (the vocabulary);
 // every switch is a POST the server allows admins only (sizeup/cad/api.py WRITES): for anyone else the
 // controls are locked here too (cad.js roLock). Closing the paged incident is a dispatcher's.
@@ -21,6 +22,7 @@ window.RadioControls = (() => {
                          "Operations": "#7ee07e", "Interop/Events": "#B8C0CA", "OEM": "#ffcf7a", "": "#9AA3AD" };
   const RADIO_STATE = { ok: "", off: "off", absent: "absent", down: "down", starting: "starting" };
   const st = { box: null, state: null, timer: 0, pending: new Map(), cpending: new Map(), error: "", sdrBusy: false, sdrError: "",
+               adsbBusy: false, adsbError: "",
                rerunBusy: false, rerunMsg: "", confirm: null, confirmTimer: 0, closing: null, closeTimer: 0, n: {},
                stt: null, sttTimer: 0, vocabMsg: "", vocabBusy: false, vocabDirty: false };
   const ENGINES = [["local", "Local"], ["aws", "AWS"], ["both", "Both"]];
@@ -56,6 +58,7 @@ window.RadioControls = (() => {
       n.radios = el("div", "radios");
       n.storage = el("div", "dim small");
       n.sdr = el("div", "sdrs");
+      n.adsb = el("div", "adsb-box");
       n.tgSum = el("span", "dim small");
       n.filter = el("input", "tg-filter");
       Object.assign(n.filter, { type: "search", placeholder: "Filter", autocomplete: "off", spellcheck: false });
@@ -85,7 +88,9 @@ window.RadioControls = (() => {
       rerunRow.append(n.rerun, n.rerunMsg);
       box.replaceChildren(
         tab("receivers", card("Receivers", "Each radio, speech-to-text and the dispatch voice.\nSDR: one dongle hears one of these at a time; "
-             + "pick what it listens to. Plug in another dongle to run two at once.", n.radios, n.sdr, n.storage)),
+             + "pick what it listens to. Plug in another dongle to run two at once.\nADS-B receiver (reserved): the dongle "
+             + "behind the 1090 MHz filter and LNA, chosen by its serial. Only its decoder (readsb) uses it; no channel and "
+             + "no auto-assign ever do. Admins name it with Use for ADS-B on its row, or release it.", n.radios, n.sdr, n.adsb, n.storage)),
         tab("receivers", card("Paged incident", "The incident the station opened from the last page: Main traffic attaches to it until it "
              + "goes quiet. Close it when the call is over.", n.inc)),
         tab("channels", card("Channels", "Record: keeps its transmissions (off for FG1, FG2 or South 2: the receiver keeps running, squelch, "
@@ -122,6 +127,7 @@ window.RadioControls = (() => {
     renderRadios();
     renderIncident();
     renderSdr();
+    renderAdsb();
     renderStorage();
     renderTalkgroups();
     renderRerun();
@@ -203,7 +209,11 @@ window.RadioControls = (() => {
           b.addEventListener("click", () => setSdrMode(m, x.serial));
           row.append(b);
         }
-        row.append(el("span", "sdr-err"));
+        const ad = el("button", "adsb-use", "Use for ADS-B");
+        ad.type = "button";
+        ad.title = "Reserve this dongle for the ADS-B receiver (its filter and LNA): its decoder only, never a channel";
+        ad.addEventListener("click", () => setAdsb(x.serial, x.name || x.serial));
+        row.append(ad, el("span", "sdr-err"));
         box.append(row);
       }
       box.dataset.key = key;
@@ -229,6 +239,85 @@ window.RadioControls = (() => {
         b.title = there ? `${m} is on SDR ${there.name || there.serial}: click to move it here` : "";
         b.disabled = !!sdr.switching || st.sdrBusy || ro();
       }
+      const ad = row.querySelector(".adsb-use");
+      if (ad) {                                       // offered only while no dongle is reserved for ADS-B
+        ad.hidden = !sdr.adsb || !!sdr.adsb.serial || !x.serial || ro();
+        ad.disabled = st.adsbBusy;
+      }
+    }
+  }
+
+  // ---- the ADS-B receiver (#235): reserved by serial, its decoder's state ------------------------------------------
+
+  function decoderText(a) {
+    const d = a.decoder || {}, f = a.forward;
+    const parts = [];
+    if (!a.installed) parts.push("no decoder on this station (sizeup-adsb is installed by install-linux.sh)");
+    else if (!d.state) parts.push("decoder: no word yet");
+    else if (d.state === "ok") parts.push(`decoding: ${d.aircraft ?? 0} aircraft, ${d.messages_per_s ?? 0} messages/s`);
+    else parts.push(`decoder ${d.state}${d.detail ? `: ${d.detail}` : ""}`);
+    if (a.held_by && !(a.held_by.app === "sizeup" && a.held_by.mode === "adsb")) parts.push(`held by ${a.held_by.app} (${a.held_by.mode})`);
+    if (f) parts.push(f.ok ? `to the hub every ${f.every_s} s` : f.error ? `not reaching the hub (${f.error})` : "not sent to the hub yet");
+    return parts.join(" · ");
+  }
+
+  function renderAdsb() {
+    const sdr = st.state && st.state.sdr, box = st.n.adsb;
+    const a = sdr && sdr.adsb;
+    show(box, !!a && (!!a.serial || !!st.adsbError));
+    if (!a) return;
+    const d = a.decoder || {};
+    const key = JSON.stringify([a.serial, a.name, a.present, d.state, d.detail, d.aircraft, d.messages_per_s, a.held_by,
+                                a.forward && [a.forward.ok, a.forward.error, a.forward.every_s], st.adsbBusy, st.adsbError, ro()]);
+    if (box.dataset.key === key) return;
+    box.dataset.key = key;
+    const kids = [];
+    if (a.serial) {
+      const row = el("div", "adsb-row");
+      const who = `SDR ${a.name || a.serial}${a.name && a.name !== a.serial ? ` (serial ${a.serial})` : ""}`
+        + (a.present === false ? " · unplugged" : "");
+      row.append(el("b", "", "ADS-B receiver (reserved)"), el("span", "", who),
+                 el("span", `adsb-state ${d.state === "ok" ? "ok" : d.state && d.state !== "off" ? "bad" : ""}`, decoderText(a)));
+      const rel = el("button", "mini", "Release");
+      rel.type = "button";
+      rel.title = "Stop using this dongle for ADS-B (admins)";
+      rel.disabled = st.adsbBusy || ro();
+      rel.addEventListener("click", () => setAdsb("", a.name || a.serial));
+      row.append(rel);
+      kids.push(row, el("p", "dim small", `Gain ${a.gain || "auto"}, bias-tee ${a.bias_tee ? "ON (powers the LNA up the coax)" : "off"}`
+        + " ([aircraft.receiver] gain / bias_tee in the station's config). Only its decoder uses this dongle."
+        + (a.source === "config" ? " Named in the station's config." : "")));
+    }
+    if (st.adsbError) kids.push(el("p", "sdr-err", st.adsbError));
+    box.replaceChildren(...kids);
+  }
+
+  async function setAdsb(serial, name) {
+    if (st.adsbBusy || ro()) return;
+    const yes = await UI.confirm(serial
+      ? `Reserve SDR ${name} for the ADS-B receiver? Whatever it runs now stops. From then on only the ADS-B decoder `
+        + "(readsb) uses it: no channel and no auto-assign ever will. Check its bias-tee setting first if its LNA is powered up the coax."
+      : `Release SDR ${name} from ADS-B? Its decoder stops. The dongle stays Off and is never given a job by itself `
+        + "(it still has the 1090 MHz filter and LNA in front of it).",
+      { ok: serial ? "Use for ADS-B" : "Release", title: "ADS-B receiver" });
+    if (!yes) return;
+    st.adsbBusy = true;
+    st.adsbError = "";
+    renderAdsb();
+    renderSdr();
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 15000);
+    try {
+      const r = await fetch("/api/adsb-receiver", { method: "POST", headers: { "Content-Type": "application/json" },
+                                                   body: JSON.stringify({ sdr: serial, confirm: true }), signal: ctl.signal });
+      if (!r.ok) st.adsbError = ((await r.json().catch(() => ({}))).error) || `refused (${r.status})`;
+    } catch (e) {
+      st.adsbError = e.name === "AbortError" ? "no answer from the server, try again" : "couldn't reach the server";
+    } finally {
+      clearTimeout(timer);
+      st.adsbBusy = false;
+      renderAdsb();
+      renderSdr();
     }
   }
 

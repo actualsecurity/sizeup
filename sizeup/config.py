@@ -258,13 +258,17 @@ class Config:
     aircraft_adsblol_url: str = ""    # "" = adsb.lol's public API (sizeup/aircraft.py ADSBLOL_URL)
     aircraft_adsbfi_url: str = ""
     aircraft_registry: bool = True    # types from the FAA Releasable Aircraft Database (public domain)
-    # [aircraft.receiver]: our own receiver, read only (readsb / dump1090 1090 MHz, dump978-fa 978 MHz UAT
-    # aircraft.json, a path or an http(s) URL); sdr: the dongle meant for ADS-B (exact USB serial), kept out of
-    # sizeup's own radios. Off, and no dongle named, until there is one.
+    # [aircraft.receiver]: our own receiver (readsb / dump1090 1090 MHz, dump978-fa 978 MHz UAT aircraft.json, a path
+    # or an http(s) URL); sdr: the dongle meant for ADS-B (exact USB serial), kept out of sizeup's own radios and the
+    # only one the station's decoder (sizeup/radio/adsbd.py, sizeup-adsb.service) ever opens; gain / bias_tee: its
+    # readsb settings (auto gain; bias-tee power for an LNA that needs it, off by default). A named dongle's decoder
+    # output is json_1090 unless one is given. The station forwards what json_1090 / json_978 say to the hub (#235).
     aircraft_receiver: bool = False
     aircraft_receiver_1090: str = ""
     aircraft_receiver_978: str = ""
     aircraft_sdr: str = ""
+    aircraft_gain: str = "auto"
+    aircraft_bias_tee: bool = False
 
 
 def read_tones_file(path: str | Path) -> list[ToneCode]:
@@ -675,11 +679,16 @@ def _aircraft(data: dict, base: Path, sdrs: tuple[str, ...]) -> dict:
                                                       "adsbfi_url", "registry", "receiver", "alarms"})
     if not isinstance(ac.get("receiver", {}), dict):
         raise ConfigError("aircraft.receiver: a table ([aircraft.receiver])")
-    rc = _take(ac.get("receiver", {}), "aircraft.receiver", {"enabled", "sdr", "json_1090", "json_978"})
+    rc = _take(ac.get("receiver", {}), "aircraft.receiver", {"enabled", "sdr", "json_1090", "json_978", "gain", "bias_tee"})
     enabled, registry, receiver = ac.get("enabled", True), ac.get("registry", True), rc.get("enabled", False)
-    alarms = ac.get("alarms", True)
-    if not all(isinstance(x, bool) for x in (enabled, registry, receiver, alarms)):
-        raise ConfigError("aircraft.enabled / registry / alarms / aircraft.receiver.enabled: true or false")
+    alarms, bias_tee = ac.get("alarms", True), rc.get("bias_tee", False)
+    if not all(isinstance(x, bool) for x in (enabled, registry, receiver, alarms, bias_tee)):
+        raise ConfigError("aircraft.enabled / registry / alarms / aircraft.receiver.enabled / bias_tee: true or false")
+    from sizeup.radio.adsbd import gain_problem
+    gain = rc.get("gain", "auto")
+    if isinstance(gain, bool) or (why := gain_problem(gain)):
+        raise ConfigError(f"aircraft.receiver.gain: {why if not isinstance(gain, bool) else 'auto or a number of dB'}")
+    gain = "auto" if str(gain).strip().lower() == "auto" else f"{float(gain):g}"
     feeds = ac.get("feeds", ["adsblol", "adsbfi"])
     if not (isinstance(feeds, list) and feeds and all(f in AIRCRAFT_FEEDS for f in feeds) and len(set(feeds)) == len(feeds)):
         raise ConfigError('aircraft.feeds: from "receiver", "adsblol", "adsbfi" (each once; the APIs in the order to '
@@ -706,22 +715,26 @@ def _aircraft(data: dict, base: Path, sdrs: tuple[str, ...]) -> dict:
             raise ConfigError(f"aircraft.receiver.{k}: the decoder's aircraft.json: a file path or an http(s):// address")
         srcs[f"aircraft_receiver_{k.split('_')[1]}"] = (u if not u or "://" in u or Path(u).is_absolute()
                                                          else str((base / u).resolve()))
+    sdr = str(rc.get("sdr", "")).strip()
+    if sdr and receiver and not any(srcs.values()):
+        from sizeup.radio.adsbd import AIRCRAFT_JSON
+        srcs["aircraft_receiver_1090"] = AIRCRAFT_JSON      # the named dongle's decoder (sizeup-adsb.service) writes it
     if ("receiver" in feeds or receiver) and not (receiver and any(srcs.values())):
         raise ConfigError('aircraft.feeds: "receiver" needs [aircraft.receiver] enabled = true and json_1090 or json_978')
     if receiver and "receiver" not in feeds:
         feeds = ["receiver", *feeds]      # user, 2026-10-14: "primary local SDR on ADSB, secondary the above sources"
-    sdr = str(rc.get("sdr", "")).strip()
     if sdr:
         if not re.fullmatch(r"[\w.-]{1,32}", sdr):
             raise ConfigError("aircraft.receiver.sdr: the ADS-B dongle's exact USB serial (letters, digits, . _ -)")
         if sdr.isdigit():
             raise ConfigError("aircraft.receiver.sdr: an all-digit serial is read as a device index by readsb and rtl "
-                              "tools; give the dongle a name first (rtl_eeprom -s adsb)")
+                              "tools; give the dongle a name first (rtl_eeprom -d <index> -s adsb1090)")
         if sdr in sdrs:
             raise ConfigError(f"aircraft.receiver.sdr: {sdr} is one of sizeup's own radios ([radio] sdrs / shared_device)")
     return dict(aircraft_enabled=enabled, aircraft_feeds=tuple(feeds), aircraft_alarms=alarms, aircraft_radius_nm=radius,
                 aircraft_ceiling_ft=ceiling,
-                aircraft_registry=registry, aircraft_receiver=receiver, aircraft_sdr=sdr, **urls, **srcs)
+                aircraft_registry=registry, aircraft_receiver=receiver, aircraft_sdr=sdr, aircraft_gain=gain,
+                aircraft_bias_tee=bias_tee, **urls, **srcs)
 
 
 def _weather(data: dict) -> dict:

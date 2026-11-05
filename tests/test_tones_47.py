@@ -146,7 +146,8 @@ def test_an_installed_station_gets_the_heard_tones_once(tmp_path, monkeypatch):
                               "(ours) added after it (the old file: ")
     assert conf.with_name("config.toml.before-tones-47").read_text() == kept        # the backup
     assert said[2].startswith("hpn-atc: already has 'HPN Tower'")          # (#233: the template has it)
-    assert marks.read_text() == "fg2\ntones-47\nhpn-atc\n"
+    assert said[3].startswith("adsb-receiver: already has")              # (#235: the template has it)
+    assert marks.read_text() == "fg2\ntones-47\nhpn-atc\nadsb-receiver\n"
     after = load(conf)
     assert {t.name: (t.a_hz, t.b_hz) for t in after.tones if t.source == "config"} == {"Port Chester FD": PC,
                                                                                       "Rye Brook FD": RB}
