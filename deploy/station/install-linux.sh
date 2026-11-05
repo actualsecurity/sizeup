@@ -763,9 +763,22 @@ preflight() {
   if [ -n "$rs" ] && ! out=$(LD_LIBRARY_PATH="$rtl/lib" "$rs/bin/readsb" --version 2>&1); then
     warn "preflight: readsb --version: $(printf '%s' "$out" | tail -n 1)"; bad=1
   fi
-  if [ -f "$rel/sizeup/radio/adsbd.py" ] && ! python3 -I "$rel/sizeup/radio/adsbd.py" help 2>&1 | grep -q 'usage: adsbd.py'; then
-    warn "preflight: adsbd.py doesn't run with the system python3"; bad=1
-  fi
+  # The scripts the station runs with the SYSTEM python3 (stdlib only, no venv; tests/test_system_python.py
+  # keeps this list complete): each must load there. Loaded as a module, so its main() doesn't run and
+  # an error says what failed. (Not "adsbd.py help | grep -q usage": its usage exits 2, and under
+  # pipefail that fails the pipeline even when grep matches. That refused 919cfc2.)
+  local f
+  for f in sizeup/radio/adsbd.py sizeup/cloud/autoupdate.py sizeup/cloud/configupdate.py; do
+    [ -f "$rel/$f" ] || continue
+    if out=$(python3 -I -B -c 'import importlib.util as u, sys
+s = u.spec_from_file_location("preflight_check", sys.argv[1]); m = u.module_from_spec(s)
+sys.modules[s.name] = m; s.loader.exec_module(m)' "$rel/$f" 2>&1); then
+      say "preflight: $(basename "$f") loads with the system python3"
+    else
+      warn "preflight: $(basename "$f") doesn't load with the system $(python3 --version 2>&1): $(printf '%s' "$out" | tail -n 1)"
+      bad=1
+    fi
+  done
   if [ "$bad" -ne 0 ]; then
     say "FAILED: preflight failed for $(basename "$rel"): not switching to it" >&2
     exit 87                                    # (only here: the updater won't retry a build that doesn't work)

@@ -178,8 +178,10 @@ How it goes, end to end:
    their pin; apt runs only if a package is missing. The running station is not touched.
 6. **Preflight**, before anything switches: the new code imports, `/etc/sizeup/config.toml` loads
    with it, `sizeup --init-state` brings the databases up in a scratch directory, its systemd units
-   parse, rtl_fm / trunk-recorder `--version` / whisper-server run. A failure: no switch, the sha is
-   recorded as failed and reported to the hub.
+   parse, rtl_fm / trunk-recorder `--version` / whisper-server / readsb run, and the scripts run with
+   the system python3 (adsbd.py, autoupdate.py, configupdate.py: stdlib only, Python 3.11+) load
+   with it. A failure: no switch, the sha is recorded as failed and reported to the hub, with the
+   error (for a script, the system Python's version and its exception).
 7. **A quiet moment**: no carrier open, nobody talking, no transcription queued or running (the
    station's `GET /api/station-mode`, `update.busy`). It waits up to 5 minutes for one, then goes
    anyway.

@@ -152,7 +152,7 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
         <button id="rv-clear" type="button">Clear</button>
       </form>
       <section class="rv-sec">
-        <div class="sec-head"><h2>Main</h2><span id="rv-main-sum" class="dim small sum"></span><button type="button" class="help" aria-label="Help" aria-expanded="false" data-help="FG1, FG2, Fire/EMS 15 and every talkgroup marked Main (Settings, Radios), and notes tagged with a unit. The rest: Other talkgroups.">?</button></div>
+        <div class="sec-head"><h2>Main</h2><span id="rv-main-sum" class="dim small sum"></span><button type="button" class="help" aria-label="Help" aria-expanded="false" data-help="FG1, FG2, Fire/EMS 15 and every talkgroup marked Main (Settings, Radios), and notes tagged with a unit, the newest 200. The rest: Other talkgroups, their own newest 300, so a busy talkgroup never pushes Main off.">?</button></div>
         <div id="rv-paging" class="paging-live" hidden aria-live="polite"></div>
         <ol id="rv-main" class="list log radio-log rv-list"></ol>
       </section>
