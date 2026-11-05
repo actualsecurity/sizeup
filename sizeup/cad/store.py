@@ -209,6 +209,9 @@ CREATE TABLE IF NOT EXISTS radio_traffic (
 );
 CREATE INDEX IF NOT EXISTS radio_traffic_start ON radio_traffic(start);
 CREATE INDEX IF NOT EXISTS radio_traffic_call ON radio_traffic(call_id);
+-- the Radio view's Main and Other, each its own newest N (#241): by talkgroup (NULL: the FM channels) or channel, by time
+CREATE INDEX IF NOT EXISTS radio_traffic_tg_start ON radio_traffic(talkgroup, start);
+CREATE INDEX IF NOT EXISTS radio_traffic_channel_start ON radio_traffic(channel, start);
 CREATE TABLE IF NOT EXISTS radio_links (
   traffic_id TEXT NOT NULL REFERENCES radio_traffic(id) ON DELETE CASCADE,
   incident_id INTEGER NOT NULL REFERENCES incidents(id),
@@ -461,6 +464,9 @@ class Store:
                           ("tone_seq", "TEXT NOT NULL DEFAULT ''")):                      # every tone heard (#115)
             if tcols and col not in tcols:
                 self.db.execute(f"ALTER TABLE radio_traffic ADD COLUMN {col} {decl}")
+        if tcols:                                         # the Radio view's Main and Other, each its own newest N (#241)
+            self.db.execute("CREATE INDEX IF NOT EXISTS radio_traffic_tg_start ON radio_traffic(talkgroup, start)")
+            self.db.execute("CREATE INDEX IF NOT EXISTS radio_traffic_channel_start ON radio_traffic(channel, start)")
         if tcols and "id_note" not in tcols:              # why an FG1 key-up has no radio ID (#163), 2026-10-14
             self.db.execute("ALTER TABLE radio_traffic ADD COLUMN id_note TEXT NOT NULL DEFAULT ''")
         if tcols and "emergency" not in tcols:            # the emergency button on the row itself, 2026-10-14

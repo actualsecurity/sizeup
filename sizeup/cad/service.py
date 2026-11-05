@@ -27,7 +27,7 @@ from sizeup import polly
 from sizeup.cad import airport, dispatcher, eta, export, mapview, runcards
 from sizeup.cad.activity import Activity
 from sizeup.cad.alarms import Alarms
-from sizeup.cad.comms import Comms
+from sizeup.cad.comms import MAIN_LIMIT, MAX_ROWS, OTHER_LIMIT, Comms
 from sizeup.cad.feed import Feed
 from sizeup.cad.newids import NewIds
 from sizeup.cad.statushints import StatusHints
@@ -1149,11 +1149,14 @@ class Cad:
         return iids
 
     def comms_query(self, q: dict) -> dict:
-        """GET /api/cad/comms: {rows, rev, channels, rigs, pcfd, talking}. ?rev=N: {unchanged: true}
+        """GET /api/cad/comms: {rows, rev, channels, rigs, pcfd, talking, counts, limits}. ?rev=N: {unchanged: true}
         when nothing was logged since N (the CAD's Radio view polls). ?q=: words in the transcript or
         note. Each row says whether it is "main" (FG1 and the like, a talkgroup marked Main, a note):
-        the Radio view puts those up front and folds the rest by talkgroup. ?emergency=1: only transmissions
-        with the emergency button or an alarm (comms.with_alarms puts the alarm on every row)."""
+        the Radio view puts those up front and folds the rest by talkgroup. Each is its own newest N (#241: the
+        other talkgroups filled a shared newest 300 and Main showed None): ?main_limit= (MAIN_LIMIT) for Main,
+        ?limit= (OTHER_LIMIT) for the rest, the same filters on both; rows: both, newest first; counts and
+        limits: {main, other}. ?emergency=1: only transmissions with the emergency button or an alarm
+        (comms.with_alarms puts the alarm on every row)."""
         def one(k: str) -> str:
             v = (q.get(k) or [""])[0].strip()
             if len(v) > 60:
@@ -1174,19 +1177,25 @@ class Cad:
             return {"unchanged": True, "rev": rev, "talking": talking}
         pcfd = [u["name"] for u in self.radios.units if is_pcfd(u)]
         try:
-            limit = int(one("limit") or 300)
+            limit = max(1, min(int(one("limit") or OTHER_LIMIT), MAX_ROWS))
+            main_limit = max(1, min(int(one("main_limit") or MAIN_LIMIT), MAX_ROWS))
         except ValueError:
-            raise CadError("limit: a number") from None
-        rows = self.comms.query(unit=one("unit"), channel=one("channel"), event=one("event"),
-                                pcfd=pcfd if one("pcfd") in ("1", "true", "on") else None,
-                                since=when("since"), until=when("until"), limit=limit,
-                                kind={"radio": "radio", "notes": "notes"}.get(one("type"), ""), text=one("q"),
-                                emergency=one("emergency") in ("1", "true", "on"))
+            raise CadError("limit, main_limit: numbers") from None
+        main, other = self.comms.split([tg for tg in self.comms.talkgroups() if self.main_tg(tg)], self.s.airband,
+                                       unit=one("unit"), channel=one("channel"), event=one("event"),
+                                       pcfd=pcfd if one("pcfd") in ("1", "true", "on") else None,
+                                       since=when("since"), until=when("until"), main_limit=main_limit, limit=limit,
+                                       kind={"radio": "radio", "notes": "notes"}.get(one("type"), ""), text=one("q"),
+                                       emergency=one("emergency") in ("1", "true", "on"))
+        for r in main:
+            r["main"] = True
+        for r in other:
+            r["main"] = False
+        rows = sorted(main + other, key=lambda r: -r["start"])
         for r in rows:
             r["has_audio"] = r["kind"] == "radio" and self.has_clip(r["id"])
-            r["main"] = (r["talkgroup"] is None and r.get("channel") not in self.s.airband) or \
-                (r["talkgroup"] is not None and bool(self.main_tg(r["talkgroup"])))
         return {"rows": rows, "rev": f"{self.comms.rev}.{self.store.rev}", "pcfd": pcfd, "talking": talking, **self.comms.facets(),
+                "counts": {"main": len(main), "other": len(other)}, "limits": {"main": main_limit, "other": limit},
                 "events": [{"id": r["id"], "number": r["number"], "type": r["type"], "address": r["address"]}
                            for r in self.store.q("SELECT DISTINCT i.id, i.number, i.type, i.address FROM radio_links l "
                                                  "JOIN incidents i ON i.id = l.incident_id ORDER BY i.id DESC LIMIT 100")]}
