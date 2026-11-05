@@ -5,7 +5,9 @@
 // format of the monitor page on the right with how certain channels are up front and obvious and the
 // others are hidden feels better"): Main (FG1, Fire/EMS 15, every talkgroup marked Main in Settings >
 // Radios, and the notes) up front; every other talkgroup folded into one row each under Other
-// talkgroups, opened on a click. The pinned 60 Control feed stays at the top of the units column.
+// talkgroups, opened on a click. The pinned 60 Control feed stays at the top of the units column. Each is its own
+// newest N (the hub's limits: Main 200, Other 300), the same filters on both (#241: the other talkgroups filled a
+// shared newest 300 on a busy evening and Main said None); no "load older": a From / To narrows either.
 //
 // Filters live in the URL hash, so a link from an event (#radio?event=26-000012) or the feed's More
 // (#radio?channel=Fire/EMS 15) opens filtered. Asks /api/cad/comms only while the view is on screen
@@ -103,7 +105,7 @@ window.RadioView = (() => {
   // folded; nothing else opens them (an emergency neither: its chip says so on the folded head), and a redraw or a
   // live update keeps what was chosen.
   const MAX_KEYS = 100;
-  const st = { open: false, rev: "", rows: [], facets: "", busy: false, again: false, timer: 0, lastOk: 0, error: "", failAt: 0,
+  const st = { open: false, rev: "", rows: [], limits: null, facets: "", busy: false, again: false, timer: 0, lastOk: 0, error: "", failAt: 0,
                other: { open: false, shut: false, tgs: new Set(), shutTgs: new Set() }, qTimer: 0 };
   try {
     const v = JSON.parse(localStorage.getItem(OTHER_KEY) || "null");
@@ -248,6 +250,18 @@ window.RadioView = (() => {
   }
   const emText = (g) => (g.emergency === "ours" ? "EMERGENCY" : g.stuck ? `Emergency flag stuck on ${g.stuck}` : "Emergency (not ours)");
 
+  // The header: "Main 42 TX · Other 300 TX (newest 300)", each section's own count against its own limit (#241);
+  // an older hub (no limits: one shared newest 300) as before.
+  function countText(rows, main, rest, lim) {
+    const tx = (list) => {
+      const n = list.filter((t) => t.kind !== "note").length, notes = list.length - n;
+      return `${n} TX${notes ? `, ${notes} note${notes === 1 ? "" : "s"}` : ""}`;
+    };
+    if (!lim) return `${tx(rows)}${rows.length >= 300 ? " (newest 300)" : ""}`;
+    const capped = (list, n) => (list.length >= n ? ` (newest ${n})` : "");
+    return `Main ${tx(main)}${capped(main, lim.main)} · Other ${tx(rest)}${capped(rest, lim.other)}`;
+  }
+
   // A page going out now (South 2), over Main until its finished row is in the list.
   function renderPaging() {
     Radio.fillPaging($("#rv-paging"), cad.state && cad.state.paging, new Set(st.rows.map((t) => t.id)));
@@ -256,12 +270,11 @@ window.RadioView = (() => {
   function render() {
     if (!st.open) return;
     renderPaging();
-    const rows = st.rows;
-    const main = rows.filter((t) => t.main !== false);
-    const rest = rows.filter((t) => t.main === false);
-    const nr = rows.filter((t) => t.kind !== "note").length;
-    setText($("#rv-count"), st.error ? `Load failed: ${st.error}`
-      : `${nr} TX${rows.length - nr ? `, ${rows.length - nr} note${rows.length - nr === 1 ? "" : "s"}` : ""}${rows.length >= 300 ? " (newest 300)" : ""}`);
+    const rows = st.rows, lim = st.limits;
+    let main = rows.filter((t) => t.main !== false);
+    let rest = rows.filter((t) => t.main === false);
+    if (lim) { main = main.slice(0, lim.main); rest = rest.slice(0, lim.other); }   // each section its own newest N
+    setText($("#rv-count"), st.error ? `Load failed: ${st.error}` : countText(rows, main, rest, lim));
     const chans = [...new Set(main.filter((t) => t.kind !== "note").map((t) => t.channel))];
     setText($("#rv-main-sum"), chans.join(" · "));
     syncList($("#rv-main"), main, { key: (t) => t.id, sig: rowSig, make: () => el("li"), fill: fillRow,
@@ -353,6 +366,7 @@ window.RadioView = (() => {
       else if (!d.unchanged) {
         st.rev = d.rev;
         st.rows = d.rows || [];
+        st.limits = d.limits && d.limits.main > 0 && d.limits.other > 0 ? d.limits : null;
         fillFacets(d);
       }
     } catch (e) {

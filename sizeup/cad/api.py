@@ -124,9 +124,10 @@ POST /api/cad/radio-id                    {system: mdc | fleetsync, radio_id, un
                                           new FG1 radio is (#163, the state's radio_ids; sizeup/cad/newids.py): unit
                                           names it (its transmissions go on that unit's events), label just says who,
                                           ignore stops asking; dispatchers and admins, only for an ID nobody has set
-GET  /api/cad/comms?unit=&channel=&event=&pcfd=1&emergency=1&since=&until=&limit=&rev=
+GET  /api/cad/comms?unit=&channel=&event=&pcfd=1&emergency=1&since=&until=&main_limit=&limit=&rev=
                                           every transmission (newest first) with its rig, radio ID, events, the
-                                          emergency button and its alarm (emergency=1: only those, #128)
+                                          emergency button and its alarm (emergency=1: only those, #128); Main
+                                          and Other each their own newest main_limit (200) / limit (300), #241
 GET  /api/cad/feed?limit=&tg=307,333      the pinned 60 Control feed: newest transmissions on the incident
                                           talkgroup(s), pc = why it is talking to us (sizeup/cad/feed.py)
 POST /api/cad/incident/<id>/link          {traffic_id, operator}  put a transmission on the event (why manual)
