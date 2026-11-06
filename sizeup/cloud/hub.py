@@ -125,6 +125,7 @@ class Jobs:
     def __init__(self):
         self._cond = threading.Condition()
         self._jobs: OrderedDict[str, dict] = OrderedDict()
+        self.closed = False             # the hub is draining (a deploy): the long polls return now, empty
 
     def put(self, kind: str, args: dict, ttl: float) -> dict:
         job = {"id": secrets.token_hex(8), "type": kind, "args": args, "expires": time.time() + ttl,
@@ -140,9 +141,18 @@ class Jobs:
             del self._jobs[jid]
         return [x for x in self._jobs.values() if not x["taken"]]
 
+    def close(self) -> None:
+        """Draining: every long poll returns at once with nothing; nothing more is handed out (a job waiting
+        here is the next task's to give: the clicker's request fails and is tried again)."""
+        with self._cond:
+            self.closed = True
+            self._cond.notify_all()
+
     def take(self, wait: float) -> list[dict]:
         with self._cond:
-            self._cond.wait_for(lambda: bool(self._open()), timeout=wait)
+            self._cond.wait_for(lambda: self.closed or bool(self._open()), timeout=wait)
+            if self.closed:
+                return []
             out = self._open()
             for x in out:
                 x["taken"] = True
@@ -525,6 +535,8 @@ class HubApp(App):
         self._aws_was_ok: bool | None = None           # AWS could take audio at the last sweep (_aws_resend)
         state = Path(cfg.cad_db).parent if cfg.cad_db else None
         self.mdb = MonitorDb(state / "hub.sqlite" if state else ":memory:")
+        # audio.sqlite: under the hub's supervisor (sizeup/handoff.py) the standby follows it with cad and hub, so
+        # on a takeover it is current and opened at once; retention keeps it small (_audio_retention, #251)
         self.audio = AudioDb(state / "audio.sqlite" if state else ":memory:", int(cfg.cloud_audio_max_mb * 1024 * 1024))
         # Nothing that could open an SDR or start a program: no dongles, no trunk-recorder or its
         # capture dir, no voice server, and no captures/ (its JSON files and WAVs live in SQLite here).
@@ -1079,19 +1091,52 @@ class HubApp(App):
         wav = self.audio.get(item.id)
         return wav_pcm(wav, 0.0 if isinstance(item, Traffic) else getattr(item, "voice_offset_s", 0.0)) if wav else None
 
-    def _clean_hub(self) -> None:
-        now = time.time()
+    def _clean_hub(self, background: bool = False, now: float | None = None) -> None:
+        now = time.time() if now is None else now
         self.store.prune(now - self.keep_s)
         with self._lock:
             while self.pages and self.pages[-1].end < now - self.keep_s:
                 self.pages.pop()
-        self.audio.prune_clips(now - self.cfg.audio_keep_hours * 3600)
+        self._audio_retention(now, background)
         self.sync()
+
+    def offpeak(self, now: float) -> bool:
+        """[storage] audio_offpeak: [start, end) in the console's time zone (2-5 am by default)."""
+        from datetime import datetime
+        a, b = self.cfg.audio_offpeak
+        h = datetime.fromtimestamp(now, tz.TZ).hour
+        return a <= h < b if a <= b else (h >= a or h < b)
+
+    def _audio_retention(self, now: float, background: bool = False) -> int:
+        """The audio retention (docs/cloud.md "Audio retention", #251, #46): clips older than [storage] audio_keep_hours
+        go, but the ones on a CAD event, with an alarm or an emergency (Comms.kept_for_events), kept
+        audio_keep_event_days (0 = forever); the size cap drops only clips that aren't a record. In small transactions;
+        outside the off-peak hours at most 10 of them a pass (the backlog waits for the night), and the free pages are
+        handed back (incremental vacuum) only off-peak. Nothing while the lease isn't ours and fresh."""
+        fence = getattr(self, "fence", None)
+        if fence is not None and not fence.ok():
+            return 0                              # not the hub's leader with a fresh lease: no writes (sizeup/fence.py)
+        cfg = self.cfg
+        quiet = self.offpeak(now)
+        days = cfg.audio_keep_event_days
+        n = self.audio.prune_clips(now - cfg.audio_keep_hours * 3600, kept=self.cad.comms.kept_for_events,
+                                   kept_older_than=(now - days * 86400) if days else None, batch=cfg.audio_prune_batch,
+                                   pause_s=0.05 if background else 0.0, max_rows=None if quiet else 10 * cfg.audio_prune_batch)
+        over = getattr(self.audio, "over_cap", 0)
+        if over and over != getattr(self, "_over_said", 0):
+            self._over_said = over
+            self.hub.log(f"audio: the clips kept as records alone are {over / 1e6:.0f} MB, over [cloud] audio_max_mb: "
+                         "kept (lower [storage] audio_keep_event_days to keep less)")
+        if quiet and background:
+            freed = self.audio.incremental_vacuum(max_pages=8192, step=128, pause_s=0.05)
+            if freed:
+                self.hub.log(f"audio: {freed} free page(s) of audio.sqlite handed back (incremental vacuum)")
+        return n
 
     def _hub_janitor(self) -> None:
         while not self._stopping.wait(600):
             try:
-                self._clean_hub()
+                self._clean_hub(background=True)
             except Exception as e:  # cleanup must never take the display down
                 self.hub.log(f"hub: cleanup error: {type(e).__name__}: {e}")
 

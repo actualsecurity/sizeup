@@ -6,14 +6,56 @@ from __future__ import annotations
 
 import http.client
 import json
+import random
 import ssl
+import time
+from typing import Callable
 from urllib.parse import urlsplit
 
 
 class HubError(RuntimeError):
-    def __init__(self, msg: str, status: int = 0):
+    def __init__(self, msg: str, status: int = 0, retry_after: float | None = None):
         super().__init__(msg)
         self.status = status       # 0 = never reached the hub (network, TLS, timeout)
+        self.retry_after = retry_after   # the hub's Retry-After (a deploy's handoff: 503 + 2 s), seconds
+
+
+def retry_after(value) -> float | None:
+    """A Retry-After header in seconds (the delta form only; the date form: None)."""
+    try:
+        v = float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return v if 0 <= v <= 3600 else None
+
+
+class Backoff:
+    """The link threads' wait after a failure (#247). A hub deploy is a gap of seconds now (the hot/cold handoff:
+    a 503 with Retry-After from the old task, a Cloudflare 502 / 530 for a moment), so the first tries come quickly:
+    first doubling, at most fast_cap for the first fast_for seconds of a failure streak; only an outage longer than
+    that backs off to cap. The hub's Retry-After is taken (within those bounds). ok() ends the streak."""
+
+    def __init__(self, first: float = 1.0, fast_cap: float = 5.0, cap: float = 60.0, fast_for: float = 180.0,
+                 clock: Callable[[], float] = time.monotonic, jitter: Callable[[float, float], float] = random.uniform):
+        self.first, self.fast_cap, self.cap, self.fast_for = first, fast_cap, cap, fast_for
+        self.clock, self.jitter = clock, jitter
+        self.since: float | None = None
+        self.n = 0
+
+    def fail(self, err: BaseException | None = None) -> float:
+        now = self.clock()
+        if self.since is None:
+            self.since, self.n = now, 0
+        self.n += 1
+        cap = self.fast_cap if now - self.since < self.fast_for else self.cap
+        wait = min(cap, self.first * 2 ** (self.n - 1))
+        ra = getattr(err, "retry_after", None)
+        if ra is not None:
+            wait = min(cap, max(0.5, ra))
+        return wait * self.jitter(0.8, 1.2)
+
+    def ok(self) -> None:
+        self.since, self.n = None, 0
 
 
 class HubClient:
@@ -86,7 +128,7 @@ class HubClient:
                 except (ValueError, AttributeError):
                     msg = raw[:200].decode(errors="replace").strip() or r.reason
                 # Cloudflare Access answers a missing/expired service token with a login page (302/403 HTML)
-                raise HubError(f"hub said {r.status}: {msg}", r.status)
+                raise HubError(f"hub said {r.status}: {msg}", r.status, retry_after(r.getheader("Retry-After")))
             try:
                 return json.loads(raw or b"{}")
             except ValueError as e:

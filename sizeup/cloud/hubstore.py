@@ -17,6 +17,7 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
+from typing import Callable
 
 from sizeup.incidents import Incident, IncidentStore, Traffic
 
@@ -36,10 +37,15 @@ CREATE INDEX IF NOT EXISTS audio_kind_at ON audio (kind, at);
 """
 
 
-def _connect(path: str) -> sqlite3.Connection:
+def _connect(path: str, incremental: bool = False) -> sqlite3.Connection:
     if path != ":memory:":
         Path(path).parent.mkdir(parents=True, exist_ok=True)
     db = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
+    if incremental and not db.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone():
+        # a new file: free pages handed back a few at a time, off-peak (AudioDb.incremental_vacuum, #251); before
+        # WAL, which writes the header. An older file keeps auto_vacuum off (turning it on is a whole VACUUM, a
+        # long lock): its free pages are reused instead.
+        db.execute("PRAGMA auto_vacuum = INCREMENTAL")
     db.execute("PRAGMA journal_mode = WAL")          # Litestream needs WAL
     db.execute("PRAGMA busy_timeout = 5000")         # ... and holds a read lock while it copies
     return db
@@ -153,7 +159,7 @@ class AudioDb:
     for this?" for every row, every second."""
 
     def __init__(self, path: str | Path, max_bytes: int = 500 * 1024 * 1024):
-        self.db = _connect(str(path))
+        self.db = _connect(str(path), incremental=True)
         self.db.executescript(AUDIO_SCHEMA)
         self.max_bytes = int(max_bytes)
         self._lock = threading.Lock()
@@ -181,21 +187,92 @@ class AudioDb:
             r = self.db.execute("SELECT note FROM audio WHERE id = ?", (aid,)).fetchone()
         return r[0] if r else ""
 
-    def prune_clips(self, older_than: float) -> int:
-        """Clips past the audio limit, then the oldest clips while over the size cap."""
+    def prune_clips(self, older_than: float, kept: Callable[[list[str]], set[str]] | None = None,
+                    kept_older_than: float | None = None, batch: int = 200, pause_s: float = 0.0,
+                    max_rows: int | None = None) -> int:
+        """The audio retention (#251, docs/cloud.md "Audio retention"). Clips (kind 'clip'; never the dispatch audio)
+        older than older_than go, except the ones kept() says are a record (on a CAD event, an alarm, an emergency):
+        those go only once older than kept_older_than (None: never). Then, while over the size cap, the oldest
+        clips that aren't a record. In transactions of at most `batch` rows, pause_s apart, the lock let go in
+        between (the station's clips and the players never wait long); at most max_rows this call (None: all).
+        The number deleted."""
         with self._lock:
-            gone = [r[0] for r in self.db.execute("SELECT id FROM audio WHERE kind = 'clip' AND at < ?", (older_than,))]
-            self.db.execute("DELETE FROM audio WHERE kind = 'clip' AND at < ?", (older_than,))
+            rows = self.db.execute("SELECT id, at FROM audio WHERE kind = 'clip' AND at < ? ORDER BY at",
+                                   (older_than,)).fetchall()
+        keep = kept([r[0] for r in rows]) if kept is not None and rows else set()
+        gone = [aid for aid, at in rows
+                if aid not in keep or (kept_older_than is not None and at < kept_older_than)]
+        if max_rows is not None:
+            gone = gone[:max_rows]
+        n = self._delete(gone, batch, pause_s)
+        if max_rows is not None and n >= max_rows:
+            return n
+        with self._lock:
             total = self.db.execute("SELECT COALESCE(SUM(LENGTH(wav)), 0) FROM audio").fetchone()[0]
+            over = []
             if total > self.max_bytes:
-                for aid, n in self.db.execute("SELECT id, LENGTH(wav) FROM audio WHERE kind = 'clip' ORDER BY at").fetchall():
-                    if total <= self.max_bytes:
-                        break
-                    self.db.execute("DELETE FROM audio WHERE id = ?", (aid,))
-                    gone.append(aid)
-                    total -= n
-            self._ids.difference_update(gone)
-        return len(gone)
+                sizes = self.db.execute("SELECT id, LENGTH(wav) FROM audio WHERE kind = 'clip' ORDER BY at").fetchall()
+        if total > self.max_bytes:
+            keep = kept([r[0] for r in sizes]) if kept is not None and sizes else set()
+            for aid, size in sizes:
+                if total <= self.max_bytes:
+                    break
+                if aid in keep:
+                    continue
+                over.append(aid)
+                total -= size
+            n += self._delete(over, batch, pause_s)
+            if total > self.max_bytes:
+                self.over_cap = total               # the records alone are over the cap: kept (the retention decides)
+        return n
+
+    over_cap = 0
+
+    def _delete(self, ids: list[str], batch: int, pause_s: float) -> int:
+        n = 0
+        batch = max(1, int(batch))
+        for k in range(0, len(ids), batch):
+            chunk = ids[k:k + batch]
+            with self._lock:
+                self.db.execute("BEGIN")
+                try:
+                    self.db.executemany("DELETE FROM audio WHERE id = ?", [(a,) for a in chunk])
+                    self.db.execute("COMMIT")
+                except Exception:
+                    self.db.execute("ROLLBACK")
+                    raise
+                self._ids.difference_update(chunk)
+            n += len(chunk)
+            if pause_s and k + batch < len(ids):
+                time.sleep(pause_s)
+        return n
+
+    def auto_vacuum(self) -> int:
+        """0 none, 1 full, 2 incremental."""
+        with self._lock:
+            return int(self.db.execute("PRAGMA auto_vacuum").fetchone()[0])
+
+    def free_pages(self) -> int:
+        with self._lock:
+            return int(self.db.execute("PRAGMA freelist_count").fetchone()[0])
+
+    def incremental_vacuum(self, max_pages: int = 4096, step: int = 128, pause_s: float = 0.0) -> int:
+        """Free pages handed back to the file system, `step` at a time (a short write each), at most max_pages
+        this call: only with auto_vacuum incremental (a new audio.sqlite). The pages freed."""
+        if self.auto_vacuum() != 2:
+            return 0
+        done = 0
+        while done < max_pages:
+            free = self.free_pages()
+            if not free:
+                break
+            k = min(step, free, max_pages - done)
+            with self._lock:
+                self.db.execute(f"PRAGMA incremental_vacuum({int(k)})").fetchall()
+            done += k
+            if pause_s:
+                time.sleep(pause_s)
+        return done
 
     def prune_dispatch(self, keep: set[str], older_than: float) -> int:
         """Previews nobody dispatched, after a day (the dispatch log's audio stays)."""

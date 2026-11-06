@@ -27,8 +27,27 @@ RUN set -eu; \
     rm /tmp/litestream.tgz; \
     litestream version
 
+# cloudflared, the Cloudflare connector, pinned, checked against the release's SHA256 list
+# (github.com/cloudflare/cloudflared/releases/tag/2026.10.7). The task's "cloudflared" container runs it from this
+# image, under deploy/hub/connector.sh: started only once this task is the hub's leader (GitHub #247).
+ARG CLOUDFLARED_VERSION=2026.10.7
+ARG CLOUDFLARED_SHA256_ARM64=3df43aedc9ff291d1735b5cb576cb97e0b157488796db2e32b28aecabb445775
+ARG CLOUDFLARED_SHA256_AMD64=1f99fb518b83dec2ba8d870a7cc991d82a77e6196295a3d2754ba17ab9f91872
+RUN set -eu; \
+    case "${TARGETARCH:-arm64}" in \
+      arm64) arch=arm64; sum="$CLOUDFLARED_SHA256_ARM64" ;; \
+      amd64) arch=amd64; sum="$CLOUDFLARED_SHA256_AMD64" ;; \
+      *) echo "no cloudflared build pinned for $TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    url="https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-${arch}"; \
+    python -c "import sys, urllib.request; urllib.request.urlretrieve(sys.argv[1], sys.argv[2])" "$url" /usr/local/bin/cloudflared; \
+    echo "$sum  /usr/local/bin/cloudflared" | sha256sum -c -; \
+    chmod 0755 /usr/local/bin/cloudflared; \
+    cloudflared --version
+
 RUN useradd --system --uid 10001 --home-dir /data --shell /usr/sbin/nologin sizeup \
-    && mkdir -p /data && chown sizeup:sizeup /data
+    && mkdir -p /data && chown sizeup:sizeup /data \
+    && mkdir -p /run/sizeup-shared && chown sizeup:sizeup /run/sizeup-shared
 
 WORKDIR /app
 COPY pyproject.toml ./
@@ -49,7 +68,12 @@ ENV PYTHONPATH=/app \
     SIZEUP_BUILD=${SIZEUP_BUILD}
 
 USER sizeup
+# The leader file and the hub's heartbeat, shared with the connector container (deploy/aws/taskdef.json mounts a
+# task volume here; ECS copies this folder, owner sizeup, into it).
+VOLUME ["/run/sizeup-shared"]
 EXPOSE 8090
-HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
-    CMD ["python", "-c", "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:%s/healthz' % os.environ.get('SIZEUP_PORT', '8090'), timeout=4)"]
+# The supervisor's /healthz (port 8089, sizeup/handoff.py) when it runs (LITESTREAM_BUCKET), else the app's.
+# ECS uses the task definition's own health check (the same control port).
+HEALTHCHECK --interval=10s --timeout=5s --start-period=300s --retries=3 \
+    CMD ["python", "-c", "import os, urllib.request; port = '8089' if os.environ.get('LITESTREAM_BUCKET') else os.environ.get('SIZEUP_PORT', '8090'); urllib.request.urlopen('http://127.0.0.1:%s/healthz' % port, timeout=4)"]
 ENTRYPOINT ["/app/deploy/hub/entrypoint.sh"]

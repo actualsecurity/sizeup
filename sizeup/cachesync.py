@@ -20,6 +20,11 @@ them for minutes. This keeps a gzip copy of each in the same bucket, under the s
     start()     a background thread looks at those files every SCAN_S and uploads one that changed (its sha256 is
                 not the one last uploaded or restored), at most once per its gap (the files saved every few minutes:
                 once an hour). A failed upload is logged and tried again later (BACKOFF_S); it never stops anything.
+                Only what changed is sent (#251: every copy went up again a minute after each start): the sha256
+                of each file as last uploaded or restored is kept in the state dir (STATE_FILE), and a file this
+                process knows nothing about is compared with S3's copy first: the gzip copy is made the same way
+                every time (mtime 0), so its MD5 is the ETag S3 listed for it (a plain single-part ETag only); the
+                same, it isn't sent again.
 
 Credentials: the ECS task role (sizeup/aws.py credentials(); no keys anywhere). Its "backups" policy
 (sizeup-aws/2-iam.sh) already allows s3:GetObject / PutObject on the bucket's every key and s3:ListBucket on the
@@ -31,6 +36,7 @@ from __future__ import annotations
 
 import gzip
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -59,6 +65,9 @@ FILES: tuple[tuple[re.Pattern, float], ...] = (
 )
 DIRS = ("", "gis", "trains", "aircraft")    # the folders of the state dir those are in
 SUB = "cache"                       # <prefix>/cache/...
+STATE_FILE = "cachesync.json"       # in the state dir: {rel: {sha, up}} as last uploaded or restored (not itself kept)
+PLAIN_ETAG = re.compile(r'"?([0-9a-f]{32})"?')     # a single-part upload's ETag: the MD5 of the object
+MANIFEST = ".cachesync-restored.json"  # in the state dir: what the hub's standby restored (sizeup/handoff.py)
 SCAN_S = 60.0
 RESTORE_S = 45.0                    # restore() at most this long in all (the health check's start period is 60 s)
 LIST_TIMEOUT_S = 10.0
@@ -100,27 +109,31 @@ class CacheMirror:
     def __init__(self, state_dir: str | Path, bucket: str, prefix: str = "sizeup-hub", region: str = "",
                  send: Callable[[str, str, dict, object, float], tuple[int, bytes]] | None = None,
                  creds: Callable[[], aws.Credentials] = aws.credentials, log: Callable[[str], None] = print,
-                 clock: Callable[[], float] = time.time, endpoint: str = ""):
+                 clock: Callable[[], float] = time.time, endpoint: str = "", fence: Callable[[], bool] | None = None):
         self.root = Path(state_dir)
+        self.fence = fence                    # the hub's single-writer lock (sizeup/fence.py): False = never upload
         self.bucket, self.region = bucket, aws.region(region)
         self.prefix = "/".join(p for p in (prefix.strip("/"), SUB) if p)
         self.endpoint = (endpoint or f"https://{bucket}.s3.{self.region}.amazonaws.com").rstrip("/")
         self.send, self.creds, self.log, self.clock = send or _send, creds, log, clock
         self._lock = threading.Lock()
         self.files: dict[str, dict] = {}      # rel -> {sha, up (when uploaded), fails, retry, error, restored}
+        self.remote: dict[str, str] = {}      # rel -> the MD5 S3 has for its copy (a plain ETag), from the listing
+        self.skipped = 0                      # uploads not made: S3 had that copy already
+        self._load_state()
         self.status = {"restored": 0, "restore_s": None, "uploaded": 0, "error": "", "at": None}
         self._stop = threading.Event()
         self._closed = threading.Event()      # restore() is over (its deadline passed)
         self._thread: threading.Thread | None = None
 
     @classmethod
-    def from_env(cls, state_dir, log: Callable[[str], None] = print) -> CacheMirror | None:
+    def from_env(cls, state_dir, log: Callable[[str], None] = print, fence: Callable[[], bool] | None = None) -> CacheMirror | None:
         """The hub's: LITESTREAM_BUCKET / LITESTREAM_PATH / LITESTREAM_REGION (deploy/aws/taskdef.json), else None."""
         bucket = os.environ.get("LITESTREAM_BUCKET", "").strip()
         if not bucket or not state_dir or os.environ.get("SIZEUP_CACHE_S3", "").strip().lower() in ("0", "off", "no", "false"):
             return None
         return cls(state_dir, bucket, os.environ.get("LITESTREAM_PATH", "").strip() or "sizeup-hub",
-                   os.environ.get("LITESTREAM_REGION", "").strip(), log=log)
+                   os.environ.get("LITESTREAM_REGION", "").strip(), log=log, fence=fence)
 
     # -- S3 ---------------------------------------------------------------------------------------------------
 
@@ -154,6 +167,9 @@ class CacheMirror:
                 rel = k[len(self.prefix) + 1:-3] if k.startswith(self.prefix + "/") and k.endswith(".gz") else ""
                 if rel and gap_for(rel) is not None:
                     out[rel] = size
+                    m = PLAIN_ETAG.fullmatch((c.findtext(f"{NS}ETag") or "").strip())
+                    if m:
+                        self.remote[rel] = m.group(1)
             token = doc.findtext(f"{NS}NextContinuationToken") or ""
             if (doc.findtext(f"{NS}IsTruncated") or "").lower() != "true" or not token:
                 break
@@ -161,10 +177,42 @@ class CacheMirror:
 
     # -- restore ----------------------------------------------------------------------------------------------
 
+    @property
+    def manifest(self) -> Path:
+        return self.root / MANIFEST
+
+    def save_manifest(self) -> None:
+        """What restore() put in place and its sha256: the hub's standby (sizeup/handoff.py) restores the caches
+        before the app runs; the app's own mirror then knows them (load_manifest) and doesn't upload them again."""
+        with self._lock:
+            done = {rel: st["sha"] for rel, st in self.files.items() if st.get("restored") and st.get("sha")}
+        try:
+            tmp = self.manifest.with_name(self.manifest.name + ".tmp")
+            tmp.write_text(json.dumps(done, sort_keys=True))
+            os.replace(tmp, self.manifest)
+        except OSError as e:
+            self.log(f"cachesync: manifest not written ({e})")
+
+    def load_manifest(self) -> int:
+        try:
+            d = json.loads(self.manifest.read_text())
+        except (OSError, ValueError):
+            return 0
+        n = 0
+        for rel, sha in (d.items() if isinstance(d, dict) else ()):
+            if gap_for(rel) is not None and isinstance(sha, str) and (self.root / rel).is_file():
+                with self._lock:
+                    self.files[rel] = {"sha": sha, "up": self.clock(), "fails": 0, "retry": 0.0, "error": "", "restored": True}
+                n += 1
+        return n
+
     def restore(self, deadline_s: float = RESTORE_S) -> int:
         """Every copy whose file is missing here, fetched and unpacked (a few at once, deadline_s in all). The
         number restored. Never raises: what isn't back is fetched from its source as before."""
         t0 = time.monotonic()
+        known = self.load_manifest()
+        if known:
+            self.log(f"cachesync: {known} cache copies already restored before the app started")
         try:
             have = self.listing()
         except Exception as e:  # no credentials, no network, no permission: local only
@@ -210,7 +258,33 @@ class CacheMirror:
             Path(tmp).unlink(missing_ok=True)
         with self._lock:
             self.files[rel] = {"sha": _sha256(dest), "up": self.clock(), "fails": 0, "retry": 0.0, "error": "", "restored": True}
+        self._save_state()
         return True
+
+    # -- what was sent, kept across restarts ---------------------------------------------------------------------
+
+    def _state_path(self) -> Path:
+        return self.root / STATE_FILE
+
+    def _load_state(self) -> None:
+        try:
+            doc = json.loads(self._state_path().read_text())
+        except (OSError, ValueError):
+            return
+        for rel, d in (doc.get("files") or {}).items() if isinstance(doc, dict) else ():
+            if gap_for(rel) is not None and isinstance(d, dict) and isinstance(d.get("sha"), str):
+                up = d.get("up") if isinstance(d.get("up"), (int, float)) else None
+                self.files[rel] = {"sha": d["sha"], "up": up, "fails": 0, "retry": 0.0, "error": "", "restored": False}
+
+    def _save_state(self) -> None:
+        with self._lock:
+            doc = {"files": {rel: {"sha": st["sha"], "up": st["up"]} for rel, st in self.files.items() if st.get("sha")}}
+        try:
+            tmp = self._state_path().with_suffix(".tmp")
+            tmp.write_text(json.dumps(doc, separators=(",", ":"), sort_keys=True))
+            tmp.replace(self._state_path())
+        except OSError as e:  # only costs an upload after the next restart
+            self.log(f"cachesync: {STATE_FILE} not saved ({type(e).__name__}: {e})")
 
     # -- upload -----------------------------------------------------------------------------------------------
 
@@ -232,6 +306,8 @@ class CacheMirror:
     def scan(self) -> int:
         """Upload what changed since it was last uploaded (or restored). The number uploaded. Never raises."""
         n, now = 0, self.clock()
+        if self.fence is not None and not self.fence():
+            return 0                              # not the hub's leader (any more): nothing goes to S3
         for rel in self.candidates():
             if self._stop.is_set():
                 break
@@ -243,7 +319,11 @@ class CacheMirror:
                 sha = _sha256(self.root / rel)
                 if sha == st["sha"]:
                     continue
-                self._upload(rel, sha)
+                if not self._upload(rel, sha):           # S3 had it already: nothing sent
+                    st.update(sha=sha, up=now, fails=0, retry=0.0, error="")
+                    self.skipped += 1
+                    self._save_state()
+                    continue
             except FileNotFoundError:
                 continue                                  # replaced or gone between the look and the read
             except Exception as e:  # never fatal: logged, tried again later
@@ -257,23 +337,31 @@ class CacheMirror:
                 continue
             st.update(sha=sha, up=now, fails=0, retry=0.0, error="")
             self.status.update(uploaded=self.status["uploaded"] + 1, at=now, error="")
+            self._save_state()
             n += 1
         return n
 
-    def _upload(self, rel: str, sha_raw: str) -> None:
+    def _upload(self, rel: str, sha_raw: str) -> bool:
+        """The file's gzip copy to S3; False when S3's copy is that one already (its ETag is our MD5): not sent."""
         src = self.root / rel
         with tempfile.TemporaryFile() as gz:
-            h = hashlib.sha256()
-            with open(src, "rb") as f, gzip.GzipFile(fileobj=_Hashing(gz, h), mode="wb", compresslevel=6, mtime=0) as z:
+            h, md5 = hashlib.sha256(), hashlib.md5(usedforsecurity=False)
+            with open(src, "rb") as f, gzip.GzipFile(fileobj=_Hashing(gz, h, md5), mode="wb", compresslevel=6, mtime=0) as z:
                 shutil.copyfileobj(f, z, CHUNK)
             size = gz.tell()
+            if self.remote.get(rel) == md5.hexdigest():
+                return False
             if size > MAX_BYTES:
                 raise ValueError(f"{size // (1024 * 1024)} MB: too big to keep a copy")
             gz.seek(0)
+            if self.fence is not None and not self.fence():
+                raise RuntimeError("not the hub's leader: not uploaded")
             self._call("PUT", self._url(self.key(rel)), gz, h.hexdigest(),
                        {"Content-Type": "application/gzip", "Content-Length": str(size), "x-amz-meta-sha256": sha_raw},
                        timeout=max(TIMEOUT_S, size / 200_000))
+        self.remote[rel] = md5.hexdigest()
         self.log(f"cachesync: {rel} kept in S3 ({size / 1e6:.2f} MB gzip)")
+        return True
 
     # -- the thread -------------------------------------------------------------------------------------------
 
@@ -303,11 +391,12 @@ class CacheMirror:
 class _Hashing:
     """A write-only file that hashes what goes through it (the gzip bytes' sha256, which S3 checks)."""
 
-    def __init__(self, f, h):
-        self.f, self.h = f, h
+    def __init__(self, f, *hashes):
+        self.f, self.hashes = f, hashes
 
     def write(self, b) -> int:
-        self.h.update(b)
+        for h in self.hashes:
+            h.update(b)
         return self.f.write(b)
 
     def flush(self) -> None:

@@ -411,15 +411,22 @@ class App:
         self.prealert = None
         self._started = False
         # The map caches kept across hub restarts (sizeup/cachesync.py, #229): on a new Fargate task, the county GIS
-        # layers, the camera lists, Metro-North's stations and the FAA registry come back from the S3 backups bucket
-        # here, before the providers below read their caches, so the maps have them at once. The hub only
-        # (LITESTREAM_BUCKET set); local only everywhere else.
+        # layers, the camera lists, Metro-North's stations and the FAA registry come back from the S3 backups bucket.
+        # Since #251 that happens in the background after the CAD serves (start_layers -> _load_layers), and the
+        # providers below read (or read again) their caches once it is over. The hub only (LITESTREAM_BUCKET set);
+        # local only everywhere else.
         self.cache_mirror = None
+        self.fence = None                         # the hub's single-writer lease (sizeup/fence.py), under its supervisor
         if cfg.cloud_role != "station" and cfg.cad_db:
             from sizeup.cachesync import CacheMirror
-            self.cache_mirror = CacheMirror.from_env(Path(cfg.cad_db).parent, log=log)
-            if self.cache_mirror is not None:
-                self.cache_mirror.restore()
+            from sizeup.fence import Fence
+            fence = Fence.from_env(log=log)      # the hub's single-writer lock (sizeup/handoff.py): uploads only while ours
+            self.fence = fence
+            self.cache_mirror = CacheMirror.from_env(Path(cfg.cad_db).parent, log=log, fence=fence.ok if fence else None)
+        self._layers_lock = threading.Lock()
+        self._layers_on = False                   # start_layers() asked for, stop_layers() not since
+        self._layers_thread: threading.Thread | None = None
+        self.layers_ready = threading.Event()     # the map caches read: the providers run (Settings, /healthz "loading")
         # The map's highway layers (sizeup/roads.py, #73): 511NY's cameras, incidents and signs where
         # it is configured, the gazetteer's mile markers and exits everywhere. Its place search is a
         # provider for the "@" place search (#67's Cad.search_places asks cad.place_providers).
@@ -429,7 +436,7 @@ class App:
         # The county GIS layers (sizeup/gis.py, #91): parcels, boundaries, utilities, facilities ... fetched
         # from Westchester County GIS by the CAD of record, served to the maps from here.
         from sizeup.gis import Gis
-        self.gis = Gis.from_config(cfg, log=log)
+        self.gis = Gis.from_config(cfg, log=log, load=False)    # its cache (28 layers, ~50 MB) read in _load_layers
         # The camera wall's area (#125): our fire districts from the county layer, the Settings edits
         # ("camera_wall": margin, include, exclude), our departments for the municipal fallback; Settings >
         # System shows every camera with where it falls (cad.camera_area).
@@ -2701,7 +2708,64 @@ class App:
 
     def start_layers(self) -> None:
         """The maps' data: one list for the all-in-one app and the hub (sizeup/cloud/hub.py HubApp), so
-        neither can miss one (#225: the hub never started the road projects reader)."""
+        neither can miss one (#225: the hub never started the road projects reader).
+        The first time, in the background (#251): the caches restored from S3, the county GIS layers read from
+        disk, then the providers started (_load_layers); the CAD serves meanwhile, each layer saying "loading"."""
+        with self._layers_lock:
+            self._layers_on = True
+            if not self.layers_ready.is_set():
+                if self._layers_thread is None:
+                    self._layers_thread = threading.Thread(target=self._load_layers, name="layers-load", daemon=True)
+                    self._layers_thread.start()
+                return
+        self._start_providers()
+
+    def _load_layers(self) -> None:
+        """start_layers()'s first time, off the request path. Never raises; whatever fails, the providers start."""
+        t0 = time.monotonic()
+        restored = 0
+        try:
+            if self.cache_mirror is not None:
+                restored = self.cache_mirror.restore()
+            if restored:
+                self._reread_caches()
+            self.gis.load_cache()
+        except Exception as e:  # never in the way of the layers starting: they fetch from their sources
+            log(f"layers: map caches not all read ({type(e).__name__}: {e}); fetched from their sources")
+        finally:
+            with self._layers_lock:
+                self.layers_ready.set()
+                on = self._layers_on
+            log(f"layers: map caches read in {time.monotonic() - t0:.1f} s"
+                + (f" ({restored} restored from S3)" if restored else "") + ("" if on else "; layers stopped meanwhile"))
+            if on:
+                self._start_providers()
+
+    def _reread_caches(self) -> None:
+        """The small providers read their caches when they were made, before cachesync put a new task's back: again."""
+        for name, fn in (("roads", lambda: self.roads._load()), ("roadwork", lambda: self.roadwork._load()),
+                         ("trains", lambda: (self.trains._load(), self.trains._load_points(None))),
+                         ("weather", lambda: self.weather._load()),
+                         ("aircraft", lambda: self.aircraft.registry.con is None and self.aircraft.registry._open())):
+            try:
+                fn()
+            except Exception as e:  # one provider's cache: never the others'
+                log(f"layers: {name} cache not read again ({type(e).__name__}: {e})")
+
+    def health_extra(self, fence=None) -> dict:
+        """/healthz beyond the static part (#251): "hub_role" under the hub's supervisor (the app runs only as the
+        leader: "active", "fenced" once the lease isn't ours and fresh; a standby task has no app: its supervisor's
+        control port says "standby"), that the CAD serves, and what is still loading in the background."""
+        out: dict = {"serving": True, "loading": self.loading()}
+        if fence is not None:
+            out["hub_role"] = "active" if fence.ok() else "fenced"
+        return out
+
+    def loading(self) -> list[str]:
+        """What is still loading in the background (/healthz, the log): never the CAD itself."""
+        return [] if self.layers_ready.is_set() or not self._layers_on else ["map layers"]
+
+    def _start_providers(self) -> None:
         self.roads.start()                        # 511NY's and the Thruway's layers (sizeup/roads.py)
         self.roadwork.start()                     # road projects & closures (sizeup/roadprojects.py)
         self.gis.start()                          # the county GIS layers (sizeup/gis.py)
@@ -2713,6 +2777,8 @@ class App:
             self.cache_mirror.start()             # their caches kept in S3 as they change (sizeup/cachesync.py)
 
     def stop_layers(self) -> None:
+        with self._layers_lock:
+            self._layers_on = False
         self.roads.stop()
         self.roadwork.stop()
         self.gis.stop()
@@ -2808,7 +2874,7 @@ def make_app(cfg: Config) -> App:
     return app
 
 
-def make_server(app: App) -> WebServer:
+def make_server(app: App, fence=None) -> WebServer:
     cfg = app.cfg
     server = WebServer(cfg.host, cfg.port, app.scene(), app.state, app.clip, app.close_incident, app.set_mode,
                        app.set_talkgroup, app.set_talkgroup_group, app.retranscribe, cad=CadApi(app.cad),
@@ -2816,7 +2882,8 @@ def make_server(app: App) -> WebServer:
                        access_log=log if cfg.cloud_role == "hub" else None, station_mode=app.station,
                        role=cfg.cloud_role, roads=app.roads, gis=app.gis,
                        trains=app.trains, weather=app.weather, station_health=getattr(app, "health", None),
-                       aircraft=app.aircraft, roadwork=app.roadwork, set_adsb=app.set_adsb_receiver)
+                       aircraft=app.aircraft, roadwork=app.roadwork, set_adsb=app.set_adsb_receiver,
+                       fence=fence, health_fn=lambda: app.health_extra(fence))
 
     def changed() -> None:             # a new talker is pushed at once, not on the next second
         server.poke()
@@ -2848,7 +2915,9 @@ def access_verifier(cfg: Config):
 
 
 def health_info(cfg: Config) -> dict:
-    """/healthz: cheap, always 200 while the process serves (the container health check)."""
+    """/healthz: cheap, always 200 while the process serves (the container health check). The app serves the CAD
+    before the map layers and the hub's audio are loaded (#251): "loading" lists what is still on its way
+    (["map layers", "audio"], [] once all is in), and is never a reason for an unhealthy answer."""
     try:
         from importlib.metadata import version
         ver = version("sizeup")
@@ -2857,6 +2926,24 @@ def health_info(cfg: Config) -> dict:
     return {"ok": True, "version": ver, "build": os.environ.get("SIZEUP_BUILD", ""),
             "role": cfg.cloud_role or "all-in-one", "station": cfg.station_id,
             **({"public_url": cfg.cloud_public_url} if cfg.cloud_public_url else {})}
+
+
+def init_state(cfg: Config) -> list[str]:
+    """--init-state: create / migrate the databases, nothing else (#251: it used to build the whole app, the GIS
+    layers and the S3 cache restore included, ~15 s on Fargate; the hub's supervisor runs it at every takeover,
+    sizeup/handoff.py). The names of the databases."""
+    made: list[str] = []
+    if not cfg.cad_db:
+        return made
+    Cad.from_config(cfg, log=log).store.db.close()     # the schema, its migrations, the seeded lists
+    made.append(cfg.cad_db)
+    if cfg.cloud_role == "hub":
+        from sizeup.cloud.hubstore import AudioDb, MonitorDb
+        state = Path(cfg.cad_db).parent
+        MonitorDb(state / "hub.sqlite").db.close()
+        AudioDb(state / "audio.sqlite").db.close()
+        made += [str(state / "hub.sqlite"), str(state / "audio.sqlite")]
+    return made
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -2871,13 +2958,24 @@ def main(argv: list[str] | None = None) -> int:
     except (ConfigError, FileNotFoundError) as e:
         print(f"config: {e}", file=sys.stderr)
         return 2
-    app = make_app(cfg)
+    # The hub under its supervisor (sizeup/handoff.py): the lease must stay ours and fresh, or this process
+    # stops writing at once (sizeup/fence.py); SIGTERM drains: new requests get 503 + Retry-After, those in
+    # flight finish, then it exits (the supervisor then puts the last changes in S3 and hands over).
+    from sizeup.fence import Fence
+    fence = Fence.from_env(log=log)
+    if fence is not None and not args.init_state:
+        if not fence.ok():
+            log("fence: started without a fresh lease: not starting")
+            return 75
+        fence.watch()
     if args.init_state:
+        init_state(cfg)
         log(f"sizeup: databases ready ({cfg.cad_db or 'in memory'})")
         return 0
+    app = make_app(cfg)
     app.start()
-    server = make_server(app)
-    signal.signal(signal.SIGTERM, lambda *_: server.shutdown())
+    server = make_server(app, fence)
+    signal.signal(signal.SIGTERM, lambda *_: server.drain())
     sm = app.station
     role = (" · hub (fed by the station, no radios)" if cfg.cloud_role == "hub"
             else f" · station, forwarding to {sm.hub_url}" if sm is not None and sm.forward else "")

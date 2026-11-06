@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import base64
 import io
-import random
 import tempfile
 import threading
 import time
@@ -50,7 +49,7 @@ from sizeup.cad import dispatcher
 from sizeup.cad.dispatcher import AudioUnavailable
 from sizeup.cloud.aircraftlink import AircraftForwarder
 from sizeup.cloud.autoupdate import Watch
-from sizeup.cloud.client import HubClient, HubError
+from sizeup.cloud.client import Backoff, HubClient, HubError
 from sizeup.cloud.health import Metrics, station_metrics
 from sizeup.cloud.outbox import Outbox
 from sizeup.tts import VoiceCfg
@@ -209,7 +208,7 @@ class StationLink:
 
     def _forward(self) -> None:
         client = self._client(60.0)
-        backoff = 1.0
+        backoff = Backoff(first=1.0, fast_cap=5.0, cap=60.0)      # a deploy is seconds now (#247)
         while not self._stop.is_set():
             rows = self.outbox.batch()
             if not rows:
@@ -224,14 +223,13 @@ class StationLink:
                 acked = int(r["acked"])
             except (HubError, KeyError, TypeError, ValueError) as e:
                 self._fail(e)
-                self._stop.wait(backoff * random.uniform(0.8, 1.2))
-                backoff = min(backoff * 2, 60.0)
+                self._stop.wait(backoff.fail(e))
                 continue
             self.outbox.ack(acked)
             self.sent += sum(1 for x in rows if x["seq"] <= acked)
             if not self._stop.is_set():
                 self._ok()
-            backoff = 1.0
+            backoff.ok()
 
     # -- talking now + status (latest wins) ------------------------------------------------------------
 
@@ -254,6 +252,7 @@ class StationLink:
 
     def _state(self) -> None:
         client = self._client(10.0)
+        backoff = Backoff(first=1.0, fast_cap=3.0, cap=5.0)
         last_status = last_tg = 0.0
         tg_sig = None
         while not self._stop.is_set():
@@ -276,9 +275,10 @@ class StationLink:
                     last_status, self._status_now = now, False
                     if "talkgroups" in body["status"]:
                         last_tg, tg_sig = now, [(r["tg"], r["record"], r["main"]) for r in body["status"]["talkgroups"]]
+                backoff.ok()
             except HubError as e:
                 self._fail(e)
-                self._stop.wait(3.0)
+                self._stop.wait(backoff.fail(e))
             self._live_wake.wait(LIVE_REFRESH_S if talking or paging else STATUS_S)
             self._live_wake.clear()
             self._stop.wait(0.05)           # a burst of changes goes up as one update
@@ -287,16 +287,15 @@ class StationLink:
 
     def _jobs(self) -> None:
         client = self._client(JOB_WAIT_S + 15.0)
-        backoff = 2.0
+        backoff = Backoff(first=1.0, fast_cap=5.0, cap=30.0)
         while not self._stop.is_set():
             try:
                 r = client.request("GET", f"/api/station/jobs?wait={JOB_WAIT_S}", timeout=JOB_WAIT_S + 15.0)
             except HubError as e:
                 self._fail(e)
-                self._stop.wait(backoff * random.uniform(0.8, 1.2))
-                backoff = min(backoff * 2, 30.0)
+                self._stop.wait(backoff.fail(e))
                 continue
-            backoff = 2.0
+            backoff.ok()
             if not self._stop.is_set():
                 self._ok()
             for job in r.get("jobs") or []:        # handed to this station: run, even if just turned off

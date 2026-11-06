@@ -242,13 +242,14 @@ class Gazetteer:
         for muni, coords in lines:
             arr = np.asarray(coords, dtype=float)
             x, y = _xy(arr[:, 1], arr[:, 0])
-            for i in range(len(x) - 1):
-                seg = math.hypot(x[i + 1] - x[i], y[i + 1] - y[i])
-                n = max(1, int(seg // 20.0))
-                t = np.arange(n) / n
-                xs.append(x[i] + t * (x[i + 1] - x[i]))
-                ys.append(y[i] + t * (y[i + 1] - y[i]))
-                munis.extend([muni] * n)
+            if len(x) > 1:                        # every segment sampled each ~20 m (one numpy pass: #251, a start)
+                dx, dy = np.diff(x), np.diff(y)
+                n = np.maximum(1, (np.hypot(dx, dy) // 20.0).astype(int))
+                seg = np.repeat(np.arange(len(dx)), n)
+                t = (np.arange(int(n.sum())) - np.repeat(np.cumsum(n) - n, n)) / n[seg]
+                xs.append(x[seg] + t * dx[seg])
+                ys.append(y[seg] + t * dy[seg])
+                munis.extend([muni] * int(n.sum()))
             xs.append(x[-1:])
             ys.append(y[-1:])
             munis.append(muni)
