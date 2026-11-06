@@ -95,8 +95,10 @@ python3 - "$SRC/sizeup/app.py" <<'PY'
 import sys
 p = sys.argv[1]
 s = open(p).read()
-old = "    server = make_server(app)\n"
-assert s.count(old) == 1
+import re
+m = re.findall(r"^    server = make_server\(app[^\n]*\)\n", s, re.M)
+assert len(m) == 1, m
+old = m[0]
 open(p, "w").write(s.replace(old, "    raise SystemExit('ci: release C never answers')\n" + old))
 PY
 C=$(push C)
