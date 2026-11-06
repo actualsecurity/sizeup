@@ -303,6 +303,9 @@ heartbeat_stale_min = 90             # no heartbeat (or restart) this long: "Tap
 # outbox_min = 5                     # the oldest event waiting on the station this old
 # disk_pct = 90                      # the station's disk this full
 # repeat_min = 15                    # at most one push per alert this often (plus its recovery)
+# p25_silent_min = 20                # "P25 trunk silent": no call on ANY talkgroup this long (trunk-recorder running;
+# p25_silent_night_min = 60          #  longer when the system's learned gaps say so); 60 min into the night (00-06).
+#                                    # One talkgroup or channel silent is only a hint. (main_channels: no more, ignored)
 
 # [roads]: the CAD maps' highway layers (sizeup/roads.py, docs/cloud.md "Highway layers"): traffic
 # cameras, incidents and closures, roadwork and message signs for our area, from the NYS Thruway

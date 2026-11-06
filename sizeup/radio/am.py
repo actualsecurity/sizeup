@@ -14,10 +14,20 @@ Westchester County Airport (HPN) ATC is AM voice at 118-137 MHz. The receiver an
     hang      HANG_FRAMES (0.4 s): the carrier may drop that long inside one transmission. ATC is a string of
               short exchanges (controller, pilot read-back, 0.5-1 s apart): 0.4 s keeps each key-up its own
               transmission, and the detector (sizeup/atc.py) reads a few of them together as the exchange.
-    lengths   under 0.6 s of carrier (MIN_FRAMES) is a blip, not kept; anything over 30 s (MAX_FRAMES) is split.
-    weak      a transmission whose carrier is under MIN_CARRIER_DB (5 dB) over the floor is marked weak
-              (Segment.weak): kept and playable, but speech-to-text invents words from noise, so the app says
-              so instead of transcribing it (shortfinal's min_carrier_db).
+    pre-roll  PREROLL_FRAMES (0.4 s, #257; was shortfinal's 0.2 s) before the open is kept, TAIL_FRAMES (0.2 s) after
+              the carrier dropped: a weak or fading carrier opens the squelch late, and "Westchester Tower" came out
+              "Chester Tower" (tools/atc_eval.py preroll: opening 0.3 s late, 85% of the first 0.3 s of speech was
+              kept with 0.2 s, 100% with 0.4 s).
+    lengths   under 0.6 s of carrier (MIN_FRAMES, the carrier's own frames: not the pre-roll) is a blip, not kept;
+              anything over 30 s (MAX_FRAMES) is split.
+    AGC       the envelope over its own carrier (agc()): the voice as modulation depth, held through a carrier that
+              fades inside one transmission; then radio_voice (sizeup/stt.py) band-passes it and sets its loudness.
+    weak      a transmission whose carrier is under MIN_CARRIER_DB (3 dB, #257; was 5) over the floor is marked weak
+              (Segment.weak): kept and playable, but speech-to-text invents words from noise, so the app says so
+              instead of transcribing it (shortfinal's min_carrier_db). Under MARGINAL_DB (6 dB) it is transcribed
+              and flagged (Segment.marginal; the row's "weak signal"): Amazon Transcribe answers nothing for noise
+              rather than invent words, and with the new antenna 9 of 50 rows were skipped under 5 dB. Station and hub may run different releases for a while: the station decides, the hub only
+              reads the carrier it is sent.
 
     schedule  a channel whose frequency changes by the time of day (#260: NY Approach, 126.4 MHz 0700-2300 local and
               120.8 2300-0700, FAA Chart Supplement): Schedule says which frequency is on now, in America/New_York
@@ -54,10 +64,14 @@ LEARN_FRAMES = 40              # 2 s before the squelch may open
 SQUELCH_DB = 3.5               # open this far over the floor (shortfinal DEFAULT_SQUELCH_DB)
 HYSTERESIS_DB = 1.5            # ... and stay open until this far under that
 HANG_FRAMES = 8                # 0.4 s
-PREROLL_FRAMES = 4             # 0.2 s before the open is kept (the start of the first word)
-MIN_FRAMES = 12                # 0.6 s
+PREROLL_FRAMES = 8             # 0.4 s before the open is kept (#257: the first syllable, "Westchester" not "Chester")
+TAIL_FRAMES = 4                # 0.2 s after the carrier dropped is kept (the last syllable)
+MIN_FRAMES = 12                # 0.6 s of carrier
 MAX_FRAMES = 20 * 30           # 30 s
-MIN_CARRIER_DB = 5.0           # weaker: "weak signal", not transcribed (shortfinal [stt] min_carrier_db)
+MIN_CARRIER_DB = 3.0           # weaker: "weak signal", not transcribed (#257: was shortfinal's 5 dB)
+MARGINAL_DB = 6.0              # weaker than this (and >= MIN_CARRIER_DB): transcribed, flagged low confidence
+AGC_S = 0.1                    # the carrier's level, followed over this long (AM AGC: under the voice band)
+AGC_MIN = 0.5                  # ... never divided by less than this x the transmission's carrier (the pre-roll's hiss)
 GAIN_DB = 36.4                 # shortfinal's airband gain
 FLOOR_MIN = 1e-6
 RETUNE_QUIET_S = 2.0           # a scheduled retune waits for this long with no carrier ...
@@ -104,6 +118,7 @@ class CarrierSquelch:
         self._frames: list[np.ndarray] = []
         self._levels: list[float] = []
         self._pre: deque[np.ndarray] = deque(maxlen=PREROLL_FRAMES)
+        self._npre = 0                       # pre-roll frames at the front of _frames
         self._quiet = 0
         self._n = 0
         self._start = 0.0
@@ -156,6 +171,7 @@ class CarrierSquelch:
             if self._n >= LEARN_FRAMES and self._over(level, self.open_db):
                 self._start = self.clock() - len(self._pre) * FRAME / RATE
                 self._frames = list(self._pre) + [frame]
+                self._npre = len(self._pre)
                 self._levels = [level]
                 self._pre = deque(maxlen=PREROLL_FRAMES)
                 self._quiet = 0
@@ -178,19 +194,42 @@ class CarrierSquelch:
         return self._close(reason) if self._frames else None
 
     def _close(self, reason: str) -> Segment | None:
-        frames = self._frames[: len(self._frames) - max(0, self._quiet - PREROLL_FRAMES)]
-        levels, start = self._levels, self._start
-        self._frames, self._levels, self._quiet = [], [], 0
-        if len(frames) - PREROLL_FRAMES < MIN_FRAMES:
+        tail = min(self._quiet, TAIL_FRAMES)
+        frames = self._frames[: len(self._frames) - (self._quiet - tail)]
+        levels, start, npre = self._levels, self._start, self._npre
+        self._frames, self._levels, self._quiet, self._npre = [], [], 0, 0
+        if len(frames) - npre - tail < MIN_FRAMES:       # the carrier itself was up too short: a blip
             return None
-        audio = np.concatenate(frames).astype(np.float64)
-        audio = (audio - audio.mean()).astype(np.float32)
-        carrier = float(20 * np.log10(max(float(np.median(levels or [self.floor_level])), 1e-9) / max(self.floor_level, 1e-9)))
+        med = float(np.median(levels or [self.floor_level]))
+        carrier = float(20 * np.log10(max(med, 1e-9) / max(self.floor_level, 1e-9)))
+        audio = agc(np.concatenate(frames), med)
         seg = Segment(start, start + len(frames) * FRAME / RATE, audio, quieting_db=carrier, reason=reason)
         seg.q_open = seg.q_close = carrier
         seg.hiss_db = self.hiss_db
         seg.weak = carrier < MIN_CARRIER_DB            # type: ignore[attr-defined]
+        seg.marginal = not seg.weak and carrier < MARGINAL_DB   # type: ignore[attr-defined]
+        seg.preroll_s = npre * FRAME / RATE            # type: ignore[attr-defined]
         return seg
+
+
+def agc(envelope: np.ndarray, carrier: float, rate: int = RATE) -> np.ndarray:
+    """AM AGC: the demodulated envelope over its own carrier, so the voice is the modulation depth whatever the signal
+    strength, and a carrier that fades or flutters inside one transmission (an aircraft turning, multipath) doesn't
+    take the voice with it. The carrier is the envelope's level followed over AGC_S (well under the 300 Hz voice
+    band), subtracted (no step where the carrier comes up) and divided out, never by less than AGC_MIN x the
+    transmission's median carrier (so the pre-roll's hiss, before the carrier, stays quieter than the voice). Scaled
+    back by that median, so a steady carrier comes out as before (DC removed). radio_voice (sizeup/stt.py) band-passes it and sets
+    the speech loudness for the clip and speech-to-text."""
+    x = np.asarray(envelope, dtype=np.float64)
+    if len(x) < 2 or carrier <= 0:
+        return (x - (x.mean() if len(x) else 0.0)).astype(np.float32)
+    n = max(1, int(AGC_S * rate))
+    k = np.ones(n) / n
+    pad = np.concatenate((np.full(n // 2, x[0]), x, np.full(n - 1 - n // 2, x[-1])))
+    level = np.convolve(pad, k, mode="valid")[: len(x)]
+    # the voice is what rides on the carrier (minus its own slow level: no step where the carrier comes up), over it
+    y = (x - level) / np.maximum(level, AGC_MIN * carrier) * carrier   # (x carrier: the input's scale, as before)
+    return (y - y.mean()).astype(np.float32)
 
 
 class Upsampler:

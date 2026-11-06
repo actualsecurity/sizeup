@@ -296,7 +296,10 @@ def test_callsigns_never_guessed():
     assert atc.attribute("runway three four, wind two seven zero at five", IX, PLANES) is None
     assert atc.spoken_callsign("JIA5011", atc.telephony_words()) == "blue streak five zero one one"
     p = atc.whisper_prompt("Westchester Tower.", PLANES, atc.telephony_words())
-    assert p.startswith("Westchester Tower. execjet five two one, jetblue one two three four,")   # nearest first
+    # who talks to the tower first (#257): arriving, departing, on the ground; nearest first within each
+    assert p == ("Westchester Tower. november one two three alfa bravo, jetblue one two three four, execjet five two one")
+    low = [dict(PLANES[0], hex="dddddd", flight="JBU99", phase="low", dist=0.1)]
+    assert atc.whisper_prompt("W.", low + PLANES, atc.telephony_words()).endswith("execjet five two one, jetblue niner niner")
 
 
 # -- the pre-alert: accept, dismiss, expire, the API -------------------------------------------------------------------
@@ -441,11 +444,18 @@ def test_the_carrier_squelch_keeps_a_transmission_whole_and_marks_a_weak_one():
     assert 3.6 < s.end - s.start < 4.5 and s.quieting_db > 10 and not s.weak and abs(float(s.audio.mean())) < 1e-3
     sq2 = CarrierSquelch(3.5, clock=lambda: T0)
     weak = [s for f in envelope([(5, 0.01, False), (2, 0.0165, True), (3, 0.01, False)], rng) if (s := sq2.feed(f)) is not None]
-    assert len(weak) == 1 and weak[0].weak                 # +4.3 dB: kept, too weak to transcribe
+    # +4.3 dB (#257): marginal, transcribed and flagged; no longer skipped
+    assert len(weak) == 1 and not weak[0].weak and weak[0].marginal
+    sq3 = CarrierSquelch(3.5, clock=lambda: T0)
+    # opens at +3.8 dB, then sits at +2.5 (over the 2 dB close): too weak to transcribe
+    weak = [s for f in envelope([(5, 0.01, False), (0.1, 0.0155, True), (2, 0.0133, True), (3, 0.01, False)], rng)
+            if (s := sq3.feed(f)) is not None]
+    assert len(weak) == 1 and weak[0].weak and not weak[0].marginal
 
 
 def test_the_app_hears_hpn_tower_and_raises_the_pre_alert(tmp_path):
-    texts = {3: "Westchester tower, JetBlue 1234, looks like a brush fire off the departure end of runway one six"}
+    # 3 s of carrier + the 0.4 s pre-roll + the 0.2 s tail (sizeup/radio/am.py, #257): 4 s to the fake whisper
+    texts = {4: "Westchester tower, JetBlue 1234, looks like a brush fire off the departure end of runway one six"}
     app = App(replace(cfg(tmp_path), channels=FIVE))
     app.stt.client = FakeWhisper(texts)
     prompts = []
@@ -481,7 +491,7 @@ def test_a_weak_carrier_is_kept_and_not_transcribed(tmp_path):
     app = App(replace(cfg(tmp_path), channels=FIVE))
     sq = CarrierSquelch(3.5)
     seg = None
-    for f in envelope([(5, 0.01, False), (2, 0.0165, True), (1, 0.01, False)], np.random.default_rng(3)):
+    for f in envelope([(5, 0.01, False), (0.1, 0.0155, True), (2, 0.0133, True), (1, 0.01, False)], np.random.default_rng(3)):
         seg = sq.feed(f) or seg
     app._segment(Channel(118.575, "HPN Tower"), seg)
     t = next(x for x in app.store.loose if x.source == "HPN Tower")

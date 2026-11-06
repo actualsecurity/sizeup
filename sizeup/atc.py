@@ -236,8 +236,19 @@ ALIAS_STOP = {"air", "jet", "jets", "express", "shuttle", "wings", "star", "sky"
 MIN_P = 0.2
 
 
+_SPELL = {v: k for k, v in LETTERS.items() if k not in ("alpha", "juliet", "whisky")}
+_WRITTEN_TAIL = re.compile(r"\b(N?)(\d{1,5})([A-Z]{1,3})\b")
+_WRITTEN_FLIGHT = re.compile(r"\b([A-Z]{3})(\d{1,4})\b")      # "MXY283", as sizeup/atc_snap.py writes it
+ICAO = "icao"                                                   # its word: "icaomxy", then the digits
+
+
 def words_of(text: str) -> list[str]:
-    return re.findall(r"[a-z]+|\d+", (text or "").lower().replace("x-ray", "xray").replace("x ray", "xray"))
+    """The words, lower case. A tail written the way sizeup/atc_normalize.py writes it ("N123AB", "568LX") is read as
+    it was said ("november one two three alfa bravo"), so the matcher sees the same characters either way."""
+    t = _WRITTEN_TAIL.sub(lambda m: " ".join((["november"] if m.group(1) else []) + list(m.group(2))
+                                             + [_SPELL[c] for c in m.group(3)]), text or "")
+    t = _WRITTEN_FLIGHT.sub(lambda m: f"{ICAO}{m.group(1).lower()} {' '.join(m.group(2))}", t)
+    return re.findall(r"[a-z]+|\d+", t.lower().replace("x-ray", "xray").replace("x ray", "xray"))
 
 
 @dataclass(frozen=True)
@@ -322,6 +333,8 @@ def _suffix(words: Sequence[str], i: int, limit: int = 6) -> tuple[str, int]:
                 c = TENS[w] + "0"
         if not c:
             break
+        if c[0].isdigit() and out and out[-1].isalpha():
+            break                                   # a tail's letters come last: "568LX 1 mile" is 568LX, then 1
         out += c
         j += 1
     return out, j
@@ -333,7 +346,12 @@ def find_mentions(text: str, index: TelephonyIndex) -> list[Mention]:
     i = 0
     while i < len(words):
         hit = None
-        if words[i] == "november" and not (i > 0 and words[i - 1] in LETTERS):
+        w = words[i]
+        if w.startswith(ICAO) and len(w) == len(ICAO) + 3 and w[len(ICAO):].upper() in index.telephony:
+            suf, j = _suffix(words, i + 1)            # a flight written by its designator ("MXY283")
+            if suf and suf[0].isdigit():
+                hit = Mention((w[len(ICAO):].upper(),), suf, i, j, phrase_end=i + 1)
+        elif words[i] == "november" and not (i > 0 and words[i - 1] in LETTERS):
             suf, j = _suffix(words, i + 1)
             if len(suf) >= 2 and any(c.isdigit() for c in suf):
                 hit = Mention((), suf, i, j)
@@ -683,10 +701,17 @@ def spoken_callsign(flight: str, telephony: dict[str, str]) -> str:
     return ""
 
 
+PROMPT_PHASES = {"arriving": 0, "departing": 1, "ground": 2, "low": 3}   # who talks to the tower first (#257)
+
+
 def whisper_prompt(base: str, aircraft: Sequence[dict], telephony: dict[str, str]) -> str:
-    """The vocabulary prompt, then the nearest aircraft's callsigns as said, as many as fit (shortfinal build_prompt)."""
+    """The vocabulary prompt, then the callsigns as said of the aircraft most likely on the frequency, as many as fit
+    (shortfinal build_prompt): arriving, departing and on the ground at HPN before low traffic passing (#257:
+    shortfinal's plausible.rank; not the nearest overall, so a helicopter low overhead doesn't push out the arrival
+    on final), nearest first in each."""
     out = base
-    for a in sorted(aircraft, key=lambda a: a.get("dist") if a.get("dist") is not None else 1e9):
+    for a in sorted(aircraft, key=lambda a: (PROMPT_PHASES.get(a.get("phase") or "", 4),
+                                              a.get("dist") if a.get("dist") is not None else 1e9)):
         cs = spoken_callsign(a.get("flight") or a.get("reg") or "", telephony)
         if not cs:
             continue

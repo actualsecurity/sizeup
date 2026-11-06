@@ -34,7 +34,9 @@
 //                ATC talkers > "Show ATC talker on the map" is on): an aircraft whose callsign was heard and matched on
 //                ADS-B (confirmed or probable, never a guess) gets a pulsing ring while its transmission is in (TALK_HOLD_S
 //                on the hub) or plays here (cad.js sizeup:playing), a steady one while the tower is calling it; its box
-//                lists its recent transmissions with ▶. A Radio row's aircraft chip (cad.js) calls focus(hex): the layer
+//                lists its recent transmissions with ▶. The tower (#257) is a "TWR" mark at the control tower (the hub's
+//                atc.tower: the airport data's), dim, lit and pulsing while the tower transmits (its transmission in
+//                within TALK_HOLD_S) or one of its transmissions plays here. A Radio row's aircraft chip (cad.js) calls focus(hex): the layer
 //                on, the map centred on it, ringed for a while, its box open. Speech-derived: never a radio ID.
 //   Data         only ever from the hub: GET /api/cad/aircraft (sizeup/aircraft.py), every 2 s while a map has the
 //                layer on and the page is visible (an unchanged answer is a 304; the hub still reads each feed at its
@@ -53,7 +55,8 @@ window.AircraftLayer = (() => {
   const STEP_PX = 0.75;                     // ... in between, one each time the fastest mark has moved this far on screen
   const HORIZON_S = 10;                     // shortfinal's MAX_EXTRAPOLATE_S: never further past a fix than this
   const SRC = "ac-aircraft";                // marks and trails in one source: one setData a frame, drawn together
-  const IDS = ["ac-trail", "ac-ring", "ac-mark", "ac-label"];
+  const IDS = ["ac-trail", "ac-ring", "ac-mark", "ac-label", "ac-twr", "ac-twr-label"];
+  const TWR_SRC = "ac-tower";               // the tower's mark (#257): its own source, never one of the aircraft
   const PING_MS = 1400;                     // one "talking" ring pulse (shortfinal's)
   const HIGHLIGHT_MS = 12000;               // a chip's aircraft, ringed this long once centred
   const FOCUS_WAIT_MS = 20000;              // ... waited for this long (the layer just turned on, the data coming)
@@ -181,8 +184,21 @@ window.AircraftLayer = (() => {
   }
   function ringsOn(d) {
     const a = atcOf(d);
-    return !!((a && ((a.talking || []).some((x) => x.until > nowS()) || talk.playing))
+    return !!((a && ((a.talking || []).some((x) => x.until > nowS()) || talk.playing || towerLit(d)))
               || (talk.highlight && Date.now() < talk.highlight.until));
+  }
+  // the tower (#257): lit while it transmits (its last transmission in within the hub's hold) or one of its plays here
+  function towerLit(d) {
+    const tw = (atcOf(d) || {}).tower;
+    return !!(tw && ((tw.until || 0) > nowS() || (talk.playing && (tw.tx || []).includes(talk.playing))));
+  }
+  function towerFc(d, now) {
+    const tw = (atcOf(d) || {}).tower;
+    if (!tw || typeof tw.lat !== "number" || typeof tw.lon !== "number") return fc([]);
+    const lit = towerLit(d), ping = lit ? (now % PING_MS) / PING_MS : 0;
+    return fc([{ type: "Feature", geometry: { type: "Point", coordinates: [tw.lon, tw.lat] },
+                 properties: { lit: lit ? 1 : 0, color: lit ? token("--ok", "#3FB950") : token("--dim", "#6E7681"),
+                               rr: 1 + 0.6 * ping, ringo: lit ? 1 - 0.7 * ping : 0.6 } }]);
   }
 
   // ---- the motion: one follower for every map (glide.js, motion.js's predictor), fed each real fix ------------------
@@ -358,6 +374,18 @@ window.AircraftLayer = (() => {
                        paint: { "text-color": ["get", "color"], "text-opacity": ["get", "opacity"],
                                 "icon-opacity": ["*", 0.85, ["get", "opacity"]] } }, before);
       }
+      // HPN's tower (#257): a "TWR" mark at the control tower (the airport data), lit and pulsing while it transmits
+      map.addSource(TWR_SRC, { type: "geojson", data: fc([]) });
+      map.addLayer({ id: "ac-twr", type: "circle", source: TWR_SRC, layout: vis,
+                     paint: { "circle-radius": ["*", ["get", "rr"], ["interpolate", ["linear"], ["zoom"], 9, 7, 12, 10, 15, 14]],
+                              "circle-color": HALO, "circle-opacity": 0.85, "circle-stroke-color": ["get", "color"],
+                              "circle-stroke-width": 2.5, "circle-stroke-opacity": ["get", "ringo"] } }, before);
+      if (glyphs) {
+        map.addLayer({ id: "ac-twr-label", type: "symbol", source: TWR_SRC, minzoom: 10,
+                       layout: { ...vis, "text-field": "TWR", "text-font": ["Noto Sans Bold"], "text-size": 10,
+                                 "text-allow-overlap": true, "text-ignore-placement": true },
+                       paint: { "text-color": ["get", "color"] } }, before);
+      }
       map.on("mouseenter", "ac-mark", () => { map.getCanvas().style.cursor = "pointer"; });
       map.on("mouseleave", "ac-mark", () => { map.getCanvas().style.cursor = ""; });
       this.added = true;
@@ -405,6 +433,8 @@ window.AircraftLayer = (() => {
       }
       const src = this.map.getSource(SRC);
       if (src) src.setData(fc(trails.concat(marks)));
+      const tw = this.map.getSource(TWR_SRC);
+      if (tw) tw.setData(towerFc(d, now));
     }
     // how often to redraw this map: each time the fastest mark has moved STEP_PX on it, at its zoom
     frameMs() {

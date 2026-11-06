@@ -42,6 +42,9 @@ county dispatch (60 Control); it doesn't replace it.
   - Who is talking on HPN Tower (#252): the callsign heard, matched to ADS-B near HPN (confirmed / probable /
     heard), tower or aircraft, as a chip on each row like a unit ID; exchanges folded together; the aircraft
     ringed on the map while it talks. Speech-derived, never a radio ID; off in Settings > System.
+  - HPN Tower transcripts (#257): the written form (RNAV Yankee 34, TWORF, N123AB, "cleared to land"), callsigns
+    nearly heard snapped to the aircraft on ADS-B, a 0.4 s pre-roll and AM AGC, marginal carriers transcribed and
+    flagged, the vocabulary refreshed from the operators seen near HPN, a lit TWR on the map while the tower talks.
 - **CAD:**
   - Events: from 60 Control pages (ours by tones or town) or entered by hand.
   - Run cards, including full department and "any apparatus".

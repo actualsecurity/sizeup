@@ -114,6 +114,7 @@ EVIDENCE_LIST = 200        # an emergency call's record (App._p25_evidence): at 
 # Speech-to-text first on the station's whisper (#195): pages, Fire/EMS 15 and our firegrounds, ahead of the rest.
 STT_FIRST = ("tg:307", "FG1", "FG2")
 AIRBAND_FIRST: set[str] = set()   # ... and the airband channels (HPN ATC, #233: the pre-alerts), filled by App
+ATC_CEILING_FT = 10000   # the station's own ADS-B: aircraft above this aren't talking to HPN Tower (the ATC prompt, #257)
 MIN_SPEECH_S = 0.15      # less sound than this above the dead-air floor (and no tones) = a mic click
 LIVE_WATCH_S = 0.2       # FG1 talking watcher: how often the squelch is looked at (the MDC ID: radio/tap.py)
 ID_EDGE_S = 1.0          # an FG1 key-up with no ID: a burst is looked for this close to either end of the carrier (#163)
@@ -524,7 +525,15 @@ class App:
         # matched against what was near HPN around its transmission), and the map's "talking" ring; the CAD of record only.
         talkers = self.cad.atc_talkers
         talkers.aircraft = self._atc_aircraft
-        self.aircraft.on_view = lambda view, now: None if self.forwarding() else talkers.observe(view, now)
+        self.aircraft.on_view = lambda view, now: None if self.forwarding() else self._atc_view(view, now)
+        # ... and the sizeup-atc vocabulary kept up with the operators seen (#257, sizeup/atc_vocab.py): the leader only
+        self.atc_refresh = None
+        if getattr(self, "atc_vocab", None) is not None:
+            from sizeup import atc as atc_mod
+            from sizeup.atc_vocab import Refresher
+            self.atc_refresh = Refresher(self.atc_vocab, talkers.operators, lambda: atc_mod.vocabulary()["phrases"],
+                                         enabled=lambda: bool(getattr(self.cad, "atc_vocab_refresh", True)),
+                                         leader=self._atc_leader, on_pending=self._atc_vocab_pending, log=log)
         self.aircraft.extra = lambda: None if self.forwarding() else talkers.map_payload()
         if self.recorder is not None:
             self.recorder.on_line = self.live.feed_line
@@ -712,13 +721,36 @@ class App:
 
     def _atc_aircraft(self) -> list[dict]:
         """The aircraft the Aircraft layer has near HPN now (sizeup/aircraft.py: its last picture, read every 15 s while the
-        emergency watch runs), for matching a callsign heard on ATC; none when that picture is over a minute old."""
+        emergency watch runs), for matching a callsign heard on ATC; none when that picture is over a minute old.
+        A station forwarding to the hub doesn't read the layer (the hub does): its whisper prompt (the fallback when
+        Amazon Transcribe can't) takes the callsigns from the station's own ADS-B receiver instead (#257)."""
         layer = getattr(self, "aircraft", None)
         fetched = layer.st.get("fetched") if layer is not None else None
         if not fetched or time.time() - fetched > 60:
-            return []
+            return self._receiver_aircraft()
         with layer._lock:      # ... and the wider set while NY Approach is heard (#260; each channel takes its own)
             return [dict(a) for a in layer.view + getattr(layer, "wide", [])]
+
+    def _receiver_aircraft(self, max_age_s: float = 30.0) -> list[dict]:
+        """The station's own ADS-B picture (sizeup/cloud/aircraftlink.py, read every second to forward to the hub): the
+        aircraft with a callsign within RADIUS_NM of HPN and under ATC_CEILING_FT (or on the ground), nearest first."""
+        fwd = getattr(getattr(self, "station", None), "aircraft", None)
+        last = getattr(fwd, "last", None)
+        if not last or time.time() - last[1] > max_age_s:
+            return []
+        from sizeup.aircraft import ARP, RADIUS_NM, nm
+        out = []
+        for p in last[0].planes:
+            if p.lat is None or p.lon is None or not (p.flight or "").strip():
+                continue
+            alt = p.alt_baro
+            if alt != "ground" and isinstance(alt, (int, float)) and alt > ATC_CEILING_FT:
+                continue
+            d = nm(ARP[0], ARP[1], p.lat, p.lon)
+            if d <= RADIUS_NM:
+                out.append({"hex": p.hex, "flight": p.flight.strip(), "reg": p.reg, "dist": round(d, 1),
+                            "phase": "ground" if alt == "ground" else ""})
+        return sorted(out, key=lambda a: a["dist"])
 
     def _atc(self, t: Traffic, text: str | None = None) -> None:
         """An airband transcript (new, or new text) to the HPN ATC pre-alert watch (sizeup/atc.py, #233): on the CAD of
@@ -732,6 +764,8 @@ class App:
         txt = t.text if text is None else text
         if not txt:
             return
+        from sizeup.atc_normalize import normalize
+        txt = normalize(txt)     # the written form (#257: "RNAV Yankee 34", "TWORF", "cleared to land"); the raw text is kept
         w = self.atc
         if w is not None and w.handles(t.source):
             try:
@@ -900,8 +934,9 @@ class App:
 
     def _airband_segment(self, ch: Channel, seg: Segment) -> None:
         """A transmission on an airband channel (HPN ATC, #233): AM (no de-emphasis), no radio IDs, kept and transcribed
-        like traffic (Settings > Radios: AWS by default). A weak carrier (sizeup/radio/am.py MIN_CARRIER_DB) is kept and
-        playable but not transcribed: speech-to-text invents words from noise (shortfinal's rule); Re-transcribe can."""
+        like traffic (Settings > Radios: AWS by default). A weak carrier (sizeup/radio/am.py MIN_CARRIER_DB, 3 dB) is kept
+        and playable but not transcribed: speech-to-text invents words from noise (shortfinal's rule); Re-transcribe can.
+        A marginal one (under MARGINAL_DB, 6 dB) is transcribed and flagged (#257)."""
         if not self.channel_pref(ch.label)["record"]:
             return
         t = Traffic(f"{ch.label.replace(' ', '')}-{int(seg.start * 1000)}", ch.label, seg.start, seg.end, "", status="pending")
@@ -916,6 +951,8 @@ class App:
             t.raw, t.confidence, t.status = "", None, "off"   # type: ignore[attr-defined]
             t.model = f"weak signal (carrier {seg.quieting_db:.1f} dB): not transcribed"   # type: ignore[attr-defined]
             return self._transcribed(t)
+        # A marginal carrier (seg.marginal, #257) is transcribed like the rest: Amazon Transcribe answers nothing for
+        # noise rather than invent words, and the row says the words may be wrong (sizeup/atc_talkers.py decorate)
         self._stt(t, seg.audio, self.stt_engine(ch.label), ch.label)
 
     def _page_segment(self, ch: Channel, seg: Segment) -> None:
@@ -1854,6 +1891,30 @@ class App:
             self._atc_vocab_ready(self.atc_vocab.name)
         log(f"speech-to-text: Amazon Transcribe streaming ({reg}) for the channels set to AWS in Settings > Radios")
 
+    def _atc_view(self, view, now) -> None:
+        """A new Aircraft layer picture on the CAD of record: to the ATC talkers, and a look at the vocabulary (#257)."""
+        self.cad.atc_talkers.observe(view, now)
+        r = getattr(self, "atc_refresh", None)
+        if r is not None:
+            try:
+                r.tick()
+            except Exception as e:  # noqa: BLE001 - the aircraft layer goes on
+                log(f"atc vocabulary: {type(e).__name__}: {e}")
+
+    def _atc_leader(self) -> bool:
+        """The CAD of record holding the hub's lease (#254: sizeup/fence.py), or all-in-one (no fence)."""
+        fence = getattr(self, "fence", None)
+        return not self.forwarding() and (fence is None or fence.ok())
+
+    def _atc_vocab_pending(self) -> None:
+        """The HPN ATC vocabulary is being updated (PENDING): new airband streams open without it until it is READY
+        again (_atc_vocab_ready), so none asks AWS for a vocabulary it is still building; open streams keep theirs."""
+        if self.aws is None:
+            return
+        for c in self.cfg.channels:
+            if c.kind == "airband" and self.aws.channel_vocabulary.pop(c.label, None):
+                log(f"aws transcribe: {c.label}: new streams without the custom vocabulary until the update is READY")
+
     def _atc_vocab_ready(self, name: str) -> None:
         """The HPN ATC vocabulary is READY: the airband channels' next streams use it (the rest keep sizeup-pcfd)."""
         if self.aws is None:
@@ -1994,7 +2055,9 @@ class App:
         st = self.vocab.push(phrases)
         if getattr(self, "atc_vocab", None) is not None:       # HPN ATC's own (#233), from data/atc/vocabulary.json
             from sizeup import atc
-            st = dict(st, atc=self.atc_vocab.push(atc.vocabulary()["phrases"]))
+            r = getattr(self, "atc_refresh", None)             # ... with the operators seen near HPN lately (#257)
+            self._atc_vocab_pending()
+            st = dict(st, atc=self.atc_vocab.push(r.phrases() if r is not None else atc.vocabulary()["phrases"]))
         return st
 
     def vocabulary_state(self) -> dict:

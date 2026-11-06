@@ -1,0 +1,260 @@
+{
+  "_about": "HPN ATC transcript normaliser (GitHub #257; sizeup/atc_normalize.py): what speech-to-text writes for HPN's own words, mapped to how they are written. 'fixes': the approach fixes (FAA CIFP, data/airport/khpn_procedures.geojson) by what is heard for them, anywhere. 'fixes_in_context': spellings that are also ordinary words ('to do', 'harp'): only right after 'over', 'at', 'from', 'direct', 'via', 'crossing' ... A fix not listed is still recognised by its own ident, and by a close spelling in that context. 'telephony': airline and operator telephony as misheard, to its written form (data/atc/khpn_operators.csv, telephony_extra.csv). 'facility_misheard': words heard in place of 'Westchester' before 'Tower' / 'Ground' (a clipped first syllable, the ATC model's European airports). Lower case; one entry per mishearing.",
+  "version": 1,
+  "fixes": {
+    "TWORF": [
+      "twarf",
+      "twarfe",
+      "twerf",
+      "tworf",
+      "tworff",
+      "twarth",
+      "twarp",
+      "quarf",
+      "twharf"
+    ],
+    "TAYSH": [
+      "taish",
+      "taysh",
+      "tash",
+      "taysch",
+      "teish",
+      "taich",
+      "tache",
+      "tayshe"
+    ],
+    "HAARP": [
+      "haarp"
+    ],
+    "CZIMR": [
+      "czimr",
+      "czimmer",
+      "simer",
+      "zimr"
+    ],
+    "JETAX": [
+      "jetax",
+      "jetaxe",
+      "jettax"
+    ],
+    "SGRET": [
+      "sgret",
+      "sugret",
+      "segret",
+      "sugrette"
+    ],
+    "TOEDO": [
+      "toedo"
+    ],
+    "RYMES": [
+      "rymes"
+    ],
+    "SIGHH": [
+      "sighh"
+    ],
+    "KIBGE": [
+      "kibge"
+    ],
+    "IKILY": [
+      "ikily"
+    ],
+    "BODRE": [
+      "bodre",
+      "bodray"
+    ],
+    "FODAK": [
+      "fodak",
+      "fodac"
+    ],
+    "CUFDO": [
+      "cufdo",
+      "cufdoe"
+    ],
+    "EZHED": [
+      "ezhed"
+    ],
+    "FARAN": [
+      "faran"
+    ],
+    "IFADY": [
+      "ifady"
+    ],
+    "IKAXE": [
+      "ikaxe"
+    ],
+    "NIDAE": [
+      "nidae",
+      "nidday",
+      "niday"
+    ],
+    "VOLLU": [
+      "vollu",
+      "volu",
+      "vollue"
+    ],
+    "WALOB": [
+      "walob",
+      "wallob"
+    ],
+    "XCESS": [
+      "xcess"
+    ],
+    "ZONGA": [
+      "zonga"
+    ],
+    "ALIXX": [
+      "alixx"
+    ],
+    "BASYE": [
+      "basye"
+    ]
+  },
+  "fixes_in_context": {
+    "TWORF": [
+      "two orf",
+      "two arf"
+    ],
+    "HAARP": [
+      "harp"
+    ],
+    "ISLET": [
+      "islet",
+      "eyelet",
+      "eye let"
+    ],
+    "CZIMR": [
+      "simmer",
+      "zimmer"
+    ],
+    "JETAX": [
+      "jet ax",
+      "jet axe"
+    ],
+    "TOEDO": [
+      "to do",
+      "toe doe",
+      "todo",
+      "toto"
+    ],
+    "RYMES": [
+      "rhymes",
+      "rimes"
+    ],
+    "SIGHH": [
+      "sigh"
+    ],
+    "KIBGE": [
+      "kibby",
+      "kibbie"
+    ],
+    "IKILY": [
+      "ike ily"
+    ],
+    "BODRE": [
+      "boder"
+    ],
+    "FODAK": [
+      "foe dak"
+    ],
+    "CUFDO": [
+      "cuff doe"
+    ],
+    "EZHED": [
+      "ez head",
+      "easy head"
+    ],
+    "FARAN": [
+      "farran",
+      "farren"
+    ],
+    "IFADY": [
+      "if ady"
+    ],
+    "IKAXE": [
+      "ike axe"
+    ],
+    "XCESS": [
+      "excess"
+    ],
+    "ZONGA": [
+      "conga"
+    ],
+    "ALIXX": [
+      "alex",
+      "alix"
+    ],
+    "BASYE": [
+      "basie"
+    ],
+    "SGRET": [
+      "secret"
+    ]
+  },
+  "telephony": {
+    "moxie": "Moxy",
+    "moxy": "Moxy",
+    "moxi": "Moxy",
+    "jet blue": "JetBlue",
+    "jetblue": "JetBlue",
+    "jet-blue": "JetBlue",
+    "net jets": "NetJets",
+    "netjets": "NetJets",
+    "net jet": "NetJets",
+    "exec jet": "Execjet",
+    "execjet": "Execjet",
+    "exact jet": "Execjet",
+    "flex jet": "Flexjet",
+    "flexjet": "Flexjet",
+    "flex-jet": "Flexjet",
+    "jet speed": "Jet Speed",
+    "jetspeed": "Jet Speed",
+    "blue streak": "Blue Streak",
+    "bluestreak": "Blue Streak",
+    "endeavor": "Endeavor",
+    "endeavour": "Endeavor",
+    "brickyard": "Brickyard",
+    "brick yard": "Brickyard",
+    "big stripe": "Bigstripe",
+    "bigstripe": "Bigstripe",
+    "good speed": "Goodspeed",
+    "goodspeed": "Goodspeed",
+    "sun country": "Sun Country",
+    "suncountry": "Sun Country",
+    "sky west": "SkyWest",
+    "skywest": "SkyWest",
+    "up jet": "Up Jet",
+    "gama jet": "Gama Jet",
+    "gamma jet": "Gama Jet",
+    "vista jet": "Vista Jet",
+    "vistajet": "Vista Jet",
+    "jet edge": "Jet Edge",
+    "jet linx": "Jet Linx",
+    "jet links": "Jet Linx",
+    "clay lacy": "Clay-Lacy",
+    "talon flight": "Talon Flight",
+    "jet setter": "Jet Setter",
+    "ex flight": "Ex-Flight",
+    "x flight": "Ex-Flight",
+    "netchets": "NetJets",
+    "net chets": "NetJets",
+    "exec-jet": "Execjet"
+  },
+  "facility_misheard": [
+    "chester",
+    "westchesters",
+    "west chester",
+    "westchester's",
+    "manchester",
+    "rochester",
+    "winchester",
+    "dorchester",
+    "lufthansa",
+    "ruzyne",
+    "praha",
+    "prague",
+    "sydney",
+    "bratislava",
+    "white plains",
+    "whiteplains"
+  ]
+}
