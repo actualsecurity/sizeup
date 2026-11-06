@@ -1,8 +1,12 @@
 # sizeup station config. Copy to config.toml (gitignored) and edit. Unknown keys are rejected.
 
 [station]
-id = "pcfd-hq"
-name = "Port Chester FD Headquarters"
+id = "pcfd-hq"                     # the hub keys this station's token, history and outbox on it: never change it
+name = "Port Chester FD South End"  # shown in Settings, health and alerts
+# Where the station PC and its antennas are: the South End firehouse, 51-53 Grace Church St (#271), not HQ. Our ADS-B
+# receiver's position (readsb --lat/--lon). Leave out for these defaults.
+lat = 40.99600
+lon = -73.66453
 
 [web]
 host = "127.0.0.1"                 # 0.0.0.0 to serve the firehouse LAN

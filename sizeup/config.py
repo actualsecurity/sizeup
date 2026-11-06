@@ -22,6 +22,7 @@ class ConfigError(ValueError):
 
 # Department names used across sizeup for the two home departments (tone codes, incidents).
 HOME_DEPARTMENTS = {"Port Chester": "Port Chester FD", "Rye Brook": "Rye Brook FD"}
+STATION_LL = (40.99600, -73.66453)   # lat, lon: the station PC is at the South End firehouse, 51-53 Grace Church St (#271)
 
 
 PAGING_HANG_S = 1.5        # see ChannelCfg.hang_s / continue_s
@@ -130,6 +131,9 @@ class Config:
     geo_search_towns: tuple[str, ...] = ("Port Chester", "Rye Brook", "Rye", "Harrison", "Greenwich", "Mamaroneck",
                                          "Larchmont", "Town of Mamaroneck")
     geo_hq: tuple[float, float] = (41.00253, -73.66692)            # lat, lon: 209 Westchester Ave
+    # [station] lat / lon: where the station PC (its antennas) is, the South End firehouse (#271), not HQ: the ADS-B
+    # receiver's position (readsb --lat/--lon, sizeup/radio/adsbd.py reads it from the file itself)
+    station_ll: tuple[float, float] = STATION_LL
     # CAD ([cad], [dispatch]): see sizeup/cad/
     cad_db: str = ""                  # "" = in memory (tests); load() defaults to state/cad.sqlite
     cad_department: str = "Port Chester Fire"           # first words of every dispatch, as said on the air
@@ -959,9 +963,17 @@ def load(path: str | Path) -> Config:
     _take(data, "config", {"station", "web", "radio", "tones", "stt", "p25", "mdc", "units", "storage", "map",
                            "cad", "dispatch", "cloud", "prealert", "roads", "roadwork", "gis", "trains", "weather", "alerts",
                            "aircraft", "geo", "atc"})
-    st = _take(data.get("station", {}), "station", {"id", "name", "auto_update"})
+    st = _take(data.get("station", {}), "station", {"id", "name", "auto_update", "lat", "lon"})
     if not isinstance(st.get("auto_update", True), bool):
         raise ConfigError("station.auto_update: true or false")
+    station_ll = STATION_LL
+    if "lat" in st or "lon" in st:
+        try:
+            station_ll = (float(st["lat"]), float(st["lon"]))
+        except (KeyError, TypeError, ValueError):
+            raise ConfigError("station.lat and station.lon: both, in degrees") from None
+        if not (40.0 <= station_ll[0] <= 42.0 and -75.0 <= station_ll[1] <= -72.0):
+            raise ConfigError("station.lat / lon: in the area")
     web = dict(_take(data.get("web", {}), "web", {"host", "port"}))
     web["host"] = _env("SIZEUP_HOST", web.get("host", "127.0.0.1"))
     try:
@@ -1146,7 +1158,7 @@ def load(path: str | Path) -> Config:
         raise ConfigError('dispatch.polly_region: an AWS region ("us-east-1"), or "" for AWS_REGION')
     return Config(
         station_id=st.get("id", "pcfd"), station_name=st.get("name", "Port Chester FD"),
-        station_auto_update=st.get("auto_update", True),
+        station_auto_update=st.get("auto_update", True), station_ll=station_ll,
         host=web.get("host", "127.0.0.1"), port=int(web.get("port", 8090)),
         rtl_fm=radio.get("rtl_fm", "rtl_fm"), channels=tuple(channels), tones=tuple(tones), tones_file=tones_file,
         ours=frozenset(ours | {"Port Chester FD", "Rye Brook FD"}),

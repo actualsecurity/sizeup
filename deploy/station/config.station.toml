@@ -13,8 +13,12 @@
 # Secrets are never in this file: /etc/sizeup/station.env (sizeup-station secrets).
 
 [station]
-id = "pcfd-hq"
-name = "Port Chester FD Headquarters"
+id = "pcfd-hq"                     # the hub keys this station's token, history and outbox on it: never change it
+name = "Port Chester FD South End"  # shown in Settings, health and alerts
+# Where the station PC and its antennas are: the South End firehouse, 51-53 Grace Church St (#271), not HQ. Our ADS-B
+# receiver's position (readsb --lat/--lon). Leave out for these defaults.
+lat = 40.99600
+lon = -73.66453
 # Follow the hub's build by itself (deploy/station/README.md "Updating"): the exact commit the hub
 # runs, built beside the running release, switched in a quiet moment, switched back if it doesn't
 # come up. false = stay put (so does `sizeup-station autoupdate off`, or a station on another --ref).

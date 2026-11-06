@@ -19,7 +19,7 @@ No `[cloud]` section = today's all-in-one, unchanged.
 With `role = "station"` the station's own web page (http://localhost:8091 on the station PC) is about
 the station only (user, 2026-10-13: "the local system doesnt show the cad bits just things relevant to
 the sdr station data pulling/pushing, and maybe the monitor page too"): `static/station.html`,
-`station.js`. The header says it is the station: "Station", its id, the hub link's state ("Hub
+`station.js`. The header says it is the station: "Station", its name (the id on hover, #271), the hub link's state ("Hub
 connected" / "Hub unreachable" / "Hub not sending" / "Not forwarding") and a link to the CAD on the hub.
 
 | view | what's on it |

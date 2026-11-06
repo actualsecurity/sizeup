@@ -1,6 +1,6 @@
 # The station
 
-The station is the computer with the RTL-SDR dongles. It runs sizeup with `[cloud] role = "station"`:
+The station is the computer with the RTL-SDR dongles, at the South End firehouse (51-53 Grace Church St). It runs sizeup with `[cloud] role = "station"`:
 the radios (rtl_fm for South 2, FG1 and FG2, trunk-recorder for the county P25 system with Fire/EMS 15),
 MDC-1200 decoding, local speech-to-text (whisper.cpp) for whatever the hub doesn't transcribe, and a
 link that **calls home**: everything it hears goes to the hub (https://sizeup.actualsecurity.org) over
@@ -16,6 +16,28 @@ Three ways to run it:
 * **Windows 10/11** (the station PC today): WSL2 + Ubuntu 24.04, set up by `install-windows.ps1`.
 * **Raspberry Pi / Debian / Ubuntu**: `install-linux.sh` directly.
 * **A Mac**: sizeup from a checkout, secrets in the Keychain ([below](#on-a-mac)).
+
+## Where the station is
+
+The station PC is at the **South End firehouse** (51-53 Grace Church St), not Headquarters (#271). `[station]` in
+`/etc/sizeup/config.toml`:
+
+* `id = "pcfd-hq"`: the hub keys the station's token, history and outbox on it. It stays `pcfd-hq` (an old name, kept
+  as a key); the pages show the name instead.
+* `name = "Port Chester FD South End"`: Settings, the station page's header, the hub's Health and the alerts
+  ("Station update failed · Port Chester FD South End").
+* `lat` / `lon` (default 40.99600, -73.66453, the South End): where the antennas are, our ADS-B receiver's position
+  (readsb `--lat/--lon`, [below](#ads-b-receiver)). Leave them out for the default.
+
+What stays Headquarters (209 Westchester Ave) is what is about Headquarters: Tapout on its phone line, `[geo] hq_lat /
+hq_lon` (where the intersection search's "nearest" is measured from) and the "headquarters" radio phrases.
+
+**An installed station** is renamed once by the update to this release (`sizeup/cloud/configupdate.py` "south-end",
+the old file kept as `config.toml.before-south-end`): `name = "Port Chester FD Headquarters"` becomes `name = "Port
+Chester FD South End"`, only when it is still exactly that (a name set by hand is left alone). It is not deferred:
+every release reads `[station] name`, so a switch back is safe. The install log says `config: south-end: [station]
+name is now "Port Chester FD South End" ...`; the station sends the new name to the hub with its next status, once
+it has restarted on the new release. `lat` / `lon` are not added: the code's default is the South End.
 
 ## Windows quick start
 
@@ -151,7 +173,7 @@ keeps the old file beside it (`config.toml.before-fg2`) and notes it in `/etc/si
 so a channel taken out by hand stays out. Likewise our tones as heard on the air (#47): a `[[tones]]`
 entry still on the unverified Port Chester pair 349.1/311.1 becomes 903.2/810.2 and Rye Brook FD
 767.4/928.1 (ours) is added after it (`config.toml.before-tones-47`); tones set by hand are left alone.
-The install log says what it added. Another model:
+And the station's name (#271, [below](#where-the-station-is)). The install log says what it added. Another model:
 `sudo sizeup-station update --model base.en`.
 
 ## Updating
@@ -402,7 +424,8 @@ station").
      the layer box lists *Our receiver (station) on adsb1090*.
 
 What runs: `python3 -I /usr/local/lib/sizeup/adsbd.py run` as the sizeup user (stdlib only, like the updater), which
-starts `readsb --device-type rtlsdr --device <its index> --gain auto [--enable-biastee] --write-json
+starts `readsb --device-type rtlsdr --device <its index> --gain auto --lat/--lon <[station] lat / lon: the South
+End by default> [--enable-biastee] --write-json
 /run/sizeup-adsb/json --write-json-every 1` (no network ports) and restarts it when it exits, stalls or the settings
 change; `python3 -I /usr/local/lib/sizeup/adsbd.py print` shows the command line it would run now. It holds the
 dongle's claim in `~/.local/state/rtl-claims` while readsb runs, and never starts while another app holds it. An
@@ -612,7 +635,7 @@ taken for an operator.
 ## The station page
 
 http://localhost:8091 on the station (`/monitor` opens its Monitor). The header says **Station**, the
-station id (`pcfd-hq`), the hub link's state (Hub connected / Hub unreachable / Hub not sending / Not
+station's name (Port Chester FD South End; the id `pcfd-hq` on hover), the hub link's state (Hub connected / Hub unreachable / Hub not sending / Not
 forwarding) and links to the CAD on the hub. Three views:
 
 * **Radios**: the receivers, speech-to-text and the Hub row; each dongle's job (and whether shortfinal

@@ -271,14 +271,14 @@ def test_an_installed_station_gains_them_once(tmp_path, monkeypatch):
     marks.write_text("fg2\ntones-47\nhpn-atc\nadsb-receiver\n")
     before = load(conf)
     said = configupdate.run(conf, marks, leaving=release(tmp_path, "rel-new", (ROOT / "sizeup" / "config.py").read_text()))
-    assert len(said) == 1 and said[0].startswith("approach-ground: NY Approach (126.4 MHz 0700-2300, 120.8 2300-0700")
+    assert len(said) == 2 and said[0].startswith("approach-ground: NY Approach (126.4 MHz 0700-2300, 120.8 2300-0700")
     kept = conf.with_name("config.toml.before-approach-ground").read_text()
     assert conf.read_text() == kept + "".join(b for _l, _m, b in configupdate.APPROACH_GROUND)    # only added to
     after = load(conf)
     assert [c.label for c in after.channels][-3:] == ["NY Approach", "NY Approach 124.65", "HPN Ground"]
     assert after.channels[-3].schedule == DAYNIGHT and after.sdr_auto_order == before.sdr_auto_order   # not auto-assigned
     assert 'auto_assign_order = ["fg1", "p25", "south2", "fg2", "hpn tower"]' in conf.read_text()
-    assert marks.read_text().endswith("approach-ground\n")
+    assert marks.read_text().endswith("approach-ground\nsouth-end\n")
     conf.write_text(kept)                                                  # taken out by hand: stays out
     assert configupdate.run(conf, marks) == []
 
@@ -293,7 +293,8 @@ def test_it_waits_while_the_release_to_go_back_to_cant_read_the_schedule(tmp_pat
     assert configupdate.reads_airband(old) and not configupdate.reads_schedule(old)
     said = configupdate.run(conf, marks, leaving=old)
     assert said == ["approach-ground: deferred: the release this switch would go back to (rel-233) can't read an "
-                    "airband channel's schedule: NY Approach and HPN Ground are added at the next update"]
+                    "airband channel's schedule: NY Approach and HPN Ground are added at the next update",
+                    "south-end: the station is already called 'Port Chester FD South End': nothing changed"]
     assert conf.read_text() == same and "approach-ground" not in marks.read_text()      # tried again next time
     assert configupdate.reads_schedule(None) and not configupdate.reads_schedule(tmp_path / "nowhere")
     # the next update: the release to go back to is the one that reads it
