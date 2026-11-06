@@ -798,7 +798,8 @@ class AtcWatch:
         allh = hits + ctx_hits
         all_norm = " . ".join([*(c.norm for c in ctx), me.norm])
         departing = next((departure_runway(c.norm) for c in reversed([*ctx, me]) if departure_runway(c.norm)), "")
-        planes = self._planes()
+        from sizeup.atc_scope import planes_for
+        planes = planes_for(me.channel, self._planes())     # who can be on this frequency (#260: Ground, Approach)
         att = self._who(me, ctx, planes)
         if not departing and att and att.get("phase") == "departing" and att.get("rwy"):
             departing = str(att["rwy"])

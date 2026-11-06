@@ -67,8 +67,9 @@ gain_db = 40
 # Ground 121.825, Clearance Delivery 126.4 (127.25 when the tower is closed), D-ATIS 133.8,
 # New York Approach 126.4 (0700-2300) / 120.8 (2300-0700) / 124.65, New York Departure 120.55.
 # One RTL-SDR covers ~2 MHz, so Tower and Ground (3.25 MHz apart) need a dongle each: one channel
-# per dongle here (several per dongle is #119). Another one is another [[radio.channels]] entry with
-# kind = "airband" and its own label ("HPN Ground", 121.825), picked for a dongle by hand.
+# per dongle here (several per dongle is #119). NY Approach and HPN Ground (#260) are below: picked for
+# a dongle by hand, never auto-assigned. The facility comes from the label (sizeup/atc_scope.py): "...
+# Ground" matches aircraft on the field, "... Approach" HPN's arrivals and departures out to 40 NM.
 [[radio.channels]]
 label = "HPN Tower"
 mhz = 118.575
@@ -76,6 +77,25 @@ kind = "airband"                   # AM, carrier squelch (sizeup/radio/am.py, sh
 device = "hpn-twr"
 gain_db = 36.4                     # shortfinal's airband gain
 squelch_db = 3.5                   # open this far over the noise floor (bench: noise +2, voice +6..+28)
+
+[[radio.channels]]
+label = "NY Approach"              # New York Approach for HPN (#260): early inbound, emergencies declared to it first
+mhz = 126.4                        # the day frequency; schedule: each frequency from its local time (America/New_York,
+kind = "airband"                   # DST-aware) until the next; retuned only between transmissions
+schedule = [{ at = "07:00", mhz = 126.4 }, { at = "23:00", mhz = 120.8 }]
+device = "nyapp"
+
+[[radio.channels]]
+label = "NY Approach 124.65"       # New York Approach's third HPN frequency, fixed
+mhz = 124.65
+kind = "airband"
+device = "nyapp2"
+
+[[radio.channels]]
+label = "HPN Ground"               # Westchester Ground (0600-2300 like the tower)
+mhz = 121.825
+kind = "airband"
+device = "hpn-gnd"
 
 # Two-tone codes: every decoded pair is shown with its page so the real codes can be confirmed and
 # named here (or in Settings > Radios > Tones). `ours = true` = opens incidents. A name is read as

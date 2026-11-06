@@ -135,20 +135,22 @@ class Comms:
             note = "" if known else str(t.get("id_note") or "")
             note = note if note in ID_NOTES else ""
             ev = evidence_json(t.get("evidence"))
+            mhz = t.get("mhz")                  # the frequency heard on (an airband row, #260); kept when not sent again
+            mhz = round(float(mhz), 4) if isinstance(mhz, (int, float)) and not isinstance(mhz, bool) and mhz > 0 else None
             vals = (call_id, turn, start, float(t.get("end") or start), t.get("source") or "", t.get("talkgroup"),
                     talker, t.get("radio_id") or "", ", ".join(rigs), disp, t.get("text") or "", t.get("status") or "",
                     t.get("model") or "", tones, t.get("voice_at"), seq, note, int(bool(t.get("emergency"))),
-                    str(t.get("kept") or "")[:40], ev, now)
+                    str(t.get("kept") or "")[:40], ev, mhz, now)
             if have:
                 db.execute("UPDATE radio_traffic SET call_id = ?, turn = ?, start = ?, end = ?, channel = ?, talkgroup = ?, "
                            "talker = ?, radio_id = ?, rig = ?, dispatcher = ?, text = ?, status = ?, model = ?, tones = ?, "
                            "voice_at = ?, tone_seq = ?, id_note = ?, emergency = MAX(emergency, ?), "
                            "kept = COALESCE(NULLIF(?, ''), kept), evidence = COALESCE(NULLIF(?, ''), evidence), "
-                           "updated_at = ? WHERE id = ?", (*vals, tid))
+                           "mhz = COALESCE(?, mhz), updated_at = ? WHERE id = ?", (*vals, tid))
             else:
                 db.execute("INSERT INTO radio_traffic (call_id, turn, start, end, channel, talkgroup, talker, radio_id, rig, "
                            "dispatcher, text, status, model, tones, voice_at, tone_seq, id_note, emergency, kept, evidence, "
-                           "updated_at, id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                           "mhz, updated_at, id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                            (*vals, tid))
             off = {r[0] for r in db.execute("SELECT incident_id FROM radio_link_exclusions WHERE traffic_id = ?", (tid,))}
             links: dict[int, tuple[str, str]] = {}

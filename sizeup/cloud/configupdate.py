@@ -36,6 +36,16 @@ at the switch to a release that has it (deploy/station/install-linux.sh activate
              hpn-atc: a release from before #235 refuses gain / bias_tee, so it waits ("deferred") until the
              release being left reads them.
 
+    approach-ground  NY Approach and HPN Ground (GitHub #260): three airband channels appended after the config's
+             channels, choices for a dongle in Settings > Radios, NEVER added to [radio] auto_assign_order (so no
+             dongle takes one by itself; pick it by hand): "NY Approach" (New York Approach for HPN, 126.4 MHz
+             0700-2300 local and 120.8 2300-0700, a schedule the receiver retunes on), "NY Approach 124.65" (the
+             Chart Supplement's third Approach frequency, fixed) and "HPN Ground" (Westchester Ground, 121.825).
+             Each one is skipped when the config has it already: a channel by that label, or for the fixed ones on
+             that frequency. Skipped: no [[radio.channels]]. Rollback-safe like hpn-atc: a release from before #260
+             refuses the schedule key (and one from before #233 kind = "airband"), so it is only applied when the
+             release being left reads "schedule"; else it waits ("deferred", not marked) for the next update.
+
 Done ones are listed in a marks file (/etc/sizeup/config-updates, one name per line), so one taken out
 by hand stays out. The config is only ever added to (tones-47 also changes the two values of the one
 entry it names): the text is kept as it is, the result must parse
@@ -141,9 +151,10 @@ def add_hpn_atc(text: str, leaving: Path | None = None) -> tuple[str, str]:
     chans = radio.get("channels") if isinstance(radio.get("channels"), list) else []
     if not chans:
         return text, "hpn-atc: no [[radio.channels]] here (no radios): nothing added"
+    later = {_key(label) for label, _m, _b in APPROACH_GROUND}     # approach-ground's (#260) aren't a tower
     for c in chans:
         if isinstance(c, dict) and (_key(c.get("label", "")) == "hpntower" or _mhz(c.get("mhz")) == HPN_MHZ
-                                    or c.get("kind") == "airband"):
+                                    or (c.get("kind") == "airband" and _key(c.get("label", "")) not in later)):
             return text, f"hpn-atc: already has {c.get('label')!r} on {c.get('mhz')} MHz: nothing added"
     if not reads_airband(leaving):
         raise Deferred(f"the release this switch would go back to ({leaving.name}) can't read an airband channel: "
@@ -343,8 +354,108 @@ def add_adsb(text: str, leaving: Path | None = None) -> tuple[str, str]:
     return new, 'adsb-receiver: [aircraft.receiver] added (sdr = "": no ADS-B dongle named yet; bias_tee = false)'
 
 
-UPDATES = (("fg2", add_fg2), ("tones-47", fix_tones), ("hpn-atc", add_hpn_atc), ("adsb-receiver", add_adsb))
-NEEDS_LEAVING = {"hpn-atc", "adsb-receiver"}   # given the release being left (rollback safety)
+# NY Approach and HPN Ground (#260), FAA Chart Supplement via airnav.com/airport/KHPN (FAA information effective
+# 29 October 2026): NEW YORK APPROACH 120.8 2300-0700, 126.4 0700-2300, 124.65; WESTCHESTER GROUND 121.825 (0600-2300).
+APPROACH_GROUND = (
+    ("NY Approach", (126.4, 120.8), """
+# Added by the update to NY Approach and HPN Ground (GitHub #260): New York Approach for HPN (FAA Chart Supplement via
+# airnav.com/airport/KHPN): 126.4 MHz 0700-2300, 120.8 2300-0700 local time; the receiver retunes on the schedule,
+# between transmissions. Pick it for a dongle on the station page (Radios) or the hub's: it is never auto-assigned.
+[[radio.channels]]
+label = "NY Approach"
+mhz = 126.4
+kind = "airband"
+schedule = [{ at = "07:00", mhz = 126.4 }, { at = "23:00", mhz = 120.8 }]   # local time (America/New_York)
+device = "nyapp"
+gain_db = 36.4
+squelch_db = 3.5
+"""),
+    ("NY Approach 124.65", (124.65,), """
+# Added by the update to NY Approach and HPN Ground (GitHub #260): New York Approach's third HPN frequency, 124.65 MHz
+# (FAA Chart Supplement), fixed. Picked by hand, never auto-assigned.
+[[radio.channels]]
+label = "NY Approach 124.65"
+mhz = 124.65
+kind = "airband"
+device = "nyapp2"
+gain_db = 36.4
+squelch_db = 3.5
+"""),
+    ("HPN Ground", (121.825,), """
+# Added by the update to NY Approach and HPN Ground (GitHub #260): Westchester Ground, 121.825 MHz (FAA Chart
+# Supplement; 0600-2300 like the tower). Picked by hand, never auto-assigned.
+[[radio.channels]]
+label = "HPN Ground"
+mhz = 121.825
+kind = "airband"
+device = "hpn-gnd"
+gain_db = 36.4
+squelch_db = 3.5
+"""),
+)
+APPROACH_SCHEDULE = [{"at": "07:00", "mhz": 126.4}, {"at": "23:00", "mhz": 120.8}]
+
+
+def reads_schedule(release: Path | None) -> bool:
+    """Whether the code of that release accepts an airband channel's schedule (#260; None: no release to go back to)."""
+    if release is None:
+        return True
+    try:
+        return '"schedule"' in (release / "sizeup" / "config.py").read_text(errors="replace")
+    except OSError:
+        return False
+
+
+def add_approach_ground(text: str, leaving: Path | None = None) -> tuple[str, str]:
+    """(new text, what was done): NY Approach (scheduled), NY Approach 124.65 and HPN Ground, the ones not there yet, after
+    the channels; auto_assign_order untouched. Deferred while the release being left can't read a schedule; ValueError
+    when the config doesn't parse or the result wouldn't say what was meant."""
+    data = tomllib.loads(text)
+    radio = data.get("radio") if isinstance(data.get("radio"), dict) else {}
+    chans = radio.get("channels") if isinstance(radio.get("channels"), list) else []
+    if not chans:
+        return text, "approach-ground: no [[radio.channels]] here (no radios): nothing added"
+    have_labels = {_key(c.get("label", "")) for c in chans if isinstance(c, dict)}
+    have_mhz = {_mhz(c.get("mhz")) for c in chans if isinstance(c, dict)}
+    todo, there = [], []
+    for label, mhzs, block in APPROACH_GROUND:
+        fixed = len(mhzs) == 1
+        if _key(label) in have_labels or (fixed and _mhz(mhzs[0]) in have_mhz):
+            there.append(label)
+        else:
+            todo.append((label, mhzs, block))
+    if not todo:
+        return text, f"approach-ground: already has {', '.join(there)}: nothing added"
+    if not reads_schedule(leaving):
+        raise Deferred(f"the release this switch would go back to ({leaving.name}) can't read an airband channel's "
+                       "schedule: NY Approach and HPN Ground are added at the next update")
+    new = text if text.endswith("\n") else text + "\n"
+    for _label, _mhzs, block in todo:
+        new += block
+    try:
+        d = tomllib.loads(new)
+    except tomllib.TOMLDecodeError as e:
+        raise ValueError(f"the result wouldn't parse ({e}): nothing changed") from None
+    r = d.get("radio") or {}
+    got = (r.get("channels") or [])
+    if got[:len(chans)] != chans or len(got) != len(chans) + len(todo):
+        raise ValueError("the channels before came out changed: nothing changed")
+    for c, (label, mhzs, _block) in zip(got[len(chans):], todo):
+        if (c.get("label"), c.get("mhz"), c.get("kind")) != (label, mhzs[0], "airband") \
+                or c.get("schedule", None) != (APPROACH_SCHEDULE if len(mhzs) > 1 else None):
+            raise ValueError(f"the {label} channel came out wrong: nothing changed")
+    if {k: v for k, v in r.items() if k != "channels"} != {k: v for k, v in radio.items() if k != "channels"} \
+            or {k: v for k, v in d.items() if k != "radio"} != {k: v for k, v in data.items() if k != "radio"}:
+        raise ValueError("the result doesn't say what was meant: nothing changed")
+    did = [f"{label} ({'126.4 MHz 0700-2300, 120.8 2300-0700' if len(mhzs) > 1 else f'{mhzs[0]:g} MHz'}, airband AM)"
+           for label, mhzs, _block in todo]
+    return new, ("approach-ground: " + ", ".join(did) + " added after the channels, picked by hand (never auto-assigned)"
+                 + (f"; already there: {', '.join(there)}" if there else ""))
+
+
+UPDATES = (("fg2", add_fg2), ("tones-47", fix_tones), ("hpn-atc", add_hpn_atc), ("adsb-receiver", add_adsb),
+           ("approach-ground", add_approach_ground))
+NEEDS_LEAVING = {"hpn-atc", "adsb-receiver", "approach-ground"}   # given the release being left (rollback safety)
 
 
 def run(conf: Path, marks: Path, leaving: Path | None = None) -> list[str]:

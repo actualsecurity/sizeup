@@ -401,7 +401,8 @@ def test_hpn_tower_ships_in_the_configs(path):
 def test_the_station_template_has_it_last(tmp_path, monkeypatch):
     from tests.test_station_install import station_config
     c = station_config(tmp_path, monkeypatch)
-    assert c.channels[-1].label == "HPN Tower" and c.channels[-1].kind == "airband" and c.sdr_auto_order[-1] == "HPN Tower"
+    hpn = next(ch for ch in c.channels if ch.label == "HPN Tower")
+    assert hpn.kind == "airband" and c.sdr_auto_order[-1] == "HPN Tower"       # last of the auto-assigned ones
     assert AUTO_ORDER[-2:] == ("FG2", "HPN Tower")
 
 
@@ -507,7 +508,8 @@ def test_aws_by_default_with_its_own_vocabulary_and_the_reserve():
 
 
 def before_233() -> str:
-    t = (STATION / "config.station.toml").read_text()
+    from tests.test_fg2 import before_260
+    t = before_260((STATION / "config.station.toml").read_text())
     t = re.sub(r"\n\[\[radio\.channels\]\]\nlabel = \"HPN Tower\".*?\n\n", "\n\n", t, flags=re.S)
     t = t.replace(', "hpn tower"]', "]")
     d = tomllib.loads(t)
@@ -527,13 +529,15 @@ def test_an_installed_station_gains_hpn_tower_once(tmp_path, monkeypatch):
     (new / "sizeup" / "config.py").write_text((ROOT / "sizeup" / "config.py").read_text())
     said = configupdate.run(conf, marks, leaving=new)
     assert said[0].startswith("hpn-atc: HPN Tower (118.575 MHz, airband AM) added after the channels; \"hpn tower\" at the end")
+    assert said[2].startswith("approach-ground: NY Approach")                # #260, after it
     kept = conf.with_name("config.toml.before-hpn-atc").read_text()
-    assert conf.read_text().replace(', "hpn tower"]', "]") == kept + configupdate.HPN_BLOCK
+    assert conf.read_text().replace(', "hpn tower"]', "]") == kept + configupdate.HPN_BLOCK + "".join(
+        b for _l, _m, b in configupdate.APPROACH_GROUND)
     after = load(conf)
-    assert after.channels[-1].label == "HPN Tower" and after.sdr_auto_order[-1] == "HPN Tower"
+    assert after.channels[-4].label == "HPN Tower" and after.sdr_auto_order[-1] == "HPN Tower"
     assert replace(after, channels=before.channels, sdr_auto_order=before.sdr_auto_order,
                    stt_aws_channels=before.stt_aws_channels) == before
-    assert marks.read_text() == "fg2\ntones-47\nhpn-atc\nadsb-receiver\n"    # (#235's: the config has it already)
+    assert marks.read_text() == "fg2\ntones-47\nhpn-atc\nadsb-receiver\napproach-ground\n"    # (#235's: the config has it)
     conf.write_text(kept)                                                  # taken out by hand: stays out
     assert configupdate.run(conf, marks, leaving=new) == []
 
@@ -550,7 +554,9 @@ def test_it_waits_while_the_release_to_go_back_to_cant_read_it(tmp_path, monkeyp
     said = configupdate.run(conf, marks, leaving=old)
     assert said == [f"hpn-atc: deferred: the release this switch would go back to (rel-old) can't read an airband "
                     "channel: HPN Tower is added at the next update",
-                    "adsb-receiver: already has [aircraft.receiver]: nothing added"]     # (#235's: nothing to add)
+                    "adsb-receiver: already has [aircraft.receiver]: nothing added",     # (#235's: nothing to add)
+                    "approach-ground: deferred: the release this switch would go back to (rel-old) can't read an "
+                    "airband channel's schedule: NY Approach and HPN Ground are added at the next update"]   # (#260's)
     assert conf.read_text() == same and marks.read_text() == "fg2\ntones-47\nadsb-receiver\n"   # hpn-atc tried again
     assert configupdate.reads_airband(None) and not configupdate.reads_airband(tmp_path / "nowhere")
     # the CLI the installer runs (system python, stdlib only), with the release being left
@@ -559,7 +565,8 @@ def test_it_waits_while_the_release_to_go_back_to_cant_read_it(tmp_path, monkeyp
     assert r.returncode == 0 and "deferred" in r.stdout and conf.read_text() == same
     r = subprocess.run([sys.executable, "-I", str(ROOT / "sizeup" / "cloud" / "configupdate.py"), str(conf), str(marks),
                         "--leaving", str(ROOT)], capture_output=True, text=True, timeout=30)
-    assert r.returncode == 0 and r.stdout.startswith("hpn-atc: HPN Tower") and load(conf).channels[-1].label == "HPN Tower"
+    assert r.returncode == 0 and r.stdout.startswith("hpn-atc: HPN Tower") and load(conf).channels[-4].label == "HPN Tower"
+    assert [c.label for c in load(conf).channels][-3:] == ["NY Approach", "NY Approach 124.65", "HPN Ground"]
     sh = (STATION / "install-linux.sh").read_text()
     assert '"$ETC/config-updates" --leaving "$leaving"' in sh and 'leaving=$(readlink -f "$CURRENT"' in sh
 

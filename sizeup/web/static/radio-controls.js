@@ -477,7 +477,7 @@ window.RadioControls = (() => {
   }
   function fmRows() {
     const c = (st.state && st.state.channels) || {};
-    return (c.fm || []).map((f) => ({ key: `ch:${f.key}`, chan: f.key, name: f.key, kind: f.kind, mhz: f.mhz, fm: true, ...chan(f.key) }));
+    return (c.fm || []).map((f) => ({ key: `ch:${f.key}`, chan: f.key, name: f.key, kind: f.kind, mhz: f.mhz, schedule: f.schedule || "", fm: true, ...chan(f.key) }));
   }
   function settle() {
     const now = Date.now(), by = new Map(((st.state && st.state.talkgroups) || []).map((r) => [r.tg, r]));
@@ -735,7 +735,8 @@ window.RadioControls = (() => {
             setText(mk, r.encrypted ? "🔒" : "");
             show(mk, !!r.encrypted);
             setText(name, r.name);
-            setText(num, r.fm ? `${r.mhz} MHz${r.kind === "paging" ? " · paging" : r.kind === "airband" ? " · AM" : ""}` : `TG ${r.tg}`);
+            // a schedule (#260, NY Approach): each frequency with its local hours, "126.4 07:00-23:00, 120.8 23:00-07:00 · AM"
+            setText(num, r.fm ? `${r.schedule || `${r.mhz} MHz`}${r.kind === "paging" ? " · paging" : r.kind === "airband" ? " · AM" : ""}` : `TG ${r.tg}`);
             show(badge, !!r.main);
             setText(heard, r.fm ? (r.kind === "paging" ? "60 Control pages" : r.kind === "airband" ? "HPN ATC (airport pre-alerts)" : "Fireground") : heardText(r));
             heard.className = r.fm || r.count ? "tg-heard" : "tg-heard dim";

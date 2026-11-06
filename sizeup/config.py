@@ -49,6 +49,11 @@ class ChannelCfg:
     # be the same page. None: by kind (paging 1.5 s / 3 s; traffic 0.4 s, as always / none).
     hang_s: float | None = None
     continue_s: float | None = None
+    # An airband channel whose frequency changes by the time of day (#260: NY Approach, 126.4 by day, 120.8 overnight):
+    # ((minute of the local day, MHz), ...) in time order, each from its time until the next one (round midnight), in
+    # America/New_York wall-clock time (sizeup/tz.py, DST-aware). () = mhz all day. The receiver retunes between
+    # transmissions (sizeup/radio/am.py Schedule).
+    schedule: tuple[tuple[int, float], ...] = ()
 
     def __post_init__(self):
         paging = self.kind == "paging"
@@ -512,7 +517,39 @@ def _airband(c: dict, i: int) -> ChannelCfg:
         raise ConfigError(f"{where}.mhz: airband voice is {AIRBAND_MHZ[0]:g} to {AIRBAND_MHZ[1]:g} MHz (AM)")
     if not 1.0 <= sq <= 20.0:
         raise ConfigError(f"{where}.squelch_db: 1 to 20 dB over the noise floor (3.5: shortfinal's, tested)")
-    return ChannelCfg(str(c["label"]), mhz, "airband", c.get("device", ""), c.get("gain_db", AIRBAND_GAIN_DB), sq)
+    sched = _schedule(c["schedule"], mhz, where) if "schedule" in c else ()
+    return ChannelCfg(str(c["label"]), mhz, "airband", c.get("device", ""), c.get("gain_db", AIRBAND_GAIN_DB), sq,
+                      schedule=sched)
+
+
+_HHMM = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
+
+
+def _schedule(raw, mhz: float, where: str) -> tuple[tuple[int, float], ...]:
+    """An airband channel's "schedule" (#260): [{at = "07:00", mhz = 126.4}, {at = "23:00", mhz = 120.8}], local
+    (America/New_York) wall-clock times, each frequency from its time until the next. mhz is one of them."""
+    why = (f'{where}.schedule: a list of {{at = "HH:MM", mhz = ...}} (local time), two or more, e.g. '
+           '[{at = "07:00", mhz = 126.4}, {at = "23:00", mhz = 120.8}]')
+    if not isinstance(raw, list) or len(raw) < 2:
+        raise ConfigError(why)
+    out: dict[int, float] = {}
+    for e in raw:
+        if not isinstance(e, dict) or set(e) != {"at", "mhz"} or not isinstance(e["at"], str) \
+                or isinstance(e["mhz"], bool) or not isinstance(e["mhz"], (int, float)):
+            raise ConfigError(why)
+        m = _HHMM.match(e["at"].strip())
+        if not m:
+            raise ConfigError(f'{where}.schedule: at = {e["at"]!r}: a time of day "HH:MM" (00:00 to 23:59)')
+        at = int(m.group(1)) * 60 + int(m.group(2))
+        if at in out:
+            raise ConfigError(f'{where}.schedule: {e["at"]} is there twice')
+        f = float(e["mhz"])
+        if not AIRBAND_MHZ[0] <= f <= AIRBAND_MHZ[1]:
+            raise ConfigError(f"{where}.schedule: {f:g} MHz: airband voice is {AIRBAND_MHZ[0]:g} to {AIRBAND_MHZ[1]:g} MHz (AM)")
+        out[at] = f
+    if round(mhz, 6) not in {round(f, 6) for f in out.values()}:
+        raise ConfigError(f"{where}.mhz: {mhz:g} is not one of the schedule's frequencies")
+    return tuple(sorted(out.items()))
 
 
 def _atc(data: dict, base: Path) -> dict:
@@ -944,10 +981,12 @@ def load(path: str | Path) -> Config:
     channels = []
     for i, c in enumerate(radio.get("channels", [])):
         _take(c, f"radio.channels[{i}]", {"label", "mhz", "kind", "device", "gain_db", "squelch_db",
-                                                 "drop_db", "hang_s", "continue_s"})
+                                                 "drop_db", "hang_s", "continue_s", "schedule"})
         if c.get("kind", "traffic") not in KINDS:
             raise ConfigError(f"radio.channels[{i}].kind: 'paging', 'traffic' or 'airband'")
         kind = c.get("kind", "traffic")
+        if "schedule" in c and kind != "airband":
+            raise ConfigError(f"radio.channels[{i}].schedule: airband channels only (#260)")
         if kind == "airband":
             channels.append(_airband(c, i))
             continue

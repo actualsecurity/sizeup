@@ -490,6 +490,42 @@ def classify(ac: Plane, procedures: Procedures | None = None, ceiling_ft: float 
     return Phase(OVERFLIGHT, dist_nm=d)
 
 
+# ---- beyond the map: HPN's traffic on NY Approach (#260) -------------------------------------------------------------
+# While an Approach channel is heard (AircraftLayer.widen: sizeup/atc_scope.py APPROACH_NM, 40 NM), the feeds are asked
+# for that much and the aircraft the map doesn't draw that may be talking to NY Approach about HPN are kept apart
+# (AircraftLayer.wide, never drawn, never in the emergency watch): inbound (pointed at HPN, descending, low and slow
+# enough to be landing here) and outbound (seen departing HPN lately, or close in, climbing away from it).
+INBOUND, OUTBOUND = "inbound", "outbound"
+WIDE_HOLD_S = 30 * 60.0        # the feeds stay widened this long after an Approach transmission
+WIDE_CEILING_FT = 17000.0      # N90's airspace (and HPN's arrivals and departures in it): under this
+WIDE_POINTED_DEG = 40.0        # inbound: its track within this of the bearing to HPN
+WIDE_AWAY_DEG = 60.0           # outbound: its track within this of the bearing away from HPN
+WIDE_CLOSE_NM = 12.0           # outbound with no departure seen: this close and climbing away
+WIDE_MAX_KT = 320.0            # inbound: slower than this (under 10,000 ft it is 250 kt anyway)
+
+
+def approach_phase(ac: Plane, departed_at: float | None, now: float, radius_nm: float) -> str:
+    """inbound | outbound | '' for an aircraft the map doesn't draw, out to radius_nm (the module's #260 notes)."""
+    if not ac.has_position or ac.alt_baro == "ground":
+        return ""
+    d = nm(ARP[0], ARP[1], ac.lat, ac.lon)
+    alt, trk, vr = ac.altitude_ft, ac.track, ac.vertical_rate
+    if d > radius_nm or trk is None or (alt is not None and alt >= WIDE_CEILING_FT):
+        return ""
+    to_field = bearing(ac.lat, ac.lon, ARP[0], ARP[1])
+    agl = None if alt is None else alt - ELEV_FT
+    if vr is not None and vr < -200 and abs(wrap180(trk - to_field)) < WIDE_POINTED_DEG \
+            and (agl is None or agl < GLIDE_FT_PER_NM * d + 4000) and (ac.gs is None or ac.gs < WIDE_MAX_KT):
+        return INBOUND
+    away = abs(wrap180(trk - (to_field + 180) % 360)) < WIDE_AWAY_DEG
+    departed = departed_at is not None and now - departed_at < DEPARTED_KEEP_S
+    if away and (vr is None or vr > 0) and departed:
+        return OUTBOUND
+    if away and vr is not None and vr > 300 and d <= WIDE_CLOSE_NM:
+        return OUTBOUND
+    return ""
+
+
 PHASE_HOLD_S = 20.0           # keep an arriving reading through brief ambiguous updates
 DEPARTED_KEEP_S = 15 * 60.0   # an HPN departure stays "departing" this long ...
 DEPARTED_MAX_FT = 18000.0     # ... while below this and inside the radius
@@ -872,8 +908,12 @@ class ApiFeed(Feed):
 
     def __init__(self, key: str, url_template: str, radius_nm: float, fetch: Callable):
         self.key = key
-        self.url = url_template.format(lat=f"{ARP[0]:.4f}", lon=f"{ARP[1]:.4f}", radius=int(math.ceil(radius_nm)))
+        self.template, self.radius_nm = url_template, float(radius_nm)   # radius_nm: the layer widens it (#260)
         self.fetch = fetch
+
+    @property
+    def url(self) -> str:
+        return self.template.format(lat=f"{ARP[0]:.4f}", lon=f"{ARP[1]:.4f}", radius=int(math.ceil(self.radius_nm)))
 
     def read(self) -> Snapshot:
         try:
@@ -1258,6 +1298,8 @@ class AircraftLayer:
         self._thread: threading.Thread | None = None
         self.asked = 0.0
         self.view: list[dict] = []
+        self.wide: list[dict] = []          # beyond the map, for NY Approach's talkers (#260: approach_phase); never drawn
+        self.wide_nm, self.wide_until = 0.0, 0.0
         self.phases: dict[str, Phase] = {}
         self.st = {"at": None, "fetched": None, "error": "", "seq": 0}
         # the emergency watch: on_emergency(event) -> alarm id | None, on_clear(event, alarm id, why) (sizeup/cad/alarms.py)
@@ -1413,8 +1455,27 @@ class AircraftLayer:
             self._no_data(now)
         return read
 
+    def widen(self, radius_nm: float, now: float | None = None) -> None:
+        """An Approach channel was heard (#260): the feeds asked for radius_nm around HPN for WIDE_HOLD_S from now, and
+        the aircraft out there that may be HPN's traffic kept in self.wide (approach_phase). The map stays as it is."""
+        now = self.clock() if now is None else now
+        if radius_nm > self.radius_nm:
+            if not self.widened(now):
+                self.log(f"aircraft: {radius_nm:g} nm around HPN for NY Approach's traffic (the map stays {self.radius_nm:g} nm)")
+            self.wide_nm, self.wide_until = float(radius_nm), now + WIDE_HOLD_S
+
+    def widened(self, now: float | None = None) -> bool:
+        return self.wide_nm > self.radius_nm and (self.clock() if now is None else now) < self.wide_until
+
+    def query_nm(self, now: float | None = None) -> float:
+        """How far around HPN the feeds are asked: the map's radius, or NY Approach's while widened (#260)."""
+        return self.wide_nm if self.widened(now) else self.radius_nm
+
     def _read(self, f: Feed, now: float, iv: float) -> bool:
         st = f.st
+        if isinstance(f, ApiFeed):
+            f.radius_nm = self.query_nm(now)
+        self.tracks.radius_nm = max(self.radius_nm, self.query_nm(now))
         try:
             snap = f.read()
         except Exception as e:  # network, a 429, a file, JSON: this feed rests, the others carry on
@@ -1480,6 +1541,7 @@ class AircraftLayer:
         with self._lock:
             self.tracks.update(snap)
             view = self._view()
+            wide = self.wide
         # "fetched" is when the answer came in, not when the tick began: the page reads each aircraft's age as its
         # "age" (at the feed's time) plus the time since "fetched", so stamping it before the reads (an API answer
         # takes 0.3 s to over 10 s) made every position look older than it was and the page drew the aircraft that
@@ -1491,7 +1553,7 @@ class AircraftLayer:
             self._fresh.notify_all()
         if self.on_view is not None:
             try:
-                self.on_view(view, done)
+                self.on_view(view + wide, done)     # ... and NY Approach's wider set (#260), for the talkers only
             except Exception as e:  # noqa: BLE001 - the layer goes on
                 self.log(f"aircraft: atc talkers: {type(e).__name__}: {e}")
         self._watch(now)
@@ -1632,12 +1694,23 @@ class AircraftLayer:
         out = []
         live = set()
         phases = {}
+        wide = []
+        far = self.widened(self.clock())
         for t in self.tracks.live():
             ac = t.plane
             live.add(ac.hex)
             ph = phases[ac.hex] = self.memory.phase(ac, now)
             emerg = ac.emergency_text
-            if ph.kind not in SHOWN and not emerg:
+            d = nm(ARP[0], ARP[1], ac.lat, ac.lon)
+            if (ph.kind not in SHOWN and not emerg) or d > self.radius_nm * 1.5:   # the map's area, as before #260
+                if far and ph.kind not in SHOWN:
+                    wp = approach_phase(ac, self.memory._departed.get(ac.hex), now, self.wide_nm)
+                    if wp:
+                        wide.append({"hex": ac.hex, "cs": ac.flight or ac.reg, "flight": ac.flight, "reg": ac.reg,
+                                     "type": ac.type, "lat": round(ac.lat, 5), "lon": round(ac.lon, 5),
+                                     "alt": ac.alt_baro if ac.alt_baro is not None else _r(ac.alt_geom), "gs": _r(ac.gs),
+                                     "trk": _r(ac.track), "vr": _r(ac.vertical_rate), "phase": wp, "dist": _r(d, 1),
+                                     "wide": True})
                 continue
             reg = self.registry.lookup(ac.hex) if not ac.hex.startswith("~") else None
             m = AIRLINE_CALLSIGN.match(ac.flight or "")
@@ -1661,6 +1734,7 @@ class AircraftLayer:
             })
         self.memory.forget(live)
         self.phases = phases
+        self.wide = sorted(wide, key=lambda a: (a["dist"], a["hex"]))
         order = {ARRIVING: 0, DEPARTING: 1, GROUND: 2, LOW: 3}
         out.sort(key=lambda a: (not a["emerg"], order.get(a["phase"], 4), a["dist"] if a["dist"] is not None else 1e9, a["hex"]))
         return out
