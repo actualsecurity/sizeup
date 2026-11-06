@@ -286,7 +286,10 @@ window.RadioControls = (() => {
     else if (!d.state) parts.push("decoder: no word yet");
     else if (d.state === "ok") parts.push(`decoding: ${d.aircraft ?? 0} aircraft, ${d.messages_per_s ?? 0} messages/s`);
     else parts.push(`decoder ${d.state}${d.detail ? `: ${d.detail}` : ""}`);
-    if (a.held_by && !(a.held_by.app === "sizeup" && a.held_by.mode === "adsb")) parts.push(`held by ${a.held_by.app} (${a.held_by.mode})`);
+    // why it failed (#262): the decoder's detail already says the cause and who holds the dongle; an older station
+    // sends neither (nothing added then)
+    if (d.state !== "ok" && d.holder && !(d.detail || "").includes(d.holder)) parts.push(`held by ${d.holder}`);
+    if (a.held_by && !(a.held_by.app === "sizeup" && a.held_by.mode === "adsb") && !d.holder) parts.push(`held by ${a.held_by.app} (${a.held_by.mode})`);
     if (f) parts.push(f.ok ? `to the hub every ${f.every_s} s` : f.error ? `not reaching the hub (${f.error})` : "not sent to the hub yet");
     return parts.join(" · ");
   }
@@ -297,7 +300,7 @@ window.RadioControls = (() => {
     show(box, !!a && (!!a.serial || !!st.adsbError));
     if (!a) return;
     const d = a.decoder || {};
-    const key = JSON.stringify([a.serial, a.name, a.present, d.state, d.detail, d.aircraft, d.messages_per_s, a.held_by,
+    const key = JSON.stringify([a.serial, a.name, a.present, d.state, d.detail, d.cause, d.holder, d.tail, d.aircraft, d.messages_per_s, a.held_by,
                                 a.forward && [a.forward.ok, a.forward.error, a.forward.every_s], st.adsbBusy, st.adsbError, ro()]);
     if (box.dataset.key === key) return;
     box.dataset.key = key;
@@ -308,6 +311,7 @@ window.RadioControls = (() => {
         + (a.present === false ? " · unplugged" : "");
       row.append(el("b", "", "ADS-B receiver (reserved)"), el("span", "", who),
                  el("span", `adsb-state ${d.state === "ok" ? "ok" : d.state && d.state !== "off" ? "bad" : ""}`, decoderText(a)));
+      if (d.state !== "ok" && Array.isArray(d.tail) && d.tail.length) row.lastChild.title = `readsb said:\n${d.tail.join("\n")}`;
       const rel = el("button", "mini", "Release");
       rel.type = "button";
       rel.title = "Stop using this dongle for ADS-B (admins)";
@@ -318,6 +322,8 @@ window.RadioControls = (() => {
         + " ([aircraft.receiver] gain / bias_tee in the station's config). Only its decoder uses this dongle."
         + (a.source === "config" ? " Named in the station's config." : "")));
     }
+    if (a.serial && d.state !== "ok" && Array.isArray(d.tail) && d.tail.length)     // readsb's last words (#262)
+      kids.push(el("p", "dim small adsb-tail", `readsb: ${d.tail.join(" | ")}`));
     if (st.adsbError) kids.push(el("p", "sdr-err", st.adsbError));
     box.replaceChildren(...kids);
   }

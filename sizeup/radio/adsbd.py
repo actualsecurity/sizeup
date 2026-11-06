@@ -40,7 +40,15 @@ renamed: readsb never guesses between them.
 
 The status (STATUS, every STEP_S, atomically): {at, state: off | refused | missing | held | unplugged | ambiguous |
 starting | ok | no_signal | down, detail, sdr, source: config | settings, gain, bias_tee, pid, index, since, restarts, held_by,
-messages_per_s, aircraft, with_pos, last_message_at, json, argv}. sizeup-station reads it for Settings > Radios and the
+messages_per_s, aircraft, with_pos, last_message_at, json, argv, and when it failed: cause, holder, tail, recovery, code}.
+
+Why it failed (#262; the station can't always be reached for journalctl): readsb's output is kept (the last
+TAIL_LINES lines of each run, and still logged). When it exits, the cause is read from its words (classify(): busy,
+not_found, permissions, bad_args, library, lost, unknown) and looked into, read-only: is the serial in librtlsdr's list,
+at which index; who has its USB device open (/proc/*/fd where readable, the shared claims, a kernel driver). If that is
+sizeup's OWN leftover job (an rtl_fm or trunk-recorder under sizeup-station / sizeup-trunk-recorder, this user's), it is
+stopped and readsb retried at once: a reserved dongle never runs another job. Another app's process never is: the
+status says "held by <it>". cause, holder and the last DETAIL_LINES lines (tail) go to Settings and the hub. sizeup-station reads it for Settings > Radios and the
 station health it sends the hub (sizeup/cloud/health.py)."""
 
 from __future__ import annotations
@@ -51,8 +59,10 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 import tomllib
+from collections import deque
 from pathlib import Path
 
 CONFIG = "/etc/sizeup/config.toml"
@@ -297,6 +307,204 @@ class Output:
                 "samples_still_s": None if self.samples is None else now - self.samples[1]}
 
 
+# -- why readsb stopped (#262): its own words, then a read-only look at the dongle ------------------------------------------
+
+TAIL_LINES = 20                   # readsb's last lines kept per run
+DETAIL_LINES = 3                  # sent on (status "tail")
+LINE_MAX = 160
+# What readsb (sdr_rtlsdr.c, v3.16.21) and librtlsdr print, lower case: the first rule that matches is the cause.
+CAUSE_RULES = (
+    ("library", ("error while loading shared libraries", "cannot open shared object file")),
+    ("permissions", ("libusb_error_access", "usb_open error -3", "please fix the device permissions", "permission denied")),
+    ("busy", ("usb_claim_interface error -6", "resource busy", "libusb_error_busy", "claimed by second instance",
+              "kernel driver is active")),
+    ("not_found", ("no supported devices found", "no device matching", "no matching devices", "usb_open error -4",
+                   "libusb_error_no_device", "error querying device")),
+    ("lost", ("lost the usb device", "rtlsdr_read_async returned unexpectedly")),
+    ("bad_args", ("unrecognized option", "invalid option", "requires an argument", "--help' for more", "usage: readsb",
+                  "unknown device type")),
+)
+CAUSE_WORDS = {"busy": "dongle busy", "not_found": "dongle not found", "permissions": "no permission to open the dongle",
+               "bad_args": "readsb refused its command line", "library": "a library readsb needs is missing",
+               "lost": "the dongle went away mid-run (USB)", "unknown": "readsb failed"}
+# sizeup's own programs that open a dongle, and the services they run under: the only processes this ever stops, and
+# only when one holds the ADS-B dongle (a reserved dongle never runs another job). shortfinal's, or anyone else's: never.
+OWN_PROGRAMS = ("rtl_fm", "trunk-recorder")
+OWN_UNITS = ("sizeup-station.service", "sizeup-trunk-recorder.service")
+RTL_PROGRAMS = ("rtl_fm", "rtl_tcp", "rtl_sdr", "rtl_power", "rtl_433", "rtl_airband", "readsb", "dump1090",
+                "dump1090-fa", "trunk-recorder", "acarsdec", "dumpvdl2", "gqrx", "op25")
+PROC, SYS = "/proc", "/sys"
+STOP_WAIT_S = 3.0
+
+
+def clean(line) -> str:
+    """One output line, printable and short (readsb prints nothing secret; still: no control characters, capped)."""
+    if isinstance(line, bytes):
+        line = line.decode(errors="replace")
+    return "".join(ch for ch in str(line) if ch.isprintable()).strip()[:LINE_MAX]
+
+
+def classify(lines: list[str]) -> tuple[str, str]:
+    """(cause, the line that says so) from readsb's last lines: busy | not_found | permissions | bad_args | library |
+    lost | unknown (and "" when no line said it)."""
+    for cause, needles in CAUSE_RULES:
+        for ln in lines:
+            if any(n in ln.lower() for n in needles):
+                return cause, ln
+    return "unknown", ""
+
+
+def usb_device(serial: str, sys_root: str = SYS) -> dict | None:
+    """The dongle with this exact serial in sysfs (nothing opened): {node: /dev/bus/usb/BBB/DDD, driver: a kernel driver
+    bound to one of its interfaces (dvb_usb_rtl28xxu), or ""}. None when sysfs has no such serial."""
+    base = Path(sys_root) / "bus" / "usb" / "devices"
+    try:
+        entries = sorted(base.iterdir())
+    except OSError:
+        return None
+    for d in entries:
+        try:
+            if ":" in d.name or (d / "serial").read_text().strip() != serial:
+                continue
+            bus, dev = int((d / "busnum").read_text()), int((d / "devnum").read_text())
+        except (OSError, ValueError):
+            continue
+        driver = ""
+        for itf in sorted(base.glob(f"{d.name}:*")):
+            try:
+                drv = os.path.basename(os.readlink(itf / "driver"))
+            except OSError:
+                continue
+            if drv and drv != "usbfs":
+                driver = drv
+                break
+        return {"node": f"/dev/bus/usb/{bus:03d}/{dev:03d}", "driver": driver}
+    return None
+
+
+def _proc_info(pdir: Path) -> dict:
+    def rd(name: str) -> str:
+        try:
+            return (pdir / name).read_bytes().decode(errors="replace")
+        except OSError:
+            return ""
+    uid = None
+    for ln in rd("status").splitlines():
+        if ln.startswith("Uid:"):
+            try:
+                uid = int(ln.split()[1])
+            except (IndexError, ValueError):
+                pass
+    unit = ""
+    for ln in rd("cgroup").splitlines():
+        for part in reversed(ln.split(":")[-1].split("/")):
+            if part.endswith(".service") or part.endswith(".scope"):
+                unit = part
+                break
+        if unit:
+            break
+    argv = [a for a in rd("cmdline").split("\0") if a]
+    comm = rd("comm").strip() or (os.path.basename(argv[0]) if argv else "")
+    return {"pid": int(pdir.name), "comm": comm, "argv": argv[:24], "uid": uid, "unit": unit}
+
+
+def holders(node: str, proc_root: str = PROC, skip: tuple = ()) -> tuple[list[dict], int]:
+    """([the processes with `node` open], how many processes' handles couldn't be read: another user's). Read-only."""
+    out, hidden = [], 0
+    try:
+        pids = [p for p in Path(proc_root).iterdir() if p.name.isdigit() and int(p.name) not in skip]
+    except OSError:
+        return [], 0
+    for p in pids:
+        try:
+            fds = list((p / "fd").iterdir())
+        except PermissionError:
+            hidden += 1
+            continue
+        except OSError:
+            continue
+        for fd in fds:
+            try:
+                if os.readlink(fd) == node:
+                    out.append(_proc_info(p))
+                    break
+            except OSError:
+                continue
+    return out, hidden
+
+
+def rtl_programs(proc_root: str = PROC, skip: tuple = ()) -> list[dict]:
+    """Programs that open RTL-SDRs running now, any user's (/proc/<pid>/comm is readable): who MAY hold the dongle
+    when the handles themselves can't be read."""
+    out = []
+    try:
+        pids = [p for p in Path(proc_root).iterdir() if p.name.isdigit() and int(p.name) not in skip]
+    except OSError:
+        return []
+    for p in pids:
+        try:
+            comm = (p / "comm").read_text().strip()
+        except OSError:
+            continue
+        if comm in RTL_PROGRAMS or comm.startswith("rtl_"):
+            out.append(_proc_info(p))
+    return out
+
+
+def channels(config: str = CONFIG) -> dict[str, str]:
+    """{"453.0375": "FG1", ...}: the config's [[radio.channels]], to name an rtl_fm by its frequency."""
+    try:
+        with open(config, "rb") as f:
+            data = tomllib.load(f)
+    except (OSError, tomllib.TOMLDecodeError):
+        return {}
+    radio = data.get("radio") if isinstance(data.get("radio"), dict) else {}
+    out = {}
+    for c in radio.get("channels") or []:
+        if isinstance(c, dict) and isinstance(c.get("mhz"), (int, float)) and c.get("label"):
+            out[f"{float(c['mhz']):.4f}"] = str(c["label"])
+    return out
+
+
+def job_of(h: dict, chans: dict[str, str]) -> str:
+    """The sizeup job a holder runs: an rtl_fm's channel (by its -f), trunk-recorder's P25; "" when unknown."""
+    if h.get("comm") == "trunk-recorder":
+        return "P25"
+    a = h.get("argv") or []
+    if "-f" in a and a.index("-f") + 1 < len(a):
+        f = a[a.index("-f") + 1].rstrip("Mm")
+        try:
+            return chans.get(f"{float(f):.4f}", f"{float(f):.4f} MHz")
+        except ValueError:
+            return ""
+    return ""
+
+
+def is_own(h: dict, uid: int | None = None) -> bool:
+    """sizeup's own job: one of its programs, run by this user, under one of its own services. Nothing else is."""
+    if uid is None:
+        uid = os.getuid() if hasattr(os, "getuid") else -1
+    text = " ".join([h.get("unit") or "", *(h.get("argv") or [])]).lower()
+    return (h.get("comm") in OWN_PROGRAMS and h.get("uid") is not None and h.get("uid") == uid
+            and h.get("unit") in OWN_UNITS and "shortfinal" not in text)
+
+
+def describe(h: dict, job: str = "") -> str:
+    """'rtl_fm (pid 812, sizeup-station's FG1 job)' or 'rtl_tcp (pid 77, shortfinal.service)'."""
+    unit = h.get("unit") or ""
+    name = unit[:-len(".service")] if unit.endswith(".service") else unit
+    who = (f"{name}'s {job} job" if job and name.startswith("sizeup") else unit
+           or (f"uid {h['uid']}" if h.get("uid") is not None else ""))
+    return f"{h.get('comm') or '?'} (pid {h.get('pid')}" + (f", {who}" if who else "") + ")"
+
+
+def in_wsl() -> bool:
+    try:
+        return "microsoft" in Path("/proc/sys/kernel/osrelease").read_text().lower()
+    except OSError:
+        return False
+
+
 # -- the supervisor --------------------------------------------------------------------------------------------------------
 
 
@@ -305,9 +513,16 @@ class Decoder:
 
     def __init__(self, config: str = CONFIG, override: str = OVERRIDE, binary: str = READSB, json_dir: str = JSON_DIR,
                  status_path: str = STATUS, claims: Path | None = None, popen=subprocess.Popen, found=devices,
-                 log=lambda m: print(m, flush=True)):
+                 log=lambda m: print(m, flush=True), proc_root: str = PROC, sys_root: str = SYS, kill=os.kill,
+                 sleep=time.sleep, uid: int | None = None):
         self.config, self.override, self.binary, self.json_dir = config, override, binary, json_dir
         self.status_path, self.claims, self.popen, self.found, self.log = status_path, claims, popen, found, log
+        self.proc_root, self.sys_root, self.kill, self.sleep, self.uid = proc_root, sys_root, kill, sleep, uid
+        self.lines: deque[str] = deque(maxlen=TAIL_LINES)    # readsb's output, this run
+        self.reader: threading.Thread | None = None
+        self.fail_detail = ""                                 # what the last failure said (before "; retry in")
+        self.stopped_pids: list[int] = []                     # sizeup's own leftovers stopped (#262)
+        self.said: tuple | None = None                        # (cause, holder) last logged
         self.proc: subprocess.Popen | None = None
         self.running: tuple | None = None          # (sdr, gain, bias_tee) of the readsb that runs
         self.claimed = ""
@@ -384,11 +599,13 @@ class Decoder:
             held = {"app": c.get("app"), "mode": c.get("mode")}
             self._set(now, "held", f"{c.get('app', 'another app')} holds {s['sdr']}"
                                    + (f" ({c.get('mode')})" if c.get("mode") else "")
-                                   + ": not started (switch it Off there to hand it over)", held_by=held, **base)
+                                   + ": not started (switch it Off there to hand it over)", held_by=held,
+                      cause="claimed", holder=f"{c.get('app', 'another app')} ({c.get('mode', '?')})", **base)
             return
         if now < self.next_start:
-            self.status.update(base, detail=f"{self.status.get('detail', '').split(';')[0]}; retry in "
-                                            f"{self.next_start - now:.0f} s")
+            first = (self.fail_detail if self.status.get("state") == "down" and self.fail_detail
+                     else self.status.get("detail", "").split(";")[0])
+            self.status.update(base, detail=f"{first}; retry in {self.next_start - now:.0f} s")
             return
         try:
             found = self.found()
@@ -403,7 +620,10 @@ class Decoder:
                 self._set(now, "ambiguous", duplicate_text(s["sdr"], same) + ": readsb not started", present=True, **base)
                 return
             why = "librtlsdr not found" if found is None else f"{s['sdr']} isn't plugged in"
-            self._set(now, "unplugged", why, present=False, **base)
+            if found is not None:
+                why += f" (plugged in: {', '.join(x for _i, x in found) or 'none'})" + (
+                    ": WSL? usbipd attach it again on Windows" if in_wsl() else "")
+            self._set(now, "unplugged", why, present=False, cause="library" if found is None else "not_found", **base)
             return
         if not claim(s["sdr"], self.claims):
             return                                     # taken between the look and now: held, next step says by whom
@@ -413,13 +633,21 @@ class Decoder:
             Path(self.json_dir).mkdir(parents=True, exist_ok=True)
             for stale in ("aircraft.json", "stats.json"):
                 (Path(self.json_dir) / stale).unlink(missing_ok=True)
-            self.proc = self.popen(argv, stdin=subprocess.DEVNULL, start_new_session=True)
+            self.lines.clear()
+            self.proc = self.popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                   start_new_session=True)
+            out = getattr(self.proc, "stdout", None)
+            self.reader = None
+            if out is not None:
+                self.reader = threading.Thread(target=self._drain, args=(out,), name="readsb-out", daemon=True)
+                self.reader.start()
         except OSError as e:
             self._fail(now, f"readsb can't start: {e}")
             self._set(now, "down", f"readsb can't start: {e}", **base)
             return
         self.running, self.started_at = want, now
         self.no_signal_since = None
+        self.fail_detail = ""
         self.log(f"adsb: readsb on {s['sdr']} (device #{idx}), gain {s['gain']}, bias-tee "
                  f"{'ON' if s['bias_tee'] else 'off'}, pid {self.proc.pid}")
         self._set(now, "starting", f"readsb on {s['sdr']} (device #{idx})", pid=self.proc.pid, index=idx,
@@ -429,9 +657,7 @@ class Decoder:
         keep = {k: self.status.get(k) for k in ("pid", "index", "argv")}
         code = self.proc.poll()
         if code is not None:
-            self._fail(now, f"readsb exited with code {code}")
-            self._set(now, "down", f"readsb exited with code {code} (unplugged? see journalctl -u sizeup-adsb)",
-                      **base)
+            self._exited(now, s, base, code)
             return
         o = self.out.read(now)
         nums = {k: o.get(k) for k in ("messages_per_s", "aircraft", "with_pos", "last_message_at")}
@@ -467,9 +693,132 @@ class Decoder:
         if self.fails and now - (self.started_at or now) > 120:
             self.fails = 0
         rate = o["messages_per_s"]
+        self.said = None
         self._set(now, "ok", f"{o['aircraft']} aircraft ({o['with_pos']} with a position)"
                              + (f", {rate:g} messages/s" if rate is not None else ""),
                   present=True, **keep, **nums, **base)
+
+    # -- readsb's output, and why it stopped (#262) -------------------------------------------------------------------
+
+    def _drain(self, out) -> None:
+        """readsb's stdout + stderr: kept (the last TAIL_LINES) and logged to the journal as before."""
+        try:
+            for raw in iter(out.readline, b""):
+                ln = clean(raw)
+                if ln:
+                    self.lines.append(ln)
+                    self.log(f"readsb: {ln}")
+        except (OSError, ValueError):
+            pass
+
+    def _exited(self, now: float, s: dict, base: dict, code: int) -> None:
+        if self.reader is not None:
+            self.reader.join(timeout=1.0)      # its last words arrive with the pipe's end
+        lines = list(self.lines)
+        d = self.diagnose(s["sdr"], lines)
+        stopped = self.recover(d)
+        words = CAUSE_WORDS.get(d["cause"], d["cause"])
+        if d["holder"]:
+            words += f" (held by {d['holder']}" + ("; stopped it, retrying" if stopped else "") + ")"
+        elif d["cause"] == "unknown":
+            words = f"readsb exited with code {code}"
+        if d["hint"]:
+            words += f": {d['hint']}"
+        said = d["line"] or (lines[-1] if lines else "")
+        detail = words + (f" · readsb: {said}" if said else "")
+        self._fail(now, f"readsb exited with code {code}: {d['cause']}" + (f" ({said})" if said else ""))
+        if stopped:
+            self.next_start, self.fails = now + BACKOFF_S[0], 0     # the dongle is free now: straight back
+        self.fail_detail = detail
+        if (d["cause"], d["holder"]) != self.said:            # the journal: once per cause, not every retry
+            self.said = (d["cause"], d["holder"])
+            self.log(f"adsb: decoder down: {detail}")
+        self._set(now, "down", detail, cause=d["cause"], holder=d["holder"], tail=lines[-DETAIL_LINES:],
+                  recovery=f"stopped {d['holder']}" if stopped else "", present=d["present"], index=d["index"],
+                  code=code, **base)
+
+    def diagnose(self, serial: str, lines: list[str]) -> dict:
+        """Why readsb stopped, read-only: {cause, line, holder, own: [pids sizeup may stop], present, index, hint}.
+        readsb's own words first; then is the serial in librtlsdr's list (and at which index), and who has its USB
+        device open (/proc/*/fd where readable, the shared claims, a kernel driver)."""
+        cause, line = classify(lines)
+        out = {"cause": cause, "line": line, "holder": "", "own": [], "present": None, "index": None, "hint": ""}
+        try:
+            found = self.found()
+        except Exception:  # noqa: BLE001 - a report, never in the way
+            found = None
+        if found is not None:
+            hits = [i for i, x in found if x == serial]
+            out["present"] = bool(hits)
+            out["index"] = hits[0] if len(hits) == 1 else None
+            if not hits and cause in ("unknown", "not_found", "lost"):
+                out["cause"] = "not_found"
+                seen = ", ".join(x for _i, x in found) or "none"
+                out["hint"] = (f"serial {serial} isn't in the dongle list (plugged in: {seen})"
+                               + (" (WSL: usbipd attach it again on Windows)" if in_wsl() else ""))
+                return out
+        if out["cause"] not in ("busy", "unknown", "permissions"):
+            return out
+        usb = usb_device(serial, self.sys_root)
+        if usb and usb["driver"]:
+            out["holder"] = f"the kernel's {usb['driver']} driver"
+            out["cause"] = "busy"
+            return out
+        found_holder = []
+        if usb:
+            found_holder, hidden = holders(usb["node"], self.proc_root, skip=(os.getpid(),))
+        else:
+            hidden = 0
+        chans = channels(self.config) if found_holder else {}
+        c = holder(serial, self.claims)
+        claimed = c if c and not (c.get("app") == APP and int(c.get("pid", -1)) == os.getpid()) else None
+        if found_holder:
+            out["cause"] = "busy" if out["cause"] == "unknown" else out["cause"]
+            uid = self.uid
+            for h in found_holder:
+                if claimed and claimed.get("app") != APP and int(claimed.get("pid", -1)) == h["pid"]:
+                    continue                              # another app's claim names this process: theirs
+                if is_own(h, uid):
+                    out["own"].append(h["pid"])
+            names = [describe(h, job_of(h, chans) if is_own(h, uid) else "") for h in found_holder]
+            out["holder"] = ", ".join(names)
+        elif claimed:
+            out["holder"] = f"{claimed.get('app', 'another app')} ({claimed.get('mode', '?')}, its claim)"
+        elif out["cause"] == "busy":
+            maybe = [h for h in rtl_programs(self.proc_root, skip=(os.getpid(),)) if h.get("comm") != "readsb"]
+            if maybe:
+                out["holder"] = "maybe " + ", ".join(describe(h) for h in maybe[:3])
+            elif hidden:
+                out["hint"] = f"{hidden} processes of other users couldn't be checked"
+        return out
+
+    def recover(self, d: dict) -> list[int]:
+        """Stop sizeup's OWN leftover job on the ADS-B dongle (d["own"]: an rtl_fm or trunk-recorder under sizeup's
+        services): a reserved dongle never runs another job. Never another app's process. The pids stopped."""
+        done = []
+        for pid in d.get("own") or []:
+            try:
+                self.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                continue
+            except OSError as e:
+                self.log(f"adsb: couldn't stop pid {pid}: {e}")
+                continue
+            gone = False
+            for _ in range(int(STOP_WAIT_S * 10)):
+                if not (Path(self.proc_root) / str(pid)).exists():
+                    gone = True
+                    break
+                self.sleep(0.1)
+            if not gone:
+                try:
+                    self.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
+            self.log(f"adsb: stopped sizeup's leftover pid {pid} on the ADS-B dongle ({d.get('holder')})")
+            done.append(pid)
+        self.stopped_pids += done
+        return done
 
     def _write(self) -> None:
         try:

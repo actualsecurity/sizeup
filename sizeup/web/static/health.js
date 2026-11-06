@@ -143,7 +143,10 @@ const StationHealth = (() => {
         ["Dongle", `${ad.name || ad.sdr}${ad.name && ad.name !== ad.sdr ? ` (serial ${ad.sdr})` : ""}`
           + (ad.present === false ? ": not plugged in" : ""), ad.present === false ? "hl-bad" : ""],
         ["Decoder", `${ad.state || "?"}${ad.detail ? `: ${ad.detail}` : ""}`, stateCls(ad.state === "ok" ? "ok" : ad.state === "off" ? "off" : "bad")],
-        ["Held by", ad.held_by ? `${ad.held_by.app} (${ad.held_by.mode})` : ""],
+        ["Cause", ad.cause && ad.state !== "ok" ? ad.cause.replace("_", " ") + (ad.recovery ? ` (${ad.recovery}, retrying)` : "") : "",
+          ad.cause && ad.state !== "ok" ? "hl-bad" : ""],
+        ["Held by", ad.holder || (ad.held_by ? `${ad.held_by.app} (${ad.held_by.mode})` : "")],
+        ["readsb said", ad.state !== "ok" && Array.isArray(ad.tail) ? ad.tail.join(" | ") : ""],
         ["Messages", ad.messages_per_s !== null && ad.messages_per_s !== undefined ? `${ad.messages_per_s} a second` : ""],
         ["Aircraft", ad.aircraft !== null && ad.aircraft !== undefined ? `${ad.aircraft} (${ad.with_pos ?? 0} with a position)` : ""],
         ["Last message", ad.last_message_at ? `${when(ad.last_message_at)} (${longDur(serverNow() - ad.last_message_at)} ago)` : "none yet"],

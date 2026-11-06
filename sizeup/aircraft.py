@@ -1186,7 +1186,7 @@ class StationFeed(Feed):
 
 
 RX_KEYS = ("sdr", "name", "state", "detail", "held_by", "present", "messages_per_s", "aircraft", "last_message_at",
-           "gain", "bias_tee", "source")
+           "gain", "bias_tee", "source", "cause", "holder")        # cause, holder: #262 (an older station sends neither)
 
 
 # How often each feed is asked (rate limits: adsb.fi's public API allows 1 request a second; adsb.lol limits by load
@@ -1197,6 +1197,7 @@ PRIMARY_S = 5.0
 SECONDARY_S = 10.0
 WATCH_S = 15.0
 SCORE_ALPHA = 0.3                  # the running count of aircraft with a fresh position that picks the primary
+RECEIVER_LOG_EVERY_S = 300.0      # our receiver failing the same way: logged once, then at most this often (#262)
 FEED_KEEP_S = 20.0                 # an API feed's last answer joins the union this long
 RECEIVER_KEEP_S = 10.0             # our receiver's: older than this, it is stale and the APIs take over
 RECEIVER_LOST_S = 10.0             # an aircraft whose position from our receiver is older than this is "lost" there:
@@ -1425,10 +1426,25 @@ class AircraftLayer:
             else:
                 wait = min(exp, BACKOFF_S[0]) if f.local else exp      # ours: back the moment it is
             why = str(e) if isinstance(e, RateLimited) else f"{type(e).__name__}: {getattr(e, 'reason', e)}"[:160]
-            if why != st["why"] or not f.local:
+            if not f.local:
                 self.log(f"aircraft: {FEEDS[f.key]['label']}: {why}; resting {wait:.0f} s")
+            else:
+                # Ours is retried every few seconds and its words change with the seconds ("for 35 s"): logged when
+                # it starts failing or fails another way, then every RECEIVER_LOG_EVERY_S while it goes on (#262).
+                kind = re.sub(r"\d+(\.\d+)?", "#", why)
+                if kind != st.get("log_kind") or now - st.get("log_at", 0.0) >= RECEIVER_LOG_EVERY_S:
+                    since = st.get("down_since") or now
+                    self.log(f"aircraft: {FEEDS[f.key]['label']}: {why}; resting {wait:.0f} s"
+                             + (f" (failing since {tz.hhmmss(since)}; logged every {RECEIVER_LOG_EVERY_S / 60:.0f} min)"
+                                if kind == st.get("log_kind") else ""))
+                    st.update(log_kind=kind, log_at=now)
+                if not st.get("down_since"):
+                    st["down_since"] = now
             st.update(rest_until=now + wait, next=now + wait, why=why)
             return False
+        if f.local and st.get("down_since"):
+            self.log(f"aircraft: {FEEDS[f.key]['label']} back (after {now - st['down_since']:.0f} s)")
+            st.update(down_since=None, log_kind="", log_at=0.0)
         fresh = sum(1 for p in snap.planes if p.has_position and (p.seen_pos if p.seen_pos is not None else p.seen) <= STALE_S
                     and nm(ARP[0], ARP[1], p.lat, p.lon) <= self.radius_nm)
         score = fresh if st["score"] is None else (1 - SCORE_ALPHA) * st["score"] + SCORE_ALPHA * fresh
