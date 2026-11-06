@@ -526,6 +526,8 @@
      radio IDs' src-* colours), an arrow between them; an aircraft chip is a button (the map). Exchanges fold (fillExchange). */
   .atc-talk { display: inline-flex; align-items: baseline; gap: var(--s-1); flex-wrap: wrap; }
   .atc-arrow { font-size: var(--fs-xs); }
+  /* a transcript from a marginal AM carrier (#257, cad.js): transcribed, flagged so its words aren't trusted blindly */
+  .atc-weak { color: var(--warn); font-size: var(--fs-xs); border: 1px dashed currentColor; border-radius: var(--radius-s); padding: 0 var(--s-1); }
   .chip.atc-fac { letter-spacing: 0.06em; }
   button.chip.atc-ac:hover { background: color-mix(in srgb, var(--c, #fff) 24%, transparent); }
   .chip.atc-ac.src-heard, .chip.xch-subj.src-heard { border-style: dashed; }

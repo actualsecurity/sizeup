@@ -304,7 +304,7 @@ def test_the_pre_alert_is_untouched(world):
 
 
 def test_the_app_identifies_hpn_tower_from_the_air(tmp_path):
-    texts = {3: "JetBlue one two three four, Westchester Tower, runway three four, cleared to land"}
+    texts = {4: "JetBlue one two three four, Westchester Tower, runway three four, cleared to land"}   # 3 s + pre-roll + tail
     app = App(replace(cfg(tmp_path), channels=FIVE))
     app.stt.client = FakeWhisper(texts)
     app.stt.start()
