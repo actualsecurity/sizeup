@@ -22,6 +22,9 @@ Westchester County Airport (HPN) ATC is AM voice at 118-137 MHz. The receiver an
               anything over 30 s (MAX_FRAMES) is split.
     AGC       the envelope over its own carrier (agc()): the voice as modulation depth, held through a carrier that
               fades inside one transmission; then radio_voice (sizeup/stt.py) band-passes it and sets its loudness.
+    tones     a steady tone over the voice (#263: most likely a carrier beating with a second one, 245-605 Hz, its own
+              pitch on each transmission) is found and notched out of the transmission (radio/amtones.py detone),
+              before its clip and speech-to-text, on every airband channel.
     weak      a transmission whose carrier is under MIN_CARRIER_DB (3 dB, #257; was 5) over the floor is marked weak
               (Segment.weak): kept and playable, but speech-to-text invents words from noise, so the app says so
               instead of transcribing it (shortfinal's min_carrier_db). Under MARGINAL_DB (6 dB) it is transcribed
@@ -54,6 +57,7 @@ from typing import Callable, Iterable
 
 import numpy as np
 
+from sizeup.radio.amtones import detone, find_tones
 from sizeup.radio.fm import FRAME, RATE, STALL_S, Channel, NfmReceiver, Segment
 from sizeup.tz import TZ
 
@@ -203,12 +207,15 @@ class CarrierSquelch:
         med = float(np.median(levels or [self.floor_level]))
         carrier = float(20 * np.log10(max(med, 1e-9) / max(self.floor_level, 1e-9)))
         audio = agc(np.concatenate(frames), med)
+        tones = find_tones(audio, RATE)                # a heterodyne's steady tone over the voice (#263): notched out
+        audio = detone(audio, RATE, tones)
         seg = Segment(start, start + len(frames) * FRAME / RATE, audio, quieting_db=carrier, reason=reason)
         seg.q_open = seg.q_close = carrier
         seg.hiss_db = self.hiss_db
         seg.weak = carrier < MIN_CARRIER_DB            # type: ignore[attr-defined]
         seg.marginal = not seg.weak and carrier < MARGINAL_DB   # type: ignore[attr-defined]
         seg.preroll_s = npre * FRAME / RATE            # type: ignore[attr-defined]
+        seg.tones = [round(f0, 1) for f0, _spread in tones]   # type: ignore[attr-defined]  (the ones notched out)
         return seg
 
 
