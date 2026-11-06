@@ -3,7 +3,8 @@
 # station: the auto-update end to end against a local git repo standing in for GitHub.
 #   A  this tree on main: the station switches from its folder copy to git (install-linux.sh --repo)
 #   B  a Python-only change: the hub "runs" it -> built beside A, switched, /healthz says B; A kept
-#   C  starts but never answers: switched to, switched back to B, C recorded as failed, not retried
+#   C  starts but never answers: switched to, switched back to B, C recorded as failed, not retried;
+#      trunk-recorder's own service (#71) is left running through both switches (Python only: same PID)
 #   D  fails its preflight (an import): never switched to, B keeps running
 #   then sizeup-station rollback by hand: back to A (never to the failed C)
 set -euo pipefail
@@ -31,6 +32,7 @@ wait_for() {   # wait_for SECONDS CMD...: until CMD succeeds
   return 1
 }
 is_build() { [ "$(build)" = "$1" ]; }
+tr_pid() { systemctl show -p MainPID --value sizeup-trunk-recorder.service; }
 state_is() { [ "$(field 'd.get("state")')" = "$1" ] && [ "$(field 'd.get("hub")')" = "$2" ]; }
 push() { gitc commit -q -am "$1"; gitc push -q --force "$BARE" main; gitc rev-parse HEAD; }
 hub_runs() { echo "$1" > "$WANT"; }      # what the station writes when the hub reports that build
@@ -68,6 +70,7 @@ np=$(find "/opt/sizeup/releases/$B/venv" -name '__init__.py' -path '*numpy/__ini
 test "$(stat -c %i "$np")" = "$(stat -c %i "/opt/sizeup/releases/$A/${np#/opt/sizeup/releases/"$B"/}")"   # venv: hard links
 tail -n 1 /var/log/sizeup-update.log | grep -q "ok in"
 tail -n 1 /var/log/sizeup-update.log
+systemctl is-active --quiet sizeup-trunk-recorder.service                # (started by B's switch: CI's install starts nothing)
 # root wrote neither through the planted links: they were replaced, the targets are untouched and root's
 test ! -L /var/lib/sizeup/trunk-recorder/config.json && test ! -L /var/lib/sizeup/trunk-recorder/unit-event.sh
 cmp "/opt/sizeup/releases/$B/sizeup/cloud/autoupdate.py" /usr/local/lib/sizeup/autoupdate.py
@@ -85,7 +88,9 @@ test "$(systemctl show -p MainPID --value sizeup-station.service)" = "$pid"
 field 'd["equivalent"]["'"$DOCS"'"]'
 tail -n 1 /var/log/sizeup-update.log | grep -q "no restart"
 
-say "C: starts, never answers: switched back"
+say "C: starts, never answers: switched back (trunk-recorder's service left running throughout)"
+trpid=$(tr_pid)
+test "$trpid" -gt 0
 python3 - "$SRC/sizeup/app.py" <<'PY'
 import sys
 p = sys.argv[1]
@@ -100,6 +105,8 @@ wait_for 600 state_is failed "$C"
 test "$(current)" = "$B"
 wait_for 60 is_build "$B"
 test "$(field 'd["last"]["result"]')" = "rolled back"
+test "$(tr_pid)" = "$trpid"                              # a Python-only switch and switch back: never restarted
+grep -q "trunk-recorder: unchanged, left running" /var/log/sizeup-install.log
 field 'd["failed"]["'"$C"'"]["why"]'
 tail -n 1 /var/log/sizeup-update.log | grep -q FAILED
 systemctl start sizeup-update.service                   # again: the same sha is left alone

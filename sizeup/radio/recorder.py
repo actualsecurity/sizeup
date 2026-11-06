@@ -8,6 +8,14 @@ It runs a copy of its config.json, config.runtime.json, with the dongle sizeup h
 unit script (unit-event.sh next to the config) on every system: trunk-recorder then prints each
 voice grant's radio ID to its output the moment the control channel sends it (radio/live.py).
 
+Two ways to run it, one face to the app (sizeup/app.py):
+    TrunkRecorder   a child of sizeup (the Mac, a bench): it stops and starts with sizeup.
+    UnitRecorder    the Linux station (GitHub #71; sizeup-station.service sets SIZEUP_TRUNK_RECORDER_UNIT=1):
+                    trunk-recorder runs under its own service, sizeup-trunk-recorder (radio/trunkrecd.py), which
+                    a restart of sizeup doesn't touch. sizeup hands it the dongle through a state file, reads
+                    its status, follows its log for the live talkers, and on its own exit leaves it running:
+                    the next sizeup adopts the trunk-recorder that runs.
+
 A dongle serial two dongles share (GitHub #242) is never handed to it: the app's lookup gives no index for it (the
 recorder waits, state "ambiguous", and says why), and a source config.json names by such a serial ("rtl=00000001")
 is left out of config.runtime.json (ambiguous_fn); with every source left out it doesn't start at all.
@@ -26,44 +34,19 @@ from collections import deque
 from pathlib import Path
 from typing import Callable
 
+from sizeup.radio import claims, trunkrecd
+from sizeup.radio.trunkrecd import (UNIT_SCRIPT, UNIT_SCRIPT_MAX, AmbiguousSource, rtl_serial,  # noqa: F401
+                                    runtime_argv, unit_script_command)
 
 LOG_MAX_BYTES = 5_000_000
-UNIT_SCRIPT = "unit-event.sh"
-# trunk-recorder 5.2's unit_script plugin builds "<unitScript> <shortName> <radioID> call <tg> <patches> &"
-# in a 200-byte buffer (cut there: a cut "&" only makes it wait for the script): an absolute path
-# longer than this leaves too little room, use ./ then (trunk-recorder's cwd is workdir).
-UNIT_SCRIPT_MAX = 140
+UNIT_ENV = "SIZEUP_TRUNK_RECORDER_UNIT"     # "1": trunk-recorder is its own service (deploy/station/systemd)
 
 
-class AmbiguousSource(ValueError):
-    """Every source in config.json names a dongle serial two or more plugged-in dongles share."""
-
-
-def rtl_serial(device: str | None) -> str:
-    """The dongle an osmosdr device string names ("rtl=fire-p25,buflen=..." -> "fire-p25"), "" for none."""
-    for part in str(device or "").split(","):
-        k, _, v = part.strip().partition("=")
-        if k == "rtl":
-            return v.strip()
-    return ""
-
-
-def unit_script_command(workdir: str | Path, value: str | None = None) -> str:
-    """What goes in a system's "unitScript": the script as an absolute, shell-quoted path (the
-    plugin hands it to system()), run by /bin/sh if it isn't executable. value: what config.json
-    says ("" = off; a relative path is taken from workdir). '' when there is no script."""
-    if value == "":
-        return ""
-    base = Path(workdir).resolve()
-    if value and (value.startswith("/") or any(c.isspace() for c in value)):
-        return value                                     # absolute already, or a command line: as given
-    path = (base / value) if value else (base / UNIT_SCRIPT)
-    if not path.is_file():
-        return ""
-    cmd = shlex.quote(str(path))
-    if len(cmd) > UNIT_SCRIPT_MAX:
-        cmd = "./" + shlex.quote(str(path.relative_to(base))) if path.is_relative_to(base) else cmd
-    return cmd if os.access(path, os.X_OK) else f"/bin/sh {cmd}"
+def make(command: str, workdir: str, on_event: Callable[[str], None] = lambda m: None) -> TrunkRecorder:
+    """The recorder for this process: the station's service when its unit says so, else a child of sizeup."""
+    if os.environ.get(UNIT_ENV) == "1":
+        return UnitRecorder(command, workdir, on_event)
+    return TrunkRecorder(command, workdir, on_event)
 
 
 class TrunkRecorder:
@@ -88,44 +71,22 @@ class TrunkRecorder:
         # Every line of its output, as it comes (sizeup/radio/live.py reads who is keying up from it).
         self.on_line: Callable[[str], None] | None = None
 
+    unit = False                # trunk-recorder is sizeup's child
+
     def _argv_for(self, dev: int | str | None = None) -> list[str]:
         """argv with --config pointing at a copy of its config (config.runtime.json) whose sources
         use dongle `dev` (None: as configured) and whose systems run the unit script."""
-        argv = list(self.argv)
-        k = next((i for i, a in enumerate(argv) if a.startswith("--config")), None)
-        name = (argv[k].split("=", 1)[1] if "=" in argv[k] else argv[k + 1]) if k is not None else "config.json"
-        src = Path(self.workdir) / name
-        if dev is None and not src.is_file():
-            return argv                                  # no config of ours to amend: run as configured
-        conf = json.loads(src.read_text())
-        if dev is not None:
-            for s in conf.get("sources", []):
-                s["device"] = f"rtl={dev}"
-        elif self.ambiguous_fn is not None:
-            keep, out = [], []
-            for s in conf.get("sources", []):
-                ser = rtl_serial(s.get("device"))
-                why = self.ambiguous_fn(ser) if ser else ""
-                (out if why else keep).append(f"{s.get('device')}: {why}" if why else s)
-            self.left_out = out
-            if out and not keep:
-                raise AmbiguousSource("; ".join(out))
-            conf["sources"] = keep
-        for s in conf.get("systems", []):
-            cmd = unit_script_command(self.workdir, s.get("unitScript"))
-            if cmd:
-                s["unitScript"] = cmd
-            else:
-                s.pop("unitScript", None)
-        out = Path(self.workdir) / "config.runtime.json"
-        out.write_text(json.dumps(conf, indent=2))
-        if k is None:
-            argv.append(f"--config={out.name}")
-        elif "=" in argv[k]:
-            argv[k] = f"--config={out.name}"
-        else:
-            argv[k + 1] = out.name
-        return argv
+        self.left_out = []
+        return runtime_argv(self.argv, self.workdir, dev, self.ambiguous_fn, self.left_out)
+
+    def on(self) -> str | None:
+        """The dongle it runs on (or waits for) now, None when it isn't running."""
+        alive = self._thread is not None and self._thread.is_alive()
+        return getattr(self.device_fn, "serial", None) if alive else None
+
+    def shutdown(self) -> None:
+        """sizeup is exiting: its child goes with it."""
+        self.stop()
 
     @property
     def installed(self) -> bool:
@@ -270,3 +231,191 @@ class TrunkRecorder:
             self.on_event(self.detail)
             backoff = 2.0 if time.monotonic() - started > 60 else min(backoff * 2, 30)
             self._stop.wait(backoff)
+
+
+class UnitRecorder(TrunkRecorder):
+    """trunk-recorder under its own service (sizeup-trunk-recorder.service, sizeup/radio/trunkrecd.py), with
+    TrunkRecorder's face to the app. Nothing here needs privilege: the service runs as the sizeup user and reads the
+    state file this writes (trunkrecd.STATE), the way the ADS-B decoder reads state/adsb_receiver.json.
+
+        start()      hand it the dongle (device_fn.serial; "" = config.json as it is): it runs within STEP_S
+        stop()       Off: returns once the service says trunk-recorder is stopped and the dongle's claim is gone
+                     (or after wait_s), so the next program can open the dongle
+        shutdown()   sizeup is exiting (an update, a restart): trunk-recorder is left running, the next sizeup
+                     adopts it by handing it the same dongle again (the service sees nothing to change)
+        status()     the service's own status (trunkrecd.STATUS)
+
+    Its output comes from trunk-recorder.log as the service writes it (from the end at start: nothing said before this
+    process is replayed), line by line to on_line (radio/live.py), the unit script's grant lines included. The claim
+    on its dongle is the service's while it runs; sizeup counts it as its own (claims.helpers)."""
+
+    unit = True
+
+    def __init__(self, command: str, workdir: str, on_event: Callable[[str], None] = lambda m: None,
+                 state_path: str | None = None, status_path: str | None = None, poll_s: float = 0.1,
+                 wait_s: float = 20.0):
+        super().__init__(command, workdir, on_event)
+        self.state_path = Path(state_path or trunkrecd.STATE)
+        self.status_path = Path(status_path or trunkrecd.STATUS)
+        self.poll_s, self.wait_s = poll_s, wait_s
+        self.serial: str | None = None                 # handed over by this process ("" = as configured); None = off
+        self._seq = 0
+        self._tail_stop = threading.Event()
+        self._tail_thread: threading.Thread | None = None
+        self._helper: tuple[float, set[int]] = (0.0, set())
+        claims.helpers = self.helper_pids
+
+    # -- the handover -------------------------------------------------------------------------------------------------
+
+    def _write_state(self, on: bool, sdr: str = "") -> int:
+        self._seq = max(self._seq + 1, time.time_ns())
+        w = {"on": on, "sdr": sdr, "name": (self.device_name or sdr) if on else "", "pid": os.getpid(),
+             "seq": self._seq, "at": time.time()}
+        p = self.state_path
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_name(f".{p.name}.{os.getpid()}")
+        tmp.write_text(json.dumps(w))
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, p)
+        return self._seq
+
+    def asked(self) -> dict:
+        """What the service was last asked (by this process or the one before it)."""
+        return trunkrecd.wanted(str(self.state_path))
+
+    def start(self) -> UnitRecorder:
+        sdr = str(getattr(self.device_fn, "serial", "") or "") if self.device_fn is not None else ""
+        self._follow()                                 # before the handover: its first lines are read too
+        try:
+            self._write_state(True, sdr)
+        except OSError as e:
+            self.state, self.detail = "down", f"cannot hand Fire/EMS 15 to {trunkrecd.UNIT}: {e}"
+            self.on_event(self.detail)
+            return self
+        self.serial = sdr
+        return self
+
+    def stop(self, reason: str = "off") -> None:
+        before = self.asked()
+        self.serial = None
+        try:
+            seq = self._write_state(False)
+        except OSError as e:
+            self.on_event(f"p25: cannot tell {trunkrecd.UNIT} to stop: {e}")
+            return
+        self.state, self.detail = "off", reason
+        if not before["on"]:
+            return                                     # nothing was running
+        end = time.monotonic() + self.wait_s
+        while time.monotonic() < end:
+            st = trunkrecd.read_status(str(self.status_path))
+            if st is None or st.get("stale"):
+                return                                 # the service isn't running: nothing holds the dongle
+            if st.get("seq") == seq and st.get("state") == "off":
+                return
+            time.sleep(self.poll_s)
+        self.on_event(f"p25: {trunkrecd.UNIT} didn't stop trunk-recorder within {self.wait_s:.0f} s ({reason})")
+
+    def shutdown(self) -> None:
+        """sizeup is exiting: trunk-recorder keeps running (the next sizeup adopts it); only the log stops being read."""
+        self._tail_stop.set()
+        if self._tail_thread is not None:
+            self._tail_thread.join(timeout=2)
+            self._tail_thread = None
+
+    def on(self) -> str | None:
+        return self.serial or None
+
+    def helper_pids(self) -> set[int]:
+        """The service's pid, whose dongle claim is sizeup's own (claims.helpers); read at most once a second."""
+        at, pids = self._helper
+        if time.monotonic() - at < 1.0:
+            return pids
+        st = trunkrecd.read_status(str(self.status_path))
+        pid = st.get("pid") if st else None
+        pids = {pid} if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0 else set()
+        self._helper = (time.monotonic(), pids)
+        return pids
+
+    def status(self) -> dict:
+        st = trunkrecd.read_status(str(self.status_path))
+        if st is None:
+            self.state, self.detail = "down", f"the trunk-recorder service isn't running (systemctl status {trunkrecd.UNIT})"
+        else:
+            s = str(st.get("state") or "")
+            self.state = {"held": "absent"}.get(s, s if s in ("ok", "off", "absent", "ambiguous", "down", "starting")
+                                                else "down")
+            self.detail = str(st.get("detail") or "")
+            try:
+                self.restarts = int(st.get("restarts") or 0)
+            except (TypeError, ValueError):
+                self.restarts = 0
+            if self.serial is not None and not st.get("stale") and (not st.get("on") or st.get("sdr") != self.serial):
+                self.state, self.detail = "starting", f"handing Fire/EMS 15 to {trunkrecd.UNIT}"
+        return {"label": "trunk-recorder", "mhz": None, "state": self.state, "detail": self.detail,
+                "open": False, "quieting_db": None, "restarts": self.restarts, "last_heard": None}
+
+    # -- its output -----------------------------------------------------------------------------------------------------
+
+    def _follow(self) -> None:
+        """Read the log from its end now (opened here, not in the thread: nothing written after this is missed)."""
+        if self._tail_thread is not None and self._tail_thread.is_alive():
+            return
+        try:
+            f = open(Path(self.workdir) / trunkrecd.LOG, "rb")
+            f.seek(0, os.SEEK_END)                     # said before this process: not replayed
+        except OSError:
+            f = None                                   # none yet: the one that appears is read from its start
+        self._tail_stop.clear()
+        self._tail_thread = threading.Thread(target=self._tail, args=(f,), name="trunk-recorder-log", daemon=True)
+        self._tail_thread.start()
+
+    def _line(self, raw: bytes) -> None:
+        line = raw.decode(errors="replace").rstrip()
+        if not line:
+            return
+        self.last_lines.append(line)
+        if self.on_line is not None:
+            try:
+                self.on_line(line)
+            except Exception as e:  # the live indicator must never stop reading
+                self.on_event(f"p25: live talker parse error: {type(e).__name__}: {e}")
+
+    def _tail(self, f) -> None:
+        """trunk-recorder.log as the service writes it: from where _follow opened it, then from the start of every
+        new file (the service renames a full one to .log.1 and opens another)."""
+        path = Path(self.workdir) / trunkrecd.LOG
+        ino = os.fstat(f.fileno()).st_ino if f is not None else None
+        buf = b""
+        while not self._tail_stop.is_set():
+            if f is None:
+                try:
+                    f = open(path, "rb")
+                    ino = os.fstat(f.fileno()).st_ino
+                except OSError:
+                    self._tail_stop.wait(self.poll_s)
+                    continue
+            chunk = f.read(65536)
+            if chunk:
+                buf += chunk
+                *lines, buf = buf.split(b"\n")
+                for raw in lines:
+                    self._line(raw)
+                continue
+            try:
+                st = os.stat(path)
+            except OSError:
+                st = None
+            if st is not None and st.st_ino == ino and st.st_size >= f.tell():
+                self._tail_stop.wait(self.poll_s)       # nothing new
+                continue
+            if st is not None and st.st_ino == ino:
+                f.seek(0)                               # cut short in place: from its start
+                continue
+            for raw in (buf + f.read()).split(b"\n"):   # renamed: the rest of the old one, then the new one
+                self._line(raw)
+            buf = b""
+            f.close()
+            f = None
+        if f is not None:
+            f.close()

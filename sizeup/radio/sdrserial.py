@@ -6,7 +6,7 @@ and raises a critical alert whose text names this command. What it does, in orde
 
     1. checks the new serial: 3-16 characters of A-Z a-z 0-9 -, at least one letter (the rtl tools read a number as a
        device index), not the serial of a dongle plugged in now
-    2. stops sizeup-station (and with it trunk-recorder and rtl_fm, its children), sizeup-adsb (readsb), and holds off
+    2. stops sizeup-station (and with it rtl_fm, its child), sizeup-trunk-recorder (#71), sizeup-adsb (readsb), and holds off
        the updater and the health timer, so nothing opens a dongle meanwhile
     3. if another app's claim (~/.local/state/rtl-claims: shortfinal) holds that serial, asks you to switch it Off
        there and waits: shortfinal is never stopped or killed from here
@@ -48,7 +48,7 @@ from typing import Callable
 from sizeup.radio import adsbd, sdr
 
 SERIAL_RE = re.compile(r"[A-Za-z0-9-]{3,16}")
-SERVICES = ("sizeup-station.service", "sizeup-adsb.service")         # trunk-recorder, rtl_fm: sizeup-station's
+SERVICES = ("sizeup-station.service", "sizeup-trunk-recorder.service", "sizeup-adsb.service")   # rtl_fm: sizeup-station's
 HOLD = ("sizeup-update.path", "sizeup-update.timer", "sizeup-health.timer")
 CHILDREN = "trunk-recorder|rtl_fm|readsb"
 CONFIG = "/etc/sizeup/config.toml"
@@ -296,7 +296,7 @@ def stop_ours(env: Env) -> list[str]:
     if _systemctl(env, "is-active", "--quiet", "sizeup-update.service").returncode == 0:
         raise Abort("an automatic update is running (journalctl -u sizeup-update -f): try again when it's done")
     if active:
-        env.say("Stopping " + ", ".join(active) + " (trunk-recorder and rtl_fm stop with sizeup-station)")
+        env.say("Stopping " + ", ".join(active) + " (rtl_fm stops with sizeup-station)")
         r = _systemctl(env, "stop", *active)
         if r.returncode != 0:
             raise Abort(f"systemctl stop failed: {(r.stderr or r.stdout).strip()[-300:]}")
@@ -469,7 +469,7 @@ def main(argv: list[str] | None = None, env: Env | None = None) -> int:
     say(f"Dongle #{idx}: {product}, serial {old}" + (f" (shared with #{', #'.join(str(i) for i, _p in others)})"
                                                      if others else "") + f"  ->  {a.new}")
     say("Plan:\n"
-        f"  1. stop {', '.join(SERVICES)} (trunk-recorder and rtl_fm with it); hold {', '.join(HOLD)}\n"
+        f"  1. stop {', '.join(SERVICES)} (rtl_fm with sizeup-station); hold {', '.join(HOLD)}\n"
         f"  2. wait for any other app holding {old} (shortfinal) to let go: never killed\n"
         f"  3. back up: {env.rtl_eeprom} -d {idx} -r {backup_path(env, old)}   (no backup, no write)\n"
         f"  4. write:   {env.rtl_eeprom} -d {idx} -s {a.new}   (answering its y/n)\n"

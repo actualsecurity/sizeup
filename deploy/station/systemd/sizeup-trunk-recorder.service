@@ -1,0 +1,48 @@
+# trunk-recorder for the sizeup station, as its own service (GitHub #71, deploy/station/README.md "trunk-recorder"):
+# a restart or update of sizeup-station leaves it running, so Fire/EMS 15 keeps the P25 control channel. Supervised by
+# /usr/local/lib/sizeup/trunkrecd.py (sizeup/radio/trunkrecd.py), which runs trunk-recorder on the dongle sizeup-station
+# hands it (/var/lib/sizeup/state/p25_recorder.json: Settings > Radios, auto-assign, the hub) and nothing when there is
+# none. Same user as sizeup, no privilege: no sudo, no polkit. An update restarts it only when its trunk-recorder build,
+# its config.json or talkgroups.csv, trunkrecd.py or this unit changed (install-linux.sh tr_sig).
+# Installed by install-linux.sh; edit there, not here.
+[Unit]
+Description=sizeup station: trunk-recorder (the county P25 system, on the dongle sizeup gives Fire/EMS 15)
+Documentation=file:///opt/sizeup/current/deploy/station/README.md
+After=systemd-udevd.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=sizeup
+Group=sizeup
+SupplementaryGroups=plugdev
+WorkingDirectory=/var/lib/sizeup
+# HOME: the shared dongle claims (~/.local/state/rtl-claims) and the volk profile (~/.volk) are the sizeup user's
+Environment=HOME=/var/lib/sizeup
+Environment=PYTHONDONTWRITEBYTECODE=1
+# The rtl-sdr-blog librtlsdr (V4) and trunk-recorder's plugins (unit_script) first, as sizeup-station had them.
+Environment=LD_LIBRARY_PATH=/opt/sizeup/rtl-sdr/lib:/opt/sizeup/trunk-recorder/lib/trunk-recorder
+Environment=PATH=/opt/sizeup/rtl-sdr/bin:/opt/sizeup/trunk-recorder/bin:/usr/local/bin:/usr/bin:/bin
+RuntimeDirectory=sizeup-trunk-recorder
+RuntimeDirectoryMode=0755
+ExecStart=/usr/bin/python3 -I /usr/local/lib/sizeup/trunkrecd.py run
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+# trunk-recorder and the unit scripts it runs are its children: stopped with it
+KillMode=control-group
+LimitNOFILE=65536
+# Reception, like the radios in sizeup-station (Nice=-5, CPUWeight=500): ahead of whisper and the updater
+Nice=-5
+CPUWeight=500
+IOWeight=500
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=yes
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sizeup-trunk-recorder
+
+[Install]
+WantedBy=multi-user.target

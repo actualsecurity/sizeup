@@ -404,6 +404,7 @@ class Station:
             if argv[0] == "systemctl":
                 if argv[1] == "is-active":
                     return subprocess.CompletedProcess(argv, 0 if argv[-1] in ("sizeup-station.service",
+                                                                                 "sizeup-trunk-recorder.service",
                                                                                  "sizeup-adsb.service",
                                                                                  "sizeup-update.timer") else 3, "", "")
                 return subprocess.CompletedProcess(argv, 0, "", "")
@@ -492,8 +493,11 @@ def test_the_rename_backs_up_writes_waits_for_the_replug_and_restarts(tmp_path):
     assert sdrserial.main(["4", "hpn-twr"], s.env) == 0, s.text()
     stops = [c for c in s.calls if c[:2] == ["systemctl", "stop"]]
     starts = [c for c in s.calls if c[:2] == ["systemctl", "start"]]
-    assert stops == [["systemctl", "stop", "sizeup-station.service", "sizeup-adsb.service", "sizeup-update.timer"]]
-    assert starts == [["systemctl", "start", "sizeup-station.service", "sizeup-adsb.service", "sizeup-update.timer"]]
+    # trunk-recorder's own service (#71) too: it holds the P25 dongle while it runs
+    assert stops == [["systemctl", "stop", "sizeup-station.service", "sizeup-trunk-recorder.service", "sizeup-adsb.service",
+                      "sizeup-update.timer"]]
+    assert starts == [["systemctl", "start", "sizeup-station.service", "sizeup-trunk-recorder.service",
+                       "sizeup-adsb.service", "sizeup-update.timer"]]
     (backup,) = (tmp_path / "backups").iterdir()
     assert backup.name.startswith("00000001-") and backup.read_bytes()[:2] == b"\x28\x32"
     assert s.eeprom() == [["-d", "4", "-r", str(backup)], ["-d", "4", "-s", "hpn-twr"], ["answered", "y"]]

@@ -2,7 +2,7 @@
 [Unit]
 Description=sizeup station: radios, speech-to-text, forwarding to the hub
 Documentation=file:///opt/sizeup/current/deploy/station/README.md
-Wants=network-online.target sizeup-whisper.service
+Wants=network-online.target sizeup-whisper.service sizeup-trunk-recorder.service
 After=network-online.target systemd-udevd.service
 # Never give up restarting (Restart=always below); the health timer also restarts a hung process.
 StartLimitIntervalSec=0
@@ -20,6 +20,9 @@ Environment=HOME=/var/lib/sizeup
 Environment=SIZEUP_STATE_DIR=/var/lib/sizeup
 # whisper-server is its own service (sizeup-whisper.service): an update doesn't reload the model
 Environment=SIZEUP_STT_EXTERNAL=1
+# trunk-recorder is its own service too (sizeup-trunk-recorder.service, #71): sizeup hands it the dongle and adopts
+# the one that runs, so a restart of this one doesn't drop the P25 control channel
+Environment=SIZEUP_TRUNK_RECORDER_UNIT=1
 # where the station tells the auto-updater the hub's build (sizeup/cloud/autoupdate.py); kept across
 # restarts of this service, gone at a reboot (the hub says it again within a minute)
 Environment=SIZEUP_UPDATE_DIR=/run/sizeup
@@ -37,7 +40,7 @@ ExecStart=/usr/local/lib/sizeup/start-station
 Restart=always
 RestartSec=5
 TimeoutStopSec=30
-# rtl_fm and trunk-recorder are its children: stopped and restarted with it.
+# rtl_fm is its child: stopped and restarted with it (trunk-recorder isn't: sizeup-trunk-recorder.service).
 KillMode=control-group
 LimitNOFILE=65536
 # Ahead of anything else on the box (apt, updates), radios first.

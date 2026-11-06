@@ -1,4 +1,5 @@
-"""The station scripts that run with the SYSTEM python3 (no venv, stdlib only): adsbd.py, autoupdate.py, configupdate.py.
+"""The station scripts that run with the SYSTEM python3 (no venv, stdlib only): adsbd.py, trunkrecd.py, autoupdate.py,
+configupdate.py.
 
 The station's python3 is the distro's: Ubuntu 24.04 (WSL) has 3.12, Debian 12 / Raspberry Pi OS 3.11 (install-linux.sh
 supports both), so these must load on 3.11 with the standard library alone. install-linux.sh's preflight loads each with
@@ -21,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 STATION = ROOT / "deploy" / "station"
 INSTALLER = STATION / "install-linux.sh"
 MIN = (3, 11)
-SYSTEM_PY = ("sizeup/radio/adsbd.py", "sizeup/cloud/autoupdate.py", "sizeup/cloud/configupdate.py")
+SYSTEM_PY = ("sizeup/radio/adsbd.py", "sizeup/radio/trunkrecd.py", "sizeup/cloud/autoupdate.py", "sizeup/cloud/configupdate.py")
 
 # stdlib names that are newer than MIN (ast.parse's feature_version catches new syntax, not new library names)
 NEWER_MODULES = {"annotationlib", "compression", "string.templatelib", "concurrent.interpreters"}

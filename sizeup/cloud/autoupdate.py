@@ -26,8 +26,11 @@ side by side: the new release is built and checked next to the running one, then
                4. a quiet moment: no carrier open, nobody talking, no transcription queued or running
                   (the station's GET /api/station-mode, "update" -> "busy"); after QUIET_MAX_S it goes anyway
                5. activate: install-linux.sh --activate SHA: the build links and /opt/sizeup/current
-                  are swapped by rename, one restart of sizeup-station (whisper-server is its own
-                  service and keeps its model loaded)
+                  are swapped by rename, one restart of sizeup-station (whisper-server and trunk-recorder
+                  are services of their own: the model stays loaded, P25 stays on its control channel,
+                  unless what they run changed). Going to a release from before trunk-recorder's own
+                  service (#71), that service is stopped and removed first: its sizeup runs trunk-recorder
+                  itself, and would find the dongle claimed
                6. /healthz must answer with the new build within HEALTH_S, else the same swap back to
                   the release that ran before (nothing rebuilt), and the sha is remembered as failed:
                   not tried again until the hub moves on to another one
@@ -88,6 +91,7 @@ KEEP_EQUIVALENT = 10
 NOT_RUNTIME = ("docs/", "tests/", ".github/", "deploy/hub/", "deploy/aws/", "Dockerfile", ".dockerignore",
                ".gitignore", "deploy/station/install-windows.ps1", "deploy/station/uninstall-windows.ps1")
 NOT_RADIOS = ("Hub", "STT")
+TR_UNIT = "sizeup-trunk-recorder.service"      # trunk-recorder's own service (#71, sizeup/radio/trunkrecd.py)
 WINDOWS_STALE = "Windows scripts out of date: run install-windows.ps1"
 
 
@@ -337,6 +341,7 @@ class Paths:
     deploy_key: Path = Path("/etc/sizeup/deploy_key")
     known_hosts: Path = Path("/etc/sizeup/known_hosts")
     windows: Path = Path("/mnt/c/ProgramData/sizeup")
+    systemd: Path = Path("/etc/systemd/system")
 
     @property
     def repo(self) -> Path:
@@ -454,9 +459,37 @@ class Updater:
         script.chmod(0o700)
         self.installer(["--stage", sha], script)
 
+    def systemctl(self, *args: str) -> None:
+        try:
+            r = subprocess.run(["systemctl", *args], capture_output=True, text=True, timeout=120)
+        except (OSError, subprocess.SubprocessError) as e:
+            self.note(f"auto-update: systemctl {' '.join(args)}: {type(e).__name__}: {e}")
+            return
+        if r.returncode != 0:
+            self.note(f"auto-update: systemctl {' '.join(args)}: {(r.stderr or r.stdout).strip()[-200:]}")
+
+    def before_switch(self, name: str) -> None:
+        """A release from before #71 runs trunk-recorder inside sizeup-station, and its installer doesn't know the
+        service: stop, disable and remove it before that release's sizeup starts (the service holds the dongle's claim,
+        and that sizeup would leave Fire/EMS 15 Off rather than fight for it). Switching forward again installs it."""
+        unit = self.p.systemd / TR_UNIT
+        rel = self.p.releases / name
+        if not unit.exists() or not rel.is_dir() or (rel / "deploy" / "station" / "systemd" / TR_UNIT).is_file():
+            return
+        b = self.build_of(name)
+        self.note(f"auto-update: release {short(b) if norm(b) else name} runs trunk-recorder inside sizeup-station: "
+                  f"{TR_UNIT} stopped and removed")
+        self.systemctl("disable", "--now", TR_UNIT)
+        try:
+            unit.unlink()
+        except OSError as e:
+            self.note(f"auto-update: {unit} not removed: {e}")
+        self.systemctl("daemon-reload")
+
     def activate(self, name: str, leaving: str = "") -> None:
         """install-linux.sh --activate NAME: links swapped, one restart. The release's own installer;
         one from before side-by-side releases has none that can, so the one we leave does it."""
+        self.before_switch(name)
         for cand in (name, leaving, *reversed(self.history())):
             script = self.p.releases / cand / "deploy/station/install-linux.sh" if cand else None
             if script is not None and script.is_file() and "--activate)" in script.read_text(errors="replace"):
