@@ -51,7 +51,11 @@ from difflib import SequenceMatcher
 from typing import Callable, Iterable, Sequence
 
 from sizeup import atc
+from sizeup.atc_normalize import normalize
+from sizeup.atc_snap import snap
+from sizeup.radio.am import MARGINAL_DB     # a transcript from a carrier under this is flagged weak (#257)
 
+SNAP_EXACT = 0.95         # a snap scoring under this was a near miss (sizeup/atc_snap.py): probable at most
 WINDOW_S = 120.0          # an aircraft active within this of the transmission may be the one
 AREA_NM = 15.0            # ... and near HPN (sizeup/aircraft.py RADIUS_NM)
 REMATCH_S = WINDOW_S + 30.0   # heard / probable ones are matched again this long (newer ADS-B pictures)
@@ -111,7 +115,13 @@ CREATE TABLE IF NOT EXISTS atc_talkers (
   updated_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS atc_talkers_at ON atc_talkers(at);
-CREATE INDEX IF NOT EXISTS atc_talkers_hex ON atc_talkers(hex, at)
+CREATE INDEX IF NOT EXISTS atc_talkers_hex ON atc_talkers(hex, at);
+CREATE TABLE IF NOT EXISTS atc_carrier (
+  traffic_id TEXT PRIMARY KEY,          -- radio_traffic.id (an airband transmission with words)
+  at REAL NOT NULL,
+  carrier_db REAL NOT NULL              -- its AM carrier over the noise floor (sizeup/radio/am.py): a weak one is flagged
+);
+CREATE INDEX IF NOT EXISTS atc_carrier_at ON atc_carrier(at)
 """
 
 
@@ -359,6 +369,7 @@ class Tx:
     record: dict | None = None
     written: float = 0.0          # when its record was last written (the map's ring)
     words: list = field(default_factory=list)
+    heard: str = ""               # the written form before callsigns were snapped to ADS-B (#257, sizeup/atc_snap.py)
 
 
 def _aircraft_rec(mt: Match, m, role: str) -> dict:
@@ -395,6 +406,35 @@ def level_says(levels: Sequence[float], carrier: float | None) -> str:
     return ""
 
 
+GENERIC_TELEPHONY = {"radio", "departure", "approach", "tower", "ground", "center", "centre", "control", "traffic",
+                     "clearance", "delivery", "information", "flight", "air", "jet", "express", "november"}
+_LOCAL: set[str] = set()
+
+
+def local_operators() -> set[str]:
+    """The designators known to fly at HPN: data/atc/khpn_operators.csv and telephony_extra.csv."""
+    if not _LOCAL:
+        import csv
+        for path in (atc.OPERATORS_FILE, EXTRA_FILE):
+            try:
+                with open(path, newline="") as f:
+                    _LOCAL.update(r["designator"] for r in csv.DictReader(f) if r.get("designator"))
+            except (OSError, KeyError):
+                pass
+    return _LOCAL
+
+
+def _heard_ok(m, words: Sequence[str], index: atc.TelephonyIndex) -> bool:
+    """A telephony callsign heard but not on ADS-B may be shown: one of HPN's operators, or the whole telephony of
+    two words or more (not a generic word: RADIO, DEPARTURE ...) said as written."""
+    if any(d in local_operators() for d in m.designators):
+        return True
+    said = tuple(words[m.start:m.phrase_end]) if m.phrase_end > m.start else ()
+    if len(said) < 2 or set(said) <= GENERIC_TELEPHONY or any(w in GENERIC_TELEPHONY for w in said[:1]):
+        return False
+    return any(index.telephony.get(d) == "".join(said) for d in m.designators)
+
+
 def analyze(tx: Tx, index: atc.TelephonyIndex, planes: Sequence[dict], before: Sequence[dict] = (),
             levels: Sequence[float] = ()) -> dict | None:
     """The record for one transmission, or None when no callsign was heard (nothing labelled). before: the records of
@@ -408,6 +448,12 @@ def analyze(tx: Tx, index: atc.TelephonyIndex, planes: Sequence[dict], before: S
     norm = atc.normalize(tx.text)
     cue = phase_cue(norm)
     scored = [(m, match(m, words, index, planes, cue)) for m in mentions]
+    # #257: a telephony callsign not on ADS-B ("heard") stands alone only when it can be trusted: an operator that flies
+    # at HPN (data/atc), or a full telephony of two words or more that isn't a generic radio word; never a loose match
+    # ("partial radio 210" -> YSY, whose telephony is RADIO). Those can still be snapped to ADS-B (sizeup/atc_snap.py).
+    scored = [(m, mt) for m, mt in scored if not (mt.status == "heard" and m.designators and not _heard_ok(m, words, index))]
+    if not scored:
+        return None
     best_m, best = max(scored, key=lambda s: (_rank(s[1]), -s[0].start))
     spans = [m for m, mt in scored if m is best_m or _same_aircraft(mt, best)
              or (best.plane is None and m.text == best_m.text)]
@@ -523,6 +569,10 @@ class AtcTalkers:
         self.aircraft, self.log = aircraft, log
         self.clock = clock or getattr(cad, "clock", None) or time.time
         self.sightings = Sightings()
+        # the operators seen near HPN lately, for the vocabulary's refresh (#257, sizeup/atc_vocab.py)
+        from sizeup.atc_vocab import Operators
+        self.operators = Operators(getattr(self.store, "meta_get", lambda k: None),
+                                   getattr(self.store, "meta_put", lambda k, v: None), self.clock)
         self.recent: dict[str, deque[Tx]] = {}
         self.levels: dict[str, deque[float]] = {}
         self._lock = threading.RLock()
@@ -533,6 +583,7 @@ class AtcTalkers:
                 if stmt.strip():
                     self.store.db.execute(stmt)
             self.store.db.execute("DELETE FROM atc_talkers WHERE at < ?", (self.clock() - KEEP_S,))
+            self.store.db.execute("DELETE FROM atc_carrier WHERE at < ?", (self.clock() - KEEP_S,))
 
     # -- the switches (Settings > System > ATC talkers; sizeup/cad/settings.py) --------------------------------------
 
@@ -558,7 +609,9 @@ class AtcTalkers:
     def observe(self, planes: Iterable[dict], now: float | None = None) -> None:
         """A new picture from the Aircraft layer: kept; the recent heard / probable transmissions matched again."""
         now = self.clock() if now is None else now
-        self.sightings.add(list(planes or []), now)
+        planes = list(planes or [])
+        self.sightings.add(planes, now)
+        self.operators.add([a for a in planes if a.get("dist") is None or a["dist"] <= AREA_NM], now)
         if self.channels and self.identify and now - self._rematched >= REMATCH_EVERY_S:
             self._rematched = now
             try:
@@ -570,9 +623,12 @@ class AtcTalkers:
         """One airband transcript {id, source, start, end, text, carrier_db?} (new, or new text): its record, or None
         (no callsign heard, not an airband channel, or Identify is off)."""
         ch = str(t.get("source") or "")
-        if ch not in self.channels or not self.identify:
+        if ch not in self.channels:
             return None
-        text = str(t.get("text") or "").strip()
+        self._carrier(t)
+        if not self.identify:
+            return None
+        text = normalize(str(t.get("text") or "").strip())       # the written form (#257): what the matcher reads
         tid = str(t.get("id") or "")
         if not tid:
             return None
@@ -585,7 +641,8 @@ class AtcTalkers:
             self.sightings.add(cur, now)
         start = float(t.get("start") or now)
         cdb = t.get("carrier_db")
-        tx = Tx(tid, ch, start, float(t.get("end") or start), text, float(cdb) if isinstance(cdb, (int, float)) else None)
+        tx = Tx(tid, ch, start, float(t.get("end") or start), text, float(cdb) if isinstance(cdb, (int, float)) else None,
+                heard=text)
         with self._lock:
             self.seen += 1
             q = self.recent.setdefault(ch, deque())
@@ -602,14 +659,37 @@ class AtcTalkers:
         self._write(changed, delete=[tid] if stale else [])
         if tx.record:
             self.labelled += 1
+        self.log(f"atc: {tid}: {describe(tx.record)}")      # one compact line per transmission (to check it on the hub)
         return tx.record
+
+    def _carrier(self, t: dict) -> None:
+        """The transmission's carrier, kept for its row's weak-signal flag (decorate), whatever the switches."""
+        cdb, tid = t.get("carrier_db"), str(t.get("id") or "")
+        if not tid or not isinstance(cdb, (int, float)) or isinstance(cdb, bool):
+            return
+        with self.store.tx() as db:
+            db.execute("INSERT INTO atc_carrier (traffic_id, at, carrier_db) VALUES (?, ?, ?) ON CONFLICT(traffic_id) "
+                       "DO UPDATE SET carrier_db = excluded.carrier_db", (tid, float(t.get("start") or self.clock()), float(cdb)))
 
     def _before(self, tx: Tx, ch: str) -> list[dict]:
         return [x.record for x in self.recent.get(ch, ()) if x.at < tx.at and x.record and x.record.get("talker")][-3:]
 
     def _analyze(self, tx: Tx, ch: str) -> None:
         planes = self.sightings.around(tx.at)
+        # #257: a callsign nearly heard, written as the aircraft on ADS-B then is called (sizeup/atc_snap.py), before
+        # the match; again at each rematch, as newer pictures come in
+        said, snaps = snap(tx.heard or tx.text, planes)
+        tx.text = said
         rec = analyze(tx, self.index, planes, self._before(tx, ch), list(self.levels.get(ch, ())))
+        if rec is not None and snaps:
+            rec["said"], rec["snaps"] = said, snaps
+            # a callsign snapped from a near miss is never more than probable (#252's rule: one character off)
+            near = {x["to"]: x["from"] for x in snaps if x["score"] < SNAP_EXACT}
+            for k in ("aircraft", "talker", "addressed"):
+                a = rec.get(k)
+                if isinstance(a, dict) and a.get("callsign") in near and a.get("status") == "confirmed":
+                    a["status"] = "probable"
+                    a["why"] = (a.get("why", "") + f"; snapped to ADS-B from “{near[a['callsign']]}”").lstrip("; ")
         if rec is not None and rec["talker"]["kind"] in CHIP and rec["how"] == "words" and tx.carrier_db is not None:
             self.levels.setdefault(ch, deque(maxlen=50)).append(float(tx.carrier_db))   # the tower's own carrier
         tx.record = rec
@@ -696,8 +776,29 @@ class AtcTalkers:
     # -- out ----------------------------------------------------------------------------------------------------------
 
     def decorate(self, rows: list[dict]) -> list[dict]:
-        """Each airband row with its record as "atc" (in place), while Identify is on; nothing otherwise."""
-        if not self.identify or not self.channels:
+        """Each airband row with its record as "atc" (in place), while Identify is on; and, whatever the switch, its text
+        in written form as "atc_text" when that differs (sizeup/atc_normalize.py, #257: "RNAV Yankee 34" for "RNA 3-4
+        Yankee"; the row's own text stays what speech-to-text wrote)."""
+        if not self.channels:
+            return rows
+        mine = [r for r in rows if r.get("channel") in self.channels and r.get("kind", "radio") == "radio" and r.get("id")]
+        for r in mine:
+            if r.get("text"):
+                said = normalize(r["text"])
+                if said != r["text"]:
+                    r["atc_text"] = said
+        carriers: dict[str, float] = {}
+        for k in range(0, len(mine), 500):
+            part = [r["id"] for r in mine[k:k + 500]]
+            for c in self.store.q(f"SELECT traffic_id, carrier_db FROM atc_carrier WHERE traffic_id IN "
+                                  f"({','.join('?' * len(part))})", part):
+                carriers[c["traffic_id"]] = float(c["carrier_db"])
+        for r in mine:
+            if r["id"] in carriers and r.get("text"):
+                r["carrier_db"] = round(carriers[r["id"]], 1)
+                if carriers[r["id"]] < MARGINAL_DB:
+                    r["atc_weak"] = True          # transcribed from a marginal carrier: the words may be wrong
+        if not self.identify:
             return rows
         ids = [r["id"] for r in rows if r.get("channel") in self.channels and r.get("kind", "radio") == "radio" and r.get("id")]
         got: dict[str, dict] = {}
@@ -711,6 +812,8 @@ class AtcTalkers:
         for r in rows:
             if r.get("id") in got:
                 r["atc"] = got[r["id"]]
+                if got[r["id"]].get("said"):            # callsigns snapped to ADS-B (#257): shown, the snap on hover
+                    r["atc_text"], r["atc_snaps"] = got[r["id"]]["said"], got[r["id"]].get("snaps") or []
         return rows
 
     def map_payload(self, now: float | None = None) -> dict | None:
@@ -742,16 +845,77 @@ class AtcTalkers:
             ac = d.get("aircraft") or {}
             lst.append({"id": r["traffic_id"], "at": d.get("at"), "end": d.get("end"), "role": ac.get("role", ""),
                         "status": ac.get("status", ""), "talker": (d.get("talker") or {}).get("callsign", ""),
-                        "text": (r.get("text") or "")[:200]})
-        return {"talking": talking, "tx": tx, "hold_s": TALK_HOLD_S}
+                        "text": (d.get("said") or normalize(r.get("text") or ""))[:200]})
+        return {"talking": talking, "tx": tx, "hold_s": TALK_HOLD_S, "tower": self._tower(now)}
+
+    def _tower(self, now: float) -> dict | None:
+        """The tower on the map (#257): where it is (tower_site()), "until" while it transmits (its last transmission in
+        within TALK_HOLD_S, like an aircraft's ring) and its transmissions of the last MAP_TX_S (lit while one plays)."""
+        site = tower_site()
+        if site is None:
+            return None
+        until, ids = 0.0, []
+        with self._lock:
+            for q in self.recent.values():
+                for x in q:
+                    tk = (x.record or {}).get("talker") or {}
+                    if tk.get("kind") != "tower" or now - x.at > MAP_TX_S:
+                        continue
+                    ids.append(x.id)
+                    if x.written and now - x.written <= TALK_HOLD_S and now - x.end <= TALK_HOLD_S + 60:
+                        until = max(until, x.written + TALK_HOLD_S)
+        return {"lat": site[0], "lon": site[1], "until": round(until, 1), "tx": ids[-MAP_TX_MAX * 3:]}
 
     def state(self) -> dict:
         return {"channels": sorted(self.channels), "identify": self.identify, "map": self.on_map,
                 "seen": self.seen, "labelled": self.labelled, "aircraft_known": len(self.sightings.seen)}
 
 
+def describe(rec: dict | None) -> str:
+    """'talker TWR → EJA505 probable (snapped “Partnership 413”)', 'talker JBU1234 confirmed', 'no callsign heard'."""
+    if not rec or not rec.get("talker"):
+        return "no callsign heard"
+    tk, ad, ac = rec["talker"], rec.get("addressed"), rec.get("aircraft") or {}
+    who = tk.get("callsign") or "unknown"
+    out = f"talker {who}" + (f" → {ad.get('callsign')}" if ad else "") + (f" {ac.get('status')}" if ac.get("status") else "")
+    snaps = rec.get("snaps") or []
+    if snaps:
+        out += " (snapped " + ", ".join(f"“{x['from']}”" for x in snaps) + ")"
+    return out
+
+
 _INDEX: atc.TelephonyIndex | None = None
 EXTRA_FILE = atc.ROOT / "data" / "atc" / "telephony_extra.csv"
+SURFACE_FILE = atc.ROOT / "data" / "airport" / "khpn_surface.geojson"
+_TOWER: list = []
+
+
+def tower_site(path=None) -> tuple[float, float] | None:
+    """(lat, lon) of HPN's control tower: the airport data's tower (data/airport/khpn_surface.geojson, OpenStreetMap
+    aeroway=tower; the one named "control tower" first), its outline's centre. None without one."""
+    if path is None and _TOWER:
+        return _TOWER[0]
+    site = None
+    try:
+        feats = json.loads(open(path or SURFACE_FILE).read()).get("features", [])
+    except (OSError, ValueError, AttributeError):
+        feats = []
+    towers = [f for f in feats if (f.get("properties") or {}).get("kind") == "tower"]
+    towers.sort(key=lambda f: "control" not in str((f.get("properties") or {}).get("name", "")).lower())
+    for f in towers:
+        g = f.get("geometry") or {}
+        pts = g.get("coordinates") or []
+        if g.get("type") == "Point":
+            pts = [pts]
+        elif g.get("type") == "Polygon":
+            pts = pts[0] if pts else []
+        pts = [p for p in pts if isinstance(p, (list, tuple)) and len(p) >= 2]
+        if pts:
+            site = (round(sum(p[1] for p in pts) / len(pts), 6), round(sum(p[0] for p in pts) / len(pts), 6))
+            break
+    if path is None:
+        _TOWER.append(site)
+    return site
 
 
 def load_index() -> atc.TelephonyIndex:

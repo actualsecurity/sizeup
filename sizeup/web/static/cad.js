@@ -871,6 +871,9 @@ const ATC_WHAT = { confirmed: "Confirmed: ADS-B has this exact callsign near HPN
   + "(one character off), the only one near HPN, its phase fits the words", heard: "Heard: the callsign as said, not matched on ADS-B" };
 const ATC_SHUT = new Set();              // exchanges this viewer folded (kept across redraws)
 const atcOn = () => !(cad.state && cad.state.atc && cad.state.atc.identify === false);
+// an airband channel's row (HPN Tower): its channel in the CAD's airband list, or a row carrying ATC fields
+const isAirband = (t) => !!(t && ((cad.state && cad.state.atc && (cad.state.atc.channels || []).includes(t.channel))
+                                  || t.atc || t.atc_text || t.carrier_db !== undefined));
 const atcMapOn = () => atcOn() && !(cad.state && cad.state.atc && cad.state.atc.map === false);
 function atcAcText(a) {
   const cs = a.callsign || "?";
@@ -1047,7 +1050,8 @@ function radioRow(t, ctx = {}) {
   if (kept) meta.append(kept);
   const atcTag = atcChip(t);                             // an airband row: who is talking, from the words (#252)
   if (atcTag) meta.append(atcTag);
-  else if (!tag && t.kind !== "note" && !t.page && !t.dispatcher) meta.append(noIdChip(t));
+  // airband (#257): no MDC / FleetSync on aviation radios, so no "No ID" chip: the ATC talker or nothing
+  else if (!tag && t.kind !== "note" && !t.page && !t.dispatcher && !isAirband(t)) meta.append(noIdChip(t));
   if (t.page && t.why !== "page") {       // a page (#80): what it was, and whether it is an event or just a page
     li.classList.add(`page-${t.page}`);
     const w = el("span", "why page", "Page");
@@ -1077,7 +1081,18 @@ function radioRow(t, ctx = {}) {
     acts.append(m);
     meta.append(acts);
   }
-  const txt = el("div", "txt" + (t.text ? "" : " muted"), t.text || sttSaid(t));
+  // HPN Tower (#257): the written form (sizeup/atc_normalize.py: "RNAV Yankee 34", "TWORF"), what was heard on hover
+  const shown = t.atc_text || t.text;
+  const txt = el("div", "txt" + (shown ? "" : " muted"), shown || sttSaid(t));
+  if (t.atc_text) {
+    const fixes = (t.atc_snaps || []).map((x) => `“${x.from}” → ${x.to} (on ADS-B)`);
+    txt.title = `As transcribed: ${t.text}` + (fixes.length ? `\nCallsign matched to ADS-B: ${fixes.join(", ")}` : "");
+  }
+  if (t.atc_weak) {                      // a marginal AM carrier (#257): transcribed, but the words may be wrong
+    const w = el("span", "atc-weak", "weak signal");
+    w.title = `Carrier ${t.carrier_db} dB over the noise floor: transcribed, but the words may be wrong`;
+    txt.prepend(w, " ");
+  }
   li.append(meta);
   const flag = oursNamedNote(t);
   if (flag) { li.classList.add("names-ours"); li.append(flag); }
@@ -1515,7 +1530,7 @@ function renderRadio(inc) {
   }
   const one = {
     key: (x) => x.key,
-    sig: (x) => x.kind === "radio" ? JSON.stringify([x.t.text, x.t.status, x.t.rig, x.t.why, x.t.has_audio, talkSig(x.t.rig),
+    sig: (x) => x.kind === "radio" ? JSON.stringify([x.t.text, x.t.atc_text, x.t.atc_weak, x.t.atc_snaps, x.t.status, x.t.rig, x.t.why, x.t.has_audio, talkSig(x.t.rig),
                                                      x.t.alt_text, x.t.rerun_at, (x.t.events || []).map((e) => [e.id, e.why]), cad.txRev,
                                                      emSig(x.t), atcSig(x.t)])
       : JSON.stringify([x.e.text, x.e.units]),

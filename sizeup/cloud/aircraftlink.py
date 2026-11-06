@@ -141,6 +141,7 @@ class AircraftForwarder:
         self.aircraft = 0
         self.last_rx: tuple[dict, float] | None = None
         self.reading = ""                    # where it reads, or why not ("" before the first look)
+        self.last: tuple[Snapshot, float] | None = None   # the last picture read, and when (the ATC prompt's, #257)
         self._feed: ReceiverFeed | None = None
         self._feed_src: tuple = ()
         self._stop = threading.Event()
@@ -174,6 +175,7 @@ class AircraftForwarder:
             self.reading = str(e)[:200]
             return None
         self.reading = " + ".join(x for x in src if x)
+        self.last = (snap, self.clock())
         return snap
 
     def rx(self) -> dict:

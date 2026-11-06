@@ -1659,11 +1659,18 @@ function sAtcTalkers(a) {
       + "name, the word order and its steady carrier. Speech-derived: never a radio ID, and never in an airport "
       + "pre-alert's matched aircraft. No callsign heard: nothing is labelled.")));
   card.id = "s-atc";
-  for (const key of ["identify", "map"]) {
+  const hints = {
+    identify: "A chip on each HPN Tower transmission: TWR, JBU1234 · A320 ✓, heard: N41DW; and its exchanges folded together",
+    map: "The aircraft talking gets a ring on the map, the tower a lit TWR; its box lists its transmissions; a chip click centres it",
+    // #257 (sizeup/atc_vocab.py): Amazon Transcribe's sizeup-atc list, with the operators seen near HPN lately
+    vocab: "Every few hours, when the operators seen near HPN in the last two days change, the sizeup-atc vocabulary is "
+      + "sent again with their names (Moxy, Execjet ...) added to the fixed list. Streams open keep going; new ones use "
+      + "it once Amazon has it ready. Off: only what Settings > Radios > Vocabulary > Push sends",
+  };
+  for (const key of ["identify", "map", "vocab"]) {
     const v = a[key];
-    const [lab, cb] = sCheck(v.label, v.value, key === "identify"
-      ? "A chip on each HPN Tower transmission: TWR, JBU1234 · A320 ✓, heard: N41DW; and its exchanges folded together"
-      : "The aircraft talking gets a ring on the map; its box lists its transmissions; a chip click centres it");
+    if (!v) continue;
+    const [lab, cb] = sCheck(v.label, v.value, hints[key]);
     cb.disabled = !canDo("admin") || (key === "map" && !a.identify.value);
     cb.addEventListener("change", () => sPost("atc", { action: "set", key, value: cb.checked },
       `${v.label}: ${cb.checked ? "on" : "off"}`));
