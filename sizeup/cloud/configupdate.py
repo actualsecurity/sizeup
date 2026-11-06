@@ -24,7 +24,8 @@ at the switch to a release that has it (deploy/station/install-linux.sh activate
     hpn-atc  HPN ATC (GitHub #233): Westchester Tower 118.575 MHz AM as an airband channel ("HPN Tower"), appended
              after the config's channels, and "hpn tower" at the end of [radio] auto_assign_order when that list is
              there, so only a 5th free dongle takes it by itself (pick it by hand for the airband dongle). Skipped: no
-             [[radio.channels]], or a channel already called HPN Tower, on 118.575, or of kind "airband".
+             [[radio.channels]], or a channel already called HPN Tower, on 118.575, or of kind "airband" (but for
+             approach-ground's own three, which a station may have first: they are not a tower).
              Rollback-safe: a release from before #233 refuses kind = "airband" (and an order naming a channel it
              doesn't have), so a switch back to it would leave the station down. So it is only applied when the
              release being left (--leaving, the one a failed switch goes back to) reads airband channels; else it
