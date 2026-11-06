@@ -19,12 +19,22 @@ Two ways to run it, one face to the app (sizeup/app.py):
 A dongle serial two dongles share (GitHub #242) is never handed to it: the app's lookup gives no index for it (the
 recorder waits, state "ambiguous", and says why), and a source config.json names by such a serial ("rtl=00000001")
 is left out of config.runtime.json (ambiguous_fn); with every source left out it doesn't start at all.
+
+The control channel (GitHub #258), from trunk-recorder's own output (ControlChannel, `cc` on both): every 3 s it
+checks how many control channel messages it decoded and, under its warn rate (10/sec), logs
+
+    [westchester]   Control Channel Message Decode Rate: 0/sec, count:  0
+
+and retunes to the next control channel under 2/sec ("Retuning to Control Channel: ..."). A healthy system logs none
+of these, so a run of them under CC_LOW (2/sec), each within CC_RUN_GAP_S of the last, is the control channel lost:
+its start goes to the hub in the station health (sizeup/cloud/health.py: the "P25 trunk silent" alert).
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import signal
 import subprocess
@@ -40,6 +50,55 @@ from sizeup.radio.trunkrecd import (UNIT_SCRIPT, UNIT_SCRIPT_MAX, AmbiguousSourc
 
 LOG_MAX_BYTES = 5_000_000
 UNIT_ENV = "SIZEUP_TRUNK_RECORDER_UNIT"     # "1": trunk-recorder is its own service (deploy/station/systemd)
+CC_RATE = re.compile(r"Control Channel Message Decode Rate:\s*(?P<rate>[\d.]+)\s*/\s*sec", re.I)
+CC_RETUNE = re.compile(r"Retuning to Control Channel", re.I)
+CC_LOW = 2.0                # messages / s under this: trunk-recorder can't hold the control channel (it retunes)
+CC_RUN_GAP_S = 15.0         # it says so every 3 s while it lasts: no such line this long, the run is over
+
+
+class ControlChannel:
+    """The control channel's decode rate as trunk-recorder logs it (feed() each line of its output). status():
+    {"rate": the last rate it logged (None: none logged: fine), "low_since": the start of the current run under
+    CC_LOW (None: not lost), "last_low": that run's last line, "retunes": count, "last_retune": when}."""
+
+    def __init__(self, clock: Callable[[], float] = time.time):
+        self.clock = clock
+        self.rate: float | None = None
+        self.at: float | None = None             # when the last rate line came
+        self.low_since: float | None = None
+        self.last_low: float | None = None
+        self.retunes = 0
+        self.last_retune: float | None = None
+
+    def feed(self, line: str) -> None:
+        if "ontrol" not in line:
+            return
+        now = self.clock()
+        m = CC_RATE.search(line)
+        if m:
+            try:
+                rate = float(m.group("rate"))
+            except ValueError:
+                return
+            self.rate, self.at = rate, now
+            if rate < CC_LOW:
+                if self.low_since is None or self.last_low is None or now - self.last_low > CC_RUN_GAP_S:
+                    self.low_since = now
+                self.last_low = now
+            else:
+                self.low_since = None
+        elif CC_RETUNE.search(line):
+            self.retunes += 1
+            self.last_retune = now
+
+    def status(self) -> dict:
+        now = self.clock()
+        lost = self.low_since is not None and self.last_low is not None and now - self.last_low <= CC_RUN_GAP_S
+        if not lost:
+            self.low_since = None
+        recent = self.at is not None and now - self.at <= CC_RUN_GAP_S
+        return {"rate": self.rate if recent else None, "low_since": self.low_since, "last_low": self.last_low,
+                "retunes": self.retunes, "last_retune": self.last_retune}
 
 
 def make(command: str, workdir: str, on_event: Callable[[str], None] = lambda m: None) -> TrunkRecorder:
@@ -70,6 +129,7 @@ class TrunkRecorder:
         self.left_out: list[str] = []
         # Every line of its output, as it comes (sizeup/radio/live.py reads who is keying up from it).
         self.on_line: Callable[[str], None] | None = None
+        self.cc = ControlChannel()              # the control channel's decode rate, from the same lines (#258)
 
     unit = False                # trunk-recorder is sizeup's child
 
@@ -159,6 +219,8 @@ class TrunkRecorder:
                         log = open(path, "a", buffering=1)
                 except OSError:
                     log = None
+            if line:
+                self.cc.feed(line)
             if line and self.on_line is not None:
                 try:
                     self.on_line(line)
@@ -375,6 +437,7 @@ class UnitRecorder(TrunkRecorder):
         if not line:
             return
         self.last_lines.append(line)
+        self.cc.feed(line)
         if self.on_line is not None:
             try:
                 self.on_line(line)
