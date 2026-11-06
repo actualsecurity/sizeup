@@ -38,6 +38,9 @@ Reset to default = drop the override (one item, or a whole section).
                                    the push topics by kind over env / SSM / the config (sizeup/notify.py Pushes;
                                    Settings > System > Push notifications, admins). Secret by name: never exported,
                                    kept through an import, a fingerprint in the audit log
+    atc                            key "identify" -> true | false (default true): ATC talkers on the airband rows, "map" ->
+                                   true | false (default true): the talker on the Aircraft map (#252, sizeup/atc_talkers.py;
+                                   Settings > System > ATC talkers, admins)
     datasources                    key a data source ("gis:hydrants", "aircraft:registry") -> off | hourly | daily | weekly |
                                    monthly: how often the registry refreshes it (#186, Settings > Data sources;
                                    sizeup/datasources.py); not set: the source's default
@@ -87,6 +90,9 @@ PAGE_SECTION[WALL_SECTION] = "system"
 # How often each data source is refreshed (#186, sizeup/datasources.py): Settings > Data sources, audited as System.
 DS_SECTION = "datasources"
 PAGE_SECTION[DS_SECTION] = "system"
+# Who is talking on HPN Tower (#252, sizeup/atc_talkers.py): Settings > System > ATC talkers, audited as System.
+ATC_SECTION, ATC_KEYS = "atc", {"identify": "Identify ATC talkers", "map": "Show ATC talker on the map"}
+PAGE_SECTION[ATC_SECTION] = "system"
 # The push topics by kind (sizeup/notify.py Pushes): Settings > System > Push notifications, audited as System.
 NOTIFY_SECTION = "notify"
 PAGE_SECTION[NOTIFY_SECTION] = "system"
@@ -344,6 +350,9 @@ class Editor:
             self.cad.s.speed = float(d.get("speed", self.config_voice[1]))
         self.cad.eta = eta.Params().with_overrides(d)
         self.cad.weather_speak = bool(d.get("weather_speak", False))     # sizeup/weather.py (#132): off by default
+        a = ov.get(ATC_SECTION) or {}
+        self.cad.atc_identify = bool(a.get("identify", True))           # sizeup/atc_talkers.py (#252): on by default
+        self.cad.atc_map = bool(a.get("map", True))
         self.cad._state = None
 
     def _commit(self, changes: list[tuple[str, str, object]], operator: str, audit: list[tuple[str, str, object, object]],
@@ -492,7 +501,32 @@ class Editor:
         out["system"] = self._system(ov)
         out["tones"] = self.tones_page()
         out["camera_wall"] = self.wall_page()
+        out["atc"] = self.atc_page(ov)
         return out
+
+    def atc_page(self, ov: dict | None = None) -> dict:
+        """Settings > System > ATC talkers (#252): each switch, its default (on) and whether it is edited."""
+        a = ((self.overrides() if ov is None else ov).get(ATC_SECTION) or {})
+        return {k: {"label": lab, "value": bool(a.get(k, True)), "default": True, "edited": k in a} for k, lab in ATC_KEYS.items()} \
+            | {"channels": sorted(getattr(getattr(self.cad, "atc_talkers", None), "channels", ()) or ())}
+
+    def _atc_op(self, action: str, body: dict, op: str) -> dict:
+        """set {key: identify | map, value: true | false} | reset {key}: admins. Off: the raw transmissions, as before."""
+        key = body.get("key")
+        if key not in ATC_KEYS:
+            raise CadError("key: identify or map")
+        cur = (self.overrides().get(ATC_SECTION) or {}).get(key, True)
+        if action == "reset":
+            v = True
+        elif action == "set":
+            v = body.get("value")
+            if not isinstance(v, bool):
+                raise CadError(f"{key}: true or false")
+        else:
+            raise CadError("action: set or reset")
+        out = self._commit([(ATC_SECTION, key, REMOVE if v is True else v)], op,
+                           [("system", f"{ATC_SECTION}/{key}", "on" if cur else "off", "on" if v else "off")])
+        return {**out, "atc": self.atc_page()}
 
     def _unit_rows(self, L, ov: dict) -> dict:
         o, used = ov.get("units", {}), self.usage("units")
@@ -589,7 +623,7 @@ class Editor:
               "dispatch": self._dispatch_op, "users": self._users_op, "runcards": self._cards_op,
               "import": self._import_op, "channels": self._channels_op, "stt": self._stt_op,
               "places": self._places_op, TONES_SECTION: self._tones_op, WALL_SECTION: self._wall_op, DS_SECTION: self._ds_op,
-              NOTIFY_SECTION: self._notify_op, "alarms": lambda a, b, o: self.cad.alarms.settings_op(a, b, o)}.get(section)
+              NOTIFY_SECTION: self._notify_op, ATC_SECTION: self._atc_op, "alarms": lambda a, b, o: self.cad.alarms.settings_op(a, b, o)}.get(section)
         if fn is None:
             raise CadError(f"no settings section {section!r}")
         if section in ("users", "import"):
@@ -2092,6 +2126,9 @@ class Editor:
         self._ds_check(ov.get(DS_SECTION) or {})
         for k, v in (ov.get("alarms") or {}).items():         # sizeup/cad/alarms.py (#128)
             ov["alarms"][k] = alarms_mod.clean(k, v)
+        a = ov.get(ATC_SECTION) or {}
+        if set(a) - set(ATC_KEYS) or any(not isinstance(v, bool) for v in a.values()):
+            raise CadError("overrides.atc: identify and map, true or false")
         st = ov.get("stt") or {}
         if set(st) - {"vocabulary", "aws_monthly_limit_usd"}:
             raise CadError("overrides.stt: vocabulary and aws_monthly_limit_usd only")

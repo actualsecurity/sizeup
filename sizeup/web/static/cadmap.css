@@ -214,6 +214,13 @@
   .ac-tag.departing { color: var(--info); }
   .ac-stale { margin-inline-start: auto; color: var(--warn); }
   .ac-emerg { color: var(--err); font-weight: 700; }
+  /* an aircraft's transmissions on HPN Tower in its box (#252, aircraft.js heardLines): ▶, time, who, the words */
+  .ac-heard-head { margin-block-start: var(--s-2); color: var(--dim); font-size: var(--fs-xs); line-height: var(--lh-xs); }
+  .ac-tx { display: flex; align-items: baseline; gap: var(--s-2); min-block-size: var(--ctl-sm); }
+  .ac-tx > .play { flex: none; }
+  .ac-tx-who { flex: none; font-size: var(--fs-xs); font-weight: 700; color: var(--ok-text); }
+  .ac-tx-who.probable { color: var(--warn); }
+  .ac-tx-text { min-inline-size: 0; overflow-wrap: anywhere; color: var(--text-2); }
 
   /* Expand: the large map, a dialog */
   .cm-big { inline-size: min(96vw, 112rem); block-size: 92vh; border-radius: var(--radius); border: var(--bw) solid var(--line-strong);

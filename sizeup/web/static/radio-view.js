@@ -205,7 +205,7 @@ window.RadioView = (() => {
   }
   const rowSig = (t) => JSON.stringify([t.text, t.status, t.model, t.alt_text, t.alt_model, t.rig, t.has_audio,
                                        (t.events || []).map((e) => [e.id, e.why]), t.rerun_at, talkSig(t.rig), cad.txRev,
-                                       emSig(t)]);
+                                       emSig(t), window.atcSig ? atcSig(t) : ""]);
   const fillRow = (li, t) => {
     const n = row(t);
     li.className = n.className;
@@ -332,7 +332,12 @@ window.RadioView = (() => {
         setText(snip, g.snippet);
         snip.className = g.muted ? "og-snip muted" : "og-snip";
         show(calls, isOpen);
-        if (isOpen) syncList(calls, g.calls, { key: (t) => t.id, sig: rowSig, make: () => el("li"), fill: fillRow, empty: "None" });
+        // HPN Tower's exchanges (#252, cad.js atcExchanges): one folding row each, "JBU1234 landing 34: 3 TX"
+        const one = { key: (t) => t.id, sig: rowSig, fill: fillRow, tx: (t) => t };
+        const xs = window.atcExchanges ? atcExchanges(g.calls) : g.calls.map((t) => ({ kind: "one", x: t }));
+        if (isOpen) syncList(calls, xs, {
+          key: (x) => (x.kind === "xch" ? `x:${x.id}` : x.x.id), sig: (x) => (x.kind === "xch" ? exchangeSig(x, one) : rowSig(x.x)),
+          make: () => el("li"), fill: (li, x) => (x.kind === "xch" ? fillExchange(li, x, one) : fillRow(li, x.x)), empty: "None" });
         else if (calls.children.length) calls.replaceChildren();
       },
       empty: "None",

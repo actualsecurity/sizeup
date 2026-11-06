@@ -1626,6 +1626,7 @@ function sSystem(panel) {
   about.classList.add("s-dept");
   panel.replaceChildren(...sHead("System"),
     about, station, alarms, pushes,
+    ...(sy && S.data.atc ? [sAtcTalkers(S.data.atc)] : []),
     sCard(sCardHead("Records"), recs, counts),
     ...(S.data.camera_wall ? [sCameraWall(S.data.camera_wall)] : []),
     sCard(sCardHead("Data file"), file),
@@ -1645,6 +1646,31 @@ function sSystem(panel) {
   sStation();
   if (window.Alarm) Alarm.mountSettings($("#s-alarms"));
   sPushes(pushes);
+}
+
+// Who is talking on HPN Tower (#252, sizeup/atc_talkers.py): the callsign heard on each airband row, matched to ADS-B,
+// and the aircraft's "talking" ring on the map. Both on by default; off: the raw transmissions, as before. Admins.
+function sAtcTalkers(a) {
+  const card = sCard(sCardHead("ATC talkers", a.identify.value ? "on" : "off",
+    sHelp("HPN Tower is AM voice: no radio IDs. With this on, each transmission's callsign is taken from the words "
+      + "(JetBlue 1234, November 4 1 Delta Whiskey) and matched to an aircraft on ADS-B near HPN within 2 minutes: "
+      + "confirmed (that exact callsign), probable (one character off, the only such aircraft, doing what the words say), "
+      + "or heard (not on ADS-B; two candidates are never picked between). The tower (TWR / GND) is told from its own "
+      + "name, the word order and its steady carrier. Speech-derived: never a radio ID, and never in an airport "
+      + "pre-alert's matched aircraft. No callsign heard: nothing is labelled.")));
+  card.id = "s-atc";
+  for (const key of ["identify", "map"]) {
+    const v = a[key];
+    const [lab, cb] = sCheck(v.label, v.value, key === "identify"
+      ? "A chip on each HPN Tower transmission: TWR, JBU1234 · A320 ✓, heard: N41DW; and its exchanges folded together"
+      : "The aircraft talking gets a ring on the map; its box lists its transmissions; a chip click centres it");
+    cb.disabled = !canDo("admin") || (key === "map" && !a.identify.value);
+    cb.addEventListener("change", () => sPost("atc", { action: "set", key, value: cb.checked },
+      `${v.label}: ${cb.checked ? "on" : "off"}`));
+    card.append(lab);
+  }
+  if (!(a.channels || []).length) card.append(el("p", "dim small", "No airband channel here ([[radio.channels]] kind = \"airband\")"));
+  return card;
 }
 
 // ---- health: the station's health and alerts (health.js, #79), admins only (#203) --------------------------------------
