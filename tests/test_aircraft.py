@@ -525,7 +525,8 @@ def test_the_aircraft_layer_only_asks_the_hub_and_predicts_only_briefly_between_
     # every aircraft's trail, from the hub's real fixes up to the mark, smoothed, in the marks' own source (#179)
     assert "a.trail" in code and '"ac-trail"' in code and "EMPHASIS" in code
     assert "Glide.smooth(Glide.line(" in code and '"line-cap": "round", "line-join": "round"' in code
-    assert code.count("addSource(") == 1 and '["geometry-type"], "LineString"' in code and '["geometry-type"], "Point"' in code
+    # (one source for the marks and trails; the tower's TWR mark, #257, is its own)
+    assert code.count("addSource(") == 2 and "map.addSource(TWR_SRC" in code and '["geometry-type"], "LineString"' in code and '["geometry-type"], "Point"' in code
     # the click still says when the mark is an estimate between reports, and when a position is stale
     assert "glide.estimated(a.hex)" in code and "Drawn at an estimate between reports" in code and '" (stale)"' in code
     ml = (STATIC / "maplayers.js").read_text()

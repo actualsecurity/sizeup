@@ -91,7 +91,9 @@ PAGE_SECTION[WALL_SECTION] = "system"
 DS_SECTION = "datasources"
 PAGE_SECTION[DS_SECTION] = "system"
 # Who is talking on HPN Tower (#252, sizeup/atc_talkers.py): Settings > System > ATC talkers, audited as System.
-ATC_SECTION, ATC_KEYS = "atc", {"identify": "Identify ATC talkers", "map": "Show ATC talker on the map"}
+ATC_SECTION, ATC_KEYS = "atc", {"identify": "Identify ATC talkers", "map": "Show ATC talker on the map",
+                                 # #257 (sizeup/atc_vocab.py): the sizeup-atc vocabulary refreshed from the operators seen
+                                 "vocab": "Refresh the ATC vocabulary from the traffic"}
 PAGE_SECTION[ATC_SECTION] = "system"
 # The push topics by kind (sizeup/notify.py Pushes): Settings > System > Push notifications, audited as System.
 NOTIFY_SECTION = "notify"
@@ -353,6 +355,7 @@ class Editor:
         a = ov.get(ATC_SECTION) or {}
         self.cad.atc_identify = bool(a.get("identify", True))           # sizeup/atc_talkers.py (#252): on by default
         self.cad.atc_map = bool(a.get("map", True))
+        self.cad.atc_vocab_refresh = bool(a.get("vocab", True))
         self.cad._state = None
 
     def _commit(self, changes: list[tuple[str, str, object]], operator: str, audit: list[tuple[str, str, object, object]],
@@ -511,10 +514,11 @@ class Editor:
             | {"channels": sorted(getattr(getattr(self.cad, "atc_talkers", None), "channels", ()) or ())}
 
     def _atc_op(self, action: str, body: dict, op: str) -> dict:
-        """set {key: identify | map, value: true | false} | reset {key}: admins. Off: the raw transmissions, as before."""
+        """set {key: identify | map | vocab, value: true | false} | reset {key}: admins. Off: the raw transmissions, as before
+        (vocab off: the vocabulary is only what Settings > Radios > Vocabulary > Push sends)."""
         key = body.get("key")
         if key not in ATC_KEYS:
-            raise CadError("key: identify or map")
+            raise CadError("key: identify, map or vocab")
         cur = (self.overrides().get(ATC_SECTION) or {}).get(key, True)
         if action == "reset":
             v = True

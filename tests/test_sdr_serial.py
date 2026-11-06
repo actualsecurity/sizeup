@@ -1,5 +1,5 @@
 """Two dongles, one serial (#242): the station spots it, alerts loudly, never opens either by that serial (no job, no
-trunk-recorder source, no readsb), a main channel gone silent alerts, and `sizeup-station sdr-serial` renames one
+trunk-recorder source, no readsb), and `sizeup-station sdr-serial` renames one
 safely. Fakes only: the device lists are made up, rtl_fm / trunk-recorder don't exist, rtl_eeprom is a script here
 and systemctl is never run."""
 
@@ -20,7 +20,7 @@ from sizeup.config import ChannelCfg
 from sizeup.radio import adsbd, sdr, sdrserial
 from sizeup.radio.recorder import TrunkRecorder
 from tests.test_app import cfg, wait
-from tests.test_health import T0, FakeHub, FakeNotifier, cfg as hcfg, radio, station_status
+from tests.test_health import T0, FakeHub, FakeNotifier, cfg as hcfg, station_status
 
 P25 = "Fire/EMS 15"
 V3_2 = (1, "RTL2838UHIDIR", "00000001")          # the station's "V3 #2"
@@ -250,103 +250,6 @@ def test_a_duplicate_serial_is_a_critical_alert_pushed_to_the_status_topic():
     assert next(d for d in m["dongles"] if d["serial"] == "00000103")["ambiguous"].startswith("serial 00000001")
     ch = r.at(10, station_status())                                     # renamed: it clears, with a recovery push
     assert [(k, a["key"]) for k, a in ch] == [("clear", "dup:00000001")] and r.n.msgs[-1]["title"].startswith("Recovered")
-
-
-def busy(r, label, every, n, start=0.0, extra=None):
-    """`label` heard every `every` s, n times from `start`; the last time."""
-    t = start
-    for i in range(n):
-        t = start + i * every
-        r.at(t, extra(t) if extra else station_status(radios=[radio(label, last_heard=T0 + t)]))
-    return t
-
-
-def test_a_main_channel_silent_far_beyond_its_usual_gap_is_a_warning():
-    r = Rig()
-    t = busy(r, "FG1", 300.0, 40)                                      # FG1 talks every 5 min, 39 gaps learned
-    st = station_status(radios=[radio("FG1", last_heard=T0 + t)])
-    c = r.h.model()["channels"][0]
-    assert c["main"] and c["usual_now_s"] == 300.0 and c["alert_after_s"] == 3600.0   # 4 x 5 min, but at least 1 h
-    r.at(t + 59 * 60, st)
-    assert [a["key"] for a in r.h.alerts()] == []                      # 59 min: a hint only
-    assert r.h.model()["hints"]
-    ch = r.at(t + 61 * 60, st)
-    assert [(k, a["key"]) for k, a in ch] == [("start", "quiet:FG1")]
-    (a,) = r.h.alerts()
-    assert a["severity"] == "warning" and a["title"] == "FG1 silent"
-    assert "usually hears something within 5 min" in a["text"] and "alert past 60 min" in a["text"]
-    assert "two with one serial?" in a["text"]
-    heard = station_status(radios=[radio("FG1", last_heard=T0 + t + 62 * 60)])
-    assert [(k, a["key"]) for k, a in r.at(t + 62 * 60, heard)] == [("clear", "quiet:FG1")]
-
-
-def test_not_a_main_channel_or_still_learning_or_stopped_never_alerts():
-    r = Rig()
-    t = busy(r, "FG2", 300.0, 40)                                       # not a main channel: hint only
-    r.at(t + 3 * 3600, station_status(radios=[radio("FG2", last_heard=T0 + t)]))
-    assert r.h.alerts() == []
-    r = Rig()
-    t = busy(r, "FG1", 300.0, 20)                                       # 19 gaps: still learning
-    r.at(t + 3 * 3600, station_status(radios=[radio("FG1", last_heard=T0 + t)]))
-    assert r.h.alerts() == [] and r.h.model()["channels"][0]["alert_after_s"] is None
-    r = Rig()
-    t = busy(r, "FG1", 300.0, 40)
-    r.at(t + 3 * 3600, station_status(radios=[radio("FG1", state="off", last_heard=T0 + t)]))
-    assert [a["key"] for a in r.h.alerts()] == []                       # Off: no program to be silent
-
-
-def test_the_usual_gap_is_that_time_of_days(monkeypatch):
-    # Busy by day (every 5 min), slow at night (every 40 min): a silence that starts by day but runs into the night
-    # is judged by the night's gaps (4 x 40 min), one by day by the day's (1 h minimum).
-    monkeypatch.setattr(healthmod, "_part", lambda t: 0 if ((t - T0) // 3600) % 24 >= 12 else 2)
-    r = Rig()
-    t = busy(r, "South 2", 300.0, 140)                                  # hours 0-11.6: "day" (part 2)
-    t = busy(r, "South 2", 2400.0, 12, start=12 * 3600.0)               # hours 12-19.3: "night" (part 0)
-    tod = r.h.tod["South 2"]
-    assert len(tod["2"]) >= 100 and len(tod["0"]) >= 11
-    day = 24 * 3600.0 + 3600.0                                          # the next day, 01:00 (day part)
-    st = station_status(radios=[radio("South 2", last_heard=T0 + day)])
-    r.at(day, st)
-    c = r.h.model()["channels"][0]
-    assert c["usual_now_s"] == 300.0 and c["alert_after_s"] == 3600.0
-    late = 24 * 3600.0 + 11.5 * 3600                                    # 11:30: the silence will run into the night
-    st = station_status(radios=[radio("South 2", last_heard=T0 + late)])
-    r.at(late + 70 * 60, st)
-    c = r.h.model()["channels"][0]
-    assert c["usual_now_s"] == 2400.0 and c["alert_after_s"] == 4 * 2400.0
-    assert r.h.alerts() == []                                           # 70 min into a slow night: fine
-
-
-def test_a_talkgroup_silent_while_others_keep_recording_alerts():
-    # #242: tg:307 stopped at 19:28 while the P25 row (any talkgroup) kept hearing calls.
-    r = Rig()
-
-    def st(t, tg307):
-        s = station_status(radios=[radio(P25, None, last_heard=T0 + t)])
-        s["health"]["heard"] = {"tg:307": {"at": T0 + tg307, "name": P25}, "tg:333": {"at": T0 + 10, "name": "Airport"}}
-        return s
-    t = busy(r, "tg:307", 240.0, 40, extra=lambda t: st(t, t))
-    c = next(c for c in r.h.model()["channels"] if c["label"] == "tg:307")
-    assert c["main"] and c["name"] == "Fire/EMS 15 (tg:307)" and c["usual_now_s"] == 240.0
-    assert not next(c for c in r.h.model()["channels"] if c["label"] == "tg:333")["main"]
-    for dt in range(60, 3800, 60):                                      # the system keeps talking; 307 doesn't
-        r.at(t + dt, st(t + dt, t))
-    keys = [a["key"] for a in r.h.alerts()]
-    assert keys == ["quiet:tg:307"]
-    (a,) = r.h.alerts()
-    assert a["title"] == "Fire/EMS 15 (tg:307) silent" and "trunk-recorder" in a["text"] and a["who"]["channel"] == "Fire/EMS 15 (tg:307)"
-
-
-def test_main_channels_from_the_config(tmp_path):
-    from sizeup.config import ConfigError, load
-    p = tmp_path / "c.toml"
-    p.write_text('[alerts]\nmain_channels = [307, "FG1"]\n')
-    assert load(p).alerts_main_channels == ("tg:307", "FG1")
-    p.write_text("")
-    assert load(p).alerts_main_channels == ("tg:307", "FG1", "South 2", "HPN Tower")
-    p.write_text('[alerts]\nmain_channels = "FG1"\n')
-    with pytest.raises(ConfigError):
-        load(p)
 
 
 # -- sizeup-station sdr-serial ---------------------------------------------------------------------------------------------

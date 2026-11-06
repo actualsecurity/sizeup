@@ -198,13 +198,26 @@ const StationHealth = (() => {
       kids.push(table(["Index", "Serial", "Product"], h.usb.map((u) => [`#${u.index}`, [u.serial || "(none)", dup.has(u.serial) ? "hl-bad" : ""],
         u.product || ""]), ""));
     }
-    kids.push(el("h3", "hl-sub", "Channels"), table(["Channel", "MHz", "State", "Last heard", "Quiet for", "Usually within", "Alert past", "Squelch", "Quieting", "Restarts", "Hint"],
+    const tk = h.trunk;
+    if (tk) {             // the P25 system as a whole (#258): its silence is the alert, one talkgroup's only a hint
+      const cc = tk.cc || null;
+      kids.push(el("h3", "hl-sub", "P25 trunk"), dl([
+        ["Last call (any talkgroup)", tk.last_call ? `${when(tk.last_call)} (${longDur(tk.quiet_s)} ago)` : "none heard yet",
+          tk.quiet_s > tk.window_s ? "hl-bad" : ""],
+        ["Alert past", `${longDur(tk.window_s)} with no call on any talkgroup`
+          + (tk.usual_s ? ` (usually a call within ${longDur(tk.usual_s)} at this time of day)` : ` (default; learning: ${tk.gaps} gaps)`)],
+        ["Control channel", !cc ? "not reported" : cc.low_since ? `lost: ${cc.rate ?? 0} messages/s since ${when(cc.low_since)}`
+          : cc.rate !== null && cc.rate !== undefined ? `low: ${cc.rate} messages/s` : "decoding (no low-rate warnings)",
+          cc && cc.low_since ? "hl-bad" : cc && cc.rate !== null && cc.rate !== undefined ? "hl-warn" : ""],
+        ["Retunes", cc && cc.retunes ? `${cc.retunes}, the last ${when(cc.last_retune)}` : ""],
+      ]));
+    }
+    kids.push(el("h3", "hl-sub", "Channels"), table(["Channel", "MHz", "State", "Last heard", "Quiet for", "Usually within", "Squelch", "Quieting", "Restarts", "Hint"],
       (h.channels || []).map((c) => [c.name || c.label, c.mhz || "", [c.word || c.state || "?", stateCls(c.state)],
         c.last_heard ? when(c.last_heard) : "never", c.quiet_s !== null && c.quiet_s !== undefined ? longDur(c.quiet_s) : "",
-        c.typical_gap_s ? longDur(c.typical_gap_s) : (c.gaps ? `learning (${c.gaps})` : ""),
-        [c.main ? (c.alert_after_s ? longDur(c.alert_after_s) : "learning") : "", c.main && c.alert_after_s && c.quiet_s > c.alert_after_s ? "hl-warn" : "dim"],
+        c.usual_now_s ? longDur(c.usual_now_s) : c.typical_gap_s ? longDur(c.typical_gap_s) : (c.gaps ? `learning (${c.gaps})` : ""),
         [c.stuck ? `stuck open ${fmtDur(c.open_s)}` : c.open ? `open ${fmtDur(c.open_s)}` : "closed", c.stuck ? "hl-bad" : ""],
-        c.quieting_db !== null && c.quieting_db !== undefined ? `${c.quieting_db} dB` : "", c.restarts || 0, [c.hint || "", c.hint ? "hl-warn" : ""]]),
+        c.quieting_db !== null && c.quieting_db !== undefined ? `${c.quieting_db} dB` : "", c.restarts || 0, [c.hint || "", c.hint ? "dim" : ""]]),
       "No channels reported"));
     kids.push(el("h3", "hl-sub", "Alert history (24 h)"), table(["Started", "Recovered", "Lasted", "Severity", "Alert", "Where", "Pushed"],
       [...d.alerts.map((a) => [when(a.since), ["not yet", "hl-bad"], longDur(serverNow() - a.since), [a.severity, a.severity === "critical" ? "hl-bad" : "hl-warn"],
@@ -214,8 +227,11 @@ const StationHealth = (() => {
       "No alerts in the last 24 h"));
     kids.push(el("p", "dim small", `Alerts: silent ${th.silent_min} min · behind ${th.behind_min} min · whisper / trunk-recorder down ${th.down_min} min · `
       + `a dongle's job down ${Math.round(th.job_grace_s || 60)} s · outbox ${th.outbox_min} min · disk ${th.disk_pct}% · at most one push per alert per ${th.repeat_min} min, plus its recovery.`
-      + (th.quiet ? ` A main channel (${th.quiet.channels.join(", ")}) silent ${th.quiet.factor}× its usual gap for that time of day (the 90th percentile, `
-        + `learned from ${th.quiet.gaps_min}+ gaps), and at least ${th.quiet.min_min} min, is a warning; a serial two dongles share is critical.` : "")));
+      + (th.trunk ? ` P25 trunk silent (critical): no call on any talkgroup for ${th.trunk.day_min} min (${th.trunk.night_min} min into the night, 00-06), `
+        + `longer when ${th.trunk.factor}× the system's usual gap for that time of day is (learned from ${th.trunk.gaps_min}+ gaps), `
+        + `or the control channel lost ${th.trunk.cc_lost_min} min. One channel or talkgroup silent is only a hint` : "")
+      + (th.hint ? ` (${th.hint.factor}× its usual gap, at least ${th.hint.min_min} min).` : ".")
+      + " A serial two dongles share is critical."));
     card.replaceChildren(...kids);
   }
 

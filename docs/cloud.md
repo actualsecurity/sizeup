@@ -228,31 +228,38 @@ works from the rows alone and the panel says so.
 | Speech-to-text down | whisper-server not up for `down_min` (2 min) | warning |
 | trunk-recorder down | trunk-recorder not up for `down_min` while its dongle job is on | critical |
 | *channel* stuck open | the squelch open without a break (#116's `stuck`, 2 min) | warning |
-| *main channel* silent | a main channel (`[alerts] main_channels`: `tg:307` Fire/EMS 15, FG1, South 2, HPN Tower) running but silent 4 times its usual gap for that time of day, and at least 1 h (below) | warning |
+| P25 trunk silent | trunk-recorder running but no call on **any** talkgroup for `p25_silent_min` (20 min; `p25_silent_night_min`, 60 min, for a silence that reaches 00-06; longer when the system's learned gaps say so), or trunk-recorder losing the control channel (decode rate under 2/s) for 2 min (below) | critical |
 | Station's events backing up | the oldest event waiting on the station is `outbox_min` (5 min) old: it couldn't reach the hub. The hub can't see that while it happens, so it shows when the station is back, from the age of the oldest event it reports, and clears as it drains | warning |
 | Station disk full | over `disk_pct` (90%) full; critical from 97% | warning |
 
 While the station is silent (or before it first reports after a hub restart) the other alerts keep the
 state they had: nothing starts or clears on old data. **Per-channel silence** is a hint, not an alert: each
 channel's gaps between transmissions are learned (the last 200, kept across redeploys), and a channel quiet
-for 3 times its usual gap (90th percentile) and at least 30 min says so in the panel: "nothing heard for
-2 h; it usually hears something within 25 min: check its antenna and dongle".
+for 3 times its usual gap for that time of day (90th percentile) and at least 30 min says so in the panel:
+"nothing heard for 2 h (last heard 13:05); at this time of day it usually hears something within 25 min". That
+holds for every conventional channel (FG1, FG2, South 2, HPN Tower) and every main talkgroup (`tg:307`, from the
+station's `health.heard`): never an alert, never a push (#258: fireground is quiet for hours, HPN Tower closes
+23:00-06:00, Fire/EMS 15 can be quiet for an hour). Each gap is also filed under the part of the day it started in
+(00-06, 06-12, 12-18, 18-24, station time); the usual gap is the 90th percentile of that part's gaps (the whole
+day's while it has fewer than 10), and for a silence that spans several parts the largest of them.
 
-**A main channel's silence is an alert** (#242: Fire/EMS 15 stopped reaching the hub at 19:28 while other
-talkgroups kept recording, and nothing said so). Conservative, so a slow night isn't an alert:
+**The whole P25 system silent is the alert** ("P25 trunk silent", critical). The P25 job's row hears a call on
+any talkgroup trunk-recorder writes, so its last call is the system's:
 
-* each gap is also filed under the part of the day it started in (00-06, 06-12, 12-18, 18-24, station time);
-  nothing alerts until the channel has 30 gaps learned;
-* the usual gap is the 90th percentile of that part of the day's gaps (the whole day's while it has fewer than
-  10), and for a silence that spans several parts the largest of them (a silence from 22:55 is judged by the
-  night's gaps too);
-* it alerts past 4 times that, and never before 1 h; only while the channel's program runs (a stopped one is
-  already the job / trunk-recorder alert) and the station reports; it clears at the next transmission.
+* no call on any talkgroup for `p25_silent_min` (20 min) by day, `p25_silent_night_min` (60 min) for a silence
+  that reaches 00-06. With 30 gaps of the system learned, 4 times its usual gap for that time of day when that is
+  longer (a station that records few talkgroups), never shorter: a county system with dozens of talkgroups doesn't
+  go 20 min without a call by day, and the control channel (next) catches a fast outage;
+* the control channel lost: trunk-recorder logs "Control Channel Message Decode Rate: N/sec" every 3 s while it
+  decodes under its warn rate, and retunes under 2/s; the station follows its log (`sizeup/radio/recorder.py`
+  `ControlChannel`) and reports a run under 2/s (`health.recorder.cc`); 2 min of it is the alert at once;
+* only while trunk-recorder runs (down is the trunk-recorder alert) and the station reports; a trunk-recorder just
+  back up gets the window to hear a call; it clears at the next call (or the control channel decoding again).
+  "P25 trunk silent 25 min: no calls on any talkgroup since 13:05 (trunk-recorder running): check the P25
+  dongle/antenna, control channel (alert past 20 min)".
 
-A talkgroup is a channel of its own here: the station's `health.heard` has each main talkgroup's last call
-(`tg:307`), with the P25 job's state, because the other talkgroups on the system can keep trunk-recorder busy
-while one goes silent. `[alerts] main_channels = ["tg:307", "FG1", "South 2", "HPN Tower"]` (labels, or
-talkgroup numbers) on the hub changes the list.
+`[alerts] main_channels` (#242's per-channel silence alerts) is no more: an older config with it still loads, and
+it changes nothing.
 
 **Where they show.**
 
