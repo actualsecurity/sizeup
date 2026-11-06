@@ -478,6 +478,8 @@ class Store:
         for col in ("evidence", "kept"):                  # an emergency's raw P25 call record; kept by its window, 2026-10-14
             if tcols and col not in tcols:
                 self.db.execute(f"ALTER TABLE radio_traffic ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
+        if tcols and "mhz" not in tcols:                  # the frequency an airband row was heard on (#260: NY Approach
+            self.db.execute("ALTER TABLE radio_traffic ADD COLUMN mhz REAL")   # changes by the time of day), 2026-11-06
         radcols = {r["name"] for r in self.db.execute("PRAGMA table_info(radios)")}
         if radcols and "last_channel" not in radcols:        # where a radio was last heard (#163), 2026-10-14
             self.db.execute("ALTER TABLE radios ADD COLUMN last_channel TEXT NOT NULL DEFAULT ''")

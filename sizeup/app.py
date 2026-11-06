@@ -68,6 +68,7 @@ from sizeup.dispatch import parse
 from sizeup.incidents import IncidentStore, Traffic
 from sizeup.radio.fm import RATE, Channel, NfmReceiver, Segment, id_burst_frames, speech_seconds, voice_floor_db
 from sizeup.radio.am import AmReceiver
+from sizeup.radio.am import Schedule as AmSchedule
 from sizeup.radio.mdc1200 import decode as mdc_decode
 from sizeup.radio import fleetsync
 from sizeup.cad.radios import fm_system
@@ -130,8 +131,9 @@ def log(msg: str) -> None:
 def make_receiver(cfg: Config, c, device, on_segment) -> NfmReceiver:
     """The receiver for one [[radio.channels]] entry: AM with the carrier squelch on an airband channel (HPN ATC, #233:
     sizeup/radio/am.py), else NFM with the noise squelch."""
-    if c.kind == "airband":
-        return AmReceiver(cfg.rtl_fm, device, c.gain_db, Channel(c.mhz, c.label), on_segment, log, open_db=c.squelch_db)
+    if c.kind == "airband":     # a schedule (#260, NY Approach): retuned by the time of day, between transmissions
+        return AmReceiver(cfg.rtl_fm, device, c.gain_db, Channel(c.mhz, c.label), on_segment, log, open_db=c.squelch_db,
+                          schedule=getattr(c, "schedule", ()) or None)
     return NfmReceiver(cfg.rtl_fm, device, c.gain_db, Channel(c.mhz, c.label), on_segment, log, open_db=c.squelch_db,
                        drop_db=c.drop_db, hang_s=c.hang_s, continue_s=c.continue_s)
 
@@ -700,20 +702,22 @@ class App:
         """whisper's prompt for one recording: the configured text, plus (stt.talker_prompt) the
         talkers on this call as they're said on the air."""
         if self._kind.get(getattr(item, "source", "")) == "airband":
-            return self._atc_prompt()
+            return self._atc_prompt(getattr(item, "source", ""))
         parts = [self.cfg.stt_prompt]
         if self.cfg.stt_talker_prompt != "off":
             parts.append(talker_prompt(getattr(item, "unit", "") or "", getattr(item, "start", None),
                                        with_time=self.cfg.stt_talker_prompt == "ids+time"))
         return " ".join(p for p in parts if p)
 
-    def _atc_prompt(self) -> str:
+    def _atc_prompt(self, channel: str = "") -> str:
         """whisper's prompt on an airband channel (#233): HPN's words, then the callsigns of the aircraft nearest the field
-        as said on the air (shortfinal stt_prompt.py), from the Aircraft layer when it has a fresh picture here."""
+        as said on the air (shortfinal stt_prompt.py), from the Aircraft layer when it has a fresh picture here; only the
+        ones that can be on that frequency (#260, sizeup/atc_scope.py: Ground the field, Approach out to 40 NM)."""
         from sizeup import atc
+        from sizeup.atc_scope import planes_for
         if self._atc_vocab is None:
             self._atc_vocab = atc.vocabulary()
-        return atc.whisper_prompt(self._atc_vocab["prompt"], self._atc_aircraft(), atc.telephony_words())
+        return atc.whisper_prompt(self._atc_vocab["prompt"], planes_for(channel, self._atc_aircraft()), atc.telephony_words())
 
     def _atc_aircraft(self) -> list[dict]:
         """The aircraft the Aircraft layer has near HPN now (sizeup/aircraft.py: its last picture, read every 15 s while the
@@ -724,8 +728,8 @@ class App:
         fetched = layer.st.get("fetched") if layer is not None else None
         if not fetched or time.time() - fetched > 60:
             return self._receiver_aircraft()
-        with layer._lock:
-            return [dict(a) for a in layer.view]
+        with layer._lock:      # ... and the wider set while NY Approach is heard (#260; each channel takes its own)
+            return [dict(a) for a in layer.view + getattr(layer, "wide", [])]
 
     def _receiver_aircraft(self, max_age_s: float = 30.0) -> list[dict]:
         """The station's own ADS-B picture (sizeup/cloud/aircraftlink.py, read every second to forward to the hub): the
@@ -753,6 +757,10 @@ class App:
         record only (a station forwarding to a hub leaves it to the hub, which has the same transcript)."""
         if self.forwarding():
             return
+        from sizeup import atc_scope
+        if self._kind.get(t.source) == "airband" and atc_scope.facility(t.source) == "approach" \
+                and getattr(self, "aircraft", None) is not None:
+            self.aircraft.widen(atc_scope.APPROACH_NM)    # NY Approach's traffic is 10-40 NM out (#260)
         txt = t.text if text is None else text
         if not txt:
             return
@@ -933,6 +941,7 @@ class App:
             return
         t = Traffic(f"{ch.label.replace(' ', '')}-{int(seg.start * 1000)}", ch.label, seg.start, seg.end, "", status="pending")
         t.fm = False                                      # type: ignore[attr-defined]
+        t.mhz = round(float(ch.mhz), 4)                   # type: ignore[attr-defined]  (the frequency it was heard on: #260)
         t.carrier_db = round(float(seg.quieting_db), 1)   # type: ignore[attr-defined]  (the tower's is steady: #252)
         t.low_energy = speech_seconds(seg.audio) < MIN_SPEECH_S   # type: ignore[attr-defined]
         self._keep_clip(t.id, radio_voice(seg.audio, deemph=False), processed=True)
@@ -2119,7 +2128,9 @@ class App:
         return {"prefs": self._chan_ov, "aws_channels": list(self.cfg.stt_aws_channels),
                 "record_only": list(self.cfg.stt_record_only), "aws_ok": ok, "aws_why": why,
                 "aws_reserve": reserve,
-                "fm": [{"key": c.label, "kind": c.kind, "mhz": c.mhz} for c in self.cfg.channels],
+                "fm": [{"key": c.label, "kind": c.kind, "mhz": c.mhz,
+                        **({"schedule": AmSchedule(c.schedule).describe()} if getattr(c, "schedule", ()) else {})}
+                       for c in self.cfg.channels],
                 "sync": self.channels_sync(), "aws": self.aws_status()}
 
     # -- state --------------------------------------------------------------------------------------

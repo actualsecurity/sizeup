@@ -678,6 +678,7 @@ class NfmReceiver:
         backoff = 2.0
         while not self._stop.is_set():
             self._stderr.clear()
+            self._tune()
             dev = None
             if callable(self.device):  # a configured serial, looked up right now (never passed as-is)
                 dev = self.device()
@@ -707,6 +708,9 @@ class NfmReceiver:
             self._kill()
             if self._stop.is_set():
                 break
+            if self._retuning():         # a scheduled retune between transmissions (radio/am.py): back up at once
+                backoff = 2.0
+                continue
             err = " ".join(self._stderr)
             if not got and ("No matching devices" in err or "No supported devices" in err):
                 # Not plugged in (or a different serial): say so, look again every 15 s, stay quiet.
@@ -722,6 +726,13 @@ class NfmReceiver:
             self.on_event(f"{self.channel.label} down: {self.detail}")
             self._stop.wait(2.0 if got else backoff)
             backoff = 2.0 if got else min(backoff * 2, 15)
+
+    def _tune(self) -> None:
+        """Before each rtl_fm start: the frequency to start on (one channel, one frequency here; radio/am.py's schedule)."""
+
+    def _retuning(self) -> bool:
+        """rtl_fm was stopped to retune (radio/am.py), not because it failed."""
+        return False
 
     def _pump(self, proc: subprocess.Popen) -> bool:
         fd = proc.stdout.fileno()

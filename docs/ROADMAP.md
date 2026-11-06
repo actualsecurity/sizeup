@@ -31,7 +31,8 @@ county dispatch (60 Control); it doesn't replace it.
   Linux / Raspberry Pi is merged (#28).
 - **Radio:**
   - Channels: South 2 paging (tones and pages), Fire/EMS 15 (P25, talker at keypress), FG1 and
-    FG2 (MDC-1200 / FleetSync IDs), HPN Tower (Westchester County Airport ATC, 118.575 AM, #233). Next
+    FG2 (MDC-1200 / FleetSync IDs), HPN Tower (Westchester County Airport ATC, 118.575 AM, #233); NY Approach
+    (126.4 by day / 120.8 overnight, retuned on the Chart Supplement's hours) and HPN Ground, picked by hand (#260). Next
     (#119): the Port Chester repeater and PC local fireground, then several channels per dongle.
   - Speech-to-text per channel: Amazon Transcribe on the main channels (and HPN ATC, with an aviation
     vocabulary), whisper elsewhere.

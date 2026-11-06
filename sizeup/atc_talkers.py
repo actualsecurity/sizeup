@@ -50,7 +50,7 @@ from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from typing import Callable, Iterable, Sequence
 
-from sizeup import atc
+from sizeup import atc, atc_scope
 from sizeup.atc_normalize import normalize
 from sizeup.atc_snap import snap
 from sizeup.radio.am import MARGINAL_DB     # a transcript from a carrier under this is flagged weak (#257)
@@ -71,9 +71,11 @@ LEVEL_MIN = 5             # tower transmissions measured before the carrier is u
 KEEP_S = 90 * 24 * 3600.0
 VERSION = 1
 
-CHIP = {"tower": "TWR", "ground": "GND", "clearance": "CLR"}
-FACILITY_WORDS = {"tower": "tower", "ground": "ground", "clearance": "clearance", "delivery": "clearance"}
-FACILITY_NAMES = ("westchester", "white plains", "hpn", "county")
+CHIP = {"tower": "TWR", "ground": "GND", "clearance": "CLR", "approach": "APP"}
+FACILITY_WORDS = {"tower": "tower", "ground": "ground", "clearance": "clearance", "delivery": "clearance",
+                  "approach": "approach"}
+FACILITY_NAMES = ("westchester", "white plains", "hpn", "county", "new york", "york")
+NAMED_ONLY = {"approach"}     # "New York Approach" (#260); a bare "approach" is a procedure ("visual approach")
 INSTRUCTION = ("contact", "monitor", "switch", "over", "with", "call", "advise", "freq", "frequency", "to")
 NOT_FACILITY_BEFORE = {"the", "on", "of", "a", "this", "that", "my", "our", "your"}
 NOT_FACILITY_AFTER = {"speed", "stop", "level", "floor", "crew", "power", "fire", "track", "light", "lights"}
@@ -95,7 +97,8 @@ PHASE_CUES = [
     (re.compile(r"\btaxi\b|\bhold short\b|\bramp\b|\bgate\b|\bparking\b|\bfbo\b|\bpush ?back\b|\bcross runway\b|\bexit\b|\bvacate\b"),
      "ground"),
 ]
-FITS = {"arriving": {"arriving", "low"}, "departing": {"departing", "ground", "low"}, "ground": {"ground", "arriving"}}
+FITS = {"arriving": {"arriving", "low", atc_scope.INBOUND}, "departing": {"departing", "ground", "low", atc_scope.OUTBOUND},
+        "ground": {"ground", "arriving"}}
 ACTIVITY = [
     (re.compile(r"\bcleared to land\b"), "landing"), (re.compile(r"\bgo around\b"), "go-around"),
     (re.compile(r"\bcleared for take ?off\b"), "takeoff"), (re.compile(r"\bline up and wait\b"), "line up"),
@@ -156,7 +159,7 @@ def facilities(words: Sequence[str]) -> list[Facility]:
             end += 1
         prev = words[start - 1] if start >= 1 else ""
         nxt = words[end] if end < len(words) else ""
-        if not named and (prev in NOT_FACILITY_BEFORE or nxt in NOT_FACILITY_AFTER):
+        if not named and (prev in NOT_FACILITY_BEFORE or nxt in NOT_FACILITY_AFTER or kind in NAMED_ONLY):
             i = end
             continue
         if kind == "clearance" and not named and start > 0:     # "copy the clearance", "your clearance": not a name
@@ -280,7 +283,7 @@ class Match:
 def _fits(plane: dict, cue: str) -> bool:
     ph = plane.get("phase") or ""
     if not cue:
-        return ph in ("arriving", "departing", "ground", "low") or not ph
+        return ph in ("arriving", "departing", "ground", "low", atc_scope.INBOUND, atc_scope.OUTBOUND) or not ph
     return ph in FITS.get(cue, set()) or not ph
 
 
@@ -388,6 +391,8 @@ def _facility_rec(kind: str, status: str, why: str) -> dict:
 
 def channel_facility(channel: str) -> str:
     c = (channel or "").lower()
+    if atc_scope.facility(channel) == "approach":
+        return "approach"
     return "ground" if "ground" in c or "gnd" in c else "clearance" if "clearance" in c or "delivery" in c else "tower"
 
 
@@ -568,7 +573,7 @@ class AtcTalkers:
         self._index = index
         self.aircraft, self.log = aircraft, log
         self.clock = clock or getattr(cad, "clock", None) or time.time
-        self.sightings = Sightings()
+        self.sightings = Sightings(area_nm=atc_scope.widest_nm(self.channels))   # NY Approach's 40 NM (#260)
         # the operators seen near HPN lately, for the vocabulary's refresh (#257, sizeup/atc_vocab.py)
         from sizeup.atc_vocab import Operators
         self.operators = Operators(getattr(self.store, "meta_get", lambda k: None),
@@ -675,7 +680,7 @@ class AtcTalkers:
         return [x.record for x in self.recent.get(ch, ()) if x.at < tx.at and x.record and x.record.get("talker")][-3:]
 
     def _analyze(self, tx: Tx, ch: str) -> None:
-        planes = self.sightings.around(tx.at)
+        planes = atc_scope.planes_for(ch, self.sightings.around(tx.at))   # who can be on this frequency (#260)
         # #257: a callsign nearly heard, written as the aircraft on ADS-B then is called (sizeup/atc_snap.py), before
         # the match; again at each rematch, as newer pictures come in
         said, snaps = snap(tx.heard or tx.text, planes)

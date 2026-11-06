@@ -1039,6 +1039,11 @@ function radioRow(t, ctx = {}) {
   const tag = Radio.rigTag({ rig: t.rig, radio_id: t.radio_id, unit: t.talker });
   if (tag) meta.append(tag);
   meta.append(el("span", "chip src", t.channel));        // the channel once; never in the talker's place
+  if (t.mhz > 0) {                                        // the frequency it was heard on (an airband row, #260: NY
+    const f = el("span", "dim small", `${+t.mhz}`);       // Approach is 126.4 by day, 120.8 overnight)
+    f.title = `Heard on ${+t.mhz} MHz`;
+    meta.append(f);
+  }
   const em = emergencyChip(t);                            // the emergency button / a mayday (#128): can't be missed
   if (em) {
     li.classList.add("emergency", t.alarm_level === "alarm" ? "em-ours" : "em-other");

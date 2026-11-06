@@ -29,6 +29,15 @@ Westchester County Airport (HPN) ATC is AM voice at 118-137 MHz. The receiver an
               rather than invent words, and with the new antenna 9 of 50 rows were skipped under 5 dB. Station and hub may run different releases for a while: the station decides, the hub only
               reads the carrier it is sent.
 
+    schedule  a channel whose frequency changes by the time of day (#260: NY Approach, 126.4 MHz 0700-2300 local and
+              120.8 2300-0700, FAA Chart Supplement): Schedule says which frequency is on now, in America/New_York
+              wall-clock time (DST-aware: 07:00 is 07:00 EDT or EST). rtl_fm can't retune while running, so the
+              receiver stops it and starts it again on the new frequency, only between transmissions: never while
+              the squelch holds one (open, or in its hang), and only after RETUNE_QUIET_S with no carrier (an
+              exchange's read-back isn't cut off from its call). A channel that never falls quiet that long retunes
+              RETUNE_FORCE_S after the time anyway, still at the next gap between transmissions, never mid-clip.
+              Each transmission carries the frequency it was heard on (its Channel).
+
 The squelch speaks NoiseSquelch's interface (radio/fm.py: feed, flush, open, busy_since, quieting_db, hiss_db,
 floor, holding, open_db, close_db, _start), so AmReceiver is an NfmReceiver with another demodulator and squelch:
 the same restart-forever loop, status, live tap and App._segment. Its "quieting_db" is the carrier over the floor.
@@ -40,11 +49,13 @@ import os
 import select
 import time
 from collections import deque
-from typing import Callable
+from datetime import datetime
+from typing import Callable, Iterable
 
 import numpy as np
 
 from sizeup.radio.fm import FRAME, RATE, STALL_S, Channel, NfmReceiver, Segment
+from sizeup.tz import TZ
 
 AM_RATE = 12000                # rtl_fm's AM output rate (shortfinal's RATE)
 AM_FRAME = AM_RATE // 20       # 50 ms at 12 kHz
@@ -63,6 +74,35 @@ AGC_S = 0.1                    # the carrier's level, followed over this long (A
 AGC_MIN = 0.5                  # ... never divided by less than this x the transmission's carrier (the pre-roll's hiss)
 GAIN_DB = 36.4                 # shortfinal's airband gain
 FLOOR_MIN = 1e-6
+RETUNE_QUIET_S = 2.0           # a scheduled retune waits for this long with no carrier ...
+RETUNE_FORCE_S = 300.0         # ... unless it is this late: then at the next gap between transmissions
+RETUNE_CHECK_S = 1.0           # how often the schedule is looked at while rtl_fm runs
+
+
+class Schedule:
+    """Which frequency is on when (#260): [(minute of the local day, MHz)], each from its time until the next one, round
+    midnight; times are America/New_York wall-clock (sizeup/tz.py TZ), so the change follows DST."""
+
+    def __init__(self, entries: Iterable[tuple[int, float]], tz=TZ):
+        self.entries = sorted((int(m), float(f)) for m, f in entries)
+        if not self.entries:
+            raise ValueError("a schedule needs at least one entry")
+        self.tz = tz
+
+    def mhz_at(self, t: float) -> float:
+        d = datetime.fromtimestamp(t, self.tz)
+        minute = d.hour * 60 + d.minute
+        cur = self.entries[-1][1]            # before the day's first time: the last one's, since last night
+        for at, mhz in self.entries:
+            if minute >= at:
+                cur = mhz
+        return cur
+
+    def describe(self) -> str:
+        """'126.4 07:00-23:00, 120.8 23:00-07:00'"""
+        n = len(self.entries)
+        hm = lambda m: f"{m // 60:02d}:{m % 60:02d}"      # noqa: E731
+        return ", ".join(f"{mhz:g} {hm(at)}-{hm(self.entries[(k + 1) % n][0])}" for k, (at, mhz) in enumerate(self.entries))
 
 
 class CarrierSquelch:
@@ -214,9 +254,47 @@ class AmReceiver(NfmReceiver):
 
     def __init__(self, rtl_fm: str, device, gain_db: float | None, channel: Channel,
                  on_segment: Callable[[Channel, Segment], None], on_event: Callable[[str], None] = lambda m: None,
-                 open_db: float = SQUELCH_DB, **_ignored):
+                 open_db: float = SQUELCH_DB, schedule: Schedule | Iterable[tuple[int, float]] | None = None, **_ignored):
         self._up = Upsampler()
         super().__init__(rtl_fm, device, gain_db, channel, on_segment, on_event, open_db=open_db)
+        self.schedule = schedule if isinstance(schedule, Schedule) or not schedule else Schedule(schedule)
+        self._retune_to: float | None = None      # set by _pump when it stopped to retune
+        self._due_since: float | None = None      # when the schedule first asked for another frequency
+        self._checked = 0.0
+
+    # -- the schedule (#260) -----------------------------------------------------------------------------------------
+
+    def _tune(self) -> None:
+        """Before each rtl_fm start: the schedule's frequency now (no transmission can be open: rtl_fm isn't running)."""
+        want = self._retune_to if self._retune_to is not None else (
+            self.schedule.mhz_at(self.clock()) if self.schedule is not None else None)
+        self._retune_to, self._due_since = None, None
+        if want is not None and round(want, 6) != round(self.channel.mhz, 6):
+            was = self.channel.mhz
+            self.channel = Channel(want, self.channel.label, self.channel.ctcss)
+            self.on_event(f"{self.channel.label}: retuned {was:g} -> {want:g} MHz (schedule: {self.schedule.describe()})")
+
+    def _retuning(self) -> bool:
+        return self._retune_to is not None
+
+    def retune_due(self) -> float | None:
+        """The frequency to retune to now, or None: a schedule change is due and no transmission is open or in its hang
+        (never mid-clip), after RETUNE_QUIET_S with no carrier (or RETUNE_FORCE_S late, at the next gap)."""
+        if self.schedule is None:
+            return None
+        now = self.clock()
+        want = self.schedule.mhz_at(now)
+        if round(want, 6) == round(self.channel.mhz, 6):
+            self._due_since = None
+            return None
+        if self._due_since is None:
+            self._due_since = now
+        if self.squelch.busy_since is not None:          # a transmission is open (or in its hang): never cut it
+            return None
+        quiet = now - self.last_heard if self.last_heard is not None else float("inf")
+        if quiet >= RETUNE_QUIET_S or now - self._due_since >= RETUNE_FORCE_S:
+            return want
+        return None
 
     def new_squelch(self) -> CarrierSquelch:
         self._up = Upsampler()
@@ -234,6 +312,8 @@ class AmReceiver(NfmReceiver):
     def status(self) -> dict:
         out = super().status()
         out["am"] = True
+        if self.schedule is not None:
+            out["schedule"] = self.schedule.describe()
         return out
 
     def _pump(self, proc) -> bool:
@@ -259,4 +339,10 @@ class AmReceiver(NfmReceiver):
                 if len(frame) == FRAME:
                     self._deliver(self.squelch.feed(frame))
             self._watch_open()
+            if self.schedule is not None and time.monotonic() - self._checked >= RETUNE_CHECK_S:
+                self._checked = time.monotonic()
+                want = self.retune_due()
+                if want is not None:          # between transmissions: stop here, _run starts it on the new frequency
+                    self._retune_to = want
+                    return got
         return got
