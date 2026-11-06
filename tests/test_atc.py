@@ -438,10 +438,14 @@ def test_the_carrier_squelch_keeps_a_transmission_whole_and_marks_a_weak_one():
     segs = [s for f in envelope([(5, 0.01, False), (2.0, 0.05, True), (0.25, 0.01, False), (1.5, 0.05, True),
                                  (3, 0.01, False), (0.3, 0.05, True), (3, 0.01, False), (2, 0.0145, True), (3, 0.01, False)], rng)
             if (s := sq.feed(f)) is not None]
-    # 2.0 s + a 0.25 s dip (inside the 0.4 s hang) + 1.5 s = one; 0.3 s = a blip, not kept; +3.2 dB = not over 3.5
-    assert len(segs) == 1
+    # 2.0 s + a 0.25 s dip (inside the 0.4 s hang) + 1.5 s = one; 0.3 s = a blip, not kept; +3.2 dB is under the 3.5 dB
+    # open, but held for 2 s it is a real carrier (#270: the sustained-weak open), kept whole and flagged marginal
+    assert len(segs) == 2
     s = segs[0]
     assert 3.6 < s.end - s.start < 4.5 and s.quieting_db > 10 and not s.weak and abs(float(s.audio.mean())) < 1e-3
+    assert s.opened == "carrier"
+    w = segs[1]
+    assert w.opened == "sustained" and 3.0 < w.quieting_db < 3.5 and w.marginal and 2.3 < w.end - w.start < 2.8
     sq2 = CarrierSquelch(3.5, clock=lambda: T0)
     weak = [s for f in envelope([(5, 0.01, False), (2, 0.0165, True), (3, 0.01, False)], rng) if (s := sq2.feed(f)) is not None]
     # +4.3 dB (#257): marginal, transcribed and flagged; no longer skipped
@@ -476,6 +480,9 @@ def test_the_app_hears_hpn_tower_and_raises_the_pre_alert(tmp_path):
     assert a["title"] == "HPN ATC: possible brush fire reported off runway 16 departure"
     t = next(x for x in app.store.loose if x.source == "HPN Tower")
     assert t.fm is False and app.has_clip(t.id) and a["data"]["snippets"][-1]["id"] == t.id
+    # #270: its level, the floor and the voice's SNR go to the hub with it
+    assert t.carrier_db > 10 and t.floor_dbfs == pytest.approx(-40, abs=0.5) and t.carrier_dbfs > t.floor_dbfs + 10
+    assert t.snr_db > 10 and t.opened == "carrier" and {"carrier_dbfs", "floor_dbfs", "snr_db", "opened"} <= set(t.as_dict())
     assert prompts and prompts[0].startswith("Westchester Tower, Westchester Ground")      # the aviation prompt
     # the Radio view keeps ATC out of Main (busy, not ours)
     rows = app.cad.comms_query({"type": ["radio"]})["rows"]
@@ -625,3 +632,40 @@ def test_the_console_shows_them_with_accept_and_dismiss():
     js = (ROOT / "sizeup" / "web" / "static" / "airport-alerts.js").read_text()
     assert "/api/cad/airport-alert/${a.id}/${what}" in js and "Approximate: " in js and "not dispatched" in js
     assert "AirportAlerts.column" in (ROOT / "sizeup" / "web" / "static" / "cad.js").read_text()
+
+
+# -- #270: weak carriers (a ground transmitter far under the aircraft overhead), synthetic AM only ---------------------
+
+
+def test_a_sustained_weak_carrier_opens_and_noise_does_not():
+    """tools/atc_eval.py squelch's AM model: a voice-modulated carrier plus complex noise, the envelope as rtl_fm -M am
+    gives it. The plain 3.5 dB open misses most transmissions just under 0 dB CNR; held for 0.4 s, 2.5 dB opens them. Noise
+    with short bursts (+1.5..2.4 dB, up to 0.3 s) and a drifting floor opens neither."""
+    from tools.atc_eval import _squelch_run, am_envelope
+    rng = np.random.default_rng(270)
+    opened = {}
+    for cnr in (-6.0, -1.0, -0.5, 6.0):
+        env = am_envelope([(10.0, None)] + [(2.5, cnr), (4.0, None)] * 10, rng, bursts_per_min=6, drift_db=0.5)
+        opened[cnr] = {sus: _squelch_run(env, sus) for sus in (False, True)}
+    n = {c: (len(o[False]), len(o[True])) for c, o in opened.items()}
+    assert n[-6.0] == (0, 0)                              # far under the noise: nothing to hear, nothing opens
+    assert n[-1.0][0] <= 3 and n[-1.0][1] >= 6            # just under: the sustained open gets most of them
+    assert n[-0.5][1] == 10 and n[-0.5][1] > n[-0.5][0]
+    assert n[6.0] == (10, 10)                             # a fair carrier opens as before, on the 3.5 dB open
+    assert all(s.opened == "carrier" for s in opened[6.0][True])
+    weak = [s for s in opened[-1.0][True] if s.opened == "sustained"]
+    assert weak and all(2.3 < s.end - s.start < 3.4 for s in weak)        # kept whole: the 0.4 s run is in it
+    assert all(s.snr_db is not None for s in opened[-0.5][True])
+    noise = am_envelope([(600.0, None)], rng, bursts_per_min=20, drift_db=0.5)
+    assert _squelch_run(noise, True) == [] and _squelch_run(noise, False) == []
+
+
+def test_the_voice_snr_is_measured_against_the_pre_roll():
+    from sizeup.radio.am import voice_snr_db
+    rng = np.random.default_rng(5)
+    noise = [0.01 + 0.001 * rng.standard_normal(FRAME) for _ in range(8)]
+    t = np.arange(FRAME) / RATE
+    voice = [0.05 + 0.01 * np.sin(2 * np.pi * 500 * t) + 0.001 * rng.standard_normal(FRAME) for _ in range(20)]
+    snr = voice_snr_db(noise + voice, 8, 28)
+    assert snr == pytest.approx(10 * np.log10(0.01 ** 2 / 2 / 0.001 ** 2), abs=1.0)    # ~17 dB
+    assert voice_snr_db(voice, 0, 20) is None           # no pre-roll: no noise to measure it against

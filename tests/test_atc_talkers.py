@@ -93,6 +93,46 @@ def test_addressing_or_speaking(text, role, talker, addressed):
     assert r["aircraft"]["role"] == {"atc": "addressed", "aircraft": "speaking"}[role]
 
 
+@pytest.mark.parametrize("text, role, why", [
+    # #270: the pilot's side with the callsign first (made-up callsigns)
+    ("November six seven eight Quebec Zulu canceling landing clearance, roger that", "aircraft", "roger / wilco"),
+    ("November six seven eight Quebec Zulu, cleared to land runway three four, wilco", "aircraft", "roger / wilco"),
+    ("JetBlue one two three four, continuing the approach, we'll call you on the go", "aircraft", "report, request"),
+    ("JetBlue one two three four, request runway one six", "aircraft", "report, request"),
+    ("JetBlue one two three four on the RNAV Yankee three four", "aircraft", "reports its approach"),
+    ("JetBlue one two three four, eight miles out on the ILS", "aircraft", "reports its approach"),
+    ("Tower, JetBlue one two three four, with you on the RNAV", "aircraft", "calls tower"),
+    ("cleared to land three four, JetBlue one two three four, thanks", "aircraft", "ends with the callsign"),
+    ("JetBlue one two three four, mayday mayday mayday, engine fire", "aircraft", "report, request"),
+    # the tower's: a directive after the callsign
+    ("November six seven eight Quebec Zulu, cancel landing clearance, go around", "atc", "an instruction"),
+    ("JetBlue one two three four, runway three four, wind three three zero at eight, cleared to land", "atc", "an instruction"),
+    ("JetBlue one two three four, turn left heading two seven zero, contact departure", "atc", "an instruction"),
+    ("November six seven eight Quebec Zulu, maintain two thousand until the bridge", "atc", "an instruction"),
+    ("JetBlue one two three four, cleared RNAV Yankee three four approach", "atc", "an instruction"),
+    # neither: unknown, not a guess
+    ("JetBlue one two three four, that's the one off the Sound", "unknown", ""),
+    ("confirm JetBlue one two three four cleared to land", "unknown", ""),
+    ("November six seven eight Quebec Zulu, are we cleared to land", "aircraft", "report, request"),
+])
+def test_who_speaks_when_the_callsign_comes_first(text, role, why):
+    r = rec(text, PLANES)
+    assert r["role"] == role, (text, r["role"], r["talker"].get("why"))
+    if role == "unknown":
+        assert r["talker"]["kind"] == "unknown" and r["addressed"] is None
+    else:
+        assert why in r["talker"]["why"]
+    if role == "aircraft":
+        assert r["talker"]["kind"] == "aircraft" and r["talker"]["callsign"] != "TWR"
+
+
+def test_a_pilot_mislabelled_as_the_tower_no_longer_teaches_the_tower_carrier():
+    """#270: the tower's carrier is learnt from what the words say is the tower's. A pilot's callsign-first readback was
+    'TWR', so the pilots' own carrier became the "tower's" and the carrier rule then called more pilots the tower."""
+    pilot = rec("November six seven eight Quebec Zulu canceling landing clearance, roger that", PLANES, carrier=28.0)
+    assert pilot["role"] == "aircraft" and pilot["talker"]["kind"] not in T.CHIP
+
+
 def test_the_tower_said_its_name_or_is_read_from_the_words():
     r = rec("JetBlue one two three four, Westchester Tower, runway three four, cleared to land", PLANES)
     assert r["talker"] == {"kind": "tower", "callsign": "TWR", "status": "heard", "why": "self-ID: westchester tower"}
@@ -157,7 +197,7 @@ def test_two_candidates_are_heard_only():
 
 
 def test_never_an_airliners_own_tail_or_a_plane_not_there():
-    a = rec("November one two three juliett bravo, runway one six", [JBU])["addressed"]
+    a = rec("November one two three juliett bravo, runway one six, line up and wait", [JBU])["addressed"]
     assert a["status"] == "heard" and a["callsign"] == "N123JB"           # JBU1234 is called JetBlue, not its tail
     a = rec("Delta four five, contact ground point niner", PLANES)["addressed"]
     assert a["status"] == "heard" and a["why"] == "not on ADS-B near HPN"
@@ -299,7 +339,7 @@ def test_the_pre_alert_is_untouched(world):
     cad, say, clock = world
     n = len(cad.airport_alerts.state()["items"])
     r = say(1, "JetBlue one two three five, mayday mayday mayday, engine fire")
-    assert r["addressed"]["status"] == "probable"
+    assert r["role"] == "aircraft" and r["talker"]["status"] == "probable"     # the pilot declares it (#270)
     assert len(cad.airport_alerts.state()["items"]) == n                      # the talker raises and feeds nothing there
 
 

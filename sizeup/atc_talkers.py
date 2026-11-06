@@ -17,7 +17,10 @@ record in atc_talkers, read back onto its Radio row as "atc" (with_atc), only wh
     who is talking  shortfinal's speaker rule (its _speaker, extended): a controller starts with the callsign and gives an
                     instruction ("JetBlue 1234, runway three four, cleared to land": the tower, to JBU1234); a pilot calls
                     the facility, reports ("... with you", "ready for departure"), or reads back and ends with the callsign
-                    ("cleared to land three four, JetBlue 1234": JBU1234 speaking). Still undecided: the exchange (the
+                    ("cleared to land three four, JetBlue 1234": JBU1234 speaking). #270: callsign first is the tower's
+                    only with a directive after it (TOWER_CUES: cleared, contact, turn, maintain ...); a pilot's readback
+                    said callsign first ("<callsign> canceling landing clearance, roger that": the participle, first
+                    person, roger / wilco at the end) or the approach it reports is the aircraft's. Still undecided: the exchange (the
                     transmission before, about the same aircraft, within REPLY_S: the other side answers), then the carrier
                     (the tower's transmitter is close and steady: a carrier within the tower's own spread of what the
                     channel's tower transmissions measured is the tower's; far under it, an aircraft). Else unknown.
@@ -85,6 +88,24 @@ GREETINGS = ("hello", "good morning", "good afternoon", "good evening", "good da
 PILOT_CUES = ("inbound", "with you", "checking in", "request", "requesting", "ready", "unable", "climbing", "descending",
               "passing", "leveling", "level at", "holding short", "looking", "with information", "have information",
               "have the numbers", "with the numbers", "wilco", "my", "we have", "we are", "were", "we re")
+# #270: more of the pilot's side. A readback said with the callsign first ("<callsign> canceling landing clearance, roger
+# that") is the pilot's: the participle ("canceling", "continuing"), first person ("we'll", "we're", "our"), or an
+# acknowledgement at the end. These win over the directive words a readback repeats ("cleared to land").
+PILOT_CUES += ("canceling", "cancelling", "continuing", "we ll", "we will", "will do", "we got", "we see", "in sight",
+               "we have", "our", "us", "we d", "going to", "we re going", "affirmative we", "negative we", "are we",
+               "can we", "could we", "do you want us", "would you like us", "mayday", "pan pan", "declaring")
+ACKS = ("roger", "roger that", "wilco", "will do", "copy", "copy that", "understood")
+# The approach a pilot reports being on ("<callsign> on the RNAV Yankee 34"): the pilot's only when no directive is said
+# too ("<callsign> cleared RNAV Yankee 34 approach" is a controller's).
+REPORT_CUES = ("rnav", "ils", "gps", "localizer", "visual", "on the", "approach", "final", "miles", "mile", "out")
+# What a controller says after the callsign (shortfinal's _speaker read any callsign-first transmission as the tower's:
+# #270, a pilot's readback was "TWR to" its own callsign). Without one of these (or the facility's own name) a
+# callsign-first transmission is "unknown", not the tower's.
+TOWER_CUES = ("cleared", "clear to", "clear for", "contact", "monitor", "turn", "maintain", "climb", "descend", "taxi",
+              "hold short", "hold position", "line up", "wind", "altimeter", "traffic", "report", "squawk", "cancel",
+              "go around", "expect", "follow", "extend", "enter", "make", "proceed", "fly", "cross", "caution", "say",
+              "verify", "reduce", "increase", "ident", "go ahead", "continue", "number", "plan", "you re", "your",
+              "do you", "are you", "remain", "keep", "exit", "join", "sequence", "behind", "frequency change", "change approved")
 TRAILING_OK = {"thanks", "thank", "you", "bye", "good", "day", "sir", "heavy", "super", "ma", "am", "cheers", "so", "long",
                "see", "ya"}
 
@@ -233,11 +254,26 @@ def speaker(words: Sequence[str], spans: Sequence, facs: Sequence[Facility]) -> 
     tail = _plain(words[last.end:])
     if len(tail) <= 1 or all(w in TRAILING_OK for w in tail):
         return "aircraft", "ends with the callsign (a readback)", None
-    if _has(PILOT_CUES, words[first.end:]):
-        return "aircraft", "a pilot's report or request", None
-    if len(_plain(words[: first.start])) <= 1:
+    rest = words[first.end:]
+    if len(tail) >= 2 and _acknowledges(tail):
+        return "aircraft", "ends with roger / wilco (the pilot's acknowledgement)", None
+    if _has(PILOT_CUES, rest):
+        return "aircraft", "a pilot's report, request or readback", None
+    directive = _has(TOWER_CUES, rest)
+    if not directive and _has(REPORT_CUES, rest):
+        return "aircraft", "reports its approach (no instruction)", None
+    if len(head) <= 1 and directive and head[:1] != ["confirm"]:     # "confirm <callsign> cleared to land": either side
         return "atc", "starts with the callsign (an instruction)", None
     return "unknown", "", None
+
+
+def _acknowledges(tail: Sequence[str]) -> bool:
+    """The transmission ends with roger / wilco / copy (pleasantries after it allowed): "..., roger that, thanks"."""
+    t = list(tail)
+    while t and t[-1] in TRAILING_OK:
+        t.pop()
+    s = " ".join(t)
+    return any(s == a or s.endswith(" " + a) for a in ACKS)
 
 
 # -- ADS-B: the pictures kept, the match ------------------------------------------------------------------------------

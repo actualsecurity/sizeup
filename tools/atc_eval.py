@@ -21,6 +21,13 @@ can't run locally, so what is measured is everything around it.
         prompt insertions (a scope callsign found only when prompted, its characters not heard without the prompt).
         There are no human references for these captures: callsign accuracy is measured against ADS-B, not WER.
 
+    python tools/atc_eval.py squelch
+        sizeup/radio/am.py's carrier squelch on synthetic AM (#270), no recordings: a voice-modulated carrier plus complex
+        noise, the envelope taken as rtl_fm -M am does, at several carrier-to-noise ratios; and noise alone for an hour
+        with bursts (+1.5..2.4 dB, 50-300 ms: the bench's noise bursts) and a slow drift of the floor. How many
+        transmissions open (and how much of each is kept), how many opens noise makes, with and without the
+        sustained-weak open.
+
 DIR is shortfinal's captures/ (clips/ and archive/<day>/: <id>.wav + <id>.json, the JSON with "scope" and "decodes").
 The captures are read, never written.
 """
@@ -211,6 +218,88 @@ def run_preroll(root: Path) -> dict:
     return res
 
 
+def am_envelope(segments, rng, rate: int = 16000, sigma: float = 0.01, bursts_per_min: float = 0.0,
+                drift_db: float = 0.0, drift_s: float = 90.0) -> np.ndarray:
+    """A synthetic rtl_fm -M am envelope: [(seconds, CNR dB or None for no carrier)] -> |carrier (1 + m voice) + noise|.
+    CNR is the carrier's power over the complex noise's in the whole band. The voice is speech-like: a few harmonics of a
+    moving pitch, in syllables (4 a second), 70% modulation. Noise: complex Gaussian (sigma per component), its level
+    stepped up by bursts (+1.5..2.4 dB for 50-300 ms, bursts_per_min) and drifting (+-drift_db over drift_s)."""
+    n = int(sum(d for d, _ in segments) * rate)
+    t = np.arange(n) / rate
+    lvl = np.ones(n)
+    if drift_db:
+        lvl *= 10 ** (drift_db * np.sin(2 * np.pi * t / drift_s) / 20)
+    k = 0
+    while bursts_per_min and k < n:
+        k += int(rng.exponential(60.0 / bursts_per_min) * rate)
+        m = int(rng.uniform(0.05, 0.3) * rate)
+        lvl[k:k + m] *= 10 ** (rng.uniform(1.5, 2.4) / 20)
+        k += m
+    noise = sigma * lvl * (rng.standard_normal(n) + 1j * rng.standard_normal(n))
+    sig = np.zeros(n)
+    at = 0
+    for dur, cnr in segments:
+        m = int(dur * rate)
+        if cnr is not None:
+            tt = np.arange(m) / rate
+            f0 = 140 + 30 * np.sin(2 * np.pi * 0.7 * tt)
+            ph = 2 * np.pi * np.cumsum(f0) / rate
+            v = sum(np.sin(h * ph) / h for h in range(2, 12)) * (np.sin(2 * np.pi * 4 * tt) > -0.3)
+            v = 0.7 * v / (np.max(np.abs(v)) or 1)
+            a = sigma * np.sqrt(2) * 10 ** (cnr / 20)       # carrier power a^2 = CNR x the noise's 2 sigma^2
+            sig[at:at + m] = a * (1 + v)
+        at += m
+    return np.abs(sig + noise)
+
+
+def _squelch_run(env: np.ndarray, sustained: bool) -> list:
+    from sizeup.radio import am
+    from sizeup.radio.fm import FRAME, RATE
+    old = am.WEAK_HOLD_FRAMES
+    am.WEAK_HOLD_FRAMES = old if sustained else 10 ** 9
+    try:
+        now = [0.0]
+        sq = am.CarrierSquelch(3.5, clock=lambda: now[0])
+        out = []
+        for k in range(0, len(env) - FRAME + 1, FRAME):
+            now[0] = k / RATE
+            s = sq.feed(env[k:k + FRAME])
+            if s is not None:
+                out.append(s)
+        return out
+    finally:
+        am.WEAK_HOLD_FRAMES = old
+
+
+SQUELCH_CNR = (-6.0, -3.0, -1.5, 0.0, 1.5, 3.0, 6.0, 10.0)
+
+
+def run_squelch(n_tx: int = 20, noise_minutes: float = 60.0) -> dict:
+    """Transmissions opened (of n_tx, 2.5 s each, 4 s apart) per CNR, and the opens an hour of noise makes."""
+    rng = np.random.default_rng(270)
+    res: dict = {}
+    print("CNR dB   carrier over floor   opened (3.5 dB only)   opened (+ sustained 2.5 dB)   kept of the 2.5 s")
+    for cnr in SQUELCH_CNR:
+        env = am_envelope([(10.0, None)] + [(2.5, cnr), (4.0, None)] * n_tx, rng, bursts_per_min=6, drift_db=0.5)
+        row = {}
+        for sus in (False, True):
+            segs = _squelch_run(env, sus)
+            row["sustained" if sus else "plain"] = (len(segs), float(np.mean([s.end - s.start for s in segs])) if segs else 0.0,
+                                                    float(np.median([s.quieting_db for s in segs])) if segs else None)
+        res[cnr] = row
+        p, s_ = row["plain"], row["sustained"]
+        over = s_[2] if s_[2] is not None else p[2]
+        print(f"{cnr:6.1f}   {'' if over is None else f'{over:5.1f} dB':>18}   {p[0]:>10}/{n_tx}   {s_[0]:>18}/{n_tx}"
+              f"   {s_[1]:5.2f} s")
+    for bpm, drift in ((6, 0.5), (20, 0.5), (6, 1.0)):
+        env = am_envelope([(noise_minutes * 60, None)], rng, bursts_per_min=bpm, drift_db=drift)
+        got = [len(_squelch_run(env, sus)) for sus in (False, True)]
+        res[f"noise opens/h, {bpm} bursts/min, drift {drift} dB"] = [g / (noise_minutes / 60) for g in got]
+        print(f"noise alone, {noise_minutes:g} min, {bpm} bursts a minute, floor drifting +-{drift} dB: "
+              f"{got[0]} opens with 3.5 dB only, {got[1]} with the sustained-weak open")
+    return res
+
+
 def run_whisper(root: Path, url: str, out: Path | None) -> dict:
     from sizeup.stt import WhisperClient, radio_voice
     client = WhisperClient(url, timeout_s=120)
@@ -272,13 +361,15 @@ def run_whisper(root: Path, url: str, out: Path | None) -> dict:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("what", choices=("normalizer", "preroll", "whisper"))
+    ap.add_argument("what", choices=("normalizer", "preroll", "whisper", "squelch"))
     ap.add_argument("--captures", type=Path)
     ap.add_argument("--url", default="http://127.0.0.1:8178/inference")
     ap.add_argument("--out", type=Path)
     a = ap.parse_args(argv)
     if a.what == "normalizer":
         run_normalizer()
+    elif a.what == "squelch":
+        run_squelch()
     elif not a.captures:
         ap.error("--captures DIR")
     elif a.what == "preroll":

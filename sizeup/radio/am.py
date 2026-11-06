@@ -14,6 +14,14 @@ Westchester County Airport (HPN) ATC is AM voice at 118-137 MHz. The receiver an
     hang      HANG_FRAMES (0.4 s): the carrier may drop that long inside one transmission. ATC is a string of
               short exchanges (controller, pilot read-back, 0.5-1 s apart): 0.4 s keeps each key-up its own
               transmission, and the detector (sizeup/atc.py) reads a few of them together as the exchange.
+    sustained a carrier under the open level but within WEAK_MARGIN_DB (1 dB) of it (2.5 dB at 3.5) opens too once it has
+              held there WEAK_HOLD_FRAMES (0.4 s) without a break (#270: the tower's ground transmitter arrives far
+              under the aircraft overhead). The bench's noise bursts are under 2.4 dB and short; the 0.4 s run is kept as
+              the carrier, with the pre-roll before it (tools/atc_eval.py squelch: about 1.5 dB of CNR more is heard,
+              and noise with bursts and a drifting floor opens no more often). Segment.opened says which opened it.
+    measured  per transmission (#270), sent to the hub with it (its traffic doc) and logged on the station: the carrier
+              over the floor (carrier_db), both in dBFS (carrier_dbfs, floor_dbfs), and the voice's SNR (snr_db: the
+              envelope's AC power with the carrier up over the pre-roll's, voice_snr_db).
     pre-roll  PREROLL_FRAMES (0.4 s, #257; was shortfinal's 0.2 s) before the open is kept, TAIL_FRAMES (0.2 s) after
               the carrier dropped: a weak or fading carrier opens the squelch late, and "Westchester Tower" came out
               "Chester Tower" (tools/atc_eval.py preroll: opening 0.3 s late, 85% of the first 0.3 s of speech was
@@ -72,6 +80,8 @@ PREROLL_FRAMES = 8             # 0.4 s before the open is kept (#257: the first 
 TAIL_FRAMES = 4                # 0.2 s after the carrier dropped is kept (the last syllable)
 MIN_FRAMES = 12                # 0.6 s of carrier
 MAX_FRAMES = 20 * 30           # 30 s
+WEAK_MARGIN_DB = 1.0           # #270: a carrier this much under the open level (2.5 dB at 3.5) opens too ...
+WEAK_HOLD_FRAMES = 8           # ... once it has held there this long without a break (0.4 s; a noise burst doesn't)
 MIN_CARRIER_DB = 3.0           # weaker: "weak signal", not transcribed (#257: was shortfinal's 5 dB)
 MARGINAL_DB = 6.0              # weaker than this (and >= MIN_CARRIER_DB): transcribed, flagged low confidence
 AGC_S = 0.1                    # the carrier's level, followed over this long (AM AGC: under the voice band)
@@ -116,12 +126,18 @@ class CarrierSquelch:
     def __init__(self, open_db: float = SQUELCH_DB, clock: Callable[[], float] = time.time):
         self.open_db, self.clock = float(open_db), clock
         self.close_db = max(0.0, self.open_db - HYSTERESIS_DB)
+        # #270: the sustained-weak open (a ground transmitter far under the aircraft overhead): weak_db held for
+        # WEAK_HOLD_FRAMES. It closes like any other (close_db), kept under weak_db so it doesn't chop.
+        self.weak_db = max(0.5, self.open_db - WEAK_MARGIN_DB)
+        self.close_db = min(self.close_db, self.weak_db - 0.5)
+        self._run: list[float] = []          # the levels of the frames in a row over weak_db (squelch closed)
+        self._opened = "carrier"             # how the open transmission opened: carrier | sustained
         self.levels: deque[float] = deque(maxlen=HISTORY_FRAMES)
         self.floor_level = 0.0               # the no-carrier envelope (linear)
         self.floor: float | None = None      # NoiseSquelch's background carrier (there is none here)
         self._frames: list[np.ndarray] = []
         self._levels: list[float] = []
-        self._pre: deque[np.ndarray] = deque(maxlen=PREROLL_FRAMES)
+        self._pre: deque[np.ndarray] = deque(maxlen=PREROLL_FRAMES + WEAK_HOLD_FRAMES)
         self._npre = 0                       # pre-roll frames at the front of _frames
         self._quiet = 0
         self._n = 0
@@ -172,13 +188,12 @@ class CarrierSquelch:
         if self._n % 20 == 0 or self._n == LEARN_FRAMES:
             self._update_floor()
         if not self._frames:
-            if self._n >= LEARN_FRAMES and self._over(level, self.open_db):
-                self._start = self.clock() - len(self._pre) * FRAME / RATE
-                self._frames = list(self._pre) + [frame]
-                self._npre = len(self._pre)
-                self._levels = [level]
-                self._pre = deque(maxlen=PREROLL_FRAMES)
-                self._quiet = 0
+            learnt = self._n >= LEARN_FRAMES
+            self._run = self._run + [level] if learnt and self._over(level, self.weak_db) else []
+            if learnt and self._over(level, self.open_db):
+                self._open(frame, level, [], "carrier")
+            elif len(self._run) >= WEAK_HOLD_FRAMES:
+                self._open(frame, level, self._run[:-1], "sustained")
             else:
                 self._pre.append(frame)
             return None
@@ -193,6 +208,17 @@ class CarrierSquelch:
             return self._close("max length")
         return None
 
+    def _open(self, frame: np.ndarray, level: float, run: list[float], how: str) -> None:
+        """Open on this frame; run: the levels of the frames just before it that were already the carrier (a sustained
+        weak open), kept as the carrier, with PREROLL_FRAMES of pre-roll before them."""
+        pre = list(self._pre)[-(PREROLL_FRAMES + len(run)):] if PREROLL_FRAMES + len(run) else []
+        self._start = self.clock() - len(pre) * FRAME / RATE
+        self._frames = pre + [frame]
+        self._npre = len(pre) - min(len(run), len(pre))
+        self._levels = run[-len(pre):] + [level] if run and pre else [level]
+        self._pre = deque(maxlen=PREROLL_FRAMES + WEAK_HOLD_FRAMES)
+        self._run, self._quiet, self._opened = [], 0, how
+
     def flush(self, reason: str = "stopped") -> Segment | None:
         """The audio stopped with the squelch open: what was heard, now."""
         return self._close(reason) if self._frames else None
@@ -200,12 +226,13 @@ class CarrierSquelch:
     def _close(self, reason: str) -> Segment | None:
         tail = min(self._quiet, TAIL_FRAMES)
         frames = self._frames[: len(self._frames) - (self._quiet - tail)]
-        levels, start, npre = self._levels, self._start, self._npre
-        self._frames, self._levels, self._quiet, self._npre = [], [], 0, 0
+        levels, start, npre, opened = self._levels, self._start, self._npre, self._opened
+        self._frames, self._levels, self._quiet, self._npre, self._opened = [], [], 0, 0, "carrier"
         if len(frames) - npre - tail < MIN_FRAMES:       # the carrier itself was up too short: a blip
             return None
         med = float(np.median(levels or [self.floor_level]))
         carrier = float(20 * np.log10(max(med, 1e-9) / max(self.floor_level, 1e-9)))
+        snr = voice_snr_db(frames, npre, len(frames) - tail)     # #270: measured before the AGC, per segment
         audio = agc(np.concatenate(frames), med)
         tones = find_tones(audio, RATE)                # a heterodyne's steady tone over the voice (#263): notched out
         audio = detone(audio, RATE, tones)
@@ -216,7 +243,23 @@ class CarrierSquelch:
         seg.marginal = not seg.weak and carrier < MARGINAL_DB   # type: ignore[attr-defined]
         seg.preroll_s = npre * FRAME / RATE            # type: ignore[attr-defined]
         seg.tones = [round(f0, 1) for f0, _spread in tones]   # type: ignore[attr-defined]  (the ones notched out)
+        # #270: what the hub needs to tell a weak transmitter from a missing one, per transmission
+        seg.carrier_dbfs = round(float(20 * np.log10(max(med, 1e-9))), 1)   # type: ignore[attr-defined]
+        seg.snr_db = None if snr is None else round(snr, 1)    # type: ignore[attr-defined]
+        seg.opened = opened                                    # type: ignore[attr-defined]  carrier | sustained
         return seg
+
+
+def voice_snr_db(frames: list[np.ndarray], npre: int, end: int) -> float | None:
+    """The voice over the noise (dB), from the envelope itself: its AC power while the carrier is up (the modulation, plus
+    the noise riding on it) over its AC power in the pre-roll (the noise alone, no carrier yet). None without a pre-roll."""
+    if npre < 2 or end - npre < 2:
+        return None
+    ac = lambda fs: float(np.mean([np.var(f) for f in fs]))      # noqa: E731  (per 50 ms frame: no carrier step in it)
+    noise, voice = ac(frames[:npre]), ac(frames[npre:end])
+    if noise <= 0:
+        return None
+    return float(10 * np.log10(max(voice / noise - 1.0, 1e-3)))
 
 
 def agc(envelope: np.ndarray, carrier: float, rate: int = RATE) -> np.ndarray:
