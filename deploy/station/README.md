@@ -468,8 +468,10 @@ the same serial as "V3 #2", and Fire/EMS 15 (tg:307) stopped reaching the hub wi
   (or Use for ADS-B) is refused with the same text, and a job saved for it is kept, not dropped, for after the fix.
   A program already running keeps the dongle it opened while its serial was still its own (that handle is the right
   dongle); it isn't restarted on it. Dongles with serials of their own keep working.
-* **A main channel gone silent is an alert too** (warning): tg:307, FG1, South 2 or HPN Tower running but silent far
-  beyond its usual gap for that time of day ([docs/cloud.md](../../docs/cloud.md#station-health-and-alerts)).
+* **Silence:** only the whole P25 system going quiet is an alert ("P25 trunk silent", critical: no call on any
+  talkgroup for 20 min, 60 min into the night, or trunk-recorder losing the control channel). One talkgroup or channel
+  silent (tg:307, FG1, South 2, HPN Tower ...) is a hint in Settings > Health only
+  ([docs/cloud.md](../../docs/cloud.md#station-health-and-alerts)).
 
 **The fix: `sizeup-station sdr-serial <index|current-serial> <new-serial>`** gives one dongle a new serial, safely:
 

@@ -20,9 +20,9 @@ notice when it clears:
     whisper       speech-to-text (whisper-server) down for down_min (2)                    warning
     recorder      trunk-recorder down for down_min while its dongle job is on              critical
     stuck:<chan>  a channel's squelch open without a break (#116's flag)                   warning
-    quiet:<chan>  a MAIN channel ([alerts] main_channels: tg:307 Fire/EMS 15, FG1, South   warning
-                  2, HPN Tower) running but silent far beyond its usual gap for that time
-                  of day (#242: Fire/EMS 15 was lost for hours with no alert): see QUIET_*
+    trunk         "P25 trunk silent" (#258): trunk-recorder running but no call on ANY       critical
+                  talkgroup for the trunk window, or the control channel lost (its decode
+                  rate under 2/s) for CC_LOST_S: see "The P25 trunk" below
     outbox        events waiting on the station for outbox_min (5): it couldn't reach the  warning
                   hub (invisible here until it comes back: worked out from the age of the
                   oldest event it reports)
@@ -39,20 +39,32 @@ notice when it clears:
                   Fire/EMS 15 keep AWS within the reserve, sizeup/transcribe.py)
 
 While the station is silent (or before it first reports) the other conditions keep the state they had:
-nothing starts or clears on old data. Per-channel silence (nothing heard for much longer than that channel
-usually goes, from its own gaps between transmissions) is a hint in the panel; on a main channel, silent far longer
-still, it is the quiet:<chan> warning. How far (conservative: a busy channel's real outage, not a slow night):
+nothing starts or clears on old data.
 
-    learned  from the channel's own gaps between transmissions (each one filed under the 6-hour part of the day it
-             started in, station time: 00-06, 06-12, 12-18, 18-24), at least QUIET_GAPS_MIN of them before any alert
+One channel or talkgroup silent is never an alert (#258: fireground is quiet for hours, HPN Tower closes overnight,
+Fire/EMS 15 can be quiet for an hour): it is a hint in the panel (Settings > Health), with when it was last heard,
+once it is silent HINT_FACTOR (3) times its usual gap and at least HINT_MIN_S (30 min). The usual gap:
+
+    learned  from the channel's own gaps between transmissions (the last GAPS_MAX; each also filed under the 6-hour
+             part of the day it started in, station time: 00-06, 06-12, 12-18, 18-24), GAPS_MIN of them first
     usual    the 90th percentile gap (9 in 10 gaps are shorter) for each part of the day the silence spans, the
              largest of them (a silence from 22:55 is judged by the night's gaps too); a part of the day with fewer
              than QUIET_TOD_MIN gaps uses the whole day's
-    alert    silent longer than QUIET_FACTOR (4) times that, and at least QUIET_MIN_S (1 h); only while the channel's
-             program runs (state ok: a stopped one is the job / recorder alert's) and the station reports
-    clears   at the next transmission heard
 A talkgroup ("tg:307") is heard from the station's health["heard"] (its main talkgroups' last calls), its state the
-P25 job's: other talkgroups on the same system can keep recording while one goes silent (#242).
+P25 job's.
+
+The P25 trunk (#258): the whole system silent is the alert. The P25 job's row hears a call on any talkgroup
+trunk-recorder writes, so its last_heard is the system's last call:
+
+    window   p25_silent_min (20 min) by day, p25_silent_night_min (60 min) for a silence that reaches 00-06; longer
+             when learned: QUIET_FACTOR (4) times the system's usual gap (above, from QUIET_GAPS_MIN gaps) for the
+             parts of the day it spans. Never shorter than the default: a county system with dozens of talkgroups
+             doesn't go 20 min without a call by day, and the control channel (below) catches a fast outage
+    from     its last call, and never before trunk-recorder was seen running (a recorder just back is given the
+             window to hear one; down, it is the recorder alert's)
+    control  the station's trunk-recorder log: a run of "Control Channel Message Decode Rate" lines under 2/s
+             (sizeup/radio/recorder.py ControlChannel) lasting CC_LOST_S: the alert at once, whatever the window
+    clears   at the next call (or the control channel decoding again)
 
 Each alert is logged once when it starts and once when it clears, shown to admins on Settings > Health
 (GET /api/cad/health, static/health.js; never in the state push nor as a banner, #203), and pushed to the
@@ -98,11 +110,13 @@ GAPS_MIN = 10               # ... at least this many before a silence hint
 HINT_FACTOR = 3.0           # silent this many times its usual (90th percentile) gap
 HINT_MIN_S = 30 * 60.0      # and at least this long
 SAVE_GAPS_S = 600.0
-MAIN_CHANNELS = ("tg:307", "FG1", "South 2", "HPN Tower")   # [alerts] main_channels: the quiet:<chan> alert's
-QUIET_GAPS_MIN = 30         # gaps learned (the whole day) before a main channel's silence can alert
+QUIET_GAPS_MIN = 30         # gaps learned (the whole day) before the P25 trunk's own gaps lengthen its window
 QUIET_TOD_MIN = 10          # ... in a part of the day before its own gaps are used (else the whole day's)
-QUIET_FACTOR = 4.0          # silent this many times the usual gap for that time of day
-QUIET_MIN_S = 3600.0        # and at least this long
+QUIET_FACTOR = 4.0          # the trunk silent this many times its usual gap for that time of day
+TRUNK_DAY_S = 20 * 60.0     # [alerts] p25_silent_min: no call on any talkgroup this long is "P25 trunk silent"
+TRUNK_NIGHT_S = 60 * 60.0   # [alerts] p25_silent_night_min: ... for a silence that reaches the night (00-06)
+NIGHT_PART = 0              # the part of the day (00-06) the night window is for
+CC_LOST_S = 120.0           # the control channel decoding under 2 messages / s this long: the trunk alert at once
 TOD_PARTS = 4               # 6-hour parts of the day for the learned gaps
 NOT_CHANNELS = ("STT", "Voice", "Hub", "Station", "trunk-recorder")
 STATUS_KEY = b"sizeup-status-token-v1"
@@ -253,6 +267,12 @@ def station_metrics(app, metrics: Metrics) -> dict:
         out["recorder"] = {"state": rs.get("state"), "restarts": rs.get("restarts", 0),
                            "detail": str(rs.get("detail") or "")[:200],
                            "expected": (not shared) or P25_JOB in assigned}
+        cc = getattr(rec, "cc", None)
+        if cc is not None:
+            try:
+                out["recorder"]["cc"] = cc.status()  # the control channel's decode rate from its log (#258)
+            except Exception:  # noqa: BLE001 - a report, never in the way
+                pass
     w = getattr(app, "whisper", None)
     if w is not None:
         out["whisper"] = {"state": getattr(w, "state", None), "detail": str(getattr(w, "detail", "") or "")[:200]}
@@ -353,7 +373,9 @@ class StationHealth:
         self._heard: dict[str, float] = {}           # each channel's last_heard as last seen
         self.gaps: dict[str, list[float]] = {}
         self.tod: dict[str, dict[str, list[float]]] = {}   # label -> part of the day -> gaps that started in it
-        self.main = tuple(getattr(cfg, "alerts_main_channels", MAIN_CHANNELS) or ())
+        self.trunk_day_s = float(getattr(cfg, "alerts_p25_silent_min", TRUNK_DAY_S / 60)) * 60
+        self.trunk_night_s = float(getattr(cfg, "alerts_p25_silent_night_min", TRUNK_NIGHT_S / 60)) * 60
+        self._trunk_up: float | None = None         # when the hub first saw trunk-recorder running (this run of it)
         self._gaps_saved = 0.0
         self._load()
 
@@ -496,15 +518,16 @@ class StationHealth:
             gaps = self.gaps.get(label) or []
             typical = _p90(gaps) if len(gaps) >= GAPS_MIN else None
             quiet = round(snow - heard, 1) if heard else None
+            usual = self._usual(label, heard, snow, GAPS_MIN) if heard else None
             hint = ""
-            if typical is not None and quiet is not None and r.get("state") == "ok" \
-                    and quiet > max(HINT_FACTOR * typical, HINT_MIN_S):
-                hint = (f"nothing heard for {_dur(quiet)}; it usually hears something within {_dur(typical)}: "
-                        "check its antenna and dongle")
-            main = label in self.main
-            limit, usual = self._quiet_limit(label, heard, snow) if main and heard else (None, None)
-            chans.append({"label": label, "name": r.get("name") or label, "main": main,
-                          "alert_after_s": limit, "usual_now_s": usual,
+            if usual is not None and quiet is not None and r.get("state") == "ok" and label != P25_JOB \
+                    and quiet > max(HINT_FACTOR * usual, HINT_MIN_S):      # (the whole system: the trunk alert's)
+                hint = (f"nothing heard for {_dur(quiet)} (last heard {_hhmm(heard + hub.skew)}); at this time of day it "
+                        f"usually hears something within {_dur(usual)}. "
+                        + ("A talkgroup can be quiet while the system talks: only the whole P25 system going quiet is "
+                           "an alert" if label.startswith("tg:") else
+                           "Often just a quiet channel (no alert); if it shouldn't be, check its antenna and dongle"))
+            chans.append({"label": label, "name": r.get("name") or label, "usual_now_s": usual,
                           "mhz": r.get("mhz"), "state": r.get("state"), "word": r.get("word") or "",
                           "detail": str(r.get("detail") or "")[:200], "open": bool(r.get("open")),
                           "open_s": r.get("open_s"), "stuck": bool(r.get("stuck")), "quieting_db": r.get("quieting_db"),
@@ -528,6 +551,7 @@ class StationHealth:
             uptime_s=round(snow - started) if isinstance(started, (int, float)) else None,
             boot=hl["boot"] + hub.skew if isinstance(hl.get("boot"), (int, float)) else None)
         out["hints"] = [{"channel": c["label"], "text": c["hint"]} for c in chans if c["hint"]]
+        out["trunk"] = self._trunk_model(p25row, hl, snow) if p25row else None
         ad = hl.get("adsb") if isinstance(hl.get("adsb"), dict) else None
         if ad is not None:                       # our ADS-B receiver (#235), its times on the hub's clock
             ad = dict(ad)
@@ -540,17 +564,42 @@ class StationHealth:
         out["transcribe"] = self._transcribe()
         return out
 
-    def _quiet_limit(self, label: str, heard: float, snow: float) -> tuple[float | None, float | None]:
-        """(how long a main channel may be silent before quiet:<label> alerts, the usual gap that is from): the
-        largest 90th-percentile gap of the parts of the day the silence spans, times QUIET_FACTOR, at least
-        QUIET_MIN_S. (None, None) while fewer than QUIET_GAPS_MIN gaps are learned."""
+    def _usual(self, label: str, heard: float, snow: float, gaps_min: int) -> float | None:
+        """The channel's usual gap for a silence from `heard` to `snow` (station time): the largest 90th-percentile
+        gap of the parts of the day it spans (the whole day's for a part with under QUIET_TOD_MIN). None while
+        fewer than gaps_min gaps are learned."""
         allday = self.gaps.get(label) or []
-        if len(allday) < QUIET_GAPS_MIN:
-            return None, None
+        if len(allday) < gaps_min:
+            return None
         base, tod = _p90(allday), self.tod.get(label) or {}
-        usual = max((_p90(tod.get(str(p)) or []) if len(tod.get(str(p)) or []) >= QUIET_TOD_MIN else base)
-                    for p in _parts(heard, max(heard, snow)))
-        return max(QUIET_FACTOR * usual, QUIET_MIN_S), usual
+        return max((_p90(tod.get(str(p)) or []) if len(tod.get(str(p)) or []) >= QUIET_TOD_MIN else base)
+                   for p in _parts(heard, max(heard, snow)))
+
+    def _trunk_window(self, t0: float, snow: float) -> tuple[float, float | None]:
+        """(how long the P25 system may go without a call on any talkgroup from t0, station time; the learned usual
+        gap that lengthened it, None while learning): the default for the parts of the day the silence spans (the
+        night's when it reaches 00-06), or QUIET_FACTOR times the learned usual gap when that is longer."""
+        floor = max(self.trunk_night_s if p == NIGHT_PART else self.trunk_day_s for p in _parts(t0, max(t0, snow)))
+        usual = self._usual(P25_JOB, t0, snow, QUIET_GAPS_MIN)
+        return (max(floor, QUIET_FACTOR * usual) if usual is not None else floor), usual
+
+    def _trunk_model(self, p25row: dict, hl: dict, snow: float) -> dict:
+        """The P25 system as a whole (#258): its last call on any talkgroup (the hub's clock), the control channel."""
+        skew = self.hub.skew or 0.0
+        row = p25row.get("last_heard") if isinstance(p25row.get("last_heard"), (int, float)) else None
+        last = max([x for x in (row, self._heard.get(P25_JOB)) if x], default=None)   # station time
+        rec = hl.get("recorder") if isinstance(hl.get("recorder"), dict) else {}
+        cc = rec.get("cc") if isinstance(rec.get("cc"), dict) else None
+        window, usual = self._trunk_window(last if last else snow, snow)
+        low = cc.get("low_since") if cc and isinstance(cc.get("low_since"), (int, float)) else None
+        return {"last_call": last + skew if last else None, "quiet_s": round(snow - last, 1) if last else None,
+                "window_s": window, "usual_s": usual, "gaps": len(self.gaps.get(P25_JOB) or []),
+                "up_since": self._trunk_up,
+                "cc": None if cc is None else {"rate": cc.get("rate"), "low_since": low + skew if low else None,
+                                               "low_s": round(snow - low, 1) if low else None,
+                                               "retunes": cc.get("retunes"),
+                                               "last_retune": cc["last_retune"] + skew
+                                               if isinstance(cc.get("last_retune"), (int, float)) else None}}
 
     def _transcribe(self) -> dict | None:
         """Amazon Transcribe's health on the hub (HubApp.aws_health()), None when it isn't set up here."""
@@ -684,17 +733,10 @@ class StationHealth:
                                            "text": f"trunk-recorder: {rec.get('state')}"
                                                    + (f" ({rec['detail']})" if rec.get("detail") else "")
                                                    + f": {P25_JOB} (P25) isn't being heard"})
+        trunk = self._trunk_alert(m, rec, now)
+        if trunk:
+            out["trunk"] = trunk
         for c in m["channels"]:
-            lim = c.get("alert_after_s")
-            if lim and c["state"] == "ok" and c["quiet_s"] is not None and c["quiet_s"] > lim:
-                heard_at = c["last_heard"] or (now - c["quiet_s"])
-                out[f"quiet:{c['label']}"] = {
-                    "severity": "warning", "title": f"{c['name']} silent",
-                    "text": f"nothing heard on {c['name']} since {_hhmm(heard_at)}; at this time of day it usually hears "
-                            f"something within {_dur(c['usual_now_s'] or 0)} (alert past {_dur(lim)}): check its dongle "
-                            "(two with one serial?), its antenna" + (" and trunk-recorder" if c["label"].startswith("tg:")
-                                                                     or c["label"] == P25_JOB else ""),
-                    "since": heard_at}
             if c["stuck"]:
                 out[f"stuck:{c['label']}"] = {
                     "severity": "warning", "title": f"{c['label']} stuck open",
@@ -720,6 +762,41 @@ class StationHealth:
                 a["who"] = self._who(k, m)
         return out, True
 
+    def _trunk_alert(self, m: dict, rec: dict | None, now: float) -> dict | None:
+        """"P25 trunk silent" (#258), or None: only while trunk-recorder runs (down or off is the recorder alert's,
+        or nothing), and judged from its last call on ANY talkgroup, never from one talkgroup's."""
+        tk = m.get("trunk")
+        if not (tk and rec and rec.get("expected") and rec.get("state") == "ok"):
+            self._trunk_up = None
+            return None
+        if self._trunk_up is None:
+            self._trunk_up = now
+        tail = "(trunk-recorder running): check the P25 dongle/antenna, control channel"
+        cc = tk.get("cc") or {}
+        if cc.get("low_since") and (cc.get("low_s") or 0) >= CC_LOST_S:
+            rate = cc.get("rate")
+            return {"severity": "critical", "title": "P25 trunk silent",
+                    "text": "control channel lost: trunk-recorder decodes "
+                            + (f"{rate:g} messages/s" if isinstance(rate, (int, float)) else "almost nothing")
+                            + f" from it since {_hhmm(cc['low_since'])}"
+                            + (f", {cc['retunes']} retunes" if cc.get("retunes") else "") + f" {tail}",
+                    "since": float(cc["low_since"])}
+        active = self.active.get("trunk")
+        start = tk["last_call"] or 0.0
+        if active is not None and not start:
+            start = float(active["since"])               # on before a hub restart: no call since
+        elif active is None:
+            start = max(start, self._trunk_up)           # a recorder just (back) up gets the window to hear a call
+        quiet = now - start
+        window, usual = self._trunk_window(start - (self.hub.skew or 0.0), self._station_now(now))
+        if quiet <= window:
+            return None
+        return {"severity": "critical", "title": "P25 trunk silent",
+                "text": f"no calls on any talkgroup since {_hhmm(start)} {tail} ("
+                        + (f"a call usually comes within {_dur(usual)} at this time of day; " if usual else "")
+                        + f"alert past {_dur(window)})",
+                "since": start}
+
     def _who(self, key: str, m: dict) -> dict:
         """Who / where an alert is about (sizeup/notify.py Who): the station, the dongle, the channel."""
         w: dict = {"station": m["station"]["name"] or m["station"]["id"] or "the station"}
@@ -737,7 +814,7 @@ class StationHealth:
             d = next((d for d in m["dongles"] if d["job"] == arg), None)
             if d:
                 w["dongle"] = f"SDR {d['name']}"
-        elif kind in ("stuck", "quiet"):
+        elif kind == "stuck":
             w["channel"] = next((c["name"] for c in m["channels"] if c["label"] == arg), arg)
         elif kind == "dup":
             x = next((x for x in m.get("duplicates") or [] if x["serial"] == arg), None)
@@ -752,6 +829,13 @@ class StationHealth:
             w["channel"] = "ADS-B"
         elif kind == "recorder":
             w["channel"] = P25_JOB
+        elif kind == "trunk":
+            w["channel"] = P25_JOB
+            d = next((d for d in m["dongles"] if d["job"] == P25_JOB), None)
+            if d:
+                w["dongle"] = f"SDR {d['name']}"
+            tk = m.get("trunk") or {}
+            w["detail"] = f"last call {_hhmm(tk['last_call'])}" if tk.get("last_call") else "no call heard yet"
         elif kind in ("update", "behind"):
             w["detail"] = f"station {short(m['build']['station'])}, hub {short(m['build']['hub'])}"
         elif kind == "outbox":
@@ -862,8 +946,10 @@ class StationHealth:
                                "down_min": self.down_s / 60, "outbox_min": self.outbox_s / 60,
                                "disk_pct": self.disk_pct, "repeat_min": self.repeat_s / 60,
                                "job_grace_s": JOB_GRACE_S,
-                               "quiet": {"channels": list(self.main), "factor": QUIET_FACTOR, "min_min": QUIET_MIN_S / 60,
-                                         "gaps_min": QUIET_GAPS_MIN}}}
+                               "trunk": {"day_min": self.trunk_day_s / 60, "night_min": self.trunk_night_s / 60,
+                                         "factor": QUIET_FACTOR, "gaps_min": QUIET_GAPS_MIN,
+                                         "cc_lost_min": CC_LOST_S / 60},
+                               "hint": {"factor": HINT_FACTOR, "min_min": HINT_MIN_S / 60}}}
 
     def status(self) -> dict:
         """GET /api/station/status: what the deploy check needs, nothing else (no names of people, no audio)."""
