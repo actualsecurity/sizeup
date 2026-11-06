@@ -187,7 +187,8 @@ class AircraftForwarder:
                 "held_by": row.get("held_by"), "state": dec.get("state") or ("off" if not row.get("serial") else ""),
                 "detail": dec.get("detail") or self.reading, "messages_per_s": dec.get("messages_per_s"),
                 "aircraft": dec.get("aircraft"), "last_message_at": dec.get("last_message_at"),
-                "gain": row.get("gain"), "bias_tee": row.get("bias_tee"), "source": row.get("source")}
+                "gain": row.get("gain"), "bias_tee": row.get("bias_tee"), "source": row.get("source"),
+                "cause": dec.get("cause") or "", "holder": dec.get("holder") or ""}
 
     # -- one turn -------------------------------------------------------------------------------------------------
 

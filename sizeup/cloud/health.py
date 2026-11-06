@@ -300,6 +300,10 @@ def adsb_health(app) -> dict | None:
             "messages_per_s": dec.get("messages_per_s"), "aircraft": dec.get("aircraft"),
             "with_pos": dec.get("with_pos"), "last_message_at": dec.get("last_message_at"), "restarts": dec.get("restarts"),
             "since": dec.get("since"), "gain": row.get("gain"), "bias_tee": row.get("bias_tee"),
+            # why it failed (#262), when the decoder says: a cause word, who holds the dongle, readsb's last lines
+            "cause": dec.get("cause") or "", "holder": str(dec.get("holder") or "")[:200],
+            "tail": [str(x)[:160] for x in (dec.get("tail") or [])][-3:] if isinstance(dec.get("tail"), list) else [],
+            "recovery": str(dec.get("recovery") or "")[:200],
             "forward": {k: fwd.get(k) for k in ("ok", "every_s", "posts", "bytes", "dropped_posts", "aircraft", "error",
                                                  "last_ok")} if fwd else None}
 
@@ -355,6 +359,7 @@ class StationHealth:
         self.tod: dict[str, dict[str, list[float]]] = {}   # label -> part of the day -> gaps that started in it
         self.main = tuple(getattr(cfg, "alerts_main_channels", MAIN_CHANNELS) or ())
         self._gaps_saved = 0.0
+        self._adsb_said: tuple | None = None         # (cause, holder) of the station's ADS-B decoder as last logged (#262)
         self._load()
 
     # -- persistence ---------------------------------------------------------------------------------------
@@ -770,6 +775,7 @@ class StationHealth:
         now = self.clock() if now is None else now
         with self._lock:
             m = self.model(now)
+            self._log_adsb(m.get("adsb"))
             conds, judged = self.conditions(m, now)
             changes: list[tuple[str, dict]] = []
             for key, c in conds.items():
@@ -806,6 +812,26 @@ class StationHealth:
                 self._save()
             self._save_gaps(now)
         return changes
+
+    def _log_adsb(self, ad) -> None:
+        """The station's ADS-B decoder: why it is down, logged once per change of cause (#262), and when it is back.
+        A station from before #262 sends no cause: nothing is logged for it."""
+        if not isinstance(ad, dict):
+            return
+        cause = str(ad.get("cause") or "") if ad.get("state") not in ("ok", "off", "starting") else ""
+        key = (cause, str(ad.get("holder") or "")) if cause else None
+        if key == self._adsb_said:
+            return
+        if key is not None:
+            tail = " | ".join(str(x) for x in (ad.get("tail") or []) if x)
+            self.log(f"health: ADS-B decoder on {ad.get('name') or ad.get('sdr') or '?'} {ad.get('state')}: {cause}"
+                     + (f", held by {ad['holder']}" if ad.get("holder") else "")
+                     + (f" ({ad['recovery']})" if ad.get("recovery") else "")
+                     + (f" · readsb: {tail}" if tail else ""))
+        elif self._adsb_said is not None and ad.get("state") == "ok":
+            self.log(f"health: ADS-B decoder on {ad.get('name') or ad.get('sdr') or '?'} back: decoding")
+        if key is not None or ad.get("state") == "ok":
+            self._adsb_said = key
 
     def _push(self, a: dict, now: float, recovered: bool = False) -> None:
         n = self.notifier

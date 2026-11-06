@@ -2227,6 +2227,7 @@ class App:
                 return f"couldn't keep the choice: {e}"
             self.adsb_sdr = serial
             if serial:
+                self._guard_adsb()                    # whatever ran there, assigned or not (#262)
                 self.assign.pop(serial, None)
                 self.set_by.pop(serial, None)
                 self._listed = [sd for sd in self._listed if sd != serial]
@@ -2260,7 +2261,9 @@ class App:
                 "installed": Path(adsbd.READSB).exists() or bool(st),
                 "gain": self.cfg.aircraft_gain, "bias_tee": self.cfg.aircraft_bias_tee,
                 "decoder": {k: st.get(k) for k in ("state", "detail", "since", "messages_per_s", "aircraft", "with_pos",
-                                                    "last_message_at", "restarts", "gain", "bias_tee")} if st else None,
+                                                    "last_message_at", "restarts", "gain", "bias_tee",
+                                                    # why it failed (#262): an older decoder has none of these
+                                                    "cause", "holder", "tail", "recovery")} if st else None,
                 "forward": fwd.stats() if fwd is not None else None}
 
     def _save_modes(self) -> None:
@@ -2390,6 +2393,8 @@ class App:
         """Look at what's plugged in: every dongle not there last time is an arrival (_arrive).
         Unplugging moves nothing. Right after startup, Off dongles wait (SDR_SETTLE_S) for the ones
         that had jobs, so the order USB attaches them in doesn't move jobs around. The jobs given."""
+        with self._mode_lock:
+            self._guard_adsb()
         here = self._plugged()
         again = [s for s in self._watch_ambiguous(sdr_lookup.devices(self.cfg.rtl_fm)) if s in here and s in self._seen]
         new = [s for s in here if s not in self._seen] + again
@@ -2481,6 +2486,9 @@ class App:
         if mode == OFF_MODE:
             log(f"SDR {self.sdr_name(serial)} released: nothing of ours on it (switch it back on in the web app)")
             return True
+        if self.adsb_sdr and serial == self.adsb_sdr:     # reserved for the ADS-B decoder (#235, #262): never a job
+            log(f"SDR {self.sdr_name(serial)} is reserved for the ADS-B receiver: {mode} not started on it")
+            return False
         if not claims.claim(serial, mode):   # another app (shortfinal) holds it: leave it alone
             c = claims.other(serial) or {}
             log(f"SDR {self.sdr_name(serial)}: in use by {c.get('app', 'another app')} ({c.get('mode', '?')}), not starting {mode}")
@@ -2491,8 +2499,30 @@ class App:
         else:
             r = self._receiver(mode)
             if r is not None:
+                if not r._stop.is_set():
+                    # Still running (on another dongle): stop it before it is replaced, or its rtl_fm runs on there
+                    # with nothing left that can reach it (#262: FG1's old rtl_fm kept the dongle reserved for ADS-B).
+                    # (One never started, from before any dongle had the job: stopping it does nothing.)
+                    if (was := getattr(r.device, "serial", None)) and was != serial:
+                        log(f"sdr: {mode}'s program on SDR {self.sdr_name(was)} stopped: {mode} moves to SDR "
+                            f"{self.sdr_name(serial)}")
+                    r.stop()
                 self._fresh_receiver(r, serial).start()
         return True
+
+    def _guard_adsb(self) -> None:
+        """A reserved dongle never runs a job (#262): any of our programs found on the ADS-B dongle is stopped."""
+        sd = self.adsb_sdr
+        if not sd:
+            return
+        for m in [m for m in self.modes if m != OFF_MODE]:
+            try:
+                on = self._program_on(m)
+            except Exception:  # noqa: BLE001 - a guard, never in the way
+                continue
+            if on == sd:
+                log(f"sdr: {m} was running on SDR {self.sdr_name(sd)}, the ADS-B receiver's dongle: stopped")
+                self._stop_mode(m, f"SDR {self.sdr_name(sd)} is reserved for ADS-B", sd)
 
     def _stop_mode(self, mode: str, why: str, serial: str) -> None:
         """Stop `mode`'s program if it runs on this dongle (not when it runs on another one: two dongles
