@@ -165,6 +165,7 @@
   .adsb-state { color: var(--text-2); }
   .adsb-state.ok { color: var(--ok-text); }
   .adsb-state.bad { color: var(--warn); }
+  .adsb-tail { font-family: var(--mono, monospace); overflow-wrap: anywhere; }   /* readsb's last lines (#262) */
   .adsb-use { margin-inline-start: var(--s-2); }
   .tg-filter { inline-size: 22rem; max-inline-size: 100%; }
   .tg-error { margin-block-start: var(--s-2); }
