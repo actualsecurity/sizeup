@@ -1,0 +1,24 @@
+# The kernel's usbfs buffer limit to 0 (no limit) at boot (GitHub #269), before the dongles' services start. All
+# usbfs users share usbfs_memory_mb (16 MB by default): readsb, every rtl_fm and trunk-recorder on one host, and with
+# about six dongles it runs out (librtlsdr: "Failed to submit transfer ... echo 0 >
+# /sys/module/usbcore/parameters/usbfs_memory_mb"; readsb: "rtlsdr_read_async returned unexpectedly"). usbcore is
+# built in on WSL2, so modprobe.d can't set it there: this does, every boot. sizeup-adsb's ExecStartPre does it again.
+# A missing or read-only file (no usbcore, a container) is said in the journal and ignored: it always succeeds.
+# Installed by install-linux.sh; edit there, not here.
+[Unit]
+Description=sizeup station: no usbfs buffer limit for the RTL-SDRs (usbfs_memory_mb = 0)
+Documentation=file:///opt/sizeup/current/deploy/station/README.md
+After=systemd-modules-load.service systemd-udevd.service
+Before=sizeup-station.service sizeup-adsb.service sizeup-trunk-recorder.service
+ConditionPathExists=/usr/local/lib/sizeup/adsbd.py
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=-/usr/bin/python3 -I /usr/local/lib/sizeup/adsbd.py usbfs
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sizeup-usbfs
+
+[Install]
+WantedBy=multi-user.target

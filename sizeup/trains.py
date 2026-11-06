@@ -1295,7 +1295,7 @@ class Trains:
         elif code == 429:
             wait, why = RATE_LIMITED_S, f"MTA rate limit ({why})"
         else:
-            wait = min(backoff[1], backoff[0] * 2 ** (st["fails"] - 1))
+            wait = min(backoff[1], backoff[0] * 2 ** min(st["fails"] - 1, 30))
         with self._fresh:
             st.update(error=why, next=now + wait)
             self._fresh.notify_all()

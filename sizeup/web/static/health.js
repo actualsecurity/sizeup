@@ -151,6 +151,9 @@ const StationHealth = (() => {
         ["Aircraft", ad.aircraft !== null && ad.aircraft !== undefined ? `${ad.aircraft} (${ad.with_pos ?? 0} with a position)` : ""],
         ["Last message", ad.last_message_at ? `${when(ad.last_message_at)} (${longDur(serverNow() - ad.last_message_at)} ago)` : "none yet"],
         ["Gain, bias-tee", `${ad.gain || "auto"}, bias-tee ${ad.bias_tee ? "ON" : "off"}`],
+        ["USB memory", ad.usbfs_mb === null || ad.usbfs_mb === undefined ? "" : (ad.usbfs_mb === 0 ? "usbfs_memory_mb 0 (no limit)"
+          : `usbfs_memory_mb ${ad.usbfs_mb} MB (shared by every dongle: 0 is wanted)`) + (ad.buffer_kib ? `; readsb ${ad.buffer_kib} KiB transfers` : ""),
+          ad.usbfs_mb ? "hl-bad" : ""],
         ["To the hub", fw.posts !== undefined ? `${fw.ok ? "ok" : "not reaching it"}${fw.error ? ` (${fw.error})` : ""}, every ${fw.every_s} s, `
           + `${fw.posts} posts, ${((fw.bytes || 0) / 1e6).toFixed(1)} MB` : "", fw.ok === false ? "hl-bad" : ""],
         ["On the hub", hb.last ? `${hb.aircraft} aircraft, last ${longDur(hb.age_s)} ago, ${hb.bytes_per_s} B/s` : "nothing received yet"],

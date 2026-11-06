@@ -1641,7 +1641,7 @@ class Provider:
         elif code == 429:
             wait, why = RATE_LIMITED_S, f"{self.short} rate limit ({why})"
         else:
-            wait = max(self.floors[feed], min(BACKOFF_S[1], BACKOFF_S[0] * 2 ** (st["fails"] - 1)))
+            wait = max(self.floors[feed], min(BACKOFF_S[1], BACKOFF_S[0] * 2 ** min(st["fails"] - 1, 30)))
         changed = st["error"] != why
         for f in self._shared(feed):
             self.status[f].update(error=why, next=now + wait)

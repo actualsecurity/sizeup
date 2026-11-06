@@ -595,7 +595,7 @@ class Weather:
             wait, why = REFUSED_S, f"refused ({why})"
         else:
             wait = max(min(EVERY_S.get(feed, RADAR_FRAMES_S), BACKOFF_S[0]),
-                       min(BACKOFF_S[1], BACKOFF_S[0] * 2 ** (st["fails"] - 1)))
+                       min(BACKOFF_S[1], BACKOFF_S[0] * 2 ** min(st["fails"] - 1, 30)))
         changed = st["error"] != why
         st.update(error=why, next=now + wait)
         if changed:

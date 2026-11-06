@@ -1174,7 +1174,7 @@ class RoadProjects:
         elif code == 429:
             wait, why = RATE_LIMITED_S, f"{f.short} rate limit ({why})"
         else:
-            wait = min(BACKOFF_S[1], max(f.every_s / 4, BACKOFF_S[0]) * 2 ** (st["fails"] - 1))
+            wait = min(BACKOFF_S[1], max(f.every_s / 4, BACKOFF_S[0]) * 2 ** min(st["fails"] - 1, 30))
         st.update(error=why, next=now + wait)
         self.log(f"roadwork: {f.short}: {why}; next try in {wait:.0f} s")
         return False

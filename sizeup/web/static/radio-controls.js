@@ -290,6 +290,9 @@ window.RadioControls = (() => {
     // sends neither (nothing added then)
     if (d.state !== "ok" && d.holder && !(d.detail || "").includes(d.holder)) parts.push(`held by ${d.holder}`);
     if (a.held_by && !(a.held_by.app === "sizeup" && a.held_by.mode === "adsb") && !d.holder) parts.push(`held by ${a.held_by.app} (${a.held_by.mode})`);
+    // the kernel's usbfs limit (#269): 0 = none; any other number is shared by every dongle and can starve readsb
+    if (typeof d.usbfs_mb === "number") parts.push(d.usbfs_mb === 0 ? "usbfs: no limit" : `usbfs_memory_mb ${d.usbfs_mb} (0 wanted)`);
+    if (d.buffer_kib) parts.push(`readsb USB transfers ${d.buffer_kib} KiB`);
     if (f) parts.push(f.ok ? `to the hub every ${f.every_s} s` : f.error ? `not reaching the hub (${f.error})` : "not sent to the hub yet");
     return parts.join(" · ");
   }

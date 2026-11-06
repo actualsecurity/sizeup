@@ -944,7 +944,7 @@ class Gis:
     def _failed(self, key: str, now: float, why: str) -> bool:
         st = self.status[key]
         st["fails"] += 1
-        wait = min(BACKOFF_S[1], BACKOFF_S[0] * 2 ** (st["fails"] - 1))
+        wait = min(BACKOFF_S[1], BACKOFF_S[0] * 2 ** min(st["fails"] - 1, 30))
         with self._lock:
             changed = st["error"] != why
             st.update(error=why[:300], next=now + wait)

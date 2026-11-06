@@ -324,6 +324,9 @@ def adsb_health(app) -> dict | None:
             "cause": dec.get("cause") or "", "holder": str(dec.get("holder") or "")[:200],
             "tail": [str(x)[:160] for x in (dec.get("tail") or [])][-3:] if isinstance(dec.get("tail"), list) else [],
             "recovery": str(dec.get("recovery") or "")[:200],
+            # the kernel's usbfs limit, MB (0: none; None: not reported) and readsb's USB transfer size when cut (#269)
+            "usbfs_mb": dec.get("usbfs_mb") if isinstance(dec.get("usbfs_mb"), int) else None,
+            "buffer_kib": dec.get("buffer_kib") if isinstance(dec.get("buffer_kib"), int) else None,
             "forward": {k: fwd.get(k) for k in ("ok", "every_s", "posts", "bytes", "dropped_posts", "aircraft", "error",
                                                  "last_ok")} if fwd else None}
 
