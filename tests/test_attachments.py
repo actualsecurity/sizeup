@@ -402,3 +402,42 @@ def test_the_server_streams_a_download_and_closes_it(tmp_path):
         assert closed == [aid]
     finally:
         srv.httpd.shutdown()
+
+
+class Later:
+    """The upload pool, run when the test says (something happens to the recording meanwhile)."""
+
+    def __init__(self):
+        self.jobs = []
+
+    def submit(self, fn, *a):
+        self.jobs.append((fn, a))
+
+    def run(self):
+        for fn, a in self.jobs:
+            fn(*a)
+        self.jobs = []
+
+
+def test_a_merged_cameras_old_id_and_a_folder_moved_mid_upload(tmp_path):
+    """#324 (camera dedup): a clip asked for under an id merged away is the kept camera's; the camera is held while its
+    clip uploads, and a segment whose folder moved meanwhile (a merge's follow()) is found where it is now."""
+    api, c, a, d, iid, clock = camera_setup(tmp_path)
+    st = d.status(CAM)
+    moved = {"to": CAM}
+    d.roads.alias = lambda cid: moved["to"] if cid in ("old-id", CAM) else cid
+    a._pool = Later()
+    out = call(api, "/api/cad/cameras/old-id/dvr/clip", {"from": st["from"], "to": st["to"], "incident_id": iid}, JULIAN)[1]
+    aid = out["attachment"]["id"]
+    assert out["attachment"]["source"] == CAM and d.holding == {CAM: 1}
+    want = b"".join(Path(s["path"]).read_bytes() for s in d.segments(CAM, st["from"], st["to"]))
+    # the camera merged into another id: its folder renamed, its index moved (as #324's follow() does)
+    (tmp_path / "dvr" / CAM).rename(tmp_path / "dvr" / "NEW1")
+    with d._lock:
+        d._cams["NEW1"] = d._cams.pop(CAM)
+    moved["to"] = "NEW1"
+    a._pool.run()
+    row = a.row(aid)
+    assert row["status"] == "stored", row["error"]
+    part = next(v for k, v in a.fake.objects.items() if k.endswith("part-0000.ts"))
+    assert part[0] == want and d.holding == {}

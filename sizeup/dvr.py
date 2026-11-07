@@ -186,6 +186,7 @@ class Dvr:
         self._pool: ThreadPoolExecutor | None = None
         self._busy: set[str] = set()              # cameras with a round under way (pool mode)
         self._next: dict[str, float] = {}         # cid -> when its next round is due
+        self.holding: dict[str, int] = {}         # cid -> clips of it being saved (never renamed meanwhile)
         if not self.shared:
             self._scan()                          # (shared: in the background, before the first round: start())
             self._scanned.set()
@@ -773,6 +774,39 @@ class Dvr:
             prev = t0 + dur
         out.append("#EXT-X-ENDLIST")
         return ("\n".join(out) + "\n").encode()
+
+    def alias(self, cid: str) -> str:
+        """The id the camera is listed under now (Roads.alias when the roads have it, #320/#324), else cid."""
+        fn = getattr(self.roads, "alias", None)
+        try:
+            return fn(cid) if callable(fn) else cid
+        except Exception:  # noqa: BLE001 - an id we can't map stays as it is
+            return cid
+
+    def hold(self, cid: str, on: bool) -> None:
+        """A clip of this camera is being saved (sizeup/attachments.py): its folder must not be renamed meanwhile
+        (a camera merge's follow(), #324, skips the cameras in self.holding)."""
+        with self._lock:
+            if on:
+                self.holding[cid] = self.holding.get(cid, 0) + 1
+            elif self.holding.get(cid, 0) > 1:
+                self.holding[cid] -= 1
+            else:
+                self.holding.pop(cid, None)
+
+    def read_segment(self, cid: str, key: int, fallback: Path | None = None) -> bytes:
+        """A recorded segment's bytes, its file found when it is read (the camera's id may have moved meanwhile:
+        alias), else fallback. OSError when it is gone."""
+        for c in dict.fromkeys((self.alias(cid), cid)):
+            f = self._file(c, key)
+            if f is not None:
+                try:
+                    return f.read_bytes()
+                except FileNotFoundError:
+                    continue
+        if fallback is None:
+            raise FileNotFoundError(f"{cid}/{key}")
+        return Path(fallback).read_bytes()
 
     def segments(self, cid: str, t_from: float, t_to: float) -> list[dict]:
         """The recorded segments that overlap [t_from, t_to], oldest first: {key, t0, dur, bytes, path} (a saved clip,

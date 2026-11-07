@@ -361,6 +361,7 @@ class Attachments:
         dvr = self.dvr()
         if dvr is None:
             raise AttachError("no camera recording here")
+        cid = dvr.alias(cid)                      # an id merged away (#320/#324): the camera kept for it
         inc = self._incident(body.get("incident_id"))
         try:
             t0, t1 = float(body["from"]), float(body["to"])
@@ -391,6 +392,7 @@ class Attachments:
                    f"camera {cid} {iso(start)} to {iso(end)} ({len(segs)} segments)" + (f"; note: {note}" if note else ""))
         out = self.public(self.row(aid))
         job = (aid, inc, cid, cam, segs, note, operator, now)
+        dvr.hold(cid, True)                       # its folder stays put until the upload is over
         if wait:
             self._upload_camera(*job)
             return self.public(self.row(aid))
@@ -415,9 +417,10 @@ class Attachments:
                 objects.append({"name": name, "key": key, "bytes": len(part), "sha256": sha256(part)})
                 part, pn = bytearray(), pn + 1
 
+            dvr = self.dvr()
             for s in segs:
                 try:
-                    b = Path(s["path"]).read_bytes()
+                    b = dvr.read_segment(cid, s["key"], s["path"]) if dvr is not None else Path(s["path"]).read_bytes()
                 except OSError as e:
                     raise AttachError(f"segment {s['key']} gone before it was copied ({type(e).__name__})") from None
                 if part and len(part) + len(b) > PART_BYTES:
@@ -443,6 +446,10 @@ class Attachments:
             why = f"{type(e).__name__}: {e}"[:300]
             self._set(aid, status="failed", error=why)
             self.audit("failed", aid, inc["id"], operator, why)
+        finally:
+            dvr = self.dvr()
+            if dvr is not None:
+                dvr.hold(cid, False)
 
     def _put_manifest(self, iid: int, aid: str, manifest: dict) -> dict:
         body = (json.dumps(manifest, indent=1, sort_keys=True) + "\n").encode()
