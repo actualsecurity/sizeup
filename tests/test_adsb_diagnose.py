@@ -34,6 +34,11 @@ BUSY = ["rtlsdr: found 2 device(s):", "  0:  Realtek, RTL2838UHIDIR, SN: fg13", 
         "usb_claim_interface error -6",
         "FATAL: rtlsdr: error opening the RTLSDR device: Device or resource busy"]
 
+# readsb's watchdog (sdr_rtlsdr.c): its words, with made-up lines around them (#315)
+WEDGED = ["rtlsdr: using device #1: Generic RTL2832U OEM (Realtek, RTL2838UHIDIR, SN adsb)",
+          "<3>SDR wedged, exiting! (check power supply / avoid using an USB extension / SDR might be defective)",
+          "<3>Abnormal exit."]
+
 
 # ---- the classification table ----------------------------------------------------------------------------------------
 
@@ -54,6 +59,7 @@ BUSY = ["rtlsdr: found 2 device(s):", "  0:  Realtek, RTL2838UHIDIR, SN: fg13", 
     (["/opt/sizeup/readsb/bin/readsb: error while loading shared libraries: librtlsdr.so.0: cannot open shared object "
       "file: No such file or directory"], "library"),
     (["FATAL: rtlsdr_read_async returned unexpectedly, probably lost the USB device, bailing out"], "lost"),
+    (WEDGED, "wedged"),
     (["Fri Nov  6 19:01:02 2026 EST  readsb starting up.", "something odd"], "unknown"),
     ([], "unknown"),
 ])
@@ -600,3 +606,147 @@ def test_the_station_sets_usbfs_to_0_at_install_boot_and_before_readsb():
         assert want in sh, want
     cli = (st / "sizeup-station").read_text()
     assert "usbfs_memory_mb" in cli and "sizeup-usbfs" in cli
+
+
+# ---- a wedged dongle (#315): power / USB, and a longer wait when it keeps happening -----------------------------------
+
+def test_wedged_wins_over_the_lost_line_that_may_follow_it():
+    assert adsbd.classify(WEDGED + ["FATAL: rtlsdr_read_async returned unexpectedly, probably lost the USB device"])[0] \
+        == "wedged"
+    assert adsbd.classify(USBFS_LINES + WEDGED)[0] == "usbfs"           # the usbfs limit is the cause, the wedge its sign
+
+
+def test_a_wedge_names_power_usb_and_the_dongle_and_the_bias_tee_only_when_it_is_on(tmp_path):
+    s = Station(tmp_path)
+    s.lines = WEDGED
+    st = s.run_and_exit(s.decoder())
+    assert st["state"] == "down" and st["cause"] == "wedged" and st["code"] == 1 and s.killed == []
+    assert st["detail"].startswith("SDR wedged (stalled): check power; avoid USB extensions/unpowered hubs; "
+                                   "try another dongle · readsb: <3>SDR wedged, exiting!")
+    assert "bias-tee" not in st["detail"] and "wedges in 1 h" not in st["detail"]
+    (tmp_path / "on").mkdir()
+    s2 = Station(tmp_path / "on")
+    s2.lines = WEDGED
+    d = s2.decoder()
+    conf = Path(d.config)
+    conf.write_text(conf.read_text().replace('sdr = "adsb"', 'sdr = "adsb"\nbias_tee = true'))
+    st = s2.run_and_exit(d)
+    assert st["detail"].startswith("SDR wedged (stalled): check power (bias-tee on: the LNA draws from this port); ")
+
+
+def wedge(s, d, at):
+    d.next_start = 0
+    assert d.step(at)["state"] == "starting"
+    s.started[-1].code = 1
+    return d.step(at + 17)
+
+
+def test_repeated_wedges_back_off_5_then_15_minutes_and_say_so(tmp_path):
+    s = Station(tmp_path)
+    s.lines = WEDGED
+    logs: list[str] = []
+    d = s.decoder(logs)
+    for i, at in enumerate((1000.0, 1100.0)):
+        st = wedge(s, d, at)
+        assert d.next_start - (at + 17) <= adsbd.BACKOFF_S[1] and "wedges in 1 h" not in st["detail"]
+    st = wedge(s, d, 1200.0)
+    assert d.next_start == 1217.0 + 300 and "; 3 wedges in 1 h: next try in 5 min · readsb:" in st["detail"]
+    assert any("3 wedges in the last hour: waiting 5 min" in m for m in logs)
+    st = d.step(1300.0)                                 # still waiting: says how long
+    assert st["state"] == "down" and st["detail"].endswith("; retry in 217 s") and len(s.started) == 3
+    st = wedge(s, d, 1600.0)
+    assert d.next_start == 1617.0 + 900 and "4 wedges in 1 h: next try in 15 min" in st["detail"]
+    h = H.adsb_health(SimpleNamespace(adsb_sdr="adsb", adsb_row=lambda: {"serial": "adsb", "installed": True,
+                                                                          "decoder": st}))
+    assert h["cause"] == "wedged" and "15 min" in h["detail"] and len(h["detail"]) <= 200
+
+
+def test_wedges_older_than_an_hour_drop_out_of_the_count(tmp_path):
+    s = Station(tmp_path)
+    s.lines = WEDGED
+    d = s.decoder()
+    for at in (1000.0, 1100.0):
+        wedge(s, d, at)
+    st = wedge(s, d, 1000.0 + adsbd.WEDGE_WINDOW_S + 50)
+    assert len(d.wedges) == 2 and "wedges in 1 h" not in st["detail"]
+
+
+def test_ten_minutes_decoding_forgets_the_wedges_uptime_alone_does_not(tmp_path):
+    from tests.test_adsb_receiver import readsb_output
+    s = Station(tmp_path)
+    s.lines = WEDGED
+    logs: list[str] = []
+    d = s.decoder(logs)
+    for at in (1000.0, 1100.0):
+        wedge(s, d, at)
+    d.next_start = 0
+    t0 = 2000.0
+    assert d.step(t0)["state"] == "starting"
+    for t in range(int(t0) + 30, int(t0) + 30 + 200, 10):    # messages until +60, then quiet: no signal, not healthy
+        readsb_output(tmp_path, float(t), 100 if t > t0 + 60 else t, samples=float(t))
+        d.step(float(t))
+    assert d.status["state"] == "no_signal" and len(d.wedges) == 2
+    t1 = t0 + 300.0
+    for k, t in enumerate(range(int(t1), int(t1 + adsbd.WEDGE_RESET_S) + 1, 10)):   # decoding again for 10 min
+        readsb_output(tmp_path, float(t), 1000 + k, samples=float(t))
+        assert d.step(float(t))["state"] == "ok"
+        assert len(d.wedges) == (2 if t < t1 + adsbd.WEDGE_RESET_S else 0)
+    assert any("decoding for 10 min: wedge count reset" in m for m in logs)
+    s.started[-1].code = 1                              # wedged again: counted from 1, the usual short wait
+    st = d.step(4000.0)
+    assert st["cause"] == "wedged" and d.wedges == [4000.0] and d.next_start - 4000.0 <= adsbd.BACKOFF_S[1]
+
+
+def test_changing_the_bias_tee_mid_wait_starts_readsb_at_once(tmp_path):
+    s = Station(tmp_path)
+    s.lines = WEDGED
+    d = s.decoder()
+    for at in (1000.0, 1100.0, 1200.0):
+        wedge(s, d, at)
+    assert d.next_start == 1517.0
+    assert d.step(1230.0)["state"] == "down" and len(s.started) == 3          # waiting
+    conf = Path(d.config)
+    conf.write_text(conf.read_text().replace('sdr = "adsb"', 'sdr = "adsb"\nbias_tee = true'))
+    st = d.step(1232.0)
+    assert st["state"] == "starting" and len(s.started) == 4 and "--enable-biastee" in s.started[-1].argv
+    assert d.wedges == [] and d.fails == 0
+
+
+def test_a_clock_jump_back_never_stretches_the_wait(tmp_path):
+    s = Station(tmp_path)
+    s.lines = WEDGED
+    d = s.decoder()
+    for at in (1_000_000.0, 1_000_100.0, 1_000_200.0):
+        wedge(s, d, at)
+    st = d.step(1000.0)                                  # the clock went back ~11 days: at most 15 min, not 11 days
+    assert d.next_start <= 1000.0 + adsbd.WEDGE_BACKOFF_S[1] and st["detail"].endswith("; retry in 900 s")
+    assert d.step(1000.0 + adsbd.WEDGE_BACKOFF_S[1])["state"] == "starting"
+    s.started[-1].code = 1
+    d.step(1000.0 + adsbd.WEDGE_BACKOFF_S[1] + 17)
+    assert len(d.wedges) == 1                            # the ones "in the future" are forgotten
+
+
+def test_a_wedged_dongle_gone_from_the_list_reads_not_found(tmp_path):
+    s = Station(tmp_path)
+    s.lines = WEDGED
+    d = s.decoder()
+    assert d.step(1000.0)["state"] == "starting"
+    s.found = [(0, "fg13")]
+    s.started[-1].code = 1
+    st = d.step(1002.0)
+    assert st["cause"] == "not_found" and "serial adsb isn't in the dongle list" in st["detail"]
+
+
+def test_a_wedge_reaches_the_hub_alert():
+    from tests.test_health import Rig, station_status
+    detail = "SDR wedged (stalled): check power; avoid USB extensions/unpowered hubs; try another dongle"
+    h = H.adsb_health(SimpleNamespace(adsb_sdr="adsb", adsb_row=lambda: {"serial": "adsb", "name": "LNA", "installed": True,
+                                                                          "decoder": {"state": "down", "detail": detail,
+                                                                                      "cause": "wedged"}}))
+    r = Rig()
+    st = station_status()
+    st["health"]["adsb"] = h
+    r.at(0, status=st)
+    r.at(120, status=st)
+    (a,) = [x for x in r.h.alerts() if x["key"] == "adsb"]
+    assert "SDR wedged (stalled): check power" in a["text"]
