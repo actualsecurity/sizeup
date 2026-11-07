@@ -53,7 +53,7 @@ from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from typing import Callable, Iterable, Sequence
 
-from sizeup import atc, atc_scope
+from sizeup import atc, atc_hours, atc_scope
 from sizeup.atc_normalize import normalize
 from sizeup.atc_snap import snap
 from sizeup.radio.am import MARGINAL_DB     # a transcript from a carrier under this is flagged weak (#257)
@@ -905,7 +905,9 @@ class AtcTalkers:
                     ids.append(x.id)
                     if x.written and now - x.written <= TALK_HOLD_S and now - x.end <= TALK_HOLD_S + 60:
                         until = max(until, x.written + TALK_HOLD_S)
-        return {"lat": site[0], "lon": site[1], "until": round(until, 1), "tx": ids[-MAP_TX_MAX * 3:]}
+        # #275: open or closed (the Chart Supplement's hours, sizeup/atc_hours.py): closed, its mark says CTAF
+        return {"lat": site[0], "lon": site[1], "until": round(until, 1), "tx": ids[-MAP_TX_MAX * 3:],
+                **atc_hours.tower(now)}
 
     def state(self) -> dict:
         return {"channels": sorted(self.channels), "identify": self.identify, "map": self.on_map,

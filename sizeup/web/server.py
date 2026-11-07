@@ -29,6 +29,7 @@ GET  /cad                      the PCFD dispatch console (static/cad.html); its 
 GET  /comms                    -> /cad#radio?<the same query> (the old communications page)
 Caching (#137): /static/... named by version from the pages (?v=, kept a year), else revalidated (ETag, 304);
 the layers' data (airport, GIS catalog and layers, roads) ETag + max-age, must-revalidate; text gzipped.
+Timing (#284): every answer says how long it took (Server-Timing: app;dur=<ms>, gzip included); the access log too.
 GET  /api/cad/roads, /api/cad/cameras, /api/cad/cameras/<id>/image
                                the map's highway layers and camera snapshots, proxied (sizeup/roads.py, #73)
 GET  /api/cad/gis, /api/cad/gis/<key>[?bbox=]
@@ -335,6 +336,7 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                  access=None, access_log: Callable[[str], None] | None = None, station_mode=None,
                  role: str = "", roads=None, gis=None, trains=None, weather=None, station_health=None, stream_gzip: bool = True,
                  aircraft=None, roadwork=None, set_adsb: Callable[[str], str | None] | None = None,
+                 airband_ab: Callable[..., str | None] | None = None,
                  gate: Gate | None = None, health_fn: Callable[[], dict] | None = None):
     """cad: a CadApi (sizeup/cad/api.py) and cad_b its own broadcaster (the console's state is
     small and separate from the monitor's, so neither page carries the other's). station: the hub's
@@ -370,6 +372,16 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
         protocol_version = "HTTP/1.1"
 
         who = None                       # the verified Access identity of the current request (access set)
+        t0 = 0.0                         # when the request was read (perf_counter): Server-Timing and the log (#284)
+
+        def parse_request(self) -> bool:
+            """Every request, whatever its method and however many on one connection: its clock starts once its
+            first line is in (not while a kept-alive connection sat idle)."""
+            self.t0 = time.perf_counter()
+            return super().parse_request()
+
+        def _ms(self) -> float:
+            return (time.perf_counter() - self.t0) * 1000 if self.t0 else 0.0
 
         def log_message(self, *a) -> None:
             pass
@@ -388,7 +400,7 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 return
             h = self.headers
             who = getattr(self.who, "email", None) or ("token" if h.get("Cf-Access-Jwt-Assertion") else "no-token")
-            access_log(f"http {self.command} {path} {code} ip={h.get('Cf-Connecting-Ip', '-')} {who} "
+            access_log(f"http {self.command} {path} {code} {self._ms():.0f}ms ip={h.get('Cf-Connecting-Ip', '-')} {who} "
                        f"ray={h.get('Cf-Ray', '-')} ua={(h.get('User-Agent') or '-')[:90]}")
 
         def _admit(self, path: str) -> bool:
@@ -432,6 +444,7 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 if accepts_gzip(self.headers):
                     body = gz if gz is not None else gzip.compress(body, 5)
                     h["Content-Encoding"] = "gzip"
+            h.setdefault("Server-Timing", f"app;dur={self._ms():.1f}")     # the time to the answer, gzip included (#284)
             self.send_response(code)
             if code != 304:
                 self.send_header("Content-Type", ctype)
@@ -645,6 +658,18 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                     return self._send(400, json.dumps({"error": err}).encode(), "application/json")
                 self._did(path, body)
                 return self._send(200, b'{"ok":true}', "application/json")
+            if path == "/api/airband-ab" and airband_ab is not None:
+                # #275: an on-air A/B of an airband dongle, rtl_fm against the channelizer (tools/airband_ab.py)
+                try:
+                    n = int(self.headers.get("Content-Length") or 0)
+                    body = json.loads(self.rfile.read(min(n, 1024)) or b"{}")
+                    err = airband_ab(str(body["channel"]), float(body.get("minutes", 60)), float(body.get("phase_s", 300)))
+                except (ValueError, KeyError, TypeError) as e:
+                    err = f"bad request: {e}"
+                if err:
+                    return self._send(400, json.dumps({"error": err}).encode(), "application/json")
+                self._did(path, body)
+                return self._send(200, b'{"ok":true}', "application/json")
             if path == "/api/adsb-receiver" and set_adsb is not None:
                 try:
                     n = int(self.headers.get("Content-Length") or 0)
@@ -752,7 +777,7 @@ class WebServer:
                  health: dict | None = None, access=None, access_log: Callable[[str], None] | None = None,
                  station_mode=None, role: str = "", roads=None, gis=None, trains=None, weather=None, station_health=None,
                  aircraft=None, roadwork=None, set_adsb=None, fence=None, health_fn: Callable[[], dict] | None = None,
-                 listener=None):
+                 airband_ab=None, listener=None):
         """listener: a socket already bound and listening on (host, port) to serve from (sizeup/app.py run_gated: the
         hub's port answered "updating" while the app was built; the connections that came meanwhile are served)."""
         self.access = access
@@ -767,7 +792,7 @@ class WebServer:
             set_talkgroup, set_talkgroup_group, retranscribe, cad, self.cad_broadcaster, station,
             json.dumps(health or {"ok": True}, separators=(",", ":")).encode(), access, access_log, station_mode, role,
             roads, gis, trains, weather, station_health, aircraft=aircraft, roadwork=roadwork, set_adsb=set_adsb,
-            gate=self.gate, health_fn=health_fn))
+            airband_ab=airband_ab, gate=self.gate, health_fn=health_fn))
         if listener is not None:
             self.httpd.socket.close()                 # (the one TCPServer made, never bound)
             self.httpd.socket = listener

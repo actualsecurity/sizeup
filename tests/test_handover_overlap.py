@@ -346,6 +346,7 @@ def _gated(tmp_path, monkeypatch, lease: bool = True):
     from sizeup import errwatch
     teed: list = []
     monkeypatch.setattr(errwatch, "install", teed.append)                     # (it would tee pytest's stdout for good)
+    monkeypatch.setattr(app_mod.sys, "setswitchinterval", lambda s: None)       # (#299's hub setting: not for pytest)
     cfg = hub_cfg(tmp_path, port=free_port(), gis_layers=())
     run = tmp_path / "run"
     run.mkdir()

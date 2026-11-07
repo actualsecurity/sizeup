@@ -148,7 +148,7 @@ def test_an_installed_station_gets_the_heard_tones_once(tmp_path, monkeypatch):
     assert said[2].startswith("hpn-atc: already has 'HPN Tower'")          # (#233: the template has it)
     assert said[3].startswith("adsb-receiver: already has")              # (#235: the template has it)
     assert said[4].startswith("approach-ground: already has")            # (#260: the template has them)
-    assert marks.read_text() == "fg2\ntones-47\nhpn-atc\nadsb-receiver\napproach-ground\nsouth-end\n"
+    assert marks.read_text() == "fg2\ntones-47\nhpn-atc\nadsb-receiver\napproach-ground\nsouth-end\nairband-sets\n"
     after = load(conf)
     assert {t.name: (t.a_hz, t.b_hz) for t in after.tones if t.source == "config"} == {"Port Chester FD": PC,
                                                                                       "Rye Brook FD": RB}

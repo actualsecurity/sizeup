@@ -244,12 +244,12 @@ def test_at_most_one_manual_refresh_per_source_per_gap_longer_for_heavy_ones():
     r.refresh("a")
     r.refresh("faa")
     r.t.t += 60
-    with pytest.raises(TooSoon, match=r"once every 2 min at most"):
+    with pytest.raises(TooSoon, match=r"max once per 2 min"):
         r.refresh("a")
     r.t.t += 61
     r.refresh("a")                                                     # 2 minutes on: again
     r.t.t += 1800
-    with pytest.raises(TooSoon, match=r"once every 1 h at most"):
+    with pytest.raises(TooSoon, match=r"max once per 1 h"):
         r.refresh("faa")
     r.t.t += 1800
     r.refresh("faa")
@@ -331,7 +331,7 @@ def test_road_projects_one_row_on_its_own_loop_refresh_reads_afresh_and_waits_ou
     feeds = {f.name: f for f in rp.feeds}
     row = r.row("roadwork")
     assert row["group"] == "Map layers" and row["schedule"] == "builtin"
-    assert row["builtin"] == "every 5 min to 24 h by source, while the layer or an incident view is open"
+    assert row["builtin"] == "5 min–24 h by source, while viewed (layer or incident)"
     assert row["next_due"] is None and row["last_fetched"] is None              # nobody looked: its loop reads nothing
     assert r.tick() == 0 and all(f.status["at"] is None for f in feeds.values())  # and the registry never runs it
     r.refresh("roadwork")
@@ -503,10 +503,10 @@ def test_only_admins_refresh_with_a_clear_answer_when_too_soon_and_an_audit_entr
     code, out = call(api, path, {}, COREY)
     assert code == 200 and out["ok"] and out["source"]["key"] == "gis:hydrants" and api.pull.calls == 1
     code, out = call(api, path, {}, COREY)
-    assert code == 429 and re.search(r"refreshed \d+ s ago: once every 2 min at most", out["error"]) and api.pull.calls == 1
+    assert code == 429 and re.search(r"refreshed \d+ s ago; max once per 2 min", out["error"]) and api.pull.calls == 1
     acts = api.cad.activity.rows(COREY, "", None, 20)
     assert any(a["summary"] == "Refreshed data source: Gis:Hydrants" for a in acts)
-    assert any(a["kind"] == "refused" and "once every 2 min" in a["summary"] for a in acts)
+    assert any(a["kind"] == "refused" and "max once per 2 min" in a["summary"] for a in acts)
     audit = api.cad.settings_audit_log({"section": ["system"]})["audit"]
     row = next(a for a in audit if a["key"] == "datasources/gis:hydrants")
     assert "Corey" in row["operator"] and row["new"] == "Refresh now" and "never" in row["old"]

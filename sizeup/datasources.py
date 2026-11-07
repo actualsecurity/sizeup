@@ -314,8 +314,8 @@ class DataSources:
         last = st["manual"]
         if last is not None and now - last < src.min_gap_s:
             again = last + src.min_gap_s
-            raise TooSoon(f"{src.name} was refreshed {_dur(now - last)} ago: once every {_dur(src.min_gap_s)} at most "
-                          f"(again from {datetime.fromtimestamp(again, self.tz):%H:%M:%S})")
+            raise TooSoon(f"{src.name}: refreshed {_dur(now - last)} ago; max once per {_dur(src.min_gap_s)} "
+                          f"(again {datetime.fromtimestamp(again, self.tz):%H:%M:%S})")
         why = ""
         if src.blocked is not None:
             try:
@@ -478,12 +478,12 @@ def roadwork_source(rw) -> Source:
         err = "; ".join(f"{f.short}: {f.status['error']}" for f in fs if f.status["error"])
         stuck = rw.reader_problem()                 # the provider's own loop not running (#225): said first
         if stuck:
-            err = f"Road projects: {stuck}; nothing is being read" + (f"; {err}" if err else "")
+            err = f"Not being read: {stuck}" + (f"; {err}" if err else "")
         nxt = [f.status["next"] for f in fs]
         looked = rw.clock() - rw.asked <= r.DEMAND_S
         return {"at": max(ats) if ats else None, "error": err, "n": len(rw.items()) + len(rw.notices()),
                 "next": min(nxt) if nxt and looked and not stuck else None,
-                "note": f"{len(ats)} of {len(fs)} sources read; the Thruway's and 511NY's roadwork come with their events"}
+                "note": f"{len(ats)}/{len(fs)} sources read · Thruway, 511NY roadwork via their events"}
 
     def refresh() -> bool:
         ok = False
@@ -499,11 +499,11 @@ def roadwork_source(rw) -> Source:
         why = [_resting(f.status, rw.clock) for f in fs]
         return why[0] if fs and all(why) else ""
     secs = sorted({f.every_s for f in rw.feeds if f.on}) or [r.NOTICE_EVERY_S]
-    every = f"every {_dur(secs[0])}" + (f" to {_dur(secs[-1])} by source" if len(secs) > 1 else "")
+    every = f"{_dur(secs[0])}" + (f"–{_dur(secs[-1])} by source" if len(secs) > 1 else "")
     return Source("roadwork", "Road projects & closures", "Map layers", "NYSDOT, CTDOT, Thruway, the villages",
                   "https://gis.dot.ny.gov/hostingny/rest/services/Projects/CapitalProgramProjects/FeatureServer",
                   "NYSDOT, CTDOT, NYS Thruway Authority, Port Chester, Rye Brook, Greenwich", status, refresh,
-                  builtin=f"{every}, while the layer or an incident view is open", blocked=blocked)
+                  builtin=f"{every}, while viewed (layer or incident)", blocked=blocked)
 
 
 def trains_sources(trains) -> list[Source]:
@@ -518,7 +518,7 @@ def trains_sources(trains) -> list[Source]:
         m = trains.model
         return off() or {"at": trains.st["at"], "error": trains.st["error"],
                          "n": len(m.area_stations) if m is not None else None,
-                         "note": f"{len(m.area_stations)} New Haven Line stations in our area" if m is not None else ""}
+                         "note": f"{len(m.area_stations)} stations in our area" if m is not None else ""}
 
     def rt() -> dict:
         return off() or {"at": trains.rt["at"], "error": trains.rt["error"], "n": trains.rt["n"],
@@ -528,7 +528,7 @@ def trains_sources(trains) -> list[Source]:
                static, trains.refresh_static, every="daily", hold=_hold(trains.st), quiet=True, min_gap_s=600.0,
                blocked=lambda: _resting(trains.st, trains.clock)),
         Source("trains:rt", "Metro-North live positions (GTFS-realtime)", "Transit", t.SOURCE, t.LINK_URL, f"Data: {t.SOURCE}",
-               rt, trains.refresh_rt, builtin=f"every {trains.every_s:g} s while the Trains layer or an event near the line is open",
+               rt, trains.refresh_rt, builtin=f"{trains.every_s:g} s while viewed (layer or event near the line)",
                blocked=lambda: _resting(trains.rt, trains.clock)),
     ]
 
@@ -562,7 +562,7 @@ def weather_sources(weather) -> list[Source]:
         with weather._tile_lock:
             tiles = list(weather._tiles.values())
         return {"at": fs["at"], "error": fs["error"], "n": len(tiles), "bytes": sum(len(x["body"]) for x in tiles),
-                "note": f"{len(tiles)} tiles kept, {len(weather.frames)} animation frames"}
+                "note": f"{len(tiles)} tiles · {len(weather.frames)} frames"}
 
     def radar_refresh() -> bool:
         with weather._tile_lock:                  # the cached tiles go: the maps ask afresh
@@ -571,7 +571,7 @@ def weather_sources(weather) -> list[Source]:
         out = weather.radar_frames()
         return not out.get("error")
     out.append(Source("weather:radar", "Radar (MRMS)", "Weather", "NOAA / NWS", w.RADAR_LINK, "NOAA/NWS MRMS radar", radar,
-                      radar_refresh, builtin=f"tiles on request (kept {_dur(w.RADAR_NOW_TTL_S)}), frames every {_dur(w.RADAR_FRAMES_S)}"))
+                      radar_refresh, builtin=f"tiles on request (kept {_dur(w.RADAR_NOW_TTL_S)}) · frames {_dur(w.RADAR_FRAMES_S)}"))
     return out
 
 
@@ -596,12 +596,12 @@ def aircraft_sources(aircraft) -> list[Source]:
             return {"on": False, "why": "FAA registry off ([aircraft] registry)"}
         size = reg.path.stat().st_size if reg.path and reg.path.is_file() else None
         return {"at": reg.st["at"], "error": reg.st["error"], "n": reg.st["n"], "bytes": size,
-                "note": "N-number, make, model and year only (never an owner)"}
-    watch = f", the emergency watch every {a.WATCH_S:g} s otherwise" if aircraft.watching() else ""
+                "note": "N-number, make, model, year (no owners)"}
+    watch = f" · emergency watch {a.WATCH_S:g} s" if aircraft.watching() else ""
     return [
         Source("aircraft:live", "Aircraft positions (ADS-B)", "Aircraft", "adsb.lol / adsb.fi", a.FEEDS["adsblol"]["link"],
                "adsb.lol (ODbL) + adsb.fi open data", live, aircraft.refresh,
-               builtin=f"every {a.PRIMARY_S:g} s while the Aircraft layer is open{watch}"),
+               builtin=f"{a.PRIMARY_S:g} s while viewed{watch}"),
         Source("aircraft:registry", "FAA aircraft registry", "Aircraft", "FAA (public domain)", "https://registry.faa.gov/",
                a.REGISTRY_CREDIT, registry, reg.refresh, every="weekly", hold=_hold(reg.st), quiet=True, min_gap_s=HEAVY_GAP_S),
     ]
@@ -619,7 +619,7 @@ def airport_source() -> Source:
         d = airport.layer()
         return {"at": p.stat().st_mtime, "n": len(d.get("features") or []), "bytes": p.stat().st_size,
                 "error": "" if d else f"{p.name} not read",
-                "note": "Built from files in data/airport/ (OSM, FAA): nothing to fetch while running"}
+                "note": "Built offline from data/airport/ (OSM, FAA)"}
 
     def reload() -> bool:
         airport._cache = None
@@ -633,7 +633,7 @@ def gazetteer_source(gaz) -> Source:
     tools/fetch_places.py, a few hundred MB of downloads) and shipped with a deploy. Shown, never fetched here."""
     def status() -> dict:
         if gaz is None:
-            return {"on": False, "why": "the gazetteer isn't loaded (data/gazetteer.sqlite)"}
+            return {"on": False, "why": "Not loaded (data/gazetteer.sqlite)"}
         p = Path(gaz.path)
         meta = getattr(gaz, "meta", {}) or {}
         built = meta.get("places_built") or meta.get("built") or ""
@@ -646,11 +646,10 @@ def gazetteer_source(gaz) -> Source:
         except ValueError:
             n = None
         return {"at": at, "bytes": p.stat().st_size if p.is_file() else None,
-                "note": (f"{n} sources; " if n else "") + "rebuilt offline (tools/fetch_addresses.py, tools/fetch_places.py) "
-                                                         "and shipped with a deploy"}
+                "note": (f"{n} sources · " if n else "") + "built offline, ships with a deploy"}
     return Source("gazetteer", "Addresses and places (gazetteer)", "Map layers", "NYS, US Census, NYSDOT, OSM", "",
                   "NYS Address Points, US Census TIGER, NYSDOT, © OpenStreetMap contributors", status, None,
-                  note="built offline: rebuilt with tools/fetch_places.py and a deploy")
+                  note="Built offline (tools/fetch_places.py), ships with a deploy")
 
 
 def tones_source(path: Path | None, codes: Callable[[], list], reload: Callable[[], bool] | None) -> Source:
@@ -659,7 +658,7 @@ def tones_source(path: Path | None, codes: Callable[[], list], reload: Callable[
     stay on top). The wiki isn't fetched from here."""
     def status() -> dict:
         if path is None or not path.is_file():
-            return {"on": False, "why": "no tone list file ([radio] tones_file)"}
+            return {"on": False, "why": "No tone list ([radio] tones_file)"}
         rows = [c for c in codes() if getattr(c, "source", "") != "config"]
         fetched = sorted(str(getattr(c, "fetched", "") or "") for c in rows if getattr(c, "fetched", ""))
         try:
@@ -667,7 +666,7 @@ def tones_source(path: Path | None, codes: Callable[[], list], reload: Callable[
         except ValueError:
             at = path.stat().st_mtime
         return {"at": at, "n": len(rows), "bytes": path.stat().st_size,
-                "note": f"{path.name}: copied from the wiki by hand; reloaded from the file here"}
+                "note": f"{path.name} · copied from the wiki by hand"}
     return Source("tones", "Tone list (Westchester tone outs)", "Radio", "RadioReference wiki",
                   "https://wiki.radioreference.com/index.php/Westchester_County_(NY)_Fire_Tone_Outs", "RadioReference wiki",
                   status, reload, every="off", action="Reload")
@@ -684,8 +683,8 @@ def transcribe_source(app) -> Source:
             return {"on": False, "why": h.get("why") or "Amazon Transcribe off"}
         bad = h.get("state") not in ("ok", None)
         b = h.get("breaker") or {}
-        note = (f"{h.get('done', 0)} answered, {h.get('timeouts', 0)} timed out, {h.get('late', 0)} late"
-                + (f"; breaker {b.get('state')}" if b.get("state") not in (None, "closed") else ""))
+        note = (f"{h.get('done', 0)} ok · {h.get('timeouts', 0)} timed out · {h.get('late', 0)} late"
+                + (f" · breaker {b.get('state')}" if b.get("state") not in (None, "closed") else ""))
         return {"at": h.get("last_ok"), "error": str(h.get("text") or "failing") if bad else "",
                 "n": h.get("open_jobs"), "note": note}
 
@@ -694,10 +693,10 @@ def transcribe_source(app) -> Source:
         return bool(aws is not None and aws.retry_now())
     return Source("transcribe", "Amazon Transcribe (speech-to-text)", "Radio", "Amazon Web Services",
                   "https://console.aws.amazon.com/billing/home", "", status, retry,
-                  builtin="streams on demand; while failing, tried again every "
-                          f"{_dur(getattr(getattr(getattr(app, 'aws', None), 's', None), 'breaker_retry_s', 300.0))}",
+                  builtin="on demand · retry every "
+                          f"{_dur(getattr(getattr(getattr(app, 'aws', None), 's', None), 'breaker_retry_s', 300.0))} while failing",
                   min_gap_s=30.0, action="Try AWS now",
-                  note="items: jobs waiting for AWS now; the AWS channels use whisper while it fails")
+                  note="Items: jobs waiting for AWS (whisper covers while it fails)")
 
 
 def build(app, log: Callable[[str], None] = print, choices: Callable[[], dict] | None = None) -> DataSources:

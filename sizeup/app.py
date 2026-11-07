@@ -59,7 +59,7 @@ from typing import Callable
 
 import numpy as np
 
-from sizeup.config import P25_JOB, Config, ConfigError, load
+from sizeup.config import P25_JOB, Config, ConfigError, airband_owner, load
 from sizeup import janitor, tz
 from sizeup.cad import Cad
 from sizeup.cad.alarms import STUCK_WITHIN_S
@@ -68,6 +68,7 @@ from sizeup.dispatch import parse
 from sizeup.incidents import IncidentStore, Traffic
 from sizeup.radio.fm import RATE, Channel, NfmReceiver, Segment, id_burst_frames, speech_seconds, voice_floor_db
 from sizeup.radio.am import AmReceiver
+from sizeup.radio.am import Extra as AmExtra
 from sizeup.radio.am import Schedule as AmSchedule
 from sizeup.radio.mdc1200 import decode as mdc_decode
 from sizeup.radio import fleetsync
@@ -91,6 +92,7 @@ from sizeup.tts import TtsService
 from sizeup.web.server import WebServer
 
 ROOT = Path(__file__).resolve().parent.parent
+HUB_SWITCH_S = 0.001     # the hub's GIL switch interval (sys.setswitchinterval; Python's default 0.005), start_app() (#284)
 SPLIT_PAGE_S = 30.0      # voice this soon after a tones-only page for us = that page's voice
 # The gazetteer names a town only from this confidence up (#80: "34 Longdale Avenue" read as Port Chester at
 # 0.34 was a street near Fairview). The point and label stay for the map; the town is never a trigger anyway.
@@ -104,6 +106,9 @@ def geo_of(m) -> dict | None:
     conf = round(float(m.confidence), 2)
     return {"lat": m.lat, "lon": m.lon, "label": m.label, "kind": m.kind,
             "town": m.municipality if conf >= TOWN_CONFIDENCE else "", "confidence": conf}
+# Channels renamed by an update (#275, sizeup/cloud/configupdate.py "airband-names"): a dongle's job saved under the old
+# name (state/sdr_modes.json) is the renamed channel's.
+RENAMED = {"NY Approach": "NY App 126.4/120.8", "NY Approach 124.65": "NY App 124.65"}
 P25_MODE = P25_JOB         # the shared-dongle mode that runs trunk-recorder ("Fire/EMS 15")
 OFF_MODE = "Off"           # the shared dongle released for other programs (sizeup keeps running)
 SWITCH_PAUSE_S = 1.0       # between stopping one program on the shared dongle and starting the next
@@ -199,12 +204,32 @@ def prewarm(cfg: Config, phases=None) -> None:
         log(f"sizeup: warm-up incomplete ({type(e).__name__}: {e}): the rest is built at the takeover")
 
 
-def make_receiver(cfg: Config, c, device, on_segment) -> NfmReceiver:
+def renamed_overrides(ov: dict, kinds: dict) -> dict:
+    """Settings > Radios > Channels choices saved under a channel's old name (#275: RENAMED) count for its new one, unless
+    the new one has its own, or the old one is still a channel here."""
+    out = dict(ov)
+    for old, new in RENAMED.items():
+        if old in out and new not in out and old not in kinds and new in kinds:
+            out[new] = out[old]
+    return out
+
+
+def plan_text(c) -> str:
+    """A channel's frequencies by the hours (#260 schedule, #275 also): '118.575 + 120.8 23:00-07:00'."""
+    head = AmSchedule(c.schedule).describe() if getattr(c, "schedule", ()) else f"{c.mhz:g}"
+    return " + ".join([head, *(AmExtra(f, label, a, b).describe() for f, a, b, label in getattr(c, "also", ()))])
+
+
+def make_receiver(cfg: Config, c, device, on_segment, covered=None) -> NfmReceiver:
     """The receiver for one [[radio.channels]] entry: AM with the carrier squelch on an airband channel (HPN ATC, #233:
     sizeup/radio/am.py), else NFM with the noise squelch."""
     if c.kind == "airband":     # a schedule (#260, NY Approach): retuned by the time of day, between transmissions
+        # also (#275): other channels' frequencies on the same dongle, each heard as its own channel's (channelize.py)
         return AmReceiver(cfg.rtl_fm, device, c.gain_db, Channel(c.mhz, c.label), on_segment, log, open_db=c.squelch_db,
-                          schedule=getattr(c, "schedule", ()) or None)
+                          schedule=getattr(c, "schedule", ()) or None,
+                          also=[AmExtra(f, label, a, b) for f, a, b, label in getattr(c, "also", ())],
+                          owner=lambda mhz: airband_owner(cfg.channels, mhz), covered=covered,
+                          multichannel=getattr(cfg, "airband_multichannel", False))
     return NfmReceiver(cfg.rtl_fm, device, c.gain_db, Channel(c.mhz, c.label), on_segment, log, open_db=c.squelch_db,
                        drop_db=c.drop_db, hang_s=c.hang_s, continue_s=c.continue_s)
 
@@ -366,7 +391,7 @@ class App:
                 self.tg.seed(t.talkgroup, t.end)
         self._last_tones_only: Page | None = None
         self.pagehold = PageHold(self.plan)   # paging: a page waits out its continuation window
-        self.receivers = [make_receiver(cfg, c, c.device, self._segment) for c in cfg.channels]
+        self.receivers = [make_receiver(cfg, c, c.device, self._segment, self._heard_elsewhere) for c in cfg.channels]
         # trunk-recorder: sizeup's child, or on the Linux station its own service (sizeup-trunk-recorder, #71), which an
         # update of sizeup leaves running on its control channel (sizeup/radio/recorder.py make)
         self.recorder = (trunk_recorder.make(cfg.p25_recorder, cfg.p25_recorder_dir or ".", log)
@@ -469,7 +494,7 @@ class App:
         # Per-channel record / transcribe / engine (Settings > Radios, sizeup/channels.py) and Amazon
         # Transcribe where this process may call it ([stt] aws: the hub; sizeup/transcribe.py).
         self.cad.radio_ctx = self
-        self._chan_ov: dict = self.cad.settings.channel_overrides()
+        self._chan_ov: dict = renamed_overrides(self.cad.settings.channel_overrides(), self._kind)
         # Tone pairs named from the console (Settings "tones", #80): merged into the plan, with the names
         # that count as ours; the hub sends them to the station with the channel choices.
         self._tone_ov: dict = {}
@@ -2127,7 +2152,7 @@ class App:
         return float(self.cfg.stt_aws_limit_usd)
 
     def channels_changed(self) -> None:
-        self._chan_ov = self.cad.settings.channel_overrides()
+        self._chan_ov = renamed_overrides(self.cad.settings.channel_overrides(), self._kind)
         log("speech-to-text channels: " + (", ".join(f"{k} {v}" for k, v in sorted(self._chan_ov.items())) or "the defaults"))
 
     def vocabulary_suggestions(self) -> list[str]:
@@ -2187,7 +2212,7 @@ class App:
         kept (this station's own Settings overrides, audited as "hub")."""
         clean = channels.check_map(prefs)
         changed = self.cad.settings.replace_channels(clean, "hub")
-        self._chan_ov = self.cad.settings.channel_overrides()
+        self._chan_ov = renamed_overrides(self.cad.settings.channel_overrides(), self._kind)
         if isinstance(tones, dict) and self.cad.settings.replace_tones(tones, "hub"):
             self._apply_named_tones()
             changed = True
@@ -2221,7 +2246,7 @@ class App:
                 "record_only": list(self.cfg.stt_record_only), "aws_ok": ok, "aws_why": why,
                 "aws_reserve": reserve,
                 "fm": [{"key": c.label, "kind": c.kind, "mhz": c.mhz,
-                        **({"schedule": AmSchedule(c.schedule).describe()} if getattr(c, "schedule", ()) else {})}
+                        **({"schedule": plan_text(c)} if getattr(c, "schedule", ()) or getattr(c, "also", ()) else {})}
                        for c in self.cfg.channels],
                 "sync": self.channels_sync(), "aws": self.aws_status()}
 
@@ -2267,9 +2292,10 @@ class App:
             if self._sdr_ignored(sd):
                 continue
             m = saved.get(sd, self.assign.get(sd, OFF_MODE))
+            m = RENAMED.get(m, m) if m not in self.modes else m     # #275: a job saved under a channel's old name
             m = m if m in self.modes and (m == OFF_MODE or m not in taken) else OFF_MODE
             self.assign[sd] = m
-            if by.get(sd) in ("person", "auto") and saved.get(sd) == m:
+            if by.get(sd) in ("person", "auto") and RENAMED.get(saved.get(sd), saved.get(sd)) == m:
                 self.set_by[sd] = by[sd]
             taken.add(m)
 
@@ -2645,10 +2671,44 @@ class App:
 
     def _fresh_receiver(self, old: NfmReceiver, serial: str) -> NfmReceiver:
         c = next(c for c in self.cfg.channels if c.label == old.channel.label)
-        r = make_receiver(self.cfg, c, self._dongle(serial), self._segment)
+        r = make_receiver(self.cfg, c, self._dongle(serial), self._segment, self._heard_elsewhere)
         self.tap.attach(r)
         self.receivers[self.receivers.index(old)] = r
         return r
+
+    def _running(self, r) -> bool:
+        """A receiver with its program up on a dongle (its job assigned, when the dongles are switchable)."""
+        return (not r._stop.is_set() and r.state == "ok"
+                and (not self.shared or r.channel.label in self.assign.values()))
+
+    def airband_ab(self, label: str, minutes: float = 60.0, phase_s: float = 300.0) -> str | None:
+        """POST /api/airband-ab (#275, tools/airband_ab.py): an on-air A/B of that airband channel's dongle, rtl_fm
+        against the channelizer (radio/am.py AbTest); its numbers are in the channel's Radios row ("ab") and logged at
+        the end. None, or why not."""
+        r = self._receiver(label)
+        if not isinstance(r, AmReceiver):
+            return f"no airband channel {label!r}"
+        if not self._running(r):
+            return f"{label} isn't running on a dongle: pick it for one first"
+        if not 2 <= float(minutes) <= 24 * 60:
+            return "minutes: 2 to 1440"
+        return r.ab_start(float(minutes), float(phase_s))
+
+    def _heard_elsewhere(self, mhz: float, me) -> bool:
+        """#275: a frequency another running dongle has (Ground's on 124.65 overnight, and NY App 124.65's own) is kept
+        by one: the dongle of the channel it belongs to, else the first one in the config. True: `me` leaves it (an
+        `also` frequency isn't taken at all, radio/am.py plan_at; a transmission both had is dropped)."""
+        key = round(float(mhz), 6)
+        owner = airband_owner(self.cfg.channels, mhz)
+        others = [r for r in list(self.receivers) if r is not me and self._running(r)
+                  and key in {round(f, 6) for f in getattr(r, "active", (r.channel.mhz,))}]
+        if not others or me.channel.label == owner:
+            return False
+        if any(r.channel.label == owner for r in others):
+            return True
+        order = list(self.receivers)
+        mine = order.index(me) if me in order else len(order)
+        return any(order.index(r) < mine for r in others)
 
     def _start_mode(self, mode: str, serial: str) -> bool:
         if mode == OFF_MODE:
@@ -2784,7 +2844,10 @@ class App:
         plugged = {s: p for _i, p, s in devs}
         rows = self.sdrs
         usb = self.usb(devs)
+        # #275: what each airband job is on now ("126.4", "118.575 CTAF + 120.8"), for its button
+        now = {r.channel.label: r.status().get("now", "") for r in self.receivers if isinstance(r, AmReceiver)}
         return {"shared": True, "mode": self.assign.get(rows[0], OFF_MODE) if rows else OFF_MODE, "modes": self.modes,
+                "now": {k: v for k, v in now.items() if v},
                 "switching": self.switching, "adsb": self.adsb_row(plugged),
                 "duplicates": usb["duplicates"],          # two dongles, one serial (#242): Settings > Radios shows the fix
                 "sdrs": [{"serial": sd, "name": self.sdr_name(sd), "product": plugged.get(sd, ""),
@@ -3090,6 +3153,11 @@ def make_app(cfg: Config) -> App:
 
 def start_app(cfg: Config) -> App:
     """make_app() and start it; the hub's log is read for its own error spikes first (#285, sizeup/errwatch.py)."""
+    if cfg.cloud_role == "hub":
+        # #284: Python's sqlite3 lets the GIL go at every row it steps, and waits up to the switch interval to get it
+        # back while another thread computes (a GIS layer's refresh, the state push): 5 ms a row by default, so a
+        # 500-row Radio view took 1-2 s whenever anything else was busy. 1 ms: about 5x less, for a little switching.
+        sys.setswitchinterval(HUB_SWITCH_S)
     app = make_app(cfg)
     if getattr(app, "error_watch", None) is not None:      # the hub: its own error spikes to the status topic
         from sizeup import errwatch
@@ -3106,6 +3174,7 @@ def make_server(app: App, fence=None, listener=None) -> WebServer:
                        role=cfg.cloud_role, roads=app.roads, gis=app.gis,
                        trains=app.trains, weather=app.weather, station_health=getattr(app, "health", None),
                        aircraft=app.aircraft, roadwork=app.roadwork, set_adsb=app.set_adsb_receiver,
+                       airband_ab=app.airband_ab if cfg.cloud_role != "hub" else None,
                        fence=fence, health_fn=lambda: app.health_extra(fence), listener=listener)
 
     def changed() -> None:             # a new talker is pushed at once, not on the next second
