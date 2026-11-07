@@ -187,6 +187,7 @@ class Dvr:
         self._busy: set[str] = set()              # cameras with a round under way (pool mode)
         self._next: dict[str, float] = {}         # cid -> when its next round is due
         self.holding: dict[str, int] = {}         # cid -> clips of it being saved (never renamed meanwhile)
+        self.may_move: Callable[[str, str], bool] = self._may_move   # #324's follow() asks before renaming a folder
         if not self.shared:
             self._scan()                          # (shared: in the background, before the first round: start())
             self._scanned.set()
@@ -794,6 +795,14 @@ class Dvr:
             else:
                 self.holding.pop(cid, None)
 
+    def _may_move(self, old: str, new: str) -> bool:
+        """A recording folder may be renamed (a camera merge, #324): only by the leader, and never while a clip of
+        either camera is being saved."""
+        if not self.may_write():
+            return False
+        with self._lock:
+            return not (self.holding.get(old) or self.holding.get(new))
+
     def read_segment(self, cid: str, key: int, fallback: Path | None = None) -> bytes:
         """A recorded segment's bytes, its file found when it is read (the camera's id may have moved meanwhile:
         alias), else fallback. OSError when it is gone."""
@@ -819,8 +828,13 @@ class Dvr:
             if t0 + dur > t_from and t0 < t_to:
                 f = self._file(cid, key)
                 if f is not None:
-                    out.append({"key": key, "t0": t0, "dur": dur, "bytes": size, "path": f})
+                    out.append({"key": key, "t0": t0, "dur": dur, "bytes": size, "path": f,
+                                "disc": self._new_stream(cid, key)})
         return out
+
+    def _new_stream(self, cid: str, key: int) -> bool:
+        """A segment that starts a new stream (a discontinuity even with no gap in time): #324 marks these; none here."""
+        return False
 
     def handles(self, path: str) -> bool:
         return bool(DVR_PATH.fullmatch(path))

@@ -441,3 +441,22 @@ def test_a_merged_cameras_old_id_and_a_folder_moved_mid_upload(tmp_path):
     assert row["status"] == "stored", row["error"]
     part = next(v for k, v in a.fake.objects.items() if k.endswith("part-0000.ts"))
     assert part[0] == want and d.holding == {}
+
+
+def test_a_new_stream_mark_is_a_discontinuity_in_the_clip_and_folders_stay_put_while_it_saves(tmp_path, monkeypatch):
+    api, c, a, d, iid, clock = camera_setup(tmp_path)
+    st = d.status(CAM)
+    segs = d.segments(CAM, st["from"], st["to"])
+    third = segs[2]["key"]
+    monkeypatch.setattr(d, "_new_stream", lambda cid, key: key == third)       # (#324 marks these in the file name)
+    a._pool = Later()
+    aid = call(api, f"/api/cad/cameras/{CAM}/dvr/clip", {"from": st["from"], "to": st["to"], "incident_id": iid},
+               JULIAN)[1]["attachment"]["id"]
+    assert not d.may_move(CAM, "other") and not d.may_move("other", CAM) and d.may_move("x", "y")
+    a._pool.run()
+    assert d.may_move(CAM, "other")
+    d.may_write = lambda: False
+    assert not d.may_move(CAM, "other")                                         # never on a draining leader
+    lines = get(api, f"/api/cad/attachments/{aid}/index.m3u8", VAL)[1].decode().splitlines()
+    tss = [i for i, x in enumerate(lines) if x.endswith(".ts")]
+    assert lines.count("#EXT-X-DISCONTINUITY") == 1 and lines[tss[1] + 1] == "#EXT-X-DISCONTINUITY"

@@ -16,7 +16,7 @@ for both kinds, in a private S3 bucket, every attach / view / download / export 
 The record (the CAD store, cad.sqlite, so Litestream keeps it):
     attachments        one row each: kind (camera | radio), source (camera id | channel), source_name, talkgroup, ref
                        (radio: the transmission id), start / end, bytes, objects [{name, key, bytes, sha256}],
-                       segments (camera: [part, offset, bytes, start, duration] for the player), note, status (saving |
+                       segments (camera: [part, offset, bytes, start, duration, new stream] for the player), note, status (saving |
                        stored | failed | deleted | expired), who attached it and when, expires_at, deleted_at / _by
     attachment_audit   attach | view | download | export | delete | failed: when, who, which attachment and incident,
                        a detail (a delete: every object and its sha256). Never pruned: a deleted attachment keeps its
@@ -88,7 +88,7 @@ CREATE TABLE IF NOT EXISTS attachments (
   end REAL NOT NULL,
   bytes INTEGER NOT NULL DEFAULT 0,
   objects TEXT NOT NULL DEFAULT '[]',   -- [{name, key, bytes, sha256}], manifest.json last
-  segments TEXT NOT NULL DEFAULT '[]',  -- camera: [[part, offset, bytes, start, duration], ...]
+  segments TEXT NOT NULL DEFAULT '[]',  -- camera: [[part, offset, bytes, start, duration, new stream], ...]
   note TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL,                 -- saving | stored | failed | deleted | expired
   error TEXT NOT NULL DEFAULT '',
@@ -425,7 +425,7 @@ class Attachments:
                     raise AttachError(f"segment {s['key']} gone before it was copied ({type(e).__name__})") from None
                 if part and len(part) + len(b) > PART_BYTES:
                     flush()
-                index.append([pn, len(part), len(b), round(s["t0"], 3), round(s["dur"], 3)])
+                index.append([pn, len(part), len(b), round(s["t0"], 3), round(s["dur"], 3), int(bool(s.get("disc")))])
                 part += b
                 total += len(b)
             flush()
@@ -436,8 +436,8 @@ class Attachments:
                         "from": iso(segs[0]["t0"]), "to": iso(segs[-1]["t0"] + segs[-1]["dur"]),
                         "created_by": operator, "created_at": iso(now), "note": note,
                         "expires_at": iso(now + RETENTION_S),
-                        "segments": [{"part": p, "offset": o, "bytes": n, "start": iso(t), "duration": d, "seq": s["key"]}
-                                     for (p, o, n, t, d), s in zip(index, segs)],
+                        "segments": [{"part": p, "offset": o, "bytes": n, "start": iso(t), "duration": d, "seq": s["key"],
+                                      "discontinuity": bool(x)} for (p, o, n, t, d, x), s in zip(index, segs)],
                         "objects": [{k: o[k] for k in ("name", "bytes", "sha256")} for o in objects]}
             objects.append(self._put_manifest(inc["id"], aid, manifest))
             self._set(aid, status="stored", bytes=total, objects=json.dumps(objects), segments=json.dumps(index), error="")
@@ -612,8 +612,10 @@ class Attachments:
         out = ["#EXTM3U", "#EXT-X-VERSION:3", f"#EXT-X-TARGETDURATION:{target}", "#EXT-X-PLAYLIST-TYPE:VOD",
                "#EXT-X-MEDIA-SEQUENCE:0"]
         prev = None
-        for n, (_, _, _, t0, dur) in enumerate(segs):
-            if prev is not None and abs(t0 - prev) > 1.5:
+        for n, seg in enumerate(segs):
+            t0, dur = seg[3], seg[4]
+            new = len(seg) > 5 and bool(seg[5])                # the DVR's new-stream mark (#324)
+            if prev is not None and (abs(t0 - prev) > 1.5 or new):
                 out.append("#EXT-X-DISCONTINUITY")
             out += [f"#EXT-X-PROGRAM-DATE-TIME:{iso(t0)}", f"#EXTINF:{dur:.3f},", f"{n}.ts"]
             prev = t0 + dur
