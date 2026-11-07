@@ -877,13 +877,17 @@ window.MapLayers = (() => {
     range.step = "1";
     range.setAttribute("aria-label", "Recording timeline");
     const at = h("span", "ml-dvr-at small");
+    const track = h("span", "ml-dvr-track");
+    const gapbar = h("span", "ml-dvr-gaps");                        // the recording's gaps, under the timeline
+    gapbar.setAttribute("aria-hidden", "true");
+    track.append(range, gapbar);
     const toLive = h("button", "sm quiet ml-dvr-live", "Live");
     toLive.type = "button";
     toLive.title = "Back to live video";
     const keep = h("button", "sm quiet ml-dvr-keep", "Keep");
     keep.type = "button";
     keep.setAttribute("aria-pressed", "false");
-    dvr.append(rec, range, at, toLive, keep);
+    dvr.append(rec, track, at, toLive, keep);
     range.addEventListener("input", () => { at.textContent = clock(Number(range.value)); viewer.dvrDragging = true; });
     range.addEventListener("change", () => { viewer.dvrDragging = false; dvrPlay(Number(range.value)); });
     toLive.addEventListener("click", () => dvrToLive());
@@ -893,11 +897,15 @@ window.MapLayers = (() => {
     ov.append(panel);
     document.body.append(ov);
     viewer.ov = ov;
-    viewer.el = { title, img, msg, where, time, foot, video, live, dvr, rec, range, at, toLive, keep };
+    viewer.el = { title, img, msg, where, time, foot, video, live, dvr, rec, range, at, toLive, keep, gapbar };
     video.addEventListener("timeupdate", dvrShowing);
     viewer.video = video;
     document.addEventListener("visibilitychange", () => {
       if (!viewer.id) return;
+      if (viewer.dvrMode) {                                       // the recording: pause and go on, never snapshots
+        try { if (document.visibilityState === "hidden") video.pause(); else video.play().catch(() => {}); } catch (_) { /* fine */ }
+        return;
+      }
       if (document.visibilityState === "hidden") {
         stopRefresh();
         if (viewer.live) { try { video.pause(); if (viewer.hls) viewer.hls.stopLoad(); } catch (_) { /* fine */ } }
@@ -1063,9 +1071,22 @@ window.MapLayers = (() => {
       if (!viewer.dvrMode && !viewer.dvrDragging) el.range.value = el.range.max;
     }
     el.range.title = d.gaps && d.gaps.length ? `${d.gaps.length} gap${d.gaps.length > 1 ? "s" : ""} in the recording` : "";
+    el.gapbar.replaceChildren();
+    if (d.from && d.to && d.to > d.from) {
+      for (const [a, b] of d.gaps || []) {
+        const g = h("i", "");
+        g.style.insetInlineStart = `${(100 * (a - d.from)) / (d.to - d.from)}%`;
+        g.style.inlineSize = `${Math.max(0.5, (100 * (b - a)) / (d.to - d.from))}%`;
+        el.gapbar.append(g);
+      }
+    }
+    if (d.stopped) { el.rec.textContent = "Rec stopped"; el.rec.title = d.stopped; }
+    // Keep is a dispatcher's or an admin's (the server refuses a viewer: sizeup/cad/api.py WRITES)
+    const w = window.cad && cad.who;
+    el.keep.hidden = !!(w && w.enforced && w.may !== "admin" && w.may !== "dispatcher");
     el.keep.setAttribute("aria-pressed", String(!!d.pinned));
     el.keep.classList.toggle("on", !!d.pinned);
-    el.keep.title = d.pinned ? "Kept: recorded until you stop keeping it" : "Keep recording this camera after you close it";
+    el.keep.title = d.pinned ? `Kept until ${d.pinned_until ? when(d.pinned_until) : "you stop it"}` : "Keep recording this camera for 24 h";
     el.toLive.hidden = !viewer.dvrMode;
     if (!viewer.dvrMode) el.at.textContent = "";
   }

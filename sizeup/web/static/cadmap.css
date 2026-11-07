@@ -163,7 +163,10 @@
   .ml-cam-src a { color: var(--info); }
   /* the DVR bar (#277): ● Rec, the timeline, the time showing, Live, Keep */
   .ml-dvr { display: flex; align-items: center; gap: var(--s-2); }
-  .ml-dvr-range { flex: 1 1 auto; min-inline-size: 6rem; accent-color: var(--accent); }
+  .ml-dvr-track { position: relative; flex: 1 1 auto; min-inline-size: 6rem; display: flex; flex-direction: column; }
+  .ml-dvr-range { inline-size: 100%; accent-color: var(--accent); }
+  .ml-dvr-gaps { position: relative; block-size: calc(2 * var(--bw)); }
+  .ml-dvr-gaps i { position: absolute; inset-block: 0; background: var(--err); }
   .ml-dvr-at { font-variant-numeric: tabular-nums; min-inline-size: 5.5em; }
   .ml-dvr-rec { color: var(--dim, inherit); white-space: nowrap; }
   .ml-dvr-rec.on { color: var(--err, #c00); font-weight: 600; }

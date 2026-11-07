@@ -100,14 +100,27 @@ def test_its_own_session_when_nobody_watches_and_a_refusing_source_is_left_alone
     f.urls.clear()
     assert d.tick() == 3
     assert f.urls[0].endswith("/playlist.m3u8") and f.urls[1].endswith("/chunklist_w1849562454.m3u8")
-    # the source refuses: not asked again for SESSION_RETRY_S
-    d._cams[CAM]["chunk"] = ""
-    orig = f.__call__
-    r.fetch = lambda url, timeout, limit: (_ for _ in ()).throw(OSError("refused")) if "skyvdn" in url else orig(url, timeout, limit)
+    assert not any(k.startswith(f"{CAM}/") for k in r._segments)            # never in the live viewers' cache
+    # one chunklist failure: a new session at once (master, then chunklist), no hole
+    real = Origin.__call__
+    fail = {"n": 1}
+
+    def flaky(url, timeout, limit):
+        if "chunklist" in url and fail["n"]:
+            fail["n"] -= 1
+            raise OSError("timed out")
+        return real(f, url, timeout, limit)
+    r.fetch = flaky
     step(d, f, clock)
+    assert d.status(CAM)["segments"] == 4 and d._cams[CAM]["fails"] == 0
+    # the source refuses every time: three rounds, then it waits (15 s doubling), and says so once per wait
+    r.fetch = lambda url, timeout, limit: (_ for _ in ()).throw(OSError("refused")) if "skyvdn" in url else real(f, url, timeout, limit)
+    step(d, f, clock, 3)
+    assert d._cams[CAM]["fails"] == 3 and d._cams[CAM]["retry_at"] == clock.t + 15
+    assert sum("no stream" in m for m in d.logs) == 1
     n = len(d.logs)
-    step(d, f, clock)
-    assert any("no stream" in m for m in d.logs) and len(d.logs) == n
+    step(d, f, clock)                                                       # within the wait: not asked
+    assert len(d.logs) == n
 
 
 def test_a_broken_segment_is_a_hole_never_a_bad_copy(tmp_path):
@@ -140,12 +153,14 @@ def test_an_open_events_cameras_and_the_cap(tmp_path):
     assert CAM not in d.wanted()
     d.incidents = lambda: 1 / 0                                        # the store busy: no event cameras this round
     assert d.wanted() == {} and any("open events not read" in m for m in d.logs)
-    # the cap: always first, then pinned
+    # the cap: always first, then an open event's (before the ones kept), then kept
     vids = [c["id"] for c in r.merged("cameras") if c.get("video")][:4]
     d.always = (vids[0],)
     d.pins = {vids[1], vids[2]}
     w = d.wanted()
     assert list(w) == [vids[0], vids[1]] and w[vids[0]] == ["always"]
+    d.incidents = lambda: [{"lat": cam["lat"] + 0.002, "lon": cam["lon"], "address": ""}]
+    assert list(d.wanted())[1] == CAM and d.wanted()[CAM][0] == "incident"
     # never a camera without video
     d.always = (SNAP_ONLY,) if not r.camera(SNAP_ONLY) or not r.camera(SNAP_ONLY).get("video") else ()
     assert SNAP_ONLY not in d.wanted()
@@ -167,7 +182,76 @@ def test_the_window_and_the_size_cap_and_the_free_disk(tmp_path):
     assert not list((tmp_path / "dvr" / CAM).glob(f"{oldest - 1}_*.ts"))                # the files go too
     d.max_bytes, d.free_floor = 10 ** 12, 10 ** 15                      # a disk short of its floor: everything goes
     d.evict()
-    assert d.total_bytes() == 0 and CAM not in d._cams and not (tmp_path / "dvr" / CAM).exists()
+    assert d.total_bytes() == 0 and not list((tmp_path / "dvr" / CAM).glob("*.ts"))
+
+
+def test_room_is_made_before_each_write_and_a_disk_under_its_floor_stops_recording(tmp_path):
+    import shutil
+    # a real floor above what the disk has free: nothing is written, and the status says why
+    free = shutil.disk_usage(tmp_path).free
+    r, d, f, clock = setup(tmp_path)
+    d.free_floor = free + 10 ** 9
+    d.pins = {CAM}
+    assert d.tick() == 0 and d.total_bytes() == 0 and not list(tmp_path.glob("dvr/*/*.ts"))
+    st = d.status(CAM)
+    assert not st["recording"] and st["stopped"].startswith("Disk full") and d.recording(CAM) == []
+    assert any("recording stopped: Disk full" in m for m in d.logs)
+    n = len(f.urls)
+    step(d, f, clock)
+    assert not any(u.endswith(".ts") for u in f.urls[n:])                   # stopped: nothing fetched either
+    d.free_floor = 0                                                         # room again
+    step(d, f, clock)
+    assert d.status(CAM)["recording"] and d.status(CAM)["segments"] > 0 and d.status(CAM)["stopped"] == ""
+    # the cap: the oldest go before the write, never after
+    one = max(s[2] for s in d._cams[CAM]["segs"].values())
+    d.max_bytes = 2 * one
+    seen = []
+    orig = d._write
+    d._write = lambda *a: (seen.append(d.total_bytes() + len(a[4])), orig(*a))[1]
+    step(d, f, clock, 3)
+    assert d.total_bytes() <= d.max_bytes and len(d._cams[CAM]["segs"]) <= 2
+
+
+def test_a_disk_that_cant_be_read_writes_nothing_and_a_failed_write_leaves_no_temp_file(tmp_path, monkeypatch):
+    import shutil
+    r, d, f, clock = setup(tmp_path)
+    d.free_floor = 1
+    d.pins = {CAM}
+    monkeypatch.setattr(shutil, "disk_usage", lambda p: (_ for _ in ()).throw(OSError("gone")))
+    assert d._free() == 0 and d.tick() == 0 and d.total_bytes() == 0       # fail closed
+    monkeypatch.undo()
+    d.free_floor = 0
+    import pathlib
+    monkeypatch.setattr(pathlib.Path, "replace", lambda self, target: (_ for _ in ()).throw(OSError("disk error")))
+    assert d.tick() == 0 and not list(tmp_path.glob("dvr/*/*.tmp")) and any("not written" in m for m in d.logs)
+
+
+def test_a_sequence_that_starts_over_is_carried_on(tmp_path):
+    r, d, f, clock = setup(tmp_path)
+    d.pins = {CAM}
+    d.tick()
+    step(d, f, clock, 2)
+    last = d._cams[CAM]["last"]
+    f.seq = 10                                                              # the origin restarted: its counter too
+    step(d, f, clock, 3)
+    keys = sorted(d._cams[CAM]["segs"])
+    assert keys[-1] > last and len(keys) == len(set(keys)) and d.status(CAM)["recording"]
+    assert any("sequence started over" in m for m in d.logs)
+    assert d.playlist(CAM).decode().count(".ts") == len(keys)
+
+
+def test_cameras_are_recorded_side_by_side(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    r, d, f, clock = setup(tmp_path, max_cameras=3)
+    vids = [c["id"] for c in r.merged("cameras") if c.get("video")][:3]
+    d.pins = set(vids)
+    d._pool = ThreadPoolExecutor(max_workers=3)
+    try:
+        assert d.tick(wait_all=True) == 9 and all(d.status(v)["segments"] == 3 for v in vids)
+        assert d.tick(wait_all=True) == 0                                    # each camera's next round: TICK_S on
+        assert d._busy == set()
+    finally:
+        d._pool.shutdown()
 
 
 def test_a_restart_finds_what_is_on_disk(tmp_path):
@@ -186,12 +270,20 @@ def test_pins_are_kept_where_the_app_says_and_only_for_video_cameras(tmp_path):
     d.load_pins = lambda: saved.get("pins", [])
     d.save_pins = lambda pins: saved.update(pins=pins)
     st = d.pin(CAM, True)
-    assert st["pinned"] and st["recording"] and st["why"] == ["pinned"] and saved["pins"] == [CAM]
+    assert st["pinned"] and st["recording"] and st["why"] == ["pinned"] and saved["pins"] == {CAM: clock.t}
+    assert st["pinned_until"] == clock.t + dvr_mod.PIN_S
     again = Dvr(r, tmp_path / "dvr", clock=clock, log=lambda m: None, free_floor=0)
     again.load_pins = d.load_pins
     again.start().stop()
-    assert again.pins == {CAM}                                          # a new process (a deploy): the pins carry over
-    assert not d.pin(CAM, False)["pinned"] and saved["pins"] == []
+    assert again.pins == {CAM: clock.t}                                 # a new process (a deploy): the pins carry over
+    saved["pins"] = [CAM]                                               # the first shape (ids only) still reads
+    again.start().stop()
+    assert set(again.pins) == {CAM}
+    # a Keep runs out after PIN_S
+    clock.t += dvr_mod.PIN_S + 1
+    assert CAM not in d.wanted() and saved["pins"] == {} and any("Keep ran out" in m for m in d.logs)
+    d.pin(CAM, True)
+    assert not d.pin(CAM, False)["pinned"] and saved["pins"] == {}
     with pytest.raises(KeyError):
         d.pin("nope", True)
     r.thruway.data["cameras"][1]["video"] = ""
@@ -204,6 +296,13 @@ def test_the_paths_take_only_what_they_name(tmp_path):
     r, d, f, clock = setup(tmp_path)
     assert r.handles(f"/api/cad/cameras/{CAM}/dvr") and r.handles(f"/api/cad/cameras/{CAM}/dvr/12.ts")
     assert not r.handles(f"/api/cad/cameras/{CAM}/dvr/..%2F..%2Fx.ts") and not r.handles(f"/api/cad/cameras/{CAM}/dvr/a.ts")
+    assert not r.handles("/api/cad/cameras/../dvr") and not r.handles("/api/cad/cameras/./dvr/index.m3u8")
+    with pytest.raises(ValueError):
+        d._dir("..")
+    (tmp_path / "dvr").mkdir(exist_ok=True)
+    (tmp_path / "dvr" / ".hidden").mkdir()
+    (tmp_path / "dvr" / ".hidden" / "1_1791915000000_4000.ts").write_bytes(b"x")
+    assert ".hidden" not in Dvr(r, tmp_path / "dvr", clock=clock, log=lambda m: None)._cams
     assert r.get(f"/api/cad/cameras/{CAM}/dvr/index.m3u8", "")[0] == 404                 # nothing recorded yet
     assert r.get(f"/api/cad/cameras/{CAM}/dvr/1.ts", "")[0] == 404
     assert r.get("/api/cad/cameras/nope/dvr", "")[0] == 404
