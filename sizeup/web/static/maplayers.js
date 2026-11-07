@@ -255,7 +255,7 @@ window.MapLayers = (() => {
       this.btn.type = "button";
       if (window.Icon) this.btn.append(Icon("layers"));
       this.btn.append("Layers");
-      this.btn.title = "Map layers: cameras, incidents, road projects and closures, signs, mileposts, exits, the airport";
+      this.btn.title = "Map layers";
       this.btn.setAttribute("aria-expanded", "false");
       this.btn.setAttribute("aria-haspopup", "true");
       this.btn.addEventListener("click", (e) => { e.stopPropagation(); this.toggle(); });
@@ -522,8 +522,8 @@ window.MapLayers = (() => {
       panel.append(list);
       for (const g of this.groups) { const el = g.top ? groupPanel(g) : null; if (el) panel.append(el); }
       if (!d) this.panel.append(h("div", "dim small", "Loading…"));
-      else if (!d.configured) this.panel.append(h("div", "dim small", "No camera or incident source is on: " + (d.note || "not configured on the hub")));
-      if (d && !d.highway_places) this.panel.append(h("div", "dim small", "Mileposts and exits: not in the places database yet"));
+      else if (!d.configured) this.panel.append(h("div", "dim small", d.note ? d.note[0].toUpperCase() + d.note.slice(1) : "Highway layers off"));
+      if (d && !d.highway_places) this.panel.append(h("div", "dim small", "Mileposts, exits: not loaded"));
       for (const s of (d && d.sources) || []) {                   // each source that is on, and when it last read
         if (!s.configured) continue;
         const line = h("div", "dim small ml-source");
@@ -531,7 +531,7 @@ window.MapLayers = (() => {
         a.href = s.link;
         a.target = "_blank";
         a.rel = "noopener";
-        line.append(a, s.at ? `, updated ${hhmm(s.at)}` : ", waiting for the first read", s.note ? ` (${s.note})` : "");
+        line.append(a, s.at ? ` · ${hhmm(s.at)}` : " · waiting", s.note ? ` (${s.note})` : "");
         this.panel.append(line);
       }
       if (d && d.configured && d.note) this.panel.append(h("div", "dim small", d.note));
@@ -548,10 +548,10 @@ window.MapLayers = (() => {
     eventRow() {
       const row = h("div", "ml-event");
       if (!this.override) {
-        row.append(h("span", "dim small", canWrite() && OPEN.includes(this.focused.status) ? "A change here is kept on this event" : "A change here is yours for this event"));
+        row.append(h("span", "dim small", canWrite() && OPEN.includes(this.focused.status) ? "Changes save to this event" : "Changes: yours, this event only"));
         return row;
       }
-      row.append(h("span", "dim small", this.overrideLocal ? "Your layers for this event" : "Kept on this event for everyone"));
+      row.append(h("span", "dim small", this.overrideLocal ? "Yours, this event" : "Saved for everyone"));
       const reset = h("button", "quiet sm", "Reset to default");
       reset.type = "button";
       reset.dataset.key = "reset";
@@ -575,9 +575,9 @@ window.MapLayers = (() => {
         // 511NY's signs (#188) come page by page, with the sign's own status; the Thruway's as lines
         const pages = (s.pages || []).length ? s.pages : ((s.lines || []).length ? [s.lines] : []);
         const lines = pages.length ? pages.flatMap((p, i) => (i ? ["·", ...p] : p))
-          : [s.status === "fault" ? "(the sign reports a fault: its message isn't known)" : "(blank)"];
+          : [s.status === "fault" ? "(fault: message unknown)" : "(blank)"];
         this.showInfo(s.name, [s.road, s.dir, s.mile ? `MP ${s.mile}` : ""].filter(Boolean).join(" "), lines,
-                      `${s.source || "511NY"}` + (s.agency ? ` (${s.agency})` : "") + (s.updated ? `, sign updated ${when(s.updated)}` : ""),
+                      `${s.source || "511NY"}` + (s.agency ? ` (${s.agency})` : "") + (s.updated ? ` · ${when(s.updated)}` : ""),
                       "ml-sign-text");
         return;
       }
@@ -588,27 +588,32 @@ window.MapLayers = (() => {
       const sub = [e.road, e.dir, e.mile ? `MP ${e.mile}` : ""].filter(Boolean).join(" ");
       const lines = [e.description || "(no description)"];
       if (e.lanes) lines.push(`Lanes: ${e.lanes}`);
-      if (e.end) lines.push(`Planned end ${when(e.end)}`);
+      if (e.end) lines.push(`End ${when(e.end)} (planned)`);
       const t = e.updated || e.start;
-      this.showInfo(title, sub, lines, `${e.source || "511NY"}` + (t ? ` updated ${when(t)}` : ""), "");
+      this.showInfo(title, sub, lines, `${e.source || "511NY"}` + (t ? ` · ${when(t)}` : ""), "");
     }
 
-    showInfo(title, sub, lines, foot, cls, icon) {
+    // #278: the title with its subtitle on the right; one fact a line; the source and freshness in a muted foot,
+    // with tip (the caveats and method, if any) behind an "i" at its end
+    showInfo(title, sub, lines, foot, cls, icon, tip) {
       const head = h("div", "ml-head");
       if (icon) head.append(icon);
-      head.append(h("b", "", title));
+      head.append(h("b", "", title), h("span", "spacer"));
+      if (sub) head.append(h("span", "dim small ml-subtitle", sub));
       const x = h("button", "icon quiet sm");
       x.type = "button";
       x.setAttribute("aria-label", "Close");
       x.append(window.Icon ? Icon("x") : "✕");
       x.addEventListener("click", () => this.closeInfo());
-      head.append(h("span", "spacer"), x);
+      head.append(x);
       const body = h("div", "ml-lines" + (cls ? ` ${cls}` : ""));
       for (const l of lines) body.append(l instanceof Node ? l : h("div", "", l));      // a line may be an element (a link)
-      this.info.replaceChildren(head);
-      if (sub) this.info.append(h("div", "dim small", sub));
-      this.info.append(body);
-      if (foot) this.info.append(h("div", "dim small", foot));
+      this.info.replaceChildren(head, body);
+      if (foot || tip) {
+        const f = h("div", "dim small ml-foot", foot || "");
+        if (tip && window.Help && Help.info) f.append(h("span", "spacer"), Help.info(tip));
+        this.info.append(f);
+      }
       this.info.hidden = false;
       x.focus({ preventScroll: true });
     }

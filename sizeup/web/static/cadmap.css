@@ -95,6 +95,9 @@
   .ml-panel > .ml-head { position: sticky; inset-block-start: calc(-1 * var(--s-2)); z-index: 1; background: var(--raised);
     margin-block: calc(-1 * var(--s-2)) 0; padding-block: var(--s-2) var(--s-1); }
   .ml-head > .ico { color: var(--c, var(--text-2)); }
+  /* a map box (#278): its subtitle on the title's line, at the right; the source and time in a foot, the "i" at its end */
+  .ml-head > .ml-subtitle { min-inline-size: 0; text-align: end; overflow-wrap: anywhere; }
+  .ml-foot { display: flex; align-items: center; gap: var(--s-1); }
   .ml-event { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1) var(--s-2); }
   .ml-list .check > .ico, .ml-fold .check > .ico { color: var(--c, var(--text-2)); }
   .ml-list { display: flex; flex-direction: column; }

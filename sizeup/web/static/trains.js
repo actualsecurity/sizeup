@@ -72,6 +72,7 @@ window.TrainLayer = (() => {
                                                               hour12: false, timeZone: tz() });
     } catch (_) { return ""; }
   }
+  const cap = (s) => (s ? s[0].toUpperCase() + s.slice(1) : s);     // the hub's why_not() is lower case ("off (…)")
   function late(s) {
     if (s === null || s === undefined) return "";
     const m = Math.round(s / 60);
@@ -453,22 +454,24 @@ window.TrainLayer = (() => {
       this.map.getSource(SRC_CARS).setData(fc(cars));
     }
     panelChanged() { if (!this.control.panel.hidden) this.control.renderPanel(); }
-    // what the click box says of where the train is drawn: reported (the MTA's time for it), predicted (carried on
-    // past that report, and how far it may go), estimated, or frozen on an old feed. No distances: nothing finer
+    // where the train is drawn (#278: a short phrase on the box; the method in its "i"): reported (the MTA's time for
+    // it), predicted (carried on past that report), estimated, or held on an old feed. No distances: nothing finer
     // than the data has.
     where(t, d) {
       const w = (this.drawn && this.drawn.get(t.id)) || {};
       const upTo = t.hold_kind === "stop" && t.next && t.next.name ? `not past ${t.next.name}` : "not past its next reporting point";
-      const when = t.fix_at ? `${t.fix_age_unknown ? "by" : "at"} ${hm(t.fix_at, true)}` : "";
-      let say;
+      const at = t.fix_at ? `${t.fix_age_unknown ? "by " : ""}${hm(t.fix_at, true)}` : "";
+      let say, why;
       if (!t.estimated) {
-        say = w.ahead ? `Position predicted: on its run since the MTA reported it ${when}, ${upTo}`
-          : `Position reported by the MTA ${when}${t.mode === "stopped" ? " (stopped)" : ""}`;
+        say = w.ahead ? `Predicted from ${at}` : `Reported ${at}${t.mode === "stopped" ? " · stopped" : ""}`;
+        why = w.ahead ? `Predicted: on its run since the MTA's report, ${upTo}` : "Reported by the MTA";
       } else {
-        say = t.mode === "stopped" ? "Position estimated (at the station: the MTA hasn't said it left)"
-          : "Position estimated (on its run between its stations, by the MTA's times)";
+        say = t.mode === "stopped" ? "Estimated · at station" : "Estimated";
+        why = t.mode === "stopped" ? "Estimated: at the station, the MTA hasn't said it left"
+          : "Estimated: on its run between its stations, by the MTA's times";
       }
-      return w.stale ? `${say}. Feed out of date${d.at ? ` (${hm(d.at, true)})` : ""}: held where it was, not moved on` : say;
+      if (w.stale) why += ". Feed out of date: held where it was";
+      return { say: say.trim(), why, stale: w.stale ? `Stale${d.at ? ` · ${hm(d.at, true)}` : ""}` : "" };
     }
 
     clicked(e) {
@@ -483,30 +486,33 @@ window.TrainLayer = (() => {
 
     show(f) {
       const d = store.data;
-      const foot = `${d.label || "MTA"}${d.at ? `, feed ${hm(d.at, true)}` : ""}. ${d.disclaimer || "Times may not be real time"}.`;
+      const foot = ["MTA", d.at ? hm(d.at, true) : ""].filter(Boolean).join(" · ");
+      const credit = `${d.label || "MTA"}. ${d.disclaimer || "Times may not be real time"}.`;
       const icon = window.Icon ? Icon("gis-train") : null;
       this.control.close();
       if (TRAIN_HIT.includes(f.layer.id)) {
         const t = (d.trains || []).find((x) => x.id === f.properties.id);
         if (!t) return;
         const lines = [];
-        lines.push(t.dir_label);
-        if (t.next_stop) lines.push(`Next stop: ${t.next_stop}${t.next_time ? ` at ${hm(t.next_time)}` : ""}${t.track ? `, track ${t.track}` : ""}`);
+        const pos = this.where(t, d);
+        if (pos.stale) lines.push(h("div", "warn", pos.stale));      // #278: up top, in the warning colour
+        lines.push([t.dir_label, t.next_stop ? `Next ${t.next_stop}${t.next_time ? ` ${hm(t.next_time)}` : ""}` : "", t.track ? `Trk ${t.track}` : ""]
+          .filter(Boolean).join(" · "));
         const said = (t.status || "").toLowerCase();         // the MTA's word, unless the delay already says it
-        const status = [late(t.delay_s), said && said !== "on-time" && !(said === "late" && t.delay_s > 0) ? t.status : ""].filter(Boolean).join(" · ");
+        const status = [late(t.delay_s), said && said !== "on-time" && !(said === "late" && t.delay_s > 0) ? t.status : "",
+                        pos.say, t.cars ? `${t.cars} car${t.cars === 1 ? "" : "s"}` : ""].filter(Boolean).join(" · ");
         if (status) lines.push(status);
-        lines.push(this.where(t, d));
-        lines.push(t.cars ? `${t.cars} car${t.cars === 1 ? "" : "s"} (from the MTA)` : `Length not given by the MTA (drawn as ${LOOK_CARS} cars for every train)`);
         lines.push(d.catenary);
-        this.control.showInfo(`Train ${t.train}`, `${t.line ? `${t.line} Line` : "Metro-North"} to ${t.headsign}`, lines, foot, "", icon);
+        const tip = [pos.why, t.cars ? "Cars: from the MTA" : `Cars: not given by the MTA (drawn as ${LOOK_CARS})`, credit].join("\n");
+        this.control.showInfo(`Train ${t.train}`, `${t.line ? `${t.line} Line` : "Metro-North"} → ${t.headsign}`, lines, foot, "", icon, tip);
         return;
       }
       if (f.layer.id === "tr-station") {
         const s = (d.stations || []).find((x) => x.id === f.properties.id);
-        this.control.showInfo(s ? `${s.name} station` : "Station", "Metro-North, New Haven Line", [d.catenary], foot, "", icon);
+        this.control.showInfo(s ? `${s.name} station` : "Station", "New Haven Line", [d.catenary], foot, "", icon, credit);
         return;
       }
-      this.control.showInfo("New Haven Line", "Metro-North", [d.catenary], foot, "", icon);
+      this.control.showInfo("New Haven Line", "Metro-North", [d.catenary], foot, "", icon, credit);
     }
 
     // the group in the Layers box
@@ -528,18 +534,25 @@ window.TrainLayer = (() => {
       cb.dataset.key = KEY;
       cb.addEventListener("change", () => { this.control.setLayer(KEY, cb.checked); kick(); });
       const mark = window.Icon ? Icon("gis-train") : null;
-      lab.append(cb, ...(mark ? [mark] : []), h("span", "", "Metro-North (New Haven Line)"));
+      lab.append(cb, ...(mark ? [mark] : []), h("span", "", "Metro-North"));
+      lab.title = "New Haven Line";
       box.append(lab);
       if (!this.isOn()) return box;
       if (!d) { box.append(h("div", "ml-note", "Loading…")); return box; }
-      if (!d.configured || d.note) { box.append(h("div", "ml-note", d.note || "Trains not configured on the hub")); return box; }
+      if (!d.configured || d.note) { box.append(h("div", "ml-note", cap(d.note) || "Not configured")); return box; }
       const n = (d.trains || []).length;
+      const span = (d.stations || []).length > 1 ? ` · ${d.stations[0].name}–${d.stations[d.stations.length - 1].name}` : "";
+      box.append(h("div", "ml-note", `${n} train${n === 1 ? "" : "s"}${span}`));
+      // the legend on screen (hollow, faded = stale); the method behind an "i" (a tap on a tablet)
+      const legend = h("div", "ml-note", "Hollow: estimated · faded: stale, held ");
+      const how = "Between reports a train runs on along its track, never past its next reporting point or stop; "
+        + "faded: the feed is out of date and it is held where it was. "
+        + ((d.trains || []).some((t) => t.cars) ? "Cars as the MTA gives them." : `Drawn as ${LOOK_CARS} cars (the MTA doesn't say).`)
+        + ` ${d.disclaimer || ""}.`;
+      if (window.Help && Help.info) legend.append(Help.info(how, "How trains are drawn")); else legend.title = how;
+      box.append(legend);
       const note = h("div", "ml-note");
-      const span = (d.stations || []).length > 1 ? ` (${d.stations[0].name} to ${d.stations[d.stations.length - 1].name})` : "";
-      note.append(`${n ? `${n} train${n === 1 ? "" : "s"} on the line${span}` : `No train on the line${span} now`}. Hollow: position estimated. Between reports a train runs on along its track, never past its next reporting point or stop; faded: the feed is out of date and it is held where it was. `
-                  + ((d.trains || []).some((t) => t.cars) ? "Each drawn the way it is going, its cars as the MTA gives them. "
-                     : `Each drawn the way it is going, as ${LOOK_CARS} cars for all (the MTA doesn't say how many cars). `)
-                  + `Data: ${d.label || "MTA"}${d.at ? `, feed ${hm(d.at, true)}` : ""}. ${d.disclaimer || ""}. `);
+      note.append(["MTA", d.at ? hm(d.at, true) : ""].filter(Boolean).join(" · "), " ");
       if (d.error) note.append(`(${d.error}) `);
       const terms = h("a", "", "Terms");
       terms.href = d.terms || "https://www.mta.info/developers/terms-and-conditions";
@@ -603,30 +616,31 @@ window.TrainLayer = (() => {
     head.addEventListener("click", () => { st.open = !st.open; draw(st, host); });
     host.replaceChildren(head);
     if (!st.open) return;
-    if (!d.configured || d.note) { host.append(h("div", "ml-note tr-note", d.note || "Trains not configured on the hub")); return; }
+    if (!d.configured || d.note) { host.append(h("div", "ml-note tr-note", cap(d.note) || "Not configured")); return; }
     const labels = d.dir_labels || { inbound: "Toward New York", outbound: "Toward New Haven" };
     const grid = h("div", "tr-dirs");
     for (const dir of ["inbound", "outbound"]) {
       const col = h("div", "tr-dir");
       col.append(h("div", "ml-cams-sub dim small", labels[dir]));
       const list = d[dir] || [];
-      if (!list.length) col.append(h("div", "tr-none dim small", `No train in the next ${d.window_min || 15} min`));
+      if (!list.length) col.append(h("div", "tr-none dim small", `None in ${d.window_min || 15} min`));
       for (const t of list) {
         const row = h("div", "tr-row");
         row.append(h("span", "tr-min", t.min <= 0 ? "now" : `${t.min} min`));
         const what = h("span", "tr-what");
         what.append(h("b", "", `Train ${t.train}`), ` to ${t.headsign}`);
-        const facts = [t.stops ? `stops${t.track ? `, track ${t.track}` : ""}` : "passes, no stop", `${hm(t.eta)}`, late(t.delay_s)].filter(Boolean);
+        const facts = [t.stops ? `stops${t.track ? ` · trk ${t.track}` : ""}` : "no stop", `${hm(t.eta)}`, late(t.delay_s)].filter(Boolean);
         what.append(h("span", "dim small", ` · ${facts.join(" · ")}`));
-        if (t.estimated) { const e = h("span", "tr-est small", "estimated"); e.title = "Our estimate from the MTA's times at the stations either side"; what.append(" ", e); }
+        if (t.estimated) { const e = h("span", "tr-est small", "est."); e.title = "Estimated from the MTA's times at the stations either side"; what.append(" ", e); }
         row.append(what);
         col.append(row);
       }
       grid.append(col);
     }
     host.append(grid);
-    host.append(h("div", "ml-note tr-note", `${d.label || "MTA"}${d.at ? `, feed ${hm(d.at, true)}` : ""}. ${d.disclaimer || ""}.`
-                                         + (d.error ? ` (${d.error})` : "")));
+    const foot = h("div", "ml-note tr-note", ["MTA", d.at ? hm(d.at, true) : "", d.error ? `(${d.error})` : ""].filter(Boolean).join(" · "));
+    foot.title = `${d.label || "MTA"}. ${d.disclaimer || ""}.`;
+    host.append(foot);
   }
 
   return { panel, load, maps, data: () => store.data, KEY };

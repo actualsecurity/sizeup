@@ -39,7 +39,7 @@ const DataSourcesPanel = (() => {
     if (s.running) chip = el("span", "chip ds-st run", "Running");
     else if (!s.on) chip = el("span", "chip ds-st off", "Not configured");
     else if (!s.ok) chip = el("span", "chip ds-st err", "Error");
-    else if (!s.last_fetched) chip = el("span", "chip ds-st off", "Not fetched yet");
+    else if (!s.last_fetched) chip = el("span", "chip ds-st off", "Not fetched");
     else chip = el("span", "chip ds-st ok", "OK");
     td.append(chip);
     if (s.running && s.started) td.append(el("div", "dim small", `since ${fmtTime(s.started, true)}`));
@@ -82,7 +82,7 @@ const DataSourcesPanel = (() => {
   }
 
   // A county GIS layer (#229): the last look at the county, when later than the download, and what it did.
-  const HOW = { unchanged: "unchanged", incremental: "only the changes downloaded", full: "downloaded whole" };
+  const HOW = { unchanged: "unchanged", incremental: "changes only", full: "full download" };
   function howLine(s, now) {
     const later = s.checked && (!s.last_fetched || s.checked - s.last_fetched >= 1);
     const d = el("div", "dim small", (later ? `checked ${ago(s.checked, now)}: ` : "") + (HOW[s.how] || s.how));
@@ -124,12 +124,12 @@ const DataSourcesPanel = (() => {
     const now = serverNow();
     const kids = [];
     if (err) kids.push(el("div", "notice err", err));
-    if (data && !data.configured) kids.push(el("div", "empty", "No data sources here: the CAD of record (the hub) keeps them"));
+    if (data && !data.configured) kids.push(el("div", "empty", "On the hub only"));
     if (data && data.sources) {
       const running = data.sources.filter((s) => s.running).length, bad = data.sources.filter((s) => s.on && !s.ok).length;
       const sum = el("div", "row ds-sum");
       sum.append(el("span", "dim small", `${data.sources.length} sources`
-        + (running ? ` · ${running} refreshing` : "") + (bad ? ` · ${bad} with an error` : "")), el("span", "spacer"));
+        + (running ? ` · ${running} refreshing` : "") + (bad ? ` · ${bad} error${bad === 1 ? "" : "s"}` : "")), el("span", "spacer"));
       const edited = data.sources.filter((s) => s.schedule === "managed" && s.every !== s.default_every).length;
       if (edited && canDo("admin")) sum.append(sBtn("Reset schedules", "Every data source back to its default schedule",
         () => sAsk(`Put ${edited} data source${edited === 1 ? "" : "s"} back on the default schedule?`,

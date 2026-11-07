@@ -143,7 +143,7 @@ def test_the_named_dongle_runs_readsb_with_its_claim_and_restarts_when_its_setti
         readsb_output(tmp_path, t, msgs)
         st = d.step(t + 0.2)
     assert st["state"] == "ok" and st["messages_per_s"] == 50.0 and st["aircraft"] == 4 and st["with_pos"] == 3
-    assert st["last_message_at"] == 1021.0 and "4 aircraft (3 with a position), 50 messages/s" in st["detail"]
+    assert st["last_message_at"] == 1021.0 and "4 aircraft · 3 with position · 50 msg/s" in st["detail"]
     receiver_conf(tmp_path, '[aircraft.receiver]\nsdr = "adsb1090"\nbias_tee = true\n')   # the LNA needs power
     d.step(1022.0)
     assert pop.started[0].code is not None                            # stopped ...
@@ -559,7 +559,7 @@ def test_the_hub_takes_the_stations_receiver_as_its_receiver_feed_and_lets_go_wh
         f.st["rest_until"] = f.st["next"] = 0
     ly.refresh()
     assert not ly.receiver_healthy() and "receiver" not in {a["src"] for a in ly.public()["aircraft"]}
-    assert "no word from the station's receiver" in ly.public()["receiver"]["note"]
+    assert "station receiver silent since" in ly.public()["receiver"]["note"]
 
 
 def test_the_api_feeds_keep_their_polite_rates_with_the_receiver_up():
@@ -637,7 +637,7 @@ def test_a_plane_only_our_receiver_hears_keeps_its_details_from_the_apis_and_nev
     assert b["src"] == "receiver" and b["reg"] == "N203QS" and b["op_src"] in ("airline", "")   # its callsign's airline, if any
     assert "PRIVATE PERSON" not in json.dumps(ly.public()).upper()     # co-owned by people: never shown
     js = (ROOT / "sizeup" / "web" / "static" / "aircraft.js").read_text()
-    assert "Position from ${SRC_NAME[a.src]" in js and "a.det" in js and "a.op" in js
+    assert "SRC_NAME[a.src]" in js and "Position: ${POS[a.pos]" in js and "a.det" in js and "a.op" in js
 
 
 # ---- the squawk pre-alert, beside the alarm ---------------------------------------------------------------------------------
@@ -702,10 +702,10 @@ def test_a_squawk_puts_one_prealert_in_the_queue_beside_its_alarm_with_everythin
     lines = dict(d["lines"])
     assert lines["Aircraft"] == "N41DW · SR22"
     assert lines["Emergency"].startswith("squawk 7700 (emergency)")
-    assert lines["Altitude"] == "900 ft, descending 500 ft/min, 80 kt"
+    assert lines["Altitude"] == "900 ft ↓500 fpm · 80 kt"
     assert "nm SE of HPN" in lines["Position"] and "from the runway" in lines["Position"]
     assert lines["Phase"].startswith("arriving HPN")
-    assert lines["Source"].startswith("our receiver on the station") and lines["Time"] and lines["ICAO address"] == "A4D227"
+    assert lines["Source"].startswith("our receiver (station)") and lines["Time"] and lines["ICAO address"] == "A4D227"
     assert "private owner" in lines["Operator"]                       # no operator known: and never a person's name
     assert d["aircraft"][0]["hex"] == "a4d227" and d["aircraft"][0]["alt"] == 900
     assert w.pushed.sent == []                                         # the alarm pushed already: not twice

@@ -414,14 +414,14 @@ station").
    effect within a few seconds (the decoder rereads the config), no restart needed. `gain = "auto"` stays unless you
    have a reason (an LNA makes a fixed high gain overload).
 4. **Check it:**
-   * `sizeup-station status`: the `adsb:` line says `ok: N aircraft (M with a position), X messages/s (adsb1090)`.
+   * `sizeup-station status`: the `adsb:` line says `ok: N aircraft · M with position · X msg/s (adsb1090)`.
      `held` means shortfinal has the dongle (switch it Off there); `unplugged` means the serial isn't on USB;
      `no signal` means nothing decoded for 2 minutes (antenna, filter, LNA, bias-tee).
    * `sizeup-station logs` (`journalctl -u sizeup-adsb`): `adsb: readsb on adsb1090 (device #N), gain auto, bias-tee off`.
    * Settings > Radios: *ADS-B receiver (reserved) · decoding: N aircraft, X messages/s · to the hub every 1 s*.
    * The hub's Settings > Health: *ADS-B receiver (station)*, messages a second, last message, *To the hub: ok*.
-   * The CAD map's Aircraft layer: click an aircraft near HPN: *Position from our receiver: ADS-B ... (1090 MHz)*;
-     the layer box lists *Our receiver (station) on adsb1090*.
+   * The CAD map's Aircraft layer: click an aircraft near HPN: the box's foot says *Our receiver · hh:mm:ss*, and its
+     "i" *Position: ADS-B ..., 1090 MHz*; the layer box lists *Receiver (station) · adsb1090 · 1090 MHz: N aircraft*.
 
 What runs: `python3 -I /usr/local/lib/sizeup/adsbd.py run` as the sizeup user (stdlib only, like the updater), which
 starts `readsb --device-type rtlsdr --device <its index> --gain auto --lat/--lon <[station] lat / lon: the South

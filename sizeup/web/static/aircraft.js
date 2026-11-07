@@ -65,10 +65,10 @@ window.AircraftLayer = (() => {
     arriving: { token: "--ok", text: "Arriving HPN", tag: "▼" },
     departing: { token: "--info", text: "Departing HPN", tag: "▲" },
     near: { token: "--warn", text: "Near HPN", tag: "" },
-    ground: { token: "--text-2", text: "On the ground at HPN", tag: "GND" },
-    low: { token: "--warn", text: "Low in the area", tag: "" },
+    ground: { token: "--text-2", text: "On ground · HPN", tag: "GND" },
+    low: { token: "--warn", text: "Low nearby", tag: "" },
     overflight: { token: "--dim", text: "Overflight", tag: "" },
-    other_ground: { token: "--dim", text: "On the ground elsewhere", tag: "" },
+    other_ground: { token: "--dim", text: "On ground elsewhere", tag: "" },
   };
   // shortfinal's EMPHASIS (its map page): how strongly each phase is drawn (the mark's size, the label's, the trail's)
   const EMPHASIS = {
@@ -83,9 +83,11 @@ window.AircraftLayer = (() => {
   };
   function emphasis(a) { return a.emerg ? EMPHASIS.emergency : (EMPHASIS[a.phase] || EMPHASIS.low); }
   // which feed each position came from (sizeup/aircraft.py combine(): our receiver first, then the freshest of the APIs)
-  const SRC_NAME = { receiver: "our receiver", adsblol: "adsb.lol", adsbfi: "adsb.fi" };
+  const SRC_NAME = { receiver: "Our receiver", adsblol: "adsb.lol", adsbfi: "adsb.fi" };
   const POS = { adsb: "ADS-B (its own GPS position)", mlat: "MLAT (located by receivers' timing)", tisb: "TIS-B (a radar position rebroadcast)",
                 adsr: "ADS-R (rebroadcast from the other band)", modes: "Mode S", adsc: "ADS-C", other: "other" };
+  // #278: the caveats the box used to spell out, now behind its "i"
+  const PHASE_TIP = "Arriving / departing / near / low is sizeup's reading of its track (shortfinal's rules), not ATC's word.";
 
   function h(tag, cls, text) {
     const n = document.createElement(tag);
@@ -102,11 +104,12 @@ window.AircraftLayer = (() => {
     try { return new Date(t * 1000).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false, timeZone: tz() }); } catch (_) { return ""; }
   }
   const fc = (features) => ({ type: "FeatureCollection", features });
-  const fmtAlt = (a) => (a === "ground" ? "GND" : typeof a === "number" ? `${a.toLocaleString("en-US")} ft` : "alt ?");
+  const fmtAlt = (a) => (a === "ground" ? "GND" : typeof a === "number" ? `${a.toLocaleString("en-US")} ft` : "alt unknown");
   const trend = (vr) => (vr === null || vr === undefined ? "" : vr > 300 ? " ↑" : vr < -300 ? " ↓" : "");
+  const cap = (s) => (s ? s[0].toUpperCase() + s.slice(1) : s);     // the hub's why_not() is lower case ("off (…)")
   function eta(s) {
     if (s === null || s === undefined) return "";
-    return s < 60 ? "under a minute" : `about ${Math.round(s / 60)} min`;
+    return s < 60 ? "<1 min" : `~${Math.round(s / 60)} min`;
   }
 
   // ---- the data: one copy for every map on the page, fetched only while one has the layer on ----------------------
@@ -458,50 +461,61 @@ window.AircraftLayer = (() => {
       setTimeout(() => this.show(hex), 0);
     }
 
+    // #278: the target layout, one fact a line (made-up aircraft):
+    //   ✈ ABC123                      Phenom 300 · E55P
+    //   Departing HPN · 1.6 nm
+    //   2,300 ft ↑1,800 fpm · 180 kt · 277°
+    //   Sqk 1234 · N000XX · Example Air
+    //   adsb.fi · 10:21:46                              ⓘ  (where the position came from, how, and the caveats)
     show(hex) {
       const d = store.data;
       const a = ((d && d.aircraft) || []).find((x) => x.hex === hex);
       if (!a) return;
-      const age = ageNow(d, a);
+      const age = ageNow(d, a), stale = age > staleS(d);
+      const has = (v) => v !== null && v !== undefined;
       const lines = [];
-      if (a.emerg) lines.push(`EMERGENCY: ${a.emerg}`);
+      if (a.emerg) lines.push(`EMERGENCY ${a.emerg}`);
+      // #278: an old position is said up top, in the warning colour, with the time it was reported (never only in the foot)
+      const fixAt = (d.fetched || d.at || 0) - (a.age || 0);
+      if (stale) lines.push(h("div", "warn", `Stale · ${hms(fixAt)}`));
       const ph = PHASE[a.phase] || PHASE.low;
-      let doing = ph.text;
-      if (a.phase === "arriving") {
-        doing += a.appr ? `, on the ${a.appr}` : a.rwy ? `, lined up on runway ${a.rwy}` : ", inbound";
-        if (a.dist !== null && a.dist !== undefined) doing += ` · ${a.dist.toFixed(1)} nm to go`;
-      } else if (a.dist !== null && a.dist !== undefined) doing += ` · ${a.dist.toFixed(1)} nm from the field`;
-      if (age > staleS(d)) doing += " (at its last position: no newer one)";
-      // reported or estimated: the mark moves on between reports; say so (the trail is its reported fixes up to it)
-      const between = glide && glide.estimated(a.hex) && age <= staleS(d);
-      lines.push(doing);
-      if (a.eta !== null && a.eta !== undefined) lines.push(`ETA ${eta(a.eta)} at its present speed (an estimate)`);
-      const vs = a.vr === null || a.vr === undefined ? "" : Math.abs(a.vr) <= 300 ? "level" : `${a.vr > 0 ? "climbing" : "descending"} ${Math.abs(a.vr).toLocaleString("en-US")} ft/min`;
-      lines.push([fmtAlt(a.alt), vs, a.gs !== null && a.gs !== undefined ? `${a.gs} kt` : "", a.trk !== null && a.trk !== undefined ? `track ${a.trk}°` : ""].filter(Boolean).join(" · "));
-      if (a.sq) lines.push(`Squawk ${a.sq}`);
-      const reg = a.reg ? `Registration ${a.reg}${a.reg_src === "faa" ? " (FAA registry)" : ""}` : "Registration not known";
-      lines.push([reg, a.airline].filter(Boolean).join(" · "));
-      // the operator: the airline its callsign names, else a company's or government's from the feeds (never a person's)
-      if (a.op && a.op !== a.airline) lines.push(`Operator: ${a.op}${a.op_src && a.op_src !== "airline" ? ` (${SRC_NAME[a.op_src] || a.op_src})` : ""}`);
-      // where its position came from: our receiver while it hears it, adsb.lol / adsb.fi when we lose it (#235)
-      lines.push(`Position from ${SRC_NAME[a.src] || a.src || "the feed"}: ${POS[a.pos] || "as the feed gives it"}${a.band ? ` (${a.band} MHz)` : ""}`
-                 + `${age > staleS(d) ? " (stale)" : ""}`);
-      if (a.det) lines.push(`Type and registration from ${SRC_NAME[a.det] || a.det}, matched by its ICAO address`);
-      if (between) lines.push(`Drawn at an estimate between reports: on from its last reported position by its track and speed (at most ${HORIZON_S} s), meeting each new report without jumping back`);
-      lines.push("Arriving / departing / low is sizeup's reading of its track (shortfinal's rules), not ATC's word.");
+      const where = a.phase !== "arriving" ? "" : a.appr ? a.appr : a.rwy ? `RWY ${a.rwy}` : "";
+      lines.push([ph.text, where, has(a.dist) ? `${a.dist.toFixed(1)} nm` : "", has(a.eta) ? `ETA ${eta(a.eta)}` : ""]
+        .filter(Boolean).join(" · "));
+      const vs = !has(a.vr) || a.alt === "ground" ? "" : Math.abs(a.vr) <= 300 ? "level"
+        : `${a.vr > 0 ? "↑" : "↓"}${Math.abs(a.vr).toLocaleString("en-US")} fpm`;
+      lines.push([[fmtAlt(a.alt), vs].filter(Boolean).join(" "), has(a.gs) ? `${a.gs} kt` : "", has(a.trk) ? `${a.trk}°` : ""]
+        .filter(Boolean).join(" · "));
+      const who = [a.airline, a.op && a.op !== a.airline ? a.op : ""].filter(Boolean);
+      const ids = [a.sq ? `Sqk ${a.sq}` : "", a.reg || "", ...who].filter(Boolean);
+      if (ids.length) lines.push(ids.join(" · "));
       lines.push(...this.heardLines(d, a));
-      const what = [a.type, a.model ? `${a.model}${a.model_src === "faa" ? " (FAA registry)" : ""}` : "", a.kind].filter(Boolean);
-      const foot = [d.credit ? `Data: ${d.credit}` : "", d.at ? `feed ${hms(d.at)}` : "", (d.registry && d.registry.credit) || ""].filter(Boolean).join(" · ");
+      const what = [a.model, a.type, a.kind].filter(Boolean);
+      const foot = [SRC_NAME[a.src] || a.src || "", d.at ? hms(d.at) : ""].filter(Boolean).join(" · ");
+      // the method and the caveats: hover or tap the "i"
+      const between = glide && glide.estimated(a.hex) && !stale;
+      const tip = [
+        `Position: ${POS[a.pos] || "as the feed gives it"}${a.band ? `, ${a.band} MHz` : ""}`,
+        a.reg ? `Registration from ${a.reg_src === "faa" ? "the FAA registry" : "the feed"}` : "",
+        a.model ? `Model from ${a.model_src === "faa" ? "the FAA registry" : "the feed"}` : "",
+        a.det ? `Type and registration from ${SRC_NAME[a.det] || a.det}, matched by its ICAO address` : "",
+        a.op && a.op !== a.airline && a.op_src && a.op_src !== "airline" ? `Operator from ${SRC_NAME[a.op_src] || a.op_src}` : "",
+        has(a.eta) ? "ETA: at its present speed" : "",
+        between ? `Drawn on between reports by its track and speed (at most ${HORIZON_S} s)` : "",
+        PHASE_TIP,
+        [d.credit ? `Data: ${d.credit}` : "", (d.registry && d.registry.credit) || ""].filter(Boolean).join(" · "),
+      ].filter(Boolean).join("\n");
       const icon = window.Icon ? Icon("aircraft") : null;
       this.control.close();
-      this.control.showInfo(callsign(a), what.length ? what.join(" · ") : "Type not known", lines, foot, a.emerg ? "ac-emerg" : "", icon);
+      this.control.showInfo(callsign(a), what.join(" · "), lines, foot, a.emerg ? "ac-emerg" : "", icon, tip);
     }
 
     // its recent transmissions on HPN Tower (#252): ▶, the time, who said it, the words; speech-derived, never a radio ID
     heardLines(d, a) {
       const at = atcOf(d), tx = (at && at.tx && at.tx[a.hex]) || [];
       if (!tx.length) return [];
-      const head = h("div", "ac-heard-head", `Heard on HPN Tower (${tx.length}): the callsign from the words, not a radio ID`);
+      const head = h("div", "ac-heard-head", `HPN Tower · ${tx.length}`);
+      head.title = "Matched by the callsign in the words, not a radio ID";
       return [head, ...tx.map((x) => {
         const row = h("div", "ac-tx");
         const b = h("button", "play mini");
@@ -510,10 +524,10 @@ window.AircraftLayer = (() => {
         if (window.Icon && Icon.play) Icon.play(b); else b.textContent = "▶";
         const url = `/api/audio/${encodeURIComponent(x.id)}.wav`;
         if (window.playBtn) playBtn(b, url); else b.addEventListener("click", () => window.play && play(url));
-        const who = x.role === "speaking" ? "it, speaking" : x.role === "addressed" ? `${x.talker || "TWR"} to it` : "about it";
+        const who = x.role === "speaking" ? "Pilot" : x.role === "addressed" ? `${x.talker || "TWR"} →` : "Mention";
         row.append(b, h("span", "dim small", hms(x.at)), h("span", `ac-tx-who ${x.status}`, who),
                    h("span", "ac-tx-text", x.text || "…"));
-        if (x.status === "probable") row.title = "Probable: one near match on ADS-B (one character off), the only one near HPN";
+        if (x.status === "probable") row.title = "Probable: one character off, the only near match at HPN";
         return row;
       })];
     }
@@ -540,11 +554,12 @@ window.AircraftLayer = (() => {
       cb.dataset.key = KEY;
       cb.addEventListener("change", () => { this.control.setLayer(KEY, cb.checked); kick(); });
       const icon = window.Icon ? Icon("aircraft") : null;
-      lab.append(cb, ...(icon ? [icon] : []), h("span", "", "Near HPN: arrivals, departures, low traffic"));
+      lab.append(cb, ...(icon ? [icon] : []), h("span", "", "Near HPN"));
+      lab.title = "Arrivals, departures, ground and low traffic";
       box.append(lab);
       if (!this.isOn()) return box;
-      if (!d) { box.append(h("div", "ml-note", store.failed ? "Aircraft unavailable here" : "Loading…")); return box; }
-      if (!d.configured || d.note) { box.append(h("div", "ml-note", d.note || "Aircraft not configured on the hub")); return box; }
+      if (!d) { box.append(h("div", "ml-note", store.failed ? "Unavailable" : "Loading…")); return box; }
+      if (!d.configured || d.note) { box.append(h("div", "ml-note", cap(d.note) || "Not configured")); return box; }
       const list = d.aircraft || [];
       for (const a of list.filter((x) => x.emerg)) box.append(h("div", "ml-note ac-emerg", `${callsign(a)}: ${a.emerg}`));
       const ours = list.filter((a) => ["arriving", "departing", "near", "ground"].includes(a.phase)).slice(0, 8);
@@ -561,12 +576,13 @@ window.AircraftLayer = (() => {
           rows.append(row);
         }
         box.append(rows);
-      } else box.append(h("div", "ml-note", "None arriving, departing or on the ground at HPN"));
+      } else box.append(h("div", "ml-note", "None at HPN"));
       const low = list.filter((a) => a.phase === "low").length;
+      box.append(h("div", "ml-note", `${low} low nearby`));
+      // the hollow-mark legend: a staleness rule, so on screen (and the "i" for a tap)
+      box.append(h("div", "ml-note", `Hollow: stale (>${staleS(d)} s)`));
       const note = h("div", "ml-note");
-      note.append(`${low ? `${low} low in the area` : "Nothing low in the area"}. Hollow: position older than ${staleS(d)} s. `
-                  + `Data: ${d.credit || "none yet"}${d.at ? `, feed ${hms(d.at)}` : ""}. `
-                  + `${(d.registry && d.registry.credit) || ""}`);
+      note.append([d.credit || "No data yet", d.at ? hms(d.at) : "", (d.registry && d.registry.credit) || ""].filter(Boolean).join(" · "));
       for (const f of (d.feeds || []).filter((x) => x.terms)) {
         const t = h("a", "", `${f.label} terms`);
         t.href = f.terms;
@@ -576,18 +592,18 @@ window.AircraftLayer = (() => {
       }
       box.append(note);
       // each feed: our receiver first, then the primary and the other API; how many it gave, or why it rests
-      const feeds = (d.feeds || []).map((f) => `${SRC_NAME[f.key] || f.label}${f.role === "primary" ? " (primary)" : ""}: `
-        + (f.resting ? `resting (${f.resting})` : f.ok ? `${f.n} aircraft, ${f.shown} shown` : "no answer yet"));
-      if (feeds.length) box.append(h("div", "ml-note", feeds.join(" · ")));
-      if (d.fetched && Date.now() / 1000 - d.fetched > 30) box.append(h("div", "ml-note ac-emerg", `No new aircraft data since ${hms(d.fetched)}`));
+      const feeds = (d.feeds || []).map((f) => `${SRC_NAME[f.key] || f.label}${f.role === "primary" ? "*" : ""}: `
+        + (f.resting ? `resting (${f.resting})` : f.ok ? `${f.n} (${f.shown} shown)` : "waiting"));
+      if (feeds.length) { const fl = h("div", "ml-note", feeds.join(" · ")); fl.title = "Aircraft each feed gave (* primary)"; box.append(fl); }
+      if (d.fetched && Date.now() / 1000 - d.fetched > 30) box.append(h("div", "ml-note ac-emerg", `No data since ${hms(d.fetched)}`));
       if (d.error) box.append(h("div", "ml-note", `(${d.error})`));
       const rx = d.receiver;
       if (rx) {
-        const bands = Object.entries(rx.bands || {}).map(([b, s]) => `${b} MHz ${s.error ? `: ${s.error}` : `${s.n} aircraft`}`);
+        const bands = Object.entries(rx.bands || {}).map(([b, s]) => `${b} MHz: ${s.error ? s.error : `${s.n} aircraft`}`);
         const who = rx.held_by && !(rx.held_by.app === "sizeup" && rx.held_by.mode === "adsb")
           ? `held by ${rx.held_by.app}${rx.held_by.mode ? ` (${rx.held_by.mode})` : ""}` : "";
-        const dec = rx.decoder && rx.decoder.state === "ok" ? `${rx.decoder.messages_per_s ?? 0} messages/s` : "";
-        box.append(h("div", "ml-note", ["Our receiver" + (rx.station ? " (station)" : "") + (rx.sdr ? ` on ${rx.name || rx.sdr}` : ""),
+        const dec = rx.decoder && rx.decoder.state === "ok" ? `${rx.decoder.messages_per_s ?? 0} msg/s` : "";
+        box.append(h("div", "ml-note", ["Receiver" + (rx.station ? " (station)" : "") + (rx.sdr ? ` · ${rx.name || rx.sdr}` : ""),
                                          who, dec, ...bands, rx.note].filter(Boolean).join(" · ")));
       }
       return box;

@@ -778,8 +778,8 @@ class Decoder:
             self.usb_fails = 0
         rate = o["messages_per_s"]
         self.said = None
-        self._set(now, "ok", f"{o['aircraft']} aircraft ({o['with_pos']} with a position)"
-                             + (f", {rate:g} messages/s" if rate is not None else ""),
+        self._set(now, "ok", f"{o['aircraft']} aircraft · {o['with_pos']} with position"
+                             + (f" · {rate:g} msg/s" if rate is not None else ""),
                   present=True, **keep, **nums, **base)
 
     # -- readsb's output, and why it stopped (#262) -------------------------------------------------------------------
