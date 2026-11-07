@@ -215,27 +215,25 @@ class Dvr:
         with self._lock:
             return self._cams.setdefault(cid, {"segs": {}, "last": None, "end": None, "offset": 0, "breaks": set()})
 
-    def _read_dir(self, d: Path) -> dict[int, tuple[float, float, int, str, bool]]:
-        """A camera's folder: key -> (start, duration, bytes, file name, a new stream). A file that goes meanwhile (another writer
-        evicting it) is skipped; a write cut short (a temp file) goes: at once on our own disk, on shared storage only
-        once it is STALE_TMP_S old (it may be the old leader's, still being written)."""
-        segs: dict[int, tuple[float, float, int, str, bool]] = {}
+    def _read_dir(self, d: Path) -> dict[int, list[tuple[float, float, int, str, bool]]] | None:
+        """A camera's folder: key -> its files [(start, duration, bytes, file name, a new stream)], usually one; two when
+        both leaders wrote the same segment (reported, never deleted here: _scan decides which one stays). None when
+        the folder can't be listed (its index is left as it is). A file that goes meanwhile (another writer evicting
+        it) is skipped; a write cut short (a temp file) goes: at once on our own disk, on shared storage only once it
+        is STALE_TMP_S old (it may be the old leader's, still being written)."""
+        segs: dict[int, list[tuple[float, float, int, str, bool]]] = {}
         try:
             entries = list(os.scandir(d))
         except OSError:
-            return segs
+            return None
         now = time.time()
         for f in entries:
             m = FILE_RE.fullmatch(f.name)
             try:
                 if m:
                     size = int(m.group(4)) if m.group(4) else f.stat().st_size
-                    key = int(m.group(1))
-                    if key in segs:                   # the same segment twice (two writers): keep one
-                        if self.may_write():
-                            Path(f.path).unlink(missing_ok=True)
-                        continue
-                    segs[key] = (int(m.group(2)) / 1000, int(m.group(3)) / 1000, size, f.name, bool(m.group(5)))
+                    segs.setdefault(int(m.group(1)), []).append(
+                        (int(m.group(2)) / 1000, int(m.group(3)) / 1000, size, f.name, bool(m.group(5))))
                 elif f.name.endswith(".tmp") and (not self.shared or now - f.stat().st_mtime > STALE_TMP_S):
                     if self.may_write():
                         Path(f.path).unlink(missing_ok=True)
@@ -243,10 +241,21 @@ class Dvr:
                 continue
         return segs
 
+    @staticmethod
+    def _newest(d: Path, files: list[tuple]) -> tuple:
+        """Of a segment's files (both leaders wrote it), the one written last (its mtime; a file gone meanwhile: never)."""
+        def mtime(x) -> float:
+            try:
+                return (d / x[3]).stat().st_mtime
+            except OSError:
+                return -1.0
+        return max(files, key=lambda x: (mtime(x), x[3]))
+
     def _scan(self) -> None:
         """What is already on disk (the app restarted within the same task, or on shared storage the leader before
         this one): the index from the file names. Taken in alongside what is already indexed (rescans): a segment
-        not indexed is added, an indexed one whose file is gone is dropped."""
+        not indexed is added, an indexed one whose file is gone is dropped. A segment both leaders wrote: the indexed
+        file stays (else the newest), only the other is deleted, whatever order the folder lists them in."""
         if not self.root.is_dir():
             return
         try:
@@ -257,6 +266,9 @@ class Dvr:
             with self._lock:                          # what was indexed before the listing (not what we write meanwhile)
                 known = set(self._cams[d.name]["segs"]) if d.name in self._cams else set()
             found = self._read_dir(Path(d.path))
+            if found is None:
+                continue                              # not listable now: its index stays as it is
+            twins = []
             with self._lock:
                 c = self._cams.get(d.name)
                 if c is None:
@@ -270,15 +282,19 @@ class Dvr:
                     c["segs"].pop(key, None)          # gone from the disk (evicted by the other writer)
                     names.pop(key, None)
                     breaks.discard(key)
-                twins = []
-                for key, (t0, dur, size, name, brk) in found.items():
-                    if key not in c["segs"]:
+                for key, files in found.items():
+                    have = (names.get(key) or _name(key, *c["segs"][key], key in breaks)) if key in c["segs"] else None
+                    keep = next((x for x in files if x[3] == have), None)
+                    if keep is None:                  # not indexed (or its indexed file is gone): the newest one
+                        keep = files[0] if len(files) == 1 else self._newest(Path(d.path), files)
+                        t0, dur, size, name, brk = keep
                         c["segs"][key] = (t0, dur, size)
                         names[key] = name
                         if brk:
                             breaks.add(key)
-                    elif name != (names.get(key) or _name(key, *c["segs"][key], key in breaks)):
-                        twins.append(name)            # the same segment written by both leaders: one is enough
+                        else:
+                            breaks.discard(key)
+                    twins += [x[3] for x in files if x[3] != keep[3]]   # the same segment twice: one is enough
                 if c["segs"]:
                     last = max(c["segs"])
                     if c["last"] is None or last > c["last"]:

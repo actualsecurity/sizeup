@@ -570,8 +570,8 @@ class App:
         # The camera DVR (#277, sizeup/dvr.py): live cameras' segments on this task's disk, on demand (the always list,
         # pins, an open event's cameras, the ones watched); the pins in the CAD store so a deploy keeps them.
         # On shared storage (#322: EFS mounted at the DVR's folder, or [roads] dvr_shared = true) the recording outlives a
-        # deploy: the area's cameras 24/7, a 24 h window, and only the lease holder writes (self.fence). This is the
-        # leader's app: the standby's warm app (prewarm) never gets here.
+        # deploy: the response area's cameras 24/7, a 12 h window, and only the lease holder writes (self.fence). This
+        # is the leader's app: the standby's warm app (prewarm) never gets here.
         if cfg.roads_dvr and cfg.roads_enabled:
             from sizeup.dvr import WORKERS, MAX_WORKERS, Dvr, shared_mount
             state = Path(cfg.cad_db).parent if cfg.cad_db else Path(".")

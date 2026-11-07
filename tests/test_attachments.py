@@ -62,6 +62,11 @@ class FakeS3:
             vid = f"v{self.n}"
             self.versions.setdefault(key, {})[vid] = bytes(body)
             return 200, {"ETag": '"e"', "x-amz-version-id": vid}, b""
+        if method == "GET" and "versions" in q:
+            pre = unquote(q.get("prefix", ""))
+            rows = "".join(f"<Version><Key>{k}</Key><VersionId>{v}</VersionId></Version>"
+                           for k in sorted(self.versions) if k.startswith(pre) for v in self.versions[k])
+            return 200, {}, f"<ListVersionsResult><IsTruncated>false</IsTruncated>{rows}</ListVersionsResult>".encode()
         if method == "GET":
             if key not in self.objects:
                 return 404, {}, b"<Error><Code>NoSuchKey</Code></Error>"
@@ -337,18 +342,37 @@ def test_a_deleted_copy_is_never_copied_again_and_a_failed_one_is_tried_again(tm
     a.fake.fail = lambda m, k: m == "PUT" and "audio.wav" in k
     clock.t += att_mod.SETTLE_S + 30
     assert a.sync_radio() == 0
-    assert {r["status"] for r in a.list(inc["id"])} == {"failed"}
+    rows = a.list(inc["id"])
+    assert [r["status"] for r in rows] == ["failed"]                        # the batch stopped at the first failure
     a.fake.fail = None
-    assert a.sync_radio() == 2 and {r["status"] for r in a.list(inc["id"])} == {"stored"}
+    assert a.sync_radio() == 1                                              # the other one; the failed one waits
+    clock.t += att_mod.RETRY_S[0] + 1
+    assert a.sync_radio() == 1 and {r["status"] for r in a.list(inc["id"])} == {"stored"}
     first = a.list(inc["id"])[0]["id"]
     a.delete(first, "Corey <corey@example.org>")
     assert a.sync_radio() == 0 and len(a.list(inc["id"], deleted=True)) == 2
-    # a copy failing every time stops after TRIES
+
+
+def test_s3_trouble_backs_off_and_never_counts_but_a_refusal_does(tmp_path):
+    c, a, inc, clock = radio_setup(tmp_path)
     c.record_traffic(tx("FG1-10", clock.t, rig="E63", radio_id="6301"))
     clock.t += att_mod.SETTLE_S + 30
-    a.fake.fail = lambda m, k: m == "PUT"
-    for _ in range(att_mod.TRIES + 2):
+    a.fake.fail = lambda m, k: m == "PUT"                                   # a 500: S3's own trouble
+    waits = []
+    for _ in range(att_mod.TRIES + 4):
         a.sync_radio()
+        row = c.store.one("SELECT tries, attempts, retry_at, status FROM attachments WHERE ref = 'FG1-10'")
+        waits.append(row["retry_at"] - clock.t)
+        assert a.sync_radio() == 0                                          # not before its time
+        clock.t = row["retry_at"] + 1
+    assert row["tries"] == 0 and row["attempts"] == att_mod.TRIES + 4 and row["status"] == "failed"
+    assert waits[:3] == [60.0, 120.0, 240.0] and max(waits) <= att_mod.RETRY_S[1]
+    # a refusal (a 400) counts: after TRIES it stops
+    real = a.fake.__call__
+    a.s3.send = lambda m, u, h, b, t: (400, {}, b"<Error><Code>InvalidRequest</Code></Error>") if m == "PUT" else real(m, u, h, b, t)
+    for _ in range(att_mod.TRIES + 3):
+        a.sync_radio()
+        clock.t += att_mod.RETRY_S[1] + 1
     row = c.store.one("SELECT tries, status FROM attachments WHERE ref = 'FG1-10'")
     assert row == {"tries": att_mod.TRIES, "status": "failed"}
 
@@ -360,11 +384,13 @@ def test_the_export_is_one_zip_with_every_hash_checked(tmp_path):
     clock.t += att_mod.SETTLE_S + 30
     assert a.sync_radio() == 2
     api = CadApi(c)
-    before = set(Path(att_mod.tempfile.gettempdir()).glob("sizeup-export-*"))
     resp = get(api, f"/api/cad/incident/{inc['id']}/export.zip")
     assert resp[0] == 200 and resp[2] == "application/zip" and inc["number"] in resp[3]["Content-Disposition"]
+    assert resp[1].length is None                                           # streamed as it is made: no length ahead
+    code, out, _ = get(api, f"/api/cad/incident/{inc['id']}/export.zip")    # one at a time
+    assert code == 400 and "another export" in json.loads(out)["error"]
     z = zipfile.ZipFile(io.BytesIO(body_of(resp)))
-    assert set(Path(att_mod.tempfile.gettempdir()).glob("sizeup-export-*")) == before        # its temp file: gone
+    assert get(api, f"/api/cad/incident/{inc['id']}/export.zip")[1].read_all()[:2] == b"PK"   # free again
     man = json.loads(z.read("manifest.json"))
     assert man["verified"] and man["incident"]["number"] == inc["number"] and len(man["attachments"]) == 2
     assert len(man["files"]) == 6 and all(f["verified"] for f in man["files"])
@@ -491,6 +517,7 @@ def test_a_delete_removes_every_version_even_a_retrys_and_a_failed_delete_can_be
     a.fake.fail = lambda m, k: m == "PUT" and k.endswith("transmission.json")
     assert a.sync_radio() == 0                                              # audio.wav written, then a failure
     a.fake.fail = None
+    clock.t += att_mod.RETRY_S[0] + 1
     assert a.sync_radio() == 1                                              # audio.wav written again: two versions
     aid = a.list(inc["id"])[0]["id"]
     wav = next(k for k in a.fake.versions if k.endswith("audio.wav"))
@@ -525,3 +552,77 @@ def test_without_the_bypass_a_locked_version_stays(tmp_path):
     s3.delete_version("attachments/1/x/a.bin", v)
     with pytest.raises(aws.AwsError):
         s3.get("attachments/1/x/a.bin")
+
+
+def test_a_version_whose_put_answer_was_lost_is_deleted_too(tmp_path):
+    """A PUT that went through but whose answer never came (no version recorded): the admin delete lists the
+    attachment's prefix and removes it as well."""
+    c, a, inc, clock = radio_setup(tmp_path)
+    c.record_traffic(tx("FG1-2", clock.t, rig="E63", radio_id="6301"))
+    clock.t += att_mod.SETTLE_S + 30
+    real = a._wrote
+    a._wrote = lambda aid, key, v: None if key.endswith("audio.wav") else real(aid, key, v)
+    assert a.sync_radio() == 1
+    a._wrote = real
+    aid = a.list(inc["id"])[0]["id"]
+    assert not any(k.endswith("audio.wav") for k, _ in json.loads(a.row(aid)["versions"]))
+    a.delete(aid, "Corey <corey@example.org>")
+    assert a.fake.versions == {} and "3 versions (listed)" in a.audit_rows(aid=aid)[0]["detail"]
+
+
+def test_a_transcript_only_download_over_http_is_not_gzipped_and_an_export_streams(tmp_path):
+    """Real HTTP: a streamed JSON body (a radio copy with no audio) goes as it is, not gzipped (it raised); an export
+    goes without a length, to the end of the connection, a whole zip."""
+    import http.client
+    import threading
+    from sizeup.web.server import WebServer
+    c, a, inc, clock = radio_setup(tmp_path)
+    c.record_traffic(tx("307-x-call_1", clock.t, "Fire/EMS 15", "", "60 Ctrl OP 7", 307, "words " * 400))
+    assert c.link_traffic(inc["id"], {"traffic_id": "307-x-call_1", "operator": "Lt. Ruiz"})["linked"]
+    clock.t += att_mod.SETTLE_S + 30
+    assert a.sync_radio() == 1
+    aid = a.list(inc["id"])[0]["id"]
+    srv = WebServer("127.0.0.1", 0, {}, dict, lambda cid: None, lambda i: False, cad=CadApi(c))
+    threading.Thread(target=srv.httpd.serve_forever, daemon=True).start()
+    try:
+        port = srv.httpd.server_address[1]
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        conn.request("GET", f"/api/cad/attachments/{aid}/download", headers={"Accept-Encoding": "gzip"})
+        r = conn.getresponse()
+        body = r.read()
+        assert r.status == 200 and r.getheader("Content-Encoding") is None and len(body) > 1024
+        assert json.loads(body)["text"].startswith("words")
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        conn.request("GET", f"/api/cad/incident/{inc['id']}/export.zip")
+        r = conn.getresponse()
+        body = r.read()
+        assert r.status == 200 and r.getheader("Content-Length") is None and r.getheader("Connection") == "close"
+        z = zipfile.ZipFile(io.BytesIO(body))
+        assert json.loads(z.read("manifest.json"))["verified"] and z.testzip() is None
+    finally:
+        srv.httpd.shutdown()
+
+
+def test_a_clip_interrupted_by_a_deploy_is_uploaded_again_by_the_next_leader(tmp_path):
+    api, c, a, d, iid, clock = camera_setup(tmp_path)
+    st = d.status(CAM)
+    a._pool = Later()                                                      # the old leader: SIGTERM, its queue gone
+    aid = call(api, f"/api/cad/cameras/{CAM}/dvr/clip", {"from": st["from"] + 6, "to": st["to"], "incident_id": iid,
+                                                          "note": "approach"}, JULIAN)[1]["attachment"]["id"]
+    gone = call(api, f"/api/cad/cameras/{CAM}/dvr/clip", {"from": st["from"], "to": st["from"] + 3, "incident_id": iid},
+                JULIAN)[1]["attachment"]["id"]
+    assert a.row(aid)["status"] == "saving" and a.fake.objects == {}
+    # the new leader (the same store and bucket, the DVR read from the shared disk)
+    b = Attachments(c.store, a.s3, log=lambda m: None, clock=clock)
+    b._pool = Now()
+    b.dvr, b.camera = (lambda: d), d.roads.camera
+    first = min(d._cams[CAM]["segs"])
+    d._remove(CAM, first)                                                  # the short one's range: evicted meanwhile
+    assert b.resume() == 1
+    row = b.row(aid)
+    assert row["status"] == "stored" and row["note"] == "approach" and "Julian" in row["created_by"]
+    want = b"".join(Path(s["path"]).read_bytes() for s in d.segments(CAM, row["start"], row["end"]))
+    part = a.fake.objects[f"attachments/{iid}/{aid}/part-0000.ts"][0]
+    assert part == want                                                    # the same id, the same range
+    assert b.row(gone)["status"] == "failed" and "no longer recorded" in b.row(gone)["error"]
+    assert b._resumed                                                      # once per process

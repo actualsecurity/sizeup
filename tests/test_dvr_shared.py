@@ -242,7 +242,15 @@ def test_the_response_area_holds_our_cameras_and_the_ones_just_out(replay_sets):
                        for c in got)
 
 
-def test_a_segment_both_leaders_wrote_is_kept_once(tmp_path):
+@pytest.mark.parametrize("order", ["listed", "reversed"])
+def test_a_segment_both_leaders_wrote_is_kept_once(tmp_path, monkeypatch, order):
+    """Whatever order the folder lists them in: the indexed file stays and only the other goes; not indexed (a new
+    leader's first look), the newest stays. Never both."""
+    real = os.scandir
+    if order == "reversed":
+        monkeypatch.setattr(dvr_mod.os, "scandir", lambda p: iter(sorted(real(p), key=lambda e: e.name, reverse=True)))
+    else:
+        monkeypatch.setattr(dvr_mod.os, "scandir", lambda p: iter(sorted(real(p), key=lambda e: e.name)))
     r, d, f, clock = setup(tmp_path, area=None)
     new = Dvr(r, tmp_path / "efs", clock=clock, log=lambda m: None, free_floor=0, area=around(r, CAM), shared=True)
     new.scan_now()
@@ -250,10 +258,41 @@ def test_a_segment_both_leaders_wrote_is_kept_once(tmp_path):
     key = max(new._cams[CAM]["segs"])
     mine = new._file(CAM, key)
     t0, dur, size = new._cams[CAM]["segs"][key]
-    twin = mine.with_name(dvr_mod._name(key, t0 + 0.5, dur, size))                 # the old leader's, timed a little apart
-    twin.write_bytes(mine.read_bytes())
-    new._scan()
-    assert mine.exists() and not twin.exists() and new._cams[CAM]["segs"][key] == (t0, dur, size)
+    for dt in (-0.5, 0.5):                                                          # sorts before / after ours
+        twin = mine.with_name(dvr_mod._name(key, t0 + dt, dur, size))               # the old leader's, timed apart
+        twin.write_bytes(mine.read_bytes())
+        new._scan()
+        assert mine.exists() and not twin.exists() and new._cams[CAM]["segs"][key] == (t0, dur, size)
+    # not indexed yet (a new leader's first look): the newest of the two stays, the other goes
+    older = mine.with_name(dvr_mod._name(key, t0 - 0.5, dur, size))
+    older.write_bytes(mine.read_bytes())
+    os.utime(older, (time.time() - 60,) * 2)
+    third = Dvr(r, tmp_path / "efs", clock=clock, log=lambda m: None, free_floor=0, shared=True)
+    third.scan_now()
+    assert mine.exists() and not older.exists() and third._file(CAM, key) == mine
+    newer = mine.with_name(dvr_mod._name(key, t0 + 0.5, dur, size))
+    newer.write_bytes(mine.read_bytes())
+    os.utime(mine, (time.time() - 60,) * 2)
+    fourth = Dvr(r, tmp_path / "efs", clock=clock, log=lambda m: None, free_floor=0, shared=True)
+    fourth.scan_now()
+    assert newer.exists() and not mine.exists() and fourth._file(CAM, key) == newer
+
+
+def test_a_folder_that_cant_be_listed_keeps_its_index(tmp_path, monkeypatch):
+    r, d, f, clock = setup(tmp_path, area=None)
+    dv = Dvr(r, tmp_path / "efs", clock=clock, log=lambda m: None, free_floor=0, area=around(r, CAM), shared=True)
+    dv.scan_now()
+    step(dv, f, clock, 2)
+    n = dv.status(CAM)["segments"]
+    real = os.scandir
+
+    def flaky(p):
+        if str(p).endswith(CAM):
+            raise OSError("ESTALE")
+        return real(p)
+    monkeypatch.setattr(dvr_mod.os, "scandir", flaky)
+    dv._scan()
+    assert dv.status(CAM)["segments"] == n
 
 
 def test_a_camera_merge_moves_a_folder_only_on_the_leader_and_never_under_a_clip(tmp_path):

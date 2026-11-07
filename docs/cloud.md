@@ -1987,11 +1987,13 @@ only, Object Lock in governance mode for 365 days, lifecycle: expire after 365 d
 - **camera**: a range of a DVR recording (at most 60 min, within what is recorded), saved by a dispatcher or admin
   (`POST /api/cad/cameras/<id>/dvr/clip {from, to, incident_id, note}`): the recorded segments concatenated as they
   are (no re-encode) into parts of at most 8 MB, then `manifest.json` (camera, range, incident, who and when, the
-  note, every segment's place in the parts, every object's sha256). Uploaded in the background (two at a time).
+  note, every segment's place in the parts, every object's sha256). Uploaded in the background (two at a time); one
+  a deploy interrupted is uploaded again by the next leader under the same id, if its range is still recorded.
 - **radio**: every transmission linked to an incident (by hand or by the auto-linking) 5 min after it ended: its
   `audio.wav`, `transmission.json` (transcript and the alternative one, talker, radio ID, rig, channel, talkgroup)
-  and `manifest.json`. Once per incident and transmission (a deleted one is never copied again; a failed one is
-  tried again, at most 5 times); kept a year whatever `audio.sqlite`'s retention.
+  and `manifest.json`. Once per incident and transmission (a deleted one is never copied again). A failed copy is
+  tried again after 60 s doubling to an hour; S3's own trouble (network, 5xx, 403) never counts, a refusal counts
+  (5 at most); a round stops at its first failure. Kept a year whatever `audio.sqlite`'s retention.
 
 Every PUT has SSE, Content-MD5 and the SHA-256 checksum. The CAD store has the record (`attachments`: kind, source,
 range, sha256 of every object, who and when, note, status) and the audit (`attachment_audit`: attach, view,
@@ -2001,9 +2003,9 @@ Through the hub only (behind Access; no share links, no presigned URLs): `GET /a
 (also in the incident's own GET), `GET /api/cad/attachments/<id>/index.m3u8` (a camera clip as a VOD playlist; its
 segments are byte ranges of the parts), `.../audio.wav`, `.../download` (one `.ts`, streamed; or the `.wav`),
 `GET /api/cad/incident/<id>/export.zip` (every object, with `manifest.json`: each file's sha256 checked against the
-one recorded when it was attached). Anyone signed in views; dispatchers and admins save clips; **admins delete**
-(`POST /api/cad/attachments/<id>/delete`): every version written for it (a retry's too, recorded at each PUT) is
-deleted by its version id past the governance lock (`x-amz-bypass-governance-retention`; the task role's
+one recorded when it was attached; streamed as it is made, nothing on the disk, one export at a time). Anyone signed in views; dispatchers and admins save clips; **admins delete**
+(`POST /api/cad/attachments/<id>/delete`): every version written for it (a retry's too, recorded at each PUT, and
+whatever else is listed under its prefix: a PUT whose answer was lost) is deleted by its version id past the governance lock (`x-amz-bypass-governance-retention`; the task role's
 `s3:DeleteObjectVersion` + `s3:BypassGovernanceRetention`, sent by nothing else), so the bytes are really gone; the
 row stays "deleted" and the audit keeps what was deleted with every sha256. A delete that fails part way is audited
 and can be asked again. Only the lease holder writes. Without the bucket:

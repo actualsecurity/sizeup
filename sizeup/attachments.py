@@ -48,7 +48,6 @@ import json
 import os
 import re
 import secrets
-import tempfile
 import threading
 import urllib.error
 import urllib.parse
@@ -69,10 +68,12 @@ SAVERS = 2                        # camera clips uploaded at once
 SETTLE_S = 300.0                  # a linked transmission is copied this long after it ended (its transcript is in)
 SYNC_S = 60.0
 SYNC_BATCH = 50
-TRIES = 5
+TRIES = 5                         # a copy refused for good (a 4xx but 403, a bad transmission), at most this often
+RETRY_S = (60.0, 3600.0)          # a failed copy tried again after 60 s doubling to an hour (network, 5xx, 403: forever)
 SAVING_STALE_S = 1800.0           # a "saving" row this old (the task went away mid-upload): failed
 VIEW_AUDIT_S = 600.0              # a view by the same person of the same attachment: audited at most this often
 EXPORT_MAX_BYTES = 4 * 1024 ** 3
+EXPORTS = 1                       # incident exports at once (each streams, holding one object in memory at a time)
 TIMEOUT_S = 60.0
 ID_RE = re.compile(r"[0-9a-f]{16}")
 KINDS = ("camera", "radio")
@@ -96,7 +97,9 @@ CREATE TABLE IF NOT EXISTS attachments (
   note TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL,                 -- saving | stored | failed | deleted | expired
   error TEXT NOT NULL DEFAULT '',
-  tries INTEGER NOT NULL DEFAULT 0,
+  tries INTEGER NOT NULL DEFAULT 0,     -- refused for good this often (TRIES at most)
+  attempts INTEGER NOT NULL DEFAULT 0,  -- failed this often in all (the backoff)
+  retry_at REAL,                        -- a failed one: not before this
   created_at REAL NOT NULL,
   created_by TEXT NOT NULL DEFAULT '',
   expires_at REAL NOT NULL,
@@ -185,6 +188,30 @@ class S3:
             raise aws.AwsError(f"S3 GET {key}: {status} {_code(data)}", _code(data) or f"HTTP {status}", status)
         return data
 
+    def list_versions(self, prefix: str) -> list[tuple[str, str]]:
+        """Every version and delete marker under prefix: [(key, version id)] (ListObjectVersions, s3:ListBucketVersions
+        on that prefix): what an admin's delete removes, a version no PUT's answer told us of included."""
+        out, marker, vmarker = [], "", ""
+        for _ in range(1000):
+            pairs = [("prefix", prefix), ("versions", "")]
+            if marker:
+                pairs += [("key-marker", marker), ("version-id-marker", vmarker)]
+            q = "&".join(f"{urllib.parse.quote(k, safe='')}={urllib.parse.quote(v, safe='')}" for k, v in sorted(pairs))
+            status, _, data = self._call("GET", "", {}, query=q)
+            if status != 200:
+                raise aws.AwsError(f"S3 list versions {prefix}: {status} {_code(data)}", _code(data) or f"HTTP {status}", status)
+            text = data.decode(errors="replace")
+            for block in re.findall(r"<(?:Version|DeleteMarker)>(.*?)</(?:Version|DeleteMarker)>", text, re.S):
+                k = re.search(r"<Key>(.*?)</Key>", block, re.S)
+                v = re.search(r"<VersionId>(.*?)</VersionId>", block, re.S)
+                if k and v:
+                    out.append((_unxml(k.group(1)), _unxml(v.group(1))))
+            if "<IsTruncated>true</IsTruncated>" not in text:
+                return out
+            marker = _unxml((re.search(r"<NextKeyMarker>(.*?)</NextKeyMarker>", text, re.S) or [None, ""])[1])
+            vmarker = _unxml((re.search(r"<NextVersionIdMarker>(.*?)</NextVersionIdMarker>", text, re.S) or [None, ""])[1])
+        return out
+
     def delete_version(self, key: str, version: str) -> None:
         """An admin's delete (Attachments.delete only): the version itself, past its governance lock. Without a version
         id (a bucket without versioning, the tests' dev setups): the key."""
@@ -193,6 +220,35 @@ class S3:
         status, _, data = self._call("DELETE", key, hdrs, query=q)
         if status not in (200, 204, 404):
             raise aws.AwsError(f"S3 DELETE {key}: {status} {_code(data)}", _code(data) or f"HTTP {status}", status)
+
+
+def _unxml(s: str) -> str:
+    return s.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", '"').replace("&apos;", "'").replace("&amp;", "&")
+
+
+class _Sink:
+    """A write-only file for zipfile (no tell, no seek: it writes data descriptors), whose bytes are taken as they come."""
+
+    def __init__(self):
+        self.parts: list[bytes] = []
+
+    def write(self, b) -> int:
+        self.parts.append(bytes(b))
+        return len(b)
+
+    def flush(self) -> None:
+        pass
+
+    def take(self) -> bytes:
+        out, self.parts = b"".join(self.parts), []
+        return out
+
+
+def _transient(e: Exception) -> bool:
+    """A failure worth trying again without counting it: the network, S3's 5xx, a 403 (credentials being renewed)."""
+    if isinstance(e, aws.AwsError):
+        return e.status == 0 or e.status == 403 or e.status >= 500 or e.code in ("Network", "NoCredentials")
+    return isinstance(e, OSError)
 
 
 def _code(data: bytes) -> str:
@@ -215,11 +271,14 @@ class Stream:
     """A response body too big to hold (a clip's download, an incident's export): its length and its pieces.
     sizeup/web/server.py writes the pieces; close() runs once it is done (or the client left)."""
 
-    def __init__(self, length: int, pieces: Callable[[], Iterator[bytes]], on_close: Callable[[], None] | None = None):
-        self.length, self._pieces, self._on_close = int(length), pieces, on_close
+    def __init__(self, length: int | None, pieces: Callable[[], Iterator[bytes]],
+                 on_close: Callable[[], None] | None = None):
+        """length: None when it isn't known before the end (an export: sent without Content-Length, the connection
+        closed after it)."""
+        self.length, self._pieces, self._on_close = (None if length is None else int(length)), pieces, on_close
 
     def __len__(self) -> int:
-        return self.length
+        return self.length or 0
 
     def __iter__(self) -> Iterator[bytes]:
         return iter(self._pieces())
@@ -254,10 +313,17 @@ class Attachments:
         self._mu = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._exports = threading.BoundedSemaphore(EXPORTS)
+        self._resumed = False
         with store.lock:
             for stmt in SCHEMA.split(";"):
                 if stmt.strip():
                     store.db.execute(stmt)
+            cols = {r["name"] for r in store.db.execute("PRAGMA table_info(attachments)")}
+            for col, decl in (("versions", "TEXT NOT NULL DEFAULT '[]'"), ("attempts", "INTEGER NOT NULL DEFAULT 0"),
+                              ("retry_at", "REAL")):
+                if col not in cols:                       # a table from before these (this branch's own test runs)
+                    store.db.execute(f"ALTER TABLE attachments ADD COLUMN {col} {decl}")
 
     @classmethod
     def from_env(cls, store, log: Callable[[str], None] = print, may_write=None) -> Attachments:
@@ -288,7 +354,7 @@ class Attachments:
         with self.store.lock:
             self.store.db.execute("INSERT INTO attachment_audit (at, attachment_id, incident_id, action, who, detail) "
                                   "VALUES (?, ?, ?, ?, ?, ?)", (self.clock(), aid, iid, action, who[:200], detail[:4000]))
-        self.log(f"attachments: {action} {aid or '-'} (incident {iid}) by {who or '-'}" + (f": {detail[:200]}" if detail else ""))
+        self.log(f"attachments: {action} {aid or '-'} (incident {iid})")   # (no names, no note: the server log)
 
     def viewed(self, row: dict, who: str, action: str = "view") -> None:
         """A view (the playlist, the audio) at most every VIEW_AUDIT_S per person and attachment; downloads always."""
@@ -485,31 +551,39 @@ class Attachments:
             "SELECT l.traffic_id AS tid, l.incident_id AS iid, l.why, l.unit FROM radio_links l "
             "JOIN radio_traffic t ON t.id = l.traffic_id JOIN incidents i ON i.id = l.incident_id "
             "LEFT JOIN attachments a ON a.kind = 'radio' AND a.incident_id = l.incident_id AND a.ref = l.traffic_id "
-            "WHERE t.end < ? AND t.end > ? AND (a.id IS NULL OR (a.status = 'failed' AND a.tries < ?)) "
-            "ORDER BY t.start LIMIT ?", (now - SETTLE_S, now - RETENTION_S, TRIES, limit))
+            "WHERE t.end < ? AND t.end > ? AND (a.id IS NULL OR (a.status = 'failed' AND a.tries < ? "
+            "AND COALESCE(a.retry_at, 0) <= ?)) ORDER BY t.start LIMIT ?",
+            (now - SETTLE_S, now - RETENTION_S, TRIES, now, limit))
         n = 0
         for x in todo:
             if self._stop.is_set() or not self.may_write():
                 break
             by = (x["unit"] or "manual") if x["why"] == "manual" else f"auto ({x['why']})"
-            if self.copy_radio(x["tid"], x["iid"], by):
-                n += 1
+            got = self._copy_radio(x["tid"], x["iid"], by)
+            if got == "failed":
+                break                                 # S3 in trouble: the rest wait for the next round
+            n += got == "copied"
         return n
 
     def copy_radio(self, tid: str, iid: int, by: str = "") -> bool:
         """One transmission into the store for one event (idempotent: an existing row is left alone unless its copy
         failed). True when it was copied now."""
+        return self._copy_radio(tid, iid, by) == "copied"
+
+    def _copy_radio(self, tid: str, iid: int, by: str = "") -> str:
+        """copied | skipped | failed. A failure is tried again after RETRY_S (doubling); one that is S3's or the
+        network's (_transient) never counts against TRIES."""
         s3 = self._need()
         t = self.store.one("SELECT * FROM radio_traffic WHERE id = ?", (tid,))
         if t is None:
-            return False
+            return "skipped"
         inc = self._incident(iid)
         now = self.clock()
         with self.store.lock:
             old = self.store.db.execute("SELECT id, status, tries FROM attachments WHERE kind = 'radio' AND incident_id = ? "
                                         "AND ref = ?", (inc["id"], tid)).fetchone()
             if old is not None and not (old["status"] == "failed" and old["tries"] < TRIES):
-                return False
+                return "skipped"
             if old is None:
                 aid = self._new_id()
                 self.store.db.execute(
@@ -547,19 +621,50 @@ class Attachments:
         except Exception as e:  # noqa: BLE001
             why = f"{type(e).__name__}: {e}"[:300]
             with self.store.lock:
-                self.store.db.execute("UPDATE attachments SET status = 'failed', error = ?, tries = tries + 1 WHERE id = ?",
-                                      (why, aid))
+                r = self.store.db.execute("SELECT attempts FROM attachments WHERE id = ?", (aid,)).fetchone()
+                n = (r["attempts"] if r else 0) + 1
+                wait = min(RETRY_S[1], RETRY_S[0] * 2 ** (n - 1))
+                self.store.db.execute("UPDATE attachments SET status = 'failed', error = ?, attempts = ?, retry_at = ?, "
+                                      "tries = tries + ? WHERE id = ?", (why, n, now + wait, 0 if _transient(e) else 1, aid))
             self.audit("failed", aid, inc["id"], by, why)
-            return False
+            return "failed"
         self.audit("attach", aid, inc["id"], by, f"radio {tid} on {t['channel']} at {iso(t['start'])}"
                    + ("" if wav else " (no audio)"))
-        return True
+        return "copied"
 
     # -- housekeeping -----------------------------------------------------------------------------------------------
 
+    def resume(self) -> int:
+        """The leader before this one went away mid-upload (a deploy: its queue went with it): every camera clip still
+        "saving", or failed as interrupted, uploaded again under the same id, when its range is still recorded (else
+        failed: "no longer recorded"). Once, after the DVR has read its index. The number queued."""
+        dvr = self.dvr()
+        if self.s3 is None or not self.may_write() or dvr is None or not getattr(dvr, "scanned", lambda: True)():
+            return 0
+        self._resumed = True
+        rows = self.store.q("SELECT * FROM attachments WHERE kind = 'camera' AND (status = 'saving' OR "
+                            "(status = 'failed' AND error LIKE 'interrupted%')) ORDER BY created_at")
+        n = 0
+        for r in rows:
+            cid = dvr.alias(r["source"]) if hasattr(dvr, "alias") else r["source"]
+            segs = dvr.segments(cid, r["start"], r["end"])
+            whole = bool(segs) and segs[0]["t0"] <= r["start"] + 0.01 and segs[-1]["t0"] + segs[-1]["dur"] >= r["end"] - 0.01
+            if not whole:
+                self._set(r["id"], status="failed", error="interrupted, and no longer recorded")
+                self.audit("failed", r["id"], r["incident_id"], r["created_by"], "interrupted; the range is no longer recorded")
+                continue
+            inc = self._incident(r["incident_id"])
+            self._set(r["id"], status="saving", error="")
+            dvr.hold(cid, True)
+            self._pool.submit(self._upload_camera, r["id"], inc, cid, self.camera(cid) or {}, segs, r["note"],
+                              r["created_by"], r["created_at"])
+            self.log(f"attachments: {r['id']}: an interrupted camera clip uploaded again")
+            n += 1
+        return n
+
     def sweep(self) -> None:
-        """A "saving" row left by a task that went away: failed (a radio one is tried again); past a year: expired
-        (S3's lifecycle removes the objects)."""
+        """A "saving" row left by a task that went away: failed (a radio one is tried again; a camera one, by resume() on
+        the next leader); past a year: expired (S3's lifecycle removes the objects)."""
         now = self.clock()
         with self.store.lock:
             self.store.db.execute("UPDATE attachments SET status = 'failed', error = 'interrupted (a deploy?)', "
@@ -573,15 +678,29 @@ class Attachments:
             self._thread.start()
         return self
 
+    def _first_round(self) -> None:
+        """At start: the interrupted uploads (once the DVR has read its index), before the first SYNC_S."""
+        for _ in range(120):
+            if self._stop.wait(1.0) or self._resumed:
+                return
+            try:
+                self.resume()
+            except Exception as e:  # pragma: no cover
+                self.log(f"attachments: resume: {type(e).__name__}: {e}")
+                return
+
     def stop(self) -> None:
         self._stop.set()
         self._pool.shutdown(wait=False, cancel_futures=True)
 
     def _run(self) -> None:
+        self._first_round()
         while not self._stop.wait(SYNC_S):
             if not self.may_write():
                 continue
             try:
+                if not self._resumed:
+                    self.resume()
                 self.sweep()
                 n = self.sync_radio()
                 if n:
@@ -605,8 +724,15 @@ class Attachments:
             raise AttachError(f"attachment {aid} is still being saved: delete it once it is stored or failed")
         objs = json.loads(r["objects"] or "[]")
         versions = [tuple(v) for v in json.loads(r["versions"] or "[]")]
+        listed = "listed"
+        try:                                          # a PUT that went through but whose answer never came: listed here
+            versions += s3.list_versions(f"{self.prefix}/{int(r['incident_id'])}/{aid}/")
+        except aws.AwsError as e:
+            listed = f"not listed ({e.code or e.status})"
+            self.log(f"attachments: {aid}: versions {listed}: the recorded ones only")
         versions += [(o["key"], "") for o in objs if not any(k == o["key"] for k, _ in versions)]
         left = list(dict.fromkeys(versions))
+        n_versions = len(left)
         try:
             while left:
                 s3.delete_version(*left[0])
@@ -618,8 +744,9 @@ class Attachments:
             self.audit("failed", aid, r["incident_id"], operator, f"delete: {e}; {len(left)} versions left")
             raise AttachError(f"not deleted: {e}") from None
         self._set(aid, status="deleted", deleted_at=self.clock(), deleted_by=operator, versions="[]")
+        r["_versions"] = f"{n_versions} versions ({listed})"
         self.audit("delete", aid, r["incident_id"], operator,
-                   f"{r['kind']} {r['source']} {iso(r['start'])} to {iso(r['end'])}; "
+                   f"{r['kind']} {r['source']} {iso(r['start'])} to {iso(r['end'])}; {r['_versions']}; "
                    + "; ".join(f"{o['name']} {o['bytes']} B sha256 {o['sha256']}" for o in objs))
         return self.public(self.row(aid))
 
@@ -685,9 +812,11 @@ class Attachments:
                 "audio/wav" if ext == "wav" else "application/json")
 
     def export(self, iid: int, who: str) -> tuple[Stream, str]:
-        """An incident's attachments as one zip (stored, not compressed): each attachment's objects as they are kept
-        under <start>_<kind>_<id>/, and manifest.json: the incident, who exported it and when, and every file with its
-        size and sha256, each checked against the sha256 recorded when it was attached ("verified")."""
+        """An incident's attachments as one zip (stored, not compressed), streamed as it is made (nothing on the disk;
+        the first bytes go at once, well inside Cloudflare's 100 s): each attachment's objects as they are kept under
+        <start>_<kind>_<id>/, then manifest.json: the incident, who exported it and when, and every file with its size
+        and sha256, each checked against the sha256 recorded when it was attached ("verified"). EXPORTS at a time (else
+        "try again shortly"). Audited when it ends (or is cut short)."""
         if self.s3 is None:
             raise NotConfigured(NOT_CONFIGURED)
         inc = self._incident(iid)
@@ -696,36 +825,38 @@ class Attachments:
         total = sum(o["bytes"] for r in rows for o in json.loads(r["objects"]))
         if total > EXPORT_MAX_BYTES:
             raise AttachError(f"too big to export at once ({total / 1024 ** 3:.1f} GB)")
-        fd, tmp = tempfile.mkstemp(prefix="sizeup-export-", suffix=".zip")
-        os.close(fd)
-        files, verified = [], True
-        try:
-            with zipfile.ZipFile(tmp, "w", zipfile.ZIP_STORED, allowZip64=True) as z:
-                for r in rows:
-                    folder = (f"{datetime.fromtimestamp(r['start'], timezone.utc).strftime('%Y%m%dT%H%M%SZ')}_"
-                              f"{r['kind']}_{r['id']}")
-                    for o in json.loads(r["objects"]):
-                        body = self.s3.get(o["key"])
-                        got = sha256(body)
-                        ok = got == o["sha256"]
-                        verified &= ok
-                        z.writestr(f"{folder}/{o['name']}", body)
-                        files.append({"path": f"{folder}/{o['name']}", "attachment": r["id"], "kind": r["kind"],
-                                      "bytes": len(body), "sha256": got, "recorded_sha256": o["sha256"], "verified": ok})
-                manifest = {"v": 1, "incident": {"id": inc["id"], "number": inc.get("number") or ""},
-                            "exported_by": who, "exported_at": iso(self.clock()), "verified": verified,
-                            "attachments": [self.public(r) for r in rows], "files": files}
-                z.writestr("manifest.json", json.dumps(manifest, indent=1, sort_keys=True) + "\n")
-        except BaseException:
-            Path(tmp).unlink(missing_ok=True)
-            raise
-        size = Path(tmp).stat().st_size
+        if not self._exports.acquire(blocking=False):
+            raise AttachError("another export is running: try again shortly")
+        state = {"files": [], "verified": True, "done": False, "released": False}
 
         def pieces() -> Iterator[bytes]:
-            with open(tmp, "rb") as f:
-                while chunk := f.read(1 << 20):
-                    yield chunk
-        self.audit("export", "", inc["id"], who, f"{len(rows)} attachments, {len(files)} files, {size} B, "
-                   f"{'verified' if verified else 'A SHA256 MISMATCH'}")
+            sink = _Sink()
+            z = zipfile.ZipFile(sink, "w", zipfile.ZIP_STORED, allowZip64=True)
+            for r in rows:
+                folder = f"{datetime.fromtimestamp(r['start'], timezone.utc).strftime('%Y%m%dT%H%M%SZ')}_{r['kind']}_{r['id']}"
+                for o in json.loads(r["objects"]):
+                    body = self.s3.get(o["key"])
+                    got = sha256(body)
+                    ok = got == o["sha256"]
+                    state["verified"] &= ok
+                    z.writestr(f"{folder}/{o['name']}", body)
+                    state["files"].append({"path": f"{folder}/{o['name']}", "attachment": r["id"], "kind": r["kind"],
+                                           "bytes": len(body), "sha256": got, "recorded_sha256": o["sha256"], "verified": ok})
+                    del body
+                    yield sink.take()
+            manifest = {"v": 1, "incident": {"id": inc["id"], "number": inc.get("number") or ""},
+                        "exported_by": who, "exported_at": iso(self.clock()), "verified": state["verified"],
+                        "attachments": [self.public(r) for r in rows], "files": state["files"]}
+            z.writestr("manifest.json", json.dumps(manifest, indent=1, sort_keys=True) + "\n")
+            z.close()
+            state["done"] = True
+            yield sink.take()
+
+        def done() -> None:
+            if not state["released"]:
+                state["released"] = True
+                self._exports.release()
+                self.audit("export", "", inc["id"], who, f"{len(rows)} attachments, {len(state['files'])} files, "
+                           + (("verified" if state["verified"] else "A SHA256 MISMATCH") if state["done"] else "cut short"))
         name = re.sub(r"[^A-Za-z0-9_.-]", "_", inc.get("number") or f"event-{inc['id']}")
-        return Stream(size, pieces, lambda: Path(tmp).unlink(missing_ok=True)), f"{name}_attachments.zip"
+        return Stream(None, pieces, done), f"{name}_attachments.zip"
