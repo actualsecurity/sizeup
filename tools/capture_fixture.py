@@ -18,10 +18,10 @@ Nothing captured ever goes into git (the repo is public); tools/replay_sync.py p
           they are only ever in the request's Authorization header, never printed or written), trimmed to our
           area's cameras; the Thruway's and the county's public camera lists (what Roads merges them with); then
           for --cameras of the CARS-Hub cameras with video the master playlist, its chunklist and the newest
-          --segments segments, exactly as served. One inventory request: 511NY allows one every 5 minutes, so
-          the cache's .ny511-last-request stamp refuses a second capture within 5 minutes. The hub polls the same
-          inventory with the same account (hourly): a capture can still land within 5 minutes of the hub's own
-          poll; capture rarely. Names from the source (camera ids, chunklist and segment names) must be plain
+          --segments segments, exactly as served. One inventory request: 511NY allows one every 5 minutes, so a
+          stamp outside the cache (~/.local/state/sizeup/ny511-last-request) refuses a second capture within 5
+          minutes. The hub polls the same inventory with the same account (hourly): a capture can still land
+          within 5 minutes of the hub's own poll; capture rarely. Names from the source (camera ids, chunklist and segment names) must be plain
           file names: '/', '..' or a leading '.' is refused, so nothing is written outside the set's folder.
   audio   clips restored read-only from the hub's Litestream backup of audio.sqlite
           (s3://sizeup-hub-backups-504804195561/sizeup-hub/audio.sqlite/, tools/ltx.py), restored to a temporary
@@ -167,7 +167,8 @@ def _trim_cctv(body: bytes, keep: set[str]) -> bytes:
     return text
 
 
-NY511_STAMP = ".ny511-last-request"           # in the cache: when this tool last asked 511NY for the inventory
+NY511_STAMP = Path.home() / ".local" / "state" / "sizeup" / "ny511-last-request"   # when this tool last asked 511NY
+                                                                                    # (not in the replay cache)
 NY511_GAP_S = 300.0                            # 511NY: once every 5 minutes at most
 
 
@@ -184,7 +185,7 @@ def ny511_wait(stamp: Path, now: float | None = None) -> float:
 
 
 def camera(args) -> None:
-    stamp = cache_dir() / NY511_STAMP
+    stamp = NY511_STAMP
     wait = ny511_wait(stamp)
     if wait > 0:
         raise SystemExit(f"511NY asks for at most one request every 5 minutes: the last capture asked "

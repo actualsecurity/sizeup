@@ -27,6 +27,8 @@ The dedicated bucket is not created by this tool. Its setup, for whoever approve
   it: only the developer's own credentials (IAM identity policies in this account) reach it. Optionally a lifecycle
   rule expiring noncurrent versions after 30 days, like the backup bucket's.
 
+Before any sync, pull and push alike check with `aws s3api head-bucket --expected-bucket-owner 504804195561` that the
+bucket exists and is this account's, and refuse otherwise (its name is public: anyone could create it).
 pull only reads from S3 (aws s3 sync S3 -> local: downloads, never deletes local files). push writes only with
 --write-to-s3, set by set (<dest>/<kind>/<set>/), each object with SSE-S3 (AES256), symlinks never followed, never
 deleting anything there; it first checks the whole cache (check()): nothing outside <kind>/<set>/, no symlinks,
@@ -53,7 +55,8 @@ from tests.replay import KINDS, MANIFEST, cache_dir, sha256  # noqa: E402
 DEDICATED = "sizeup-replay-fixtures-504804195561"
 BACKUPS = "sizeup-hub-backups-504804195561"
 DEFAULT_S3 = f"s3://{DEDICATED}/v1"
-DESTINATIONS = {DEDICATED: re.compile(r"^v\d+$"), BACKUPS: re.compile(r"^replay-fixtures/v\d+$")}
+DESTINATIONS = {DEDICATED: re.compile(r"^v[0-9]+$"), BACKUPS: re.compile(r"^replay-fixtures/v[0-9]+$")}
+OWNER = "504804195561"         # the account both buckets must belong to (head-bucket --expected-bucket-owner)
 AIRBAND = re.compile(r"^(HPNTower|HPNGround|NYApproach)-\d+$")
 CLIP_KEYS = {"id", "channel", "at", "bytes", "file"}
 # what each kind may hold, by name ending; the content of each is sniffed (sniff())
@@ -79,6 +82,22 @@ def destination(args) -> str:
         raise Refused(f"{url} is not a replay-fixtures location (s3://{DEDICATED}/v<N> or "
                       f"s3://{BACKUPS}/replay-fixtures/v<N>)")
     return url
+
+
+def owned(url: str) -> None:
+    """Refuse unless the bucket exists and belongs to our account (OWNER): its name is public, so anyone could
+    create it; never sync to or from a bucket that isn't ours."""
+    bucket = url[len("s3://"):].split("/", 1)[0]
+    try:
+        out = subprocess.run(["aws", "s3api", "head-bucket", "--bucket", bucket, "--expected-bucket-owner", OWNER],
+                             capture_output=True, text=True, timeout=60)
+        rc, err = out.returncode, (out.stderr or "").strip()
+    except (OSError, subprocess.TimeoutExpired) as e:
+        rc, err = -1, f"{type(e).__name__}: {e}"
+    if rc != 0:
+        raise Refused(f"s3://{bucket} is not there or not account {OWNER}'s ({err[:200] or f'exit {rc}'}); it must "
+                      "be created first, by the account's owner: the setup is in this tool's docstring "
+                      "(tools/replay_sync.py)")
 
 
 def sniff(rel: str, p: Path) -> str:
@@ -224,6 +243,7 @@ def status(args) -> int:
 
 def pull(args) -> int:
     url = destination(args)
+    owned(url)
     root = cache_dir()
     root.mkdir(parents=True, exist_ok=True)
     rc = aws("s3", "sync", url + "/", str(root) + "/", "--only-show-errors", "--exact-timestamps",
@@ -247,6 +267,7 @@ def push(args) -> int:
     if problems:
         print("not pushed: the cache has problems\n  " + "\n  ".join(problems), file=sys.stderr)
         return 1
+    owned(url)
     rc = 0
     for name, _doc in sets(root):                  # set by set: only <kind>/<set>/ is ever sent
         rc = aws("s3", "sync", str(root / name) + "/", f"{url}/{name}/", "--only-show-errors", "--sse", "AES256",

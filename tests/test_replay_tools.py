@@ -104,11 +104,21 @@ def audio_set(root: Path, name: str = "ok", clips=None, files=None) -> Path:
     return make_set(root, "audio", name, {"clips.json": json.dumps(clips).encode(), "clips/a.wav": WAV, **(files or {})})
 
 
-def ran_aws(monkeypatch) -> list:
+def ran_aws(monkeypatch, head_rc: int = 0) -> list:
+    """aws, faked: every call kept; head-bucket answers head_rc (0: the bucket is there and ours), the rest 0."""
     ran = []
-    monkeypatch.setattr(replay_sync.subprocess, "run",
-                        lambda args, **k: ran.append(args) or type("R", (), {"returncode": 0})())
+
+    def run(args, **k):
+        ran.append(args)
+        rc = head_rc if args[1:3] == ["s3api", "head-bucket"] else 0
+        return type("R", (), {"returncode": rc, "stderr": "An error occurred (404) when calling the HeadBucket "
+                                                          "operation: Not Found" if rc else ""})()
+    monkeypatch.setattr(replay_sync.subprocess, "run", run)
     return ran
+
+
+def head(bucket: str) -> list:
+    return ["aws", "s3api", "head-bucket", "--bucket", bucket, "--expected-bucket-owner", "504804195561"]
 
 
 def test_a_good_cache_passes_and_is_pushed_set_by_set_without_following_symlinks(tmp_path, monkeypatch):
@@ -119,6 +129,8 @@ def test_a_good_cache_passes_and_is_pushed_set_by_set_without_following_symlinks
     ran = ran_aws(monkeypatch)
     assert replay_sync.main(["push", "--write-to-s3"]) == 0
     dest = replay_sync.DEFAULT_S3
+    assert ran[0] == head(replay_sync.DEDICATED)               # the bucket checked first
+    ran = ran[1:]
     assert [(a[3], a[4]) for a in ran] == [(f"{tmp_path}/audio/ok/", f"{dest}/audio/ok/"),
                                           (f"{tmp_path}/camera/c/", f"{dest}/camera/c/")]
     assert all("--no-follow-symlinks" in a and a[a.index("--sse") + 1] == "AES256" for a in ran)
@@ -203,11 +215,32 @@ def test_pull_only_reads_from_s3(tmp_path, monkeypatch):
     ran = ran_aws(monkeypatch)
     assert replay_sync.main(["pull"]) == 0
     assert replay_sync.main(["--s3", "s3://sizeup-hub-backups-504804195561/replay-fixtures/v2", "pull"]) == 0
-    assert ran == [["aws", "s3", "sync", f"{replay_sync.DEFAULT_S3}/", f"{tmp_path}/", "--only-show-errors",
+    assert ran == [head(replay_sync.DEDICATED),
+                   ["aws", "s3", "sync", f"{replay_sync.DEFAULT_S3}/", f"{tmp_path}/", "--only-show-errors",
                     "--exact-timestamps"],
+                   head(replay_sync.BACKUPS),
                    ["aws", "s3", "sync", "s3://sizeup-hub-backups-504804195561/replay-fixtures/v2/", f"{tmp_path}/",
                     "--only-show-errors", "--exact-timestamps"]]
     assert replay_sync.DEFAULT_S3 == "s3://sizeup-replay-fixtures-504804195561/v1"
+
+
+def test_no_sync_unless_the_bucket_is_there_and_ours(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("SIZEUP_REPLAY_DIR", str(tmp_path))
+    audio_set(tmp_path)
+    for cmd in (["push", "--write-to-s3"], ["pull"], ["--s3", "s3://sizeup-hub-backups-504804195561/replay-fixtures/v1",
+                                                     "pull"]):
+        ran = ran_aws(monkeypatch, head_rc=254)
+        assert replay_sync.main(cmd) == 2, cmd
+        assert len(ran) == 1 and ran[0][1:3] == ["s3api", "head-bucket"], ran          # no sync after it
+        assert ran[0][-2:] == ["--expected-bucket-owner", "504804195561"]
+        err = capsys.readouterr().err
+        assert "must be created first" in err and "docstring" in err
+
+
+def test_version_digits_are_ascii_only(tmp_path, monkeypatch):
+    monkeypatch.setenv("SIZEUP_REPLAY_DIR", str(tmp_path))
+    monkeypatch.setattr(replay_sync.subprocess, "run", lambda *a, **k: pytest.fail("ran aws"))
+    assert replay_sync.main(["--s3", "s3://sizeup-replay-fixtures-504804195561/v\u0661", "pull"]) == 2   # Arabic-Indic 1
 
 
 # ---- capture_fixture: names from a source, 511NY's limit, the LTX downloads ----------------------------------------
@@ -233,12 +266,22 @@ def test_the_511ny_stamp_keeps_captures_5_minutes_apart(tmp_path):
 
 
 def test_a_second_camera_capture_within_5_minutes_is_refused(tmp_path, monkeypatch):
-    monkeypatch.setenv("SIZEUP_REPLAY_DIR", str(tmp_path))
-    (tmp_path / capture_fixture.NY511_STAMP).write_text(f"{__import__('time').time():.0f}\n")
+    monkeypatch.setenv("SIZEUP_REPLAY_DIR", str(tmp_path / "cache"))
+    stamp = tmp_path / "state" / "ny511-last-request"
+    stamp.parent.mkdir()
+    stamp.write_text(f"{__import__('time').time():.0f}\n")
+    monkeypatch.setattr(capture_fixture, "NY511_STAMP", stamp)
     monkeypatch.setattr(capture_fixture, "keychain", lambda s: pytest.fail("asked the Keychain"))
     with pytest.raises(SystemExit) as e:
         capture_fixture.main(["camera"])
     assert "5 minutes" in str(e.value)
+
+
+def test_the_511ny_stamp_is_outside_the_replay_cache(monkeypatch):
+    stamp = capture_fixture.NY511_STAMP
+    assert stamp == Path.home() / ".local" / "state" / "sizeup" / "ny511-last-request"
+    monkeypatch.delenv("SIZEUP_REPLAY_DIR", raising=False)
+    assert replay.cache_dir() not in stamp.parents
 
 
 def test_ltx_downloads_never_inside_the_repo(monkeypatch):
