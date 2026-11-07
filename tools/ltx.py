@@ -17,9 +17,11 @@ The layout Litestream (0.5) keeps: <db>/<level>/<min txid>-<max txid>.ltx, level
              flags & 1; a page header with pgno 0 ends them
     index    the pages' offsets (varints), its size, then the trailer (post-apply and file checksums): not needed
 
-Restore: the newest snapshot, then from its max TXID + 1 on, at each step the file that starts there and reaches
-furthest (any level), until none does. The pages are applied newest file first and each page only once (its newest
-copy wins), so most of the snapshot is never decompressed; the database is cut to the last file's commit size.
+Restore: the newest snapshot, then a greedy cover: at each step, of the files that start at or before the chain's
+end + 1 (compacted files often overlap it) and reach past it, the one that reaches furthest, the highest level on a
+tie, until none does. Stopping short of the newest TXID in the backup (a real gap) fails, unless --allow-stale.
+The pages are applied newest file first and each page only once (its newest copy wins), so most of the snapshot is
+never decompressed; the database is cut to the last file's commit size.
 """
 
 from __future__ import annotations
@@ -171,35 +173,50 @@ def listing(url: str) -> list[tuple[int, int, int, str]]:
     return files
 
 
-def plan(files: list[tuple[int, int, int, str]], log: Callable[[str], None] = print) -> list[tuple[int, int, int, str]]:
-    """The newest snapshot (from TXID 1), then the files that carry it on, each the one reaching furthest. A file
-    beyond a gap (no file starts right after the chain's end) is left out, and the gap is said."""
+def plan(files: list[tuple[int, int, int, str]], log: Callable[[str], None] = print,
+         allow_stale: bool = False) -> list[tuple[int, int, int, str]]:
+    """The newest snapshot (from TXID 1), then a greedy cover: at each step the file that starts at or before the
+    chain's end + 1 and reaches furthest past it (the highest level on a tie). Compacted files usually overlap the
+    end; that is no gap. Only when no file carries the chain on is there a gap: it is said, and if the chain then
+    stops short of the newest TXID in the backup, the plan fails (SystemExit) unless allow_stale."""
     snaps = [f for f in files if f[1] == 1]
     if not snaps:
         raise SystemExit("no snapshot (no file from TXID 1)")
     chain = [max(snaps, key=lambda f: (f[2], f[0]))]
-    starts: dict[int, list] = {}
-    for f in files:
-        starts.setdefault(f[1], []).append(f)
+    end = chain[0][2]
+    pending = sorted(files, key=lambda f: f[1])
+    i, best = 0, None
     while True:
-        nxt = starts.get(chain[-1][2] + 1)
-        if not nxt:
-            later = [f for f in files if f[1] > chain[-1][2] + 1]
-            if later:
-                lo = min(f[1] for f in later)
-                log(f"ltx: warning: a gap after TXID {chain[-1][2]:#x} (the next file starts at {lo:#x}); "
-                    f"restoring only up to {chain[-1][2]:#x}, {len(later)} later files left out")
-            return chain
-        chain.append(max(nxt, key=lambda f: (f[2], f[0])))
+        while i < len(pending) and pending[i][1] <= end + 1:
+            f = pending[i]
+            if f[2] > end and (best is None or (f[2], f[0]) > (best[2], best[0])):
+                best = f
+            i += 1
+        if best is None:
+            break
+        chain.append(best)              # every file seen so far now ends at or before the new end: start afresh
+        end, best = best[2], None
+    latest = max(f[2] for f in files)
+    if end < latest:
+        later = [f for f in files if f[2] > end]
+        lo = min(f[1] for f in later)
+        msg = (f"a gap after TXID {end:#x} (the next file starts at {lo:#x}); the restore reaches only {end:#x} of "
+               f"{latest:#x}, {len(later)} later files left out")
+        if not allow_stale:
+            raise SystemExit(f"ltx: {msg} (--allow-stale to restore it anyway)")
+        log(f"ltx: warning: {msg}")
+    return chain
 
 
-def restore(url: str, out: Path, work: Path | None = None, log: Callable[[str], None] = print) -> dict:
-    """The database under url (s3://bucket/path/db) restored to out, as of its newest TXID in the backup.
-    work: where the LTX files are downloaded (kept: a second restore reuses them). {txid, timestamp_ms, pages}."""
+def restore(url: str, out: Path, work: Path | None = None, log: Callable[[str], None] = print,
+            allow_stale: bool = False) -> dict:
+    """The database under url (s3://bucket/path/db) restored to out, as of its newest TXID in the backup (a gap
+    that stops it short fails, unless allow_stale). work: where the LTX files are downloaded (kept: a second
+    restore reuses them). {txid, timestamp_ms, pages}."""
     url = url.rstrip("/")
     work = Path(work) if work else out.parent / (out.name + ".ltx")
     work.mkdir(parents=True, exist_ok=True)
-    chain = plan(listing(url), log)
+    chain = plan(listing(url), log, allow_stale)
     total = sum(1 for _ in chain)
     log(f"ltx: {total} files, TXID {chain[0][1]:#x} to {chain[-1][2]:#x}")
     local = []
@@ -237,11 +254,13 @@ def main(argv=None) -> None:
     r.add_argument("url")
     r.add_argument("out")
     r.add_argument("--work", default="")
+    r.add_argument("--allow-stale", action="store_true",
+                   help="restore up to a gap even when it stops short of the newest TXID in the backup")
     i = sub.add_parser("info")
     i.add_argument("file")
     a = p.parse_args(argv)
     if a.cmd == "restore":
-        restore(a.url, Path(a.out), Path(a.work) if a.work else None)
+        restore(a.url, Path(a.out), Path(a.work) if a.work else None, allow_stale=a.allow_stale)
     else:
         b = Path(a.file).read_bytes()
         h = header(b)
