@@ -855,8 +855,9 @@ class AwsTranscriber:
         self.stopped.set()
         for w in list(self._workers.values()):
             w.wake()
+        end = time.monotonic() + 8.0          # 8 s for them all, not each (#264: a deploy's drain waits on this)
         for w in list(self._workers.values()):
-            w.join(timeout=8)
+            w.join(timeout=max(0.0, end - time.monotonic()))
 
     # -- the watchdog -------------------------------------------------------------------------------------
 

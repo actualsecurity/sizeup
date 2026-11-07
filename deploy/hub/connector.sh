@@ -3,8 +3,10 @@
 # "cloudflared" container of deploy/aws/taskdef.json runs this, from the hub image.
 #
 # Only the leader's task may be reached. The hub container's supervisor (sizeup/handoff.py) writes
-# $SIZEUP_SHARED_DIR/leader (a task volume both containers mount) once this task holds the lock and its app
-# answers; it removes it when the overlap after a handoff is over, or at once when the lease is lost.
+# $SIZEUP_SHARED_DIR/leader (a task volume both containers mount) once this task holds the lock and its app's port
+# answers (at first "update in progress", while the app is built: #264, so this connector is registered by the time
+# the CAD serves); it removes it when the overlap after a handoff is over (the new leader serves, its own connector
+# up: two connectors for a moment, never none), or at once when the lease is lost.
 #   * no `leader` file: cloudflared is not started (a standby, or a task still starting)
 #   * `leader` appears: cloudflared starts
 #   * `leader` goes, or the hub's heartbeat ($SIZEUP_SHARED_DIR/hub-alive, unix seconds, rewritten every second)
