@@ -947,6 +947,47 @@ RSS. Each stream is at most ~26 KB/s (205 kbit/s) each way, so the 4-stream cap 
 and in, well within a 0.25 vCPU Fargate task; the pass-through does no decoding. One stream origin
 answered 502 at open during the run: that is the fallback path (snapshots) working.
 
+### Camera DVR (#277)
+
+`sizeup/dvr.py`: the live cameras' segments kept on the hub's disk so the viewer can scrub back. Copies, no
+re-encode: each segment as the hub serves it live (checked and repaired, #276). On demand only, at most
+`[roads] dvr_max_cameras` (12) at once, in this order: `dvr_always`; an open CAD event's cameras (within
+`dvr_near_m`, and the ones just before / at / after it along the road); the cameras a dispatcher **Keep**s in the
+viewer for 24 h (`POST /api/cad/cameras/<id>/dvr/pin {on}`, dispatchers and admins, in their activity; kept in the
+CAD store's meta `dvr_pins`, so a deploy keeps them); the ones someone is watching live, and for `dvr_linger_min`
+(30) after. Snapshot-only cameras (the county's) are not recorded. Eight workers record side by side, each camera
+on its own 4 s cadence (measured: 12 cameras keep up with no gaps). A camera's own session never goes through the
+live viewers' segment cache. A chunklist that fails is asked again at once with a new session; three failures in
+a row, the camera waits (15 s doubling to 5 min). A stream whose sequence starts over is carried on.
+
+A rolling window per camera (`dvr_window_min`, 120), a cap over all (`dvr_max_gb`, 6) and 3 GB of disk always
+left free, made room for before each write: the oldest go first; when nothing more can go, recording stops and
+the viewer says so ("Rec stopped", the reason in its tooltip) until there is room. Measured 2026-11-07: about 150-200 kbit/s per camera, 130-175 MB per 2 h; 12
+cameras, about 2 GB. Files under the state folder's `dvr/<camera>/<seq>_<start ms>_<duration ms>.ts`, written
+whole (temp file, rename); the index is the file names (an app restart finds them).
+
+`GET /api/cad/cameras/<id>/dvr` (`{recording, why, pinned, from, to, segments, bytes, window_s, gaps}`),
+`.../dvr/index.m3u8` (a VOD playlist, `EXT-X-PROGRAM-DATE-TIME` on every segment, a discontinuity at a gap),
+`.../dvr/<seq>.ts`. Behind Cloudflare Access like the rest of `/api/cad`; no share links, nothing public.
+The viewer: ● Rec (why, in the tooltip), the timeline, the time showing, **Live**, **Keep**.
+
+A segment's time is when it first appears in the chunklist, less the durations listed after it; after the first,
+each begins where the one before ended. It can be off by up to a segment (4-8 s) from the camera's own clock.
+
+**Network**: the service runs in the default VPC's subnets with a public IP (sizeup-aws `9-service.sh`:
+`assignPublicIp=ENABLED`), so the recording's ~1.6 GB a day per camera comes in through the internet gateway, not a
+NAT gateway: no data-processing charge.
+
+**A deploy** (`sizeup/handoff.py`): the recordings are on the task's ephemeral disk: the new task starts with
+none (a standby task doesn't run the app, so it doesn't record either), and there is a gap from the old task's
+DRAINING to the new one's app serving. The pins carry over (the CAD store, Litestream).
+
+**Terms**: 511NY's Developer Access Agreement (https://511ny.org/help/24, last updated 2026-09-18) has no clause on
+storing or recording; it allows us to "redistribute, enhance, repackage, and add value to the data", not to alter
+"the substance of a report", and asks the time of the data wherever it is shown (the timeline shows it). It also
+asks that NYSDOT be kept informed of material changes in use. The Thruway's disclaimer: no resale or
+redistribution for profit. Recordings stay department-internal.
+
 ### Camera wall (#125)
 
 > "on the monitor page and the overview page, can we add a way to look at all of the cameras in our

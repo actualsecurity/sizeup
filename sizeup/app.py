@@ -447,6 +447,22 @@ class App:
         self.roads.ours = tuple(cfg.cad_monitor_departments)
         self.roads.wall_settings = lambda: self.cad.settings.overrides().get("camera_wall") or {}
         self.cad.camera_area = self.roads.settings_rows
+        # The camera DVR (#277, sizeup/dvr.py): live cameras' segments on this task's disk, on demand (the always list,
+        # pins, an open event's cameras, the ones watched); the pins in the CAD store so a deploy keeps them.
+        if cfg.roads_dvr and cfg.roads_enabled:
+            from sizeup.dvr import Dvr
+            state = Path(cfg.cad_db).parent if cfg.cad_db else Path(".")
+            self.roads.dvr = Dvr(self.roads, Path(cfg.roads_dvr_dir) if cfg.roads_dvr_dir else state / "dvr",
+                                 window_s=cfg.roads_dvr_window_s, max_bytes=cfg.roads_dvr_max_bytes,
+                                 near_m=cfg.roads_dvr_near_m, always=cfg.roads_dvr_always, linger_s=cfg.roads_dvr_linger_s,
+                                 max_cameras=cfg.roads_dvr_max_cameras, log=log)
+            store = self.cad.store
+            self.roads.dvr.incidents = lambda: store.q(
+                "SELECT lat, lon, address FROM incidents WHERE status IN ('queued', 'pending', 'active') "
+                "AND lat IS NOT NULL AND lon IS NOT NULL")
+            self.roads.dvr.load_pins = lambda: json.loads(store.meta_get("dvr_pins") or "[]")
+            self.roads.dvr.save_pins = lambda pins: store.meta_put("dvr_pins", json.dumps(pins))
+            self.cad.dvr_pin = self.roads.dvr.pin
         # Road projects & closures (sizeup/roadprojects.py, #185): the Thruway's and 511NY's roadwork through roads,
         # the villages' road notices (placed by the gazetteer, or listed), any WZDx feed configured; read while someone looks.
         from sizeup.roadprojects import RoadProjects
