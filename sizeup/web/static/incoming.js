@@ -5,6 +5,7 @@
 //   Incoming.column(list, s, deps)  "Possible incoming" at the top of the 60 Control column (the board: above its feed):
 //                                   radio pre-alerts and reports held for a higher tier. Never an incident
 //   Incoming.notify(s)              the pre-alert chime per new notice (radio.js alert settings)
+//   Incoming.facts(node, inc)       the incident view: its feed event, jurisdiction and run numbers (inc.feed)
 "use strict";
 
 window.Incoming = (() => {
@@ -66,5 +67,19 @@ window.Incoming = (() => {
     if (st.seen.size > 200) st.seen = new Set(items.map((x) => x.id));
   }
 
-  return { pill, column, notify };
+  const flat = (v) => (v && typeof v === "object"
+    ? (Array.isArray(v) ? v.join(", ") : Object.entries(v).map(([k, x]) => `${k} ${flat(x)}`).join(", ")) : String(v ?? ""));
+
+  function facts(node, inc) {
+    if (!node) return;
+    const f = inc && inc.feed;
+    node.hidden = !f;
+    if (!f) return;
+    const text = [`${f.label} ${f.event_id}`, f.jurisdiction ? flat(f.jurisdiction) : "",
+      f.run_numbers && Object.keys(f.run_numbers).length ? `Run ${flat(f.run_numbers)}` : ""].filter(Boolean).join(" · ");
+    if (node.textContent !== text) node.textContent = text;
+    node.title = f.group_units ? Object.entries(f.group_units).map(([g, u]) => `${g}: ${flat(u)}`).join("\n") : "";
+  }
+
+  return { pill, column, notify, facts };
 })();

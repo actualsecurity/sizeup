@@ -33,6 +33,11 @@ A factory is `factory(ctx: SourceContext) -> Adapter | Iterable[Adapter]`. An ad
                          poll_s, doubling to MAX_BACKOFF_S while it keeps raising
     health() -> Health   how the feed is doing now; asked after every poll()
     close() -> None      optional: called once when the station stops
+    poll_now(reason: str) -> None
+                         optional: something just happened that may be a call coming (reason: "paging tones", "radio
+                         pre-alert", "phone pre-alert"). The runner calls it, then calls poll() at once instead of
+                         waiting out poll_s (at most once every TRIGGER_MIN_S per adapter). The adapter may use it to
+                         skip its own pacing for that one poll; it should return quickly (no requests in it)
 
 A FeedEvent's fields, as the feed says them (never parsed here beyond the checks in FeedEvent.check):
 
@@ -46,12 +51,21 @@ A FeedEvent's fields, as the feed says them (never parsed here beyond the checks
     unit_times   per unit (optional): unit -> TIME_KEYS -> epoch seconds
     comments     (epoch seconds, text) pairs, oldest first; append only (a comment once sent is never changed)
     closed       the feed closed it
+    extra        adapter-specific fields, JSON-able (str keys; values str, number, bool, list or dict), at most
+                 EXTRA_MAX_BYTES as JSON. Keys the hub shows on the incident (EXTRA_SHOWN): "jurisdiction" (str),
+                 "run_numbers" ({group: run number}), "group_units" ({group: [unit, ...]}). Any other key is kept and
+                 its changes are on the timeline, nothing more
+    aliases      external ids of this source merged INTO this event (the feed merged B into A: A's aliases has "B").
+                 The hub retires B: its report points at A, a timeline entry on both, and B's incident, if it is a
+                 different one still waiting to be accepted, is dismissed as merged (an accepted one only gets the
+                 note: a person decides). Keep a merged id in aliases for as long as the event is sent
 
 Every change to an event (a field, a time, a new comment) is an entry on the incident's timeline on the hub.
 """
 
 from __future__ import annotations
 
+import json
 import math
 import re
 from dataclasses import dataclass, field
@@ -68,6 +82,11 @@ RESERVED = ("paging",)
 MIN_POLL_S = 5.0
 MAX_BACKOFF_S = 300.0
 MAX_UNITS, MAX_COMMENTS, MAX_TEXT = 60, 500, 2000
+MAX_ALIASES = 50
+EXTRA_MAX_BYTES = 16 * 1024
+EXTRA_SHOWN = ("jurisdiction", "run_numbers", "group_units")
+TRIGGER_MIN_S = 2.0
+TRIGGERS = ("paging tones", "radio pre-alert", "phone pre-alert")
 
 
 class SourceError(ValueError):
@@ -97,6 +116,8 @@ class FeedEvent:
     unit_times: Mapping[str, Mapping[str, float]] = field(default_factory=dict)
     comments: tuple[tuple[float, str], ...] = ()
     closed: bool = False
+    extra: Mapping[str, object] = field(default_factory=dict)
+    aliases: tuple[str, ...] = ()
 
     def check(self) -> FeedEvent:
         """SourceError when it breaks the interface; else itself."""
@@ -117,6 +138,17 @@ class FeedEvent:
         for c in self.comments:
             if (not isinstance(c, tuple) or len(c) != 2 or not _when(c[0]) or not isinstance(c[1], str)):
                 raise SourceError("comments: (epoch seconds, text) pairs")
+        if not isinstance(self.extra, Mapping) or not all(isinstance(k, str) for k in self.extra):
+            raise SourceError("extra: a mapping with text keys")
+        try:
+            size = len(json.dumps(dict(self.extra), allow_nan=False))
+        except (TypeError, ValueError):
+            raise SourceError("extra: JSON values only (text, numbers, booleans, lists, mappings)") from None
+        if size > EXTRA_MAX_BYTES:
+            raise SourceError(f"extra: at most {EXTRA_MAX_BYTES} bytes as JSON")
+        if len(self.aliases) > MAX_ALIASES or not all(isinstance(a, str) and 1 <= len(a) <= 64 and a != self.event_id
+                                                      for a in self.aliases):
+            raise SourceError(f"aliases: up to {MAX_ALIASES} other event ids of this source")
         return self
 
     def as_dict(self) -> dict:
@@ -125,7 +157,8 @@ class FeedEvent:
                 "location": self.location[:MAX_TEXT], "units": [u.strip() for u in self.units],
                 "times": {k: float(v) for k, v in self.times.items()},
                 "unit_times": {u.strip(): {k: float(v) for k, v in t.items()} for u, t in self.unit_times.items()},
-                "comments": [[float(at), text[:MAX_TEXT]] for at, text in self.comments], "closed": bool(self.closed)}
+                "comments": [[float(at), text[:MAX_TEXT]] for at, text in self.comments], "closed": bool(self.closed),
+                "extra": json.loads(json.dumps(dict(self.extra))), "aliases": list(self.aliases)}
 
     @classmethod
     def from_dict(cls, d: dict) -> FeedEvent:
@@ -139,7 +172,8 @@ class FeedEvent:
                      times=dict(d.get("times") or {}),
                      unit_times={str(u): dict(t) for u, t in (d.get("unit_times") or {}).items()},
                      comments=tuple((c[0], c[1]) for c in d.get("comments") or ()),
-                     closed=bool(d.get("closed")))
+                     closed=bool(d.get("closed")), extra=dict(d.get("extra") or {}),
+                     aliases=tuple(str(a) for a in d.get("aliases") or ()))
         except (TypeError, ValueError, IndexError, AttributeError) as e:
             raise SourceError(f"not an event: {e}") from None
         return ev.check()

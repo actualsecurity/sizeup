@@ -726,6 +726,7 @@ function renderDetail() {
   setText($("#d-elapsed-l"), open ? "Elapsed" : "Duration");
   if (open) since(elapsed, inc.created_at);
   else { since(elapsed, null); setText(elapsed, fmtDur((inc.closed_at || 0) - inc.created_at)); }
+  if (window.Incoming) Incoming.facts($("#d-feed"), inc);
   show($("#d-via-w"), !!inc.received_via);
   setText($("#d-via"), inc.received_via ? nameOf("received_via", inc.received_via) : "");
   show($("#d-until-w"), !!inc.until_at);

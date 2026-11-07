@@ -552,6 +552,7 @@ class HubApp(App):
         self.health = self.hub.health_ = StationHealth(self.hub, cfg, self.mdb, notifier, log)
         # The incident sources (#297): paging is a tier only while the station is connected; Settings > Health shows them.
         self.cad.sources.paging_ok = self.hub.connected
+        self.cad.sources.trigger = self._sources_poll_now      # a pre-alert here: the station's adapters poll now
         self.health.sources = self.cad.sources.panel
         if not notifier.enabled:
             log("health: no push for station alerts (no status or alerts topic in effect): Settings > Health and log only")
@@ -999,6 +1000,16 @@ class HubApp(App):
         st["rerun"] = self.hub.rerun()
         st["cloud"] = self.hub.cad_cloud()
         return st
+
+    def _sources_poll_now(self, reason: str) -> None:
+        """A radio or phone pre-alert on the hub: the station's adapters poll now (a job; never waits, never raises)."""
+        def send() -> None:
+            try:
+                self.hub.remote("sources_poll_now", reason, timeout=10.0)
+            except Exception:  # noqa: BLE001 - offline or an older station: it polls on its own schedule
+                pass
+        if self.hub.connected():
+            threading.Thread(target=send, name="sources-poll-now", daemon=True).start()
 
     def close_incident(self, iid: str) -> bool:
         ok = super().close_incident(iid)

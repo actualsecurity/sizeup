@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 from sizeup.sources import (ENTRY_POINT_GROUP, ENV_MODULES, ENV_PATH, MAX_BACKOFF_S, MIN_POLL_S, RESERVED, SOURCE_ID,
-                            Adapter, FeedEvent, Health, SourceContext, SourceError)
+                            TRIGGER_MIN_S, Adapter, FeedEvent, Health, SourceContext, SourceError)
 
 HEARTBEAT_S = 60.0
 
@@ -122,6 +122,8 @@ class _Run:
         self.health_at = 0.0
         self.error = ""                            # poll() raised: why
         self.fails = 0
+        self.wake = threading.Event()              # trigger(): poll now
+        self.triggered = 0.0
 
 
 class SourceRunner:
@@ -191,14 +193,33 @@ class SourceRunner:
 
     # -- threads ---------------------------------------------------------------------------------------------------
 
+    def trigger(self, reason: str) -> int:
+        """Something that may be a call coming (paging tones, a radio or phone pre-alert): each adapter's optional
+        poll_now(reason), then a poll at once (at most once every TRIGGER_MIN_S per adapter). How many were woken."""
+        now, n = self.clock(), 0
+        for r in self.runs:
+            if now - r.triggered < TRIGGER_MIN_S:
+                continue
+            r.triggered = now
+            hook = getattr(r.a, "poll_now", None)
+            if callable(hook):
+                try:
+                    hook(reason)
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"incident sources: {r.a.label}: poll_now: {type(e).__name__}: {e}")
+            r.wake.set()
+            n += 1
+        return n
+
     def _loop(self, r: _Run) -> None:
         while not self._stop.is_set():
+            r.wake.clear()
             try:
                 wait = self.step(r)
             except Exception as e:  # noqa: BLE001 - the sink failing: try again later
                 self.log(f"incident sources: {r.a.label}: {type(e).__name__}: {e}")
                 wait = MAX_BACKOFF_S
-            self._stop.wait(wait)
+            r.wake.wait(wait)
 
     def start(self) -> SourceRunner:
         for r in self.runs:
@@ -210,6 +231,7 @@ class SourceRunner:
     def stop(self) -> None:
         self._stop.set()
         for r in self.runs:
+            r.wake.set()
             close = getattr(r.a, "close", None)
             if callable(close):
                 try:

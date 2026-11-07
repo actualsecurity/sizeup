@@ -23,6 +23,12 @@ sizeup/sources/runner.py (they come here as "source_event" / "source_health" thr
                each new comment at its own time, closed or reopened in the feed
     measure    each report's first-seen time (source_reports.first_seen); per incident and source the earliest, and
                the lead over paging (paging's first seen less the source's): Settings > Health
+    merge      a feed's event naming other ids of the same source in its aliases (the feed merged them into it): each
+               alias's report is retired onto this event (merged_into), with a timeline entry on both incidents; the
+               alias's own incident, if another one still queued, is dismissed as merged (an accepted one gets the note)
+    extra      a feed's adapter-specific fields: their changes on the timeline; jurisdiction, run numbers and each
+               group's units shown on the incident (decorate(): incident["feed"])
+    trigger    paging tones, a radio pre-alert, the phone ring: poke() tells the adapters to poll now
     incoming   pre-alerts never make an incident: a radio transmission on the 60 Control feed's talkgroups that names
                us and is dispatch opening a call to us or announces one ("incoming additional alarm", "stand by for a
                page") is a "possible incoming" notice for INCOMING_S (with the held reports and the phone pre-alert)
@@ -39,7 +45,7 @@ from statistics import median
 from typing import Callable
 
 from sizeup.cad.store import OPEN, TZ
-from sizeup.sources import HEALTH_STATES, SOURCE_ID, TIME_KEYS, FeedEvent, SourceError
+from sizeup.sources import EXTRA_SHOWN, HEALTH_STATES, SOURCE_ID, TIME_KEYS, FeedEvent, SourceError
 
 PAGING, PAGING_RANK, PAGING_LABEL = "paging", 1000, "Paging"
 FEED_SOURCE = "CAD feed"               # incidents.source of one an external feed made
@@ -71,6 +77,7 @@ CREATE TABLE IF NOT EXISTS source_reports (
   updated_at REAL NOT NULL,
   hold_until REAL,                      -- held: attached or created by then
   data TEXT NOT NULL DEFAULT '{}',      -- the report as last seen (a feed: FeedEvent.as_dict; paging: the page's fields)
+  merged_into TEXT NOT NULL DEFAULT '', -- the feed merged this event into that one (its aliases): retired, ignored after
   PRIMARY KEY (source, ref)
 );
 CREATE INDEX IF NOT EXISTS source_reports_incident ON source_reports(incident_id);
@@ -137,6 +144,17 @@ def same_place(a: str, b: str) -> bool:
     return sa <= sb or sb <= sa
 
 
+def _shown(v) -> str:
+    """An extra's value for people: {"Fire": "26-0012"} -> "Fire 26-0012"; [a, b] -> "a, b"; None -> "(none)"."""
+    if v is None or v == "" or v == [] or v == {}:
+        return "(none)"
+    if isinstance(v, dict):
+        return "; ".join(f"{k} {_shown(x)}" for k, x in v.items())
+    if isinstance(v, list):
+        return ", ".join(_shown(x) for x in v)
+    return str(v)
+
+
 def _hm(t: float | None) -> str:
     return datetime.fromtimestamp(t, TZ).strftime("%H:%M:%S") if t else "—"
 
@@ -155,6 +173,9 @@ class Sources:
         self.paging_ok: Callable[[], bool] = lambda: True
         # Cad: create_page(data) -> incident id, for a held page whose time came (Cad._create_from_page)
         self.create_page: Callable[[dict], int | None] | None = None
+        # trigger(reason): tell the station's adapters "poll now" (the app sets it: the runner here, or a job to the
+        # station from the hub); None: nothing to tell
+        self.trigger: Callable[[str], None] | None = None
         self._stop = threading.Event()
         with self.store.lock:
             self.store.db.executescript(SCHEMA)
@@ -274,17 +295,22 @@ class Sources:
         data = ev.as_dict()
         with self._lock:
             rep = self._report(ev.source, ev.event_id)
+            if rep and rep["merged_into"]:                   # retired: the feed merged it into another event
+                into = self._report(ev.source, rep["merged_into"])
+                return into["incident_id"] if into else None
             prev = json.loads(rep["data"]) if rep else None
             if rep and rep["incident_id"]:
                 self._put(ev.source, ev.event_id, rank, label, seen, data)
                 self._apply(rep["incident_id"], prev, data, label, rank)
+                self._merge(ev.source, ev.event_id, rep["incident_id"], data, label)
                 return rep["incident_id"]
             at = min(data["times"].values()) if data["times"] else seen
-            inc = self.match(ev.source, at, data["location"], data["units"])
+            inc = self._alias_incident(ev.source, data) or self.match(ev.source, at, data["location"], data["units"])
             if inc is not None:
                 self._put(ev.source, ev.event_id, rank, label, seen, data, incident_id=inc["id"])
                 self._attached(inc, ev.source, label, rank, seen)
                 self._apply(inc["id"], None, data, label, rank, attach=True)
+                self._merge(ev.source, ev.event_id, inc["id"], data, label)
                 return inc["id"]
             if self._above(rank, now):
                 held = rep is None or rep["hold_until"] is None
@@ -296,8 +322,41 @@ class Sources:
                 return None
             self._put(ev.source, ev.event_id, rank, label, seen, data)
             iid = self._create_feed(ev.source, ev.event_id, data, label)
+            self._merge(ev.source, ev.event_id, iid, data, label)
             self._settle()
             return iid
+
+    def _alias_incident(self, source: str, data: dict) -> dict | None:
+        """The incident one of this event's aliases already has (the event it was merged from)."""
+        for a in data.get("aliases") or []:
+            r = self._report(source, a)
+            if r and r["incident_id"]:
+                return self.store.incident(r["incident_id"])
+        return None
+
+    def _merge(self, source: str, ref: str, iid: int, data: dict, label: str) -> None:
+        """The feed merged its aliases into this event: each retired onto it (see the module's "merge")."""
+        for a in data.get("aliases") or []:
+            r = self._report(source, a)
+            if r is not None and r["merged_into"]:
+                continue
+            old = r["incident_id"] if r else None
+            now = self.clock()
+            with self.store.tx() as db:
+                if r is None:                                # never seen here: on record, so it is ignored if it comes
+                    db.execute("INSERT INTO source_reports (source, ref, rank, label, incident_id, first_seen, updated_at, "
+                               "data, merged_into) VALUES (?, ?, ?, ?, ?, ?, ?, '{}', ?)",
+                               (source, a, self._rank_of(source, ref), label, iid, now, now, ref))
+                else:
+                    db.execute("UPDATE source_reports SET merged_into = ?, incident_id = ?, hold_until = NULL "
+                               "WHERE source = ? AND ref = ?", (ref, iid, source, a))
+                if old and old != iid:
+                    self.store._event(db, iid, "feed", f"{label}: event {a} merged into {ref} (event #{old})", at=now)
+                    self.store._event(db, old, "feed", f"{label}: event {a} merged into {ref} (event #{iid})", at=now)
+            if r is not None:
+                self.log(f"incident sources: {label} event {a} merged into {ref}")
+            if old and old != iid and self.store.incident(old)["status"] == "queued":
+                self.store.dismiss(old, operator=label, reason=f"merged into {label} event {ref}")
 
     def _create_feed(self, source: str, ref: str, data: dict, label: str) -> int:
         typ, sub, note = self.cad.map_type(data["type"], label)
@@ -379,6 +438,10 @@ class Sources:
         for a, text in new["comments"]:
             if (float(a), text) not in had:
                 notes.append((float(a), f"{label} comment: {text}"))
+        was_x, now_x = old.get("extra") or {}, new.get("extra") or {}
+        for k in sorted(set(was_x) | set(now_x)):
+            if was_x.get(k) != now_x.get(k):
+                notes.append((now, f"{pre}: {k.replace('_', ' ')} {_shown(now_x.get(k))}"))
         if bool(new["closed"]) != bool(old["closed"]):
             notes.append((now, f"{pre}: {'closed' if new['closed'] else 'reopened'} in the feed"))
         if fields and inc["status"] in OPEN:
@@ -448,7 +511,7 @@ class Sources:
 
     def held(self) -> list[dict]:
         return self.store.q("SELECT * FROM source_reports WHERE incident_id IS NULL AND hold_until IS NOT NULL "
-                            "ORDER BY first_seen")
+                            "AND merged_into = '' ORDER BY first_seen")
 
     def _settle(self) -> int:
         """Held reports that now match an incident: attached (after one was created)."""
@@ -525,6 +588,35 @@ class Sources:
     def stop(self) -> None:
         self._stop.set()
 
+    def poke(self, reason: str) -> None:
+        """Paging tones, a radio pre-alert, the phone ring: the adapters poll now (never raises)."""
+        if self.trigger is None:
+            return
+        try:
+            self.trigger(reason)
+        except Exception as e:  # noqa: BLE001
+            self.log(f"incident sources: poll now ({reason}): {type(e).__name__}: {e}")
+
+    def decorate(self, incs: list[dict]) -> list[dict]:
+        """Each incident a feed has: incident["feed"] = {label, event_id, jurisdiction, run_numbers, group_units} from
+        its best-ranked feed (None without one)."""
+        ids = [i["id"] for i in incs]
+        best: dict[int, dict] = {}
+        for i in range(0, len(ids), 500):
+            part = ids[i:i + 500]
+            for r in self.store.q(f"SELECT incident_id, source, ref, rank, label, data FROM source_reports WHERE source != ? "
+                                  f"AND merged_into = '' AND incident_id IN ({','.join('?' * len(part))}) ORDER BY rank, first_seen",
+                                  (PAGING, *part)):
+                best.setdefault(r["incident_id"], r)
+        for inc in incs:
+            r = best.get(inc["id"])
+            if r is None:
+                inc["feed"] = None
+                continue
+            x = json.loads(r["data"] or "{}").get("extra") or {}
+            inc["feed"] = {"label": r["label"], "event_id": r["ref"], **{k: x[k] for k in EXTRA_SHOWN if k in x}}
+        return incs
+
     # -- pre-alerts: possible incoming ------------------------------------------------------------------------------------
 
     def consider_radio(self, tid: str) -> dict | None:
@@ -559,6 +651,7 @@ class Sources:
                              (tid, t["start"], t["channel"], text, t["start"] + INCOMING_S))
         if cur.rowcount:
             self.log(f"incident sources: possible incoming ({t['channel']}): {text}")
+            self.poke("radio pre-alert")
         return self.store.one("SELECT * FROM incoming WHERE ref = ?", (tid,))
 
     def created(self, inc: dict) -> None:

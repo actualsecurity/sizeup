@@ -446,3 +446,89 @@ def test_adapters_are_never_loaded_or_run_on_the_hub(tmp_path, monkeypatch):
         SourceRunner([FakeFeed()], lambda k, d: None, role="hub")
     assert looked == []                                   # refused before discovery
     assert load_adapters(context_for(tmp_path, print), env={}, role="") == []    # all-in-one: allowed
+
+
+# -- the trigger hook, extras, merges ------------------------------------------------------------------------------------
+
+
+def test_triggers_ask_the_adapters_to_poll_now(tmp_path):
+    rig = Rig(tmp_path)
+    rig.cad.sources.trigger = rig.runner.trigger
+    traffic(rig.cad, "a-t0", "Port Chester, incoming additional alarm", T0)           # a radio pre-alert
+    assert rig.feed.pokes == ["radio pre-alert"] and rig.runner.runs[0].wake.is_set()
+    traffic(rig.cad, "f-t0", "Stand by for a page, Port Chester", T0 + 1)
+    assert rig.feed.pokes == ["radio pre-alert"]                                        # at most every TRIGGER_MIN_S
+    rig.at(10)
+    from sizeup.prealert import PreAlerts
+    pa = PreAlerts(rig.cad, "http://127.0.0.1:9", "ring", "status", log=lambda m: None)
+    pa.ring({"id": "r1", "time": T0 + 10, "event": "message", "topic": "ring", "title": "STATION PHONE RINGING",
+             "message": "Incoming call", "priority": 5})
+    assert rig.feed.pokes[-1] == "phone pre-alert" and rig.incidents() == []
+
+
+def test_paging_tones_of_ours_poke_the_station_adapters():
+    from sizeup.radio.livepage import LivePaging
+    from sizeup.radio.tones import TonePlan, ToneCode, ToneEvent
+    hits = []
+    lp = LivePaging(TonePlan([ToneCode("Port Chester FD", 349.1, 311.1, "PCFD")]), {"Port Chester FD"})
+    lp.on_ours = lambda: hits.append(1)
+    from sizeup.radio.livepage import _Live
+    from sizeup.radio.tones import ToneDetector
+    cur = _Live("South 2", 0.0, 0.0, ToneDetector(8000, t0=0.0))
+    lp._pair(cur, ToneEvent("two_tone", 400.0, 500.0, 0.5, 1.5), True)       # not ours: nothing
+    lp._pair(cur, ToneEvent("two_tone", 349.1, 311.1, 1.0, 2.0), True)
+    assert hits == [1]
+
+
+def test_extras_are_on_the_timeline_and_shown_on_the_incident(tmp_path):
+    rig = Rig(tmp_path)
+    rig.feed.put("A1", type="ALARM", location="12 Example Ave", units=("E60",), times={"dispatched": T0},
+                 extra={"jurisdiction": "Example Village", "run_numbers": {"Fire": "26-0012"}, "group_units": {"Fire": ["E60"]},
+                        "beat": "7"})
+    rig.poll()
+    [inc] = rig.incidents()
+    assert {"County feed: jurisdiction Example Village", "County feed: run numbers Fire 26-0012", "County feed: beat 7",
+            "County feed: group units Fire E60"} <= set(rig.feed_lines(inc["id"]))
+    rig.at(30)
+    rig.feed.change("A1", extra={**rig.feed.events["A1"].extra, "run_numbers": {"Fire": "26-0012", "EMS": "26-0444"}})
+    rig.poll()
+    assert rig.feed_lines(inc["id"])[-1] == "County feed: run numbers Fire 26-0012; EMS 26-0444"
+    [shown] = [i for i in rig.cad.state()["incidents"] if i["id"] == inc["id"]]
+    assert shown["feed"] == {"label": "County feed", "event_id": "A1", "jurisdiction": "Example Village",
+                             "run_numbers": {"Fire": "26-0012", "EMS": "26-0444"}, "group_units": {"Fire": ["E60"]}}
+    with pytest.raises(SourceError):
+        FeedEvent("county", "X", extra={"bad": object()}).check()
+
+
+def test_a_merge_retires_the_other_event_and_its_queued_incident(tmp_path):
+    rig = Rig(tmp_path)
+    rig.feed.put("A1", type="ALARM", location="12 Example Ave", units=("E60",), times={"dispatched": T0})
+    rig.feed.put("B2", type="ALARM", location="400 Sample St", units=("E62",), times={"dispatched": T0 + 30})
+    rig.poll()
+    a, b = rig.incidents()
+    rig.at(60)
+    rig.feed.change("A1", aliases=("B2",), units=("E60", "E62"))
+    rig.poll()
+    b_now = rig.cad.store.incident(b["id"])
+    assert b_now["status"] == "dismissed"
+    assert f"County feed: event B2 merged into A1 (event #{a['id']})" in rig.feed_lines(b["id"])
+    assert f"County feed: event B2 merged into A1 (event #{b['id']})" in rig.feed_lines(a["id"])
+    n = len(rig.feed_lines(b["id"]))
+    rig.at(90)
+    rig.feed.change("B2", location="402 Sample St")             # the feed still sends B: ignored
+    rig.poll()
+    assert len(rig.feed_lines(b["id"])) == n and len(rig.incidents()) == 2
+    assert [i["feed"]["event_id"] for i in rig.cad.state()["incidents"] if i["id"] == a["id"]] == ["A1"]
+
+
+def test_an_event_naming_an_alias_attaches_to_its_incident(tmp_path):
+    rig = Rig(tmp_path)
+    rig.feed.put("B2", type="ALARM", location="400 Sample St", units=("E62",), times={"dispatched": T0})
+    rig.poll()
+    [b] = rig.incidents()
+    b_ev = rig.feed.events.pop("B2")
+    rig.at(30)
+    rig.feed.put("C3", type="ALARM", location="401 Other Rd", units=("E64",), times={"dispatched": T0 + 30}, aliases=("B2",))
+    rig.poll()
+    assert len(rig.incidents()) == 1 and rig.cad.store.incident(b["id"])["status"] == "queued"
+    assert b_ev.event_id == "B2"

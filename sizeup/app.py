@@ -2943,6 +2943,13 @@ class App:
             return
         if adapters:
             self.sources_runner = SourceRunner(adapters, self._source_out, log=log, role=role).start()
+            self.paging.on_ours = lambda: self.sources_poll_now("paging tones")
+            self.cad.sources.trigger = self.sources_poll_now      # a pre-alert on this CAD (all-in-one)
+
+    def sources_poll_now(self, reason: str = "") -> int:
+        """Paging tones of ours, a radio or phone pre-alert (here, or the hub's job): the adapters poll now."""
+        r = self.sources_runner
+        return r.trigger(str(reason or "")[:40]) if r is not None else 0
 
     def _source_out(self, kind: str, data: dict) -> None:
         """An adapter's event or health: to the hub (a station forwarding), else the CAD here."""

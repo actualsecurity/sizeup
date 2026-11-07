@@ -763,6 +763,15 @@ Incidents come in from ranked sources. The interface is in `sizeup/sources/__ini
 - **Reconciliation:** a match needs the incident to be created within 20 min, not dismissed and with nothing on it from
   the same source. It also needs a unit in common or the same place. The best-ranked source's type and location win.
   Every change and comment from a feed goes on the incident's timeline (kind `feed`).
+- **Merges and extras:**
+  - When a feed says event B is now part of A (`aliases`), B is retired onto A, and B's incident is dismissed if it is
+    still queued.
+  - An adapter's `extra` fields go on the timeline. The incident shows the jurisdiction, run numbers and each
+    group's units.
+- **Poll now:** paging tones of ours, a radio pre-alert or the phone ring calls each adapter's optional `poll_now()`,
+  and then polls it at once. The hub reaches the station through a job.
+- **Station only:** the hub refuses to load or run adapters (`HubRefused`). It only applies the station's forwarded
+  events.
 - **Measurement:** each source's first-seen time per incident, and its lead over paging. Settings > Health shows both.
 - **Pre-alerts never make an incident.** These include a dispatcher on the feed's talkgroups opening a call to us,
   "incoming additional alarm" or "stand by for a page" naming us, a held report and the phone ring. They show as

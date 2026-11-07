@@ -293,6 +293,10 @@ class Cad:
         if self._state is None or self._state[0] != rev:
             cards = runcards.cards(self.store)
             incs = self._with_radio(self.store.incidents())
+            try:
+                self.sources.decorate(incs)               # a feed's jurisdiction and run numbers on the incident (#297)
+            except Exception as e:  # noqa: BLE001
+                self.log(f"CAD: incident sources: {type(e).__name__}: {e}")
             self._state = (rev, {
                 "department": self.s.department,
                 "lists": self.lists.public(),

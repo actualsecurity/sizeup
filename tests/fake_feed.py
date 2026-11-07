@@ -27,6 +27,7 @@ class FakeFeed:
         self.polls = 0
         self.closed = False
         self._script: list[tuple[float, object]] = []
+        self.pokes: list[str] = []
 
     # -- the script -----------------------------------------------------------------------------------------------
 
@@ -34,13 +35,15 @@ class FakeFeed:
         kw.setdefault("units", ())
         kw["units"] = tuple(kw["units"])
         kw["comments"] = tuple(tuple(c) for c in kw.get("comments", ()))
+        kw["aliases"] = tuple(kw.get("aliases", ()))
         ev = FeedEvent(source=self.source, event_id=event_id, **kw)
         self.events[event_id] = ev
         return ev
 
     def change(self, event_id: str, **kw) -> FeedEvent:
-        if "units" in kw:
-            kw["units"] = tuple(kw["units"])
+        for k in ("units", "aliases"):
+            if k in kw:
+                kw[k] = tuple(kw[k])
         if "times" in kw:
             kw["times"] = {**self.events[event_id].times, **kw["times"]}
         self.events[event_id] = ev = replace(self.events[event_id], **kw)
@@ -77,6 +80,9 @@ class FakeFeed:
 
     def health(self) -> Health:
         return self._health
+
+    def poll_now(self, reason: str) -> None:
+        self.pokes.append(reason)
 
     def close(self) -> None:
         self.closed = True

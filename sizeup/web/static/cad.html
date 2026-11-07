@@ -278,6 +278,8 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
               <span id="d-disp-w"><span class="dim">Disposition</span> <b id="d-disp"></b></span>
             </div>
             <div id="d-caller" class="d-caller"></div>
+            <!-- the external CAD feed's event (#297, incoming.js): its id, jurisdiction and run numbers -->
+            <div id="d-feed" class="d-caller" hidden></div>
             <!-- an Airport event (#105): what the tower passed, one compact row; the subtype's FAA definition behind "?" -->
             <div id="d-airport" class="d-airport" hidden aria-label="Airport: what the tower passed"></div>
             <div id="d-roads" class="d-roads" hidden aria-label="Road closures and projects nearby"></div>
