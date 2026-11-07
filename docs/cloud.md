@@ -755,6 +755,50 @@ expire_min = 5
 heartbeat_stale_min = 90
 ```
 
+## Incident sources: external CAD feeds, paging as the backup (#297)
+
+Incidents come in from ranked sources. The interface is in `sizeup/sources/__init__.py`, the station's runner in
+`sizeup/sources/runner.py` and the rules in `sizeup/cad/sources.py`.
+
+- **External CAD feeds** are the primary (rank 1, then 2, 3 ...). They are read-only adapters in a private package
+  installed on the station, outside this repo. The station finds them by the entry point group
+  `sizeup.incident_sources`, or by `SIZEUP_INCIDENT_SOURCES="pkg.mod:factory"` plus `SIZEUP_INCIDENT_SOURCES_PATH` in
+  `/etc/sizeup/station.env`. A directory on that path outlives a release's venv being rebuilt, and nothing goes in
+  `config.toml`, so switching back to an older release stays safe. Their events and health go to the hub through the
+  outbox as `source_event` / `source_health`.
+- **Nothing waits.** A page for us makes its incident at once, whatever the feeds' health. An occasional duplicate
+  is acceptable; a delay is not. A feed's new event does the same unless it attaches. An event that is already closed,
+  or was dispatched more than 20 min ago (a first run, a lost database), is recorded and never makes an incident.
+- **Health:** a feed reports `ok`, `backing_off`, `failing` or `stale`, and a feed with no report for 3 min counts as
+  stale. Paging is healthy while the station is connected. The first healthy tier is the acting primary. The console
+  pill shows it (`County feed · backing off · Paging primary`), and so does Settings > Health.
+- **Matching:** only an open incident (queued, pending or active) created within 20 min, with nothing on it from the
+  same source.
+  - When both sides have a location, they must be the same place: house number and street, direction and suffix. An
+    intersection never matches a numbered address. Shared units never override two different places.
+  - A unit in common (cleared assignments don't count) is enough only when one side has no location.
+- **Attaching:** a page attaches only to an incident a feed has. A feed event attaches only to a queued incident or
+  one a feed made. Any other match makes its own incident, noted "Possibly the same as #N" on both.
+- **Authority:** the best-ranked feed's type and location apply while the incident is queued, or to a field no person
+  has edited. Otherwise there is a timeline note, and the incident view offers "Use County feed's type / location"
+  (`POST /api/cad/incident/<id>/feed-use`). A pin a person set is never cleared. Every change and comment from a feed
+  goes on the timeline (kind `feed`).
+- **Merges and extras:**
+  - When a feed says event B is now part of A (`aliases`), B is retired, with a note on both incidents and in the log.
+    B's incident is dismissed only if it is still queued and the same source made it. Otherwise it keeps B's report
+    and gets a note.
+  - An adapter's `extra` fields go on the timeline. The incident shows the jurisdiction, run numbers and each
+    group's units.
+- **Poll now and reset:** paging tones of ours, a radio pre-alert or the phone ring wakes each adapter. The adapter's
+  own thread then calls its optional `poll_now(reason)` and polls; `trigger()` never runs adapter code. A remote reset
+  (#305) is queued in the runner's `Resets` and runs `reset()` on the adapter's own thread before its next poll.
+- **Station only:** the hub refuses to load or run adapters (`HubRefused`). It only applies the station's forwarded
+  events. The hub only ever sees an exception's type, never its text.
+- **Measurement:** each source's first-seen time per incident, and its lead over paging. Settings > Health shows both.
+- **Pre-alerts never make an incident.** These include a dispatcher on the feed's talkgroups opening a call to us,
+  "incoming additional alarm" or "stand by for a page" naming us, and the phone ring. They show as "Possible incoming"
+  at the top of the 60 Control column.
+
 ## Highway layers: cameras, incidents, signs, mileposts (the Thruway, 511NY)
 
 > "it looks like this has location data of all the highway things, including cameras, that would be

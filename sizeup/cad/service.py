@@ -31,6 +31,7 @@ from sizeup.cad.comms import MAIN_LIMIT, MAX_ROWS, OTHER_LIMIT, Comms
 from sizeup.cad.feed import Feed
 from sizeup.cad.newids import NewIds
 from sizeup.cad.statushints import StatusHints
+from sizeup.cad.sources import PAGING_RANK, Sources
 from sizeup.cad.radios import Registry, RadioError, is_pcfd
 from sizeup.cad import settings as settings_mod
 from sizeup.cad import lists as lists_mod
@@ -203,7 +204,10 @@ class Cad:
         # Unit statuses suggested from what is heard on our fire channels (#37): a dispatcher accepts or dismisses each.
         self.hints = StatusHints(self.store, lambda: self.lists, channels=s.tactical,
                                  talkgroups=tuple(dict.fromkeys((*s.incident_talkgroups, *s.airport_talkgroups))), log=log)
-        self.comms.on_text = self.hints.consider
+        self.comms.on_text = self._on_text
+        # Incident sources, ranked (#297, sizeup/cad/sources.py): external CAD feeds first, the paging decoder the backup;
+        # which may make an incident, whose fields win, the possible-incoming notices. The app starts its ticker.
+        self.sources = Sources(self, clock=clock, log=log)
         # FG1 radio IDs nobody has named yet (#163): "Radio 1234 (MDC) on FG1: who is this?" on the console.
         self.newids = NewIds(self)
         # The emergency button and a mayday heard on our fire channels (sizeup/cad/alarms.py, #128): the app feeds it
@@ -288,6 +292,10 @@ class Cad:
         if self._state is None or self._state[0] != rev:
             cards = runcards.cards(self.store)
             incs = self._with_radio(self.store.incidents())
+            try:
+                self.sources.decorate(incs)               # a feed's jurisdiction and run numbers on the incident (#297)
+            except Exception as e:  # noqa: BLE001
+                self.log(f"CAD: incident sources: {type(e).__name__}: {e}")
             self._state = (rev, {
                 "department": self.s.department,
                 "lists": self.lists.public(),
@@ -322,7 +330,27 @@ class Cad:
                     comms_rev=f"{self.comms.rev}.{rev}",
                     talking=self.live(), paging=self.paging(), cloud=self.cloud(), prealert=self.prealert_state(now),
                     airport_alerts=self.airport_alerts_state(now),
-                    status_hints=self.status_hints(), alarms=self.alarms_state(now), radio_ids=self.radio_ids(now))
+                    status_hints=self.status_hints(), alarms=self.alarms_state(now), radio_ids=self.radio_ids(now),
+                    sources=self.sources_state(now))
+
+    def sources_state(self, now: float | None = None) -> dict | None:
+        """The incident sources (#297): the tiers, the acting primary, the possible-incoming notices (never breaks the
+        console)."""
+        try:
+            return self.sources.state(now)
+        except Exception as e:  # noqa: BLE001
+            self.log(f"CAD: incident sources: {type(e).__name__}: {e}")
+            return None
+
+    def _on_text(self, tid: str) -> None:
+        """A transcript arrived or changed: status suggestions (#37) and the radio pre-alerts (#297)."""
+        try:
+            self.hints.consider(tid)
+        finally:
+            try:
+                self.sources.consider_radio(tid)
+            except Exception as e:  # noqa: BLE001 - a notice never stops the transcript
+                self.log(f"CAD: possible incoming: {type(e).__name__}: {e}")
 
     def radio_ids(self, now: float | None = None) -> list[dict]:
         """The FG1 radio IDs to ask about (#163, sizeup/cad/newids.py); a fault never breaks the console."""
@@ -390,6 +418,10 @@ class Cad:
             return None
 
     def _prealert_match(self, inc: dict) -> None:
+        try:
+            self.sources.created(inc)               # the possible-incoming notices it answers (#297)
+        except Exception as e:  # noqa: BLE001
+            self.log(f"CAD: possible incoming: {type(e).__name__}: {e}")
         if self.prealert is not None:
             try:
                 self.prealert.match(inc)
@@ -579,7 +611,21 @@ class Cad:
                 g = dict(f, type=airport.TYPE)
                 if airport.default_location(g):
                     f.update(address=g["address"], lat=g["lat"], lon=g["lon"], geo_label=g["geo_label"])
-        return self.store.update_incident(iid, f, _text(body, "operator", OPERATOR_MAX))
+        op = _text(body, "operator", OPERATOR_MAX)
+        before = self.store.incident(iid)
+        after = self.store.update_incident(iid, f, op)
+        # a person set these (#297): a CAD feed only notes its own type / location / pin from now on
+        hand = [g for g, ks in (("type", ("type", "subtype")), ("location", ("address", "cross_street", "place")),
+                                ("pin", ("lat", "lon"))) if any(k in f and before[k] != after[k] for k in ks)]
+        if "pin" in hand and "lat" not in body:
+            hand.remove("pin")                       # re-placed from a typed address, not a pin a person put down
+        self.sources.mark_manual(iid, hand, op)
+        return after
+
+    def feed_use(self, iid: int, body: dict) -> dict:
+        """POST /api/cad/incident/<id>/feed-use {field: type | location, operator}: the CAD feed's value over the
+        one a person set (#297)."""
+        return self.sources.feed_use(iid, _text(body, "field", 20, required=True), _text(body, "operator", OPERATOR_MAX))
 
     def accept(self, iid: int, body: dict) -> dict:
         """A queued 60 Control page accepted (the type can be picked in the same call)."""
@@ -587,6 +633,7 @@ class Cad:
         f = {k: _text(body, k, 24) for k in ("type", "subtype") if k in body}
         if f:
             self.store.update_incident(iid, f, op)
+            self.sources.mark_manual(iid, ["type"], op)       # a person picked it (#297: a feed only notes its own)
         return self.store.accept(iid, op)
 
     def dismiss(self, iid: int, body: dict) -> dict:
@@ -1529,18 +1576,24 @@ class Cad:
         if typ == airport.TYPE:                        # the tower's facts as the page says them (#105)
             f.update(airport.fields(" ".join(inc.page_text)))
         old = self.store.by_source_ref(ref)
+        if old is None and (got := self.sources.paging_incident(str(inc.id))):
+            old = self.store.incident(got)             # attached to an incident a higher tier made (#297)
         if old is None:
-            via = "60 CONTROL" if "60 CONTROL" in self.lists.received_codes else ""
-            iid = self.store.create_incident(**f, received_via=via, source="60 Control page", source_ref=ref,
-                                             status="queued")
-            self.log(f"CAD: from 60 Control: {self.lists.type_label(typ, sub) or 'type not set'} at "
-                     f"{f['address'] or '(no location)'}")
-            self.comms.link_pages(iid, getattr(inc, "pages", []))   # its page plays from the event (#64)
-            inc = self.store.incident(iid)
-            self._prealert_match(inc)
-            return inc
+            # The paging decoder is the backup (#297, sizeup/cad/sources.py): it attaches to the incident a feed has
+            # for it, else makes its own at once (never held), noted "possibly the same as" a near one it may not join.
+            data = {"f": f, "ref": ref, "pages": list(getattr(inc, "pages", []) or []), "type_heard": inc.incident_type}
+            at = (inc.page_starts or [inc.opened])[0]
+            how, got = self.sources.page(str(inc.id), at, f["address"] or heard, list(inc.units or []), data)
+            if how == "attached":
+                return self.store.incident(got)
+            iid = self._create_from_page(data)
+            self.sources.created_by_page(str(inc.id), iid, got)
+            return self.store.incident(iid)
         self.comms.link_pages(old["id"], getattr(inc, "pages", []))  # a repeat of the page: on it too, accepted or not
         if old["status"] != "queued":
+            return old
+        auth = self.sources.authority(old["id"])
+        if auth is not None and auth < PAGING_RANK:    # a feed's fields rule it: the page's repeat changes nothing
             return old
         fill = {k: v for k, v in f.items() if k == "remarks" or
                 (k not in ("type", "subtype", "type_note", "geo_alts") and v not in (None, "") and old[k] in (None, ""))}
@@ -1552,3 +1605,41 @@ class Cad:
         if not old["type"] and typ:                    # the repeat said what it is
             fill.update(type=typ, subtype=sub, type_note=note)
         return self.store.update_incident(old["id"], fill, log=False)
+
+    def _create_from_page(self, data: dict) -> int:
+        """A page's queued event (from_monitor's fields)."""
+        f, ref = data["f"], data["ref"]
+        old = self.store.by_source_ref(ref)
+        if old is not None:
+            return old["id"]
+        via = "60 CONTROL" if "60 CONTROL" in self.lists.received_codes else ""
+        iid = self.store.create_incident(**f, received_via=via, source="60 Control page", source_ref=ref, status="queued")
+        self.log(f"CAD: from 60 Control: {self.lists.type_label(f['type'], f['subtype']) or 'type not set'} at "
+                 f"{f['address'] or '(no location)'}")
+        self.comms.link_pages(iid, data.get("pages") or [])   # its page plays from the event (#64)
+        self._prealert_match(self.store.incident(iid))
+        return iid
+
+    def map_type(self, raw: str, label: str = "") -> tuple[str, str, str]:
+        """An external feed's event type -> (TYPE, SUBTYPE, note): one of our codes as it is ("STRU", "ALARM/COMM"),
+        else read like a page's type (runcards.from_page); one nobody maps leaves the type to the operator."""
+        raw = (raw or "").strip()
+        if not raw:
+            return "", "", ""
+        typ, _, sub = raw.upper().partition("/")
+        try:
+            self.lists.check_type(typ.strip(), sub.strip(), required=True)
+            return typ.strip(), sub.strip(), ""
+        except ValueError:
+            pass
+        from sizeup.dispatch import parse
+        d = parse(f"respond to {raw}")
+        typ, sub, note = runcards.from_page(d.incident_type, d.category, raw)
+        for t, s in ((typ, sub), (typ, "")):
+            try:
+                self.lists.check_type(t, s, required=False)
+                if t:
+                    return t, s, note if s == sub else f"subtype not given by {label or 'the feed'}: {raw}"
+            except ValueError:
+                continue
+        return "", "", f"type from {label or 'the feed'}: {raw}"[:200]

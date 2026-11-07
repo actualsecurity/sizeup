@@ -54,7 +54,7 @@ OPERATOR_MAX = 320
 SCHEMA_VERSION = 10        # 6-9 unused (other branches); v10: the department's own codes
 
 OPEN = ("queued", "pending", "active")
-SOURCES = ("manual", "60 Control page")
+SOURCES = ("manual", "60 Control page", "CAD feed")    # CAD feed: an external incident source (#297)
 ON_TIMES = {"dispatched": "dispatched_at", "enroute": "enroute_at", "onscene": "onscene_at"}
 
 SCHEMA = """

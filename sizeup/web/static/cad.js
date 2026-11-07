@@ -305,6 +305,7 @@ function statusLabel(u, code) {
 function eventStatus(inc) {         // Pending / Open / Active / Closed, with the data file's color
   const es = L().event_statuses || {};
   const k = inc.status === "pending" && !inc.emergency ? "open" : inc.status;
+  if (k === "queued" && inc.feed) return { ...(es[k] || {}), name: inc.feed.label };   // a CAD feed's, not 60 Control's (#297)
   return es[k] || { name: inc.status };
 }
 function stBadge(node, name, color) {
@@ -489,7 +490,7 @@ function isOpen(inc) {
   return ["queued", "pending", "active"].includes(inc.status);
 }
 function incTitle(inc) {
-  return inc.number || (inc.status === "queued" ? "Page" : "—");
+  return inc.number || (inc.status === "queued" ? (inc.source === "CAD feed" ? (inc.feed && inc.feed.label) || "CAD feed" : "Page") : "—");
 }
 // An open call's summary (state.overview, sizeup/cad/mapview.py overview): its units, the newest transmission and
 // note, the channels its traffic comes over; null for a closed one.
@@ -585,6 +586,13 @@ function renderPrealert() {
   PreAlert.badge($("#prealert"), pa);
   PreAlert.notify(pa);
   show($("#csv-prealerts"), !!pa);
+  // incident sources (incoming.js, #297): the acting primary, and possible incoming (radio pre-alerts, held reports)
+  const src = cad.state && cad.state.sources;
+  if (window.Incoming) {
+    Incoming.pill($("#src-pill"), src);
+    Incoming.column($(BOARD ? "#b-incoming" : "#q-incoming"), src, deps);
+    Incoming.notify(src);
+  }
   // airport pre-alerts (airport-alerts.js, #233): HPN ATC; accept makes a pending event (never a dispatch)
   const aa = cad.state && cad.state.airport_alerts;
   if (window.AirportAlerts) {
@@ -685,7 +693,7 @@ function renderDetail() {
   stBadge($("#d-class"), inc.emergency ? "Emergency" : "Non-emergency", inc.emergency ? "#EE6475" : "#8fb8d8");
   show($("#d-joint"), !!inc.joint_call);
   if (inc.joint_call) stBadge($("#d-joint"), inc.joint_call, "#6AA6E8");
-  setText($("#d-source"), inc.source === "manual" ? "Manual" : inc.source);
+  setText($("#d-source"), inc.source === "manual" ? "Manual" : inc.feed && inc.source === "CAD feed" ? inc.feed.label : inc.source);
   show($("#d-accept"), inc.status === "queued");
   show($("#d-dismiss"), inc.status === "queued");
   show($("#d-close"), inc.status === "pending" || inc.status === "active");
@@ -694,6 +702,7 @@ function renderDetail() {
   if (!(inc.status === "pending" || inc.status === "active")) show($("#close-form"), false);
   show($("#d-queued"), inc.status === "queued");
   if (inc.status === "queued") {
+    setText($("#d-qhead"), `${inc.feed && inc.source === "CAD feed" ? inc.feed.label : "60 Control page"}: set type, then Accept or Dismiss`);
     setText($("#d-qnote"), inc.type_note || "");
     const ts = $("#d-acc-type");
     if (ts._for !== inc.id) {
@@ -719,6 +728,7 @@ function renderDetail() {
   setText($("#d-elapsed-l"), open ? "Elapsed" : "Duration");
   if (open) since(elapsed, inc.created_at);
   else { since(elapsed, null); setText(elapsed, fmtDur((inc.closed_at || 0) - inc.created_at)); }
+  if (window.Incoming) Incoming.facts($("#d-feed"), inc, { api, operator, readonly: BOARD || !canDo("dispatch") });
   show($("#d-via-w"), !!inc.received_via);
   setText($("#d-via"), inc.received_via ? nameOf("received_via", inc.received_via) : "");
   show($("#d-until-w"), !!inc.until_at);
@@ -1723,7 +1733,7 @@ function playForEvent(inc, e) {
   const d = (inc.dispatches || []).find((x) => Math.abs(x.at - e.at) < 0.001);
   return d && d.has_audio ? d.id : null;
 }
-const EVENT_KINDS = { note: "comment", status: "status", system: "system", attach: "attached", prealert: "pre-alert", reopened: "reopened", alarm: "EMERGENCY" };
+const EVENT_KINDS = { note: "comment", status: "status", system: "system", attach: "attached", prealert: "pre-alert", feed: "CAD feed", reopened: "reopened", alarm: "EMERGENCY" };
 // The latest entry, one line, for the folded Timeline's header: "19:34:21 status · 2392 on location"
 function eventLine(e) {
   const text = e.kind === "note" && e.units ? noteText(e) : e.text;

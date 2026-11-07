@@ -386,6 +386,7 @@ class StationHealth:
         self._trunk_up: float | None = None         # when the hub first saw trunk-recorder running (this run of it)
         self._gaps_saved = 0.0
         self._adsb_said: tuple | None = None         # (cause, holder) of the station's ADS-B decoder as last logged (#262)
+        self.sources: Callable[[], dict] | None = None   # the incident sources' panel (#297, sizeup/cad/sources.py)
         self._load()
 
     # -- persistence ---------------------------------------------------------------------------------------
@@ -965,7 +966,11 @@ class StationHealth:
             pushed = dict(self.last_push)
             pushed_now = {k for k, a in self.active.items() if a.get("pushed")}     # this episode reached the topic
         n = self.notifier
-        return {"health": self.model(now), "alerts": [dict(a, pushed=a["key"] in pushed_now) for a in self.alerts()],
+        try:
+            sources = self.sources() if self.sources is not None else None    # incident sources (#297)
+        except Exception as e:  # noqa: BLE001 - never in the way of the rest of the panel
+            sources = {"error": f"{type(e).__name__}: {e}"[:200]}
+        return {"health": self.model(now), "sources": sources, "alerts": [dict(a, pushed=a["key"] in pushed_now) for a in self.alerts()],
                 "history": [{k: h.get(k) for k in ("key", "severity", "title", "text", "since", "cleared", "pushed", "who")}
                             for h in hist],
                 "notify": {"on": bool(n is not None and n.enabled),

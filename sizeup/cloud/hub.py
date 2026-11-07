@@ -550,6 +550,10 @@ class HubApp(App):
         from sizeup.notify import STATUS
         notifier = self.pushes.notifier(STATUS)
         self.health = self.hub.health_ = StationHealth(self.hub, cfg, self.mdb, notifier, log)
+        # The incident sources (#297): paging is a tier only while the station is connected; Settings > Health shows them.
+        self.cad.sources.paging_ok = self.hub.connected
+        self.cad.sources.trigger = self._sources_poll_now      # a pre-alert here: the station's adapters poll now
+        self.health.sources = self.cad.sources.panel
         # the hub's own error spikes (#285, sizeup/errwatch.py): the same status notifier; main() tees the log into it
         from sizeup import errwatch
         pub = (cfg.cloud_public_url or "").rstrip("/")
@@ -602,6 +606,8 @@ class HubApp(App):
             self._set_alt(self._id(d), str(d.get("text") or ""), str(d.get("model") or "")[:80])
         elif kind == "alarm":                         # the P25 emergency button, ahead of its transcript (#128)
             self._apply_alarm(d, audio)
+        elif kind in ("source_event", "source_health"):   # an external incident source on the station (#297)
+            self.apply_source(kind, d)
         elif kind == "heard":
             if d.get("system") in ("mdc", "p25", "fleetsync"):
                 self.radios.heard(d["system"], str(d.get("radio_id") or ""), str(d.get("alias") or ""), d.get("at"),
@@ -1001,6 +1007,16 @@ class HubApp(App):
         st["cloud"] = self.hub.cad_cloud()
         return st
 
+    def _sources_poll_now(self, reason: str) -> None:
+        """A radio or phone pre-alert on the hub: the station's adapters poll now (a job; never waits, never raises)."""
+        def send() -> None:
+            try:
+                self.hub.remote("sources_poll_now", reason, timeout=10.0)
+            except Exception:  # noqa: BLE001 - offline or an older station: it polls on its own schedule
+                pass
+        if self.hub.connected():
+            threading.Thread(target=send, name="sources-poll-now", daemon=True).start()
+
     def close_incident(self, iid: str) -> bool:
         ok = super().close_incident(iid)
         self.sync()
@@ -1153,6 +1169,7 @@ class HubApp(App):
         threading.Thread(target=self._aws_watch, name="aws-sweep", daemon=True).start()
         self._started = True                      # the phone pre-alert: the hub's own subscription
         self.prealert_sync()
+        self.start_sources()                      # held reports and promotion (#297); the adapters are the station's
         self.start_layers()                       # the maps' data, as App starts it (road projects too: #225)
         if self.vocab is not None and self.vocab.state()["state"] == "PENDING":
             self.vocab.poll()
@@ -1166,6 +1183,7 @@ class HubApp(App):
         self._stopping.set()
         if self.prealert is not None:
             self.prealert.stop()
+        self.cad.sources.stop()
         self.stop_layers()
         if self.aws is not None:
             self.aws.stop()
