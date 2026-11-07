@@ -3,6 +3,7 @@ only: a scripted external CAD feed (tests/fake_feed.py), page tones and made-up 
 
 from __future__ import annotations
 
+import json
 import time
 
 import pytest
@@ -415,3 +416,63 @@ def test_moving_the_last_unit_to_another_call_lets_the_pending_close_go(rig):
     other = rig.cad.create({"type": "STRU", "address": "400 Sample St", "operator": "Lt. Test"})
     rig.cad.dispatch(other["id"], {"unit_ids": [rig.uid("E62")], "operator": "Lt. Test"})
     assert rig.inc()["status"] == "closed"
+
+
+# -- the fourth review ---------------------------------------------------------------------------------------------------
+
+
+def test_an_incident_already_accepted_at_the_feeds_first_report_stays_manual(rig):
+    """M1: a page a person accepted (or a call from before this code) when the feed's first report reaches automation:
+    a baseline only, never tracked, nothing dispatched or replayed."""
+    page = rig.page()
+    rig.cad.accept(page["id"], {"operator": "Lt. Test"})
+    rig.at(40)
+    rig.feed.put("A1", type="ALARM/COMM", location="12 Example Ave", units=("E60", "L31"),
+                 times={"dispatched": T0 + 30, "responding": T0 + 35})
+    rig.poll()
+    assert rig.iid() == page["id"]                                    # attached to the page's call (#304)
+    row = rig.cad.store.one("SELECT * FROM auto_incidents WHERE incident_id = ?", (page["id"],))
+    assert row["tracked_at"] is None and json.loads(row["seen"])["units"] == ["E60", "L31"] and row["seen_src"] == "county"
+    assert rig.inc()["assignments"] == [] and rig.steps() == []
+    rig.at(80)
+    rig.change(units=("E60", "L31", "E62"), times={"on_location": T0 + 75})
+    assert rig.inc()["assignments"] == [] and rig.steps() == []        # manual for good
+
+
+def test_only_the_units_own_rig_puts_it_on_a_call_never_60_control(rig):
+    """L1: a "responding" for a unit on no call places it only when said on that unit's own identified rig."""
+    rig.created(units=("E60",))
+    with rig.cad.store.tx() as db:                                    # a dispatcher's alias someone put in the registry
+        db.execute("INSERT INTO radios (system, radio_id, unit, label, source, alias, updated_at) "
+                   "VALUES ('p25', '9999001', '', '', 'confirmed', '60 CTRL', ?)", (T0,))
+    rig.radio("307-5-call_5-t0", T0 + 40, "Engine 62 responding", unit="60 CTRL", radio_id="9999001")
+    assert rig.cad.store.unit(rig.uid("E62"))["incident_id"] is None              # 60 Control saying it: never
+    rig.radio("307-6-call_6-t0", T0 + 45, "Engine 64 responding", rig="E60", unit="E60")
+    assert rig.cad.store.unit(rig.uid("E64"))["incident_id"] is None              # another rig saying it: never
+    rig.radio("307-7-call_7-t0", T0 + 50, "Ladder 31 responding", rig="L31", unit="L31")
+    assert rig.on("L31") is not None                                               # its own rig: placed
+
+
+def test_another_feed_ruling_the_incident_is_a_new_baseline(rig):
+    """L2: the best-ranked feed's report changes hands: never diffed against the other feed's report."""
+    from tests.fake_feed import FakeFeed
+    mirror = FakeFeed("mirror", "Mirror feed", rank=2, clock=rig.clock)
+    rig.feeds.append(mirror)
+    rig.runner = type(rig.runner)(rig.feeds, rig.sink, log=lambda m: None, clock=rig.clock)
+    mirror.put("M1", type="ALARM/COMM", location="12 Example Ave", units=("E60",), times={"dispatched": T0})
+    rig.poll()
+    iid = rig.cad.store.one("SELECT incident_id FROM source_reports WHERE ref = 'M1'")["incident_id"]
+    assert rig.cad.store.incident(iid)["status"] in ("pending", "active")
+    rig.at(30)
+    rig.feed.put("A1", type="ALARM/COMM", location="12 Example Ave", units=("E60", "L31", "E62"),
+                 times={"dispatched": T0 + 20, "responding": T0 + 25})
+    rig.poll()
+    assert rig.iid("A1") == iid
+    row = rig.cad.store.one("SELECT seen, seen_src FROM auto_incidents WHERE incident_id = ?", (iid,))
+    assert row["seen_src"] == "county" and json.loads(row["seen"])["units"] == ["E60", "L31", "E62"]
+    on = {a["name"] for a in rig.cad.full(iid)["assignments"] if not a["cleared_at"]}
+    assert "L31" not in on and "E62" not in on                          # not "newly listed": the other feed's list
+    rig.at(60)
+    rig.feed.change("A1", units=("E60", "L31", "E62", "E64"))
+    rig.poll()
+    assert "E64" in {a["name"] for a in rig.cad.full(iid)["assignments"] if not a["cleared_at"]}

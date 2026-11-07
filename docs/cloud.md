@@ -831,15 +831,21 @@ Incidents come in from ranked sources. The interface is in `sizeup/sources/__ini
 
 - **The mode** is department-wide, switched in the header (`POST /api/cad/dispatch-mode`, dispatchers and admins, with a
   confirm). Each switch is a Settings audit row (section `dispatch`) with the Access identity. The default is 60 Control
-  dispatching. It is never exported and is kept through an import.
-- **60 Control dispatching:** a feed incident reported in this mode is tracked.
+  dispatching. It is never exported and is kept through an import. The wall board (`/monitor`) shows it as a read-only
+  pill.
+- **60 Control dispatching:** a feed incident first reported while queued in this mode is tracked. One already accepted
+  at the feed's first report (from before the deploy, or a page a person took first) stays manual: that report is only
+  its baseline. When another feed's report starts to rule an incident, it is the new baseline.
   - It is accepted only when the feed lists one of our units (exact board codes, spoken names or the data file's
     `feed_unit_aliases`) or a page attached, and never while it is "possibly the same as" an open accepted incident.
+    When a person accepts one that waited, the units the feed lists then are dispatched (no times replayed).
   - Newly listed units are dispatched at the feed's time; unknown codes are listed on the timeline, never dispatched.
   - Units on the call move forward from the feed's per-unit times and the radio's status hints. Automation never puts
-    back a unit that was on the call and cleared. The radio places a unit on no call only by its own identified
-    "responding", when exactly one incident is open from the last 20 minutes and it is tracked.
-  - The feed's in service closes it only when no unit is left on it; otherwise "County in service: close?" with one click.
+    back a unit that was on the call and cleared. The radio places a unit on no call only by a "responding" said on
+    its own identified rig (never 60 Control or another rig), when exactly one incident is open from the last 20
+    minutes and it is tracked.
+  - The feed's in service releases the units it lists that no person marked, then closes the call when none is left;
+    otherwise "County in service: close?" with one click.
   - Each step is an `auto_steps` row with its source (county, radio) and a one-click undo
     (`POST /api/cad/incident/<id>/auto-undo`); undoing a close puts back the units it released.
 - **A person wins:** a unit a person touches on an incident (marked before the change), and an incident a person reopens,

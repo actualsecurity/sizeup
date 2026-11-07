@@ -26,7 +26,10 @@ class AutoRig(Rig):
 
     def sink(self, kind: str, d: dict) -> None:
         self.sent.append((kind, d))
-        (self.cad.source_event if kind == "source_event" else self.cad.sources.on_health)(d)
+        if kind == "source_event":
+            self.cad.source_event(d)
+        else:
+            self.cad.sources.apply(kind, d)
 
     def iid(self, eid: str = "A1") -> int:
         return self.cad.store.one("SELECT incident_id FROM source_reports WHERE source = 'county' AND ref = ?", (eid,))["incident_id"]
@@ -158,12 +161,27 @@ def test_a_radio_responding_puts_one_of_ours_on_the_one_new_tracked_call(rig):
 
 
 def test_a_feed_type_nobody_maps_waits_for_a_person_then_goes_on(rig):
+    """M2: a person accepting the held call in 60 Control mode dispatches the units the feed lists then, at the feed's
+    dispatched time, without replaying its other times; what the feed lists later follows as usual."""
     rig.created(type="ZZZ UNKNOWN THING")
     assert rig.inc()["status"] == "queued" and rig.inc()["assignments"] == []
+    rig.at(30)
+    rig.change(times={"responding": T0 + 25})                                      # while it waits: never replayed
     rig.cad.accept(rig.iid(), {"type": "ALARM", "subtype": "COMM", "operator": "Lt. Test"})
+    e60, l31 = rig.here("E60"), rig.here("L31")
+    assert e60 and l31 and e60["dispatched_at"] == T0 and e60["enroute_at"] is None
+    assert rig.status("E60") == rig.cad.lists.status_for("dispatched")
+    assert any("dispatched (listed by County feed" in e["text"] for e in rig.inc()["events"])
     rig.at(60)
     rig.change(units=("E60", "L31", "E62"))                                         # listed after the person accepted
-    assert rig.here("E62") and rig.here("E60") is None                              # E60, L31: listed before, the person's
+    assert rig.here("E62")
+
+
+def test_a_held_call_accepted_in_pcfd_mode_dispatches_nothing(rig):
+    rig.created(type="ZZZ UNKNOWN THING")
+    rig.mode("pcfd")
+    rig.cad.accept(rig.iid(), {"type": "ALARM", "subtype": "COMM", "operator": "Lt. Test"})
+    assert rig.inc()["assignments"] == []
 
 
 # -- PCFD dispatching ------------------------------------------------------------------------------------------------
