@@ -15,7 +15,7 @@ import time
 import pytest
 
 from sizeup import dvr as dvr_mod
-from sizeup.config import DVR_AREA, ConfigError
+from sizeup.config import ConfigError
 from sizeup.dvr import Dvr, area_polygon, in_area, shared_mount
 from tests.test_dvr import CAM, setup, step
 from tests.test_roads import load_cfg
@@ -26,22 +26,41 @@ def around(r, cid, d=0.01):
     return [c["lon"] - d, c["lat"] - d, c["lon"] + d, c["lat"] + d]
 
 
-def test_the_areas_cameras_are_always_recorded_on_shared_storage_only(tmp_path):
+def test_the_response_areas_cameras_are_always_recorded_on_shared_storage_only(tmp_path):
+    """The camera wall's area (Settings > System) decides it: inside our area or within its margin plus dvr_extra_m,
+    its includes, never its excludes; only cameras with video. On our own disk: as before (none)."""
     r, d, f, clock = setup(tmp_path, area=None)
-    assert d.area == () and d.area_cameras() == [] and CAM not in d.wanted()        # local disk: as before
-    r, d, f, clock = setup(tmp_path, area=around(r, CAM), shared=True)
+    assert d.area_cameras() == [] and CAM not in d.wanted()                        # local disk: as before
+    r, d, f, clock = setup(tmp_path, shared=True, area_wall=True, area_extra_m=0)
     d.scan_now()
-    assert CAM in d.area_cameras() and d.wanted()[CAM] == ["always"]
-    inside = d.area_cameras()
-    assert all(in_area(d.area, r.camera(c)["lat"], r.camera(c)["lon"]) for c in inside)
-    others = [c["id"] for c in r.merged("cameras") if c.get("video") and c["id"] not in inside]
-    assert others and not set(others) & set(d.wanted())                             # outside it: on demand only
+    _, rows = r.area_rows()
+    video = {c["id"] for c in r.merged("cameras") if c.get("video") and not c.get("off")}
+    on_wall = sorted(x["camera"]["id"] for x in rows if x["in"] and x["camera"]["id"] in video)
+    assert on_wall and d.area_cameras() == on_wall                                  # the wall's cameras with video
+    assert all(d.wanted()[cid] == ["always"] for cid in on_wall)
+    far = sorted((x for x in rows if not x["in"] and x["camera"]["id"] in video and x["dist_m"] is not None),
+                 key=lambda x: x["dist_m"])
+    nearest_out = far[0]
+    # a little beyond the wall's margin: dvr_extra_m
+    d2 = Dvr(r, tmp_path / "x2", clock=clock, log=lambda m: None, free_floor=0, shared=True, area_wall=True,
+             area_extra_m=nearest_out["dist_m"] - r.wall_config()["margin_m"] + 1)
+    assert nearest_out["camera"]["id"] in d2.area_cameras()
+    # the same Settings govern both: an exclude leaves it out, an include brings one in, the margin moves it
+    inc = far[-1]["camera"]["id"]
+    r.wall_settings = lambda: {"margin_m": 0, "include": [inc], "exclude": [on_wall[0]]}
+    clock.t += dvr_mod.AREA_EVERY_S + 1
+    got = d.area_cameras()
+    assert inc in got and on_wall[0] not in got
+    assert all(x["dist_m"] == 0 for x in r.area_rows()[1] if x["camera"]["id"] in got and x["camera"]["id"] != inc)
+    # an override polygon wins over the wall's area
+    r, d, f, clock = setup(tmp_path / "y", shared=True, area_wall=True, area=around(r, CAM, 0.001))
+    assert d.area_cameras() == [CAM]
     # an open event's cameras still come first in the cap
+    others = [c for c in video if c != CAM]
     d.max_cameras = 1
     cam = r.camera(others[0])
     d.incidents = lambda: [{"lat": cam["lat"], "lon": cam["lon"], "address": ""}]
     assert list(d.wanted()) == [others[0]]
-    assert step(d, f, clock) is None and d.status(CAM)["segments"] == 0
 
 
 def test_a_polygon_and_a_bbox_are_the_same_ring():
@@ -173,18 +192,20 @@ def test_shared_mount_reads_the_mount_table(tmp_path):
 
 def test_the_config(tmp_path):
     c = load_cfg(tmp_path, "")
-    assert (c.roads_dvr_shared, c.roads_dvr_area, c.roads_dvr_shared_window_s, c.roads_dvr_shared_max_bytes,
-            c.roads_dvr_shared_max_cameras) == ("auto", DVR_AREA, 86400.0, 80 * 1024 ** 3, 32)
+    assert (c.roads_dvr_shared, c.roads_dvr_area, c.roads_dvr_extra_m, c.roads_dvr_shared_window_s,
+            c.roads_dvr_shared_max_bytes, c.roads_dvr_shared_max_cameras) == ("auto", None, 1000.0, 43200.0,
+                                                                              25 * 1024 ** 3, 20)
     assert (c.roads_dvr_window_s, c.roads_dvr_max_bytes, c.roads_dvr_max_cameras) == (7200.0, 6 * 1024 ** 3, 12)
-    c = load_cfg(tmp_path, "[roads]\ndvr_shared = true\ndvr_area = [-73.7, 40.9, -73.6, 41.0]\ndvr_shared_window_min = 720\n")
+    c = load_cfg(tmp_path, "[roads]\ndvr_shared = true\ndvr_area = [-73.7, 40.9, -73.6, 41.0]\ndvr_shared_window_min = 1440\n"
+                           "dvr_extra_m = 0\n")
     assert c.roads_dvr_shared == "on" and c.roads_dvr_area == area_polygon([-73.7, 40.9, -73.6, 41.0])
-    assert c.roads_dvr_shared_window_s == 43200.0
+    assert c.roads_dvr_shared_window_s == 86400.0 and c.roads_dvr_extra_m == 0.0
     c = load_cfg(tmp_path, "[roads]\ndvr_shared = false\ndvr_area = [[-73.7, 40.9], [-73.6, 40.9], [-73.65, 41.0]]\n")
     assert c.roads_dvr_shared == "off" and len(c.roads_dvr_area) == 3
     assert load_cfg(tmp_path, "[roads]\ndvr_area = []\n").roads_dvr_area == ()
     for bad in ('dvr_shared = "maybe"', "dvr_area = [1, 2]", "dvr_area = [-73.6, 40.9, -73.7, 41.0]",
                 "dvr_area = [[0, 0], [1, 1]]", "dvr_area = [-80, 30, -70, 40]", "dvr_shared_window_min = 5000",
-                "dvr_shared_max_cameras = 99"):
+                "dvr_shared_max_cameras = 99", "dvr_extra_m = -1", "dvr_extra_m = 9000"):
         with pytest.raises(ConfigError, match="roads.dvr"):
             load_cfg(tmp_path, f"[roads]\n{bad}\n")
 
@@ -199,18 +220,26 @@ def test_the_standby_never_makes_a_dvr(tmp_path):
 
 
 @pytest.mark.replay("camera")
-def test_the_default_area_holds_our_cameras_and_approaches(replay_sets):
-    """The CARS-Hub's, the Thruway's and the county's camera lists as captured: the default area holds the cameras with
-    video in Port Chester, Rye Brook and on the approaches, and leaves out White Plains and Mamaroneck."""
+def test_the_response_area_holds_our_cameras_and_the_ones_just_out(replay_sets):
+    """The CARS-Hub's, the Thruway's and the county's camera lists as captured, against our fire district (the county
+    GIS layer, tests/fixtures/wcgis): with the camera wall's default margin and the default dvr_extra_m, the cameras
+    with video in Port Chester / Rye Brook and just outside them (I-95 to exit 21, the Hutch to exit 16, I-287 east of
+    exit 9), not the approaches out to Mamaroneck or White Plains."""
+    import json
+    from pathlib import Path
     from tests.test_replay_camera import ReplayFetch, make
+    fd = json.loads((Path(__file__).parent / "fixtures" / "wcgis" / "fire_districts.geojson").read_text())
+    ours = [f["geometry"] for f in fd["features"] if f["properties"]["FIRENAME"] == "PORT CHESTER FD"]
     for s in replay_sets("camera"):
         rd = make(ReplayFetch(s), True)
-        cams = [c for c in rd.merged("cameras") if c.get("video") and not c.get("off")]
-        inside = [c for c in cams if in_area(DVR_AREA, c["lat"], c["lon"])]
-        assert 15 <= len(inside) <= 25 and len(inside) < len(cams)
-        roads = {c["road"] for c in inside}
-        assert {"I-95", "I-287", "Hutch"} <= roads
-        assert not any("Mamaroneck" in c["name"] or "Interchange 7" in c["name"] for c in inside)
+        rd.area_shapes = lambda: {"basis": "fire_districts", "names": ["PORT CHESTER FD"], "note": "", "shapes": ours}
+        d = Dvr(rd, Path("/nonexistent/dvr"), log=lambda m: None, free_floor=0, shared=True, area_wall=True,
+                area_extra_m=1000)
+        got = [rd.camera(c) for c in d.area_cameras()]
+        assert 6 <= len(got) <= 10
+        assert {"I-95", "Hutch"} <= {c["road"] for c in got}
+        assert not any("Mamaroneck" in c["name"] or "Interchange 7" in c["name"] or "Interchange 8" in c["name"]
+                       for c in got)
 
 
 def test_a_segment_both_leaders_wrote_is_kept_once(tmp_path):

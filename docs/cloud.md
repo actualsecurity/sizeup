@@ -1000,33 +1000,38 @@ storing or recording; it allows us to "redistribute, enhance, repackage, and add
 asks that NYSDOT be kept informed of material changes in use. The Thruway's disclaimer: no resale or
 redistribution for profit. Recordings stay department-internal.
 
-**Since #322/#323** we record our area's cameras 24/7 (a 24 h window) and keep **incident clips** for a year (below).
-That is a material change in use: tell 511NY's program manager (24/7 recording of the area's cameras, saved clips
-attached to incidents, kept a year, department-internal, never redistributed).
+**Since #322/#323** we record our response area's cameras around the clock (a 12 h window) and keep **incident
+clips** for a year (below). That is a material change in use: tell 511NY's program manager (24/7 recording of the
+area's cameras, saved clips attached to incidents, kept a year, department-internal, never redistributed).
 
-#### Shared storage: 24 h of our area (#322)
+#### Shared storage: 12 h of our response area (#322)
 
 With `dvr_dir` on storage shared between tasks (EFS: `[roads] dvr_shared = "auto"` sees an `nfs4` mount there;
 `true` / `false` force it), the recording outlives a deploy, so:
 
-- every camera with video inside `[roads] dvr_area` is recorded 24/7 (reason `always`), on top of the on-demand ones.
-  The default area (`sizeup/config.py` `DVR_AREA`): Port Chester, Rye Brook and the I-95 / I-287 / Hutch approaches out
-  to Rye, Harrison and the Greenwich line (a polygon; a bbox `[w, s, e, n]` works too; `[]`: none). **19 cameras** in
-  the camera lists captured 2026-11-07 (`tests/test_dvr_shared.py`'s replay test checks it);
-- the window is `dvr_shared_window_min` (1440), the cap `dvr_shared_max_gb` (80) over `dvr_shared_max_cameras` (32),
-  and the workers scale with it (up to 24). Measured on the captured segments: ~190 kbit/s, **~2.0 GB per camera per
-  day**: ~40 GB for the area, ~65 GB at the cap;
-- only the lease holder writes or deletes (the app's fence, `sizeup/fence.py`); the standby's warm app never makes a
-  DVR. A new leader reads the index in the background (the file names carry the size, so no stat per file over NFS;
-  recording waits for it), then appends after each camera's last segment. For 5 min after the start it lists the
-  folders again every 30 s, taking in what the draining leader wrote after the first look and dropping what it
-  evicted; another writer's temp file is left alone unless it is 10 min old;
+- the cameras with video in our **response area** are recorded around the clock (reason `always`), on top of the
+  on-demand ones. The same Settings decide it as for the camera wall (Settings > System, `Roads.area_rows`): inside
+  our fire districts or within its `margin_m` (1000) of them, its includes, never its excludes, and `[roads]
+  dvr_extra_m` (1000) beyond that margin for the ones just outside. **8 cameras** with the defaults in the camera
+  lists captured 2026-11-07 (5 with no extra, 7 with 500 m, 15 with 1500 m; `tests/test_dvr_shared.py`'s replay
+  test). `[roads] dvr_area` (a polygon or bbox) only as an override;
+- the window is `dvr_shared_window_min` (720), the cap `dvr_shared_max_gb` (25) over `dvr_shared_max_cameras` (20),
+  and the workers scale with it. Measured on the captured segments: ~190 kbit/s, **~1 GB per camera per 12 h**: ~8 GB
+  for the area;
+- only the lease holder writes or deletes (the app's fence, `sizeup/fence.py`), and a camera merge's folder rename
+  (`follow()`, #324) only on it and never while a clip of either camera is being saved (`may_move`); the standby's
+  warm app never makes a DVR. A new leader reads the index in the background (the file names carry the size,
+  `key_t0_dur_bytes[_n].ts`, so no stat per file over NFS; the older forms still read; recording waits for it),
+  then appends after each camera's last segment. For 5 min after the start it lists the folders again every 30 s,
+  taking in what the draining leader wrote after the first look and dropping what it evicted; another writer's temp
+  file is left alone unless it is 10 min old;
 - without shared storage nothing changes: local disk, 2 h, the on-demand cameras only.
 
-The infra is sizeup-aws `14-dvr-storage.sh` (EFS, encrypted, General Purpose, Elastic throughput; mount targets in the
-service's subnets; NFS only from the task's security group; an access point `/dvr` as the container's user; a file
-system policy: TLS, the task role through the access point only). The task definition then mounts it at `/data/dvr`
-(the default `dvr_dir`): that change deploys only after the script has run.
+The infra is sizeup-aws `14-dvr-storage.sh` (EFS, encrypted, General Purpose, **Bursting** throughput, no lifecycle,
+no backups: ~$2.50/month for 8 GB; mount targets in the service's subnets; NFS only from the task's security group;
+an access point `/dvr` as the container's user; a file system policy: TLS, the task role through the access point
+only). The task definition then mounts it at `/data/dvr` (the default `dvr_dir`): that change deploys only after the
+script has run.
 
 ### Camera wall (#125)
 
@@ -1997,9 +2002,11 @@ Through the hub only (behind Access; no share links, no presigned URLs): `GET /a
 segments are byte ranges of the parts), `.../audio.wav`, `.../download` (one `.ts`, streamed; or the `.wav`),
 `GET /api/cad/incident/<id>/export.zip` (every object, with `manifest.json`: each file's sha256 checked against the
 one recorded when it was attached). Anyone signed in views; dispatchers and admins save clips; **admins delete**
-(`POST /api/cad/attachments/<id>/delete`): the objects get a delete marker (with Object Lock the versions stay
-hidden until their year is up; a person with `s3:BypassGovernanceRetention` can remove them sooner), the row stays
-"deleted" and the audit keeps what was deleted with every sha256. Only the lease holder writes. Without the bucket:
+(`POST /api/cad/attachments/<id>/delete`): every version written for it (a retry's too, recorded at each PUT) is
+deleted by its version id past the governance lock (`x-amz-bypass-governance-retention`; the task role's
+`s3:DeleteObjectVersion` + `s3:BypassGovernanceRetention`, sent by nothing else), so the bytes are really gone; the
+row stays "deleted" and the audit keeps what was deleted with every sha256. A delete that fails part way is audited
+and can be asked again. Only the lease holder writes. Without the bucket:
 "Incident attachments not configured", nothing copied, the lists read empty.
 
 ## The hub's storage

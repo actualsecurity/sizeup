@@ -579,14 +579,15 @@ class App:
             fs = shared_mount(root) if cfg.roads_dvr_shared == "auto" else ""
             shared = cfg.roads_dvr_shared == "on" or bool(fs)
             if shared:
-                log(f"dvr: {root} is shared storage ({fs or 'dvr_shared = true'}): the area's cameras, "
+                log(f"dvr: {root} is shared storage ({fs or 'dvr_shared = true'}): the response area's cameras, "
                     f"{cfg.roads_dvr_shared_window_s / 3600:.0f} h, only while this task holds the lease")
             cams = cfg.roads_dvr_shared_max_cameras if shared else cfg.roads_dvr_max_cameras
             self.roads.dvr = Dvr(self.roads, root,
                                  window_s=cfg.roads_dvr_shared_window_s if shared else cfg.roads_dvr_window_s,
                                  max_bytes=cfg.roads_dvr_shared_max_bytes if shared else cfg.roads_dvr_max_bytes,
                                  near_m=cfg.roads_dvr_near_m, always=cfg.roads_dvr_always, linger_s=cfg.roads_dvr_linger_s,
-                                 max_cameras=cams, log=log, area=cfg.roads_dvr_area if shared else (), shared=shared,
+                                 max_cameras=cams, log=log, area=(cfg.roads_dvr_area or ()) if shared else (), shared=shared,
+                                 area_wall=shared and cfg.roads_dvr_area is None, area_extra_m=cfg.roads_dvr_extra_m,
                                  workers=min(MAX_WORKERS, max(WORKERS, cams // 2)) if shared else WORKERS,
                                  may_write=self.fence.ok if self.fence is not None else None)
             store = self.cad.store

@@ -9,9 +9,10 @@ for both kinds, in a private S3 bucket, every attach / view / download / export 
         both     manifest.json      what it is: kind, source, range, incident, who attached it and when, the note, every
                                     object's size and sha256; written last
     Every PUT with SSE-S3 (x-amz-server-side-encryption: AES256), Content-MD5 and x-amz-checksum-sha256 (S3 checks the
-    bytes; Object Lock wants one of them). The bucket (sizeup-aws 14-dvr-storage.sh): Block Public Access, versioning,
-    Object Lock in governance mode (365 days), lifecycle: current objects expire after 365 days. The hub task role may
-    read and write only there. No share links, no presigned URLs: every byte goes through the hub behind Access.
+    bytes; Object Lock wants one of them); every version it makes is recorded (attachments.versions). The bucket
+    (sizeup-aws 14-dvr-storage.sh): Block Public Access, versioning, Object Lock in governance mode (365 days: nothing
+    can be overwritten away or deleted early), lifecycle: current objects expire after 365 days. The hub task role
+    reads and writes only there. No share links, no presigned URLs: every byte goes through the hub behind Access.
 
 The record (the CAD store, cad.sqlite, so Litestream keeps it):
     attachments        one row each: kind (camera | radio), source (camera id | channel), source_name, talkgroup, ref
@@ -32,9 +33,11 @@ tried again, at most TRIES times. Once copied, the incident keeps it for a year 
 Only the leader writes (may_write: the app's fence, sizeup/fence.py). Without a bucket (no SIZEUP_ATTACHMENTS_BUCKET)
 nothing is copied, a save says "Incident attachments not configured" and the lists still read.
 
-Deleting (admins only) removes the objects with a plain DELETE: with Object Lock that leaves the locked versions hidden
-behind a delete marker until their retention ends (a person with s3:BypassGovernanceRetention can remove them sooner);
-the row stays as "deleted" and the audit keeps what was deleted, with every object's sha256.
+Deleting (admins only, Attachments.delete, the one place that deletes anything): every version it ever wrote is
+deleted by its version id with x-amz-bypass-governance-retention: true (the task role has s3:BypassGovernanceRetention
+and s3:DeleteObjectVersion for this; nothing else in sizeup sends either), so the bytes are really gone; the row stays
+as "deleted" and the audit keeps what was deleted, with every object's sha256. A delete that fails part way says so
+(audited "failed") and can be asked again.
 """
 
 from __future__ import annotations
@@ -88,6 +91,7 @@ CREATE TABLE IF NOT EXISTS attachments (
   end REAL NOT NULL,
   bytes INTEGER NOT NULL DEFAULT 0,
   objects TEXT NOT NULL DEFAULT '[]',   -- [{name, key, bytes, sha256}], manifest.json last
+  versions TEXT NOT NULL DEFAULT '[]',  -- every [key, S3 version id] written (a retry's too): what a delete removes
   segments TEXT NOT NULL DEFAULT '[]',  -- camera: [[part, offset, bytes, start, duration, new stream], ...]
   note TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL,                 -- saving | stored | failed | deleted | expired
@@ -149,9 +153,9 @@ class S3:
     def url(self, key: str) -> str:
         return f"{self.base}/{urllib.parse.quote(key)}"
 
-    def _call(self, method: str, key: str, headers: dict, body: bytes = b"") -> tuple[int, dict, bytes]:
+    def _call(self, method: str, key: str, headers: dict, body: bytes = b"", query: str = "") -> tuple[int, dict, bytes]:
         sha = sha256(body)
-        url = self.url(key)
+        url = self.url(key) + (f"?{query}" if query else "")
         signed = aws.sign(method, url, {"x-amz-content-sha256": sha, **headers}, body, self.creds(), self.region, "s3",
                           payload_sha=sha)
         try:
@@ -172,7 +176,7 @@ class S3:
             "x-amz-server-side-encryption": "AES256"}, body)
         if status != 200:
             raise aws.AwsError(f"S3 PUT {key}: {status} {_code(data)}", _code(data) or f"HTTP {status}", status)
-        return h.get("etag", "")
+        return h.get("x-amz-version-id", "")
 
     def get(self, key: str, first: int | None = None, last: int | None = None) -> bytes:
         hdrs = {"Range": f"bytes={first}-{last}"} if first is not None else {}
@@ -181,8 +185,12 @@ class S3:
             raise aws.AwsError(f"S3 GET {key}: {status} {_code(data)}", _code(data) or f"HTTP {status}", status)
         return data
 
-    def delete(self, key: str) -> None:
-        status, _, data = self._call("DELETE", key, {})
+    def delete_version(self, key: str, version: str) -> None:
+        """An admin's delete (Attachments.delete only): the version itself, past its governance lock. Without a version
+        id (a bucket without versioning, the tests' dev setups): the key."""
+        q = f"versionId={urllib.parse.quote(version, safe='')}" if version else ""
+        hdrs = {"x-amz-bypass-governance-retention": "true"} if version else {}
+        status, _, data = self._call("DELETE", key, hdrs, query=q)
         if status not in (200, 204, 404):
             raise aws.AwsError(f"S3 DELETE {key}: {status} {_code(data)}", _code(data) or f"HTTP {status}", status)
 
@@ -347,6 +355,14 @@ class Attachments:
     def _new_id(self) -> str:
         return secrets.token_hex(8)
 
+    def _wrote(self, aid: str, key: str, version: str) -> None:
+        """A PUT went through: its version, kept at once (a failed upload's too), so a delete can remove it."""
+        with self.store.lock:
+            r = self.store.db.execute("SELECT versions FROM attachments WHERE id = ?", (aid,)).fetchone()
+            vs = json.loads(r["versions"] if r else "[]")
+            vs.append([key, version])
+            self.store.db.execute("UPDATE attachments SET versions = ? WHERE id = ?", (json.dumps(vs), aid))
+
     def _set(self, aid: str, **cols) -> None:
         with self.store.lock:
             self.store.db.execute(f"UPDATE attachments SET {', '.join(f'{k} = ?' for k in cols)} WHERE id = ?",
@@ -413,7 +429,7 @@ class Attachments:
                 key = self.key(inc["id"], aid, name)
                 if not self.may_write():
                     raise AttachError("lost the lease mid-upload")
-                s3.put(key, bytes(part), "video/MP2T")
+                self._wrote(aid, key, s3.put(key, bytes(part), "video/MP2T"))
                 objects.append({"name": name, "key": key, "bytes": len(part), "sha256": sha256(part)})
                 part, pn = bytearray(), pn + 1
 
@@ -454,7 +470,7 @@ class Attachments:
     def _put_manifest(self, iid: int, aid: str, manifest: dict) -> dict:
         body = (json.dumps(manifest, indent=1, sort_keys=True) + "\n").encode()
         key = self.key(iid, aid, "manifest.json")
-        self.s3.put(key, body, "application/json")
+        self._wrote(aid, key, self.s3.put(key, body, "application/json"))
         return {"name": "manifest.json", "key": key, "bytes": len(body), "sha256": sha256(body)}
 
     # -- radio --------------------------------------------------------------------------------------------------------
@@ -513,11 +529,11 @@ class Attachments:
             wav = self.audio(tid)
             if wav:
                 key = self.key(inc["id"], aid, "audio.wav")
-                s3.put(key, wav, "audio/wav")
+                self._wrote(aid, key, s3.put(key, wav, "audio/wav"))
                 objects.append({"name": "audio.wav", "key": key, "bytes": len(wav), "sha256": sha256(wav)})
             body = (json.dumps(meta, indent=1, sort_keys=True, default=str) + "\n").encode()
             key = self.key(inc["id"], aid, "transmission.json")
-            s3.put(key, body, "application/json")
+            self._wrote(aid, key, s3.put(key, body, "application/json"))
             objects.append({"name": "transmission.json", "key": key, "bytes": len(body), "sha256": sha256(body)})
             manifest = {"v": 1, "id": aid, "kind": "radio", "incident": {"id": inc["id"], "number": inc.get("number") or ""},
                         "source": {"transmission": tid, "channel": t["channel"], "talkgroup": t["talkgroup"],
@@ -576,18 +592,32 @@ class Attachments:
     # -- delete -------------------------------------------------------------------------------------------------------
 
     def delete(self, aid: str, operator: str) -> dict:
-        """Admins (sizeup/cad/api.py): the objects deleted (S3: a delete marker over the locked versions), the row kept
-        as "deleted", the audit with every object's sha256."""
+        """Admins only (sizeup/cad/api.py): every version written for it deleted past its governance lock (the only
+        caller of S3.delete_version), the row kept as "deleted", the audit with every object's sha256. A delete that
+        fails part way: audited, the row as it was (asked again, it deletes what is left)."""
         s3 = self._need()
         r = self.row(aid)
         if r is None:
             raise AttachError(f"no attachment {aid}")
         if r["status"] in ("deleted", "expired"):
             raise AttachError(f"attachment {aid} is {r['status']} already")
+        if r["status"] == "saving":
+            raise AttachError(f"attachment {aid} is still being saved: delete it once it is stored or failed")
         objs = json.loads(r["objects"] or "[]")
-        for o in objs:
-            s3.delete(o["key"])
-        self._set(aid, status="deleted", deleted_at=self.clock(), deleted_by=operator)
+        versions = [tuple(v) for v in json.loads(r["versions"] or "[]")]
+        versions += [(o["key"], "") for o in objs if not any(k == o["key"] for k, _ in versions)]
+        left = list(dict.fromkeys(versions))
+        try:
+            while left:
+                s3.delete_version(*left[0])
+                left.pop(0)
+        except aws.AwsError as e:
+            with self.store.lock:
+                self.store.db.execute("UPDATE attachments SET versions = ? WHERE id = ?",
+                                      (json.dumps([list(v) for v in left]), aid))
+            self.audit("failed", aid, r["incident_id"], operator, f"delete: {e}; {len(left)} versions left")
+            raise AttachError(f"not deleted: {e}") from None
+        self._set(aid, status="deleted", deleted_at=self.clock(), deleted_by=operator, versions="[]")
         self.audit("delete", aid, r["incident_id"], operator,
                    f"{r['kind']} {r['source']} {iso(r['start'])} to {iso(r['end'])}; "
                    + "; ".join(f"{o['name']} {o['bytes']} B sha256 {o['sha256']}" for o in objs))

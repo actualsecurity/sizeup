@@ -6,9 +6,10 @@ What is recorded, on demand only (Dvr.wanted, at most max_cameras at once, in th
   always    [roads] dvr_always: camera ids recorded all the time
   incident  an open CAD event's cameras: the ones just before / at / after it along the road (Roads.cameras_for)
             and any within dvr_near_m as the crow flies
-  always    (#322) on shared storage only: every camera with video inside [roads] dvr_area (a polygon or a bbox:
-            Port Chester, Rye Brook and the I-95 / I-287 / Hutch approaches out to Rye, Harrison and the Greenwich
-            line), 24/7
+  always    (#322) on shared storage only: every camera with video in our response area, around the clock: the
+            camera wall's area (Settings > System, Roads.area_rows: our fire districts, its margin_m, its include /
+            exclude) and up to area_extra_m ([roads] dvr_extra_m) beyond that margin; [roads] dvr_area, a polygon,
+            only as an override
   pinned    a dispatcher's "Keep" in the viewer (POST /api/cad/cameras/<id>/dvr/pin): PIN_S (24 h) or until unpinned
             (kept in the CAD store's meta, so a deploy keeps the pins)
   open      a camera someone is watching live, and for linger_s after the last viewer closed
@@ -45,7 +46,7 @@ task records until it drains; the new one starts recording when its app serves (
 empty and there's a gap of the handoff's length. The pins are in the CAD store (Litestream): they carry over.
 
 Shared storage (#322): dvr_dir on a mount shared between tasks (EFS, NFS: shared_mount(), or [roads] dvr_shared) keeps
-the recording across deploys, so the window is 24 h (dvr_shared_window_min) and the area's cameras are recorded 24/7.
+the recording across deploys, so the window is 12 h (dvr_shared_window_min) and the area's cameras are recorded 24/7.
 Only the lease-holding leader writes or deletes (may_write: the app's fence, sizeup/fence.py); the standby's warm app
 (sizeup/app.py prewarm) never makes a Dvr at all. A new leader reads the index from the file names in the background
 (_scan, the recording waits for it), then appends after each camera's last key. The old leader may still be draining
@@ -96,6 +97,7 @@ STALE_TMP_S = 600.0                   # shared storage: another writer's temp fi
 RESCAN_S = 30.0                       # shared storage: the folder read again this often ...
 RESCAN_FOR_S = 300.0                  # ... for this long after the start (the old leader draining)
 MAX_WORKERS = 24
+AREA_EVERY_S = 60.0                   # the response area's cameras: worked out again this often
 
 
 def shared_mount(path: str | Path, mounts: str = "/proc/self/mounts") -> str:
@@ -162,7 +164,7 @@ class Dvr:
                  near_m: float = NEAR_M, always: tuple[str, ...] = (), linger_s: float = LINGER_S,
                  max_cameras: int = MAX_CAMERAS, clock: Callable[[], float] = time.time, log: Callable[[str], None] = print,
                  free_floor: int = FREE_FLOOR_BYTES, workers: int = WORKERS, area=(), shared: bool = False,
-                 may_write: Callable[[], bool] | None = None):
+                 may_write: Callable[[], bool] | None = None, area_wall: bool = False, area_extra_m: float = 0.0):
         self.roads, self.root = roads, Path(root)
         self.window_s, self.max_bytes, self.near_m = float(window_s), int(max_bytes), float(near_m)
         self.always = tuple(a for a in always if CAM_RE.fullmatch(a))
@@ -170,6 +172,8 @@ class Dvr:
         self.clock, self.log, self.free_floor, self.workers = clock, log, int(free_floor), max(1, int(workers))
         # shared storage (#322): the area's cameras always; only the leader writes; the index read in the background
         self.area, self.shared = area_polygon(area), bool(shared)
+        self.area_wall, self.area_extra_m = bool(area_wall) and not self.area, float(area_extra_m)
+        self._area_at, self._area_ids = -1e18, []
         self.may_write = may_write or (lambda: True)
         self._scanned = threading.Event()
         self._started_at: float | None = None
@@ -550,13 +554,40 @@ class Dvr:
         return {cid: why[cid] for cid in order[:self.max_cameras]}
 
     def area_cameras(self, cams: list[dict] | None = None) -> list[str]:
-        """The cameras with video inside dvr_area (#322), by id; none without an area."""
+        """The cameras with video recorded around the clock (#322), by id: the response area's (the camera wall's area,
+        area_wall) or those inside the dvr_area override; none without either."""
+        if self.area_wall:
+            return self._wall_cameras()
         if not self.area:
             return []
         if cams is None:
             cams = [c for c in self.roads.merged("cameras") if c.get("video") and not c.get("off") and CAM_RE.fullmatch(c["id"])]
         return sorted(c["id"] for c in cams if c.get("lat") is not None and c.get("lon") is not None
                       and in_area(self.area, float(c["lat"]), float(c["lon"])))
+
+    def _wall_cameras(self) -> list[str]:
+        """The camera wall's area (Roads.area_rows: Settings > System decides it): its included cameras, and in "auto"
+        those inside our fire districts or within its margin_m plus area_extra_m of them; never an excluded one. Only
+        with live video. Worked out again every AREA_EVERY_S (a polygon distance per camera)."""
+        now = self.clock()
+        if now - self._area_at < AREA_EVERY_S:
+            return self._area_ids
+        rows_fn = getattr(self.roads, "area_rows", None)
+        try:
+            area, rows = rows_fn() if rows_fn is not None else ({}, [])
+        except Exception as e:  # noqa: BLE001 - the area not readable now: the last one
+            self.log(f"dvr: the response area not read ({type(e).__name__})")
+            return self._area_ids
+        reach = float(area.get("margin_m") or 0) + self.area_extra_m
+        ids = []
+        for r in rows:
+            c = r["camera"]
+            if not (c.get("video") and not c.get("off") and CAM_RE.fullmatch(c["id"])) or r["mode"] == "exclude":
+                continue
+            if r["mode"] == "include" or (r["dist_m"] is not None and r["dist_m"] <= reach):
+                ids.append(c["id"])
+        self._area_at, self._area_ids = now, sorted(ids)
+        return self._area_ids
 
     # -- recording ---------------------------------------------------------------------------------------------------
 

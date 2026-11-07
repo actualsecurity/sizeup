@@ -350,14 +350,15 @@ heartbeat_stale_min = 90             # no heartbeat (or restart) this long: "Tap
 # dvr_max_cameras = 12                    # recorded at once (1 to 40): ~200 kbit/s each in, 175 MB each per 2 h
 # dvr_always = []                         # camera ids recorded all the time
 # dvr_dir = ""                            # "" = the state folder's dvr/
-# On storage shared between tasks (#322: EFS at dvr_dir) the recording outlives a deploy: the area's cameras 24/7, 24 h.
+# On storage shared between tasks (#322: EFS at dvr_dir) the recording outlives a deploy: the response area's cameras
+# around the clock, 12 h. The response area is the camera wall's (Settings > System: our fire districts, its margin,
+# its include / exclude), plus dvr_extra_m beyond its margin.
 # dvr_shared = "auto"                     # "auto": an nfs4 / efs mount at dvr_dir; true / false: force it
-# dvr_area = [[-73.735, 40.955], [-73.640, 40.955], [-73.640, 41.050], [-73.755, 41.050], [-73.755, 41.025], [-73.735, 41.025]]
-#                                         # [[lon, lat], ...] or [west, south, east, north]; [] = none. The default: Port
-#                                         # Chester, Rye Brook, the I-95 / I-287 / Hutch approaches to Rye, Harrison, Greenwich
-# dvr_shared_window_min = 1440            # kept per camera on shared storage (10 to 2880)
-# dvr_shared_max_gb = 80                  # ~2 GB per camera per day; 19 cameras in the area (0.5 to 2000)
-# dvr_shared_max_cameras = 32             # recorded at once on shared storage (1 to 64)
+# dvr_extra_m = 1000                      # beyond the camera wall's margin, still recorded (0 to 5000): 8 cameras
+# dvr_area = []                           # an override: [[lon, lat], ...] or [west, south, east, north]; [] = none
+# dvr_shared_window_min = 720             # kept per camera on shared storage (10 to 2880)
+# dvr_shared_max_gb = 25                  # ~1 GB per camera per 12 h (0.5 to 2000)
+# dvr_shared_max_cameras = 20             # recorded at once on shared storage (1 to 64)
 
 # [roadwork]: the maps' "Road projects & closures" layer and the incident view's closure lines (sizeup/roadprojects.py,
 # #185): the Thruway's and 511NY's roadwork (read by [roads]), the capital programs in construction (the Thruway, NYSDOT,

@@ -16,6 +16,8 @@ import zipfile
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
+import pytest
+
 from sizeup import attachments as att_mod
 from sizeup import aws
 from sizeup.attachments import Attachments, S3, Stream
@@ -29,15 +31,22 @@ from tests.test_roles import COREY, JULIAN, VAL, call, people
 
 
 class FakeS3:
-    """One bucket: PUT (SSE-S3 and both checksums required, as with Object Lock), GET (a byte range), DELETE."""
+    """One versioned bucket under Object Lock (governance): PUT (SSE-S3 and both checksums required) makes a version;
+    GET (a byte range) reads the current one; DELETE of a version needs x-amz-bypass-governance-retention (else
+    AccessDenied, as S3 answers a locked version); a plain DELETE would only leave a delete marker."""
 
     def __init__(self):
-        self.objects: dict[str, tuple[bytes, str]] = {}
+        self.objects: dict[str, tuple[bytes, str]] = {}           # the current versions
+        self.versions: dict[str, dict[str, bytes]] = {}           # key -> {version id: bytes}: every one kept
         self.calls: list[tuple[str, str]] = []
+        self.bypassed: list[tuple[str, str]] = []
         self.fail = None
+        self.n = 0
 
     def __call__(self, method, url, headers, body, timeout):
-        key = unquote(urlsplit(url).path[1:])
+        u = urlsplit(url)
+        key = unquote(u.path[1:])
+        q = dict(x.split("=", 1) for x in u.query.split("&") if x)
         self.calls.append((method, key))
         h = {k.lower(): v for k, v in headers.items()}
         assert h["authorization"].startswith("AWS4-HMAC-SHA256 Credential=AKIDTEST/") and "x-amz-date" in h
@@ -49,7 +58,10 @@ class FakeS3:
             assert base64.b64decode(h["x-amz-checksum-sha256"]) == hashlib.sha256(body).digest()
             assert h["x-amz-content-sha256"] == hashlib.sha256(body).hexdigest()
             self.objects[key] = (bytes(body), h["content-type"])
-            return 200, {"ETag": '"e"'}, b""
+            self.n += 1
+            vid = f"v{self.n}"
+            self.versions.setdefault(key, {})[vid] = bytes(body)
+            return 200, {"ETag": '"e"', "x-amz-version-id": vid}, b""
         if method == "GET":
             if key not in self.objects:
                 return 404, {}, b"<Error><Code>NoSuchKey</Code></Error>"
@@ -59,7 +71,15 @@ class FakeS3:
                 return 206, {}, b[first:last + 1]
             return 200, {}, b
         if method == "DELETE":
-            self.objects.pop(key, None)
+            vid = unquote(q.get("versionId", ""))
+            assert vid, "a plain DELETE: only a delete marker under Object Lock (sizeup never sends one)"
+            if h.get("x-amz-bypass-governance-retention") != "true":
+                return 403, {}, b"<Error><Code>AccessDenied</Code></Error>"
+            self.bypassed.append((key, vid))
+            self.versions.get(key, {}).pop(vid, None)
+            if not self.versions.get(key):
+                self.versions.pop(key, None)
+                self.objects.pop(key, None)
             return 204, {}, b""
         raise AssertionError(method)
 
@@ -201,9 +221,11 @@ def test_only_an_admin_deletes_and_the_record_stays(tmp_path):
     path = f"/api/cad/attachments/{aid}/delete"
     assert needs(path) == "admin"
     assert call(api, path, {}, JULIAN)[0] == 403 and call(api, path, {}, VAL)[0] == 403
+    assert [m for m, _ in a.fake.calls if m == "DELETE"] == []                   # nobody else deletes anything
     code, out = call(api, path, {}, COREY)
     assert code == 200 and out["attachment"]["status"] == "deleted" and "Corey" in out["attachment"]["deleted_by"]
-    assert a.fake.objects == {} and [m for m, _ in a.fake.calls if m == "DELETE"] == ["DELETE"] * len(objs)
+    # really gone: every version, each by its id past the governance lock
+    assert a.fake.objects == {} and a.fake.versions == {} and len(a.fake.bypassed) == len(objs)
     audit = a.audit_rows(aid=aid)
     assert audit[0]["action"] == "delete" and all(o["sha256"] in audit[0]["detail"] for o in objs)
     assert any(x["summary"].startswith(f"Deleted the camera attachment {aid}") for x in c.activity.rows(COREY, "", None, 20))
@@ -460,3 +482,46 @@ def test_a_new_stream_mark_is_a_discontinuity_in_the_clip_and_folders_stay_put_w
     lines = get(api, f"/api/cad/attachments/{aid}/index.m3u8", VAL)[1].decode().splitlines()
     tss = [i for i, x in enumerate(lines) if x.endswith(".ts")]
     assert lines.count("#EXT-X-DISCONTINUITY") == 1 and lines[tss[1] + 1] == "#EXT-X-DISCONTINUITY"
+
+
+def test_a_delete_removes_every_version_even_a_retrys_and_a_failed_delete_can_be_asked_again(tmp_path):
+    c, a, inc, clock = radio_setup(tmp_path)
+    c.record_traffic(tx("FG1-2", clock.t, rig="E63", radio_id="6301"))
+    clock.t += att_mod.SETTLE_S + 30
+    a.fake.fail = lambda m, k: m == "PUT" and k.endswith("transmission.json")
+    assert a.sync_radio() == 0                                              # audio.wav written, then a failure
+    a.fake.fail = None
+    assert a.sync_radio() == 1                                              # audio.wav written again: two versions
+    aid = a.list(inc["id"])[0]["id"]
+    wav = next(k for k in a.fake.versions if k.endswith("audio.wav"))
+    assert len(a.fake.versions[wav]) == 2
+    # a delete that fails part way: audited, the row as it was, what is left deleted when asked again
+    real = a.fake.__call__
+    calls = {"n": 0}
+
+    def flaky(method, url, headers, body, timeout):
+        if method == "DELETE":
+            calls["n"] += 1
+            if calls["n"] == 2:
+                return 500, {}, b"<Error><Code>InternalError</Code></Error>"
+        return real(method, url, headers, body, timeout)
+    a.s3.send = flaky
+    with pytest.raises(att_mod.AttachError, match="not deleted"):
+        a.delete(aid, "Corey <corey@example.org>")
+    assert a.row(aid)["status"] == "stored" and a.audit_rows(aid=aid)[0]["action"] == "failed"
+    a.delete(aid, "Corey <corey@example.org>")
+    assert a.fake.versions == {} and a.fake.objects == {} and a.row(aid)["status"] == "deleted"
+    with pytest.raises(att_mod.AttachError, match="deleted already"):
+        a.delete(aid, "Corey <corey@example.org>")
+
+
+def test_without_the_bypass_a_locked_version_stays(tmp_path):
+    """The governance lock is real in the fake: a version delete without the bypass header is refused, so only the
+    admin delete (which sends it) removes anything."""
+    s3 = S3("b", send=FakeS3(), creds=lambda: aws.Credentials("AKIDTEST", "secret"))
+    v = s3.put("attachments/1/x/a.bin", b"data")
+    code, _, _ = s3._call("DELETE", "attachments/1/x/a.bin", {}, query=f"versionId={v}")
+    assert code == 403 and s3.get("attachments/1/x/a.bin") == b"data"
+    s3.delete_version("attachments/1/x/a.bin", v)
+    with pytest.raises(aws.AwsError):
+        s3.get("attachments/1/x/a.bin")
