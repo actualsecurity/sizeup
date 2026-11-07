@@ -933,8 +933,10 @@ def test_no_stream_for_a_camera_without_one_a_down_one_or_an_unknown_one():
     for _ in range(3):
         clock.t += IMAGE_TTL_S + 1
         r.get("/api/cad/cameras/1ne01370s/image", "")
-    # (#276) a camera with live video is judged by its stream: a failing still never takes it off or refuses it
-    assert not r.health("1ne01370s")["down"] and r.health("1ne01370s")["state"] == "ok"
+    # (#276) a camera with live video is judged by its stream: a failing still never refuses it; until its stream is
+    # looked at it is stale, "video not checked"
+    h = r.health("1ne01370s")
+    assert not h["down"] and (h["state"], h["why"]) == ("stale", "Still old · video not checked")
     code, body, _, _ = r.get("/api/cad/cameras/1ne01370s/stream/playlist.m3u8", "")
     assert code == 200
     r.close_stream("1ne01370s", "")
