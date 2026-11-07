@@ -23,6 +23,7 @@ HEX = "~279a"                                   # not an ICAO address: no regist
 END = {e: (lat, lon) for _, e, lat, lon in A.RUNWAY_ENDS}
 HDG = {e: A.bearing(*END[e], *END[o]) for e, o in (("34", "16"), ("16", "34"), ("29", "11"), ("11", "29"))}
 ELEV = A.ELEV_FT
+LAG = math.ceil((A.VS_SMOOTH_S + A.SWITCH_S) / STEP_S)    # reports a change of mind may take: the smoothed rate, the debounce
 
 
 def move(lat: float, lon: float, brg: float, dist_nm: float) -> tuple[float, float]:
@@ -123,12 +124,12 @@ def test_a_departure_first_seen_airborne_is_departed():
 # ---- arrivals ---------------------------------------------------------------------------------------------------------------
 
 
-def final_34(from_nm=5.0, gs=130.0, down_to_ft=0.0, baro=0.0, legs_after=()):
+def final_34(from_nm=5.0, gs=130.0, down_to_ft=0.0, baro=0.0, legs_after=(), category="A2"):
     """On the 34 final from from_nm on a 3 degree path to down_to_ft over the threshold, then legs_after."""
     vr = -gs * 318 / 60                                     # 318 ft a nm at gs kt
     s = (from_nm - down_to_ft / 318) * 3600 / gs
     return fly_legs(move(*END["34"], HDG["34"] + 180, from_nm), HDG["34"], ELEV + 318 * from_nm, gs,
-                    [(s - s % STEP_S, {"vr": vr}), *legs_after], baro=baro)
+                    [(s - s % STEP_S, {"vr": vr}), *legs_after], baro=baro, category=category)
 
 
 def test_an_arrival_on_the_34_final_reads_inbound_on_its_approach_then_down():
@@ -172,7 +173,7 @@ def test_a_go_around_from_short_final_is_near_never_departed():
     phases, _ = phases_of(reports)
     k = kinds(phases)
     climb = next(i for i, r in enumerate(reports) if r.baro_rate > 0)
-    assert set(k[:climb]) == {ARRIVING} and set(k[climb:]) == {NEAR}, k
+    assert set(k[:climb]) == {ARRIVING} and set(k[climb + LAG:]) == {NEAR} and DEPARTING not in k, k
 
 
 @pytest.mark.parametrize("baro", [0.0, 150.0])
@@ -182,7 +183,7 @@ def test_a_balked_landing_at_50_ft_is_near_never_departed(baro):
     k = kinds(phases)
     level = next(i for i, r in enumerate(reports) if r.baro_rate >= 0)
     assert DEPARTING not in k and GROUND not in k and set(k[:level]) == {ARRIVING}, k
-    assert set(k[level + 1:]) == {NEAR}, k
+    assert set(k[level + LAG:]) == {NEAR}, k
 
 
 def test_a_touch_and_go_lands_then_departs():
@@ -190,8 +191,8 @@ def test_a_touch_and_go_lands_then_departs():
                                                                 (90, {"vr": 900.0, "gs": 100.0})])
     k = kinds(phases_of(reports)[0])
     n = len(final_34())
-    assert set(k[:n]) == {ARRIVING} and set(k[n:n + 2]) == {GROUND}
-    assert set(k[n + 2:]) == {DEPARTING}, k
+    assert set(k[:n]) == {ARRIVING} and set(k[n:n + 2]) == {GROUND} and set(k[n + 2:n + 4]) <= {GROUND, DEPARTING}
+    assert set(k[n + 4:]) == {DEPARTING}, k
 
 
 def test_an_emergency_return_to_34_reads_arriving_on_the_final():
@@ -206,9 +207,9 @@ def test_an_emergency_return_to_34_reads_arriving_on_the_final():
     assert final * STEP_S < A.FIELD_RECENT_S
     assert A.nm(*END["34"], reports[final].lat, reports[final].lon) < 2.6
     assert ARRIVING not in k[:final]
-    assert k[final + 1:] == [ARRIVING] * (len(k) - final - 1), k
-    assert {p.approach for p in phases[final + 1:]} <= {"ILS 34", "LOC 34", "RNAV (GPS) Y 34", "RNAV (RNP) Z 34", None}
-    assert all(p.runway == "34" for p in phases[final + 1:] if p.approach)
+    assert k[final + LAG:] == [ARRIVING] * (len(k) - final - LAG), k
+    assert {p.approach for p in phases[final + LAG:]} <= {"ILS 34", "LOC 34", "RNAV (GPS) Y 34", "RNAV (RNP) Z 34", None}
+    assert all(p.runway == "34" for p in phases[final + LAG:] if p.approach)
 
 
 def test_a_level_departure_turning_back_past_the_field_does_not_flap():
@@ -269,13 +270,14 @@ def test_a_misread_arrival_is_cleared_by_a_strong_climb_away():
     last = level[-1]
     climb = fly_legs(move(last.lat, last.lon, HDG["34"], 0.1), HDG["34"], ELEV + 600, 130.0, [(120, {"vr": 1500.0})])
     later = kinds(phases_of(climb, mem, T0 + len(level) * STEP_S)[0])
-    assert ARRIVING not in later and later[-1] == DEPARTING and HEX not in mem._inbound, later
+    assert ARRIVING not in later[LAG:] and later[-1] == DEPARTING and HEX not in mem._inbound, later
 
 
-def test_a_landing_with_no_ground_flag_then_a_taxi_and_parked_reads_ground_never_departed():
+@pytest.mark.parametrize("category", ["A2", ""])
+def test_a_landing_with_no_ground_flag_then_a_taxi_and_parked_reads_ground_never_departed(category):
     """Many GA transponders never say "ground": landed at a +200 ft altimeter offset, slowed, off the runway at
-    15 kt, parked for 25 minutes."""
-    reports = final_34(baro=200.0, legs_after=[(20, {"gs": 40.0}), (10, {"gs": 15.0, "turn": 9.0}), (60, {"gs": 15.0}),
+    15 kt, parked for 25 minutes; with its category, and with none (Mode S, MLAT, older ADS-B)."""
+    reports = final_34(baro=200.0, category=category, legs_after=[(20, {"gs": 40.0}), (10, {"gs": 15.0, "turn": 9.0}), (60, {"gs": 15.0}),
                                                 (10, {"gs": 0.0}), (1500, {"gs": 0.0})])
     phases, mem = phases_of(reports)
     k = kinds(phases)
@@ -344,3 +346,80 @@ def test_a_slow_helicopter_descent_reads_ground_only_on_touchdown():
     for r, p in zip(down, phases):
         assert p.kind != GROUND or r.alt_baro - ELEV < 150, (r.alt_baro, p.kind)
     assert kinds(phases)[-3:] == [GROUND] * 3 and DEPARTING not in kinds(phases)
+
+
+@pytest.mark.parametrize("category,agl,gs,trk", [("A7", 300, 60.0, None), ("A7", 380, 45.0, None), ("", 300, 60.0, None),
+                                                 ("B4", 300, 45.0, None), ("A7", 300, 60.0, 60.0), ("A2", 300, 120.0, None)])
+def test_a_low_pass_over_the_runway_is_never_on_the_ground_or_departed(category, agl, gs, trk):
+    """Along 16/34 at a few hundred feet (helicopters cross HPN like this; a fixed-wing low pass at approach speed),
+    or across it: on the runway's outline below 400 ft, but not a roll."""
+    if trk is None:                                         # along the runway, from 1.5 nm south of the 34 end
+        start, trk = move(*END["34"], HDG["34"] + 180, 1.5), HDG["34"]
+    else:                                                   # across it, through the middle
+        start = move(*A.ARP, trk + 180, 1.5)
+    reports = fly_legs(start, trk, ELEV + agl, gs, [(round(3.5 * 3600 / gs / STEP_S) * STEP_S, {})], category=category)
+    assert any(A.on_runway(r.lat, r.lon) for r in reports)
+    k = kinds(phases_of(reports)[0])
+    assert GROUND not in k and DEPARTING not in k, k
+
+
+# ---- what real feeds do (#279's replay of an hour of HPN traffic) ------------------------------------------------------
+
+
+def test_a_departure_first_seen_climbing_off_the_runway_is_departed_from_the_first_report():
+    """No roll seen: the first report is 110 ft up over runway 34, climbing (the snapshot reads it on the RNP Z 34)."""
+    reports = fly_legs(move(*END["34"], HDG["34"], 0.25), HDG["34"], ELEV + 110, 80.0,
+                       [(60, {"vr": 800.0, "gs": 100.0})], baro=100.0, category="A1")
+    k = kinds(phases_of(reports)[0])
+    assert k == [DEPARTING] * len(k), k
+
+
+def test_a_noisy_reported_rate_does_not_flip_a_level_arrival():
+    """Light aircraft report a rate that jumps +-450 ft/min from report to report while level: inbound on the 34
+    final at 2,000 ft, it reads arriving and stays so."""
+    reports = fly_legs(move(*END["34"], HDG["34"] + 180, 7.0), HDG["34"], ELEV + 1600, 110.0, [(150, {})], category="A1")
+    noisy = [Plane(**{**r.__dict__, "baro_rate": (448.0, -192.0, 384.0, -448.0, 128.0)[i % 5]}) for i, r in enumerate(reports)]
+    k = kinds(phases_of(noisy)[0])
+    assert changes(k) <= 1 and k[-1] == ARRIVING, k
+
+
+def test_a_stuck_reported_rate_through_a_takeoff_is_not_ground_once_up():
+    """A feed's rate stuck at +128 ft/min while the altitude climbs 275 ft in 5 s: the altitude says climbing."""
+    reports = takeoff("34", 0.2, baro=100.0)
+    stuck = [Plane(**{**r.__dict__, "baro_rate": 128.0}) for r in reports]
+    k = kinds(phases_of(stuck)[0])
+    up = airborne_from(reports)
+    assert ARRIVING not in k and GROUND not in k[up + 2:] and k[-1] == DEPARTING, k
+
+
+
+def test_an_emergency_is_never_held_by_the_debounce_and_a_held_phase_has_a_fresh_distance(monkeypatch):
+    """Squawking 7700 off 34 and turning back to land: its phase changes on the report the reading does (the alarm and
+    the pre-alert read it); without the emergency the change waits SWITCH_S, the held phase with this report's
+    distance."""
+    legs = [(15, {"gs": 120.0}), (40, {"vr": 1500.0, "gs": 120.0}), (60, {"turn": -3.0}), (95, {}), (60, {"turn": -3.0}),
+            (60, {"vr": -650.0, "gs": 110.0})]
+    reports = fly_legs(move(*END["34"], HDG["34"], 0.2), HDG["34"], ELEV, 90.0, legs, baro=150.0)
+    sos = [Plane(**{**r.__dict__, "squawk": "7700"}) for r in reports]
+    held = phases_of(reports)[0]
+    emergency = kinds(phases_of(sos)[0])
+    monkeypatch.setattr(A, "SWITCH_S", 0.0)
+    raw = phases_of(reports)[0]
+    assert emergency == kinds(raw)
+    assert kinds(held) != kinds(raw) and ARRIVING in kinds(raw)
+    first = kinds(raw).index(ARRIVING)
+    assert emergency[first] == ARRIVING and kinds(held)[first] != ARRIVING
+    for r, h, x in zip(reports, held, raw):
+        if h.kind != x.kind:                                   # held: this report's distance, not the old one
+            want = A.nm(*END[h.runway], r.lat, r.lon) if h.runway else A.nm(*A.ARP, r.lat, r.lon)
+            assert h.dist_nm == pytest.approx(want)
+
+
+@pytest.mark.parametrize("from_nm", [1.5, -0.3])
+def test_a_slow_fixed_wing_low_pass_along_the_runway_is_not_a_roll(from_nm):
+    """Level at 200 ft and 90 kt along 34, never descending: not on the ground (a roll speeds up), never departing;
+    first seen over the runway it may read ground for that one report, not after."""
+    reports = fly_legs(move(*END["34"], HDG["34"] + 180, from_nm), HDG["34"], ELEV + 200, 90.0, [(90, {})])
+    assert sum(A.on_runway(r.lat, r.lon, r.track) for r in reports) >= 4
+    k = kinds(phases_of(reports)[0])
+    assert DEPARTING not in k and GROUND not in k[1:], k
