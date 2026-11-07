@@ -55,6 +55,10 @@ class ChannelCfg:
     # America/New_York wall-clock time (sizeup/tz.py, DST-aware). () = mhz all day. The receiver retunes between
     # transmissions (sizeup/radio/am.py Schedule).
     schedule: tuple[tuple[int, float], ...] = ()
+    # Other frequencies on the same dongle (#275, "also"): ((MHz, from, until, label), ...), from/until minutes of the
+    # local day (None: all day); label: the airband channel that frequency belongs to (its transmissions are that
+    # channel's). More than one frequency on: rtl_sdr + the channelizer instead of rtl_fm (sizeup/radio/channelize.py).
+    also: tuple[tuple[float, int | None, int | None, str], ...] = ()
 
     def __post_init__(self):
         paging = self.kind == "paging"
@@ -523,11 +527,91 @@ def _airband(c: dict, i: int) -> ChannelCfg:
     if not 1.0 <= sq <= 20.0:
         raise ConfigError(f"{where}.squelch_db: 1 to 20 dB over the noise floor (3.5: shortfinal's, tested)")
     sched = _schedule(c["schedule"], mhz, where) if "schedule" in c else ()
+    also = _also(c["also"], where) if "also" in c else ()
     return ChannelCfg(str(c["label"]), mhz, "airband", c.get("device", ""), c.get("gain_db", AIRBAND_GAIN_DB), sq,
-                      schedule=sched)
+                      schedule=sched, also=also)
 
 
 _HHMM = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
+
+
+def _hhmm(v, where: str) -> int:
+    m = _HHMM.match(v.strip()) if isinstance(v, str) else None
+    if not m:
+        raise ConfigError(f'{where}: {v!r}: a time of day "HH:MM" (00:00 to 23:59)')
+    return int(m.group(1)) * 60 + int(m.group(2))
+
+
+def _also(raw, where: str) -> tuple[tuple[float, int | None, int | None, str], ...]:
+    """An airband channel's "also" (#275): [{mhz = 120.8, from = "23:00", until = "07:00"}, ...]: other frequencies
+    on the same dongle, all day or between two local times. The labels are filled in by _also_owners."""
+    why = (f'{where}.also: a list of {{mhz = ..., from = "HH:MM", until = "HH:MM"}} (from / until: both or neither), '
+           'e.g. [{mhz = 120.8, from = "23:00", until = "07:00"}]')
+    if not isinstance(raw, list) or not raw:
+        raise ConfigError(why)
+    out = []
+    for e in raw:
+        if not isinstance(e, dict) or "mhz" not in e or set(e) - {"mhz", "from", "until"} \
+                or ("from" in e) != ("until" in e) or isinstance(e["mhz"], bool) or not isinstance(e["mhz"], (int, float)):
+            raise ConfigError(why)
+        f = float(e["mhz"])
+        if not AIRBAND_MHZ[0] <= f <= AIRBAND_MHZ[1]:
+            raise ConfigError(f"{where}.also: {f:g} MHz: airband voice is {AIRBAND_MHZ[0]:g} to {AIRBAND_MHZ[1]:g} MHz (AM)")
+        a = _hhmm(e["from"], f"{where}.also.from") if "from" in e else None
+        b = _hhmm(e["until"], f"{where}.also.until") if "until" in e else None
+        out.append((f, a, b, ""))
+    return tuple(out)
+
+
+def airband_owner(channels, mhz: float) -> str | None:
+    """The airband channel a frequency belongs to (#275): the one on it (its mhz), else the one whose schedule has it."""
+    key = round(float(mhz), 6)
+    air = [c for c in channels if c.kind == "airband"]
+    for c in air:
+        if round(c.mhz, 6) == key:
+            return c.label
+    for c in air:
+        if any(round(f, 6) == key for _at, f in c.schedule):
+            return c.label
+    return None
+
+
+def _also_owners(channels: list) -> list:
+    """Each "also" frequency with the channel it belongs to (that channel's transmissions, AWS, talkers ...), and every
+    set of frequencies one dongle would have on at once checked to fit one capture (sizeup/radio/channelize.py plan)."""
+    from dataclasses import replace
+
+    from sizeup.radio import channelize
+    out = []
+    for i, c in enumerate(channels):
+        if not c.also:
+            out.append(c)
+            continue
+        where = f"radio.channels[{i}].also"
+        also = []
+        for f, a, b, _l in c.also:
+            owner = airband_owner(channels, f)
+            if owner is None:
+                raise ConfigError(f"{where}: {f:g} MHz isn't on any airband channel here: add a channel for it")
+            also.append((f, a, b, owner))
+        cuts = sorted({0, *(at for at, _f in c.schedule),
+                       *(x for f, a, b, _o in also for x in (a, b) if x is not None)})
+        for m in cuts:
+            first = c.mhz
+            for at, f in c.schedule:
+                first = f if m >= at else first
+            if c.schedule and m < c.schedule[0][0]:
+                first = c.schedule[-1][1]
+            on = {round(first, 6)}
+            for f, a, b, _o in also:
+                if a is None or b is None or a == b or (a <= m < b if a < b else (m >= a or m < b)):
+                    on.add(round(f, 6))
+            try:
+                channelize.plan(sorted(on))
+            except ValueError as e:
+                raise ConfigError(f"{where}: at {m // 60:02d}:{m % 60:02d} {e}") from None
+        out.append(replace(c, also=tuple(also)))
+    return out
 
 
 def _schedule(raw, mhz: float, where: str) -> tuple[tuple[int, float], ...]:
@@ -994,12 +1078,14 @@ def load(path: str | Path) -> Config:
     channels = []
     for i, c in enumerate(radio.get("channels", [])):
         _take(c, f"radio.channels[{i}]", {"label", "mhz", "kind", "device", "gain_db", "squelch_db",
-                                                 "drop_db", "hang_s", "continue_s", "schedule"})
+                                                 "drop_db", "hang_s", "continue_s", "schedule", "also"})
         if c.get("kind", "traffic") not in KINDS:
             raise ConfigError(f"radio.channels[{i}].kind: 'paging', 'traffic' or 'airband'")
         kind = c.get("kind", "traffic")
         if "schedule" in c and kind != "airband":
             raise ConfigError(f"radio.channels[{i}].schedule: airband channels only (#260)")
+        if "also" in c and kind != "airband":
+            raise ConfigError(f"radio.channels[{i}].also: airband channels only (#275)")
         if kind == "airband":
             channels.append(_airband(c, i))
             continue
@@ -1022,6 +1108,7 @@ def load(path: str | Path) -> Config:
     labels = [c.label for c in channels]
     if len(set(labels)) != len(labels):
         raise ConfigError("radio.channels: two channels have the same label")
+    channels = _also_owners(channels)
     tones, ours, tones_file = [], set(), ""
     tf = radio.get("tones_file", "data/westchester_tones.csv")
     if tf:

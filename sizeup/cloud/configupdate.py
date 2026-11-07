@@ -53,6 +53,18 @@ at the switch to a release that has it (deploy/station/install-linux.sh activate
              it is. The id (pcfd-hq) never changes: the hub keys the station's token, history and outbox on it. Not
              deferred: every release reads [station] name, so a switch back is safe with either name.
 
+    airband-sets  clearer names and several frequencies per dongle (GitHub #275): "NY Approach" becomes "NY App 126.4/120.8"
+             and "NY Approach 124.65" "NY App 124.65" (the label line only: a dongle's saved job follows, sizeup/app.py
+             RENAMED); HPN Tower gets also = 120.8 23:00-07:00 (NY Approach's overnight frequency on the Tower's dongle,
+             118.575 kept: the CTAF while the tower is closed, and the tower reopening at 06:00 is heard); NY App
+             126.4/120.8 gets also = 124.65 07:00-23:00 (126.4 + 124.65 on one dongle by day); HPN Ground gets a
+             schedule, 121.825 06:00-23:00 and 124.65 23:00-06:00 (Ground is closed overnight: its dongle hears
+             Approach's 124.65 then). Each part only on a channel exactly as approach-ground / hpn-atc / the template
+             left it (that label, frequency and schedule, no "also" yet) and only when the frequency it adds has a
+             channel here (its transmissions are that channel's); the rest is left as it is. Rollback-safe like
+             approach-ground: a release from before #275 refuses "also", so it waits ("deferred") until the release
+             being left reads it.
+
 Done ones are listed in a marks file (/etc/sizeup/config-updates, one name per line), so one taken out
 by hand stays out. The config is only ever added to (tones-47 also changes the two values of the one
 entry it names): the text is kept as it is, the result must parse
@@ -158,7 +170,8 @@ def add_hpn_atc(text: str, leaving: Path | None = None) -> tuple[str, str]:
     chans = radio.get("channels") if isinstance(radio.get("channels"), list) else []
     if not chans:
         return text, "hpn-atc: no [[radio.channels]] here (no radios): nothing added"
-    later = {_key(label) for label, _m, _b in APPROACH_GROUND}     # approach-ground's (#260) aren't a tower
+    later = {_key(label) for label, _m, _b in APPROACH_GROUND}     # approach-ground's (#260) aren't a tower ...
+    later |= {_key(label) for label in RENAMES.values()}            # ... nor are they by their #275 names
     for c in chans:
         if isinstance(c, dict) and (_key(c.get("label", "")) == "hpntower" or _mhz(c.get("mhz")) == HPN_MHZ
                                     or (c.get("kind") == "airband" and _key(c.get("label", "")) not in later)):
@@ -427,7 +440,8 @@ def add_approach_ground(text: str, leaving: Path | None = None) -> tuple[str, st
     todo, there = [], []
     for label, mhzs, block in APPROACH_GROUND:
         fixed = len(mhzs) == 1
-        if _key(label) in have_labels or (fixed and _mhz(mhzs[0]) in have_mhz):
+        if _key(label) in have_labels or (fixed and _mhz(mhzs[0]) in have_mhz) \
+                or _key(RENAMES.get(label, label)) in have_labels:          # there by its #275 name
             there.append(label)
         else:
             todo.append((label, mhzs, block))
@@ -497,9 +511,133 @@ def rename_south_end(text: str) -> tuple[str, str]:
     return new, f'south-end: [station] name is now "{SOUTH_END}" (was "{OLD_NAME}"; the id {st.get("id")!r} is kept)'
 
 
+# Several frequencies per dongle and clearer names (#275). FAA Chart Supplement via airnav.com/airport/KHPN (FAA
+# information effective 29 October 2026): WESTCHESTER TOWER 118.575 [0600-2300] (CTAF 118.575), WESTCHESTER GROUND
+# 121.825 [0600-2300], NEW YORK APPROACH 120.8 2300-0700, 126.4 0700-2300, 124.65.
+RENAMES = {"NY Approach": "NY App 126.4/120.8", "NY Approach 124.65": "NY App 124.65"}
+TOWER_ALSO = [{"mhz": 120.8, "from": "23:00", "until": "07:00"}]
+APPROACH_ALSO = [{"mhz": 124.65, "from": "07:00", "until": "23:00"}]
+GROUND_SCHEDULE = [{"at": "06:00", "mhz": 121.825}, {"at": "23:00", "mhz": 124.65}]
+CHANNELS_HEADER = re.compile(r"^[ \t]*\[\[[ \t]*radio\.channels[ \t]*\]\][ \t]*(?:#.*)?$")
+LABEL_LINE = r'^(?P<head>[ \t]*label[ \t]*=[ \t]*){old}(?P<tail>[ \t]*(?:#[^\n]*)?)$'
+
+
+def reads_also(release: Path | None) -> bool:
+    """Whether the code of that release accepts an airband channel's "also" (#275; None: no release to go back to)."""
+    if release is None:
+        return True
+    try:
+        return '"also"' in (release / "sizeup" / "config.py").read_text(errors="replace")
+    except OSError:
+        return False
+
+
+def _toml_list(entries: list[dict]) -> str:
+    def val(v):
+        return f'"{v}"' if isinstance(v, str) else f"{v:g}"
+    return "[" + ", ".join("{ " + ", ".join(f"{k} = {val(v)}" for k, v in e.items()) + " }" for e in entries) + "]"
+
+
+def _add_line(seg: str, line: str) -> str:
+    """seg (one [[radio.channels]] table) with line after its last key line."""
+    keys = list(KEY_LINE.finditer(seg))
+    if not keys:
+        raise ValueError("a [[radio.channels]] table with no keys: change it by hand")
+    end = seg.find("\n", keys[-1].start())
+    cut = len(seg) if end < 0 else end + 1
+    head = seg[:cut] if seg[:cut].endswith("\n") else seg[:cut] + "\n"
+    return head + line + "\n" + seg[cut:]
+
+
+def airband_sets(text: str, leaving: Path | None = None) -> tuple[str, str]:
+    """(new text, what was done): the #275 names, the Tower's and Approach's "also" and Ground's schedule, each on a
+    channel exactly as it was added. Deferred while the release being left can't read "also"; ValueError when the
+    config doesn't parse or the result wouldn't say what was meant."""
+    data = tomllib.loads(text)
+    radio = data.get("radio") if isinstance(data.get("radio"), dict) else {}
+    chans = radio.get("channels") if isinstance(radio.get("channels"), list) else []
+    if not chans:
+        return text, "airband-sets: no [[radio.channels]] here (no radios): nothing changed"
+    labels = {c.get("label") for c in chans if isinstance(c, dict)}
+
+    def has(mhz: float) -> bool:                  # a channel the frequency belongs to (its mhz, or its schedule)
+        return any(isinstance(c, dict) and c.get("kind") == "airband"
+                   and (_mhz(c.get("mhz")) == mhz or any(isinstance(e, dict) and _mhz(e.get("mhz")) == mhz
+                                                        for e in (c.get("schedule") or [])))
+                   for c in chans)
+
+    plan: dict[int, tuple[str | None, str | None]] = {}      # channel index -> (new label, line to add)
+    did: dict[int, list[str]] = {}
+    for i, c in enumerate(chans):
+        if not isinstance(c, dict) or c.get("kind") != "airband" or "also" in c:
+            continue
+        label, mhz = c.get("label"), _mhz(c.get("mhz"))
+        if label == "NY Approach" and mhz == 126.4 and c.get("schedule") == APPROACH_SCHEDULE:
+            new = RENAMES[label] if RENAMES[label] not in labels else None
+            line = f"also = {_toml_list(APPROACH_ALSO)}   # #275: 124.65 too, by day (one dongle, 2.048 MS/s)" \
+                if has(124.65) else None
+            plan[i] = (new, line)
+        elif label == "NY Approach 124.65" and mhz == 124.65 and "schedule" not in c:
+            if RENAMES[label] not in labels:
+                plan[i] = (RENAMES[label], None)
+        elif label == "HPN Tower" and mhz == 118.575 and "schedule" not in c and has(120.8):
+            plan[i] = (None, f"also = {_toml_list(TOWER_ALSO)}   # #275: NY Approach overnight too (118.575: CTAF)")
+        elif label == "HPN Ground" and mhz == 121.825 and "schedule" not in c and has(124.65):
+            plan[i] = (None, f"schedule = {_toml_list(GROUND_SCHEDULE)}   # #275: Ground closed 23:00-06:00: 124.65 then")
+    plan = {i: p for i, p in plan.items() if p != (None, None)}
+    if not plan:
+        return text, "airband-sets: no channel as it was added (NY Approach, HPN Tower, HPN Ground): nothing changed"
+    if not reads_also(leaving):
+        raise Deferred(f"the release this switch would go back to ({leaving.name}) can't read an airband channel's "
+                       '"also": the #275 names and frequencies are changed at the next update')
+    heads = list(HEADER.finditer(text))
+    segs = []
+    for k, h in enumerate(heads):
+        if CHANNELS_HEADER.match(h.group(0)):
+            segs.append((h.start(), heads[k + 1].start() if k + 1 < len(heads) else len(text)))
+    if len(segs) != len(chans):
+        raise ValueError("the [[radio.channels]] tables aren't all plain [[radio.channels]] headers: change them by hand")
+    want = [dict(c) for c in chans]
+    new_text = text
+    for i in sorted(plan, reverse=True):            # from the end, so the earlier offsets hold
+        s, e = segs[i]
+        seg = new_text[s:e]
+        label, line = plan[i]
+        old = chans[i]["label"]
+        if label:
+            rx = re.compile(LABEL_LINE.format(old=re.escape(f'"{old}"')), re.M)
+            found = list(rx.finditer(seg))
+            if len(found) != 1:
+                raise ValueError(f'the {old} channel\'s label isn\'t one plain line: rename it to "{label}" by hand')
+            m = found[0]
+            seg = seg[:m.start()] + f'{m.group("head")}"{label}"{m.group("tail")}' + seg[m.end():]
+            want[i]["label"] = label
+            did.setdefault(i, []).append(f'"{old}" is now "{label}"')
+        if line:
+            seg = _add_line(seg, line)
+            key = line.split("=", 1)[0].strip()
+            want[i][key] = tomllib.loads(line.split("#", 1)[0])[key]
+            did.setdefault(i, []).append(f"{label or old}: {key} " + ("120.8 23:00-07:00" if old == "HPN Tower" else
+                                                     "124.65 07:00-23:00" if key == "also" else
+                                                     "121.825 06:00-23:00, 124.65 23:00-06:00"))
+        new_text = new_text[:s] + seg + new_text[e:]
+    if not new_text.endswith("\n") and text.endswith("\n"):
+        new_text += "\n"
+    try:
+        got = tomllib.loads(new_text)
+    except tomllib.TOMLDecodeError as e:
+        raise ValueError(f"the result wouldn't parse ({e}): nothing changed") from None
+    r = got.get("radio") or {}
+    if r.get("channels") != want or {k: v for k, v in r.items() if k != "channels"} != \
+            {k: v for k, v in radio.items() if k != "channels"} or \
+            {k: v for k, v in got.items() if k != "radio"} != {k: v for k, v in data.items() if k != "radio"}:
+        raise ValueError("the result doesn't say what was meant: nothing changed")
+    return new_text, "airband-sets: " + "; ".join(x for i in sorted(did) for x in did[i])
+
+
 UPDATES = (("fg2", add_fg2), ("tones-47", fix_tones), ("hpn-atc", add_hpn_atc), ("adsb-receiver", add_adsb),
-           ("approach-ground", add_approach_ground), ("south-end", rename_south_end))
-NEEDS_LEAVING = {"hpn-atc", "adsb-receiver", "approach-ground"}   # given the release being left (rollback safety)
+           ("approach-ground", add_approach_ground), ("south-end", rename_south_end), ("airband-sets", airband_sets))
+NEEDS_LEAVING = {"hpn-atc", "adsb-receiver", "approach-ground", "airband-sets"}   # given the release being left
 
 
 def run(conf: Path, marks: Path, leaving: Path | None = None) -> list[str]:

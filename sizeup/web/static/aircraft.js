@@ -197,7 +197,9 @@ window.AircraftLayer = (() => {
     if (!tw || typeof tw.lat !== "number" || typeof tw.lon !== "number") return fc([]);
     const lit = towerLit(d), ping = lit ? (now % PING_MS) / PING_MS : 0;
     return fc([{ type: "Feature", geometry: { type: "Point", coordinates: [tw.lon, tw.lat] },
+                 // #275: closed (06:00-23:00 local open), "CTAF" instead of "TWR"; an older hub sends no "open"
                  properties: { lit: lit ? 1 : 0, color: lit ? token("--ok", "#3FB950") : token("--dim", "#6E7681"),
+                               name: tw.open === false ? "CTAF" : "TWR",
                                rr: 1 + 0.6 * ping, ringo: lit ? 1 - 0.7 * ping : 0.6 } }]);
   }
 
@@ -382,7 +384,7 @@ window.AircraftLayer = (() => {
                               "circle-stroke-width": 2.5, "circle-stroke-opacity": ["get", "ringo"] } }, before);
       if (glyphs) {
         map.addLayer({ id: "ac-twr-label", type: "symbol", source: TWR_SRC, minzoom: 10,
-                       layout: { ...vis, "text-field": "TWR", "text-font": ["Noto Sans Bold"], "text-size": 10,
+                       layout: { ...vis, "text-field": ["get", "name"], "text-font": ["Noto Sans Bold"], "text-size": 10,
                                  "text-allow-overlap": true, "text-ignore-placement": true },
                        paint: { "text-color": ["get", "color"] } }, before);
       }

@@ -323,7 +323,7 @@ running, and no person has picked a job for it, it gets the first job in `auto_a
 5. `hpn tower`: HPN Tower, Westchester County Airport ATC, 118.575 AM (#233; [below](#hpn-atc-the-airband-dongle)).
    Last of all: only a 5th free dongle takes it by itself; normally a person picks it for the airband dongle
 
-With all five covered, another dongle stays Off. NY Approach, NY Approach 124.65 and HPN Ground (#260) are never in
+With all five covered, another dongle stays Off. NY App 126.4/120.8, NY App 124.65 and HPN Ground (#260) are never in
 the order: a dongle only runs them when a person picks one ([below](#ny-approach-and-hpn-ground)). The log says `sdr: V3 #2 (00000001) → FG1 (auto)`,
 and the station page and the hub's monitor show the row as "· FG1 · auto".
 
@@ -487,22 +487,39 @@ name it in `[radio] sdr_names` (`hpn-twr = "NESDR SMArt"`). shortfinal keeps its
 Two more airband choices for a dongle (#260), beside HPN Tower, with the same treatment: AM, the carrier squelch,
 Amazon Transcribe with the `sizeup-atc` vocabulary, the airport pre-alert rules and talker identification. Emergencies
 are usually declared to Approach before the tower, so a spare dongle on NY Approach gives the earliest warning.
-Frequencies from the FAA Chart Supplement via [airnav.com/airport/KHPN](https://www.airnav.com/airport/KHPN) (FAA
-information effective 29 October 2026): NEW YORK APPROACH 120.8 (2300-0700), 126.4 (0700-2300), 124.65; WESTCHESTER
-GROUND 121.825 (0600-2300).
+Frequencies and hours from the FAA Chart Supplement via [airnav.com/airport/KHPN](https://www.airnav.com/airport/KHPN)
+(FAA information effective 29 October 2026): WESTCHESTER TOWER 118.575 [0600-2300] (CTAF 118.575); WESTCHESTER GROUND
+121.825 [0600-2300]; NEW YORK APPROACH 120.8 2300-0700, 126.4 0700-2300, 124.65 (no hours).
 
-| Channel | MHz | |
+| Channel (#275 names) | On its own dongle | |
 |---|---|---|
-| NY Approach | 126.4 07:00-23:00, 120.8 23:00-07:00 local | the `schedule`: retuned by the time of day |
-| NY Approach 124.65 | 124.65 | Approach's third HPN frequency, fixed |
-| HPN Ground | 121.825 | on the field |
+| HPN Tower | 118.575 all day, + 120.8 23:00-07:00 | the tower is closed 23:00-06:00: 118.575 is the CTAF then, still heard |
+| NY App 126.4/120.8 | 126.4 + 124.65 07:00-23:00, 120.8 23:00-07:00 | the `schedule`, and 124.65 by day |
+| NY App 124.65 | 124.65 | Approach's third HPN frequency, fixed |
+| HPN Ground | 121.825 06:00-23:00, 124.65 23:00-06:00 | Ground is closed overnight: its dongle hears 124.65 then |
 
-**The schedule.** `schedule = [{ at = "07:00", mhz = 126.4 }, { at = "23:00", mhz = 120.8 }]` on the channel: each
-frequency from its time until the next, in America/New_York wall-clock time (DST-aware). rtl_fm can't retune while
-it runs, so the receiver restarts it on the new frequency, and only between transmissions: never while one is open or
-in its hang, and after 2 s with no carrier (a read-back stays with its call); a channel that never falls quiet that long
-retunes 5 minutes late at the next gap. The log says `NY Approach: retuned 126.4 -> 120.8 MHz`; each transmission in
-the Radio view shows the frequency it was heard on.
+**Several frequencies on one dongle (#275).** An RTL-SDR captures about 2 MHz. A channel's `also = [{ mhz = 120.8,
+from = "23:00", until = "07:00" }]` puts another channel's frequency on the same dongle: while more than one is on, the
+dongle runs `rtl_sdr` and `sizeup/radio/channelize.py` (one FFT channelizer, its own process) instead of `rtl_fm`, and
+each frequency has its own squelch, tone notch, clip, transcript and talker ID, and is heard as the channel it belongs
+to (120.8 on the Tower's dongle is NY App 126.4/120.8's). One frequency on: `rtl_fm`, as before. The rate and centre
+are picked so every channel is within 89% of the way to the band edge, at least 25 kHz off the DC spike and 30 kHz off
+the other's mirror image: 118.575 + 120.8 at 2.56 MS/s centred on 119.7025, 126.4 + 124.65 at 2.048 MS/s, 120.8 +
+121.825 at 1.6 MS/s. At most about 2.27 MHz between the lowest and highest at any one time (the config says so when a
+set doesn't fit). A frequency two dongles hear at once is kept on one: the dongle of the channel it belongs to, else
+the first in the config (the log says `HPN Tower: 120.8 is heard on another dongle: kept there, not here` once).
+
+**The schedule and the set.** `schedule = [{ at = "07:00", mhz = 126.4 }, { at = "23:00", mhz = 120.8 }]` on the
+channel: each frequency from its time until the next, in America/New_York wall-clock time (DST-aware); `also`'s `from` /
+`until` the same. The program can't retune while it runs, so the receiver restarts it on the new set, and only between
+transmissions: never while one is open or in its hang on any of its frequencies, and after 2 s with no carrier (a
+read-back stays with its call); a channel that never falls quiet that long retunes 5 minutes late at the next gap. The
+log says `HPN Tower: retuned 118.575 -> 118.575 + 120.8 MHz (schedule: 118.575 + 120.8 23:00-07:00)`; each
+transmission in the Radio view shows the frequency it was heard on (`118.575 CTAF` while the tower is closed).
+
+**On screen.** The Radios rows show what each dongle is on now (`118.575 CTAF + 120.8`) and `Tower open` / `Tower
+closed`; the dongle's button `NY App 126.4/120.8 · 126.4`; the tower's mark on the map says `CTAF` while it is closed.
+The details (each frequency's carrier, the capture, the hours) are in the row's tooltip.
 
 **Who it matches.** Approach traffic is 10-40 NM out, so while NY Approach is heard the hub's Aircraft feeds are asked
 for 40 NM (for 30 minutes after its last transmission; the map stays 15 NM) and its callsigns are matched to HPN's
@@ -511,12 +528,18 @@ matches only aircraft on the field; HPN Tower is as before (`sizeup/atc_scope.py
 
 **Pick it:** rename the spare dongle's serial once (`sudo sizeup-station sdr-serial <its index> nyapp`, [Two dongles,
 one serial](#two-dongles-one-serial)), then on the station page (Radios) or the hub's Settings > Radios set its row to
-**NY Approach**, and press Settings > Radios > Vocabulary > **Push** so the `sizeup-atc` vocabulary is current.
+**NY App 126.4/120.8**, and press Settings > Radios > Vocabulary > **Push** so the `sizeup-atc` vocabulary is current.
 
 **An installed station** gets the three channels from the update once (`sizeup/cloud/configupdate.py`
 "approach-ground", the old file kept as `config.toml.before-approach-ground`), only when the release it is switching
 from reads a `schedule`: a release from before #260 refuses it, and a failed switch goes back to it. So the first update
 to this release says `config: approach-ground: deferred ...` and the next one adds them; never to `auto_assign_order`.
+Then #275's names and sets come the same way ("airband-sets", `config.toml.before-airband-sets`): "NY Approach" becomes
+"NY App 126.4/120.8", "NY Approach 124.65" "NY App 124.65", and HPN Tower, NY App 126.4/120.8 and HPN Ground get the
+`also` / `schedule` lines above, each only on a channel exactly as it was added. A release from before #275 refuses
+`also`, so the first update to this release says `config: airband-sets: deferred ...` and the next one changes them. A
+dongle's saved job follows the rename. To have them sooner, copy the four blocks from `deploy/station/config.station.toml`
+into `/etc/sizeup/config.toml` and restart `sizeup-station`.
 
 ## Two dongles, one serial
 

@@ -59,7 +59,7 @@ from typing import Callable
 
 import numpy as np
 
-from sizeup.config import P25_JOB, Config, ConfigError, load
+from sizeup.config import P25_JOB, Config, ConfigError, airband_owner, load
 from sizeup import janitor, tz
 from sizeup.cad import Cad
 from sizeup.cad.alarms import STUCK_WITHIN_S
@@ -68,6 +68,7 @@ from sizeup.dispatch import parse
 from sizeup.incidents import IncidentStore, Traffic
 from sizeup.radio.fm import RATE, Channel, NfmReceiver, Segment, id_burst_frames, speech_seconds, voice_floor_db
 from sizeup.radio.am import AmReceiver
+from sizeup.radio.am import Extra as AmExtra
 from sizeup.radio.am import Schedule as AmSchedule
 from sizeup.radio.mdc1200 import decode as mdc_decode
 from sizeup.radio import fleetsync
@@ -104,6 +105,9 @@ def geo_of(m) -> dict | None:
     conf = round(float(m.confidence), 2)
     return {"lat": m.lat, "lon": m.lon, "label": m.label, "kind": m.kind,
             "town": m.municipality if conf >= TOWN_CONFIDENCE else "", "confidence": conf}
+# Channels renamed by an update (#275, sizeup/cloud/configupdate.py "airband-names"): a dongle's job saved under the old
+# name (state/sdr_modes.json) is the renamed channel's.
+RENAMED = {"NY Approach": "NY App 126.4/120.8", "NY Approach 124.65": "NY App 124.65"}
 P25_MODE = P25_JOB         # the shared-dongle mode that runs trunk-recorder ("Fire/EMS 15")
 OFF_MODE = "Off"           # the shared dongle released for other programs (sizeup keeps running)
 SWITCH_PAUSE_S = 1.0       # between stopping one program on the shared dongle and starting the next
@@ -128,12 +132,21 @@ def log(msg: str) -> None:
     print(f"{time.strftime('%H:%M:%S')} {msg}", flush=True)
 
 
-def make_receiver(cfg: Config, c, device, on_segment) -> NfmReceiver:
+def plan_text(c) -> str:
+    """A channel's frequencies by the hours (#260 schedule, #275 also): '118.575 + 120.8 23:00-07:00'."""
+    head = AmSchedule(c.schedule).describe() if getattr(c, "schedule", ()) else f"{c.mhz:g}"
+    return " + ".join([head, *(AmExtra(f, label, a, b).describe() for f, a, b, label in getattr(c, "also", ()))])
+
+
+def make_receiver(cfg: Config, c, device, on_segment, covered=None) -> NfmReceiver:
     """The receiver for one [[radio.channels]] entry: AM with the carrier squelch on an airband channel (HPN ATC, #233:
     sizeup/radio/am.py), else NFM with the noise squelch."""
     if c.kind == "airband":     # a schedule (#260, NY Approach): retuned by the time of day, between transmissions
+        # also (#275): other channels' frequencies on the same dongle, each heard as its own channel's (channelize.py)
         return AmReceiver(cfg.rtl_fm, device, c.gain_db, Channel(c.mhz, c.label), on_segment, log, open_db=c.squelch_db,
-                          schedule=getattr(c, "schedule", ()) or None)
+                          schedule=getattr(c, "schedule", ()) or None,
+                          also=[AmExtra(f, label, a, b) for f, a, b, label in getattr(c, "also", ())],
+                          owner=lambda mhz: airband_owner(cfg.channels, mhz), covered=covered)
     return NfmReceiver(cfg.rtl_fm, device, c.gain_db, Channel(c.mhz, c.label), on_segment, log, open_db=c.squelch_db,
                        drop_db=c.drop_db, hang_s=c.hang_s, continue_s=c.continue_s)
 
@@ -292,7 +305,7 @@ class App:
                 self.tg.seed(t.talkgroup, t.end)
         self._last_tones_only: Page | None = None
         self.pagehold = PageHold(self.plan)   # paging: a page waits out its continuation window
-        self.receivers = [make_receiver(cfg, c, c.device, self._segment) for c in cfg.channels]
+        self.receivers = [make_receiver(cfg, c, c.device, self._segment, self._heard_elsewhere) for c in cfg.channels]
         # trunk-recorder: sizeup's child, or on the Linux station its own service (sizeup-trunk-recorder, #71), which an
         # update of sizeup leaves running on its control channel (sizeup/radio/recorder.py make)
         self.recorder = (trunk_recorder.make(cfg.p25_recorder, cfg.p25_recorder_dir or ".", log)
@@ -2140,7 +2153,7 @@ class App:
                 "record_only": list(self.cfg.stt_record_only), "aws_ok": ok, "aws_why": why,
                 "aws_reserve": reserve,
                 "fm": [{"key": c.label, "kind": c.kind, "mhz": c.mhz,
-                        **({"schedule": AmSchedule(c.schedule).describe()} if getattr(c, "schedule", ()) else {})}
+                        **({"schedule": plan_text(c)} if getattr(c, "schedule", ()) or getattr(c, "also", ()) else {})}
                        for c in self.cfg.channels],
                 "sync": self.channels_sync(), "aws": self.aws_status()}
 
@@ -2186,9 +2199,10 @@ class App:
             if self._sdr_ignored(sd):
                 continue
             m = saved.get(sd, self.assign.get(sd, OFF_MODE))
+            m = RENAMED.get(m, m) if m not in self.modes else m     # #275: a job saved under a channel's old name
             m = m if m in self.modes and (m == OFF_MODE or m not in taken) else OFF_MODE
             self.assign[sd] = m
-            if by.get(sd) in ("person", "auto") and saved.get(sd) == m:
+            if by.get(sd) in ("person", "auto") and RENAMED.get(saved.get(sd), saved.get(sd)) == m:
                 self.set_by[sd] = by[sd]
             taken.add(m)
 
@@ -2564,10 +2578,31 @@ class App:
 
     def _fresh_receiver(self, old: NfmReceiver, serial: str) -> NfmReceiver:
         c = next(c for c in self.cfg.channels if c.label == old.channel.label)
-        r = make_receiver(self.cfg, c, self._dongle(serial), self._segment)
+        r = make_receiver(self.cfg, c, self._dongle(serial), self._segment, self._heard_elsewhere)
         self.tap.attach(r)
         self.receivers[self.receivers.index(old)] = r
         return r
+
+    def _running(self, r) -> bool:
+        """A receiver with its program up on a dongle (its job assigned, when the dongles are switchable)."""
+        return (not r._stop.is_set() and r.state == "ok"
+                and (not self.shared or r.channel.label in self.assign.values()))
+
+    def _heard_elsewhere(self, mhz: float, me) -> bool:
+        """#275: a frequency two dongles hear at once (the Tower's dongle has NY Approach's 120.8 overnight, and so may
+        Approach's own) is kept by one: the dongle of the channel it belongs to, else the first one in the config.
+        True: `me` drops it."""
+        key = round(float(mhz), 6)
+        owner = airband_owner(self.cfg.channels, mhz)
+        others = [r for r in list(self.receivers) if r is not me and self._running(r)
+                  and key in {round(f, 6) for f in getattr(r, "active", (r.channel.mhz,))}]
+        if not others or me.channel.label == owner:
+            return False
+        if any(r.channel.label == owner for r in others):
+            return True
+        order = list(self.receivers)
+        mine = order.index(me) if me in order else len(order)
+        return any(order.index(r) < mine for r in others)
 
     def _start_mode(self, mode: str, serial: str) -> bool:
         if mode == OFF_MODE:
@@ -2703,7 +2738,10 @@ class App:
         plugged = {s: p for _i, p, s in devs}
         rows = self.sdrs
         usb = self.usb(devs)
+        # #275: what each airband job is on now ("126.4", "118.575 CTAF + 120.8"), for its button
+        now = {r.channel.label: r.status().get("now", "") for r in self.receivers if isinstance(r, AmReceiver)}
         return {"shared": True, "mode": self.assign.get(rows[0], OFF_MODE) if rows else OFF_MODE, "modes": self.modes,
+                "now": {k: v for k, v in now.items() if v},
                 "switching": self.switching, "adsb": self.adsb_row(plugged),
                 "duplicates": usb["duplicates"],          # two dongles, one serial (#242): Settings > Radios shows the fix
                 "sdrs": [{"serial": sd, "name": self.sdr_name(sd), "product": plugged.get(sd, ""),

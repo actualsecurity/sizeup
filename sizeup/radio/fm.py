@@ -697,13 +697,13 @@ class NfmReceiver:
                 self._stop.wait(backoff)
                 backoff = min(backoff * 2, 15)
                 continue
-            self.state, self.detail = "ok", f"{self.channel.label} {self.channel.mhz:.4f}"
+            self.state, self.detail = "ok", self._ok_detail()
             self.squelch = self.new_squelch()
             got = self._pump(self._proc)
             # Mid-transmission when the audio stopped: keep what was heard (and say why it ended). Before
             # the kill (up to 3 s for a hung rtl_fm), so RX goes out as soon as the audio is known gone.
-            self._deliver(self.squelch.flush("stopped" if self._stop.is_set() else
-                                             "stall" if self.detail == "rtl_fm stalled" else "rtl_fm ended"))
+            self._flush("stopped" if self._stop.is_set() else
+                        "stall" if self.detail in ("rtl_fm stalled", "rtl_sdr stalled") else "rtl_fm ended")
             self._watch_open()
             self._kill()
             if self._stop.is_set():
@@ -726,6 +726,13 @@ class NfmReceiver:
             self.on_event(f"{self.channel.label} down: {self.detail}")
             self._stop.wait(2.0 if got else backoff)
             backoff = 2.0 if got else min(backoff * 2, 15)
+
+    def _ok_detail(self) -> str:
+        return f"{self.channel.label} {self.channel.mhz:.4f}"
+
+    def _flush(self, reason: str) -> None:
+        """The audio stopped: what the squelch (each squelch: radio/am.py's several channels) held, delivered now."""
+        self._deliver(self.squelch.flush(reason))
 
     def _tune(self) -> None:
         """Before each rtl_fm start: the frequency to start on (one channel, one frequency here; radio/am.py's schedule)."""
@@ -772,11 +779,11 @@ class NfmReceiver:
             self.on_event(f"{self.channel.label}: squelch open {_mmss(self.clock() - since)} continuously (stuck?): "
                           f"{squelch_levels(sq)}")
 
-    def _deliver(self, seg: Segment | None) -> None:
+    def _deliver(self, seg: Segment | None, channel: Channel | None = None) -> None:
         if seg is None:
             return
         self.last_heard = seg.end
         try:
-            self.on_segment(self.channel, seg)
+            self.on_segment(channel or self.channel, seg)
         except Exception as e:
             self.on_event(f"segment handler error: {type(e).__name__}: {e}")

@@ -49,6 +49,13 @@ Westchester County Airport (HPN) ATC is AM voice at 118-137 MHz. The receiver an
               RETUNE_FORCE_S after the time anyway, still at the next gap between transmissions, never mid-clip.
               Each transmission carries the frequency it was heard on (its Channel).
 
+    several   more than one frequency on one dongle (#275): a channel's `also` (the Tower's dongle takes NY Approach's
+              overnight 120.8 too, 23:00-07:00, so the tower reopening on 118.575 is never missed while Approach is
+              heard), or a schedule with another channel's frequency in it (Ground's dongle on 124.65 while Ground is
+              closed). Then rtl_sdr + radio/channelize.py (several AM channels from one capture) replaces rtl_fm,
+              and each frequency has its own CarrierSquelch and goes out as the channel it belongs to. One frequency:
+              rtl_fm, as before. A frequency another dongle also has is kept by one of them (App._heard_elsewhere).
+
 The squelch speaks NoiseSquelch's interface (radio/fm.py: feed, flush, open, busy_since, quieting_db, hiss_db,
 floor, holding, open_db, close_db, _start), so AmReceiver is an NfmReceiver with another demodulator and squelch:
 the same restart-forever loop, status, live tap and App._segment. Its "quieting_db" is the carrier over the floor.
@@ -58,13 +65,17 @@ from __future__ import annotations
 
 import os
 import select
+import sys
 import time
 from collections import deque
 from datetime import datetime
+from pathlib import Path
 from typing import Callable, Iterable
 
 import numpy as np
 
+from sizeup import atc_hours
+from sizeup.radio import channelize
 from sizeup.radio.amtones import detone, find_tones
 from sizeup.radio.fm import FRAME, RATE, STALL_S, Channel, NfmReceiver, Segment
 from sizeup.tz import TZ
@@ -299,62 +310,165 @@ class Upsampler:
         return np.interp(t, np.arange(len(xx)), xx)
 
 
+class Extra:
+    """Another frequency on the same dongle (#275, config "also"): heard as `label`'s (the channel that frequency is
+    on), between `start` and `end` (minutes of the local day; None: all day)."""
+
+    def __init__(self, mhz: float, label: str, start: int | None = None, end: int | None = None):
+        self.mhz, self.label, self.start, self.end = float(mhz), label, start, end
+
+    def on_at(self, minute: int) -> bool:
+        if self.start is None or self.end is None or self.start == self.end:
+            return True
+        if self.start < self.end:
+            return self.start <= minute < self.end
+        return minute >= self.start or minute < self.end
+
+    def describe(self) -> str:
+        hm = lambda m: f"{m // 60:02d}:{m % 60:02d}"      # noqa: E731
+        return f"{self.mhz:g}" + ("" if self.start is None or self.end is None else f" {hm(self.start)}-{hm(self.end)}")
+
+
+class Sub:
+    """One frequency being demodulated: the Channel its transmissions are heard on (the label: the channel that
+    frequency belongs to), its own squelch and upsampler."""
+
+    def __init__(self, channel: Channel, squelch, up: Upsampler | None = None):
+        self.channel, self.squelch, self.up = channel, squelch, up
+
+
 class AmReceiver(NfmReceiver):
-    """rtl_fm in AM on one airband channel, feeding a CarrierSquelch; finished segments go to on_segment."""
+    """rtl_fm in AM on one airband channel, feeding a CarrierSquelch; finished segments go to on_segment.
+
+    Several frequencies at once (#275: `also`, a schedule with another channel's frequency in it): when more than one
+    is on, the dongle runs the channelizer (radio/channelize.py: rtl_sdr + an FFT channelizer, its own process) instead
+    of rtl_fm, and each frequency gets its own CarrierSquelch (its own floor, tone notch, clips, speech-to-text and
+    talkers: each transmission is delivered as the channel that frequency belongs to, owner(mhz)). One frequency on:
+    rtl_fm, as before. The set changes like a schedule's retune: between transmissions, never mid-clip.
+    covered(mhz, receiver): another dongle hears that frequency too and keeps it (App._heard_elsewhere): not delivered twice."""
 
     def __init__(self, rtl_fm: str, device, gain_db: float | None, channel: Channel,
                  on_segment: Callable[[Channel, Segment], None], on_event: Callable[[str], None] = lambda m: None,
-                 open_db: float = SQUELCH_DB, schedule: Schedule | Iterable[tuple[int, float]] | None = None, **_ignored):
+                 open_db: float = SQUELCH_DB, schedule: Schedule | Iterable[tuple[int, float]] | None = None,
+                 also: Iterable[Extra | tuple] = (), owner: Callable[[float], str | None] | None = None,
+                 covered: Callable[[float, "AmReceiver"], bool] | None = None, rtl_sdr: str | None = None,
+                 python: str | None = None, **_ignored):
         self._up = Upsampler()
+        self.base_mhz = float(channel.mhz)
+        self.extras = [x if isinstance(x, Extra) else Extra(*x) for x in also]
+        self.owner = owner or (lambda mhz: None)
+        self.covered = covered
+        self.rtl_sdr = rtl_sdr or _sibling(rtl_fm, "rtl_sdr")
+        self.python = python or sys.executable
+        self.active: tuple[float, ...] = (float(channel.mhz),)
+        self.subs: list[Sub] = []
+        self.capture: tuple[float, int] | None = None     # (centre MHz, rate) while the channelizer runs
+        self._dropped: set[float] = set()                 # frequencies another dongle has (logged once each)
         super().__init__(rtl_fm, device, gain_db, channel, on_segment, on_event, open_db=open_db)
         self.schedule = schedule if isinstance(schedule, Schedule) or not schedule else Schedule(schedule)
-        self._retune_to: float | None = None      # set by _pump when it stopped to retune
+        self._retune_to: float | tuple[float, ...] | None = None  # set by _pump when it stopped to retune
         self._due_since: float | None = None      # when the schedule first asked for another frequency
         self._checked = 0.0
+        self.active = self.plan_at(self.clock())
+        self.channel = Channel(self.active[0], channel.label, channel.ctcss)
+        self.subs = self._make_subs(self.squelch)
 
-    # -- the schedule (#260) -----------------------------------------------------------------------------------------
+    # -- which frequencies when (#260 schedule, #275 also) -----------------------------------------------------------
+
+    def plan_at(self, t: float) -> tuple[float, ...]:
+        """The frequencies on at t: the channel's own (its schedule's) first, then the extras on then."""
+        first = self.schedule.mhz_at(t) if getattr(self, "schedule", None) is not None else self.base_mhz
+        d = datetime.fromtimestamp(t, TZ)
+        minute = d.hour * 60 + d.minute
+        out = [float(first)]
+        for x in self.extras:
+            if x.on_at(minute) and all(round(x.mhz, 6) != round(f, 6) for f in out):
+                out.append(x.mhz)
+        return tuple(out)
+
+    def label_for(self, mhz: float) -> str:
+        """The channel a frequency belongs to (owner), else this one's: transmissions are heard as that channel's."""
+        if round(mhz, 6) == round(self.base_mhz, 6):
+            return self.channel.label
+        named = next((x.label for x in self.extras if x.label and round(x.mhz, 6) == round(mhz, 6)), None)
+        return named or self.owner(mhz) or self.channel.label
+
+    def _make_subs(self, first) -> list[Sub]:
+        subs = []
+        for k, mhz in enumerate(self.active):
+            ch = Channel(mhz, self.label_for(mhz), self.channel.ctcss)
+            subs.append(Sub(ch, first if k == 0 else CarrierSquelch(open_db=self.open_db), Upsampler()))
+        return subs
+
+    def describe_plan(self) -> str:
+        """'118.575 + 120.8 23:00-07:00', '126.4 07:00-23:00, 120.8 23:00-07:00'."""
+        head = self.schedule.describe() if self.schedule is not None else f"{self.base_mhz:g}"
+        return " + ".join([head, *(x.describe() for x in self.extras)])
+
+    # -- the schedule (#260) and the set (#275) ----------------------------------------------------------------------
 
     def _tune(self) -> None:
-        """Before each rtl_fm start: the schedule's frequency now (no transmission can be open: rtl_fm isn't running)."""
-        want = self._retune_to if self._retune_to is not None else (
-            self.schedule.mhz_at(self.clock()) if self.schedule is not None else None)
+        """Before each start: the set on now (no transmission can be open: nothing is running)."""
+        want = self._retune_to if self._retune_to is not None else self.plan_at(self.clock())
+        want = (float(want),) if isinstance(want, (int, float)) else tuple(want)
         self._retune_to, self._due_since = None, None
-        if want is not None and round(want, 6) != round(self.channel.mhz, 6):
-            was = self.channel.mhz
-            self.channel = Channel(want, self.channel.label, self.channel.ctcss)
-            self.on_event(f"{self.channel.label}: retuned {was:g} -> {want:g} MHz (schedule: {self.schedule.describe()})")
+        if _key(want) != _key(self._current()):
+            was = self._current()
+            self.on_event(f"{self.channel.label}: retuned {_fmt(was)} -> {_fmt(want)} MHz (schedule: {self.describe_plan()})")
+        self.active = tuple(want)
+        self.channel = Channel(self.active[0], self.channel.label, self.channel.ctcss)
+        self.capture = plan_capture(self.active) if len(self.active) > 1 else None
 
     def _retuning(self) -> bool:
         return self._retune_to is not None
 
-    def retune_due(self) -> float | None:
-        """The frequency to retune to now, or None: a schedule change is due and no transmission is open or in its hang
-        (never mid-clip), after RETUNE_QUIET_S with no carrier (or RETUNE_FORCE_S late, at the next gap)."""
-        if self.schedule is None:
+    def _current(self) -> tuple[float, ...]:
+        """What it is on: the channel's frequency, then the others with it."""
+        return (float(self.channel.mhz), *self.active[1:])
+
+    def _busy(self) -> bool:
+        return self.squelch.busy_since is not None or any(s.squelch.busy_since is not None for s in self.subs[1:])
+
+    def retune_due(self) -> float | tuple[float, ...] | None:
+        """The frequency (one) or set (several) to retune to now, or None: a change is due and no transmission is open or in its hang on any of
+        its frequencies (never mid-clip), after RETUNE_QUIET_S with no carrier (or RETUNE_FORCE_S late, at the next gap)."""
+        if self.schedule is None and not self.extras:
             return None
         now = self.clock()
-        want = self.schedule.mhz_at(now)
-        if round(want, 6) == round(self.channel.mhz, 6):
+        want = self.plan_at(now)
+        if _key(want) == _key(self._current()):
             self._due_since = None
             return None
         if self._due_since is None:
             self._due_since = now
-        if self.squelch.busy_since is not None:          # a transmission is open (or in its hang): never cut it
+        if self._busy():                                 # a transmission is open (or in its hang): never cut it
             return None
         quiet = now - self.last_heard if self.last_heard is not None else float("inf")
         if quiet >= RETUNE_QUIET_S or now - self._due_since >= RETUNE_FORCE_S:
-            return want
+            return want[0] if len(want) == 1 else want
         return None
 
     def new_squelch(self) -> CarrierSquelch:
         self._up = Upsampler()
         return CarrierSquelch(open_db=self.open_db)
 
+    def _ok_detail(self) -> str:
+        if len(self.active) == 1:
+            return f"{self.channel.label} {self.channel.mhz:.4f}"
+        c, rate = self.capture or (0.0, 0)
+        return f"{_fmt(self.active)} · {rate / 1e6:g} MS/s @ {c:.4f}"
+
     def argv(self, dev: str | None = None) -> list[str]:
+        dev = self.device if dev is None and not callable(self.device) else dev
+        if len(self.active) > 1:
+            if self.capture is None:
+                self.capture = plan_capture(self.active)
+            c, rate = self.capture
+            return channelize.argv_for(self.python, self.rtl_sdr, c, rate,
+                                       [m * 1e6 - c * 1e6 for m in self.active], self.gain_db, dev)
         cmd = [self.rtl_fm, "-M", "am", "-f", f"{self.channel.mhz:.4f}M", "-s", str(AM_RATE)]
         if self.gain_db is not None:
             cmd += ["-g", f"{self.gain_db:g}"]
-        dev = self.device if dev is None and not callable(self.device) else dev
         if dev:
             cmd += ["-d", str(dev)]
         return cmd + ["-"]
@@ -362,37 +476,116 @@ class AmReceiver(NfmReceiver):
     def status(self) -> dict:
         out = super().status()
         out["am"] = True
-        if self.schedule is not None:
-            out["schedule"] = self.schedule.describe()
+        if self.schedule is not None or self.extras:
+            out["schedule"] = self.describe_plan()
+        now = self.clock()
+        out["freqs"] = []
+        for k, s in enumerate(self.subs or [Sub(self.channel, self.squelch)]):
+            q = s.squelch.quieting_db
+            out["freqs"].append({"mhz": s.channel.mhz, "label": s.channel.label, "name": freq_name(s.channel.mhz, now),
+                                 "open": bool(s.squelch.open), "quieting_db": None if q is None else round(q, 1),
+                                 "elsewhere": round(s.channel.mhz, 6) in self._dropped})
+        if any(f["open"] for f in out["freqs"]):
+            out["open"] = True
+        out["now"] = now_text(out["freqs"])
+        if any(round(f["mhz"], 4) in (atc_hours.TOWER_MHZ, atc_hours.GROUND_MHZ) for f in out["freqs"]):
+            out["tower"] = atc_hours.tower(now)            # HPN's tower open / closed (CTAF) now
+        if self.capture is not None:
+            out["capture"] = {"centre_mhz": round(self.capture[0], 6), "rate": self.capture[1]}
         return out
+
+    # -- delivering ---------------------------------------------------------------------------------------------------
+
+    def _deliver(self, seg: Segment | None, channel: Channel | None = None) -> None:
+        if seg is None:
+            return
+        ch = channel or (self.subs[0].channel if self.subs else self.channel)
+        if self.covered is not None and ch.label != self.channel.label:   # another channel's frequency
+            try:
+                gone = self.covered(ch.mhz, self)
+            except Exception:  # noqa: BLE001 - never in the way of a transmission
+                gone = False
+            if gone:                                     # another dongle keeps this frequency: not twice
+                if round(ch.mhz, 6) not in self._dropped:
+                    self._dropped.add(round(ch.mhz, 6))
+                    self.on_event(f"{self.channel.label}: {ch.mhz:g} is heard on another dongle: kept there, not here")
+                self.last_heard = seg.end
+                return
+            self._dropped.discard(round(ch.mhz, 6))
+        super()._deliver(seg, ch)
+
+    def _flush(self, reason: str) -> None:
+        subs = self.subs or [Sub(self.channel, self.squelch)]
+        self._deliver(self.squelch.flush(reason), subs[0].channel)
+        for s in subs[1:]:
+            self._deliver(s.squelch.flush(reason), s.channel)
 
     def _pump(self, proc) -> bool:
         fd = proc.stdout.fileno()
         buf, got, last = b"", False, time.monotonic()
-        need = AM_FRAME * 2
+        self.subs = self._make_subs(self.squelch)        # the squelch _run has just made, then one for each other one
+        multi = len(self.active) > 1
+        n = len(self.subs) if multi else 1
+        need = FRAME * 4 * n if multi else AM_FRAME * 2
         while not self._stop.is_set() and proc.poll() is None:
             r, _, _ = select.select([fd], [], [], 1.0)
             if not r:
                 if time.monotonic() - last > STALL_S:
-                    self.detail = "rtl_fm stalled"
+                    self.detail = "rtl_fm stalled" if not multi else "rtl_sdr stalled"
                     return got
                 continue
-            chunk = os.read(fd, 8192)
+            chunk = os.read(fd, 65536 if multi else 8192)
             if not chunk:
                 return got
             got, last = True, time.monotonic()
             buf += chunk
             while len(buf) >= need:
+                if multi:                                # FRAME float32 samples per channel, channels in turn, 16 kHz
+                    x = np.frombuffer(buf[:need], dtype="<f4").astype(np.float64).reshape(n, FRAME)
+                    buf = buf[need:]
+                    self._deliver(self.squelch.feed(x[0]), self.subs[0].channel)
+                    for k in range(1, n):
+                        s = self.subs[k]
+                        self._deliver(s.squelch.feed(x[k]), s.channel)
+                    continue
                 x = np.frombuffer(buf[:need], dtype="<i2").astype(np.float64) / 32768.0
                 buf = buf[need:]
                 frame = self._up(x)
                 if len(frame) == FRAME:
                     self._deliver(self.squelch.feed(frame))
             self._watch_open()
-            if self.schedule is not None and time.monotonic() - self._checked >= RETUNE_CHECK_S:
+            if (self.schedule is not None or self.extras) and time.monotonic() - self._checked >= RETUNE_CHECK_S:
                 self._checked = time.monotonic()
                 want = self.retune_due()
-                if want is not None:          # between transmissions: stop here, _run starts it on the new frequency
+                if want is not None:          # between transmissions: stop here, _run starts it on the new set
                     self._retune_to = want
                     return got
         return got
+
+
+def _key(mhzs) -> tuple:
+    return tuple(round(float(m), 6) for m in mhzs)
+
+
+def _fmt(mhzs) -> str:
+    return " + ".join(f"{m:g}" for m in mhzs)
+
+
+def _sibling(rtl_fm: str, name: str) -> str:
+    """rtl_sdr next to the configured rtl_fm (/opt/sizeup/rtl-sdr/bin: the same rtl-sdr-blog build), else on PATH."""
+    p = Path(rtl_fm)
+    return str(p.with_name(name)) if p.parent != Path(".") or "/" in rtl_fm else name
+
+
+def plan_capture(mhzs) -> tuple[float, int]:
+    return channelize.plan(mhzs)
+
+
+def now_text(freqs: list[dict]) -> str:
+    """What a dongle is on now, short (#278): '126.4', '118.575 CTAF + 120.8'."""
+    return " + ".join(f"{f['mhz']:g}" + (f" {f['name']}" if f.get("name") else "") for f in freqs)
+
+
+def freq_name(mhz: float, t: float) -> str:
+    """What a frequency is now, for the rows (#275): 'CTAF' on the tower's frequency while the tower is closed."""
+    return atc_hours.freq_name(mhz, t)
