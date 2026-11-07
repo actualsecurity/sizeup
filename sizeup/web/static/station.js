@@ -231,7 +231,7 @@ function renderClock() {
 // ---- Monitor: pages and transmissions heard here ------------------------------------------------------
 
 const STT_SAID = { no_speech: "Key-up, no speech", pending: "Transcribing", remote: "Transcribed on the hub (AWS)",
-                   off: "Not transcribed", error: "Transcription failed" };
+                   off: "Not transcribed", skipped: "Skipped: busy", error: "Transcription failed" };
 const said = (x) => STT_SAID[x.status] || "—";
 const player = new Audio();
 let playing = null;                  // the play button of what is playing now

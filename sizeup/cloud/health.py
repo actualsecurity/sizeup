@@ -28,8 +28,11 @@ notice when it clears:
                   oldest event it reports)
     disk          the station's disk over disk_pct (90) full                               warning (critical
                                                                                            from DISK_CRITICAL)
-    stt_backlog   the station's whisper queue: its oldest live clip waiting STT_BACKLOG_S   warning
-                  (10 min) or more, or clips dropped / skipped (sizeup/stt.py SttQueue, #195)
+    stt_backlog   the station's whisper queue (sizeup/stt.py SttQueue, #195, #300): its oldest   warning
+                  clip that matters (not a context talkgroup's, those are shed) waiting STT_BACKLOG_S
+                  (10 min); one episode until it has been under STT_CLEAR_S (2 min) for
+                  STT_CLEAR_HOLD_S (15 min). Pushed once, when the oldest has waited STT_NOTIFY_S
+                  (20 min), with how many wait and the main cause; "Recovered" only for a pushed one
     transcribe    Amazon Transcribe on the hub failing long enough that its breaker is     warning
                   open (sizeup/transcribe.py, #195): AWS's reason (timed out, AccessDenied,
                   credentials, throttled, billing); the AWS channels run the station's
@@ -121,7 +124,11 @@ TOD_PARTS = 4               # 6-hour parts of the day for the learned gaps
 NOT_CHANNELS = ("STT", "Voice", "Hub", "Station", "trunk-recorder")
 STATUS_KEY = b"sizeup-status-token-v1"
 P25_JOB = "Fire/EMS 15"
-STT_BACKLOG_S = 600.0       # the station's whisper: its oldest live clip waiting this long is an alert (#195)
+STT_BACKLOG_S = 600.0       # the station's whisper: its oldest live clip waiting this long is an alert (#195) ...
+STT_CLEAR_S = 120.0         # ... until the oldest waits less than this ...
+STT_CLEAR_HOLD_S = 900.0    # ... for this long: one episode, however the queue wobbles (#300)
+STT_NOTIFY_S = 1200.0       # pushed only while the oldest has waited this long (a shorter one: the panel, no push)
+NOTIFY_AFTER = {"stt_backlog": STT_NOTIFY_S}   # alerts pushed only once they are this old (from their since)
 BUDGET_WARN = 0.8           # this month's AWS cost at this share of the limit: a warning (and a push)
 
 
@@ -386,6 +393,9 @@ class StationHealth:
         self._trunk_up: float | None = None         # when the hub first saw trunk-recorder running (this run of it)
         self._gaps_saved = 0.0
         self._adsb_said: tuple | None = None         # (cause, holder) of the station's ADS-B decoder as last logged (#262)
+        self._stt_oldest = 0.0                       # the whisper backlog's oldest clip's wait, as last reported
+        self._stt_ok_since: float | None = None      # the whisper backlog under STT_CLEAR_S since (its hysteresis, #300)
+        self._clear_at: dict[str, float] = {}        # an alert's real clear time when it clears later than that
         self._load()
 
     # -- persistence ---------------------------------------------------------------------------------------
@@ -550,8 +560,10 @@ class StationHealth:
         out["processes"] = {"whisper": dict(wh, down_since=self._first.get("whisper")) if wh else None,
                             "recorder": dict(rec, down_since=self._first.get("recorder")) if rec else None}
         sq = hl.get("stt_queue") if isinstance(hl.get("stt_queue"), dict) else None
-        out["stt_queue"] = {k: sq.get(k) for k in ("queued", "urgent", "live", "rerun", "stale", "oldest_s", "dropped",
-                                                   "skipped", "last_drop", "max", "working")} if sq else None
+        out["stt_queue"] = {k: sq.get(k) for k in ("queued", "urgent", "high", "live", "low", "rerun", "fallback", "stale",
+                                                   "oldest_s", "oldest_low_s", "top", "in_h", "in_low_h", "in_fallback_h",
+                                                   "in_top", "service_s", "out_h", "dropped", "skipped", "shed",
+                                                   "last_drop", "last_error", "max", "working")} if sq else None
         started = hl.get("started")
         out["system"] = {k: hl.get(k) for k in ("host", "cpu_pct", "load1", "cpus", "mem_pct", "mem_total", "temp_c",
                                                  "disk_pct", "disk_free", "disk_total", "disk_path")}
@@ -730,12 +742,9 @@ class StationHealth:
                                                + (f" ({ad['detail']})" if ad.get("detail") else "")
                                                + ": the map uses adsb.lol / adsb.fi meanwhile"})
         sq = m.get("stt_queue")
-        if sq and ((sq.get("oldest_s") or 0) >= STT_BACKLOG_S):
-            out["stt_backlog"] = {"severity": "warning", "title": "Speech-to-text behind",
-                                  "text": f"the station's whisper is behind: its oldest waiting clip is from "
-                                          f"{_hhmm(now - float(sq.get('oldest_s') or 0))} (pages, Fire/EMS 15 and the "
-                                          "firegrounds go first; clips waiting too long are skipped and say so)",
-                                  "since": now - float(sq.get("oldest_s") or 0)}
+        stt = self._stt_backlog(sq, now) if sq else None
+        if stt:
+            out["stt_backlog"] = stt
         rec = m["processes"]["recorder"]
         if rec and rec.get("expected") and rec.get("state") != "ok":
             held("recorder", self.down_s, {"severity": "critical", "title": "trunk-recorder down",
@@ -770,6 +779,72 @@ class StationHealth:
             if a is not None:
                 a["who"] = self._who(k, m)
         return out, True
+
+    def _notify_ok(self, a: dict, now: float) -> bool:
+        """Old enough to push (NOTIFY_AFTER); the whisper backlog only while it is still that far behind now, not one
+        nearly caught up (#300)."""
+        if now - float(a["since"]) < NOTIFY_AFTER.get(a["key"], 0.0):
+            return False
+        return a["key"] != "stt_backlog" or self._stt_oldest >= STT_NOTIFY_S
+
+    def _stt_backlog(self, sq: dict, now: float) -> dict | None:
+        """The whisper backlog alert with hysteresis (#300): on at STT_BACKLOG_S, off only once the oldest clip has
+        waited under STT_CLEAR_S for STT_CLEAR_HOLD_S (its cleared time: when it caught up)."""
+        oldest = self._stt_oldest = float(sq.get("oldest_s") or 0)
+        on = self.active.get("stt_backlog")
+        if oldest >= STT_BACKLOG_S:
+            self._stt_ok_since = None
+        elif on is None:
+            self._stt_ok_since = None
+            return None
+        elif oldest < STT_CLEAR_S:
+            ok = self._stt_ok_since = self._stt_ok_since or now
+            if now - ok >= STT_CLEAR_HOLD_S:
+                self._clear_at["stt_backlog"] = ok
+                return None
+        else:
+            self._stt_ok_since = None
+        return {"severity": "warning", "title": "Speech-to-text behind", "text": self._stt_text(sq),
+                "since": float(on["since"]) if on else now - oldest}
+
+    def _chan(self, key: str) -> str:
+        """"tg:383" -> its talkgroup's name where the hub knows it."""
+        if isinstance(key, str) and key.startswith("tg:"):
+            try:
+                return self.hub.app.tg.name(int(key[3:]))
+            except Exception:  # noqa: BLE001 - no app, no such talkgroup: the key will do
+                pass
+        return str(key)
+
+    def _stt_text(self, sq: dict) -> str:
+        """One line, data first: how many wait (and how many urgent) and the main cause."""
+        n, urgent = int(sq.get("queued") or 0), int(sq.get("urgent") or 0)
+        head = f"{n} clips waiting" + (f" ({urgent} pages / Fire/EMS 15 / firegrounds)" if urgent else "")
+        return f"{head}; cause: {self._stt_cause(sq)}"
+
+    def _stt_cause(self, sq: dict) -> str:
+        svc, in_h = sq.get("service_s"), sq.get("in_h")
+        fb_h = sq.get("in_fallback_h") or 0
+        wh = (self.hub.status or {}).get("health") or {}
+        wh = wh.get("whisper") if isinstance(wh, dict) and isinstance(wh.get("whisper"), dict) else {}
+        if wh and wh.get("state") not in ("ok", "off", None):
+            return f"whisper-server {wh.get('state')}"
+        if sq.get("last_error") and not svc:
+            return f"whisper-server failing ({str(sq['last_error'])[:60]})"
+        if in_h and fb_h * 3 >= in_h:
+            return f"Amazon Transcribe falling back, {fb_h} of {in_h} clips/h"
+        if isinstance(svc, (int, float)) and svc > 0 and in_h:
+            cap = round(3600 / svc)
+            top = sq.get("in_top") or []
+            most = (f", most from {self._chan(top[0][0])} ({round(100 * top[0][1] / in_h)}%)"
+                    if top and top[0][1] and in_h else "")
+            if in_h > cap:
+                return f"{in_h} clips/h in, {cap}/h out ({svc:.0f} s each){most}"
+            return f"catching up, {in_h} clips/h in, {cap}/h out ({svc:.0f} s each){most}"
+        top = sq.get("top") or []
+        if top:
+            return f"most waiting from {self._chan(top[0][0])} ({top[0][1]})"
+        return "more clips than whisper can take"
 
     def _trunk_alert(self, m: dict, rec: dict | None, now: float) -> dict | None:
         """"P25 trunk silent" (#258), or None: only while trunk-recorder runs (down or off is the recorder alert's,
@@ -884,7 +959,7 @@ class StationHealth:
                 if key not in ("silent", "transcribe", "aws_budget80", "aws_budget") and not judged:
                     continue                             # the station's data is old: leave it as it was
                 a = self.active.pop(key)
-                a["cleared"] = now
+                a["cleared"] = self._clear_at.pop(key, now)
                 self.history.append(a)
                 changes.append(("clear", a))
                 self.log(f"health: cleared {a['title']} (after {_dur(now - a['since'])})")
@@ -894,7 +969,8 @@ class StationHealth:
                 if kind == "clear" and a.get("pushed"):
                     self._push(a, now, recovered=True)
             for a in self.active.values():
-                if not a.get("pushed") and now - self.last_push.get(a["key"], 0.0) >= self.repeat_s:
+                if (not a.get("pushed") and now - self.last_push.get(a["key"], 0.0) >= self.repeat_s
+                        and self._notify_ok(a, now)):
                     self._push(a, now)
             if changes:
                 self._save()

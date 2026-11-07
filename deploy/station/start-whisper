@@ -14,9 +14,13 @@ except (OSError, tomllib.TOMLDecodeError):
     stt = {}
 def path(p):
     return os.path.realpath(p if os.path.isabs(p) else os.path.join(os.path.dirname(sys.argv[1]), p))
+# Threads: one fewer than the CPUs at most (#300). whisper.cpp's threads wait on each other at every step, so one
+# preempted by the radios (trunk-recorder, rtl_fm, readsb) stalls them all: more threads than free cores is slower.
+spare = max(1, (len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count() or 4) - 1)
+threads = min(int(stt.get("threads") or spare), spare)
 argv = [path(stt.get("server_binary") or "/opt/sizeup/whisper/bin/whisper-server"),
         "-m", path(stt.get("model") or "/opt/sizeup/models/whisper.bin"),
-        "--host", "127.0.0.1", "--port", str(int(stt.get("port", 8179))), "-t", str(int(stt.get("threads", 8)))]
+        "--host", "127.0.0.1", "--port", str(int(stt.get("port", 8179))), "-t", str(threads)]
 if int(stt.get("beam_size", 0) or 0) > 1:
     argv += ["-bs", str(int(stt["beam_size"]))]
 print("\n".join(argv))
