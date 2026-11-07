@@ -440,6 +440,11 @@ built in), and sizeup-adsb's `ExecStartPre=+`. A missing or read-only file is no
 `sizeup-station status` and `doctor`, Settings > Radios and the hub's Health show the value. If readsb still dies
 that way twice in a row, it is restarted with smaller USB transfers (`--sdr-buffer-size 32`, KiB, instead of 128).
 
+A wedged dongle (#315): readsb exits with `SDR wedged, exiting! (check power supply / ...)` when the dongle stops
+delivering samples, usually power: an LNA on the bias-tee draws from the dongle's port, and USB extensions and unpowered
+hubs sag. The cause shows as `wedged` with what to check (the bias-tee only when it is on). After 3 wedges in an hour
+it waits 5 min before the next try, then 15 min, and says so; a run of 10 min or more resets the count.
+
 ## HPN ATC: the airband dongle
 
 The airport pre-alerts (#233, `sizeup/atc.py`) listen to Westchester Tower on **118.575 MHz AM** (FAA Chart
