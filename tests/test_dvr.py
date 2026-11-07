@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 
 import pytest
 
@@ -237,7 +238,27 @@ def test_a_sequence_that_starts_over_is_carried_on(tmp_path):
     keys = sorted(d._cams[CAM]["segs"])
     assert keys[-1] > last and len(keys) == len(set(keys)) and d.status(CAM)["recording"]
     assert any("sequence started over" in m for m in d.logs)
-    assert d.playlist(CAM).decode().count(".ts") == len(keys)
+    text = d.playlist(CAM).decode()
+    assert text.count(".ts") == len(keys)
+    # the new stream begins after a discontinuity (its timestamps start again: hls.js stalls scrubbing across it
+    # otherwise), though it follows on in time; and the mark is on disk, so a restart keeps it
+    first_new = min(k for k in keys if k > last)
+    lines = text.splitlines()
+    at = next(i for i, x in enumerate(lines) if x.startswith(f"{first_new}.ts?s="))
+    assert text.count("#EXT-X-DISCONTINUITY") == 1 and "#EXT-X-DISCONTINUITY" in lines[at - 3:at]
+    assert (tmp_path / "dvr" / CAM / d._file(CAM, first_new).name).name.endswith("_n.ts")
+    # its URL (#321: ?s=<start ms>) finds the marked file; another start under that key is refused
+    query = lines[at].split("?", 1)[1]
+    assert r.get(f"/api/cad/cameras/{CAM}/dvr/{first_new}.ts", query)[0] == 200
+    assert r.get(f"/api/cad/cameras/{CAM}/dvr/{first_new}.ts", "s=1")[0] == 404
+    again = Dvr(r, tmp_path / "dvr", clock=clock, log=lambda m: None, free_floor=0)
+    assert again.playlist(CAM).decode() == text
+    # and a camera's first segments after a restart of the hub: nothing known of the one before, so a mark too
+    again.pins = {CAM}
+    clock.t += 4
+    f.advance()
+    again.tick()
+    assert again.playlist(CAM).decode().count("#EXT-X-DISCONTINUITY") == 2
 
 
 def test_cameras_are_recorded_side_by_side(tmp_path):
@@ -339,3 +360,43 @@ def test_the_config(tmp_path):
         with pytest.raises(ConfigError, match="roads.dvr"):
             load_cfg(tmp_path, f"[roads]\n{bad}\n")
     assert dvr_mod.MAX_BYTES == 6 * 1024 ** 3 and dvr_mod.WINDOW_S == 7200
+
+
+def test_scrubbing_seeks_while_dragging_from_segments_the_browser_may_keep(tmp_path):
+    """#321: the viewer seeks as the handle moves (maplayers.js dvrScrub). It maps the handle's clock time to the player's
+    time through the playlist's dates, and it fetches the segments next to the handle ahead so hls.js can take them
+    from the browser's cache: the playlist must never be cached, and each segment must be cacheable."""
+    r, d, f, clock = setup(tmp_path)
+    d.pins = {CAM}
+    d.tick()
+    step(d, f, clock, 2)
+    code, body, _, hdr = r.get(f"/api/cad/cameras/{CAM}/dvr/index.m3u8", "")
+    assert code == 200 and hdr["Cache-Control"] == "no-store"
+    names = re.findall(r"^(\d+)\.ts\?s=(\d{13})$", body.decode(), re.M)
+    assert names and body.decode().count("#EXT-X-PROGRAM-DATE-TIME:") == len(names)
+    for n, start in names:
+        assert int(start) == int(d._cams[CAM]["segs"][int(n)][0] * 1000)
+        code, seg, ctype, hdr = r.get(f"/api/cad/cameras/{CAM}/dvr/{n}.ts", f"s={start}")
+        assert code == 200 and ctype == "video/MP2T" and seg[0] == 0x47
+        assert hdr["Cache-Control"] == "private, max-age=3600"             # the same URL from cache, never public
+    # a key the counter reused after a restart is another segment: the old URL (its start) is refused, never served
+    n, start = names[0]
+    assert r.get(f"/api/cad/cameras/{CAM}/dvr/{n}.ts", f"s={int(start) - 60000}")[0] == 404
+    assert r.get(f"/api/cad/cameras/{CAM}/dvr/{n}.ts", "")[0] == 200
+    ml = (Path(__file__).resolve().parent.parent / "sizeup" / "web" / "static" / "maplayers.js").read_text()
+    body = ml[ml.index("  // Scrubbing (#321)"):ml.index("  async function dvrKeep()")]
+    assert "const SCRUB_MS = 150" in body and "requestAnimationFrame(" in body          # coalesced, throttled
+    assert "v.seeking && since < 2000" in body                                          # none while one is in flight
+    assert 'typeof v.fastSeek === "function"' in body                                   # the nearest keyframe where it can
+    assert "autoStartLoad: false" in body and "enableInterstitialPlayback: false" in body and "hls.startLoad(m ? m.at" in body
+    assert "maxMaxBufferLength = SCRUB_BUF" in body and "maxMaxBufferLength = 30" in body
+    assert 'atEnd ? "Live" : clock(t)' in body and "return dvrToLive()" in body        # the end: Live
+    assert "holdFrame()" in body and "startRefresh" not in body.split("function dvrToLive")[0]   # no snapshots while scrubbing
+    assert '"touchmove", touchAt, { passive: false }' in ml and '"touchend", () => dvrScrubEnd()' in ml
+    assert "r.width - 2 * inset" in ml                                                  # a finger: the thumb's inset
+    assert '"pointerdown"' in ml and "setTimeout(dvrScrubEnd)" in ml                    # let go where it began: ended
+    assert "PageUp: 60" in ml and "ArrowRight: 10" in ml and '"aria-valuetext"' in body
+    assert "if (!viewer.dvrMode) { dvrReset(); dvrDraw(); return; }" in body             # Live while live: nothing new
+    assert "viewer.dvrStarting !== go" in body                                          # a Live tap cancels a start
+    live = ml[ml.index("  function startLive(id) {"):]
+    assert live.index("viewer.hls.destroy()") < live.index("new Hls(")                   # one player at a time

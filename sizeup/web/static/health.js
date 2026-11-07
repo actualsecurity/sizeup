@@ -173,10 +173,13 @@ const StationHealth = (() => {
     const sq = h.stt_queue;
     if (sq) {             // the station's whisper queue (#195): depth, the oldest live clip's wait, what was dropped
       kids.push(el("h3", "hl-sub", "Speech-to-text queue (station)"), dl([
-        ["Waiting", `${sq.queued}/${sq.max} · ${sq.urgent} urgent · ${sq.live - sq.urgent} other live · ${sq.rerun} re-runs`],
+        ["Waiting", `${sq.queued}/${sq.max} · ${sq.urgent} urgent · ${sq.live - sq.urgent - (sq.high || 0)} other live`
+          + `${sq.high ? ` · ${sq.high} airband` : ""} · ${sq.rerun} re-runs${sq.low !== undefined ? ` · ${sq.low} context talkgroups` : ""}`],
         ["Oldest live clip", sq.oldest_s !== null && sq.oldest_s !== undefined ? longDur(sq.oldest_s) : "none",
           (sq.oldest_s || 0) >= 600 ? "hl-bad" : ""],
-        ["Dropped / skipped", `${sq.dropped || 0} / ${sq.skipped || 0}` + (sq.last_drop ? ` · last: ${sq.last_drop.why}` : ""),
+        ["Pace", sq.service_s ? `${sq.service_s} s/clip (${Math.round(3600 / sq.service_s)}/h) · ${sq.in_h || 0}/h in`
+          + (sq.in_fallback_h ? ` · ${sq.in_fallback_h}/h AWS fallback` : "") : "", sq.service_s && sq.in_h > 3600 / sq.service_s ? "hl-warn" : ""],
+        ["Dropped / skipped / shed", `${sq.dropped || 0} / ${sq.skipped || 0} / ${sq.shed || 0}` + (sq.last_drop ? ` · last: ${sq.last_drop.why}` : ""),
           sq.dropped || sq.skipped ? "hl-warn" : ""],
       ]));
     }

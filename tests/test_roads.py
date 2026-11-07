@@ -166,7 +166,7 @@ def test_a_refresh_reads_each_feed_with_the_key_and_nothing_else_carries_it(tmp_
     assert pub["configured"] and pub["attribution"] == "powered by 511NY" and pub["link"] == "https://511ny.org/"
     assert [c["id"] for c in pub["cameras"]] == ["4631", "4620", "4616"]
     assert all(set(c) == {"id", "name", "road", "dir", "mile", "lat", "lon", "has_video", "off", "source", "cadence", "down", "state", "why", "since", "rec",
-                          "down_since", "last_image"} for c in pub["cameras"])
+                          "down_since", "last_image", "also"} for c in pub["cameras"])
     assert all(c["source"] == "511NY" for c in pub["cameras"]) and all(e["source"] == "511NY" for e in pub["events"])
     assert [s["name"] for s in pub["sources"]] == ["511ny"]
     st = pub["sources"][0]["status"]
@@ -597,7 +597,8 @@ def test_a_camera_over_the_events_carriageway_wins_when_it_is_nearly_as_close(hi
     nb = picks(r.cameras_for(*place("I-95 MM 9.5"), "I-95 NB MM 9.5"))
     assert nb == [("before", 0.3, "south", False, "1ne00915s"), ("after", 0.4, "north", False, "1ne00989s")]
     # a facing camera up to 0.3 mi further than the nearest is preferred: a fake NB one at 10.1 vs the SB one at 9.9
-    fake = dict(r.camera("1ne00989s"), id="fakeNB", dir="Northbound", lat=40.96413, lon=-73.73698)   # ~MP 10.1
+    fake = dict(r.camera("1ne00989s"), id="fakeNB", dir="Northbound", lat=40.96413, lon=-73.73698,   # ~MP 10.1
+                video="https://video.example/rtplive/FAKE_NB1/playlist.m3u8", url="https://stills.example/FAKE_NB1.png")
     r.thruway.data["cameras"].append(fake)
     r._changed()
     assert picks(r.cameras_for(*place("I-95 MM 9.5"), "I-95 NB MM 9.5"))[1] == ("after", 0.5, "north", True, "fakeNB")
@@ -1225,7 +1226,7 @@ def test_the_hub_serves_layers_and_snapshots_to_a_signed_in_viewer(tmp_path, key
         assert {e["id"] for e in doc["events"]} == {"NYSDOT-CARS-31001", "NYSDOT-CARS-31002", "NYSDOT-CARS-31003",
                                                     "NYSDOT-CARS-31007"}
         assert len(doc["signs"]) == 7 and {s["source"] for s in doc["signs"]} == {"511NY"}
-        assert {c["id"] for c in doc["cameras"]} == {"35992", "34715", "34353", "35589", "36011", "34259"}   # (no Thruway, county)
+        assert {c["id"] for c in doc["cameras"]} == {"35992", "34715", "35589", "36011", "34259"}   # (no Thruway, county; #320)
         code, img = req(h.url + "/api/cad/cameras/35992/image", headers=val)
         assert code == 200 and img == JPEG
         assert set(fake511.auths["cctv/NYSDOT/R8_039.flv.png"]) == {""}             # a picture: never the credentials

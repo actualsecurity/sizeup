@@ -31,9 +31,10 @@ RestartSec=5
 TimeoutStopSec=15
 # readsb is its child: stopped with it
 KillMode=control-group
-# Reception, like the radios (sizeup-station: Nice=-5, CPUWeight=500): ahead of whisper
-Nice=-5
-CPUWeight=400
+# Below whisper (#300): aircraft positions can lose a few messages under load (the map falls back to adsb.lol), the
+# dispatch transcripts shouldn't wait. The radios (sizeup-station, trunk-recorder: Nice=-5, CPUWeight=500) stay first.
+Nice=5
+CPUWeight=50
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=full
