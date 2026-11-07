@@ -287,8 +287,8 @@ def test_two_places_are_two_calls_whatever_the_units_and_cleared_units_never_mat
     assert rig.incidents()[-1]["source_ref"] == "feed:county:C1" and c is None
 
 
-def test_units_alone_match_only_when_neither_side_has_a_location(tmp_path):
-    """Review 3 #1: one side with a location, the other without: two incidents, noted, never joined by units."""
+def test_units_alone_never_attach_with_or_without_locations(tmp_path):
+    """Reviews 3 and 4: units alone never join two reports, even when neither has a location: two incidents, noted."""
     rig = Rig(tmp_path)
     rig.feed.put("A1", type="ALARM", location="", units=("E60",), times={"dispatched": T0})
     rig.poll()
@@ -300,8 +300,26 @@ def test_units_alone_match_only_when_neither_side_has_a_location(tmp_path):
     rig.at(60)
     rig.feed.outage("failing", "x")
     rig.poll()
-    nowhere = rig.page("p3", PAGE_NO_PLACE, fresh=True)    # neither has a place: the units decide
-    assert nowhere["id"] == a["id"]
+    nowhere = rig.page("p3", PAGE_NO_PLACE, fresh=True)    # neither has a place: still its own incident
+    assert nowhere["id"] not in (a["id"], got["id"])
+    assert any(x.startswith("Possibly the same as #") for x in rig.feed_lines(nowhere["id"]))
+
+
+def test_noloc_outage_sequence(tmp_path):
+    """Review 4's probe: a self-dispatched call the feed reported before a location was entered (E60 on it), then the
+    feed down and a page for E60 with no location: a new incident, both noted."""
+    rig = Rig(tmp_path)
+    rig.feed.put("A1", type="EMS", location="", units=("E60",), times={"dispatched": T0})
+    rig.poll()
+    rig.feed.outage("failing", "x")
+    rig.at(400)
+    rig.poll()
+    got = rig.page("p2", "Port Chester Fire Department, Engine 60, respond to an activated fire alarm. Time out 1437.")
+    a, b = rig.incidents()
+    assert got["id"] == b["id"] and (a["source"], b["source"]) == ("CAD feed", "60 Control page")
+    assert rig.feed_lines(b["id"]) == [f"Possibly the same as #{a['id']}: (no location)"]
+    assert rig.feed_lines(a["id"])[-1] == f"Possibly the same as #{b['id']}: (no location)"
+    assert not any("attached" in x for i in (a, b) for x in rig.feed_lines(i["id"]))
 
 
 def test_a_feed_event_never_joins_an_accepted_incident_it_didnt_make(tmp_path):
@@ -1043,3 +1061,51 @@ def test_known_towns_are_dropped_and_two_different_ones_are_two_places():
     assert same_place(f"12 Example Ave, {t1}", f"12 Example Ave ({t1})")
     assert not same_place(f"12 Example Ave {t1}", f"12 Example Ave {t2}")
     assert not same_place(f"12 Example Ave, {t1}", f"12 Example Ave ({t2})")
+
+
+def test_the_runner_imports_without_sizeup_cloud_adapters():
+    """sizeup/sources owns Resets (sources/resets.py): the runner imports nothing of sizeup.cloud, so #305's
+    adapters.py importing the runner can never be a circle. A fresh interpreter where sizeup.cloud.adapters can't load."""
+    import subprocess
+    from pathlib import Path
+    code = ("import sys, importlib.abc\n"
+            "class Block(importlib.abc.MetaPathFinder):\n"
+            "    def find_spec(self, name, path=None, target=None):\n"
+            "        if name == 'sizeup.cloud.adapters': raise ImportError('blocked')\n"
+            "sys.meta_path.insert(0, Block())\n"
+            "import sizeup.sources.runner as r\n"
+            "from sizeup.sources.resets import Resets\n"
+            "assert r.Resets is Resets and r.SourceRunner([], lambda k, d: None).resets.__class__ is Resets\n"
+            "assert not any(m.startswith('sizeup.cloud') for m in sys.modules), sorted(m for m in sys.modules if 'cloud' in m)\n"
+            "print('ok')\n")
+    root = Path(__file__).resolve().parents[1]
+    out = subprocess.run([sys.executable, "-c", code], cwd=root, capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0 and out.stdout.strip() == "ok", out.stderr
+    assert "sizeup.cloud" not in (root / "sizeup" / "sources" / "runner.py").read_text().split('"""', 2)[2].split("class ")[0]
+
+
+# -- the fourth review: snake-case town tokens, place-name abbreviations, towns reloaded -------------------------------
+
+
+def test_snake_case_town_tokens_are_towns_when_known():
+    t1, t2, t3 = towns()
+    snake = lambda t: t.upper().replace(" ", "_")
+    assert same_place(f"12 Example Ave, {t1}", f"12 EXAMPLE AVE {snake(t1)}")
+    assert same_place(f"12 Example Ave {t1}", f"12 EXAMPLE AVE {snake(t1)}")
+    assert not same_place(f"12 Example Ave, {t1}", f"12 EXAMPLE AVE {snake(t3)}")      # two known towns: two places
+    assert same_place("12 Example Ave", f"12 EXAMPLE AVE {snake(t1)}")                 # a town vs none: a match
+    assert same_place("12 Example Ave", "12 EXAMPLE AVE EXAMPLE_TOWN")                  # unknown: dropped
+
+
+def test_place_names_use_saint_and_mount():
+    assert same_place("@ST PAUL CHURCH", "@SAINT PAUL CHURCH") and same_place("@MT SAMPLE CENTER", "@Mount Sample Center")
+    assert not same_place("@SAMPLE SCHOOL", "@SAMPLE SCHOOL ANNEX") and same_place("@SAMPLE SCHOOL", "@ SAMPLE SCHOOL")
+
+
+def test_the_town_list_follows_settings_lists(tmp_path):
+    from dataclasses import replace
+    rig = Rig(tmp_path)
+    assert same_place("12 Example Ave Sampleton", "12 Example Ave Otherton")       # unknown words: dropped
+    rig.cad.lists = replace(rig.cad.lists, geo_town_order=(*rig.cad.lists.geo_town_order, "Sampleton", "Otherton"))
+    rig.cad.sources._towns()                                # as match() and decorate() do on every call
+    assert not same_place("12 Example Ave, Sampleton", "12 Example Ave, Otherton")

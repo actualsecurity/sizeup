@@ -782,10 +782,10 @@ Incidents come in from ranked sources. The interface is in `sizeup/sources/__ini
     intersection never matches a numbered address. Shared units never override two different places.
   - A named place with no street (`@SAMPLE SCHOOL`) has its own key: it matches the same place name and never an
     address. A direction after the suffix (`12 Main St W`) and `EXT` are part of the street. A name made only of
-    suffix words is the name (`12 Court St`). Only known towns (the lists' `geo_town_order` and aliases) are dropped
-    from the end, and two different known towns are two places.
-  - A unit in common (cleared assignments don't count) is enough only when neither side has a location. If one side
-    has one, units never join them.
+    suffix words is the name (`12 Court St`). Only known towns (the lists' `geo_town_order` and aliases, reloaded when
+    Settings > Lists change) are dropped from the end, an `UPPER_SNAKE` token included (`EXAMPLE_TOWN`), and two different
+    known towns are two places. Place names use Saint/Mount for `ST`/`MT`.
+  - A unit in common (cleared assignments don't count) never joins two reports on its own, with or without locations.
   - Two incidents in the window that share units but may not be joined are noted "Possibly the same as #N" on both,
     so a duplicate is never silent.
 - **Attaching:** a page attaches only to an incident a feed has. A feed event attaches only to a queued incident or
@@ -803,7 +803,7 @@ Incidents come in from ranked sources. The interface is in `sizeup/sources/__ini
 - **Poll now and reset:** paging tones of ours, a radio pre-alert or the phone ring wakes each adapter. The adapter's
   own thread then calls its optional `poll_now(reason)` and polls; `trigger()` never runs adapter code. Triggers are
   ignored while an adapter is failing or its health isn't `ok`, so during an outage its own back-off stands. A remote reset
-  (#305) is queued in the runner's `Resets` and runs `reset()` on the adapter's own thread before its next poll.
+  (#305) is queued in the runner's `Resets` (`sizeup/sources/resets.py`) and runs `reset()` on the adapter's own thread before its next poll.
 - **Station only:** the hub refuses to load or run adapters (`HubRefused`). It only applies the station's forwarded
   events. The hub only ever sees an exception's type, never its text.
 - **Measurement:** each source's first-seen time per incident, and its lead over paging. Settings > Health shows both.
