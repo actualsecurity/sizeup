@@ -458,7 +458,9 @@ another `[[radio.channels]]` entry with `kind = "airband"` (picked by hand):
 
 One dongle runs one channel today (several per dongle is #119). The receiver is shortfinal's (tested on the bench):
 `rtl_fm -M am -s 12000` at 36.4 dB gain, a carrier squelch 3.5 dB over the noise floor (1.5 dB hysteresis, 0.4 s
-hang, 0.6 s minimum, 30 s maximum), and a carrier under 5 dB is kept but not transcribed. Its transmissions go to
+hang, 0.6 s minimum, 30 s maximum; a carrier held 0.4 s within 1 dB under the open level opens too, #270), and a carrier
+under 3 dB is kept but not transcribed. Each transmission's carrier and floor (dBFS) and its voice SNR are logged on the
+station (`HPN Tower: carrier +12.3 dB over the floor (...)`) and sent to the hub with it. Its transmissions go to
 Amazon Transcribe on the hub by default (a priority channel, kept within the reserve past the monthly limit, with its
 own vocabulary `sizeup-atc`: Settings > Radios > Vocabulary > Push sends it with the PCFD one).
 
