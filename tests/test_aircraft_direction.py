@@ -9,6 +9,7 @@ optionally not reported."""
 
 import json
 import math
+import random
 
 import pytest
 
@@ -29,17 +30,21 @@ def move(lat: float, lon: float, brg: float, dist_nm: float) -> tuple[float, flo
     return lat + dist_nm / 60 * math.cos(r), lon + dist_nm / 60 * math.sin(r) / math.cos(math.radians(lat))
 
 
-def fly_legs(start, trk, alt, gs, legs, baro=0.0, vr_reported=True):
+def fly_legs(start, trk, alt, gs, legs, baro=0.0, vr_reported=True, mode_c=False):
     """Reports every STEP_S along legs of (seconds, {vr: ft/min, turn: deg/s, gs: target kt, ground: bool}): the
     position, track, speed and altitude change continuously (speed by at most 4 kt/s). alt is true MSL; the report's
-    pressure altitude is off by baro."""
+    pressure altitude is off by baro; mode_c: in 100 ft steps, jittering across a step (+/- 60 ft of noise)."""
     lat, lon = start
     out = []
+    noise = random.Random(279)
     for seconds, leg in legs:
         for _ in range(round(seconds / STEP_S)):
             vr = leg.get("vr", 0.0)
+            reported = round(alt + baro)
+            if mode_c:
+                reported = int(round((alt + baro + noise.uniform(-60, 60)) / 100) * 100)
             out.append(Plane(hex=HEX, lat=lat, lon=lon, track=trk % 360, gs=gs, category="A2",
-                             alt_baro="ground" if leg.get("ground") else round(alt + baro),
+                             alt_baro="ground" if leg.get("ground") else reported,
                              baro_rate=vr if vr_reported else None))
             trk += leg.get("turn", 0.0) * STEP_S / 2
             lat, lon = move(lat, lon, trk, gs * STEP_S / 3600)
@@ -265,3 +270,49 @@ def test_a_misread_arrival_is_cleared_by_a_strong_climb_away():
     climb = fly_legs(move(last.lat, last.lon, HDG["34"], 0.1), HDG["34"], ELEV + 600, 130.0, [(120, {"vr": 1500.0})])
     later = kinds(phases_of(climb, mem, T0 + len(level) * STEP_S)[0])
     assert ARRIVING not in later and later[-1] == DEPARTING and HEX not in mem._inbound, later
+
+
+def test_a_landing_with_no_ground_flag_then_a_taxi_and_parked_reads_ground_never_departed():
+    """Many GA transponders never say "ground": landed at a +200 ft altimeter offset, slowed, off the runway at
+    15 kt, parked for 25 minutes."""
+    reports = final_34(baro=200.0, legs_after=[(20, {"gs": 40.0}), (10, {"gs": 15.0, "turn": 9.0}), (60, {"gs": 15.0}),
+                                                (10, {"gs": 0.0}), (1500, {"gs": 0.0})])
+    phases, mem = phases_of(reports)
+    k = kinds(phases)
+    n = len(final_34())
+    assert set(k[:n]) == {ARRIVING} and DEPARTING not in k and NEAR not in k, k
+    assert k[-300:] == [GROUND] * 300 and HEX not in mem._departed
+
+
+@pytest.mark.parametrize("gs,repeat", [(90.0, False), (90.0, True), (140.0, True)])
+def test_a_level_rnp_z_34_arrival_on_the_opening_stretch_does_not_flap(gs, repeat):
+    """Reports 2 s apart (at 90 kt: 0.05 nm a report), or every position sent twice (a merged feed with no fresh fix),
+    level, along the first part of the RNP Z 34 final, which leads away from the field."""
+    gj = json.loads(A.PROCEDURES_FILE.read_text())
+    path = next(f for f in gj["features"] if f["properties"].get("kind") == "approach_path"
+                and f["properties"].get("name") == "RNAV (RNP) Z 34" and f["properties"].get("segment") == "final")
+    (lon0, lat0), (lon1, lat1) = path["geometry"]["coordinates"][:2]
+    trk = A.bearing(lat0, lon0, lat1, lon1)
+    mem, k = PhaseMemory(PROC), []
+    for i in range(60):                                     # 2 minutes
+        lat, lon = move(lat0, lon0, trk, gs * 2 * (i // 2 * 2 if repeat else i) / 3600)
+        r = Plane(hex=HEX, lat=lat, lon=lon, track=trk, gs=gs, category="A2", alt_baro=round(ELEV + 4000), baro_rate=0.0)
+        k.append(mem.phase(r, T0 + 2 * i).kind)
+    d = [A.nm(*A.ARP, *move(lat0, lon0, trk, gs * 2 * (i // 2 * 2 if repeat else i) / 3600)) for i in (0, 59)]
+    assert d[1] > d[0] + 0.15                               # opening from the field all the while
+    assert classify(r, PROC).approach == "RNAV (RNP) Z 34"
+    assert changes(k) <= 1 and k[-1] == ARRIVING and k.count(ARRIVING) >= 45, k
+
+
+def test_mode_c_altitude_steps_make_no_vertical_rate():
+    """No rate reported, the altitude in 100 ft steps jittering across one: a level final stays put once it reads
+    arriving; a takeoff roll reads on the ground throughout."""
+    level = fly_legs(move(*END["34"], HDG["34"] + 180, 6.0), HDG["34"], ELEV + 1500, 120.0, [(150, {})],
+                     vr_reported=False, mode_c=True)
+    assert len({r.alt_baro for r in level}) == 2
+    k = kinds(phases_of(level)[0])
+    assert changes(k) <= 1 and k[-1] == ARRIVING, k
+    roll = fly_legs(move(*END["34"], HDG["34"], 0.2), HDG["34"], ELEV, 60.0, [(20, {"gs": 130.0})], baro=150.0,
+                    vr_reported=False, mode_c=True)
+    assert len({r.alt_baro for r in roll}) == 2
+    assert set(kinds(phases_of(roll)[0])) == {GROUND}
