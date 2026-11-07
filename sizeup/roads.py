@@ -52,7 +52,9 @@ Two providers (Provider), read side by side and merged (Roads):
 Both at once: 511NY, when it is on, wins per item: a Thruway event within DEDUPE_M (50 m, the same layer)
 of a 511NY one is left out, and a Thruway sign within SIGN_DEDUPE_M (150 m) of a 511NY one that says the same
 thing (the same direction too, when both give one) is one sign (_merged). Cameras the other way round: ours
-first, a CARS-Hub camera only where we have none. Every item carries its "source" ("511NY" | "Thruway" |
+first, a CARS-Hub camera only where we have none; one camera listed twice, by two sources or by one, is listed once
+(#320, camera_match: the same stream, an id inside the other's, the same name at the same road and milepost, or two
+sources' records at the same place), its other ids naming it (Roads.alias). Every item carries its "source" ("511NY" | "Thruway" |
 "County"), shown on the map. The feeds are statewide, so only our area is kept (bbox: Port Chester, Rye Brook and
 the mutual-aid neighbours with a margin). Each provider has its own schedule and backoff (refused credentials
 wait 30 min, a 429 5 min, anything else 1 min doubling to 15, never under the feed's floor), and one disk cache
@@ -127,6 +129,7 @@ import time
 import xml.etree.ElementTree as ET
 from collections import OrderedDict
 from email.utils import formatdate, parsedate_to_datetime
+from functools import lru_cache
 from pathlib import Path
 from typing import Callable
 from urllib.error import HTTPError, URLError
@@ -1124,13 +1127,122 @@ def same_camera(a: dict, b: dict, within_m: float = CAMERA_MATCH_M) -> bool:
     return (hw(a) and hw(b)) or (bool(_cam_key(a)) and _cam_key(a) == _cam_key(b))
 
 
+# One camera listed twice (#320). Read 2026-11-07 (the CARS-Hub inventory, the Thruway's and the county's lists, and the
+# stills): the CARS-Hub lists some cameras twice under two ids, an older record and a newer one, each with its own stream
+# name, the same name in other words ("Exit 17 Lincoln Ave MM 17.41" / "At Exit 17 on Lincoln Avenue": one overlay ID on
+# both pictures) and the same route and linear reference, so the same point to the microdegree. The merge compared only
+# different sources, so both stayed. But the CARS-Hub puts every camera at its route and milepost, so two cameras at one
+# milepost share a point too (two views a few metres apart, both southbound): within a source, a place alone never makes
+# two records one camera. In order, two records are one camera when:
+#   stream  they name the same stream (the HLS folder, or a still named for it: one stream name on two hosts is one camera);
+#   id      one's id (letters and digits) is a word of the other's id or addresses (a DOT id inside a CARS id);
+#   name    the same name once its milepost, route, direction and filler words are left out and the street words spelled
+#           out, facing the same way (a direction on one side only is not), on the same road, within CAMERA_NAME_M and
+#           (one source's mileposts) CAMERA_MILE_MI;
+#   near    from two sources only: same_camera for a CARS-Hub one, else DEDUPE_M (as before).
+# One is kept (Roads._merge_cameras): in service, then live video, then the fresher still (both images' times when the
+# hub has both, else the faster cadence), then ours first. The one kept stays
+# kept until another beats it on those (sticky): its id is what the DVR records under and a dispatcher's Keep names.
+CAMERA_NAME_M = 300.0
+CAMERA_MILE_MI = 0.2
+CAMERA_FRESHER_S = 300.0         # a still this much newer is the fresher one
+STREAM_NAME = re.compile(r"[A-Za-z0-9_-]{3,64}")
+STILL_NAME = re.compile(r"[A-Za-z0-9]+_[A-Za-z0-9_]+")
+NAME_DROP = re.compile(r"\b(?:mm|mp|milepost)\s*\d+(?:\.\d+)?|\b(?:i|interstate|us|ny|sr|rt|rte|route|cr)[\s-]*\d+[a-z]?\b"
+                       r"|\bhrp\b|\bhutch(?:inson)?(?:\s+river)?(?:\s+(?:pkwy|parkway))?\b"
+                       r"|\b(?:nb|sb|eb|wb|northbound|southbound|eastbound|westbound)\b", re.I)
+NAME_FILLER = {"at", "on", "the", "of", "and", "in", "near", "just", "located", "connector", "interstate", "a"}
+NAME_SPELL = {"ave": "avenue", "av": "avenue", "rd": "road", "st": "street", "ln": "lane", "dr": "drive", "pkwy": "parkway",
+              "pky": "parkway", "blvd": "boulevard", "hwy": "highway", "int": "exit", "interchange": "exit", "n": "north",
+              "s": "south", "e": "east", "w": "west"}
+
+
+def stream_keys(c: dict) -> frozenset[str]:
+    """The streams a camera names, upper case: its HLS folder (".../rtplive/XX_123/playlist.m3u8": XX_123) and its still
+    where it is named for one (".../XX_123.flv.png": XX_123; not "camera23.jpg" or "12.jpg")."""
+    return _stream_keys(c.get("video") or "", c.get("url") or "")
+
+
+@lru_cache(maxsize=4096)
+def _stream_keys(video: str, url: str) -> frozenset[str]:
+    out = set()
+    parts = [x for x in urlsplit(video).path.split("/") if x]
+    if len(parts) >= 2 and STREAM_NAME.fullmatch(parts[-2]) and re.search(r"\d", parts[-2]):
+        out.add(parts[-2].upper())
+    stem = urlsplit(url).path.rsplit("/", 1)[-1].split(".")[0]
+    if STILL_NAME.fullmatch(stem) and re.search(r"\d", stem):
+        out.add(stem.upper())
+    return frozenset(out)
+
+
+@lru_cache(maxsize=4096)
+def _id_words(cid: str) -> frozenset[str]:
+    words = re.split(r"[^A-Z0-9_]+", cid.upper())
+    return frozenset(w for w in words if len(w) >= 5 and re.search(r"[A-Z]", w) and re.search(r"\d", w))
+
+
+@lru_cache(maxsize=4096)
+def _words_of_ids(cid: str, url: str, video: str) -> frozenset[str]:
+    return frozenset(re.split(r"[^A-Z0-9_]+", " ".join((cid, url, video)).upper())) | _stream_keys(video, url)
+
+
+def _id_in(a: dict, b: dict) -> bool:
+    """One of a's id words (5+ characters, letters and digits) is a word of b's id or addresses, or a stream b names."""
+    mine = _id_words(a.get("id") or "")
+    return bool(mine) and bool(mine & _words_of_ids(b.get("id") or "", b.get("url") or "", b.get("video") or ""))
+
+
+@lru_cache(maxsize=4096)
+def name_key(name: str) -> frozenset[str]:
+    """A camera's name for "the same name": its milepost, route, direction and filler words left out, the street words
+    spelled out ("Exit 17 Lincoln Ave MM 17.41" and "At Exit 17 on Lincoln Avenue": {exit, 17, lincoln, avenue})."""
+    t = NAME_DROP.sub(" ", (name or "").lower())
+    words = [NAME_SPELL.get(w, w) for w in re.findall(r"[a-z0-9]+", t)]
+    return frozenset(w for w in words if w not in NAME_FILLER)
+
+
+def road_key(c: dict) -> str:
+    return _road_key(c.get("road") or "", c.get("name") or "")
+
+
+@lru_cache(maxsize=4096)
+def _road_key(road: str, name: str) -> str:
+    hw = highway_from_text(f"{road} {name}")
+    return hw[0] if hw else " ".join(_words(road))
+
+
+def _facing_apart(a: dict, b: dict) -> bool:
+    """Not the same way: two directions that differ, or (for the name rule) one given and the other not."""
+    return cam_dir(a.get("dir") or a.get("name", "")) != cam_dir(b.get("dir") or b.get("name", ""))
+
+
+def camera_match(a: dict, b: dict, same_source: bool, near: Callable[[dict, dict], bool] | None = None) -> str:
+    """How two records are one camera ("stream", "id", "name", "near"), "" when they aren't. same_source: from one
+    provider (its cameras placed by milepost: a place alone is never enough); near: the rule for two sources' records
+    by place (same_camera by default)."""
+    if stream_keys(a) & stream_keys(b):
+        return "stream"
+    if _id_in(a, b) or _id_in(b, a):
+        return "id"
+    ka = name_key(a.get("name") or "")
+    if (len(ka) >= 2 and ka == name_key(b.get("name") or "") and road_key(a) and road_key(a) == road_key(b)
+            and km(a["lat"], a["lon"], b["lat"], b["lon"]) * 1000 <= CAMERA_NAME_M and not _facing_apart(a, b)):
+        ma, mb = _f(a.get("mile")), _f(b.get("mile"))
+        if not same_source or ma is None or mb is None or abs(ma - mb) <= CAMERA_MILE_MI:
+            return "name"
+    if not same_source and (near or same_camera)(a, b):
+        return "near"
+    return ""
+
+
 def compare_cameras(new: list[dict], ours: list[dict], within_m: float = CAMERA_MATCH_M) -> dict:
     """A feed's cameras against the ones we have (the Thruway's, the county's): {n, known, known_by: {source: n},
-    new, new_by_road: {road: n}, new_ids}. A camera that is the same as one of ours (same_camera) is one we have."""
+    new, new_by_road: {road: n}, new_ids}. A camera that is the same as one of ours (camera_match) is one we have."""
     known_by: dict[str, int] = {}
     fresh = []
+    near = lambda a, b: same_camera(a, b, within_m)
     for c in new:
-        twin = next((o for o in ours if same_camera(c, o, within_m)), None)
+        twin = next((o for o in ours if camera_match(c, o, False, near)), None)
         if twin is None:
             fresh.append(c)
         else:
@@ -1757,6 +1869,9 @@ class Roads:
                        if county else None)
         self.providers = [p for p in (self.ny, self.carshub, self.thruway, self.county) if p is not None]
         self._health: dict[str, dict] = {}            # camera id -> {fails, down_since, last_image, checked}
+        self._cam_kept: dict[str, str] = {}           # camera id -> the id kept for its camera at the last merge (#320)
+        self._alias: dict[str, str] = {}              # a merged-away camera id -> the id kept for its camera
+        self._cam_group_cache: tuple[int, list[list[str]]] | None = None   # (the lists' hash, the groups' ids)
         self._streams: dict[str, dict] = {}           # camera id -> {last (playlist request), base (the stream's folder)}
         self._segments: OrderedDict[str, dict] = OrderedDict()   # "cid/name" -> {body, ctype, fetched, kept, ...}
         self._segment_locks: dict[str, list] = {}               # "cid/name" -> [lock, users]: one fetch at a time
@@ -1999,11 +2114,16 @@ class Roads:
             cur = self._merge
             if cur is not None and cur[0] == self.rev and feed in cur[1]:
                 return cur[1][feed]
+        if feed == "cameras":
+            out = self._merge_cameras()
+            with self._lock:
+                if self._merge is None or self._merge[0] != self.rev:
+                    self._merge = (self.rev, {})
+                self._merge[1][feed] = out
+            return out
         out, ids, whose = [], set(), []
 
         def same(it: dict, o: dict, mine: str, theirs: str) -> bool:
-            if feed == "cameras" and CARSHUB in (mine, theirs):
-                return same_camera(it, o)
             d = km(it["lat"], it["lon"], o["lat"], o["lon"]) * 1000
             if feed == "signs":
                 return (d <= SIGN_DEDUPE_M and sign_text(it) == sign_text(o)
@@ -2015,12 +2135,6 @@ class Roads:
                     continue
                 twin = next((i for i, (o, w) in enumerate(zip(out, whose)) if w != p.name and same(it, o, p.name, w)), None)
                 if twin is not None:
-                    o = out[twin]
-                    # the same camera: the one with live video (a CARS-Hub HLS camera over the county's JPEG one)
-                    if feed == "cameras" and it.get("has_video") and not o.get("has_video") and not it.get("off"):
-                        ids.discard(o["id"])
-                        out[twin], whose[twin] = it, p.name
-                        ids.add(it["id"])
                     continue
                 out.append(it)
                 whose.append(p.name)
@@ -2030,6 +2144,119 @@ class Roads:
                 self._merge = (self.rev, {})
             self._merge[1][feed] = out
         return out
+
+    def _merge_cameras(self) -> list[dict]:
+        """Every provider's cameras, in _order, each camera once (_cam_groups). The one kept (_cam_better, sticky) is
+        listed where the first of its records was, with "also": the others' sources and names; their ids map to its id
+        (alias), so a page, a Keep or a recording that names one of them finds it. So does the id of one kept before
+        that has left its list since, while a record of its camera is still there (the older of two records retired)."""
+        order = self._order("cameras")
+        groups = self._cam_groups(order)
+        out, alias = [], {}
+        present = {c["id"] for g in groups for c, _ in g}
+        for g in groups:
+            if len(g) == 1:
+                out.append(g[0][0])
+                continue
+            best = g[0][0]
+            for c, _ in g[1:]:
+                if self._cam_better(c, best):
+                    best = c
+            kept = {self._cam_kept.get(c["id"]) for c, _ in g}
+            prev = next((c for c, _ in g if c["id"] in kept), None)
+            if prev is not None and prev is not best and self._cam_rank(prev) == self._cam_rank(best):
+                best = prev                                       # sticky: the one kept until another beats it
+            for c, _ in g:
+                self._cam_kept[c["id"]] = best["id"]
+                if c is not best:
+                    alias[c["id"]] = best["id"]
+            out.append(dict(best, also=[{"source": c.get("source", ""), "name": c.get("name", "")} for c, _ in g if c is not best]))
+        listed = {c["id"] for c in out}
+        now_of = lambda i: alias.get(i, i)
+        # the records once merged with one now gone from every list: it names the one its camera is listed as now
+        gone = {k: v for k, v in self._cam_kept.items() if k not in present}
+        for k in gone:
+            mates = [m for m, v in self._cam_kept.items() if v == gone[k] or m == gone[k]]
+            there = next((m for m in mates if m in present), None)
+            if there is not None:
+                alias[k] = now_of(there)
+            else:
+                self._cam_kept.pop(k, None)                       # its camera is gone altogether
+        with self._lock:
+            self._alias = {k: v for k, v in self._alias.items() if k not in listed and v != k} | alias
+            # an id merged away earlier, its camera now kept under another: the old id names the one kept now
+            self._alias = {k: now_of(v) for k, v in self._alias.items() if now_of(v) != k and now_of(v) in listed}
+        return out
+
+    def _cam_groups(self, order: list[Provider]) -> list[list[tuple[dict, str]]]:
+        """The records grouped by camera (camera_match), kept while the lists say the same (a hash of what the rules read:
+        the grouping is the quadratic part; a rev moves for much else). A record joins the first group with one it
+        matches, and only if it matches every record of its own source there directly: two of one source are never one
+        camera through a third."""
+        sig = hash(tuple((p.name, tuple((c["id"], c.get("name"), c.get("road"), c.get("dir"), c.get("mile"), c["lat"], c["lon"],
+                                         c.get("url"), c.get("video")) for c in p.data["cameras"])) for p in order))
+        cached = self._cam_group_cache
+        if cached is not None and cached[0] == sig:
+            ids: dict[str, tuple[dict, str]] = {}
+            for p in order:
+                for c in p.data["cameras"]:
+                    ids.setdefault(c["id"], (c, p.name))
+            return [[ids[i] for i in g] for g in cached[1]]       # (the records themselves: their state may be newer)
+        groups: list[list[tuple[dict, str]]] = []
+        seen: set[str] = set()
+
+        def near(a: dict, b: dict, pa: str, pb: str) -> bool:
+            if CARSHUB in (pa, pb):
+                return same_camera(a, b)
+            return km(a["lat"], a["lon"], b["lat"], b["lon"]) * 1000 <= DEDUPE_M
+
+        def fits(it: dict, pn: str, g: list) -> bool:
+            if not any(camera_match(it, o, w == pn, lambda a, b, w=w: near(a, b, pn, w)) for o, w in g):
+                return False
+            return all(camera_match(it, o, True) for o, w in g if w == pn)
+        for p in order:
+            for it in p.data["cameras"]:
+                if it["id"] in seen:
+                    continue
+                seen.add(it["id"])
+                g = next((g for g in groups if fits(it, p.name, g)), None)
+                if g is None:
+                    groups.append([(it, p.name)])
+                else:
+                    g.append((it, p.name))
+        self._cam_group_cache = (sig, [[c["id"] for c, _ in g] for g in groups])
+        return groups
+
+    def _cam_rank(self, c: dict) -> tuple:
+        """What makes one record of a camera better than another, before the stills' times: in service, then live video,
+        then in its source's latest list (an older record its source has dropped). From the lists only, so the one kept
+        doesn't change with a camera's state (that stays the kept one's own: down, stale, offline, as for any camera)."""
+        return (not c.get("off"), bool(c.get("video")) and not c.get("off"), not c.get("missing_since"))
+
+    def _cam_better(self, c: dict, best: dict) -> bool:
+        """c over best (the one kept so far): by _cam_rank, then the fresher still: both images' times when the hub has
+        fetched both (CAMERA_FRESHER_S newer), else the source's faster cadence. A tie keeps best (ours first)."""
+        rc, rb = self._cam_rank(c), self._cam_rank(best)
+        if rc != rb:
+            return rc > rb
+        tc = (self._health.get(c["id"]) or {}).get("last_image")
+        tb = (self._health.get(best["id"]) or {}).get("last_image")
+        if tc is not None and tb is not None:
+            return tc - tb > CAMERA_FRESHER_S
+        cad = lambda x: int(x.get("cadence") or CADENCE_S.get(x.get("source", ""), 60))
+        return cad(c) < cad(best)
+
+    def alias(self, cid: str) -> str:
+        """The id a camera is listed under now: itself, or the one kept where its records were merged (#320)."""
+        self.merged("cameras")
+        with self._lock:
+            return self._alias.get(cid, cid)
+
+    def aliases(self) -> dict[str, str]:
+        """Every merged-away id -> the id kept for its camera."""
+        self.merged("cameras")
+        with self._lock:
+            return dict(self._alias)
 
     def _carshub_read(self, p: Provider, feed: str) -> None:
         """The CARS-Hub's cameras read: how many in our area are new against ours (the Thruway's, the county's,
@@ -2060,6 +2287,7 @@ class Roads:
         out = {k: c.get(k, "") for k in ("id", "name", "road", "dir", "mile", "lat", "lon", "has_video", "off", "source")}
         out["cadence"] = int(c.get("cadence") or CADENCE_S.get(c.get("source", ""), 60))
         out["rec"] = bool(self.dvr is not None and self.dvr.recording(c["id"]))      # the DVR has it on (#277)
+        out["also"] = list(c.get("also") or [])               # its other records, merged (#320): [{source, name}]
         return out | self.health(c["id"], c)
 
     # -- camera health: down when its image is stale or it keeps failing (#99); a video camera by its stream (#276) --
@@ -2901,9 +3129,9 @@ class Roads:
             else:
                 return 400, b'{"error":"q or near"}', JSON, {}
             return 200, json.dumps({"configured": self.configured, "cameras": cams}).encode(), JSON, {}
-        if m := CAMERA_PATH.fullmatch(path):
-            return self.image(m.group(1), _since(headers, one("since")))
+        if m := CAMERA_PATH.fullmatch(path):                # (a merged-away id: the camera kept for it, #320)
+            return self.image(self.alias(m.group(1)), _since(headers, one("since")))
         if m := STREAM_PATH.fullmatch(path):
             v = one("v")
-            return self.stream(m.group(1), m.group(2), v if VIEWER_RE.fullmatch(v) else "")
+            return self.stream(self.alias(m.group(1)), m.group(2), v if VIEWER_RE.fullmatch(v) else "")
         return 404, b"not found\n", "text/plain", {}
