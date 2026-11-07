@@ -30,7 +30,7 @@ def move(lat: float, lon: float, brg: float, dist_nm: float) -> tuple[float, flo
     return lat + dist_nm / 60 * math.cos(r), lon + dist_nm / 60 * math.sin(r) / math.cos(math.radians(lat))
 
 
-def fly_legs(start, trk, alt, gs, legs, baro=0.0, vr_reported=True, mode_c=False):
+def fly_legs(start, trk, alt, gs, legs, baro=0.0, vr_reported=True, mode_c=False, category="A2"):
     """Reports every STEP_S along legs of (seconds, {vr: ft/min, turn: deg/s, gs: target kt, ground: bool}): the
     position, track, speed and altitude change continuously (speed by at most 4 kt/s). alt is true MSL; the report's
     pressure altitude is off by baro; mode_c: in 100 ft steps, jittering across a step (+/- 60 ft of noise)."""
@@ -43,7 +43,7 @@ def fly_legs(start, trk, alt, gs, legs, baro=0.0, vr_reported=True, mode_c=False
             reported = round(alt + baro)
             if mode_c:
                 reported = int(round((alt + baro + noise.uniform(-60, 60)) / 100) * 100)
-            out.append(Plane(hex=HEX, lat=lat, lon=lon, track=trk % 360, gs=gs, category="A2",
+            out.append(Plane(hex=HEX, lat=lat, lon=lon, track=trk % 360, gs=gs, category=category,
                              alt_baro="ground" if leg.get("ground") else reported,
                              baro_rate=vr if vr_reported else None))
             trk += leg.get("turn", 0.0) * STEP_S / 2
@@ -316,3 +316,31 @@ def test_mode_c_altitude_steps_make_no_vertical_rate():
                     vr_reported=False, mode_c=True)
     assert len({r.alt_baro for r in roll}) == 2
     assert set(kinds(phases_of(roll)[0])) == {GROUND}
+
+
+@pytest.mark.parametrize("category", ["A7", "", "B4"])
+def test_a_slow_helicopter_orbiting_or_hovering_near_the_field_is_never_on_the_ground(category):
+    """Flying slow and low near HPN (an orbit at 300 ft and 40 kt 1.5 nm out, a hover at 200-380 ft): never "on the
+    ground at HPN" (the alarm would say so of an airborne helicopter in trouble), never departing."""
+    orbit = fly_legs(move(*A.ARP, 200.0, 1.5), 90.0, ELEV + 300, 40.0, [(300, {"turn": 4.0})], category=category)
+    assert max(A.nm(*A.ARP, r.lat, r.lon) for r in orbit) < 2.0
+    k = kinds(phases_of(orbit)[0])
+    assert GROUND not in k and DEPARTING not in k and ARRIVING not in k, k
+    hover = [Plane(hex=HEX, lat=move(*A.ARP, 120.0, 0.8)[0], lon=move(*A.ARP, 120.0, 0.8)[1], track=0.0, gs=0.0,
+                   alt_baro=round(ELEV + 200 + 180 * abs(math.sin(i / 7))), baro_rate=0.0, category=category) for i in range(60)]
+    assert set(kinds(phases_of(hover)[0])) <= {LOW, NEAR}       # (its track points up the 34 final: near, at most)
+    # lifted off the pad here (on the ground, then up), then hovering at 300 ft: flying, not on the ground
+    pad = [Plane(hex=HEX, lat=hover[0].lat, lon=hover[0].lon, gs=0.0, alt_baro="ground", category=category)] * 3
+    up = [Plane(**{**r.__dict__, "alt_baro": round(ELEV + 300)}) for r in hover[:40]]
+    k = kinds(phases_of(pad + up)[0])
+    assert k[:3] == [GROUND] * 3 and GROUND not in k[3:], k
+
+
+def test_a_slow_helicopter_descent_reads_ground_only_on_touchdown():
+    """Down to the field from 800 ft at 30 kt and 400 ft/min: on the ground only below ~150 ft, or once it says so."""
+    down = fly_legs(move(*A.ARP, 300.0, 0.9), 120.0, ELEV + 800, 30.0, [(110, {"vr": -400.0, "gs": 20.0})], category="A7")
+    land = [Plane(**{**down[-1].__dict__, "alt_baro": "ground", "gs": 0.0, "baro_rate": 0.0})] * 3
+    phases, _ = phases_of(down + land)
+    for r, p in zip(down, phases):
+        assert p.kind != GROUND or r.alt_baro - ELEV < 150, (r.alt_baro, p.kind)
+    assert kinds(phases)[-3:] == [GROUND] * 3 and DEPARTING not in kinds(phases)

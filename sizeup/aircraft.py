@@ -563,7 +563,9 @@ VS_FPM = 300.0                # climbing past +this, descending past -this; leve
 STRONG_CLIMB_FPM = 800.0      # climbing this hard and opening, never once seen descending in: not an arrival after all
 VS_FROM_ALT_S = (30.0, 60.0)  # no vertical rate reported: a least-squares slope of the altitudes over at least 30 s
 VS_FROM_ALT_FT = 200.0        # ... (Mode C reports in 100 ft steps), level unless they change by this much
-FLYING_KT = 60.0              # departing needs flight: this fast, climbing, or above RUNWAY_AGL_FT (not a taxi)
+FLYING_KT = 60.0              # departing needs flight: this fast, climbing, or above its ground band (not a taxi)
+LOW_SLOW_AGL_FT = 150.0       # a helicopter, an ultralight or an unknown category is only on the ground below this:
+FIXED_WING = {"A1", "A2", "A3", "A4", "A5", "A6"}    # ... these may read on the ground up to RUNWAY_AGL_FT
 TREND_S = (15.0, 90.0)        # the distance to the field now against a report this far back (the latest such) ...
 TREND_NM = 0.15               # ... closer by more than this: closing; further: opening; else steady or not known
 TO_GO_NM = 0.05               # on a published approach: its distance to go down by this since the last reading
@@ -771,9 +773,12 @@ class PhaseMemory:
             runway = ac.gs is not None and ac.gs < LANDED_KT       # a balked landing at 50 ft is not down
         elif runway:
             runway = (ac.gs is None or ac.gs >= RUNWAY_MIN_KT) and not descending
-        if not runway and fd <= GROUND_RADIUS_NM and (agl is None or agl < RUNWAY_AGL_FT) and ac.gs is not None \
-                and ac.gs < LANDED_KT and not climbing:
-            runway = True                       # slow and low on the airport: landed, taxiing, parked (no ground flag)
+        # slow and low on the airport after landing or taking off here: taxiing, parked (no ground flag). Only with
+        # that evidence, and for a helicopter (it flies slow and low) only below LOW_SLOW_AGL_FT.
+        band = RUNWAY_AGL_FT if ac.category in FIXED_WING else LOW_SLOW_AGL_FT
+        if not runway and fd <= GROUND_RADIUS_NM and agl is not None and agl < band and ac.gs is not None \
+                and ac.gs < LANDED_KT and not climbing and (from_field or (was_inbound and self._descended.get(h))):
+            runway = True
         if runway:                              # the takeoff roll, a landing roll, a touch-and-go, the taxiways
             self._on_field[h] = now
             self._inbound.pop(h, None)
@@ -782,7 +787,7 @@ class PhaseMemory:
             return Phase(GROUND, dist_nm=fd)
         in_area = fd <= self.radius_nm and (alt is None or alt < DEPARTED_MAX_FT)
         returning = (closing and not climbing) or (descending and not opening)   # climbing out over the runway closes too
-        flying = (ac.gs is not None and ac.gs >= FLYING_KT) or climbing or (agl is not None and agl > RUNWAY_AGL_FT)
+        flying = (ac.gs is not None and ac.gs >= FLYING_KT) or climbing or (agl is not None and agl > band)
         if from_field and in_area:
             return self._leaving(h, now, fd, returning, climbing, opening, flying)
         close_in = fd <= MANEUVER_NM and (agl is None or agl < MANEUVER_MAX_AGL) and (ac.gs is None or ac.gs <= MANEUVER_MAX_KT)
