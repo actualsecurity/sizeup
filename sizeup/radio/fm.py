@@ -36,6 +36,8 @@ from typing import Callable
 
 import numpy as np
 
+from sizeup.procenv import child_env
+
 RATE = 16000
 FRAME = RATE // 20             # 50 ms
 HISTORY_FRAMES = 20 * 60       # hiss reference: last minute
@@ -690,7 +692,7 @@ class NfmReceiver:
                     continue
             try:
                 self._proc = subprocess.Popen(self.argv(dev), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                              start_new_session=True)
+                                              start_new_session=True, env=child_env())
                 threading.Thread(target=self._drain, args=(self._proc,), daemon=True).start()
             except OSError as e:
                 self.state, self.detail = "down", f"cannot start rtl_fm: {e}"

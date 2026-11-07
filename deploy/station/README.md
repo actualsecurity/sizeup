@@ -139,7 +139,7 @@ nothing enabled or started, no prompts); `--stage SHA` and `--activate NAME` are
 | readsb v3.16.21 (wiedehopf), RTL-SDR with the bias-tee switch, against rtl-sdr-blog's librtlsdr: the ADS-B decoder (#235) | `/opt/sizeup/readsb` -> `builds/readsb-<tag>-<commit>` |
 | whisper model, SHA-256 checked; `whisper.bin` points at the one in use | `/opt/sizeup/models` |
 | config, from `config.station.toml` once and never overwritten (`config.toml.dist` = the current template) | `/etc/sizeup/config.toml` |
-| secrets `SIZEUP_STATION_TOKEN`, `SIZEUP_ACCESS_CLIENT_ID`, `SIZEUP_ACCESS_CLIENT_SECRET` (root:sizeup 0640) | `/etc/sizeup/station.env` |
+| secrets `SIZEUP_STATION_TOKEN`, `SIZEUP_ACCESS_CLIENT_ID`, `SIZEUP_ACCESS_CLIENT_SECRET`, and an incident-source adapter's (root 0600) | `/etc/sizeup/station.env` |
 | what `update` fetches (repo, ref), the model, auto-update on / off | `/etc/sizeup/install.conf` |
 | state: CAD, outbox, `cloud.json`, captures, trunk-recorder's working dir | `/var/lib/sizeup` |
 | `sizeup-station.service`, `sizeup-whisper.service`, `sizeup-trunk-recorder.service` (trunk-recorder on the dongle sizeup gives Fire/EMS 15: [below](#trunk-recorder-its-own-service)), `sizeup-adsb.service` (the ADS-B decoder: idle until a dongle is named for it), `sizeup-health.timer`, `sizeup-update.path` / `.timer` / `.service`, journald cap (200 MB, kept across reboots) | `/etc/systemd/...` |
@@ -291,6 +291,73 @@ with a link in its place (a rename: nothing rebuilt), makes a release of the com
 to trunk-recorder's copy, switches and restarts once. If main doesn't answer within 90 s it switches
 back to the release of the old commit by itself. Safe to run again at any point. `/opt/sizeup/app`
 and `/opt/sizeup/venv` stay until that old release is pruned (after two more updates), then go.
+
+## Incident-source adapter (station only)
+
+A private, read-only incident-source adapter (#301; the interface it implements: #297, `sizeup/sources/`) lives in a
+repo of its own and is installed and run **on the station only, never on the hub**. Without one set up, nothing below
+happens and updates are exactly as above.
+
+On the station:
+
+```sh
+sudo sizeup-station adapter setup    # asks for the repo (git@github.com:OWNER/REPO.git), the branch or tag
+                                     # (main), its credential variable names; prints a deploy key and the command
+                                     # to add it; then each credential, hidden
+sudo sizeup-station adapter status   # repo, installed commit, installed or failing, which credentials are set
+sudo sizeup-station adapter remove   # key, credentials and [adapter] out; the next release runs without it
+sudo sizeup-station adapter reset [source]   # a source that stopped itself (e.g. a login it won't retry): its reset()
+```
+
+Setup makes `/etc/sizeup/adapter-deploy-key` (ed25519, root 0600) and prints **only its public half**, with the
+command to run on your Mac, where `gh` is signed in (read-only: no `--allow-write`):
+
+```sh
+echo 'ssh-ed25519 AAAA... sizeup-adapter@station' | gh repo deploy-key add - -R OWNER/REPO --title 'sizeup station HOST'
+```
+
+The repo must be on GitHub (`git@github.com:OWNER/REPO.git`); GitHub's host key is pinned in `/etc/sizeup/known_hosts`
+(`StrictHostKeyChecking=yes`).
+
+**Credentials** go into `/etc/sizeup/credentials/<NAME>` (root 0700 / 0600, never echoed, logged or sent to the hub) and
+reach the station service only through systemd `LoadCredential=` (a drop-in,
+`/etc/systemd/system/sizeup-station.service.d/adapter-credentials.conf`; systemd 247+: Ubuntu 24.04 / WSL2 has 255,
+Debian 12 252): files under `$CREDENTIALS_DIRECTORY` for that service only, never in its environment. sizeup takes
+the directory's path out of its environment at start, and every program it starts (rtl_fm, whisper-server,
+trunk-recorder, Kokoro) gets an explicit environment without it (`sizeup/procenv.py`). An adapter reads one with
+`sizeup.cloud.adapters.credential("NAME")`. The config gets `[adapter] repo`, `ref` and `env` (the names only). An
+older release refuses that table, so while a rollback would go to one, it waits in `/etc/sizeup/adapter-pending.json`
+and is written at the next switch (`sizeup/cloud/configupdate.py`, the same rule as the other config additions).
+
+How it updates (`sizeup/cloud/autoupdate.py`): every update, and every check while the station stays on its build,
+fetches the ref over SSH into `/opt/sizeup/adapter.git`. Each adapter commit's wheels (and its dependencies') are
+built **once**, as the sizeup user, checked (no `.pth`, no scripts) and kept root's in
+`/opt/sizeup/adapter-wheels/<commit>-<cpXY>`; root installs them with `--no-deps --no-index --only-binary :all:` into a
+hard-linked copy of the staged release, `releases/<sha>-a<adapter commit>`, and its **preflight** runs as the sizeup
+user with no credentials: it imports, has a `sizeup.incident_sources` entry point, and its module's `self_check()` (if
+it has one) returns `""` or `None`. No adapter or dependency code ever runs as root.
+
+**An adapter problem never holds up a sizeup update.** The release gets the adapter commit at the ref; if that one
+can't be fetched, built, installed or doesn't pass, the one that runs now (its wheels are cached: no rebuild, no
+PyPI); if even that fails, none (the paging decoder is the primary meanwhile, #297). The failure is recorded for the
+adapter commit only (retried after 5, 15, 60, 60 minutes, 5 tries, then failed until its ref moves), and shows as
+`failing` in status, doctor and the hub's Health. A new adapter commit alone is a side-by-side rebuild of the same
+sha, with the same quiet-moment wait, `/healthz` check and switch back. `sizeup-station rollback` goes back to the
+previous release, its adapter with it; to a release with the adapter only while the adapter is set up.
+
+Watching it: `sizeup-station status` / `doctor` ("adapter: NAME abc1234 installed"), the station page's Hub row and
+the hub's Settings > Health (Version and updates > Adapter): the repo's short name, the installed commit, installed
+or running (the runner's word, each source's own health) or failing. Never a credential or the repo's URL.
+
+**Reset from the hub.** An adapter may stop with "failing: login (manual reset needed)" to protect a shared account.
+An admin resets it from the hub: Settings > Health, a Reset button beside each source that is failing (with a
+confirm). That sends a `sources_reset` job over the station's authenticated jobs channel; the station calls the
+adapter's optional `reset()` on that adapter's own thread, before its next poll. `POST /api/sources/reset` (hub and
+station) takes JSON with `X-Sizeup-Action: reset` only, one per source per 5 minutes. The hub logs who pressed it
+(their Access identity), nothing else. An adapter without `reset()`: nothing happens, and the answer says so.
+
+The hub refuses: a hub's config (`[cloud] role = "hub"`) makes setup, the updater and the self-check refuse, and the
+hub process names any adapter installed in its environment in its log and never loads it.
 
 ## Switching over from the Mac
 

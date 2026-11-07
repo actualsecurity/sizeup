@@ -53,6 +53,13 @@ at the switch to a release that has it (deploy/station/install-linux.sh activate
              it is. The id (pcfd-hq) never changes: the hub keys the station's token, history and outbox on it. Not
              deferred: every release reads [station] name, so a switch back is safe with either name.
 
+    adapter  the station's incident-source adapter (GitHub #301): not a once-only update, but what `sudo sizeup-station
+             adapter setup` saved in adapter-pending.json (beside the config: repo, ref and the names of its
+             credential variables, never a value) written as an [adapter] table, replacing the one there. Rollback-
+             safe like hpn-atc: a release from before #301 refuses an [adapter] table, so it waits (the updater reads
+             the pending file meanwhile) until the release being left reads it; then the pending file goes.
+             --remove-adapter takes the table out (any release reads a config without it).
+
 Done ones are listed in a marks file (/etc/sizeup/config-updates, one name per line), so one taken out
 by hand stays out. The config is only ever added to (tones-47 also changes the two values of the one
 entry it names): the text is kept as it is, the result must parse
@@ -62,12 +69,14 @@ entry it names): the text is kept as it is, the result must parse
 Run by the system python3 (stdlib only, like autoupdate.py), from the release being switched to:
 
     python3 -I configupdate.py /etc/sizeup/config.toml /etc/sizeup/config-updates [--leaving /opt/sizeup/releases/<sha>]
+                               [--remove-adapter]
 
 One line per change or skip on stdout; exit 0 unless something couldn't be read or written.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
@@ -497,6 +506,122 @@ def rename_south_end(text: str) -> tuple[str, str]:
     return new, f'south-end: [station] name is now "{SOUTH_END}" (was "{OLD_NAME}"; the id {st.get("id")!r} is kept)'
 
 
+ADAPTER_HEADER = re.compile(r"^[ \t]*\[[ \t]*adapter[ \t]*\][ \t]*(?:#.*)?$", re.M)
+ADAPTER_NOTE = ("# The station's incident-source adapter (#301; sudo sizeup-station adapter setup / remove): a private repo\n"
+                "# read with its own deploy key (/etc/sizeup/adapter-deploy-key). Its credentials are in\n"
+                "# /etc/sizeup/station.env, never here. Installed and run on the station only, never on the hub.\n")
+SAFE = re.compile(r"[A-Za-z0-9@:._/+-]*")
+
+
+def reads_adapter(release: Path | None) -> bool:
+    """Whether the code of that release accepts an [adapter] table (#301; None: no release to go back to)."""
+    if release is None:
+        return True
+    try:
+        return "ADAPTER_KEYS" in (release / "sizeup" / "config.py").read_text(errors="replace")
+    except OSError:
+        return False
+
+
+def _cut_adapter(text: str) -> str:
+    """The text without its [adapter] table (and the note written above it). ValueError if there are two."""
+    heads = list(HEADER.finditer(text))
+    mine = [i for i, h in enumerate(heads) if ADAPTER_HEADER.match(h.group(0))]
+    if not mine:
+        return text
+    if len(mine) > 1:
+        raise ValueError("two [adapter] tables: fix them by hand")
+    i = mine[0]
+    s, e = heads[i].start(), heads[i + 1].start() if i + 1 < len(heads) else len(text)
+    if i + 1 < len(heads):                   # comment lines just above the next table stay with it
+        m = re.search(r"(?:^[ \t]*#[^\n]*\n)+\Z", text[s:e], re.M)
+        if m:
+            e = s + m.start()
+    if text[:s].endswith(ADAPTER_NOTE):
+        s -= len(ADAPTER_NOTE)
+    head, tail = text[:s].rstrip("\n"), text[e:].lstrip("\n")
+    if not tail:
+        return head + "\n" if head else ""
+    return (head + "\n\n" if head else "") + tail
+
+
+def set_adapter(text: str, want: dict) -> tuple[str, str]:
+    """(new text, what was done): [adapter] repo / ref / env as want says, at the end (an old one taken out first).
+    ValueError when the config doesn't parse, a value isn't plain, or the result wouldn't say what was meant."""
+    data = tomllib.loads(text)
+    repo, ref = str(want.get("repo") or ""), str(want.get("ref") or "main")
+    env = [str(x) for x in want.get("env") or []]
+    if not repo or not all(SAFE.fullmatch(v) for v in (repo, ref, *env)):
+        raise ValueError("adapter-pending.json: repo, ref and env must be plain names")
+    rest = _cut_adapter(text)
+    names = ", ".join('"' + x + '"' for x in env)
+    block = f'{ADAPTER_NOTE}[adapter]\nrepo = "{repo}"\nref = "{ref}"\nenv = [{names}]\n'
+    new = rest.rstrip("\n") + "\n\n" + block if rest.strip() else block
+    try:
+        got = tomllib.loads(new)
+    except tomllib.TOMLDecodeError as e:
+        raise ValueError(f"the result wouldn't parse ({e}): nothing changed") from None
+    if got != {**{k: v for k, v in data.items() if k != "adapter"}, "adapter": {"repo": repo, "ref": ref, "env": env}}:
+        raise ValueError("the result doesn't say what was meant: nothing changed")
+    if got == data:
+        return text, "adapter: [adapter] already says that: nothing changed"
+    return new, f"adapter: [adapter] {'updated' if 'adapter' in data else 'added'} (ref {ref})"
+
+
+def remove_adapter(text: str) -> tuple[str, str]:
+    data = tomllib.loads(text)
+    if "adapter" not in data:
+        return text, "adapter: no [adapter] table: nothing changed"
+    new = _cut_adapter(text)
+    try:
+        got = tomllib.loads(new)
+    except tomllib.TOMLDecodeError as e:
+        raise ValueError(f"the result wouldn't parse ({e}): nothing changed") from None
+    if got != {k: v for k, v in data.items() if k != "adapter"}:
+        raise ValueError("the result doesn't say what was meant: nothing changed")
+    return new, "adapter: [adapter] removed"
+
+
+def _write(conf: Path, text: str, new: str, name: str) -> str:
+    """conf replaced by new in one rename, the old text kept beside it: the old file's name."""
+    st = conf.stat()
+    keep = conf.with_name(f"{conf.name}.before-{name}")
+    keep.write_text(text)
+    os.chmod(keep, st.st_mode & 0o777)
+    tmp = conf.with_name(f".{conf.name}.{os.getpid()}")
+    tmp.write_text(new)
+    os.chmod(tmp, st.st_mode & 0o777)
+    if os.geteuid() == 0:
+        os.chown(tmp, st.st_uid, st.st_gid)
+        os.chown(keep, st.st_uid, st.st_gid)
+    os.replace(tmp, conf)
+    return str(keep)
+
+
+def apply_adapter(conf: Path, leaving: Path | None = None, remove: bool = False) -> list[str]:
+    """adapter-pending.json (beside conf) as [adapter], unless the release being left can't read it; or (remove)
+    [adapter] out. Lines to say."""
+    pending = conf.with_name("adapter-pending.json")
+    if not remove and not pending.is_file():
+        return []
+    text = conf.read_text()
+    try:
+        if remove:
+            new, said = remove_adapter(text)
+        else:
+            if not reads_adapter(leaving):
+                return [f"adapter: deferred: the release a rollback would go to ({leaving.name}) can't read [adapter]: "
+                        "written at the next update (the updater uses the saved setup meanwhile)"]
+            new, said = set_adapter(text, json.loads(pending.read_text()))
+    except (ValueError, tomllib.TOMLDecodeError) as e:
+        return [f"adapter: not applied: {e}"]
+    if new != text:
+        said += f" (the old file: {_write(conf, text, new, 'adapter')})"
+    if not remove:
+        pending.unlink(missing_ok=True)
+    return [said]
+
+
 UPDATES = (("fg2", add_fg2), ("tones-47", fix_tones), ("hpn-atc", add_hpn_atc), ("adsb-receiver", add_adsb),
            ("approach-ground", add_approach_ground), ("south-end", rename_south_end))
 NEEDS_LEAVING = {"hpn-atc", "adsb-receiver", "approach-ground"}   # given the release being left (rollback safety)
@@ -508,7 +633,7 @@ def run(conf: Path, marks: Path, leaving: Path | None = None) -> list[str]:
     done = set(marks.read_text().split()) if marks.exists() else set()
     todo = [(n, f) for n, f in UPDATES if n not in done]
     if not todo:
-        return []
+        return apply_adapter(conf, leaving)
     text = conf.read_text()
     out = []
     for name, fn in todo:
@@ -521,27 +646,18 @@ def run(conf: Path, marks: Path, leaving: Path | None = None) -> list[str]:
             out.append(f"{name}: not applied: {e}")
             continue                                  # not marked: tried again at the next update
         if new != text:
-            st = conf.stat()
-            keep = conf.with_name(f"{conf.name}.before-{name}")
-            keep.write_text(text)
-            os.chmod(keep, st.st_mode & 0o777)
-            tmp = conf.with_name(f".{conf.name}.{os.getpid()}")
-            tmp.write_text(new)
-            os.chmod(tmp, st.st_mode & 0o777)
-            if os.geteuid() == 0:
-                os.chown(tmp, st.st_uid, st.st_gid)
-                os.chown(keep, st.st_uid, st.st_gid)
-            os.replace(tmp, conf)
+            said += f" (the old file: {_write(conf, text, new, name)})"
             text = new
-            said += f" (the old file: {keep})"
         out.append(said)
         done.add(name)
         marks.write_text("".join(f"{n}\n" for n, _f in UPDATES if n in done))
-    return out
+    return out + apply_adapter(conf, leaving)
 
 
 def main(argv: list[str]) -> int:
     leaving = None
+    remove = "--remove-adapter" in argv
+    argv = [a for a in argv if a != "--remove-adapter"]
     if len(argv) == 4 and argv[2] == "--leaving":
         leaving = Path(argv[3]) if argv[3] else None
         argv = argv[:2]
@@ -553,7 +669,7 @@ def main(argv: list[str]) -> int:
         print(f"no {conf}: nothing to update")
         return 0
     try:
-        for line in run(conf, marks, leaving):
+        for line in (apply_adapter(conf, leaving, remove=True) if remove else run(conf, marks, leaving)):
             print(line)
     except OSError as e:
         print(f"couldn't update {conf}: {e}", file=sys.stderr)

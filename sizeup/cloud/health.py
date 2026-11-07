@@ -157,6 +157,17 @@ def _read(path: str) -> str:
         return ""
 
 
+def station_adapter(a) -> dict | None:
+    """The station's incident-source adapter as it reported it (#301): state, short repo name, commit, text, and each
+    source's health. Only these keys pass (the station sends no URL or credential; nothing else is shown either)."""
+    if not isinstance(a, dict) or a.get("state") in (None, "", "off"):
+        return None
+    health = [{k: str(h.get(k) or "")[:120] for k in ("source", "label", "state", "reason")}
+              for h in (a.get("health") if isinstance(a.get("health"), list) else []) if isinstance(h, dict)][:10]
+    return {"state": str(a.get("state"))[:20], "repo": str(a.get("repo") or "")[:40],
+            "commit": str(a.get("commit") or "")[:12], "text": str(a.get("text") or "")[:400], "health": health}
+
+
 class Metrics:
     """This machine, cheaply, for the state post every 5 s: stdlib only; Linux reads /proc and /sys, macOS
     (and anything else) gives what it can (load, disk) and None for the rest."""
@@ -479,7 +490,7 @@ class StationHealth:
                         "update": {k: upd.get(k) for k in ("state", "since", "to", "from", "paused") if k in upd},
                         "last": upd.get("last") if isinstance(upd.get("last"), dict) else None,
                         "failed": upd.get("failed") if isinstance(upd.get("failed"), dict) else {},
-                        "behind_since": self._first.get("behind")}
+                        "behind_since": self._first.get("behind"), "adapter": station_adapter(v.get("adapter"))}
         ob = st.get("outbox") if isinstance(st.get("outbox"), dict) else {}
         oldest = ob.get("oldest") if isinstance(ob.get("oldest"), (int, float)) else None
         out["outbox"] = {"pending": int(ob.get("pending") or 0), "oldest": oldest + hub.skew if oldest else None,

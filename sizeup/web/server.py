@@ -358,6 +358,9 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
     hub_says = json.dumps({"error": "this is the hub: station forwarding is switched on the station"}).encode()
     station_ui = role == "station"
 
+    from sizeup.cloud.adapters import ResetLimit
+    reset_limit = ResetLimit()             # POST /api/sources/reset: one per source per 5 min (#301)
+
     def station_says() -> bytes:
         url = (getattr(station_mode, "hub_url", "") or "") if station_mode is not None else ""
         return json.dumps({"error": "this is the station: the CAD is on the hub" + (f" ({url})" if url else ""),
@@ -671,6 +674,39 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                     return self._send(400, json.dumps({"error": f"bad request: {e}"}).encode(), "application/json")
                 self._did(path, body)
                 return self._send(200, json.dumps({"queued": queued}).encode(), "application/json")
+            if path == "/api/sources/reset" and (station is not None or station_mode is not None):
+                # an incident source's reset() (#301): on the hub an admin's (cad.permit above: not in WRITES), sent to
+                # the station as a job; on the station, sudo sizeup-station adapter reset. JSON with X-Sizeup-Action:
+                # reset only (a page elsewhere can't send that without a CORS preflight), one per source per 5 min.
+                ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+                if ctype != "application/json" or self.headers.get("X-Sizeup-Action") != "reset":
+                    self.close_connection = True
+                    return self._send(400, b'{"error":"JSON with X-Sizeup-Action: reset only"}', "application/json")
+                raw = self._body(1024)
+                try:
+                    body = json.loads(raw or b"{}") if raw is not None else None
+                    src = str(body.get("source") or "") if isinstance(body, dict) else ""
+                except ValueError:
+                    src = ""
+                if (wait_s := reset_limit.allow(src)) > 0:
+                    return self._send(429, json.dumps({"error": f"reset again in {wait_s / 60:.0f} min (one per 5 min)"})
+                                      .encode(), "application/json")
+                try:
+                    body = json.loads(raw or b"{}") if raw is not None else None
+                    if not isinstance(body, dict):
+                        raise ValueError("a JSON object, at most 1 KB")
+                    if station is not None and hasattr(station, "reset_source"):
+                        out = station.reset_source(str(body.get("source") or ""), getattr(self.who, "email", "") or "")
+                    elif station_mode is not None:
+                        out = station_mode.sources_reset(body)
+                    else:
+                        return self._send(404, b'{"error":"not here"}', "application/json")
+                except ValueError as e:
+                    return self._send(400, json.dumps({"error": str(e)}).encode(), "application/json")
+                except RuntimeError as e:            # (StationOffline too): the station couldn't
+                    return self._send(503, json.dumps({"error": str(e)[:300]}).encode(), "application/json")
+                self._did(path, body)
+                return self._send(200, json.dumps(out).encode(), "application/json")
             if path in ("/api/station-mode", "/api/station-mode/test") and (station is not None or station_mode is not None):
                 raw = self._body(4096)
                 if station is not None:

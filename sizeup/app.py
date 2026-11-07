@@ -89,6 +89,7 @@ from sizeup.stt import LIVE, RERUN, URGENT, Transcriber, WhisperClient, radio_vo
 from sizeup.talkgroups import TalkgroupPrefs
 from sizeup.tts import TtsService
 from sizeup.web.server import WebServer
+from sizeup.procenv import child_env
 
 ROOT = Path(__file__).resolve().parent.parent
 SPLIT_PAGE_S = 30.0      # voice this soon after a tones-only page for us = that page's voice
@@ -208,7 +209,8 @@ class WhisperService:
                 self.state, self.detail = "starting", "waiting for whisper-server (sizeup-whisper.service)"
             elif self._proc is None or self._proc.poll() is not None:
                 try:
-                    self._proc = subprocess.Popen(self.argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    self._proc = subprocess.Popen(self.argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                                  env=child_env())
                     self.state, self.detail = "starting", "loading model"
                     if self.state_path:
                         try:
@@ -2998,8 +3000,14 @@ def make_app(cfg: Config) -> App:
     or all-in-one, forwarding to the hub as the station when that is on (config.toml's [cloud] role
     = "station" until Settings > System > Station changes it: sizeup/cloud/stationmode.py)."""
     if cfg.cloud_role == "hub":
+        from sizeup.cloud.adapters import hub_guard
         from sizeup.cloud.hub import HubApp
+        hub_guard(cfg.cloud_role, log)     # incident-source adapters: the station's only (#301), never loaded here
         return HubApp(cfg, log=log)
+    # the incident-source adapter's credentials (#301): files under $CREDENTIALS_DIRECTORY only, out of os.environ before
+    # anything is started (sizeup/procenv.py)
+    from sizeup.procenv import take_credentials
+    take_credentials(cfg.adapter_env)
     app = App(cfg)
     from sizeup.cloud.stationmode import StationMode
     StationMode(app, cfg, log=log)     # on: sets app.events / app.link now, so nothing is missed

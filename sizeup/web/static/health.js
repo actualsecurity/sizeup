@@ -120,7 +120,11 @@ const StationHealth = (() => {
         last.radios_s !== undefined && last.radios_s !== null ? `radios ${last.radios_s} s` : ""].filter(Boolean).join(", ") : ""],
       ["Update log", last && last.line ? last.line : ""],
       ["Failed builds", Object.entries(b.failed || {}).map(([k, v]) => `${short(k)}: ${(v && v.why) || "?"}`).join("; ")],
+      // the station's incident-source adapter (#301): what runs, and each source's own health
+      ...(b.adapter ? [["Adapter", b.adapter.text, stateCls(["running", "installed"].includes(b.adapter.state) ? "ok" : "bad")]] : []),
     ]));
+    const failing = ((b.adapter && b.adapter.health) || []).filter((x) => x.state === "failing");
+    if (failing.length) kids.push(resetRow(failing));
     kids.push(el("h3", "hl-sub", "Outbox and system"), dl([
       ["Events waiting", ob.pending || 0, ob.age_s >= (th.outbox_min || 5) * 60 ? "hl-bad" : ""],
       ["Oldest waiting", ob.oldest ? `${when(ob.oldest)} (${longDur(ob.age_s)})` : ""],
@@ -251,6 +255,34 @@ const StationHealth = (() => {
       + (th.hint ? ` (${th.hint.factor}× its usual gap, at least ${th.hint.min_min} min).` : ".")
       + " A serial two dongles share is critical."));
     card.replaceChildren(...kids);
+  }
+
+  // An incident source stopped itself (#301, e.g. a login it won't retry): its reset() on the station, admins only
+  // (POST /api/sources/reset: a sources_reset job; who pressed it is logged on the hub). Only while it is failing.
+  function resetRow(failing) {
+    const r = el("div", "row");
+    for (const x of failing) {
+      const name = x.label || x.source;
+      const btn = el("button", "", `Reset ${name}`);
+      btn.title = x.reason || "failing";
+      btn.addEventListener("click", async () => {
+        if (!confirm(`Reset ${name} on the station?\n${x.reason || "failing"}`)) return;
+        btn.disabled = true;
+        let msg;
+        try {
+          const res = await fetch("/api/sources/reset", { method: "POST",
+                                                           headers: { "Content-Type": "application/json", "X-Sizeup-Action": "reset" },
+                                                           body: JSON.stringify({ source: x.source }) });
+          const d = await res.json().catch(() => ({}));
+          msg = res.ok ? (d.result || "Reset asked") : (d.error || `HTTP ${res.status}`);
+        } catch (e) { msg = String(e); }
+        btn.disabled = false;
+        btn.title = msg;
+        r.append(el("span", "dim small", msg));
+      });
+      r.append(btn);
+    }
+    return r;
   }
 
   function say(text) {               // not the hub, or not an admin: one line, no poll

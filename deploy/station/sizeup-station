@@ -13,6 +13,11 @@
 #                                follow the hub's build by itself (on by default; off = stay put)
 #   sizeup-station rollback      back to the release that ran before (a rename and a restart)
 #   sizeup-station secrets       enter the hub token / Cloudflare Access service token again
+#   sizeup-station adapter setup|status|remove|reset [source]
+#                                the station's private incident-source adapter (#301): setup makes its deploy key
+#                                (prints only the public half), asks for its repo, ref and credentials (hidden, into
+#                                station.env), and the updater installs it into the next release; never on the hub.
+#                                reset: a source that stopped itself (a login it won't retry) calls its reset()
 #   sizeup-station doctor        check everything, say what's wrong and what to do
 #   sizeup-station sdr-serial <index|serial> <new-serial> [--dry-run] [--yes]
 #                                give one dongle a new, unique serial (two with one serial can't be told
@@ -213,7 +218,11 @@ cmd_doctor() {
   if [ -f "$ENVFILE" ]; then
     local perm
     perm=$(stat -c '%U:%G %a' "$ENVFILE")
-    if [ "$perm" = "root:sizeup 640" ]; then ok "$ENVFILE is root:sizeup 640"; else no "$ENVFILE is $perm (want root:sizeup 640): sizeup-station secrets"; fi
+    case "$perm" in
+      "root:root 600") ok "$ENVFILE is root 600" ;;
+      "root:sizeup 640") note "$ENVFILE is root:sizeup 640 (sizeup-station secrets makes it root 600)" ;;
+      *) no "$ENVFILE is $perm (want root 600): sizeup-station secrets" ;;
+    esac
     for k in SIZEUP_STATION_TOKEN SIZEUP_ACCESS_CLIENT_ID SIZEUP_ACCESS_CLIENT_SECRET; do
       if grep -qE "^$k=.+" "$ENVFILE"; then ok "$k is set"; else note "$k is not set"; fi
     done
@@ -302,6 +311,37 @@ case "$cmd" in
     fi
     exec python3 -I "$UPDATER" rollback ;;
   secrets) need_root secrets "$@"; exec bash "$INSTALLER" --secrets ;;
+  adapter)
+    sub="${1:-status}"
+    case "$sub" in
+      setup|remove)
+        need_root adapter "$@"
+        if [ "$(systemctl show -p ActiveState --value sizeup-update.service 2>/dev/null || true)" = activating ]; then
+          echo "An automatic update is running (journalctl -u sizeup-update -f): try again when it's done." >&2
+          exit 1
+        fi
+        rc=0
+        python3 -I "$UPDATER" adapter "$@" || rc=$?
+        # the updater installs (or takes out) the adapter now, side by side
+        [ "$rc" -ne 0 ] || systemctl start --no-block sizeup-update.service 2>/dev/null || true
+        exit "$rc" ;;
+      status) need_root adapter "$@"; exec python3 -I "$UPDATER" adapter status ;;
+      reset)
+        # a source that stopped itself (a login it will not retry): its reset, on its own thread
+        need_root adapter "$@"
+        src="${2:-}"
+        if [ -n "$src" ] && ! printf '%s' "$src" | grep -qE '^[a-z0-9][a-z0-9_-]{0,31}$'; then
+          echo "sizeup-station adapter reset [source]" >&2
+          exit 2
+        fi
+        out=$(curl -sS --max-time 15 -X POST -H 'Content-Type: application/json' -H 'X-Sizeup-Action: reset' \
+              -d "{\"source\": \"$src\"}" \
+              "http://127.0.0.1:$(port)/api/sources/reset" 2>&1 || true)
+        said=$(printf '%s' "$out" | json 'd.get("result") or "FAILED: " + d.get("error", "?")')
+        echo "${said:-FAILED: no answer from the station: $out}"
+        exit 0 ;;
+      *) echo "sizeup-station adapter setup|status|remove|reset [source]" >&2; exit 2 ;;
+    esac ;;
   doctor) need_root doctor "$@"; cmd_doctor ;;
   sdr-serial)
     need_root sdr-serial "$@"
