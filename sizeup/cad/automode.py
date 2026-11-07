@@ -421,7 +421,7 @@ class AutoDispatch:
             return 4
         return RANK.get(L.role(status), 0)
 
-    def _unit_step(self, iid: int, u: dict, intent: str, t: float, op: str, source: str, ref: str) -> None:
+    def _unit_step(self, iid: int, u: dict, intent: str, t: float, op: str, source: str, ref: str) -> int | None:
         """A unit's status from the feed's time: only a unit on this incident now, forward only against this
         assignment's own times and its status (H1: never (re)assigns; a late time never undoes a later step)."""
         L = self.store.lists
@@ -448,8 +448,8 @@ class AutoDispatch:
         if fresh:
             with self.store.tx() as db:
                 db.execute(f"UPDATE assignments SET {col} = ? WHERE id = ?", (t, a["id"]))
-        self._step(iid, "status", source, f"{u['name']} {L.status_phrase(code, u['name'], u['board'])}", t, unit=u,
-                   prev=u["status"], status=code, col=col if fresh else "", ref=ref, event_kind="status")
+        return self._step(iid, "status", source, f"{u['name']} {L.status_phrase(code, u['name'], u['board'])}", t, unit=u,
+                          prev=u["status"], status=code, col=col if fresh else "", ref=ref, event_kind="status")
 
     def _close(self, iid: int, t: float, op: str, label: str, listed) -> None:
         """The feed's incident in service (N1): every unit the feed lists that no person marked is released (in service,
@@ -465,11 +465,14 @@ class AutoDispatch:
             return                                       # closed by automation before (and reopened since): a person's
         ours = self._ours()
         keys = {_key(n) for n in listed or []}
+        released = []
         for r in self.store.q("SELECT u.id, u.name FROM assignments a JOIN units u ON u.id = a.unit_id "
                               "WHERE a.incident_id = ? AND a.cleared_at IS NULL ORDER BY a.id", (iid,)):
             on_list = any(ours.get(k, {}).get("id") == r["id"] for k in keys)
             if on_list and not self._manual(iid, f"unit:{r['name']}"):
-                self._unit_step(iid, self.store.unit(r["id"]), "free", t, op, "county", "in_service")
+                sid = self._unit_step(iid, self.store.unit(r["id"]), "free", t, op, "county", "in_service")
+                if sid:
+                    released.append(sid)
         blocking = self._blocking(iid)
         if blocking:
             if not self.store.one("SELECT 1 AS x FROM auto_steps WHERE incident_id = ? AND kind = 'close?' AND ref = ?",
@@ -477,14 +480,16 @@ class AutoDispatch:
                 self._step(iid, "close?", "county", f"County in service {_hm(t)}: close? (still on it: {', '.join(blocking)})",
                            t, ref=str(t), own_event=True, operator=op)
             return
-        self._do_close(iid, t, op, label)
+        self._do_close(iid, t, op, label, released)
 
     def _blocking(self, iid: int) -> list[str]:
         return [r["name"] for r in self.store.q(
             "SELECT u.name FROM assignments a JOIN units u ON u.id = a.unit_id WHERE a.incident_id = ? AND a.cleared_at IS NULL "
             "ORDER BY a.id", (iid,))]
 
-    def _do_close(self, iid: int, t: float, op: str, label: str) -> None:
+    def _do_close(self, iid: int, t: float, op: str, label: str, released=()) -> None:
+        """Closed; the step remembers the units the close released and those this in service released (released: their
+        steps), so one undo of the close puts them all back (round 3)."""
         if self._manual(iid, "close"):
             return
         codes = self.store.lists.disposition_codes
@@ -493,7 +498,7 @@ class AutoDispatch:
             left = [{"unit_id": r["id"], "status": r["status"]} for r in self.store._left_on(self.store.db, iid)]
         self.store.close(iid, disp, op)
         self._step(iid, "close", "county", f"Closed: {label} in service {_hm(t)}", t, event_kind="closed",
-                   ref=json.dumps(left))
+                   ref=json.dumps({"left": left, "released": list(released)}))
 
     def close_pending(self, iid: int) -> dict | None:
         """The latest "close?" on an open incident not closed by automation since: the step, else None."""
@@ -636,6 +641,8 @@ class AutoDispatch:
                         self.store._event(db, iid, "status", f"{u['name']} off this call (automatic dispatch undone)",
                                           operator, u["id"], now)
                 elif L.role(s["status"]) == "free":      # cleared by the feed / the radio: back on it as it was
+                    if inc["status"] in ("closed", "dismissed"):
+                        raise CadError("the call is closed: undo the close first")
                     if u["incident_id"] is not None:
                         raise CadError(f"{u['name']} is on another call now")
                     if s["prev"] in self.store.return_statuses():
@@ -659,13 +666,34 @@ class AutoDispatch:
             return {"ok": True, "step": sid, "incident_id": iid}
 
     def _restore(self, iid: int, s: dict, operator: str) -> None:
-        """An automatic close undone: each unit it released back as it was, when still free and on no other call."""
+        """An automatic close undone: the units its in service released back on the call at the status they had (their
+        assignment reopened, its times kept; each release step undone too), and those the close itself released back
+        as they were, each when still free and on no other call."""
         try:
-            left = json.loads(s["ref"] or "[]")
+            ref = json.loads(s["ref"] or "[]")
         except ValueError:
-            left = []
+            ref = []
+        left = ref if isinstance(ref, list) else ref.get("left") or []
+        released = [] if isinstance(ref, list) else ref.get("released") or []
         L = self.store.lists
         now = self.clock()
+        for sid in released:
+            r = self.store.one("SELECT * FROM auto_steps WHERE id = ? AND incident_id = ? AND undone_at IS NULL", (sid, iid))
+            if r is None:
+                continue
+            u = self.store.unit(r["unit_id"])
+            a = self.store.one("SELECT id FROM assignments WHERE incident_id = ? AND unit_id = ? AND cleared_at IS NOT NULL "
+                               "ORDER BY cleared_at DESC, id DESC LIMIT 1", (iid, u["id"]))
+            if a is None or u["incident_id"] is not None or L.role(u["status"]) != "free" or r["prev"] not in L.status_ids:
+                continue
+            with self.store.tx() as db:
+                db.execute("UPDATE assignments SET cleared_at = NULL WHERE id = ?", (a["id"],))
+                db.execute("UPDATE units SET status = ?, status_at = ?, out_of_service = '' WHERE id = ?", (r["prev"], now, u["id"]))
+                self.store._history(db, u["id"], u["status"], r["prev"], iid, operator, now, "automatic close undone")
+                self.store._event(db, iid, "status", f"{u['name']} back on this call ({L.status_phrase(r['prev'], u['name'], u['board'])})",
+                                  operator, u["id"], now)
+                db.execute("UPDATE auto_steps SET undone_at = ?, undone_by = ? WHERE id = ?", (now, operator, sid))
+            self.mark_units(iid, [u["name"]], operator)
         for r in left if isinstance(left, list) else []:
             u = self.store.unit(int(r["unit_id"]))
             if u["incident_id"] is None and L.role(u["status"]) == "free" and r.get("status") in L.status_ids:

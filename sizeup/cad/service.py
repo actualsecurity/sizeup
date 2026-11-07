@@ -396,6 +396,10 @@ class Cad:
             raise CadError("step: a number")
         return self.auto.undo(iid, sid, _text(body, "operator", OPERATOR_MAX))
 
+    def _recheck_from(self, iid: int, units: list[dict]) -> None:
+        """Units moved here from other calls: a call of theirs waiting to close goes ahead once its last unit is off (#311)."""
+        self.auto.recheck_close([u.get("incident_id") for u in units if u.get("incident_id") and u.get("incident_id") != iid])
+
     def _by_hand(self, iid: int | None, uids, operator: str) -> None:
         """A person put these units on (or moved them on) the incident: automation leaves them there alone (#311)."""
         if not iid:
@@ -1071,6 +1075,7 @@ class Cad:
         self._by_hand(iid, [u["id"] for u in units], operator)
         moved = self.store.assign(iid, [u["id"] for u in units], operator,
                                   verb="added to the assignment" if kind == "add_on" else "")
+        self._recheck_from(iid, units)
         return self._send(iid, text, units, operator, channel, "add-on" if kind == "add_on" else "dispatch", moved,
                           remarks, plan)
 
@@ -1118,6 +1123,7 @@ class Cad:
         self.store.note(iid, "Upgrade: " + "; ".join(what or ["more units"]), operator, kind="upgrade")
         self._by_hand(iid, [u["id"] for u in units], operator)
         moved = self.store.assign(iid, [u["id"] for u in units], operator, verb="dispatched (upgrade)") if units else []
+        self._recheck_from(iid, units)
         return self._send(iid, text, units, operator, channel, "upgrade", moved, remarks, plan)
 
     def attach(self, iid: int, body: dict) -> dict:
@@ -1141,6 +1147,7 @@ class Cad:
             by = {u["id"]: u for u in units}
             for i in agency:                                            # "RBPD dispatched", "KEYHOLDER notified"
                 self.store.set_unit_status(i, self.lists.agency_attach_status(by[i]["status_set"]), op)
+        self._recheck_from(iid, units)
         return {"ok": True, "moved": moved}
 
     def _add_responding(self, iid: int, units: list[dict], body: dict) -> dict:
@@ -1160,6 +1167,7 @@ class Cad:
             raise CadError(f"Another agency's unit, not {L.name('unit_statuses', status)}: {', '.join(agency)}")
         self._by_hand(iid, [u["id"] for u in units], op)
         moved = self.store.assign(iid, [u["id"] for u in units], op, status=status)
+        self._recheck_from(iid, units)
         return {"ok": True, "moved": moved, "status": status}
 
     def _prune_audio(self) -> None:

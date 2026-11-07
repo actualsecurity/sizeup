@@ -371,3 +371,47 @@ def test_more_common_places_never_count():
     for p in ("Post Office", "The Fire Department", "Train Station", "Parking Garage", "Nursing Home", "Car Wash",
               "Apartment Complex", "Elementary School", "Shopping Center"):
         assert not place_hit(f"units at the {p.lower()}", p), p
+
+
+# -- round 3 ----------------------------------------------------------------------------------------------------------
+
+
+def test_one_undo_of_a_mistaken_in_service_puts_the_call_back(rig):
+    rig.created(units=("E60", "L31"))
+    rig.at(240)
+    rig.change(unit_times={"E60": {"on_location": T0 + 230}, "L31": {"responding": T0 + 200}})
+    assert rig.status("E60") == "OL" and rig.status("L31") == "RS"
+    rig.at(300)
+    rig.change(unit_times={"E60": {"on_location": T0 + 230}, "L31": {"responding": T0 + 200}},
+               times=_times(in_service=T0 + 295))                                  # by mistake
+    assert rig.inc()["status"] == "closed" and rig.status("E60") == "AV" and rig.status("L31") == "AV"
+    rig.cad.auto_undo(rig.iid(), {"step": rig.step("close")["id"], "operator": "Lt. Test"})   # one undo
+    inc = rig.inc()
+    assert inc["status"] == "active" and rig.here("E60") and rig.here("L31")
+    assert rig.status("E60") == "OL" and rig.status("L31") == "RS"                # as before, not Dispatched
+    assert rig.here("E60")["onscene_at"] == T0 + 230                               # its times kept
+    rel = [s for s in inc["auto"]["steps"] if s["kind"] == "status" and s["status"] == "AV"]
+    assert len(rel) == 2 and all(s["undone"] for s in rel)
+
+
+def test_undoing_a_release_on_a_closed_call_says_undo_the_close_first(rig):
+    rig.created(units=("E60", "L31"))
+    rig.at(300)
+    rig.change(times=_times(in_service=T0 + 295))
+    assert rig.inc()["status"] == "closed"
+    s = next(x for x in rig.inc()["auto"]["steps"] if x["kind"] == "status" and x["unit"] == "E60")
+    with pytest.raises(Exception, match="undo the close first"):
+        rig.cad.auto_undo(rig.iid(), {"step": s["id"], "operator": "Lt. Test"})
+    rig.cad.auto_undo(rig.iid(), {"step": rig.step("close")["id"], "operator": "Lt. Test"})
+    assert rig.here("E60") and rig.here("L31") and rig.status("E60") == "DP"
+
+
+def test_moving_the_last_unit_to_another_call_lets_the_pending_close_go(rig):
+    rig.created(units=("E60",))
+    rig.cad.dispatch(rig.iid(), {"unit_ids": [rig.uid("E62")], "operator": "Lt. Test"})
+    rig.at(300)
+    rig.change(times=_times(in_service=T0 + 295))
+    assert rig.inc()["status"] == "active" and rig.inc()["auto"]["close_pending"]
+    other = rig.cad.create({"type": "STRU", "address": "400 Sample St", "operator": "Lt. Test"})
+    rig.cad.dispatch(other["id"], {"unit_ids": [rig.uid("E62")], "operator": "Lt. Test"})
+    assert rig.inc()["status"] == "closed"
