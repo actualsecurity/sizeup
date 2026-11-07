@@ -218,3 +218,8 @@ def _module_rng_per_test(request):
     mod.rng = np.random.default_rng([seed, zlib.crc32(request.node.nodeid.encode())])
     yield
     mod.rng = rng
+
+
+# Private real-data replay (#283, tests/replay.py): the "replay" marker and the replay_sets fixture; a replay test is
+# skipped, with the reason, when the local cache (~/.cache/sizeup-replay or $SIZEUP_REPLAY_DIR) has no data of its kind.
+from tests.replay import pytest_collection_modifyitems, pytest_configure, replay_sets  # noqa: E402,F401

@@ -102,16 +102,13 @@ window.RoadProjects = (() => {
     const live = items.filter((it) => dated(it) && shown(it, filter, now));
     const nAct = live.filter((it) => stateOf(it, now) === "active").length;
     const nNext = live.filter((it) => stateOf(it, now) === "upcoming").length;
-    let text = `${nAct} in effect now, ${nNext} upcoming${filter === "all" ? "" : filter === "today" ? " today" : " this week"}.`;
+    let text = `${nAct} active · ${nNext} upcoming${filter === "all" ? "" : filter === "today" ? " today" : " this week"}`;
     const undated = [...items, ...notices].filter((it) => !dated(it) && stateOf(it, now) !== "ended");
     const n = { project: 0, notice: 0, other: 0 };
     for (const it of undated) n[it.kind === "project" || it.kind === "notice" ? it.kind : "other"] += 1;
-    const parts = [[n.project, "long-term project", "long-term projects"], [n.other, "roadwork item", "roadwork items"],
+    const parts = [[n.project, "project", "projects"], [n.other, "roadwork", "roadwork"],
                    [n.notice, "notice", "notices"]].filter(([k]) => k).map(([k, one, many]) => `${k} ${k === 1 ? one : many}`);
-    if (parts.length) {
-      const list = parts.length === 1 ? parts[0] : `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
-      text += ` ${list} without dates${filter === "all" ? "" : " (under All)"}.`;
-    }
+    if (parts.length) text += ` · undated: ${parts.join(", ")}${filter === "all" ? "" : " (in All)"}`;
     return { nAct, nNext, undated: undated.length, text };
   }
   const filter = () => { const f = stored(FILTER_KEY); return FILTERS.some(([k]) => k === f) ? f : "week"; };
@@ -288,8 +285,8 @@ window.RoadProjects = (() => {
       const it = ((st.data && st.data.items) || []).find((x) => x.id === id);
       if (!it) return;
       this.control.close();
-      const [title, sub, lines, foot] = describe(it, st.data, Date.now() / 1000);
-      this.control.showInfo(title, sub, lines, foot, "rw-info");
+      const [title, sub, lines, foot, tip] = describe(it, st.data, Date.now() / 1000);
+      this.control.showInfo(title, sub, lines, foot, "rw-info", null, tip);
     }
 
     panel() {
@@ -320,15 +317,15 @@ window.RoadProjects = (() => {
         seg.append(b);
       }
       box.append(seg);
-      if (!d) { box.append(h("div", "ml-note", st.err ? `Unavailable here (${st.err})` : "Loading…")); return box; }
+      if (!d) { box.append(h("div", "ml-note", st.err ? `Unavailable (${st.err})` : "Loading…")); return box; }
       const now = Date.now() / 1000;
       const legend = h("div", "ml-note rw-legend");
       const sw = (cls, text) => { const s = h("span", `rw-key ${cls}`); legend.append(s, ` ${text}  `); };
-      sw("rw-key-closed", `closed now`);
-      sw("rw-key-work", `lanes / work now`);
+      sw("rw-key-closed", `closed`);
+      sw("rw-key-work", `lanes / work`);
       sw("rw-key-next", `upcoming`);
       box.append(h("div", "ml-note", summary(d, f, now).text), legend);
-      if (d.reader) box.append(h("div", "ml-note rw-reader", `Road projects: ${d.reader}, so the sources below aren't being read. Settings > Data sources has the details.`));
+      if (d.reader) { const r = h("div", "ml-note rw-reader", `Not being read: ${d.reader}`); r.title = "Settings > Data sources"; box.append(r); }
       for (const s of d.sources || []) {
         const line = h("div", "ml-note rw-source");
         const a = h("a", "", s.label);
@@ -336,8 +333,8 @@ window.RoadProjects = (() => {
         a.target = "_blank";
         a.rel = "noopener";
         // s.reader: this hub's reader isn't reading it (#225), said rather than "waiting" forever
-        const what = !s.on ? `: ${s.why || "off"}` : s.error ? `: ${s.error}` : s.at ? `, updated ${dayClock(s.at)} (${s.n})${s.reader ? ", not being read now" : ""}`
-          : s.reader ? `: not being read (${s.reader})` : ", waiting for the first read";
+        const what = !s.on ? `: ${s.why || "off"}` : s.error ? `: ${s.error}` : s.at ? ` · ${dayClock(s.at)} · ${s.n}${s.reader ? " · not read now" : ""}`
+          : s.reader ? `: not read (${s.reader})` : " · waiting";
         line.append(a, what);
         if (s.on && (s.error || s.reader)) line.classList.add("rw-err");
         box.append(line);
@@ -345,7 +342,7 @@ window.RoadProjects = (() => {
       const unplaced = (d.notices || []).filter((n) => shown(n, f, now));      // undated: under All only (#237)
       if (unplaced.length) {
         const fold = h("details", "ml-fold rw-notices");
-        const sum = h("summary", "ml-sub", "Notices not on the map");
+        const sum = h("summary", "ml-sub", "Unmapped notices");
         sum.append(h("span", "ml-count", String(unplaced.length)));
         fold.append(sum);
         for (const n of unplaced) {
@@ -354,8 +351,9 @@ window.RoadProjects = (() => {
           a.href = n.link;
           a.target = "_blank";
           a.rel = "noopener";
-          row.append(a, h("span", "dim small", ` ${n.source}${n.updated ? `, posted ${dayClock(n.updated, true)}` : ""}`));
-          if (n.place_how) row.append(h("div", "ml-note", n.place_how));
+          row.append(a, h("span", "dim small", ` ${n.source}${n.updated ? ` · ${dayClock(n.updated, true)}` : ""}`));
+          if (n.place_how && window.Help && Help.info) row.append(" ", Help.info(`On the map: ${n.place_how}`, "Where it is drawn"));
+          else if (n.place_how) row.title = n.place_how;
           fold.append(row);
         }
         box.append(fold);
@@ -365,45 +363,46 @@ window.RoadProjects = (() => {
     }
   }
 
-  // the click box: [title, sub, lines, foot]
+  // the click box (#278: one fact a line; the source's own words quoted; the method in the "i"): [title, sub, lines, foot, tip]
   function describe(it, d, now) {
     const stt = stateOf(it, now), cur = current(it, now), next = nextStart(it, now);
     const title = (CLOSURE[it.closure] || KIND[it.kind] || "Roadwork") + (it.road ? `: ${it.road}` : "");
-    const where = [it.cross_from && it.cross_to ? `between ${it.cross_from} and ${it.cross_to}` : it.cross_from ? `at ${it.cross_from}` : "",
-                   it.dir].filter(Boolean).join(", ");
-    const lines = [];
+    const where = [it.cross_from && it.cross_to ? `${it.cross_from} to ${it.cross_to}` : it.cross_from ? `at ${it.cross_from}` : "",
+                   it.dir].filter(Boolean).join(" · ");
+    const lines = [], tip = [];
     if (stt === "active" && it.kind === "project") lines.push("In construction");
-    else if (stt === "active") lines.push(cur && cur[1] != null ? `In effect now, until ${dayClock(cur[1])}` : "In effect now, no end time given");
-    else if (stt === "upcoming" && next != null) lines.push(`Upcoming: starts ${dayClock(next, true)}`);
-    else if (it.kind === "notice") lines.push("No dates given as data: see the notice");
-    const endText = it.end_day ? `${it.end_estimated ? "estimated completion" : "completion date"} ${dayText(it.end_day)}`
-      : it.end != null ? dayClock(it.end, true) : `no end time given${it.end_text ? ` (${it.end_text})` : ""}`;
-    const dates = `${it.start != null ? dayClock(it.start, true) : "start not given"} to ${endText}`;
-    if (it.kind !== "notice" || it.start != null || it.end != null) lines.push(`Dates: ${dates}`);
-    if (it.kind === "project") lines.push("No daily hours, lanes or closures given by the source");
+    else if (stt === "active") lines.push(cur && cur[1] != null ? `Now · until ${dayClock(cur[1])}` : "Now · no end time");
+    else if (stt === "upcoming" && next != null) lines.push(`Starts ${dayClock(next, true)}`);
+    else if (it.kind === "notice") lines.push("No dates: see the notice");
+    const endText = it.end_day ? `${it.end_estimated ? "est. done" : "done"} ${dayText(it.end_day)}`
+      : it.end != null ? dayClock(it.end, true) : (it.end_text || "end ?");      // end_text: the source's words or ours: unquoted
+    const dates = `${it.start != null ? dayClock(it.start, true) : "start ?"} → ${endText}`;
+    if (it.kind !== "notice" || it.start != null || it.end != null) lines.push(dates);
+    if (it.kind === "project") tip.push("No daily hours, lanes or closures given by the source");
     if ((it.facts || []).length) lines.push(it.facts.join(" · "));
-    if (it.start_text && it.start == null) lines.push(`Start, as the source says: ${it.start_text}`);
+    if (it.start_text && it.start == null) lines.push(`Start: "${it.start_text}"`);
     for (const hr of it.hours || []) {
-      const days = (hr.days || []).length ? hr.days.map((x) => ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][x]).join(", ") : "every day";
-      lines.push(`Hours: ${hr.from} to ${hr.to}, ${days}`);
+      const days = (hr.days || []).length ? hr.days.map((x) => ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][x]).join(", ") : "daily";
+      lines.push(`${hr.from}–${hr.to} · ${days}`);
     }
-    if (it.hours_text) lines.push(`Hours, as the source says: ${it.hours_text}`);
+    if (it.hours_text) lines.push(`Hours: "${it.hours_text}"`);
     if (it.lanes) lines.push(`Lanes: ${it.lanes}`);
     if (it.detour) lines.push(`Detour: ${it.detour}`);
     if (it.description && it.description !== it.title) lines.push(it.description);
     else if (it.title && it.title !== title) lines.push(it.title);
-    if (it.place_how) lines.push(`On the map: ${it.place_how}`);
+    if (it.place_how) tip.push(`On the map: ${it.place_how}`);
     const src = ((d && d.sources) || []).find((s) => s.short === it.source);
-    const also = (it.also || []).length ? ` Also from ${it.also.join(", ")}.` : "";
+    if ((it.also || []).length) tip.push(`Also from ${it.also.join(", ")}`);
+    tip.push(`Times in ${tz().replace("_", " ")}`);
     if (it.link) {
       const row = h("div", "rw-link");
-      const a = h("a", "", "The source's page");
+      const a = h("a", "", "Source");
       a.href = it.link;
       a.target = "_blank";
       a.rel = "noopener";
       row.append(a);
       if (it.flyer) {
-        const f = h("a", "", "the flyer");
+        const f = h("a", "", "Flyer");
         f.href = it.flyer;
         f.target = "_blank";
         f.rel = "noopener";
@@ -411,8 +410,8 @@ window.RoadProjects = (() => {
       }
       lines.push(row);
     }
-    const foot = `${src ? src.label : it.source}${it.updated ? `, updated ${dayClock(it.updated, true)}` : ""}.${also} Times in ${tz().replace("_", " ")}.`;
-    return [title, where, lines, foot];
+    const foot = [src ? src.label : it.source, it.updated ? dayClock(it.updated, true) : ""].filter(Boolean).join(" · ");
+    return [title, where, lines, foot, tip.join("\n")];
   }
 
   if (window.MapLayers && MapLayers.addGroup) MapLayers.addGroup({ attach: (control) => new RoadMap(control) });

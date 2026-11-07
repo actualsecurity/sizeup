@@ -103,7 +103,7 @@ def test_nysdot_projects_in_construction_one_record_per_project_with_its_complet
     assert windows(by["nysdot:881495"], NOW) == []             # its completion date (2026-09-07) has passed: not shown
     line = note_line(us1, [None, us1["end"]], NOW)
     assert line.startswith("Construction project: This project will correct existing pavement deficiencies")
-    assert line.endswith("(NYSDOT: in construction, completion date Oct 26, 2027; no closure times given)")
+    assert line.endswith("(NYSDOT · in construction · done Oct 26, 2027)")
 
 
 def test_ctdot_work_areas_in_greenwich_road_work_only():
@@ -150,7 +150,7 @@ def test_the_thruway_roadwork_comes_through_roads_not_a_second_fetch():
     assert (r["road"], r["dir"], r["cross_from"], r["cross_to"]) == ("I-287", "Westbound", "exit 8", "exit 8 - I-87")
     assert r["end"] is None and r["no_end"] and r["end_text"] == "Until further notice" and r["start"] is None
     assert note_line(r, windows(r, NOW)[0], NOW) == \
-        "Roadwork: I-287 between exit 8 and exit 8 - I-87 no end time given (Until further notice) (Thruway)"
+        "Roadwork: I-287 between exit 8 and exit 8 - I-87 no end time (Until further notice) (Thruway)"
     assert len(f.calls) == 1                                               # roads read it once; this module read nothing
     src = {s["name"]: s for s in p.sources()}
     assert src["thruway"]["on"] and src["thruway"]["n"] == 1
@@ -197,7 +197,7 @@ def test_the_line_says_what_where_until_and_whose_in_the_console_timezone():
     assert note_line(rec, [NOW + 7 * 3600, NOW + 15 * 3600], NOW) == \
         "Road closed: Westchester Ave between N Pearl St and King St from 9:00 PM until Oct 16 5:00 AM (511NY)"
     assert note_line(rec | {"closure": "lanes"}, [None, None], NOW) == \
-        "Lane closure: Westchester Ave between N Pearl St and King St no end time given (511NY)"
+        "Lane closure: Westchester Ave between N Pearl St and King St no end time (511NY)"
     assert note_line(rec, [NOW - 7200, NOW - 3600], NOW).endswith("ended 1:00 PM (511NY)")
 
 
@@ -410,11 +410,9 @@ def test_today_and_this_week_show_dated_items_in_their_window_and_all_shows_the_
     assert "wzdx:wz-1" not in out["eight_days"]["week"] and "wzdx:wz-1" in out["eight_days"]["all"]
     # the panel's line: dated items only; the undated ones counted, and where they are
     s = now["summary"]
-    assert s["week"]["text"] == ("2 in effect now, 2 upcoming this week. 2 long-term projects, 1 roadwork item and "
-                                 "3 notices without dates (under All).")
-    assert s["today"]["text"].startswith("2 in effect now, 1 upcoming today. 2 long-term projects")
-    assert s["all"]["text"] == ("2 in effect now, 3 upcoming. 2 long-term projects, 1 roadwork item and 3 notices "
-                                "without dates.")
+    assert s["week"]["text"] == "2 active · 2 upcoming this week · undated: 2 projects, 1 roadwork, 3 notices (in All)"
+    assert s["today"]["text"].startswith("2 active · 1 upcoming today · undated: 2 projects")
+    assert s["all"]["text"] == "2 active · 3 upcoming · undated: 2 projects, 1 roadwork, 3 notices"
     assert s["week"]["undated"] == 6
     js = (STATIC / "roadprojects.js").read_text()
     assert "(d.notices || []).filter((n) => shown(n, f, now))" in js and "summary(d, f, now).text" in js
@@ -623,7 +621,7 @@ def test_the_reader_survives_a_surprise_and_says_so_while_it_lasts(gaz, monkeypa
                                                                 ("pc_alerts", "nysdot"))
     from sizeup.datasources import roadwork_source
     st = roadwork_source(q).status()
-    assert st["error"].startswith("Road projects: the reader stopped") and st["next"] is None
+    assert st["error"].startswith("Not being read: the reader stopped") and st["next"] is None
 
 
 def test_a_save_that_fails_is_logged_and_the_read_kept(gaz, tmp_path, monkeypatch):
@@ -670,7 +668,7 @@ def test_the_page_draws_the_group_the_filter_and_the_incident_line():
     assert "cad.hooks.push(renderIncident)" in js and 'aria-pressed' in js
     assert 'token("--err"' in js and 'token("--warn"' in js and 'token("--info"' in js       # the design's colours
     assert 'filter: ["all", line, ["!", now]]' in js and '"line-dasharray": [1.2, 1.2] } }, before);     // upcoming: dashed' in js
-    assert "no end time given" in js and "start not given" in js
+    assert "no end time" in js and "start ?" in js
     lines = js.splitlines()
     uses = [ln for ln in lines if "localStorage." in ln]
     assert len(uses) == 2 and all("try {" in ln for ln in uses)

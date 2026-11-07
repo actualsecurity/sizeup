@@ -237,3 +237,8 @@ __marimo__/
 .streamlit/secrets.toml
 
 deploy/hub/*.sqlite*
+
+# the private replay cache and Litestream LTX downloads (#283) if put inside the repo: never committed
+sizeup-replay/
+.sizeup-replay/
+*.ltx

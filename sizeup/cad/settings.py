@@ -635,7 +635,7 @@ class Editor:
                           "edited": "voice" in d or "speed" in d,
                           "speed": getattr(self.cad.s, "speed", 1.0), "rate_wpm": getattr(self.cad.s, "rate_wpm", 0),
                           "fallback": getattr(self.cad.s, "fallback_voice", ""), "repeat": getattr(self.cad.s, "repeat", 0)},
-                "transmit": {"enabled": self.cad.transmitter.enabled, "note": "Transmit is off: logged and played here only"},
+                "transmit": {"enabled": self.cad.transmitter.enabled, "note": "Transmit off: logged, played here only"},
                 "weather_speak": {"value": bool(d.get("weather_speak", False)), "default": False, "edited": "weather_speak" in d},
                 "department": self.cad.s.department,
                 "eta": self._eta_page(L, d)}

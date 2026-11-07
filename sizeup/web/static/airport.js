@@ -53,7 +53,7 @@ window.AirportLayer = (() => {
     else load();
   }
   const ready = () => !!store.data;
-  const note = () => (store.failed ? "Airport layer unavailable here" : "");
+  const note = () => (store.failed ? "Airport layer unavailable" : "");
   const credit = () => (store.data ? "Airport: OpenStreetMap (ODbL), FAA CIFP" : "");
 
   // ---- where the field is: an event there turns the layer on, and the map looks at the whole field ---------

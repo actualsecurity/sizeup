@@ -253,13 +253,14 @@ def test_a_page_never_attaches_to_a_manual_incident(tmp_path):
     rig.cad.store.assign(m["id"], [rig.uid("E60")], "Lt. Test")
     rig.at(600)
     got = rig.page()
-    assert got["id"] != m["id"] and got["source"] == "60 Control page" and rig.feed_lines(m["id"]) == []
+    assert got["id"] != m["id"] and got["source"] == "60 Control page"
+    assert rig.feed_lines(m["id"]) == [f"Possibly the same as #{got['id']}: 12 Example Avenue"]    # noted, not buried
     # the same place as a manual call: its own incident still, noted on both
     same = rig.cad.create({"type": "ALARM", "subtype": "COMM", "address": "400 Sample Street", "operator": "Lt. Test"})
     rig.at(700)
     p2 = rig.page("p2", OTHER_PAGE, fresh=True)
     assert p2["id"] not in (m["id"], same["id"])
-    assert rig.feed_lines(p2["id"]) == [f"Possibly the same as #{same['number']}: 400 Sample Street"]
+    assert f"Possibly the same as #{same['number']}: 400 Sample Street" in rig.feed_lines(p2["id"])
     assert rig.feed_lines(same["id"]) == [f"Possibly the same as #{p2['id']}: 400 Sample Street"]
 
 
@@ -272,7 +273,8 @@ def test_two_places_are_two_calls_whatever_the_units_and_cleared_units_never_mat
     rig.feed.recover()
     rig.feed.put("B1", type="STRU", location="400 Sample St", units=("E60",), times={"dispatched": T0 + 60})
     rig.poll()
-    assert len(rig.incidents()) == 2 and rig.feed_lines(page["id"]) == []   # a shared unit never joins two places
+    assert len(rig.incidents()) == 2                       # a shared unit never joins two places, only notes them
+    assert rig.feed_lines(page["id"]) == ["Possibly the same as #2: 400 Sample St"]
     # a cleared unit is not on the call any more
     c = rig.cad.create({"type": "EMS", "address": "", "operator": "Lt. Test"}) if False else None
     m = rig.cad.store.incident(page["id"])
@@ -285,13 +287,13 @@ def test_two_places_are_two_calls_whatever_the_units_and_cleared_units_never_mat
     assert rig.incidents()[-1]["source_ref"] == "feed:county:C1" and c is None
 
 
-def test_units_alone_match_only_when_one_side_has_no_location(tmp_path):
+def test_units_alone_match_only_when_the_incident_has_no_location(tmp_path):
     rig = Rig(tmp_path)
-    page = rig.page()                                      # E60, L31 at 12 Example Avenue, queued
-    rig.at(40)
-    rig.feed.put("A1", type="ALARM", location="", units=("E60",), times={"dispatched": T0 + 30})
+    rig.feed.put("A1", type="ALARM", location="", units=("E60",), times={"dispatched": T0})
     rig.poll()
-    assert [i["id"] for i in rig.incidents()] == [page["id"]]
+    [a] = rig.incidents()
+    rig.at(40)
+    assert rig.page()["id"] == a["id"]                     # the page has the place, the feed's incident none yet
 
 
 def test_a_feed_event_never_joins_an_accepted_incident_it_didnt_make(tmp_path):
@@ -806,3 +808,150 @@ def test_a_reset_runs_on_the_adapters_own_thread_and_starts_the_back_off_over(tm
     r2.resets.request("plain")
     r2._reset_due(r2.runs[0])
     assert any("no reset()" in m for m in lines)
+
+
+# -- the second review: no-location reports, address formats, triggers in an outage, edits while queued ----------------
+
+
+PAGE_NO_PLACE = "Port Chester Fire Department, Engine 60, respond to an activated fire alarm. Time out 1440."
+
+
+def test_a_page_with_no_location_never_attaches_to_a_feed_incident_by_units(tmp_path):
+    """Review 2 #1: the feed down, paging the backup: a page naming E60 but no place is a new call, noted."""
+    rig = Rig(tmp_path)
+    rig.feed.put("A1", type="STRU", location="12 Example Ave", units=("E60",), times={"dispatched": T0})
+    rig.poll()
+    [a] = rig.incidents()
+    rig.feed.outage("failing", "x")
+    rig.at(600)
+    rig.poll()
+    got = rig.page("p2", PAGE_NO_PLACE)
+    assert got["id"] != a["id"] and got["source"] == "60 Control page"
+    assert any(x.startswith(f"Possibly the same as #{a['id']}") for x in rig.feed_lines(got["id"]))
+    assert any(x.startswith(f"Possibly the same as #{got['id']}") for x in rig.feed_lines(a["id"]))
+
+
+def test_a_feed_event_with_no_location_never_attaches_to_a_page_s_incident_by_units(tmp_path):
+    rig = Rig(tmp_path)
+    rig.feed.outage("failing", "x")
+    rig.poll()
+    p = rig.page("p1")
+    rig.at(300)
+    rig.feed.recover()
+    rig.feed.put("B1", type="EMS", location="", units=("E60",), times={"dispatched": T0 + 290})
+    rig.poll()
+    a, b = rig.incidents()
+    assert (a["id"], b["source_ref"]) == (p["id"], "feed:county:B1")
+    assert any(x.startswith(f"Possibly the same as #{p['id']}") for x in rig.feed_lines(b["id"]))
+
+
+# The external CAD's location formats (synthetic names only) against ours: same place?
+FORMATS = [
+    ("12 Example Avenue", "12 EXAMPLE AVENUE : @SAMPLE PLACE", True),
+    ("12 Example Avenue", "12 EXAMPLE AVE @ SAMPLE PLACE", True),
+    ("12 Example Avenue", "12 EXAMPLE AVE   : @SAMPLE SCHOOL - EXAMPLE VILLAGE EXAMPLE_TOWN", True),
+    ("12 Example Avenue", "12 EXAMPLE AVE, SAMPLE TOWN", True),
+    ("12 Example Avenue", "12 EXAMPLE AVE SAMPLE TOWN", True),
+    ("12 Example Avenue", "12 EXAMPLE AVE 3RD FL", True),
+    ("12 Example Avenue", "12 EXAMPLE AVE 2ND FLOOR", True),
+    ("12 Example Avenue", "12 EXAMPLE AVE APT 3", True),
+    ("12 Example Avenue", "12-14 EXAMPLE AVE", True),
+    ("12 Example Avenue", "12 EXAMPLE AVE (SAMPLE TOWN)", True),
+    ("12 Example Avenue", "12 EXAMPLE AVE; SAMPLE PLACE", True),
+    ("12 Example Avenue", "12 EXAMPLE AV", True),
+    ("12 Example Avenue", "12 EXAMPLE AVE #2", True),
+    ("12 Example Ave", "12 EXAMPLE AVE [SAMPLE BUSINESS]", True),
+    ("12 Example Ave", "12 EXAMPLE AVENUE,ST", True),
+    ("12 Example Ave", "12 EXAMPLE AVE BLDG 2", True),
+    ("12 Example Ave", "@SAMPLE PLACE (12 EXAMPLE AVE)", True),
+    ("Elm St & Example Ave", "EXAMPLE AVE / ELM ST", True),
+    ("Elm Street and Example Avenue", "ELM ST/EXAMPLE AVE", True),
+    ("Elm St at Example Ave", "ELM ST & EXAMPLE AVE", True),
+    ("N Elm St & Example Ave", "ELM ST & EXAMPLE AVE", True),
+    ("Elm St & Example Ave", "ELM ST / EXAMPLE AVE / OAK ST", False),
+    ("12 Elm Street", "12 N ELM ST", True),
+    ("12 N Elm St", "12 S ELM ST", False),
+    ("12 Saint Sample Pl", "12 ST SAMPLE PL", True),
+    ("12 Oak St", "12 OAK STREET UNIT B", True),
+    ("12 Sampleway", "12 SAMPLEWAY", True),
+    ("12 Sampleway", "12 SAMPLEWAY @SAMPLE PLACE", True),
+    ("14 Example Ave", "12 EXAMPLE AVE", False),
+    ("Oak St", "500 OAK ST", False),
+    ("Elm St & Example Ave", "100 EXAMPLE AVE", False),
+]
+
+
+@pytest.mark.parametrize("ours,theirs,same", FORMATS)
+def test_the_external_cads_location_formats(ours, theirs, same):
+    assert same_place(ours, theirs) is same
+    assert same_place(theirs, ours) is same
+
+
+def test_a_duplicate_is_never_silent(tmp_path):
+    """Review 2 #2: two places sharing units within the window: two incidents, each noted with the other."""
+    rig = Rig(tmp_path)
+    rig.feed.put("A1", type="ALARM/COMM", location="400 SAMPLE ST : @SAMPLE PLACE", units=("E60", "L31"),
+                 times={"dispatched": T0})
+    rig.poll()
+    rig.at(45)
+    page = rig.page("p1")                                  # E60, L31 at 12 Example Avenue
+    a = rig.incidents()[0]
+    assert page["id"] != a["id"]
+    assert any(x.startswith(f"Possibly the same as #{a['id']}") for x in rig.feed_lines(page["id"]))
+    assert any(x.startswith(f"Possibly the same as #{page['id']}") for x in rig.feed_lines(a["id"]))
+    # the real format, the same place: attached, not a duplicate
+    rig.at(60)
+    rig.feed.put("A2", type="ALARM/COMM", location="12 EXAMPLE AVENUE   : @SAMPLE SCHOOL - EXAMPLE VILLAGE EXAMPLE_TOWN",
+                 units=("E60",), times={"dispatched": T0 + 50})
+    rig.poll()
+    assert len(rig.incidents()) == 2 and rig.cad.store.incident(page["id"])["type"] == "ALARM"
+
+
+def test_triggers_never_outpace_the_back_off(tmp_path):
+    """Review 2 #3: while the adapter is failing, a trigger never polls the external app sooner."""
+    clock = Clock()
+
+    class Down(FakeFeed):
+        def health(self):
+            return Health("ok")                            # even when health() says ok, failing polls hold it back
+    feed = Down(clock=clock)
+    feed.outage("failing", "x", raise_=True)
+    r = SourceRunner([feed], lambda k, d: None, log=lambda m: None, clock=clock)
+    r.step(r.runs[0])
+    assert r.runs[0].fails == 1
+    clock.t += 5
+    assert r.trigger("paging tones") == 0 and not r.runs[0].wake.is_set()
+    feed.recover()
+    r.step(r.runs[0])
+    clock.t += 5
+    assert r.trigger("paging tones") == 1
+    r2 = SourceRunner([FakeFeed(clock=clock)], lambda k, d: None, log=lambda m: None, clock=clock)
+    r2.runs[0].a.outage("backing_off", "HTTP 429")
+    r2.step(r2.runs[0])                                    # health says backing off: no triggers either
+    clock.t += 5
+    assert r2.trigger("radio pre-alert") == 0
+
+
+def test_a_person_s_edit_stands_on_a_queued_incident_too(tmp_path):
+    rig = Rig(tmp_path)
+    rig.feed.put("A1", type="ALARM/COMM", location="12 EXAMPLE AVE", units=("E60",), times={"dispatched": T0})
+    rig.poll()
+    [inc] = rig.incidents()
+    rig.cad.update(inc["id"], {"address": "400 Sample St", "operator": "Lt. Test"})     # still queued
+    rig.at(30)
+    rig.feed.change("A1", location="14 EXAMPLE AVE")
+    rig.poll()
+    assert rig.cad.store.incident(inc["id"])["address"] == "400 Sample St"
+    assert rig.cad.sources.manual(inc["id"]) == {"location"}
+    rig.at(40)
+    rig.page("p1")                                         # a page and the feed never mark anything as a person's
+    rig.feed.change("A1", type="STRU")
+    rig.poll()
+    assert rig.cad.sources.manual(inc["id"]) == {"location"}
+
+
+def test_a_feed_incident_is_received_via_the_feed_not_60_control(tmp_path):
+    rig = Rig(tmp_path)
+    rig.feed.put("A1", type="ALARM", location="12 Example Ave", units=("E60",), times={"dispatched": T0})
+    rig.poll()
+    assert rig.incidents()[0]["received_via"] == ""        # the console shows "Via County feed" from inc.feed

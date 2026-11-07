@@ -634,7 +634,7 @@ def test_trains_are_drawn_as_trains_along_the_line():
     assert "?have=" in js and "static_same" in js
     assert "const POLL_MS = 5000," in js and "const BACKOFF_MS = [10000, 60000];" in js        # every 5 s; a failure: to a minute
     assert "Math.min(BACKOFF_MS[1], BACKOFF_MS[0] * 2 ** (store.fails - 1))" in js and "console.warn(`trains: " in js
-    assert "doesn't say how many cars" in js and "Length not given by the MTA" in js
+    assert "the MTA doesn't say" in js and "Cars: not given by the MTA" in js              # #278: in the hover / "i"
     assert "localStorage" not in js
 
 
@@ -642,7 +642,7 @@ def test_a_train_without_the_mtas_count_looks_like_a_train_of_cars():
     """#164: not one long body but the look of a typical train, the same for every one, and the box says so."""
     js = (STATIC / "trains.js").read_text()
     assert "LOOK_CARS = 6" in js and "(cars | 0) || LOOK_CARS" in js
-    assert "Length not given by the MTA (drawn as ${LOOK_CARS} cars for every train)" in js
+    assert "Cars: not given by the MTA (drawn as ${LOOK_CARS})" in js                 # #278: in the box's "i"
     assert "PLAIN" not in js                                                         # no single-body train left
 
 
