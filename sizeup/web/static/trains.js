@@ -72,6 +72,7 @@ window.TrainLayer = (() => {
                                                               hour12: false, timeZone: tz() });
     } catch (_) { return ""; }
   }
+  const cap = (s) => (s ? s[0].toUpperCase() + s.slice(1) : s);     // the hub's why_not() is lower case ("off (…)")
   function late(s) {
     if (s === null || s === undefined) return "";
     const m = Math.round(s / 60);
@@ -469,8 +470,8 @@ window.TrainLayer = (() => {
         why = t.mode === "stopped" ? "Estimated: at the station, the MTA hasn't said it left"
           : "Estimated: on its run between its stations, by the MTA's times";
       }
-      if (w.stale) { say = `Feed stale${d.at ? ` · ${hm(d.at, true)}` : ""}`; why += ". Feed out of date: held where it was"; }
-      return { say: say.trim(), why };
+      if (w.stale) why += ". Feed out of date: held where it was";
+      return { say: say.trim(), why, stale: w.stale ? `Stale${d.at ? ` · ${hm(d.at, true)}` : ""}` : "" };
     }
 
     clicked(e) {
@@ -493,10 +494,11 @@ window.TrainLayer = (() => {
         const t = (d.trains || []).find((x) => x.id === f.properties.id);
         if (!t) return;
         const lines = [];
+        const pos = this.where(t, d);
+        if (pos.stale) lines.push(h("div", "warn", pos.stale));      // #278: up top, in the warning colour
         lines.push([t.dir_label, t.next_stop ? `Next ${t.next_stop}${t.next_time ? ` ${hm(t.next_time)}` : ""}` : "", t.track ? `Trk ${t.track}` : ""]
           .filter(Boolean).join(" · "));
         const said = (t.status || "").toLowerCase();         // the MTA's word, unless the delay already says it
-        const pos = this.where(t, d);
         const status = [late(t.delay_s), said && said !== "on-time" && !(said === "late" && t.delay_s > 0) ? t.status : "",
                         pos.say, t.cars ? `${t.cars} car${t.cars === 1 ? "" : "s"}` : ""].filter(Boolean).join(" · ");
         if (status) lines.push(status);
@@ -537,15 +539,19 @@ window.TrainLayer = (() => {
       box.append(lab);
       if (!this.isOn()) return box;
       if (!d) { box.append(h("div", "ml-note", "Loading…")); return box; }
-      if (!d.configured || d.note) { box.append(h("div", "ml-note", d.note || "Not configured")); return box; }
+      if (!d.configured || d.note) { box.append(h("div", "ml-note", cap(d.note) || "Not configured")); return box; }
       const n = (d.trains || []).length;
       const span = (d.stations || []).length > 1 ? ` · ${d.stations[0].name}–${d.stations[d.stations.length - 1].name}` : "";
       box.append(h("div", "ml-note", `${n} train${n === 1 ? "" : "s"}${span}`));
-      const note = h("div", "ml-note");
-      note.title = "Hollow: position estimated. Between reports a train runs on along its track, never past its next reporting "
-        + "point or stop; faded: the feed is out of date and it is held where it was. "
+      // the legend on screen (hollow, faded = stale); the method behind an "i" (a tap on a tablet)
+      const legend = h("div", "ml-note", "Hollow: estimated · faded: stale, held ");
+      const how = "Between reports a train runs on along its track, never past its next reporting point or stop; "
+        + "faded: the feed is out of date and it is held where it was. "
         + ((d.trains || []).some((t) => t.cars) ? "Cars as the MTA gives them." : `Drawn as ${LOOK_CARS} cars (the MTA doesn't say).`)
         + ` ${d.disclaimer || ""}.`;
+      if (window.Help && Help.info) legend.append(Help.info(how, "How trains are drawn")); else legend.title = how;
+      box.append(legend);
+      const note = h("div", "ml-note");
       note.append(["MTA", d.at ? hm(d.at, true) : ""].filter(Boolean).join(" · "), " ");
       if (d.error) note.append(`(${d.error}) `);
       const terms = h("a", "", "Terms");
@@ -610,7 +616,7 @@ window.TrainLayer = (() => {
     head.addEventListener("click", () => { st.open = !st.open; draw(st, host); });
     host.replaceChildren(head);
     if (!st.open) return;
-    if (!d.configured || d.note) { host.append(h("div", "ml-note tr-note", d.note || "Not configured")); return; }
+    if (!d.configured || d.note) { host.append(h("div", "ml-note tr-note", cap(d.note) || "Not configured")); return; }
     const labels = d.dir_labels || { inbound: "Toward New York", outbound: "Toward New Haven" };
     const grid = h("div", "tr-dirs");
     for (const dir of ["inbound", "outbound"]) {

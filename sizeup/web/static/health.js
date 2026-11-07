@@ -84,7 +84,8 @@ const StationHealth = (() => {
     const push = n.on ? `Push on · ${(n.server || "").replace(/^https?:\/\//, "")}` + (n.failed ? ` · ${n.failed} failed: ${n.last_error}` : "")
       : "Push off";
     const pushEl = el("span", "dim small", push);
-    if (!n.on) pushEl.title = "No status topic in effect: Settings > System > Push notifications, SSM /sizeup-hub/status-topic or [alerts]";
+    // #278: why it is off and where to set it, behind an "i" (a tap on a tablet; a title alone never shows there)
+    if (!n.on && window.Help && Help.info) pushEl.append(" ", Help.info("No status topic in effect. Set one in Settings > System > Push notifications, SSM /sizeup-hub/status-topic or [alerts]"));
     const head = el("div", "card-head");
     head.append(el("h2", "", "Now"),
       el("span", `chip ${d.alerts.length ? "hl-bad" : "hl-ok"}`, d.alerts.length ? `${d.alerts.length} alert${d.alerts.length === 1 ? "" : "s"}` : "No alerts"),
@@ -195,8 +196,8 @@ const StationHealth = (() => {
     }
     kids.push(el("h3", "hl-sub", "Dongles"));
     for (const x of h.duplicates || []) {        // two dongles, one serial (#242): neither is opened by it
-      const dupe = el("p", "notice err", `${x.text} · fix: sudo sizeup-station sdr-serial <index> <new-serial>`);
-      dupe.title = "Run it with --dry-run first, then without (deploy/station/README.md \"Two dongles, one serial\")";
+      const dupe = el("p", "notice err", `${x.text} · fix: sudo sizeup-station sdr-serial <index> <new-serial> --dry-run, then without --dry-run`);
+      dupe.title = "deploy/station/README.md \"Two dongles, one serial\"";
       kids.push(dupe);
     }
     kids.push(table(["SDR", "Serial", "Plugged in", "Job", "Running", "Restarts", "Detail"],
@@ -240,12 +241,13 @@ const StationHealth = (() => {
     const thr = el("p", "dim small", `Alert at: silent ${th.silent_min} min · behind ${th.behind_min} min · whisper / trunk-recorder down ${th.down_min} min · `
       + `dongle job down ${Math.round(th.job_grace_s || 60)} s · outbox ${th.outbox_min} min · disk ${th.disk_pct}%`
       + (th.trunk ? ` · P25 silent ${th.trunk.day_min} min (night ${th.trunk.night_min})` : "") + ` · 1 push / ${th.repeat_min} min`);
-    thr.title = "Each alert is pushed at most once per interval, plus its recovery."
+    const rules = "Each alert is pushed at most once per interval, plus its recovery."
       + (th.trunk ? ` P25 trunk silent (critical): no call on any talkgroup for ${th.trunk.day_min} min (${th.trunk.night_min} min into the night, 00-06), `
         + `longer when ${th.trunk.factor}× the system's usual gap for that time of day is (learned from ${th.trunk.gaps_min}+ gaps), `
         + `or the control channel lost ${th.trunk.cc_lost_min} min. One channel or talkgroup silent is only a hint` : "")
       + (th.hint ? ` (${th.hint.factor}× its usual gap, at least ${th.hint.min_min} min).` : ".")
       + " A serial two dongles share is critical.";
+    if (window.Help && Help.info) thr.append(" ", Help.info(rules, "Alert rules")); else thr.title = rules;
     kids.push(thr);
     card.replaceChildren(...kids);
   }

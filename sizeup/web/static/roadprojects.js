@@ -352,7 +352,8 @@ window.RoadProjects = (() => {
           a.target = "_blank";
           a.rel = "noopener";
           row.append(a, h("span", "dim small", ` ${n.source}${n.updated ? ` · ${dayClock(n.updated, true)}` : ""}`));
-          if (n.place_how) row.title = n.place_how;
+          if (n.place_how && window.Help && Help.info) row.append(" ", Help.info(`On the map: ${n.place_how}`, "Where it is drawn"));
+          else if (n.place_how) row.title = n.place_how;
           fold.append(row);
         }
         box.append(fold);
@@ -374,7 +375,7 @@ window.RoadProjects = (() => {
     else if (stt === "upcoming" && next != null) lines.push(`Starts ${dayClock(next, true)}`);
     else if (it.kind === "notice") lines.push("No dates: see the notice");
     const endText = it.end_day ? `${it.end_estimated ? "est. done" : "done"} ${dayText(it.end_day)}`
-      : it.end != null ? dayClock(it.end, true) : `end ?${it.end_text ? ` ("${it.end_text}")` : ""}`;
+      : it.end != null ? dayClock(it.end, true) : (it.end_text || "end ?");      // end_text: the source's words or ours: unquoted
     const dates = `${it.start != null ? dayClock(it.start, true) : "start ?"} → ${endText}`;
     if (it.kind !== "notice" || it.start != null || it.end != null) lines.push(dates);
     if (it.kind === "project") tip.push("No daily hours, lanes or closures given by the source");

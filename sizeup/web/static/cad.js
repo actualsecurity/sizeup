@@ -539,7 +539,7 @@ function fillQueueItem(li, inc) {
   if (ap) li.append(el("div", "qs ap-line", ap));       // the tower's facts on an airport event (#105)
   if (inc.status === "queued") {
     if (inc.type_note) li.append(el("div", "qs warn", inc.type_note));
-    if (unconfirmed(inc)) li.append(Object.assign(el("div", "qs warn", "Location unconfirmed"), { title: "Pick it on the event" }));   // (#176)
+    if (unconfirmed(inc)) li.append(el("div", "qs warn", "Location unconfirmed: pick it on the event"));   // (#176; #278: an instruction, on screen)
     li.append(el("div", "qs dim", "Accept or Dismiss"));
   } else if (!inc.emergency && isOpen(inc)) {
     if (inc.until_at) li.append(el("div", "qs dim", `Until ${fmtTime(inc.until_at)}`));
@@ -1265,8 +1265,10 @@ async function nameTonesDialog(t, opts = {}) {
   head.append(el("h2", "dialog-title", "Name these tones"));
   head.querySelector("h2").id = "tone-form-title";
   const body = el("form", "dialog-body");
-  body.append(Object.assign(el("p", "dim small", `Page ${fmtTime(t.start, true)} ${t.channel}`),
-    { title: "Each pair goes in the tone book under its places and service; this page is read again" }));
+  const toneHow = "Each pair goes in the tone book under its places and service; this page is read again";
+  const pageLine = el("p", "dim small", `Page ${fmtTime(t.start, true)} ${t.channel} `);
+  if (window.Help && Help.info) pageLine.append(Help.info(toneHow, "How tones are saved")); else pageLine.title = toneHow;
+  body.append(pageLine);
   if (opts.ours) body.append(el("p", "warnbox small", `${oursNamedText(t)} · prefilled PC / RB: check which is whose`));
   const prefill = [["Port Chester"], ["Rye Brook"]];
   const box = el("div", "tone-pairs");

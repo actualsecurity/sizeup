@@ -149,7 +149,7 @@ window.AirportAlerts = (() => {
     for (const a of items) {
       if (st.seen.has(a.id)) continue;
       st.seen.add(a.id);
-      if (!first && window.Radio && Radio.prealert) Radio.prealert(a.title, "Airport pre-alert · Accept or Dismiss");
+      if (!first && window.Radio && Radio.prealert) Radio.prealert(a.title, "Airport pre-alert · not dispatched · Accept or Dismiss");
     }
     if (st.seen.size > 200) st.seen = new Set(items.map((a) => a.id));
   }

@@ -64,7 +64,7 @@ window.AircraftLayer = (() => {
   const PHASE = {
     arriving: { token: "--ok", text: "Arriving HPN", tag: "▼" },
     departing: { token: "--info", text: "Departing HPN", tag: "▲" },
-    ground: { token: "--text-2", text: "On ground HPN", tag: "GND" },
+    ground: { token: "--text-2", text: "On ground · HPN", tag: "GND" },
     low: { token: "--warn", text: "Low nearby", tag: "" },
     overflight: { token: "--dim", text: "Overflight", tag: "" },
     other_ground: { token: "--dim", text: "On ground elsewhere", tag: "" },
@@ -102,11 +102,12 @@ window.AircraftLayer = (() => {
     try { return new Date(t * 1000).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false, timeZone: tz() }); } catch (_) { return ""; }
   }
   const fc = (features) => ({ type: "FeatureCollection", features });
-  const fmtAlt = (a) => (a === "ground" ? "GND" : typeof a === "number" ? `${a.toLocaleString("en-US")} ft` : "alt ?");
+  const fmtAlt = (a) => (a === "ground" ? "GND" : typeof a === "number" ? `${a.toLocaleString("en-US")} ft` : "alt unknown");
   const trend = (vr) => (vr === null || vr === undefined ? "" : vr > 300 ? " ↑" : vr < -300 ? " ↓" : "");
+  const cap = (s) => (s ? s[0].toUpperCase() + s.slice(1) : s);     // the hub's why_not() is lower case ("off (…)")
   function eta(s) {
     if (s === null || s === undefined) return "";
-    return s < 60 ? "<1 min" : `${Math.round(s / 60)} min`;
+    return s < 60 ? "<1 min" : `~${Math.round(s / 60)} min`;
   }
 
   // ---- the data: one copy for every map on the page, fetched only while one has the layer on ----------------------
@@ -471,11 +472,15 @@ window.AircraftLayer = (() => {
       const has = (v) => v !== null && v !== undefined;
       const lines = [];
       if (a.emerg) lines.push(`EMERGENCY ${a.emerg}`);
+      // #278: an old position is said up top, in the warning colour, with the time it was reported (never only in the foot)
+      const fixAt = (d.fetched || d.at || 0) - (a.age || 0);
+      if (stale) lines.push(h("div", "warn", `Stale · ${hms(fixAt)}`));
       const ph = PHASE[a.phase] || PHASE.low;
       const where = a.phase !== "arriving" ? "" : a.appr === "maneuvering" ? "maneuvering" : a.appr ? a.appr : a.rwy ? `RWY ${a.rwy}` : "";
       lines.push([ph.text, where, has(a.dist) ? `${a.dist.toFixed(1)} nm` : "", has(a.eta) ? `ETA ${eta(a.eta)}` : ""]
         .filter(Boolean).join(" · "));
-      const vs = !has(a.vr) || Math.abs(a.vr) <= 300 ? "" : `${a.vr > 0 ? "↑" : "↓"}${Math.abs(a.vr).toLocaleString("en-US")} fpm`;
+      const vs = !has(a.vr) || a.alt === "ground" ? "" : Math.abs(a.vr) <= 300 ? "level"
+        : `${a.vr > 0 ? "↑" : "↓"}${Math.abs(a.vr).toLocaleString("en-US")} fpm`;
       lines.push([[fmtAlt(a.alt), vs].filter(Boolean).join(" "), has(a.gs) ? `${a.gs} kt` : "", has(a.trk) ? `${a.trk}°` : ""]
         .filter(Boolean).join(" · "));
       const who = [a.airline, a.op && a.op !== a.airline ? a.op : ""].filter(Boolean);
@@ -483,7 +488,7 @@ window.AircraftLayer = (() => {
       if (ids.length) lines.push(ids.join(" · "));
       lines.push(...this.heardLines(d, a));
       const what = [a.model, a.type, a.kind].filter(Boolean);
-      const foot = [SRC_NAME[a.src] || a.src || "", d.at ? hms(d.at) : "", stale ? "stale" : ""].filter(Boolean).join(" · ");
+      const foot = [SRC_NAME[a.src] || a.src || "", d.at ? hms(d.at) : ""].filter(Boolean).join(" · ");
       // the method and the caveats: hover or tap the "i"
       const between = glide && glide.estimated(a.hex) && !stale;
       const tip = [
@@ -551,7 +556,7 @@ window.AircraftLayer = (() => {
       box.append(lab);
       if (!this.isOn()) return box;
       if (!d) { box.append(h("div", "ml-note", store.failed ? "Unavailable" : "Loading…")); return box; }
-      if (!d.configured || d.note) { box.append(h("div", "ml-note", d.note || "Not configured")); return box; }
+      if (!d.configured || d.note) { box.append(h("div", "ml-note", cap(d.note) || "Not configured")); return box; }
       const list = d.aircraft || [];
       for (const a of list.filter((x) => x.emerg)) box.append(h("div", "ml-note ac-emerg", `${callsign(a)}: ${a.emerg}`));
       const ours = list.filter((a) => ["arriving", "departing", "ground"].includes(a.phase)).slice(0, 8);
@@ -571,8 +576,9 @@ window.AircraftLayer = (() => {
       } else box.append(h("div", "ml-note", "None at HPN"));
       const low = list.filter((a) => a.phase === "low").length;
       box.append(h("div", "ml-note", `${low} low nearby`));
+      // the hollow-mark legend: a staleness rule, so on screen (and the "i" for a tap)
+      box.append(h("div", "ml-note", `Hollow: stale (>${staleS(d)} s)`));
       const note = h("div", "ml-note");
-      note.title = `Hollow mark: position older than ${staleS(d)} s`;
       note.append([d.credit || "No data yet", d.at ? hms(d.at) : "", (d.registry && d.registry.credit) || ""].filter(Boolean).join(" · "));
       for (const f of (d.feeds || []).filter((x) => x.terms)) {
         const t = h("a", "", `${f.label} terms`);
@@ -590,7 +596,7 @@ window.AircraftLayer = (() => {
       if (d.error) box.append(h("div", "ml-note", `(${d.error})`));
       const rx = d.receiver;
       if (rx) {
-        const bands = Object.entries(rx.bands || {}).map(([b, s]) => `${b}: ${s.error ? s.error : s.n}`);
+        const bands = Object.entries(rx.bands || {}).map(([b, s]) => `${b} MHz: ${s.error ? s.error : `${s.n} aircraft`}`);
         const who = rx.held_by && !(rx.held_by.app === "sizeup" && rx.held_by.mode === "adsb")
           ? `held by ${rx.held_by.app}${rx.held_by.mode ? ` (${rx.held_by.mode})` : ""}` : "";
         const dec = rx.decoder && rx.decoder.state === "ok" ? `${rx.decoder.messages_per_s ?? 0} msg/s` : "";

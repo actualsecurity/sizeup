@@ -779,7 +779,7 @@ class StationHealth:
             rate = cc.get("rate")
             return {"severity": "critical", "title": "P25 trunk silent",
                     "text": "control channel lost: trunk-recorder decodes "
-                            + (f"{rate:g} messages/s" if isinstance(rate, (int, float)) else "almost nothing")
+                            + (f"{rate:g} msg/s" if isinstance(rate, (int, float)) else "almost nothing")
                             + f" from it since {_hhmm(cc['low_since'])}"
                             + (f", {cc['retunes']} retunes" if cc.get("retunes") else "") + f" {tail}",
                     "since": float(cc["low_since"])}

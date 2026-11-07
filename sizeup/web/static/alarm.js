@@ -374,7 +374,9 @@ window.Alarm = (() => {
     dIn.checked = !!d.drill;
     dIn.addEventListener("change", () => save("drill", dIn.checked));
     drill.append(dIn, mk("span", "", "Drill mode"));
-    drill.title = "Alarms say DRILL (training); pushes at normal priority";
+    const drillWhat = "Alarms say DRILL (training); pushes at normal priority";
+    drill.title = drillWhat;
+    if (window.Help && Help.info) drill.append(" ", Help.info(drillWhat, "Drill mode"));
     // other talkgroups
     const other = mk("select", "field");
     other.setAttribute("aria-label", "Emergency button on other talkgroups");

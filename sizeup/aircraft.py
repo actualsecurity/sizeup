@@ -1373,7 +1373,7 @@ class AircraftLayer:
         if not self.enabled:
             return "off ([aircraft] enabled = false)"
         if not self.feeds:
-            return "Not configured (no feed)"
+            return "not configured (no feed)"
         return ""
 
     # -- the schedule ------------------------------------------------------------------------------------------------

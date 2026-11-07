@@ -143,7 +143,7 @@ def test_the_named_dongle_runs_readsb_with_its_claim_and_restarts_when_its_setti
         readsb_output(tmp_path, t, msgs)
         st = d.step(t + 0.2)
     assert st["state"] == "ok" and st["messages_per_s"] == 50.0 and st["aircraft"] == 4 and st["with_pos"] == 3
-    assert st["last_message_at"] == 1021.0 and "4 aircraft (3 with a position), 50 messages/s" in st["detail"]
+    assert st["last_message_at"] == 1021.0 and "4 aircraft · 3 with position · 50 msg/s" in st["detail"]
     receiver_conf(tmp_path, '[aircraft.receiver]\nsdr = "adsb1090"\nbias_tee = true\n')   # the LNA needs power
     d.step(1022.0)
     assert pop.started[0].code is not None                            # stopped ...

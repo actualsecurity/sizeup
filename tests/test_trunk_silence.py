@@ -187,7 +187,7 @@ def test_the_control_channel_lost_alerts_at_once_and_clears_when_it_decodes():
     assert [(k, a["key"]) for k, a in ch] == [("start", "trunk")]
     (a,) = r.h.alerts()
     assert a["title"] == "P25 trunk silent" and a["since"] == T0 + 60
-    assert a["text"].startswith("control channel lost: trunk-recorder decodes 0 messages/s from it since ")
+    assert a["text"].startswith("control channel lost: trunk-recorder decodes 0 msg/s from it since ")
     assert ", 3 retunes (trunk-recorder running) · check P25 dongle, antenna, control channel" in a["text"]
     ok = {"rate": None, "low_since": None, "last_low": T0 + 200, "retunes": 3, "last_retune": T0 + 90}
     ch = r.at(240, p25(235, cc=ok))

@@ -308,9 +308,9 @@ def aircraft_type(ev: dict) -> str:
 
 
 def aircraft_alt(ev: dict) -> str:
-    """"900 ft ↓500 fpm", "900 ft level", "GND", "alt ?" (#278: numbers, short units)."""
+    """"900 ft ↓500 fpm", "900 ft level", "GND", "alt unknown" (#278: numbers, short units)."""
     alt = ev.get("alt")
-    alt_s = "GND" if alt == "ground" else f"{alt:,} ft" if isinstance(alt, (int, float)) else "alt ?"
+    alt_s = "GND" if alt == "ground" else f"{alt:,} ft" if isinstance(alt, (int, float)) else "alt unknown"
     vr = ev.get("vr")
     if isinstance(vr, (int, float)) and alt != "ground":
         alt_s += " level" if abs(vr) <= 300 else f" {'↑' if vr > 0 else '↓'}{abs(vr):,} fpm"

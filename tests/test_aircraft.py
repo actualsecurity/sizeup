@@ -528,8 +528,9 @@ def test_the_aircraft_layer_only_asks_the_hub_and_predicts_only_briefly_between_
     # (one source for the marks and trails; the tower's TWR mark, #257, is its own)
     assert code.count("addSource(") == 2 and "map.addSource(TWR_SRC" in code and '["geometry-type"], "LineString"' in code and '["geometry-type"], "Point"' in code
     # the click still says when the mark is an estimate between reports, and when a position is stale
-    # (#278: in the box's "i"; the foot says "stale")
-    assert "glide.estimated(a.hex)" in code and "Drawn on between reports" in code and 'stale ? "stale" : ""' in code
+    # (#278: the estimate in the box's "i"; a stale position up top, in the warning colour, with its time)
+    assert "glide.estimated(a.hex)" in code and "Drawn on between reports" in code
+    assert 'if (stale) lines.push(h("div", "warn", `Stale · ${hms(fixAt)}`));' in code
     ml = (STATIC / "maplayers.js").read_text()
     assert "this.force.aircraft = on" in ml and "this.force.airport = on" in ml
     assert 'id="i-aircraft"' in (STATIC / "icons.svg").read_text()

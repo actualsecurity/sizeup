@@ -214,7 +214,7 @@ window.Weather = (() => {
     if (c.wind_deg !== null && c.wind_deg !== undefined && c.wind_mph) n.append(arrow(c.wind_deg));
     n.append(h("span", "", c.short));
     n.classList.toggle("stale", !!c.stale);
-    n.title = [`${c.name || c.station} at ${when(c.at)}${c.stale ? " (old)" : ""}`, c.text, c.humidity != null ? `Humidity ${c.humidity}%` : "",
+    n.title = [`${c.name || c.station} at ${when(c.at)}${c.stale ? " (stale)" : ""}`, c.text, c.humidity != null ? `Humidity ${c.humidity}%` : "",
                c.visibility_mi != null ? `Visibility ${c.visibility_mi} mi` : "", "National Weather Service"].filter(Boolean).join(" · ");
   }
 
@@ -249,7 +249,7 @@ window.Weather = (() => {
     const g = t.gauge;
     if (g) {
       const off = g.offset_ft === null || g.offset_ft === undefined ? "" : ` (${g.offset_ft >= 0 ? "+" : ""}${g.offset_ft.toFixed(1)} vs. table)`;
-      box.append(h("div", "small" + (g.stale ? " warn" : " dim"), `${g.name} gauge ${ft(g.ft)}${off} · ${when(g.at)}${g.stale ? " · old" : ""}`));
+      box.append(h("div", "small" + (g.stale ? " warn" : " dim"), `${g.name} gauge ${ft(g.ft)}${off} · ${when(g.at)}${g.stale ? " · stale" : ""}`));
     }
     for (const a of (d.marine_alerts || [])) {
       const m = h("button", `notice ${TONE[a.level] || "info"} wx-alert wx-marine`);

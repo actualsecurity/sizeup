@@ -416,12 +416,13 @@ window.GisLayers = (() => {
         rows.push([label, text]);
       }
       const lines = rows.map(([k, v]) => `${k}: ${v}`);
-      // #278: the layer's note is a caveat, behind the "i"; the rail's catenary stays on the box (a hazard)
-      if (l.note && l.key === "rail") lines.push(l.note);
+      // #278: a hazard note (the catenary, fuel tanks, no flow data, no load limits) stays on the box; any other note is a
+      // caveat, behind the "i"
+      if (l.note && l.hazard) lines.push(l.note);
       const foot = [store.cat.attribution || "Westchester County GIS", l.asof, l.at ? day(l.at) : ""].filter(Boolean).join(" · ");
       this.control.close();
       this.control.showInfo(title || l.label, (props._ours ? "Ours · " : "") + (l.sub || l.label), lines.length ? lines : ["(no details)"], foot, "",
-                            iconEl(l, !!props._ours), l.note && l.key !== "rail" ? l.note : "");
+                            iconEl(l, !!props._ours), l.note && !l.hazard ? l.note : "");
     }
 
     // the group in the Layers box; folds: each group's open state as the box had it before this rebuild
