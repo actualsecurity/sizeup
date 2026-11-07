@@ -10,6 +10,8 @@ What is recorded, on demand only (Dvr.wanted, at most max_cameras at once, in th
             (kept in the CAD store's meta, so a deploy keeps the pins)
   open      a camera someone is watching live, and for linger_s after the last viewer closed
 Only cameras with live video; a snapshot-only camera (the county's) has nothing to copy.
+A camera listed under another id now (#320, Roads.alias: its records merged and another one kept): its Keep and its
+recording go with it (follow), and its old id's paths find it.
 
 The window: window_s (default 2 h) per camera; older segments go. And a size cap over every camera (max_bytes,
 default 6 GB) and a floor of free disk (FREE_FLOOR_BYTES), both made room for before each write: the oldest go
@@ -258,6 +260,11 @@ class Dvr:
 
     # -- what to record ----------------------------------------------------------------------------------------------
 
+    def _alias(self, cid: str) -> str:
+        """The id the camera is listed under now (Roads.alias, #320: its records merged, another one kept)."""
+        fn = getattr(self.roads, "alias", None)
+        return fn(cid) if fn is not None else cid
+
     def _pins_now(self) -> dict[str, float]:
         now = self.clock()
         with self._lock:
@@ -266,13 +273,54 @@ class Dvr:
             gone = [cid for cid, at in self.pins.items() if now - at > PIN_S]
             for cid in gone:
                 self.pins.pop(cid)
+            moved = {cid: self._alias(cid) for cid in self.pins}
+            moved = {a: b for a, b in moved.items() if a != b}
+            for a, b in moved.items():                    # a Keep follows its camera to the id kept for it (#320)
+                at = self.pins.pop(a)
+                self.pins[b] = max(at, self.pins.get(b, at))
             pins = dict(self.pins)
         if gone:
             self.log(f"dvr: Keep ran out for {', '.join(sorted(gone))}")
+        if moved:
+            self.log(f"dvr: Keep moved with its camera: {', '.join(f'{a} -> {b}' for a, b in sorted(moved.items()))}")
+        if gone or moved:
             self.save_pins(pins)
         return pins
 
+    def follow(self) -> list[str]:
+        """A camera's records merged and the id kept for it changed (#320): its recording goes with it, so the viewer
+        of the id kept now finds the window recorded so far. Moved only to an id with nothing recorded yet (else the
+        older stays under its own id, still served there) and never mid-round. The ids moved."""
+        fn = getattr(self.roads, "aliases", None)
+        moved = []
+        for old, new in (fn() if fn is not None else {}).items():
+            if not (CAM_RE.fullmatch(old) and CAM_RE.fullmatch(new)) or old == new:
+                continue
+            with self._disk, self._lock:
+                c = self._cams.get(old)
+                if not c or not c["segs"] or (self._cams.get(new) or {}).get("segs") or old in self._busy or new in self._busy:
+                    continue
+                src, dst = self._dir(old), self._dir(new)
+                try:
+                    if dst.exists():
+                        dst.rmdir()                       # (an empty folder only: anything in it stays and the move waits)
+                    src.rename(dst)
+                except OSError as e:
+                    self.log(f"dvr: {old}'s recording not moved to {new} ({type(e).__name__})")
+                    continue
+                for k in ("chunk", "hstate", "retry_at", "fails"):
+                    c.pop(k, None)                        # another stream, maybe: a session of its own, keys carried on
+                self._cams[new] = c
+                self._cams.pop(old)
+                for d in (self._opened, self._next):
+                    if old in d:
+                        d[new] = max(d.pop(old), d.get(new, 0))
+            moved.append(old)
+            self.log(f"dvr: {old}'s recording moved to {new} (the same camera, now listed as {new})")
+        return moved
+
     def pin(self, cid: str, on: bool) -> dict:
+        cid = self._alias(cid)
         cam = self.roads.camera(cid)
         if cam is None or not CAM_RE.fullmatch(cid):
             raise KeyError(cid)
@@ -331,6 +379,7 @@ class Dvr:
                 self._opened.pop(cid)
             opened = sorted(self._opened.items(), key=lambda x: -x[1])
         pins = self._pins_now()
+        self.follow()
         video = {c["id"] for c in self.roads.merged("cameras") if c.get("video") and not c.get("off") and CAM_RE.fullmatch(c["id"])}
         why: dict[str, list[str]] = {}
         order: list[str] = []
@@ -344,7 +393,7 @@ class Dvr:
             if reason not in why[cid]:
                 why[cid].append(reason)
         for cid in self.always:
-            add(cid, "always")
+            add(self._alias(cid), "always")
         for cid, _ in sorted(self._incident_cams().items(), key=lambda x: x[1]):
             add(cid, "incident")
         for cid in sorted(pins):
@@ -622,6 +671,10 @@ class Dvr:
         hdr = {"Cache-Control": "no-store"}
         with self._lock:
             known = cid in self._cams
+        if self.roads.camera(cid) is None and not known:
+            cid = self._alias(cid)                        # a merged-away id: the camera kept for it (#320)
+            with self._lock:
+                known = cid in self._cams
         if self.roads.camera(cid) is None and not known:
             return 404, b'{"error":"no such camera"}', JSON, hdr
         if not what:
