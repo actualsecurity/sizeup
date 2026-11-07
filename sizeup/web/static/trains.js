@@ -640,7 +640,8 @@ window.TrainLayer = (() => {
     }
     host.append(grid);
     const foot = h("div", "ml-note tr-note", ["MTA", d.at ? hm(d.at, true) : "", d.error ? `(${d.error})` : ""].filter(Boolean).join(" · "));
-    foot.title = `${d.label || "MTA"}. ${d.disclaimer || ""}.`;
+    const credit = `${d.label || "MTA"}. ${d.disclaimer || "Times may not be real time"}.`;
+    if (window.Help && Help.info) foot.append(" ", Help.info(credit, "Train times")); else foot.title = credit;
     host.append(foot);
   }
 
