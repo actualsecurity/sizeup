@@ -7,8 +7,9 @@ served the same minute, and for a few cameras the master playlist, chunklist and
   - every CARS-Hub camera in our area with live video stays on the list (itself, or the same camera from another
     source that has video too): 511NY cameras vanished from the list once;
   - every recorded segment is whole MPEG-TS (188-byte packets, each with the sync byte; the PAT, the PMT and video
-    frames in it), and the hub's proxy serves it byte for byte: the first segment asked for directly (a truncated
-    first segment was a real bug) and the ones its pump fetches ahead.
+    frames in it), and the hub's proxy never serves one cut short: byte for byte, or (#276) repaired, its broken
+    frames left out and the rest whole; the first segment asked for directly (a truncated first segment was a real
+    bug) and the ones its pump fetches ahead.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from pathlib import Path
 
 import pytest
 
+from sizeup import hlsseg
 from sizeup import roads as r
 from sizeup.roads import BasicAuth, Roads
 
@@ -96,6 +98,23 @@ def ts_whole(body: bytes) -> list[str]:
     return bad
 
 
+def served_as_recorded(rd: Roads, s, cid: str, name: str, body: bytes, label: str) -> None:
+    """A served segment is never cut short: whole MPEG-TS, and the recorded bytes exactly unless the hub repaired it
+    (#276, sizeup/hlsseg.py: frames whose reference chain the origin broke are left out, the rest kept whole); a
+    repaired one is still complete by hlsseg.check, and the hub's record says how many frames it dropped."""
+    want = s.file(f"streams/{cid}/{name}").read_bytes()
+    bad = ts_whole(body)
+    assert not bad, f"{label} {name}: served {bad}"
+    hit = rd._segments.get(f"{cid}/{name}") or {}
+    if body == want:
+        return
+    repaired = hit.get("dropped", 0) > 0 and not hit.get("noplay")
+    assert repaired, f"{label} {name}: served {len(body)} bytes, not the {len(want)} recorded, and not a repair"
+    info = hlsseg.check(body)
+    shorter = len(body) < len(want)
+    assert shorter and info["frames"] > 0, f"{label} {name}: a repair of {len(want)} bytes served as {len(body)}"
+
+
 def test_every_carshub_camera_with_video_stays_on_the_list(replay_sets, tmp_path):
     for s in replay_sets("camera"):
         fetch = ReplayFetch(s)
@@ -122,7 +141,7 @@ def test_every_carshub_camera_with_video_stays_on_the_list(replay_sets, tmp_path
                     assert ours == len(area), f"{s.name} ({when}): {ours} CARS-Hub cameras listed of {len(area)}"
 
 
-def test_recorded_segments_are_whole_and_the_proxy_serves_them_byte_for_byte(replay_sets):
+def test_recorded_segments_are_whole_and_the_proxy_never_serves_one_cut_short(replay_sets):
     checked = 0
     for s in replay_sets("camera"):
         fetch = ReplayFetch(s)
@@ -153,16 +172,13 @@ def test_recorded_segments_are_whole_and_the_proxy_serves_them_byte_for_byte(rep
             # the first segment, asked for directly (before the pump has it), then the pump's fetches ahead
             first = segs[0]
             code, body, ctype, _ = rd.stream(st["id"], first)
-            want = s.file(f"streams/{st['id']}/{first}").read_bytes()
             assert code == 200 and ctype == "video/MP2T", f"{label} {first}: {code} {ctype}"
-            whole = body == want
-            assert whole, f"{label} {first}: served {len(body)} bytes, not the {len(want)} recorded"
+            served_as_recorded(rd, s, st["id"], first, body, label)
             rd.pump_once(st["id"])
             for n in segs:
                 code, body, _, _ = rd.stream(st["id"], n)
-                want = s.file(f"streams/{st['id']}/{n}").read_bytes()
-                whole = code == 200 and body == want
-                assert whole, f"{label} {n}: HTTP {code}, served {len(body)} bytes, not the {len(want)} recorded"
+                assert code == 200, f"{label} {n}: HTTP {code}"
+                served_as_recorded(rd, s, st["id"], n, body, label)
             status = rd.stream_status(st["id"])
             ok = status["open"] and status["target_s"] and status["target_s"] >= 1
             assert ok, f"{label}: stream status open={status['open']} target_s={status['target_s']}"

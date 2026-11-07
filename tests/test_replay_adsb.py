@@ -143,9 +143,6 @@ def departures(history: dict[str, list]) -> dict[str, list]:
     return out
 
 
-@pytest.mark.xfail(reason="#279: a departure off runway 34 lies on the approach path at lift-off, is read as arriving there "
-                          "(PhaseMemory then holds it as 'maneuvering' while it climbs out); being fixed in #279",
-                   strict=True)      # strict: once #279 lands this passes, and the XPASS says to take the mark off
 def test_departures_are_never_labelled_arriving(replay_sets):
     wrong, found = [], 0
     for s in replay_sets("adsb"):
