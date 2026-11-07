@@ -634,7 +634,9 @@ model() {
 
 # -- a release: the code at one commit and its venv, beside the running one ------------------------
 reqs_key() { { cat "$1/pyproject.toml"; python3 --version; } | sha256sum | cut -c1-16; }
-venv_ok() { [ -x "$1/venv/bin/python" ] && "$1/venv/bin/python" -c 'import numpy' >/dev/null 2>&1; }
+# (as the sizeup user: a release's venv may have the incident-source adapter in it (#301), and root never starts an
+# interpreter that reads that site-packages)
+venv_ok() { [ -x "$1/venv/bin/python" ] && as_user "$1/venv/bin/python" -c 'import numpy' >/dev/null 2>&1; }
 
 # make_release NAME SHA [VENV_DONOR]: /opt/sizeup/releases/NAME, made once (a finished one is reused).
 make_release() {
@@ -674,12 +676,15 @@ make_release() {
     python3 -m venv "$tmp/venv"
     tmpsrc=$(mktemp -d)
     cp -a "$tmp/pyproject.toml" "$tmp/sizeup" "$tmpsrc/"
+    # (a venv made just now: nothing in its site-packages but pip, never an adapter's)
     "$tmp/venv/bin/python" -m pip install -q --disable-pip-version-check --no-cache-dir --upgrade "$tmpsrc"
     rm -rf "$tmpsrc"
   fi
   echo "$reqs" > "$tmp/REQS"
   # bytecode now, not at every start (the service runs with PYTHONDONTWRITEBYTECODE)
-  "$tmp/venv/bin/python" -m compileall -q -j 0 "$tmp/sizeup" >/dev/null || warn "compileall complained"
+  # -I -S: compileall is the standard library's; the venv's site-packages (linked from a release that may have the
+  # incident-source adapter, #301) is never read by this root interpreter
+  "$tmp/venv/bin/python" -I -S -m compileall -q -j 0 "$tmp/sizeup" >/dev/null || warn "compileall complained"
   # the builds it runs with: this installer's pins (an older release keeps the ones it had)
   printf 'rtl-sdr=%s\ntrunk-recorder=%s\nwhisper=%s\nreadsb=%s\n' "$RTLSDR_B" "$TR_B" "$WHISPER_B" "$READSB_B" > "$tmp/BUILDS"
   chown -R root:root "$tmp"

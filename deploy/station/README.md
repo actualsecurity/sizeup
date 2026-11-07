@@ -319,31 +319,41 @@ echo 'ssh-ed25519 AAAA... sizeup-adapter@station' | gh repo deploy-key add - -R 
 The repo must be on GitHub (`git@github.com:OWNER/REPO.git`); GitHub's host key is pinned in `/etc/sizeup/known_hosts`
 (`StrictHostKeyChecking=yes`).
 
-**Credentials** go into `/etc/sizeup/credentials/<NAME>` (root 0700 / 0600, never echoed, logged or sent to the hub) and
-reach the station service only through systemd `LoadCredential=` (a drop-in,
-`/etc/systemd/system/sizeup-station.service.d/adapter-credentials.conf`; systemd 247+: Ubuntu 24.04 / WSL2 has 255,
-Debian 12 252): files under `$CREDENTIALS_DIRECTORY` for that service only, never in its environment. sizeup takes
-the directory's path out of its environment at start, and every program it starts (rtl_fm, whisper-server,
-trunk-recorder, Kokoro) gets an explicit environment without it (`sizeup/procenv.py`). An adapter reads one with
-`sizeup.cloud.adapters.credential("NAME")`. The config gets `[adapter] repo`, `ref` and `env` (the names only). An
-older release refuses that table, so while a rollback would go to one, it waits in `/etc/sizeup/adapter-pending.json`
-and is written at the next switch (`sizeup/cloud/configupdate.py`, the same rule as the other config additions).
+**Credentials** go into systemd's credstore, `/etc/credstore/sizeup-adapter.<NAME>` (root 0700 / 0600, never echoed,
+logged or sent to the hub), and reach the station service only as files under `$CREDENTIALS_DIRECTORY`, never in its
+environment. A drop-in (`/etc/systemd/system/sizeup-station.service.d/adapter-credentials.conf`) says
+`ImportCredential=sizeup-adapter.*` on systemd 254+ (Ubuntu 24.04 / WSL2: 255), so a file deleted by hand is only a
+missing credential (the adapter shows failing), never a station that won't start; older systemd (Debian 12: 252) gets
+one `LoadCredential=` per file there, rewritten whenever setup or remove change them, and `doctor` fails if they don't
+match. sizeup takes the directory's path out of its environment at start, and every program it starts (rtl_fm,
+whisper-server, trunk-recorder, Kokoro) gets an explicit environment without it (`sizeup/procenv.py`). An adapter
+reads one with `sizeup.cloud.adapters.credential("NAME")`. The config gets `[adapter] repo`, `ref` and `env` (the names
+only). An older release refuses that table, so while a rollback would go to one, it waits in
+`/etc/sizeup/adapter-pending.json` and is written at the next switch (`sizeup/cloud/configupdate.py`, the same rule as
+the other config additions). (A local path as the repo is for CI and tests only: `SIZEUP_ADAPTER_ALLOW_LOCAL=1`.)
 
 How it updates (`sizeup/cloud/autoupdate.py`): every update, and every check while the station stays on its build,
 fetches the ref over SSH into `/opt/sizeup/adapter.git`. Each adapter commit's wheels (and its dependencies') are
-built **once**, as the sizeup user, checked (no `.pth`, no scripts) and kept root's in
-`/opt/sizeup/adapter-wheels/<commit>-<cpXY>`; root installs them with `--no-deps --no-index --only-binary :all:` into a
-hard-linked copy of the staged release, `releases/<sha>-a<adapter commit>`, and its **preflight** runs as the sizeup
-user with no credentials: it imports, has a `sizeup.incident_sources` entry point, and its module's `self_check()` (if
-it has one) returns `""` or `None`. No adapter or dependency code ever runs as root.
+built **once**, as the sizeup user, checked and kept root's in `/opt/sizeup/adapter-wheels/<commit>-<cpXY>`
+(pruned to the kept releases' commits and the one at the ref). Root refuses a wheel with a `.pth`,
+`sitecustomize.py` / `usercustomize.py`, any `.data/` directory, a path outside site-packages, or a top-level module or
+package that the venv already has or another distribution's RECORD claims, then **unpacks** the rest itself into a
+hard-linked copy of the staged release, `releases/<sha>-a<adapter commit>`: no pip, no interpreter (the old version
+goes by its RECORD). Its **preflight** runs as the sizeup user with no credentials: it imports, has a
+`sizeup.incident_sources` entry point, and its module's `self_check()` (if it has one) returns `""` or `None`. Root's
+other interpreters never read a venv's site-packages either (`-I -S` for compileall, `-S` for `sdr-serial`, the
+donor-venv check as the sizeup user). No adapter or dependency code ever runs as root.
 
 **An adapter problem never holds up a sizeup update.** The release gets the adapter commit at the ref; if that one
 can't be fetched, built, installed or doesn't pass, the one that runs now (its wheels are cached: no rebuild, no
 PyPI); if even that fails, none (the paging decoder is the primary meanwhile, #297). The failure is recorded for the
 adapter commit only (retried after 5, 15, 60, 60 minutes, 5 tries, then failed until its ref moves), and shows as
-`failing` in status, doctor and the hub's Health. A new adapter commit alone is a side-by-side rebuild of the same
-sha, with the same quiet-moment wait, `/healthz` check and switch back. `sizeup-station rollback` goes back to the
-previous release, its adapter with it; to a release with the adapter only while the adapter is set up.
+`failing` in status, doctor and the hub's Health. If the release with the adapter doesn't come up (`/healthz`, or
+a start cut short), it goes back, then tries the same sizeup release without the adapter before sizeup's sha is blamed:
+if that comes up, the adapter commit is the failed one. A new adapter commit alone is a side-by-side rebuild of the
+same sha, with the same quiet-moment wait, `/healthz` check and switch back. `sizeup-station rollback` goes back to the
+previous release, its adapter with it; to a release with the adapter only while the adapter is set up (`--force`: the
+next check takes it out again).
 
 Watching it: `sizeup-station status` / `doctor` ("adapter: NAME abc1234 installed"), the station page's Hub row and
 the hub's Settings > Health (Version and updates > Adapter): the repo's short name, the installed commit, installed
@@ -353,7 +363,8 @@ or running (the runner's word, each source's own health) or failing. Never a cre
 An admin resets it from the hub: Settings > Health, a Reset button beside each source that is failing (with a
 confirm). That sends a `sources_reset` job over the station's authenticated jobs channel; the station calls the
 adapter's optional `reset()` on that adapter's own thread, before its next poll. `POST /api/sources/reset` (hub and
-station) takes JSON with `X-Sizeup-Action: reset` only, one per source per 5 minutes. The hub logs who pressed it
+station) takes JSON with `X-Sizeup-Action: reset` only, one per source per 5 minutes (counted once the station took
+it; "all" counts for every source). The hub logs who pressed it
 (their Access identity), nothing else. An adapter without `reset()`: nothing happens, and the answer says so.
 
 The hub refuses: a hub's config (`[cloud] role = "hub"`) makes setup, the updater and the self-check refuse, and the

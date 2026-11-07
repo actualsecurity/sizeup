@@ -49,16 +49,19 @@ side by side: the new release is built and checked next to the running one, then
              Each update (and each run while the station stays on its build) fetches [adapter] ref from GitHub over
              SSH (StrictHostKeyChecking=yes) into /opt/sizeup/adapter.git. Its wheels (and its dependencies') are
              built ONCE per commit as the sizeup user, checked (no .pth, no scripts) and kept root's in
-             /opt/sizeup/adapter-wheels/<commit>-<cpXY>; root installs them with --no-deps --no-index --only-binary
-             into a hard-linked copy of the staged release, releases/<sha>-a<commit12>, and the sizeup user runs its
+             /opt/sizeup/adapter-wheels/<commit>-<cpXY>; root unpacks them itself (no pip, no interpreter; refused:
+             .pth, site/usercustomize, .data/, anything the venv already has or another RECORD claims) into a
+             hard-linked copy of the staged release, releases/<sha>-a<commit12>, and the sizeup user runs its
              self-check (it imports, has a sizeup.incident_sources entry point, its module's self_check() returns ""
              or None) with no credentials. No adapter or dependency code ever runs as root.
              An adapter problem never holds up or fails a sizeup update: the commit at the ref, else the one that
              runs (its cached wheels), else none (the paging decoder is the primary meanwhile), each failure only in
-             state.json "adapter" (retried like a build, RETRY_S / MAX_STAGES, then failed until the ref moves). A
+             state.json "adapter" (retried like a build, RETRY_S / MAX_STAGES, then failed until the ref moves); a
+             release with it that doesn't come up is retried without it before sizeup's sha is blamed. A
              new adapter commit alone is a side-by-side rebuild of the same sha; a rollback goes back to the previous
-             release, its adapter with it. Its credentials: /etc/sizeup/credentials (root 0600), handed to the
-             station service by systemd LoadCredential= only (sizeup/procenv.py), never in an environment.
+             release, its adapter with it. Its credentials: /etc/credstore/sizeup-adapter.<NAME> (root 0600), handed to the
+             station service from systemd's credstore only (ImportCredential= / LoadCredential=, sizeup/procenv.py),
+             never in an environment.
 
     python3 autoupdate.py run | status | doctor | on | off | prune | rollback
     python3 autoupdate.py adapter setup | status | remove | stage RELEASE
@@ -127,6 +130,7 @@ RESERVED_ENV = {"SIZEUP_STATION_TOKEN", "SIZEUP_ACCESS_CLIENT_ID", "SIZEUP_ACCES
 RESERVED_PREFIX = ("LD_", "PYTHON", "SYSTEMD_", "GIT_", "SSH_")
 ADAPTER_CHECK_S = 120.0
 HUB_REFUSED = "incident-source adapters run on the station only, never on the hub"
+CRED_PREFIX = "sizeup-adapter."             # its credentials' names in the credstore and $CREDENTIALS_DIRECTORY
 # GitHub's published SSH host key (= install-linux.sh GITHUB_HOSTKEY): the adapter's repo is on GitHub, never TOFU
 GITHUB_HOSTKEY = "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl"
 # Run by the release's venv python, as the sizeup user, no credentials: the adapter imports and passes its self-check.
@@ -168,18 +172,21 @@ done(True, version=d.version, sources=names)
 
 
 PART = r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}"
+ALLOW_LOCAL = "SIZEUP_ADAPTER_ALLOW_LOCAL"     # =1: a local repository path is accepted (CI and tests only)
 
 
 def adapter_repo_problem(url) -> str:
     """Why this isn't an adapter repo ("" when it is): GitHub over SSH only (git@github.com:OWNER/REPO.git or
-    ssh://git@github.com/OWNER/REPO.git), or an absolute local path (a repository on this machine: CI, tests). Every
+    ssh://git@github.com/OWNER/REPO.git), or with SIZEUP_ADAPTER_ALLOW_LOCAL=1 an absolute local path (CI, tests). Every
     part starts with a letter or digit (never an option, never ..)."""
     u = str(url or "").strip()
     if re.fullmatch(rf"(?:git@github\.com:|ssh://git@github\.com/){PART}/{PART}", u):
         return ""
     if re.fullmatch(rf"(?:/{PART})+", u):
-        return ""
-    return "git@github.com:OWNER/REPO.git (or a local path)"
+        if os.environ.get(ALLOW_LOCAL) == "1":
+            return ""
+        return f"a local path only with {ALLOW_LOCAL}=1 (CI, tests): git@github.com:OWNER/REPO.git"
+    return "git@github.com:OWNER/REPO.git"
 
 
 def repo_name(url) -> str:
@@ -210,6 +217,7 @@ def _norm_dist(name) -> str:
 
 
 def _dist_of(wheel: Path) -> str:
+    """A wheel's (or a .dist-info directory's) distribution name, normalized."""
     return _norm_dist(wheel.name.split("-", 1)[0])
 
 
@@ -512,7 +520,7 @@ class Paths:
     adapter_pending: Path = Path("/etc/sizeup/adapter-pending.json")    # setup's [adapter], until the config has it
     env: Path = Path("/etc/sizeup/station.env")
     marks: Path = Path("/etc/sizeup/config-updates")
-    credentials: Path = Path("/etc/sizeup/credentials")              # the adapter's credentials, root 0700 / 0600
+    credentials: Path = Path("/etc/credstore")                       # the adapter's: sizeup-adapter.<NAME>, root 0600
     dropin: Path = Path("/etc/systemd/system/sizeup-station.service.d/adapter-credentials.conf")
 
     @property
@@ -639,14 +647,15 @@ class Updater:
         script.chmod(0o700)
         self.installer(["--stage", sha], script)
 
-    def systemctl(self, *args: str) -> None:
+    def systemctl(self, *args: str) -> bool:
         try:
             r = subprocess.run(["systemctl", *args], capture_output=True, text=True, timeout=120)
         except (OSError, subprocess.SubprocessError) as e:
             self.note(f"auto-update: systemctl {' '.join(args)}: {type(e).__name__}: {e}")
-            return
+            return False
         if r.returncode != 0:
             self.note(f"auto-update: systemctl {' '.join(args)}: {(r.stderr or r.stdout).strip()[-200:]}")
+        return r.returncode == 0
 
     def before_switch(self, name: str) -> None:
         """A release from before #71 runs trunk-recorder inside sizeup-station, and its installer doesn't know the
@@ -899,18 +908,105 @@ class Updater:
 
     @staticmethod
     def wheel_problem(path: Path) -> str:
-        """Why root won't install this wheel ("" = fine): a .pth file (code at every interpreter start) or scripts."""
+        """Why root won't install this wheel ("" = fine): anything that runs code at an interpreter's start or lands
+        outside site-packages: a .pth, sitecustomize / usercustomize, any .data/ directory (scripts, headers, data
+        into the venv), an absolute or .. path; or not exactly one .dist-info."""
         try:
             with zipfile.ZipFile(path) as z:
                 names = z.namelist()
         except (OSError, zipfile.BadZipFile):
             return f"{path.name}: not a wheel"
+        infos = {n.split("/")[0] for n in names if n.split("/")[0].endswith(".dist-info")}
+        if len(infos) != 1:
+            return f"{path.name}: {len(infos)} .dist-info directories"
         for n in names:
+            parts = n.split("/")
+            if n.startswith("/") or "\\" in n or ".." in parts or ":" in parts[0]:
+                return f"{path.name}: a path outside site-packages ({n[:80]})"
+            if parts[0].endswith(".data"):
+                return f"{path.name}: has a .data directory ({n[:80]})"
             if n.endswith(".pth"):
                 return f"{path.name}: has a .pth file ({n[:80]})"
-            if re.search(r"\.data/scripts/", n):
-                return f"{path.name}: has scripts ({n[:80]})"
+            if len(parts) == 1 and parts[0] in ("sitecustomize.py", "usercustomize.py"):
+                return f"{path.name}: has {parts[0]}"
         return ""
+
+    @staticmethod
+    def _module(name: str) -> str:
+        """The import name a top-level site-packages entry gives (pkg, pkg.py, pkg.cpython-312-x86_64-linux-gnu.so)."""
+        return name.split(".")[0].lower()
+
+    @staticmethod
+    def site_of(rel: Path) -> Path:
+        got = sorted((rel / "venv").glob("lib/python*/site-packages"))
+        if len(got) != 1:
+            raise StepError(f"adapter: {rel.name}: no single site-packages in its venv")
+        return got[0]
+
+    def taken(self, site: Path) -> set[str]:
+        """The top-level import names site-packages has already: what's there, and what any dist's RECORD claims."""
+        out = {self._module(e.name) for e in site.iterdir()
+               if not e.name.endswith((".dist-info", ".egg-info", ".pth")) and e.name != "__pycache__"}
+        for rec in site.glob("*.dist-info/RECORD"):
+            try:
+                for line in rec.read_text(errors="replace").splitlines():
+                    top = line.split(",", 1)[0].split("/", 1)[0]
+                    if top and not top.endswith((".dist-info", ".data")) and top not in ("..", "__pycache__"):
+                        out.add(self._module(top))
+            except OSError:
+                pass
+        return out
+
+    def wheel_tops(self, path: Path) -> set[str]:
+        with zipfile.ZipFile(path) as z:
+            return {self._module(n.split("/")[0]) for n in z.namelist() if not n.split("/")[0].endswith(".dist-info")}
+
+    def install_wheel(self, site: Path, path: Path) -> None:
+        """A checked wheel unpacked into site-packages by this (root's) process: no interpreter, no pip, nothing run."""
+        root = site.resolve()
+        with zipfile.ZipFile(path) as z:
+            for info in z.infolist():
+                dest = (site / info.filename).resolve()
+                if root not in dest.parents:
+                    raise StepError(f"adapter: {path.name}: {info.filename[:80]} outside site-packages", PREFLIGHT_EXIT)
+                if info.is_dir():
+                    dest.mkdir(parents=True, exist_ok=True)
+                    continue
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.unlink(missing_ok=True)       # (a hard link the release was copied with: a new file, never written through)
+                with z.open(info) as src, open(dest, "wb") as out:
+                    shutil.copyfileobj(src, out)
+                os.chmod(dest, 0o644)
+            info_dir = next(n.split("/")[0] for n in z.namelist() if n.split("/")[0].endswith(".dist-info"))
+        (site / info_dir / "INSTALLER").write_text("sizeup\n")
+
+    def uninstall_dist(self, site: Path, dist: str) -> None:
+        """A distribution out of site-packages by its RECORD (unlinked: the release it was linked from keeps its own)."""
+        root = site.resolve()
+        for di in [d for d in site.glob("*.dist-info") if _dist_of(d) == _norm_dist(dist)]:
+            try:
+                lines = (di / "RECORD").read_text(errors="replace").splitlines()
+            except OSError:
+                lines = []
+            dirs = set()
+            for line in lines:
+                rel_ = line.split(",", 1)[0]
+                if not rel_:
+                    continue
+                f = (site / rel_).resolve()
+                if root not in f.parents or di.resolve() in (f, *f.parents):
+                    continue
+                if f.is_file() or f.is_symlink():
+                    f.unlink()
+                    dirs.update(p for p in f.parents if root in p.parents)
+            shutil.rmtree(di, ignore_errors=True)
+            for d in sorted(dirs, key=lambda p: len(p.parts), reverse=True):
+                try:
+                    if d.name == "__pycache__":
+                        shutil.rmtree(d, ignore_errors=True)
+                    d.rmdir()
+                except OSError:
+                    pass
 
     def wheels(self, ad: dict, commit: str, rel: Path) -> tuple[Path, str]:
         """(directory, distribution): the adapter's wheels and its dependencies', built ONCE per commit (and Python) as
@@ -932,7 +1028,7 @@ class Updater:
             got = sorted(out.glob("*.whl"))
             if not any(_dist_of(w) == _norm_dist(dist) for w in got):
                 raise StepError(f"adapter: no {dist} wheel was built", PREFLIGHT_EXIT)
-            for w in got:
+            for w in got:                          # (checked again against the venv when installed)
                 if (bad := self.wheel_problem(w)):
                     raise StepError(f"adapter: wheel refused: {bad}", PREFLIGHT_EXIT)
             tmp = self.p.adapter_wheels / f".tmp-{commit}"
@@ -974,49 +1070,36 @@ class Updater:
             raise StepError(f"adapter: wheel build failed (exit {r.returncode})")
 
     def pip_install(self, rel: Path, wheels: Path, dist: str, drop: list[str]) -> None:
-        """Root installs the adapter from its checked wheels only: what its venv still needs (pip --dry-run --report,
-        no index, wheels only: nothing executes), then those wheels with --no-deps --no-index --only-binary :all:.
-        The adapters it replaces (drop) are uninstalled first."""
-        py = str(rel / "venv" / "bin" / "python")
-        if drop:
-            self._run_out([py, "-m", "pip", "uninstall", "-y", "-q", "--disable-pip-version-check", *drop],
-                          "adapter: uninstall")
-        only = ["--no-index", "--find-links", str(wheels), "--only-binary", ":all:", "--no-cache-dir",
-                "--disable-pip-version-check"]
-        r = subprocess.run([py, "-m", "pip", "install", "-q", "--dry-run", "--ignore-installed", "--report", "-", *only,
-                            dist], capture_output=True, text=True, timeout=300)
-        try:
-            plan_ = json.loads(r.stdout or "{}") if r.returncode == 0 else None
-        except ValueError:
-            plan_ = None
-        if not isinstance(plan_, dict):
-            raise StepError("adapter: pip couldn't resolve it from its wheels")
+        """The adapter into rel's venv from its checked wheels, by root WITHOUT any interpreter (no pip, nothing from
+        that venv run): the adapters it replaces (drop) and its own older version out by their RECORDs, then its wheel
+        and those of its dependencies the venv lacks unpacked. A wheel that would shadow anything there (a module or
+        package name the venv has, or another dist's RECORD claims) is refused, as is one wheel_problem() refuses."""
+        site = self.site_of(rel)
+        for d in dict.fromkeys([*drop, dist]):
+            self.uninstall_dist(site, d)
         have = self.venv_dists(rel)
-        files = []
-        for item in plan_.get("install") or []:
-            meta = item.get("metadata") or {}
-            name, ver = _norm_dist(meta.get("name", "")), str(meta.get("version") or "")
-            if name != _norm_dist(dist) and name in have:
-                continue                           # sizeup's own (or one already there): left as it is
-            url = str((item.get("download_info") or {}).get("url") or "")
-            f = Path(url.removeprefix("file://")) if url.startswith("file://") else None
-            if f is None or f.parent != wheels or f.suffix != ".whl":
-                raise StepError(f"adapter: {name} {ver} isn't one of its checked wheels")
-            files.append(str(f))
-        self._run_out([py, "-m", "pip", "install", "-q", "--no-deps", "--upgrade", *only, *files], "adapter: pip install")
+        files = [w for w in sorted(Path(wheels).glob("*.whl")) if _dist_of(w) == _norm_dist(dist) or _dist_of(w) not in have]
+        taken = self.taken(site)
+        for w in files:
+            if (bad := self.wheel_problem(w)):
+                raise StepError(f"adapter: wheel refused: {bad}", PREFLIGHT_EXIT)
+            if (clash := self.wheel_tops(w) & taken):
+                raise StepError(f"adapter: wheel refused: {w.name} would replace {', '.join(sorted(clash))[:120]}",
+                                PREFLIGHT_EXIT)
+            taken |= self.wheel_tops(w)
+        for w in files:
+            self.install_wheel(site, w)
 
     def venv_dists(self, rel: Path) -> set[str]:
         """The distributions a release's venv has (their dist-info directories: nothing run)."""
-        out = set()
-        for di in (rel / "venv").glob("lib/python*/site-packages/*.dist-info"):
-            out.add(_norm_dist(di.name[:-len(".dist-info")].rsplit("-", 1)[0]))
-        return out
+        return {_dist_of(di) for di in (rel / "venv").glob("lib/python*/site-packages/*.dist-info")}
 
     def pip_uninstall(self, rel: Path, dists: list[str]) -> None:
-        """The adapters a release's venv may have from the venv it was linked from: out (none wanted)."""
+        """The adapters a release's venv may have from the venv it was linked from: out (none wanted). No interpreter."""
         if dists:
-            self._run_out([str(rel / "venv" / "bin" / "python"), "-m", "pip", "uninstall", "-y", "-q",
-                           "--disable-pip-version-check", *dists], "adapter: uninstall")
+            site = self.site_of(rel)
+            for d in dists:
+                self.uninstall_dist(site, d)
 
     def self_check(self, rel: Path, dist: str) -> dict:
         """The adapter imports in that release, as the sizeup user, with no credentials: {version, sources}.
@@ -1163,31 +1246,47 @@ class Updater:
             commit = ""
         return ad, commit, known
 
+    # The adapter's credentials (#301): /etc/credstore/sizeup-adapter.<NAME> (root 0700 / 0600), never an environment.
+    # systemd 254+ (Ubuntu 24.04 / WSL2: 255): ImportCredential=sizeup-adapter.* in a drop-in: a missing file is just
+    # missing (the adapter says so), never a station that won't start. Older (Debian 12: 252): LoadCredential= for each
+    # file there now (regenerated whenever setup / remove change them; doctor checks it matches).
+
+    def cred_file(self, name: str) -> Path:
+        return self.p.credentials / f"{CRED_PREFIX}{name}"
+
     def cred_dir_ok(self) -> None:
         self.p.credentials.mkdir(parents=True, exist_ok=True)
         os.chmod(self.p.credentials, 0o700)
         if os.geteuid() == 0:
             os.chown(self.p.credentials, 0, 0)
 
+    def cred_names(self) -> list[str]:
+        try:
+            return sorted(f.name[len(CRED_PREFIX):] for f in self.p.credentials.iterdir()
+                          if f.name.startswith(CRED_PREFIX) and f.is_file())
+        except OSError:
+            return []
+
     def cred_has(self, name: str) -> bool | None:
         """Whether the adapter's credential name is stored (None: can't be looked at here). Never its value."""
         try:
-            return (self.p.credentials / name).stat().st_size > 0
+            return self.cred_file(name).stat().st_size > 0
         except FileNotFoundError:
             return False
         except OSError:
             return None
 
     def write_creds(self, values: dict[str, str], drop: set[str] = frozenset()) -> None:
-        """The adapter's credentials: /etc/sizeup/credentials/<NAME> (root 0600, one value each), handed to the station
-        service only through systemd LoadCredential= (a drop-in: $CREDENTIALS_DIRECTORY), never its environment."""
+        """The adapter's credentials as root-only files, handed to the station service by systemd (its
+        $CREDENTIALS_DIRECTORY), never its environment."""
         self.cred_dir_ok()
-        for k in drop:
-            (self.p.credentials / k).unlink(missing_ok=True)
         for k, v in values.items():
             if any(c in v for c in "\n\r\0"):
                 raise ValueError("one line, please")
-            tmp = self.p.credentials / f".{k}.{os.getpid()}"
+        for k in drop:
+            self.cred_file(k).unlink(missing_ok=True)
+        for k, v in values.items():
+            tmp = self.p.credentials / f".{CRED_PREFIX}{k}.{os.getpid()}"
             tmp.unlink(missing_ok=True)
             fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             try:
@@ -1196,25 +1295,50 @@ class Updater:
                     os.fchown(fd, 0, 0)
             finally:
                 os.close(fd)
-            os.replace(tmp, self.p.credentials / k)
+            os.replace(tmp, self.cred_file(k))
         self.write_dropin()
 
-    def write_dropin(self) -> None:
-        """sizeup-station.service.d/adapter-credentials.conf: one LoadCredential= per stored credential (none: gone)."""
+    def systemd_version(self) -> int:
         try:
-            names = sorted(f.name for f in self.p.credentials.iterdir() if f.is_file() and not f.name.startswith("."))
+            out = subprocess.run(["systemctl", "--version"], capture_output=True, text=True, timeout=10).stdout
+            return int(re.match(r"systemd (\d+)", out).group(1))
+        except (OSError, subprocess.SubprocessError, AttributeError, ValueError):
+            return 0
+
+    def dropin_text(self) -> str:
+        """What sizeup-station.service.d/adapter-credentials.conf should say now ("": no drop-in)."""
+        names = self.cred_names()
+        if not names:
+            return ""
+        head = ("# The incident-source adapter's credentials (#301, sudo sizeup-station adapter setup): files under\n"
+                "# $CREDENTIALS_DIRECTORY for this service only, never in its environment or its children's.\n[Service]\n")
+        if self.systemd_version() >= 254:
+            return head + f"ImportCredential={CRED_PREFIX}*\n"
+        return head + "".join(f"LoadCredential={CRED_PREFIX}{n}:{self.cred_file(n)}\n" for n in names)
+
+    def dropin_problem(self) -> str:
+        """Why the drop-in doesn't match the credential files ("" = it does): doctor."""
+        want = self.dropin_text()
+        try:
+            have = self.p.dropin.read_text()
+        except FileNotFoundError:
+            have = ""
         except OSError:
-            names = []
-        if names:
+            return ""
+        if have == want:
+            return ""
+        return f"{self.p.dropin} doesn't match {self.p.credentials}: sudo sizeup-station adapter setup (Enter keeps them)"
+
+    def write_dropin(self) -> bool:
+        """The drop-in as dropin_text() says, then daemon-reload: whether systemd took it."""
+        text = self.dropin_text()
+        if text:
             self.p.dropin.parent.mkdir(parents=True, exist_ok=True)
-            self.p.dropin.write_text(
-                "# The incident-source adapter's credentials (#301, sudo sizeup-station adapter setup): files under\n"
-                "# $CREDENTIALS_DIRECTORY for this service only, never in its environment or its children's.\n"
-                "[Service]\n" + "".join(f"LoadCredential={n}:{self.p.credentials / n}\n" for n in names))
+            self.p.dropin.write_text(text)
             os.chmod(self.p.dropin, 0o644)
         else:
             self.p.dropin.unlink(missing_ok=True)
-        self.systemctl("daemon-reload")
+        return self.systemctl("daemon-reload")
 
     def env_has(self, key: str) -> bool | None:
         """Whether station.env sets key (None: it can't be read here). Names only: a value is never read out."""
@@ -1440,11 +1564,34 @@ class Updater:
         back = self._switch_back(frm, name)
         if same_build(self.build_of(frm), to) and st.get("adapter_to"):     # an adapter-only rebuild (#301)
             self.adapter_failed(st, str(st["adapter_to"]), f"interrupted; then {why}")
+        elif (c := (self.release_adapter(name) or {}).get("commit")) and not back \
+                and not self._try_plain(st, frm, build, name):
+            # sizeup's own release came up without the adapter: the adapter is what didn't (#301)
+            self.adapter_failed(st, c, f"interrupted; then {why}; {short(build)} runs without it")
+            self.result(f"update {short(frm)} -> {short(to)}: interrupted, unhealthy with adapter {c[:7]} ({why}): "
+                        f"{short(build)} runs without it")
+            self.save(st, state="current", current=build)
+            return
         else:
             self._failed(st, to, f"interrupted; then {why}")
         self.result(f"update {short(frm)} -> {short(to)}: interrupted and unhealthy ({why}): back on {short(frm)}: "
                     + ("ok" if not back else f"FAILED: {back}"))
         self.save(st, state="failed", current=self.current()[1])
+
+    def _try_plain(self, st: dict, back_to: str, sha: str, failed_rel: str) -> str:
+        """releases/<sha>-a<c> didn't come up (we're back on back_to): the same sizeup WITHOUT the adapter, before sha is
+        blamed. "" when it answers (it runs now); else why not (and back on back_to again)."""
+        self.note(f"auto-update: {failed_rel} didn't come up: trying {short(sha)} without the adapter")
+        try:
+            self.clean_base(sha, st)
+            self.activate(sha, back_to)
+            why = self.healthy(sha)
+        except StepError as e:
+            why = str(e)[:300]
+        if why:
+            back = self._switch_back(back_to, sha)
+            return why + (f"; going back: {back}" if back else "")
+        return ""
 
     def _switch_back(self, name: str, leaving: str) -> str:
         """Back to release NAME (a rename and a restart: nothing rebuilt): "" when it answers."""
@@ -1568,6 +1715,21 @@ class Updater:
                                 radios_s=None if radios is None else round(radios, 1)))
             return 0
         back = self._switch_back(name, target)
+        if not only and target != sha and not back:
+            # the release with the adapter didn't come up: sizeup's own without it, before sizeup is blamed (#301)
+            c = (self.release_adapter(target) or {}).get("commit", "")
+            plain = self._try_plain(st, name, sha, target)
+            if not plain:
+                self.adapter_failed(st, c, f"the release with it didn't come up ({why})")
+                self.prune()
+                secs = self.clock() - t0
+                self.result(f"{tag}: ok in {secs:.0f} s without adapter {c[:7]} (with it: {why}); adapter {c[:7]} not "
+                            "tried again until its ref moves")
+                self.save(st, state="current", current=sha, hub=want,
+                          last=dict(last, result="ok", adapter="", adapter_why=f"adapter {c[:7]}: {why}"[:300],
+                                    why="", seconds=round(secs)))
+                return 0
+            why += f"; without the adapter too: {plain}"
         if only:
             if ac:
                 self.adapter_failed(st, ac, why)
@@ -1656,6 +1818,14 @@ class Updater:
                     shutil.rmtree(old, ignore_errors=True)
                     gone.append(old.name)
             legacy.unlink(missing_ok=True)
+        # the adapter's cached wheels (#301): only the commits a kept release has, and the one at its ref now
+        if self.p.adapter_wheels.is_dir():
+            keep = {(self.release_adapter(r) or {}).get("commit", "") for r in self.releases()}
+            keep.add(str((self.load().get("adapter") or {}).get("remote") or ""))
+            for d in self.p.adapter_wheels.iterdir():
+                if d.name.split("-", 1)[0] not in keep:
+                    shutil.rmtree(d, ignore_errors=True)
+                    gone.append(f"adapter-wheels/{d.name[:12]}")
         hist = [h for h in self.history() if h in self.releases()]
         try:
             (self.p.releases / ".history").write_text("".join(f"{h}\n" for h in hist[-50:]))
@@ -1665,7 +1835,7 @@ class Updater:
             self.note(f"auto-update: pruned {', '.join(gone)}")
         return gone
 
-    def rollback(self) -> int:
+    def rollback(self, force: bool = False) -> int:
         """sizeup-station rollback: back to the release that ran before; the one left is not tried again until the hub
         moves on (or, the same sizeup with another adapter commit, that adapter commit until its ref moves)."""
         st = self.load()
@@ -1676,10 +1846,10 @@ class Updater:
             return 1
         to_ad = (self.release_adapter(prev) or {}).get("commit", "")
         ad = self.adapter()
-        if to_ad and (not ad or ad.get("why")):
+        if to_ad and (not ad or ad.get("why")) and not force:
             print(f"Release {prev} has the incident-source adapter ({to_ad[:7]}), which isn't set up now: the next check "
-                  "would take it out again. Set it up first (sudo sizeup-station adapter setup), then roll back.",
-                  file=sys.stderr)
+                  "would take it out again. Set it up first (sudo sizeup-station adapter setup), then roll back; or "
+                  "sudo sizeup-station rollback --force (the next check removes the adapter).", file=sys.stderr)
             return 1
         why = self._switch_back(prev, name)
         new = self.current()[1]
@@ -1742,7 +1912,10 @@ class Updater:
         adapter = dict(adapter_view(installed, rec), ref=(ad or installed or {}).get("ref", ""),
                        env=[(k, self.cred_has(k)) for k in (ad or {}).get("env") or []],
                        key=os.path.isfile(self.p.adapter_key), sources=(installed or {}).get("sources") or [],
-                       key_open=self.key_open())
+                       key_open=self.key_open(), dropin=self.dropin_problem() if os.geteuid() == 0 else "")
+        missing = [k for k, has in adapter["env"] if has is False]
+        if missing and adapter["state"] in ("installed", "running"):
+            adapter.update(state="failing", text=adapter["text"] + f" · {', '.join(missing)} missing")
         return {"build": build, "release": name, "hub": want, "paused": paused, "record": st, "windows": win,
                 "releases": self.releases(), "previous": self.previous(), "adapter": adapter, **d}
 
@@ -1801,9 +1974,11 @@ def doctor_lines(r: dict) -> list[str]:
             out.append("  FAIL  adapter: no deploy key: sudo sizeup-station adapter setup")
         elif ad.get("key_open"):
             out.append(f"  FAIL  adapter: {ad['key_open']}: sudo chmod 600 /etc/sizeup/adapter-deploy-key")
+        if ad.get("dropin"):
+            out.append(f"  FAIL  adapter: {ad['dropin']}")
         for k, has in ad.get("env") or []:
-            out.append(f"  ok    {k} is set" if has else f"  note  {k} is not set: sudo sizeup-station adapter setup"
-                       if has is False else f"  note  {k}: /etc/sizeup/credentials not readable here")
+            out.append(f"  ok    {k} is set" if has else f"  FAIL  {k} is not set: sudo sizeup-station adapter setup"
+                       if has is False else f"  note  {k}: /etc/credstore not readable here")
     return out
 
 
@@ -1958,8 +2133,13 @@ def adapter_remove(u: Updater, yes: bool = False, ask: Callable[[str], str] = in
         out("Nothing changed.")
         return 1
     names = set(cur.get("env") or [])
-    shutil.rmtree(u.p.credentials, ignore_errors=True)
-    u.write_dropin()
+    # the drop-in first (and systemd told), only then the files: a service never asked for a file that's gone
+    u.p.dropin.unlink(missing_ok=True)
+    if not u.systemctl("daemon-reload"):
+        out("systemctl daemon-reload failed: the credentials are left in place; run this again")
+        return 1
+    for n in u.cred_names():
+        u.cred_file(n).unlink(missing_ok=True)
     if names:
         u.drop_env(names)
     for f in (u.p.adapter_key, u.p.adapter_key.with_name(u.p.adapter_key.name + ".pub"), u.p.adapter_pending):
@@ -1969,6 +2149,10 @@ def adapter_remove(u: Updater, yes: bool = False, ask: Callable[[str], str] = in
         out(f"config: {line}")
     shutil.rmtree(u.p.adapter_repo, ignore_errors=True)
     shutil.rmtree(u.p.adapter_wheels, ignore_errors=True)
+    try:
+        u.p.credentials.rmdir()                 # (only if nothing else is in the credstore)
+    except OSError:
+        pass
     st = u.load()
     rec = u.adapter_rec(st)
     u.save(st, adapter={"dists": rec.get("dists") or [], "configured": False, "failed": {}, "retry": {}})
@@ -2037,6 +2221,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--env", default=None, help="adapter setup: its credential variable names, comma-separated")
     ap.add_argument("--no-check", action="store_true", help="adapter setup: don't wait for the repo to answer")
     ap.add_argument("--yes", action="store_true", help="adapter remove: don't ask")
+    ap.add_argument("--force", action="store_true", help="rollback: to a release whose adapter isn't set up now")
     a = ap.parse_args(argv)
     u = Updater(quiet_max_s=a.quiet_max, health_s=a.health_timeout)
     if a.cmd == "adapter":
@@ -2051,7 +2236,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         return u.locked(prune)
     if a.cmd == "rollback":
-        return u.locked(u.rollback)
+        return u.locked(lambda: u.rollback(force=a.force))
     if a.cmd in ("on", "off"):
         s = u.settings()
         if a.cmd == "on" and s["ref"] != MAIN:

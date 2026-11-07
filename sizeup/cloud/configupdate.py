@@ -553,6 +553,9 @@ def set_adapter(text: str, want: dict) -> tuple[str, str]:
     env = [str(x) for x in want.get("env") or []]
     if not repo or not all(SAFE.fullmatch(v) for v in (repo, ref, *env)):
         raise ValueError("adapter-pending.json: repo, ref and env must be plain names")
+    if not repo.startswith(("git@github.com:", "ssh://git@github.com/")) and \
+            not (repo.startswith("/") and os.environ.get("SIZEUP_ADAPTER_ALLOW_LOCAL") == "1"):
+        raise ValueError("adapter-pending.json: repo: git@github.com:OWNER/REPO.git (a local path only in CI and tests)")
     rest = _cut_adapter(text)
     names = ", ".join('"' + x + '"' for x in env)
     block = f'{ADAPTER_NOTE}[adapter]\nrepo = "{repo}"\nref = "{ref}"\nenv = [{names}]\n'

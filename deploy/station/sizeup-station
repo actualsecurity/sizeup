@@ -309,7 +309,7 @@ case "$cmd" in
       echo "An automatic update is running (journalctl -u sizeup-update -f): try again when it's done." >&2
       exit 1
     fi
-    exec python3 -I "$UPDATER" rollback ;;
+    exec python3 -I "$UPDATER" rollback "$@" ;;     # (--force: to a release whose adapter isn't set up now, #301)
   secrets) need_root secrets "$@"; exec bash "$INSTALLER" --secrets ;;
   adapter)
     sub="${1:-status}"
@@ -346,7 +346,7 @@ case "$cmd" in
   sdr-serial)
     need_root sdr-serial "$@"
     cd /
-    exec env PYTHONPATH="$APP" PYTHONDONTWRITEBYTECODE=1 LD_LIBRARY_PATH="$RTLSDR_LIB" "$VENV/bin/python" -P -m sizeup.radio.sdrserial "$@" ;;
+    exec env PYTHONPATH="$APP" PYTHONDONTWRITEBYTECODE=1 LD_LIBRARY_PATH="$RTLSDR_LIB" "$VENV/bin/python" -S -P -m sizeup.radio.sdrserial "$@" ;;   # (-S: root never reads the venv's site-packages: #301)
   version)
     echo "release: $(readlink -f /opt/sizeup/current 2>/dev/null || echo "none ($APP)") build $(cat "$APP/BUILD" 2>/dev/null || echo '?')"
     git --git-dir=/opt/sizeup/repo.git log -1 --format='%h %s (%cd)' --date=short "$(cat "$APP/BUILD" 2>/dev/null || echo HEAD)" 2>/dev/null || true

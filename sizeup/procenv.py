@@ -38,10 +38,12 @@ def credential(name: str) -> str:
     """An adapter credential's value ("" when it isn't there): read from the service's credentials directory."""
     if _dir is None or not name or "/" in name or name.startswith("."):
         return ""
-    try:
-        return (_dir / name).read_text().rstrip("\n")
-    except OSError:
-        return ""
+    for n in (f"sizeup-adapter.{name}", name):          # (ImportCredential= / LoadCredential= name it so)
+        try:
+            return (_dir / n).read_text().rstrip("\n")
+        except OSError:
+            continue
+    return ""
 
 
 def child_env(base=None, **extra) -> dict:

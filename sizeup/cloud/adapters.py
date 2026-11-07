@@ -105,7 +105,7 @@ class Resets:
         try:
             fn()
         except Exception as e:  # noqa: BLE001 - an adapter's bug never stops the station
-            log(f"incident sources: {source}: reset{who} failed: {type(e).__name__}: {e}"[:300])
+            log(f"incident sources: {source}: reset{who} failed: {type(e).__name__}")    # (its type only: no secrets)
             return f"failed: {type(e).__name__}"
         log(f"incident sources: {source}: reset{who}")
         return "reset"
@@ -142,7 +142,10 @@ RESET_EVERY_S = 300.0
 
 
 class ResetLimit:
-    """One reset per source per RESET_EVERY_S (each server: the hub's, the station's): a shared account isn't hammered."""
+    """One reset per source per RESET_EVERY_S (each server: the hub's, the station's): a shared account isn't hammered.
+    blocked() before; done() only once the station said ok. "" (all) is blocked by any source's, and counts for all."""
+
+    MAX = 64
 
     def __init__(self, every_s: float = RESET_EVERY_S, clock: Callable[[], float] | None = None):
         import time
@@ -150,12 +153,19 @@ class ResetLimit:
         self._at: dict[str, float] = {}
         self._lock = threading.Lock()
 
-    def allow(self, source: str) -> float:
-        """0 = go (and counted); else the seconds until the next one may."""
+    def blocked(self, source: str) -> float:
+        """0 = go; else the seconds until a reset of source may."""
         now = self.clock()
         with self._lock:
-            last = self._at.get(source or "*")
-            if last is not None and now - last < self.every_s:
-                return self.every_s - (now - last)
-            self._at[source or "*"] = now
-        return 0.0
+            keys = list(self._at) if not source else [source, "*"]
+            last = max((self._at.get(k, -1e18) for k in keys), default=-1e18)
+        return max(0.0, self.every_s - (now - last))
+
+    def done(self, source: str, sources: list[str] | tuple = ()) -> None:
+        now = self.clock()
+        with self._lock:
+            for k in ([source] if source else ["*", *sources]):
+                self._at[k] = now
+            if len(self._at) > self.MAX:            # bounded: the oldest go
+                for k in sorted(self._at, key=self._at.get)[:len(self._at) - self.MAX]:
+                    del self._at[k]

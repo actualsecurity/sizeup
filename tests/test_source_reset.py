@@ -103,6 +103,7 @@ def test_reset_runs_on_the_adapters_own_thread_and_is_a_noop_without_reset():
             raise RuntimeError("password=hunter2 rejected")
     res.request("feed")
     assert res.run_due(Broken(), logs.append) == "failed: RuntimeError"          # never takes the thread down
+    assert "hunter2" not in "\n".join(logs) and logs[-1].endswith("failed: RuntimeError")   # its type only
 
 
 def test_the_hub_sends_a_sources_reset_job_and_the_station_runs_it(tmp_path):
@@ -120,8 +121,9 @@ def test_the_hub_sends_a_sources_reset_job_and_the_station_runs_it(tmp_path):
         assert wait(lambda: feed.resets, 3) and feed.resets == [st.sources_runner.threads["feed"]]
         code, body = reset(hub.url, "feed")                     # again within 5 min: no
         assert code == 429 and "one per 5 min" in body["error"] and len(feed.resets) == 1
-        code, body = reset(hub.url, "nope")
-        assert code == 503 and "no source 'nope'" in body["error"]
+        for _ in range(2):                                      # a reset that didn't go isn't counted
+            code, body = reset(hub.url, "nope")
+            assert code == 503 and "no source 'nope'" in body["error"]
         code, body = reset(hub.url, "Bad Id")
         assert code == 400
         # on the station itself (sizeup-station adapter reset): the same, locally
@@ -159,14 +161,23 @@ def test_the_health_panel_has_the_reset_button_only_for_failing_sources():
     assert 'filter((x) => x.state === "failing")' in js and 'fetch("/api/sources/reset"' in js and "confirm(" in js
 
 
-def test_the_limit_is_one_per_source_per_5_min():
+def test_the_limit_is_one_per_source_per_5_min_counted_only_when_it_went():
     t = [0.0]
     lim = adapters.ResetLimit(clock=lambda: t[0])
-    assert lim.allow("feed") == 0 and lim.allow("feed") == 300 and lim.allow("other") == 0
+    assert lim.blocked("feed") == 0
+    assert lim.blocked("feed") == 0                       # (asked, not done: not counted)
+    lim.done("feed")
+    assert lim.blocked("feed") == 300 and lim.blocked("other") == 0
+    assert lim.blocked("") == 300                         # all: held up by any source's
     t[0] = 299
-    assert lim.allow("feed") > 0
+    assert lim.blocked("feed") > 0
     t[0] = 301
-    assert lim.allow("feed") == 0
+    assert lim.blocked("feed") == 0
+    lim.done("", ["feed", "other"])                       # all: every source's bucket
+    assert lim.blocked("feed") == 300 and lim.blocked("other") == 300 and lim.blocked("third") == 300
+    for i in range(200):                                  # bounded
+        lim.done(f"s{i}")
+    assert len(lim._at) <= lim.MAX
 
 
 def test_against_the_real_source_runner():

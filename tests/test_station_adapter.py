@@ -76,9 +76,20 @@ class AdapterUpdater(FakeUpdater):
         self.wheel_fail = self.pip_fail = False
         self.extra_files: dict[str, str] = {}
         self.systemctls: list[tuple] = []
+        self.systemctl_ok, self.systemd = True, 255
+        self.unhealthy_releases: set[str] = set()
 
     def systemctl(self, *args):
         self.systemctls.append(args)
+        return self.systemctl_ok
+
+    def systemd_version(self):
+        return self.systemd
+
+    def healthy(self, sha):
+        if self.current()[0] in self.unhealthy_releases:
+            return "/healthz didn't answer within 90 s of the switch"
+        return super().healthy(sha)
 
     def make_release(self, name, build, builds=""):
         super().make_release(name, build, builds)
@@ -103,35 +114,36 @@ class AdapterUpdater(FakeUpdater):
             z.writestr(f"{di}/METADATA", f"Metadata-Version: 2.1\nName: {meta['name']}\nVersion: {ver}\n")
             z.writestr(f"{di}/entry_points.txt",
                        f"[{au.ADAPTER_GROUP}]\n" + "".join(f"{k} = {v}\n" for k, v in eps.items()))
+            z.writestr(f"{di}/RECORD", "".join(f"{n},,\n" for n in [*z.namelist(), f"{di}/RECORD"]))
 
     def pip_install(self, rel, wheels, dist, drop):
-        """pip install --no-deps --no-index from the cached wheels, faked: the wheel unzipped into site-packages."""
+        """The real install (no interpreter: unpacked by this process), recorded; pip_fail breaks it."""
         self.pips.append(("install", rel.name, dist, tuple(drop)))
         if self.pip_fail:
             raise StepError("adapter: pip install: ERROR: something")
-        self.pip_uninstall(rel, list(drop))
-        site = rel / "venv" / SITE
-        shutil.rmtree(site / "feed_adapter", ignore_errors=True)
-        for w in sorted(Path(wheels).glob("*.whl")):
-            with zipfile.ZipFile(w) as z:
-                z.extractall(site)
+        return super().pip_install(rel, wheels, dist, drop)
 
     def pip_uninstall(self, rel, dists):
         if dists:
             self.pips.append(("uninstall", rel.name, tuple(dists)))
-        site = rel / "venv" / SITE
-        for d in dists:
-            for p in list(site.glob(f"{d.replace('-', '_')}-*.dist-info")) + [site / "feed_adapter"]:
-                shutil.rmtree(p, ignore_errors=True)
+        return super().pip_uninstall(rel, dists)
 
     def set_up(self, repo: Path, ref: str = "main") -> None:
         self.p.adapter_key.write_text("fake private key\n")
         self.p.adapter_key.chmod(0o600)
         self.p.adapter_pending.write_text(json.dumps({"repo": str(repo), "ref": ref, "env": ["FEED_USER"]}))
+        if not self.cred_has("FEED_USER"):
+            self.write_creds({"FEED_USER": "feed-user"})
         self._settings = None
 
     def installed(self) -> dict | None:
         return self.release_adapter(self.current()[0])
+
+
+@pytest.fixture(autouse=True)
+def allow_local(monkeypatch):
+    """The stand-in for the private repo is a local path: allowed in tests and CI only."""
+    monkeypatch.setenv(au.ALLOW_LOCAL, "1")
 
 
 @pytest.fixture
@@ -297,7 +309,7 @@ def test_removed_the_next_release_has_no_adapter(station, capsys):
     lines = []
     assert au.adapter_remove(u, yes=True, out=lines.append) == 0
     assert not u.p.adapter_key.exists() and not u.p.adapter_pending.exists() and not u.p.adapter_repo.exists()
-    assert not u.p.credentials.exists() and not u.p.dropin.exists() and not u.p.adapter_wheels.exists()
+    assert not u.cred_names() and not u.p.dropin.exists() and not u.p.adapter_wheels.exists()
     assert u.p.env.read_text() == "SIZEUP_STATION_TOKEN=x\n"          # its credentials out, the station's kept
     u._settings = None
     assert u.adapter() == {}
@@ -354,13 +366,14 @@ def test_setup_makes_the_key_asks_hidden_and_records_the_repo(station):
         assert v not in text                                                  # never printed
     # credentials: root-only files handed over by LoadCredential=, never in station.env (the environment)
     assert u.p.env.read_text() == "# sizeup station secrets\nSIZEUP_STATION_TOKEN=tok-123\n"
-    assert (u.p.credentials / "FEED_USER").read_text() == 'us"er$1'
-    assert (u.p.credentials / "FEED_PASS").read_text() == "p\\ass word`x"
-    assert stat.S_IMODE((u.p.credentials / "FEED_PASS").stat().st_mode) == 0o600
+    assert u.cred_file("FEED_USER").read_text() == 'us"er$1'
+    assert u.cred_file("FEED_USER").name == "sizeup-adapter.FEED_USER"           # (the credstore's naming)
+    assert u.cred_file("FEED_PASS").read_text() == "p\\ass word`x"
+    assert stat.S_IMODE(u.cred_file("FEED_PASS").stat().st_mode) == 0o600
     assert stat.S_IMODE(u.p.credentials.stat().st_mode) == 0o700
-    assert u.p.dropin.read_text().count("LoadCredential=") == 2
-    assert f"LoadCredential=FEED_USER:{u.p.credentials / 'FEED_USER'}" in u.p.dropin.read_text()
-    assert ("daemon-reload",) in u.systemctls
+    assert "ImportCredential=sizeup-adapter.*" in u.p.dropin.read_text()       # systemd 255: a missing file is fine
+    assert "LoadCredential" not in u.p.dropin.read_text()
+    assert ("daemon-reload",) in u.systemctls and u.dropin_problem() == ""
     assert au.GITHUB_HOSTKEY in u.p.known_hosts.read_text()                  # pinned: StrictHostKeyChecking=yes
     assert au.GITHUB_HOSTKEY in (ROOT / "deploy" / "station" / "install-linux.sh").read_text()
     cfg = tomllib.loads(u.p.config.read_text())                               # no rollback target: written now
@@ -378,8 +391,7 @@ def test_setup_makes_the_key_asks_hidden_and_records_the_repo(station):
     assert au.adapter_setup(u, ask=lambda p: next(answers), secret=lambda p: "", out=said.append,
                             make_key=make_key, check=False) == 0
     assert len(made) == 1                                                     # the same key
-    assert (u.p.credentials / "FEED_USER").read_text() == 'us"er$1' and not (u.p.credentials / "FEED_PASS").exists()
-    assert "FEED_PASS" not in u.p.dropin.read_text()
+    assert u.cred_file("FEED_USER").read_text() == 'us"er$1' and not u.cred_file("FEED_PASS").exists()
     assert tomllib.loads(u.p.config.read_text())["adapter"]["ref"] == "v2"
 
 
@@ -536,7 +548,13 @@ def test_the_config_reads_adapter_and_configupdate_adds_and_removes_it(tmp_path,
 def test_helpers():
     assert au.adapter_repo_problem("git@github.com:o/r.git") == ""
     assert au.adapter_repo_problem("ssh://git@github.com/o/r.git") == ""
-    assert au.adapter_repo_problem("/srv/adapter.git") == ""
+    assert au.adapter_repo_problem("/srv/adapter.git") == ""                  # (ALLOW_LOCAL: the fixture's)
+    os.environ.pop(au.ALLOW_LOCAL)
+    assert "only with SIZEUP_ADAPTER_ALLOW_LOCAL=1" in au.adapter_repo_problem("/srv/adapter.git")
+    with pytest.raises(ValueError):
+        cu.set_adapter("", {"repo": "/srv/adapter.git", "ref": "main", "env": []})
+    for other_host in ("git@gitlab.com:o/r.git", "ssh://git@example.org/o/r.git", "git@github.com:-o/r"):
+        assert au.adapter_repo_problem(other_host)
     for bad in ("https://github.com/o/r", "-oProxyCommand=x", "ext::sh -c x", "git@github.com:o/r;x", ""):
         assert au.adapter_repo_problem(bad)
     assert au.repo_name("git@github.com:o/feed.git") == "feed" and au.repo_name("/srv/x/adapter.git") == "adapter"
@@ -570,16 +588,21 @@ def test_cli_status_without_an_adapter(tmp_path, monkeypatch, capsys):
 
 
 def test_credentials_root_only_files_and_station_env_kept(tmp_path):
-    u = au.Updater(au.Paths(env=tmp_path / "station.env", credentials=tmp_path / "cred",
+    u = au.Updater(au.Paths(env=tmp_path / "station.env", credentials=tmp_path / "credstore",
                             dropin=tmp_path / "d" / "adapter-credentials.conf"))
-    u.systemctl = lambda *a: None
+    u.systemctl = lambda *a: True
+    u.systemd_version = lambda: 252                       # Debian 12: LoadCredential= for each file there
     u.write_creds({"FEED_USER": "a b"})
-    assert stat.S_IMODE(os.stat(tmp_path / "cred" / "FEED_USER").st_mode) == 0o600
+    assert stat.S_IMODE(os.stat(u.cred_file("FEED_USER")).st_mode) == 0o600
     assert u.cred_has("FEED_USER") and not u.cred_has("FEED_PASS")
+    assert u.p.dropin.read_text().count("LoadCredential=") == 1
+    assert f"LoadCredential=sizeup-adapter.FEED_USER:{u.cred_file('FEED_USER')}" in u.p.dropin.read_text()
+    u.cred_file("FEED_USER").unlink()                     # by hand: doctor says the drop-in doesn't match
+    assert "doesn't match" in u.dropin_problem()
     with pytest.raises(ValueError):
         u.write_creds({"FEED_PASS": "two\nlines"})
     u.write_creds({}, drop={"FEED_USER"})
-    assert u.cred_has("FEED_USER") is False and not (tmp_path / "d" / "adapter-credentials.conf").exists()
+    assert u.cred_has("FEED_USER") is False and not u.p.dropin.exists() and u.dropin_problem() == ""
     (tmp_path / "station.env").write_text('# x\nSIZEUP_STATION_TOKEN=t\nFEED_USER="old"\n')
     u.drop_env({"FEED_USER"})
     assert (tmp_path / "station.env").read_text() == "# x\nSIZEUP_STATION_TOKEN=t\n"
@@ -786,3 +809,190 @@ def test_the_programs_sizeup_starts_get_an_explicit_env():
     for f, needle in (("sizeup/radio/fm.py", "env=child_env()"), ("sizeup/app.py", "env=child_env()"),
                       ("sizeup/tts.py", "env=child_env()"), ("sizeup/radio/recorder.py", "env = child_env()")):
         assert needle in (ROOT / f).read_text(), f
+
+
+# -- re-review of #305 (b1516e3) ---------------------------------------------------------------------------------
+
+def _install_other_dist(rel: Path) -> None:
+    """A distribution already in the venv: 'otherpkg', claimed by its RECORD."""
+    site = rel / "venv" / SITE
+    (site / "otherpkg").mkdir(parents=True, exist_ok=True)
+    (site / "otherpkg" / "__init__.py").write_text("")
+    di = site / "otherpkg-1.0.dist-info"
+    di.mkdir(exist_ok=True)
+    (di / "METADATA").write_text("Metadata-Version: 2.1\nName: otherpkg\nVersion: 1.0\n")
+    (di / "RECORD").write_text("otherpkg/__init__.py,,\notherpkg-1.0.dist-info/RECORD,,\nclaimed_only/x.py,,\n")
+
+
+@pytest.mark.parametrize("extra, why", [
+    ({"sitecustomize.py": "import os; os.system('id')"}, "sitecustomize"),
+    ({"usercustomize.py": "x = 1"}, "usercustomize"),
+    ({"feed_adapter-0.1.data/data/bin/python": "#!/bin/sh"}, ".data"),
+    ({"otherpkg/evil.py": "x = 1"}, "would replace otherpkg"),         # into another package's directory
+    ({"claimed_only.py": "x = 1"}, "would replace claimed_only"),      # a name another dist's RECORD claims
+    ({"json.py": "x = 1"}, ""),                                         # (a stdlib name: not site-packages', allowed)
+])
+def test_root_refuses_wheels_that_could_run_or_shadow_code(station, extra, why):
+    repo, u, ad = station
+    _install_other_dist(u.p.releases / repo.shas[0])
+    u.extra_files = extra
+    u.set_up(ad.bare)
+    u.want(repo.shas[0])
+    rc = u.run()
+    if not why:
+        assert rc == 0 and u.installed() is not None
+        return
+    assert rc == 1 and u.installed() is None
+    got = u.load()["adapter"]["failed"][ad.commits[0]]["why"]
+    assert "wheel refused" in got and why in got
+    assert not (u.p.releases / repo.shas[0] / "venv" / SITE / "sitecustomize.py").exists()
+
+
+def test_no_root_run_interpreter_reads_the_adapter_release(station, monkeypatch):
+    """Installing and uninstalling the adapter starts no process at all (no pip, no venv python): only the sizeup
+    user's wheel build and self-check run anything."""
+    repo, u, ad = station
+    started = []
+    real_run, real_popen = subprocess.run, subprocess.Popen
+    in_install = [False]
+
+    def watch(fn):
+        def w(argv, *a, **k):
+            if in_install[0]:
+                started.append(list(argv))
+            return fn(argv, *a, **k)
+        return w
+    monkeypatch.setattr(au.subprocess, "run", watch(real_run))
+    monkeypatch.setattr(au.subprocess, "Popen", watch(real_popen))
+    base_install, base_uninstall = au.Updater.pip_install, au.Updater.pip_uninstall
+
+    def install(self, *a):
+        in_install[0] = True
+        try:
+            return base_install(self, *a)
+        finally:
+            in_install[0] = False
+    monkeypatch.setattr(au.Updater, "pip_install", install)
+    u.set_up(ad.bare)
+    u.want(repo.shas[0])
+    assert u.run() == 0 and u.installed() is not None
+    c2 = ad.commit("def make(ctx):\n    return []\n")
+    assert u.run() == 0 and u.installed()["commit"] == c2                 # the old version out by its RECORD, too
+    assert started == []
+    site = u.p.current.resolve() / "venv" / SITE
+    assert [d.name for d in site.glob("feed_adapter-*.dist-info")] == ["feed_adapter-0.1.dist-info"]
+    assert (site / "feed_adapter-0.1.dist-info" / "INSTALLER").read_text() == "sizeup\n"
+    for f in ("deploy/station/install-linux.sh",):
+        sh = (ROOT / f).read_text()
+        assert '"$tmp/venv/bin/python" -I -S -m compileall' in sh
+        assert 'as_user "$1/venv/bin/python" -c \'import numpy\'' in sh
+    assert '"$VENV/bin/python" -S -P -m sizeup.radio.sdrserial' in (ROOT / "deploy/station/sizeup-station").read_text()
+
+
+def test_a_release_with_the_adapter_that_doesnt_come_up_retries_without_it(station):
+    repo, u, ad, good = _with_adapter(station)
+    c1 = ad.commits[0]
+    new = repo.commit("two")
+    u.unhealthy_releases = {au.release_name(new, c1)}       # the adapter hangs the new release's start
+    u.want(new)
+    assert u.run() == 0
+    assert u.current() == (new, new) and u.installed() is None             # sizeup's release runs, without it
+    assert new not in u.load().get("failed", {}) and c1 in u.load()["adapter"]["failed"]
+    assert u.calls[-3:] == [("activate", au.release_name(new, c1)), ("activate", good), ("activate", new)]
+    assert "without adapter" in u.p.log.read_text().splitlines()[-1]
+    # (the reviewer's probe: both with and without the adapter fail: then it is sizeup's)
+    newer = repo.commit("three")
+    u.unhealthy.add(newer)
+    u.want(newer)
+    u.unhealthy_releases = set()
+    assert u.run() == 1 and newer in u.load()["failed"] and u.current()[1] == new
+
+
+def test_an_interrupted_start_with_the_adapter_retries_without_it(station):
+    repo, u, ad, good = _with_adapter(station)
+    c1 = ad.commits[0]
+    new = repo.commit("two")
+    u.make_release(new, new)
+    target = au.release_name(new, c1)
+    shutil.copytree(u.p.releases / good, u.p.releases / target, symlinks=True, dirs_exist_ok=True)
+    (u.p.releases / target / "BUILD").write_text(new + "\n")
+    u.switch(target)                                        # switched, then the box rebooted, and it never came up
+    u.unhealthy_releases = {target}
+    u.save(u.load(), state="updating", to=new, adapter_to="", **{"from": good})
+    u.want(new)
+    u.run()
+    assert u.current() == (new, new) and c1 in u.load()["adapter"]["failed"] and new not in u.load().get("failed", {})
+
+
+def test_remove_takes_the_drop_in_out_first_and_keeps_the_files_if_systemd_says_no(station):
+    repo, u, ad, good = _with_adapter(station)
+    _current_release_with_configupdate(u)
+    u.systemctl_ok = False
+    out = []
+    assert au.adapter_remove(u, yes=True, out=out.append) == 1
+    assert not u.p.dropin.exists() and u.cred_has("FEED_USER")           # drop-in gone, files kept
+    assert "left in place" in out[-1]
+    u.systemctl_ok = True
+    assert au.adapter_remove(u, yes=True, out=out.append) == 0 and not u.cred_names()
+
+
+def test_a_missing_credential_shows_failing_and_the_drop_in_never_names_it(station):
+    repo, u, ad, good = _with_adapter(station)
+    u.cred_file("FEED_USER").unlink()                       # deleted by hand
+    r = u.report()["adapter"]
+    assert r["state"] == "failing" and "FEED_USER missing" in r["text"]
+    assert any("FEED_USER is not set" in ln for ln in au.doctor_lines(u.report()))
+    assert "ImportCredential=sizeup-adapter.*" in u.p.dropin.read_text()  # 255: no per-file line to fail the start
+    u.systemd = 252
+    assert "doesn't match" in u.dropin_problem()                          # (Debian 12: doctor says so)
+
+
+def test_rollback_force_to_an_adapter_release_that_isnt_set_up(station):
+    repo, u, ad, withad = _with_adapter(station)
+    s = repo.shas[0]
+    u.p.adapter_key.unlink()
+    u.p.adapter_pending.unlink()
+    u._settings = None
+    u.run()
+    assert u.rollback() == 1 and u.current()[0] == s
+    assert u.rollback(force=True) == 0 and u.current()[0] == withad
+    assert not u.load().get("failed")
+    u.calls.clear()
+    u.run()                                                 # the next check takes the adapter out again
+    assert u.current()[0] == s
+
+
+def test_prune_keeps_only_the_wheels_of_kept_releases_and_the_ref(station):
+    repo, u, ad, good = _with_adapter(station)
+    for i in range(3):
+        ad.commit(f"def make(ctx):\n    return []\n# {i}\n")
+        assert u.run() == 0
+    kept = {(u.release_adapter(r) or {}).get("commit") for r in u.releases()} | {u.load()["adapter"]["remote"]}
+    have = {d.name.split("-", 1)[0] for d in u.p.adapter_wheels.iterdir()}
+    assert have <= kept and ad.commits[0] not in have and len(have) <= au.KEEP_RELEASES + 1
+
+
+def test_probe_a_wheel_that_wont_build_never_fails_sizeup(station):
+    """(re-review probe) a new adapter commit that won't build, and a new sizeup sha: sizeup moves, never failed."""
+    repo, u, ad, good = _with_adapter(station)
+    ad.commit("def make(ctx):\n    return []\n# x\n")
+    u.wheel_fail = True
+    new = repo.commit("two")
+    u.want(new)
+    t = [1e9]
+    u.clock = lambda: t[0]
+    for _ in range(au.MAX_STAGES + 2):
+        u.run()
+        t[0] += 4000
+    assert new not in u.load().get("failed", {}) and u.current()[1] == new
+    assert u.installed()["commit"] == ad.commits[0]                       # the one that ran, from its cached wheels
+
+
+def test_probe_adapter_only_wheel_failures_back_off(station):
+    repo, u, ad, good = _with_adapter(station)
+    ad.commit("def make(ctx):\n    return []\n")
+    u.wheel_fail = True
+    n0 = len(u.builds)
+    for _ in range(5):
+        u.run()
+    assert len(u.builds) - n0 <= 1

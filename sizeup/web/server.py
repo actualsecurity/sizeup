@@ -358,7 +358,7 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
     hub_says = json.dumps({"error": "this is the hub: station forwarding is switched on the station"}).encode()
     station_ui = role == "station"
 
-    from sizeup.cloud.adapters import ResetLimit
+    from sizeup.cloud.adapters import SOURCE_ID, ResetLimit
     reset_limit = ResetLimit()             # POST /api/sources/reset: one per source per 5 min (#301)
 
     def station_says() -> bytes:
@@ -685,16 +685,17 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 raw = self._body(1024)
                 try:
                     body = json.loads(raw or b"{}") if raw is not None else None
-                    src = str(body.get("source") or "") if isinstance(body, dict) else ""
-                except ValueError:
-                    src = ""
-                if (wait_s := reset_limit.allow(src)) > 0:
+                    if not isinstance(body, dict):
+                        raise ValueError("a JSON object, at most 1 KB")
+                    src = str(body.get("source") or "").strip()
+                    if src and not SOURCE_ID.fullmatch(src):
+                        raise ValueError("source: a source id")
+                except ValueError as e:
+                    return self._send(400, json.dumps({"error": str(e)}).encode(), "application/json")
+                if (wait_s := reset_limit.blocked(src)) > 0:
                     return self._send(429, json.dumps({"error": f"reset again in {wait_s / 60:.0f} min (one per 5 min)"})
                                       .encode(), "application/json")
                 try:
-                    body = json.loads(raw or b"{}") if raw is not None else None
-                    if not isinstance(body, dict):
-                        raise ValueError("a JSON object, at most 1 KB")
                     if station is not None and hasattr(station, "reset_source"):
                         out = station.reset_source(str(body.get("source") or ""), getattr(self.who, "email", "") or "")
                     elif station_mode is not None:
@@ -705,6 +706,7 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                     return self._send(400, json.dumps({"error": str(e)}).encode(), "application/json")
                 except RuntimeError as e:            # (StationOffline too): the station couldn't
                     return self._send(503, json.dumps({"error": str(e)[:300]}).encode(), "application/json")
+                reset_limit.done(src, [x.split(":", 1)[0] for x in str(out.get("result") or "").split("; ")])
                 self._did(path, body)
                 return self._send(200, json.dumps(out).encode(), "application/json")
             if path in ("/api/station-mode", "/api/station-mode/test") and (station is not None or station_mode is not None):
