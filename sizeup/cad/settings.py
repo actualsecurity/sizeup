@@ -101,6 +101,11 @@ PAGE_SECTION[ATC_SECTION] = "system"
 # The push topics by kind (sizeup/notify.py Pushes): Settings > System > Push notifications, audited as System.
 NOTIFY_SECTION = "notify"
 PAGE_SECTION[NOTIFY_SECTION] = "system"
+# The dispatch mode (#311, sizeup/cad/automode.py): switched from the header, not a setting: never exported, kept
+# through an import, like the push topics.
+MODE_SECTION = "dispatch_mode"
+PAGE_SECTION[MODE_SECTION] = "dispatch"
+KEPT_SECTIONS = (NOTIFY_SECTION, MODE_SECTION)
 # The hub's own error spikes (#285, sizeup/errwatch.py): Settings > System > Hub error alerts, audited as System.
 ERR_SECTION = errwatch.SECTION
 PAGE_SECTION[ERR_SECTION] = "system"
@@ -2132,7 +2137,7 @@ class Editor:
         return {"format": FORMAT, "version": FORMAT_VERSION,
                 "exported_at": datetime.fromtimestamp(self.store.clock(), TZ).isoformat(timespec="seconds"),
                 "data_file": lists_mod._shown_path(str(self.path)), "defaults_version": str(self.defaults.get("version") or ""),
-                "overrides": {k: v for k, v in self.overrides().items() if k != NOTIFY_SECTION},   # names secret
+                "overrides": {k: v for k, v in self.overrides().items() if k not in KEPT_SECTIONS},   # names secret
                 "run_cards": [{"type": c["type"], "spoken": c["spoken"], "is_default": c["is_default"], "slots": c["slots"],
                                "remarks": c["remarks"]} for c in runcards.cards(self.store)],
                 "operators": [{"name": o["name"], "role": o["role"], "active": o["active"], "email": o["email"],
@@ -2146,7 +2151,7 @@ class Editor:
         ov = data.get("overrides") or {}
         if not isinstance(ov, dict) or any(s not in PAGE_SECTION or not isinstance(v, dict) for s, v in ov.items()):
             raise CadError(f"overrides: sections from {', '.join(PAGE_SECTION)}")
-        ov = {k: v for k, v in ov.items() if k != NOTIFY_SECTION}    # the push topics: set in Settings only, kept
+        ov = {k: v for k, v in ov.items() if k not in KEPT_SECTIONS}    # the push topics, the mode: set here only, kept
         try:
             json.dumps(ov)
         except (TypeError, ValueError):
@@ -2284,7 +2289,7 @@ class Editor:
                                     "email": o["email"]}
             self._keep_an_admin(list(after.values()), "the file leaves no active admin with a sign-in email "
                                 f"({', '.join(a['name'] for a in self.admins())} now): nobody could change Settings after it")
-        cur = {k: v for k, v in self.overrides().items() if k != NOTIFY_SECTION}
+        cur = {k: v for k, v in self.overrides().items() if k not in KEPT_SECTIONS}
         changes = []
         for sec in sorted(set(cur) | set(ov)):
             a, b = cur.get(sec, {}), ov.get(sec, {})
@@ -2319,7 +2324,7 @@ class Editor:
                     "note": "Nothing changed yet. Operators not in the file are kept; run cards and edits are replaced."}
         now = self.store.clock()
         with self.store.tx() as db:
-            db.execute("DELETE FROM settings_overrides WHERE section != ?", (NOTIFY_SECTION,))
+            db.execute("DELETE FROM settings_overrides WHERE section NOT IN (?, ?)", KEPT_SECTIONS)
             for sec, kv in ov.items():
                 for k, v in kv.items():
                     db.execute("INSERT INTO settings_overrides (section, key, value, updated_at, operator) VALUES (?, ?, ?, ?, ?)",

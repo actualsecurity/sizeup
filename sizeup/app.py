@@ -2964,7 +2964,7 @@ class App:
     def apply_source(self, kind: str, data: dict) -> None:
         """A "source_event" / "source_health" on the CAD of record (the hub applies the station's the same way)."""
         if kind == "source_event":
-            self.cad.sources.on_event(data)
+            self.cad.source_event(data)              # the incident sources (#297), then the dispatch mode (#311)
         elif kind == "source_health":
             self.cad.sources.on_health(data)
 

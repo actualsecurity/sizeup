@@ -135,7 +135,7 @@ def test_plus_event_is_a_manual_link_with_the_operator(tmp_path):
     a = _event_with(c, ["E63"], clock)
     clock.t += 5
     c.record_traffic(tx("307-m-call_1", clock.t, "Fire/EMS 15", "", "60 Ctrl OP 7", 307,
-                        "60 Control to Port Chester, PD requesting you at 209 Westchester."))
+                        "60 Control to Port Chester, PD requesting you at the school."))
     api = CadApi(c)
     post = lambda path, body: (lambda r: (r[0], json.loads(r[1])))(api.post(path, json.dumps(body).encode()))
     code, r = post(f"/api/cad/incident/{a['id']}/link", {"traffic_id": "307-m-call_1", "operator": "Lt. Ruiz"})

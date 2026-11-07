@@ -27,11 +27,13 @@ from sizeup import polly
 from sizeup.cad import airport, dispatcher, eta, export, mapview, runcards
 from sizeup.cad.activity import Activity
 from sizeup.cad.alarms import Alarms
+from sizeup.cad.automode import AutoDispatch
 from sizeup.cad.comms import MAIN_LIMIT, MAX_ROWS, OTHER_LIMIT, Comms
 from sizeup.cad.feed import Feed
 from sizeup.cad.newids import NewIds
 from sizeup.cad.statushints import StatusHints
 from sizeup.cad.sources import PAGING_RANK, Sources
+from sizeup.cad.radiolog import RadioLog
 from sizeup.cad.radios import Registry, RadioError, is_pcfd
 from sizeup.cad import settings as settings_mod
 from sizeup.cad import lists as lists_mod
@@ -208,6 +210,11 @@ class Cad:
         # Incident sources, ranked (#297, sizeup/cad/sources.py): external CAD feeds first, the paging decoder the backup;
         # which may make an incident, whose fields win, the possible-incoming notices. The app starts its ticker.
         self.sources = Sources(self, clock=clock, log=log)
+        # Dispatch modes (#311, sizeup/cad/automode.py): 60 Control dispatching moves a feed's incident through the call
+        # by itself (accept, units, statuses, close), PCFD dispatching leaves it queued. The per-incident radio log in
+        # both (sizeup/cad/radiolog.py): transmissions naming its units, address or place, or on its fireground channel.
+        self.auto = AutoDispatch(self, clock=clock, log=log)
+        self.radiolog = RadioLog(self)
         # FG1 radio IDs nobody has named yet (#163): "Radio 1234 (MDC) on FG1: who is this?" on the console.
         self.newids = NewIds(self)
         # The emergency button and a mayday heard on our fire channels (sizeup/cad/alarms.py, #128): the app feeds it
@@ -296,8 +303,10 @@ class Cad:
                 self.sources.decorate(incs)               # a feed's jurisdiction and run numbers on the incident (#297)
             except Exception as e:  # noqa: BLE001
                 self.log(f"CAD: incident sources: {type(e).__name__}: {e}")
+            self._decorate_auto(incs)
             self._state = (rev, {
                 "department": self.s.department,
+                "dispatch_mode": self.auto.state(),       # #311: the header's switch
                 "lists": self.lists.public(),
                 "units": self.store.units(),
                 "incidents": incs,
@@ -343,14 +352,50 @@ class Cad:
             return None
 
     def _on_text(self, tid: str) -> None:
-        """A transcript arrived or changed: status suggestions (#37) and the radio pre-alerts (#297)."""
+        """A transcript arrived or changed: the per-incident radio log (#311), status suggestions (#37), taken at once
+        for a tracked incident in 60 Control mode (#311), and the radio pre-alerts (#297)."""
         try:
-            self.hints.consider(tid)
+            self.radiolog.consider(tid)
+        except Exception as e:  # noqa: BLE001 - the log never stops the transcript
+            self.log(f"CAD: radio log: {type(e).__name__}: {e}")
+        try:
+            self.auto.on_hints(self.hints.consider(tid))
         finally:
             try:
                 self.sources.consider_radio(tid)
             except Exception as e:  # noqa: BLE001 - a notice never stops the transcript
                 self.log(f"CAD: possible incoming: {type(e).__name__}: {e}")
+
+    def _decorate_auto(self, incs: list[dict]) -> list[dict]:
+        try:
+            self.auto.decorate(incs)                      # #311: each automatic step, its source and its undo
+        except Exception as e:  # noqa: BLE001
+            self.log(f"CAD: dispatch mode: {type(e).__name__}: {e}")
+        return incs
+
+    def source_event(self, d: dict) -> int | None:
+        """A "source_event" on the CAD of record (#297), then the dispatch mode's part (#311). The incident id."""
+        iid = self.sources.on_event(d)
+        self.auto.on_feed(iid)
+        return iid
+
+    def dispatch_mode(self, body: dict) -> dict:
+        """POST /api/cad/dispatch-mode {mode: 60control | pcfd, operator}: the header's switch (#311)."""
+        return self.auto.set_mode(_text(body, "mode", 20, required=True), _text(body, "operator", OPERATOR_MAX))
+
+    def auto_undo(self, iid: int, body: dict) -> dict:
+        """POST /api/cad/incident/<id>/auto-undo {step, operator}: an automatic step taken back (#311)."""
+        sid = body.get("step")
+        if isinstance(sid, bool) or not isinstance(sid, int):
+            raise CadError("step: a number")
+        return self.auto.undo(iid, sid, _text(body, "operator", OPERATOR_MAX))
+
+    def _by_hand(self, iid: int | None, uids, operator: str) -> None:
+        """A person put these units on (or moved them on) the incident: automation leaves them there alone (#311)."""
+        if not iid:
+            return
+        by = {u["id"]: u["name"] for u in self.store.units()}
+        self.auto.mark_units(iid, [by.get(i) for i in uids], operator)
 
     def radio_ids(self, now: float | None = None) -> list[dict]:
         """The FG1 radio IDs to ask about (#163, sizeup/cad/newids.py); a fault never breaks the console."""
@@ -382,7 +427,11 @@ class Cad:
     def hint(self, hid: int, action: str, body: dict) -> dict:
         """POST /api/cad/hint/<id>/accept | dismiss {operator}: a radio status suggestion taken or turned down."""
         op = _text(body, "operator", OPERATOR_MAX)
-        return self.hints.accept(hid, op) if action == "accept" else self.hints.dismiss(hid, op)
+        if action != "accept":
+            return self.hints.dismiss(hid, op)
+        out = self.hints.accept(hid, op)
+        self._by_hand(out.get("incident_id"), [out["id"]], op)
+        return out
 
     def alarms_state(self, now: float | None = None) -> dict | None:
         """Open alarms, notices and the just acknowledged (sizeup/cad/alarms.py; a fault never breaks the console)."""
@@ -643,8 +692,12 @@ class Cad:
         return self.store.close(iid, _text(body, "disposition", 40), _text(body, "operator", OPERATOR_MAX))
 
     def reopen(self, iid: int, body: dict) -> dict:
-        """A closed or dismissed event back on the boards (#89): see Store.reopen."""
-        return self.store.reopen(iid, _text(body, "operator", OPERATOR_MAX))
+        """A closed or dismissed event back on the boards (#89): see Store.reopen. A feed's in service no longer closes
+        it by itself (#311)."""
+        op = _text(body, "operator", OPERATOR_MAX)
+        out = self.store.reopen(iid, op)
+        self.auto.mark(iid, ["close"], op)
+        return out
 
     def note(self, iid: int, body: dict) -> dict:
         """A timeline comment. units: the unit tags picked with the autocomplete ("E63 stated that ..."):
@@ -719,7 +772,7 @@ class Cad:
                               for u in r["units"]])
 
     def full(self, iid: int) -> dict:
-        return self._with_radio([self.store.full(iid)], limit=1000)[0]
+        return self._decorate_auto(self._with_radio([self.store.full(iid)], limit=1000))[0]
 
     def history(self) -> dict:
         return {"incidents": self.store.history()}
@@ -1003,6 +1056,7 @@ class Cad:
         text, plan = self._text_for(inc, units, kind, full=bool(_bool(body, "full")), remarks=remarks)
         moved = self.store.assign(iid, [u["id"] for u in units], operator,
                                   verb="added to the assignment" if kind == "add_on" else "")
+        self._by_hand(iid, [u["id"] for u in units], operator)
         return self._send(iid, text, units, operator, channel, "add-on" if kind == "add_on" else "dispatch", moved,
                           remarks, plan)
 
@@ -1049,6 +1103,7 @@ class Cad:
             what.append(L.wording["full_response"])
         self.store.note(iid, "Upgrade: " + "; ".join(what or ["more units"]), operator, kind="upgrade")
         moved = self.store.assign(iid, [u["id"] for u in units], operator, verb="dispatched (upgrade)") if units else []
+        self._by_hand(iid, [u["id"] for u in units], operator)
         return self._send(iid, text, units, operator, channel, "upgrade", moved, remarks, plan)
 
     def attach(self, iid: int, body: dict) -> dict:
@@ -1063,6 +1118,7 @@ class Cad:
         if body.get("status") is not None:
             return self._add_responding(iid, units, body)
         op = _text(body, "operator", OPERATOR_MAX)
+        self._by_hand(iid, [u["id"] for u in units], op)
         ours = [u["id"] for u in units if u["response"] != "agency"]
         agency = [u["id"] for u in units if u["response"] == "agency"]
         moved = self.store.assign(iid, ours, op, attach=True) if ours else []
@@ -1089,6 +1145,7 @@ class Cad:
         if agency:
             raise CadError(f"Another agency's unit, not {L.name('unit_statuses', status)}: {', '.join(agency)}")
         moved = self.store.assign(iid, [u["id"] for u in units], op, status=status)
+        self._by_hand(iid, [u["id"] for u in units], op)
         return {"ok": True, "moved": moved, "status": status}
 
     def _prune_audio(self) -> None:
@@ -1129,18 +1186,26 @@ class Cad:
             uid = int(body["unit_id"])
         except (KeyError, TypeError, ValueError):
             raise CadError("unit_id: required") from None
-        return self.store.return_to_incident(iid, uid, _text(body, "status", 40, required=True),
-                                             _text(body, "operator", OPERATOR_MAX))
+        op = _text(body, "operator", OPERATOR_MAX)
+        out = self.store.return_to_incident(iid, uid, _text(body, "status", 40, required=True), op)
+        self._by_hand(iid, [uid], op)
+        return out
 
     def unit_status(self, uid: int, body: dict) -> dict:
         status = _text(body, "status", 40, required=True)
+        op = _text(body, "operator", OPERATOR_MAX)
+        was = self.store.unit(uid)["incident_id"]
         if "incident_id" in body and body["incident_id"] is not None:   # the board's "which call?" answer
             try:
                 iid = int(body["incident_id"])
             except (TypeError, ValueError):
                 raise CadError("incident_id: a number (0 = no call)") from None
-            return self.store.set_unit_status_on(uid, status, iid, _text(body, "operator", OPERATOR_MAX), _text(body, "note", 200))
-        return self.store.set_unit_status(uid, status, _text(body, "operator", OPERATOR_MAX), _text(body, "note", 200))
+            out = self.store.set_unit_status_on(uid, status, iid, op, _text(body, "note", 200))
+        else:
+            out = self.store.set_unit_status(uid, status, op, _text(body, "note", 200))
+        for i in {was, out.get("incident_id")}:          # a person's: automation leaves the unit alone there (#311)
+            self._by_hand(i, [uid], op)
+        return out
 
     def unit_station(self, uid: int, body: dict) -> dict:
         """A unit's home firehouse (a name from data/firehouses.json; '' = not set). Stored as a Settings
@@ -1585,6 +1650,7 @@ class Cad:
             at = (inc.page_starts or [inc.opened])[0]
             how, got = self.sources.page(str(inc.id), at, f["address"] or heard, list(inc.units or []), data)
             if how == "attached":
+                self.auto.on_page(got)                 # 60 Control mode: "paged" on a tracked incident (#311)
                 return self.store.incident(got)
             iid = self._create_from_page(data)
             self.sources.created_by_page(str(inc.id), iid, got)

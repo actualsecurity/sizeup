@@ -30,6 +30,8 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
   <span id="conn" class="pill warn">Connecting</span>
   <span id="prealert" class="pill pa-badge" hidden></span>
   <span id="src-pill" class="pill" hidden></span>
+  <!-- the dispatch mode (#311, dispatchmode.js): 60 Control dispatching or PCFD dispatching, department-wide -->
+  <span id="dmode" class="seg dmode console-only" role="group" aria-label="Dispatch mode" hidden></span>
   <span id="cloud-pill" class="pill" hidden></span>
   <span id="tx-pill" class="pill tx-off console-only" title="No radio interface: dispatches are logged and played here only">Transmit off</span>
   <span id="talking" class="talking-strip" hidden aria-live="polite"></span>
@@ -613,6 +615,7 @@ Slots go in order. A kind takes the next available unit of that kind (regular ap
 <script src="/static/cad-feed.js"></script>
 <script src="/static/prealert.js"></script>
 <script src="/static/incoming.js"></script>
+<script src="/static/dispatchmode.js"></script>
 <script src="/static/airport-alerts.js"></script>
 <script src="/static/cad.js"></script>
 <script src="/static/status-hints.js"></script>

@@ -799,6 +799,25 @@ Incidents come in from ranked sources. The interface is in `sizeup/sources/__ini
   "incoming additional alarm" or "stand by for a page" naming us, and the phone ring. They show as "Possible incoming"
   at the top of the 60 Control column.
 
+### Dispatch modes and the per-incident radio log (#311)
+
+`sizeup/cad/automode.py` and `sizeup/cad/radiolog.py`, on the CAD of record.
+
+- **The mode** is department-wide, switched in the header (`POST /api/cad/dispatch-mode`, dispatchers and admins). Each
+  switch is a Settings audit row (section `dispatch`) with the Access identity. The default is 60 Control dispatching.
+- **60 Control dispatching:** a feed incident reported in this mode is tracked. It is accepted at once and the feed's
+  units of ours are dispatched at the feed's time. Pages attach as "paged" at the tone time. Units move forward from
+  the feed's per-unit times and from the radio's status hints, and the incident closes on the feed's in service. Each
+  step is an `auto_steps` row with its source (county, radio) and a one-click undo
+  (`POST /api/cad/incident/<id>/auto-undo`).
+- **A person wins:** a unit a person touches on an incident, and an incident a person reopens, are left alone by
+  automation from then on (`manual_edits`, `unit:<code>` / `close`).
+- **PCFD dispatching:** feed incidents are queued only. A switch affects only what comes after it: feed changes
+  reported in PCFD mode are never replayed, and an incident first reported in PCFD mode stays manual.
+- **Radio log (both modes):** a transmission goes on an open incident when it names one of its units, its address or
+  its place, or is on its working fireground channel. Only our dispatch and fire channels count, with the guards
+  listed in `radiolog.py`. One click removes it, and it stays off.
+
 ## Highway layers: cameras, incidents, signs, mileposts (the Thruway, 511NY)
 
 > "it looks like this has location data of all the highway things, including cameras, that would be

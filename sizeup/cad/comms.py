@@ -38,6 +38,8 @@
                                   unit = the operator who did it (also in the event's timeline)
                       page        a 60 Control page (South 2) on the event it opened, or a repeat of it
                                   (Cad.from_monitor): the event's page plays from the event itself
+                      mention     the transcript names a unit on the event, its address or its place;
+                      fireground  on the event's working fireground channel (sizeup/cad/radiolog.py, #311)
     A page is a row like any transmission (id = the page id, channel South 2, talker 60 Control), with
     its tone pairs (tones: [{a_hz, b_hz, names, ours}], JSON) and where the voice starts (voice_at, seconds
     into the clip: play skips the tones). Read back, each row says what kind of page it is (page, #80):
@@ -685,6 +687,10 @@ def why_text(why: str, unit: str = "") -> str:
         return "the 60 Control page"
     if why == "airport":
         return "Airport Incident talkgroup, the open airport event"
+    if why == "mention":
+        return f"names its {unit}" if unit in ("address", "place") else f"names {unit or 'a unit on it'}"
+    if why == "fireground":
+        return f"its fireground channel {unit}".rstrip()
     return why
 
 
