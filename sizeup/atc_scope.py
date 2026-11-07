@@ -42,9 +42,9 @@ class Scope:
         return (plane.get("phase") or "") in self.phases
 
 
-TOWER = Scope("tower", AREA_NM, frozenset({"arriving", "departing", "ground", "low", "overflight", "other_ground", ""}))
+TOWER = Scope("tower", AREA_NM, frozenset({"arriving", "departing", "near", "ground", "low", "overflight", "other_ground", ""}))
 GROUND = Scope("ground", GROUND_NM, frozenset({"ground"}))
-APPROACH = Scope("approach", APPROACH_NM, frozenset({"arriving", "departing", INBOUND, OUTBOUND, ""}))
+APPROACH = Scope("approach", APPROACH_NM, frozenset({"arriving", "departing", "near", INBOUND, OUTBOUND, ""}))
 
 
 def facility(label: str) -> str:

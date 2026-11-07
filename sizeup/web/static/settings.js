@@ -1627,6 +1627,7 @@ function sSystem(panel) {
   panel.replaceChildren(...sHead("System"),
     about, station, alarms, pushes,
     ...(sy && S.data.atc ? [sAtcTalkers(S.data.atc)] : []),
+    ...(sy && S.data.hub_errors && sIsHub() ? [sHubErrors(S.data.hub_errors)] : []),
     sCard(sCardHead("Records"), recs, counts),
     ...(S.data.camera_wall ? [sCameraWall(S.data.camera_wall)] : []),
     sCard(sCardHead("Data file"), file),
@@ -1677,6 +1678,37 @@ function sAtcTalkers(a) {
     card.append(lab);
   }
   if (!(a.channels || []).length) card.append(el("p", "dim small", "No airband channel here ([[radio.channels]] kind = \"airband\")"));
+  return card;
+}
+
+// The hub's own error spikes (#285, sizeup/errwatch.py): pushed to the status topic, at most one per error an hour,
+// plus "back to normal". The thresholds count error lines in 5 min. Admins; the hub only.
+function sHubErrors(e) {
+  const card = sCard(sCardHead("Hub error alerts", e.on.value ? "on" : "off",
+    sHelp(`Pushes a notice to the status topic when one error repeats more than ${e.per_signature.value} times in `
+      + `${e.window_min} min, or all errors exceed ${e.total.value}. Names the module and type, never the message. `
+      + `At most hourly per error; 'back to normal' after ${e.quiet_min} quiet min.`)));
+  card.id = "s-hub-errors";
+  const [lab, cb] = sCheck(e.on.label, e.on.value, "Off: still counted on Settings > Health, nothing pushed");
+  cb.disabled = !canDo("admin");
+  cb.addEventListener("change", () => sPost("hub_errors", { action: "set", key: "on", value: cb.checked },
+    `${e.on.label}: ${cb.checked ? "on" : "off"}`));
+  card.append(lab);
+  for (const key of ["per_signature", "total"]) {
+    const v = e[key];
+    const n = el("input", "s-num");
+    n.type = "number"; n.min = String(v.min); n.max = String(v.max); n.step = "1";
+    n.value = String(v.value);
+    n.disabled = !canDo("admin");
+    n.setAttribute("aria-label", v.label);
+    n.addEventListener("change", () => sPost("hub_errors", { action: "set", key, value: Number(n.value) },
+      `${v.label}: ${n.value}`));
+    const row = el("div", "row");
+    row.append(el("span", "s-eta-l", v.label), n, sState(v.edited ? "edited" : "default"), el("span", "spacer"));
+    if (v.edited && canDo("admin")) row.append(sBtn("Reset", `Default: ${v.default}`,
+      () => sPost("hub_errors", { action: "reset", key }, `${v.label}: ${v.default}`)));
+    card.append(row);
+  }
   return card;
 }
 
