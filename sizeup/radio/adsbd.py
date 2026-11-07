@@ -47,8 +47,8 @@ messages_per_s, aircraft, with_pos, last_message_at, json, argv, and when it fai
 
 Why it failed (#262; the station can't always be reached for journalctl): readsb's output is kept (the last
 TAIL_LINES lines of each run, and still logged). When it exits, the cause is read from its words (classify(): busy,
-not_found, permissions, bad_args, library, lost, unknown) and looked into, read-only: is the serial in librtlsdr's list,
-at which index; who has its USB device open (/proc/*/fd where readable, the shared claims, a kernel driver). If that is
+not_found, permissions, bad_args, library, usbfs, wedged, lost, unknown) and looked into, read-only: is the serial in
+librtlsdr's list, at which index; who has its USB device open (/proc/*/fd where readable, the shared claims, a kernel driver). If that is
 sizeup's OWN leftover job (an rtl_fm or trunk-recorder under sizeup-station / sizeup-trunk-recorder, this user's), it is
 stopped and readsb retried at once: a reserved dongle never runs another job. Another app's process never is: the
 status says "held by <it>". cause, holder and the last DETAIL_LINES lines (tail) go to Settings and the hub. sizeup-station reads it for Settings > Radios and the
@@ -60,7 +60,14 @@ runs out: librtlsdr says "Failed to submit transfer" and "echo 0 > /sys/module/u
 readsb "rtlsdr_read_async returned unexpectedly" a few seconds in (cause "usbfs"). The station sets it to 0 (no limit)
 as root: install-linux.sh, sizeup-usbfs.service at boot, and sizeup-adsb's ExecStartPre (WSL2 included, where usbcore
 is built in and modprobe.d can't). This process (the sizeup user) can't write it: it reports it (status usbfs_mb), and
-after SMALL_AFTER such failures in a row runs readsb with smaller USB transfers (--sdr-buffer-size SMALL_BUF_KIB)."""
+after SMALL_AFTER such failures in a row runs readsb with smaller USB transfers (--sdr-buffer-size SMALL_BUF_KIB).
+
+A wedged dongle (#315): readsb's own watchdog gives up on a dongle that stops delivering samples ("SDR wedged, exiting!
+(check power supply / avoid using an USB extension / SDR might be defective)"), usually a power problem: an LNA powered
+by the bias-tee draws from the dongle's USB port, and extensions and unpowered hubs sag. Cause "wedged"; the hint says
+what to check (the bias-tee only when it is on). After WEDGE_AFTER wedges within WEDGE_WINDOW_S it waits longer
+(WEDGE_BACKOFF_S: 5 min, then 15) and says so, instead of retrying every 30 s; WEDGE_RESET_S of decoding forgets
+them (a change of dongle, gain or bias-tee forgets them at once, mid-wait too)."""
 
 from __future__ import annotations
 
@@ -100,6 +107,10 @@ USBFS = "module/usbcore/parameters/usbfs_memory_mb"        # under /sys: the ker
 SMALL_AFTER = 2                   # this many usbfs / lost-USB exits in a row: readsb with smaller USB transfers
 SMALL_BUF_KIB = 32                # readsb --sdr-buffer-size (KiB; its default 128): 16 x 32 KiB in flight, not 2 MiB
 RATE_WINDOW_S = 60.0              # messages / s over the last minute
+WEDGE_WINDOW_S = 3600.0           # wedges counted over the last hour (#315)
+WEDGE_AFTER = 3                   # this many in the window: back off longer
+WEDGE_BACKOFF_S = (300.0, 900.0)  # 5 min at WEDGE_AFTER, 15 min after that
+WEDGE_RESET_S = 600.0             # a run this long forgets them
 
 
 def gain_problem(gain) -> str:
@@ -390,6 +401,9 @@ CAUSE_RULES = (
     # librtlsdr's "Failed to submit transfer N / Please increase your allowed usbfs buffer size ... echo 0 >
     # /sys/module/usbcore/parameters/usbfs_memory_mb", then readsb's "lost the USB device" (#269): the limit, not the dongle
     ("usbfs", ("usbfs_memory_mb", "allowed usbfs buffer size", "failed to submit transfer")),
+    # readsb's watchdog: "SDR wedged, exiting! (check power supply / avoid using an USB extension / SDR might be
+    # defective)" (#315): the dongle stopped delivering samples, usually power; before "lost", which may follow it
+    ("wedged", ("sdr wedged",)),
     ("lost", ("lost the usb device", "rtlsdr_read_async returned unexpectedly")),
     ("bad_args", ("unrecognized option", "invalid option", "requires an argument", "--help' for more", "usage: readsb",
                   "unknown device type")),
@@ -397,7 +411,8 @@ CAUSE_RULES = (
 CAUSE_WORDS = {"busy": "dongle busy", "not_found": "dongle not found", "permissions": "no permission to open the dongle",
                "bad_args": "readsb refused its command line", "library": "a library readsb needs is missing",
                "lost": "the dongle went away mid-run (USB)",
-               "usbfs": "the kernel's USB transfer memory ran out (usbfs_memory_mb)", "unknown": "readsb failed"}
+               "usbfs": "the kernel's USB transfer memory ran out (usbfs_memory_mb)", "wedged": "SDR wedged (stalled)",
+               "unknown": "readsb failed"}
 # sizeup's own programs that open a dongle, and the services they run under: the only processes this ever stops, and
 # only when one holds the ADS-B dongle (a reserved dongle never runs another job). shortfinal's, or anyone else's: never.
 OWN_PROGRAMS = ("rtl_fm", "trunk-recorder")
@@ -417,7 +432,7 @@ def clean(line) -> str:
 
 def classify(lines: list[str]) -> tuple[str, str]:
     """(cause, the line that says so) from readsb's last lines: busy | not_found | permissions | bad_args | library |
-    usbfs | lost | unknown (and "" when no line said it)."""
+    usbfs | wedged | lost | unknown (and "" when no line said it)."""
     for cause, needles in CAUSE_RULES:
         for ln in lines:
             if any(n in ln.lower() for n in needles):
@@ -605,6 +620,9 @@ class Decoder:
         self.no_signal_wait = NO_SIGNAL_RESTART_S[0]
         self.usb_fails = 0                                    # usbfs / lost-USB exits in a row (#269)
         self.buffer_kib: int | None = None                    # SMALL_BUF_KIB once they kept coming
+        self.wedges: list[float] = []                         # when readsb said "SDR wedged", the last hour (#315)
+        self.failed_with: tuple | None = None                 # (sdr, gain, bias_tee) of the readsb that last failed
+        self.ok_since: float | None = None                    # decoding ("ok") without a break since (this run)
         self.out = Output(json_dir)
         self.status: dict = {"state": "starting", "detail": "", "since": None}
 
@@ -633,9 +651,11 @@ class Decoder:
         self.running, self.started_at = None, None
         self.out.reset()
 
-    def _fail(self, now: float, why: str) -> None:
+    def _fail(self, now: float, why: str, wait: float | None = None) -> None:
+        self.failed_with = self.running
         self.fails += 1
-        wait = min(BACKOFF_S[1], BACKOFF_S[0] * 2 ** min(self.fails - 1, 30))
+        if wait is None:
+            wait = min(BACKOFF_S[1], BACKOFF_S[0] * 2 ** min(self.fails - 1, 30))
         self.next_start = now + wait
         self.restarts += 1
         self.stop(why)
@@ -651,6 +671,11 @@ class Decoder:
         if self.proc is not None and self.running != want:
             self.stop("its dongle, gain or bias-tee changed")
             self.fails, self.next_start = 0, 0.0
+            self.wedges = []
+        elif self.proc is None and self.failed_with is not None and self.failed_with != want:
+            self.log("adsb: its dongle, gain or bias-tee changed: trying again now")     # e.g. mid-wait after wedges
+            self.fails, self.next_start, self.failed_with = 0, 0.0, None
+            self.wedges = []
         if not s["sdr"]:
             self.stop("no dongle named for ADS-B")
             self._set(now, "off", "no dongle named for ADS-B ([aircraft.receiver] sdr, or Settings > Radios)", **base)
@@ -676,6 +701,7 @@ class Decoder:
                                    + ": not started (switch it Off there to hand it over)", held_by=held,
                       cause="claimed", holder=f"{c.get('app', 'another app')} ({c.get('mode', '?')})", **base)
             return
+        self.next_start = min(self.next_start, now + max(BACKOFF_S[1], WEDGE_BACKOFF_S[1]))   # the clock went back
         if now < self.next_start:
             first = (self.fail_detail if self.status.get("state") == "down" and self.fail_detail
                      else self.status.get("detail", "").split(";")[0])
@@ -726,8 +752,8 @@ class Decoder:
             self._fail(now, f"readsb can't start: {e}")
             self._set(now, "down", f"readsb can't start: {e}", **base)
             return
-        self.running, self.started_at = want, now
-        self.no_signal_since = None
+        self.running, self.started_at, self.failed_with = want, now, None
+        self.no_signal_since, self.ok_since = None, None
         self.fail_detail = ""
         self.log(f"adsb: readsb on {s['sdr']} (device #{idx}), gain {s['gain']}, bias-tee "
                  f"{'ON' if s['bias_tee'] else 'off'}, pid {self.proc.pid}"
@@ -767,12 +793,17 @@ class Decoder:
                 self.stop("no signal")
                 self._set(now, "down", f"nothing decoded for {quiet:.0f} s: restarting readsb", **base)
                 return
+            self.ok_since = None
             self._set(now, "no_signal", f"nothing decoded for {quiet:.0f} s: check the antenna, the filter and the LNA"
                                         + (" (bias-tee is on)" if s["bias_tee"] else " (bias-tee is off: does the LNA "
                                                                                      "need power from it?)"),
                       present=True, **keep, **nums, **base)
             return
         self.no_signal_since, self.no_signal_wait = None, NO_SIGNAL_RESTART_S[0]
+        self.ok_since = now if self.ok_since is None else self.ok_since
+        if self.wedges and now - self.ok_since >= WEDGE_RESET_S:
+            self.log(f"adsb: decoding for {WEDGE_RESET_S / 60:.0f} min: wedge count reset")
+            self.wedges = []
         if self.fails and now - (self.started_at or now) > 120:
             self.fails = 0
             self.usb_fails = 0
@@ -802,6 +833,7 @@ class Decoder:
         d = self.diagnose(s["sdr"], lines)
         stopped = self.recover(d)
         self._usb_fallback(d)
+        wait = self._wedged(now, d, s["bias_tee"])
         words = CAUSE_WORDS.get(d["cause"], d["cause"])
         if d["holder"]:
             words += f" (held by {d['holder']}" + ("; stopped it, retrying" if stopped else "") + ")"
@@ -811,7 +843,7 @@ class Decoder:
             words += f": {d['hint']}"
         said = d["line"] or (lines[-1] if lines else "")
         detail = words + (f" · readsb: {said}" if said else "")
-        self._fail(now, f"readsb exited with code {code}: {d['cause']}" + (f" ({said})" if said else ""))
+        self._fail(now, f"readsb exited with code {code}: {d['cause']}" + (f" ({said})" if said else ""), wait)
         if stopped:
             self.next_start, self.fails = now + BACKOFF_S[0], 0     # the dongle is free now: straight back
         self.fail_detail = detail
@@ -821,6 +853,24 @@ class Decoder:
         self._set(now, "down", detail, cause=d["cause"], holder=d["holder"], tail=lines[-DETAIL_LINES:],
                   recovery=f"stopped {d['holder']}" if stopped else "", present=d["present"], index=d["index"],
                   code=code, **base)
+
+    def _wedged(self, now: float, d: dict, bias_tee: bool) -> float | None:
+        """readsb said "SDR wedged" (#315): the hint (power, USB, the dongle), and after WEDGE_AFTER of them within
+        WEDGE_WINDOW_S a longer wait (WEDGE_BACKOFF_S), said in the hint. The wait, or None for the usual backoff."""
+        if d["cause"] != "wedged":
+            return None
+        self.wedges = [t for t in self.wedges if 0 <= now - t < WEDGE_WINDOW_S] + [now]   # (a clock jump forgets them)
+        n = len(self.wedges)
+        hint = (("check power (bias-tee on: the LNA draws from this port)" if bias_tee else "check power")
+                + "; avoid USB extensions/unpowered hubs; try another dongle")
+        wait = None
+        if n >= WEDGE_AFTER:
+            wait = WEDGE_BACKOFF_S[0] if n == WEDGE_AFTER else WEDGE_BACKOFF_S[1]
+            hint += f"; {n} wedges in 1 h: next try in {wait / 60:.0f} min"
+            self.log(f"adsb: {n} wedges in the last hour: waiting {wait / 60:.0f} min before the next try")
+        if not d["hint"]:
+            d["hint"] = hint
+        return wait
 
     def _usb_fallback(self, d: dict) -> None:
         """The usbfs limit (or a USB loss, which it looks like without librtlsdr's line) SMALL_AFTER times in a row:
@@ -859,7 +909,7 @@ class Decoder:
             hits = [i for i, x in found if x == serial]
             out["present"] = bool(hits)
             out["index"] = hits[0] if len(hits) == 1 else None
-            if not hits and cause in ("unknown", "not_found", "lost"):
+            if not hits and cause in ("unknown", "not_found", "lost", "wedged"):
                 out["cause"] = "not_found"
                 seen = ", ".join(x for _i, x in found) or "none"
                 out["hint"] = (f"serial {serial} isn't in the dongle list (plugged in: {seen})"

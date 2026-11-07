@@ -457,7 +457,11 @@ def test_the_new_cctv_cameras_join_ours_and_live_video_wins_a_tie():
     ids = [c["id"] for c in rd.merged("cameras")]
     assert "36011" not in ids and "35589" not in ids and {"1ne01370s", "1cw00780w"} <= set(ids)   # the Thruway's (live video)
     assert "34259" not in ids and "wc23" in ids                              # the county's: neither has video, ours kept
-    assert {"35992", "34715", "34353"} <= set(ids) and {"wc24", "wc25", "wc26"} <= set(ids)
+    assert {"35992", "34715"} <= set(ids) and {"wc24", "wc25", "wc26"} <= set(ids)
+    # (#320) the Exit 17 camera, listed twice by the CARS-Hub (two ids, two stream names, the same name in other words
+    # at the same route and milepost): once, and its other id names the one kept
+    assert "34353" not in ids and rd.alias("34353") == "34715"
+    assert rd.camera("34715")["also"] == [{"source": "511NY", "name": "Exit 17 Lincoln Ave MM 17.41"}]
     assert ids.index("35992") > ids.index("1ne01370s")
     c = rd.camera("35992")
     assert c["source"] == "511NY" and c["has_video"] and c["cadence"] == 60

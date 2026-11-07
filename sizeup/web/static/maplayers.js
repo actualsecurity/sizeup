@@ -824,7 +824,8 @@ window.MapLayers = (() => {
     a.href = src ? src.link : "#";
     a.target = "_blank";
     a.rel = "noopener";
-    a.title = SOURCE_NOTE[c && c.source] || (src ? src.label : "");
+    a.title = (SOURCE_NOTE[c && c.source] || (src ? src.label : ""))       // one camera from several records (#320)
+      + (c && (c.also || []).length ? `. Also listed by ${c.also.map((x) => `${x.source} as "${x.name}"`).join(", ")}` : "");
     const n = (c && c.cadence) || 60;
     const foot = viewer.el.foot;
     if (viewer.live) {
@@ -1450,7 +1451,8 @@ window.MapLayers = (() => {
         const b = h("button", "ml-thumb");
         b.type = "button";
         b.dataset.camera = c.id;
-        b.title = `${c.name}${c.road ? `, ${c.road}` : ""}${c.dir ? ` ${c.dir}` : ""}${c.mile ? ` MP ${c.mile}` : ""} (${c.source || "511NY"}). Open live`;
+        b.title = `${c.name}${c.road ? `, ${c.road}` : ""}${c.dir ? ` ${c.dir}` : ""}${c.mile ? ` MP ${c.mile}` : ""} (${c.source || "511NY"}). Open live`
+          + ((c.also || []).length ? `. Also listed by ${c.also.map((x) => `${x.source} as "${x.name}"`).join(", ")}` : "");
         const img = h("img", "ml-thumb-img");
         img.alt = "";
         img.loading = "lazy";

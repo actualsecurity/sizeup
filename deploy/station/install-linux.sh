@@ -773,7 +773,7 @@ preflight() {
   # an error says what failed. (Not "adsbd.py help | grep -q usage": its usage exits 2, and under
   # pipefail that fails the pipeline even when grep matches. That refused 919cfc2.)
   local f
-  for f in sizeup/radio/adsbd.py sizeup/radio/trunkrecd.py sizeup/cloud/autoupdate.py sizeup/cloud/configupdate.py; do
+  for f in sizeup/radio/adsbd.py sizeup/radio/trunkrecd.py sizeup/cloud/autoupdate.py sizeup/cloud/configupdate.py tools/stt_diag.py; do
     [ -f "$rel/$f" ] || continue
     if out=$(python3 -I -B -c 'import importlib.util as u, sys
 s = u.spec_from_file_location("preflight_check", sys.argv[1]); m = u.module_from_spec(s)
