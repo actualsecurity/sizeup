@@ -237,7 +237,23 @@ def test_a_sequence_that_starts_over_is_carried_on(tmp_path):
     keys = sorted(d._cams[CAM]["segs"])
     assert keys[-1] > last and len(keys) == len(set(keys)) and d.status(CAM)["recording"]
     assert any("sequence started over" in m for m in d.logs)
-    assert d.playlist(CAM).decode().count(".ts") == len(keys)
+    text = d.playlist(CAM).decode()
+    assert text.count(".ts") == len(keys)
+    # the new stream begins after a discontinuity (its timestamps start again: hls.js stalls scrubbing across it
+    # otherwise), though it follows on in time; and the mark is on disk, so a restart keeps it
+    first_new = min(k for k in keys if k > last)
+    lines = text.splitlines()
+    at = lines.index(f"{first_new}.ts")
+    assert text.count("#EXT-X-DISCONTINUITY") == 1 and "#EXT-X-DISCONTINUITY" in lines[at - 3:at]
+    assert (tmp_path / "dvr" / CAM / d._file(CAM, first_new).name).name.endswith("_n.ts")
+    again = Dvr(r, tmp_path / "dvr", clock=clock, log=lambda m: None, free_floor=0)
+    assert again.playlist(CAM).decode() == text
+    # and a camera's first segments after a restart of the hub: nothing known of the one before, so a mark too
+    again.pins = {CAM}
+    clock.t += 4
+    f.advance()
+    again.tick()
+    assert again.playlist(CAM).decode().count("#EXT-X-DISCONTINUITY") == 2
 
 
 def test_cameras_are_recorded_side_by_side(tmp_path):
