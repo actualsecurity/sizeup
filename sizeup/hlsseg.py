@@ -264,7 +264,6 @@ def check(body: bytes, state: dict | None = None) -> dict:
     prev_ref = state.get("prev_ref")
     broken = bool(state.get("broken", prev_ref is None))
     first = True
-    gop: list[int] = []                               # this GOP's frames so far, after its IDR
     pictures: list[int] = []
     for f in frames:
         nals = nal_units(f["es"])
@@ -295,17 +294,16 @@ def check(body: bytes, state: dict | None = None) -> dict:
             first = False
         if idr:
             broken = bool(slices) and slices[0][0] != 0          # an IDR missing its first slice
-            gop = [f["pes"]] if broken else []
             prev_ref = slices[0][2] if slices else 0
-        elif prev_ref is None or broken:
-            broken = True                             # nothing it refers to came whole: broken until the next IDR
+        elif prev_ref is None:
+            broken = True                             # no IDR before it (here or carried): nothing it refers to
         elif slices:
             fn = slices[0][2]
             mx = 1 << sps["log2_max_frame_num"]
             if slices[0][0] != 0:                     # the picture's first slice is missing
                 broken = True
             elif not sps["gaps_allowed"] and fn not in (prev_ref, (prev_ref + 1) % mx):
-                out["lost"] += (fn - prev_ref - 1) % mx
+                out["lost"] += (fn - prev_ref - 1) % mx      # (counted on in a chain already broken, too)
                 broken = True
             if ref_idc:
                 prev_ref = fn
@@ -313,16 +311,11 @@ def check(body: bytes, state: dict | None = None) -> dict:
             out["h264"] = False                       # slices but no SPS to read them by: not judged
         if not f["whole"]:                            # a frame with packets missing: damaged, and what follows it
             broken = True
-            if idr:
-                gop = [f["pes"]]
-        if not idr:
-            gop.append(f["pes"])
         if broken:
-            # A loss is rarely whole frames only: the frames before it in its GOP are often cut short too (seen:
-            # a P-frame 18 frames before the first frame_num gap). The whole GOP goes but its IDR: the player holds
-            # that picture (hls.js stretches a frame over the gap) until the next IDR.
-            out["broken"].extend(gop)
-            gop = []
+            # From the first frame whose chain is broken to the next IDR; never the frames before it, which decode
+            # whole (#276 follow-up: dropping the GOP before a loss threw away 76 % of a segment ffmpeg decodes clean
+            # up to its frame_num gap). The player holds the last good picture (hls.js stretches it over the gap).
+            out["broken"].append(f["pes"])
     out["broken"] = sorted(set(out["broken"]))
     dropped = set(out["broken"])
     out["playable"] = sum(1 for k in pictures if k not in dropped)

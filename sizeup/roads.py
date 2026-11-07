@@ -2675,10 +2675,13 @@ class Roads:
         players' lists; served as it came if asked for)."""
         ctype = (headers.get("content-type") or "video/MP2T").split(";")[0].strip() or "video/MP2T"
         st = self._streams.get(cid)
-        m = re.search(r"_(\d{1,12})\.ts$", name)
-        seq = int(m.group(1)) if m else None
+        m = re.search(r"^(.*?)(\d{1,12})\.ts$", name)
+        session, seq = (m.group(1), int(m.group(2))) if m else ("", None)
         prev = (st or {}).get("hstate")
-        state = prev[1] if prev and seq is not None and prev[0] == seq - 1 else {"sps": (st or {}).get("sps")}
+        # carried only from this session's segment just before (not another session's, a gap, or one out of order);
+        # else judged by itself (its leading frames before an IDR are the only ones that can't be)
+        follows = prev is not None and seq is not None and prev[0] == session and prev[1] == seq - 1
+        state = prev[2] if follows else {"sps": (st or {}).get("sps")}
         info = hlsseg.check(body, state)
         try:
             fixed, noplay = hlsseg.repair(body, info), False
@@ -2694,8 +2697,8 @@ class Roads:
             if st is not None:
                 if info["sps"]:
                     st["sps"] = info["sps"]
-                if seq is not None and (not st.get("hstate") or seq > st["hstate"][0]):
-                    st["hstate"] = (seq, info["state"])
+                if seq is not None and (not st.get("hstate") or st["hstate"][0] != session or seq > st["hstate"][1]):
+                    st["hstate"] = (session, seq, info["state"])
                 if name not in st.setdefault("seen", {}):
                     st["seen"][name] = hit["dropped"]
                     while len(st["seen"]) > STREAM_DAMAGE_WINDOW:
