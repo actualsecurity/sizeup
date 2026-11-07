@@ -550,6 +550,9 @@ class HubApp(App):
         from sizeup.notify import STATUS
         notifier = self.pushes.notifier(STATUS)
         self.health = self.hub.health_ = StationHealth(self.hub, cfg, self.mdb, notifier, log)
+        # The incident sources (#297): paging is a tier only while the station is connected; Settings > Health shows them.
+        self.cad.sources.paging_ok = self.hub.connected
+        self.health.sources = self.cad.sources.panel
         if not notifier.enabled:
             log("health: no push for station alerts (no status or alerts topic in effect): Settings > Health and log only")
         self.live = self.hub.live                      # main() sets on_change to push the display
@@ -596,6 +599,8 @@ class HubApp(App):
             self._set_alt(self._id(d), str(d.get("text") or ""), str(d.get("model") or "")[:80])
         elif kind == "alarm":                         # the P25 emergency button, ahead of its transcript (#128)
             self._apply_alarm(d, audio)
+        elif kind in ("source_event", "source_health"):   # an external incident source on the station (#297)
+            self.apply_source(kind, d)
         elif kind == "heard":
             if d.get("system") in ("mdc", "p25", "fleetsync"):
                 self.radios.heard(d["system"], str(d.get("radio_id") or ""), str(d.get("alias") or ""), d.get("at"),
@@ -1146,6 +1151,7 @@ class HubApp(App):
         threading.Thread(target=self._aws_watch, name="aws-sweep", daemon=True).start()
         self._started = True                      # the phone pre-alert: the hub's own subscription
         self.prealert_sync()
+        self.start_sources()                      # held reports and promotion (#297); the adapters are the station's
         self.start_layers()                       # the maps' data, as App starts it (road projects too: #225)
         if self.vocab is not None and self.vocab.state()["state"] == "PENDING":
             self.vocab.poll()
@@ -1159,6 +1165,7 @@ class HubApp(App):
         self._stopping.set()
         if self.prealert is not None:
             self.prealert.stop()
+        self.cad.sources.stop()
         self.stop_layers()
         if self.aws is not None:
             self.aws.stop()

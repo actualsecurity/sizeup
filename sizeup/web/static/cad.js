@@ -489,7 +489,7 @@ function isOpen(inc) {
   return ["queued", "pending", "active"].includes(inc.status);
 }
 function incTitle(inc) {
-  return inc.number || (inc.status === "queued" ? "Page" : "—");
+  return inc.number || (inc.status === "queued" ? (inc.source === "CAD feed" ? "CAD feed" : "Page") : "—");
 }
 // An open call's summary (state.overview, sizeup/cad/mapview.py overview): its units, the newest transmission and
 // note, the channels its traffic comes over; null for a closed one.
@@ -585,6 +585,13 @@ function renderPrealert() {
   PreAlert.badge($("#prealert"), pa);
   PreAlert.notify(pa);
   show($("#csv-prealerts"), !!pa);
+  // incident sources (incoming.js, #297): the acting primary, and possible incoming (radio pre-alerts, held reports)
+  const src = cad.state && cad.state.sources;
+  if (window.Incoming) {
+    Incoming.pill($("#src-pill"), src);
+    Incoming.column($(BOARD ? "#b-incoming" : "#q-incoming"), src, deps);
+    Incoming.notify(src);
+  }
   // airport pre-alerts (airport-alerts.js, #233): HPN ATC; accept makes a pending event (never a dispatch)
   const aa = cad.state && cad.state.airport_alerts;
   if (window.AirportAlerts) {
@@ -1723,7 +1730,7 @@ function playForEvent(inc, e) {
   const d = (inc.dispatches || []).find((x) => Math.abs(x.at - e.at) < 0.001);
   return d && d.has_audio ? d.id : null;
 }
-const EVENT_KINDS = { note: "comment", status: "status", system: "system", attach: "attached", prealert: "pre-alert", reopened: "reopened", alarm: "EMERGENCY" };
+const EVENT_KINDS = { note: "comment", status: "status", system: "system", attach: "attached", prealert: "pre-alert", feed: "CAD feed", reopened: "reopened", alarm: "EMERGENCY" };
 // The latest entry, one line, for the folded Timeline's header: "19:34:21 status · 2392 on location"
 function eventLine(e) {
   const text = e.kind === "note" && e.units ? noteText(e) : e.text;

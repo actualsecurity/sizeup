@@ -743,6 +743,31 @@ expire_min = 5
 heartbeat_stale_min = 90
 ```
 
+## Incident sources: external CAD feeds, paging as the backup (#297)
+
+Incidents come in from ranked sources. The interface is in `sizeup/sources/__init__.py`, the station's runner in
+`sizeup/sources/runner.py` and the rules in `sizeup/cad/sources.py`.
+
+- **External CAD feeds** are the primary (rank 1, then 2, 3 ...). They are read-only adapters in a private package
+  installed on the station, outside this repo. The station finds them by the entry point group
+  `sizeup.incident_sources`, or by `SIZEUP_INCIDENT_SOURCES="pkg.mod:factory"` plus `SIZEUP_INCIDENT_SOURCES_PATH` in
+  `/etc/sizeup/station.env`. A directory on that path outlives a release's venv being rebuilt, and nothing goes in
+  `config.toml`, so switching back to an older release stays safe. Their events and health go to the hub through the
+  outbox as `source_event` / `source_health`.
+- **The paging decoder** is the backup. A page attaches to the incident a feed made. It makes one at once only when no
+  healthy feed ranks above it; otherwise it is held for `HOLD_S` (60 s). It also makes one as soon as the feeds above
+  it stop being healthy.
+- **Health:** a feed reports `ok`, `backing_off`, `failing` or `stale`, and a feed with no report for 3 min counts as
+  stale. Paging is healthy while the station is connected. The first healthy tier is the acting primary. The console
+  pill shows it (`County feed · backing off · Paging primary`), and so does Settings > Health.
+- **Reconciliation:** a match needs the incident to be created within 20 min, not dismissed and with nothing on it from
+  the same source. It also needs a unit in common or the same place. The best-ranked source's type and location win.
+  Every change and comment from a feed goes on the incident's timeline (kind `feed`).
+- **Measurement:** each source's first-seen time per incident, and its lead over paging. Settings > Health shows both.
+- **Pre-alerts never make an incident.** These include a dispatcher on the feed's talkgroups opening a call to us,
+  "incoming additional alarm" or "stand by for a page" naming us, a held report and the phone ring. They show as
+  "Possible incoming" at the top of the 60 Control column.
+
 ## Highway layers: cameras, incidents, signs, mileposts (the Thruway, 511NY)
 
 > "it looks like this has location data of all the highway things, including cameras, that would be

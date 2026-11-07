@@ -412,9 +412,10 @@ class PreAlerts:
 
     def _counts(self, inc: dict) -> bool:
         """A 60 Control page for us (queued from the monitor) or a new emergency event."""
-        if inc["status"] in ("closed", "dismissed") and inc["source"] != "60 Control page":
+        auto = inc["source"] in ("60 Control page", "CAD feed")      # a page, or an external CAD feed's (#297)
+        if inc["status"] in ("closed", "dismissed") and not auto:
             return False
-        return inc["source"] == "60 Control page" or bool(inc["emergency"])
+        return auto or bool(inc["emergency"])
 
     def match(self, inc: dict | None) -> list[int]:
         """Cad.create / Cad.from_monitor made an event: the open pre-alerts it answers are matched."""
