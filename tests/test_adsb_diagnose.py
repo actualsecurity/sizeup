@@ -671,22 +671,70 @@ def test_wedges_older_than_an_hour_drop_out_of_the_count(tmp_path):
     assert len(d.wedges) == 2 and "wedges in 1 h" not in st["detail"]
 
 
-def test_a_ten_minute_run_forgets_the_wedges_and_another_cause_keeps_the_usual_backoff(tmp_path):
+def test_ten_minutes_decoding_forgets_the_wedges_uptime_alone_does_not(tmp_path):
+    from tests.test_adsb_receiver import readsb_output
     s = Station(tmp_path)
     s.lines = WEDGED
     logs: list[str] = []
     d = s.decoder(logs)
     for at in (1000.0, 1100.0):
         wedge(s, d, at)
-    for start, up, left in ((2000.0, adsbd.WEDGE_RESET_S - 1, 2), (3000.0, adsbd.WEDGE_RESET_S, 0)):
-        d.next_start = 0
-        assert d.step(start)["state"] == "starting"
-        d.step(start + up)                             # (then restarted as stuck: no aircraft.json here)
-        assert len(d.wedges) == left
-    assert any("wedge count reset" in m for m in logs)
-    s.lines = ["what"]
-    st = wedge(s, d, 5000.0)
-    assert st["cause"] == "unknown" and d.next_start - 5017.0 <= adsbd.BACKOFF_S[1]
+    d.next_start = 0
+    t0 = 2000.0
+    assert d.step(t0)["state"] == "starting"
+    for t in range(int(t0) + 30, int(t0) + 30 + 200, 10):    # messages until +60, then quiet: no signal, not healthy
+        readsb_output(tmp_path, float(t), 100 if t > t0 + 60 else t, samples=float(t))
+        d.step(float(t))
+    assert d.status["state"] == "no_signal" and len(d.wedges) == 2
+    t1 = t0 + 300.0
+    for k, t in enumerate(range(int(t1), int(t1 + adsbd.WEDGE_RESET_S) + 1, 10)):   # decoding again for 10 min
+        readsb_output(tmp_path, float(t), 1000 + k, samples=float(t))
+        assert d.step(float(t))["state"] == "ok"
+        assert len(d.wedges) == (2 if t < t1 + adsbd.WEDGE_RESET_S else 0)
+    assert any("decoding for 10 min: wedge count reset" in m for m in logs)
+    s.started[-1].code = 1                              # wedged again: counted from 1, the usual short wait
+    st = d.step(4000.0)
+    assert st["cause"] == "wedged" and d.wedges == [4000.0] and d.next_start - 4000.0 <= adsbd.BACKOFF_S[1]
+
+
+def test_changing_the_bias_tee_mid_wait_starts_readsb_at_once(tmp_path):
+    s = Station(tmp_path)
+    s.lines = WEDGED
+    d = s.decoder()
+    for at in (1000.0, 1100.0, 1200.0):
+        wedge(s, d, at)
+    assert d.next_start == 1517.0
+    assert d.step(1230.0)["state"] == "down" and len(s.started) == 3          # waiting
+    conf = Path(d.config)
+    conf.write_text(conf.read_text().replace('sdr = "adsb"', 'sdr = "adsb"\nbias_tee = true'))
+    st = d.step(1232.0)
+    assert st["state"] == "starting" and len(s.started) == 4 and "--enable-biastee" in s.started[-1].argv
+    assert d.wedges == [] and d.fails == 0
+
+
+def test_a_clock_jump_back_never_stretches_the_wait(tmp_path):
+    s = Station(tmp_path)
+    s.lines = WEDGED
+    d = s.decoder()
+    for at in (1_000_000.0, 1_000_100.0, 1_000_200.0):
+        wedge(s, d, at)
+    st = d.step(1000.0)                                  # the clock went back ~11 days: at most 15 min, not 11 days
+    assert d.next_start <= 1000.0 + adsbd.WEDGE_BACKOFF_S[1] and st["detail"].endswith("; retry in 900 s")
+    assert d.step(1000.0 + adsbd.WEDGE_BACKOFF_S[1])["state"] == "starting"
+    s.started[-1].code = 1
+    d.step(1000.0 + adsbd.WEDGE_BACKOFF_S[1] + 17)
+    assert len(d.wedges) == 1                            # the ones "in the future" are forgotten
+
+
+def test_a_wedged_dongle_gone_from_the_list_reads_not_found(tmp_path):
+    s = Station(tmp_path)
+    s.lines = WEDGED
+    d = s.decoder()
+    assert d.step(1000.0)["state"] == "starting"
+    s.found = [(0, "fg13")]
+    s.started[-1].code = 1
+    st = d.step(1002.0)
+    assert st["cause"] == "not_found" and "serial adsb isn't in the dongle list" in st["detail"]
 
 
 def test_a_wedge_reaches_the_hub_alert():

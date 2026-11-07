@@ -66,8 +66,8 @@ A wedged dongle (#315): readsb's own watchdog gives up on a dongle that stops de
 (check power supply / avoid using an USB extension / SDR might be defective)"), usually a power problem: an LNA powered
 by the bias-tee draws from the dongle's USB port, and extensions and unpowered hubs sag. Cause "wedged"; the hint says
 what to check (the bias-tee only when it is on). After WEDGE_AFTER wedges within WEDGE_WINDOW_S it waits longer
-(WEDGE_BACKOFF_S: 5 min, then 15) and says so, instead of retrying every 30 s; a run of WEDGE_RESET_S or more forgets
-them."""
+(WEDGE_BACKOFF_S: 5 min, then 15) and says so, instead of retrying every 30 s; WEDGE_RESET_S of decoding forgets
+them ( a change of dongle, gain or bias-tee forgets them at once, mid-wait too)."""
 
 from __future__ import annotations
 
@@ -621,6 +621,8 @@ class Decoder:
         self.usb_fails = 0                                    # usbfs / lost-USB exits in a row (#269)
         self.buffer_kib: int | None = None                    # SMALL_BUF_KIB once they kept coming
         self.wedges: list[float] = []                         # when readsb said "SDR wedged", the last hour (#315)
+        self.failed_with: tuple | None = None                 # (sdr, gain, bias_tee) of the readsb that last failed
+        self.ok_since: float | None = None                    # decoding ("ok") without a break since (this run)
         self.out = Output(json_dir)
         self.status: dict = {"state": "starting", "detail": "", "since": None}
 
@@ -650,6 +652,7 @@ class Decoder:
         self.out.reset()
 
     def _fail(self, now: float, why: str, wait: float | None = None) -> None:
+        self.failed_with = self.running
         self.fails += 1
         if wait is None:
             wait = min(BACKOFF_S[1], BACKOFF_S[0] * 2 ** min(self.fails - 1, 30))
@@ -668,6 +671,10 @@ class Decoder:
         if self.proc is not None and self.running != want:
             self.stop("its dongle, gain or bias-tee changed")
             self.fails, self.next_start = 0, 0.0
+            self.wedges = []
+        elif self.proc is None and self.failed_with is not None and self.failed_with != want:
+            self.log("adsb: its dongle, gain or bias-tee changed: trying again now")     # e.g. mid-wait after wedges
+            self.fails, self.next_start, self.failed_with = 0, 0.0, None
             self.wedges = []
         if not s["sdr"]:
             self.stop("no dongle named for ADS-B")
@@ -694,6 +701,7 @@ class Decoder:
                                    + ": not started (switch it Off there to hand it over)", held_by=held,
                       cause="claimed", holder=f"{c.get('app', 'another app')} ({c.get('mode', '?')})", **base)
             return
+        self.next_start = min(self.next_start, now + max(BACKOFF_S[1], WEDGE_BACKOFF_S[1]))   # the clock went back
         if now < self.next_start:
             first = (self.fail_detail if self.status.get("state") == "down" and self.fail_detail
                      else self.status.get("detail", "").split(";")[0])
@@ -744,8 +752,8 @@ class Decoder:
             self._fail(now, f"readsb can't start: {e}")
             self._set(now, "down", f"readsb can't start: {e}", **base)
             return
-        self.running, self.started_at = want, now
-        self.no_signal_since = None
+        self.running, self.started_at, self.failed_with = want, now, None
+        self.no_signal_since, self.ok_since = None, None
         self.fail_detail = ""
         self.log(f"adsb: readsb on {s['sdr']} (device #{idx}), gain {s['gain']}, bias-tee "
                  f"{'ON' if s['bias_tee'] else 'off'}, pid {self.proc.pid}"
@@ -760,9 +768,6 @@ class Decoder:
         if code is not None:
             self._exited(now, s, base, code)
             return
-        if self.wedges and now - (self.started_at or now) >= WEDGE_RESET_S:
-            self.log(f"adsb: readsb up {WEDGE_RESET_S / 60:.0f} min: wedge count reset")
-            self.wedges = []
         o = self.out.read(now)
         nums = {k: o.get(k) for k in ("messages_per_s", "aircraft", "with_pos", "last_message_at")}
         if now - (self.started_at or now) < GRACE_S:
@@ -788,12 +793,17 @@ class Decoder:
                 self.stop("no signal")
                 self._set(now, "down", f"nothing decoded for {quiet:.0f} s: restarting readsb", **base)
                 return
+            self.ok_since = None
             self._set(now, "no_signal", f"nothing decoded for {quiet:.0f} s: check the antenna, the filter and the LNA"
                                         + (" (bias-tee is on)" if s["bias_tee"] else " (bias-tee is off: does the LNA "
                                                                                      "need power from it?)"),
                       present=True, **keep, **nums, **base)
             return
         self.no_signal_since, self.no_signal_wait = None, NO_SIGNAL_RESTART_S[0]
+        self.ok_since = now if self.ok_since is None else self.ok_since
+        if self.wedges and now - self.ok_since >= WEDGE_RESET_S:
+            self.log(f"adsb: decoding for {WEDGE_RESET_S / 60:.0f} min: wedge count reset")
+            self.wedges = []
         if self.fails and now - (self.started_at or now) > 120:
             self.fails = 0
             self.usb_fails = 0
@@ -849,7 +859,7 @@ class Decoder:
         WEDGE_WINDOW_S a longer wait (WEDGE_BACKOFF_S), said in the hint. The wait, or None for the usual backoff."""
         if d["cause"] != "wedged":
             return None
-        self.wedges = [t for t in self.wedges if now - t < WEDGE_WINDOW_S] + [now]
+        self.wedges = [t for t in self.wedges if 0 <= now - t < WEDGE_WINDOW_S] + [now]   # (a clock jump forgets them)
         n = len(self.wedges)
         hint = (("check power (bias-tee on: the LNA draws from this port)" if bias_tee else "check power")
                 + "; avoid USB extensions/unpowered hubs; try another dongle")
@@ -899,7 +909,7 @@ class Decoder:
             hits = [i for i, x in found if x == serial]
             out["present"] = bool(hits)
             out["index"] = hits[0] if len(hits) == 1 else None
-            if not hits and cause in ("unknown", "not_found", "lost"):
+            if not hits and cause in ("unknown", "not_found", "lost", "wedged"):
                 out["cause"] = "not_found"
                 seen = ", ".join(x for _i, x in found) or "none"
                 out["hint"] = (f"serial {serial} isn't in the dongle list (plugged in: {seen})"

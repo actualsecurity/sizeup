@@ -443,7 +443,8 @@ that way twice in a row, it is restarted with smaller USB transfers (`--sdr-buff
 A wedged dongle (#315): readsb exits with `SDR wedged, exiting! (check power supply / ...)` when the dongle stops
 delivering samples, usually power: an LNA on the bias-tee draws from the dongle's port, and USB extensions and unpowered
 hubs sag. The cause shows as `wedged` with what to check (the bias-tee only when it is on). After 3 wedges in an hour
-it waits 5 min before the next try, then 15 min, and says so; a run of 10 min or more resets the count.
+it waits 5 min before the next try, then 15 min, and says so. 10 min of decoding resets the count, and so does
+changing the dongle, gain or bias-tee (which also ends the wait at once).
 
 ## HPN ATC: the airband dongle
 
