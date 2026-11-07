@@ -287,13 +287,21 @@ def test_two_places_are_two_calls_whatever_the_units_and_cleared_units_never_mat
     assert rig.incidents()[-1]["source_ref"] == "feed:county:C1" and c is None
 
 
-def test_units_alone_match_only_when_the_incident_has_no_location(tmp_path):
+def test_units_alone_match_only_when_neither_side_has_a_location(tmp_path):
+    """Review 3 #1: one side with a location, the other without: two incidents, noted, never joined by units."""
     rig = Rig(tmp_path)
     rig.feed.put("A1", type="ALARM", location="", units=("E60",), times={"dispatched": T0})
     rig.poll()
     [a] = rig.incidents()
     rig.at(40)
-    assert rig.page()["id"] == a["id"]                     # the page has the place, the feed's incident none yet
+    got = rig.page()                                       # the page has a place, the feed's incident none
+    assert got["id"] != a["id"]
+    assert any(x.startswith(f"Possibly the same as #{a['id']}") for x in rig.feed_lines(got["id"]))
+    rig.at(60)
+    rig.feed.outage("failing", "x")
+    rig.poll()
+    nowhere = rig.page("p3", PAGE_NO_PLACE, fresh=True)    # neither has a place: the units decide
+    assert nowhere["id"] == a["id"]
 
 
 def test_a_feed_event_never_joins_an_accepted_incident_it_didnt_make(tmp_path):
@@ -955,3 +963,83 @@ def test_a_feed_incident_is_received_via_the_feed_not_60_control(tmp_path):
     rig.feed.put("A1", type="ALARM", location="12 Example Ave", units=("E60",), times={"dispatched": T0})
     rig.poll()
     assert rig.incidents()[0]["received_via"] == ""        # the console shows "Via County feed" from inc.feed
+
+
+# -- the third review: place-only locations, suffix-word names, directions after the suffix, EXT, towns ------------------
+
+
+def towns():
+    """Two known towns, from the data file's own list (the tests name no town themselves)."""
+    from sizeup.cad import lists
+    from sizeup.cad.sources import set_towns
+    L = lists.load()
+    set_towns(L.geo_town_order, L.geo_town_aliases)       # as Sources does from the lists
+    return L.geo_town_order[0], L.geo_town_order[2], L.geo_town_order[1]
+
+
+def test_a_located_page_never_joins_a_feed_incident_with_only_a_place_name(tmp_path):
+    rig = Rig(tmp_path)
+    rig.feed.put("A1", type="STRU", location="@SAMPLE SCHOOL", units=("E60",), times={"dispatched": T0})
+    rig.poll()
+    [a] = rig.incidents()
+    rig.feed.outage("failing", "x")
+    rig.at(600)
+    rig.poll()
+    got = rig.page("p2")                                   # E60, L31 at 12 Example Avenue: another call
+    assert got["id"] != a["id"]
+    assert any(x.startswith(f"Possibly the same as #{a['id']}") for x in rig.feed_lines(got["id"]))
+    assert not any("attached" in x for x in rig.feed_lines(a["id"]))
+
+
+SAME, DIFFERENT = True, False
+FORMATS_3 = [
+    ("12 Example Ave", "12 Example Ave Ext", DIFFERENT),
+    ("12 PARK AVE EXT", "12 PARK AVE", DIFFERENT),
+    ("12 Example Ave Extension", "12 EXAMPLE AVE EXT", SAME),
+    ("12 Main St", "12 Main St W", DIFFERENT),
+    ("12 Main St N", "12 Main St S", DIFFERENT),
+    ("12 HIGH ST W", "12 HIGH ST E", DIFFERENT),
+    ("12 Main St N", "12 MAIN STREET N", SAME),
+    ("12 W Main St", "12 E Main St", DIFFERENT),
+    ("12 W Main St", "12 Main St", SAME),
+    ("1-3 Elm St", "1 Elm St", SAME),
+    ("1-3 Elm St", "3 Elm St", DIFFERENT),                 # a range is its first number
+    ("@SAMPLE SCHOOL", "12 Example Ave", DIFFERENT),
+    ("@SAMPLE SCHOOL", "@OTHER SCHOOL", DIFFERENT),
+    ("@SAMPLE SCHOOL", "@Sample School", SAME),
+    ("@SAMPLE SCHOOL - EXAMPLE VILLAGE", "@SAMPLE SCHOOL", SAME),
+    ("12 Court St", "12 Court St", SAME),
+    ("12 Court St", "40 Court St", DIFFERENT),
+    ("12 Place Rd", "99 Place Rd", DIFFERENT),
+    ("12 Place Rd", "12 PLACE ROAD", SAME),
+    ("12 North St", "12 South St", DIFFERENT),
+    ("12 North St", "12 NORTH STREET", SAME),
+    ("12 N Ridge St", "12 S Ridge St", DIFFERENT),
+    ("12 Example Ave", "12 Example Rd", DIFFERENT),
+    ("12 Example Ave", "12 Example St", DIFFERENT),
+    ("12 Example", "12 Example Ave", SAME),
+    ("12 Example Ave", "12A Example Ave", DIFFERENT),
+    ("12 Example Ave", "1 2 Example Ave", DIFFERENT),
+    ("12 Saint Sample Pl", "12 Sample Pl", DIFFERENT),
+    ("12 Saint Sample Pl", "12 ST SAMPLE PL", SAME),
+    ("12 Mount Sample Ave", "12 Sample Ave", DIFFERENT),
+    ("12 EXAMPLE AVE : @SAMPLE SCHOOL", "12 Example Avenue", SAME),
+    ("@SAMPLE SCHOOL (12 EXAMPLE AVE)", "12 Example Ave", SAME),
+    ("12 Example Ave & Elm St", "12 Example Ave", DIFFERENT),
+    ("I95 NB EXIT 10", "I95 SB EXIT 10", DIFFERENT),
+    ("100 Example Ave Ste 4", "100 Example Ave", SAME),
+    ("12 EXAMPLE AVE - EXAMPLE VILLAGE", "12 Example Ave", SAME),
+]
+
+
+@pytest.mark.parametrize("ours,theirs,same", FORMATS_3)
+def test_the_third_reviews_address_pairs(ours, theirs, same):
+    assert same_place(ours, theirs) is same and same_place(theirs, ours) is same
+
+
+def test_known_towns_are_dropped_and_two_different_ones_are_two_places():
+    t1, t2, t3 = towns()
+    assert same_place(f"12 Oak St {t2}", "12 Oak St") and same_place(f"12 Oak St {t3}", "12 Oak St")
+    assert same_place(f"12 Example Ave, {t1}", f"12 Example Ave ({t1})")
+    assert not same_place(f"12 Example Ave {t1}", f"12 Example Ave {t2}")
+    assert not same_place(f"12 Example Ave, {t1}", f"12 Example Ave ({t2})")

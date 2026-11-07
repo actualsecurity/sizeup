@@ -780,8 +780,12 @@ Incidents come in from ranked sources. The interface is in `sizeup/sources/__ini
     `12 EXAMPLE AVE`.
   - When both sides have a location, they must be the same place: house number and street, direction and suffix. An
     intersection never matches a numbered address. Shared units never override two different places.
-  - A unit in common (cleared assignments don't count) is enough only when neither side has a location, or only the
-    incoming report has one. A report with no location never attaches to an incident that has one.
+  - A named place with no street (`@SAMPLE SCHOOL`) has its own key: it matches the same place name and never an
+    address. A direction after the suffix (`12 Main St W`) and `EXT` are part of the street. A name made only of
+    suffix words is the name (`12 Court St`). Only known towns (the lists' `geo_town_order` and aliases) are dropped
+    from the end, and two different known towns are two places.
+  - A unit in common (cleared assignments don't count) is enough only when neither side has a location. If one side
+    has one, units never join them.
   - Two incidents in the window that share units but may not be joined are noted "Possibly the same as #N" on both,
     so a duplicate is never silent.
 - **Attaching:** a page attaches only to an incident a feed has. A feed event attaches only to a queued incident or

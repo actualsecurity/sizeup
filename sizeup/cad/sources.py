@@ -15,8 +15,7 @@ sizeup/sources/runner.py (they come here as "source_event" / "source_health" thr
                report, with no report of the same source on it. When both have a location, the same place is required
                (street_part() then same_place: house number and street, direction and suffix; an intersection never
                equals a numbered address), whatever units they share. A unit in common (assignments not cleared, and
-               the reports' units) is enough only when neither has a location or only the incoming report has one; a
-               report with no location never attaches to an incident that has one. Two incidents sharing units in the
+               the reports' units) is enough only when NEITHER has a location; if one side has one, never by units. Two incidents sharing units in the
                window that may not be joined are noted "possibly the same as #N" on both: a duplicate is never silent
     attach     a page attaches only to an incident a feed has; a feed event only to a queued one or one a feed made.
                Any other match: the report makes its own incident, noted "possibly the same as #N" on both
@@ -139,33 +138,81 @@ def units_match(a, b) -> set[str]:
     return out
 
 
-def _street(s: str) -> tuple[str, frozenset, str, frozenset]:
-    """'12 N Example Ave Apt 3' -> ('12', {'n'}, 'ave', {'example'}): house number, directions, suffix, name words. Words
-    after the street's suffix (a town, a business) are dropped."""
-    words = [ABBR.get(w, w) for w in re.findall(r"[a-z0-9]+", s.lower())]
-    num = words.pop(0) if words and re.fullmatch(r"\d+[a-z]?", words[0]) else ""
-    cut = next((i for i, w in enumerate(words) if w in SUFFIXES and any(x not in DIRECTIONS for x in words[:i])), None)
-    if cut is not None:
-        words = words[:cut + 1]
-    dirs = frozenset(w for w in words if w in DIRECTIONS)
+TOWNS: tuple[tuple[str, ...], ...] = ()      # known town names as word tuples, longest first (set_towns)
+TOWN_OF: dict[tuple[str, ...], str] = {}       # ... and the town each one means (an alias's town)
+EXT = {"ext": "ext", "extension": "ext", "extn": "ext"}
+
+
+def set_towns(names, aliases: dict | None = None) -> None:
+    """The towns a location may end with ("12 King St <town>"): the lists' geo_town_order and geo_town_aliases. Only
+    these are dropped as a town (two different ones named: two places); any other trailing word stays."""
+    global TOWNS, TOWN_OF
+    key = lambda n: tuple(re.findall(r"[a-z0-9]+", str(n).lower()))
+    TOWN_OF = {key(n): str(n).lower() for n in names if key(n)}
+    for a, town in (aliases or {}).items():
+        if key(a):
+            TOWN_OF[key(a)] = str(town).lower()
+    TOWNS = tuple(sorted(TOWN_OF, key=len, reverse=True))
+
+
+def _strip_town(words: list[str]) -> tuple[list[str], str]:
+    """(the words without a known town at the end, that town or '')."""
+    for t in TOWNS:
+        if len(words) > len(t) and tuple(words[-len(t):]) == t:
+            rest, _ = _strip_town(words[:-len(t)])
+            return rest, TOWN_OF[t]
+    return words, ""
+
+
+def _town(s: str) -> str:
+    """The known town a location names: after a comma, in parentheses, or at its end."""
+    s = s or ""
+    for part in [*re.findall(r"\(([^)]*)\)", s), *s.split(",")[1:2]]:
+        t = TOWN_OF.get(tuple(re.findall(r"[a-z0-9]+", part.lower())))
+        if t:
+            return t
+    words = re.findall(r"[a-z0-9]+", street_part(s).lower())
+    return _strip_town(words[1:] if words and words[0].isdigit() else words)[1]
+
+
+def _street(s: str) -> tuple[str, frozenset, str, frozenset, frozenset]:
+    """'12 N Example Ave Apt 3' -> ('12', {'n'}, 'ave', {'example'}, {}): house number, directions before the name, suffix,
+    name words, directions after the suffix ("12 Main St W"). After the suffix only a direction and EXT ("12 Park Ave
+    Ext") are kept; a known town at the end is dropped. A name made only of suffix or direction words is the name
+    ("12 Court St", "12 North St")."""
+    raw = re.findall(r"[a-z0-9]+", s.lower())
+    num = raw.pop(0) if raw and re.fullmatch(r"\d+[a-z]?", raw[0]) else ""
+    raw = _strip_town(raw)[0]
+    words = [ABBR.get(w, w) for w in raw]
+    if len(raw) >= 2 and raw[0] in ("st", "saint") and words[1] not in SUFFIXES:
+        words[0] = "saint"                                 # "St Marys Pl": Saint, part of the name
+    cut = next((i for i, w in enumerate(words) if w in SUFFIXES
+                and any(x not in DIRECTIONS and x not in SUFFIXES for x in words[:i])), None)
+    if cut is None and len(words) >= 2 and words[-1] in SUFFIXES:
+        cut = len(words) - 1                               # "Court St", "North St", "Place Rd"
+    before, after = (words[:cut], words[cut + 1:]) if cut is not None else (words, [])
     suffix = words[cut] if cut is not None else ""
-    name = frozenset(w for i, w in enumerate(words) if w not in DIRECTIONS and w not in NOISE and i != cut
-                     and not (w in SUFFIXES and i > 0))      # "St Marys Pl": a leading "st" is Saint's, dropped too
-    name = frozenset(w for w in name if w not in SUFFIXES)
-    return num, dirs, suffix, name
+    pre = frozenset(w for w in before if w in DIRECTIONS)
+    name = [w for w in before if w not in DIRECTIONS and w not in NOISE]
+    if not name:                                           # "North St": the direction is the name
+        name, pre = [w for w in before if w not in NOISE], frozenset()
+    post = frozenset(w for w in after if w in DIRECTIONS)
+    name += [EXT[w] for w in after if w in EXT]
+    return num, pre, suffix, frozenset(name), post
 
 
 def street_part(s: str) -> str:
     """The street part of a location as CADs write it: '12 EXAMPLE AVE   : @SAMPLE SCHOOL - EXAMPLE VILLAGE EXAMPLE_TOWN'
     -> '12 EXAMPLE AVE'; '@SAMPLE SCHOOL (12 EXAMPLE AVE)' -> '12 EXAMPLE AVE'; '12-14 EXAMPLE AVE 3RD FL' ->
-    '12 EXAMPLE AVE'. A named place, ';...', '(...)', '[...]', the town after a comma, UPPER_SNAKE town tokens, floors,
-    units and apartments are left out; a range is its first number."""
+    '12 EXAMPLE AVE'. A named place, ' - ...', ';...', '(...)', '[...]', the town after a comma, UPPER_SNAKE town
+    tokens, floors, units and apartments are left out; a range is its first number. '' for a place only."""
     s = (s or "").strip()
     m = re.match(r"^\s*@[^(]*\(([^)]*)\)", s)
     if m:                                                   # @PLACE (ADDRESS)
         s = m.group(1)
     s = re.split(r"\s:\s|\s*:\s*@", s)[0]
     s = s.split("@")[0].split(";")[0]
+    s = re.split(r"\s+-\s+", s)[0]
     s = re.sub(r"\([^)]*\)|\[[^\]]*\]", " ", s).split(",")[0]
     s = re.sub(r"\b[A-Z0-9]+(?:_[A-Z0-9]+)+\b", " ", s)     # EXAMPLE_TOWN
     s = FLOOR.sub("", s)
@@ -174,36 +221,56 @@ def street_part(s: str) -> str:
     return " ".join(s.split())
 
 
+def _place_only(s: str) -> frozenset:
+    """'@SAMPLE SCHOOL' / '12 : @SAMPLE SCHOOL - ...' -> {'sample', 'school'}: a named place's words, when that is all."""
+    m = re.search(r"@\s*([^():;\[\],@]+)", s or "")
+    if not m:
+        return frozenset()
+    name = re.split(r"\s+-\s+", m.group(1))[0]
+    return frozenset(w for w in re.findall(r"[a-z0-9]+", name.lower()) if w not in NOISE)
+
+
 def place_key(s: str):
-    """('addr', number, directions, suffix, name) for a street address, ('x', {streets}) for an intersection, None for
-    nothing usable (street_part() first)."""
-    s = street_part(s)
-    if not s:
-        return None
-    parts = [p for p in INTERSECTION.split(s) if p.strip()]
-    if len(parts) >= 2:
-        streets = frozenset((d, x, n) for _, d, x, n in (_street(p) for p in parts) if n)
-        return ("x", streets) if len(streets) >= 2 else None
-    num, dirs, suffix, name = _street(s)
-    return ("addr", num, dirs, suffix, name) if name else None
+    """('addr', number, pre, suffix, name, post) for a street address, ('x', {streets}) for an intersection, ('place',
+    {words}) for a named place with no street ("@SAMPLE SCHOOL"), None for nothing usable (street_part() first)."""
+    part = street_part(s)
+    if part:
+        parts = [p for p in INTERSECTION.split(part) if p.strip()]
+        if len(parts) >= 2:
+            streets = frozenset(x[1:] for x in (_street(p) for p in parts) if x[3])
+            return ("x", streets) if len(streets) >= 2 else None
+        num, pre, suffix, name, post = _street(part)
+        if name:
+            return ("addr", num, pre, suffix, name, post)
+    words = _place_only(s)
+    return ("place", words) if words else None
 
 
 def _same_street(a, b) -> bool:
-    (_, da, sa, na), (_, db, sb, nb) = a, b
-    return na == nb and (not da or not db or da == db) and (not sa or not sb or sa == sb)
+    """(pre, suffix, name, post) twice: the same name; a direction before it may be missing on one side, one after the
+    suffix may not ("12 Main St W" is not "12 Main St"); a missing suffix is fine, two different ones are not."""
+    (pa, sa, na, qa), (pb, sb, nb, qb) = a, b
+    return na == nb and (not pa or not pb or pa == pb) and (not sa or not sb or sa == sb) and qa == qb
 
 
 def same_place(a: str, b: str) -> bool:
-    """Strict: the same house number and street ('12 Example Ave' = '12 EXAMPLE AVENUE APT 3'); never '14 Example Ave',
-    'S Example Ave' for 'N Example Ave', 'Example Ave' for '12 Example Ave', or an intersection for a numbered address."""
+    """Strict: the same house number and street ('12 Example Ave' = '12 EXAMPLE AVENUE APT 3'), the same intersection,
+    or the same named place; never '14 Example Ave', 'S Example Ave' for 'N Example Ave', '12 Main St W' for '12 Main
+    St', '12 Park Ave Ext' for '12 Park Ave', 'Example Ave' for '12 Example Ave', an intersection or a named place for a
+    numbered address."""
     ka, kb = place_key(a), place_key(b)
     if ka is None or kb is None or ka[0] != kb[0]:
         return False
+    ta, tb = _town(a), _town(b)
+    if ta and tb and ta != tb:
+        return False                                       # the same address in two known towns
+    if ka[0] == "place":
+        return ka[1] == kb[1]
     if ka[0] == "x":
-        return len(ka[1]) == len(kb[1]) and all(any(_same_street((None, *x), (None, *y)) for y in kb[1]) for x in ka[1])
+        return len(ka[1]) == len(kb[1]) and all(any(_same_street(x, y) for y in kb[1]) for x in ka[1])
     if ka[1] != kb[1]:
         return False
-    return _same_street(ka[1:], kb[1:])
+    return _same_street(ka[2:], kb[2:])
 
 
 def _shown(v) -> str:
@@ -242,6 +309,8 @@ class Sources:
         self._stop = threading.Event()
         with self.store.lock:
             self.store.db.executescript(SCHEMA)
+        L = cad.lists
+        set_towns(getattr(L, "geo_town_order", ()), getattr(L, "geo_town_aliases", {}))
 
     # -- health and tiers ----------------------------------------------------------------------------------------------
 
@@ -339,10 +408,10 @@ class Sources:
                     score = -len(common)
                 else:
                     continue
-            elif common and not here and theirs:             # no location here, one there: never by units alone
+            elif common and (here or theirs):                # one side has a location: never by units alone
                 score = -len(common)
             elif common:
-                score = len(common)                          # neither has a location, or only this report has one
+                score = len(common)                          # neither has a location: the units decide
             else:
                 continue
             k = (-abs(score), abs(inc["created_at"] - at))
