@@ -165,8 +165,7 @@ TOP_MPS = 40.0                  # no faster than about 90 mph between two statio
 STOP_COST_MAX_S = 120.0
 JSON = "application/json"
 NEAR_PATH = "/api/cad/trains/near"
-CATENARY = ("New Haven Line: overhead catenary, 12.5 kV AC, plus the third rail at stations; "
-            "treat every wire as live until Metro-North confirms it is de-energized and grounded")
+CATENARY = "12.5 kV AC catenary + third rail at stations: live until Metro-North confirms de-energized and grounded"
 GONE = ("Departed",)             # the MTA railroad extension's status for a stop the train has left
 DIRS = {1: ("outbound", "Toward New Haven"), -1: ("inbound", "Toward New York")}
 # GTFS-realtime VehiclePosition.current_status
@@ -1223,12 +1222,12 @@ class Trains:
 
     def why_not(self) -> str:
         if not self.enabled:
-            return "Trains off ([trains] enabled = false)"
+            return "off ([trains] enabled = false)"
         if not self.configured:
-            return "Trains not configured (no MTA feed address)"
+            return "Not configured (no MTA feed address)"
         if self.model is None:
             err = self.st["error"]
-            return "Metro-North's stations and line not loaded yet" + (f" ({err})" if err else "")
+            return "Line not loaded yet" + (f" ({err})" if err else "")
         return ""
 
     def _headers(self) -> dict:

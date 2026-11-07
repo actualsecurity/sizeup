@@ -363,6 +363,6 @@ def test_the_box_says_nothing_about_wildcards():
     for box in ('id="f-address"', 'id="e-address"'):
         tag = html[html.index(box):html.index(">", html.index(box))]
         assert "N Main / Westchester" in tag and "%" not in tag and "*" not in tag
-    assert "more… ${box.more} more of ${box.total}" in js            # the cap shown
+    assert "+${box.more} more of ${box.total}" in js            # the cap shown
     assert "meet ? m.name : m.label" in js                            # "N Main St & Westchester Ave" · its town
     assert "wildcard" not in (html + js).lower()

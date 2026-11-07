@@ -98,7 +98,7 @@ WINDOW_MAX_KEPT = 40                       # someone else's window keeps at most
 RECENT_S = 10 * 60                         # acknowledged alarms listed this long (the screens say who and when)
 KEEP_S = 90 * 86400
 ADSB_CHANNEL = "ADS-B (public data)"
-ADSB_NOTE = "From public ADS-B data, not an official notification"
+ADSB_NOTE = "Public ADS-B data, not official"
 COLUMNS = (("source", "TEXT NOT NULL DEFAULT ''"), ("subject", "TEXT NOT NULL DEFAULT ''"),   # added after #128
            ("clear_by", "TEXT NOT NULL DEFAULT ''"), ("clear_at", "REAL"),                    # All clear, 2026-10-14
            ("stuck", "TEXT NOT NULL DEFAULT ''"))                                            # #190
@@ -308,26 +308,26 @@ def aircraft_type(ev: dict) -> str:
 
 
 def aircraft_alt(ev: dict) -> str:
-    """"900 ft, descending 500 ft/min", "on the ground", "altitude not reported"."""
+    """"900 ft ↓500 fpm", "900 ft level", "GND", "alt ?" (#278: numbers, short units)."""
     alt = ev.get("alt")
-    alt_s = "on the ground" if alt == "ground" else f"{alt:,} ft" if isinstance(alt, (int, float)) else "altitude not reported"
+    alt_s = "GND" if alt == "ground" else f"{alt:,} ft" if isinstance(alt, (int, float)) else "alt ?"
     vr = ev.get("vr")
     if isinstance(vr, (int, float)) and alt != "ground":
-        alt_s += ", level" if abs(vr) <= 300 else f", {'climbing' if vr > 0 else 'descending'} {abs(vr):,} ft/min"
+        alt_s += " level" if abs(vr) <= 300 else f" {'↑' if vr > 0 else '↓'}{abs(vr):,} fpm"
     return alt_s
 
 
 def aircraft_doing(ev: dict) -> str:
-    """"arriving HPN on the ILS 34, 1.4 nm to go", "departing HPN", "low in the area" (sizeup's reading of its track)."""
+    """"arriving HPN · ILS 34 · 1.4 nm", "departing HPN", "low in the area" (sizeup's reading of its track)."""
     ph = ev.get("phase") or ""
     if ph == "arriving":
         doing = "arriving HPN"
         if ev.get("approach") and ev["approach"] != "maneuvering":
-            doing += f" on the {ev['approach']}"
+            doing += f" · {ev['approach']}"
         elif ev.get("runway"):
-            doing += f", runway {ev['runway']}"
+            doing += f" · RWY {ev['runway']}"
         if ev.get("dist_nm") is not None:
-            doing += f", {ev['dist_nm']} nm to go"
+            doing += f" · {ev['dist_nm']} nm"
         return doing
     return PHASES.get(ph, ph)
 

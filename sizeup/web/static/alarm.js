@@ -113,7 +113,7 @@ window.Alarm = (() => {
 
   async function ack(a, b) {
     if (!signedIn() && !opName()) {
-      UI.toast("Enter your name (Operator, top right) to acknowledge", "alert");
+      UI.toast("Name needed: Operator, top right", "alert", "To acknowledge");
       return;
     }
     st.busy.add(a.id);
@@ -136,7 +136,7 @@ window.Alarm = (() => {
   // All clear: resolved ("things are ok"), not just seen: the emergency window closes (acknowledged too)
   async function allClear(a, b) {
     if (!signedIn() && !opName()) {
-      UI.toast("Enter your name (Operator, top right) to give the all clear", "alert");
+      UI.toast("Name needed: Operator, top right", "alert", "To give the all clear");
       return;
     }
     st.busy.add(a.id);
@@ -280,7 +280,7 @@ window.Alarm = (() => {
         r.append(mk("b", "", `${a.drill ? "DRILL · " : ""}Emergency button (not ours)`),
           mk("span", "", ` ${a.who} on ${a.channel} at ${hms(a.at)}${a.text ? `: “${a.text}”` : ""}`));
         if (a.stuck) {                // #190: it went on flagging routine calls: said once, its later flags not alarms
-          const s = mk("span", "alarm-stuck", ` · emergency flag stuck on ${a.stuck}`);
+          const s = mk("span", "alarm-stuck", ` · flag stuck: ${a.stuck}`);
           s.title = "The same flag on call after call of routine traffic: a radio left in emergency mode, or a talkgroup "
             + "the system holds in emergency. Its later flags are not emergencies: no new alarm, the window not renewed.";
           r.append(s);
@@ -310,7 +310,7 @@ window.Alarm = (() => {
     // the header: sound not unlocked yet (the wall board especially: nobody has touched it)
     const hdr = document.querySelector("body > header");
     if (hdr && !st.pill) {
-      st.pill = btn("Alarm sound: tap to enable", "pill warn alarm-pill", () => unlock());
+      st.pill = btn("Tap for alarm sound", "pill warn alarm-pill", () => unlock());
       st.pill.title = "Browsers play sound only after a click: this enables the emergency alarm's sound on this screen";
       const conn = hdr.querySelector("#conn");
       if (conn) conn.after(st.pill); else hdr.append(st.pill);
@@ -334,7 +334,7 @@ window.Alarm = (() => {
       st.acked.add(a.id);
     }
     for (const a of st.notices) {
-      if (st.seen && !st.seen.has(a.id)) UI.toast(`Emergency button: ${a.who} on ${a.channel}`, "alert", "Not our channel or rig: a notice");
+      if (st.seen && !st.seen.has(a.id)) UI.toast(`Emergency button: ${a.who} on ${a.channel}`, "alert", "Not ours · notice");
     }
     st.seen = new Set([...open, ...st.notices, ...(s.recent || [])].map((a) => a.id));
     if (fresh.length && st.overlay) st.overlay._sig = "";
@@ -365,14 +365,16 @@ window.Alarm = (() => {
         + "alarm with sound on every console and wall board until a dispatcher acknowledges it (who and when go on the "
         + "event's chronology). The button on another agency's talkgroup, by a radio not ours, is a notice. "
         + "\"...\" in a phrase: up to " + d.gap_words + " words in between that don't say no.")] : []),
-      mk("span", "dim small", d.push ? "Pushed to the alerts topic (ntfy)" : "No push topic ([alerts] ntfy_topic / status_topic)"));
+      Object.assign(mk("span", "dim small", d.push ? "Push: alerts topic" : "No push topic"),
+        { title: d.push ? "ntfy alerts topic" : "[alerts] ntfy_topic / status_topic" }));
     // drill
     const drill = mk("label", "check");
     const dIn = mk("input");
     dIn.type = "checkbox";
     dIn.checked = !!d.drill;
     dIn.addEventListener("change", () => save("drill", dIn.checked));
-    drill.append(dIn, mk("span", "", "Drill mode: alarms say DRILL (training), pushes at normal priority"));
+    drill.append(dIn, mk("span", "", "Drill mode"));
+    drill.title = "Alarms say DRILL (training); pushes at normal priority";
     // other talkgroups
     const other = mk("select", "field");
     other.setAttribute("aria-label", "Emergency button on other talkgroups");
@@ -384,14 +386,15 @@ window.Alarm = (() => {
     other.value = d.other;
     other.addEventListener("change", () => save("other", other.value));
     const oRow = mk("div", "row");
-    oRow.append(mk("span", "", "Emergency button on another agency's talkgroup, radio not ours:"), other);
+    oRow.append(Object.assign(mk("span", "", "Other agency's button:"),
+      { title: "The emergency button on another agency's talkgroup, by a radio not ours" }), other);
     // channels
     const ch = mk("input", "field alarm-chans");
     ch.type = "text";
     ch.value = (d.channels || []).join(", ");
     ch.setAttribute("aria-label", "Fire channels");
     const chRow = mk("div", "row");
-    chRow.append(mk("span", "", "Fire channels (words checked here):"), ch,
+    chRow.append(Object.assign(mk("span", "", "Fire channels:"), { title: "Where the alarm words are checked" }), ch,
       btn("Save", "sm", () => save("channels", ch.value.split(",").map((x) => x.trim()).filter(Boolean))),
       ...(edited("channels") ? [btn("Default", "sm quiet", () => reset("channels"))] : []),
       mk("span", "dim small", `Default ${(d.defaults.channels || []).join(", ")}`));
@@ -403,7 +406,7 @@ window.Alarm = (() => {
     const kRow = mk("div", "row");
     kRow.append(btn("Save words", "sm", () => save("keywords", kw.value.split("\n").map((x) => x.trim()).filter(Boolean))),
       ...(edited("keywords") ? [btn("Default", "sm quiet", () => reset("keywords"))] : []),
-      mk("span", "dim small", "One phrase a line, whole words, any case"));
+      Object.assign(mk("span", "dim small", "One phrase a line"), { title: "Whole words, any case" }));
     card.replaceChildren(head, drill, oRow, chRow, kw, kRow);
   }
 

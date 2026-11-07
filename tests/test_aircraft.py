@@ -528,7 +528,8 @@ def test_the_aircraft_layer_only_asks_the_hub_and_predicts_only_briefly_between_
     # (one source for the marks and trails; the tower's TWR mark, #257, is its own)
     assert code.count("addSource(") == 2 and "map.addSource(TWR_SRC" in code and '["geometry-type"], "LineString"' in code and '["geometry-type"], "Point"' in code
     # the click still says when the mark is an estimate between reports, and when a position is stale
-    assert "glide.estimated(a.hex)" in code and "Drawn at an estimate between reports" in code and '" (stale)"' in code
+    # (#278: in the box's "i"; the foot says "stale")
+    assert "glide.estimated(a.hex)" in code and "Drawn on between reports" in code and 'stale ? "stale" : ""' in code
     ml = (STATIC / "maplayers.js").read_text()
     assert "this.force.aircraft = on" in ml and "this.force.airport = on" in ml
     assert 'id="i-aircraft"' in (STATIC / "icons.svg").read_text()
@@ -765,14 +766,14 @@ def test_a_7700_near_hpn_raises_one_alarm_with_what_and_where_and_a_push(tmp_pat
     assert len(al) == 1 and al[0]["level"] == "alarm" and al[0]["source"] == "adsb" and al[0]["channel"] == "ADS-B (public data)"
     a = al[0]
     assert a["what"] == "aircraft emergency: squawk 7700 (emergency)" and a["who"] == "N41DW"
-    assert a["text"].startswith("N41DW, SR22 · squawk 7700 (emergency) · 900 ft, descending 500 ft/min · ")
-    assert "nm SE of HPN" in a["text"] and "arriving HPN on the ILS 34" in a["text"] and "via adsb.lol" in a["text"]
-    assert a["text"].endswith("From public ADS-B data, not an official notification.")
+    assert a["text"].startswith("N41DW, SR22 · squawk 7700 (emergency) · 900 ft ↓500 fpm · ")
+    assert "nm SE of HPN" in a["text"] and "arriving HPN · ILS 34" in a["text"] and "via adsb.lol" in a["text"]
+    assert a["text"].endswith("Public ADS-B data, not official.")
     assert w.cad.state()["alarms"]["open"][0]["id"] == a["id"]
     assert w.cad.alarms.notifier.flush(5) and len(ntfy.got) == 1
     m = ntfy.got[0]
     assert m["title"] == "AIRCRAFT EMERGENCY: SQUAWK 7700 (EMERGENCY) · N41DW (SR22) on ADS-B (public data)"
-    assert m["priority"] == 5 and "airplane" in m["tags"] and "From public ADS-B data, not an official notification" in m["message"]
+    assert m["priority"] == 5 and "airplane" in m["tags"] and "Public ADS-B data, not official" in m["message"]
     assert m["topic"] == "sizeup-test-alarms-0123"
 
 

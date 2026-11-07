@@ -416,11 +416,12 @@ window.GisLayers = (() => {
         rows.push([label, text]);
       }
       const lines = rows.map(([k, v]) => `${k}: ${v}`);
-      if (l.note) lines.push(l.note);
-      const foot = `${store.cat.attribution || "Westchester County GIS"}${l.asof ? `, ${l.asof}` : ""}${l.at ? `, fetched ${day(l.at)}` : ""}`;
+      // #278: the layer's note is a caveat, behind the "i"; the rail's catenary stays on the box (a hazard)
+      if (l.note && l.key === "rail") lines.push(l.note);
+      const foot = [store.cat.attribution || "Westchester County GIS", l.asof, l.at ? day(l.at) : ""].filter(Boolean).join(" · ");
       this.control.close();
-      this.control.showInfo(title || l.label, (props._ours ? "Ours: " : "") + (l.sub || l.label), lines.length ? lines : ["(no details)"], foot, "",
-                            iconEl(l, !!props._ours));
+      this.control.showInfo(title || l.label, (props._ours ? "Ours · " : "") + (l.sub || l.label), lines.length ? lines : ["(no details)"], foot, "",
+                            iconEl(l, !!props._ours), l.note && l.key !== "rail" ? l.note : "");
     }
 
     // the group in the Layers box; folds: each group's open state as the box had it before this rebuild
@@ -436,7 +437,7 @@ window.GisLayers = (() => {
       head.append(h("span", "spacer"), src);
       box.append(head);
       if (!cat) { box.append(h("div", "dim small", "Loading…")); return box; }
-      if (!cat.configured || !layersOf(cat).length) { box.append(h("div", "dim small", cat.note || "No county GIS layers configured on the hub")); return box; }
+      if (!cat.configured || !layersOf(cat).length) { box.append(h("div", "dim small", cat.note || "Not configured")); return box; }
       const zoom = this.map.getZoom();
       let group = null, fold = null, any3d = false;
       for (const l of layersOf(cat)) {
@@ -484,12 +485,13 @@ window.GisLayers = (() => {
         cb.checked = this.tilted;
         cb.dataset.key = "gis:3d";
         cb.addEventListener("change", () => this.tilt(cb.checked));
-        row.append(cb, h("span", "", "3D: tilt the map, buildings by height"));
+        row.append(cb, h("span", "", "3D buildings"));
+        row.title = "Tilt the map; buildings drawn by height";
         box.append(row);
       }
       const at = Math.max(0, ...layersOf(cat).map((l) => l.at || 0));
       const note = h("div", "ml-note");
-      note.append(`Open data by ${cat.attribution || "Westchester County GIS"}` + (at ? `, fetched ${day(at)}` : "") + ". ");
+      note.append([cat.attribution || "Westchester County GIS", at ? day(at) : ""].filter(Boolean).join(" · ") + " · ");
       const terms = h("a", "", "Terms");
       terms.href = cat.terms || "https://gis.westchestercountyny.gov/";
       terms.target = "_blank";

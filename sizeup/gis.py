@@ -310,8 +310,7 @@ DEFAULT_LAYERS: tuple[Layer, ...] = (
     Layer("rail", "Railroads", f"{_WC}/DataHub_BasemapPlanimetrics/MapServer/1", group="Transportation", kind="line",
           style={"color": "--text-2", "width": 2.4, "dash": 1}, minzoom=13, refresh="monthly", simplify_m=1.0,
           fields=(("NAME", "Line"), ("DESCRIPTION", "Kind")), licence=COUNTY_TERMS, page=f"{_HUB}7fa83627031243d999b8cd5f3ba26125_1",
-          note="Metro-North New Haven Line (Port Chester, Rye): overhead catenary, 12.5 kV AC, plus the third rail at stations; "
-               "the county's data names no owner or electrification"),
+          note="New Haven Line: 12.5 kV AC catenary + third rail at stations (not in the county's data)"),
     Layer("train_stations", "Train stations", f"{_WC}/DataHub_Transportation/MapServer/156", group="Transportation", kind="point", icon="train",
           style={"color": "--text-2", "radius": 5.5}, minzoom=11, refresh="monthly",
           fields=(("STATNAME", "Station"),), trains_field="STATNAME",

@@ -1,6 +1,8 @@
 // "?" help: the longer explanation of a section, kept off the screen until asked for.
 //   In a page:   <button type="button" class="help" data-help="...">?</button>
 //   In a script: Help.button("...")  (the same button)
+//                Help.info("...")    (an "i" for a detail's caveats and method: #278, kept off the line itself;
+//                                     the same text as its hover title)
 // Click, Enter or Space opens it under the button; the button again, a click elsewhere, Esc, a scroll
 // or a resize closes it (Esc puts the focus back on the button).
 "use strict";
@@ -16,6 +18,13 @@ window.Help = (() => {
     b.dataset.help = text;
     b.setAttribute("aria-label", label);
     b.setAttribute("aria-expanded", "false");
+    return b;
+  }
+
+  function info(text, label = "Details") {
+    const b = button(text, label);
+    b.textContent = "i";
+    b.title = text;
     return b;
   }
 
@@ -67,5 +76,5 @@ window.Help = (() => {
   window.addEventListener("resize", () => close(false));
   document.addEventListener("scroll", () => close(false), true);
 
-  return { button, close };
+  return { button, info, close };
 })();

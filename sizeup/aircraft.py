@@ -1371,9 +1371,9 @@ class AircraftLayer:
 
     def why_not(self) -> str:
         if not self.enabled:
-            return "Aircraft off ([aircraft] enabled = false)"
+            return "off ([aircraft] enabled = false)"
         if not self.feeds:
-            return "Aircraft not configured (no feed)"
+            return "Not configured (no feed)"
         return ""
 
     # -- the schedule ------------------------------------------------------------------------------------------------
@@ -1824,8 +1824,8 @@ class AircraftLayer:
             rx, st = sf.rx, sf.stats()
             fresh = st["age_s"] is not None and st["age_s"] <= RECEIVER_KEEP_S
             name = rx.get("name") or rx.get("sdr") or ""
-            note = ("" if fresh else f"no word from the station's receiver since {tz.hhmmss(sf.last)}"
-                    if sf.last else "the station's receiver hasn't sent anything yet")
+            note = ("" if fresh else f"station receiver silent since {tz.hhmmss(sf.last)}"
+                    if sf.last else "station receiver: nothing yet")
             if rx.get("state") and rx.get("state") != "ok":
                 note = "; ".join(x for x in (note, f"decoder {rx['state']}: {rx.get('detail') or ''}".rstrip(": ")) if x)
             return {"enabled": True, "station": True, "sdr": rx.get("sdr", ""), "name": name, "present": rx.get("present"),
@@ -1854,11 +1854,11 @@ class AircraftLayer:
                 if c:
                     out["held_by"] = {"app": c.get("app"), "mode": c.get("mode")}
             if out["present"] is False:
-                out["note"] = f"The ADS-B dongle {self.sdr_name} is not plugged in"
+                out["note"] = f"ADS-B dongle {self.sdr_name}: not plugged in"
             elif not out["held_by"] and out["present"]:
-                out["note"] = f"The ADS-B dongle {self.sdr_name} is plugged in but no app holds it (nothing decoding)"
+                out["note"] = f"ADS-B dongle {self.sdr_name}: idle (no app holds it)"
         elif self.receiver_on:
-            out["note"] = "No dongle named for ADS-B yet ([aircraft.receiver] sdr)"
+            out["note"] = "No ADS-B dongle set ([aircraft.receiver] sdr)"
         return out
 
     def feeds_public(self, view: list[dict]) -> list[dict]:
