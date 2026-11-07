@@ -237,3 +237,7 @@ __marimo__/
 .streamlit/secrets.toml
 
 deploy/hub/*.sqlite*
+
+# the private replay cache (#283) if pointed inside the repo: never committed
+sizeup-replay/
+.sizeup-replay/
