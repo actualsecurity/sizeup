@@ -77,7 +77,8 @@ MSG_MAX = 80
 MAX_SIGS = 400              # signatures kept; past this a new one is counted as ("hub", "error")
 MAX_TIMES = 2 * LIMITS["per_signature"][1]     # timestamps kept per signature: more than the largest K
 MAX_ALL = 2 * LIMITS["total"][1]               # ... and of every error line: more than the largest total
-MAX_QUEUE = 200000          # lines waiting to be read; past this they are dropped (counted)
+MAX_QUEUE = 20000           # lines waiting to be read (about 5 MB at most); past this they are dropped (counted)
+PANEL_DRAIN = 1000          # panel() (a Health request's thread) reads at most this many: the hub-errors thread does
 PENDING_S = 1.0             # a traceback's last line waits this long for "During handling ..." (chained: once)
 TOP = 8                     # Settings > Health: the top signatures shown
 META = "errwatch"           # hub.sqlite meta key
@@ -128,6 +129,13 @@ def _source(prefix: str) -> str:
 
 def _known(name: str) -> str:
     return name if name in KNOWN else "error"
+
+
+def _is_exception(name: str) -> bool:
+    """"sizeup.cad.store.CadError": a class of that name in that loaded module, an exception (not just any text)."""
+    mod, _, cls = name.rpartition(".")
+    c = getattr(sys.modules.get(mod), cls, None)
+    return isinstance(c, type) and issubclass(c, BaseException)
 
 
 def _first_word(s: str) -> str:
@@ -329,7 +337,7 @@ class ErrorWatch:
             name = e.group(1) if e else ""
             last = name.rsplit(".", 1)[-1]
             root = name.split(".", 1)[0]
-            typ = last if (last in KNOWN or (root == "sizeup" and "." in name and len(last) <= 40)) else "error"
+            typ = last if (last in KNOWN or (root == "sizeup" and len(last) <= 40 and _is_exception(name))) else "error"
             msg = s[e.end():].lstrip(": ") if e else s
             self._pending[stream] = (at, (tb["module"] or "hub", typ), _norm(msg))
             return
@@ -457,7 +465,7 @@ class ErrorWatch:
     # -- Settings > Health (admins) -----------------------------------------------------------------------------
 
     def panel(self, now: float | None = None) -> dict:
-        self.drain()
+        self.drain(PANEL_DRAIN)
         now = self.clock() if now is None else now
         cfg = self.config()
         with self._lock:
@@ -501,7 +509,8 @@ class LineTee:
                 *lines, buf = buf.split("\n")
                 w, key = self._watch, f"{self._name}:{threading.get_ident()}"     # a traceback per thread
                 for line in lines:
-                    w.feed(line, key)
+                    if _first_word(TS.sub("", line)) not in IGNORE:     # the access log, our own lines: not queued
+                        w.feed(line, key)
             loc.buf = buf if len(buf) <= 65536 else ""
         except Exception:  # noqa: BLE001 - the log comes first
             pass

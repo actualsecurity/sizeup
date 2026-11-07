@@ -308,7 +308,7 @@ def test_a_traceback_names_only_a_sizeup_module_and_a_real_class():
     w, clock, *_ = watch()
     err = LineTee(io.StringIO(), w, "stderr")
     for last in ("Jane_DoeError: x", "botocore.exceptions.ClientError: An error occurred",
-                 "sizeup.cloud.hub.HubPostError: x", "thirdparty.Jane_DoeError: x"):
+                 "sizeup.cloud.hub.HubPostError: x", "thirdparty.Jane_DoeError: x", "sizeup.notify.NotifyError: x"):
         err.write("Traceback (most recent call last):\n"
                   '  File "/app/sizeup/jane_doe.py", line 1, in f\n    x()\n'
                   '  File "/app/sizeup/aircraft.py", line 2, in g\n    y()\n'
@@ -318,7 +318,7 @@ def test_a_traceback_names_only_a_sizeup_module_and_a_real_class():
     clock.t += 5
     w.drain()
     assert sorted((k, s.total) for k, s in w.sigs.items()) == [
-        (("aircraft", "ClientError"), 1), (("aircraft", "HubPostError"), 1), (("aircraft", "error"), 2)]
+        (("aircraft", "ClientError"), 1), (("aircraft", "NotifyError"), 1), (("aircraft", "error"), 3)]           # no sizeup.cloud.hub.HubPostError
 
 
 def test_a_chained_traceback_is_one_error():
@@ -474,3 +474,35 @@ def test_a_flood_of_one_error_past_its_window_cap_is_still_one_notice():
     w.tick()
     w.tick()
     assert [g["title"].split(" ×")[0] for g in n.got] == ["Hub errors: aircraft OverflowError"]
+
+
+def test_the_tee_never_queues_the_access_log_or_our_own_lines():
+    w, *_ = watch()
+    t = LineTee(io.StringIO(), w, "stdout")
+    t.write(f"12:00:01 http GET {PATH} 404 ua=FooError\nerrors: Hub errors: x\nnotify: not sent (KeyError)\n")
+    assert w._q.qsize() == 0
+    t.write("12:00:01 hub: KeyError: x\n")
+    assert w._q.qsize() == 1
+
+
+def test_a_health_request_reads_only_a_little_of_the_queue():
+    w, *_ = watch()
+    for _ in range(errwatch.PANEL_DRAIN + 500):
+        w.feed(OVERFLOW.format(n=1))
+    assert w.panel()["total"] == errwatch.PANEL_DRAIN and w._q.qsize() == 500
+    w.drain()
+    assert w.total == errwatch.PANEL_DRAIN + 500
+
+
+def test_the_hubs_startup_path_tees_its_log(tmp_path, monkeypatch):
+    import sys
+    from sizeup.app import start_app
+    from tests.test_cloud import hub_cfg
+    monkeypatch.setattr(sys, "stdout", io.StringIO())
+    monkeypatch.setattr(sys, "stderr", io.StringIO())
+    app = start_app(hub_cfg(tmp_path))
+    try:
+        assert isinstance(sys.stdout, LineTee) and isinstance(sys.stderr, LineTee)
+        assert sys.stdout._watch is app.error_watch
+    finally:
+        app.stop()
