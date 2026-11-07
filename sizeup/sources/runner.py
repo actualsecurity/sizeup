@@ -24,6 +24,7 @@ from typing import Callable, Iterable
 
 from sizeup.sources import (ENTRY_POINT_GROUP, ENV_MODULES, ENV_PATH, MAX_BACKOFF_S, MIN_POLL_S, RESERVED, SOURCE_ID,
                             TRIGGER_MIN_S, Adapter, FeedEvent, Health, SourceContext, SourceError)
+from sizeup.sources.resets import Resets      # #297 owns it; #305's sizeup/cloud/adapters.py imports it from here
 
 HEARTBEAT_S = 60.0
 PRUNE_S = 6 * 3600.0          # an event no poll has had this long is forgotten here
@@ -113,52 +114,6 @@ def check_adapter(a) -> str:
     if not isinstance(a.poll_s, (int, float)) or isinstance(a.poll_s, bool) or a.poll_s <= 0:
         return "poll_s: seconds"
     return ""
-
-
-class _Resets:
-    """The runner's reset queue when #305's sizeup/cloud/adapters.py Resets isn't here (the same names and behaviour:
-    request() from anywhere, run_due() on the adapter's own thread before its next poll). Delete once both merged."""
-
-    def __init__(self):
-        self._want: dict[str, str] = {}             # source -> who asked
-        self._lock = threading.Lock()
-        self.wake: Callable[[str], None] | None = None   # the runner's: cut a back-off short for that source
-
-    def request(self, source: str, by: str = "") -> None:
-        with self._lock:
-            self._want[source] = by
-        if self.wake is not None:
-            self.wake(source)
-
-    def pending(self, source: str) -> bool:
-        with self._lock:
-            return source in self._want
-
-    def run_due(self, adapter, log: Callable[[str], None] = print) -> str | None:
-        """On the adapter's thread: its reset(), if one was asked for. What happened (None: nothing asked)."""
-        source = str(getattr(adapter, "source", ""))
-        with self._lock:
-            if source not in self._want:
-                return None
-            by = self._want.pop(source)
-        who = f" (asked by {by})" if by else ""
-        fn = getattr(adapter, "reset", None)
-        if not callable(fn):
-            log(f"incident sources: {source}: reset{who}: it has no reset(): nothing to do")
-            return "no reset(): nothing to do"
-        try:
-            fn()
-        except Exception as e:  # noqa: BLE001 - an adapter's bug never stops the station
-            log(f"incident sources: {source}: reset{who} failed: {type(e).__name__}")
-            return f"failed: {type(e).__name__}"
-        log(f"incident sources: {source}: reset{who}")
-        return "reset"
-
-
-try:                                              # #305 (station-adapters) defines it; the same names either way
-    from sizeup.cloud.adapters import Resets      # type: ignore[import-not-found]
-except ImportError:
-    Resets = _Resets
 
 
 class _Run:

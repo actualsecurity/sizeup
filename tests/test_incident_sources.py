@@ -1043,3 +1043,24 @@ def test_known_towns_are_dropped_and_two_different_ones_are_two_places():
     assert same_place(f"12 Example Ave, {t1}", f"12 Example Ave ({t1})")
     assert not same_place(f"12 Example Ave {t1}", f"12 Example Ave {t2}")
     assert not same_place(f"12 Example Ave, {t1}", f"12 Example Ave ({t2})")
+
+
+def test_the_runner_imports_without_sizeup_cloud_adapters():
+    """sizeup/sources owns Resets (sources/resets.py): the runner imports nothing of sizeup.cloud, so #305's
+    adapters.py importing the runner can never be a circle. A fresh interpreter where sizeup.cloud.adapters can't load."""
+    import subprocess
+    from pathlib import Path
+    code = ("import sys, importlib.abc\n"
+            "class Block(importlib.abc.MetaPathFinder):\n"
+            "    def find_spec(self, name, path=None, target=None):\n"
+            "        if name == 'sizeup.cloud.adapters': raise ImportError('blocked')\n"
+            "sys.meta_path.insert(0, Block())\n"
+            "import sizeup.sources.runner as r\n"
+            "from sizeup.sources.resets import Resets\n"
+            "assert r.Resets is Resets and r.SourceRunner([], lambda k, d: None).resets.__class__ is Resets\n"
+            "assert not any(m.startswith('sizeup.cloud') for m in sys.modules), sorted(m for m in sys.modules if 'cloud' in m)\n"
+            "print('ok')\n")
+    root = Path(__file__).resolve().parents[1]
+    out = subprocess.run([sys.executable, "-c", code], cwd=root, capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0 and out.stdout.strip() == "ok", out.stderr
+    assert "sizeup.cloud" not in (root / "sizeup" / "sources" / "runner.py").read_text().split('"""', 2)[2].split("class ")[0]
