@@ -592,6 +592,7 @@ ROLL_ACCEL_S = (4.0, 20.0)
 RUNWAY_ALIGN_DEG = 30.0       # a roll is along the runway (either way): a crossing is not
 FIXED_WING_ARRIVAL_KT = 70.0  # no category: on a runway's final this fast, it is flown as a fixed-wing (the 400 ft band)
 LANDED_KT = 50.0              # an arrival on the runway counts as down only by the ground flag or this slow ...
+LIFTOFF_S = 30.0              # just off the runway: closing on the field over it is not coming back (only descending)
 RETURN_HOLD_S = 10.0          # a departure turns "near" only after it has been coming back this long
 
 
@@ -647,12 +648,13 @@ class PhaseMemory:
          (SHORT_FINAL_NM) without descending.
       5. On a runway's centreline, along it, under its band, not climbing: ground (the takeoff roll, the landing
          roll). A descended arrival only below LANDED_KT (a balked landing is not down); anything else at
-         RUNWAY_MIN_KT or more, not descending, and under ROLL_MAX_KT or speeding up (a low pass is not a roll).
+         RUNWAY_MIN_KT or more, not descending, and speeding up for a fixed-wing (a low pass is not a roll: with no
+         earlier speed to judge by, ground for this report only), under ROLL_MAX_KT or speeding up otherwise.
       5b. Climbing low over a runway, along it, under its band (not a descended arrival: a go-around): a lift-off;
          on the field now (to 7).
       6. On the airport, under its band, below LANDED_KT, not climbing, after landing or taking off here: ground
          (taxiing, parked with no ground flag).
-      7. From the field, in the area: _leaving(): not flying (FLYING_KT, climbing, above its band): ground; coming
+      7. From the field, in the area (within LIFTOFF_S of the runway never coming back unless descending): _leaving(): not flying (FLYING_KT, climbing, above its band): ground; coming
          back (closing, or descending and not opening): near once that has lasted RETURN_HOLD_S; else departing
          (from near only once climbing or opening).
       8. Was inbound: closing (or getting closer on its approach), not climbing or opening: arriving; else the held
@@ -661,6 +663,9 @@ class PhaseMemory:
      10. p is arriving (not confirmed in 4): near: lined up alone never decides.
      11. Departed in the last DEPARTED_KEEP_S, in the area, p low / overflight: _leaving().
      12. p (low, overflight).
+    Then phase(): a change between arriving, departing, near and low is shown once it has held SWITCH_S (never held
+    for an emergency: the alarm and the pre-alert read it at once), the held phase with this report's distance; a
+    departure at flying speed is not taken back to the ground without the ground flag.
     """
 
     def __init__(self, procedures: Procedures | None, ceiling_ft: float = CEILING_FT, radius_nm: float = RADIUS_NM):
@@ -737,6 +742,11 @@ class PhaseMemory:
         then = [(t, g) for t, _, _, g, _ in hist if g is not None and ROLL_ACCEL_S[0] <= now - t <= ROLL_ACCEL_S[1]]
         return gs is not None and bool(then) and gs - max(then)[1] >= ROLL_ACCEL_KT
 
+    @staticmethod
+    def _can_judge(hist, now: float) -> bool:
+        """An earlier ground speed ROLL_ACCEL_S back to tell a roll from a pass by."""
+        return any(g is not None and ROLL_ACCEL_S[0] <= now - t <= ROLL_ACCEL_S[1] for t, _, _, g, _ in hist)
+
     def _approaching(self, h: str, now: float, p: Phase) -> bool:
         """Its distance to go along the same published approach is down by TO_GO_NM against the latest reading
         TREND_S[0]..TREND_S[1] back (not the last report: a repeated position or a short step says nothing)."""
@@ -757,16 +767,31 @@ class PhaseMemory:
             return p
         h = ac.hex
         shown = self._shown.get(h)
-        if shown is not None and shown.kind != p.kind and shown.kind in DEBOUNCED and p.kind in DEBOUNCED:
+        if shown is not None and shown.kind == DEPARTING and p.kind == GROUND and ac.alt_baro != "ground" \
+                and ac.gs is not None and ac.gs >= FLYING_KT:
+            return self._fresh(shown, ac)       # just lifted off, a rate missing or stuck: not back on the ground
+        # an emergency's phase goes to the alarm and the pre-alert as it is (AircraftLayer._event): never held
+        if shown is not None and shown.kind != p.kind and shown.kind in DEBOUNCED and p.kind in DEBOUNCED \
+                and not ac.emergency_text:
             pend = self._pending.get(h)
             if pend is None or pend[0] != p.kind:
                 pend = self._pending[h] = (p.kind, now)
             if now - pend[1] < SWITCH_S:        # not yet: noise across a boundary is not a change of mind
-                return shown if (shown.runway or p.runway) else replace(shown, dist_nm=p.dist_nm)
+                return self._fresh(shown, ac)
         self._pending.pop(h, None)
         self._shown[h] = p
         self._last[h] = p.kind
         return p
+
+    @staticmethod
+    def _fresh(held: Phase, ac: Plane) -> Phase:
+        """A held phase with the distance (and ETA) of this report: to its runway's threshold, else to the field."""
+        d = None
+        if held.runway:
+            d = next((nm(lat, lon, ac.lat, ac.lon) for e, lat, lon, _ in _runway_ends() if e == held.runway), None)
+        if d is None:
+            d = nm(ARP[0], ARP[1], ac.lat, ac.lon)
+        return replace(held, dist_nm=d, eta_s=_eta(d, ac.gs) if held.eta_s is not None else None)
 
     def _leaving(self, h: str, now: float, fd: float, returning: bool, climbing: bool, opening: bool,
                  flying: bool = True) -> Phase:
@@ -843,9 +868,20 @@ class PhaseMemory:
         runway = on_runway(ac.lat, ac.lon, ac.track) and (agl is None or agl < band) and not climbing
         if runway and was_inbound and self._descended.get(h):
             runway = ac.gs is not None and ac.gs < LANDED_KT       # a balked landing at 50 ft is not down
+        tentative = False
+        if runway and was_inbound and self._descended.get(h):
+            pass
         elif runway:
-            runway = (ac.gs is None or ac.gs >= RUNWAY_MIN_KT) and not descending \
-                and (ac.gs is None or ac.gs < ROLL_MAX_KT or self._accelerating(hist, now, ac.gs))
+            moving = (ac.gs is None or ac.gs >= RUNWAY_MIN_KT) and not descending
+            if fixed:
+                # a roll speeds up; a low pass along the runway (never seen descending) holds its speed. With no
+                # earlier speed to judge by, it reads on the ground but is not taken as on the field yet.
+                rolling = moving and self._accelerating(hist, now, ac.gs)
+                tentative = moving and not rolling and not self._can_judge(hist, now) \
+                    and (ac.gs is None or ac.gs < ROLL_MAX_KT)
+                runway = rolling
+            else:
+                runway = moving and (ac.gs is None or ac.gs < ROLL_MAX_KT or self._accelerating(hist, now, ac.gs))
         # slow and low on the airport after landing or taking off here: taxiing, parked (no ground flag). Only with
         # that evidence, and for a helicopter (it flies slow and low) only below LOW_SLOW_AGL_FT.
         if not runway and fd <= GROUND_RADIUS_NM and agl is not None and agl < band and ac.gs is not None \
@@ -857,6 +893,8 @@ class PhaseMemory:
             self._inbound.pop(h, None)
             self._held.pop(h, None)
             from_field, was_inbound = True, False
+        if tentative and not runway:
+            return Phase(GROUND, dist_nm=fd)
         if runway:                              # the takeoff roll, a landing roll, a touch-and-go, the taxiways
             self._on_field[h] = now
             self._inbound.pop(h, None)
@@ -867,6 +905,8 @@ class PhaseMemory:
         returning = (closing and not climbing) or (descending and not opening)   # climbing out over the runway closes too
         flying = (ac.gs is not None and ac.gs >= FLYING_KT) or climbing or (agl is not None and agl > band)
         if from_field and in_area:
+            if now - self._on_field.get(h, -1e9) <= LIFTOFF_S and not descending:
+                returning = False               # over the rest of the runway after lift-off: it closes on the field
             return self._leaving(h, now, fd, returning, climbing, opening, flying)
         close_in = fd <= MANEUVER_NM and (agl is None or agl < MANEUVER_MAX_AGL) and (ac.gs is None or ac.gs <= MANEUVER_MAX_KT)
         if was_inbound:

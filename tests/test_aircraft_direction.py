@@ -390,3 +390,36 @@ def test_a_stuck_reported_rate_through_a_takeoff_is_not_ground_once_up():
     k = kinds(phases_of(stuck)[0])
     up = airborne_from(reports)
     assert ARRIVING not in k and GROUND not in k[up + 2:] and k[-1] == DEPARTING, k
+
+
+
+def test_an_emergency_is_never_held_by_the_debounce_and_a_held_phase_has_a_fresh_distance(monkeypatch):
+    """Squawking 7700 off 34 and turning back to land: its phase changes on the report the reading does (the alarm and
+    the pre-alert read it); without the emergency the change waits SWITCH_S, the held phase with this report's
+    distance."""
+    legs = [(15, {"gs": 120.0}), (40, {"vr": 1500.0, "gs": 120.0}), (60, {"turn": -3.0}), (95, {}), (60, {"turn": -3.0}),
+            (60, {"vr": -650.0, "gs": 110.0})]
+    reports = fly_legs(move(*END["34"], HDG["34"], 0.2), HDG["34"], ELEV, 90.0, legs, baro=150.0)
+    sos = [Plane(**{**r.__dict__, "squawk": "7700"}) for r in reports]
+    held = phases_of(reports)[0]
+    emergency = kinds(phases_of(sos)[0])
+    monkeypatch.setattr(A, "SWITCH_S", 0.0)
+    raw = phases_of(reports)[0]
+    assert emergency == kinds(raw)
+    assert kinds(held) != kinds(raw) and ARRIVING in kinds(raw)
+    first = kinds(raw).index(ARRIVING)
+    assert emergency[first] == ARRIVING and kinds(held)[first] != ARRIVING
+    for r, h, x in zip(reports, held, raw):
+        if h.kind != x.kind:                                   # held: this report's distance, not the old one
+            want = A.nm(*END[h.runway], r.lat, r.lon) if h.runway else A.nm(*A.ARP, r.lat, r.lon)
+            assert h.dist_nm == pytest.approx(want)
+
+
+@pytest.mark.parametrize("from_nm", [1.5, -0.3])
+def test_a_slow_fixed_wing_low_pass_along_the_runway_is_not_a_roll(from_nm):
+    """Level at 200 ft and 90 kt along 34, never descending: not on the ground (a roll speeds up), never departing;
+    first seen over the runway it may read ground for that one report, not after."""
+    reports = fly_legs(move(*END["34"], HDG["34"] + 180, from_nm), HDG["34"], ELEV + 200, 90.0, [(90, {})])
+    assert sum(A.on_runway(r.lat, r.lon, r.track) for r in reports) >= 4
+    k = kinds(phases_of(reports)[0])
+    assert DEPARTING not in k and GROUND not in k[1:], k
