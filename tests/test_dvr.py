@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 
 import pytest
 
@@ -339,3 +340,31 @@ def test_the_config(tmp_path):
         with pytest.raises(ConfigError, match="roads.dvr"):
             load_cfg(tmp_path, f"[roads]\n{bad}\n")
     assert dvr_mod.MAX_BYTES == 6 * 1024 ** 3 and dvr_mod.WINDOW_S == 7200
+
+
+def test_scrubbing_seeks_while_dragging_from_segments_the_browser_may_keep(tmp_path):
+    """#321: the viewer seeks as the handle moves (maplayers.js dvrScrub). It maps the handle's clock time to the player's
+    time through the playlist's dates, and it fetches the segments next to the handle ahead so hls.js can take them
+    from the browser's cache: the playlist must never be cached, and each segment must be cacheable."""
+    r, d, f, clock = setup(tmp_path)
+    d.pins = {CAM}
+    d.tick()
+    step(d, f, clock, 2)
+    code, body, _, hdr = r.get(f"/api/cad/cameras/{CAM}/dvr/index.m3u8", "")
+    assert code == 200 and hdr["Cache-Control"] == "no-store"
+    names = re.findall(r"^(\d+)\.ts$", body.decode(), re.M)
+    assert names and body.decode().count("#EXT-X-PROGRAM-DATE-TIME:") == len(names)
+    for n in names:
+        code, seg, ctype, hdr = r.get(f"/api/cad/cameras/{CAM}/dvr/{n}.ts", "")
+        assert code == 200 and ctype == "video/MP2T" and seg[0] == 0x47
+        assert hdr["Cache-Control"] == "private, max-age=3600"             # the same URL from cache, never public
+    ml = (Path(__file__).resolve().parent.parent / "sizeup" / "web" / "static" / "maplayers.js").read_text()
+    body = ml[ml.index("  // Scrubbing (#321)"):ml.index("  async function dvrKeep()")]
+    assert "const SCRUB_MS = 150" in body and "requestAnimationFrame(" in body          # coalesced, throttled
+    assert "v.seeking && since < 2000" in body                                          # none while one is in flight
+    assert 'typeof v.fastSeek === "function"' in body                                   # the nearest keyframe where it can
+    assert "autoStartLoad: false" in body and "enableInterstitialPlayback: false" in body and "hls.startLoad(m ? m.at" in body
+    assert "maxMaxBufferLength = SCRUB_BUF" in body and "maxMaxBufferLength = 30" in body
+    assert 'atEnd ? "Live" : clock(t)' in body and "return dvrToLive()" in body        # the end: Live
+    assert "holdFrame()" in body and "startRefresh" not in body.split("function dvrToLive")[0]   # no snapshots while scrubbing
+    assert '"touchmove", touchAt, { passive: false }' in ml and '"touchend", () => dvrScrubEnd()' in ml

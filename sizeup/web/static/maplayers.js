@@ -887,7 +887,10 @@ window.MapLayers = (() => {
     const track = h("span", "ml-dvr-track");
     const gapbar = h("span", "ml-dvr-gaps");                        // the recording's gaps, under the timeline
     gapbar.setAttribute("aria-hidden", "true");
-    track.append(range, gapbar);
+    const tip = h("span", "ml-dvr-tip small");                     // the time under the handle, while dragging (#321)
+    tip.hidden = true;
+    tip.setAttribute("aria-hidden", "true");
+    track.append(tip, range, gapbar);
     const toLive = h("button", "sm quiet ml-dvr-live", "Live");
     toLive.type = "button";
     toLive.title = "Back to live video";
@@ -895,8 +898,21 @@ window.MapLayers = (() => {
     keep.type = "button";
     keep.setAttribute("aria-pressed", "false");
     dvr.append(rec, track, at, toLive, keep);
-    range.addEventListener("input", () => { at.textContent = clock(Number(range.value)); viewer.dvrDragging = true; });
-    range.addEventListener("change", () => { viewer.dvrDragging = false; dvrPlay(Number(range.value)); });
+    range.addEventListener("input", () => dvrScrub(Number(range.value)));
+    range.addEventListener("change", () => dvrScrubEnd());
+    // a finger anywhere on the track (#321): our own drag, not the browser's (a thumb-only grab on iOS, page scrolls)
+    const touchAt = (e) => {
+      const tc = e.touches[0];
+      if (!tc || range.disabled) return;
+      e.preventDefault();
+      const r = range.getBoundingClientRect(), lo = Number(range.min), hi = Number(range.max);
+      range.value = String(Math.round(lo + Math.min(1, Math.max(0, (tc.clientX - r.left) / r.width)) * (hi - lo)));
+      dvrScrub(Number(range.value));
+    };
+    range.addEventListener("touchstart", touchAt, { passive: false });
+    range.addEventListener("touchmove", touchAt, { passive: false });
+    range.addEventListener("touchend", () => dvrScrubEnd());
+    range.addEventListener("touchcancel", () => dvrScrubEnd());
     toLive.addEventListener("click", () => dvrToLive());
     keep.addEventListener("click", () => dvrKeep());
     body.append(frame, meta, dvr, foot);
@@ -904,8 +920,9 @@ window.MapLayers = (() => {
     ov.append(panel);
     document.body.append(ov);
     viewer.ov = ov;
-    viewer.el = { title, img, msg, where, time, foot, video, live, dvr, rec, range, at, toLive, keep, gapbar };
+    viewer.el = { title, img, msg, where, time, foot, video, live, dvr, rec, range, at, toLive, keep, gapbar, tip };
     video.addEventListener("timeupdate", dvrShowing);
+    for (const ev of ["seeked", "loadeddata"]) video.addEventListener(ev, () => { if (viewer.dvrDragging) dvrSeekSoon(); });   // the drag's next seek
     viewer.video = video;
     document.addEventListener("visibilitychange", () => {
       if (!viewer.id) return;
@@ -1038,7 +1055,9 @@ window.MapLayers = (() => {
   function dvrOpen(c) {
     viewer.dvr = null;
     viewer.dvrMode = false;
+    dvrReset();
     const el = viewer.el;
+    el.video.removeAttribute("poster");
     el.dvr.hidden = !(c && c.has_video);
     if (el.dvr.hidden) return;
     el.at.textContent = "";
@@ -1051,6 +1070,8 @@ window.MapLayers = (() => {
     viewer.dvrTimer = null;
     if (viewer.dvrMode && viewer.hls) { try { viewer.hls.destroy(); } catch (_) { /* gone */ } viewer.hls = null; }
     viewer.dvrMode = false;
+    dvrReset();
+    if (viewer.el) viewer.el.video.removeAttribute("poster");
   }
   async function dvrPoll() {
     const id = viewer.id;
@@ -1097,31 +1118,135 @@ window.MapLayers = (() => {
     el.toLive.hidden = !viewer.dvrMode;
     if (!viewer.dvrMode) el.at.textContent = "";
   }
-  function dvrPlay(t) {
+  // Scrubbing (#321): while the handle moves the picture follows it. One seek per animation frame at most, SCRUB_MS
+  // apart and never while one is still in flight (fastSeek, the nearest keyframe, where the browser has it); the
+  // segments either side of the handle are fetched ahead (the hub serves them cacheable, so hls.js then takes them
+  // from the browser's cache), and the player buffers only what is shown until the handle is let go. Let go: it
+  // plays on from there; at the end of the recording: Live. The last frame stays up between players and seeks
+  // (the video's poster): never a blank, never the snapshot.
+  const SCRUB_MS = 150, REST_MS = 400, SCRUB_BUF = 0.2;          // seconds buffered past the frame, while dragging
+  function dvrMediaTime(t) {                                    // {i: segment, at: player time} for the clock time t
+    const frags = viewer.dvrFrags, ms = t * 1000;
+    if (!frags || !frags.length) return null;
+    let i = frags.findIndex((x) => x.programDateTime && ms < x.programDateTime + x.duration * 1000);
+    if (i < 0) i = frags.length - 1;
+    const f = frags[i];
+    return { i, at: f.start + Math.max(0, Math.min(f.duration - 0.05, (ms - (f.programDateTime || ms)) / 1000)) };
+  }
+  function holdFrame() {                                        // the frame showing, kept as the video's poster
+    const v = viewer.el.video;
+    try {
+      if (v.hidden || v.readyState < 2 || !v.videoWidth) return false;
+      const cv = document.createElement("canvas");
+      cv.width = v.videoWidth;
+      cv.height = v.videoHeight;
+      cv.getContext("2d").drawImage(v, 0, 0);
+      v.poster = cv.toDataURL("image/jpeg", 0.8);
+      return true;
+    } catch (_) { return false; }
+  }
+  function dvrSeek(t, exact) {
+    const v = viewer.el.video, m = dvrMediaTime(t);
+    if (!m) return;
+    viewer.dvrSeekT = t;
+    viewer.dvrSeekAt = performance.now();
+    if (!exact && typeof v.fastSeek === "function") v.fastSeek(m.at); else v.currentTime = m.at;
+    const last = viewer.dvrSeekI;
+    viewer.dvrSeekI = m.i;
+    if (!exact && last != null && last !== m.i && Math.abs(m.i - last) <= 2) dvrPrefetch([m.i + Math.sign(m.i - last)]);
+  }
+  function dvrSeekSoon() {                                      // the drag's next seek
+    if (viewer.dvrRaf) return;
+    viewer.dvrRaf = requestAnimationFrame(() => {
+      viewer.dvrRaf = 0;
+      const v = viewer.el.video, since = performance.now() - (viewer.dvrSeekAt || 0);
+      if (!viewer.dvrDragging || !viewer.dvrFrags || viewer.dvrWant === viewer.dvrSeekT) return;
+      if (!v.readyState || (v.seeking && since < 2000)) return;  // nothing yet, or in flight: "loadeddata" / "seeked" ask again
+      clearTimeout(viewer.dvrWait);
+      if (since < SCRUB_MS) { viewer.dvrWait = setTimeout(dvrSeekSoon, SCRUB_MS - since); return; }
+      dvrSeek(viewer.dvrWant, false);
+    });
+  }
+  // Ahead of the handle: the next segment its way while it moves slowly, the ones either side once it rests; each
+  // once, two at a time at most (a fast drag fetches only the segments it shows)
+  function dvrPrefetch(js) {
+    const frags = viewer.dvrFrags, seen = viewer.dvrFetched;
+    if (!seen || !frags) return;
+    for (const j of js) {
+      const f = frags[j];
+      if (!f || seen.has(f.url) || viewer.dvrInflight >= 2) continue;
+      seen.add(f.url);
+      viewer.dvrInflight = (viewer.dvrInflight || 0) + 1;
+      fetch(f.url, { credentials: "same-origin", priority: "low" }).then((r) => r.arrayBuffer())
+        .catch(() => seen.delete(f.url)).finally(() => { viewer.dvrInflight--; });
+    }
+  }
+  function dvrScrub(t) {                                        // the slider moved (mouse, keys or a finger)
+    const d = viewer.dvr, el = viewer.el;
+    if (!viewer.id || !d || !d.from) return;
+    viewer.dvrDragging = true;
+    viewer.dvrWant = t;
+    const lo = Number(el.range.min), hi = Number(el.range.max), atEnd = t >= d.to - 2;
+    el.tip.hidden = false;
+    el.tip.textContent = atEnd ? "Live" : clock(t);
+    el.tip.style.setProperty("--f", String(Math.min(1, Math.max(0, (t - lo) / Math.max(1, hi - lo)))));
+    if (atEnd) return;                                          // let go here: Live
+    if (!viewer.dvrMode) { dvrStart(viewer.id); return; }
+    if (viewer.hls) viewer.hls.config.maxMaxBufferLength = SCRUB_BUF;
+    el.video.pause();
+    dvrSeekSoon();
+    clearTimeout(viewer.dvrRest);
+    viewer.dvrRest = setTimeout(() => {                         // the handle rests: the segments either side
+      const m = viewer.dvrDragging && dvrMediaTime(viewer.dvrWant);
+      if (m) dvrPrefetch([m.i - 1, m.i + 1]);
+    }, REST_MS);
+  }
+  function dvrScrubEnd() {
+    if (!viewer.dvrDragging) return;
+    viewer.dvrDragging = false;
+    viewer.el.tip.hidden = true;
+    dvrPlay(Number(viewer.el.range.value));
+  }
+  function dvrPlay(t) {                                         // play the recording from the clock time t
     const id = viewer.id, d = viewer.dvr;
     if (!id || !d || !d.from) return;
-    if (t >= d.to - 2) return dvrToLive();                       // the end of the recording: live
+    if (t >= d.to - 2) return dvrToLive();                      // the end of the recording: live
+    viewer.dvrWant = t;
+    if (!viewer.dvrMode || !viewer.dvrFrags) { dvrStart(id); return; }   // its playlist seeks and plays
+    if (viewer.hls) viewer.hls.config.maxMaxBufferLength = 30;
+    dvrSeek(t, true);
+    viewer.el.video.play().catch(() => {});
+  }
+  function dvrStart(id) {                                       // the recording's player in place of the live one
+    if (viewer.dvrMode || viewer.dvrStarting) return;
+    viewer.dvrStarting = true;
     const v = viewer.el.video;
     loadHls().then((Hls) => {
-      if (viewer.id !== id || !Hls.isSupported()) return;
-      const seek = (frags) => {
-        const ms = t * 1000;
-        const f = frags.find((x) => x.programDateTime && ms >= x.programDateTime && ms < x.programDateTime + x.duration * 1000)
-          || frags.find((x) => x.programDateTime && x.programDateTime >= ms) || frags[frags.length - 1];
-        if (!f) return;
-        v.currentTime = f.start + Math.max(0, (ms - (f.programDateTime || ms)) / 1000);
-        v.play().catch(() => {});
-      };
-      if (viewer.dvrMode && viewer.hls && viewer.dvrFrags) return seek(viewer.dvrFrags);
+      if (viewer.id !== id || viewer.dvrMode || !Hls.isSupported()) return;
+      const held = holdFrame();
       stopLive();
       v.onplaying = v.onwaiting = v.onerror = null;              // the live player's: not this one's
+      v.autoplay = false;                                        // it plays when let go, not while dragging
       viewer.dvrMode = true;
-      v.hidden = false;
-      viewer.el.img.hidden = true;
+      viewer.dvrFetched = new Set();
+      viewer.dvrSeekT = viewer.dvrSeekI = null;
       stopRefresh();
-      const hls = new Hls({ enableWorker: false, maxBufferLength: 30, backBufferLength: 30 });
+      if (held) { v.hidden = false; viewer.el.img.hidden = true; }
+      v.addEventListener("loadeddata", () => { if (viewer.dvrMode) { v.hidden = false; viewer.el.img.hidden = true; } }, { once: true });
+      // autoStartLoad off (and no interstitials, which would start it at 0): the first segment loaded is the one asked for
+      const hls = new Hls({ enableWorker: false, autoStartLoad: false, enableInterstitialPlayback: false, maxBufferLength: 30,
+                            maxMaxBufferLength: viewer.dvrDragging ? SCRUB_BUF : 30, backBufferLength: 30 });
       viewer.hls = hls;
-      hls.on(Hls.Events.LEVEL_LOADED, (_, data) => { viewer.dvrFrags = data.details.fragments; seek(viewer.dvrFrags); });
+      hls.on(Hls.Events.LEVEL_LOADED, (_, data) => {
+        viewer.dvrFrags = data.details.fragments;
+        const m = dvrMediaTime(viewer.dvrWant);
+        viewer.dvrSeekT = viewer.dvrWant;                        // hls.js seeks there once the first segment is in
+        viewer.dvrSeekI = m ? m.i : null;
+        hls.startLoad(m ? m.at : -1);
+        if (viewer.dvrDragging) return;
+        hls.config.maxMaxBufferLength = 30;
+        v.play().catch(() => {});
+      });
       hls.on(Hls.Events.ERROR, (_, data) => {
         if (data && data.fatal) { viewer.el.msg.hidden = false; viewer.el.msg.textContent = "Recording unavailable"; viewer.el.msg.title = data.details || ""; }
       });
@@ -1130,7 +1255,7 @@ window.MapLayers = (() => {
       viewer.el.time.textContent = "Recording";
       viewer.el.time.title = "Playing the hub's recording";
       viewer.el.toLive.hidden = false;
-    }).catch(() => {});
+    }).catch(() => {}).finally(() => { viewer.dvrStarting = false; });
   }
   function dvrShowing() {                                       // the time of what is showing, from the playlist's dates
     if (!viewer.dvrMode || !viewer.dvrFrags) return;
@@ -1142,15 +1267,27 @@ window.MapLayers = (() => {
     viewer.el.at.title = `Recorded ${when(t)}`;
     if (!viewer.dvrDragging) viewer.el.range.value = String(Math.floor(t));
   }
+  function dvrReset() {                                         // the scrub's state, for a new player or none
+    cancelAnimationFrame(viewer.dvrRaf);
+    clearTimeout(viewer.dvrWait);
+    clearTimeout(viewer.dvrRest);
+    viewer.dvrRaf = 0;
+    viewer.dvrDragging = false;
+    viewer.dvrFrags = null;
+    viewer.dvrFetched = null;
+    viewer.dvrSeekI = null;
+    if (viewer.el) { viewer.el.tip.hidden = true; viewer.el.video.autoplay = true; }
+  }
   function dvrToLive() {
     const id = viewer.id, c = camById(id);
     if (!id) return;
-    if (viewer.hls && viewer.dvrMode) { try { viewer.hls.destroy(); } catch (_) { /* gone */ } viewer.hls = null; }
+    if (viewer.hls && viewer.dvrMode) { holdFrame(); try { viewer.hls.destroy(); } catch (_) { /* gone */ } viewer.hls = null; }
     viewer.dvrMode = false;
-    viewer.dvrFrags = null;
+    dvrReset();
     viewer.el.toLive.hidden = true;
     viewer.el.at.textContent = "";
     if (c && c.has_video && !c.off) startLive(c.id);
+    else { viewer.el.video.hidden = true; refreshCamera(); startRefresh(); }   // no live video: the snapshots
     dvrDraw();
   }
   async function dvrKeep() {
