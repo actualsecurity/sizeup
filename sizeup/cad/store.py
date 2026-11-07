@@ -467,6 +467,12 @@ class Store:
         if tcols:                                         # the Radio view's Main and Other, each its own newest N (#241)
             self.db.execute("CREATE INDEX IF NOT EXISTS radio_traffic_tg_start ON radio_traffic(talkgroup, start)")
             self.db.execute("CREATE INDEX IF NOT EXISTS radio_traffic_channel_start ON radio_traffic(channel, start)")
+            # #284, each quick to build on a big log (150k rows): partial (~40 ms each): the rows with a rig (the
+            # Radio view's unit filter and its unit choices) and the pages (Settings > Radios > Tones' "heard")
+            self.db.execute("CREATE INDEX IF NOT EXISTS radio_traffic_rig ON radio_traffic(rig) WHERE rig != ''")
+            self.db.execute("CREATE INDEX IF NOT EXISTS radio_traffic_tones ON radio_traffic(updated_at) WHERE tones != ''")
+            # a channel filter's Main: one talkgroup's newest on that channel, not every row of the talkgroup (~90 ms to build)
+            self.db.execute("CREATE INDEX IF NOT EXISTS radio_traffic_channel_tg_start ON radio_traffic(channel, talkgroup, start)")
         if tcols and "id_note" not in tcols:              # why an FG1 key-up has no radio ID (#163), 2026-10-14
             self.db.execute("ALTER TABLE radio_traffic ADD COLUMN id_note TEXT NOT NULL DEFAULT ''")
         if tcols and "emergency" not in tcols:            # the emergency button on the row itself, 2026-10-14

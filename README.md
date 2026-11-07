@@ -44,3 +44,15 @@ NOAA / National Weather Service and NOAA CO-OPS, public domain, through the hub 
 /opt/homebrew/bin/python3.14 -m venv .venv && .venv/bin/pip install -e '.[dev]'
 .venv/bin/python -m pytest
 ```
+
+Replay tests (#283, `tests/test_replay_*.py`) replay real captured data: ADS-B around HPN, the CARS-Hub's camera
+streams, airband clips. That data is private and never in git. It lives in a dedicated private bucket
+(`s3://sizeup-replay-fixtures-504804195561/v1/`, or `$SIZEUP_REPLAY_S3`; its setup is in `tools/replay_sync.py`)
+and in a local cache outside the repo (`~/.cache/sizeup-replay`, or `$SIZEUP_REPLAY_DIR`). Without it the replay
+tests skip and say why.
+
+```sh
+.venv/bin/python tools/replay_sync.py pull                        # read-only download into the cache
+.venv/bin/python tools/capture_fixture.py adsb|camera|audio       # capture a new set (tests/replay.py)
+.venv/bin/python tools/replay_sync.py push --write-to-s3          # share it (refuses without the flag)
+```

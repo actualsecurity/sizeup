@@ -540,7 +540,7 @@ function fillQueueItem(li, inc) {
   if (ap) li.append(el("div", "qs ap-line", ap));       // the tower's facts on an airport event (#105)
   if (inc.status === "queued") {
     if (inc.type_note) li.append(el("div", "qs warn", inc.type_note));
-    if (unconfirmed(inc)) li.append(el("div", "qs warn", "Location unconfirmed: pick it on the event"));   // (#176)
+    if (unconfirmed(inc)) li.append(el("div", "qs warn", "Location unconfirmed: pick it on the event"));   // (#176; #278: an instruction, on screen)
     li.append(el("div", "qs dim", "Accept or Dismiss"));
   } else if (!inc.emergency && isOpen(inc)) {
     if (inc.until_at) li.append(el("div", "qs dim", `Until ${fmtTime(inc.until_at)}`));
@@ -1038,6 +1038,15 @@ function keptChip(t) {
 // that incident) and its "⋯" menu (txMenu) at the end; the transcript under it. ctx: {scope: "feed" | "rv" |
 // "inc" (where it is drawn: the menu's identity across redraws), current: the incident whose list this is
 // (no chip for it)}. The wall board: no chips, no menu.
+// HPN's tower hours (#275, sizeup/atc_hours.py: FAA Chart Supplement, 06:00-23:00 local): 118.575 is the CTAF outside them
+const HPN_TOWER_MHZ = 118.575, HPN_TOWER_OPEN = [6 * 60, 23 * 60];
+const hpnClock = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour: "numeric", minute: "numeric", hourCycle: "h23" });
+function hpnTowerOpenAt(ts) {
+  const p = Object.fromEntries(hpnClock.formatToParts(new Date(ts * 1000)).map((x) => [x.type, x.value]));
+  const m = (+p.hour % 24) * 60 + +p.minute;
+  return m >= HPN_TOWER_OPEN[0] && m < HPN_TOWER_OPEN[1];
+}
+
 function radioRow(t, ctx = {}) {
   const li = el("li", "rt");
   const meta = el("div", "meta");
@@ -1051,8 +1060,9 @@ function radioRow(t, ctx = {}) {
   if (tag) meta.append(tag);
   meta.append(el("span", "chip src", t.channel));        // the channel once; never in the talker's place
   if (t.mhz > 0) {                                        // the frequency it was heard on (an airband row, #260: NY
-    const f = el("span", "dim small", `${+t.mhz}`);       // Approach is 126.4 by day, 120.8 overnight)
-    f.title = `Heard on ${+t.mhz} MHz`;
+    const ctaf = +t.mhz === HPN_TOWER_MHZ && !hpnTowerOpenAt(t.start);   // Approach is 126.4 by day, 120.8 overnight)
+    const f = el("span", "dim small", ctaf ? `${+t.mhz} CTAF` : `${+t.mhz}`);
+    f.title = `Heard on ${+t.mhz} MHz` + (ctaf ? " (HPN tower closed: CTAF)" : "");
     meta.append(f);
   }
   const em = emergencyChip(t);                            // the emergency button / a mayday (#128): can't be missed
@@ -1158,8 +1168,8 @@ function oursNamedNote(t) {
   if (!oursNamed(t)) return null;
   const n = el("div", "names-ours-note warnbox small", oursNamedText(t));
   n.setAttribute("role", "note");
-  if (t.prealert) n.append(el("span", "", ` · Phone rang ${fmtTime(t.prealert.at, true)}, `
-    + `${t.prealert.status === "expired" ? "expired unmatched" : "still open"}`));
+  if (t.prealert) n.append(el("span", "", ` · Phone ${fmtTime(t.prealert.at, true)} · `
+    + `${t.prealert.status === "expired" ? "expired, unmatched" : "open"}`));
   n.title = "Not an event: only PCFD's or Rye Brook's tones open one. If these were our tones, Name these tones (Ours).";
   return n;
 }
@@ -1276,8 +1286,11 @@ async function nameTonesDialog(t, opts = {}) {
   head.append(el("h2", "dialog-title", "Name these tones"));
   head.querySelector("h2").id = "tone-form-title";
   const body = el("form", "dialog-body");
-  body.append(el("p", "dim small", `Page ${fmtTime(t.start, true)} ${t.channel}. Each pair goes in the tone book under its places and service; this page is read again.`));
-  if (opts.ours) body.append(el("p", "warnbox small", `${oursNamedText(t)}. Filled in as Port Chester and Rye Brook: check which pair is whose before saving.`));
+  const toneHow = "Each pair goes in the tone book under its places and service; this page is read again";
+  const pageLine = el("p", "dim small", `Page ${fmtTime(t.start, true)} ${t.channel} `);
+  if (window.Help && Help.info) pageLine.append(Help.info(toneHow, "How tones are saved")); else pageLine.title = toneHow;
+  body.append(pageLine);
+  if (opts.ours) body.append(el("p", "warnbox small", `${oursNamedText(t)} · prefilled PC / RB: check which is whose`));
   const prefill = [["Port Chester"], ["Rye Brook"]];
   const box = el("div", "tone-pairs");
   const rows = [];
@@ -1304,7 +1317,7 @@ async function nameTonesDialog(t, opts = {}) {
         btns.forEach((y) => y.removeAttribute("aria-pressed"));
         addRow({ a_hz: a.hz, b_hz: x === a ? a.hz : x.hz, names: [] }, null);
         a = null;
-        tip.textContent = "Added below the pairs. Pick another A, then its B";
+        tip.textContent = "Added. Pick another A, then its B";
       });
       return b;
     });
@@ -1471,11 +1484,11 @@ async function rerunTx(t) {
     UI.toast(`Failed: ${e.message}`, "err");
     return;
   }
-  if (!r || !r.queued) { UI.toast("Nothing to re-transcribe", "info", "No recording left, or it is already queued"); return; }
+  if (!r || !r.queued) { UI.toast("Nothing to re-transcribe", "info", "No recording, or already queued"); return; }
   const timer = setTimeout(() => {
     if (!RERUN_WAIT.has(t.id)) return;
     RERUN_WAIT.delete(t.id);
-    UI.toast("No answer from the station", "err", "Re-transcribe: nothing came back in 45 s");
+    UI.toast("No answer from the station", "err", "Re-transcribe · 45 s timeout");
     repaintTx();
   }, RERUN_WAIT_MS);
   RERUN_WAIT.set(t.id, { at, timer });
@@ -2283,7 +2296,7 @@ function suggestNote() {
     li.addEventListener("mousedown", (e) => { e.preventDefault(); takeItem(x); });
     return li;
   }));
-  box.append(el("li", "hint dim small", "Tab to take, Esc to close"));
+  box.append(el("li", "hint dim small", "Tab take · Esc close"));
   const fresh = box.hidden;
   show(box, true);
   if (fresh) box.scrollIntoView({ block: "nearest" });
@@ -2773,7 +2786,7 @@ function addressBox(input, geoNote, list, opts = {}) {
       let t = `Map: ${p.label} (${p.kind}${p.confidence != null ? `, ${Math.round(p.confidence * 100)}%` : ""})`;
       if (p.moved) t += " · point moved on the map";
       if (p.place && !p.street_address && !input.value.trim().replace(/@.*$/, "").trim()) {
-        t += ` · ${p.lat.toFixed(5)}, ${p.lon.toFixed(5)} · no street address in the data: type it before the @`;
+        t += ` · ${p.lat.toFixed(5)}, ${p.lon.toFixed(5)} · no street address: type one before the @`;
       }
       setText(geoNote, t);
     } else if (!input.value.trim()) setText(geoNote, "");
@@ -2807,8 +2820,8 @@ function addressBox(input, geoNote, list, opts = {}) {
     }));
     if (!ms.length) list.replaceChildren(el("li", "dim", box.error || "No match"));
     else {
-      if (box.more) list.append(el("li", "hint dim small", `more… ${box.more} more of ${box.total}: type more of a street name`));
-      list.append(el("li", "hint dim small", "↑ ↓ to choose, Tab to take and go on, Esc to close"));
+      if (box.more) list.append(el("li", "hint dim small", `+${box.more} more of ${box.total}: keep typing`));
+      list.append(el("li", "hint dim small", "↑↓ choose · Tab take · Esc close"));
     }
     show(list, true);
     input.setAttribute("aria-expanded", "true");
@@ -3498,7 +3511,7 @@ function renderCloud() {
   pill.title = c.detail || "";
   const url = c.hub_url || "the hub";
   if (banner.dataset.url !== url) {
-    banner.replaceChildren("Station console, not the CAD of record. Changes here stay local. Hub: ",
+    banner.replaceChildren("Station console · changes stay local · CAD of record: ",
       Object.assign(el("a", null, url), { href: `${url}/cad`, target: "_blank", rel: "noopener" }));
     banner.dataset.url = url;
   }
@@ -3817,7 +3830,7 @@ function applyRoles() {
   show(banner, viewOnly);
   const note = $("#s-role");
   const who = !w.active ? "account deactivated" : w.role === "viewer" ? "viewer" : "dispatcher";
-  setText(note, w.bootstrap ? "No admin yet: anyone signed in can change settings. Make one in Users."
+  setText(note, w.bootstrap ? "No admin yet: anyone can change settings. Add one in Users."
     : roSettings ? `Read-only: ${who}. ${askAdmin()}` : "");
   show(note, w.bootstrap || roSettings);
   note.classList.toggle("boot", !!w.bootstrap);

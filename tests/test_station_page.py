@@ -201,5 +201,5 @@ def test_the_cad_settings_station_card_is_the_same_hub_link_card():
     cad = (STATIC / "cad.html").read_text()
     assert cad.index('src="/static/hublink.js"') < cad.index('src="/static/settings.js"')
     hub = (STATIC / "hublink.js").read_text()
-    for need in ('"/api/station-mode"', '"/api/station-mode/test"', '"Last contact"', '"Waiting to go up"', "Forward to hub"):
+    for need in ('"/api/station-mode"', '"/api/station-mode/test"', '"Last contact"', '"Queued"', "Forward to hub"):
         assert need in hub, need

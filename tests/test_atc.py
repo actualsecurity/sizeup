@@ -539,7 +539,7 @@ def test_an_installed_station_gains_hpn_tower_once(tmp_path, monkeypatch):
     from tests.test_fg2 import installed
     conf = installed(tmp_path, monkeypatch, before_233())
     marks = tmp_path / "etc" / "config-updates"
-    marks.write_text("fg2\ntones-47\n")
+    marks.write_text("fg2\ntones-47\nairband-sets\n")        # (#275's: its own tests)
     before = load(conf)
     new = tmp_path / "rel-new"
     (new / "sizeup").mkdir(parents=True)
@@ -554,7 +554,7 @@ def test_an_installed_station_gains_hpn_tower_once(tmp_path, monkeypatch):
     assert after.channels[-4].label == "HPN Tower" and after.sdr_auto_order[-1] == "HPN Tower"
     assert replace(after, channels=before.channels, sdr_auto_order=before.sdr_auto_order,
                    stt_aws_channels=before.stt_aws_channels) == before
-    assert marks.read_text() == "fg2\ntones-47\nhpn-atc\nadsb-receiver\napproach-ground\nsouth-end\n"    # (#235's: the config has it)
+    assert marks.read_text() == "fg2\ntones-47\nhpn-atc\nadsb-receiver\napproach-ground\nsouth-end\nairband-sets\n"
     conf.write_text(kept)                                                  # taken out by hand: stays out
     assert configupdate.run(conf, marks, leaving=new) == []
 
@@ -574,8 +574,9 @@ def test_it_waits_while_the_release_to_go_back_to_cant_read_it(tmp_path, monkeyp
                     "adsb-receiver: already has [aircraft.receiver]: nothing added",     # (#235's: nothing to add)
                     "approach-ground: deferred: the release this switch would go back to (rel-old) can't read an "
                     "airband channel's schedule: NY Approach and HPN Ground are added at the next update",   # (#260's)
-                    "south-end: the station is already called 'Port Chester FD South End': nothing changed"]
-    assert conf.read_text() == same and marks.read_text() == "fg2\ntones-47\nadsb-receiver\nsouth-end\n"   # hpn-atc tried again
+                    "south-end: the station is already called 'Port Chester FD South End': nothing changed",
+                    "airband-sets: deferred: waits for approach-ground (not done yet)"]   # (#275's: after #260's)
+    assert conf.read_text() == same and marks.read_text() == "fg2\ntones-47\nadsb-receiver\nsouth-end\n"
     assert configupdate.reads_airband(None) and not configupdate.reads_airband(tmp_path / "nowhere")
     # the CLI the installer runs (system python, stdlib only), with the release being left
     r = subprocess.run([sys.executable, "-I", str(ROOT / "sizeup" / "cloud" / "configupdate.py"), str(conf), str(marks),
@@ -584,7 +585,7 @@ def test_it_waits_while_the_release_to_go_back_to_cant_read_it(tmp_path, monkeyp
     r = subprocess.run([sys.executable, "-I", str(ROOT / "sizeup" / "cloud" / "configupdate.py"), str(conf), str(marks),
                         "--leaving", str(ROOT)], capture_output=True, text=True, timeout=30)
     assert r.returncode == 0 and r.stdout.startswith("hpn-atc: HPN Tower") and load(conf).channels[-4].label == "HPN Tower"
-    assert [c.label for c in load(conf).channels][-3:] == ["NY Approach", "NY Approach 124.65", "HPN Ground"]
+    assert [c.label for c in load(conf).channels][-3:] == ["NY App 126.4/120.8", "NY App 124.65", "HPN Ground"]   # (#275)
     sh = (STATION / "install-linux.sh").read_text()
     assert '"$ETC/config-updates" --leaving "$leaving"' in sh and 'leaving=$(readlink -f "$CURRENT"' in sh
 

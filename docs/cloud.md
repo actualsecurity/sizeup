@@ -1157,10 +1157,11 @@ closure's colour (full closure `--err`, lanes and the rest `--warn`); **upcoming
 start (a date or a time), and its dates (with an end, its daily hours, or open-ended from that start) overlap the window.
 An item with no start, or only a completion or target date (the NYSDOT, Thruway and CTDOT capital projects, a village
 notice whose dates are in its words, the Thruway's "Until further notice" roadwork), is shown under **All** only; the
-panel's line counts dated items only and adds how many are without dates (*2 in effect now, 1 upcoming this week. 2
-long-term projects and 3 notices without dates (under All).*). A click: what, where, in effect now or when it starts, its dates and
-daily hours exactly as the source gives them ("start not given", "no end time given (Until further notice)"), lanes,
-detour, the source's own text, the source and when it updated the item, a link to the source's page. Notices that name
+panel's line counts dated items only and adds how many are without dates (*2 active · 1 upcoming this week · undated:
+2 projects, 3 notices (in All)*). A click (#278: one fact a line): what, where, in effect now or when it starts, its dates
+and daily hours as the source gives them ("start ?", "Until further notice", the source's own words in quotes), lanes,
+detour, the source's own text, a link to the source's page; the source and when it updated the item in the foot, how it
+was placed and the time zone behind its "i". Notices that name
 no place we can find are listed in the box (title, date, link), never put on the map by guess.
 
 **Incident view:** under the address, a line for each dated closure whose window covers the event's time, within 300 m
@@ -1453,8 +1454,9 @@ MTA reports where it is, **hollow** when the position is our estimate. Every tra
 length: the feed doesn't say how many cars a train has (see *What the feed gives* below); should it, that
 many cars are drawn. The heading is the line's own over about a train's length there. A click
 on a train: line and destination, direction (*Toward New York* / *Toward New Haven*), next stop and time,
-track, delay, status, reported or estimated; on a station or the line: the catenary note (overhead
-catenary, 12.5 kV AC, plus the third rail at stations; the same note as the county *Railroads* layer,
+track, delay, status, reported or estimated (*Stale · hh:mm:ss* up top in the warning colour on an old feed); on a
+station or the line: the catenary note (*12.5 kV AC catenary + third rail at stations. Treat all wires as live until
+Metro-North confirms de-energized and grounded.*; the same hazard as the county *Railroads* layer,
 whose drawing of the tracks stays where it is in *County GIS*).
 
 **Trains approaching.** Under an open event's map, for an event within **150 m of the tracks or a
@@ -1729,7 +1731,8 @@ and our receiver keeps the rest. No word from the station for 10 s: the APIs car
 their rates while the map is open or the watch runs (5 s / 10 s, the watch's 15 s), receiver or not, so they have
 the plane when we lose it; the station feed is in memory (read every 1 to 2 s, free). A station forwarding to the
 hub no longer reads adsb.lol for the watch at all (the hub does). The click says where the position came from
-(*Position from our receiver* / *adsb.lol* / *adsb.fi*) and the box shows the station's receiver and its forwarding.
+(its foot: *Our receiver* / *adsb.lol* / *adsb.fi* and the time; how, behind its "i") and the box shows the station's
+receiver and its forwarding.
 
 **Details by ICAO address.** readsb's records carry no registration, type or owner. The API feeds' records do
 (adsb.lol / adsb.fi `r`, `t`, `desc`, `ownOp`, `year`): the hub keeps them by ICAO address for 6 hours, so a plane

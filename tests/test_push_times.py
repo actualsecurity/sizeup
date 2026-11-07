@@ -49,7 +49,7 @@ def test_the_speech_to_text_behind_push_reads_local_time():
                                  "dropped": 0, "skipped": 0, "last_drop": None, "max": 2000}
     r.at(now - T0, status=st)
     a = next(a for a in r.h.alerts() if a["key"] == "stt_backlog")
-    assert "its oldest waiting clip is from 08:29 " in a["text"]               # the banner
+    assert "oldest waiting clip from 08:29 " in a["text"]               # the banner
     m = next(m for m in r.n.msgs if m["title"].startswith("Speech-to-text behind"))
     assert m["title"].startswith("Speech-to-text behind 5 h 0 min")
     assert "from 08:29 " in m["body"] and m["body"].endswith("(since 08:29).") and "13:29" not in m["body"]
@@ -61,7 +61,7 @@ def test_the_silent_push_and_its_recovery_read_local_time():
     r.at(CLIP_EST - T0, status=station_status())                          # last heard 08:29 EST
     r.at(CLIP_EST - T0 + 181, post=False)
     a = next(a for a in r.h.alerts() if a["key"] == "silent")
-    assert "since 08:29:" in a["text"] and r.n.msgs[-1]["title"].endswith("last heard 08:29")
+    assert "since 08:29 " in a["text"] and r.n.msgs[-1]["title"].endswith("last heard 08:29")
     r.at(CLIP_EST - T0 + 600, status=station_status())                    # back at 08:39
     assert r.n.msgs[-1]["title"].startswith("Recovered: Station silent") and "cleared at 08:39 " in r.n.msgs[-1]["body"]
 

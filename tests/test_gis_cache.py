@@ -313,7 +313,7 @@ def test_data_sources_show_checked_and_downloaded_and_schedule_from_the_look(tmp
     reg.refresh("gis:hydrants", by="admin@example.org")      # Refresh now: whole
     assert arc.queries("features") and reg.row("gis:hydrants")["how"] == "full"
     js = (STATIC / "datasources.js").read_text()
-    assert "s.checked" in js and "howLine" in js and "only the changes downloaded" in js
+    assert "s.checked" in js and "howLine" in js and "changes only" in js
 
 
 # ---- "loading" ----------------------------------------------------------------------------------------------------------

@@ -294,7 +294,7 @@ def test_a_channel_quiet_far_longer_than_usual_is_a_hint_not_an_alert():
     assert ch["gaps"] == 11 and ch["typical_gap_s"] == 300.0 and ch["hint"] == ""
     r.at(t + 40 * 60, status=st)
     m = r.h.model()
-    assert "nothing heard for 40 min" in m["channels"][0]["hint"] and m["hints"][0]["channel"] == "FG1"
+    assert "quiet 40 min" in m["channels"][0]["hint"] and m["hints"][0]["channel"] == "FG1"
     assert r.keys() == [] and r.n.msgs == []
 
 
