@@ -118,18 +118,12 @@ def test_60_control_moves_the_call_through_by_itself(rig):
     rig.at(900)
     rig.change(unit_times={"E60": {"responding": T0 + 55, "on_location": T0 + 230, "in_service": T0 + 880}})
     assert rig.status("E60") == "AV" and rig.on("E60")["cleared_at"] == T0 + 880
-    rig.change(times={"in_service": T0 + 890})                                     # L31 has no in service of its own
+    rig.change(times={"in_service": T0 + 890})                                     # the incident's: L31 released, closed
     inc = rig.inc()
-    assert inc["status"] == "active" and rig.here("L31")                           # not closed under it: asked instead
-    ask = rig.step("close?")
-    assert ask["ask_close"] and not ask["undo"] and "L31" in ask["text"]
-    rig.radio("307-2b-call_2b-t0", T0 + 895, "Ladder 31 back in service")          # the radio clears it
-    rig.change(comments=((T0 + 896, "all units clear"),))
-    inc = rig.inc()
+    assert [x for x in rig.steps() if x[2] == "L31"][-1][3] == "AV"
     assert inc["status"] == "closed" and inc["disposition"] == "COMPLETE"
     assert rig.status("E60") == "AV" and rig.status("L31") == "AV"
     assert rig.steps()[-1] == ("close", "county", "", "", False)
-    assert rig.steps().count(("close?", "county", "", "", False)) == 1             # asked once
 
 
 def test_incident_times_move_a_unit_only_when_it_is_the_only_one(rig):
@@ -168,8 +162,8 @@ def test_a_feed_type_nobody_maps_waits_for_a_person_then_goes_on(rig):
     assert rig.inc()["status"] == "queued" and rig.inc()["assignments"] == []
     rig.cad.accept(rig.iid(), {"type": "ALARM", "subtype": "COMM", "operator": "Lt. Test"})
     rig.at(60)
-    rig.change(unit_times={"E60": {"responding": T0 + 55}})
-    assert rig.on("E60")["status"] == "RS"                                          # tracked: assigned, then responding
+    rig.change(units=("E60", "L31", "E62"))                                         # listed after the person accepted
+    assert rig.here("E62") and rig.here("E60") is None                              # E60, L31: listed before, the person's
 
 
 # -- PCFD dispatching ------------------------------------------------------------------------------------------------

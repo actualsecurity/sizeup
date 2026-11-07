@@ -5,6 +5,7 @@
 //   DispatchMode.header(node, st, deps)        the header's switch: 60 Control | PCFD (dispatchers and admins)
 //   DispatchMode.eventChip(inc, e, deps)       a Timeline entry an automatic step made: its source, ✕ undoes it
 //   DispatchMode.unitChip(inc, a, deps)        a unit on the incident whose status automation set: the same
+//   DispatchMode.closeRow(inc, deps)           the queue card's "County in service · close?" (one click), while pending
 //   DispatchMode.sig(inc, key)                 what to redraw on (the step's undo state)
 "use strict";
 
@@ -127,5 +128,18 @@ window.DispatchMode = (() => {
     return s ? `${s.id}${s.undone ? "u" : ""}${inc.status}` : "";
   }
 
-  return { header, eventChip, unitChip, sig };
+  // The queue card (console and wall board): "County in service · close?" with one click, while one is pending
+  function closeRow(inc, deps) {
+    const s = inc.auto && inc.auto.close_pending;
+    if (!s) return null;
+    const row = el("div", "qs warn auto-close");
+    row.append(el("span", "", "County in service · close?"));
+    row.title = s.text;
+    const w = askClose(inc, s, deps);
+    const btn = w.querySelector && w.querySelector("button");
+    if (btn) row.append(btn);
+    return row;
+  }
+
+  return { header, eventChip, unitChip, sig, closeRow };
 })();

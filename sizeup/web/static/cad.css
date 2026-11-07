@@ -873,4 +873,5 @@
   .auto-src.radio { color: var(--ok-text); }
   .auto-src.undone { color: var(--dim); text-decoration: line-through; }
   .auto-undo { color: var(--dim); }
+  .auto-close { display: flex; align-items: center; gap: var(--s-2); }
 }

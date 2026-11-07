@@ -375,6 +375,7 @@ class Comms:
             if old is None:
                 return {"unlinked": False, "why": ""}
             db.execute("DELETE FROM radio_links WHERE traffic_id = ? AND incident_id = ?", (tid, iid))
+            db.execute("DELETE FROM radio_link_kept WHERE traffic_id = ? AND incident_id = ?", (tid, iid))
             auto = old["why"] != "manual"
             if auto:
                 db.execute("INSERT OR REPLACE INTO radio_link_exclusions (traffic_id, incident_id, at, operator, why, unit) "

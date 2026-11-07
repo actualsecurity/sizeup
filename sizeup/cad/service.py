@@ -217,6 +217,7 @@ class Cad:
         # by itself (accept, units, statuses, close), PCFD dispatching leaves it queued. The per-incident radio log in
         # both (sizeup/cad/radiolog.py): transmissions naming its units, address or place, or on its fireground channel.
         self.auto = AutoDispatch(self, clock=clock, log=log)
+        self.sources.on_possibly = self.auto.possibly
         self.radiolog = RadioLog(self)
         # FG1 radio IDs nobody has named yet (#163): "Radio 1234 (MDC) on FG1: who is this?" on the console.
         self.newids = NewIds(self)
@@ -441,6 +442,7 @@ class Cad:
                 self._by_hand(i, [h["unit_id"]], op)
         out = self.hints.accept(hid, op)
         self._by_hand(out.get("incident_id"), [out["id"]], op)
+        self.auto.recheck_close([was] if h is not None else [])   # a unit off a call that waits to close (#311 N1)
         return out
 
     def alarms_state(self, now: float | None = None) -> dict | None:
@@ -693,7 +695,9 @@ class Cad:
         if f:
             self.store.update_incident(iid, f, op)
             self.sources.mark_manual(iid, ["type"], op)       # a person picked it (#297: a feed only notes its own)
-        return self.store.accept(iid, op)
+        out = self.store.accept(iid, op)
+        self.auto.accepted(iid)                               # #311: what the feed said so far is never replayed
+        return out
 
     def dismiss(self, iid: int, body: dict) -> dict:
         return self.store.dismiss(iid, _text(body, "operator", OPERATOR_MAX), _text(body, "reason", 200))
@@ -1216,6 +1220,8 @@ class Cad:
             out = self.store.set_unit_status(uid, status, op, _text(body, "note", 200))
         for i in {was, out.get("incident_id")}:          # a person's: automation leaves the unit alone there (#311)
             self._by_hand(i, [uid], op)
+        if was and out.get("incident_id") != was:
+            self.auto.recheck_close([was])               # the last unit off a call that waits to close (#311 N1)
         return out
 
     def unit_station(self, uid: int, body: dict) -> dict:
@@ -1367,10 +1373,11 @@ class Cad:
         return dict(r, incident_id=iid, number=inc["number"])
 
     def keep_traffic(self, iid: int, body: dict) -> dict:
-        """POST /api/cad/incident/<id>/keep {traffic_id, operator}: an automatic mention / fireground link confirmed by a
-        person (#311): its audio and row are kept like any on the event."""
+        """POST /api/cad/incident/<id>/keep {traffic_id, undo?, operator}: an automatic mention / fireground link confirmed
+        by a person (#311): its audio and row are kept like any on the event; undo: not kept any more."""
         inc = self.store.incident(iid)
-        r = self.radiolog.keep(_text(body, "traffic_id", 200, required=True), iid, _text(body, "operator", OPERATOR_MAX))
+        undo = _bool(body, "undo") or False
+        r = self.radiolog.keep(_text(body, "traffic_id", 200, required=True), iid, _text(body, "operator", OPERATOR_MAX), undo)
         if r.get("error"):
             raise CadError(r["error"])
         return dict(r, incident_id=iid, number=inc["number"])

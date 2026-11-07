@@ -48,10 +48,12 @@ NUM = re.compile(r"\d{1,5}[a-z]?")
 UNIT_WORDS = {"engine", "ladder", "tower", "rescue", "truck", "utility", "marine", "squad", "medic", "ambulance", "alpha",
               "unit", "car", "chief", "e", "l", "tl", "r", "u", "m"}
 # Named places too common in fire radio to mean this incident's place
-PLACE_STOP = {"fire house", "firehouse", "the firehouse", "the fire house", "the station", "station", "fire station",
-              "headquarters", "quarters", "the quarters", "fire headquarters", "police station", "police headquarters",
-              "the hospital", "hospital", "the school", "high school", "middle school", "the park", "town hall",
-              "village hall", "city hall", "the building", "the house", "the scene", "command post", "the command post"}
+PLACE_STOP = {"fire house", "firehouse", "station", "fire station", "headquarters", "quarters", "fire headquarters",
+              "police station", "police headquarters", "hospital", "school", "high school", "middle school",
+              "elementary school", "park", "town hall", "village hall", "city hall", "building", "house", "scene",
+              "command post", "fire department", "police department", "post office", "train station", "gas station",
+              "parking lot", "parking garage", "nursing home", "senior center", "shopping center", "medical center",
+              "car wash", "apartment complex"}
 RESPOND = re.compile(r"\brespond(?:ing)?\s+to\s+(?:the\s+)?(?P<where>[^.;,!?]+?)(?=\s+(?:for|on|with|reported|"
                      r"second|third|report)\b|[.;,!?]|$)", re.I)
 TO_NUM = re.compile(r"\b(?:to|at)\s+(\d{1,5}[a-z]?\s+(?!(?:control|dispatch|minutes?|hours?|seconds?|units?|feet|ft|"
@@ -118,7 +120,7 @@ def address_hit(text: str, address: str) -> bool:
 def place_hit(text: str, place: str) -> bool:
     """The transcript names this place as a whole phrase: two words or more, never a common one (PLACE_STOP)."""
     words = [w for w in WORD.findall((place or "").lower()) if w not in NOISE]
-    if len(words) < 2 or " ".join(words) in PLACE_STOP or (place or "").strip().lower() in PLACE_STOP:
+    if len(words) < 2 or " ".join(words) in PLACE_STOP:  # "the" aside: "The Fire House" is "fire house"
         return False
     return re.search(r"(?<![\w])" + r"\W+(?:the\W+)?".join(re.escape(w) for w in words) + r"(?![\w])",
                      (text or "").lower()) is not None
@@ -333,6 +335,8 @@ class RadioLog:
                             (lo, hi, BACKFILL_MAX))
         if not rows:
             return []
+        if len(rows) >= BACKFILL_MAX:
+            self.cad.log(f"CAD: radio log backfill for event {iid}: the first {BACKFILL_MAX} transmissions only")
         ctx = self.context(lo, hi)
         out = []
         for t in rows:
@@ -353,12 +357,22 @@ class RadioLog:
         else:
             threading.Thread(target=run, name="radiolog-backfill", daemon=True).start()
 
-    def keep(self, tid: str, iid: int, operator: str = "") -> dict:
-        """A person confirms an automatic mention / fireground link: its audio and row are kept like the event's."""
+    def keep(self, tid: str, iid: int, operator: str = "", undo: bool = False) -> dict:
+        """A person confirms an automatic mention / fireground link (its audio and row then kept like the event's), or
+        takes that back (undo): a line in the event's timeline either way."""
+        from sizeup.cad.comms import _when, _who
         with self.store.tx() as db:
-            if not db.execute("SELECT 1 FROM radio_links WHERE traffic_id = ? AND incident_id = ?", (tid, iid)).fetchone():
+            t = db.execute("SELECT * FROM radio_traffic WHERE id = ?", (tid,)).fetchone()
+            if t is None or not db.execute("SELECT 1 FROM radio_links WHERE traffic_id = ? AND incident_id = ?",
+                                           (tid, iid)).fetchone():
                 return {"kept": False, "error": "not on this event"}
-            db.execute("INSERT OR IGNORE INTO radio_link_kept (traffic_id, incident_id, at, operator) VALUES (?, ?, ?, ?)",
-                       (tid, iid, self.cad.clock(), operator))
+            if undo:
+                n = db.execute("DELETE FROM radio_link_kept WHERE traffic_id = ? AND incident_id = ?", (tid, iid)).rowcount
+            else:
+                n = db.execute("INSERT OR IGNORE INTO radio_link_kept (traffic_id, incident_id, at, operator) VALUES (?, ?, ?, ?)",
+                               (tid, iid, self.cad.clock(), operator)).rowcount
+            if n:
+                self.store._event(db, iid, "radio", f"Radio {_when(t)} {_who(t)} on {t['channel']} "
+                                  + ("no longer kept" if undo else "kept with this event"), operator)
         self.cad.comms.rev += 1
-        return {"kept": True}
+        return {"kept": not undo}

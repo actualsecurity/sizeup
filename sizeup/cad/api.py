@@ -102,7 +102,7 @@ POST /api/cad/incident/<id>/recommend     {type?, subtype?}      -> {units, unfi
 POST /api/cad/incident/<id>/feed-use      {field: type|location} -> the event: the CAD feed's value over a person's (#297)
 POST /api/cad/incident/<id>/auto-undo     {step, operator?}  an automatic step (60 Control dispatching, #311; the event's
                                           auto.steps) taken back: the unit (or the close) is then a person's
-POST /api/cad/incident/<id>/keep          {traffic_id, operator?}  an automatic radio-log link (mention / fireground,
+POST /api/cad/incident/<id>/keep          {traffic_id, undo?, operator?}  an automatic radio-log link (mention / fireground,
                                           #311) confirmed: its audio and row are kept like any on the event
 POST /api/cad/dispatch-mode               {mode: 60control | pcfd, operator?}  the header's switch (#311,
                                           sizeup/cad/automode.py); dispatchers and admins; in the Settings audit log
@@ -328,7 +328,7 @@ def _on_incident(m, b, o, c):
     if act == "unlink":
         return f"Removed a transmission from {ev}", n
     if act == "keep":
-        return f"Kept a transmission on {ev}", n
+        return f"{'Stopped keeping' if b.get('undo') else 'Kept'} a transmission on {ev}", n
     if act == "auto-undo":
         return f"Undid an automatic step on {ev}", n
     if act == "return":

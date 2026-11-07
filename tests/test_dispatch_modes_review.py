@@ -271,3 +271,103 @@ def test_the_switch_takes_the_lock(rig):
         assert th.is_alive() and not out                                           # waits for automation in progress
     th.join(2)
     assert out and rig.cad.auto.mode() == "pcfd"
+
+
+# -- round 2 ----------------------------------------------------------------------------------------------------------
+
+
+def _times(**kw):
+    return {"dispatched": T0, **kw}
+
+
+def test_incident_times_only_close_the_call_and_free_its_units_for_the_next(rig):
+    rig.created(units=("E60", "L31"))                                              # incident-level times only
+    rig.at(60)
+    rig.change(times=_times(responding=T0 + 50))
+    rig.at(240)
+    rig.change(times=_times(responding=T0 + 50, on_location=T0 + 230))
+    rig.at(900)
+    rig.change(times=_times(responding=T0 + 50, on_location=T0 + 230, in_service=T0 + 890))
+    a = rig.inc()
+    assert a["status"] == "closed" and rig.status("E60") == "AV" and rig.status("L31") == "AV"
+    rig.at(3300)
+    rig.feed.put("B1", type="ALARM/COMM", location="400 Sample St", units=("E60", "L31"), times={"dispatched": rig.clock.t})
+    rig.poll()
+    b = rig.inc("B1")
+    assert b["status"] == "active" and {x["name"] for x in b["assignments"] if not x["cleared_at"]} == {"E60", "L31"}
+
+
+def test_a_unit_the_feed_doesnt_list_holds_the_close_until_the_radio_clears_it(rig):
+    rig.created(units=("E60",))
+    rig.radio("307-r1-call_r1-t0", T0 + 40, "Engine 62 responding", rig="E62", unit="E62")   # placed by its own radio
+    assert rig.here("E62")
+    rig.at(900)
+    rig.change(times=_times(in_service=T0 + 890))
+    inc = rig.inc()
+    assert inc["status"] == "active" and rig.here("E60") is None and rig.here("E62")
+    assert inc["auto"]["close_pending"] and "E62" in inc["auto"]["close_pending"]["text"]
+    rig.radio("307-r2-call_r2-t0", T0 + 905, "Engine 62 back in service", rig="E62", unit="E62")
+    assert rig.inc()["status"] == "closed" and rig.inc()["auto"]["close_pending"] is None
+
+
+def test_a_person_clearing_the_last_unit_lets_the_pending_close_go(rig):
+    rig.created(units=("E60",))
+    rig.cad.dispatch(rig.iid(), {"unit_ids": [rig.uid("E62")], "operator": "Lt. Test"})
+    rig.at(900)
+    rig.change(times=_times(in_service=T0 + 890))
+    assert rig.inc()["status"] == "active" and rig.here("E62")
+    rig.cad.unit_status(rig.uid("E62"), {"status": "AV", "operator": "Lt. Test"})  # the board
+    assert rig.inc()["status"] == "closed"
+
+
+def test_nothing_reported_in_pcfd_mode_replays_after_a_person_accepts(rig):
+    rig.created(units=("E60", "L31"), type="ZZZ UNKNOWN THING")
+    rig.mode("pcfd")
+    rig.cad.accept(rig.iid(), {"type": "ALARM", "subtype": "COMM", "operator": "Lt. Test"})
+    rig.cad.dispatch(rig.iid(), {"unit_ids": [rig.uid("E60")], "operator": "Lt. Test"})
+    rig.at(60)
+    rig.change(unit_times={"L31": {"responding": T0 + 55, "on_location": T0 + 58}})
+    rig.mode("60control")
+    rig.at(70)
+    rig.change(comments=((T0 + 65, "nothing for units"),))
+    assert rig.status("L31") == "AV" and rig.on("L31") is None and not [s for s in rig.steps() if s[2] == "L31"]
+
+
+def test_an_unknown_radio_id_never_places_a_unit(rig):
+    rig.created(units=("E60",))
+    rig.radio("307-u-call_u-t0", T0 + 40, "Engine 62 responding", radio_id="99999")  # an ID nobody named
+    assert rig.cad.store.unit(rig.uid("E62"))["incident_id"] is None
+
+
+def test_possibly_the_same_is_a_relation_not_text(rig):
+    rig.page()
+    first = rig.incidents()[0]["id"]
+    rig.cad.accept(first, {"operator": "Lt. Test"})
+    rig.cad.dispatch(first, {"unit_ids": [rig.uid("E60")], "operator": "Lt. Test"})
+    rig.at(30)
+    rig.created()
+    if rig.iid() != first:
+        assert rig.cad.store.one("SELECT 1 AS x FROM auto_possibly WHERE incident_id = ? AND other_id = ?", (rig.iid(), first))
+        with rig.cad.store.tx() as db:                                             # the note's words don't matter
+            db.execute("UPDATE events SET text = 'x' WHERE text LIKE 'Possibly the same as%'")
+        assert rig.cad.auto._possibly_open(rig.iid())["id"] == first
+
+
+def test_keep_is_on_the_timeline_undoable_and_gone_with_the_link(rig):
+    rig.created()
+    iid = rig.iid()
+    rig.radio("307-k-call_k-t0", T0 + 30, "60 Control to Engine 60, copy your on location")
+    rig.cad.keep_traffic(iid, {"traffic_id": "307-k-call_k-t0", "operator": "Lt. Test"})
+    assert any(e["text"].endswith("kept with this event") for e in rig.inc()["events"])
+    rig.cad.keep_traffic(iid, {"traffic_id": "307-k-call_k-t0", "undo": True, "operator": "Lt. Test"})
+    assert any(e["text"].endswith("no longer kept") for e in rig.inc()["events"])
+    assert "307-k-call_k-t0" not in rig.cad.comms.kept_for_events(["307-k-call_k-t0"])
+    rig.cad.keep_traffic(iid, {"traffic_id": "307-k-call_k-t0", "operator": "Lt. Test"})
+    rig.cad.unlink_traffic(iid, {"traffic_id": "307-k-call_k-t0", "operator": "Lt. Test"})
+    assert rig.cad.store.q("SELECT * FROM radio_link_kept") == []
+
+
+def test_more_common_places_never_count():
+    for p in ("Post Office", "The Fire Department", "Train Station", "Parking Garage", "Nursing Home", "Car Wash",
+              "Apartment Complex", "Elementary School", "Shopping Center"):
+        assert not place_hit(f"units at the {p.lower()}", p), p

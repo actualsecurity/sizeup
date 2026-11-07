@@ -92,6 +92,12 @@ CREATE TABLE IF NOT EXISTS auto_steps (
   undone_by TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS auto_steps_incident ON auto_steps(incident_id);
+CREATE TABLE IF NOT EXISTS auto_possibly (     -- incidents sources.py noted "possibly the same" (both ways)
+  incident_id INTEGER NOT NULL,
+  other_id INTEGER NOT NULL,
+  at REAL NOT NULL,
+  PRIMARY KEY (incident_id, other_id)
+);
 """
 
 
@@ -100,7 +106,6 @@ def _key(s: str) -> str:
     return re.sub(r"[\s-]+", "", str(s or "")).upper()
 
 
-POSSIBLY = re.compile(r"^Possibly the same as #(\S+?):")
 
 
 def _hm(t: float | None) -> str:
@@ -273,18 +278,16 @@ class AutoDispatch:
             db.execute("UPDATE auto_incidents SET held = ? WHERE incident_id = ?", (why, iid))
             self.store._event(db, iid, "auto", why, op)
 
+    def possibly(self, a: int, b: int) -> None:
+        """sources.py noted these two "possibly the same" (Sources.on_possibly)."""
+        with self.store.tx() as db:
+            for x, y in ((a, b), (b, a)):
+                db.execute("INSERT OR IGNORE INTO auto_possibly (incident_id, other_id, at) VALUES (?, ?, ?)", (x, y, self.clock()))
+
     def _possibly_open(self, iid: int) -> dict | None:
-        """An open accepted incident this one is noted "possibly the same as" (sources.py), else None."""
-        for e in self.store.q("SELECT text FROM events WHERE incident_id = ? AND kind = 'feed' AND text LIKE 'Possibly the same as #%'",
-                              (iid,)):
-            m = POSSIBLY.match(e["text"])
-            if not m:
-                continue
-            ref = m.group(1)
-            o = self.store.one("SELECT * FROM incidents WHERE number = ? OR (number IS NULL AND CAST(id AS TEXT) = ?)", (ref, ref))
-            if o and o["id"] != iid and o["status"] in ("pending", "active"):
-                return o
-        return None
+        """An open accepted incident this one is possibly the same as (auto_possibly), else None."""
+        return self.store.one("SELECT i.* FROM auto_possibly p JOIN incidents i ON i.id = p.other_id WHERE p.incident_id = ? "
+                              "AND i.status IN ('pending', 'active') ORDER BY i.id LIMIT 1", (iid,))
 
     def _apply(self, iid: int, old: dict, new: dict, label: str) -> None:
         op = f"{label} · auto"
@@ -306,13 +309,11 @@ class AutoDispatch:
             self.store.accept(iid, op)
             self._step(iid, "accept", "county", f"Accepted ({label})", self.clock(), event_kind="accepted")
             inc = self.store.incident(iid)
+            old = {}                                     # accepted by automation now: everything listed so far is new
+            self._started(iid)
         if inc["status"] not in ("pending", "active"):
             return
-        row = self._tracking(iid)
-        if row["started_at"] is None:                    # automation's first look at it open: everything is new
-            old = {}
-            with self.store.tx() as db:
-                db.execute("UPDATE auto_incidents SET started_at = ? WHERE incident_id = ?", (self.clock(), iid))
+        self._started(iid)                               # else: what was seen stays the baseline (N2, never replayed)
         self._paged(iid)
         times, otimes = new.get("times") or {}, old.get("times") or {}
         uts, outs = new.get("unit_times") or {}, old.get("unit_times") or {}
@@ -341,7 +342,16 @@ class AutoDispatch:
                 if t is not None and t != was.get(k):
                     self._unit_step(iid, u, FEED_STATUS[k], t, op, "county", k)
         if times.get("in_service") is not None or new.get("closed"):
-            self._close(iid, times.get("in_service") or self.clock(), op, label, uts)
+            self._close(iid, times.get("in_service") or self.clock(), op, label, units)
+
+    def _started(self, iid: int) -> None:
+        with self.store.tx() as db:
+            db.execute("UPDATE auto_incidents SET started_at = ? WHERE incident_id = ? AND started_at IS NULL", (self.clock(), iid))
+
+    def accepted(self, iid: int) -> None:
+        """A person accepted it (any mode): automation goes on from what was seen, never replaying it (N2)."""
+        with self._lock:
+            self._started(iid)
 
     def _paged(self, iid: int) -> None:
         r = self._tracking(iid)
@@ -441,8 +451,11 @@ class AutoDispatch:
         self._step(iid, "status", source, f"{u['name']} {L.status_phrase(code, u['name'], u['board'])}", t, unit=u,
                    prev=u["status"], status=code, col=col if fresh else "", ref=ref, event_kind="status")
 
-    def _close(self, iid: int, t: float, op: str, label: str, uts: dict) -> None:
-        """The feed's in service: closed when no unit is left on it; else "close?" on the timeline (H2)."""
+    def _close(self, iid: int, t: float, op: str, label: str, listed) -> None:
+        """The feed's incident in service (N1): every unit the feed lists that no person marked is released (in service,
+        undoable); the call closes when none is left on it. A unit a person put or kept there, or one the feed doesn't
+        list, keeps it open with "close?" (shown on the incident and its queue card, one click closes it);
+        recheck_close() closes it once those clear."""
         if self._manual(iid, "close"):
             return
         inc = self.store.incident(iid)
@@ -450,17 +463,28 @@ class AutoDispatch:
             return
         if self.store.one("SELECT 1 AS x FROM auto_steps WHERE incident_id = ? AND kind = 'close'", (iid,)):
             return                                       # closed by automation before (and reopened since): a person's
-        # Still on it after the per-unit steps above: a unit a person put or kept there (marked: automation never clears
-        # it), or one the feed gave no in-service time of its own. Either way the call isn't over for us.
-        blocking = [r["name"] for r in self.store.q(
-            "SELECT u.name FROM assignments a JOIN units u ON u.id = a.unit_id WHERE a.incident_id = ? AND a.cleared_at IS NULL "
-            "ORDER BY a.id", (iid,))]
+        ours = self._ours()
+        keys = {_key(n) for n in listed or []}
+        for r in self.store.q("SELECT u.id, u.name FROM assignments a JOIN units u ON u.id = a.unit_id "
+                              "WHERE a.incident_id = ? AND a.cleared_at IS NULL ORDER BY a.id", (iid,)):
+            on_list = any(ours.get(k, {}).get("id") == r["id"] for k in keys)
+            if on_list and not self._manual(iid, f"unit:{r['name']}"):
+                self._unit_step(iid, self.store.unit(r["id"]), "free", t, op, "county", "in_service")
+        blocking = self._blocking(iid)
         if blocking:
             if not self.store.one("SELECT 1 AS x FROM auto_steps WHERE incident_id = ? AND kind = 'close?' AND ref = ?",
                                   (iid, str(t))):
                 self._step(iid, "close?", "county", f"County in service {_hm(t)}: close? (still on it: {', '.join(blocking)})",
                            t, ref=str(t), own_event=True, operator=op)
             return
+        self._do_close(iid, t, op, label)
+
+    def _blocking(self, iid: int) -> list[str]:
+        return [r["name"] for r in self.store.q(
+            "SELECT u.name FROM assignments a JOIN units u ON u.id = a.unit_id WHERE a.incident_id = ? AND a.cleared_at IS NULL "
+            "ORDER BY a.id", (iid,))]
+
+    def _do_close(self, iid: int, t: float, op: str, label: str) -> None:
         if self._manual(iid, "close"):
             return
         codes = self.store.lists.disposition_codes
@@ -470,6 +494,31 @@ class AutoDispatch:
         self.store.close(iid, disp, op)
         self._step(iid, "close", "county", f"Closed: {label} in service {_hm(t)}", t, event_kind="closed",
                    ref=json.dumps(left))
+
+    def close_pending(self, iid: int) -> dict | None:
+        """The latest "close?" on an open incident not closed by automation since: the step, else None."""
+        inc = self.store.one("SELECT status FROM incidents WHERE id = ?", (iid,))
+        if not inc or inc["status"] not in ("pending", "active") or self._manual(iid, "close"):
+            return None
+        if self.store.one("SELECT 1 AS x FROM auto_steps WHERE incident_id = ? AND kind = 'close'", (iid,)):
+            return None
+        return self.store.one("SELECT * FROM auto_steps WHERE incident_id = ? AND kind = 'close?' ORDER BY id DESC LIMIT 1", (iid,))
+
+    def recheck_close(self, iids) -> None:
+        """A unit cleared off these incidents (the radio, the board, by hand): a pending close goes ahead once no unit is
+        left on it (60 Control mode, a tracked incident). Never raises."""
+        try:
+            with self._lock:
+                if self.mode() != "60control":
+                    return
+                for iid in {i for i in iids if i}:
+                    s = self.close_pending(iid)
+                    if s is None or not self.tracked(iid) or self._blocking(iid):
+                        continue
+                    _, label = self._feed(iid)
+                    self._do_close(iid, s["at"], f"{label or 'County feed'} · auto", label or "County feed")
+        except Exception as e:  # noqa: BLE001
+            self.log(f"CAD: dispatch mode: {type(e).__name__}: {e}")
 
     # -- the radio's status hints -------------------------------------------------------------------------------------
 
@@ -503,8 +552,11 @@ class AutoDispatch:
             if h["intent"] != "enroute" or h["who"] not in ("talker", "named"):
                 return
             t = self.store.one("SELECT rig, radio_id, talker FROM radio_traffic WHERE id = ?", (h["traffic_id"],))
-            if not t or not (t["rig"] or t["radio_id"] or t["talker"]):
-                return                                   # an unidentified radio never places a unit
+            known = bool(t and (t["rig"] or (t["talker"] and self.store.one(
+                "SELECT 1 AS x FROM radios WHERE (alias != '' AND alias = ?) OR (unit != '' AND unit = ?)",
+                (t["talker"], t["talker"])))))
+            if not known:
+                return                                   # a radio nobody named (no rig, an unknown ID or alias): never places (#163)
             since = self.clock() - ASSIGN_WINDOW_S
             cands = [r["id"] for r in self.store.q("SELECT id FROM incidents WHERE status IN ('pending', 'active') "
                                                    "AND created_at >= ?", (since,))]
@@ -529,6 +581,8 @@ class AutoDispatch:
             self.cad.hints.accept(h["id"], "Radio · auto")
         except CadError:
             return
+        if h["intent"] in ("free", "quarters"):
+            self.recheck_close([iid])                    # the last unit off: a pending close goes ahead (N1)
         a = self._on_here(iid, u["id"]) or a
         if fresh and a is not None:
             with self.store.tx() as db:
@@ -626,11 +680,14 @@ class AutoDispatch:
         ids = [i["id"] for i in incs]
         rows: dict[int, dict] = {}
         steps: dict[int, list] = {}
+        closed_by_hand: set[int] = set()
         for k in range(0, len(ids), 500):
             part = ids[k:k + 500]
             marks = ",".join("?" * len(part))
             for r in self.store.q(f"SELECT * FROM auto_incidents WHERE incident_id IN ({marks})", part):
                 rows[r["incident_id"]] = r
+            closed_by_hand |= {r["incident_id"] for r in self.store.q(
+                f"SELECT incident_id FROM manual_edits WHERE field = 'close' AND incident_id IN ({marks})", part)}
             for s in self.store.q(f"SELECT * FROM auto_steps WHERE incident_id IN ({marks}) ORDER BY id", part):
                 steps.setdefault(s["incident_id"], []).append(
                     {"id": s["id"], "at": s["at"], "kind": s["kind"], "source": s["source"], "unit": s["unit"],
@@ -639,9 +696,13 @@ class AutoDispatch:
                      "ask_close": s["kind"] == "close?"})
         for inc in incs:
             r = rows.get(inc["id"])
+            st = steps.get(inc["id"], [])
+            ask = next((x for x in reversed(st) if x["kind"] == "close?"), None)
+            pending = (ask is not None and inc["status"] in ("pending", "active") and not any(x["kind"] == "close" for x in st)
+                       and inc["id"] not in closed_by_hand)
             inc["auto"] = None if r is None and inc["id"] not in steps else {
                 "tracked": bool(r and r["tracked_at"] is not None), "paged_at": r["paged_at"] if r else None,
-                "steps": steps.get(inc["id"], [])}
+                "steps": st, "close_pending": ask if pending else None}
         return incs
 
     @staticmethod

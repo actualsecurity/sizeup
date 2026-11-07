@@ -538,6 +538,8 @@ function fillQueueItem(li, inc) {
   li.replaceChildren(head, type, addr);
   const ap = airportLine(inc);
   if (ap) li.append(el("div", "qs ap-line", ap));       // the tower's facts on an airport event (#105)
+  const ask = window.DispatchMode && isOpen(inc) && DispatchMode.closeRow(inc, autoDeps());   // County in service: close? (#311)
+  if (ask) li.append(ask);
   if (inc.status === "queued") {
     if (inc.type_note) li.append(el("div", "qs warn", inc.type_note));
     if (unconfirmed(inc)) li.append(el("div", "qs warn", "Location unconfirmed: pick it on the event"));   // (#176; #278: an instruction, on screen)
@@ -611,7 +613,7 @@ function renderQueue() {
   const byAge = (a, b) => a.created_at - b.created_at;        // oldest first
   const sig = (i) => JSON.stringify([i.status, i.number, i.type, i.subtype, i.address, i.id === cad.sel, i.emergency,
     i.until_at, i.disposition, i.type_note, unconfirmed(i), i.joint_call, openAssignments(i).map((a) => [a.name, a.status, txNow(a.name)]),
-    i.closed_at, cad.listSig.length, canDo("dispatch"), airportLine(i), queueExtra(i)]);
+    i.closed_at, cad.listSig.length, canDo("dispatch"), airportLine(i), queueExtra(i), i.auto && i.auto.close_pending && i.auto.close_pending.id]);
   const opts = { key: (i) => String(i.id), sig, make: queueItem, fill: fillQueueItem };
   syncList($("#q-queued"), all.filter((i) => i.status === "queued").sort(byAge), { ...opts, empty: "None" });
   syncList($("#q-pending"), all.filter((i) => i.status === "pending" && i.emergency).sort(byAge),
@@ -1107,11 +1109,12 @@ function radioRow(t, ctx = {}) {
       x.title = "Remove from this incident";
       x.setAttribute("aria-label", "Remove from this incident");
       x.addEventListener("click", () => unlinkTx(t, { id: ctx.current, number: (incidents().find((i) => i.id === ctx.current) || {}).number || "" }));
-      if ((t.why === "mention" || t.why === "fireground") && !t.link_kept) {   // auto from words: kept only when confirmed
-        const k = el("button", "mini", "Keep");
+      if (t.why === "mention" || t.why === "fireground") {   // auto from words: its recording kept only when confirmed
+        const k = el("button", "mini", t.link_kept ? "Kept" : "Keep");
         k.type = "button";
-        k.title = "Keep its recording with this incident";
-        k.addEventListener("click", () => keepTx(t, ctx.current));
+        k.setAttribute("aria-pressed", String(!!t.link_kept));
+        k.title = t.link_kept ? "Kept with this incident: click to stop keeping it" : "Keep its recording with this incident";
+        k.addEventListener("click", () => keepTx(t, ctx.current, !!t.link_kept));
         meta.append(k);
       }
       meta.append(x);
@@ -1463,10 +1466,10 @@ async function unlinkTx(t, e) {
   }
   txChanged();
 }
-async function keepTx(t, iid) {
+async function keepTx(t, iid, undo = false) {
   try {
-    await api("POST", `/api/cad/incident/${iid}/keep`, { traffic_id: t.id, operator: operator() });
-    UI.toast("Kept", "ok");
+    await api("POST", `/api/cad/incident/${iid}/keep`, { traffic_id: t.id, undo, operator: operator() });
+    UI.toast(undo ? "No longer kept" : "Kept", "ok");
   } catch (err) {
     UI.toast(`Keep failed: ${err.message}`, "err");
   }
