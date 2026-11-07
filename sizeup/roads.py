@@ -1137,7 +1137,8 @@ def same_camera(a: dict, b: dict, within_m: float = CAMERA_MATCH_M) -> bool:
 #   stream  they name the same stream (the HLS folder, or a still named for it: one stream name on two hosts is one camera);
 #   id      one's id (letters and digits) is a word of the other's id or addresses (a DOT id inside a CARS id);
 #   name    the same name once its milepost, route, direction and filler words are left out and the street words spelled
-#           out, on the same road, within CAMERA_NAME_M and (one source's mileposts) CAMERA_MILE_MI;
+#           out, facing the same way (a direction on one side only is not), on the same road, within CAMERA_NAME_M and
+#           (one source's mileposts) CAMERA_MILE_MI;
 #   near    from two sources only: same_camera for a CARS-Hub one, else DEDUPE_M (as before).
 # One is kept (Roads._merge_cameras): in service, then live video, then the fresher still (both images' times when the
 # hub has both, else the faster cadence), then ours first. The one kept stays
@@ -1211,8 +1212,8 @@ def _road_key(road: str, name: str) -> str:
 
 
 def _facing_apart(a: dict, b: dict) -> bool:
-    da, db = cam_dir(a.get("dir") or a.get("name", "")), cam_dir(b.get("dir") or b.get("name", ""))
-    return bool(da and db and da != db)
+    """Not the same way: two directions that differ, or (for the name rule) one given and the other not."""
+    return cam_dir(a.get("dir") or a.get("name", "")) != cam_dir(b.get("dir") or b.get("name", ""))
 
 
 def camera_match(a: dict, b: dict, same_source: bool, near: Callable[[dict, dict], bool] | None = None) -> str:
@@ -1870,6 +1871,7 @@ class Roads:
         self._health: dict[str, dict] = {}            # camera id -> {fails, down_since, last_image, checked}
         self._cam_kept: dict[str, str] = {}           # camera id -> the id kept for its camera at the last merge (#320)
         self._alias: dict[str, str] = {}              # a merged-away camera id -> the id kept for its camera
+        self._cam_group_cache: tuple[int, list[list[str]]] | None = None   # (the lists' hash, the groups' ids)
         self._streams: dict[str, dict] = {}           # camera id -> {last (playlist request), base (the stream's folder)}
         self._segments: OrderedDict[str, dict] = OrderedDict()   # "cid/name" -> {body, ctype, fetched, kept, ...}
         self._segment_locks: dict[str, list] = {}               # "cid/name" -> [lock, users]: one fetch at a time
@@ -2144,30 +2146,14 @@ class Roads:
         return out
 
     def _merge_cameras(self) -> list[dict]:
-        """Every provider's cameras, in _order, each camera once (camera_match: the same stream, an id inside the other's,
-        the same name on the same road and milepost, or from two sources the same place). The one kept (_cam_better) is
+        """Every provider's cameras, in _order, each camera once (_cam_groups). The one kept (_cam_better, sticky) is
         listed where the first of its records was, with "also": the others' sources and names; their ids map to its id
-        (alias), so a page, a Keep or a recording that names one of them finds it."""
+        (alias), so a page, a Keep or a recording that names one of them finds it. So does the id of one kept before
+        that has left its list since, while a record of its camera is still there (the older of two records retired)."""
         order = self._order("cameras")
-        groups: list[list[tuple[dict, str]]] = []
-        seen: set[str] = set()
-
-        def near(a: dict, b: dict, pa: str, pb: str) -> bool:
-            if CARSHUB in (pa, pb):
-                return same_camera(a, b)
-            return km(a["lat"], a["lon"], b["lat"], b["lon"]) * 1000 <= DEDUPE_M
-        for p in order:
-            for it in p.data["cameras"]:
-                if it["id"] in seen:
-                    continue
-                seen.add(it["id"])
-                g = next((g for g in groups if any(camera_match(it, o, w == p.name, lambda a, b, w=w: near(a, b, p.name, w))
-                                                   for o, w in g)), None)
-                if g is None:
-                    groups.append([(it, p.name)])
-                else:
-                    g.append((it, p.name))
+        groups = self._cam_groups(order)
         out, alias = [], {}
+        present = {c["id"] for g in groups for c, _ in g}
         for g in groups:
             if len(g) == 1:
                 out.append(g[0][0])
@@ -2186,17 +2172,66 @@ class Roads:
                     alias[c["id"]] = best["id"]
             out.append(dict(best, also=[{"source": c.get("source", ""), "name": c.get("name", "")} for c, _ in g if c is not best]))
         listed = {c["id"] for c in out}
+        now_of = lambda i: alias.get(i, i)
+        # the records once merged with one now gone from every list: it names the one its camera is listed as now
+        gone = {k: v for k, v in self._cam_kept.items() if k not in present}
+        for k in gone:
+            mates = [m for m, v in self._cam_kept.items() if v == gone[k] or m == gone[k]]
+            there = next((m for m in mates if m in present), None)
+            if there is not None:
+                alias[k] = now_of(there)
+            else:
+                self._cam_kept.pop(k, None)                       # its camera is gone altogether
         with self._lock:
             self._alias = {k: v for k, v in self._alias.items() if k not in listed and v != k} | alias
             # an id merged away earlier, its camera now kept under another: the old id names the one kept now
-            self._alias = {k: alias.get(v, v) for k, v in self._alias.items()}
+            self._alias = {k: now_of(v) for k, v in self._alias.items() if now_of(v) != k and now_of(v) in listed}
         return out
 
+    def _cam_groups(self, order: list[Provider]) -> list[list[tuple[dict, str]]]:
+        """The records grouped by camera (camera_match), kept while the lists say the same (a hash of what the rules read:
+        the grouping is the quadratic part; a rev moves for much else). A record joins the first group with one it
+        matches, and only if it matches every record of its own source there directly: two of one source are never one
+        camera through a third."""
+        sig = hash(tuple((p.name, tuple((c["id"], c.get("name"), c.get("road"), c.get("dir"), c.get("mile"), c["lat"], c["lon"],
+                                         c.get("url"), c.get("video")) for c in p.data["cameras"])) for p in order))
+        cached = self._cam_group_cache
+        if cached is not None and cached[0] == sig:
+            ids: dict[str, tuple[dict, str]] = {}
+            for p in order:
+                for c in p.data["cameras"]:
+                    ids.setdefault(c["id"], (c, p.name))
+            return [[ids[i] for i in g] for g in cached[1]]       # (the records themselves: their state may be newer)
+        groups: list[list[tuple[dict, str]]] = []
+        seen: set[str] = set()
+
+        def near(a: dict, b: dict, pa: str, pb: str) -> bool:
+            if CARSHUB in (pa, pb):
+                return same_camera(a, b)
+            return km(a["lat"], a["lon"], b["lat"], b["lon"]) * 1000 <= DEDUPE_M
+
+        def fits(it: dict, pn: str, g: list) -> bool:
+            if not any(camera_match(it, o, w == pn, lambda a, b, w=w: near(a, b, pn, w)) for o, w in g):
+                return False
+            return all(camera_match(it, o, True) for o, w in g if w == pn)
+        for p in order:
+            for it in p.data["cameras"]:
+                if it["id"] in seen:
+                    continue
+                seen.add(it["id"])
+                g = next((g for g in groups if fits(it, p.name, g)), None)
+                if g is None:
+                    groups.append([(it, p.name)])
+                else:
+                    g.append((it, p.name))
+        self._cam_group_cache = (sig, [[c["id"] for c, _ in g] for g in groups])
+        return groups
+
     def _cam_rank(self, c: dict) -> tuple:
-        """What makes one record of a camera better than another, before the stills' times: in service, then live video.
-        From the lists only, so the one kept doesn't change with a camera's state (that stays the kept one's own: down,
-        stale, offline, as for any camera)."""
-        return (not c.get("off"), bool(c.get("video")) and not c.get("off"))
+        """What makes one record of a camera better than another, before the stills' times: in service, then live video,
+        then in its source's latest list (an older record its source has dropped). From the lists only, so the one kept
+        doesn't change with a camera's state (that stays the kept one's own: down, stale, offline, as for any camera)."""
+        return (not c.get("off"), bool(c.get("video")) and not c.get("off"), not c.get("missing_since"))
 
     def _cam_better(self, c: dict, best: dict) -> bool:
         """c over best (the one kept so far): by _cam_rank, then the fresher still: both images' times when the hub has

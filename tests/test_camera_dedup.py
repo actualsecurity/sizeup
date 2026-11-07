@@ -192,3 +192,95 @@ def test_a_keep_and_a_recording_follow_the_camera_to_the_id_kept_for_it(tmp_path
     # after a restart too (the folder is the new id's)
     again = Dvr(rd, tmp_path / "dvr", clock=clock, log=lambda m: None, free_floor=0)
     assert again.status("NYSDOT-90080")["segments"] == after["segments"]
+
+
+def test_two_of_one_source_are_never_one_camera_through_a_third():
+    # the Thruway's camera is near both 511NY records; those two don't match each other (other names, one point)
+    thruway = cam("1xx00500e", "I-287 at Interchange 5", road="I-287", dir="Eastbound", mile="5.0", stream="XX_950")
+    a = cam("90090", "I-287 MP 005.00 EB at Interchange 5", road="I-287", dir="Eastbound", mile="25.0", stream="XX_950")
+    b = cam("90091", "I287 EB North of Birch Lane MM 5.1", road="I-287", dir="Eastbound", mile="25.0", lat=LAT + 3 * M,
+            stream="R0_991")
+    assert r.camera_match(b, thruway, False) == "near" and r.camera_match(a, b, True) == ""
+    rd = roads(carshub=[a, b], thruway=[thruway])
+    assert ids(rd) == ["1xx00500e", "90091"] and rd.alias("90090") == "1xx00500e"
+
+
+def test_a_direction_on_one_side_only_is_not_the_same_name():
+    a = cam("90095", "Exit 9 Elm Ave", stream="R0_995")
+    assert r.camera_match(a, cam("90096", "SB Exit 9 Elm Ave", stream="R0_996"), True) == ""
+    assert r.camera_match(a, cam("90097", "At Exit 9 on Elm Avenue", dir="Southbound", stream="R0_997"), True) == ""
+
+
+def test_the_groups_are_made_again_only_when_the_lists_change():
+    a, b = cam("90100", "Exit 9 Elm Ave", stream="R0_100"), cam("90101", "At Exit 9 on Elm Avenue", stream="R0_101")
+    rd = roads(carshub=[a, b])
+    assert ids(rd) == ["90100"]
+    calls = []
+    real = r.camera_match
+    try:
+        r.camera_match = lambda *x, **k: calls.append(1) or real(*x, **k)
+        rd._changed()                                               # a rev for something else (a still, a DVR mark)
+        assert ids(rd) == ["90100"] and not calls
+        rd.carshub.data["cameras"][1] = dict(rd.carshub.data["cameras"][1], name="Exit 10 Oak St")
+        rd._changed()
+        assert ids(rd) == ["90100", "90101"] and calls
+    finally:
+        r.camera_match = real
+
+
+def test_the_kept_record_retired_by_its_source_names_the_one_left():
+    # the newer record kept; later its source drops it (stale for a while, then gone): the older one is listed, and
+    # the retired id names it all along
+    old, new = cam("90110", "Exit 9 Elm Ave MM 9.41", stream="R0_110"), cam("90111", "At Exit 9 on Elm Avenue", stream="R0_111")
+    rd = roads(carshub=[new, old])
+    assert ids(rd) == ["90111"]
+    rd.carshub.data["cameras"][0]["missing_since"] = 1.0           # left out of a read: still there, stale
+    rd._changed()
+    assert ids(rd) == ["90110"] and rd.alias("90111") == "90110"
+    rd.carshub.data["cameras"].pop(0)                               # gone (CAMERA_KEEP_S later)
+    rd._changed()
+    assert ids(rd) == ["90110"] and rd.alias("90111") == "90110" and not rd.camera("90110").get("also")
+    # straight from listed to gone (no stale spell) too
+    rd = roads(carshub=[new, old])
+    assert ids(rd) == ["90111"]
+    rd.carshub.data["cameras"].pop(0)
+    rd._changed()
+    assert ids(rd) == ["90110"] and rd.alias("90111") == "90110"
+    # and once the camera is gone altogether, nothing names it
+    rd.carshub.data["cameras"].clear()
+    rd._changed()
+    assert ids(rd) == [] and rd.aliases() == {}
+
+
+def test_a_keep_and_a_recording_follow_when_the_kept_record_is_retired(tmp_path):
+    rd, d, f, clock = setup(tmp_path)
+    twin = dict(rd.camera(CAM), id="NYSDOT-90120", name="I-95 SB at Interchange 21 (second record)")
+    rd.thruway.data["cameras"].append(twin)
+    rd._changed()
+    assert rd.alias("NYSDOT-90120") == CAM
+    d.pin(CAM, True)
+    step(d, f, clock, 2)
+    before = d.status(CAM)
+    rd.thruway.data["cameras"] = [c for c in rd.thruway.data["cameras"] if c["id"] != CAM]    # the kept one retired
+    rd._changed()
+    assert rd.camera(CAM) is None and rd.alias(CAM) == "NYSDOT-90120"
+    step(d, f, clock)
+    assert set(d.pins) == {"NYSDOT-90120"}
+    after = d.status("NYSDOT-90120")
+    assert after["recording"] and after["from"] == before["from"] and after["segments"] > before["segments"]
+    code, _, _ = rd.get(f"/api/cad/cameras/{CAM}/dvr/index.m3u8", "")[:3]
+    assert code == 200
+
+
+def test_a_recording_waits_to_move_while_its_segments_are_read(tmp_path):
+    rd, d, f, clock = setup(tmp_path)
+    d.pins = {CAM}
+    step(d, f, clock, 2)
+    twin = dict(rd.camera(CAM), id="NYSDOT-90130", name="I-95 SB at Interchange 21 (second record)")
+    rd.thruway.data["cameras"].append(twin)
+    next(c for c in rd.thruway.data["cameras"] if c["id"] == CAM).update(off=True)
+    rd._changed()
+    d.may_move = lambda old, new: False                             # a clip is being cut from it
+    assert d.follow() == [] and (tmp_path / "dvr" / CAM).is_dir()
+    d.may_move = lambda old, new: True
+    assert d.follow() == [CAM] and (tmp_path / "dvr" / "NYSDOT-90130").is_dir()
