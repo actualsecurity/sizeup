@@ -101,7 +101,7 @@ from pathlib import Path
 from typing import Callable
 
 from sizeup import tz
-from sizeup.cloud.autoupdate import same_build, short
+from sizeup.cloud.autoupdate import public, same_build, short
 
 TICK_S = 5.0
 JOB_GRACE_S = 60.0          # a dongle's job may be down this long (a restart, a switch) before it is an alert
@@ -1065,7 +1065,10 @@ class StationHealth:
                                "hint": {"factor": HINT_FACTOR, "min_min": HINT_MIN_S / 60}}}
 
     def status(self) -> dict:
-        """GET /api/station/status: what the deploy check needs, nothing else (no names of people, no audio)."""
+        """GET /api/station/status: what the deploy check needs, nothing else (no names of people, no audio). The deploy
+        check prints it into the PUBLIC GitHub Actions log: never the incident-source adapter (#301): no "adapter"
+        record, no last.adapter_why, and no adapter commit in a release name (public()). The station keeps the
+        adapter's reason, repo and commit out of last.line / last.why / its failures; they are on the Health page only."""
         now = self.clock()
         m = self.model(now)
         b = m["build"]
@@ -1073,10 +1076,11 @@ class StationHealth:
         return {"ok": True, "at": now, "hub_build": self.hub.build,
                 "station": {"reported": m["reported"], "connected": m["station"]["connected"],
                             "last_state": m["station"]["last_state"], "silent": m["station"]["silent"],
-                            "build": b["station"], "state": b["state"], "text": b["text"],
-                            "update": b["update"],
-                            "last": {k: last.get(k) for k in ("at", "from", "to", "result", "why", "seconds", "staged_s",
-                                                              "waited_s", "up_s", "radios_s", "line")} if last else None},
+                            "build": b["station"], "state": b["state"], "text": public(b["text"]),
+                            "update": {k: public(v) if isinstance(v, str) else v for k, v in b["update"].items()},
+                            "last": {k: public(v) if k in ("why", "line") and v else v
+                                     for k in ("at", "from", "to", "result", "why", "seconds", "staged_s", "waited_s",
+                                               "up_s", "radios_s", "line") for v in (last.get(k),)} if last else None},
                 "alerts": self.alerts()}
 
 

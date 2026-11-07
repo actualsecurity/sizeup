@@ -135,6 +135,11 @@ CRED_PREFIX = "sizeup-adapter."             # its credentials' names in the cred
 # GitHub's published SSH host key (= install-linux.sh GITHUB_HOSTKEY): the adapter's repo is on GitHub, never TOFU
 GITHUB_HOSTKEY = "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl"
 # Run by the release's venv python, as the sizeup user, no credentials: the adapter imports and passes its self-check.
+# The self-check contract: an adapter module MAY define a module-level self_check(), called with no arguments, no
+# credentials and no network expected. It passes by returning None, "", True or an empty list/tuple; it fails by
+# returning anything else (a string: the reason; a list/tuple: the reasons, joined with "; "), or by raising (only the
+# exception's type is kept). Its reason is the adapter's own words: it goes to state.json "adapter" and the Health
+# page only, never to the update's result line (the public deploy check, #305).
 ADAPTER_CHECK = r'''
 import importlib, importlib.metadata as md, json, sys
 dist, role, group = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -165,6 +170,8 @@ for e in eps:
             r = chk()
         except Exception as x:
             done(False, f"{e.name}: self_check: {type(x).__name__}")
+        if isinstance(r, (list, tuple)):
+            r = "; ".join(str(x) for x in r if str(x).strip())        # a list of problems: empty = none
         if r not in (None, "", True):
             done(False, f"{e.name}: self_check: {str(r)[:200]}")       # (the adapter's own reason)
     names.append(e.name)
@@ -220,6 +227,17 @@ def _norm_dist(name) -> str:
 def _dist_of(wheel: Path) -> str:
     """A wheel's (or a .dist-info directory's) distribution name, normalized."""
     return _norm_dist(wheel.name.split("-", 1)[0])
+
+
+ADAPTER_SUFFIX = re.compile(r"(?<=[0-9a-f]{7})-a[0-9a-f]{7,12}\b")
+
+
+def public(text) -> str:
+    """Text the hub's GET /api/station/status passes on, and so the deploy check prints into the public GitHub Actions
+    log: the adapter's commit taken out of a release name (releases/<sha>-a<commit> -> <sha>+adapter). The adapter's
+    reasons, repo and commit are never put in it at all (only in state.json "adapter" and last.adapter_why: the
+    Access-protected Health page)."""
+    return ADAPTER_SUFFIX.sub("+adapter", str(text or ""))
 
 
 def release_name(sha: str, commit: str = "") -> str:
@@ -608,7 +626,8 @@ class Updater:
         self.clock, self.sleep = clock, sleep
         self.out = out or (lambda line: print(line, flush=True))
         self._settings: dict | None = None
-        self._line = ""                 # the last result() line: saved with "last" (the hub's deploy check prints it)
+        self._line = ""                 # the last result() line: saved with "last" (the hub's deploy check prints it
+        #                                 into the PUBLIC GitHub Actions log: never the adapter's reason, repo or commit)
 
     # -- the outside world (tests replace these) ---------------------------------------------------------
 
@@ -1448,8 +1467,10 @@ class Updater:
         return read_state(self.p.state)
 
     def save(self, st: dict, **kw) -> None:
-        if isinstance(kw.get("last"), dict) and self._line:
-            kw["last"] = dict(kw["last"], line=self._line[:500])
+        if isinstance(kw.get("last"), dict):
+            kw["last"] = dict(kw["last"], **({"line": self._line[:500]} if self._line else {}))
+            if kw["last"].get("why"):
+                kw["last"]["why"] = public(kw["last"]["why"])
         st.update(kw)
         if "state" in kw:
             st["since"] = self.clock()
@@ -1463,9 +1484,12 @@ class Updater:
         """Progress: the journal only."""
         self.out(line)
 
-    def result(self, line: str) -> None:
-        """The one line per attempt: the journal and /var/log/sizeup-update.log (and state.json's "last")."""
-        self._line = line
+    def result(self, line: str, detail: str = "") -> None:
+        """The one line per attempt: the journal and /var/log/sizeup-update.log (and state.json's "last", which the
+        hub's deploy check prints into the public GitHub Actions log). detail: the adapter's own words (its reason,
+        repo, commit, #301): the journal and the log on the station only, never "last"."""
+        self._line = public(line)
+        line += f" · {detail}" if detail else ""
         self.out(line)
         try:
             with self.p.log.open("a") as f:
@@ -1510,7 +1534,7 @@ class Updater:
 
     def _failed(self, st: dict, sha: str, why: str) -> None:
         failed = st.get("failed") if isinstance(st.get("failed"), dict) else {}
-        failed[sha] = {"at": self.clock(), "why": why[:300]}
+        failed[sha] = {"at": self.clock(), "why": public(why)[:300]}     # (the hub's status shows it: describe)
         st["failed"] = _newest_failed(failed, KEEP_FAILED)
 
     # -- the work -----------------------------------------------------------------------------------------------
@@ -1588,8 +1612,8 @@ class Updater:
                 and not self._try_plain(st, frm, build, name):
             # sizeup's own release came up without the adapter: the adapter is what didn't (#301)
             self.adapter_failed(st, c, f"interrupted; then {why}; {short(build)} runs without it", build)
-            self.result(f"update {short(frm)} -> {short(to)}: interrupted, unhealthy with adapter {c[:7]} ({why}): "
-                        f"{short(build)} runs without it")
+            self.result(f"update {short(frm)} -> {short(to)}: interrupted, unhealthy with the adapter ({why}): "
+                        f"{short(build)} runs without it", detail=f"adapter {c[:7]} not tried again until its ref moves")
             self.save(st, state="current", current=build)
             return
         else:
@@ -1632,8 +1656,9 @@ class Updater:
         have_c = (have or {}).get("commit", "")
         if only:
             ad, ac = adapter
-            tag = (f"adapter {repo_name((ad or have or {}).get('repo'))} {have_c[:7] or 'none'} -> {ac[:7] or 'none'}"
-                   f" on {short(build)}")
+            tag = f"adapter rebuild of {short(build)}"             # (public: no repo, no commit)
+            self.note(f"auto-update: {tag}: adapter {repo_name((ad or have or {}).get('repo'))} "
+                      f"{have_c[:7] or 'none'} -> {ac[:7] or 'none'}")
             last = {"at": t0, "from": build, "to": build, "adapter": ac[:12], "adapter_from": have_c[:12]}
             self.save(st, state="updating", to=build, paused="", adapter_to=ac, **{"from": name})
             sha = build
@@ -1689,10 +1714,11 @@ class Updater:
                 said.append(self.adapter_fail(st, c, e, sha))
                 self.note(f"auto-update: {said[-1]}")
         if only and ac and target == sha:
-            self.result(f"{tag}: not switched: {'; '.join(said)}; still on {short(build)}"
-                        + (f" (adapter {have_c[:7]})" if have_c else ""))
+            self.result(f"{tag}: not switched: the adapter didn't build; still on {short(build)}",
+                        detail="; ".join(said))
             self.save(st, state="current", current=build,
-                      last=dict(last, result="adapter not built", why="; ".join(said)[:300],
+                      last=dict(last, result="adapter not built", why="the adapter didn't build",
+                                adapter_why="; ".join(said)[:300],
                                 seconds=round(self.clock() - t0)))
             return 1
         if target == sha:
@@ -1728,7 +1754,10 @@ class Updater:
             gap = f"web back {up:.0f} s after the switch" + (f", radios {radios:.0f} s" if radios is not None else "")
             self.result(f"{tag}: ok in {secs:.0f} s (built {staged:.0f} s, waited {waited:.0f} s for a quiet moment, "
                         f"{gap})" + (f" · {win}" if win else "")
-                        + (f" · {last['adapter_why']}; adapter {got[:7] or 'none'} runs" if last.get("adapter_why") else ""))
+                        + ((" · the adapter's newer commit didn't build; " + ("the one before runs" if got else
+                                                                            "running without it"))
+                           if last.get("adapter_why") else ""),
+                        detail=f"{last['adapter_why']}; adapter {got[:7] or 'none'} runs" if last.get("adapter_why") else "")
             self.save(st, state="current", current=sha, windows=win, **({} if only else {"hub": want}),
                       last=dict(last, result="ok", why="", seconds=round(secs), staged_s=round(staged),
                                 waited_s=round(waited), up_s=round(up, 1),
@@ -1743,8 +1772,8 @@ class Updater:
                 self.adapter_failed(st, c, f"the release with it didn't come up ({why})", sha)
                 self.prune()
                 secs = self.clock() - t0
-                self.result(f"{tag}: ok in {secs:.0f} s without adapter {c[:7]} (with it: {why}); adapter {c[:7]} not "
-                            "tried again until its ref moves")
+                self.result(f"{tag}: ok in {secs:.0f} s without the adapter (with it: {public(why)})",
+                            detail=f"adapter {c[:7]} not tried again until its ref moves")
                 self.save(st, state="current", current=sha, hub=want,
                           last=dict(last, result="ok", adapter="", adapter_why=f"adapter {c[:7]}: {why}"[:300],
                                     why="", seconds=round(secs)))
@@ -1753,13 +1782,15 @@ class Updater:
         if only:
             if ac:
                 self.adapter_failed(st, ac, why, sha)
-            again = f"not trying adapter {ac[:7]} again until its ref moves" if ac else "trying again at the next check"
+            again = "not trying that adapter commit again until its ref moves" if ac else "trying again at the next check"
         else:
             self._failed(st, sha, why)
             again = f"not trying {short(sha)} again until the hub moves on"
         secs = self.clock() - t0
-        self.result(f"{tag}: FAILED ({why}): back on {short(build)}" + (f" (adapter {have_c[:7]})" if have_c else "")
-                    + f": {'ok' if not back else 'FAILED TOO: ' + back}; {again}")
+        self.result(f"{tag}: FAILED ({why}): back on {short(build)}"
+                    + f": {'ok' if not back else 'FAILED TOO: ' + back}; {again}",
+                    detail="; ".join(x for x in (f"adapter {ac[:7]} failed" if only and ac else "",
+                                                 f"adapter {have_c[:7]} runs" if have_c else "") if x))
         self.save(st, state="current" if only else "failed", current=self.current()[1] or build,
                   last=dict(last, result="rolled back" if not back else "rollback failed",
                             why=why + ("" if not back else f"; going back: {back}"), seconds=round(secs)))

@@ -340,7 +340,10 @@ built **once**, as the sizeup user, checked and kept root's in `/opt/sizeup/adap
 package that the venv already has or another distribution's RECORD claims, then **unpacks** the rest itself into a
 hard-linked copy of the staged release, `releases/<sha>-a<adapter commit>`: no pip, no interpreter (the old version
 goes by its RECORD). Its **preflight** runs as the sizeup user with no credentials: it imports, has a
-`sizeup.incident_sources` entry point, and its module's `self_check()` (if it has one) returns `""` or `None`. Root's
+`sizeup.incident_sources` entry point, and its module's `self_check()` passes. The contract: an optional
+module-level `self_check()`, no arguments, run with no credentials; it passes by returning `None`, `""`, `True` or an
+empty list, and fails by returning a reason (a string) or a list of reasons, or by raising (only the exception's type
+is kept). Root's
 other interpreters never read a venv's site-packages either (`-I -S` for compileall, `-S` for `sdr-serial`, the
 donor-venv check as the sizeup user). No adapter or dependency code ever runs as root.
 
@@ -358,6 +361,12 @@ next check takes it out again).
 Watching it: `sizeup-station status` / `doctor` ("adapter: NAME abc1234 installed"), the station page's Hub row and
 the hub's Settings > Health (Version and updates > Adapter): the repo's short name, the installed commit, installed
 or running (the runner's word, each source's own health) or failing. Never a credential or the repo's URL.
+
+The adapter stays out of the **public** deploy check: the update's result line (`last.line`), `last.why` and sizeup's
+own failures say only "the adapter" (no reason, repo name or commit; a release name's adapter commit becomes
+`+adapter`), because `GET /api/station/status` passes them to `tools/deploy_check.py`, which prints them into the
+GitHub Actions log of this public repo. The adapter's own words are in state.json `adapter`, `last.adapter_why`, the
+station's journal and `/var/log/sizeup-update.log`, and the hub's Settings > Health (behind Cloudflare Access).
 
 **Reset from the hub.** An adapter may stop with "failing: login (manual reset needed)" to protect a shared account.
 An admin resets it from the hub: Settings > Health, a Reset button beside each source that is failing (with a

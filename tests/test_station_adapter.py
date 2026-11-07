@@ -222,7 +222,7 @@ def test_an_adapter_that_fails_its_preflight_is_never_switched_to(station):
     rec = u.load()["adapter"]
     assert "FEED_USER is not set" in rec["failed"][bad]["why"]
     assert u.load()["last"]["result"] == "adapter not built" and not u.load().get("failed")
-    assert "not switched: adapter" in u.p.log.read_text().splitlines()[-1]
+    assert "not switched: the adapter didn't build" in u.p.log.read_text().splitlines()[-1]
     assert not (u.p.releases / au.release_name(s, bad)).exists()   # nothing left half-built
     view = u.report()["adapter"]
     assert view["state"] == "failing" and f"{bad[:7]} failed" in view["text"]
@@ -281,7 +281,7 @@ def test_an_adapter_release_that_doesnt_come_up_is_switched_back(station):
     assert u.run() == 1
     assert u.calls == [("stage", s), ("activate", au.release_name(s, c2)), ("activate", au.release_name(s, c1))]
     assert u.installed()["commit"] == c1 and c2 in u.load()["adapter"]["failed"]
-    assert "not trying adapter" in u.p.log.read_text().splitlines()[-1]
+    assert "not trying that adapter commit" in u.p.log.read_text().splitlines()[-1]
 
 
 def test_a_fetch_that_fails_changes_nothing(station):
@@ -901,7 +901,7 @@ def test_a_release_with_the_adapter_that_doesnt_come_up_retries_without_it(stati
     assert u.current() == (new, new) and u.installed() is None             # sizeup's release runs, without it
     assert new not in u.load().get("failed", {}) and c1 in u.load()["adapter"]["failed"]
     assert u.calls[-3:] == [("activate", au.release_name(new, c1)), ("activate", good), ("activate", new)]
-    assert "without adapter" in u.p.log.read_text().splitlines()[-1]
+    assert "without the adapter" in u.p.log.read_text().splitlines()[-1]
     # (the reviewer's probe: both with and without the adapter fail: then it is sizeup's)
     newer = repo.commit("three")
     u.unhealthy.add(newer)
@@ -1091,3 +1091,106 @@ def test_adapters_imports_nothing_from_sources_at_load():
                         "import sizeup.cloud.adapters; print(any(m.startswith('sizeup.sources') for m in sys.modules))"],
                        capture_output=True, text=True)
     assert r.returncode == 0 and r.stdout.strip() == "False", r.stderr[-400:]
+
+
+# -- the public deploy check never shows the adapter (review of #305) -----------------------------------------------
+
+REASON = "zq-reason-only-the-adapter-says"
+
+
+def _private_repo(station, tmp_path):
+    """The stand-in renamed so its short name can't be mistaken for the word "adapter"; its self-check fails with
+    REASON (a list: #305's contract)."""
+    repo, u, ad = station
+    named = tmp_path / "zq-private-src.git"
+    shutil.move(ad.bare, named)
+    ad.bare = named
+    return repo, u, ad
+
+
+def _public_output(u, monkeypatch, capsys, hub_build: str) -> tuple[str, dict]:
+    """What the hub's GET /api/station/status answers for this station, and what tools/deploy_check.py prints from it
+    in GitHub Actions (stdout and stderr): (the printed text + the JSON, the model the Health page shows)."""
+    from sizeup.cloud.health import StationHealth
+    from tests.test_deploy_check import dc
+    from tests.test_health import FakeHub, cfg as hcfg, station_status
+    w = au.Watch(own=u.current()[1], run_dir="", state_path=str(u.p.state), clock=lambda: 1e9, log=lambda m: None,
+                 release=u.p.current.resolve())
+    w.hub_build = hub_build
+    hub = FakeHub()
+    hub.build, hub.last_state = hub_build, hub.now
+    hub.status = station_status(build=u.current()[1], version=w.status())
+    h = StationHealth(hub, hcfg(), None, None, lambda m: None, clock=lambda: hub.now)
+    st = h.status()
+    monkeypatch.setenv("SIZEUP_STATUS_TOKEN", "t")
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setattr(dc, "fetch", lambda *a, **k: (json.loads(json.dumps(st)), "", 200))
+    capsys.readouterr()
+    dc.main(["--url", "https://hub.example", "--build", hub_build, "--timeout", "0", "--every", "0"])
+    out = capsys.readouterr()
+    return out.out + out.err + json.dumps(st), h.model()
+
+
+def _assert_private(text: str, ad, u) -> None:
+    secrets = [REASON, "zq-private-src", str(ad.bare)]
+    for c in ad.commits:
+        secrets += [c[:7], c[:12], c]
+    leaked = [x for x in secrets if x in text]
+    assert not leaked, (leaked, text)
+    assert "-a" + ad.commits[0][:7] not in text
+
+
+@pytest.mark.parametrize("case", ["adapter-only preflight", "sizeup update, new adapter commit fails",
+                                  "release with the adapter doesn't come up", "neither comes up",
+                                  "adapter-only rebuild doesn't come up"])
+def test_the_public_deploy_check_never_shows_the_adapters_reason_repo_or_commit(station, tmp_path, monkeypatch,
+                                                                                capsys, case):
+    repo, u, ad = _private_repo(station, tmp_path)
+    s = repo.shas[0]
+    u.set_up(ad.bare)
+    u.want(s)
+    assert u.run() == 0
+    c1 = ad.commits[0]
+    bad = f"def make(ctx):\n    return []\n\ndef self_check():\n    return [{REASON!r}, '']\n"
+    hub_build = s
+    if case == "adapter-only preflight":
+        ad.commits.append(ad.commit(bad))
+        assert u.run() == 1 and u.load()["last"]["result"] == "adapter not built"
+    elif case == "sizeup update, new adapter commit fails":
+        ad.commits.append(ad.commit(bad))
+        hub_build = repo.commit("two")
+        u.want(hub_build)
+        assert u.run() == 0 and u.current()[1] == hub_build and u.load()["last"]["adapter_why"]
+    elif case == "release with the adapter doesn't come up":
+        hub_build = repo.commit("two")
+        u.unhealthy_releases = {au.release_name(hub_build, c1)}
+        u.want(hub_build)
+        assert u.run() == 0 and u.current() == (hub_build, hub_build)
+    elif case == "neither comes up":
+        hub_build = repo.commit("two")
+        u.unhealthy.add(hub_build)
+        u.want(hub_build)
+        assert u.run() == 1 and hub_build in u.load()["failed"]
+    else:
+        ad.commits.append(ad.commit("def make(ctx):\n    return []\n"))
+        u.unhealthy.add(s)
+        assert u.run() == 1 and "FAILED" in u.load()["last"]["line"]
+    text, model = _public_output(u, monkeypatch, capsys, hub_build)
+    assert "::notice" in text or "::error" in text                        # (it did print the station's word)
+    _assert_private(text, ad, u)
+    # the adapter's own words stay where they belong: the Health page (Access) and the station's own log
+    page = json.dumps(model)
+    assert "zq-private-src" in page
+    if case in ("adapter-only preflight", "sizeup update, new adapter commit fails"):
+        assert REASON in page and REASON in u.p.log.read_text()
+
+
+def test_self_check_may_return_a_list_empty_is_a_pass(station):
+    repo, u, ad = station
+    ad.commits.append(ad.commit("def make(ctx):\n    return []\n\ndef self_check():\n    return []\n"))
+    u.set_up(ad.bare)
+    u.want(repo.shas[0])
+    assert u.run() == 0 and u.installed()["commit"] == ad.commits[-1]
+    bad = ad.commit("def make(ctx):\n    return []\n\ndef self_check():\n    return ['no FEED_USER', 'no FEED_PASS']\n")
+    assert u.run() == 1
+    assert "no FEED_USER; no FEED_PASS" in u.load()["adapter"]["failed"][bad]["why"]
