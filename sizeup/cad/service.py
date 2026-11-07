@@ -308,7 +308,7 @@ class Cad:
             try:
                 self.sources.decorate(incs)               # a feed's jurisdiction and run numbers on the incident (#297)
             except Exception as e:  # noqa: BLE001
-                self.log(f"CAD: incident sources: {type(e).__name__}: {e}")
+                self.log(f"CAD: incident sources: {type(e).__name__}")
             self._decorate_auto(incs)
             self._state = (rev, {
                 "department": self.s.department,
@@ -354,7 +354,7 @@ class Cad:
         try:
             return self.sources.state(now)
         except Exception as e:  # noqa: BLE001
-            self.log(f"CAD: incident sources: {type(e).__name__}: {e}")
+            self.log(f"CAD: incident sources: {type(e).__name__}")
             return None
 
     def _on_text(self, tid: str) -> None:
@@ -363,7 +363,7 @@ class Cad:
         try:
             self.radiolog.consider(tid)
         except Exception as e:  # noqa: BLE001 - the log never stops the transcript
-            self.log(f"CAD: radio log: {type(e).__name__}: {e}")
+            self.log(f"CAD: radio log: {type(e).__name__}")
         try:
             self.auto.on_hints(self.hints.consider(tid))
         finally:
@@ -376,7 +376,7 @@ class Cad:
         try:
             self.auto.decorate(incs)                      # #311: each automatic step, its source and its undo
         except Exception as e:  # noqa: BLE001
-            self.log(f"CAD: dispatch mode: {type(e).__name__}: {e}")
+            self.log(f"CAD: dispatch mode: {type(e).__name__}")
         return incs
 
     def source_event(self, d: dict) -> int | None:
@@ -697,10 +697,14 @@ class Cad:
         op = _text(body, "operator", OPERATOR_MAX)
         f = {k: _text(body, k, 24) for k in ("type", "subtype") if k in body}
         if f:
-            self.store.update_incident(iid, f, op)
-            self.sources.mark_manual(iid, ["type"], op)       # a person picked it (#297: a feed only notes its own)
+            before = self.store.incident(iid)
+            after = self.store.update_incident(iid, f, op)
+            # a person changed it (#297: a feed only notes its own from then on). The console sends the type it shows
+            # with every accept: the same type and subtype back is not an edit, and the feed keeps its authority
+            if any(before[k] != after[k] for k in ("type", "subtype")):
+                self.sources.mark_manual(iid, ["type"], op)
         out = self.store.accept(iid, op)
-        self.auto.accepted(iid)                               # #311: what the feed said so far is never replayed
+        self.auto.accepted(iid)                               # #311: listed units dispatched, nothing replayed
         return out
 
     def dismiss(self, iid: int, body: dict) -> dict:

@@ -1,5 +1,5 @@
-"""Remote resets of incident-source adapters (#297, used by #305's sources_reset job): an adapter that stopped itself to
-protect a shared account starts over when a person asks. The owner of Resets: sizeup/sources/runner.py keeps one
+"""Remote resets of incident-source adapters (#297, used by #305's sources_reset job): an adapter that stopped itself
+starts over when a person asks. The owner of Resets: sizeup/sources/runner.py keeps one
 (SourceRunner.resets) and sizeup/cloud/adapters.py (#305) queues requests into it. Standard library only; it imports
 nothing of sizeup, so nothing can import it in a circle."""
 

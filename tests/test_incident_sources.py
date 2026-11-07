@@ -58,7 +58,7 @@ class Rig:
 
     def sink(self, kind: str, d: dict) -> None:
         self.sent.append((kind, d))
-        (self.cad.sources.on_event if kind == "source_event" else self.cad.sources.on_health)(d)
+        self.cad.sources.apply(kind, d)
 
     def poll(self) -> None:
         """One turn of each adapter's loop: poll_now(reason) when triggered, then the poll."""
@@ -125,7 +125,9 @@ def test_the_runner_sends_new_and_changed_events_and_health_on_change_and_heartb
     clock = Clock()
     feed = FakeFeed(clock=clock)
     sent = []
-    r = SourceRunner([feed], lambda k, d: sent.append((k, d)), log=lambda m: None, clock=clock)
+    seen = []
+    r = SourceRunner([feed], lambda k, d: (seen if k == "source_seen" else sent).append((k, d)), log=lambda m: None,
+                     clock=clock)
     feed.put("A1", type="ALARM/COMM", location="12 Example Ave", units=("E60",), times={"dispatched": T0})
     assert r.step(r.runs[0]) == feed.poll_s
     assert [k for k, _ in sent] == ["source_event", "source_health"]
@@ -142,7 +144,7 @@ def test_the_runner_sends_new_and_changed_events_and_health_on_change_and_heartb
     assert sent[-1][0] == "source_health"                  # the heartbeat
     feed.outage("failing", "HTTP 503", raise_=True)
     waits = [r.step(r.runs[0]) for _ in range(3)]
-    assert waits == [10, 20, 40]                           # backing off while poll() raises
+    assert waits == [30, 60, 120]                          # backing off while poll() raises
     assert sent[-1][1]["state"] == "failing" and "HTTP 503" in sent[-1][1]["reason"]
     feed.put("bad", location=5)                            # breaks the interface: skipped, the rest go on
     feed.recover()
@@ -206,8 +208,8 @@ def test_a_page_creates_its_incident_at_once_and_the_feed_attaches_later_and_tak
     rig.poll()
     [inc] = rig.incidents()
     assert inc["id"] == got["id"] and inc["type"] == "STRU"                  # queued: the feed's type
-    [att] = [x for x in rig.feed_lines(inc["id"]) if x.startswith("County feed: attached")]
-    assert att == "County feed: attached (30 s after Paging) · now authoritative"
+    [att] = [x for x in rig.feed_lines(inc["id"]) if x.startswith("County feed attached")]
+    assert att == "County feed attached 30 s after Paging · authoritative"
     [row] = rig.cad.sources.panel()["incidents"]
     assert {s["source"]: s["lead_s"] for s in row["seen"]} == {PAGING: None, "county": -30.0}
 
@@ -322,18 +324,47 @@ def test_noloc_outage_sequence(tmp_path):
     assert not any("attached" in x for i in (a, b) for x in rig.feed_lines(i["id"]))
 
 
-def test_a_feed_event_never_joins_an_accepted_incident_it_didnt_make(tmp_path):
-    """Review #2: the page was accepted (a person runs it): the feed's event is its own queued incident, noted."""
+def test_a_page_that_beats_the_feed_gets_the_feeds_report_after_it_is_accepted(tmp_path):
+    """Review 4 #4: the page first, accepted (the console sends the type it shows): the feed's event for the same place
+    attaches to it, no duplicate. The page's type was never a person's, so the feed's applies."""
     rig = Rig(tmp_path)
     page = rig.page()
-    rig.cad.accept(page["id"], {"type": "ALARM", "subtype": "COMM", "operator": "Lt. Test"})
+    shown = rig.cad.store.incident(page["id"])
+    rig.cad.accept(page["id"], {"operator": "Lt. Test", "type": shown["type"], "subtype": shown["subtype"]})
+    assert rig.cad.sources.manual(page["id"]) == set()
+    rig.at(40)
+    rig.feed.put("A1", type="STRU", location="12 EXAMPLE AVE : @SAMPLE PLACE", units=("E60",),
+                 times={"dispatched": T0 + 30})
+    rig.poll()
+    [inc] = rig.incidents()
+    assert (inc["id"], inc["status"], inc["type"]) == (page["id"], "pending", "STRU")
+    assert inc["address"] == "12 Example Avenue"                    # the same place: the page's wording stays
+    assert rig.cad.store.one("SELECT incident_id FROM source_reports WHERE ref = 'A1'")["incident_id"] == page["id"]
+    assert any(x.startswith("County feed attached") for x in rig.feed_lines(inc["id"]))
+
+
+def test_a_page_accepted_with_a_type_picked_keeps_it_when_the_feed_attaches(tmp_path):
+    rig = Rig(tmp_path)
+    page = rig.page()
+    rig.cad.accept(page["id"], {"operator": "Lt. Test", "type": "ALARM", "subtype": "RESD"})
+    assert rig.cad.sources.manual(page["id"]) == {"type"}
     rig.at(40)
     rig.feed.put("A1", type="STRU", location="12 Example Ave", units=("E60",), times={"dispatched": T0 + 30})
     rig.poll()
-    a, b = rig.incidents()
-    num = rig.cad.store.incident(a["id"])["number"]
-    assert (b["source"], b["status"]) == ("CAD feed", "queued") and rig.cad.store.incident(a["id"])["type"] == "ALARM"
-    assert f"Possibly the same as #{num}: 12 Example Avenue" in rig.feed_lines(b["id"])
+    [inc] = rig.incidents()
+    assert (inc["type"], inc["subtype"]) == ("ALARM", "RESD")
+    assert "County feed: type STRU (kept the type set by hand)" in rig.feed_lines(inc["id"])
+
+
+def test_a_feed_event_attaching_to_a_person_s_incident_keeps_their_type_and_location(tmp_path):
+    rig = Rig(tmp_path)
+    inc = rig.cad.create({"type": "ALARM", "subtype": "COMM", "address": "12 Example Ave", "operator": "Lt. Test"})
+    rig.at(30)
+    rig.feed.put("A1", type="STRU", location="12 EXAMPLE AVE APT 3", units=("E60",), times={"dispatched": T0 + 20})
+    rig.poll()
+    [got] = rig.incidents()
+    assert (got["id"], got["type"], got["address"]) == (inc["id"], "ALARM", "12 Example Ave")
+    assert rig.cad.sources.manual(inc["id"]) == {"type", "location"}
 
 
 def test_a_person_s_type_location_and_pin_are_kept_and_use_the_feeds_is_one_click(tmp_path):
@@ -352,8 +383,8 @@ def test_a_person_s_type_location_and_pin_are_kept_and_use_the_feeds_is_one_clic
     a = rig.cad.store.incident(inc["id"])
     assert (a["address"], a["type"], a["lat"]) == ("400 Sample St", "STRU", 41.0)
     lines = rig.feed_lines(inc["id"])
-    assert "County feed: location 14 EXAMPLE AVE (the location set by hand kept: Use County feed's location)" in lines
-    assert "County feed: type ALARM/RESD (the type set by hand kept: Use County feed's type)" in lines
+    assert "County feed: location 14 EXAMPLE AVE (kept the location set by hand)" in lines
+    assert "County feed: type ALARM/RESD (kept the type set by hand)" in lines
     [shown] = [i for i in rig.cad.state()["incidents"] if i["id"] == inc["id"]]
     assert shown["feed"]["use"] == {"type": "ALARM/RESD", "location": "14 EXAMPLE AVE"}
     rig.cad.feed_use(inc["id"], {"field": "location", "operator": "Lt. Test"})
@@ -391,7 +422,7 @@ def test_every_feed_change_and_comment_is_on_the_timeline(tmp_path):
     rig.feed.change("A1", closed=True, times={"in_service": T0 + 900})
     rig.at(900)
     rig.poll()
-    assert rig.feed_lines(inc["id"])[-2:] == ["County feed: in service 14:45:00", "County feed: closed in the feed"]
+    assert rig.feed_lines(inc["id"])[-2:] == ["County feed: in service 14:45:00", "County feed: closed"]
 
 
 def test_two_events_are_two_incidents(tmp_path):
@@ -418,7 +449,7 @@ def test_a_lower_ranked_feed_creates_at_once_the_primary_attaches_and_rules(tmp_
     mirror.change("M1", location="99 Elsewhere Rd")
     rig.poll()
     assert rig.cad.store.incident(inc["id"])["address"] == "12 Example Ave"
-    assert "Mirror feed (not authoritative): location 99 Elsewhere Rd" in rig.feed_lines(inc["id"])
+    assert "Mirror feed (secondary): location 99 Elsewhere Rd" in rig.feed_lines(inc["id"])
     county.outage("failing", "HTTP 500")
     rig.at(70)
     rig.poll()
@@ -705,10 +736,10 @@ def test_triggers_ask_the_adapters_to_poll_now(tmp_path):
     traffic(rig.cad, "f-t0", "Stand by for a page, Port Chester", T0 + 1)
     rig.poll()
     assert rig.feed.pokes == ["radio pre-alert"]                                        # at most every TRIGGER_MIN_S
-    rig.at(10)
+    rig.at(40)
     from sizeup.prealert import PreAlerts
     pa = PreAlerts(rig.cad, "http://127.0.0.1:9", "ring", "status", log=lambda m: None)
-    pa.ring({"id": "r1", "time": T0 + 10, "event": "message", "topic": "ring", "title": "STATION PHONE RINGING",
+    pa.ring({"id": "r1", "time": T0 + 40, "event": "message", "topic": "ring", "title": "STATION PHONE RINGING",
              "message": "Incoming call", "priority": 5})
     rig.poll()
     assert rig.feed.pokes[-1] == "phone pre-alert" and rig.incidents() == []
@@ -757,8 +788,8 @@ def test_a_merge_dismisses_only_the_same_sources_queued_incident(tmp_path):
     rig.feed.change("A1", aliases=("B2",), units=("E60", "E62"))
     rig.poll()
     assert rig.cad.store.incident(b["id"])["status"] == "dismissed"
-    assert f"County feed: event B2 merged into A1 (event #{a['id']})" in rig.feed_lines(b["id"])
-    assert f"County feed: event B2 merged into A1 (event #{b['id']})" in rig.feed_lines(a["id"])
+    assert f"County feed: merged into #{a['id']}" in rig.feed_lines(b["id"])
+    assert f"County feed: merged #{b['id']} into this" in rig.feed_lines(a["id"])
     n = len(rig.feed_lines(b["id"]))
     rig.at(90)
     rig.feed.change("B2", location="402 Sample St")             # the feed still sends B: ignored
@@ -779,7 +810,7 @@ def test_a_merge_never_dismisses_an_accepted_incident_and_keeps_its_report(tmp_p
     rig.poll()
     assert rig.cad.store.incident(b["id"])["status"] == "pending"
     assert rig.cad.store.one("SELECT incident_id FROM source_reports WHERE ref = 'B1'")["incident_id"] == b["id"]
-    assert f"County feed: event B1 merged into A1 (event #{a['id']}): kept, check it" in rig.feed_lines(b["id"])
+    assert f"County feed: merged into #{a['id']} (kept: check it)" in rig.feed_lines(b["id"])
     rig.at(60)                                                   # B's incident is still taken: a new call is its own
     rig.feed.put("C1", type="STRU", location="9 Far Rd", units=("E62",), times={"dispatched": T0 + 60})
     rig.poll()
@@ -821,7 +852,7 @@ def test_a_reset_runs_on_the_adapters_own_thread_and_starts_the_back_off_over(tm
             ran.append(threading.current_thread().name)
             self.recover()
     feed = Locked()
-    feed.outage("failing", "login (manual reset needed)", raise_=True)
+    feed.outage("failing", "stopped itself", raise_=True)
     r = SourceRunner([feed, FakeFeed("other", "Other feed")], lambda k, d: None, log=lambda m: None)
     run = r.runs[0]
     for _ in range(3):
@@ -845,7 +876,7 @@ def test_a_reset_runs_on_the_adapters_own_thread_and_starts_the_back_off_over(tm
     assert any("no reset()" in m for m in lines)
 
 
-# -- the second review: no-location reports, address formats, triggers in an outage, edits while queued ----------------
+# -- the second review: no-location reports, location formats, triggers in an outage, edits while queued ----------------
 
 
 PAGE_NO_PLACE = "Port Chester Fire Department, Engine 60, respond to an activated fire alarm. Time out 1440."
@@ -880,7 +911,7 @@ def test_a_feed_event_with_no_location_never_attaches_to_a_page_s_incident_by_un
     assert any(x.startswith(f"Possibly the same as #{p['id']}") for x in rig.feed_lines(b["id"]))
 
 
-# The external CAD's location formats (synthetic names only) against ours: same place?
+# Location formats, mixed and synthetic (made-up names), against ours: same place?
 FORMATS = [
     ("12 Example Avenue", "12 EXAMPLE AVENUE : @SAMPLE PLACE", True),
     ("12 Example Avenue", "12 EXAMPLE AVE @ SAMPLE PLACE", True),
@@ -917,7 +948,7 @@ FORMATS = [
 
 
 @pytest.mark.parametrize("ours,theirs,same", FORMATS)
-def test_the_external_cads_location_formats(ours, theirs, same):
+def test_location_formats(ours, theirs, same):
     assert same_place(ours, theirs) is same
     assert same_place(theirs, ours) is same
 
@@ -934,7 +965,7 @@ def test_a_duplicate_is_never_silent(tmp_path):
     assert page["id"] != a["id"]
     assert any(x.startswith(f"Possibly the same as #{a['id']}") for x in rig.feed_lines(page["id"]))
     assert any(x.startswith(f"Possibly the same as #{page['id']}") for x in rig.feed_lines(a["id"]))
-    # the real format, the same place: attached, not a duplicate
+    # the same place written another way: attached, not a duplicate
     rig.at(60)
     rig.feed.put("A2", type="ALARM/COMM", location="12 EXAMPLE AVENUE   : @SAMPLE SCHOOL - EXAMPLE VILLAGE EXAMPLE_TOWN",
                  units=("E60",), times={"dispatched": T0 + 50})
@@ -1118,3 +1149,282 @@ def test_the_town_list_follows_settings_lists(tmp_path):
     rig.cad.lists = replace(rig.cad.lists, geo_town_order=(*rig.cad.lists.geo_town_order, "Sampleton", "Otherton"))
     rig.cad.sources._towns()                                # as match() and decorate() do on every call
     assert not same_place("12 Example Ave, Sampleton", "12 Example Ave, Otherton")
+
+
+# -- the fourth review: county data stays in the department, gentle triggers, authority, closure, logs -------------------
+
+
+class Pushes:
+    """A notifier that keeps what it was asked to send (no network)."""
+    enabled = True
+
+    def __init__(self):
+        self.sent = []
+
+    def send(self, title, body, priority=3, tags=(), click="", who=None):
+        self.sent.append({"title": title, "body": body, "who": who})
+        return True
+
+
+def _alarm_on(cad, iid: int, tid: str) -> dict:
+    now = cad.store.clock() if hasattr(cad.store, "clock") else T0
+    with cad.store.tx() as db:
+        aid = db.execute("INSERT INTO alarms (traffic_id, at, end, created_at, updated_at, level, emergency, text, channel, "
+                         "unit, drill, source, subject, incident_id) VALUES (?, ?, ?, ?, ?, 'alarm', 1, 'mayday', 'FG1', "
+                         "'E60', 0, '', 'mayday', ?)", (tid, now, now, now, now, iid)).lastrowid
+    return cad.alarms.get(aid)
+
+
+def test_a_push_never_carries_an_address_a_feed_set(tmp_path):
+    """Review 4 #1: the push's Who line is public (ntfy): a feed's address never goes in it, only our number."""
+    rig = Rig(tmp_path)
+    rig.feed.put("A1", type="STRU", location="12 EXAMPLE AVE : @SAMPLE PLACE", units=("E60",), times={"dispatched": T0})
+    rig.poll()
+    [fed] = rig.incidents()
+    rig.cad.accept(fed["id"], {"operator": "Lt. Test"})
+    mine = rig.cad.create({"type": "ALARM", "subtype": "COMM", "address": "400 Sample St", "operator": "Lt. Test"})
+    n = Pushes()
+    rig.cad.alarms.notifier = n
+    for iid, tid in ((fed["id"], "t1"), (mine["id"], "t2")):
+        rig.cad.alarms._push(_alarm_on(rig.cad, iid, tid))
+    fed_who, mine_who = n.sent[0]["who"], n.sent[1]["who"]
+    assert fed_who["address"] == "" and fed_who["incident"] == str(rig.cad.store.incident(fed["id"])["number"])
+    assert mine_who["address"] == "400 Sample St"
+    assert not any("EXAMPLE" in json.dumps(p).upper() for p in n.sent[:1])
+    # a person typing another address makes it theirs: pushed again
+    rig.cad.update(fed["id"], {"address": "14 Example Ave", "operator": "Lt. Test"})
+    rig.cad.alarms._push(_alarm_on(rig.cad, fed["id"], "t3"))
+    assert n.sent[-1]["who"]["address"] == "14 Example Ave"
+    # the feed moving it (a field nobody set by hand) is the feed's again
+    rig.cad.sources.feed_use(fed["id"], "location")
+    rig.cad.alarms._push(_alarm_on(rig.cad, fed["id"], "t4"))
+    assert n.sent[-1]["who"]["address"] == ""
+
+
+def test_a_feed_location_is_shown_and_said_as_its_street_part(tmp_path):
+    """Review 4 #14: never the feed's raw location string on the console or in the voice."""
+    rig = Rig(tmp_path)
+    rig.feed.put("A1", type="STRU", location="12 EXAMPLE AVE   : @SAMPLE SCHOOL - SAMPLE VILLAGE", units=("E60",),
+                 times={"dispatched": T0})
+    rig.feed.put("B1", type="EMS", location="@SAMPLE PARK - SAMPLE VILLAGE", units=("E62",), times={"dispatched": T0})
+    rig.poll()
+    a, b = rig.incidents()
+    assert (a["address"], b["address"]) == ("12 EXAMPLE AVE", "@ SAMPLE PARK")
+    assert src.shown_location("") == "" and src.shown_location("12-14 EXAMPLE AVE 3RD FL") == "12 EXAMPLE AVE"
+
+
+def test_triggers_are_gentle_floor_cap_and_never_soon_after_a_poll(tmp_path):
+    """Review 4 #2: tone pairs, pre-alerts and rings come in bursts: at most one triggered poll per max(poll_s, 30 s),
+    at most TRIGGER_MAX in a window, and the triggered poll waits until 30 s after the last one."""
+    from sizeup.sources import TRIGGER_MAX, TRIGGER_MIN_S, TRIGGER_WINDOW_S
+    clock = Clock()
+    feed = FakeFeed(poll_s=45.0, clock=clock)
+    r = SourceRunner([feed], lambda k, d: None, log=lambda m: None, clock=clock)
+    run = r.runs[0]
+    r.step(run)
+    assert r.trigger("paging tones") == 1 and r.hold(run) == TRIGGER_MIN_S
+    taken = [0.0]
+    for dt in (2, 4, 30, 45, 90, 135, 180, 225, 400):
+        clock.t = T0 + dt
+        if r.trigger("paging tones"):
+            taken.append(dt)
+    assert taken == [0.0, 45, 90, 135] and len(taken) == TRIGGER_MAX           # the floor, then the cap
+    clock.t = T0 + TRIGGER_WINDOW_S
+    assert r.trigger("phone pre-alert") == 1                                    # the window moved on
+    clock.t = T0 + 10
+    run.polled = T0
+    assert r.hold(run) == 20.0
+    clock.t = T0 + 31
+    assert r.hold(run) == 0.0
+    # a short poll_s never makes polls more often than the floor
+    assert r.step(run) >= 30 and SourceRunner([FakeFeed(poll_s=5.0)], lambda k, d: None).step(
+        SourceRunner([FakeFeed(poll_s=5.0)], lambda k, d: None).runs[0]) == 30
+
+
+def test_the_contract_says_poll_now_never_bypasses_pacing_and_the_source_is_read_only():
+    import sizeup.sources as iface
+    doc = " ".join(iface.__doc__.split())
+    for said in ("poll_now must NEVER bypass the adapter's own pacing", "never acknowledge, write, mark",
+                 "in-service or cleared time", "no spoofed user agents", "no anti-detection"):
+        assert said in doc, said
+
+
+def test_accepting_with_the_type_the_console_shows_keeps_the_feeds_authority(tmp_path):
+    """Review 4 #3: cad.js sends the type and subtype it shows with Accept: the same ones back are not a person's edit."""
+    rig = Rig(tmp_path)
+    rig.feed.put("A1", type="ALARM/COMM", location="12 Example Ave", units=("E60",), times={"dispatched": T0})
+    rig.poll()
+    [inc] = rig.incidents()
+    rig.cad.accept(inc["id"], {"operator": "Lt. Test", "type": inc["type"], "subtype": inc["subtype"]})
+    assert rig.cad.sources.manual(inc["id"]) == set()
+    rig.at(30)
+    rig.feed.change("A1", type="STRU")
+    rig.poll()
+    assert rig.cad.store.incident(inc["id"])["type"] == "STRU"                 # the feed still rules the type
+
+
+def test_a_feed_event_after_an_outage_still_attaches_to_the_page_s_incident(tmp_path):
+    """Review 4 #8: the feed down half an hour; its event (dispatched then) attaches to the page's call, not recorded
+    only and not a second incident."""
+    rig = Rig(tmp_path)
+    rig.feed.outage("failing", "x", raise_=True)
+    rig.poll()
+    page = rig.page()
+    rig.cad.accept(page["id"], {"operator": "Lt. Test"})
+    rig.at(1800)
+    rig.feed.recover()
+    rig.feed.put("A1", type="STRU", location="12 EXAMPLE AVE", units=("E60", "L31"), times={"dispatched": T0 + 10})
+    rig.poll()
+    [inc] = rig.incidents()
+    assert rig.cad.store.one("SELECT incident_id FROM source_reports WHERE ref = 'A1'")["incident_id"] == page["id"]
+
+
+def test_a_feed_closure_dismisses_only_an_untouched_queued_incident_it_made(tmp_path):
+    """Review 4 #5: closed in the feed (its in-service time): its own untouched queued incident goes; one a person
+    touched, or one a page also has, only gets the line."""
+    rig = Rig(tmp_path)
+    rig.feed.put("A1", type="ALARM", location="12 Example Ave", units=("E60",), times={"dispatched": T0})
+    rig.feed.put("B1", type="ALARM", location="400 Sample St", units=("E62",), times={"dispatched": T0})
+    rig.poll()
+    a, b = rig.incidents()
+    rig.cad.note(b["id"], {"text": "caller called back", "operator": "Lt. Test"})
+    rig.at(600)
+    for e in ("A1", "B1"):
+        rig.feed.change(e, closed=True, times={"in_service": T0 + 590})
+    rig.poll()
+    assert rig.cad.store.incident(a["id"])["status"] == "dismissed"
+    assert rig.cad.store.incident(b["id"])["status"] == "queued" and "County feed: closed" in rig.feed_lines(b["id"])
+
+
+def test_the_runner_lists_the_ids_still_seen_and_the_hub_flags_an_open_report_gone(tmp_path):
+    """Review 4 #5: an event that drops out of the snapshot while open here is noted once, and cleared if it comes back."""
+    from sizeup.sources import SEEN_EVERY_S
+    rig = Rig(tmp_path)
+    rig.feed.put("A1", type="ALARM", location="12 Example Ave", units=("E60",), times={"dispatched": T0})
+    rig.feed.put("B1", type="ALARM", location="400 Sample St", units=("E62",), times={"dispatched": T0})
+    rig.poll()
+    seen = [d for k, d in rig.sent if k == "source_seen"]
+    assert seen and sorted(seen[-1]["ids"]) == ["A1", "B1"] and seen[-1]["complete"]
+    a, b = rig.incidents()
+    ev = rig.feed.events.pop("B1")
+    rig.at(60)
+    rig.poll()                                             # not due yet
+    assert len([k for k, _ in rig.sent if k == "source_seen"]) == 1
+    rig.at(SEEN_EVERY_S)
+    rig.poll()
+    rig.at(2 * SEEN_EVERY_S)
+    rig.poll()
+    assert rig.feed_lines(b["id"]).count("County feed: no longer listed (open here)") == 1
+    assert rig.feed_lines(a["id"]).count("County feed: no longer listed (open here)") == 0
+    [row] = [i for i in rig.cad.sources.panel()["incidents"] if i["id"] == b["id"]]
+    assert row["seen"][0]["gone_at"] == T0 + SEEN_EVERY_S
+    rig.feed.events["B1"] = ev
+    rig.at(3 * SEEN_EVERY_S)
+    rig.poll()
+    assert rig.cad.store.one("SELECT gone_at FROM source_reports WHERE ref = 'B1'")["gone_at"] is None
+
+
+def test_logs_carry_our_incident_ids_and_the_label_never_the_feed_s_data(tmp_path):
+    """Review 4 #6: no feed event id, type or location in a log line (recorded only, created, merged, dismissed)."""
+    rig = Rig(tmp_path)
+    lines = []
+    rig.cad.sources.log = lines.append
+    rig.runner.log = lines.append
+    rig.at(3000)
+    rig.feed.put("OLD9", type="SECRETTYPE", location="77 HIDDEN RD", times={"dispatched": T0})       # recorded only
+    rig.feed.put("ZZ1", type="SECRETTYPE", location="12 HIDDEN RD", units=("E60",), times={"dispatched": T0 + 2990})
+    rig.feed.put("ZZ2", type="SECRETTYPE", location="14 HIDDEN RD", units=("E62",), times={"dispatched": T0 + 2990})
+    rig.poll()
+    rig.at(3030)
+    rig.feed.change("ZZ1", aliases=("ZZ2",))
+    rig.feed.change("ZZ1", closed=True, times={"in_service": T0 + 3020})
+    rig.poll()
+    assert lines and any("County feed" in m for m in lines)
+    for m in lines:
+        assert not any(x in m for x in ("OLD9", "ZZ1", "ZZ2", "SECRETTYPE", "HIDDEN")), m
+
+
+def test_the_hub_retries_a_source_event_that_failed_and_logs_its_type_only(tmp_path):
+    """Review 4 #9 and #6: a source_event that fails to apply is left unacked (the station sends it again), up to
+    SOURCE_RETRIES; the hub's log and last error name the exception's type, never its text."""
+    import sqlite3
+    from sizeup.cloud.hub import SOURCE_RETRIES
+    from tests.test_cloud import HubRun, call, hub_cfg
+    hub = HubRun(hub_cfg(tmp_path))
+    lines = []
+    try:
+        hub.app.hub.log = lines.append
+        real, fails = hub.app.cad.sources.on_event, [2]
+
+        def flaky(d):
+            if fails[0]:
+                fails[0] -= 1
+                raise sqlite3.OperationalError("locked near 12 SECRET AVE")
+            return real(d)
+        hub.app.cad.sources.on_event = flaky
+        now = time.time()
+        ev = FeedEvent("county", "Q1", "STRU", "12 SECRET AVE", ("E60",), {"dispatched": now - 5}).as_dict()
+        batch = {"epoch": "e1", "events": [{"seq": 1, "at": now, "type": "source_event",
+                                            "data": {"source": "county", "label": "County feed", "rank": 1, "seen_at": now,
+                                                     "first_seen": now, "event": ev}}]}
+        assert call(hub.url + "/api/station/events", "POST", batch)[1]["acked"] == 0
+        assert call(hub.url + "/api/station/events", "POST", batch)[1]["acked"] == 0
+        assert call(hub.url + "/api/station/events", "POST", batch)[1] == {"ok": True, "acked": 1, "applied": 1}
+        assert hub.app.cad.store.one("SELECT 1 AS x FROM source_reports WHERE ref = 'Q1'") is not None
+        assert SOURCE_RETRIES == 3 and "SECRET" not in hub.app.hub.last_error
+        assert lines and not any("SECRET" in m for m in lines)
+    finally:
+        hub.close()
+
+
+def test_station_mode_on_sends_again_what_went_to_the_local_cad(tmp_path):
+    """Review 4 #10: events applied here while station mode was Off reach the hub once it is turned on."""
+    clock = Clock()
+    feed = FakeFeed(clock=clock)
+    fwd, sent = [False], []
+    r = SourceRunner([feed], lambda k, d: sent.append((fwd[0], k, d)), log=lambda m: None, clock=clock,
+                     target=lambda: fwd[0])
+    feed.put("A1", type="ALARM", location="12 Example Ave", units=("E60",), times={"dispatched": T0})
+    r.step(r.runs[0])
+    clock.t += 30
+    r.step(r.runs[0])
+    assert [(f, k) for f, k, _ in sent if k == "source_event"] == [(False, "source_event")]
+    fwd[0] = True
+    clock.t += 30
+    r.step(r.runs[0])
+    assert [f for f, k, _ in sent if k == "source_event"] == [False, True]
+    assert sent[-1][0] is True and any(f and k == "source_health" for f, k, _ in sent)
+
+
+def test_a_merge_moves_the_page_off_the_dismissed_incident(tmp_path):
+    """Review 4 #11: a page on B's queued incident moves with B's report when the feed merges B into A."""
+    rig = Rig(tmp_path)
+    rig.feed.put("B2", type="ALARM", location="12 Example Ave", units=("E60",), times={"dispatched": T0})
+    rig.feed.put("A1", type="ALARM", location="400 Sample St", units=("E62",), times={"dispatched": T0})
+    rig.poll()
+    b, a = rig.incidents()
+    rig.at(20)
+    got = rig.page("p1")
+    assert got["id"] == b["id"]
+    rig.at(60)
+    rig.feed.change("A1", aliases=("B2",))
+    rig.poll()
+    assert rig.cad.store.incident(b["id"])["status"] == "dismissed"
+    assert rig.cad.sources.paging_incident(rig.cad.store.one(
+        "SELECT ref FROM source_reports WHERE source = 'paging'")["ref"]) == a["id"]
+    rig.at(90)
+    assert rig.page("p2")["id"] == a["id"]                 # the page's repeat lands on A, not the dismissed B
+
+
+def test_a_feed_is_stale_by_the_hub_s_clock_not_the_station_s(tmp_path):
+    """Review 4 #12: a station clock minutes behind never makes a fresh report stale; no report for 3 min does."""
+    rig = Rig(tmp_path)
+    rig.cad.sources.on_health({"source": "county", "label": "County feed", "rank": 1, "state": "ok",
+                               "at": T0 - 600})                     # the station's clock 10 min behind
+    assert rig.cad.sources.acting()["source"] == "county"
+    rig.at(REPORT_STALE_S + 1)
+    assert rig.cad.sources.tiers()[0]["state"] == "stale"
+
+
+def test_the_runner_has_no_state_rows_any_more():
+    assert not hasattr(SourceRunner, "state")

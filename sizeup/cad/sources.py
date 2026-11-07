@@ -17,8 +17,10 @@ sizeup/sources/runner.py (they come here as "source_event" / "source_health" thr
                equals a numbered address), whatever units they share. A unit in common (assignments not cleared, and
                the reports' units) never joins two reports on its own, with or without locations. Two incidents sharing units in the
                window that may not be joined are noted "possibly the same as #N" on both: a duplicate is never silent
-    attach     a page attaches only to an incident a feed has; a feed event only to a queued one or one a feed made.
-               Any other match: the report makes its own incident, noted "possibly the same as #N" on both
+    attach     a page attaches only to an incident a feed has. A feed event attaches to any match (always a strict
+               same place): a page that beat the feed gets the feed's report, not a duplicate. A person's type and
+               location stand (manual_edits; an incident a person made counts as theirs). Any other near match: the
+               report makes its own incident, noted "possibly the same as #N" on both
     authority  the best-ranked report's type and location are applied to a field no person has edited, whatever the
                status (manual_edits: type, location, pin); otherwise a timeline note, and the incident view
                offers "Use <feed>'s <field>" (feed_use). A pin a person set is never cleared
@@ -27,6 +29,13 @@ sizeup/sources/runner.py (they come here as "source_event" / "source_health" thr
     merge      a feed's event naming other ids of the same source in its aliases: each alias's report is retired
                (merged_into) with a note on both incidents and in the log. The alias's incident is dismissed only when
                it is still queued AND that same source made it (its report then moves onto the event); otherwise a note
+    closed     the feed closed an event (its in-service or cleared time): a queued incident only that event made, and
+               nobody touched, is dismissed; any other gets the timeline line
+    stale      the station sends the ids still in each feed's snapshot ("source_seen"): an open report the feed no
+               longer lists is noted once on its incident and flagged in Settings > Health
+    address    a feed's location is shown (and said) as its street part (shown_location); the addresses a feed put on
+               an incident are recorded (feed_addresses) so a push never carries them (alarms.push_address)
+    logs       our incident ids and the source's label only: never the feed's ids, types, locations or an exception's text
     measure    each report's first-seen time; per incident and source the earliest, and the lead over paging
     trigger    paging tones, a radio pre-alert, the phone ring: poke() tells the adapters to poll now
     incoming   pre-alerts never make an incident: a transmission on the 60 Control feed's talkgroups that names us and is
@@ -66,7 +75,8 @@ CREATE TABLE IF NOT EXISTS source_health (
   state TEXT NOT NULL,                  -- ok | backing_off | failing | stale (as the station reported it)
   reason TEXT NOT NULL DEFAULT '',
   since REAL,
-  at REAL NOT NULL                      -- when the station reported it
+  at REAL NOT NULL,                     -- when the station reported it (the station's clock)
+  received REAL                         -- when the hub got it (the hub's clock: the stale check's)
 );
 CREATE TABLE IF NOT EXISTS source_reports (
   source TEXT NOT NULL,                 -- the adapter's source id, or 'paging'
@@ -78,6 +88,7 @@ CREATE TABLE IF NOT EXISTS source_reports (
   updated_at REAL NOT NULL,
   data TEXT NOT NULL DEFAULT '{}',      -- the report as last seen (a feed: FeedEvent.as_dict; paging: the page's fields)
   merged_into TEXT NOT NULL DEFAULT '', -- the feed merged this event into that one (its aliases): retired, ignored after
+  gone_at REAL,                         -- the feed's snapshot stopped listing it while it was open here (source_seen)
   PRIMARY KEY (source, ref)
 );
 CREATE INDEX IF NOT EXISTS source_reports_incident ON source_reports(incident_id);
@@ -87,6 +98,11 @@ CREATE TABLE IF NOT EXISTS manual_edits (     -- a person set this field: a feed
   at REAL NOT NULL,
   operator TEXT NOT NULL DEFAULT '',
   PRIMARY KEY (incident_id, field)
+);
+CREATE TABLE IF NOT EXISTS feed_addresses (   -- an address a feed put on an incident: never in a push (#297)
+  incident_id INTEGER NOT NULL,
+  address TEXT NOT NULL,
+  PRIMARY KEY (incident_id, address)
 );
 CREATE TABLE IF NOT EXISTS incoming (
   id INTEGER PRIMARY KEY,
@@ -208,10 +224,10 @@ def _snake_town(m) -> str:
 
 
 def street_part(s: str) -> str:
-    """The street part of a location as CADs write it: '12 EXAMPLE AVE   : @SAMPLE SCHOOL - EXAMPLE VILLAGE EXAMPLE_TOWN'
-    -> '12 EXAMPLE AVE'; '@SAMPLE SCHOOL (12 EXAMPLE AVE)' -> '12 EXAMPLE AVE'; '12-14 EXAMPLE AVE 3RD FL' ->
-    '12 EXAMPLE AVE'. A named place, ' - ...', ';...', '(...)', '[...]', the town after a comma, UPPER_SNAKE town
-    tokens, floors, units and apartments are left out; a range is its first number. '' for a place only."""
+    """The street part of a location: '12 EXAMPLE AVE : @SAMPLE PLACE' -> '12 EXAMPLE AVE'; '@SAMPLE PLACE (12 EXAMPLE
+    AVE)' -> '12 EXAMPLE AVE'; '12-14 EXAMPLE AVE 3RD FL' -> '12 EXAMPLE AVE'. A named place, ' - ...', ';...', '(...)',
+    '[...]', the town after a comma, UPPER_SNAKE town tokens, floors, units and apartments are left out; a range is its
+    first number. '' for a place only."""
     s = (s or "").strip()
     m = re.match(r"^\s*@[^(]*\(([^)]*)\)", s)
     if m:                                                   # @PLACE (ADDRESS)
@@ -225,6 +241,18 @@ def street_part(s: str) -> str:
     s = UNIT_TAIL.sub("", s)
     s = re.sub(r"^\s*(\d+)[a-z]?\s*-\s*\d+[a-z]?\b", r"\1", s, flags=re.I)
     return " ".join(s.split())
+
+
+def shown_location(s: str) -> str:
+    """A feed's location as the console shows it and the voice says it: its street part ('12 EXAMPLE AVE'), else its
+    named place ('@ SAMPLE SCHOOL'), else the text as given. Never the feed's whole raw string."""
+    s = (s or "").strip()
+    part = street_part(s)
+    if part:
+        return part[:200]
+    m = re.search(r"@\s*([^():;\[\],@]+)", s)
+    name = " ".join(re.split(r"\s+-\s+", m.group(1))[0].split()) if m else ""
+    return (f"@ {name}" if name else s)[:200]
 
 
 def _place_only(s: str) -> frozenset:
@@ -318,6 +346,10 @@ class Sources:
         self._stop = threading.Event()
         with self.store.lock:
             self.store.db.executescript(SCHEMA)
+            for table, col in (("source_health", "received REAL"), ("source_reports", "gone_at REAL")):
+                have = {r[1] for r in self.store.db.execute(f"PRAGMA table_info({table})")}
+                if col.split()[0] not in have:
+                    self.store.db.execute(f"ALTER TABLE {table} ADD COLUMN {col}")
         self._towns_for = None
         self._towns()
 
@@ -341,11 +373,12 @@ class Sources:
         label = str(d.get("label") or src)[:60]
         before = self.acting()
         with self.store.tx() as db:
-            db.execute("INSERT INTO source_health (source, label, rank, state, reason, since, at) VALUES (?, ?, ?, ?, ?, ?, ?) "
-                       "ON CONFLICT(source) DO UPDATE SET label = excluded.label, rank = excluded.rank, state = excluded.state, "
-                       "reason = excluded.reason, since = excluded.since, at = excluded.at WHERE excluded.at >= source_health.at",
+            db.execute("INSERT INTO source_health (source, label, rank, state, reason, since, at, received) "
+                       "VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(source) DO UPDATE SET label = excluded.label, "
+                       "rank = excluded.rank, state = excluded.state, reason = excluded.reason, since = excluded.since, "
+                       "at = excluded.at, received = excluded.received WHERE excluded.at >= source_health.at",
                        (src, label, rank, state, str(d.get("reason") or "")[:200],
-                        d.get("since") if isinstance(d.get("since"), (int, float)) else None, float(at)))
+                        d.get("since") if isinstance(d.get("since"), (int, float)) else None, float(at), self.clock()))
         after = self.acting()
         if (before or {}).get("source") != (after or {}).get("source"):
             self.log(f"incident sources: acting primary {(before or {}).get('label', 'none')} -> {(after or {}).get('label', 'none')}")
@@ -354,10 +387,11 @@ class Sources:
         """Every tier, best first: {source, label, rank, state, reason, at, healthy, acting}."""
         now = self.clock() if now is None else now
         out = []
-        for r in self.store.q("SELECT * FROM source_health WHERE at >= ? ORDER BY rank, source", (now - FORGET_S,)):
+        for r in self.store.q("SELECT *, COALESCE(received, at) AS got FROM source_health WHERE COALESCE(received, at) >= ? "
+                              "ORDER BY rank, source", (now - FORGET_S,)):
             state, reason = r["state"], r["reason"]
-            if now - r["at"] > REPORT_STALE_S:
-                state, reason = "stale", f"no report since {_hm(r['at'])}"
+            if now - r["got"] > REPORT_STALE_S:              # the hub's own clock: a station's skew never hides it
+                state, reason = "stale", f"no report since {_hm(r['got'])}"
             out.append({"source": r["source"], "label": r["label"], "rank": r["rank"], "state": state, "reason": reason,
                         "at": r["at"], "healthy": state == "ok"})
         try:
@@ -449,7 +483,7 @@ class Sources:
                               at=now)
             self.store._event(db, other["id"], "feed", f"Possibly the same as {_ref(new)}: {new['address'] or '(no location)'}",
                               at=now)
-        self.log(f"incident sources: event {new_id} possibly the same as {other['id']}")
+        self.log(f"incident sources: event {new_id} possibly the same as event {other['id']}")
         if self.on_possibly is not None:
             self.on_possibly(new_id, other["id"])
 
@@ -476,9 +510,10 @@ class Sources:
 
     def _location_fields(self, iid: int, loc: str) -> dict:
         """The fields for a feed's location: the address, and a new pin only when no person set one."""
-        f = {"address": loc[:200], "place": "", "place_address": "", "geo_alts": ""}
+        shown = shown_location(loc)
+        f = {"address": shown, "place": "", "place_address": "", "geo_alts": ""}
         if "pin" not in self.manual(iid):
-            g = {"address": loc[:200], "lat": None, "lon": None, "geo_label": ""}
+            g = {"address": shown, "lat": None, "lon": None, "geo_label": ""}
             self.cad._auto_geo(g)
             f.update(lat=g["lat"], lon=g["lon"], geo_label=g["geo_label"])
         return f
@@ -503,12 +538,37 @@ class Sources:
                 raise CadError(f"{r['label']} has no location")
             f = self._location_fields(iid, loc)
         inc = self.store.update_incident(iid, f, operator=operator)
+        if field == "location":
+            self._fed_address(iid)
         with self.store.tx() as db:
             db.execute("DELETE FROM manual_edits WHERE incident_id = ? AND field = ?", (iid, field))
             self.store._event(db, iid, "feed", f"Used {r['label']}'s {field}", operator, at=self.clock())
         return inc
 
+    # -- addresses a feed set (never in a push) ---------------------------------------------------------------------
+
+    def _fed_address(self, iid: int) -> None:
+        """The incident's address now came from a feed: on record, so no push carries it."""
+        addr = (self.store.incident(iid)["address"] or "").strip()
+        if addr:
+            with self.store.tx() as db:
+                db.execute("INSERT OR IGNORE INTO feed_addresses (incident_id, address) VALUES (?, ?)", (iid, addr))
+
+    def feed_address(self, iid: int, address: str) -> bool:
+        """This address on this incident came from a feed (alarms.push_address leaves it out of a push)."""
+        return self.store.one("SELECT 1 AS x FROM feed_addresses WHERE incident_id = ? AND address = ?",
+                              (iid, (address or "").strip())) is not None
+
     # -- a feed's event ----------------------------------------------------------------------------------------------
+
+    def apply(self, kind: str, d: dict) -> None:
+        """One of the station's (or this machine's runner's) source_event / source_health / source_seen."""
+        if kind == "source_event":
+            self.on_event(d)
+        elif kind == "source_health":
+            self.on_health(d)
+        elif kind == "source_seen":
+            self.on_seen(d)
 
     def on_event(self, d: dict) -> int | None:
         """A "source_event" from the station: applied as a change, attached, created, or (closed or old) recorded only.
@@ -527,17 +587,25 @@ class Sources:
             prev = json.loads(rep["data"]) if rep else None
             if rep and rep["incident_id"]:
                 self._put(ev.source, ev.event_id, rank, label, seen, data)
+                if rep["gone_at"] is not None:                # listed again
+                    with self.store.tx() as db:
+                        db.execute("UPDATE source_reports SET gone_at = NULL WHERE source = ? AND ref = ?",
+                                   (ev.source, ev.event_id))
                 self._apply(rep["incident_id"], prev, data, label, rank)
                 self._merge(ev.source, ev.event_id, rep["incident_id"], data, label)
+                if data["closed"] and not (prev or {}).get("closed"):
+                    self._feed_closed(rep["incident_id"], ev.source, ev.event_id, label)
                 return rep["incident_id"]
             at = min(data["times"].values()) if data["times"] else seen
             inc = self._alias_incident(ev.source, data)
             similar = None
             if inc is None:
+                # a match is always the same place (match): attach, whoever made the incident and whatever its status
+                # (open), so a page that beat the feed gets the feed's report, not a duplicate
                 inc, similar = self.match(ev.source, at, data["location"], data["units"])
-                if inc is not None and not (inc["status"] == "queued" or inc["source"] == FEED_SOURCE):
-                    inc, similar = None, inc                 # accepted and not a feed's: its own incident, noted
             if inc is not None:
+                if inc["source"] == "manual":                # a person typed its type and location: theirs stand
+                    self.mark_manual(inc["id"], [f for f, k in (("type", "type"), ("location", "address")) if inc[k]])
                 self._put(ev.source, ev.event_id, rank, label, seen, data, incident_id=inc["id"])
                 self._attached(inc, ev.source, label, rank, seen)
                 self._apply(inc["id"], None, data, label, rank, attach=True)
@@ -547,8 +615,7 @@ class Sources:
             disp = data["times"].get("dispatched") or (min(data["times"].values()) if data["times"] else None)
             if data["closed"] or (disp is not None and now - disp > MATCH_WINDOW_S):
                 if rep is None:
-                    self.log(f"incident sources: {label} event {ev.event_id} recorded only "
-                             f"({'closed' if data['closed'] else 'dispatched ' + _hm(disp)})")
+                    self.log(f"incident sources: {label}: an event recorded only ({'closed' if data['closed'] else 'old'})")
                 return None
             iid = self._create_feed(ev.source, ev.event_id, data, label)
             if similar is not None:
@@ -559,7 +626,7 @@ class Sources:
     def _create_feed(self, source: str, ref: str, data: dict, label: str) -> int:
         typ, sub, note = self.cad.map_type(data["type"], label)
         loc = data["location"].strip()
-        f = {"type": typ, "subtype": sub, "type_note": note, "address": loc[:200],
+        f = {"type": typ, "subtype": sub, "type_note": note, "address": shown_location(loc),
              "remarks": (f"{label} event {ref}: {data['type'] or 'type not given'} at {loc or '(no location)'}"
                          + (f"; units {', '.join(data['units'])}" if data["units"] else ""))[:4000]}
         self.cad._auto_geo(f)
@@ -568,7 +635,8 @@ class Sources:
                                          status="queued")
         with self.store.tx() as db:
             db.execute("UPDATE source_reports SET incident_id = ? WHERE source = ? AND ref = ?", (iid, source, ref))
-        self.log(f"incident sources: {label} event {ref} -> event {iid}: {data['type'] or 'type not given'} at {loc or '(no location)'}")
+        self._fed_address(iid)
+        self.log(f"incident sources: {label}: new event {iid}")
         rep = self._report(source, ref)
         self._apply(iid, None, data, label, rep["rank"] if rep else 1, created=True)
         self.cad._prealert_match(self.store.incident(iid))      # the phone pre-alert and the notices it answers
@@ -596,23 +664,33 @@ class Sources:
             if old and old != iid:
                 o = self.store.incident(old)
                 dismiss = o["status"] == "queued" and o["source"] == FEED_SOURCE and o["source_ref"] == f"feed:{source}:{a}"
+            pages: list = []
+            rank = self._report(source, ref)["rank"]
             with self.store.tx() as db:
                 if r is None:                                # never seen here: on record, so it is ignored if it comes
                     db.execute("INSERT INTO source_reports (source, ref, rank, label, incident_id, first_seen, updated_at, "
                                "data, merged_into) VALUES (?, ?, ?, ?, NULL, ?, ?, '{}', ?)",
-                               (source, a, self._report(source, ref)["rank"], label, now, now, ref))
+                               (source, a, rank, label, now, now, ref))
                 else:                                        # its report moves only with a dismissed (or no) incident
                     move = old is None or dismiss
                     db.execute("UPDATE source_reports SET merged_into = ?, incident_id = ? WHERE source = ? AND ref = ?",
                                (ref, iid if move else old, source, a))
+                if dismiss:                                  # a page on the dismissed one moves with it
+                    for p in db.execute("SELECT data FROM source_reports WHERE incident_id = ? AND source = ?",
+                                        (old, PAGING)).fetchall():
+                        pages += list(json.loads(p[0] or "{}").get("pages") or [])
+                    db.execute("UPDATE source_reports SET incident_id = ? WHERE incident_id = ? AND source = ?",
+                               (iid, old, PAGING))
                 if old and old != iid:
-                    self.store._event(db, iid, "feed", f"{label}: event {a} merged into {ref} (event #{old})", at=now)
-                    self.store._event(db, old, "feed", f"{label}: event {a} merged into {ref} (event #{iid})"
-                                      + ("" if dismiss else ": kept, check it"), at=now)
-            self.log(f"incident sources: MERGE {label} event {a} -> {ref} (event {old or 'none'} -> {iid})"
-                     + (", dismissed" if dismiss else ""))
+                    o, i = self.store.incident(old), self.store.incident(iid)
+                    self.store._event(db, iid, "feed", f"{label}: merged {_ref(o)} into this", at=now)
+                    self.store._event(db, old, "feed", f"{label}: merged into {_ref(i)}" + ("" if dismiss else " (kept: check it)"),
+                                      at=now)
+            self.log(f"incident sources: MERGE {label}: event {old or 'none'} -> {iid}" + (", dismissed" if dismiss else ""))
             if dismiss:
-                self.store.dismiss(old, operator=label, reason=f"merged into {label} event {ref}")
+                self.store.dismiss(old, operator=label, reason=f"merged into {_ref(self.store.incident(iid))}")
+                if pages:
+                    self.cad.comms.link_pages(iid, pages)
 
     def _attached(self, inc: dict, source: str, label: str, rank: int, seen: float) -> None:
         """A note on the incident: this source has it too, how long after (or before) the one that made it."""
@@ -621,11 +699,11 @@ class Sources:
         rel = ""
         if first and first["t"] is not None:
             gap = seen - first["t"]
-            rel = f" ({_dur(gap)} {'after' if gap >= 0 else 'before'} {first['label'] or first['source']})"
+            rel = f" {_dur(gap)} {'after' if gap >= 0 else 'before'} {first['label'] or first['source']}"
         auth = self.authority(inc["id"])
-        lead = " · now authoritative" if auth == rank and rank != PAGING_RANK else ""
+        lead = " · authoritative" if auth == rank and rank != PAGING_RANK else ""
         with self.store.tx() as db:
-            self.store._event(db, inc["id"], "feed", f"{label}: attached{rel}{lead}", at=self.clock())
+            self.store._event(db, inc["id"], "feed", f"{label} attached{rel}{lead}", at=self.clock())
 
     def _apply(self, iid: int, prev: dict | None, new: dict, label: str, rank: int, attach: bool = False,
                created: bool = False) -> None:
@@ -637,13 +715,13 @@ class Sources:
         old = prev or {"type": "", "location": "", "units": [], "times": {}, "unit_times": {}, "comments": [], "closed": False}
         notes: list[tuple[float, str]] = []
         now = self.clock()
-        pre = label if auth else f"{label} (not authoritative)"
+        pre = label if auth else f"{label} (secondary)"
         fields: dict = {}
         if new["type"] and (new["type"] != old["type"] or attach):
             typ, sub, note = self.cad.map_type(new["type"], label)
             differs = bool(typ) and (typ, sub) != (inc["type"], inc["subtype"])
             if auth and differs and "type" in hand:
-                notes.append((now, f"{label}: type {new['type']} (the type set by hand kept: Use {label}'s type)"))
+                notes.append((now, f"{label}: type {new['type']} (kept the type set by hand)"))
             elif not created:
                 notes.append((now, f"{pre}: type {new['type']}"))
             if auth and differs and "type" not in hand:
@@ -652,9 +730,9 @@ class Sources:
         if loc and (loc != old["location"].strip() or attach):
             differs = not created and not same_place(loc, inc["address"])
             if auth and differs and "location" in hand:
-                notes.append((now, f"{label}: location {loc} (the location set by hand kept: Use {label}'s location)"))
+                notes.append((now, f"{label}: location {shown_location(loc)} (kept the location set by hand)"))
             elif not created:
-                notes.append((now, f"{pre}: location {loc}"))
+                notes.append((now, f"{pre}: location {shown_location(loc)}"))
             if auth and differs and "location" not in hand:
                 fields.update(self._location_fields(iid, loc))
         if new["units"] != list(old["units"]):
@@ -682,16 +760,66 @@ class Sources:
             if was_x.get(k) != now_x.get(k):
                 notes.append((now, f"{pre}: {k.replace('_', ' ')} {_shown(now_x.get(k))}"))
         if bool(new["closed"]) != bool(old["closed"]):
-            notes.append((now, f"{pre}: {'closed' if new['closed'] else 'reopened'} in the feed"))
+            notes.append((now, f"{pre}: {'closed' if new['closed'] else 'reopened'}"))
         if fields and inc["status"] in OPEN:
             try:
                 self.store.update_incident(iid, fields, operator=label, log=False)
+                if "address" in fields:
+                    self._fed_address(iid)
             except Exception as e:  # noqa: BLE001 - a field the lists refuse: the timeline still says it
-                notes.append((now, f"{label}: not applied ({type(e).__name__}: {e})"))
+                notes.append((now, f"{label}: not applied ({type(e).__name__})"))
         if notes:
             with self.store.tx() as db:
                 for at, text in notes:
                     self.store._event(db, iid, "feed", text[:2000], at=at)
+
+    def _feed_closed(self, iid: int, source: str, ref: str, label: str) -> bool:
+        """The feed closed its event: the queued incident only it made, untouched by anyone, is dismissed. True if so."""
+        inc = self.store.incident(iid)
+        if not (inc["status"] == "queued" and inc["source"] == FEED_SOURCE and inc["source_ref"] == f"feed:{source}:{ref}"):
+            return False
+        touched = (self.manual(iid)
+                   or self.store.one("SELECT 1 AS x FROM source_reports WHERE incident_id = ? AND merged_into = '' "
+                                     "AND NOT (source = ? AND ref = ?) LIMIT 1", (iid, source, ref))
+                   or self.store.one("SELECT 1 AS x FROM assignments WHERE incident_id = ? LIMIT 1", (iid,))
+                   or self.store.one("SELECT 1 AS x FROM events WHERE incident_id = ? AND kind IN ('note', 'dispatch', "
+                                     "'remarks', 'tones', 'attach', 'status', 'edit') LIMIT 1", (iid,)))
+        if touched:
+            return False
+        self.store.dismiss(iid, operator=label, reason=f"closed in {label}")
+        self.log(f"incident sources: {label}: event {iid} dismissed (closed in the feed)")
+        return True
+
+    def on_seen(self, d: dict) -> int:
+        """A "source_seen" from the station: the ids in the feed's last snapshot. An open report on an open incident
+        that the feed no longer lists is noted once (gone_at); one listed again is cleared. How many newly gone."""
+        src = str(d.get("source") or "")
+        ids = d.get("ids")
+        if not SOURCE_ID.fullmatch(src) or src == PAGING or not isinstance(ids, list):
+            raise SourceError(f"bad source_seen {src!r}")
+        if not d.get("complete", True):
+            return 0                                         # a cut list: nothing can be told missing
+        listed = {str(x) for x in ids}
+        label = str(d.get("label") or src)[:60]
+        now, n = self.clock(), 0
+        with self._lock:
+            rows = self.store.q(f"SELECT r.ref, r.incident_id, r.data, r.gone_at FROM source_reports r JOIN incidents i "
+                                f"ON i.id = r.incident_id WHERE r.source = ? AND r.merged_into = '' AND i.status IN "
+                                f"({','.join('?' * len(OPEN))})", (src, *OPEN))
+            with self.store.tx() as db:
+                for r in rows:
+                    if r["ref"] in listed:
+                        if r["gone_at"] is not None:
+                            db.execute("UPDATE source_reports SET gone_at = NULL WHERE source = ? AND ref = ?", (src, r["ref"]))
+                        continue
+                    if r["gone_at"] is not None or json.loads(r["data"] or "{}").get("closed"):
+                        continue
+                    db.execute("UPDATE source_reports SET gone_at = ? WHERE source = ? AND ref = ?", (now, src, r["ref"]))
+                    self.store._event(db, r["incident_id"], "feed", f"{label}: no longer listed (open here)", at=now)
+                    n += 1
+        if n:
+            self.log(f"incident sources: {label}: {n} open no longer listed")
+        return n
 
     # -- the paging decoder -------------------------------------------------------------------------------------------
 
@@ -750,7 +878,7 @@ class Sources:
             try:
                 self.tick()
             except Exception as e:  # noqa: BLE001 - the ticker never dies
-                self.log(f"incident sources: {type(e).__name__}: {e}")
+                self.log(f"incident sources: {type(e).__name__}")
 
     def start(self) -> Sources:
         threading.Thread(target=self.run, name="incident-sources", daemon=True).start()
@@ -766,7 +894,7 @@ class Sources:
         try:
             self.trigger(reason)
         except Exception as e:  # noqa: BLE001
-            self.log(f"incident sources: poll now ({reason}): {type(e).__name__}: {e}")
+            self.log(f"incident sources: poll now ({reason}): {type(e).__name__}")
 
     def decorate(self, incs: list[dict]) -> list[dict]:
         """Each incident a feed has: incident["feed"] = {label, event_id, jurisdiction, run_numbers, group_units, use}
@@ -866,14 +994,15 @@ class Sources:
     def panel(self, now: float | None = None) -> dict:
         """Settings > Health: the tiers, and per incident each source's first-seen time and its lead over paging."""
         now = self.clock() if now is None else now
-        rows = self.store.q("SELECT r.incident_id, r.source, r.label, MIN(r.first_seen) AS first, i.number, i.address, "
-                            "i.created_at FROM source_reports r JOIN incidents i ON i.id = r.incident_id "
-                            "GROUP BY r.incident_id, r.source ORDER BY i.created_at DESC")
+        rows = self.store.q("SELECT r.incident_id, r.source, r.label, MIN(r.first_seen) AS first, MAX(r.gone_at) AS gone, "
+                            "i.number, i.address, i.status, i.created_at FROM source_reports r JOIN incidents i "
+                            "ON i.id = r.incident_id GROUP BY r.incident_id, r.source ORDER BY i.created_at DESC")
         by: dict[int, dict] = {}
         for r in rows:
             e = by.setdefault(r["incident_id"], {"id": r["incident_id"], "number": r["number"], "address": r["address"],
                                                  "created_at": r["created_at"], "seen": []})
-            e["seen"].append({"source": r["source"], "label": r["label"], "first_seen": r["first"]})
+            e["seen"].append({"source": r["source"], "label": r["label"], "first_seen": r["first"],
+                              "gone_at": r["gone"] if r["status"] in OPEN else None})   # open here, the feed no longer lists it
         leads: dict[str, list[float]] = {}
         for e in by.values():
             e["seen"].sort(key=lambda s: s["first_seen"])

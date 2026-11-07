@@ -249,7 +249,9 @@ class CarrierSquelch:
         carrier = float(20 * np.log10(max(med, 1e-9) / max(self.floor_level, 1e-9)))
         snr = voice_snr_db(frames, npre, len(frames) - tail)     # #270: measured before the AGC, per segment
         audio = agc(np.concatenate(frames), med)
-        tones = find_tones(audio, RATE)                # a heterodyne's steady tone over the voice (#263): notched out
+        # a heterodyne's steady tone over the voice (#263): looked for on the carrier (#263: not in the pre-roll and the
+        # tail, which have none), notched out of the whole clip
+        tones = find_tones(audio, RATE, span=(npre * FRAME, (len(frames) - tail) * FRAME))
         audio = detone(audio, RATE, tones)
         seg = Segment(start, start + len(frames) * FRAME / RATE, audio, quieting_db=carrier, reason=reason)
         seg.q_open = seg.q_close = carrier

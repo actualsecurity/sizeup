@@ -61,9 +61,9 @@ def cam(rd, cid):
 def test_a_511ny_still_minutes_old_is_how_its_stills_are_not_a_camera_down():
     rd, f, clock = hub()
     f.age = 850                                         # 14 min: the oldest seen on a working camera
-    assert rd.image("34353")[0] == 200 and not rd.health("34353")["down"]
-    assert cam(rd, "34353")["state"] == "ok" and "34353" in [c["camera"] for c in rd.search_places("exit 17 lincoln camera")]
-    assert rd.stream("34353", "playlist.m3u8")[0] == 200                     # its live video is never refused for it
+    assert rd.image("35992")[0] == 200 and not rd.health("35992")["down"]
+    assert cam(rd, "35992")["state"] == "ok" and "35992" in [c["camera"] for c in rd.search_places("exit 16 purchase camera")]
+    assert rd.stream("35992", "playlist.m3u8")[0] == 200                     # its live video is never refused for it
     # the 300 s that took it down before still holds for the county's 8 s pictures
     assert r.STALE_IMAGE_S == 300 and Roads.stale_s({"source": "County"}) == 300 and Roads.stale_s({"source": "511NY"}) == 1800
 
@@ -73,43 +73,43 @@ def test_a_live_video_camera_with_no_current_still_is_judged_by_its_stream():
     f.age = 2 * 86400                                   # a still two days old (seen on one camera)
     for _ in range(3):
         clock.t += 60
-        code, body, _, _ = rd.image("34353")
+        code, body, _, _ = rd.image("35992")
         assert code == 404 and json.loads(body)["error"] == "no current image"
     # its stream not looked at yet: listed, stale, and not offered by the pickers until it is
-    c = cam(rd, "34353")
+    c = cam(rd, "35992")
     assert not c["down"] and (c["state"], c["why"]) == ("stale", "Still old · video not checked")
     lat, lon = c["lat"], c["lon"]
-    assert "34353" not in [x["id"] for x in rd.nearest(lat, lon)]
+    assert "35992" not in [x["id"] for x in rd.nearest(lat, lon)]
     # the sweep looks (two small GETs): it streams, so it is on
     n = len(f.calls)
     clock.t += r.HEALTH_SWEEP_S + 1
     rd.sweep()
-    assert any("34353" in u or "R8_038" in u for u, _ in f.calls[n:] if "skyvdn" in u)
-    c = cam(rd, "34353")
-    assert not c["down"] and c["state"] == "ok" and "34353" in [x["id"] for x in rd.nearest(lat, lon)]
+    assert any("35992" in u or "R8_039" in u for u, _ in f.calls[n:] if "skyvdn" in u)
+    c = cam(rd, "35992")
+    assert not c["down"] and c["state"] == "ok" and "35992" in [x["id"] for x in rd.nearest(lat, lon)]
     # the next sweep finds no stream either: offline, with the reason, and the rev moved so the pages hear it
     f.hls = False
     rev = rd.rev
     clock.t += r.HEALTH_SWEEP_S + 1
     rd.sweep()
-    c = cam(rd, "34353")
+    c = cam(rd, "35992")
     assert c["down"] and c["state"] == "offline" and c["why"] == "No video or image" and rd.rev != rev
-    assert "34353" not in [x["id"] for x in rd.nearest(lat, lon)]
-    assert rd.stream("34353", "playlist.m3u8")[0] == 503                     # a viewer: snapshots at once
+    assert "35992" not in [x["id"] for x in rd.nearest(lat, lon)]
+    assert rd.stream("35992", "playlist.m3u8")[0] == 503                     # a viewer: snapshots at once
     # a fresh still with the stream still refused: listed, stale, "No live video"
     f.age = 30
     clock.t += 60
-    assert rd.image("34353")[0] == 200
-    c = cam(rd, "34353")
+    assert rd.image("35992")[0] == 200
+    c = cam(rd, "35992")
     assert not c["down"] and (c["state"], c["why"]) == ("stale", "No live video")
     clock.t += r.STREAM_RETRY_S + 1
-    assert cam(rd, "34353")["state"] == "ok"
+    assert cam(rd, "35992")["state"] == "ok"
 
 
 def test_a_state_that_changes_with_time_moves_the_rev():
     rd, f, clock = hub()
     f.hls = False
-    assert rd.stream("34353", "playlist.m3u8")[0] == 503                     # refused: "No live video" for 5 min
+    assert rd.stream("35992", "playlist.m3u8")[0] == 503                     # refused: "No live video" for 5 min
     rd.state_tick()
     rev = rd.rev
     assert rd.state_tick() is False and rd.rev == rev                       # nothing changed: no churn
@@ -134,31 +134,31 @@ def test_a_camera_left_out_of_a_read_stays_listed_stale_and_goes_only_after_a_wh
     for p in ("thruway", "county", "carshub"):
         rd.refresh("cameras", p)
     n = len(rd.public()["cameras"])
-    # the next read leaves 34353 out (a partial or odd read; nothing the hub can tell from a good one)
+    # the next read leaves 35992 out (a partial or odd read; nothing the hub can tell from a good one)
     xml = fx("cars_cctv_recorded.xml")
-    start = xml.index(b"<inventory-item>", xml.index(b"<device-id>34353") - 400)
+    start = xml.index(b"<inventory-item>", xml.index(b"<device-id>35992") - 400)
     end = xml.index(b"</inventory-item>", start) + len(b"</inventory-item>")
     f.bodies[HUB] = xml[:start] + xml[end:]
     clock.t += 3600
     assert rd.refresh("cameras", rd.carshub)
-    c = cam(rd, "34353")
+    c = cam(rd, "35992")
     assert len(rd.public()["cameras"]) == n and (c["state"], c["why"], c["since"]) == ("stale", "Not in 511NY's list", clock.t)
     assert rd.carshub.status["cameras"]["n"] == 5                                   # the source's own count
     assert any("1 not in the latest list, kept (stale)" in m for m in rd.logs)
     # kept across a restart (the disk cache), and still stale
     again = make(f, clock=clock, hub=HUB, thruway=True, county=True, tmp_path=tmp_path)
-    assert cam(again, "34353")["state"] == "stale"
+    assert cam(again, "35992")["state"] == "stale"
     # back in the list: fresh again
     clock.t += 3600
     f.bodies[HUB] = xml
     rd.refresh("cameras", rd.carshub)
-    assert cam(rd, "34353")["state"] == "ok"
+    assert cam(rd, "35992")["state"] == "ok"
     # left out for longer than CAMERA_KEEP_S: gone
     f.bodies[HUB] = xml[:start] + xml[end:]
     for _ in range(int(r.CAMERA_KEEP_S // 3600) + 2):
         clock.t += 3600
         rd.refresh("cameras", rd.carshub)
-    assert cam(rd, "34353") is None
+    assert cam(rd, "35992") is None
 
 
 def test_an_empty_read_never_empties_the_map():
@@ -183,10 +183,10 @@ def test_a_list_that_cant_be_read_keeps_its_cameras_and_says_so_when_it_has_been
     rd.carshub.fetch = failing
     clock.t += 3600
     assert not rd.refresh("cameras", rd.carshub)
-    assert {c["id"] for c in rd.public()["cameras"]} == before and cam(rd, "34353")["state"] == "ok"   # an hour: fine
+    assert {c["id"] for c in rd.public()["cameras"]} == before and cam(rd, "35992")["state"] == "ok"   # an hour: fine
     clock.t += 2 * 3600
     rd._changed()
-    c = cam(rd, "34353")
+    c = cam(rd, "35992")
     assert (c["state"], c["why"]) == ("stale", "511NY list not updated") and c["since"] == NOW
     assert cam(rd, "wc23")["state"] == "ok"                                          # the county's list is fine
     f.bodies[HUB] = good

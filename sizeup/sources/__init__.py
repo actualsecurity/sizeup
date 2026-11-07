@@ -25,26 +25,41 @@ A factory is `factory(ctx: SourceContext) -> Adapter | Iterable[Adapter]`. An ad
     source: str          stable id, SOURCE_ID ([a-z0-9][a-z0-9_-]{0,31}): "county"; never "paging"
     label: str           short name for people: "County feed"
     rank: int            1 = the primary; 2, 3 ... the next tiers (1..99)
-    poll_s: float        how often the runner calls poll() (at least MIN_POLL_S); the adapter paces its own requests
+    poll_s: float        how often the runner calls poll(): 30 to 60 s (never under MIN_POLL_S); the adapter paces its
+                         own requests too
     poll() -> Iterable[FeedEvent]
                          the events the feed knows now (open ones, and ones that changed lately): a snapshot each time.
-                         An event left out is left as last seen (never deleted). It may raise: the runner reports the
+                         An event left out is never deleted, but the runner sends the ids of each poll's snapshot every
+                         SEEN_EVERY_S ("source_seen"), and the hub flags an open report the feed no longer lists. It may
+                         raise: the runner reports the
                          source "failing" (the exception's TYPE only as the reason: never its text, which may hold a URL
                          or a credential) and calls it again after poll_s, doubling to MAX_BACKOFF_S while it keeps
                          raising. A bad event is skipped on its own; the others still go
     health() -> Health   how the feed is doing now; asked after every poll()
     close() -> None      optional: called once when the station stops
     reset() -> None      optional: a person asked to start over (Settings > Health "Reset", or `sizeup-station adapter
-                         reset`, #305), e.g. after the adapter stopped itself with "failing: login (manual reset
-                         needed)" to protect a shared account. Called on the adapter's own runner thread before its
-                         next poll(); its back-off starts over. Raising is logged by type only
+                         reset`, #305), e.g. for an adapter that stopped itself. Called on the adapter's own runner
+                         thread before its next poll(); its back-off starts over. Raising is logged by type only
     poll_now(reason: str) -> None
                          optional: something just happened that may be a call coming (reason: "paging tones", "radio
                          pre-alert", "phone pre-alert"). Called on the adapter's own runner thread (never the caller's),
-                         right before an immediate poll() instead of waiting out poll_s (at most once every
-                         TRIGGER_MIN_S per adapter, and never while the adapter is failing or its health isn't ok: during an
-                         outage its own pacing and back-off stand). The adapter may use it to skip its own pacing for
-                         that one poll
+                         right before an earlier poll() than poll_s would give. The runner keeps triggered polls gentle:
+                         at most one per max(poll_s, TRIGGER_MIN_S) per adapter, at most TRIGGER_MAX per
+                         TRIGGER_WINDOW_S, never sooner than TRIGGER_MIN_S after the last poll, and none while the
+                         adapter is failing or its health isn't ok. poll_now must NEVER bypass the adapter's own pacing
+                         or back-off: it is a hint, and an adapter that is not due may ignore it
+
+Rules for every adapter (the source is someone else's system; the department reads it, nothing more):
+
+    read only        never acknowledge, write, mark, claim or change anything at the source. Closure is derived
+                     from what the feed shows (an in-service or cleared time, or the event leaving its open list), never
+                     made there
+    gentle           poll every 30 to 60 s (poll_s), back off on errors, and never more often because of poll_now
+    honest           identify the client honestly (its real name and version as the user agent); no spoofed user
+                     agents, no browser impersonation, no anti-detection of any kind
+    closed           set closed=True from the feed's own in-service or cleared time (put it in times["in_service"] too)
+    stays here       the feed's data goes to the hub and nowhere else: never logged beyond its receipt (ids, types
+                     and locations stay out of logs), never in a push, an issue, a PR or CI output
 
 A FeedEvent's fields, as the feed says them (never parsed here beyond the checks in FeedEvent.check):
 
@@ -57,7 +72,8 @@ A FeedEvent's fields, as the feed says them (never parsed here beyond the checks
                  out_at, in_service. Leave a key out until it happens
     unit_times   per unit (optional): unit -> TIME_KEYS -> epoch seconds (up to 60 units)
     comments     (epoch seconds, text) pairs, oldest first; append only (a comment once sent is never changed)
-    closed       the feed closed it
+    closed       the feed shows it closed: derived from its in-service or cleared time (never closed at the source).
+                 The hub dismisses a queued incident only this feed made and no person touched; any other gets a note
     extra        adapter-specific fields, JSON-able (str keys; values str, number, bool, list or dict), at most
                  EXTRA_MAX_BYTES as JSON. Keys the hub shows on the incident (EXTRA_SHOWN): "jurisdiction" (str),
                  "run_numbers" ({group: run number}), "group_units" ({group: [unit, ...]}). Any other key is kept and
@@ -86,7 +102,7 @@ TIME_KEYS = ("dispatched", "responding", "on_location", "en_route_to", "out_at",
 HEALTH_STATES = ("ok", "backing_off", "failing", "stale")
 SOURCE_ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
 RESERVED = ("paging",)
-MIN_POLL_S = 5.0
+MIN_POLL_S = 30.0                      # gentle polling: never more often than this, whatever poll_s says
 MAX_BACKOFF_S = 300.0
 MAX_UNITS, MAX_COMMENTS, MAX_TEXT = 60, 500, 2000
 MAX_ALIASES = 50
@@ -94,7 +110,10 @@ MAX_UNIT_LEN = 32
 MAX_EVENT_BYTES = 256 * 1024            # one event as JSON, comments included
 EXTRA_MAX_BYTES = 16 * 1024
 EXTRA_SHOWN = ("jurisdiction", "run_numbers", "group_units")
-TRIGGER_MIN_S = 2.0
+TRIGGER_MIN_S = 30.0                    # a triggered poll: never sooner than this after the last poll, nor the last trigger
+TRIGGER_MAX, TRIGGER_WINDOW_S = 4, 600.0  # ... and at most this many triggered polls per window, per adapter
+SEEN_EVERY_S = 120.0                    # the runner sends the ids still in the feed's snapshot this often ("source_seen")
+MAX_SEEN_IDS = 2000
 TRIGGERS = ("paging tones", "radio pre-alert", "phone pre-alert")
 
 
@@ -209,7 +228,7 @@ class FeedEvent:
                      closed=bool(d.get("closed")), extra=dict(d.get("extra") or {}),
                      aliases=tuple(str(a) for a in d.get("aliases") or ()))
         except (TypeError, ValueError, IndexError, AttributeError) as e:
-            raise SourceError(f"not an event: {e}") from None
+            raise SourceError(f"not an event: {type(e).__name__}") from None
         return ev.check()
 
 

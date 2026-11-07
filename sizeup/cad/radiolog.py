@@ -351,7 +351,7 @@ class RadioLog:
             try:
                 self.backfill(iid)
             except Exception as e:  # noqa: BLE001
-                self.cad.log(f"CAD: radio log backfill: {type(e).__name__}: {e}")
+                self.cad.log(f"CAD: radio log backfill: {type(e).__name__}")
         if self.inline:
             run()
         else:

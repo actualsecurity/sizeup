@@ -6,6 +6,8 @@ own and hands what changed to sink(kind, data):
     "source_event"   {source, label, rank, seen_at, first_seen, event: FeedEvent.as_dict()}: a new event, or one that
                      changed since it was last sent (the whole event: the hub works out what changed)
     "source_health"  {source, label, rank, state, reason, since, at}: on every change, and every HEARTBEAT_S
+    "source_seen"    {source, label, rank, at, ids, complete}: the event ids in the last good poll's snapshot, every
+                     SEEN_EVERY_S (the hub flags an open report the feed no longer lists)
 
 On a station the sink is the outbox to the hub (App._emit: durable, in order); all-in-one it is the CAD's Sources here. A
 failing adapter never stops the others or the station: poll() raising is "failing" with its reason, and the runner
@@ -22,8 +24,9 @@ import time
 from pathlib import Path
 from typing import Callable, Iterable
 
-from sizeup.sources import (ENTRY_POINT_GROUP, ENV_MODULES, ENV_PATH, MAX_BACKOFF_S, MIN_POLL_S, RESERVED, SOURCE_ID,
-                            TRIGGER_MIN_S, Adapter, FeedEvent, Health, SourceContext, SourceError)
+from sizeup.sources import (ENTRY_POINT_GROUP, ENV_MODULES, ENV_PATH, MAX_BACKOFF_S, MAX_SEEN_IDS, MIN_POLL_S, RESERVED,
+                            SEEN_EVERY_S, SOURCE_ID, TRIGGER_MAX, TRIGGER_MIN_S, TRIGGER_WINDOW_S, Adapter, FeedEvent,
+                            Health, SourceContext, SourceError)
 from sizeup.sources.resets import Resets      # #297 owns it; #305's sizeup/cloud/adapters.py imports it from here
 
 HEARTBEAT_S = 60.0
@@ -129,17 +132,25 @@ class _Run:
         self.fails = 0
         self.wake = threading.Event()              # trigger(): poll now
         self.reason = ""                           # ... and why (poll_now is called on the adapter's own thread)
-        self.triggered = 0.0
+        self.triggered = 0.0                       # the last trigger taken
+        self.triggers: list[float] = []            # ... and those within TRIGGER_WINDOW_S (at most TRIGGER_MAX)
+        self.polled: float | None = None           # when poll() was last called (a triggered poll waits TRIGGER_MIN_S)
         self.last_in: dict[str, float] = {}        # event_id -> when it was last in a poll (sent is pruned by it)
+        self.snapshot: list[str] = []              # the event ids in the last good poll
+        self.seen_at = 0.0                         # when "source_seen" was last sent
+        self.target = None                         # where the sink sent them (see SourceRunner.target)
 
 
 class SourceRunner:
     def __init__(self, adapters: Iterable[Adapter], sink: Callable[[str, dict], None], log: Callable[[str], None] = print,
-                 clock: Callable[[], float] = time.time, role: str = "station"):
+                 clock: Callable[[], float] = time.time, role: str = "station", target: Callable[[], object] | None = None):
         require_station(role)
         self.runs = [_Run(a) for a in adapters]
         self.sink, self.log, self.clock = sink, log, clock
-        # A remote reset (#305: an adapter that stopped itself to protect a shared account): queued here from anywhere,
+        # Where the sink sends them now (the app: forwarding to the hub or not). When it changes, everything is sent again:
+        # what went to the local CAD while station mode was Off never reached the hub
+        self.target = target
+        # A remote reset (#305: an adapter that stopped itself): queued here from anywhere,
         # run by that adapter's own thread before its next poll (never the job's thread)
         self.resets = Resets()
         self.resets.wake = self._wake_source
@@ -154,24 +165,33 @@ class SourceRunner:
     def step(self, r: _Run) -> float:
         """Poll one adapter once, send what changed and its health. The seconds until the next poll."""
         a, now = r.a, self.clock()
+        self._retarget(r)
+        r.polled = now
         try:
             events = list(a.poll())
             r.error, r.fails = "", 0
+            ok = True
         except Exception as e:  # noqa: BLE001 - the feed's trouble: "failing", never the station's
-            events = []
+            events, ok = [], False
             r.fails += 1
             r.error = type(e).__name__              # the type only: its text may hold a URL or a credential
+        ids = []
         for ev in events:
             try:
-                self._event(r, ev, now)
+                if self._event(r, ev, now):
+                    ids.append(ev.event_id)
             except Exception as e:  # noqa: BLE001 - one bad event never drops the rest
                 self.log(f"incident sources: {a.label}: event skipped ({type(e).__name__})")
+        if ok:
+            r.snapshot = ids
+            self._seen(r, now)
         self._prune(r, now)
         self._health(r, now)
         wait = max(MIN_POLL_S, float(a.poll_s))
         return min(MAX_BACKOFF_S, wait * (2 ** min(r.fails - 1, 10))) if r.fails else wait
 
-    def _event(self, r: _Run, ev, now: float) -> None:
+    def _event(self, r: _Run, ev, now: float) -> bool:
+        """One event of a poll: sent when new or changed. False when it breaks the interface (skipped)."""
         a = r.a
         try:
             if not isinstance(ev, FeedEvent):
@@ -181,14 +201,39 @@ class SourceRunner:
             d = ev.check().as_dict()
         except SourceError as e:
             self.log(f"incident sources: {a.label}: event skipped: {e}")
-            return
+            return False
         r.last_in[ev.event_id] = now
         if r.sent.get(ev.event_id) == d:
-            return
+            return True
         first = r.first.setdefault(ev.event_id, now)
         self.sink("source_event", {"source": a.source, "label": a.label, "rank": a.rank, "seen_at": now,
                                    "first_seen": first, "event": d})
         r.sent[ev.event_id] = d
+        return True
+
+    def _seen(self, r: _Run, now: float) -> None:
+        """Every SEEN_EVERY_S: the ids in the last good snapshot ("source_seen"), so the hub can flag an open report
+        the feed no longer lists. complete: False when the list was cut at MAX_SEEN_IDS (the hub flags nothing then)."""
+        if now - r.seen_at < SEEN_EVERY_S:
+            return
+        a = r.a
+        self.sink("source_seen", {"source": a.source, "label": a.label, "rank": a.rank, "at": now,
+                                  "ids": r.snapshot[:MAX_SEEN_IDS], "complete": len(r.snapshot) <= MAX_SEEN_IDS})
+        r.seen_at = now
+
+    def _retarget(self, r: _Run) -> None:
+        """The sink sends somewhere else now (station mode turned on or off): everything again, health included."""
+        if self.target is None:
+            return
+        try:
+            t = self.target()
+        except Exception:  # noqa: BLE001
+            return
+        if t != r.target:
+            if r.target is not None:
+                r.sent.clear()
+                r.health, r.seen_at = None, 0.0
+            r.target = t
 
     @staticmethod
     def _prune(r: _Run, now: float) -> None:
@@ -222,16 +267,22 @@ class SourceRunner:
 
     def trigger(self, reason: str) -> int:
         """Something that may be a call coming (paging tones, a radio or phone pre-alert): each adapter's optional
-        poll at once (at most once every TRIGGER_MIN_S per adapter; never while it is failing or backing off: the
-        adapter's own pacing stands during an outage). Only sets a flag and the reason: never runs adapter
-        code here (the caller may hold the paging decoder's lock); the adapter's own thread calls poll_now(reason)
-        before that poll. How many were woken."""
+        earlier poll. Gentle whatever wakes it (tone pairs, pre-alerts and phone rings come in bursts): at most one per
+        max(poll_s, TRIGGER_MIN_S) per adapter, at most TRIGGER_MAX per TRIGGER_WINDOW_S, the poll itself never sooner
+        than TRIGGER_MIN_S after the last one (_loop), and none while it is failing or backing off (the adapter's own
+        pacing stands during an outage). Only sets a flag and the reason: never runs adapter code here (the caller may
+        hold the paging decoder's lock); the adapter's own thread calls poll_now(reason) before that poll. How many
+        were woken."""
         now, n = self.clock(), 0
         for r in self.runs:
-            if now - r.triggered < TRIGGER_MIN_S:
+            if now - r.triggered < max(TRIGGER_MIN_S, float(r.a.poll_s)):
                 continue
             if r.fails or (r.health is not None and r.health[0] != "ok"):
                 continue                       # an outage: the adapter's own pacing (and back-off) stands
+            r.triggers = [t for t in r.triggers if now - t < TRIGGER_WINDOW_S]
+            if len(r.triggers) >= TRIGGER_MAX:
+                continue
+            r.triggers.append(now)
             r.triggered, r.reason = now, str(reason or "")[:40]
             r.wake.set()
             n += 1
@@ -260,15 +311,21 @@ class SourceRunner:
             except Exception as e:  # noqa: BLE001
                 self.log(f"incident sources: {r.a.label}: poll_now: {type(e).__name__}")
 
+    def hold(self, r: _Run) -> float:
+        """Seconds a triggered poll still waits: never sooner than TRIGGER_MIN_S after the last poll."""
+        return 0.0 if r.polled is None else max(0.0, TRIGGER_MIN_S - (self.clock() - r.polled))
+
     def _loop(self, r: _Run) -> None:
         while not self._stop.is_set():
             r.wake.clear()
+            if r.reason and (h := self.hold(r)) > 0 and self._stop.wait(h):
+                break
             self._reset_due(r)
             self._poll_now(r)
             try:
                 wait = self.step(r)
             except Exception as e:  # noqa: BLE001 - the sink failing: try again later
-                self.log(f"incident sources: {r.a.label}: {type(e).__name__}: {e}")
+                self.log(f"incident sources: {r.a.label}: {type(e).__name__}")
                 wait = MAX_BACKOFF_S
             r.wake.wait(wait)
 
@@ -289,12 +346,6 @@ class SourceRunner:
                     close()
                 except Exception as e:  # noqa: BLE001
                     self.log(f"incident sources: {r.a.label}: close: {type(e).__name__}")
-
-    def state(self) -> list[dict]:
-        """The station page's rows: each adapter, its health as last sent and how many events it has seen."""
-        return [{"source": r.a.source, "label": r.a.label, "rank": r.a.rank,
-                 "state": (r.health or ("", ""))[0], "reason": (r.health or ("", ""))[1], "events": len(r.sent)}
-                for r in self.runs]
 
 
 def context_for(state_root: str | Path, log: Callable[[str], None], clock: Callable[[], float] = time.time):

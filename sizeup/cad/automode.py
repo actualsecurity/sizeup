@@ -224,7 +224,7 @@ class AutoDispatch:
             with self._lock:
                 first = self._on_feed(iid)
         except Exception as e:  # noqa: BLE001
-            self.log(f"CAD: dispatch mode: {type(e).__name__}: {e}")
+            self.log(f"CAD: dispatch mode: {type(e).__name__}")
         if first:                                        # the radio log's backfill: after, outside the lock (M3)
             self.cad.radiolog.backfill_soon(iid)
 
@@ -273,7 +273,7 @@ class AutoDispatch:
                     if inc["status"] in ("pending", "active"):
                         self._paged(iid)
         except Exception as e:  # noqa: BLE001
-            self.log(f"CAD: dispatch mode: {type(e).__name__}: {e}")
+            self.log(f"CAD: dispatch mode: {type(e).__name__}")
 
     def _aliases(self) -> dict[str, str]:
         """The data file's "feed_unit_aliases": {feed code: board code} (optional)."""
@@ -573,7 +573,7 @@ class AutoDispatch:
                     _, label = self._feed(iid)
                     self._do_close(iid, s["at"], f"{label or 'County feed'} · auto", label or "County feed")
         except Exception as e:  # noqa: BLE001
-            self.log(f"CAD: dispatch mode: {type(e).__name__}: {e}")
+            self.log(f"CAD: dispatch mode: {type(e).__name__}")
 
     # -- the radio's status hints -------------------------------------------------------------------------------------
 
@@ -588,7 +588,7 @@ class AutoDispatch:
                 for h in made:
                     self._hint(h)
         except Exception as e:  # noqa: BLE001
-            self.log(f"CAD: dispatch mode: {type(e).__name__}: {e}")
+            self.log(f"CAD: dispatch mode: {type(e).__name__}")
 
     def _hint(self, h: dict) -> None:
         if h.get("outcome", "pending") != "pending" or h["intent"] not in HINT_INTENTS:
