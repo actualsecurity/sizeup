@@ -3088,6 +3088,15 @@ def make_app(cfg: Config) -> App:
     return app
 
 
+def start_app(cfg: Config) -> App:
+    """make_app() and start it; the hub's log is read for its own error spikes first (#285, sizeup/errwatch.py)."""
+    app = make_app(cfg)
+    if getattr(app, "error_watch", None) is not None:      # the hub: its own error spikes to the status topic
+        from sizeup import errwatch
+        errwatch.install(app.error_watch)
+    return app.start()
+
+
 def make_server(app: App, fence=None, listener=None) -> WebServer:
     cfg = app.cfg
     server = WebServer(cfg.host, cfg.port, app.scene(), app.state, app.clip, app.close_incident, app.set_mode,
@@ -3274,10 +3283,9 @@ def serve(cfg: Config, fence=None, phases=None, early=None) -> int:
     t = phases if phases is not None else Phases("startup")
     _STARTUP = t
     try:
-        app = make_app(cfg)
+        app = start_app(cfg)                      # make_app, the hub's errwatch on its log (#285), start
     finally:
         _STARTUP = None
-    app.start()
     t.mark("start")
     listener = None
     if early is not None:

@@ -343,6 +343,9 @@ def _gated(tmp_path, monkeypatch, lease: bool = True):
     """run_gated in a thread, as the supervisor starts it: (cfg, gate, thread, result, servers)."""
     monkeypatch.setattr(app_mod.App, "start_layers", lambda self: None)        # no providers, no network
     monkeypatch.setattr(Fence, "watch", lambda self, every=0.5: None)          # (its os._exit is not for pytest)
+    from sizeup import errwatch
+    teed: list = []
+    monkeypatch.setattr(errwatch, "install", teed.append)                     # (it would tee pytest's stdout for good)
     cfg = hub_cfg(tmp_path, port=free_port(), gis_layers=())
     run = tmp_path / "run"
     run.mkdir()
@@ -354,6 +357,7 @@ def _gated(tmp_path, monkeypatch, lease: bool = True):
     real_server = app_mod.make_server
 
     def capture(app, fence=None, listener=None):
+        assert teed == [app.error_watch] and app.error_watch is not None    # errwatch on the log before it serves
         s = real_server(app, fence, listener)
         servers.append((app, s))
         made.set()

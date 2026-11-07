@@ -252,7 +252,9 @@ window.CamWall = (() => {
     t.cam = c;
     t.name.textContent = c.name;
     t.where.textContent = whereText(c);
-    t.el.title = `${c.name}${c.road ? `, ${c.road}` : ""}${c.dir ? ` ${c.dir}` : ""} (${c.source || "511NY"}). Open the viewer`;
+    t.el.title = `${c.name}${c.road ? `, ${c.road}` : ""}${c.dir ? ` ${c.dir}` : ""} (${c.source || "511NY"}). Open the viewer`
+      + (c.state === "stale" && c.why ? `. Stale: ${c.why}` : "");
+    t.el.classList.toggle("stale", c.state === "stale");
     t.el.classList.toggle("pinned", !!c.pin);
     t.pin.hidden = !c.pin;
     if (c.pin) t.pin.textContent = pinText(c);
@@ -284,7 +286,9 @@ window.CamWall = (() => {
         b.type = "button";
         b.dataset.camera = c.id;
         b.setAttribute("aria-label", `camera down: ${c.name}`);
-        const why = c.down ? (c.down_since ? `down since ${fmtTime(c.down_since)}` : "down") : `out of service (${c.source || "source"})`;
+        // "Offline · 10:12", the reason in the tooltip (#276, #278)
+        const why = c.down ? (c.down_since ? `Offline · ${fmtTime(c.down_since)}` : "Offline") : "Out of service";
+        b.title = c.down ? (c.why || "") : `Marked out of service by ${c.source || "its source"}`;
         b.append(el("span", "", c.name), el("span", "dim small", [whereText(c), why].filter(Boolean).join(" · ")));
         ul.append(b);
       }
@@ -437,9 +441,16 @@ window.CamWall = (() => {
                             maxBufferLength: 18, backBufferLength: 0, manifestLoadingTimeOut: 8000, manifestLoadingMaxRetry: 0,
                             levelLoadingTimeOut: 12000, levelLoadingMaxRetry: 2, fragLoadingTimeOut: 15000, fragLoadingMaxRetry: 2 });
       t.hls = hls;
+      const tries = [];
       hls.on(Hls.Events.ERROR, (_, data) => {
         if (!data || !data.fatal) return;
         const code = data.response && data.response.code;
+        const now = Date.now();
+        while (tries.length && now - tries[0] > 60000) tries.shift();
+        if (code !== 429 && code !== 503 && !/^manifestLoad/.test(data.details || "") && tries.length < 3) {   // #276: a spoiled segment
+          tries.push(now);
+          try { if (data.type === Hls.ErrorTypes.MEDIA_ERROR) hls.recoverMediaError(); else hls.startLoad(); return; } catch (_) { /* fail */ }
+        }
         failed(code, code === 503 ? 300 : 0, data.details);
       });
       hls.loadSource(streamUrl(t, "playlist.m3u8"));
