@@ -22,7 +22,8 @@ ROOT = Path(__file__).resolve().parents[1]
 STATION = ROOT / "deploy" / "station"
 INSTALLER = STATION / "install-linux.sh"
 MIN = (3, 11)
-SYSTEM_PY = ("sizeup/radio/adsbd.py", "sizeup/radio/trunkrecd.py", "sizeup/cloud/autoupdate.py", "sizeup/cloud/configupdate.py")
+SYSTEM_PY = ("sizeup/radio/adsbd.py", "sizeup/radio/trunkrecd.py", "sizeup/cloud/autoupdate.py", "sizeup/cloud/configupdate.py",
+             "tools/stt_diag.py")
 
 # stdlib names that are newer than MIN (ast.parse's feature_version catches new syntax, not new library names)
 NEWER_MODULES = {"annotationlib", "compression", "string.templatelib", "concurrent.interpreters"}
@@ -49,7 +50,7 @@ def preflight_loader() -> str:
 
 def test_the_preflight_checks_every_system_python_script():
     sh = INSTALLER.read_text()
-    m = re.search(r"for f in ((?:sizeup/\S+\.py ?)+); do", sh)
+    m = re.search(r"for f in ((?:(?:sizeup|tools)/\S+\.py ?)+); do", sh)
     assert m, "install-linux.sh's preflight has no loop over the system-python3 scripts"
     assert tuple(m.group(1).split()) == SYSTEM_PY
     assert "| grep -q 'usage: adsbd.py'" not in sh       # could never pass under pipefail (usage exits 2)

@@ -656,6 +656,17 @@ about one core all the time; each rtl_fm a little. So:
 * In Settings > Radios on the hub, **turn off transcription for talkgroups you don't need** (they can stay
   recorded): every transmission whisper skips is CPU for the ones that matter.
 * `sizeup-station status` shows the load: above 4 for long, transcribe less or use a smaller model.
+* whisper's cost is per clip, not per second of audio (#300: ~16 s each on this box whether the clip lasts 1 s or
+  10 s, so ~220 clips an hour at most). Its queue is strict: pages, Fire/EMS 15 and the firegrounds first, the
+  airband next, other live traffic, re-runs, and last the talkgroups that aren't "main" (heard as context); those
+  get one greedy pass while it is behind and are skipped ("Skipped: busy", still re-transcribable) once they wait
+  15 min, so it never falls an hour behind on them; an airband clip is skipped after 5 min (a late pre-alert is no
+  use). Mark a talkgroup "main" to keep it out of that.
+* whisper-server never runs more threads than the CPUs less one (3 here: more is slower, its threads wait on each
+  other); readsb runs below it (nice 5), the radios above it (nice -5).
+* `sizeup-station stt` says why it is behind: the model and threads, whisper's time per clip by the hour, the CPU
+  use and niceness of the radios, readsb and whisper, and what was shed or skipped (`--bench clip.wav` also times
+  one clip a few ways; it adds a few requests, so run it when the station is quiet).
 
 ## On a Mac
 

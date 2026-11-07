@@ -351,7 +351,7 @@ def test_the_whisper_backlog_is_an_alert():
     r.at(0, status=st)
     assert "stt_backlog" in r.keys()
     a = next(a for a in r.h.alerts() if a["key"] == "stt_backlog")
-    assert a["title"] == "Speech-to-text behind" and "oldest waiting clip" in a["text"]
+    assert a["title"] == "Speech-to-text behind" and a["text"].startswith("1800 clips waiting (20 pages")
     assert r.h.model(T0)["stt_queue"]["dropped"] == 12
 
 
