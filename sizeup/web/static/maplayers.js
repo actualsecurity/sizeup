@@ -213,7 +213,7 @@ window.MapLayers = (() => {
     if (key === "cameras") {
       return fc((d.cameras || []).filter((c) => !(prefs.hideDown && c.down)).map((c) => pt(c, {
         id: c.id, icon: c.down ? "ml-cam-down" : c.off ? "ml-cam-off" : "ml-cam", off: !!c.off, down: !!c.down,
-        label: c.down ? "camera down" : "" })));
+        label: c.down ? "offline" : c.state === "stale" ? "stale" : "" })));
     }
     if (key === "incidents") {                // roadwork is the Road projects & closures layer's (roadprojects.js, #185)
       return fc((d.events || []).filter((e) => e.layer === key).map((e) => pt(e, {
@@ -698,11 +698,25 @@ window.MapLayers = (() => {
       if (!r.ok || id !== viewer.id) return;
       const st = await r.json();
       viewer.fps = st.fps;
-      if (st.fps != null && st.fps < 5) {
-        viewer.el.time.textContent = `Live · low frame rate from the source (~${st.fps} fps)`;
-        if (viewer.el.msg.hidden || viewer.el.msg.textContent.startsWith("Buffering")) note(`Low frame rate from the source (~${st.fps} fps): the picture updates about ${st.fps >= 1 ? "once a second" : "every few seconds"}`);
-      } else if (viewer.el.msg.textContent.startsWith("Low frame rate")) viewer.el.msg.hidden = true;
+      viewer.damaged = st.damaged ? [st.damaged, st.checked] : null;
+      liveTime();
     } catch (_) { /* next time */ }
+  }
+  // "Live", "Live · ~2 fps", "Live · lossy source": short; the why in the tooltip (#278)
+  function liveTime() {
+    if (!viewer.el || !viewer.live) return;
+    const t = viewer.el.time, tips = ["Live video through the hub, muted"];
+    let text = "Live";
+    if (viewer.fps != null && viewer.fps < 5) {
+      text += ` · ~${viewer.fps} fps`;
+      tips.push(`The source sends about ${viewer.fps} frames a second`);
+    }
+    if (viewer.damaged) {
+      text += " · lossy source";
+      tips.push(`${viewer.damaged[0]} of the last ${viewer.damaged[1]} segments came with frames lost at the source: the hub leaves the damaged frames out, so the picture holds instead of smearing`);
+    }
+    t.textContent = text;
+    t.title = tips.join(". ");
   }
   function stopLive() {
     if (viewer.liveId) {
@@ -712,6 +726,7 @@ window.MapLayers = (() => {
     clearInterval(viewer.statusTimer);
     viewer.statusTimer = null;
     viewer.fps = null;
+    viewer.damaged = null;
     if (viewer.hls) { try { viewer.hls.destroy(); } catch (_) { /* gone */ } viewer.hls = null; }
     if (viewer.video) { try { viewer.video.pause(); viewer.video.removeAttribute("src"); viewer.video.load(); } catch (_) { /* gone */ } }
     if (viewer.el) { viewer.el.video.hidden = true; viewer.el.live.hidden = true; }
@@ -721,7 +736,8 @@ window.MapLayers = (() => {
     if (!viewer.id) return;
     stopLive();
     viewer.el.msg.hidden = false;
-    viewer.el.msg.textContent = `No live video (${why}): snapshots instead`;
+    viewer.el.msg.textContent = "No live video · snapshots";
+    viewer.el.msg.title = why;
     setTimeout(() => { if (viewer.el.msg.textContent.startsWith("No live video")) viewer.el.msg.hidden = true; }, 6000);
     showFoot();
     refreshCamera();
@@ -737,9 +753,9 @@ window.MapLayers = (() => {
       stopRefresh();
       v.hidden = false;
       viewer.el.img.hidden = true;
-      if (!viewer.el.msg.textContent.startsWith("Low frame rate")) viewer.el.msg.hidden = true;
+      viewer.el.msg.hidden = true;
       viewer.el.live.hidden = false;
-      viewer.el.time.textContent = "Live" + (viewer.fps != null && viewer.fps < 5 ? ` · low frame rate from the source (~${viewer.fps} fps)` : "");
+      liveTime();
       showFoot();
       if (!viewer.statusTimer) viewer.statusTimer = setInterval(pollStatus, 5000);
     };
@@ -760,10 +776,26 @@ window.MapLayers = (() => {
                             maxBufferLength: 30, backBufferLength: 10, manifestLoadingTimeOut: 8000, manifestLoadingMaxRetry: 0,
                             levelLoadingTimeOut: 12000, levelLoadingMaxRetry: 2, fragLoadingTimeOut: 15000, fragLoadingMaxRetry: 2 });
       viewer.hls = hls;
-      note("Connecting to the live stream…");
+      note("Connecting…");
+      const tries = [];                                               // recoveries within the last minute
       hls.on(Hls.Events.ERROR, (_, data) => {
         if (!data) return;
         const code = data.response && data.response.code;
+        // (#276) one segment the source spoiled (a 502 from the hub) or a decode hiccup is not the end of the stream:
+        // load on / recover the media a few times a minute before going to snapshots
+        if (data.fatal && code !== 429 && code !== 503 && data.details !== "manifestLoadTimeOut" && data.details !== "manifestLoadError") {
+          const now = Date.now();
+          while (tries.length && now - tries[0] > 60000) tries.shift();
+          if (tries.length < 3) {
+            tries.push(now);
+            note("Buffering…");
+            try {
+              if (data.type === Hls.ErrorTypes.MEDIA_ERROR) hls.recoverMediaError();
+              else hls.startLoad();
+              return;
+            } catch (_) { /* fall through: snapshots */ }
+          }
+        }
         if (data.fatal) {
           const r = code === 429 ? "the hub has enough streams open" : code === 503 ? "no live video from the source right now"
             : data.details === "manifestLoadTimeOut" ? "the source didn't answer" : data.details || "stream error";
@@ -778,15 +810,24 @@ window.MapLayers = (() => {
       v.onwaiting = () => { if (viewer.live) note("Buffering…"); };
     }).catch(() => native());                                       // hls.js didn't load: the browser's own, or snapshots
   }
+  // The footer, data first (#278): "511NY" (its link) and how the picture comes; the sentences in the tooltip
   function showFoot() {
     const c = camById(viewer.id);
     const src = ((store.data && store.data.sources) || []).find((s) => c && s.short === c.source);
-    const a = h("a", "", SOURCE_NOTE[c && c.source] || (src ? src.label : "the source"));
+    const a = h("a", "", (c && c.source) || (src ? src.short : "Source"));
     a.href = src ? src.link : "#";
     a.target = "_blank";
     a.rel = "noopener";
-    if (viewer.live) viewer.el.foot.replaceChildren("Live video through the hub (", a, "), muted, the newest segments fetched ahead. Only while this is open.");
-    else viewer.el.foot.replaceChildren(`${cadenceText(c)}, through the hub (`, a, "). Looked at every 10 s while this is open.");
+    a.title = SOURCE_NOTE[c && c.source] || (src ? src.label : "");
+    const n = (c && c.cadence) || 60;
+    const foot = viewer.el.foot;
+    if (viewer.live) {
+      foot.replaceChildren(a, " · Live");
+      foot.title = "Live video through the hub, muted; the newest segments fetched ahead; only while this is open";
+    } else {
+      foot.replaceChildren(a, ` · Snapshot · ${n >= 60 ? "~1 min" : `${n} s`}`);
+      foot.title = `${cadenceText(c)}, through the hub; looked at every 10 s while this is open`;
+    }
   }
 
   function buildViewer() {
@@ -858,17 +899,22 @@ window.MapLayers = (() => {
     clearInterval(viewer.timer);
     clearInterval(viewer.tick);
     viewer.timer = viewer.tick = null;
-    if (viewer.id) viewer.el.time.textContent = viewer.taken ? `Image ${hhmm(viewer.taken)}, paused` : "Paused";
+    if (viewer.id && !viewer.live) viewer.el.time.textContent = viewer.taken ? `${hhmm(viewer.taken)} · paused` : "Paused";
   }
   function showTime() {
     if (!viewer.id) return;
+    const t = viewer.el.time;
     if (viewer.down) {
       const d = viewer.down;
-      viewer.el.time.textContent = `Down since ${when(d.down_since)}` + (d.last_image ? ` (last image ${when(d.last_image)})` : " (no image)");
+      t.textContent = d.down_since ? `Offline · ${ago(d.down_since).replace(" ago", "")}` : "Offline";
+      t.title = [d.why, d.down_since ? `since ${when(d.down_since)}` : "", d.last_image ? `last image ${when(d.last_image)}` : "no image"].filter(Boolean).join(", ");
       return;
     }
     if (!viewer.taken) return;
-    viewer.el.time.textContent = `Image ${when(viewer.taken)} (${ago(viewer.taken)})${viewer.stale ? ", camera not answering" : ""}`;
+    const c = camById(viewer.id);
+    t.textContent = `${when(viewer.taken)} · ${ago(viewer.taken)}` + (viewer.stale ? " · not answering" : "")
+      + (c && c.state === "stale" ? " · stale" : "");
+    t.title = c && c.state === "stale" ? `${c.why}${c.since ? ` since ${when(c.since)}` : ""}` : `Image taken ${when(viewer.taken)}`;
   }
 
   async function refreshCamera() {
@@ -886,7 +932,7 @@ window.MapLayers = (() => {
           viewer.down = e;
           viewer.el.img.hidden = true;
           viewer.el.msg.hidden = false;
-          viewer.el.msg.textContent = "Camera down: no current image";
+          viewer.el.msg.textContent = "Offline";
           showTime();
           return;
         }
@@ -907,9 +953,10 @@ window.MapLayers = (() => {
       viewer.el.msg.hidden = true;
       showTime();
     } catch (e) {
-      if (id !== viewer.id) return;
+      if (id !== viewer.id || viewer.live) return;            // live video plays: the still doesn't matter (#276)
       viewer.el.msg.hidden = false;
-      viewer.el.msg.textContent = `No image: ${e.message}`;
+      viewer.el.msg.textContent = "No image";
+      viewer.el.msg.title = e.message;
       if (!viewer.url) viewer.el.img.hidden = true;
     } finally {
       viewer.busy = false;
@@ -923,7 +970,7 @@ window.MapLayers = (() => {
     viewer.taken = 0;
     viewer.etag = null;
     viewer.stale = false;
-    viewer.down = c && c.down ? { down: true, down_since: c.down_since, last_image: c.last_image } : null;
+    viewer.down = c && c.down ? { down: true, down_since: c.down_since, last_image: c.last_image, why: c.why } : null;
     viewer.cadence = (c && c.cadence) || 60;
     const el = viewer.el;
     el.title.textContent = c ? c.name : `Camera ${id}`;
@@ -933,8 +980,8 @@ window.MapLayers = (() => {
     el.img.hidden = true;
     el.img.alt = c ? `Traffic camera: ${c.name}` : "Traffic camera";
     el.msg.hidden = false;
-    el.msg.textContent = c && c.down ? "Camera down: no current image"
-      : c && c.off ? `This camera is marked out of service by ${c.source || "its source"}: trying anyway…` : "Loading…";
+    el.msg.textContent = c && c.down ? "Offline" : c && c.off ? "Out of service · trying" : "Loading…";
+    el.msg.title = c && c.down ? (c.why || "") : c && c.off ? `Marked out of service by ${c.source || "its source"}` : "";
     el.time.textContent = "";
     if (viewer.down) showTime();
     if (viewer.url) { URL.revokeObjectURL(viewer.url); viewer.url = null; }
@@ -1099,8 +1146,9 @@ window.MapLayers = (() => {
           b.type = "button";
           b.dataset.camera = c.id;
           b.setAttribute("aria-label", `camera down: ${c.name}`);
+          b.title = c.why || "";
           b.append(h("span", "", c.name), h("span", "dim small", (c.miles != null ? `${c.miles.toFixed(1)} mi` : `${Math.round((c.km || 0) * 1000)} m`)
-            + (c.down_since ? `, down since ${when(c.down_since)}` : "")));
+            + (c.down_since ? ` · Offline · ${when(c.down_since)}` : " · Offline")));
           b.addEventListener("click", () => openCamera(c.id, b));
           ul.append(b);
         }

@@ -318,6 +318,7 @@ class Supervisor:
         self.lost = threading.Event()
         self.renewing = threading.Event()
         self._renew_now = threading.Event()
+        self._write_lock = threading.RLock()   # the lease is written by the renew thread and the main one (#282)
         self._renew_token: object | None = None
         self.followers: dict[str, Proc] = {}
         self.follow_done: set[str] = set()        # restored (or: no replica to restore)
@@ -354,15 +355,17 @@ class Supervisor:
         return self.run_dir / "lease.json"
 
     def _write(self, path: Path, text: str) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(f".{path.name}.tmp")
-        tmp.write_text(text)
-        os.replace(tmp, path)
+        with self._write_lock:            # one shared tmp name: two threads at once lost one's os.replace (#282)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(f".{path.name}.tmp")
+            tmp.write_text(text)
+            os.replace(tmp, path)
 
     def write_lease(self) -> None:
-        self._write(self.lease_file, json.dumps({
-            "generation": self.lock.generation, "valid_until": self.lock.valid_until, "holder": self.lock.holder,
-            "litestream_pid": self.litestream.pid if self.litestream is not None else None}))
+        with self._write_lock:            # (an RLock) what it says and the write in one go: the newest lands last
+            self._write(self.lease_file, json.dumps({
+                "generation": self.lock.generation, "valid_until": self.lock.valid_until, "holder": self.lock.holder,
+                "litestream_pid": self.litestream.pid if self.litestream is not None else None}))
 
     def heartbeat(self) -> None:
         self._write(self.shared / "hub-alive", f"{int(time.time())}\n")

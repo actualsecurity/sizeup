@@ -3008,6 +3008,20 @@ def make_app(cfg: Config) -> App:
     return app
 
 
+def start_app(cfg: Config) -> App:
+    """make_app() and start it; the hub's log is read for its own error spikes first (#285, sizeup/errwatch.py)."""
+    if cfg.cloud_role == "hub":
+        # #284: Python's sqlite3 lets the GIL go at every row it steps, and waits up to the switch interval to get it
+        # back while another thread computes (a GIS layer's refresh, the state push): 5 ms a row by default, so a
+        # 500-row Radio view took 1-2 s whenever anything else was busy. 1 ms: about 5x less, for a little switching.
+        sys.setswitchinterval(HUB_SWITCH_S)
+    app = make_app(cfg)
+    if getattr(app, "error_watch", None) is not None:      # the hub: its own error spikes to the status topic
+        from sizeup import errwatch
+        errwatch.install(app.error_watch)
+    return app.start()
+
+
 def make_server(app: App, fence=None) -> WebServer:
     cfg = app.cfg
     server = WebServer(cfg.host, cfg.port, app.scene(), app.state, app.clip, app.close_incident, app.set_mode,
@@ -3106,13 +3120,7 @@ def main(argv: list[str] | None = None) -> int:
         init_state(cfg)
         log(f"sizeup: databases ready ({cfg.cad_db or 'in memory'})")
         return 0
-    if cfg.cloud_role == "hub":
-        # #284: Python's sqlite3 lets the GIL go at every row it steps, and waits up to the switch interval to get it
-        # back while another thread computes (a GIS layer's refresh, the state push): 5 ms a row by default, so a
-        # 500-row Radio view took 1-2 s whenever anything else was busy. 1 ms: about 5x less, for a little switching.
-        sys.setswitchinterval(HUB_SWITCH_S)
-    app = make_app(cfg)
-    app.start()
+    app = start_app(cfg)
     server = make_server(app, fence)
     signal.signal(signal.SIGTERM, lambda *_: server.drain())
     sm = app.station

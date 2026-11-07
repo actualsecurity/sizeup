@@ -218,9 +218,10 @@ def test_it_is_cheap():
     6 ms per second of audio on the bench Mac."""
     x = voice(30.0, seed=12) + tone(30.0, 310.0, 0.1)
     detone(x)                                                          # warm up
-    t0 = time.perf_counter()
+    # CPU time, not the wall clock: a loaded machine (pytest-xdist's workers) stretches the wall clock, not the work (#282)
+    t0 = time.process_time()
     for _ in range(3):
         y = detone(x)
-    per_s = (time.perf_counter() - t0) / 3 / 30.0
+    per_s = (time.process_time() - t0) / 3 / 30.0
     assert per_s < 0.03, f"{per_s * 1000:.1f} ms per second of audio"
     assert len(y) == len(x)
