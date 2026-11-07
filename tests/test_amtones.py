@@ -210,6 +210,58 @@ def test_the_carrier_squelch_notches_a_heterodyne_before_the_clip():
     assert s2.tones == []                                              # no beat: nothing notched
 
 
+def _short_transmission(seconds: float, beat: float, seed: int) -> np.ndarray:
+    """The real clips' shape (HPN Tower, 2026-11-07, e.g. 15:08:51: 1.9 s, a 361 Hz beat left in it): 5 s of no
+    carrier, `seconds` of carrier with voice and a 361 Hz beat at `beat` x the carrier, then no carrier."""
+    rng = np.random.default_rng(seed)
+    talk = voice(seconds, seed=seed)
+    b = beat * np.sin(2 * np.pi * 361.0 * np.arange(len(talk)) / RATE)
+    return np.concatenate([0.01 + 0.0005 * rng.standard_normal(5 * RATE),
+                           0.05 * (1 + 0.25 * talk / 0.1 + b) + 0.0005 * rng.standard_normal(len(talk)),
+                           0.01 + 0.0005 * rng.standard_normal(2 * RATE)])
+
+
+def _segment(env: np.ndarray):
+    sq = CarrierSquelch(3.5, clock=lambda: T0)
+    segs = [s for k in range(len(env) // FRAME) if (s := sq.feed(env[k * FRAME:(k + 1) * FRAME])) is not None]
+    assert len(segs) == 1
+    return segs[0]
+
+
+def test_a_short_transmissions_tone_is_looked_for_on_its_carrier(monkeypatch):
+    """The tone left in short transmissions (2026-11-07: 22 of 342 HPN Tower clips, median 1.95 s, after #267): the
+    0.4 s pre-roll and 0.2 s tail have no carrier and so no beat, and on a 1.9 s clip they held the tone's share of the
+    frames under TONE_PRESENT. It is looked for on the carrier now; the notch still covers the whole clip."""
+    from sizeup.radio import am
+    found = []
+    for seed in range(6):
+        s = _segment(_short_transmission(1.3, 0.1, seed))
+        found.append(bool(s.tones) and abs(s.tones[0] - 361.0) < 1.5)
+        if s.tones:
+            assert power_at(s.audio, 361.0) < 0.01 * band_power(s.audio)
+        assert s.preroll_s == pytest.approx(0.4)
+    assert all(found)
+    # as it was (the whole clip, pre-roll and tail in it): missed on half of them
+    monkeypatch.setattr(am, "find_tones", lambda a, rate, span=None: find_tones(a, rate))
+    old = [bool(_segment(_short_transmission(1.3, 0.1, seed)).tones) for seed in range(6)]
+    assert sum(old) <= 3
+
+
+@pytest.mark.parametrize("seconds", [0.8, 1.3, 2.0])
+def test_a_short_transmission_without_a_tone_is_left_alone(seconds):
+    for seed in range(6):
+        assert _segment(_short_transmission(seconds, 0.0, seed)).tones == []
+
+
+def test_the_span_is_where_tones_are_looked_for():
+    """find_tones(span=): only that part is looked at (a tone outside it isn't found; one inside is)."""
+    x = np.concatenate([tone(2.0, 400.0, 0.1), voice(2.0, seed=13)])
+    assert find_tones(x, span=(2 * RATE, 4 * RATE)) == []
+    got = find_tones(x, span=(0, 2 * RATE))
+    assert got and abs(got[0][0] - 400.0) < 1.5
+    assert find_tones(x, span=(0, RATE // 4)) == []                       # under TONE_MIN_S
+
+
 # -- cheap ---------------------------------------------------------------------------------------------------------------
 
 
@@ -225,3 +277,31 @@ def test_it_is_cheap():
     per_s = (time.process_time() - t0) / 3 / 30.0
     assert per_s < 0.03, f"{per_s * 1000:.1f} ms per second of audio"
     assert len(y) == len(x)
+
+
+def test_the_tones_notched_go_with_the_transmission(tmp_path):
+    """The row says which tones were notched (sent to the hub in its traffic doc, and in the station's log line), so a
+    tone heard in a clip can be checked against what the station took out."""
+    from dataclasses import replace
+
+    from sizeup.app import App
+    from sizeup.radio.fm import Channel
+    from tests.test_app import FakeWhisper, cfg, wait
+    from tests.test_atc import FIVE
+
+    app = App(replace(cfg(tmp_path), channels=FIVE))
+    app.stt.client = FakeWhisper({k: "Westchester tower, JetBlue 1234, runway three four" for k in range(1, 6)})
+    app.stt.start()
+    s = _segment(_short_transmission(2.0, 0.2, 1))
+    assert s.tones
+    app._segment(Channel(118.575, "HPN Tower"), s)
+    assert wait(lambda: any(x.source == "HPN Tower" for x in app.store.loose), 10)
+    t = next(x for x in app.store.loose if x.source == "HPN Tower")
+    assert t.tones == s.tones and "tones" in t.as_dict()
+    plain = _segment(_short_transmission(2.0, 0.0, 2))
+    plain.start += 60
+    plain.end += 60
+    app._segment(Channel(118.575, "HPN Tower"), plain)
+    assert wait(lambda: sum(x.source == "HPN Tower" for x in app.store.loose) == 2, 10)
+    t2 = max((x for x in app.store.loose if x.source == "HPN Tower"), key=lambda x: x.start)
+    assert t2 is not t and "tones" not in t2.as_dict()

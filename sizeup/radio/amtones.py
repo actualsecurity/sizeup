@@ -15,7 +15,8 @@ off under 300 Hz. So the tone is found and notched:
 
     find      a short-time spectrum (128 ms frames, 32 ms apart, 7.8 Hz bins at 16 kHz): in each frame, the peaks
               TONE_OVER_DB over the median of their +/-80 Hz neighbourhood. A tone is such a peak (+/-1 bin) in
-              TONE_PRESENT of the frames of the clip, or of any TONE_WINDOW_S of it (a tone on part of a transmission),
+              TONE_PRESENT of the frames of the clip's carrier (not its pre-roll and tail: #263), or of any
+              TONE_WINDOW_S of it (a tone on part of a transmission),
               and steady: its frequency, frame to frame, within TONE_SPREAD_HZ (p10-p90). Voice doesn't pass: its
               harmonics move with the pitch and stop between words.
     notch     each tone (TONE_MAX at most, the strongest first) with a notch of Q TONE_Q (10 Hz wide at 300 Hz),
@@ -53,9 +54,14 @@ def _frames(x: np.ndarray, rate: int) -> tuple[np.ndarray, np.ndarray]:
     return P, np.fft.rfftfreq(n, 1 / rate)
 
 
-def find_tones(audio: np.ndarray, rate: int = 16000) -> list[tuple[float, float]]:
-    """The steady tones in a clip: [(frequency Hz, its drift Hz p10-p90)], the strongest first, TONE_MAX at most."""
+def find_tones(audio: np.ndarray, rate: int = 16000, span: tuple[int, int] | None = None) -> list[tuple[float, float]]:
+    """The steady tones in a clip: [(frequency Hz, its drift Hz p10-p90)], the strongest first, TONE_MAX at most.
+    span: (first, end) sample of the carrier, where a beat can be (#263): looked for there only, so the pre-roll and
+    the tail (0.6 s of no carrier, a third of a 1.9 s transmission) don't hold its share of the frames under
+    TONE_PRESENT."""
     x = np.asarray(audio, dtype=np.float64)
+    if span is not None:
+        x = x[max(0, int(span[0])):max(0, int(span[1]))]
     if len(x) < TONE_MIN_S * rate:
         return []
     P, f = _frames(x - x.mean(), rate)
