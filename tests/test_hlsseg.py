@@ -193,7 +193,6 @@ def test_a_picture_missing_its_first_slice_or_a_segment_starting_mid_gop_is_brok
 
 @pytest.mark.parametrize("cut, why", [
     (lambda s: s[:-100], "not whole"),                                       # cut mid-packet
-    (lambda s: s[:-188 * 2], "cut short"),                                   # cut at a packet: the last frame short
     (lambda s: s[:188 * 3] + b"\x00" + s[188 * 3 + 1:], "sync"),
     (lambda s: b"", "empty"),
     (lambda s: s[376:], "no video stream"),                                  # no PAT / PMT
@@ -202,6 +201,66 @@ def test_a_picture_missing_its_first_slice_or_a_segment_starting_mid_gop_is_brok
 def test_a_segment_cut_short_or_not_mpeg_ts_is_refused(cut, why):
     with pytest.raises(hlsseg.Bad, match=why):
         hlsseg.check(cut(segment(gop(8) + [(True, 0)])))                    # ending on an IDR: a frame of 4 packets
+
+
+def test_a_last_frame_cut_short_is_left_out_not_the_whole_segment():
+    # cut at a packet boundary (an origin that closed early and said no length): the frame goes, the rest plays
+    seg = segment(gop(8) + [(True, 0)])                                      # ending on an IDR: a frame of 4 packets
+    info = hlsseg.check(seg[:-188 * 2])
+    assert info["broken"] == [8] and info["playable"] == 8
+    fixed = hlsseg.repair(seg[:-188 * 2], info)
+    assert hlsseg.check(fixed)["broken"] == [] and hlsseg.check(fixed)["frames"] == 8
+
+
+def test_a_lost_packet_just_before_the_next_frame_breaks_the_frame_it_ended():
+    seg = bytearray(segment(gop(4) + gop(4), bounded=False))               # unbounded PES: only the counters tell
+    pk = [i for i in range(0, len(seg), 188) if (seg[i + 1] & 0x1F) << 8 | seg[i + 2] == VPID]
+    starts = [i for i in pk if seg[i + 1] & 0x40]
+    last_of_first_idr = starts[1] - 188                                      # the IDR's last packet
+    del seg[last_of_first_idr:last_of_first_idr + 188]
+    info = hlsseg.check(bytes(seg))
+    assert 0 in info["broken"] and info["broken"][:4] == [0, 1, 2, 3] and 4 not in info["broken"]
+
+
+def test_the_pat_skips_the_network_program():
+    pat = (b"\x47\x40\x00\x10" + b"\x00" + b"\x00\xb0\x11\x00\x01\xc1\x00\x00" + b"\x00\x00\xe0\x10"
+           + b"\x00\x01\xe1\x00" + b"\x00\x00\x00\x00").ljust(188, b"\xff")             # program 0 (NIT) first
+    seg = pat + segment(gop(4))[188:]
+    assert hlsseg.check(seg)["frames"] == 4
+
+
+def test_a_segment_starting_mid_gop_is_judged_by_the_one_before():
+    a = segment(gop(4))
+    b = segment([(False, 4), (False, 5), (True, 0), (False, 1)])
+    sa = hlsseg.check(a)
+    assert hlsseg.check(b)["broken"] == [0, 1]                               # by itself: nothing it refers to
+    assert hlsseg.check(b, sa["state"])["broken"] == []                       # after a: frame 3 came, 4 follows it
+    broken_a = hlsseg.check(segment(gop(2) + [(False, 3)]))                  # a ends broken (frame 2 lost) ...
+    assert hlsseg.check(b, broken_a["state"])["broken"] == [0, 1]            # ... so b's lead-in is too
+
+
+def test_nothing_left_is_never_served_as_a_repair_and_what_is_served_passes_the_check():
+    with pytest.raises(hlsseg.Bad, match="no picture"):
+        hlsseg.repair(segment([(False, 3), (False, 4)]))
+    import random
+    rng = random.Random(5)
+    base = segment(gop(8) + [(True, 0), (False, 1), (False, 3)] + gop(4))
+    for _ in range(400):                                                     # a small fuzz: the repair invariant
+        b = bytearray(base)
+        for _ in range(rng.randint(1, 5)):
+            n = len(b) // 188
+            k = rng.randrange(n) * 188
+            if rng.random() < 0.5 and n > 2:
+                del b[k:k + 188]
+            else:
+                b[k + 4 + rng.randrange(184)] = rng.randrange(256)
+        try:
+            info = hlsseg.check(bytes(b))
+            fixed = hlsseg.repair(bytes(b), info)
+        except hlsseg.Bad:
+            continue
+        again = hlsseg.check(fixed)
+        assert again["playable"] > 0 and len(fixed) % 188 == 0
 
 
 def test_an_unbounded_pes_can_only_be_judged_by_its_packets():
@@ -274,10 +333,13 @@ SEG = "/api/cad/cameras/1ne01370s/stream/"
 def test_a_segment_cut_short_is_fetched_again_and_only_the_whole_one_is_served():
     r, f, _ = opened()
     whole = segment(gop(8) + [(True, 0)])
-    f.segs["media_w1_1225.ts"] = [whole[:-188 * 2], whole]                  # first the origin's cut-short copy
+    f.segs["media_w1_1225.ts"] = [ValueError("cut short: 600 of 1000 bytes"), whole]   # http_get's answer, then whole
     code, body, ctype, _ = r.get(SEG + "media_w1_1225.ts", "")
     assert (code, body, ctype) == (200, whole, "video/MP2T") and len(f.urls) == 2
-    assert "media_w1_1225.ts refused (its last frame is cut short)" in "\n".join(r.logs)
+    f.segs["media_w1_1226.ts"] = [ValueError("cut short"), ValueError("cut short")]
+    code, body, _, _ = r.get(SEG + "media_w1_1226.ts", "")
+    assert code == 502 and "media_w1_1226.ts refused (cut short)" in "\n".join(r.logs)
+    assert r._segment_locks == {}                                            # no lock left behind
 
 
 def test_a_segment_broken_twice_is_a_502_and_never_cached():
@@ -331,10 +393,17 @@ def test_playback_starts_on_a_segment_with_a_keyframe_to_show():
     f.segs["media_w1_1225.ts"] = [segment([(False, 3), (False, 4), (False, 5)])]
     assert r.pump_once("1ne01370s") == 3
     assert r._segments["1ne01370s/media_w1_1225.ts"]["kept"] == 0
-    code, body, _, _ = r.get(SEG + "chunklist_w1849562454.m3u8", "")
+    code, body, _, _ = r.get(SEG + "chunklist_w1849562454.m3u8", "v=dlgpage0")      # a page's first: trimmed
     text = body.decode()
     assert code == 200 and "media_w1_1225.ts" not in text and "#EXT-X-MEDIA-SEQUENCE:1226" in text
     assert text.index("media_w1_1226.ts") < text.index("media_w1_1227.ts")
+    # every later list: the segment stays in its place, marked a gap (the player skips it, the sequence holds)
+    text = r.get(SEG + "chunklist_w1849562454.m3u8", "v=dlgpage0")[1].decode()
+    assert "#EXT-X-MEDIA-SEQUENCE:1225" in text and "#EXT-X-GAP\nmedia_w1_1225.ts" in text
+    assert "#EXT-X-GAP\nmedia_w1_1226" not in text
+    # asked for anyway: served as it came (no repair could make a picture of it)
+    code, body, _, _ = r.get(SEG + "media_w1_1225.ts", "")
+    assert code == 200 and body == r._segments["1ne01370s/media_w1_1225.ts"]["body"]
     # a page's first list (where its playback starts) also skips the ones that came damaged; later lists don't
     f.segs["media_w1_1226.ts"] = [segment(gop(4) + [(True, 0), (False, 2), (False, 3)])]
     r._segments.pop("1ne01370s/media_w1_1226.ts")
@@ -342,7 +411,7 @@ def test_playback_starts_on_a_segment_with_a_keyframe_to_show():
     first = r.get(SEG + "chunklist_w1849562454.m3u8", "v=dlgpage1")[1].decode()
     again = r.get(SEG + "chunklist_w1849562454.m3u8", "v=dlgpage1")[1].decode()
     assert "#EXT-X-MEDIA-SEQUENCE:1227" in first and "media_w1_1226.ts" not in first
-    assert "#EXT-X-MEDIA-SEQUENCE:1226" in again and "media_w1_1226.ts" in again
+    assert "#EXT-X-MEDIA-SEQUENCE:1225" in again and "#EXT-X-GAP\nmedia_w1_1225.ts" in again and "media_w1_1226.ts" in again
     # never trimmed to nothing: the last stays
     assert r._for_player("1ne01370s", b"#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:1225\n#EXTINF:4.0,\nmedia_w1_1225.ts\n").count(b".ts") == 1
 
@@ -352,10 +421,22 @@ def test_a_trimmed_head_carries_its_discontinuity_into_the_sequence():
     r._streams["1ne01370s"]["bad"] = {"media_w1_9.ts": "cut short"}
     cl = (b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:9\n#EXT-X-DISCONTINUITY-SEQUENCE:54\n"
           b"#EXT-X-DISCONTINUITY\n#EXTINF:4.0,\nmedia_w1_9.ts\n#EXTINF:4.0,\nmedia_w1_10.ts\n")
-    out = r._for_player("1ne01370s", cl).decode()
+    out = r._for_player("1ne01370s", cl, start=True).decode()
     assert "#EXT-X-MEDIA-SEQUENCE:10" in out and "#EXT-X-DISCONTINUITY-SEQUENCE:55" in out
     assert "#EXT-X-DISCONTINUITY\n" not in out and out.startswith("#EXTM3U\n#EXT-X-TARGETDURATION:4\n")
+    later = r._for_player("1ne01370s", cl).decode()                        # not a start: a gap in its place
+    assert "#EXT-X-MEDIA-SEQUENCE:9" in later and "#EXT-X-DISCONTINUITY\n#EXTINF:4.0,\n#EXT-X-GAP\nmedia_w1_9.ts" in later
     assert r._for_player("1ne01370s", cl.replace(b"media_w1_9", b"media_w1_8")) == cl.replace(b"media_w1_9", b"media_w1_8")
+
+
+def test_a_gap_in_the_middle_of_every_list():
+    r, f, _ = opened()
+    r._streams["1ne01370s"]["bad"] = {"media_w1_10.ts": "no video"}
+    cl = (b"#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:9\n#EXTINF:4.0,\nmedia_w1_9.ts\n#EXTINF:4.0,\nmedia_w1_10.ts\n"
+          b"#EXTINF:4.0,\nmedia_w1_11.ts\n")
+    for start in (True, False):
+        out = r._for_player("1ne01370s", cl, start=start).decode()
+        assert "#EXT-X-MEDIA-SEQUENCE:9" in out and out.count(".ts") == 3 and "#EXTINF:4.0,\n#EXT-X-GAP\nmedia_w1_10.ts" in out
 
 
 def test_the_check_is_cheap_enough_for_the_hub():

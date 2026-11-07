@@ -29,7 +29,7 @@ class Stills(Fetch):
         self.clock, self.age, self.hls = clock, 60.0, True
 
     def __call__(self, url, timeout, limit, headers=None):
-        if url.startswith((STILLS, "https://www.westchestergov.com/cctv/")):
+        if url.startswith((STILLS, "https://www.westchestergov.com/cctv/", "https://nyssnapshot.com/", "https://511ny.org/map/Cctv/")):
             self.calls.append((url, dict(headers or {})))
             if self.age is None:
                 raise OSError("timed out")
@@ -38,6 +38,8 @@ class Stills(Fetch):
             self.calls.append((url, {}))
             if not self.hls:
                 raise OSError("connection refused")
+            if "chunklist_" in url:
+                return 200, {"content-type": "application/vnd.apple.mpegurl"}, b"#EXTM3U\n#EXTINF:4.0,\nmedia_w1_1.ts\n"
             return 200, {"content-type": "application/vnd.apple.mpegurl"}, b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\nchunklist_w1.m3u8\n"
         return super().__call__(url, timeout, limit, headers)
 
@@ -66,20 +68,34 @@ def test_a_511ny_still_minutes_old_is_how_its_stills_are_not_a_camera_down():
     assert r.STALE_IMAGE_S == 300 and Roads.stale_s({"source": "County"}) == 300 and Roads.stale_s({"source": "511NY"}) == 1800
 
 
-def test_a_live_video_camera_with_no_current_still_stays_on_until_its_stream_refuses_too():
+def test_a_live_video_camera_with_no_current_still_is_judged_by_its_stream():
     rd, f, clock = hub()
     f.age = 2 * 86400                                   # a still two days old (seen on one camera)
     for _ in range(3):
         clock.t += 60
         code, body, _, _ = rd.image("34353")
         assert code == 404 and json.loads(body)["error"] == "no current image"
+    # its stream not looked at yet: listed, stale, and not offered by the pickers until it is
     c = cam(rd, "34353")
-    assert not c["down"] and c["state"] == "ok"
-    # its stream refuses as well: offline, with the reason
+    assert not c["down"] and (c["state"], c["why"]) == ("stale", "Still old · video not checked")
+    lat, lon = c["lat"], c["lon"]
+    assert "34353" not in [x["id"] for x in rd.nearest(lat, lon)]
+    # the sweep looks (two small GETs): it streams, so it is on
+    n = len(f.calls)
+    clock.t += r.HEALTH_SWEEP_S + 1
+    rd.sweep()
+    assert any("34353" in u or "R8_038" in u for u, _ in f.calls[n:] if "skyvdn" in u)
+    c = cam(rd, "34353")
+    assert not c["down"] and c["state"] == "ok" and "34353" in [x["id"] for x in rd.nearest(lat, lon)]
+    # the next sweep finds no stream either: offline, with the reason, and the rev moved so the pages hear it
     f.hls = False
-    assert rd.stream("34353", "playlist.m3u8")[0] == 503
+    rev = rd.rev
+    clock.t += r.HEALTH_SWEEP_S + 1
+    rd.sweep()
     c = cam(rd, "34353")
-    assert c["down"] and c["state"] == "offline" and c["why"] == "No video or image" and c["since"] == clock.t
+    assert c["down"] and c["state"] == "offline" and c["why"] == "No video or image" and rd.rev != rev
+    assert "34353" not in [x["id"] for x in rd.nearest(lat, lon)]
+    assert rd.stream("34353", "playlist.m3u8")[0] == 503                     # a viewer: snapshots at once
     # a fresh still with the stream still refused: listed, stale, "No live video"
     f.age = 30
     clock.t += 60
@@ -88,6 +104,17 @@ def test_a_live_video_camera_with_no_current_still_stays_on_until_its_stream_ref
     assert not c["down"] and (c["state"], c["why"]) == ("stale", "No live video")
     clock.t += r.STREAM_RETRY_S + 1
     assert cam(rd, "34353")["state"] == "ok"
+
+
+def test_a_state_that_changes_with_time_moves_the_rev():
+    rd, f, clock = hub()
+    f.hls = False
+    assert rd.stream("34353", "playlist.m3u8")[0] == 503                     # refused: "No live video" for 5 min
+    rd.state_tick()
+    rev = rd.rev
+    assert rd.state_tick() is False and rd.rev == rev                       # nothing changed: no churn
+    clock.t += r.STREAM_RETRY_S + 1                                          # the refusal runs out with no request
+    assert rd.state_tick() is True and rd.rev != rev
 
 
 def test_a_snapshot_camera_goes_down_with_its_reason():

@@ -442,9 +442,16 @@ window.CamWall = (() => {
                             maxBufferLength: 18, backBufferLength: 0, manifestLoadingTimeOut: 8000, manifestLoadingMaxRetry: 0,
                             levelLoadingTimeOut: 12000, levelLoadingMaxRetry: 2, fragLoadingTimeOut: 15000, fragLoadingMaxRetry: 2 });
       t.hls = hls;
+      const tries = [];
       hls.on(Hls.Events.ERROR, (_, data) => {
         if (!data || !data.fatal) return;
         const code = data.response && data.response.code;
+        const now = Date.now();
+        while (tries.length && now - tries[0] > 60000) tries.shift();
+        if (code !== 429 && code !== 503 && !/^manifestLoad/.test(data.details || "") && tries.length < 3) {   // #276: a spoiled segment
+          tries.push(now);
+          try { if (data.type === Hls.ErrorTypes.MEDIA_ERROR) hls.recoverMediaError(); else hls.startLoad(); return; } catch (_) { /* fail */ }
+        }
         failed(code, code === 503 ? 300 : 0, data.details);
       });
       hls.loadSource(streamUrl(t, "playlist.m3u8"));

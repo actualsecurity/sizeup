@@ -67,7 +67,11 @@ def _streams(body: bytes) -> tuple[int | None, int | None]:
         try:
             if pid == 0 and pmt is None:
                 s = _psi_section(body, i, off)
-                pmt = ((s[10] & 0x1F) << 8) | s[11]
+                sl = ((s[1] & 0x0F) << 8) | s[2]
+                for j in range(8, min(3 + sl - 4, len(s) - 3), 4):
+                    if (s[j] << 8 | s[j + 1]) != 0:   # program 0 names the network PID, not a PMT
+                        pmt = ((s[j + 2] & 0x1F) << 8) | s[j + 3]
+                        break
             elif pmt is not None and pid == pmt:
                 s = _psi_section(body, i, off)
                 sl = ((s[1] & 0x0F) << 8) | s[2]
@@ -90,8 +94,8 @@ def _pes(body: bytes, vpid: int) -> list[dict]:
         if pid != vpid:
             continue
         if off < TS:                                  # a packet with a payload: its counter must follow the last
-            if last_cc is not None and cc not in ((last_cc + 1) & 0x0F, last_cc) and cur is not None and not pusi:
-                cur["gap"] = True                     # a packet of this frame went missing
+            if last_cc is not None and cc not in ((last_cc + 1) & 0x0F, last_cc) and cur is not None:
+                cur["gap"] = True                     # a packet of this frame went missing (its tail, when this starts the next)
             last_cc = cc
         if pusi:
             cur = {"packets": [], "data": bytearray()}
@@ -230,10 +234,16 @@ def _slice_head(nal: bytes, sps: dict) -> tuple[int, int, int] | None:
         return None
 
 
-def check(body: bytes, sps: dict | None = None) -> dict:
-    """A segment's structure and frames. Bad when it must not be served at all. Else {frames, idr_first, broken
-    (indexes of the frames whose reference chain is broken), lost (reference frames missing before them), sps,
-    size: "WxH", h264: whether the frames were looked inside}. sps: the stream's, when this segment carries none."""
+def check(body: bytes, state: dict | None = None) -> dict:
+    """A segment's structure and frames. Bad only when it isn't MPEG-TS with video at all (empty, not whole 188-byte
+    packets, a lost sync byte, no PAT / PMT, no video PES): such a body is never served. Else {frames, idr_first,
+    broken (indexes of the frames to leave out), lost (reference frames missing before them), playable (frames with
+    a picture that stay), sps, size: "WxH", h264: whether the frames were looked inside, state}. A frame cut short
+    (the last one too: an origin that closed early) or with a packet missing is broken, not Bad.
+    state: the stream's after the segment before (check's "state": its SPS, the last reference frame_num, whether
+    the chain was broken), so a segment that starts mid-GOP is judged by what came before it; None: by itself."""
+    state = dict(state or {})
+    sps = state.get("sps")
     vpid, stype = _streams(body)
     if vpid is None:
         raise Bad("no video stream (no PAT / PMT)")
@@ -243,18 +253,19 @@ def check(body: bytes, sps: dict | None = None) -> dict:
     frames = []
     for k, p in enumerate(pes):
         es, pts, whole = _pes_es(p)
-        if not whole and k == len(pes) - 1:
-            raise Bad("its last frame is cut short")
         frames.append({"es": es, "pts": pts, "whole": whole, "pes": k})
-    out = {"frames": len(frames), "idr_first": False, "broken": [], "lost": 0, "sps": sps, "size": "", "h264": stype == H264}
+    out = {"frames": len(frames), "idr_first": False, "broken": [], "lost": 0, "playable": 0, "sps": sps, "size": "",
+           "h264": stype == H264, "state": {"sps": sps, "prev_ref": None, "broken": True}}
     if stype != H264:
         out["idr_first"] = True                       # not looked inside: trusted as the origin cut it
+        out["broken"] = [f["pes"] for f in frames if not f["whole"]]
+        out["playable"] = len(frames) - len(out["broken"])
         return out
-    prev_ref = None
-    broken = False
+    prev_ref = state.get("prev_ref")
+    broken = bool(state.get("broken", prev_ref is None))
     first = True
     gop: list[int] = []                               # this GOP's frames so far, after its IDR
-    idr_bad = False
+    pictures: list[int] = []
     for f in frames:
         nals = nal_units(f["es"])
         slices = []
@@ -263,9 +274,9 @@ def check(body: bytes, sps: dict | None = None) -> dict:
         for n in nals:
             t = n[0] & 0x1F
             if t == 7:
-                s = parse_sps(n)
-                if s:
-                    out["sps"] = sps = s
+                sp = parse_sps(n)
+                if sp:
+                    out["sps"] = sps = sp
             elif t in (1, 5):
                 has_slice = True
                 idr = idr or t == 5
@@ -274,17 +285,20 @@ def check(body: bytes, sps: dict | None = None) -> dict:
                     h = _slice_head(n, sps)
                     if h:
                         slices.append(h)
-        if not has_slice:                             # SEI, parameter sets only: nothing to judge
+        if not has_slice:                             # SEI, parameter sets, a frame's lost tail: no picture
+            if not f["whole"]:
+                out["broken"].append(f["pes"])
             continue
+        pictures.append(f["pes"])
         if first:
-            out["idr_first"] = idr
+            out["idr_first"] = idr and f["whole"]
             first = False
         if idr:
-            broken = idr_bad = bool(slices) and slices[0][0] != 0      # an IDR missing its first slice
-            gop = [f["pes"]] if idr_bad else []
+            broken = bool(slices) and slices[0][0] != 0          # an IDR missing its first slice
+            gop = [f["pes"]] if broken else []
             prev_ref = slices[0][2] if slices else 0
-        elif prev_ref is None:
-            broken = True                             # no IDR before it in this segment: nothing it refers to is here
+        elif prev_ref is None or broken:
+            broken = True                             # nothing it refers to came whole: broken until the next IDR
         elif slices:
             fn = slices[0][2]
             mx = 1 << sps["log2_max_frame_num"]
@@ -310,6 +324,9 @@ def check(body: bytes, sps: dict | None = None) -> dict:
             out["broken"].extend(gop)
             gop = []
     out["broken"] = sorted(set(out["broken"]))
+    dropped = set(out["broken"])
+    out["playable"] = sum(1 for k in pictures if k not in dropped)
+    out["state"] = {"sps": sps, "prev_ref": prev_ref, "broken": broken}
     if sps:
         out["size"] = f"{sps['width']}x{sps['height']}"
     return out
@@ -317,8 +334,11 @@ def check(body: bytes, sps: dict | None = None) -> dict:
 
 def repair(body: bytes, info: dict | None = None) -> bytes:
     """The segment with its broken frames (check's "broken") left out: their video packets dropped, the video PID's
-    continuity counters renumbered so the rest reads as one unbroken run."""
+    continuity counters renumbered so the rest reads as one unbroken run. Bad when no picture is left (a segment
+    with no IDR in a broken chain): what is served always passes check, or isn't served."""
     info = info if info is not None else check(body)
+    if not info["playable"]:
+        raise Bad("no picture left after the repair")
     if not info["broken"]:
         return body
     vpid, _ = _streams(body)
@@ -336,4 +356,8 @@ def repair(body: bytes, info: dict | None = None) -> bytes:
             if cc is not None:
                 pkt[3] = (pkt[3] & 0xF0) | cc
         out += pkt
-    return bytes(out)
+    fixed = bytes(out)
+    again = check(fixed)                              # Bad here (no video left): the caller's "not served"
+    if not again["playable"]:
+        raise Bad("no picture left after the repair")
+    return fixed

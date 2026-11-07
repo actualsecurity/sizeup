@@ -775,9 +775,25 @@ window.MapLayers = (() => {
                             levelLoadingTimeOut: 12000, levelLoadingMaxRetry: 2, fragLoadingTimeOut: 15000, fragLoadingMaxRetry: 2 });
       viewer.hls = hls;
       note("Connecting…");
+      const tries = [];                                               // recoveries within the last minute
       hls.on(Hls.Events.ERROR, (_, data) => {
         if (!data) return;
         const code = data.response && data.response.code;
+        // (#276) one segment the source spoiled (a 502 from the hub) or a decode hiccup is not the end of the stream:
+        // load on / recover the media a few times a minute before going to snapshots
+        if (data.fatal && code !== 429 && code !== 503 && data.details !== "manifestLoadTimeOut" && data.details !== "manifestLoadError") {
+          const now = Date.now();
+          while (tries.length && now - tries[0] > 60000) tries.shift();
+          if (tries.length < 3) {
+            tries.push(now);
+            note("Buffering…");
+            try {
+              if (data.type === Hls.ErrorTypes.MEDIA_ERROR) hls.recoverMediaError();
+              else hls.startLoad();
+              return;
+            } catch (_) { /* fall through: snapshots */ }
+          }
+        }
         if (data.fatal) {
           const r = code === 429 ? "the hub has enough streams open" : code === 503 ? "no live video from the source right now"
             : data.details === "manifestLoadTimeOut" ? "the source didn't answer" : data.details || "stream error";

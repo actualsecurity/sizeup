@@ -1759,9 +1759,11 @@ class Roads:
         self._health: dict[str, dict] = {}            # camera id -> {fails, down_since, last_image, checked}
         self._streams: dict[str, dict] = {}           # camera id -> {last (playlist request), base (the stream's folder)}
         self._segments: OrderedDict[str, dict] = OrderedDict()   # "cid/name" -> {body, ctype, fetched, kept, ...}
-        self._segment_locks: dict[str, threading.Lock] = {}     # "cid/name" -> one fetch at a time
+        self._segment_locks: dict[str, list] = {}               # "cid/name" -> [lock, users]: one fetch at a time
         self._stream_lock = threading.Lock()
         self._stream_down: dict[str, float] = {}      # camera id -> when its source last refused to stream
+        self._probe: dict[str, dict] = {}             # camera id -> {at, ok}: its stream looked at by the sweep (#276)
+        self._state_sig: tuple | None = None          # the cameras' states as the pages last heard them
         self._pumps: dict[str, threading.Thread] = {}
         self._swept = 0.0
         self._images: OrderedDict[str, dict] = OrderedDict()
@@ -1845,6 +1847,7 @@ class Roads:
                             self._swept = 0.0                   # a new camera list: look at them now
             if self.clock() >= self._swept + HEALTH_SWEEP_S:
                 self.sweep()
+            self.state_tick()
             self._stop.wait(5.0)
 
     def sweep(self) -> int:
@@ -1861,7 +1864,52 @@ class Roads:
                 continue
             self.image(c["id"])
             n += 1
+            # (#276) a live-video camera whose still is down: is its stream there? (two small GETs, as a player's first)
+            if c.get("video") and (self._health.get(c["id"]) or {}).get("down_since") is not None:
+                self.probe_stream(c["id"])
         return n
+
+    def probe_stream(self, cid: str) -> bool:
+        """A live-video camera's stream looked at: its master playlist and its chunklist, as a player's first two
+        requests (an open stream with a fresh chunklist counts without asking). Kept in _probe; a refusal also in
+        _stream_down (the viewers get snapshots at once). True when it streams."""
+        cam = self.camera(cid)
+        if cam is None or not cam.get("video"):
+            return False
+        now = self.clock()
+        st = self._streams.get(cid)
+        ok = bool(st and st.get("list") and now - st.get("list_at", 0) < 30)
+        if not ok:
+            base = cam["video"].rsplit("/", 1)[0] + "/"
+            try:
+                code, _, body = self.fetch(cam["video"], STREAM_OPEN_TIMEOUT_S, 1 << 20)
+                clean = self._clean_playlist(body) if code == 200 and body else None
+                chunk = next((t for t in (clean or b"").decode().splitlines() if t and not t.startswith("#")), "")
+                if chunk:
+                    code, _, body = self.fetch(base + chunk, STREAM_TIMEOUT_S, 1 << 20)
+                    ok = code == 200 and b".ts" in (body or b"")
+            except (HTTPError, URLError, OSError, ValueError):
+                ok = False
+        was = self._probe.get(cid, {}).get("ok")
+        self._probe[cid] = {"at": now, "ok": ok}
+        if not ok:
+            self._stream_down[cid] = now
+            self.log(f"roads: {cid}: still down and no live video either: offline")
+        if was != ok:
+            self._changed()
+        return ok
+
+    def state_tick(self) -> bool:
+        """The cameras' states change with time too (a refusal or a list's age running out, a probe gone old): the rev
+        moves when any did, so the pages hear of it. True when it moved."""
+        sig = tuple((c["id"], self.health(c["id"], c)["state"]) for c in self.merged("cameras"))
+        if sig == self._state_sig:
+            return False
+        moved = self._state_sig is not None
+        self._state_sig = sig
+        if moved:
+            self._changed()
+        return moved
 
     def due(self) -> list[tuple[str, str]]:
         """(provider, feed) pairs to fetch now."""
@@ -2023,8 +2071,8 @@ class Roads:
 
     def health(self, cid: str, cam: dict | None = None) -> dict:
         """{down, down_since, last_image, state: ok | stale | offline, why: a short reason ("" when ok), since}.
-        down (offline): a snapshot camera whose still is stale or failing; a live-video camera only when its stream's
-        source refused too. stale: still listed and offered, but its source's list left it out or hasn't been read
+        down (offline): a snapshot camera whose still is stale or failing; a live-video camera when its still is and
+        its stream's source refused too (a viewer's open, or the sweep's probe_stream). stale: still listed and offered, but its source's list left it out or hasn't been read
         lately, or (video) its stream refused while its still is fine."""
         cam = cam if cam is not None else self.camera(cid)
         h = self._health.get(cid) or {"fails": 0, "down_since": None, "last_image": None}
@@ -2033,6 +2081,10 @@ class Roads:
         refused = self._stream_down.get(cid)
         refused = refused if refused is not None and now - refused < STREAM_RETRY_S else None
         still_down = h["down_since"] is not None
+        probe = self._probe.get(cid)
+        probe = probe if probe is not None and now - probe["at"] < 2 * HEALTH_SWEEP_S else None
+        if video and still_down and refused is None and probe is not None and not probe["ok"]:
+            refused = probe["at"]                     # the sweep found no stream either: offline until it finds one
         down = still_down and (not video or refused is not None)
         out = {"down": down, "down_since": (max(h["down_since"], refused) if video else h["down_since"]) if down else None,
                "last_image": h["last_image"], "state": "ok", "why": "", "since": None}
@@ -2050,7 +2102,15 @@ class Roads:
             return out | {"state": "stale", "why": f"{cam.get('source') or 'Source'} list not updated", "since": st["at"]}
         if video and refused is not None:
             return out | {"state": "stale", "why": "No live video", "since": refused}
+        if video and still_down and probe is None:   # the still is dead and its stream not looked at yet
+            return out | {"state": "stale", "why": "Still old · video not checked", "since": h["down_since"]}
         return out
+
+    def _offerable(self, c: dict) -> bool:
+        """Offered by the pickers (nearest, cameras_for): not offline, and not a video camera whose still is dead and
+        whose stream nobody has looked at yet (#276: it may be dead too)."""
+        h = self.health(c["id"], c)
+        return not h["down"] and h["why"] != "Still old · video not checked"
 
     def _note_image(self, cid: str, ok: bool, taken: float | None, now: float, stale_s: float = STALE_IMAGE_S) -> None:
         """A snapshot fetch's outcome: fresh (ok), or stale / failed. Transitions bump the rev."""
@@ -2094,7 +2154,7 @@ class Roads:
         return next((c for c in self.merged("cameras") if c["id"] == cid), None)
 
     def nearest(self, lat: float, lon: float, n: int = 3, within_km: float = NEAR_KM) -> list[dict]:
-        cams = [c for c in self.merged("cameras") if not c["off"] and not self.health(c["id"], c)["down"]]
+        cams = [c for c in self.merged("cameras") if not c["off"] and self._offerable(c)]
         d = sorted(((km(lat, lon, c["lat"], c["lon"]), c) for c in cams), key=lambda x: x[0])
         return [self._cam_public(c) | {"km": round(k, 2)} for k, c in d[:max(0, n)] if k <= within_km]
 
@@ -2189,7 +2249,7 @@ class Roads:
                 at = self._mileage(route, c["lat"], c["lon"])
                 if not at or at[1] > MARKER_M:
                     continue
-                if self.health(c["id"], c)["down"]:                              # demoted: the folded "N cameras down" row
+                if not self._offerable(c):                                     # demoted: the folded "N cameras down" row
                     if abs(at[0] - mile) <= ALONG_MI:
                         down.append(self._cam_public(c) | {"rel": "down", "miles": round(abs(at[0] - mile), 1),
                                                            "side": "", "facing": False, "km": round(km(lat, lon, c["lat"], c["lon"]), 2)})
@@ -2228,7 +2288,7 @@ class Roads:
                 out.append(c | {"rel": "nearby", "miles": None, "side": "", "facing": False})
         seen = {c["id"] for c in down}
         for c in self.merged("cameras"):                                       # down cameras close by, too
-            if c["id"] in seen or c["off"] or not self.health(c["id"], c)["down"]:
+            if c["id"] in seen or c["off"] or self._offerable(c):
                 continue
             k = km(lat, lon, c["lat"], c["lon"])
             if k <= NEARBY_KM:
@@ -2564,33 +2624,38 @@ class Roads:
 
     def _segment(self, cid: str, base: str, name: str) -> dict:
         """A segment from the cache, else from the origin: one fetch at a time per segment (the player and the pump
-        asking at once wait for the one), checked whole (hlsseg.check: whole packets, every frame complete) and
-        repaired (frames whose reference chain is broken at the source left out). A segment that fails the check is
-        fetched once more; failing again, hlsseg.Bad (never served, never cached). Fetch errors are raised."""
+        asking at once wait for the one), checked (hlsseg.check) and repaired (frames whose reference chain is broken
+        at the source left out). A body that isn't MPEG-TS with video, or came short of its Content-Length, is fetched
+        once more; failing again, hlsseg.Bad / ValueError (never served, never cached). Fetch errors are raised."""
         key = f"{cid}/{name}"
-        with self._stream_lock:
-            lock = self._segment_locks.setdefault(key, threading.Lock())
-        with lock:
-            hit = self._segments.get(key)
-            if hit and self.clock() - hit["fetched"] < STREAM_SEG_TTL_S:
-                return hit
-            try:
+        with self._stream_lock:                       # [lock, users]: dropped once nobody holds or waits for it
+            ent = self._segment_locks.setdefault(key, [threading.Lock(), 0])
+            ent[1] += 1
+        try:
+            with ent[0]:
+                hit = self._segments.get(key)
+                if hit and self.clock() - hit["fetched"] < STREAM_SEG_TTL_S:
+                    return hit
                 for attempt in (1, 2):
-                    with self._parallel:
-                        code, headers, body = self.fetch(base + name, STREAM_TIMEOUT_S, STREAM_MAX_BYTES)
-                    if code != 200 or not body:
-                        raise ValueError(f"HTTP {code}")
                     try:
+                        with self._parallel:
+                            code, headers, body = self.fetch(base + name, STREAM_TIMEOUT_S, STREAM_MAX_BYTES)
+                        if code != 200 or not body:
+                            raise ValueError(f"HTTP {code}")
                         return self._keep_segment(cid, name, headers, body, self.clock())
                     except hlsseg.Bad as e:
                         self._note_bad(cid, name, str(e))
                         if attempt == 2:
                             raise
-            finally:
-                with self._stream_lock:
-                    if len(self._segment_locks) > 4 * STREAM_SEG_KEEP:
-                        for k in [k for k in self._segment_locks if k not in self._segments and k != key]:
-                            self._segment_locks.pop(k, None)
+                    except ValueError as e:               # cut short (http_get), an HTTP error: once more
+                        if attempt == 2:
+                            self._note_bad(cid, name, str(e))
+                            raise
+        finally:
+            with self._stream_lock:
+                ent[1] -= 1
+                if ent[1] <= 0 and self._segment_locks.get(key) is ent:
+                    self._segment_locks.pop(key, None)
         raise AssertionError("unreachable")  # pragma: no cover
 
     def _note_bad(self, cid: str, name: str, why: str) -> None:
@@ -2603,14 +2668,24 @@ class Roads:
         self.log(f"roads: stream {cid}: {name} refused ({why})")
 
     def _keep_segment(self, cid: str, name: str, headers: dict, body: bytes, now: float) -> dict:
-        """A fetched segment, checked (hlsseg.Bad when it must not be served) and repaired, into the cache; its frames
-        into the stream's frame-rate estimate and its damage into the stream's record (stream_status)."""
+        """A fetched segment, checked (hlsseg.Bad when it isn't MPEG-TS with video) and repaired, into the cache; its
+        frames into the stream's frame-rate estimate and its damage into the stream's record (stream_status). The
+        check carries on from the segment before when this one follows it (its last reference frame, a chain broken
+        across the cut). A segment with no picture left after the repair is kept as it came (noplay: a GAP in the
+        players' lists; served as it came if asked for)."""
         ctype = (headers.get("content-type") or "video/MP2T").split(";")[0].strip() or "video/MP2T"
         st = self._streams.get(cid)
-        info = hlsseg.check(body, (st or {}).get("sps"))
-        fixed = hlsseg.repair(body, info)
+        m = re.search(r"_(\d{1,12})\.ts$", name)
+        seq = int(m.group(1)) if m else None
+        prev = (st or {}).get("hstate")
+        state = prev[1] if prev and seq is not None and prev[0] == seq - 1 else {"sps": (st or {}).get("sps")}
+        info = hlsseg.check(body, state)
+        try:
+            fixed, noplay = hlsseg.repair(body, info), False
+        except hlsseg.Bad:
+            fixed, noplay = body, True
         hit = {"body": fixed, "ctype": ctype, "fetched": now, "frames": info["frames"], "dropped": len(info["broken"]),
-               "lost": info["lost"], "kept": info["frames"] - len(info["broken"]), "size": info["size"]}
+               "lost": info["lost"], "kept": 0 if noplay else info["playable"], "noplay": noplay, "size": info["size"]}
         with self._stream_lock:
             self._segments[f"{cid}/{name}"] = hit
             self._segments.move_to_end(f"{cid}/{name}")
@@ -2619,6 +2694,8 @@ class Roads:
             if st is not None:
                 if info["sps"]:
                     st["sps"] = info["sps"]
+                if seq is not None and (not st.get("hstate") or seq > st["hstate"][0]):
+                    st["hstate"] = (seq, info["state"])
                 if name not in st.setdefault("seen", {}):
                     st["seen"][name] = hit["dropped"]
                     while len(st["seen"]) > STREAM_DAMAGE_WINDOW:
@@ -2632,7 +2709,7 @@ class Roads:
                             st["fps"] = round(st["frames"] / st["seconds"], 1)
         if hit["dropped"]:
             self.log(f"roads: stream {cid}: {name}: {info['lost']} reference frames lost at the source; "
-                     f"{hit['dropped']} of {info['frames']} frames left out")
+                     f"{hit['dropped']} of {info['frames']} frames left out" + ("; nothing to show: a gap" if noplay else ""))
         return hit
 
     def _first_list(self, st: dict, viewer: str) -> bool:
@@ -2646,11 +2723,11 @@ class Roads:
         return first
 
     def _for_player(self, cid: str, chunklist: bytes, start: bool = False) -> bytes:
-        """The chunklist as a player gets it (#276): its head trimmed of segments the hub knows have nothing to play
-        (one that failed its check twice, or with no frame left after the repair). start (a page's first chunklist:
-        where its playback begins): also of the ones that came damaged, so the first picture is a whole live one.
-        Later lists don't trim those (a player already on its way would jump). Only the head, so the media sequence
-        only ever moves on; the discontinuity sequence counts any EXT-X-DISCONTINUITY taken off with it."""
+        """The chunklist as a player gets it (#276). Every list: a segment the hub knows has nothing to play (refused
+        twice, or no picture left after the repair) is marked EXT-X-GAP (the player skips it; its place and the
+        media sequence stay). start (a page's first chunklist: where its playback begins): the head trimmed of those
+        and of the ones that came damaged, so the first picture is a whole live one; only the head, so the media
+        sequence only ever moves on, and the discontinuity sequence counts any EXT-X-DISCONTINUITY taken off."""
         st = self._streams.get(cid) or {}
         bad = st.get("bad") or {}
         lines = chunklist.decode(errors="replace").splitlines()
@@ -2667,14 +2744,20 @@ class Roads:
             else:
                 segs.append((tags, t))
                 tags = []
-        drop = 0
-        for _, name in segs[:-1]:                       # never the last: something to play
+
+        def gap(name: str) -> bool:
             hit = self._segments.get(f"{cid}/{name}")
-            if name in bad or (hit is not None and (hit["kept"] == 0 or (start and hit["dropped"]))):
-                drop += 1
-            else:
-                break
-        if not drop:
+            return name in bad or (hit is not None and hit.get("noplay", False))
+        drop = 0
+        if start:
+            for _, name in segs[:-1]:                   # never the last: something to play
+                hit = self._segments.get(f"{cid}/{name}")
+                if gap(name) or (hit is not None and hit["dropped"]):
+                    drop += 1
+                else:
+                    break
+        gaps = [name for _, name in segs[drop:] if gap(name)]
+        if not drop and not gaps:
             return chunklist
         disc = sum(1 for t, _ in segs[:drop] for x in t if x == "#EXT-X-DISCONTINUITY")
         out = []
@@ -2686,7 +2769,7 @@ class Roads:
         if disc and not any(t.startswith("#EXT-X-DISCONTINUITY-SEQUENCE:") for t in head):
             out.append(f"#EXT-X-DISCONTINUITY-SEQUENCE:{disc}")
         for t, name in segs[drop:]:
-            out += t + [name]
+            out += t + (["#EXT-X-GAP"] if name in gaps and "#EXT-X-GAP" not in t else []) + [name]
         out += tags
         return ("\n".join(x for x in out if x) + "\n").encode()
 

@@ -324,8 +324,7 @@
   }
   .cw-tile.pinned { border-color: var(--warn); outline: var(--bw) solid var(--warn); outline-offset: calc(-1 * var(--bw)); }
   .cw-tile.stale { border-style: dashed; }
-  .cw-tile.rec .cw-frame::after { content: "●"; position: absolute; inset-block-start: var(--s-1); inset-inline-end: var(--s-1);
-    color: var(--err); font-size: var(--fs-2xs); line-height: 1; }                /* #277: the DVR records it */                     /* #276: listed, but its source left it out or went quiet */
+  .cw-tile.rec .cw-name::before { content: "● "; color: var(--err); }      /* the DVR records it (#277): in the caption, clear of the pin */
   .cw-frame { position: relative; display: block; aspect-ratio: 16 / 9; overflow: hidden; background: #000; border-radius: var(--radius-s); }
   .cw-img, .cw-video { position: absolute; inset: 0; inline-size: 100%; block-size: 100%; object-fit: contain; }
   .cw-pin { position: absolute; inset-block-start: var(--s-1); inset-inline-end: var(--s-1); padding: 0 var(--s-2);
