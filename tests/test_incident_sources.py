@@ -954,4 +954,4 @@ def test_a_feed_incident_is_received_via_the_feed_not_60_control(tmp_path):
     rig = Rig(tmp_path)
     rig.feed.put("A1", type="ALARM", location="12 Example Ave", units=("E60",), times={"dispatched": T0})
     rig.poll()
-    assert rig.incidents()[0]["received_via"] == "CAD FEED"
+    assert rig.incidents()[0]["received_via"] == ""        # the console shows "Via County feed" from inc.feed

@@ -196,7 +196,6 @@
     {"code": "RADIO", "name": "Radio"},
     {"code": "60 CONTROL", "name": "60 Control"},
     {"code": "PD", "name": "PD"},
-    {"code": "CAD FEED", "name": "CAD feed"},
     {"code": "OTHER", "name": "Other"}
   ],
   "_event_class": [

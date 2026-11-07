@@ -477,7 +477,7 @@ class Sources:
              "remarks": (f"{label} event {ref}: {data['type'] or 'type not given'} at {loc or '(no location)'}"
                          + (f"; units {', '.join(data['units'])}" if data["units"] else ""))[:4000]}
         self.cad._auto_geo(f)
-        via = "CAD FEED" if "CAD FEED" in self.cad.lists.received_codes else ""    # never "60 Control"; the console shows the feed label
+        via = ""                     # never "60 Control": the console says the feed's label (the sheet has no code for it)
         iid = self.store.create_incident(**f, received_via=via, source=FEED_SOURCE, source_ref=f"feed:{source}:{ref}",
                                          status="queued")
         with self.store.tx() as db:
