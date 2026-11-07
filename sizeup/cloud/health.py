@@ -127,7 +127,7 @@ P25_JOB = "Fire/EMS 15"
 STT_BACKLOG_S = 600.0       # the station's whisper: its oldest live clip waiting this long is an alert (#195) ...
 STT_CLEAR_S = 120.0         # ... until the oldest waits less than this ...
 STT_CLEAR_HOLD_S = 900.0    # ... for this long: one episode, however the queue wobbles (#300)
-STT_NOTIFY_S = 1200.0       # pushed only once the oldest has waited this long (a shorter one: the panel, no push)
+STT_NOTIFY_S = 1200.0       # pushed only while the oldest has waited this long (a shorter one: the panel, no push)
 NOTIFY_AFTER = {"stt_backlog": STT_NOTIFY_S}   # alerts pushed only once they are this old (from their since)
 BUDGET_WARN = 0.8           # this month's AWS cost at this share of the limit: a warning (and a push)
 
@@ -392,6 +392,7 @@ class StationHealth:
         self._trunk_up: float | None = None         # when the hub first saw trunk-recorder running (this run of it)
         self._gaps_saved = 0.0
         self._adsb_said: tuple | None = None         # (cause, holder) of the station's ADS-B decoder as last logged (#262)
+        self._stt_oldest = 0.0                       # the whisper backlog's oldest clip's wait, as last reported
         self._stt_ok_since: float | None = None      # the whisper backlog under STT_CLEAR_S since (its hysteresis, #300)
         self._clear_at: dict[str, float] = {}        # an alert's real clear time when it clears later than that
         self._load()
@@ -778,10 +779,17 @@ class StationHealth:
                 a["who"] = self._who(k, m)
         return out, True
 
+    def _notify_ok(self, a: dict, now: float) -> bool:
+        """Old enough to push (NOTIFY_AFTER); the whisper backlog only while it is still that far behind now, not one
+        nearly caught up (#300)."""
+        if now - float(a["since"]) < NOTIFY_AFTER.get(a["key"], 0.0):
+            return False
+        return a["key"] != "stt_backlog" or self._stt_oldest >= STT_NOTIFY_S
+
     def _stt_backlog(self, sq: dict, now: float) -> dict | None:
         """The whisper backlog alert with hysteresis (#300): on at STT_BACKLOG_S, off only once the oldest clip has
         waited under STT_CLEAR_S for STT_CLEAR_HOLD_S (its cleared time: when it caught up)."""
-        oldest = float(sq.get("oldest_s") or 0)
+        oldest = self._stt_oldest = float(sq.get("oldest_s") or 0)
         on = self.active.get("stt_backlog")
         if oldest >= STT_BACKLOG_S:
             self._stt_ok_since = None
@@ -961,7 +969,7 @@ class StationHealth:
                     self._push(a, now, recovered=True)
             for a in self.active.values():
                 if (not a.get("pushed") and now - self.last_push.get(a["key"], 0.0) >= self.repeat_s
-                        and now - float(a["since"]) >= NOTIFY_AFTER.get(a["key"], 0.0)):
+                        and self._notify_ok(a, now)):
                     self._push(a, now)
             if changes:
                 self._save()

@@ -85,7 +85,7 @@ from sizeup.cad import tonelist
 from sizeup.radio.tones import ToneEvent, TonePlan, base_name
 from sizeup.talkers import talker_prompt
 from sizeup import channels
-from sizeup.stt import HIGH, LIVE, LOW, RERUN, URGENT, Transcriber, WhisperClient, radio_voice, wav_bytes
+from sizeup.stt import HIGH, LIVE, LOW, RERUN, SHED, URGENT, Transcriber, WhisperClient, radio_voice, wav_bytes
 from sizeup.talkgroups import TalkgroupPrefs
 from sizeup.tts import TtsService
 from sizeup.web.server import WebServer
@@ -141,7 +141,17 @@ def make_receiver(cfg: Config, c, device, on_segment) -> NfmReceiver:
 def whisper_threads() -> int:
     """whisper-server's threads at most: one fewer than the CPUs (#300). whisper.cpp's threads wait on each other at
     every step, so one preempted by the radios stalls them all: more threads than free cores is slower, not faster."""
-    return max(1, (os.cpu_count() or 4) - 1)
+    return max(1, cpus() - 1)
+
+
+def cpus() -> int:
+    """The CPUs this process may run on (its affinity: a container's or a cgroup's share), else the machine's."""
+    if hasattr(os, "sched_getaffinity"):
+        try:
+            return len(os.sched_getaffinity(0)) or 1
+        except OSError:
+            pass
+    return os.cpu_count() or 4
 
 
 class WhisperService:
@@ -1881,8 +1891,9 @@ class App:
             if not item.as_alt:
                 self._rerun_finish(item.id, f"failed: {why}"[:200])
             return
-        item.raw, item.confidence, item.status = "", None, "error"
-        item.model = f"{Path(self.cfg.stt_model).name} (not transcribed: {why})"[:200]
+        shed = why.startswith(SHED)             # whisper was busy (#300): a quiet "skipped", still re-runnable
+        item.raw, item.confidence, item.status = "", None, "skipped" if shed else "error"
+        item.model = f"{Path(self.cfg.stt_model).name} ({why if shed else 'not transcribed: ' + why})"[:200]
         self._transcribed(item)
 
     # -- Amazon Transcribe (the hub; all-in-one with [stt] aws) ---------------------------------------------

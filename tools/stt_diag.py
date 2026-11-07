@@ -2,7 +2,7 @@
 """Why is the station's whisper behind? (GitHub #300). Read-only, stdlib only: run it on the station.
 
     sizeup-station stt [--hours 6] [--sample 10]       (or: python3 -I /opt/sizeup/current/tools/stt_diag.py)
-    sizeup-station stt --bench clip.wav [--runs 3]      also time whisper-server on one clip, a few ways
+    sizeup-station stt --bench clip.wav [--runs 1]      also time whisper-server on one 16 kHz mono clip, three ways
 
 What it reports, each a line or a short table:
 
@@ -58,8 +58,12 @@ def config() -> dict:
         return {}
 
 
+def _cpus() -> int:
+    return len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count() or 0
+
+
 def machine() -> list[str]:
-    cpus = os.cpu_count() or 0
+    cpus = _cpus()
     out = [f"machine:   {cpus} CPUs, load {' '.join(open('/proc/loadavg').read().split()[:3]) if os.path.exists('/proc/loadavg') else '?'}"
            + (", WSL2" if "microsoft" in run(["uname", "-r"]).lower() else "")]
     try:
@@ -87,7 +91,7 @@ def whisper(cfg: dict) -> list[str]:
     out.append(f"model:     {os.path.basename(model)} ({size:.0f} MB)"
                + ("  <- large: several times slower than small.en on a CPU" if "large" in model else ""))
     threads = int(argv[argv.index("-t") + 1]) if "-t" in argv[:-1] else None
-    cpus = os.cpu_count() or 0
+    cpus = _cpus()
     if threads is not None:
         note = "ok" if threads <= max(1, cpus - 1) else f"too many: at most {max(1, cpus - 1)} (one fewer than the CPUs)"
         out.append(f"threads:   {threads} on {cpus} CPUs ({note}); [stt] threads = {stt.get('threads', '(unset)')}")
@@ -189,7 +193,8 @@ def queue_log(hours: float) -> list[str]:
         m = re.match(r"speech-to-text: (\S+) not transcribed: (.*)", line)
         if m:
             w = m.group(2)
-            why["shed (context talkgroup)" if "context only" in w else "skipped (waited too long)" if "skipped" in w
+            why["shed (busy: airband)" if w.startswith("skipped: busy") and "airband" in w
+                else "shed (busy: context talkgroup)" if w.startswith("skipped: busy") else "skipped (waited too long)" if "skipped" in w
                 else "dropped (queue full)" if "full" in w or "already waiting" in w else w[:40]] += 1
             chan[m.group(1).split("-")[0]] += 1
         m = re.match(r"speech-to-text re-run: (\d+) recording\(s\) queued", line)
@@ -206,8 +211,10 @@ def queue_log(hours: float) -> list[str]:
 
 def _wav16k(path: str) -> bytes:
     with wave.open(path, "rb") as w:
-        if w.getnchannels() != 1 or w.getsampwidth() != 2:
-            raise SystemExit(f"{path}: want 16-bit mono WAV")
+        if w.getnchannels() != 1 or w.getsampwidth() != 2 or w.getframerate() != 16000:
+            raise SystemExit(f"{path}: want a 16 kHz 16-bit mono WAV (what sizeup sends whisper), not "
+                             f"{w.getframerate()} Hz, {w.getsampwidth() * 8}-bit, {w.getnchannels()} channel(s): "
+                             "e.g. ffmpeg -i in.wav -ar 16000 -ac 1 -sample_fmt s16 out.wav")
         rate, frames = w.getframerate(), w.readframes(w.getnframes())
     buf = io.BytesIO()
     with wave.open(buf, "wb") as o:
@@ -254,7 +261,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--hours", type=float, default=6.0, help="how far back the journals are read (6)")
     p.add_argument("--sample", type=float, default=10.0, help="seconds of CPU use sampled (10)")
     p.add_argument("--bench", metavar="WAV", help="also time whisper-server on this 16-bit mono WAV")
-    p.add_argument("--runs", type=int, default=3)
+    p.add_argument("--runs", type=int, default=1, help="requests per way with --bench (1: each adds to whisper's queue)")
     a = p.parse_args(argv)
     cfg = config()
     for section in (machine(), whisper(cfg), processes(a.sample), pace(a.hours), queue_log(a.hours)):

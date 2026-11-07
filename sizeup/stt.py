@@ -40,11 +40,15 @@ QUEUE_MAX = 2000            # items waiting at most: past it the worst one goes 
 CHANNEL_CAP = 400           # one channel's items waiting at most: past it that channel's worst one goes
 STALE_S = 600.0             # a live item waiting this long goes behind the fresh ones of its class (newest stale first) ...
 MAX_WAIT_S = 3 * 3600.0     # ... and one waiting this long is skipped (said on it), never transcribed hours late
+HIGH_MAX_WAIT_S = 300.0     # an airband clip waiting this long is shed: a late pre-alert is no use, and heavy airband
+                            # (the AWS breaker open) must never hold up the live talkgroups below it for hours
 LOW_MAX_WAIT_S = 900.0      # a context talkgroup's clip waiting this long is shed (skipped, said on it): whisper
                             # never falls further behind than this on traffic nobody acts on
 BEHIND_S = 120.0            # the oldest live clip waiting this long: "behind" (context clips get one greedy pass)
 RATE_WINDOW_S = 1800.0      # clips in / out per hour are counted over this long
 LIVE_CLASSES = (URGENT, HIGH, LIVE)
+SHED_AFTER = {HIGH: HIGH_MAX_WAIT_S, LOW: LOW_MAX_WAIT_S}
+SHED = "skipped: busy"      # what a shed clip's reason starts with: its status is "skipped", not "error" (re-runnable)
 CLASS_NAMES = {URGENT: "urgent", HIGH: "high", LIVE: "live", RERUN: "rerun", LOW: "low"}
 
 
@@ -188,7 +192,7 @@ class SttQueue:
     before a fresh one, then the oldest), the new one only when it is the worst; get() takes URGENT, then HIGH, LIVE,
     RERUN, LOW: a class only when every class above it is empty. In a class the fresh items go in order, then the ones
     that waited STALE_S (the newest first). A live item that waited MAX_WAIT_S is skipped, a LOW one (a context
-    talkgroup) LOW_MAX_WAIT_S: shed, so whisper never falls far behind on traffic nobody acts on. Every item dropped
+    talkgroup) LOW_MAX_WAIT_S and a HIGH one (airband) HIGH_MAX_WAIT_S: shed, so whisper never falls far behind on traffic nobody acts on. Every item dropped
     or skipped goes to on_drop(item, why): nothing is lost without a word on it."""
 
     def __init__(self, on_drop: Callable[[object, str], None] = lambda item, why: None,
@@ -260,14 +264,15 @@ class SttQueue:
                 pass
 
     def _take(self, now: float, skips: list, sheds: list) -> tuple | None:
-        old = [e for e in self._items if e[0] in LIVE_CLASSES and now - e[5] >= MAX_WAIT_S]
-        low = [e for e in self._items if e[0] == LOW and now - e[5] >= LOW_MAX_WAIT_S]
-        for e in old + low:
+        shed = [e for e in self._items if e[0] in SHED_AFTER and now - e[5] >= SHED_AFTER[e[0]]]
+        old = [e for e in self._items if e[0] in LIVE_CLASSES and now - e[5] >= MAX_WAIT_S and e not in shed]
+        for e in old + shed:
             self._items.remove(e)
         skips.extend((e[2], f"waited {int((now - e[5]) // 60)} min for speech-to-text: skipped, "
                                     "too far behind (Re-transcribe it if it matters)") for e in old)
-        sheds.extend((e[2], f"not transcribed: speech-to-text was {int((now - e[5]) // 60)} min behind and this "
-                            "talkgroup is context only (Re-transcribe it if it matters)") for e in low)
+        sheds.extend((e[2], f"{SHED}: speech-to-text {int((now - e[5]) // 60)} min behind, "
+                            + ("an airband clip is no use late" if e[0] == HIGH else "a context talkgroup")
+                            + " (Re-transcribe it if it matters)") for e in shed)
         if not self._items:
             return None
         e = min(self._items, key=lambda x: self._key(x, now))
@@ -335,7 +340,8 @@ class SttQueue:
                 "in_fallback_h": round(sum(1 for x in arrived if x[3]) * per_h),
                 "in_top": [(ch, round(n * per_h)) for ch, n in sorted(came.items(), key=lambda kv: -kv[1])[:3]],
                 "dropped": self.dropped, "skipped": self.skipped, "shed": self.shed, "last_drop": self.last_drop,
-                "max": self.maxsize, "stale_s": STALE_S, "max_wait_s": MAX_WAIT_S, "low_max_wait_s": LOW_MAX_WAIT_S}
+                "max": self.maxsize, "stale_s": STALE_S, "max_wait_s": MAX_WAIT_S, "low_max_wait_s": LOW_MAX_WAIT_S,
+                "high_max_wait_s": HIGH_MAX_WAIT_S}
 
 
 class Transcriber:

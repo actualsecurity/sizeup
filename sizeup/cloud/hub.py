@@ -42,7 +42,7 @@ transcript_pending "aws" (the station skipped whisper) is shown as "Transcribing
 (_aws_start -> _retext); "both" gets AWS's text with the station's kept as alt_text. If AWS can't, the
 station's whisper is asked for it (retranscribe), else it says "transcription failed".
 Never left "Transcribing" (#195): an AWS job past its deadline fails as "AWS timed out" (sizeup/transcribe.py's
-watchdog) and goes the same way, but only on pages, Fire/EMS 15 and the firegrounds: a clip on any other channel
+watchdog) and goes the same way, but only on pages, Fire/EMS 15, the firegrounds and the airband: a clip on any other channel
 that timed out waits for AWS's late answer instead, which becomes its text (#300: a slow AWS never floods the
 station's whisper); a late AWS answer after the whisper fallback is kept as alt_text (App._aws_late). Every SWEEP_S the
 hub also looks for anything still pending "aws" (_aws_sweep): past its deadline + SWEEP_GRACE_S with no job
@@ -78,7 +78,7 @@ from typing import Callable
 
 from sizeup import channels
 from sizeup import tz
-from sizeup.app import CLIP_ID, STT_FIRST, App, AwsJob, channels_model
+from sizeup.app import AIRBAND_FIRST, CLIP_ID, STT_FIRST, App, AwsJob, channels_model
 from sizeup.cad.dispatcher import AudioUnavailable
 from sizeup.cad.radios import fm_system
 from sizeup.cloud.autoupdate import describe
@@ -728,10 +728,12 @@ class HubApp(App):
 
     @staticmethod
     def _whisper_fallback(job) -> bool:
-        """Does AWS timing out on it send it to the station's whisper? Pages, Fire/EMS 15 and the firegrounds only
-        (#300): anything else waits for AWS's late answer (usually seconds after the deadline), so a slow AWS never
-        floods the station's whisper with clips nobody is waiting on."""
-        return job.kind == "page" or job.channel in STT_FIRST or job.channel in RESERVE_CHANNELS
+        """Does AWS timing out on it send it to the station's whisper? Pages, Fire/EMS 15, the firegrounds and the
+        airband (the ATC pre-alerts, #233; whisper sheds an airband clip that waits 5 min) only (#300): anything else
+        waits for AWS's late answer (usually seconds after the deadline), so a slow AWS never floods the station's
+        whisper with clips nobody is waiting on."""
+        return (job.kind == "page" or job.channel in STT_FIRST or job.channel in RESERVE_CHANNELS
+                or job.channel in AIRBAND_FIRST)
 
     def _aws_failed(self, job, why: str) -> None:
         """Amazon Transcribe couldn't: the station's whisper does it (retranscribe, the text comes back as
@@ -740,8 +742,8 @@ class HubApp(App):
         late = (job.alt is None and not job.rerun and not job.recovered and why.startswith("AWS timed out")
                 and not self._whisper_fallback(job))
         self.hub.log(f"aws transcribe: {job.kind} {job.id}: {why}" + (
-            "" if job.alt is not None else ": waiting for AWS's late answer (whisper is for pages, Fire/EMS 15 and the "
-                                           "firegrounds)" if late else ": asking the station's whisper"))
+            "" if job.alt is not None else ": waiting for AWS's late answer (whisper is for pages, Fire/EMS 15, the "
+                                           "firegrounds and the airband)" if late else ": asking the station's whisper"))
         if late:
             self._aws_asked[job.id] = time.time()  # (the sweep: no late answer in FALLBACK_WAIT_S -> failed)
             self._aws_late_wait.add(job.id)
