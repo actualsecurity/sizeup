@@ -213,6 +213,14 @@ def test_on_the_hub_an_aws_timeout_goes_to_whisper_only_for_priority_channels(tm
         r = _row(hub, "M16-2")
         assert r["status"] == "error" and "no late answer" in r["model"]
         assert ("transcribe_now", ["M16-2"]) not in asked
+        # left pending at a shutdown (#292's drain) and recovered at the next start: whisper as before, any channel
+        events = [_event("M16-3", "Marine 16", 4)]
+        assert call(hub.url + "/api/station/events", "POST", {"epoch": "e1", "events": events})[0] == 200
+        assert wait(lambda: (_row(hub, "M16-3") or {}).get("status") == "pending", 5)
+        hub.app._aws_failed(AwsJob("traffic", "M16-3", "Marine 16", recovered=True),
+                            "AWS timed out: the hub restarted (waiting over 60 min)")
+        assert wait(lambda: ("transcribe_now", ["M16-3"]) in asked, 10)
+        assert "M16-3" not in hub.app._aws_late_wait
     finally:
         hub.close()
         fake.close()
