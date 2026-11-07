@@ -322,7 +322,7 @@ def aircraft_doing(ev: dict) -> str:
     ph = ev.get("phase") or ""
     if ph == "arriving":
         doing = "arriving HPN"
-        if ev.get("approach") and ev["approach"] != "maneuvering":
+        if ev.get("approach"):
             doing += f" on the {ev['approach']}"
         elif ev.get("runway"):
             doing += f", runway {ev['runway']}"

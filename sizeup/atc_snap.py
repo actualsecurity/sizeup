@@ -195,7 +195,7 @@ def snap(text: str, planes: Iterable[dict], tel: dict | None = None) -> tuple[st
                         scored.append((0.45 * ts + 0.55 * ns, i0 - n, c))
                 # the airline's name lost ("Tower of jet 665", "Partnership 413"): its flight number alone, the only
                 # aircraft near with it, never after a runway / heading / altitude word (#257)
-                short = handoff and c.phase == "departing" and len(c.number) == 2
+                short = handoff and c.phase in ("departing", "near") and len(c.number) == 2
                 if c.number.isdigit() and (len(c.number) >= 3 or short):
                     for k in range(i0, j0):
                         if "".join(_char(t.group(0)) for t in toks[k:j0]) != c.number:
