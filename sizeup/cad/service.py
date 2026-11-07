@@ -300,7 +300,7 @@ class Cad:
             try:
                 self.sources.decorate(incs)               # a feed's jurisdiction and run numbers on the incident (#297)
             except Exception as e:  # noqa: BLE001
-                self.log(f"CAD: incident sources: {type(e).__name__}: {e}")
+                self.log(f"CAD: incident sources: {type(e).__name__}")
             self._state = (rev, {
                 "department": self.s.department,
                 "lists": self.lists.public(),
@@ -344,7 +344,7 @@ class Cad:
         try:
             return self.sources.state(now)
         except Exception as e:  # noqa: BLE001
-            self.log(f"CAD: incident sources: {type(e).__name__}: {e}")
+            self.log(f"CAD: incident sources: {type(e).__name__}")
             return None
 
     def _on_text(self, tid: str) -> None:
@@ -637,8 +637,12 @@ class Cad:
         op = _text(body, "operator", OPERATOR_MAX)
         f = {k: _text(body, k, 24) for k in ("type", "subtype") if k in body}
         if f:
-            self.store.update_incident(iid, f, op)
-            self.sources.mark_manual(iid, ["type"], op)       # a person picked it (#297: a feed only notes its own)
+            before = self.store.incident(iid)
+            after = self.store.update_incident(iid, f, op)
+            # a person changed it (#297: a feed only notes its own from then on). The console sends the type it shows
+            # with every accept: the same type and subtype back is not an edit, and the feed keeps its authority
+            if any(before[k] != after[k] for k in ("type", "subtype")):
+                self.sources.mark_manual(iid, ["type"], op)
         return self.store.accept(iid, op)
 
     def dismiss(self, iid: int, body: dict) -> dict:

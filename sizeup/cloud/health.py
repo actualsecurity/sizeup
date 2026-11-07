@@ -1040,7 +1040,7 @@ class StationHealth:
         try:
             sources = self.sources() if self.sources is not None else None    # incident sources (#297)
         except Exception as e:  # noqa: BLE001 - never in the way of the rest of the panel
-            sources = {"error": f"{type(e).__name__}: {e}"[:200]}
+            sources = {"error": type(e).__name__}
         return {"health": self.model(now), "sources": sources, "alerts": [dict(a, pushed=a["key"] in pushed_now) for a in self.alerts()],
                 "history": [{k: h.get(k) for k in ("key", "severity", "title", "text", "since", "cleared", "pushed", "who")}
                             for h in hist],

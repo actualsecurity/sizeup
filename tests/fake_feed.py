@@ -17,7 +17,7 @@ from sizeup.sources import FeedEvent, Health
 
 
 class FakeFeed:
-    def __init__(self, source: str = "county", label: str = "County feed", rank: int = 1, poll_s: float = 10.0,
+    def __init__(self, source: str = "county", label: str = "County feed", rank: int = 1, poll_s: float = 30.0,
                  clock=None):
         self.source, self.label, self.rank, self.poll_s = source, label, rank, poll_s
         self.clock = clock

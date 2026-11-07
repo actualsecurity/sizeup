@@ -87,6 +87,7 @@ from sizeup.cloud.health import StationHealth, status_token
 from sizeup.cloud.hubstore import AudioDb, MonitorDb
 from sizeup.incidents import Traffic
 from sizeup.radio.page import page_from_dict
+from sizeup.sources import SourceError
 from sizeup.transcribe import RESERVE_CHANNELS, deadline_for
 
 JSON = "application/json"
@@ -255,6 +256,7 @@ class Hub:
         self._ingest = threading.Lock()
         self.epoch = app.mdb.get("station_epoch")
         self.seq = int(app.mdb.get("station_seq", "0") or 0)
+        self._failed: tuple[str, int, int] = ("", 0, 0)   # (epoch, seq, tries) of a source_event that failed to apply
 
     # -- health --------------------------------------------------------------------------------------
 
@@ -493,6 +495,14 @@ class Hub:
             return _json(404, {"error": "no aircraft layer here"})
         return _json(200, layer.station_ingest(json.loads(raw or b"{}"), size))
 
+    def _retry(self, seq: int) -> bool:
+        """A source_event failed to apply: True while it still has tries left (left unacked, the station sends it
+        again), False once it has had SOURCE_RETRIES (then skipped, like any other bad event)."""
+        ep, s, n = self._failed
+        n = n + 1 if (ep, s) == (self.epoch, seq) else 1
+        self._failed = (self.epoch, seq, n)
+        return n < SOURCE_RETRIES
+
     def _events(self, raw: bytes | None) -> tuple[int, bytes, str]:
         if raw is None:
             return _json(413, {"error": f"too large ({MAX_EVENTS_BODY // 1024 // 1024} MB max): send smaller batches"})
@@ -510,14 +520,19 @@ class Hub:
                 seq = int(ev.get("seq") or 0)
                 if seq <= self.seq:
                     continue                   # delivered before (the station retried): already applied
+                kind = str(ev.get("type"))
                 try:
                     audio = base64.b64decode(ev["audio"]) if ev.get("audio") else None
-                    self.app.apply(str(ev.get("type")), ev.get("data") or {}, audio)
+                    self.app.apply(kind, ev.get("data") or {}, audio)
                     n += 1
                 except Exception as e:  # one bad event must not block the ones behind it
                     self.errors += 1
-                    self.last_error = f"{ev.get('type')} #{seq}: {type(e).__name__}: {e}"[:200]
-                    self.log(f"hub: could not apply {self.last_error}")
+                    # an incident source's event: its text may quote the county's data, so the type only (#297)
+                    said = "" if kind in SOURCE_KINDS else f": {e}"
+                    self.last_error = f"{kind} #{seq}: {type(e).__name__}{said}"[:200]
+                    self.log(f"hub: could not apply {kind} #{seq}: {type(e).__name__}")
+                    if kind == "source_event" and not isinstance(e, SourceError) and self._retry(seq):
+                        break                  # not acked: the station sends it again (a malformed one is skipped)
                 self.seq = seq
             self.app.mdb.put("station_epoch", self.epoch)
             self.app.mdb.put("station_seq", str(self.seq))
@@ -525,6 +540,10 @@ class Hub:
                 self.app.sync()
                 self.live.on_change()       # push the display now, not on its next second
             return _json(200, {"ok": True, "acked": self.seq, "applied": n})
+
+
+SOURCE_KINDS = ("source_event", "source_health", "source_seen")   # an external incident source's (#297)
+SOURCE_RETRIES = 3          # a source_event that fails to apply (not a malformed one) is retried this often, then skipped
 
 
 class HubApp(App):
@@ -617,7 +636,7 @@ class HubApp(App):
             self._set_alt(self._id(d), str(d.get("text") or ""), str(d.get("model") or "")[:80])
         elif kind == "alarm":                         # the P25 emergency button, ahead of its transcript (#128)
             self._apply_alarm(d, audio)
-        elif kind in ("source_event", "source_health"):   # an external incident source on the station (#297)
+        elif kind in SOURCE_KINDS:                     # an external incident source on the station (#297)
             self.apply_source(kind, d)
         elif kind == "heard":
             if d.get("system") in ("mdc", "p25", "fleetsync"):

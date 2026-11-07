@@ -116,7 +116,7 @@ const StationHealth = (() => {
         so.lead.map((x) => [x.label, lead(x.median_s), `${lead(x.min_s)} … ${lead(x.max_s)}`, x.n]), ""));
       if ((so.incidents || []).length) kids.push(table(["Event", "Location", "First seen", "Lead over paging"],
         so.incidents.slice(0, 20).map((i) => [i.number || `#${i.id}`, i.address,
-          i.seen.map((x) => `${x.label} ${when(x.first_seen)}`).join(" · "),
+          i.seen.map((x) => `${x.label} ${when(x.first_seen)}` + (x.gone_at ? " · no longer listed" : "")).join(" · "),
           i.seen.filter((x) => x.lead_s !== null && x.lead_s !== undefined).map((x) => `${x.label} ${lead(x.lead_s)}`).join(" · ")]), ""));
     }
     kids.push(el("h3", "hl-sub", "Station"), dl([

@@ -705,11 +705,15 @@ function renderDetail() {
     setText($("#d-qhead"), `${inc.feed && inc.source === "CAD feed" ? inc.feed.label : "60 Control page"}: set type, then Accept or Dismiss`);
     setText($("#d-qnote"), inc.type_note || "");
     const ts = $("#d-acc-type");
-    if (ts._for !== inc.id) {
+    const key = `${inc.type || ""}/${inc.subtype || ""}`;
+    // follow the incident's type (a CAD feed may change it while queued) until a person picks another one here
+    if (ts._for !== inc.id || (ts._key !== key && !accPicked())) {
       ts._for = inc.id;
+      ts._key = key;
       ts.value = inc.type || "";
       fillSubtypes($("#d-acc-sub"), ts.value);
       $("#d-acc-sub").value = inc.subtype || "";
+      ts._shown = `${ts.value}/${$("#d-acc-sub").value}`;
     }
   }
   const type = $("#d-type");
@@ -3559,7 +3563,13 @@ $("#e-acft-souls").addEventListener("input", () => airportSoulsToLevel("e"));
 $("#f-subtype").addEventListener("change", entryClass);
 $("#f-emergency").addEventListener("change", () => { cad.emergTouched = true; entryClass(); });
 $("#d-acc-type").addEventListener("change", () => fillSubtypes($("#d-acc-sub"), $("#d-acc-type").value));
-$("#d-accept").addEventListener("click", () => act("accept", { type: $("#d-acc-type").value, subtype: $("#d-acc-sub").value }));
+// the type and subtype go with Accept only when a person picked them here: the same type back is not an edit, and a
+// CAD feed keeps its authority over the type (#297)
+function accPicked() {
+  const ts = $("#d-acc-type");
+  return ts._shown !== undefined && `${ts.value}/${$("#d-acc-sub").value}` !== ts._shown;
+}
+$("#d-accept").addEventListener("click", () => act("accept", accPicked() ? { type: $("#d-acc-type").value, subtype: $("#d-acc-sub").value } : {}));
 $("#d-dismiss").addEventListener("click", () => {
   const why = prompt("Dismiss this page: why? (optional)");
   if (why !== null) act("dismiss", { reason: why });

@@ -3125,12 +3125,14 @@ class App:
         role = self.cfg.cloud_role or ""
         require_station(role)                      # HubRefused: a hard check, before anything is looked at
         root = Path(self.cfg.cad_db).parent if self.cfg.cad_db else Path(".")
+        env = dict(os.environ)                     # as it is now: the thread may start late
 
         def load() -> None:                        # off the start path: a slow or hanging factory never holds it up
             try:
-                adapters = load_adapters(context_for(root, log), log=log, role=role)
+                adapters = load_adapters(context_for(root, log), log=log, env=env, role=role)
                 if adapters and not self._stopping.is_set():
-                    self.sources_runner = SourceRunner(adapters, self._source_out, log=log, role=role).start()
+                    self.sources_runner = SourceRunner(adapters, self._source_out, log=log, role=role,
+                                                       target=self.forwarding).start()
                     self.paging.on_ours = lambda: self.sources_poll_now("paging tones")
                     self.cad.sources.trigger = self.sources_poll_now      # a pre-alert on this CAD (all-in-one)
             except KeyboardInterrupt:
@@ -3152,11 +3154,9 @@ class App:
             self.apply_source(kind, data)
 
     def apply_source(self, kind: str, data: dict) -> None:
-        """A "source_event" / "source_health" on the CAD of record (the hub applies the station's the same way)."""
-        if kind == "source_event":
-            self.cad.sources.on_event(data)
-        elif kind == "source_health":
-            self.cad.sources.on_health(data)
+        """A "source_event" / "source_health" / "source_seen" on the CAD of record (the hub applies the station's the
+        same way)."""
+        self.cad.sources.apply(kind, data)
 
     def forwarding(self) -> bool:
         """This app sends what it hears to a hub, which is then the CAD of record."""
