@@ -19,14 +19,16 @@ from sizeup.stt import radio_voice
 T0 = 1_800_000_000.0
 
 
-def voice(seconds: float, seed: int = 0, f0: float = 120.0) -> np.ndarray:
-    """Speech-like: a glottal pitch moving with intonation (+/-25%) and jitter, harmonics to 3.5 kHz weighted by three
-    formants that move per syllable, syllables ~4 a second with gaps between words. RMS ~0.1 while talking."""
+def voice(seconds: float, seed: int = 0, f0: float = 120.0, move: float = 0.25) -> np.ndarray:
+    """Speech-like: a glottal pitch moving with intonation (+/-move: 25%; a monotone talker ~4%) and jitter,
+    harmonics to 3.5 kHz weighted by three formants that move per syllable, syllables ~4 a second with gaps between
+    words. RMS ~0.1 while talking."""
     rng = np.random.default_rng(seed)
     n = int(seconds * RATE)
     t = np.arange(n) / RATE
-    pitch = f0 * (1 + 0.25 * np.sin(2 * np.pi * 0.7 * t + rng.uniform(0, 6)) + 0.08 * np.sin(2 * np.pi * 3.1 * t))
-    pitch *= 1 + 0.01 * np.convolve(rng.standard_normal(n), np.ones(400) / 20, "same")
+    pitch = f0 * (1 + move * np.sin(2 * np.pi * 0.7 * t + rng.uniform(0, 6))
+                  + 0.32 * move * np.sin(2 * np.pi * 3.1 * t))
+    pitch *= 1 + 0.04 * move * np.convolve(rng.standard_normal(n), np.ones(400) / 20, "same")
     phase = 2 * np.pi * np.cumsum(pitch) / RATE
     syl = int(np.ceil(seconds * 4)) + 1
     formants = [np.repeat(rng.uniform(lo, hi, syl), RATE // 4)[:n] for lo, hi in ((300, 800), (900, 2200), (2300, 3000))]
@@ -221,6 +223,14 @@ def _short_transmission(seconds: float, beat: float, seed: int) -> np.ndarray:
                            0.01 + 0.0005 * rng.standard_normal(2 * RATE)])
 
 
+def _short_transmission_with(talk: np.ndarray, beat: float, seed: int, f: float = 361.0) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    b = beat * np.sin(2 * np.pi * f * np.arange(len(talk)) / RATE)
+    return np.concatenate([0.01 + 0.0005 * rng.standard_normal(5 * RATE),
+                           0.05 * (1 + 0.25 * talk / 0.1 + b) + 0.0005 * rng.standard_normal(len(talk)),
+                           0.01 + 0.0005 * rng.standard_normal(2 * RATE)])
+
+
 def _segment(env: np.ndarray):
     sq = CarrierSquelch(3.5, clock=lambda: T0)
     segs = [s for k in range(len(env) // FRAME) if (s := sq.feed(env[k * FRAME:(k + 1) * FRAME])) is not None]
@@ -253,6 +263,30 @@ def test_a_short_transmission_without_a_tone_is_left_alone(seconds):
         assert _segment(_short_transmission(seconds, 0.0, seed)).tones == []
 
 
+def test_a_monotone_voice_is_not_a_tone():
+    """A flat 1-2 s read-back (pitch moving ~4%) holds a harmonic within 12 Hz: about a third were notched once the
+    tone was looked for on the carrier alone. Its harmonics drift 10-12 Hz, over 2% of their frequency; the real beats
+    (258 on the hub's clips, 2026-11-06/07) drift 0.3-11 Hz and 2.8% at most, so over 9 Hz a tone must be within 2%."""
+    notched = [(d, f0, seed) for d in (1.0, 1.5, 2.0) for f0 in (100.0, 120.0, 140.0, 160.0, 200.0, 250.0)
+               for seed in range(5)
+               if _segment(_short_transmission_with(voice(d, seed=seed, f0=f0, move=0.04), 0.0, seed)).tones]
+    assert len(notched) <= 2, notched
+    assert amtones.TONE_SPREAD_SOFT_HZ == 9.0 and amtones.TONE_SPREAD_REL == 0.02
+
+
+@pytest.mark.parametrize("f, spread, kept", [(300.0, 5.0, True), (300.0, 10.0, False), (604.0, 11.0, True),
+                                             (250.0, 11.0, False), (480.0, 11.5, False), (300.0, 13.0, False)])
+def test_the_drift_rule(f, spread, kept, monkeypatch):
+    """Over 9 Hz (p10-p90) a tone must be within 2% of its frequency, and never over 12 Hz."""
+    v = voice(4.0, seed=21)
+    t = np.arange(len(v)) / RATE
+    # a tone swept linearly over spread / 0.8 Hz: its p10-p90 is `spread`
+    sweep = spread / 0.8
+    x = v + 0.15 * np.sin(2 * np.pi * ((f - sweep / 2) * t + 0.5 * (sweep / t[-1]) * t * t))
+    got = find_tones(x)
+    assert bool(got and abs(got[0][0] - f) < 3) == kept, got
+
+
 def test_the_span_is_where_tones_are_looked_for():
     """find_tones(span=): only that part is looked at (a tone outside it isn't found; one inside is)."""
     x = np.concatenate([tone(2.0, 400.0, 0.1), voice(2.0, seed=13)])
@@ -280,7 +314,8 @@ def test_it_is_cheap():
 
 
 def test_the_tones_notched_go_with_the_transmission(tmp_path):
-    """The row says which tones were notched (sent to the hub in its traffic doc, and in the station's log line), so a
+    """The row says which tones were notched: notched_hz (a row's `tones` is a page's tone pair), sent to the hub in its
+    traffic doc and in the station's log line, so a
     tone heard in a clip can be checked against what the station took out."""
     from dataclasses import replace
 
@@ -297,11 +332,11 @@ def test_the_tones_notched_go_with_the_transmission(tmp_path):
     app._segment(Channel(118.575, "HPN Tower"), s)
     assert wait(lambda: any(x.source == "HPN Tower" for x in app.store.loose), 10)
     t = next(x for x in app.store.loose if x.source == "HPN Tower")
-    assert t.tones == s.tones and "tones" in t.as_dict()
+    assert t.notched_hz == s.tones and "notched_hz" in t.as_dict() and "tones" not in t.as_dict()
     plain = _segment(_short_transmission(2.0, 0.0, 2))
     plain.start += 60
     plain.end += 60
     app._segment(Channel(118.575, "HPN Tower"), plain)
     assert wait(lambda: sum(x.source == "HPN Tower" for x in app.store.loose) == 2, 10)
     t2 = max((x for x in app.store.loose if x.source == "HPN Tower"), key=lambda x: x.start)
-    assert t2 is not t and "tones" not in t2.as_dict()
+    assert t2 is not t and "notched_hz" not in t2.as_dict()

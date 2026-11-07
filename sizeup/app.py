@@ -1088,7 +1088,8 @@ class App:
             if getattr(seg, k, None) is not None:
                 setattr(t, k, getattr(seg, k))
         if getattr(seg, "tones", None):
-            t.tones = list(seg.tones)                     # type: ignore[attr-defined]  (#263: the tones notched out)
+            # #263: the tones notched out (not "tones": on a row that is a page's tone pair)
+            t.notched_hz = list(seg.tones)                # type: ignore[attr-defined]
         if seg.hiss_db is not None:
             t.floor_dbfs = round(float(seg.hiss_db), 1)   # type: ignore[attr-defined]
         log(f"{ch.label}: carrier {t.carrier_db:+.1f} dB over the floor"
