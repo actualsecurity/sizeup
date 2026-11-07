@@ -166,10 +166,11 @@
   .ml-cam-src a { color: var(--info); }
   /* the DVR bar (#277): ● Rec, the timeline, the time showing, Live, Keep */
   .ml-dvr { display: flex; align-items: center; gap: var(--s-2); }
-  .ml-dvr-track { position: relative; flex: 1 1 auto; min-inline-size: 6rem; display: flex; flex-direction: column; }
+  .ml-dvr-track { position: relative; flex: 1 1 auto; min-inline-size: 6rem; display: flex; flex-direction: column;
+    padding-block-start: var(--lh-xs); }     /* room for the time label over the handle, clear of the line above */
   .ml-dvr-range { inline-size: 100%; accent-color: var(--accent); touch-action: none; }
   @media (pointer: coarse) { .ml-dvr-range { block-size: var(--ctl); } }     /* a finger's target */
-  .ml-dvr-tip { position: absolute; inset-block-end: 100%; inset-inline-start: calc(var(--f, 0) * (100% - 1rem) + 0.5rem);
+  .ml-dvr-tip { position: absolute; inset-block-start: 0; inset-inline-start: calc(var(--f, 0) * (100% - 2 * var(--inset, 8px)) + var(--inset, 8px));
     transform: translateX(-50%); padding: 0 var(--s-1); white-space: nowrap; pointer-events: none; font-variant-numeric: tabular-nums;
     color: var(--on-accent); background: var(--accent); border-radius: var(--radius-s); }
   .ml-dvr-gaps { position: relative; block-size: calc(2 * var(--bw)); }
@@ -179,6 +180,7 @@
   .ml-dvr-rec.on { color: var(--err, #c00); font-weight: 600; }
   .ml-dvr-keep.on { color: var(--on-accent); background: var(--accent); }
   .ml-dvr-live { font-weight: 700; }
+  .ml-dvr-live.off { visibility: hidden; }
 
   /* the event's Cameras panel (maplayers.js cameras, #95): under its map (the grid's second column; one column
      when narrow); the wall board's strip (.ml-cams-small) above the cards */

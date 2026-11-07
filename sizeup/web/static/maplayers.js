@@ -749,6 +749,7 @@ window.MapLayers = (() => {
     if (document.visibilityState !== "hidden") startRefresh();
   }
   function startLive(id) {
+    if (viewer.hls) { try { viewer.hls.destroy(); } catch (_) { /* gone */ } viewer.hls = null; }   // one player at a time
     const url = `/api/cad/cameras/${encodeURIComponent(id)}/stream/playlist.m3u8?v=${VIEWER}`;
     viewer.liveId = String(id);
     const v = viewer.el.video;
@@ -891,7 +892,7 @@ window.MapLayers = (() => {
     tip.hidden = true;
     tip.setAttribute("aria-hidden", "true");
     track.append(tip, range, gapbar);
-    const toLive = h("button", "sm quiet ml-dvr-live", "Live");
+    const toLive = h("button", "sm quiet ml-dvr-live off", "Live");
     toLive.type = "button";
     toLive.title = "Back to live video";
     const keep = h("button", "sm quiet ml-dvr-keep", "Keep");
@@ -900,13 +901,30 @@ window.MapLayers = (() => {
     dvr.append(rec, track, at, toLive, keep);
     range.addEventListener("input", () => dvrScrub(Number(range.value)));
     range.addEventListener("change", () => dvrScrubEnd());
-    // a finger anywhere on the track (#321): our own drag, not the browser's (a thumb-only grab on iOS, page scrolls)
+    // let go where it began: no "change" (Chromium), so the release itself ends the drag (after any "change")
+    range.addEventListener("pointerdown", () => {
+      const up = () => { removeEventListener("pointerup", up); removeEventListener("pointercancel", up); setTimeout(dvrScrubEnd); };
+      addEventListener("pointerup", up);
+      addEventListener("pointercancel", up);
+    });
+    // keys: 10 s a step, a minute with Page Up / Down (Home / End: the browser's own)
+    range.addEventListener("keydown", (e) => {
+      const k = { ArrowLeft: -10, ArrowDown: -10, ArrowRight: 10, ArrowUp: 10, PageDown: -60, PageUp: 60 }[e.key];
+      if (!k || range.disabled) return;
+      e.preventDefault();
+      range.value = String(Number(range.value) + k);
+      dvrScrub(Number(range.value));
+      dvrScrubEnd();
+    });
+    // a finger anywhere on the track (#321): our own drag, not the browser's (a thumb-only grab on iOS, page scrolls);
+    // the handle's centre runs from half a thumb in from either end, as the browser draws it
     const touchAt = (e) => {
       const tc = e.touches[0];
       if (!tc || range.disabled) return;
       e.preventDefault();
-      const r = range.getBoundingClientRect(), lo = Number(range.min), hi = Number(range.max);
-      range.value = String(Math.round(lo + Math.min(1, Math.max(0, (tc.clientX - r.left) / r.width)) * (hi - lo)));
+      const r = range.getBoundingClientRect(), lo = Number(range.min), hi = Number(range.max), inset = thumbInset();
+      const f = (tc.clientX - r.left - inset) / Math.max(1, r.width - 2 * inset);
+      range.value = String(Math.round(lo + Math.min(1, Math.max(0, f)) * (hi - lo)));
       dvrScrub(Number(range.value));
     };
     range.addEventListener("touchstart", touchAt, { passive: false });
@@ -1096,7 +1114,7 @@ window.MapLayers = (() => {
     if (d.from && d.to) {
       el.range.min = String(Math.floor(d.from));
       el.range.max = String(Math.floor(d.to));
-      if (!viewer.dvrMode && !viewer.dvrDragging) el.range.value = el.range.max;
+      if (!viewer.dvrMode && !viewer.dvrDragging) { el.range.value = el.range.max; el.range.setAttribute("aria-valuetext", "Live"); }
     }
     el.range.title = d.gaps && d.gaps.length ? `${d.gaps.length} gap${d.gaps.length > 1 ? "s" : ""} in the recording` : "";
     el.gapbar.replaceChildren();
@@ -1115,7 +1133,7 @@ window.MapLayers = (() => {
     el.keep.setAttribute("aria-pressed", String(!!d.pinned));
     el.keep.classList.toggle("on", !!d.pinned);
     el.keep.title = d.pinned ? `Kept until ${d.pinned_until ? when(d.pinned_until) : "you stop it"}` : "Keep recording this camera for 24 h";
-    el.toLive.hidden = !viewer.dvrMode;
+    el.toLive.classList.toggle("off", !viewer.dvrMode);        // its room kept: the track doesn't jump under a finger
     if (!viewer.dvrMode) el.at.textContent = "";
   }
   // Scrubbing (#321): while the handle moves the picture follows it. One seek per animation frame at most, SCRUB_MS
@@ -1181,6 +1199,10 @@ window.MapLayers = (() => {
         .catch(() => seen.delete(f.url)).finally(() => { viewer.dvrInflight--; });
     }
   }
+  // Half the slider's thumb (px), where its centre stops short of either end: the CSSOM can't measure a native thumb
+  // (getComputedStyle(range, "::-webkit-slider-thumb") gives the whole slider), so the engines' own: iOS 28 px, the rest 16
+  const THUMB_INSET = typeof CSS !== "undefined" && CSS.supports("-webkit-touch-callout", "none") ? 14 : 8;
+  const thumbInset = () => THUMB_INSET;
   function dvrScrub(t) {                                        // the slider moved (mouse, keys or a finger)
     const d = viewer.dvr, el = viewer.el;
     if (!viewer.id || !d || !d.from) return;
@@ -1189,7 +1211,9 @@ window.MapLayers = (() => {
     const lo = Number(el.range.min), hi = Number(el.range.max), atEnd = t >= d.to - 2;
     el.tip.hidden = false;
     el.tip.textContent = atEnd ? "Live" : clock(t);
+    el.range.setAttribute("aria-valuetext", el.tip.textContent);
     el.tip.style.setProperty("--f", String(Math.min(1, Math.max(0, (t - lo) / Math.max(1, hi - lo)))));
+    el.tip.style.setProperty("--inset", `${thumbInset()}px`);
     if (atEnd) return;                                          // let go here: Live
     if (!viewer.dvrMode) { dvrStart(viewer.id); return; }
     if (viewer.hls) viewer.hls.config.maxMaxBufferLength = SCRUB_BUF;
@@ -1217,12 +1241,13 @@ window.MapLayers = (() => {
     dvrSeek(t, true);
     viewer.el.video.play().catch(() => {});
   }
+  let dvrGen = 0;
   function dvrStart(id) {                                       // the recording's player in place of the live one
     if (viewer.dvrMode || viewer.dvrStarting) return;
-    viewer.dvrStarting = true;
+    const go = viewer.dvrStarting = ++dvrGen;                   // dvrReset (Live, close, another camera) cancels it
     const v = viewer.el.video;
     loadHls().then((Hls) => {
-      if (viewer.id !== id || viewer.dvrMode || !Hls.isSupported()) return;
+      if (viewer.dvrStarting !== go || viewer.id !== id || viewer.dvrMode || !Hls.isSupported()) return;
       const held = holdFrame();
       stopLive();
       v.onplaying = v.onwaiting = v.onerror = null;              // the live player's: not this one's
@@ -1254,8 +1279,8 @@ window.MapLayers = (() => {
       hls.attachMedia(v);
       viewer.el.time.textContent = "Recording";
       viewer.el.time.title = "Playing the hub's recording";
-      viewer.el.toLive.hidden = false;
-    }).catch(() => {}).finally(() => { viewer.dvrStarting = false; });
+      viewer.el.toLive.classList.remove("off");
+    }).catch(() => {}).finally(() => { if (viewer.dvrStarting === go) viewer.dvrStarting = 0; });
   }
   function dvrShowing() {                                       // the time of what is showing, from the playlist's dates
     if (!viewer.dvrMode || !viewer.dvrFrags) return;
@@ -1265,13 +1290,14 @@ window.MapLayers = (() => {
     const t = f.programDateTime / 1000 + (ct - f.start);
     viewer.el.at.textContent = clock(t);
     viewer.el.at.title = `Recorded ${when(t)}`;
-    if (!viewer.dvrDragging) viewer.el.range.value = String(Math.floor(t));
+    if (!viewer.dvrDragging) { viewer.el.range.value = String(Math.floor(t)); viewer.el.range.setAttribute("aria-valuetext", clock(t)); }
   }
   function dvrReset() {                                         // the scrub's state, for a new player or none
     cancelAnimationFrame(viewer.dvrRaf);
     clearTimeout(viewer.dvrWait);
     clearTimeout(viewer.dvrRest);
     viewer.dvrRaf = 0;
+    viewer.dvrStarting = 0;
     viewer.dvrDragging = false;
     viewer.dvrFrags = null;
     viewer.dvrFetched = null;
@@ -1281,12 +1307,13 @@ window.MapLayers = (() => {
   function dvrToLive() {
     const id = viewer.id, c = camById(id);
     if (!id) return;
+    if (!viewer.dvrMode) { dvrReset(); dvrDraw(); return; }    // live already (a recording still starting: cancelled)
     if (viewer.hls && viewer.dvrMode) { holdFrame(); try { viewer.hls.destroy(); } catch (_) { /* gone */ } viewer.hls = null; }
     viewer.dvrMode = false;
     dvrReset();
-    viewer.el.toLive.hidden = true;
+    viewer.el.toLive.classList.add("off");
     viewer.el.at.textContent = "";
-    if (c && c.has_video && !c.off) startLive(c.id);
+    if (c && c.has_video && !c.down && !c.off) startLive(c.id);
     else { viewer.el.video.hidden = true; refreshCamera(); startRefresh(); }   // no live video: the snapshots
     dvrDraw();
   }

@@ -352,12 +352,17 @@ def test_scrubbing_seeks_while_dragging_from_segments_the_browser_may_keep(tmp_p
     step(d, f, clock, 2)
     code, body, _, hdr = r.get(f"/api/cad/cameras/{CAM}/dvr/index.m3u8", "")
     assert code == 200 and hdr["Cache-Control"] == "no-store"
-    names = re.findall(r"^(\d+)\.ts$", body.decode(), re.M)
+    names = re.findall(r"^(\d+)\.ts\?s=(\d{13})$", body.decode(), re.M)
     assert names and body.decode().count("#EXT-X-PROGRAM-DATE-TIME:") == len(names)
-    for n in names:
-        code, seg, ctype, hdr = r.get(f"/api/cad/cameras/{CAM}/dvr/{n}.ts", "")
+    for n, start in names:
+        assert int(start) == int(d._cams[CAM]["segs"][int(n)][0] * 1000)
+        code, seg, ctype, hdr = r.get(f"/api/cad/cameras/{CAM}/dvr/{n}.ts", f"s={start}")
         assert code == 200 and ctype == "video/MP2T" and seg[0] == 0x47
         assert hdr["Cache-Control"] == "private, max-age=3600"             # the same URL from cache, never public
+    # a key the counter reused after a restart is another segment: the old URL (its start) is refused, never served
+    n, start = names[0]
+    assert r.get(f"/api/cad/cameras/{CAM}/dvr/{n}.ts", f"s={int(start) - 60000}")[0] == 404
+    assert r.get(f"/api/cad/cameras/{CAM}/dvr/{n}.ts", "")[0] == 200
     ml = (Path(__file__).resolve().parent.parent / "sizeup" / "web" / "static" / "maplayers.js").read_text()
     body = ml[ml.index("  // Scrubbing (#321)"):ml.index("  async function dvrKeep()")]
     assert "const SCRUB_MS = 150" in body and "requestAnimationFrame(" in body          # coalesced, throttled
@@ -368,3 +373,10 @@ def test_scrubbing_seeks_while_dragging_from_segments_the_browser_may_keep(tmp_p
     assert 'atEnd ? "Live" : clock(t)' in body and "return dvrToLive()" in body        # the end: Live
     assert "holdFrame()" in body and "startRefresh" not in body.split("function dvrToLive")[0]   # no snapshots while scrubbing
     assert '"touchmove", touchAt, { passive: false }' in ml and '"touchend", () => dvrScrubEnd()' in ml
+    assert "r.width - 2 * inset" in ml                                                  # a finger: the thumb's inset
+    assert '"pointerdown"' in ml and "setTimeout(dvrScrubEnd)" in ml                    # let go where it began: ended
+    assert "PageUp: 60" in ml and "ArrowRight: 10" in ml and '"aria-valuetext"' in body
+    assert "if (!viewer.dvrMode) { dvrReset(); dvrDraw(); return; }" in body             # Live while live: nothing new
+    assert "viewer.dvrStarting !== go" in body                                          # a Live tap cancels a start
+    live = ml[ml.index("  function startLive(id) {"):]
+    assert live.index("viewer.hls.destroy()") < live.index("new Hls(")                   # one player at a time
