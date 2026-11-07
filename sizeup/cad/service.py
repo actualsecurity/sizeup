@@ -42,6 +42,8 @@ from sizeup.tts import VoiceCfg
 from sizeup.tts import voices as tts_voices
 
 AUDIO_NAME = re.compile(r"[0-9a-f]{20}")
+COMMS_CACHE_S, COMMS_CACHE_N = 10.0, 32     # GET /api/cad/comms: an answer reused this long, at most this many kept (#284)
+COMMS_UNSENT = ("call_id", "turn", "updated_at")   # radio_traffic columns the Radio view never reads (#284: smaller answer)
 FIRE_KINDS = ("chief", "engine", "ladder", "tower", "rescue", "utility", "marine")
 PREVIEW_KEEP_S = 24 * 3600
 MAX_UNITS = 30
@@ -193,6 +195,7 @@ class Cad:
         self.comms = Comms(self.store, s.tactical, s.incident_talkgroups, clock=clock, paging=s.paging,
                            airport_tgs=s.airport_talkgroups)
         self.comms.prune()
+        self._comms_cache: dict = {}       # GET /api/cad/comms answers by (filters, revs), COMMS_CACHE_S (#284)
         # Who is talking on HPN Tower (#252, sizeup/atc_talkers.py): the callsign heard, matched to ADS-B, on each airband
         # row ("atc"), speech-derived (never a radio ID). The app hands it the transcripts and the Aircraft layer's pictures.
         from sizeup.atc_talkers import AtcTalkers
@@ -1181,15 +1184,23 @@ class Cad:
                 raise CadError(f"{k}: unix seconds") from None
         rev = one("rev")
         talking = self.live()
-        if rev and rev == f"{self.comms.rev}.{self.store.rev}":
+        now_rev = f"{self.comms.rev}.{self.store.rev}"
+        if rev and rev == now_rev:
             return {"unchanged": True, "rev": rev, "talking": talking}
+        # The same filters at the same revs (every screen asks when comms_rev moves; a filter tried again): the answer
+        # made a moment ago, for COMMS_CACHE_S (#284). Only "talking" is live.
         pcfd = [u["name"] for u in self.radios.units if is_pcfd(u)]
+        main_tgs = [tg for tg in self.comms.talkgroups() if self.main_tg(tg)]
+        key = (now_rev, tuple(pcfd), tuple(main_tgs), tuple(sorted((k, tuple(v)) for k, v in q.items() if k != "rev")))
+        hit = self._comms_cache.get(key)
+        if hit is not None and time.monotonic() - hit[0] < COMMS_CACHE_S:
+            return {**hit[1], "talking": talking}
         try:
             limit = max(1, min(int(one("limit") or OTHER_LIMIT), MAX_ROWS))
             main_limit = max(1, min(int(one("main_limit") or MAIN_LIMIT), MAX_ROWS))
         except ValueError:
             raise CadError("limit, main_limit: numbers") from None
-        main, other = self.comms.split([tg for tg in self.comms.talkgroups() if self.main_tg(tg)], self.s.airband,
+        main, other = self.comms.split(main_tgs, self.s.airband,
                                        unit=one("unit"), channel=one("channel"), event=one("event"),
                                        pcfd=pcfd if one("pcfd") in ("1", "true", "on") else None,
                                        since=when("since"), until=when("until"), main_limit=main_limit, limit=limit,
@@ -1202,11 +1213,19 @@ class Cad:
         rows = sorted(main + other, key=lambda r: -r["start"])
         for r in rows:
             r["has_audio"] = r["kind"] == "radio" and self.has_clip(r["id"])
-        return {"rows": rows, "rev": f"{self.comms.rev}.{self.store.rev}", "pcfd": pcfd, "talking": talking, **self.comms.facets(),
-                "counts": {"main": len(main), "other": len(other)}, "limits": {"main": main_limit, "other": limit},
-                "events": [{"id": r["id"], "number": r["number"], "type": r["type"], "address": r["address"]}
-                           for r in self.store.q("SELECT DISTINCT i.id, i.number, i.type, i.address FROM radio_links l "
-                                                 "JOIN incidents i ON i.id = l.incident_id ORDER BY i.id DESC LIMIT 100")]}
+            for k in COMMS_UNSENT:
+                r.pop(k, None)
+        out = {"rows": rows, "rev": now_rev, "pcfd": pcfd, **self.comms.facets(),
+               "counts": {"main": len(main), "other": len(other)}, "limits": {"main": main_limit, "other": limit},
+               "events": [{"id": r["id"], "number": r["number"], "type": r["type"], "address": r["address"]}
+                          for r in self.store.q("SELECT DISTINCT i.id, i.number, i.type, i.address FROM radio_links l "
+                                                "JOIN incidents i ON i.id = l.incident_id ORDER BY i.id DESC LIMIT 100")]}
+        kept = {k: v for k, v in self._comms_cache.items() if k[0] == now_rev}     # an older rev's: never asked again
+        if len(kept) >= COMMS_CACHE_N:
+            kept = {}
+        kept[key] = (time.monotonic(), out)
+        self._comms_cache = kept
+        return {**out, "talking": talking}
 
     def feed_query(self, q: dict) -> dict:
         """GET /api/cad/feed?limit=&tg=307,333: the 60 Control feed (default: the data file's talkgroups)."""

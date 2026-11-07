@@ -92,6 +92,7 @@ from sizeup.tts import TtsService
 from sizeup.web.server import WebServer
 
 ROOT = Path(__file__).resolve().parent.parent
+HUB_SWITCH_S = 0.001     # the hub's GIL switch interval (sys.setswitchinterval; Python's default 0.005), start_app() (#284)
 SPLIT_PAGE_S = 30.0      # voice this soon after a tones-only page for us = that page's voice
 # The gazetteer names a town only from this confidence up (#80: "34 Longdale Avenue" read as Port Chester at
 # 0.34 was a street near Fairview). The point and label stay for the map; the town is never a trigger anyway.
@@ -3071,6 +3072,11 @@ def make_app(cfg: Config) -> App:
 
 def start_app(cfg: Config) -> App:
     """make_app() and start it; the hub's log is read for its own error spikes first (#285, sizeup/errwatch.py)."""
+    if cfg.cloud_role == "hub":
+        # #284: Python's sqlite3 lets the GIL go at every row it steps, and waits up to the switch interval to get it
+        # back while another thread computes (a GIS layer's refresh, the state push): 5 ms a row by default, so a
+        # 500-row Radio view took 1-2 s whenever anything else was busy. 1 ms: about 5x less, for a little switching.
+        sys.setswitchinterval(HUB_SWITCH_S)
     app = make_app(cfg)
     if getattr(app, "error_watch", None) is not None:      # the hub: its own error spikes to the status topic
         from sizeup import errwatch

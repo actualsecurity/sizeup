@@ -36,6 +36,7 @@ Heard: the pages in the CAD's communications log (radio_traffic.tones, 90 days u
 from __future__ import annotations
 
 import csv
+from bisect import bisect_left, bisect_right
 import json
 import re
 from dataclasses import dataclass, field
@@ -508,11 +509,14 @@ class Book:
     def table(self, events: list[Heard], meta: dict) -> list[dict]:
         """One row per entity with its pairs: Settings > Radios > Tones. meta: override key -> {operator, at}."""
         out = []
+        by_a = sorted(events, key=lambda h: h.a_hz)      # each pair looks only at the decodes near its A tone (#284)
+        a_s = [h.a_hz for h in by_a]
         for e in self.entities.values():
             pairs, epages, elast = [], set(), None
             for p in sorted(e.pairs, key=lambda p: (p.state == "deleted", p.role.casefold(), p.a_hz)):
                 pages, last = set(), None
-                for h in events:
+                span = self.tolerance * abs(p.a_hz) * 1.001 + 1e-9
+                for h in by_a[bisect_left(a_s, p.a_hz - span):bisect_right(a_s, p.a_hz + span)]:
                     if _same(self.tolerance, h.a_hz, h.b_hz, p.a_hz, p.b_hz):
                         pages.add(h.page)
                         last = h.at if last is None else max(last, h.at)
@@ -615,8 +619,12 @@ def unnamed(events: list[Heard], plan: TonePlan, has_clip=None) -> list[dict]:
     """The pairs heard that the plan doesn't match, one row per pair (its decodes within the tolerance), newest first:
     {a_hz, b_hz, first, last, count, page (the latest), channel, has_audio}."""
     rows: list[dict] = []
+    named: dict[tuple, bool] = {}        # a pair heard many times is matched against the plan once (#284)
     for h in events:                     # newest first: the first decode of a pair is its latest
-        if plan.match_pair(h.a_hz, h.b_hz):
+        k = (h.a_hz, h.b_hz)
+        if k not in named:
+            named[k] = bool(plan.match_pair(h.a_hz, h.b_hz))
+        if named[k]:
             continue
         row = next((r for r in rows if _same(plan.tolerance, h.a_hz, h.b_hz, r["a_hz"], r["b_hz"])), None)
         if row is None:
