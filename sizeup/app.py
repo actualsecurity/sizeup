@@ -206,11 +206,13 @@ def prewarm(cfg: Config, phases=None) -> None:
 
 def renamed_overrides(ov: dict, kinds: dict) -> dict:
     """Settings > Radios > Channels choices saved under a channel's old name (#275: RENAMED) count for its new one, unless
-    the new one has its own, or the old one is still a channel here."""
+    the new one has its own, or the old one is still a channel here. The old name's is then dropped (#307: a channel
+    given that name later doesn't inherit it); App._channel_overrides saves that."""
     out = dict(ov)
     for old, new in RENAMED.items():
-        if old in out and new not in out and old not in kinds and new in kinds:
-            out[new] = out[old]
+        if old in out and old not in kinds and new in kinds:
+            moved = out.pop(old)
+            out.setdefault(new, moved)
     return out
 
 
@@ -511,7 +513,7 @@ class App:
         # Per-channel record / transcribe / engine (Settings > Radios, sizeup/channels.py) and Amazon
         # Transcribe where this process may call it ([stt] aws: the hub; sizeup/transcribe.py).
         self.cad.radio_ctx = self
-        self._chan_ov: dict = renamed_overrides(self.cad.settings.channel_overrides(), self._kind)
+        self._chan_ov: dict = self._channel_overrides()
         # Tone pairs named from the console (Settings "tones", #80): merged into the plan, with the names
         # that count as ours; the hub sends them to the station with the channel choices.
         self._tone_ov: dict = {}
@@ -2197,8 +2199,20 @@ class App:
     def aws_limit_default(self) -> float:
         return float(self.cfg.stt_aws_limit_usd)
 
+    def _channel_overrides(self) -> dict:
+        """The channel choices (renamed_overrides), the old names' moved and dropped in the store too (#307)."""
+        stored = self.cad.settings.channel_overrides()
+        out = renamed_overrides(stored, self._kind)
+        if out != stored:
+            try:
+                self.cad.settings.replace_channels(out, "rename")
+                log("channel choices: moved from the old names: " + ", ".join(sorted(set(stored) - set(out))))
+            except Exception as e:  # noqa: BLE001 - never in the way: still used as moved, saved next time
+                log(f"channel choices: couldn't save the move from the old names ({type(e).__name__}: {e})")
+        return out
+
     def channels_changed(self) -> None:
-        self._chan_ov = renamed_overrides(self.cad.settings.channel_overrides(), self._kind)
+        self._chan_ov = self._channel_overrides()
         log("speech-to-text channels: " + (", ".join(f"{k} {v}" for k, v in sorted(self._chan_ov.items())) or "the defaults"))
 
     def vocabulary_suggestions(self) -> list[str]:
@@ -2258,7 +2272,7 @@ class App:
         kept (this station's own Settings overrides, audited as "hub")."""
         clean = channels.check_map(prefs)
         changed = self.cad.settings.replace_channels(clean, "hub")
-        self._chan_ov = renamed_overrides(self.cad.settings.channel_overrides(), self._kind)
+        self._chan_ov = self._channel_overrides()
         if isinstance(tones, dict) and self.cad.settings.replace_tones(tones, "hub"):
             self._apply_named_tones()
             changed = True

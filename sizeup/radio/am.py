@@ -105,7 +105,9 @@ RETUNE_CHECK_S = 1.0           # how often the schedule is looked at while rtl_f
 FALLBACK_AFTER = 3             # #275: the channelizer giving no audio this many starts in a row ...
 FALLBACK_S = 30 * 60.0         # ... rtl_fm on the channel's own frequency this long
 DROP_WINDOW_S = 30.0           # the channelizer's output measured against real time over this long ...
-DROP_PCT = 97.0                # ... under this percent: logged (rtl_sdr losing samples)
+DROP_PCT = 97.0                # ... under this percent: logged (rtl_sdr losing samples) ...
+DROP_STEP = 1.0                # ... then again only when it moves this many points (#307)
+BACK_PCT = 99.0                # ... and once when it is back at this
 
 
 class Schedule:
@@ -435,9 +437,11 @@ class AmReceiver(NfmReceiver):
         self.ab: AbTest | None = None
         self._multi_fails = 0                             # channelizer starts in a row that gave no audio
         self._multi_ok = False                            # the last start's channelizer gave audio
+        self._multi_ran = False                           # a channelizer process started since the last _tune (#307)
         self._fallback_until = 0.0
         self._stuck_subs: dict[int, float] = {}           # #116's stuck watch, per other frequency
         self.rate_pct: float | None = None                # the channelizer's output against real time, last window
+        self._drop_said: float | None = None              # the percent last logged under DROP_PCT, None: not short
         super().__init__(rtl_fm, device, gain_db, channel, on_segment, on_event, open_db=open_db)
         self.schedule = schedule if isinstance(schedule, Schedule) or not schedule else Schedule(schedule)
         self._retune_to: float | tuple[float, ...] | None = None  # set by _pump when it stopped to retune
@@ -522,13 +526,14 @@ class AmReceiver(NfmReceiver):
     def _tune(self) -> None:
         """Before each start: the set on now (no transmission can be open: nothing is running)."""
         now = self.clock()
-        if len(self.active) > 1 and not self._retuning():     # the last start was the channelizer, not stopped by us
+        # #307: only a channelizer that actually started counts (not the first start, nor one that never ran: no dongle)
+        if self._multi_ran and not self._retuning():         # the last start was the channelizer, not stopped by us
             self._multi_fails = 0 if self._multi_ok else self._multi_fails + 1
             if self._multi_fails >= FALLBACK_AFTER:
                 self._fallback_until, self._multi_fails = now + FALLBACK_S, 0
                 self.on_event(f"{self.channel.label}: rtl_sdr failed {FALLBACK_AFTER} times: rtl_fm on "
                               f"{self.channel.mhz:g} alone for {FALLBACK_S / 60:g} min")
-        self._multi_ok = False
+        self._multi_ok = self._multi_ran = False
         want = self._retune_to if self._retune_to is not None else self.plan_at(now)
         want = (float(want),) if isinstance(want, (int, float)) else tuple(want)
         if len(want) > 1 and now < self._fallback_until:
@@ -684,6 +689,7 @@ class AmReceiver(NfmReceiver):
         self._stuck_subs = {}
         multi = len(self.active) > 1
         n = len(self.subs) if multi else 1
+        self._multi_ran = multi                          # started: its giving audio or not counts at the next _tune
         need = FRAME * 4 * n if multi else AM_FRAME * 2
         win_t, win_frames = None, 0                      # #275: the channelizer's output against real time
         self.rate_pct = None
@@ -720,10 +726,7 @@ class AmReceiver(NfmReceiver):
                 if win_t is None:
                     win_t, win_frames = tnow, 0          # from the first audio: the start-up isn't a drop
                 elif tnow - win_t >= DROP_WINDOW_S:
-                    self.rate_pct = round(100.0 * win_frames * FRAME / RATE / (tnow - win_t), 1)
-                    if self.rate_pct < DROP_PCT:
-                        self.on_event(f"{self.channel.label}: the channelizer gave {self.rate_pct:g}% of real time over "
-                                      f"{tnow - win_t:.0f} s: samples dropped (USB?)")
+                    self._rate_window(round(100.0 * win_frames * FRAME / RATE / (tnow - win_t), 1), tnow - win_t)
                     win_t, win_frames = tnow, 0
             self._watch_open()
             if (self.schedule is not None or self.extras) and time.monotonic() - self._checked >= RETUNE_CHECK_S:
@@ -733,6 +736,20 @@ class AmReceiver(NfmReceiver):
                     self._retune_to = want
                     return got
         return got
+
+    def _rate_window(self, pct: float, secs: float) -> None:
+        """One DROP_WINDOW_S window's output against real time (#307: not logged every window, ~2,900 lines a day at
+        96%): logged when it falls under DROP_PCT, then only when it moves DROP_STEP or more from what was last said,
+        and once when it is back at BACK_PCT (between the two: still short, nothing said)."""
+        self.rate_pct = pct
+        said = self._drop_said
+        if said is not None and pct >= BACK_PCT:
+            self._drop_said = None
+            self.on_event(f"{self.channel.label}: the channelizer is back to {pct:g}% of real time")
+        elif pct < DROP_PCT and (said is None or abs(pct - said) >= DROP_STEP):
+            self._drop_said = pct
+            self.on_event(f"{self.channel.label}: the channelizer gave {pct:g}% of real time over "
+                          f"{secs:.0f} s: samples dropped (USB?)")
 
 
 def _key(mhzs) -> tuple:

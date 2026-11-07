@@ -16,6 +16,10 @@ POST /api/mode {"mode": ...}  one shared dongle: hand it to a channel or trunk-r
 POST /api/adsb-receiver {"sdr": serial | "", "confirm": true}  admins: name (or unname) the station's ADS-B dongle
                         (#235; App.set_adsb_receiver; the hub sends it to the station): reserved for its decoder,
                         never one of the radios (state "sdr".adsb). Without "confirm": true it is refused
+Every POST on the station (and all-in-one; not the hub, behind Cloudflare Access) is refused 403 when a browser says
+it came from another site (#307: Sec-Fetch-Site not same-origin / none, else an Origin not this host): it binds
+127.0.0.1, but a page open in the station PC's browser could still post. Its own page, and tools with neither header
+(tools/airband_ab.py, curl), are unaffected.
 GET  /healthz                   {"ok": true, version, build, role}: cheap, for the container health check
 GET|POST /api/station/...      [cloud] role = "hub" only: the station's ingest and job queue, bearer token
                                (sizeup/cloud/hub.py)
@@ -328,6 +332,22 @@ class Gate:
         return self.draining.is_set() or (write and self.fence is not None and not self.fence.ok())
 
 
+def cross_site(headers) -> str | None:
+    """Why a POST is refused as cross-site (#307, CSRF), or None. A browser sends Sec-Fetch-Site (same-origin from the
+    page itself; none: typed or a bookmark), else Origin, which must be this Host. Neither (curl, urllib): allowed."""
+    site = (headers.get("Sec-Fetch-Site") or "").strip().lower()
+    if site:
+        return None if site in ("same-origin", "none") else f"refused: a cross-site request ({site})"
+    origin = (headers.get("Origin") or "").strip()
+    if not origin:
+        return None
+    host = (headers.get("Host") or "").strip().lower()
+    got = urlsplit(origin)
+    if origin.lower() == "null" or got.scheme not in ("http", "https") or got.netloc.lower() != host:
+        return f"refused: a cross-site request (Origin {origin[:80]})"
+    return None
+
+
 def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | None],
                  close_incident: Callable[[str], bool], set_mode: Callable[[str], str | None] | None = None,
                  set_talkgroup: Callable[..., str | None] | None = None,
@@ -364,6 +384,8 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
         url = (getattr(station_mode, "hub_url", "") or "") if station_mode is not None else ""
         return json.dumps({"error": "this is the station: the CAD is on the hub" + (f" ({url})" if url else ""),
                            "hub_url": url}).encode()
+
+    same_origin_only = role != "hub"
 
     def cad_refused(method: str, path: str) -> bool:
         return station_ui and path.startswith("/api/cad/") and (method, path) not in STATION_CAD
@@ -606,6 +628,9 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
             path = urlsplit(self.path).path
             if not self._admit(path):
                 return
+            if same_origin_only and (why := cross_site(self.headers)):
+                self.close_connection = True     # the body is left unread
+                return self._send(403, json.dumps({"error": why}).encode(), "application/json")
             if path.startswith("/api/station/") and station is not None:
                 code, body, ctype = station.handle("POST", path, "", self.headers, self._body)
                 if code >= 400:              # the body may be unread (a refused token): don't reuse the connection
