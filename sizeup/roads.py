@@ -1771,6 +1771,7 @@ class Roads:
         self._parallel = threading.BoundedSemaphore(IMAGE_PARALLEL)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self.dvr = None                               # the camera DVR (#277, sizeup/dvr.py), when the app makes one
         self.places = highway_places(gazetteer, self.bbox)
         self._load()
 
@@ -1808,6 +1809,8 @@ class Roads:
     # -- the schedule ----------------------------------------------------------------------------------
 
     def start(self) -> Roads:
+        if self.dvr is not None and self.configured:
+            self.dvr.start()
         for p in self.providers:
             if not p.configured:
                 self.log(f"roads: {p.why_not()}")
@@ -1830,6 +1833,8 @@ class Roads:
 
     def stop(self) -> None:
         self._stop.set()
+        if self.dvr is not None:
+            self.dvr.stop()
 
     def _run(self) -> None:
         while not self._stop.is_set():
@@ -2054,6 +2059,7 @@ class Roads:
     def _cam_public(self, c: dict) -> dict:
         out = {k: c.get(k, "") for k in ("id", "name", "road", "dir", "mile", "lat", "lon", "has_video", "off", "source")}
         out["cadence"] = int(c.get("cadence") or CADENCE_S.get(c.get("source", ""), 60))
+        out["rec"] = bool(self.dvr is not None and self.dvr.recording(c["id"]))      # the DVR has it on (#277)
         return out | self.health(c["id"], c)
 
     # -- camera health: down when its image is stale or it keeps failing (#99); a video camera by its stream (#276) --
@@ -2669,10 +2675,13 @@ class Roads:
         players' lists; served as it came if asked for)."""
         ctype = (headers.get("content-type") or "video/MP2T").split(";")[0].strip() or "video/MP2T"
         st = self._streams.get(cid)
-        m = re.search(r"_(\d{1,12})\.ts$", name)
-        seq = int(m.group(1)) if m else None
+        m = re.search(r"^(.*?)(\d{1,12})\.ts$", name)
+        session, seq = (m.group(1), int(m.group(2))) if m else ("", None)
         prev = (st or {}).get("hstate")
-        state = prev[1] if prev and seq is not None and prev[0] == seq - 1 else {"sps": (st or {}).get("sps")}
+        # carried only from this session's segment just before (not another session's, a gap, or one out of order);
+        # else judged by itself (its leading frames before an IDR are the only ones that can't be)
+        follows = prev is not None and seq is not None and prev[0] == session and prev[1] == seq - 1
+        state = prev[2] if follows else {"sps": (st or {}).get("sps")}
         info = hlsseg.check(body, state)
         try:
             fixed, noplay = hlsseg.repair(body, info), False
@@ -2688,8 +2697,8 @@ class Roads:
             if st is not None:
                 if info["sps"]:
                     st["sps"] = info["sps"]
-                if seq is not None and (not st.get("hstate") or seq > st["hstate"][0]):
-                    st["hstate"] = (seq, info["state"])
+                if seq is not None and (not st.get("hstate") or st["hstate"][0] != session or seq > st["hstate"][1]):
+                    st["hstate"] = (session, seq, info["state"])
                 if name not in st.setdefault("seen", {}):
                     st["seen"][name] = hit["dropped"]
                     while len(st["seen"]) > STREAM_DAMAGE_WINDOW:
@@ -2845,11 +2854,13 @@ class Roads:
 
     def handles(self, path: str) -> bool:
         return (path == "/api/cad/roads" or path == "/api/cad/cameras" or bool(CAMERA_PATH.fullmatch(path))
-                or bool(STREAM_PATH.fullmatch(path)))
+                or bool(STREAM_PATH.fullmatch(path)) or (self.dvr is not None and self.dvr.handles(path)))
 
     def get(self, path: str, query: str, headers=None) -> tuple[int, bytes, str, dict]:
         q = parse_qs(query or "")
         one = lambda k: (q.get(k) or [""])[0].strip()
+        if self.dvr is not None and self.dvr.handles(path):          # the recordings (#277)
+            return self.dvr.get(path, query)
         if path == "/api/cad/roads":
             if one("rev") and one("rev") == str(self.rev):
                 return 200, json.dumps({"rev": self.rev, "same": True}).encode(), JSON, {}

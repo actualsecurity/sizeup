@@ -1015,6 +1015,47 @@ RSS. Each stream is at most ~26 KB/s (205 kbit/s) each way, so the 4-stream cap 
 and in, well within a 0.25 vCPU Fargate task; the pass-through does no decoding. One stream origin
 answered 502 at open during the run: that is the fallback path (snapshots) working.
 
+### Camera DVR (#277)
+
+`sizeup/dvr.py`: the live cameras' segments kept on the hub's disk so the viewer can scrub back. Copies, no
+re-encode: each segment as the hub serves it live (checked and repaired, #276). On demand only, at most
+`[roads] dvr_max_cameras` (12) at once, in this order: `dvr_always`; an open CAD event's cameras (within
+`dvr_near_m`, and the ones just before / at / after it along the road); the cameras a dispatcher **Keep**s in the
+viewer for 24 h (`POST /api/cad/cameras/<id>/dvr/pin {on}`, dispatchers and admins, in their activity; kept in the
+CAD store's meta `dvr_pins`, so a deploy keeps them); the ones someone is watching live, and for `dvr_linger_min`
+(30) after. Snapshot-only cameras (the county's) are not recorded. Eight workers record side by side, each camera
+on its own 4 s cadence (measured: 12 cameras keep up with no gaps). A camera's own session never goes through the
+live viewers' segment cache. A chunklist that fails is asked again at once with a new session; three failures in
+a row, the camera waits (15 s doubling to 5 min). A stream whose sequence starts over is carried on.
+
+A rolling window per camera (`dvr_window_min`, 120), a cap over all (`dvr_max_gb`, 6) and 3 GB of disk always
+left free, made room for before each write: the oldest go first; when nothing more can go, recording stops and
+the viewer says so ("Rec stopped", the reason in its tooltip) until there is room. Measured 2026-11-07: about 150-200 kbit/s per camera, 130-175 MB per 2 h; 12
+cameras, about 2 GB. Files under the state folder's `dvr/<camera>/<seq>_<start ms>_<duration ms>.ts`, written
+whole (temp file, rename); the index is the file names (an app restart finds them).
+
+`GET /api/cad/cameras/<id>/dvr` (`{recording, why, pinned, from, to, segments, bytes, window_s, gaps}`),
+`.../dvr/index.m3u8` (a VOD playlist, `EXT-X-PROGRAM-DATE-TIME` on every segment, a discontinuity at a gap),
+`.../dvr/<seq>.ts`. Behind Cloudflare Access like the rest of `/api/cad`; no share links, nothing public.
+The viewer: ● Rec (why, in the tooltip), the timeline, the time showing, **Live**, **Keep**.
+
+A segment's time is when it first appears in the chunklist, less the durations listed after it; after the first,
+each begins where the one before ended. It can be off by up to a segment (4-8 s) from the camera's own clock.
+
+**Network**: the service runs in the default VPC's subnets with a public IP (sizeup-aws `9-service.sh`:
+`assignPublicIp=ENABLED`), so the recording's ~1.6 GB a day per camera comes in through the internet gateway, not a
+NAT gateway: no data-processing charge.
+
+**A deploy** (`sizeup/handoff.py`): the recordings are on the task's ephemeral disk: the new task starts with
+none (a standby task doesn't run the app, so it doesn't record either), and there is a gap from the old task's
+DRAINING to the new one's app serving. The pins carry over (the CAD store, Litestream).
+
+**Terms**: 511NY's Developer Access Agreement (https://511ny.org/help/24, last updated 2026-09-18) has no clause on
+storing or recording; it allows us to "redistribute, enhance, repackage, and add value to the data", not to alter
+"the substance of a report", and asks the time of the data wherever it is shown (the timeline shows it). It also
+asks that NYSDOT be kept informed of material changes in use. The Thruway's disclaimer: no resale or
+redistribution for profit. Recordings stay department-internal.
+
 ### Camera wall (#125)
 
 > "on the monitor page and the overview page, can we add a way to look at all of the cameras in our
@@ -2030,8 +2071,13 @@ supervisor ([Deploys](#deploys-the-hotcold-handoff)) the app runs only after a t
   rule (no replication of a file not restored yet) wins over the start time there.
 * **The standby warms the map caches** (`sizeup/cachesync.py` restore: read-only toward S3, files on its own disk;
   the manifest and `cachesync.json` tell the app's mirror their sha256, so nothing is sent back).
-* `--init-state` (run at every takeover) only creates and migrates the databases; it no longer builds the whole
-  app (the GIS layers, the S3 cache restore: ~15 s on Fargate).
+* `--init-state`'s work (at every takeover) only creates and migrates the databases; it no longer builds the whole
+  app (the GIS layers, the S3 cache restore: ~15 s on Fargate). Since #264 the warm app does it itself (no new
+  Python process to start).
+* **The standby warms the app** (#264): once the caches are back its supervisor starts the app gated
+  (`SIZEUP_APP_GATE`, `sizeup/app.py run_gated`): it imports everything and builds what needs no database (the
+  gazetteer, the map providers with their caches, the ATC rules), says "warm" and waits; the standby is healthy
+  only then. It has no lease file and is told nothing until the takeover.
 * **In the app, after it serves**: the map caches' restore (whatever the standby didn't bring), the county GIS
   layers' cache (28 layers, ~50 MB of GeoJSON, paced so requests keep going), then the providers (roads, road
   projects, trains, aircraft, weather, the data sources' schedule, the cache mirror): `App._load_layers`. Until a
@@ -2078,12 +2124,12 @@ stateDiagram-v2
     STARTING --> STANDBY: lock held by another
     STANDBY --> TAKEOVER: lock released, or expired + 5 s
     STANDBY --> [*]: SIGTERM (lock untouched)
-    TAKEOVER --> ACTIVE: followers caught up, promoted, init-state, litestream replicate, app healthy, leader file, "serving"
+    TAKEOVER --> ACTIVE: followers caught up, promoted, gate "init" (init-state), litestream replicate, gate "run" (the port answers: leader file), app healthy, connector up, "serving"
     TAKEOVER --> RELEASED: can't (bad copy, no backup, replica moved) - released, exit 1
     ACTIVE --> DRAINING: SIGTERM (ECS - the new task is healthy)
     ACTIVE --> RELEASED: the app exited - drained, exit 1
     DRAINING --> RELEASED: app exited, litestream sync -wait for each file, Litestream stopped, lock released with positions
-    RELEASED --> DONE: the new leader says "serving", or 45 s - leader file removed (the old connector stops)
+    RELEASED --> DONE: the new leader says "serving", or 180 s / shortly before ECS's SIGKILL - leader file removed (the old connector stops)
     RELEASED --> ACTIVE: nobody took it in 20 s, or it was given back unused - taken back until shortly before the SIGKILL
     ACTIVE --> FENCED: lease not renewed for 20 s, or the lock written by another
     TAKEOVER --> FENCED
@@ -2098,15 +2144,24 @@ stateDiagram-v2
   the app's own mirror not to upload them again). Its `/healthz` (port 8089, the task's health check) answers 200
   only once every file is restored and the caches are back: ECS stops the old task only then. That can take
   minutes (`audio.sqlite` is the big one): the health check's start period is 300 s.
-* **TAKEOVER** reads the replica's last position (`litestream restore -dry-run`); the lock is held, so nothing can
-  move it. The followers need only the last few changes: **seconds, not a restore**. A follower that doesn't get
+* **TAKEOVER** reads the replica's last position (`litestream restore -dry-run`, the three files at once); the lock
+  is held, so nothing can move it. The followers need only the last few changes: **seconds, not a restore**. A follower that doesn't get
   there in 30 s falls back to a full restore. Refused, never promoted: a replica behind the release; no backup at
   all although a leader ran before (an empty start would be replicated over the real data); a replica that moves
-  while this task holds the lock (another writer: e.g. a hub from before the lock).
+  while this task holds the lock (another writer: e.g. a hub from before the lock). Then the warm app is told
+  "init" through its gate file (it checks the lease file first, like its fence, and opens / migrates the
+  databases), `litestream replicate` starts, the gate says "run": the app's port answers at once ("update in
+  progress", 503 + Retry-After), so the `leader` file goes in then and the new connector registers while the app
+  is built; the real server takes the same socket over (nothing refused in between). "serving" goes in the lock
+  once the app's /healthz is 200 and the connector is up.
 * **DRAINING** confirms every change is in S3 (`litestream sync -wait`: the replica's position must reach the
-  database's) before the lock is released; port 8090 then answers 503 + Retry-After itself.
-* **RELEASED**: the old connector stays up (answering 503) until the new leader says "serving" (its own connector
-  connected), at most 45 s. If nobody took the lock within 20 s, or a new task took it and gave it back without
+  database's) before the lock is released. Port 8090 answers 503 + Retry-After ("update in progress") from the
+  moment the draining app lets go of it (it used to refuse connections for ~11 s while the app stopped:
+  Cloudflare's 502).
+* **RELEASED**: the old connector stays up (answering "update in progress") until the new leader says "serving"
+  (its app answers and its own connector is connected): two connectors on the tunnel for a moment, never none
+  (#264: a fixed 45 s cut it before the new one was up, 5–7 s of Cloudflare error 1033). At most 180 s, and never
+  past 3 s before ECS's SIGKILL (stopTimeout 120 s, Fargate's maximum). If nobody took the lock within 20 s, or a new task took it and gave it back without
   writing (the replica still exactly at our release), the old task takes it back and serves until shortly before
   ECS kills it, then drains again. A new task that wrote and then failed: the old one never resumes from its own
   (now older) files; ECS's next task restores.
@@ -2117,9 +2172,17 @@ out, and so does the app's own watchdog from inside (`sizeup/fence.py`, from the
 rewrites at each renew); the web server refuses writes (POST: 503) while the lease isn't fresh; the cache mirror
 uploads nothing. The release happens only after the app and Litestream have exited.
 
-**What a person sees.** About **10–20 s** of a small "Reconnecting… (update in progress)" pill on the CAD page
-(estimated, not yet measured: the drain and sync take a few seconds, the new app's start and its connector a few
-more). The page keeps what it shows; its state stream is opened again (a browser gives up on a 502 / 503 / 530
+**Where the time goes** (#264): one log line each, `handoff: drain timing: app … · sync … · litestream … · release
+… (…; N s since SIGTERM)` on the old task, `handoff: takeover timing: plan … · catch-up … · verify … · promote … ·
+init-state … · litestream … · listen … · app … · connector …` on the new one, and in the app `warm-up timing:`
+(standby), `startup timing:` (gate to serving, App.__init__'s parts: cad, providers, speech-to-text, hub, …) and
+`stop timing:`.
+
+**What a person sees.** Measured on the first deploys (taskdef 65, 69): about 70 s in all, ~20 s of the old app's
+drain and sync, ~50 s from the takeover to serving, then 5–7 s of Cloudflare error 1033 (no connector) and ~11 s
+of 502s during the drain. Since #264: no 1033 and no 502, a small "Reconnecting… (update in progress)" pill on
+the CAD page for the drain plus the takeover (expected ~35–45 s on 0.25 vCPU; the timing lines above say where it
+goes). The page keeps what it shows; its state stream is opened again (a browser gives up on a 502 / 503 / 530
 answer), it polls meanwhile, and an API call the hub answered "updating" (refused before anything was done) is sent
 again; a write that may have reached the hub is never sent twice. A page loaded during the gap gets a short
 "Reconnecting…" page that reloads itself. The station's link retries 1, 2, 4, 5, 5 … s (the hub's Retry-After

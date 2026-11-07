@@ -154,16 +154,16 @@ def test_frame_num_wraps_and_non_reference_frames_are_no_loss():
     assert hlsseg.check(segment(frames))["broken"] == []
 
 
-def test_a_lost_reference_frame_breaks_its_gop_after_the_idr_and_the_repair_leaves_those_frames_out():
-    # as the origin served it: frame_num 3 never came (a gap, the H.264 way of saying a reference frame was lost)
-    # (frames 1 and 2 came, but a loss rarely takes whole frames only: the GOP goes from its IDR on)
+def test_a_lost_reference_frame_breaks_the_chain_from_the_loss_and_the_repair_leaves_those_frames_out():
+    # as the origin served it: frame_num 3 never came (a gap, the H.264 way of saying a reference frame was lost);
+    # frames 1 and 2 came whole and decode: they stay, the frames from the gap to the next IDR go
     frames = gop(8) + [(True, 0), (False, 1), (False, 2), (False, 4), (False, 5), (False, 6)] + gop(4)
     seg = segment(frames)
     info = hlsseg.check(seg)
-    assert info["lost"] == 1 and info["broken"] == [9, 10, 11, 12, 13]      # the second GOP but its IDR
+    assert info["lost"] == 1 and info["broken"] == [11, 12, 13]
     fixed = hlsseg.repair(seg, info)
     again = hlsseg.check(fixed)
-    assert again["frames"] == len(frames) - 5 and again["broken"] == [] and again["idr_first"]
+    assert again["frames"] == len(frames) - 3 and again["broken"] == [] and again["idr_first"]
     ccs = video_ccs(fixed)
     assert all((b - a) % 16 == 1 for a, b in zip(ccs, ccs[1:]))             # the continuity counters run on unbroken
     assert len(fixed) % 188 == 0 and len(fixed) < len(seg)
@@ -173,12 +173,12 @@ def test_the_idr_itself_lost_breaks_everything_until_the_next_one():
     # the mid-segment IDR gone (what the 8.267 s segments showed): its P-frames refer to a frame that never came
     frames = gop(6) + [(False, 1), (False, 2), (False, 3)] + gop(4)
     info = hlsseg.check(segment(frames))
-    assert info["broken"] == [1, 2, 3, 4, 5, 6, 7, 8] and info["lost"] == 11      # frame_num 5 -> 1: 6..15, 0 missing
+    assert info["broken"] == [6, 7, 8] and info["lost"] == 11              # frame_num 5 -> 1: 6..15, 0 missing
 
 
 def test_a_picture_missing_its_first_slice_or_a_segment_starting_mid_gop_is_broken():
     frames = gop(4) + [(False, 4, 30)] + [(False, 5), (False, 6)] + gop(3)
-    assert hlsseg.check(segment(frames))["broken"] == [1, 2, 3, 4, 5, 6]
+    assert hlsseg.check(segment(frames))["broken"] == [4, 5, 6]             # from the damaged picture to the next IDR
     # a TS packet of a frame lost mid-segment (its continuity counter skips): that frame and the rest of its GOP
     seg = bytearray(segment(gop(4) + [(True, 0), (False, 1), (False, 2)] + gop(2)))
     pk = [i for i in range(0, len(seg), 188) if (seg[i + 1] & 0x1F) << 8 | seg[i + 2] == VPID]
@@ -189,6 +189,44 @@ def test_a_picture_missing_its_first_slice_or_a_segment_starting_mid_gop_is_brok
     info = hlsseg.check(segment([(False, 7), (False, 8)] + gop(4)))
     assert info["idr_first"] is False and info["broken"] == [0, 1]           # no IDR before them: never a start
     assert hlsseg.check(hlsseg.repair(segment([(False, 7), (False, 8)] + gop(4))))["idr_first"] is True
+
+
+def test_frames_before_a_loss_are_never_dropped():
+    # #276 follow-up, the pattern of a recorded 511NY segment (Hutch, 352x240 Baseline, 15 fps, 4-bit frame_num, the
+    # P-frames nal_ref_idc 2): an IDR, 42 P-frames that ffmpeg decodes clean, then frame_num 10 -> 13 (two reference
+    # frames never came; ffmpeg: "Frame num gap 13 11", concealed), 16 P-frames on. The repair kept 1 frame of 59
+    # (the old rule took the GOP back to its IDR); now the 43 before the gap stay.
+    fns = list(range(43))
+    frames = [(True, 0)] + [(False, n % 16) for n in fns[1:]] + [(False, (13 + k) % 16) for k in range(16)]
+    seg = segment(frames)
+    info = hlsseg.check(seg)
+    assert info["frames"] == 59 and info["broken"] == list(range(43, 59)) and info["lost"] == 2 and info["playable"] == 43
+    fixed = hlsseg.repair(seg, info)
+    assert hlsseg.check(fixed)["frames"] == 43 and hlsseg.check(fixed)["broken"] == []
+    # its successor: three gaps (1 -> 4, 4 -> 7, 9 -> 13), the first at frame 18: 18 stay, every gap counted
+    fns = list(range(18)) + [4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25] + list(range(29, 45))
+    nxt = [(True, 0)] + [(False, n % 16) for n in fns[1:]]
+    info = hlsseg.check(segment(nxt))
+    assert info["broken"][0] == 18 and len(info["broken"]) == len(nxt) - 18 and info["lost"] >= 4
+    # a non-reference frame shares its frame_num with the next reference frame: no loss
+    frames = [(True, 0), (False, 1), (False, 2, 0, False), (False, 2), (False, 3)]
+    assert hlsseg.check(segment(frames))["broken"] == []
+
+
+def test_the_carried_state_is_only_from_the_same_sessions_segment_just_before():
+    clock = Clock()
+    f = Origin()
+    r = make(key="", urls={}, fetch=f, clock=clock, thruway=True)
+    assert r.refresh("cameras")
+    assert r.get("/api/cad/cameras/1ne01370s/stream/playlist.m3u8", "")[0] == 200
+    head = segment(gop(4))                                                   # ends on frame_num 3, whole
+    tail = segment([(False, 4), (False, 5), (True, 0)])                      # starts mid-GOP: needs frame 3
+    r._keep_segment("1ne01370s", "media_wA_100.ts", {}, head, clock.t)
+    assert r._keep_segment("1ne01370s", "media_wA_101.ts", {}, tail, clock.t)["dropped"] == 0     # the one before
+    r._keep_segment("1ne01370s", "media_wA_200.ts", {}, head, clock.t)
+    assert r._keep_segment("1ne01370s", "media_wB_201.ts", {}, tail, clock.t)["dropped"] == 2     # another session
+    r._keep_segment("1ne01370s", "media_wA_300.ts", {}, head, clock.t)
+    assert r._keep_segment("1ne01370s", "media_wA_302.ts", {}, tail, clock.t)["dropped"] == 2     # a gap between
 
 
 @pytest.mark.parametrize("cut, why", [
@@ -357,8 +395,8 @@ def test_a_damaged_segment_is_served_repaired_and_the_status_counts_it():
     f.segs["media_w1_1227.ts"] = [damaged]
     code, body, _, _ = r.get(SEG + "media_w1_1227.ts", "")
     info = hlsseg.check(body)
-    assert code == 200 and info["frames"] == 9 and info["broken"] == [] and body != damaged
-    assert "1 reference frames lost at the source; 3 of 12 frames left out" in "\n".join(r.logs)
+    assert code == 200 and info["frames"] == 10 and info["broken"] == [] and body != damaged
+    assert "1 reference frames lost at the source; 2 of 12 frames left out" in "\n".join(r.logs)
     st = json.loads(r.get(SEG + "status", "")[1])
     assert st["damaged"] == 1 and st["checked"] == 1
     n = len(f.urls)

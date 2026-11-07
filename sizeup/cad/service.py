@@ -266,6 +266,8 @@ class Cad:
         # Settings > System > Camera wall (#125): every camera with where it falls in our area (sizeup/roads.py
         # Roads.settings_rows); the app sets it. None: no highway layers here.
         self.camera_area: Callable[[], dict] | None = None
+        # The camera DVR's pins (#277, sizeup/dvr.py Dvr.pin(cid, on) -> its status); the app sets it.
+        self.dvr_pin: Callable[[str, bool], dict] | None = None
         # Settings > Data sources (#186): the hub's data pulls (sizeup/datasources.py DataSources); the app sets it.
         # None: no data sources here (GET /api/cad/datasources says so).
         self.datasources = None

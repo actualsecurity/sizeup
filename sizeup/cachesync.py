@@ -117,6 +117,7 @@ class CacheMirror:
         self.endpoint = (endpoint or f"https://{bucket}.s3.{self.region}.amazonaws.com").rstrip("/")
         self.send, self.creds, self.log, self.clock = send or _send, creds, log, clock
         self._lock = threading.Lock()
+        self._save_mu = threading.RLock()     # one write of cachesync.json / the manifest at a time (#264)
         self.files: dict[str, dict] = {}      # rel -> {sha, up (when uploaded), fails, retry, error, restored}
         self.remote: dict[str, str] = {}      # rel -> the MD5 S3 has for its copy (a plain ETag), from the listing
         self.skipped = 0                      # uploads not made: S3 had that copy already
@@ -184,14 +185,13 @@ class CacheMirror:
     def save_manifest(self) -> None:
         """What restore() put in place and its sha256: the hub's standby (sizeup/handoff.py) restores the caches
         before the app runs; the app's own mirror then knows them (load_manifest) and doesn't upload them again."""
-        with self._lock:
-            done = {rel: st["sha"] for rel, st in self.files.items() if st.get("restored") and st.get("sha")}
-        try:
-            tmp = self.manifest.with_name(self.manifest.name + ".tmp")
-            tmp.write_text(json.dumps(done, sort_keys=True))
-            os.replace(tmp, self.manifest)
-        except OSError as e:
-            self.log(f"cachesync: manifest not written ({e})")
+        with self._save_mu:
+            with self._lock:
+                done = {rel: st["sha"] for rel, st in self.files.items() if st.get("restored") and st.get("sha")}
+            try:
+                self._write_atomic(self.manifest, json.dumps(done, sort_keys=True))
+            except OSError as e:
+                self.log(f"cachesync: manifest not written ({e})")
 
     def load_manifest(self) -> int:
         try:
@@ -277,14 +277,26 @@ class CacheMirror:
                 self.files[rel] = {"sha": d["sha"], "up": up, "fails": 0, "retry": 0.0, "error": "", "restored": False}
 
     def _save_state(self) -> None:
-        with self._lock:
-            doc = {"files": {rel: {"sha": st["sha"], "up": st["up"]} for rel, st in self.files.items() if st.get("sha")}}
-        try:
-            tmp = self._state_path().with_suffix(".tmp")
-            tmp.write_text(json.dumps(doc, separators=(",", ":"), sort_keys=True))
-            tmp.replace(self._state_path())
-        except OSError as e:  # only costs an upload after the next restart
-            self.log(f"cachesync: {STATE_FILE} not saved ({type(e).__name__}: {e})")
+        with self._save_mu:               # the snapshot and its write together: an older one never lands last
+            with self._lock:
+                doc = {"files": {rel: {"sha": st["sha"], "up": st["up"]} for rel, st in self.files.items() if st.get("sha")}}
+            try:
+                self._write_atomic(self._state_path(), json.dumps(doc, separators=(",", ":"), sort_keys=True))
+            except OSError as e:  # only costs an upload after the next restart
+                self.log(f"cachesync: {STATE_FILE} not saved ({type(e).__name__}: {e})")
+
+    def _write_atomic(self, dest: Path, text: str) -> None:
+        """dest replaced at once by text. The restore workers, the upload thread and the hub's supervisor (another
+        process, the same folder) all save: one at a time here, and each through a temp file of its own (#264: two
+        saves sharing "cachesync.tmp" raced, the second os.replace finding it gone)."""
+        with self._save_mu:
+            fd, tmp = tempfile.mkstemp(prefix=f".{dest.name}.", suffix=".tmp", dir=dest.parent)
+            try:
+                with os.fdopen(fd, "w") as f:
+                    f.write(text)
+                os.replace(tmp, dest)
+            finally:
+                Path(tmp).unlink(missing_ok=True)
 
     # -- upload -----------------------------------------------------------------------------------------------
 
