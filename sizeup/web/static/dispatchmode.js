@@ -3,6 +3,7 @@
 // undo}]}.
 //
 //   DispatchMode.header(node, st, deps)        the header's switch: 60 Control | PCFD (dispatchers and admins)
+//   DispatchMode.pill(node, st)                the wall board's (/monitor) read-only pill: "60 Control dispatching"
 //   DispatchMode.eventChip(inc, e, deps)       a Timeline entry an automatic step made: its source, ✕ undoes it
 //   DispatchMode.unitChip(inc, a, deps)        a unit on the incident whose status automation set: the same
 //   DispatchMode.closeRow(inc, deps)           the queue card's "County in service · close?" (one click), while pending
@@ -40,6 +41,17 @@ window.DispatchMode = (() => {
       b.addEventListener("click", () => set(m, st, deps));
       return b;
     }));
+  }
+
+  function pill(node, st) {
+    if (!node) return;
+    node.hidden = !st;
+    if (!st) return;
+    const sig = JSON.stringify([st.mode, st.by, st.at]);
+    if (node._sig === sig) return;
+    node._sig = sig;
+    node.textContent = st.label;
+    node.title = TIPS[st.mode] || "";
   }
 
   async function set(m, st, deps) {
@@ -141,5 +153,5 @@ window.DispatchMode = (() => {
     return row;
   }
 
-  return { header, eventChip, unitChip, sig, closeRow };
+  return { header, pill, eventChip, unitChip, sig, closeRow };
 })();

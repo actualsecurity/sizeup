@@ -596,6 +596,7 @@ function renderPrealert() {
     Incoming.notify(src);
   }
   if (window.DispatchMode && !BOARD) DispatchMode.header($("#dmode"), cad.state && cad.state.dispatch_mode, autoDeps());
+  if (window.DispatchMode && BOARD) DispatchMode.pill($("#dmode-pill"), cad.state && cad.state.dispatch_mode);   // the wall board
   // airport pre-alerts (airport-alerts.js, #233): HPN ATC; accept makes a pending event (never a dispatch)
   const aa = cad.state && cad.state.airport_alerts;
   if (window.AirportAlerts) {

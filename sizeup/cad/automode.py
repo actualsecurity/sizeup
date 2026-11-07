@@ -5,14 +5,19 @@ record (the hub, or all-in-one), on top of the incident sources (sizeup/cad/sour
                dispatching). Dispatchers and admins switch it (POST /api/cad/dispatch-mode); each switch is a Settings
                audit row (section "dispatch", key "dispatch_mode", who: the Access identity) and a log line. Kept in
                settings_overrides (section "dispatch_mode", key "mode", with who set it last; not set: the default)
-    tracked    an incident the feed reported while in 60 Control mode (auto_incidents.tracked_at). One first reported in
-               PCFD mode stays manual for good. A switch affects only what comes after it: every feed report is
-               remembered as processed (auto_incidents.seen) in either mode, and automation applies only the change
-               from the last report processed, so nothing reported while in PCFD mode is replayed after switching back
+    tracked    an incident the feed reported while queued in 60 Control mode (auto_incidents.tracked_at). One first
+               reported in PCFD mode, or already accepted when the feed's first report came (an incident from before
+               this code, a page a person took in first), stays manual for good: that report is only its baseline. A
+               switch affects only what comes after it: every feed report is remembered as processed (auto_incidents.
+               seen, with whose report it was: seen_src) in either mode, and automation applies only the change from
+               the last report processed, so nothing reported while in PCFD mode is replayed after switching back.
+               When another feed's report starts to rule the incident, it becomes the baseline (nothing applied)
     60 Control (a tracked incident, while in 60 Control mode):
       accept   queued -> numbered at once when the feed lists one of our units or a page attached (and it has a type: a
                feed type nobody maps waits for a person). Never when it is "possibly the same as" an open accepted
-               incident (sources.py): it stays queued for a person, said once on its timeline
+               incident (sources.py): it stays queued for a person, said once on its timeline. When a person accepts
+               one that waited, the units the feed lists then are dispatched at the feed's dispatched time (their
+               statuses come with the feed's next changes and the radio, never replayed)
       paged    a page attached to it (the paging decoder's report): "Paged 14:31:02" at the tone time (source radio)
       units    each unit the feed newly lists that is ours is dispatched at the feed's dispatched time: matched exactly
                against the board's codes and spoken names (spaces and dashes aside), or the data file's
@@ -25,11 +30,14 @@ record (the hub, or all-in-one), on top of the incident sources (sizeup/cad/sour
                unit it was). The radio's status hints (sizeup/cad/statushints.py) for a unit on a tracked incident are
                taken at once (responding, on location, staging, back in service / quarters; never "clear", command or
                out of service, which stay suggestions). A unit on no call is put on one only by a "responding" said
-               by its own identified radio or naming it (who: talker | named), and only when exactly one incident
-               (tracked or not) is open and opened in the last ASSIGN_WINDOW_S, and that one is tracked
-      close    the feed's in_service (or closed): closed COMPLETE when no unit is still on it; a unit a person put
-               or kept on it, or one the feed gave no in-service time, keeps it open with "County in service: close?"
-               on the timeline (one click closes it). Undoing a close puts back the units it released
+               on that unit's own identified rig (the transmission's rig is that unit, and it isn't 60 Control's), and
+               only when exactly one incident (tracked or not) is open and opened in the last ASSIGN_WINDOW_S, and
+               that one is tracked
+      close    the feed's in_service (or closed): each unit the feed lists that no person marked is released (in
+               service, at that time; each release is its own undoable step), then the incident closes COMPLETE when
+               no unit is left on it. A unit a person put or kept on it, or one the feed doesn't list, keeps it open
+               with "County in service: close?" on the timeline (one click closes it); it closes by itself once those
+               clear. Undoing the close puts back the units it and the in service released
       source   every automatic step is an auto_steps row with its source (county | radio) and its timeline entry; each
                (but accept) is undone with one click (POST /api/cad/incident/<id>/auto-undo {step}), which marks the
                unit (or the close) as a person's
@@ -67,8 +75,9 @@ COLS = {"dispatched": "dispatched_at", "enroute": "enroute_at", "onscene": "onsc
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS auto_incidents (
   incident_id INTEGER PRIMARY KEY,
-  tracked_at REAL,                      -- NULL: first reported in PCFD mode, manual for good
+  tracked_at REAL,                      -- NULL: manual for good (first reported in PCFD mode, or already accepted then)
   seen TEXT NOT NULL DEFAULT '{}',      -- the feed's report as last processed (FeedEvent.as_dict)
+  seen_src TEXT NOT NULL DEFAULT '',    -- whose report that was (source_reports.source): another feed's re-baselines
   paged_at REAL,
   started_at REAL,                      -- automation first took it while pending / active (units listed before: new then)
   held TEXT NOT NULL DEFAULT ''         -- why it was left queued for a person (said once)
@@ -118,6 +127,8 @@ class AutoDispatch:
         self._lock = threading.RLock()
         with self.store.lock:
             self.store.db.executescript(SCHEMA)
+            if "seen_src" not in {r[1] for r in self.store.db.execute("PRAGMA table_info(auto_incidents)")}:
+                self.store.db.execute("ALTER TABLE auto_incidents ADD COLUMN seen_src TEXT NOT NULL DEFAULT ''")
 
     # -- the mode --------------------------------------------------------------------------------------------------
 
@@ -194,9 +205,14 @@ class AutoDispatch:
         return bool(r and r["tracked_at"] is not None)
 
     def _feed(self, iid: int) -> tuple[dict | None, str]:
-        r = self.store.one("SELECT data, label FROM source_reports WHERE incident_id = ? AND source != ? AND merged_into = '' "
-                           "ORDER BY rank, first_seen LIMIT 1", (iid, PAGING))
-        return (json.loads(r["data"] or "{}"), r["label"] or "County feed") if r else (None, "")
+        data, label, _ = self._best(iid)
+        return data, label
+
+    def _best(self, iid: int) -> tuple[dict | None, str, str]:
+        """The best-ranked feed report on the incident: (its data, its label, its source)."""
+        r = self.store.one("SELECT data, label, source FROM source_reports WHERE incident_id = ? AND source != ? "
+                           "AND merged_into = '' ORDER BY rank, first_seen LIMIT 1", (iid, PAGING))
+        return (json.loads(r["data"] or "{}"), r["label"] or "County feed", r["source"]) if r else (None, "", "")
 
     def on_feed(self, iid: int | None) -> None:
         """A feed's report applied to an incident (Cad.source_event): tracked or not, and in 60 Control mode the change
@@ -214,22 +230,36 @@ class AutoDispatch:
 
     def _on_feed(self, iid: int) -> bool:
         """True: the first report on this incident."""
-        data, label = self._feed(iid)
+        data, label, src = self._best(iid)
         if data is None:
             return False
         row = self._tracking(iid)
         auto = self.mode() == "60control"
         first = row is None
+        seen = json.dumps(data, separators=(",", ":"))
         if first:
+            if self.store.incident(iid)["status"] != "queued":
+                # already accepted when the feed's first report reached automation (an incident from before this
+                # code, or a page a person took in first): manual for good, what the feed says now is only the
+                # baseline, nothing applied (M1)
+                with self.store.tx() as db:
+                    db.execute("INSERT OR IGNORE INTO auto_incidents (incident_id, tracked_at, seen, seen_src) "
+                               "VALUES (?, NULL, ?, ?)", (iid, seen, src))
+                return True
             with self.store.tx() as db:
-                db.execute("INSERT OR IGNORE INTO auto_incidents (incident_id, tracked_at, seen) VALUES (?, ?, '{}')",
-                           (iid, self.clock() if auto else None))
+                db.execute("INSERT OR IGNORE INTO auto_incidents (incident_id, tracked_at, seen, seen_src) VALUES (?, ?, '{}', ?)",
+                           (iid, self.clock() if auto else None, src))
             row = self._tracking(iid)
+        elif row["seen_src"] and row["seen_src"] != src:
+            # another feed's report rules it now (a better-ranked one attached, or the old one merged away): its report
+            # is the new baseline, never diffed against the other feed's (L2)
+            with self.store.tx() as db:
+                db.execute("UPDATE auto_incidents SET seen = ?, seen_src = ? WHERE incident_id = ?", (seen, src, iid))
+            return first
         if auto and row["tracked_at"] is not None:
             self._apply(iid, json.loads(row["seen"] or "{}"), data, label)
         with self.store.tx() as db:
-            db.execute("UPDATE auto_incidents SET seen = ? WHERE incident_id = ?",
-                       (json.dumps(data, separators=(",", ":")), iid))
+            db.execute("UPDATE auto_incidents SET seen = ?, seen_src = ? WHERE incident_id = ?", (seen, src, iid))
         return first
 
     def on_page(self, iid: int | None) -> None:
@@ -348,10 +378,30 @@ class AutoDispatch:
         with self.store.tx() as db:
             db.execute("UPDATE auto_incidents SET started_at = ? WHERE incident_id = ? AND started_at IS NULL", (self.clock(), iid))
 
-    def accepted(self, iid: int) -> None:
-        """A person accepted it (any mode): automation goes on from what was seen, never replaying it (N2)."""
-        with self._lock:
-            self._started(iid)
+    def accepted(self, iid: int, operator: str = "") -> None:
+        """A person accepted it (any mode): automation goes on from what was seen, never replaying its times (N2). In
+        60 Control mode a tracked incident's units the feed lists now (while it waited for a person: held, or a type
+        nobody maps) are dispatched as the feed has them, at its dispatched time; their statuses come with the feed's
+        next changes and the radio (M2)."""
+        try:
+            with self._lock:
+                self._started(iid)
+                if self.mode() == "60control" and self.tracked(iid):
+                    self._dispatch_listed(iid)
+        except Exception as e:  # noqa: BLE001 - the accept stands whatever this does
+            self.log(f"CAD: dispatch mode: {type(e).__name__}")
+
+    def _dispatch_listed(self, iid: int) -> None:
+        data, label = self._feed(iid)
+        if not data or self.store.incident(iid)["status"] not in ("pending", "active"):
+            return
+        ours, op = self._ours(), f"{label} · auto"
+        times, uts = data.get("times") or {}, data.get("unit_times") or {}
+        for name in data.get("units") or []:
+            u = ours.get(_key(name))
+            if u is not None:
+                t = (uts.get(name) or {}).get("dispatched") or times.get("dispatched")
+                self._assign(iid, u, t, op, f"dispatched (listed by {label}" + (f" {_hm(t)})" if t else ")"))
 
     def _paged(self, iid: int) -> None:
         r = self._tracking(iid)
@@ -556,12 +606,11 @@ class AutoDispatch:
         else:                                            # on no call: placed only by its own "responding", one call open
             if h["intent"] != "enroute" or h["who"] not in ("talker", "named"):
                 return
-            t = self.store.one("SELECT rig, radio_id, talker FROM radio_traffic WHERE id = ?", (h["traffic_id"],))
-            known = bool(t and (t["rig"] or (t["talker"] and self.store.one(
-                "SELECT 1 AS x FROM radios WHERE (alias != '' AND alias = ?) OR (unit != '' AND unit = ?)",
-                (t["talker"], t["talker"])))))
-            if not known:
-                return                                   # a radio nobody named (no rig, an unknown ID or alias): never places (#163)
+            t = self.store.one("SELECT rig, dispatcher FROM radio_traffic WHERE id = ?", (h["traffic_id"],))
+            rigs = {_key(x) for x in str((t or {}).get("rig") or "").split(",") if x.strip()}
+            if not t or t["dispatcher"] or rigs != {_key(u["name"])}:
+                return                                   # only that unit's own identified rig saying it: never 60 Control
+                                                         # sending it, a radio nobody named, or another rig (#163, L1)
             since = self.clock() - ASSIGN_WINDOW_S
             cands = [r["id"] for r in self.store.q("SELECT id FROM incidents WHERE status IN ('pending', 'active') "
                                                    "AND created_at >= ?", (since,))]
