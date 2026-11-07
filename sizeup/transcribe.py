@@ -855,8 +855,16 @@ class AwsTranscriber:
         self.stopped.set()
         for w in list(self._workers.values()):
             w.wake()
+        end = time.monotonic() + 8.0          # 8 s for them all, not each (#264: a deploy's drain waits on this)
         for w in list(self._workers.values()):
-            w.join(timeout=8)
+            w.join(timeout=max(0.0, end - time.monotonic()))
+        late = [w for w in self._workers.values() if w.is_alive()]
+        if late:
+            # their items stay "pending" (aws) in the saved state: the next start's _aws_recover (sizeup/cloud/hub.py)
+            # sends them to AWS again, or to the station's whisper
+            n = sum(len(w.q) + len(w.pending) + (w.current is not None and w.current not in w.pending) for w in late)
+            self.log(f"aws transcribe: stopped with {len(late)} stream(s) still busy after 8 s: {n} job(s) left "
+                     "pending for the next start")
 
     # -- the watchdog -------------------------------------------------------------------------------------
 

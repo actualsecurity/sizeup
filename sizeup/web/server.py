@@ -751,7 +751,10 @@ class WebServer:
                  retranscribe: Callable[[list[str] | None], int] | None = None, cad=None, station=None,
                  health: dict | None = None, access=None, access_log: Callable[[str], None] | None = None,
                  station_mode=None, role: str = "", roads=None, gis=None, trains=None, weather=None, station_health=None,
-                 aircraft=None, roadwork=None, set_adsb=None, fence=None, health_fn: Callable[[], dict] | None = None):
+                 aircraft=None, roadwork=None, set_adsb=None, fence=None, health_fn: Callable[[], dict] | None = None,
+                 listener=None):
+        """listener: a socket already bound and listening on (host, port) to serve from (sizeup/app.py run_gated: the
+        hub's port answered "updating" while the app was built; the connections that came meanwhile are served)."""
         self.access = access
         self.gate = Gate(fence)
         self.station = station
@@ -759,12 +762,16 @@ class WebServer:
         # The CAD's own state push (the whole console rebuilt and sent once a second): not on a station,
         # whose page has no CAD (role = "station": its /api/cad/stream is refused).
         self.cad_broadcaster = Broadcaster(cad.cad.state) if cad is not None and role != "station" else None
-        self.httpd = ThreadingHTTPServer((host, port), make_handler(
+        self.httpd = ThreadingHTTPServer((host, port), bind_and_activate=listener is None, RequestHandlerClass=make_handler(
             json.dumps(scene, separators=(",", ":")).encode(), self.broadcaster, clip, close_incident, set_mode,
             set_talkgroup, set_talkgroup_group, retranscribe, cad, self.cad_broadcaster, station,
             json.dumps(health or {"ok": True}, separators=(",", ":")).encode(), access, access_log, station_mode, role,
             roads, gis, trains, weather, station_health, aircraft=aircraft, roadwork=roadwork, set_adsb=set_adsb,
             gate=self.gate, health_fn=health_fn))
+        if listener is not None:
+            self.httpd.socket.close()                 # (the one TCPServer made, never bound)
+            self.httpd.socket = listener
+            self.httpd.server_address = listener.getsockname()
         self.httpd.daemon_threads = True
 
     @property
