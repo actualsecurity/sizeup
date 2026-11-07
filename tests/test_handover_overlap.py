@@ -113,15 +113,37 @@ def test_a_standby_is_healthy_only_once_its_app_is_warm(world, tmp_path):
     finish(a)
 
 
-def test_a_warm_app_that_dies_is_started_again_and_never_holds_the_health_check(world, tmp_path):
+def test_a_warm_app_that_dies_is_started_again_and_the_standby_is_unhealthy_meanwhile(world, tmp_path):
+    a = Task(world, "A", tmp_path).start()
+    until(lambda: a.sup.role == "active")
+    world.warm_delay["B"] = 0.0
+    b = Task(world, "B", tmp_path).start()
+    until(lambda: b.sup.app_warm.is_set())
+    world.warm_delay["B"] = 0.6                                         # the next one takes a while
+    b.env.app.kill()                                                    # (OOM)
+    until(lambda: any("warm app exited" in e for e in b.sup.events))
+    assert not b.sup.warm() and health(b) == 503                        # ECS doesn't stop A for it
+    until(lambda: b.env.calls.count("app start") == 2, what="started again")
+    until(lambda: b.sup.warm(), what="warm again")
+    assert health(b) == 200
+    b.sup.on_term()
+    assert b.wait() == 0
+    finish(a)
+
+
+def test_a_bad_image_whose_app_keeps_dying_never_gets_the_leader_stopped(world, tmp_path):
     a = Task(world, "A", tmp_path).start()
     until(lambda: a.sup.role == "active")
     b = Task(world, "B", tmp_path).start()
-    until(lambda: b.sup.app_warm.is_set())
-    b.env.app.kill()                                                    # (OOM, a crash at import)
-    until(lambda: any("warm app exited" in e for e in b.sup.events))
-    assert b.sup.warm()                                                 # never 503 for it: ECS would replace the task
-    until(lambda: b.env.calls.count("app start") == 2, what="started again")
+    until(lambda: "app start" in b.env.calls)
+    for n in range(1, 4):                                               # it crashes at every start (import error)
+        until(lambda: b.env.calls.count("app start") == n, what=f"start {n}")
+        b.env.app.kill()
+        until(lambda: sum("warm app exited" in e for e in b.sup.events) == n)
+    assert any("given up" in e for e in b.sup.events)
+    time.sleep(0.6)                                                     # past WARM_APP_RETRY_S: no fourth start
+    assert b.env.calls.count("app start") == 3 and not b.sup.warm() and health(b) == 503
+    assert a.sup.role == "active" and world.s3.doc()["holder"] == "A"  # ECS's circuit breaker rolls back
     b.sup.on_term()
     assert b.wait() == 0
     finish(a)
@@ -184,6 +206,56 @@ def test_the_overlap_ends_cleanly_before_ecs_kills_the_task(world, tmp_path):
     world.build_delay["B"] = 0.0
     until(lambda: b.sup.role == "active")
     finish(b)
+
+
+def test_serving_is_said_only_once_the_new_connector_is_up(world, tmp_path):
+    a = Task(world, "A", tmp_path).start()
+    until(lambda: a.sup.role == "active")
+    world.connector_down.add("B")                                       # B's cloudflared doesn't connect (yet)
+    b = Task(world, "B", tmp_path).start()
+    until(lambda: b.sup.role == "standby" and b.sup.warm())
+    with Connectors(a, b) as seen:
+        a.sup.on_term()
+        until(lambda: b.sup.role == "active", what="B active")
+        time.sleep(1.0)                                                 # past CONNECTOR_READY_S: still not "serving"
+        assert world.s3.doc()["phase"] == "connecting" and a.leader_file.exists()
+        assert a.code is None                                           # A's connector stays: no 1033
+        world.connector_down.discard("B")
+        until(lambda: world.s3.doc()["phase"] == "serving", what="serving once the connector is up")
+        assert a.wait() == 0
+    assert all(any(s) for s in seen.samples)
+    assert any("the new leader B serves" in e for e in a.sup.events)
+    finish(b)
+
+
+def test_a_connector_that_never_comes_up_keeps_the_old_one_until_shortly_before_the_sigkill(world, tmp_path):
+    a = Task(world, "A", tmp_path, STOP_TIMEOUT_S=3.0, KILL_MARGIN_S=0.5, RETAKE_S=1e9).start()
+    until(lambda: a.sup.role == "active")
+    world.connector_down.add("B")
+    b = Task(world, "B", tmp_path).start()
+    until(lambda: b.sup.role == "standby" and b.sup.warm())
+    a.sup.t["OVERLAP_S"] = 180.0
+    a.sup.on_term()
+    t0 = time.monotonic()
+    assert a.wait(10) == 0
+    assert 2.0 < time.monotonic() - t0 < 3.0                           # held to kill - margin, not cut at "active"
+    assert any("ECS stops this task in moments" in e for e in a.sup.events)
+    assert world.s3.doc()["phase"] == "connecting"
+    finish(b)
+
+
+def test_a_late_renew_never_brings_the_lease_file_back_after_the_release(world, tmp_path):
+    t = Task(world, "A", tmp_path)
+    t.lock.try_take()
+    t.sup.start_renewing()
+    assert t.sup.lease_file.exists()
+    t.sup.stop_renewing()
+    t.sup.drop_lease()
+    t.sup.write_lease()                                                 # a renew that finished just after
+    assert not t.sup.lease_file.exists()
+    t.sup.start_renewing()                                              # the next take: written again
+    assert t.sup.lease_file.exists()
+    t.sup.stop_renewing()
 
 
 # -- the drained port ----------------------------------------------------------------------------------------------

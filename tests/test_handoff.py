@@ -244,6 +244,7 @@ class World:
         self.restore_delay: dict[str, float] = {}
         self.warm_delay: dict[str, float] = {}      # the gated app's warm-up, per task (inf: never warm)
         self.build_delay: dict[str, float] = {}     # after "run": answering "updating" this long, then the CAD serves
+        self.connector_down: set[str] = set()       # whose cloudflared never connects
         self.app_fails: set[str] = set()
         self.rogue = False                  # something else moves the replica (a writer from before the lock)
         self.pids = 1000
@@ -325,6 +326,8 @@ class FakeApp(FakeProc):
                 self._say("error: no fresh lease")
                 self._end(75)
                 return
+            self.track = True                                  # a writer from here: it opens the databases
+            self.world.up(self.task, "app")
             if said == "init":
                 self.env.calls.append("init_state")
                 for db in DBS:
@@ -333,8 +336,6 @@ class FakeApp(FakeProc):
                 self.phase = "ready"
         if said == "run" and self.phase in ("warm", "ready"):
             self.env.calls.append("app")
-            self.track = True
-            self.world.up(self.task, "app")
             self.env.written = {db: 5 for db in DBS}         # what it writes while it runs
             self.phase, self.run_at = "listening", time.monotonic()
         if self.phase == "listening" and time.monotonic() - self.run_at >= self.world.build_delay.get(self.task, 0.0):
@@ -406,7 +407,7 @@ class FakeEnv(Env):
         return self._serving() and self.task not in self.world.app_fails
 
     def connector_ready(self):
-        return True
+        return self.task not in self.world.connector_down
 
     def quick_check(self, path):
         return "ok"
@@ -530,7 +531,8 @@ def test_the_handoff_old_drains_syncs_releases_new_catches_up_and_serves(world, 
     assert world.s3.doc()["holder"] == "B" and world.s3.doc()["generation"] == 2 and world.s3.doc()["phase"] == "serving"
     # the order: A's app gone, A's Litestream gone (after its sync), the release, then B writes
     t = world.when
-    assert t("A", "app down") < t("A", "litestream down") < t("B", "litestream up") < t("B", "app up")
+    assert t("A", "app down") < t("A", "litestream down") < t("B", "app up") < t("B", "litestream up")
+    assert b.env.calls.index("init_state") < b.env.calls.index("replicate") < b.env.calls.index("app")
     assert [c for c in a.env.calls if c.startswith("sync")] == [f"sync {db}" for db in DBS]
     assert b.sup.positions == {db: f"{105:016x}" for db in DBS}         # caught up to the release, by the followers
     assert not any(c.startswith("restore") for c in b.env.calls)        # incremental: no full restore

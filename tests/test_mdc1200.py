@@ -121,10 +121,10 @@ def test_corrupted_burst_is_rejected_unless_asked():
 def test_fast():
     audio = channel(np.concatenate([pad(0.15), encode(0x01, 0x80, 0x1234), pad(0.15)]))[: RATE // 2]
     decode(audio, RATE)
-    t = time.perf_counter()
+    t = time.process_time()                    # CPU time: a loaded machine stretches only the wall clock (#282)
     for _ in range(10):
         decode(audio, RATE)
-    assert (time.perf_counter() - t) / 10 < 0.05
+    assert (time.process_time() - t) / 10 < 0.05
 
 
 # ---- real captures: Port Chester FD fireground (453.0375 MHz), rtl_fm 16 kHz discriminator

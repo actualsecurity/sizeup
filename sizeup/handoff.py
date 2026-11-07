@@ -84,6 +84,7 @@ KILL_MARGIN_S = 3.0            # ... it stops this long before ECS's SIGKILL, cl
 INIT_S = 300.0                 # the app opening / migrating the databases after the gate says "init"
 APP_LISTEN_S = 30.0            # the app's port answering ("updating") after the gate says "run"
 WARM_APP_RETRY_S = 30.0        # a warm (standby) app that exited: started again after this long
+WARM_APP_MAX_FAILS = 3         # ... at most this often; then the standby stays unhealthy (ECS rolls the deploy back)
 RETAKE_S = 20.0                # nobody took it: take it back
 STOP_TIMEOUT_S = 120.0         # the task definition's stopTimeout: ECS SIGKILLs this long after SIGTERM
 REDRAIN_S = 40.0               # after a retake: drain again this long before the SIGKILL
@@ -302,7 +303,8 @@ class Supervisor:
                  LITESTREAM_STOP_S=LITESTREAM_STOP_S, OVERLAP_S=OVERLAP_S, RETAKE_S=RETAKE_S,
                  STOP_TIMEOUT_S=STOP_TIMEOUT_S, REDRAIN_S=REDRAIN_S, RENEW_S=leaderlock.RENEW_S,
                  RETAKE_MIN_LEFT_S=RETAKE_MIN_LEFT_S, CREATED_WAIT_S=CREATED_WAIT_S, KILL_MARGIN_S=KILL_MARGIN_S,
-                 INIT_S=INIT_S, APP_LISTEN_S=APP_LISTEN_S, WARM_APP_RETRY_S=WARM_APP_RETRY_S)
+                 INIT_S=INIT_S, APP_LISTEN_S=APP_LISTEN_S, WARM_APP_RETRY_S=WARM_APP_RETRY_S,
+                 WARM_APP_MAX_FAILS=WARM_APP_MAX_FAILS)
         t.update(timing or {})
         self.t = t
         self.role = "starting"
@@ -312,6 +314,8 @@ class Supervisor:
         self.lost = threading.Event()
         self.renewing = threading.Event()
         self._renew_now = threading.Event()
+        self._write_lock = threading.RLock()   # the lease is written by the renew thread and the main one (#282)
+        self._lease_open = False                # (under _write_lock) the lease file may be written: held, not let go
         self._renew_token: object | None = None
         self.followers: dict[str, Proc] = {}
         self.follow_done: set[str] = set()        # restored (or: no replica to restore)
@@ -320,7 +324,7 @@ class Supervisor:
         self.app: Proc | None = None              # the app that may write (after the gate says "init")
         self.warm_app: Proc | None = None         # the app started while standing by, waiting at its gate (#264)
         self.app_warm = threading.Event()         # ... it said "warm"
-        self._warm_failed = False                 # ... it exited before the takeover (the takeover starts one)
+        self._warm_fails = 0                      # ... how often it exited before the takeover
         self._warm_app_at: float | None = None
         self.litestream: Proc | None = None
         self.updating_srv: ThreadingHTTPServer | None = None
@@ -328,7 +332,6 @@ class Supervisor:
         self._port_thread: threading.Thread | None = None
         self.timing: Phases | None = None
         self.control_srv: ThreadingHTTPServer | None = None
-        self._write_mu = threading.Lock()
         self.events: list[str] = []               # what happened, in order (the tests read it)
         self.positions: dict | None = None
         self.released_positions: dict | None = None
@@ -378,7 +381,7 @@ class Supervisor:
         """path replaced at once by text. The renew thread and this one both write the lease file: one at a time,
         each through a temp file of its own (#264: a shared ".lease.json.tmp" raced, the second os.replace failing)."""
         path.parent.mkdir(parents=True, exist_ok=True)
-        with self._write_mu:
+        with self._write_lock:
             fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
             try:
                 with os.fdopen(fd, "w") as f:
@@ -388,16 +391,18 @@ class Supervisor:
                 Path(tmp).unlink(missing_ok=True)
 
     def write_lease(self) -> None:
-        self._write(self.lease_file, json.dumps({
-            "generation": self.lock.generation, "valid_until": self.lock.valid_until, "holder": self.lock.holder,
-            "litestream_pid": self.litestream.pid if self.litestream is not None else None}))
+        with self._write_lock:            # (an RLock) what it says and the write in one go: the newest lands last
+            if not self._lease_open:      # let go (released, fenced): a renew finishing late never brings it back
+                return
+            self._write(self.lease_file, json.dumps({
+                "generation": self.lock.generation, "valid_until": self.lock.valid_until, "holder": self.lock.holder,
+                "litestream_pid": self.litestream.pid if self.litestream is not None else None}))
 
     def heartbeat(self) -> None:
         self._write(self.shared / "hub-alive", f"{int(time.time())}\n")
 
     def warm(self) -> bool:
-        return (self.caches_warm.is_set() and self.follow_done >= set(DBS)
-                and (self.app_warm.is_set() or self._warm_failed))
+        return self.caches_warm.is_set() and self.follow_done >= set(DBS) and self.app_warm.is_set()
 
     def healthy(self, app: dict | None = None, asked: bool = False) -> bool:
         """ECS's health check (control port /healthz). A standby: only once warm. Taking over, draining,
@@ -503,15 +508,22 @@ class Supervisor:
             return
         p = self.warm_app
         if p is None:
+            if self._warm_fails >= self.t["WARM_APP_MAX_FAILS"]:
+                return                    # this image's app doesn't start: never healthy, ECS rolls back
             if self._warm_app_at is None or self.mono() - self._warm_app_at >= self.t["WARM_APP_RETRY_S"]:
                 self.warm_app = self._start_app()
                 self.note("app started, gated: warming up before the takeover")
             return
         code = p.poll()
         if code is not None:
-            self.note(f"the warm app exited {code}: started again in {self.t['WARM_APP_RETRY_S']:.0f} s")
+            self._warm_fails += 1
             self.warm_app = None
-            self._warm_failed = True      # ECS's health doesn't wait on it: the takeover starts one if need be
+            self.app_warm.clear()         # not healthy without it: a bad image must not get the old task stopped
+            if self._warm_fails >= self.t["WARM_APP_MAX_FAILS"]:
+                self.note(f"the warm app exited {code}, {self._warm_fails} times: given up; this task stays "
+                          "unhealthy (ECS's circuit breaker rolls the deploy back, the leader serves on)")
+            else:
+                self.note(f"the warm app exited {code}: started again in {self.t['WARM_APP_RETRY_S']:.0f} s")
             return
         if not self.app_warm.is_set() and self._gate_answer() == "warm":
             self.app_warm.set()
@@ -580,10 +592,18 @@ class Supervisor:
                 nxt = self.mono() + 2.0
 
     def start_renewing(self) -> None:
+        with self._write_lock:
+            self._lease_open = True
         self.write_lease()
         self._renew_token = token = object()
         self.renewing.set()
         threading.Thread(target=self._renew_loop, args=(token,), name="lock-renew", daemon=True).start()
+
+    def drop_lease(self) -> None:
+        """The lease file gone for good (until the next take): the app's fence says "not ours" from here."""
+        with self._write_lock:
+            self._lease_open = False
+            self.lease_file.unlink(missing_ok=True)
 
     def stop_renewing(self) -> None:
         self.renewing.clear()
@@ -617,7 +637,7 @@ class Supervisor:
         self.stop_renewing()
         self.lock.drop()
         self.leader_file.unlink(missing_ok=True)
-        self.lease_file.unlink(missing_ok=True)
+        self.drop_lease()
         return EXIT_FENCED
 
     # -- main ----------------------------------------------------------------------------------------------
@@ -869,14 +889,19 @@ class Supervisor:
         if not self.leader_file.exists():
             self._leader_file_now("the app serves")
         end = self.mono() + self.t["CONNECTOR_READY_S"]
-        while not self.env.connector_ready() and self.mono() < end:
+        ready = self.env.connector_ready()
+        while not ready and self.mono() < end:
             self.must_hold()
             self.sleep(0.2)
+            ready = self.env.connector_ready()
         t.mark("connector")
-        self.say("serving")
+        # "serving" in the lock is what lets the old task drop its connector: only once ours is up (#264), else the
+        # tunnel would have none. Not up yet: "connecting", and active() says "serving" the moment it is.
+        self.say("serving" if ready else "connecting")
         self.role = "active"
         self.detail = ""
-        self.note(f"active: serving, generation {self.lock.generation}")
+        self.note(f"active: serving, generation {self.lock.generation}"
+                  + ("" if ready else "; the connector isn't up yet: the old one stays until it is"))
         log(f"handoff: {t.line()}")
 
     def _leader_file_now(self, why: str) -> None:
@@ -889,8 +914,14 @@ class Supervisor:
     def active(self, deadline: float | None = None, retake: bool = True) -> int:
         backoff = LITESTREAM_BACKOFF[0]
         restart_at = None
+        asked_at = self.mono()
         while True:
             self.must_hold()
+            if self.lock.phase == "connecting" and self.mono() - asked_at >= 1.0:
+                asked_at = self.mono()
+                if self.env.connector_ready():
+                    self.say("serving")
+                    self.note("the connector is up: serving")
             if self.term.is_set() and deadline is None:
                 return self.step_down(code=0, overlap=True, retake=retake)
             if deadline is not None and self.mono() >= deadline:
@@ -954,7 +985,7 @@ class Supervisor:
         except LockError as e:
             self.note(f"release not confirmed ({e}): the lease runs out by itself in {leaderlock.TTL_S:.0f} s")
             released = ""
-        self.lease_file.unlink(missing_ok=True)
+        self.drop_lease()
         self.released_positions = positions if clean else None
         self.role = "released"
         t.mark("release")
