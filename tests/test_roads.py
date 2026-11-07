@@ -165,7 +165,7 @@ def test_a_refresh_reads_each_feed_with_the_key_and_nothing_else_carries_it(tmp_
     pub = r.public()
     assert pub["configured"] and pub["attribution"] == "powered by 511NY" and pub["link"] == "https://511ny.org/"
     assert [c["id"] for c in pub["cameras"]] == ["4631", "4620", "4616"]
-    assert all(set(c) == {"id", "name", "road", "dir", "mile", "lat", "lon", "has_video", "off", "source", "cadence", "down",
+    assert all(set(c) == {"id", "name", "road", "dir", "mile", "lat", "lon", "has_video", "off", "source", "cadence", "down", "state", "why", "since",
                           "down_since", "last_image"} for c in pub["cameras"])
     assert all(c["source"] == "511NY" for c in pub["cameras"]) and all(e["source"] == "511NY" for e in pub["events"])
     assert [s["name"] for s in pub["sources"]] == ["511ny"]
@@ -814,7 +814,21 @@ def test_down_cameras_are_demoted_in_the_picker_and_listed_apart(tmp_path):
 
 # ---- live video (#101): the camera's HLS stream through the hub, only while a viewer is open ---------------------
 
-SEG = b"\x47" + b"ts-bytes" * 100
+def synthetic_ts(frames: int) -> bytes:
+    """An MPEG-TS with a PAT (PMT on PID 0x100), a PMT (H.264 video on PID 0x101) and `frames` PES starts."""
+    def packet(pid: int, payload: bytes, pusi: int) -> bytes:
+        hdr = bytes([0x47, (pusi << 6) | (pid >> 8), pid & 0xFF, 0x10])
+        return (hdr + payload).ljust(188, b"\xff")
+    pat = b"\x00" + b"\x00\xb0\x0d\x00\x01\xc1\x00\x00\x00\x01\xe1\x00" + b"\x00\x00\x00\x00"
+    pmt = b"\x00" + b"\x02\xb0\x12\x00\x01\xc1\x00\x00\xe1\x01\xf0\x00" + b"\x1b\xe1\x01\xf0\x00" + b"\x00\x00\x00\x00"
+    out = packet(0, pat, 1) + packet(0x100, pmt, 1)
+    for _ in range(frames):
+        out += packet(0x101, b"\x00\x00\x01\xe0\x00\x00\x80\x80\x05" + b"\x21\x00\x01\x00\x01" + b"\x00\x00\x00\x01\x65", 1)
+        out += packet(0x101, b"\x11" * 100, 0)
+    return out
+
+
+SEG = synthetic_ts(4)                                    # a whole segment (#276: the hub serves nothing else)
 PLAYLIST = b"#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-STREAM-INF:BANDWIDTH=205422,CODECS=\"avc1.4d4015\",RESOLUTION=512x288\nchunklist_w1849562454.m3u8\n"
 CHUNKLIST = (b"#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:14\n#EXT-X-MEDIA-SEQUENCE:1225\n"
              b"#EXTINF:6.4,\nmedia_w1849562454_1225.ts\n#EXTINF:6.799,\nmedia_w1849562454_1226.ts\n")
@@ -919,9 +933,13 @@ def test_no_stream_for_a_camera_without_one_a_down_one_or_an_unknown_one():
     for _ in range(3):
         clock.t += IMAGE_TTL_S + 1
         r.get("/api/cad/cameras/1ne01370s/image", "")
-    assert r.health("1ne01370s")["down"]
+    # (#276) a camera with live video is judged by its stream: a failing still never refuses it; until its stream is
+    # looked at it is stale, "video not checked"
+    h = r.health("1ne01370s")
+    assert not h["down"] and (h["state"], h["why"]) == ("stale", "Still old · video not checked")
     code, body, _, _ = r.get("/api/cad/cameras/1ne01370s/stream/playlist.m3u8", "")
-    assert code == 404 and json.loads(body)["down"]
+    assert code == 200
+    r.close_stream("1ne01370s", "")
     # the origin failing: a 502, no session churn
     del f.fail["image"]
     clock.t += 1000
@@ -946,20 +964,6 @@ def test_no_stream_for_a_camera_without_one_a_down_one_or_an_unknown_one():
 
 
 # ---- the stream pump, the frame rate, the status; snapshots at the source's cadence (hls-smooth, refs #101) ------
-
-
-def synthetic_ts(frames: int) -> bytes:
-    """An MPEG-TS with a PAT (PMT on PID 0x100), a PMT (H.264 video on PID 0x101) and `frames` PES starts."""
-    def packet(pid: int, payload: bytes, pusi: int) -> bytes:
-        hdr = bytes([0x47, (pusi << 6) | (pid >> 8), pid & 0xFF, 0x10])
-        return (hdr + payload).ljust(188, b"\xff")
-    pat = b"\x00" + b"\x00\xb0\x0d\x00\x01\xc1\x00\x00\x00\x01\xe1\x00" + b"\x00\x00\x00\x00"
-    pmt = b"\x00" + b"\x02\xb0\x12\x00\x01\xc1\x00\x00\xe1\x01\xf0\x00" + b"\x1b\xe1\x01\xf0\x00" + b"\x00\x00\x00\x00"
-    out = packet(0, pat, 1) + packet(0x100, pmt, 1)
-    for _ in range(frames):
-        out += packet(0x101, b"\x00\x00\x01\xe0\x00\x00\x80\x80\x05" + b"\x21\x00\x01\x00\x01" + b"\x00\x00\x00\x01\x65", 1)
-        out += packet(0x101, b"\x11" * 100, 0)
-    return out
 
 
 def test_frames_are_counted_from_the_transport_stream():
@@ -1027,7 +1031,7 @@ def test_a_low_frame_rate_at_the_source_is_measured_and_reported():
     st = json.loads(r.get("/api/cad/cameras/1ne01370s/stream/status", "")[1])
     assert st["fps"] == 1.0 and st["open"] and st["source_down"] is False
     assert json.loads(r.get("/api/cad/cameras/1cw00250w/stream/status", "")[1]) == {
-        "open": False, "fps": None, "ahead": 0, "target_s": None, "source_down": False}
+        "open": False, "fps": None, "ahead": 0, "target_s": None, "source_down": False, "damaged": 0, "checked": 0}
 
 
 def test_a_snapshot_is_served_again_only_when_the_hub_has_a_newer_one(tmp_path):
@@ -1305,13 +1309,13 @@ def test_the_layers_control_is_on_every_map_with_its_five_layers():
     assert 'id="d-cams"' in html and 'id="ov-cams"' in html
     assert "/api/cad/cameras?" in js and "CAM_REFRESH_MS)" in js and 'aria-expanded' in js   # live, collapsible
     assert '"ml-cam-down"' in js and "Hide down cameras" in js and "cameras down" in js       # down cameras (#99)
-    assert "Down since" in js and "Snapshot, updated every" in js
+    assert "Offline · " in js and "Snapshot, updated every" in js                              # short, data first (#278)
     # live video (#101): hls.js only from cdnjs, muted and inline, "Live" only from the player, snapshots otherwise
     assert re.search(r'const HLS_JS = "https://cdnjs\.cloudflare\.com/ajax/libs/hls\.js/[\d.]+/hls\.min\.js"', js)
     assert not re.search(r"https://(?!cdnjs\.cloudflare\.com)[a-z0-9.-]+/[^\"']*\.js", js)
     assert "video.muted = true" in js and 'setAttribute("playsinline"' in js and "/stream/playlist.m3u8" in js
-    assert 'viewer.el.time.textContent = "Live"' in js and "liveFailed(" in js
+    assert 'let text = "Live"' in js and "liveFailed(" in js
     assert "liveSyncDurationCount: 3" in js and "manifestLoadingMaxRetry: 0" in js and "Buffering…" in js   # hls-smooth
-    assert "low frame rate from the source" in js and "/stream/status" in js and "If-None-Match" in js
+    assert "fps" in js and "frames a second" in js and "lossy source" in js and "/stream/status" in js and "If-None-Match" in js
     sprite = (STATIC / "icons.svg").read_text()
     assert 'id="i-layers"' in sprite and 'id="i-camera"' in sprite

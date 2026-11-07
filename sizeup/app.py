@@ -3056,6 +3056,15 @@ def make_app(cfg: Config) -> App:
     return app
 
 
+def start_app(cfg: Config) -> App:
+    """make_app() and start it; the hub's log is read for its own error spikes first (#285, sizeup/errwatch.py)."""
+    app = make_app(cfg)
+    if getattr(app, "error_watch", None) is not None:      # the hub: its own error spikes to the status topic
+        from sizeup import errwatch
+        errwatch.install(app.error_watch)
+    return app.start()
+
+
 def make_server(app: App, fence=None) -> WebServer:
     cfg = app.cfg
     server = WebServer(cfg.host, cfg.port, app.scene(), app.state, app.clip, app.close_incident, app.set_mode,
@@ -3154,8 +3163,7 @@ def main(argv: list[str] | None = None) -> int:
         init_state(cfg)
         log(f"sizeup: databases ready ({cfg.cad_db or 'in memory'})")
         return 0
-    app = make_app(cfg)
-    app.start()
+    app = start_app(cfg)
     server = make_server(app, fence)
     signal.signal(signal.SIGTERM, lambda *_: server.drain())
     sm = app.station

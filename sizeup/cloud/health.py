@@ -372,6 +372,7 @@ class StationHealth:
         self.disk_pct = cfg.alerts_disk_pct
         self.repeat_s = cfg.alerts_repeat_min * 60
         self.public_url = (cfg.cloud_public_url or "").rstrip("/")
+        self.errors = None          # the hub's own error lines (sizeup/errwatch.py ErrorWatch, #285): HubApp sets it
         self._lock = threading.RLock()
         self.active: dict[str, dict] = {}
         self.history: list[dict] = []
@@ -976,6 +977,7 @@ class StationHealth:
                            "server": getattr(n, "server", "") if n is not None and n.enabled else "",
                            "sent": getattr(n, "sent", 0), "failed": getattr(n, "failed", 0),
                            "last_error": getattr(n, "last_error", ""), "last_push": max(pushed.values(), default=None)},
+                "errors": self.errors.panel() if self.errors is not None else None,
                 "thresholds": {"silent_min": self.silent_s / 60, "behind_min": self.behind_s / 60,
                                "down_min": self.down_s / 60, "outbox_min": self.outbox_s / 60,
                                "disk_pct": self.disk_pct, "repeat_min": self.repeat_s / 60,

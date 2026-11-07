@@ -175,6 +175,8 @@ POST /api/cad/settings/datasources        {action: set, key, value: off | hourly
                                           reset, key?}: how often a data source is refreshed; admins
 POST /api/cad/settings/atc                {action: set {key: identify | map | vocab, value: true | false} | reset {key}}: who is
                                           talking on HPN Tower (#252, sizeup/atc_talkers.py) on the rows / the map; admins
+POST /api/cad/settings/hub_errors         {action: set {key: on | per_signature | total, value} | reset {key}}: the hub's own
+                                          error spikes to the status topic (#285, sizeup/errwatch.py); admins
 """
 
 from __future__ import annotations
