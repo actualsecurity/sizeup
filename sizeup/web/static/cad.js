@@ -730,7 +730,8 @@ function renderDetail() {
   else { since(elapsed, null); setText(elapsed, fmtDur((inc.closed_at || 0) - inc.created_at)); }
   if (window.Incoming) Incoming.facts($("#d-feed"), inc, { api, operator, readonly: BOARD || !canDo("dispatch") });
   show($("#d-via-w"), !!inc.received_via);
-  setText($("#d-via"), inc.received_via ? nameOf("received_via", inc.received_via) : "");
+  setText($("#d-via"), inc.feed && inc.received_via === "CAD FEED" ? inc.feed.label     // the feed's own name (#297)
+    : inc.received_via ? nameOf("received_via", inc.received_via) : "");
   show($("#d-until-w"), !!inc.until_at);
   setText($("#d-until"), inc.until_at ? fmtTime(inc.until_at) : "");
   show($("#d-disp-w"), !!inc.disposition);

@@ -13,13 +13,15 @@ sizeup/sources/runner.py (they come here as "source_event" / "source_health" thr
                is recorded and never makes an incident
     match      an OPEN incident (queued, pending, active; never closed or dismissed) created within MATCH_WINDOW_S of the
                report, with no report of the same source on it. When both have a location, the same place is required
-               (same_place: house number and street, direction and suffix; an intersection never equals a numbered
-               address), whatever units they share; a unit in common (assignments not cleared, and the reports' units)
-               is enough only when one side has no location
+               (street_part() then same_place: house number and street, direction and suffix; an intersection never
+               equals a numbered address), whatever units they share. A unit in common (assignments not cleared, and
+               the reports' units) is enough only when neither has a location or only the incoming report has one; a
+               report with no location never attaches to an incident that has one. Two incidents sharing units in the
+               window that may not be joined are noted "possibly the same as #N" on both: a duplicate is never silent
     attach     a page attaches only to an incident a feed has; a feed event only to a queued one or one a feed made.
                Any other match: the report makes its own incident, noted "possibly the same as #N" on both
-    authority  the best-ranked report's type and location are applied while the incident is queued, or for a field no
-               person has edited (manual_edits: type, location, pin); otherwise a timeline note, and the incident view
+    authority  the best-ranked report's type and location are applied to a field no person has edited, whatever the
+               status (manual_edits: type, location, pin); otherwise a timeline note, and the incident view
                offers "Use <feed>'s <field>" (feed_use). A pin a person set is never cleared
     timeline   every change a feed reports is an entry on the incident (kind "feed"): type, location, units, each time
                (per unit too), each new comment at its own time, closed or reopened, each extra
@@ -108,8 +110,9 @@ ABBR = {"street": "st", "avenue": "ave", "av": "ave", "road": "rd", "drive": "dr
 SUFFIXES = {"st", "ave", "rd", "dr", "ln", "pl", "ct", "blvd", "ter", "pkwy", "hwy", "cir", "way", "sq", "plz"}
 DIRECTIONS = {"n", "s", "e", "w", "ne", "nw", "se", "sw"}
 NOISE = {"the", "of"}
-INTERSECTION = re.compile(r"\s(?:&|and|/|at|@)\s|&|/", re.I)
-UNIT_TAIL = re.compile(r"(?:\b(?:apt|apartment|unit|ste|suite|fl|floor|rm|room|bldg|building)\b|#).*$", re.I)
+INTERSECTION = re.compile(r"\s(?:&|and|/|at)\s|&|/", re.I)
+UNIT_TAIL = re.compile(r"(?:\b(?:apt|apartment|unit|ste|suite|fl|flr|floor|rm|room|bldg|building)\b|#).*$", re.I)
+FLOOR = re.compile(r"\b\d+(?:st|nd|rd|th)\s+(?:fl|flr|floor)\b.*$", re.I)
 # A transmission announcing a page or an alarm to come (a pre-alert: never an incident)
 INCOMING = re.compile(r"\b(?:incoming|stand\s*-?\s*by\s+for|standby\s+for)\b[^.?!]{0,40}?\b(?:alarm|page|tones?|call|"
                       r"assignment|box)\b|\b(?:additional|second|2nd|third|3rd|fourth|4th)\s+alarm\b|"
@@ -137,20 +140,44 @@ def units_match(a, b) -> set[str]:
 
 
 def _street(s: str) -> tuple[str, frozenset, str, frozenset]:
-    """'12 N Example Ave Apt 3' -> ('12', {'n'}, 'ave', {'example'}): house number, directions, suffix, name words."""
+    """'12 N Example Ave Apt 3' -> ('12', {'n'}, 'ave', {'example'}): house number, directions, suffix, name words. Words
+    after the street's suffix (a town, a business) are dropped."""
     words = [ABBR.get(w, w) for w in re.findall(r"[a-z0-9]+", s.lower())]
     num = words.pop(0) if words and re.fullmatch(r"\d+[a-z]?", words[0]) else ""
+    cut = next((i for i, w in enumerate(words) if w in SUFFIXES and any(x not in DIRECTIONS for x in words[:i])), None)
+    if cut is not None:
+        words = words[:cut + 1]
     dirs = frozenset(w for w in words if w in DIRECTIONS)
-    suffix = next((w for w in reversed(words) if w in SUFFIXES), "")
-    name = frozenset(w for w in words if w not in DIRECTIONS and w not in SUFFIXES and w not in NOISE)
+    suffix = words[cut] if cut is not None else ""
+    name = frozenset(w for i, w in enumerate(words) if w not in DIRECTIONS and w not in NOISE and i != cut
+                     and not (w in SUFFIXES and i > 0))      # "St Marys Pl": a leading "st" is Saint's, dropped too
+    name = frozenset(w for w in name if w not in SUFFIXES)
     return num, dirs, suffix, name
+
+
+def street_part(s: str) -> str:
+    """The street part of a location as CADs write it: '12 EXAMPLE AVE   : @SAMPLE SCHOOL - EXAMPLE VILLAGE EXAMPLE_TOWN'
+    -> '12 EXAMPLE AVE'; '@SAMPLE SCHOOL (12 EXAMPLE AVE)' -> '12 EXAMPLE AVE'; '12-14 EXAMPLE AVE 3RD FL' ->
+    '12 EXAMPLE AVE'. A named place, ';...', '(...)', '[...]', the town after a comma, UPPER_SNAKE town tokens, floors,
+    units and apartments are left out; a range is its first number."""
+    s = (s or "").strip()
+    m = re.match(r"^\s*@[^(]*\(([^)]*)\)", s)
+    if m:                                                   # @PLACE (ADDRESS)
+        s = m.group(1)
+    s = re.split(r"\s:\s|\s*:\s*@", s)[0]
+    s = s.split("@")[0].split(";")[0]
+    s = re.sub(r"\([^)]*\)|\[[^\]]*\]", " ", s).split(",")[0]
+    s = re.sub(r"\b[A-Z0-9]+(?:_[A-Z0-9]+)+\b", " ", s)     # EXAMPLE_TOWN
+    s = FLOOR.sub("", s)
+    s = UNIT_TAIL.sub("", s)
+    s = re.sub(r"^\s*(\d+)[a-z]?\s*-\s*\d+[a-z]?\b", r"\1", s, flags=re.I)
+    return " ".join(s.split())
 
 
 def place_key(s: str):
     """('addr', number, directions, suffix, name) for a street address, ('x', {streets}) for an intersection, None for
-    nothing usable. The town after a comma, a named place after "@" and an apartment are left out."""
-    s = (s or "").split(",")[0]
-    s = UNIT_TAIL.sub("", s.split(" @ ")[0] if " @ " in s else s).strip()
+    nothing usable (street_part() first)."""
+    s = street_part(s)
     if not s:
         return None
     parts = [p for p in INTERSECTION.split(s) if p.strip()]
@@ -291,13 +318,14 @@ class Sources:
         return self.store.one("SELECT 1 AS x FROM source_reports WHERE incident_id = ? AND source != ? AND merged_into = '' "
                               "LIMIT 1", (iid, PAGING)) is not None
 
-    def match(self, source: str, at: float, location: str, units) -> dict | None:
-        """The open incident this report is most likely about (see the module's "match"), or None. Whether it may
-        attach there is the caller's (see "attach")."""
+    def match(self, source: str, at: float, location: str, units) -> tuple[dict | None, dict | None]:
+        """(the open incident this report may attach to, else the one it is possibly the same as): see the module's
+        "match". Whether it may attach there is also the caller's (see "attach")."""
         taken = {r["incident_id"] for r in self.store.q(
             "SELECT incident_id FROM source_reports WHERE source = ? AND incident_id IS NOT NULL", (source,))}
         here = place_key(location) is not None
-        best, key = None, None
+        best = near = None
+        bkey = nkey = None
         for inc in self.store.q(f"SELECT * FROM incidents WHERE created_at BETWEEN ? AND ? AND status IN "
                                 f"({','.join('?' * len(OPEN))})", (at - MATCH_WINDOW_S, at + MATCH_WINDOW_S, *OPEN)):
             if inc["id"] in taken:
@@ -305,17 +333,24 @@ class Sources:
             common = units_match(units, self._units_of(inc["id"]))
             theirs = [x for x in (inc["address"], inc["place_address"], inc["geo_label"]) if place_key(x) is not None]
             if here and theirs:
-                if not any(same_place(location, x) for x in theirs):
-                    continue                                 # two places: never the same call, whatever the units
-                score = 10 + len(common)
+                if any(same_place(location, x) for x in theirs):
+                    score = 10 + len(common)
+                elif common:                                 # two places sharing units: never joined, never silent
+                    score = -len(common)
+                else:
+                    continue
+            elif common and not here and theirs:             # no location here, one there: never by units alone
+                score = -len(common)
             elif common:
-                score = len(common)                          # one side has no location: the units decide
+                score = len(common)                          # neither has a location, or only this report has one
             else:
                 continue
-            k = (-score, abs(inc["created_at"] - at))
-            if key is None or k < key:
-                best, key = inc, k
-        return best
+            k = (-abs(score), abs(inc["created_at"] - at))
+            if score > 0 and (bkey is None or k < bkey):
+                best, bkey = inc, k
+            elif score < 0 and (nkey is None or k < nkey):
+                near, nkey = inc, k
+        return best, (None if best is not None else near)
 
     def authority(self, iid: int) -> int | None:
         r = self.store.one("SELECT MIN(rank) AS r FROM source_reports WHERE incident_id = ? AND merged_into = ''", (iid,))
@@ -413,7 +448,7 @@ class Sources:
             inc = self._alias_incident(ev.source, data)
             similar = None
             if inc is None:
-                inc = self.match(ev.source, at, data["location"], data["units"])
+                inc, similar = self.match(ev.source, at, data["location"], data["units"])
                 if inc is not None and not (inc["status"] == "queued" or inc["source"] == FEED_SOURCE):
                     inc, similar = None, inc                 # accepted and not a feed's: its own incident, noted
             if inc is not None:
@@ -442,7 +477,7 @@ class Sources:
              "remarks": (f"{label} event {ref}: {data['type'] or 'type not given'} at {loc or '(no location)'}"
                          + (f"; units {', '.join(data['units'])}" if data["units"] else ""))[:4000]}
         self.cad._auto_geo(f)
-        via = "60 CONTROL" if "60 CONTROL" in self.cad.lists.received_codes else ""
+        via = "CAD FEED" if "CAD FEED" in self.cad.lists.received_codes else ""    # never "60 Control"; the console shows the feed label
         iid = self.store.create_incident(**f, received_via=via, source=FEED_SOURCE, source_ref=f"feed:{source}:{ref}",
                                          status="queued")
         with self.store.tx() as db:
@@ -512,7 +547,7 @@ class Sources:
         "authority"), and a timeline entry per change."""
         inc = self.store.incident(iid)
         auth = rank <= (self.authority(iid) or rank)
-        hand = set() if inc["status"] == "queued" else self.manual(iid)
+        hand = self.manual(iid)                    # a person's edit stands whatever the status, queued too
         old = prev or {"type": "", "location": "", "units": [], "times": {}, "unit_times": {}, "comments": [], "closed": False}
         notes: list[tuple[float, str]] = []
         now = self.clock()
@@ -587,13 +622,13 @@ class Sources:
             rep = self._report(PAGING, ref)
             if rep and rep["incident_id"]:
                 return "attached", rep["incident_id"]
-            inc = self.match(PAGING, at, location, units)
+            inc, similar = self.match(PAGING, at, location, units)
             if inc is not None and self._has_feed(inc["id"]):
                 self._put(PAGING, ref, PAGING_RANK, PAGING_LABEL, at, rec, incident_id=inc["id"])
                 self._page_attached(inc, rec)
                 return "attached", inc["id"]
             self._put(PAGING, ref, PAGING_RANK, PAGING_LABEL, at, rec)
-            return "create", inc
+            return "create", inc or similar
 
     def created_by_page(self, ref: str, iid: int, similar: dict | None = None) -> None:
         with self.store.tx() as db:

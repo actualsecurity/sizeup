@@ -42,7 +42,9 @@ A factory is `factory(ctx: SourceContext) -> Adapter | Iterable[Adapter]`. An ad
                          optional: something just happened that may be a call coming (reason: "paging tones", "radio
                          pre-alert", "phone pre-alert"). Called on the adapter's own runner thread (never the caller's),
                          right before an immediate poll() instead of waiting out poll_s (at most once every
-                         TRIGGER_MIN_S per adapter). The adapter may use it to skip its own pacing for that one poll
+                         TRIGGER_MIN_S per adapter, and never while the adapter is failing or its health isn't ok: during an
+                         outage its own pacing and back-off stand). The adapter may use it to skip its own pacing for
+                         that one poll
 
 A FeedEvent's fields, as the feed says them (never parsed here beyond the checks in FeedEvent.check):
 

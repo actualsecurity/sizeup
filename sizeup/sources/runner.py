@@ -267,13 +267,16 @@ class SourceRunner:
 
     def trigger(self, reason: str) -> int:
         """Something that may be a call coming (paging tones, a radio or phone pre-alert): each adapter's optional
-        poll at once (at most once every TRIGGER_MIN_S per adapter). Only sets a flag and the reason: never runs adapter
+        poll at once (at most once every TRIGGER_MIN_S per adapter; never while it is failing or backing off: the
+        adapter's own pacing stands during an outage). Only sets a flag and the reason: never runs adapter
         code here (the caller may hold the paging decoder's lock); the adapter's own thread calls poll_now(reason)
         before that poll. How many were woken."""
         now, n = self.clock(), 0
         for r in self.runs:
             if now - r.triggered < TRIGGER_MIN_S:
                 continue
+            if r.fails or (r.health is not None and r.health[0] != "ok"):
+                continue                       # an outage: the adapter's own pacing (and back-off) stands
             r.triggered, r.reason = now, str(reason or "")[:40]
             r.wake.set()
             n += 1
@@ -330,7 +333,7 @@ class SourceRunner:
                 try:
                     close()
                 except Exception as e:  # noqa: BLE001
-                    self.log(f"incident sources: {r.a.label}: close: {type(e).__name__}: {e}")
+                    self.log(f"incident sources: {r.a.label}: close: {type(e).__name__}")
 
     def state(self) -> list[dict]:
         """The station page's rows: each adapter, its health as last sent and how many events it has seen."""

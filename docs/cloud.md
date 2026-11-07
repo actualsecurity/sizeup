@@ -774,13 +774,20 @@ Incidents come in from ranked sources. The interface is in `sizeup/sources/__ini
   pill shows it (`County feed · backing off · Paging primary`), and so does Settings > Health.
 - **Matching:** only an open incident (queued, pending or active) created within 20 min, with nothing on it from the
   same source.
+  - Locations are first cut to their street part. A named place after `:` or `@`, `;…`, `(…)`, `[…]`, the town after a
+    comma or after the street's suffix, `UPPER_SNAKE` town tokens, floors and units are dropped, and a range becomes
+    its first number. For example, `12 EXAMPLE AVE   : @SAMPLE SCHOOL - EXAMPLE VILLAGE EXAMPLE_TOWN` becomes
+    `12 EXAMPLE AVE`.
   - When both sides have a location, they must be the same place: house number and street, direction and suffix. An
     intersection never matches a numbered address. Shared units never override two different places.
-  - A unit in common (cleared assignments don't count) is enough only when one side has no location.
+  - A unit in common (cleared assignments don't count) is enough only when neither side has a location, or only the
+    incoming report has one. A report with no location never attaches to an incident that has one.
+  - Two incidents in the window that share units but may not be joined are noted "Possibly the same as #N" on both,
+    so a duplicate is never silent.
 - **Attaching:** a page attaches only to an incident a feed has. A feed event attaches only to a queued incident or
   one a feed made. Any other match makes its own incident, noted "Possibly the same as #N" on both.
-- **Authority:** the best-ranked feed's type and location apply while the incident is queued, or to a field no person
-  has edited. Otherwise there is a timeline note, and the incident view offers "Use County feed's type / location"
+- **Authority:** the best-ranked feed's type and location apply to a field no person has edited, whatever the
+  incident's status. Otherwise there is a timeline note, and the incident view offers "Use County feed's type / location"
   (`POST /api/cad/incident/<id>/feed-use`). A pin a person set is never cleared. Every change and comment from a feed
   goes on the timeline (kind `feed`).
 - **Merges and extras:**
@@ -790,7 +797,8 @@ Incidents come in from ranked sources. The interface is in `sizeup/sources/__ini
   - An adapter's `extra` fields go on the timeline. The incident shows the jurisdiction, run numbers and each
     group's units.
 - **Poll now and reset:** paging tones of ours, a radio pre-alert or the phone ring wakes each adapter. The adapter's
-  own thread then calls its optional `poll_now(reason)` and polls; `trigger()` never runs adapter code. A remote reset
+  own thread then calls its optional `poll_now(reason)` and polls; `trigger()` never runs adapter code. Triggers are
+  ignored while an adapter is failing or its health isn't `ok`, so during an outage its own back-off stands. A remote reset
   (#305) is queued in the runner's `Resets` and runs `reset()` on the adapter's own thread before its next poll.
 - **Station only:** the hub refuses to load or run adapters (`HubRefused`). It only applies the station's forwarded
   events. The hub only ever sees an exception's type, never its text.
