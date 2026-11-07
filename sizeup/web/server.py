@@ -454,13 +454,22 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
             if "Cache-Control" not in h:
                 self.send_header("Cache-Control", "no-store")
             self.end_headers()
-            if code == 304:
-                return
-            if self.command != "HEAD":
-                try:
-                    self.wfile.write(body)
-                except (BrokenPipeError, ConnectionResetError, TimeoutError):
-                    self.close_connection = True   # the client left first (a station restart, a closed tab)
+            streamed = not isinstance(body, (bytes, bytearray, memoryview))   # sizeup/attachments.py Stream (#323)
+            try:
+                if code == 304:
+                    return
+                if self.command != "HEAD":
+                    try:
+                        if streamed:
+                            for piece in body:
+                                self.wfile.write(piece)
+                        else:
+                            self.wfile.write(body)
+                    except (BrokenPipeError, ConnectionResetError, TimeoutError):
+                        self.close_connection = True   # the client left first (a station restart, a closed tab)
+            finally:
+                if streamed:
+                    body.close()
 
         def _data(self, path: str, query: str, resp: tuple) -> tuple:
             """A data answer with the caching DATA_MAX_AGE gives its path (an ETag from the body, unless the

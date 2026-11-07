@@ -1000,6 +1000,34 @@ storing or recording; it allows us to "redistribute, enhance, repackage, and add
 asks that NYSDOT be kept informed of material changes in use. The Thruway's disclaimer: no resale or
 redistribution for profit. Recordings stay department-internal.
 
+**Since #322/#323** we record our area's cameras 24/7 (a 24 h window) and keep **incident clips** for a year (below).
+That is a material change in use: tell 511NY's program manager (24/7 recording of the area's cameras, saved clips
+attached to incidents, kept a year, department-internal, never redistributed).
+
+#### Shared storage: 24 h of our area (#322)
+
+With `dvr_dir` on storage shared between tasks (EFS: `[roads] dvr_shared = "auto"` sees an `nfs4` mount there;
+`true` / `false` force it), the recording outlives a deploy, so:
+
+- every camera with video inside `[roads] dvr_area` is recorded 24/7 (reason `always`), on top of the on-demand ones.
+  The default area (`sizeup/config.py` `DVR_AREA`): Port Chester, Rye Brook and the I-95 / I-287 / Hutch approaches out
+  to Rye, Harrison and the Greenwich line (a polygon; a bbox `[w, s, e, n]` works too; `[]`: none). **19 cameras** in
+  the camera lists captured 2026-11-07 (`tests/test_dvr_shared.py`'s replay test checks it);
+- the window is `dvr_shared_window_min` (1440), the cap `dvr_shared_max_gb` (80) over `dvr_shared_max_cameras` (32),
+  and the workers scale with it (up to 24). Measured on the captured segments: ~190 kbit/s, **~2.0 GB per camera per
+  day**: ~40 GB for the area, ~65 GB at the cap;
+- only the lease holder writes or deletes (the app's fence, `sizeup/fence.py`); the standby's warm app never makes a
+  DVR. A new leader reads the index in the background (the file names carry the size, so no stat per file over NFS;
+  recording waits for it), then appends after each camera's last segment. For 5 min after the start it lists the
+  folders again every 30 s, taking in what the draining leader wrote after the first look and dropping what it
+  evicted; another writer's temp file is left alone unless it is 10 min old;
+- without shared storage nothing changes: local disk, 2 h, the on-demand cameras only.
+
+The infra is sizeup-aws `14-dvr-storage.sh` (EFS, encrypted, General Purpose, Elastic throughput; mount targets in the
+service's subnets; NFS only from the task's security group; an access point `/dvr` as the container's user; a file
+system policy: TLS, the task role through the access point only). The task definition then mounts it at `/data/dvr`
+(the default `dvr_dir`): that change deploys only after the script has run.
+
 ### Camera wall (#125)
 
 > "on the monitor page and the overview page, can we add a way to look at all of the cameras in our
@@ -1943,6 +1971,36 @@ station = "KHPN"
 tide_station = "8518091"         # Rye Beach (predictions)
 gauge_station = "8516945"        # Kings Point (the gauge)
 ```
+
+## Incident attachments (#323)
+
+`sizeup/attachments.py`: what is attached to an incident is kept the same way whatever its kind, in a private S3
+bucket (`SIZEUP_ATTACHMENTS_BUCKET`, sizeup-aws `14-dvr-storage.sh`: Block Public Access, SSE-S3, versioning, TLS
+only, Object Lock in governance mode for 365 days, lifecycle: expire after 365 days), under
+`attachments/<incident id>/<attachment id>/`, for a year:
+
+- **camera**: a range of a DVR recording (at most 60 min, within what is recorded), saved by a dispatcher or admin
+  (`POST /api/cad/cameras/<id>/dvr/clip {from, to, incident_id, note}`): the recorded segments concatenated as they
+  are (no re-encode) into parts of at most 8 MB, then `manifest.json` (camera, range, incident, who and when, the
+  note, every segment's place in the parts, every object's sha256). Uploaded in the background (two at a time).
+- **radio**: every transmission linked to an incident (by hand or by the auto-linking) 5 min after it ended: its
+  `audio.wav`, `transmission.json` (transcript and the alternative one, talker, radio ID, rig, channel, talkgroup)
+  and `manifest.json`. Once per incident and transmission (a deleted one is never copied again; a failed one is
+  tried again, at most 5 times); kept a year whatever `audio.sqlite`'s retention.
+
+Every PUT has SSE, Content-MD5 and the SHA-256 checksum. The CAD store has the record (`attachments`: kind, source,
+range, sha256 of every object, who and when, note, status) and the audit (`attachment_audit`: attach, view,
+download, export, delete, failed; never pruned). Views, downloads and exports are also in the person's activity.
+
+Through the hub only (behind Access; no share links, no presigned URLs): `GET /api/cad/incident/<id>/attachments`
+(also in the incident's own GET), `GET /api/cad/attachments/<id>/index.m3u8` (a camera clip as a VOD playlist; its
+segments are byte ranges of the parts), `.../audio.wav`, `.../download` (one `.ts`, streamed; or the `.wav`),
+`GET /api/cad/incident/<id>/export.zip` (every object, with `manifest.json`: each file's sha256 checked against the
+one recorded when it was attached). Anyone signed in views; dispatchers and admins save clips; **admins delete**
+(`POST /api/cad/attachments/<id>/delete`): the objects get a delete marker (with Object Lock the versions stay
+hidden until their year is up; a person with `s3:BypassGovernanceRetention` can remove them sooner), the row stays
+"deleted" and the audit keeps what was deleted with every sha256. Only the lease holder writes. Without the bucket:
+"Incident attachments not configured", nothing copied, the lists read empty.
 
 ## The hub's storage
 

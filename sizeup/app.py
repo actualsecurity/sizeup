@@ -552,13 +552,26 @@ class App:
         self.cad.camera_area = self.roads.settings_rows
         # The camera DVR (#277, sizeup/dvr.py): live cameras' segments on this task's disk, on demand (the always list,
         # pins, an open event's cameras, the ones watched); the pins in the CAD store so a deploy keeps them.
+        # On shared storage (#322: EFS mounted at the DVR's folder, or [roads] dvr_shared = true) the recording outlives a
+        # deploy: the area's cameras 24/7, a 24 h window, and only the lease holder writes (self.fence). This is the
+        # leader's app: the standby's warm app (prewarm) never gets here.
         if cfg.roads_dvr and cfg.roads_enabled:
-            from sizeup.dvr import Dvr
+            from sizeup.dvr import WORKERS, MAX_WORKERS, Dvr, shared_mount
             state = Path(cfg.cad_db).parent if cfg.cad_db else Path(".")
-            self.roads.dvr = Dvr(self.roads, Path(cfg.roads_dvr_dir) if cfg.roads_dvr_dir else state / "dvr",
-                                 window_s=cfg.roads_dvr_window_s, max_bytes=cfg.roads_dvr_max_bytes,
+            root = Path(cfg.roads_dvr_dir) if cfg.roads_dvr_dir else state / "dvr"
+            fs = shared_mount(root) if cfg.roads_dvr_shared == "auto" else ""
+            shared = cfg.roads_dvr_shared == "on" or bool(fs)
+            if shared:
+                log(f"dvr: {root} is shared storage ({fs or 'dvr_shared = true'}): the area's cameras, "
+                    f"{cfg.roads_dvr_shared_window_s / 3600:.0f} h, only while this task holds the lease")
+            cams = cfg.roads_dvr_shared_max_cameras if shared else cfg.roads_dvr_max_cameras
+            self.roads.dvr = Dvr(self.roads, root,
+                                 window_s=cfg.roads_dvr_shared_window_s if shared else cfg.roads_dvr_window_s,
+                                 max_bytes=cfg.roads_dvr_shared_max_bytes if shared else cfg.roads_dvr_max_bytes,
                                  near_m=cfg.roads_dvr_near_m, always=cfg.roads_dvr_always, linger_s=cfg.roads_dvr_linger_s,
-                                 max_cameras=cfg.roads_dvr_max_cameras, log=log)
+                                 max_cameras=cams, log=log, area=cfg.roads_dvr_area if shared else (), shared=shared,
+                                 workers=min(MAX_WORKERS, max(WORKERS, cams // 2)) if shared else WORKERS,
+                                 may_write=self.fence.ok if self.fence is not None else None)
             store = self.cad.store
             self.roads.dvr.incidents = lambda: store.q(
                 "SELECT lat, lon, address FROM incidents WHERE status IN ('queued', 'pending', 'active') "
@@ -566,6 +579,16 @@ class App:
             self.roads.dvr.load_pins = lambda: json.loads(store.meta_get("dvr_pins") or "[]")
             self.roads.dvr.save_pins = lambda pins: store.meta_put("dvr_pins", json.dumps(pins))
             self.cad.dvr_pin = self.roads.dvr.pin
+        # Incident attachments (#323, sizeup/attachments.py): camera clips saved from the DVR and every transmission
+        # linked to an event, copied to the private S3 bucket (SIZEUP_ATTACHMENTS_BUCKET) and kept a year; only the
+        # lease holder writes. Without the bucket: "not configured", nothing copied.
+        from sizeup.attachments import Attachments
+        self.attachments = Attachments.from_env(self.cad.store, log=log,
+                                                may_write=self.fence.ok if self.fence is not None else None)
+        self.attachments.dvr = lambda: self.roads.dvr
+        self.attachments.camera = self.roads.camera
+        self.attachments.audio = self.clip
+        self.cad.attachments = self.attachments
         # Road projects & closures (sizeup/roadprojects.py, #185): the Thruway's and 511NY's roadwork through roads,
         # the villages' road notices (placed by the gazetteer, or listed), any WZDx feed configured; read while someone looks.
         self.roadwork = prov["roadwork"]
@@ -2963,6 +2986,7 @@ class App:
             self.tts.start()
         self.stt.start()
         threading.Thread(target=self._janitor, name="janitor", daemon=True).start()
+        self.attachments.start()                  # linked transmissions copied to the attachments bucket (#323)
         threading.Thread(target=self.cad.place_index, name="places", daemon=True).start()   # built before the first "@"
         threading.Thread(target=self._watch_fm, name="talking", daemon=True).start()
         if self.shared:
@@ -3106,6 +3130,7 @@ class App:
 
     def stop(self) -> None:
         self._stopping.set()
+        self.attachments.stop()
         for r in self.receivers:
             r.stop()
         for page in self.pagehold.flush():   # pages still in their continuation window: as they are

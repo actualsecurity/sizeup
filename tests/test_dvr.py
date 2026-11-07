@@ -55,7 +55,7 @@ def test_a_camera_someone_opens_is_recorded_from_the_same_segments_the_viewer_ge
     assert st["recording"] and st["why"] == ["open"] and st["segments"] == 3 and st["to"] == clock.t
     assert st["to"] - st["from"] == pytest.approx(12.0) and st["gaps"] == []
     files = sorted(p.name for p in (tmp_path / "dvr" / CAM).iterdir())
-    assert len(files) == 3 and all(re.fullmatch(r"\d+_\d{13}_4000\.ts", x) for x in files)
+    assert len(files) == 3 and all(re.fullmatch(r"\d+_\d{13}_4000_\d+\.ts", x) for x in files)
     # what is kept is what the viewer was served: checked and repaired
     seg = r.get(f"/api/cad/cameras/{CAM}/dvr/1226.ts", "")
     assert seg[0] == 200 and seg[2] == "video/MP2T" and seg[1] == r._segments[f"{CAM}/media_w1_1226.ts"]["body"]
