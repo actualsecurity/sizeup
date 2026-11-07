@@ -2929,17 +2929,20 @@ class App:
     def start_sources(self) -> None:
         """The incident sources (#297): the CAD's ticker (held reports, promotion) and this machine's adapters."""
         self.cad.sources.start()
-        if self.cfg.cloud_role == "hub":
+        if self.cfg.cloud_role == "hub":         # station only: the hub gets their events through the outbox
             return
-        from sizeup.sources.runner import SourceRunner, context_for, load_adapters
+        from sizeup.sources.runner import HubRefused, SourceRunner, context_for, load_adapters
         root = Path(self.cfg.cad_db).parent if self.cfg.cad_db else Path(".")
+        role = self.cfg.cloud_role or ""
         try:
-            adapters = load_adapters(context_for(root, log), log=log)
+            adapters = load_adapters(context_for(root, log), log=log, role=role)
+        except HubRefused:
+            raise
         except Exception as e:  # noqa: BLE001 - never in the way of the station starting
             log(f"incident sources: not loaded: {type(e).__name__}: {e}")
             return
         if adapters:
-            self.sources_runner = SourceRunner(adapters, self._source_out, log=log).start()
+            self.sources_runner = SourceRunner(adapters, self._source_out, log=log, role=role).start()
 
     def _source_out(self, kind: str, data: dict) -> None:
         """An adapter's event or health: to the hub (a station forwarding), else the CAD here."""

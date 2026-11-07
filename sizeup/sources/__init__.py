@@ -5,6 +5,10 @@ paging decoder is the backup and ranks below every feed (sizeup/cad/sources.py P
 radio phrases announcing a page) never make an incident. The adapters live OUTSIDE this repo (a private package installed
 on the station); this module is everything they are built against. Standard library only.
 
+Station only: adapters are discovered, imported and run on the station (or all-in-one), never on the hub. The hub refuses
+with a hard check (sizeup/sources/runner.py require_station: HubRefused) before it looks at any entry point or module; it
+only receives the station's forwarded events through the outbox, and the adapters' credentials never leave the station.
+
 Discovery (sizeup/sources/runner.py load_adapters), both at once, each factory called once at start:
 
     entry point     group "sizeup.incident_sources" in the adapter package's metadata, e.g. in its pyproject.toml:

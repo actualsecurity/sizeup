@@ -53,9 +53,22 @@ def _factories(env: dict | None = None) -> list[tuple[str, Callable]]:
     return out
 
 
+class HubRefused(RuntimeError):
+    """Adapters run on the station only: the hub never discovers, imports or runs one (it gets their events through the
+    station's outbox, and the adapters' credentials never reach it)."""
+
+
+def require_station(role: str) -> None:
+    """HubRefused on the hub ([cloud] role = "hub"); a station, or all-in-one (the station's machine with no hub)."""
+    if (role or "").strip().lower() == "hub":
+        raise HubRefused("incident-source adapters run on the station only, never on the hub")
+
+
 def load_adapters(ctx_for: Callable[[str], SourceContext], log: Callable[[str], None] = print,
-                  env: dict | None = None) -> list[Adapter]:
-    """Every adapter the station has, checked; one that can't load is logged and left out (never fatal)."""
+                  env: dict | None = None, role: str = "station") -> list[Adapter]:
+    """Every adapter the station has, checked; one that can't load is logged and left out (never fatal). HubRefused
+    on the hub, before any entry point or module is looked at."""
+    require_station(role)
     found: list[Adapter] = []
     seen: set[str] = set()
     for where, load in _factories(env):
@@ -113,7 +126,8 @@ class _Run:
 
 class SourceRunner:
     def __init__(self, adapters: Iterable[Adapter], sink: Callable[[str, dict], None], log: Callable[[str], None] = print,
-                 clock: Callable[[], float] = time.time):
+                 clock: Callable[[], float] = time.time, role: str = "station"):
+        require_station(role)
         self.runs = [_Run(a) for a in adapters]
         self.sink, self.log, self.clock = sink, log, clock
         self._stop = threading.Event()

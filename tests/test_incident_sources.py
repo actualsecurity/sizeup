@@ -15,7 +15,7 @@ from sizeup.cad.sources import HOLD_S, PAGING, REPORT_STALE_S, norm_unit, same_p
 from sizeup.dispatch import parse
 from sizeup.incidents import IncidentStore
 from sizeup.sources import FeedEvent, Health, SourceError
-from sizeup.sources.runner import HEARTBEAT_S, SourceRunner, check_adapter, context_for, load_adapters
+from sizeup.sources.runner import HEARTBEAT_S, HubRefused, SourceRunner, check_adapter, context_for, load_adapters
 from tests.fake_feed import FakeFeed
 from tests.test_cad import local, make_cad
 
@@ -435,3 +435,14 @@ def test_a_stations_adapter_reaches_the_hub_through_the_outbox(tmp_path):
     finally:
         st.link.stop()
         hub.close()
+
+
+def test_adapters_are_never_loaded_or_run_on_the_hub(tmp_path, monkeypatch):
+    looked = []
+    monkeypatch.setattr("importlib.metadata.entry_points", lambda group: looked.append(group) or [])
+    with pytest.raises(HubRefused):
+        load_adapters(context_for(tmp_path, print), env={"SIZEUP_INCIDENT_SOURCES": "tests.fake_feed:make"}, role="hub")
+    with pytest.raises(HubRefused):
+        SourceRunner([FakeFeed()], lambda k, d: None, role="hub")
+    assert looked == []                                   # refused before discovery
+    assert load_adapters(context_for(tmp_path, print), env={}, role="") == []    # all-in-one: allowed
