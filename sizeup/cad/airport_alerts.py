@@ -545,7 +545,7 @@ def aircraft_line(x: dict) -> str:
     elif x.get("alt") == "ground":
         parts.append("GND")
     if x.get("phase"):
-        parts.append(f"{x['phase']}" + (f" {x['rwy']}" if x.get("rwy") else ""))
+        parts.append(("near HPN" if x["phase"] == "near" else f"{x['phase']}") + (f" {x['rwy']}" if x.get("rwy") else ""))
     if x.get("hex") is None and x.get("spoken"):
         parts.append("heard, not on ADS-B")
     elif x.get("match"):

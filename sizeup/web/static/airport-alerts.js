@@ -44,7 +44,7 @@ window.AirportAlerts = (() => {
     if (x.type || x.model) parts[0] += ` (${x.type || x.model})`;
     if (x.dist !== undefined && x.dist !== null) parts.push(`${x.dist} NM`);
     if (typeof x.alt === "number") parts.push(`${x.alt.toLocaleString()} ft`);
-    if (x.phase) parts.push(x.phase + (x.rwy ? ` ${x.rwy}` : ""));
+    if (x.phase) parts.push((x.phase === "near" ? "near HPN" : x.phase) + (x.rwy ? ` ${x.rwy}` : ""));
     parts.push(x.hex ? `ADS-B ${Math.round((x.match || 0) * 100)}%` : "heard, not on ADS-B");
     return parts.join(" · ");
   }

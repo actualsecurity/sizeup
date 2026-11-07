@@ -64,6 +64,7 @@ window.AircraftLayer = (() => {
   const PHASE = {
     arriving: { token: "--ok", text: "Arriving HPN", tag: "▼" },
     departing: { token: "--info", text: "Departing HPN", tag: "▲" },
+    near: { token: "--warn", text: "Near HPN", tag: "" },
     ground: { token: "--text-2", text: "On ground · HPN", tag: "GND" },
     low: { token: "--warn", text: "Low nearby", tag: "" },
     overflight: { token: "--dim", text: "Overflight", tag: "" },
@@ -73,6 +74,7 @@ window.AircraftLayer = (() => {
   const EMPHASIS = {
     arriving: { scale: 1.15, label: 1.0, trail: 1.3 },
     departing: { scale: 1.05, label: 1.0, trail: 1.2 },
+    near: { scale: 1.0, label: 1.0, trail: 1.1 },
     ground: { scale: 0.85, label: 0.9, trail: 0.8 },
     low: { scale: 1.0, label: 1.0, trail: 1.0 },
     // a squawk 7500 / 7600 / 7700 or its own emergency status (the hub raises the alarm and pushes): never drawn
@@ -85,7 +87,7 @@ window.AircraftLayer = (() => {
   const POS = { adsb: "ADS-B (its own GPS position)", mlat: "MLAT (located by receivers' timing)", tisb: "TIS-B (a radar position rebroadcast)",
                 adsr: "ADS-R (rebroadcast from the other band)", modes: "Mode S", adsc: "ADS-C", other: "other" };
   // #278: the caveats the box used to spell out, now behind its "i"
-  const PHASE_TIP = "Arriving / departing / low is sizeup's reading of its track (shortfinal's rules), not ATC's word.";
+  const PHASE_TIP = "Arriving / departing / near / low is sizeup's reading of its track (shortfinal's rules), not ATC's word.";
 
   function h(tag, cls, text) {
     const n = document.createElement(tag);
@@ -156,10 +158,11 @@ window.AircraftLayer = (() => {
   function callsign(a) { return a.cs || (a.hex || "").replace(/^~/, "").toUpperCase(); }
   function phaseLine(a) {
     if (a.phase === "arriving") {
-      const where = a.appr && a.appr !== "maneuvering" ? `▼ ${a.appr}` : a.rwy ? `▼ RWY ${a.rwy}` : "▼ inbound";
+      const where = a.appr ? `▼ ${a.appr}` : a.rwy ? `▼ RWY ${a.rwy}` : "▼ inbound";
       return [where, a.dist !== null && a.dist !== undefined ? `${a.dist.toFixed(1)} nm` : ""].filter(Boolean).join(" · ");
     }
     if (a.phase === "departing") return "▲ departed HPN";
+    if (a.phase === "near") return "near HPN";
     return "";
   }
 
@@ -256,7 +259,7 @@ window.AircraftLayer = (() => {
       if (!last || last[0] !== a.lon || last[1] !== a.lat) reported.push([a.lon, a.lat]);   // its latest fix
       looks.set(a.hex, { kind, scale: size * em.scale, color: colour(a), cs: callsign(a), lscale: em.label, reported,
                          detail: [a.emerg ? a.emerg.toUpperCase() : "", phaseLine(a), basics].filter(Boolean).join("\n"),
-                         rank: (a.emerg ? 0 : 10) + ({ arriving: 1, departing: 2, ground: 3, low: 4 }[a.phase] || 5),
+                         rank: (a.emerg ? 0 : 10) + ({ arriving: 1, departing: 2, near: 3, ground: 4, low: 5 }[a.phase] || 6),
                          width: 2 * Math.min(em.trail, 1.2), trailOpacity: Math.min(0.8, 0.45 * em.trail) });
     }
     return looks;
@@ -476,7 +479,7 @@ window.AircraftLayer = (() => {
       const fixAt = (d.fetched || d.at || 0) - (a.age || 0);
       if (stale) lines.push(h("div", "warn", `Stale · ${hms(fixAt)}`));
       const ph = PHASE[a.phase] || PHASE.low;
-      const where = a.phase !== "arriving" ? "" : a.appr === "maneuvering" ? "maneuvering" : a.appr ? a.appr : a.rwy ? `RWY ${a.rwy}` : "";
+      const where = a.phase !== "arriving" ? "" : a.appr ? a.appr : a.rwy ? `RWY ${a.rwy}` : "";
       lines.push([ph.text, where, has(a.dist) ? `${a.dist.toFixed(1)} nm` : "", has(a.eta) ? `ETA ${eta(a.eta)}` : ""]
         .filter(Boolean).join(" · "));
       const vs = !has(a.vr) || a.alt === "ground" ? "" : Math.abs(a.vr) <= 300 ? "level"
@@ -559,7 +562,7 @@ window.AircraftLayer = (() => {
       if (!d.configured || d.note) { box.append(h("div", "ml-note", cap(d.note) || "Not configured")); return box; }
       const list = d.aircraft || [];
       for (const a of list.filter((x) => x.emerg)) box.append(h("div", "ml-note ac-emerg", `${callsign(a)}: ${a.emerg}`));
-      const ours = list.filter((a) => ["arriving", "departing", "ground"].includes(a.phase)).slice(0, 8);
+      const ours = list.filter((a) => ["arriving", "departing", "near", "ground"].includes(a.phase)).slice(0, 8);
       if (ours.length) {
         const rows = h("div", "ac-list");
         for (const a of ours) {

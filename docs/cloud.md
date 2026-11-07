@@ -286,6 +286,18 @@ and the alert history of the last 24 h (started, recovered, how long, where, whe
 `GET /api/cad/health`: admins only (`sizeup/cad/api.py` `ADMIN_READS`; a 403 for a dispatcher or a viewer),
 polled every 5 s while the tab is open and not otherwise.
 
+**The hub's own errors (#285, `sizeup/errwatch.py`):** the hub reads its own log (stdout and stderr, queued and read
+on its own thread): error lines ("aircraft: OverflowError: ...", "aws transcribe ...: Connection: BlockingIOError: ...",
+"ERROR", "error:") and tracebacks (a chained one once). Each is counted under a signature of (source, type), both from
+fixed lists: the source is a sizeup module or a known log prefix (else "hub"), the type a known exception name (else
+"error"), so nothing a request or a message carries can be named in a notice. One signature more than 10 times in
+5 min, or more than 100 error lines of any kind in 5 min, pushes one short notice to the status topic, e.g. "Hub
+errors: aircraft OverflowError ×1,480 in 25 min · since 16:13": at most one per signature (and for the total) an
+hour, then "Hub errors back to normal" once it has been at or under its threshold 15 minutes. What was pushed is kept
+in `hub.sqlite` (meta "errwatch"), so a redeploy doesn't push a running fault again. Settings → System → **Hub error
+alerts** (admins, the hub): on / off and the two numbers; Settings → Health: **Hub errors**, the rate and the top
+signatures with their last message (admins only). The access log (`http ...` lines) is not counted.
+
 ### The alert and status topics (ntfy)
 
 Pushes go to **topics of our own** on ntfy.sh, never Tapout's: `pcfd-phone-prealert` pages the fire
@@ -299,7 +311,7 @@ Two kinds, two topics (`sizeup/notify.py` `route()`):
 | Kind | Setting (hub: SSM) | What |
 |---|---|---|
 | alerts | `[alerts] ntfy_topic` / `SIZEUP_ALERT_TOPIC` (`/sizeup-hub/alert-topic`) | Emergency buttons (P25, MDC, FleetSync), the fireground mayday, aircraft emergency squawks; their acknowledgements, all clears and "Ended" notices |
-| status | `[alerts] status_topic` / `SIZEUP_STATUS_TOPIC` (`/sizeup-hub/status-topic`) | Station health (silent, behind, update failed, dongle gone, job / whisper / trunk-recorder down, stuck channel, outbox, disk, whisper queue), "Amazon Transcribe failing", its monthly budget at 80 % / 100 %, and every recovery notice |
+| status | `[alerts] status_topic` / `SIZEUP_STATUS_TOPIC` (`/sizeup-hub/status-topic`) | Station health (silent, behind, update failed, dongle gone, job / whisper / trunk-recorder down, stuck channel, outbox, disk, whisper queue), "Amazon Transcribe failing", its monthly budget at 80 % / 100 %, the hub's own error spikes (#285), and every recovery notice |
 
 Only one of the two set: both kinds go to it. The app logs at startup where each kind goes
 ("notify: alerts → topic set (SSM), status → topic set (SSM)"), never the names.

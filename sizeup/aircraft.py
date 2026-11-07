@@ -16,7 +16,11 @@ What comes from shortfinal (the PCFD firehouse ADS-B + KHPN display; its branch 
                   ground / departing and still climbing out), ground (on the surface at HPN), low (below the
                   ceiling inside the radius: LGA arrivals over Port Chester, helicopters), overflight, and
                   other_ground (on the surface somewhere else). Overflights and other fields' ground traffic are
-                  not drawn; an emergency is drawn whatever its phase.
+                  not drawn; an emergency is drawn whatever its phase. That is one snapshot's reading; what is shown
+                  is confirmed over the recent reports (PhaseMemory, #279): the vertical rate, the distance to the
+                  field closing or opening, and whether it was on the field lately. Lining up with a runway or an
+                  approach never decides arriving vs departing alone (a departure off 34 shares the 34 final's
+                  heading), and when the signals disagree it is "near" (near HPN), not a guess.
   the approaches  shortfinal's Procedures.match() on the FAA CIFP paths already in data/airport/
                   khpn_procedures.geojson (finals and transitions, incl. the curved RNAV (RNP) Z lineups over
                   Port Chester): "ILS 34", "RNAV (RNP) Z 34" ...
@@ -445,7 +449,8 @@ class Procedures:
 # ---- what each aircraft is doing at HPN (shortfinal common/phase.py) ---------------------------------------------------
 
 ARRIVING, DEPARTING, GROUND, OTHER_GROUND, LOW, OVERFLIGHT = "arriving", "departing", "ground", "other_ground", "low", "overflight"
-SHOWN = (ARRIVING, DEPARTING, GROUND, LOW)      # drawn; an emergency is drawn whatever its phase
+NEAR = "near"                  # by HPN, arriving or departing not clear from its track (#279: PhaseMemory)
+SHOWN = (ARRIVING, DEPARTING, NEAR, GROUND, LOW)      # drawn; an emergency is drawn whatever its phase
 GROUND_RADIUS_NM = 2.0
 
 
@@ -455,7 +460,7 @@ class Phase:
     runway: str | None = None
     dist_nm: float | None = None      # to the threshold (on final / on an approach) or to the field
     eta_s: float | None = None        # distance / ground speed: an estimate
-    approach: str | None = None       # "ILS 34", or "maneuvering"
+    approach: str | None = None       # the published approach it is on: "ILS 34"
 
 
 def _eta(d: float, gs: float | None) -> float | None:
@@ -470,7 +475,7 @@ def _runway_ends():
 
 def classify(ac: Plane, procedures: Procedures | None = None, ceiling_ft: float = CEILING_FT,
              radius_nm: float = RADIUS_NM) -> Phase:
-    """One snapshot's reading, shortfinal's rules unchanged."""
+    """One snapshot's reading, shortfinal's rules unchanged. PhaseMemory.phase() confirms it from the recent reports."""
     if not ac.has_position:
         return Phase(OVERFLIGHT)
     d = nm(ARP[0], ARP[1], ac.lat, ac.lon)
@@ -545,63 +550,266 @@ def approach_phase(ac: Plane, departed_at: float | None, now: float, radius_nm: 
     return ""
 
 
-PHASE_HOLD_S = 20.0           # keep an arriving reading through brief ambiguous updates
+PHASE_HOLD_S = 20.0           # keep an arriving reading through brief ambiguous updates (not while climbing or opening)
 DEPARTED_KEEP_S = 15 * 60.0   # an HPN departure stays "departing" this long ...
 DEPARTED_MAX_FT = 18000.0     # ... while below this and inside the radius
 INBOUND_KEEP_S = 10 * 60.0    # seen arriving within this long and not landed since ...
 MANEUVER_NM = 12.0            # ... still this close ...
 MANEUVER_MAX_AGL = 5000.0     # ... this low ...
-MANEUVER_MAX_KT = 210.0       # ... and this slow: an arrival being vectored, going around, in the pattern
+MANEUVER_MAX_KT = 210.0       # ... and this slow: an arrival being vectored or going around (near, unless closing in)
+# Which way it is going (#279): a departure off 34 shares the runway's heading with an arrival on the 34 final, so the
+# runway or approach a track lines up with never says which on its own. These do:
+VS_FPM = 300.0                # climbing past +this, descending past -this; level between
+STRONG_CLIMB_FPM = 800.0      # climbing this hard and opening, never once seen descending in: not an arrival after all
+VS_FROM_ALT_S = (30.0, 60.0)  # no vertical rate reported: a least-squares slope of the altitudes over at least 30 s
+VS_FROM_ALT_FT = 200.0        # ... (Mode C reports in 100 ft steps), level unless they change by this much
+FLYING_KT = 60.0              # departing needs flight: this fast, climbing, or above its ground band (not a taxi)
+LOW_SLOW_AGL_FT = 150.0       # a helicopter, an ultralight or an unknown category is only on the ground below this:
+FIXED_WING = {"A1", "A2", "A3", "A4", "A5", "A6"}    # ... these may read on the ground up to RUNWAY_AGL_FT
+TREND_S = (15.0, 90.0)        # the distance to the field now against a report this far back (the latest such) ...
+TREND_NM = 0.15               # ... closer by more than this: closing; further: opening; else steady or not known
+TO_GO_NM = 0.05               # on a published approach: its distance to go down by this since the last reading
+HISTORY_S = 120.0             # reports kept per aircraft for the trends
+FIELD_RECENT_S = 5 * 60.0     # on the field this recently: a departure (or the pattern), unless it comes back to land
+SHORT_FINAL_NM = 1.0          # this close to a threshold, lined up: an arrival only while descending
+# On the runway: pressure altitude is not corrected for the day's altimeter setting (+/- a few hundred feet), so the
+# runway's own outline decides, not "AGL": on its centreline between the ends (with a margin), this low by the
+# uncorrected reading, moving, not climbing or descending: the takeoff roll, the landing roll, a touch-and-go.
+RUNWAY_HALF_NM = 0.05         # ~90 m either side of the centreline
+RUNWAY_MARGIN_NM = 0.15       # past either end
+RUNWAY_AGL_FT = 400.0         # by the uncorrected pressure altitude
+RUNWAY_MIN_KT = 40.0
+LANDED_KT = 50.0              # an arrival on the runway counts as down only by the ground flag or this slow ...
+RETURN_HOLD_S = 10.0          # a departure turns "near" only after it has been coming back this long
+
+
+def _flat(lat: float, lon: float) -> tuple[float, float]:
+    return ((lon - ARP[1]) * math.cos(math.radians(ARP[0])) * NM_PER_DEG_LAT, (lat - ARP[0]) * NM_PER_DEG_LAT)
+
+
+def on_runway(lat: float, lon: float) -> bool:
+    """On (or just past an end of) one of HPN's runways' centrelines."""
+    p = _flat(lat, lon)
+    for name in {r[0] for r in RUNWAY_ENDS}:
+        a, b = (_flat(r[2], r[3]) for r in RUNWAY_ENDS if r[0] == name)
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        length = math.hypot(dx, dy)
+        along = ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / length
+        lateral = abs((p[0] - a[0]) * dy - (p[1] - a[1]) * dx) / length
+        if -RUNWAY_MARGIN_NM <= along <= length + RUNWAY_MARGIN_NM and lateral <= RUNWAY_HALF_NM:
+            return True
+    return False
+
+
+def past_threshold(lat: float, lon: float, end: str | None) -> bool:
+    """Beyond runway `end`'s landing threshold, over the runway: no longer approaching it."""
+    for e, tlat, tlon, landing in _runway_ends():
+        if e == end:
+            d = nm(tlat, tlon, lat, lon)
+            off = math.radians(wrap180(bearing(tlat, tlon, lat, lon) - landing))
+            return d * math.cos(off) > 0.02 and abs(d * math.sin(off)) < 0.3
+    return False
 
 
 class PhaseMemory:
-    """shortfinal core/state.py _phase(), without its route lookups: aircraft seen leaving HPN stay departing
-    until they leave the area; an arrival turning or climbing close in is still an arrival (vectors, a go-around,
-    the pattern), not a departure."""
+    """What each aircraft is doing at HPN from its recent reports, not one snapshot (#279; shortfinal core/state.py
+    _phase(), without its route lookups, then reworked). classify() gives the snapshot's reading; this confirms it:
+
+      arriving   the reading says arriving (a published approach, lined up on a runway end, or inbound and descending),
+                 it is not climbing, and it is descending or getting closer: to the field, or along its approach
+                 (a published approach may lead away from the field before it turns in: RNAV (RNP) Z 34). Never over
+                 the runway past the threshold, nor on a short final without descending, for a first reading. Within
+                 FIELD_RECENT_S of being on the field only when descending and getting closer both (back to land).
+      departing  on the field lately (the ground at HPN, or on the runway: the takeoff roll, a touch-and-go) and not
+                 coming back; or the reading says departing (close in, low, climbing away), it is not closing, and it
+                 was not arriving lately; then it stays departing while it leaves the area.
+      near       the signals disagree (an arrival reading while climbing or opening, a departure coming back, a
+                 go-around, the pattern): "near HPN", never a guess. A departure turns near only after coming back
+                 for RETURN_HOLD_S, and turns departing again only when climbing or opening.
+    """
 
     def __init__(self, procedures: Procedures | None, ceiling_ft: float = CEILING_FT, radius_nm: float = RADIUS_NM):
         self.procedures, self.ceiling_ft, self.radius_nm = procedures, ceiling_ft, radius_nm
         self._held: dict[str, tuple[Phase, float]] = {}
         self._departed: dict[str, float] = {}
         self._inbound: dict[str, float] = {}
+        self._descended: dict[str, bool] = {}          # an arrival seen descending in (not only lined up)
+        self._on_field: dict[str, float] = {}
+        self._history: dict[str, deque] = {}           # (time, distance to the field, altitude)
+        self._to_go: dict[str, deque] = {}           # (time, approach, distance to go)
+        self._last: dict[str, str] = {}
+        self._returning: dict[str, float] = {}
 
     def forget(self, live: set[str]) -> None:
-        for memory in (self._held, self._departed, self._inbound):
+        for memory in (self._held, self._departed, self._inbound, self._descended, self._on_field, self._history,
+                       self._to_go, self._last, self._returning):
             for h in [h for h in memory if h not in live]:
                 del memory[h]
 
-    def phase(self, ac: Plane, now: float) -> Phase:
+    def _record(self, h: str, now: float, d: float, alt: float | None) -> deque:
+        hist = self._history.setdefault(h, deque())
+        if not hist or now > hist[-1][0]:
+            hist.append((now, d, alt))
+        while hist and now - hist[0][0] > HISTORY_S:
+            hist.popleft()
+        return hist
+
+    @staticmethod
+    def _trend(hist, now: float, d: float, trail=()) -> str:
+        """closing | opening | '': the distance to the field now against the latest report at least TREND_S[0] and at
+        most TREND_S[1] back (this memory's, else the track's trail, which carries only positions)."""
+        then = [(t, x) for t, x, _ in hist if TREND_S[0] <= now - t <= TREND_S[1]]
+        if not then:
+            then = [(t, nm(ARP[0], ARP[1], lat, lon)) for t, lat, lon in trail if TREND_S[0] <= now - t <= TREND_S[1]]
+        if not then:
+            return ""
+        delta = d - max(then)[1]
+        return "closing" if delta < -TREND_NM else "opening" if delta > TREND_NM else ""
+
+    @staticmethod
+    def _vrate(ac: Plane, hist, now: float) -> float | None:
+        """The reported vertical rate, else the least-squares slope of the altitude reports of the last
+        VS_FROM_ALT_S[1] (ft/min), when they span VS_FROM_ALT_S[0]: never from one 100 ft step. Level (0) unless the
+        fit changes by VS_FROM_ALT_FT over them."""
+        if ac.vertical_rate is not None:
+            return ac.vertical_rate
+        pts = [(t, a) for t, _, a in hist if a is not None and now - t <= VS_FROM_ALT_S[1]]
+        if len(pts) < 3 or pts[-1][0] - pts[0][0] < VS_FROM_ALT_S[0]:
+            return None
+        mt = sum(t for t, _ in pts) / len(pts)
+        ma = sum(a for _, a in pts) / len(pts)
+        slope = sum((t - mt) * (a - ma) for t, a in pts) / sum((t - mt) ** 2 for t, _ in pts)      # ft/s
+        return slope * 60 if abs(slope * (pts[-1][0] - pts[0][0])) >= VS_FROM_ALT_FT else 0.0
+
+    def _approaching(self, h: str, now: float, p: Phase) -> bool:
+        """Its distance to go along the same published approach is down by TO_GO_NM against the latest reading
+        TREND_S[0]..TREND_S[1] back (not the last report: a repeated position or a short step says nothing)."""
+        if not p.approach or p.dist_nm is None:
+            self._to_go.pop(h, None)
+            return False
+        q = self._to_go.setdefault(h, deque())
+        if q and q[-1][1] != p.approach:
+            q.clear()
+        if not q or now > q[-1][0]:
+            q.append((now, p.approach, p.dist_nm))
+        while q and now - q[0][0] > TREND_S[1]:
+            q.popleft()
+        then = [x for t, _, x in q if now - t >= TREND_S[0]]
+        return bool(then) and then[-1] - p.dist_nm > TO_GO_NM
+
+    def phase(self, ac: Plane, now: float, trail=()) -> Phase:
+        p = self._phase(ac, now, trail)
+        if ac.has_position:
+            self._last[ac.hex] = p.kind
+        return p
+
+    def _leaving(self, h: str, now: float, fd: float, returning: bool, climbing: bool, opening: bool,
+                 flying: bool = True) -> Phase:
+        """Departing or near for an aircraft that left HPN, with hysteresis: no flapping as it turns. Not flying (a
+        taxi, parked with no ground flag): on the ground."""
+        if not flying:
+            if fd <= GROUND_RADIUS_NM:
+                self._on_field[h] = now
+                return Phase(GROUND, dist_nm=fd)
+            return Phase(LOW, dist_nm=fd)
+        last = self._last.get(h)
+        if returning:
+            since = self._returning.setdefault(h, now)
+            if last == DEPARTING and now - since < RETURN_HOLD_S:
+                return Phase(DEPARTING, dist_nm=fd)
+            return Phase(NEAR, dist_nm=fd)
+        self._returning.pop(h, None)
+        if last == NEAR and not (climbing or opening):
+            return Phase(NEAR, dist_nm=fd)
+        self._departed[h] = now
+        return Phase(DEPARTING, dist_nm=fd)
+
+    def _phase(self, ac: Plane, now: float, trail=()) -> Phase:
         p = classify(ac, self.procedures, self.ceiling_ft, self.radius_nm)
         h = ac.hex
-        alt = ac.altitude_ft
-        d = p.dist_nm if p.dist_nm is not None else 1e9
+        if p.kind == OTHER_GROUND or not ac.has_position:
+            return p
+        fd = nm(ARP[0], ARP[1], ac.lat, ac.lon)
+        alt = ac.altitude_ft if ac.alt_baro != "ground" else None
+        hist = self._record(h, now, fd, alt)
+        trend = self._trend(hist, now, fd, trail)
+        to_go_dec = self._approaching(h, now, p)
+        was_inbound = now - self._inbound.get(h, -1e9) < INBOUND_KEEP_S
         if p.kind == GROUND:
             self._inbound.pop(h, None)          # landed: whatever it does next is a departure
-            self._departed[h] = now
-        if p.kind == ARRIVING:
-            self._held[h] = (p, now)
-            self._departed.pop(h, None)
-            self._inbound[h] = now
+            self._descended.pop(h, None)
+            self._held.pop(h, None)
+            self._on_field[h] = now
             return p
+        vr = self._vrate(ac, hist, now)
         agl = None if alt is None else alt - ELEV_FT
-        maneuvering = (now - self._inbound.get(h, -1e9) < INBOUND_KEEP_S and d <= MANEUVER_NM
-                       and (agl is None or agl < MANEUVER_MAX_AGL) and (ac.gs is None or ac.gs <= MANEUVER_MAX_KT))
+        climbing = vr is not None and vr > VS_FPM
+        descending = vr is not None and vr < -VS_FPM
+        closing, opening = trend == "closing", trend == "opening"
+        from_field = now - self._on_field.get(h, -1e9) < FIELD_RECENT_S
+        near = Phase(NEAR, dist_nm=fd)
+        # a strong climb away from an "arrival" never once seen descending in: it was a departure misread
+        if was_inbound and not self._descended.get(h) and vr is not None and vr > STRONG_CLIMB_FPM and opening:
+            self._inbound.pop(h, None)
+            self._held.pop(h, None)
+            was_inbound = False
+        if p.kind == ARRIVING and not climbing:
+            getting_closer = closing or to_go_dec
+            first = not was_inbound
+            blocked = first and p.runway is not None and (
+                past_threshold(ac.lat, ac.lon, p.runway)
+                or (p.dist_nm is not None and p.dist_nm < SHORT_FINAL_NM and not descending))
+            vetoed = opening and not p.approach        # an approach may lead away before it turns in: its to-go says
+            ok = (descending and getting_closer) if from_field else (descending or getting_closer)
+            if ok and not blocked and not vetoed:
+                self._held[h] = (p, now)
+                self._departed.pop(h, None)
+                self._inbound[h] = now
+                self._descended[h] = self._descended.get(h, False) or descending
+                self._on_field.pop(h, None)     # came back to land: what it does next is up to it
+                return p
+        runway = on_runway(ac.lat, ac.lon) and (agl is None or agl < RUNWAY_AGL_FT) and not climbing
+        if runway and was_inbound and self._descended.get(h):
+            runway = ac.gs is not None and ac.gs < LANDED_KT       # a balked landing at 50 ft is not down
+        elif runway:
+            runway = (ac.gs is None or ac.gs >= RUNWAY_MIN_KT) and not descending
+        # slow and low on the airport after landing or taking off here: taxiing, parked (no ground flag). Only with
+        # that evidence, and for a helicopter (it flies slow and low) only below LOW_SLOW_AGL_FT.
+        band = RUNWAY_AGL_FT if ac.category in FIXED_WING else LOW_SLOW_AGL_FT
+        if not runway and fd <= GROUND_RADIUS_NM and agl is not None and agl < band and ac.gs is not None \
+                and ac.gs < LANDED_KT and not climbing and (from_field or (was_inbound and self._descended.get(h))):
+            runway = True
+        if runway:                              # the takeoff roll, a landing roll, a touch-and-go, the taxiways
+            self._on_field[h] = now
+            self._inbound.pop(h, None)
+            self._descended.pop(h, None)
+            self._held.pop(h, None)
+            return Phase(GROUND, dist_nm=fd)
+        in_area = fd <= self.radius_nm and (alt is None or alt < DEPARTED_MAX_FT)
+        returning = (closing and not climbing) or (descending and not opening)   # climbing out over the runway closes too
+        flying = (ac.gs is not None and ac.gs >= FLYING_KT) or climbing or (agl is not None and agl > band)
+        if from_field and in_area:
+            return self._leaving(h, now, fd, returning, climbing, opening, flying)
+        close_in = fd <= MANEUVER_NM and (agl is None or agl < MANEUVER_MAX_AGL) and (ac.gs is None or ac.gs <= MANEUVER_MAX_KT)
+        if was_inbound:
+            if not climbing and not opening and (closing or to_go_dec):
+                self._inbound[h] = now
+                if p.kind == ARRIVING:
+                    return p
+                return Phase(ARRIVING, dist_nm=fd, eta_s=_eta(fd, ac.gs))          # vectored, level or descending in
+            held = self._held.get(h)
+            if held and now - held[1] < PHASE_HOLD_S and not climbing and not opening:
+                return Phase(held[0].kind, held[0].runway, p.dist_nm, held[0].eta_s, held[0].approach)
+            self._held.pop(h, None)
+            if close_in or p.kind in (ARRIVING, DEPARTING):
+                return near                     # a go-around, a missed approach, vectors away
+            return p
         if p.kind == DEPARTING:
-            if maneuvering:
-                return Phase(ARRIVING, dist_nm=p.dist_nm, approach="maneuvering")
-            self._departed[h] = now
-            return p
-        if p.kind not in (LOW, OVERFLIGHT):
-            return p
-        if not maneuvering and now - self._departed.get(h, -1e9) < DEPARTED_KEEP_S and d <= self.radius_nm \
-                and (alt is None or alt < DEPARTED_MAX_FT):
-            return Phase(DEPARTING, dist_nm=p.dist_nm)
-        held = self._held.get(h)
-        if held and now - held[1] < PHASE_HOLD_S:
-            return Phase(held[0].kind, held[0].runway, p.dist_nm, held[0].eta_s, held[0].approach)
-        self._held.pop(h, None)
-        if maneuvering:
-            return Phase(ARRIVING, dist_nm=p.dist_nm, approach="maneuvering")
+            return self._leaving(h, now, fd, closing, climbing, opening)
+        if p.kind == ARRIVING:
+            return near                         # lined up, but level and not closing yet, or climbing, or opening
+        if now - self._departed.get(h, -1e9) < DEPARTED_KEEP_S and in_area and p.kind in (LOW, OVERFLIGHT):
+            return self._leaving(h, now, fd, returning, climbing, opening, flying)
         return p
 
 
@@ -1774,7 +1982,7 @@ class AircraftLayer:
         for t in self.tracks.live():
             ac = t.plane
             live.add(ac.hex)
-            ph = phases[ac.hex] = self.memory.phase(ac, now)
+            ph = phases[ac.hex] = self.memory.phase(ac, now, t.trail)
             emerg = ac.emergency_text
             d = nm(ARP[0], ARP[1], ac.lat, ac.lon)
             if (ph.kind not in SHOWN and not emerg) or d > self.radius_nm * 1.5:   # the map's area, as before #260
@@ -1810,8 +2018,8 @@ class AircraftLayer:
         self.memory.forget(live)
         self.phases = phases
         self.wide = sorted(wide, key=lambda a: (a["dist"], a["hex"]))
-        order = {ARRIVING: 0, DEPARTING: 1, GROUND: 2, LOW: 3}
-        out.sort(key=lambda a: (not a["emerg"], order.get(a["phase"], 4), a["dist"] if a["dist"] is not None else 1e9, a["hex"]))
+        order = {ARRIVING: 0, DEPARTING: 1, GROUND: 2, NEAR: 3, LOW: 4}
+        out.sort(key=lambda a: (not a["emerg"], order.get(a["phase"], 5), a["dist"] if a["dist"] is not None else 1e9, a["hex"]))
         return out
 
     def receiver_status(self) -> dict | None:
