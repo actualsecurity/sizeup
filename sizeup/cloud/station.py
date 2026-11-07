@@ -218,6 +218,8 @@ class StationLink:
             ad["text"] += " · " + ", ".join(f"{h['label'] or h['source']} {h['state'] or '?'}"
                                             + (f" ({h['reason']})" if h["reason"] and h["state"] != "ok" else "")
                                             for h in ad["health"])
+        if ad.get("state") == "installed" and ad["health"]:      # installed, and the runner says how it runs
+            ad["state"] = "running" if all(h["state"] == "ok" for h in ad["health"]) else "failing"
         return ad
 
     def version(self) -> dict:

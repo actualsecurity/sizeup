@@ -44,6 +44,7 @@ from collections import deque
 from pathlib import Path
 from typing import Callable
 
+from sizeup.procenv import child_env
 from sizeup.radio import claims, trunkrecd
 from sizeup.radio.trunkrecd import (UNIT_SCRIPT, UNIT_SCRIPT_MAX, AmbiguousSource, rtl_serial,  # noqa: F401
                                     runtime_argv, unit_script_command)
@@ -262,7 +263,7 @@ class TrunkRecorder:
                 continue
             try:
                 # trunk-recorder runs ffmpeg by name for call audio: make sure Homebrew's bin is on PATH.
-                env = dict(os.environ)
+                env = child_env()
                 env["PATH"] = ":".join(["/opt/homebrew/bin", "/usr/local/bin", env.get("PATH", "")])
                 self._proc = subprocess.Popen(argv, cwd=self.workdir, stdout=subprocess.PIPE,
                                               stderr=subprocess.STDOUT, start_new_session=True, env=env)

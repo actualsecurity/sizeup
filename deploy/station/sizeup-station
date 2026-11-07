@@ -334,7 +334,8 @@ case "$cmd" in
           echo "sizeup-station adapter reset [source]" >&2
           exit 2
         fi
-        out=$(curl -sS --max-time 15 -X POST -H 'Content-Type: application/json' -d "{\"source\": \"$src\"}" \
+        out=$(curl -sS --max-time 15 -X POST -H 'Content-Type: application/json' -H 'X-Sizeup-Action: reset' \
+              -d "{\"source\": \"$src\"}" \
               "http://127.0.0.1:$(port)/api/sources/reset" 2>&1 || true)
         said=$(printf '%s' "$out" | json 'd.get("result") or "FAILED: " + d.get("error", "?")')
         echo "${said:-FAILED: no answer from the station: $out}"

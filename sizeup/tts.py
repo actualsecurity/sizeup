@@ -29,6 +29,8 @@ from typing import Callable
 
 import numpy as np
 
+from sizeup.procenv import child_env
+
 HOME = Path.home() / ".local" / "share" / "sizeup" / "tts"   # tools/setup_tts.sh
 DEFAULT_PYTHON = str(HOME / "venv" / "bin" / "python")
 SERVER = Path(__file__).with_name("tts_server.py")
@@ -240,7 +242,7 @@ class TtsService:
         try:
             logf = open(self._log_path(), "wb")
             self._proc = subprocess.Popen(self.argv, stdin=subprocess.DEVNULL, stdout=logf, stderr=subprocess.STDOUT,
-                                          start_new_session=True)
+                                          start_new_session=True, env=child_env())
             logf.close()
             self.state, self.detail = "starting", f"loading Kokoro {self.voice}"
             if self.state_path:

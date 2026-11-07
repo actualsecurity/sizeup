@@ -11,7 +11,26 @@ from sizeup.cloud.access import Identity
 from sizeup.cloud.adapters import Resets, request_reset
 from tests.test_app import wait
 from tests.test_cad import make_cad
-from tests.test_cloud import HubRun, call, hub_cfg, station, station_cfg
+import json
+import urllib.error
+import urllib.request
+
+import pytest
+
+from sizeup.cloud import adapters
+from tests.test_cloud import HubRun, hub_cfg, station, station_cfg
+
+
+def reset(url, source, headers=None):
+    """POST /api/sources/reset as the Health page does: JSON, X-Sizeup-Action: reset."""
+    h = {"Content-Type": "application/json", "X-Sizeup-Action": "reset"} if headers is None else headers
+    req = urllib.request.Request(url + "/api/sources/reset", method="POST", data=json.dumps({"source": source}).encode(),
+                                 headers=h)
+    try:
+        with urllib.request.urlopen(req, timeout=40) as r:
+            return r.status, json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read() or b"{}")
 from tests.test_roles import COREY, JULIAN, VAL, people
 
 
@@ -93,12 +112,17 @@ def test_the_hub_sends_a_sources_reset_job_and_the_station_runs_it(tmp_path):
     st.sources_runner = Runner(feed)
     try:
         assert wait(lambda: hub.app.hub.connected(), 5)
-        code, body = call(hub.url + "/api/sources/reset", "POST", {"source": "feed"}, token=None)
+        # without the header (a form or a page elsewhere): refused before anything
+        assert reset(hub.url, "feed", {"Content-Type": "application/json"})[0] == 400
+        assert reset(hub.url, "feed", {"Content-Type": "text/plain", "X-Sizeup-Action": "reset"})[0] == 400
+        code, body = reset(hub.url, "feed")
         assert code == 200 and body["result"] == "feed: reset asked (runs before its next poll)"
         assert wait(lambda: feed.resets, 3) and feed.resets == [st.sources_runner.threads["feed"]]
-        code, body = call(hub.url + "/api/sources/reset", "POST", {"source": "nope"}, token=None)
+        code, body = reset(hub.url, "feed")                     # again within 5 min: no
+        assert code == 429 and "one per 5 min" in body["error"] and len(feed.resets) == 1
+        code, body = reset(hub.url, "nope")
         assert code == 503 and "no source 'nope'" in body["error"]
-        code, body = call(hub.url + "/api/sources/reset", "POST", {"source": "Bad Id"}, token=None)
+        code, body = reset(hub.url, "Bad Id")
         assert code == 400
         # on the station itself (sizeup-station adapter reset): the same, locally
         srv_station = st.station.sources_reset({"source": "feed"})
@@ -133,3 +157,31 @@ def test_the_health_panel_has_the_reset_button_only_for_failing_sources():
     from pathlib import Path
     js = (Path(__file__).resolve().parent.parent / "sizeup" / "web" / "static" / "health.js").read_text()
     assert 'filter((x) => x.state === "failing")' in js and 'fetch("/api/sources/reset"' in js and "confirm(" in js
+
+
+def test_the_limit_is_one_per_source_per_5_min():
+    t = [0.0]
+    lim = adapters.ResetLimit(clock=lambda: t[0])
+    assert lim.allow("feed") == 0 and lim.allow("feed") == 300 and lim.allow("other") == 0
+    t[0] = 299
+    assert lim.allow("feed") > 0
+    t[0] = 301
+    assert lim.allow("feed") == 0
+
+
+def test_against_the_real_source_runner():
+    """Once #297 (PR #304) is on main: its SourceRunner runs a reset on the adapter's own thread (Resets.run_due)."""
+    runner = pytest.importorskip("sizeup.sources.runner")
+    if not hasattr(runner.SourceRunner, "__init__") or "resets" not in runner.SourceRunner.__init__.__code__.co_names:
+        pytest.skip("#304's SourceRunner has no Resets yet")
+    from sizeup.sources import Health
+    feed = Feed()
+    feed.poll = lambda: []
+    feed.health = lambda: Health("ok")
+    sent = []
+    r = runner.SourceRunner([feed], lambda kind, data: sent.append(kind), log=lambda m: None).start()
+    try:
+        assert request_reset(r, "feed", "x")["ok"]
+        assert wait(lambda: feed.resets, 10) and feed.resets[0] != threading.get_ident()
+    finally:
+        r.stop()

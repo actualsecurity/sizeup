@@ -155,6 +155,7 @@ class Config:
     # [cloud] (sizeup/cloud/, docs/cloud.md): "" = all-in-one; "hub" (the cloud copy, no radios) or
     # "station" (the Mac with the SDRs, forwarding to the hub).
     cloud_role: str = ""
+    adapter_env: tuple = ()           # [adapter] env (#301): the adapter's credential names, never in a child's environment
     cloud_hub_url: str = ""           # station: the hub's https base URL
     cloud_token: str = ""             # both: the station's bearer token (env SIZEUP_STATION_TOKEN wins)
     cloud_access_id: str = ""         # station: Cloudflare Access service token (env SIZEUP_ACCESS_CLIENT_ID / _SECRET)
@@ -959,13 +960,14 @@ def _stt_aws(stt: dict) -> dict:
 ADAPTER_KEYS = {"repo", "ref", "env"}
 
 
-def _adapter(data: dict) -> None:
+def _adapter(data: dict) -> tuple:
     a = _take(data.get("adapter", {}), "adapter", ADAPTER_KEYS)
     if not isinstance(a.get("repo", ""), str) or not isinstance(a.get("ref", ""), str):
         raise ConfigError("adapter.repo / adapter.ref: text (sudo sizeup-station adapter setup)")
     env = a.get("env", [])
     if not isinstance(env, list) or not all(isinstance(x, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", x) for x in env):
         raise ConfigError('adapter.env: a list of variable names, e.g. ["FEED_USER", "FEED_PASS"]')
+    return tuple(env)
 
 
 def load(path: str | Path) -> Config:
@@ -978,7 +980,7 @@ def load(path: str | Path) -> Config:
     _take(data, "config", {"station", "web", "radio", "tones", "stt", "p25", "mdc", "units", "storage", "map",
                            "cad", "dispatch", "cloud", "prealert", "roads", "roadwork", "gis", "trains", "weather", "alerts",
                            "aircraft", "geo", "atc", "adapter"})
-    _adapter(data)
+    adapter_env = _adapter(data)
     st = _take(data.get("station", {}), "station", {"id", "name", "auto_update", "lat", "lon"})
     if not isinstance(st.get("auto_update", True), bool):
         raise ConfigError("station.auto_update: true or false")
@@ -1173,6 +1175,7 @@ def load(path: str | Path) -> Config:
     if d_region and not re.fullmatch(r"[a-z]{2}(-[a-z]+)+-\d", d_region):
         raise ConfigError('dispatch.polly_region: an AWS region ("us-east-1"), or "" for AWS_REGION')
     return Config(
+        adapter_env=adapter_env,
         station_id=st.get("id", "pcfd"), station_name=st.get("name", "Port Chester FD"),
         station_auto_update=st.get("auto_update", True), station_ll=station_ll,
         host=web.get("host", "127.0.0.1"), port=int(web.get("port", 8090)),

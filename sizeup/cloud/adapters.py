@@ -39,7 +39,10 @@ GROUP = "sizeup.incident_sources"         # = sizeup.sources.ENTRY_POINT_GROUP a
 
 SOURCE_ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")      # = sizeup.sources.SOURCE_ID
 
-__all__ = ["GROUP", "HubRefused", "Resets", "SOURCE_ID", "discover", "hub_guard", "request_reset", "require_station"]
+from sizeup.procenv import credential  # noqa: E402,F401 - an adapter's credentials: credential("FEED_USER")
+
+__all__ = ["GROUP", "HubRefused", "Resets", "SOURCE_ID", "credential", "discover", "hub_guard", "request_reset",
+           "require_station"]
 
 
 def discover(role, entry_points: Callable | None = None) -> list[str]:
@@ -133,3 +136,26 @@ def request_reset(runner, source: str, by: str = "", log: Callable[[str], None] 
         out.append(f"{src}: reset asked (runs before its next poll)")
     log(f"incident sources: reset of {source or 'all'} asked by {by or 'someone'}: {'; '.join(out)}")
     return {"ok": True, "result": "; ".join(out)}
+
+
+RESET_EVERY_S = 300.0
+
+
+class ResetLimit:
+    """One reset per source per RESET_EVERY_S (each server: the hub's, the station's): a shared account isn't hammered."""
+
+    def __init__(self, every_s: float = RESET_EVERY_S, clock: Callable[[], float] | None = None):
+        import time
+        self.every_s, self.clock = every_s, clock or time.time
+        self._at: dict[str, float] = {}
+        self._lock = threading.Lock()
+
+    def allow(self, source: str) -> float:
+        """0 = go (and counted); else the seconds until the next one may."""
+        now = self.clock()
+        with self._lock:
+            last = self._at.get(source or "*")
+            if last is not None and now - last < self.every_s:
+                return self.every_s - (now - last)
+            self._at[source or "*"] = now
+        return 0.0

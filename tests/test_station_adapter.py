@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tomllib
 import venv
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -68,7 +69,16 @@ class AdapterUpdater(FakeUpdater):
         self.p.known_hosts = tmp / "etc" / "known_hosts"
         self.p.adapter_key.parent.mkdir(exist_ok=True)
         self.p.config.write_text('[station]\nid = "test"\n')
+        self.p.credentials = tmp / "etc" / "credentials"
+        self.p.dropin = tmp / "systemd" / "sizeup-station.service.d" / "adapter-credentials.conf"
         self.pips: list[tuple] = []
+        self.builds: list[str] = []
+        self.wheel_fail = self.pip_fail = False
+        self.extra_files: dict[str, str] = {}
+        self.systemctls: list[tuple] = []
+
+    def systemctl(self, *args):
+        self.systemctls.append(args)
 
     def make_release(self, name, build, builds=""):
         super().make_release(name, build, builds)
@@ -76,19 +86,35 @@ class AdapterUpdater(FakeUpdater):
         if not v.exists():
             venv.create(v, with_pip=False, symlinks=True)
 
-    def pip_install(self, rel, src, dist, drop):
-        self.pips.append(("install", rel.name, dist, tuple(drop)))
-        site = rel / "venv" / SITE
-        self.pip_uninstall(rel, list(drop))
+    def build_wheels(self, rel, src, out):
+        """pip wheel, faked: the package and its dist-info zipped as a wheel (no build backend, no network)."""
+        self.builds.append(src.name)
+        if self.wheel_fail:
+            raise StepError("adapter: wheel build failed (exit 1)")
         meta = tomllib.loads((src / "pyproject.toml").read_text())["project"]
-        shutil.rmtree(site / "feed_adapter", ignore_errors=True)
-        shutil.copytree(src / "feed_adapter", site / "feed_adapter")
-        di = site / f"{dist.replace('-', '_')}-{meta['version']}.dist-info"
-        shutil.rmtree(di, ignore_errors=True)
-        di.mkdir()
-        (di / "METADATA").write_text(f"Metadata-Version: 2.1\nName: {dist}\nVersion: {meta['version']}\n")
+        dist, ver = meta["name"].replace("-", "_"), meta["version"]
         eps = meta.get("entry-points", {}).get(au.ADAPTER_GROUP, {})
-        (di / "entry_points.txt").write_text(f"[{au.ADAPTER_GROUP}]\n" + "".join(f"{k} = {v}\n" for k, v in eps.items()))
+        with zipfile.ZipFile(out / f"{dist}-{ver}-py3-none-any.whl", "w") as z:
+            for f in sorted((src / "feed_adapter").rglob("*")):
+                z.write(f, f"feed_adapter/{f.relative_to(src / 'feed_adapter')}")
+            for extra, data in self.extra_files.items():
+                z.writestr(extra, data)
+            di = f"{dist}-{ver}.dist-info"
+            z.writestr(f"{di}/METADATA", f"Metadata-Version: 2.1\nName: {meta['name']}\nVersion: {ver}\n")
+            z.writestr(f"{di}/entry_points.txt",
+                       f"[{au.ADAPTER_GROUP}]\n" + "".join(f"{k} = {v}\n" for k, v in eps.items()))
+
+    def pip_install(self, rel, wheels, dist, drop):
+        """pip install --no-deps --no-index from the cached wheels, faked: the wheel unzipped into site-packages."""
+        self.pips.append(("install", rel.name, dist, tuple(drop)))
+        if self.pip_fail:
+            raise StepError("adapter: pip install: ERROR: something")
+        self.pip_uninstall(rel, list(drop))
+        site = rel / "venv" / SITE
+        shutil.rmtree(site / "feed_adapter", ignore_errors=True)
+        for w in sorted(Path(wheels).glob("*.whl")):
+            with zipfile.ZipFile(w) as z:
+                z.extractall(site)
 
     def pip_uninstall(self, rel, dists):
         if dists:
@@ -157,7 +183,7 @@ def test_the_adapter_is_fetched_installed_and_switched_to_side_by_side(station):
     assert rec["remote"] == c1 and rec["repo"] == "adapter" and rec["dists"] == ["feed-adapter"]
     assert u.load()["last"]["result"] == "ok" and u.load()["last"]["adapter"] == c1[:12]
     view = u.report()["adapter"]
-    assert view["state"] == "loaded" and view["text"] == f"adapter {c1[:7]} loaded"
+    assert view["state"] == "installed" and view["text"] == f"adapter {c1[:7]} installed"
     assert any(ln.startswith("adapter:   adapter ") for ln in au.status_lines(u.report()))
     u.calls.clear()
     assert u.run() == 0 and u.calls == []                          # the same commit: nothing
@@ -182,11 +208,11 @@ def test_an_adapter_that_fails_its_preflight_is_never_switched_to(station):
     assert u.current()[0] == good and ("activate", au.release_name(s, bad)) not in u.calls
     rec = u.load()["adapter"]
     assert "FEED_USER is not set" in rec["failed"][bad]["why"]
-    assert u.load()["last"]["result"] == "adapter preflight failed"
-    assert "not switched (adapter" in u.p.log.read_text().splitlines()[-1]
+    assert u.load()["last"]["result"] == "adapter not built" and not u.load().get("failed")
+    assert "not switched: adapter" in u.p.log.read_text().splitlines()[-1]
     assert not (u.p.releases / au.release_name(s, bad)).exists()   # nothing left half-built
     view = u.report()["adapter"]
-    assert view["state"] == "failed" and f"{bad[:7]} failed" in view["text"]
+    assert view["state"] == "failing" and f"{bad[:7]} failed" in view["text"]
     assert any(ln.startswith("  FAIL  adapter") for ln in au.doctor_lines(u.report()))
     u.calls.clear()
     assert u.run() == 0 and u.calls == []                          # not tried again until the ref moves
@@ -264,11 +290,14 @@ def test_removed_the_next_release_has_no_adapter(station, capsys):
     u.set_up(ad.bare)
     u.want(s)
     u.run()
-    u.p.env.write_text('SIZEUP_STATION_TOKEN=x\nFEED_USER="u"\n')
+    u.p.env.write_text('SIZEUP_STATION_TOKEN=x\nFEED_USER="u"\n')      # (one kept there before LoadCredential=)
+    u.write_creds({"FEED_USER": "u"})
+    assert u.p.dropin.is_file()
     _current_release_with_configupdate(u)
     lines = []
     assert au.adapter_remove(u, yes=True, out=lines.append) == 0
     assert not u.p.adapter_key.exists() and not u.p.adapter_pending.exists() and not u.p.adapter_repo.exists()
+    assert not u.p.credentials.exists() and not u.p.dropin.exists() and not u.p.adapter_wheels.exists()
     assert u.p.env.read_text() == "SIZEUP_STATION_TOKEN=x\n"          # its credentials out, the station's kept
     u._settings = None
     assert u.adapter() == {}
@@ -323,10 +352,17 @@ def test_setup_makes_the_key_asks_hidden_and_records_the_repo(station):
     assert hidden == ["FEED_USER (hidden): ", "FEED_PASS (hidden): "]       # getpass: never echoed
     for v in ('us"er$1', "p\\ass word`x"):
         assert v not in text                                                  # never printed
-    env = u.p.env.read_text()
-    assert "SIZEUP_STATION_TOKEN=tok-123" in env                              # the station's own kept
-    assert 'FEED_USER="us\\"er\\$1"' in env and 'FEED_PASS="p\\\\ass word\\`x"' in env
-    assert stat.S_IMODE(u.p.env.stat().st_mode) == 0o600
+    # credentials: root-only files handed over by LoadCredential=, never in station.env (the environment)
+    assert u.p.env.read_text() == "# sizeup station secrets\nSIZEUP_STATION_TOKEN=tok-123\n"
+    assert (u.p.credentials / "FEED_USER").read_text() == 'us"er$1'
+    assert (u.p.credentials / "FEED_PASS").read_text() == "p\\ass word`x"
+    assert stat.S_IMODE((u.p.credentials / "FEED_PASS").stat().st_mode) == 0o600
+    assert stat.S_IMODE(u.p.credentials.stat().st_mode) == 0o700
+    assert u.p.dropin.read_text().count("LoadCredential=") == 2
+    assert f"LoadCredential=FEED_USER:{u.p.credentials / 'FEED_USER'}" in u.p.dropin.read_text()
+    assert ("daemon-reload",) in u.systemctls
+    assert au.GITHUB_HOSTKEY in u.p.known_hosts.read_text()                  # pinned: StrictHostKeyChecking=yes
+    assert au.GITHUB_HOSTKEY in (ROOT / "deploy" / "station" / "install-linux.sh").read_text()
     cfg = tomllib.loads(u.p.config.read_text())                               # no rollback target: written now
     assert cfg["adapter"] == {"repo": "git@github.com:example-org/feed-adapter.git", "ref": "main",
                               "env": ["FEED_USER", "FEED_PASS"]}
@@ -335,15 +371,15 @@ def test_setup_makes_the_key_asks_hidden_and_records_the_repo(station):
     assert u.adapter() == {"repo": "git@github.com:example-org/feed-adapter.git", "ref": "main",
                            "env": ["FEED_USER", "FEED_PASS"], "why": ""}
     r = u.report()["adapter"]
-    assert r["env"] == [("FEED_USER", True), ("FEED_PASS", True)] and r["state"] == "pending"
+    assert r["env"] == [("FEED_USER", True), ("FEED_PASS", True)] and r["state"] == "failing"   # set up, not in yet
     # again: Enter keeps each credential, a name dropped takes its value out
     said.clear()
     answers = iter(["", "v2", "FEED_USER"])
     assert au.adapter_setup(u, ask=lambda p: next(answers), secret=lambda p: "", out=said.append,
                             make_key=make_key, check=False) == 0
     assert len(made) == 1                                                     # the same key
-    env = u.p.env.read_text()
-    assert 'FEED_USER="us\\"er\\$1"' in env and "FEED_PASS" not in env
+    assert (u.p.credentials / "FEED_USER").read_text() == 'us"er$1' and not (u.p.credentials / "FEED_PASS").exists()
+    assert "FEED_PASS" not in u.p.dropin.read_text()
     assert tomllib.loads(u.p.config.read_text())["adapter"]["ref"] == "v2"
 
 
@@ -410,7 +446,7 @@ def test_a_hub_refuses_to_load_or_run_adapters(station, tmp_path):
     assert u.adapter()["why"] == au.HUB_REFUSED
     u.want(repo.shas[0])
     assert u.run() == 0 and u.calls == [] and not u.p.adapter_repo.exists()
-    assert u.pick_adapter({}, u.current()[0]) == (None, "")
+    assert u.pick_adapter({}, u.current()[0]) == (None, "", "")
 
 
 def test_the_guard_is_the_one_297_defines():
@@ -442,8 +478,8 @@ def test_the_view_status_and_hub_health_show_no_credentials(station, tmp_path):
     w = au.Watch(own=repo.shas[0], run_dir="", state_path=str(u.p.state), clock=lambda: 1e9, log=lambda m: None,
                  release=u.p.current.resolve())
     v = w.status()["adapter"]
-    assert v == {"state": "loaded", "repo": "adapter", "commit": ad.commits[0][:12],
-                 "text": f"adapter {ad.commits[0][:7]} loaded"}
+    assert v == {"state": "installed", "repo": "adapter", "commit": ad.commits[0][:12],
+                 "text": f"adapter {ad.commits[0][:7]} installed"}
     assert str(ad.bare) not in json.dumps(w.status())                         # the URL stays on the station
     sent = dict(v, health=[{"source": "feed", "label": "Feed", "state": "ok", "reason": "", "password": "x"}],
                 url="git@x:y/z.git", env={"FEED_PASS": "x"})
@@ -457,10 +493,10 @@ def test_the_station_link_adds_each_sources_health():
     from sizeup.cloud.station import StationLink
     rows = [{"source": "feed", "label": "Feed", "rank": 1, "state": "failing", "reason": "HTTP 503", "events": 2}]
     fake = type("L", (), {})()
-    fake.updates = type("W", (), {"status": lambda self: {"adapter": {"state": "loaded", "text": "x 1234567 loaded"}}})()
+    fake.updates = type("W", (), {"status": lambda self: {"adapter": {"state": "installed", "text": "x 1234567 installed"}}})()
     fake.app = type("A", (), {"sources_runner": type("R", (), {"state": lambda self: rows})()})()
     ad = StationLink.adapter(fake)
-    assert ad["text"] == "x 1234567 loaded · Feed failing (HTTP 503)"
+    assert ad["text"] == "x 1234567 installed · Feed failing (HTTP 503)" and ad["state"] == "failing"
     assert ad["health"] == [{"source": "feed", "label": "Feed", "state": "failing", "reason": "HTTP 503"}]
     fake.app = object()                                                       # no runner (before #297): no rows
     assert StationLink.adapter(fake)["health"] == []
@@ -506,9 +542,6 @@ def test_helpers():
     assert au.repo_name("git@github.com:o/feed.git") == "feed" and au.repo_name("/srv/x/adapter.git") == "adapter"
     assert au.github_slug("git@github.com:o/feed.git") == "o/feed"
     assert au.github_slug("ssh://git@github.com/o/feed") == "o/feed" and au.github_slug("/srv/a.git") == ""
-    assert au.env_quote('a"b$c`d\\e') == '"a\\"b\\$c\\`d\\\\e"'
-    with pytest.raises(ValueError):
-        au.env_quote("two\nlines")
     assert au.env_problem("FEED_USER") == "" and au.env_problem("PATH") and au.env_problem("LD_PRELOAD")
     assert au.env_problem("feed") and au.env_problem("SIZEUP_ACCESS_CLIENT_SECRET")
 
@@ -536,13 +569,21 @@ def test_cli_status_without_an_adapter(tmp_path, monkeypatch, capsys):
         au.main(["run", "extra"])
 
 
-def test_station_env_written_root_only(tmp_path):
-    u = au.Updater(au.Paths(env=tmp_path / "station.env"))
-    u.write_env({"FEED_USER": "a b"})
+def test_credentials_root_only_files_and_station_env_kept(tmp_path):
+    u = au.Updater(au.Paths(env=tmp_path / "station.env", credentials=tmp_path / "cred",
+                            dropin=tmp_path / "d" / "adapter-credentials.conf"))
+    u.systemctl = lambda *a: None
+    u.write_creds({"FEED_USER": "a b"})
+    assert stat.S_IMODE(os.stat(tmp_path / "cred" / "FEED_USER").st_mode) == 0o600
+    assert u.cred_has("FEED_USER") and not u.cred_has("FEED_PASS")
+    with pytest.raises(ValueError):
+        u.write_creds({"FEED_PASS": "two\nlines"})
+    u.write_creds({}, drop={"FEED_USER"})
+    assert u.cred_has("FEED_USER") is False and not (tmp_path / "d" / "adapter-credentials.conf").exists()
+    (tmp_path / "station.env").write_text('# x\nSIZEUP_STATION_TOKEN=t\nFEED_USER="old"\n')
+    u.drop_env({"FEED_USER"})
+    assert (tmp_path / "station.env").read_text() == "# x\nSIZEUP_STATION_TOKEN=t\n"
     assert stat.S_IMODE(os.stat(tmp_path / "station.env").st_mode) == 0o600
-    assert u.env_has("FEED_USER") and not u.env_has("FEED_PASS")
-    u.write_env({}, drop={"FEED_USER"})
-    assert u.env_has("FEED_USER") is False
 
 
 def test_on_a_build_that_failed_the_adapter_still_follows_its_ref(station):
@@ -589,3 +630,159 @@ def test_setup_says_so_while_an_update_holds_the_lock(station, monkeypatch):
         fcntl.flock(lk, fcntl.LOCK_EX)
         a = SimpleNamespace(sub=["setup"], repo=str(ad.bare), ref="main", env="", no_check=True, yes=False)
         assert au.adapter_cli(u, a) == 1 and not u.p.adapter_key.exists()
+
+
+# -- an adapter problem never fails a sizeup update (review of #305) -------------------------------------------------
+
+def _with_adapter(station):
+    repo, u, ad = station
+    u.set_up(ad.bare)
+    u.want(repo.shas[0])
+    assert u.run() == 0
+    return repo, u, ad, u.current()[0]
+
+
+@pytest.mark.parametrize("broken", ["wheel", "pip", "archive"])
+def test_a_new_adapter_commit_that_breaks_never_holds_up_a_sizeup_update(station, broken):
+    """The commit at the ref breaks (its wheel build, pip, or git archive): the sizeup release is built with the
+    adapter that runs (its cached wheels), and sizeup's sha is never recorded as failed."""
+    repo, u, ad, good = _with_adapter(station)
+    c1 = ad.commits[0]
+    bad = ad.commit("def make(ctx):\n    return []\n\n# two\n")
+    real_archive = u.archive
+
+    def archive(commit, src):
+        if commit == bad:
+            raise StepError("adapter: git archive failed (exit 128)")
+        return real_archive(commit, src)
+    if broken == "archive":
+        u.archive = archive
+    elif broken == "wheel":
+        u.wheel_fail = True                  # (c1's wheels are cached: not built again)
+    new = repo.commit("two")
+    u.want(new)
+    if broken == "pip":
+        real = u.pip_install
+        u.pip_install = lambda rel, wheels, dist, drop: (_ for _ in ()).throw(StepError("adapter: pip install: no")) \
+            if bad[:12] in rel.name else real(rel, wheels, dist, drop)
+    assert u.run() == 0
+    assert u.current() == (au.release_name(new, c1), new) and u.installed()["commit"] == c1
+    assert not u.load().get("failed")
+    rec = u.load()["adapter"]
+    assert bad in rec["retry"] and "not built yet" in u.load()["last"]["adapter_why"]
+    assert "adapter " in u.p.log.read_text().splitlines()[-1] and ": ok in " in u.p.log.read_text().splitlines()[-1]
+    assert u.report()["adapter"]["state"] == "failing"                    # shown: a newer commit isn't in
+
+
+def test_if_even_the_running_adapter_cant_be_installed_sizeup_goes_on_without_it(station):
+    repo, u, ad, good = _with_adapter(station)
+    u.pip_install = lambda *a: (_ for _ in ()).throw(StepError("adapter: wheel: build backend failed"))
+    new = repo.commit("two")
+    u.want(new)
+    t = [1e9]
+    u.clock = lambda: t[0]
+    for _ in range(au.MAX_STAGES + 2):
+        u.run()
+        t[0] += 4000
+    assert new not in u.load().get("failed", {})                         # (the reviewer's probe)
+    assert u.current() == (new, new) and u.installed() is None           # without the adapter: paging is primary
+    view = u.report()["adapter"]
+    assert view["state"] == "failing" and "not installed" in view["text"]
+    assert any(ln.startswith("  FAIL  adapter") for ln in au.doctor_lines(u.report()))
+    assert ad.commits[0] in u.load()["adapter"]["failed"]                 # tried MAX_STAGES times, then failed
+
+
+def test_an_adapter_only_build_that_breaks_backs_off_then_fails(station):
+    repo, u, ad, good = _with_adapter(station)
+    c2 = ad.commit("def make(ctx):\n    return []\n")
+    n = []
+
+    def boom(*a):
+        n.append(1)
+        raise StepError("adapter: wheel: build backend failed")
+    u.pip_install = boom
+    for _ in range(5):
+        u.run()
+    assert len(n) == 1                                                    # (the probe: not every run)
+    assert u.load()["adapter"]["retry"][c2]["n"] == 1 and u.current()[0] == good
+    for i in range(au.MAX_STAGES + 1):
+        u.t[0] += 3601
+        u.run()
+    assert len(n) == au.MAX_STAGES and c2 in u.load()["adapter"]["failed"] and not u.load().get("failed")
+
+
+def test_wheels_are_built_once_per_commit_and_reused(station):
+    repo, u, ad, good = _with_adapter(station)
+    assert len(u.builds) == 1
+    cache = list(u.p.adapter_wheels.iterdir())
+    assert len(cache) == 1 and json.loads((cache[0] / "wheels.json").read_text())["dist"] == "feed-adapter"
+    u.wheel_fail = True
+    for i in range(2):
+        new = repo.commit(f"n{i}")
+        u.want(new)
+        assert u.run() == 0 and u.installed()["commit"] == ad.commits[0]
+    assert len(u.builds) == 1                                             # no rebuild, no PyPI
+
+
+@pytest.mark.parametrize("extra", [{"evil.pth": "import os"}, {"feed_adapter-0.1.data/scripts/x": "#!/bin/sh"}])
+def test_root_refuses_a_wheel_with_a_pth_file_or_scripts(station, extra):
+    repo, u, ad = station
+    u.extra_files = extra
+    u.set_up(ad.bare)
+    u.want(repo.shas[0])
+    assert u.run() == 1 and u.installed() is None and u.pips == []
+    why = u.load()["adapter"]["failed"][ad.commits[0]]["why"]
+    assert "wheel refused" in why and ("pth" in why or "scripts" in why)
+
+
+def test_rollback_to_an_adapter_release_needs_the_adapter_set_up(station, capsys):
+    repo, u, ad, withad = _with_adapter(station)
+    s = repo.shas[0]
+    u.p.adapter_key.unlink()
+    u.p.adapter_pending.unlink()
+    u._settings = None
+    u.run()
+    assert u.current()[0] == s
+    assert u.rollback() == 1                                              # (the probe: it was undone at the next run)
+    assert "Set it up first" in capsys.readouterr().err
+    assert u.current()[0] == s and not u.load().get("failed")             # the running sha is never marked failed
+
+
+def test_status_as_a_user_who_cant_read_etc_never_raises(station, monkeypatch):
+    repo, u, ad, good = _with_adapter(station)
+    import os.path as osp
+    real = osp.isfile
+    monkeypatch.setattr(au.os.path, "isfile", lambda p: False if "etc" in str(p) else real(p))
+
+    def denied(self, *a, **k):
+        raise PermissionError(13, "Permission denied")
+    monkeypatch.setattr(au.Path, "stat", denied)
+    r = u.report()                                                         # no exception
+    assert r["adapter"]["key"] is False
+    assert au.status_lines(r)
+
+
+def test_a_child_gets_no_adapter_credentials(tmp_path, monkeypatch):
+    from sizeup import procenv
+    cred = tmp_path / "creds"
+    cred.mkdir()
+    (cred / "FEED_PASS").write_text("s3cret\n")
+    monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(cred))
+    monkeypatch.setenv("FEED_PASS", "leaked-old-style")
+    monkeypatch.setattr(procenv, "_dir", None)
+    monkeypatch.setattr(procenv, "_names", set())
+    assert procenv.take_credentials(["FEED_PASS"]) == cred
+    assert "CREDENTIALS_DIRECTORY" not in os.environ and "FEED_PASS" not in os.environ
+    assert adapters.credential("FEED_PASS") == "s3cret"
+    assert adapters.credential("../FEED_PASS") == ""
+    env = procenv.child_env(dict(os.environ, CREDENTIALS_DIRECTORY="/x", FEED_PASS="y"))
+    out = subprocess.run([sys.executable, "-c", "import os, json; print(json.dumps(dict(os.environ)))"], env=env,
+                         capture_output=True, text=True, check=True).stdout
+    child = json.loads(out)
+    assert "FEED_PASS" not in child and "CREDENTIALS_DIRECTORY" not in child and "s3cret" not in out
+
+
+def test_the_programs_sizeup_starts_get_an_explicit_env():
+    for f, needle in (("sizeup/radio/fm.py", "env=child_env()"), ("sizeup/app.py", "env=child_env()"),
+                      ("sizeup/tts.py", "env=child_env()"), ("sizeup/radio/recorder.py", "env = child_env()")):
+        assert needle in (ROOT / f).read_text(), f

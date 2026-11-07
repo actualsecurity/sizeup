@@ -121,7 +121,7 @@ const StationHealth = (() => {
       ["Update log", last && last.line ? last.line : ""],
       ["Failed builds", Object.entries(b.failed || {}).map(([k, v]) => `${short(k)}: ${(v && v.why) || "?"}`).join("; ")],
       // the station's incident-source adapter (#301): what runs, and each source's own health
-      ...(b.adapter ? [["Adapter", b.adapter.text, stateCls(b.adapter.state === "loaded" ? "ok" : "bad")]] : []),
+      ...(b.adapter ? [["Adapter", b.adapter.text, stateCls(["running", "installed"].includes(b.adapter.state) ? "ok" : "bad")]] : []),
     ]));
     const failing = ((b.adapter && b.adapter.health) || []).filter((x) => x.state === "failing");
     if (failing.length) kids.push(resetRow(failing));
@@ -255,7 +255,8 @@ const StationHealth = (() => {
         btn.disabled = true;
         let msg;
         try {
-          const res = await fetch("/api/sources/reset", { method: "POST", headers: { "Content-Type": "application/json" },
+          const res = await fetch("/api/sources/reset", { method: "POST",
+                                                           headers: { "Content-Type": "application/json", "X-Sizeup-Action": "reset" },
                                                            body: JSON.stringify({ source: x.source }) });
           const d = await res.json().catch(() => ({}));
           msg = res.ok ? (d.result || "Reset asked") : (d.error || `HTTP ${res.status}`);

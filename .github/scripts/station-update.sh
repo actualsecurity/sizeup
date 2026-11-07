@@ -169,18 +169,27 @@ A1=$(gita rev-parse HEAD)
 wait_for 600 idle
 printf 'ci-user\n' | sizeup-station adapter setup --repo "$ADB" --ref main --env CI_FEED_USER --no-check
 test "$(stat -c '%U %a' /etc/sizeup/adapter-deploy-key)" = "root 600"
-test "$(stat -c '%U %a' /etc/sizeup/station.env)" = "root 600"
-grep -q '^CI_FEED_USER="ci-user"$' /etc/sizeup/station.env
+test "$(stat -c '%U %a' /etc/sizeup/credentials/CI_FEED_USER)" = "root 600"     # LoadCredential=, never the environment
+test "$(cat /etc/sizeup/credentials/CI_FEED_USER)" = ci-user
+grep -q '^LoadCredential=CI_FEED_USER:/etc/sizeup/credentials/CI_FEED_USER$' \
+  /etc/systemd/system/sizeup-station.service.d/adapter-credentials.conf
+test -z "$(grep '^CI_FEED_USER=' /etc/sizeup/station.env 2>/dev/null || true)"
 python3 -c 'import tomllib; a = tomllib.load(open("/etc/sizeup/config.toml", "rb"))["adapter"]; assert a["ref"] == "main", a'
 wait_for 600 release_is "$A-a${A1:0:12}"
 wait_for 300 idle                                          # (its /healthz check and prune, then done)
 wait_for 120 is_build "$A"
 test "$(adapter_commit)" = "$A1"
+# the credential reaches the service as a file under $CREDENTIALS_DIRECTORY (systemd 255), not in its environment
+spid=$(systemctl show -p MainPID --value sizeup-station.service)
+test "$(cat /run/credentials/sizeup-station.service/CI_FEED_USER)" = ci-user
+test -z "$(tr '\0' '\n' < "/proc/$spid/environ" | grep '^CI_FEED_USER=' || true)"
+test -n "$(ls /opt/sizeup/adapter-wheels/)"                                   # its wheels, built once, root's
+test "$(stat -c %U "$(ls -d /opt/sizeup/adapter-wheels/"$A1"-*)")" = root
 /opt/sizeup/current/venv/bin/python -c 'import importlib.metadata as m; assert [e.name for e in m.entry_points(group="sizeup.incident_sources")] == ["feed"]'
 test -n "$(in_venv /opt/sizeup/current)" && test -z "$(in_venv "/opt/sizeup/releases/$A")"   # only in the copy
 sizeup-station status > "$WORK/status.txt"
 grep "^adapter:" "$WORK/status.txt"
-grep -q "^adapter:   adapter ${A1:0:7} loaded" "$WORK/status.txt"
+grep -q "^adapter:   adapter ${A1:0:7} installed" "$WORK/status.txt"
 sizeup-station adapter status
 wait_for 600 idle
 
@@ -193,13 +202,14 @@ test "$(adapter_commit)" = "$A2"
 
 printf 'def make(ctx):\n    return []\n\n\ndef self_check():\n    return "ci: broken"\n' > "$AD/ci_feed/__init__.py"
 A3=$(pusha three)
-systemctl start sizeup-update.service
+systemctl start sizeup-update.service || true            # (the unit fails: that adapter commit failed its preflight)
+wait_for 300 idle
 release_is "$A-a${A2:0:12}"                               # never switched to
 test ! -e "/opt/sizeup/releases/$A-a${A3:0:12}"
 [[ "$(field 'd["adapter"]["failed"]["'"$A3"'"]["why"]')" == *"ci: broken"* ]]
-test "$(field 'd["last"]["result"]')" = "adapter preflight failed"
+test "$(field 'd["last"]["result"]')" = "adapter not built"
 doc=$(sizeup-station doctor 2>&1 || true)                 # (no dongles, no token here: it fails anyway)
-grep -q "FAIL  adapter adapter ${A2:0:7} loaded · ${A3:0:7} failed" <<<"$doc"
+grep -q "FAIL  adapter adapter ${A2:0:7} installed · ${A3:0:7} failed" <<<"$doc"
 
 sizeup-station rollback                                   # the previous adapter comes back with its release
 release_is "$A-a${A1:0:12}"
@@ -207,8 +217,8 @@ wait_for 60 is_build "$A"
 test "$(adapter_commit)" = "$A1"
 
 sizeup-station adapter remove --yes
-test ! -e /etc/sizeup/adapter-deploy-key
-test -z "$(grep '^CI_FEED_USER=' /etc/sizeup/station.env || true)"
+test ! -e /etc/sizeup/adapter-deploy-key && test ! -e /etc/sizeup/credentials
+test ! -e /etc/systemd/system/sizeup-station.service.d/adapter-credentials.conf
 wait_for 600 release_is "$A"
 wait_for 300 idle
 wait_for 60 is_build "$A"
