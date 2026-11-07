@@ -325,7 +325,7 @@ def test_station_health_alerts_at_80_percent_at_the_limit_and_when_transcribe_fa
     assert r.keys() == []
     h["budget"] = {"pct": 82.0, "usd": 20.5, "limit_usd": 25, "month": "2026-10"}
     r.at(5, post=False)                                       # (the station silent: the hub's own alerts still go)
-    assert r.keys() == ["aws_budget80"] and "$20.50 of the $25 limit" in r.h.alerts()[0]["text"]
+    assert r.keys() == ["aws_budget80"] and "$20.50 / $25" in r.h.alerts()[0]["text"]
     assert any("80%" in m["title"] for m in r.n.msgs)          # pushed on our alerts topic
     h["budget"] = {"pct": 100.0, "usd": 25.0, "limit_usd": 25, "month": "2026-10",
                    "reserve_text": "pages and Fire/EMS 15 keep AWS up to $30 (the reserve)"}

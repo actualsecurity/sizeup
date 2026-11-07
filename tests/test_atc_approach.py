@@ -57,10 +57,11 @@ def test_the_templates_have_them_as_choices_never_auto_assigned(tmp_path, monkey
     from tests.test_station_install import station_config
     c = station_config(tmp_path, monkeypatch)
     ch = {x.label: x for x in c.channels}
-    assert (ch["NY Approach"].mhz, ch["NY Approach"].kind, ch["NY Approach"].schedule) == (126.4, "airband", DAYNIGHT)
-    assert (ch["NY Approach 124.65"].mhz, ch["NY Approach 124.65"].schedule) == (124.65, ())
+    app, app3 = "NY App 126.4/120.8", "NY App 124.65"                            # #275's names
+    assert (ch[app].mhz, ch[app].kind, ch[app].schedule) == (126.4, "airband", DAYNIGHT)
+    assert (ch[app3].mhz, ch[app3].schedule) == (124.65, ())
     assert (ch["HPN Ground"].mhz, ch["HPN Ground"].kind) == (121.825, "airband")
-    new = {"NY Approach", "NY Approach 124.65", "HPN Ground"}
+    new = {app, app3, "HPN Ground"}
     assert not new & set(c.sdr_auto_order) and not new & set(AUTO_ORDER)          # never auto-assigned
     assert c.sdr_auto_order[-1] == "HPN Tower"
     assert new <= set(c.stt_aws_channels)                                          # AWS by default, like HPN Tower
@@ -257,6 +258,9 @@ def before_260() -> str:
     return strip((STATION / "config.station.toml").read_text())
 
 
+NOT_275 = "airband-sets\n"     # #275's update, marked done: these tests are about #260's
+
+
 def release(tmp_path, name, code: str) -> Path:
     rel = tmp_path / name
     (rel / "sizeup").mkdir(parents=True)
@@ -268,7 +272,7 @@ def test_an_installed_station_gains_them_once(tmp_path, monkeypatch):
     from tests.test_fg2 import installed
     conf = installed(tmp_path, monkeypatch, before_260())
     marks = tmp_path / "etc" / "config-updates"
-    marks.write_text("fg2\ntones-47\nhpn-atc\nadsb-receiver\n")
+    marks.write_text("fg2\ntones-47\nhpn-atc\nadsb-receiver\n" + NOT_275)
     before = load(conf)
     said = configupdate.run(conf, marks, leaving=release(tmp_path, "rel-new", (ROOT / "sizeup" / "config.py").read_text()))
     assert len(said) == 2 and said[0].startswith("approach-ground: NY Approach (126.4 MHz 0700-2300, 120.8 2300-0700")
@@ -278,7 +282,7 @@ def test_an_installed_station_gains_them_once(tmp_path, monkeypatch):
     assert [c.label for c in after.channels][-3:] == ["NY Approach", "NY Approach 124.65", "HPN Ground"]
     assert after.channels[-3].schedule == DAYNIGHT and after.sdr_auto_order == before.sdr_auto_order   # not auto-assigned
     assert 'auto_assign_order = ["fg1", "p25", "south2", "fg2", "hpn tower"]' in conf.read_text()
-    assert marks.read_text().endswith("approach-ground\nsouth-end\n")
+    assert marks.read_text().endswith("approach-ground\nsouth-end\nairband-sets\n")
     conf.write_text(kept)                                                  # taken out by hand: stays out
     assert configupdate.run(conf, marks) == []
 
@@ -287,7 +291,7 @@ def test_it_waits_while_the_release_to_go_back_to_cant_read_the_schedule(tmp_pat
     from tests.test_fg2 import installed
     conf = installed(tmp_path, monkeypatch, before_260())
     marks = tmp_path / "etc" / "config-updates"
-    marks.write_text("fg2\ntones-47\nhpn-atc\nadsb-receiver\n")
+    marks.write_text("fg2\ntones-47\nhpn-atc\nadsb-receiver\n" + NOT_275)
     same = conf.read_text()
     old = release(tmp_path, "rel-233", 'KINDS = ("paging", "traffic", "airband")\n')     # reads airband, not a schedule
     assert configupdate.reads_airband(old) and not configupdate.reads_schedule(old)
@@ -453,7 +457,8 @@ def test_an_approach_transcript_widens_the_layer():
 
 
 def test_the_template_block_and_the_update_agree():
-    tpl = tomllib.loads((STATION / "config.station.toml").read_text())["radio"]["channels"]
+    from tests.test_fg2 import before_275
+    tpl = tomllib.loads(before_275((STATION / "config.station.toml").read_text()))["radio"]["channels"]
     upd = tomllib.loads("".join(b for _l, _m, b in configupdate.APPROACH_GROUND))["radio"]["channels"]
     assert [c for c in tpl if c["label"] in {"NY Approach", "NY Approach 124.65", "HPN Ground"}] == upd
     assert json.dumps(configupdate.APPROACH_SCHEDULE) == json.dumps(upd[0]["schedule"])

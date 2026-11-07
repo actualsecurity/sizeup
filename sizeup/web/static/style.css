@@ -439,6 +439,8 @@
   :where(.pill.on, .pill.tx-on) { color: var(--on-accent); background: var(--accent); border-color: var(--accent); }
   /* a receiver (Settings > Radios): its name, then its state word */
   :where(.pill.radio) .st { font-weight: 600; opacity: 0.85; text-transform: uppercase; letter-spacing: 0.05em; }
+  /* an airband dongle (#275): its frequencies now, and HPN's tower open / closed */
+  :where(.pill.radio) :is(.fq, .tw) { font-variant-numeric: tabular-nums; opacity: 0.85; }
   :where(.pill.radio:is(.down, .ambiguous)) { color: var(--err); }
   :where(.pill.radio:is(.absent, .off, .unknown)) { color: var(--dim); border-color: var(--line-strong); border-style: solid; }
   :where(.pill.radio.open) { color: var(--on-ok); background: var(--ok); border-color: var(--ok); }

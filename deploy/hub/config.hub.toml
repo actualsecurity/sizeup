@@ -60,20 +60,22 @@ mhz = 118.575
 kind = "airband"
 
 [[radio.channels]]
-label = "NY Approach"              # #260: New York Approach for HPN, 126.4 0700-2300 / 120.8 2300-0700 local (the station retunes)
+label = "NY App 126.4/120.8"       # #260/#275: New York Approach for HPN, 126.4 0700-2300 / 120.8 2300-0700 local
 mhz = 126.4
 kind = "airband"
 schedule = [{ at = "07:00", mhz = 126.4 }, { at = "23:00", mhz = 120.8 }]
+also = [{ mhz = 124.65, from = "07:00", until = "23:00" }]
 
 [[radio.channels]]
-label = "NY Approach 124.65"       # #260: New York Approach's third HPN frequency
+label = "NY App 124.65"            # #260/#275: New York Approach's third HPN frequency
 mhz = 124.65
 kind = "airband"
 
 [[radio.channels]]
-label = "HPN Ground"               # #260: Westchester Ground 121.825
+label = "HPN Ground"               # #260: Westchester Ground 121.825 (0600-2300; 124.65 on its dongle overnight, #275)
 mhz = 121.825
 kind = "airband"
+schedule = [{ at = "06:00", mhz = 121.825 }, { at = "23:00", mhz = 124.65 }]
 
 [p25]
 capture_dir = ""                   # no trunk-recorder here: the station sends its calls
@@ -85,7 +87,7 @@ incident_talkgroups = [307, 333]
 # Credentials: the task role (sizeup-aws/12-transcribe.sh adds transcribe:StartStreamTranscription*
 # and the sizeup-* vocabularies); region: the task's AWS_REGION. No whisper here: the station runs it.
 aws = true
-aws_channels = ["South 2", "FG1", "FG2", 307, "HPN Tower", "NY Approach", "NY Approach 124.65", "HPN Ground"]
+aws_channels = ["South 2", "FG1", "FG2", 307, "HPN Tower", "NY App 126.4/120.8", "NY App 124.65", "HPN Ground"]
 # South 2 paging, FG1, FG2, Fire/EMS 15, HPN ATC (Tower, and #260's Approach and Ground): AWS
 # Recorded, not transcribed, unless Settings > Radios > Channels says otherwise (#201): WCPD Ch 1 (383) and
 # LLT Supervisor 1 (3127), about 1,800 clips a day off the station's whisper. The hub folds this into the

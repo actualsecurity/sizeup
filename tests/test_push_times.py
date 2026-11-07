@@ -61,7 +61,7 @@ def test_the_silent_push_and_its_recovery_read_local_time():
     r.at(CLIP_EST - T0, status=station_status())                          # last heard 08:29 EST
     r.at(CLIP_EST - T0 + 181, post=False)
     a = next(a for a in r.h.alerts() if a["key"] == "silent")
-    assert "since 08:29:" in a["text"] and r.n.msgs[-1]["title"].endswith("last heard 08:29")
+    assert "since 08:29 " in a["text"] and r.n.msgs[-1]["title"].endswith("last heard 08:29")
     r.at(CLIP_EST - T0 + 600, status=station_status())                    # back at 08:39
     assert r.n.msgs[-1]["title"].startswith("Recovered: Station silent") and "cleared at 08:39 " in r.n.msgs[-1]["body"]
 

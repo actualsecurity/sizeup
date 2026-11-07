@@ -97,7 +97,7 @@ def test_readsb_gets_the_stations_position_from_the_config(tmp_path):
 def test_an_installed_station_is_renamed_once_and_keeps_its_id(tmp_path, monkeypatch):
     conf = installed(tmp_path, monkeypatch, before_271())
     marks = tmp_path / "etc" / "config-updates"
-    marks.write_text("fg2\ntones-47\nhpn-atc\nadsb-receiver\napproach-ground\n")
+    marks.write_text("fg2\ntones-47\nhpn-atc\nadsb-receiver\napproach-ground\nairband-sets\n")
     before = load(conf)
     assert (before.station_id, before.station_name) == ("pcfd-hq", OLD)
     said = configupdate.run(conf, marks)
@@ -111,7 +111,7 @@ def test_an_installed_station_is_renamed_once_and_keeps_its_id(tmp_path, monkeyp
     after = load(conf)
     assert (after.station_id, after.station_name) == ("pcfd-hq", NEW) and replace(after, station_name=OLD) == before
     assert after.station_ll == STATION_LL                                  # the code's default: South End
-    assert marks.read_text().endswith("approach-ground\nsouth-end\n")
+    assert marks.read_text().endswith("approach-ground\nsouth-end\nairband-sets\n")
     conf.write_text(kept)                                                  # put back by hand: stays so
     assert configupdate.run(conf, marks) == []
 
@@ -139,4 +139,4 @@ def test_a_name_it_cant_change_safely_is_not_changed():
 
 def test_the_update_needs_no_release_to_go_back_to():
     assert "south-end" not in configupdate.NEEDS_LEAVING                   # every release reads [station] name
-    assert configupdate.UPDATES[-1][0] == "south-end"
+    assert [n for n, _f in configupdate.UPDATES][-2:] == ["south-end", "airband-sets"]   # (#275's after it)

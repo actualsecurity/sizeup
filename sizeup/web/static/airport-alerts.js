@@ -51,7 +51,7 @@ window.AirportAlerts = (() => {
 
   function alarmWord(d, alarms) {
     if (!d.alarm_id || !alarms) return "";
-    if ((alarms.open || []).some((x) => x.id === d.alarm_id)) return "Alarm open: acknowledge it on the alarm";
+    if ((alarms.open || []).some((x) => x.id === d.alarm_id)) return "Alarm open · ack on the alarm";
     const done = (alarms.recent || []).find((x) => x.id === d.alarm_id);
     return done && done.ack_by ? `Alarm acknowledged by ${done.ack_by}` : "Alarm acknowledged";
   }
@@ -73,7 +73,7 @@ window.AirportAlerts = (() => {
       li.append(dl);
     }
     li.append(el("div", "aa-src", `${a.source_name}${a.channel ? ` · ${a.channel}` : ""} · ${deps.time(a.at)}`
-                 + (a.count > 1 ? ` · ${a.count} transmissions` : "")));
+                 + (a.count > 1 ? ` · ${a.count} tx` : "")));
     const heard = el("ol", "aa-heard");
     for (const s of d.snippets || []) {
       const r = el("li", s.context ? "aa-snip ctx" : "aa-snip");
@@ -115,7 +115,7 @@ window.AirportAlerts = (() => {
       try {
         const r = await deps.api("POST", `/api/cad/airport-alert/${a.id}/${what}`, { operator: deps.operator() });
         if (what === "accept" && r && r.incident) {
-          UI.toast(`Event ${r.incident.number || r.incident.id} made, pending: not dispatched`, "ok");
+          UI.toast(`Event ${r.incident.number || r.incident.id} pending · not dispatched`, "ok");
           if (deps.select) deps.select(r.incident.id);
         }
       } catch (err) {
@@ -149,7 +149,7 @@ window.AirportAlerts = (() => {
     for (const a of items) {
       if (st.seen.has(a.id)) continue;
       st.seen.add(a.id);
-      if (!first && window.Radio && Radio.prealert) Radio.prealert(a.title, "Airport pre-alert: accept or dismiss it (nothing is dispatched)");
+      if (!first && window.Radio && Radio.prealert) Radio.prealert(a.title, "Airport pre-alert · not dispatched · Accept or Dismiss");
     }
     if (st.seen.size > 200) st.seen = new Set(items.map((a) => a.id));
   }
