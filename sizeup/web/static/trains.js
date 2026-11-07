@@ -87,6 +87,7 @@ window.TrainLayer = (() => {
   function notify() { for (const fn of store.subs) { try { fn(store.data); } catch (e) { console.error(e); } } }
   async function load() {
     if (store.loading) return store.loading;
+    const t0 = performance.now();               // map:trains: asked -> drawn (#284)
     store.loading = (async () => {
       try {
         const had = store.data;                // the line and stations we hold: the hub leaves them out when unchanged
@@ -103,7 +104,7 @@ window.TrainLayer = (() => {
         store.fails += 1;
         console.warn(`trains: ${e.message || e}; next poll in ${Math.round(nextPoll() / 1000)} s`);
       }
-      finally { store.loading = null; notify(); animate(); }
+      finally { store.loading = null; notify(); animate(); try { performance.clearMeasures("map:trains"); performance.measure("map:trains", { start: t0 }); } catch (_) { /* an older browser */ } }
     })();
     return store.loading;
   }
