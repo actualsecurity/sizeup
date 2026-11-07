@@ -86,7 +86,7 @@ from sizeup.cad import tonelist
 from sizeup.radio.tones import ToneEvent, TonePlan, base_name
 from sizeup.talkers import talker_prompt
 from sizeup import channels
-from sizeup.stt import LIVE, RERUN, URGENT, Transcriber, WhisperClient, radio_voice, wav_bytes
+from sizeup.stt import HIGH, LIVE, LOW, RERUN, SHED, URGENT, Transcriber, WhisperClient, radio_voice, wav_bytes
 from sizeup.talkgroups import TalkgroupPrefs
 from sizeup.tts import TtsService
 from sizeup.web.server import WebServer
@@ -234,6 +234,22 @@ def make_receiver(cfg: Config, c, device, on_segment, covered=None) -> NfmReceiv
                        drop_db=c.drop_db, hang_s=c.hang_s, continue_s=c.continue_s)
 
 
+def whisper_threads() -> int:
+    """whisper-server's threads at most: one fewer than the CPUs (#300). whisper.cpp's threads wait on each other at
+    every step, so one preempted by the radios stalls them all: more threads than free cores is slower, not faster."""
+    return max(1, cpus() - 1)
+
+
+def cpus() -> int:
+    """The CPUs this process may run on (its affinity: a container's or a cgroup's share), else the machine's."""
+    if hasattr(os, "sched_getaffinity"):
+        try:
+            return len(os.sched_getaffinity(0)) or 1
+        except OSError:
+            pass
+    return os.cpu_count() or 4
+
+
 class WhisperService:
     """Keep whisper-server running (model stays loaded). A server sizeup started earlier (recorded
     in state_path) is reused when its model/flags still match the config and replaced when they
@@ -243,6 +259,7 @@ class WhisperService:
 
     def __init__(self, binary: str, model: str, port: int, threads: int, beam_size: int = 0,
                  state_path: str | Path | None = None):
+        threads = min(int(threads or 0) or whisper_threads(), whisper_threads())   # (start-whisper does the same, #300)
         self.argv = [binary, "-m", model, "--host", "127.0.0.1", "--port", str(port), "-t", str(threads)]
         if beam_size > 1:
             self.argv += ["-bs", str(beam_size)]
@@ -1073,12 +1090,16 @@ class App:
         for k in ("carrier_dbfs", "snr_db", "opened"):
             if getattr(seg, k, None) is not None:
                 setattr(t, k, getattr(seg, k))
+        if getattr(seg, "tones", None):
+            # #263: the tones notched out (not "tones": on a row that is a page's tone pair)
+            t.notched_hz = list(seg.tones)                # type: ignore[attr-defined]
         if seg.hiss_db is not None:
             t.floor_dbfs = round(float(seg.hiss_db), 1)   # type: ignore[attr-defined]
         log(f"{ch.label}: carrier {t.carrier_db:+.1f} dB over the floor"
             f" ({getattr(t, 'carrier_dbfs', '?')} / {getattr(t, 'floor_dbfs', '?')} dBFS), voice SNR "
             f"{'?' if getattr(t, 'snr_db', None) is None else f'{t.snr_db:.1f} dB'}, {seg.end - seg.start:.1f} s"
-            + (", opened on a sustained weak carrier" if getattr(seg, "opened", "") == "sustained" else ""))
+            + (", opened on a sustained weak carrier" if getattr(seg, "opened", "") == "sustained" else "")
+            + (f", tones notched {', '.join(f'{f:g}' for f in seg.tones)} Hz" if getattr(seg, "tones", None) else ""))
         t.low_energy = speech_seconds(seg.audio) < MIN_SPEECH_S   # type: ignore[attr-defined]
         self._keep_clip(t.id, radio_voice(seg.audio, deemph=False), processed=True)
         self._keep_source(t.id, seg.audio)
@@ -1808,10 +1829,10 @@ class App:
                     jobs.append((p.start, Rerun(p.id, "page", got[1], start=p.start, as_alt=as_alt), got[0]))
                     seen.add(p.id)
         traffic = list(self.store.loose) + [t for i in self.store.incidents for t in i.traffic]
-        first: dict[str, bool] = {}         # live: Fire/EMS 15 and the firegrounds ahead (STT_FIRST)
+        keys: dict[str, str] = {}           # live: each one's channel, for its class (_stt_priority)
         for t in traffic:
             if (want is None or t.id in want) and t.id not in busy and t.id not in seen:
-                first[t.id] = (channels.tg_key(t.talkgroup) if t.talkgroup is not None else t.source) in STT_FIRST
+                keys[t.id] = channels.tg_key(t.talkgroup) if t.talkgroup is not None else t.source
                 got = self._rerun_audio(t.id, getattr(t, "fm", self._kind.get(t.source) != "airband"))
                 if got:
                     low = speech_seconds(got[0]) < MIN_SPEECH_S  # same mic-click rule as the live pass
@@ -1823,8 +1844,9 @@ class App:
                 self.rerun = {"total": 0, "done": 0, "changed": 0, "failed": 0}
             n = 0
             for _start, job, audio in jobs:
-                prio = RERUN if not live else URGENT if job.kind == "page" or first.get(job.id) else LIVE
-                if self.stt.submit(job, audio, priority=prio):
+                key = keys.get(job.id, "")
+                prio = RERUN if not live else self._stt_priority(job, key)
+                if self.stt.submit(job, audio, priority=prio, channel=(key or None) if live else None, fallback=live):
                     self._rerun_ids.add(job.id)
                     n += 1
             self.rerun["total"] += n
@@ -1972,10 +1994,17 @@ class App:
             self._aws_wait[item.id] = (pcm, key)
         self.stt.submit(item, audio, self._stt_priority(item, key), key)    # (dropped: _stt_dropped says so on it)
 
-    @staticmethod
-    def _stt_priority(item, key: str) -> int:
-        """Pages, Fire/EMS 15 and the firegrounds ahead of other live traffic on the whisper queue."""
-        return URGENT if not isinstance(item, (Traffic, Rerun)) or key in STT_FIRST or key in AIRBAND_FIRST else LIVE
+    def _stt_priority(self, item, key: str) -> int:
+        """The whisper queue's class (strict, sizeup/stt.py, #300): pages, Fire/EMS 15 and the firegrounds first
+        (URGENT), the airband pre-alerts (HIGH), other live traffic (LIVE), and last a talkgroup heard only as
+        context (LOW: not "main" in Settings > Radios), which is shed when whisper is behind."""
+        if not isinstance(item, (Traffic, Rerun)) or getattr(item, "kind", "") == "page" or key in STT_FIRST:
+            return URGENT
+        if key in AIRBAND_FIRST:
+            return HIGH
+        if channels.is_tg(key) and not self.tg.main(int(key[3:])):
+            return LOW
+        return LIVE
 
     def _stt_dropped(self, item, why: str) -> None:
         """The whisper queue dropped or skipped it (sizeup/stt.py SttQueue, #195): it says so ("Transcription
@@ -1991,8 +2020,9 @@ class App:
             if not item.as_alt:
                 self._rerun_finish(item.id, f"failed: {why}"[:200])
             return
-        item.raw, item.confidence, item.status = "", None, "error"
-        item.model = f"{Path(self.cfg.stt_model).name} (not transcribed: {why})"[:200]
+        shed = why.startswith(SHED)             # whisper was busy (#300): a quiet "skipped", still re-runnable
+        item.raw, item.confidence, item.status = "", None, "skipped" if shed else "error"
+        item.model = f"{Path(self.cfg.stt_model).name} ({why if shed else 'not transcribed: ' + why})"[:200]
         self._transcribed(item)
 
     # -- Amazon Transcribe (the hub; all-in-one with [stt] aws) ---------------------------------------------
@@ -2137,7 +2167,7 @@ class App:
         item, _key = self._find(job.id)
         if item is None:
             return
-        if getattr(item, "status", "") == "error" and job.alt is None and not job.rerun:
+        if getattr(item, "status", "") in ("error", "skipped") and job.alt is None and not job.rerun:
             log(f"aws transcribe: {job.kind} {job.id}: a late answer, and the fallback had none: it is the text")
             return self._aws_done(job, text, conf)
         log(f"aws transcribe: {job.kind} {job.id}: a late answer, kept as the alternative: {text}")

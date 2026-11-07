@@ -6,6 +6,8 @@ served the same minute, and for a few cameras the master playlist, chunklist and
 
   - every CARS-Hub camera in our area with live video stays on the list (itself, or the same camera from another
     source that has video too): 511NY cameras vanished from the list once;
+  - no camera is listed twice (#320): no two listed cameras name the same stream, and a record merged away names
+    (Roads.alias) one that is listed;
   - every recorded segment is whole MPEG-TS (188-byte packets, each with the sync byte; the PAT, the PMT and video
     frames in it), and the hub's proxy never serves one cut short: byte for byte, or (#276) repaired, its broken
     frames left out and the rest whole; the first segment asked for directly (a truncated first segment was a real
@@ -132,13 +134,47 @@ def test_every_carshub_camera_with_video_stays_on_the_list(replay_sets, tmp_path
             for when, rd in (("read", fresh), ("restarted", restarted)):
                 listed = rd.merged("cameras")
                 ids = {c["id"] for c in listed}
+                kept = {c["id"]: c for c in listed}
                 gone = [c["id"] for c in with_video
-                        if c["id"] not in ids and not any(o.get("has_video") and r.same_camera(c, o) for o in listed)]
+                        if c["id"] not in ids and not (kept.get(rd.alias(c["id"])) or {}).get("has_video")
+                        and not any(o.get("has_video") and r.same_camera(c, o) for o in listed)]
                 assert not gone, (f"{s.name} ({when}, ours too: {with_ours}): CARS-Hub cameras with video missing "
                                   f"from the list: {gone}")
                 if not with_ours:
-                    ours = len([c for c in listed if c["source"] == r.SOURCE])
-                    assert ours == len(area), f"{s.name} ({when}): {ours} CARS-Hub cameras listed of {len(area)}"
+                    ours = [c["id"] for c in area if rd.alias(c["id"]) in ids]
+                    assert len(ours) == len(area), f"{s.name} ({when}): {len(ours)} CARS-Hub cameras listed of {len(area)}"
+
+
+def test_no_two_listed_cameras_share_a_stream(replay_sets):
+    """#320: one camera listed twice (two sources' records, or one source's two) is two tiles, two streams open and two
+    of the DVR's slots. Every listed camera's stream (its HLS folder, or a still named for one) is its own."""
+    for s in replay_sets("camera"):
+        fetch = ReplayFetch(s)
+        for with_ours in (False, True):
+            rd = make(fetch, with_ours)
+            listed = rd.merged("cameras")
+            seen: dict[str, str] = {}
+            twice = []
+            for c in listed:
+                for k in r.stream_keys(c):
+                    if k in seen:
+                        twice.append((seen[k], c["id"]))
+                    seen[k] = c["id"]
+            assert not twice, f"{s.name} (ours too: {with_ours}): {len(twice)} pairs of listed cameras share a stream"
+            # nor one source's two records of a camera: the same name in other words at one route and milepost (#320:
+            # the CARS-Hub's older and newer records, each with its own stream)
+            places: dict[tuple, str] = {}
+            same = 0
+            for c in listed:
+                key = (c.get("source"), r.name_key(c["name"]), r.road_key(c), c.get("mile"))
+                if len(key[1]) >= 2 and key[3]:
+                    same += key in places
+                    places[key] = c["id"]
+            assert not same, f"{s.name} (ours too: {with_ours}): {same} cameras listed twice by one source"
+            ids = [c["id"] for c in listed]
+            assert len(ids) == len(set(ids)), f"{s.name}: an id listed twice"
+            for gone, kept in rd.aliases().items():
+                assert kept in ids, f"{s.name}: a merged-away camera names one not listed"
 
 
 def test_recorded_segments_are_whole_and_the_proxy_never_serves_one_cut_short(replay_sets):

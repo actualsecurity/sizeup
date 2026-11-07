@@ -18,6 +18,9 @@
 #                                give one dongle a new, unique serial (two with one serial can't be told
 #                                apart, #242): stops the radios, backs up its EEPROM to ~/sizeup-eeprom-backups,
 #                                writes it with rtl_eeprom, waits for the replug, starts them again
+#   sizeup-station stt [--hours H] [--bench clip.wav]
+#                                why speech-to-text is behind (#300): whisper's model, threads and pace, CPU use and
+#                                niceness of the radios, readsb and whisper, clips shed or skipped (read-only)
 #   sizeup-station version
 #
 # Never prints a secret: the hub check goes through the station itself (POST /api/station-mode/test).
@@ -308,6 +311,7 @@ case "$cmd" in
     need_root sdr-serial "$@"
     cd /
     exec env PYTHONPATH="$APP" PYTHONDONTWRITEBYTECODE=1 LD_LIBRARY_PATH="$RTLSDR_LIB" "$VENV/bin/python" -P -m sizeup.radio.sdrserial "$@" ;;
+  stt) exec python3 -I "$APP/tools/stt_diag.py" "$@" ;;
   version)
     echo "release: $(readlink -f /opt/sizeup/current 2>/dev/null || echo "none ($APP)") build $(cat "$APP/BUILD" 2>/dev/null || echo '?')"
     git --git-dir=/opt/sizeup/repo.git log -1 --format='%h %s (%cd)' --date=short "$(cat "$APP/BUILD" 2>/dev/null || echo HEAD)" 2>/dev/null || true
