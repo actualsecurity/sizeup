@@ -43,7 +43,15 @@ class LtxError(ValueError):
 
 
 def lz4_block(src: bytes, size: int) -> bytes:
-    """Decompress one LZ4 block (no frame) of known decompressed size."""
+    """Decompress one LZ4 block (no frame) of known decompressed size. A malformed block (truncated, an offset
+    before the start, more output than `size`) is an LtxError, never an IndexError or unbounded output."""
+    try:
+        return _lz4_block(src, size)
+    except IndexError:
+        raise LtxError("lz4: truncated block") from None
+
+
+def _lz4_block(src: bytes, size: int) -> bytes:
     out = bytearray()
     i, n = 0, len(src)
     while i < n:
@@ -57,6 +65,8 @@ def lz4_block(src: bytes, size: int) -> bytes:
                 lit += b
                 if b != 255:
                     break
+        if len(out) + lit > size or i + lit > n:
+            raise LtxError("lz4: literals past the page or the block")
         out += src[i:i + lit]
         i += lit
         if i >= n:
@@ -74,6 +84,8 @@ def lz4_block(src: bytes, size: int) -> bytes:
                 if b != 255:
                     break
         ml += 4
+        if len(out) + ml > size:
+            raise LtxError("lz4: match past the page")
         start = len(out) - off
         if start < 0:
             raise LtxError("lz4: offset before the start")
@@ -91,11 +103,18 @@ def lz4_block(src: bytes, size: int) -> bytes:
     return bytes(out)
 
 
+MAX_COMMIT = 1 << 22            # pages: 16 GiB at 4 KiB, far past the hub's databases (audio.sqlite ~270 MB)
+
+
 def header(b: bytes) -> dict:
     if len(b) < HEADER or b[:4] != MAGIC:
         raise LtxError("not an LTX file")
     (flags, page_size, commit, min_tx, max_tx, ts, pre, wal_off, wal_size, s1, s2,
      node) = struct.unpack(">IIIQQqQqqIIQ", b[4:80])
+    if page_size < 512 or page_size > 65536 or page_size & (page_size - 1):
+        raise LtxError(f"page size {page_size}: not a power of two from 512 to 65536")
+    if not 0 < commit <= MAX_COMMIT:
+        raise LtxError(f"commit {commit} pages: out of range (1 to {MAX_COMMIT})")
     return {"flags": flags, "page_size": page_size, "commit": commit, "min_txid": min_tx, "max_txid": max_tx,
             "timestamp_ms": ts, "pre_apply_checksum": pre, "wal_offset": wal_off, "wal_size": wal_size}
 
@@ -109,6 +128,8 @@ def pages(b: bytes):
         pgno, flags = struct.unpack(">IH", b[off:off + 6])
         if pgno == 0:
             return
+        if off + 10 > len(b):
+            raise LtxError(f"page {pgno}: truncated page header")
         (size,) = struct.unpack(">I", b[off + 6:off + 10])
         off += 10
         if off + size > len(b):
@@ -150,8 +171,9 @@ def listing(url: str) -> list[tuple[int, int, int, str]]:
     return files
 
 
-def plan(files: list[tuple[int, int, int, str]]) -> list[tuple[int, int, int, str]]:
-    """The newest snapshot (from TXID 1), then the files that carry it on, each the one reaching furthest."""
+def plan(files: list[tuple[int, int, int, str]], log: Callable[[str], None] = print) -> list[tuple[int, int, int, str]]:
+    """The newest snapshot (from TXID 1), then the files that carry it on, each the one reaching furthest. A file
+    beyond a gap (no file starts right after the chain's end) is left out, and the gap is said."""
     snaps = [f for f in files if f[1] == 1]
     if not snaps:
         raise SystemExit("no snapshot (no file from TXID 1)")
@@ -162,6 +184,11 @@ def plan(files: list[tuple[int, int, int, str]]) -> list[tuple[int, int, int, st
     while True:
         nxt = starts.get(chain[-1][2] + 1)
         if not nxt:
+            later = [f for f in files if f[1] > chain[-1][2] + 1]
+            if later:
+                lo = min(f[1] for f in later)
+                log(f"ltx: warning: a gap after TXID {chain[-1][2]:#x} (the next file starts at {lo:#x}); "
+                    f"restoring only up to {chain[-1][2]:#x}, {len(later)} later files left out")
             return chain
         chain.append(max(nxt, key=lambda f: (f[2], f[0])))
 
@@ -172,7 +199,7 @@ def restore(url: str, out: Path, work: Path | None = None, log: Callable[[str], 
     url = url.rstrip("/")
     work = Path(work) if work else out.parent / (out.name + ".ltx")
     work.mkdir(parents=True, exist_ok=True)
-    chain = plan(listing(url))
+    chain = plan(listing(url), log)
     total = sum(1 for _ in chain)
     log(f"ltx: {total} files, TXID {chain[0][1]:#x} to {chain[-1][2]:#x}")
     local = []

@@ -145,7 +145,7 @@ def departures(history: dict[str, list]) -> dict[str, list]:
 
 @pytest.mark.xfail(reason="#279: a departure off runway 34 lies on the approach path at lift-off, is read as arriving there "
                           "(PhaseMemory then holds it as 'maneuvering' while it climbs out); being fixed in #279",
-                   strict=False)
+                   strict=True)      # strict: once #279 lands this passes, and the XPASS says to take the mark off
 def test_departures_are_never_labelled_arriving(replay_sets):
     wrong, found = [], 0
     for s in replay_sets("adsb"):
@@ -178,10 +178,12 @@ WARMUP_S = 300.0
 
 
 def test_the_feed_loop_survives_a_long_outage(replay_sets):
+    checked = 0
     for s in replay_sets("adsb"):
         rp = Replay(s)
         if rp.end - rp.start < WARMUP_S + 120:
             continue
+        checked += 1
         logs: list[str] = []
         ly = layer(rp, station=True, logs=logs)
         seq = [0]
@@ -224,3 +226,4 @@ def test_the_feed_loop_survives_a_long_outage(replay_sets):
         if before:
             assert max(n for _, n in pictures) > 0, f"{s.name}: aircraft before the outage, none after"
         assert not any("Traceback" in m or "OverflowError" in m for m in logs), "\n".join(logs[-5:])
+    assert checked, f"no recording long enough ({WARMUP_S + 120:.0f} s) for the outage test"

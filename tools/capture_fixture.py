@@ -9,15 +9,20 @@ Each run writes one set, <cache>/<kind>/<set>/, with a manifest.json saying what
 and the command that captured it. The cache is $SIZEUP_REPLAY_DIR, else ~/.cache/sizeup-replay: outside the repo.
 Nothing captured ever goes into git (the repo is public); tools/replay_sync.py push shares it, privately.
 
-  adsb    the public ADS-B feeds sizeup reads (adsb.lol's point query, and adsb.fi's with --feeds) around HPN, every
-          --every s for --minutes: snapshots.jsonl.gz, one line per answer {t: when fetched (unix s), feed, status,
-          body: the JSON as served}. Within the feeds' limits (adsb.lol: 5 s was fine for shortfinal; adsb.fi: 1/s).
+  adsb    the public ADS-B feeds sizeup reads (adsb.lol's point query, and adsb.fi's with --feeds) around HPN,
+          every --every s (at least 1) for --minutes: snapshots.jsonl.gz, one line per answer {t: when fetched
+          (unix s), feed, status, body: the JSON as served}. Within the feeds' limits (adsb.fi: 1/s); a feed that
+          fails (adsb.lol answers 429 at 5 s at times) rests, doubling, up to 2 minutes.
   camera  the 511NY CARS-Hub's camera streams in our area: the CCTV inventory (data/cctv.xml, HTTP Basic: the
           username and password from the macOS Keychain, account pcfd, services sizeup-511ny-carshub-user / -pass;
           they are only ever in the request's Authorization header, never printed or written), trimmed to our
           area's cameras; the Thruway's and the county's public camera lists (what Roads merges them with); then
           for --cameras of the CARS-Hub cameras with video the master playlist, its chunklist and the newest
-          --segments segments, exactly as served. One inventory request (511NY: once every 5 minutes at most).
+          --segments segments, exactly as served. One inventory request: 511NY allows one every 5 minutes, so
+          the cache's .ny511-last-request stamp refuses a second capture within 5 minutes. The hub polls the same
+          inventory with the same account (hourly): a capture can still land within 5 minutes of the hub's own
+          poll; capture rarely. Names from the source (camera ids, chunklist and segment names) must be plain
+          file names: '/', '..' or a leading '.' is refused, so nothing is written outside the set's folder.
   audio   clips restored read-only from the hub's Litestream backup of audio.sqlite
           (s3://sizeup-hub-backups-504804195561/sizeup-hub/audio.sqlite/, tools/ltx.py), restored to a temporary
           file deleted afterwards: only the airband channels' clips (HPN Tower, HPN Ground, NY Approach: public air
@@ -32,6 +37,7 @@ from __future__ import annotations
 import argparse
 import gzip
 import json
+import re
 import shlex
 import shutil
 import sqlite3
@@ -58,6 +64,17 @@ def how() -> str:
     return "tools/capture_fixture.py " + " ".join(shlex.quote(a) for a in sys.argv[1:])
 
 
+SAFE_NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.:-]{0,127}$")
+
+
+def safe_name(name: str) -> str:
+    """A file or folder name from a source (a camera id, a segment's name): one plain name, never a path. Refuses
+    '/', '..', a leading '.', and anything else outside SAFE_NAME, so nothing lands outside the set's folder."""
+    if not SAFE_NAME.fullmatch(name) or ".." in name:
+        raise ValueError(f"not a plain file name: {name[:80]!r}")
+    return name
+
+
 def new_set(kind: str, prefix: str) -> Path:
     d = cache_dir() / kind / set_id(prefix)
     d.mkdir(parents=True, exist_ok=False)
@@ -73,6 +90,7 @@ def adsb(args) -> None:
     for f in feeds:
         if f not in urls:
             raise SystemExit(f"unknown feed {f} (adsblol, adsbfi)")
+    every = max(1.0, float(args.every))            # never faster than one round a second
     d = new_set("adsb", "hpn")
     raw = d / "snapshots.jsonl"
     start = time.time()
@@ -81,6 +99,7 @@ def adsb(args) -> None:
     rest = {f: 0.0 for f in feeds}                 # a feed that says 429 rests (doubling, at most 2 min)
     fails = {f: 0 for f in feeds}
     errors = 0
+    said = time.time()
     with open(raw, "w", encoding="utf-8") as out:
         while time.time() < end:
             tick = time.time()
@@ -94,7 +113,7 @@ def adsb(args) -> None:
                 except (HTTPError, URLError, OSError, ValueError) as e:
                     errors += 1
                     fails[f] += 1
-                    rest[f] = time.time() + min(120.0, args.every * 2 ** min(fails[f], 5))
+                    rest[f] = time.time() + min(120.0, every * 2 ** min(fails[f], 5))
                     print(f"{f}: {type(e).__name__}: {getattr(e, 'reason', e)}; resting {rest[f] - time.time():.0f} s",
                           flush=True)
                     continue
@@ -103,16 +122,17 @@ def adsb(args) -> None:
                                      separators=(",", ":")) + "\n")
                 out.flush()
                 n[f] += 1
-            if sum(n.values()) % 60 == 0:
+            if time.time() - said >= 60:                   # progress once a minute
+                said = time.time()
                 print(f"{time.strftime('%H:%M:%S')} {n} answers, {errors} errors", flush=True)
-            time.sleep(max(0.0, args.every - (time.time() - tick)))
+            time.sleep(max(0.0, every - (time.time() - tick)))
     with open(raw, "rb") as fi, gzip.open(d / "snapshots.jsonl.gz", "wb") as fo:
         shutil.copyfileobj(fi, fo)
     raw.unlink()
     write_manifest(d, "adsb", source=", ".join(feeds) + f" point query, {args.radius} nm around HPN",
                    how=how(), captured_from=start, captured_to=time.time(),
                    files={"snapshots.jsonl.gz": "snapshots: one JSON line per feed answer {t, feed, status, body}"},
-                   extra={"every_s": args.every, "answers": n, "errors": errors})
+                   extra={"every_s": every, "answers": n, "errors": errors})
     print(f"{d}: {n} answers, {errors} errors")
 
 
@@ -147,7 +167,28 @@ def _trim_cctv(body: bytes, keep: set[str]) -> bytes:
     return text
 
 
+NY511_STAMP = ".ny511-last-request"           # in the cache: when this tool last asked 511NY for the inventory
+NY511_GAP_S = 300.0                            # 511NY: once every 5 minutes at most
+
+
+def ny511_wait(stamp: Path, now: float | None = None) -> float:
+    """Seconds still to wait before the next 511NY inventory request (0: go), from the stamp file's time.
+    Note the hub polls the same inventory with the same account (hourly, never under 5 min apart): a capture right
+    after one of its polls still makes two requests within 5 minutes; this only keeps the tool's own requests apart."""
+    now = time.time() if now is None else now
+    try:
+        last = float(stamp.read_text().strip())
+    except (OSError, ValueError):
+        return 0.0
+    return max(0.0, NY511_GAP_S - (now - last))
+
+
 def camera(args) -> None:
+    stamp = cache_dir() / NY511_STAMP
+    wait = ny511_wait(stamp)
+    if wait > 0:
+        raise SystemExit(f"511NY asks for at most one request every 5 minutes: the last capture asked "
+                         f"{NY511_GAP_S - wait:.0f} s ago; try again in {wait:.0f} s")
     auth = r.BasicAuth(keychain(KC_USER), keychain(KC_PASS))
     if not auth:
         raise SystemExit(f"no 511NY CARS-Hub credentials in the Keychain (account {ACCOUNT}, {KC_USER} / {KC_PASS})")
@@ -158,6 +199,8 @@ def camera(args) -> None:
 
     start = time.time()
     url = r.hub_cctv()
+    stamp.parent.mkdir(parents=True, exist_ok=True)
+    stamp.write_text(f"{start:.0f}\n")                # before the request: a failed one counts too
     try:
         code, _, body = r.http_get(url, r.TIMEOUT_S * 3, r.MAX_FEED_BYTES, auth.header())
     except (HTTPError, URLError, OSError, ValueError) as e:
@@ -187,7 +230,11 @@ def camera(args) -> None:
         files[name] = what
     streams = []
     for c in chosen:
-        cdir = Path("streams") / c["id"]
+        try:
+            cdir = Path("streams") / safe_name(c["id"])
+        except ValueError as e:
+            say(f"skipped a camera: {e}")
+            continue
         (d / cdir).mkdir(parents=True, exist_ok=True)
         rec = {"id": c["id"], "video": c["video"], "files": []}
         try:
@@ -220,16 +267,16 @@ def _stream(video: str, segments: int, out: Path) -> list[tuple[str, str]]:
     (out / "playlist.m3u8").write_bytes(master)
     got.append(("playlist.m3u8", f"master playlist, HTTP {code}, {h.get('content-type', '')}"))
     chunk = next((t.strip() for t in master.decode(errors="replace").splitlines() if t.strip() and not t.startswith("#")), "")
-    if not chunk or "/" in chunk.split("?")[0]:
+    if not chunk:
         return got
+    cname = safe_name(chunk.split("?")[0])               # a plain name in the stream's folder, never a path
     code, h, chunklist = r.http_get(base + chunk, r.STREAM_TIMEOUT_S, r.STREAM_MAX_BYTES)
-    cname = chunk.split("?")[0]
     (out / cname).write_bytes(chunklist)
     got.append((cname, f"chunklist, HTTP {code}, {h.get('content-type', '')}"))
     names = [t.strip() for t in chunklist.decode(errors="replace").splitlines() if t.strip() and not t.startswith("#")]
     for name in names[-segments:]:
+        sname = safe_name(name.split("?")[0])
         code, h, seg = r.http_get(base + name, r.STREAM_TIMEOUT_S, r.STREAM_MAX_BYTES)
-        sname = name.split("?")[0]
         (out / sname).write_bytes(seg)
         got.append((sname, f"segment, HTTP {code}, {h.get('content-type', '')}, content-length "
                            f"{h.get('content-length', '?')}"))
@@ -254,7 +301,10 @@ def audio(args) -> None:
     start = time.time()
     with tempfile.TemporaryDirectory(prefix="sizeup-ltx-") as tmp:
         db_path = Path(tmp) / "audio.sqlite"
-        work = Path(args.ltx_cache).expanduser() if args.ltx_cache else Path(tmp) / "ltx"
+        work = Path(args.ltx_cache).expanduser().resolve() if args.ltx_cache else Path(tmp) / "ltx"
+        if args.ltx_cache and (work == ROOT or ROOT in work.parents):
+            raise SystemExit(f"--ltx-cache {work} is inside the repo: the LTX files hold the whole audio database "
+                             "(dispatch audio too); keep them outside it")
         info = ltx.restore(f"{BACKUP}/audio.sqlite", db_path, work=work, log=print)
         con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
         rows = []
@@ -286,7 +336,7 @@ def main(argv=None) -> None:
     sub = p.add_subparsers(dest="what", required=True)
     a = sub.add_parser("adsb")
     a.add_argument("--minutes", type=float, default=40.0)
-    a.add_argument("--every", type=float, default=5.0)
+    a.add_argument("--every", type=float, default=5.0, help="seconds between rounds (at least 1)")
     a.add_argument("--feeds", default="adsblol")
     a.add_argument("--radius", type=int, default=int(ac.RADIUS_NM))
     c = sub.add_parser("camera")

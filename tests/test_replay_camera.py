@@ -58,9 +58,10 @@ class ReplayFetch:
         self.urls.append(url)
         base = url.split("?")[0]
         if base not in self.bodies:
-            raise AssertionError(f"not in the recording: {url}")
+            raise AssertionError("a fetch the recording doesn't have")       # (the address not printed: private)
         h, body = self.bodies[base]
-        assert len(body) <= limit, f"{url}: {len(body)} bytes over the limit {limit}"
+        over = len(body) > limit
+        assert not over, f"a recorded body of {len(body)} bytes is over the limit {limit}"
         return 200, dict(h), body
 
 
@@ -107,7 +108,8 @@ def test_every_carshub_camera_with_video_stays_on_the_list(replay_sets, tmp_path
             # ... and after a restart, from the hub's disk cache alone (nothing fetched)
             offline = ReplayFetch(s)
             restarted = make(offline, with_ours, cache, read=False)
-            assert not offline.urls, f"fetched after a restart: {offline.urls}"
+            fetched = len(offline.urls)
+            assert fetched == 0, f"{fetched} fetches after a restart (from the disk cache alone: none)"
             for when, rd in (("read", fresh), ("restarted", restarted)):
                 listed = rd.merged("cameras")
                 ids = {c["id"] for c in listed}
@@ -116,7 +118,8 @@ def test_every_carshub_camera_with_video_stays_on_the_list(replay_sets, tmp_path
                 assert not gone, (f"{s.name} ({when}, ours too: {with_ours}): CARS-Hub cameras with video missing "
                                   f"from the list: {gone}")
                 if not with_ours:
-                    assert len([c for c in listed if c["source"] == r.SOURCE]) == len(area), f"{s.name} ({when})"
+                    ours = len([c for c in listed if c["source"] == r.SOURCE])
+                    assert ours == len(area), f"{s.name} ({when}): {ours} CARS-Hub cameras listed of {len(area)}"
 
 
 def test_recorded_segments_are_whole_and_the_proxy_serves_them_byte_for_byte(replay_sets):
@@ -132,30 +135,36 @@ def test_recorded_segments_are_whole_and_the_proxy_serves_them_byte_for_byte(rep
             label = f"{s.name} {st['id']}"
             for n in segs:
                 body = s.file(f"streams/{st['id']}/{n}").read_bytes()
-                assert not ts_whole(body), f"{label} {n}: {ts_whole(body)}"
+                bad = ts_whole(body)
+                assert not bad, f"{label} {n}: {bad}"
                 recorded = next(f for f in st["files"] if f["name"] == n)["what"]
                 if "content-length " in recorded and recorded.rsplit(" ", 1)[-1].isdigit():
-                    assert int(recorded.rsplit(" ", 1)[-1]) == len(body), f"{label} {n}: shorter than its Content-Length"
+                    same = int(recorded.rsplit(" ", 1)[-1]) == len(body)
+                    assert same, f"{label} {n}: not its Content-Length"
             assert rd.camera(st["id"]) is not None, f"{label}: not on the list"
             code, master, _, _ = rd.stream(st["id"], "playlist.m3u8", "v1")
-            assert code == 200, f"{label}: master playlist {code} {master[:120]!r}"
+            assert code == 200, f"{label}: master playlist HTTP {code}"
             chunk = next(t.split("?")[0] for t in master.decode().splitlines() if t and not t.startswith("#"))
             code, chunklist, _, _ = rd.stream(st["id"], chunk)
-            assert code == 200, f"{label}: chunklist {code} {chunklist[:120]!r}"
+            assert code == 200, f"{label}: chunklist HTTP {code}"
             listed = [t for t in chunklist.decode().splitlines() if t and not t.startswith("#")]
-            assert listed[-len(segs):] == segs, f"{label}: the hub's chunklist names other segments"
+            same = listed[-len(segs):] == segs
+            assert same, f"{label}: the hub's chunklist names other segments"
             # the first segment, asked for directly (before the pump has it), then the pump's fetches ahead
             first = segs[0]
             code, body, ctype, _ = rd.stream(st["id"], first)
             want = s.file(f"streams/{st['id']}/{first}").read_bytes()
             assert code == 200 and ctype == "video/MP2T", f"{label} {first}: {code} {ctype}"
-            assert body == want, f"{label} {first}: served {len(body)} bytes of {len(want)}"
+            whole = body == want
+            assert whole, f"{label} {first}: served {len(body)} bytes, not the {len(want)} recorded"
             rd.pump_once(st["id"])
             for n in segs:
                 code, body, _, _ = rd.stream(st["id"], n)
                 want = s.file(f"streams/{st['id']}/{n}").read_bytes()
-                assert code == 200 and body == want, f"{label} {n}: served {len(body)} bytes of {len(want)}"
+                whole = code == 200 and body == want
+                assert whole, f"{label} {n}: HTTP {code}, served {len(body)} bytes, not the {len(want)} recorded"
             status = rd.stream_status(st["id"])
-            assert status["open"] and status["target_s"] and status["target_s"] >= 1, f"{label}: {status}"
+            ok = status["open"] and status["target_s"] and status["target_s"] >= 1
+            assert ok, f"{label}: stream status open={status['open']} target_s={status['target_s']}"
             checked += 1
     assert checked, "no recorded stream with segments"
