@@ -328,7 +328,7 @@ class CacheMirror:
                 continue                                  # replaced or gone between the look and the read
             except Exception as e:  # never fatal: logged, tried again later
                 st["fails"] += 1
-                wait_s = min(BACKOFF_S[1], BACKOFF_S[0] * 2 ** (st["fails"] - 1))
+                wait_s = min(BACKOFF_S[1], BACKOFF_S[0] * 2 ** min(st["fails"] - 1, 30))
                 why = f"{type(e).__name__}: {e}"[:200]
                 if why != st["error"]:
                     self.log(f"cachesync: {rel} not uploaded ({why}); again in {wait_s / 60:.0f} min")

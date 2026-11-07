@@ -839,3 +839,90 @@ def test_station_health_reports_the_decoder_and_alerts_when_it_is_down():
     assert "adsb" not in r.keys() and r.h.model()["adsb"]["held_by"]["app"] == "shortfinal"   # a handover: shown, not alerted
     js = (ROOT / "sizeup" / "web" / "static" / "health.js").read_text()
     assert "ADS-B receiver (station)" in js and "messages_per_s" in js
+
+
+# -- #269: the hub's poll died on "OverflowError: int too large to convert to float" ------------------------------------
+
+HUGE = 10 ** 400                     # JSON allows any number of digits; Python reads it as an int no float can hold
+
+
+def test_a_station_quiet_for_hours_never_overflows_the_backoff_and_the_api_feeds_go_on():
+    """The hub's receiver feed fails every 5 s while the station is quiet; after 1024 of them (85 min) the backoff,
+    5.0 * 2 ** fails, raised OverflowError on every poll and nothing was read or combined any more (#269)."""
+    clock = Clock(T3 + 0.5)
+    said = []
+    ly = hub_layer(clock, Feeds(lol=(LOL3,), fi=(FI3,)))
+    ly.log = said.append
+    ly.station_ingest(post_body(list(readsb_snap(now=clock.t).planes)[:2]), 900)
+    rx = ly.feeds[0]
+    rx.st["fails"] = 1100                       # the quiet station, hours on
+    clock.t += A.RECEIVER_KEEP_S + 1
+    for f in ly.feeds:
+        f.st["rest_until"] = f.st["next"] = 0
+    assert ly.refresh()                         # the APIs answered and were combined
+    assert rx.st["rest_until"] - clock.t == pytest.approx(A.BACKOFF_S[0])   # ours: back the moment it is
+    assert {a["src"] for a in ly.public()["aircraft"]} <= {"adsblol", "adsbfi"} and ly.public()["aircraft"]
+    assert not [m for m in said if "OverflowError" in m]
+
+
+def test_a_huge_number_in_our_receivers_json_drops_that_field_and_keeps_the_aircraft():
+    good = {"hex": "a00001", "lat": 41.07, "lon": -73.70, "alt_baro": 2500, "gs": 140.0, "seen": 0.2, "seen_pos": 0.2}
+    odd = dict(good, hex="a00002", gs=HUGE, track=-HUGE, baro_rate=HUGE, rssi=HUGE, seen=HUGE, alt_baro=HUGE)
+    nonsense = dict(good, hex="a00003", lat=HUGE, lon=HUGE, alt_geom=float("inf"), seen_pos=float("nan"))
+    snap = parse_snapshot({"now": T3, "aircraft": [good, odd, nonsense]}, band="1090")
+    by = {p.hex: p for p in snap.planes}
+    assert set(by) == {"a00001", "a00002", "a00003"}
+    assert by["a00002"].gs is None and by["a00002"].track is None and by["a00002"].alt_baro is None
+    assert by["a00002"].lat == 41.07 and by["a00002"].seen == 0.0
+    assert by["a00003"].lat is None and by["a00003"].lon is None and by["a00003"].alt_geom is None
+    with pytest.raises(ValueError):
+        parse_snapshot({"now": HUGE, "aircraft": [good]})          # no usable time: refused, never an OverflowError
+    assert parse_snapshot({"now": T3 * 1000, "ac": [good, odd]}).now == pytest.approx(T3)
+
+
+def test_a_huge_number_in_a_forwarded_post_drops_that_field_and_the_hub_keeps_the_rest():
+    clock = Clock(T3 + 0.5)
+    ly = hub_layer(clock)
+    ok = ["a00001", 41.07, -73.70, 2500, 140.0, 90.0, 0, "1200", "", "TEST1", 0.2, 0.2, -12.0, "A1", "adsb", "1090", 0.0]
+    big = ["a00002", 41.08, -73.71, 2600, HUGE, -HUGE, HUGE, "1200", "", "TEST2", 0.3, HUGE, HUGE, "A1", "adsb", "1090",
+           HUGE]
+    body = {"v": 1, "epoch": "e1", "seq": 0, "full": True, "ac": [ok, big], "gone": []}
+    raw = json.dumps(body).encode()                      # through JSON, as the hub gets it
+    assert ly.station_ingest(json.loads(raw), len(raw))["ok"]
+    assert unwire(["a00003", 41.0, -73.7, HUGE] + [None] * 13)["alt"] is None
+    r = unwire(big)
+    assert r["alt"] == 2600 and r["gs"] is None and r["trk"] is None and r["s"] == 0.0 and r["lat"] == 41.08
+    ly.asked = clock.t
+    ly.tick()
+    got = {a["hex"]: a for a in ly.public()["aircraft"]}
+    assert got["a00001"]["src"] == "receiver" and got["a00002"]["src"] == "receiver"
+
+
+def test_a_bug_in_the_poll_logs_its_traceback_once_then_a_count_every_few_minutes():
+    clock = Clock(T3 + 0.5)
+    said = []
+    ly = hub_layer(clock)
+    ly.log = said.append
+
+    def boom():
+        return float(HUGE)                       # OverflowError: int too large to convert to float
+    ly.tick = boom
+    ly._stop.clear()
+    for _ in range(50):                          # 50 polls, a second apart
+        try:
+            ly.tick()
+        except Exception as e:  # noqa: BLE001 - what _run does
+            ly._error("poll", e)
+        clock.t += 1
+    assert len(said) == 1 and "Traceback" in said[0] and "OverflowError" in said[0] and "logged once" in said[0]
+    clock.t += A.ERROR_LOG_EVERY_S
+    try:
+        ly.tick()
+    except Exception as e:  # noqa: BLE001
+        ly._error("poll", e)
+    assert len(said) == 2 and "Traceback" not in said[1] and "50 times" in said[1]
+    try:
+        raise ValueError("another")
+    except ValueError as e:
+        ly._error("poll", e)                     # a different error: its own traceback
+    assert len(said) == 3 and "Traceback" in said[2] and "ValueError" in said[2]

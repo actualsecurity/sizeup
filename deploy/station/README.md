@@ -431,6 +431,15 @@ change; `python3 -I /usr/local/lib/sizeup/adsbd.py print` shows the command line
 dongle's claim in `~/.local/state/rtl-claims` while readsb runs, and never starts while another app holds it. An
 update restarts it only when the decoder or its unit changed.
 
+USB transfer memory (#269): every dongle on the host (readsb, each rtl_fm, trunk-recorder) shares the kernel's
+`usbfs_memory_mb` (16 MB by default). With about six dongles it runs out and readsb dies a few seconds in with
+`Failed to submit transfer`, `echo 0 > /sys/module/usbcore/parameters/usbfs_memory_mb` and `rtlsdr_read_async returned
+unexpectedly` (the cause shows as `usbfs`). The station sets it to 0 (no limit) as root: install-linux.sh (now, and
+`/etc/modprobe.d/sizeup-usbfs.conf` where usbcore is a module), `sizeup-usbfs.service` at every boot (WSL2's usbcore is
+built in), and sizeup-adsb's `ExecStartPre=+`. A missing or read-only file is noted and never stops anything.
+`sizeup-station status` and `doctor`, Settings > Radios and the hub's Health show the value. If readsb still dies
+that way twice in a row, it is restarted with smaller USB transfers (`--sdr-buffer-size 32`, KiB, instead of 128).
+
 ## HPN ATC: the airband dongle
 
 The airport pre-alerts (#233, `sizeup/atc.py`) listen to Westchester Tower on **118.575 MHz AM** (FAA Chart

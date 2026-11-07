@@ -190,7 +190,7 @@ class AircraftForwarder:
                 "detail": dec.get("detail") or self.reading, "messages_per_s": dec.get("messages_per_s"),
                 "aircraft": dec.get("aircraft"), "last_message_at": dec.get("last_message_at"),
                 "gain": row.get("gain"), "bias_tee": row.get("bias_tee"), "source": row.get("source"),
-                "cause": dec.get("cause") or "", "holder": dec.get("holder") or ""}
+                "cause": dec.get("cause") or "", "holder": dec.get("holder") or "", "usbfs_mb": dec.get("usbfs_mb")}
 
     # -- one turn -------------------------------------------------------------------------------------------------
 
@@ -219,7 +219,7 @@ class AircraftForwarder:
         except HubError as e:
             self.fails += 1
             self.dropped_posts += 1
-            wait = min(BACKOFF_S[1], BACKOFF_S[0] * 2 ** (self.fails - 1))
+            wait = min(BACKOFF_S[1], BACKOFF_S[0] * 2 ** min(self.fails - 1, 30))
             self.next_post = now + wait * random.uniform(0.9, 1.1)
             if self.error_since is None or self.fails in (1, 10) or self.fails % 100 == 0:
                 self.log(f"aircraft to the hub: {e}; dropped (live data isn't queued), next try in {wait:.0f} s")

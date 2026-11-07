@@ -842,9 +842,10 @@ activate() {
   [ ! -f "$sys/../../sizeup/radio/adsbd.py" ] || install -D -m 0644 "$sys/../../sizeup/radio/adsbd.py" "$LIB/adsbd.py"
   # trunk-recorder's supervisor (#71; a release from before it runs trunk-recorder inside sizeup-station)
   [ ! -f "$sys/../../sizeup/radio/trunkrecd.py" ] || install -D -m 0644 "$sys/../../sizeup/radio/trunkrecd.py" "$LIB/trunkrecd.py"
-  for t in sizeup-station.service sizeup-whisper.service sizeup-health.service sizeup-health.timer \
+  for t in sizeup-usbfs.service sizeup-station.service sizeup-whisper.service sizeup-health.service sizeup-health.timer \
            sizeup-update.service sizeup-update.path sizeup-update.timer sizeup-adsb.service sizeup-trunk-recorder.service; do
-    [ -f "$sys/systemd/$t" ] || continue                       # (sizeup-adsb: from before #235; sizeup-trunk-recorder: #71)
+    [ -f "$sys/systemd/$t" ] || continue                       # (sizeup-adsb: from before #235; sizeup-trunk-recorder: #71;
+                                                               # sizeup-usbfs: #269)
     install -m 0644 "$sys/systemd/$t" "/etc/systemd/system/$t"
   done
   install -D -m 0644 "$sys/systemd/journald-sizeup.conf" /etc/systemd/journald.conf.d/sizeup.conf
@@ -909,6 +910,11 @@ PY
   systemctl enable --quiet sizeup-station.service sizeup-whisper.service sizeup-health.timer \
     sizeup-update.path sizeup-update.timer
   [ ! -f /etc/systemd/system/sizeup-adsb.service ] || systemctl enable --quiet sizeup-adsb.service
+  # no usbfs buffer limit (#269), at every boot and now, before the dongles' services (re)start; never fails the switch
+  if [ -f /etc/systemd/system/sizeup-usbfs.service ]; then
+    systemctl enable --quiet sizeup-usbfs.service || warn "sizeup-usbfs: couldn't enable it"
+    systemctl restart sizeup-usbfs.service || warn "sizeup-usbfs: didn't run (systemctl status sizeup-usbfs)"
+  fi
   # trunk-recorder first: sizeup-station then hands the dongle to (or adopts) the one that runs. Left running unless
   # what it runs changed, so a Python-only update keeps Fire/EMS 15 on the air (same trunk-recorder PID).
   trunk_recorder_service "$tr_was"
@@ -1079,6 +1085,24 @@ EOF
 # gr-osmosdr on Debian / Pi OS, whose own librtlsdr0 predates the V4). Ubuntu 24.04's gr-osmosdr uses
 # librtlsdr.so.2 (osmocom 2.0.1, which knows the V4 too). Through the link: it follows the release.
 echo "$OPT/rtl-sdr/lib" > /etc/ld.so.conf.d/00-sizeup-rtlsdr.conf
+# The kernel's usbfs buffer limit (#269): shared by every dongle on this host (readsb, rtl_fm, trunk-recorder), 16 MB
+# by default, and with about six dongles it runs out ("Failed to submit transfer", readsb "lost the USB device"). 0 =
+# no limit: modprobe.d where usbcore is a module (at its next load), now through /sys (usbcore built in: WSL2, Pi OS),
+# and every boot and readsb start by sizeup-usbfs.service and sizeup-adsb's ExecStartPre. Missing or read-only: noted.
+cat > /etc/modprobe.d/sizeup-usbfs.conf <<'EOF'
+# sizeup (#269): no usbfs buffer limit, for many RTL-SDRs on one host (sizeup-usbfs.service sets it when built in)
+options usbcore usbfs_memory_mb=0
+EOF
+usbfs=/sys/module/usbcore/parameters/usbfs_memory_mb
+if [ ! -e "$usbfs" ]; then
+  say "usbfs_memory_mb: no $usbfs here (nothing to set)"
+elif [ "$(cat "$usbfs" 2>/dev/null)" = 0 ]; then
+  say "usbfs_memory_mb: 0 (no limit)"
+elif { echo 0 > "$usbfs"; } 2>/dev/null && [ "$(cat "$usbfs" 2>/dev/null)" = 0 ]; then
+  say "usbfs_memory_mb: now 0 (no limit on USB transfer memory)"
+else
+  warn "usbfs_memory_mb: $(cat "$usbfs" 2>/dev/null || echo '?') and it can't be written (readsb may run out of USB memory)"
+fi
 if [ "$CI_MODE" -eq 0 ]; then
   udevadm control --reload-rules 2>/dev/null || true
   udevadm trigger --subsystem-match=usb 2>/dev/null || true
@@ -1093,7 +1117,7 @@ activate "$NAME"
 if command -v systemd-analyze >/dev/null; then
   systemd-analyze verify /etc/systemd/system/sizeup-station.service /etc/systemd/system/sizeup-whisper.service \
     /etc/systemd/system/sizeup-adsb.service /etc/systemd/system/sizeup-trunk-recorder.service \
-    /etc/systemd/system/sizeup-health.timer /etc/systemd/system/sizeup-update.path \
+    /etc/systemd/system/sizeup-usbfs.service /etc/systemd/system/sizeup-health.timer /etc/systemd/system/sizeup-update.path \
     /etc/systemd/system/sizeup-update.timer || warn "systemd-analyze verify complained (above)"
 fi
 

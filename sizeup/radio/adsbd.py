@@ -11,6 +11,8 @@ never opens any other dongle. With no dongle named, nothing runs and no dongle i
         python3 -I adsbd.py run        supervise readsb (the service)
         python3 -I adsbd.py print      the readsb command line it would run now, or why none
         python3 -I adsbd.py status     the last status it wrote
+        python3 -I adsbd.py usbfs      as root: the kernel's usbfs buffer limit to 0 (unlimited), when it can be (#269);
+                                       sizeup-adsb's ExecStartPre (+, root) and sizeup-usbfs.service at boot run it
 
 What runs: readsb (wiedehopf, pinned and built by install-linux.sh, /opt/sizeup/readsb/bin/readsb) with
     --device-type rtlsdr --device <index>   the dongle's CURRENT index, looked up by its exact serial right before each
@@ -50,7 +52,15 @@ at which index; who has its USB device open (/proc/*/fd where readable, the shar
 sizeup's OWN leftover job (an rtl_fm or trunk-recorder under sizeup-station / sizeup-trunk-recorder, this user's), it is
 stopped and readsb retried at once: a reserved dongle never runs another job. Another app's process never is: the
 status says "held by <it>". cause, holder and the last DETAIL_LINES lines (tail) go to Settings and the hub. sizeup-station reads it for Settings > Radios and the
-station health it sends the hub (sizeup/cloud/health.py)."""
+station health it sends the hub (sizeup/cloud/health.py).
+
+The USB buffer limit (#269): the kernel gives all usbfs users together usbfs_memory_mb (16 MB by default) for their
+transfers, and readsb (16 x 128 KiB), every rtl_fm and trunk-recorder on one host share it. With about six dongles it
+runs out: librtlsdr says "Failed to submit transfer" and "echo 0 > /sys/module/usbcore/parameters/usbfs_memory_mb",
+readsb "rtlsdr_read_async returned unexpectedly" a few seconds in (cause "usbfs"). The station sets it to 0 (no limit)
+as root: install-linux.sh, sizeup-usbfs.service at boot, and sizeup-adsb's ExecStartPre (WSL2 included, where usbcore
+is built in and modprobe.d can't). This process (the sizeup user) can't write it: it reports it (status usbfs_mb), and
+after SMALL_AFTER such failures in a row runs readsb with smaller USB transfers (--sdr-buffer-size SMALL_BUF_KIB)."""
 
 from __future__ import annotations
 
@@ -86,6 +96,9 @@ STALL_S = 60.0                    # the dongle's sample count not moving this lo
 NO_SIGNAL_S = 120.0               # nothing decoded this long: "no signal"
 NO_SIGNAL_RESTART_S = (300.0, 1800.0)
 BACKOFF_S = (2.0, 30.0)
+USBFS = "module/usbcore/parameters/usbfs_memory_mb"        # under /sys: the kernel's usbfs buffer limit, MB (0: none)
+SMALL_AFTER = 2                   # this many usbfs / lost-USB exits in a row: readsb with smaller USB transfers
+SMALL_BUF_KIB = 32                # readsb --sdr-buffer-size (KiB; its default 128): 16 x 32 KiB in flight, not 2 MiB
 RATE_WINDOW_S = 60.0              # messages / s over the last minute
 
 
@@ -152,13 +165,56 @@ def settings(config: str = CONFIG, override: str = OVERRIDE) -> dict:
 
 
 def readsb_argv(binary: str, index: int, gain: str = "auto", bias_tee: bool = False, json_dir: str = JSON_DIR,
-                lat: float = REF[0], lon: float = REF[1]) -> list[str]:
-    """readsb on device `index` (resolved from the exact serial just before), aircraft.json every second."""
+                lat: float = REF[0], lon: float = REF[1], buffer_kib: int | None = None) -> list[str]:
+    """readsb on device `index` (resolved from the exact serial just before), aircraft.json every second; buffer_kib:
+    its USB transfer size (the fallback when the usbfs limit keeps running out, #269), else readsb's own 128."""
     argv = [binary, "--device-type", "rtlsdr", "--device", str(int(index)), "--gain", str(gain),
             "--lat", f"{lat:.5f}", "--lon", f"{lon:.5f}", "--write-json", json_dir, "--write-json-every", "1"]
     if bias_tee:
         argv.append("--enable-biastee")
+    if buffer_kib:
+        argv += ["--sdr-buffer-size", str(int(buffer_kib))]
     return argv
+
+
+# -- the kernel's usbfs buffer limit (#269) ---------------------------------------------------------------------------
+
+
+def usbfs_mb(sys_root: str = "/sys") -> int | None:
+    """usbfs_memory_mb now (0: no limit); None when there is no such file (no usbcore) or it can't be read."""
+    try:
+        return int((Path(sys_root) / USBFS).read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def set_usbfs(sys_root: str = "/sys") -> tuple[int | None, int | None, str]:
+    """usbfs_memory_mb to 0 when it isn't already: (before, after, what went wrong or ""). Never raises: a missing or
+    read-only file (no usbcore, a container, not root) is said, not an error."""
+    before = usbfs_mb(sys_root)
+    if before is None:
+        return None, None, f"no {Path(sys_root) / USBFS}"
+    if before == 0:
+        return 0, 0, ""
+    try:
+        (Path(sys_root) / USBFS).write_text("0\n")
+    except OSError as e:
+        return before, usbfs_mb(sys_root), f"can't write it ({e.strerror or type(e).__name__})"
+    after = usbfs_mb(sys_root)
+    return before, after, "" if after == 0 else f"still {after} after writing 0"
+
+
+def usbfs_main(sys_root: str = "/sys") -> int:
+    """adsbd.py usbfs (root: install-linux.sh, sizeup-usbfs.service, sizeup-adsb's ExecStartPre). Always 0: a station
+    whose limit can't be lifted still runs (readsb falls back to smaller transfers)."""
+    before, after, err = set_usbfs(sys_root)
+    if err:
+        print(f"usbfs_memory_mb: {err}" + (f" (it is {after})" if after is not None and "still" not in err else ""))
+    elif before != after:
+        print(f"usbfs_memory_mb: {before} -> 0 (no limit on USB transfer memory, #269)")
+    else:
+        print("usbfs_memory_mb: 0 (no limit)")
+    return 0
 
 
 # -- the dongles (librtlsdr's USB strings: nothing is opened) -----------------------------------------------------------
@@ -331,13 +387,17 @@ CAUSE_RULES = (
               "kernel driver is active")),
     ("not_found", ("no supported devices found", "no device matching", "no matching devices", "usb_open error -4",
                    "libusb_error_no_device", "error querying device")),
+    # librtlsdr's "Failed to submit transfer N / Please increase your allowed usbfs buffer size ... echo 0 >
+    # /sys/module/usbcore/parameters/usbfs_memory_mb", then readsb's "lost the USB device" (#269): the limit, not the dongle
+    ("usbfs", ("usbfs_memory_mb", "allowed usbfs buffer size", "failed to submit transfer")),
     ("lost", ("lost the usb device", "rtlsdr_read_async returned unexpectedly")),
     ("bad_args", ("unrecognized option", "invalid option", "requires an argument", "--help' for more", "usage: readsb",
                   "unknown device type")),
 )
 CAUSE_WORDS = {"busy": "dongle busy", "not_found": "dongle not found", "permissions": "no permission to open the dongle",
                "bad_args": "readsb refused its command line", "library": "a library readsb needs is missing",
-               "lost": "the dongle went away mid-run (USB)", "unknown": "readsb failed"}
+               "lost": "the dongle went away mid-run (USB)",
+               "usbfs": "the kernel's USB transfer memory ran out (usbfs_memory_mb)", "unknown": "readsb failed"}
 # sizeup's own programs that open a dongle, and the services they run under: the only processes this ever stops, and
 # only when one holds the ADS-B dongle (a reserved dongle never runs another job). shortfinal's, or anyone else's: never.
 OWN_PROGRAMS = ("rtl_fm", "trunk-recorder")
@@ -357,7 +417,7 @@ def clean(line) -> str:
 
 def classify(lines: list[str]) -> tuple[str, str]:
     """(cause, the line that says so) from readsb's last lines: busy | not_found | permissions | bad_args | library |
-    lost | unknown (and "" when no line said it)."""
+    usbfs | lost | unknown (and "" when no line said it)."""
     for cause, needles in CAUSE_RULES:
         for ln in lines:
             if any(n in ln.lower() for n in needles):
@@ -543,6 +603,8 @@ class Decoder:
         self.restarts = 0
         self.no_signal_since: float | None = None
         self.no_signal_wait = NO_SIGNAL_RESTART_S[0]
+        self.usb_fails = 0                                    # usbfs / lost-USB exits in a row (#269)
+        self.buffer_kib: int | None = None                    # SMALL_BUF_KIB once they kept coming
         self.out = Output(json_dir)
         self.status: dict = {"state": "starting", "detail": "", "since": None}
 
@@ -573,7 +635,7 @@ class Decoder:
 
     def _fail(self, now: float, why: str) -> None:
         self.fails += 1
-        wait = min(BACKOFF_S[1], BACKOFF_S[0] * 2 ** (self.fails - 1))
+        wait = min(BACKOFF_S[1], BACKOFF_S[0] * 2 ** min(self.fails - 1, 30))
         self.next_start = now + wait
         self.restarts += 1
         self.stop(why)
@@ -584,7 +646,8 @@ class Decoder:
         s = settings(self.config, self.override)
         want = (s["sdr"], s["gain"], s["bias_tee"])
         base = {"sdr": s["sdr"], "source": s["source"], "gain": s["gain"], "bias_tee": s["bias_tee"],
-                "restarts": self.restarts, "json": str(Path(self.json_dir) / "aircraft.json")}
+                "restarts": self.restarts, "json": str(Path(self.json_dir) / "aircraft.json"),
+                "usbfs_mb": usbfs_mb(self.sys_root), "buffer_kib": self.buffer_kib}
         if self.proc is not None and self.running != want:
             self.stop("its dongle, gain or bias-tee changed")
             self.fails, self.next_start = 0, 0.0
@@ -639,7 +702,14 @@ class Decoder:
         if not claim(s["sdr"], self.claims):
             return                                     # taken between the look and now: held, next step says by whom
         self.claimed = s["sdr"]
-        argv = readsb_argv(self.binary, idx, s["gain"], s["bias_tee"], self.json_dir, s["lat"], s["lon"])
+        mb = usbfs_mb(self.sys_root)
+        if mb:                        # a limit: lifted when this can (root; the unit's ExecStartPre did it at start)
+            before, after, err = set_usbfs(self.sys_root)
+            if not err:
+                self.log(f"adsb: usbfs_memory_mb {before} -> 0")
+            base["usbfs_mb"] = after
+        argv = readsb_argv(self.binary, idx, s["gain"], s["bias_tee"], self.json_dir, s["lat"], s["lon"],
+                            buffer_kib=self.buffer_kib)
         try:
             Path(self.json_dir).mkdir(parents=True, exist_ok=True)
             for stale in ("aircraft.json", "stats.json"):
@@ -660,7 +730,9 @@ class Decoder:
         self.no_signal_since = None
         self.fail_detail = ""
         self.log(f"adsb: readsb on {s['sdr']} (device #{idx}), gain {s['gain']}, bias-tee "
-                 f"{'ON' if s['bias_tee'] else 'off'}, pid {self.proc.pid}")
+                 f"{'ON' if s['bias_tee'] else 'off'}, pid {self.proc.pid}"
+                 + (f", USB transfers {self.buffer_kib} KiB" if self.buffer_kib else "")
+                 + (f" (usbfs_memory_mb {base['usbfs_mb']})" if base.get("usbfs_mb") else ""))
         self._set(now, "starting", f"readsb on {s['sdr']} (device #{idx})", pid=self.proc.pid, index=idx,
                   present=True, argv=argv, **base)
 
@@ -703,6 +775,7 @@ class Decoder:
         self.no_signal_since, self.no_signal_wait = None, NO_SIGNAL_RESTART_S[0]
         if self.fails and now - (self.started_at or now) > 120:
             self.fails = 0
+            self.usb_fails = 0
         rate = o["messages_per_s"]
         self.said = None
         self._set(now, "ok", f"{o['aircraft']} aircraft ({o['with_pos']} with a position)"
@@ -728,6 +801,7 @@ class Decoder:
         lines = list(self.lines)
         d = self.diagnose(s["sdr"], lines)
         stopped = self.recover(d)
+        self._usb_fallback(d)
         words = CAUSE_WORDS.get(d["cause"], d["cause"])
         if d["holder"]:
             words += f" (held by {d['holder']}" + ("; stopped it, retrying" if stopped else "") + ")"
@@ -747,6 +821,29 @@ class Decoder:
         self._set(now, "down", detail, cause=d["cause"], holder=d["holder"], tail=lines[-DETAIL_LINES:],
                   recovery=f"stopped {d['holder']}" if stopped else "", present=d["present"], index=d["index"],
                   code=code, **base)
+
+    def _usb_fallback(self, d: dict) -> None:
+        """The usbfs limit (or a USB loss, which it looks like without librtlsdr's line) SMALL_AFTER times in a row:
+        readsb from now on with SMALL_BUF_KIB transfers (#269). Said in the hint either way."""
+        if d["cause"] not in ("usbfs", "lost"):
+            self.usb_fails = 0
+            return
+        self.usb_fails += 1
+        mb = usbfs_mb(self.sys_root)
+        if self.buffer_kib is None and self.usb_fails >= SMALL_AFTER:
+            self.buffer_kib = SMALL_BUF_KIB
+            self.log(f"adsb: {self.usb_fails} USB failures in a row: readsb with {SMALL_BUF_KIB} KiB transfers from now on")
+        hint = []
+        if mb:
+            hint.append(f"usbfs_memory_mb is {mb} (0 = no limit; sudo systemctl restart sizeup-adsb sets it)")
+        elif mb == 0 and d["cause"] == "usbfs":
+            hint.append("usbfs_memory_mb is already 0")
+        if self.buffer_kib:
+            hint.append(f"readsb now uses {self.buffer_kib} KiB USB transfers")
+        elif d["cause"] == "usbfs" or mb:
+            hint.append(f"smaller USB transfers after {SMALL_AFTER} in a row")
+        if hint and not d["hint"]:
+            d["hint"] = "; ".join(hint)
 
     def diagnose(self, serial: str, lines: list[str]) -> dict:
         """Why readsb stopped, read-only: {cause, line, holder, own: [pids sizeup may stop], present, index, hint}.
@@ -874,8 +971,10 @@ def main(argv: list[str]) -> int:
         st = read_status()
         print(json.dumps(st, indent=2) if st else "no status yet (is sizeup-adsb running?)")
         return 0
+    if cmd == "usbfs":
+        return usbfs_main()
     if cmd != "run":
-        print("usage: adsbd.py run | print | status", file=sys.stderr)
+        print("usage: adsbd.py run | print | status | usbfs", file=sys.stderr)
         return 2
     d = Decoder()
     stopping = []

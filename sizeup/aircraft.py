@@ -111,6 +111,7 @@ import re
 import sqlite3
 import threading
 import time
+import traceback
 import zipfile
 from collections import deque
 from dataclasses import dataclass, field, replace
@@ -210,9 +211,20 @@ def wrap180(deg: float) -> float:
 # ---- one aircraft, as a feed reports it ----------------------------------------------------------------------------
 
 
+def finite(v) -> float | None:
+    """v as a float when it is a finite number, else None. An int too big for a float (JSON allows any number of
+    digits: 1e999 written out) is None, never an OverflowError: math.isfinite(int) and float(int) raise one (#269)."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    try:
+        f = float(v)
+    except OverflowError:
+        return None
+    return f if math.isfinite(f) else None
+
+
 def _num(d: dict, key: str) -> float | None:
-    v = d.get(key)
-    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) else None
+    return finite(d.get(key))
 
 
 @dataclass(frozen=True)
@@ -249,10 +261,9 @@ class Plane:
     @classmethod
     def from_json(cls, d: dict, band: str = "") -> Plane:
         alt = d.get("alt_baro")
-        if isinstance(alt, (int, float)) and not isinstance(alt, bool):
-            alt = int(alt)
-        elif alt != "ground":
-            alt = None
+        if alt != "ground":
+            alt = finite(alt)
+            alt = int(alt) if alt is not None and -2000 <= alt <= 200000 else None
         lat, lon = _num(d, "lat"), _num(d, "lon")
         if lat is not None and lon is not None and not (-90 <= lat <= 90 and -180 <= lon <= 180):
             lat = lon = None
@@ -309,14 +320,22 @@ def parse_snapshot(data: dict, band: str = "") -> Snapshot:
     if not isinstance(data, dict):
         raise ValueError("not an aircraft list")
     if "ac" in data:
-        now, records = float(data.get("now") or 0) / 1000.0, data.get("ac") or []
+        now, records = (finite(data.get("now")) or 0.0) / 1000.0, data.get("ac") or []
     elif "aircraft" in data:
-        now, records = float(data.get("now") or 0), data.get("aircraft") or []
+        now, records = finite(data.get("now")) or 0.0, data.get("aircraft") or []
     else:
         raise ValueError("no aircraft list (ac / aircraft)")
     if not now or not isinstance(records, list):
         raise ValueError("no time (now) or no aircraft list")
-    return Snapshot(now, tuple(Plane.from_json(r, band) for r in records if isinstance(r, dict) and r.get("hex")))
+    planes = []
+    for r in records:
+        if not isinstance(r, dict) or not r.get("hex"):
+            continue
+        try:
+            planes.append(Plane.from_json(r, band))
+        except (TypeError, ValueError, OverflowError, AttributeError):   # one odd record: that aircraft only (#269)
+            continue
+    return Snapshot(now, tuple(planes))
 
 
 def merge(parts: list[Snapshot]) -> Snapshot:
@@ -829,7 +848,7 @@ class Registry:
                 con = sqlite3.connect(str(self.path), check_same_thread=False)
         except Exception as e:  # network, a bad zip, a full disk: try again later, the layer works without it
             self.st["fails"] += 1
-            wait = min(REGISTRY_BACKOFF_S[1], REGISTRY_BACKOFF_S[0] * 2 ** (self.st["fails"] - 1))
+            wait = min(REGISTRY_BACKOFF_S[1], REGISTRY_BACKOFF_S[0] * 2 ** min(self.st["fails"] - 1, 30))
             self.st.update(error=f"{type(e).__name__}: {getattr(e, 'reason', e)}"[:160], next=now + wait)
             self.log(f"aircraft: FAA registry not read: {self.st['error']}; next try in {wait:.0f} s")
             return False
@@ -1112,9 +1131,8 @@ def wire(p: Plane) -> list:
 
 
 def _wnum(v, lo: float, hi: float) -> float | None:
-    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or not lo <= v <= hi:
-        return None
-    return float(v)
+    v = finite(v)
+    return v if v is not None and lo <= v <= hi else None
 
 
 def _wstr(v, n: int) -> str:
@@ -1174,7 +1192,10 @@ class StationFeed(Feed):
                 want_full = True                   # a post missed (or the hub restarted): apply it, ask for all
             self.epoch, self.seq = epoch, seq
             for raw in d.get("ac", [])[:WIRE_MAX]:
-                r = unwire(raw)
+                try:
+                    r = unwire(raw)
+                except (TypeError, ValueError, OverflowError, AttributeError):   # that aircraft only (#269)
+                    r = None
                 if r is None:
                     self.bad += 1
                     continue
@@ -1226,7 +1247,8 @@ class StationFeed(Feed):
 
 
 RX_KEYS = ("sdr", "name", "state", "detail", "held_by", "present", "messages_per_s", "aircraft", "last_message_at",
-           "gain", "bias_tee", "source", "cause", "holder")        # cause, holder: #262 (an older station sends neither)
+           "gain", "bias_tee", "source", "cause", "holder",        # cause, holder: #262 (an older station sends neither)
+           "usbfs_mb")                                             # the station's usbfs limit, MB (#269)
 
 
 # How often each feed is asked (rate limits: adsb.fi's public API allows 1 request a second; adsb.lol limits by load
@@ -1238,6 +1260,8 @@ SECONDARY_S = 10.0
 WATCH_S = 15.0
 SCORE_ALPHA = 0.3                  # the running count of aircraft with a fresh position that picks the primary
 RECEIVER_LOG_EVERY_S = 300.0      # our receiver failing the same way: logged once, then at most this often (#262)
+ERROR_LOG_EVERY_S = 300.0          # the poll itself failing (a bug): its traceback once per distinct error, then one
+                                   # line at most this often while it goes on (#269: one line a second for 25 min)
 FEED_KEEP_S = 20.0                 # an API feed's last answer joins the union this long
 RECEIVER_KEEP_S = 10.0             # our receiver's: older than this, it is stale and the APIs take over
 RECEIVER_LOST_S = 10.0             # an aircraft whose position from our receiver is older than this is "lost" there:
@@ -1324,6 +1348,7 @@ class AircraftLayer:
         # None goes in the answer as "atc" (the "talking" ring, each aircraft's recent transmissions)
         self.on_view: Callable[[list[dict], float], None] | None = None
         self.extra: Callable[[], dict | None] | None = None
+        self._errors: dict[tuple, dict] = {}        # _error(): (where, type, file:line) -> {n, at, skipped}
 
     @classmethod
     def from_config(cls, cfg, log: Callable[[str], None] = print, devices: Callable[[], list] | None = None) -> AircraftLayer:
@@ -1375,9 +1400,31 @@ class AircraftLayer:
             try:
                 self.tick()
             except Exception as e:  # never let one bad answer stop the layer for good
-                self.log(f"aircraft: {type(e).__name__}: {e}")
+                self._error("poll", e)
             self._wake.wait(1.0)
             self._wake.clear()
+
+    def _error(self, where: str, e: BaseException) -> None:
+        """A bug in the poll (not a feed's answer: those rest the feed). The first time an error is seen (its type and
+        where it was raised), its traceback; then one line, at most every ERROR_LOG_EVERY_S, with the count (#269)."""
+        tb = traceback.extract_tb(e.__traceback__)
+        at = f"{Path(tb[-1].filename).name}:{tb[-1].lineno}" if tb else "?"
+        key = (where, type(e).__name__, at)
+        now = self.clock()
+        seen = self._errors.get(key)
+        if seen is None:
+            self._errors[key] = {"n": 1, "at": now, "skipped": 0}
+            lines = "".join(traceback.format_exception(type(e), e, e.__traceback__)).rstrip()
+            self.log(f"aircraft: {where}: {type(e).__name__}: {e} (at {at}; logged once, then every "
+                     f"{ERROR_LOG_EVERY_S / 60:.0f} min)\n{lines}")
+            return
+        seen["n"] += 1
+        if now - seen["at"] >= ERROR_LOG_EVERY_S:
+            self.log(f"aircraft: {where}: {type(e).__name__}: {e} (at {at}; {seen['skipped'] + 1} times in the last "
+                     f"{(now - seen['at']) / 60:.0f} min, {seen['n']} in all)")
+            seen.update(at=now, skipped=0)
+        else:
+            seen["skipped"] += 1
 
     def demanded(self) -> bool:
         return self.clock() - self.asked <= DEMAND_S
@@ -1435,7 +1482,7 @@ class AircraftLayer:
             iv = self.interval(f, demanded)
             if iv is None or now < f.st["rest_until"] or now < f.st["next"]:
                 continue
-            read = self._read(f, now, iv) or read
+            read = self._try_read(f, now, iv) or read
         if read:
             self._combine(now)
         elif self.st["fetched"] is None or now - self.st["fetched"] > FEED_KEEP_S:
@@ -1449,7 +1496,7 @@ class AircraftLayer:
         read = False
         for f in self.feeds:
             if now >= f.st["rest_until"]:
-                read = self._read(f, now, self.interval(f, True) or SECONDARY_S) or read
+                read = self._try_read(f, now, self.interval(f, True) or SECONDARY_S) or read
         if read:
             self._combine(now)
         else:
@@ -1472,6 +1519,16 @@ class AircraftLayer:
         """How far around HPN the feeds are asked: the map's radius, or NY Approach's while widened (#260)."""
         return self.wide_nm if self.widened(now) else self.radius_nm
 
+    def _try_read(self, f: Feed, now: float, iv: float) -> bool:
+        """_read(), and a bug in it (not the feed's answer: _read rests the feed for those) rests that feed only: the
+        others are still read and combined (#269: one feed's OverflowError stopped every poll)."""
+        try:
+            return self._read(f, now, iv)
+        except Exception as e:  # noqa: BLE001
+            f.st.update(rest_until=now + BACKOFF_S[0], next=now + BACKOFF_S[0], why=f"{type(e).__name__}: {e}"[:160])
+            self._error(FEEDS[f.key]["label"], e)
+            return False
+
     def _read(self, f: Feed, now: float, iv: float) -> bool:
         st = f.st
         if isinstance(f, ApiFeed):
@@ -1481,7 +1538,9 @@ class AircraftLayer:
             snap = f.read()
         except Exception as e:  # network, a 429, a file, JSON: this feed rests, the others carry on
             st["fails"] += 1
-            exp = min(BACKOFF_S[1], BACKOFF_S[0] * 2 ** (st["fails"] - 1))
+            # (the exponent capped: 2 ** 1024 times a float is an OverflowError, and ours fails every 5 s, so after
+            # 85 min of no posts every poll raised it and no feed was read: #269)
+            exp = min(BACKOFF_S[1], BACKOFF_S[0] * 2 ** min(st["fails"] - 1, 30))
             if isinstance(e, RateLimited):
                 wait = e.retry_after_s if e.retry_after_s else max(RATE_LIMITED_MIN_S, exp)
             else:
@@ -1771,7 +1830,8 @@ class AircraftLayer:
                 note = "; ".join(x for x in (note, f"decoder {rx['state']}: {rx.get('detail') or ''}".rstrip(": ")) if x)
             return {"enabled": True, "station": True, "sdr": rx.get("sdr", ""), "name": name, "present": rx.get("present"),
                     "held_by": rx.get("held_by"), "decoder": {k: rx.get(k) for k in ("state", "detail", "messages_per_s",
-                                                                                         "aircraft", "last_message_at")},
+                                                                                         "aircraft", "last_message_at",
+                                                                                         "usbfs_mb")},
                     "forwarding": st, "bands": {}, "note": note}
         if not self.receiver_on and not self.sdr:
             return None

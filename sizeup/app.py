@@ -2337,7 +2337,9 @@ class App:
                 "decoder": {k: st.get(k) for k in ("state", "detail", "since", "messages_per_s", "aircraft", "with_pos",
                                                     "last_message_at", "restarts", "gain", "bias_tee",
                                                     # why it failed (#262): an older decoder has none of these
-                                                    "cause", "holder", "tail", "recovery")} if st else None,
+                                                    "cause", "holder", "tail", "recovery",
+                                                    # the kernel's usbfs limit and readsb's USB transfers (#269)
+                                                    "usbfs_mb", "buffer_kib")} if st else None,
                 "forward": fwd.stats() if fwd is not None else None}
 
     def _save_modes(self) -> None:

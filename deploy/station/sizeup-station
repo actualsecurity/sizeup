@@ -106,7 +106,9 @@ except (OSError, ValueError):
     echo "adsb:      sizeup-adsb.service $(systemctl is-active sizeup-adsb.service 2>/dev/null || true); $(python3 -I -c 'import json, sys
 try:
     d = json.load(open("/run/sizeup-adsb/decoder.json"))
-    print(d.get("state", "?") + ": " + (d.get("detail") or "") + (" (" + d["sdr"] + ")" if d.get("sdr") else ""))
+    print(d.get("state", "?") + ": " + (d.get("detail") or "") + (" (" + d["sdr"] + ")" if d.get("sdr") else "")
+          + ("; usbfs_memory_mb %s" % d["usbfs_mb"] if d.get("usbfs_mb") is not None else "")
+          + ("; readsb USB transfers %s KiB" % d["buffer_kib"] if d.get("buffer_kib") else ""))
 except (OSError, ValueError):
     print("no status yet")' 2>/dev/null || true)"
   fi
@@ -156,6 +158,11 @@ cmd_doctor() {
   if [ -f /etc/systemd/system/sizeup-adsb.service ]; then
     if systemctl is-active --quiet sizeup-adsb.service; then ok "sizeup-adsb is running (readsb only on the dongle named for ADS-B)"; else no "sizeup-adsb isn't running: systemctl enable --now sizeup-adsb.service"; fi
     if [ -x /opt/sizeup/readsb/bin/readsb ]; then ok "readsb installed"; else no "readsb missing: run install-linux.sh again"; fi
+    # the kernel's usbfs buffer limit (#269): shared by every dongle; 0 = none (sizeup-usbfs.service sets it at boot)
+    usbfs=$(cat /sys/module/usbcore/parameters/usbfs_memory_mb 2>/dev/null || true)
+    if [ -z "$usbfs" ]; then note "usbfs_memory_mb: no usbcore parameter here"
+    elif [ "$usbfs" = 0 ]; then ok "usbfs_memory_mb is 0 (no USB transfer memory limit)"
+    else no "usbfs_memory_mb is $usbfs MB (readsb can run out with many dongles): sudo systemctl restart sizeup-usbfs sizeup-adsb"; fi
   fi
   # updates: follows the hub's build (deploy/station/README.md "Updating")
   if [ -f "$UPDATER" ]; then
