@@ -16,7 +16,7 @@ import threading
 from email.utils import formatdate
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 
 import pytest
 
@@ -934,10 +934,12 @@ def test_no_stream_for_a_camera_without_one_a_down_one_or_an_unknown_one():
     for _ in range(3):
         clock.t += IMAGE_TTL_S + 1
         r.get("/api/cad/cameras/1ne01370s/image", "")
-    # (#276) a camera with live video is judged by its stream: a failing still never refuses it; until its stream is
-    # looked at it is stale, "video not checked"
+    # (#276) a camera with live video is judged by its stream: a failing still never refuses it; (#308) the still
+    # going down probes its stream at once, in the background: it streams, so it is ok
+    assert r.probes_done()
     h = r.health("1ne01370s")
-    assert not h["down"] and (h["state"], h["why"]) == ("stale", "Still old · video not checked")
+    assert not h["down"] and (h["state"], h["why"]) == ("ok", "")
+    assert any("chunklist" in u for u in f.urls)
     code, body, _, _ = r.get("/api/cad/cameras/1ne01370s/stream/playlist.m3u8", "")
     assert code == 200
     r.close_stream("1ne01370s", "")
@@ -962,6 +964,68 @@ def test_no_stream_for_a_camera_without_one_a_down_one_or_an_unknown_one():
     assert "1ne01370s: no live video from the source" in "\n".join(r.logs)
     clock.t += 301
     assert r.get("/api/cad/cameras/1ne01370s/stream/playlist.m3u8", "")[0] == 200
+
+
+class Blackhole(StreamFetch):
+    """The HLS origin taking each request to its timeout (gate unset: holds until set, then times out)."""
+
+    def __init__(self):
+        super().__init__()
+        self.gate = threading.Event()
+        self.probe_threads: list[str] = []
+
+    def __call__(self, url, timeout, limit):
+        if "skyvdn.com" in url:
+            self.urls.append(url)
+            self.probe_threads.append(threading.current_thread().name)
+            self.gate.wait(5)
+            raise URLError(TimeoutError("timed out"))
+        return super().__call__(url, timeout, limit)
+
+
+def stale_stills(clock, monkeypatch, workers=2):
+    """A Roads whose cameras' stills are all a day old (down at once) and whose HLS origin blackholes requests."""
+    monkeypatch.setattr(roads_mod, "PROBE_WORKERS", workers)
+    f = Blackhole()
+    f.image = (200, {"content-type": "image/jpeg", "last-modified": formatdate(clock.t - 86400, usegmt=True)}, JPEG)
+    r = make(key="", urls={}, fetch=f, clock=clock, thruway=True)
+    assert r.refresh("cameras")
+    video = [c["id"] for c in r.merged("cameras") if c.get("video") and not c["off"]]
+    assert len(video) >= 4 and len({c["video"].split("/")[2] for c in r.merged("cameras") if c.get("video")}) == 1
+    return r, f, video
+
+
+def test_the_stream_probe_never_holds_up_the_feed_thread(monkeypatch):
+    # (#308) an origin that blackholes requests: the sweep returns while the probes wait, and they run on their own
+    # threads, never the one that reads the incident and sign feeds
+    clock = Clock()
+    r, f, video = stale_stills(clock, monkeypatch)
+    n = r.sweep()
+    assert n >= len(video) and r._probing                                   # back, with the probes still out
+    assert all(t == "roads-probe" for t in f.probe_threads)
+    f.gate.set()
+    assert r.probes_done()
+    assert f.probe_threads and all(t == "roads-probe" for t in f.probe_threads)
+
+
+def test_a_host_whose_probes_time_out_is_left_alone_until_the_next_sweep(monkeypatch):
+    clock = Clock()
+    r, f, video = stale_stills(clock, monkeypatch, workers=1)
+    f.gate.set()                                                            # each request times out at once
+    r.sweep()
+    assert r.probes_done()
+    probed = [u for u in f.urls if "skyvdn" in u]
+    assert len(probed) == roads_mod.PROBE_HOST_TIMEOUTS                     # two timed out: the rest not asked
+    assert "s58.nysdot.skyvdn.com:443: 2 stream probes timed out" in "\n".join(r.logs)
+    timed_out = [cid for cid in video if cid in r._probe]
+    assert len(timed_out) == 2 and all(r.health(cid)["state"] == "offline" for cid in timed_out)
+    left = [cid for cid in video if cid not in r._probe]
+    assert left and all(r.health(cid)["why"] == "Still old · video not checked" for cid in left)
+    # the next sweep gives the host its chance again
+    clock.t += roads_mod.HEALTH_SWEEP_S + 1
+    r.sweep()
+    assert r.probes_done()
+    assert len([u for u in f.urls if "skyvdn" in u]) == 2 * roads_mod.PROBE_HOST_TIMEOUTS
 
 
 # ---- the stream pump, the frame rate, the status; snapshots at the source's cadence (hls-smooth, refs #101) ------

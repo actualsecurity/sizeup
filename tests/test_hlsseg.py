@@ -114,12 +114,12 @@ PMT = (b"\x47\x41\x00\x10" + b"\x00" + b"\x02\xb0\x12\x00\x01\xc1\x00\x00\xe1\x0
        + b"\x00\x00\x00\x00").ljust(188, b"\xff")
 
 
-def segment(frames: list[tuple], bounded=True) -> bytes:
-    """frames: (idr, frame_num[, first_mb[, ref]]) each, 15 fps."""
+def segment(frames: list[tuple], bounded=True, pts: list[float] | None = None) -> bytes:
+    """frames: (idr, frame_num[, first_mb[, ref]]) each, 15 fps (pts: each frame's own instead)."""
     cc: dict = {}
     out = PAT + PMT
     for i, f in enumerate(frames):
-        out += ts_packets(VPID, frame(*f), cc, bounded, pts=10 + i / 15)
+        out += ts_packets(VPID, frame(*f), cc, bounded, pts=pts[i] if pts else 10 + i / 15)
     return out
 
 
@@ -227,6 +227,51 @@ def test_the_carried_state_is_only_from_the_same_sessions_segment_just_before():
     assert r._keep_segment("1ne01370s", "media_wB_201.ts", {}, tail, clock.t)["dropped"] == 2     # another session
     r._keep_segment("1ne01370s", "media_wA_300.ts", {}, head, clock.t)
     assert r._keep_segment("1ne01370s", "media_wA_302.ts", {}, tail, clock.t)["dropped"] == 2     # a gap between
+
+
+def test_fifteen_lost_reference_frames_wrapping_frame_num_onto_itself_are_a_loss():
+    # (#308) frame_num is 4 bits: 15 reference frames lost after frame_num 5 bring the next one back to 5. Two
+    # reference frames in a row never share a frame_num in progressive video, so it is a loss, not a repeat
+    ts = [10 + i / 15 for i in range(6)] + [10 + (6 + 15) / 15 + i / 15 for i in range(4)]
+    info = hlsseg.check(segment(gop(6) + [(False, 5), (False, 6), (False, 7), (False, 8)], pts=ts))
+    assert info["lost"] == 15 and info["broken"] == [6, 7, 8, 9] and info["playable"] == 6
+    # a non-reference frame keeps prev_ref's frame_num + 1, the reference frame after it the same: no loss
+    ok = hlsseg.check(segment(gop(3) + [(False, 3, 0, False), (False, 3), (False, 4)]))
+    assert ok["lost"] == 0 and ok["broken"] == []
+
+
+def test_sixteen_lost_reference_frames_show_in_the_pts():
+    # 16 lost: frame_num 5 -> 6 looks like the next frame; the PTS jumped 17 frame intervals
+    ts = [10 + i / 15 for i in range(6)] + [10 + (6 + 16) / 15 + i / 15 for i in range(3)]
+    info = hlsseg.check(segment(gop(6) + [(False, 6), (False, 7), (False, 8)], pts=ts))
+    assert info["lost"] == 16 and info["broken"] == [6, 7, 8]
+    # ... across a segment's cut too (the PTS and the frame interval carried)
+    a = hlsseg.check(segment(gop(6), pts=ts[:6]))
+    b = hlsseg.check(segment([(False, 6), (False, 7), (False, 8)], pts=ts[6:]), a["state"])
+    assert b["lost"] == 16 and b["broken"] == [0, 1, 2]
+
+
+def test_a_camera_skipping_a_frame_or_two_in_its_timing_is_no_loss():
+    # a recorded 30 fps camera: steps of 100 ms among its 33 ms ones, frame_num unbroken, every frame decoding
+    # whole; a PTS gap is only a loss when it is long enough to hide a frame_num wrap
+    ts, t = [], 10.0
+    for i in range(20):
+        ts.append(t)
+        t += 0.1 if i in (4, 11) else 1 / 30
+    info = hlsseg.check(segment(gop(20), pts=ts))
+    assert info["lost"] == 0 and info["broken"] == []
+    # nor a frame_num repeated by a non-reference frame after a reference one (it only follows prev_ref + 1 rules)
+    assert hlsseg.check(segment(gop(4) + [(False, 4, 0, False), (False, 4, 0, False), (False, 4)]))["broken"] == []
+
+
+def test_a_gap_is_counted_once_however_many_frames_follow_it():
+    # (#308) frame_num 3 and 4 lost after 2: the non-reference frames after the gap name 5 too, as does the
+    # reference frame after them. Two lost, not six
+    info = hlsseg.check(segment(gop(3) + [(False, 5, 0, False), (False, 5, 0, False), (False, 5), (False, 6)]))
+    assert info["lost"] == 2 and info["broken"] == [3, 4, 5, 6]
+    # a second gap, after the next reference frame, counts again
+    info = hlsseg.check(segment(gop(3) + [(False, 5), (False, 6), (False, 9, 0, False), (False, 9)]))
+    assert info["lost"] == 2 + 2
 
 
 @pytest.mark.parametrize("cut, why", [
@@ -380,11 +425,31 @@ def test_a_segment_cut_short_is_fetched_again_and_only_the_whole_one_is_served()
     assert r._segment_locks == {}                                            # no lock left behind
 
 
+def test_a_segment_refused_by_http_twice_is_asked_again_not_a_gap_for_good():
+    # (#308) two transient HTTP failures: a 502 now, but not marked bad (no GAP in the players' lists); the pump and
+    # the player ask again, and the whole one is served
+    r, f, _ = opened()
+    whole = segment(gop(8) + [(True, 0)])
+    f.segs["media_w1_1226.ts"] = [ValueError("HTTP 503"), ValueError("HTTP 503"), whole]
+    assert r.get(SEG + "media_w1_1226.ts", "")[0] == 502
+    assert "media_w1_1226.ts" not in (r._streams["1ne01370s"].get("bad") or {})
+    assert "#EXT-X-GAP" not in r.get(SEG + "chunklist_w1849562454.m3u8", "")[1].decode()
+    r.pump_once("1ne01370s")
+    assert r._segments["1ne01370s/media_w1_1226.ts"]["body"] == whole
+    assert r.get(SEG + "media_w1_1226.ts", "")[1] == whole
+    # not video once, then whole: served, and not marked bad either
+    r._segments.pop("1ne01370s/media_w1_1227.ts", None)                     # (the pump's copy)
+    f.segs["media_w1_1227.ts"] = [b"\x47" * 1000, whole]
+    assert r.get(SEG + "media_w1_1227.ts", "")[1] == whole
+    assert "media_w1_1227.ts" not in (r._streams["1ne01370s"].get("bad") or {})
+
+
 def test_a_segment_broken_twice_is_a_502_and_never_cached():
     r, f, _ = opened()
     f.segs["media_w1_1226.ts"] = [b"\x47" * 1000, b"\x47" * 1000]
     code, body, _, _ = r.get(SEG + "media_w1_1226.ts", "")
     assert code == 502 and b"broken segment" in body and "1ne01370s/media_w1_1226.ts" not in r._segments
+    assert "media_w1_1226.ts" in r._streams["1ne01370s"]["bad"]              # not video twice: a GAP for good
     code, body, _, _ = r.get(SEG + "media_w1_1226.ts", "")                   # asked again: a fresh (clean) fetch
     assert code == 200 and hlsseg.check(body)["broken"] == []
 

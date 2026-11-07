@@ -11,7 +11,10 @@ stay frozen until the next IDR, up to two segments later. A browser can't tell; 
                 video stream, every video PES complete (none cut short); then each frame (access unit): IDR or not,
                 frame_num, nal_ref_idc and the slices' first macroblock. A reference frame whose frame_num skips one
                 (H.264 7.4.3, gaps not allowed by the SPS) or whose first slice doesn't start at macroblock 0 breaks
-                the chain: from there to the next IDR the frames are "broken".
+                the chain: from there to the next IDR the frames are "broken". frame_num is only 4 bits on the
+                cameras, so a loss of 15 or 16 reference frames wraps to a value that looks right (#308): a
+                reference frame that repeats the frame_num of the reference frame just before it (progressive
+                video: only a field pair may), or a PTS gap long enough to hide a wrap, is a loss too.
   repair(body)  the segment with its broken frames left out (their TS packets dropped, the video PID's continuity
                 counters renumbered): the player holds the last good picture until the next IDR instead of decoding
                 garbage.
@@ -24,6 +27,7 @@ from __future__ import annotations
 
 TS = 188
 H264 = 0x1B
+PTS_WRAP = (1 << 33) / 90000.0          # the 33-bit 90 kHz clock wraps after about 26.5 h
 VIDEO_TYPES = (0x1B, 0x24, 0x02)       # H.264, HEVC, MPEG-2 video (only H.264 is looked inside)
 
 
@@ -256,6 +260,7 @@ def check(body: bytes, state: dict | None = None) -> dict:
         frames.append({"es": es, "pts": pts, "whole": whole, "pes": k})
     out = {"frames": len(frames), "idr_first": False, "broken": [], "lost": 0, "playable": 0, "sps": sps, "size": "",
            "h264": stype == H264, "state": {"sps": sps, "prev_ref": None, "broken": True}}
+    dt = _frame_interval([f["pts"] for f in frames]) or state.get("dt")
     if stype != H264:
         out["idr_first"] = True                       # not looked inside: trusted as the origin cut it
         out["broken"] = [f["pes"] for f in frames if not f["whole"]]
@@ -263,6 +268,9 @@ def check(body: bytes, state: dict | None = None) -> dict:
         return out
     prev_ref = state.get("prev_ref")
     broken = bool(state.get("broken", prev_ref is None))
+    last_ref = bool(state.get("last_ref"))           # the picture before this one was a reference picture
+    last_pts = state.get("pts")                       # ... and its PTS
+    counted = bool(state.get("counted"))              # a gap after prev_ref already counted in lost (#308)
     first = True
     pictures: list[int] = []
     for f in frames:
@@ -292,23 +300,47 @@ def check(body: bytes, state: dict | None = None) -> dict:
         if first:
             out["idr_first"] = idr and f["whole"]
             first = False
+        gap = None                                    # seconds since the picture before (None: not known)
+        if f["pts"] is not None and last_pts is not None:
+            gap = (f["pts"] - last_pts) % PTS_WRAP
+            gap = gap if gap < PTS_WRAP / 2 else None  # backwards (B-frames in decode order): no gap
         if idr:
             broken = bool(slices) and slices[0][0] != 0          # an IDR missing its first slice
             prev_ref = slices[0][2] if slices else 0
+            counted = False
         elif prev_ref is None:
             broken = True                             # no IDR before it (here or carried): nothing it refers to
         elif slices:
             fn = slices[0][2]
             mx = 1 << sps["log2_max_frame_num"]
+            lost = 0
             if slices[0][0] != 0:                     # the picture's first slice is missing
                 broken = True
-            elif not sps["gaps_allowed"] and fn not in (prev_ref, (prev_ref + 1) % mx):
-                out["lost"] += (fn - prev_ref - 1) % mx      # (counted on in a chain already broken, too)
+            elif not sps["gaps_allowed"]:
+                if fn not in (prev_ref, (prev_ref + 1) % mx):
+                    lost = (fn - prev_ref - 1) % mx
+                elif fn == prev_ref and ref_idc and last_ref and sps["frame_mbs_only"]:
+                    # (#308) a reference frame right after one never repeats its frame_num in progressive video
+                    # (only a field pair may): mx - 1 lost wrapped to it
+                    lost = mx - 1
+                elif gap is not None and dt and gap > (mx - 0.5) * dt:
+                    # (#308) frame_num can't tell mx lost reference frames from none; the PTS can. Only a gap long
+                    # enough to hide a wrap: fewer lost frames show in frame_num, and the cameras' own timing skips
+                    # a frame or two with nothing lost (a recorded 30 fps camera: 100 ms steps, every frame whole)
+                    lost = round(gap / dt) - 1
+            if lost:
+                if not counted:                       # once per prev_ref: not again for each frame after it
+                    out["lost"] += lost               # (counted on in a chain already broken, too)
+                    counted = True
                 broken = True
             if ref_idc:
                 prev_ref = fn
+                counted = False
         elif sps is None:
             out["h264"] = False                       # slices but no SPS to read them by: not judged
+        last_ref = idr or bool(ref_idc)
+        if f["pts"] is not None:
+            last_pts = f["pts"]
         if not f["whole"]:                            # a frame with packets missing: damaged, and what follows it
             broken = True
         if broken:
@@ -319,10 +351,18 @@ def check(body: bytes, state: dict | None = None) -> dict:
     out["broken"] = sorted(set(out["broken"]))
     dropped = set(out["broken"])
     out["playable"] = sum(1 for k in pictures if k not in dropped)
-    out["state"] = {"sps": sps, "prev_ref": prev_ref, "broken": broken}
+    out["state"] = {"sps": sps, "prev_ref": prev_ref, "broken": broken, "last_ref": last_ref, "pts": last_pts,
+                    "dt": dt, "counted": counted}
     if sps:
         out["size"] = f"{sps['width']}x{sps['height']}"
     return out
+
+
+def _frame_interval(pts: list) -> float | None:
+    """The stream's frame interval (s): the median step between frames' PTS, or None with fewer than two steps."""
+    steps = sorted(d for a, b in zip(pts, pts[1:]) if a is not None and b is not None
+                   for d in ((b - a) % PTS_WRAP,) if 0 < d < 1.0)
+    return steps[len(steps) // 2] if len(steps) >= 2 else None
 
 
 def repair(body: bytes, info: dict | None = None) -> bytes:

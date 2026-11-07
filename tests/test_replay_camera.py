@@ -220,3 +220,54 @@ def test_recorded_segments_are_whole_and_the_proxy_never_serves_one_cut_short(re
             assert ok, f"{label}: stream status open={status['open']} target_s={status['target_s']}"
             checked += 1
     assert checked, "no recorded stream with segments"
+
+
+def _frame_nums(body: bytes) -> list[tuple[bool, int, int, float | None]]:
+    """(idr, nal_ref_idc, frame_num, pts) of each picture, read with hlsseg's own parsers (its SPS carried in)."""
+    vpid, _ = hlsseg._streams(body)
+    out, sps = [], None
+    for p in hlsseg._pes(body, vpid):
+        es, pts, _ = hlsseg._pes_es(p)
+        for n in hlsseg.nal_units(es):
+            t = n[0] & 0x1F
+            if t == 7:
+                sps = hlsseg.parse_sps(n) or sps
+            elif t in (1, 5) and sps:
+                h = hlsseg._slice_head(n, sps)
+                if h:
+                    out.append((t == 5, (n[0] >> 5) & 3, h[2], pts))
+                break
+    return out
+
+
+def test_the_cameras_own_uneven_timing_is_never_counted_as_a_loss(replay_sets):
+    """(#308) frame_num is 4 bits, so check also reads a long PTS gap as lost frames. The recorded cameras skip a
+    frame or two in their timing with nothing lost (a 30 fps camera's 100 ms steps): checked in order, the state
+    carried, each stream counts exactly the frame_num gaps (once per reference frame before them), no more."""
+    uneven = 0
+    for s in replay_sets("camera"):
+        fetch = ReplayFetch(s)
+        for st in fetch.streams:
+            segs = sorted((f["name"] for f in st.get("files", []) if f["name"].endswith(".ts")),
+                          key=lambda n: int(n.rsplit("_", 1)[1][:-3]))
+            state, prev_ref, counted = None, None, False
+            for n in segs:
+                body = s.file(f"streams/{st['id']}/{n}").read_bytes()
+                info = hlsseg.check(body, state)
+                state = info["state"]
+                want, mx = 0, 1 << (info["sps"] or {}).get("log2_max_frame_num", 4)
+                pics = _frame_nums(body)
+                steps = sorted(b[3] - a[3] for a, b in zip(pics, pics[1:]) if a[3] is not None and b[3] is not None)
+                if steps and steps[-1] > 1.5 * steps[len(steps) // 2]:
+                    uneven += 1
+                for idr, ref, fn, _ in pics:
+                    if idr:
+                        prev_ref, counted = fn, False
+                        continue
+                    if prev_ref is not None and fn not in (prev_ref, (prev_ref + 1) % mx) and not counted:
+                        want += (fn - prev_ref - 1) % mx
+                        counted = True
+                    if ref:
+                        prev_ref, counted = fn, False
+                assert info["lost"] == want, f"{s.name} {st['id']} {n}: lost {info['lost']}, frame_num gaps {want}"
+    assert uneven, "no recorded segment with uneven timing"

@@ -122,6 +122,7 @@ from __future__ import annotations
 
 import json
 import math
+import queue
 import re
 import sqlite3
 import threading
@@ -238,6 +239,9 @@ VIEWER_RE = re.compile(r"[A-Za-z0-9_-]{1,32}")   # a page's stream token (?v=): 
 STREAM_TIMEOUT_S = 10.0          # a chunklist or segment
 STREAM_OPEN_TIMEOUT_S = 6.0      # the first playlist: a stream that doesn't answer this fast is down at the source
 STREAM_RETRY_S = 300.0           # ... and is not asked again for this long (the viewer shows snapshots at once)
+PROBE_WORKERS = 2                # stream probes at once, off the feed thread (#308)
+PROBE_HOST_TIMEOUTS = 2          # a host's probes timing out this often in one sweep: its other cameras not probed
+PROBE_FRESH_S = 60.0             # a camera probed this recently is not probed again
 STREAM_AHEAD = 3                 # segments the pump keeps fetched ahead of the player, from the latest chunklist
 STREAM_LIST_FRESH_S = 2.0        # a chunklist younger than this is served from the pump's copy
 STREAM_MAX_BYTES = 4 * 1024 * 1024
@@ -1878,6 +1882,14 @@ class Roads:
         self._stream_lock = threading.Lock()
         self._stream_down: dict[str, float] = {}      # camera id -> when its source last refused to stream
         self._probe: dict[str, dict] = {}             # camera id -> {at, ok}: its stream looked at by the sweep (#276)
+        # (#308) the probes run on PROBE_WORKERS threads of their own, never the feed thread: an origin that
+        # blackholes requests can't hold up the incident and sign feeds. A host whose probes time out
+        # PROBE_HOST_TIMEOUTS times in one sweep is not probed again until the next.
+        self._probe_q: queue.Queue = queue.Queue()
+        self._probe_lock = threading.Lock()
+        self._probing: set[str] = set()               # camera ids queued or being probed
+        self._probe_workers = 0
+        self._host_timeouts: dict[str, int] = {}      # stream host -> its probes timed out since the sweep began
         self._state_sig: tuple | None = None          # the cameras' states as the pages last heard them
         self._pumps: dict[str, threading.Thread] = {}
         self._swept = 0.0
@@ -1970,6 +1982,8 @@ class Roads:
         down before anyone opens one. The number fetched."""
         now = self.clock()
         self._swept = now
+        with self._probe_lock:
+            self._host_timeouts.clear()               # each sweep gives every host its chance again
         n = 0
         for c in list(self.merged("cameras")):
             if self._stop.is_set():
@@ -1979,10 +1993,65 @@ class Roads:
                 continue
             self.image(c["id"])
             n += 1
-            # (#276) a live-video camera whose still is down: is its stream there? (two small GETs, as a player's first)
+            # (#276) a live-video camera whose still is down: is its stream there? (two small GETs, as a player's
+            # first; in the background, #308)
             if c.get("video") and (self._health.get(c["id"]) or {}).get("down_since") is not None:
-                self.probe_stream(c["id"])
+                self.probe_soon(c["id"])
         return n
+
+    def probe_soon(self, cid: str) -> bool:
+        """probe_stream on a probe thread (#308): not for a camera queued or probed in the last PROBE_FRESH_S, or on
+        a host whose probes keep timing out this sweep. True when queued."""
+        cam = self.camera(cid)
+        if cam is None or not cam.get("video") or self._stop.is_set():
+            return False
+        host = urlsplit(cam["video"]).netloc
+        last = self._probe.get(cid)
+        with self._probe_lock:
+            if (cid in self._probing or self._host_timeouts.get(host, 0) >= PROBE_HOST_TIMEOUTS
+                    or (last is not None and self.clock() - last["at"] < PROBE_FRESH_S)):
+                return False
+            self._probing.add(cid)
+            self._probe_q.put((cid, host))
+            if self._probe_workers < PROBE_WORKERS:
+                self._probe_workers += 1
+                threading.Thread(target=self._probe_worker, name="roads-probe", daemon=True).start()
+        return True
+
+    def _probe_worker(self) -> None:
+        """Probes from the queue until it is empty for a while (the thread ends: a quiet hub holds none)."""
+        while True:
+            with self._probe_lock:
+                try:
+                    cid, host = self._probe_q.get_nowait()
+                except queue.Empty:
+                    self._probe_workers -= 1
+                    return
+                skip = self._stop.is_set() or self._host_timeouts.get(host, 0) >= PROBE_HOST_TIMEOUTS
+            try:
+                if not skip:
+                    self.probe_stream(cid)
+            except Exception as e:  # pragma: no cover - a probe's surprise never ends the thread
+                self.log(f"roads: {cid}: stream probe error {type(e).__name__}")
+            finally:
+                with self._probe_lock:
+                    self._probing.discard(cid)
+
+    def probes_done(self, timeout: float = 10.0) -> bool:
+        """Wait until no probe is queued or running (tests; shutdown). True when none is."""
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            with self._probe_lock:
+                if not self._probing:
+                    return True
+            time.sleep(0.01)
+        return False
+
+    def _probe_timed_out(self, host: str) -> None:
+        with self._probe_lock:
+            n = self._host_timeouts[host] = self._host_timeouts.get(host, 0) + 1
+        if n == PROBE_HOST_TIMEOUTS:
+            self.log(f"roads: {host}: {n} stream probes timed out; its other cameras not probed until the next sweep")
 
     def probe_stream(self, cid: str) -> bool:
         """A live-video camera's stream looked at: its master playlist and its chunklist, as a player's first two
@@ -2003,8 +2072,10 @@ class Roads:
                 if chunk:
                     code, _, body = self.fetch(base + chunk, STREAM_TIMEOUT_S, 1 << 20)
                     ok = code == 200 and b".ts" in (body or b"")
-            except (HTTPError, URLError, OSError, ValueError):
+            except (HTTPError, URLError, OSError, ValueError) as e:
                 ok = False
+                if isinstance(e, TimeoutError) or isinstance(getattr(e, "reason", None), TimeoutError):
+                    self._probe_timed_out(urlsplit(cam["video"]).netloc)
         was = self._probe.get(cid, {}).get("ok")
         self._probe[cid] = {"at": now, "ok": ok}
         if not ok:
@@ -2357,6 +2428,8 @@ class Roads:
                 h["down_since"] = now
         if was != (h["down_since"] is not None):
             self._changed()
+            if not was:
+                self.probe_soon(cid)                  # (#308) a video camera's still just went: its stream now
 
     def _down_answer(self, cid: str, cam: dict | None = None) -> tuple[int, bytes, str, dict]:
         h = self.health(cid, cam)
@@ -2872,12 +2945,12 @@ class Roads:
                             raise ValueError(f"HTTP {code}")
                         return self._keep_segment(cid, name, headers, body, self.clock())
                     except hlsseg.Bad as e:
-                        self._note_bad(cid, name, str(e))
-                        if attempt == 2:
+                        if attempt == 2:                  # (#308) only a body that isn't video is a GAP for good
+                            self._note_bad(cid, name, str(e))
                             raise
                     except ValueError as e:               # cut short (http_get), an HTTP error: once more
-                        if attempt == 2:
-                            self._note_bad(cid, name, str(e))
+                        if attempt == 2:                  # ... then asked again later (not marked bad)
+                            self._note_bad(cid, name, str(e), keep=False)
                             raise
         finally:
             with self._stream_lock:
@@ -2886,10 +2959,12 @@ class Roads:
                     self._segment_locks.pop(key, None)
         raise AssertionError("unreachable")  # pragma: no cover
 
-    def _note_bad(self, cid: str, name: str, why: str) -> None:
+    def _note_bad(self, cid: str, name: str, why: str, keep: bool = True) -> None:
+        """A segment refused: logged; keep: kept in the stream's "bad" (a GAP in the players' lists, never fetched
+        again). Only hlsseg.Bad is kept (#308): a transient HTTP failure is asked again."""
         with self._stream_lock:
             st = self._streams.get(cid)
-            if st is not None:
+            if st is not None and keep:
                 st.setdefault("bad", {})[name] = why
                 while len(st["bad"]) > 50:
                     st["bad"].pop(next(iter(st["bad"])))
@@ -2954,8 +3029,8 @@ class Roads:
         return first
 
     def _for_player(self, cid: str, chunklist: bytes, start: bool = False) -> bytes:
-        """The chunklist as a player gets it (#276). Every list: a segment the hub knows has nothing to play (refused
-        twice, or no picture left after the repair) is marked EXT-X-GAP (the player skips it; its place and the
+        """The chunklist as a player gets it (#276). Every list: a segment the hub knows has nothing to play (twice not
+        video at all, or no picture left after the repair) is marked EXT-X-GAP (the player skips it; its place and the
         media sequence stay). start (a page's first chunklist: where its playback begins): the head trimmed of those
         and of the ones that came damaged, so the first picture is a whole live one; only the head, so the media
         sequence only ever moves on, and the discontinuity sequence counts any EXT-X-DISCONTINUITY taken off."""
