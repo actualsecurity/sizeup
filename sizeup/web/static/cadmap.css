@@ -161,6 +161,14 @@
   .ml-cam-where { font-weight: 600; }
   .ml-cam-time { font-variant-numeric: tabular-nums; }
   .ml-cam-src a { color: var(--info); }
+  /* the DVR bar (#277): ● Rec, the timeline, the time showing, Live, Keep */
+  .ml-dvr { display: flex; align-items: center; gap: var(--s-2); }
+  .ml-dvr-range { flex: 1 1 auto; min-inline-size: 6rem; accent-color: var(--accent); }
+  .ml-dvr-at { font-variant-numeric: tabular-nums; min-inline-size: 5.5em; }
+  .ml-dvr-rec { color: var(--dim, inherit); white-space: nowrap; }
+  .ml-dvr-rec.on { color: var(--err, #c00); font-weight: 600; }
+  .ml-dvr-keep.on { color: var(--on-accent); background: var(--accent); }
+  .ml-dvr-live { font-weight: 700; }
 
   /* the event's Cameras panel (maplayers.js cameras, #95): under its map (the grid's second column; one column
      when narrow); the wall board's strip (.ml-cams-small) above the cards */
@@ -315,7 +323,9 @@
     white-space: normal; text-align: start; font-weight: 400; background: var(--card); border-color: var(--line);
   }
   .cw-tile.pinned { border-color: var(--warn); outline: var(--bw) solid var(--warn); outline-offset: calc(-1 * var(--bw)); }
-  .cw-tile.stale { border-style: dashed; }                     /* #276: listed, but its source left it out or went quiet */
+  .cw-tile.stale { border-style: dashed; }
+  .cw-tile.rec .cw-frame::after { content: "●"; position: absolute; inset-block-start: var(--s-1); inset-inline-end: var(--s-1);
+    color: var(--err); font-size: var(--fs-2xs); line-height: 1; }                /* #277: the DVR records it */                     /* #276: listed, but its source left it out or went quiet */
   .cw-frame { position: relative; display: block; aspect-ratio: 16 / 9; overflow: hidden; background: #000; border-radius: var(--radius-s); }
   .cw-img, .cw-video { position: absolute; inset: 0; inline-size: 100%; block-size: 100%; object-fit: contain; }
   .cw-pin { position: absolute; inset-block-start: var(--s-1); inset-inline-end: var(--s-1); padding: 0 var(--s-2);

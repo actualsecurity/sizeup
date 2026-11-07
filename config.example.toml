@@ -333,6 +333,17 @@ heartbeat_stale_min = 90             # no heartbeat (or restart) this long: "Tap
 # stream_max = 8                          # live camera streams through the hub at once (a camera watched by several
 #                                         # pages is one); each ~26 KB/s and ~1.4 % of a core: 8 is safe on 0.25 vCPU
 # wall_streams = 0                        # the camera wall's live tiles per page; 0: every streaming camera in our area
+# Camera DVR (#277, sizeup/dvr.py): the live cameras' segments kept on the hub's disk so the viewer can scrub back.
+# Only cameras with live video, on demand: the always list, the ones pinned in the viewer, an open event's cameras,
+# the ones being watched (and dvr_linger_min after). Behind Cloudflare Access like the rest; never public.
+# dvr = true
+# dvr_window_min = 120                    # kept per camera (10 to 720)
+# dvr_max_gb = 6                          # every camera's segments together, at most (0.5 to 200); oldest go first
+# dvr_near_m = 1000                       # an open CAD event's cameras: this close (0 to 5000), and the ones along the road
+# dvr_linger_min = 30                     # a camera someone opened records on this long after they close it (0 to 240)
+# dvr_max_cameras = 12                    # recorded at once (1 to 40): ~200 kbit/s each in, 175 MB each per 2 h
+# dvr_always = []                         # camera ids recorded all the time
+# dvr_dir = ""                            # "" = the state folder's dvr/
 
 # [roadwork]: the maps' "Road projects & closures" layer and the incident view's closure lines (sizeup/roadprojects.py,
 # #185): the Thruway's and 511NY's roadwork (read by [roads]), the capital programs in construction (the Thruway, NYSDOT,

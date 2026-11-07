@@ -211,7 +211,7 @@ window.MapLayers = (() => {
     if (key === "cameras") {
       return fc((d.cameras || []).filter((c) => !(prefs.hideDown && c.down)).map((c) => pt(c, {
         id: c.id, icon: c.down ? "ml-cam-down" : c.off ? "ml-cam-off" : "ml-cam", off: !!c.off, down: !!c.down,
-        label: c.down ? "offline" : c.state === "stale" ? "stale" : "" })));
+        label: c.down ? "offline" : c.state === "stale" ? "stale" : c.rec ? "● rec" : "" })));
     }
     if (key === "incidents") {                // roadwork is the Road projects & closures layer's (roadprojects.js, #185)
       return fc((d.events || []).filter((e) => e.layer === key).map((e) => pt(e, {
@@ -852,12 +852,33 @@ window.MapLayers = (() => {
     time.setAttribute("aria-live", "polite");
     meta.append(where, time);
     const foot = h("div", "dim small ml-cam-src");
-    body.append(frame, meta, foot);
+    // The DVR (#277): the recording's timeline, Live, what time is showing, the recording state and Keep
+    const dvr = h("div", "ml-dvr");
+    dvr.hidden = true;
+    const rec = h("span", "ml-dvr-rec small");
+    const range = h("input", "ml-dvr-range");
+    range.type = "range";
+    range.step = "1";
+    range.setAttribute("aria-label", "Recording timeline");
+    const at = h("span", "ml-dvr-at small");
+    const toLive = h("button", "sm quiet ml-dvr-live", "Live");
+    toLive.type = "button";
+    toLive.title = "Back to live video";
+    const keep = h("button", "sm quiet ml-dvr-keep", "Keep");
+    keep.type = "button";
+    keep.setAttribute("aria-pressed", "false");
+    dvr.append(rec, range, at, toLive, keep);
+    range.addEventListener("input", () => { at.textContent = clock(Number(range.value)); viewer.dvrDragging = true; });
+    range.addEventListener("change", () => { viewer.dvrDragging = false; dvrPlay(Number(range.value)); });
+    toLive.addEventListener("click", () => dvrToLive());
+    keep.addEventListener("click", () => dvrKeep());
+    body.append(frame, meta, dvr, foot);
     panel.append(head, body);
     ov.append(panel);
     document.body.append(ov);
     viewer.ov = ov;
-    viewer.el = { title, img, msg, where, time, foot, video, live };
+    viewer.el = { title, img, msg, where, time, foot, video, live, dvr, rec, range, at, toLive, keep };
+    video.addEventListener("timeupdate", dvrShowing);
     viewer.video = video;
     document.addEventListener("visibilitychange", () => {
       if (!viewer.id) return;
@@ -972,9 +993,137 @@ window.MapLayers = (() => {
     refreshCamera();                                             // a picture at once, even when video follows
     if (document.visibilityState !== "hidden") startRefresh();
     if (c && c.has_video && !c.down && !c.off) startLive(c.id);
+    dvrOpen(c);
     return true;
   }
+  // ---- the DVR (#277): scrub back through the hub's recording of this camera ----------------------------------------
+  // GET /api/cad/cameras/<id>/dvr: {recording, why, pinned, from, to, gaps}; .../dvr/index.m3u8: the recording as a
+  // VOD playlist with EXT-X-PROGRAM-DATE-TIME (the time shown is read from it); POST .../dvr/pin {on}: Keep.
+  function clock(t) {
+    try { return new Date(t * 1000).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false, timeZone: tz() }); }
+    catch (_) { return ""; }
+  }
+  const WHY = { always: "always recorded", pinned: "kept by a dispatcher", incident: "near an open event", open: "opened in a viewer" };
+  function dvrOpen(c) {
+    viewer.dvr = null;
+    viewer.dvrMode = false;
+    const el = viewer.el;
+    el.dvr.hidden = !(c && c.has_video);
+    if (el.dvr.hidden) return;
+    el.at.textContent = "";
+    dvrPoll();
+    clearInterval(viewer.dvrTimer);
+    viewer.dvrTimer = setInterval(dvrPoll, 10000);
+  }
+  function dvrStop() {
+    clearInterval(viewer.dvrTimer);
+    viewer.dvrTimer = null;
+    if (viewer.dvrMode && viewer.hls) { try { viewer.hls.destroy(); } catch (_) { /* gone */ } viewer.hls = null; }
+    viewer.dvrMode = false;
+  }
+  async function dvrPoll() {
+    const id = viewer.id;
+    if (!id) return;
+    try {
+      const r = await fetch(`/api/cad/cameras/${encodeURIComponent(id)}/dvr`, { credentials: "same-origin", cache: "no-store" });
+      if (!r.ok || id !== viewer.id) return;
+      const d = await r.json();
+      viewer.dvr = d;
+      dvrDraw();
+    } catch (_) { /* next time */ }
+  }
+  function dvrDraw() {
+    const d = viewer.dvr, el = viewer.el;
+    if (!d) return;
+    const mins = d.from && d.to ? Math.round((d.to - d.from) / 60) : 0;
+    el.rec.textContent = d.recording ? "● Rec" : mins ? "Rec off" : "No recording";
+    el.rec.classList.toggle("on", !!d.recording);
+    el.rec.title = (d.recording ? `Recording: ${(d.why || []).map((w) => WHY[w] || w).join(", ")}` : "Not recording now")
+      + (mins ? `. ${mins} min kept (up to ${Math.round(d.window_s / 60)}), on the hub only` : "");
+    el.range.disabled = !(d.from && d.to);
+    if (d.from && d.to) {
+      el.range.min = String(Math.floor(d.from));
+      el.range.max = String(Math.floor(d.to));
+      if (!viewer.dvrMode && !viewer.dvrDragging) el.range.value = el.range.max;
+    }
+    el.range.title = d.gaps && d.gaps.length ? `${d.gaps.length} gap${d.gaps.length > 1 ? "s" : ""} in the recording` : "";
+    el.keep.setAttribute("aria-pressed", String(!!d.pinned));
+    el.keep.classList.toggle("on", !!d.pinned);
+    el.keep.title = d.pinned ? "Kept: recorded until you stop keeping it" : "Keep recording this camera after you close it";
+    el.toLive.hidden = !viewer.dvrMode;
+    if (!viewer.dvrMode) el.at.textContent = "";
+  }
+  function dvrPlay(t) {
+    const id = viewer.id, d = viewer.dvr;
+    if (!id || !d || !d.from) return;
+    if (t >= d.to - 2) return dvrToLive();                       // the end of the recording: live
+    const v = viewer.el.video;
+    loadHls().then((Hls) => {
+      if (viewer.id !== id || !Hls.isSupported()) return;
+      const seek = (frags) => {
+        const ms = t * 1000;
+        const f = frags.find((x) => x.programDateTime && ms >= x.programDateTime && ms < x.programDateTime + x.duration * 1000)
+          || frags.find((x) => x.programDateTime && x.programDateTime >= ms) || frags[frags.length - 1];
+        if (!f) return;
+        v.currentTime = f.start + Math.max(0, (ms - (f.programDateTime || ms)) / 1000);
+        v.play().catch(() => {});
+      };
+      if (viewer.dvrMode && viewer.hls && viewer.dvrFrags) return seek(viewer.dvrFrags);
+      stopLive();
+      v.onplaying = v.onwaiting = v.onerror = null;              // the live player's: not this one's
+      viewer.dvrMode = true;
+      v.hidden = false;
+      viewer.el.img.hidden = true;
+      stopRefresh();
+      const hls = new Hls({ enableWorker: false, maxBufferLength: 30, backBufferLength: 30 });
+      viewer.hls = hls;
+      hls.on(Hls.Events.LEVEL_LOADED, (_, data) => { viewer.dvrFrags = data.details.fragments; seek(viewer.dvrFrags); });
+      hls.on(Hls.Events.ERROR, (_, data) => {
+        if (data && data.fatal) { viewer.el.msg.hidden = false; viewer.el.msg.textContent = "Recording unavailable"; viewer.el.msg.title = data.details || ""; }
+      });
+      hls.loadSource(`/api/cad/cameras/${encodeURIComponent(id)}/dvr/index.m3u8`);
+      hls.attachMedia(v);
+      viewer.el.time.textContent = "Recording";
+      viewer.el.time.title = "Playing the hub's recording";
+      viewer.el.toLive.hidden = false;
+    }).catch(() => {});
+  }
+  function dvrShowing() {                                       // the time of what is showing, from the playlist's dates
+    if (!viewer.dvrMode || !viewer.dvrFrags) return;
+    const ct = viewer.el.video.currentTime;
+    const f = viewer.dvrFrags.find((x) => ct >= x.start && ct < x.start + x.duration);
+    if (!f || !f.programDateTime) return;
+    const t = f.programDateTime / 1000 + (ct - f.start);
+    viewer.el.at.textContent = clock(t);
+    viewer.el.at.title = `Recorded ${when(t)}`;
+    if (!viewer.dvrDragging) viewer.el.range.value = String(Math.floor(t));
+  }
+  function dvrToLive() {
+    const id = viewer.id, c = camById(id);
+    if (!id) return;
+    if (viewer.hls && viewer.dvrMode) { try { viewer.hls.destroy(); } catch (_) { /* gone */ } viewer.hls = null; }
+    viewer.dvrMode = false;
+    viewer.dvrFrags = null;
+    viewer.el.toLive.hidden = true;
+    viewer.el.at.textContent = "";
+    if (c && c.has_video && !c.off) startLive(c.id);
+    dvrDraw();
+  }
+  async function dvrKeep() {
+    const id = viewer.id, d = viewer.dvr;
+    if (!id) return;
+    let op = "";
+    try { op = window.operator ? operator() : ""; } catch (_) { /* no operator field on this page */ }
+    try {
+      const r = await fetch(`/api/cad/cameras/${encodeURIComponent(id)}/dvr/pin`, { method: "POST", credentials: "same-origin",
+        headers: { "Content-Type": "application/json" }, body: JSON.stringify({ on: !(d && d.pinned), operator: op }) });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || `${r.status}`);
+      if (id === viewer.id && j.dvr) { viewer.dvr = j.dvr; dvrDraw(); }
+    } catch (e) { if (window.UI && UI.toast) UI.toast(`Not kept: ${e.message}`, "err"); }
+  }
   function stopCamera() {
+    dvrStop();
     stopLive();
     clearInterval(viewer.timer);
     clearInterval(viewer.tick);

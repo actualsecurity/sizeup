@@ -1,0 +1,242 @@
+"""The camera DVR (#277, sizeup/dvr.py): live cameras' HLS segments kept on the hub's disk on demand, a rolling window
+per camera and a size cap over all, played back as a VOD playlist with the time of every segment.
+
+No network: the Thruway's camera fixtures with a moving Wowza-like chunklist (tests/test_hlsseg.py Origin), the
+segments built there (a real SPS, slice headers, TS packets).
+"""
+
+from __future__ import annotations
+
+import json
+import re
+
+import pytest
+
+from sizeup import dvr as dvr_mod
+from sizeup.cad.api import CadApi, needs
+from sizeup.dvr import Dvr
+from tests.test_cad import make_cad
+from tests.test_hlsseg import Origin, gop, segment
+from tests.test_roads import Clock, load_cfg, make
+from tests.test_roles import COREY, JULIAN, VAL, call, people
+
+CAM = "1ne01370s"                       # the Thruway's I-95 exit 21 camera (HLS)
+SNAP_ONLY = "1cw00250w"
+
+
+def setup(tmp_path, **kw):
+    clock = Clock()
+    f = Origin()
+    r = make(key="", urls={}, fetch=f, clock=clock, thruway=True)
+    assert r.refresh("cameras")
+    logs = []
+    d = Dvr(r, tmp_path / "dvr", clock=clock, log=logs.append, free_floor=0, **kw)
+    d.logs = logs
+    r.dvr = d
+    return r, d, f, clock
+
+
+def step(d, f, clock, n=1, dt=4.0):
+    for _ in range(n):
+        f.advance()
+        clock.t += dt
+        d.tick()
+
+
+def test_a_camera_someone_opens_is_recorded_from_the_same_segments_the_viewer_gets(tmp_path):
+    r, d, f, clock = setup(tmp_path)
+    assert d.tick() == 0 and d.wanted() == {}                          # nobody watching, nothing pinned: nothing
+    assert r.get(f"/api/cad/cameras/{CAM}/stream/playlist.m3u8", "")[0] == 200
+    r.pump_once(CAM)                                                    # the live stream's chunklist and segments
+    f.urls.clear()
+    assert d.tick() == 3 and d.wanted() == {CAM: ["open"]}
+    assert not any(u.endswith(".ts") for u in f.urls)                   # the live pump's copies: fetched once
+    st = d.status(CAM)
+    assert st["recording"] and st["why"] == ["open"] and st["segments"] == 3 and st["to"] == clock.t
+    assert st["to"] - st["from"] == pytest.approx(12.0) and st["gaps"] == []
+    files = sorted(p.name for p in (tmp_path / "dvr" / CAM).iterdir())
+    assert len(files) == 3 and all(re.fullmatch(r"\d+_\d{13}_4000\.ts", x) for x in files)
+    # what is kept is what the viewer was served: checked and repaired
+    seg = r.get(f"/api/cad/cameras/{CAM}/dvr/1226.ts", "")
+    assert seg[0] == 200 and seg[2] == "video/MP2T" and seg[1] == r._segments[f"{CAM}/media_w1_1226.ts"]["body"]
+    assert r.public()["cameras"][[c["id"] for c in r.public()["cameras"]].index(CAM)]["rec"] is True
+
+
+def test_the_playlist_dates_every_segment_and_marks_a_gap(tmp_path):
+    r, d, f, clock = setup(tmp_path)
+    d.pins = {CAM}
+    d.tick()
+    step(d, f, clock, 2)
+    clock.t += 120                                                      # the stream went away two minutes ...
+    f.seq += 30
+    d.tick()                                                            # ... and came back
+    code, body, ctype, _ = r.get(f"/api/cad/cameras/{CAM}/dvr/index.m3u8", "")
+    text = body.decode()
+    assert code == 200 and ctype == "application/vnd.apple.mpegurl"
+    assert "#EXT-X-PLAYLIST-TYPE:VOD" in text and text.rstrip().endswith("#EXT-X-ENDLIST")
+    assert text.count("#EXT-X-PROGRAM-DATE-TIME:") == text.count(".ts") == 8
+    assert text.count("#EXT-X-DISCONTINUITY") == 1 and "#EXT-X-MEDIA-SEQUENCE:1225" in text
+    assert re.search(r"#EXT-X-PROGRAM-DATE-TIME:\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z", text)
+    st = json.loads(r.get(f"/api/cad/cameras/{CAM}/dvr", "")[1])
+    assert len(st["gaps"]) == 1 and st["gaps"][0][1] - st["gaps"][0][0] > 100
+
+
+def test_segments_follow_on_in_time_and_none_is_kept_twice(tmp_path):
+    r, d, f, clock = setup(tmp_path)
+    d.pins = {CAM}
+    d.tick()
+    step(d, f, clock, 3)
+    segs = sorted(d._cams[CAM]["segs"].items())
+    assert [s for s, _ in segs] == list(range(1225, 1231))
+    assert all(abs(a[1][0] + a[1][1] - b[1][0]) < 1e-6 for a, b in zip(segs, segs[1:]))   # each begins where the last ended
+    n = len(f.urls)
+    clock.t += 1
+    assert d.tick() == 0 and sum(u.endswith(".ts") for u in f.urls[n:]) == 0           # nothing new: nothing fetched
+
+
+def test_its_own_session_when_nobody_watches_and_a_refusing_source_is_left_alone(tmp_path):
+    r, d, f, clock = setup(tmp_path)
+    d.pins = {CAM}
+    f.urls.clear()
+    assert d.tick() == 3
+    assert f.urls[0].endswith("/playlist.m3u8") and f.urls[1].endswith("/chunklist_w1849562454.m3u8")
+    # the source refuses: not asked again for SESSION_RETRY_S
+    d._cams[CAM]["chunk"] = ""
+    orig = f.__call__
+    r.fetch = lambda url, timeout, limit: (_ for _ in ()).throw(OSError("refused")) if "skyvdn" in url else orig(url, timeout, limit)
+    step(d, f, clock)
+    n = len(d.logs)
+    step(d, f, clock)
+    assert any("no stream" in m for m in d.logs) and len(d.logs) == n
+
+
+def test_a_broken_segment_is_a_hole_never_a_bad_copy(tmp_path):
+    r, d, f, clock = setup(tmp_path)
+    d.pins = {CAM}
+    f.segs["media_w1_1226.ts"] = [b"\x47" * 1000, b"\x47" * 1000]
+    assert d.tick() == 2 and 1226 not in d._cams[CAM]["segs"]
+    assert any("media_w1_1226.ts not kept" in m for m in d.logs)
+
+
+def test_an_opened_camera_records_on_a_while_after_its_viewer_closes(tmp_path):
+    r, d, f, clock = setup(tmp_path, linger_s=600)
+    r.get(f"/api/cad/cameras/{CAM}/stream/playlist.m3u8", "v=dlgabc")
+    d.tick()
+    r.close_stream(CAM, "dlgabc")
+    clock.t += 300
+    assert d.wanted() == {CAM: ["open"]}
+    clock.t += 301
+    assert d.wanted() == {}
+    d.tick()
+    assert d.status(CAM)["recording"] is False and d.status(CAM)["segments"] > 0      # kept for its window
+
+
+def test_an_open_events_cameras_and_the_cap(tmp_path):
+    r, d, f, clock = setup(tmp_path, near_m=500, max_cameras=2)
+    cam = r.camera(CAM)
+    d.incidents = lambda: [{"lat": cam["lat"] + 0.002, "lon": cam["lon"], "address": "I-95"}]   # ~220 m
+    assert d.wanted() == {CAM: ["incident"]}
+    d.incidents = lambda: [{"lat": cam["lat"] + 0.05, "lon": cam["lon"], "address": ""}]        # 5.5 km: no
+    assert CAM not in d.wanted()
+    d.incidents = lambda: 1 / 0                                        # the store busy: no event cameras this round
+    assert d.wanted() == {} and any("open events not read" in m for m in d.logs)
+    # the cap: always first, then pinned
+    vids = [c["id"] for c in r.merged("cameras") if c.get("video")][:4]
+    d.always = (vids[0],)
+    d.pins = {vids[1], vids[2]}
+    w = d.wanted()
+    assert list(w) == [vids[0], vids[1]] and w[vids[0]] == ["always"]
+    # never a camera without video
+    d.always = (SNAP_ONLY,) if not r.camera(SNAP_ONLY) or not r.camera(SNAP_ONLY).get("video") else ()
+    assert SNAP_ONLY not in d.wanted()
+
+
+def test_the_window_and_the_size_cap_and_the_free_disk(tmp_path):
+    r, d, f, clock = setup(tmp_path, window_s=20)
+    d.pins = {CAM}
+    d.tick()
+    step(d, f, clock, 3)
+    segs = d._cams[CAM]["segs"]
+    assert all(t0 >= clock.t - 20 for t0, _, _ in segs.values())       # older than the window: gone
+    n = len(segs)
+    one = next(iter(segs.values()))[2]
+    d.max_bytes = one * 2
+    d.evict()
+    assert len(segs) == 2 and d.total_bytes() <= one * 2 and n > 2
+    oldest = min(segs)
+    assert not list((tmp_path / "dvr" / CAM).glob(f"{oldest - 1}_*.ts"))                # the files go too
+    d.max_bytes, d.free_floor = 10 ** 12, 10 ** 15                      # a disk short of its floor: everything goes
+    d.evict()
+    assert d.total_bytes() == 0 and CAM not in d._cams and not (tmp_path / "dvr" / CAM).exists()
+
+
+def test_a_restart_finds_what_is_on_disk(tmp_path):
+    r, d, f, clock = setup(tmp_path)
+    d.pins = {CAM}
+    d.tick()
+    (tmp_path / "dvr" / CAM / "1300_1.tmp").write_bytes(b"half")       # a write cut short by the restart
+    again = Dvr(r, tmp_path / "dvr", clock=clock, log=lambda m: None, free_floor=0)
+    assert again.status(CAM)["segments"] == 3 and again.status(CAM)["from"] == d.status(CAM)["from"]
+    assert not (tmp_path / "dvr" / CAM / "1300_1.tmp").exists()
+
+
+def test_pins_are_kept_where_the_app_says_and_only_for_video_cameras(tmp_path):
+    r, d, f, clock = setup(tmp_path)
+    saved = {}
+    d.load_pins = lambda: saved.get("pins", [])
+    d.save_pins = lambda pins: saved.update(pins=pins)
+    st = d.pin(CAM, True)
+    assert st["pinned"] and st["recording"] and st["why"] == ["pinned"] and saved["pins"] == [CAM]
+    again = Dvr(r, tmp_path / "dvr", clock=clock, log=lambda m: None, free_floor=0)
+    again.load_pins = d.load_pins
+    again.start().stop()
+    assert again.pins == {CAM}                                          # a new process (a deploy): the pins carry over
+    assert not d.pin(CAM, False)["pinned"] and saved["pins"] == []
+    with pytest.raises(KeyError):
+        d.pin("nope", True)
+    r.thruway.data["cameras"][1]["video"] = ""
+    r._changed()
+    with pytest.raises(ValueError, match="no live video"):
+        d.pin(r.thruway.data["cameras"][1]["id"], True)
+
+
+def test_the_paths_take_only_what_they_name(tmp_path):
+    r, d, f, clock = setup(tmp_path)
+    assert r.handles(f"/api/cad/cameras/{CAM}/dvr") and r.handles(f"/api/cad/cameras/{CAM}/dvr/12.ts")
+    assert not r.handles(f"/api/cad/cameras/{CAM}/dvr/..%2F..%2Fx.ts") and not r.handles(f"/api/cad/cameras/{CAM}/dvr/a.ts")
+    assert r.get(f"/api/cad/cameras/{CAM}/dvr/index.m3u8", "")[0] == 404                 # nothing recorded yet
+    assert r.get(f"/api/cad/cameras/{CAM}/dvr/1.ts", "")[0] == 404
+    assert r.get("/api/cad/cameras/nope/dvr", "")[0] == 404
+
+
+def test_only_dispatchers_and_admins_keep_a_camera_recording_and_it_is_in_their_activity(tmp_path):
+    a = CadApi(make_cad(tmp_path))
+    a.cad.log = lambda m: None
+    a.ids = people(a.cad)
+    asked = []
+    a.cad.dvr_pin = lambda cid, on: asked.append((cid, on)) or {"pinned": on}
+    path = f"/api/cad/cameras/{CAM}/dvr/pin"
+    assert needs(path) == "dispatch"
+    code, out = call(a, path, {"on": True}, VAL)
+    assert code == 403 and asked == []
+    code, out = call(a, path, {"on": True}, JULIAN)
+    assert code == 200 and out["dvr"] == {"pinned": True} and asked == [(CAM, True)]
+    assert any(x["summary"] == f"Kept camera {CAM} recording" for x in a.cad.activity.rows(JULIAN, "", None, 20))
+    code, out = call(a, path, {"on": "yes"}, COREY)
+    assert code == 400 and "true or false" in out["error"]
+    a.cad.dvr_pin = None
+    assert call(a, path, {"on": False}, COREY)[0] == 400
+
+
+def test_the_config(tmp_path):
+    cfg = load_cfg(tmp_path, "")
+    assert (cfg.roads_dvr, cfg.roads_dvr_window_s, cfg.roads_dvr_max_bytes, cfg.roads_dvr_max_cameras) == (
+        True, 7200.0, 6 * 1024 ** 3, 12)
+    cfg = load_cfg(tmp_path, '[roads]\ndvr_window_min = 60\ndvr_max_gb = 2.5\ndvr_always = ["1ne01370s"]\ndvr_near_m = 300\n')
+    assert (cfg.roads_dvr_window_s, cfg.roads_dvr_max_bytes, cfg.roads_dvr_always, cfg.roads_dvr_near_m) == (
+        3600.0, int(2.5 * 1024 ** 3), ("1ne01370s",), 300.0)
+    from sizeup.config import ConfigError
+    for bad in ("dvr = 1", "dvr_window_min = 5", "dvr_max_gb = 0", 'dvr_always = ["../x"]', "dvr_max_cameras = 99"):
+        with pytest.raises(ConfigError, match="roads.dvr"):
+            load_cfg(tmp_path, f"[roads]\n{bad}\n")
+    assert dvr_mod.MAX_BYTES == 6 * 1024 ** 3 and dvr_mod.WINDOW_S == 7200

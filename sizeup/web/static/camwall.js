@@ -253,7 +253,8 @@ window.CamWall = (() => {
     t.name.textContent = c.name;
     t.where.textContent = whereText(c);
     t.el.title = `${c.name}${c.road ? `, ${c.road}` : ""}${c.dir ? ` ${c.dir}` : ""} (${c.source || "511NY"}). Open the viewer`
-      + (c.state === "stale" && c.why ? `. Stale: ${c.why}` : "");
+      + (c.state === "stale" && c.why ? `. Stale: ${c.why}` : "") + (c.rec ? ". Recording on the hub" : "");
+    t.el.classList.toggle("rec", !!c.rec);
     t.el.classList.toggle("stale", c.state === "stale");
     t.el.classList.toggle("pinned", !!c.pin);
     t.pin.hidden = !c.pin;
