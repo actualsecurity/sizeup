@@ -41,6 +41,9 @@ Reset to default = drop the override (one item, or a whole section).
     atc                            key "identify" -> true | false (default true): ATC talkers on the airband rows, "map" ->
                                    true | false (default true): the talker on the Aircraft map (#252, sizeup/atc_talkers.py;
                                    Settings > System > ATC talkers, admins)
+    hub_errors                     key "on" -> true | false (default true), "per_signature" / "total" -> a count: the hub's
+                                   own error spikes pushed to the status topic (#285, sizeup/errwatch.py; Settings >
+                                   System > Hub error alerts, admins)
     datasources                    key a data source ("gis:hydrants", "aircraft:registry") -> off | hourly | daily | weekly |
                                    monthly: how often the registry refreshes it (#186, Settings > Data sources;
                                    sizeup/datasources.py); not set: the source's default
@@ -70,7 +73,7 @@ from sizeup.cad import dispatcher, eta, runcards, tonelist
 from sizeup.cad import lists as lists_mod
 from sizeup.cad.lists import CLASSES, CODE, COLOR, LIST_SECTIONS, LONG_CODE, RESPONSES, ROLES, ListsError
 from sizeup.cad.store import OPERATOR_MAX, SCHEMA_VERSION, TZ, CadError
-from sizeup import polly
+from sizeup import errwatch, polly
 from sizeup.radio.tones import pair_key
 from sizeup.tts import KOKORO_VOICES
 
@@ -98,6 +101,9 @@ PAGE_SECTION[ATC_SECTION] = "system"
 # The push topics by kind (sizeup/notify.py Pushes): Settings > System > Push notifications, audited as System.
 NOTIFY_SECTION = "notify"
 PAGE_SECTION[NOTIFY_SECTION] = "system"
+# The hub's own error spikes (#285, sizeup/errwatch.py): Settings > System > Hub error alerts, audited as System.
+ERR_SECTION = errwatch.SECTION
+PAGE_SECTION[ERR_SECTION] = "system"
 WALL_ID = re.compile(r"[A-Za-z0-9_.:-]{1,64}")      # sizeup/roads.py CAMERA_ID
 MAX_WALL_IDS = 200
 AUDIT_SECTIONS = ("lists", "run cards", "units", "dispatch", "users", "system", "radios")
@@ -505,7 +511,45 @@ class Editor:
         out["tones"] = self.tones_page()
         out["camera_wall"] = self.wall_page()
         out["atc"] = self.atc_page(ov)
+        out["hub_errors"] = self.errors_page(ov)
         return out
+
+    def errors_page(self, ov: dict | None = None) -> dict:
+        """Settings > System > Hub error alerts (#285): the switch and the two thresholds, each with its default."""
+        e = ((self.overrides() if ov is None else ov).get(ERR_SECTION) or {})
+        return {k: {"label": errwatch.LABELS[k], "value": e.get(k, d), "default": d, "edited": k in e,
+                    **({"min": errwatch.LIMITS[k][0], "max": errwatch.LIMITS[k][1]} if k in errwatch.LIMITS else {})}
+                for k, d in errwatch.DEFAULTS.items()} | {"window_min": errwatch.WINDOW_S / 60,
+                                                         "repeat_min": errwatch.REPEAT_S / 60, "quiet_min": errwatch.QUIET_S / 60}
+
+    @staticmethod
+    def _errors_value(key, v):
+        if key == "on":
+            if not isinstance(v, bool):
+                raise CadError("on: true or false")
+            return v
+        lo, hi = errwatch.LIMITS[key]
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or v != int(v) or not lo <= v <= hi:
+            raise CadError(f"{key}: a whole number from {lo} to {hi}")
+        return int(v)
+
+    def _errors_op(self, action: str, body: dict, op: str) -> dict:
+        """set {key: on | per_signature | total, value} | reset {key}: admins."""
+        key = body.get("key")
+        if key not in errwatch.DEFAULTS:
+            raise CadError("key: on, per_signature or total")
+        d = errwatch.DEFAULTS[key]
+        cur = (self.overrides().get(ERR_SECTION) or {}).get(key, d)
+        if action == "reset":
+            v = d
+        elif action == "set":
+            v = self._errors_value(key, body.get("value"))
+        else:
+            raise CadError("action: set or reset")
+        shown = (lambda x: ("on" if x else "off") if key == "on" else str(x))
+        out = self._commit([(ERR_SECTION, key, REMOVE if v == d and type(v) is type(d) else v)], op,
+                           [("system", f"{ERR_SECTION}/{key}", shown(cur), shown(v))])
+        return {**out, "hub_errors": self.errors_page()}
 
     def atc_page(self, ov: dict | None = None) -> dict:
         """Settings > System > ATC talkers (#252): each switch, its default (on) and whether it is edited."""
@@ -627,7 +671,7 @@ class Editor:
               "dispatch": self._dispatch_op, "users": self._users_op, "runcards": self._cards_op,
               "import": self._import_op, "channels": self._channels_op, "stt": self._stt_op,
               "places": self._places_op, TONES_SECTION: self._tones_op, WALL_SECTION: self._wall_op, DS_SECTION: self._ds_op,
-              NOTIFY_SECTION: self._notify_op, ATC_SECTION: self._atc_op, "alarms": lambda a, b, o: self.cad.alarms.settings_op(a, b, o)}.get(section)
+              NOTIFY_SECTION: self._notify_op, ATC_SECTION: self._atc_op, ERR_SECTION: self._errors_op, "alarms": lambda a, b, o: self.cad.alarms.settings_op(a, b, o)}.get(section)
         if fn is None:
             raise CadError(f"no settings section {section!r}")
         if section in ("users", "import"):
@@ -2133,6 +2177,13 @@ class Editor:
         a = ov.get(ATC_SECTION) or {}
         if set(a) - set(ATC_KEYS) or any(not isinstance(v, bool) for v in a.values()):
             raise CadError("overrides.atc: identify and map, true or false")
+        for k, v in (ov.get(ERR_SECTION) or {}).items():      # sizeup/errwatch.py (#285)
+            if k not in errwatch.DEFAULTS:
+                raise CadError(f"overrides.{ERR_SECTION}: {', '.join(errwatch.DEFAULTS)} only")
+            try:
+                self._errors_value(k, v)
+            except CadError as e:
+                raise CadError(f"overrides.{ERR_SECTION}.{e}") from None
         st = ov.get("stt") or {}
         if set(st) - {"vocabulary", "aws_monthly_limit_usd"}:
             raise CadError("overrides.stt: vocabulary and aws_monthly_limit_usd only")

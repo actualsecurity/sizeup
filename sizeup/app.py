@@ -3106,6 +3106,9 @@ def main(argv: list[str] | None = None) -> int:
         log(f"sizeup: databases ready ({cfg.cad_db or 'in memory'})")
         return 0
     app = make_app(cfg)
+    if getattr(app, "error_watch", None) is not None:      # the hub: its own error spikes to the status topic (#285)
+        from sizeup import errwatch
+        errwatch.install(app.error_watch)
     app.start()
     server = make_server(app, fence)
     signal.signal(signal.SIGTERM, lambda *_: server.drain())

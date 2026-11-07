@@ -186,6 +186,20 @@ const StationHealth = (() => {
       if ((tr.recent || []).length) kids.push(table(["When", "Channel", "Reason", "AWS said"],
         tr.recent.map((r) => [when(r.at), r.channel, r.reason, r.why]), ""));
     }
+    const er = d.errors;
+    if (er) {             // the hub's own error lines (#285, sizeup/errwatch.py): the rate and the top errors
+      kids.push(el("h3", "hl-sub", "Hub errors"), dl([
+        ["Rate", `${er.last5} in the last ${er.window_min} min (${er.per_min}/min)`,
+          er.last5 > er.total_limit ? "hl-bad" : er.last5 ? "hl-warn" : "hl-ok"],
+        ["Since the hub started", `${er.total} error line${er.total === 1 ? "" : "s"}, ${er.signatures} different (${when(er.since)})`],
+        ["Push", (er.on ? `on: one error over ${er.per_signature} or all over ${er.total_limit} in ${er.window_min} min`
+          : "off (Settings > System > Hub error alerts)") + (er.alerting ? "; alerting now" : ""), er.alerting ? "hl-bad" : ""],
+        ["Last notices", (er.pushes || []).slice(0, 3).map((p) => `${when(p.at)} ${p.title}`).join("; ")],
+      ]));
+      if ((er.top || []).length) kids.push(table(["Source", "Type", "Message (digits stripped)", "Last 5 min", "This run", "Since", "Last", "Total"],
+        er.top.map((s) => [s.source, s.type, s.message, [s.last5, s.last5 > er.per_signature ? "hl-bad" : ""], s.count,
+          when(s.first), when(s.last), s.total]), ""));
+    }
     kids.push(el("h3", "hl-sub", "Dongles"));
     for (const x of h.duplicates || []) {        // two dongles, one serial (#242): neither is opened by it
       kids.push(el("p", "notice err", `${x.text}. On the station: sudo sizeup-station sdr-serial <index> <new-serial> --dry-run, `
