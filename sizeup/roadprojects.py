@@ -382,27 +382,27 @@ def note_line(rec: dict, win: list | None, now: float) -> str:
     head = HEAD.get(rec.get("closure") or "") or KIND_HEAD.get(rec.get("kind") or "", "Roadwork")
     tail = ""
     if rec.get("kind") == "notice":
-        posted = f", posted {day_clock(rec['updated'], now)}" if rec.get("updated") else ""
-        return f"Notice: {where_text(rec)} ({rec.get('source') or '?'}{posted}): \"{rec.get('title') or ''}\" (dates in the notice)"
+        posted = f" · {day_clock(rec['updated'], now)}" if rec.get("updated") else ""
+        return f"Notice: {where_text(rec)} ({rec.get('source') or '?'}{posted}): \"{rec.get('title') or ''}\""
     if rec.get("kind") == "project":
-        done = (f"completion date {day_text(rec['end_day'])}" if rec.get("end_day")
-                else rec.get("end_text") or "no completion date given")
+        done = (f"done {day_text(rec['end_day'])}" if rec.get("end_day")
+                else rec.get("end_text") or "no end date")
         title = rec.get("title") or where_text(rec)
         title = title if len(title) <= 100 else title[:99].rstrip() + "…"
-        return f"{head}: {title} ({rec.get('source') or '?'}: in construction, {done}; no closure times given)"
+        return f"{head}: {title} ({rec.get('source') or '?'} · in construction · {done})"
     if win is not None:
         s, e = win
         hours = rec.get("hours") or []
         if e is not None and e <= now:
             tail = f"ended {day_clock(e, now)}"
         elif s is not None and s > now:
-            tail = f"from {day_clock(s, now)}" + (f" until {day_clock(e, now)}" if e is not None else ", no end time given")
+            tail = f"from {day_clock(s, now)}" + (f" until {day_clock(e, now)}" if e is not None else ", no end time")
         elif e is not None:
             tail = f"until {day_clock(e, now)}"
             if hours and rec.get("end"):
-                tail += f" (daily hours; work ends {day_clock(rec['end'], now)})"
+                tail += f" (daily; ends {day_clock(rec['end'], now)})"
         else:
-            tail = "no end time given" + (f" ({rec['end_text']})" if rec.get("end_text") else "")
+            tail = "no end time" + (f" ({rec['end_text']})" if rec.get("end_text") else "")
     return f"{head}: {where_text(rec)}" + (f" {tail}" if tail else "") + f" ({rec.get('source') or '?'})"
 
 

@@ -214,7 +214,7 @@ window.Weather = (() => {
     if (c.wind_deg !== null && c.wind_deg !== undefined && c.wind_mph) n.append(arrow(c.wind_deg));
     n.append(h("span", "", c.short));
     n.classList.toggle("stale", !!c.stale);
-    n.title = [`${c.name || c.station} at ${when(c.at)}${c.stale ? " (old)" : ""}`, c.text, c.humidity != null ? `Humidity ${c.humidity}%` : "",
+    n.title = [`${c.name || c.station} at ${when(c.at)}${c.stale ? " (stale)" : ""}`, c.text, c.humidity != null ? `Humidity ${c.humidity}%` : "",
                c.visibility_mi != null ? `Visibility ${c.visibility_mi} mi` : "", "National Weather Service"].filter(Boolean).join(" · ");
   }
 
@@ -232,7 +232,7 @@ window.Weather = (() => {
     const t = d && d.tides;
     const box = h("div", "wx-tides-in");
     if (!t) {
-      box.append(h("span", "dim small", st.err ? "Tides unavailable" : "Tides: waiting for NOAA"));
+      box.append(h("span", "dim small", st.err ? "Tides unavailable" : "Tides: waiting"));
       return box;
     }
     const now = h("div", "wx-tide-now");
@@ -248,8 +248,8 @@ window.Weather = (() => {
     box.append(nx);
     const g = t.gauge;
     if (g) {
-      const off = g.offset_ft === null || g.offset_ft === undefined ? "" : `, ${g.offset_ft >= 0 ? "+" : ""}${g.offset_ft.toFixed(1)} ft vs. the table`;
-      box.append(h("div", "small" + (g.stale ? " warn" : " dim"), `${g.name} gauge ${ft(g.ft)}${off} (${when(g.at)}${g.stale ? ", old" : ""})`));
+      const off = g.offset_ft === null || g.offset_ft === undefined ? "" : ` (${g.offset_ft >= 0 ? "+" : ""}${g.offset_ft.toFixed(1)} vs. table)`;
+      box.append(h("div", "small" + (g.stale ? " warn" : " dim"), `${g.name} gauge ${ft(g.ft)}${off} · ${when(g.at)}${g.stale ? " · stale" : ""}`));
     }
     for (const a of (d.marine_alerts || [])) {
       const m = h("button", `notice ${TONE[a.level] || "info"} wx-alert wx-marine`);
@@ -409,7 +409,7 @@ window.Weather = (() => {
       src.rel = "noopener";
       head.append(h("span", "spacer"), src);
       box.append(head);
-      if (!r || !r.on) { box.append(h("div", "dim small", st.err ? "Weather unavailable here" : "Radar off on the hub")); return box; }
+      if (!r || !r.on) { box.append(h("div", "dim small", st.err ? "Unavailable" : "Radar off")); return box; }
       const lab = h("label", "check");
       const cb = h("input");
       cb.type = "checkbox";
@@ -425,9 +425,11 @@ window.Weather = (() => {
       acb.disabled = !this.on();
       acb.dataset.key = "wx:anim";
       acb.addEventListener("change", () => { store(ANIM_KEY, acb.checked); for (const m of maps) m.refresh(); });
-      an.append(acb, h("span", "", "Animate the last hour"));
+      an.append(acb, h("span", "", "Animate 1 h"));
       box.append(an);
-      box.append(h("div", "ml-note", `${r.label}, every 2 min. Public domain (NOAA).`));
+      const rn = h("div", "ml-note", `${r.label} · every 2 min`);
+      rn.title = "NOAA, public domain";
+      box.append(rn);
       return box;
     }
   }

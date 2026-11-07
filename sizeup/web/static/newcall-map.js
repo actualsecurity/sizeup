@@ -269,7 +269,7 @@ window.NewCallMap = (() => {
       any = true;
       choice(box, { label: r.street.name }, "Street", "Add as cross street", () => addCross(r.street.name));
     }
-    if (!any) box.append(el("div", "dim small", "No address point, intersection or place mapped right here."));
+    if (!any) box.append(el("div", "dim small", "Nothing mapped here"));
     const keep = el("button", "mini quiet", "Use this point");
     keep.type = "button";
     keep.title = "Put the pin here; the location stays as typed";
@@ -297,10 +297,10 @@ window.NewCallMap = (() => {
     let r = null;
     try { r = await lookHere(lat, lon); } catch (_) { r = null; }
     if (!isOpen()) return;
-    const box = hereBox("Pin moved", typed ? `The location still says “${typed}”, at the moved point.` : "");
+    const box = hereBox("Pin moved", typed ? `Location kept: “${typed}”` : "");
     const a = r && r.address;
     if (a && locationText(a) !== typed) choice(box, a, "Nearest address point", "Use this address", () => use(a));
-    const keep = el("button", "mini", typed ? "Keep the address, use the moved point" : "Keep the moved point");
+    const keep = el("button", "mini", typed ? "Keep address, use point" : "Keep point");
     keep.type = "button";
     keep.addEventListener("click", (e) => { e.stopPropagation(); closeHere(); backToField(); });
     const foot = el("div", "row");

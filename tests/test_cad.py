@@ -486,7 +486,7 @@ def test_non_emergency_events_get_no_dispatch_but_can_have_units():
     cad = make_cad()
     iid = cad.create({"type": "NOTIF", "subtype": "WATER", "address": "10 Grove St", "remarks": "hydrant OOS"})["id"]
     r = cad.recommend(iid, {})
-    assert r["units"] == [] and r["note"].startswith("Non-emergency event")
+    assert r["units"] == [] and r["note"].startswith("Non-emergency:")
     e60 = uid(cad, "E60")
     for fn in (cad.dispatch, cad.preview):
         with pytest.raises(CadError, match="Non-emergency"):
@@ -1125,7 +1125,7 @@ def test_api_event_lifecycle(server):
     assert code == 200 and len(st["units"]) == 254 and st["incidents"] == [] and st["run_cards_default"]
     assert st["lists"]["source"] == "data/cad_lists.json" and st["lists"]["unit_boards"][1]["folded"] is True
     assert st["transmit"] == {"enabled": False, "transmitter": "null", "channels": ["FG1", "PC repeater"],
-                              "note": "Transmit is off: logged and played here only"}
+                              "note": "Transmit off: logged, played here only"}
     code, g = server.j("GET", "/api/cad/geocode?q=209+westchester")
     assert code == 200 and g["matches"][0]["label"] == "209 Westchester Ave, Port Chester" and g["matches"][0]["town"] == "Port Chester"
     assert server.j("POST", "/api/cad/incident", {"type": "Volcano"}) == (400, {"error": "type: 'Volcano' is not an event type"})

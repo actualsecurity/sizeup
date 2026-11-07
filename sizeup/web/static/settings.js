@@ -563,7 +563,7 @@ function sUnnamed(d) {
   }
   if (!rows.length) {
     const tr = el("tr");
-    tr.append(Object.assign(el("td", "empty", "None: every pair heard has a name"), { colSpan: 7 }));
+    tr.append(Object.assign(el("td", "empty", "None unnamed"), { colSpan: 7 }));
     t.tBodies[0].append(tr);
   }
   return sCard(sCardHead("Heard but unnamed", rows.length ? `${rows.length}` : "", sHelp("Pairs heard on the air that no "
@@ -1172,7 +1172,7 @@ function sDispatch(panel) {
 // A National Weather Service warning said once by the dispatch voice (weather.js, #132): played where a console is
 // open (and the wall board with its Sound on), never keyed. Off by default.
 function sWeatherSpeak(w) {
-  const [lab, cb] = sCheck("Say NWS warnings with the dispatch voice", w.value,
+  const [lab, cb] = sCheck("Speak NWS warnings", w.value,
     "A warning for our zones (not a watch or advisory), once, played on the consoles: never transmitted");
   cb.addEventListener("change", () => sPost("dispatch", { action: "set", key: "weather_speak", value: cb.checked },
     cb.checked ? "Weather warnings will be spoken" : "Weather warnings: banner only"));
@@ -1199,7 +1199,7 @@ function sJointOnly(j) {
 function sVoice(v) {
   const picked = v.engine === "kokoro" || v.engine === "polly";
   const info = v.engine === "kokoro" ? `Kokoro, fallback ${v.fallback || "macOS say"}`
-    : v.engine === "polly" ? "Amazon Polly (made by the server)" : v.engine === "none" ? "none (text only here)" : "macOS say";
+    : v.engine === "polly" ? "Amazon Polly" : v.engine === "none" ? "None (text only)" : "macOS say";
   const box = sCard(sCardHead("Voice", info,
     picked ? sHelp("Speed 0.5 to 2 (0.92 is a touch slower than talking). Preview says a short sample in this voice.") : null));
   const row = el("div", "row");
@@ -1677,7 +1677,7 @@ function sAtcTalkers(a) {
       `${v.label}: ${cb.checked ? "on" : "off"}`));
     card.append(lab);
   }
-  if (!(a.channels || []).length) card.append(el("p", "dim small", "No airband channel here ([[radio.channels]] kind = \"airband\")"));
+  if (!(a.channels || []).length) card.append(Object.assign(el("p", "dim small", "No airband channel"), { title: '[[radio.channels]] kind = "airband"' }));
   return card;
 }
 
@@ -1752,7 +1752,7 @@ async function sPushes(card) {
     const head = el("div", "row");
     head.append(el("b", "s-eta-l", k.label), el("span", `chip s-state ${k.topic ? "edited" : "default"}`, S_PUSH_FROM[k.source] || k.source));
     const now = el("div", "dim small");
-    now.append(k.topic ? el("span", "", "In effect: ") : el("span", "", k.source === "off" ? "Off: no pushes of this kind" : "Not set: no pushes of this kind"),
+    now.append(k.topic ? el("span", "", "In effect: ") : Object.assign(el("span", "", k.source === "off" ? "Off" : "Not set"), { title: "No pushes of this kind" }),
       ...(k.topic ? [el("span", "mono", k.topic), el("span", "", ` (${k.source_text})`)] : []));
     const input = sInput(k.settings.topic, d.max_len, `${k.label} (empty: the default)`, null, "mono");
     input.minLength = d.min_len;
@@ -1762,15 +1762,15 @@ async function sPushes(card) {
       ...(k.settings.topic || k.settings.off ? [sBtn("Use default", `The default: ${k.default.topic ? k.default.source_text : "not set"}`,
         () => sPost("notify", { action: "reset", key: k.kind }, `${k.label}: back to the default`))] : []),
       ...(k.settings.off ? [] : [sBtn("Turn off", "No pushes of this kind until it is set again",
-        () => sAsk(`Turn off pushes to the ${k.label.toLowerCase()}? Nothing of this kind reaches a phone until it is set again.`,
+        () => sAsk(`Turn off ${k.label.toLowerCase()} pushes? None reach a phone until it is set again.`,
           () => sPost("notify", { action: "off", key: k.kind }, `${k.label}: off`), "Turn off"), "danger-quiet")]),
       el("span", "spacer"),
       sBtn("Send test push", k.topic ? `“sizeup test: ${k.kind} topic” to the topic in effect` : "No topic in effect", () => sPushTest(card, k), k.topic ? "" : "quiet"));
     const last = el("div", "dim small");
     const lp = k.last;
-    last.textContent = [lp ? `Last push ${when(lp.at)}: ${lp.ok ? "sent" : `not sent (${lp.error})`} · ${lp.sent} sent, ${lp.failed} failed`
-      : "No push since this server started",
-    k.test ? `Last test ${when(k.test.at)}: ${k.test.ok ? "sent" : `not sent (${k.test.error})`}` : ""].filter(Boolean).join(" · ");
+    last.textContent = [lp ? `Last push ${when(lp.at)} ${lp.ok ? "sent" : `failed (${lp.error})`} · ${lp.sent} sent · ${lp.failed} failed`
+      : "No pushes since restart",
+    k.test ? `Test ${when(k.test.at)} ${k.test.ok ? "sent" : `failed (${k.test.error})`}` : ""].filter(Boolean).join(" · ");
     kids.push(head, now, row, last);
   }
   const srv = sInput(d.server.settings, 200, `ntfy server (empty: ${d.server.default})`, null, "mono");

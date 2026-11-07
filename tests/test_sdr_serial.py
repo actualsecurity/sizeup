@@ -241,7 +241,7 @@ def test_a_duplicate_serial_is_a_critical_alert_pushed_to_the_status_topic():
     assert a["severity"] == "critical" and a["title"] == "Duplicate dongle serial 00000001"
     assert a["text"].startswith("Two dongles share serial 00000001 (indexes 1 and 4): sizeup can't tell them apart. "
                                 "Fix: sizeup-station sdr-serial 4 <new-serial>")
-    assert "V3 #2's job Fire/EMS 15 doesn't (re)start until then" in a["text"]
+    assert "V3 #2's job Fire/EMS 15 won't start until fixed" in a["text"]
     assert a["who"]["dongle"] == "SDR V3 #2" and a["who"]["channel"] == P25 and a["who"]["detail"] == "indexes 1, 4"
     (msg,) = r.n.msgs
     assert msg["priority"] == 4 and msg["title"].startswith("Duplicate dongle serial 00000001") and "sdr-serial 4" in msg["body"]
