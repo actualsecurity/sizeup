@@ -2038,7 +2038,7 @@ class App:
         item, _key = self._find(job.id)
         if item is None:
             return
-        if getattr(item, "status", "") == "error" and job.alt is None and not job.rerun:
+        if getattr(item, "status", "") in ("error", "skipped") and job.alt is None and not job.rerun:
             log(f"aws transcribe: {job.kind} {job.id}: a late answer, and the fallback had none: it is the text")
             return self._aws_done(job, text, conf)
         log(f"aws transcribe: {job.kind} {job.id}: a late answer, kept as the alternative: {text}")

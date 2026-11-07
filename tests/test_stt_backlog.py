@@ -349,3 +349,40 @@ def test_the_bench_wants_what_sizeup_sends_whisper(tmp_path):
         w.writeframes(b"\0\0" * 800)
     with pytest.raises(SystemExit, match="16 kHz"):
         diag._wav16k(str(p))
+
+
+def test_a_late_aws_answer_on_a_skipped_clip_is_its_text(tmp_path):
+    from sizeup.app import App, AwsJob
+    from sizeup.incidents import Traffic
+    from tests.test_app import cfg
+    app = App(cfg(tmp_path))
+    t = Traffic("tower-1", "HPN Tower", time.time() - 5, time.time() - 2, "")
+    app._stt_dropped(t, "skipped: busy: speech-to-text 5 min behind, an airband clip is no use late (Re-transcribe it)")
+    assert t.status == "skipped"
+    app._aws_late(AwsJob("traffic", "tower-1", "HPN Tower"), "late words", 0.8)
+    t = app._find("tower-1")[0]
+    assert t.text == "late words" and t.status == "done" and not getattr(t, "alt_text", "")
+
+
+def test_when_aws_is_back_a_skipped_clip_goes_to_it(tmp_path):
+    from tests.fake_transcribe import FakeTranscribe
+    from tests.test_channels import AWS_TEXT, aws_cfg
+    from tests.test_cloud import HubRun, call, hub_cfg
+    from tests.test_transcribe import wait
+    from tests.test_transcribe_watchdog import _pending_event, _row
+    fake = FakeTranscribe(phrases={500: AWS_TEXT})
+    hub = HubRun(hub_cfg(tmp_path, **aws_cfg(fake)))
+    try:
+        assert call(hub.url + "/api/cad/settings/stt", "POST", {"action": "set", "key": "aws_monthly_limit_usd",
+                                                                 "value": 0}, token=None)[0] == 200
+        assert call(hub.url + "/api/station/events", "POST", {"epoch": "e1", "events": [_pending_event("FG1-7")]})[0] == 200
+        assert wait(lambda: (_row(hub, "FG1-7") or {}).get("status") == "error", 20)
+        item = hub.app._find("FG1-7")[0]
+        item.status = "skipped"                                         # the station's whisper was busy: shed
+        assert call(hub.url + "/api/cad/settings/stt", "POST", {"action": "set", "key": "aws_monthly_limit_usd",
+                                                                 "value": 40}, token=None)[0] == 200
+        assert hub.app._aws_resend() == 1
+        assert wait(lambda: (_row(hub, "FG1-7") or {}).get("text") == AWS_TEXT + ".", 20)
+    finally:
+        hub.close()
+        fake.close()

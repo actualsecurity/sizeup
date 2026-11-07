@@ -903,7 +903,7 @@ class HubApp(App):
         items = pages + [(t, channels.tg_key(t.talkgroup) if t.talkgroup is not None else t.source, "traffic")
                          for t in list(self.store.loose) + [t for i in self.store.incidents for t in i.traffic]]
         todo = [(it, key, kind) for it, key, kind in items
-                if it.end > now - RESEND_S and (it.status == "pending" or (it.status == "error" and not getattr(it, "text", "")
+                if it.end > now - RESEND_S and (it.status == "pending" or (it.status in ("error", "skipped") and not getattr(it, "text", "")
                                                                            and not getattr(it, "raw", "")))
                 and self.channel_pref(key)["engine"] == "aws"
                 and (it.id not in self._aws_since or it.id in self._aws_asked)]     # (not one AWS is doing now)
