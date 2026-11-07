@@ -95,6 +95,9 @@
   .ml-panel > .ml-head { position: sticky; inset-block-start: calc(-1 * var(--s-2)); z-index: 1; background: var(--raised);
     margin-block: calc(-1 * var(--s-2)) 0; padding-block: var(--s-2) var(--s-1); }
   .ml-head > .ico { color: var(--c, var(--text-2)); }
+  /* a map box (#278): its subtitle on the title's line, at the right; the source and time in a foot, the "i" at its end */
+  .ml-head > .ml-subtitle { min-inline-size: 0; text-align: end; overflow-wrap: anywhere; }
+  .ml-foot { display: flex; align-items: center; gap: var(--s-1); }
   .ml-event { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1) var(--s-2); }
   .ml-list .check > .ico, .ml-fold .check > .ico { color: var(--c, var(--text-2)); }
   .ml-list { display: flex; flex-direction: column; }
@@ -161,6 +164,17 @@
   .ml-cam-where { font-weight: 600; }
   .ml-cam-time { font-variant-numeric: tabular-nums; }
   .ml-cam-src a { color: var(--info); }
+  /* the DVR bar (#277): ● Rec, the timeline, the time showing, Live, Keep */
+  .ml-dvr { display: flex; align-items: center; gap: var(--s-2); }
+  .ml-dvr-track { position: relative; flex: 1 1 auto; min-inline-size: 6rem; display: flex; flex-direction: column; }
+  .ml-dvr-range { inline-size: 100%; accent-color: var(--accent); }
+  .ml-dvr-gaps { position: relative; block-size: calc(2 * var(--bw)); }
+  .ml-dvr-gaps i { position: absolute; inset-block: 0; background: var(--err); }
+  .ml-dvr-at { font-variant-numeric: tabular-nums; min-inline-size: 5.5em; }
+  .ml-dvr-rec { color: var(--dim, inherit); white-space: nowrap; }
+  .ml-dvr-rec.on { color: var(--err, #c00); font-weight: 600; }
+  .ml-dvr-keep.on { color: var(--on-accent); background: var(--accent); }
+  .ml-dvr-live { font-weight: 700; }
 
   /* the event's Cameras panel (maplayers.js cameras, #95): under its map (the grid's second column; one column
      when narrow); the wall board's strip (.ml-cams-small) above the cards */
@@ -315,6 +329,8 @@
     white-space: normal; text-align: start; font-weight: 400; background: var(--card); border-color: var(--line);
   }
   .cw-tile.pinned { border-color: var(--warn); outline: var(--bw) solid var(--warn); outline-offset: calc(-1 * var(--bw)); }
+  .cw-tile.stale { border-style: dashed; }
+  .cw-tile.rec .cw-name::before { content: "● "; color: var(--err); }      /* the DVR records it (#277): in the caption, clear of the pin */
   .cw-frame { position: relative; display: block; aspect-ratio: 16 / 9; overflow: hidden; background: #000; border-radius: var(--radius-s); }
   .cw-img, .cw-video { position: absolute; inset: 0; inline-size: 100%; block-size: 100%; object-fit: contain; }
   .cw-pin { position: absolute; inset-block-start: var(--s-1); inset-inline-end: var(--s-1); padding: 0 var(--s-2);

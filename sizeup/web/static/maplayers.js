@@ -111,6 +111,7 @@ window.MapLayers = (() => {
   const store = { data: null, rev: "", timer: null, subs: new Set(), loading: null };
   async function load() {
     if (store.loading) return store.loading;
+    const t0 = performance.now();               // map:roads (cameras, events, signs): asked -> drawn (#284)
     store.loading = (async () => {
       try {
         const r = await fetch(`/api/cad/roads${store.rev !== "" ? `?rev=${encodeURIComponent(store.rev)}` : ""}`,
@@ -130,6 +131,7 @@ window.MapLayers = (() => {
         }
       } finally {
         store.loading = null;
+        try { performance.clearMeasures("map:roads"); performance.measure("map:roads", { start: t0 }); } catch (_) { /* an older browser */ }
       }
     })();
     return store.loading;
@@ -211,7 +213,7 @@ window.MapLayers = (() => {
     if (key === "cameras") {
       return fc((d.cameras || []).filter((c) => !(prefs.hideDown && c.down)).map((c) => pt(c, {
         id: c.id, icon: c.down ? "ml-cam-down" : c.off ? "ml-cam-off" : "ml-cam", off: !!c.off, down: !!c.down,
-        label: c.down ? "camera down" : "" })));
+        label: c.down ? "offline" : c.state === "stale" ? "stale" : c.rec ? "● rec" : "" })));
     }
     if (key === "incidents") {                // roadwork is the Road projects & closures layer's (roadprojects.js, #185)
       return fc((d.events || []).filter((e) => e.layer === key).map((e) => pt(e, {
@@ -255,7 +257,7 @@ window.MapLayers = (() => {
       this.btn.type = "button";
       if (window.Icon) this.btn.append(Icon("layers"));
       this.btn.append("Layers");
-      this.btn.title = "Map layers: cameras, incidents, road projects and closures, signs, mileposts, exits, the airport";
+      this.btn.title = "Map layers";
       this.btn.setAttribute("aria-expanded", "false");
       this.btn.setAttribute("aria-haspopup", "true");
       this.btn.addEventListener("click", (e) => { e.stopPropagation(); this.toggle(); });
@@ -522,8 +524,8 @@ window.MapLayers = (() => {
       panel.append(list);
       for (const g of this.groups) { const el = g.top ? groupPanel(g) : null; if (el) panel.append(el); }
       if (!d) this.panel.append(h("div", "dim small", "Loading…"));
-      else if (!d.configured) this.panel.append(h("div", "dim small", "No camera or incident source is on: " + (d.note || "not configured on the hub")));
-      if (d && !d.highway_places) this.panel.append(h("div", "dim small", "Mileposts and exits: not in the places database yet"));
+      else if (!d.configured) this.panel.append(h("div", "dim small", d.note ? d.note[0].toUpperCase() + d.note.slice(1) : "Highway layers off"));
+      if (d && !d.highway_places) this.panel.append(h("div", "dim small", "Mileposts, exits: not loaded"));
       for (const s of (d && d.sources) || []) {                   // each source that is on, and when it last read
         if (!s.configured) continue;
         const line = h("div", "dim small ml-source");
@@ -531,7 +533,7 @@ window.MapLayers = (() => {
         a.href = s.link;
         a.target = "_blank";
         a.rel = "noopener";
-        line.append(a, s.at ? `, updated ${hhmm(s.at)}` : ", waiting for the first read", s.note ? ` (${s.note})` : "");
+        line.append(a, s.at ? ` · ${hhmm(s.at)}` : " · waiting", s.note ? ` (${s.note})` : "");
         this.panel.append(line);
       }
       if (d && d.configured && d.note) this.panel.append(h("div", "dim small", d.note));
@@ -548,10 +550,10 @@ window.MapLayers = (() => {
     eventRow() {
       const row = h("div", "ml-event");
       if (!this.override) {
-        row.append(h("span", "dim small", canWrite() && OPEN.includes(this.focused.status) ? "A change here is kept on this event" : "A change here is yours for this event"));
+        row.append(h("span", "dim small", canWrite() && OPEN.includes(this.focused.status) ? "Changes save to this event" : "Changes: yours, this event only"));
         return row;
       }
-      row.append(h("span", "dim small", this.overrideLocal ? "Your layers for this event" : "Kept on this event for everyone"));
+      row.append(h("span", "dim small", this.overrideLocal ? "Yours, this event" : "Saved for everyone"));
       const reset = h("button", "quiet sm", "Reset to default");
       reset.type = "button";
       reset.dataset.key = "reset";
@@ -575,9 +577,9 @@ window.MapLayers = (() => {
         // 511NY's signs (#188) come page by page, with the sign's own status; the Thruway's as lines
         const pages = (s.pages || []).length ? s.pages : ((s.lines || []).length ? [s.lines] : []);
         const lines = pages.length ? pages.flatMap((p, i) => (i ? ["·", ...p] : p))
-          : [s.status === "fault" ? "(the sign reports a fault: its message isn't known)" : "(blank)"];
+          : [s.status === "fault" ? "(fault: message unknown)" : "(blank)"];
         this.showInfo(s.name, [s.road, s.dir, s.mile ? `MP ${s.mile}` : ""].filter(Boolean).join(" "), lines,
-                      `${s.source || "511NY"}` + (s.agency ? ` (${s.agency})` : "") + (s.updated ? `, sign updated ${when(s.updated)}` : ""),
+                      `${s.source || "511NY"}` + (s.agency ? ` (${s.agency})` : "") + (s.updated ? ` · ${when(s.updated)}` : ""),
                       "ml-sign-text");
         return;
       }
@@ -588,27 +590,32 @@ window.MapLayers = (() => {
       const sub = [e.road, e.dir, e.mile ? `MP ${e.mile}` : ""].filter(Boolean).join(" ");
       const lines = [e.description || "(no description)"];
       if (e.lanes) lines.push(`Lanes: ${e.lanes}`);
-      if (e.end) lines.push(`Planned end ${when(e.end)}`);
+      if (e.end) lines.push(`End ${when(e.end)} (planned)`);
       const t = e.updated || e.start;
-      this.showInfo(title, sub, lines, `${e.source || "511NY"}` + (t ? ` updated ${when(t)}` : ""), "");
+      this.showInfo(title, sub, lines, `${e.source || "511NY"}` + (t ? ` · ${when(t)}` : ""), "");
     }
 
-    showInfo(title, sub, lines, foot, cls, icon) {
+    // #278: the title with its subtitle on the right; one fact a line; the source and freshness in a muted foot,
+    // with tip (the caveats and method, if any) behind an "i" at its end
+    showInfo(title, sub, lines, foot, cls, icon, tip) {
       const head = h("div", "ml-head");
       if (icon) head.append(icon);
-      head.append(h("b", "", title));
+      head.append(h("b", "", title), h("span", "spacer"));
+      if (sub) head.append(h("span", "dim small ml-subtitle", sub));
       const x = h("button", "icon quiet sm");
       x.type = "button";
       x.setAttribute("aria-label", "Close");
       x.append(window.Icon ? Icon("x") : "✕");
       x.addEventListener("click", () => this.closeInfo());
-      head.append(h("span", "spacer"), x);
+      head.append(x);
       const body = h("div", "ml-lines" + (cls ? ` ${cls}` : ""));
       for (const l of lines) body.append(l instanceof Node ? l : h("div", "", l));      // a line may be an element (a link)
-      this.info.replaceChildren(head);
-      if (sub) this.info.append(h("div", "dim small", sub));
-      this.info.append(body);
-      if (foot) this.info.append(h("div", "dim small", foot));
+      this.info.replaceChildren(head, body);
+      if (foot || tip) {
+        const f = h("div", "dim small ml-foot", foot || "");
+        if (tip && window.Help && Help.info) f.append(h("span", "spacer"), Help.info(tip));
+        this.info.append(f);
+      }
       this.info.hidden = false;
       x.focus({ preventScroll: true });
     }
@@ -696,11 +703,25 @@ window.MapLayers = (() => {
       if (!r.ok || id !== viewer.id) return;
       const st = await r.json();
       viewer.fps = st.fps;
-      if (st.fps != null && st.fps < 5) {
-        viewer.el.time.textContent = `Live · low frame rate from the source (~${st.fps} fps)`;
-        if (viewer.el.msg.hidden || viewer.el.msg.textContent.startsWith("Buffering")) note(`Low frame rate from the source (~${st.fps} fps): the picture updates about ${st.fps >= 1 ? "once a second" : "every few seconds"}`);
-      } else if (viewer.el.msg.textContent.startsWith("Low frame rate")) viewer.el.msg.hidden = true;
+      viewer.damaged = st.damaged ? [st.damaged, st.checked] : null;
+      liveTime();
     } catch (_) { /* next time */ }
+  }
+  // "Live", "Live · ~2 fps", "Live · lossy source": short; the why in the tooltip (#278)
+  function liveTime() {
+    if (!viewer.el || !viewer.live) return;
+    const t = viewer.el.time, tips = ["Live video through the hub, muted"];
+    let text = "Live";
+    if (viewer.fps != null && viewer.fps < 5) {
+      text += ` · ~${viewer.fps} fps`;
+      tips.push(`The source sends about ${viewer.fps} frames a second`);
+    }
+    if (viewer.damaged) {
+      text += " · lossy source";
+      tips.push(`${viewer.damaged[0]} of the last ${viewer.damaged[1]} segments came with frames lost at the source: the hub leaves the damaged frames out, so the picture holds instead of smearing`);
+    }
+    t.textContent = text;
+    t.title = tips.join(". ");
   }
   function stopLive() {
     if (viewer.liveId) {
@@ -710,6 +731,7 @@ window.MapLayers = (() => {
     clearInterval(viewer.statusTimer);
     viewer.statusTimer = null;
     viewer.fps = null;
+    viewer.damaged = null;
     if (viewer.hls) { try { viewer.hls.destroy(); } catch (_) { /* gone */ } viewer.hls = null; }
     if (viewer.video) { try { viewer.video.pause(); viewer.video.removeAttribute("src"); viewer.video.load(); } catch (_) { /* gone */ } }
     if (viewer.el) { viewer.el.video.hidden = true; viewer.el.live.hidden = true; }
@@ -719,7 +741,8 @@ window.MapLayers = (() => {
     if (!viewer.id) return;
     stopLive();
     viewer.el.msg.hidden = false;
-    viewer.el.msg.textContent = `No live video (${why}): snapshots instead`;
+    viewer.el.msg.textContent = "No live video · snapshots";
+    viewer.el.msg.title = why;
     setTimeout(() => { if (viewer.el.msg.textContent.startsWith("No live video")) viewer.el.msg.hidden = true; }, 6000);
     showFoot();
     refreshCamera();
@@ -735,9 +758,9 @@ window.MapLayers = (() => {
       stopRefresh();
       v.hidden = false;
       viewer.el.img.hidden = true;
-      if (!viewer.el.msg.textContent.startsWith("Low frame rate")) viewer.el.msg.hidden = true;
+      viewer.el.msg.hidden = true;
       viewer.el.live.hidden = false;
-      viewer.el.time.textContent = "Live" + (viewer.fps != null && viewer.fps < 5 ? ` · low frame rate from the source (~${viewer.fps} fps)` : "");
+      liveTime();
       showFoot();
       if (!viewer.statusTimer) viewer.statusTimer = setInterval(pollStatus, 5000);
     };
@@ -758,10 +781,26 @@ window.MapLayers = (() => {
                             maxBufferLength: 30, backBufferLength: 10, manifestLoadingTimeOut: 8000, manifestLoadingMaxRetry: 0,
                             levelLoadingTimeOut: 12000, levelLoadingMaxRetry: 2, fragLoadingTimeOut: 15000, fragLoadingMaxRetry: 2 });
       viewer.hls = hls;
-      note("Connecting to the live stream…");
+      note("Connecting…");
+      const tries = [];                                               // recoveries within the last minute
       hls.on(Hls.Events.ERROR, (_, data) => {
         if (!data) return;
         const code = data.response && data.response.code;
+        // (#276) one segment the source spoiled (a 502 from the hub) or a decode hiccup is not the end of the stream:
+        // load on / recover the media a few times a minute before going to snapshots
+        if (data.fatal && code !== 429 && code !== 503 && data.details !== "manifestLoadTimeOut" && data.details !== "manifestLoadError") {
+          const now = Date.now();
+          while (tries.length && now - tries[0] > 60000) tries.shift();
+          if (tries.length < 3) {
+            tries.push(now);
+            note("Buffering…");
+            try {
+              if (data.type === Hls.ErrorTypes.MEDIA_ERROR) hls.recoverMediaError();
+              else hls.startLoad();
+              return;
+            } catch (_) { /* fall through: snapshots */ }
+          }
+        }
         if (data.fatal) {
           const r = code === 429 ? "the hub has enough streams open" : code === 503 ? "no live video from the source right now"
             : data.details === "manifestLoadTimeOut" ? "the source didn't answer" : data.details || "stream error";
@@ -776,15 +815,24 @@ window.MapLayers = (() => {
       v.onwaiting = () => { if (viewer.live) note("Buffering…"); };
     }).catch(() => native());                                       // hls.js didn't load: the browser's own, or snapshots
   }
+  // The footer, data first (#278): "511NY" (its link) and how the picture comes; the sentences in the tooltip
   function showFoot() {
     const c = camById(viewer.id);
     const src = ((store.data && store.data.sources) || []).find((s) => c && s.short === c.source);
-    const a = h("a", "", SOURCE_NOTE[c && c.source] || (src ? src.label : "the source"));
+    const a = h("a", "", (c && c.source) || (src ? src.short : "Source"));
     a.href = src ? src.link : "#";
     a.target = "_blank";
     a.rel = "noopener";
-    if (viewer.live) viewer.el.foot.replaceChildren("Live video through the hub (", a, "), muted, the newest segments fetched ahead. Only while this is open.");
-    else viewer.el.foot.replaceChildren(`${cadenceText(c)}, through the hub (`, a, "). Looked at every 10 s while this is open.");
+    a.title = SOURCE_NOTE[c && c.source] || (src ? src.label : "");
+    const n = (c && c.cadence) || 60;
+    const foot = viewer.el.foot;
+    if (viewer.live) {
+      foot.replaceChildren(a, " · Live");
+      foot.title = "Live video through the hub, muted; the newest segments fetched ahead; only while this is open";
+    } else {
+      foot.replaceChildren(a, ` · Snapshot · ${n >= 60 ? "~1 min" : `${n} s`}`);
+      foot.title = `${cadenceText(c)}, through the hub; looked at every 10 s while this is open`;
+    }
   }
 
   function buildViewer() {
@@ -827,15 +875,44 @@ window.MapLayers = (() => {
     time.setAttribute("aria-live", "polite");
     meta.append(where, time);
     const foot = h("div", "dim small ml-cam-src");
-    body.append(frame, meta, foot);
+    // The DVR (#277): the recording's timeline, Live, what time is showing, the recording state and Keep
+    const dvr = h("div", "ml-dvr");
+    dvr.hidden = true;
+    const rec = h("span", "ml-dvr-rec small");
+    const range = h("input", "ml-dvr-range");
+    range.type = "range";
+    range.step = "1";
+    range.setAttribute("aria-label", "Recording timeline");
+    const at = h("span", "ml-dvr-at small");
+    const track = h("span", "ml-dvr-track");
+    const gapbar = h("span", "ml-dvr-gaps");                        // the recording's gaps, under the timeline
+    gapbar.setAttribute("aria-hidden", "true");
+    track.append(range, gapbar);
+    const toLive = h("button", "sm quiet ml-dvr-live", "Live");
+    toLive.type = "button";
+    toLive.title = "Back to live video";
+    const keep = h("button", "sm quiet ml-dvr-keep", "Keep");
+    keep.type = "button";
+    keep.setAttribute("aria-pressed", "false");
+    dvr.append(rec, track, at, toLive, keep);
+    range.addEventListener("input", () => { at.textContent = clock(Number(range.value)); viewer.dvrDragging = true; });
+    range.addEventListener("change", () => { viewer.dvrDragging = false; dvrPlay(Number(range.value)); });
+    toLive.addEventListener("click", () => dvrToLive());
+    keep.addEventListener("click", () => dvrKeep());
+    body.append(frame, meta, dvr, foot);
     panel.append(head, body);
     ov.append(panel);
     document.body.append(ov);
     viewer.ov = ov;
-    viewer.el = { title, img, msg, where, time, foot, video, live };
+    viewer.el = { title, img, msg, where, time, foot, video, live, dvr, rec, range, at, toLive, keep, gapbar };
+    video.addEventListener("timeupdate", dvrShowing);
     viewer.video = video;
     document.addEventListener("visibilitychange", () => {
       if (!viewer.id) return;
+      if (viewer.dvrMode) {                                       // the recording: pause and go on, never snapshots
+        try { if (document.visibilityState === "hidden") video.pause(); else video.play().catch(() => {}); } catch (_) { /* fine */ }
+        return;
+      }
       if (document.visibilityState === "hidden") {
         stopRefresh();
         if (viewer.live) { try { video.pause(); if (viewer.hls) viewer.hls.stopLoad(); } catch (_) { /* fine */ } }
@@ -856,17 +933,22 @@ window.MapLayers = (() => {
     clearInterval(viewer.timer);
     clearInterval(viewer.tick);
     viewer.timer = viewer.tick = null;
-    if (viewer.id) viewer.el.time.textContent = viewer.taken ? `Image ${hhmm(viewer.taken)}, paused` : "Paused";
+    if (viewer.id && !viewer.live) viewer.el.time.textContent = viewer.taken ? `${hhmm(viewer.taken)} · paused` : "Paused";
   }
   function showTime() {
     if (!viewer.id) return;
+    const t = viewer.el.time;
     if (viewer.down) {
       const d = viewer.down;
-      viewer.el.time.textContent = `Down since ${when(d.down_since)}` + (d.last_image ? ` (last image ${when(d.last_image)})` : " (no image)");
+      t.textContent = d.down_since ? `Offline · ${ago(d.down_since).replace(" ago", "")}` : "Offline";
+      t.title = [d.why, d.down_since ? `since ${when(d.down_since)}` : "", d.last_image ? `last image ${when(d.last_image)}` : "no image"].filter(Boolean).join(", ");
       return;
     }
     if (!viewer.taken) return;
-    viewer.el.time.textContent = `Image ${when(viewer.taken)} (${ago(viewer.taken)})${viewer.stale ? ", camera not answering" : ""}`;
+    const c = camById(viewer.id);
+    t.textContent = `${when(viewer.taken)} · ${ago(viewer.taken)}` + (viewer.stale ? " · not answering" : "")
+      + (c && c.state === "stale" ? " · stale" : "");
+    t.title = c && c.state === "stale" ? `${c.why}${c.since ? ` since ${when(c.since)}` : ""}` : `Image taken ${when(viewer.taken)}`;
   }
 
   async function refreshCamera() {
@@ -884,7 +966,7 @@ window.MapLayers = (() => {
           viewer.down = e;
           viewer.el.img.hidden = true;
           viewer.el.msg.hidden = false;
-          viewer.el.msg.textContent = "Camera down: no current image";
+          viewer.el.msg.textContent = "Offline";
           showTime();
           return;
         }
@@ -905,9 +987,10 @@ window.MapLayers = (() => {
       viewer.el.msg.hidden = true;
       showTime();
     } catch (e) {
-      if (id !== viewer.id) return;
+      if (id !== viewer.id || viewer.live) return;            // live video plays: the still doesn't matter (#276)
       viewer.el.msg.hidden = false;
-      viewer.el.msg.textContent = `No image: ${e.message}`;
+      viewer.el.msg.textContent = "No image";
+      viewer.el.msg.title = e.message;
       if (!viewer.url) viewer.el.img.hidden = true;
     } finally {
       viewer.busy = false;
@@ -921,7 +1004,7 @@ window.MapLayers = (() => {
     viewer.taken = 0;
     viewer.etag = null;
     viewer.stale = false;
-    viewer.down = c && c.down ? { down: true, down_since: c.down_since, last_image: c.last_image } : null;
+    viewer.down = c && c.down ? { down: true, down_since: c.down_since, last_image: c.last_image, why: c.why } : null;
     viewer.cadence = (c && c.cadence) || 60;
     const el = viewer.el;
     el.title.textContent = c ? c.name : `Camera ${id}`;
@@ -931,8 +1014,8 @@ window.MapLayers = (() => {
     el.img.hidden = true;
     el.img.alt = c ? `Traffic camera: ${c.name}` : "Traffic camera";
     el.msg.hidden = false;
-    el.msg.textContent = c && c.down ? "Camera down: no current image"
-      : c && c.off ? `This camera is marked out of service by ${c.source || "its source"}: trying anyway…` : "Loading…";
+    el.msg.textContent = c && c.down ? "Offline" : c && c.off ? "Out of service · trying" : "Loading…";
+    el.msg.title = c && c.down ? (c.why || "") : c && c.off ? `Marked out of service by ${c.source || "its source"}` : "";
     el.time.textContent = "";
     if (viewer.down) showTime();
     if (viewer.url) { URL.revokeObjectURL(viewer.url); viewer.url = null; }
@@ -941,9 +1024,150 @@ window.MapLayers = (() => {
     refreshCamera();                                             // a picture at once, even when video follows
     if (document.visibilityState !== "hidden") startRefresh();
     if (c && c.has_video && !c.down && !c.off) startLive(c.id);
+    dvrOpen(c);
     return true;
   }
+  // ---- the DVR (#277): scrub back through the hub's recording of this camera ----------------------------------------
+  // GET /api/cad/cameras/<id>/dvr: {recording, why, pinned, from, to, gaps}; .../dvr/index.m3u8: the recording as a
+  // VOD playlist with EXT-X-PROGRAM-DATE-TIME (the time shown is read from it); POST .../dvr/pin {on}: Keep.
+  function clock(t) {
+    try { return new Date(t * 1000).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false, timeZone: tz() }); }
+    catch (_) { return ""; }
+  }
+  const WHY = { always: "always recorded", pinned: "kept by a dispatcher", incident: "near an open event", open: "opened in a viewer" };
+  function dvrOpen(c) {
+    viewer.dvr = null;
+    viewer.dvrMode = false;
+    const el = viewer.el;
+    el.dvr.hidden = !(c && c.has_video);
+    if (el.dvr.hidden) return;
+    el.at.textContent = "";
+    dvrPoll();
+    clearInterval(viewer.dvrTimer);
+    viewer.dvrTimer = setInterval(dvrPoll, 10000);
+  }
+  function dvrStop() {
+    clearInterval(viewer.dvrTimer);
+    viewer.dvrTimer = null;
+    if (viewer.dvrMode && viewer.hls) { try { viewer.hls.destroy(); } catch (_) { /* gone */ } viewer.hls = null; }
+    viewer.dvrMode = false;
+  }
+  async function dvrPoll() {
+    const id = viewer.id;
+    if (!id) return;
+    try {
+      const r = await fetch(`/api/cad/cameras/${encodeURIComponent(id)}/dvr`, { credentials: "same-origin", cache: "no-store" });
+      if (!r.ok || id !== viewer.id) return;
+      const d = await r.json();
+      viewer.dvr = d;
+      dvrDraw();
+    } catch (_) { /* next time */ }
+  }
+  function dvrDraw() {
+    const d = viewer.dvr, el = viewer.el;
+    if (!d) return;
+    const mins = d.from && d.to ? Math.round((d.to - d.from) / 60) : 0;
+    el.rec.textContent = d.recording ? "● Rec" : mins ? "Rec off" : "No recording";
+    el.rec.classList.toggle("on", !!d.recording);
+    el.rec.title = (d.recording ? `Recording: ${(d.why || []).map((w) => WHY[w] || w).join(", ")}` : "Not recording now")
+      + (mins ? `. ${mins} min kept (up to ${Math.round(d.window_s / 60)}), on the hub only` : "");
+    el.range.disabled = !(d.from && d.to);
+    if (d.from && d.to) {
+      el.range.min = String(Math.floor(d.from));
+      el.range.max = String(Math.floor(d.to));
+      if (!viewer.dvrMode && !viewer.dvrDragging) el.range.value = el.range.max;
+    }
+    el.range.title = d.gaps && d.gaps.length ? `${d.gaps.length} gap${d.gaps.length > 1 ? "s" : ""} in the recording` : "";
+    el.gapbar.replaceChildren();
+    if (d.from && d.to && d.to > d.from) {
+      for (const [a, b] of d.gaps || []) {
+        const g = h("i", "");
+        g.style.insetInlineStart = `${(100 * (a - d.from)) / (d.to - d.from)}%`;
+        g.style.inlineSize = `${Math.max(0.5, (100 * (b - a)) / (d.to - d.from))}%`;
+        el.gapbar.append(g);
+      }
+    }
+    if (d.stopped) { el.rec.textContent = "Rec stopped"; el.rec.title = d.stopped; }
+    // Keep is a dispatcher's or an admin's (the server refuses a viewer: sizeup/cad/api.py WRITES)
+    const w = window.cad && cad.who;
+    el.keep.hidden = !!(w && w.enforced && w.may !== "admin" && w.may !== "dispatcher");
+    el.keep.setAttribute("aria-pressed", String(!!d.pinned));
+    el.keep.classList.toggle("on", !!d.pinned);
+    el.keep.title = d.pinned ? `Kept until ${d.pinned_until ? when(d.pinned_until) : "you stop it"}` : "Keep recording this camera for 24 h";
+    el.toLive.hidden = !viewer.dvrMode;
+    if (!viewer.dvrMode) el.at.textContent = "";
+  }
+  function dvrPlay(t) {
+    const id = viewer.id, d = viewer.dvr;
+    if (!id || !d || !d.from) return;
+    if (t >= d.to - 2) return dvrToLive();                       // the end of the recording: live
+    const v = viewer.el.video;
+    loadHls().then((Hls) => {
+      if (viewer.id !== id || !Hls.isSupported()) return;
+      const seek = (frags) => {
+        const ms = t * 1000;
+        const f = frags.find((x) => x.programDateTime && ms >= x.programDateTime && ms < x.programDateTime + x.duration * 1000)
+          || frags.find((x) => x.programDateTime && x.programDateTime >= ms) || frags[frags.length - 1];
+        if (!f) return;
+        v.currentTime = f.start + Math.max(0, (ms - (f.programDateTime || ms)) / 1000);
+        v.play().catch(() => {});
+      };
+      if (viewer.dvrMode && viewer.hls && viewer.dvrFrags) return seek(viewer.dvrFrags);
+      stopLive();
+      v.onplaying = v.onwaiting = v.onerror = null;              // the live player's: not this one's
+      viewer.dvrMode = true;
+      v.hidden = false;
+      viewer.el.img.hidden = true;
+      stopRefresh();
+      const hls = new Hls({ enableWorker: false, maxBufferLength: 30, backBufferLength: 30 });
+      viewer.hls = hls;
+      hls.on(Hls.Events.LEVEL_LOADED, (_, data) => { viewer.dvrFrags = data.details.fragments; seek(viewer.dvrFrags); });
+      hls.on(Hls.Events.ERROR, (_, data) => {
+        if (data && data.fatal) { viewer.el.msg.hidden = false; viewer.el.msg.textContent = "Recording unavailable"; viewer.el.msg.title = data.details || ""; }
+      });
+      hls.loadSource(`/api/cad/cameras/${encodeURIComponent(id)}/dvr/index.m3u8`);
+      hls.attachMedia(v);
+      viewer.el.time.textContent = "Recording";
+      viewer.el.time.title = "Playing the hub's recording";
+      viewer.el.toLive.hidden = false;
+    }).catch(() => {});
+  }
+  function dvrShowing() {                                       // the time of what is showing, from the playlist's dates
+    if (!viewer.dvrMode || !viewer.dvrFrags) return;
+    const ct = viewer.el.video.currentTime;
+    const f = viewer.dvrFrags.find((x) => ct >= x.start && ct < x.start + x.duration);
+    if (!f || !f.programDateTime) return;
+    const t = f.programDateTime / 1000 + (ct - f.start);
+    viewer.el.at.textContent = clock(t);
+    viewer.el.at.title = `Recorded ${when(t)}`;
+    if (!viewer.dvrDragging) viewer.el.range.value = String(Math.floor(t));
+  }
+  function dvrToLive() {
+    const id = viewer.id, c = camById(id);
+    if (!id) return;
+    if (viewer.hls && viewer.dvrMode) { try { viewer.hls.destroy(); } catch (_) { /* gone */ } viewer.hls = null; }
+    viewer.dvrMode = false;
+    viewer.dvrFrags = null;
+    viewer.el.toLive.hidden = true;
+    viewer.el.at.textContent = "";
+    if (c && c.has_video && !c.off) startLive(c.id);
+    dvrDraw();
+  }
+  async function dvrKeep() {
+    const id = viewer.id, d = viewer.dvr;
+    if (!id) return;
+    let op = "";
+    try { op = window.operator ? operator() : ""; } catch (_) { /* no operator field on this page */ }
+    try {
+      const r = await fetch(`/api/cad/cameras/${encodeURIComponent(id)}/dvr/pin`, { method: "POST", credentials: "same-origin",
+        headers: { "Content-Type": "application/json" }, body: JSON.stringify({ on: !(d && d.pinned), operator: op }) });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || `${r.status}`);
+      if (id === viewer.id && j.dvr) { viewer.dvr = j.dvr; dvrDraw(); }
+    } catch (e) { if (window.UI && UI.toast) UI.toast(`Not kept: ${e.message}`, "err"); }
+  }
   function stopCamera() {
+    dvrStop();
     stopLive();
     clearInterval(viewer.timer);
     clearInterval(viewer.tick);
@@ -1097,8 +1321,9 @@ window.MapLayers = (() => {
           b.type = "button";
           b.dataset.camera = c.id;
           b.setAttribute("aria-label", `camera down: ${c.name}`);
+          b.title = c.why || "";
           b.append(h("span", "", c.name), h("span", "dim small", (c.miles != null ? `${c.miles.toFixed(1)} mi` : `${Math.round((c.km || 0) * 1000)} m`)
-            + (c.down_since ? `, down since ${when(c.down_since)}` : "")));
+            + (c.down_since ? ` · Offline · ${when(c.down_since)}` : " · Offline")));
           b.addEventListener("click", () => openCamera(c.id, b));
           ul.append(b);
         }

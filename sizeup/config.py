@@ -55,6 +55,10 @@ class ChannelCfg:
     # America/New_York wall-clock time (sizeup/tz.py, DST-aware). () = mhz all day. The receiver retunes between
     # transmissions (sizeup/radio/am.py Schedule).
     schedule: tuple[tuple[int, float], ...] = ()
+    # Other frequencies on the same dongle (#275, "also"): ((MHz, from, until, label), ...), from/until minutes of the
+    # local day (None: all day); label: the airband channel that frequency belongs to (its transmissions are that
+    # channel's). More than one frequency on: rtl_sdr + the channelizer instead of rtl_fm (sizeup/radio/channelize.py).
+    also: tuple[tuple[float, int | None, int | None, str], ...] = ()
 
     def __post_init__(self):
         paging = self.kind == "paging"
@@ -112,6 +116,10 @@ class Config:
     # A dongle that appears with no job a person chose gets the first job in auto_assign_order that no
     # other dongle has (sizeup/app.py _auto_assign). load() defaults it on; built directly (tests), off.
     sdr_auto_assign: bool = False
+    # #275: the airband channels' `also` frequencies taken (several per dongle, sizeup/radio/channelize.py). Off by default
+    # (PR #289's review): each dongle runs rtl_fm on its own channel until an on-air A/B (tools/airband_ab.py) says the
+    # wideband capture costs nothing at the site.
+    airband_multichannel: bool = False
     sdr_auto_order: tuple[str, ...] = ("FG1", "Fire/EMS 15", "South 2", "FG2", "HPN Tower")   # labels / "Fire/EMS 15" (P25)
     p25_recorder: str = ""       # trunk-recorder command line, started/stopped by sizeup
     p25_recorder_dir: str = ""   # its working directory (config.json + talkgroups.csv)
@@ -241,6 +249,14 @@ class Config:
     roads_county: bool = True         # Westchester County DPW's cameras (a public ArcGIS layer, no key) (#99)
     roads_stream_max: int = 8         # live camera streams open at once, hub-wide (sizeup/roads.py STREAM_MAX, #125)
     roads_wall_streams: int = 0       # the camera wall's live tiles at once per page; 0: every camera in our area that streams
+    roads_dvr: bool = True            # camera DVR (#277, sizeup/dvr.py): segments kept on the hub's disk, on demand
+    roads_dvr_window_s: float = 7200.0
+    roads_dvr_max_bytes: int = 6 * 1024 ** 3
+    roads_dvr_near_m: float = 1000.0
+    roads_dvr_linger_s: float = 1800.0
+    roads_dvr_max_cameras: int = 12
+    roads_dvr_always: tuple[str, ...] = ()
+    roads_dvr_dir: str = ""
     # [roadwork] (sizeup/roadprojects.py, #185): road projects & closures for the maps and the incident view: the
     # Thruway's and 511NY's roadwork (through [roads]), the capital programs (Thruway, NYSDOT, CTDOT), the villages'
     # road notices; 511NY's WZDx (the CARS API, with [roads]' username and password) and any other public WZDx feed.
@@ -524,11 +540,91 @@ def _airband(c: dict, i: int) -> ChannelCfg:
     if not 1.0 <= sq <= 20.0:
         raise ConfigError(f"{where}.squelch_db: 1 to 20 dB over the noise floor (3.5: shortfinal's, tested)")
     sched = _schedule(c["schedule"], mhz, where) if "schedule" in c else ()
+    also = _also(c["also"], where) if "also" in c else ()
     return ChannelCfg(str(c["label"]), mhz, "airband", c.get("device", ""), c.get("gain_db", AIRBAND_GAIN_DB), sq,
-                      schedule=sched)
+                      schedule=sched, also=also)
 
 
 _HHMM = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
+
+
+def _hhmm(v, where: str) -> int:
+    m = _HHMM.match(v.strip()) if isinstance(v, str) else None
+    if not m:
+        raise ConfigError(f'{where}: {v!r}: a time of day "HH:MM" (00:00 to 23:59)')
+    return int(m.group(1)) * 60 + int(m.group(2))
+
+
+def _also(raw, where: str) -> tuple[tuple[float, int | None, int | None, str], ...]:
+    """An airband channel's "also" (#275): [{mhz = 120.8, from = "23:00", until = "07:00"}, ...]: other frequencies
+    on the same dongle, all day or between two local times. The labels are filled in by _also_owners."""
+    why = (f'{where}.also: a list of {{mhz = ..., from = "HH:MM", until = "HH:MM"}} (from / until: both or neither), '
+           'e.g. [{mhz = 120.8, from = "23:00", until = "07:00"}]')
+    if not isinstance(raw, list) or not raw:
+        raise ConfigError(why)
+    out = []
+    for e in raw:
+        if not isinstance(e, dict) or "mhz" not in e or set(e) - {"mhz", "from", "until"} \
+                or ("from" in e) != ("until" in e) or isinstance(e["mhz"], bool) or not isinstance(e["mhz"], (int, float)):
+            raise ConfigError(why)
+        f = float(e["mhz"])
+        if not AIRBAND_MHZ[0] <= f <= AIRBAND_MHZ[1]:
+            raise ConfigError(f"{where}.also: {f:g} MHz: airband voice is {AIRBAND_MHZ[0]:g} to {AIRBAND_MHZ[1]:g} MHz (AM)")
+        a = _hhmm(e["from"], f"{where}.also.from") if "from" in e else None
+        b = _hhmm(e["until"], f"{where}.also.until") if "until" in e else None
+        out.append((f, a, b, ""))
+    return tuple(out)
+
+
+def airband_owner(channels, mhz: float) -> str | None:
+    """The airband channel a frequency belongs to (#275): the one on it (its mhz), else the one whose schedule has it."""
+    key = round(float(mhz), 6)
+    air = [c for c in channels if c.kind == "airband"]
+    for c in air:
+        if round(c.mhz, 6) == key:
+            return c.label
+    for c in air:
+        if any(round(f, 6) == key for _at, f in c.schedule):
+            return c.label
+    return None
+
+
+def _also_owners(channels: list) -> list:
+    """Each "also" frequency with the channel it belongs to (that channel's transmissions, AWS, talkers ...), and every
+    set of frequencies one dongle would have on at once checked to fit one capture (sizeup/radio/channelize.py plan)."""
+    from dataclasses import replace
+
+    from sizeup.radio import channelize
+    out = []
+    for i, c in enumerate(channels):
+        if not c.also:
+            out.append(c)
+            continue
+        where = f"radio.channels[{i}].also"
+        also = []
+        for f, a, b, _l in c.also:
+            owner = airband_owner(channels, f)
+            if owner is None:
+                raise ConfigError(f"{where}: {f:g} MHz isn't on any airband channel here: add a channel for it")
+            also.append((f, a, b, owner))
+        cuts = sorted({0, *(at for at, _f in c.schedule),
+                       *(x for f, a, b, _o in also for x in (a, b) if x is not None)})
+        for m in cuts:
+            first = c.mhz
+            for at, f in c.schedule:
+                first = f if m >= at else first
+            if c.schedule and m < c.schedule[0][0]:
+                first = c.schedule[-1][1]
+            on = {round(first, 6)}
+            for f, a, b, _o in also:
+                if a is None or b is None or a == b or (a <= m < b if a < b else (m >= a or m < b)):
+                    on.add(round(f, 6))
+            try:
+                channelize.plan(sorted(on))
+            except ValueError as e:
+                raise ConfigError(f"{where}: at {m // 60:02d}:{m % 60:02d} {e}") from None
+        out.append(replace(c, also=tuple(also)))
+    return out
 
 
 def _schedule(raw, mhz: float, where: str) -> tuple[tuple[int, float], ...]:
@@ -627,7 +723,8 @@ def _roads(data: dict) -> dict:
                 raise ConfigError(f"roads.{gone}: no longer used ({why})")
     rd = _take(raw, "roads", {"enabled", "ny511", "bbox", "cameras_every_min", "events_every_s", "signs_every_min",
                               "events_url", "signs_url", "ny511_hub", "carshub_imagery", "thruway", "county",
-                              "stream_max", "wall_streams"})
+                              "stream_max", "wall_streams", "dvr", "dvr_window_min", "dvr_max_gb", "dvr_near_m",
+                              "dvr_linger_min", "dvr_max_cameras", "dvr_always", "dvr_dir"})
     flags = {k: rd.get(k, d) for k, d in (("enabled", True), ("ny511", True), ("thruway", True), ("county", True),
                                           ("carshub_imagery", True))}
     if not all(isinstance(x, bool) for x in flags.values()):
@@ -656,6 +753,25 @@ def _roads(data: dict) -> dict:
         raise ConfigError("roads.stream_max: live camera streams at once through the hub, 1 to 64")
     if not (isinstance(wall, int) and not isinstance(wall, bool) and 0 <= wall <= 64):
         raise ConfigError("roads.wall_streams: the camera wall's live tiles per page, 0 (every camera in our area that streams) to 64")
+    dvr = rd.get("dvr", True)
+    if not isinstance(dvr, bool):
+        raise ConfigError("roads.dvr: true or false")
+    def num(key, default, lo, hi, what):
+        v = rd.get(key, default)
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not lo <= v <= hi:
+            raise ConfigError(f"roads.{key}: {what}, {lo} to {hi}")
+        return v
+    dvr_window = num("dvr_window_min", 120, 10, 720, "minutes kept per camera") * 60.0
+    dvr_gb = num("dvr_max_gb", 6, 0.5, 200, "gigabytes for every camera's recording together")
+    dvr_near = num("dvr_near_m", 1000, 0, 5000, "metres from an open event")
+    dvr_linger = num("dvr_linger_min", 30, 0, 240, "minutes an opened camera records on") * 60.0
+    dvr_max = num("dvr_max_cameras", 12, 1, 40, "cameras recorded at once")
+    always = rd.get("dvr_always", [])
+    if not (isinstance(always, list) and all(isinstance(x, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,64}", x) for x in always)):
+        raise ConfigError("roads.dvr_always: a list of camera ids")
+    dvr_dir = rd.get("dvr_dir", "")
+    if not isinstance(dvr_dir, str):
+        raise ConfigError("roads.dvr_dir: a folder (\"\" = the state folder's dvr/)")
     urls = {}
     for k in ("events_url", "signs_url", "ny511_hub"):
         u = str(rd.get(k, "")).strip()
@@ -669,7 +785,10 @@ def _roads(data: dict) -> dict:
     return dict(roads_enabled=flags["enabled"], roads_ny511=flags["ny511"], roads_511ny_user=user, roads_511ny_pass=password,
                 roads_bbox=(w, s, e, n), roads_cameras_s=cams, roads_events_s=events, roads_signs_s=signs,
                 roads_thruway=flags["thruway"], roads_county=flags["county"], roads_carshub_imagery=flags["carshub_imagery"],
-                roads_stream_max=smax, roads_wall_streams=wall, **urls)
+                roads_stream_max=smax, roads_wall_streams=wall, roads_dvr=dvr, roads_dvr_window_s=float(dvr_window),
+                roads_dvr_max_bytes=int(dvr_gb * 1024 ** 3), roads_dvr_near_m=float(dvr_near),
+                roads_dvr_linger_s=float(dvr_linger), roads_dvr_max_cameras=int(dvr_max), roads_dvr_always=tuple(always),
+                roads_dvr_dir=dvr_dir.strip(), **urls)
 
 
 def _roadwork(data: dict) -> dict:
@@ -1002,7 +1121,9 @@ def load(path: str | Path) -> Config:
     pa = _prealert(data)
     state_dir = Path(os.environ["SIZEUP_STATE_DIR"]).expanduser() if os.environ.get("SIZEUP_STATE_DIR", "").strip() else base
     radio = _take(data.get("radio", {}), "radio", {"rtl_fm", "channels", "tones_file", "shared_device", "start_mode", "sdrs", "sdr_names", "sdr_ignore",
-                                                 "auto_assign", "auto_assign_order"})
+                                                 "auto_assign", "auto_assign_order", "airband_multichannel"})
+    if not isinstance(radio.get("airband_multichannel", False), bool):
+        raise ConfigError("radio.airband_multichannel: true or false (#275: the channels' `also` frequencies on; off by default)")
     raw_sdrs = radio.get("sdrs", ())
     sdr_auto = raw_sdrs == "auto"
     sdrs = (() if sdr_auto else tuple(str(x) for x in raw_sdrs)) or ((str(radio["shared_device"]),) if radio.get("shared_device") else ())
@@ -1012,12 +1133,14 @@ def load(path: str | Path) -> Config:
     channels = []
     for i, c in enumerate(radio.get("channels", [])):
         _take(c, f"radio.channels[{i}]", {"label", "mhz", "kind", "device", "gain_db", "squelch_db",
-                                                 "drop_db", "hang_s", "continue_s", "schedule"})
+                                                 "drop_db", "hang_s", "continue_s", "schedule", "also"})
         if c.get("kind", "traffic") not in KINDS:
             raise ConfigError(f"radio.channels[{i}].kind: 'paging', 'traffic' or 'airband'")
         kind = c.get("kind", "traffic")
         if "schedule" in c and kind != "airband":
             raise ConfigError(f"radio.channels[{i}].schedule: airband channels only (#260)")
+        if "also" in c and kind != "airband":
+            raise ConfigError(f"radio.channels[{i}].also: airband channels only (#275)")
         if kind == "airband":
             channels.append(_airband(c, i))
             continue
@@ -1040,6 +1163,7 @@ def load(path: str | Path) -> Config:
     labels = [c.label for c in channels]
     if len(set(labels)) != len(labels):
         raise ConfigError("radio.channels: two channels have the same label")
+    channels = _also_owners(channels)
     tones, ours, tones_file = [], set(), ""
     tf = radio.get("tones_file", "data/westchester_tones.csv")
     if tf:
@@ -1179,7 +1303,8 @@ def load(path: str | Path) -> Config:
         station_id=st.get("id", "pcfd"), station_name=st.get("name", "Port Chester FD"),
         station_auto_update=st.get("auto_update", True), station_ll=station_ll,
         host=web.get("host", "127.0.0.1"), port=int(web.get("port", 8090)),
-        rtl_fm=radio.get("rtl_fm", "rtl_fm"), channels=tuple(channels), tones=tuple(tones), tones_file=tones_file,
+        rtl_fm=radio.get("rtl_fm", "rtl_fm"), airband_multichannel=bool(radio.get("airband_multichannel", False)),
+        channels=tuple(channels), tones=tuple(tones), tones_file=tones_file,
         ours=frozenset(ours | {"Port Chester FD", "Rye Brook FD"}),
         stt_server=stt.get("server_binary", "whisper-server"), stt_model=rel(stt.get("model", "models/ggml-large-v3-turbo.bin")),
         stt_port=int(stt.get("port", 8179)), stt_threads=int(stt.get("threads", 8)), stt_prompt=stt.get("prompt", ""),

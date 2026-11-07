@@ -312,7 +312,7 @@ class AirportAlerts:
         loc = d.get("location") or {}
         if loc.get("basis"):
             body.append(("approx. location: " if loc.get("lat") is not None else "location: ") + loc["basis"])
-        body.append(f"{level(r['confidence'])} confidence; not dispatched: accept or dismiss it in the CAD")
+        body.append(f"{level(r['confidence'])} confidence · not dispatched · accept or dismiss in the CAD")
         try:
             n.send(r["title"], " · ".join(b for b in body if b), 4, ("airplane", "warning"),
                    (self.public_url.rstrip("/") + "/cad") if self.public_url else "")
@@ -462,7 +462,7 @@ class AirportAlerts:
             with self.store.tx() as db:
                 db.execute("UPDATE airport_alerts SET status = 'accepted', outcome_at = ?, operator = ?, incident_id = ? "
                            "WHERE id = ? AND status = 'open'", (now, op, inc["id"], pid))
-                self._event(db, f"Airport pre-alert {_hms(r['at'])} accepted: {r['title']}: event made, pending (not dispatched)",
+                self._event(db, f"Airport pre-alert {_hms(r['at'])} accepted: {r['title']} · event pending, not dispatched",
                             iid=inc["id"], operator=op, at=now)
         self.on_change()
         return dict(self.get(pid), incident=inc)
@@ -481,8 +481,8 @@ class AirportAlerts:
                 for r in old:
                     db.execute("UPDATE airport_alerts SET status = 'expired', outcome_at = ? WHERE id = ? AND status = 'open'",
                                (now, r["id"]))
-                    self._event(db, f"Airport pre-alert {_hms(r['at'])} expired: nobody accepted it in "
-                                    f"{self.expire_s / 60:g} min: {r['title']}", at=now)
+                    self._event(db, f"Airport pre-alert {_hms(r['at'])} expired (unanswered {self.expire_s / 60:g} min): "
+                                    f"{r['title']}", at=now)
         return len(old)
 
     def prune(self) -> int:
@@ -543,9 +543,9 @@ def aircraft_line(x: dict) -> str:
     if isinstance(x.get("alt"), (int, float)):
         parts.append(f"{int(x['alt']):,} ft")
     elif x.get("alt") == "ground":
-        parts.append("on the ground")
+        parts.append("GND")
     if x.get("phase"):
-        parts.append(f"{x['phase']}" + (f" {x['rwy']}" if x.get("rwy") else ""))
+        parts.append(("near HPN" if x["phase"] == "near" else f"{x['phase']}") + (f" {x['rwy']}" if x.get("rwy") else ""))
     if x.get("hex") is None and x.get("spoken"):
         parts.append("heard, not on ADS-B")
     elif x.get("match"):
@@ -564,13 +564,13 @@ def remarks(r: dict) -> str:
         lines.append("Aircraft: " + aircraft_line(x))
     loc = d.get("location") or {}
     if loc.get("basis"):
-        lines.append(("Approximate location (from the words, not a fix): " if loc.get("lat") is not None
+        lines.append(("Approx. location (from the words, not a fix): " if loc.get("lat") is not None
                       else "Location as heard: ") + loc["basis"])
     if d.get("phrases"):
         lines.append("Heard: " + "; ".join(d["phrases"]))
     for k, v in d.get("lines") or []:                 # an aircraft emergency's details (#235)
         lines.append(f"{k}: {v}")
-    lines.append("Not dispatched: made from the pre-alert, dispatch from here.")
+    lines.append("Not dispatched.")
     return "\n".join(lines)
 
 
@@ -613,18 +613,18 @@ class AircraftPreAlerts:
         op = ev.get("operator") or ""
         op_from = "from its callsign" if ev.get("operator_src") == "airline" else \
             f"from {ev.get('details_from') or ev.get('feed') or 'the feed'}"
-        src = "our receiver on the station" if rx else f"{ev.get('feed') or 'a public feed'} (public data)"
+        src = "our receiver (station)" if rx else f"{ev.get('feed') or 'a public feed'} (public data)"
         if ev.get("details_from"):
-            src += f"; type, registration and operator from {ev['details_from']} by its ICAO address"
+            src += f" · details: {ev['details_from']} (ICAO match)"
         pos_at = ev.get("pos_at")
         when = A._hms(ev.get("at")) + (f" (position {A._hms(pos_at)})" if pos_at and abs((ev.get("at") or 0) - pos_at) >= 1 else "")
         squawk = ev.get("squawk") or ""
         lines = [["Aircraft", f"{who} · {A.aircraft_type(ev)}"],
-                 ["Operator", f"{op} ({op_from})" if op else "not known (a private owner's name is never shown)"],
+                 ["Operator", f"{op} ({op_from})" if op else "unknown (private owners never shown)"],
                  ["Emergency", meaning + (f" (squawk {squawk})" if squawk and squawk not in meaning else "")],
-                 ["Altitude", ", ".join(x for x in (A.aircraft_alt(ev), speed) if x)],
-                 ["Position", where or "not known"],
-                 ["Phase", A.aircraft_doing(ev) or "not known"],
+                 ["Altitude", " · ".join(x for x in (A.aircraft_alt(ev), speed) if x)],
+                 ["Position", where or "unknown"],
+                 ["Phase", A.aircraft_doing(ev) or "unknown"],
                  ["Source", src],
                  ["Time", when],
                  ["ICAO address", str(ev.get("hex") or "").lstrip("~").upper()]]

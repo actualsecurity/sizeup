@@ -59,7 +59,7 @@ from typing import Callable
 
 import numpy as np
 
-from sizeup.config import P25_JOB, Config, ConfigError, load
+from sizeup.config import P25_JOB, Config, ConfigError, airband_owner, load
 from sizeup import janitor, tz
 from sizeup.cad import Cad
 from sizeup.cad.alarms import STUCK_WITHIN_S
@@ -68,6 +68,7 @@ from sizeup.dispatch import parse
 from sizeup.incidents import IncidentStore, Traffic
 from sizeup.radio.fm import RATE, Channel, NfmReceiver, Segment, id_burst_frames, speech_seconds, voice_floor_db
 from sizeup.radio.am import AmReceiver
+from sizeup.radio.am import Extra as AmExtra
 from sizeup.radio.am import Schedule as AmSchedule
 from sizeup.radio.mdc1200 import decode as mdc_decode
 from sizeup.radio import fleetsync
@@ -92,6 +93,7 @@ from sizeup.web.server import WebServer
 from sizeup.procenv import child_env
 
 ROOT = Path(__file__).resolve().parent.parent
+HUB_SWITCH_S = 0.001     # the hub's GIL switch interval (sys.setswitchinterval; Python's default 0.005), start_app() (#284)
 SPLIT_PAGE_S = 30.0      # voice this soon after a tones-only page for us = that page's voice
 # The gazetteer names a town only from this confidence up (#80: "34 Longdale Avenue" read as Port Chester at
 # 0.34 was a street near Fairview). The point and label stay for the map; the town is never a trigger anyway.
@@ -105,6 +107,9 @@ def geo_of(m) -> dict | None:
     conf = round(float(m.confidence), 2)
     return {"lat": m.lat, "lon": m.lon, "label": m.label, "kind": m.kind,
             "town": m.municipality if conf >= TOWN_CONFIDENCE else "", "confidence": conf}
+# Channels renamed by an update (#275, sizeup/cloud/configupdate.py "airband-names"): a dongle's job saved under the old
+# name (state/sdr_modes.json) is the renamed channel's.
+RENAMED = {"NY Approach": "NY App 126.4/120.8", "NY Approach 124.65": "NY App 124.65"}
 P25_MODE = P25_JOB         # the shared-dongle mode that runs trunk-recorder ("Fire/EMS 15")
 OFF_MODE = "Off"           # the shared dongle released for other programs (sizeup keeps running)
 SWITCH_PAUSE_S = 1.0       # between stopping one program on the shared dongle and starting the next
@@ -129,12 +134,103 @@ def log(msg: str) -> None:
     print(f"{time.strftime('%H:%M:%S')} {msg}", flush=True)
 
 
-def make_receiver(cfg: Config, c, device, on_segment) -> NfmReceiver:
+# -- warm before the takeover (GitHub #264) ---------------------------------------------------------------------
+# The hub's supervisor (sizeup/handoff.py) starts the app while its task stands by, gated: everything that needs
+# no database (the imports, the gazetteer, the map providers and their caches, the ATC rules) is built then
+# (prewarm), and App.__init__ takes it from here instead of building it again after the takeover.
+_WARM: dict[str, object] = {}
+_STARTUP = None                         # a sizeup.timing.Phases while main() builds the app: App marks its phases
+
+
+def _mark(name: str) -> None:
+    if _STARTUP is not None:
+        _STARTUP.mark(name)
+
+
+def _warm_for(cfg: Config) -> tuple:
+    return (cfg.cad_db, cfg.cloud_role)
+
+
+def _take_warm(key: str, cfg: Config):
+    """What prewarm() built for this config (the same state dir), once."""
+    if _WARM.get("_for") != _warm_for(cfg):
+        return None
+    return _WARM.pop(key, None)
+
+
+def make_providers(cfg: Config, gaz) -> dict:
+    """The map's data providers (constructed, not started: App.start_layers starts them), each having read its cache
+    from the state dir. The county GIS layers' own cache (~50 MB) is read later, in the background (_load_layers)."""
+    from sizeup.aircraft import AircraftLayer
+    from sizeup.gis import Gis
+    from sizeup.roadprojects import RoadProjects
+    from sizeup.roads import Roads
+    from sizeup.trains import Trains
+    from sizeup.weather import Weather
+    roads = Roads.from_config(cfg, log=log)
+    return {"roads": roads, "gis": Gis.from_config(cfg, log=log, load=False),
+            "roadwork": RoadProjects.from_config(cfg, roads=roads, gaz=gaz, log=log),
+            "trains": Trains.from_config(cfg, log=log),
+            "aircraft": AircraftLayer.from_config(cfg, log=log, devices=lambda: sdr_lookup.devices(cfg.rtl_fm)),
+            "weather": Weather.from_config(cfg, log=log), "_gaz": gaz}
+
+
+def _load_atc_rules(cfg: Config):
+    from sizeup.atc import Rules
+    return Rules.load(cfg.atc_rules or None)
+
+
+def prewarm(cfg: Config, phases=None) -> None:
+    """What the app can build before it may touch a database: never writes anything (the standby's task holds no
+    lock). Whatever fails here is simply built again by App.__init__ (and fails there, as it always did)."""
+    mark = phases.mark if phases is not None else (lambda name: None)
+    _WARM.clear()
+    _WARM["_for"] = _warm_for(cfg)
+    try:
+        import sizeup.atc, sizeup.cachesync, sizeup.cloud.access, sizeup.datasources, sizeup.fence  # noqa: E401,F401
+        import sizeup.notify, sizeup.prealert, sizeup.transcribe  # noqa: E401,F401
+        if cfg.cloud_role == "hub":
+            import sizeup.cloud.hub, sizeup.cloud.hubstore  # noqa: E401,F401
+        from sizeup.geo import intersections, pagegeo, places  # noqa: F401
+        mark("imports")
+        gaz = App._load_gazetteer()
+        _WARM["gaz"] = gaz
+        mark("gazetteer")
+        _WARM["providers"] = make_providers(cfg, gaz)
+        mark("providers")
+        if cfg.atc_enabled and any(c.kind == "airband" for c in cfg.channels):
+            _WARM["atc_rules"] = (cfg.atc_rules, _load_atc_rules(cfg))
+            mark("atc rules")
+    except Exception as e:  # never fatal: App.__init__ builds what isn't here
+        log(f"sizeup: warm-up incomplete ({type(e).__name__}: {e}): the rest is built at the takeover")
+
+
+def renamed_overrides(ov: dict, kinds: dict) -> dict:
+    """Settings > Radios > Channels choices saved under a channel's old name (#275: RENAMED) count for its new one, unless
+    the new one has its own, or the old one is still a channel here."""
+    out = dict(ov)
+    for old, new in RENAMED.items():
+        if old in out and new not in out and old not in kinds and new in kinds:
+            out[new] = out[old]
+    return out
+
+
+def plan_text(c) -> str:
+    """A channel's frequencies by the hours (#260 schedule, #275 also): '118.575 + 120.8 23:00-07:00'."""
+    head = AmSchedule(c.schedule).describe() if getattr(c, "schedule", ()) else f"{c.mhz:g}"
+    return " + ".join([head, *(AmExtra(f, label, a, b).describe() for f, a, b, label in getattr(c, "also", ()))])
+
+
+def make_receiver(cfg: Config, c, device, on_segment, covered=None) -> NfmReceiver:
     """The receiver for one [[radio.channels]] entry: AM with the carrier squelch on an airband channel (HPN ATC, #233:
     sizeup/radio/am.py), else NFM with the noise squelch."""
     if c.kind == "airband":     # a schedule (#260, NY Approach): retuned by the time of day, between transmissions
+        # also (#275): other channels' frequencies on the same dongle, each heard as its own channel's (channelize.py)
         return AmReceiver(cfg.rtl_fm, device, c.gain_db, Channel(c.mhz, c.label), on_segment, log, open_db=c.squelch_db,
-                          schedule=getattr(c, "schedule", ()) or None)
+                          schedule=getattr(c, "schedule", ()) or None,
+                          also=[AmExtra(f, label, a, b) for f, a, b, label in getattr(c, "also", ())],
+                          owner=lambda mhz: airband_owner(cfg.channels, mhz), covered=covered,
+                          multichannel=getattr(cfg, "airband_multichannel", False))
     return NfmReceiver(cfg.rtl_fm, device, c.gain_db, Channel(c.mhz, c.label), on_segment, log, open_db=c.squelch_db,
                        drop_db=c.drop_db, hang_s=c.hang_s, continue_s=c.continue_s)
 
@@ -270,7 +366,10 @@ class App:
                     if cfg.dispatch_tts_engine == "kokoro" and cfg.dispatch_tts_python else None)
         self.stt = Transcriber(WhisperClient(f"http://127.0.0.1:{cfg.stt_port}/inference"), self._transcribed,
                                prompt=self._prompt, on_drop=self._stt_dropped)
-        self.gaz = self._load_gazetteer()
+        _mark("init")
+        gaz = _take_warm("gaz", cfg)
+        self.gaz = gaz if gaz is not None else self._load_gazetteer()
+        _mark("gazetteer")
         self.keep_s = cfg.keep_hours * 3600
         self._lock = threading.Lock()
         self.storage: dict | None = None
@@ -294,7 +393,7 @@ class App:
                 self.tg.seed(t.talkgroup, t.end)
         self._last_tones_only: Page | None = None
         self.pagehold = PageHold(self.plan)   # paging: a page waits out its continuation window
-        self.receivers = [make_receiver(cfg, c, c.device, self._segment) for c in cfg.channels]
+        self.receivers = [make_receiver(cfg, c, c.device, self._segment, self._heard_elsewhere) for c in cfg.channels]
         # trunk-recorder: sizeup's child, or on the Linux station its own service (sizeup-trunk-recorder, #71), which an
         # update of sizeup leaves running on its control channel (sizeup/radio/recorder.py make)
         self.recorder = (trunk_recorder.make(cfg.p25_recorder, cfg.p25_recorder_dir or ".", log)
@@ -351,6 +450,7 @@ class App:
                     if cfg.p25_dir else None)
         # PCFD's own dispatch console: incidents, units, run cards (state/cad.sqlite).
         self.cad = Cad.from_config(cfg, geocoder=self._geocode_text if self.gaz is not None else None, log=log)
+        _mark("cad")
         if self.gaz is not None:           # the place search over the same gazetteer (a note's "@", #67)
             from sizeup.geo.intersections import IntersectionSearch
             from sizeup.geo.places import PlaceIndex
@@ -396,7 +496,7 @@ class App:
         # Per-channel record / transcribe / engine (Settings > Radios, sizeup/channels.py) and Amazon
         # Transcribe where this process may call it ([stt] aws: the hub; sizeup/transcribe.py).
         self.cad.radio_ctx = self
-        self._chan_ov: dict = self.cad.settings.channel_overrides()
+        self._chan_ov: dict = renamed_overrides(self.cad.settings.channel_overrides(), self._kind)
         # Tone pairs named from the console (Settings "tones", #80): merged into the plan, with the names
         # that count as ours; the hub sends them to the station with the channel choices.
         self._tone_ov: dict = {}
@@ -408,8 +508,10 @@ class App:
         self._aws_wait: dict[str, tuple[np.ndarray, str]] = {}
         self._vocab_suggest: list[str] | None = None
         self.aws = self.vocab = self.atc_vocab = None
+        _mark("radio")
         if cfg.stt_aws:
             self._aws_setup()
+            _mark("speech-to-text")
         # The phone pre-alert from Tapout's ntfy feed (sizeup/prealert.py), read only, on the CAD of
         # record: all-in-one or the hub. While this station forwards to a hub it is off here (the hub
         # subscribes: one alert): prealert_sync() follows Settings > System > Station.
@@ -435,13 +537,14 @@ class App:
         # The map's highway layers (sizeup/roads.py, #73): 511NY's cameras, incidents and signs where
         # it is configured, the gazetteer's mile markers and exits everywhere. Its place search is a
         # provider for the "@" place search (#67's Cad.search_places asks cad.place_providers).
-        from sizeup.roads import Roads
-        self.roads = Roads.from_config(cfg, log=log)
+        prov = _take_warm("providers", cfg)
+        if not isinstance(prov, dict) or prov.get("_gaz") is not self.gaz:
+            prov = make_providers(cfg, self.gaz)
+        self.roads = prov["roads"]
         self.cad.place_providers = [self.roads.search_places]
         # The county GIS layers (sizeup/gis.py, #91): parcels, boundaries, utilities, facilities ... fetched
         # from Westchester County GIS by the CAD of record, served to the maps from here.
-        from sizeup.gis import Gis
-        self.gis = Gis.from_config(cfg, log=log, load=False)    # its cache (28 layers, ~50 MB) read in _load_layers
+        self.gis = prov["gis"]                     # its cache (28 layers, ~50 MB) read in _load_layers
         # The camera wall's area (#125): our fire districts from the county layer, the Settings edits
         # ("camera_wall": margin, include, exclude), our departments for the municipal fallback; Settings >
         # System shows every camera with where it falls (cad.camera_area).
@@ -449,24 +552,37 @@ class App:
         self.roads.ours = tuple(cfg.cad_monitor_departments)
         self.roads.wall_settings = lambda: self.cad.settings.overrides().get("camera_wall") or {}
         self.cad.camera_area = self.roads.settings_rows
+        # The camera DVR (#277, sizeup/dvr.py): live cameras' segments on this task's disk, on demand (the always list,
+        # pins, an open event's cameras, the ones watched); the pins in the CAD store so a deploy keeps them.
+        if cfg.roads_dvr and cfg.roads_enabled:
+            from sizeup.dvr import Dvr
+            state = Path(cfg.cad_db).parent if cfg.cad_db else Path(".")
+            self.roads.dvr = Dvr(self.roads, Path(cfg.roads_dvr_dir) if cfg.roads_dvr_dir else state / "dvr",
+                                 window_s=cfg.roads_dvr_window_s, max_bytes=cfg.roads_dvr_max_bytes,
+                                 near_m=cfg.roads_dvr_near_m, always=cfg.roads_dvr_always, linger_s=cfg.roads_dvr_linger_s,
+                                 max_cameras=cfg.roads_dvr_max_cameras, log=log)
+            store = self.cad.store
+            self.roads.dvr.incidents = lambda: store.q(
+                "SELECT lat, lon, address FROM incidents WHERE status IN ('queued', 'pending', 'active') "
+                "AND lat IS NOT NULL AND lon IS NOT NULL")
+            self.roads.dvr.load_pins = lambda: json.loads(store.meta_get("dvr_pins") or "[]")
+            self.roads.dvr.save_pins = lambda pins: store.meta_put("dvr_pins", json.dumps(pins))
+            self.cad.dvr_pin = self.roads.dvr.pin
         # Road projects & closures (sizeup/roadprojects.py, #185): the Thruway's and 511NY's roadwork through roads,
         # the villages' road notices (placed by the gazetteer, or listed), any WZDx feed configured; read while someone looks.
-        from sizeup.roadprojects import RoadProjects
-        self.roadwork = RoadProjects.from_config(cfg, roads=self.roads, gaz=self.gaz, log=log)
+        self.roadwork = prov["roadwork"]
         # Metro-North's trains (sizeup/trains.py, #131): the MTA's feeds, read by the CAD of record while
         # someone looks at the Trains layer or an event near the tracks.
-        from sizeup.trains import Trains
-        self.trains = Trains.from_config(cfg, log=log)
+        self.trains = prov["trains"]
         # one station, one mark (#162): the county's Train stations leave out the ones the Trains layer draws
         self.gis.train_stations = self.trains.stations
         # Aircraft near HPN (sizeup/aircraft.py, #155): shortfinal's PCFD-focused picture, read by the CAD of record
         # while someone looks at the Aircraft layer. It never opens a dongle: a receiver's aircraft.json is only read.
-        from sizeup.aircraft import AircraftLayer
-        self.aircraft = AircraftLayer.from_config(cfg, log=log, devices=lambda: sdr_lookup.devices(cfg.rtl_fm))
+        self.aircraft = prov["aircraft"]
         # Weather and water (sizeup/weather.py, #132): NWS alerts, conditions and radar, NOAA tides; a warning
         # said by the dispatch voice when Settings > Dispatch allows it (played where the console is open).
-        from sizeup.weather import Weather
-        self.weather = Weather.from_config(cfg, log=log)
+        self.weather = prov["weather"]
+        _mark("providers")
         self.weather.speak_on = lambda: bool(getattr(self.cad, "weather_speak", False))
         self.weather.speaker = self._weather_voice
         if cfg.prealert_enabled:
@@ -492,6 +608,7 @@ class App:
         self.cad.pushes = self.pushes
         self.cad.alarms.notifier = self.pushes.notifier(notify.ALERTS)
         log(self.pushes.line())
+        _mark("prealert + pushes")
         self.cad.alarms.public_url = cfg.cloud_public_url
         # Airport pre-alerts (sizeup/cad/airport_alerts.py, #233): pushed to the alerts topic; HPN ATC's watch
         # (sizeup/atc.py) reads every airband transcript on the CAD of record (_atc).
@@ -503,9 +620,11 @@ class App:
         airband = [c.label for c in cfg.channels if c.kind == "airband"]
         AIRBAND_FIRST.update(airband)
         if airband and cfg.atc_enabled:
-            from sizeup.atc import AtcWatch, Rules
+            from sizeup.atc import AtcWatch
             try:
-                self.atc = AtcWatch(aa, airband, Rules.load(cfg.atc_rules or None), aircraft=self._atc_aircraft,
+                warm = _take_warm("atc_rules", cfg)
+                rules = warm[1] if isinstance(warm, tuple) and warm[0] == cfg.atc_rules else _load_atc_rules(cfg)
+                self.atc = AtcWatch(aa, airband, rules, aircraft=self._atc_aircraft,
                                     context=cfg.atc_context, context_s=cfg.atc_context_s, log=log)
                 log(f"atc: airport pre-alerts from {', '.join(airband)} ({len(self.atc.rules.rules)} rules)")
             except (OSError, ValueError, KeyError) as e:
@@ -546,11 +665,14 @@ class App:
         self.cad.datasources = self.datasources
         self._fm_live: dict[str, dict] = {}
         self._stopping = threading.Event()
+        _mark("atc + data sources")
         self._backfill()
+        _mark("backfill")
 
     # -- geocoding ------------------------------------------------------------------------------
 
-    def _load_gazetteer(self):
+    @staticmethod
+    def _load_gazetteer():
         try:
             from sizeup.geo.gazetteer import Gazetteer
             return Gazetteer()
@@ -2048,7 +2170,7 @@ class App:
         return float(self.cfg.stt_aws_limit_usd)
 
     def channels_changed(self) -> None:
-        self._chan_ov = self.cad.settings.channel_overrides()
+        self._chan_ov = renamed_overrides(self.cad.settings.channel_overrides(), self._kind)
         log("speech-to-text channels: " + (", ".join(f"{k} {v}" for k, v in sorted(self._chan_ov.items())) or "the defaults"))
 
     def vocabulary_suggestions(self) -> list[str]:
@@ -2108,7 +2230,7 @@ class App:
         kept (this station's own Settings overrides, audited as "hub")."""
         clean = channels.check_map(prefs)
         changed = self.cad.settings.replace_channels(clean, "hub")
-        self._chan_ov = self.cad.settings.channel_overrides()
+        self._chan_ov = renamed_overrides(self.cad.settings.channel_overrides(), self._kind)
         if isinstance(tones, dict) and self.cad.settings.replace_tones(tones, "hub"):
             self._apply_named_tones()
             changed = True
@@ -2142,7 +2264,7 @@ class App:
                 "record_only": list(self.cfg.stt_record_only), "aws_ok": ok, "aws_why": why,
                 "aws_reserve": reserve,
                 "fm": [{"key": c.label, "kind": c.kind, "mhz": c.mhz,
-                        **({"schedule": AmSchedule(c.schedule).describe()} if getattr(c, "schedule", ()) else {})}
+                        **({"schedule": plan_text(c)} if getattr(c, "schedule", ()) or getattr(c, "also", ()) else {})}
                        for c in self.cfg.channels],
                 "sync": self.channels_sync(), "aws": self.aws_status()}
 
@@ -2188,9 +2310,10 @@ class App:
             if self._sdr_ignored(sd):
                 continue
             m = saved.get(sd, self.assign.get(sd, OFF_MODE))
+            m = RENAMED.get(m, m) if m not in self.modes else m     # #275: a job saved under a channel's old name
             m = m if m in self.modes and (m == OFF_MODE or m not in taken) else OFF_MODE
             self.assign[sd] = m
-            if by.get(sd) in ("person", "auto") and saved.get(sd) == m:
+            if by.get(sd) in ("person", "auto") and RENAMED.get(saved.get(sd), saved.get(sd)) == m:
                 self.set_by[sd] = by[sd]
             taken.add(m)
 
@@ -2566,10 +2689,44 @@ class App:
 
     def _fresh_receiver(self, old: NfmReceiver, serial: str) -> NfmReceiver:
         c = next(c for c in self.cfg.channels if c.label == old.channel.label)
-        r = make_receiver(self.cfg, c, self._dongle(serial), self._segment)
+        r = make_receiver(self.cfg, c, self._dongle(serial), self._segment, self._heard_elsewhere)
         self.tap.attach(r)
         self.receivers[self.receivers.index(old)] = r
         return r
+
+    def _running(self, r) -> bool:
+        """A receiver with its program up on a dongle (its job assigned, when the dongles are switchable)."""
+        return (not r._stop.is_set() and r.state == "ok"
+                and (not self.shared or r.channel.label in self.assign.values()))
+
+    def airband_ab(self, label: str, minutes: float = 60.0, phase_s: float = 300.0) -> str | None:
+        """POST /api/airband-ab (#275, tools/airband_ab.py): an on-air A/B of that airband channel's dongle, rtl_fm
+        against the channelizer (radio/am.py AbTest); its numbers are in the channel's Radios row ("ab") and logged at
+        the end. None, or why not."""
+        r = self._receiver(label)
+        if not isinstance(r, AmReceiver):
+            return f"no airband channel {label!r}"
+        if not self._running(r):
+            return f"{label} isn't running on a dongle: pick it for one first"
+        if not 2 <= float(minutes) <= 24 * 60:
+            return "minutes: 2 to 1440"
+        return r.ab_start(float(minutes), float(phase_s))
+
+    def _heard_elsewhere(self, mhz: float, me) -> bool:
+        """#275: a frequency another running dongle has (Ground's on 124.65 overnight, and NY App 124.65's own) is kept
+        by one: the dongle of the channel it belongs to, else the first one in the config. True: `me` leaves it (an
+        `also` frequency isn't taken at all, radio/am.py plan_at; a transmission both had is dropped)."""
+        key = round(float(mhz), 6)
+        owner = airband_owner(self.cfg.channels, mhz)
+        others = [r for r in list(self.receivers) if r is not me and self._running(r)
+                  and key in {round(f, 6) for f in getattr(r, "active", (r.channel.mhz,))}]
+        if not others or me.channel.label == owner:
+            return False
+        if any(r.channel.label == owner for r in others):
+            return True
+        order = list(self.receivers)
+        mine = order.index(me) if me in order else len(order)
+        return any(order.index(r) < mine for r in others)
 
     def _start_mode(self, mode: str, serial: str) -> bool:
         if mode == OFF_MODE:
@@ -2705,7 +2862,10 @@ class App:
         plugged = {s: p for _i, p, s in devs}
         rows = self.sdrs
         usb = self.usb(devs)
+        # #275: what each airband job is on now ("126.4", "118.575 CTAF + 120.8"), for its button
+        now = {r.channel.label: r.status().get("now", "") for r in self.receivers if isinstance(r, AmReceiver)}
         return {"shared": True, "mode": self.assign.get(rows[0], OFF_MODE) if rows else OFF_MODE, "modes": self.modes,
+                "now": {k: v for k, v in now.items() if v},
                 "switching": self.switching, "adsb": self.adsb_row(plugged),
                 "duplicates": usb["duplicates"],          # two dongles, one serial (#242): Settings > Radios shows the fix
                 "sdrs": [{"serial": sd, "name": self.sdr_name(sd), "product": plugged.get(sd, ""),
@@ -3015,7 +3175,21 @@ def make_app(cfg: Config) -> App:
     return app
 
 
-def make_server(app: App, fence=None) -> WebServer:
+def start_app(cfg: Config) -> App:
+    """make_app() and start it; the hub's log is read for its own error spikes first (#285, sizeup/errwatch.py)."""
+    if cfg.cloud_role == "hub":
+        # #284: Python's sqlite3 lets the GIL go at every row it steps, and waits up to the switch interval to get it
+        # back while another thread computes (a GIS layer's refresh, the state push): 5 ms a row by default, so a
+        # 500-row Radio view took 1-2 s whenever anything else was busy. 1 ms: about 5x less, for a little switching.
+        sys.setswitchinterval(HUB_SWITCH_S)
+    app = make_app(cfg)
+    if getattr(app, "error_watch", None) is not None:      # the hub: its own error spikes to the status topic
+        from sizeup import errwatch
+        errwatch.install(app.error_watch)
+    return app.start()
+
+
+def make_server(app: App, fence=None, listener=None) -> WebServer:
     cfg = app.cfg
     server = WebServer(cfg.host, cfg.port, app.scene(), app.state, app.clip, app.close_incident, app.set_mode,
                        app.set_talkgroup, app.set_talkgroup_group, app.retranscribe, cad=CadApi(app.cad),
@@ -3024,7 +3198,8 @@ def make_server(app: App, fence=None) -> WebServer:
                        role=cfg.cloud_role, roads=app.roads, gis=app.gis,
                        trains=app.trains, weather=app.weather, station_health=getattr(app, "health", None),
                        aircraft=app.aircraft, roadwork=app.roadwork, set_adsb=app.set_adsb_receiver,
-                       fence=fence, health_fn=lambda: app.health_extra(fence))
+                       airband_ab=app.airband_ab if cfg.cloud_role != "hub" else None,
+                       fence=fence, health_fn=lambda: app.health_extra(fence), listener=listener)
 
     def changed() -> None:             # a new talker is pushed at once, not on the next second
         server.poke()
@@ -3099,24 +3274,120 @@ def main(argv: list[str] | None = None) -> int:
     except (ConfigError, FileNotFoundError) as e:
         print(f"config: {e}", file=sys.stderr)
         return 2
-    # The hub under its supervisor (sizeup/handoff.py): the lease must stay ours and fresh, or this process
-    # stops writing at once (sizeup/fence.py); SIGTERM drains: new requests get 503 + Retry-After, those in
-    # flight finish, then it exits (the supervisor then puts the last changes in S3 and hands over).
-    from sizeup.fence import Fence
-    fence = Fence.from_env(log=log)
-    if fence is not None and not args.init_state:
-        if not fence.ok():
-            log("fence: started without a fresh lease: not starting")
-            return 75
-        fence.watch()
     if args.init_state:
         init_state(cfg)
         log(f"sizeup: databases ready ({cfg.cad_db or 'in memory'})")
         return 0
-    app = make_app(cfg)
-    app.start()
-    server = make_server(app, fence)
-    signal.signal(signal.SIGTERM, lambda *_: server.drain())
+    # The hub under its supervisor (sizeup/handoff.py), started while its task stands by: warm up, then wait for the
+    # takeover (#264).
+    gate = os.environ.get("SIZEUP_APP_GATE", "").strip()
+    if gate:
+        return run_gated(cfg, Path(gate))
+    # The hub under its supervisor: the lease must stay ours and fresh, or this process stops writing at once
+    # (sizeup/fence.py); SIGTERM drains: new requests get 503 + Retry-After, those in flight finish, then it exits
+    # (the supervisor then puts the last changes in S3 and hands over).
+    from sizeup.fence import Fence
+    fence = Fence.from_env(log=log)
+    if fence is not None:
+        if not fence.ok():
+            log("fence: started without a fresh lease: not starting")
+            return 75
+        fence.watch()
+    return serve(cfg, fence)
+
+
+GATE_POLL_S = 0.05
+
+
+def _gate_says(gate: Path) -> str:
+    try:
+        return gate.read_text().strip()
+    except OSError:
+        return ""
+
+
+def _wait_gate(gate: Path, want: tuple[str, ...]) -> str:
+    while True:
+        said = _gate_says(gate)
+        if said in want:
+            return said
+        time.sleep(GATE_POLL_S)
+
+
+def _answer_gate(gate: Path, text: str) -> None:
+    out = Path(f"{gate}.answer")
+    tmp = out.with_name(f".{out.name}.{os.getpid()}.tmp")
+    tmp.write_text(text + "\n")
+    os.replace(tmp, out)
+
+
+def run_gated(cfg: Config, gate: Path) -> int:
+    """The hub's app started by its supervisor while the task stands by (sizeup/handoff.py, #264). Nothing here may
+    write until the supervisor says so through the gate file (and the lease file says the lock is ours):
+
+        (standby)  prewarm(): imports, the gazetteer, the map providers and their caches, the ATC rules; then wait
+        "init"     the takeover: the databases promoted. --init-state's work, here (no new Python to start); the
+                   answer ("ok" / "error: ...") in <gate>.answer; then wait while the supervisor starts Litestream
+        "run"      the port listens at once ("updating": the supervisor starts the connector beside it), the app is
+                   built and takes the socket over: the CAD serves
+
+    "run" without "init" (a retake): straight to serving. Each step's time is logged (startup timing)."""
+    from sizeup.fence import Fence
+    from sizeup.timing import Phases
+    warm = Phases("warm-up")
+    prewarm(cfg, warm)
+    _answer_gate(gate, "warm")
+    log(warm.line("waiting for the takeover"))
+    said = _wait_gate(gate, ("init", "run"))
+    t = Phases("startup")
+    fence = Fence.from_env(log=log)
+    if fence is None or not fence.ok():
+        _answer_gate(gate, "error: no fresh lease")
+        log("fence: told to start without a fresh lease: not starting")
+        return 75
+    fence.watch()
+    if said == "init":
+        try:
+            init_state(cfg)
+        except Exception as e:
+            _answer_gate(gate, f"error: {type(e).__name__}: {e}"[:300])
+            log(f"sizeup: the databases didn't open ({type(e).__name__}: {e})")
+            return 1
+        _answer_gate(gate, "ok")
+        log(f"sizeup: databases ready ({cfg.cad_db or 'in memory'})")
+        t.mark("init-state")
+        _wait_gate(gate, ("run",))
+        t.mark("litestream")                      # (the supervisor starts it meanwhile)
+    early = None
+    try:
+        from sizeup.web.updating import serve_updating
+        early = serve_updating(cfg.host, cfg.port)
+    except OSError as e:  # the real server binds it below, as it always did (and says why if it can't)
+        log(f"sizeup: port {cfg.port} not taken early ({e})")
+    t.mark("listen")
+    return serve(cfg, fence, t, early)
+
+
+def serve(cfg: Config, fence=None, phases=None, early=None) -> int:
+    """Build the app, start it, serve until SIGTERM drains it. early: the "updating" server already on the port (its
+    socket is taken over, nothing refused in between)."""
+    global _STARTUP
+    from sizeup.timing import Phases
+    t = phases if phases is not None else Phases("startup")
+    _STARTUP = t
+    try:
+        app = start_app(cfg)                      # make_app, the hub's errwatch on its log (#285), start
+    finally:
+        _STARTUP = None
+    t.mark("start")
+    listener = None
+    if early is not None:
+        early.shutdown()                          # stops answering; the socket stays open, connections queue on it
+        listener = early.socket
+    server = make_server(app, fence, listener)
+    t.mark("server")
+    if threading.current_thread() is threading.main_thread():
+        signal.signal(signal.SIGTERM, lambda *_: server.drain())
     sm = app.station
     role = (" · hub (fed by the station, no radios)" if cfg.cloud_role == "hub"
             else f" · station, forwarding to {sm.hub_url}" if sm is not None and sm.forward else "")
@@ -3124,10 +3395,13 @@ def main(argv: list[str] | None = None) -> int:
         + (f" · P25 {cfg.p25_dir}" if cfg.p25_dir and cfg.cloud_role != "hub" else "") + role
         + (f" · station page {server.url} (the CAD is on the hub)" if cfg.cloud_role == "station"
            else f" · {server.url} · CAD {server.url}cad" + f" ({cfg.cad_db or 'in memory'}; transmit off)"))
+    log(t.line())
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        t0 = time.monotonic()
         app.stop()
+        log(f"sizeup: stopped in {time.monotonic() - t0:.1f} s")
     return 0

@@ -65,8 +65,8 @@ def test_tg307_silent_while_other_talkgroups_are_active_is_no_alert():
     m = r.h.model()
     c = next(c for c in m["channels"] if c["label"] == "tg:307")
     assert c["usual_now_s"] == 240.0 and "main" not in c and "alert_after_s" not in c
-    assert c["hint"].startswith("nothing heard for 2 h 59 min (last heard ") and "last heard" in c["hint"]
-    assert "only the whole P25 system going quiet is an alert" in c["hint"]
+    assert c["hint"].startswith("quiet 2 h 59 min (last ") and "usual gap" in c["hint"]
+    assert "only the whole P25 system going quiet is one" in c["hint"]
     assert [h["channel"] for h in m["hints"]] == ["tg:307"]
     assert m["trunk"]["quiet_s"] < 120
 
@@ -84,8 +84,8 @@ def test_a_conventional_channel_silent_for_hours_is_a_hint_only(label):
     assert r.keys() == [] and r.n.msgs == []
     m = r.h.model()
     (hint,) = m["hints"]
-    assert hint["channel"] == label and hint["text"].startswith("nothing heard for 13 h")
-    assert "last heard" in hint["text"] and "no alert" in hint["text"]
+    assert hint["channel"] == label and hint["text"].startswith("quiet 13 h")
+    assert "(last " in hint["text"] and "no alert" in hint["text"]
 
 
 def test_an_old_main_channel_alert_from_before_clears():
@@ -112,7 +112,7 @@ def test_the_whole_trunk_silent_past_the_window_alerts_and_recovers_on_a_call():
     (a,) = r.h.alerts()
     assert a["severity"] == "critical" and a["title"] == "P25 trunk silent" and a["since"] == T0
     assert a["text"].startswith("no calls on any talkgroup since ")
-    assert "(trunk-recorder running): check the P25 dongle/antenna, control channel (alert past 20 min)" in a["text"]
+    assert "(trunk-recorder running) · check P25 dongle, antenna, control channel (alert after 20 min)" in a["text"]
     assert a["who"]["channel"] == P25 and a["who"]["dongle"] == "SDR 103"
     (msg,) = r.n.msgs
     assert msg["title"].startswith("P25 trunk silent 21 min") and msg["priority"] == 4
@@ -141,7 +141,7 @@ def test_the_night_window_and_the_learned_one(monkeypatch):
     assert tk["usual_s"] == 600.0 and tk["window_s"] == 40 * 60 and r.keys() == []
     r.at(t + 41 * 60, p25(t))
     (a,) = r.h.alerts()
-    assert "a call usually comes within 10 min at this time of day; alert past 40 min" in a["text"]
+    assert "usual gap 10 min; alert after 40 min" in a["text"]
     # A busy system (a call a minute) never shortens it below the default.
     r = Rig()
     for i in range(41):
@@ -187,8 +187,8 @@ def test_the_control_channel_lost_alerts_at_once_and_clears_when_it_decodes():
     assert [(k, a["key"]) for k, a in ch] == [("start", "trunk")]
     (a,) = r.h.alerts()
     assert a["title"] == "P25 trunk silent" and a["since"] == T0 + 60
-    assert a["text"].startswith("control channel lost: trunk-recorder decodes 0 messages/s from it since ")
-    assert ", 3 retunes (trunk-recorder running): check the P25 dongle/antenna, control channel" in a["text"]
+    assert a["text"].startswith("control channel lost: trunk-recorder decodes 0 msg/s from it since ")
+    assert ", 3 retunes (trunk-recorder running) · check P25 dongle, antenna, control channel" in a["text"]
     ok = {"rate": None, "low_since": None, "last_low": T0 + 200, "retunes": 3, "last_retune": T0 + 90}
     ch = r.at(240, p25(235, cc=ok))
     assert [(k, a["key"]) for k, a in ch] == [("clear", "trunk")]

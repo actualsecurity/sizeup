@@ -152,6 +152,7 @@ class Layer:
     drop_ours: bool = False           # leave out our own departments' features: the map draws ours from our own data
                                       # (the county's 2015 fire stations put a "PORT CHESTER F.D." at Don Bosco Pl, 2026-10-14)
     note: str = ""                    # what the data doesn't say, shown with every feature ("catenary: 12.5 kV")
+    hazard: bool = False              # #278: the note is a hazard or a data gap that matters on scene: on the box, not behind its "i"
     icon: str = ""                    # the mark for a point layer (#111): static/icons.svg "i-gis-<icon>" ("hydrant",
                                       # "fire-station"), in the style's color on the map, by its toggle, in the click box; "": a dot
     sub: str = ""                     # what a feature is, under its title in the click box ("Petroleum bulk storage (NYSDEC PBS)");
@@ -167,7 +168,7 @@ class Layer:
         return {"key": self.key, "label": self.label, "group": self.group, "kind": self.kind, "style": dict(self.style),
                 "minzoom": self.minzoom, "fields": [list(f) for f in self.fields], "on": self.on, "refresh": self.refresh,
                 "tiled": self.tiled, "licence": self.licence, "page": self.page, "asof": self.asof,
-                "ours_field": self.ours_field, "drop_ours": self.drop_ours, "note": self.note, "icon": self.icon, "sub": self.sub,
+                "ours_field": self.ours_field, "drop_ours": self.drop_ours, "note": self.note, "hazard": self.hazard, "icon": self.icon, "sub": self.sub,
                 "trains_field": self.trains_field}
 
 
@@ -213,7 +214,7 @@ DEFAULT_LAYERS: tuple[Layer, ...] = (
           style={"color": "--err", "radius": 4.5, "label": "HYD_NUMBER", "labelzoom": 17}, minzoom=14, refresh="monthly",
           fields=(("FIRENAME", "Fire district"), ("HYD_NUMBER", "Hydrant no."), ("MUNCIPALIT", "Municipality")),
           licence=COUNTY_TERMS, page=f"{_HUB}b1766f745f954027936f74e7b0d2de65_147", asof="as of Oct 2015",
-          note="Positions from the departments that contributed them (some partial); no flow or size data"),
+          note="Positions from the departments that contributed them (some partial); no flow or size data", hazard=True),
     # The county's copy of NYSDEC's PBS registry carries the facility, its address and PBS number only (no tank count,
     # product or gallons: those are in DEC's own PBS database, by the PBS number). The mark: a drum in the warning
     # color, a third larger than the hydrant's, so a fuel site is unmistakable (#111).
@@ -222,7 +223,7 @@ DEFAULT_LAYERS: tuple[Layer, ...] = (
           style={"color": "--warn", "radius": 5, "size": 1.35}, minzoom=12, refresh="monthly",
           fields=(("FACILITY_NAME", "Facility"), ("STREET", "Address"), ("CITY", "City"), ("PBSNUMBER", "PBS no.")),
           licence=COUNTY_TERMS, page=f"{_HUB}04c419cd0cd4467db97cc434b36654c6_165", asof="NYSDEC, as of June 2017",
-          note="Fuel tanks on site: check on a fire or spill (tank count, product and gallons: DEC's PBS record by the number)"),
+          note="Fuel tanks on site: check on a fire or spill (tank count, product and gallons: DEC's PBS record by the number)", hazard=True),
     Layer("tanks_towers", "Tanks, towers, antennas", f"{_WC}/DataHub_BasemapPlanimetrics/MapServer/14", group="Utilities", kind="polygon", icon="tank",
           style={"color": "--warn", "fill": 0.3, "width": 1.2, "height": "ACTUAL_HEIGHT", "height_scale": 0.3048},
           minzoom=13, refresh="monthly", simplify_m=0.3, where="FEA_CODE IN (2110, 2120, 2130)",
@@ -233,7 +234,7 @@ DEFAULT_LAYERS: tuple[Layer, ...] = (
           style={"color": "--text-2", "fill": 0.25, "width": 1.2}, minzoom=13, refresh="monthly", simplify_m=0.3,
           fields=(("DESCRIPTION", "Structure"), ("PHOTO_DATE", "Photo date")),
           licence=COUNTY_TERMS, page=f"{_HUB}50f7273fb48948d0a514b51993066846_16", asof="aerial photos 2000-2023 (each feature's date)",
-          note="Footprints only: the county publishes no load or clearance limits"),
+          note="Footprints only: the county publishes no load or clearance limits", hazard=True),
     # -- Facilities -----------------------------------------------------------------------------------------------
     Layer("fire_stations", "Fire stations", f"{_WC}/DataHub_CommunityFacilities/MapServer/183", group="Facilities", kind="point", icon="fire-station",
           style={"color": "--err", "radius": 5}, minzoom=11, refresh="monthly",
@@ -310,8 +311,7 @@ DEFAULT_LAYERS: tuple[Layer, ...] = (
     Layer("rail", "Railroads", f"{_WC}/DataHub_BasemapPlanimetrics/MapServer/1", group="Transportation", kind="line",
           style={"color": "--text-2", "width": 2.4, "dash": 1}, minzoom=13, refresh="monthly", simplify_m=1.0,
           fields=(("NAME", "Line"), ("DESCRIPTION", "Kind")), licence=COUNTY_TERMS, page=f"{_HUB}7fa83627031243d999b8cd5f3ba26125_1",
-          note="Metro-North New Haven Line (Port Chester, Rye): overhead catenary, 12.5 kV AC, plus the third rail at stations; "
-               "the county's data names no owner or electrification"),
+          note="New Haven Line: 12.5 kV AC catenary + third rail at stations; treat all wires as live (not in the county's data)", hazard=True),
     Layer("train_stations", "Train stations", f"{_WC}/DataHub_Transportation/MapServer/156", group="Transportation", kind="point", icon="train",
           style={"color": "--text-2", "radius": 5.5}, minzoom=11, refresh="monthly",
           fields=(("STATNAME", "Station"),), trains_field="STATNAME",

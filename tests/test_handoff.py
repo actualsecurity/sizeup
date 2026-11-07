@@ -242,6 +242,9 @@ class World:
         self.violations: list[str] = []
         self.log: list[tuple[float, str, str]] = []
         self.restore_delay: dict[str, float] = {}
+        self.warm_delay: dict[str, float] = {}      # the gated app's warm-up, per task (inf: never warm)
+        self.build_delay: dict[str, float] = {}     # after "run": answering "updating" this long, then the CAD serves
+        self.connector_down: set[str] = set()       # whose cloudflared never connects
         self.app_fails: set[str] = set()
         self.rogue = False                  # something else moves the replica (a writer from before the lock)
         self.pids = 1000
@@ -294,6 +297,51 @@ class FakeProc:
         self._end(-9)
 
 
+class FakeApp(FakeProc):
+    """The gated app (sizeup/app.py run_gated) as its supervisor sees it, moved on by poll(): "warm" after its
+    warm-up; the gate's "init" -> the databases made (only with a fresh lease, like the app's fence) and "ok";
+    "run" -> it writes (an app in the world) and its port answers ("updating" for build_delay, then it serves)."""
+
+    def __init__(self, env: FakeEnv, gate: Path, lease: Path):
+        self.env, self.gate, self.lease = env, gate, lease
+        self.answer = Path(f"{gate}.answer")
+        self.t0, self.phase = time.monotonic(), "warming"
+        super().__init__(env.world, env.task, "app", self._step, track=False)
+
+    def _say(self, text: str) -> None:
+        self.answer.write_text(text + "\n")
+
+    def _step(self, _p) -> None:
+        try:
+            said = self.gate.read_text().strip()
+        except OSError:
+            said = ""
+        if self.phase == "warming":
+            if time.monotonic() - self.t0 < self.world.warm_delay.get(self.task, 0.0):
+                return
+            self._say("warm")
+            self.phase = "warm"
+        if said in ("init", "run") and self.phase == "warm":
+            if not Fence(self.lease, log=lambda m: None).ok():
+                self._say("error: no fresh lease")
+                self._end(75)
+                return
+            self.track = True                                  # a writer from here: it opens the databases
+            self.world.up(self.task, "app")
+            if said == "init":
+                self.env.calls.append("init_state")
+                for db in DBS:
+                    self.env.db_path(db).touch()
+                self._say("ok")
+                self.phase = "ready"
+        if said == "run" and self.phase in ("warm", "ready"):
+            self.env.calls.append("app")
+            self.env.written = {db: 5 for db in DBS}         # what it writes while it runs
+            self.phase, self.run_at = "listening", time.monotonic()
+        if self.phase == "listening" and time.monotonic() - self.run_at >= self.world.build_delay.get(self.task, 0.0):
+            self.phase = "serving"
+
+
 class FakeEnv(Env):
     def __init__(self, world: World, task: str, root: Path):
         super().__init__("cfg.toml", root / "data", "ls.yml", "sock", port=0)
@@ -343,23 +391,23 @@ class FakeEnv(Env):
         self.world.replica[db] += n
         return self.world.replica[db]
 
-    def init_state(self):
-        self.calls.append("init_state")
-        for db in DBS:
-            self.db_path(db).touch()
-
     def start_app(self, env):
-        self.calls.append("app")
-        assert env.get("SIZEUP_LEASE_FILE")
-        self.app = FakeProc(self.world, self.task, "app")
-        self.written = {db: 5 for db in DBS}         # what it writes while it runs
+        self.calls.append("app start")
+        assert env.get("SIZEUP_LEASE_FILE") and env.get("SIZEUP_APP_GATE")
+        self.app = FakeApp(self, Path(env["SIZEUP_APP_GATE"]), Path(env["SIZEUP_LEASE_FILE"]))
         return self.app
 
+    def _serving(self) -> bool:
+        return self.app is not None and self.app.poll() is None and self.app.phase == "serving"
+
+    def app_answers(self):
+        return self.app is not None and self.app.poll() is None and self.app.phase in ("listening", "serving")
+
     def app_healthy(self):
-        return self.app is not None and self.app.code is None and self.task not in self.world.app_fails
+        return self._serving() and self.task not in self.world.app_fails
 
     def connector_ready(self):
-        return True
+        return self.task not in self.world.connector_down
 
     def quick_check(self, path):
         return "ok"
@@ -370,7 +418,8 @@ class FakeEnv(Env):
 
 FAST = dict(POLL_S=0.05, CATCHUP_S=2.0, RESTORE_S=4.0, APP_READY_S=1.5, CONNECTOR_READY_S=0.2, APP_STOP_S=1.0,
             SYNC_S=2.0, LITESTREAM_STOP_S=1.0, OVERLAP_S=3.0, RETAKE_S=0.8, STOP_TIMEOUT_S=6.0, REDRAIN_S=1.5,
-            RENEW_S=0.15, RETAKE_MIN_LEFT_S=1.0, CREATED_WAIT_S=0.1)
+            RENEW_S=0.15, RETAKE_MIN_LEFT_S=1.0, CREATED_WAIT_S=0.1, KILL_MARGIN_S=0.3, INIT_S=2.0, APP_LISTEN_S=1.0,
+            WARM_APP_RETRY_S=0.3)
 LEASE = dict(ttl=1.0, safety=0.4, grace=0.3)        # holder: 0.6 s after a renew; taker: 1.3 s
 
 
@@ -482,7 +531,8 @@ def test_the_handoff_old_drains_syncs_releases_new_catches_up_and_serves(world, 
     assert world.s3.doc()["holder"] == "B" and world.s3.doc()["generation"] == 2 and world.s3.doc()["phase"] == "serving"
     # the order: A's app gone, A's Litestream gone (after its sync), the release, then B writes
     t = world.when
-    assert t("A", "app down") < t("A", "litestream down") < t("B", "litestream up") < t("B", "app up")
+    assert t("A", "app down") < t("A", "litestream down") < t("B", "app up") < t("B", "litestream up")
+    assert b.env.calls.index("init_state") < b.env.calls.index("replicate") < b.env.calls.index("app")
     assert [c for c in a.env.calls if c.startswith("sync")] == [f"sync {db}" for db in DBS]
     assert b.sup.positions == {db: f"{105:016x}" for db in DBS}         # caught up to the release, by the followers
     assert not any(c.startswith("restore") for c in b.env.calls)        # incremental: no full restore

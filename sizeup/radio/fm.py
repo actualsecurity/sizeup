@@ -671,6 +671,16 @@ class NfmReceiver:
                     os.killpg(p.pid, signal.SIGKILL)
                 except Exception:
                     pass
+        if p is not None:
+            # The whole group gone (#275: the channelizer's rtl_sdr under it), so the dongle is closed before the next
+            # program opens it: no false "busy" at a retune
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline:
+                try:
+                    os.killpg(p.pid, 0)
+                except (ProcessLookupError, PermissionError, OSError):
+                    break
+                time.sleep(0.05)
 
     def _drain(self, proc: subprocess.Popen) -> None:
         for line in iter(proc.stderr.readline, b""):
@@ -695,17 +705,17 @@ class NfmReceiver:
                                               start_new_session=True, env=child_env())
                 threading.Thread(target=self._drain, args=(self._proc,), daemon=True).start()
             except OSError as e:
-                self.state, self.detail = "down", f"cannot start rtl_fm: {e}"
+                self.state, self.detail = "down", f"cannot start {self._program()}: {e}"
                 self._stop.wait(backoff)
                 backoff = min(backoff * 2, 15)
                 continue
-            self.state, self.detail = "ok", f"{self.channel.label} {self.channel.mhz:.4f}"
+            self.state, self.detail = "ok", self._ok_detail()
             self.squelch = self.new_squelch()
             got = self._pump(self._proc)
             # Mid-transmission when the audio stopped: keep what was heard (and say why it ended). Before
             # the kill (up to 3 s for a hung rtl_fm), so RX goes out as soon as the audio is known gone.
-            self._deliver(self.squelch.flush("stopped" if self._stop.is_set() else
-                                             "stall" if self.detail == "rtl_fm stalled" else "rtl_fm ended"))
+            self._flush("stopped" if self._stop.is_set() else
+                        "stall" if self.detail in ("rtl_fm stalled", "rtl_sdr stalled") else "rtl_fm ended")
             self._watch_open()
             self._kill()
             if self._stop.is_set():
@@ -724,10 +734,21 @@ class NfmReceiver:
             if not got and ("usb_claim_interface" in err or "Failed to open" in err):
                 self.detail = f"dongle '{self.device_name}' busy (in use by another program?)"
             else:
-                self.detail = "rtl_fm stopped" if got else "no audio from rtl_fm"
+                self.detail = f"{self._program()} stopped" if got else f"no audio from {self._program()}"
             self.on_event(f"{self.channel.label} down: {self.detail}")
             self._stop.wait(2.0 if got else backoff)
             backoff = 2.0 if got else min(backoff * 2, 15)
+
+    def _program(self) -> str:
+        """What this receiver runs, for its messages (radio/am.py: rtl_sdr and the channelizer for several)."""
+        return "rtl_fm"
+
+    def _ok_detail(self) -> str:
+        return f"{self.channel.label} {self.channel.mhz:.4f}"
+
+    def _flush(self, reason: str) -> None:
+        """The audio stopped: what the squelch (each squelch: radio/am.py's several channels) held, delivered now."""
+        self._deliver(self.squelch.flush(reason))
 
     def _tune(self) -> None:
         """Before each rtl_fm start: the frequency to start on (one channel, one frequency here; radio/am.py's schedule)."""
@@ -774,11 +795,11 @@ class NfmReceiver:
             self.on_event(f"{self.channel.label}: squelch open {_mmss(self.clock() - since)} continuously (stuck?): "
                           f"{squelch_levels(sq)}")
 
-    def _deliver(self, seg: Segment | None) -> None:
+    def _deliver(self, seg: Segment | None, channel: Channel | None = None) -> None:
         if seg is None:
             return
         self.last_heard = seg.end
         try:
-            self.on_segment(self.channel, seg)
+            self.on_segment(channel or self.channel, seg)
         except Exception as e:
             self.on_event(f"segment handler error: {type(e).__name__}: {e}")

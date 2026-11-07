@@ -145,7 +145,7 @@ window.HubLink = (() => {
     card.querySelector(".sm-facts").replaceChildren(
       fact("Last contact", s.last_ok ? `${hhmmss(s.last_ok)} (${ago(s.last_ok)})` : d.forward ? "Not yet" : "—",
            s.last_ok ? "" : "dim"),
-      fact("Waiting to go up", n ? `${n} event${n === 1 ? "" : "s"}` + (s.oldest ? `, oldest ${ago(s.oldest)}` : "") : "None",
+      fact("Queued", n ? `${n} event${n === 1 ? "" : "s"}` + (s.oldest ? ` · oldest ${ago(s.oldest)}` : "") : "None",
            n ? "warn" : "dim", "Kept in state/outbox.sqlite until the hub has them, also across restarts"),
       ...(s.last_error ? [fact("Last error", s.last_error, "err", s.error_since ? `Since ${hhmmss(s.error_since)}` : "")] : []));
     const sec = d.secrets || {};
@@ -160,6 +160,7 @@ window.HubLink = (() => {
     const hint = card.querySelector(".sm-hint");
     const tok = sec.token || {};
     hint.replaceChildren();
+    hint.title = "";
     if (!tok.set) {
       if (d.keychain) {
         hint.append("Add the token to the Keychain: ",
@@ -169,7 +170,8 @@ window.HubLink = (() => {
           " (Linux: sudo sizeup-station secrets) and restart.");
       }
     } else if (d.from === "config") {
-      hint.append(`From config.toml (${d.config_role}) until changed here.`);
+      hint.append(`From config.toml (${d.config_role})`);
+      hint.title = "Until changed here";
     }
     hint.hidden = !hint.childNodes.length;
   }
@@ -178,7 +180,7 @@ window.HubLink = (() => {
     const card = st.card;
     const op = st.deps.operator ? st.deps.operator() : "";
     if (!op) {
-      msg("Enter your name (Operator, top right) first: every change records who made it.");
+      msg("Enter operator name (top right)");
       if (st.deps.askOperator) st.deps.askOperator();
       return;
     }
@@ -199,7 +201,7 @@ window.HubLink = (() => {
       const d = await r.json().catch(() => null);
       if (!r.ok) throw new Error((d && d.error) || `${r.status} ${r.statusText}`);
       st.data = d;
-      msg("forward" in body ? (d.forward ? "Forwarding to the hub: on." : "Forwarding to the hub: off.") : "Hub URL saved.", true);
+      msg("forward" in body ? (d.forward ? "Forwarding on" : "Forwarding off") : "Hub URL saved", true);
       if (st.deps.onState) st.deps.onState(d);
     } catch (e) {
       msg(e.message);

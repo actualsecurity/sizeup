@@ -106,7 +106,8 @@ window.RadioView = (() => {
   // live update keeps what was chosen.
   const MAX_KEYS = 100;
   const st = { open: false, rev: "", rows: [], limits: null, facets: "", busy: false, again: false, timer: 0, lastOk: 0, error: "", failAt: 0,
-               other: { open: false, shut: false, tgs: new Set(), shutTgs: new Set() }, qTimer: 0 };
+               other: { open: false, shut: false, tgs: new Set(), shutTgs: new Set() }, qTimer: 0,
+               shown: null, changedAt: 0 };   // shown: the filters the rows on hand are for (query string)
   try {
     const v = JSON.parse(localStorage.getItem(OTHER_KEY) || "null");
     if (v) {
@@ -158,10 +159,25 @@ window.RadioView = (() => {
     f("since").value = toLocalInput(Number(q.get("since")) || 0);
     f("until").value = toLocalInput(Number(q.get("until")) || 0);
   }
+  // A channel or unit picked from the unfiltered list: the rows on hand that match, at once, while the hub is asked
+  // (#284: the filter took 1-2 s to show anything).
+  function narrowNow(v) {
+    if (st.shown !== "" || !st.rows.length) return;
+    if (Object.entries(v).some(([k, x]) => x !== "" && x !== null && k !== "channel" && k !== "unit")) return;
+    const has = (t) => (!v.channel || t.channel === v.channel)
+      && (!v.unit || (t.rig || "").split(/,\s*/).includes(v.unit));
+    const rows = st.rows.filter(has);
+    if (!rows.length) return;
+    st.rows = rows;
+    st.shown = null;                               // not the unfiltered list any more
+    render();
+  }
   function changed() {
+    st.changedAt = performance.now();
     const q = query(false).toString();
     history.replaceState(null, "", "#radio" + (q ? `?${q}` : ""));
     st.rev = "";
+    narrowNow(filters());
     poll();
   }
 
@@ -346,6 +362,13 @@ window.RadioView = (() => {
 
   // ---- polling ------------------------------------------------------------------------------------
 
+  function measure(name, start, end) {
+    try {                                          // only the latest of each: a board runs for weeks
+      performance.clearMeasures(name);
+      performance.measure(name, end === undefined ? { start } : { start, end });
+    } catch (_) { /* an older browser */ }
+  }
+
   // On screen: open, the page visible, the view shown and the address still #radio. Anything else stops
   // the asking (and an open view whose address moved on is closed: however it was left).
   function shown() {
@@ -363,14 +386,19 @@ window.RadioView = (() => {
     st.busy = true;
     st.again = false;
     const asked = query(false).toString();
+    const t0 = performance.now();
+    let t1 = 0;
     try {
       const d = await api("GET", `/api/cad/comms?${query(true)}`);
+      t1 = performance.now();
+      measure("radio:fetch", t0, t1);               // DevTools > Performance, or performance.getEntriesByName (#284)
       st.lastOk = Date.now();
       st.error = "";
       if (asked !== query(false).toString()) st.again = true;   // stale: the filters moved on
       else if (!d.unchanged) {
         st.rev = d.rev;
         st.rows = d.rows || [];
+        st.shown = asked;
         st.limits = d.limits && d.limits.main > 0 && d.limits.other > 0 ? d.limits : null;
         fillFacets(d);
       }
@@ -380,6 +408,8 @@ window.RadioView = (() => {
     } finally {
       st.busy = false;
       render();
+      if (t1) measure("radio:render", t1);
+      if (st.changedAt && !st.again) { measure("radio:filter", st.changedAt); st.changedAt = 0; }   // a filter: picked -> shown
       if (st.again) { st.rev = ""; poll(); } else if (shown()) st.timer = setTimeout(poll, pushed() ? SAFETY_MS : POLL_MS);
     }
   }

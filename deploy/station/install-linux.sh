@@ -766,6 +766,9 @@ preflight() {
   if [ ! -x "$rtl/bin/rtl_fm" ] || ldd "$rtl/bin/rtl_fm" 2>/dev/null | grep -q 'not found'; then
     warn "preflight: $rtl/bin/rtl_fm can't run"; bad=1
   fi
+  # rtl_sdr (the same build): an airband dongle with several frequencies (#275, sizeup/radio/channelize.py). Without it
+  # only those dongles are down, so it is said, not a reason to stay on the old release.
+  if [ ! -x "$rtl/bin/rtl_sdr" ]; then warn "preflight: $rtl/bin/rtl_sdr missing: a dongle with several airband frequencies won't start"; fi
   if ! out=$(LD_LIBRARY_PATH="$rtl/lib:$tr/lib/trunk-recorder" "$tr/bin/trunk-recorder" --version 2>&1); then
     warn "preflight: trunk-recorder --version: $(printf '%s' "$out" | tail -n 1)"; bad=1
   fi

@@ -146,7 +146,7 @@ window.RadioControls = (() => {
     syncList(st.n.radios, radios, {
       key: (r) => r.label,
       sig: (r) => JSON.stringify([r.state, r.open, r.detail, r.mhz, r.quieting_db, r.restarts, r.word, r.open_s, r.stuck,
-                                  r.hiss_db, r.floor_db, r.open_db, r.close_db]),
+                                  r.hiss_db, r.floor_db, r.open_db, r.close_db, r.now, r.tower, r.freqs]),
       make: () => el("span", "pill radio"),
       fill: (node, r) => {
         const state = r.state || "unknown";
@@ -156,7 +156,11 @@ window.RadioControls = (() => {
         const stuck = on && !!r.stuck;
         node.className = `pill radio ${state}${on ? " open" : ""}${stuck ? " stuck" : ""}`;
         const word = stuck ? `open ${mmss(r.open_s)} (stuck?)` : on ? "● RX" : r.word || (RADIO_STATE[state] ?? state);
-        node.replaceChildren(el("b", null, r.label), ...(word ? [el("span", "st", word)] : []));
+        // #275: what it is on now ("126.4", "118.575 CTAF + 120.8") and HPN's tower, short (#278); the rest in the title
+        const live = state === "ok" && r.now;
+        node.replaceChildren(el("b", null, r.label), ...(live ? [el("span", "fq", r.now)] : []),
+                             ...(r.tower ? [el("span", "tw", r.tower.open ? "Tower open" : "Tower closed")] : []),
+                             ...(word ? [el("span", "st", word)] : []));
         const bits = [r.detail || r.label];
         if (r.mhz) bits.push(`${r.mhz} MHz`);
         if (r.restarts) bits.push(`${r.restarts} restarts`);
@@ -177,6 +181,13 @@ window.RadioControls = (() => {
           if (has(r.floor_db)) lv.push(`background carrier ${r.floor_db} dB`);
           lines.push(lv.join(" · "));
         }
+        for (const f of r.freqs && r.freqs.length > 1 ? r.freqs : []) {
+          lines.push(`${f.mhz} MHz${f.name ? ` ${f.name}` : ""} → ${f.label}: ${f.open ? "RX" : "idle"}`
+                     + (has(f.quieting_db) ? ` · carrier ${f.quieting_db} dB` : "") + (f.elsewhere ? " · kept on another dongle" : ""));
+        }
+        if (r.capture) lines.push(`capture ${r.capture.rate / 1e6} MS/s at ${r.capture.centre_mhz} MHz`);
+        if (r.schedule) lines.push(`schedule ${r.schedule}`);
+        if (r.tower) lines.push(`HPN tower ${r.tower.hours} local: ${r.tower.open ? "open" : "closed, 118.575 is CTAF"} until ${r.tower.next}`);
         lines.push(`state: ${state}${r.open ? " · squelch open" : ""}`);
         node.title = lines.join("\n");
         // the hub's Station row: opens Settings > Health (#79), an admin's only (#203)
@@ -261,9 +272,12 @@ window.RadioControls = (() => {
       const who = x.set_by === "auto" ? `${x.mode} set automatically when it was plugged in`
                 : x.set_by === "person" ? `${x.mode} picked by a person` : "";
       row.title = (x.present ? `SDR ${nm}` : `SDR ${nm}: not plugged in`) + (who ? `\n${who}` : "") + (x.ambiguous ? `\n${x.ambiguous}` : "");
-      for (const b of row.querySelectorAll("button")) {
+      for (const b of row.querySelectorAll("button[data-mode]")) {
         const m = b.dataset.mode;
         const there = m !== "Off" && list.find((o) => o.serial !== x.serial && o.mode === m);
+        // #275: the job's frequency now on the dongle running it ("NY App 126.4/120.8 · 126.4")
+        const now = m === x.mode && sdr.now && sdr.now[m];
+        setText(b, now ? `${m} · ${now}` : m);
         b.classList.toggle("active", m === x.mode);
         b.classList.toggle("elsewhere", !!there);
         b.title = there ? `${m} is on SDR ${there.name || there.serial}: click to move it here` : "";

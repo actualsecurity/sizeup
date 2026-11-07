@@ -273,8 +273,10 @@ def _groups(t: str) -> str:
                   one, t, flags=re.I)
 
 
+@lru_cache(maxsize=4096)
 def normalize(text: str) -> str:
-    """The written form of an HPN ATC transcript (the module doc). '' stays ''; idempotent."""
+    """The written form of an HPN ATC transcript (the module doc). '' stays ''; idempotent. Remembered for the last 4096
+    texts: the Radio view asks for the same rows on every refresh, ~1 ms each (#284)."""
     t = " ".join(str(text or "").split())
     if not t:
         return ""

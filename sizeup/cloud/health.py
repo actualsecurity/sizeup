@@ -383,6 +383,7 @@ class StationHealth:
         self.disk_pct = cfg.alerts_disk_pct
         self.repeat_s = cfg.alerts_repeat_min * 60
         self.public_url = (cfg.cloud_public_url or "").rstrip("/")
+        self.errors = None          # the hub's own error lines (sizeup/errwatch.py ErrorWatch, #285): HubApp sets it
         self._lock = threading.RLock()
         self.active: dict[str, dict] = {}
         self.history: list[dict] = []
@@ -541,11 +542,9 @@ class StationHealth:
             hint = ""
             if usual is not None and quiet is not None and r.get("state") == "ok" and label != P25_JOB \
                     and quiet > max(HINT_FACTOR * usual, HINT_MIN_S):      # (the whole system: the trunk alert's)
-                hint = (f"nothing heard for {_dur(quiet)} (last heard {_hhmm(heard + hub.skew)}); at this time of day it "
-                        f"usually hears something within {_dur(usual)}. "
-                        + ("A talkgroup can be quiet while the system talks: only the whole P25 system going quiet is "
-                           "an alert" if label.startswith("tg:") else
-                           "Often just a quiet channel (no alert); if it shouldn't be, check its antenna and dongle"))
+                hint = (f"quiet {_dur(quiet)} (last {_hhmm(heard + hub.skew)}; usual gap {_dur(usual)}) · "
+                        + ("no alert: only the whole P25 system going quiet is one" if label.startswith("tg:") else
+                           "no alert; if unexpected, check antenna and dongle"))
             chans.append({"label": label, "name": r.get("name") or label, "usual_now_s": usual,
                           "mhz": r.get("mhz"), "state": r.get("state"), "word": r.get("word") or "",
                           "detail": str(r.get("detail") or "")[:200], "open": bool(r.get("open")),
@@ -650,27 +649,26 @@ class StationHealth:
         tr = m.get("transcribe")                                 # the hub's own: decided even while the station is silent
         if tr and tr.get("state") in ("down", "retrying"):
             out["transcribe"] = {"severity": "warning", "title": "Amazon Transcribe failing",
-                                 "text": f"{tr.get('text') or ''}: the AWS channels use the station's whisper meanwhile",
+                                 "text": f"{tr.get('text') or ''} · AWS channels on the station's whisper",
                                  "since": float(tr.get("failing_since") or now)}
         bud = (tr or {}).get("budget") or {}
         pct = bud.get("pct")
         if isinstance(pct, (int, float)) and pct >= BUDGET_WARN * 100:
-            spent = f"${bud.get('usd', 0):.2f} of the ${bud.get('limit_usd', 0):g} limit in {bud.get('month', '')}"
-            out["aws_budget80"] = {"severity": "warning", "title": f"Amazon Transcribe at {BUDGET_WARN:.0%} of its monthly limit",
-                                   "text": f"{spent}: at the limit the AWS channels go to the station's whisper",
+            spent = f"${bud.get('usd', 0):.2f} / ${bud.get('limit_usd', 0):g} in {bud.get('month', '')}"
+            out["aws_budget80"] = {"severity": "warning", "title": f"Amazon Transcribe at {BUDGET_WARN:.0%} of monthly limit",
+                                   "text": f"{spent} · at the limit, AWS channels go to the station's whisper",
                                    "since": float(bud.get("warn_since") or now)}
             if pct >= 100:
                 out["aws_budget"] = {"severity": "critical", "title": "Amazon Transcribe monthly limit reached",
-                                     "text": f"{spent}: the AWS channels use the station's whisper until next month or a "
-                                             "higher limit (Settings > Radios)" + (f"; {bud['reserve_text']}"
+                                     "text": f"{spent} · AWS channels on the station's whisper until next month or a "
+                                             "higher limit (Settings > Radios)" + (f" · {bud['reserve_text']}"
                                                                                   if bud.get("reserve_text") else ""),
                                      "since": float(bud.get("limit_since") or now)}
         silent, since = self._silent(now)
         if silent:
             out["silent"] = {"severity": "critical", "title": "Station silent",
-                             "text": (f"no word from {name} since {_hhmm(since)}: radios, speech-to-text and what it "
-                                      "hears are not reaching the hub" if self.hub.last_state else
-                                      f"no station has reported since the hub started ({_hhmm(since)})"),
+                             "text": (f"no word from {name} since {_hhmm(since)} · radios and transcripts not reaching the hub"
+                                      if self.hub.last_state else f"no station report since the hub started ({_hhmm(since)})"),
                              "since": since}
         if silent is None:
             out["silent"] = None                         # undecided: keep as it is
@@ -702,16 +700,15 @@ class StationHealth:
             held("behind", self.behind_s, {"severity": "warning", "title": "Station behind the hub",
                                            "text": f"{b['text']} (the hub runs {short(b['hub'])})"})
         for x in m.get("duplicates") or []:
-            on = f" {x['name']}'s job {x['job']} doesn't (re)start until then." if x["job"] != "Off" else ""
+            on = f" {x['name']}'s job {x['job']} won't start until fixed." if x["job"] != "Off" else ""
             out[f"dup:{x['serial']}"] = {"severity": "critical", "title": f"Duplicate dongle serial {x['serial']}",
-                                         "text": (x["text"] or f"{len(x['indexes'])} dongles share serial {x['serial']}: "
-                                                  "sizeup can't tell them apart") + "." + on,
+                                         "text": (x["text"] or f"{len(x['indexes'])} dongles share serial {x['serial']}") + "." + on,
                                          "since": now}
         for d in m["dongles"]:
             if not d["present"]:
                 held(f"sdr:{d['serial']}", 0, {"severity": "critical", "title": f"SDR {d['name']} gone",
-                                               "text": f"dongle {d['name']} ({d['serial']}) is unplugged or not found"
-                                                       + (f": its job {d['job']} isn't running" if d["job"] != "Off" else "")})
+                                               "text": f"dongle {d['name']} ({d['serial']}) unplugged or not found"
+                                                       + (f" · {d['job']} not running" if d["job"] != "Off" else "")})
             elif d["job"] != "Off" and not d["running"] and (d["job"] != P25_JOB or m["processes"]["recorder"] is None):
                 held(f"job:{d['job']}", JOB_GRACE_S, {"severity": "critical", "title": f"{d['job']} not running",
                                                      "text": f"{d['job']} on SDR {d['name']}: {d['state'] or '?'}"
@@ -731,27 +728,26 @@ class StationHealth:
             held("whisper", self.down_s, {"severity": "warning", "title": "Speech-to-text down",
                                           "text": f"whisper-server: {wh.get('state')}"
                                                   + (f" ({wh['detail']})" if wh.get("detail") else "")
-                                                  + ": transmissions come up without text"})
+                                                  + " · no transcripts"})
         ad = m.get("adsb")
         if ad and ad.get("state") in ("down", "missing", "unplugged", "refused", "no_signal", "ambiguous"):
             # (held by another app is a handover, not a fault: the panel says who has it)
             held("adsb", self.down_s, {"severity": "warning", "title": "ADS-B receiver down",
                                        "text": f"the ADS-B decoder on {ad.get('name') or ad.get('sdr')}: {ad.get('state')}"
                                                + (f" ({ad['detail']})" if ad.get("detail") else "")
-                                               + ": the map uses adsb.lol / adsb.fi meanwhile"})
+                                               + " · map on adsb.lol / adsb.fi"})
         sq = m.get("stt_queue")
         if sq and ((sq.get("oldest_s") or 0) >= STT_BACKLOG_S):
             out["stt_backlog"] = {"severity": "warning", "title": "Speech-to-text behind",
-                                  "text": f"the station's whisper is behind: its oldest waiting clip is from "
-                                          f"{_hhmm(now - float(sq.get('oldest_s') or 0))} (pages, Fire/EMS 15 and the "
-                                          "firegrounds go first; clips waiting too long are skipped and say so)",
+                                  "text": f"oldest waiting clip from {_hhmm(now - float(sq.get('oldest_s') or 0))} "
+                                          "(pages, Fire/EMS 15, firegrounds first; stale clips skipped)",
                                   "since": now - float(sq.get("oldest_s") or 0)}
         rec = m["processes"]["recorder"]
         if rec and rec.get("expected") and rec.get("state") != "ok":
             held("recorder", self.down_s, {"severity": "critical", "title": "trunk-recorder down",
                                            "text": f"trunk-recorder: {rec.get('state')}"
                                                    + (f" ({rec['detail']})" if rec.get("detail") else "")
-                                                   + f": {P25_JOB} (P25) isn't being heard"})
+                                                   + f" · {P25_JOB} (P25) not heard"})
         trunk = self._trunk_alert(m, rec, now)
         if trunk:
             out["trunk"] = trunk
@@ -759,19 +755,18 @@ class StationHealth:
             if c["stuck"]:
                 out[f"stuck:{c['label']}"] = {
                     "severity": "warning", "title": f"{c['label']} stuck open",
-                    "text": f"{c['label']} squelch open without a break since {_hhmm(now - float(c['open_s'] or 0))}: "
-                            "likely noise holding it (check the squelch, the antenna)",
+                    "text": f"{c['label']} squelch open since {_hhmm(now - float(c['open_s'] or 0))} · "
+                            "likely noise (check squelch, antenna)",
                     "since": now - float(c["open_s"] or 0)}      # (no running duration in the text: the panel counts)
         ob = m["outbox"]
         if ob["pending"] and ob["age_s"] is not None and ob["age_s"] >= self.outbox_s:
             out["outbox"] = {"severity": "warning", "title": "Station's events backing up",
-                             "text": f"{ob['pending']} event(s) waiting on the station, the oldest from {_hhmm(ob['oldest'])}: "
-                                     "it couldn't reach the hub (or the hub couldn't take them)",
+                             "text": f"{ob['pending']} event(s) waiting, oldest {_hhmm(ob['oldest'])} · not reaching the hub",
                              "since": ob["oldest"]}
         disk = m["system"].get("disk_pct")
         if isinstance(disk, (int, float)) and disk >= self.disk_pct:
             out["disk"] = {"severity": "critical" if disk >= DISK_CRITICAL else "warning", "title": "Station disk full",
-                           "text": f"the station's disk is {disk:.0f}% full" + (
+                           "text": f"disk {disk:.0f}% full" + (
                                f" ({m['system']['disk_free'] / 1e9:.1f} GB free)" if m["system"].get("disk_free") else ""),
                            "since": now}
         for k in [k for k in self._first if k not in seen]:
@@ -790,13 +785,13 @@ class StationHealth:
             return None
         if self._trunk_up is None:
             self._trunk_up = now
-        tail = "(trunk-recorder running): check the P25 dongle/antenna, control channel"
+        tail = "(trunk-recorder running) · check P25 dongle, antenna, control channel"
         cc = tk.get("cc") or {}
         if cc.get("low_since") and (cc.get("low_s") or 0) >= CC_LOST_S:
             rate = cc.get("rate")
             return {"severity": "critical", "title": "P25 trunk silent",
                     "text": "control channel lost: trunk-recorder decodes "
-                            + (f"{rate:g} messages/s" if isinstance(rate, (int, float)) else "almost nothing")
+                            + (f"{rate:g} msg/s" if isinstance(rate, (int, float)) else "almost nothing")
                             + f" from it since {_hhmm(cc['low_since'])}"
                             + (f", {cc['retunes']} retunes" if cc.get("retunes") else "") + f" {tail}",
                     "since": float(cc["low_since"])}
@@ -812,8 +807,8 @@ class StationHealth:
             return None
         return {"severity": "critical", "title": "P25 trunk silent",
                 "text": f"no calls on any talkgroup since {_hhmm(start)} {tail} ("
-                        + (f"a call usually comes within {_dur(usual)} at this time of day; " if usual else "")
-                        + f"alert past {_dur(window)})",
+                        + (f"usual gap {_dur(usual)}; " if usual else "")
+                        + f"alert after {_dur(window)})",
                 "since": start}
 
     def _who(self, key: str, m: dict) -> dict:
@@ -982,6 +977,7 @@ class StationHealth:
                            "server": getattr(n, "server", "") if n is not None and n.enabled else "",
                            "sent": getattr(n, "sent", 0), "failed": getattr(n, "failed", 0),
                            "last_error": getattr(n, "last_error", ""), "last_push": max(pushed.values(), default=None)},
+                "errors": self.errors.panel() if self.errors is not None else None,
                 "thresholds": {"silent_min": self.silent_s / 60, "behind_min": self.behind_s / 60,
                                "down_min": self.down_s / 60, "outbox_min": self.outbox_s / 60,
                                "disk_pct": self.disk_pct, "repeat_min": self.repeat_s / 60,

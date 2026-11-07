@@ -70,10 +70,14 @@ gain_db = 40
 # airnav.com/airport/KHPN, effective 2026-10-29): Tower 118.575 (0600-2300; CTAF when closed),
 # Ground 121.825, Clearance Delivery 126.4 (127.25 when the tower is closed), D-ATIS 133.8,
 # New York Approach 126.4 (0700-2300) / 120.8 (2300-0700) / 124.65, New York Departure 120.55.
-# One RTL-SDR covers ~2 MHz, so Tower and Ground (3.25 MHz apart) need a dongle each: one channel
-# per dongle here (several per dongle is #119). NY Approach and HPN Ground (#260) are below: picked for
-# a dongle by hand, never auto-assigned. The facility comes from the label (sizeup/atc_scope.py): "...
-# Ground" matches aircraft on the field, "... Approach" HPN's arrivals and departures out to 40 NM.
+# One RTL-SDR covers about 2 MHz: a channel's `also` (#275) puts other channels' frequencies on its dongle (rtl_sdr and
+# one FFT channelizer, sizeup/radio/channelize.py: each frequency its own squelch, clips, speech-to-text and talkers,
+# heard as the channel it belongs to), at most about 1.78 MHz between the lowest and highest at any time, and only with
+# [radio] airband_multichannel = true (off by default: try it first with tools/airband_ab.py, an on-air A/B against
+# rtl_fm), and only while no other running dongle has that frequency. One frequency: rtl_fm, as before. NY Approach and HPN Ground (#260) are below: picked for a dongle by hand, never
+# auto-assigned. The facility comes from the label (sizeup/atc_scope.py): "... Ground" matches aircraft on the field,
+# "... App" / "... Approach" HPN's arrivals and departures out to 40 NM. A frequency on two dongles at once is kept on
+# one (the channel's own dongle).
 [[radio.channels]]
 label = "HPN Tower"
 mhz = 118.575
@@ -83,14 +87,15 @@ gain_db = 36.4                     # shortfinal's airband gain
 squelch_db = 3.5                   # open this far over the noise floor (bench: noise +2, voice +6..+28)
 
 [[radio.channels]]
-label = "NY Approach"              # New York Approach for HPN (#260): early inbound, emergencies declared to it first
+label = "NY App 126.4/120.8"       # New York Approach for HPN (#260): early inbound, emergencies declared to it first
 mhz = 126.4                        # the day frequency; schedule: each frequency from its local time (America/New_York,
 kind = "airband"                   # DST-aware) until the next; retuned only between transmissions
 schedule = [{ at = "07:00", mhz = 126.4 }, { at = "23:00", mhz = 120.8 }]
+also = [{ mhz = 124.65, from = "07:00", until = "23:00" }]                  # 126.4 + 124.65 by day
 device = "nyapp"
 
 [[radio.channels]]
-label = "NY Approach 124.65"       # New York Approach's third HPN frequency, fixed
+label = "NY App 124.65"            # New York Approach's third HPN frequency, fixed
 mhz = 124.65
 kind = "airband"
 device = "nyapp2"
@@ -99,6 +104,7 @@ device = "nyapp2"
 label = "HPN Ground"               # Westchester Ground (0600-2300 like the tower)
 mhz = 121.825
 kind = "airband"
+schedule = [{ at = "06:00", mhz = 121.825 }, { at = "23:00", mhz = 124.65 }]   # closed overnight: 124.65 then
 device = "hpn-gnd"
 
 # Two-tone codes: every decoded pair is shown with its page so the real codes can be confirmed and
@@ -333,6 +339,17 @@ heartbeat_stale_min = 90             # no heartbeat (or restart) this long: "Tap
 # stream_max = 8                          # live camera streams through the hub at once (a camera watched by several
 #                                         # pages is one); each ~26 KB/s and ~1.4 % of a core: 8 is safe on 0.25 vCPU
 # wall_streams = 0                        # the camera wall's live tiles per page; 0: every streaming camera in our area
+# Camera DVR (#277, sizeup/dvr.py): the live cameras' segments kept on the hub's disk so the viewer can scrub back.
+# Only cameras with live video, on demand: the always list, the ones pinned in the viewer, an open event's cameras,
+# the ones being watched (and dvr_linger_min after). Behind Cloudflare Access like the rest; never public.
+# dvr = true
+# dvr_window_min = 120                    # kept per camera (10 to 720)
+# dvr_max_gb = 6                          # every camera's segments together, at most (0.5 to 200); oldest go first
+# dvr_near_m = 1000                       # an open CAD event's cameras: this close (0 to 5000), and the ones along the road
+# dvr_linger_min = 30                     # a camera someone opened records on this long after they close it (0 to 240)
+# dvr_max_cameras = 12                    # recorded at once (1 to 40): ~200 kbit/s each in, 175 MB each per 2 h
+# dvr_always = []                         # camera ids recorded all the time
+# dvr_dir = ""                            # "" = the state folder's dvr/
 
 # [roadwork]: the maps' "Road projects & closures" layer and the incident view's closure lines (sizeup/roadprojects.py,
 # #185): the Thruway's and 511NY's roadwork (read by [roads]), the capital programs in construction (the Thruway, NYSDOT,

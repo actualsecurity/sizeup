@@ -77,7 +77,8 @@ from typing import Callable
 
 from sizeup import channels
 from sizeup import tz
-from sizeup.app import CLIP_ID, App, AwsJob, channels_model
+from sizeup import app as app_mod
+from sizeup.app import CLIP_ID, RENAMED, App, AwsJob, channels_model
 from sizeup.cad.dispatcher import AudioUnavailable
 from sizeup.cad.radios import fm_system
 from sizeup.cloud.autoupdate import describe
@@ -552,6 +553,7 @@ class HubApp(App):
         # audio.sqlite: under the hub's supervisor (sizeup/handoff.py) the standby follows it with cad and hub, so
         # on a takeover it is current and opened at once; retention keeps it small (_audio_retention, #251)
         self.audio = AudioDb(state / "audio.sqlite" if state else ":memory:", int(cfg.cloud_audio_max_mb * 1024 * 1024))
+        app_mod._mark("hub databases")
         # Nothing that could open an SDR or start a program: no dongles, no trunk-recorder or its
         # capture dir, no voice server, and no captures/ (its JSON files and WAVs live in SQLite here).
         super().__init__(replace(cfg, clips_dir="", p25_dir="", p25_recorder="", sdrs=(), sdr_auto=False,
@@ -564,6 +566,12 @@ class HubApp(App):
         from sizeup.notify import STATUS
         notifier = self.pushes.notifier(STATUS)
         self.health = self.hub.health_ = StationHealth(self.hub, cfg, self.mdb, notifier, log)
+        # the hub's own error spikes (#285, sizeup/errwatch.py): the same status notifier; main() tees the log into it
+        from sizeup import errwatch
+        pub = (cfg.cloud_public_url or "").rstrip("/")
+        self.error_watch = errwatch.ErrorWatch(notifier, settings=lambda: self.cad.settings.section(errwatch.SECTION), log=log,
+                                               click=f"{pub}/cad#settings/system/health" if pub else "", db=self.mdb)
+        self.health.errors = self.error_watch
         if not notifier.enabled:
             log("health: no push for station alerts (no status or alerts topic in effect): Settings > Health and log only")
         self.live = self.hub.live                      # main() sets on_change to push the display
@@ -579,10 +587,16 @@ class HubApp(App):
         for p in list(self.pages):                     # pages from before #64: rows in Radio too
             self._page_to_cad(p, replace=False)
         self._clean_hub()
+        app_mod._mark("hub")
 
     # -- the station's events ----------------------------------------------------------------------
 
     def apply(self, kind: str, d: dict, audio: bytes | None) -> None:
+        if kind in ("traffic", "alarm") and d.get("source") in RENAMED and d["source"] not in self._kind \
+                and RENAMED[d["source"]] in self._kind:
+            # #275: a station whose config isn't renamed yet (its update is deferred once) sends the old name: its
+            # transmissions are the renamed channel's here (airband, the pre-alerts, AWS); the id stays the station's
+            d = {**d, "source": RENAMED[d["source"]]}
         if kind == "page":
             self._apply_page(d, audio)
         elif kind == "page_text":
@@ -1157,6 +1171,7 @@ class HubApp(App):
     def start(self) -> HubApp:
         threading.Thread(target=self._hub_janitor, name="hub-janitor", daemon=True).start()
         threading.Thread(target=self.health.run, args=(self._stopping,), name="station-health", daemon=True).start()
+        threading.Thread(target=self.error_watch.run, args=(self._stopping,), name="hub-errors", daemon=True).start()
         threading.Thread(target=self._aws_watch, name="aws-sweep", daemon=True).start()
         self._started = True                      # the phone pre-alert: the hub's own subscription
         self.prealert_sync()
@@ -1170,13 +1185,19 @@ class HubApp(App):
         return self
 
     def stop(self) -> None:
+        from sizeup.timing import Phases
+        t = Phases("stop")                             # the drain's share of a deploy (#264): where it goes
         self._stopping.set()
         if self.prealert is not None:
             self.prealert.stop()
         self.stop_layers()
+        t.mark("layers")
         if self.aws is not None:
             self.aws.stop()
+            t.mark("speech-to-text")
         try:
             self.sync()
         except Exception:
             pass
+        t.mark("sync")
+        self.hub.log(t.line())
