@@ -538,7 +538,7 @@ function fillQueueItem(li, inc) {
   li.replaceChildren(head, type, addr);
   const ap = airportLine(inc);
   if (ap) li.append(el("div", "qs ap-line", ap));       // the tower's facts on an airport event (#105)
-  const ask = window.DispatchMode && isOpen(inc) && DispatchMode.closeRow(inc, autoDeps());   // County in service: close? (#311)
+  const ask = globalThis.DispatchMode && isOpen(inc) && DispatchMode.closeRow(inc, autoDeps());   // County in service: close? (#311)
   if (ask) li.append(ask);
   if (inc.status === "queued") {
     if (inc.type_note) li.append(el("div", "qs warn", inc.type_note));
@@ -606,14 +606,15 @@ function renderPrealert() {
 }
 function queueExtra(i) {              // what the queue card shows from the call's summary (#217), for its signature
   const o = isOpen(i) ? callSummary(i.id) : null;
-  return o ? [o.radio, o.note, callLive(o).map((e) => [e.key, e.rig, e.channel, e.alias])] : null;
+  const ask = i.auto && i.auto.close_pending ? i.auto.close_pending.id : null;    // County in service: close? (#311)
+  return o ? [o.radio, o.note, callLive(o).map((e) => [e.key, e.rig, e.channel, e.alias]), ask] : ask;
 }
 function renderQueue() {
   const all = incidents();
   const byAge = (a, b) => a.created_at - b.created_at;        // oldest first
   const sig = (i) => JSON.stringify([i.status, i.number, i.type, i.subtype, i.address, i.id === cad.sel, i.emergency,
     i.until_at, i.disposition, i.type_note, unconfirmed(i), i.joint_call, openAssignments(i).map((a) => [a.name, a.status, txNow(a.name)]),
-    i.closed_at, cad.listSig.length, canDo("dispatch"), airportLine(i), queueExtra(i), i.auto && i.auto.close_pending && i.auto.close_pending.id]);
+    i.closed_at, cad.listSig.length, canDo("dispatch"), airportLine(i), queueExtra(i)]);
   const opts = { key: (i) => String(i.id), sig, make: queueItem, fill: fillQueueItem };
   syncList($("#q-queued"), all.filter((i) => i.status === "queued").sort(byAge), { ...opts, empty: "None" });
   syncList($("#q-pending"), all.filter((i) => i.status === "pending" && i.emergency).sort(byAge),
