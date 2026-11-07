@@ -9,23 +9,33 @@ its task runs the Cloudflare connector. Every task is one of:
 
   STARTING  the lock is read; followers (`litestream restore -f`) restore cad / hub / audio .sqlite into
             /data/standby/ and keep applying the leader's changes; the map caches come back from S3
-            (sizeup/cachesync.py). The lock free (none yet, released, or expired): take it -> TAKEOVER.
-  STANDBY   the lock is someone else's: nothing is written but /data/standby/ and the caches. No app, no
-            `litestream replicate`, no connector (it waits for the `leader` file). /healthz on the control
-            port (8089) answers 200 once every follower has restored and the caches are back ("warm"), so ECS
-            stops the old task only when this one can take over in seconds.
-  TAKEOVER  lock taken (generation + 1): the replica's last position is read (`restore -dry-run`), at least the
-            positions the old leader released with; the followers catch up to it (only the last few changes:
-            seconds), are stopped, quick-checked and moved into /data; `--init-state`; `litestream replicate`;
-            the app; its /healthz; then the `leader` file (the connector starts) and phase "serving" in the lock.
+            (sizeup/cachesync.py); once they are, the app is started GATED (#264: sizeup/app.py run_gated): it
+            imports everything and builds what needs no database (the gazetteer, the map providers and their
+            caches, the ATC rules), says "warm" and waits. The lock free (none yet, released, or expired): take
+            it -> TAKEOVER.
+  STANDBY   the lock is someone else's: nothing is written but /data/standby/ and the caches. The app waits at its
+            gate (no lease file: it couldn't write if it tried), no `litestream replicate`, no connector (it waits
+            for the `leader` file). /healthz on the control port (8089) answers 200 once every follower has
+            restored, the caches are back and the app is warm ("warm"), so ECS stops the old task only when this
+            one can take over in seconds.
+  TAKEOVER  lock taken (generation + 1): the replica's last position is read (`restore -dry-run`, the three at
+            once), at least the positions the old leader released with; the followers catch up to it (only the
+            last few changes: seconds), are stopped, quick-checked and moved into /data; the gate says "init" (the
+            app does --init-state's work), `litestream replicate`, the gate says "run": the app's port answers
+            "updating" at once, so the `leader` file is written then (the connector registers while the app is
+            built); the app's /healthz; once the connector is up too, phase "serving" in the lock. One timing
+            line says where the time went.
   ACTIVE    the lock renewed every 10 s. Not renewed for 20 s, or written by someone else: FENCED (below).
   DRAINING  SIGTERM (ECS, after the new task is healthy): phase "draining"; the app stops taking requests (503 +
             Retry-After), finishes those in flight and exits; port 8090 answers 503 + Retry-After from here;
             `litestream sync -wait` puts every last change in S3 and gives its position; Litestream stops; the
             lock is released with those positions.
-  RELEASED  the connector stays up (answering 503) until the new leader says "serving" or OVERLAP_S; if nobody
-            took the lock within RETAKE_S it is taken back and this task serves on until shortly before ECS
-            kills it, then drains again. Then the `leader` file goes (the connector stops) and this exits.
+  RELEASED  the connector stays up (answering "updating": the port is taken the moment the draining app lets go
+            of it) until the new leader says "serving" in the lock (its app answers and its connector is up), for
+            at most OVERLAP_S and never past shortly before ECS's SIGKILL: two connectors on the tunnel for a
+            moment, never none. If nobody took the lock within RETAKE_S it is taken back and this task serves on
+            until shortly before ECS kills it, then drains again. Then the `leader` file goes (the connector
+            stops) and this exits.
   FENCED    the lease isn't ours or fresh: the app and Litestream are SIGKILLed at once, the `leader` file goes,
             exit 3 (ECS replaces the task). The app's own watchdog (sizeup/fence.py) does the same from inside.
 
@@ -43,15 +53,20 @@ import signal
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import threading
 import time
+import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable
 
 from sizeup import leaderlock
 from sizeup.leaderlock import LeaderLock, LockError, LockLost, txid
+from sizeup.timing import Phases
+from sizeup.web.updating import serve_updating
 
 DBS = ("cad", "hub", "audio")
 CHECKED = ("cad", "hub")       # quick-checked before they are promoted (audio: big, clips only)
@@ -64,7 +79,12 @@ CONNECTOR_READY_S = 30.0       # cloudflared connected to the edge (not fatal: "
 APP_STOP_S = 30.0              # the app, after SIGTERM, before SIGKILL
 SYNC_S = 45.0                  # `litestream sync -wait` for the three files, in all
 LITESTREAM_STOP_S = 40.0       # Litestream after SIGTERM (it syncs once more itself)
-OVERLAP_S = 45.0               # the released connector, at most
+OVERLAP_S = 180.0              # the released connector, at most (and never past STOP_TIMEOUT_S - KILL_MARGIN_S)
+KILL_MARGIN_S = 3.0            # ... it stops this long before ECS's SIGKILL, cleanly
+INIT_S = 300.0                 # the app opening / migrating the databases after the gate says "init"
+APP_LISTEN_S = 30.0            # the app's port answering ("updating") after the gate says "run"
+WARM_APP_RETRY_S = 30.0        # a warm (standby) app that exited: started again after this long
+WARM_APP_MAX_FAILS = 3         # ... at most this often; then the standby stays unhealthy (ECS rolls the deploy back)
 RETAKE_S = 20.0                # nobody took it: take it back
 STOP_TIMEOUT_S = 120.0         # the task definition's stopTimeout: ECS SIGKILLs this long after SIGTERM
 REDRAIN_S = 40.0               # after a retake: drain again this long before the SIGKILL
@@ -206,13 +226,19 @@ class Env:
             raise RuntimeError(f"litestream sync {db}: replica at {replica}, the database at {local}")
         return replica
 
-    def init_state(self) -> None:
-        r = subprocess.run([self.python, "-m", "sizeup", "--config", self.config, "--init-state"], timeout=300)
-        if r.returncode != 0:
-            raise RuntimeError(f"sizeup --init-state exited {r.returncode}")
-
     def start_app(self, env: dict) -> Proc:
+        """The app, gated (env has SIZEUP_APP_GATE: sizeup/app.py run_gated): it warms up and waits for the gate."""
         return Proc("app", [self.python, "-m", "sizeup", "--config", self.config], env=env)
+
+    def app_answers(self) -> bool:
+        """Anything answers on the app's port (its early "updating" answer counts: a 503)."""
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/healthz", timeout=2.0):
+                return True
+        except urllib.error.HTTPError:
+            return True
+        except OSError:
+            return False
 
     def _get(self, url: str) -> bool:
         try:
@@ -251,38 +277,6 @@ class Env:
             m.save_manifest()
 
 
-# -- the 503 answer while no app serves on this task ----------------------------------------------------------
-
-UPDATING_JSON = json.dumps({"error": "the hub is updating: back in a few seconds", "updating": True}).encode()
-UPDATING_HTML = (b"<!doctype html><meta charset=utf-8><meta http-equiv=refresh content=3><title>Updating</title>"
-                 b"<body style=\"font:16px system-ui;margin:3em;color:#333\"><p>Reconnecting&hellip; (update in progress)"
-                 b"</p><p>This page reloads by itself.</p>")
-RETRY_AFTER = "2"
-
-
-class _Updating(BaseHTTPRequestHandler):
-    protocol_version = "HTTP/1.1"
-
-    def log_message(self, *a) -> None:
-        pass
-
-    def _answer(self) -> None:
-        html = "text/html" in (self.headers.get("Accept") or "") and not self.path.startswith("/api/")
-        body = UPDATING_HTML if html else UPDATING_JSON
-        self.send_response(503)
-        self.send_header("Content-Type", "text/html; charset=utf-8" if html else "application/json")
-        self.send_header("Retry-After", RETRY_AFTER)
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Connection", "close")
-        self.end_headers()
-        if self.command != "HEAD":
-            self.wfile.write(body)
-        self.close_connection = True
-
-    do_GET = do_POST = do_HEAD = do_PUT = do_DELETE = _answer
-
-
 def serve(port: int, handler, host: str = "127.0.0.1") -> ThreadingHTTPServer | None:
     try:
         srv = ThreadingHTTPServer((host, port), handler)
@@ -308,7 +302,9 @@ class Supervisor:
                  CONNECTOR_READY_S=CONNECTOR_READY_S, APP_STOP_S=APP_STOP_S, SYNC_S=SYNC_S,
                  LITESTREAM_STOP_S=LITESTREAM_STOP_S, OVERLAP_S=OVERLAP_S, RETAKE_S=RETAKE_S,
                  STOP_TIMEOUT_S=STOP_TIMEOUT_S, REDRAIN_S=REDRAIN_S, RENEW_S=leaderlock.RENEW_S,
-                 RETAKE_MIN_LEFT_S=RETAKE_MIN_LEFT_S, CREATED_WAIT_S=CREATED_WAIT_S)
+                 RETAKE_MIN_LEFT_S=RETAKE_MIN_LEFT_S, CREATED_WAIT_S=CREATED_WAIT_S, KILL_MARGIN_S=KILL_MARGIN_S,
+                 INIT_S=INIT_S, APP_LISTEN_S=APP_LISTEN_S, WARM_APP_RETRY_S=WARM_APP_RETRY_S,
+                 WARM_APP_MAX_FAILS=WARM_APP_MAX_FAILS)
         t.update(timing or {})
         self.t = t
         self.role = "starting"
@@ -319,14 +315,22 @@ class Supervisor:
         self.renewing = threading.Event()
         self._renew_now = threading.Event()
         self._write_lock = threading.RLock()   # the lease is written by the renew thread and the main one (#282)
+        self._lease_open = False                # (under _write_lock) the lease file may be written: held, not let go
         self._renew_token: object | None = None
         self.followers: dict[str, Proc] = {}
         self.follow_done: set[str] = set()        # restored (or: no replica to restore)
         self.no_replica: set[str] = set()
         self.caches_warm = threading.Event()
-        self.app: Proc | None = None
+        self.app: Proc | None = None              # the app that may write (after the gate says "init")
+        self.warm_app: Proc | None = None         # the app started while standing by, waiting at its gate (#264)
+        self.app_warm = threading.Event()         # ... it said "warm"
+        self._warm_fails = 0                      # ... how often it exited before the takeover
+        self._warm_app_at: float | None = None
         self.litestream: Proc | None = None
         self.updating_srv: ThreadingHTTPServer | None = None
+        self._port_stop = threading.Event()
+        self._port_thread: threading.Thread | None = None
+        self.timing: Phases | None = None
         self.control_srv: ThreadingHTTPServer | None = None
         self.events: list[str] = []               # what happened, in order (the tests read it)
         self.positions: dict | None = None
@@ -354,15 +358,42 @@ class Supervisor:
     def lease_file(self) -> Path:
         return self.run_dir / "lease.json"
 
+    @property
+    def gate_file(self) -> Path:
+        """What the gated app may do (sizeup/app.py run_gated): "init", then "run"."""
+        return self.run_dir / "app-gate"
+
+    @property
+    def gate_answer_file(self) -> Path:
+        """The gated app's answer: "warm", then "ok" (or "error: ...") after "init"."""
+        return self.run_dir / "app-gate.answer"
+
+    def _gate(self, word: str) -> None:
+        self._write(self.gate_file, word + "\n")
+
+    def _gate_answer(self) -> str:
+        try:
+            return self.gate_answer_file.read_text().strip()
+        except OSError:
+            return ""
+
     def _write(self, path: Path, text: str) -> None:
-        with self._write_lock:            # one shared tmp name: two threads at once lost one's os.replace (#282)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_name(f".{path.name}.tmp")
-            tmp.write_text(text)
-            os.replace(tmp, path)
+        """path replaced at once by text. The renew thread and this one both write the lease file: one at a time,
+        each through a temp file of its own (#264: a shared ".lease.json.tmp" raced, the second os.replace failing)."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with self._write_lock:
+            fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+            try:
+                with os.fdopen(fd, "w") as f:
+                    f.write(text)
+                os.replace(tmp, path)
+            finally:
+                Path(tmp).unlink(missing_ok=True)
 
     def write_lease(self) -> None:
         with self._write_lock:            # (an RLock) what it says and the write in one go: the newest lands last
+            if not self._lease_open:      # let go (released, fenced): a renew finishing late never brings it back
+                return
             self._write(self.lease_file, json.dumps({
                 "generation": self.lock.generation, "valid_until": self.lock.valid_until, "holder": self.lock.holder,
                 "litestream_pid": self.litestream.pid if self.litestream is not None else None}))
@@ -371,7 +402,7 @@ class Supervisor:
         self._write(self.shared / "hub-alive", f"{int(time.time())}\n")
 
     def warm(self) -> bool:
-        return self.caches_warm.is_set() and self.follow_done >= set(DBS)
+        return self.caches_warm.is_set() and self.follow_done >= set(DBS) and self.app_warm.is_set()
 
     def healthy(self, app: dict | None = None, asked: bool = False) -> bool:
         """ECS's health check (control port /healthz). A standby: only once warm. Taking over, draining,
@@ -397,7 +428,7 @@ class Supervisor:
         serves the CAD, and what it is still loading in the background (#251: map layers)."""
         app = self._app_status() if self.role in ("active", "retaken") and self.app is not None else None
         return {"ok": self.healthy(app, asked=app is not None or self.app is not None), "role": self.role, "detail": self.detail,
-                "warm": self.warm(), "serving": bool(app and app.get("serving", True)),
+                "warm": self.warm(), "app_warm": self.app_warm.is_set(), "serving": bool(app and app.get("serving", True)),
                 "loading": list((app or {}).get("loading") or []),
                 "generation": self.lock.generation, "holder": leaderlock.short(self.lock.holder),
                 "leader": leaderlock.short((self.lock.last_seen or {}).get("holder", "")),
@@ -458,6 +489,83 @@ class Supervisor:
             p.stop(15.0)
         self.followers.clear()
 
+    # -- the app, warm before the takeover (#264) ------------------------------------------------------------
+
+    def _start_app(self) -> Proc:
+        """The app, gated: it warms up (imports, the gazetteer, the providers...) and waits for the gate file."""
+        self.run_dir.mkdir(parents=True, exist_ok=True)
+        self.gate_file.unlink(missing_ok=True)
+        self.gate_answer_file.unlink(missing_ok=True)
+        self.app_warm.clear()
+        self.app_env = dict(os.environ, SIZEUP_LEASE_FILE=str(self.lease_file), SIZEUP_APP_GATE=str(self.gate_file))
+        self._warm_app_at = self.mono()
+        return self.env.start_app(self.app_env)
+
+    def keep_warm_app(self) -> None:
+        """While standing by: the gated app started once the caches are back (it reads them), started again if it
+        exits, "warm" noted when it says so."""
+        if not self.caches_warm.is_set():
+            return
+        p = self.warm_app
+        if p is None:
+            if self._warm_fails >= self.t["WARM_APP_MAX_FAILS"]:
+                return                    # this image's app doesn't start: never healthy, ECS rolls back
+            if self._warm_app_at is None or self.mono() - self._warm_app_at >= self.t["WARM_APP_RETRY_S"]:
+                self.warm_app = self._start_app()
+                self.note("app started, gated: warming up before the takeover")
+            return
+        code = p.poll()
+        if code is not None:
+            self._warm_fails += 1
+            self.warm_app = None
+            self.app_warm.clear()         # not healthy without it: a bad image must not get the old task stopped
+            if self._warm_fails >= self.t["WARM_APP_MAX_FAILS"]:
+                self.note(f"the warm app exited {code}, {self._warm_fails} times: given up; this task stays "
+                          "unhealthy (ECS's circuit breaker rolls the deploy back, the leader serves on)")
+            else:
+                self.note(f"the warm app exited {code}: started again in {self.t['WARM_APP_RETRY_S']:.0f} s")
+            return
+        if not self.app_warm.is_set() and self._gate_answer() == "warm":
+            self.app_warm.set()
+            self.note("app warm: waiting at its gate")
+
+    def stop_warm_app(self) -> None:
+        if self.warm_app is not None:
+            self.warm_app.stop(10.0)
+            self.warm_app = None
+
+    # -- the port while no app serves on it -------------------------------------------------------------------
+
+    def take_port(self) -> None:
+        """The "updating" answer on the app's port the moment the draining app lets go of it (#264: the port
+        refused connections for ~11 s while the old app stopped, Cloudflare's 502)."""
+        if self.updating_srv is not None or (self._port_thread is not None and self._port_thread.is_alive()):
+            return
+        self._port_stop.clear()
+
+        def run() -> None:
+            failed = None
+            while not self._port_stop.is_set():
+                try:
+                    self.updating_srv = serve_updating("127.0.0.1", self.env.port)
+                    return
+                except OSError as e:
+                    if failed is None:
+                        failed = e
+                    time.sleep(0.05)
+        self._port_thread = threading.Thread(target=run, name="take-port", daemon=True)
+        self._port_thread.start()
+
+    def free_port(self) -> None:
+        self._port_stop.set()
+        if self._port_thread is not None:
+            self._port_thread.join(2.0)
+            self._port_thread = None
+        if self.updating_srv is not None:
+            self.updating_srv.shutdown()
+            self.updating_srv.server_close()
+            self.updating_srv = None
+
     # -- the renew thread ----------------------------------------------------------------------------------
 
     def _renew_loop(self, token: object) -> None:
@@ -484,10 +592,18 @@ class Supervisor:
                 nxt = self.mono() + 2.0
 
     def start_renewing(self) -> None:
+        with self._write_lock:
+            self._lease_open = True
         self.write_lease()
         self._renew_token = token = object()
         self.renewing.set()
         threading.Thread(target=self._renew_loop, args=(token,), name="lock-renew", daemon=True).start()
+
+    def drop_lease(self) -> None:
+        """The lease file gone for good (until the next take): the app's fence says "not ours" from here."""
+        with self._write_lock:
+            self._lease_open = False
+            self.lease_file.unlink(missing_ok=True)
 
     def stop_renewing(self) -> None:
         self.renewing.clear()
@@ -515,13 +631,13 @@ class Supervisor:
         """Stop every write NOW: SIGKILL, no drain, no release (the lease runs out by itself)."""
         self.role = "fenced"
         self.note(f"FENCED: {why}: app and Litestream killed")
-        for p in (self.app, self.litestream, *self.followers.values()):
+        for p in (self.app, self.warm_app, self.litestream, *self.followers.values()):
             if p is not None:
                 p.kill()
         self.stop_renewing()
         self.lock.drop()
         self.leader_file.unlink(missing_ok=True)
-        self.lease_file.unlink(missing_ok=True)
+        self.drop_lease()
         return EXIT_FENCED
 
     # -- main ----------------------------------------------------------------------------------------------
@@ -541,6 +657,7 @@ class Supervisor:
         except _Fenced as e:
             return self.fence(str(e))
         finally:
+            self._port_stop.set()
             if self.updating_srv is not None:
                 self.updating_srv.shutdown()
 
@@ -559,9 +676,11 @@ class Supervisor:
         errors_since = None
         while prev is None:
             self.check_followers()
+            self.keep_warm_app()
             if self.term.is_set():
                 self.note(f"stopped while {self.role}: the lock untouched")
                 self.stop_followers()
+                self.stop_warm_app()
                 return 0
             try:
                 prev = self.lock.try_take()
@@ -572,6 +691,7 @@ class Supervisor:
                 if self.mono() - errors_since > self.t["RESTORE_S"]:
                     self.note("the lock unreadable too long: exiting")
                     self.stop_followers()
+                    self.stop_warm_app()
                     return 1
             if prev is None:
                 if self.role != "standby":
@@ -586,6 +706,7 @@ class Supervisor:
 
     def take_over(self, prev: dict) -> int:
         self.role = "takeover"
+        self.timing = Phases("takeover", clock=self.mono)
         self.start_renewing()
         positions = prev.get("positions") if isinstance(prev.get("positions"), dict) else {}
         self.note(f"takeover: generation {self.lock.generation}"
@@ -598,24 +719,40 @@ class Supervisor:
             raise
         except Exception as e:
             self.note(f"takeover failed: {type(e).__name__}: {e}")
+            if self.timing is not None:
+                log(f"handoff: {self.timing.line('failed')}")
+            self.stop_warm_app()
             return self.step_down(code=1, overlap=False, retake=False)
         return self.active()
+
+    def _plan_all(self) -> dict[str, int | None | Exception]:
+        """The replica's last position of every file, asked at once (each is a `litestream restore -dry-run` of its
+        own, seconds of S3 listing: #264)."""
+        def one(db: str):
+            try:
+                return self.env.plan(db)
+            except Exception as e:
+                return e
+        with ThreadPoolExecutor(len(DBS), thread_name_prefix="plan") as ex:
+            return dict(zip(DBS, ex.map(one, DBS)))
 
     def _target(self, prev: dict, positions: dict) -> dict[str, int | None]:
         """Where each file must be: the replica's last position (we hold the lock: it is frozen now), and never
         behind what the old leader released with."""
         out: dict[str, int | None] = {}
+        first = self._plan_all()
         for db in DBS:
             end = self.mono() + 60.0
-            while True:
+            have = first[db]
+            while isinstance(have, Exception):
+                if self.mono() > end:
+                    raise RuntimeError(f"the replica of {db} can't be read: {have}") from None
+                self.must_hold()
+                self.sleep(2.0)
                 try:
                     have = self.env.plan(db)
-                    break
                 except Exception as e:
-                    if self.mono() > end:
-                        raise RuntimeError(f"the replica of {db} can't be read: {e}") from None
-                    self.must_hold()
-                    self.sleep(2.0)
+                    have = e
             released = txid(positions.get(db))
             if have is None:
                 if not prev.get("_created"):
@@ -630,7 +767,9 @@ class Supervisor:
         return out
 
     def _promote(self, prev: dict, positions: dict) -> None:
+        t = self.timing or Phases("takeover", clock=self.mono)
         target = self._target(prev, positions)
+        t.mark("plan")
         self.detail = f"catching up to {target}"
         for db, want in target.items():
             if want is None:
@@ -652,12 +791,16 @@ class Supervisor:
                 if got < want:
                     raise RuntimeError(f"{db}: restored to {got}, the replica is at {want}")
                 Path(str(self.staged(db)) + "-txid").write_text(f"{got:016x}\n")
+        t.mark("catch-up")
         self.stop_followers()
         # We hold the lock: nobody may move the replica now. If it moved, something else writes to it (a hub
         # from before the lock, still running beside us): never promote.
         if prev.get("_created"):
             self.sleep(self.t["CREATED_WAIT_S"])   # longer than Litestream's 1 s sync: an old writer would show
-        again = {db: self.env.plan(db) for db in DBS}
+        again = self._plan_all()
+        for v in again.values():
+            if isinstance(v, Exception):
+                raise v
         moved = {db: (target[db], again[db]) for db in DBS if again[db] != target[db]}
         if moved:
             raise RuntimeError(f"the replica moved while this task held the lock (another writer?): {moved}")
@@ -671,6 +814,7 @@ class Supervisor:
                 res = self.env.quick_check(self.staged(db))
                 if res != "ok":
                     raise RuntimeError(f"{db}.sqlite quick_check: {res[:200]}")
+        t.mark("verify")
         self.must_hold()
         for db, want in target.items():
             dest = self.env.db_path(db)
@@ -684,19 +828,55 @@ class Supervisor:
                 os.replace(self.staged(db), dest)
             Path(f"{self.staged(db)}-txid").unlink(missing_ok=True)
         self.positions = {db: (f"{n:016x}" if n is not None else None) for db, n in target.items()}
+        t.mark("promote")
         self.note(f"promoted: {self.positions}")
 
     def _start_writer(self) -> None:
-        """--init-state, Litestream, the app, its health, the leader file, "serving"."""
+        """The warm app opens the databases ("init"), Litestream, the app serves ("run"): its port answers at once,
+        so the leader file (the connector) goes in then; its /healthz; the connector up; "serving"."""
+        t = self.timing or Phases("takeover", clock=self.mono)
         self.must_hold()
-        self.env.init_state()
+        app = self.warm_app if self.warm_app is not None and self.warm_app.poll() is None else None
+        self.warm_app = None
+        if app is None:
+            self.note("no warm app: one started now (it warms up first)")
+            app = self._start_app()
+        self.app = app
+        self.write_lease()                          # fresh for the app's fence, which it reads at the gate
+        self.gate_answer_file.unlink(missing_ok=True)
+        self._gate("init")
+        end = self.mono() + self.t["INIT_S"]
+        while True:
+            self.must_hold()
+            ans = self._gate_answer()
+            if ans == "ok":
+                break
+            if ans.startswith("error"):
+                raise RuntimeError(f"the app couldn't open the databases: {ans}")
+            if app.poll() is not None:
+                raise RuntimeError(f"the app exited {app.poll()} while opening the databases")
+            if self.mono() > end:
+                raise RuntimeError(f"the app didn't open the databases in {self.t['INIT_S']:.0f} s")
+            self.sleep(0.05)
+        t.mark("init-state")
         self.must_hold()
         self.litestream = self.env.replicate()
         self.write_lease()
-        self.app_env = dict(os.environ, SIZEUP_LEASE_FILE=str(self.lease_file))
+        t.mark("litestream")
         self.must_hold()
-        self.app = self.env.start_app(self.app_env)
+        self._gate("run")
         self.note("app started")
+        end = self.mono() + self.t["APP_LISTEN_S"]
+        answers = self.env.app_answers()
+        while not answers and self.mono() < end:
+            self.must_hold()
+            if app.poll() is not None:
+                raise RuntimeError(f"the app exited {app.poll()} while starting")
+            self.sleep(0.05)
+            answers = self.env.app_answers()
+        t.mark("listen")
+        if answers:                                  # ("updating" until the CAD serves: the connector registers meanwhile)
+            self._leader_file_now("the app's port answers")
         end = self.mono() + self.t["APP_READY_S"]
         while not self.env.app_healthy():
             self.must_hold()
@@ -704,26 +884,44 @@ class Supervisor:
                 raise RuntimeError(f"the app exited {self.app.poll()} while starting")
             if self.mono() > end:
                 raise RuntimeError(f"the app didn't answer /healthz in {self.t['APP_READY_S']:.0f} s")
-            self.sleep(0.2)
-        self.must_hold()
-        self._write(self.leader_file, f"{self.lock.generation}\n")
-        self.note("leader file written: the connector starts")
+            self.sleep(0.1)
+        t.mark("app")
+        if not self.leader_file.exists():
+            self._leader_file_now("the app serves")
         end = self.mono() + self.t["CONNECTOR_READY_S"]
-        while not self.env.connector_ready() and self.mono() < end:
+        ready = self.env.connector_ready()
+        while not ready and self.mono() < end:
             self.must_hold()
             self.sleep(0.2)
-        self.say("serving")
+            ready = self.env.connector_ready()
+        t.mark("connector")
+        # "serving" in the lock is what lets the old task drop its connector: only once ours is up (#264), else the
+        # tunnel would have none. Not up yet: "connecting", and active() says "serving" the moment it is.
+        self.say("serving" if ready else "connecting")
         self.role = "active"
         self.detail = ""
-        self.note(f"active: serving, generation {self.lock.generation}")
+        self.note(f"active: serving, generation {self.lock.generation}"
+                  + ("" if ready else "; the connector isn't up yet: the old one stays until it is"))
+        log(f"handoff: {t.line()}")
+
+    def _leader_file_now(self, why: str) -> None:
+        self.must_hold()
+        self._write(self.leader_file, f"{self.lock.generation}\n")
+        self.note(f"leader file written ({why}): the connector starts")
 
     # -- active --------------------------------------------------------------------------------------------
 
     def active(self, deadline: float | None = None, retake: bool = True) -> int:
         backoff = LITESTREAM_BACKOFF[0]
         restart_at = None
+        asked_at = self.mono()
         while True:
             self.must_hold()
+            if self.lock.phase == "connecting" and self.mono() - asked_at >= 1.0:
+                asked_at = self.mono()
+                if self.env.connector_ready():
+                    self.say("serving")
+                    self.note("the connector is up: serving")
             if self.term.is_set() and deadline is None:
                 return self.step_down(code=0, overlap=True, retake=retake)
             if deadline is not None and self.mono() >= deadline:
@@ -747,14 +945,15 @@ class Supervisor:
 
     def step_down(self, code: int, overlap: bool, retake: bool) -> int:
         self.role = "draining"
+        t = Phases("drain", clock=self.mono)
         self.note("draining: the app finishes what's in flight")
         self.say("draining")
+        self.take_port()                          # "updating" on the port the moment the app lets go of it
         if self.app is not None:
             self.app.stop(self.t["APP_STOP_S"])
             self.app = None
+        t.mark("app")
         self.must_hold()
-        if self.updating_srv is None:
-            self.updating_srv = serve(self.env.port, _Updating)
         positions, clean = {}, self.litestream is not None
         end = self.mono() + self.t["SYNC_S"]
         if self.litestream is not None:
@@ -772,9 +971,11 @@ class Supervisor:
                         self.sleep(1.0)
                 if not clean:
                     break
+            t.mark("sync")
             self.must_hold()
             self.litestream.stop(self.t["LITESTREAM_STOP_S"])
             self.litestream = None
+            t.mark("litestream")
         self.must_hold()
         self.stop_renewing()
         try:
@@ -784,10 +985,12 @@ class Supervisor:
         except LockError as e:
             self.note(f"release not confirmed ({e}): the lease runs out by itself in {leaderlock.TTL_S:.0f} s")
             released = ""
-        self.lease_file.unlink(missing_ok=True)
+        self.drop_lease()
         self.released_positions = positions if clean else None
         self.role = "released"
+        t.mark("release")
         self.note(f"released: {positions if clean else 'unclean'}")
+        log(f"handoff: {t.line(self._since_term())}")
         if overlap:
             res = self.overlap(released, retake)
             if res is not None:
@@ -798,16 +1001,24 @@ class Supervisor:
         return code
 
     def overlap(self, released_etag: str, retake: bool) -> int | None:
-        """The connector stays up (503s) until the new leader serves; or, nobody taking it, take it back."""
+        """The connector stays up ("updating") until the new leader says "serving" in the lock: its app answers and
+        its own connector is up, so the tunnel never has none (#264). At most OVERLAP_S, and never past KILL_MARGIN_S
+        before ECS's SIGKILL. Nobody taking the lock: take it back."""
         start = self.mono()
-        while self.mono() - start < self.t["OVERLAP_S"]:
+        end = min(start + self.t["OVERLAP_S"], self._kill_at() - self.t["KILL_MARGIN_S"])
+        seen = ""
+        while self.mono() < end:
             try:
                 doc, etag = self.lock.read()
             except LockError:
                 doc, etag = None, ""
             if doc and doc.get("holder") != self.lock.holder and doc.get("state") == "held":
+                if doc.get("phase") != seen:
+                    seen = str(doc.get("phase") or "")
+                    log(f"handoff: the new leader {leaderlock.short(doc.get('holder', ''))} is {seen or 'starting'}")
                 if doc.get("phase") == "serving":
-                    self.note(f"the new leader {leaderlock.short(doc.get('holder', ''))} serves")
+                    self.note(f"the new leader {leaderlock.short(doc.get('holder', ''))} serves: after "
+                              f"{self.mono() - start:.1f} s of overlap{self._since_term(', ')}")
                     return None
             elif (retake and self.released_positions and leaderlock.is_free(doc, self.lock.wall(), self.lock.grace)
                   and self.mono() - start >= self.t["RETAKE_S"]
@@ -815,9 +1026,18 @@ class Supervisor:
                 res = self._retake(released_etag, etag)
                 if res is not None:
                     return res
-            self.sleep(0.25)
-        self.note(f"no new leader serving after {self.t['OVERLAP_S']:.0f} s")
+            self.sleep(max(0.0, min(0.25, end - self.mono())))
+        cut = self._kill_at() - self.t["KILL_MARGIN_S"] < start + self.t["OVERLAP_S"]
+        self.note(f"no new leader serving after {self.mono() - start:.0f} s"
+                  + (" (ECS stops this task in moments)" if cut else ""))
         return None
+
+    def _kill_at(self) -> float:
+        """When ECS SIGKILLs this task (inf: no SIGTERM yet)."""
+        return float("inf") if self.term_at is None else self.term_at + self.t["STOP_TIMEOUT_S"]
+
+    def _since_term(self, sep: str = "") -> str:
+        return "" if self.term_at is None else f"{sep}{self.mono() - self.term_at:.1f} s since SIGTERM"
 
     def _time_left(self) -> float:
         if self.term_at is None:
@@ -861,13 +1081,15 @@ class Supervisor:
             self.must_hold()
             self.litestream = self.env.replicate()
             self.write_lease()
-            self.app_env = dict(os.environ, SIZEUP_LEASE_FILE=str(self.lease_file))
-            if self.updating_srv is not None:
-                self.updating_srv.shutdown()
-                self.updating_srv.server_close()
-                self.updating_srv = None
-            self.app = self.env.start_app(self.app_env)
+            self.app = self._start_app()
             end = self.mono() + self.t["APP_READY_S"]
+            while self._gate_answer() != "warm":     # "updating" from here until the app takes the port
+                self.must_hold()
+                if self.app.poll() is not None or self.mono() > end:
+                    raise RuntimeError("the app didn't come back")
+                self.sleep(0.1)
+            self.free_port()
+            self._gate("run")
             while not self.env.app_healthy():
                 self.must_hold()
                 if self.app.poll() is not None or self.mono() > end:

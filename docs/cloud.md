@@ -2015,8 +2015,13 @@ supervisor ([Deploys](#deploys-the-hotcold-handoff)) the app runs only after a t
   rule (no replication of a file not restored yet) wins over the start time there.
 * **The standby warms the map caches** (`sizeup/cachesync.py` restore: read-only toward S3, files on its own disk;
   the manifest and `cachesync.json` tell the app's mirror their sha256, so nothing is sent back).
-* `--init-state` (run at every takeover) only creates and migrates the databases; it no longer builds the whole
-  app (the GIS layers, the S3 cache restore: ~15 s on Fargate).
+* `--init-state`'s work (at every takeover) only creates and migrates the databases; it no longer builds the whole
+  app (the GIS layers, the S3 cache restore: ~15 s on Fargate). Since #264 the warm app does it itself (no new
+  Python process to start).
+* **The standby warms the app** (#264): once the caches are back its supervisor starts the app gated
+  (`SIZEUP_APP_GATE`, `sizeup/app.py run_gated`): it imports everything and builds what needs no database (the
+  gazetteer, the map providers with their caches, the ATC rules), says "warm" and waits; the standby is healthy
+  only then. It has no lease file and is told nothing until the takeover.
 * **In the app, after it serves**: the map caches' restore (whatever the standby didn't bring), the county GIS
   layers' cache (28 layers, ~50 MB of GeoJSON, paced so requests keep going), then the providers (roads, road
   projects, trains, aircraft, weather, the data sources' schedule, the cache mirror): `App._load_layers`. Until a
@@ -2063,12 +2068,12 @@ stateDiagram-v2
     STARTING --> STANDBY: lock held by another
     STANDBY --> TAKEOVER: lock released, or expired + 5 s
     STANDBY --> [*]: SIGTERM (lock untouched)
-    TAKEOVER --> ACTIVE: followers caught up, promoted, init-state, litestream replicate, app healthy, leader file, "serving"
+    TAKEOVER --> ACTIVE: followers caught up, promoted, gate "init" (init-state), litestream replicate, gate "run" (the port answers: leader file), app healthy, connector up, "serving"
     TAKEOVER --> RELEASED: can't (bad copy, no backup, replica moved) - released, exit 1
     ACTIVE --> DRAINING: SIGTERM (ECS - the new task is healthy)
     ACTIVE --> RELEASED: the app exited - drained, exit 1
     DRAINING --> RELEASED: app exited, litestream sync -wait for each file, Litestream stopped, lock released with positions
-    RELEASED --> DONE: the new leader says "serving", or 45 s - leader file removed (the old connector stops)
+    RELEASED --> DONE: the new leader says "serving", or 180 s / shortly before ECS's SIGKILL - leader file removed (the old connector stops)
     RELEASED --> ACTIVE: nobody took it in 20 s, or it was given back unused - taken back until shortly before the SIGKILL
     ACTIVE --> FENCED: lease not renewed for 20 s, or the lock written by another
     TAKEOVER --> FENCED
@@ -2083,15 +2088,24 @@ stateDiagram-v2
   the app's own mirror not to upload them again). Its `/healthz` (port 8089, the task's health check) answers 200
   only once every file is restored and the caches are back: ECS stops the old task only then. That can take
   minutes (`audio.sqlite` is the big one): the health check's start period is 300 s.
-* **TAKEOVER** reads the replica's last position (`litestream restore -dry-run`); the lock is held, so nothing can
-  move it. The followers need only the last few changes: **seconds, not a restore**. A follower that doesn't get
+* **TAKEOVER** reads the replica's last position (`litestream restore -dry-run`, the three files at once); the lock
+  is held, so nothing can move it. The followers need only the last few changes: **seconds, not a restore**. A follower that doesn't get
   there in 30 s falls back to a full restore. Refused, never promoted: a replica behind the release; no backup at
   all although a leader ran before (an empty start would be replicated over the real data); a replica that moves
-  while this task holds the lock (another writer: e.g. a hub from before the lock).
+  while this task holds the lock (another writer: e.g. a hub from before the lock). Then the warm app is told
+  "init" through its gate file (it checks the lease file first, like its fence, and opens / migrates the
+  databases), `litestream replicate` starts, the gate says "run": the app's port answers at once ("update in
+  progress", 503 + Retry-After), so the `leader` file goes in then and the new connector registers while the app
+  is built; the real server takes the same socket over (nothing refused in between). "serving" goes in the lock
+  once the app's /healthz is 200 and the connector is up.
 * **DRAINING** confirms every change is in S3 (`litestream sync -wait`: the replica's position must reach the
-  database's) before the lock is released; port 8090 then answers 503 + Retry-After itself.
-* **RELEASED**: the old connector stays up (answering 503) until the new leader says "serving" (its own connector
-  connected), at most 45 s. If nobody took the lock within 20 s, or a new task took it and gave it back without
+  database's) before the lock is released. Port 8090 answers 503 + Retry-After ("update in progress") from the
+  moment the draining app lets go of it (it used to refuse connections for ~11 s while the app stopped:
+  Cloudflare's 502).
+* **RELEASED**: the old connector stays up (answering "update in progress") until the new leader says "serving"
+  (its app answers and its own connector is connected): two connectors on the tunnel for a moment, never none
+  (#264: a fixed 45 s cut it before the new one was up, 5–7 s of Cloudflare error 1033). At most 180 s, and never
+  past 3 s before ECS's SIGKILL (stopTimeout 120 s, Fargate's maximum). If nobody took the lock within 20 s, or a new task took it and gave it back without
   writing (the replica still exactly at our release), the old task takes it back and serves until shortly before
   ECS kills it, then drains again. A new task that wrote and then failed: the old one never resumes from its own
   (now older) files; ECS's next task restores.
@@ -2102,9 +2116,17 @@ out, and so does the app's own watchdog from inside (`sizeup/fence.py`, from the
 rewrites at each renew); the web server refuses writes (POST: 503) while the lease isn't fresh; the cache mirror
 uploads nothing. The release happens only after the app and Litestream have exited.
 
-**What a person sees.** About **10–20 s** of a small "Reconnecting… (update in progress)" pill on the CAD page
-(estimated, not yet measured: the drain and sync take a few seconds, the new app's start and its connector a few
-more). The page keeps what it shows; its state stream is opened again (a browser gives up on a 502 / 503 / 530
+**Where the time goes** (#264): one log line each, `handoff: drain timing: app … · sync … · litestream … · release
+… (…; N s since SIGTERM)` on the old task, `handoff: takeover timing: plan … · catch-up … · verify … · promote … ·
+init-state … · litestream … · listen … · app … · connector …` on the new one, and in the app `warm-up timing:`
+(standby), `startup timing:` (gate to serving, App.__init__'s parts: cad, providers, speech-to-text, hub, …) and
+`stop timing:`.
+
+**What a person sees.** Measured on the first deploys (taskdef 65, 69): about 70 s in all, ~20 s of the old app's
+drain and sync, ~50 s from the takeover to serving, then 5–7 s of Cloudflare error 1033 (no connector) and ~11 s
+of 502s during the drain. Since #264: no 1033 and no 502, a small "Reconnecting… (update in progress)" pill on
+the CAD page for the drain plus the takeover (expected ~35–45 s on 0.25 vCPU; the timing lines above say where it
+goes). The page keeps what it shows; its state stream is opened again (a browser gives up on a 502 / 503 / 530
 answer), it polls meanwhile, and an API call the hub answered "updating" (refused before anything was done) is sent
 again; a write that may have reached the hub is never sent twice. A page loaded during the gap gets a short
 "Reconnecting…" page that reloads itself. The station's link retries 1, 2, 4, 5, 5 … s (the hub's Retry-After
