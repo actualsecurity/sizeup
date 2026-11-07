@@ -9,6 +9,7 @@ real camera count: a replay test over the CARS-Hub's captured camera lists (test
 from __future__ import annotations
 
 import os
+import re
 import time
 
 import pytest
@@ -88,8 +89,14 @@ def test_a_new_leader_reads_the_index_in_the_background_and_appends(tmp_path):
     keys = sorted(new._cams[CAM]["segs"])
     assert keys[-1] == last + 1 and len(keys) == len(set(keys))                     # appended after the last, none twice
     names = os.listdir(tmp_path / "efs" / CAM)
-    assert len(names) == len(keys) and all(n.count("_") == 3 for n in names)       # its size in its name: no stat
-    assert new.playlist(CAM).count(b".ts") == len(keys)
+    assert len(names) == len(keys) and all(re.fullmatch(r"\d+_\d{13}_\d+_\d+(_n)?\.ts", n) for n in names)  # size: no stat
+    # this task's own session is a new stream (#320's mark): a discontinuity, kept through a rescan
+    assert new._file(CAM, last + 1).name.endswith("_n.ts") and new._new_stream(CAM, last + 1)
+    pl = new.playlist(CAM).decode()
+    assert pl.count(".ts") == len(keys) and "#EXT-X-DISCONTINUITY" in pl
+    again = Dvr(r, tmp_path / "efs", clock=clock, log=lambda m: None, free_floor=0, shared=True)
+    again.scan_now()
+    assert again._new_stream(CAM, last + 1) and not again._new_stream(CAM, last)
 
 
 def test_the_old_leader_draining_while_the_new_one_reads(tmp_path, monkeypatch):
@@ -138,9 +145,19 @@ def test_a_restart_on_its_own_disk_is_as_before(tmp_path):
     (tmp_path / "dvr" / CAM / "1300_1.tmp").write_bytes(b"half")
     legacy = tmp_path / "dvr" / CAM / "1200_1791914000000_4000.ts"                 # a name from before the size was in it
     legacy.write_bytes(b"x" * 188)
+    marked = tmp_path / "dvr" / CAM / "1201_1791914004000_4000_n.ts"               # #320's mark, no size
+    marked.write_bytes(b"y" * 376)
+    both = tmp_path / "dvr" / CAM / "1202_1791914008000_4000_564_n.ts"             # size and mark
+    both.write_bytes(b"z" * 564)
     again = Dvr(r, tmp_path / "dvr", clock=clock, log=lambda m: None, free_floor=0)
     assert again.scanned() and not (tmp_path / "dvr" / CAM / "1300_1.tmp").exists()
-    assert again._cams[CAM]["segs"][1200][2] == 188 and again._file(CAM, 1200) == legacy
+    segs = again._cams[CAM]["segs"]
+    assert (segs[1200][2], segs[1201][2], segs[1202][2]) == (188, 376, 564)
+    assert (again._file(CAM, 1200), again._file(CAM, 1201), again._file(CAM, 1202)) == (legacy, marked, both)
+    assert not again._new_stream(CAM, 1200) and again._new_stream(CAM, 1201) and again._new_stream(CAM, 1202)
+    import re as _re
+    old_re = _re.compile(r"(\d{1,15})_(\d{10,16})_(\d{1,9})(_n)?\.ts")             # an older dvr.py (#324) meeting new names
+    assert old_re.fullmatch(both.name) is None and old_re.fullmatch(dvr_mod._name(1, 1791914000, 4, 99)) is None
 
 
 def test_shared_mount_reads_the_mount_table(tmp_path):
@@ -208,3 +225,22 @@ def test_a_segment_both_leaders_wrote_is_kept_once(tmp_path):
     twin.write_bytes(mine.read_bytes())
     new._scan()
     assert mine.exists() and not twin.exists() and new._cams[CAM]["segs"][key] == (t0, dur, size)
+
+
+def test_a_camera_merge_moves_a_folder_only_on_the_leader_and_never_under_a_clip(tmp_path):
+    """#324's follow(): a recording renamed to the id its camera is kept under now, asked through may_move: never by a
+    task that may not write (a draining leader on EFS), never while a clip of either camera is being saved."""
+    lease = {"ok": True}
+    r, d, f, clock = setup(tmp_path, may_write=lambda: lease["ok"])
+    d.pins = {CAM}
+    step(d, f, clock, 2)
+    r.aliases = lambda: {CAM: "NEWX"}
+    lease["ok"] = False
+    assert d.follow() == [] and (tmp_path / "dvr" / CAM).is_dir()
+    lease["ok"] = True
+    d.hold(CAM, True)
+    assert d.follow() == [] and (tmp_path / "dvr" / CAM).is_dir()
+    d.hold(CAM, False)
+    assert d.follow() == [CAM] and (tmp_path / "dvr" / "NEWX").is_dir() and not (tmp_path / "dvr" / CAM).exists()
+    key = min(d._cams["NEWX"]["segs"])
+    assert d._file("NEWX", key).exists()                                            # its file names kept with it

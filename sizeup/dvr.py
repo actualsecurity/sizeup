@@ -13,6 +13,8 @@ What is recorded, on demand only (Dvr.wanted, at most max_cameras at once, in th
             (kept in the CAD store's meta, so a deploy keeps the pins)
   open      a camera someone is watching live, and for linger_s after the last viewer closed
 Only cameras with live video; a snapshot-only camera (the county's) has nothing to copy.
+A camera listed under another id now (#320, Roads.alias: its records merged and another one kept): its Keep and its
+recording go with it (follow), and its old id's paths find it.
 
 The window: window_s (default 2 h) per camera; older segments go. And a size cap over every camera (max_bytes,
 default 6 GB) and a floor of free disk (FREE_FLOOR_BYTES), both made room for before each write: the oldest go
@@ -33,7 +35,8 @@ HTTP (behind Cloudflare Access with the rest of /api/cad; nothing here is public
   GET  /api/cad/cameras/<id>/dvr                   {recording, why: [always | pinned | incident | open], pinned,
                                                     from, to, segments, bytes, window_s, gaps: [[from, to], ...]}
   GET  /api/cad/cameras/<id>/dvr/index.m3u8         the recording as a VOD playlist: EXT-X-PROGRAM-DATE-TIME on every
-                                                    segment (the viewer's timestamp), EXT-X-DISCONTINUITY at a gap
+                                                    segment (the viewer's timestamp), EXT-X-DISCONTINUITY at a gap and
+                                                    at a new stream (another stream, the origin restarted)
   GET  /api/cad/cameras/<id>/dvr/<seq>.ts           a recorded segment
   POST /api/cad/cameras/<id>/dvr/pin {on}           (sizeup/cad/api.py, dispatchers and admins) keep recording / stop
 
@@ -81,7 +84,8 @@ GAP_S = 1.5                          # segments further apart than this: a disco
 SESSION_RETRY_S = 300.0              # a camera whose stream keeps failing: asked at most this seldom
 FAILS_BEFORE_WAIT = 3
 SEQ_RE = re.compile(r"_(\d{1,12})\.ts$")
-FILE_RE = re.compile(r"(\d{1,15})_(\d{10,16})_(\d{1,9})(?:_(\d{1,12}))?\.ts")   # key, start (ms), duration (ms), bytes
+FILE_RE = re.compile(r"(\d{1,15})_(\d{10,16})_(\d{1,9})(?:_(\d{1,12}))?(_n)?\.ts")   # key, start (ms), duration (ms),
+#   bytes (#322: the index read without a stat), _n: a new stream (#320); the older forms without either still read
 CAM_ID = r"[A-Za-z0-9_][A-Za-z0-9_.:-]{0,63}"                      # never "." or "..": a folder name
 CAM_RE = re.compile(CAM_ID)
 DVR_PATH = re.compile(rf"/api/cad/cameras/({CAM_ID})/dvr(?:/(index\.m3u8|\d{{1,15}}\.ts))?")
@@ -175,6 +179,9 @@ class Dvr:
         self.load_pins: Callable[[], object] = list
         self.save_pins: Callable[[dict], None] = lambda pins: None
         self.pins: dict[str, float] = {}          # cid -> when it was pinned
+        # a recording's folder renamed to the id its camera is kept under now (follow, #320): only when this says so
+        # (#322: only the leader, never while a clip of either camera is being saved: _may_move)
+        self.may_move: Callable[[str, str], bool] = lambda old, new: self._may_move(old, new)
         self._lock = threading.RLock()            # _cams, _opened, _wanted, pins
         self._disk = threading.RLock()            # making room and writing: one at a time
         self._cams: dict[str, dict] = {}          # cid -> {segs: {key: (t0, dur, bytes)}, last, end, offset, chunk, ...}
@@ -187,7 +194,6 @@ class Dvr:
         self._busy: set[str] = set()              # cameras with a round under way (pool mode)
         self._next: dict[str, float] = {}         # cid -> when its next round is due
         self.holding: dict[str, int] = {}         # cid -> clips of it being saved (never renamed meanwhile)
-        self.may_move: Callable[[str, str], bool] = self._may_move   # #324's follow() asks before renaming a folder
         if not self.shared:
             self._scan()                          # (shared: in the background, before the first round: start())
             self._scanned.set()
@@ -201,13 +207,13 @@ class Dvr:
 
     def _cam(self, cid: str) -> dict:
         with self._lock:
-            return self._cams.setdefault(cid, {"segs": {}, "last": None, "end": None, "offset": 0})
+            return self._cams.setdefault(cid, {"segs": {}, "last": None, "end": None, "offset": 0, "breaks": set()})
 
-    def _read_dir(self, d: Path) -> dict[int, tuple[float, float, int, str]]:
-        """A camera's folder: key -> (start, duration, bytes, file name). A file that goes meanwhile (another writer
+    def _read_dir(self, d: Path) -> dict[int, tuple[float, float, int, str, bool]]:
+        """A camera's folder: key -> (start, duration, bytes, file name, a new stream). A file that goes meanwhile (another writer
         evicting it) is skipped; a write cut short (a temp file) goes: at once on our own disk, on shared storage only
         once it is STALE_TMP_S old (it may be the old leader's, still being written)."""
-        segs: dict[int, tuple[float, float, int, str]] = {}
+        segs: dict[int, tuple[float, float, int, str, bool]] = {}
         try:
             entries = list(os.scandir(d))
         except OSError:
@@ -223,7 +229,7 @@ class Dvr:
                         if self.may_write():
                             Path(f.path).unlink(missing_ok=True)
                         continue
-                    segs[key] = (int(m.group(2)) / 1000, int(m.group(3)) / 1000, size, f.name)
+                    segs[key] = (int(m.group(2)) / 1000, int(m.group(3)) / 1000, size, f.name, bool(m.group(5)))
                 elif f.name.endswith(".tmp") and (not self.shared or now - f.stat().st_mtime > STALE_TMP_S):
                     if self.may_write():
                         Path(f.path).unlink(missing_ok=True)
@@ -250,17 +256,22 @@ class Dvr:
                 if c is None:
                     if not found:
                         continue
-                    c = self._cams.setdefault(d.name, {"segs": {}, "last": None, "end": None, "offset": 0, "names": {}})
+                    c = self._cams.setdefault(d.name, {"segs": {}, "last": None, "end": None, "offset": 0, "names": {},
+                                                        "breaks": set()})
                 names = c.setdefault("names", {})
+                breaks = c.setdefault("breaks", set())
                 for key in [k for k in known if k not in found]:
                     c["segs"].pop(key, None)          # gone from the disk (evicted by the other writer)
                     names.pop(key, None)
+                    breaks.discard(key)
                 twins = []
-                for key, (t0, dur, size, name) in found.items():
+                for key, (t0, dur, size, name, brk) in found.items():
                     if key not in c["segs"]:
                         c["segs"][key] = (t0, dur, size)
                         names[key] = name
-                    elif name != (names.get(key) or _name(key, *c["segs"][key])):
+                        if brk:
+                            breaks.add(key)
+                    elif name != (names.get(key) or _name(key, *c["segs"][key], key in breaks)):
                         twins.append(name)            # the same segment written by both leaders: one is enough
                 if c["segs"]:
                     last = max(c["segs"])
@@ -278,9 +289,10 @@ class Dvr:
             c = self._cams.get(cid)
             s = c["segs"].get(key) if c else None
             name = c.get("names", {}).get(key) if c else None
+            brk = bool(c) and key in c.get("breaks", ())
         if not s:
             return None
-        return self._dir(cid) / (name or _name(key, s[0], s[1], s[2]))
+        return self._dir(cid) / (name or _name(key, s[0], s[1], s[2], brk))
 
     def _free(self) -> int:
         """Free bytes on the recordings' disk; 0 when it can't be told (fail closed: no write)."""
@@ -306,16 +318,18 @@ class Dvr:
                 _, cid, key = min(every)
                 self._remove(cid, key)
 
-    def _write(self, cid: str, key: int, t0: float, dur: float, body: bytes) -> bool:
+    def _write(self, cid: str, key: int, t0: float, dur: float, body: bytes, brk: bool = False) -> bool:
         """One segment onto the disk, whole or not at all (a temp file renamed; gone on any error), after making room
-        for it. False when there is no room: recording stops (self.stopped) until there is."""
+        for it. False when there is no room: recording stops (self.stopped) until there is. brk: the first of a new
+        stream (another stream, a new session, the origin's counter started over): a discontinuity in the playlist,
+        kept in its file name ("_n") so a restart knows it too."""
         with self._disk:
             if not self._room(len(body)):
                 self._stopped(f"Disk full: under {self.free_floor / 1024 ** 3:.1f} GB free"
                               if self._free() - len(body) < self.free_floor else "Over the recording cap")
                 return False
             d = self._dir(cid)
-            f = d / _name(key, t0, dur, len(body))
+            f = d / _name(key, t0, dur, len(body), brk)
             tmp = d / f".{f.stem}.{os.getpid()}.tmp" if self.shared else f.with_suffix(".tmp")
             try:
                 d.mkdir(parents=True, exist_ok=True)
@@ -333,6 +347,8 @@ class Dvr:
             with self._lock:
                 c["segs"][key] = (t0, dur, len(body))
                 c.setdefault("names", {}).pop(key, None)
+                if brk:
+                    c.setdefault("breaks", set()).add(key)
                 if c["last"] is None or key > c["last"]:
                     c["last"], c["end"] = key, t0 + dur
         return True
@@ -350,6 +366,7 @@ class Dvr:
             s = c["segs"].pop(key, None) if c else None
             if c:
                 c.get("names", {}).pop(key, None)
+                c.get("breaks", set()).discard(key)
         if f is not None:
             f.unlink(missing_ok=True)
         return s[2] if s else 0
@@ -381,6 +398,11 @@ class Dvr:
 
     # -- what to record ----------------------------------------------------------------------------------------------
 
+    def _alias(self, cid: str) -> str:
+        """The id the camera is listed under now (Roads.alias, #320: its records merged, another one kept)."""
+        fn = getattr(self.roads, "alias", None)
+        return fn(cid) if fn is not None else cid
+
     def _pins_now(self) -> dict[str, float]:
         now = self.clock()
         with self._lock:
@@ -389,13 +411,60 @@ class Dvr:
             gone = [cid for cid, at in self.pins.items() if now - at > PIN_S]
             for cid in gone:
                 self.pins.pop(cid)
+            moved = {cid: self._alias(cid) for cid in self.pins}
+            moved = {a: b for a, b in moved.items() if a != b}
+            for a, b in moved.items():                    # a Keep follows its camera to the id kept for it (#320)
+                at = self.pins.pop(a)
+                self.pins[b] = max(at, self.pins.get(b, at))
             pins = dict(self.pins)
         if gone:
             self.log(f"dvr: Keep ran out for {', '.join(sorted(gone))}")
+        if moved:
+            self.log(f"dvr: Keep moved with its camera: {', '.join(f'{a} -> {b}' for a, b in sorted(moved.items()))}")
+        if gone or moved:
             self.save_pins(pins)
         return pins
 
+    def follow(self) -> list[str]:
+        """A camera's records merged and the id kept for it changed (#320): its recording goes with it, so the viewer
+        of the id kept now finds the window recorded so far. Moved only to an id with nothing recorded yet (else the
+        older stays under its own id, still served there), never while a segment is written (the disk lock: _write
+        holds it), never while either camera has a round under way (_busy), and only when may_move(old, new) says so
+        (whatever else reads the segments' paths: a clip being cut or uploaded, a standby that mustn't write). The ids
+        moved."""
+        fn = getattr(self.roads, "aliases", None)
+        moved = []
+        for old, new in (fn() if fn is not None else {}).items():
+            if not (CAM_RE.fullmatch(old) and CAM_RE.fullmatch(new)) or old == new:
+                continue
+            with self._disk, self._lock:
+                c = self._cams.get(old)
+                if not c or not c["segs"] or (self._cams.get(new) or {}).get("segs") or old in self._busy or new in self._busy:
+                    continue
+                if not self.may_move(old, new):
+                    continue
+                src, dst = self._dir(old), self._dir(new)
+                try:
+                    if dst.exists():
+                        dst.rmdir()                       # (an empty folder only: anything in it stays and the move waits)
+                    src.rename(dst)
+                except OSError as e:
+                    self.log(f"dvr: {old}'s recording not moved to {new} ({type(e).__name__})")
+                    continue
+                for k in ("chunk", "hstate", "retry_at", "fails"):
+                    c.pop(k, None)                        # another stream, maybe: a session of its own, keys carried on
+                c["restarted"] = True                     # (and a discontinuity before its first)
+                self._cams[new] = c
+                self._cams.pop(old)
+                for d in (self._opened, self._next):
+                    if old in d:
+                        d[new] = max(d.pop(old), d.get(new, 0))
+            moved.append(old)
+            self.log(f"dvr: {old}'s recording moved to {new} (the same camera, now listed as {new})")
+        return moved
+
     def pin(self, cid: str, on: bool) -> dict:
+        cid = self._alias(cid)
         cam = self.roads.camera(cid)
         if cam is None or not CAM_RE.fullmatch(cid):
             raise KeyError(cid)
@@ -454,6 +523,7 @@ class Dvr:
                 self._opened.pop(cid)
             opened = sorted(self._opened.items(), key=lambda x: -x[1])
         pins = self._pins_now()
+        self.follow()
         live = [c for c in self.roads.merged("cameras") if c.get("video") and not c.get("off") and CAM_RE.fullmatch(c["id"])]
         video = {c["id"] for c in live}
         why: dict[str, list[str]] = {}
@@ -468,7 +538,7 @@ class Dvr:
             if reason not in why[cid]:
                 why[cid].append(reason)
         for cid in self.always:
-            add(cid, "always")
+            add(self._alias(cid), "always")
         for cid, _ in sorted(self._incident_cams().items(), key=lambda x: x[1]):
             add(cid, "incident")
         for cid in self.area_cameras(live):
@@ -582,6 +652,7 @@ class Dvr:
             offset = last + 1 - seqs[0]
             with self._lock:
                 c["offset"] = offset
+            c["restarted"] = True                              # a discontinuity before the next one kept
             c.pop("hstate", None)
             self.log(f"dvr: {cid}: the stream's sequence started over (now {seqs[-1]}); carried on from {last}")
         # each one's end: now, less the durations of those after it (a segment is listed once it is whole)
@@ -614,7 +685,12 @@ class Dvr:
                 body = self._fetch_own(cid, c, base, name, seqs[k])
             if body is None:
                 continue
-            if self._write(cid, key, t0, dur, body):
+            # the first of a new stream: another stream (the camera kept under another record, #320), the origin's counter
+            # started over, a jump in the sequence, or nothing known of the one before (a restart, a recording moved)
+            brk = last is not None and (c.get("restarted") or c.get("src") != base or key != last + 1)
+            if self._write(cid, key, t0, dur, body, brk):
+                c["src"] = base
+                c.pop("restarted", None)
                 n += 1
         return n
 
@@ -761,6 +837,7 @@ class Dvr:
         with self._lock:
             c = self._cams.get(cid)
             segs = sorted(c["segs"].items()) if c else []
+            breaks = set(c.get("breaks", ())) if c else set()
         if not segs:
             return None
         target = max(1, int(max(s[1] for _, s in segs) + 0.999))
@@ -768,7 +845,7 @@ class Dvr:
                f"#EXT-X-MEDIA-SEQUENCE:{segs[0][0]}"]
         prev = None
         for key, (t0, dur, _) in segs:
-            if prev is not None and abs(t0 - prev) > GAP_S:
+            if prev is not None and (abs(t0 - prev) > GAP_S or key in breaks):
                 out.append("#EXT-X-DISCONTINUITY")
             pdt = datetime.fromtimestamp(t0, timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
             out += [f"#EXT-X-PROGRAM-DATE-TIME:{pdt}", f"#EXTINF:{dur:.3f},", f"{key}.ts"]
@@ -778,9 +855,8 @@ class Dvr:
 
     def alias(self, cid: str) -> str:
         """The id the camera is listed under now (Roads.alias when the roads have it, #320/#324), else cid."""
-        fn = getattr(self.roads, "alias", None)
         try:
-            return fn(cid) if callable(fn) else cid
+            return self._alias(cid)
         except Exception:  # noqa: BLE001 - an id we can't map stays as it is
             return cid
 
@@ -833,8 +909,10 @@ class Dvr:
         return out
 
     def _new_stream(self, cid: str, key: int) -> bool:
-        """A segment that starts a new stream (a discontinuity even with no gap in time): #324 marks these; none here."""
-        return False
+        """A segment that starts a new stream (a discontinuity even with no gap in time: its "_n" mark, #320)."""
+        with self._lock:
+            c = self._cams.get(cid)
+            return bool(c) and key in c.get("breaks", ())
 
     def handles(self, path: str) -> bool:
         return bool(DVR_PATH.fullmatch(path))
@@ -847,6 +925,10 @@ class Dvr:
         hdr = {"Cache-Control": "no-store"}
         with self._lock:
             known = cid in self._cams
+        if self.roads.camera(cid) is None and not known:
+            cid = self._alias(cid)                        # a merged-away id: the camera kept for it (#320)
+            with self._lock:
+                known = cid in self._cams
         if self.roads.camera(cid) is None and not known:
             return 404, b'{"error":"no such camera"}', JSON, hdr
         if not what:
@@ -866,6 +948,7 @@ class Dvr:
         return 200, body, "video/MP2T", {"Cache-Control": "private, max-age=3600"}
 
 
-def _name(key: int, t0: float, dur: float, size: int) -> str:
-    """A segment's file name: its key, start and duration (ms) and size, so the index is read without a stat."""
-    return f"{key}_{int(t0 * 1000)}_{int(dur * 1000)}_{int(size)}.ts"
+def _name(key: int, t0: float, dur: float, size: int, brk: bool = False) -> str:
+    """A segment's file name: its key, start and duration (ms) and size (so the index is read without a stat), and
+    "_n" when it starts a new stream (#320)."""
+    return f"{key}_{int(t0 * 1000)}_{int(dur * 1000)}_{int(size)}{'_n' if brk else ''}.ts"

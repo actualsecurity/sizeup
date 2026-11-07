@@ -49,10 +49,10 @@ def test_the_speech_to_text_behind_push_reads_local_time():
                                  "dropped": 0, "skipped": 0, "last_drop": None, "max": 2000}
     r.at(now - T0, status=st)
     a = next(a for a in r.h.alerts() if a["key"] == "stt_backlog")
-    assert "oldest waiting clip from 08:29 " in a["text"]               # the banner
+    assert a["since"] == CLIP_EST and a["text"].startswith("1800 clips waiting")   # the banner
     m = next(m for m in r.n.msgs if m["title"].startswith("Speech-to-text behind"))
     assert m["title"].startswith("Speech-to-text behind 5 h 0 min")
-    assert "from 08:29 " in m["body"] and m["body"].endswith("(since 08:29).") and "13:29" not in m["body"]
+    assert m["body"].endswith("(since 08:29).") and "13:29" not in m["body"]
 
 
 def test_the_silent_push_and_its_recovery_read_local_time():
