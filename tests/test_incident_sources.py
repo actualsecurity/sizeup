@@ -661,22 +661,31 @@ def test_a_factory_that_raises_systemexit_or_hangs_never_stops_the_station(tmp_p
 
 
 def test_a_hub_with_adapters_configured_loads_nothing(tmp_path, monkeypatch):
-    """The hub never discovers, imports or runs an adapter, even with SIZEUP_INCIDENT_SOURCES set."""
+    """The hub never loads, imports or runs an adapter, even with one installed and SIZEUP_INCIDENT_SOURCES set. Reading
+    the entry points' metadata is allowed (#305's hub_guard logs an installed adapter as refused): no .load(), no import."""
     from sizeup.app import make_app
     from tests.test_cloud import hub_cfg
     marker = tmp_path / "imported"
     pkg = tmp_path / "adapters3"
     pkg.mkdir()
     (pkg / "spy.py").write_text(f"open({str(marker)!r}, 'w').write('x')\ndef make(ctx):\n    return []\n")
-    looked = []
-    monkeypatch.setattr("importlib.metadata.entry_points", lambda group: looked.append(group) or [])
+    loaded = []
+
+    class Installed:                                       # an adapter package installed on the hub by mistake
+        name, group, value = "spy", "sizeup.incident_sources", "spy:make"
+
+        def load(self):
+            loaded.append(self.name)
+            raise AssertionError("an adapter's entry point was loaded on the hub")
+    monkeypatch.setattr("importlib.metadata.entry_points",
+                        lambda *a, group=None, **kw: [Installed()] if group in (None, "sizeup.incident_sources") else [])
     monkeypatch.setenv("SIZEUP_INCIDENT_SOURCES", "spy:make")
     monkeypatch.setenv("SIZEUP_INCIDENT_SOURCES_PATH", str(pkg))
     app = make_app(hub_cfg(tmp_path))
     try:
         app.start_sources()
         time.sleep(0.3)
-        assert app.sources_runner is None and not marker.exists() and looked == []
+        assert app.sources_runner is None and not marker.exists() and loaded == []
         with pytest.raises(HubRefused):
             require_station(app.cfg.cloud_role)
     finally:
