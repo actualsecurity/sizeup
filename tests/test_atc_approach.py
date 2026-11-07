@@ -332,7 +332,7 @@ def plane(hex_, flight, phase, dist, **kw):
 FAR_IN = plane("a00001", "JBU1234", "inbound", 30.0)          # 30 NM out, descending toward HPN: Approach's
 CLOSE = plane("a00002", "DAL45", "arriving", 4.0)
 ON_FIELD = plane("a00003", "EJA521", "ground", 0.4)
-FAR_LOW = plane("a00004", "RPA4546", "low", 30.0)
+FAR_LOW = plane("a00004", "RPA4712", "low", 30.0)
 
 
 def test_the_facility_and_its_aircraft():

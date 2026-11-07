@@ -404,16 +404,16 @@ def test_the_station_sends_only_what_changed_nearest_first_and_only_what_the_hub
     assert all(len(str(r[1]).split(".")[1]) <= 5 for r in body["ac"])  # ~1 m
     d.sent_ok(body, snap, 100.0)
     assert d.build(snap, 101.0, True) == (None, False)                # nothing changed
-    moved = readsb_snap(changes={"ab282b": {"lat": 41.0, "seen_pos": 0.0}})
+    moved = readsb_snap(changes={"abedb1": {"lat": 41.0, "seen_pos": 0.0}})
     body, _ = d.build(moved, 102.0, True)
-    assert [r[0] for r in body["ac"]] == ["ab282b"] and body["gone"] == [] and not body["full"]
+    assert [r[0] for r in body["ac"]] == ["abedb1"] and body["gone"] == [] and not body["full"]
     d.sent_ok(body, moved, 102.0)
     body, _ = d.build(moved, 100.0 + REFRESH_S, True)                 # still heard, unchanged: again every 5 s
-    assert len(body["ac"]) == 9 and "ab282b" not in [r[0] for r in body["ac"]]
+    assert len(body["ac"]) == 9 and "abedb1" not in [r[0] for r in body["ac"]]
     d.sent_ok(body, moved, 100.0 + REFRESH_S)
-    fewer = Snapshot(moved.now, tuple(p for p in moved.planes if p.hex != "a90a5f"))
+    fewer = Snapshot(moved.now, tuple(p for p in moved.planes if p.hex != "a9096a"))
     body, _ = d.build(fewer, 106.0, True)
-    assert body["gone"] == ["a90a5f"] and body["ac"] == []
+    assert body["gone"] == ["a9096a"] and body["ac"] == []
     capped = Deltas(cap=3)
     body, _ = capped.build(snap, 100.0, True)
     assert len(body["ac"]) == 3 and capped.dropped == 7
@@ -426,9 +426,9 @@ def test_an_emergency_squawk_goes_at_once_and_the_rest_waits_for_the_hubs_interv
     d.sent_ok(body, snap, 100.0)
     moved = readsb_snap(shift=0.001)
     assert d.build(moved, 101.0, False) == (None, False)              # changed, not due: waits
-    sq = readsb_snap(shift=0.001, changes={"a35692": {"squawk": "7700"}})
+    sq = readsb_snap(shift=0.001, changes={"a48b1c": {"squawk": "7700"}})
     body, urgent = d.build(sq, 101.0, False)
-    assert urgent and body is not None and "a35692" in [r[0] for r in body["ac"]]
+    assert urgent and body is not None and "a48b1c" in [r[0] for r in body["ac"]]
 
 
 class FakeClient:
@@ -515,13 +515,13 @@ def test_the_wire_record_round_trips_and_nonsense_is_refused():
 
 def test_the_receiver_wins_while_its_position_is_fresh_and_an_api_takes_a_plane_we_lost():
     api = parse_snapshot(json.loads(FI3))
-    ab = next(p for p in api.planes if p.hex == "ab282b")
+    ab = next(p for p in api.planes if p.hex == "abedb1")
     rx_fresh = Snapshot(api.now, (replace(ab, seen_pos=3.0, lat=ab.lat + 0.001, feed=""),))   # older than adsb.fi's, < 10 s
     m = {p.hex: p for p in combine([("receiver", rx_fresh), ("adsbfi", api)]).planes}
-    assert m["ab282b"].feed == "receiver" and m["ab282b"].lat == pytest.approx(ab.lat + 0.001)
+    assert m["abedb1"].feed == "receiver" and m["abedb1"].lat == pytest.approx(ab.lat + 0.001)
     rx_lost = Snapshot(api.now, (replace(ab, seen_pos=A.RECEIVER_LOST_S + 2, feed=""),))
     m = {p.hex: p for p in combine([("receiver", rx_lost), ("adsbfi", api)]).planes}
-    assert m["ab282b"].feed == "adsbfi"                               # we lost it: adsb.fi has it fresh
+    assert m["abedb1"].feed == "adsbfi"                               # we lost it: adsb.fi has it fresh
     only = Snapshot(api.now, (replace(ab, hex="a0beef", seen_pos=25.0),))
     assert {p.hex: p.feed for p in combine([("receiver", only), ("adsbfi", api)]).planes}["a0beef"] == "receiver"
 
@@ -543,14 +543,14 @@ def test_the_hub_takes_the_stations_receiver_as_its_receiver_feed_and_lets_go_wh
     ly = hub_layer(clock, Feeds(lol=(LOL3, lol_at(T3 + 11.5)), fi=(FI3, 503)))
     assert isinstance(ly.feeds[0], StationFeed) and ly.interval(ly.feeds[0], True) is None   # nothing yet: not read
     assert ly.receiver_status() is None and "receiver" not in [f["key"] for f in ly.feeds_public([])]
-    heard = [p for p in readsb_snap(now=clock.t).planes if p.hex in ("ab282b", "a35692")]
+    heard = [p for p in readsb_snap(now=clock.t).planes if p.hex in ("abedb1", "a48b1c")]
     r = ly.station_ingest(post_body([replace(p, seen_pos=0.4) for p in heard]), 900)
     assert r == {"ok": True, "full": False, "every": A.FORWARD_SLOW_S}
     ly.asked = clock.t
     assert ly.station_ingest(post_body([], seq=1, full=False), 100)["every"] == A.FORWARD_FAST_S   # someone looks
     ly.refresh()
     src = {a["hex"]: a["src"] for a in ly.public()["aircraft"]}
-    assert src["ab282b"] == "receiver" and src["a90a5f"] in ("adsblol", "adsbfi") and ly.receiver_healthy()
+    assert src["abedb1"] == "receiver" and src["a9096a"] in ("adsblol", "adsbfi") and ly.receiver_healthy()
     rx = ly.public()["receiver"]
     assert rx["station"] and rx["forwarding"]["posts"] == 2 and rx["forwarding"]["aircraft"] == 2
     assert ly.station_ingest(post_body([], seq=5, full=False), 10)["full"] is True   # a post missed: ask for all
@@ -600,7 +600,7 @@ def test_the_hub_endpoint_takes_gzip_with_the_station_token_only(tmp_path):
             HubClient(hub.url, TOKEN).request("POST", "/api/station/aircraft", {"ac": "nope"})
         assert e.value.status == 400
         state = json.dumps(hub.app.cad.state())
-        assert "ab282b" not in state and "a35692" not in state         # never in the state push (#146)
+        assert "abedb1" not in state and "a48b1c" not in state         # never in the state push (#146)
     finally:
         hub.close()
 
@@ -613,28 +613,28 @@ def lol_with(recs, now_ms) -> bytes:
 
 def test_a_plane_only_our_receiver_hears_keeps_its_details_from_the_apis_and_never_a_persons_name():
     clock = Clock(T3 + 0.5)
-    company = {"hex": "a4d227", "flight": "N41DW", "r": "N41DW", "t": "SR22", "ownOp": "EXAMPLE FLYING LLC", "year": "2007",
+    company = {"hex": "a5bf1b", "flight": "N47DQ", "r": "N47DQ", "t": "SR22", "ownOp": "EXAMPLE FLYING LLC", "year": "2007",
                "lat": 41.04, "lon": -73.686, "alt_baro": 1500, "gs": 90, "track": 330, "seen_pos": 0.1, "seen": 0.1}
-    person = {"hex": "a19e97", "flight": "EJA203", "r": "N203QS", "t": "CL35", "ownOp": "A PRIVATE PERSON",
+    person = {"hex": "a2002f", "flight": "EJA228", "r": "N228QZ", "t": "CL35", "ownOp": "A PRIVATE PERSON",
               "lat": 41.05, "lon": -73.69, "alt_baro": 2500, "gs": 140, "track": 330, "seen_pos": 0.1, "seen": 0.1}
     fetch = Feeds(lol=(lol_with([company, person], T3 * 1000), lol_with([], (T3 + 30) * 1000)), fi=(404,))
     ly = hub_layer(clock, fetch)
     ly.registry.refresh()
     ly.refresh()                                                      # adsb.lol has both: their details are kept
-    assert ly.details["a4d227"]["reg"] == "N41DW" and ly.details["a4d227"]["feed"] == "adsblol"
+    assert ly.details["a5bf1b"]["reg"] == "N47DQ" and ly.details["a5bf1b"]["feed"] == "adsblol"
     clock.t += 30
     rx = [Plane(hex=h, flight=f, lat=lat, lon=-73.686, alt_baro=1400, gs=90.0, track=330.0, seen=0.2, seen_pos=0.2,
-                source="adsb", band="1090") for h, f, lat in (("a4d227", "N41DW", 41.042), ("a19e97", "EJA203", 41.052))]
+                source="adsb", band="1090") for h, f, lat in (("a5bf1b", "N47DQ", 41.042), ("a2002f", "EJA228", 41.052))]
     ly.station_ingest(post_body(rx), 500)
     for f in ly.feeds:
         f.st["rest_until"] = f.st["next"] = 0
     ly.refresh()                                                      # adsb.lol has neither now; only we hear them
     v = {a["hex"]: a for a in ly.public()["aircraft"]}
-    a = v["a4d227"]
-    assert a["src"] == "receiver" and a["reg"] == "N41DW" and a["type"] == "SR22" and a["det"] == "adsblol"
+    a = v["a5bf1b"]
+    assert a["src"] == "receiver" and a["reg"] == "N47DQ" and a["type"] == "SR22" and a["det"] == "adsblol"
     assert a["op"] == "Example Flying LLC" and a["op_src"] == "adsblol"   # the FAA lists an LLC: a company
-    b = v["a19e97"]
-    assert b["src"] == "receiver" and b["reg"] == "N203QS" and b["op_src"] in ("airline", "")   # its callsign's airline, if any
+    b = v["a2002f"]
+    assert b["src"] == "receiver" and b["reg"] == "N228QZ" and b["op_src"] in ("airline", "")   # its callsign's airline, if any
     assert "PRIVATE PERSON" not in json.dumps(ly.public()).upper()     # co-owned by people: never shown
     js = (ROOT / "sizeup" / "web" / "static" / "aircraft.js").read_text()
     assert "SRC_NAME[a.src]" in js and "Position: ${POS[a.pos]" in js and "a.det" in js and "a.op" in js
@@ -642,8 +642,8 @@ def test_a_plane_only_our_receiver_hears_keeps_its_details_from_the_apis_and_nev
 
 # ---- the squawk pre-alert, beside the alarm ---------------------------------------------------------------------------------
 
-def squawk(hex_="a4d227", sq="7700", lat=41.0400, lon=-73.6860, alt=900, feed="receiver", **kw) -> Snapshot:
-    return Snapshot(0, (Plane(hex=hex_, flight="N41DW", reg="N41DW", type="SR22", alt_baro=alt, gs=80.0, track=330.0,
+def squawk(hex_="a5bf1b", sq="7700", lat=41.0400, lon=-73.6860, alt=900, feed="receiver", **kw) -> Snapshot:
+    return Snapshot(0, (Plane(hex=hex_, flight="N47DQ", reg="N47DQ", type="SR22", alt_baro=alt, gs=80.0, track=330.0,
                               baro_rate=-500.0, squawk=sq, lat=lat, lon=lon, seen=0.2, seen_pos=0.2, category="A1",
                               source="adsb", band="1090" if feed == "receiver" else "", feed=feed, **kw),))
 
@@ -698,16 +698,16 @@ def test_a_squawk_puts_one_prealert_in_the_queue_beside_its_alarm_with_everythin
     (p,), (al,) = w.items(), w.cad.alarms.history()
     d = p["data"]
     assert p["status"] == "open" and p["source"] == "adsb" and p["kind"] == "squawk" and d["alarm_id"] == al["id"]
-    assert p["title"] == "AIRCRAFT EMERGENCY · N41DW · squawk 7700 (emergency)" and p["detail"].startswith("ADS-B: our receiver")
+    assert p["title"] == "AIRCRAFT EMERGENCY · N47DQ · squawk 7700 (emergency)" and p["detail"].startswith("ADS-B: our receiver")
     lines = dict(d["lines"])
-    assert lines["Aircraft"] == "N41DW · SR22"
+    assert lines["Aircraft"] == "N47DQ · SR22"
     assert lines["Emergency"].startswith("squawk 7700 (emergency)")
     assert lines["Altitude"] == "900 ft ↓500 fpm · 80 kt"
     assert "nm SE of HPN" in lines["Position"] and "from the runway" in lines["Position"]
     assert lines["Phase"].startswith("arriving HPN")
-    assert lines["Source"].startswith("our receiver (station)") and lines["Time"] and lines["ICAO address"] == "A4D227"
+    assert lines["Source"].startswith("our receiver (station)") and lines["Time"] and lines["ICAO address"] == "A5BF1B"
     assert "private owner" in lines["Operator"]                       # no operator known: and never a person's name
-    assert d["aircraft"][0]["hex"] == "a4d227" and d["aircraft"][0]["alt"] == 900
+    assert d["aircraft"][0]["hex"] == "a5bf1b" and d["aircraft"][0]["alt"] == 900
     assert w.pushed.sent == []                                         # the alarm pushed already: not twice
     st = w.cad.state()["airport_alerts"]
     assert [x["id"] for x in st["open"]] == [p["id"]]
@@ -772,7 +772,7 @@ def test_an_airport_event_takes_it_and_a_dispatcher_accepts_or_dismisses_it(tmp_
     assert out["status"] == "dismissed" and out["operator"] == "Lt. Ruiz"
     acc = w.cad.airport_alert(p["id"], "accept", {"operator": "Lt. Ruiz"})
     assert acc["status"] == "accepted" and acc["incident"]["status"] == "pending"
-    assert "Emergency: squawk 7700" in acc["incident"]["remarks"] and "ICAO address: A4D227" in acc["incident"]["remarks"]
+    assert "Emergency: squawk 7700" in acc["incident"]["remarks"] and "ICAO address: A5BF1B" in acc["incident"]["remarks"]
     csv = w.cad.export("airport-alerts.csv").decode("utf-8-sig")
     assert "landed safely" in csv and "AIRCRAFT EMERGENCY" in csv and "accepted" in csv
 
