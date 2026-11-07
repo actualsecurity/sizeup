@@ -240,6 +240,14 @@ class Config:
     roads_county: bool = True         # Westchester County DPW's cameras (a public ArcGIS layer, no key) (#99)
     roads_stream_max: int = 8         # live camera streams open at once, hub-wide (sizeup/roads.py STREAM_MAX, #125)
     roads_wall_streams: int = 0       # the camera wall's live tiles at once per page; 0: every camera in our area that streams
+    roads_dvr: bool = True            # camera DVR (#277, sizeup/dvr.py): segments kept on the hub's disk, on demand
+    roads_dvr_window_s: float = 7200.0
+    roads_dvr_max_bytes: int = 6 * 1024 ** 3
+    roads_dvr_near_m: float = 1000.0
+    roads_dvr_linger_s: float = 1800.0
+    roads_dvr_max_cameras: int = 12
+    roads_dvr_always: tuple[str, ...] = ()
+    roads_dvr_dir: str = ""
     # [roadwork] (sizeup/roadprojects.py, #185): road projects & closures for the maps and the incident view: the
     # Thruway's and 511NY's roadwork (through [roads]), the capital programs (Thruway, NYSDOT, CTDOT), the villages'
     # road notices; 511NY's WZDx (the CARS API, with [roads]' username and password) and any other public WZDx feed.
@@ -626,7 +634,8 @@ def _roads(data: dict) -> dict:
                 raise ConfigError(f"roads.{gone}: no longer used ({why})")
     rd = _take(raw, "roads", {"enabled", "ny511", "bbox", "cameras_every_min", "events_every_s", "signs_every_min",
                               "events_url", "signs_url", "ny511_hub", "carshub_imagery", "thruway", "county",
-                              "stream_max", "wall_streams"})
+                              "stream_max", "wall_streams", "dvr", "dvr_window_min", "dvr_max_gb", "dvr_near_m",
+                              "dvr_linger_min", "dvr_max_cameras", "dvr_always", "dvr_dir"})
     flags = {k: rd.get(k, d) for k, d in (("enabled", True), ("ny511", True), ("thruway", True), ("county", True),
                                           ("carshub_imagery", True))}
     if not all(isinstance(x, bool) for x in flags.values()):
@@ -655,6 +664,25 @@ def _roads(data: dict) -> dict:
         raise ConfigError("roads.stream_max: live camera streams at once through the hub, 1 to 64")
     if not (isinstance(wall, int) and not isinstance(wall, bool) and 0 <= wall <= 64):
         raise ConfigError("roads.wall_streams: the camera wall's live tiles per page, 0 (every camera in our area that streams) to 64")
+    dvr = rd.get("dvr", True)
+    if not isinstance(dvr, bool):
+        raise ConfigError("roads.dvr: true or false")
+    def num(key, default, lo, hi, what):
+        v = rd.get(key, default)
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not lo <= v <= hi:
+            raise ConfigError(f"roads.{key}: {what}, {lo} to {hi}")
+        return v
+    dvr_window = num("dvr_window_min", 120, 10, 720, "minutes kept per camera") * 60.0
+    dvr_gb = num("dvr_max_gb", 6, 0.5, 200, "gigabytes for every camera's recording together")
+    dvr_near = num("dvr_near_m", 1000, 0, 5000, "metres from an open event")
+    dvr_linger = num("dvr_linger_min", 30, 0, 240, "minutes an opened camera records on") * 60.0
+    dvr_max = num("dvr_max_cameras", 12, 1, 40, "cameras recorded at once")
+    always = rd.get("dvr_always", [])
+    if not (isinstance(always, list) and all(isinstance(x, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,64}", x) for x in always)):
+        raise ConfigError("roads.dvr_always: a list of camera ids")
+    dvr_dir = rd.get("dvr_dir", "")
+    if not isinstance(dvr_dir, str):
+        raise ConfigError("roads.dvr_dir: a folder (\"\" = the state folder's dvr/)")
     urls = {}
     for k in ("events_url", "signs_url", "ny511_hub"):
         u = str(rd.get(k, "")).strip()
@@ -668,7 +696,10 @@ def _roads(data: dict) -> dict:
     return dict(roads_enabled=flags["enabled"], roads_ny511=flags["ny511"], roads_511ny_user=user, roads_511ny_pass=password,
                 roads_bbox=(w, s, e, n), roads_cameras_s=cams, roads_events_s=events, roads_signs_s=signs,
                 roads_thruway=flags["thruway"], roads_county=flags["county"], roads_carshub_imagery=flags["carshub_imagery"],
-                roads_stream_max=smax, roads_wall_streams=wall, **urls)
+                roads_stream_max=smax, roads_wall_streams=wall, roads_dvr=dvr, roads_dvr_window_s=float(dvr_window),
+                roads_dvr_max_bytes=int(dvr_gb * 1024 ** 3), roads_dvr_near_m=float(dvr_near),
+                roads_dvr_linger_s=float(dvr_linger), roads_dvr_max_cameras=int(dvr_max), roads_dvr_always=tuple(always),
+                roads_dvr_dir=dvr_dir.strip(), **urls)
 
 
 def _roadwork(data: dict) -> dict:
