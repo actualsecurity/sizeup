@@ -1179,7 +1179,7 @@ class Updater:
 
     # -- the work -----------------------------------------------------------------------------------------------
 
-    def locked(self, fn: Callable[[], int]) -> int:
+    def locked(self, fn: Callable[[], int], busy_rc: int = 0) -> int:
         if os.environ.get("SIZEUP_UPDATE_LOCKED") == "1":     # (run by an installer that holds it)
             return fn()
         self.p.work.mkdir(parents=True, exist_ok=True)
@@ -1187,8 +1187,8 @@ class Updater:
             try:
                 fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except OSError:
-                self.note("auto-update: another run is in progress")
-                return 0
+                self.note("auto-update: another run is in progress" + (": try again when it's done" if busy_rc else ""))
+                return busy_rc
             return fn()
 
     def run(self) -> int:
@@ -1742,9 +1742,10 @@ def adapter_remove(u: Updater, yes: bool = False, ask: Callable[[str], str] = in
 def adapter_cli(u: Updater, a) -> int:
     sub = a.sub[0] if a.sub else "status"
     if sub == "setup":
-        return u.locked(lambda: adapter_setup(u, a.repo, a.ref, a.env, check=not a.no_check and sys.stdin.isatty()))
+        check = not a.no_check and sys.stdin.isatty()
+        return u.locked(lambda: adapter_setup(u, a.repo, a.ref, a.env, check=check), busy_rc=1)
     if sub == "remove":
-        return u.locked(lambda: adapter_remove(u, yes=a.yes))
+        return u.locked(lambda: adapter_remove(u, yes=a.yes), busy_rc=1)
     if sub == "stage" and len(a.sub) == 2:
         # install-linux.sh (an update by hand): release NAME with the adapter set up; prints the release to switch to
         def stage() -> int:
@@ -1765,7 +1766,7 @@ def adapter_cli(u: Updater, a) -> int:
             u.save(st)
             print(name)
             return 0
-        return u.locked(stage)
+        return u.locked(stage, busy_rc=1)
     if sub == "status":
         r = u.report()
         ad = _dict(r.get("adapter"))

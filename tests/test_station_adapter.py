@@ -577,3 +577,15 @@ def test_doctor_fails_a_key_others_can_read(station):
     assert not any("want root 600" in ln for ln in au.doctor_lines(u.report()))
     u.p.adapter_key.chmod(0o644)
     assert any(ln.startswith("  FAIL  adapter: ") and "want root 600" in ln for ln in au.doctor_lines(u.report()))
+
+
+def test_setup_says_so_while_an_update_holds_the_lock(station, monkeypatch):
+    import fcntl
+    from types import SimpleNamespace
+    repo, u, ad = station
+    monkeypatch.delenv("SIZEUP_UPDATE_LOCKED", raising=False)
+    u.p.work.mkdir(parents=True, exist_ok=True)
+    with (u.p.work / "lock").open("w") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        a = SimpleNamespace(sub=["setup"], repo=str(ad.bare), ref="main", env="", no_check=True, yes=False)
+        assert au.adapter_cli(u, a) == 1 and not u.p.adapter_key.exists()

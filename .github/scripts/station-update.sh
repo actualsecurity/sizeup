@@ -139,7 +139,7 @@ AD=$WORK/adapter
 ADB=$WORK/adapter.git
 release() { basename "$(readlink -f /opt/sizeup/current)"; }
 release_is() { [ "$(release)" = "$1" ]; }
-idle() { ! systemctl is-active --quiet sizeup-update.service; }
+idle() { case "$(systemctl show -p ActiveState --value sizeup-update.service)" in inactive|failed) ;; *) return 1 ;; esac; }   # (a oneshot running is "activating")
 in_venv() { find "$1/venv" -path '*site-packages/ci_feed' -print -quit; }
 adapter_commit() { python3 -c 'import json; print(json.load(open("/opt/sizeup/current/ADAPTER.json"))["commit"])'; }
 gita() { git -C "$AD" -c user.name=ci -c user.email=ci@example.invalid "$@"; }
@@ -173,6 +173,7 @@ test "$(stat -c '%U %a' /etc/sizeup/station.env)" = "root 600"
 grep -q '^CI_FEED_USER="ci-user"$' /etc/sizeup/station.env
 python3 -c 'import tomllib; a = tomllib.load(open("/etc/sizeup/config.toml", "rb"))["adapter"]; assert a["ref"] == "main", a'
 wait_for 600 release_is "$A-a${A1:0:12}"
+wait_for 300 idle                                          # (its /healthz check and prune, then done)
 wait_for 120 is_build "$A"
 test "$(adapter_commit)" = "$A1"
 /opt/sizeup/current/venv/bin/python -c 'import importlib.metadata as m; assert [e.name for e in m.entry_points(group="sizeup.incident_sources")] == ["feed"]'
@@ -209,6 +210,7 @@ sizeup-station adapter remove --yes
 test ! -e /etc/sizeup/adapter-deploy-key
 test -z "$(grep '^CI_FEED_USER=' /etc/sizeup/station.env || true)"
 wait_for 600 release_is "$A"
+wait_for 300 idle
 wait_for 60 is_build "$A"
 test ! -e /opt/sizeup/current/ADAPTER.json && test -z "$(in_venv /opt/sizeup/current)"
 say "ok"

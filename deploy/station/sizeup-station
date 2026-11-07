@@ -315,7 +315,7 @@ case "$cmd" in
     case "$sub" in
       setup|remove)
         need_root adapter "$@"
-        if systemctl is-active --quiet sizeup-update.service 2>/dev/null; then
+        if [ "$(systemctl show -p ActiveState --value sizeup-update.service 2>/dev/null || true)" = activating ]; then
           echo "An automatic update is running (journalctl -u sizeup-update -f): try again when it's done." >&2
           exit 1
         fi
