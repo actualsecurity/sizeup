@@ -76,7 +76,7 @@ from typing import Callable
 
 from sizeup import channels
 from sizeup import tz
-from sizeup.app import CLIP_ID, App, AwsJob, channels_model
+from sizeup.app import CLIP_ID, RENAMED, App, AwsJob, channels_model
 from sizeup.cad.dispatcher import AudioUnavailable
 from sizeup.cad.radios import fm_system
 from sizeup.cloud.autoupdate import describe
@@ -575,6 +575,11 @@ class HubApp(App):
     # -- the station's events ----------------------------------------------------------------------
 
     def apply(self, kind: str, d: dict, audio: bytes | None) -> None:
+        if kind in ("traffic", "alarm") and d.get("source") in RENAMED and d["source"] not in self._kind \
+                and RENAMED[d["source"]] in self._kind:
+            # #275: a station whose config isn't renamed yet (its update is deferred once) sends the old name: its
+            # transmissions are the renamed channel's here (airband, the pre-alerts, AWS); the id stays the station's
+            d = {**d, "source": RENAMED[d["source"]]}
         if kind == "page":
             self._apply_page(d, audio)
         elif kind == "page_text":

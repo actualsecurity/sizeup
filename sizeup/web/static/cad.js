@@ -1027,6 +1027,15 @@ function keptChip(t) {
 // that incident) and its "⋯" menu (txMenu) at the end; the transcript under it. ctx: {scope: "feed" | "rv" |
 // "inc" (where it is drawn: the menu's identity across redraws), current: the incident whose list this is
 // (no chip for it)}. The wall board: no chips, no menu.
+// HPN's tower hours (#275, sizeup/atc_hours.py: FAA Chart Supplement, 06:00-23:00 local): 118.575 is the CTAF outside them
+const HPN_TOWER_MHZ = 118.575, HPN_TOWER_OPEN = [6 * 60, 23 * 60];
+const hpnClock = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour: "numeric", minute: "numeric", hourCycle: "h23" });
+function hpnTowerOpenAt(ts) {
+  const p = Object.fromEntries(hpnClock.formatToParts(new Date(ts * 1000)).map((x) => [x.type, x.value]));
+  const m = (+p.hour % 24) * 60 + +p.minute;
+  return m >= HPN_TOWER_OPEN[0] && m < HPN_TOWER_OPEN[1];
+}
+
 function radioRow(t, ctx = {}) {
   const li = el("li", "rt");
   const meta = el("div", "meta");
@@ -1040,8 +1049,9 @@ function radioRow(t, ctx = {}) {
   if (tag) meta.append(tag);
   meta.append(el("span", "chip src", t.channel));        // the channel once; never in the talker's place
   if (t.mhz > 0) {                                        // the frequency it was heard on (an airband row, #260: NY
-    const f = el("span", "dim small", `${+t.mhz}`);       // Approach is 126.4 by day, 120.8 overnight)
-    f.title = `Heard on ${+t.mhz} MHz`;
+    const ctaf = +t.mhz === HPN_TOWER_MHZ && !hpnTowerOpenAt(t.start);   // Approach is 126.4 by day, 120.8 overnight)
+    const f = el("span", "dim small", ctaf ? `${+t.mhz} CTAF` : `${+t.mhz}`);
+    f.title = `Heard on ${+t.mhz} MHz` + (ctaf ? " (HPN tower closed: CTAF)" : "");
     meta.append(f);
   }
   const em = emergencyChip(t);                            // the emergency button / a mayday (#128): can't be missed

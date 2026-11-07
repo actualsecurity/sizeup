@@ -73,22 +73,27 @@ kind = "airband"                   # AM, carrier squelch; transcripts feed the a
 device = "hpn-twr"
 gain_db = 36.4
 squelch_db = 3.5
+# #275: the tower is open 06:00-23:00 (Chart Supplement); closed, 118.575 is the CTAF and is still heard on this
+# dongle all night, so the tower reopening is never missed. Approach's overnight 120.8 is on Approach's own dongle
+# (118.575 and 120.8 are 2.2 MHz apart: too wide for one capture without losing the tower at the band edge).
 
 # NY Approach and HPN Ground (#260; an installed station gets these once from sizeup/cloud/configupdate.py
-# "approach-ground"). FAA Chart Supplement via airnav.com/airport/KHPN: NEW YORK APPROACH 126.4 0700-2300, 120.8
-# 2300-0700, 124.65; WESTCHESTER GROUND 121.825. Choices for a dongle in Radios, never auto-assigned (not in
-# auto_assign_order): pick them by hand.
+# "approach-ground", and the #275 names and frequencies from "airband-sets"). FAA Chart Supplement via
+# airnav.com/airport/KHPN: NEW YORK APPROACH 126.4 0700-2300, 120.8 2300-0700, 124.65; WESTCHESTER GROUND 121.825
+# 0600-2300. Choices for a dongle in Radios, never auto-assigned (not in auto_assign_order): pick them by hand.
+# A frequency heard on two dongles at once is kept on one (the channel it belongs to).
 [[radio.channels]]
-label = "NY Approach"              # New York Approach for HPN: early inbound, emergencies declared before the tower
+label = "NY App 126.4/120.8"       # New York Approach for HPN: early inbound, emergencies declared before the tower
 mhz = 126.4
 kind = "airband"
 schedule = [{ at = "07:00", mhz = 126.4 }, { at = "23:00", mhz = 120.8 }]   # local time; retuned between transmissions
+also = [{ mhz = 124.65, from = "07:00", until = "23:00" }]   # #275: 124.65 too by day, only with [radio] airband_multichannel
 device = "nyapp"
 gain_db = 36.4
 squelch_db = 3.5
 
 [[radio.channels]]
-label = "NY Approach 124.65"       # New York Approach's third HPN frequency (Chart Supplement), fixed
+label = "NY App 124.65"            # New York Approach's third HPN frequency (Chart Supplement), fixed
 mhz = 124.65
 kind = "airband"
 device = "nyapp2"
@@ -96,9 +101,10 @@ gain_db = 36.4
 squelch_db = 3.5
 
 [[radio.channels]]
-label = "HPN Ground"               # Westchester Ground 121.825 AM (0600-2300 like the tower)
+label = "HPN Ground"               # Westchester Ground 121.825 AM, 0600-2300 like the tower
 mhz = 121.825
 kind = "airband"
+schedule = [{ at = "06:00", mhz = 121.825 }, { at = "23:00", mhz = 124.65 }]   # #275: closed overnight: 124.65 then
 device = "hpn-gnd"
 gain_db = 36.4
 squelch_db = 3.5
