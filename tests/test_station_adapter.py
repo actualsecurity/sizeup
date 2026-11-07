@@ -75,6 +75,7 @@ class AdapterUpdater(FakeUpdater):
         self.builds: list[str] = []
         self.wheel_fail = self.pip_fail = False
         self.extra_files: dict[str, str] = {}
+        self.extra_record: list[str] = []
         self.systemctls: list[tuple] = []
         self.systemctl_ok, self.systemd = True, 255
         self.unhealthy_releases: set[str] = set()
@@ -114,7 +115,7 @@ class AdapterUpdater(FakeUpdater):
             z.writestr(f"{di}/METADATA", f"Metadata-Version: 2.1\nName: {meta['name']}\nVersion: {ver}\n")
             z.writestr(f"{di}/entry_points.txt",
                        f"[{au.ADAPTER_GROUP}]\n" + "".join(f"{k} = {v}\n" for k, v in eps.items()))
-            z.writestr(f"{di}/RECORD", "".join(f"{n},,\n" for n in [*z.namelist(), f"{di}/RECORD"]))
+            z.writestr(f"{di}/RECORD", "".join(f"{n},,\n" for n in [*z.namelist(), f"{di}/RECORD", *self.extra_record]))
 
     def pip_install(self, rel, wheels, dist, drop):
         """The real install (no interpreter: unpacked by this process), recorded; pip_fail breaks it."""
@@ -827,6 +828,7 @@ def _install_other_dist(rel: Path) -> None:
 @pytest.mark.parametrize("extra, why", [
     ({"sitecustomize.py": "import os; os.system('id')"}, "sitecustomize"),
     ({"usercustomize.py": "x = 1"}, "usercustomize"),
+    ({"sitecustomize/__init__.py": "x = 1"}, "sitecustomize"),        # a package of that name too
     ({"feed_adapter-0.1.data/data/bin/python": "#!/bin/sh"}, ".data"),
     ({"otherpkg/evil.py": "x = 1"}, "would replace otherpkg"),         # into another package's directory
     ({"claimed_only.py": "x = 1"}, "would replace claimed_only"),      # a name another dist's RECORD claims
@@ -996,3 +998,96 @@ def test_probe_adapter_only_wheel_failures_back_off(station):
     for _ in range(5):
         u.run()
     assert len(u.builds) - n0 <= 1
+
+
+
+def test_uninstall_removes_only_what_root_unpacked_never_what_the_record_says(station):
+    """(final review M-a) the adapter's RECORD names another package's file: nothing outside the adapter is deleted."""
+    repo, u, ad = station
+    _install_other_dist(u.p.releases / repo.shas[0])
+    u.extra_record = ["otherpkg/__init__.py", "../../../../etc/passwd", "/etc/hosts"]
+    u.set_up(ad.bare)
+    u.want(repo.shas[0])
+    assert u.run() == 0
+    site = u.p.current.resolve() / "venv" / SITE
+    files = (site / "feed_adapter-0.1.dist-info" / au.FILES).read_text().split()
+    assert "feed_adapter/__init__.py" in files and "otherpkg/__init__.py" not in files
+    c2 = ad.commit("def make(ctx):\n    return []\n")
+    assert u.run() == 0 and u.installed()["commit"] == c2           # the old version out (by root's list)
+    site = u.p.current.resolve() / "venv" / SITE
+    assert (site / "otherpkg" / "__init__.py").is_file()
+    u.uninstall_dist(site, "feed-adapter")
+    assert (site / "otherpkg" / "__init__.py").is_file() and not (site / "feed_adapter").exists()
+    # one root didn't install (no SIZEUP-FILES): left alone
+    (site / "otherpkg-1.0.dist-info" / "RECORD").write_text("otherpkg/__init__.py,,\n")
+    u.uninstall_dist(site, "otherpkg")
+    assert (site / "otherpkg" / "__init__.py").is_file()
+
+
+def test_rollback_after_a_fallback_without_the_adapter_finds_the_old_release(station):
+    """(final review M-b) T with adapter c1 didn't come up, T without it did (c1 failed on T): a rollback still goes
+    back to S with c1, which ran fine."""
+    repo, u, ad, good = _with_adapter(station)
+    c1 = ad.commits[0]
+    new = repo.commit("two")
+    u.unhealthy_releases = {au.release_name(new, c1)}
+    u.want(new)
+    assert u.run() == 0 and u.current() == (new, new)
+    assert u.load()["adapter"]["failed"][c1]["sha"] == new
+    assert u.previous() == good
+    assert u.rollback() == 0 and u.current()[0] == good and u.installed()["commit"] == c1
+
+
+def test_dropping_a_credential_on_old_systemd_drop_in_first(station):
+    repo, u, ad, good = _with_adapter(station)
+    u.systemd = 252
+    u.write_creds({"FEED_PASS": "p"})
+    assert "sizeup-adapter.FEED_PASS:" in u.p.dropin.read_text()
+    u.systemctl_ok = False
+    with pytest.raises(StepError):
+        u.write_creds({}, drop={"FEED_PASS"})
+    assert u.cred_has("FEED_PASS")                                     # systemd said no: the file stays
+    u.systemctl_ok = True
+    u.write_creds({}, drop={"FEED_PASS"})
+    assert not u.cred_has("FEED_PASS") and "FEED_PASS" not in u.p.dropin.read_text()
+
+
+IMPORT_ORDER = r"""
+import sys
+sys.path.insert(0, {root!r})
+import sizeup
+sizeup.__path__.append({overlay!r})              # (a stand-in for #304's sizeup/sources, whose runner imports adapters)
+for m in {order!r}:
+    __import__(m)
+import sizeup.cloud.adapters as a
+assert a.Resets.__module__ == {resets!r}, a.Resets.__module__
+assert a.HubRefused.__module__ == {guard!r}
+print("ok")
+"""
+
+
+@pytest.mark.parametrize("order", [["sizeup.cloud.adapters", "sizeup.sources.runner"],
+                                   ["sizeup.sources.runner", "sizeup.cloud.adapters"]])
+def test_no_import_cycle_with_the_sources_package_either_way(tmp_path, order):
+    """(final review H2) #304's runner imports sizeup.cloud.adapters at module level; adapters imports sizeup.sources
+    only lazily: both orders, in fresh interpreters."""
+    src = tmp_path / "sizeup" / "sources"
+    src.mkdir(parents=True)
+    (src / "__init__.py").write_text("")
+    (src / "resets.py").write_text("class Resets:\n    pass\n")
+    (src / "runner.py").write_text(
+        "from sizeup.cloud.adapters import credential  # noqa: F401 (as #304's may)\n"
+        "from sizeup.sources.resets import Resets  # noqa: F401\n"
+        "class HubRefused(RuntimeError):\n    pass\n"
+        "def require_station(role):\n    if role == 'hub':\n        raise HubRefused('hub')\n")
+    code = IMPORT_ORDER.format(root=str(ROOT), overlay=str(tmp_path / "sizeup"), order=order,
+                               resets="sizeup.sources.resets", guard="sizeup.sources.runner")
+    r = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True)
+    assert r.returncode == 0 and r.stdout.strip() == "ok", r.stderr[-600:]
+
+
+def test_adapters_imports_nothing_from_sources_at_load():
+    r = subprocess.run([sys.executable, "-I", "-c", f"import sys; sys.path.insert(0, {str(ROOT)!r}); "
+                        "import sizeup.cloud.adapters; print(any(m.startswith('sizeup.sources') for m in sys.modules))"],
+                       capture_output=True, text=True)
+    assert r.returncode == 0 and r.stdout.strip() == "False", r.stderr[-400:]

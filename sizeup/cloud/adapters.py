@@ -1,8 +1,10 @@
 """The hub's side of the station's incident-source adapters (#301): a hub never loads or runs one.
 
-The guard is #297's (sizeup/sources/runner.py require_station / HubRefused, the check load_adapters makes before it looks
-at any entry point). Until that is on main, the same check is here under the same names; once it is, the import below
-is all that runs (and the fallback can go).
+The guard and Resets are #297's (PR #304): sizeup/sources/runner.py require_station / HubRefused, the check
+load_adapters makes before it looks at any entry point, and sizeup/sources/resets.py Resets. They are imported LAZILY
+(module __getattr__, and inside the functions here), never at this module's import, so neither import order makes a
+cycle (#304's runner may import this module). Until #304 is on main the same names are defined here, used only when
+that lazy import raises ImportError.
 
     discover(role)       the installed adapters' entry-point names (metadata only, nothing imported); HubRefused on the
                          hub before anything is looked at
@@ -25,15 +27,40 @@ import re
 import threading
 from typing import Callable
 
-try:
-    from sizeup.sources.runner import HubRefused, require_station
-except ImportError:                                  # before #297 (PR #304) is merged: the same check
-    class HubRefused(RuntimeError):  # type: ignore[no-redef]
-        """Adapters run on the station only: the hub never discovers, imports or runs one."""
 
-    def require_station(role: str) -> None:  # type: ignore[misc]
-        if (role or "").strip().lower() == "hub":
-            raise HubRefused("incident-source adapters run on the station only, never on the hub")
+
+class _HubRefused(RuntimeError):
+    """(Before #304:) adapters run on the station only: the hub never discovers, imports or runs one."""
+
+
+def _require_station(role: str) -> None:
+    if (role or "").strip().lower() == "hub":
+        raise _impl()[0]("incident-source adapters run on the station only, never on the hub")
+
+
+def _impl() -> tuple:
+    """(HubRefused, require_station, Resets): #304's when it's there, else these. Imported here, at call time."""
+    try:
+        from sizeup.sources.runner import HubRefused, require_station
+    except ImportError:
+        HubRefused, require_station = _HubRefused, _require_station
+    try:
+        from sizeup.sources.resets import Resets
+    except ImportError:
+        Resets = _Resets
+    return HubRefused, require_station, Resets
+
+
+def __getattr__(name: str):
+    """HubRefused, require_station and Resets, resolved lazily (PEP 562): no import of sizeup.sources at load."""
+    if name in ("HubRefused", "require_station", "Resets"):
+        return dict(zip(("HubRefused", "require_station", "Resets"), _impl()))[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def _guard(role) -> None:
+    _impl()[1](str(role or ""))
+
 
 GROUP = "sizeup.incident_sources"         # = sizeup.sources.ENTRY_POINT_GROUP and autoupdate.ADAPTER_GROUP
 
@@ -46,7 +73,7 @@ __all__ = ["GROUP", "HubRefused", "Resets", "SOURCE_ID", "credential", "discover
 
 
 def discover(role, entry_points: Callable | None = None) -> list[str]:
-    require_station(str(role or ""))
+    _guard(role)
     if entry_points is None:
         from importlib.metadata import entry_points
     return sorted({e.name for e in entry_points(group=GROUP)})
@@ -54,8 +81,9 @@ def discover(role, entry_points: Callable | None = None) -> list[str]:
 
 def hub_guard(role, log: Callable[[str], None], entry_points: Callable | None = None) -> list[str]:
     """The adapters found installed on the hub, each refused and never loaded ([] on a station)."""
+    HubRefused = _impl()[0]
     try:
-        require_station(str(role or ""))
+        _guard(role)
         return []
     except HubRefused as refused:
         why = str(refused)
@@ -71,8 +99,8 @@ def hub_guard(role, log: Callable[[str], None], entry_points: Callable | None = 
     return found
 
 
-class Resets:
-    """Reset requests, each run on its adapter's own thread: request() from anywhere, run_due() by the runner's loop for
+class _Resets:
+    """(Before #304's sizeup/sources/resets.py:) reset requests, each run on its adapter's own thread: request() from anywhere, run_due() by the runner's loop for
     that adapter (before its next poll)."""
 
     def __init__(self):
@@ -143,7 +171,8 @@ RESET_EVERY_S = 300.0
 
 class ResetLimit:
     """One reset per source per RESET_EVERY_S (each server: the hub's, the station's): a shared account isn't hammered.
-    blocked() before; done() only once the station said ok. "" (all) is blocked by any source's, and counts for all."""
+    take() before (it marks the source pending, so two at once can't both go), finish() after: counted only when the
+    station said ok. "" (all) is held up by any source's, and counts for all of them. Bounded."""
 
     MAX = 64
 
@@ -151,21 +180,38 @@ class ResetLimit:
         import time
         self.every_s, self.clock = every_s, clock or time.time
         self._at: dict[str, float] = {}
+        self._pending: set[str] = set()
         self._lock = threading.Lock()
 
+    def _wait(self, source: str, now: float) -> float:
+        keys = list(self._at) if not source else [source, "*"]
+        last = max((self._at.get(k, -1e18) for k in keys), default=-1e18)
+        busy = bool(self._pending) if not source else bool({source, "*"} & self._pending)
+        return self.every_s if busy else max(0.0, self.every_s - (now - last))
+
     def blocked(self, source: str) -> float:
-        """0 = go; else the seconds until a reset of source may."""
-        now = self.clock()
+        """0 = a reset of source may go now; else the seconds until it may."""
         with self._lock:
-            keys = list(self._at) if not source else [source, "*"]
-            last = max((self._at.get(k, -1e18) for k in keys), default=-1e18)
-        return max(0.0, self.every_s - (now - last))
+            return self._wait(source, self.clock())
+
+    def take(self, source: str) -> float:
+        """blocked(), and when 0 the source is marked pending until finish()."""
+        with self._lock:
+            wait = self._wait(source, self.clock())
+            if not wait:
+                self._pending.add(source or "*")
+            return wait
+
+    def finish(self, source: str, ok: bool, sources: list[str] | tuple = ()) -> None:
+        with self._lock:
+            self._pending.discard(source or "*")
+            if ok:
+                now = self.clock()
+                for k in ([source] if source else ["*", *sources]):
+                    self._at[k] = now
+                if len(self._at) > self.MAX:            # bounded: the oldest go
+                    for k in sorted(self._at, key=self._at.get)[:len(self._at) - self.MAX]:
+                        del self._at[k]
 
     def done(self, source: str, sources: list[str] | tuple = ()) -> None:
-        now = self.clock()
-        with self._lock:
-            for k in ([source] if source else ["*", *sources]):
-                self._at[k] = now
-            if len(self._at) > self.MAX:            # bounded: the oldest go
-                for k in sorted(self._at, key=self._at.get)[:len(self._at) - self.MAX]:
-                    del self._at[k]
+        self.finish(source, True, sources)

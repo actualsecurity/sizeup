@@ -130,6 +130,7 @@ RESERVED_ENV = {"SIZEUP_STATION_TOKEN", "SIZEUP_ACCESS_CLIENT_ID", "SIZEUP_ACCES
 RESERVED_PREFIX = ("LD_", "PYTHON", "SYSTEMD_", "GIT_", "SSH_")
 ADAPTER_CHECK_S = 120.0
 HUB_REFUSED = "incident-source adapters run on the station only, never on the hub"
+FILES = "SIZEUP-FILES"                      # in an adapter's .dist-info: what root unpacked (all an uninstall removes)
 CRED_PREFIX = "sizeup-adapter."             # its credentials' names in the credstore and $CREDENTIALS_DIRECTORY
 # GitHub's published SSH host key (= install-linux.sh GITHUB_HOSTKEY): the adapter's repo is on GitHub, never TOFU
 GITHUB_HOSTKEY = "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl"
@@ -869,7 +870,7 @@ class Updater:
         self.save(st)
         return n
 
-    def adapter_fail(self, st: dict, commit: str, e: Exception) -> str:
+    def adapter_fail(self, st: dict, commit: str, e: Exception, sha: str = "") -> str:
         """An adapter commit didn't build, install or pass its preflight: retried (RETRY_S, MAX_STAGES in all) unless
         it can't work (its preflight, its wheels), then in adapter.failed. Never sizeup's failed. What it says."""
         rec = self.adapter_rec(st)
@@ -877,7 +878,7 @@ class Updater:
         r = rec["retry"].get(commit) if isinstance(rec["retry"].get(commit), dict) else {"n": MAX_STAGES}
         if (isinstance(e, StepError) and e.code == PREFLIGHT_EXIT) or int(r.get("n") or 0) >= MAX_STAGES:
             rec["retry"].pop(commit, None)
-            rec["failed"][commit] = {"at": self.clock(), "why": why}
+            rec["failed"][commit] = {"at": self.clock(), "why": why, "sha": sha}
             rec["failed"] = _newest_failed(rec["failed"], KEEP_FAILED)
             return f"adapter {commit[:7]} failed ({why}); not tried again until its ref moves"
         r["why"] = why
@@ -885,10 +886,12 @@ class Updater:
         return (f"adapter {commit[:7]} not built yet ({why}); again after {_clock(r.get('next_at'))} "
                 f"(try {r.get('n')} of {MAX_STAGES})")
 
-    def adapter_failed(self, st: dict, commit: str, why: str) -> None:
+    def adapter_failed(self, st: dict, commit: str, why: str, sha: str = "") -> None:
+        """That adapter commit failed (with sizeup's sha: where; a rollback may still go to a release that ran it on
+        another sha)."""
         rec = self.adapter_rec(st)
         rec["retry"].pop(commit, None)
-        rec["failed"][commit] = {"at": self.clock(), "why": why[:300]}
+        rec["failed"][commit] = {"at": self.clock(), "why": why[:300], "sha": sha}
         rec["failed"] = _newest_failed(rec["failed"], KEEP_FAILED)
 
     def as_user(self) -> list[str]:
@@ -927,7 +930,7 @@ class Updater:
                 return f"{path.name}: has a .data directory ({n[:80]})"
             if n.endswith(".pth"):
                 return f"{path.name}: has a .pth file ({n[:80]})"
-            if len(parts) == 1 and parts[0] in ("sitecustomize.py", "usercustomize.py"):
+            if Updater._module(parts[0]) in ("sitecustomize", "usercustomize"):   # (a module, a package, an .so)
                 return f"{path.name}: has {parts[0]}"
         return ""
 
@@ -964,6 +967,7 @@ class Updater:
     def install_wheel(self, site: Path, path: Path) -> None:
         """A checked wheel unpacked into site-packages by this (root's) process: no interpreter, no pip, nothing run."""
         root = site.resolve()
+        done: list[str] = []
         with zipfile.ZipFile(path) as z:
             for info in z.infolist():
                 dest = (site / info.filename).resolve()
@@ -977,34 +981,38 @@ class Updater:
                 with z.open(info) as src, open(dest, "wb") as out:
                     shutil.copyfileobj(src, out)
                 os.chmod(dest, 0o644)
+                done.append(dest.relative_to(root).as_posix())
             info_dir = next(n.split("/")[0] for n in z.namelist() if n.split("/")[0].endswith(".dist-info"))
         (site / info_dir / "INSTALLER").write_text("sizeup\n")
+        # root's own list of what it unpacked: the only thing an uninstall ever removes (never the wheel's RECORD)
+        (site / info_dir / FILES).write_text("".join(f"{f}\n" for f in [*done, f"{info_dir}/INSTALLER"]))
 
     def uninstall_dist(self, site: Path, dist: str) -> None:
-        """A distribution out of site-packages by its RECORD (unlinked: the release it was linked from keeps its own)."""
+        """A distribution root installed out of site-packages: only the files in its SIZEUP-FILES (root's own list,
+        written when it unpacked them; never the wheel's RECORD), unlinked (the release it was linked from keeps its
+        own). One without that list wasn't installed by root here: left alone."""
         root = site.resolve()
         for di in [d for d in site.glob("*.dist-info") if _dist_of(d) == _norm_dist(dist)]:
             try:
-                lines = (di / "RECORD").read_text(errors="replace").splitlines()
+                lines = (di / FILES).read_text(errors="replace").splitlines()
             except OSError:
-                lines = []
+                self.note(f"auto-update: {di.name}: no {FILES} (not installed by the updater): left as it is")
+                continue
             dirs = set()
-            for line in lines:
-                rel_ = line.split(",", 1)[0]
-                if not rel_:
+            for rel_ in lines:
+                if not rel_ or rel_.startswith("/") or ".." in rel_.split("/"):
                     continue
-                f = (site / rel_).resolve()
-                if root not in f.parents or di.resolve() in (f, *f.parents):
+                f = site / rel_
+                if root not in f.resolve().parents:
                     continue
                 if f.is_file() or f.is_symlink():
                     f.unlink()
-                    dirs.update(p for p in f.parents if root in p.parents)
-            shutil.rmtree(di, ignore_errors=True)
+                    dirs.update(p for p in f.parents if root in p.resolve().parents)
+            (di / FILES).unlink(missing_ok=True)
             for d in sorted(dirs, key=lambda p: len(p.parts), reverse=True):
+                shutil.rmtree(d / "__pycache__", ignore_errors=True)
                 try:
-                    if d.name == "__pycache__":
-                        shutil.rmtree(d, ignore_errors=True)
-                    d.rmdir()
+                    d.rmdir()                      # (only once empty: another package's directory never goes)
                 except OSError:
                     pass
 
@@ -1278,13 +1286,13 @@ class Updater:
 
     def write_creds(self, values: dict[str, str], drop: set[str] = frozenset()) -> None:
         """The adapter's credentials as root-only files, handed to the station service by systemd (its
-        $CREDENTIALS_DIRECTORY), never its environment."""
+        $CREDENTIALS_DIRECTORY), never its environment. New ones first, then the drop-in (without the dropped ones) and
+        a daemon-reload that must succeed, and only then are the dropped files deleted: a service is never asked for a
+        file that's gone (LoadCredential=, systemd < 254)."""
         self.cred_dir_ok()
         for k, v in values.items():
             if any(c in v for c in "\n\r\0"):
                 raise ValueError("one line, please")
-        for k in drop:
-            self.cred_file(k).unlink(missing_ok=True)
         for k, v in values.items():
             tmp = self.p.credentials / f".{CRED_PREFIX}{k}.{os.getpid()}"
             tmp.unlink(missing_ok=True)
@@ -1296,7 +1304,11 @@ class Updater:
             finally:
                 os.close(fd)
             os.replace(tmp, self.cred_file(k))
-        self.write_dropin()
+        gone = set(drop) - set(values)
+        if not self.write_dropin(exclude=gone):
+            raise StepError("systemctl daemon-reload failed: the old credentials are left in place")
+        for k in gone:
+            self.cred_file(k).unlink(missing_ok=True)
 
     def systemd_version(self) -> int:
         try:
@@ -1305,9 +1317,9 @@ class Updater:
         except (OSError, subprocess.SubprocessError, AttributeError, ValueError):
             return 0
 
-    def dropin_text(self) -> str:
+    def dropin_text(self, exclude: set[str] = frozenset()) -> str:
         """What sizeup-station.service.d/adapter-credentials.conf should say now ("": no drop-in)."""
-        names = self.cred_names()
+        names = [n for n in self.cred_names() if n not in exclude]
         if not names:
             return ""
         head = ("# The incident-source adapter's credentials (#301, sudo sizeup-station adapter setup): files under\n"
@@ -1329,9 +1341,9 @@ class Updater:
             return ""
         return f"{self.p.dropin} doesn't match {self.p.credentials}: sudo sizeup-station adapter setup (Enter keeps them)"
 
-    def write_dropin(self) -> bool:
+    def write_dropin(self, exclude: set[str] = frozenset()) -> bool:
         """The drop-in as dropin_text() says, then daemon-reload: whether systemd took it."""
-        text = self.dropin_text()
+        text = self.dropin_text(exclude)
         if text:
             self.p.dropin.parent.mkdir(parents=True, exist_ok=True)
             self.p.dropin.write_text(text)
@@ -1414,9 +1426,17 @@ class Updater:
         afailed = (st.get("adapter") or {}).get("failed") if isinstance(st.get("adapter"), dict) else {}
         for name in reversed(self.history()):
             if name != cur and name in have and failed_entry(failed, self.build_of(name)) is None \
-                    and (self.release_adapter(name) or {}).get("commit") not in (afailed or {}):
+                    and not self._adapter_failed_here(afailed or {}, name):
                 return name
         return ""
+
+    def _adapter_failed_here(self, afailed: dict, name: str) -> bool:
+        """Release name's adapter commit failed ON ITS sha (or nobody said where): not a rollback's target. One that
+        failed only with another sizeup (e.g. a newer one that didn't come up with it) still is."""
+        f = afailed.get((self.release_adapter(name) or {}).get("commit", ""))
+        if not isinstance(f, dict):
+            return False
+        return not f.get("sha") or same_build(f.get("sha"), self.build_of(name))
 
     def build_of(self, name: str) -> str:
         try:
@@ -1563,11 +1583,11 @@ class Updater:
             return
         back = self._switch_back(frm, name)
         if same_build(self.build_of(frm), to) and st.get("adapter_to"):     # an adapter-only rebuild (#301)
-            self.adapter_failed(st, str(st["adapter_to"]), f"interrupted; then {why}")
+            self.adapter_failed(st, str(st["adapter_to"]), f"interrupted; then {why}", build)
         elif (c := (self.release_adapter(name) or {}).get("commit")) and not back \
                 and not self._try_plain(st, frm, build, name):
             # sizeup's own release came up without the adapter: the adapter is what didn't (#301)
-            self.adapter_failed(st, c, f"interrupted; then {why}; {short(build)} runs without it")
+            self.adapter_failed(st, c, f"interrupted; then {why}; {short(build)} runs without it", build)
             self.result(f"update {short(frm)} -> {short(to)}: interrupted, unhealthy with adapter {c[:7]} ({why}): "
                         f"{short(build)} runs without it")
             self.save(st, state="current", current=build)
@@ -1666,7 +1686,7 @@ class Updater:
                 self.adapter_rec(st)["retry"].pop(c, None)
                 break
             except (StepError, OSError) as e:
-                said.append(self.adapter_fail(st, c, e))
+                said.append(self.adapter_fail(st, c, e, sha))
                 self.note(f"auto-update: {said[-1]}")
         if only and ac and target == sha:
             self.result(f"{tag}: not switched: {'; '.join(said)}; still on {short(build)}"
@@ -1720,7 +1740,7 @@ class Updater:
             c = (self.release_adapter(target) or {}).get("commit", "")
             plain = self._try_plain(st, name, sha, target)
             if not plain:
-                self.adapter_failed(st, c, f"the release with it didn't come up ({why})")
+                self.adapter_failed(st, c, f"the release with it didn't come up ({why})", sha)
                 self.prune()
                 secs = self.clock() - t0
                 self.result(f"{tag}: ok in {secs:.0f} s without adapter {c[:7]} (with it: {why}); adapter {c[:7]} not "
@@ -1732,7 +1752,7 @@ class Updater:
             why += f"; without the adapter too: {plain}"
         if only:
             if ac:
-                self.adapter_failed(st, ac, why)
+                self.adapter_failed(st, ac, why, sha)
             again = f"not trying adapter {ac[:7]} again until its ref moves" if ac else "trying again at the next check"
         else:
             self._failed(st, sha, why)
@@ -1856,7 +1876,7 @@ class Updater:
         left = (self.release_adapter(name) or {}).get("commit", "")
         if same_build(build, self.build_of(prev)):
             if left and left != to_ad:          # the same sizeup, another adapter: that adapter commit is the one left
-                self.adapter_failed(st, left, "rolled back by hand (sizeup-station rollback)")
+                self.adapter_failed(st, left, "rolled back by hand (sizeup-station rollback)", build)
         else:
             self._failed(st, build, "rolled back by hand (sizeup-station rollback)")
         self.result(f"rollback {short(build)} -> {short(new)}: " + ("ok" if not why else f"FAILED: {why}"))
@@ -2092,7 +2112,11 @@ def adapter_setup(u: Updater, repo: str = "", ref: str = "", env: str | None = N
         out("  (add it to the repo as a read-only deploy key)")
     out("")
     changed = bool(g["values"] or g["old"])
-    u.write_creds(g["values"], drop=g["old"])
+    try:
+        u.write_creds(g["values"], drop=g["old"])
+    except StepError as e:
+        out(f"credentials: {e}")
+        return 1
     u.drop_env(set(names) | g["old"])           # (kept in station.env before LoadCredential=: out of the environment)
     g["values"].clear()
     u.p.adapter_pending.write_text(json.dumps({"repo": repo, "ref": ref, "env": names}, indent=1) + "\n")
@@ -2186,7 +2210,7 @@ def adapter_cli(u: Updater, a) -> int:
                     u.adapter_rec(st)["retry"].pop(c, None)
                     break
                 except (StepError, OSError) as e:
-                    print(u.adapter_fail(st, c, e), file=sys.stderr)
+                    print(u.adapter_fail(st, c, e, u.build_of(base)), file=sys.stderr)
             if name == base:
                 try:
                     u.clean_base(base, st)

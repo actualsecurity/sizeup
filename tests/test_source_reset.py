@@ -196,3 +196,14 @@ def test_against_the_real_source_runner():
         assert wait(lambda: feed.resets, 10) and feed.resets[0] != threading.get_ident()
     finally:
         r.stop()
+
+
+def test_a_reset_in_flight_holds_up_another_for_that_source():
+    t = [0.0]
+    lim = adapters.ResetLimit(clock=lambda: t[0])
+    assert lim.take("feed") == 0
+    assert lim.take("feed") > 0 and lim.take("") > 0 and lim.take("other") == 0   # pending: the same source waits
+    lim.finish("feed", False)                              # it didn't go: not counted
+    assert lim.take("feed") == 0
+    lim.finish("feed", True)
+    assert lim.blocked("feed") == 300

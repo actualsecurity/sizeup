@@ -367,6 +367,11 @@ station) takes JSON with `X-Sizeup-Action: reset` only, one per source per 5 min
 it; "all" counts for every source). The hub logs who pressed it
 (their Access identity), nothing else. An adapter without `reset()`: nothing happens, and the answer says so.
 
+**Known limitation (#314):** the adapter runs inside sizeup-station, as the `sizeup` user, and its credentials are files
+under `/run/credentials/sizeup-station.service/` owned by that user. Other programs that run as `sizeup` and parse
+untrusted radio or network input (trunk-recorder, whisper-server, readsb, rtl_fm) could read them if one were
+compromised. Running the adapter as its own service under its own user is #314.
+
 The hub refuses: a hub's config (`[cloud] role = "hub"`) makes setup, the updater and the self-check refuse, and the
 hub process names any adapter installed in its environment in its log and never loads it.
 

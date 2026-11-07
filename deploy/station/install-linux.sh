@@ -677,7 +677,7 @@ make_release() {
     tmpsrc=$(mktemp -d)
     cp -a "$tmp/pyproject.toml" "$tmp/sizeup" "$tmpsrc/"
     # (a venv made just now: nothing in its site-packages but pip, never an adapter's)
-    "$tmp/venv/bin/python" -m pip install -q --disable-pip-version-check --no-cache-dir --upgrade "$tmpsrc"
+    "$tmp/venv/bin/python" -I -m pip install -q --disable-pip-version-check --no-cache-dir --upgrade "$tmpsrc"
     rm -rf "$tmpsrc"
   fi
   echo "$reqs" > "$tmp/REQS"
