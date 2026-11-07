@@ -211,7 +211,7 @@ class DataSources:
         if at is None and st["ok"]:
             at = st["tried"]                      # read, though the provider keeps no time of its own
         if st["fails"] and st["tried"] is not None:
-            wait = min(BACKOFF_S[1], iv, BACKOFF_S[0] * 2 ** (st["fails"] - 1))
+            wait = min(BACKOFF_S[1], iv, BACKOFF_S[0] * 2 ** min(st["fails"] - 1, 30))
             return st["tried"] + wait
         if at is None:
             return st["tried"] or self.started    # never fetched: at once (one at a time, in registration order)

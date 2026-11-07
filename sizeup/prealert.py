@@ -173,7 +173,7 @@ class NtfyStream:
             except (TypeError, ValueError):
                 ra = 0.0
             return min(max(self.BACKOFF_429, ra), self.RETRY_AFTER_MAX)
-        return min(self.BACKOFF_START * (2 ** max(0, self.failures - 1)), self.BACKOFF_MAX)
+        return min(self.BACKOFF_START * (2 ** min(max(0, self.failures - 1), 30)), self.BACKOFF_MAX)
 
     def _run(self) -> None:
         while not self._stop.is_set():

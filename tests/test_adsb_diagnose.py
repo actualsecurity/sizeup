@@ -475,3 +475,128 @@ def test_the_sdr_watch_stops_a_program_found_on_the_adsb_dongle(rig):
     app.adsb_sdr = "adsb"                                              # reserved behind its back
     app._sdr_arrivals()
     assert r._stop.is_set()
+
+
+# ---- the kernel's usbfs buffer limit (#269) ------------------------------------------------------------------------------
+
+# What librtlsdr (rtl-sdr-blog) and readsb v3.16.21 print when usbfs_memory_mb runs out, a few seconds in
+USBFS_LINES = ["rtlsdr: using device #1: Generic RTL2832U OEM (Realtek, RTL2838UHIDIR, SN adsb)",
+               "Failed to submit transfer 15",
+               "Please increase your allowed usbfs buffer size with the following command:",
+               "echo 0 > /sys/module/usbcore/parameters/usbfs_memory_mb",
+               "FATAL: rtlsdr_read_async returned unexpectedly, probably lost the USB device, bailing out"]
+
+
+def usbfs_file(s: Station, value: str | None = "16") -> Path:
+    f = s.sys / adsbd.USBFS
+    if value is not None:
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(value + "\n")
+    return f
+
+
+def test_the_usbfs_hint_is_its_own_cause_before_lost():
+    assert adsbd.classify(USBFS_LINES)[0] == "usbfs"
+    assert adsbd.classify(USBFS_LINES[-1:])[0] == "lost"          # the FATAL line alone: still "lost"
+    assert "usbfs_memory_mb" in adsbd.CAUSE_WORDS["usbfs"]
+
+
+def test_set_usbfs_lifts_the_limit_and_tolerates_a_missing_or_read_only_file(tmp_path, capsys):
+    s = Station(tmp_path)
+    assert adsbd.usbfs_mb(str(s.sys)) is None
+    assert adsbd.set_usbfs(str(s.sys))[2].startswith("no ")           # no usbcore: said, not raised
+    assert adsbd.usbfs_main(str(s.sys)) == 0
+    f = usbfs_file(s, "16")
+    assert adsbd.set_usbfs(str(s.sys)) == (16, 0, "") and f.read_text().strip() == "0"
+    assert adsbd.usbfs_main(str(s.sys)) == 0 and "0 (no limit)" in capsys.readouterr().out
+    f.write_text("16\n")
+    f.chmod(0o444)
+    try:
+        if os.access(f, os.W_OK):
+            pytest.skip("running as root: a read-only file is still writable")
+        before, after, err = adsbd.set_usbfs(str(s.sys))
+        assert (before, after) == (16, 16) and err.startswith("can't write it")
+        assert adsbd.usbfs_main(str(s.sys)) == 0 and "can't write it" in capsys.readouterr().out
+    finally:
+        f.chmod(0o644)
+    f.write_text("garbage\n")
+    assert adsbd.usbfs_mb(str(s.sys)) is None
+
+
+def test_readsb_dying_on_the_usbfs_limit_says_so_lifts_it_when_it_can_then_cuts_its_transfers(tmp_path):
+    s = Station(tmp_path)
+    f = usbfs_file(s, "16")
+    f.chmod(0o444)                                     # the sizeup user can't write it
+    if os.access(f, os.W_OK):
+        f.chmod(0o644)
+        pytest.skip("running as root")
+    s.lines = USBFS_LINES
+    logs: list[str] = []
+    d = s.decoder(logs)
+    try:
+        st = s.run_and_exit(d)
+        assert st["state"] == "down" and st["cause"] == "usbfs" and st["usbfs_mb"] == 16
+        assert st["detail"].startswith("the kernel's USB transfer memory ran out (usbfs_memory_mb)")
+        assert "usbfs_memory_mb is 16" in st["detail"] and "smaller USB transfers after 2" in st["detail"]
+        assert "--sdr-buffer-size" not in s.started[-1].argv and st["buffer_kib"] is None
+        assert s.killed == []
+        d.next_start = 0                               # the second time: smaller transfers from now on
+        assert d.step(1010.0)["state"] == "starting"
+        s.started[-1].code = 1
+        st = d.step(1012.0)
+        assert st["cause"] == "usbfs" and "readsb now uses 32 KiB USB transfers" in st["detail"]
+        d.next_start = 0
+        st = d.step(1020.0)
+        argv = s.started[-1].argv
+        assert argv[argv.index("--sdr-buffer-size") + 1] == str(adsbd.SMALL_BUF_KIB) and st["buffer_kib"] == 32
+        assert any("32 KiB transfers from now on" in m for m in logs)
+    finally:
+        f.chmod(0o644)
+
+
+def test_the_decoder_lifts_the_limit_before_readsb_when_it_can_and_reports_it(tmp_path):
+    s = Station(tmp_path)
+    f = usbfs_file(s, "16")                            # writable here (as root would find it)
+    logs: list[str] = []
+    d = s.decoder(logs)
+    st = d.step(1000.0)
+    assert st["state"] == "starting" and st["usbfs_mb"] == 0 and f.read_text().strip() == "0"
+    assert any("usbfs_memory_mb 16 -> 0" in m for m in logs)
+    assert d.step(1002.0)["usbfs_mb"] == 0
+    (tmp_path / "other").mkdir()
+    s2 = Station(tmp_path / "other")                   # no such file: None, and readsb starts all the same
+    assert s2.decoder().step(1000.0)["usbfs_mb"] is None
+
+
+def test_the_usbfs_value_reaches_settings_health_and_the_hub():
+    app = SimpleNamespace(adsb_sdr="adsb", adsb_row=lambda: {"serial": "adsb", "installed": True, "decoder": {
+        "state": "down", "detail": "x", "cause": "usbfs", "usbfs_mb": 16, "buffer_kib": 32}})
+    h = H.adsb_health(app)
+    assert h["usbfs_mb"] == 16 and h["buffer_kib"] == 32 and h["cause"] == "usbfs"
+    assert "usbfs_mb" in A.RX_KEYS
+    app_py = (ROOT / "sizeup" / "app.py").read_text()
+    assert '"usbfs_mb", "buffer_kib")} if st else None' in app_py
+    js = (ROOT / "sizeup" / "web" / "static" / "health.js").read_text()
+    assert "usbfs_memory_mb" in js and "ad.usbfs_mb" in js
+    assert "d.usbfs_mb" in (ROOT / "sizeup" / "web" / "static" / "radio-controls.js").read_text()
+
+
+def test_the_station_sets_usbfs_to_0_at_install_boot_and_before_readsb():
+    st = ROOT / "deploy" / "station"
+    unit = (st / "systemd" / "sizeup-adsb.service").read_text()
+    assert "ExecStartPre=-+/usr/bin/python3 -I /usr/local/lib/sizeup/adsbd.py usbfs" in unit
+    assert unit.index("ExecStartPre=") < unit.index("ExecStart=/usr/bin/python3")
+    boot = (st / "systemd" / "sizeup-usbfs.service").read_text()
+    for want in ("Type=oneshot", "ExecStart=-/usr/bin/python3 -I /usr/local/lib/sizeup/adsbd.py usbfs",
+                 "Before=sizeup-station.service sizeup-adsb.service sizeup-trunk-recorder.service",
+                 "WantedBy=multi-user.target"):
+        assert want in boot, want
+    assert "User=" not in boot                        # root: only root may write /sys
+    sh = (st / "install-linux.sh").read_text()
+    for want in ("for t in sizeup-usbfs.service sizeup-station.service", "systemctl enable --quiet sizeup-usbfs.service",
+                 "systemctl restart sizeup-usbfs.service ||", "options usbcore usbfs_memory_mb=0",
+                 "usbfs=/sys/module/usbcore/parameters/usbfs_memory_mb", '{ echo 0 > "$usbfs"; } 2>/dev/null',
+                 "/etc/systemd/system/sizeup-usbfs.service /etc/systemd/system/sizeup-health.timer"):
+        assert want in sh, want
+    cli = (st / "sizeup-station").read_text()
+    assert "usbfs_memory_mb" in cli and "sizeup-usbfs" in cli

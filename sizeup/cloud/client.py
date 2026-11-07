@@ -48,7 +48,7 @@ class Backoff:
             self.since, self.n = now, 0
         self.n += 1
         cap = self.fast_cap if now - self.since < self.fast_for else self.cap
-        wait = min(cap, self.first * 2 ** (self.n - 1))
+        wait = min(cap, self.first * 2 ** min(self.n - 1, 30))
         ra = getattr(err, "retry_after", None)
         if ra is not None:
             wait = min(cap, max(0.5, ra))
