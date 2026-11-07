@@ -34,8 +34,14 @@ ROOT = Path(__file__).resolve().parent.parent
 STATION = ROOT / "deploy" / "station"
 INSTALLER = STATION / "install-linux.sh"
 P25 = "Fire/EMS 15"
-SERVICE_PID = os.getppid()          # a live pid that isn't this process: the service's, as on the station
+# The service's pid, as on the station: alive, not this process, and never OTHER_PID. Not os.getppid(): a test run
+# whose parent has gone (started in the background, by an agent, in a container) has launchd / init as its parent,
+# pid 1 too, and the service then took shortfinal's claim as its own (#282). A child of ours that lives as long as we
+# do (it exits when its stdin, our end of the pipe, closes).
+_SERVICE = subprocess.Popen([sys.executable, "-I", "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE)
+SERVICE_PID = _SERVICE.pid
 OTHER_PID = 1                       # alive, not ours: shortfinal's in these tests
+assert SERVICE_PID not in (os.getpid(), OTHER_PID)
 
 
 class FakeProc:
@@ -134,7 +140,11 @@ def test_the_dongle_sizeup_hands_over_runs_trunk_recorder_on_its_index_and_the_s
     assert p.kw["cwd"] == str(tmp_path / "tr") and p.kw["start_new_session"] is True
     conf = json.loads((tmp_path / "tr" / "config.runtime.json").read_text())
     assert [x["device"] for x in conf["sources"]] == ["rtl=0"]              # the index, never the serial
-    assert [x["unitScript"] for x in conf["systems"]] == [str((tmp_path / "tr" / "unit-event.sh").resolve())]
+    # the script by its absolute path, or "./unit-event.sh" when that is too long for trunk-recorder's buffer: which
+    # one depends on how deep tmp_path is (pytest-xdist's popen-gwN folders make it longer, #282)
+    script = (tmp_path / "tr" / "unit-event.sh").resolve()
+    assert [x["unitScript"] for x in conf["systems"]] == [
+        str(script) if len(str(script)) <= trunkrecd.UNIT_SCRIPT_MAX else "./unit-event.sh"]
     # the claim is the service's now (sizeup's own was taken over), in the agreed format
     c = claim_of("v4")
     assert c["app"] == "sizeup" and c["pid"] == SERVICE_PID and c["mode"] == P25 and set(c) == {"app", "pid", "mode", "since"}

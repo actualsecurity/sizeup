@@ -450,6 +450,7 @@ class CallIngest:
     def start(self, skip_existing: bool = True) -> CallIngest:
         if skip_existing:
             self.prime()
+        self._look()          # its state from the first look, not "starting" until the thread's first poll (#282)
         threading.Thread(target=self._run, name="p25-ingest", daemon=True).start()
         return self
 
@@ -503,14 +504,19 @@ class CallIngest:
             calls.append(call)
         return calls
 
+    def _look(self) -> bool:
+        """state / detail from whether trunk-recorder's capture dir is there; True when it is."""
+        if not self.dir.exists():
+            self.state, self.detail = "absent", f"no trunk-recorder output at {self.dir}"
+            return False
+        self.state = "ok"
+        self.detail = f"watching {self.dir.name}" + (
+            f" · last call {tz.hhmm(self.last_call)}" if self.last_call else "")
+        return True
+
     def _run(self) -> None:
         while not self._stop.is_set():
-            if not self.dir.exists():
-                self.state, self.detail = "absent", f"no trunk-recorder output at {self.dir}"
-            else:
-                self.state = "ok"
-                self.detail = f"watching {self.dir.name}" + (
-                    f" · last call {tz.hhmm(self.last_call)}" if self.last_call else "")
+            if self._look():
                 try:
                     calls = self.scan()
                 except Exception as e:                       # never let one bad file stop ingest
