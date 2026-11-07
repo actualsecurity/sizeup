@@ -191,12 +191,13 @@ const StationHealth = (() => {
       kids.push(el("h3", "hl-sub", "Hub errors"), dl([
         ["Rate", `${er.last5} in the last ${er.window_min} min (${er.per_min}/min)`,
           er.last5 > er.total_limit ? "hl-bad" : er.last5 ? "hl-warn" : "hl-ok"],
-        ["Since the hub started", `${er.total} error line${er.total === 1 ? "" : "s"}, ${er.signatures} different (${when(er.since)})`],
+        ["Since the hub started", `${er.total} since ${when(er.since)}, ${er.signatures} kind${er.signatures === 1 ? "" : "s"}`
+          + (er.dropped ? ` (${er.dropped} lines not read: too many at once)` : "")],
         ["Push", (er.on ? `on: one error over ${er.per_signature} or all over ${er.total_limit} in ${er.window_min} min`
           : "off (Settings > System > Hub error alerts)") + (er.alerting ? "; alerting now" : ""), er.alerting ? "hl-bad" : ""],
         ["Last notices", (er.pushes || []).slice(0, 3).map((p) => `${when(p.at)} ${p.title}`).join("; ")],
       ]));
-      if ((er.top || []).length) kids.push(table(["Source", "Type", "Message (digits stripped)", "Last 5 min", "This run", "Since", "Last", "Total"],
+      if ((er.top || []).length) kids.push(table(["Source", "Type", "Last message (digits stripped)", "Last 5 min", "This spike", "Since", "Last", "Total"],
         er.top.map((s) => [s.source, s.type, s.message, [s.last5, s.last5 > er.per_signature ? "hl-bad" : ""], s.count,
           when(s.first), when(s.last), s.total]), ""));
     }

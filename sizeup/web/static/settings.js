@@ -1685,11 +1685,9 @@ function sAtcTalkers(a) {
 // plus "back to normal". The thresholds count error lines in 5 min. Admins; the hub only.
 function sHubErrors(e) {
   const card = sCard(sCardHead("Hub error alerts", e.on.value ? "on" : "off",
-    sHelp(`The hub counts the error lines and tracebacks in its own log. One error (the same module, type and message) `
-      + `more than the first number of times in ${e.window_min} min, or all of them together more than the second, `
-      + `pushes one short notice to the status topic: the module, the type and the count, never the message. At most one `
-      + `per error per ${e.repeat_min} min, and a "back to normal" notice after ${e.quiet_min} quiet minutes. A one-off `
-      + `error is never pushed. Settings > Health shows the rate and the top errors either way.`)));
+    sHelp(`Pushes a notice to the status topic when one error repeats more than ${e.per_signature.value} times in `
+      + `${e.window_min} min, or all errors exceed ${e.total.value}. Names the module and type, never the message. `
+      + `At most hourly per error; 'back to normal' after ${e.quiet_min} quiet min.`)));
   card.id = "s-hub-errors";
   const [lab, cb] = sCheck(e.on.label, e.on.value, "Off: still counted on Settings > Health, nothing pushed");
   cb.disabled = !canDo("admin");

@@ -554,7 +554,7 @@ class HubApp(App):
         from sizeup import errwatch
         pub = (cfg.cloud_public_url or "").rstrip("/")
         self.error_watch = errwatch.ErrorWatch(notifier, settings=lambda: self.cad.settings.section(errwatch.SECTION), log=log,
-                                               click=f"{pub}/cad#settings/system/health" if pub else "")
+                                               click=f"{pub}/cad#settings/system/health" if pub else "", db=self.mdb)
         self.health.errors = self.error_watch
         if not notifier.enabled:
             log("health: no push for station alerts (no status or alerts topic in effect): Settings > Health and log only")

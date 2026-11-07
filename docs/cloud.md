@@ -286,15 +286,17 @@ and the alert history of the last 24 h (started, recovered, how long, where, whe
 `GET /api/cad/health`: admins only (`sizeup/cad/api.py` `ADMIN_READS`; a 403 for a dispatcher or a viewer),
 polled every 5 s while the tab is open and not otherwise.
 
-**The hub's own errors (#285, `sizeup/errwatch.py`):** the hub reads its own log (stdout and stderr): error lines
-("aircraft: OverflowError: ...", "aws transcribe ...: Connection: BlockingIOError: ...", "ERROR", "error:") and
-tracebacks, each under a signature (the source module, the exception type, the message with its digits stripped).
-One signature more than 10 times in 5 min, or more than 100 error lines of any kind in 5 min, pushes one short
-notice to the status topic, e.g. "Hub errors: aircraft OverflowError ×1,480 in 25 min · since 16:13": at most one
-per signature (and for the total) an hour, then "Hub errors back to normal" after 15 quiet minutes. A notice names
-the module, the type and the count, never the message. Settings → System → **Hub error alerts** (admins, the hub):
-on / off and the two numbers; Settings → Health: **Hub errors**, the rate and the top signatures. The access log
-(`http ...` lines) is not counted.
+**The hub's own errors (#285, `sizeup/errwatch.py`):** the hub reads its own log (stdout and stderr, queued and read
+on its own thread): error lines ("aircraft: OverflowError: ...", "aws transcribe ...: Connection: BlockingIOError: ...",
+"ERROR", "error:") and tracebacks (a chained one once). Each is counted under a signature of (source, type), both from
+fixed lists: the source is a sizeup module or a known log prefix (else "hub"), the type a known exception name (else
+"error"), so nothing a request or a message carries can be named in a notice. One signature more than 10 times in
+5 min, or more than 100 error lines of any kind in 5 min, pushes one short notice to the status topic, e.g. "Hub
+errors: aircraft OverflowError ×1,480 in 25 min · since 16:13": at most one per signature (and for the total) an
+hour, then "Hub errors back to normal" once it has been at or under its threshold 15 minutes. What was pushed is kept
+in `hub.sqlite` (meta "errwatch"), so a redeploy doesn't push a running fault again. Settings → System → **Hub error
+alerts** (admins, the hub): on / off and the two numbers; Settings → Health: **Hub errors**, the rate and the top
+signatures with their last message (admins only). The access log (`http ...` lines) is not counted.
 
 ### The alert and status topics (ntfy)
 
