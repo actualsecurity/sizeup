@@ -953,6 +953,21 @@ def _stt_aws(stt: dict) -> dict:
                 stt_aws_vocabulary=vocab, stt_record_only=record_only)
 
 
+# [adapter] (#301): the station's incident-source adapter, read only by the station's updater
+# (sizeup/cloud/autoupdate.py, written by sudo sizeup-station adapter setup): never its credentials (station.env).
+# configupdate.py looks for ADAPTER_KEYS here to know a release reads the table.
+ADAPTER_KEYS = {"repo", "ref", "env"}
+
+
+def _adapter(data: dict) -> None:
+    a = _take(data.get("adapter", {}), "adapter", ADAPTER_KEYS)
+    if not isinstance(a.get("repo", ""), str) or not isinstance(a.get("ref", ""), str):
+        raise ConfigError("adapter.repo / adapter.ref: text (sudo sizeup-station adapter setup)")
+    env = a.get("env", [])
+    if not isinstance(env, list) or not all(isinstance(x, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", x) for x in env):
+        raise ConfigError('adapter.env: a list of variable names, e.g. ["FEED_USER", "FEED_PASS"]')
+
+
 def load(path: str | Path) -> Config:
     path = Path(path)
     base = path.parent
@@ -962,7 +977,8 @@ def load(path: str | Path) -> Config:
         raise ConfigError(f"{path}: {e}") from e
     _take(data, "config", {"station", "web", "radio", "tones", "stt", "p25", "mdc", "units", "storage", "map",
                            "cad", "dispatch", "cloud", "prealert", "roads", "roadwork", "gis", "trains", "weather", "alerts",
-                           "aircraft", "geo", "atc"})
+                           "aircraft", "geo", "atc", "adapter"})
+    _adapter(data)
     st = _take(data.get("station", {}), "station", {"id", "name", "auto_update", "lat", "lon"})
     if not isinstance(st.get("auto_update", True), bool):
         raise ConfigError("station.auto_update: true or false")

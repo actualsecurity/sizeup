@@ -139,7 +139,7 @@ nothing enabled or started, no prompts); `--stage SHA` and `--activate NAME` are
 | readsb v3.16.21 (wiedehopf), RTL-SDR with the bias-tee switch, against rtl-sdr-blog's librtlsdr: the ADS-B decoder (#235) | `/opt/sizeup/readsb` -> `builds/readsb-<tag>-<commit>` |
 | whisper model, SHA-256 checked; `whisper.bin` points at the one in use | `/opt/sizeup/models` |
 | config, from `config.station.toml` once and never overwritten (`config.toml.dist` = the current template) | `/etc/sizeup/config.toml` |
-| secrets `SIZEUP_STATION_TOKEN`, `SIZEUP_ACCESS_CLIENT_ID`, `SIZEUP_ACCESS_CLIENT_SECRET` (root:sizeup 0640) | `/etc/sizeup/station.env` |
+| secrets `SIZEUP_STATION_TOKEN`, `SIZEUP_ACCESS_CLIENT_ID`, `SIZEUP_ACCESS_CLIENT_SECRET`, and an incident-source adapter's (root 0600) | `/etc/sizeup/station.env` |
 | what `update` fetches (repo, ref), the model, auto-update on / off | `/etc/sizeup/install.conf` |
 | state: CAD, outbox, `cloud.json`, captures, trunk-recorder's working dir | `/var/lib/sizeup` |
 | `sizeup-station.service`, `sizeup-whisper.service`, `sizeup-trunk-recorder.service` (trunk-recorder on the dongle sizeup gives Fire/EMS 15: [below](#trunk-recorder-its-own-service)), `sizeup-adsb.service` (the ADS-B decoder: idle until a dongle is named for it), `sizeup-health.timer`, `sizeup-update.path` / `.timer` / `.service`, journald cap (200 MB, kept across reboots) | `/etc/systemd/...` |
@@ -291,6 +291,52 @@ with a link in its place (a rename: nothing rebuilt), makes a release of the com
 to trunk-recorder's copy, switches and restarts once. If main doesn't answer within 90 s it switches
 back to the release of the old commit by itself. Safe to run again at any point. `/opt/sizeup/app`
 and `/opt/sizeup/venv` stay until that old release is pruned (after two more updates), then go.
+
+## Incident-source adapter (station only)
+
+A private, read-only incident-source adapter (#301; the interface it implements: #297, `sizeup/sources/`) lives in a
+repo of its own and is installed and run **on the station only, never on the hub**. Without one set up, nothing below
+happens and updates are exactly as above.
+
+On the station:
+
+```sh
+sudo sizeup-station adapter setup    # asks for the repo (git@github.com:OWNER/REPO.git), the branch or tag
+                                     # (main), its credential variable names; prints a deploy key and the command
+                                     # to add it; then each credential, hidden
+sudo sizeup-station adapter status   # repo, installed commit, loaded or failed, which variables are set
+sudo sizeup-station adapter remove   # key, credentials and [adapter] out; the next release runs without it
+```
+
+Setup makes `/etc/sizeup/adapter-deploy-key` (ed25519, root 0600) and prints **only its public half**, with the
+command to run on your Mac, where `gh` is signed in (read-only: no `--allow-write`):
+
+```sh
+echo 'ssh-ed25519 AAAA... sizeup-adapter@station' | gh repo deploy-key add - -R OWNER/REPO --title 'sizeup station HOST'
+```
+
+The credentials go into `/etc/sizeup/station.env` only (root 0600, never echoed, logged or sent to the hub); the
+config gets `[adapter] repo`, `ref` and `env` (the variable names). An older release refuses that table, so while a
+rollback would go to one, it waits in `/etc/sizeup/adapter-pending.json` and is written at the next switch
+(`sizeup/cloud/configupdate.py`, the same rule as the other config additions).
+
+How it updates (`sizeup/cloud/autoupdate.py`): every update, and every check while the station is on the hub's build,
+fetches the ref over SSH with that key (`StrictHostKeyChecking=accept-new`, GitHub's key pinned in
+`/etc/sizeup/known_hosts`) into `/opt/sizeup/adapter.git`. The release is staged as usual, then copied (hard links)
+to `releases/<sha>-a<adapter commit>`, the adapter's wheel built as the sizeup user and installed into that copy's
+venv, and its **preflight** run as the sizeup user with no credentials: it imports, has a `sizeup.incident_sources`
+entry point, and its module's `self_check()` (if it has one) returns `""` or `None`. A failure: no switch, that
+adapter commit isn't tried again until the ref moves, and a sizeup update meanwhile keeps the adapter that runs. A new
+adapter commit alone is a side-by-side rebuild of the same sha, with the same quiet-moment wait, `/healthz` check and
+switch back. `sizeup-station rollback` goes back to the previous release, its adapter with it. `ADAPTER.json` in a
+release says what it has.
+
+Watching it: `sizeup-station status` / `doctor` ("adapter: NAME abc1234 loaded"), the station page's Hub row and the
+hub's Settings > Health (Version and updates > Adapter): the repo's short name, the installed commit, loaded or
+failed, and each source's own health once the station runs it. Never a credential or the repo's URL.
+
+The hub refuses: a hub's config (`[cloud] role = "hub"`) makes setup, the updater and the self-check refuse, and the
+hub process names any adapter installed in its environment in its log and never loads it.
 
 ## Switching over from the Mac
 

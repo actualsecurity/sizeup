@@ -194,10 +194,36 @@ class StationLink:
             detail += f" · {self.outbox.dropped_audio} clip(s) dropped to keep the outbox under its limit"
         v = self.updates.status()
         detail += f" · version: {v['text']}"
+        ad = self.adapter(v)
+        if ad.get("text"):
+            detail += f" · adapter: {ad['text']}"
         if not word and v["state"] in ("updating", "failed"):
             word = "updating" if v["state"] == "updating" else "update failed"
         return {"label": "Hub", "mhz": None, "state": state, "word": word, "detail": detail, "open": False,
                 "quieting_db": None, "restarts": 0, "last_heard": None}
+
+    def adapter(self, v: dict | None = None) -> dict:
+        """The incident-source adapter (#301): what the release has installed, the updater's last word, and each
+        source's own health from the runner (#297, when there is one). Names and states only, never a credential."""
+        ad = dict((v or self.updates.status()).get("adapter") or {})
+        runner = getattr(self.app, "sources_runner", None)
+        try:
+            rows = runner.state() if runner is not None else []
+        except Exception:  # noqa: BLE001 - a report: never in the way of the status
+            rows = []
+        ad["health"] = [{k: str(r.get(k) or "")[:120] for k in ("source", "label", "state", "reason")}
+                        for r in rows if isinstance(r, dict)][:10]
+        if ad["health"] and ad.get("text"):
+            ad["text"] += " · " + ", ".join(f"{h['label'] or h['source']} {h['state'] or '?'}"
+                                            + (f" ({h['reason']})" if h["reason"] and h["state"] != "ok" else "")
+                                            for h in ad["health"])
+        return ad
+
+    def version(self) -> dict:
+        """The updater's status for the hub, the adapter's with its runtime health."""
+        v = self.updates.status()
+        v["adapter"] = self.adapter(v)
+        return v
 
     def cad_cloud(self) -> dict:
         """The station's console header: the CAD of record is the hub's."""
@@ -241,7 +267,7 @@ class StationLink:
                "sdr": app.sdr(), "rerun": dict(app.rerun, pending=len(app._rerun_ids)),
                "channels": app.channels_applied(),
                "outbox": {"pending": n, "oldest": oldest, "dropped_audio": self.outbox.dropped_audio},
-               "version": self.updates.status()}
+               "version": self.version()}
         try:
             out["health"] = station_metrics(app, self.metrics)
         except Exception as e:  # health is a report: never in the way of the status itself

@@ -43,16 +43,31 @@ side by side: the new release is built and checked next to the running one, then
     paused   install.conf SIZEUP_AUTO_UPDATE=off (sizeup-station autoupdate off), [station]
              auto_update = false in the config, a station installed with another --ref than main
              (testing a branch: the hub runs main), or one installed from a folder (--from-dir).
+    adapter  the station's private, read-only incident-source adapter (#301; the interface: #297), kept in a repo
+             of its own and never on the hub. Only with its deploy key (/etc/sizeup/adapter-deploy-key) and
+             [adapter] repo in the config (sudo sizeup-station adapter setup); without them nothing here changes.
+             Each update (and each run while the station is on the hub's build) fetches [adapter] ref over SSH
+             into /opt/sizeup/adapter.git; the release is staged as usual (releases/<sha>), then copied (hard
+             links) to releases/<sha>-a<commit12> with the adapter pip-installed into that copy's venv (the
+             wheel built as the sizeup user) and preflighted: it imports, has a sizeup.incident_sources entry
+             point, and its module's self_check() (if it has one) returns "" or None, run as the sizeup user
+             with no credentials. A failure: no switch. A new adapter commit alone is a side-by-side rebuild of
+             the same sha; a rollback goes back to the previous release, its adapter with it. A failed adapter
+             commit is not tried again until the ref moves (a sizeup update meanwhile keeps the adapter that
+             runs). ADAPTER.json in the release says what it has; state.json "adapter" what the updater saw.
 
     python3 autoupdate.py run | status | doctor | on | off | prune | rollback
+    python3 autoupdate.py adapter setup | status | remove | stage RELEASE
 """
 
 from __future__ import annotations
 
 import argparse
 import fcntl
+import getpass
 import json
 import os
+import pwd
 import re
 import shutil
 import stat
@@ -93,6 +108,128 @@ NOT_RUNTIME = ("docs/", "tests/", ".github/", "deploy/hub/", "deploy/aws/", "Doc
 NOT_RADIOS = ("Hub", "STT")
 TR_UNIT = "sizeup-trunk-recorder.service"      # trunk-recorder's own service (#71, sizeup/radio/trunkrecd.py)
 WINDOWS_STALE = "Windows scripts out of date: run install-windows.ps1"
+SVC_USER = "sizeup"
+
+# -- the incident-source adapter (#301) ---------------------------------------------------------------
+ADAPTER_GROUP = "sizeup.incident_sources"   # the entry-point group adapters register in (#297: sizeup/sources)
+ADAPTER_FILE = "ADAPTER.json"               # in a release built with an adapter: what its venv has
+ADAPTER_REF = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,199}")
+ADAPTER_ENV = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
+# the station's own variables (station.env, the unit): never an adapter's credential
+RESERVED_ENV = {"SIZEUP_STATION_TOKEN", "SIZEUP_ACCESS_CLIENT_ID", "SIZEUP_ACCESS_CLIENT_SECRET", "SIZEUP_BUILD",
+                "SIZEUP_STATE_DIR", "SIZEUP_UPDATE_DIR", "SIZEUP_STT_EXTERNAL", "SIZEUP_TRUNK_RECORDER_UNIT",
+                "SIZEUP_INCIDENT_SOURCES", "SIZEUP_INCIDENT_SOURCES_PATH", "HOME", "PATH", "USER", "SHELL", "LANG"}
+RESERVED_PREFIX = ("LD_", "PYTHON", "SYSTEMD_", "GIT_", "SSH_")
+ADAPTER_CHECK_S = 120.0
+HUB_REFUSED = "incident-source adapters run on the station only, never on the hub"
+# Run by the release's venv python, as the sizeup user, no credentials: the adapter imports and passes its self-check.
+ADAPTER_CHECK = r'''
+import importlib, importlib.metadata as md, json, sys
+dist, role, group = sys.argv[1], sys.argv[2], sys.argv[3]
+def done(ok, why="", **kw):
+    print("\n" + json.dumps(dict(kw, ok=ok, why=str(why)[:300])))
+    sys.exit(0 if ok else 3)
+if role.strip().lower() == "hub":
+    done(False, "incident-source adapters run on the station only, never on the hub")
+try:
+    d = md.distribution(dist)
+except md.PackageNotFoundError:
+    done(False, f"{dist} isn't installed")
+eps = [e for e in d.entry_points if e.group == group]
+if not eps:
+    done(False, f"{dist} has no {group} entry point")
+names = []
+for e in eps:
+    try:
+        f = e.load()
+        mod = sys.modules.get(e.module) or importlib.import_module(e.module)
+    except Exception as x:
+        done(False, f"{e.name}: import: {type(x).__name__}: {x}")
+    if not callable(f):
+        done(False, f"{e.name}: {e.value} isn't callable")
+    chk = getattr(mod, "self_check", None)
+    if callable(chk):
+        try:
+            r = chk()
+        except Exception as x:
+            done(False, f"{e.name}: self_check: {type(x).__name__}: {x}")
+        if r not in (None, "", True):
+            done(False, f"{e.name}: self_check: {r}")
+    names.append(e.name)
+done(True, version=d.version, sources=names)
+'''
+
+
+def adapter_repo_problem(url) -> str:
+    """Why this isn't an adapter repo URL ("" when it is): an SSH git URL (git@host:owner/repo.git,
+    ssh://git@host/owner/repo.git), or an absolute local path (a repository on this machine: CI, tests)."""
+    u = str(url or "").strip()
+    if re.fullmatch(r"[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:[A-Za-z0-9._][A-Za-z0-9._/-]*", u):
+        return ""
+    if re.fullmatch(r"ssh://[A-Za-z0-9._-]+@[A-Za-z0-9.-]+(:[0-9]{1,5})?/[A-Za-z0-9._][A-Za-z0-9._/-]*", u):
+        return ""
+    if re.fullmatch(r"/[A-Za-z0-9._][A-Za-z0-9._/-]*", u):
+        return ""
+    return "an SSH git URL (git@github.com:owner/repo.git) or a local path"
+
+
+def repo_name(url) -> str:
+    """The repo's short name (no host, no owner): what status and the hub show."""
+    tail = re.split(r"[/:]", str(url or "").rstrip("/"))[-1]
+    return (tail[:-4] if tail.endswith(".git") else tail)[:40] or "?"
+
+
+def github_slug(url) -> str:
+    """owner/repo for a GitHub SSH URL ("" otherwise): for the gh command printed at setup."""
+    m = re.fullmatch(r"(?:[A-Za-z0-9._-]+@github\.com:|ssh://[A-Za-z0-9._-]+@github\.com(?::[0-9]+)?/)"
+                     r"([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+?)(?:\.git)?/?", str(url or "").strip())
+    return f"{m.group(1)}/{m.group(2)}" if m else ""
+
+
+def env_problem(name: str) -> str:
+    if not ADAPTER_ENV.fullmatch(name):
+        return f"{name!r}: A-Z, 0-9 and _, starting with a letter"
+    if name in RESERVED_ENV or name.startswith(RESERVED_PREFIX):
+        return f"{name}: the station's own (pick another name)"
+    return ""
+
+
+def env_quote(value: str) -> str:
+    """A value as systemd's EnvironmentFile reads it back exactly: double quotes, \\ " ` $ escaped."""
+    if any(c in value for c in "\n\r\0"):
+        raise ValueError("one line, please")
+    return '"' + re.sub(r'([\\"`$])', r"\\\1", value) + '"'
+
+
+def release_name(sha: str, commit: str = "") -> str:
+    """releases/<sha>, or releases/<sha>-a<adapter commit, 12> for one built with an adapter."""
+    return f"{sha}-a{commit[:12]}" if commit else sha
+
+
+def adapter_view(installed: dict | None, rec: dict | None) -> dict:
+    """{state, repo, commit, text}: the adapter as status, the station page and the hub show it (no credentials, no
+    URL). state: off | loaded | failed | pending. installed: the running release's ADAPTER.json; rec: state.json's."""
+    rec = rec if isinstance(rec, dict) else {}
+    installed = installed if isinstance(installed, dict) else None
+    if installed is None and not rec.get("configured"):
+        return {"state": "off", "repo": "", "commit": "", "text": ""}
+    name = str(rec.get("repo") or repo_name((installed or {}).get("repo")))
+    failed = rec.get("failed") if isinstance(rec.get("failed"), dict) else {}
+    remote = str(rec.get("remote") or "")
+    f = failed.get(remote) if remote else None
+    why = (str(f.get("why") or "?") if isinstance(f, dict) else "")
+    err = str(rec.get("error") or "")[:200]
+    if installed is not None:
+        c = str(installed.get("commit") or "")
+        text = f"{name} {c[:7]} loaded"
+        if why and not remote.startswith(c or "-"):
+            text += f" · {remote[:7]} failed: {why[:200]}"
+        if err:
+            text += f" · {err}"
+        return {"state": "failed" if why else "loaded", "repo": name, "commit": c[:12], "text": text}
+    why = why or err
+    return {"state": "failed" if why else "pending", "repo": name, "commit": "",
+            "text": f"{name} not installed" + (f": {why[:200]}" if why else " yet")}
 
 
 def _console_tz():
@@ -260,8 +397,11 @@ class Watch:
 
     def __init__(self, own: str | None = None, run_dir: str | None = None,
                  state_path: str = "/var/lib/sizeup-update/state.json", clock: Callable[[], float] = time.time,
-                 log: Callable[[str], None] = print):
+                 log: Callable[[str], None] = print, release: str | Path | None = None):
         self.own = norm(os.environ.get("SIZEUP_BUILD", "") if own is None else own)
+        # the release this process runs (rel/sizeup/cloud/autoupdate.py): its ADAPTER.json, if it has an adapter
+        self.release = Path(release) if release is not None else Path(__file__).resolve().parents[2]
+        self._installed: dict | None = None
         d = os.environ.get("SIZEUP_UPDATE_DIR", "") if run_dir is None else run_dir
         self.want = Path(d) / "update-wanted" if d else None
         self.state_path = Path(state_path)
@@ -314,10 +454,18 @@ class Watch:
         out["failed"] = _newest_failed(st.get("failed") if isinstance(st.get("failed"), dict) else {}, 5)
         return out
 
+    def adapter(self) -> dict:
+        """The incident-source adapter this release runs, and what the updater last saw (adapter_view: no URL, no
+        credentials)."""
+        if self._installed is None:          # (a release never changes under a running process: read once)
+            self._installed = read_state(self.release / ADAPTER_FILE)
+        self.state()
+        return adapter_view(self._installed or None, self._read[1].get("adapter"))
+
     def status(self) -> dict:
-        """{build, hub, update, state, text}: in the station's status to the hub, and its Hub row."""
+        """{build, hub, update, state, text, adapter}: in the station's status to the hub, and its Hub row."""
         upd = self.state()
-        return dict({"build": self.own, "hub": self.hub_build, "update": upd},
+        return dict({"build": self.own, "hub": self.hub_build, "update": upd, "adapter": self.adapter()},
                     **describe(self.own, self.hub_build, upd, self.clock()))
 
 
@@ -342,6 +490,14 @@ class Paths:
     known_hosts: Path = Path("/etc/sizeup/known_hosts")
     windows: Path = Path("/mnt/c/ProgramData/sizeup")
     systemd: Path = Path("/etc/systemd/system")
+    adapter_key: Path = Path("/etc/sizeup/adapter-deploy-key")          # the adapter repo's read-only deploy key
+    adapter_pending: Path = Path("/etc/sizeup/adapter-pending.json")    # setup's [adapter], until the config has it
+    env: Path = Path("/etc/sizeup/station.env")
+    marks: Path = Path("/etc/sizeup/config-updates")
+
+    @property
+    def adapter_repo(self) -> Path:
+        return self.opt / "adapter.git"
 
     @property
     def repo(self) -> Path:
@@ -561,11 +717,354 @@ class Updater:
             except (OSError, tomllib.TOMLDecodeError):
                 cfg = {}
             station, web = cfg.get("station") or {}, cfg.get("web") or {}
+            cloud, adapter = cfg.get("cloud") or {}, cfg.get("adapter") or {}
             self._settings = {"ref": kv.get("SIZEUP_REF", MAIN), "source": kv.get("SIZEUP_SOURCE", "git"),
                               "switch": kv.get("SIZEUP_AUTO_UPDATE", "on"),
                               "config": station.get("auto_update", True) if isinstance(station, dict) else True,
-                              "port": int(web.get("port", PORT)) if isinstance(web, dict) else PORT}
+                              "port": int(web.get("port", PORT)) if isinstance(web, dict) else PORT,
+                              "role": str(cloud.get("role") or "") if isinstance(cloud, dict) else "",
+                              "adapter": adapter if isinstance(adapter, dict) else {}}
         return self._settings
+
+    # -- the incident-source adapter (#301) ----------------------------------------------------------------------
+
+    def adapter(self) -> dict:
+        """The adapter this station is set up for: {repo, ref, env, why}; {} = none (no key and no repo: nothing
+        changes). why: set up, but not usable ("" = go). setup's values (adapter-pending.json) until the config has
+        them (configupdate.py: [adapter] waits while a rollback would go to a release that can't read it)."""
+        s = self.settings()
+        a = read_state(self.p.adapter_pending) or s["adapter"]
+        repo, ref = str(a.get("repo") or "").strip(), str(a.get("ref") or MAIN).strip()
+        env = [str(x) for x in a.get("env") or [] if isinstance(x, str)] if isinstance(a.get("env"), list) else []
+        key = self.p.adapter_key.is_file()
+        if not key and not repo:
+            return {}
+        out = {"repo": repo, "ref": ref, "env": env, "why": ""}
+        if str(s.get("role") or "").strip().lower() == "hub":
+            out["why"] = HUB_REFUSED
+        elif not key:
+            out["why"] = f"no deploy key ({self.p.adapter_key}): sudo sizeup-station adapter setup"
+        elif not repo:
+            out["why"] = "no [adapter] repo: sudo sizeup-station adapter setup"
+        elif adapter_repo_problem(repo):
+            out["why"] = f"[adapter] repo: {adapter_repo_problem(repo)}"
+        elif not ADAPTER_REF.fullmatch(ref):
+            out["why"] = "[adapter] ref: a branch or tag name"
+        return out
+
+    def key_open(self) -> str:
+        """Why the adapter's deploy key is readable by others ("" when it is root's alone, or not there)."""
+        try:
+            st = self.p.adapter_key.stat()
+        except OSError:
+            return ""
+        if st.st_mode & 0o077 or (os.geteuid() == 0 and st.st_uid != 0):
+            return f"{self.p.adapter_key} is {stat.filemode(st.st_mode)} uid {st.st_uid} (want root 600)"
+        return ""
+
+    def adapter_ssh(self) -> str:
+        return (f"ssh -i {self.p.adapter_key} -o IdentitiesOnly=yes -o UserKnownHostsFile={self.p.known_hosts} "
+                "-o StrictHostKeyChecking=accept-new -o BatchMode=yes -o ConnectTimeout=20")
+
+    def adapter_git(self, *args: str, check: bool = True, timeout: float = 300) -> str:
+        """git in /opt/sizeup/adapter.git, as root, over SSH with the adapter's own deploy key."""
+        r = subprocess.run(["git", "--no-replace-objects", f"--git-dir={self.p.adapter_repo}", *args], capture_output=True,
+                           text=True, timeout=timeout, env=dict(os.environ, GIT_SSH_COMMAND=self.adapter_ssh(),
+                                                                GIT_TERMINAL_PROMPT="0"))
+        if check and r.returncode != 0:
+            lines = (r.stderr or r.stdout).strip().splitlines()
+            raise StepError(f"adapter git {args[0]}: {lines[-1] if lines else 'failed'}")
+        return r.stdout.strip() if r.returncode == 0 else ""
+
+    def fetch_adapter(self, ad: dict) -> str:
+        """The commit [adapter] ref names on its repo now (fetched into /opt/sizeup/adapter.git). StepError if not."""
+        if not (self.p.adapter_repo / "HEAD").is_file():
+            self.p.adapter_repo.mkdir(parents=True, exist_ok=True)
+            self.adapter_git("init", "-q", "--bare")
+        try:
+            self.adapter_git("fetch", "-q", "--force", "--no-tags", "--", ad["repo"], f"+{ad['ref']}:refs/sizeup/adapter")
+        except subprocess.TimeoutExpired:
+            raise StepError("adapter git fetch: timed out") from None
+        sha = self.adapter_git("rev-parse", "--verify", "--quiet", "refs/sizeup/adapter^{commit}", check=False)
+        if not FULL_SHA.fullmatch(sha):
+            raise StepError(f"adapter: no commit at {ad['ref']}")
+        return sha
+
+    def adapter_reach(self, ad: dict) -> str:
+        """"" when the adapter's repo answers with its key (git ls-remote), else what it said."""
+        if not ad or ad.get("why"):
+            return (ad or {}).get("why") or "not set up"
+        try:
+            r = subprocess.run(["git", "ls-remote", "--", ad["repo"], ad["ref"]], capture_output=True, text=True,
+                               timeout=60, env=dict(os.environ, GIT_SSH_COMMAND=self.adapter_ssh(), GIT_TERMINAL_PROMPT="0"))
+        except (OSError, subprocess.SubprocessError) as e:
+            return f"{type(e).__name__}: {e}"
+        if r.returncode != 0:
+            lines = [ln for ln in r.stderr.strip().splitlines() if ln.strip()]
+            return lines[-1] if lines else f"git ls-remote: exit {r.returncode}"
+        return "" if r.stdout.strip() else f"no {ad['ref']} on the repo"
+
+    def release_adapter(self, name: str) -> dict | None:
+        """What release NAME has installed (its ADAPTER.json), None when it has no adapter."""
+        d = read_state(self.p.releases / name / ADAPTER_FILE) if name else {}
+        return d if d.get("commit") else None
+
+    def adapter_rec(self, st: dict) -> dict:
+        rec = st.get("adapter")
+        if not isinstance(rec, dict):
+            rec = st["adapter"] = {}
+        for k in ("failed",):
+            if not isinstance(rec.get(k), dict):
+                rec[k] = {}
+        return rec
+
+    def as_user(self) -> list[str]:
+        """The adapter's code (its build, import and self-check) never runs as root: as the sizeup user."""
+        if os.geteuid() != 0:
+            return []
+        return ["runuser", "-u", SVC_USER, "--"]
+
+    def pip_install(self, rel: Path, src: Path, dist: str, drop: list[str]) -> None:
+        """The adapter into rel's venv: its wheel built as the sizeup user (none of its code runs as root), then
+        installed; the adapters it replaces (drop: other names installed before) uninstalled first."""
+        py = str(rel / "venv" / "bin" / "python")
+        wheels = Path(self.p.work) / f"adapter-wheel-{os.getpid()}"
+        shutil.rmtree(wheels, ignore_errors=True)
+        wheels.mkdir(parents=True)
+        try:
+            if os.geteuid() == 0:             # (the sizeup user builds it: its own copy of the source)
+                pw = pwd.getpwnam(SVC_USER)
+                for p in (wheels, src, *src.rglob("*")):
+                    os.lchown(p, pw.pw_uid, pw.pw_gid)
+            self._run_out([*self.as_user(), "env", f"HOME={wheels}", py, "-m", "pip", "wheel", "-q", "--no-deps",
+                           "--no-cache-dir", "--disable-pip-version-check", "-w", str(wheels), str(src)],
+                          "adapter: wheel", cwd=str(wheels))
+            got = sorted(wheels.glob("*.whl"))
+            if len(got) != 1:
+                raise StepError(f"adapter: wheel: {len(got)} wheels built, not 1")
+            if drop:
+                self._run_out([py, "-m", "pip", "uninstall", "-y", "-q", "--disable-pip-version-check", *drop],
+                              "adapter: uninstall")
+            self._run_out([py, "-m", "pip", "install", "-q", "--no-cache-dir", "--disable-pip-version-check",
+                           "--upgrade", "--upgrade-strategy", "only-if-needed", str(got[0])], "adapter: pip install")
+        finally:
+            shutil.rmtree(wheels, ignore_errors=True)
+
+    def pip_uninstall(self, rel: Path, dists: list[str]) -> None:
+        """The adapters a release's venv may have from the venv it was linked from: out (none wanted)."""
+        if dists:
+            self._run_out([str(rel / "venv" / "bin" / "python"), "-m", "pip", "uninstall", "-y", "-q",
+                           "--disable-pip-version-check", *dists], "adapter: uninstall")
+
+    def self_check(self, rel: Path, dist: str) -> dict:
+        """The adapter imports in that release, as the sizeup user, with no credentials: {version, sources}.
+        StepError(PREFLIGHT_EXIT) when it doesn't."""
+        env = {"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": "/var/lib/sizeup" if os.geteuid() == 0 else str(rel),
+               "PYTHONPATH": str(rel), "PYTHONDONTWRITEBYTECODE": "1", "LANG": "C.UTF-8"}
+        try:
+            r = subprocess.run([*self.as_user(), "env", "-i", *(f"{k}={v}" for k, v in env.items()),
+                                str(rel / "venv" / "bin" / "python"), "-c", ADAPTER_CHECK, dist,
+                                self.settings().get("role") or "station", ADAPTER_GROUP],
+                               capture_output=True, text=True, timeout=ADAPTER_CHECK_S, cwd=str(rel))
+        except subprocess.TimeoutExpired:
+            raise StepError(f"adapter self-check: no answer in {ADAPTER_CHECK_S:g} s", PREFLIGHT_EXIT) from None
+        except OSError as e:
+            raise StepError(f"adapter self-check: {e}", PREFLIGHT_EXIT) from None
+        lines = [ln for ln in (r.stdout or "").splitlines() if ln.strip()]
+        try:
+            d = json.loads(lines[-1]) if lines else {}
+        except ValueError:
+            d = {}
+        if r.returncode != 0 or not d.get("ok"):
+            why = d.get("why") or ((r.stderr or "").strip().splitlines() or ["failed"])[-1]
+            raise StepError(f"adapter self-check: {why}"[:300], PREFLIGHT_EXIT)
+        return {"version": str(d.get("version") or "")[:40], "sources": [str(x)[:40] for x in d.get("sources") or []][:20]}
+
+    def _run_out(self, argv: list[str], what: str, cwd: str | None = None) -> None:
+        try:
+            r = subprocess.run(argv, capture_output=True, text=True, timeout=900, cwd=cwd)
+        except (OSError, subprocess.SubprocessError) as e:
+            raise StepError(f"{what}: {type(e).__name__}: {e}") from None
+        if r.returncode != 0:
+            lines = [ln for ln in (r.stderr or r.stdout or "").strip().splitlines() if ln.strip()]
+            raise StepError(f"{what}: {lines[-1] if lines else f'exit {r.returncode}'}"[:300])
+
+    def adapter_dist(self, src: Path) -> str:
+        """The adapter's distribution name: [project] name in its pyproject.toml."""
+        try:
+            name = tomllib.loads((src / "pyproject.toml").read_text()).get("project", {}).get("name", "")
+        except (OSError, tomllib.TOMLDecodeError, AttributeError) as e:
+            raise StepError(f"adapter: pyproject.toml: {e}", PREFLIGHT_EXIT) from None
+        if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}", name):
+            raise StepError("adapter: no [project] name in its pyproject.toml", PREFLIGHT_EXIT)
+        return name
+
+    def build_adapter(self, base: str, ad: dict, commit: str, st: dict) -> str:
+        """releases/<base>-a<commit12>: releases/<base> as hard links, the adapter at commit pip-installed into its
+        venv, then its self-check. The name; StepError (PREFLIGHT_EXIT: it installed, but doesn't work) if not."""
+        name = release_name(base, commit)
+        rel, tmp = self.p.releases / name, self.p.releases / f".staging-{name}"
+        if (rel / ".complete").is_file() and (self.release_adapter(name) or {}).get("commit") == commit:
+            self.note(f"auto-update: release {name}: already staged")
+            return name
+        src = Path(self.p.work) / f"adapter-src-{commit[:12]}"
+        for d in (tmp, rel, src):
+            shutil.rmtree(d, ignore_errors=True)
+        try:
+            self._run_out(["cp", "-al", str(self.p.releases / base), str(tmp)], "adapter: copy the release")
+            for f in tmp.iterdir():               # (the release's own small files: copies, never shared)
+                if f.is_file() and not f.is_symlink():
+                    data = f.read_bytes()
+                    f.unlink()
+                    f.write_bytes(data)
+            (tmp / ".complete").unlink(missing_ok=True)
+            src.mkdir(parents=True)
+            arch = subprocess.run(["git", f"--git-dir={self.p.adapter_repo}", "archive", "--format=tar", commit],
+                                  capture_output=True, timeout=300)
+            if arch.returncode != 0:
+                raise StepError(f"adapter: git archive {commit[:12]}: {arch.stderr.decode(errors='replace').strip()[-200:]}")
+            subprocess.run(["tar", "-x", "-C", str(src)], input=arch.stdout, check=True, capture_output=True, timeout=300)
+            dist = self.adapter_dist(src)
+            rec = self.adapter_rec(st)
+            drop = [d for d in rec.get("dists") or [] if isinstance(d, str) and d != dist]
+            self.note(f"auto-update: release {name}: adapter {repo_name(ad['repo'])} {commit[:7]} ({dist}) into its venv")
+            self.pip_install(tmp, src, dist, drop)
+            rec["dists"] = sorted({*[d for d in rec.get("dists") or [] if isinstance(d, str)], dist})[-10:]
+            got = self.self_check(tmp, dist)
+            (tmp / ADAPTER_FILE).write_text(json.dumps(
+                {"repo": ad["repo"], "ref": ad["ref"], "commit": commit, "dist": dist, "at": self.clock(), **got},
+                indent=1, sort_keys=True) + "\n")
+            (tmp / ADAPTER_FILE).chmod(0o644)
+            os.replace(tmp, rel)
+            (rel / ".complete").touch()
+        except subprocess.SubprocessError as e:
+            raise StepError(f"adapter: {type(e).__name__}: {e}"[:300]) from None
+        finally:
+            shutil.rmtree(src, ignore_errors=True)
+            shutil.rmtree(tmp, ignore_errors=True)
+        self.note(f"auto-update: release {name}: adapter preflight ok ({', '.join(got['sources'])})")
+        return name
+
+    def clean_base(self, base: str, st: dict) -> None:
+        """No adapter wanted: the release's venv (linked from one that had one) without it."""
+        dists = [d for d in self.adapter_rec(st).get("dists") or [] if isinstance(d, str)]
+        if dists and base != self.current()[0]:
+            self.pip_uninstall(self.p.releases / base, dists)
+
+    def adapter_check(self, st: dict, name: str, build: str) -> int:
+        """On the hub's build already: a new adapter commit (or one set up, or removed) is a side-by-side rebuild of
+        the same sha. Nothing without an adapter, as before."""
+        ad, have = self.adapter(), self.release_adapter(name)
+        if not ad and have is None:
+            return 0
+        if not FULL_SHA.fullmatch(build or ""):
+            return 0
+        rec = self.adapter_rec(st)
+        if ad.get("why") and ad.get("repo") and self.p.adapter_key.is_file() and \
+                str(self.settings().get("role") or "").lower() != "hub":
+            if rec.get("error") != ad["why"]:
+                self.save(st, adapter=dict(rec, error=ad["why"], configured=True))
+                self.note(f"auto-update: adapter: {ad['why']}")
+            return 0
+        want = None if ad.get("why") or not ad else ad
+        if want is None:
+            if have is None:
+                return 0
+            return self.update(st, name, build, build, adapter=(None, ""))
+        try:
+            commit = self.fetch_adapter(want)
+        except StepError as e:
+            if rec.get("error") != str(e):
+                self.save(st, adapter=dict(rec, error=str(e)[:300], configured=True, repo=repo_name(want["repo"]),
+                                           ref=want["ref"]))
+                self.note(f"auto-update: {e}: staying as it is")
+            return 0
+        rec.update(configured=True, repo=repo_name(want["repo"]), ref=want["ref"], remote=commit, error="",
+                   checked=self.clock())
+        if have is not None and have.get("commit") == commit and have.get("repo") == want["repo"]:
+            self.save(st)
+            return 0
+        if commit in rec["failed"]:
+            self.save(st)
+            return 0
+        return self.update(st, name, build, build, adapter=(want, commit))
+
+    def pick_adapter(self, st: dict, current: str) -> tuple[dict | None, str]:
+        """(settings, commit) for a new release: the commit at the ref now, else (it failed before, or can't be
+        fetched) the one that runs; (None, "") without an adapter."""
+        ad = self.adapter()
+        if not ad or ad.get("why"):
+            return None, ""
+        have = self.release_adapter(current)
+        known = have.get("commit", "") if have is not None and have.get("repo") == ad["repo"] else ""
+        rec = self.adapter_rec(st)
+        try:
+            commit = self.fetch_adapter(ad)
+            rec.update(configured=True, repo=repo_name(ad["repo"]), ref=ad["ref"], remote=commit, error="",
+                       checked=self.clock())
+        except StepError as e:
+            rec.update(configured=True, repo=repo_name(ad["repo"]), ref=ad["ref"], error=str(e)[:300])
+            self.note(f"auto-update: {e}" + (f": keeping adapter {known[:7]}" if known else ": built without it"))
+            return (ad, known) if known else (None, "")
+        if commit in rec["failed"]:
+            return (ad, known) if known else (None, "")
+        return ad, commit
+
+    def env_has(self, key: str) -> bool | None:
+        """Whether station.env sets key (None: it can't be read here). Names only: a value is never read out."""
+        try:
+            text = self.p.env.read_text()
+        except OSError:
+            return None
+        return any(ln.startswith(f"{key}=") and ln[len(key) + 1:].strip() not in ("", '""', "''")
+                   for ln in text.splitlines())
+
+    def write_env(self, values: dict[str, str], drop: set[str] = frozenset()) -> None:
+        """station.env with these set (and drop's taken out), everything else in it kept: root 0600, one rename."""
+        try:
+            lines = self.p.env.read_text().splitlines()
+        except FileNotFoundError:
+            lines = ["# sizeup station secrets (install-linux.sh / sizeup-station secrets / adapter setup). root 0600."]
+        out, done = [], set()
+        for ln in lines:
+            k = ln.split("=", 1)[0].strip() if "=" in ln and not ln.lstrip().startswith("#") else ""
+            if k in drop:
+                continue
+            if k in values:
+                if k not in done:
+                    out.append(f"{k}={env_quote(values[k])}")
+                    done.add(k)
+                continue
+            out.append(ln)
+        out += [f"{k}={env_quote(v)}" for k, v in values.items() if k not in done]
+        tmp = self.p.env.with_name(f".{self.p.env.name}.{os.getpid()}")
+        tmp.unlink(missing_ok=True)
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            os.write(fd, ("\n".join(out) + "\n").encode())
+            if os.geteuid() == 0:
+                os.fchown(fd, 0, 0)
+            os.fchmod(fd, 0o600)
+        finally:
+            os.close(fd)
+        os.replace(tmp, self.p.env)
+
+    def configupdate(self, *extra: str) -> tuple[int, str]:
+        """The running release's configupdate.py on the config: [adapter] from adapter-pending.json now, unless a
+        rollback would go to a release that can't read it (then at the next update), or extra (--remove-adapter)."""
+        script = self.p.current / "sizeup" / "cloud" / "configupdate.py"
+        if not script.is_file():
+            return 1, f"no {script}"
+        prev = self.previous()
+        leaving = str(self.p.releases / prev) if prev else ""
+        r = subprocess.run([sys.executable, "-I", str(script), str(self.p.config), str(self.p.marks), "--leaving", leaving,
+                            *extra], capture_output=True, text=True, timeout=60)
+        return r.returncode, (r.stdout + r.stderr).strip()
+
+    def adapter_failed(self, st: dict, commit: str, why: str) -> None:
+        rec = self.adapter_rec(st)
+        rec["failed"][commit] = {"at": self.clock(), "why": why[:300]}
+        rec["failed"] = _newest_failed(rec["failed"], KEEP_FAILED)
 
     def current(self) -> tuple[str, str]:
         """(release name, its build) /opt/sizeup/current points at; ("", "") before releases."""
@@ -594,9 +1093,12 @@ class Updater:
         """The release that ran before the current one (a rollback's target; never one that failed),
         "" if none is left."""
         cur, have = self.current()[0], set(self.releases())
-        failed = self.load().get("failed") or {}
+        st = self.load()
+        failed = st.get("failed") or {}
+        afailed = (st.get("adapter") or {}).get("failed") if isinstance(st.get("adapter"), dict) else {}
         for name in reversed(self.history()):
-            if name != cur and name in have and failed_entry(failed, self.build_of(name)) is None:
+            if name != cur and name in have and failed_entry(failed, self.build_of(name)) is None \
+                    and (self.release_adapter(name) or {}).get("commit") not in (afailed or {}):
                 return name
         return ""
 
@@ -712,7 +1214,8 @@ class Updater:
             paused = "this station isn't on side-by-side releases yet: sudo sizeup-station update"
         action, why = plan(want, build, paused, st.get("failed"), st)
         if action == "none":
-            return 0
+            # the hub's build unknown: the release that runs stays, but its adapter follows its ref (#301)
+            return self.adapter_check(st, name, build) if name and not paused else 0
         if action == "update" and not FULL_SHA.fullmatch(want):
             action = "paused"
             why = paused = f"the hub's build {want} isn't a full git sha: not updating"
@@ -721,12 +1224,13 @@ class Updater:
         if action == "current":
             if st.get("state") != "current" or st.get("current") != build or st.get("paused") != paused:
                 self.save(st, state="current", current=build, hub=want, paused=paused)
-            return 0
+            return self.adapter_check(st, name, build) if not paused else 0
         if action in ("paused", "failed-before"):
             if st.get("state") != action or not same_build(st.get("hub"), want) or st.get("paused") != paused:
                 self.save(st, state=action, current=build, hub=want, paused=paused)
                 self.note(f"auto-update: not updating to {short(want)}: {why}")
-            return 0
+            # staying on this build: its adapter still follows its ref (#301); paused: nothing moves
+            return self.adapter_check(st, name, build) if action == "failed-before" else 0
         return self.update(st, name, build, want)
 
     def _interrupted(self, st: dict) -> None:
@@ -742,7 +1246,10 @@ class Updater:
             self.save(st, state="current", current=build)
             return
         back = self._switch_back(frm, name)
-        self._failed(st, to, f"interrupted; then {why}")
+        if same_build(self.build_of(frm), to) and st.get("adapter_to"):     # an adapter-only rebuild (#301)
+            self.adapter_failed(st, str(st["adapter_to"]), f"interrupted; then {why}")
+        else:
+            self._failed(st, to, f"interrupted; then {why}")
         self.result(f"update {short(frm)} -> {short(to)}: interrupted and unhealthy ({why}): back on {short(frm)}: "
                     + ("ok" if not back else f"FAILED: {back}"))
         self.save(st, state="failed", current=self.current()[1])
@@ -755,63 +1262,71 @@ class Updater:
             return str(e)[:300]
         return self.healthy(self.build_of(name) or name)
 
-    def update(self, st: dict, name: str, build: str, want: str) -> int:
+    def update(self, st: dict, name: str, build: str, want: str,
+               adapter: tuple[dict | None, str] | None = None) -> int:
+        """To the hub's build want, side by side. adapter: (settings, commit) for a rebuild of the running build
+        with another incident-source adapter commit (or none: (None, "")); None: a sizeup update, which keeps the
+        adapter set up (pick_adapter)."""
         t0 = self.clock()
-        tag = f"update {short(build)} -> {short(want)}"
-        last = {"at": t0, "from": build, "to": want}
-        self.save(st, state="updating", to=want, hub=want, paused="", **{"from": name})
-        try:
-            self.git("fetch", "--force", "origin", f"+refs/heads/{MAIN}:refs/remotes/origin/{MAIN}")
-        except StepError as e:
-            self.result(f"{tag}: can't fetch ({e}): staying on {short(build)}; trying again at the next check")
-            self.save(st, state="behind", current=build, last=dict(last, result="no fetch", why=str(e)[:300]))
-            return 1
-        sha = self.git("rev-parse", "--verify", "--quiet", f"{want}^{{commit}}", check=False)
-        on_main = bool(sha) and self.is_ancestor(sha, f"refs/remotes/origin/{MAIN}")
-        if not on_main:
-            why = f"not on origin/{MAIN}" if sha else "no such commit in the repository"
-            self._failed(st, sha or want, why)
-            self.result(f"{tag}: refused: {short(want)} is {why} (the station only runs what {MAIN} has)")
-            self.save(st, state="failed", current=build, last=dict(last, result="refused", why=why))
-            return 1
-        last["to"] = sha
-        self.save(st, to=sha)
-        if build and FULL_SHA.fullmatch(build) and not runtime_changes(self.changed(build, sha)):
-            eq = dict(st.get("equivalent") or {}) if isinstance(st.get("equivalent"), dict) else {}
-            eq[sha] = build
-            st["equivalent"] = dict(list(eq.items())[-KEEP_EQUIVALENT:])
-            self.result(f"{tag}: nothing the station runs changed (docs, tests, CI, the hub's files): "
-                        f"no restart; up to date")
-            self.save(st, state="current", current=build, hub=want,
-                      last=dict(last, result="no runtime change", why="", seconds=0))
-            return 0
-        n = self._attempt(st, sha)
-        self.note(f"auto-update: {tag}: building the release beside the running one (try {n} of {MAX_STAGES})")
+        only = adapter is not None
+        have = self.release_adapter(name)
+        have_c = (have or {}).get("commit", "")
+        if only:
+            ad, ac = adapter
+            tag = (f"adapter {repo_name((ad or have or {}).get('repo'))} {have_c[:7] or 'none'} -> {ac[:7] or 'none'}"
+                   f" on {short(build)}")
+            last = {"at": t0, "from": build, "to": build, "adapter": ac[:12], "adapter_from": have_c[:12]}
+            self.save(st, state="updating", to=build, paused="", adapter_to=ac, **{"from": name})
+            sha = build
+        else:
+            tag = f"update {short(build)} -> {short(want)}"
+            last = {"at": t0, "from": build, "to": want}
+            self.save(st, state="updating", to=want, hub=want, paused="", adapter_to="", **{"from": name})
+            try:
+                self.git("fetch", "--force", "origin", f"+refs/heads/{MAIN}:refs/remotes/origin/{MAIN}")
+            except StepError as e:
+                self.result(f"{tag}: can't fetch ({e}): staying on {short(build)}; trying again at the next check")
+                self.save(st, state="behind", current=build, last=dict(last, result="no fetch", why=str(e)[:300]))
+                return 1
+            sha = self.git("rev-parse", "--verify", "--quiet", f"{want}^{{commit}}", check=False)
+            on_main = bool(sha) and self.is_ancestor(sha, f"refs/remotes/origin/{MAIN}")
+            if not on_main:
+                why = f"not on origin/{MAIN}" if sha else "no such commit in the repository"
+                self._failed(st, sha or want, why)
+                self.result(f"{tag}: refused: {short(want)} is {why} (the station only runs what {MAIN} has)")
+                self.save(st, state="failed", current=build, last=dict(last, result="refused", why=why))
+                return 1
+            last["to"] = sha
+            ad, ac = self.pick_adapter(st, name)
+            if ac or have_c:
+                last.update(adapter=ac[:12], adapter_from=have_c[:12])
+            self.save(st, to=sha, adapter_to=ac)
+            if build and FULL_SHA.fullmatch(build) and ac == have_c and not runtime_changes(self.changed(build, sha)):
+                eq = dict(st.get("equivalent") or {}) if isinstance(st.get("equivalent"), dict) else {}
+                eq[sha] = build
+                st["equivalent"] = dict(list(eq.items())[-KEEP_EQUIVALENT:])
+                self.result(f"{tag}: nothing the station runs changed (docs, tests, CI, the hub's files): "
+                            f"no restart; up to date")
+                self.save(st, state="current", current=build, hub=want,
+                          last=dict(last, result="no runtime change", why="", seconds=0))
+                return 0
+        n = 1 if only else self._attempt(st, sha)
+        self.note(f"auto-update: {tag}: building the release beside the running one"
+                  + ("" if only else f" (try {n} of {MAX_STAGES})"))
+        step = "stage"
         try:
             self.stage(sha)
+            step = "adapter"
+            if ac:
+                target = self.build_adapter(sha, ad, ac, st)
+            else:
+                self.clean_base(sha, st)
+                target = sha
         except (StepError, OSError) as e:
-            secs = self.clock() - t0
-            preflight = isinstance(e, StepError) and e.code == PREFLIGHT_EXIT
-            if preflight or n >= MAX_STAGES:
-                why = (f"preflight: {e}" if preflight else f"couldn't build it {n} times: {e}")[:300]
-                self._failed(st, sha, why)
-                st.pop("retry", None)
-                self.result(f"{tag}: not switched ({why}); still on {short(build)}; not trying {short(sha)} again "
-                            "until the hub moves on")
-                self.save(st, state="failed", current=build,
-                          last=dict(last, result="preflight failed" if preflight else "build failed", why=why,
-                                    seconds=round(secs)))
-                return 1
-            st["retry"][sha]["why"] = str(e)[:200]
-            at = _clock(st["retry"][sha]["next_at"])
-            self.result(f"{tag}: couldn't build it yet ({e}); still on {short(build)}; trying again after {at} "
-                        f"(try {n} of {MAX_STAGES})")
-            self.save(st, state="behind", current=build,
-                      last=dict(last, result="build failed, will retry", why=str(e)[:300], seconds=round(secs)))
-            return 1
+            return self._not_built(st, e, step, tag, sha, build, ac, have_c, n, only, last)
         st.pop("retry", None)
         staged = self.clock() - t0
-        self.save(st, state="waiting")
+        self.save(st, state="waiting", to_release=target)
         waited, busy = wait_quiet(self.busy, self.quiet_max_s, self.clock, self.sleep)
         if busy:
             self.note(f"auto-update: still busy after {waited:.0f} s ({busy}): switching anyway")
@@ -819,7 +1334,7 @@ class Updater:
         self.save(st, state="updating")
         t1 = self.clock()
         try:
-            self.activate(sha, name)
+            self.activate(target, name)
             why = self.healthy(sha)
         except StepError as e:
             why = str(e)[:300]
@@ -832,19 +1347,61 @@ class Updater:
             gap = f"web back {up:.0f} s after the switch" + (f", radios {radios:.0f} s" if radios is not None else "")
             self.result(f"{tag}: ok in {secs:.0f} s (built {staged:.0f} s, waited {waited:.0f} s for a quiet moment, "
                         f"{gap})" + (f" · {win}" if win else ""))
-            self.save(st, state="current", current=sha, hub=want, windows=win,
+            self.save(st, state="current", current=sha, windows=win, **({} if only else {"hub": want}),
                       last=dict(last, result="ok", why="", seconds=round(secs), staged_s=round(staged),
                                 waited_s=round(waited), up_s=round(up, 1),
                                 radios_s=None if radios is None else round(radios, 1)))
             return 0
-        back = self._switch_back(name, sha)
-        self._failed(st, sha, why)
+        back = self._switch_back(name, target)
+        if only:
+            if ac:
+                self.adapter_failed(st, ac, why)
+            again = f"not trying adapter {ac[:7]} again until its ref moves" if ac else "trying again at the next check"
+        else:
+            self._failed(st, sha, why)
+            again = f"not trying {short(sha)} again until the hub moves on"
         secs = self.clock() - t0
-        self.result(f"{tag}: FAILED ({why}): back on {short(build)}: {'ok' if not back else 'FAILED TOO: ' + back}; "
-                    f"not trying {short(sha)} again until the hub moves on")
+        self.result(f"{tag}: FAILED ({why}): back on {short(build)}" + (f" (adapter {have_c[:7]})" if have_c else "")
+                    + f": {'ok' if not back else 'FAILED TOO: ' + back}; {again}")
         self.save(st, state="failed", current=self.current()[1] or build,
                   last=dict(last, result="rolled back" if not back else "rollback failed",
                             why=why + ("" if not back else f"; going back: {back}"), seconds=round(secs)))
+        return 1
+
+    def _not_built(self, st: dict, e: Exception, step: str, tag: str, sha: str, build: str, ac: str, have_c: str,
+                   n: int, only: bool, last: dict) -> int:
+        """The release (or its adapter) couldn't be built or failed its preflight: nothing switched."""
+        secs = round(self.clock() - t0) if (t0 := last.get("at")) else 0
+        preflight = isinstance(e, StepError) and e.code == PREFLIGHT_EXIT
+        if step == "adapter" and preflight and ac != have_c:
+            # a new adapter commit that doesn't work: not again until its ref moves; sizeup goes on without it
+            self.adapter_failed(st, ac, str(e))
+            st.pop("retry", None)
+            self.result(f"{tag}: not switched (adapter {ac[:7]}: {e}); still on {short(build)}; adapter {ac[:7]} "
+                        "not tried again until its ref moves")
+            self.save(st, state="current" if only else "behind", current=build,
+                      last=dict(last, result="adapter preflight failed", why=str(e)[:300], seconds=secs))
+            return 1
+        if only:
+            self.result(f"{tag}: not built ({e}); still on {short(build)}; trying again at the next check")
+            self.save(st, state="current", current=build,
+                      last=dict(last, result="build failed, will retry", why=str(e)[:300], seconds=secs))
+            return 1
+        if preflight or n >= MAX_STAGES:
+            why = (f"preflight: {e}" if preflight else f"couldn't build it {n} times: {e}")[:300]
+            self._failed(st, sha, why)
+            st.pop("retry", None)
+            self.result(f"{tag}: not switched ({why}); still on {short(build)}; not trying {short(sha)} again "
+                        "until the hub moves on")
+            self.save(st, state="failed", current=build,
+                      last=dict(last, result="preflight failed" if preflight else "build failed", why=why, seconds=secs))
+            return 1
+        st["retry"][sha]["why"] = str(e)[:200]
+        at = _clock(st["retry"][sha]["next_at"])
+        self.result(f"{tag}: couldn't build it yet ({e}); still on {short(build)}; trying again after {at} "
+                    f"(try {n} of {MAX_STAGES})")
+        self.save(st, state="behind", current=build,
+                  last=dict(last, result="build failed, will retry", why=str(e)[:300], seconds=secs))
         return 1
 
     def changed(self, a: str, b: str) -> list[str]:
@@ -912,7 +1469,12 @@ class Updater:
             return 1
         why = self._switch_back(prev, name)
         new = self.current()[1]
-        self._failed(st, build, "rolled back by hand (sizeup-station rollback)")
+        left = (self.release_adapter(name) or {}).get("commit", "")
+        if same_build(build, self.build_of(prev)) and left:
+            # the same sizeup, another adapter: that adapter commit is the one left (#301)
+            self.adapter_failed(st, left, "rolled back by hand (sizeup-station rollback)")
+        else:
+            self._failed(st, build, "rolled back by hand (sizeup-station rollback)")
         self.result(f"rollback {short(build)} -> {short(new)}: " + ("ok" if not why else f"FAILED: {why}"))
         self.save(st, state="failed", current=new,
                   last={"at": self.clock(), "from": build, "to": new, "result": "rolled back by hand", "why": why})
@@ -955,8 +1517,20 @@ class Updater:
         paused = paused_reason(self.settings())
         d = describe(build, want, dict(st, paused=paused))
         win = st.get("windows", "") if os.geteuid() != 0 else self.windows()
+        installed = self.release_adapter(name)
+        ad = self.adapter()
+        rec = dict(st.get("adapter") or {}) if isinstance(st.get("adapter"), dict) else {}
+        if ad:
+            rec.setdefault("configured", True)
+            rec.setdefault("repo", repo_name(ad.get("repo")))
+            if ad.get("why"):
+                rec["error"] = ad["why"]
+        adapter = dict(adapter_view(installed, rec), ref=(ad or installed or {}).get("ref", ""),
+                       env=[(k, self.env_has(k)) for k in (ad or {}).get("env") or []],
+                       key=self.p.adapter_key.is_file(), sources=(installed or {}).get("sources") or [],
+                       key_open=self.key_open())
         return {"build": build, "release": name, "hub": want, "paused": paused, "record": st, "windows": win,
-                "releases": self.releases(), "previous": self.previous(), **d}
+                "releases": self.releases(), "previous": self.previous(), "adapter": adapter, **d}
 
 
 def _dict(x) -> dict:
@@ -982,6 +1556,10 @@ def status_lines(r: dict) -> list[str]:
                    + (f", radios after {last['radios_s']} s" if last.get("radios_s") is not None else ""))
     if r.get("windows"):
         out.append(f"windows:   {r['windows']}")
+    ad = _dict(r.get("adapter"))
+    if ad.get("state", "off") != "off":
+        out.append(f"adapter:   {ad.get('text')}" + (f" (ref {ad['ref']})" if ad.get("ref") else "")
+                   + (f"; sources {', '.join(ad['sources'])}" if ad.get("sources") else ""))
     return out
 
 
@@ -997,16 +1575,228 @@ def doctor_lines(r: dict) -> list[str]:
         out.append(f"  note  version: {r['text']}")
     if r["windows"]:
         out.append(f"  FAIL  {r['windows']}")
+    ad = _dict(r.get("adapter"))
+    if ad.get("state", "off") != "off":
+        if ad["state"] == "loaded":
+            out.append(f"  ok    adapter {ad.get('text')}")
+        elif ad["state"] == "failed":
+            out.append(f"  FAIL  adapter {ad.get('text')} (journalctl -u sizeup-update)")
+        else:
+            out.append(f"  note  adapter {ad.get('text')} (sudo sizeup-station autoupdate now)")
+        if not ad.get("key"):
+            out.append("  FAIL  adapter: no deploy key: sudo sizeup-station adapter setup")
+        elif ad.get("key_open"):
+            out.append(f"  FAIL  adapter: {ad['key_open']}: sudo chmod 600 /etc/sizeup/adapter-deploy-key")
+        for k, has in ad.get("env") or []:
+            out.append(f"  ok    {k} is set" if has else f"  note  {k} is not set: sudo sizeup-station adapter setup"
+                       if has is False else f"  note  {k}: station.env not readable here")
     return out
+
+
+# -- sizeup-station adapter setup | status | remove (#301) -----------------------------------------------------
+
+def keygen(key: Path) -> None:
+    """A new ed25519 key at key (root 0600) and key.pub."""
+    host = os.uname().nodename.split(".")[0] or "station"
+    key.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", f"sizeup-adapter@{host}", "-f", str(key)],
+                   check=True, capture_output=True, timeout=60)
+
+
+def public_key(key: Path) -> str:
+    try:
+        pub = key.with_name(key.name + ".pub").read_text().strip()
+    except OSError:
+        pub = subprocess.run(["ssh-keygen", "-y", "-f", str(key)], capture_output=True, text=True, timeout=30).stdout.strip()
+    if not re.fullmatch(r"ssh-ed25519 [A-Za-z0-9+/=]+(?: [A-Za-z0-9@._-]+)?", pub):
+        raise StepError(f"{key}.pub isn't an ed25519 public key")
+    return pub
+
+
+def adapter_setup(u: Updater, repo: str = "", ref: str = "", env: str | None = None, check: bool = True,
+                  ask: Callable[[str], str] = input, secret: Callable[[str], str] = getpass.getpass,
+                  out: Callable[[str], None] = print, make_key: Callable[[Path], None] = keygen,
+                  reach: Callable[[dict], str] | None = None) -> int:
+    """sudo sizeup-station adapter setup: the deploy key (only its public half is printed), the repo and ref, the
+    credentials (hidden, into station.env), [adapter] in the config (now, or at the next update). 0 = saved."""
+    s = u.settings()
+    if str(s.get("role") or "").strip().lower() == "hub":
+        out(f"Refused: {HUB_REFUSED} ([cloud] role = \"hub\" in {u.p.config}).")
+        return 2
+    cur = u.adapter() or {}
+
+    def pick(given: str, prompt: str, default: str, problem: Callable[[str], str]) -> str | None:
+        for _ in range(3):
+            v = given or ask(prompt + (f" [{default}]" if default else "") + ": ").strip() or default
+            why = problem(v) if v else "required"
+            if not why:
+                return v
+            out(f"  {why}")
+            if given:
+                return None
+        return None
+
+    repo = pick(repo, "Adapter repo (SSH URL)", cur.get("repo", ""), adapter_repo_problem)
+    if repo is None:
+        return 2
+    ref = pick(ref, "Branch or tag", cur.get("ref") or MAIN,
+               lambda v: "" if ADAPTER_REF.fullmatch(v) else "a branch or tag name")
+    if ref is None:
+        return 2
+    if env is None:
+        env = ask(f"Credential variable names, comma-separated [{','.join(cur.get('env') or [])}]: ").strip() \
+            or ",".join(cur.get("env") or [])
+    names = list(dict.fromkeys(n.strip() for n in env.split(",") if n.strip()))
+    bad = [p for p in map(env_problem, names) if p]
+    if bad:
+        out("  " + "; ".join(bad))
+        return 2
+    key = u.p.adapter_key
+    if not key.is_file():
+        make_key(key)
+    os.chmod(key, 0o600)
+    if os.geteuid() == 0:
+        os.chown(key, 0, 0)
+    pub = public_key(key)
+    slug = github_slug(repo)
+    host = os.uname().nodename.split(".")[0] or "station"
+    out("")
+    out("Deploy key (public, read-only). On your Mac:")
+    if slug:
+        out(f"  echo '{pub}' | gh repo deploy-key add - -R {slug} --title 'sizeup station {host}'")
+    else:
+        out(f"  {pub}")
+        out("  (add it to the repo as a read-only deploy key)")
+    out("")
+    values = {}
+    for k in names:
+        has = u.env_has(k)
+        for _ in range(3):
+            v = secret(f"{k} (hidden" + ("; Enter keeps it" if has else "") + "): ")
+            if not v:
+                if not has:
+                    out(f"  {k}: not set")
+                break
+            if any(c in v for c in "\n\r\0"):
+                out("  one line, please")
+                continue
+            values[k] = v
+            break
+    old = set(cur.get("env") or []) - set(names)
+    if values or old:
+        u.write_env(values, drop=old)
+    values.clear()
+    u.p.adapter_pending.write_text(json.dumps({"repo": repo, "ref": ref, "env": names}, indent=1) + "\n")
+    u.p.adapter_pending.chmod(0o644)
+    rc, said = u.configupdate()
+    for line in said.splitlines():
+        if line.startswith("adapter"):
+            out(f"config: {line}")
+    if rc != 0:
+        out(f"config: not changed ({said.splitlines()[-1] if said else '?'}); the updater uses the saved setup")
+    u._settings = None
+    if check:
+        reach = reach or (lambda a: u.adapter_reach(a))
+        a = u.adapter()
+        while True:
+            why = reach(a)
+            if not why:
+                out(f"Access: ok ({repo_name(repo)} {ref})")
+                break
+            out(f"Access: {why}")
+            if ask("Press Enter once the key is added on GitHub (s to skip): ").strip().lower() == "s":
+                break
+    out("Saved. Installed at the next update check (sudo sizeup-station autoupdate now).")
+    return 0
+
+
+def adapter_remove(u: Updater, yes: bool = False, ask: Callable[[str], str] = input,
+                   out: Callable[[str], None] = print) -> int:
+    """sudo sizeup-station adapter remove: the key, its credentials, [adapter]; the next update runs without it."""
+    cur = u.adapter() or {}
+    if not cur and not u.release_adapter(u.current()[0]):
+        out("No adapter set up.")
+        return 0
+    if not yes and ask(f"Remove the adapter {repo_name(cur.get('repo'))} (key, credentials, config)? [y/N] ").strip().lower() != "y":
+        out("Nothing changed.")
+        return 1
+    names = set(cur.get("env") or [])
+    if names:
+        u.write_env({}, drop=names)
+    for f in (u.p.adapter_key, u.p.adapter_key.with_name(u.p.adapter_key.name + ".pub"), u.p.adapter_pending):
+        f.unlink(missing_ok=True)
+    rc, said = u.configupdate("--remove-adapter")
+    for line in said.splitlines():
+        out(f"config: {line}")
+    shutil.rmtree(u.p.adapter_repo, ignore_errors=True)
+    st = u.load()
+    rec = u.adapter_rec(st)
+    u.save(st, adapter={"dists": rec.get("dists") or [], "configured": False, "failed": {}})
+    slug = github_slug(cur.get("repo"))
+    out("Removed. The next update check switches to a release without it (sudo sizeup-station autoupdate now).")
+    if slug:
+        out(f"On your Mac: gh repo deploy-key list -R {slug}, then gh repo deploy-key delete <id> -R {slug}")
+    return 0 if rc == 0 else 1
+
+
+def adapter_cli(u: Updater, a) -> int:
+    sub = a.sub[0] if a.sub else "status"
+    if sub == "setup":
+        return u.locked(lambda: adapter_setup(u, a.repo, a.ref, a.env, check=not a.no_check and sys.stdin.isatty()))
+    if sub == "remove":
+        return u.locked(lambda: adapter_remove(u, yes=a.yes))
+    if sub == "stage" and len(a.sub) == 2:
+        # install-linux.sh (an update by hand): release NAME with the adapter set up; prints the release to switch to
+        def stage() -> int:
+            st = u.load()
+            ad, commit = u.pick_adapter(st, u.current()[0])
+            name = a.sub[1]
+            try:
+                if commit:
+                    name = u.build_adapter(name, ad, commit, st)
+                else:
+                    u.clean_base(name, st)
+            except (StepError, OSError) as e:
+                print(f"adapter: {e}", file=sys.stderr)
+                if commit and isinstance(e, StepError) and e.code == PREFLIGHT_EXIT:
+                    u.adapter_failed(st, commit, str(e))
+                u.save(st)
+                return 1
+            u.save(st)
+            print(name)
+            return 0
+        return u.locked(stage)
+    if sub == "status":
+        r = u.report()
+        ad = _dict(r.get("adapter"))
+        print(f"adapter:   {ad.get('text') or 'none (sudo sizeup-station adapter setup)'}"
+              + (f" (ref {ad['ref']})" if ad.get("ref") else ""))
+        if ad.get("state", "off") != "off":
+            print(f"key:       {'yes' if ad.get('key') else 'no'} ({u.p.adapter_key})")
+            for k, has in ad.get("env") or []:
+                print(f"{k}: {'set' if has else 'not set' if has is False else '?'}")
+        return 0
+    print("sizeup-station adapter setup | status | remove", file=sys.stderr)
+    return 2
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="autoupdate.py", description="the station follows the hub's build")
-    ap.add_argument("cmd", choices=["run", "status", "doctor", "on", "off", "prune", "rollback"])
+    ap.add_argument("cmd", choices=["run", "status", "doctor", "on", "off", "prune", "rollback", "adapter"])
+    ap.add_argument("sub", nargs="*", help="adapter: setup | status | remove | stage RELEASE")
     ap.add_argument("--quiet-max", type=float, default=QUIET_MAX_S, help="seconds to wait for a quiet moment")
     ap.add_argument("--health-timeout", type=float, default=HEALTH_S, help="seconds for /healthz after the switch")
+    ap.add_argument("--repo", default="", help="adapter setup: the adapter repo (SSH URL)")
+    ap.add_argument("--ref", default="", help="adapter setup: its branch or tag (default main)")
+    ap.add_argument("--env", default=None, help="adapter setup: its credential variable names, comma-separated")
+    ap.add_argument("--no-check", action="store_true", help="adapter setup: don't wait for the repo to answer")
+    ap.add_argument("--yes", action="store_true", help="adapter remove: don't ask")
     a = ap.parse_args(argv)
     u = Updater(quiet_max_s=a.quiet_max, health_s=a.health_timeout)
+    if a.cmd == "adapter":
+        return adapter_cli(u, a)
+    if a.sub:
+        ap.error(f"unexpected {' '.join(a.sub)}")
     if a.cmd == "run":
         return u.run()
     if a.cmd == "prune":

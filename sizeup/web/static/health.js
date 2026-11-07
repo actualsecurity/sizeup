@@ -120,6 +120,8 @@ const StationHealth = (() => {
         last.radios_s !== undefined && last.radios_s !== null ? `radios ${last.radios_s} s` : ""].filter(Boolean).join(", ") : ""],
       ["Update log", last && last.line ? last.line : ""],
       ["Failed builds", Object.entries(b.failed || {}).map(([k, v]) => `${short(k)}: ${(v && v.why) || "?"}`).join("; ")],
+      // the station's incident-source adapter (#301): what runs, and each source's own health
+      ...(b.adapter ? [["Adapter", b.adapter.text, stateCls(b.adapter.state === "loaded" ? "ok" : "bad")]] : []),
     ]));
     kids.push(el("h3", "hl-sub", "Outbox and system"), dl([
       ["Events waiting", ob.pending || 0, ob.age_s >= (th.outbox_min || 5) * 60 ? "hl-bad" : ""],

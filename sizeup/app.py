@@ -2998,7 +2998,9 @@ def make_app(cfg: Config) -> App:
     or all-in-one, forwarding to the hub as the station when that is on (config.toml's [cloud] role
     = "station" until Settings > System > Station changes it: sizeup/cloud/stationmode.py)."""
     if cfg.cloud_role == "hub":
+        from sizeup.cloud.adapters import hub_guard
         from sizeup.cloud.hub import HubApp
+        hub_guard(cfg.cloud_role, log)     # incident-source adapters: the station's only (#301), never loaded here
         return HubApp(cfg, log=log)
     app = App(cfg)
     from sizeup.cloud.stationmode import StationMode
