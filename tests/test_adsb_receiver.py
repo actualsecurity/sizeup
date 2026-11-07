@@ -27,7 +27,7 @@ from sizeup.cad.airport_alerts import AircraftPreAlerts
 from sizeup.cloud import configupdate
 from sizeup.cloud.aircraftlink import REFRESH_S, AircraftForwarder, Deltas
 from sizeup.cloud.client import HubClient, HubError
-from sizeup.config import ConfigError, load
+from sizeup.config import STATION_LL, ConfigError, load
 from sizeup.radio import adsbd
 from tests.test_aircraft import FI3, FI_URL, LOL3, LOL_URL, T3, Clock, Feeds
 
@@ -97,7 +97,8 @@ def test_readsb_runs_on_the_named_dongles_index_with_auto_gain_and_bias_tee_off_
     assert argv[argv.index("--gain") + 1] == "auto" and "--enable-biastee" not in argv
     assert argv[argv.index("--write-json") + 1] == adsbd.JSON_DIR and argv[argv.index("--write-json-every") + 1] == "1"
     assert "--net" not in argv and not any(a.startswith("--net-") for a in argv)   # no network ports
-    assert float(argv[argv.index("--lat") + 1]) == pytest.approx(A.ARP[0], abs=1e-4)   # HPN's point, not the station's
+    assert (float(argv[argv.index("--lat") + 1]), float(argv[argv.index("--lon") + 1])) == pytest.approx(
+        STATION_LL, abs=1e-5)                                           # the station's own spot: South End (#271)
     assert adsbd.readsb_argv("readsb", 0, "38.6", True)[-1] == "--enable-biastee"
     assert adsbd.AIRCRAFT_JSON == adsbd.JSON_DIR + "/aircraft.json"
 
@@ -106,7 +107,8 @@ def test_what_runs_comes_from_the_config_and_settings_wins(tmp_path):
     conf = receiver_conf(tmp_path, '[aircraft.receiver]\nsdr = "adsb1090"\ngain = 38.6\nbias_tee = true\n')
     ov = tmp_path / "adsb_receiver.json"
     s = adsbd.settings(str(conf), str(ov))
-    assert s == {"sdr": "adsb1090", "source": "config", "gain": "38.6", "bias_tee": True, "problem": ""}
+    assert s == {"sdr": "adsb1090", "source": "config", "gain": "38.6", "bias_tee": True, "problem": "",
+                 "lat": STATION_LL[0], "lon": STATION_LL[1]}
     ov.write_text(json.dumps({"sdr": "lna-adsb"}))
     assert adsbd.settings(str(conf), str(ov))["sdr"] == "lna-adsb" and adsbd.settings(str(conf), str(ov))["source"] == "settings"
     ov.write_text(json.dumps({"sdr": ""}))                              # Settings released it: none, whatever the config says

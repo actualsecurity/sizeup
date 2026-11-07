@@ -353,7 +353,8 @@ function fillChannels(all, pages) {
 
 function renderSystem() {
   const h = sta.health || {}, sc = (sta.scene && sta.scene.station) || {};
-  const rows = [["Station", sc.id || h.station || "—"], ["Name", sc.name || "—"], ["Role", h.role || "—"],
+  // the name first (#271: the id pcfd-hq is the hub's key, not where the station is)
+  const rows = [["Station", sc.name || "—"], ["Station id", sc.id || h.station || "—"], ["Role", h.role || "—"],
                 ["Version", h.version || "—"], ["Build", h.build || "—"]];
   $("#sys-facts").replaceChildren(...rows.map(([k, v]) => {
     const d = el("div");
@@ -394,8 +395,8 @@ async function boot() {
   try {
     sta.scene = await (await fetch("/api/scene")).json();
     const s = sta.scene.station || {};
-    setText($("#station"), s.id || "");
-    $("#station").title = s.name ? `${s.name} (station id ${s.id})` : "";
+    setText($("#station"), s.name || s.id || "");      // the name (#271), the id on hover
+    $("#station").title = s.id ? `station id ${s.id}` : "";
   } catch (e) {
     console.warn("no scene:", e);
   }

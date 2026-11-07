@@ -547,7 +547,7 @@ def test_an_installed_station_gains_hpn_tower_once(tmp_path, monkeypatch):
     assert after.channels[-4].label == "HPN Tower" and after.sdr_auto_order[-1] == "HPN Tower"
     assert replace(after, channels=before.channels, sdr_auto_order=before.sdr_auto_order,
                    stt_aws_channels=before.stt_aws_channels) == before
-    assert marks.read_text() == "fg2\ntones-47\nhpn-atc\nadsb-receiver\napproach-ground\n"    # (#235's: the config has it)
+    assert marks.read_text() == "fg2\ntones-47\nhpn-atc\nadsb-receiver\napproach-ground\nsouth-end\n"    # (#235's: the config has it)
     conf.write_text(kept)                                                  # taken out by hand: stays out
     assert configupdate.run(conf, marks, leaving=new) == []
 
@@ -566,8 +566,9 @@ def test_it_waits_while_the_release_to_go_back_to_cant_read_it(tmp_path, monkeyp
                     "channel: HPN Tower is added at the next update",
                     "adsb-receiver: already has [aircraft.receiver]: nothing added",     # (#235's: nothing to add)
                     "approach-ground: deferred: the release this switch would go back to (rel-old) can't read an "
-                    "airband channel's schedule: NY Approach and HPN Ground are added at the next update"]   # (#260's)
-    assert conf.read_text() == same and marks.read_text() == "fg2\ntones-47\nadsb-receiver\n"   # hpn-atc tried again
+                    "airband channel's schedule: NY Approach and HPN Ground are added at the next update",   # (#260's)
+                    "south-end: the station is already called 'Port Chester FD South End': nothing changed"]
+    assert conf.read_text() == same and marks.read_text() == "fg2\ntones-47\nadsb-receiver\nsouth-end\n"   # hpn-atc tried again
     assert configupdate.reads_airband(None) and not configupdate.reads_airband(tmp_path / "nowhere")
     # the CLI the installer runs (system python, stdlib only), with the release being left
     r = subprocess.run([sys.executable, "-I", str(ROOT / "sizeup" / "cloud" / "configupdate.py"), str(conf), str(marks),

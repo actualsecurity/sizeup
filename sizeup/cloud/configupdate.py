@@ -47,6 +47,12 @@ at the switch to a release that has it (deploy/station/install-linux.sh activate
              refuses the schedule key (and one from before #233 kind = "airband"), so it is only applied when the
              release being left reads "schedule"; else it waits ("deferred", not marked) for the next update.
 
+    south-end  the station's name (GitHub #271): the station PC is at the South End firehouse (51-53 Grace Church St),
+             not Headquarters, so [station] name "Port Chester FD Headquarters" (the template's until then) becomes
+             "Port Chester FD South End". Only when the name is exactly the old default: one set by hand is left as
+             it is. The id (pcfd-hq) never changes: the hub keys the station's token, history and outbox on it. Not
+             deferred: every release reads [station] name, so a switch back is safe with either name.
+
 Done ones are listed in a marks file (/etc/sizeup/config-updates, one name per line), so one taken out
 by hand stays out. The config is only ever added to (tones-47 also changes the two values of the one
 entry it names): the text is kept as it is, the result must parse
@@ -454,8 +460,45 @@ def add_approach_ground(text: str, leaving: Path | None = None) -> tuple[str, st
                  + (f"; already there: {', '.join(there)}" if there else ""))
 
 
+OLD_NAME = "Port Chester FD Headquarters"
+SOUTH_END = "Port Chester FD South End"
+STATION_HEADER = re.compile(r"^[ \t]*\[[ \t]*station[ \t]*\][ \t]*(?:#.*)?$", re.M)
+NAME_LINE = re.compile(r'^(?P<head>[ \t]*name[ \t]*=[ \t]*)"Port Chester FD Headquarters"(?P<tail>[ \t]*(?:#[^\n]*)?)$', re.M)
+
+
+def rename_south_end(text: str) -> tuple[str, str]:
+    """(new text, what was done): [station] name "Port Chester FD Headquarters" -> "Port Chester FD South End". The
+    text unchanged when the name is anything else (the reason says why). ValueError when the config doesn't parse or
+    the change can't be made safely."""
+    data = tomllib.loads(text)
+    st = data.get("station") if isinstance(data.get("station"), dict) else {}
+    name = st.get("name")
+    if name == SOUTH_END:
+        return text, f"south-end: the station is already called {SOUTH_END!r}: nothing changed"
+    if name != OLD_NAME:
+        return text, f"south-end: the station is called {name!r}, not the old default: nothing changed"
+    heads = list(HEADER.finditer(text))
+    top = [h for h in heads if STATION_HEADER.match(h.group(0))]
+    if len(top) != 1:
+        raise ValueError("[station] isn't one plain [station] header: change its name by hand")
+    i = heads.index(top[0])
+    s, e = top[0].end(), heads[i + 1].start() if i + 1 < len(heads) else len(text)
+    found = list(NAME_LINE.finditer(text, s, e))
+    if len(found) != 1:
+        raise ValueError(f'[station] name isn\'t one plain line: change it to "{SOUTH_END}" by hand')
+    m = found[0]
+    new = text[:m.start()] + f'{m.group("head")}"{SOUTH_END}"{m.group("tail")}' + text[m.end():]
+    try:
+        got = tomllib.loads(new)
+    except tomllib.TOMLDecodeError as e:
+        raise ValueError(f"the result wouldn't parse ({e}): nothing changed") from None
+    if got != {**data, "station": {**st, "name": SOUTH_END}}:
+        raise ValueError("the result doesn't say what was meant: nothing changed")
+    return new, f'south-end: [station] name is now "{SOUTH_END}" (was "{OLD_NAME}"; the id {st.get("id")!r} is kept)'
+
+
 UPDATES = (("fg2", add_fg2), ("tones-47", fix_tones), ("hpn-atc", add_hpn_atc), ("adsb-receiver", add_adsb),
-           ("approach-ground", add_approach_ground))
+           ("approach-ground", add_approach_ground), ("south-end", rename_south_end))
 NEEDS_LEAVING = {"hpn-atc", "adsb-receiver", "approach-ground"}   # given the release being left (rollback safety)
 
 

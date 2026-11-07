@@ -856,7 +856,7 @@ activate() {
     sed -i "s#$LEGACY_APP/deploy/trunk-recorder/talkgroups.csv#$TR_DIR/talkgroups.csv#" "$CONF"
     say "config: [p25] talkgroups_file is now $TR_DIR/talkgroups.csv (trunk-recorder's copy, from the release)"
   fi
-  # What this release adds to the config (#119: the FG2 channel; #47: our tones as heard; #233: HPN Tower), once per station;
+  # What this release adds to the config (#119: the FG2 channel; #47: our tones as heard; #233: HPN Tower; #271: the name), once per station;
   # the old file is kept beside it, one taken out by hand stays out (sizeup/cloud/configupdate.py, $ETC/config-updates).
   # --leaving: the release running now, which a failed switch goes back to: an addition it couldn't read waits.
   if [ -f "$rel/sizeup/cloud/configupdate.py" ] && [ -f "$CONF" ]; then

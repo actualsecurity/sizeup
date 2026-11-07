@@ -23,7 +23,8 @@ What runs: readsb (wiedehopf, pinned and built by install-linux.sh, /opt/sizeup/
     --enable-biastee                        only with [aircraft.receiver] bias_tee = true: 4.5 V up the coax for an LNA
                                             that is powered that way. Off by default: an LNA with its own supply, or a
                                             plain filter, must not get it
-    --lat/--lon HPN's reference point       for decoding surface positions (not the station's own location)
+    --lat/--lon the receiver's position     [station] lat / lon (the South End firehouse by default, #271): surface
+                                            positions are decoded from it (HPN is ~5 NM away, well inside 45 NM)
     --write-json JSON_DIR --write-json-every 1   aircraft.json every second, read by the station's forwarder
                                             (sizeup/cloud/aircraftlink.py) and sent on to the hub
 No network ports: readsb's networking stays off.
@@ -83,7 +84,7 @@ AIRCRAFT_JSON = JSON_DIR + "/aircraft.json"
 STATUS = RUN_DIR + "/decoder.json"
 READSB = "/opt/sizeup/readsb/bin/readsb"
 LIBRTLSDR = ("/opt/sizeup/rtl-sdr/lib/librtlsdr.so.0", "librtlsdr.so.0", "/opt/homebrew/lib/librtlsdr.dylib")
-REF = (41.06695, -73.70757)       # HPN's airport reference point (sizeup/aircraft.py ARP), for surface positions
+REF = (40.99600, -73.66453)       # the station's own spot, South End firehouse (sizeup/config.py STATION_LL, #271)
 APP, MODE = "sizeup", "adsb"
 SERIAL_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-")
 GAINS = (0.0, 60.0)               # an R820T's range in dB (readsb rounds to the nearest step)
@@ -124,12 +125,22 @@ def serial_problem(serial: str) -> str:
     return ""
 
 
+def position(data: dict) -> dict:
+    """{lat, lon}: the receiver's position, [station] lat / lon when both are numbers in the area, else REF."""
+    st = data.get("station") if isinstance(data.get("station"), dict) else {}
+    lat, lon = st.get("lat"), st.get("lon")
+    if all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in (lat, lon)) \
+            and 40.0 <= lat <= 42.0 and -75.0 <= lon <= -72.0:
+        return {"lat": float(lat), "lon": float(lon)}
+    return {"lat": REF[0], "lon": REF[1]}
+
+
 # -- what to run -----------------------------------------------------------------------------------------------------
 
 
 def settings(config: str = CONFIG, override: str = OVERRIDE) -> dict:
-    """{sdr, source, gain, bias_tee, problem}: the config's [aircraft.receiver], the dongle as Settings named it
-    (OVERRIDE {"sdr": ...}, "" = none) over the config's."""
+    """{sdr, source, gain, bias_tee, problem, lat, lon}: the config's [aircraft.receiver], the dongle as Settings named it
+    (OVERRIDE {"sdr": ...}, "" = none) over the config's, and the receiver's position (position())."""
     try:
         with open(config, "rb") as f:
             data = tomllib.load(f)
@@ -150,7 +161,7 @@ def settings(config: str = CONFIG, override: str = OVERRIDE) -> dict:
     gain = "auto" if isinstance(gain, bool) or gain_problem(gain) or str(gain).strip().lower() == "auto" else f"{float(gain):g}"
     bias = rc.get("bias_tee", False) is True
     problem = serial_problem(sdr) or (f"the config can't be read ({err})" if err and not sdr else "")
-    return {"sdr": sdr, "source": source, "gain": gain, "bias_tee": bias, "problem": problem}
+    return {"sdr": sdr, "source": source, "gain": gain, "bias_tee": bias, "problem": problem, **position(data)}
 
 
 def readsb_argv(binary: str, index: int, gain: str = "auto", bias_tee: bool = False, json_dir: str = JSON_DIR,
@@ -697,7 +708,8 @@ class Decoder:
             if not err:
                 self.log(f"adsb: usbfs_memory_mb {before} -> 0")
             base["usbfs_mb"] = after
-        argv = readsb_argv(self.binary, idx, s["gain"], s["bias_tee"], self.json_dir, buffer_kib=self.buffer_kib)
+        argv = readsb_argv(self.binary, idx, s["gain"], s["bias_tee"], self.json_dir, s["lat"], s["lon"],
+                            buffer_kib=self.buffer_kib)
         try:
             Path(self.json_dir).mkdir(parents=True, exist_ok=True)
             for stale in ("aircraft.json", "stats.json"):
@@ -952,7 +964,7 @@ def main(argv: list[str]) -> int:
             print(s["problem"] or "no dongle named for ADS-B: nothing runs")
             return 0
         idx = resolve(s["sdr"], devices())
-        print(" ".join(readsb_argv(READSB, idx if idx is not None else -1, s["gain"], s["bias_tee"]))
+        print(" ".join(readsb_argv(READSB, idx if idx is not None else -1, s["gain"], s["bias_tee"], JSON_DIR, s["lat"], s["lon"]))
               + ("" if idx is not None else f"   ({s['sdr']} isn't plugged in now)"))
         return 0
     if cmd == "status":
