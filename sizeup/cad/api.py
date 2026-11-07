@@ -159,6 +159,7 @@ GET  /api/cad/datasources[?rev=]          Settings > Data sources (#186, sizeup/
                                           schedule (managed | builtin | none), every, running, ...}, rev; ?rev= the same:
                                           {rev, same: true}. Admins and dispatchers (a viewer: 403). Polled by the panel
                                           while it is open: never in the state push
+POST /api/cad/cameras/<id>/dvr/pin        {on: bool}  keep recording a camera (#277, sizeup/dvr.py; dispatchers, admins)
 POST /api/cad/datasources/<key>/refresh   {operator?}  Refresh now: runs in the background, the answer at once
                                           ({ok, source: the row, running}); 429 {error} when refused (refreshing already,
                                           too soon after the last, or the source is resting); admins; in the person's
@@ -208,6 +209,7 @@ HINT = re.compile(r"/api/cad/hint/(\d{1,9})/(accept|dismiss)")
 ALARM_ACK = re.compile(r"/api/cad/alarm/(\d{1,9})/ack")
 ALARM_CLEAR = re.compile(r"/api/cad/alarm/(\d{1,9})/clear")
 DATASOURCE = re.compile(r"/api/cad/datasources/([A-Za-z0-9_.:%-]{1,200})/refresh")
+DVR_PIN = re.compile(r"/api/cad/cameras/([A-Za-z0-9_.:-]{1,64})/dvr/pin")      # keep recording a camera (#277)
 DS_READERS = ("admin", "dispatcher")      # who may see Settings > Data sources (#186)
 # The GETs only an admin may read (with a verified sign-in, like WRITES): path -> why, in the 403. The rest of the
 # GETs are anyone signed in's (Data sources: DS_READERS). server.py asks the same for the ones it serves itself.
@@ -237,6 +239,7 @@ WRITES = (
     (re.compile(r"/api/cad/runcards(?:/delete)?"), "admin"),
     (re.compile(r"/api/cad/radios(?:/delete)?"), "admin"),                 # the radio-ID registry
     (DATASOURCE, "admin"),                                                  # a data source's Refresh now (#186)
+    (DVR_PIN, "dispatch"),                                                  # keep recording a camera (#277)
     (re.compile(r"/api/(?:talkgroup|talkgroup-group|mode|retranscribe|adsb-receiver)"), "admin"),   # the station's radios (server.py)
 )
 READ_ACTIONS = {("/api/cad/settings/dispatch", "preview")}                  # the wording on a sample event
@@ -404,6 +407,7 @@ DOES = (
     (re.compile(r"/api/cad/radios/delete"), lambda m, b, o, c: (f"Changed settings: radio {b.get('system', '')} "
                                                                 f"{_clip(b.get('radio_id'), 12)} deleted", "")),
     (re.compile(r"/api/incident/([^/]{1,80})/close"), lambda m, b, o, c: (f"Closed monitor incident {m.group(1)}", "")),
+    (DVR_PIN, lambda m, b, o, c: (f"{'Kept' if b.get('on') else 'Stopped keeping'} camera {m.group(1)} recording", "")),
     (DATASOURCE, lambda m, b, o, c: (f"Refreshed data source: {_clip((o.get('source') or {}).get('name') or unquote(m.group(1)), 60)}", "")),
     (re.compile(r"/api/talkgroup"), lambda m, b, o, c: (f"Talkgroup {b.get('tg')}: {_toggles(b) or 'no change'}", "")),
     (re.compile(r"/api/talkgroup-group"), lambda m, b, o, c: (f"Talkgroups {_clip(b.get('group'), 40)}: {_toggles(b) or 'no change'}", "")),
@@ -545,6 +549,20 @@ class CadApi:
         only secret)."""
         p = getattr(self.cad, "pushes", None)
         return _json(200, {"configured": False} if p is None else {"configured": True, **p.page()})
+
+    def _dvr_pin(self, cid: str, body: dict) -> dict:
+        """POST /api/cad/cameras/<id>/dvr/pin {on}: keep recording this camera until unpinned, or stop (#277)."""
+        fn = getattr(self.cad, "dvr_pin", None)
+        if fn is None:
+            raise CadError("no camera recording here")
+        if not isinstance(body.get("on"), bool):
+            raise CadError("on: true or false")
+        try:
+            return {"ok": True, "dvr": fn(cid, body["on"])}
+        except KeyError:
+            raise CadError(f"no camera {cid}") from None
+        except ValueError as e:
+            raise CadError(str(e)) from None
 
     def _ds_refresh(self, key: str, body: dict) -> dict:
         """POST /api/cad/datasources/<key>/refresh: started (the row), in the Settings audit log too."""
@@ -699,4 +717,6 @@ class CadApi:
             return c.name_radio(body)
         if m := DATASOURCE.fullmatch(path):
             return self._ds_refresh(unquote(m.group(1)), body)
+        if m := DVR_PIN.fullmatch(path):
+            return self._dvr_pin(m.group(1), body)
         return None

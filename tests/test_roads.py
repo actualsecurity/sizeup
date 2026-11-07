@@ -165,7 +165,7 @@ def test_a_refresh_reads_each_feed_with_the_key_and_nothing_else_carries_it(tmp_
     pub = r.public()
     assert pub["configured"] and pub["attribution"] == "powered by 511NY" and pub["link"] == "https://511ny.org/"
     assert [c["id"] for c in pub["cameras"]] == ["4631", "4620", "4616"]
-    assert all(set(c) == {"id", "name", "road", "dir", "mile", "lat", "lon", "has_video", "off", "source", "cadence", "down", "state", "why", "since",
+    assert all(set(c) == {"id", "name", "road", "dir", "mile", "lat", "lon", "has_video", "off", "source", "cadence", "down", "state", "why", "since", "rec",
                           "down_since", "last_image"} for c in pub["cameras"])
     assert all(c["source"] == "511NY" for c in pub["cameras"]) and all(e["source"] == "511NY" for e in pub["events"])
     assert [s["name"] for s in pub["sources"]] == ["511ny"]
