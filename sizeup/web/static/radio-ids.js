@@ -1,5 +1,5 @@
 /* New radio IDs heard on FG1 / FG2 (GitHub #163; sizeup/cad/newids.py): the state's radio_ids, in the units column
-   under the radio and above the units (#177), as "New radio IDs": "Radio 1234 (MDC) on FG1: who is this?", when and how often it was heard, the call it was
+   under the radio and above the units (#177), as "New radio IDs": "Radio 1234 (MDC) · FG1: who?", when and how often it was heard, the call it was
    heard during, and a pick: a unit (the call's units first), or who it is with no unit, or Ignore. Dispatchers and
    admins answer (POST /api/cad/radio-id); a viewer, and the wall board, see the question and nothing to press.
    Naming it puts its transmissions on that unit's calls, the ones already heard too; nothing is ever guessed.
@@ -20,13 +20,13 @@
   const board = () => typeof BOARD !== "undefined" && BOARD;
   const mayAnswer = () => !board() && (typeof canDo !== "function" || canDo("dispatch"));
   const hms = (t) => (typeof fmtTime === "function" ? fmtTime(t, true) : new Date(t * 1000).toLocaleTimeString());
-  const question = (a) => `Radio ${a.radio_id} (${a.kind}) on ${a.channel}: who is this?`;
+  const question = (a) => `Radio ${a.radio_id} (${a.kind}) · ${a.channel}: who?`;
 
   function heard(a) {
-    const n = a.count === 1 ? "once" : `${a.count} times`;
+    const n = `${a.count}×`;
     const when = a.count === 1 ? hms(a.last_at) : `${hms(a.first_at)}–${hms(a.last_at)}`;
     const during = (a.incidents || []).map((i) => i.number || `#${i.id}`).join(", ");
-    return `Heard ${n}, ${when}` + (during ? ` · during ${during}` : "");
+    return `Heard ${n} · ${when}` + (during ? ` · on ${during}` : "");
   }
 
   async function answer(a, body, what) {
@@ -35,7 +35,7 @@
     try {
       const r = await api("POST", "/api/cad/radio-id", Object.assign({ system: a.system, radio_id: a.radio_id,
                                                                        operator: typeof operator === "function" ? operator() : "" }, body));
-      UI.toast(`${a.kind} ${a.radio_id}: ${what}`, "ok", (r.linked || []).length ? `Its transmissions are on ${r.linked.join(", ")}` : "");
+      UI.toast(`${a.kind} ${a.radio_id}: ${what}`, "ok", (r.linked || []).length ? `Linked: ${r.linked.join(", ")}` : "");
     } catch (e) {
       busy.delete(a.key);
       UI.toast(e.message, "err");

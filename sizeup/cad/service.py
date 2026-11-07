@@ -298,7 +298,7 @@ class Cad:
                 "run_cards_default": any(c["is_default"] for c in cards),
                 "transmit": {"enabled": self.transmitter.enabled, "transmitter": self.transmitter.name,
                              "channels": list(self.s.channels),
-                             "note": "Transmit is off: logged and played here only"},
+                             "note": "Transmit off: logged, played here only"},
                 "audio": {"tts": self.s.tts_engine in ("kokoro", "polly") or (self.s.tts_engine != "none" and bool(
                               shutil.which("say") and shutil.which("afconvert"))),
                           "engine": self.s.tts_engine, "voice": self.s.voice, "speed": self.s.speed,
@@ -664,7 +664,7 @@ class Cad:
         if not inc["emergency"]:
             on = [u["name"] for u in self.store.units() if u["incident_id"] == iid]
             return {"card": None, "card_label": "", "units": [], "unfilled": [], "already": on,
-                    "note": "Non-emergency event: no run card and no dispatch. Attach units if needed."}
+                    "note": "Non-emergency: no run card, no dispatch. Attach units if needed."}
         typ = _text(body, "type", 24) or inc["type"]
         sub = _text(body, "subtype", 24) if "type" in body else inc["subtype"]
         r = runcards.recommend(self.store, typ, sub, iid, where=self.locations(), params=self.eta)

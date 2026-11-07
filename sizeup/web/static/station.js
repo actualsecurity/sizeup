@@ -150,8 +150,7 @@ function route() {
       askOperator: () => $("#operator").focus(),
       msg: sMsg,
       changed: refreshHub,
-      offText: "Stop forwarding to the hub? Radios and speech-to-text keep running; what is heard meanwhile isn't sent. "
-        + "Anything already queued waits here.",
+      offText: "Stop forwarding to the hub? Radios keep running; nothing new is sent. Queued items wait here.",
       time: (t) => fmtTime(t, true),
       onState: (d) => { sta.hub = d; renderHub(); },
     });
@@ -189,7 +188,7 @@ function renderHub() {
     setText(pill, s.state === "ok" ? "Hub connected" : s.state === "starting" ? "Hub connecting"
       : s.state === "blocked" ? "Hub not sending" : "Hub unreachable");
   }
-  pill.title = [s.text, s.detail, n ? `${n} waiting to go up` : ""].filter(Boolean).join("\n");
+  pill.title = [s.text, s.detail, n ? `${n} waiting` : ""].filter(Boolean).join("\n");
   const url = d.hub_url || "";
   show(link, !!url);
   if (url && link.dataset.url !== url) {
@@ -205,7 +204,7 @@ function renderFromCad() {
   const box = $("#from-cad");
   if (!sta.fromCad) return;
   const url = (sta.hub && sta.hub.hub_url) || "";
-  box.replaceChildren("This is the station. The CAD is on the hub", ...(url
+  box.replaceChildren("Station page · CAD on the hub", ...(url
     ? [": ", Object.assign(el("a", null, `${url}/cad`), { href: `${url}/cad`, target: "_blank", rel: "noopener" })] : ["."]));
   show(box, true);
 }
@@ -217,7 +216,7 @@ function renderConn() {
   else if (age > LOST_AFTER_MS) { pill.className = "pill err"; setText(pill, "No updates"); }
   else if (sta.live && sta.live.mode() === "polling") {
     pill.className = "pill ok"; setText(pill, "Polling");
-    pill.title = "Stream blocked on this network: polling every 2 s";
+    pill.title = "Stream blocked here: polling every 2 s";
   } else { pill.className = "pill ok"; setText(pill, "Live"); pill.title = ""; }
   document.body.classList.toggle("stale", !!sta.lastMsgAt && age > LOST_AFTER_MS);
 }
@@ -230,7 +229,7 @@ function renderClock() {
 
 // ---- Monitor: pages and transmissions heard here ------------------------------------------------------
 
-const STT_SAID = { no_speech: "Key-up, no speech", pending: "Transcribing", remote: "Transcribed on the hub (AWS)",
+const STT_SAID = { no_speech: "Key-up, no speech", pending: "Transcribing", remote: "On the hub (AWS)",
                    off: "Not transcribed", error: "Transcription failed" };
 const said = (x) => STT_SAID[x.status] || "—";
 const player = new Audio();
