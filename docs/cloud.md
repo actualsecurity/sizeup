@@ -815,20 +815,26 @@ Incidents come in from ranked sources. The interface is in `sizeup/sources/__ini
 
 `sizeup/cad/automode.py` and `sizeup/cad/radiolog.py`, on the CAD of record.
 
-- **The mode** is department-wide, switched in the header (`POST /api/cad/dispatch-mode`, dispatchers and admins). Each
-  switch is a Settings audit row (section `dispatch`) with the Access identity. The default is 60 Control dispatching.
-- **60 Control dispatching:** a feed incident reported in this mode is tracked. It is accepted at once and the feed's
-  units of ours are dispatched at the feed's time. Pages attach as "paged" at the tone time. Units move forward from
-  the feed's per-unit times and from the radio's status hints, and the incident closes on the feed's in service. Each
-  step is an `auto_steps` row with its source (county, radio) and a one-click undo
-  (`POST /api/cad/incident/<id>/auto-undo`).
-- **A person wins:** a unit a person touches on an incident, and an incident a person reopens, are left alone by
-  automation from then on (`manual_edits`, `unit:<code>` / `close`).
-- **PCFD dispatching:** feed incidents are queued only. A switch affects only what comes after it: feed changes
-  reported in PCFD mode are never replayed, and an incident first reported in PCFD mode stays manual.
-- **Radio log (both modes):** a transmission goes on an open incident when it names one of its units, its address or
-  its place, or is on its working fireground channel. Only our dispatch and fire channels count, with the guards
-  listed in `radiolog.py`. One click removes it, and it stays off.
+- **The mode** is department-wide, switched in the header (`POST /api/cad/dispatch-mode`, dispatchers and admins, with a
+  confirm). Each switch is a Settings audit row (section `dispatch`) with the Access identity. The default is 60 Control
+  dispatching. It is never exported and is kept through an import.
+- **60 Control dispatching:** a feed incident reported in this mode is tracked.
+  - It is accepted only when the feed lists one of our units (exact board codes, spoken names or the data file's
+    `feed_unit_aliases`) or a page attached, and never while it is "possibly the same as" an open accepted incident.
+  - Newly listed units are dispatched at the feed's time; unknown codes are listed on the timeline, never dispatched.
+  - Units on the call move forward from the feed's per-unit times and the radio's status hints. Automation never puts
+    back a unit that was on the call and cleared. The radio places a unit on no call only by its own identified
+    "responding", when exactly one incident is open from the last 20 minutes and it is tracked.
+  - The feed's in service closes it only when no unit is left on it; otherwise "County in service: close?" with one click.
+  - Each step is an `auto_steps` row with its source (county, radio) and a one-click undo
+    (`POST /api/cad/incident/<id>/auto-undo`); undoing a close puts back the units it released.
+- **A person wins:** a unit a person touches on an incident (marked before the change), and an incident a person reopens,
+  are left alone by automation from then on (`manual_edits`, `unit:<code>` / `close`).
+- **PCFD dispatching:** feed incidents are queued only. A switch affects only what comes after it.
+- **Radio log (both modes):** a transmission goes on an open incident when it names one of its board units, its address or
+  its place, or is on its fireground channel when the feed names one. Only our dispatch and fire channels count, with the
+  guards listed in `radiolog.py`. One click removes it. These links don't extend the audio's retention until a person
+  keeps them ("Keep", `POST /api/cad/incident/<id>/keep`).
 
 ## Highway layers: cameras, incidents, signs, mileposts (the Thruway, 511NY)
 

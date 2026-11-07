@@ -102,6 +102,8 @@ POST /api/cad/incident/<id>/recommend     {type?, subtype?}      -> {units, unfi
 POST /api/cad/incident/<id>/feed-use      {field: type|location} -> the event: the CAD feed's value over a person's (#297)
 POST /api/cad/incident/<id>/auto-undo     {step, operator?}  an automatic step (60 Control dispatching, #311; the event's
                                           auto.steps) taken back: the unit (or the close) is then a person's
+POST /api/cad/incident/<id>/keep          {traffic_id, operator?}  an automatic radio-log link (mention / fireground,
+                                          #311) confirmed: its audio and row are kept like any on the event
 POST /api/cad/dispatch-mode               {mode: 60control | pcfd, operator?}  the header's switch (#311,
                                           sizeup/cad/automode.py); dispatchers and admins; in the Settings audit log
 POST /api/cad/incident/<id>/preview       {unit_ids, full?, remarks?} -> {text, kind, audio_url, audio_note, remarks,
@@ -200,7 +202,7 @@ from sizeup.datasources import TooSoon
 
 JSON = "application/json"
 MAX_BODY = 65536
-INCIDENT = re.compile(r"/api/cad/incident/(\d{1,9})(?:/(accept|dismiss|close|reopen|note|recommend|preview|dispatch|upgrade|attach|link|unlink|return|feed-use|auto-undo))?")
+INCIDENT = re.compile(r"/api/cad/incident/(\d{1,9})(?:/(accept|dismiss|close|reopen|note|recommend|preview|dispatch|upgrade|attach|link|unlink|keep|return|feed-use|auto-undo))?")
 SUGGEST = re.compile(r"/api/cad/incident/(\d{1,9})/units")
 EXPORT = re.compile(r"/api/cad/export/([a-z-]{1,20}\.csv)")
 UNIT = re.compile(r"/api/cad/unit/(\d{1,9})/status")
@@ -229,7 +231,7 @@ ADMIN_READS = {
 # anyone signed in (a POST that changes nothing). First match wins; a path not here is "admin".
 WRITES = (
     (re.compile(r"/api/cad/incident(?:/\d{1,9}(?:/(?:accept|dismiss|close|reopen|note|recommend|preview|dispatch|upgrade"
-                r"|attach|link|unlink|return|feed-use|auto-undo))?)?"), "dispatch"),      # events, notes, dispatches, radio links
+                r"|attach|link|unlink|keep|return|feed-use|auto-undo))?)?"), "dispatch"),      # events, notes, dispatches, radio links
     (DISPATCH_MODE, "dispatch"),                                            # 60 Control / PCFD dispatching (#311)
     (UNIT, "dispatch"),                                                     # unit status on the board
     (PREALERT, "dispatch"),                                                 # a phone pre-alert that is nothing
@@ -325,6 +327,8 @@ def _on_incident(m, b, o, c):
         return f"Linked a transmission to {ev}", n
     if act == "unlink":
         return f"Removed a transmission from {ev}", n
+    if act == "keep":
+        return f"Kept a transmission on {ev}", n
     if act == "auto-undo":
         return f"Undid an automatic step on {ev}", n
     if act == "return":
@@ -700,7 +704,7 @@ class CadApi:
             iid, action = int(m.group(1)), m.group(2)
             fn = {None: c.update, "accept": c.accept, "dismiss": c.dismiss, "close": c.close, "reopen": c.reopen, "note": c.note,
                   "recommend": c.recommend, "preview": c.preview, "dispatch": c.dispatch, "upgrade": c.upgrade,
-                  "attach": c.attach, "link": c.link_traffic, "unlink": c.unlink_traffic,
+                  "attach": c.attach, "link": c.link_traffic, "unlink": c.unlink_traffic, "keep": c.keep_traffic,
                   "return": c.return_unit, "feed-use": c.feed_use, "auto-undo": c.auto_undo}[action]
             return fn(iid, body)
         if m := UNIT.fullmatch(path):

@@ -434,6 +434,11 @@ class Cad:
         op = _text(body, "operator", OPERATOR_MAX)
         if action != "accept":
             return self.hints.dismiss(hid, op)
+        h = self.store.one("SELECT unit_id, incident_id FROM status_hints WHERE id = ?", (hid,))
+        if h is not None:                                # a person's, before the write (#311 L4): where it was and goes
+            was = self.store.unit(h["unit_id"])["incident_id"]
+            for i in {was, h["incident_id"]}:
+                self._by_hand(i, [h["unit_id"]], op)
         out = self.hints.accept(hid, op)
         self._by_hand(out.get("incident_id"), [out["id"]], op)
         return out
@@ -1059,9 +1064,9 @@ class Cad:
         channel = self._channel(body)
         kind = "add_on" if self.store.has_dispatch(iid) else "new"
         text, plan = self._text_for(inc, units, kind, full=bool(_bool(body, "full")), remarks=remarks)
+        self._by_hand(iid, [u["id"] for u in units], operator)
         moved = self.store.assign(iid, [u["id"] for u in units], operator,
                                   verb="added to the assignment" if kind == "add_on" else "")
-        self._by_hand(iid, [u["id"] for u in units], operator)
         return self._send(iid, text, units, operator, channel, "add-on" if kind == "add_on" else "dispatch", moved,
                           remarks, plan)
 
@@ -1107,8 +1112,8 @@ class Cad:
         if full:
             what.append(L.wording["full_response"])
         self.store.note(iid, "Upgrade: " + "; ".join(what or ["more units"]), operator, kind="upgrade")
-        moved = self.store.assign(iid, [u["id"] for u in units], operator, verb="dispatched (upgrade)") if units else []
         self._by_hand(iid, [u["id"] for u in units], operator)
+        moved = self.store.assign(iid, [u["id"] for u in units], operator, verb="dispatched (upgrade)") if units else []
         return self._send(iid, text, units, operator, channel, "upgrade", moved, remarks, plan)
 
     def attach(self, iid: int, body: dict) -> dict:
@@ -1149,8 +1154,8 @@ class Cad:
         agency = [u["name"] for u in units if u["response"] == "agency" and status not in L.unit_statuses_for(u["name"], u["board"])]
         if agency:
             raise CadError(f"Another agency's unit, not {L.name('unit_statuses', status)}: {', '.join(agency)}")
-        moved = self.store.assign(iid, [u["id"] for u in units], op, status=status)
         self._by_hand(iid, [u["id"] for u in units], op)
+        moved = self.store.assign(iid, [u["id"] for u in units], op, status=status)
         return {"ok": True, "moved": moved, "status": status}
 
     def _prune_audio(self) -> None:
@@ -1192,19 +1197,20 @@ class Cad:
         except (KeyError, TypeError, ValueError):
             raise CadError("unit_id: required") from None
         op = _text(body, "operator", OPERATOR_MAX)
-        out = self.store.return_to_incident(iid, uid, _text(body, "status", 40, required=True), op)
         self._by_hand(iid, [uid], op)
-        return out
+        return self.store.return_to_incident(iid, uid, _text(body, "status", 40, required=True), op)
 
     def unit_status(self, uid: int, body: dict) -> dict:
         status = _text(body, "status", 40, required=True)
         op = _text(body, "operator", OPERATOR_MAX)
         was = self.store.unit(uid)["incident_id"]
+        self._by_hand(was, [uid], op)                    # a person's, before the write (#311 L4)
         if "incident_id" in body and body["incident_id"] is not None:   # the board's "which call?" answer
             try:
                 iid = int(body["incident_id"])
             except (TypeError, ValueError):
                 raise CadError("incident_id: a number (0 = no call)") from None
+            self._by_hand(iid, [uid], op)
             out = self.store.set_unit_status_on(uid, status, iid, op, _text(body, "note", 200))
         else:
             out = self.store.set_unit_status(uid, status, op, _text(body, "note", 200))
@@ -1356,6 +1362,15 @@ class Cad:
         if inc["status"] == "dismissed":
             raise CadError("event is dismissed")
         r = self.comms.link(_text(body, "traffic_id", 200, required=True), iid, _text(body, "operator", OPERATOR_MAX))
+        if r.get("error"):
+            raise CadError(r["error"])
+        return dict(r, incident_id=iid, number=inc["number"])
+
+    def keep_traffic(self, iid: int, body: dict) -> dict:
+        """POST /api/cad/incident/<id>/keep {traffic_id, operator}: an automatic mention / fireground link confirmed by a
+        person (#311): its audio and row are kept like any on the event."""
+        inc = self.store.incident(iid)
+        r = self.radiolog.keep(_text(body, "traffic_id", 200, required=True), iid, _text(body, "operator", OPERATOR_MAX))
         if r.get("error"):
             raise CadError(r["error"])
         return dict(r, incident_id=iid, number=inc["number"])

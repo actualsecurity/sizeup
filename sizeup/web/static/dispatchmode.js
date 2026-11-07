@@ -43,6 +43,7 @@ window.DispatchMode = (() => {
 
   async function set(m, st, deps) {
     if (m.mode === st.mode || !deps.canDo("dispatch")) return;
+    if (!await deps.confirm(`Switch to ${m.label}?`, { ok: m.short, danger: false })) return;
     try {
       await deps.api("POST", "/api/cad/dispatch-mode", { mode: m.mode, operator: deps.operator() });
       deps.toast(m.label, "ok");
@@ -54,6 +55,7 @@ window.DispatchMode = (() => {
   const steps = (inc) => (inc && inc.auto && inc.auto.steps) || [];
 
   function chip(inc, s, deps) {
+    if (s.ask_close) return askClose(inc, s, deps);
     const c = el("span", `auto-src ${s.source}${s.undone ? " undone" : ""}`, s.source);
     c.title = `${s.undone ? "Undone: " : "Automatic: "}${s.text} (${s.source === "county" ? "County feed" : "radio"}, ${deps.time(s.at)})`;
     if (!s.undo || deps.readonly || !deps.canDo("dispatch")) return c;
@@ -77,6 +79,31 @@ window.DispatchMode = (() => {
     return w;
   }
 
+  // "County in service: close?" (a unit still on it): one click closes it, Complete
+  function askClose(inc, s, deps) {
+    const c = el("span", `auto-src ${s.source}`, s.source);
+    c.title = `${s.text} (County feed, ${deps.time(s.at)})`;
+    const open = inc.status === "pending" || inc.status === "active";
+    if (!open || deps.readonly || !deps.canDo("dispatch")) return c;
+    const b = el("button", "mini", "Close");
+    b.type = "button";
+    b.title = "Close: Complete";
+    b.addEventListener("click", async (ev) => {
+      ev.stopPropagation();
+      b.disabled = true;
+      try {
+        await deps.api("POST", `/api/cad/incident/${inc.id}/close`, { disposition: "COMPLETE", operator: deps.operator() });
+        deps.toast("Closed", "ok");
+      } catch (err) {
+        b.disabled = false;
+        deps.toast(`Not closed: ${err.message}`, "err");
+      }
+    });
+    const w = el("span", "auto-step");
+    w.append(c, b);
+    return w;
+  }
+
   function eventChip(inc, e, deps) {
     const s = steps(inc).find((x) => x.event_id === e.id);
     return s ? chip(inc, s, deps) : null;
@@ -97,7 +124,7 @@ window.DispatchMode = (() => {
 
   function sig(inc, key) {
     const s = typeof key === "number" ? steps(inc).find((x) => x.event_id === key) : unitStep(inc, key);
-    return s ? `${s.id}${s.undone ? "u" : ""}` : "";
+    return s ? `${s.id}${s.undone ? "u" : ""}${inc.status}` : "";
   }
 
   return { header, eventChip, unitChip, sig };

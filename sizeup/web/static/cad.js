@@ -863,7 +863,7 @@ const RADIO_WHY = { unit: "Unit", dispatcher: "60 Control", manual: "Added", pag
                     fireground: "Fireground" };
 // The dispatch mode's chips and undo (dispatchmode.js, #311)
 function autoDeps() {
-  return { api, operator, canDo, toast: UI.toast, time: (t) => fmtTime(t, true), readonly: BOARD };
+  return { api, operator, canDo, toast: UI.toast, confirm: UI.confirm, time: (t) => fmtTime(t, true), readonly: BOARD };
 }
 // An FG1 key-up with no radio ID (comms.py id_note, #163): what was found, never who it might be.
 const NO_ID = {
@@ -1107,6 +1107,13 @@ function radioRow(t, ctx = {}) {
       x.title = "Remove from this incident";
       x.setAttribute("aria-label", "Remove from this incident");
       x.addEventListener("click", () => unlinkTx(t, { id: ctx.current, number: (incidents().find((i) => i.id === ctx.current) || {}).number || "" }));
+      if ((t.why === "mention" || t.why === "fireground") && !t.link_kept) {   // auto from words: kept only when confirmed
+        const k = el("button", "mini", "Keep");
+        k.type = "button";
+        k.title = "Keep its recording with this incident";
+        k.addEventListener("click", () => keepTx(t, ctx.current));
+        meta.append(k);
+      }
       meta.append(x);
     }
   }
@@ -1456,6 +1463,15 @@ async function unlinkTx(t, e) {
   }
   txChanged();
 }
+async function keepTx(t, iid) {
+  try {
+    await api("POST", `/api/cad/incident/${iid}/keep`, { traffic_id: t.id, operator: operator() });
+    UI.toast("Kept", "ok");
+  } catch (err) {
+    UI.toast(`Keep failed: ${err.message}`, "err");
+  }
+  txChanged();
+}
 async function copyText(t) {
   const text = `${fmtTime(t.start, true)} ${t.rig || t.talker || ""} (${t.channel}): ${t.text}`;
   try {
@@ -1576,7 +1592,7 @@ function renderRadio(inc) {
   }
   const one = {
     key: (x) => x.key,
-    sig: (x) => x.kind === "radio" ? JSON.stringify([x.t.text, x.t.atc_text, x.t.atc_weak, x.t.atc_snaps, x.t.status, x.t.rig, x.t.why, x.t.has_audio, talkSig(x.t.rig),
+    sig: (x) => x.kind === "radio" ? JSON.stringify([x.t.text, x.t.atc_text, x.t.atc_weak, x.t.atc_snaps, x.t.status, x.t.rig, x.t.why, x.t.link_kept, x.t.has_audio, talkSig(x.t.rig),
                                                      x.t.alt_text, x.t.rerun_at, (x.t.events || []).map((e) => [e.id, e.why]), cad.txRev,
                                                      emSig(x.t), atcSig(x.t)])
       : JSON.stringify([x.e.text, x.e.units]),

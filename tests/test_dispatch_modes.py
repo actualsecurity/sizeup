@@ -20,6 +20,10 @@ ADDR = "12 Example Ave"
 class AutoRig(Rig):
     """The incident sources' rig, the way the app applies a feed's event (Cad.source_event: sources, then the mode)."""
 
+    def __init__(self, tmp_path, *feeds):
+        super().__init__(tmp_path, *feeds)
+        self.cad.radiolog.inline = True                 # the backfill on this thread
+
     def sink(self, kind: str, d: dict) -> None:
         self.sent.append((kind, d))
         (self.cad.source_event if kind == "source_event" else self.cad.sources.on_health)(d)
@@ -34,7 +38,12 @@ class AutoRig(Rig):
         return self.cad.store.one("SELECT status FROM units WHERE name = ?", (name,))["status"]
 
     def on(self, name: str, eid: str = "A1") -> dict | None:
-        return next((a for a in self.inc(eid)["assignments"] if a["name"] == name), None)
+        """The unit's latest assignment on the incident (cleared or not)."""
+        return next((a for a in reversed(self.inc(eid)["assignments"]) if a["name"] == name), None)
+
+    def here(self, name: str, eid: str = "A1") -> dict | None:
+        """Its assignment there not cleared, else None."""
+        return next((a for a in self.inc(eid)["assignments"] if a["name"] == name and not a["cleared_at"]), None)
 
     def steps(self, eid: str = "A1") -> list[tuple]:
         return [(s["kind"], s["source"], s["unit"], s["status"], s["undone"]) for s in self.inc(eid)["auto"]["steps"]]
@@ -107,11 +116,20 @@ def test_60_control_moves_the_call_through_by_itself(rig):
     assert rig.status("L31") == "OL"
 
     rig.at(900)
-    rig.change(times={"in_service": T0 + 890})                                     # the feed's in service: closed
+    rig.change(unit_times={"E60": {"responding": T0 + 55, "on_location": T0 + 230, "in_service": T0 + 880}})
+    assert rig.status("E60") == "AV" and rig.on("E60")["cleared_at"] == T0 + 880
+    rig.change(times={"in_service": T0 + 890})                                     # L31 has no in service of its own
+    inc = rig.inc()
+    assert inc["status"] == "active" and rig.here("L31")                           # not closed under it: asked instead
+    ask = rig.step("close?")
+    assert ask["ask_close"] and not ask["undo"] and "L31" in ask["text"]
+    rig.radio("307-2b-call_2b-t0", T0 + 895, "Ladder 31 back in service")          # the radio clears it
+    rig.change(comments=((T0 + 896, "all units clear"),))
     inc = rig.inc()
     assert inc["status"] == "closed" and inc["disposition"] == "COMPLETE"
     assert rig.status("E60") == "AV" and rig.status("L31") == "AV"
     assert rig.steps()[-1] == ("close", "county", "", "", False)
+    assert rig.steps().count(("close?", "county", "", "", False)) == 1             # asked once
 
 
 def test_incident_times_move_a_unit_only_when_it_is_the_only_one(rig):
@@ -127,9 +145,11 @@ def test_incident_times_move_a_unit_only_when_it_is_the_only_one(rig):
 
 
 def test_a_unit_on_another_call_is_not_moved_and_one_out_of_service_is_not_sent(rig):
+    rig.clock.t = T0 - 3600                                                        # an hour before: not a duplicate
     other = rig.cad.create({"type": "STRU", "address": "400 Sample St", "operator": "Lt. Test"})
     rig.cad.dispatch(other["id"], {"unit_ids": [rig.uid("L31")], "operator": "Lt. Test"})
     rig.cad.unit_status(rig.uid("E60"), {"status": "OS", "note": "pump", "operator": "Lt. Test"})
+    rig.at(0)
     rig.created()
     assert rig.inc()["assignments"] == [] and rig.status("L31") == "DP"
     assert any("L31 on" in e["text"] and "not moved" in e["text"] for e in rig.inc()["events"])
@@ -137,7 +157,7 @@ def test_a_unit_on_another_call_is_not_moved_and_one_out_of_service_is_not_sent(
 
 def test_a_radio_responding_puts_one_of_ours_on_the_one_new_tracked_call(rig):
     rig.created(units=("E60",))
-    rig.radio("307-3-call_3-t0", T0 + 40, "Engine 62 responding")
+    rig.radio("307-3-call_3-t0", T0 + 40, "Engine 62 responding", rig="E62", unit="E62")    # its own radio
     assert rig.on("E62")["status"] == "RS" and rig.step("status", "E62")["source"] == "radio"
     rig.radio("307-4-call_4-t0", T0 + 50, "Engine 64 on location")                # on location with no call: never guessed
     assert rig.on("E64") is None and rig.status("E64") == "AV"
@@ -215,11 +235,16 @@ def test_one_click_undo_and_the_feed_does_not_redo_it(rig):
     assert rig.status("E60") == "DP"                                               # the person's now
     a = rig.step("assign", "L31")
     rig.cad.auto_undo(rig.iid(), {"step": a["id"], "operator": "Lt. Test"})
-    assert rig.on("L31") is None and rig.status("L31") == "AV"
+    assert rig.here("L31") is None and rig.on("L31")["cleared_at"] and rig.status("L31") == "AV"   # cleared, kept
     rig.change(unit_times={"L31": {"responding": T0 + 195}})
-    assert rig.on("L31") is None                                                   # not sent again
+    assert rig.here("L31") is None                                                 # not sent again
+    rig.change(unit_times={"E60": {"responding": T0 + 55, "on_location": T0 + 190, "in_service": T0 + 880}})
+    assert rig.here("E60")                                                         # the person's: the feed doesn't clear it
     rig.at(900)
     rig.change(times={"in_service": T0 + 890})
+    assert rig.inc()["status"] == "active" and rig.step("close?")                  # a person's unit on it: asked, not closed
+    rig.cad.unit_status(rig.uid("E60"), {"status": "AV", "operator": "Lt. Test"})  # they clear it
+    rig.change(comments=((T0 + 895, "all clear"),))
     assert rig.inc()["status"] == "closed"
     c = rig.step("close")
     rig.cad.auto_undo(rig.iid(), {"step": c["id"], "operator": "Lt. Test"})
@@ -357,7 +382,7 @@ def test_radio_log_attaches_what_is_about_the_incident(rig, mode):
 
 
 def test_radio_log_only_while_open_and_never_two_incidents_for_one_address(rig):
-    rig.created()
+    rig.created(units=("E60",))
     iid = rig.iid()
     rig.at(900)
     rig.change(times={"in_service": T0 + 890})

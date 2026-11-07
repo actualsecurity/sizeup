@@ -100,6 +100,21 @@ def rig_rows_sql(n: int) -> str:
             + f") LIMIT {RIG_ROWS_MAX + 1}")
 # A transmission that had the emergency button or raised an alarm (the Radio view's Emergency filter)
 EMERGENCY_WHERE = "(t.emergency = 1 OR t.id IN (SELECT traffic_id FROM alarms))"
+# Links the radio log made from words alone (#311, sizeup/cad/radiolog.py): they don't keep a transmission's audio or row
+# past the normal retention until a person keeps them (radio_link_kept).
+AUTO_UNSURE = ("mention", "fireground")
+KEPT_SCHEMA = """
+CREATE TABLE IF NOT EXISTS radio_link_kept (
+  traffic_id TEXT NOT NULL,
+  incident_id INTEGER NOT NULL,
+  at REAL NOT NULL,
+  operator TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (traffic_id, incident_id)
+);
+"""
+# A link that keeps its transmission: any but an unconfirmed mention / fireground one
+SURE_LINK = ("(l.why NOT IN ('mention', 'fireground') OR EXISTS (SELECT 1 FROM radio_link_kept k "
+             "WHERE k.traffic_id = l.traffic_id AND k.incident_id = l.incident_id))")
 
 
 def split_call(tid: str, p25: bool) -> tuple[str, int | None]:
@@ -122,6 +137,8 @@ class Comms:
         self.names_ours = None  # text -> [our unit codes] (the feed's matcher, #115): a page not ours naming them
         self.on_text = None     # traffic id -> None: a transcript arrived or changed (status suggestions, #37)
         self._revs: dict = {}   # name -> (rev, value): what _per_rev made
+        with self.store.lock:
+            self.store.db.executescript(KEPT_SCHEMA)
         self._drop_channel_links()
 
     def _drop_channel_links(self) -> None:
@@ -406,17 +423,17 @@ class Comms:
     def prune(self) -> int:
         cutoff = self.clock() - KEEP_UNLINKED_S
         with self.store.tx() as db:
-            return db.execute("DELETE FROM radio_traffic WHERE start < ? AND id NOT IN (SELECT traffic_id FROM radio_links)",
-                              (cutoff,)).rowcount
+            return db.execute(f"DELETE FROM radio_traffic WHERE start < ? AND id NOT IN (SELECT l.traffic_id FROM radio_links l "
+                              f"WHERE {SURE_LINK})", (cutoff,)).rowcount
 
     def kept_for_events(self, ids: list[str]) -> set[str]:
         """Of these clip ids, the ones whose audio is a record (the hub's audio retention, #251): on a CAD event
-        (radio_links, any why), with an alarm, or with the emergency button or an emergency window's keep."""
+        (radio_links, any why but an unconfirmed mention / fireground one, #311), with an alarm, or with the emergency button or an emergency window's keep."""
         out: set[str] = set()
         for k in range(0, len(ids), 500):
             chunk = list(ids[k:k + 500])
             marks = ",".join("?" * len(chunk))
-            sql = (f"SELECT traffic_id AS id FROM radio_links WHERE traffic_id IN ({marks}) "
+            sql = (f"SELECT l.traffic_id AS id FROM radio_links l WHERE l.traffic_id IN ({marks}) AND {SURE_LINK} "
                    f"UNION SELECT id FROM radio_traffic WHERE id IN ({marks}) AND (emergency = 1 OR kept != '')")
             out.update(r["id"] for r in self.store.q(sql, chunk * 2))
             try:
@@ -454,7 +471,8 @@ class Comms:
         out: dict[int, list[dict]] = {i: [] for i in ids}
         if not ids:
             return out
-        rows = self.store.q(f"SELECT t.*, l.incident_id, l.why, l.unit AS link_unit FROM radio_links l "
+        rows = self.store.q(f"SELECT t.*, l.incident_id, l.why, l.unit AS link_unit, EXISTS (SELECT 1 FROM radio_link_kept k "
+                            f"WHERE k.traffic_id = l.traffic_id AND k.incident_id = l.incident_id) AS link_kept FROM radio_links l "
                             f"JOIN radio_traffic t ON t.id = l.traffic_id WHERE l.incident_id IN ({','.join('?' * len(ids))}) "
                             f"ORDER BY t.start DESC", ids)
         for r in rows:
