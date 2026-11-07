@@ -104,7 +104,7 @@ window.TrainLayer = (() => {
         store.fails += 1;
         console.warn(`trains: ${e.message || e}; next poll in ${Math.round(nextPoll() / 1000)} s`);
       }
-      finally { store.loading = null; notify(); animate(); try { performance.measure("map:trains", { start: t0 }); } catch (_) { /* an older browser */ } }
+      finally { store.loading = null; notify(); animate(); try { performance.clearMeasures("map:trains"); performance.measure("map:trains", { start: t0 }); } catch (_) { /* an older browser */ } }
     })();
     return store.loading;
   }

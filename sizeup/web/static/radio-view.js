@@ -363,7 +363,10 @@ window.RadioView = (() => {
   // ---- polling ------------------------------------------------------------------------------------
 
   function measure(name, start, end) {
-    try { performance.measure(name, end === undefined ? { start } : { start, end }); } catch (_) { /* an older browser */ }
+    try {                                          // only the latest of each: a board runs for weeks
+      performance.clearMeasures(name);
+      performance.measure(name, end === undefined ? { start } : { start, end });
+    } catch (_) { /* an older browser */ }
   }
 
   // On screen: open, the page visible, the view shown and the address still #radio. Anything else stops

@@ -76,9 +76,26 @@ MAIN_LIMIT, OTHER_LIMIT = 200, 300    # the Radio view's Main and Other: each it
 ID_NOTES = ("none", "undecoded", "weak")    # why an FG1 key-up has no radio ID (radio_traffic.id_note, #163)
 RELINK_MAX = 2000                           # a radio just named: at most this many of its unnamed transmissions
 EVIDENCE_MAX = 64 * 1024                    # an emergency's raw call record (radio_traffic.evidence), at most
-# A unit filter (or PCFD only): the rows with a rig, found on the partial index radio_traffic_rig and then sorted, not a
-# newest-first walk of the whole log that a rare unit reads to the end (#284). Ends with the condition on rig and ")".
-RIG_IN = "t.rowid IN (SELECT rowid FROM radio_traffic WHERE rig != '' AND "
+# A unit filter (or PCFD only, #284): the rows it matches are looked up once on the partial index radio_traffic_rig; up to
+# this many, each section asks for just those rows (a rare unit no longer reads the whole log to its end); more (a
+# busy unit, or every row with a rig): the newest-first walk, which finds enough of them quickly.
+RIG_ROWS_MAX = 3000
+RIG_LIKE = "(',' || REPLACE({col}, ' ', '') || ',') LIKE ?"
+# The Radio view's choices (Comms.facets), a skip along an index each: channel (radio_traffic_channel_start) and rig
+# (radio_traffic_rig), one look-up per value.
+CHANNELS_SQL = ("WITH RECURSIVE c(ch) AS (SELECT MIN(channel) FROM radio_traffic UNION ALL "
+                "SELECT (SELECT MIN(channel) FROM radio_traffic WHERE channel > c.ch) FROM c WHERE c.ch IS NOT NULL) "
+                "SELECT ch AS channel, (SELECT MAX(start) FROM radio_traffic WHERE channel = c.ch) AS m FROM c "
+                "WHERE ch IS NOT NULL ORDER BY m DESC")
+RIGS_SQL = ("WITH RECURSIVE g(rig) AS (SELECT MIN(rig) FROM radio_traffic WHERE rig != '' UNION ALL "
+            "SELECT (SELECT MIN(rig) FROM radio_traffic WHERE rig != '' AND rig > g.rig) FROM g WHERE g.rig IS NOT NULL) "
+            "SELECT rig FROM g WHERE rig IS NOT NULL")
+
+
+def rig_rows_sql(n: int) -> str:
+    """The rows whose rig names any of n units (n LIKE patterns), at most RIG_ROWS_MAX + 1: on radio_traffic_rig."""
+    return ("SELECT rowid AS r FROM radio_traffic WHERE rig != '' AND (" + " OR ".join([RIG_LIKE.format(col="rig")] * n)
+            + f") LIMIT {RIG_ROWS_MAX + 1}")
 # A transmission that had the emergency button or raised an alarm (the Radio view's Emergency filter)
 EMERGENCY_WHERE = "(t.emergency = 1 OR t.id IN (SELECT traffic_id FROM alarms))"
 
@@ -552,8 +569,7 @@ class Comms:
             where.append("LOWER(t.text) LIKE ? ESCAPE '\\'")
             args.append(f"%{_like(w)}%")
         if unit:
-            where.append(RIG_IN + "(',' || REPLACE(rig, ' ', '') || ',') LIKE ?)")
-            args.append(f"%,{unit},%")
+            self._rig_where(where, args, [unit])
         if channel:
             where.append("t.channel = ?")
             args.append(channel)
@@ -564,8 +580,7 @@ class Comms:
         if pcfd is not None:
             if not pcfd:
                 return None
-            where.append(RIG_IN + "(" + " OR ".join(["(',' || REPLACE(rig, ' ', '') || ',') LIKE ?"] * len(pcfd)) + "))")
-            args += [f"%,{u},%" for u in pcfd]
+            self._rig_where(where, args, pcfd)
         if since is not None:
             where.append("t.start >= ?")
             args.append(since)
@@ -573,6 +588,17 @@ class Comms:
             where.append("t.start <= ?")
             args.append(until)
         return where, args
+
+    def _rig_where(self, where: list, args: list, units) -> None:
+        """Rows whose rig names any of these units: by their rowids when few (RIG_ROWS_MAX), else by the rig itself."""
+        pats = [f"%,{u},%" for u in units]
+        rows = self.store.q(rig_rows_sql(len(pats)), pats)
+        if len(rows) <= RIG_ROWS_MAX:
+            where.append("t.rowid IN (SELECT value FROM json_each(?))")
+            args.append(json.dumps([r["r"] for r in rows]))
+        else:
+            where.append("(" + " OR ".join([RIG_LIKE.format(col="t.rig")] * len(pats)) + ")")
+            args += pats
 
     def _fetch(self, where, args, limit) -> list[dict]:
         return self.store.q("SELECT t.*, 'radio' AS kind FROM radio_traffic t"
@@ -613,15 +639,7 @@ class Comms:
         return self._per_rev("facets", self._facets)
 
     def _facets(self) -> dict:
-        chans = self.store.q(
-            "WITH RECURSIVE c(ch) AS (SELECT MIN(channel) FROM radio_traffic UNION ALL "
-            "SELECT (SELECT MIN(channel) FROM radio_traffic WHERE channel > c.ch) FROM c WHERE c.ch IS NOT NULL) "
-            "SELECT ch AS channel, (SELECT MAX(start) FROM radio_traffic WHERE channel = c.ch) AS m FROM c "
-            "WHERE ch IS NOT NULL ORDER BY m DESC")
-        rigs = self.store.q(
-            "WITH RECURSIVE g(rig) AS (SELECT MIN(rig) FROM radio_traffic WHERE rig != '' UNION ALL "
-            "SELECT (SELECT MIN(rig) FROM radio_traffic WHERE rig != '' AND rig > g.rig) FROM g WHERE g.rig IS NOT NULL) "
-            "SELECT rig FROM g WHERE rig IS NOT NULL")
+        chans, rigs = self.store.q(CHANNELS_SQL), self.store.q(RIGS_SQL)
         return {"channels": [r["channel"] for r in chans] + [NOTES],
                 "rigs": sorted({x.strip() for r in rigs for x in r["rig"].split(",") if x.strip()})}
 

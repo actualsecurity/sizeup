@@ -131,7 +131,7 @@ window.MapLayers = (() => {
         }
       } finally {
         store.loading = null;
-        try { performance.measure("map:roads", { start: t0 }); } catch (_) { /* an older browser */ }
+        try { performance.clearMeasures("map:roads"); performance.measure("map:roads", { start: t0 }); } catch (_) { /* an older browser */ }
       }
     })();
     return store.loading;

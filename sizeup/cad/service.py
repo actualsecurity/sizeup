@@ -1220,9 +1220,11 @@ class Cad:
                "events": [{"id": r["id"], "number": r["number"], "type": r["type"], "address": r["address"]}
                           for r in self.store.q("SELECT DISTINCT i.id, i.number, i.type, i.address FROM radio_links l "
                                                 "JOIN incidents i ON i.id = l.incident_id ORDER BY i.id DESC LIMIT 100")]}
-        if len(self._comms_cache) >= COMMS_CACHE_N:
-            self._comms_cache.clear()
-        self._comms_cache[key] = (time.monotonic(), out)
+        kept = {k: v for k, v in self._comms_cache.items() if k[0] == now_rev}     # an older rev's: never asked again
+        if len(kept) >= COMMS_CACHE_N:
+            kept = {}
+        kept[key] = (time.monotonic(), out)
+        self._comms_cache = kept
         return {**out, "talking": talking}
 
     def feed_query(self, q: dict) -> dict:

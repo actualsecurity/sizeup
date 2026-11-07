@@ -121,7 +121,7 @@ window.AircraftLayer = (() => {
         const r = await fetch(URL, { credentials: "same-origin" });
         if (r.ok) { store.data = await r.json(); store.at = Date.now(); store.failed = false; } else store.failed = true;
       } catch (_) { store.failed = true; /* the hub is away: keep what we have; it goes stale on screen */ }
-      finally { store.loading = null; moved(); notify(); animate(); try { performance.measure("map:aircraft", { start: t0 }); } catch (_) { /* an older browser */ } }
+      finally { store.loading = null; moved(); notify(); animate(); try { performance.clearMeasures("map:aircraft"); performance.measure("map:aircraft", { start: t0 }); } catch (_) { /* an older browser */ } }
     })();
     return store.loading;
   }

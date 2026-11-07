@@ -373,6 +373,12 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
         who = None                       # the verified Access identity of the current request (access set)
         t0 = 0.0                         # when the request was read (perf_counter): Server-Timing and the log (#284)
 
+        def parse_request(self) -> bool:
+            """Every request, whatever its method and however many on one connection: its clock starts once its
+            first line is in (not while a kept-alive connection sat idle)."""
+            self.t0 = time.perf_counter()
+            return super().parse_request()
+
         def _ms(self) -> float:
             return (time.perf_counter() - self.t0) * 1000 if self.t0 else 0.0
 
@@ -494,7 +500,6 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                                                            "Connection": "close"})
 
         def do_GET(self) -> None:
-            self.t0 = time.perf_counter()
             if gate.refuse(write=False):
                 return self._updating()
             gate.enter()
@@ -504,7 +509,6 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 gate.leave()
 
         def do_POST(self) -> None:
-            self.t0 = time.perf_counter()
             if gate.refuse(write=True):
                 return self._updating()
             gate.enter()

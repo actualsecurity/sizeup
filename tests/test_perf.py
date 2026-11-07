@@ -25,13 +25,16 @@ def test_every_answer_says_how_long_it_took(tmp_path):
         hub.close()
 
 
-def test_the_radio_views_indexes_are_made(tmp_path):
+def test_the_radio_views_queries_use_their_indexes(tmp_path):
+    from sizeup.cad.comms import CHANNELS_SQL, RIGS_SQL, rig_rows_sql
     cad = make_cad(tmp_path)
     names = {r["name"] for r in cad.store.q("SELECT name FROM sqlite_master WHERE type = 'index'")}
     assert {"radio_traffic_rig", "radio_traffic_tones", "radio_traffic_channel_tg_start"} <= names
-    plan = " ".join(r["detail"] for r in cad.store.q(
-        "EXPLAIN QUERY PLAN SELECT DISTINCT rig FROM radio_traffic WHERE rig != '' AND rig > 'A'"))
-    assert "radio_traffic_rig" in plan
+    for sql, args, index in [(CHANNELS_SQL, (), "radio_traffic_channel_start"), (RIGS_SQL, (), "radio_traffic_rig"),
+                             (rig_rows_sql(3), ("%,E60,%", "%,E63,%", "%,L31,%"), "radio_traffic_rig")]:
+        plan = [r["detail"] for r in cad.store.q("EXPLAIN QUERY PLAN " + sql, args)]
+        assert any(index in d for d in plan), (sql, plan)
+        assert not any(d.strip() == "SCAN radio_traffic" for d in plan), (sql, plan)     # never the whole log
 
 
 def test_facets_and_the_unit_filter_match_a_plain_scan(tmp_path):
@@ -64,6 +67,52 @@ def test_the_same_question_at_the_same_rev_is_answered_once(tmp_path):
     assert calls == [] and b["rows"] == a["rows"] and "talking" in b
     tx(cad, 2)
     assert len(cad.comms_query({"channel": ["Fire/EMS 15"]})["rows"]) == 2 and calls == [1]
+
+
+def test_every_change_to_a_row_is_seen_at_once(tmp_path):
+    """A reused answer never hides a change: a re-run transcript, a radio named, a link added or removed, an alarm."""
+    from tests.test_alarms import tx as alarm_tx
+    cad = make_cad(tmp_path)
+    tx(cad, 1, source="FG1", talkgroup=None, unit="3B07", radio_id="3B07", text="")
+    one = lambda: next(r for r in cad.comms_query({})["rows"] if r["id"] == "tx-1")
+    assert one()["text"] == ""
+    cad.comms.retext("tx-1", "Engine 63 on location", "done", "m")
+    assert one()["text"] == "Engine 63 on location"
+    cad.comms.relink("mdc", "3B07", "L31")
+    assert one()["rig"] == "L31"
+    iid = cad.create({"type": "STRU", "address": "1 Main St"})["id"]
+    cad.link_traffic(iid, {"traffic_id": "tx-1", "operator": "Lt. Ruiz"})
+    assert [e["id"] for e in one()["events"]] == [iid]
+    cad.unlink_traffic(iid, {"traffic_id": "tx-1", "operator": "Lt. Ruiz"})
+    assert one()["events"] == []
+    assert one()["alarm_id"] is None
+    cad.alarms.on_traffic(alarm_tx("tx-1", "Engine 63 mayday mayday mayday", rig="E63", radio_id="6301"))
+    assert one()["alarm_id"] is not None
+
+
+def test_pcfd_only_on_a_log_where_every_row_has_a_rig_stays_quick(tmp_path):
+    """#284 review: every row with a rig (26 PCFD units OR'd) must not read the whole log once per section."""
+    cad = make_cad(tmp_path)
+    pcfd = [u["name"] for u in cad.radios.units if __import__("sizeup.cad.radios", fromlist=["is_pcfd"]).is_pcfd(u)]
+    assert pcfd
+    now = time.time()
+    rows = [(f"x-{i}", now - 20000 + i * 0.1, now - 20000 + i * 0.1 + 2, ("FG1", "Fire/EMS 15", "WCPD Ch 1")[i % 3],
+             (None, 307, 383)[i % 3], pcfd[i % len(pcfd)] if i % 4 == 0 else f"X{i % 300}", now) for i in range(30000)]
+    with cad.store.tx() as db:
+        db.executemany("INSERT INTO radio_traffic (id, start, end, channel, talkgroup, rig, updated_at) "
+                       "VALUES (?, ?, ?, ?, ?, ?, ?)", rows)
+    def took(q) -> float:                                              # the median of 3, never a reused answer
+        ts = []
+        for _ in range(3):
+            t = time.perf_counter()
+            assert cad.comms_query(dict(q, nc=[str(t)]))["rows"]
+            ts.append(time.perf_counter() - t)
+        return sorted(ts)[1]
+    took({})                                                           # warm
+    base = took({})                                                    # the unfiltered view, same log, same machine
+    ratio = max(took(q) for q in ({"pcfd": ["1"]}, {"pcfd": ["1"], "channel": ["FG1"]}, {"unit": [pcfd[0]]},
+                                  {"unit": ["X7"]})) / base
+    assert ratio < 20, ratio                                           # ~5-10x; the regression was ~50x
 
 
 def test_the_tone_table_counts_what_was_heard_near_each_pair():
