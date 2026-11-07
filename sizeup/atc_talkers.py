@@ -118,7 +118,7 @@ PHASE_CUES = [
     (re.compile(r"\btaxi\b|\bhold short\b|\bramp\b|\bgate\b|\bparking\b|\bfbo\b|\bpush ?back\b|\bcross runway\b|\bexit\b|\bvacate\b"),
      "ground"),
 ]
-FITS = {"arriving": {"arriving", "low", atc_scope.INBOUND}, "departing": {"departing", "ground", "low", atc_scope.OUTBOUND},
+FITS = {"arriving": {"arriving", "near", "low", atc_scope.INBOUND}, "departing": {"departing", "near", "ground", "low", atc_scope.OUTBOUND},
         "ground": {"ground", "arriving"}}
 ACTIVITY = [
     (re.compile(r"\bcleared to land\b"), "landing"), (re.compile(r"\bgo around\b"), "go-around"),
@@ -319,7 +319,7 @@ class Match:
 def _fits(plane: dict, cue: str) -> bool:
     ph = plane.get("phase") or ""
     if not cue:
-        return ph in ("arriving", "departing", "ground", "low", atc_scope.INBOUND, atc_scope.OUTBOUND) or not ph
+        return ph in ("arriving", "departing", "near", "ground", "low", atc_scope.INBOUND, atc_scope.OUTBOUND) or not ph
     return ph in FITS.get(cue, set()) or not ph
 
 

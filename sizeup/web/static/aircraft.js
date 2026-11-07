@@ -157,6 +157,7 @@ window.AircraftLayer = (() => {
       return [where, a.dist !== null && a.dist !== undefined ? `${a.dist.toFixed(1)} nm` : ""].filter(Boolean).join(" · ");
     }
     if (a.phase === "departing") return "▲ departed HPN";
+    if (a.phase === "near") return "near HPN";
     return "";
   }
 

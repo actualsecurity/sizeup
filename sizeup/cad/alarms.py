@@ -293,7 +293,7 @@ def line(a: dict) -> str:
             f"at {_hms(a.get('at'))}")
 
 
-PHASES = {"departing": "departing HPN", "ground": "on the ground at HPN", "low": "low in the area",
+PHASES = {"departing": "departing HPN", "near": "near HPN", "ground": "on the ground at HPN", "low": "low in the area",
           "overflight": "passing over", "other_ground": "on the ground elsewhere"}
 
 
