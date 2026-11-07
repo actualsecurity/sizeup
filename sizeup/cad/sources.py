@@ -15,7 +15,7 @@ sizeup/sources/runner.py (they come here as "source_event" / "source_health" thr
                report, with no report of the same source on it. When both have a location, the same place is required
                (street_part() then same_place: house number and street, direction and suffix; an intersection never
                equals a numbered address), whatever units they share. A unit in common (assignments not cleared, and
-               the reports' units) is enough only when NEITHER has a location; if one side has one, never by units. Two incidents sharing units in the
+               the reports' units) never joins two reports on its own, with or without locations. Two incidents sharing units in the
                window that may not be joined are noted "possibly the same as #N" on both: a duplicate is never silent
     attach     a page attaches only to an incident a feed has; a feed event only to a queued one or one a feed made.
                Any other match: the report makes its own incident, noted "possibly the same as #N" on both
@@ -141,6 +141,7 @@ def units_match(a, b) -> set[str]:
 TOWNS: tuple[tuple[str, ...], ...] = ()      # known town names as word tuples, longest first (set_towns)
 TOWN_OF: dict[tuple[str, ...], str] = {}       # ... and the town each one means (an alias's town)
 EXT = {"ext": "ext", "extension": "ext", "extn": "ext"}
+PLACE_ABBR = {"st": "saint", "mt": "mount", "ft": "fort"}   # a place's name: "@ST PAUL CHURCH" = "@SAINT PAUL CHURCH"
 
 
 def set_towns(names, aliases: dict | None = None) -> None:
@@ -201,6 +202,11 @@ def _street(s: str) -> tuple[str, frozenset, str, frozenset, frozenset]:
     return num, pre, suffix, frozenset(name), post
 
 
+def _snake_town(m) -> str:
+    words = tuple(m.group(0).lower().split("_"))
+    return " " + " ".join(words) + " " if words in TOWN_OF else " "
+
+
 def street_part(s: str) -> str:
     """The street part of a location as CADs write it: '12 EXAMPLE AVE   : @SAMPLE SCHOOL - EXAMPLE VILLAGE EXAMPLE_TOWN'
     -> '12 EXAMPLE AVE'; '@SAMPLE SCHOOL (12 EXAMPLE AVE)' -> '12 EXAMPLE AVE'; '12-14 EXAMPLE AVE 3RD FL' ->
@@ -214,7 +220,7 @@ def street_part(s: str) -> str:
     s = s.split("@")[0].split(";")[0]
     s = re.split(r"\s+-\s+", s)[0]
     s = re.sub(r"\([^)]*\)|\[[^\]]*\]", " ", s).split(",")[0]
-    s = re.sub(r"\b[A-Z0-9]+(?:_[A-Z0-9]+)+\b", " ", s)     # EXAMPLE_TOWN
+    s = re.sub(r"\b[A-Z0-9]+(?:_[A-Z0-9]+)+\b", _snake_town, s)     # EXAMPLE_TOWN: a known town kept, else dropped
     s = FLOOR.sub("", s)
     s = UNIT_TAIL.sub("", s)
     s = re.sub(r"^\s*(\d+)[a-z]?\s*-\s*\d+[a-z]?\b", r"\1", s, flags=re.I)
@@ -227,7 +233,7 @@ def _place_only(s: str) -> frozenset:
     if not m:
         return frozenset()
     name = re.split(r"\s+-\s+", m.group(1))[0]
-    return frozenset(w for w in re.findall(r"[a-z0-9]+", name.lower()) if w not in NOISE)
+    return frozenset(PLACE_ABBR.get(w, w) for w in re.findall(r"[a-z0-9]+", name.lower()) if w not in NOISE)
 
 
 def place_key(s: str):
@@ -309,8 +315,15 @@ class Sources:
         self._stop = threading.Event()
         with self.store.lock:
             self.store.db.executescript(SCHEMA)
-        L = cad.lists
-        set_towns(getattr(L, "geo_town_order", ()), getattr(L, "geo_town_aliases", {}))
+        self._towns_for = None
+        self._towns()
+
+    def _towns(self) -> None:
+        """The known towns from the lists, again whenever Settings > Lists replaced them."""
+        L = self.cad.lists
+        if L is not self._towns_for:
+            set_towns(getattr(L, "geo_town_order", ()), getattr(L, "geo_town_aliases", {}))
+            self._towns_for = L
 
     # -- health and tiers ----------------------------------------------------------------------------------------------
 
@@ -390,6 +403,7 @@ class Sources:
     def match(self, source: str, at: float, location: str, units) -> tuple[dict | None, dict | None]:
         """(the open incident this report may attach to, else the one it is possibly the same as): see the module's
         "match". Whether it may attach there is also the caller's (see "attach")."""
+        self._towns()
         taken = {r["incident_id"] for r in self.store.q(
             "SELECT incident_id FROM source_reports WHERE source = ? AND incident_id IS NOT NULL", (source,))}
         here = place_key(location) is not None
@@ -408,10 +422,8 @@ class Sources:
                     score = -len(common)
                 else:
                     continue
-            elif common and (here or theirs):                # one side has a location: never by units alone
+            elif common:                                     # units alone never join two reports: noted, both kept
                 score = -len(common)
-            elif common:
-                score = len(common)                          # neither has a location: the units decide
             else:
                 continue
             k = (-abs(score), abs(inc["created_at"] - at))
@@ -755,6 +767,7 @@ class Sources:
         """Each incident a feed has: incident["feed"] = {label, event_id, jurisdiction, run_numbers, group_units, use}
         from its best-ranked feed (None without one); use: the fields a person set that the feed says otherwise
         ({"type": "...", "location": "..."}: the incident view's "Use <feed>'s <field>")."""
+        self._towns()
         ids = [i["id"] for i in incs]
         best: dict[int, dict] = {}
         hand: dict[int, set] = {}
