@@ -2931,20 +2931,23 @@ class App:
         self.cad.sources.start()
         if self.cfg.cloud_role == "hub":         # station only: the hub gets their events through the outbox
             return
-        from sizeup.sources.runner import HubRefused, SourceRunner, context_for, load_adapters
-        root = Path(self.cfg.cad_db).parent if self.cfg.cad_db else Path(".")
+        from sizeup.sources.runner import SourceRunner, context_for, load_adapters, require_station
         role = self.cfg.cloud_role or ""
-        try:
-            adapters = load_adapters(context_for(root, log), log=log, role=role)
-        except HubRefused:
-            raise
-        except Exception as e:  # noqa: BLE001 - never in the way of the station starting
-            log(f"incident sources: not loaded: {type(e).__name__}: {e}")
-            return
-        if adapters:
-            self.sources_runner = SourceRunner(adapters, self._source_out, log=log, role=role).start()
-            self.paging.on_ours = lambda: self.sources_poll_now("paging tones")
-            self.cad.sources.trigger = self.sources_poll_now      # a pre-alert on this CAD (all-in-one)
+        require_station(role)                      # HubRefused: a hard check, before anything is looked at
+        root = Path(self.cfg.cad_db).parent if self.cfg.cad_db else Path(".")
+
+        def load() -> None:                        # off the start path: a slow or hanging factory never holds it up
+            try:
+                adapters = load_adapters(context_for(root, log), log=log, role=role)
+                if adapters and not self._stopping.is_set():
+                    self.sources_runner = SourceRunner(adapters, self._source_out, log=log, role=role).start()
+                    self.paging.on_ours = lambda: self.sources_poll_now("paging tones")
+                    self.cad.sources.trigger = self.sources_poll_now      # a pre-alert on this CAD (all-in-one)
+            except KeyboardInterrupt:
+                raise
+            except BaseException as e:  # noqa: BLE001 - never in the way of the station
+                log(f"incident sources: not loaded: {type(e).__name__}")
+        threading.Thread(target=load, name="sources-load", daemon=True).start()
 
     def sources_poll_now(self, reason: str = "") -> int:
         """Paging tones of ours, a radio or phone pre-alert (here, or the hub's job): the adapters poll now."""

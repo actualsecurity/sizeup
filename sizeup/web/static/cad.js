@@ -305,6 +305,7 @@ function statusLabel(u, code) {
 function eventStatus(inc) {         // Pending / Open / Active / Closed, with the data file's color
   const es = L().event_statuses || {};
   const k = inc.status === "pending" && !inc.emergency ? "open" : inc.status;
+  if (k === "queued" && inc.feed) return { ...(es[k] || {}), name: inc.feed.label };   // a CAD feed's, not 60 Control's (#297)
   return es[k] || { name: inc.status };
 }
 function stBadge(node, name, color) {
@@ -489,7 +490,7 @@ function isOpen(inc) {
   return ["queued", "pending", "active"].includes(inc.status);
 }
 function incTitle(inc) {
-  return inc.number || (inc.status === "queued" ? (inc.source === "CAD feed" ? "CAD feed" : "Page") : "—");
+  return inc.number || (inc.status === "queued" ? (inc.source === "CAD feed" ? (inc.feed && inc.feed.label) || "CAD feed" : "Page") : "—");
 }
 // An open call's summary (state.overview, sizeup/cad/mapview.py overview): its units, the newest transmission and
 // note, the channels its traffic comes over; null for a closed one.
@@ -692,7 +693,7 @@ function renderDetail() {
   stBadge($("#d-class"), inc.emergency ? "Emergency" : "Non-emergency", inc.emergency ? "#EE6475" : "#8fb8d8");
   show($("#d-joint"), !!inc.joint_call);
   if (inc.joint_call) stBadge($("#d-joint"), inc.joint_call, "#6AA6E8");
-  setText($("#d-source"), inc.source === "manual" ? "Manual" : inc.source);
+  setText($("#d-source"), inc.source === "manual" ? "Manual" : inc.feed && inc.source === "CAD feed" ? inc.feed.label : inc.source);
   show($("#d-accept"), inc.status === "queued");
   show($("#d-dismiss"), inc.status === "queued");
   show($("#d-close"), inc.status === "pending" || inc.status === "active");
@@ -701,6 +702,7 @@ function renderDetail() {
   if (!(inc.status === "pending" || inc.status === "active")) show($("#close-form"), false);
   show($("#d-queued"), inc.status === "queued");
   if (inc.status === "queued") {
+    setText($("#d-qhead"), `${inc.feed && inc.source === "CAD feed" ? inc.feed.label : "60 Control page"}: set type, then Accept or Dismiss`);
     setText($("#d-qnote"), inc.type_note || "");
     const ts = $("#d-acc-type");
     if (ts._for !== inc.id) {
@@ -726,7 +728,7 @@ function renderDetail() {
   setText($("#d-elapsed-l"), open ? "Elapsed" : "Duration");
   if (open) since(elapsed, inc.created_at);
   else { since(elapsed, null); setText(elapsed, fmtDur((inc.closed_at || 0) - inc.created_at)); }
-  if (window.Incoming) Incoming.facts($("#d-feed"), inc);
+  if (window.Incoming) Incoming.facts($("#d-feed"), inc, { api, operator, readonly: BOARD || !canDo("dispatch") });
   show($("#d-via-w"), !!inc.received_via);
   setText($("#d-via"), inc.received_via ? nameOf("received_via", inc.received_via) : "");
   show($("#d-until-w"), !!inc.until_at);

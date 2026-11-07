@@ -29,15 +29,20 @@ A factory is `factory(ctx: SourceContext) -> Adapter | Iterable[Adapter]`. An ad
     poll() -> Iterable[FeedEvent]
                          the events the feed knows now (open ones, and ones that changed lately): a snapshot each time.
                          An event left out is left as last seen (never deleted). It may raise: the runner reports the
-                         source "failing" (the exception's type and message as the reason) and calls it again after
-                         poll_s, doubling to MAX_BACKOFF_S while it keeps raising
+                         source "failing" (the exception's TYPE only as the reason: never its text, which may hold a URL
+                         or a credential) and calls it again after poll_s, doubling to MAX_BACKOFF_S while it keeps
+                         raising. A bad event is skipped on its own; the others still go
     health() -> Health   how the feed is doing now; asked after every poll()
     close() -> None      optional: called once when the station stops
+    reset() -> None      optional: a person asked to start over (Settings > Health "Reset", or `sizeup-station adapter
+                         reset`, #305), e.g. after the adapter stopped itself with "failing: login (manual reset
+                         needed)" to protect a shared account. Called on the adapter's own runner thread before its
+                         next poll(); its back-off starts over. Raising is logged by type only
     poll_now(reason: str) -> None
                          optional: something just happened that may be a call coming (reason: "paging tones", "radio
-                         pre-alert", "phone pre-alert"). The runner calls it, then calls poll() at once instead of
-                         waiting out poll_s (at most once every TRIGGER_MIN_S per adapter). The adapter may use it to
-                         skip its own pacing for that one poll; it should return quickly (no requests in it)
+                         pre-alert", "phone pre-alert"). Called on the adapter's own runner thread (never the caller's),
+                         right before an immediate poll() instead of waiting out poll_s (at most once every
+                         TRIGGER_MIN_S per adapter). The adapter may use it to skip its own pacing for that one poll
 
 A FeedEvent's fields, as the feed says them (never parsed here beyond the checks in FeedEvent.check):
 
@@ -45,10 +50,10 @@ A FeedEvent's fields, as the feed says them (never parsed here beyond the checks
     event_id     the feed's event id, stable for the event's life (1..64 chars)
     type         the event type: the feed's wording ("STRUCTURE FIRE"), or one of our type codes ("STRU", "ALARM/COMM")
     location     the location text ("12 Example Ave")
-    units        the unit codes on it, in order ("E1", "L2")
+    units        the unit codes on it, in order ("E1", "L2"): up to 60, each at most 32 characters
     times        the event's times, TIME_KEYS -> epoch seconds: dispatched (out), responding, on_location, en_route_to,
                  out_at, in_service. Leave a key out until it happens
-    unit_times   per unit (optional): unit -> TIME_KEYS -> epoch seconds
+    unit_times   per unit (optional): unit -> TIME_KEYS -> epoch seconds (up to 60 units)
     comments     (epoch seconds, text) pairs, oldest first; append only (a comment once sent is never changed)
     closed       the feed closed it
     extra        adapter-specific fields, JSON-able (str keys; values str, number, bool, list or dict), at most
@@ -83,6 +88,8 @@ MIN_POLL_S = 5.0
 MAX_BACKOFF_S = 300.0
 MAX_UNITS, MAX_COMMENTS, MAX_TEXT = 60, 500, 2000
 MAX_ALIASES = 50
+MAX_UNIT_LEN = 32
+MAX_EVENT_BYTES = 256 * 1024            # one event as JSON, comments included
 EXTRA_MAX_BYTES = 16 * 1024
 EXTRA_SHOWN = ("jurisdiction", "run_numbers", "group_units")
 TRIGGER_MIN_S = 2.0
@@ -96,7 +103,8 @@ class SourceError(ValueError):
 @dataclass(frozen=True)
 class Health:
     state: str                         # one of HEALTH_STATES
-    reason: str = ""                   # short, for people: "HTTP 503", "no update in 20 min"
+    reason: str = ""                   # short, for people: "HTTP 503", "no update in 20 min"; never a secret, a URL or a
+                                       # server's text (it goes to the hub and on screen)
     since: float | None = None         # when it entered this state (epoch seconds), if the adapter knows
 
     def check(self) -> Health:
@@ -120,24 +128,43 @@ class FeedEvent:
     aliases: tuple[str, ...] = ()
 
     def check(self) -> FeedEvent:
-        """SourceError when it breaks the interface; else itself."""
-        if not SOURCE_ID.fullmatch(self.source or "") or self.source in RESERVED:
+        """SourceError when it breaks the interface (any wrong type included); else itself."""
+        try:
+            self._check()
+            size = len(json.dumps(self._dict(), allow_nan=False))
+        except SourceError:
+            raise
+        except (TypeError, ValueError, AttributeError, KeyError, IndexError) as e:
+            raise SourceError(f"not an event: {type(e).__name__}") from None
+        if size > MAX_EVENT_BYTES:
+            raise SourceError(f"too large: {size} bytes as JSON (at most {MAX_EVENT_BYTES})")
+        return self
+
+    def _check(self) -> None:
+        if not isinstance(self.source, str) or not SOURCE_ID.fullmatch(self.source) or self.source in RESERVED:
             raise SourceError(f"source {self.source!r}: [a-z0-9][a-z0-9_-]{{0,31}}, not {', '.join(RESERVED)}")
         if not isinstance(self.event_id, str) or not 1 <= len(self.event_id) <= 64:
             raise SourceError("event_id: 1 to 64 characters")
         for k in ("type", "location"):
             if not isinstance(getattr(self, k), str):
                 raise SourceError(f"{k}: text")
-        if len(self.units) > MAX_UNITS or not all(isinstance(u, str) and u.strip() for u in self.units):
-            raise SourceError(f"units: up to {MAX_UNITS} unit codes")
+        if (not isinstance(self.units, (tuple, list)) or len(self.units) > MAX_UNITS
+                or not all(isinstance(u, str) and u.strip() and len(u) <= MAX_UNIT_LEN for u in self.units)):
+            raise SourceError(f"units: up to {MAX_UNITS} unit codes of at most {MAX_UNIT_LEN} characters")
         _times(self.times, "times")
+        if not isinstance(self.unit_times, Mapping) or len(self.unit_times) > MAX_UNITS:
+            raise SourceError(f"unit_times: a mapping of up to {MAX_UNITS} units")
         for u, t in self.unit_times.items():
+            if not isinstance(u, str) or not u.strip() or len(u) > MAX_UNIT_LEN:
+                raise SourceError(f"unit_times: unit codes of at most {MAX_UNIT_LEN} characters")
             _times(t, f"unit_times[{u!r}]")
-        if len(self.comments) > MAX_COMMENTS:
+        if not isinstance(self.comments, (tuple, list)) or len(self.comments) > MAX_COMMENTS:
             raise SourceError(f"comments: up to {MAX_COMMENTS}")
         for c in self.comments:
-            if (not isinstance(c, tuple) or len(c) != 2 or not _when(c[0]) or not isinstance(c[1], str)):
+            if not isinstance(c, (tuple, list)) or len(c) != 2 or not _when(c[0]) or not isinstance(c[1], str):
                 raise SourceError("comments: (epoch seconds, text) pairs")
+        if not isinstance(self.closed, bool):
+            raise SourceError("closed: true or false")
         if not isinstance(self.extra, Mapping) or not all(isinstance(k, str) for k in self.extra):
             raise SourceError("extra: a mapping with text keys")
         try:
@@ -146,13 +173,18 @@ class FeedEvent:
             raise SourceError("extra: JSON values only (text, numbers, booleans, lists, mappings)") from None
         if size > EXTRA_MAX_BYTES:
             raise SourceError(f"extra: at most {EXTRA_MAX_BYTES} bytes as JSON")
-        if len(self.aliases) > MAX_ALIASES or not all(isinstance(a, str) and 1 <= len(a) <= 64 and a != self.event_id
-                                                      for a in self.aliases):
+        if (not isinstance(self.aliases, (tuple, list)) or len(self.aliases) > MAX_ALIASES
+                or not all(isinstance(a, str) and 1 <= len(a) <= 64 and a != self.event_id for a in self.aliases)):
             raise SourceError(f"aliases: up to {MAX_ALIASES} other event ids of this source")
-        return self
 
     def as_dict(self) -> dict:
-        """The event as it goes to the hub (the outbox's JSON)."""
+        """The event as it goes to the hub (the outbox's JSON). SourceError when it breaks the interface."""
+        try:
+            return self._dict()
+        except (TypeError, ValueError, AttributeError, KeyError, IndexError) as e:
+            raise SourceError(f"not an event: {type(e).__name__}") from None
+
+    def _dict(self) -> dict:
         return {"source": self.source, "event_id": self.event_id, "type": self.type[:MAX_TEXT],
                 "location": self.location[:MAX_TEXT], "units": [u.strip() for u in self.units],
                 "times": {k: float(v) for k, v in self.times.items()},
@@ -186,6 +218,8 @@ def _when(v) -> bool:
 def _times(t: Mapping[str, float], where: str) -> None:
     if not isinstance(t, Mapping):
         raise SourceError(f"{where}: a mapping of {', '.join(TIME_KEYS)}")
+    if len(t) > len(TIME_KEYS):
+        raise SourceError(f"{where}: at most {len(TIME_KEYS)} times")
     for k, v in t.items():
         if k not in TIME_KEYS:
             raise SourceError(f"{where}: {k!r} is not one of {', '.join(TIME_KEYS)}")
@@ -212,6 +246,9 @@ class Adapter(Protocol):
     def poll(self) -> Iterable[FeedEvent]: ...
 
     def health(self) -> Health: ...
+
+    # Optional, so not in the Protocol (an adapter without them is still one): close() -> None, reset() -> None,
+    # poll_now(reason: str) -> None. See the module's docstring.
 
 
 Factory = Callable[[SourceContext], "Adapter | Iterable[Adapter]"]

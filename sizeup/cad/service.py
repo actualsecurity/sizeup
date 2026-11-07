@@ -208,7 +208,6 @@ class Cad:
         # Incident sources, ranked (#297, sizeup/cad/sources.py): external CAD feeds first, the paging decoder the backup;
         # which may make an incident, whose fields win, the possible-incoming notices. The app starts its ticker.
         self.sources = Sources(self, clock=clock, log=log)
-        self.sources.create_page = self._create_from_page
         # FG1 radio IDs nobody has named yet (#163): "Radio 1234 (MDC) on FG1: who is this?" on the console.
         self.newids = NewIds(self)
         # The emergency button and a mayday heard on our fire channels (sizeup/cad/alarms.py, #128): the app feeds it
@@ -612,7 +611,21 @@ class Cad:
                 g = dict(f, type=airport.TYPE)
                 if airport.default_location(g):
                     f.update(address=g["address"], lat=g["lat"], lon=g["lon"], geo_label=g["geo_label"])
-        return self.store.update_incident(iid, f, _text(body, "operator", OPERATOR_MAX))
+        op = _text(body, "operator", OPERATOR_MAX)
+        before = self.store.incident(iid)
+        after = self.store.update_incident(iid, f, op)
+        # a person set these (#297): a CAD feed only notes its own type / location / pin from now on
+        hand = [g for g, ks in (("type", ("type", "subtype")), ("location", ("address", "cross_street", "place")),
+                                ("pin", ("lat", "lon"))) if any(k in f and before[k] != after[k] for k in ks)]
+        if "pin" in hand and "lat" not in body:
+            hand.remove("pin")                       # re-placed from a typed address, not a pin a person put down
+        self.sources.mark_manual(iid, hand, op)
+        return after
+
+    def feed_use(self, iid: int, body: dict) -> dict:
+        """POST /api/cad/incident/<id>/feed-use {field: type | location, operator}: the CAD feed's value over the
+        one a person set (#297)."""
+        return self.sources.feed_use(iid, _text(body, "field", 20, required=True), _text(body, "operator", OPERATOR_MAX))
 
     def accept(self, iid: int, body: dict) -> dict:
         """A queued 60 Control page accepted (the type can be picked in the same call)."""
@@ -620,6 +633,7 @@ class Cad:
         f = {k: _text(body, k, 24) for k in ("type", "subtype") if k in body}
         if f:
             self.store.update_incident(iid, f, op)
+            self.sources.mark_manual(iid, ["type"], op)       # a person picked it (#297: a feed only notes its own)
         return self.store.accept(iid, op)
 
     def dismiss(self, iid: int, body: dict) -> dict:
@@ -1565,16 +1579,15 @@ class Cad:
         if old is None and (got := self.sources.paging_incident(str(inc.id))):
             old = self.store.incident(got)             # attached to an incident a higher tier made (#297)
         if old is None:
-            # The paging decoder is the backup (#297, sizeup/cad/sources.py): it attaches to the incident a higher tier
-            # made, makes one only when no healthy higher tier may still report it, else holds it (a possible incoming).
+            # The paging decoder is the backup (#297, sizeup/cad/sources.py): it attaches to the incident a feed has
+            # for it, else makes its own at once (never held), noted "possibly the same as" a near one it may not join.
             data = {"f": f, "ref": ref, "pages": list(getattr(inc, "pages", []) or []), "type_heard": inc.incident_type}
             at = (inc.page_starts or [inc.opened])[0]
-            how, iid = self.sources.page(str(inc.id), at, f["address"] or heard, list(inc.units or []), data)
-            if how == "held":
-                return None
-            if how == "create":
-                iid = self._create_from_page(data)
-                self.sources.created_by_page(str(inc.id), iid)
+            how, got = self.sources.page(str(inc.id), at, f["address"] or heard, list(inc.units or []), data)
+            if how == "attached":
+                return self.store.incident(got)
+            iid = self._create_from_page(data)
+            self.sources.created_by_page(str(inc.id), iid, got)
             return self.store.incident(iid)
         self.comms.link_pages(old["id"], getattr(inc, "pages", []))  # a repeat of the page: on it too, accepted or not
         if old["status"] != "queued":
@@ -1594,7 +1607,7 @@ class Cad:
         return self.store.update_incident(old["id"], fill, log=False)
 
     def _create_from_page(self, data: dict) -> int:
-        """A page's queued event (from_monitor's fields): now, or when its hold is up (Sources.tick)."""
+        """A page's queued event (from_monitor's fields)."""
         f, ref = data["f"], data["ref"]
         old = self.store.by_source_ref(ref)
         if old is not None:

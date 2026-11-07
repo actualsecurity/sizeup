@@ -3,9 +3,10 @@
 //   Incoming.pill(node, s)          the header: the primary feed's health and the acting primary when it isn't it
 //                                   ("County feed · backing off · Paging primary"); hidden with no feed
 //   Incoming.column(list, s, deps)  "Possible incoming" at the top of the 60 Control column (the board: above its feed):
-//                                   radio pre-alerts and reports held for a higher tier. Never an incident
+//                                   radio pre-alerts. Never an incident
 //   Incoming.notify(s)              the pre-alert chime per new notice (radio.js alert settings)
-//   Incoming.facts(node, inc)       the incident view: its feed event, jurisdiction and run numbers (inc.feed)
+//   Incoming.facts(node, inc, deps) the incident view: its feed event, jurisdiction and run numbers (inc.feed), and
+//                                   "Use <feed>'s type / location" where a person set it and the feed says otherwise
 "use strict";
 
 window.Incoming = (() => {
@@ -44,7 +45,7 @@ window.Incoming = (() => {
     list.replaceChildren(...items.map((x) => {
       const li = el("li", "pa");
       li.dataset.key = x.id;
-      li.title = x.kind === "held" ? `${x.source}: held for a higher tier until ${deps.time(x.until)}` : `${x.source}: ${x.text}`;
+      li.title = `${x.source}: ${x.text}`;
       if (window.Icon) li.append(Icon("bell"));
       const what = el("span", "pa-what");
       what.append(el("b", "pa-t", "Possible incoming"), el("span", "pa-src", `${x.source} · ${deps.time(x.at)} · ${x.text}`));
@@ -70,15 +71,32 @@ window.Incoming = (() => {
   const flat = (v) => (v && typeof v === "object"
     ? (Array.isArray(v) ? v.join(", ") : Object.entries(v).map(([k, x]) => `${k} ${flat(x)}`).join(", ")) : String(v ?? ""));
 
-  function facts(node, inc) {
+  function facts(node, inc, deps) {
     if (!node) return;
     const f = inc && inc.feed;
     node.hidden = !f;
     if (!f) return;
     const text = [`${f.label} ${f.event_id}`, f.jurisdiction ? flat(f.jurisdiction) : "",
       f.run_numbers && Object.keys(f.run_numbers).length ? `Run ${flat(f.run_numbers)}` : ""].filter(Boolean).join(" · ");
-    if (node.textContent !== text) node.textContent = text;
+    const use = f.use || {};
+    const sig = JSON.stringify([inc.id, text, use, deps && deps.readonly]);
     node.title = f.group_units ? Object.entries(f.group_units).map(([g, u]) => `${g}: ${flat(u)}`).join("\n") : "";
+    if (node._sig === sig) return;
+    node._sig = sig;
+    const kids = [el("span", "", text)];
+    for (const [field, value] of Object.entries(use)) {
+      if (!deps || deps.readonly) break;
+      const b = el("button", "mini", `Use ${f.label}'s ${field}`);
+      b.type = "button";
+      b.title = `${f.label}: ${value}`;
+      b.addEventListener("click", async () => {
+        b.disabled = true;
+        try { await deps.api("POST", `/api/cad/incident/${inc.id}/feed-use`, { field, operator: deps.operator() }); }
+        catch (err) { UI.toast(`Failed: ${err.message}`, "err"); b.disabled = false; }
+      });
+      kids.push(" ", b);
+    }
+    node.replaceChildren(...kids);
   }
 
   return { pill, column, notify, facts };
