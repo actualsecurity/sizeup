@@ -189,6 +189,8 @@ def test_a_keep_and_a_recording_follow_the_camera_to_the_id_kept_for_it(tmp_path
     # the old id's paths find the camera kept for it
     code, body, _, _ = rd.get(f"/api/cad/cameras/{CAM}/dvr/index.m3u8", "")
     assert code == 200 and body.count(b".ts") == after["segments"]
+    name, query = body.decode().splitlines()[-2].split("?", 1)                # a segment as the viewer asks (#321)
+    assert rd.get(f"/api/cad/cameras/{CAM}/dvr/{name}", query)[0] == 200
     # after a restart too (the folder is the new id's)
     again = Dvr(rd, tmp_path / "dvr", clock=clock, log=lambda m: None, free_floor=0)
     assert again.status("NYSDOT-90080")["segments"] == after["segments"]

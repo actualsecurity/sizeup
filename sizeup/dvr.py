@@ -34,7 +34,8 @@ HTTP (behind Cloudflare Access with the rest of /api/cad; nothing here is public
   GET  /api/cad/cameras/<id>/dvr/index.m3u8         the recording as a VOD playlist: EXT-X-PROGRAM-DATE-TIME on every
                                                     segment (the viewer's timestamp), EXT-X-DISCONTINUITY at a gap and
                                                     at a new stream (another stream, the origin restarted)
-  GET  /api/cad/cameras/<id>/dvr/<seq>.ts           a recorded segment
+  GET  /api/cad/cameras/<id>/dvr/<seq>.ts?s=<ms>    a recorded segment (s: its start, as the playlist lists it; another
+                                                    segment under the same key now: 404)
   POST /api/cad/cameras/<id>/dvr/pin {on}           (sizeup/cad/api.py, dispatchers and admins) keep recording / stop
 
 A deploy (sizeup/handoff.py): the recordings are on the task's ephemeral disk, so a new task starts with none. The old
@@ -54,6 +55,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qs
 
 from sizeup import hlsseg
 
@@ -681,7 +683,8 @@ class Dvr:
             if prev is not None and (abs(t0 - prev) > GAP_S or key in breaks):
                 out.append("#EXT-X-DISCONTINUITY")
             pdt = datetime.fromtimestamp(t0, timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-            out += [f"#EXT-X-PROGRAM-DATE-TIME:{pdt}", f"#EXTINF:{dur:.3f},", f"{key}.ts"]
+            # ?s=<start ms>: a key the counter reuses after a restart is another URL, never a cached old segment (#321)
+            out += [f"#EXT-X-PROGRAM-DATE-TIME:{pdt}", f"#EXTINF:{dur:.3f},", f"{key}.ts?s={int(t0 * 1000)}"]
             prev = t0 + dur
         out.append("#EXT-X-ENDLIST")
         return ("\n".join(out) + "\n").encode()
@@ -711,6 +714,9 @@ class Dvr:
                 return 404, b'{"error":"nothing recorded"}', JSON, hdr
             return 200, body, "application/vnd.apple.mpegurl", hdr
         f = self._file(cid, int(what[:-3]))
+        want = parse_qs(query).get("s", [""])[0]
+        if f is not None and want and f.name.split("_")[1] != want:      # that key, but another segment now
+            f = None
         try:
             body = f.read_bytes() if f is not None else None
         except OSError:
