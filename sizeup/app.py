@@ -91,7 +91,7 @@ from sizeup.tts import TtsService
 from sizeup.web.server import WebServer
 
 ROOT = Path(__file__).resolve().parent.parent
-HUB_SWITCH_S = 0.001     # the hub's GIL switch interval (sys.setswitchinterval; Python's default 0.005), main() (#284)
+HUB_SWITCH_S = 0.001     # the hub's GIL switch interval (sys.setswitchinterval; Python's default 0.005), start_app() (#284)
 SPLIT_PAGE_S = 30.0      # voice this soon after a tones-only page for us = that page's voice
 # The gazetteer names a town only from this confidence up (#80: "34 Longdale Avenue" read as Port Chester at
 # 0.34 was a street near Fairview). The point and label stay for the map; the town is never a trigger anyway.
