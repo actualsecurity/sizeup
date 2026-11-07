@@ -2008,7 +2008,13 @@ one recorded when it was attached; streamed as it is made, nothing on the disk, 
 whatever else is listed under its prefix: a PUT whose answer was lost) is deleted by its version id past the governance lock (`x-amz-bypass-governance-retention`; the task role's
 `s3:DeleteObjectVersion` + `s3:BypassGovernanceRetention`, sent by nothing else), so the bytes are really gone; the
 row stays "deleted" and the audit keeps what was deleted with every sha256. A delete that fails part way is audited
-and can be asked again. Only the lease holder writes. Without the bucket:
+and can be asked again.
+
+**Who can get past the lock** (owner's decision, 2026-11-07): the hub's own task role, for the audited admin delete
+only, so an admin's delete really removes the bytes; no separate role, no hide-only delete. The trade-off: the lock
+then protects against mistakes and against anyone without the task role, but not against a compromised hub, which
+could delete attachments with the same permission. The app's audit (`attachment_audit`, in the Litestream-replicated
+CAD store) and S3's own records (CloudTrail data events, if turned on) are what show such a delete. Only the lease holder writes. Without the bucket:
 "Incident attachments not configured", nothing copied, the lists read empty.
 
 ## The hub's storage
