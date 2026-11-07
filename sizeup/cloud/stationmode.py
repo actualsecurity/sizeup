@@ -333,6 +333,15 @@ class StationMode:
 
     # -- Test connection ------------------------------------------------------------------------------
 
+    def sources_reset(self, body: dict, by: str = "sizeup-station on the station") -> dict:
+        """POST /api/sources/reset {source?} here (sudo sizeup-station adapter reset): an incident source's reset() on
+        its own thread (#301). ValueError with the reason if not."""
+        from sizeup.cloud.adapters import request_reset
+        out = request_reset(getattr(self.app, "sources_runner", None), str(body.get("source") or ""), by, self.log)
+        if not out.get("ok"):
+            raise ValueError(out.get("error") or "not reset")
+        return out
+
     def test(self, body: dict) -> dict:
         """POST /api/station-mode/test {hub_url?}: GET /healthz on the hub, then the station path
         (/api/station/hello) with the bearer token, both with the Access service-token headers.

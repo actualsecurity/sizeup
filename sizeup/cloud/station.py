@@ -48,6 +48,7 @@ from sizeup import tz
 from sizeup.cad import dispatcher
 from sizeup.cad.dispatcher import AudioUnavailable
 from sizeup.cloud.aircraftlink import AircraftForwarder
+from sizeup.cloud.adapters import request_reset
 from sizeup.cloud.autoupdate import Watch
 from sizeup.cloud.client import Backoff, HubClient, HubError
 from sizeup.cloud.health import Metrics, station_metrics
@@ -334,6 +335,10 @@ class StationLink:
                 res = self._tts(job.get("args") or {})
             elif kind == "call":
                 res = self._call(job.get("args") or {})
+            elif kind == "sources_reset":               # an admin on the hub: an incident source's reset() (#301)
+                a = job.get("args") if isinstance(job.get("args"), dict) else {}
+                res = request_reset(getattr(self.app, "sources_runner", None), str(a.get("source") or ""),
+                                    f"{a.get('by') or 'an admin'} on the hub", self.log)
             else:
                 res = {"ok": False, "error": f"this station doesn't know job {kind!r}"}
         except Exception as e:  # a bad job must never take the station down

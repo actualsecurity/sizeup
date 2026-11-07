@@ -671,6 +671,26 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                     return self._send(400, json.dumps({"error": f"bad request: {e}"}).encode(), "application/json")
                 self._did(path, body)
                 return self._send(200, json.dumps({"queued": queued}).encode(), "application/json")
+            if path == "/api/sources/reset" and (station is not None or station_mode is not None):
+                # an incident source's reset() (#301): on the hub an admin's (cad.permit above: not in WRITES), sent to
+                # the station as a job; on the station, sudo sizeup-station adapter reset
+                raw = self._body(1024)
+                try:
+                    body = json.loads(raw or b"{}") if raw is not None else None
+                    if not isinstance(body, dict):
+                        raise ValueError("a JSON object, at most 1 KB")
+                    if station is not None and hasattr(station, "reset_source"):
+                        out = station.reset_source(str(body.get("source") or ""), getattr(self.who, "email", "") or "")
+                    elif station_mode is not None:
+                        out = station_mode.sources_reset(body)
+                    else:
+                        return self._send(404, b'{"error":"not here"}', "application/json")
+                except ValueError as e:
+                    return self._send(400, json.dumps({"error": str(e)}).encode(), "application/json")
+                except RuntimeError as e:            # (StationOffline too): the station couldn't
+                    return self._send(503, json.dumps({"error": str(e)[:300]}).encode(), "application/json")
+                self._did(path, body)
+                return self._send(200, json.dumps(out).encode(), "application/json")
             if path in ("/api/station-mode", "/api/station-mode/test") and (station is not None or station_mode is not None):
                 raw = self._body(4096)
                 if station is not None:

@@ -306,7 +306,14 @@ sudo sizeup-station adapter setup    # asks for the repo (git@github.com:OWNER/R
                                      # to add it; then each credential, hidden
 sudo sizeup-station adapter status   # repo, installed commit, loaded or failed, which variables are set
 sudo sizeup-station adapter remove   # key, credentials and [adapter] out; the next release runs without it
+sudo sizeup-station adapter reset [source]   # a source that stopped itself (e.g. a login it won't retry): its reset()
 ```
+
+**Reset from the hub.** An adapter may stop with "failing: login (manual reset needed)" to protect a shared account.
+An admin resets it from the hub: Settings > Health, a Reset button beside each source that is failing (with a
+confirm). That sends a `sources_reset` job over the station's authenticated jobs channel; the station calls the
+adapter's optional `reset()` on that adapter's own thread, before its next poll. The hub logs who pressed it (their
+Access identity), nothing else. An adapter without `reset()`: nothing happens, and the answer says so.
 
 Setup makes `/etc/sizeup/adapter-deploy-key` (ed25519, root 0600) and prints **only its public half**, with the
 command to run on your Mac, where `gh` is signed in (read-only: no `--allow-write`):

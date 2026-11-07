@@ -14,6 +14,7 @@ runs on a bare Linux box with Python + numpy.
                                   build (SIZEUP_BUILD), which the station follows (autoupdate.py)
     GET  /api/station/jobs?wait=25   long poll: jobs for the station -> {jobs: [{id, type, args}]}
     POST /api/station/jobs/<id>   the station's answer {ok, error?, result?, label?, audio?}
+                                  (jobs: tts, call, sources_reset: an incident source's reset(), #301)
     POST /api/station/aircraft    our ADS-B receiver on the station (#235, sizeup/cloud/aircraftlink.py): {v, epoch, seq,
                                   full, ac: [[hex, lat, lon, alt, gs, trk, vr, squawk, emergency, flight, seen_pos, seen,
                                   rssi, ...]], gone: [hex], rx?}, gzipped, every 1 s while someone looks at the map (or an
@@ -359,6 +360,19 @@ class Hub:
         if not res.get("ok"):
             raise RuntimeError(str(res.get("error") or "the station couldn't do it"))
         return res
+
+    def reset_source(self, source: str, by: str = "") -> dict:
+        """POST /api/sources/reset (an admin, Settings > Health): the station's incident source's reset() (#301), as a
+        sources_reset job over the station's authenticated jobs channel. Logged with who asked (their Access
+        identity; never a credential). ValueError for a bad source, StationOffline / RuntimeError from the station."""
+        from sizeup.cloud.adapters import SOURCE_ID
+        source = str(source or "").strip()
+        if source and not SOURCE_ID.fullmatch(source):
+            raise ValueError("source: a source id")
+        self.log(f"incident sources: reset of {source or 'all'} asked by {by or 'someone (no sign-in)'}")
+        res = self.call("sources_reset", {"source": source, "by": by}, 30.0)
+        self.log(f"incident sources: reset of {source or 'all'}: {str(res.get('result') or 'done')[:200]}")
+        return {"ok": True, "result": str(res.get("result") or "")[:300]}
 
     def render_voice(self, args: dict) -> tuple[bytes, str]:
         """Cad.remote_voice: the dispatch said by the station's voice, or AudioUnavailable (text only)."""
