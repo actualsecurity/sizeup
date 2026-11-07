@@ -193,6 +193,7 @@ cmd_doctor() {
     [ -n "$line" ] && no "${line#  CRITICAL }"
   done < <(printf '%s\n' "$out" | grep '^  CRITICAL' || true)
   if [ -x /opt/sizeup/rtl-sdr/bin/rtl_fm ]; then ok "rtl_fm (rtl-sdr-blog) installed"; else no "rtl_fm missing: run install-linux.sh again"; fi
+  if [ -x /opt/sizeup/rtl-sdr/bin/rtl_sdr ]; then ok "rtl_sdr installed (several airband frequencies per dongle)"; else no "rtl_sdr missing: run install-linux.sh again"; fi
   if out=$(LD_LIBRARY_PATH="$RTLSDR_LIB:/opt/sizeup/trunk-recorder/lib/trunk-recorder" /opt/sizeup/trunk-recorder/bin/trunk-recorder --version 2>&1 | grep -iE 'version|[0-9]+\.[0-9]+' | head -n 1); then
     ok "trunk-recorder: ${out:-installed}"
   else

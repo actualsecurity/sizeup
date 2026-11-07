@@ -32,8 +32,9 @@ county dispatch (60 Control); it doesn't replace it.
 - **Radio:**
   - Channels: South 2 paging (tones and pages), Fire/EMS 15 (P25, talker at keypress), FG1 and
     FG2 (MDC-1200 / FleetSync IDs), HPN Tower (Westchester County Airport ATC, 118.575 AM, #233); NY Approach
-    (126.4 by day / 120.8 overnight, retuned on the Chart Supplement's hours) and HPN Ground, picked by hand (#260). Next
-    (#119): the Port Chester repeater and PC local fireground, then several channels per dongle.
+    (126.4 by day / 120.8 overnight, retuned on the Chart Supplement's hours) and HPN Ground, picked by hand (#260).
+    Several airband frequencies per dongle (one capture, an FFT channelizer), the tower's hours (CTAF when closed)
+    and the "NY App 126.4/120.8" names (#275). Next (#119): the Port Chester repeater and PC local fireground.
   - Speech-to-text per channel: Amazon Transcribe on the main channels (and HPN ATC, with an aviation
     vocabulary), whisper elsewhere.
   - Pre-alerts: the phone pre-alert from Tapout's ntfy feed (read only); airport pre-alerts from HPN ATC

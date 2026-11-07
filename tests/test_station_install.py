@@ -52,8 +52,8 @@ def test_station_template_is_a_linux_station(tmp_path, monkeypatch):
     assert c.rtl_fm == "/opt/sizeup/rtl-sdr/bin/rtl_fm" and c.sdr_auto and c.start_mode == "South 2"
     assert [(ch.label, ch.mhz, ch.kind) for ch in c.channels] == [("South 2", 470.2, "paging"), ("FG1", 453.0375, "traffic"),
                                                                  ("FG2", 458.0375, "traffic"), ("HPN Tower", 118.575, "airband"),
-                                                                 ("NY Approach", 126.4, "airband"),        # #260
-                                                                 ("NY Approach 124.65", 124.65, "airband"),
+                                                                 ("NY App 126.4/120.8", 126.4, "airband"),   # #260/#275
+                                                                 ("NY App 124.65", 124.65, "airband"),
                                                                  ("HPN Ground", 121.825, "airband")]
     assert (c.stt_server, c.stt_model, c.stt_port) == ("/opt/sizeup/whisper/bin/whisper-server",
                                                        "/opt/sizeup/models/whisper.bin", 8179)
