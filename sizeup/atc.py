@@ -701,7 +701,7 @@ def spoken_callsign(flight: str, telephony: dict[str, str]) -> str:
     return ""
 
 
-PROMPT_PHASES = {"arriving": 0, "departing": 1, "ground": 2, "low": 3}   # who talks to the tower first (#257)
+PROMPT_PHASES = {"arriving": 0, "departing": 1, "near": 2, "ground": 2, "low": 3}   # who talks to the tower first (#257)
 
 
 def whisper_prompt(base: str, aircraft: Sequence[dict], telephony: dict[str, str]) -> str:

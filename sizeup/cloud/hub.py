@@ -553,6 +553,12 @@ class HubApp(App):
         from sizeup.notify import STATUS
         notifier = self.pushes.notifier(STATUS)
         self.health = self.hub.health_ = StationHealth(self.hub, cfg, self.mdb, notifier, log)
+        # the hub's own error spikes (#285, sizeup/errwatch.py): the same status notifier; main() tees the log into it
+        from sizeup import errwatch
+        pub = (cfg.cloud_public_url or "").rstrip("/")
+        self.error_watch = errwatch.ErrorWatch(notifier, settings=lambda: self.cad.settings.section(errwatch.SECTION), log=log,
+                                               click=f"{pub}/cad#settings/system/health" if pub else "", db=self.mdb)
+        self.health.errors = self.error_watch
         if not notifier.enabled:
             log("health: no push for station alerts (no status or alerts topic in effect): Settings > Health and log only")
         self.live = self.hub.live                      # main() sets on_change to push the display
@@ -1171,6 +1177,7 @@ class HubApp(App):
     def start(self) -> HubApp:
         threading.Thread(target=self._hub_janitor, name="hub-janitor", daemon=True).start()
         threading.Thread(target=self.health.run, args=(self._stopping,), name="station-health", daemon=True).start()
+        threading.Thread(target=self.error_watch.run, args=(self._stopping,), name="hub-errors", daemon=True).start()
         threading.Thread(target=self._aws_watch, name="aws-sweep", daemon=True).start()
         self._started = True                      # the phone pre-alert: the hub's own subscription
         self.prealert_sync()

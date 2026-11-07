@@ -28,7 +28,8 @@ Two topics, by kind (route(), Pushes; user, 2026-11-01):
     STATUS  [alerts] status_topic / SIZEUP_STATUS_TOPIC (the hub: SSM /sizeup-hub/status-topic): the system's
             own health: station health (sizeup/cloud/health.py: silent, behind, update failed, a dongle gone, a
             job / whisper / trunk-recorder down, a stuck channel, the outbox, the disk, the whisper queue), Amazon
-            Transcribe failing, its monthly budget at 80 % / 100 %, and their recovery notices
+            Transcribe failing, its monthly budget at 80 % / 100 %, the hub's own error spikes (sizeup/errwatch.py,
+            #285), and their recovery notices
 
 Only one of them set: every kind goes there (as before the split). Neither: no pushes. The app logs at startup
 where each kind goes (Pushes.line(): "topic set (SSM)", "off", never a topic's name).
