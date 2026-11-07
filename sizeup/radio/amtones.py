@@ -15,9 +15,12 @@ off under 300 Hz. So the tone is found and notched:
 
     find      a short-time spectrum (128 ms frames, 32 ms apart, 7.8 Hz bins at 16 kHz): in each frame, the peaks
               TONE_OVER_DB over the median of their +/-80 Hz neighbourhood. A tone is such a peak (+/-1 bin) in
-              TONE_PRESENT of the frames of the clip, or of any TONE_WINDOW_S of it (a tone on part of a transmission),
-              and steady: its frequency, frame to frame, within TONE_SPREAD_HZ (p10-p90). Voice doesn't pass: its
-              harmonics move with the pitch and stop between words.
+              TONE_PRESENT of the frames of the clip's carrier (not its pre-roll and tail: #263), or of any
+              TONE_WINDOW_S of it (a tone on part of a transmission), and steady: its frequency, frame to frame
+              (tracked within +/-1 bin of where it was found), within TONE_SPREAD_HZ (p10-p90), and over
+              TONE_SPREAD_SOFT_HZ only within TONE_SPREAD_REL of it. Voice doesn't pass: its harmonics move with the
+              pitch and stop between words (a monotone 1-2 s one moves ~4%: 10-12 Hz at 250-480 Hz, under 12 Hz but
+              over 2%).
     notch     each tone (TONE_MAX at most, the strongest first) with a notch of Q TONE_Q (10 Hz wide at 300 Hz),
               widened to the tone's own drift, applied zero-phase (|H|^2, as a forward-backward IIR notch) on the
               whole clip's spectrum, padded so it doesn't wrap. Nothing found: the audio comes back untouched.
@@ -36,7 +39,9 @@ TONE_NEIGH_HZ = 80.0           # a peak is measured against the median of this m
 TONE_OVER_DB = 10.0            # ... and is this far over it
 TONE_PRESENT = 0.6             # a tone is a peak in this share of the frames (of the clip or of one window) ...
 TONE_WINDOW_S = 2.0            # ... the window
-TONE_SPREAD_HZ = 12.0          # ... and steady: its frequency within this (p10-p90) where it is
+TONE_SPREAD_HZ = 12.0          # ... and steady: its frequency within this (p10-p90) where it is ...
+TONE_SPREAD_SOFT_HZ = 9.0      # ... and over this only if within TONE_SPREAD_REL of it: a monotone voice's pitch
+TONE_SPREAD_REL = 0.02         #     moves ~4% (10-12 Hz at 250-480 Hz); the real beats 0.3-11 Hz, 2.8% at most
 TONE_MIN_S = 0.5               # and there this long at least
 TONE_MAX = 6                   # notches at most
 TONE_Q = 30.0                  # notch Q: f / Q wide (-3 dB), 10 Hz at 300 Hz
@@ -53,9 +58,14 @@ def _frames(x: np.ndarray, rate: int) -> tuple[np.ndarray, np.ndarray]:
     return P, np.fft.rfftfreq(n, 1 / rate)
 
 
-def find_tones(audio: np.ndarray, rate: int = 16000) -> list[tuple[float, float]]:
-    """The steady tones in a clip: [(frequency Hz, its drift Hz p10-p90)], the strongest first, TONE_MAX at most."""
+def find_tones(audio: np.ndarray, rate: int = 16000, span: tuple[int, int] | None = None) -> list[tuple[float, float]]:
+    """The steady tones in a clip: [(frequency Hz, its drift Hz p10-p90)], the strongest first, TONE_MAX at most.
+    span: (first, end) sample of the carrier, where a beat can be (#263): looked for there only, so the pre-roll and
+    the tail (0.6 s of no carrier, a third of a 1.9 s transmission) don't hold its share of the frames under
+    TONE_PRESENT."""
     x = np.asarray(audio, dtype=np.float64)
+    if span is not None:
+        x = x[max(0, int(span[0])):max(0, int(span[1]))]
     if len(x) < TONE_MIN_S * rate:
         return []
     P, f = _frames(x - x.mean(), rate)
@@ -90,14 +100,14 @@ def find_tones(audio: np.ndarray, rate: int = 16000) -> list[tuple[float, float]
             continue
         taken.append(i)
         rows = np.where(near[:, i])[0]
-        lo, hi = max(1, i - 2), min(len(f) - 2, i + 2)
+        lo, hi = max(1, i - 1), min(len(f) - 2, i + 1)      # (+/-1 bin: a voice harmonic passing 2 bins off isn't it)
         j = lo + np.argmax(D[rows, lo:hi + 1], axis=1)        # its bin, frame by frame
         a, b, cc = D[rows, j - 1], D[rows, j], D[rows, j + 1]
         den = a - 2 * b + cc
         frac = np.where(np.abs(den) > 1e-9, 0.5 * (a - cc) / np.where(np.abs(den) > 1e-9, den, 1), 0.0)
         track = f[j] + np.clip(frac, -1, 1) * df
         p10, p50, p90 = np.percentile(track, (10, 50, 90))
-        if p90 - p10 > TONE_SPREAD_HZ:
+        if p90 - p10 > TONE_SPREAD_HZ or (p90 - p10 > TONE_SPREAD_SOFT_HZ and p90 - p10 > TONE_SPREAD_REL * p50):
             continue                                     # it moves: voice, not a tone
         found.append((float(level[i]), float(p50), float(p90 - p10)))
         if len(found) >= TONE_MAX:
