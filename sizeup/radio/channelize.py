@@ -1,19 +1,22 @@
 """Several airband AM channels from one dongle (GitHub #275): rtl_sdr IQ -> FFT channelizer -> one envelope per channel.
 
-rtl_fm demodulates one frequency per dongle. An RTL-SDR's capture is about 2 MHz wide, and HPN's frequencies come in
-pairs that fit in one: 118.575 (Tower, CTAF when the tower is closed) + 120.8 (NY Approach overnight), 126.4 + 124.65
-(NY Approach), 120.8 + 121.825 (Ground). So a dongle given more than one frequency runs this instead of rtl_fm, as its
+rtl_fm demodulates one frequency per dongle. An RTL-SDR's capture is about 2 MHz wide, and some of HPN's frequencies
+come in pairs that fit in one with room to spare at the edges: 126.4 + 124.65 (NY Approach), 120.8 + 121.825 (Approach
+overnight and Ground). 118.575 + 120.8 (Tower + Approach overnight, 2.2 MHz) doesn't. So a dongle given more than one frequency runs this instead of rtl_fm, as its
 own process (python -m sizeup.radio.channelize ...: the numpy work never holds sizeup's GIL), with rtl_sdr under it:
 
     capture   rtl_sdr -f <centre> -s <rate> (8-bit IQ) on stdout, read here. plan() picks the rate and the centre:
-              the smallest of RATES with every channel within EDGE_FRAC x rate of the centre (the RTL2832U's decimating
-              filter rolls off towards the edges, and aliases past them); the centre starts between the frequencies and
-              moves in 5 kHz steps until no channel is within DC_GUARD of it (the DC spike) and no channel sits within
-              IMAGE_GUARD of another's mirror image (the tuner's IQ imbalance puts a weak copy of each signal at minus
-              its offset: two channels symmetric about the centre would each hear the other).
-                  118.575 + 120.8    2.225 MHz apart: 2.56 MS/s, centre 119.7025, offsets -1.1275 / +1.0975 MHz
-                  124.65 + 126.4     1.75 MHz apart:  2.4 MS/s
-                  120.8 + 121.825    1.025 MHz apart: 1.6 MS/s
+              the smallest of RATES with every channel within EDGE_FRAC (0.35) x rate of the centre, and at least
+              WIDE_RATE (2.4 MS/s) for a pair more than WIDE_SPAN_HZ (1.2 MHz) apart. The edge is kept well in: the
+              R820T's analog IF filter follows the rate (about 2.05 MHz wide at 2.048 MS/s), and past it only the
+              RTL2832U's decimator limits the band, which rolls off and lets aliases in (PR #289's review). Then the
+              centre starts between the frequencies and moves in 5 kHz steps until no channel is within DC_GUARD of
+              it (the DC spike) and no channel sits within IMAGE_GUARD of another's mirror image (the tuner's IQ
+              imbalance puts a weak copy of each signal at minus its offset: two channels symmetric about the centre
+              would each hear the other).
+                  124.65 + 126.4     1.75 MHz apart:  2.56 MS/s, centre 125.54, offsets -0.89 / +0.86 MHz
+                  120.8 + 121.825    1.025 MHz apart: 1.6 MS/s, centre 121.3275
+                  118.575 + 120.8    2.225 MHz apart: doesn't fit (two dongles: the Tower's and Approach's)
     channels  overlap-save: one FFT of each block, shared by every channel; per channel only the BINS bins round its
               offset, times the channel filter (a 63-tap Kaiser low-pass, flat to +-4.3 kHz, 80 dB down from 5.3 kHz),
               and a small inverse FFT, which is the channel filtered and decimated to 16 kHz in one go. The offset is
@@ -25,6 +28,11 @@ own process (python -m sizeup.radio.channelize ...: the numpy work never holds s
               receiver reads to say absent / busy, as with rtl_fm).
 
 A single-frequency dongle keeps rtl_fm (sizeup/radio/am.py): at 1 MS/s inside rtl_fm it is the cheaper of the two.
+The carrier over the floor reads about 1 dB higher here than from rtl_fm -s 12000: the channel filter's noise bandwidth
+is about 9.6 kHz against rtl_fm's 12 kHz.
+
+On SIGTERM (the receiver stopping it: a retune, a switch) rtl_sdr is stopped and waited for before this exits, so the
+dongle is closed (rtlsdr_close) before the next program opens it.
 """
 
 from __future__ import annotations
@@ -39,14 +47,15 @@ import numpy as np
 
 OUT_RATE = 16000                       # sizeup's audio rate (radio/fm.py RATE)
 FRAME = OUT_RATE // 20                 # 50 ms (radio/fm.py FRAME)
-RATES = (1_600_000, 2_048_000, 2_400_000, 2_560_000)   # each a multiple of 16 kHz; 2.56 MS/s is the highest an RTL-SDR
-                                       # is generally run at without losing samples
-EDGE_FRAC = 0.445                      # every channel within this x rate of the centre (89% of the way to Nyquist)
+RATES = (1_600_000, 2_400_000, 2_560_000)   # each a multiple of 16 kHz; 2.56 MS/s is the highest an RTL-SDR is
+                                       # generally run at without losing samples
+EDGE_FRAC = 0.35                       # every channel within this x rate of the centre (70% of the way to Nyquist)
+WIDE_SPAN_HZ, WIDE_RATE = 1_200_000, 2_400_000   # a pair wider than this: at least this rate (the R820T's IF)
 DC_GUARD = 25_000.0                    # Hz from the centre (the DC spike)
 IMAGE_GUARD = 30_000.0                 # Hz between a channel and another's mirror image
 STEP = 5_000.0                         # the centre moves in these steps
 MAX_SHIFT = 250_000.0
-MAX_SPAN_HZ = 2 * EDGE_FRAC * RATES[-1] - 2 * STEP   # widest set of frequencies one dongle can take (2.27 MHz)
+MAX_SPAN_HZ = 2 * EDGE_FRAC * RATES[-1] - 2 * STEP   # widest set of frequencies one dongle can take (1.78 MHz)
 BINS = 1024                            # output samples per FFT block (per channel), before the overlap
 TAPS = 63                              # the channel filter's length at 16 kHz
 OVERLAP = 64                           # output samples dropped per block (>= TAPS - 1)
@@ -65,6 +74,8 @@ def plan(mhzs, rates=RATES) -> tuple[float, int]:
         shifts += [k * STEP, -k * STEP]
         k += 1
     for rate in rates:
+        if fs[-1] - fs[0] > WIDE_SPAN_HZ and rate < WIDE_RATE:
+            continue
         for s in shifts:
             c = round(mid + s)
             off = [f - c for f in fs]
@@ -161,7 +172,11 @@ def main(argv: list[str] | None = None) -> int:
     cmd.append("-")
     ch = Channelizer(a.s, a.offset)
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)          # stderr: ours (the receiver reads it)
-    signal.signal(signal.SIGTERM, lambda *_: (proc.terminate(), sys.exit(0)))
+
+    def stop(*_):
+        _stop(proc)
+        sys.exit(0)
+    signal.signal(signal.SIGTERM, stop)
     out = sys.stdout.buffer
     fd = proc.stdout.fileno()
     chunk = 2 * ch.keep                                            # one block of 8-bit I/Q
@@ -190,9 +205,19 @@ def main(argv: list[str] | None = None) -> int:
     except (BrokenPipeError, KeyboardInterrupt):
         pass
     finally:
-        if proc.poll() is None:
-            proc.terminate()
+        _stop(proc)
     return proc.wait() or 0
+
+
+def _stop(proc: subprocess.Popen) -> None:
+    """rtl_sdr stopped and gone (the dongle closed) before this process exits."""
+    if proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=3)
 
 
 if __name__ == "__main__":

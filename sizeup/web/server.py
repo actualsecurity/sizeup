@@ -335,6 +335,7 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                  access=None, access_log: Callable[[str], None] | None = None, station_mode=None,
                  role: str = "", roads=None, gis=None, trains=None, weather=None, station_health=None, stream_gzip: bool = True,
                  aircraft=None, roadwork=None, set_adsb: Callable[[str], str | None] | None = None,
+                 airband_ab: Callable[..., str | None] | None = None,
                  gate: Gate | None = None, health_fn: Callable[[], dict] | None = None):
     """cad: a CadApi (sizeup/cad/api.py) and cad_b its own broadcaster (the console's state is
     small and separate from the monitor's, so neither page carries the other's). station: the hub's
@@ -645,6 +646,18 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                     return self._send(400, json.dumps({"error": err}).encode(), "application/json")
                 self._did(path, body)
                 return self._send(200, b'{"ok":true}', "application/json")
+            if path == "/api/airband-ab" and airband_ab is not None:
+                # #275: an on-air A/B of an airband dongle, rtl_fm against the channelizer (tools/airband_ab.py)
+                try:
+                    n = int(self.headers.get("Content-Length") or 0)
+                    body = json.loads(self.rfile.read(min(n, 1024)) or b"{}")
+                    err = airband_ab(str(body["channel"]), float(body.get("minutes", 60)), float(body.get("phase_s", 300)))
+                except (ValueError, KeyError, TypeError) as e:
+                    err = f"bad request: {e}"
+                if err:
+                    return self._send(400, json.dumps({"error": err}).encode(), "application/json")
+                self._did(path, body)
+                return self._send(200, b'{"ok":true}', "application/json")
             if path == "/api/adsb-receiver" and set_adsb is not None:
                 try:
                     n = int(self.headers.get("Content-Length") or 0)
@@ -751,7 +764,8 @@ class WebServer:
                  retranscribe: Callable[[list[str] | None], int] | None = None, cad=None, station=None,
                  health: dict | None = None, access=None, access_log: Callable[[str], None] | None = None,
                  station_mode=None, role: str = "", roads=None, gis=None, trains=None, weather=None, station_health=None,
-                 aircraft=None, roadwork=None, set_adsb=None, fence=None, health_fn: Callable[[], dict] | None = None):
+                 aircraft=None, roadwork=None, set_adsb=None, fence=None, health_fn: Callable[[], dict] | None = None,
+                 airband_ab=None):
         self.access = access
         self.gate = Gate(fence)
         self.station = station
@@ -764,7 +778,7 @@ class WebServer:
             set_talkgroup, set_talkgroup_group, retranscribe, cad, self.cad_broadcaster, station,
             json.dumps(health or {"ok": True}, separators=(",", ":")).encode(), access, access_log, station_mode, role,
             roads, gis, trains, weather, station_health, aircraft=aircraft, roadwork=roadwork, set_adsb=set_adsb,
-            gate=self.gate, health_fn=health_fn))
+            airband_ab=airband_ab, gate=self.gate, health_fn=health_fn))
         self.httpd.daemon_threads = True
 
     @property

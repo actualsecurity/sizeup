@@ -55,15 +55,15 @@ at the switch to a release that has it (deploy/station/install-linux.sh activate
 
     airband-sets  clearer names and several frequencies per dongle (GitHub #275): "NY Approach" becomes "NY App 126.4/120.8"
              and "NY Approach 124.65" "NY App 124.65" (the label line only: a dongle's saved job follows, sizeup/app.py
-             RENAMED); HPN Tower gets also = 120.8 23:00-07:00 (NY Approach's overnight frequency on the Tower's dongle,
-             118.575 kept: the CTAF while the tower is closed, and the tower reopening at 06:00 is heard); NY App
-             126.4/120.8 gets also = 124.65 07:00-23:00 (126.4 + 124.65 on one dongle by day); HPN Ground gets a
+             RENAMED); NY App 126.4/120.8 gets also = 124.65 07:00-23:00 (126.4 + 124.65 on one dongle by day, only
+             with [radio] airband_multichannel on, which this doesn't set); HPN Ground gets a
              schedule, 121.825 06:00-23:00 and 124.65 23:00-06:00 (Ground is closed overnight: its dongle hears
              Approach's 124.65 then). Each part only on a channel exactly as approach-ground / hpn-atc / the template
              left it (that label, frequency and schedule, no "also" yet) and only when the frequency it adds has a
              channel here (its transmissions are that channel's); the rest is left as it is. Rollback-safe like
              approach-ground: a release from before #275 refuses "also", so it waits ("deferred") until the release
-             being left reads it.
+             being left reads it. And it waits for approach-ground (marked done): never marked done before the
+             channels it changes are there.
 
 Done ones are listed in a marks file (/etc/sizeup/config-updates, one name per line), so one taken out
 by hand stays out. The config is only ever added to (tones-47 also changes the two values of the one
@@ -515,7 +515,6 @@ def rename_south_end(text: str) -> tuple[str, str]:
 # information effective 29 October 2026): WESTCHESTER TOWER 118.575 [0600-2300] (CTAF 118.575), WESTCHESTER GROUND
 # 121.825 [0600-2300], NEW YORK APPROACH 120.8 2300-0700, 126.4 0700-2300, 124.65.
 RENAMES = {"NY Approach": "NY App 126.4/120.8", "NY Approach 124.65": "NY App 124.65"}
-TOWER_ALSO = [{"mhz": 120.8, "from": "23:00", "until": "07:00"}]
 APPROACH_ALSO = [{"mhz": 124.65, "from": "07:00", "until": "23:00"}]
 GROUND_SCHEDULE = [{"at": "06:00", "mhz": 121.825}, {"at": "23:00", "mhz": 124.65}]
 CHANNELS_HEADER = re.compile(r"^[ \t]*\[\[[ \t]*radio\.channels[ \t]*\]\][ \t]*(?:#.*)?$")
@@ -550,7 +549,7 @@ def _add_line(seg: str, line: str) -> str:
 
 
 def airband_sets(text: str, leaving: Path | None = None) -> tuple[str, str]:
-    """(new text, what was done): the #275 names, the Tower's and Approach's "also" and Ground's schedule, each on a
+    """(new text, what was done): the #275 names, Approach's "also" and Ground's schedule, each on a
     channel exactly as it was added. Deferred while the release being left can't read "also"; ValueError when the
     config doesn't parse or the result wouldn't say what was meant."""
     data = tomllib.loads(text)
@@ -580,13 +579,11 @@ def airband_sets(text: str, leaving: Path | None = None) -> tuple[str, str]:
         elif label == "NY Approach 124.65" and mhz == 124.65 and "schedule" not in c:
             if RENAMES[label] not in labels:
                 plan[i] = (RENAMES[label], None)
-        elif label == "HPN Tower" and mhz == 118.575 and "schedule" not in c and has(120.8):
-            plan[i] = (None, f"also = {_toml_list(TOWER_ALSO)}   # #275: NY Approach overnight too (118.575: CTAF)")
         elif label == "HPN Ground" and mhz == 121.825 and "schedule" not in c and has(124.65):
             plan[i] = (None, f"schedule = {_toml_list(GROUND_SCHEDULE)}   # #275: Ground closed 23:00-06:00: 124.65 then")
     plan = {i: p for i, p in plan.items() if p != (None, None)}
     if not plan:
-        return text, "airband-sets: no channel as it was added (NY Approach, HPN Tower, HPN Ground): nothing changed"
+        return text, "airband-sets: no channel as it was added (NY Approach, HPN Ground): nothing changed"
     if not reads_also(leaving):
         raise Deferred(f"the release this switch would go back to ({leaving.name}) can't read an airband channel's "
                        '"also": the #275 names and frequencies are changed at the next update')
@@ -617,9 +614,8 @@ def airband_sets(text: str, leaving: Path | None = None) -> tuple[str, str]:
             seg = _add_line(seg, line)
             key = line.split("=", 1)[0].strip()
             want[i][key] = tomllib.loads(line.split("#", 1)[0])[key]
-            did.setdefault(i, []).append(f"{label or old}: {key} " + ("120.8 23:00-07:00" if old == "HPN Tower" else
-                                                     "124.65 07:00-23:00" if key == "also" else
-                                                     "121.825 06:00-23:00, 124.65 23:00-06:00"))
+            did.setdefault(i, []).append(f"{label or old}: {key} " + ("124.65 07:00-23:00" if key == "also" else
+                                                                     "121.825 06:00-23:00, 124.65 23:00-06:00"))
         new_text = new_text[:s] + seg + new_text[e:]
     if not new_text.endswith("\n") and text.endswith("\n"):
         new_text += "\n"
@@ -638,6 +634,7 @@ def airband_sets(text: str, leaving: Path | None = None) -> tuple[str, str]:
 UPDATES = (("fg2", add_fg2), ("tones-47", fix_tones), ("hpn-atc", add_hpn_atc), ("adsb-receiver", add_adsb),
            ("approach-ground", add_approach_ground), ("south-end", rename_south_end), ("airband-sets", airband_sets))
 NEEDS_LEAVING = {"hpn-atc", "adsb-receiver", "approach-ground", "airband-sets"}   # given the release being left
+AFTER = {"airband-sets": "approach-ground"}       # not before that one is done (marked): what it changes comes from it
 
 
 def run(conf: Path, marks: Path, leaving: Path | None = None) -> list[str]:
@@ -650,6 +647,9 @@ def run(conf: Path, marks: Path, leaving: Path | None = None) -> list[str]:
     text = conf.read_text()
     out = []
     for name, fn in todo:
+        if AFTER.get(name) and AFTER[name] not in done:
+            out.append(f"{name}: deferred: waits for {AFTER[name]} (not done yet)")
+            continue                                  # not marked: tried again at the next update
         try:
             new, said = fn(text, leaving) if name in NEEDS_LEAVING else fn(text)
         except Deferred as e:

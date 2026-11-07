@@ -116,6 +116,10 @@ class Config:
     # A dongle that appears with no job a person chose gets the first job in auto_assign_order that no
     # other dongle has (sizeup/app.py _auto_assign). load() defaults it on; built directly (tests), off.
     sdr_auto_assign: bool = False
+    # #275: the airband channels' `also` frequencies taken (several per dongle, sizeup/radio/channelize.py). Off by default
+    # (PR #289's review): each dongle runs rtl_fm on its own channel until an on-air A/B (tools/airband_ab.py) says the
+    # wideband capture costs nothing at the site.
+    airband_multichannel: bool = False
     sdr_auto_order: tuple[str, ...] = ("FG1", "Fire/EMS 15", "South 2", "FG2", "HPN Tower")   # labels / "Fire/EMS 15" (P25)
     p25_recorder: str = ""       # trunk-recorder command line, started/stopped by sizeup
     p25_recorder_dir: str = ""   # its working directory (config.json + talkgroups.csv)
@@ -1068,7 +1072,9 @@ def load(path: str | Path) -> Config:
     pa = _prealert(data)
     state_dir = Path(os.environ["SIZEUP_STATE_DIR"]).expanduser() if os.environ.get("SIZEUP_STATE_DIR", "").strip() else base
     radio = _take(data.get("radio", {}), "radio", {"rtl_fm", "channels", "tones_file", "shared_device", "start_mode", "sdrs", "sdr_names", "sdr_ignore",
-                                                 "auto_assign", "auto_assign_order"})
+                                                 "auto_assign", "auto_assign_order", "airband_multichannel"})
+    if not isinstance(radio.get("airband_multichannel", False), bool):
+        raise ConfigError("radio.airband_multichannel: true or false (#275: the channels' `also` frequencies on; off by default)")
     raw_sdrs = radio.get("sdrs", ())
     sdr_auto = raw_sdrs == "auto"
     sdrs = (() if sdr_auto else tuple(str(x) for x in raw_sdrs)) or ((str(radio["shared_device"]),) if radio.get("shared_device") else ())
@@ -1247,7 +1253,8 @@ def load(path: str | Path) -> Config:
         station_id=st.get("id", "pcfd"), station_name=st.get("name", "Port Chester FD"),
         station_auto_update=st.get("auto_update", True), station_ll=station_ll,
         host=web.get("host", "127.0.0.1"), port=int(web.get("port", 8090)),
-        rtl_fm=radio.get("rtl_fm", "rtl_fm"), channels=tuple(channels), tones=tuple(tones), tones_file=tones_file,
+        rtl_fm=radio.get("rtl_fm", "rtl_fm"), airband_multichannel=bool(radio.get("airband_multichannel", False)),
+        channels=tuple(channels), tones=tuple(tones), tones_file=tones_file,
         ours=frozenset(ours | {"Port Chester FD", "Rye Brook FD"}),
         stt_server=stt.get("server_binary", "whisper-server"), stt_model=rel(stt.get("model", "models/ggml-large-v3-turbo.bin")),
         stt_port=int(stt.get("port", 8179)), stt_threads=int(stt.get("threads", 8)), stt_prompt=stt.get("prompt", ""),

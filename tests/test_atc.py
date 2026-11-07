@@ -575,8 +575,8 @@ def test_it_waits_while_the_release_to_go_back_to_cant_read_it(tmp_path, monkeyp
                     "approach-ground: deferred: the release this switch would go back to (rel-old) can't read an "
                     "airband channel's schedule: NY Approach and HPN Ground are added at the next update",   # (#260's)
                     "south-end: the station is already called 'Port Chester FD South End': nothing changed",
-                    "airband-sets: no channel as it was added (NY Approach, HPN Tower, HPN Ground): nothing changed"]   # (#275's: no airband channel yet)
-    assert conf.read_text() == same and marks.read_text() == "fg2\ntones-47\nadsb-receiver\nsouth-end\nairband-sets\n"
+                    "airband-sets: deferred: waits for approach-ground (not done yet)"]   # (#275's: after #260's)
+    assert conf.read_text() == same and marks.read_text() == "fg2\ntones-47\nadsb-receiver\nsouth-end\n"
     assert configupdate.reads_airband(None) and not configupdate.reads_airband(tmp_path / "nowhere")
     # the CLI the installer runs (system python, stdlib only), with the release being left
     r = subprocess.run([sys.executable, "-I", str(ROOT / "sizeup" / "cloud" / "configupdate.py"), str(conf), str(marks),
@@ -585,7 +585,7 @@ def test_it_waits_while_the_release_to_go_back_to_cant_read_it(tmp_path, monkeyp
     r = subprocess.run([sys.executable, "-I", str(ROOT / "sizeup" / "cloud" / "configupdate.py"), str(conf), str(marks),
                         "--leaving", str(ROOT)], capture_output=True, text=True, timeout=30)
     assert r.returncode == 0 and r.stdout.startswith("hpn-atc: HPN Tower") and load(conf).channels[-4].label == "HPN Tower"
-    assert [c.label for c in load(conf).channels][-3:] == ["NY Approach", "NY Approach 124.65", "HPN Ground"]
+    assert [c.label for c in load(conf).channels][-3:] == ["NY App 126.4/120.8", "NY App 124.65", "HPN Ground"]   # (#275)
     sh = (STATION / "install-linux.sh").read_text()
     assert '"$ETC/config-updates" --leaving "$leaving"' in sh and 'leaving=$(readlink -f "$CURRENT"' in sh
 

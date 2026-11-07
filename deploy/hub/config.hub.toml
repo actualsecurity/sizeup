@@ -58,7 +58,6 @@ kind = "traffic"
 label = "HPN Tower"                # HPN ATC (#233): the airport pre-alerts are made here, from its transcripts
 mhz = 118.575
 kind = "airband"
-also = [{ mhz = 120.8, from = "23:00", until = "07:00" }]   # #275: as the station's (the channel list shows it)
 
 [[radio.channels]]
 label = "NY App 126.4/120.8"       # #260/#275: New York Approach for HPN, 126.4 0700-2300 / 120.8 2300-0700 local

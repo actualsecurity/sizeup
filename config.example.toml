@@ -72,8 +72,9 @@ gain_db = 40
 # New York Approach 126.4 (0700-2300) / 120.8 (2300-0700) / 124.65, New York Departure 120.55.
 # One RTL-SDR covers about 2 MHz: a channel's `also` (#275) puts other channels' frequencies on its dongle (rtl_sdr and
 # one FFT channelizer, sizeup/radio/channelize.py: each frequency its own squelch, clips, speech-to-text and talkers,
-# heard as the channel it belongs to). At most about 2.27 MHz between the lowest and highest at any time. One
-# frequency: rtl_fm, as before. NY Approach and HPN Ground (#260) are below: picked for a dongle by hand, never
+# heard as the channel it belongs to), at most about 1.78 MHz between the lowest and highest at any time, and only with
+# [radio] airband_multichannel = true (off by default: try it first with tools/airband_ab.py, an on-air A/B against
+# rtl_fm), and only while no other running dongle has that frequency. One frequency: rtl_fm, as before. NY Approach and HPN Ground (#260) are below: picked for a dongle by hand, never
 # auto-assigned. The facility comes from the label (sizeup/atc_scope.py): "... Ground" matches aircraft on the field,
 # "... App" / "... Approach" HPN's arrivals and departures out to 40 NM. A frequency on two dongles at once is kept on
 # one (the channel's own dongle).
@@ -84,7 +85,6 @@ kind = "airband"                   # AM, carrier squelch (sizeup/radio/am.py, sh
 device = "hpn-twr"
 gain_db = 36.4                     # shortfinal's airband gain
 squelch_db = 3.5                   # open this far over the noise floor (bench: noise +2, voice +6..+28)
-also = [{ mhz = 120.8, from = "23:00", until = "07:00" }]   # tower closed (118.575 is CTAF): Approach's 120.8 too
 
 [[radio.channels]]
 label = "NY App 126.4/120.8"       # New York Approach for HPN (#260): early inbound, emergencies declared to it first

@@ -493,28 +493,40 @@ Frequencies and hours from the FAA Chart Supplement via [airnav.com/airport/KHPN
 
 | Channel (#275 names) | On its own dongle | |
 |---|---|---|
-| HPN Tower | 118.575 all day, + 120.8 23:00-07:00 | the tower is closed 23:00-06:00: 118.575 is the CTAF then, still heard |
-| NY App 126.4/120.8 | 126.4 + 124.65 07:00-23:00, 120.8 23:00-07:00 | the `schedule`, and 124.65 by day |
+| HPN Tower | 118.575 all day | the tower is closed 23:00-06:00: 118.575 is the CTAF then, still heard |
+| NY App 126.4/120.8 | 126.4 07:00-23:00 (+ 124.65 with multichannel on), 120.8 23:00-07:00 | the `schedule` |
 | NY App 124.65 | 124.65 | Approach's third HPN frequency, fixed |
 | HPN Ground | 121.825 06:00-23:00, 124.65 23:00-06:00 | Ground is closed overnight: its dongle hears 124.65 then |
 
-**Several frequencies on one dongle (#275).** An RTL-SDR captures about 2 MHz. A channel's `also = [{ mhz = 120.8,
-from = "23:00", until = "07:00" }]` puts another channel's frequency on the same dongle: while more than one is on, the
-dongle runs `rtl_sdr` and `sizeup/radio/channelize.py` (one FFT channelizer, its own process) instead of `rtl_fm`, and
-each frequency has its own squelch, tone notch, clip, transcript and talker ID, and is heard as the channel it belongs
-to (120.8 on the Tower's dongle is NY App 126.4/120.8's). One frequency on: `rtl_fm`, as before. The rate and centre
-are picked so every channel is within 89% of the way to the band edge, at least 25 kHz off the DC spike and 30 kHz off
-the other's mirror image: 118.575 + 120.8 at 2.56 MS/s centred on 119.7025, 126.4 + 124.65 at 2.048 MS/s, 120.8 +
-121.825 at 1.6 MS/s. At most about 2.27 MHz between the lowest and highest at any one time (the config says so when a
-set doesn't fit). A frequency two dongles hear at once is kept on one: the dongle of the channel it belongs to, else
-the first in the config (the log says `HPN Tower: 120.8 is heard on another dongle: kept there, not here` once).
+**Several frequencies on one dongle (#275), off by default.** An RTL-SDR captures about 2 MHz. A channel's
+`also = [{ mhz = 124.65, from = "07:00", until = "23:00" }]` puts another channel's frequency on the same dongle, but
+only with `[radio] airband_multichannel = true` (off by default) and only while no other running dongle has that
+frequency (then the dongle stays on `rtl_fm`, narrow). While more than one is on, the dongle runs `rtl_sdr` and
+`sizeup/radio/channelize.py` (one FFT channelizer, its own process) instead of `rtl_fm`, and each frequency has its own
+squelch, tone notch, clip, transcript and talker ID, and is heard as the channel it belongs to. The capture keeps every
+channel within 35% of the rate from the centre (the R820T's IF filter follows the rate, and past it the RTL2832U's
+decimator rolls off and lets aliases in), 25 kHz off the DC spike and 30 kHz off the other's mirror image, and a pair
+more than 1.2 MHz apart gets at least 2.4 MS/s: 126.4 + 124.65 at 2.56 MS/s centred on 125.54, 120.8 + 121.825 at 1.6
+MS/s. At most about 1.78 MHz between the lowest and highest at any one time (the config says so when a set doesn't
+fit): 118.575 and 120.8 (2.2 MHz) need two dongles. The carrier over the floor reads about 1 dB higher through the
+channelizer than through `rtl_fm` (its noise bandwidth is narrower). If `rtl_sdr` gives no audio 3 starts in a row, the
+dongle goes back to `rtl_fm` on its own frequency for 30 minutes; if the channelizer runs under 97% of real time (USB
+dropping samples), the log says so.
+
+**Before turning it on: the on-air A/B.** With the channel on its dongle, on the station:
+`python3 /opt/sizeup/current/tools/airband_ab.py "NY App 126.4/120.8" --minutes 60`. The dongle alternates between
+`rtl_fm` and the channelizer every 5 minutes (between transmissions) and the tool prints, per path and frequency, the
+transmissions' median carrier over the floor, floor (dBFS) and voice SNR (also logged: `... A/B over on 126.4: ...`).
+The channelizer's carrier should read about +1 dB and its SNR the same; lower means the wideband capture costs the
+channel something here: leave `airband_multichannel` off. Turn it on by adding `airband_multichannel = true` under
+`[radio]` in `/etc/sizeup/config.toml` and restarting `sizeup-station`.
 
 **The schedule and the set.** `schedule = [{ at = "07:00", mhz = 126.4 }, { at = "23:00", mhz = 120.8 }]` on the
 channel: each frequency from its time until the next, in America/New_York wall-clock time (DST-aware); `also`'s `from` /
 `until` the same. The program can't retune while it runs, so the receiver restarts it on the new set, and only between
 transmissions: never while one is open or in its hang on any of its frequencies, and after 2 s with no carrier (a
 read-back stays with its call); a channel that never falls quiet that long retunes 5 minutes late at the next gap. The
-log says `HPN Tower: retuned 118.575 -> 118.575 + 120.8 MHz (schedule: 118.575 + 120.8 23:00-07:00)`; each
+log says `NY App 126.4/120.8: retuned 126.4 -> 126.4 + 124.65 MHz (schedule: ...)`; each
 transmission in the Radio view shows the frequency it was heard on (`118.575 CTAF` while the tower is closed).
 
 **On screen.** The Radios rows show what each dongle is on now (`118.575 CTAF + 120.8`) and `Tower open` / `Tower
@@ -535,11 +547,11 @@ one serial](#two-dongles-one-serial)), then on the station page (Radios) or the 
 from reads a `schedule`: a release from before #260 refuses it, and a failed switch goes back to it. So the first update
 to this release says `config: approach-ground: deferred ...` and the next one adds them; never to `auto_assign_order`.
 Then #275's names and sets come the same way ("airband-sets", `config.toml.before-airband-sets`): "NY Approach" becomes
-"NY App 126.4/120.8", "NY Approach 124.65" "NY App 124.65", and HPN Tower, NY App 126.4/120.8 and HPN Ground get the
-`also` / `schedule` lines above, each only on a channel exactly as it was added. A release from before #275 refuses
-`also`, so the first update to this release says `config: airband-sets: deferred ...` and the next one changes them. A
-dongle's saved job follows the rename. To have them sooner, copy the four blocks from `deploy/station/config.station.toml`
-into `/etc/sizeup/config.toml` and restart `sizeup-station`.
+"NY App 126.4/120.8", "NY Approach 124.65" "NY App 124.65", NY App 126.4/120.8 gets the `also` line and HPN Ground the
+`schedule` above, each only on a channel exactly as it was added, and only after approach-ground is done. A release from
+before #275 refuses `also`, so the first update to this release says `config: airband-sets: deferred ...` and the next
+one changes them. A dongle's saved job and the Settings > Radios > Channels choices follow the rename. It never turns
+`airband_multichannel` on.
 
 ## Two dongles, one serial
 

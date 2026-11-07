@@ -338,7 +338,7 @@ def test_an_installed_station_config_gains_fg2_once_and_keeps_everything_else(tm
     assert [c.label for c in before.channels] == ["South 2", "FG1"] and before.sdr_auto_order == ("FG1", P25, "South 2")
     said = configupdate.run(conf, marks)
     assert len(said) == 7 and said[0].startswith("fg2: FG2 (458.0375 MHz, traffic) added") and '"fg2"' in said[0]
-    assert said[6].startswith('airband-sets: HPN Tower: also 120.8 23:00-07:00; "NY Approach" is now "NY App 126.4/120.8"')
+    assert said[6].startswith('airband-sets: "NY Approach" is now "NY App 126.4/120.8"')   # #275, last
     assert said[2].startswith("hpn-atc: HPN Tower (118.575 MHz, airband AM) added")         # #233, the update after
     assert said[1] == "tones-47: no [[tones]] entry on the unverified 349.1/311.1: nothing changed"                  # this template's tones are already the heard ones (#47)
     assert said[3] == "adsb-receiver: already has [aircraft.receiver]: nothing added"         # (#235: the template has it)
@@ -375,7 +375,7 @@ def test_the_template_and_odd_configs_are_left_alone(tmp_path, monkeypatch):
                                              "adsb-receiver: already has [aircraft.receiver]: nothing added",
                                              "approach-ground: already has NY Approach, NY Approach 124.65, HPN Ground: "
                                              "nothing added", "south-end: the station is already called 'Port Chester FD South End': nothing changed",
-                                             "airband-sets: no channel as it was added (NY Approach, HPN Tower, HPN Ground): "
+                                             "airband-sets: no channel as it was added (NY Approach, HPN Ground): "
                                              "nothing changed"]                      # #275: the template has them
     assert conf.read_text() == same and marks.read_text() == "fg2\ntones-47\nhpn-atc\nadsb-receiver\napproach-ground\nsouth-end\nairband-sets\n"
     # no radios (a hub-like config): nothing; no auto_assign_order: the channel only (the code's order ends with it)

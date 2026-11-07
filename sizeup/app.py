@@ -132,6 +132,16 @@ def log(msg: str) -> None:
     print(f"{time.strftime('%H:%M:%S')} {msg}", flush=True)
 
 
+def renamed_overrides(ov: dict, kinds: dict) -> dict:
+    """Settings > Radios > Channels choices saved under a channel's old name (#275: RENAMED) count for its new one, unless
+    the new one has its own, or the old one is still a channel here."""
+    out = dict(ov)
+    for old, new in RENAMED.items():
+        if old in out and new not in out and old not in kinds and new in kinds:
+            out[new] = out[old]
+    return out
+
+
 def plan_text(c) -> str:
     """A channel's frequencies by the hours (#260 schedule, #275 also): '118.575 + 120.8 23:00-07:00'."""
     head = AmSchedule(c.schedule).describe() if getattr(c, "schedule", ()) else f"{c.mhz:g}"
@@ -146,7 +156,8 @@ def make_receiver(cfg: Config, c, device, on_segment, covered=None) -> NfmReceiv
         return AmReceiver(cfg.rtl_fm, device, c.gain_db, Channel(c.mhz, c.label), on_segment, log, open_db=c.squelch_db,
                           schedule=getattr(c, "schedule", ()) or None,
                           also=[AmExtra(f, label, a, b) for f, a, b, label in getattr(c, "also", ())],
-                          owner=lambda mhz: airband_owner(cfg.channels, mhz), covered=covered)
+                          owner=lambda mhz: airband_owner(cfg.channels, mhz), covered=covered,
+                          multichannel=getattr(cfg, "airband_multichannel", False))
     return NfmReceiver(cfg.rtl_fm, device, c.gain_db, Channel(c.mhz, c.label), on_segment, log, open_db=c.squelch_db,
                        drop_db=c.drop_db, hang_s=c.hang_s, continue_s=c.continue_s)
 
@@ -407,7 +418,7 @@ class App:
         # Per-channel record / transcribe / engine (Settings > Radios, sizeup/channels.py) and Amazon
         # Transcribe where this process may call it ([stt] aws: the hub; sizeup/transcribe.py).
         self.cad.radio_ctx = self
-        self._chan_ov: dict = self.cad.settings.channel_overrides()
+        self._chan_ov: dict = renamed_overrides(self.cad.settings.channel_overrides(), self._kind)
         # Tone pairs named from the console (Settings "tones", #80): merged into the plan, with the names
         # that count as ours; the hub sends them to the station with the channel choices.
         self._tone_ov: dict = {}
@@ -2059,7 +2070,7 @@ class App:
         return float(self.cfg.stt_aws_limit_usd)
 
     def channels_changed(self) -> None:
-        self._chan_ov = self.cad.settings.channel_overrides()
+        self._chan_ov = renamed_overrides(self.cad.settings.channel_overrides(), self._kind)
         log("speech-to-text channels: " + (", ".join(f"{k} {v}" for k, v in sorted(self._chan_ov.items())) or "the defaults"))
 
     def vocabulary_suggestions(self) -> list[str]:
@@ -2119,7 +2130,7 @@ class App:
         kept (this station's own Settings overrides, audited as "hub")."""
         clean = channels.check_map(prefs)
         changed = self.cad.settings.replace_channels(clean, "hub")
-        self._chan_ov = self.cad.settings.channel_overrides()
+        self._chan_ov = renamed_overrides(self.cad.settings.channel_overrides(), self._kind)
         if isinstance(tones, dict) and self.cad.settings.replace_tones(tones, "hub"):
             self._apply_named_tones()
             changed = True
@@ -2588,10 +2599,23 @@ class App:
         return (not r._stop.is_set() and r.state == "ok"
                 and (not self.shared or r.channel.label in self.assign.values()))
 
+    def airband_ab(self, label: str, minutes: float = 60.0, phase_s: float = 300.0) -> str | None:
+        """POST /api/airband-ab (#275, tools/airband_ab.py): an on-air A/B of that airband channel's dongle, rtl_fm
+        against the channelizer (radio/am.py AbTest); its numbers are in the channel's Radios row ("ab") and logged at
+        the end. None, or why not."""
+        r = self._receiver(label)
+        if not isinstance(r, AmReceiver):
+            return f"no airband channel {label!r}"
+        if not self._running(r):
+            return f"{label} isn't running on a dongle: pick it for one first"
+        if not 2 <= float(minutes) <= 24 * 60:
+            return "minutes: 2 to 1440"
+        return r.ab_start(float(minutes), float(phase_s))
+
     def _heard_elsewhere(self, mhz: float, me) -> bool:
-        """#275: a frequency two dongles hear at once (the Tower's dongle has NY Approach's 120.8 overnight, and so may
-        Approach's own) is kept by one: the dongle of the channel it belongs to, else the first one in the config.
-        True: `me` drops it."""
+        """#275: a frequency another running dongle has (Ground's on 124.65 overnight, and NY App 124.65's own) is kept
+        by one: the dongle of the channel it belongs to, else the first one in the config. True: `me` leaves it (an
+        `also` frequency isn't taken at all, radio/am.py plan_at; a transmission both had is dropped)."""
         key = round(float(mhz), 6)
         owner = airband_owner(self.cfg.channels, mhz)
         others = [r for r in list(self.receivers) if r is not me and self._running(r)
@@ -3054,6 +3078,7 @@ def make_server(app: App, fence=None) -> WebServer:
                        role=cfg.cloud_role, roads=app.roads, gis=app.gis,
                        trains=app.trains, weather=app.weather, station_health=getattr(app, "health", None),
                        aircraft=app.aircraft, roadwork=app.roadwork, set_adsb=app.set_adsb_receiver,
+                       airband_ab=app.airband_ab if cfg.cloud_role != "hub" else None,
                        fence=fence, health_fn=lambda: app.health_extra(fence))
 
     def changed() -> None:             # a new talker is pushed at once, not on the next second

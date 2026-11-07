@@ -669,6 +669,16 @@ class NfmReceiver:
                     os.killpg(p.pid, signal.SIGKILL)
                 except Exception:
                     pass
+        if p is not None:
+            # The whole group gone (#275: the channelizer's rtl_sdr under it), so the dongle is closed before the next
+            # program opens it: no false "busy" at a retune
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline:
+                try:
+                    os.killpg(p.pid, 0)
+                except (ProcessLookupError, PermissionError, OSError):
+                    break
+                time.sleep(0.05)
 
     def _drain(self, proc: subprocess.Popen) -> None:
         for line in iter(proc.stderr.readline, b""):
@@ -693,7 +703,7 @@ class NfmReceiver:
                                               start_new_session=True)
                 threading.Thread(target=self._drain, args=(self._proc,), daemon=True).start()
             except OSError as e:
-                self.state, self.detail = "down", f"cannot start rtl_fm: {e}"
+                self.state, self.detail = "down", f"cannot start {self._program()}: {e}"
                 self._stop.wait(backoff)
                 backoff = min(backoff * 2, 15)
                 continue
@@ -722,10 +732,14 @@ class NfmReceiver:
             if not got and ("usb_claim_interface" in err or "Failed to open" in err):
                 self.detail = f"dongle '{self.device_name}' busy (in use by another program?)"
             else:
-                self.detail = "rtl_fm stopped" if got else "no audio from rtl_fm"
+                self.detail = f"{self._program()} stopped" if got else f"no audio from {self._program()}"
             self.on_event(f"{self.channel.label} down: {self.detail}")
             self._stop.wait(2.0 if got else backoff)
             backoff = 2.0 if got else min(backoff * 2, 15)
+
+    def _program(self) -> str:
+        """What this receiver runs, for its messages (radio/am.py: rtl_sdr and the channelizer for several)."""
+        return "rtl_fm"
 
     def _ok_detail(self) -> str:
         return f"{self.channel.label} {self.channel.mhz:.4f}"
