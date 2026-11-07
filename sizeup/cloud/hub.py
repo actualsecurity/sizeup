@@ -42,7 +42,9 @@ transcript_pending "aws" (the station skipped whisper) is shown as "Transcribing
 (_aws_start -> _retext); "both" gets AWS's text with the station's kept as alt_text. If AWS can't, the
 station's whisper is asked for it (retranscribe), else it says "transcription failed".
 Never left "Transcribing" (#195): an AWS job past its deadline fails as "AWS timed out" (sizeup/transcribe.py's
-watchdog) and goes the same way; a late AWS answer is then kept as alt_text (App._aws_late). Every SWEEP_S the
+watchdog) and goes the same way, but only on pages, Fire/EMS 15 and the firegrounds: a clip on any other channel
+that timed out waits for AWS's late answer instead, which becomes its text (#300: a slow AWS never floods the
+station's whisper); a late AWS answer after the whisper fallback is kept as alt_text (App._aws_late). Every SWEEP_S the
 hub also looks for anything still pending "aws" (_aws_sweep): past its deadline + SWEEP_GRACE_S with no job
 answering for it (a job lost, a thread gone) it is failed over too (the station's whisper, at live priority:
 transcribe_now), and one the station's whisper was asked for that has no text FALLBACK_WAIT_S later says
@@ -76,7 +78,7 @@ from typing import Callable
 
 from sizeup import channels
 from sizeup import tz
-from sizeup.app import CLIP_ID, App, AwsJob, channels_model
+from sizeup.app import CLIP_ID, STT_FIRST, App, AwsJob, channels_model
 from sizeup.cad.dispatcher import AudioUnavailable
 from sizeup.cad.radios import fm_system
 from sizeup.cloud.autoupdate import describe
@@ -84,7 +86,7 @@ from sizeup.cloud.health import StationHealth, status_token
 from sizeup.cloud.hubstore import AudioDb, MonitorDb
 from sizeup.incidents import Traffic
 from sizeup.radio.page import page_from_dict
-from sizeup.transcribe import deadline_for
+from sizeup.transcribe import RESERVE_CHANNELS, deadline_for
 
 JSON = "application/json"
 MAX_EVENTS_BODY = 32 * 1024 * 1024
@@ -531,6 +533,7 @@ class HubApp(App):
     def __init__(self, cfg, log: Callable[[str], None] = print):
         self._aws_since: dict[str, float] = {}         # id -> when Amazon Transcribe got it (the sweep's clock)
         self._aws_asked: dict[str, float] = {}         # id -> when the station's whisper was asked instead
+        self._aws_late_wait: set[str] = set()          # timed out, not a priority channel: AWS's late answer is the text
         self._pending_seen: dict[str, float] = {}      # page id -> when the sweep first saw it waiting for whisper
         self._aws_was_ok: bool | None = None           # AWS could take audio at the last sweep (_aws_resend)
         state = Path(cfg.cad_db).parent if cfg.cad_db else None
@@ -710,6 +713,11 @@ class HubApp(App):
         self.sync()
 
     def _aws_late(self, job, text: str, conf) -> None:
+        if job.id in self._aws_late_wait and job.alt is None and not job.rerun:
+            self._aws_late_wait.discard(job.id)     # nothing else was asked for it: AWS's late answer is the text
+            item, _key = self._find(job.id)
+            if item is not None and getattr(item, "status", "") == "pending":
+                return self._aws_done(job, text, conf)
         super()._aws_late(job, text, conf)
         self.sync()
 
@@ -718,11 +726,26 @@ class HubApp(App):
         if getattr(self, "hub", None) is not None:
             self.channels_check(force=True)
 
+    @staticmethod
+    def _whisper_fallback(job) -> bool:
+        """Does AWS timing out on it send it to the station's whisper? Pages, Fire/EMS 15 and the firegrounds only
+        (#300): anything else waits for AWS's late answer (usually seconds after the deadline), so a slow AWS never
+        floods the station's whisper with clips nobody is waiting on."""
+        return job.kind == "page" or job.channel in STT_FIRST or job.channel in RESERVE_CHANNELS
+
     def _aws_failed(self, job, why: str) -> None:
         """Amazon Transcribe couldn't: the station's whisper does it (retranscribe, the text comes back as
-        a retext event); a station that can't: "transcription failed", said on the transmission."""
-        self.hub.log(f"aws transcribe: {job.kind} {job.id}: {why}" + ("" if job.alt is not None else
-                                                                       ": asking the station's whisper"))
+        a retext event); a station that can't: "transcription failed", said on the transmission. Timed out on a
+        channel that isn't a priority one: AWS's late answer is awaited instead (_whisper_fallback)."""
+        late = (job.alt is None and not job.rerun and not job.recovered and why.startswith("AWS timed out")
+                and not self._whisper_fallback(job))
+        self.hub.log(f"aws transcribe: {job.kind} {job.id}: {why}" + (
+            "" if job.alt is not None else ": waiting for AWS's late answer (whisper is for pages, Fire/EMS 15 and the "
+                                           "firegrounds)" if late else ": asking the station's whisper"))
+        if late:
+            self._aws_asked[job.id] = time.time()  # (the sweep: no late answer in FALLBACK_WAIT_S -> failed)
+            self._aws_late_wait.add(job.id)
+            return
         if job.rerun:                              # re-transcribe: the station's whisper instead, said so
             self._rerun_note[job.id] = f"AWS failed ({why[:80]})"
             threading.Thread(target=self._rerun_station, args=([job.id],), name="aws-fallback", daemon=True).start()
@@ -802,12 +825,15 @@ class HubApp(App):
         for d in (self._aws_since, self._aws_asked):
             for cid in [c for c in d if c not in ids]:
                 d.pop(cid, None)
+        self._aws_late_wait.intersection_update(ids)
         for item, key, kind in pending:
             asked = self._aws_asked.get(item.id)
             if asked is not None:
                 if now - asked >= FALLBACK_WAIT_S:
-                    self._aws_give_up(item, kind, f"AWS failed and the station's whisper sent no text in "
-                                                  f"{FALLBACK_WAIT_S / 60:.0f} min; it comes up if it arrives")
+                    self._aws_give_up(item, kind, (f"AWS timed out and sent no late answer in {FALLBACK_WAIT_S / 60:.0f} "
+                                                   "min; it comes up if it arrives") if item.id in self._aws_late_wait else
+                                      f"AWS failed and the station's whisper sent no text in "
+                                      f"{FALLBACK_WAIT_S / 60:.0f} min; it comes up if it arrives")
                     n += 1
                 continue
             since = self._aws_since.setdefault(item.id, now)    # (one nobody tracked: counted from now)

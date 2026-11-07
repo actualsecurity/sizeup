@@ -17,6 +17,7 @@ import time
 import urllib.request
 import uuid
 import wave
+from collections import deque
 from typing import Callable
 
 import numpy as np
@@ -28,13 +29,23 @@ NOISE_LABEL = re.compile(r"^[\[(*].*[\])*]$")  # "(static)", "[MUSIC]" — not s
 HALLUCINATIONS = {"thank you", "thanks", "thank you very much", "yes", "you", "bye", "bye bye", "okay",
                   "ok", "thanks for watching", "thank you for watching", "so", "oh", "the end"}
 SHORT_S = 1.5
-# Queue priority (SttQueue): what matters for dispatch first, a person's re-run next, anything that has waited
-# too long last. #195: the station's whisper fell 9 h behind and the newest clips were refused and lost.
-URGENT, LIVE, RERUN, STALE = -1, 0, 1, 2    # pages, Fire/EMS 15 and the firegrounds | other live traffic | re-runs
+# Queue priority (SttQueue), strict: a class is served only when every class above it is empty (#300). Pages,
+# Fire/EMS 15 and the firegrounds first, the airband pre-alerts next, other live traffic, a person's re-run, then
+# the talkgroups heard only as context (not "main" in Settings > Radios: other towns' fire, county police). #195:
+# the station's whisper fell 9 h behind and the newest clips were refused and lost; #300: it fell 60-80 min behind
+# because the context talkgroups alone bring more clips than it can do (each costs the same ~16 s, however short).
+URGENT, HIGH, LIVE, RERUN, LOW = -2, -1, 0, 1, 2
+STALE = 3                   # (kept for callers: a class's stale items now go after its fresh ones, not after all)
 QUEUE_MAX = 2000            # items waiting at most: past it the worst one goes (lowest priority, then oldest)
 CHANNEL_CAP = 400           # one channel's items waiting at most: past it that channel's worst one goes
-STALE_S = 600.0             # a live item waiting this long goes behind everything fresh (newest stale first) ...
+STALE_S = 600.0             # a live item waiting this long goes behind the fresh ones of its class (newest stale first) ...
 MAX_WAIT_S = 3 * 3600.0     # ... and one waiting this long is skipped (said on it), never transcribed hours late
+LOW_MAX_WAIT_S = 900.0      # a context talkgroup's clip waiting this long is shed (skipped, said on it): whisper
+                            # never falls further behind than this on traffic nobody acts on
+BEHIND_S = 120.0            # the oldest live clip waiting this long: "behind" (context clips get one greedy pass)
+RATE_WINDOW_S = 1800.0      # clips in / out per hour are counted over this long
+LIVE_CLASSES = (URGENT, HIGH, LIVE)
+CLASS_NAMES = {URGENT: "urgent", HIGH: "high", LIVE: "live", RERUN: "rerun", LOW: "low"}
 
 
 def wav_bytes(audio: np.ndarray, rate: int = 16000) -> bytes:
@@ -144,7 +155,9 @@ class WhisperClient:
     def __init__(self, url: str, timeout_s: float = 60.0):
         self.url, self.timeout_s = url, timeout_s
 
-    def transcribe(self, audio16k: np.ndarray, prompt: str = "") -> tuple[str, float | None]:
+    def transcribe(self, audio16k: np.ndarray, prompt: str = "", fast: bool = False) -> tuple[str, float | None]:
+        """fast: one greedy pass, no temperature fallback (whisper-server decodes a hard clip up to 5 more times at
+        higher temperatures): the context talkgroups' clips while the queue is behind (#300)."""
         pad = np.zeros(8000, dtype=np.float32)  # whisper likes a little silence around speech
         body_wav = wav_bytes(np.concatenate([pad, audio16k.astype(np.float32), pad]))
         boundary = uuid.uuid4().hex
@@ -152,6 +165,8 @@ class WhisperClient:
         fields = [("response_format", "verbose_json"), ("temperature", "0.0")]
         if prompt:
             fields.append(("prompt", prompt))
+        if fast:
+            fields.append(("temperature_inc", "0.0"))
         for name, value in fields:
             parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode())
         parts.append((f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="tx.wav"\r\n'
@@ -168,30 +183,32 @@ class WhisperClient:
 
 
 class SttQueue:
-    """The whisper queue (#195): never refuses the newest clip silently. put() past QUEUE_MAX (or past a
-    channel's CHANNEL_CAP) drops the worst item instead (the lowest class, in it the oldest: a re-run before
-    live traffic, a stale clip before a fresh one), the new one only when it is the worst; get() takes
-    URGENT, then LIVE in order, then RERUN; a live item that has waited STALE_S goes after those (the newest
-    stale first), and one that waited MAX_WAIT_S is skipped. Every item dropped or skipped goes to
-    on_drop(item, why): nothing is lost without a word on it."""
+    """The whisper queue (#195, #300): strict priority, and never refuses the newest clip silently. put() past
+    QUEUE_MAX (or past a channel's CHANNEL_CAP) drops the worst item instead (the lowest class, in it a stale clip
+    before a fresh one, then the oldest), the new one only when it is the worst; get() takes URGENT, then HIGH, LIVE,
+    RERUN, LOW: a class only when every class above it is empty. In a class the fresh items go in order, then the ones
+    that waited STALE_S (the newest first). A live item that waited MAX_WAIT_S is skipped, a LOW one (a context
+    talkgroup) LOW_MAX_WAIT_S: shed, so whisper never falls far behind on traffic nobody acts on. Every item dropped
+    or skipped goes to on_drop(item, why): nothing is lost without a word on it."""
 
     def __init__(self, on_drop: Callable[[object, str], None] = lambda item, why: None,
                  clock: Callable[[], float] = time.time, maxsize: int = QUEUE_MAX, channel_cap: int = CHANNEL_CAP):
         self.on_drop, self.clock, self.maxsize, self.channel_cap = on_drop, clock, maxsize, channel_cap
-        self._items: list[list] = []              # [priority, seq, item, audio, channel, at]
+        self._items: list[list] = []              # [priority, seq, item, audio, channel, at, fallback]
         self._cv = threading.Condition()
         self._seq = itertools.count()
-        self.dropped = self.skipped = 0
+        self.dropped = self.skipped = self.shed = 0
         self.last_drop: dict | None = None
+        self._in: deque = deque()                 # (at, channel, priority, fallback) of each clip put, RATE_WINDOW_S
 
     def _key(self, e: list, now: float) -> tuple:
         prio, seq, at = e[0], e[1], e[5]
-        if prio in (URGENT, LIVE) and now - at >= STALE_S:
-            return (STALE, prio, -seq)            # waited too long: after the fresh ones, the newest first
+        if prio != RERUN and now - at >= STALE_S:
+            return (prio, 1, -seq)                # waited too long: after its class's fresh ones, the newest first
         return (prio, 0, seq)
 
     def _worst(self, items: list[list], now: float) -> list:
-        """The one to drop: the lowest class (re-runs, then what waited too long), in it the oldest."""
+        """The one to drop: the lowest class, in it a stale one before a fresh one, then the oldest."""
         def rank(x: list) -> tuple:
             k = self._key(x, now)
             return (k[0], k[1], -x[1])
@@ -201,15 +218,20 @@ class SttQueue:
         with self._cv:
             return len(self._items)
 
-    def put(self, entry: tuple) -> bool:
-        """entry (priority, seq-or-None, item, audio[, channel]). False: this item was the one dropped."""
+    def put(self, entry: tuple, fallback: bool = False) -> bool:
+        """entry (priority, seq-or-None, item, audio[, channel]). fallback: the hub's, for a clip AWS couldn't do.
+        False: this item was the one dropped."""
         prio, _seq, item, audio = entry[:4]
         channel = entry[4] if len(entry) > 4 else None
         now = self.clock()
-        e = [prio, next(self._seq), item, audio, channel, now]
+        e = [prio, next(self._seq), item, audio, channel, now, bool(fallback)]
         out: list[tuple[object, str]] = []
         with self._cv:
             self._items.append(e)
+            if prio != RERUN:
+                self._in.append((now, channel, prio, bool(fallback)))
+                while self._in and now - self._in[0][0] > RATE_WINDOW_S:
+                    self._in.popleft()
             mine = [x for x in self._items if channel is not None and x[4] == channel]
             if channel is not None and len(mine) > self.channel_cap:
                 worst = self._worst(mine, now)
@@ -227,6 +249,8 @@ class SttQueue:
         for item, why in out:
             if kind == "dropped":
                 self.dropped += 1
+            elif kind == "shed":
+                self.shed += 1
             else:
                 self.skipped += 1
             self.last_drop = {"at": self.clock(), "why": why}
@@ -235,12 +259,15 @@ class SttQueue:
             except Exception:  # the caller's trouble must not stop the queue
                 pass
 
-    def _take(self, now: float, skips: list) -> tuple | None:
-        old = [e for e in self._items if e[0] in (URGENT, LIVE) and now - e[5] >= MAX_WAIT_S]
-        for e in old:
+    def _take(self, now: float, skips: list, sheds: list) -> tuple | None:
+        old = [e for e in self._items if e[0] in LIVE_CLASSES and now - e[5] >= MAX_WAIT_S]
+        low = [e for e in self._items if e[0] == LOW and now - e[5] >= LOW_MAX_WAIT_S]
+        for e in old + low:
             self._items.remove(e)
         skips.extend((e[2], f"waited {int((now - e[5]) // 60)} min for speech-to-text: skipped, "
                                     "too far behind (Re-transcribe it if it matters)") for e in old)
+        sheds.extend((e[2], f"not transcribed: speech-to-text was {int((now - e[5]) // 60)} min behind and this "
+                            "talkgroup is context only (Re-transcribe it if it matters)") for e in low)
         if not self._items:
             return None
         e = min(self._items, key=lambda x: self._key(x, now))
@@ -250,11 +277,12 @@ class SttQueue:
     def get(self, timeout: float | None = None) -> tuple:
         """(priority, seq, item, audio): the best item; queue.Empty after timeout (None: wait for one)."""
         skips: list[tuple[object, str]] = []
+        sheds: list[tuple[object, str]] = []
         end = None if timeout is None else time.monotonic() + timeout
         try:
             with self._cv:
                 while True:
-                    got = self._take(self.clock(), skips)
+                    got = self._take(self.clock(), skips, sheds)
                     if got is not None:
                         return got
                     left = None if end is None else end - time.monotonic()
@@ -263,23 +291,51 @@ class SttQueue:
                     self._cv.wait(left)
         finally:
             self._dropped(skips, "skipped")
+            self._dropped(sheds, "shed")
 
     def get_nowait(self) -> tuple:
         return self.get(timeout=0)
 
+    def behind(self) -> bool:
+        """The oldest live clip (any class but re-runs) has waited BEHIND_S."""
+        now = self.clock()
+        with self._cv:
+            return any(e[0] != RERUN and now - e[5] >= BEHIND_S for e in self._items)
+
     def stats(self) -> dict:
-        """Depth by kind and the oldest live item's wait: station status and health (the backlog alert)."""
+        """Depth by kind, the oldest clip's wait, where they come from: station status and health (the backlog
+        alert says how many wait and why, sizeup/cloud/health.py). oldest_s: the oldest clip that matters
+        (urgent, high, live); a context talkgroup's (low) is oldest_low_s."""
         now = self.clock()
         with self._cv:
             items = list(self._items)
-        live = [e for e in items if e[0] in (URGENT, LIVE)]
+            arrived = [x for x in self._in if now - x[0] <= RATE_WINDOW_S]
+        live = [e for e in items if e[0] in LIVE_CLASSES]
+        low = [e for e in items if e[0] == LOW]
         oldest = min((e[5] for e in live), default=None)
+        oldest_low = min((e[5] for e in low), default=None)
+        waiting: dict[str, int] = {}
+        for e in items:
+            if e[0] != RERUN:
+                waiting[e[4] or "?"] = waiting.get(e[4] or "?", 0) + 1
+        per_h = 3600.0 / RATE_WINDOW_S
+        came: dict[str, int] = {}
+        for _at, ch, _p, _f in arrived:
+            came[ch or "?"] = came.get(ch or "?", 0) + 1
         return {"queued": len(items), "urgent": sum(1 for e in live if e[0] == URGENT),
-                "live": len(live), "rerun": sum(1 for e in items if e[0] == RERUN),
+                "high": sum(1 for e in live if e[0] == HIGH), "live": len(live), "low": len(low),
+                "rerun": sum(1 for e in items if e[0] == RERUN),
+                "fallback": sum(1 for e in items if e[6]),
                 "stale": sum(1 for e in live if now - e[5] >= STALE_S),
                 "oldest_at": oldest, "oldest_s": round(now - oldest, 1) if oldest is not None else None,
-                "dropped": self.dropped, "skipped": self.skipped, "last_drop": self.last_drop,
-                "max": self.maxsize, "stale_s": STALE_S, "max_wait_s": MAX_WAIT_S}
+                "oldest_low_s": round(now - oldest_low, 1) if oldest_low is not None else None,
+                "top": sorted(waiting.items(), key=lambda kv: -kv[1])[:3],
+                "in_h": round(len(arrived) * per_h),
+                "in_low_h": round(sum(1 for x in arrived if x[2] == LOW) * per_h),
+                "in_fallback_h": round(sum(1 for x in arrived if x[3]) * per_h),
+                "in_top": [(ch, round(n * per_h)) for ch, n in sorted(came.items(), key=lambda kv: -kv[1])[:3]],
+                "dropped": self.dropped, "skipped": self.skipped, "shed": self.shed, "last_drop": self.last_drop,
+                "max": self.maxsize, "stale_s": STALE_S, "max_wait_s": MAX_WAIT_S, "low_max_wait_s": LOW_MAX_WAIT_S}
 
 
 class Transcriber:
@@ -297,17 +353,26 @@ class Transcriber:
         self._drop_thread: threading.Thread | None = None
         self.last_error = ""
         self._working = False
+        self._took: deque = deque(maxlen=50)      # (finished at, seconds) of the last transcriptions: whisper's pace
 
     def busy(self) -> int:
         """Transcriptions queued or running (the station's auto-update waits for none before a restart)."""
         return self._q.qsize() + (1 if self._working else 0)
 
-    def submit(self, item, audio: np.ndarray, priority: int = LIVE, channel: str | None = None) -> bool:
-        """Queue it. False: it was dropped at once (the queue full of better items): on_drop has it already."""
-        return self._q.put((priority, None, item, audio, channel))
+    def submit(self, item, audio: np.ndarray, priority: int = LIVE, channel: str | None = None,
+               fallback: bool = False) -> bool:
+        """Queue it. False: it was dropped at once (the queue full of better items): on_drop has it already.
+        fallback: the hub asked for it because Amazon Transcribe couldn't (counted: the backlog's cause)."""
+        return self._q.put((priority, None, item, audio, channel), fallback=fallback)
 
     def stats(self) -> dict:
-        return dict(self._q.stats(), working=self._working, last_error=self.last_error)
+        out = dict(self._q.stats(), working=self._working, last_error=self.last_error)
+        took = list(self._took)
+        if took:
+            out["service_s"] = round(sum(s for _t, s in took) / len(took), 1)       # seconds per clip, lately
+            now = time.time()
+            out["out_h"] = round(sum(1 for t, _s in took if now - t <= 600) * 6) if len(took) >= 5 else None
+        return out
 
     def _dropped(self, item, why: str) -> None:
         """on_drop on its own thread: never in the context of submit(), whose caller may hold its own locks."""
@@ -331,14 +396,18 @@ class Transcriber:
     def _run(self) -> None:
         while True:
             self._working = False
-            _prio, _n, item, audio = self._q.get()
+            prio, _n, item, audio = self._q.get()
             self._working = True
+            # behind: a context talkgroup's clip gets one greedy pass (no temperature fallback), #300
+            fast = {"fast": True} if prio == LOW and self._q.behind() else {}
             for attempt in range(3):
                 try:
+                    t0 = time.monotonic()
                     # No noise reduction for the model: on the FG1 bench it cut the whine 15 dB for listening
                     # but changed 1 of 4 real transcripts ("Testing one two" -> "Nothing wanted").
                     raw, conf = self.client.transcribe(radio_voice(audio, deemph=getattr(item, "fm", True), nr=False),
-                                                      self.prompt(item))
+                                                      self.prompt(item), **fast)
+                    self._took.append((time.time(), time.monotonic() - t0))
                     break
                 except Exception as e:
                     self.last_error = f"{type(e).__name__}: {e}"[:160]
