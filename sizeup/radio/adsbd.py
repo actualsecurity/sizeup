@@ -67,7 +67,7 @@ A wedged dongle (#315): readsb's own watchdog gives up on a dongle that stops de
 by the bias-tee draws from the dongle's USB port, and extensions and unpowered hubs sag. Cause "wedged"; the hint says
 what to check (the bias-tee only when it is on). After WEDGE_AFTER wedges within WEDGE_WINDOW_S it waits longer
 (WEDGE_BACKOFF_S: 5 min, then 15) and says so, instead of retrying every 30 s; WEDGE_RESET_S of decoding forgets
-them ( a change of dongle, gain or bias-tee forgets them at once, mid-wait too)."""
+them (a change of dongle, gain or bias-tee forgets them at once, mid-wait too)."""
 
 from __future__ import annotations
 
