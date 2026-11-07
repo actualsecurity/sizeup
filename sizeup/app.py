@@ -1087,12 +1087,16 @@ class App:
         for k in ("carrier_dbfs", "snr_db", "opened"):
             if getattr(seg, k, None) is not None:
                 setattr(t, k, getattr(seg, k))
+        if getattr(seg, "tones", None):
+            # #263: the tones notched out (not "tones": on a row that is a page's tone pair)
+            t.notched_hz = list(seg.tones)                # type: ignore[attr-defined]
         if seg.hiss_db is not None:
             t.floor_dbfs = round(float(seg.hiss_db), 1)   # type: ignore[attr-defined]
         log(f"{ch.label}: carrier {t.carrier_db:+.1f} dB over the floor"
             f" ({getattr(t, 'carrier_dbfs', '?')} / {getattr(t, 'floor_dbfs', '?')} dBFS), voice SNR "
             f"{'?' if getattr(t, 'snr_db', None) is None else f'{t.snr_db:.1f} dB'}, {seg.end - seg.start:.1f} s"
-            + (", opened on a sustained weak carrier" if getattr(seg, "opened", "") == "sustained" else ""))
+            + (", opened on a sustained weak carrier" if getattr(seg, "opened", "") == "sustained" else "")
+            + (f", tones notched {', '.join(f'{f:g}' for f in seg.tones)} Hz" if getattr(seg, "tones", None) else ""))
         t.low_energy = speech_seconds(seg.audio) < MIN_SPEECH_S   # type: ignore[attr-defined]
         self._keep_clip(t.id, radio_voice(seg.audio, deemph=False), processed=True)
         self._keep_source(t.id, seg.audio)
