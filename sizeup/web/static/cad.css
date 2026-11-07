@@ -477,6 +477,8 @@
   .rigtag { display: inline-flex; align-items: baseline; gap: var(--s-1); }
   .radio-log > li.note { border-inline-start: var(--bw-mark) solid var(--info); padding-inline-start: var(--s-2); }
   .radio-log .chip.src, .pages .chip.src { --c: var(--dim); }
+  /* the Radio view's long lists: rows off screen are not laid out or painted until scrolled to (#284) */
+  :is(.rv-list, .og-calls) > li { content-visibility: auto; contain-intrinsic-size: auto 4.5rem; }
   .unit-filter { margin-block-end: var(--s-2); gap: var(--s-1); }
   .unit-filter button.talking { border-color: var(--ok); box-shadow: 0 0 0 var(--bw) var(--ok); }
   /* the other engine's text under the transcript, to compare ("both": Settings > Radios > Engine; the ⇄ toggle) */

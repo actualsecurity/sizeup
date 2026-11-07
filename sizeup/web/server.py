@@ -29,6 +29,7 @@ GET  /cad                      the PCFD dispatch console (static/cad.html); its 
 GET  /comms                    -> /cad#radio?<the same query> (the old communications page)
 Caching (#137): /static/... named by version from the pages (?v=, kept a year), else revalidated (ETag, 304);
 the layers' data (airport, GIS catalog and layers, roads) ETag + max-age, must-revalidate; text gzipped.
+Timing (#284): every answer says how long it took (Server-Timing: app;dur=<ms>, gzip included); the access log too.
 GET  /api/cad/roads, /api/cad/cameras, /api/cad/cameras/<id>/image
                                the map's highway layers and camera snapshots, proxied (sizeup/roads.py, #73)
 GET  /api/cad/gis, /api/cad/gis/<key>[?bbox=]
@@ -370,6 +371,10 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
         protocol_version = "HTTP/1.1"
 
         who = None                       # the verified Access identity of the current request (access set)
+        t0 = 0.0                         # when the request was read (perf_counter): Server-Timing and the log (#284)
+
+        def _ms(self) -> float:
+            return (time.perf_counter() - self.t0) * 1000 if self.t0 else 0.0
 
         def log_message(self, *a) -> None:
             pass
@@ -388,7 +393,7 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 return
             h = self.headers
             who = getattr(self.who, "email", None) or ("token" if h.get("Cf-Access-Jwt-Assertion") else "no-token")
-            access_log(f"http {self.command} {path} {code} ip={h.get('Cf-Connecting-Ip', '-')} {who} "
+            access_log(f"http {self.command} {path} {code} {self._ms():.0f}ms ip={h.get('Cf-Connecting-Ip', '-')} {who} "
                        f"ray={h.get('Cf-Ray', '-')} ua={(h.get('User-Agent') or '-')[:90]}")
 
         def _admit(self, path: str) -> bool:
@@ -432,6 +437,7 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 if accepts_gzip(self.headers):
                     body = gz if gz is not None else gzip.compress(body, 5)
                     h["Content-Encoding"] = "gzip"
+            h.setdefault("Server-Timing", f"app;dur={self._ms():.1f}")     # the time to the answer, gzip included (#284)
             self.send_response(code)
             if code != 304:
                 self.send_header("Content-Type", ctype)
@@ -488,6 +494,7 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                                                            "Connection": "close"})
 
         def do_GET(self) -> None:
+            self.t0 = time.perf_counter()
             if gate.refuse(write=False):
                 return self._updating()
             gate.enter()
@@ -497,6 +504,7 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 gate.leave()
 
         def do_POST(self) -> None:
+            self.t0 = time.perf_counter()
             if gate.refuse(write=True):
                 return self._updating()
             gate.enter()

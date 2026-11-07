@@ -111,6 +111,7 @@ window.MapLayers = (() => {
   const store = { data: null, rev: "", timer: null, subs: new Set(), loading: null };
   async function load() {
     if (store.loading) return store.loading;
+    const t0 = performance.now();               // map:roads (cameras, events, signs): asked -> drawn (#284)
     store.loading = (async () => {
       try {
         const r = await fetch(`/api/cad/roads${store.rev !== "" ? `?rev=${encodeURIComponent(store.rev)}` : ""}`,
@@ -130,6 +131,7 @@ window.MapLayers = (() => {
         }
       } finally {
         store.loading = null;
+        try { performance.measure("map:roads", { start: t0 }); } catch (_) { /* an older browser */ }
       }
     })();
     return store.loading;

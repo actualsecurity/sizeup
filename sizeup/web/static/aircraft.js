@@ -114,13 +114,14 @@ window.AircraftLayer = (() => {
   function notify() { for (const fn of store.subs) { try { fn(store.data); } catch (e) { console.error(e); } } }
   async function load() {
     if (store.loading) return store.loading;
+    const t0 = performance.now();               // map:aircraft: asked -> drawn (#284)
     store.loading = (async () => {
       try {
         // the browser revalidates (If-None-Match): an unchanged answer is a 304 and the copy it has
         const r = await fetch(URL, { credentials: "same-origin" });
         if (r.ok) { store.data = await r.json(); store.at = Date.now(); store.failed = false; } else store.failed = true;
       } catch (_) { store.failed = true; /* the hub is away: keep what we have; it goes stale on screen */ }
-      finally { store.loading = null; moved(); notify(); animate(); }
+      finally { store.loading = null; moved(); notify(); animate(); try { performance.measure("map:aircraft", { start: t0 }); } catch (_) { /* an older browser */ } }
     })();
     return store.loading;
   }
