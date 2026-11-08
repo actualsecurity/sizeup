@@ -88,6 +88,19 @@ def clip_8k(wav: bytes | None) -> bytes | None:
     return buf.getvalue()
 
 
+def source_rows(runner) -> list[dict]:
+    """Each incident source's own health from #297's SourceRunner (its runs: the adapter, and (state, reason) as its
+    runner last sent it; none yet: "starting"). [] without a runner."""
+    if runner is None:
+        return []
+    out = []
+    for r in runner.runs:
+        a, h = r.a, r.health
+        out.append({"source": a.source, "label": a.label, "state": h[0] if h else "starting",
+                    "reason": (h[1] if h else "") or ""})
+    return out
+
+
 class StationLink:
     def __init__(self, app, cfg, log: Callable[[str], None] = print,
                  client: Callable[[float], HubClient] | None = None, outbox: Outbox | None = None,
@@ -210,17 +223,21 @@ class StationLink:
         ad = dict((v or self.updates.status()).get("adapter") or {})
         runner = getattr(self.app, "sources_runner", None)
         try:
-            rows = runner.state() if runner is not None else []
-        except Exception:  # noqa: BLE001 - a report: never in the way of the status
+            rows = source_rows(runner)
+        except Exception as e:  # noqa: BLE001 - a report: never in the way of the status (but said, by type)
             rows = []
+            if getattr(self, "_rows_said", "") != type(e).__name__:
+                self._rows_said = type(e).__name__
+                self.log(f"hub link: incident sources' health not read: {type(e).__name__}")
         ad["health"] = [{k: str(r.get(k) or "")[:120] for k in ("source", "label", "state", "reason")}
                         for r in rows if isinstance(r, dict)][:10]
         if ad["health"] and ad.get("text"):
             ad["text"] += " · " + ", ".join(f"{h['label'] or h['source']} {h['state'] or '?'}"
                                             + (f" ({h['reason']})" if h["reason"] and h["state"] != "ok" else "")
                                             for h in ad["health"])
-        if ad.get("state") == "installed" and ad["health"]:      # installed, and the runner says how it runs
-            ad["state"] = "running" if all(h["state"] == "ok" for h in ad["health"]) else "failing"
+        said = [h for h in ad["health"] if h["state"] != "starting"]        # (not polled yet: no word either way)
+        if ad.get("state") == "installed" and said:              # installed, and the runner says how it runs
+            ad["state"] = "running" if all(h["state"] == "ok" for h in said) else "failing"
         return ad
 
     def version(self) -> dict:

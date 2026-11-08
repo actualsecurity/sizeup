@@ -502,16 +502,62 @@ def test_the_view_status_and_hub_health_show_no_credentials(station, tmp_path):
     assert au.adapter_view(None, None)["state"] == "off"
 
 
-def test_the_station_link_adds_each_sources_health():
+def test_the_station_link_adds_each_sources_health_from_the_real_runner():
+    """#304's real SourceRunner: a failing source reaches the station's report, the hub's Health model, and so the
+    Reset button's data (health.js: build.adapter.health entries that are failing); an ok one doesn't."""
+    from sizeup.cloud.health import StationHealth
     from sizeup.cloud.station import StationLink
-    rows = [{"source": "feed", "label": "Feed", "rank": 1, "state": "failing", "reason": "HTTP 503", "events": 2}]
+    from sizeup.sources import Health
+    from sizeup.sources.runner import SourceRunner
+    from tests.test_health import FakeHub, cfg as hcfg, station_status
+
+    class Feed:
+        source, label, rank, poll_s = "feed", "Feed", 1, 30.0
+
+        def poll(self):
+            raise ConnectionError("https://user:pw@feed.example/ refused")    # (its text never goes anywhere)
+
+        def health(self):
+            return Health("ok")
+
+        def reset(self):
+            pass
+
+    class Other(Feed):
+        source, label, rank = "other", "Other", 2
+
+        def poll(self):
+            return []
+
+    runner = SourceRunner([Feed(), Other()], lambda kind, data: None, log=lambda m: None)
+    logs: list[str] = []
     fake = type("L", (), {})()
-    fake.updates = type("W", (), {"status": lambda self: {"adapter": {"state": "installed", "text": "x 1234567 installed"}}})()
-    fake.app = type("A", (), {"sources_runner": type("R", (), {"state": lambda self: rows})()})()
+    fake.log = logs.append
+    fake.updates = type("W", (), {"status": lambda self: {"adapter": {"state": "installed", "repo": "x",
+                                                                       "text": "x 1234567 installed"}}})()
+    fake.app = type("A", (), {"sources_runner": runner})()
+    ad = StationLink.adapter(fake)                                            # not polled yet: no word either way
+    assert [h["state"] for h in ad["health"]] == ["starting", "starting"] and ad["state"] == "installed"
+    for r in runner.runs:
+        runner.step(r)
     ad = StationLink.adapter(fake)
-    assert ad["text"] == "x 1234567 installed · Feed failing (HTTP 503)" and ad["state"] == "failing"
-    assert ad["health"] == [{"source": "feed", "label": "Feed", "state": "failing", "reason": "HTTP 503"}]
-    fake.app = object()                                                       # no runner (before #297): no rows
+    assert ad["health"] == [{"source": "feed", "label": "Feed", "state": "failing", "reason": "ConnectionError"},
+                            {"source": "other", "label": "Other", "state": "ok", "reason": ""}]
+    assert ad["state"] == "failing" and "Feed failing (ConnectionError)" in ad["text"] and "pw@" not in str(ad)
+    assert logs == []
+    # the hub: Settings > Health's adapter row, and the Reset button's data (failing sources only)
+    hub = FakeHub()
+    hub.last_state = hub.now
+    hub.status = station_status(version={"build": hub.build, "hub": hub.build, "update": {}, "adapter": ad})
+    model = StationHealth(hub, hcfg(), None, None, lambda m: None, clock=lambda: hub.now).model()
+    shown = model["build"]["adapter"]
+    assert shown["state"] == "failing"
+    assert [h["source"] for h in shown["health"] if h["state"] == "failing"] == ["feed"]
+    # a runner this code can't read: said once, by type, and the status still goes
+    fake.app = type("A", (), {"sources_runner": object()})()
+    assert StationLink.adapter(fake)["health"] == [] and StationLink.adapter(fake)["health"] == []
+    assert logs == ["hub link: incident sources' health not read: AttributeError"]
+    fake.app = object()                                                       # no runner: no rows
     assert StationLink.adapter(fake)["health"] == []
 
 
