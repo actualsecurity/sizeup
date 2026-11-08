@@ -32,9 +32,9 @@ def plane(hex_, flight, reg="", type_="", phase="arriving", dist=4.0, **kw):
 
 
 JBU = plane("a1b2c3", "JBU1234", "N123JB", "A320", "arriving")
-N41DW = plane("c0ffee", "N41DW", "N41DW", "C172", "departing", 2.0)
+N47DQ = plane("c0ffee", "N47DQ", "N47DQ", "C172", "departing", 2.0)
 EJA = plane("0dd0dd", "EJA521", "N521QS", "C68A", "ground", 0.4)
-PLANES = [JBU, N41DW, EJA]
+PLANES = [JBU, N47DQ, EJA]
 
 
 def rec(text, planes=(), before=(), levels=(), carrier=None, at=T0):
@@ -57,9 +57,9 @@ def rec(text, planes=(), before=(), levels=(), carrier=None, at=T0):
     ("Blue Streak five zero one one, hold short runway one six", "JIA5011"),
     ("Execjet five twenty one, taxi to runway one six", "EJA521"),
     ("Reach four five six, cleared to land", "RCH456"),                    # military: Air Mobility Command
-    ("November four one Delta Whiskey, runway one six, line up and wait", "N41DW"),
+    ("November four seven Delta Quebec, runway one six, line up and wait", "N47DQ"),
     ("November one two three alfa bravo, wind calm", "N123AB"),
-    ("Cessna one delta whiskey, roger", "…1DW"),                           # shortened after first contact
+    ("Cessna seven delta quebec, roger", "…7DQ"),                           # shortened after first contact
 ])
 def test_the_callsign_heard(text, heard):
     r = rec(text)
@@ -80,11 +80,11 @@ def test_no_callsign_heard_nothing_labelled():
     ("Westchester Tower, JetBlue one two three four, ten miles south, inbound", "aircraft", "JBU1234", "TWR"),
     ("JetBlue one two three four, Westchester Tower, runway three four, cleared to land", "atc", "TWR", "JBU1234"),
     ("good morning JetBlue one two three four Westchester Tower", "atc", "TWR", "JBU1234"),
-    ("November four one Delta Whiskey, Westchester Ground, taxi to runway one six via alpha", "atc", "GND", "N41DW"),
-    ("Westchester Ground, November four one Delta Whiskey at the FBO, ready to taxi", "aircraft", "N41DW", "GND"),
+    ("November four seven Delta Quebec, Westchester Ground, taxi to runway one six via alpha", "atc", "GND", "N47DQ"),
+    ("Westchester Ground, November four seven Delta Quebec at the FBO, ready to taxi", "aircraft", "N47DQ", "GND"),
     ("JetBlue one two three four with you at three thousand", "aircraft", "JBU1234", None),
-    ("November four one Delta Whiskey, contact ground point niner", "atc", "TWR", "N41DW"),   # an instruction, not the GND
-    ("hold short runway one six, November four one Delta Whiskey", "aircraft", "N41DW", None),
+    ("November four seven Delta Quebec, contact ground point niner", "atc", "TWR", "N47DQ"),   # an instruction, not the GND
+    ("hold short runway one six, November four seven Delta Quebec", "aircraft", "N47DQ", None),
 ])
 def test_addressing_or_speaking(text, role, talker, addressed):
     r = rec(text, PLANES)
@@ -171,8 +171,8 @@ def test_the_carrier_tells_the_steady_tower_from_an_aircraft():
 def test_confirmed_is_an_exact_callsign_or_tail_on_adsb():
     a = rec("JetBlue one two three four, runway three four, cleared to land", PLANES)["addressed"]
     assert (a["status"], a["confidence"], a["hex"], a["type"]) == ("confirmed", 1.0, "a1b2c3", "A320")
-    a = rec("hold short runway one six, November four one Delta Whiskey", PLANES)["talker"]
-    assert (a["status"], a["hex"], a["callsign"]) == ("confirmed", "c0ffee", "N41DW")
+    a = rec("hold short runway one six, November four seven Delta Quebec", PLANES)["talker"]
+    assert (a["status"], a["hex"], a["callsign"]) == ("confirmed", "c0ffee", "N47DQ")
 
 
 def test_probable_is_one_near_match_whose_phase_fits():
@@ -183,7 +183,7 @@ def test_probable_is_one_near_match_whose_phase_fits():
     r = rec("JetBlue one two three five, cleared to land runway three four", [dict(JBU, phase="departing"), EJA])
     assert r["addressed"]["status"] == "heard" and r["addressed"]["callsign"] == "JBU1235" and "not arriving" in r["addressed"]["why"]
     # a shortened tail: the only aircraft whose tail ends so
-    assert rec("one delta whiskey, roger", PLANES)["talker"]["status"] == "probable"
+    assert rec("seven delta quebec, roger", PLANES)["talker"]["status"] == "probable"
 
 
 def test_two_candidates_are_heard_only():
@@ -192,8 +192,8 @@ def test_two_candidates_are_heard_only():
     assert a["status"] == "heard" and "hex" not in a and "2 near matches" in a["why"]
     dup = [plane("aaa111", "JBU1234"), plane("bbb222", "JBU1234")]
     assert rec("JetBlue one two three four, cleared to land", dup)["addressed"]["status"] == "heard"
-    tails = [plane("aaa111", "N11DW", "N11DW"), plane("bbb222", "N21DW", "N21DW")]
-    assert rec("one delta whiskey, roger", tails)["talker"]["status"] == "heard"
+    tails = [plane("aaa111", "N37DQ", "N37DQ"), plane("bbb222", "N57DQ", "N57DQ")]
+    assert rec("seven delta quebec, roger", tails)["talker"]["status"] == "heard"
 
 
 def test_never_an_airliners_own_tail_or_a_plane_not_there():
@@ -215,10 +215,10 @@ def test_the_time_window_and_matching_again_as_adsb_comes_in():
     tk = cad.atc_talkers
     tk.observe([], T0)
     r = tk.heard({"id": "HPNTower-1", "source": CH, "start": T0, "end": T0 + 3,
-                  "text": "Westchester Tower, November four one Delta Whiskey, ready for departure"})
+                  "text": "Westchester Tower, November four seven Delta Quebec, ready for departure"})
     assert r["talker"]["status"] == "heard"                                 # not on ADS-B yet
     clock[0] = T0 + 60
-    tk.observe([N41DW], T0 + 60)                                            # ... seen a minute later: within the window
+    tk.observe([N47DQ], T0 + 60)                                            # ... seen a minute later: within the window
     got = cad.store.one("SELECT hex, data FROM atc_talkers WHERE traffic_id = 'HPNTower-1'")
     assert got["hex"] == "c0ffee" and json.loads(got["data"])["talker"]["status"] == "confirmed"
     tk.heard({"id": "HPNTower-2", "source": CH, "start": T0 + 61, "end": T0 + 63, "text": "Delta four five, contact ground"})
@@ -236,10 +236,10 @@ def item(i, at, cs=None, hex_="", ch=CH):
 
 def test_exchanges_group_consecutive_transmissions_about_one_aircraft():
     ids = T.exchanges([item(1, 0, "JBU1234"), item(2, 5, "JBU1234"), item(3, 9), item(4, 12, "JBU1234"),   # one between joins
-                       item(5, 20, "N41DW"), item(6, 25, "JBU1234"),                                       # another breaks
+                       item(5, 20, "N47DQ"), item(6, 25, "JBU1234"),                                       # another breaks
                        item(7, 25 + T.EXCHANGE_GAP_S + 1, "JBU1234"),                                       # too long after
-                       item(8, 200, "N41DW"), item(9, 203), item(10, 204), item(11, 206, "N41DW"),           # two between: no
-                       item(12, 300, "N41DW"), item(13, 304, "…1DW"),                                       # shortened: joins
+                       item(8, 200, "N47DQ"), item(9, 203), item(10, 204), item(11, 206, "N47DQ"),           # two between: no
+                       item(12, 300, "N47DQ"), item(13, 304, "…7DQ"),                                       # shortened: joins
                        item(14, 301, "JBU1234", ch="HPN Ground")])                                         # its own channel
     assert ids["t1"] == ids["t2"] == ids["t3"] == ids["t4"] == "t1"
     assert ids["t5"] == "t5" and ids["t6"] == "t6" and ids["t7"] == "t7"

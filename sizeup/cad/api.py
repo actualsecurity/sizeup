@@ -161,6 +161,20 @@ GET  /api/cad/datasources[?rev=]          Settings > Data sources (#186, sizeup/
                                           {rev, same: true}. Admins and dispatchers (a viewer: 403). Polled by the panel
                                           while it is open: never in the state push
 POST /api/cad/cameras/<id>/dvr/pin        {on: bool}  keep recording a camera (#277, sizeup/dvr.py; dispatchers, admins)
+POST /api/cad/cameras/<id>/dvr/clip       {from, to (unix s), incident_id, note?}  save a recorded range (at most 60 min,
+                                          within what the DVR has) as a camera clip attached to the event (#323,
+                                          sizeup/attachments.py): {ok, attachment} at once ("saving"), uploaded in the
+                                          background; dispatchers and admins; audited. No bucket: 400 "not configured"
+GET  /api/cad/incident/<id>/attachments   {configured, attachments: [{id, kind (camera | radio), source, source_name,
+                                          start, end, bytes, note, status, created_by, created_at, objects: [{name,
+                                          bytes, sha256}], play?, download?}]} in time order (also in GET
+                                          /api/cad/incident/<id> as "attachments"); ?deleted=1: the deleted ones too
+GET  /api/cad/incident/<id>/attachments/audit   every attach / view / download / export / delete of its attachments
+GET  /api/cad/incident/<id>/export.zip    every attachment's objects, with manifest.json (sizes, sha256, verified); audited
+GET  /api/cad/attachments/<id>            one attachment; .../index.m3u8 (a camera clip as a VOD playlist, a view: audited),
+                                          .../<n>.ts (its segments, from S3), .../audio.wav (a radio one; audited),
+                                          .../download (one .ts or .wav; audited). Anyone signed in; never public
+POST /api/cad/attachments/<id>/delete     {}  admins only: the objects deleted, the row and its audit kept
 POST /api/cad/datasources/<key>/refresh   {operator?}  Refresh now: runs in the background, the answer at once
                                           ({ok, source: the row, running}); 429 {error} when refused (refreshing already,
                                           too soon after the last, or the source is resting); admins; in the person's
@@ -211,6 +225,9 @@ ALARM_ACK = re.compile(r"/api/cad/alarm/(\d{1,9})/ack")
 ALARM_CLEAR = re.compile(r"/api/cad/alarm/(\d{1,9})/clear")
 DATASOURCE = re.compile(r"/api/cad/datasources/([A-Za-z0-9_.:%-]{1,200})/refresh")
 DVR_PIN = re.compile(r"/api/cad/cameras/([A-Za-z0-9_.:-]{1,64})/dvr/pin")      # keep recording a camera (#277)
+DVR_CLIP = re.compile(r"/api/cad/cameras/([A-Za-z0-9_.:-]{1,64})/dvr/clip")    # a camera clip on an event (#323)
+ATTACHMENT = re.compile(r"/api/cad/attachments/([0-9a-f]{16})(?:/(index\.m3u8|(\d{1,6})\.ts|audio\.wav|download|delete))?")
+INCIDENT_ATTACHMENTS = re.compile(r"/api/cad/incident/(\d{1,9})/(attachments|attachments/audit|export\.zip)")
 DS_READERS = ("admin", "dispatcher")      # who may see Settings > Data sources (#186)
 # The GETs only an admin may read (with a verified sign-in, like WRITES): path -> why, in the 403. The rest of the
 # GETs are anyone signed in's (Data sources: DS_READERS). server.py asks the same for the ones it serves itself.
@@ -241,6 +258,8 @@ WRITES = (
     (re.compile(r"/api/cad/radios(?:/delete)?"), "admin"),                 # the radio-ID registry
     (DATASOURCE, "admin"),                                                  # a data source's Refresh now (#186)
     (DVR_PIN, "dispatch"),                                                  # keep recording a camera (#277)
+    (DVR_CLIP, "dispatch"),                                                 # save a camera clip on an event (#323)
+    (ATTACHMENT, "admin"),                                                  # delete an event's attachment (#323)
     (re.compile(r"/api/(?:talkgroup|talkgroup-group|mode|retranscribe|adsb-receiver)"), "admin"),   # the station's radios (server.py)
 )
 READ_ACTIONS = {("/api/cad/settings/dispatch", "preview")}                  # the wording on a sample event
@@ -411,6 +430,11 @@ DOES = (
                                                                 f"{_clip(b.get('radio_id'), 12)} deleted", "")),
     (re.compile(r"/api/incident/([^/]{1,80})/close"), lambda m, b, o, c: (f"Closed monitor incident {m.group(1)}", "")),
     (DVR_PIN, lambda m, b, o, c: (f"{'Kept' if b.get('on') else 'Stopped keeping'} camera {m.group(1)} recording", "")),
+    (DVR_CLIP, lambda m, b, o, c: (f"Saved a clip of camera {m.group(1)} to {_number(c, b.get('incident_id')) or 'an event'} "
+                                   f"({_span(b)})", _number(c, b.get("incident_id")))),
+    (ATTACHMENT, lambda m, b, o, c: (f"Deleted the {(o.get('attachment') or {}).get('kind', '')} attachment {m.group(1)} from "
+                                     f"{_number(c, (o.get('attachment') or {}).get('incident_id')) or 'an event'}",
+                                     _number(c, (o.get("attachment") or {}).get("incident_id")))),
     (DATASOURCE, lambda m, b, o, c: (f"Refreshed data source: {_clip((o.get('source') or {}).get('name') or unquote(m.group(1)), 60)}", "")),
     (re.compile(r"/api/talkgroup"), lambda m, b, o, c: (f"Talkgroup {b.get('tg')}: {_toggles(b) or 'no change'}", "")),
     (re.compile(r"/api/talkgroup-group"), lambda m, b, o, c: (f"Talkgroups {_clip(b.get('group'), 40)}: {_toggles(b) or 'no change'}", "")),
@@ -420,6 +444,14 @@ DOES = (
     (re.compile(r"/api/retranscribe"), lambda m, b, o, c: ("Retranscribe: every recording" if b.get("all")
                                                            else f"Retranscribe: {len(b.get('ids') or [])} recordings", "")),
 )
+
+
+def _span(b) -> str:
+    try:
+        s = float(b["to"]) - float(b["from"])
+        return f"{int(s // 60)}:{int(s % 60):02d}"
+    except (KeyError, TypeError, ValueError):
+        return "?"
 
 
 def summarize(path: str, body: dict, out, c) -> tuple[str, str] | None:
@@ -627,7 +659,13 @@ class CadApi:
                 return _json(200, {"units": self.cad.suggest_units(int(m.group(1)), (parse_qs(query).get("q") or [""])[0][:20])})
             if m := INCIDENT.fullmatch(path):
                 if m.group(2) is None:
-                    return _json(200, self.cad.full(int(m.group(1))))
+                    out = self.cad.full(int(m.group(1)))
+                    att = getattr(self.cad, "attachments", None)
+                    if att is not None and isinstance(out, dict):
+                        out["attachments"] = att.list(int(m.group(1)))
+                    return _json(200, out)
+            if (m := INCIDENT_ATTACHMENTS.fullmatch(path)) or (m := ATTACHMENT.fullmatch(path)):
+                return self._attachments_get(path, m, parse_qs(query), who)
             if m := EXPORT.fullmatch(path):
                 data = self.cad.export(m.group(1))
                 return (200, data, "text/csv; charset=utf-8") if data is not None else (404, b"no such export\n", "text/plain")
@@ -722,4 +760,88 @@ class CadApi:
             return self._ds_refresh(unquote(m.group(1)), body)
         if m := DVR_PIN.fullmatch(path):
             return self._dvr_pin(m.group(1), body)
+        if m := DVR_CLIP.fullmatch(path):
+            return {"ok": True, "attachment": self._attach_call(lambda a: a.save_camera(m.group(1), body,
+                                                                                         str(body.get("operator") or "")))}
+        if (m := ATTACHMENT.fullmatch(path)) and m.group(2) == "delete":
+            return {"ok": True, "attachment": self._attach_call(lambda a: a.delete(m.group(1), str(body.get("operator") or "")))}
         return None
+
+    # -- incident attachments (#323, sizeup/attachments.py) -----------------------------------------------------------
+
+    def _attach_call(self, fn):
+        from sizeup.attachments import NOT_CONFIGURED, AttachError
+        from sizeup.aws import AwsError
+        att = getattr(self.cad, "attachments", None)
+        if att is None:
+            raise CadError(NOT_CONFIGURED)
+        try:
+            return fn(att)
+        except AttachError as e:
+            raise CadError(str(e)) from None
+        except AwsError as e:
+            raise CadError(f"S3: {e}") from None
+
+    def _attachments_get(self, path: str, m, q: dict, who):
+        """The attachments' GETs: anyone signed in; a view, a download and an export are audited (and in the person's
+        activity)."""
+        from sizeup.attachments import NOT_CONFIGURED, AttachError
+        from sizeup.aws import AwsError
+        att = getattr(self.cad, "attachments", None)
+        email = who.email if who is not None and who.email else ""
+        name = email
+        if email:
+            try:
+                name = self.cad.settings.standing(email)["operator"] or email
+            except CadError:
+                pass
+        hdr = {"Cache-Control": "no-store"}
+
+        def note(summary: str, iid) -> None:
+            if email:
+                self.cad.activity.record(email, "action", f"GET {path}", summary, _number(self.cad, iid))
+        try:
+            if m.re is INCIDENT_ATTACHMENTS:
+                iid, what = int(m.group(1)), m.group(2)
+                if att is None:
+                    if what == "attachments":
+                        return _json(200, {"configured": False, "attachments": []})
+                    return _json(400, {"error": NOT_CONFIGURED})
+                if what == "attachments":
+                    return _json(200, {"configured": att.configured,
+                                       "attachments": att.list(iid, deleted=(q.get("deleted") or [""])[0] == "1")})
+                if what == "attachments/audit":
+                    return _json(200, {"audit": att.audit_rows(iid=iid)})
+                body, fname = att.export(iid, name)
+                note(f"Exported the attachments of {_number(self.cad, iid) or f'event {iid}'}", iid)
+                return 200, body, "application/zip", {"Content-Disposition": f'attachment; filename="{fname}"', **hdr}
+            if att is None:
+                return _json(400, {"error": NOT_CONFIGURED})
+            aid, what = m.group(1), m.group(2)
+            row = att.row(aid)
+            if row is None:
+                return _json(404, {"error": "no such attachment"})
+            if what is None:
+                return _json(200, {"attachment": att.public(row), "audit": att.audit_rows(aid=aid, limit=100)})
+            if what == "delete":
+                return 405, b'{"error":"POST"}', JSON
+            if what == "index.m3u8":
+                body = att.playlist(aid)
+                att.viewed(row, name)
+                return 200, body, "application/vnd.apple.mpegurl", hdr
+            if what == "audio.wav":
+                body = att.audio_wav(aid)
+                att.viewed(row, name)
+                return 200, body, "audio/wav", {"Cache-Control": "private, max-age=3600"}
+            if what == "download":
+                body, fname, ctype = att.download(aid)
+                att.viewed(row, name, "download")
+                note(f"Downloaded the {row['kind']} attachment {aid}", row["incident_id"])
+                return 200, body, ctype, {"Content-Disposition": f'attachment; filename="{fname}"', **hdr}
+            return 200, att.segment(aid, int(m.group(3))), "video/MP2T", {"Cache-Control": "private, max-age=3600"}
+        except KeyError:
+            return _json(404, {"error": "not stored (saving, failed or deleted)"})
+        except AttachError as e:
+            return _json(400, {"error": str(e)})
+        except AwsError as e:
+            return _json(502, {"error": f"S3: {e}"})

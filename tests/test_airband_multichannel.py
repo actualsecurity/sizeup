@@ -327,7 +327,7 @@ def test_a_failing_rtl_sdr_falls_back_to_rtl_fm_and_says_why(monkeypatch):
     r, events = approach(clock)
     assert r._program() == "rtl_sdr" and len(r.active) == 2
     for _ in range(am.FALLBACK_AFTER):                               # starts that gave no audio
-        r._multi_ok = False
+        r._multi_ran, r._multi_ok = True, False
         r._tune()
     assert r.active == (126.4,) and r._program() == "rtl_fm"
     assert any("rtl_sdr failed 3 times: rtl_fm on 126.4 alone for 30 min" in e for e in events)
@@ -335,6 +335,41 @@ def test_a_failing_rtl_sdr_falls_back_to_rtl_fm_and_says_why(monkeypatch):
     clock[0] += am.FALLBACK_S + 1
     r._tune()
     assert r.active == (126.4, 124.65)                               # tried again after it
+
+
+def test_only_a_channelizer_that_started_counts_toward_the_fallback():
+    """#307: the first start (nothing ran yet) and starts that never ran (no dongle) aren't failures; started ones are."""
+    clock = [local(2026, 7, 1, 12)]
+    r, events = approach(clock)                                      # approach() has made the first _tune
+    assert r._multi_fails == 0
+    for _ in range(am.FALLBACK_AFTER + 2):                           # the dongle not plugged in: _run never started it
+        r._tune()
+    assert r._multi_fails == 0 and len(r.active) == 2
+    for k in range(1, am.FALLBACK_AFTER):
+        r._multi_ran, r._multi_ok = True, False
+        r._tune()
+        assert r._multi_fails == k and len(r.active) == 2            # not yet: FALLBACK_AFTER real ones
+    r._multi_ran, r._multi_ok = True, True                           # one that gave audio: from zero again
+    r._tune()
+    assert r._multi_fails == 0 and not any("failed" in e for e in events)
+
+
+def test_a_short_link_is_logged_once_then_on_change_not_every_window():
+    """#307: at 96% every 30 s was ~2,900 lines a day. Said when it falls short, when it moves a point, and when back."""
+    events: list[str] = []
+    r = AmReceiver("rtl_fm", "", 36.4, Channel(126.4, APP), lambda c, s: None, events.append, open_db=3.5)
+    for pct in (99.8, 96.0, 96.3, 95.8, 96.4, 96.0, 97.5, 96.2):    # a day's windows on a link at about 96%
+        r._rate_window(pct, 30.0)
+    assert events == ["NY App 126.4/120.8: the channelizer gave 96% of real time over 30 s: samples dropped (USB?)"]
+    assert r.rate_pct == 96.2                                        # the row still shows the last window
+    r._rate_window(94.9, 30.0)
+    r._rate_window(95.2, 30.0)
+    r._rate_window(99.6, 30.0)
+    r._rate_window(99.9, 30.0)
+    assert events[1:] == ["NY App 126.4/120.8: the channelizer gave 94.9% of real time over 30 s: samples dropped (USB?)",
+                          "NY App 126.4/120.8: the channelizer is back to 99.6% of real time"]
+    r._rate_window(96.0, 30.0)
+    assert len(events) == 4                                          # short again: said again
 
 
 def test_dropped_samples_are_logged(tmp_path, monkeypatch):
@@ -538,8 +573,22 @@ def test_settings_choices_saved_under_the_old_names_follow_the_rename():
     ov = {"NY Approach": {"engine": "local"}, "NY Approach 124.65": {"transcribe": False}, APP3: {"engine": "aws"}}
     got = renamed_overrides(ov, kinds)
     assert got[APP] == {"engine": "local"} and got[APP3] == {"engine": "aws"}      # the new name's own wins
+    assert "NY Approach" not in got and "NY Approach 124.65" not in got           # #307: the old names' dropped
     assert renamed_overrides(ov, {**kinds, "NY Approach": "airband"}).get(APP) is None   # the old one still a channel
     assert renamed_overrides({}, kinds) == {}
+
+
+def test_the_old_names_choices_are_moved_in_the_store(rig):  # noqa: F811
+    """#307: moved and the old key deleted, so a channel given an old name later doesn't inherit its choice."""
+    _plugged, _logs, make = rig
+    app = make(channels=FIVE + (NYAPP, NYAPP3, GND))
+    app.cad.settings.replace_channels({"NY Approach": {"engine": "local"}, APP3: {"transcribe": False},
+                                       "NY Approach 124.65": {"engine": "aws"}}, "hub")
+    app.channels_changed()
+    want = {APP: {"engine": "local"}, APP3: {"transcribe": False}}
+    assert app._chan_ov == want and app.cad.settings.channel_overrides() == want
+    app.channels_changed()                                           # nothing more to move: nothing written
+    assert app.cad.settings.channel_overrides() == want
 
 
 def test_a_dongles_saved_job_follows_the_rename(rig, tmp_path):  # noqa: F811

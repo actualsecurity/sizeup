@@ -18,7 +18,8 @@ Nothing captured ever goes into git (the repo is public); tools/replay_sync.py p
           they are only ever in the request's Authorization header, never printed or written), trimmed to our
           area's cameras; the Thruway's and the county's public camera lists (what Roads merges them with); then
           for --cameras of the CARS-Hub cameras with video the master playlist, its chunklist and the newest
-          --segments segments, exactly as served. One inventory request: 511NY allows one every 5 minutes, so a
+          --segments segments, exactly as served; with --stills every area CARS-Hub camera's still too, once, a
+          second apart (stills/<id>.<png|jpg>, stills.json: their addresses; the overlay match, #320). One inventory request: 511NY allows one every 5 minutes, so a
           stamp outside the cache (~/.local/state/sizeup/ny511-last-request) refuses a second capture within 5
           minutes. The hub polls the same inventory with the same account (hourly): a capture can still land
           within 5 minutes of the hub's own poll; capture rarely. Names from the source (camera ids, chunklist and segment names) must be plain
@@ -250,6 +251,8 @@ def camera(args) -> None:
             rec["files"].append({"name": rel, "what": what})
         streams.append(rec)
         say(f"{c['id']}: {len(got)} files")
+    if args.stills:
+        files.update(_stills(area, d, say))
     (d / "streams.json").write_text(json.dumps(streams, indent=2) + "\n")
     files["streams.json"] = "per camera: its video URL and the files fetched, in order (master, chunklist, segments)"
     write_manifest(d, "camera", source="511NY CARS-Hub (data/cctv.xml) and the cameras' HLS on *.skyvdn.com",
@@ -257,6 +260,31 @@ def camera(args) -> None:
                    extra={"cameras_in_area": len(area), "cameras_in_area_with_video": len(cams),
                           "streams": len(chosen)})
     print(f"{d}: {len(chosen)} streams, {len(files)} files")
+
+
+def _stills(area: list[dict], d: Path, say) -> dict[str, str]:
+    """Every area camera's still as served (public, no credentials), one request a second: stills/<id>.<ext> and
+    stills.json [{id, url, file, ctype}]."""
+    files, index = {}, []
+    (d / "stills").mkdir(exist_ok=True)
+    for c in area:
+        if not c.get("url"):
+            continue
+        try:
+            code, h, body = r.http_get(c["url"], r.IMAGE_TIMEOUT_S, r.IMAGE_MAX_BYTES)
+            name = f"stills/{safe_name(c['id'])}.{'png' if body[:4] == b'\x89PNG' else 'jpg'}"
+        except (HTTPError, URLError, OSError, ValueError) as e:
+            say(f"{c['id']} still: {type(e).__name__}: {getattr(e, 'reason', e)}")
+            continue
+        (d / name).write_bytes(body)
+        ctype = h.get("content-type", "")
+        files[name] = f"still, HTTP {code}, {ctype}"
+        index.append({"id": c["id"], "url": c["url"], "file": name, "ctype": ctype})
+        time.sleep(1.0)
+    (d / "stills.json").write_text(json.dumps(index, indent=2) + "\n")
+    files["stills.json"] = "per camera: its still's address and the file it was saved as"
+    say(f"stills: {len(index)}")
+    return files
 
 
 def _stream(video: str, segments: int, out: Path) -> list[tuple[str, str]]:
@@ -344,6 +372,7 @@ def main(argv=None) -> None:
     c.add_argument("--cameras", type=int, default=3)
     c.add_argument("--segments", type=int, default=4)
     c.add_argument("--id", action="append", default=[])
+    c.add_argument("--stills", action="store_true", help="also every area camera's still, once each, 1 s apart")
     u = sub.add_parser("audio")
     u.add_argument("--clips", type=int, default=10, help="per channel, the newest")
     u.add_argument("--channel", action="append", default=[], help=f"one of {', '.join(AIRBAND)} (default: all)")
