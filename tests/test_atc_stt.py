@@ -317,7 +317,7 @@ def test_the_map_draws_the_tower_mark():
     assert '"ac-twr"' in js and '"ac-twr-label"' in js and '"text-field": ["get", "name"]' in js
     assert 'name: tw.open === false ? "CTAF" : "TWR"' in js                  # #275: closed, the mark says CTAF
     assert "towerLit(d)" in js and "tw.until" in js and "(tw.tx || []).includes(talk.playing)" in js
-    assert 'const IDS = ["ac-trail", "ac-ring", "ac-mark", "ac-label", "ac-twr", "ac-twr-label"]' in js   # on with the layer
+    assert 'const IDS = ["ac-trail", "ac-ring", "ac-mark", "ac-label", "ac-twr", "ac-twr-label", ' in js   # on with the layer
     assert "localStorage" not in js
     cad_js = (STATIC / "cad.js").read_text()
     assert "t.atc_text || t.text" in cad_js and '"atc-weak"' in cad_js and "As transcribed: " in cad_js

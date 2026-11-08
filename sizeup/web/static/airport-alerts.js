@@ -5,7 +5,9 @@
 //
 //   title      "HPN ATC: possible brush fire reported off runway 16 departure", the confidence (high / medium / low)
 //   heard      each transmission ("context": heard just before the one that matched), with ▶ for its audio
-//   aircraft   the callsign, type, distance and phase from the Aircraft layer (or "heard, not on ADS-B")
+//   aircraft   the callsign, type, distance and phase from the Aircraft layer (or "heard, not on ADS-B"); on ADS-B, a
+//              click follows it on the map (aircraft.js AircraftLayer.follow). Every aircraft an open card names is
+//              ringed on the map in its colour (AircraftLayer.alerts), wider while the card is hovered or focused
 //   location   the words heard, and the approximate point's reason (always marked approximate) or "not placed"
 //   Accept     a new PENDING event (never a dispatch: a person dispatches from it); Dismiss: nothing to it
 //
@@ -18,7 +20,7 @@
 "use strict";
 
 window.AirportAlerts = (() => {
-  const st = { seen: null, busy: new Set(), audio: null, playing: "" };
+  const st = { seen: null, busy: new Set(), audio: null, playing: "", hovered: null };
 
   function el(tag, cls, text) {
     const n = document.createElement(tag);
@@ -50,6 +52,18 @@ window.AirportAlerts = (() => {
     return parts.join(" · ");
   }
 
+  const MATCH_TIP = "ADS-B match: how sure the callsign heard is this aircraft (not the alert's confidence)";
+  // the aircraft line: on ADS-B (a hex), a button that follows it on the map
+  function acftLine(x, text, tag) {
+    if (!x.hex || !window.AircraftLayer || !AircraftLayer.follow) return el(tag || "div", tag ? "" : "aa-acft", text);
+    const b = el("button", "aa-acft aa-follow", text);
+    b.type = "button";
+    b.dataset.hex = x.hex;
+    b.title = `${MATCH_TIP}\nClick: follow it on the map`;
+    b.addEventListener("click", (ev) => { ev.stopPropagation(); AircraftLayer.follow(x.hex); b.blur(); });   // (focus off: the ring follows the pointer)
+    return b;
+  }
+
   // The confidence chip's hover: what made it (the words each rule matched) and the confidence the push said.
   function why(a, d) {
     const said = [...new Set((d.snippets || []).flatMap((s) => s.hits || []))];
@@ -73,6 +87,17 @@ window.AirportAlerts = (() => {
     const d = a.data || {};
     const li = el("li", `aa aa-${a.level}` + (d.drill ? " aa-drill" : ""));
     li.dataset.key = String(a.id);
+    const hexes = (d.aircraft || []).map((x) => x && x.hex).filter(Boolean);
+    if (hexes.length && window.AircraftLayer && AircraftLayer.hover) {     // its aircraft ringed wider on the map
+      li.dataset.hex = hexes.join(" ");
+      // ringed wider while the pointer is on it or it has the focus; let go when it is redrawn (column)
+      const h = { inside: false, focus: false };
+      const set = () => { st.hovered = h.inside || h.focus ? li : null; AircraftLayer.hover(st.hovered ? hexes : []); };
+      li.addEventListener("mouseenter", () => { h.inside = true; set(); });
+      li.addEventListener("mouseleave", () => { h.inside = false; set(); });
+      li.addEventListener("focusin", () => { h.focus = true; set(); });
+      li.addEventListener("focusout", (e) => { if (!li.contains(e.relatedTarget)) { h.focus = false; set(); } });
+    }
     const head = el("div", "aa-head");
     if (window.Icon) head.append(Icon("aircraft"));
     const conf = el("span", `aa-conf ${a.level}`, a.source === "adsb" ? "ADS-B" : `${a.level} ${Math.round(a.confidence * 100)}%`);
@@ -83,7 +108,12 @@ window.AirportAlerts = (() => {
     if (aw) li.append(el("div", "aa-alarm", aw));
     if ((d.lines || []).length) {
       const dl = el("dl", "aa-lines");
-      for (const [k, v] of d.lines) dl.append(el("dt", "", k), el("dd", "", v));
+      const first = (d.aircraft || [])[0];
+      for (const [k, v] of d.lines) {
+        const dd = el("dd");
+        dd.append(k === "Aircraft" && first ? acftLine(first, v, "span") : v);
+        dl.append(el("dt", "", k), dd);
+      }
       li.append(dl);
     }
     li.append(el("div", "aa-src", `${a.source_name}${a.channel ? ` · ${a.channel}` : ""} · ${deps.time(a.at)}`
@@ -104,8 +134,8 @@ window.AirportAlerts = (() => {
     if (heard.children.length) li.append(heard);
     if (!(d.lines || []).length) {
       for (const x of d.aircraft || []) {
-        const n = el("div", "aa-acft", aircraftLine(x));
-        if (x.hex) n.title = "ADS-B match: how sure the callsign heard is this aircraft (not the alert's confidence)";
+        const n = acftLine(x, aircraftLine(x));           // on ADS-B: a button that follows it on the map
+        if (x.hex && !n.title) n.title = MATCH_TIP;
         li.append(n);
       }
     }
@@ -154,11 +184,14 @@ window.AirportAlerts = (() => {
   function column(list, s, deps) {
     if (!list) return;
     const items = open(s);
+    if (window.AircraftLayer && AircraftLayer.alerts) AircraftLayer.alerts(items);    // ringed on the map while open
     list.hidden = !items.length;
     const sig = JSON.stringify(items.map((a) => [a.id, a.title, a.count, a.confidence, st.busy.has(a.id), st.playing,
                                                  (a.data || {}).lines, alarmWord(a.data || {}, deps.alarms)]));
     if (list._sig === sig) return;
     list._sig = sig;
+    if (st.hovered && window.AircraftLayer && AircraftLayer.hover) AircraftLayer.hover([]);   // the hovered card is redrawn
+    st.hovered = null;
     list.replaceChildren(...items.map((a) => card(a, deps)));
   }
 

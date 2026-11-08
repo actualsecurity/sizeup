@@ -1020,7 +1020,7 @@ class AtcWatch:
                 a = next((p for p in planes if p.get("hex") == att.hex), {})
                 return {"callsign": att.callsign, "hex": att.hex, "spoken": att.spoken, "match": att.confidence,
                         **{k: a.get(k) for k in ("type", "model", "reg", "lat", "lon", "alt", "gs", "trk", "phase", "rwy",
-                                                 "dist", "airline") if a.get(k) is not None}}
+                                                 "dist", "airline", "pos_at") if a.get(k) is not None}}
             if heard_only is None and att.spoken and not att.spoken.startswith("…"):
                 heard_only = {"callsign": att.spoken, "hex": None, "spoken": att.spoken, "match": 0.0}
         return heard_only
