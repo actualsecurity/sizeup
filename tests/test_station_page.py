@@ -203,3 +203,45 @@ def test_the_cad_settings_station_card_is_the_same_hub_link_card():
     hub = (STATIC / "hublink.js").read_text()
     for need in ('"/api/station-mode"', '"/api/station-mode/test"', '"Last contact"', '"Queued"', "Forward to hub"):
         assert need in hub, need
+
+
+def test_a_station_refuses_cross_site_posts_but_not_its_own_page(tmp_path):
+    """#307 (CSRF): the station binds 127.0.0.1, but a page open in the station PC's browser could still post to it."""
+    app = station_app(tmp_path)
+    server, port = serve(app)
+    me = f"127.0.0.1:{port}"
+
+    def post(path, body, **headers):
+        c = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        try:
+            c.request("POST", path, body=json.dumps(body).encode(), headers={"Content-Type": "application/json", **headers})
+            r = c.getresponse()
+            return r.status, json.loads(r.read() or b"{}")
+        finally:
+            c.close()
+
+    try:
+        for path, body in (("/api/airband-ab", {"channel": "x"}), ("/api/mode", {"mode": "trunk"}),
+                           ("/api/adsb-receiver", {"sdr": "", "confirm": True}), ("/api/retranscribe", {"ids": []}),
+                           ("/api/station-mode", {"forward": False}), ("/api/talkgroup", {"tg": 1})):
+            for h in ({"Sec-Fetch-Site": "cross-site"}, {"Sec-Fetch-Site": "same-site"},     # same-site: another port
+                      {"Origin": "https://evil.example"}, {"Origin": "null"}, {"Origin": "http://127.0.0.1:1"}):
+                code, got = post(path, body, **h)
+                assert code == 403 and got["error"].startswith("refused: a cross-site request"), (path, h)
+        assert app.station.state()["forward"] is True                      # nothing was switched
+        # the station page itself (same-origin), a typed request, and tools without the headers
+        for h in ({"Sec-Fetch-Site": "same-origin", "Origin": f"http://{me}"}, {"Origin": f"http://{me}"},
+                  {"Sec-Fetch-Site": "none"}, {}):
+            code, _ = post("/api/retranscribe", {"ids": []}, **h)
+            assert code == 200, h
+    finally:
+        server.shutdown()
+
+
+def test_the_cross_site_check():
+    from sizeup.web.server import cross_site
+    assert cross_site({}) is None and cross_site({"Host": "127.0.0.1:8091"}) is None
+    assert cross_site({"Origin": "http://localhost:8091", "Host": "localhost:8091"}) is None
+    assert cross_site({"Origin": "http://localhost:3000", "Host": "localhost:8091"})
+    assert cross_site({"Sec-Fetch-Site": "same-origin", "Origin": "http://x", "Host": "y"}) is None   # the browser's word
+    assert cross_site({"Sec-Fetch-Site": "cross-site", "Host": "localhost:8091"})
