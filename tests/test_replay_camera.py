@@ -7,7 +7,8 @@ served the same minute, and for a few cameras the master playlist, chunklist and
   - every CARS-Hub camera in our area with live video stays on the list (itself, or the same camera from another
     source that has video too): 511NY cameras vanished from the list once;
   - no camera is listed twice (#320): no two listed cameras name the same stream, and a record merged away names
-    (Roads.alias) one that is listed;
+    (Roads.alias) one that is listed; once the hub has looked at every still (sets with stills), no two listed
+    cameras carry the same overlay (the camera's DOT name on the picture);
   - every recorded segment is whole MPEG-TS (188-byte packets, each with the sync byte; the PAT, the PMT and video
     frames in it), and the hub's proxy never serves one cut short: byte for byte, or (#276) repaired, its broken
     frames left out and the rest whole; the first segment asked for directly (a truncated first segment was a real
@@ -18,10 +19,11 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from urllib.error import HTTPError
 
 import pytest
 
-from sizeup import hlsseg
+from sizeup import camoverlay, hlsseg
 from sizeup import roads as r
 from sizeup.roads import BasicAuth, Roads
 
@@ -48,6 +50,9 @@ class ReplayFetch:
         for name, url in (("thruway_cameras.xml", THRUWAY), ("county_cameras.json", COUNTY)):
             if s.file(name).is_file():
                 self.bodies[url] = ({"content-type": "application/octet-stream"}, s.file(name).read_bytes())
+        if s.file("stills.json").is_file():                 # (sets captured with --stills: every area camera's still)
+            for st in json.loads(s.file("stills.json").read_text()):
+                self.bodies[st["url"]] = ({"content-type": st["ctype"]}, s.file(st["file"]).read_bytes())
         self.streams = json.loads(s.file("streams.json").read_text())
         for st in self.streams:
             base = st["video"].rsplit("/", 1)[0] + "/"
@@ -56,12 +61,18 @@ class ReplayFetch:
                 url = st["video"] if f["name"] == "playlist.m3u8" else base + f["name"]
                 ctype = "video/MP2T" if f["name"].endswith(".ts") else "application/vnd.apple.mpegurl"
                 self.bodies[url] = ({"content-type": ctype, "content-length": str(len(body))}, body)
+        self.folders = {st["video"].rsplit("/", 1)[0] + "/" for st in self.streams}
         self.urls: list[str] = []
+        self.stills_404 = False          # a still the set doesn't have (the Thruway's, the county's): 404, not a failure
 
     def __call__(self, url, timeout, limit, headers=None):
         self.urls.append(url)
         base = url.split("?")[0]
         if base not in self.bodies:
+            if base.endswith(".ts") and base.rsplit("/", 1)[0] + "/" in self.folders:
+                raise HTTPError(url, 404, "not recorded", None, None)       # named in its chunklist, not captured
+            if self.stills_404 and not base.endswith((".m3u8", ".ts")):
+                raise HTTPError(url, 404, "not recorded", None, None)
             raise AssertionError("a fetch the recording doesn't have")       # (the address not printed: private)
         h, body = self.bodies[base]
         over = len(body) > limit
@@ -220,3 +231,30 @@ def test_recorded_segments_are_whole_and_the_proxy_never_serves_one_cut_short(re
             assert ok, f"{label}: stream status open={status['open']} target_s={status['target_s']}"
             checked += 1
     assert checked, "no recorded stream with segments"
+
+
+def test_once_the_stills_are_seen_no_two_listed_cameras_carry_the_same_overlay(replay_sets):
+    """#320: the CARS-Hub's two records of one camera can disagree on the name and the milepost and share no stream; the
+    overlay on their stills is the same. After a sweep (every listed camera's still fetched once) none is listed twice,
+    and a restart (the disk cache) keeps it so."""
+    checked = 0
+    for s in replay_sets("camera"):
+        if not s.file("stills.json").is_file():
+            continue
+        for with_ours in (False, True):
+            fetch = ReplayFetch(s)
+            fetch.stills_404 = True
+            rd = make(fetch, with_ours)
+            rd.probe_stream = lambda cid: True                          # (a still that's down: its stream not asked)
+            before = len(rd.merged("cameras"))
+            rd.sweep()
+            listed = rd.merged("cameras")
+            seen = [(c["id"], rd._overlay[c["id"]]) for c in listed if c["id"] in rd._overlay]
+            twice = sum(1 for i, (_, a) in enumerate(seen) for _, b in seen[i + 1:] if camoverlay.same(a, b))
+            assert not twice, f"{s.name} (ours too: {with_ours}): {twice} pairs of listed cameras carry one overlay"
+            assert len(listed) <= before and len(seen) >= 10, f"{s.name}: {len(seen)} overlays read"
+            for gone, kept in rd.aliases().items():
+                assert kept in {c["id"] for c in listed}, f"{s.name}: a merged-away camera names one not listed"
+            checked += 1
+    if not checked:
+        pytest.skip("no camera set with stills (tools/capture_fixture.py camera --stills)")
