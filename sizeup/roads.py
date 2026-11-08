@@ -1153,6 +1153,7 @@ CAMERA_OVERLAY_M = 2000.0        # the same overlay on two stills: one camera, o
 OVERLAY_KEEP_S = 24 * 3600.0     # an overlay not read again within this long is forgotten (its camera's still is
                                  # looked at every HEALTH_SWEEP_S, a merged-away one's too: sweep)
 OVERLAY_SAVE_S = 60.0            # the overlays read: into the disk cache at most this often
+OVERLAY_SPLIT_READS = 3          # a merge by overlay comes apart after this many reads in a row of another overlay
 CAMERA_MILE_MI = 0.2
 CAMERA_FRESHER_S = 300.0         # a still this much newer is the fresher one
 STREAM_NAME = re.compile(r"[A-Za-z0-9_-]{3,64}")
@@ -1885,6 +1886,7 @@ class Roads:
         self._overlay: dict[str, tuple[int, int, bytes]] = {}   # camera id -> its still's overlay (camoverlay), when seen
         self._overlay_seen: dict[str, float] = {}     # camera id -> when its overlay was last read
         self._overlay_checked: dict[str, float] = {}  # a merged-away camera id -> when its still was last looked at
+        self._overlay_miss: dict[str, int] = {}       # an overlay-merged camera id -> reads in a row of another overlay
         self._overlay_rev = 0
         self._overlay_dirty = False                   # read since the disk cache was last written
         self._overlay_saved = 0.0
@@ -2305,20 +2307,37 @@ class Roads:
                 and km(a["lat"], a["lon"], b["lat"], b["lon"]) * 1000 <= CAMERA_OVERLAY_M)
 
     def _note_overlay(self, cid: str, ctype: str, body: bytes) -> None:
-        """A fresh still's overlay kept (#320): a new one, or one that changed, groups the cameras again (and is saved,
-        OVERLAY_SAVE_S at most). A still with none (a placeholder, a JPEG) leaves the last one read, until it is
-        OVERLAY_KEEP_S old (_expire_overlays)."""
+        """A fresh still's overlay kept (#320). One another camera carries too groups the cameras again (and is saved,
+        OVERLAY_SAVE_S at most); a merged camera's that differs counts only after OVERLAY_SPLIT_READS reads in a row.
+        A still with none (a placeholder, a JPEG) leaves the last one read, until it is OVERLAY_KEEP_S old
+        (_expire_overlays)."""
         sig = camoverlay.overlay(body)          # (the PNG's own signature, whatever its label: PNGs come as image/jpeg too)
         if sig is None:
             return
         now = self.clock()
         old = self._overlay.get(cid)
-        self._overlay[cid] = sig
-        self._overlay_seen[cid] = now
-        if not camoverlay.same(old, sig):
-            self._overlay_rev += 1
+        if camoverlay.same(old, sig):                     # read again as before
+            self._overlay_seen[cid] = now
+            self._overlay_miss.pop(cid, None)
+        elif old is not None and cid in self._overlay_tied:
+            # a camera an overlay merged: some bars come back a few edge pixels off now and then (5 of 26, hours apart);
+            # one odd read is noise (the pattern kept, nothing regrouped), OVERLAY_SPLIT_READS in a row its new name
+            self._overlay_miss[cid] = self._overlay_miss.get(cid, 0) + 1
+            if self._overlay_miss[cid] < OVERLAY_SPLIT_READS:
+                return
+            self._overlay_miss.pop(cid, None)
+            self._overlay[cid], self._overlay_seen[cid] = sig, now
+            self._overlay_rev += 1                        # the merge comes apart (unless it matches another way)
             self._overlay_dirty = True
             self._changed()
+        else:
+            self._overlay[cid], self._overlay_seen[cid] = sig, now
+            # only a pattern another camera carries can merge: one never seen elsewhere (a scene read as a bar, a bar
+            # with its time in it) changes nothing, so nothing is regrouped, refreshed or saved for it
+            if any(camoverlay.same(sig, v) for k, v in list(self._overlay.items()) if k != cid):
+                self._overlay_rev += 1
+                self._overlay_dirty = True
+                self._changed()
         if self._overlay_dirty and now - self._overlay_saved >= OVERLAY_SAVE_S:
             self._save()
 
@@ -2343,6 +2362,7 @@ class Roads:
             self._overlay.pop(cid, None)
             self._overlay_seen.pop(cid, None)
             self._overlay_checked.pop(cid, None)
+            self._overlay_miss.pop(cid, None)
         if gone:
             self._overlay_rev += 1
             self._overlay_dirty = True

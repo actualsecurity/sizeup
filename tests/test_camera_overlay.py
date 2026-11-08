@@ -218,11 +218,65 @@ def test_a_merge_by_overlay_is_checked_again_and_comes_apart_when_the_overlays_d
     f.bodies[NORTH["url"]] = png(picture(seed=2))
     rd.sweep()
     assert ids(rd) == ["90200"] and rd.alias("90201") == "90200"
-    # the merged-away record isn't listed, but the sweep still looks at its still: now it names another camera
+    # the merged-away record isn't listed, but the sweep still looks at its still: now it names another camera; after
+    # OVERLAY_SPLIT_READS sweeps in a row of that, the merge comes apart
     f.bodies[NORTH["url"]] = png(picture("CAM-I999nb-N_of_Ex9_OAK RD-mp4.9", seed=2))
+    for k in range(r.OVERLAY_SPLIT_READS):
+        assert ids(rd) == ["90200"], k
+        clock.t += r.HEALTH_SWEEP_S + 1
+        rd.sweep()
+    assert ids(rd) == ["90200", "90201"] and rd.aliases() == {}
+
+
+def jittered(img: np.ndarray, n: int = 19, seed: int = 7) -> np.ndarray:
+    """img with n pixels at the edges of its overlay's glyphs flipped (the real bars' read-to-read jitter)."""
+    out = img.copy()
+    lit = out[:16, :, 0] > 128
+    edge = np.argwhere(lit ^ np.roll(lit, 1, axis=1))
+    for y, x in np.random.default_rng(seed).choice(edge, n, replace=False):
+        out[y, x] = 255 - out[y, x]
+    return out
+
+
+def test_one_jittered_read_keeps_the_merge_and_three_in_a_row_split_it(tmp_path):
+    clock = Clock()
+    rd, f = hub([AT, NORTH], tmp_path, clock)
+    f.bodies[AT["url"]] = png(picture(seed=1))
+    f.bodies[NORTH["url"]] = png(picture(seed=2))
+    rd.sweep()
+    assert ids(rd) == ["90200"]
+    rev, kept = rd.rev, rd._overlay["90201"]
+    # one read a few edge pixels off: noise; the pattern kept, nothing regrouped or saved
+    f.bodies[NORTH["url"]] = png(jittered(picture(seed=2)))
+    assert not camoverlay.same(camoverlay.overlay(f.bodies[NORTH["url"]]), kept)
     clock.t += r.HEALTH_SWEEP_S + 1
     rd.sweep()
-    assert ids(rd) == ["90200", "90201"] and rd.aliases() == {}
+    assert ids(rd) == ["90200"] and rd._overlay["90201"] == kept and not rd._overlay_dirty
+    assert all(x["id"] != "90201" for x in rd.public()["cameras"])
+    # the clean read again: the count starts over
+    f.bodies[NORTH["url"]] = png(picture(seed=2))
+    clock.t += r.HEALTH_SWEEP_S + 1
+    rd.sweep()
+    assert ids(rd) == ["90200"] and "90201" not in rd._overlay_miss
+    # three odd reads in a row: the merge comes apart
+    for k in range(3):
+        f.bodies[NORTH["url"]] = png(jittered(picture(seed=2), seed=k))
+        clock.t += r.HEALTH_SWEEP_S + 1
+        rd.sweep()
+    assert ids(rd) == ["90200", "90201"] and rd.rev != rev
+
+
+def test_a_pattern_no_other_camera_carries_changes_nothing():
+    rd, f = hub([AT, NORTH])
+    f.bodies[AT["url"]] = png(picture(seed=1))
+    f.bodies[NORTH["url"]] = png(picture("CAM-I999nb-N_of_Ex9_OAK RD-mp4.9", seed=2))
+    rev = rd.rev
+    for t in ("03:18:22", "03:18:29", "03:18:36"):                 # (a bar read with its time in it: new each time)
+        f.bodies[AT["url"]] = png(picture(time="11/08/26 " + t, seed=1, time_at=4 + 6 * len(NAME) + 6))
+        rd._images.clear()
+        rd.image("90200")
+        rd.image("90201")
+    assert rd.rev == rev and rd._overlay_rev == 0 and not rd._overlay_dirty and ids(rd) == ["90200", "90201"]
 
 
 def test_overlays_not_read_for_a_day_are_forgotten_and_gone_ids_are_not_kept(tmp_path):
@@ -258,14 +312,42 @@ def test_a_new_overlay_is_saved_soon_without_waiting_for_the_next_list(tmp_path)
     cache = tmp_path / "roads.json"
     f.bodies[AT["url"]] = png(picture(seed=1))
     f.bodies[NORTH["url"]] = png(picture(seed=2))
-    rd.image("90200")                                               # the first: written at once
-    assert set(json.loads(cache.read_text())["overlays"]) == {"90200"}
-    rd.image("90201")                                               # the next within OVERLAY_SAVE_S: waits
-    assert set(json.loads(cache.read_text())["overlays"]) == {"90200"} and rd._overlay_dirty
-    clock.t += r.OVERLAY_SAVE_S
+    rd.image("90200")                                               # alone: nothing to merge, nothing written
+    assert not cache.exists()
+    rd.image("90201")                                               # the same overlay: a merge, written at once
+    assert set(json.loads(cache.read_text())["overlays"]) == {"90200", "90201"}
+    # another pair within OVERLAY_SAVE_S: it waits ...
+    c = cam("90220", "I-287 at Exit 5 Birch Ln", road="I-287", mile="5.0", stream="R0_220", lat=LAT + 9000 * M)
+    d = cam("90221", "I-287 North of Exit 5 Birch Ln", road="I-287", mile="5.4", stream="R0_221", lat=LAT + 9600 * M)
+    rd.carshub.data["cameras"] += [dict(x, source="511NY", provider="carshub") for x in (c, d)]
+    rd._changed()
+    f.bodies[c["url"]] = png(picture("CAM-I287eb-Ex5_BIRCH LN-mp5.0", seed=5))
+    f.bodies[d["url"]] = png(picture("CAM-I287eb-Ex5_BIRCH LN-mp5.0", seed=6))
+    rd.image("90220")
+    rd.image("90221")
+    assert set(json.loads(cache.read_text())["overlays"]) == {"90200", "90201"} and rd._overlay_dirty
+    clock.t += r.OVERLAY_SAVE_S                                     # ... until it's due (the next still read)
     rd._images.clear()
-    rd.image("90200")                                               # (the same overlay: nothing new, but it's due)
-    assert set(json.loads(cache.read_text())["overlays"]) == {"90200", "90201"} and not rd._overlay_dirty
+    rd.image("90200")
+    assert set(json.loads(cache.read_text())["overlays"]) == {"90200", "90201", "90220", "90221"} and not rd._overlay_dirty
+
+
+def test_a_save_builds_and_writes_its_document_under_one_lock(tmp_path):
+    rd, f = hub([AT, NORTH], tmp_path)
+    events = []
+
+    class Lock:
+        def __enter__(self):
+            events.append("lock")
+
+        def __exit__(self, *a):
+            events.append("unlock")
+    real_clock = rd.clock
+    rd.clock = lambda: events.append("build") or real_clock()      # (the document's time: read while building it)
+    rd._save_lock = Lock()
+    rd._save()
+    assert events[0] == "lock" and events[-1] == "unlock" and "build" in events[1:-1]
+    assert (tmp_path / "roads.json").exists()
 
 
 def test_a_png_labelled_image_jpeg_is_read_by_its_bytes():
