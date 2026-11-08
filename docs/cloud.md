@@ -785,8 +785,12 @@ Incidents come in from ranked sources. The interface is in `sizeup/sources/__ini
   - When both sides have a location, they must be the same place: house number and street, direction and suffix. An
     intersection never matches a numbered address. Shared units never override two different places.
   - One building can hold two calls (an apartment, a school): when both sides name units, they must share at least one;
-    otherwise "Possibly the same as #N". A same-place incident the source already has is noted the same way, never
-    skipped silently.
+    otherwise (unless the types agree) "Possibly the same as #N". A same-place incident the source already has is noted
+    the same way, never skipped silently. A feed's unit codes go through the data file's `feed_unit_aliases` first.
+  - The same place is not enough: it must be the same call. A page joins a feed's incident only when the feed's dispatch
+    is within 5 min of the page or the types agree, and never one the feed has in service. A feed event never joins an
+    incident made after it ended, and one first seen closed or old (after an outage) joins only an incident made within
+    5 min of its dispatch; otherwise it is recorded only.
   - A named place with no street (`@SAMPLE SCHOOL`) has its own key: it matches the same place name and never an
     address. A direction after the suffix (`12 Main St W`) and `EXT` are part of the street. A name made only of
     suffix words is the name (`12 Court St`). Only known towns (the lists' `geo_town_order` and aliases, reloaded when
