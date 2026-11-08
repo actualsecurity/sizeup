@@ -479,34 +479,33 @@ def test_another_feed_ruling_the_incident_is_a_new_baseline(rig):
     assert "E64" in {a["name"] for a in rig.cad.full(iid)["assignments"] if not a["cleared_at"]}
 
 
-def test_the_primary_recovering_while_the_call_is_in_service_still_closes_it(rig):
-    """Finding 2: the mirror ran the call; the primary comes back with the call already in service: its units are
-    released and the call closes, never left active."""
-    from tests.fake_feed import FakeFeed
-    mirror = FakeFeed("mirror", "Mirror feed", rank=2, clock=rig.clock)
-    rig.feeds.append(mirror)
-    rig.runner = type(rig.runner)(rig.feeds, rig.sink, log=lambda m: None, clock=rig.clock)
-    rig.feed.outage("failing", "x", raise_=True)
-    mirror.put("M1", type="ALARM/COMM", location="12 Example Ave", units=("E60",), times={"dispatched": T0})
-    rig.poll()
-    iid = rig.cad.store.one("SELECT incident_id FROM source_reports WHERE ref = 'M1'")["incident_id"]
-    assert any(a["name"] == "E60" and not a["cleared_at"] for a in rig.cad.full(iid)["assignments"])
-    rig.at(1200)
-    rig.feed.recover()
-    rig.feed.put("A1", type="ALARM/COMM", location="12 Example Ave", units=("E60",), closed=True,  # the same call:
-                 times={"dispatched": T0, "on_location": T0 + 300, "in_service": T0 + 1100})     # dispatched as it was made
-    rig.poll()
-    assert rig.iid("A1") == iid
-    inc = rig.cad.full(iid)
-    assert inc["status"] == "closed" and not any(not a["cleared_at"] for a in inc["assignments"])
-
-
 def _two_feeds(rig):
     from tests.fake_feed import FakeFeed
     mirror = FakeFeed("mirror", "Mirror feed", rank=2, clock=rig.clock)
     rig.feeds.append(mirror)
     rig.runner = type(rig.runner)(rig.feeds, rig.sink, log=lambda m: None, clock=rig.clock)
     return mirror
+
+
+def test_the_primary_recovering_after_the_call_ended_asks_close_never_closes(rig):
+    """Seventh review (A): the mirror ran the call; the primary comes back with that same call already in service (first
+    seen closed). It may join (the same call) and record its times, but never releases a unit or closes: "close?"."""
+    mirror = _two_feeds(rig)
+    rig.feed.outage("failing", "x", raise_=True)
+    mirror.put("M1", type="ALARM/COMM", location="12 Example Ave", units=("E60",), times={"dispatched": T0})
+    rig.poll()
+    iid = rig.cad.store.one("SELECT incident_id FROM source_reports WHERE ref = 'M1'")["incident_id"]
+    rig.at(1200)
+    rig.feed.recover()
+    rig.feed.put("A1", type="ALARM/COMM", location="12 Example Ave", units=("E60",), closed=True,
+                 times={"dispatched": T0, "on_location": T0 + 300, "in_service": T0 + 1100})
+    rig.poll()
+    assert rig.iid("A1") == iid
+    inc = rig.cad.full(iid)
+    assert inc["status"] in ("pending", "active") and any(a["name"] == "E60" and not a["cleared_at"] for a in inc["assignments"])
+    assert inc["auto"]["close_pending"] and inc["auto"]["close_pending"]["text"].endswith(": close?")
+    rig.cad.unit_status(rig.uid("E60"), {"status": "AV", "operator": "Lt. Test"})
+    assert rig.cad.store.incident(iid)["status"] in ("pending", "active")    # the last unit off: still a person's close
 
 
 def test_an_earlier_closed_call_at_the_address_never_closes_the_live_one(rig):
@@ -562,3 +561,60 @@ def test_a_new_ruler_on_a_queued_incident_is_its_first_report(rig):
     assert any(a["name"] == "E60" and not a["cleared_at"] for a in rig.cad.full(iid)["assignments"])
     row = rig.cad.store.one("SELECT started_at, seen_src FROM auto_incidents WHERE incident_id = ?", (iid,))
     assert row["started_at"] is not None and row["seen_src"] == "county"
+
+
+# -- the seventh review: the live call stays open --------------------------------------------------------------------
+
+PAGE_E60 = ("Port Chester Fire Department, Engine 60, respond to an activated fire alarm. 12 Example Avenue, "
+            "cross of Sample Street. Time out 1442.")
+
+
+def _open(rig, iid):
+    return rig.cad.store.incident(iid)["status"] in ("queued", "pending", "active")
+
+
+def test_probe_1_a_closed_event_from_before_the_page_leaves_the_live_call_open(rig):
+    rig.feed.outage("failing", "x", raise_=True)
+    rig.poll()
+    rig.at(600)
+    page = rig.page()
+    rig.at(1000)
+    rig.feed.recover()
+    rig.feed.put("C1", type="ALARM/COMM", location="12 EXAMPLE AVE", units=("E60", "L31"), closed=True,
+                 times={"dispatched": T0 + 400, "in_service": T0 + 900})
+    rig.poll()
+    assert _open(rig, page["id"])
+
+
+def test_probe_2_the_first_alarm_s_close_leaves_the_second_call_open(rig):
+    rig.feed.put("A1", type="ALARM/COMM", location="12 EXAMPLE AVE", units=("E60", "L31"), times={"dispatched": T0})
+    rig.poll()
+    a1 = rig.iid("A1")
+    rig.feed.outage("failing", "x", raise_=True)
+    rig.at(900)
+    rig.poll()
+    p = rig.page(fresh=True)
+    assert p["id"] != a1
+    rig.at(2400)
+    rig.feed.recover()
+    rig.feed.put("A2", type="ALARM/COMM", location="12 EXAMPLE AVE", units=("E60", "L31"), times={"dispatched": T0 + 890})
+    rig.feed.change("A1", closed=True, times={"in_service": T0 + 2000})
+    rig.poll()
+    assert rig.cad.store.incident(a1)["status"] == "closed"            # A1 was seen open: its close stands
+    assert _open(rig, p["id"]) and rig.iid("A2") == p["id"]
+
+
+def test_probe_3_two_calls_at_one_address_the_earlier_s_close_leaves_the_later_open(rig):
+    rig.feed.outage("failing", "x", raise_=True)
+    rig.poll()
+    first = rig.page()
+    rig.at(700)
+    second = rig.page("p2", PAGE_E60, fresh=True)
+    rig.at(1500)
+    rig.feed.recover()
+    rig.feed.put("B1", type="ALARM/COMM", location="12 EXAMPLE AVE", units=("E60", "L31"), closed=True,
+                 times={"dispatched": T0 - 5, "in_service": T0 + 1400})
+    rig.feed.put("B2", type="ALARM/COMM", location="12 EXAMPLE AVE", units=("E60",), times={"dispatched": T0 + 695})
+    rig.poll()
+    assert rig.iid("B2") == second["id"] and _open(rig, second["id"])
+    assert _open(rig, first["id"])                                      # B1 first seen closed: never closes it

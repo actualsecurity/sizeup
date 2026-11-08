@@ -38,7 +38,10 @@ record (the hub, or all-in-one), on top of the incident sources (sizeup/cad/sour
                service, at that time; each release is its own undoable step), then the incident closes COMPLETE when
                no unit is left on it. A unit a person put or kept on it, or one the feed doesn't list, keeps it open
                with "County in service: close?" on the timeline (one click closes it); it closes by itself once those
-               clear. Undoing the close puts back the units it and the in service released
+               clear. Undoing the close puts back the units it and the in service released. Only a source whose report
+               was seen OPEN here at least once (open_srcs: not closed, no in-service time, not first seen over
+               ASSIGN_WINDOW_S after its dispatch) releases units or closes; a report first seen closed or late records
+               its times and asks "close?" (one click), never closing by itself
       source   every automatic step is an auto_steps row with its source (county | radio) and its timeline entry; each
                (but accept) is undone with one click (POST /api/cad/incident/<id>/auto-undo {step}), which marks the
                unit (or the close) as a person's
@@ -57,7 +60,6 @@ import time
 from datetime import datetime
 
 import re
-from pathlib import Path
 
 from sizeup.cad.sources import FEED_SOURCE, PAGING
 from sizeup.cad.store import OPEN, TZ, CadError
@@ -79,6 +81,8 @@ CREATE TABLE IF NOT EXISTS auto_incidents (
   tracked_at REAL,                      -- NULL: manual for good (first reported in PCFD mode, or already accepted then)
   seen TEXT NOT NULL DEFAULT '{}',      -- the feed's report as last processed (FeedEvent.as_dict)
   seen_src TEXT NOT NULL DEFAULT '',    -- whose report that was (source_reports.source): another feed's re-baselines
+  open_srcs TEXT NOT NULL DEFAULT '[]', -- the sources whose report was seen OPEN here (not closed, not late): only
+                                        -- they may release units or close it automatically
   paged_at REAL,
   started_at REAL,                      -- automation first took it while pending / active (units listed before: new then)
   held TEXT NOT NULL DEFAULT ''         -- why it was left queued for a person (said once)
@@ -128,8 +132,11 @@ class AutoDispatch:
         self._lock = threading.RLock()
         with self.store.lock:
             self.store.db.executescript(SCHEMA)
-            if "seen_src" not in {r[1] for r in self.store.db.execute("PRAGMA table_info(auto_incidents)")}:
+            have = {r[1] for r in self.store.db.execute("PRAGMA table_info(auto_incidents)")}
+            if "seen_src" not in have:
                 self.store.db.execute("ALTER TABLE auto_incidents ADD COLUMN seen_src TEXT NOT NULL DEFAULT ''")
+            if "open_srcs" not in have:
+                self.store.db.execute("ALTER TABLE auto_incidents ADD COLUMN open_srcs TEXT NOT NULL DEFAULT '[]'")
 
     # -- the mode --------------------------------------------------------------------------------------------------
 
@@ -256,15 +263,35 @@ class AutoDispatch:
             # and statuses are the new baseline, never diffed against the other feed's (L2). Its listed units are still
             # dispatched (_assign: never twice, never a cleared one back) and its in service still closes the call
             if auto and row["tracked_at"] is not None:
-                self._ruler_changed(iid, data, label)
+                self._ruler_changed(iid, data, label, self._seen_open(iid, src, data))
             with self.store.tx() as db:
                 db.execute("UPDATE auto_incidents SET seen = ?, seen_src = ? WHERE incident_id = ?", (seen, src, iid))
             return first
+        live = self._seen_open(iid, src, data)
         if auto and row["tracked_at"] is not None:
-            self._apply(iid, json.loads(row["seen"] or "{}"), data, label)
+            self._apply(iid, json.loads(row["seen"] or "{}"), data, label, live)
         with self.store.tx() as db:
             db.execute("UPDATE auto_incidents SET seen = ?, seen_src = ? WHERE incident_id = ?", (seen, src, iid))
         return first
+
+    def _seen_open(self, iid: int, src: str, data: dict) -> bool:
+        """The invariant (seventh review): automation releases units and closes an incident only from a source whose
+        report it saw OPEN here at least once (not closed, no in-service time, and not first seen over
+        ASSIGN_WINDOW_S after its dispatch). A report first seen closed or late only records its times; its end is a
+        "close?" for a person. True when src is such a source (this report may make it one)."""
+        r = self._tracking(iid)
+        try:
+            srcs = set(json.loads(r["open_srcs"] or "[]")) if r else set()
+        except ValueError:
+            srcs = set()
+        times = data.get("times") or {}
+        disp = times.get("dispatched") or (min(times.values()) if times else None)
+        if (src not in srcs and not data.get("closed") and times.get("in_service") is None
+                and (disp is None or self.clock() - disp <= ASSIGN_WINDOW_S)):
+            srcs.add(src)
+            with self.store.tx() as db:
+                db.execute("UPDATE auto_incidents SET open_srcs = ? WHERE incident_id = ?", (json.dumps(sorted(srcs)), iid))
+        return src in srcs
 
     def on_page(self, iid: int | None) -> None:
         """A page attached to an incident a feed has: "paged" on a tracked one, in 60 Control mode."""
@@ -280,14 +307,9 @@ class AutoDispatch:
             self.log(f"CAD: dispatch mode: {type(e).__name__}")
 
     def _aliases(self) -> dict[str, str]:
-        """The data file's "feed_unit_aliases": {feed code: board code} (optional)."""
-        L = self.store.lists
-        try:
-            d = json.loads(Path(L.path).read_text()) if L.path else {}
-        except (OSError, ValueError):
-            d = {}
-        a = d.get("feed_unit_aliases") or {}
-        return {_key(k): str(v) for k, v in a.items() if isinstance(k, str) and isinstance(v, str)} if isinstance(a, dict) else {}
+        """The data file's "feed_unit_aliases": {feed code: board code} (optional), read where the incident sources read
+        them (Sources.feed_unit_aliases: one source of truth, again when the file changes)."""
+        return {_key(k): str(v) for k, v in self.cad.sources.feed_unit_aliases().items()}
 
     def _ours(self) -> dict[str, dict]:
         """A feed's unit code as written -> our board unit (the fire response: PCFD and the joint response): the board
@@ -323,7 +345,7 @@ class AutoDispatch:
         return self.store.one("SELECT i.* FROM auto_possibly p JOIN incidents i ON i.id = p.other_id WHERE p.incident_id = ? "
                               "AND i.status IN ('pending', 'active') ORDER BY i.id LIMIT 1", (iid,))
 
-    def _apply(self, iid: int, old: dict, new: dict, label: str) -> None:
+    def _apply(self, iid: int, old: dict, new: dict, label: str, live: bool = True) -> None:
         op = f"{label} · auto"
         inc = self.store.incident(iid)
         ours = self._ours()
@@ -373,10 +395,13 @@ class AutoDispatch:
                 now_t, was = times, otimes
             for k in ("responding", "on_location", "in_service"):
                 t = now_t.get(k)
-                if t is not None and t != was.get(k):
+                if t is not None and t != was.get(k) and (live or k != "in_service"):
                     self._unit_step(iid, u, FEED_STATUS[k], t, op, "county", k)
         if times.get("in_service") is not None or new.get("closed"):
-            self._close(iid, times.get("in_service") or self.clock(), op, label, units)
+            if live:
+                self._close(iid, times.get("in_service") or self.clock(), op, label, units)
+            else:
+                self._ask_close(iid, times.get("in_service") or self.clock(), op, label)
 
     def _started(self, iid: int) -> None:
         with self.store.tx() as db:
@@ -395,20 +420,34 @@ class AutoDispatch:
         except Exception as e:  # noqa: BLE001 - the accept stands whatever this does
             self.log(f"CAD: dispatch mode: {type(e).__name__}")
 
-    def _ruler_changed(self, iid: int, data: dict, label: str) -> None:
+    def _ruler_changed(self, iid: int, data: dict, label: str, live: bool) -> None:
         """A new feed rules a tracked incident: queued, it is taken as any first report; pending or active, its listed
-        units are dispatched and its in service (or closed) runs the close, with no times replayed."""
+        units are dispatched (unless its report is already over) and its in service (or closed) runs the close, with
+        no times replayed. A report never seen open (live False) only asks "close?"."""
         status = self.store.incident(iid)["status"]
         if status == "queued":
-            self._apply(iid, {}, data, label)
+            self._apply(iid, {}, data, label, live)
             return
         if status not in ("pending", "active"):
             return
         self._started(iid)                               # when automation took it, if not before
-        self._dispatch_listed(iid)
         times = data.get("times") or {}
-        if times.get("in_service") is not None or data.get("closed"):
+        ended = times.get("in_service") is not None or data.get("closed")
+        if not ended:
+            self._dispatch_listed(iid)
+        elif live:
             self._close(iid, times.get("in_service") or self.clock(), f"{label} · auto", label, data.get("units") or [])
+        else:
+            self._ask_close(iid, times.get("in_service") or self.clock(), f"{label} · auto", label)
+
+    def _ask_close(self, iid: int, t: float, op: str, label: str) -> None:
+        """The end of a report never seen open here: "close?" for a person (one click), never closed by itself."""
+        if self._manual(iid, "close") or self.store.incident(iid)["status"] not in ("pending", "active"):
+            return
+        ref = f"ask:{t}"
+        if not self.store.one("SELECT 1 AS x FROM auto_steps WHERE incident_id = ? AND kind = 'close?' AND ref = ?", (iid, ref)):
+            self._step(iid, "close?", "county", f"{label} in service {_hm(t)}: close?", t, ref=ref, own_event=True,
+                       operator=op)
 
     def _dispatch_listed(self, iid: int) -> None:
         data, label = self._feed(iid)
@@ -587,8 +626,8 @@ class AutoDispatch:
                     return
                 for iid in {i for i in iids if i}:
                     s = self.close_pending(iid)
-                    if s is None or not self.tracked(iid) or self._blocking(iid):
-                        continue
+                    if s is None or not self.tracked(iid) or self._blocking(iid) or str(s["ref"]).startswith("ask:"):
+                        continue                         # ("ask:": a report never seen open: a person closes it)
                     _, label = self._feed(iid)
                     self._do_close(iid, s["at"], f"{label or 'County feed'} · auto", label or "County feed")
         except Exception as e:  # noqa: BLE001

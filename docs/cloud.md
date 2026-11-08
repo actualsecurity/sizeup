@@ -857,6 +857,8 @@ Incidents come in from ranked sources. The interface is in `sizeup/sources/__ini
     minutes and it is tracked.
   - The feed's in service releases the units it lists that no person marked, then closes the call when none is left;
     otherwise "County in service: close?" with one click.
+  - Only a feed whose report was seen open here at least once releases units or closes a call. A report first seen
+    closed, or more than 20 min after its dispatch, records its times and asks "close?" (one click), never closing it.
   - Each step is an `auto_steps` row with its source (county, radio) and a one-click undo
     (`POST /api/cad/incident/<id>/auto-undo`); undoing a close puts back the units it released.
 - **A person wins:** a unit a person touches on an incident (marked before the change), and an incident a person reopens,
