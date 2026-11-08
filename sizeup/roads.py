@@ -1880,7 +1880,8 @@ class Roads:
         self._health: dict[str, dict] = {}            # camera id -> {fails, down_since, last_image, checked}
         self._cam_kept: dict[str, str] = {}           # camera id -> the id kept for its camera at the last merge (#320)
         self._alias: dict[str, str] = {}              # a merged-away camera id -> the id kept for its camera
-        self._cam_group_cache: tuple[int, list[list[str]]] | None = None   # (the lists' hash, the groups' ids)
+        self._cam_group_cache: tuple[int, list[list[str]], set[str]] | None = None   # (hash, groups' ids, _overlay_tied)
+        self._overlay_tied: set[str] = set()          # the ids in groups an overlay joined (#320): their stills rechecked
         self._overlay: dict[str, tuple[int, int, bytes]] = {}   # camera id -> its still's overlay (camoverlay), when seen
         self._overlay_seen: dict[str, float] = {}     # camera id -> when its overlay was last read
         self._overlay_checked: dict[str, float] = {}  # a merged-away camera id -> when its still was last looked at
@@ -1998,14 +1999,17 @@ class Roads:
             # (#276) a live-video camera whose still is down: is its stream there? (two small GETs, as a player's first)
             if c.get("video") and (self._health.get(c["id"]) or {}).get("down_since") is not None:
                 self.probe_stream(c["id"])
-        # (#320) the merged-away records' stills too, for their overlays: a merge made by them is checked as often
+        # (#320) the merged-away records' stills too, where an overlay is what ties them to the one kept: a merge made by
+        # overlays is checked as often as any camera (stamped at the sweep's start: every HEALTH_SWEEP_S, not two)
         aliases = self.aliases()
+        tied = self._overlay_tied
         for p in self.providers:
             for c in list(p.data["cameras"]):
                 if self._stop.is_set():
                     break
-                if c["id"] in aliases and c.get("url") and now - self._overlay_checked.get(c["id"], 0) >= HEALTH_SWEEP_S:
-                    self._overlay_look(c)
+                if (c["id"] in aliases and c["id"] in tied and c.get("url")
+                        and now - self._overlay_checked.get(c["id"], 0) >= HEALTH_SWEEP_S):
+                    self._overlay_look(c, now)
                     n += 1
         self._expire_overlays(now)
         if self._overlay_dirty:
@@ -2114,26 +2118,28 @@ class Roads:
             self.log(f"roads: cache {self.cache.name} not read ({type(e).__name__}); fetching afresh")
 
     def _save(self) -> None:
-        self._overlay_dirty, self._overlay_saved = False, self.clock()
-        if not self.cache:
-            return
-        now = self._overlay_saved
-        have = {c["id"] for p in self.providers for c in p.data["cameras"]}
-        doc = {"bbox": list(self.bbox),
-               "providers": {p.name: {f: {"at": p.status[f]["at"], "items": p.data[f], "etag": p.status[f]["etag"],
-                                          "modified": p.status[f]["modified"], "published": p.status[f]["published"]}
-                                      for f in FEEDS} for p in self.providers},
-               "overlays": {cid: [w, rows, base64.b64encode(bits).decode(), self._overlay_seen.get(cid, 0)]
-                            for cid, (w, rows, bits) in list(self._overlay.items())
-                            if cid in have and now - self._overlay_seen.get(cid, 0) <= OVERLAY_KEEP_S}}
-        try:
-            with self._save_lock:                          # (the feeds' thread and a still's: one write at a time)
+        """The disk cache: the lists and the overlays read (#320: fresh ones, of ids a list has). Built and written under
+        one lock, so an older document never lands after a newer one."""
+        with self._save_lock:                              # (the feeds' thread and a still's: one save at a time)
+            self._overlay_dirty, self._overlay_saved = False, self.clock()
+            if not self.cache:
+                return
+            now = self._overlay_saved
+            have = {c["id"] for p in self.providers for c in p.data["cameras"]}
+            doc = {"bbox": list(self.bbox),
+                   "providers": {p.name: {f: {"at": p.status[f]["at"], "items": p.data[f], "etag": p.status[f]["etag"],
+                                              "modified": p.status[f]["modified"], "published": p.status[f]["published"]}
+                                          for f in FEEDS} for p in self.providers},
+                   "overlays": {cid: [w, rows, base64.b64encode(bits).decode(), self._overlay_seen.get(cid, 0)]
+                                for cid, (w, rows, bits) in list(self._overlay.items())
+                                if cid in have and now - self._overlay_seen.get(cid, 0) <= OVERLAY_KEEP_S}}
+            try:
                 self.cache.parent.mkdir(parents=True, exist_ok=True)
                 tmp = self.cache.with_suffix(".tmp")
                 tmp.write_text(json.dumps(doc, separators=(",", ":")))
                 tmp.replace(self.cache)
-        except OSError as e:
-            self.log(f"roads: cache not saved ({type(e).__name__}: {e})")
+            except OSError as e:
+                self.log(f"roads: cache not saved ({type(e).__name__}: {e})")
 
     # -- what the pages get ----------------------------------------------------------------------------
 
@@ -2244,6 +2250,7 @@ class Roads:
             for p in order:
                 for c in p.data["cameras"]:
                     ids.setdefault(c["id"], (c, p.name))
+            self._overlay_tied = cached[2]
             return [[ids[i] for i in g] for g in cached[1]]       # (the records themselves: their state may be newer)
         groups: list[list[tuple[dict, str]]] = []
         seen: set[str] = set()
@@ -2253,11 +2260,26 @@ class Roads:
                 return same_camera(a, b)
             return km(a["lat"], a["lon"], b["lat"], b["lon"]) * 1000 <= DEDUPE_M
 
+        by_overlay: set[int] = set()                              # the groups an overlay joined a record to
+
         def fits(it: dict, pn: str, g: list) -> bool:
-            if not any(camera_match(it, o, w == pn, lambda a, b, w=w: near(a, b, pn, w)) or self._same_overlay(it, o)
-                       for o, w in g):
+            used = False
+
+            def match(o: dict, same_source: bool, w: str = "") -> bool:
+                nonlocal used
+                if camera_match(it, o, same_source, (lambda a, b: near(a, b, pn, w)) if not same_source else None):
+                    return True
+                if self._same_overlay(it, o):
+                    used = True
+                    return True
                 return False
-            return all(camera_match(it, o, True) or self._same_overlay(it, o) for o, w in g if w == pn)
+            if not any(match(o, w == pn, w) for o, w in g):
+                return False
+            if not all(match(o, True) for o, w in g if w == pn):
+                return False
+            if used:
+                by_overlay.add(id(g))
+            return True
         for p in order:
             for it in p.data["cameras"]:
                 if it["id"] in seen:
@@ -2268,7 +2290,8 @@ class Roads:
                     groups.append([(it, p.name)])
                 else:
                     g.append((it, p.name))
-        self._cam_group_cache = (sig, [[c["id"] for c, _ in g] for g in groups])
+        self._overlay_tied = {c["id"] for g in groups if id(g) in by_overlay for c, _ in g}
+        self._cam_group_cache = (sig, [[c["id"] for c, _ in g] for g in groups], self._overlay_tied)
         return groups
 
     def _same_overlay(self, a: dict, b: dict) -> bool:
@@ -2285,7 +2308,7 @@ class Roads:
         """A fresh still's overlay kept (#320): a new one, or one that changed, groups the cameras again (and is saved,
         OVERLAY_SAVE_S at most). A still with none (a placeholder, a JPEG) leaves the last one read, until it is
         OVERLAY_KEEP_S old (_expire_overlays)."""
-        sig = camoverlay.overlay(body) if ctype == "image/png" else None
+        sig = camoverlay.overlay(body)          # (the PNG's own signature, whatever its label: PNGs come as image/jpeg too)
         if sig is None:
             return
         now = self.clock()
@@ -2299,10 +2322,10 @@ class Roads:
         if self._overlay_dirty and now - self._overlay_saved >= OVERLAY_SAVE_S:
             self._save()
 
-    def _overlay_look(self, c: dict) -> None:
+    def _overlay_look(self, c: dict, now: float | None = None) -> None:
         """A merged-away record's still, fetched for its overlay only (sweep): the merge is checked again, every
         HEALTH_SWEEP_S, as for any listed camera's (a wrong one comes apart: its overlay differs)."""
-        self._overlay_checked[c["id"]] = self.clock()
+        self._overlay_checked[c["id"]] = self.clock() if now is None else now
         try:
             with self._parallel:
                 code, headers, body = self.fetch(c["url"], IMAGE_TIMEOUT_S, IMAGE_MAX_BYTES)

@@ -115,14 +115,21 @@ def test_a_name_longer_than_most_of_the_bar_is_read_whole():
 
 
 class Stills:
-    """The stills by address (PNG, served now)."""
+    """The stills by address (PNG, served now as ctype; each fetch takes `takes` seconds of the clock)."""
 
     def __init__(self):
         self.bodies: dict[str, bytes] = {}
+        self.ctype = "image/png"
+        self.calls: list[str] = []
+        self.clock = None
+        self.takes = 0.0
 
     def __call__(self, url, timeout, limit, headers=None):
+        self.calls.append(url)
+        if self.clock is not None:
+            self.clock.t += self.takes
         if url in self.bodies:
-            return 200, {"content-type": "image/png"}, self.bodies[url]
+            return 200, {"content-type": self.ctype}, self.bodies[url]
         return 404, {}, b""
 
 
@@ -142,6 +149,7 @@ def hub(cams, tmp_path=None, clock=None):
     rd.carshub.data["cameras"] = [dict(c, source="511NY", provider="carshub") for c in cams]
     rd.carshub.status["cameras"]["at"] = 1_800_000_000.0
     rd._changed()
+    f.clock = clock
     return rd, f
 
 
@@ -258,3 +266,46 @@ def test_a_new_overlay_is_saved_soon_without_waiting_for_the_next_list(tmp_path)
     rd._images.clear()
     rd.image("90200")                                               # (the same overlay: nothing new, but it's due)
     assert set(json.loads(cache.read_text())["overlays"]) == {"90200", "90201"} and not rd._overlay_dirty
+
+
+def test_a_png_labelled_image_jpeg_is_read_by_its_bytes():
+    # the still server labels some PNG stills image/jpeg: the overlay goes by the PNG signature, not the label
+    rd, f = hub([AT, NORTH])
+    f.ctype = "image/jpeg"
+    f.bodies[AT["url"]] = png(picture(seed=1))
+    f.bodies[NORTH["url"]] = png(picture(seed=2))
+    rd.image("90200")
+    rd.image("90201")
+    assert ids(rd) == ["90200"] and rd.alias("90201") == "90200"
+
+
+def test_wide_spaces_in_a_name_are_inside_the_name():
+    # 352 px stills (a 14-row bar): four spaces make a gap wider than 1.5 bar heights inside the name; the cut is at
+    # the widest gap, before the time at the right edge, so two cameras sharing the part before the spaces stay two
+    a = camoverlay.overlay(png(picture("CAM-I99nb-Ex9    OAK RD-mp4.3", "11/08 03:18", seed=1, w=352, h=240)))
+    b = camoverlay.overlay(png(picture("CAM-I99nb-Ex9    ELM ST-mp2.1", "11/08 03:18", seed=2, w=352, h=240)))
+    c = camoverlay.overlay(png(picture("CAM-I99nb-Ex9    OAK RD-mp4.3", "11/09 21:40", seed=3, w=352, h=240)))
+    assert a and b and not camoverlay.same(a, b) and camoverlay.same(a, c)
+    # no time at the right edge: the whole text is the name, wide gaps and all
+    d = camoverlay.overlay(png(picture("CAM-I99nb-Ex9    OAK RD", "", seed=1, w=352, h=240)))
+    e = camoverlay.overlay(png(picture("CAM-I99nb-Ex9    ELM ST", "", seed=1, w=352, h=240)))
+    assert d and e and not camoverlay.same(d, e)
+
+
+def test_the_sweep_rechecks_only_the_records_an_overlay_ties():
+    clock = Clock()
+    by_stream = cam("90210", "At Exit 7 on Elm Street", road="I-684", mile="2.0", stream="R0_210", lat=LAT + 5000 * M)
+    twin = dict(by_stream, id="90211", name="I-684 Exit 7 Elm St second record", url="https://stills.example/R0_211.png")
+    rd, f = hub([AT, NORTH, by_stream, twin], clock=clock)
+    f.takes = 5.0                                                   # each still takes a few seconds
+    for c in (AT, NORTH, by_stream, twin):
+        f.bodies[c["url"]] = png(picture(seed=1) if c in (AT, NORTH) else picture("CAM-I999-Ex7_ELM ST-mp2.0", seed=4))
+    rd.sweep()
+    assert set(rd.aliases()) == {"90201", "90211"} and rd._overlay_tied == {"90200", "90201"}
+    # the next sweeps, HEALTH_SWEEP_S apart from the start of the last: the overlay-tied record's still each time,
+    # never the one merged by its stream
+    for _ in range(2):
+        f.calls.clear()
+        clock.t = rd._swept + r.HEALTH_SWEEP_S                      # (the last sweep's fetches took 20 s of that)
+        rd.sweep()
+        assert NORTH["url"] in f.calls and twin["url"] not in f.calls
