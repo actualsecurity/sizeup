@@ -80,7 +80,7 @@ episode's push says so. Each alert's own grace (held()) is as before.
 
 Muted (#340, Settings > System > Push notifications, admins): an alert kind (MUTE_KINDS) muted, until a time or until
 unmuted (settings section MUTE_SECTION, kind -> {"until": epoch | null}), is shown on Settings > Health as before,
-marked muted, and never pushed (nor its recovery). The hub's own error spikes (sizeup/errwatch.py) are "hub_errors".
+marked muted, and not pushed; one pushed before the mute still gets its "Recovered". The hub's own error spikes (sizeup/errwatch.py) are "hub_errors".
 Alerts and 24 h of their history are kept in hub.sqlite (meta "health"), so a redeploy neither forgets nor
 repeats them.
 
@@ -442,6 +442,7 @@ class StationHealth:
         self.settling: dict[str, dict] = {}          # cleared, not yet settled (#340): back before SETTLE_S, one episode
         self.mutes: Callable[[], dict] | None = None   # the mutes' settings section (#340): HubApp sets it
         self._load()
+        self._first_saved = {k: v for k, v in self._first.items() if k in self.settling}
 
     # -- persistence ---------------------------------------------------------------------------------------
 
@@ -458,6 +459,9 @@ class StationHealth:
             self.history = [h for h in d.get("history") or [] if isinstance(h, dict)]
             self.last_push = {k: float(v) for k, v in (d.get("last_push") or {}).items() if isinstance(v, (int, float))}
             self.settling = {k: v for k, v in (d.get("settling") or {}).items() if isinstance(v, dict) and v.get("cleared")}
+            # held() counting a settling alert again: kept, so a takeover doesn't measure from itself (#340)
+            self._first.update({k: float(v) for k, v in (d.get("first") or {}).items()
+                                if k in self.settling and isinstance(v, (int, float))})
         if isinstance(g, dict):
             self.gaps = {str(k): [float(x) for x in v if isinstance(x, (int, float))][-GAPS_MAX:]
                          for k, v in g.items() if isinstance(v, list)}
@@ -473,7 +477,8 @@ class StationHealth:
             return
         try:
             self.db.put("health", json.dumps({"active": self.active, "history": self.history[-HISTORY_MAX:],
-                                              "last_push": self.last_push, "settling": self.settling},
+                                              "last_push": self.last_push, "settling": self.settling,
+                                              "first": {k: v for k, v in self._first.items() if k in self.settling}},
                                              separators=(",", ":")))
         except Exception as e:  # never in the way of the alerts themselves
             self.log(f"health: can't save the alerts: {type(e).__name__}: {e}")
@@ -1033,7 +1038,9 @@ class StationHealth:
                 if (not a.get("pushed") and (a.get("escalated") or now - self.last_push.get(a["key"], 0.0) >= self.repeat_s)
                         and self._notify_ok(a, now) and alert_kind(a["key"]) not in mutes):
                     self._push(a, now)
-            if changes or settled:
+            first = {k: v for k, v in self._first.items() if k in self.settling}
+            if changes or settled or first != self._first_saved:
+                self._first_saved = first
                 self._save()
             self._save_gaps(now)
         return changes
@@ -1059,7 +1066,7 @@ class StationHealth:
         """Clear long enough (#340): the episode is over; "Recovered" if it was pushed (before any mute: a muted
         alert is never pushed, so one pushed is told it is over)."""
         a = self.settling.pop(key)
-        if a.get("pushed"):
+        if a.get("pushed") or a.get("escalated"):    # (escalated: pushed as a warning, its critical not yet)
             self._push(a, now, recovered=True)
 
     @staticmethod
@@ -1115,6 +1122,8 @@ class StationHealth:
             n.send(f"Recovered: {a['title']}", f"{a['title']} cleared at {_hhmm(a.get('cleared'))} after "
                                                f"{_dur((a.get('cleared') or now) - a['since'])}{flap}.",
                    priority=3, tags=("white_check_mark", "sizeup"), click=click, who=who)
+            return
+        if alert_kind(a["key"]) in self._mutes(now):     # muted since the tick began: not now
             return
         a["pushed"] = True
         a.pop("escalated", None)

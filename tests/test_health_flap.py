@@ -307,3 +307,50 @@ def test_mute_values_are_checked_critical_ones_timed_only_and_expired_ones_dropp
     assert post({"action": "unmute", "key": "whisper"})[0] == 200
     assert "whisper" not in rig.cad.settings.section(H.MUTE_SECTION)
     assert len(rig.cad.settings_audit_log({"section": ["system"]})["audit"]) == n0
+
+
+def test_a_warning_pushed_then_muted_then_critical_still_gets_its_recovery():
+    r = Rig()
+    mutes = {}
+    r.h.mutes = lambda: mutes
+    r.at(0, status=disk(92.0))
+    assert [m["priority"] for m in r.n.msgs if "disk" in m["title"]] == [3]
+    mutes["disk"] = {"until": None}
+    r.at(60, status=disk(98.0))                                           # critical, muted: not pushed
+    r.at(120, status=disk(50.0))
+    r.at(120 + SETTLE_S, status=disk(50.0))
+    titles = [m["title"].split(" · ")[0] for m in r.n.msgs if "disk" in m["title"]]
+    assert titles == ["Station disk full", "Recovered: Station disk full"]
+
+
+def test_a_held_alert_counting_again_survives_a_takeover(tmp_path):
+    """ADS-B with a 20 min hold: down, pushed, up a minute, down again; the hub is replaced 19 min into the re-hold.
+    The new hub measures from when it was first seen again, not from the takeover: no false "Recovered"."""
+    from sizeup.cloud.hubstore import MonitorDb
+    db = MonitorDb(tmp_path / "hub.sqlite")
+    r = Rig(db, alerts_down_min=20.0)
+    for dt in range(0, 25 * 60, 30):
+        r.at(dt, status=adsb_down())
+    r.at(25 * 60, status=adsb_down("starting"))
+    for dt in range(26 * 60, 26 * 60 + 19 * 60, 30):                       # held() counting it again: 19 min
+        r.at(dt, status=adsb_down())
+    assert len(adsb(r.n.msgs)) == 1
+    r2 = Rig(db, alerts_down_min=20.0)                                    # the takeover
+    for dt in range(26 * 60 + 19 * 60, 3 * 3600, 30):
+        r2.at(dt, status=adsb_down())
+    assert adsb(r2.n.msgs) == []                                          # no "Recovered", no second "down"
+    assert [a["key"] for a in r2.h.alerts() if a["key"] == "adsb"] == ["adsb"]
+
+
+def test_a_mute_saved_mid_tick_stops_the_push():
+    r = Rig()
+    calls = []
+
+    def mutes():                                                          # muted between the tick's read and the send
+        calls.append(1)
+        return {"adsb": {"until": None}} if len(calls) > 1 else {}
+    r.h.mutes = mutes
+    r.at(0, status=adsb_down())
+    calls.clear()
+    r.at(120, status=adsb_down())
+    assert adsb(r.n.msgs) == [] and not r.h.active["adsb"]["pushed"]

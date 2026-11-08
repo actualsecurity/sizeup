@@ -1797,7 +1797,7 @@ const S_MUTE_FOR = [["", "Until unmuted"], ["1", "1 h"], ["24", "24 h"], ["168",
 function sMutes(m) {
   const head = el("div", "row");
   head.append(el("b", "s-eta-l", "Mute alerts"), el("span", "dim small", `${m.kinds.filter((k) => k.muted).length} muted`));
-  if (window.Help && Help.info) head.append(Help.info("A muted alert still shows on Settings > Health; it and its recovery aren't pushed."));
+  if (window.Help && Help.info) head.append(Help.info("A muted alert still shows on Settings > Health, not pushed. One pushed before the mute still gets its recovery."));
   const rows = m.kinds.map((k) => {
     const [lab, cb] = sCheck(k.label, k.muted, k.muted ? "Unmute: pushed again" : "Mute: Health only, no push");
     const sel = sSelect(k.timed_only ? S_MUTE_FOR.slice(1) : S_MUTE_FOR, "24", null, `${k.label}: mute for`);

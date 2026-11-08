@@ -71,7 +71,7 @@ const StationHealth = (() => {
         : !n.on ? "Not pushed (push off)" : a.pushed ? "Pushed" : "Not pushed yet";
       const flap = th.flap_n && a.flaps >= th.flap_n ? `flapping, back ${a.flaps}× in 1 h` : "";
       const det = el("span", "hb-detail dim small", [where, rec, flap].filter(Boolean).join(" · "));
-      det.title = a.muted ? "Muted: shown here, not pushed; no recovery push (Settings > System > Push notifications)"
+      det.title = a.muted ? "Muted: shown here, not pushed; \"Recovered\" only if pushed before the mute (Settings > System > Push notifications)"
         : n.on ? `Pushed to the status topic; "Recovered" once clear ${th.settle_min || 15} min` : "Push off: it clears here and in the log only";
       r.append(sevChip(a.severity), el("b", "hb-title", a.title), el("span", "hb-text", a.text),
         el("span", "hb-when dim", `since ${when(a.since)} · ${longDur(serverNow() - a.since)}`), det);
