@@ -1719,3 +1719,46 @@ def test_unit_aliases_are_read_again_when_the_data_file_changes(tmp_path, monkey
     rig.cad.sources._towns()
     assert src.units_match(["QX-9"], ["E62"]) and not src.units_match(["QX-9"], ["E60"])
     src.set_unit_aliases({})
+
+
+# -- the eighth review: an earlier call, open, and a late event of the same call -------------------------------------
+
+
+def test_an_earlier_call_still_open_never_joins_a_later_page_s_incident(tmp_path):
+    """Call 2 is paged at T0+600 (the only incident); the feed then lists call 1 (dispatched at T0, open): its own."""
+    rig = Rig(tmp_path)
+    rig.feed.outage("failing", "x", raise_=True)
+    rig.poll()
+    rig.at(600)
+    page = rig.page()
+    rig.at(610)
+    rig.feed.recover()
+    rig.feed.put("C1", type="ALARM/COMM", location="12 EXAMPLE AVE", units=("E60",), times={"dispatched": T0})
+    rig.poll()
+    assert _ref_of(rig, "C1") not in (None, page["id"])
+
+
+def test_an_open_late_event_90_s_before_the_page_joins_it(tmp_path):
+    rig = Rig(tmp_path)
+    rig.feed.outage("failing", "x", raise_=True)
+    rig.poll()
+    rig.at(600)
+    page = rig.page()
+    rig.at(2000)
+    rig.feed.recover()
+    rig.feed.put("S1", type="ALARM/COMM", location="12 EXAMPLE AVE", units=("E60", "L31"), times={"dispatched": T0 + 510})
+    rig.poll()
+    assert _ref_of(rig, "S1") == page["id"] and len(rig.incidents()) == 1
+
+
+def test_an_open_late_earlier_call_10_min_before_stays_separate(tmp_path):
+    rig = Rig(tmp_path)
+    rig.feed.outage("failing", "x", raise_=True)
+    rig.poll()
+    rig.at(600)
+    page = rig.page()
+    rig.at(2000)
+    rig.feed.recover()
+    rig.feed.put("E1", type="ALARM/COMM", location="12 EXAMPLE AVE", units=("E60", "L31"), times={"dispatched": T0})
+    rig.poll()
+    assert _ref_of(rig, "E1") not in (None, page["id"])

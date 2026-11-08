@@ -21,9 +21,10 @@ sizeup/sources/runner.py (they come here as "source_event" / "source_health" thr
                window that may not be joined are noted "possibly the same as #N" on both: a duplicate is never silent
     same call  a match must also be the same call (SAME_CALL_S): a page joins a feed's incident only when the feed's
                dispatch is within 5 min of it (the same type is not enough), and never one the feed has in service. A
-               feed event never joins an incident made after it ended; one first seen closed or old only when it was
-               dispatched at most SAME_CALL_BEFORE_S before the incident's creation and SAME_CALL_S after it (the same
-               call, recovered after an outage). Candidates rank by time first, shared units second; with two at the
+               feed event never joins an incident made after it ended, nor one made more than SAME_CALL_S after its
+               dispatch (an earlier call, open or not); one first seen closed only when dispatched at most
+               SAME_CALL_BEFORE_S before the incident's creation and SAME_CALL_S after; one first seen open but late
+               (an outage) within SAME_CALL_S either way. Candidates rank by time first, shared units second; with two at the
                place, the nearest must be within SAME_CALL_S. An event first seen closed is recorded only; one first
                seen late but still open makes its incident, noted "first seen N after its dispatch"
     attach     a page attaches only to an incident a feed has. A feed event attaches to any match (always a strict
@@ -697,16 +698,21 @@ class Sources:
 
     def _same_call(self, inc: dict, data: dict, now: float) -> bool:
         """May this feed event attach to that incident? Never when it ended (in service) before the incident was made: a
-        different call. An event first seen closed or old (dispatched over MATCH_WINDOW_S ago: after an outage) only when
-        it was dispatched no more than SAME_CALL_BEFORE_S before the incident's creation and no more than SAME_CALL_S
-        after: the same call, recovered (one dispatched before our incident existed is an earlier call)."""
+        different call. Never when it was dispatched more than SAME_CALL_S before the incident was made: an earlier call,
+        open or not. An event first seen closed (or in service) only when dispatched at most SAME_CALL_BEFORE_S before
+        the incident's creation and SAME_CALL_S after; one first seen open but late (an outage) within SAME_CALL_S
+        either way: the same call, recovered."""
         made = inc["created_at"]
         ended = (data.get("times") or {}).get("in_service")      # the event's own (a unit's may be an early cancel)
         if ended is not None and ended < made:
             return False
         disp = self._disp(data)
-        if data.get("closed") or (disp is not None and now - disp > MATCH_WINDOW_S):
+        if data.get("closed") or ended is not None:           # first seen over: only the same call, strictly
             return disp is not None and -SAME_CALL_BEFORE_S <= disp - made <= SAME_CALL_S
+        if disp is not None and disp - made < -SAME_CALL_S:
+            return False                                       # dispatched well before the incident: an earlier call
+        if disp is not None and now - disp > MATCH_WINDOW_S:   # open, first seen late (an outage): within SAME_CALL_S
+            return disp - made <= SAME_CALL_S
         return True
 
     def _create_feed(self, source: str, ref: str, data: dict, label: str) -> int:
