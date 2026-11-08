@@ -784,6 +784,9 @@ Incidents come in from ranked sources. The interface is in `sizeup/sources/__ini
     that street part (or `@ <place>`), never the feed's whole string.
   - When both sides have a location, they must be the same place: house number and street, direction and suffix. An
     intersection never matches a numbered address. Shared units never override two different places.
+  - One building can hold two calls (an apartment, a school): when both sides name units, they must share at least one;
+    otherwise "Possibly the same as #N". A same-place incident the source already has is noted the same way, never
+    skipped silently.
   - A named place with no street (`@SAMPLE SCHOOL`) has its own key: it matches the same place name and never an
     address. A direction after the suffix (`12 Main St W`) and `EXT` are part of the street. A name made only of
     suffix words is the name (`12 Court St`). Only known towns (the lists' `geo_town_order` and aliases, reloaded when
