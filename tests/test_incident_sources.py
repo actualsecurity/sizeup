@@ -456,19 +456,22 @@ def test_a_lower_ranked_feed_creates_at_once_the_primary_attaches_and_rules(tmp_
     assert rig.cad.state()["sources"]["acting"] == "Mirror feed"           # the next tier, not paging
 
 
-def test_closed_or_old_events_are_recorded_and_never_make_an_incident(tmp_path):
-    """Review S10 (a first run, a lost database): what the feed still lists from before is not a new call."""
+def test_a_closed_event_is_recorded_only_and_an_old_open_one_is_an_incident(tmp_path):
+    """Review S10 and the seventh review (E): what the feed lists as over is not a call; an event first seen long after its
+    dispatch (an outage, a first run) but still open is one, never dropped, and says it was seen late."""
     rig = Rig(tmp_path)
     rig.at(3600)
     rig.feed.put("OLD", type="STRU", location="1 Old Rd", units=("E60",), times={"dispatched": T0})
     rig.feed.put("DONE", type="STRU", location="2 Old Rd", units=("E61",), times={"dispatched": T0 + 3590}, closed=True)
     rig.poll()
-    assert rig.incidents() == []
-    assert {r["ref"] for r in rig.cad.store.q("SELECT ref FROM source_reports WHERE incident_id IS NULL")} == {"OLD", "DONE"}
+    [old] = rig.incidents()
+    assert old["source_ref"] == "feed:county:OLD" and old["status"] == "queued"
+    assert "County feed: first seen 60:00 after its dispatch" in rig.feed_lines(old["id"])
+    assert {r["ref"] for r in rig.cad.store.q("SELECT ref FROM source_reports WHERE incident_id IS NULL")} == {"DONE"}
     rig.at(3600 + MATCH_WINDOW_S)
-    rig.feed.change("OLD", location="1 Old Road")          # a later change: still never a new call
+    rig.feed.change("DONE", location="2 Old Road")         # a later change: still never a call
     rig.poll()
-    assert rig.incidents() == []
+    assert len(rig.incidents()) == 1
 
 
 # -- pre-alerts ---------------------------------------------------------------------------------------------------------
@@ -1544,9 +1547,9 @@ def test_an_event_first_seen_closed_or_old_never_joins_a_live_call(tmp_path):
                  times={"dispatched": T0, "in_service": T0 + 500})              # ended before the page
     rig.feed.put("OLD2", type="ALARM/COMM", location="12 EXAMPLE AVE", units=("E60",), times={"dispatched": T0 - 1500})
     rig.poll()
-    assert [i["id"] for i in rig.incidents()] == [page["id"]]
-    for ref in ("OLD1", "OLD2"):
-        assert rig.cad.store.one("SELECT incident_id FROM source_reports WHERE ref = ?", (ref,))["incident_id"] is None
+    assert rig.cad.store.one("SELECT incident_id FROM source_reports WHERE ref = 'OLD1'")["incident_id"] is None
+    old2 = rig.cad.store.one("SELECT incident_id FROM source_reports WHERE ref = 'OLD2'")["incident_id"]
+    assert old2 not in (None, page["id"])                  # still open: its own incident, never the live call's
     assert rig.cad.sources.authority(page["id"]) == src.PAGING_RANK
 
 
@@ -1561,13 +1564,25 @@ def test_a_live_event_that_ended_before_the_incident_never_joins_it(tmp_path):
     assert rig.cad.store.one("SELECT incident_id FROM source_reports WHERE ref = 'E1'")["incident_id"] != page["id"]
 
 
-def test_a_page_long_after_the_feed_s_dispatch_joins_it_only_for_the_same_type(tmp_path):
+@pytest.mark.parametrize("ftype", ["ALARM/COMM", "EMS"])
+def test_a_page_10_min_after_the_feed_s_dispatch_stays_separate(tmp_path, ftype):
+    """Seventh review (C, G): the 5-min rule alone decides; the same type is not enough (a second alarm there later)."""
     rig = Rig(tmp_path)
-    rig.feed.put("A1", type="ALARM/COMM", location="12 EXAMPLE AVE", units=("E60",), times={"dispatched": T0})
+    rig.feed.put("A1", type=ftype, location="12 EXAMPLE AVE", units=("E60",), times={"dispatched": T0})
     rig.poll()
     [a] = rig.incidents()
     rig.at(600)
-    assert rig.page()["id"] == a["id"]                    # 10 min later, but an alarm both: the same call (a re-page)
+    p = rig.page()
+    assert p["id"] != a["id"] and _possibly(rig, p["id"], a["id"])
+
+
+def test_a_page_within_5_min_of_the_feed_s_dispatch_joins_it(tmp_path):
+    rig = Rig(tmp_path)
+    rig.feed.put("A1", type="EMS", location="12 EXAMPLE AVE", units=("E60",), times={"dispatched": T0})
+    rig.poll()
+    [a] = rig.incidents()
+    rig.at(240)
+    assert rig.page()["id"] == a["id"]
 
 
 def test_feed_unit_aliases_keep_a_page_first_call_whole(tmp_path, monkeypatch):
@@ -1620,3 +1635,87 @@ def test_units_shared_at_another_place_with_a_held_incident_add_no_note(tmp_path
     rig.poll()
     x, y = rig.incidents()
     assert not any(t.startswith("Possibly") for i in (x, y) for t in rig.feed_lines(i["id"]))
+
+
+# -- the seventh review: earlier calls, second calls, the nearest in time ----------------------------------------------
+
+PAGE_E60 = ("Port Chester Fire Department, Engine 60, respond to an activated fire alarm. 12 Example Avenue, "
+            "cross of Sample Street. Time out 1442.")
+
+
+def _ref_of(rig, ref):
+    return rig.cad.store.one("SELECT incident_id FROM source_reports WHERE ref = ?", (ref,))["incident_id"]
+
+
+def test_a_closed_event_dispatched_before_the_incident_never_joins_it(tmp_path):
+    """Probe 1: dispatched 200 s before our page's incident existed, in service after it: an earlier call."""
+    rig = Rig(tmp_path)
+    rig.feed.outage("failing", "x", raise_=True)
+    rig.poll()
+    rig.at(600)
+    page = rig.page()
+    rig.at(1000)
+    rig.feed.recover()
+    rig.feed.put("C1", type="ALARM/COMM", location="12 EXAMPLE AVE", units=("E60", "L31"), closed=True,
+                 times={"dispatched": T0 + 400, "in_service": T0 + 900})
+    rig.poll()
+    assert _ref_of(rig, "C1") is None and [i["id"] for i in rig.incidents()] == [page["id"]]
+
+
+def test_a_second_alarm_later_is_its_own_call_and_the_first_s_close_leaves_it(tmp_path):
+    """Probe 2: alarm A1, the feed down, a re-activation page 15 min later: its own incident. After recovery A2 (old, open)
+    joins the page's incident, and A1's in service never closes it."""
+    rig = Rig(tmp_path)
+    rig.feed.put("A1", type="ALARM/COMM", location="12 EXAMPLE AVE", units=("E60", "L31"), times={"dispatched": T0})
+    rig.poll()
+    [a1] = rig.incidents()
+    rig.feed.outage("failing", "x", raise_=True)
+    rig.at(900)
+    rig.poll()
+    p = rig.page(fresh=True)
+    assert p["id"] != a1["id"]
+    rig.cad.accept(p["id"], {"operator": "Lt. Test"})
+    rig.at(2400)
+    rig.feed.recover()
+    rig.feed.put("A2", type="ALARM/COMM", location="12 EXAMPLE AVE", units=("E60", "L31"), times={"dispatched": T0 + 890})
+    rig.feed.change("A1", closed=True, times={"in_service": T0 + 2000})
+    rig.poll()
+    assert _ref_of(rig, "A2") == p["id"] and _ref_of(rig, "A1") == a1["id"]
+    assert rig.cad.store.incident(p["id"])["status"] in ("pending", "active")
+
+
+def test_two_calls_at_one_address_the_report_joins_the_nearest_in_time(tmp_path):
+    """Probe 3: units shared with the earlier call never pull a report off the call it is nearest to in time."""
+    rig = Rig(tmp_path)
+    rig.feed.outage("failing", "x", raise_=True)
+    rig.poll()
+    first = rig.page()                                     # E60, L31
+    rig.at(700)
+    second = rig.page("p2", PAGE_E60, fresh=True)          # E60 only, 700 s later
+    assert second["id"] != first["id"]
+    rig.at(1500)
+    rig.feed.recover()
+    rig.feed.put("B2", type="ALARM/COMM", location="12 EXAMPLE AVE", units=("E60", "L31"), times={"dispatched": T0 + 695})
+    rig.poll()
+    assert _ref_of(rig, "B2") == second["id"]
+
+
+def test_unit_aliases_are_read_again_when_the_data_file_changes(tmp_path, monkeypatch):
+    """Seventh review (F): one source of truth, re-read on a file change (the dispatch mode reads it from here too)."""
+    import os
+    from pathlib import Path
+    rig = Rig(tmp_path)
+    L = rig.cad.lists
+    d = json.loads(Path(L.path).read_text())
+    p = tmp_path / "lists.json"
+    d["feed_unit_aliases"] = {"QX-9": "E60"}
+    p.write_text(json.dumps(d))
+    monkeypatch.setattr(L, "path", str(p))
+    assert rig.cad.sources.feed_unit_aliases() == {"QX-9": "E60"}
+    d["feed_unit_aliases"] = {"QX-9": "E62"}
+    p.write_text(json.dumps(d))
+    os.utime(p, ns=(time.time_ns() + 10**9, time.time_ns() + 10**9))
+    assert rig.cad.sources.feed_unit_aliases() == {"QX-9": "E62"}
+    rig.cad.sources._towns()
+    assert src.units_match(["QX-9"], ["E62"]) and not src.units_match(["QX-9"], ["E60"])
+    src.set_unit_aliases({})

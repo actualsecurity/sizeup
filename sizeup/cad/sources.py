@@ -9,21 +9,23 @@ sizeup/sources/runner.py (they come here as "source_event" / "source_health" thr
                Settings > Health say which)
     create     never delayed: a page for us makes its incident at once whatever the feeds' health (an occasional
                duplicate is acceptable, a delay is not), and so does a feed's new event, unless it attaches (below).
-               A feed event already closed, or dispatched more than MATCH_WINDOW_S ago (a first run, a lost database),
-               is recorded and never makes an incident
+               A feed event already closed (or in service) when first seen is recorded and never makes an incident
     match      an OPEN incident (queued, pending, active; never closed or dismissed) created within MATCH_WINDOW_S of the
                report, with no report of the same source on it (one at the same place that has: "possibly the same", never
                silent). When both have a location, the same place is required (street_part() then same_place: house
                number and street, direction and suffix; an intersection never equals a numbered address), whatever
                units they share; and when both name units, at least one in common (one building, two calls: an
-               apartment, a school) or the same type, else "possibly the same". A feed's unit codes go through the
+               apartment, a school) or the same type within SAME_CALL_S, else "possibly the same". A feed's unit codes go through the
                data file's "feed_unit_aliases" first. A unit in common (assignments not cleared, and
                the reports' units) never joins two reports on its own, with or without locations. Two incidents sharing units in the
                window that may not be joined are noted "possibly the same as #N" on both: a duplicate is never silent
     same call  a match must also be the same call (SAME_CALL_S): a page joins a feed's incident only when the feed's
-               dispatch is within 5 min of it or the types agree, and never one the feed has in service. A feed event
-               never joins an incident made after it ended; one first seen closed or old only when it was dispatched
-               within 5 min of the incident's creation (the same call, recovered after an outage), else recorded only
+               dispatch is within 5 min of it (the same type is not enough), and never one the feed has in service. A
+               feed event never joins an incident made after it ended; one first seen closed or old only when it was
+               dispatched at most SAME_CALL_BEFORE_S before the incident's creation and SAME_CALL_S after it (the same
+               call, recovered after an outage). Candidates rank by time first, shared units second; with two at the
+               place, the nearest must be within SAME_CALL_S. An event first seen closed is recorded only; one first
+               seen late but still open makes its incident, noted "first seen N after its dispatch"
     attach     a page attaches only to an incident a feed has. A feed event attaches to any match (always a strict
                same place): a page that beat the feed gets the feed's report, not a duplicate. A person's type and
                location stand (manual_edits; an incident a person made counts as theirs). Any other near match: the
@@ -69,6 +71,7 @@ FEED_SOURCE = "CAD feed"               # incidents.source of one an external fee
 PAGE_SOURCE = "60 Control page"
 MATCH_WINDOW_S = 20 * 60.0
 SAME_CALL_S = 5 * 60.0                 # a report's dispatch this close to an incident's creation: the same call
+SAME_CALL_BEFORE_S = 60.0              # ... and an event first seen closed or old: dispatched at most this before it
 REPORT_STALE_S = 180.0
 FORGET_S = 24 * 3600.0                 # a feed silent this long is off the tiers (taken off the station)
 INCOMING_S = 300.0
@@ -380,13 +383,27 @@ class Sources:
         L = self.cad.lists
         if L is not self._towns_for:
             set_towns(getattr(L, "geo_town_order", ()), getattr(L, "geo_town_aliases", {}))
+            self._towns_for = L
+        set_unit_aliases(self.feed_unit_aliases())
+
+    def feed_unit_aliases(self) -> dict[str, str]:
+        """The data file's "feed_unit_aliases" {feed code: board code}: the one place they are read (matching here, the
+        dispatch mode's units, #311), again whenever the file changes."""
+        path = getattr(self.cad.lists, "path", None)
+        try:
+            key = (path, Path(path).stat().st_mtime_ns) if path else None
+        except OSError:
+            key = None
+        if key != getattr(self, "_aliases_key", ()):
             try:
-                d = json.loads(Path(L.path).read_text()) if getattr(L, "path", None) else {}
+                d = json.loads(Path(path).read_text()) if key else {}
             except (OSError, ValueError):
                 d = {}
             a = d.get("feed_unit_aliases") if isinstance(d, dict) else None
-            set_unit_aliases(a if isinstance(a, dict) else {})
-            self._towns_for = L
+            self._aliases = {k: v for k, v in (a.items() if isinstance(a, dict) else ())
+                             if isinstance(k, str) and isinstance(v, str)}
+            self._aliases_key = key
+        return dict(self._aliases)
 
     # -- health and tiers ----------------------------------------------------------------------------------------------
 
@@ -474,6 +491,7 @@ class Sources:
         here = place_key(location) is not None
         best = near = None
         bkey = nkey = None
+        places = 0
         for inc in self.store.q(f"SELECT * FROM incidents WHERE created_at BETWEEN ? AND ? AND status IN "
                                 f"({','.join('?' * len(OPEN))})", (at - MATCH_WINDOW_S, at + MATCH_WINDOW_S, *OPEN)):
             on = self._units_of(inc["id"])
@@ -485,7 +503,8 @@ class Sources:
                     continue
                 score = -1
             elif here and theirs:
-                if same and units and on and not common and not (typ and typ == inc["type"]):
+                if same and units and on and not common and not (
+                        typ and typ == inc["type"] and abs(inc["created_at"] - at) <= SAME_CALL_S):
                     score = -1                               # one building, two calls (another unit, apartment...)
                 elif same:
                     score = 10 + len(common)
@@ -497,11 +516,15 @@ class Sources:
                 score = -len(common)
             else:
                 continue
-            k = (-abs(score), abs(inc["created_at"] - at))
+            k = (abs(inc["created_at"] - at), -abs(score))   # the nearest in time first; shared units break ties
+            if score > 0:
+                places += 1
             if score > 0 and (bkey is None or k < bkey):
                 best, bkey = inc, k
             elif score < 0 and (nkey is None or k < nkey):
                 near, nkey = inc, k
+        if best is not None and places > 1 and bkey[0] > SAME_CALL_S:
+            best, near = None, best                          # two calls at the place, neither near in time: a person picks
         return best, (None if best is not None else near)
 
     def authority(self, iid: int) -> int | None:
@@ -648,11 +671,15 @@ class Sources:
                 return inc["id"]
             self._put(ev.source, ev.event_id, rank, label, seen, data)
             disp = data["times"].get("dispatched") or (min(data["times"].values()) if data["times"] else None)
-            if data["closed"] or (disp is not None and now - disp > MATCH_WINDOW_S):
+            ended = data["closed"] or data["times"].get("in_service") is not None
+            if ended:                                        # over before we heard of it: on record, no incident
                 if rep is None:
-                    self.log(f"incident sources: {label}: an event recorded only ({'closed' if data['closed'] else 'old'})")
+                    self.log(f"incident sources: {label}: an event recorded only (closed)")
                 return None
             iid = self._create_feed(ev.source, ev.event_id, data, label)
+            if disp is not None and now - disp > MATCH_WINDOW_S:  # still open, first seen late (an outage, a first run)
+                with self.store.tx() as db:
+                    self.store._event(db, iid, "feed", f"{label}: first seen {_dur(now - disp)} after its dispatch", at=now)
             if similar is not None:
                 self._possibly(iid, similar)
             self._merge(ev.source, ev.event_id, iid, data, label)
@@ -666,14 +693,15 @@ class Sources:
     def _same_call(self, inc: dict, data: dict, now: float) -> bool:
         """May this feed event attach to that incident? Never when it ended (in service) before the incident was made: a
         different call. An event first seen closed or old (dispatched over MATCH_WINDOW_S ago: after an outage) only when
-        it was dispatched within SAME_CALL_S of the incident's creation: the same call, recovered."""
+        it was dispatched no more than SAME_CALL_BEFORE_S before the incident's creation and no more than SAME_CALL_S
+        after: the same call, recovered (one dispatched before our incident existed is an earlier call)."""
         made = inc["created_at"]
         ended = (data.get("times") or {}).get("in_service")      # the event's own (a unit's may be an early cancel)
         if ended is not None and ended < made:
             return False
         disp = self._disp(data)
         if data.get("closed") or (disp is not None and now - disp > MATCH_WINDOW_S):
-            return disp is not None and abs(disp - made) <= SAME_CALL_S
+            return disp is not None and -SAME_CALL_BEFORE_S <= disp - made <= SAME_CALL_S
         return True
 
     def _create_feed(self, source: str, ref: str, data: dict, label: str) -> int:
@@ -903,15 +931,15 @@ class Sources:
             return "create", inc or similar
 
     def _page_same_call(self, inc: dict, at: float, typ: str) -> bool:
-        """A page joins a feed's incident only for the same call: the feed's dispatch within SAME_CALL_S of the page, or
-        the same type; never one the feed already has in service (or closed)."""
+        """A page joins a feed's incident only for the same call: the feed's dispatch within SAME_CALL_S of the page (the
+        same type is not enough: a second alarm there later is another call); never one the feed has in service."""
         r = self._best_feed(inc["id"])
         d = json.loads(r["data"] or "{}") if r else {}
         ended = (d.get("times") or {}).get("in_service")
         if d.get("closed") or (ended is not None and ended < at):
             return False
         disp = self._disp(d) or (r["first_seen"] if r else None)
-        return (disp is not None and abs(at - disp) <= SAME_CALL_S) or bool(typ and typ == inc["type"])
+        return disp is not None and abs(at - disp) <= SAME_CALL_S
 
     def created_by_page(self, ref: str, iid: int, similar: dict | None = None) -> None:
         with self.store.tx() as db:
