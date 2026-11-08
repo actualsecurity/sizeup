@@ -240,13 +240,14 @@ STREAM_TIMEOUT_S = 10.0          # a chunklist or segment
 STREAM_OPEN_TIMEOUT_S = 6.0      # the first playlist: a stream that doesn't answer this fast is down at the source
 STREAM_RETRY_S = 300.0           # ... and is not asked again for this long (the viewer shows snapshots at once)
 PROBE_WORKERS = 2                # stream probes at once, off the feed thread (#308)
-PROBE_HOST_TIMEOUTS = 2          # a host's probes timing out this often in one sweep: its other cameras not probed
+PROBE_HOST_TIMEOUTS = 4          # a host's probes timing out this often in a row: its other cameras not probed
 PROBE_FRESH_S = 60.0             # a camera probed this recently is not probed again
 STREAM_AHEAD = 3                 # segments the pump keeps fetched ahead of the player, from the latest chunklist
 STREAM_LIST_FRESH_S = 2.0        # a chunklist younger than this is served from the pump's copy
 STREAM_MAX_BYTES = 4 * 1024 * 1024
 STREAM_SEG_TTL_S = 60.0          # a segment kept this long (two viewers of one camera: one fetch)
 STREAM_SEG_KEEP = 40
+STREAM_SEG_RETRY_S = 10.0        # a segment that failed (not for good) is not asked for again this soon (#308)
 STREAM_DAMAGE_WINDOW = 30        # stream_status's "damaged": of this many latest segments
 NEAR_KM = 1.5                    # "Cameras nearby" (the map's nearest-camera lookup): this close to the event
 # The incident viewer's cameras (#95): along the road, not as the crow flies
@@ -1884,12 +1885,14 @@ class Roads:
         self._probe: dict[str, dict] = {}             # camera id -> {at, ok}: its stream looked at by the sweep (#276)
         # (#308) the probes run on PROBE_WORKERS threads of their own, never the feed thread: an origin that
         # blackholes requests can't hold up the incident and sign feeds. A host whose probes time out
-        # PROBE_HOST_TIMEOUTS times in one sweep is not probed again until the next.
+        # PROBE_HOST_TIMEOUTS times in a row (an answered probe starts the count again: one host serves every 511NY
+        # camera, and a few dead cameras on it are not a dead host) is not probed again until the next sweep.
         self._probe_q: queue.Queue = queue.Queue()
         self._probe_lock = threading.Lock()
         self._probing: set[str] = set()               # camera ids queued or being probed
         self._probe_workers = 0
-        self._host_timeouts: dict[str, int] = {}      # stream host -> its probes timed out since the sweep began
+        self._host_timeouts: dict[str, int] = {}      # stream host -> its probes timed out in a row this sweep
+        self._seg_retry: OrderedDict[str, tuple[float, str]] = OrderedDict()   # "cid/name" -> (asked again after, why)
         self._state_sig: tuple | None = None          # the cameras' states as the pages last heard them
         self._pumps: dict[str, threading.Thread] = {}
         self._swept = 0.0
@@ -2001,7 +2004,7 @@ class Roads:
 
     def probe_soon(self, cid: str) -> bool:
         """probe_stream on a probe thread (#308): not for a camera queued or probed in the last PROBE_FRESH_S, or on
-        a host whose probes keep timing out this sweep. True when queued."""
+        a host whose last PROBE_HOST_TIMEOUTS probes this sweep all timed out. True when queued."""
         cam = self.camera(cid)
         if cam is None or not cam.get("video") or self._stop.is_set():
             return False
@@ -2047,11 +2050,13 @@ class Roads:
             time.sleep(0.01)
         return False
 
-    def _probe_timed_out(self, host: str) -> None:
+    def _probe_answered(self, host: str, timed_out: bool) -> None:
+        """A probe's outcome for its host's breaker: a timeout counts, anything answered starts the count again."""
         with self._probe_lock:
-            n = self._host_timeouts[host] = self._host_timeouts.get(host, 0) + 1
+            n = self._host_timeouts[host] = self._host_timeouts.get(host, 0) + 1 if timed_out else 0
         if n == PROBE_HOST_TIMEOUTS:
-            self.log(f"roads: {host}: {n} stream probes timed out; its other cameras not probed until the next sweep")
+            self.log(f"roads: {host}: {n} stream probes in a row timed out; its other cameras not probed until the "
+                     "next sweep")
 
     def probe_stream(self, cid: str) -> bool:
         """A live-video camera's stream looked at: its master playlist and its chunklist, as a player's first two
@@ -2065,6 +2070,7 @@ class Roads:
         ok = bool(st and st.get("list") and now - st.get("list_at", 0) < 30)
         if not ok:
             base = cam["video"].rsplit("/", 1)[0] + "/"
+            timed_out = False
             try:
                 code, _, body = self.fetch(cam["video"], STREAM_OPEN_TIMEOUT_S, 1 << 20)
                 clean = self._clean_playlist(body) if code == 200 and body else None
@@ -2074,8 +2080,8 @@ class Roads:
                     ok = code == 200 and b".ts" in (body or b"")
             except (HTTPError, URLError, OSError, ValueError) as e:
                 ok = False
-                if isinstance(e, TimeoutError) or isinstance(getattr(e, "reason", None), TimeoutError):
-                    self._probe_timed_out(urlsplit(cam["video"]).netloc)
+                timed_out = isinstance(e, TimeoutError) or isinstance(getattr(e, "reason", None), TimeoutError)
+            self._probe_answered(urlsplit(cam["video"]).netloc, timed_out)
         was = self._probe.get(cid, {}).get("ok")
         self._probe[cid] = {"at": now, "ok": ok}
         if not ok:
@@ -2927,7 +2933,9 @@ class Roads:
         """A segment from the cache, else from the origin: one fetch at a time per segment (the player and the pump
         asking at once wait for the one), checked (hlsseg.check) and repaired (frames whose reference chain is broken
         at the source left out). A body that isn't MPEG-TS with video, or came short of its Content-Length, is fetched
-        once more; failing again, hlsseg.Bad / ValueError (never served, never cached). Fetch errors are raised."""
+        once more; failing again, hlsseg.Bad / ValueError (never served, never cached). Fetch errors are raised.
+        (#308) Not video both times: a GAP for good (_note_bad). Any other failure: not asked for again for
+        STREAM_SEG_RETRY_S (a ValueError until then), then fetched as new."""
         key = f"{cid}/{name}"
         with self._stream_lock:                       # [lock, users]: dropped once nobody holds or waits for it
             ent = self._segment_locks.setdefault(key, [threading.Lock(), 0])
@@ -2937,21 +2945,35 @@ class Roads:
                 hit = self._segments.get(key)
                 if hit and self.clock() - hit["fetched"] < STREAM_SEG_TTL_S:
                     return hit
+                retry = self._seg_retry.get(key)
+                if retry is not None and self.clock() < retry[0]:
+                    raise ValueError(f"{retry[1]}; asked again in {retry[0] - self.clock():.0f} s")
+                first_bad = False
                 for attempt in (1, 2):
                     try:
                         with self._parallel:
                             code, headers, body = self.fetch(base + name, STREAM_TIMEOUT_S, STREAM_MAX_BYTES)
                         if code != 200 or not body:
                             raise ValueError(f"HTTP {code}")
-                        return self._keep_segment(cid, name, headers, body, self.clock())
+                        hit = self._keep_segment(cid, name, headers, body, self.clock())
+                        self._seg_retry.pop(key, None)
+                        return hit
                     except hlsseg.Bad as e:
-                        if attempt == 2:                  # (#308) only a body that isn't video is a GAP for good
-                            self._note_bad(cid, name, str(e))
+                        if attempt == 1:
+                            first_bad = True
+                        else:                             # (#308) not video both times: a GAP for good
+                            self._note_bad(cid, name, str(e), keep=first_bad)
+                            if not first_bad:
+                                self._retry_later(key, str(e))
                             raise
                     except ValueError as e:               # cut short (http_get), an HTTP error: once more
                         if attempt == 2:                  # ... then asked again later (not marked bad)
                             self._note_bad(cid, name, str(e), keep=False)
+                            self._retry_later(key, str(e))
                             raise
+                    except (HTTPError, URLError, OSError) as e:
+                        self._retry_later(key, f"{type(e).__name__}")
+                        raise
         finally:
             with self._stream_lock:
                 ent[1] -= 1
@@ -2959,9 +2981,16 @@ class Roads:
                     self._segment_locks.pop(key, None)
         raise AssertionError("unreachable")  # pragma: no cover
 
+    def _retry_later(self, key: str, why: str) -> None:
+        with self._stream_lock:
+            self._seg_retry[key] = (self.clock() + STREAM_SEG_RETRY_S, why)
+            self._seg_retry.move_to_end(key)
+            while len(self._seg_retry) > STREAM_SEG_KEEP:
+                self._seg_retry.popitem(last=False)
+
     def _note_bad(self, cid: str, name: str, why: str, keep: bool = True) -> None:
         """A segment refused: logged; keep: kept in the stream's "bad" (a GAP in the players' lists, never fetched
-        again). Only hlsseg.Bad is kept (#308): a transient HTTP failure is asked again."""
+        again). Only hlsseg.Bad on both tries is kept (#308): a transient failure is asked again."""
         with self._stream_lock:
             st = self._streams.get(cid)
             if st is not None and keep:

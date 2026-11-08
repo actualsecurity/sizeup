@@ -41,6 +41,9 @@ class Bits:
         n = v.bit_length()
         return self.u(n - 1, 0).u(n, v)
 
+    def se(self, v: int) -> Bits:
+        return self.ue(2 * v - 1 if v > 0 else -2 * v)
+
     def rbsp(self) -> bytes:
         b = self.bits + [1]
         b += [0] * (-len(b) % 8)
@@ -61,6 +64,22 @@ def sps(w_mbs=22, h_mbs=15) -> bytes:
             .ue(2).ue(1).u(1, 0)                              # POC type 2, one ref frame, no gaps allowed
             .ue(w_mbs - 1).ue(h_mbs - 1).u(1, 1).u(1, 1).u(1, 0).u(1, 0))
     return b"\x67" + body.rbsp()
+
+
+def sps_high(lists=(0, 3, 6)) -> bytes:
+    """A High-profile SPS with a scaling matrix (seq_scaling_list_present for lists): frame_num 4 bits, 480x272."""
+    b = (Bits().u(8, 100).u(8, 0).u(8, 30).ue(0)               # High, level 3.0, sps 0
+         .ue(1).ue(0).ue(0).u(1, 0).u(1, 1))                  # 4:2:0, 8-bit, no qpprime bypass, scaling matrix
+    for i in range(8):
+        b.u(1, i in lists)
+        if i == 0 and i in lists:
+            b.se(-8)                                           # nextScale 0 at once: the default list, no more deltas
+        elif i in lists:
+            size = 16 if i < 6 else 64
+            for j in range(size):                              # a ramp up from 8, then down by -9 at the end
+                b.se(1 if j < size - 1 else -9)
+    b.ue(0).ue(2).ue(1).u(1, 0).ue(29).ue(16).u(1, 1).u(1, 1).u(1, 0).u(1, 0)
+    return b"\x67" + b.rbsp()
 
 
 def pps() -> bytes:
@@ -229,6 +248,23 @@ def test_the_carried_state_is_only_from_the_same_sessions_segment_just_before():
     assert r._keep_segment("1ne01370s", "media_wA_302.ts", {}, tail, clock.t)["dropped"] == 2     # a gap between
 
 
+def test_a_high_profile_sps_with_a_scaling_matrix_is_read_past_and_judged():
+    # (#308) one recorded camera is High profile with a scaling matrix: its SPS used to read as None, so its frames
+    # were never judged. The scaling lists are read past (16 and 64 deltas, one ending early), the rest kept
+    for lists in ((0, 3, 6), (), tuple(range(8))):
+        sp = hlsseg.parse_sps(sps_high(lists))
+        assert sp == {"log2_max_frame_num": 4, "gaps_allowed": False, "separate_colour_plane": 0, "frame_mbs_only": 1,
+                      "width": 480, "height": 272}, lists
+    cc: dict = {}
+    body = PAT + PMT
+    es = [b"\x00\x00\x00\x01" + n for n in (sps_high(), pps(), slice_nal(True, 0))]
+    body += ts_packets(VPID, b"".join(es), cc, pts=10)
+    for i, fn in enumerate((1, 2, 4, 5), 1):                                 # frame_num 3 lost
+        body += ts_packets(VPID, b"\x00\x00\x00\x01" + slice_nal(False, fn), cc, pts=10 + i / 30)
+    info = hlsseg.check(body)
+    assert info["h264"] and info["size"] == "480x272" and info["lost"] == 1 and info["broken"] == [3, 4]
+
+
 def test_fifteen_lost_reference_frames_wrapping_frame_num_onto_itself_are_a_loss():
     # (#308) frame_num is 4 bits: 15 reference frames lost after frame_num 5 bring the next one back to 5. Two
     # reference frames in a row never share a frame_num in progressive video, so it is a loss, not a repeat
@@ -251,9 +287,10 @@ def test_sixteen_lost_reference_frames_show_in_the_pts():
     assert b["lost"] == 16 and b["broken"] == [0, 1, 2]
 
 
-def test_a_camera_skipping_a_frame_or_two_in_its_timing_is_no_loss():
-    # a recorded 30 fps camera: steps of 100 ms among its 33 ms ones, frame_num unbroken, every frame decoding
-    # whole; a PTS gap is only a loss when it is long enough to hide a frame_num wrap
+def test_a_short_pts_gap_with_frame_num_unbroken_is_no_loss():
+    # a PTS gap counts only when it is long enough to hide a frame_num wrap: a shorter one with frame_num unbroken
+    # lost no reference frame (non-reference frames, or the timing), and a shorter loss of reference frames shows
+    # in frame_num, as every longer PTS step in the recordings does
     ts, t = [], 10.0
     for i in range(20):
         ts.append(t)
@@ -428,12 +465,17 @@ def test_a_segment_cut_short_is_fetched_again_and_only_the_whole_one_is_served()
 def test_a_segment_refused_by_http_twice_is_asked_again_not_a_gap_for_good():
     # (#308) two transient HTTP failures: a 502 now, but not marked bad (no GAP in the players' lists); the pump and
     # the player ask again, and the whole one is served
-    r, f, _ = opened()
+    r, f, clock = opened()
     whole = segment(gop(8) + [(True, 0)])
     f.segs["media_w1_1226.ts"] = [ValueError("HTTP 503"), ValueError("HTTP 503"), whole]
     assert r.get(SEG + "media_w1_1226.ts", "")[0] == 502
     assert "media_w1_1226.ts" not in (r._streams["1ne01370s"].get("bad") or {})
     assert "#EXT-X-GAP" not in r.get(SEG + "chunklist_w1849562454.m3u8", "")[1].decode()
+    # not asked for again at once (the pump and the player hammering a failing origin): a 502 from the hub
+    n = len(f.urls)
+    code, body, _, _ = r.get(SEG + "media_w1_1226.ts", "")
+    assert code == 502 and b"asked again in 10 s" in body and len(f.urls) == n
+    clock.t += roads_mod.STREAM_SEG_RETRY_S
     r.pump_once("1ne01370s")
     assert r._segments["1ne01370s/media_w1_1226.ts"]["body"] == whole
     assert r.get(SEG + "media_w1_1226.ts", "")[1] == whole
@@ -442,6 +484,12 @@ def test_a_segment_refused_by_http_twice_is_asked_again_not_a_gap_for_good():
     f.segs["media_w1_1227.ts"] = [b"\x47" * 1000, whole]
     assert r.get(SEG + "media_w1_1227.ts", "")[1] == whole
     assert "media_w1_1227.ts" not in (r._streams["1ne01370s"].get("bad") or {})
+    # only not video BOTH times is a GAP for good: once not video and once an HTTP error, either way round, is not
+    for name, tries in (("media_w1_1240.ts", [b"\x47" * 1000, ValueError("HTTP 503")]),
+                        ("media_w1_1241.ts", [ValueError("HTTP 503"), b"\x47" * 1000])):
+        f.segs[name] = tries
+        assert r.get(SEG + name, "")[0] == 502
+        assert name not in (r._streams["1ne01370s"].get("bad") or {})
 
 
 def test_a_segment_broken_twice_is_a_502_and_never_cached():

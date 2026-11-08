@@ -967,14 +967,19 @@ def test_no_stream_for_a_camera_without_one_a_down_one_or_an_unknown_one():
 
 
 class Blackhole(StreamFetch):
-    """The HLS origin taking each request to its timeout (gate unset: holds until set, then times out)."""
+    """The HLS origin taking each request to its timeout (gate unset: holds until set, then times out). dead: only
+    those stream folders (TA_...) time out, the rest answer."""
 
     def __init__(self):
         super().__init__()
         self.gate = threading.Event()
         self.probe_threads: list[str] = []
+        self.dead: set[str] | None = None
 
     def __call__(self, url, timeout, limit):
+        if "skyvdn.com" in url and self.dead is not None and url.split("/")[4] not in self.dead:
+            self.probe_threads.append(threading.current_thread().name)
+            return super().__call__(url, timeout, limit)
         if "skyvdn.com" in url:
             self.urls.append(url)
             self.probe_threads.append(threading.current_thread().name)
@@ -991,7 +996,7 @@ def stale_stills(clock, monkeypatch, workers=2):
     r = make(key="", urls={}, fetch=f, clock=clock, thruway=True)
     assert r.refresh("cameras")
     video = [c["id"] for c in r.merged("cameras") if c.get("video") and not c["off"]]
-    assert len(video) >= 4 and len({c["video"].split("/")[2] for c in r.merged("cameras") if c.get("video")}) == 1
+    assert len(video) > roads_mod.PROBE_HOST_TIMEOUTS + 1 and len({c["video"].split("/")[2] for c in r.merged("cameras") if c.get("video")}) == 1
     return r, f, video
 
 
@@ -1015,10 +1020,11 @@ def test_a_host_whose_probes_time_out_is_left_alone_until_the_next_sweep(monkeyp
     r.sweep()
     assert r.probes_done()
     probed = [u for u in f.urls if "skyvdn" in u]
-    assert len(probed) == roads_mod.PROBE_HOST_TIMEOUTS                     # two timed out: the rest not asked
-    assert "s58.nysdot.skyvdn.com:443: 2 stream probes timed out" in "\n".join(r.logs)
+    n = roads_mod.PROBE_HOST_TIMEOUTS
+    assert len(probed) == n                                                 # timed out in a row: the rest not asked
+    assert f"s58.nysdot.skyvdn.com:443: {n} stream probes in a row timed out" in "\n".join(r.logs)
     timed_out = [cid for cid in video if cid in r._probe]
-    assert len(timed_out) == 2 and all(r.health(cid)["state"] == "offline" for cid in timed_out)
+    assert len(timed_out) == n and all(r.health(cid)["state"] == "offline" for cid in timed_out)
     left = [cid for cid in video if cid not in r._probe]
     assert left and all(r.health(cid)["why"] == "Still old · video not checked" for cid in left)
     # the next sweep gives the host its chance again
@@ -1026,6 +1032,22 @@ def test_a_host_whose_probes_time_out_is_left_alone_until_the_next_sweep(monkeyp
     r.sweep()
     assert r.probes_done()
     assert len([u for u in f.urls if "skyvdn" in u]) == 2 * roads_mod.PROBE_HOST_TIMEOUTS
+
+
+def test_a_few_dead_cameras_never_stop_the_probes_of_the_others_on_their_host(monkeypatch):
+    # every 511NY camera streams from one host: two dead cameras on it (timing out, even back to back) are not a
+    # dead host. An answered probe starts the count again, and every other camera is still probed
+    clock = Clock()
+    r, f, video = stale_stills(clock, monkeypatch, workers=1)
+    folder = {c["id"]: c["video"].split("/")[4] for c in r.merged("cameras") if c.get("video")}
+    f.dead = {folder[video[0]], folder[video[1]]}
+    f.gate.set()
+    r.sweep()
+    assert r.probes_done()
+    assert all(cid in r._probe for cid in video)                            # every one looked at
+    assert [cid for cid in video if not r._probe[cid]["ok"]] == video[:2]
+    assert all(r.health(cid)["state"] == "ok" for cid in video[2:])
+    assert "in a row timed out" not in "\n".join(r.logs)
 
 
 # ---- the stream pump, the frame rate, the status; snapshots at the source's cadence (hls-smooth, refs #101) ------
