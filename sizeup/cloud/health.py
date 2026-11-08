@@ -72,6 +72,15 @@ trunk-recorder writes, so its last_heard is the system's last call:
 Each alert is logged once when it starts and once when it clears, shown to admins on Settings > Health
 (GET /api/cad/health, static/health.js; never in the state push nor as a banner, #203), and pushed to the
 status topic ([alerts] status_topic, else ntfy_topic: sizeup/notify.py route()): at most one push per condition per repeat_min (15), plus its recovery (only for an episode that was pushed).
+
+Flapping (#340), for every alert: one that clears is "settling" for SETTLE_S (15 min; SETTLE_FLAPPING_S, 30 min, once it
+has come back FLAP_N (3) times within FLAP_WINDOW_S (1 h)). Back before it settles, it is the same episode: no second
+push and no "Recovered"; "Recovered" is pushed only once it has settled (with how often it flapped). A flapping
+episode's push says so. Each alert's own grace (held()) is as before.
+
+Muted (#340, Settings > System > Push notifications, admins): an alert kind (MUTE_KINDS) muted, until a time or until
+unmuted (settings section MUTE_SECTION, kind -> {"until": epoch | null}), is shown on Settings > Health as before,
+marked muted, and not pushed; one pushed before the mute still gets its "Recovered". The hub's own error spikes (sizeup/errwatch.py) are "hub_errors".
 Alerts and 24 h of their history are kept in hub.sqlite (meta "health"), so a redeploy neither forgets nor
 repeats them.
 
@@ -89,6 +98,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import math
 import os
 import re
 import shutil
@@ -130,6 +140,39 @@ STT_CLEAR_HOLD_S = 900.0    # ... for this long: one episode, however the queue 
 STT_NOTIFY_S = 1200.0       # pushed only while the oldest has waited this long (a shorter one: the panel, no push)
 NOTIFY_AFTER = {"stt_backlog": STT_NOTIFY_S}   # alerts pushed only once they are this old (from their since)
 BUDGET_WARN = 0.8           # this month's AWS cost at this share of the limit: a warning (and a push)
+SETTLE_S = 15 * 60.0        # #340: "Recovered" only once an alert has stayed clear this long; back sooner: one episode
+SETTLE_FLAPPING_S = 30 * 60.0   # ... this long for one flapping:
+FLAP_N = 3                  # back this many times ...
+FLAP_WINDOW_S = 3600.0      # ... within this long
+HUB_OWN = ("silent", "transcribe", "aws_budget80", "aws_budget")   # decided on the hub's own data, the station silent or not
+MUTE_SECTION = "alert_mutes"    # the CAD settings section of the mutes (sizeup/cad/settings.py _mutes_op)
+# The alert kinds an admin may mute (#340): the part of an alert's key before ":" (aws_budget80 is aws_budget's).
+MUTE_KINDS = {"adsb": "ADS-B receiver down", "whisper": "Speech-to-text down", "stt_backlog": "Speech-to-text behind",
+              "job": "Channel not running", "sdr": "SDR gone", "dup": "Duplicate dongle serial",
+              "recorder": "trunk-recorder down", "trunk": "P25 trunk silent", "stuck": "Channel stuck open",
+              "silent": "Station silent", "behind": "Station behind the hub", "update": "Station update failed",
+              "outbox": "Station's events backing up", "disk": "Station disk full",
+              "transcribe": "Amazon Transcribe failing", "aws_budget": "Amazon Transcribe monthly limit",
+              "hub_errors": "Hub errors"}
+MUTE_TIMED_ONLY = ("silent", "trunk", "job")   # critical ones: muted for a time only, never until unmuted
+
+
+def alert_kind(key: str) -> str:
+    """An alert's key -> its kind for muting: "job:FG1" -> "job", "aws_budget80" -> "aws_budget"."""
+    k = str(key).partition(":")[0]
+    return "aws_budget" if k == "aws_budget80" else k
+
+
+def active_mutes(section: dict | None, now: float) -> dict[str, float | None]:
+    """The mutes in force at `now` from the settings section: {kind: until (None: until unmuted)}."""
+    out: dict[str, float | None] = {}
+    for k, v in (section or {}).items():
+        if k in MUTE_KINDS and isinstance(v, dict):
+            until = v.get("until")
+            if until is None or (isinstance(until, (int, float)) and not isinstance(until, bool) and math.isfinite(until)
+                                 and until > now):
+                out[k] = None if until is None else float(until)
+    return out
 
 
 def status_token(station_token: str, configured: str = "") -> str:
@@ -408,7 +451,10 @@ class StationHealth:
         self._stt_oldest = 0.0                       # the whisper backlog's oldest clip's wait, as last reported
         self._stt_ok_since: float | None = None      # the whisper backlog under STT_CLEAR_S since (its hysteresis, #300)
         self._clear_at: dict[str, float] = {}        # an alert's real clear time when it clears later than that
+        self.settling: dict[str, dict] = {}          # cleared, not yet settled (#340): back before SETTLE_S, one episode
+        self.mutes: Callable[[], dict] | None = None   # the mutes' settings section (#340): HubApp sets it
         self._load()
+        self._first_saved = {k: v for k, v in self._first.items() if k in self.settling}
 
     # -- persistence ---------------------------------------------------------------------------------------
 
@@ -424,6 +470,10 @@ class StationHealth:
             self.active = {k: v for k, v in (d.get("active") or {}).items() if isinstance(v, dict)}
             self.history = [h for h in d.get("history") or [] if isinstance(h, dict)]
             self.last_push = {k: float(v) for k, v in (d.get("last_push") or {}).items() if isinstance(v, (int, float))}
+            self.settling = {k: v for k, v in (d.get("settling") or {}).items() if isinstance(v, dict) and v.get("cleared")}
+            # held() counting a settling alert again: kept, so a takeover doesn't measure from itself (#340)
+            self._first.update({k: float(v) for k, v in (d.get("first") or {}).items()
+                                if k in self.settling and isinstance(v, (int, float))})
         if isinstance(g, dict):
             self.gaps = {str(k): [float(x) for x in v if isinstance(x, (int, float))][-GAPS_MAX:]
                          for k, v in g.items() if isinstance(v, list)}
@@ -439,7 +489,9 @@ class StationHealth:
             return
         try:
             self.db.put("health", json.dumps({"active": self.active, "history": self.history[-HISTORY_MAX:],
-                                              "last_push": self.last_push}, separators=(",", ":")))
+                                              "last_push": self.last_push, "settling": self.settling,
+                                              "first": {k: v for k, v in self._first.items() if k in self.settling}},
+                                             separators=(",", ":")))
         except Exception as e:  # never in the way of the alerts themselves
             self.log(f"health: can't save the alerts: {type(e).__name__}: {e}")
 
@@ -947,42 +999,108 @@ class StationHealth:
             m = self.model(now)
             self._log_adsb(m.get("adsb"))
             conds, judged = self.conditions(m, now)
+            mutes = self._mutes(now)
             changes: list[tuple[str, dict]] = []
+            settled = False
             for key, c in conds.items():
                 if c is None:
                     continue
                 a = self.active.get(key)
-                if a is None:
+                back = self._first.get(key, float(c.get("since") or now))   # held(): from when it was first seen again
+                if a is None and key in self.settling and \
+                        min(now, back) - float(self.settling[key]["cleared"]) >= self._settle_s(self.settling[key]):
+                    self._settle(key, now, mutes)        # it had settled (between ticks): that episode's recovery first
+                    settled = True
+                if a is None and key in self.settling:   # back before it settled (#340): the same episode, no push
+                    a = self._resume(key, now)
+                    self._escalate(a, c)
+                    a.update(severity=c["severity"], title=c["title"], text=c["text"], who=c.get("who") or a.get("who") or {})
+                    changes.append(("start", a))
+                    self.log(f"health: back {a['title']} before it settled, {self._flaps(a, now)}× in 1 h "
+                             f"(one episode since {_hhmm(a['since'])})")
+                elif a is None:
                     a = {"key": key, "severity": c["severity"], "title": c["title"], "text": c["text"],
                          "since": float(c.get("since") or now), "raised": now, "pushed": False, "who": c.get("who") or {}}
                     self.active[key] = a
                     changes.append(("start", a))
                     self.log(f"health: ALERT {a['title']}: {a['text']} (since {_hhmm(a['since'])})")
                 else:
+                    self._escalate(a, c)
                     a.update(severity=c["severity"], title=c["title"], text=c["text"], who=c.get("who") or a.get("who") or {})
             for key in list(self.active):
                 if key in conds:
                     continue
-                if key not in ("silent", "transcribe", "aws_budget80", "aws_budget") and not judged:
+                if key not in HUB_OWN and not judged:
                     continue                             # the station's data is old: leave it as it was
                 a = self.active.pop(key)
                 a["cleared"] = self._clear_at.pop(key, now)
                 self.history.append(a)
+                self.settling[key] = a                   # "Recovered" once it has settled (#340)
                 changes.append(("clear", a))
                 self.log(f"health: cleared {a['title']} (after {_dur(now - a['since'])})")
             cut = now - HISTORY_S
             self.history = [h for h in self.history if (h.get("cleared") or now) >= cut][-HISTORY_MAX:]
-            for kind, a in changes:
-                if kind == "clear" and a.get("pushed"):
-                    self._push(a, now, recovered=True)
+            for key, a in list(self.settling.items()):
+                if (key not in HUB_OWN and not judged) or now - float(a["cleared"]) < self._settle_s(a) \
+                        or key in self._first:          # (held() sees it again, within its grace: not clear)
+                    continue                             # not settled yet (or can't tell: the station is silent)
+                self._settle(key, now, mutes)
+                settled = True
             for a in self.active.values():
-                if (not a.get("pushed") and now - self.last_push.get(a["key"], 0.0) >= self.repeat_s
-                        and self._notify_ok(a, now)):
+                if (not a.get("pushed") and (a.get("escalated") or now - self.last_push.get(a["key"], 0.0) >= self.repeat_s)
+                        and self._notify_ok(a, now) and alert_kind(a["key"]) not in mutes):
                     self._push(a, now)
-            if changes:
+            first = {k: v for k, v in self._first.items() if k in self.settling}
+            if changes or settled or first != self._first_saved:
+                self._first_saved = first
                 self._save()
             self._save_gaps(now)
         return changes
+
+    def _resume(self, key: str, now: float) -> dict:
+        """A settling alert back (#340): active again as the same episode (its since, whether it was pushed), out of
+        the history, its flap counted."""
+        a = self.settling.pop(key)
+        self.history = [h for h in self.history if not (h.get("key") == key and h.get("raised") == a.get("raised"))]
+        a.pop("cleared", None)
+        a["flaps"] = [t for t in a.get("flaps") or [] if now - t < FLAP_WINDOW_S][-20:] + [now]
+        a["flap_n"] = int(a.get("flap_n") or 0) + 1
+        self.active[key] = a
+        return a
+
+    @staticmethod
+    def _escalate(a: dict, c: dict) -> None:
+        """A pushed warning that is now critical (disk 92 % -> 98 %): pushed again at once, whatever repeat_min."""
+        if a.get("pushed") and c["severity"] == "critical" and a.get("severity") != "critical":
+            a["pushed"], a["escalated"] = False, True
+
+    def _settle(self, key: str, now: float, mutes: dict) -> None:
+        """Clear long enough (#340): the episode is over; "Recovered" if it was pushed (before any mute: a muted
+        alert is never pushed, so one pushed is told it is over)."""
+        a = self.settling.pop(key)
+        if a.get("pushed") or a.get("escalated"):    # (escalated: pushed as a warning, its critical not yet)
+            self._push(a, now, recovered=True)
+
+    @staticmethod
+    def _flaps(a: dict, at: float) -> int:
+        """How often the alert came back in the hour before `at`."""
+        return sum(1 for t in a.get("flaps") or [] if 0 <= at - t < FLAP_WINDOW_S)
+
+    def _settle_s(self, a: dict) -> float:
+        return SETTLE_FLAPPING_S if self._flaps(a, float(a["cleared"])) >= FLAP_N else SETTLE_S
+
+    def _mutes(self, now: float) -> dict[str, float | None]:
+        """The alert kinds muted now (#340): {kind: until | None}; none when the settings can't be read."""
+        if self.mutes is None:
+            return {}
+        try:
+            return active_mutes(self.mutes(), now)
+        except Exception:  # noqa: BLE001 - the CAD's settings unreadable: push as usual
+            return {}
+
+    def muted(self, key: str, now: float | None = None) -> bool:
+        """This alert's (or kind's, e.g. "hub_errors") pushes muted now (#340)."""
+        return alert_kind(key) in self._mutes(self.clock() if now is None else now)
 
     def _log_adsb(self, ad) -> None:
         """The station's ADS-B decoder: why it is down, logged once per change of cause (#262), and when it is back.
@@ -1012,14 +1130,20 @@ class StationHealth:
         click = f"{self.public_url}/cad#settings/system/health" if self.public_url else ""
         who = a.get("who") or None
         if recovered:
+            flap = f", back {a['flap_n']}× before it settled" if a.get("flap_n") else ""
             n.send(f"Recovered: {a['title']}", f"{a['title']} cleared at {_hhmm(a.get('cleared'))} after "
-                                               f"{_dur((a.get('cleared') or now) - a['since'])}.",
+                                               f"{_dur((a.get('cleared') or now) - a['since'])}{flap}.",
                    priority=3, tags=("white_check_mark", "sizeup"), click=click, who=who)
             return
+        if alert_kind(a["key"]) in self._mutes(now):     # muted since the tick began: not now
+            return
         a["pushed"] = True
+        a.pop("escalated", None)
         self.last_push[a["key"]] = now
         long = now - a["since"]
-        n.send(a["title"] + (f" {_dur(long)}" if long >= 60 else ""), f"{a['text']} (since {_hhmm(a['since'])}).",
+        flaps = self._flaps(a, now)
+        flap = f"; flapping, back {flaps}× in 1 h" if flaps >= FLAP_N else ""
+        n.send(a["title"] + (f" {_dur(long)}" if long >= 60 else ""), f"{a['text']} (since {_hhmm(a['since'])}{flap}).",
                priority=4 if a["severity"] == "critical" else 3,
                tags=("rotating_light" if a["severity"] == "critical" else "warning", "sizeup"), click=click, who=who)
         self._save()
@@ -1035,8 +1159,13 @@ class StationHealth:
 
     def alerts(self) -> list[dict]:
         """The active alerts, worst first then oldest (Settings > Health, the deploy check)."""
+        now = self.clock()
+        mutes = self._mutes(now)
         with self._lock:
-            out = [dict({k: a[k] for k in ("key", "severity", "title", "text", "since")}, who=a.get("who") or {})
+            out = [dict({k: a[k] for k in ("key", "severity", "title", "text", "since")}, who=a.get("who") or {},
+                        flaps=self._flaps(a, now),                                  # back this often in 1 h (#340)
+                        **({"muted": True, "muted_until": mutes[alert_kind(a["key"])]}
+                           if alert_kind(a["key"]) in mutes else {}))
                    for a in self.active.values()]
         return sorted(out, key=lambda a: (a["severity"] != "critical", a["since"]))
 
@@ -1058,12 +1187,14 @@ class StationHealth:
                 "notify": {"on": bool(n is not None and n.enabled),
                            "server": getattr(n, "server", "") if n is not None and n.enabled else "",
                            "sent": getattr(n, "sent", 0), "failed": getattr(n, "failed", 0),
-                           "last_error": getattr(n, "last_error", ""), "last_push": max(pushed.values(), default=None)},
+                           "last_error": getattr(n, "last_error", ""), "last_push": max(pushed.values(), default=None),
+                           "muted": [{"kind": k, "label": MUTE_KINDS[k], "until": u} for k, u in self._mutes(now).items()]},
                 "errors": self.errors.panel() if self.errors is not None else None,
                 "thresholds": {"silent_min": self.silent_s / 60, "behind_min": self.behind_s / 60,
                                "down_min": self.down_s / 60, "outbox_min": self.outbox_s / 60,
                                "disk_pct": self.disk_pct, "repeat_min": self.repeat_s / 60,
-                               "job_grace_s": JOB_GRACE_S,
+                               "job_grace_s": JOB_GRACE_S, "settle_min": SETTLE_S / 60,
+                               "settle_flapping_min": SETTLE_FLAPPING_S / 60, "flap_n": FLAP_N,
                                "trunk": {"day_min": self.trunk_day_s / 60, "night_min": self.trunk_night_s / 60,
                                          "factor": QUIET_FACTOR, "gaps_min": QUIET_GAPS_MIN,
                                          "cc_lost_min": CC_LOST_S / 60},

@@ -192,6 +192,8 @@ POST /api/cad/settings/atc                {action: set {key: identify | map | vo
                                           talking on HPN Tower (#252, sizeup/atc_talkers.py) on the rows / the map; admins
 POST /api/cad/settings/hub_errors         {action: set {key: on | per_signature | total, value} | reset {key}}: the hub's own
                                           error spikes to the status topic (#285, sizeup/errwatch.py); admins
+POST /api/cad/settings/alert_mutes        {action: mute {key: a health alert kind, hours?} | unmute {key}}: shown on
+                                          Settings > Health, not pushed (#340, sizeup/cloud/health.py); admins
 """
 
 from __future__ import annotations

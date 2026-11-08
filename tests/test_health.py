@@ -8,7 +8,7 @@ import pytest
 
 from sizeup import tz
 from sizeup.cloud.autoupdate import describe
-from sizeup.cloud.health import JOB_GRACE_S, Metrics, StationHealth, status_token
+from sizeup.cloud.health import JOB_GRACE_S, SETTLE_S, Metrics, StationHealth, status_token
 from sizeup.cloud.hubstore import MonitorDb
 from sizeup.config import ConfigError, load
 from tests.test_access import TEAM, AUD, jwt, keys, jwks, req  # noqa: F401  (fixtures)
@@ -117,16 +117,19 @@ def test_silent_starts_after_three_minutes_pushes_once_and_clears_with_a_recover
     assert len(r.n.msgs) == 1                                             # once, not every tick
     ch = r.at(210, status=station_status())
     assert [(k, a["key"]) for k, a in ch] == [("clear", "silent")] and r.keys() == []
-    assert r.n.msgs[1]["title"].startswith("Recovered: Station silent") and any("health: cleared Station silent" in m for m in r.logs)
+    assert len(r.n.msgs) == 1 and any("health: cleared Station silent" in m for m in r.logs)   # not settled yet (#340)
+    r.at(210 + SETTLE_S - 5, status=station_status())
+    assert len(r.n.msgs) == 1
+    r.at(210 + SETTLE_S, status=station_status())                         # clear 15 min: settled, recovered
+    assert r.n.msgs[1]["title"].startswith("Recovered: Station silent") and "cleared at " + tz.hhmm(T0 + 210) in r.n.msgs[1]["body"]
     # the station goes quiet: "since" its last post, the push says when it was last heard
-    r.at(300)
-    r.at(300 + 179, post=False)
+    t = 210 + SETTLE_S
+    r.at(t + 300)
+    r.at(t + 300 + 179, post=False)
     assert r.keys() == []
-    r.at(300 + 181, post=False)
-    assert r.keys() == ["silent"] and r.h.alerts()[0]["since"] == T0 + 300
-    assert len(r.n.msgs) == 2                                              # within 15 min of the last push: not again yet
-    r.at(181 + 900, post=False)
-    assert r.n.msgs[-1]["title"] == "Station silent 13 min · PCFD station · last heard " + tz.hhmm(T0 + 300)
+    r.at(t + 300 + 181, post=False)
+    assert r.keys() == ["silent"] and r.h.alerts()[0]["since"] == T0 + t + 300
+    assert r.n.msgs[-1]["title"] == "Station silent 3 min · PCFD station · last heard " + tz.hhmm(T0 + t + 300)
 
 
 def test_while_silent_nothing_else_starts_or_clears():
@@ -152,13 +155,15 @@ def test_behind_the_hub_for_fifteen_minutes():
     assert a["key"] == "behind" and a["since"] == T0 and "bbbbbbb" in a["text"] and "aaaaaaa" in a["text"]
     assert r.n.msgs[-1]["title"] == "Station behind the hub 15 min · PCFD station · station bbbbbbb, hub aaaaaaa"
     r.at(16 * 60, status=station_status(build=HUB))
+    r.at(16 * 60 + SETTLE_S, status=station_status(build=HUB))
     assert r.keys() == [] and r.n.msgs[-1]["title"].startswith("Recovered: Station behind the hub")
     # an update to the hub's build in progress counts too (stuck updating), a docs-only equivalent doesn't
-    upd = {"state": "updating", "to": HUB, "since": T0 + 17 * 60}
-    r.at(17 * 60, status=station_status(build=OLD, version={"build": OLD, "update": upd}))
-    r.at(33 * 60, status=station_status(build=OLD, version={"build": OLD, "update": dict(upd, since=T0 + 33 * 60)}))
+    t = 16 * 60 + SETTLE_S
+    upd = {"state": "updating", "to": HUB, "since": T0 + t + 60}
+    r.at(t + 60, status=station_status(build=OLD, version={"build": OLD, "update": upd}))
+    r.at(t + 16 * 60, status=station_status(build=OLD, version={"build": OLD, "update": dict(upd, since=T0 + t + 16 * 60)}))
     assert r.keys() == ["behind"]
-    r.at(34 * 60, status=station_status(build=OLD, version={"build": OLD, "update": {"equivalent": {HUB: OLD}}}))
+    r.at(t + 17 * 60, status=station_status(build=OLD, version={"build": OLD, "update": {"equivalent": {HUB: OLD}}}))
     assert r.keys() == []
 
 
@@ -243,23 +248,23 @@ def test_a_stuck_channel_and_the_outbox_backing_up_and_a_full_disk():
     assert r.keys() == []                                               # a fresh, short backlog is normal
 
 
-def test_at_most_one_push_per_condition_per_fifteen_minutes_plus_its_recovery():
-    r = Rig()
+def test_at_most_one_push_per_condition_per_repeat_interval_plus_its_recovery():
+    r = Rig(alerts_repeat_min=30.0)
     stuck = station_status(radios=[radio("FG1", open=True, open_s=130.0, stuck=True)])
     calm = station_status()
     r.at(0, status=stuck)
     r.at(60, status=calm)
+    r.at(60 + SETTLE_S, status=calm)                                    # clear 15 min: recovered (#340)
     assert [m["title"].split(" · ")[0] for m in r.n.msgs] == ["FG1 stuck open 2 min", "Recovered: FG1 stuck open"]
-    r.at(120, status=stuck)                                             # again within 15 min: shown, not pushed
+    r.at(1020, status=stuck)                                            # again within 30 min of the push: shown, not pushed
     assert r.keys() == ["stuck:FG1"] and len(r.n.msgs) == 2
-    r.at(180, status=calm)                                              # its clear isn't pushed either
+    r.at(1080, status=calm)                                             # its clear isn't pushed either
+    r.at(1080 + SETTLE_S, status=calm)
     assert len(r.n.msgs) == 2 and len(r.h.history) == 2
-    r.at(300, status=stuck)
-    r.at(899, status=stuck)
-    assert len(r.n.msgs) == 2
-    r.at(900, status=stuck)                                             # still on when the 15 min are up: pushed now
+    r.at(2000, status=stuck)                                            # 30 min since the last push: pushed
     assert len(r.n.msgs) == 3 and r.n.msgs[-1]["title"].startswith("FG1 stuck open")
-    r.at(960, status=calm)
+    r.at(2060, status=calm)
+    r.at(2060 + SETTLE_S, status=calm)
     assert r.n.msgs[-1]["title"].startswith("Recovered: FG1 stuck open")
     hist = r.h.panel()["history"]
     assert [h["pushed"] for h in hist] == [True, False, True]
@@ -280,7 +285,10 @@ def test_alerts_survive_a_hub_restart_without_a_second_push(tmp_path):
     r2.at(16 * 60 + 5, status=station_status(build=OLD))
     assert [a["key"] for a in r2.h.alerts()] == ["behind"] and r2.n.msgs == []
     r2.at(17 * 60, status=station_status(build=HUB))
-    assert r2.h.alerts() == [] and r2.n.msgs[0]["title"].startswith("Recovered: Station behind the hub")
+    assert r2.h.alerts() == [] and r2.n.msgs == []                       # settling (#340), kept through a redeploy too
+    r3 = Rig(db)
+    r3.at(17 * 60 + SETTLE_S, status=station_status(build=HUB))
+    assert r3.n.msgs[0]["title"].startswith("Recovered: Station behind the hub")
 
 
 def test_a_channel_quiet_far_longer_than_usual_is_a_hint_not_an_alert():

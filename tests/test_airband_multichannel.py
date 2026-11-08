@@ -149,13 +149,12 @@ def approach(clock, covered=None, multichannel=True, **kw):
     events = []
     r = AmReceiver("/opt/sizeup/rtl-sdr/bin/rtl_fm", "", 36.4, Channel(126.4, APP), lambda c, s: None, events.append,
                    open_db=3.5, schedule=DAYNIGHT, also=[Extra(124.65, APP3, 7 * 60, 23 * 60)], covered=covered,
-                   multichannel=multichannel, **kw)
-    r.clock = lambda: clock[0]
+                   multichannel=multichannel, clock=lambda: clock[0], **kw)   # pinned: never the wall's (#346)
     r._tune()
     return r, events
 
 
-def test_also_is_off_by_default_and_never_taken_when_another_dongle_has_it():
+def test_also_is_off_by_default_and_never_taken_when_another_dongle_has_it(any_hour):
     day = [local(2026, 7, 1, 12)]
     r, _ = approach(day, multichannel=False)                         # [radio] airband_multichannel: off by default
     assert r.active == (126.4,) and r.capture is None
@@ -174,10 +173,21 @@ def test_also_is_off_by_default_and_never_taken_when_another_dongle_has_it():
     assert r.describe_plan() == "126.4 07:00-23:00, 120.8 23:00-07:00 + 124.65 07:00-23:00"
 
 
-def test_the_tower_row_says_ctaf_while_the_tower_is_closed():
+@pytest.mark.parametrize("t, want", [pytest.param(local(2026, 7, 1, 5, 59), 124.65, id="05:59"),
+                                     pytest.param(local(2026, 7, 1, 6), 121.825, id="06:00"),
+                                     pytest.param(local(2026, 7, 1, 22, 59), 121.825, id="22:59"),
+                                     pytest.param(local(2026, 7, 1, 23), 124.65, id="23:00")])
+def test_hpn_grounds_dongle_starts_on_its_clocks_frequency(any_hour, t, want):
+    """#346: the frequency a receiver starts on is its clock's (Ground by day, 124.65 overnight), never the wall's."""
+    r = AmReceiver("rtl_fm", "", 36.4, Channel(121.825, "HPN Ground"), lambda c, s: None, open_db=3.5,
+                   schedule=GND.schedule, clock=lambda: t)
+    assert r.channel.mhz == want and r.active == (want,) and r.retune_due() is None
+
+
+def test_the_tower_row_says_ctaf_while_the_tower_is_closed(any_hour):
     night = [local(2026, 7, 1, 23, 30)]
-    r = AmReceiver("rtl_fm", "", 36.4, Channel(118.575, "HPN Tower"), lambda c, s: None, open_db=3.5)
-    r.clock = lambda: night[0]
+    r = AmReceiver("rtl_fm", "", 36.4, Channel(118.575, "HPN Tower"), lambda c, s: None, open_db=3.5,
+                   clock=lambda: night[0])
     st = r.status()
     assert st["freqs"][0]["name"] == "CTAF" and st["now"] == "118.575 CTAF"
     assert st["tower"] == {"open": False, "hours": "06:00-23:00", "next": "06:00"}
@@ -292,8 +302,8 @@ def test_a_fake_rtl_sdr_through_the_channelizer_process_gives_each_channel_its_t
             done.set()
     monkeypatch.chdir(ROOT)                                          # python -m sizeup.radio.channelize finds this tree
     r = AmReceiver(str(tmp_path / "rtl_fm"), "", 36.4, Channel(126.4, APP), seg, lambda m: None, open_db=3.5,
-                   schedule=DAYNIGHT, also=[Extra(124.65, APP3, 7 * 60, 23 * 60)], rtl_sdr=str(fake.exe), multichannel=True)
-    r.clock = lambda: clock[0]
+                   schedule=DAYNIGHT, also=[Extra(124.65, APP3, 7 * 60, 23 * 60)], rtl_sdr=str(fake.exe), multichannel=True,
+                   clock=lambda: clock[0])
     r.start()
     try:
         assert done.wait(60), f"{got} {r.status()}"
@@ -382,8 +392,8 @@ def test_dropped_samples_are_logged(tmp_path, monkeypatch):
     clock = [local(2026, 7, 1, 12)]
     events: list[str] = []
     r = AmReceiver("rtl_fm", "", 36.4, Channel(126.4, APP), lambda c, s: None, events.append, open_db=3.5,
-                   schedule=DAYNIGHT, also=[Extra(124.65, APP3, 7 * 60, 23 * 60)], multichannel=True, python=str(fake))
-    r.clock = lambda: clock[0]
+                   schedule=DAYNIGHT, also=[Extra(124.65, APP3, 7 * 60, 23 * 60)], multichannel=True, python=str(fake),
+                   clock=lambda: clock[0])
     r.start()
     try:
         deadline = time.time() + 15
