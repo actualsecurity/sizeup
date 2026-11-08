@@ -421,7 +421,8 @@ class AmReceiver(NfmReceiver):
                  open_db: float = SQUELCH_DB, schedule: Schedule | Iterable[tuple[int, float]] | None = None,
                  also: Iterable[Extra | tuple] = (), owner: Callable[[float], str | None] | None = None,
                  covered: Callable[[float, "AmReceiver"], bool] | None = None, rtl_sdr: str | None = None,
-                 python: str | None = None, multichannel: bool = False, **_ignored):
+                 python: str | None = None, multichannel: bool = False,
+                 clock: Callable[[], float] | None = None, **_ignored):
         self._up = Upsampler()
         self.base_mhz = float(channel.mhz)
         self.extras = [x if isinstance(x, Extra) else Extra(*x) for x in also]
@@ -443,6 +444,8 @@ class AmReceiver(NfmReceiver):
         self.rate_pct: float | None = None                # the channelizer's output against real time, last window
         self._drop_said: float | None = None              # the percent last logged under DROP_PCT, None: not short
         super().__init__(rtl_fm, device, gain_db, channel, on_segment, on_event, open_db=open_db)
+        if clock is not None:               # the tests' time, before plan_at picks the frequency it starts on (#346)
+            self.clock = clock
         self.schedule = schedule if isinstance(schedule, Schedule) or not schedule else Schedule(schedule)
         self._retune_to: float | tuple[float, ...] | None = None  # set by _pump when it stopped to retune
         self._due_since: float | None = None      # when the schedule first asked for another frequency

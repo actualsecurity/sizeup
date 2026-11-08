@@ -122,10 +122,11 @@ def test_the_schedule_says_itself():
 
 
 def receiver(clock):
+    """The clock goes in at construction (#346): __init__ picks the frequency it starts on from it, and a receiver made
+    on the real clock overnight started on 120.8 whatever the test's clock said."""
     events = []
     r = AmReceiver("rtl_fm", "", 36.4, Channel(126.4, "NY Approach"), lambda c, s: None, events.append, open_db=3.5,
-                   schedule=DAYNIGHT)
-    r.clock = lambda: clock[0]
+                   schedule=DAYNIGHT, clock=lambda: clock[0])
     r.squelch = CarrierSquelch(open_db=3.5, clock=lambda: clock[0])
     return r, events
 
@@ -136,14 +137,21 @@ def feed(r, clock, frames):
         r._deliver(r.squelch.feed(f))
 
 
-def test_never_retuned_mid_transmission():
+# (10 s before the change, the frequency before, the one after): both of the schedule's changes
+BOUNDARIES = [pytest.param(local(2026, 7, 1, 22, 59, 50), 126.4, 120.8, id="23:00"),
+              pytest.param(local(2026, 7, 2, 6, 59, 50), 120.8, 126.4, id="07:00")]
+
+
+@pytest.mark.parametrize("before, was, then", BOUNDARIES)
+def test_never_retuned_mid_transmission(any_hour, before, was, then):
     rng = np.random.default_rng(3)
-    clock = [local(2026, 7, 1, 22, 59, 50)]
+    clock = [before]
     r, events = receiver(clock)
-    feed(r, clock, envelope([(4.0, 0.01, False)], rng))                     # the floor learned, 126.4 by day
-    assert r.retune_due() is None
-    feed(r, clock, envelope([(9.0, 0.1, True)], rng))                       # a transmission across 23:00
-    assert clock[0] > local(2026, 7, 1, 23) and r.squelch.busy_since is not None
+    assert r.channel.mhz == was and r.retune_due() is None                 # the test's clock, not the wall's
+    feed(r, clock, envelope([(4.0, 0.01, False)], rng))                     # the floor learned, before the change
+    assert clock[0] < before + 10 and r.retune_due() is None               # this side of it: nothing due
+    feed(r, clock, envelope([(9.0, 0.1, True)], rng))                       # a transmission across the change
+    assert clock[0] > before + 10 and r.squelch.busy_since is not None
     assert r.retune_due() is None                                          # open: never cut
     clock[0] += am.RETUNE_FORCE_S + 1                                       # ... not even long overdue
     assert r.retune_due() is None
@@ -154,21 +162,21 @@ def test_never_retuned_mid_transmission():
     assert r.squelch.busy_since is None and r.last_heard is not None
     assert r.retune_due() is None                                          # ... a read-back may follow: wait
     feed(r, clock, envelope([(am.RETUNE_QUIET_S + 0.1, 0.01, False)], rng))
-    assert r.retune_due() == 120.8                                         # quiet: now
-    r._retune_to = 120.8
+    assert r.retune_due() == then                                          # quiet: now
+    r._retune_to = then
     assert r._retuning()
     r._tune()                                                              # (what _run does before the next start)
-    assert r.channel.mhz == 120.8 and r.channel.label == "NY Approach" and not r._retuning()
-    assert r.argv("3")[r.argv("3").index("-f") + 1] == "120.8000M"
-    assert events == ["NY Approach: retuned 126.4 -> 120.8 MHz (schedule: 126.4 07:00-23:00, 120.8 23:00-07:00)"]
+    assert r.channel.mhz == then and r.channel.label == "NY Approach" and not r._retuning()
+    assert r.argv("3")[r.argv("3").index("-f") + 1] == f"{then:.4f}M"
+    assert events == [f"NY Approach: retuned {was:g} -> {then:g} MHz (schedule: 126.4 07:00-23:00, 120.8 23:00-07:00)"]
     assert r.retune_due() is None and r.status()["schedule"] == "126.4 07:00-23:00, 120.8 23:00-07:00"
 
 
-def test_a_busy_channel_retunes_late_but_still_between_transmissions():
+def test_a_busy_channel_retunes_late_but_still_between_transmissions(any_hour):
     rng = np.random.default_rng(4)
     clock = [local(2026, 7, 2, 6, 59, 55)]
     r, _ = receiver(clock)
-    r.channel = Channel(120.8, "NY Approach")
+    assert r.channel.mhz == 120.8                                          # still the night's
     feed(r, clock, envelope([(4.0, 0.01, False)], rng))
     talk = [(1.5, 0.1, True), (1.0, 0.01, False)] * 3                       # key-ups 1 s apart: never 2 s quiet
     for _ in range(int(am.RETUNE_FORCE_S / 7.5) + 10):
@@ -197,8 +205,7 @@ def test_the_receiver_restarts_rtl_fm_on_the_new_frequency_and_isnt_down(tmp_pat
     clock = [local(2026, 7, 1, 22, 59, 58)]
     events = []
     r = AmReceiver(fake_rtl_fm(tmp_path), "", 36.4, Channel(120.8, "NY Approach"), lambda c, s: None, events.append,
-                   open_db=3.5, schedule=DAYNIGHT)
-    r.clock = lambda: clock[0]
+                   open_db=3.5, schedule=DAYNIGHT, clock=lambda: clock[0])
     r.start()
     starts = tmp_path / "starts.txt"
     try:
