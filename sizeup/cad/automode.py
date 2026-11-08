@@ -404,6 +404,7 @@ class AutoDispatch:
             return
         if status not in ("pending", "active"):
             return
+        self._started(iid)                               # when automation took it, if not before
         self._dispatch_listed(iid)
         times = data.get("times") or {}
         if times.get("in_service") is not None or data.get("closed"):

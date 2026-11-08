@@ -493,9 +493,72 @@ def test_the_primary_recovering_while_the_call_is_in_service_still_closes_it(rig
     assert any(a["name"] == "E60" and not a["cleared_at"] for a in rig.cad.full(iid)["assignments"])
     rig.at(1200)
     rig.feed.recover()
-    rig.feed.put("A1", type="ALARM/COMM", location="12 Example Ave", units=("E60",),
-                 times={"dispatched": T0, "on_location": T0 + 300, "in_service": T0 + 1100})
+    rig.feed.put("A1", type="ALARM/COMM", location="12 Example Ave", units=("E60",), closed=True,  # the same call:
+                 times={"dispatched": T0, "on_location": T0 + 300, "in_service": T0 + 1100})     # dispatched as it was made
     rig.poll()
     assert rig.iid("A1") == iid
     inc = rig.cad.full(iid)
     assert inc["status"] == "closed" and not any(not a["cleared_at"] for a in inc["assignments"])
+
+
+def _two_feeds(rig):
+    from tests.fake_feed import FakeFeed
+    mirror = FakeFeed("mirror", "Mirror feed", rank=2, clock=rig.clock)
+    rig.feeds.append(mirror)
+    rig.runner = type(rig.runner)(rig.feeds, rig.sink, log=lambda m: None, clock=rig.clock)
+    return mirror
+
+
+def test_an_earlier_closed_call_at_the_address_never_closes_the_live_one(rig):
+    """Sixth review: the primary comes back and lists an EMS call at the same address that ended before the live fire
+    call began: it never joins, rules or closes the live call."""
+    mirror = _two_feeds(rig)
+    rig.feed.outage("failing", "x", raise_=True)
+    rig.at(600)
+    mirror.put("M1", type="ALARM/COMM", location="12 Example Ave", units=("E60", "L31"), times={"dispatched": T0 + 600})
+    rig.poll()
+    iid = rig.cad.store.one("SELECT incident_id FROM source_reports WHERE ref = 'M1'")["incident_id"]
+    assert rig.cad.store.incident(iid)["status"] in ("pending", "active")
+    rig.at(900)
+    rig.feed.recover()
+    rig.feed.put("OLD1", type="EMS", location="12 EXAMPLE AVE", units=("E60",), closed=True,
+                 times={"dispatched": T0, "in_service": T0 + 500})
+    rig.poll()
+    inc = rig.cad.full(iid)
+    assert inc["status"] in ("pending", "active") and any(a["name"] == "E60" and not a["cleared_at"] for a in inc["assignments"])
+    assert rig.cad.store.one("SELECT incident_id FROM source_reports WHERE ref = 'OLD1'")["incident_id"] != iid
+
+
+def test_an_earlier_closed_call_never_takes_a_queued_page(rig):
+    """The single-feed variant: our page waits queued; the feed (back from an outage) lists an earlier ended call at the
+    address: the page's incident stays open and untouched."""
+    rig.feed.outage("failing", "x", raise_=True)
+    rig.poll()
+    rig.at(600)
+    page = rig.page()
+    rig.at(700)
+    rig.feed.recover()
+    rig.feed.put("OLD1", type="EMS", location="12 EXAMPLE AVE", units=("E60",), closed=True,
+                 times={"dispatched": T0, "in_service": T0 + 500})
+    rig.poll()
+    inc = rig.cad.store.incident(page["id"])
+    assert inc["status"] == "queued" and rig.cad.store.one(
+        "SELECT 1 AS x FROM auto_incidents WHERE incident_id = ?", (page["id"],)) is None
+
+
+def test_a_new_ruler_on_a_queued_incident_is_its_first_report(rig):
+    """The mirror's call is none of ours (queued); the primary attaches listing E60: accepted and dispatched as a first
+    report would be, and automation's start recorded."""
+    mirror = _two_feeds(rig)
+    mirror.put("M1", type="ALARM/COMM", location="12 Example Ave", units=("Z99",), times={"dispatched": T0})
+    rig.poll()
+    iid = rig.cad.store.one("SELECT incident_id FROM source_reports WHERE ref = 'M1'")["incident_id"]
+    assert rig.cad.store.incident(iid)["status"] == "queued"
+    rig.at(30)
+    rig.feed.put("A1", type="ALARM/COMM", location="12 Example Ave", units=("E60",), times={"dispatched": T0 + 10})
+    rig.poll()
+    assert rig.iid("A1") == iid
+    assert rig.cad.store.incident(iid)["status"] in ("pending", "active")
+    assert any(a["name"] == "E60" and not a["cleared_at"] for a in rig.cad.full(iid)["assignments"])
+    row = rig.cad.store.one("SELECT started_at, seen_src FROM auto_incidents WHERE incident_id = ?", (iid,))
+    assert row["started_at"] is not None and row["seen_src"] == "county"
