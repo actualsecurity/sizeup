@@ -418,6 +418,25 @@ def test_the_image_ships_cloudflared_pinned_and_the_shared_folder():
     assert os.access(ROOT / "deploy/hub/connector.sh", os.X_OK)
 
 
+def test_the_updating_page_reloads_the_whole_url_hash_included():
+    # #316: a bare <meta http-equiv=refresh> goes to the page's own URL; with a hash (/cad#settings/radios) the
+    # browser takes that as a jump within the page and never asks the server again. location.reload() keeps it all.
+    from sizeup.web.updating import UPDATING_HTML, serve_updating
+    srv = serve_updating("127.0.0.1", 0)
+    try:
+        req = urllib.request.Request(f"http://127.0.0.1:{srv.server_address[1]}/cad", headers={"Accept": "text/html"})
+        with pytest.raises(urllib.error.HTTPError) as e:
+            urllib.request.urlopen(req, timeout=10)
+        body = e.value.read()
+    finally:
+        srv.shutdown()
+    assert e.value.code == 503 and body == UPDATING_HTML
+    page = body.decode()
+    assert "location.reload()" in page and "update in progress" in page
+    head, _, rest = page.partition("<noscript>")
+    assert "http-equiv=refresh" not in head + rest.partition("</noscript>")[2]   # only for a browser without script
+
+
 # -- the CAD page: "Reconnecting… (update in progress)" ----------------------------------------------------------------
 
 HARNESS = r"""

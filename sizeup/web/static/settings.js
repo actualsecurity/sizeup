@@ -1654,14 +1654,14 @@ function sSystem(panel) {
 function sAtcTalkers(a) {
   const card = sCard(sCardHead("ATC talkers", a.identify.value ? "on" : "off",
     sHelp("HPN Tower is AM voice: no radio IDs. With this on, each transmission's callsign is taken from the words "
-      + "(JetBlue 1234, November 4 1 Delta Whiskey) and matched to an aircraft on ADS-B near HPN within 2 minutes: "
+      + "(JetBlue 1234, November 4 7 Delta Quebec) and matched to an aircraft on ADS-B near HPN within 2 minutes: "
       + "confirmed (that exact callsign), probable (one character off, the only such aircraft, doing what the words say), "
       + "or heard (not on ADS-B; two candidates are never picked between). The tower (TWR / GND) is told from its own "
       + "name, the word order and its steady carrier. Speech-derived: never a radio ID, and never in an airport "
       + "pre-alert's matched aircraft. No callsign heard: nothing is labelled.")));
   card.id = "s-atc";
   const hints = {
-    identify: "A chip on each HPN Tower transmission: TWR, JBU1234 · A320 ✓, heard: N41DW; and its exchanges folded together",
+    identify: "A chip on each HPN Tower transmission: TWR, JBU1234 · A320 ✓, heard: N47DQ; and its exchanges folded together",
     map: "The aircraft talking gets a ring on the map, the tower a lit TWR; its box lists its transmissions; a chip click centres it",
     // #257 (sizeup/atc_vocab.py): Amazon Transcribe's sizeup-atc list, with the operators seen near HPN lately
     vocab: "Every few hours, when the operators seen near HPN in the last two days change, the sizeup-atc vocabulary is "
