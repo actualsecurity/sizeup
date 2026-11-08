@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -390,16 +391,89 @@ def _taskdef():
 def test_the_task_definition_hands_over():
     td = _taskdef()
     hub, cf = (next(c for c in td["containerDefinitions"] if c["name"] == n) for n in ("hub", "cloudflared"))
-    assert td["volumes"] == [{"name": "shared"}]
+    assert td["volumes"][0] == {"name": "shared"}
     for c in (hub, cf):
         assert c["stopTimeout"] == 120 and c["essential"] is True
-        assert c["mountPoints"] == [{"sourceVolume": "shared", "containerPath": "/run/sizeup-shared"}]
+        assert c["mountPoints"][0] == {"sourceVolume": "shared", "containerPath": "/run/sizeup-shared"}
         assert c["linuxParameters"]["initProcessEnabled"] is True
         assert "dependsOn" not in c                    # ECS would stop them in order, and health is the standby's
     assert "127.0.0.1:8089/healthz" in hub["healthCheck"]["command"][1] and hub["healthCheck"]["startPeriod"] == 300
     assert cf["image"] == hub["image"] and cf["entryPoint"] == ["/app/deploy/hub/connector.sh"]
     assert [s["name"] for s in cf["secrets"]] == ["TUNNEL_TOKEN"]
     assert "TUNNEL_TOKEN" not in {s["name"] for s in hub["secrets"]}
+
+
+# -- the DVR's EFS volume and the attachments bucket (#322, #323; sizeup-aws 14-dvr-storage.sh) ---------------------------
+
+EFS_FS = re.compile(r"fs-[0-9a-f]{8,40}")
+EFS_AP = re.compile(r"fsap-[0-9a-f]{8,40}")
+
+
+def test_the_task_definition_mounts_the_dvr_on_efs_and_names_the_attachments_bucket():
+    td = _taskdef()
+    hub, cf = (next(c for c in td["containerDefinitions"] if c["name"] == n) for n in ("hub", "cloudflared"))
+    # 0.5 vCPU with 2 GB (Fargate: 1-4 GB at 512): 1 GB already peaked at 72-80% before 24/7 recording, the radio
+    # backfill and clip uploads
+    assert (td["cpu"], td["memory"]) == ("512", "2048")
+    vols = {v["name"]: v for v in td["volumes"]}
+    assert set(vols) == {"shared", "dvr"}
+    efs = vols["dvr"]["efsVolumeConfiguration"]
+    assert efs["transitEncryption"] == "ENABLED"                     # the file system policy denies plain NFS
+    assert efs["authorizationConfig"]["iam"] == "ENABLED"            # ... and allows only the task role,
+    assert efs["authorizationConfig"]["accessPointId"].startswith("fsap-")   # through the access point (/dvr, 10001)
+    assert efs["fileSystemId"].startswith("fs-") and "rootDirectory" not in efs   # the access point sets the root
+    assert hub["mountPoints"] == [{"sourceVolume": "shared", "containerPath": "/run/sizeup-shared"},
+                                  {"sourceVolume": "dvr", "containerPath": "/data/dvr", "readOnly": False}]
+    assert cf["mountPoints"] == [{"sourceVolume": "shared", "containerPath": "/run/sizeup-shared"}]   # the hub's only
+    env = {e["name"]: e["value"] for e in hub["environment"]}
+    acct = td["taskRoleArn"].split(":")[4]
+    assert env["SIZEUP_ATTACHMENTS_BUCKET"] == f"sizeup-clips-{acct}"     # 14-dvr-storage.sh's CLIPS
+    assert "SIZEUP_ATTACHMENTS_BUCKET" not in {e["name"] for e in cf["environment"]}
+
+
+def test_the_hub_sees_the_efs_mount_as_the_dvrs_shared_folder(monkeypatch, tmp_path):
+    # The mount point is the hub's default dvr_dir (the state folder's dvr/: SIZEUP_STATE_DIR=/data in the image) and
+    # dvr_shared = "auto" takes it as shared: 12 h of the response area. Fargate mounts EFS with TLS through the
+    # local stunnel, so /proc/self/mounts shows an nfs4 mount from 127.0.0.1.
+    from sizeup.config import load
+    from sizeup.dvr import shared_mount
+    assert "SIZEUP_STATE_DIR=/data" in (ROOT / "Dockerfile").read_text()
+    monkeypatch.setenv("SIZEUP_STATE_DIR", "/data")
+    cfg = load(ROOT / "deploy" / "hub" / "config.hub.toml")
+    assert cfg.roads_enabled and cfg.roads_dvr and cfg.roads_dvr_shared == "auto" and cfg.roads_dvr_dir == ""
+    root = Path(cfg.cad_db).parent / "dvr"                          # sizeup/app.py: the DVR's folder
+    hub = next(c for c in _taskdef()["containerDefinitions"] if c["name"] == "hub")
+    mount = next(m["containerPath"] for m in hub["mountPoints"] if m["sourceVolume"] == "dvr")
+    assert str(root) == mount == "/data/dvr"
+    mounts = tmp_path / "mounts"
+    mounts.write_text("overlay / overlay rw,relatime 0 0\n"
+                      "127.0.0.1:/ /data/dvr nfs4 rw,relatime,vers=4.1,rsize=1048576,wsize=1048576,hard,proto=tcp,"
+                      "port=20049,timeo=600,retrans=2,sec=sys 0 0\n"
+                      "tmpfs /run/sizeup-shared tmpfs rw 0 0\n")
+    assert shared_mount(root, str(mounts)) == "nfs4"
+
+
+def test_the_hub_turns_attachments_on_from_the_task_definitions_bucket(monkeypatch, tmp_path):
+    from sizeup.attachments import Attachments
+    from tests.test_cad import make_cad
+    hub = next(c for c in _taskdef()["containerDefinitions"] if c["name"] == "hub")
+    env = {e["name"]: e["value"] for e in hub["environment"]}
+    monkeypatch.setenv("SIZEUP_ATTACHMENTS_BUCKET", env["SIZEUP_ATTACHMENTS_BUCKET"])
+    monkeypatch.setenv("AWS_REGION", env["AWS_REGION"])
+    a = Attachments.from_env(make_cad(tmp_path).store, log=lambda m: None)
+    assert a.configured and a.s3.bucket == env["SIZEUP_ATTACHMENTS_BUCKET"] and a.prefix == "attachments"
+    monkeypatch.delenv("SIZEUP_ATTACHMENTS_BUCKET")                  # the rollback: no bucket, nothing copied
+    assert not Attachments.from_env(make_cad(tmp_path / "b").store, log=lambda m: None).configured
+
+
+def test_the_task_definition_names_real_efs_ids_not_placeholders():
+    # The ids sizeup-aws 14-dvr-storage.sh printed: a placeholder (REPLACE_ME) or a malformed id would fail every new
+    # task and stall the deploy.
+    text = (ROOT / "deploy/aws/taskdef.json").read_text()
+    efs = next(v for v in json.loads(text)["volumes"] if v["name"] == "dvr")["efsVolumeConfiguration"]
+    assert "REPLACE_ME" not in text, "deploy/aws/taskdef.json still has REPLACE_ME placeholders"
+    assert EFS_FS.fullmatch(efs["fileSystemId"]), efs["fileSystemId"]
+    assert EFS_AP.fullmatch(efs["authorizationConfig"]["accessPointId"]), efs["authorizationConfig"]["accessPointId"]
 
 
 def test_the_deploy_workflow_puts_the_new_image_in_both_containers():
