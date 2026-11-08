@@ -412,6 +412,9 @@ EFS_AP = re.compile(r"fsap-[0-9a-f]{8,40}")
 def test_the_task_definition_mounts_the_dvr_on_efs_and_names_the_attachments_bucket():
     td = _taskdef()
     hub, cf = (next(c for c in td["containerDefinitions"] if c["name"] == n) for n in ("hub", "cloudflared"))
+    # 0.5 vCPU with 2 GB (Fargate: 1-4 GB at 512): 1 GB already peaked at 72-80% before 24/7 recording, the radio
+    # backfill and clip uploads
+    assert (td["cpu"], td["memory"]) == ("512", "2048")
     vols = {v["name"]: v for v in td["volumes"]}
     assert set(vols) == {"shared", "dvr"}
     efs = vols["dvr"]["efsVolumeConfiguration"]
