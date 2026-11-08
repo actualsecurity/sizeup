@@ -785,7 +785,8 @@ def test_atc_and_adsb_share_one_queue_and_atc_is_unchanged(tmp_path):
                                            confidence=0.85, channel="HPN Tower",
                                            snippets=[{"id": "x1", "at": w.clock.t, "channel": "HPN Tower", "text": "smoke"}]))
     assert new and w.pushed.sent == ["HPN ATC: possible brush fire off runway 16"]     # ATC still pushes
-    assert set(a["data"]) == {"snippets", "aircraft", "location", "phrases", "kinds", "event", "rank"}   # none of #235's
+    assert set(a["data"]) == {"snippets", "aircraft", "location", "phrases", "kinds", "event", "rank",
+                               "pushed"}                                     # none of #235's (pushed: #350)
     inc = w.cad.create({"type": "AIRPORT", "address": "240 Airport Rd", "operator": "Lt. Ruiz"})
     assert w.aa.get(a["id"])["incident_id"] is None and w.aa.get(a["id"])["status"] == "open"   # ATC's: left to Accept
     assert {r["source"] for r in w.cad.state()["airport_alerts"]["open"]} == {"atc", "adsb"}

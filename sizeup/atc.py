@@ -152,6 +152,7 @@ class Rule:
     never: re.Pattern | None = None
     always: bool = False
     event_type: str = ""
+    routine: bool = False        # counts at the routine factor in an exchange of normal sequencing (rules.json routine)
 
 
 @dataclass(frozen=True)
@@ -176,11 +177,15 @@ class Rules:
             if not 0 < w <= 1:
                 raise ValueError(f"rule {r['id']}: weight 0 to 1")
             self.rules.append(Rule(r["id"], r["category"], w, _rx(r["pattern"]), r.get("thing") or r["id"],
-                                   _rx(r["not"]) if r.get("not") else None, bool(r.get("always")), r.get("event_type", "")))
+                                   _rx(r["not"]) if r.get("not") else None, bool(r.get("always")), r.get("event_type", ""),
+                                   bool(r.get("routine"))))
         cues = d.get("cues") or {}
         self.cues = {k: _rx(v) for k, v in cues.items() if isinstance(v, str)}
         sup = (d.get("suppress") or {}).get("pattern")
         self.suppress = re.compile(sup) if sup else None
+        rt = d.get("routine") or {}
+        self.routine = _rx(rt["pattern"]) if rt.get("pattern") else None
+        self.routine_factor = float(rt.get("factor", 1.0))
         self.landmarks = [normalize(x) for x in d.get("landmarks") or [] if normalize(x)]
 
     @classmethod
@@ -202,6 +207,10 @@ class Rules:
         # the generic fire / smoke / emergency word that is part of a more specific hit adds nothing of its own
         spans = [h for h in out if h.rule.weight >= 0.6]
         return [h for h in out if h.rule.weight >= 0.6 or not any(h.text in s.text and h is not s for s in spans)]
+
+    def is_routine(self, norm: str) -> bool:
+        """Normal sequencing said in these words ("number 3", "square the base", "cleared to land")."""
+        return bool(self.routine and self.routine.search(norm))
 
     def cue(self, name: str, norm: str) -> bool:
         rx = self.cues.get(name)
@@ -722,6 +731,51 @@ def whisper_prompt(base: str, aircraft: Sequence[dict], telephony: dict[str, str
     return out.rstrip(",")
 
 
+# -- ADS-B against an accident's words ------------------------------------------------------------------------------
+
+ADSB_AFTER_S = 10.0          # a position this long after the transmission ended is "after" it
+ADSB_LOST_S = 20.0           # no position for this long, last seen before the transmission: lost
+ADSB_LOW_FT = 1500           # ... under this (not on the ground)
+ADSB_NORMAL = 0.3            # an accident rule's weight while the aircraft it names flies on normally after the words
+                             # (a rule under the threshold alone; one that alerts alone is lowered to the threshold
+                             # at most: AtcWatch.confidence)
+ADSB_MATCH = 0.7             # the callsign in the transmission itself, matched this well and to one aircraft only
+ADSB_MATCH_NORMAL = 1.0      # ... and exactly, for "normal" (which lowers): a one-off match may be another aircraft
+NORMAL_MIN_FT, NORMAL_MIN_KT, NORMAL_MIN_VR = 500, 50, -1000
+NORMAL_LEVEL_FT = 1000       # under this, "normal" only when not descending at all
+ADSB_WORSE = 0.4             # added (as one more hit) when its ADS-B stops low, it squawks 7700 or it drops fast
+EMERGENCY_SQ = ("7700", "7600", "7500")
+
+
+def adsb_check(plane: dict | None, at: float, now: float) -> tuple[str, str] | None:
+    """What the named aircraft's ADS-B says about an accident heard at `at` (the transmission's end): ("normal", why)
+    when it is still received after it, airborne and flying normally (holding altitude and speed); ("worse", why) when
+    it squawks an emergency, drops fast at low altitude, or its ADS-B stopped at low altitude before the words and has
+    not come back; None when it can't say (no position after the words yet, on the ground, no aircraft).
+    plane: the Aircraft layer's dict (alt, gs, vr, sq, emerg, pos_at: when its last position was)."""
+    if not plane:
+        return None
+    alt, gs, vr = plane.get("alt"), plane.get("gs"), plane.get("vr")
+    airborne = isinstance(alt, (int, float)) and not isinstance(alt, bool)
+    sq = str(plane.get("sq") or "")
+    if sq in EMERGENCY_SQ or plane.get("emerg"):
+        return "worse", f"ADS-B: {('squawk ' + sq) if sq in EMERGENCY_SQ else plane.get('emerg')}"
+    if airborne and isinstance(vr, (int, float)) and vr <= -3000 and alt < 3000:
+        return "worse", f"ADS-B: descending {int(-vr):,} fpm at {int(alt):,} ft"
+    pos_at = plane.get("pos_at")
+    if not isinstance(pos_at, (int, float)):
+        return None
+    if pos_at >= at + ADSB_AFTER_S:
+        known = airborne and isinstance(gs, (int, float)) and isinstance(vr, (int, float))   # a missing one: can't say
+        if known and alt >= NORMAL_MIN_FT and gs >= NORMAL_MIN_KT and vr > NORMAL_MIN_VR \
+                and (alt >= NORMAL_LEVEL_FT or vr >= 0):
+            return "normal", f"ADS-B: flying normally after ({int(alt):,} ft, {int(gs)} kt)"
+        return None
+    if pos_at < at and now - pos_at >= ADSB_LOST_S and airborne and alt < ADSB_LOW_FT:
+        return "worse", f"ADS-B: lost at {int(alt):,} ft"
+    return None
+
+
 # -- the watch -------------------------------------------------------------------------------------------------------
 
 
@@ -783,10 +837,12 @@ class AtcWatch:
             q.append(me)
         if not hits:
             return None
-        conf = score([h.rule.weight for h in hits] + [h.rule.weight * self.rules.context_factor for c in ctx for h in c.hits])
+        conf, adsb = self.confidence(me, ctx)
         if conf < self.rules.threshold:
+            if adsb and adsb[0] == "normal":
+                self.log(f"atc: {me.id}: held back ({adsb[1]}): {', '.join(h.text for h in hits)}")
             return None
-        alert = self.build(me, ctx, conf)
+        alert = self.build(me, ctx, conf, adsb)
         try:
             row, new = self.alerts.raise_alert(alert)
         except Exception as e:  # noqa: BLE001 - a pre-alert must never stop the radio
@@ -795,6 +851,66 @@ class AtcWatch:
         if new:
             self.raised += 1
         return row
+
+    def confidence(self, me: Heard, ctx: list[Heard]) -> tuple[float, tuple[str, str] | None]:
+        """The score (the rules' weights, the earlier transmissions' at context_factor) and what the named aircraft's
+        ADS-B said about it. The ambiguous rules ('routine') count at the routine factor when the exchange is normal
+        sequencing (in this transmission, or the same callsign's before it); when the aircraft named in this transmission
+        flies on normally after the words, an accident rule under the threshold alone counts at ADSB_NORMAL and one
+        that alerts alone is lowered to the threshold at most; ADSB_WORSE is added when its ADS-B says something is wrong (adsb_check)."""
+        routine = self._routine(me, ctx)
+        pairs = [(h, 1.0) for h in me.hits] + [(h, self.rules.context_factor) for c in ctx for h in c.hits]
+        adsb = None
+        if any(h.rule.category == "accident" for h, _ in pairs):
+            adsb = self._adsb(me)
+        floor = self.rules.threshold
+        weights = []
+        for h, f in pairs:
+            w = h.rule.weight * f
+            if routine and h.rule.routine:
+                w *= self.rules.routine_factor
+            if h.rule.category == "accident" and adsb and adsb[0] == "normal":
+                # a rule that alerts on its own ("went down", "lost radar contact") never goes under the threshold:
+                # the aircraft named may be the one reporting it or spoken to, not the one lost, or ADS-B may be
+                # wrong; only the weaker words ("lost contact with", under the threshold alone) go quiet
+                w = w * ADSB_NORMAL if h.rule.weight < floor else min(w, max(w * ADSB_NORMAL, floor))
+            weights.append(w)
+        if adsb and adsb[0] == "worse":
+            weights.append(ADSB_WORSE)
+        return score(weights), adsb
+
+    def _routine(self, me: Heard, ctx: list[Heard]) -> bool:
+        """Normal sequencing in this transmission, or in an earlier one with the same callsign (not just anyone's
+        "number two, cleared to land" on a busy frequency)."""
+        if self.rules.is_routine(me.norm):
+            return True
+        mine = {m.suffix for m in find_mentions(me.text, self.index) if len(m.suffix) >= 3}
+        if not mine:
+            return False
+        for c in ctx:
+            if self.rules.is_routine(c.norm):
+                theirs = {m.suffix for m in find_mentions(c.text, self.index) if len(m.suffix) >= 3}
+                if any(a.endswith(b) or b.endswith(a) for a in mine for b in theirs):
+                    return True
+        return False
+
+    def _adsb(self, me: Heard) -> tuple[str, str] | None:
+        """adsb_check for the aircraft named in THIS transmission, matched at ADSB_MATCH or better and to one aircraft
+        only (none from the transmissions before it: the callsign there may be someone else's); "normal" only for an
+        exact match."""
+        from sizeup.atc_scope import planes_for
+        planes = planes_for(me.channel, self._planes())
+        att = attribute(me.text, self.index, planes)
+        if att is None or att.hex is None or att.confidence < ADSB_MATCH:
+            return None
+        other = attribute(me.text, self.index, [p for p in planes if p.get("hex") != att.hex])
+        if other is not None and other.hex is not None and other.confidence >= ADSB_MATCH:
+            return None                                  # another aircraft fits as well: not sure which
+        plane = next((p for p in planes if p.get("hex") == att.hex), None)
+        v = adsb_check(plane, me.at, self.clock())
+        if v and v[0] == "normal" and att.confidence < ADSB_MATCH_NORMAL:
+            return None
+        return v
 
     # -- what the pre-alert says --------------------------------------------------------------------------------------
 
@@ -817,7 +933,7 @@ class AtcWatch:
             return "fire"
         return top.rule.category
 
-    def build(self, me: Heard, ctx: list[Heard], conf: float) -> AirportAlert:
+    def build(self, me: Heard, ctx: list[Heard], conf: float, adsb: tuple[str, str] | None = None) -> AirportAlert:
         hits = list(me.hits)
         ctx_hits = [h for c in ctx for h in c.hits]
         allh = hits + ctx_hits
@@ -826,6 +942,8 @@ class AtcWatch:
         from sizeup.atc_scope import planes_for
         planes = planes_for(me.channel, self._planes())     # who can be on this frequency (#260: Ground, Approach)
         att = self._who(me, ctx, planes)
+        if att and adsb:
+            att = {**att, "adsb": adsb[1]}
         if not departing and att and att.get("phase") == "departing" and att.get("rwy"):
             departing = str(att["rwy"])
         w = where(me.norm, self.rules, departing)
@@ -851,7 +969,7 @@ class AtcWatch:
         cs = (att or {}).get("callsign") or ""
         subject = ("fire" + (f":{w.runway}" if w.runway else "")) if cat in FIRE else (f"acft:{cs}" if cs else cat)
         detail = " · ".join(x for x in (f"{info.get('label', cat)}", f"heard: {', '.join(dict.fromkeys(h.text for h in allh))}",
-                                         f"{me.channel}") if x)
+                                         adsb[1] if adsb else "", f"{me.channel}") if x)
         return AirportAlert(source="atc", kind=cat, subject=subject, title=title, detail=detail, confidence=round(conf, 2),
                             at=me.at, channel=me.channel, group=me.channel, snippets=snippets,
                             aircraft=[att] if att else [], location=loc, phrases=w.phrases, event=event, rank=rank(top))
