@@ -400,11 +400,87 @@ def test_adsb_flying_normally_after_the_words_holds_an_accident_back():
     assert hear2(1, "lost radar contact with November one two three alfa bravo", 0) is not None
 
 
-def test_adsb_still_flying_downgrades_even_a_crash_word():
+def test_adsb_flying_normally_never_silences_the_clear_words():
+    """A clear accident word is lowered to the threshold at most (it alerts, at low): the aircraft named may be the
+    one reporting it, or its ADS-B may be wrong."""
     clock = Clock()
-    cad, w, hear, push = watch(clock, acft(T0 + 40))
-    assert hear(1, "Westchester tower, November one two three alfa bravo crashed", 30) is None     # 0.75 x 0.3
-    assert push.sent == []
+    cad, w, hear, push = watch(clock, acft(T0 + 45))
+    a = hear(1, "Westchester tower, November one two three alfa bravo crashed", 30)
+    assert a is not None and a["confidence"] == RULES.threshold and a["level"] == "low" and len(push.sent) == 1
+    assert "flying normally after" in a["detail"]
+    # a pilot reporting a crash they saw: the callsign is the reporter's, flying on normally
+    clock2 = Clock()
+    cad2, w2, hear2, push2 = watch(clock2, acft(T0 + 45))
+    b = hear2(1, "Westchester tower, Bonanza one two three alfa bravo, a plane just went down in the woods off our left", 30)
+    assert b is not None and b["kind"] == "accident" and b["confidence"] >= RULES.threshold
+
+
+@pytest.mark.parametrize("before, text", [
+    (None, "lost radar contact with November three alfa bravo"),                 # an abbreviated tail: 0.6, not 0.7
+    (None, "radar contact lost, two three alfa bravo"),                          # the letters and digits only
+    (None, "radar contact lost with November one two three alfa"),               # misheard: one aircraft off
+    ("Bonanza one two three alfa bravo, number two, cleared to land runway three four",
+     "Westchester tower, aircraft down off the end of runway three four"),       # no callsign in the words themselves
+])
+def test_adsb_is_only_asked_about_the_aircraft_named_plainly_in_the_transmission(before, text):
+    clock = Clock()
+    cad, w, hear, push = watch(clock, acft(T0 + 100))              # N123AB flying normally well after everything
+    if before:
+        assert hear(1, before, 0) is None
+    a = hear(2, text, 40)
+    assert a is not None and a["kind"] == "accident" and a["confidence"] >= 0.6
+    assert "flying normally" not in a["detail"]
+
+
+def test_adsb_normal_needs_a_later_steady_fix():
+    p = acft(0)[0]
+    # 4 s after the words, at 400 ft, coming down at 1,500 fpm: not normal
+    assert atc.adsb_check(dict(p, pos_at=T0 + 4, alt=400, vr=-1500), T0, T0 + 5) is None
+    assert atc.adsb_check(dict(p, pos_at=T0 + 12, alt=400, vr=-1500), T0, T0 + 13) is None
+    # no vertical rate (or no speed): unknown, not normal
+    assert atc.adsb_check(dict(p, pos_at=T0 + 12, vr=None), T0, T0 + 13) is None
+    assert atc.adsb_check(dict(p, pos_at=T0 + 12, gs=None), T0, T0 + 13) is None
+    # under 1,000 ft only level or climbing is normal
+    assert atc.adsb_check(dict(p, pos_at=T0 + 12, alt=800, vr=-200), T0, T0 + 13) is None
+    assert atc.adsb_check(dict(p, pos_at=T0 + 12, alt=800, vr=300), T0, T0 + 13)[0] == "normal"
+    assert atc.adsb_check(dict(p, pos_at=T0 + 12), T0, T0 + 13)[0] == "normal"            # 1,600 ft, 105 kt, -300
+
+
+def test_adsb_two_aircraft_fitting_the_words_is_no_answer():
+    clock = Clock()
+    twin = dict(acft(T0 + 100)[0], hex="be36bf")                    # the same callsign twice (a feed's duplicate)
+    cad, w, hear, push = watch(clock, acft(T0 + 100) + [twin])
+    a = hear(1, "lost radar contact with November one two three alfa bravo", 40)
+    assert a is not None and a["confidence"] == 0.6
+
+
+def test_someone_elses_routine_call_does_not_damp_a_controllers_lost_radar():
+    clock = Clock()
+    cad, w, hear, push = watch(clock, [])
+    assert hear(1, "Cirrus four five six charlie delta, number two, cleared to land runway three four", 0) is None
+    a = hear(2, "lost radar contact with November one two three alfa bravo", 8)
+    assert a is not None and a["confidence"] == 0.6
+    # ... the same aircraft's routine call does
+    clock2 = Clock()
+    cad2, w2, hear2, push2 = watch(clock2, [])
+    assert hear2(1, "November one two three alfa bravo, number two, cleared to land runway three four", 0) is None
+    assert hear2(2, "lost radar contact with November one two three alfa bravo", 8) is None
+
+
+def test_pushed_is_kept_only_when_the_push_went_out():
+    class Down(FakeNotifier):
+        def send(self, *a, **k):
+            return False
+
+    class Boom(FakeNotifier):
+        def send(self, *a, **k):
+            raise OSError("no network")
+    for n in (Down(), Boom()):
+        clock = Clock()
+        cad, w, hear, push = watch(clock, [])
+        cad.airport_alerts.notifier = n
+        a = hear(1, "Westchester tower, aircraft down off the end of runway three four", 0)
+        assert a is not None and "pushed" not in a["data"]
 
 
 def test_adsb_lost_at_low_altitude_is_not_downgraded_and_adds():

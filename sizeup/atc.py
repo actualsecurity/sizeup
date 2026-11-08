@@ -733,10 +733,15 @@ def whisper_prompt(base: str, aircraft: Sequence[dict], telephony: dict[str, str
 
 # -- ADS-B against an accident's words ------------------------------------------------------------------------------
 
-ADSB_AFTER_S = 3.0           # a position this long after the transmission ended is "after" it
+ADSB_AFTER_S = 10.0          # a position this long after the transmission ended is "after" it
 ADSB_LOST_S = 20.0           # no position for this long, last seen before the transmission: lost
 ADSB_LOW_FT = 1500           # ... under this (not on the ground)
 ADSB_NORMAL = 0.3            # an accident rule's weight while the aircraft it names flies on normally after the words
+                             # (a 'routine' rule's; a clear one's never under the threshold: AtcWatch.confidence)
+ADSB_MATCH = 0.7             # the callsign in the transmission itself, matched this well and to one aircraft only
+ADSB_MATCH_NORMAL = 1.0      # ... and exactly, for "normal" (which lowers): a one-off match may be another aircraft
+NORMAL_MIN_FT, NORMAL_MIN_KT, NORMAL_MIN_VR = 500, 50, -1000
+NORMAL_LEVEL_FT = 1000       # under this, "normal" only when not descending at all
 ADSB_WORSE = 0.4             # added (as one more hit) when its ADS-B stops low, it squawks 7700 or it drops fast
 EMERGENCY_SQ = ("7700", "7600", "7500")
 
@@ -760,7 +765,9 @@ def adsb_check(plane: dict | None, at: float, now: float) -> tuple[str, str] | N
     if not isinstance(pos_at, (int, float)):
         return None
     if pos_at >= at + ADSB_AFTER_S:
-        if airborne and alt >= 300 and isinstance(gs, (int, float)) and gs >= 40 and (not isinstance(vr, (int, float)) or vr > -2000):
+        known = airborne and isinstance(gs, (int, float)) and isinstance(vr, (int, float))   # a missing one: can't say
+        if known and alt >= NORMAL_MIN_FT and gs >= NORMAL_MIN_KT and vr > NORMAL_MIN_VR \
+                and (alt >= NORMAL_LEVEL_FT or vr >= 0):
             return "normal", f"ADS-B: flying normally after ({int(alt):,} ft, {int(gs)} kt)"
         return None
     if pos_at < at and now - pos_at >= ADSB_LOST_S and airborne and alt < ADSB_LOW_FT:
@@ -847,33 +854,61 @@ class AtcWatch:
     def confidence(self, me: Heard, ctx: list[Heard]) -> tuple[float, tuple[str, str] | None]:
         """The score (the rules' weights, the earlier transmissions' at context_factor) and what the named aircraft's
         ADS-B said about it. The ambiguous rules ('routine') count at the routine factor when the exchange is normal
-        sequencing; an accident rule counts at ADSB_NORMAL when the aircraft flies on normally after the words, and
-        ADSB_WORSE is added when its ADS-B says something is wrong (adsb_check)."""
-        routine = self.rules.is_routine(" . ".join([*(c.norm for c in ctx), me.norm]))
+        sequencing (in this transmission, or the same callsign's before it); when the aircraft named in this transmission
+        flies on normally after the words, an ambiguous accident rule counts at ADSB_NORMAL and a clear one is lowered
+        to the threshold at most; ADSB_WORSE is added when its ADS-B says something is wrong (adsb_check)."""
+        routine = self._routine(me, ctx)
         pairs = [(h, 1.0) for h in me.hits] + [(h, self.rules.context_factor) for c in ctx for h in c.hits]
         adsb = None
         if any(h.rule.category == "accident" for h, _ in pairs):
-            adsb = self._adsb(me, ctx)
+            adsb = self._adsb(me)
+        floor = self.rules.threshold
         weights = []
         for h, f in pairs:
             w = h.rule.weight * f
             if routine and h.rule.routine:
                 w *= self.rules.routine_factor
             if h.rule.category == "accident" and adsb and adsb[0] == "normal":
-                w *= ADSB_NORMAL
+                # the ambiguous words go quiet; the clear ones ("went down") never under the threshold: the aircraft
+                # named may be the one reporting it, or ADS-B may be wrong
+                w = w * ADSB_NORMAL if h.rule.routine else min(w, max(w * ADSB_NORMAL, floor))
             weights.append(w)
         if adsb and adsb[0] == "worse":
             weights.append(ADSB_WORSE)
         return score(weights), adsb
 
-    def _adsb(self, me: Heard, ctx: list[Heard]) -> tuple[str, str] | None:
+    def _routine(self, me: Heard, ctx: list[Heard]) -> bool:
+        """Normal sequencing in this transmission, or in an earlier one with the same callsign (not just anyone's
+        "number two, cleared to land" on a busy frequency)."""
+        if self.rules.is_routine(me.norm):
+            return True
+        mine = {m.suffix for m in find_mentions(me.text, self.index) if len(m.suffix) >= 3}
+        if not mine:
+            return False
+        for c in ctx:
+            if self.rules.is_routine(c.norm):
+                theirs = {m.suffix for m in find_mentions(c.text, self.index) if len(m.suffix) >= 3}
+                if any(a.endswith(b) or b.endswith(a) for a in mine for b in theirs):
+                    return True
+        return False
+
+    def _adsb(self, me: Heard) -> tuple[str, str] | None:
+        """adsb_check for the aircraft named in THIS transmission, matched at ADSB_MATCH or better and to one aircraft
+        only (none from the transmissions before it: the callsign there may be someone else's); "normal" only for an
+        exact match."""
         from sizeup.atc_scope import planes_for
         planes = planes_for(me.channel, self._planes())
-        att = self._who(me, ctx, planes)
-        if not att or not att.get("hex"):
+        att = attribute(me.text, self.index, planes)
+        if att is None or att.hex is None or att.confidence < ADSB_MATCH:
             return None
-        plane = next((p for p in planes if p.get("hex") == att["hex"]), None)
-        return adsb_check(plane, me.at, self.clock())
+        other = attribute(me.text, self.index, [p for p in planes if p.get("hex") != att.hex])
+        if other is not None and other.hex is not None and other.confidence >= ADSB_MATCH:
+            return None                                  # another aircraft fits as well: not sure which
+        plane = next((p for p in planes if p.get("hex") == att.hex), None)
+        v = adsb_check(plane, me.at, self.clock())
+        if v and v[0] == "normal" and att.confidence < ADSB_MATCH_NORMAL:
+            return None
+        return v
 
     # -- what the pre-alert says --------------------------------------------------------------------------------------
 

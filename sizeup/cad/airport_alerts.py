@@ -253,8 +253,8 @@ class AirportAlerts:
                 new = True
             if new and a.join_event:
                 out = self._join_open_event(out)
-        if new and a.push:
-            self._push(out)
+        if new and a.push and self._push(out):
+            out = self._pushed(out)
         self.on_change()
         return out, new
 
@@ -263,8 +263,6 @@ class AirportAlerts:
                 "phrases": list(dict.fromkeys(a.phrases))[:MAX_PHRASES], "kinds": [a.kind], "event": dict(a.event),
                 "rank": int(a.rank), **_extras(a)}
         conf = round(max(0.0, min(1.0, float(a.confidence))), 2)
-        if a.push and getattr(self.notifier, "enabled", False):
-            data["pushed"] = conf          # the confidence the one push said (additions may raise it later: not re-pushed)
         with self.store.tx() as db:
             cur = db.execute("INSERT INTO airport_alerts (source, kind, subject, grp, at, updated_at, title, detail, confidence, "
                              "channel, data, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')",
@@ -306,10 +304,20 @@ class AirportAlerts:
                        "count = count + 1 WHERE id = ?", (now, json.dumps(data), conf, title[:200], detail[:400], kind, row["id"]))
         return self.get(row["id"])
 
-    def _push(self, r: dict) -> None:
+    def _pushed(self, r: dict) -> dict:
+        """Keep the confidence the one push said (additions may raise it later; it is not pushed again)."""
+        with self._lock:
+            row = self.store.one("SELECT data FROM airport_alerts WHERE id = ?", (r["id"],))
+            data = json.loads((row or {}).get("data") or "{}")
+            data["pushed"] = round(float(r["confidence"]), 2)
+            with self.store.tx() as db:
+                db.execute("UPDATE airport_alerts SET data = ? WHERE id = ?", (json.dumps(data), r["id"]))
+        return self.get(r["id"])
+
+    def _push(self, r: dict) -> bool:
         n = self.notifier
         if n is None or not getattr(n, "enabled", False):
-            return
+            return False
         d = r["data"]
         body = []
         for s in (d.get("snippets") or [])[-2:]:
@@ -321,10 +329,11 @@ class AirportAlerts:
             body.append(("approx. location: " if loc.get("lat") is not None else "location: ") + loc["basis"])
         body.append(f"alert {conf_text(r['confidence'])} · not dispatched · accept or dismiss in the CAD")
         try:
-            n.send(r["title"], " · ".join(b for b in body if b), 4, ("airplane", "warning"),
-                   (self.public_url.rstrip("/") + "/cad") if self.public_url else "")
+            return bool(n.send(r["title"], " · ".join(b for b in body if b), 4, ("airplane", "warning"),
+                               (self.public_url.rstrip("/") + "/cad") if self.public_url else ""))
         except Exception as e:  # noqa: BLE001 - a push never stops the pre-alert
             self.log(f"airport pre-alert: push: {type(e).__name__}: {e}")
+            return False
 
     # -- a source that knows when its trigger is over (#235) ----------------------------------------------------------
 
