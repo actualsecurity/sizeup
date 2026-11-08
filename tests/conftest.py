@@ -220,6 +220,20 @@ def _module_rng_per_test(request):
     mod.rng = rng
 
 
+@pytest.fixture(params=[3, 6, 12, 22, 23], ids=lambda h: f"wall-{h:02d}h")
+def any_hour(request, monkeypatch):
+    """The real clock moved to hh:30 America/New_York (still ticking), as if the suite ran then. #346: an airband test
+    failed only after 23:00, when NY Approach's schedule is on 120.8; a test that takes this must not depend on it."""
+    import time
+    from datetime import datetime
+
+    from sizeup.tz import TZ
+    real = time.time
+    shift = datetime(2026, 11, 7, request.param, 30, tzinfo=TZ).timestamp() - real()
+    monkeypatch.setattr(time, "time", lambda: real() + shift)
+    return request.param
+
+
 # Private real-data replay (#283, tests/replay.py): the "replay" marker and the replay_sets fixture; a replay test is
 # skipped, with the reason, when the local cache (~/.cache/sizeup-replay or $SIZEUP_REPLAY_DIR) has no data of its kind.
 from tests.replay import pytest_collection_modifyitems, pytest_configure, replay_sets  # noqa: E402,F401
