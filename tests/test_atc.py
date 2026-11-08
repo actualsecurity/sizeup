@@ -302,14 +302,14 @@ def test_callsigns_never_guessed():
     assert atc.whisper_prompt("W.", low + PLANES, atc.telephony_words()).endswith("execjet five two one, jetblue niner niner")
 
 
-# -- "lost contact with the traffic": sequencing, not a crash; ADS-B against an accident's words -------------------------
-# The shape of a real false alarm (paraphrased; made-up tail): a pilot in the pattern, number 3, lost sight of the
-# traffic they were to follow. "lost contact with" was in the crash rule, so it was raised as a possible crash at 75%.
+# -- losing the traffic: sequencing, not a crash; ADS-B against an accident's words --------------------------------------
+# #350 (invented wording, made-up tail and aircraft): a pilot in the pattern losing sight of the traffic to follow.
+# "lost contact with" was in the crash rule, so that read as a possible crash.
 
-PATTERN_PILOT = ["Okay, we'll continue as number three, we'll square up the base in a minute, Citation one two three alfa bravo.",
-                 "And I lost contact with the traffic. How are we doing?"]
+PATTERN_PILOT = ["Bonanza one two three alfa bravo, number two behind the Cirrus, turning a left base",
+                 "Bonanza three alfa bravo, we've lost contact with that traffic we were following, say sequence"]
 NOT_A_CRASH = [
-    "and I lost contact with the traffic, how are we doing",
+    "lost contact with that traffic, say sequence",
     "we lost sight of the traffic",
     "November one two three alfa bravo, I've lost the traffic",
     "lost visual with that traffic, say position",
@@ -321,8 +321,8 @@ NOT_A_CRASH = [
 
 def acft(at, **kw):
     """N123AB (made up) on ADS-B as the Aircraft layer has it for the watch: pos_at is its last position's time."""
-    return [{"hex": "c25c25", "flight": "N123AB", "reg": "N123AB", "type": "C25M", "lat": 41.17, "lon": -73.68, "alt": 2100,
-             "gs": 140, "vr": -500, "sq": "1200", "phase": "arriving", "rwy": "34", "dist": 7.9, "pos_at": at, **kw}]
+    return [{"hex": "be36be", "flight": "N123AB", "reg": "N123AB", "type": "BE36", "lat": 41.11, "lon": -73.74, "alt": 1600,
+             "gs": 105, "vr": -300, "sq": "1200", "phase": "arriving", "rwy": "16", "dist": 3.1, "pos_at": at, **kw}]
 
 
 def watch(clock, planes):
@@ -381,19 +381,19 @@ def test_routine_sequencing_in_the_exchange_lowers_the_ambiguous_words_only():
     # the clear words count in full, however routine the exchange ("cleared to land" is often just before a crash)
     clock2 = Clock()
     cad2, w2, hear2, push2 = watch(clock2, [])
-    assert hear2(1, "Citation one two three alfa bravo, runway three four, cleared to land", 0) is None
+    assert hear2(1, "Bonanza one two three alfa bravo, runway three four, cleared to land", 0) is None
     a = hear2(2, "Westchester tower, aircraft down off the end of runway three four", 10)
     assert a is not None and a["kind"] == "accident" and a["confidence"] == 0.75
 
 
 def test_adsb_flying_normally_after_the_words_holds_an_accident_back():
     clock = Clock()
-    planes = acft(T0 + 10)                                    # a position 10 s after the words: 2,100 ft, 140 kt
+    planes = acft(T0 + 10)                                    # a position 10 s after the words: 1,600 ft, 105 kt
     cad, w, hear, push = watch(clock, planes)
     assert hear(1, "lost radar contact with November one two three alfa bravo", 0) is None
     # straight from the check: normal flight after the transmission
     v = atc.adsb_check(planes[0], T0, T0 + 12)
-    assert v[0] == "normal" and "2,100 ft" in v[1]
+    assert v[0] == "normal" and "1,600 ft" in v[1]
     # the words alone would have alerted
     clock2 = Clock()
     cad2, w2, hear2, push2 = watch(clock2, [])
@@ -416,7 +416,7 @@ def test_adsb_lost_at_low_altitude_is_not_downgraded_and_adds():
     a = hear(1, "I lost contact with November one two three alfa bravo", 2)                  # 0.45 alone: under
     assert a is not None and a["kind"] == "accident" and a["confidence"] == round(atc.score([0.45, atc.ADSB_WORSE]), 2)
     ac = a["data"]["aircraft"][0]
-    assert ac["hex"] == "c25c25" and ac["adsb"] == "ADS-B: lost at 700 ft" and "ADS-B: lost at 700 ft" in a["detail"]
+    assert ac["hex"] == "be36be" and ac["adsb"] == "ADS-B: lost at 700 ft" and "ADS-B: lost at 700 ft" in a["detail"]
     # ... and a squawk 7700 or a fast drop low says the same
     assert atc.adsb_check(dict(planes[0], sq="7700", pos_at=T0 + 5), T0, T0 + 6)[0] == "worse"
     assert atc.adsb_check(dict(planes[0], vr=-4200, alt=1200, pos_at=T0 + 5), T0, T0 + 6)[0] == "worse"
@@ -441,7 +441,7 @@ def test_the_app_gives_the_watch_each_positions_time(tmp_path):
 
 def test_the_push_and_the_card_say_the_same_labelled_confidence():
     clock = Clock()
-    planes = [dict(PLANES[1], hex="c25c25", type="C25M")]           # N123AB, no pos_at: ADS-B says nothing either way
+    planes = [dict(PLANES[1], hex="be36be", type="BE36")]           # N123AB, no pos_at: ADS-B says nothing either way
     cad, w, hear, push = watch(clock, planes)
     a = hear(1, "Westchester tower, November three alfa bravo, aircraft down off the end of runway three four", 0)
     assert a is not None and a["confidence"] == 0.75 and a["level"] == "medium"
