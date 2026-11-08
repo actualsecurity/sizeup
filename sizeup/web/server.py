@@ -439,28 +439,43 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
             h = dict(headers or {})
             if code == 200 and h.get("ETag") and etag_matches(self.headers.get("If-None-Match"), h["ETag"]):
                 code, body = 304, b""
-            elif code == 200 and len(body) >= GZIP_MIN and compressible(ctype) and "Content-Encoding" not in h:
+            elif (code == 200 and isinstance(body, (bytes, bytearray, memoryview)) and len(body) >= GZIP_MIN
+                  and compressible(ctype) and "Content-Encoding" not in h):    # (a streamed body goes as it is)
                 h.setdefault("Vary", "Accept-Encoding")
                 if accepts_gzip(self.headers):
                     body = gz if gz is not None else gzip.compress(body, 5)
                     h["Content-Encoding"] = "gzip"
             h.setdefault("Server-Timing", f"app;dur={self._ms():.1f}")     # the time to the answer, gzip included (#284)
             self.send_response(code)
+            unsized = not isinstance(body, (bytes, bytearray, memoryview)) and getattr(body, "length", 0) is None
             if code != 304:
                 self.send_header("Content-Type", ctype)
-                self.send_header("Content-Length", str(len(body)))
+                if unsized:                       # a body made as it goes (an export, #323): to the end of the connection
+                    h["Connection"] = "close"
+                    self.close_connection = True
+                else:
+                    self.send_header("Content-Length", str(len(body)))
             for k, v in h.items():
                 self.send_header(k, v)
             if "Cache-Control" not in h:
                 self.send_header("Cache-Control", "no-store")
             self.end_headers()
-            if code == 304:
-                return
-            if self.command != "HEAD":
-                try:
-                    self.wfile.write(body)
-                except (BrokenPipeError, ConnectionResetError, TimeoutError):
-                    self.close_connection = True   # the client left first (a station restart, a closed tab)
+            streamed = not isinstance(body, (bytes, bytearray, memoryview))   # sizeup/attachments.py Stream (#323)
+            try:
+                if code == 304:
+                    return
+                if self.command != "HEAD":
+                    try:
+                        if streamed:
+                            for piece in body:
+                                self.wfile.write(piece)
+                        else:
+                            self.wfile.write(body)
+                    except (BrokenPipeError, ConnectionResetError, TimeoutError):
+                        self.close_connection = True   # the client left first (a station restart, a closed tab)
+            finally:
+                if streamed:
+                    body.close()
 
         def _data(self, path: str, query: str, resp: tuple) -> tuple:
             """A data answer with the caching DATA_MAX_AGE gives its path (an ETag from the body, unless the
