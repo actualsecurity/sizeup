@@ -56,6 +56,7 @@ def test_the_speech_to_text_behind_push_reads_local_time():
 
 
 def test_the_silent_push_and_its_recovery_read_local_time():
+    from sizeup.cloud.health import SETTLE_S
     from tests.test_health import T0, Rig, station_status
     r = Rig()
     r.at(CLIP_EST - T0, status=station_status())                          # last heard 08:29 EST
@@ -63,7 +64,9 @@ def test_the_silent_push_and_its_recovery_read_local_time():
     a = next(a for a in r.h.alerts() if a["key"] == "silent")
     assert "since 08:29 " in a["text"] and r.n.msgs[-1]["title"].endswith("last heard 08:29")
     r.at(CLIP_EST - T0 + 600, status=station_status())                    # back at 08:39
-    assert r.n.msgs[-1]["title"].startswith("Recovered: Station silent") and "cleared at 08:39 " in r.n.msgs[-1]["body"]
+    r.at(CLIP_EST - T0 + 600 + SETTLE_S, status=station_status())         # settled (#340)
+    m = next(m for m in r.n.msgs if m["title"].startswith("Recovered: Station silent"))
+    assert "cleared at 08:39 " in m["body"]
 
 
 def test_the_station_update_lines_read_local_time():

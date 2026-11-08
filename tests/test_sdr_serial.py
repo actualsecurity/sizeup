@@ -249,7 +249,10 @@ def test_a_duplicate_serial_is_a_critical_alert_pushed_to_the_status_topic():
     assert m["duplicates"][0]["indexes"] == [1, 4] and len(m["usb"]) == 2
     assert next(d for d in m["dongles"] if d["serial"] == "00000103")["ambiguous"].startswith("serial 00000001")
     ch = r.at(10, station_status())                                     # renamed: it clears, with a recovery push
-    assert [(k, a["key"]) for k, a in ch] == [("clear", "dup:00000001")] and r.n.msgs[-1]["title"].startswith("Recovered")
+    assert [(k, a["key"]) for k, a in ch] == [("clear", "dup:00000001")]
+    from sizeup.cloud.health import SETTLE_S
+    r.at(10 + SETTLE_S, station_status())                              # once it has settled (#340)
+    assert r.n.msgs[-1]["title"].startswith("Recovered")
 
 
 # -- sizeup-station sdr-serial ---------------------------------------------------------------------------------------------

@@ -118,6 +118,8 @@ def test_the_whole_trunk_silent_past_the_window_alerts_and_recovers_on_a_call():
     assert msg["title"].startswith("P25 trunk silent 21 min") and msg["priority"] == 4
     ch = r.at(22 * 60, p25(22 * 60, {"tg:333": 22 * 60}))              # a call on any talkgroup clears it
     assert [(k, a["key"]) for k, a in ch] == [("clear", "trunk")]
+    from sizeup.cloud.health import SETTLE_S
+    r.at(22 * 60 + SETTLE_S, p25(22 * 60 + SETTLE_S, {"tg:333": 22 * 60 + SETTLE_S}))   # settled (#340)
     assert r.n.msgs[-1]["title"].startswith("Recovered: P25 trunk silent")
 
 
