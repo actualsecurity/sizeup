@@ -263,7 +263,7 @@ class AirportAlerts:
                 "phrases": list(dict.fromkeys(a.phrases))[:MAX_PHRASES], "kinds": [a.kind], "event": dict(a.event),
                 "rank": int(a.rank), **_extras(a)}
         conf = round(max(0.0, min(1.0, float(a.confidence))), 2)
-        if a.push:
+        if a.push and getattr(self.notifier, "enabled", False):
             data["pushed"] = conf          # the confidence the one push said (additions may raise it later: not re-pushed)
         with self.store.tx() as db:
             cur = db.execute("INSERT INTO airport_alerts (source, kind, subject, grp, at, updated_at, title, detail, confidence, "
