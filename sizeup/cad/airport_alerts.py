@@ -22,8 +22,8 @@ The model (AirportAlert, what a source hands in):
                         is /api/audio/<id>.wav while it is kept), context = heard before the one that matched
     aircraft            [{callsign, hex, type, model, reg, lat, lon, alt, gs, trk, phase, rwy, dist, match, spoken, pos_at}]:
                         the aircraft it is about, from the Aircraft layer (ATC: the callsign heard, matched to ADS-B);
-                        pos_at: when lat / lon was its fix. Each row also carries "hexes", the ICAO addresses it names
-                        (the map rings those aircraft while it is open, and keeps a faded last fix when one is lost)
+                        pos_at: when lat / lon was its fix (the map, aircraft.js, rings each by hex while it is open,
+                        and keeps a faded last fix when one is lost)
     location            {lat, lon, approx: true, radius_m, basis} when the words give a place (an approximate point,
                         always said to be one), or {placed: false, basis} / None; never more precise than what was said
     phrases             the location words heard ("off the departure end of runway 16", "rye lake")
@@ -509,8 +509,6 @@ class AirportAlerts:
             r["level"] = level(float(r["confidence"]))
             r["source_name"] = SOURCES.get(r["source"], r["source"])
             r["group"] = r.pop("grp", "")
-            # the aircraft it names, by ICAO address (the map's key: aircraft.js rings them while it is open)
-            r["hexes"] = [x["hex"] for x in r["data"].get("aircraft") or [] if isinstance(x, dict) and x.get("hex")]
         return rows
 
     def state(self, now: float | None = None) -> dict:

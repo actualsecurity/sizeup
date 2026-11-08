@@ -20,7 +20,7 @@
 "use strict";
 
 window.AirportAlerts = (() => {
-  const st = { seen: null, busy: new Set(), audio: null, playing: "" };
+  const st = { seen: null, busy: new Set(), audio: null, playing: "", hovered: null };
 
   function el(tag, cls, text) {
     const n = document.createElement(tag);
@@ -58,7 +58,7 @@ window.AirportAlerts = (() => {
     b.type = "button";
     b.dataset.hex = x.hex;
     b.title = "Follow on the map";
-    b.addEventListener("click", (ev) => { ev.stopPropagation(); AircraftLayer.follow(x.hex); });
+    b.addEventListener("click", (ev) => { ev.stopPropagation(); AircraftLayer.follow(x.hex); b.blur(); });   // (focus off: the ring follows the pointer)
     return b;
   }
 
@@ -76,11 +76,13 @@ window.AirportAlerts = (() => {
     const hexes = (d.aircraft || []).map((x) => x && x.hex).filter(Boolean);
     if (hexes.length && window.AircraftLayer && AircraftLayer.hover) {     // its aircraft ringed wider on the map
       li.dataset.hex = hexes.join(" ");
-      const on = () => AircraftLayer.hover(hexes), off = () => AircraftLayer.hover([]);
-      li.addEventListener("mouseenter", on);
-      li.addEventListener("mouseleave", off);
-      li.addEventListener("focusin", on);
-      li.addEventListener("focusout", (e) => { if (!li.contains(e.relatedTarget)) off(); });
+      // ringed wider while the pointer is on it or it has the focus; let go when it is redrawn (column)
+      const h = { inside: false, focus: false };
+      const set = () => { st.hovered = h.inside || h.focus ? li : null; AircraftLayer.hover(st.hovered ? hexes : []); };
+      li.addEventListener("mouseenter", () => { h.inside = true; set(); });
+      li.addEventListener("mouseleave", () => { h.inside = false; set(); });
+      li.addEventListener("focusin", () => { h.focus = true; set(); });
+      li.addEventListener("focusout", (e) => { if (!li.contains(e.relatedTarget)) { h.focus = false; set(); } });
     }
     const head = el("div", "aa-head");
     if (window.Icon) head.append(Icon("aircraft"));
@@ -167,6 +169,8 @@ window.AirportAlerts = (() => {
                                                  (a.data || {}).lines, alarmWord(a.data || {}, deps.alarms)]));
     if (list._sig === sig) return;
     list._sig = sig;
+    if (st.hovered && window.AircraftLayer && AircraftLayer.hover) AircraftLayer.hover([]);   // the hovered card is redrawn
+    st.hovered = null;
     list.replaceChildren(...items.map((a) => card(a, deps)));
   }
 
