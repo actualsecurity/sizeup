@@ -618,3 +618,21 @@ def test_probe_3_two_calls_at_one_address_the_earlier_s_close_leaves_the_later_o
     rig.poll()
     assert rig.iid("B2") == second["id"] and _open(rig, second["id"])
     assert _open(rig, first["id"])                                      # B1 first seen closed: never closes it
+
+
+def test_a_report_first_seen_over_never_accepts_a_queued_page_or_dispatches(rig):
+    """Eighth review: a report first seen closed joins the queued page's incident (the same call) but never accepts it
+    or dispatches its units: recorded, and a person decides."""
+    rig.feed.outage("failing", "x", raise_=True)
+    rig.poll()
+    rig.at(600)
+    page = rig.page()
+    rig.at(2000)
+    rig.feed.recover()
+    rig.feed.put("Z1", type="ALARM/COMM", location="12 EXAMPLE AVE", units=("E60", "L31"), closed=True,
+                 times={"dispatched": T0 + 590, "in_service": T0 + 1900})
+    rig.poll()
+    assert rig.iid("Z1") == page["id"]
+    inc = rig.cad.full(page["id"])
+    assert inc["status"] == "queued" and inc["assignments"] == []
+    assert any("shows it over" in e["text"] for e in inc["events"])

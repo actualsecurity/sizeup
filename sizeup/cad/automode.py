@@ -15,7 +15,8 @@ record (the hub, or all-in-one), on top of the incident sources (sizeup/cad/sour
                replayed); its listed units are still dispatched and its in service still closes the call
     60 Control (a tracked incident, while in 60 Control mode):
       accept   queued -> numbered at once when the feed lists one of our units or a page attached (and it has a type: a
-               feed type nobody maps waits for a person). Never when it is "possibly the same as" an open accepted
+               feed type nobody maps waits for a person; a report already over, closed or in service, never: recorded,
+               and said once on the timeline). Never when it is "possibly the same as" an open accepted
                incident (sources.py): it stays queued for a person, said once on its timeline. When a person accepts
                one that waited, the units the feed lists then are dispatched at the feed's dispatched time (their
                statuses come with the feed's next changes and the radio, never replayed)
@@ -360,6 +361,9 @@ class AutoDispatch:
                 return
             if not mine and not paged:
                 return                                   # none of ours, no page: not our call (yet)
+            if new.get("closed") or (new.get("times") or {}).get("in_service") is not None:
+                self._held(iid, f"Not accepted automatically: {label} shows it over", op)
+                return                                   # a report already over: recorded, a person decides
             if not inc["type"]:
                 return                                   # a type nobody maps: a person accepts it, then it goes on
             self.store.accept(iid, op)
