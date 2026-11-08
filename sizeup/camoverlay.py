@@ -4,12 +4,16 @@
 Why: the CARS-Hub lists some cameras twice under two ids with two stream names, and with names and mileposts that
 disagree (one camera listed "at" an exit and "north of" it, 0.4 mile apart). Nothing in the inventory, the stream or the
 still's address ties them together; the overlay burned into the picture does. Read 2026-11-08 on every still in our
-area: a pair of one camera's two records gave the same bar to the pixel (stills taken seconds apart, the time left
-out); any two different cameras' bars at one size differed in 7 % of their pixels or more.
+area: a pair of one camera's two records gave the same name to the pixel, at two fetches half an hour apart; two
+names one character apart differ in a few pixels only, so nothing short of the same pixels is the same name.
 
-overlay(body): the bar's left 60 % (the name, not the time), white text on black, as bits: (width, height, bits) of a
-PNG still whose top rows look like such a bar (dark mostly, some text), else None (a JPEG, no bar, a placeholder).
-same(a, b): two of them at the same image size differing in under OVERLAY_DIFF of their bits.
+overlay(body): the bar's name, white text on black, as bits: (width, bar height, bits) of a PNG still whose top rows
+look like such a bar (dark mostly, some text), else None (a JPEG, no bar, a placeholder, too big to read cheaply). The
+name is the bar's first run of text: from its first lit column to the first gap wider than NAME_GAP bar heights
+(the date and the time come after such a gap; a name's own spaces are a character wide). The rest of the bar is
+blanked, so a name of any length is kept whole and the time never counts. A bar whose name runs into the time without
+such a gap gives a different pattern at each still: it never matches (the safe way to fail).
+same(a, b): the same image size and bar, and not one bit apart, with at least MIN_INK lit pixels in the name.
 
 Only the top rows are decoded (zlib in pieces, the PNG row filters undone here): no imaging library.
 """
@@ -23,11 +27,13 @@ import numpy as np
 
 BAR = 0.06              # the bar: this share of the image's height from the top (at least BAR_MIN rows)
 BAR_MIN = 12
-NAME = 0.6              # its left part: the camera's name (the time is on the right)
-INK = 0.05              # a bar: at least this share of text (light) ...
+NAME_GAP = 1.5         # the name ends at the first gap this many bar heights wide (the date / time follow it)
+NAME_MIN = 0.15         # a name at least this share of the width ...
+MIN_INK = 150           # ... with at least this many lit pixels
+INK = 0.03              # a bar: at least this share of text (light) ...
 DARK = 0.5              # ... on at least this share of dark
-OVERLAY_DIFF = 0.01     # two bars differing in fewer of their bits than this: the same overlay
-MAX_SIDE = 4096
+MAX_SIDE = 1920         # bigger stills aren't read (the row filters are undone in Python: the cost grows with the size)
+MAX_BYTES = 200_000     # nor a bar of more than this many bytes (rows x width x channels)
 
 
 def _chunks(body: bytes):
@@ -61,6 +67,8 @@ def top_rows(body: bytes, share: float = BAR, least: int = BAR_MIN) -> np.ndarra
                 ch = {0: 1, 2: 3, 6: 4}[ctype]
                 rows = min(h, max(least, int(h * share)))
                 need = rows * (w * ch + 1)
+                if rows * w * ch > MAX_BYTES:
+                    return None
             elif kind == b"IDAT" and hdr is not None:
                 raw += dec.decompress(data, need - len(raw))
                 if len(raw) >= need:
@@ -97,22 +105,40 @@ def top_rows(body: bytes, share: float = BAR, least: int = BAR_MIN) -> np.ndarra
     return out.reshape(rows, w, ch)[:, :, :3].mean(axis=2)
 
 
+def name_span(light: np.ndarray) -> tuple[int, int] | None:
+    """The bar's name: (first column, column after its last) of the first run of lit columns ended by a gap wider than
+    NAME_GAP bar heights (or the bar's edge)."""
+    xs = np.flatnonzero(light.any(axis=0))
+    if not len(xs):
+        return None
+    gap = NAME_GAP * light.shape[0]
+    wide = np.flatnonzero(np.diff(xs) - 1 >= gap)
+    end = xs[wide[0]] if len(wide) else xs[-1]
+    return int(xs[0]), int(end) + 1
+
+
 def overlay(body: bytes) -> tuple[int, int, bytes] | None:
-    """The still's overlay bar, its name part as bits: (image width, bar height, packed bits), None when there's none."""
+    """The still's overlay bar, its name as bits (the rest blanked): (image width, bar height, packed bits), None when
+    there's none."""
     grey = top_rows(body)
     if grey is None:
         return None
     rows, w = grey.shape
-    name = grey[:, :int(w * NAME)]
-    light = name > 128
-    if light.mean() < INK or (name < 64).mean() < DARK:
+    light = grey > 128
+    if light.mean() < INK or (grey < 64).mean() < DARK:
         return None
-    return w, rows, np.packbits(light).tobytes()
+    span = name_span(light)
+    if span is None or span[1] - span[0] < NAME_MIN * w:
+        return None
+    name = np.zeros_like(light)
+    name[:, span[0]:span[1]] = light[:, span[0]:span[1]]
+    if name.sum() < MIN_INK:
+        return None
+    return w, rows, np.packbits(name).tobytes()
 
 
 def same(a: tuple[int, int, bytes] | None, b: tuple[int, int, bytes] | None) -> bool:
-    """One overlay: the same image size and bar, under OVERLAY_DIFF of the bits apart."""
-    if a is None or b is None or a[:2] != b[:2] or len(a[2]) != len(b[2]):
+    """One overlay: the same image size and bar, and the same name to the pixel (with MIN_INK of it lit)."""
+    if a is None or b is None or a[:2] != b[:2] or len(a[2]) != len(b[2]) or a[2] != b[2]:
         return False
-    x = np.unpackbits(np.frombuffer(a[2], np.uint8) ^ np.frombuffer(b[2], np.uint8))
-    return x.mean() < OVERLAY_DIFF
+    return int(np.unpackbits(np.frombuffer(a[2], np.uint8)).sum()) >= MIN_INK

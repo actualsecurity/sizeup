@@ -1150,6 +1150,9 @@ def same_camera(a: dict, b: dict, within_m: float = CAMERA_MATCH_M) -> bool:
 # kept until another beats it on those (sticky): its id is what the DVR records under and a dispatcher's Keep names.
 CAMERA_NAME_M = 300.0
 CAMERA_OVERLAY_M = 2000.0        # the same overlay on two stills: one camera, on the same road and this close (#320)
+OVERLAY_KEEP_S = 24 * 3600.0     # an overlay not read again within this long is forgotten (its camera's still is
+                                 # looked at every HEALTH_SWEEP_S, a merged-away one's too: sweep)
+OVERLAY_SAVE_S = 60.0            # the overlays read: into the disk cache at most this often
 CAMERA_MILE_MI = 0.2
 CAMERA_FRESHER_S = 300.0         # a still this much newer is the fresher one
 STREAM_NAME = re.compile(r"[A-Za-z0-9_-]{3,64}")
@@ -1879,7 +1882,12 @@ class Roads:
         self._alias: dict[str, str] = {}              # a merged-away camera id -> the id kept for its camera
         self._cam_group_cache: tuple[int, list[list[str]]] | None = None   # (the lists' hash, the groups' ids)
         self._overlay: dict[str, tuple[int, int, bytes]] = {}   # camera id -> its still's overlay (camoverlay), when seen
+        self._overlay_seen: dict[str, float] = {}     # camera id -> when its overlay was last read
+        self._overlay_checked: dict[str, float] = {}  # a merged-away camera id -> when its still was last looked at
         self._overlay_rev = 0
+        self._overlay_dirty = False                   # read since the disk cache was last written
+        self._overlay_saved = 0.0
+        self._save_lock = threading.Lock()
         self._streams: dict[str, dict] = {}           # camera id -> {last (playlist request), base (the stream's folder)}
         self._segments: OrderedDict[str, dict] = OrderedDict()   # "cid/name" -> {body, ctype, fetched, kept, ...}
         self._segment_locks: dict[str, list] = {}               # "cid/name" -> [lock, users]: one fetch at a time
@@ -1990,6 +1998,18 @@ class Roads:
             # (#276) a live-video camera whose still is down: is its stream there? (two small GETs, as a player's first)
             if c.get("video") and (self._health.get(c["id"]) or {}).get("down_since") is not None:
                 self.probe_stream(c["id"])
+        # (#320) the merged-away records' stills too, for their overlays: a merge made by them is checked as often
+        aliases = self.aliases()
+        for p in self.providers:
+            for c in list(p.data["cameras"]):
+                if self._stop.is_set():
+                    break
+                if c["id"] in aliases and c.get("url") and now - self._overlay_checked.get(c["id"], 0) >= HEALTH_SWEEP_S:
+                    self._overlay_look(c)
+                    n += 1
+        self._expire_overlays(now)
+        if self._overlay_dirty:
+            self._save()
         return n
 
     def probe_stream(self, cid: str) -> bool:
@@ -2082,27 +2102,36 @@ class Roads:
                     p.status[feed].update(at=at, n=len(items), next=at + p.every[feed], etag=str(f.get("etag") or ""),
                                           modified=str(f.get("modified") or ""),
                                           published=f.get("published") if isinstance(f.get("published"), (int, float)) else None)
-            for cid, v in (doc.get("overlays") or {}).items():     # (#320) the stills' overlays seen: a restart keeps them
-                if CAMERA_ID.fullmatch(str(cid)) and isinstance(v, list) and len(v) == 3:
+            have = {c["id"] for p in self.providers for c in p.data["cameras"]}
+            for cid, v in (doc.get("overlays") or {}).items():     # (#320) the stills' overlays read: a restart keeps them
+                if (cid in have and isinstance(v, list) and len(v) == 4 and isinstance(v[3], (int, float))
+                        and 0 <= now - v[3] <= OVERLAY_KEEP_S):
                     self._overlay[cid] = (int(v[0]), int(v[1]), base64.b64decode(str(v[2])))
+                    self._overlay_seen[cid] = float(v[3])
             self._overlay_rev += 1
             self._changed()
         except (OSError, ValueError, TypeError, AttributeError) as e:
             self.log(f"roads: cache {self.cache.name} not read ({type(e).__name__}); fetching afresh")
 
     def _save(self) -> None:
+        self._overlay_dirty, self._overlay_saved = False, self.clock()
         if not self.cache:
             return
+        now = self._overlay_saved
+        have = {c["id"] for p in self.providers for c in p.data["cameras"]}
         doc = {"bbox": list(self.bbox),
                "providers": {p.name: {f: {"at": p.status[f]["at"], "items": p.data[f], "etag": p.status[f]["etag"],
                                           "modified": p.status[f]["modified"], "published": p.status[f]["published"]}
                                       for f in FEEDS} for p in self.providers},
-               "overlays": {cid: [w, rows, base64.b64encode(bits).decode()] for cid, (w, rows, bits) in list(self._overlay.items())}}
+               "overlays": {cid: [w, rows, base64.b64encode(bits).decode(), self._overlay_seen.get(cid, 0)]
+                            for cid, (w, rows, bits) in list(self._overlay.items())
+                            if cid in have and now - self._overlay_seen.get(cid, 0) <= OVERLAY_KEEP_S}}
         try:
-            self.cache.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.cache.with_suffix(".tmp")
-            tmp.write_text(json.dumps(doc, separators=(",", ":")))
-            tmp.replace(self.cache)
+            with self._save_lock:                          # (the feeds' thread and a still's: one write at a time)
+                self.cache.parent.mkdir(parents=True, exist_ok=True)
+                tmp = self.cache.with_suffix(".tmp")
+                tmp.write_text(json.dumps(doc, separators=(",", ":")))
+                tmp.replace(self.cache)
         except OSError as e:
             self.log(f"roads: cache not saved ({type(e).__name__}: {e})")
 
@@ -2253,16 +2282,49 @@ class Roads:
                 and km(a["lat"], a["lon"], b["lat"], b["lon"]) * 1000 <= CAMERA_OVERLAY_M)
 
     def _note_overlay(self, cid: str, ctype: str, body: bytes) -> None:
-        """A fresh still's overlay kept (#320): a new one, or one that changed, groups the cameras again. A still with
-        none (a placeholder, a JPEG) leaves the last one known: what it said is still what the camera is."""
+        """A fresh still's overlay kept (#320): a new one, or one that changed, groups the cameras again (and is saved,
+        OVERLAY_SAVE_S at most). A still with none (a placeholder, a JPEG) leaves the last one read, until it is
+        OVERLAY_KEEP_S old (_expire_overlays)."""
         sig = camoverlay.overlay(body) if ctype == "image/png" else None
         if sig is None:
             return
+        now = self.clock()
         old = self._overlay.get(cid)
         self._overlay[cid] = sig
+        self._overlay_seen[cid] = now
         if not camoverlay.same(old, sig):
             self._overlay_rev += 1
+            self._overlay_dirty = True
             self._changed()
+        if self._overlay_dirty and now - self._overlay_saved >= OVERLAY_SAVE_S:
+            self._save()
+
+    def _overlay_look(self, c: dict) -> None:
+        """A merged-away record's still, fetched for its overlay only (sweep): the merge is checked again, every
+        HEALTH_SWEEP_S, as for any listed camera's (a wrong one comes apart: its overlay differs)."""
+        self._overlay_checked[c["id"]] = self.clock()
+        try:
+            with self._parallel:
+                code, headers, body = self.fetch(c["url"], IMAGE_TIMEOUT_S, IMAGE_MAX_BYTES)
+        except (HTTPError, URLError, OSError, ValueError):
+            return
+        ctype = (headers.get("content-type") or "").split(";")[0].strip().lower()
+        if code == 200 and body:
+            self._note_overlay(c["id"], ctype, body)
+
+    def _expire_overlays(self, now: float) -> int:
+        """Forget the overlays not read within OVERLAY_KEEP_S and those of ids no list has now. The number forgotten."""
+        have = {c["id"] for p in self.providers for c in p.data["cameras"]}
+        gone = [cid for cid in list(self._overlay) if cid not in have or now - self._overlay_seen.get(cid, 0) > OVERLAY_KEEP_S]
+        for cid in gone:
+            self._overlay.pop(cid, None)
+            self._overlay_seen.pop(cid, None)
+            self._overlay_checked.pop(cid, None)
+        if gone:
+            self._overlay_rev += 1
+            self._overlay_dirty = True
+            self._changed()
+        return len(gone)
 
     def _cam_rank(self, c: dict) -> tuple:
         """What makes one record of a camera better than another, before the stills' times: in service, then live video,
