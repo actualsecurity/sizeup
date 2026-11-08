@@ -771,8 +771,9 @@ Incidents come in from ranked sources. The interface is in `sizeup/sources/__ini
   bypasses that), honest (the client's real name as its user agent; no spoofing or anti-detection), and the feed's
   data stays in the department (never in logs beyond receipt, pushes, issues, PRs or CI output).
 - **Nothing waits.** A page for us makes its incident at once, whatever the feeds' health. An occasional duplicate
-  is acceptable; a delay is not. A feed's new event does the same unless it attaches. An event that is already closed,
-  or was dispatched more than 20 min ago (a first run, a lost database), is recorded and never makes an incident.
+  is acceptable; a delay is not. A feed's new event does the same unless it attaches. An event already closed (or in
+  service) when first seen is recorded and never makes an incident. One first seen more than 20 min after its dispatch
+  but still open (an outage, a first run) makes its incident, noted "first seen N after its dispatch".
 - **Health:** a feed reports `ok`, `backing_off`, `failing` or `stale`, and a feed with no report for 3 min counts as
   stale (by the hub's clock). Paging is healthy while the station is connected. The first healthy tier is the acting primary. The console
   pill shows it (`County feed · backing off · Paging primary`), and so does Settings > Health.
@@ -785,12 +786,14 @@ Incidents come in from ranked sources. The interface is in `sizeup/sources/__ini
   - When both sides have a location, they must be the same place: house number and street, direction and suffix. An
     intersection never matches a numbered address. Shared units never override two different places.
   - One building can hold two calls (an apartment, a school): when both sides name units, they must share at least one;
-    otherwise (unless the types agree) "Possibly the same as #N". A same-place incident the source already has is noted
-    the same way, never skipped silently. A feed's unit codes go through the data file's `feed_unit_aliases` first.
+    otherwise (unless the types agree within 5 min) "Possibly the same as #N". A same-place incident the source already has is noted
+    the same way, never skipped silently. A feed's unit codes go through the data file's `feed_unit_aliases` first (read again when the file changes; the
+    dispatch mode reads them from the same place).
   - The same place is not enough: it must be the same call. A page joins a feed's incident only when the feed's dispatch
-    is within 5 min of the page or the types agree, and never one the feed has in service. A feed event never joins an
-    incident made after it ended, and one first seen closed or old (after an outage) joins only an incident made within
-    5 min of its dispatch; otherwise it is recorded only.
+    is within 5 min of the page (the same type is not enough), and never one the feed has in service. A feed event
+    never joins an incident made after it ended. One first seen closed or old (after an outage) joins only an incident
+    made at most 1 min after and 5 min before its dispatch. Candidates rank by time first, shared units second; with
+    two at the place, the nearest must be within 5 min.
   - A named place with no street (`@SAMPLE SCHOOL`) has its own key: it matches the same place name and never an
     address. A direction after the suffix (`12 Main St W`) and `EXT` are part of the street. A name made only of
     suffix words is the name (`12 Court St`). Only known towns (the lists' `geo_town_order` and aliases, reloaded when
