@@ -737,7 +737,8 @@ ADSB_AFTER_S = 10.0          # a position this long after the transmission ended
 ADSB_LOST_S = 20.0           # no position for this long, last seen before the transmission: lost
 ADSB_LOW_FT = 1500           # ... under this (not on the ground)
 ADSB_NORMAL = 0.3            # an accident rule's weight while the aircraft it names flies on normally after the words
-                             # (a 'routine' rule's; a clear one's never under the threshold: AtcWatch.confidence)
+                             # (a rule under the threshold alone; one that alerts alone is lowered to the threshold
+                             # at most: AtcWatch.confidence)
 ADSB_MATCH = 0.7             # the callsign in the transmission itself, matched this well and to one aircraft only
 ADSB_MATCH_NORMAL = 1.0      # ... and exactly, for "normal" (which lowers): a one-off match may be another aircraft
 NORMAL_MIN_FT, NORMAL_MIN_KT, NORMAL_MIN_VR = 500, 50, -1000
@@ -855,8 +856,8 @@ class AtcWatch:
         """The score (the rules' weights, the earlier transmissions' at context_factor) and what the named aircraft's
         ADS-B said about it. The ambiguous rules ('routine') count at the routine factor when the exchange is normal
         sequencing (in this transmission, or the same callsign's before it); when the aircraft named in this transmission
-        flies on normally after the words, an ambiguous accident rule counts at ADSB_NORMAL and a clear one is lowered
-        to the threshold at most; ADSB_WORSE is added when its ADS-B says something is wrong (adsb_check)."""
+        flies on normally after the words, an accident rule under the threshold alone counts at ADSB_NORMAL and one
+        that alerts alone is lowered to the threshold at most; ADSB_WORSE is added when its ADS-B says something is wrong (adsb_check)."""
         routine = self._routine(me, ctx)
         pairs = [(h, 1.0) for h in me.hits] + [(h, self.rules.context_factor) for c in ctx for h in c.hits]
         adsb = None
@@ -869,9 +870,10 @@ class AtcWatch:
             if routine and h.rule.routine:
                 w *= self.rules.routine_factor
             if h.rule.category == "accident" and adsb and adsb[0] == "normal":
-                # the ambiguous words go quiet; the clear ones ("went down") never under the threshold: the aircraft
-                # named may be the one reporting it, or ADS-B may be wrong
-                w = w * ADSB_NORMAL if h.rule.routine else min(w, max(w * ADSB_NORMAL, floor))
+                # a rule that alerts on its own ("went down", "lost radar contact") never goes under the threshold:
+                # the aircraft named may be the one reporting it or spoken to, not the one lost, or ADS-B may be
+                # wrong; only the weaker words ("lost contact with", under the threshold alone) go quiet
+                w = w * ADSB_NORMAL if h.rule.weight < floor else min(w, max(w * ADSB_NORMAL, floor))
             weights.append(w)
         if adsb and adsb[0] == "worse":
             weights.append(ADSB_WORSE)

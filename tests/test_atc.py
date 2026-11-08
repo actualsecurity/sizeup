@@ -390,14 +390,30 @@ def test_adsb_flying_normally_after_the_words_holds_an_accident_back():
     clock = Clock()
     planes = acft(T0 + 10)                                    # a position 10 s after the words: 1,600 ft, 105 kt
     cad, w, hear, push = watch(clock, planes)
-    assert hear(1, "lost radar contact with November one two three alfa bravo", 0) is None
+    # the weak words (lost-contact, 0.45) with an earlier "emergency?" in the exchange: 0.56 on the words alone
+    assert hear(1, "Bonanza seven eight nine, say intentions, is this an emergency", -20) is None
+    assert hear(2, "I lost contact with November one two three alfa bravo", 0) is None           # 0.45 x 0.3
     # straight from the check: normal flight after the transmission
     v = atc.adsb_check(planes[0], T0, T0 + 12)
     assert v[0] == "normal" and "1,600 ft" in v[1]
     # the words alone would have alerted
     clock2 = Clock()
     cad2, w2, hear2, push2 = watch(clock2, [])
-    assert hear2(1, "lost radar contact with November one two three alfa bravo", 0) is not None
+    assert hear2(1, "Bonanza seven eight nine, say intentions, is this an emergency", -20) is None
+    assert hear2(2, "I lost contact with November one two three alfa bravo", 0) is not None
+    # "lost radar contact" alerts alone: normal ADS-B lowers it to the threshold, never under
+    clock3 = Clock()
+    cad3, w3, hear3, push3 = watch(clock3, acft(T0 + 10))
+    a = hear3(1, "lost radar contact with November one two three alfa bravo", 0)
+    assert a is not None and a["confidence"] == RULES.threshold and a["level"] == "low"
+
+
+def test_the_aircraft_spoken_to_is_not_the_one_lost():
+    """A controller tells N123AB (flying normally) about another aircraft they lost on radar: still a pre-alert."""
+    clock = Clock()
+    cad, w, hear, push = watch(clock, acft(T0 + 20))
+    a = hear(1, "November one two three alfa bravo, I lost radar contact with a Cessna off your left, say if you have him", 5)
+    assert a is not None and a["kind"] == "accident" and a["confidence"] >= RULES.threshold and len(push.sent) == 1
 
 
 def test_adsb_flying_normally_never_silences_the_clear_words():
