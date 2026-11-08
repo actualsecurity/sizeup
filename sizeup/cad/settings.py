@@ -44,6 +44,9 @@ Reset to default = drop the override (one item, or a whole section).
     hub_errors                     key "on" -> true | false (default true), "per_signature" / "total" -> a count: the hub's
                                    own error spikes pushed to the status topic (#285, sizeup/errwatch.py; Settings >
                                    System > Hub error alerts, admins)
+    alert_mutes                    key an alert kind (sizeup/cloud/health.py MUTE_KINDS: adsb, whisper, job, trunk,
+                                   silent, hub_errors ...) -> {"until": epoch | null (until unmuted)}: shown on Settings >
+                                   Health, not pushed (#340; Settings > System > Push notifications, admins)
     datasources                    key a data source ("gis:hydrants", "aircraft:registry") -> off | hourly | daily | weekly |
                                    monthly: how often the registry refreshes it (#186, Settings > Data sources;
                                    sizeup/datasources.py); not set: the source's default
@@ -63,6 +66,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import math
 import re
 from datetime import datetime
 from pathlib import Path
@@ -74,6 +78,7 @@ from sizeup.cad import lists as lists_mod
 from sizeup.cad.lists import CLASSES, CODE, COLOR, LIST_SECTIONS, LONG_CODE, RESPONSES, ROLES, ListsError
 from sizeup.cad.store import OPERATOR_MAX, SCHEMA_VERSION, TZ, CadError
 from sizeup import errwatch, polly
+from sizeup.cloud import health as health_mod
 from sizeup.radio.tones import pair_key
 from sizeup.tts import KOKORO_VOICES
 
@@ -109,6 +114,10 @@ KEPT_SECTIONS = (NOTIFY_SECTION, MODE_SECTION)
 # The hub's own error spikes (#285, sizeup/errwatch.py): Settings > System > Hub error alerts, audited as System.
 ERR_SECTION = errwatch.SECTION
 PAGE_SECTION[ERR_SECTION] = "system"
+# Health alerts muted (#340, sizeup/cloud/health.py): Settings > System > Push notifications, audited as System.
+MUTE_SECTION = health_mod.MUTE_SECTION
+PAGE_SECTION[MUTE_SECTION] = "system"
+MUTE_HOURS_MAX = 24 * 30
 WALL_ID = re.compile(r"[A-Za-z0-9_.:-]{1,64}")      # sizeup/roads.py CAMERA_ID
 MAX_WALL_IDS = 200
 AUDIT_SECTIONS = ("lists", "run cards", "units", "dispatch", "users", "system", "radios")
@@ -517,7 +526,66 @@ class Editor:
         out["camera_wall"] = self.wall_page()
         out["atc"] = self.atc_page(ov)
         out["hub_errors"] = self.errors_page(ov)
+        out["alert_mutes"] = self.mutes_page(ov)
         return out
+
+    def mutes_page(self, ov: dict | None = None) -> dict:
+        """Settings > System > Push notifications > Mute (#340): each health alert kind, muted or not, until when."""
+        now = self.store.clock()
+        on = health_mod.active_mutes((self.overrides() if ov is None else ov).get(MUTE_SECTION) or {}, now)
+        return {"kinds": [{"key": k, "label": lab, "muted": k in on, "until": on.get(k),
+                           "timed_only": k in health_mod.MUTE_TIMED_ONLY}
+                          for k, lab in health_mod.MUTE_KINDS.items()], "hours_max": MUTE_HOURS_MAX}
+
+    @staticmethod
+    def _mute_value(key: str, v, now: float) -> dict | None:
+        """A mute as stored ({"until": epoch | None}); None for one already over (dropped)."""
+        if not isinstance(v, dict) or set(v) - {"until"}:
+            raise CadError('{"until": a time or null}')
+        u = v.get("until")
+        if u is None:
+            if key in health_mod.MUTE_TIMED_ONLY:
+                raise CadError(f"until: a time ({health_mod.MUTE_KINDS[key]} is muted for a time only)")
+            return {"until": None}
+        if isinstance(u, bool) or not isinstance(u, (int, float)) or not math.isfinite(u) \
+                or not 0 <= u <= now + MUTE_HOURS_MAX * 3600.0:
+            raise CadError(f"until: a time (epoch seconds) within {MUTE_HOURS_MAX // 24} days, or null (until unmuted)")
+        return {"until": float(u)} if u > now else None
+
+    def _mutes_op(self, action: str, body: dict, op: str) -> dict:
+        """mute {key, hours?: 1..MUTE_HOURS_MAX (none: until unmuted)} | unmute {key}: admins (sizeup/cad/api.py)."""
+        key = body.get("key")
+        if key not in health_mod.MUTE_KINDS:
+            raise CadError(f"key: one of {', '.join(health_mod.MUTE_KINDS)}")
+        now = self.store.clock()
+        cur = (self.overrides().get(MUTE_SECTION) or {}).get(key)
+        def shown(v) -> str:
+            if not isinstance(v, dict) or key not in health_mod.active_mutes({key: v}, now):
+                return "pushed"
+            return "muted" + (f" until {datetime.fromtimestamp(v['until'], TZ).strftime('%Y-%m-%d %H:%M')}"
+                              if v.get("until") is not None else "")
+        if action == "mute":
+            h = body.get("hours")
+            if h is None and key in health_mod.MUTE_TIMED_ONLY:
+                raise CadError(f"hours: 1 to {MUTE_HOURS_MAX} ({health_mod.MUTE_KINDS[key]} is muted for a time only)")
+            if h is None:
+                new = {"until": None}
+            elif isinstance(h, bool) or not isinstance(h, (int, float)) or not 0 < h <= MUTE_HOURS_MAX:
+                raise CadError(f"hours: 1 to {MUTE_HOURS_MAX}, or none (until unmuted)")
+            else:
+                new = {"until": round(now + h * 3600.0)}
+        elif action == "unmute":
+            if cur is None:
+                return {"ok": True, "alert_mutes": self.mutes_page()}
+            if shown(cur) == "pushed":                   # over already: tidied away, nothing to audit
+                out = self._commit([(MUTE_SECTION, key, REMOVE)], op, [])
+                return {**out, "alert_mutes": self.mutes_page()}
+            new = REMOVE
+        else:
+            raise CadError("action: mute or unmute")
+        out = self._commit([(MUTE_SECTION, key, new)], op,
+                           [("system", f"{MUTE_SECTION}/{key}", shown(cur), shown(None if new is REMOVE else new))])
+        return {**out, "alert_mutes": self.mutes_page()}
 
     def errors_page(self, ov: dict | None = None) -> dict:
         """Settings > System > Hub error alerts (#285): the switch and the two thresholds, each with its default."""
@@ -676,7 +744,7 @@ class Editor:
               "dispatch": self._dispatch_op, "users": self._users_op, "runcards": self._cards_op,
               "import": self._import_op, "channels": self._channels_op, "stt": self._stt_op,
               "places": self._places_op, TONES_SECTION: self._tones_op, WALL_SECTION: self._wall_op, DS_SECTION: self._ds_op,
-              NOTIFY_SECTION: self._notify_op, ATC_SECTION: self._atc_op, ERR_SECTION: self._errors_op, "alarms": lambda a, b, o: self.cad.alarms.settings_op(a, b, o)}.get(section)
+              NOTIFY_SECTION: self._notify_op, ATC_SECTION: self._atc_op, ERR_SECTION: self._errors_op, MUTE_SECTION: self._mutes_op, "alarms": lambda a, b, o: self.cad.alarms.settings_op(a, b, o)}.get(section)
         if fn is None:
             raise CadError(f"no settings section {section!r}")
         if section in ("users", "import"):
@@ -2189,6 +2257,17 @@ class Editor:
                 self._errors_value(k, v)
             except CadError as e:
                 raise CadError(f"overrides.{ERR_SECTION}.{e}") from None
+        for k, v in list((ov.get(MUTE_SECTION) or {}).items()):     # sizeup/cloud/health.py (#340)
+            if k not in health_mod.MUTE_KINDS:
+                raise CadError(f"overrides.{MUTE_SECTION}: {', '.join(health_mod.MUTE_KINDS)} only")
+            try:
+                m = self._mute_value(k, v, self.store.clock())
+            except CadError as e:
+                raise CadError(f"overrides.{MUTE_SECTION}.{k}: {e}") from None
+            if m is None:
+                del ov[MUTE_SECTION][k]                   # over already: not brought back
+            else:
+                ov[MUTE_SECTION][k] = m
         st = ov.get("stt") or {}
         if set(st) - {"vocabulary", "aws_monthly_limit_usd"}:
             raise CadError("overrides.stt: vocabulary and aws_monthly_limit_usd only")
