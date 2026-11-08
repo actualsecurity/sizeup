@@ -791,8 +791,9 @@ Incidents come in from ranked sources. The interface is in `sizeup/sources/__ini
     dispatch mode reads them from the same place).
   - The same place is not enough: it must be the same call. A page joins a feed's incident only when the feed's dispatch
     is within 5 min of the page (the same type is not enough), and never one the feed has in service. A feed event
-    never joins an incident made after it ended. One first seen closed or old (after an outage) joins only an incident
-    made at most 1 min after and 5 min before its dispatch. Candidates rank by time first, shared units second; with
+    never joins an incident made after it ended, nor one made more than 5 min after its dispatch (an earlier call, open
+    or not). One first seen closed joins only an incident made at most 1 min after and 5 min before its dispatch; one
+    first seen open but late (an outage) one within 5 min either way. Candidates rank by time first, shared units second; with
     two at the place, the nearest must be within 5 min.
   - A named place with no street (`@SAMPLE SCHOOL`) has its own key: it matches the same place name and never an
     address. A direction after the suffix (`12 Main St W`) and `EXT` are part of the street. A name made only of
