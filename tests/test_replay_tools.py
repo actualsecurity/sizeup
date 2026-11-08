@@ -45,8 +45,46 @@ def test_ltx_header_and_pages():
 
 def test_ltx_restore_plan_the_snapshot_then_the_furthest_files():
     files = [(9, 1, 100, "0009/a"), (9, 1, 50, "0009/old"), (3, 101, 200, "0003/b"), (1, 101, 120, "0001/x"),
-             (0, 201, 201, "0000/c"), (0, 202, 202, "0000/d"), (1, 201, 202, "0001/cd"), (0, 204, 204, "0000/gap")]
+             (0, 201, 201, "0000/c"), (0, 202, 202, "0000/d"), (1, 201, 202, "0001/cd")]
     assert [f[3] for f in ltx.plan(files)] == ["0009/a", "0003/b", "0001/cd"]
+
+
+def ltx_name(level: int, lo: int, hi: int) -> tuple[int, int, int, str]:
+    return level, lo, hi, f"{level:04d}/{lo:016x}-{hi:016x}.ltx"
+
+
+def test_ltx_plan_follows_compacted_files_that_overlap_the_end():
+    # The shape of a real hub.sqlite backup (#327): the snapshot ends at 0x3a578, but the compacted files after it
+    # start a little earlier (0x3a576), at every level, and level 0 only starts at 0x3a57a. Following only a file
+    # that starts at end + 1 stopped at the snapshot: a restore a day stale.
+    files = [ltx_name(9, 1, 0x3a578),
+             ltx_name(3, 0x3a576, 0x3a72c), ltx_name(2, 0x3a576, 0x3a595), ltx_name(1, 0x3a576, 0x3a579),
+             ltx_name(3, 0x3a72d, 0x3a8f0), ltx_name(2, 0x3a8e0, 0x3a910), ltx_name(2, 0x3a911, 0x3a930),
+             ltx_name(1, 0x3a925, 0x3a931), ltx_name(1, 0x3a932, 0x3a934), ltx_name(0, 0x3a933, 0x3a933),
+             ltx_name(0, 0x3a934, 0x3a934), ltx_name(0, 0x3a935, 0x3a935)]
+    files += [ltx_name(0, t, t) for t in range(0x3a57a, 0x3a5a0)]          # level 0, long since compacted
+    said = []
+    chain = ltx.plan(files, said.append)
+    assert [(f[0], f[1], f[2]) for f in chain] == [
+        (9, 1, 0x3a578), (3, 0x3a576, 0x3a72c), (3, 0x3a72d, 0x3a8f0), (2, 0x3a8e0, 0x3a910), (2, 0x3a911, 0x3a930),
+        (1, 0x3a925, 0x3a931), (1, 0x3a932, 0x3a934), (0, 0x3a935, 0x3a935)]
+    assert chain[-1][2] == max(f[2] for f in files) and not said
+
+
+def test_ltx_plan_an_exact_chain_and_the_highest_level_on_a_tie():
+    files = [ltx_name(9, 1, 10), ltx_name(0, 11, 11), ltx_name(1, 11, 12), ltx_name(2, 11, 12), ltx_name(0, 12, 12),
+             ltx_name(0, 13, 13), ltx_name(0, 14, 14)]
+    said = []
+    assert [(f[0], f[1], f[2]) for f in ltx.plan(files, said.append)] == [(9, 1, 10), (2, 11, 12), (0, 13, 13),
+                                                                         (0, 14, 14)]
+    assert not said
+
+
+def test_ltx_plan_a_file_inside_the_chain_is_no_gap():
+    # a level 0 file already covered by a compaction, and one wholly inside the snapshot: nothing is left out
+    files = [ltx_name(9, 1, 20), ltx_name(0, 5, 5), ltx_name(1, 19, 25), ltx_name(0, 22, 22)]
+    said = []
+    assert [f[2] for f in ltx.plan(files, said.append)] == [20, 25] and not said
 
 
 def test_ltx_restore_applies_the_newest_copy_of_each_page(tmp_path, monkeypatch):
@@ -318,8 +356,53 @@ def test_ltx_truncated_page_header():
         list(ltx.pages(b[:ltx.HEADER + 8]))
 
 
-def test_ltx_plan_warns_on_a_gap():
+def test_ltx_plan_fails_on_a_real_gap_unless_allowed():
+    files = [(9, 1, 10, "a"), (0, 11, 11, "b"), (0, 13, 13, "c")]
     said = []
-    chain = ltx.plan([(9, 1, 10, "a"), (0, 11, 11, "b"), (0, 13, 13, "c")], said.append)
+    with pytest.raises(SystemExit, match="gap after TXID 0xb .*0xd.*reaches only 0xb of 0xd"):
+        ltx.plan(files, said.append)
+    chain = ltx.plan(files, said.append, allow_stale=True)
     assert [f[3] for f in chain] == ["a", "b"]
-    assert said and "gap after TXID 0xb" in said[0] and "0xd" in said[0]
+    assert len(said) == 1 and "warning" in said[0] and "gap after TXID 0xb" in said[0] and "0xd" in said[0]
+
+
+def fake_backup(monkeypatch, blobs: dict[str, bytes]) -> None:
+    def fake_aws(*args):
+        if args[0] == "ls":
+            return "".join(f"2026-11-07 10:00:00 512 db/x.sqlite/{k}\n" for k in blobs)
+        assert args[0] == "cp" and args[2].startswith("s3://bucket/db/x.sqlite/"), args   # downloads only
+        Path(args[3]).write_bytes(blobs[args[2].split("x.sqlite/")[1]])
+        return ""
+    monkeypatch.setattr(ltx, "_aws", fake_aws)
+
+
+def test_ltx_restore_a_snapshot_then_overlapping_incrementals(tmp_path, monkeypatch):
+    # snapshot to 5, a level 1 compaction from 4 (overlapping it) to 8, then level 0 files 9 and 10 and an older
+    # level 0 file (6) that the compaction already holds
+    n, p = ltx_name, lambda c: c * 512
+    blobs = {n(9, 1, 5)[3]: ltx_file({1: p(b"s"), 2: p(b"s"), 3: p(b"s")}, 3, 1, 5),
+             n(1, 4, 8)[3]: ltx_file({2: p(b"a"), 4: p(b"a")}, 4, 4, 8),
+             n(0, 6, 6)[3]: ltx_file({2: p(b"x")}, 3, 6, 6),
+             n(0, 9, 9)[3]: ltx_file({3: p(b"b")}, 4, 9, 9),
+             n(0, 10, 10)[3]: ltx_file({4: p(b"c")}, 4, 10, 10)}
+    fake_backup(monkeypatch, blobs)
+    said = []
+    info = ltx.restore("s3://bucket/db/x.sqlite", tmp_path / "out.db", work=tmp_path / "w", log=said.append)
+    assert info["txid"] == 10 and info["pages"] == 4
+    assert (tmp_path / "out.db").read_bytes() == p(b"s") + p(b"a") + p(b"b") + p(b"c")
+    assert not any("warning" in m for m in said)
+    assert sorted(x.name for x in (tmp_path / "w").iterdir()) == sorted(
+        k.replace("/", "_") for k in blobs if not k.startswith("0000/0000000000000006"))
+
+
+def test_ltx_restore_short_of_the_newest_txid_fails_before_writing(tmp_path, monkeypatch):
+    n, p = ltx_name, lambda c: c * 512
+    fake_backup(monkeypatch, {n(9, 1, 5)[3]: ltx_file({1: p(b"s")}, 1, 1, 5),
+                              n(0, 7, 7)[3]: ltx_file({1: p(b"z")}, 1, 7, 7)})
+    out = tmp_path / "out.db"
+    with pytest.raises(SystemExit) as e:
+        ltx.main(["restore", "s3://bucket/db/x.sqlite", str(out), "--work", str(tmp_path / "w")])
+    assert e.value.code not in (0, None) and "reaches only 0x5 of 0x7" in str(e.value.code)
+    assert not out.exists()
+    ltx.main(["restore", "s3://bucket/db/x.sqlite", str(out), "--work", str(tmp_path / "w"), "--allow-stale"])
+    assert out.read_bytes() == p(b"s")
