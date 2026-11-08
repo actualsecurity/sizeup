@@ -11,7 +11,8 @@ record (the hub, or all-in-one), on top of the incident sources (sizeup/cad/sour
                switch affects only what comes after it: every feed report is remembered as processed (auto_incidents.
                seen, with whose report it was: seen_src) in either mode, and automation applies only the change from
                the last report processed, so nothing reported while in PCFD mode is replayed after switching back.
-               When another feed's report starts to rule the incident, it becomes the baseline (nothing applied)
+               When another feed's report starts to rule the incident, its times and statuses become the baseline (not
+               replayed); its listed units are still dispatched and its in service still closes the call
     60 Control (a tracked incident, while in 60 Control mode):
       accept   queued -> numbered at once when the feed lists one of our units or a page attached (and it has a type: a
                feed type nobody maps waits for a person). Never when it is "possibly the same as" an open accepted
@@ -251,8 +252,11 @@ class AutoDispatch:
                            (iid, self.clock() if auto else None, src))
             row = self._tracking(iid)
         elif row["seen_src"] and row["seen_src"] != src:
-            # another feed's report rules it now (a better-ranked one attached, or the old one merged away): its report
-            # is the new baseline, never diffed against the other feed's (L2)
+            # another feed's report rules it now (a better-ranked one attached, or the old one merged away): its times
+            # and statuses are the new baseline, never diffed against the other feed's (L2). Its listed units are still
+            # dispatched (_assign: never twice, never a cleared one back) and its in service still closes the call
+            if auto and row["tracked_at"] is not None:
+                self._ruler_changed(iid, data, label)
             with self.store.tx() as db:
                 db.execute("UPDATE auto_incidents SET seen = ?, seen_src = ? WHERE incident_id = ?", (seen, src, iid))
             return first
@@ -390,6 +394,20 @@ class AutoDispatch:
                     self._dispatch_listed(iid)
         except Exception as e:  # noqa: BLE001 - the accept stands whatever this does
             self.log(f"CAD: dispatch mode: {type(e).__name__}")
+
+    def _ruler_changed(self, iid: int, data: dict, label: str) -> None:
+        """A new feed rules a tracked incident: queued, it is taken as any first report; pending or active, its listed
+        units are dispatched and its in service (or closed) runs the close, with no times replayed."""
+        status = self.store.incident(iid)["status"]
+        if status == "queued":
+            self._apply(iid, {}, data, label)
+            return
+        if status not in ("pending", "active"):
+            return
+        self._dispatch_listed(iid)
+        times = data.get("times") or {}
+        if times.get("in_service") is not None or data.get("closed"):
+            self._close(iid, times.get("in_service") or self.clock(), f"{label} · auto", label, data.get("units") or [])
 
     def _dispatch_listed(self, iid: int) -> None:
         data, label = self._feed(iid)

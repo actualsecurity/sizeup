@@ -838,7 +838,8 @@ Incidents come in from ranked sources. The interface is in `sizeup/sources/__ini
   pill.
 - **60 Control dispatching:** a feed incident first reported while queued in this mode is tracked. One already accepted
   at the feed's first report (from before the deploy, or a page a person took first) stays manual: that report is only
-  its baseline. When another feed's report starts to rule an incident, it is the new baseline.
+  its baseline. When another feed's report starts to rule an incident, its times and statuses are the new baseline;
+  its listed units are still dispatched and its in service still closes the call.
   - It is accepted only when the feed lists one of our units (exact board codes, spoken names or the data file's
     `feed_unit_aliases`) or a page attached, and never while it is "possibly the same as" an open accepted incident.
     When a person accepts one that waited, the units the feed lists then are dispatched (no times replayed).

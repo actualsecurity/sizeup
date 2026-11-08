@@ -470,9 +470,32 @@ def test_another_feed_ruling_the_incident_is_a_new_baseline(rig):
     assert rig.iid("A1") == iid
     row = rig.cad.store.one("SELECT seen, seen_src FROM auto_incidents WHERE incident_id = ?", (iid,))
     assert row["seen_src"] == "county" and json.loads(row["seen"])["units"] == ["E60", "L31", "E62"]
-    on = {a["name"] for a in rig.cad.full(iid)["assignments"] if not a["cleared_at"]}
-    assert "L31" not in on and "E62" not in on                          # not "newly listed": the other feed's list
+    here = {a["name"]: a for a in rig.cad.full(iid)["assignments"] if not a["cleared_at"]}
+    assert {"E60", "L31", "E62"} <= set(here)                           # the new ruler's units: dispatched
+    assert here["L31"]["enroute_at"] is None                             # its times: the baseline, not replayed
     rig.at(60)
     rig.feed.change("A1", units=("E60", "L31", "E62", "E64"))
     rig.poll()
     assert "E64" in {a["name"] for a in rig.cad.full(iid)["assignments"] if not a["cleared_at"]}
+
+
+def test_the_primary_recovering_while_the_call_is_in_service_still_closes_it(rig):
+    """Finding 2: the mirror ran the call; the primary comes back with the call already in service: its units are
+    released and the call closes, never left active."""
+    from tests.fake_feed import FakeFeed
+    mirror = FakeFeed("mirror", "Mirror feed", rank=2, clock=rig.clock)
+    rig.feeds.append(mirror)
+    rig.runner = type(rig.runner)(rig.feeds, rig.sink, log=lambda m: None, clock=rig.clock)
+    rig.feed.outage("failing", "x", raise_=True)
+    mirror.put("M1", type="ALARM/COMM", location="12 Example Ave", units=("E60",), times={"dispatched": T0})
+    rig.poll()
+    iid = rig.cad.store.one("SELECT incident_id FROM source_reports WHERE ref = 'M1'")["incident_id"]
+    assert any(a["name"] == "E60" and not a["cleared_at"] for a in rig.cad.full(iid)["assignments"])
+    rig.at(1200)
+    rig.feed.recover()
+    rig.feed.put("A1", type="ALARM/COMM", location="12 Example Ave", units=("E60",),
+                 times={"dispatched": T0, "on_location": T0 + 300, "in_service": T0 + 1100})
+    rig.poll()
+    assert rig.iid("A1") == iid
+    inc = rig.cad.full(iid)
+    assert inc["status"] == "closed" and not any(not a["cleared_at"] for a in inc["assignments"])
