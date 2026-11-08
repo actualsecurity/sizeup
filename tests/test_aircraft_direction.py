@@ -423,3 +423,49 @@ def test_a_slow_fixed_wing_low_pass_along_the_runway_is_not_a_roll(from_nm):
     assert sum(A.on_runway(r.lat, r.lon, r.track) for r in reports) >= 4
     k = kinds(phases_of(reports)[0])
     assert DEPARTING not in k and GROUND not in k[1:], k
+
+
+# ---- a tight turn-back (#313) ---------------------------------------------------------------------------------------------
+
+
+def turnback_16(turn_s, final_s, gs=70.0, baro=0.0):
+    """Off 34 (rolling from 40 kt), up to 370 ft 20 s after lift-off, the engine fails: a 180 to the left in turn_s
+    gliding, wings level on the 16 heading for final_s, the last report 0.05 nm short of the 16 threshold."""
+    sink = -(370 - 20) / (turn_s + final_s) * 60
+
+    def fly(start):
+        legs = [(15, {"gs": gs}), (20, {"vr": 1110.0, "gs": gs}), (turn_s, {"vr": sink, "turn": -180.0 / turn_s}),
+                (final_s + STEP_S, {"vr": sink})]
+        return fly_legs(move(*END["34"], HDG["34"], start), HDG["34"], ELEV, 40.0, legs, baro=baro)
+
+    last = fly(0.0)[-1]                                         # how far beyond the 16 threshold that ends up
+    beyond = A.nm(*END["16"], last.lat, last.lon) * math.cos(math.radians(
+        A.bearing(*END["16"], last.lat, last.lon) - (HDG["16"] + 180)))
+    return fly(0.05 - beyond)
+
+
+@pytest.mark.parametrize("turn_s,final_s", [(30, 10), (35, 10), (40, 10), (30, 15), (35, 15), (40, 15), (30, 20),
+                                            (35, 20), (40, 20)])
+@pytest.mark.parametrize("gs,baro", [(65.0, 0.0), (80.0, 150.0)])
+def test_a_tight_turn_back_after_an_engine_failure_at_370_ft_reads_arriving(turn_s, final_s, gs, baro):
+    """Down before 15 s of closing on the field can show: descending and lined up on the 16 final decides."""
+    reports = turnback_16(turn_s, final_s, gs, baro)
+    up = airborne_from(reports)
+    fail = round((15 + 20) / STEP_S)
+    assert reports[fail].alt_baro - ELEV - baro == pytest.approx(370, abs=5) and (fail - up) * STEP_S <= 25
+    final = fail + round(turn_s / STEP_S)
+    assert abs(A.wrap180(reports[final].track - HDG["16"])) < 1 and A.lined_up(reports[final], "16")
+    assert not A.past_threshold(reports[-1].lat, reports[-1].lon, "16")
+    k = kinds(phases_of(reports)[0])
+    assert set(k[up:fail]) == {DEPARTING} and ARRIVING not in k[:final - 1], k
+    assert k[-1] == ARRIVING and k[-2] == ARRIVING, k          # shown (after the debounce) before it is down
+    sos = kinds(phases_of([Plane(**{**r.__dict__, "squawk": "7700"}) for r in reports])[0])
+    assert sos[final:] == [ARRIVING] * (len(sos) - final), sos  # the emergency watch: from rolling out on final
+
+
+def test_a_departure_descending_straight_out_is_not_arriving():
+    """Under a low ceiling or an airspace shelf: up to 1,200 ft off 34, then down to 800 ft straight out. Descending
+    and from the field, but not lined up on a runway end: never arriving."""
+    reports = takeoff("34", 0.2, baro=150.0, climb_s=50, extra=[(30, {"vr": -800.0}), (60, {})])
+    k = kinds(phases_of(reports)[0])
+    assert ARRIVING not in k and k[-1] == DEPARTING, k

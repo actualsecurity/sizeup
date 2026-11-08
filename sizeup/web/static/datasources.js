@@ -43,7 +43,7 @@ const DataSourcesPanel = (() => {
     else chip = el("span", "chip ds-st ok", "OK");
     td.append(chip);
     if (s.running && s.started) td.append(el("div", "dim small", `since ${fmtTime(s.started, true)}`));
-    else if (!s.on && s.why) td.append(el("div", "dim small", s.why));
+    else if (!s.on && s.why) td.append(el("div", "dim small", s.why[0].toUpperCase() + s.why.slice(1)));   // why_not() is lower case
     else if (s.error) td.append(el("div", "error ds-err", s.error));
     const r = s.last_run;
     if (r && r.at && !s.running) {

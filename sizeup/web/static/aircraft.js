@@ -479,7 +479,7 @@ window.AircraftLayer = (() => {
       const lines = [];
       if (a.emerg) lines.push(`EMERGENCY ${a.emerg}`);
       // #278: an old position is said up top, in the warning colour, with the time it was reported (never only in the foot)
-      const fixAt = (d.fetched || d.at || 0) - (a.age || 0);
+      const fixAt = (d.at || d.fetched || 0) - (a.age || 0);   // a.age is at the feed's time (d.at)
       if (stale) lines.push(h("div", "warn", `Stale · ${hms(fixAt)}`));
       const ph = PHASE[a.phase] || PHASE.low;
       const where = a.phase !== "arriving" ? "" : a.appr ? a.appr : a.rwy ? `RWY ${a.rwy}` : "";

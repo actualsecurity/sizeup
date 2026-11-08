@@ -401,7 +401,7 @@ def test_the_faa_registry_weekly_overnight_at_most_hourly_by_hand(tmp_path):
     row = r.row("aircraft:registry")
     assert row["every"] == "weekly" and row["quiet"] and row["min_gap_s"] == 3600
     r.refresh("aircraft:registry")
-    assert ly.fetch.calls.count(FAA_URL) == 1 and ly.registry.lookup("a19e97")["n"] == "N203QS"
+    assert ly.fetch.calls.count(FAA_URL) == 1 and ly.registry.lookup("a2002f")["n"] == "N228QZ"
     row = r.row("aircraft:registry")
     assert row["ok"] and row["items"] > 0 and row["bytes"] > 0
     with pytest.raises(TooSoon):

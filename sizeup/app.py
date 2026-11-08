@@ -206,11 +206,13 @@ def prewarm(cfg: Config, phases=None) -> None:
 
 def renamed_overrides(ov: dict, kinds: dict) -> dict:
     """Settings > Radios > Channels choices saved under a channel's old name (#275: RENAMED) count for its new one, unless
-    the new one has its own, or the old one is still a channel here."""
+    the new one has its own, or the old one is still a channel here. The old name's is then dropped (#307: a channel
+    given that name later doesn't inherit it); App._channel_overrides saves that."""
     out = dict(ov)
     for old, new in RENAMED.items():
-        if old in out and new not in out and old not in kinds and new in kinds:
-            out[new] = out[old]
+        if old in out and old not in kinds and new in kinds:
+            moved = out.pop(old)
+            out.setdefault(new, moved)
     return out
 
 
@@ -511,7 +513,7 @@ class App:
         # Per-channel record / transcribe / engine (Settings > Radios, sizeup/channels.py) and Amazon
         # Transcribe where this process may call it ([stt] aws: the hub; sizeup/transcribe.py).
         self.cad.radio_ctx = self
-        self._chan_ov: dict = renamed_overrides(self.cad.settings.channel_overrides(), self._kind)
+        self._chan_ov: dict = self._channel_overrides()
         # Tone pairs named from the console (Settings "tones", #80): merged into the plan, with the names
         # that count as ours; the hub sends them to the station with the channel choices.
         self._tone_ov: dict = {}
@@ -572,13 +574,27 @@ class App:
         self.cad.camera_area = self.roads.settings_rows
         # The camera DVR (#277, sizeup/dvr.py): live cameras' segments on this task's disk, on demand (the always list,
         # pins, an open event's cameras, the ones watched); the pins in the CAD store so a deploy keeps them.
+        # On shared storage (#322: EFS mounted at the DVR's folder, or [roads] dvr_shared = true) the recording outlives a
+        # deploy: the response area's cameras 24/7, a 12 h window, and only the lease holder writes (self.fence). This
+        # is the leader's app: the standby's warm app (prewarm) never gets here.
         if cfg.roads_dvr and cfg.roads_enabled:
-            from sizeup.dvr import Dvr
+            from sizeup.dvr import WORKERS, MAX_WORKERS, Dvr, shared_mount
             state = Path(cfg.cad_db).parent if cfg.cad_db else Path(".")
-            self.roads.dvr = Dvr(self.roads, Path(cfg.roads_dvr_dir) if cfg.roads_dvr_dir else state / "dvr",
-                                 window_s=cfg.roads_dvr_window_s, max_bytes=cfg.roads_dvr_max_bytes,
+            root = Path(cfg.roads_dvr_dir) if cfg.roads_dvr_dir else state / "dvr"
+            fs = shared_mount(root) if cfg.roads_dvr_shared == "auto" else ""
+            shared = cfg.roads_dvr_shared == "on" or bool(fs)
+            if shared:
+                log(f"dvr: {root} is shared storage ({fs or 'dvr_shared = true'}): the response area's cameras, "
+                    f"{cfg.roads_dvr_shared_window_s / 3600:.0f} h, only while this task holds the lease")
+            cams = cfg.roads_dvr_shared_max_cameras if shared else cfg.roads_dvr_max_cameras
+            self.roads.dvr = Dvr(self.roads, root,
+                                 window_s=cfg.roads_dvr_shared_window_s if shared else cfg.roads_dvr_window_s,
+                                 max_bytes=cfg.roads_dvr_shared_max_bytes if shared else cfg.roads_dvr_max_bytes,
                                  near_m=cfg.roads_dvr_near_m, always=cfg.roads_dvr_always, linger_s=cfg.roads_dvr_linger_s,
-                                 max_cameras=cfg.roads_dvr_max_cameras, log=log)
+                                 max_cameras=cams, log=log, area=(cfg.roads_dvr_area or ()) if shared else (), shared=shared,
+                                 area_wall=shared and cfg.roads_dvr_area is None, area_extra_m=cfg.roads_dvr_extra_m,
+                                 workers=min(MAX_WORKERS, max(WORKERS, cams // 2)) if shared else WORKERS,
+                                 may_write=self.fence.ok if self.fence is not None else None)
             store = self.cad.store
             self.roads.dvr.incidents = lambda: store.q(
                 "SELECT lat, lon, address FROM incidents WHERE status IN ('queued', 'pending', 'active') "
@@ -586,6 +602,16 @@ class App:
             self.roads.dvr.load_pins = lambda: json.loads(store.meta_get("dvr_pins") or "[]")
             self.roads.dvr.save_pins = lambda pins: store.meta_put("dvr_pins", json.dumps(pins))
             self.cad.dvr_pin = self.roads.dvr.pin
+        # Incident attachments (#323, sizeup/attachments.py): camera clips saved from the DVR and every transmission
+        # linked to an event, copied to the private S3 bucket (SIZEUP_ATTACHMENTS_BUCKET) and kept a year; only the
+        # lease holder writes. Without the bucket: "not configured", nothing copied.
+        from sizeup.attachments import Attachments
+        self.attachments = Attachments.from_env(self.cad.store, log=log,
+                                                may_write=self.fence.ok if self.fence is not None else None)
+        self.attachments.dvr = lambda: self.roads.dvr
+        self.attachments.camera = self.roads.camera
+        self.attachments.audio = self.clip
+        self.cad.attachments = self.attachments
         # Road projects & closures (sizeup/roadprojects.py, #185): the Thruway's and 511NY's roadwork through roads,
         # the villages' road notices (placed by the gazetteer, or listed), any WZDx feed configured; read while someone looks.
         self.roadwork = prov["roadwork"]
@@ -2200,8 +2226,20 @@ class App:
     def aws_limit_default(self) -> float:
         return float(self.cfg.stt_aws_limit_usd)
 
+    def _channel_overrides(self) -> dict:
+        """The channel choices (renamed_overrides), the old names' moved and dropped in the store too (#307)."""
+        stored = self.cad.settings.channel_overrides()
+        out = renamed_overrides(stored, self._kind)
+        if out != stored:
+            try:
+                self.cad.settings.replace_channels(out, "rename")
+                log("channel choices: moved from the old names: " + ", ".join(sorted(set(stored) - set(out))))
+            except Exception as e:  # noqa: BLE001 - never in the way: still used as moved, saved next time
+                log(f"channel choices: couldn't save the move from the old names ({type(e).__name__}: {e})")
+        return out
+
     def channels_changed(self) -> None:
-        self._chan_ov = renamed_overrides(self.cad.settings.channel_overrides(), self._kind)
+        self._chan_ov = self._channel_overrides()
         log("speech-to-text channels: " + (", ".join(f"{k} {v}" for k, v in sorted(self._chan_ov.items())) or "the defaults"))
 
     def vocabulary_suggestions(self) -> list[str]:
@@ -2261,7 +2299,7 @@ class App:
         kept (this station's own Settings overrides, audited as "hub")."""
         clean = channels.check_map(prefs)
         changed = self.cad.settings.replace_channels(clean, "hub")
-        self._chan_ov = renamed_overrides(self.cad.settings.channel_overrides(), self._kind)
+        self._chan_ov = self._channel_overrides()
         if isinstance(tones, dict) and self.cad.settings.replace_tones(tones, "hub"):
             self._apply_named_tones()
             changed = True
@@ -2996,6 +3034,7 @@ class App:
             self.tts.start()
         self.stt.start()
         threading.Thread(target=self._janitor, name="janitor", daemon=True).start()
+        self.attachments.start()                  # linked transmissions copied to the attachments bucket (#323)
         threading.Thread(target=self.cad.place_index, name="places", daemon=True).start()   # built before the first "@"
         threading.Thread(target=self._watch_fm, name="talking", daemon=True).start()
         if self.shared:
@@ -3182,6 +3221,7 @@ class App:
 
     def stop(self) -> None:
         self._stopping.set()
+        self.attachments.stop()
         for r in self.receivers:
             r.stop()
         for page in self.pagehold.flush():   # pages still in their continuation window: as they are
