@@ -473,6 +473,27 @@ def _runway_ends():
         yield end, lat, lon, bearing(lat, lon, olat, olon)      # landing on 16: heading ~150
 
 
+def _on_final(ac: Plane, agl: float, lat: float, lon: float, landing: float) -> float | None:
+    """Its distance to a runway end's threshold when lined up on that end's final: on the approach side, within the
+    final's width, tracking the landing heading, under its glide band; else None."""
+    dt = nm(lat, lon, ac.lat, ac.lon)
+    if dt > FINAL_NM or agl > GLIDE_FT_PER_NM * dt + 800:
+        return None
+    off = abs(wrap180(bearing(lat, lon, ac.lat, ac.lon) - (landing + 180)))   # the approach side
+    lateral = dt * math.sin(math.radians(min(off, 90)))
+    if off < 90 and lateral < max(0.6, 0.12 * dt) and abs(wrap180(ac.track - landing)) < 35:
+        return dt
+    return None
+
+
+def lined_up(ac: Plane, end: str | None) -> bool:
+    """Lined up on runway `end`'s final (classify()'s test), whatever matched it to that runway."""
+    agl = None if ac.altitude_ft is None else ac.altitude_ft - ELEV_FT
+    if end is None or agl is None or ac.track is None or not ac.has_position:
+        return False
+    return any(_on_final(ac, agl, lat, lon, landing) is not None for e, lat, lon, landing in _runway_ends() if e == end)
+
+
 def classify(ac: Plane, procedures: Procedures | None = None, ceiling_ft: float = CEILING_FT,
              radius_nm: float = RADIUS_NM) -> Phase:
     """One snapshot's reading, shortfinal's rules unchanged. PhaseMemory.phase() confirms it from the recent reports."""
@@ -490,12 +511,8 @@ def classify(ac: Plane, procedures: Procedures | None = None, ceiling_ft: float 
             return Phase(ARRIVING, runway=m.runway, dist_nm=m.to_go_nm, eta_s=_eta(m.to_go_nm, gs), approach=m.name)
     if agl is not None and trk is not None and (vr is None or vr < 500):
         for end, lat, lon, landing in _runway_ends():
-            dt = nm(lat, lon, ac.lat, ac.lon)
-            if dt > FINAL_NM or agl > GLIDE_FT_PER_NM * dt + 800:
-                continue
-            off = abs(wrap180(bearing(lat, lon, ac.lat, ac.lon) - (landing + 180)))   # the approach side
-            lateral = dt * math.sin(math.radians(min(off, 90)))
-            if off < 90 and lateral < max(0.6, 0.12 * dt) and abs(wrap180(trk - landing)) < 35:
+            dt = _on_final(ac, agl, lat, lon, landing)
+            if dt is not None:
                 return Phase(ARRIVING, runway=end, dist_nm=dt, eta_s=_eta(dt, gs))
     if agl is not None and trk is not None and vr is not None:
         to_field = bearing(ac.lat, ac.lon, ARP[0], ARP[1])
@@ -644,7 +661,8 @@ class PhaseMemory:
          memory is cleared (a departure misread).
       4. p is arriving, not climbing: arriving, when descending or getting closer (to the field, or along its
          approach; opening vetoes only off a published approach); after being on the field, only descending and
-         getting closer both (back to land). A first reading never past the threshold, nor on a short final
+         getting closer both, or descending lined up on a runway end's final (back to land: a tight turn-back is
+         down before the trend shows, #313). A first reading never past the threshold, nor on a short final
          (SHORT_FINAL_NM) without descending.
       5. On a runway's centreline, along it, under its band, not climbing: ground (the takeoff roll, the landing
          roll). A descended arrival only below LANDED_KT (a balked landing is not down); anything else at
@@ -853,7 +871,12 @@ class PhaseMemory:
                 past_threshold(ac.lat, ac.lon, p.runway)
                 or (p.dist_nm is not None and p.dist_nm < SHORT_FINAL_NM and not descending))
             vetoed = opening and not p.approach        # an approach may lead away before it turns in: its to-go says
-            ok = (descending and getting_closer) if from_field else (descending or getting_closer)
+            # back to land after being on the field: descending and closing in, or descending lined up on a runway
+            # end's final (a tight turn-back is down before 15 s of closing can show, #313)
+            if from_field:
+                ok = descending and (getting_closer or lined_up(ac, p.runway))
+            else:
+                ok = descending or getting_closer
             if ok and not blocked and not vetoed:
                 self._held[h] = (p, now)
                 self._departed.pop(h, None)
@@ -866,11 +889,9 @@ class PhaseMemory:
         fixed = ac.category in FIXED_WING or self._fixed.get(h, False)
         band = RUNWAY_AGL_FT if fixed else LOW_SLOW_AGL_FT
         runway = on_runway(ac.lat, ac.lon, ac.track) and (agl is None or agl < band) and not climbing
-        if runway and was_inbound and self._descended.get(h):
-            runway = ac.gs is not None and ac.gs < LANDED_KT       # a balked landing at 50 ft is not down
         tentative = False
         if runway and was_inbound and self._descended.get(h):
-            pass
+            runway = ac.gs is not None and ac.gs < LANDED_KT       # a balked landing at 50 ft is not down
         elif runway:
             moving = (ac.gs is None or ac.gs >= RUNWAY_MIN_KT) and not descending
             if fixed:
