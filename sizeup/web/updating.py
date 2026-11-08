@@ -13,7 +13,11 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 UPDATING_JSON = json.dumps({"error": "the hub is updating: back in a few seconds", "updating": True}).encode()
-UPDATING_HTML = (b"<!doctype html><meta charset=utf-8><meta http-equiv=refresh content=3><title>Updating</title>"
+# It reloads itself with location.reload(), which keeps the whole URL, the hash included (#316): a plain
+# <meta http-equiv=refresh> goes to the page's URL, and when that has a hash (/cad#settings/radios) the browser takes it
+# as a jump within the page and never asks the server again. The meta refresh stays for a browser without script.
+UPDATING_HTML = (b"<!doctype html><meta charset=utf-8><noscript><meta http-equiv=refresh content=3></noscript>"
+                 b"<title>Updating</title><script>setTimeout(function () { location.reload(); }, 3000);</script>"
                  b"<body style=\"font:16px system-ui;margin:3em;color:#333\"><p>Reconnecting&hellip; (update in progress)"
                  b"</p><p>This page reloads by itself.</p>")
 STARTING_HEALTH = json.dumps({"ok": False, "serving": False, "updating": True}).encode()

@@ -276,6 +276,8 @@ class Cad:
         self.camera_area: Callable[[], dict] | None = None
         # The camera DVR's pins (#277, sizeup/dvr.py Dvr.pin(cid, on) -> its status); the app sets it.
         self.dvr_pin: Callable[[str, bool], dict] | None = None
+        # Incident attachments (#323, sizeup/attachments.py Attachments); the app sets it. None: none here.
+        self.attachments = None
         # Settings > Data sources (#186): the hub's data pulls (sizeup/datasources.py DataSources); the app sets it.
         # None: no data sources here (GET /api/cad/datasources says so).
         self.datasources = None

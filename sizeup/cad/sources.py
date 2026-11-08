@@ -12,9 +12,11 @@ sizeup/sources/runner.py (they come here as "source_event" / "source_health" thr
                A feed event already closed, or dispatched more than MATCH_WINDOW_S ago (a first run, a lost database),
                is recorded and never makes an incident
     match      an OPEN incident (queued, pending, active; never closed or dismissed) created within MATCH_WINDOW_S of the
-               report, with no report of the same source on it. When both have a location, the same place is required
-               (street_part() then same_place: house number and street, direction and suffix; an intersection never
-               equals a numbered address), whatever units they share. A unit in common (assignments not cleared, and
+               report, with no report of the same source on it (one at the same place that has: "possibly the same", never
+               silent). When both have a location, the same place is required (street_part() then same_place: house
+               number and street, direction and suffix; an intersection never equals a numbered address), whatever
+               units they share; and when both name units, at least one in common (one building, two calls: an
+               apartment, a school), else "possibly the same". A unit in common (assignments not cleared, and
                the reports' units) never joins two reports on its own, with or without locations. Two incidents sharing units in the
                window that may not be joined are noted "possibly the same as #N" on both: a duplicate is never silent
     attach     a page attaches only to an incident a feed has. A feed event attaches to any match (always a strict
@@ -448,12 +450,18 @@ class Sources:
         bkey = nkey = None
         for inc in self.store.q(f"SELECT * FROM incidents WHERE created_at BETWEEN ? AND ? AND status IN "
                                 f"({','.join('?' * len(OPEN))})", (at - MATCH_WINDOW_S, at + MATCH_WINDOW_S, *OPEN)):
-            if inc["id"] in taken:
-                continue
-            common = units_match(units, self._units_of(inc["id"]))
+            on = self._units_of(inc["id"])
+            common = units_match(units, on)
             theirs = [x for x in (inc["address"], inc["place_address"], inc["geo_label"]) if place_key(x) is not None]
-            if here and theirs:
-                if any(same_place(location, x) for x in theirs):
+            same = here and bool(theirs) and any(same_place(location, x) for x in theirs)
+            if inc["id"] in taken:                           # this source has it already: another call there, noted
+                if not same:
+                    continue
+                score = -1
+            elif here and theirs:
+                if same and units and on and not common:     # one building, two calls (another unit, apartment...)
+                    score = -1
+                elif same:
                     score = 10 + len(common)
                 elif common:                                 # two places sharing units: never joined, never silent
                     score = -len(common)
@@ -783,7 +791,9 @@ class Sources:
                                      "AND NOT (source = ? AND ref = ?) LIMIT 1", (iid, source, ref))
                    or self.store.one("SELECT 1 AS x FROM assignments WHERE incident_id = ? LIMIT 1", (iid,))
                    or self.store.one("SELECT 1 AS x FROM events WHERE incident_id = ? AND kind IN ('note', 'dispatch', "
-                                     "'remarks', 'tones', 'attach', 'status', 'edit') LIMIT 1", (iid,)))
+                                     "'remarks', 'tones', 'attach', 'status', 'edit', 'alarm', 'prealert') LIMIT 1", (iid,))
+                   or self.store.one("SELECT 1 AS x FROM alarms WHERE incident_id = ? LIMIT 1", (iid,))
+                   or self.store.one("SELECT 1 AS x FROM radio_links WHERE incident_id = ? LIMIT 1", (iid,)))
         if touched:
             return False
         self.store.dismiss(iid, operator=label, reason=f"closed in {label}")

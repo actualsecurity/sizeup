@@ -10,8 +10,8 @@ record in atc_talkers, read back onto its Radio row as "atc" (with_atc), only wh
     the callsign    sizeup/atc.py's find_mentions (shortfinal core/callsign.py): airline telephony from HPN's operators
                     (data/atc/khpn_operators.csv), the extra spoken forms in data/atc/telephony_extra.csv and FAA JO 7340.2
                     (data/airport/airlines.csv): "JetBlue one two three four" / "jetblue twelve thirty four" -> JBU1234;
-                    N-numbers in phonetics ("November four one Delta Whiskey" -> N41DW); a shortened tail after first
-                    contact ("one delta whiskey" -> ...1DW). No callsign heard: no record, nothing labelled.
+                    N-numbers in phonetics ("November four seven Delta Quebec" -> N47DQ); a shortened tail after first
+                    contact ("seven delta quebec" -> ...7DQ). No callsign heard: no record, nothing labelled.
     the facility    "Westchester Tower" / "Ground" / "Clearance" as the speaker's own name (right after the callsign:
                     the controller) or as the one called (before it: the pilot); "contact ground" is an instruction.
     who is talking  shortfinal's speaker rule (its _speaker, extended): a controller starts with the callsign and gives an
@@ -550,7 +550,7 @@ def _same_subject(a: dict | None, b: dict | None) -> bool:
         return ha == hb
     if ca == cb:
         return True
-    for x, y in ((ca, cb), (cb, ca)):         # "...1DW" (shortened) is N41DW's
+    for x, y in ((ca, cb), (cb, ca)):         # "...7DQ" (shortened) is N47DQ's
         if x.startswith("…") and len(x) >= 4 and y.endswith(x[1:]):
             return True
     sa, sb = (a or {}).get("spoken", "").upper(), (b or {}).get("spoken", "").upper()

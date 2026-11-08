@@ -1428,3 +1428,81 @@ def test_a_feed_is_stale_by_the_hub_s_clock_not_the_station_s(tmp_path):
 
 def test_the_runner_has_no_state_rows_any_more():
     assert not hasattr(SourceRunner, "state")
+
+
+# -- the fifth review: one building, two calls ------------------------------------------------------------------------
+
+
+def _possibly(rig, a: int, b: int) -> bool:
+    ref = lambda i: f"#{rig.cad.store.incident(i)['number'] or i}"
+    return (any(x.startswith(f"Possibly the same as {ref(b)}") for x in rig.feed_lines(a))
+            and any(x.startswith(f"Possibly the same as {ref(a)}") for x in rig.feed_lines(b)))
+
+
+def test_one_building_two_calls_the_page_never_joins_the_other_call(tmp_path):
+    """An EMS call in an apartment, then our fire alarm page for the building (other units): the page makes its own
+    incident, noted; the feed's fire event then attaches to the page's, not a silent duplicate."""
+    rig = Rig(tmp_path)
+    rig.feed.put("X1", type="EMS", location="12 EXAMPLE AVE APT 7", units=("E62",), times={"dispatched": T0})
+    rig.poll()
+    [ems] = rig.incidents()
+    rig.at(60)
+    page = rig.page()                                      # E60, L31 at 12 Example Avenue
+    assert page["id"] != ems["id"] and _possibly(rig, page["id"], ems["id"])
+    rig.at(90)
+    rig.feed.put("F1", type="ALARM/COMM", location="12 EXAMPLE AVE", units=("E60", "L31"), times={"dispatched": T0 + 55})
+    rig.poll()
+    assert len(rig.incidents()) == 2
+    assert rig.cad.store.one("SELECT incident_id FROM source_reports WHERE ref = 'F1'")["incident_id"] == page["id"]
+
+
+def test_one_building_two_calls_after_a_feed_outage(tmp_path):
+    """The reverse: the page first (feed down), then the feed's EMS event for an apartment there: its own incident,
+    noted; the feed's fire event attaches to the page's."""
+    rig = Rig(tmp_path)
+    rig.feed.outage("failing", "x", raise_=True)
+    rig.poll()
+    page = rig.page()
+    rig.at(600)
+    rig.feed.recover()
+    rig.feed.put("X1", type="EMS", location="12 EXAMPLE AVE APT 7", units=("E62",), times={"dispatched": T0 + 30})
+    rig.poll()
+    ems = rig.incidents()[-1]
+    assert ems["id"] != page["id"] and _possibly(rig, page["id"], ems["id"])
+    rig.feed.put("F1", type="ALARM/COMM", location="12 EXAMPLE AVE", units=("E60", "L31"), times={"dispatched": T0})
+    rig.at(610)
+    rig.poll()
+    assert len(rig.incidents()) == 2
+    assert rig.cad.store.one("SELECT incident_id FROM source_reports WHERE ref = 'F1'")["incident_id"] == page["id"]
+
+
+def test_a_second_event_at_a_place_the_source_already_has_is_noted_not_silent(tmp_path):
+    rig = Rig(tmp_path)
+    rig.feed.put("X1", type="EMS", location="12 EXAMPLE AVE APT 7", units=("E62",), times={"dispatched": T0})
+    rig.poll()
+    rig.at(60)
+    rig.feed.put("Y1", type="ALARM/COMM", location="12 EXAMPLE AVE", units=("E60",), times={"dispatched": T0 + 50})
+    rig.poll()
+    x, y = rig.incidents()
+    assert _possibly(rig, x["id"], y["id"])
+
+
+def test_a_feed_closure_never_dismisses_an_incident_with_an_alarm_or_radio(tmp_path):
+    rig = Rig(tmp_path)
+    rig.feed.put("A1", type="ALARM", location="12 Example Ave", units=("E60",), times={"dispatched": T0})
+    rig.poll()
+    [a] = rig.incidents()
+    with rig.cad.store.tx() as db:
+        db.execute("INSERT INTO alarms (traffic_id, at, end, created_at, updated_at, level, emergency, text, channel, "
+                   "unit, drill, source, subject, incident_id) VALUES ('t9', ?, ?, ?, ?, 'alarm', 1, 'mayday', 'FG1', "
+                   "'E60', 0, '', 'mayday', ?)", (T0, T0, T0, T0, a["id"]))
+    rig.at(600)
+    rig.feed.change("A1", closed=True, times={"in_service": T0 + 590})
+    rig.poll()
+    assert rig.cad.store.incident(a["id"])["status"] == "queued"
+
+
+def test_a_bad_event_s_error_never_names_its_units():
+    with pytest.raises(SourceError) as e:
+        FeedEvent("county", "A1", unit_times={"SECRET9": {"bogus": T0}}).check()
+    assert "SECRET9" not in str(e.value) and "bogus" not in str(e.value)

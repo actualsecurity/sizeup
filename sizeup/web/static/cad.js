@@ -889,7 +889,7 @@ function noIdChip(t) {
 // ---- who is talking on HPN Tower (#252, sizeup/atc_talkers.py) ----------------------------------------------------
 // An airband row's "atc": the callsign heard (speech-derived, never a radio ID), matched to ADS-B, and who said it, as a
 // chip like a unit's: "TWR → JBU1234 · A320 ✓" (the tower to it), "JBU1234 · A320 ✓" (it speaking), "probable: ..." (one
-// near match, unique), "heard: N41DW" (not on ADS-B). The statuses wear the radio IDs' colours (confirmed, guessed,
+// near match, unique), "heard: N47DQ" (not on ADS-B). The statuses wear the radio IDs' colours (confirmed, guessed,
 // heard). A row with no callsign heard has no record: nothing labelled. Settings > System > ATC talkers turns it off.
 const ATC_STATUS = { confirmed: "src-confirmed", probable: "src-guessed", heard: "src-heard" };
 const ATC_WHAT = { confirmed: "Confirmed: ADS-B has this exact callsign near HPN", probable: "Probable: one near match on ADS-B "

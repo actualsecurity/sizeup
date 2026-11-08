@@ -178,7 +178,7 @@ class FeedEvent:
         for u, t in self.unit_times.items():
             if not isinstance(u, str) or not u.strip() or len(u) > MAX_UNIT_LEN:
                 raise SourceError(f"unit_times: unit codes of at most {MAX_UNIT_LEN} characters")
-            _times(t, f"unit_times[{u!r}]")
+            _times(t, "unit_times")                 # never the unit's code: the station logs this text
         if not isinstance(self.comments, (tuple, list)) or len(self.comments) > MAX_COMMENTS:
             raise SourceError(f"comments: up to {MAX_COMMENTS}")
         for c in self.comments:
@@ -243,9 +243,9 @@ def _times(t: Mapping[str, float], where: str) -> None:
         raise SourceError(f"{where}: at most {len(TIME_KEYS)} times")
     for k, v in t.items():
         if k not in TIME_KEYS:
-            raise SourceError(f"{where}: {k!r} is not one of {', '.join(TIME_KEYS)}")
+            raise SourceError(f"{where}: keys are {', '.join(TIME_KEYS)}")
         if not _when(v):
-            raise SourceError(f"{where}[{k!r}]: epoch seconds")
+            raise SourceError(f"{where}: epoch seconds")
 
 
 @dataclass(frozen=True)
