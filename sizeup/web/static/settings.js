@@ -1779,6 +1779,7 @@ async function sPushes(card) {
     sBtn("Save", "This server, from Settings (empty: the default)", () => sPost("notify", { action: "server", key: "server", value: srv.value.trim() }, "ntfy server saved"), "primary"),
     el("span", "dim small", `In effect: ${d.server.value} (${S_PUSH_FROM[d.server.source] || d.server.source})`));
   kids.push(sRow);
+  if (S.data.alert_mutes) kids.push(...sMutes(S.data.alert_mutes));
   card.hidden = false;
   if (location.hash === "#settings/system/pushes" && S.pushScrolled !== location.hash) {     // from Settings > Health
     S.pushScrolled = location.hash;
@@ -1790,6 +1791,27 @@ async function sPushes(card) {
     + "and all clears. Only one topic set: everything goes to it. A name set here wins over SSM and the config file; empty uses "
     + `them. Never Tapout's topics (${d.forbidden.join(", ")}): refused. ${d.min_len} to ${d.max_len} letters, digits, - and _; `
     + "ntfy topics are public by name, so make them long and random. Only admins see the names.")), ...kids);
+}
+// Health alerts muted (#340, health.py MUTE_KINDS): still on Settings > Health, not pushed (nor their recovery).
+const S_MUTE_FOR = [["", "Until unmuted"], ["1", "1 h"], ["24", "24 h"], ["168", "7 days"]];
+function sMutes(m) {
+  const head = el("div", "row");
+  head.append(el("b", "s-eta-l", "Mute alerts"), el("span", "dim small", `${m.kinds.filter((k) => k.muted).length} muted`));
+  if (window.Help && Help.info) head.append(Help.info("A muted alert still shows on Settings > Health; it and its recovery aren't pushed."));
+  const rows = m.kinds.map((k) => {
+    const [lab, cb] = sCheck(k.label, k.muted, k.muted ? "Unmute: pushed again" : "Mute: Health only, no push");
+    const sel = sSelect(S_MUTE_FOR, "24", null, `${k.label}: mute for`);
+    cb.disabled = sel.disabled = !canDo("admin");
+    cb.addEventListener("change", () => sPost("alert_mutes", cb.checked
+      ? { action: "mute", key: k.key, hours: sel.value ? Number(sel.value) : null }
+      : { action: "unmute", key: k.key }, `${k.label}: ${cb.checked ? "muted" : "pushed"}`));
+    const row = el("div", "row");
+    row.append(lab, el("span", "spacer"), k.muted
+      ? sState(k.until ? `muted until ${fmtTime(k.until)}` : "muted")
+      : sel);
+    return row;
+  });
+  return [head, ...rows];
 }
 async function sPushTest(card, k) {
   const op = operator();

@@ -196,8 +196,9 @@ class ErrorWatch:
     SECTION ({} without); db: hub.sqlite's MonitorDb (get / put), where the notices' state is kept."""
 
     def __init__(self, notifier=None, settings: Callable[[], dict] | None = None, clock: Callable[[], float] = time.time,
-                 log: Callable[[str], None] = print, click: str = "", db=None):
+                 log: Callable[[str], None] = print, click: str = "", db=None, muted: Callable[[], bool] | None = None):
         self.notifier, self.settings, self.clock, self.log, self.click = notifier, settings or (lambda: {}), clock, log, click
+        self.muted = muted or (lambda: False)            # muted in Settings > System > Push notifications (#340)
         self.db = db
         self.sigs: dict[tuple, _Sig] = {}
         self.times: deque = deque(maxlen=MAX_ALL)       # every error line in the last WINDOW_S: (at, signature)
@@ -432,9 +433,14 @@ class ErrorWatch:
             self._save()
         if out:
             n = self.notifier
-            on = cfg["on"] and n is not None and getattr(n, "enabled", False)
+            try:
+                mute = bool(self.muted())
+            except Exception:  # noqa: BLE001 - the settings unreadable: push as usual
+                mute = False
+            on = cfg["on"] and not mute and n is not None and getattr(n, "enabled", False)
             for title, body in out:
                 self.log(f"errors: {title}" + ("" if on else " (not pushed: " + ("off in Settings" if not cfg["on"]
+                                                                                   else "muted" if mute
                                                                                    else "no status topic") + ")"))
                 if on:
                     back = title.startswith("Hub errors back")

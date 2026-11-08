@@ -274,6 +274,13 @@ it changes nothing.
   "Station silent 4 min · Port Chester FD · last heard 14:32", "South 2 not running · PCFD · SDR 101 on South 2";
   the push opens the panel (with `[cloud] public_url` set).
 * Alerts and 24 h of their history are in `hub.sqlite`: a redeploy neither forgets an alert nor pushes it again.
+* **Flapping (#340).** "Recovered" is pushed only once an alert has stayed clear 15 min (30 min once it came back 3
+  times within an hour). Back before then, it is the same episode: no second push, no "Recovered", one row in the
+  history. A push for a flapping one says so ("flapping, back 4× in 1 h"); its "Recovered" says how often it came
+  back. E.g. an ADS-B dongle that wedges every 15 min for hours: one push, then one "Recovered" once it settles.
+* **Muted (#340).** Settings → System → Push notifications → Mute alerts (admins): each alert kind (ADS-B, whisper,
+  channel jobs, P25 trunk silent, station silent, hub errors ...), until unmuted or for 1 h / 24 h / 7 days. A muted
+  alert still shows on Health ("Muted"); it and its recovery aren't pushed. Audited as System. Default: none.
 
 **The panel:** Settings → **Health**, a tab of its own shown to admins on the hub (also the Station row in
 Settings → Radios → Receivers, for an admin; the pushes' old link `#settings/system/health` lands there): links

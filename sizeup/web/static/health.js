@@ -63,12 +63,14 @@ const StationHealth = (() => {
   const sevChip = (s) => el("span", `chip ${s === "critical" ? "hl-bad" : "hl-warn"}`, s === "critical" ? "Critical" : "Warning");
 
   // The alerts now: severity, what, since when (and how long), where, and what happens at recovery.
-  function alertRows(alerts, n) {
+  function alertRows(alerts, n, th = {}) {
     return alerts.map((a) => {
       const r = el("div", `hb-row ${a.severity === "critical" ? "critical" : "warning"}`);
       const where = whoText(a.who);
-      const rec = !n.on ? "Not pushed (push off)" : a.pushed ? "Pushed" : "Not pushed yet";
-      const det = el("span", "hb-detail dim small", [where, rec].filter(Boolean).join(" · "));
+      const rec = a.muted ? (a.muted_until ? `Muted until ${when(a.muted_until)}` : "Muted")
+        : !n.on ? "Not pushed (push off)" : a.pushed ? "Pushed" : "Not pushed yet";
+      const flap = th.flap_n && a.flaps >= th.flap_n ? `flapping, back ${a.flaps}× in 1 h` : "";
+      const det = el("span", "hb-detail dim small", [where, rec, flap].filter(Boolean).join(" · "));
       det.title = n.on ? "Pushed to the status topic; a recovery notice follows when it clears" : "Push off: it clears here and in the log only";
       r.append(sevChip(a.severity), el("b", "hb-title", a.title), el("span", "hb-text", a.text),
         el("span", "hb-when dim", `since ${when(a.since)} · ${longDur(serverNow() - a.since)}`), det);
@@ -99,7 +101,7 @@ const StationHealth = (() => {
     }
     kids.push(el("h3", "hl-sub", "Alerts now"),
       ...(d.alerts.length ? [el("div", "hl-alerts")] : [el("p", "dim small", "None")]));
-    if (d.alerts.length) kids[kids.length - 1].append(...alertRows(d.alerts, n));
+    if (d.alerts.length) kids[kids.length - 1].append(...alertRows(d.alerts, n, th));
     if ((h.hints || []).length) {
       const box = el("div", "hl-hints");
       for (const x of h.hints) box.append(el("p", "notice info", `${x.channel}: ${x.text}`));
@@ -259,7 +261,8 @@ const StationHealth = (() => {
     const thr = el("p", "dim small", `Alert at: silent ${th.silent_min} min · behind ${th.behind_min} min · whisper / trunk-recorder down ${th.down_min} min · `
       + `dongle job down ${Math.round(th.job_grace_s || 60)} s · outbox ${th.outbox_min} min · disk ${th.disk_pct}%`
       + (th.trunk ? ` · P25 silent ${th.trunk.day_min} min (night ${th.trunk.night_min})` : "") + ` · 1 push / ${th.repeat_min} min`);
-    const rules = "Each alert is pushed at most once per interval, plus its recovery."
+    const rules = "Each alert is pushed at most once per interval, plus its recovery"
+      + (th.settle_min ? ` once clear ${th.settle_min} min (${th.settle_flapping_min} min if back ${th.flap_n}× in 1 h; back sooner: one episode, no push).` : ".")
       + (th.trunk ? ` P25 trunk silent (critical): no call on any talkgroup for ${th.trunk.day_min} min (${th.trunk.night_min} min into the night, 00-06), `
         + `longer when ${th.trunk.factor}× the system's usual gap for that time of day is (learned from ${th.trunk.gaps_min}+ gaps), `
         + `or the control channel lost ${th.trunk.cc_lost_min} min. One channel or talkgroup silent is only a hint` : "")
