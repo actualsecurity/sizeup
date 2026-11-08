@@ -333,7 +333,7 @@ def aircraft_doing(ev: dict) -> str:
 
 
 def aircraft_who(ev: dict) -> str:
-    """"N41DW", "JBU123 (N123JB)": its callsign, with its registration when that differs."""
+    """"N47DQ", "JBU123 (N123JB)": its callsign, with its registration when that differs."""
     label = aircraft_label(ev)
     if ev.get("callsign") and ev.get("reg") and ev["reg"] != ev["callsign"]:
         label += f" ({ev['reg']})"

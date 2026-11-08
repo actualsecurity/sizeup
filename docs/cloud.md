@@ -1809,8 +1809,8 @@ the emergency watch reads the primary feed every 15 s (`[aircraft] alarms = fals
   FAA registry loaded, which adds the make and model):
 
   ```
-  AIRCRAFT EMERGENCY: SQUAWK 7700 (EMERGENCY) · N41DW (SR22) on ADS-B (public data)
-  14:38:30 · N41DW, SR22, Cirrus Design Corp SR22 · squawk 7700 (emergency) · 900 ft, descending 500 ft/min ·
+  AIRCRAFT EMERGENCY: SQUAWK 7700 (EMERGENCY) · N47DQ (SR22) on ADS-B (public data)
+  14:38:30 · N47DQ, SR22, Cirrus Design Corp SR22 · squawk 7700 (emergency) · 900 ft, descending 500 ft/min ·
   1.9 nm SE of HPN · arriving HPN on the ILS 34, 1.4 nm to go · via adsb.lol. From public ADS-B data, not an
   official notification.
   ```
@@ -1845,7 +1845,7 @@ What it says:
 
 | | |
 |---|---|
-| title | AIRCRAFT EMERGENCY · N41DW · squawk 7700 (emergency) |
+| title | AIRCRAFT EMERGENCY · N47DQ · squawk 7700 (emergency) |
 | Aircraft | the callsign (registration) · the type designator, the FAA registry's make and model |
 | Operator | the airline its callsign names, or a company's / government's from the feeds; never a person's name |
 | Emergency | squawk 7500 (hijack) / 7600 (radio failure) / 7700 (emergency), or the aircraft's own status |
