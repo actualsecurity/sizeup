@@ -256,6 +256,15 @@ class Config:
     roads_dvr_max_cameras: int = 12
     roads_dvr_always: tuple[str, ...] = ()
     roads_dvr_dir: str = ""
+    # #322: on shared storage (EFS at dvr_dir) the response area's cameras around the clock and a 12 h window; "auto":
+    # the mount says. Which cameras: the camera wall's area (Settings > System: our fire districts plus its margin_m,
+    # its include / exclude) and dvr_extra_m beyond that margin; dvr_area: a polygon instead (an override, rarely)
+    roads_dvr_shared: str = "auto"                     # auto | on | off
+    roads_dvr_area: tuple | None = None                # None: the camera wall's area; () none; a ring of (lon, lat)
+    roads_dvr_extra_m: float = 1000.0
+    roads_dvr_shared_window_s: float = 43200.0
+    roads_dvr_shared_max_bytes: int = 25 * 1024 ** 3
+    roads_dvr_shared_max_cameras: int = 20
     # [roadwork] (sizeup/roadprojects.py, #185): road projects & closures for the maps and the incident view: the
     # Thruway's and 511NY's roadwork (through [roads]), the capital programs (Thruway, NYSDOT, CTDOT), the villages'
     # road notices; 511NY's WZDx (the CARS API, with [roads]' username and password) and any other public WZDx feed.
@@ -723,7 +732,9 @@ def _roads(data: dict) -> dict:
     rd = _take(raw, "roads", {"enabled", "ny511", "bbox", "cameras_every_min", "events_every_s", "signs_every_min",
                               "events_url", "signs_url", "ny511_hub", "carshub_imagery", "thruway", "county",
                               "stream_max", "wall_streams", "dvr", "dvr_window_min", "dvr_max_gb", "dvr_near_m",
-                              "dvr_linger_min", "dvr_max_cameras", "dvr_always", "dvr_dir"})
+                              "dvr_linger_min", "dvr_max_cameras", "dvr_always", "dvr_dir", "dvr_shared", "dvr_area",
+                              "dvr_shared_window_min", "dvr_shared_max_gb", "dvr_shared_max_cameras",
+                              "dvr_extra_m"})
     flags = {k: rd.get(k, d) for k, d in (("enabled", True), ("ny511", True), ("thruway", True), ("county", True),
                                           ("carshub_imagery", True))}
     if not all(isinstance(x, bool) for x in flags.values()):
@@ -771,6 +782,15 @@ def _roads(data: dict) -> dict:
     dvr_dir = rd.get("dvr_dir", "")
     if not isinstance(dvr_dir, str):
         raise ConfigError("roads.dvr_dir: a folder (\"\" = the state folder's dvr/)")
+    shared = rd.get("dvr_shared", "auto")
+    shared = {True: "on", False: "off"}.get(shared, shared) if isinstance(shared, bool) else shared
+    if shared not in ("auto", "on", "off"):
+        raise ConfigError('roads.dvr_shared: "auto" (the mount says: EFS / NFS), true or false')
+    sh_window = num("dvr_shared_window_min", 720, 10, 2880, "minutes kept per camera on shared storage") * 60.0
+    sh_gb = num("dvr_shared_max_gb", 25, 0.5, 2000, "gigabytes for every camera's recording on shared storage")
+    sh_max = num("dvr_shared_max_cameras", 20, 1, 64, "cameras recorded at once on shared storage")
+    extra = num("dvr_extra_m", 1000, 0, 5000, "metres beyond the camera wall's margin still recorded on shared storage")
+    area = _dvr_area(rd.get("dvr_area", None))
     urls = {}
     for k in ("events_url", "signs_url", "ny511_hub"):
         u = str(rd.get(k, "")).strip()
@@ -787,7 +807,36 @@ def _roads(data: dict) -> dict:
                 roads_stream_max=smax, roads_wall_streams=wall, roads_dvr=dvr, roads_dvr_window_s=float(dvr_window),
                 roads_dvr_max_bytes=int(dvr_gb * 1024 ** 3), roads_dvr_near_m=float(dvr_near),
                 roads_dvr_linger_s=float(dvr_linger), roads_dvr_max_cameras=int(dvr_max), roads_dvr_always=tuple(always),
-                roads_dvr_dir=dvr_dir.strip(), **urls)
+                roads_dvr_dir=dvr_dir.strip(), roads_dvr_shared=shared, roads_dvr_area=area, roads_dvr_extra_m=float(extra),
+                roads_dvr_shared_window_s=float(sh_window), roads_dvr_shared_max_bytes=int(sh_gb * 1024 ** 3),
+                roads_dvr_shared_max_cameras=int(sh_max), **urls)
+
+
+def _dvr_area(raw) -> tuple:
+    """[roads] dvr_area: [west, south, east, north], or a polygon [[lon, lat], ...] (3 to 200 points), or [] for none;
+    not given: None (the camera wall's area, Settings > System, governs it). A ring of (lon, lat)."""
+    if raw is None:
+        return None
+    bad = ConfigError("roads.dvr_area: [west, south, east, north] or [[lon, lat], ...] (3 to 200 points) in our "
+                      "part of the world, or [] for none")
+    if not isinstance(raw, list):
+        raise bad
+    if not raw:
+        return ()
+    num = lambda v: isinstance(v, (int, float)) and not isinstance(v, bool)    # noqa: E731
+    if len(raw) == 4 and all(num(v) for v in raw):
+        w, s, e, n = (float(v) for v in raw)
+        if not (w < e and s < n):
+            raise bad
+        pts = ((w, s), (e, s), (e, n), (w, n))
+    elif 3 <= len(raw) <= 200 and all(isinstance(p, list) and len(p) == 2 and all(num(v) for v in p) for p in raw):
+        pts = tuple((float(p[0]), float(p[1])) for p in raw)
+    else:
+        raise bad
+    if not all(-180 <= x <= 180 and -90 <= y <= 90 for x, y in pts) or max(x for x, _ in pts) - min(x for x, _ in pts) > 3 \
+            or max(y for _, y in pts) - min(y for _, y in pts) > 3:
+        raise bad
+    return pts
 
 
 def _roadwork(data: dict) -> dict:

@@ -255,6 +255,12 @@ def test_a_high_profile_sps_with_a_scaling_matrix_is_read_past_and_judged():
         sp = hlsseg.parse_sps(sps_high(lists))
         assert sp == {"log2_max_frame_num": 4, "gaps_allowed": False, "separate_colour_plane": 0, "frame_mbs_only": 1,
                       "width": 480, "height": 272}, lists
+    # log2_max_frame_num over 16 (the spec's limit): a malformed SPS, not judged by (no nonsense lost counts)
+    bad = b"\x67" + (Bits().u(8, 66).u(8, 0xC0).u(8, 30).ue(0).ue(13).ue(2).ue(1).u(1, 0)
+                     .ue(21).ue(14).u(1, 1).u(1, 1).u(1, 0).u(1, 0)).rbsp()
+    assert hlsseg.parse_sps(bad) is None
+    assert hlsseg.parse_sps(b"\x67" + (Bits().u(8, 66).u(8, 0xC0).u(8, 30).ue(0).ue(12).ue(2).ue(1).u(1, 0)
+                                       .ue(21).ue(14).u(1, 1).u(1, 1).u(1, 0).u(1, 0)).rbsp())["log2_max_frame_num"] == 16
     cc: dict = {}
     body = PAT + PMT
     es = [b"\x00\x00\x00\x01" + n for n in (sps_high(), pps(), slice_nal(True, 0))]

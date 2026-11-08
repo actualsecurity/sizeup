@@ -45,7 +45,8 @@ RUN set -eu; \
     chmod 0755 /usr/local/bin/cloudflared; \
     cloudflared --version
 
-RUN useradd --system --uid 10001 --home-dir /data --shell /usr/sbin/nologin sizeup \
+RUN groupadd --system --gid 10001 sizeup \
+    && useradd --system --uid 10001 --gid 10001 --home-dir /data --shell /usr/sbin/nologin sizeup \
     && mkdir -p /data && chown sizeup:sizeup /data \
     && mkdir -p /run/sizeup-shared && chown sizeup:sizeup /run/sizeup-shared
 

@@ -524,7 +524,7 @@ window.MapLayers = (() => {
       panel.append(list);
       for (const g of this.groups) { const el = g.top ? groupPanel(g) : null; if (el) panel.append(el); }
       if (!d) this.panel.append(h("div", "dim small", "Loading…"));
-      else if (!d.configured) this.panel.append(h("div", "dim small", d.note ? d.note[0].toUpperCase() + d.note.slice(1) : "Highway layers off"));
+      else if (!d.configured) this.panel.append(h("div", "dim small", /^highway layers off/i.test(d.note || "") ? d.note[0].toUpperCase() + d.note.slice(1) : "Highway layers off: " + (d.note || "not configured")));
       if (d && !d.highway_places) this.panel.append(h("div", "dim small", "Mileposts, exits: not loaded"));
       for (const s of (d && d.sources) || []) {                   // each source that is on, and when it last read
         if (!s.configured) continue;

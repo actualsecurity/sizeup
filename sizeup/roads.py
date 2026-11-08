@@ -53,8 +53,8 @@ Both at once: 511NY, when it is on, wins per item: a Thruway event within DEDUPE
 of a 511NY one is left out, and a Thruway sign within SIGN_DEDUPE_M (150 m) of a 511NY one that says the same
 thing (the same direction too, when both give one) is one sign (_merged). Cameras the other way round: ours
 first, a CARS-Hub camera only where we have none; one camera listed twice, by two sources or by one, is listed once
-(#320, camera_match: the same stream, an id inside the other's, the same name at the same road and milepost, or two
-sources' records at the same place), its other ids naming it (Roads.alias). Every item carries its "source" ("511NY" | "Thruway" |
+(#320, camera_match: the same stream, an id inside the other's, the same overlay on both stills, the same name at the
+same road and milepost, or two sources' records at the same place), its other ids naming it (Roads.alias). Every item carries its "source" ("511NY" | "Thruway" |
 "County"), shown on the map. The feeds are statewide, so only our area is kept (bbox: Port Chester, Rye Brook and
 the mutual-aid neighbours with a margin). Each provider has its own schedule and backoff (refused credentials
 wait 30 min, a 429 5 min, anything else 1 min doubling to 15, never under the feed's floor), and one disk cache
@@ -120,6 +120,7 @@ cad.place_providers.
 
 from __future__ import annotations
 
+import base64
 import json
 import math
 import queue
@@ -137,7 +138,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote, urlsplit
 from urllib.request import Request, urlopen
 
-from sizeup import hlsseg
+from sizeup import camoverlay, hlsseg
 from sizeup.geo.places import ROUTES          # each highway's positive direction (NB / EB: the mileage rises that way)
 
 SOURCE = "511NY"
@@ -1144,11 +1145,16 @@ def same_camera(a: dict, b: dict, within_m: float = CAMERA_MATCH_M) -> bool:
 #   name    the same name once its milepost, route, direction and filler words are left out and the street words spelled
 #           out, facing the same way (a direction on one side only is not), on the same road, within CAMERA_NAME_M and
 #           (one source's mileposts) CAMERA_MILE_MI;
+#   overlay the same overlay bar on both stills (sizeup/camoverlay.py: the camera's DOT name burned into the picture),
+#           on the same road within CAMERA_OVERLAY_M, not facing different ways: the CARS-Hub's two records of one
+#           camera can disagree on the name and the milepost ("at" an exit and "north of" it, 0.4 mile apart) and
+#           share nothing else (Roads._same_overlay; known once the hub has fetched both stills);
 #   near    from two sources only: same_camera for a CARS-Hub one, else DEDUPE_M (as before).
 # One is kept (Roads._merge_cameras): in service, then live video, then the fresher still (both images' times when the
 # hub has both, else the faster cadence), then ours first. The one kept stays
 # kept until another beats it on those (sticky): its id is what the DVR records under and a dispatcher's Keep names.
 CAMERA_NAME_M = 300.0
+CAMERA_OVERLAY_M = 2000.0        # the same overlay on two stills: one camera, on the same road and this close (#320)
 CAMERA_MILE_MI = 0.2
 CAMERA_FRESHER_S = 300.0         # a still this much newer is the fresher one
 STREAM_NAME = re.compile(r"[A-Za-z0-9_-]{3,64}")
@@ -1877,6 +1883,8 @@ class Roads:
         self._cam_kept: dict[str, str] = {}           # camera id -> the id kept for its camera at the last merge (#320)
         self._alias: dict[str, str] = {}              # a merged-away camera id -> the id kept for its camera
         self._cam_group_cache: tuple[int, list[list[str]]] | None = None   # (the lists' hash, the groups' ids)
+        self._overlay: dict[str, tuple[int, int, bytes]] = {}   # camera id -> its still's overlay (camoverlay), when seen
+        self._overlay_rev = 0
         self._streams: dict[str, dict] = {}           # camera id -> {last (playlist request), base (the stream's folder)}
         self._segments: OrderedDict[str, dict] = OrderedDict()   # "cid/name" -> {body, ctype, fetched, kept, ...}
         self._segment_locks: dict[str, list] = {}               # "cid/name" -> [lock, users]: one fetch at a time
@@ -2151,6 +2159,10 @@ class Roads:
                     p.status[feed].update(at=at, n=len(items), next=at + p.every[feed], etag=str(f.get("etag") or ""),
                                           modified=str(f.get("modified") or ""),
                                           published=f.get("published") if isinstance(f.get("published"), (int, float)) else None)
+            for cid, v in (doc.get("overlays") or {}).items():     # (#320) the stills' overlays seen: a restart keeps them
+                if CAMERA_ID.fullmatch(str(cid)) and isinstance(v, list) and len(v) == 3:
+                    self._overlay[cid] = (int(v[0]), int(v[1]), base64.b64decode(str(v[2])))
+            self._overlay_rev += 1
             self._changed()
         except (OSError, ValueError, TypeError, AttributeError) as e:
             self.log(f"roads: cache {self.cache.name} not read ({type(e).__name__}); fetching afresh")
@@ -2161,7 +2173,8 @@ class Roads:
         doc = {"bbox": list(self.bbox),
                "providers": {p.name: {f: {"at": p.status[f]["at"], "items": p.data[f], "etag": p.status[f]["etag"],
                                           "modified": p.status[f]["modified"], "published": p.status[f]["published"]}
-                                      for f in FEEDS} for p in self.providers}}
+                                      for f in FEEDS} for p in self.providers},
+               "overlays": {cid: [w, rows, base64.b64encode(bits).decode()] for cid, (w, rows, bits) in list(self._overlay.items())}}
         try:
             self.cache.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.cache.with_suffix(".tmp")
@@ -2270,8 +2283,9 @@ class Roads:
         the grouping is the quadratic part; a rev moves for much else). A record joins the first group with one it
         matches, and only if it matches every record of its own source there directly: two of one source are never one
         camera through a third."""
-        sig = hash(tuple((p.name, tuple((c["id"], c.get("name"), c.get("road"), c.get("dir"), c.get("mile"), c["lat"], c["lon"],
-                                         c.get("url"), c.get("video")) for c in p.data["cameras"])) for p in order))
+        sig = hash((self._overlay_rev,) + tuple((p.name, tuple((c["id"], c.get("name"), c.get("road"), c.get("dir"), c.get("mile"),
+                                                                 c["lat"], c["lon"], c.get("url"), c.get("video"))
+                                                                for c in p.data["cameras"])) for p in order))
         cached = self._cam_group_cache
         if cached is not None and cached[0] == sig:
             ids: dict[str, tuple[dict, str]] = {}
@@ -2288,9 +2302,10 @@ class Roads:
             return km(a["lat"], a["lon"], b["lat"], b["lon"]) * 1000 <= DEDUPE_M
 
         def fits(it: dict, pn: str, g: list) -> bool:
-            if not any(camera_match(it, o, w == pn, lambda a, b, w=w: near(a, b, pn, w)) for o, w in g):
+            if not any(camera_match(it, o, w == pn, lambda a, b, w=w: near(a, b, pn, w)) or self._same_overlay(it, o)
+                       for o, w in g):
                 return False
-            return all(camera_match(it, o, True) for o, w in g if w == pn)
+            return all(camera_match(it, o, True) or self._same_overlay(it, o) for o, w in g if w == pn)
         for p in order:
             for it in p.data["cameras"]:
                 if it["id"] in seen:
@@ -2303,6 +2318,28 @@ class Roads:
                     g.append((it, p.name))
         self._cam_group_cache = (sig, [[c["id"] for c, _ in g] for g in groups])
         return groups
+
+    def _same_overlay(self, a: dict, b: dict) -> bool:
+        """Both stills carry the same overlay (the camera's DOT name), on the same road, within CAMERA_OVERLAY_M and not
+        facing different ways (when both say)."""
+        sa, sb = self._overlay.get(a["id"]), self._overlay.get(b["id"])
+        if sa is None or sb is None or not camoverlay.same(sa, sb):
+            return False
+        da, db = cam_dir(a.get("dir") or a.get("name", "")), cam_dir(b.get("dir") or b.get("name", ""))
+        return (bool(road_key(a)) and road_key(a) == road_key(b) and not (da and db and da != db)
+                and km(a["lat"], a["lon"], b["lat"], b["lon"]) * 1000 <= CAMERA_OVERLAY_M)
+
+    def _note_overlay(self, cid: str, ctype: str, body: bytes) -> None:
+        """A fresh still's overlay kept (#320): a new one, or one that changed, groups the cameras again. A still with
+        none (a placeholder, a JPEG) leaves the last one known: what it said is still what the camera is."""
+        sig = camoverlay.overlay(body) if ctype == "image/png" else None
+        if sig is None:
+            return
+        old = self._overlay.get(cid)
+        self._overlay[cid] = sig
+        if not camoverlay.same(old, sig):
+            self._overlay_rev += 1
+            self._changed()
 
     def _cam_rank(self, c: dict) -> tuple:
         """What makes one record of a camera better than another, before the stills' times: in service, then live video,
@@ -2752,6 +2789,7 @@ class Roads:
                     self._images.pop(cid, None)
                     return self._down_answer(cid, cam)
                 self._note_image(cid, True, taken, now)
+                self._note_overlay(cid, ctype, body)
                 hit = {"body": body, "ctype": ctype, "taken": taken, "fetched": now}
                 self._images[cid] = hit
                 self._images.move_to_end(cid)
@@ -2945,7 +2983,8 @@ class Roads:
                 hit = self._segments.get(key)
                 if hit and self.clock() - hit["fetched"] < STREAM_SEG_TTL_S:
                     return hit
-                retry = self._seg_retry.get(key)
+                with self._stream_lock:
+                    retry = self._seg_retry.get(key)
                 if retry is not None and self.clock() < retry[0]:
                     raise ValueError(f"{retry[1]}; asked again in {retry[0] - self.clock():.0f} s")
                 first_bad = False
@@ -2956,7 +2995,8 @@ class Roads:
                         if code != 200 or not body:
                             raise ValueError(f"HTTP {code}")
                         hit = self._keep_segment(cid, name, headers, body, self.clock())
-                        self._seg_retry.pop(key, None)
+                        with self._stream_lock:
+                            self._seg_retry.pop(key, None)
                         return hit
                     except hlsseg.Bad as e:
                         if attempt == 1:

@@ -6,6 +6,10 @@ What is recorded, on demand only (Dvr.wanted, at most max_cameras at once, in th
   always    [roads] dvr_always: camera ids recorded all the time
   incident  an open CAD event's cameras: the ones just before / at / after it along the road (Roads.cameras_for)
             and any within dvr_near_m as the crow flies
+  always    (#322) on shared storage only: every camera with video in our response area, around the clock: the
+            camera wall's area (Settings > System, Roads.area_rows: our fire districts, its margin_m, its include /
+            exclude) and up to area_extra_m ([roads] dvr_extra_m) beyond that margin; [roads] dvr_area, a polygon,
+            only as an override
   pinned    a dispatcher's "Keep" in the viewer (POST /api/cad/cameras/<id>/dvr/pin): PIN_S (24 h) or until unpinned
             (kept in the CAD store's meta, so a deploy keeps the pins)
   open      a camera someone is watching live, and for linger_s after the last viewer closed
@@ -41,11 +45,22 @@ HTTP (behind Cloudflare Access with the rest of /api/cad; nothing here is public
 A deploy (sizeup/handoff.py): the recordings are on the task's ephemeral disk, so a new task starts with none. The old
 task records until it drains; the new one starts recording when its app serves (TAKEOVER): the window restarts
 empty and there's a gap of the handoff's length. The pins are in the CAD store (Litestream): they carry over.
+
+Shared storage (#322): dvr_dir on a mount shared between tasks (EFS, NFS: shared_mount(), or [roads] dvr_shared) keeps
+the recording across deploys, so the window is 12 h (dvr_shared_window_min) and the area's cameras are recorded 24/7.
+Only the lease-holding leader writes or deletes (may_write: the app's fence, sizeup/fence.py); the standby's warm app
+(sizeup/app.py prewarm) never makes a Dvr at all. A new leader reads the index from the file names in the background
+(_scan, the recording waits for it), then appends after each camera's last key. The old leader may still be draining
+meanwhile: a file that vanishes under the scan is skipped, another writer's temp file is left alone unless it is stale
+(STALE_TMP_S), and for RESCAN_FOR_S after the start the folder is read again every RESCAN_S, taking in what the old
+leader wrote after the first look and dropping what it evicted. A segment's size is in its file name
+(key_start_duration_bytes.ts), so reading the index never stats a file over NFS. Without shared storage: as before.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import threading
@@ -72,12 +87,57 @@ GAP_S = 1.5                          # segments further apart than this: a disco
 SESSION_RETRY_S = 300.0              # a camera whose stream keeps failing: asked at most this seldom
 FAILS_BEFORE_WAIT = 3
 SEQ_RE = re.compile(r"_(\d{1,12})\.ts$")
-FILE_RE = re.compile(r"(\d{1,15})_(\d{10,16})_(\d{1,9})(_n)?\.ts")   # key, start (ms), duration (ms), _n: a new stream
+FILE_RE = re.compile(r"(\d{1,15})_(\d{10,16})_(\d{1,9})(?:_(\d{1,12}))?(_n)?\.ts")   # key, start (ms), duration (ms),
+#   bytes (#322: the index read without a stat), _n: a new stream (#320); the older forms without either still read
 CAM_ID = r"[A-Za-z0-9_][A-Za-z0-9_.:-]{0,63}"                      # never "." or "..": a folder name
 CAM_RE = re.compile(CAM_ID)
 DVR_PATH = re.compile(rf"/api/cad/cameras/({CAM_ID})/dvr(?:/(index\.m3u8|\d{{1,15}}\.ts))?")
 JSON = "application/json"
 REASONS = ("always", "incident", "pinned", "open")
+SHARED_FS = ("nfs", "nfs4", "efs")    # a mount of these types: shared between tasks (EFS)
+STALE_TMP_S = 600.0                   # shared storage: another writer's temp file this old is a write cut short
+RESCAN_S = 30.0                       # shared storage: the folder read again this often ...
+RESCAN_FOR_S = 300.0                  # ... for this long after the start (the old leader draining)
+MAX_WORKERS = 24
+AREA_EVERY_S = 60.0                   # the response area's cameras: worked out again this often
+
+
+def shared_mount(path: str | Path, mounts: str = "/proc/self/mounts") -> str:
+    """The file system type of the mount path is on when it is one shared between tasks (EFS: "nfs4"), else ""."""
+    try:
+        p = os.path.realpath(path)
+        best, kind = "", ""
+        with open(mounts) as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) < 3:
+                    continue
+                mp = parts[1].replace("\\040", " ")
+                if (p == mp or p.startswith(mp.rstrip("/") + "/")) and len(mp) >= len(best):
+                    best, kind = mp, parts[2]
+        return kind if kind.split(".")[-1] in SHARED_FS else ""
+    except OSError:
+        return ""
+
+
+def area_polygon(area) -> tuple[tuple[float, float], ...]:
+    """[roads] dvr_area as a ring of (lon, lat): a bbox [west, south, east, north] or a polygon [[lon, lat], ...]."""
+    if not area:
+        return ()
+    if len(area) == 4 and all(isinstance(x, (int, float)) for x in area):
+        w, s, e, n = (float(x) for x in area)
+        return ((w, s), (e, s), (e, n), (w, n))
+    return tuple((float(p[0]), float(p[1])) for p in area)
+
+
+def in_area(poly, lat: float, lon: float) -> bool:
+    """Inside the ring (ray casting)."""
+    inside, n = False, len(poly)
+    for i in range(n):
+        (x1, y1), (x2, y2) = poly[i], poly[(i + 1) % n]
+        if (y1 > lat) != (y2 > lat) and lon < (x2 - x1) * (lat - y1) / (y2 - y1) + x1:
+            inside = not inside
+    return inside
 
 
 def _chunklist(text: str) -> tuple[int, list[tuple[str, float]]]:
@@ -105,19 +165,29 @@ class Dvr:
     def __init__(self, roads, root: str | Path, window_s: float = WINDOW_S, max_bytes: int = MAX_BYTES,
                  near_m: float = NEAR_M, always: tuple[str, ...] = (), linger_s: float = LINGER_S,
                  max_cameras: int = MAX_CAMERAS, clock: Callable[[], float] = time.time, log: Callable[[str], None] = print,
-                 free_floor: int = FREE_FLOOR_BYTES, workers: int = WORKERS):
+                 free_floor: int = FREE_FLOOR_BYTES, workers: int = WORKERS, area=(), shared: bool = False,
+                 may_write: Callable[[], bool] | None = None, area_wall: bool = False, area_extra_m: float = 0.0):
         self.roads, self.root = roads, Path(root)
         self.window_s, self.max_bytes, self.near_m = float(window_s), int(max_bytes), float(near_m)
         self.always = tuple(a for a in always if CAM_RE.fullmatch(a))
         self.linger_s, self.max_cameras = float(linger_s), int(max_cameras)
         self.clock, self.log, self.free_floor, self.workers = clock, log, int(free_floor), max(1, int(workers))
+        # shared storage (#322): the area's cameras always; only the leader writes; the index read in the background
+        self.area, self.shared = area_polygon(area), bool(shared)
+        self.area_wall, self.area_extra_m = bool(area_wall) and not self.area, float(area_extra_m)
+        self._area_at, self._area_ids = -1e18, []
+        self.may_write = may_write or (lambda: True)
+        self._scanned = threading.Event()
+        self._started_at: float | None = None
+        self._rescanned_at = 0.0
         # the app hands in: open CAD events [{lat, lon, address, label}], and where the pins are kept
         self.incidents: Callable[[], list[dict]] = list
         self.load_pins: Callable[[], object] = list
         self.save_pins: Callable[[dict], None] = lambda pins: None
         self.pins: dict[str, float] = {}          # cid -> when it was pinned
         # a recording's folder renamed to the id its camera is kept under now (follow, #320): only when this says so
-        self.may_move: Callable[[str, str], bool] = lambda old, new: True
+        # (#322: only the leader, never while a clip of either camera is being saved: _may_move)
+        self.may_move: Callable[[str, str], bool] = lambda old, new: self._may_move(old, new)
         self._lock = threading.RLock()            # _cams, _opened, _wanted, pins
         self._disk = threading.RLock()            # making room and writing: one at a time
         self._cams: dict[str, dict] = {}          # cid -> {segs: {key: (t0, dur, bytes)}, last, end, offset, chunk, ...}
@@ -129,7 +199,10 @@ class Dvr:
         self._pool: ThreadPoolExecutor | None = None
         self._busy: set[str] = set()              # cameras with a round under way (pool mode)
         self._next: dict[str, float] = {}         # cid -> when its next round is due
-        self._scan()
+        self.holding: dict[str, int] = {}         # cid -> clips of it being saved (never renamed meanwhile)
+        if not self.shared:
+            self._scan()                          # (shared: in the background, before the first round: start())
+            self._scanned.set()
 
     # -- the disk ----------------------------------------------------------------------------------------------------
 
@@ -142,36 +215,106 @@ class Dvr:
         with self._lock:
             return self._cams.setdefault(cid, {"segs": {}, "last": None, "end": None, "offset": 0, "breaks": set()})
 
+    def _read_dir(self, d: Path) -> dict[int, list[tuple[float, float, int, str, bool]]] | None:
+        """A camera's folder: key -> its files [(start, duration, bytes, file name, a new stream)], usually one; two when
+        both leaders wrote the same segment (reported, never deleted here: _scan decides which one stays). None when
+        the folder can't be listed (its index is left as it is). A file that goes meanwhile (another writer evicting
+        it) is skipped; a write cut short (a temp file) goes: at once on our own disk, on shared storage only once it
+        is STALE_TMP_S old (it may be the old leader's, still being written)."""
+        segs: dict[int, list[tuple[float, float, int, str, bool]]] = {}
+        try:
+            entries = list(os.scandir(d))
+        except OSError:
+            return None
+        now = time.time()
+        for f in entries:
+            m = FILE_RE.fullmatch(f.name)
+            try:
+                if m:
+                    size = int(m.group(4)) if m.group(4) else f.stat().st_size
+                    segs.setdefault(int(m.group(1)), []).append(
+                        (int(m.group(2)) / 1000, int(m.group(3)) / 1000, size, f.name, bool(m.group(5))))
+                elif f.name.endswith(".tmp") and (not self.shared or now - f.stat().st_mtime > STALE_TMP_S):
+                    if self.may_write():
+                        Path(f.path).unlink(missing_ok=True)
+            except FileNotFoundError:
+                continue
+        return segs
+
+    @staticmethod
+    def _newest(d: Path, files: list[tuple]) -> tuple:
+        """Of a segment's files (both leaders wrote it), the one written last (its mtime; a file gone meanwhile: never)."""
+        def mtime(x) -> float:
+            try:
+                return (d / x[3]).stat().st_mtime
+            except OSError:
+                return -1.0
+        return max(files, key=lambda x: (mtime(x), x[3]))
+
     def _scan(self) -> None:
-        """What is already on disk (the app restarted within the same task): the index from the file names; a write
-        cut short (a .tmp) goes."""
+        """What is already on disk (the app restarted within the same task, or on shared storage the leader before
+        this one): the index from the file names. Taken in alongside what is already indexed (rescans): a segment
+        not indexed is added, an indexed one whose file is gone is dropped. A segment both leaders wrote: the indexed
+        file stays (else the newest), only the other is deleted, whatever order the folder lists them in."""
         if not self.root.is_dir():
             return
-        for d in self.root.iterdir():
-            if not d.is_dir() or not CAM_RE.fullmatch(d.name):
-                continue
-            segs, breaks = {}, set()
-            for f in d.iterdir():
-                m = FILE_RE.fullmatch(f.name)
-                if m:
-                    segs[int(m.group(1))] = (int(m.group(2)) / 1000, int(m.group(3)) / 1000, f.stat().st_size)
-                    if m.group(4):
-                        breaks.add(int(m.group(1)))
-                elif f.suffix == ".tmp":
-                    f.unlink(missing_ok=True)
-            if segs:
-                last = max(segs)
-                self._cams[d.name] = {"segs": segs, "last": last, "end": segs[last][0] + segs[last][1], "offset": 0,
-                                      "breaks": breaks}
+        try:
+            dirs = [d for d in os.scandir(self.root) if CAM_RE.fullmatch(d.name) and d.is_dir()]
+        except OSError:
+            return
+        for d in dirs:
+            with self._lock:                          # what was indexed before the listing (not what we write meanwhile)
+                known = set(self._cams[d.name]["segs"]) if d.name in self._cams else set()
+            found = self._read_dir(Path(d.path))
+            if found is None:
+                continue                              # not listable now: its index stays as it is
+            twins = []
+            with self._lock:
+                c = self._cams.get(d.name)
+                if c is None:
+                    if not found:
+                        continue
+                    c = self._cams.setdefault(d.name, {"segs": {}, "last": None, "end": None, "offset": 0, "names": {},
+                                                        "breaks": set()})
+                names = c.setdefault("names", {})
+                breaks = c.setdefault("breaks", set())
+                for key in [k for k in known if k not in found]:
+                    c["segs"].pop(key, None)          # gone from the disk (evicted by the other writer)
+                    names.pop(key, None)
+                    breaks.discard(key)
+                for key, files in found.items():
+                    have = (names.get(key) or _name(key, *c["segs"][key], key in breaks)) if key in c["segs"] else None
+                    keep = next((x for x in files if x[3] == have), None)
+                    if keep is None:                  # not indexed (or its indexed file is gone): the newest one
+                        keep = files[0] if len(files) == 1 else self._newest(Path(d.path), files)
+                        t0, dur, size, name, brk = keep
+                        c["segs"][key] = (t0, dur, size)
+                        names[key] = name
+                        if brk:
+                            breaks.add(key)
+                        else:
+                            breaks.discard(key)
+                    twins += [x[3] for x in files if x[3] != keep[3]]   # the same segment twice: one is enough
+                if c["segs"]:
+                    last = max(c["segs"])
+                    if c["last"] is None or last > c["last"]:
+                        c["last"], c["end"] = last, c["segs"][last][0] + c["segs"][last][1]
+            if twins and self.may_write():
+                for name in twins:
+                    (Path(d.path) / name).unlink(missing_ok=True)
+
+    def scanned(self) -> bool:
+        return self._scanned.is_set()
 
     def _file(self, cid: str, key: int) -> Path | None:
         with self._lock:
             c = self._cams.get(cid)
             s = c["segs"].get(key) if c else None
+            name = c.get("names", {}).get(key) if c else None
             brk = bool(c) and key in c.get("breaks", ())
         if not s:
             return None
-        return self._dir(cid) / f"{key}_{int(s[0] * 1000)}_{int(s[1] * 1000)}{'_n' if brk else ''}.ts"
+        return self._dir(cid) / (name or _name(key, s[0], s[1], s[2], brk))
 
     def _free(self) -> int:
         """Free bytes on the recordings' disk; 0 when it can't be told (fail closed: no write)."""
@@ -208,8 +351,8 @@ class Dvr:
                               if self._free() - len(body) < self.free_floor else "Over the recording cap")
                 return False
             d = self._dir(cid)
-            f = d / f"{key}_{int(t0 * 1000)}_{int(dur * 1000)}{'_n' if brk else ''}.ts"
-            tmp = f.with_suffix(".tmp")
+            f = d / _name(key, t0, dur, len(body), brk)
+            tmp = d / f".{f.stem}.{os.getpid()}.tmp" if self.shared else f.with_suffix(".tmp")
             try:
                 d.mkdir(parents=True, exist_ok=True)
                 tmp.write_bytes(body)
@@ -225,6 +368,7 @@ class Dvr:
             c = self._cam(cid)
             with self._lock:
                 c["segs"][key] = (t0, dur, len(body))
+                c.setdefault("names", {}).pop(key, None)
                 if brk:
                     c.setdefault("breaks", set()).add(key)
                 if c["last"] is None or key > c["last"]:
@@ -243,6 +387,7 @@ class Dvr:
             c = self._cams.get(cid)
             s = c["segs"].pop(key, None) if c else None
             if c:
+                c.get("names", {}).pop(key, None)
                 c.get("breaks", set()).discard(key)
         if f is not None:
             f.unlink(missing_ok=True)
@@ -401,7 +546,8 @@ class Dvr:
             opened = sorted(self._opened.items(), key=lambda x: -x[1])
         pins = self._pins_now()
         self.follow()
-        video = {c["id"] for c in self.roads.merged("cameras") if c.get("video") and not c.get("off") and CAM_RE.fullmatch(c["id"])}
+        live = [c for c in self.roads.merged("cameras") if c.get("video") and not c.get("off") and CAM_RE.fullmatch(c["id"])]
+        video = {c["id"] for c in live}
         why: dict[str, list[str]] = {}
         order: list[str] = []
 
@@ -417,11 +563,49 @@ class Dvr:
             add(self._alias(cid), "always")
         for cid, _ in sorted(self._incident_cams().items(), key=lambda x: x[1]):
             add(cid, "incident")
+        for cid in self.area_cameras(live):
+            add(cid, "always")
         for cid in sorted(pins):
             add(cid, "pinned")
         for cid, _ in opened:
             add(cid, "open")
         return {cid: why[cid] for cid in order[:self.max_cameras]}
+
+    def area_cameras(self, cams: list[dict] | None = None) -> list[str]:
+        """The cameras with video recorded around the clock (#322), by id: the response area's (the camera wall's area,
+        area_wall) or those inside the dvr_area override; none without either."""
+        if self.area_wall:
+            return self._wall_cameras()
+        if not self.area:
+            return []
+        if cams is None:
+            cams = [c for c in self.roads.merged("cameras") if c.get("video") and not c.get("off") and CAM_RE.fullmatch(c["id"])]
+        return sorted(c["id"] for c in cams if c.get("lat") is not None and c.get("lon") is not None
+                      and in_area(self.area, float(c["lat"]), float(c["lon"])))
+
+    def _wall_cameras(self) -> list[str]:
+        """The camera wall's area (Roads.area_rows: Settings > System decides it): its included cameras, and in "auto"
+        those inside our fire districts or within its margin_m plus area_extra_m of them; never an excluded one. Only
+        with live video. Worked out again every AREA_EVERY_S (a polygon distance per camera)."""
+        now = self.clock()
+        if now - self._area_at < AREA_EVERY_S:
+            return self._area_ids
+        rows_fn = getattr(self.roads, "area_rows", None)
+        try:
+            area, rows = rows_fn() if rows_fn is not None else ({}, [])
+        except Exception as e:  # noqa: BLE001 - the area not readable now: the last one
+            self.log(f"dvr: the response area not read ({type(e).__name__})")
+            return self._area_ids
+        reach = float(area.get("margin_m") or 0) + self.area_extra_m
+        ids = []
+        for r in rows:
+            c = r["camera"]
+            if not (c.get("video") and not c.get("off") and CAM_RE.fullmatch(c["id"])) or r["mode"] == "exclude":
+                continue
+            if r["mode"] == "include" or (r["dist_m"] is not None and r["dist_m"] <= reach):
+                ids.append(c["id"])
+        self._area_at, self._area_ids = now, sorted(ids)
+        return self._area_ids
 
     # -- recording ---------------------------------------------------------------------------------------------------
 
@@ -534,7 +718,7 @@ class Dvr:
                 last, end = c["last"], c["end"]
             if have:
                 continue
-            if self._stop.is_set() or self.stopped and not self._room(1 << 20):
+            if self._stop.is_set() or (self.stopped and not self._room(1 << 20)) or not self.may_write():
                 break
             t0 = ends[k] - dur
             if last is not None and key == last + 1 and end is not None and abs(end - t0) < 3 * dur + 2:
@@ -563,7 +747,17 @@ class Dvr:
         """One round over every camera wanted, then the eviction. Started (a pool of WORKERS): each camera on its own
         cadence, a new round when its last one is done and TICK_S has passed, never waiting on the slowest camera;
         the segments written by the rounds that ended this tick (all of them with wait_all). Not started: each in
-        turn. The segments written."""
+        turn. The segments written. Nothing at all (no fetch, no write, no eviction) while this task may not write
+        (shared storage: not the leader) or the index is still being read."""
+        if not self.may_write():
+            return 0
+        if not self._scanned.is_set():
+            return 0
+        if self.shared and self._started_at is not None:
+            now = self.clock()
+            if now - self._started_at <= RESCAN_FOR_S and now - self._rescanned_at >= RESCAN_S:
+                self._rescanned_at = now
+                self._scan()                                   # what the old leader wrote (or evicted) since
         wanted = self.wanted()
         with self._lock:
             before = self._wanted
@@ -623,12 +817,26 @@ class Dvr:
                          and isinstance(at, (int, float))}
         if self._thread is None or not self._thread.is_alive():
             self._stop.clear()
+            self._started_at = self.clock()
             self._pool = ThreadPoolExecutor(max_workers=self.workers, thread_name_prefix="dvr")
             self._thread = threading.Thread(target=self._run, name="dvr", daemon=True)
             self._thread.start()
             self.log(f"dvr: on, {self.window_s / 60:.0f} min per camera, at most {self.max_cameras} cameras and "
-                     f"{self.max_bytes / 1024 ** 3:.1f} GB, in {self.root}")
+                     f"{self.max_bytes / 1024 ** 3:.1f} GB, in {self.root}"
+                     + (f"; shared storage, {len(self.area_cameras())} cameras in the area always" if self.shared else ""))
         return self
+
+    def scan_now(self) -> None:
+        """Shared storage: read the index (the leader before this one's recording) before the first round."""
+        if self._scanned.is_set():
+            return
+        t = time.monotonic()
+        self._scan()
+        self._rescanned_at = self.clock()
+        self._scanned.set()
+        with self._lock:
+            n, cams = sum(len(c["segs"]) for c in self._cams.values()), len(self._cams)
+        self.log(f"dvr: {n} segments of {cams} cameras found on shared storage in {time.monotonic() - t:.1f} s: appending")
 
     def stop(self) -> None:
         self._stop.set()
@@ -637,6 +845,12 @@ class Dvr:
             self._pool = None
 
     def _run(self) -> None:
+        if not self._scanned.is_set():
+            try:
+                self.scan_now()
+            except Exception as e:  # pragma: no cover - an unreadable folder: recorded afresh
+                self.log(f"dvr: the shared index not read ({type(e).__name__}: {e})")
+                self._scanned.set()
         while not self._stop.is_set():
             t = self.clock()
             try:
@@ -689,6 +903,67 @@ class Dvr:
         out.append("#EXT-X-ENDLIST")
         return ("\n".join(out) + "\n").encode()
 
+    def alias(self, cid: str) -> str:
+        """The id the camera is listed under now (Roads.alias when the roads have it, #320/#324), else cid."""
+        try:
+            return self._alias(cid)
+        except Exception:  # noqa: BLE001 - an id we can't map stays as it is
+            return cid
+
+    def hold(self, cid: str, on: bool) -> None:
+        """A clip of this camera is being saved (sizeup/attachments.py): its folder must not be renamed meanwhile
+        (a camera merge's follow(), #324, skips the cameras in self.holding)."""
+        with self._lock:
+            if on:
+                self.holding[cid] = self.holding.get(cid, 0) + 1
+            elif self.holding.get(cid, 0) > 1:
+                self.holding[cid] -= 1
+            else:
+                self.holding.pop(cid, None)
+
+    def _may_move(self, old: str, new: str) -> bool:
+        """A recording folder may be renamed (a camera merge, #324): only by the leader, and never while a clip of
+        either camera is being saved."""
+        if not self.may_write():
+            return False
+        with self._lock:
+            return not (self.holding.get(old) or self.holding.get(new))
+
+    def read_segment(self, cid: str, key: int, fallback: Path | None = None) -> bytes:
+        """A recorded segment's bytes, its file found when it is read (the camera's id may have moved meanwhile:
+        alias), else fallback. OSError when it is gone."""
+        for c in dict.fromkeys((self.alias(cid), cid)):
+            f = self._file(c, key)
+            if f is not None:
+                try:
+                    return f.read_bytes()
+                except FileNotFoundError:
+                    continue
+        if fallback is None:
+            raise FileNotFoundError(f"{cid}/{key}")
+        return Path(fallback).read_bytes()
+
+    def segments(self, cid: str, t_from: float, t_to: float) -> list[dict]:
+        """The recorded segments that overlap [t_from, t_to], oldest first: {key, t0, dur, bytes, path} (a saved clip,
+        sizeup/attachments.py: copied as they are)."""
+        with self._lock:
+            c = self._cams.get(cid)
+            segs = sorted(c["segs"].items()) if c else []
+        out = []
+        for key, (t0, dur, size) in segs:
+            if t0 + dur > t_from and t0 < t_to:
+                f = self._file(cid, key)
+                if f is not None:
+                    out.append({"key": key, "t0": t0, "dur": dur, "bytes": size, "path": f,
+                                "disc": self._new_stream(cid, key)})
+        return out
+
+    def _new_stream(self, cid: str, key: int) -> bool:
+        """A segment that starts a new stream (a discontinuity even with no gap in time: its "_n" mark, #320)."""
+        with self._lock:
+            c = self._cams.get(cid)
+            return bool(c) and key in c.get("breaks", ())
+
     def handles(self, path: str) -> bool:
         return bool(DVR_PATH.fullmatch(path))
 
@@ -724,3 +999,9 @@ class Dvr:
         if body is None:
             return 404, b'{"error":"not recorded (or past the window)"}', JSON, hdr
         return 200, body, "video/MP2T", {"Cache-Control": "private, max-age=3600"}
+
+
+def _name(key: int, t0: float, dur: float, size: int, brk: bool = False) -> str:
+    """A segment's file name: its key, start and duration (ms) and size (so the index is read without a stat), and
+    "_n" when it starts a new stream (#320)."""
+    return f"{key}_{int(t0 * 1000)}_{int(dur * 1000)}_{int(size)}{'_n' if brk else ''}.ts"

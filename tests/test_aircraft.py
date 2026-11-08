@@ -7,15 +7,21 @@ looks), the ETag, the config (a dongle named for ADS-B is kept out of sizeup's r
 Never adsb.lol or the FAA itself (conftest.py turns the default addresses off and refuses any host but this one).
 Fixtures (tests/fixtures/aircraft/, tools/record_aircraft_fixtures.py):
   adsblol_hpn_1.json, _2.json  adsb.lol's answer for 15 nm around HPN, recorded 2026-10-14 14:38:04 and 14:38:30
-                               EDT, as served: EJA203 just landing on 34 (its last position 18 s, then 44 s old),
-                               N41DW (SR22) on the ILS 34, an LGA arrival (RPA4546) over Westchester at 2,000 ft, a
+                               EDT, as served: EJA228 just landing on 34 (its last position 18 s, then 44 s old),
+                               N47DQ (SR22) on the ILS 34, an LGA arrival (RPA4712) over Westchester at 2,000 ft, a
                                Bell 427 helicopter, two light aircraft, two overflights.
   faa_registry.zip             the FAA Releasable Aircraft Database of 2026-10-13 trimmed to those US aircraft and
                                one more, real headers, the owner name and address columns blanked.
+  Every registration, ICAO address, flight number and owner in these fixtures is fictional (#293): US tails are
+  N-numbers that were unassigned, unreserved and never deregistered in the FAA database of 2026-11-06, with the
+  address the N-number algorithm gives them (registry fixture: serial, unique ID and Mode S code to match);
+  Canadian marks are off Transport Canada's register of 2026-11-06, with their addresses; flight numbers are
+  renumbered (operator prefixes kept, so the airline lookup still works). Positions, altitudes, squawks, times
+  and every other field are as recorded. Real captures go in the private replay cache (#283), never here.
   readsb_aircraft.json         NOT recorded from a receiver (there is none yet): adsblol_hpn_2.json in readsb's
                                file layout ("now" in seconds, "aircraft").
   dump978_aircraft.json        NOT recorded: built by hand from the fields dump978-fa's skyaware writer emits
-                               (skyaware_writer.cc): the SR22 on UAT with a fresher fix, N43632 with an older one, and
+                               (skyaware_writer.cc): the SR22 on UAT with a fresher fix, N43653 with an older one, and
                                a TIS-B trackfile ("~" address)."""
 
 import json
@@ -97,9 +103,9 @@ def test_adsblol_and_readsb_read_the_same():
     r = parse_snapshot(json.loads((FIX / "readsb_aircraft.json").read_text()))
     assert a.now == pytest.approx(T2) and r.now == pytest.approx(T2) and len(a.planes) == len(r.planes) == 9
     assert [p.hex for p in a.planes] == [p.hex for p in r.planes]
-    sr22 = next(p for p in a.planes if p.hex == "a4d227")
-    assert (sr22.flight, sr22.reg, sr22.type, sr22.alt_baro, sr22.category, sr22.source) == ("N41DW", "N41DW", "SR22", 900, "A1", "adsb")
-    assert next(p for p in a.planes if p.hex == "a19e97").type == ""          # EJA203: the feed has no type for it
+    sr22 = next(p for p in a.planes if p.hex == "a5bf1b")
+    assert (sr22.flight, sr22.reg, sr22.type, sr22.alt_baro, sr22.category, sr22.source) == ("N47DQ", "N47DQ", "SR22", 900, "A1", "adsb")
+    assert next(p for p in a.planes if p.hex == "a2002f").type == ""          # EJA228: the feed has no type for it
     for bad in ({}, {"now": 0, "ac": []}, {"now": 5, "aircraft": "x"}, []):
         with pytest.raises(ValueError):
             parse_snapshot(bad)
@@ -111,10 +117,10 @@ def test_the_receivers_1090_and_978_merge_by_icao_address():
     m = merge([r, u])
     assert m.now == pytest.approx(u.now) and len(m.planes) == 10                      # 9 on 1090, 1 more only on 978
     p = {x.hex: x for x in m.planes}
-    assert p["a4d227"].band == "978" and p["a4d227"].lat == pytest.approx(41.04411)      # the fresher fix wins
-    assert p["a4d227"].type == "SR22" and p["a4d227"].reg == "N41DW"                    # what only 1090 heard is kept
-    assert p["a53c44"].band == "1090" and p["a53c44"].flight == "N43632"               # 978's fix was 9 s old
-    assert p["a53c44"].seen_pos == pytest.approx(0.4, abs=0.01)                         # rebased onto the merged clock
+    assert p["a5bf1b"].band == "978" and p["a5bf1b"].lat == pytest.approx(41.04411)      # the fresher fix wins
+    assert p["a5bf1b"].type == "SR22" and p["a5bf1b"].reg == "N47DQ"                    # what only 1090 heard is kept
+    assert p["a53c8b"].band == "1090" and p["a53c8b"].flight == "N43653"               # 978's fix was 9 s old
+    assert p["a53c8b"].seen_pos == pytest.approx(0.4, abs=0.01)                         # rebased onto the merged clock
     assert p["~2b0c4d"].source == "tisb" and p["~2b0c4d"].band == "978"
 
 
@@ -134,13 +140,13 @@ def test_the_recorded_traffic_reads_as_shortfinal_would(tmp_path):
     clock = Clock()
     d = both(layer(clock, cache_dir=tmp_path), clock)
     a = by_cs(d)
-    assert a["N41DW"]["phase"] == ARRIVING and a["N41DW"]["appr"] == "ILS 34" and a["N41DW"]["rwy"] == "34"
-    assert a["EJA203"]["phase"] == ARRIVING and a["EJA203"]["rwy"] == "34"
+    assert a["N47DQ"]["phase"] == ARRIVING and a["N47DQ"]["appr"] == "ILS 34" and a["N47DQ"]["rwy"] == "34"
+    assert a["EJA228"]["phase"] == ARRIVING and a["EJA228"]["rwy"] == "34"
     # LGA's arrival over Westchester at 1,925 ft and 12.8 nm: low traffic, not ours (the altitude-for-distance gate)
-    assert a["RPA4546"]["phase"] == LOW and a["N83HH"]["phase"] == LOW and a["N83HH"]["kind"] == "helicopter"
+    assert a["RPA4712"]["phase"] == LOW and a["N82HQ"]["phase"] == LOW and a["N82HQ"]["kind"] == "helicopter"
     shown = set(a)
-    assert "ROU1819" not in shown and "PTR2334" not in shown and "EJA267" not in shown    # overflights: not drawn
-    assert [x["cs"] for x in d["aircraft"]][:2] == ["N41DW", "EJA203"] or [x["cs"] for x in d["aircraft"]][:2] == ["EJA203", "N41DW"]
+    assert "ROU1736" not in shown and "PTR2381" not in shown and "EJA249" not in shown    # overflights: not drawn
+    assert [x["cs"] for x in d["aircraft"]][:2] == ["N47DQ", "EJA228"] or [x["cs"] for x in d["aircraft"]][:2] == ["EJA228", "N47DQ"]
     assert d["counts"] == {"arriving": 2, "low": 4, "emergency": 0}
 
 
@@ -181,9 +187,9 @@ def test_a_departure_stays_departing_while_it_climbs_out():
 def test_an_old_position_is_marked_and_gets_no_eta_and_an_aircraft_is_dropped(tmp_path):
     clock = Clock()
     d = both(layer(clock, cache_dir=tmp_path), clock)
-    eja = by_cs(d)["EJA203"]
+    eja = by_cs(d)["EJA228"]
     assert eja["age"] > STALE_S and eja["eta"] is None                     # 44 s old: hollow on the map, no ETA from it
-    assert by_cs(d)["N41DW"]["age"] < STALE_S and by_cs(d)["N41DW"]["eta"] is not None
+    assert by_cs(d)["N47DQ"]["age"] < STALE_S and by_cs(d)["N47DQ"]["eta"] is not None
     tr = Tracks()
     tr.update(Snapshot(T1, (plane(seen_pos=0.0),)))
     tr.update(Snapshot(T1 + DROP_S + 1, ()))
@@ -216,8 +222,8 @@ def test_every_aircraft_drawn_has_a_short_trail_of_real_fixes(tmp_path):
         assert a["cat"] == t.plane.category and "tr" in a
     a = by_cs(d)
     # not only arrivals, departures and emergencies now: low traffic too, once it has moved
-    assert len(a["RPA4546"]["trail"]) == 2 and a["RPA4546"]["phase"] == LOW
-    assert len(a["N41DW"]["trail"]) == 2 and a["N41DW"]["phase"] == ARRIVING
+    assert len(a["RPA4712"]["trail"]) == 2 and a["RPA4712"]["phase"] == LOW
+    assert len(a["N47DQ"]["trail"]) == 2 and a["N47DQ"]["phase"] == ARRIVING
 
 
 def test_a_trail_point_every_60_m_or_15_s_and_kept_short():
@@ -283,16 +289,16 @@ def test_the_turn_rate_is_the_feeds_or_from_the_last_two_fixes_and_clamped():
 
 def test_the_registry_gives_make_and_model_and_never_an_owner(tmp_path):
     reg = Registry(FAA_URL, tmp_path, FakeFetch(), log=lambda m: None, clock=Clock())
-    assert reg.lookup("a19e97") is None and reg.refresh()
-    assert reg.lookup("a19e97") == {"n": "N203QS", "make": "Bombardier Inc", "model": "CL-600-2B16", "year": "2025",
+    assert reg.lookup("a2002f") is None and reg.refresh()
+    assert reg.lookup("a2002f") == {"n": "N228QZ", "make": "Bombardier Inc", "model": "CL-600-2B16", "year": "2025",
                                     "kind": "airplane", "engine": "turbofan", "engines": 2, "company": ""}   # co-owned
-    assert reg.lookup("a4d227")["company"] == "LLC"         # the kind of registrant only (#235), never who
-    assert reg.lookup("ab56b8")["kind"] == "helicopter" and reg.lookup("c04051") is None and reg.lookup("~2b0c4d") is None
+    assert reg.lookup("a5bf1b")["company"] == "LLC"         # the kind of registrant only (#235), never who
+    assert reg.lookup("ab2f40")["kind"] == "helicopter" and reg.lookup("c02b5a") is None and reg.lookup("~2b0c4d") is None
     con = reg.con
     cols = {r[1] for t in ("aircraft", "models") for r in con.execute(f"PRAGMA table_info({t})")}
     assert not cols & {"name", "street", "city", "owner", "zip"}
     again = Registry(FAA_URL, tmp_path, FakeFetch(), log=lambda m: None, clock=Clock())    # the cache: no fetch
-    assert again.lookup("a4d227")["model"] == "SR22" and not again.due()
+    assert again.lookup("a5bf1b")["model"] == "SR22" and not again.due()
     with pytest.raises(ValueError):
         build_registry(zipfile_with({"README.txt": "x"}), reg.con)
 
@@ -309,12 +315,12 @@ def zipfile_with(files: dict) -> bytes:
 def test_a_type_comes_from_the_feed_or_the_registry_and_is_never_made_up(tmp_path):
     clock = Clock()
     a = by_cs(both(layer(clock, cache_dir=tmp_path), clock))
-    assert a["EJA203"]["type"] == "" and a["EJA203"]["model"] == "Bombardier Inc CL-600-2B16" and a["EJA203"]["model_src"] == "faa"
-    assert a["RPA4546"]["type"] == "E75L" and a["RPA4546"]["airline"] == "Republic Airlines, Inc."
-    assert a["EJA203"]["airline"] == "Netjets Aviation, Inc." and a["N41DW"]["airline"] == ""
+    assert a["EJA228"]["type"] == "" and a["EJA228"]["model"] == "Bombardier Inc CL-600-2B16" and a["EJA228"]["model_src"] == "faa"
+    assert a["RPA4712"]["type"] == "E75L" and a["RPA4712"]["airline"] == "Republic Airlines, Inc."
+    assert a["EJA228"]["airline"] == "Netjets Aviation, Inc." and a["N47DQ"]["airline"] == ""
     no_reg = layer(Clock(), registry=False)
     no_reg.refresh()
-    eja = by_cs(no_reg.public())["EJA203"]
+    eja = by_cs(no_reg.public())["EJA228"]
     assert eja["type"] == "" and eja["model"] == "" and eja["model_src"] == ""                     # nothing to say: nothing said
     body = json.dumps(both(layer(clock := Clock(), cache_dir=tmp_path / "b"), clock)).lower()
     assert "ownop" not in body and "owner" not in body
@@ -605,14 +611,14 @@ def test_both_feeds_are_combined_and_the_freshest_position_wins():
     for h, p in m.items():
         t_lol, t_fi = lol.now - L[h].seen_pos, fi.now - F[h].seen_pos
         assert p.feed == ("adsblol" if t_lol > t_fi else "adsbfi"), h
-    assert m["a5263e"].feed == "adsbfi" and m["a5b829"].feed == "adsblol"     # 1.7 s vs 0.1 s; 0.0 s vs 0.3 s
+    assert m["a4fe82"].feed == "adsbfi" and m["a62739"].feed == "adsblol"     # 1.7 s vs 0.1 s; 0.0 s vs 0.3 s
 
 
 def test_an_aircraft_only_one_feed_has_is_kept():
-    ly = dual(fetch=Feeds(lol=(lol_without({"ab282b", "a5263e"}),)))
+    ly = dual(fetch=Feeds(lol=(lol_without({"abedb1", "a4fe82"}),)))
     ly.refresh()
     src = {a["hex"]: a["src"] for a in ly.public()["aircraft"]}
-    assert src.get("ab282b") == "adsbfi"                                       # RPA5623 3 nm out: only adsb.fi had it
+    assert src.get("abedb1") == "adsbfi"                                       # RPA5768 3 nm out: only adsb.fi had it
     d = ly.public()
     assert {f["key"]: f["n"] for f in d["feeds"]} == {"adsblol": 8, "adsbfi": 10}
     assert d["credit"] == "adsb.lol (ODbL) + adsb.fi open data" or d["credit"] == "adsb.fi open data + adsb.lol (ODbL)" \
@@ -620,7 +626,7 @@ def test_an_aircraft_only_one_feed_has_is_kept():
 
 
 def test_the_feed_giving_more_aircraft_is_primary_and_a_tie_goes_to_the_config_order():
-    ly = dual(fetch=Feeds(lol=(lol_without({"ab282b", "a5263e", "a09101"}),)))
+    ly = dual(fetch=Feeds(lol=(lol_without({"abedb1", "a4fe82", "a12add"}),)))
     assert ly.primary().key == "adsblol"                                       # nothing read yet: config order
     ly.refresh()
     assert ly.primary().key == "adsbfi"                                        # 10 against 7
@@ -690,15 +696,15 @@ def test_while_nobody_looks_only_the_emergency_watch_reads_and_slower():
 def test_our_receiver_comes_first_and_the_apis_fill_in_and_take_over_when_it_is_stale(tmp_path):
     # our receiver hearing two of the recorded aircraft (adsb.lol's records in readsb's layout), with older fixes
     r = {"now": T3, "aircraft": [dict(a, seen_pos=5.0, lat=a["lat"] + 0.001) for a in json.loads(LOL3)["ac"]
-                                 if a["hex"] in ("ab282b", "a35692")]}
+                                 if a["hex"] in ("abedb1", "a48b1c")]}
     (tmp_path / "a.json").write_text(json.dumps(r))
     clock = Clock(T3 + 0.5)
     ly = layer(clock, Feeds(), feeds=("receiver", "adsblol", "adsbfi"), adsbfi_url=FI_URL, receiver=True,
                receiver_1090=str(tmp_path / "a.json"))
     ly.refresh()
     src = {a["hex"]: a["src"] for a in ly.public()["aircraft"]}
-    assert src["ab282b"] == "receiver"                                         # it hears it: its position, though older
-    assert src["a90a5f"] in ("adsblol", "adsbfi")                              # it doesn't: the APIs fill in
+    assert src["abedb1"] == "receiver"                                         # it hears it: its position, though older
+    assert src["a9096a"] in ("adsblol", "adsbfi")                              # it doesn't: the APIs fill in
     assert ly.receiver_healthy()
     (tmp_path / "a.json").unlink()
     clock.t += A.RECEIVER_KEEP_S + 1
@@ -728,9 +734,9 @@ def ntfy():
     f.close()
 
 
-def squawking(hex_="a4d227", squawk="7700", t=T1, lat=41.0400, lon=-73.6860, alt=900, seen=0.2, **kw) -> Snapshot:
-    """N41DW (from the recording) on the ILS 34 at 900 ft, squawking `squawk`."""
-    return Snapshot(t, (Plane(hex=hex_, flight="N41DW", reg="N41DW", type="SR22", alt_baro=alt, gs=80.0, track=330.0,
+def squawking(hex_="a5bf1b", squawk="7700", t=T1, lat=41.0400, lon=-73.6860, alt=900, seen=0.2, **kw) -> Snapshot:
+    """N47DQ (from the recording) on the ILS 34 at 900 ft, squawking `squawk`."""
+    return Snapshot(t, (Plane(hex=hex_, flight="N47DQ", reg="N47DQ", type="SR22", alt_baro=alt, gs=80.0, track=330.0,
                               baro_rate=-500.0, squawk=squawk, lat=lat, lon=lon, seen=seen, seen_pos=seen, category="A1",
                               source="adsb", feed="adsblol", **kw),))
 
@@ -766,14 +772,14 @@ def test_a_7700_near_hpn_raises_one_alarm_with_what_and_where_and_a_push(tmp_pat
     al = w.alarms()
     assert len(al) == 1 and al[0]["level"] == "alarm" and al[0]["source"] == "adsb" and al[0]["channel"] == "ADS-B (public data)"
     a = al[0]
-    assert a["what"] == "aircraft emergency: squawk 7700 (emergency)" and a["who"] == "N41DW"
-    assert a["text"].startswith("N41DW, SR22 · squawk 7700 (emergency) · 900 ft ↓500 fpm · ")
+    assert a["what"] == "aircraft emergency: squawk 7700 (emergency)" and a["who"] == "N47DQ"
+    assert a["text"].startswith("N47DQ, SR22 · squawk 7700 (emergency) · 900 ft ↓500 fpm · ")
     assert "nm SE of HPN" in a["text"] and "arriving HPN · ILS 34" in a["text"] and "via adsb.lol" in a["text"]
     assert a["text"].endswith("Public ADS-B data, not official.")
     assert w.cad.state()["alarms"]["open"][0]["id"] == a["id"]
     assert w.cad.alarms.notifier.flush(5) and len(ntfy.got) == 1
     m = ntfy.got[0]
-    assert m["title"] == "AIRCRAFT EMERGENCY: SQUAWK 7700 (EMERGENCY) · N41DW (SR22) on ADS-B (public data)"
+    assert m["title"] == "AIRCRAFT EMERGENCY: SQUAWK 7700 (EMERGENCY) · N47DQ (SR22) on ADS-B (public data)"
     assert m["priority"] == 5 and "airplane" in m["tags"] and "Public ADS-B data, not official" in m["message"]
     assert m["topic"] == "sizeup-test-alarms-0123"
 
@@ -798,7 +804,7 @@ def test_a_flicker_does_not_re_alarm_and_the_end_clears_it_with_a_push(tmp_path,
 def test_each_emergency_kind_and_the_aircrafts_own_status(tmp_path):
     w = Watch(tmp_path)
     w.feed(squawking(squawk="7500"))
-    w.feed(Snapshot(0, squawking(squawk="7600").planes + squawking(hex_="a53c44", squawk="4655", emergency="minfuel",
+    w.feed(Snapshot(0, squawking(squawk="7600").planes + squawking(hex_="a53c8b", squawk="4655", emergency="minfuel",
                                                                   lat=41.03).planes))
     whats = sorted(a["what"] for a in w.alarms())
     assert whats == ["aircraft emergency: minimum fuel", "aircraft emergency: squawk 7500 (hijack)",
@@ -823,7 +829,7 @@ def test_alarms_are_rate_limited(tmp_path):
 def test_drill_mode_marks_the_aircraft_alarm_and_its_push(tmp_path, ntfy):
     w = Watch(tmp_path, Notifier(ntfy.url, "sizeup-test-alarms-0123", lambda m: None, sleep=lambda s: None), drill=True)
     w.feed(squawking())
-    assert w.alarms()[0]["drill"] and alarms_mod.line(w.alarms()[0]).startswith("DRILL — EMERGENCY: N41DW aircraft emergency")
+    assert w.alarms()[0]["drill"] and alarms_mod.line(w.alarms()[0]).startswith("DRILL — EMERGENCY: N47DQ aircraft emergency")
     assert w.cad.alarms.notifier.flush(5) and ntfy.got[0]["title"].startswith("DRILL: AIRCRAFT EMERGENCY")
     assert ntfy.got[0]["priority"] == 3 and "not a real emergency" in ntfy.got[0]["message"]
 

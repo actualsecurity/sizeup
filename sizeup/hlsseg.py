@@ -218,6 +218,8 @@ def parse_sps(nal: bytes) -> dict | None:
                                 nxt = (last + r.se() + 256) % 256
                             last = nxt or last
         log2_mfn = r.ue() + 4
+        if log2_mfn > 16:                             # over the spec's limit (7.4.2.1.1): not an SPS to judge by
+            return None
         poc_type = r.ue()
         if poc_type == 0:
             r.ue()
