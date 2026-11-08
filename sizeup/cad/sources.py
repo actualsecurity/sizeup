@@ -12,11 +12,18 @@ sizeup/sources/runner.py (they come here as "source_event" / "source_health" thr
                A feed event already closed, or dispatched more than MATCH_WINDOW_S ago (a first run, a lost database),
                is recorded and never makes an incident
     match      an OPEN incident (queued, pending, active; never closed or dismissed) created within MATCH_WINDOW_S of the
-               report, with no report of the same source on it. When both have a location, the same place is required
-               (street_part() then same_place: house number and street, direction and suffix; an intersection never
-               equals a numbered address), whatever units they share. A unit in common (assignments not cleared, and
+               report, with no report of the same source on it (one at the same place that has: "possibly the same", never
+               silent). When both have a location, the same place is required (street_part() then same_place: house
+               number and street, direction and suffix; an intersection never equals a numbered address), whatever
+               units they share; and when both name units, at least one in common (one building, two calls: an
+               apartment, a school) or the same type, else "possibly the same". A feed's unit codes go through the
+               data file's "feed_unit_aliases" first. A unit in common (assignments not cleared, and
                the reports' units) never joins two reports on its own, with or without locations. Two incidents sharing units in the
                window that may not be joined are noted "possibly the same as #N" on both: a duplicate is never silent
+    same call  a match must also be the same call (SAME_CALL_S): a page joins a feed's incident only when the feed's
+               dispatch is within 5 min of it or the types agree, and never one the feed has in service. A feed event
+               never joins an incident made after it ended; one first seen closed or old only when it was dispatched
+               within 5 min of the incident's creation (the same call, recovered after an outage), else recorded only
     attach     a page attaches only to an incident a feed has. A feed event attaches to any match (always a strict
                same place): a page that beat the feed gets the feed's report, not a duplicate. A person's type and
                location stand (manual_edits; an incident a person made counts as theirs). Any other near match: the
@@ -49,6 +56,7 @@ import json
 import re
 import threading
 import time
+from pathlib import Path
 from datetime import datetime
 from statistics import median
 from typing import Callable
@@ -60,6 +68,7 @@ PAGING, PAGING_RANK, PAGING_LABEL = "paging", 1000, "Paging"
 FEED_SOURCE = "CAD feed"               # incidents.source of one an external feed made
 PAGE_SOURCE = "60 Control page"
 MATCH_WINDOW_S = 20 * 60.0
+SAME_CALL_S = 5 * 60.0                 # a report's dispatch this close to an incident's creation: the same call
 REPORT_STALE_S = 180.0
 FORGET_S = 24 * 3600.0                 # a feed silent this long is off the tiers (taken off the station)
 INCOMING_S = 300.0
@@ -142,9 +151,25 @@ def norm_unit(u: str) -> str:
     return letters + digits
 
 
+UNIT_ALIASES: dict[str, str] = {}    # a feed's unit code -> our board code, both normalised (the data file's
+                                      # "feed_unit_aliases", as the dispatch mode reads it; set_unit_aliases)
+
+
+def set_unit_aliases(aliases: dict | None) -> None:
+    global UNIT_ALIASES
+    UNIT_ALIASES = {norm_unit(k): norm_unit(v) for k, v in (aliases or {}).items()
+                    if isinstance(k, str) and isinstance(v, str) and norm_unit(k) and norm_unit(v)}
+
+
+def _unit(x: str) -> str:
+    n = norm_unit(x)
+    return UNIT_ALIASES.get(n, n)
+
+
 def units_match(a, b) -> set[str]:
-    """The units two lists have in common (normalised); a bare number matches a unit with that number."""
-    na, nb = {norm_unit(x) for x in a if norm_unit(x)}, {norm_unit(x) for x in b if norm_unit(x)}
+    """The units two lists have in common (normalised, a feed's code through UNIT_ALIASES); a bare number matches a unit
+    with that number."""
+    na, nb = {_unit(x) for x in a if _unit(x)}, {_unit(x) for x in b if _unit(x)}
     out = na & nb
     for x in na:
         for y in nb:
@@ -355,6 +380,12 @@ class Sources:
         L = self.cad.lists
         if L is not self._towns_for:
             set_towns(getattr(L, "geo_town_order", ()), getattr(L, "geo_town_aliases", {}))
+            try:
+                d = json.loads(Path(L.path).read_text()) if getattr(L, "path", None) else {}
+            except (OSError, ValueError):
+                d = {}
+            a = d.get("feed_unit_aliases") if isinstance(d, dict) else None
+            set_unit_aliases(a if isinstance(a, dict) else {})
             self._towns_for = L
 
     # -- health and tiers ----------------------------------------------------------------------------------------------
@@ -434,7 +465,7 @@ class Sources:
         return self.store.one("SELECT 1 AS x FROM source_reports WHERE incident_id = ? AND source != ? AND merged_into = '' "
                               "LIMIT 1", (iid, PAGING)) is not None
 
-    def match(self, source: str, at: float, location: str, units) -> tuple[dict | None, dict | None]:
+    def match(self, source: str, at: float, location: str, units, typ: str = "") -> tuple[dict | None, dict | None]:
         """(the open incident this report may attach to, else the one it is possibly the same as): see the module's
         "match". Whether it may attach there is also the caller's (see "attach")."""
         self._towns()
@@ -445,12 +476,18 @@ class Sources:
         bkey = nkey = None
         for inc in self.store.q(f"SELECT * FROM incidents WHERE created_at BETWEEN ? AND ? AND status IN "
                                 f"({','.join('?' * len(OPEN))})", (at - MATCH_WINDOW_S, at + MATCH_WINDOW_S, *OPEN)):
-            if inc["id"] in taken:
-                continue
-            common = units_match(units, self._units_of(inc["id"]))
+            on = self._units_of(inc["id"])
+            common = units_match(units, on)
             theirs = [x for x in (inc["address"], inc["place_address"], inc["geo_label"]) if place_key(x) is not None]
-            if here and theirs:
-                if any(same_place(location, x) for x in theirs):
+            same = here and bool(theirs) and any(same_place(location, x) for x in theirs)
+            if inc["id"] in taken:                           # this source has it already: another call there, noted
+                if not same:
+                    continue
+                score = -1
+            elif here and theirs:
+                if same and units and on and not common and not (typ and typ == inc["type"]):
+                    score = -1                               # one building, two calls (another unit, apartment...)
+                elif same:
                     score = 10 + len(common)
                 elif common:                                 # two places sharing units: never joined, never silent
                     score = -len(common)
@@ -597,7 +634,10 @@ class Sources:
             if inc is None:
                 # a match is always the same place (match): attach, whoever made the incident and whatever its status
                 # (open), so a page that beat the feed gets the feed's report, not a duplicate
-                inc, similar = self.match(ev.source, at, data["location"], data["units"])
+                typ = self.cad.map_type(data["type"], label)[0] if data["type"] else ""
+                inc, similar = self.match(ev.source, at, data["location"], data["units"], typ)
+                if inc is not None and not self._same_call(inc, data, now):
+                    inc, similar = None, inc                 # another call there (one that ended before, an old one)
             if inc is not None:
                 if inc["source"] == "manual":                # a person typed its type and location: theirs stand
                     self.mark_manual(inc["id"], [f for f, k in (("type", "type"), ("location", "address")) if inc[k]])
@@ -617,6 +657,24 @@ class Sources:
                 self._possibly(iid, similar)
             self._merge(ev.source, ev.event_id, iid, data, label)
             return iid
+
+    @staticmethod
+    def _disp(data: dict) -> float | None:
+        t = data.get("times") or {}
+        return t.get("dispatched") or (min(t.values()) if t else None)
+
+    def _same_call(self, inc: dict, data: dict, now: float) -> bool:
+        """May this feed event attach to that incident? Never when it ended (in service) before the incident was made: a
+        different call. An event first seen closed or old (dispatched over MATCH_WINDOW_S ago: after an outage) only when
+        it was dispatched within SAME_CALL_S of the incident's creation: the same call, recovered."""
+        made = inc["created_at"]
+        ended = (data.get("times") or {}).get("in_service")      # the event's own (a unit's may be an early cancel)
+        if ended is not None and ended < made:
+            return False
+        disp = self._disp(data)
+        if data.get("closed") or (disp is not None and now - disp > MATCH_WINDOW_S):
+            return disp is not None and abs(disp - made) <= SAME_CALL_S
+        return True
 
     def _create_feed(self, source: str, ref: str, data: dict, label: str) -> int:
         typ, sub, note = self.cad.map_type(data["type"], label)
@@ -778,7 +836,9 @@ class Sources:
                                      "AND NOT (source = ? AND ref = ?) LIMIT 1", (iid, source, ref))
                    or self.store.one("SELECT 1 AS x FROM assignments WHERE incident_id = ? LIMIT 1", (iid,))
                    or self.store.one("SELECT 1 AS x FROM events WHERE incident_id = ? AND kind IN ('note', 'dispatch', "
-                                     "'remarks', 'tones', 'attach', 'status', 'edit') LIMIT 1", (iid,)))
+                                     "'remarks', 'tones', 'attach', 'status', 'edit', 'alarm', 'prealert') LIMIT 1", (iid,))
+                   or self.store.one("SELECT 1 AS x FROM alarms WHERE incident_id = ? LIMIT 1", (iid,))
+                   or self.store.one("SELECT 1 AS x FROM radio_links WHERE incident_id = ? LIMIT 1", (iid,)))
         if touched:
             return False
         self.store.dismiss(iid, operator=label, reason=f"closed in {label}")
@@ -831,13 +891,27 @@ class Sources:
             rep = self._report(PAGING, ref)
             if rep and rep["incident_id"]:
                 return "attached", rep["incident_id"]
-            inc, similar = self.match(PAGING, at, location, units)
+            typ = str((data.get("f") or {}).get("type") or "")
+            inc, similar = self.match(PAGING, at, location, units, typ)
+            if inc is not None and self._has_feed(inc["id"]) and not self._page_same_call(inc, at, typ):
+                inc, similar = None, inc                     # another call there: the page's own incident, noted
             if inc is not None and self._has_feed(inc["id"]):
                 self._put(PAGING, ref, PAGING_RANK, PAGING_LABEL, at, rec, incident_id=inc["id"])
                 self._page_attached(inc, rec)
                 return "attached", inc["id"]
             self._put(PAGING, ref, PAGING_RANK, PAGING_LABEL, at, rec)
             return "create", inc or similar
+
+    def _page_same_call(self, inc: dict, at: float, typ: str) -> bool:
+        """A page joins a feed's incident only for the same call: the feed's dispatch within SAME_CALL_S of the page, or
+        the same type; never one the feed already has in service (or closed)."""
+        r = self._best_feed(inc["id"])
+        d = json.loads(r["data"] or "{}") if r else {}
+        ended = (d.get("times") or {}).get("in_service")
+        if d.get("closed") or (ended is not None and ended < at):
+            return False
+        disp = self._disp(d) or (r["first_seen"] if r else None)
+        return (disp is not None and abs(at - disp) <= SAME_CALL_S) or bool(typ and typ == inc["type"])
 
     def created_by_page(self, ref: str, iid: int, similar: dict | None = None) -> None:
         with self.store.tx() as db:
