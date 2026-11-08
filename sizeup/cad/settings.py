@@ -66,6 +66,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import math
 import re
 from datetime import datetime
 from pathlib import Path
@@ -527,17 +528,24 @@ class Editor:
         """Settings > System > Push notifications > Mute (#340): each health alert kind, muted or not, until when."""
         now = self.store.clock()
         on = health_mod.active_mutes((self.overrides() if ov is None else ov).get(MUTE_SECTION) or {}, now)
-        return {"kinds": [{"key": k, "label": lab, "muted": k in on, "until": on.get(k)}
+        return {"kinds": [{"key": k, "label": lab, "muted": k in on, "until": on.get(k),
+                           "timed_only": k in health_mod.MUTE_TIMED_ONLY}
                           for k, lab in health_mod.MUTE_KINDS.items()], "hours_max": MUTE_HOURS_MAX}
 
     @staticmethod
-    def _mute_value(v) -> dict:
+    def _mute_value(key: str, v, now: float) -> dict | None:
+        """A mute as stored ({"until": epoch | None}); None for one already over (dropped)."""
         if not isinstance(v, dict) or set(v) - {"until"}:
             raise CadError('{"until": a time or null}')
         u = v.get("until")
-        if u is not None and (isinstance(u, bool) or not isinstance(u, (int, float))):
-            raise CadError("until: a time (epoch seconds) or null (until unmuted)")
-        return {"until": None if u is None else float(u)}
+        if u is None:
+            if key in health_mod.MUTE_TIMED_ONLY:
+                raise CadError(f"until: a time ({health_mod.MUTE_KINDS[key]} is muted for a time only)")
+            return {"until": None}
+        if isinstance(u, bool) or not isinstance(u, (int, float)) or not math.isfinite(u) \
+                or not 0 <= u <= now + MUTE_HOURS_MAX * 3600.0:
+            raise CadError(f"until: a time (epoch seconds) within {MUTE_HOURS_MAX // 24} days, or null (until unmuted)")
+        return {"until": float(u)} if u > now else None
 
     def _mutes_op(self, action: str, body: dict, op: str) -> dict:
         """mute {key, hours?: 1..MUTE_HOURS_MAX (none: until unmuted)} | unmute {key}: admins (sizeup/cad/api.py)."""
@@ -553,6 +561,8 @@ class Editor:
                               if v.get("until") is not None else "")
         if action == "mute":
             h = body.get("hours")
+            if h is None and key in health_mod.MUTE_TIMED_ONLY:
+                raise CadError(f"hours: 1 to {MUTE_HOURS_MAX} ({health_mod.MUTE_KINDS[key]} is muted for a time only)")
             if h is None:
                 new = {"until": None}
             elif isinstance(h, bool) or not isinstance(h, (int, float)) or not 0 < h <= MUTE_HOURS_MAX:
@@ -562,6 +572,9 @@ class Editor:
         elif action == "unmute":
             if cur is None:
                 return {"ok": True, "alert_mutes": self.mutes_page()}
+            if shown(cur) == "pushed":                   # over already: tidied away, nothing to audit
+                out = self._commit([(MUTE_SECTION, key, REMOVE)], op, [])
+                return {**out, "alert_mutes": self.mutes_page()}
             new = REMOVE
         else:
             raise CadError("action: mute or unmute")
@@ -2239,13 +2252,17 @@ class Editor:
                 self._errors_value(k, v)
             except CadError as e:
                 raise CadError(f"overrides.{ERR_SECTION}.{e}") from None
-        for k, v in (ov.get(MUTE_SECTION) or {}).items():     # sizeup/cloud/health.py (#340)
+        for k, v in list((ov.get(MUTE_SECTION) or {}).items()):     # sizeup/cloud/health.py (#340)
             if k not in health_mod.MUTE_KINDS:
                 raise CadError(f"overrides.{MUTE_SECTION}: {', '.join(health_mod.MUTE_KINDS)} only")
             try:
-                ov[MUTE_SECTION][k] = self._mute_value(v)
+                m = self._mute_value(k, v, self.store.clock())
             except CadError as e:
                 raise CadError(f"overrides.{MUTE_SECTION}.{k}: {e}") from None
+            if m is None:
+                del ov[MUTE_SECTION][k]                   # over already: not brought back
+            else:
+                ov[MUTE_SECTION][k] = m
         st = ov.get("stt") or {}
         if set(st) - {"vocabulary", "aws_monthly_limit_usd"}:
             raise CadError("overrides.stt: vocabulary and aws_monthly_limit_usd only")

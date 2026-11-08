@@ -165,7 +165,7 @@ def test_mute_in_settings_audited_exported_and_read_by_health(tmp_path):
     assert not any(k["muted"] for k in page["kinds"])                     # default: nothing muted
     code, out = post({"action": "mute", "key": "adsb"})
     assert code == 200 and next(k for k in out["alert_mutes"]["kinds"] if k["key"] == "adsb") == \
-        {"key": "adsb", "label": "ADS-B receiver down", "muted": True, "until": None}
+        {"key": "adsb", "label": "ADS-B receiver down", "muted": True, "until": None, "timed_only": False}
     now = rig.cad.store.clock()
     code, out = post({"action": "mute", "key": "whisper", "hours": 24})
     w = next(k for k in out["alert_mutes"]["kinds"] if k["key"] == "whisper")
@@ -199,7 +199,12 @@ def test_hub_errors_muted_are_counted_not_pushed():
     for i in range(30):
         w.feed(stamp(clock.t, OVERFLOW.format(n=i)))
     clock.t += 30
-    assert w.tick() and n.got == [] and any("(not pushed: muted)" in m for m in logs)
+    assert w.tick() == [] and n.got == [] and not w.pushes                  # nothing marked as pushed
+    assert all(not s.alerting and not s.pushed_at for s in w.sigs.values()) and w.panel()["total"] == 30
+    muted[0] = False                                                      # unmuted, still over: pushed now
+    clock.t += 30
+    (got,) = w.tick()
+    assert got[0].startswith("Hub errors: aircraft OverflowError") and len(n.got) == 1
 
 
 def test_the_hub_reads_the_mutes_from_settings(tmp_path):
@@ -213,3 +218,92 @@ def test_the_hub_reads_the_mutes_from_settings(tmp_path):
         assert app.health.muted("adsb") and app.error_watch.muted() and not app.health.muted("whisper")
     finally:
         app.stop()
+
+
+# -- the #342 review ---------------------------------------------------------------------------------------------------
+
+def disk(pct):
+    st = station_status()
+    st["health"]["disk_pct"] = pct
+    return st
+
+
+def test_a_pushed_warning_back_as_critical_is_pushed_again_at_once():
+    r = Rig()
+    r.at(0, status=disk(92.0))
+    assert [m["priority"] for m in r.n.msgs if "disk" in m["title"]] == [3]
+    for t in range(60, 300, 30):                                          # 80 % for 4 min: settling
+        r.at(t, status=disk(80.0))
+    for t in range(300, 3 * 3600, 60):                                    # then 98 % for 3 h: critical
+        r.at(t, status=disk(98.0))
+    pushes = [m for m in r.n.msgs if "disk" in m["title"]]
+    assert [m["priority"] for m in pushes] == [3, 4] and "98% full" in pushes[1]["body"]
+    assert [a["severity"] for a in r.h.alerts() if a["key"] == "disk"] == ["critical"]
+    # in place too: 92 % -> 98 % without clearing, within repeat_min
+    r2 = Rig()
+    r2.at(0, status=disk(92.0))
+    r2.at(60, status=disk(98.0))
+    r2.at(120, status=disk(98.0))
+    assert [m["priority"] for m in r2.n.msgs if "disk" in m["title"]] == [3, 4]
+
+
+def test_a_hold_longer_than_the_settle_time_never_sends_a_false_recovery():
+    """ADS-B down past its hold, up a moment, down again: while held() counts it again it isn't "clear"."""
+    r = Rig(alerts_down_min=20.0)                                         # a hold longer than SETTLE_S
+    t = 0
+    for _ in range(4):                                                    # down 25 min, up 1 min, over and over
+        for dt in range(0, 25 * 60, 30):
+            r.at(t + dt, status=adsb_down())
+        for dt in range(25 * 60, 26 * 60, 30):
+            r.at(t + dt, status=adsb_down("starting"))
+        t += 26 * 60
+    titles = [m["title"].split(" · ")[0] for m in adsb(r.n.msgs)]
+    assert titles == ["ADS-B receiver down 20 min"]                       # no "Recovered" while it keeps coming back
+
+
+def test_a_pushed_alert_muted_afterwards_still_gets_its_recovery():
+    r = Rig()
+    mutes = {}
+    r.h.mutes = lambda: mutes
+    r.at(0, status=adsb_down())
+    r.at(120, status=adsb_down())
+    assert len(adsb(r.n.msgs)) == 1
+    mutes["adsb"] = {"until": None}
+    r.at(200, status=station_status())
+    r.at(200 + SETTLE_S, status=station_status())
+    assert [m["title"].split(" · ")[0] for m in adsb(r.n.msgs)] == ["ADS-B receiver down 2 min",
+                                                                     "Recovered: ADS-B receiver down"]
+    assert r.h.panel()["notify"]["muted"] == [{"kind": "adsb", "label": "ADS-B receiver down", "until": None}]
+
+
+def test_mute_values_are_checked_critical_ones_timed_only_and_expired_ones_dropped(tmp_path):
+    rig = SettingsRig(tmp_path)
+    post = lambda body: call(rig.api, "/api/cad/settings/alert_mutes", body, COREY)       # noqa: E731
+    now = rig.cad.store.clock()
+    for key in ("silent", "trunk", "job"):                                # critical: for a time only
+        code, out = post({"action": "mute", "key": key})
+        assert code == 400 and "for a time only" in out["error"]
+        assert post({"action": "mute", "key": key, "hours": 1})[0] == 200
+    page = {k["key"]: k for k in rig.cad.settings_get()["alert_mutes"]["kinds"]}
+    assert page["trunk"]["timed_only"] and not page["adsb"]["timed_only"]
+    ex = rig.cad.settings_export()
+    imp = lambda mutes: call(rig.api, "/api/cad/settings/import",                      # noqa: E731
+                             {"action": "apply", "settings": dict(ex, overrides=dict(ex["overrides"], alert_mutes=mutes))},
+                             COREY)
+    for bad in ({"adsb": {"until": float("inf")}}, {"adsb": {"until": 1e300}}, {"adsb": {"until": -5}},
+                {"adsb": {"until": float("nan")}}, {"silent": {"until": None}}, {"adsb": {"until": "soon"}}):
+        code, out = imp(bad)
+        assert code == 400 and "alert_mutes" in out["error"], bad
+    code, _ = imp({"adsb": {"until": now - 60}, "whisper": {"until": now + 3600}, "disk": {"until": None}})
+    assert code == 200
+    assert rig.cad.settings.section(H.MUTE_SECTION) == {"whisper": {"until": now + 3600}, "disk": {"until": None}}
+    page = rig.cad.settings_get()                                         # the page is still served
+    assert {k["key"] for k in page["alert_mutes"]["kinds"] if k["muted"]} == {"whisper", "disk"}
+    # a mute over already: unmuting tidies it away without an audit row
+    with rig.cad.store.tx() as db:
+        db.execute("UPDATE settings_overrides SET value = ? WHERE section = ? AND key = ?",
+                   ('{"until": %f}' % (now - 10), H.MUTE_SECTION, "whisper"))
+    n0 = len(rig.cad.settings_audit_log({"section": ["system"]})["audit"])
+    assert post({"action": "unmute", "key": "whisper"})[0] == 200
+    assert "whisper" not in rig.cad.settings.section(H.MUTE_SECTION)
+    assert len(rig.cad.settings_audit_log({"section": ["system"]})["audit"]) == n0

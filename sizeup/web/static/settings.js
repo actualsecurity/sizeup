@@ -1800,14 +1800,15 @@ function sMutes(m) {
   if (window.Help && Help.info) head.append(Help.info("A muted alert still shows on Settings > Health; it and its recovery aren't pushed."));
   const rows = m.kinds.map((k) => {
     const [lab, cb] = sCheck(k.label, k.muted, k.muted ? "Unmute: pushed again" : "Mute: Health only, no push");
-    const sel = sSelect(S_MUTE_FOR, "24", null, `${k.label}: mute for`);
+    const sel = sSelect(k.timed_only ? S_MUTE_FOR.slice(1) : S_MUTE_FOR, "24", null, `${k.label}: mute for`);
+    if (k.timed_only) sel.title = "Critical: muted for a time only";
     cb.disabled = sel.disabled = !canDo("admin");
     cb.addEventListener("change", () => sPost("alert_mutes", cb.checked
       ? { action: "mute", key: k.key, hours: sel.value ? Number(sel.value) : null }
       : { action: "unmute", key: k.key }, `${k.label}: ${cb.checked ? "muted" : "pushed"}`));
     const row = el("div", "row");
     row.append(lab, el("span", "spacer"), k.muted
-      ? sState(k.until ? `muted until ${fmtTime(k.until)}` : "muted")
+      ? el("span", "chip s-state edited", k.until ? `Muted until ${fmtTime(k.until)}` : "Muted")
       : sel);
     return row;
   });

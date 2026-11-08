@@ -71,7 +71,8 @@ const StationHealth = (() => {
         : !n.on ? "Not pushed (push off)" : a.pushed ? "Pushed" : "Not pushed yet";
       const flap = th.flap_n && a.flaps >= th.flap_n ? `flapping, back ${a.flaps}× in 1 h` : "";
       const det = el("span", "hb-detail dim small", [where, rec, flap].filter(Boolean).join(" · "));
-      det.title = n.on ? "Pushed to the status topic; a recovery notice follows when it clears" : "Push off: it clears here and in the log only";
+      det.title = a.muted ? "Muted: shown here, not pushed; no recovery push (Settings > System > Push notifications)"
+        : n.on ? `Pushed to the status topic; "Recovered" once clear ${th.settle_min || 15} min` : "Push off: it clears here and in the log only";
       r.append(sevChip(a.severity), el("b", "hb-title", a.title), el("span", "hb-text", a.text),
         el("span", "hb-when dim", `since ${when(a.since)} · ${longDur(serverNow() - a.since)}`), det);
       return r;
@@ -86,12 +87,15 @@ const StationHealth = (() => {
     const push = n.on ? `Push on · ${(n.server || "").replace(/^https?:\/\//, "")}` + (n.failed ? ` · ${n.failed} failed: ${n.last_error}` : "")
       : "Push off";
     const pushEl = el("span", "dim small", push);
+    const muted = n.muted || [];                // alert kinds muted (#340): not pushed until unmuted or the time is up
+    const mutedEl = muted.length ? el("span", "chip hl-warn", `Muted: ${muted.map((x) => x.label + (x.until ? ` until ${when(x.until)}` : "")).join(", ")}`) : null;
+    if (mutedEl) mutedEl.title = "Shown here, not pushed (Settings > System > Push notifications)";
     // #278: why it is off and where to set it, behind an "i" (a tap on a tablet; a title alone never shows there)
     if (!n.on && window.Help && Help.info) pushEl.append(" ", Help.info("No status topic in effect. Set one in Settings > System > Push notifications, SSM /sizeup-hub/status-topic or [alerts]"));
     const head = el("div", "card-head");
     head.append(el("h2", "", "Now"),
       el("span", `chip ${d.alerts.length ? "hl-bad" : "hl-ok"}`, d.alerts.length ? `${d.alerts.length} alert${d.alerts.length === 1 ? "" : "s"}` : "No alerts"),
-      el("span", "spacer"), pushEl);
+      el("span", "spacer"), ...(mutedEl ? [mutedEl] : []), pushEl);
     const kids = [head];
     if (!h.reported) kids.push(el("p", "notice", "No station report yet"));
     else if (!h.health_reported) {

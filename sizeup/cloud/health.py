@@ -98,6 +98,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import math
 import os
 import re
 import shutil
@@ -153,6 +154,7 @@ MUTE_KINDS = {"adsb": "ADS-B receiver down", "whisper": "Speech-to-text down", "
               "outbox": "Station's events backing up", "disk": "Station disk full",
               "transcribe": "Amazon Transcribe failing", "aws_budget": "Amazon Transcribe monthly limit",
               "hub_errors": "Hub errors"}
+MUTE_TIMED_ONLY = ("silent", "trunk", "job")   # critical ones: muted for a time only, never until unmuted
 
 
 def alert_kind(key: str) -> str:
@@ -167,7 +169,8 @@ def active_mutes(section: dict | None, now: float) -> dict[str, float | None]:
     for k, v in (section or {}).items():
         if k in MUTE_KINDS and isinstance(v, dict):
             until = v.get("until")
-            if until is None or (isinstance(until, (int, float)) and not isinstance(until, bool) and until > now):
+            if until is None or (isinstance(until, (int, float)) and not isinstance(until, bool) and math.isfinite(until)
+                                 and until > now):
                 out[k] = None if until is None else float(until)
     return out
 
@@ -986,12 +989,14 @@ class StationHealth:
                 if c is None:
                     continue
                 a = self.active.get(key)
+                back = self._first.get(key, float(c.get("since") or now))   # held(): from when it was first seen again
                 if a is None and key in self.settling and \
-                        min(now, float(c.get("since") or now)) - float(self.settling[key]["cleared"]) >= self._settle_s(self.settling[key]):
+                        min(now, back) - float(self.settling[key]["cleared"]) >= self._settle_s(self.settling[key]):
                     self._settle(key, now, mutes)        # it had settled (between ticks): that episode's recovery first
                     settled = True
                 if a is None and key in self.settling:   # back before it settled (#340): the same episode, no push
                     a = self._resume(key, now)
+                    self._escalate(a, c)
                     a.update(severity=c["severity"], title=c["title"], text=c["text"], who=c.get("who") or a.get("who") or {})
                     changes.append(("start", a))
                     self.log(f"health: back {a['title']} before it settled, {self._flaps(a, now)}× in 1 h "
@@ -1003,6 +1008,7 @@ class StationHealth:
                     changes.append(("start", a))
                     self.log(f"health: ALERT {a['title']}: {a['text']} (since {_hhmm(a['since'])})")
                 else:
+                    self._escalate(a, c)
                     a.update(severity=c["severity"], title=c["title"], text=c["text"], who=c.get("who") or a.get("who") or {})
             for key in list(self.active):
                 if key in conds:
@@ -1018,12 +1024,13 @@ class StationHealth:
             cut = now - HISTORY_S
             self.history = [h for h in self.history if (h.get("cleared") or now) >= cut][-HISTORY_MAX:]
             for key, a in list(self.settling.items()):
-                if (key not in HUB_OWN and not judged) or now - float(a["cleared"]) < self._settle_s(a):
+                if (key not in HUB_OWN and not judged) or now - float(a["cleared"]) < self._settle_s(a) \
+                        or key in self._first:          # (held() sees it again, within its grace: not clear)
                     continue                             # not settled yet (or can't tell: the station is silent)
                 self._settle(key, now, mutes)
                 settled = True
             for a in self.active.values():
-                if (not a.get("pushed") and now - self.last_push.get(a["key"], 0.0) >= self.repeat_s
+                if (not a.get("pushed") and (a.get("escalated") or now - self.last_push.get(a["key"], 0.0) >= self.repeat_s)
                         and self._notify_ok(a, now) and alert_kind(a["key"]) not in mutes):
                     self._push(a, now)
             if changes or settled:
@@ -1042,10 +1049,17 @@ class StationHealth:
         self.active[key] = a
         return a
 
+    @staticmethod
+    def _escalate(a: dict, c: dict) -> None:
+        """A pushed warning that is now critical (disk 92 % -> 98 %): pushed again at once, whatever repeat_min."""
+        if a.get("pushed") and c["severity"] == "critical" and a.get("severity") != "critical":
+            a["pushed"], a["escalated"] = False, True
+
     def _settle(self, key: str, now: float, mutes: dict) -> None:
-        """Clear long enough (#340): the episode is over; "Recovered" if it was pushed and isn't muted."""
+        """Clear long enough (#340): the episode is over; "Recovered" if it was pushed (before any mute: a muted
+        alert is never pushed, so one pushed is told it is over)."""
         a = self.settling.pop(key)
-        if a.get("pushed") and alert_kind(key) not in mutes:
+        if a.get("pushed"):
             self._push(a, now, recovered=True)
 
     @staticmethod
@@ -1103,6 +1117,7 @@ class StationHealth:
                    priority=3, tags=("white_check_mark", "sizeup"), click=click, who=who)
             return
         a["pushed"] = True
+        a.pop("escalated", None)
         self.last_push[a["key"]] = now
         long = now - a["since"]
         flaps = self._flaps(a, now)
@@ -1147,7 +1162,8 @@ class StationHealth:
                 "notify": {"on": bool(n is not None and n.enabled),
                            "server": getattr(n, "server", "") if n is not None and n.enabled else "",
                            "sent": getattr(n, "sent", 0), "failed": getattr(n, "failed", 0),
-                           "last_error": getattr(n, "last_error", ""), "last_push": max(pushed.values(), default=None)},
+                           "last_error": getattr(n, "last_error", ""), "last_push": max(pushed.values(), default=None),
+                           "muted": [{"kind": k, "label": MUTE_KINDS[k], "until": u} for k, u in self._mutes(now).items()]},
                 "errors": self.errors.panel() if self.errors is not None else None,
                 "thresholds": {"silent_min": self.silent_s / 60, "behind_min": self.behind_s / 60,
                                "down_min": self.down_s / 60, "outbox_min": self.outbox_s / 60,
