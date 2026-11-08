@@ -136,6 +136,11 @@ def level(conf: float) -> str:
     return next(w for lo, w in LEVELS if conf >= lo)
 
 
+def conf_text(conf: float) -> str:
+    """The pre-alert's own confidence as the card shows it: 'medium 75%' (never the aircraft match's)."""
+    return f"{level(conf)} {round(float(conf) * 100)}%"
+
+
 @dataclass
 class AirportAlert:
     """What a source hands to AirportAlerts.raise_alert (the module doc)."""
@@ -258,13 +263,15 @@ class AirportAlerts:
                 "phrases": list(dict.fromkeys(a.phrases))[:MAX_PHRASES], "kinds": [a.kind], "event": dict(a.event),
                 "rank": int(a.rank), **_extras(a)}
         conf = round(max(0.0, min(1.0, float(a.confidence))), 2)
+        if a.push:
+            data["pushed"] = conf          # the confidence the one push said (additions may raise it later: not re-pushed)
         with self.store.tx() as db:
             cur = db.execute("INSERT INTO airport_alerts (source, kind, subject, grp, at, updated_at, title, detail, confidence, "
                              "channel, data, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')",
                              (a.source, a.kind, a.subject[:200], a.group[:80], at, now, a.title[:200], a.detail[:400], conf,
                               a.channel[:40], json.dumps(data)))
             pid = cur.lastrowid
-            self._event(db, f"Airport pre-alert ({SOURCES[a.source]}): {a.title} ({level(conf)} confidence)", at=at)
+            self._event(db, f"Airport pre-alert ({SOURCES[a.source]}): {a.title} (alert {conf_text(conf)})", at=at)
         self.log(f"airport pre-alert #{pid}: {a.title} ({conf:.2f})")
         return self.get(pid)
 
@@ -312,7 +319,7 @@ class AirportAlerts:
         loc = d.get("location") or {}
         if loc.get("basis"):
             body.append(("approx. location: " if loc.get("lat") is not None else "location: ") + loc["basis"])
-        body.append(f"{level(r['confidence'])} confidence · not dispatched · accept or dismiss in the CAD")
+        body.append(f"alert {conf_text(r['confidence'])} · not dispatched · accept or dismiss in the CAD")
         try:
             n.send(r["title"], " · ".join(b for b in body if b), 4, ("airplane", "warning"),
                    (self.public_url.rstrip("/") + "/cad") if self.public_url else "")
@@ -549,7 +556,9 @@ def aircraft_line(x: dict) -> str:
     if x.get("hex") is None and x.get("spoken"):
         parts.append("heard, not on ADS-B")
     elif x.get("match"):
-        parts.append(f"ADS-B match {round(float(x['match']) * 100)}%")
+        parts.append(f"ADS-B match {round(float(x['match']) * 100)}%")      # the callsign to aircraft match, not the alert's
+    if x.get("adsb"):
+        parts.append(str(x["adsb"]))
     return " · ".join(parts)
 
 
@@ -557,7 +566,7 @@ def remarks(r: dict) -> str:
     """The new event's remarks: what was heard, who, where (as said), and that it came from a pre-alert."""
     d = r.get("data") or {}
     lines = [f"Airport pre-alert ({r.get('source_name') or SOURCES.get(r.get('source'), '')}, {_hms(r.get('at'))}): "
-             f"{r.get('title', '')} ({r.get('level') or level(float(r.get('confidence') or 0))} confidence)"]
+             f"{r.get('title', '')} (alert {conf_text(float(r.get('confidence') or 0))})"]
     for s in d.get("snippets") or []:
         lines.append(f"{_hms(s.get('at'))} {s.get('channel', '')}: “{s.get('text', '')}”")
     for x in d.get("aircraft") or []:

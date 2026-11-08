@@ -893,8 +893,10 @@ class App:
         fetched = layer.st.get("fetched") if layer is not None else None
         if not fetched or time.time() - fetched > 60:
             return self._receiver_aircraft()
+        at = layer.st.get("at")      # the picture's feed time: a position's time is that less its age (atc.adsb_check)
         with layer._lock:      # ... and the wider set while NY Approach is heard (#260; each channel takes its own)
-            return [dict(a) for a in layer.view + getattr(layer, "wide", [])]
+            return [dict(a, pos_at=at - a["age"]) if isinstance(at, (int, float)) and isinstance(a.get("age"), (int, float))
+                    else dict(a) for a in layer.view + getattr(layer, "wide", [])]
 
     def _receiver_aircraft(self, max_age_s: float = 30.0) -> list[dict]:
         """The station's own ADS-B picture (sizeup/cloud/aircraftlink.py, read every second to forward to the hub): the
