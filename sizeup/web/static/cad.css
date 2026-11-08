@@ -100,6 +100,12 @@
   .aa-conf.low { color: var(--dim); }
   .aa-src, .aa-acft, .aa-loc { color: var(--text-2); font-size: var(--fs-xs); line-height: var(--lh-xs); overflow-wrap: anywhere; }
   .aa-loc.approx { color: var(--warn); }
+  /* an aircraft line on ADS-B: a click follows it on the map (aircraft.js), ringed there in the card's colour */
+  .aa-follow { display: block; inline-size: 100%; padding: 0; text-align: start; background: none; border: 0; cursor: pointer;
+    font: inherit; font-size: var(--fs-xs); line-height: var(--lh-xs); color: var(--text);
+    text-decoration: underline dotted; text-underline-offset: 3px; white-space: normal; overflow-wrap: anywhere; }
+  .aa-follow:hover { color: var(--accent-text); text-decoration-style: solid; }
+  .aa-lines .aa-follow { display: inline; inline-size: auto; font-size: inherit; line-height: inherit; }
   .aa-heard { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--s-1); }
   .aa-snip { display: flex; align-items: baseline; gap: var(--s-1); min-inline-size: 0; font-size: var(--fs-sm); line-height: var(--lh-sm); }
   .aa-snip.ctx { color: var(--text-2); }

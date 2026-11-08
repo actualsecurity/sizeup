@@ -416,6 +416,7 @@ window.CadMap = (() => {
       };
       btn("Recenter", opts.manual ? "Back to the location" : "Back to the call and its rigs", () => {
         this.userMoved = false;
+        this.map.fire("sizeup:recenter");             // an aircraft being followed (aircraft.js) is let go
         if (opts.onRecenter) opts.onRecenter(); else this.fit(true);
       }, "locate");
       if (opts.onExpand) btn("Expand", "Large map (Esc closes)", opts.onExpand, "expand");
@@ -437,6 +438,7 @@ window.CadMap = (() => {
         });
       });
       this.map.on("movestart", (e) => { if (e.originalEvent) this.userMoved = true; });
+      this.map.on("sizeup:follow", () => { this.userMoved = true; });   // following an aircraft: no refit until Recenter
       this.layer = new RigLayer(this.map, { ...opts, host });
       // Cameras, incidents, roadwork, signs, mileposts, exits and their Layers button (maplayers.js, #73)
       this.roads = window.MapLayers ? MapLayers.attach(this.map, host, ctrls, { layers: opts.layers }) : null;   // its set: "overview" | "incident" (#111)
@@ -462,6 +464,7 @@ window.CadMap = (() => {
       if (fid !== this.focusId) {                     // another call (or none): look at it whatever was done before
         this.focusId = fid;
         this.userMoved = false;
+        if (this.fitKey !== null) this.map.fire("sizeup:recenter");   // framed again: a followed aircraft let go
         this.fitKey = null;
         this.layer.closePicker();
         this.clearPlace();

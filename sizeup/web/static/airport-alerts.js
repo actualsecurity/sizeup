@@ -5,7 +5,9 @@
 //
 //   title      "HPN ATC: possible brush fire reported off runway 16 departure", the confidence (high / medium / low)
 //   heard      each transmission ("context": heard just before the one that matched), with ▶ for its audio
-//   aircraft   the callsign, type, distance and phase from the Aircraft layer (or "heard, not on ADS-B")
+//   aircraft   the callsign, type, distance and phase from the Aircraft layer (or "heard, not on ADS-B"); on ADS-B, a
+//              click follows it on the map (aircraft.js AircraftLayer.follow). Every aircraft an open card names is
+//              ringed on the map in its colour (AircraftLayer.alerts), wider while the card is hovered or focused
 //   location   the words heard, and the approximate point's reason (always marked approximate) or "not placed"
 //   Accept     a new PENDING event (never a dispatch: a person dispatches from it); Dismiss: nothing to it
 //
@@ -49,6 +51,17 @@ window.AirportAlerts = (() => {
     return parts.join(" · ");
   }
 
+  // the aircraft line: on ADS-B (a hex), a button that follows it on the map
+  function acftLine(x, text, tag) {
+    if (!x.hex || !window.AircraftLayer || !AircraftLayer.follow) return el(tag || "div", tag ? "" : "aa-acft", text);
+    const b = el("button", "aa-acft aa-follow", text);
+    b.type = "button";
+    b.dataset.hex = x.hex;
+    b.title = "Follow on the map";
+    b.addEventListener("click", (ev) => { ev.stopPropagation(); AircraftLayer.follow(x.hex); });
+    return b;
+  }
+
   function alarmWord(d, alarms) {
     if (!d.alarm_id || !alarms) return "";
     if ((alarms.open || []).some((x) => x.id === d.alarm_id)) return "Alarm open · ack on the alarm";
@@ -60,6 +73,15 @@ window.AirportAlerts = (() => {
     const d = a.data || {};
     const li = el("li", `aa aa-${a.level}` + (d.drill ? " aa-drill" : ""));
     li.dataset.key = String(a.id);
+    const hexes = (d.aircraft || []).map((x) => x && x.hex).filter(Boolean);
+    if (hexes.length && window.AircraftLayer && AircraftLayer.hover) {     // its aircraft ringed wider on the map
+      li.dataset.hex = hexes.join(" ");
+      const on = () => AircraftLayer.hover(hexes), off = () => AircraftLayer.hover([]);
+      li.addEventListener("mouseenter", on);
+      li.addEventListener("mouseleave", off);
+      li.addEventListener("focusin", on);
+      li.addEventListener("focusout", (e) => { if (!li.contains(e.relatedTarget)) off(); });
+    }
     const head = el("div", "aa-head");
     if (window.Icon) head.append(Icon("aircraft"));
     head.append(el("b", "aa-title", (d.drill ? "DRILL · " : "") + a.title),
@@ -69,7 +91,12 @@ window.AirportAlerts = (() => {
     if (aw) li.append(el("div", "aa-alarm", aw));
     if ((d.lines || []).length) {
       const dl = el("dl", "aa-lines");
-      for (const [k, v] of d.lines) dl.append(el("dt", "", k), el("dd", "", v));
+      const first = (d.aircraft || [])[0];
+      for (const [k, v] of d.lines) {
+        const dd = el("dd");
+        dd.append(k === "Aircraft" && first ? acftLine(first, v, "span") : v);
+        dl.append(el("dt", "", k), dd);
+      }
       li.append(dl);
     }
     li.append(el("div", "aa-src", `${a.source_name}${a.channel ? ` · ${a.channel}` : ""} · ${deps.time(a.at)}`
@@ -88,7 +115,7 @@ window.AirportAlerts = (() => {
       heard.append(r);
     }
     if (heard.children.length) li.append(heard);
-    if (!(d.lines || []).length) for (const x of d.aircraft || []) li.append(el("div", "aa-acft", aircraftLine(x)));
+    if (!(d.lines || []).length) for (const x of d.aircraft || []) li.append(acftLine(x, aircraftLine(x)));
     const loc = d.location;
     if (loc && loc.basis) {
       const placed = loc.lat !== undefined && loc.lat !== null;
@@ -134,6 +161,7 @@ window.AirportAlerts = (() => {
   function column(list, s, deps) {
     if (!list) return;
     const items = open(s);
+    if (window.AircraftLayer && AircraftLayer.alerts) AircraftLayer.alerts(items);    // ringed on the map while open
     list.hidden = !items.length;
     const sig = JSON.stringify(items.map((a) => [a.id, a.title, a.count, a.confidence, st.busy.has(a.id), st.playing,
                                                  (a.data || {}).lines, alarmWord(a.data || {}, deps.alarms)]));

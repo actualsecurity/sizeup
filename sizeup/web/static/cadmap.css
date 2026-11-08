@@ -234,6 +234,15 @@
   .ac-tag.departing { color: var(--info); }
   .ac-stale { margin-inline-start: auto; color: var(--warn); }
   .ac-emerg { color: var(--err); font-weight: 700; }
+  /* following an aircraft (aircraft.js follow): "Following N123AB ✕" at the foot of the map, in the alert's colour if one names it */
+  .ac-follow { position: absolute; inset-block-end: calc(var(--ctl-sm) + var(--s-6)); inset-inline-start: 50%; transform: translateX(-50%); z-index: var(--z-map);
+    display: flex; align-items: center; gap: var(--s-1); max-inline-size: calc(100% - var(--s-4)); padding: 0 0 0 var(--s-2);
+    font-size: var(--fs-sm); line-height: var(--lh-sm); font-weight: 700; color: var(--text); white-space: nowrap;
+    background: color-mix(in srgb, var(--bg) 90%, transparent); border: var(--bw) solid var(--line-strong); border-radius: var(--radius); }
+  .ac-follow .ico { flex: none; color: var(--text-2); }
+  .ac-follow.alerted { border-color: var(--accent-text); }
+  .ac-follow.alerted .ico { color: var(--accent-text); }
+  .ac-follow-t { min-inline-size: 0; overflow: hidden; text-overflow: ellipsis; }
   /* an aircraft's transmissions on HPN Tower in its box (#252, aircraft.js heardLines): ▶, time, who, the words */
   .ac-heard-head { margin-block-start: var(--s-2); color: var(--dim); font-size: var(--fs-xs); line-height: var(--lh-xs); }
   .ac-tx { display: flex; align-items: baseline; gap: var(--s-2); min-block-size: var(--ctl-sm); }

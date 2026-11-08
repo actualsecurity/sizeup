@@ -20,8 +20,10 @@ The model (AirportAlert, what a source hands in):
     confidence          0 to 1, the source's own (ATC: the rules' weights); shown as a word and a percentage
     snippets            [{id, at, channel, text, hits, context}]: the transmissions (id = the traffic id: its audio
                         is /api/audio/<id>.wav while it is kept), context = heard before the one that matched
-    aircraft            [{callsign, hex, type, model, reg, lat, lon, alt, gs, trk, phase, rwy, dist, match, spoken}]:
-                        the aircraft it is about, from the Aircraft layer (ATC: the callsign heard, matched to ADS-B)
+    aircraft            [{callsign, hex, type, model, reg, lat, lon, alt, gs, trk, phase, rwy, dist, match, spoken, pos_at}]:
+                        the aircraft it is about, from the Aircraft layer (ATC: the callsign heard, matched to ADS-B);
+                        pos_at: when lat / lon was its fix. Each row also carries "hexes", the ICAO addresses it names
+                        (the map rings those aircraft while it is open, and keeps a faded last fix when one is lost)
     location            {lat, lon, approx: true, radius_m, basis} when the words give a place (an approximate point,
                         always said to be one), or {placed: false, basis} / None; never more precise than what was said
     phrases             the location words heard ("off the departure end of runway 16", "rye lake")
@@ -507,6 +509,8 @@ class AirportAlerts:
             r["level"] = level(float(r["confidence"]))
             r["source_name"] = SOURCES.get(r["source"], r["source"])
             r["group"] = r.pop("grp", "")
+            # the aircraft it names, by ICAO address (the map's key: aircraft.js rings them while it is open)
+            r["hexes"] = [x["hex"] for x in r["data"].get("aircraft") or [] if isinstance(x, dict) and x.get("hex")]
         return rows
 
     def state(self, now: float | None = None) -> dict:
@@ -632,7 +636,7 @@ class AircraftPreAlerts:
         detail = f"ADS-B: {'our receiver' if rx else ev.get('feed') or 'public data'} · {A.ADSB_NOTE}"
         acft = {"callsign": who, "hex": ev.get("hex"), "type": ev.get("type"), "model": ev.get("model"), "reg": ev.get("reg"),
                 "lat": ev.get("lat"), "lon": ev.get("lon"), "alt": ev.get("alt"), "gs": ev.get("gs"),
-                "phase": ev.get("phase"), "rwy": ev.get("runway"), "dist": ev.get("dist_nm"), "match": 1.0}
+                "phase": ev.get("phase"), "rwy": ev.get("runway"), "dist": ev.get("dist_nm"), "match": 1.0, "pos_at": ev.get("pos_at")}
         return title, detail, lines, acft
 
     def _alert(self, ev: dict, alarm_id=None) -> AirportAlert:

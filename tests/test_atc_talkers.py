@@ -378,7 +378,7 @@ def test_the_console_shows_the_talker_like_unit_ids():
     rv = (STATIC / "radio-view.js").read_text()
     assert "atcExchanges(g.calls)" in rv and "atcSig(t)" in rv and "window.atcSig = atcSig;" in cadjs
     ac = (STATIC / "aircraft.js").read_text()
-    for s in ('id: "ac-ring"', '"sizeup:playing"', "function focus(hex)", "heardLines(d, a)", "» TALKING", "« TWR calling",
+    for s in ('id: "ac-ring"', '"sizeup:playing"', "function focus(hex, opts)", "heardLines(d, a)", "» TALKING", "« TWR calling",
               "cad.state.atc.map === false", "return { load, maps, data: () => store.data, KEY, focus"):
         assert s in ac, s
     st = (STATIC / "settings.js").read_text()
