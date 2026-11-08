@@ -47,19 +47,33 @@ window.AirportAlerts = (() => {
     if (x.dist !== undefined && x.dist !== null) parts.push(`${x.dist} NM`);
     if (typeof x.alt === "number") parts.push(`${x.alt.toLocaleString()} ft`);
     if (x.phase) parts.push((x.phase === "near" ? "near HPN" : x.phase) + (x.rwy ? ` ${x.rwy}` : ""));
-    parts.push(x.hex ? `ADS-B ${Math.round((x.match || 0) * 100)}%` : "heard, not on ADS-B");
+    parts.push(x.hex ? `ADS-B match ${Math.round((x.match || 0) * 100)}%` : "heard, not on ADS-B");
+    if (x.adsb) parts.push(x.adsb);
     return parts.join(" · ");
   }
 
+  const MATCH_TIP = "ADS-B match: how sure the callsign heard is this aircraft (not the alert's confidence)";
   // the aircraft line: on ADS-B (a hex), a button that follows it on the map
   function acftLine(x, text, tag) {
     if (!x.hex || !window.AircraftLayer || !AircraftLayer.follow) return el(tag || "div", tag ? "" : "aa-acft", text);
     const b = el("button", "aa-acft aa-follow", text);
     b.type = "button";
     b.dataset.hex = x.hex;
-    b.title = "Follow on the map";
+    b.title = `${MATCH_TIP}\nClick: follow it on the map`;
     b.addEventListener("click", (ev) => { ev.stopPropagation(); AircraftLayer.follow(x.hex); b.blur(); });   // (focus off: the ring follows the pointer)
     return b;
+  }
+
+  // The confidence chip's hover: what made it (the words each rule matched) and the confidence the push said.
+  function why(a, d) {
+    const said = [...new Set((d.snippets || []).flatMap((s) => s.hits || []))];
+    const out = [`Alert confidence ${Math.round(a.confidence * 100)}%`];
+    if (said.length) out.push(`matched: ${said.join(", ")}`);
+    for (const x of d.aircraft || []) if (x.adsb) out.push(x.adsb);
+    if (d.pushed !== undefined && d.pushed !== null && Math.round(d.pushed * 100) !== Math.round(a.confidence * 100)) {
+      out.push(`pushed at ${Math.round(d.pushed * 100)}%`);
+    }
+    return out.join("\n");
   }
 
   function alarmWord(d, alarms) {
@@ -86,8 +100,9 @@ window.AirportAlerts = (() => {
     }
     const head = el("div", "aa-head");
     if (window.Icon) head.append(Icon("aircraft"));
-    head.append(el("b", "aa-title", (d.drill ? "DRILL · " : "") + a.title),
-                el("span", `aa-conf ${a.level}`, a.source === "adsb" ? "ADS-B" : `${a.level} ${Math.round(a.confidence * 100)}%`));
+    const conf = el("span", `aa-conf ${a.level}`, a.source === "adsb" ? "ADS-B" : `${a.level} ${Math.round(a.confidence * 100)}%`);
+    if (a.source !== "adsb") conf.title = why(a, d);
+    head.append(el("b", "aa-title", (d.drill ? "DRILL · " : "") + a.title), conf);
     li.append(head);
     const aw = alarmWord(d, deps.alarms);
     if (aw) li.append(el("div", "aa-alarm", aw));
@@ -117,7 +132,13 @@ window.AirportAlerts = (() => {
       heard.append(r);
     }
     if (heard.children.length) li.append(heard);
-    if (!(d.lines || []).length) for (const x of d.aircraft || []) li.append(acftLine(x, aircraftLine(x)));
+    if (!(d.lines || []).length) {
+      for (const x of d.aircraft || []) {
+        const n = acftLine(x, aircraftLine(x));           // on ADS-B: a button that follows it on the map
+        if (x.hex && !n.title) n.title = MATCH_TIP;
+        li.append(n);
+      }
+    }
     const loc = d.location;
     if (loc && loc.basis) {
       const placed = loc.lat !== undefined && loc.lat !== null;

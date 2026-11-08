@@ -13,6 +13,7 @@ never answers "same" to an old process's rev.
 from __future__ import annotations
 
 import json
+import threading
 from email.utils import formatdate
 from urllib.error import HTTPError
 
@@ -27,6 +28,7 @@ class Stills(Fetch):
     def __init__(self, clock):
         super().__init__()
         self.clock, self.age, self.hls = clock, 60.0, True
+        self.gate: threading.Event | None = None       # set: the HLS origin answers only once it is set
 
     def __call__(self, url, timeout, limit, headers=None):
         if url.startswith((STILLS, "https://www.westchestergov.com/cctv/", "https://nyssnapshot.com/", "https://511ny.org/map/Cctv/")):
@@ -36,6 +38,8 @@ class Stills(Fetch):
             return 200, {"content-type": "image/png", "last-modified": formatdate(self.clock() - self.age, usegmt=True)}, b"\x89PNG"
         if "skyvdn.com" in url:
             self.calls.append((url, {}))
+            if self.gate is not None:
+                self.gate.wait(5)
             if not self.hls:
                 raise OSError("connection refused")
             if "chunklist_" in url:
@@ -71,6 +75,8 @@ def test_a_511ny_still_minutes_old_is_how_its_stills_are_not_a_camera_down():
 def test_a_live_video_camera_with_no_current_still_is_judged_by_its_stream():
     rd, f, clock = hub()
     f.age = 2 * 86400                                   # a still two days old (seen on one camera)
+    f.gate = threading.Event()                          # the origin slow to answer the probe
+    n = len(f.calls)
     for _ in range(3):
         clock.t += 60
         code, body, _, _ = rd.image("35992")
@@ -80,10 +86,9 @@ def test_a_live_video_camera_with_no_current_still_is_judged_by_its_stream():
     assert not c["down"] and (c["state"], c["why"]) == ("stale", "Still old · video not checked")
     lat, lon = c["lat"], c["lon"]
     assert "35992" not in [x["id"] for x in rd.nearest(lat, lon)]
-    # the sweep looks (two small GETs): it streams, so it is on
-    n = len(f.calls)
-    clock.t += r.HEALTH_SWEEP_S + 1
-    rd.sweep()
+    # (#308) the still going down set off a probe at once (two small GETs, in the background), not at the next sweep
+    f.gate.set()
+    assert rd.probes_done()
     assert any("35992" in u or "R8_039" in u for u, _ in f.calls[n:] if "skyvdn" in u)
     c = cam(rd, "35992")
     assert not c["down"] and c["state"] == "ok" and "35992" in [x["id"] for x in rd.nearest(lat, lon)]
@@ -92,6 +97,7 @@ def test_a_live_video_camera_with_no_current_still_is_judged_by_its_stream():
     rev = rd.rev
     clock.t += r.HEALTH_SWEEP_S + 1
     rd.sweep()
+    assert rd.probes_done()
     c = cam(rd, "35992")
     assert c["down"] and c["state"] == "offline" and c["why"] == "No video or image" and rd.rev != rev
     assert "35992" not in [x["id"] for x in rd.nearest(lat, lon)]

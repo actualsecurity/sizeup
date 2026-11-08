@@ -59,7 +59,7 @@ def test_the_aircraft_atc_matches_against_carry_their_fix_time(monkeypatch):
     planes = atc_planes(ly, clock, monkeypatch)
     assert planes and len(planes) >= len(d["aircraft"])
     for p in planes:
-        assert p["pos_at"] == round(ly.st["at"] - p["age"], 1)
+        assert p["pos_at"] == ly.st["at"] - p["age"]
     assert all(p["pos_at"] <= ly.st["at"] for p in planes)
 
 
@@ -189,7 +189,7 @@ out.calls = calls;
     atc_hex = hexes(items[0])[0]
     assert o["cards"][0]["hex"] == atc_hex
     (tag, hx, text, title), = o["cards"][0]["follow"]
-    assert tag == "BUTTON" and hx == atc_hex and text.startswith("N47DQ (SR22)") and "ADS-B" in text and title == "Follow on the map"
+    assert tag == "BUTTON" and hx == atc_hex and text.startswith("N47DQ (SR22)") and "ADS-B" in text and "not the alert's confidence" in title and title.endswith("Click: follow it on the map")
     assert o["cards"][1]["hex"] == "a0bead" and o["cards"][1]["follow"][0][1] == "a0bead"   # the emergency's Aircraft line
     # (the follow click takes the focus off its line: the ring stays wide only while the pointer is on the card)
     assert o["calls"] == [["alerts", [[atc_hex], ["a0bead"]]], ["hover", [atc_hex]], ["follow", atc_hex], ["hover", [atc_hex]],

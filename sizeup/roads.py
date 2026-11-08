@@ -123,6 +123,7 @@ from __future__ import annotations
 import base64
 import json
 import math
+import queue
 import re
 import sqlite3
 import threading
@@ -239,11 +240,15 @@ VIEWER_RE = re.compile(r"[A-Za-z0-9_-]{1,32}")   # a page's stream token (?v=): 
 STREAM_TIMEOUT_S = 10.0          # a chunklist or segment
 STREAM_OPEN_TIMEOUT_S = 6.0      # the first playlist: a stream that doesn't answer this fast is down at the source
 STREAM_RETRY_S = 300.0           # ... and is not asked again for this long (the viewer shows snapshots at once)
+PROBE_WORKERS = 2                # stream probes at once, off the feed thread (#308)
+PROBE_HOST_TIMEOUTS = 4          # a host's probes timing out this often in a row: its other cameras not probed
+PROBE_FRESH_S = 60.0             # a camera probed this recently is not probed again
 STREAM_AHEAD = 3                 # segments the pump keeps fetched ahead of the player, from the latest chunklist
 STREAM_LIST_FRESH_S = 2.0        # a chunklist younger than this is served from the pump's copy
 STREAM_MAX_BYTES = 4 * 1024 * 1024
 STREAM_SEG_TTL_S = 60.0          # a segment kept this long (two viewers of one camera: one fetch)
 STREAM_SEG_KEEP = 40
+STREAM_SEG_RETRY_S = 10.0        # a segment that failed (not for good) is not asked for again this soon (#308)
 STREAM_DAMAGE_WINDOW = 30        # stream_status's "damaged": of this many latest segments
 NEAR_KM = 1.5                    # "Cameras nearby" (the map's nearest-camera lookup): this close to the event
 # The incident viewer's cameras (#95): along the road, not as the crow flies
@@ -1150,6 +1155,10 @@ def same_camera(a: dict, b: dict, within_m: float = CAMERA_MATCH_M) -> bool:
 # kept until another beats it on those (sticky): its id is what the DVR records under and a dispatcher's Keep names.
 CAMERA_NAME_M = 300.0
 CAMERA_OVERLAY_M = 2000.0        # the same overlay on two stills: one camera, on the same road and this close (#320)
+OVERLAY_KEEP_S = 24 * 3600.0     # an overlay not read again within this long is forgotten (its camera's still is
+                                 # looked at every HEALTH_SWEEP_S, a merged-away one's too: sweep)
+OVERLAY_SAVE_S = 60.0            # the overlays read: into the disk cache at most this often
+OVERLAY_SPLIT_READS = 3          # a merge by overlay comes apart after this many reads in a row of another overlay
 CAMERA_MILE_MI = 0.2
 CAMERA_FRESHER_S = 300.0         # a still this much newer is the fresher one
 STREAM_NAME = re.compile(r"[A-Za-z0-9_-]{3,64}")
@@ -1877,15 +1886,33 @@ class Roads:
         self._health: dict[str, dict] = {}            # camera id -> {fails, down_since, last_image, checked}
         self._cam_kept: dict[str, str] = {}           # camera id -> the id kept for its camera at the last merge (#320)
         self._alias: dict[str, str] = {}              # a merged-away camera id -> the id kept for its camera
-        self._cam_group_cache: tuple[int, list[list[str]]] | None = None   # (the lists' hash, the groups' ids)
+        self._cam_group_cache: tuple[int, list[list[str]], set[str]] | None = None   # (hash, groups' ids, _overlay_tied)
+        self._cam_merge_lock = threading.Lock()       # _merge_cameras: its sticky choice and aliases, one at a time
+        self._overlay_tied: set[str] = set()          # the ids in groups an overlay joined (#320): their stills rechecked
         self._overlay: dict[str, tuple[int, int, bytes]] = {}   # camera id -> its still's overlay (camoverlay), when seen
+        self._overlay_seen: dict[str, float] = {}     # camera id -> when its overlay was last read
+        self._overlay_checked: dict[str, float] = {}  # a merged-away camera id -> when its still was last looked at
+        self._overlay_miss: dict[str, int] = {}       # an overlay-merged camera id -> reads in a row of another overlay
         self._overlay_rev = 0
+        self._overlay_dirty = False                   # read since the disk cache was last written
+        self._overlay_saved = 0.0
+        self._save_lock = threading.Lock()
         self._streams: dict[str, dict] = {}           # camera id -> {last (playlist request), base (the stream's folder)}
         self._segments: OrderedDict[str, dict] = OrderedDict()   # "cid/name" -> {body, ctype, fetched, kept, ...}
         self._segment_locks: dict[str, list] = {}               # "cid/name" -> [lock, users]: one fetch at a time
         self._stream_lock = threading.Lock()
         self._stream_down: dict[str, float] = {}      # camera id -> when its source last refused to stream
         self._probe: dict[str, dict] = {}             # camera id -> {at, ok}: its stream looked at by the sweep (#276)
+        # (#308) the probes run on PROBE_WORKERS threads of their own, never the feed thread: an origin that
+        # blackholes requests can't hold up the incident and sign feeds. A host whose probes time out
+        # PROBE_HOST_TIMEOUTS times in a row (an answered probe starts the count again: one host serves every 511NY
+        # camera, and a few dead cameras on it are not a dead host) is not probed again until the next sweep.
+        self._probe_q: queue.Queue = queue.Queue()
+        self._probe_lock = threading.Lock()
+        self._probing: set[str] = set()               # camera ids queued or being probed
+        self._probe_workers = 0
+        self._host_timeouts: dict[str, int] = {}      # stream host -> its probes timed out in a row this sweep
+        self._seg_retry: OrderedDict[str, tuple[float, str]] = OrderedDict()   # "cid/name" -> (asked again after, why)
         self._state_sig: tuple | None = None          # the cameras' states as the pages last heard them
         self._pumps: dict[str, threading.Thread] = {}
         self._swept = 0.0
@@ -1978,6 +2005,8 @@ class Roads:
         down before anyone opens one. The number fetched."""
         now = self.clock()
         self._swept = now
+        with self._probe_lock:
+            self._host_timeouts.clear()               # each sweep gives every host its chance again
         n = 0
         for c in list(self.merged("cameras")):
             if self._stop.is_set():
@@ -1987,10 +2016,82 @@ class Roads:
                 continue
             self.image(c["id"])
             n += 1
-            # (#276) a live-video camera whose still is down: is its stream there? (two small GETs, as a player's first)
+            # (#276) a live-video camera whose still is down: is its stream there? (two small GETs, as a player's
+            # first; in the background, #308)
             if c.get("video") and (self._health.get(c["id"]) or {}).get("down_since") is not None:
-                self.probe_stream(c["id"])
+                self.probe_soon(c["id"])
+        # (#320) the merged-away records' stills too, where an overlay is what ties them to the one kept: a merge made by
+        # overlays is checked as often as any camera (stamped at the sweep's start: every HEALTH_SWEEP_S, not two)
+        aliases = self.aliases()
+        tied = self._overlay_tied
+        for p in self.providers:
+            for c in list(p.data["cameras"]):
+                if self._stop.is_set():
+                    break
+                if (c["id"] in aliases and c["id"] in tied and c.get("url")
+                        and now - self._overlay_checked.get(c["id"], 0) >= HEALTH_SWEEP_S):
+                    self._overlay_look(c, now)
+                    n += 1
+        self._expire_overlays(now)
+        if self._overlay_dirty:
+            self._save()
         return n
+
+    def probe_soon(self, cid: str) -> bool:
+        """probe_stream on a probe thread (#308): not for a camera queued or probed in the last PROBE_FRESH_S, or on
+        a host whose last PROBE_HOST_TIMEOUTS probes this sweep all timed out. True when queued."""
+        cam = self.camera(cid)
+        if cam is None or not cam.get("video") or self._stop.is_set():
+            return False
+        host = urlsplit(cam["video"]).netloc
+        last = self._probe.get(cid)
+        with self._probe_lock:
+            if (cid in self._probing or self._host_timeouts.get(host, 0) >= PROBE_HOST_TIMEOUTS
+                    or (last is not None and self.clock() - last["at"] < PROBE_FRESH_S)):
+                return False
+            self._probing.add(cid)
+            self._probe_q.put((cid, host))
+            if self._probe_workers < PROBE_WORKERS:
+                self._probe_workers += 1
+                threading.Thread(target=self._probe_worker, name="roads-probe", daemon=True).start()
+        return True
+
+    def _probe_worker(self) -> None:
+        """Probes from the queue until it is empty for a while (the thread ends: a quiet hub holds none)."""
+        while True:
+            with self._probe_lock:
+                try:
+                    cid, host = self._probe_q.get_nowait()
+                except queue.Empty:
+                    self._probe_workers -= 1
+                    return
+                skip = self._stop.is_set() or self._host_timeouts.get(host, 0) >= PROBE_HOST_TIMEOUTS
+            try:
+                if not skip:
+                    self.probe_stream(cid)
+            except Exception as e:  # pragma: no cover - a probe's surprise never ends the thread
+                self.log(f"roads: {cid}: stream probe error {type(e).__name__}")
+            finally:
+                with self._probe_lock:
+                    self._probing.discard(cid)
+
+    def probes_done(self, timeout: float = 10.0) -> bool:
+        """Wait until no probe is queued or running (tests; shutdown). True when none is."""
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            with self._probe_lock:
+                if not self._probing:
+                    return True
+            time.sleep(0.01)
+        return False
+
+    def _probe_answered(self, host: str, timed_out: bool) -> None:
+        """A probe's outcome for its host's breaker: a timeout counts, anything answered starts the count again."""
+        with self._probe_lock:
+            n = self._host_timeouts[host] = self._host_timeouts.get(host, 0) + 1 if timed_out else 0
+        if n == PROBE_HOST_TIMEOUTS:
+            self.log(f"roads: {host}: {n} stream probes in a row timed out; its other cameras not probed until the "
+                     "next sweep")
 
     def probe_stream(self, cid: str) -> bool:
         """A live-video camera's stream looked at: its master playlist and its chunklist, as a player's first two
@@ -2004,6 +2105,7 @@ class Roads:
         ok = bool(st and st.get("list") and now - st.get("list_at", 0) < 30)
         if not ok:
             base = cam["video"].rsplit("/", 1)[0] + "/"
+            timed_out = False
             try:
                 code, _, body = self.fetch(cam["video"], STREAM_OPEN_TIMEOUT_S, 1 << 20)
                 clean = self._clean_playlist(body) if code == 200 and body else None
@@ -2011,8 +2113,10 @@ class Roads:
                 if chunk:
                     code, _, body = self.fetch(base + chunk, STREAM_TIMEOUT_S, 1 << 20)
                     ok = code == 200 and b".ts" in (body or b"")
-            except (HTTPError, URLError, OSError, ValueError):
+            except (HTTPError, URLError, OSError, ValueError) as e:
                 ok = False
+                timed_out = isinstance(e, TimeoutError) or isinstance(getattr(e, "reason", None), TimeoutError)
+            self._probe_answered(urlsplit(cam["video"]).netloc, timed_out)
         was = self._probe.get(cid, {}).get("ok")
         self._probe[cid] = {"at": now, "ok": ok}
         if not ok:
@@ -2082,29 +2186,40 @@ class Roads:
                     p.status[feed].update(at=at, n=len(items), next=at + p.every[feed], etag=str(f.get("etag") or ""),
                                           modified=str(f.get("modified") or ""),
                                           published=f.get("published") if isinstance(f.get("published"), (int, float)) else None)
-            for cid, v in (doc.get("overlays") or {}).items():     # (#320) the stills' overlays seen: a restart keeps them
-                if CAMERA_ID.fullmatch(str(cid)) and isinstance(v, list) and len(v) == 3:
+            have = {c["id"] for p in self.providers for c in p.data["cameras"]}
+            for cid, v in (doc.get("overlays") or {}).items():     # (#320) the stills' overlays read: a restart keeps them
+                if (cid in have and isinstance(v, list) and len(v) == 4 and isinstance(v[3], (int, float))
+                        and 0 <= now - v[3] <= OVERLAY_KEEP_S):
                     self._overlay[cid] = (int(v[0]), int(v[1]), base64.b64decode(str(v[2])))
+                    self._overlay_seen[cid] = float(v[3])
             self._overlay_rev += 1
             self._changed()
         except (OSError, ValueError, TypeError, AttributeError) as e:
             self.log(f"roads: cache {self.cache.name} not read ({type(e).__name__}); fetching afresh")
 
     def _save(self) -> None:
-        if not self.cache:
-            return
-        doc = {"bbox": list(self.bbox),
-               "providers": {p.name: {f: {"at": p.status[f]["at"], "items": p.data[f], "etag": p.status[f]["etag"],
-                                          "modified": p.status[f]["modified"], "published": p.status[f]["published"]}
-                                      for f in FEEDS} for p in self.providers},
-               "overlays": {cid: [w, rows, base64.b64encode(bits).decode()] for cid, (w, rows, bits) in list(self._overlay.items())}}
-        try:
-            self.cache.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.cache.with_suffix(".tmp")
-            tmp.write_text(json.dumps(doc, separators=(",", ":")))
-            tmp.replace(self.cache)
-        except OSError as e:
-            self.log(f"roads: cache not saved ({type(e).__name__}: {e})")
+        """The disk cache: the lists and the overlays read (#320: fresh ones, of ids a list has). Built and written under
+        one lock, so an older document never lands after a newer one."""
+        with self._save_lock:                              # (the feeds' thread and a still's: one save at a time)
+            self._overlay_dirty, self._overlay_saved = False, self.clock()
+            if not self.cache:
+                return
+            now = self._overlay_saved
+            have = {c["id"] for p in self.providers for c in p.data["cameras"]}
+            doc = {"bbox": list(self.bbox),
+                   "providers": {p.name: {f: {"at": p.status[f]["at"], "items": p.data[f], "etag": p.status[f]["etag"],
+                                              "modified": p.status[f]["modified"], "published": p.status[f]["published"]}
+                                          for f in FEEDS} for p in self.providers},
+                   "overlays": {cid: [w, rows, base64.b64encode(bits).decode(), self._overlay_seen.get(cid, 0)]
+                                for cid, (w, rows, bits) in list(self._overlay.items())
+                                if cid in have and now - self._overlay_seen.get(cid, 0) <= OVERLAY_KEEP_S}}
+            try:
+                self.cache.parent.mkdir(parents=True, exist_ok=True)
+                tmp = self.cache.with_suffix(".tmp")
+                tmp.write_text(json.dumps(doc, separators=(",", ":")))
+                tmp.replace(self.cache)
+            except OSError as e:
+                self.log(f"roads: cache not saved ({type(e).__name__}: {e})")
 
     # -- what the pages get ----------------------------------------------------------------------------
 
@@ -2128,7 +2243,8 @@ class Roads:
             if cur is not None and cur[0] == self.rev and feed in cur[1]:
                 return cur[1][feed]
         if feed == "cameras":
-            out = self._merge_cameras()
+            with self._cam_merge_lock:            # one merge at a time (the sweep, the probe threads, the pages')
+                out = self._merge_cameras()
             with self._lock:
                 if self._merge is None or self._merge[0] != self.rev:
                     self._merge = (self.rev, {})
@@ -2215,6 +2331,7 @@ class Roads:
             for p in order:
                 for c in p.data["cameras"]:
                     ids.setdefault(c["id"], (c, p.name))
+            self._overlay_tied = cached[2]
             return [[ids[i] for i in g] for g in cached[1]]       # (the records themselves: their state may be newer)
         groups: list[list[tuple[dict, str]]] = []
         seen: set[str] = set()
@@ -2224,11 +2341,26 @@ class Roads:
                 return same_camera(a, b)
             return km(a["lat"], a["lon"], b["lat"], b["lon"]) * 1000 <= DEDUPE_M
 
+        by_overlay: set[int] = set()                              # the groups an overlay joined a record to
+
         def fits(it: dict, pn: str, g: list) -> bool:
-            if not any(camera_match(it, o, w == pn, lambda a, b, w=w: near(a, b, pn, w)) or self._same_overlay(it, o)
-                       for o, w in g):
+            used = False
+
+            def match(o: dict, same_source: bool, w: str = "") -> bool:
+                nonlocal used
+                if camera_match(it, o, same_source, (lambda a, b: near(a, b, pn, w)) if not same_source else None):
+                    return True
+                if self._same_overlay(it, o):
+                    used = True
+                    return True
                 return False
-            return all(camera_match(it, o, True) or self._same_overlay(it, o) for o, w in g if w == pn)
+            if not any(match(o, w == pn, w) for o, w in g):
+                return False
+            if not all(match(o, True) for o, w in g if w == pn):
+                return False
+            if used:
+                by_overlay.add(id(g))
+            return True
         for p in order:
             for it in p.data["cameras"]:
                 if it["id"] in seen:
@@ -2239,7 +2371,8 @@ class Roads:
                     groups.append([(it, p.name)])
                 else:
                     g.append((it, p.name))
-        self._cam_group_cache = (sig, [[c["id"] for c, _ in g] for g in groups])
+        self._overlay_tied = {c["id"] for g in groups if id(g) in by_overlay for c, _ in g}
+        self._cam_group_cache = (sig, [[c["id"] for c, _ in g] for g in groups], self._overlay_tied)
         return groups
 
     def _same_overlay(self, a: dict, b: dict) -> bool:
@@ -2253,16 +2386,67 @@ class Roads:
                 and km(a["lat"], a["lon"], b["lat"], b["lon"]) * 1000 <= CAMERA_OVERLAY_M)
 
     def _note_overlay(self, cid: str, ctype: str, body: bytes) -> None:
-        """A fresh still's overlay kept (#320): a new one, or one that changed, groups the cameras again. A still with
-        none (a placeholder, a JPEG) leaves the last one known: what it said is still what the camera is."""
-        sig = camoverlay.overlay(body) if ctype == "image/png" else None
+        """A fresh still's overlay kept (#320). One another camera carries too groups the cameras again (and is saved,
+        OVERLAY_SAVE_S at most); a merged camera's that differs counts only after OVERLAY_SPLIT_READS reads in a row.
+        A still with none (a placeholder, a JPEG) leaves the last one read, until it is OVERLAY_KEEP_S old
+        (_expire_overlays)."""
+        sig = camoverlay.overlay(body)          # (the PNG's own signature, whatever its label: PNGs come as image/jpeg too)
         if sig is None:
             return
+        now = self.clock()
         old = self._overlay.get(cid)
-        self._overlay[cid] = sig
-        if not camoverlay.same(old, sig):
-            self._overlay_rev += 1
+        if camoverlay.same(old, sig):                     # read again as before
+            self._overlay_seen[cid] = now
+            self._overlay_miss.pop(cid, None)
+        elif old is not None and cid in self._overlay_tied:
+            # a camera an overlay merged: some bars come back a few edge pixels off now and then (5 of 26, hours apart);
+            # one odd read is noise (the pattern kept, nothing regrouped), OVERLAY_SPLIT_READS in a row its new name
+            self._overlay_miss[cid] = self._overlay_miss.get(cid, 0) + 1
+            if self._overlay_miss[cid] < OVERLAY_SPLIT_READS:
+                return
+            self._overlay_miss.pop(cid, None)
+            self._overlay[cid], self._overlay_seen[cid] = sig, now
+            self._overlay_rev += 1                        # the merge comes apart (unless it matches another way)
+            self._overlay_dirty = True
             self._changed()
+        else:
+            self._overlay[cid], self._overlay_seen[cid] = sig, now
+            # only a pattern another camera carries can merge: one never seen elsewhere (a scene read as a bar, a bar
+            # with its time in it) changes nothing, so nothing is regrouped, refreshed or saved for it
+            if any(camoverlay.same(sig, v) for k, v in list(self._overlay.items()) if k != cid):
+                self._overlay_rev += 1
+                self._overlay_dirty = True
+                self._changed()
+        if self._overlay_dirty and now - self._overlay_saved >= OVERLAY_SAVE_S:
+            self._save()
+
+    def _overlay_look(self, c: dict, now: float | None = None) -> None:
+        """A merged-away record's still, fetched for its overlay only (sweep): the merge is checked again, every
+        HEALTH_SWEEP_S, as for any listed camera's (a wrong one comes apart: its overlay differs)."""
+        self._overlay_checked[c["id"]] = self.clock() if now is None else now
+        try:
+            with self._parallel:
+                code, headers, body = self.fetch(c["url"], IMAGE_TIMEOUT_S, IMAGE_MAX_BYTES)
+        except (HTTPError, URLError, OSError, ValueError):
+            return
+        ctype = (headers.get("content-type") or "").split(";")[0].strip().lower()
+        if code == 200 and body:
+            self._note_overlay(c["id"], ctype, body)
+
+    def _expire_overlays(self, now: float) -> int:
+        """Forget the overlays not read within OVERLAY_KEEP_S and those of ids no list has now. The number forgotten."""
+        have = {c["id"] for p in self.providers for c in p.data["cameras"]}
+        gone = [cid for cid in list(self._overlay) if cid not in have or now - self._overlay_seen.get(cid, 0) > OVERLAY_KEEP_S]
+        for cid in gone:
+            self._overlay.pop(cid, None)
+            self._overlay_seen.pop(cid, None)
+            self._overlay_checked.pop(cid, None)
+            self._overlay_miss.pop(cid, None)
+        if gone:
+            self._overlay_rev += 1
+            self._overlay_dirty = True
+            self._changed()
+        return len(gone)
 
     def _cam_rank(self, c: dict) -> tuple:
         """What makes one record of a camera better than another, before the stills' times: in service, then live video,
@@ -2394,6 +2578,8 @@ class Roads:
                 h["down_since"] = now
         if was != (h["down_since"] is not None):
             self._changed()
+            if not was:
+                self.probe_soon(cid)                  # (#308) a video camera's still just went: its stream now
 
     def _down_answer(self, cid: str, cam: dict | None = None) -> tuple[int, bytes, str, dict]:
         h = self.health(cid, cam)
@@ -2892,7 +3078,9 @@ class Roads:
         """A segment from the cache, else from the origin: one fetch at a time per segment (the player and the pump
         asking at once wait for the one), checked (hlsseg.check) and repaired (frames whose reference chain is broken
         at the source left out). A body that isn't MPEG-TS with video, or came short of its Content-Length, is fetched
-        once more; failing again, hlsseg.Bad / ValueError (never served, never cached). Fetch errors are raised."""
+        once more; failing again, hlsseg.Bad / ValueError (never served, never cached). Fetch errors are raised.
+        (#308) Not video both times: a GAP for good (_note_bad). Any other failure: not asked for again for
+        STREAM_SEG_RETRY_S (a ValueError until then), then fetched as new."""
         key = f"{cid}/{name}"
         with self._stream_lock:                       # [lock, users]: dropped once nobody holds or waits for it
             ent = self._segment_locks.setdefault(key, [threading.Lock(), 0])
@@ -2902,21 +3090,37 @@ class Roads:
                 hit = self._segments.get(key)
                 if hit and self.clock() - hit["fetched"] < STREAM_SEG_TTL_S:
                     return hit
+                with self._stream_lock:
+                    retry = self._seg_retry.get(key)
+                if retry is not None and self.clock() < retry[0]:
+                    raise ValueError(f"{retry[1]}; asked again in {retry[0] - self.clock():.0f} s")
+                first_bad = False
                 for attempt in (1, 2):
                     try:
                         with self._parallel:
                             code, headers, body = self.fetch(base + name, STREAM_TIMEOUT_S, STREAM_MAX_BYTES)
                         if code != 200 or not body:
                             raise ValueError(f"HTTP {code}")
-                        return self._keep_segment(cid, name, headers, body, self.clock())
+                        hit = self._keep_segment(cid, name, headers, body, self.clock())
+                        with self._stream_lock:
+                            self._seg_retry.pop(key, None)
+                        return hit
                     except hlsseg.Bad as e:
-                        self._note_bad(cid, name, str(e))
-                        if attempt == 2:
+                        if attempt == 1:
+                            first_bad = True
+                        else:                             # (#308) not video both times: a GAP for good
+                            self._note_bad(cid, name, str(e), keep=first_bad)
+                            if not first_bad:
+                                self._retry_later(key, str(e))
                             raise
                     except ValueError as e:               # cut short (http_get), an HTTP error: once more
-                        if attempt == 2:
-                            self._note_bad(cid, name, str(e))
+                        if attempt == 2:                  # ... then asked again later (not marked bad)
+                            self._note_bad(cid, name, str(e), keep=False)
+                            self._retry_later(key, str(e))
                             raise
+                    except (HTTPError, URLError, OSError) as e:
+                        self._retry_later(key, f"{type(e).__name__}")
+                        raise
         finally:
             with self._stream_lock:
                 ent[1] -= 1
@@ -2924,10 +3128,19 @@ class Roads:
                     self._segment_locks.pop(key, None)
         raise AssertionError("unreachable")  # pragma: no cover
 
-    def _note_bad(self, cid: str, name: str, why: str) -> None:
+    def _retry_later(self, key: str, why: str) -> None:
+        with self._stream_lock:
+            self._seg_retry[key] = (self.clock() + STREAM_SEG_RETRY_S, why)
+            self._seg_retry.move_to_end(key)
+            while len(self._seg_retry) > STREAM_SEG_KEEP:
+                self._seg_retry.popitem(last=False)
+
+    def _note_bad(self, cid: str, name: str, why: str, keep: bool = True) -> None:
+        """A segment refused: logged; keep: kept in the stream's "bad" (a GAP in the players' lists, never fetched
+        again). Only hlsseg.Bad on both tries is kept (#308): a transient failure is asked again."""
         with self._stream_lock:
             st = self._streams.get(cid)
-            if st is not None:
+            if st is not None and keep:
                 st.setdefault("bad", {})[name] = why
                 while len(st["bad"]) > 50:
                     st["bad"].pop(next(iter(st["bad"])))
@@ -2992,8 +3205,8 @@ class Roads:
         return first
 
     def _for_player(self, cid: str, chunklist: bytes, start: bool = False) -> bytes:
-        """The chunklist as a player gets it (#276). Every list: a segment the hub knows has nothing to play (refused
-        twice, or no picture left after the repair) is marked EXT-X-GAP (the player skips it; its place and the
+        """The chunklist as a player gets it (#276). Every list: a segment the hub knows has nothing to play (twice not
+        video at all, or no picture left after the repair) is marked EXT-X-GAP (the player skips it; its place and the
         media sequence stay). start (a page's first chunklist: where its playback begins): the head trimmed of those
         and of the ones that came damaged, so the first picture is a whole live one; only the head, so the media
         sequence only ever moves on, and the discontinuity sequence counts any EXT-X-DISCONTINUITY taken off."""

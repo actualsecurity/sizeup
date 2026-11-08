@@ -196,8 +196,9 @@ class ErrorWatch:
     SECTION ({} without); db: hub.sqlite's MonitorDb (get / put), where the notices' state is kept."""
 
     def __init__(self, notifier=None, settings: Callable[[], dict] | None = None, clock: Callable[[], float] = time.time,
-                 log: Callable[[str], None] = print, click: str = "", db=None):
+                 log: Callable[[str], None] = print, click: str = "", db=None, muted: Callable[[], bool] | None = None):
         self.notifier, self.settings, self.clock, self.log, self.click = notifier, settings or (lambda: {}), clock, log, click
+        self.muted = muted or (lambda: False)            # muted in Settings > System > Push notifications (#340)
         self.db = db
         self.sigs: dict[tuple, _Sig] = {}
         self.times: deque = deque(maxlen=MAX_ALL)       # every error line in the last WINDOW_S: (at, signature)
@@ -389,6 +390,10 @@ class ErrorWatch:
         now = self.clock() if now is None else now
         cfg = self.config()
         k, limit = cfg["per_signature"], cfg["total"]
+        try:
+            mute = bool(self.muted())                    # muted (#340): no new notice, nothing marked as pushed
+        except Exception:  # noqa: BLE001 - the settings unreadable: push as usual
+            mute = False
         out: list[tuple[str, str]] = []
         changed = False
         with self._lock:
@@ -399,7 +404,7 @@ class ErrorWatch:
                     sig.over_at = sig.times[-1]             # its last line while over K: quiet from there
             # a signature over K
             for sig in sorted(self.sigs.values(), key=lambda x: -len(x.times)):
-                if len(sig.times) > k and now - sig.pushed_at >= REPEAT_S:
+                if len(sig.times) > k and now - sig.pushed_at >= REPEAT_S and not mute:
                     sig.pushed_at, sig.alerting = now, True
                     out.append(self._spike(sig, now, k))
             # the total over its threshold, not counting the signatures pushed this hour (one fault, one notice)
@@ -407,7 +412,7 @@ class ErrorWatch:
             rest = sum(1 for _, key in self.times if key not in pushed) if pushed else n5
             if rest > limit:
                 self.total_high = now
-            if rest > limit and now - self.total_pushed_at >= REPEAT_S:
+            if rest > limit and now - self.total_pushed_at >= REPEAT_S and not mute:
                 self.total_pushed_at, self.total_alerting = now, True
                 top = max(self.sigs.values(), key=lambda x: len(x.times), default=None)
                 title = f"Hub errors: {_fmt(n5)} in 5 min" + (

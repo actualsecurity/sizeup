@@ -1,5 +1,5 @@
 {
-  "_about": "HPN ATC pre-alert rules (GitHub #233; read by sizeup/atc.py). Each transmission on an airband channel (and the few before it on the same channel: the exchange) is lower-cased, punctuation dropped, and each rule's regular expression is looked for with word boundaries. A rule's weight is how sure a hit alone makes us that the fire department should hear about it (0 to 1); several rules combine as 1 - (1 - w1)(1 - w2)..., the earlier transmissions at context_factor. A pre-alert is raised at threshold or over. 'not': patterns that, in the same transmission, mean the rule's words are something else (no smoking, a drill). 'always': still counts inside an ATIS / NOTAM readout (suppress). Change the weights here, not in the code; tests/test_atc.py has the transcripts that must and must not trigger.",
+  "_about": "HPN ATC pre-alert rules (GitHub #233; read by sizeup/atc.py). Each transmission on an airband channel (and the few before it on the same channel: the exchange) is lower-cased, punctuation dropped, and each rule's regular expression is looked for with word boundaries. A rule's weight is how sure a hit alone makes us that the fire department should hear about it (0 to 1); several rules combine as 1 - (1 - w1)(1 - w2)..., the earlier transmissions at context_factor. A pre-alert is raised at threshold or over. 'not': patterns that, in the same transmission, mean the rule's words are something else (no smoking, a drill). 'always': still counts inside an ATIS / NOTAM readout (suppress). 'routine': counts less in an exchange of normal sequencing (routine). An accident rule's score also follows the named aircraft's ADS-B (sizeup/atc.py adsb_check). Change the weights here, not in the code; tests/test_atc.py has the transcripts that must and must not trigger.",
   "version": 1,
   "threshold": 0.5,
   "context_factor": 0.5,
@@ -66,8 +66,14 @@
      "not": "drill|training|exercise|test|truck check|inspection"},
 
     {"id": "crash", "category": "accident", "weight": 0.75, "thing": "possible crash",
-     "pattern": "crash|crashed|went down|(?:aircraft|airplane|plane|helicopter) (?:is )?down|accident|impact(?:ed)? (?:the )?(?:ground|terrain|trees|water)|lost (?:contact|radar contact) with",
+     "pattern": "crash|crashed|went down|(?:aircraft|airplane|plane|helicopter) (?:is )?down|accident|impact(?:ed)? (?:the )?(?:ground|terrain|trees|water)",
      "not": "crash crew|crash fire|crash rescue|crash trucks?|crash (?:and|&) fire|no accident|(?:ils|localizer|glide ?slope|frequency|radio|radar|system|scope|lights?|website|computer) (?:went|is) down"},
+    {"id": "lost-radar", "category": "accident", "weight": 0.6, "routine": true, "thing": "radar contact lost",
+     "pattern": "lost radar(?: contact)?|radar contact (?:is |was |has been )?lost|lost (?:him|her|them|it|the target|the aircraft|his target|their target) on (?:radar|the scope|my scope)",
+     "not": "(?:lost|lose|losing|no) (?:radio |visual |radar )?(?:contact|sight|visual|the visual|joy)(?: with| of| on)? (?:the |that |this |my |your |our |any |his |her )?(?:traffic|preceding|airport|field|runway)|lost the (?:traffic|airport|field|runway)|looking for (?:the )?traffic|radar service terminated|squawk vfr|resume own navigation|frequency change approved"},
+    {"id": "lost-contact", "category": "accident", "weight": 0.45, "routine": true, "thing": "contact lost",
+     "pattern": "lost (?:all |radio )?contact with",
+     "not": "(?:lost|lose|losing|no) (?:radio |visual |radar )?(?:contact|sight|visual|the visual|joy)(?: with| of| on)? (?:the |that |this |my |your |our |any |his |her )?(?:traffic|preceding|airport|field|runway)|lost the (?:traffic|airport|field|runway)|looking for (?:the )?traffic|lost (?:all |radio )?contact with (?:the )?(?:tower|ground|approach|departure|center|frequency|atis)"},
 
     {"id": "disabled", "category": "runway", "weight": 0.7, "thing": "disabled aircraft",
      "pattern": "disabled (?:aircraft|airplane|plane|jet|on the runway)|(?:aircraft|airplane|plane) disabled|stuck on the runway|cant (?:taxi|move)|unable to (?:taxi|clear the runway)"},
@@ -104,6 +110,11 @@
     "aircraft": "cockpit|cabin|on board|onboard|flight deck|our (?:engine|engines|apu|cabin|cockpit)|the (?:engine|apu|brakes|wheel)|my (?:engine|aircraft)|lav|lavatory|galley",
     "field": "on the field|at the field|on the airport|on the ramp|on the apron|on the runway|on taxiway|near the runway|on the taxiway",
     "off_airport": "off the (?:departure |approach )?end|past the (?:departure |approach )?end|off (?:our|the|my) (?:left|right|nose|wing)|o ?clock|below us|beneath us|on the ground (?:below|beneath|off)|in the (?:woods|trees|brush|grass)|(?:north|south|east|west|northeast|northwest|southeast|southwest|north east|north west|south east|south west) of (?:the )?(?:field|airport|runway)|miles? (?:north|south|east|west|northeast|northwest|southeast|southwest)|by the (?:lake|reservoir|highway|parkway|interstate)|off (?:the )?airport|outside the (?:fence|airport)|near the (?:highway|parkway|interstate|lake|reservoir)|brush|grass|tree ?line|treeline|woods|house|building|neighborhood"
+  },
+  "routine": {
+    "_about": "Normal sequencing in the exchange (number 3, square the base, cleared to land, a pattern entry, following traffic): the rules marked 'routine': true (the ambiguous 'lost contact' words) count at factor there. Never the clear words (crashed, went down, MAYDAY).",
+    "factor": 0.6,
+    "pattern": "number (?:one|two|three|four|five|1|2|3|4|5)(?! engine)|square (?:the|your|my|it) base|(?:left|right) (?:downwind|base)|extend(?:ing)? (?:your |the |my |our )?downwind|cleared (?:to land|for the option|for (?:a )?touch and go|for takeoff)|touch and go|follow(?:ing)? (?:the |that |a )?(?:traffic|cessna|piper|cirrus|aircraft|jet)|traffic (?:to follow|in sight|is a)|make (?:left|right) traffic|report (?:midfield|base|final|downwind)|enter(?:ing)? (?:a )?(?:left |right )?(?:downwind|base)"
   },
   "suppress": {
     "_about": "An ATIS or NOTAM readout, or the weather: only the 'always' rules count in it (a recorded runway closure is not news).",
