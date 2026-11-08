@@ -69,6 +69,7 @@ class LivePaging:
     def __init__(self, plan: TonePlan, ours: Iterable[str] = (), clock: Callable[[], float] = time.time,
                  on_change: Callable[[], None] = _noop, rate: int = RATE, hold_s: float = HOLD_S):
         self.plan, self.clock, self.on_change, self.rate = plan, clock, on_change, rate
+        self.on_ours: Callable[[], None] = _noop     # a pair of ours started ringing (#297: the CAD feed adapters poll now)
         self.hold_s = hold_s        # at least the channel's continuation window (#61), so a held page stays shown
         self.ours = {base_name(n) for n in ours}
         self._lock = threading.Lock()
@@ -192,6 +193,11 @@ class LivePaging:
         cur.phase, cur.voice_s = "tones", 0.0
         cur.pairs.append(p)
         cur.tail = np.zeros(0)
+        if p["ours"]:
+            try:
+                self.on_ours()
+            except Exception:  # noqa: BLE001 - never in the way of the page
+                pass
 
     def _phase(self, cur: _Live, x: np.ndarray) -> None:
         if not cur.pairs:

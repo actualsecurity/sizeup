@@ -63,7 +63,8 @@ CONNECTED_S = 15.0       # no answer from the hub this long = not connected (the
 CALLS = ("set_mode", "set_talkgroup", "set_talkgroup_group", "retranscribe", "set_channel_prefs",
          "emergency_all_clear",       # an alarm's All clear on the hub: the emergency window here closes (#128)
          "transcribe_now",            # the hub's fallback when Amazon Transcribe can't: whisper at live priority (#195)
-         "set_adsb_receiver")         # Settings > Radios on the hub: the dongle reserved for ADS-B (#235)
+         "set_adsb_receiver",         # Settings > Radios on the hub: the dongle reserved for ADS-B (#235)
+         "sources_poll_now")          # a pre-alert on the hub: the CAD feed adapters here poll now (#297)
 
 
 def clip_8k(wav: bytes | None) -> bytes | None:

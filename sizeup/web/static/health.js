@@ -105,6 +105,20 @@ const StationHealth = (() => {
       for (const x of h.hints) box.append(el("p", "notice info", `${x.channel}: ${x.text}`));
       kids.push(el("h3", "hl-sub", "Hints"), box);
     }
+    const so = d.sources;
+    if (so && so.tiers) {   // incident sources (#297, sizeup/cad/sources.py): tiers, the acting primary, the lead over paging
+      const lead = (v) => (v === null || v === undefined ? "—" : `${v >= 0 ? "+" : "−"}${longDur(Math.abs(v))}`);
+      kids.push(el("h3", "hl-sub", "Incident sources"), table(["Tier", "Source", "State", "Reason", "Last report", "Primary"],
+        so.tiers.map((t) => [t.rank >= 1000 ? "backup" : t.rank, t.label, [t.state.replace(/_/g, " "), stateCls(t.state)], t.reason,
+          t.source === "paging" ? "" : `${when(t.at)} (${longDur(serverNow() - t.at)} ago)`, [t.acting ? "acting" : "", t.acting ? "hl-ok" : ""]]),
+        "None"));
+      if ((so.lead || []).length) kids.push(table(["Source", "Lead over paging (median)", "Range", "Incidents"],
+        so.lead.map((x) => [x.label, lead(x.median_s), `${lead(x.min_s)} … ${lead(x.max_s)}`, x.n]), ""));
+      if ((so.incidents || []).length) kids.push(table(["Event", "Location", "First seen", "Lead over paging"],
+        so.incidents.slice(0, 20).map((i) => [i.number || `#${i.id}`, i.address,
+          i.seen.map((x) => `${x.label} ${when(x.first_seen)}` + (x.gone_at ? " · no longer listed" : "")).join(" · "),
+          i.seen.filter((x) => x.lead_s !== null && x.lead_s !== undefined).map((x) => `${x.label} ${lead(x.lead_s)}`).join(" · ")]), ""));
+    }
     kids.push(el("h3", "hl-sub", "Station"), dl([
       ["Station", st.name || st.id],
       ["Connection", st.connected ? "Connected" : st.last_state ? `Offline · ${longDur(serverNow() - st.last_state)}` : "Offline",

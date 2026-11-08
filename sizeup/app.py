@@ -534,6 +534,9 @@ class App:
         # subscribes: one alert): prealert_sync() follows Settings > System > Station.
         self.prealert = None
         self._started = False
+        # External incident sources (#297, sizeup/sources/): the station's read-only CAD feed adapters, found and
+        # started in start() (never on the hub: it has none). Their events go to the hub's outbox, or the CAD here.
+        self.sources_runner = None
         # The map caches kept across hub restarts (sizeup/cachesync.py, #229): on a new Fargate task, the county GIS
         # layers, the camera lists, Metro-North's stations and the FAA registry come back from the S3 backups bucket.
         # Since #251 that happens in the background after the CAD serves (start_layers -> _load_layers), and the
@@ -3027,6 +3030,7 @@ class App:
             self.link.start()
         self._started = True
         self.prealert_sync()
+        self.start_sources()
         if self.cfg.cloud_role != "station":   # the station page has no maps: don't spend 511NY calls there
             self.start_layers()
         return self
@@ -3114,6 +3118,48 @@ class App:
         if self.cache_mirror is not None:
             self.cache_mirror.stop()
 
+    def start_sources(self) -> None:
+        """The incident sources (#297): the CAD's ticker (held reports, promotion) and this machine's adapters."""
+        self.cad.sources.start()
+        if self.cfg.cloud_role == "hub":         # station only: the hub gets their events through the outbox
+            return
+        from sizeup.sources.runner import SourceRunner, context_for, load_adapters, require_station
+        role = self.cfg.cloud_role or ""
+        require_station(role)                      # HubRefused: a hard check, before anything is looked at
+        root = Path(self.cfg.cad_db).parent if self.cfg.cad_db else Path(".")
+        env = dict(os.environ)                     # as it is now: the thread may start late
+
+        def load() -> None:                        # off the start path: a slow or hanging factory never holds it up
+            try:
+                adapters = load_adapters(context_for(root, log), log=log, env=env, role=role)
+                if adapters and not self._stopping.is_set():
+                    self.sources_runner = SourceRunner(adapters, self._source_out, log=log, role=role,
+                                                       target=self.forwarding).start()
+                    self.paging.on_ours = lambda: self.sources_poll_now("paging tones")
+                    self.cad.sources.trigger = self.sources_poll_now      # a pre-alert on this CAD (all-in-one)
+            except KeyboardInterrupt:
+                raise
+            except BaseException as e:  # noqa: BLE001 - never in the way of the station
+                log(f"incident sources: not loaded: {type(e).__name__}")
+        threading.Thread(target=load, name="sources-load", daemon=True).start()
+
+    def sources_poll_now(self, reason: str = "") -> int:
+        """Paging tones of ours, a radio or phone pre-alert (here, or the hub's job): the adapters poll now."""
+        r = self.sources_runner
+        return r.trigger(str(reason or "")[:40]) if r is not None else 0
+
+    def _source_out(self, kind: str, data: dict) -> None:
+        """An adapter's event or health: to the hub (a station forwarding), else the CAD here."""
+        if self.forwarding():
+            self._emit(kind, data)
+        else:
+            self.apply_source(kind, data)
+
+    def apply_source(self, kind: str, data: dict) -> None:
+        """A "source_event" / "source_health" / "source_seen" on the CAD of record (the hub applies the station's the
+        same way)."""
+        self.cad.sources.apply(kind, data)
+
     def forwarding(self) -> bool:
         """This app sends what it hears to a hub, which is then the CAD of record."""
         if self.station is not None:
@@ -3162,6 +3208,9 @@ class App:
             self.link.stop()
         if self.prealert is not None:
             self.prealert.stop()
+        if self.sources_runner is not None:
+            self.sources_runner.stop()
+        self.cad.sources.stop()
         self.stop_layers()
 
     def _weather_voice(self, text: str) -> tuple[str | None, str]:

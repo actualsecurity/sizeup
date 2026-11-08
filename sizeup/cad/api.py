@@ -99,6 +99,7 @@ POST /api/cad/incident/<id>/note          {text, units?: ["E63"], places?: [{lab
                                           kept while "@label" is in the text (never moves the event)
 GET  /api/cad/incident/<id>/units?q=e6    unit autocomplete: on the event first, then fire units, then the rest
 POST /api/cad/incident/<id>/recommend     {type?, subtype?}      -> {units, unfilled, already, card, note}
+POST /api/cad/incident/<id>/feed-use      {field: type|location} -> the event: the CAD feed's value over a person's (#297)
 POST /api/cad/incident/<id>/preview       {unit_ids, full?, remarks?} -> {text, kind, audio_url, audio_note, remarks,
                                                                     tones, tone_warnings}
 POST /api/cad/incident/<id>/dispatch      {unit_ids, operator, channel?, full?, remarks?} -> {dispatch_id, text, ...}
@@ -195,7 +196,7 @@ from sizeup.datasources import TooSoon
 
 JSON = "application/json"
 MAX_BODY = 65536
-INCIDENT = re.compile(r"/api/cad/incident/(\d{1,9})(?:/(accept|dismiss|close|reopen|note|recommend|preview|dispatch|upgrade|attach|link|unlink|return))?")
+INCIDENT = re.compile(r"/api/cad/incident/(\d{1,9})(?:/(accept|dismiss|close|reopen|note|recommend|preview|dispatch|upgrade|attach|link|unlink|return|feed-use))?")
 SUGGEST = re.compile(r"/api/cad/incident/(\d{1,9})/units")
 EXPORT = re.compile(r"/api/cad/export/([a-z-]{1,20}\.csv)")
 UNIT = re.compile(r"/api/cad/unit/(\d{1,9})/status")
@@ -223,7 +224,7 @@ ADMIN_READS = {
 # anyone signed in (a POST that changes nothing). First match wins; a path not here is "admin".
 WRITES = (
     (re.compile(r"/api/cad/incident(?:/\d{1,9}(?:/(?:accept|dismiss|close|reopen|note|recommend|preview|dispatch|upgrade"
-                r"|attach|link|unlink|return))?)?"), "dispatch"),                # events, notes, dispatches, radio links
+                r"|attach|link|unlink|return|feed-use))?)?"), "dispatch"),                # events, notes, dispatches, radio links
     (UNIT, "dispatch"),                                                     # unit status on the board
     (PREALERT, "dispatch"),                                                 # a phone pre-alert that is nothing
     (AIRPORT_ALERT, "dispatch"),                                            # an airport pre-alert: an event, or nothing
@@ -296,6 +297,8 @@ def _on_incident(m, b, o, c):
         return f"Dismissed {ev}" + (f": {_clip(b.get('reason'))}" if b.get("reason") else ""), n
     if act == "close":
         return f"Closed {ev}: {b.get('disposition', '')}", n
+    if act == "feed-use":
+        return f"Used the CAD feed's {_clip(b.get('field'), 20)} on {ev}", n
     if act == "reopen":
         return f"Reopened {ev}" + (f": {o['status']}" if o.get("status") else ""), n
     if act == "note":
@@ -689,7 +692,7 @@ class CadApi:
             fn = {None: c.update, "accept": c.accept, "dismiss": c.dismiss, "close": c.close, "reopen": c.reopen, "note": c.note,
                   "recommend": c.recommend, "preview": c.preview, "dispatch": c.dispatch, "upgrade": c.upgrade,
                   "attach": c.attach, "link": c.link_traffic, "unlink": c.unlink_traffic,
-                  "return": c.return_unit}[action]
+                  "return": c.return_unit, "feed-use": c.feed_use}[action]
             return fn(iid, body)
         if m := UNIT.fullmatch(path):
             return c.unit_status(int(m.group(1)), body)

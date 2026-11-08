@@ -397,6 +397,9 @@ class PreAlerts:
                      + (" (received late: expired)" if late else ""))
             if not late and not r["test"]:
                 self._match_recent(pid, r["at"])
+                sources = getattr(self.cad, "sources", None)
+                if sources is not None:
+                    sources.poke("phone pre-alert")    # the station's CAD feed adapters poll now (#297)
         self.on_change()
         return self.get(pid)
 
@@ -412,9 +415,10 @@ class PreAlerts:
 
     def _counts(self, inc: dict) -> bool:
         """A 60 Control page for us (queued from the monitor) or a new emergency event."""
-        if inc["status"] in ("closed", "dismissed") and inc["source"] != "60 Control page":
+        auto = inc["source"] in ("60 Control page", "CAD feed")      # a page, or an external CAD feed's (#297)
+        if inc["status"] in ("closed", "dismissed") and not auto:
             return False
-        return inc["source"] == "60 Control page" or bool(inc["emergency"])
+        return auto or bool(inc["emergency"])
 
     def match(self, inc: dict | None) -> list[int]:
         """Cad.create / Cad.from_monitor made an event: the open pre-alerts it answers are matched."""
