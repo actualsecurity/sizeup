@@ -1747,6 +1747,41 @@ function statusChoices(u, where) {
   if (!next) return mine;                              // a server without the flow: as before
   return next.map((c) => all.find((s) => s.code === c)).filter(Boolean);
 }
+// Follow a rig on the map (#358, cadmap.js): its unit-board row and its row on an incident, while it is on the map;
+// hovering (or focusing) either row rings it wider there. Only on a map already on screen: never a view switch (a new
+// call's draft, an edit form); no map showing it: the button flashes instead.
+const onMap = (name) => !!(window.CadMap && CadMap.onMap && CadMap.onMap(name));
+const FLASH_MS = 1200;
+function followBtn(name) {
+  const b = el("button", "mini quiet u-follow");
+  b.type = "button";
+  b.title = `Follow ${name} on the map`;
+  b.setAttribute("aria-label", b.title);
+  b.append(Icon("locate"));
+  b.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (CadMap.followUnit(name)) return;
+    b.classList.add("nomap");
+    b.title = "No map on screen";
+    setTimeout(() => { b.classList.remove("nomap"); b.title = `Follow ${name} on the map`; }, FLASH_MS);
+  });
+  return b;
+}
+let hoveredRow = null;                 // the row whose rig is ringed wider (cleared when that row goes)
+function hoverRig(li) {
+  const on = () => { if (li._rig && window.CadMap && CadMap.hoverUnits) { hoveredRow = li; CadMap.hoverUnits([li._rig]); } };
+  const off = () => { if (hoveredRow === li) hoveredRow = null; if (window.CadMap && CadMap.hoverUnits) CadMap.hoverUnits([]); };
+  li.addEventListener("mouseenter", on);
+  li.addEventListener("mouseleave", off);
+  li.addEventListener("focusin", on);
+  li.addEventListener("focusout", (e) => { if (!e.relatedTarget || !li.contains(e.relatedTarget)) off(); });
+}
+function dropGoneHover() {             // after a redraw: the hovered row removed (or its rig off it): no ring left behind
+  if (hoveredRow && (!hoveredRow.isConnected || !hoveredRow._rig)) {
+    hoveredRow = null;
+    if (window.CadMap && CadMap.hoverUnits) CadMap.hoverUnits([]);
+  }
+}
 function talkSig(name) {
   const t = Radio.talkingFor(name);
   return t ? `${t.key}|${t.ended ? 1 : 0}` : "";
@@ -1760,10 +1795,11 @@ function renderOnUnits(inc) {
     key: (a) => String(a.id),
     sig: (a) => JSON.stringify([a.status, a.dispatched_at, a.enroute_at, a.onscene_at, a.cleared_at, cad.listSig.length, cmd,
       (a.next || []).join(), (a.return || []).join(), talkSig(a.name), window.DispatchMode ? DispatchMode.sig(inc, a) : "",
-      cad.ask && cad.ask.uid === a.unit_id && cad.ask.where === "inc" ? cad.ask.status : null]),
-    make: () => el("li", "ou"),
+      cad.ask && cad.ask.uid === a.unit_id && cad.ask.where === "inc" ? cad.ask.status : null, !a.cleared_at && onMap(a.name)]),
+    make: () => { const li = el("li", "ou"); hoverRig(li); return li; },
     fill: (li, a) => {
       li.className = "ou" + (a.cleared_at ? " cleared" : "");
+      li._rig = a.cleared_at ? "" : a.name;
       const head = el("div", "ouh");
       head.append(el("b", "", a.name));
       if (!a.cleared_at) head.append(statusChip(a.status, agencySet(a) ? statusLabel(a, a.status) : undefined));
@@ -1775,6 +1811,7 @@ function renderOnUnits(inc) {
       head.append(times, el("span", "spacer"));
       const talk = !a.cleared_at && Radio.talkingFor(a.name);
       if (talk) head.append(el("span", "talk-badge", `${talk.ended ? "Ended" : "TX"} ${talk.channel}`));
+      if (!a.cleared_at && onMap(a.name)) head.append(followBtn(a.name));
       if (!a.cleared_at && isOpen(inc)) {
         head.append(statusButtons({ id: a.unit_id, status: a.status, next: a.next, cmd: cmd !== a.name && cmd,
           status_set: a.status_set || "" }, "inc"));
@@ -1784,6 +1821,7 @@ function renderOnUnits(inc) {
     },
     empty: "None",
   });
+  dropGoneHover();
 }
 
 function playForEvent(inc, e) {
@@ -3199,9 +3237,10 @@ function renderUnits() {
       sig: (u) => JSON.stringify([u.status, u.status_at, u.incident_number, u.out_of_service, u.spare, cad.openUnit === u.id,
         talkSig(u.name),
         cad.ask && cad.ask.uid === u.id && cad.ask.where === "board" ? cad.ask.status : null, cad.listSig.length,
-        cad.pick && cad.pick.uid === u.id ? cad.pick.status : null]),
+        cad.pick && cad.pick.uid === u.id ? cad.pick.status : null, !BOARD && onMap(u.name)]),
       make: () => {
         const li = el("li", "urow item");
+        hoverRig(li);
         const flip = () => {
           const id = Number(li.dataset.key);
           cad.openUnit = cad.openUnit === id ? null : id;
@@ -3226,6 +3265,7 @@ function renderUnits() {
         li.className = "urow item" + (cad.openUnit === u.id ? " open" : "") + (oos ? " oos" : "")
           + (talk ? (talk.ended ? " talked" : " talking") : "");
         li.style.setProperty("--st", unitStatus(u.status).bg || "#9AA3AD");     // Dispatch's rig tile: its status edge (#205)
+        li._rig = u.name;
         const head = el("div", "uh");
         const name = el("b", "un", u.name);
         name.title = [u.title, u.spoken && u.spoken !== u.name ? `said "${u.spoken}"` : "", u.department, u.spare ? "spare" : ""]
@@ -3245,6 +3285,7 @@ function renderUnits() {
           tb.title = [talk.radio_id ? `Radio ${talk.radio_id}` : "", talk.label || talk.alias || ""].filter(Boolean).join(", ");
           head.append(tb);
         }
+        if (!BOARD && onMap(u.name)) head.append(followBtn(u.name));
         const ust = el("span", "ust");                                        // the status and its time: one piece (#205)
         ust.append(statusChip(u.status, agencySet(u) ? statusLabel(u, u.status) : undefined), since(el("span", "ut"), u.status_at, true));   // compact, exact on hover (#209)
         head.append(el("span", "spacer"), ust);
@@ -3263,6 +3304,7 @@ function renderUnits() {
       empty: "None",
     });
   });
+  dropGoneHover();
 }
 
 function renderUnitLog() {

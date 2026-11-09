@@ -231,9 +231,11 @@ class Cad:
         self.has_clip: Callable[[str], bool] = lambda cid: False
         # Is this talkgroup "Main" (the station's switch, Settings > Radios)? The app sets it; alone: the incident talkgroups.
         self.main_tg: Callable[[int], bool] = lambda tg: tg in s.incident_talkgroups
-        # The maps (sizeup/cad/mapview.py): live unit positions {code: {lat, lon, at}} from a future AVL
-        # feed (IamResponding, Red Alert, an iPad app). Nothing sets it yet.
+        # The maps (sizeup/cad/mapview.py): live unit positions {code: {lat, lon, at, heading?, speed?, source?}}
+        # from a future AVL feed (IamResponding, Red Alert, an iPad app; #358). The single input: no provider sets
+        # it yet (the source isn't chosen); _feed_position() feeds fixes in the ingest shape for tests and dev.
         self.positions: Callable[[], dict[str, dict]] = lambda: {}
+        self._fed: dict[str, dict] = {}
         # [cloud] role = "hub" (sizeup/cloud/hub.py): the voice is Amazon Polly's, rendered here
         # (tts_engine "polly"), else the station's: remote_voice(job) -> (WAV bytes, "Voice: ...") or
         # AudioUnavailable, also Polly's fallback; audio_blobs keeps the dispatch audio in SQLite (the
@@ -530,6 +532,14 @@ class Cad:
             if f:
                 out[str(code)] = f
         return out
+
+    def _feed_position(self, fix: dict) -> None:
+        """Tests and local dev only (#358): one fix in mapview's ingest shape {unit, lat, lon, at, heading?,
+        speed?, source}, kept as that unit's latest and handed to the maps through Cad.positions, the single
+        input. Not a provider: nothing in the app calls it."""
+        code, pos = mapview.ingest(fix)
+        self._fed[code] = pos
+        self.positions = lambda: dict(self._fed)
 
     def map_slice(self, units: list[dict], incs: list[dict], pos: dict, now: float) -> dict:
         tags = {c: j["tag"] for j in self.lists.joint_response.values() for c in j["units"]}

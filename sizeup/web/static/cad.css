@@ -561,6 +561,12 @@
   .ulist > li.urow.open { background: var(--hover); }
   .ulist > li.urow.oos .un { color: var(--dim); text-decoration: line-through; }
   .uh { display: flex; align-items: center; gap: var(--s-2); min-inline-size: 0; min-block-size: var(--ctl-sm); }
+  /* Follow on the map (#358): a unit-board row's and an incident's unit row's; on a pointer, shown on hover or focus */
+  .u-follow { flex: none; }
+  .u-follow.nomap { color: var(--warn); outline: var(--bw) solid var(--warn); }   /* no map on screen shows it */
+  @media (hover: hover) {
+    .urow:not(:hover, :focus-within, .open) .u-follow:not(.nomap), .ou:not(:hover, :focus-within) .u-follow:not(.nomap) { visibility: hidden; }
+  }
   .un { font-weight: 700; }
   .utitle { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-inline-size: 0; }
   .ust { display: inline-flex; align-items: center; gap: var(--s-2); flex: none; min-inline-size: 0; }

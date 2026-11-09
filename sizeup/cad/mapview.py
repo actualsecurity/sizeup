@@ -29,9 +29,23 @@ Home station: units[code].station in data/cad_lists.json, with the Settings unit
 it (set from the map's picker or Settings > Units; sizeup/cad/settings.py), else not set. The department hasn't said which apparatus is
 housed where, so nothing is set by default.
 
-Live positions (future AVL: IamResponding, Red Alert, an iPad app): Cad.positions returns
-{unit code: {"lat", "lon", "at"}}; a fresh one (POSITION_MAX_AGE_S) overrides where the unit is
-drawn (place "position"), keeping its look and its line to the incident. Nothing feeds it yet.
+Live positions (future AVL: IamResponding, Red Alert, an iPad app; #358): Cad.positions is the
+single input. It returns {unit code: {"lat", "lon", "at", "heading"?, "speed"?, "source"?}}; one no
+older than POSITION_MAX_AGE_S overrides where the unit is drawn (place "position"), keeping its look
+and its line to the incident. Older than POSITION_STALE_S it is still drawn there, marked stale (the
+page draws it hollow and faded, with its age); older than POSITION_MAX_AGE_S it is ignored and the
+unit is placed by its status again. No provider feeds it yet (the source isn't chosen).
+
+The ingest shape a future provider hands in, one fix per unit (ingest() checks it):
+
+    {"unit": "E60",              the unit's code (Store.units() name)
+     "lat": 41.0, "lon": -73.6,  WGS84 degrees
+     "at": 1791400000.0,         epoch seconds when the fix was true (not when it arrived; never milliseconds)
+     "heading": 270.0,           optional: degrees true, 0-360 (the page moves it on along it between fixes)
+     "speed": 12.5,              optional: metres per second over the ground, 0-100
+     "source": "avl-vendor"}     a short name for where it came from (shown in the chip's tooltip)
+
+Cad._feed_position(fix) feeds one in for tests and local dev only.
 
 Where a rig is now (locate(); user, 2026-10-07: "whether they just cleared a call next door should be
 taken into account too, if within reasonable time before them ending up back in station"):
@@ -61,6 +75,11 @@ from sizeup.cad import airport
 FIREHOUSES = ROOT / "data" / "firehouses.json"
 FIRE_KINDS = ("chief", "engine", "ladder", "tower", "rescue", "utility", "marine")
 POSITION_MAX_AGE_S = 300.0      # an AVL fix older than this is ignored (the unit is drawn by status)
+POSITION_STALE_S = 60.0         # ... older than this: still drawn at the fix, but stale (hollow, faded, its age)
+POSITION_HORIZON_S = 8.0        # the page draws a moving rig on from its fix this long at most (about the AVL interval)
+POSITION_FUTURE_S = 60.0        # a fix this far ahead of our clock is wrong (skew is taken up to this)
+MAX_SPEED_MS = 100.0            # m/s; faster is no fire apparatus (360 km/h): ingest refuses it, fresh_position drops it
+EPOCH_MIN, EPOCH_MAX = 1e9, 1e10   # plausible epoch seconds (2001-2286): milliseconds (1.7e12) are refused
 RECENT_S = 6 * 3600.0           # cleared calls looked at for a return trip (the longest window allowed)
 AT_HOME_KM = 0.15               # an AVL fix this close to its station: in quarters (turnout counts)
 LOOK = {"free": "available", "oos": "oos", "dispatched": "dispatched", "": "dispatched", "enroute": "responding",
@@ -88,17 +107,65 @@ def is_fire(unit: dict) -> bool:
     return unit.get("kind") in FIRE_KINDS and not unit.get("mutual_aid")
 
 
+def _num(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and v == v and abs(v) != float("inf")
+
+
 def fresh_position(pos, now: float) -> dict | None:
-    """A live position {lat, lon, at} that can be drawn: numbers in range and no older than
-    POSITION_MAX_AGE_S (an `at` in the future is clock skew: taken)."""
+    """A live position {lat, lon, at, heading?, speed?, source?} that can be drawn: numbers in range and
+    no older than POSITION_MAX_AGE_S (an `at` up to POSITION_FUTURE_S ahead is clock skew: taken; further ahead
+    is a wrong clock or milliseconds: refused). heading, speed and
+    source are kept only when they are good (a bad one is dropped, not the fix)."""
     if not isinstance(pos, dict):
         return None
     lat, lon, at = pos.get("lat"), pos.get("lon"), pos.get("at")
-    if not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in (lat, lon, at)):
+    if not all(_num(v) for v in (lat, lon, at)):
         return None
-    if not (-90 <= lat <= 90 and -180 <= lon <= 180) or now - at > POSITION_MAX_AGE_S:
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180) or now - at > POSITION_MAX_AGE_S or at - now > POSITION_FUTURE_S:
         return None
-    return {"lat": float(lat), "lon": float(lon), "at": float(at)}
+    out = {"lat": float(lat), "lon": float(lon), "at": float(at)}
+    hd, sp, src = pos.get("heading"), pos.get("speed"), pos.get("source")
+    if _num(hd) and 0 <= hd <= 360:
+        out["heading"] = float(hd) % 360
+    if _num(sp) and 0 <= sp <= MAX_SPEED_MS:
+        out["speed"] = float(sp)
+    if isinstance(src, str) and src.strip():
+        out["source"] = src.strip()[:40]
+    return out
+
+
+def stale_position(pos: dict, now: float) -> bool:
+    """A fix still drawn (fresh_position) but older than POSITION_STALE_S: hollow, faded, its age shown."""
+    return now - pos["at"] > POSITION_STALE_S
+
+
+def ingest(fix) -> tuple[str, dict]:
+    """One fix in the generic ingest shape (the module doc) -> (unit code, the position Cad.positions
+    returns for it). Raises ValueError for anything that isn't that shape; an old fix is not an error here
+    (fresh_position decides what is drawn)."""
+    if not isinstance(fix, dict):
+        raise ValueError("a fix is an object")
+    unit = fix.get("unit")
+    if not isinstance(unit, str) or not unit.strip():
+        raise ValueError("unit: the unit's code")
+    for k in ("lat", "lon", "at"):
+        if not _num(fix.get(k)):
+            raise ValueError(f"{k}: a number")
+    if not (-90 <= fix["lat"] <= 90 and -180 <= fix["lon"] <= 180):
+        raise ValueError("lat, lon: out of range")
+    if not EPOCH_MIN < fix["at"] < EPOCH_MAX:
+        raise ValueError("at: epoch seconds (not milliseconds)")
+    for k, lo, hi in (("heading", 0, 360), ("speed", 0, MAX_SPEED_MS)):
+        if fix.get(k) is not None and not (_num(fix[k]) and lo <= fix[k] <= hi):
+            raise ValueError(f"{k}: {lo}-{hi}")
+    src = fix.get("source")
+    if not isinstance(src, str) or not src.strip():
+        raise ValueError("source: where the fix came from")
+    pos = {"lat": float(fix["lat"]), "lon": float(fix["lon"]), "at": float(fix["at"]), "source": src.strip()[:40]}
+    for k in ("heading", "speed"):
+        if fix.get(k) is not None:
+            pos[k] = float(fix[k])
+    return unit.strip(), pos
 
 
 def _ll(x: dict | None) -> list[float] | None:
@@ -179,7 +246,8 @@ def place(unit: dict, role: str, station: dict | None = None, incident: dict | N
 
     Returns None (not drawn) or {unit, id, kind, status, look, place: station|incident|position|returning,
     group, lon, lat, ring: 0 (inner) | 1 (outer, not there yet), incident_id, incident_number,
-    line_to: [lon, lat] | None, station, home_line (the line is to its station: thin)}."""
+    line_to: [lon, lat] | None, station, home_line (the line is to its station: thin)}; a "position"
+    one also has its fix's at, age (s), stale, and heading / speed / source when the fix has them."""
     fire = is_fire(unit) if fire is None else fire
     look = LOOK.get(role, "dispatched")
     inc_ll = _ll(incident)
@@ -193,8 +261,11 @@ def place(unit: dict, role: str, station: dict | None = None, incident: dict | N
     going = incident is not None and role != "onscene" and inc_ll is not None   # a line to where it's going
     loc = locate(unit, role, station, incident, position, now, clear, params)
     if loc and loc["where"] == "position":
+        fix = fresh_position(position, now)
+        extra = {k: fix[k] for k in ("heading", "speed", "source") if k in fix}
         return dict(spec, place="position", group=f"unit:{unit['name']}", lon=loc["ll"][0], lat=loc["ll"][1],
-                    line_to=inc_ll if going else None, at=fresh_position(position, now)["at"])
+                    line_to=inc_ll if going else None, at=fix["at"], age=round(max(0.0, now - fix["at"]), 1),
+                    stale=stale_position(fix, now), **extra)
     if incident is not None and inc_ll is not None and (role == "onscene" or station is None or not fire):
         # on location; or on an event with no home station to start from (EMS, PD, a fire unit not set yet)
         return dict(spec, place="incident", group=f"incident:{incident['id']}", lon=inc_ll[0], lat=inc_ll[1],
@@ -246,7 +317,8 @@ def map_slice(units: list[dict], incidents: list[dict], role, firehouses: list[d
              "type": i.get("type") or "", "subtype": i.get("subtype") or "", "address": i.get("address") or "",
              "lat": i["lat"], "lon": i["lon"]}
             for i in open_incs.values() if i.get("lat") is not None and i.get("lon") is not None]
-    return {"stations": firehouses, "markers": markers, "unset": unset, "incidents": pins}
+    return {"stations": firehouses, "markers": markers, "unset": unset, "incidents": pins,
+            "avl": {"stale_s": POSITION_STALE_S, "max_age_s": POSITION_MAX_AGE_S, "horizon_s": POSITION_HORIZON_S}}
 
 
 def locations(units: list[dict], incidents: list[dict], role, firehouses: list[dict], positions: dict | None = None,
