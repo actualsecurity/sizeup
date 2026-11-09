@@ -426,8 +426,9 @@ class Transcriber:
             if (not raw or NOISE_LABEL.match(raw) or not said  # "." = squelch tail
                     or (said in HALLUCINATIONS
                         and (len(audio) / 16000 < SHORT_S or getattr(item, "low_energy", False)))):
-                raw, item.status = "", "no_speech"
+                raw, status = "", "no_speech"
             else:
-                item.status = "done"
+                status = "done"
             item.raw, item.confidence = raw, conf
+            item.status = status                # last: a reader that sees "done" sees its text (and read_twice)
             self.on_done(item)
