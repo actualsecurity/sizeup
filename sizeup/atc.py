@@ -435,6 +435,18 @@ def number_words(words: Sequence[str]) -> tuple[set[int], dict[int, str]]:
             i += 1
         return i
 
+    def decimals(i: int) -> None:
+        """A frequency's decimals from words[i]: 1 or 2 digits (3 in the 8.33 kHz style, "118.025"), never into a tail:
+        before letters ("121 point 9 1 2 3 alfa bravo") only the first digit."""
+        run, k = [], i
+        while k < n and _dig(words[k]) and len(run) < 6:
+            run.append(k)
+            k += 1
+        if not run:
+            return
+        letters_next = k < n and words[k] in LETTERS and words[k] != "november"
+        take(i, 1 if letters_next and len(run) > 1 else 3)
+
     def runway(i: int) -> None:
         run, k = "", i
         ends = []                      # (characters so far, index of the word) at each word boundary
@@ -476,9 +488,11 @@ def number_words(words: Sequence[str]) -> tuple[set[int], dict[int, str]]:
             k = i + 1
             while k < n and words[k] in ("to", "and", "maintain", "at", "flight", "level"):
                 k += 1
-            if k < n and words[k].isdigit():
+            group = k + 1 < n and words[k + 1].isdigit() and len(words[k + 1]) == 3          # "3,000": "3", "000"
+            # a whole number word ("3000", "3,000", "12"), never a lone digit that starts a tail ("leaving 123AB")
+            if k < n and words[k].isdigit() and (len(words[k]) >= 2 or group):
                 covered.add(k)
-                while k + 1 < n and words[k + 1].isdigit() and len(words[k + 1]) == 3:   # "3,000": "3", "000"
+                while k + 1 < n and words[k + 1].isdigit() and len(words[k + 1]) == 3:
                     k += 1
                     covered.add(k)
         elif w in _FREQ_WORDS:
@@ -489,13 +503,19 @@ def number_words(words: Sequence[str]) -> tuple[set[int], dict[int, str]]:
             while m < n and len(lead) < 3 and _dig(words[m]):
                 lead += _dig(words[m])
                 m += 1
-            if len(lead) >= 3 and FREQ_MHZ[0] <= int(lead[:3]) <= FREQ_MHZ[1]:   # "contact departure 678AB": a tail
-                k = take(k, 3)
-                if k < n and words[k] in _POINT:
-                    covered.add(k)
-                    take(k + 1, 3)
-                elif k < n and words[k].isdigit() and len(words[k]) <= 3 and len(words[k - 1]) == 3:   # "126.4"
-                    covered.add(k)
+            # a frequency only with its decimals ("126.4", "one two six point four"): three digits then letters is a
+            # tail ("contact departure 123AB"), and outside the airband it is one anyway
+            point = m < n and words[m] in _POINT
+            d = m + 1 if m + 1 < n and words[m] == STOP_WORD else m         # "126.4", or "126 xstopx 4" (clauses)
+            dot = m < n and m == k + 1 and len(words[k]) == 3 and d < n and words[d].isdigit() and len(words[d]) <= 3 \
+                and not (d + 1 < n and words[d + 1] in LETTERS)
+            if len(lead) == 3 and FREQ_MHZ[0] <= int(lead) <= FREQ_MHZ[1] and (point or dot):
+                take(k, 3)
+                if point:
+                    covered.add(m)
+                    decimals(m + 1)
+                else:
+                    covered.update((m, d))
         elif w in _POINT and i > 0 and _dig(words[i - 1]) and _dig(nxt):
             k, got = i - 1, 0                                     # "one two four point six five"
             while k >= 0 and _dig(words[k]) and got < 3:
@@ -503,7 +523,7 @@ def number_words(words: Sequence[str]) -> tuple[set[int], dict[int, str]]:
                 covered.add(k)
                 k -= 1
             covered.add(i)
-            take(i + 1, 3)
+            decimals(i + 1)
         elif w in _UNITS or w in _ALT_UNITS or (w == "clock" and i > 0 and words[i - 1] == "o"):
             k = i - (2 if w == "clock" else 1)
             got = 0
@@ -514,18 +534,21 @@ def number_words(words: Sequence[str]) -> tuple[set[int], dict[int, str]]:
     return covered, rest
 
 
-def _after_number(i: int, words: Sequence[str], numbers: set[int], rest: dict[int, str]) -> bool:
-    """Whether words[i] comes right after an ATC number (a comma between at most), or is the rest of one."""
+def after_number(i: int, words: Sequence[str], numbers: set[int], rest: dict[int, str], suffix: str) -> bool:
+    """Whether a tail read from words[i] may hold an ATC number's digits: it is the rest of a number run into it
+    ("runway 347 kilo zulu" -> "7KZ"), or it comes right after one (a comma between at most) with only 1 or 2 digits
+    ("runway 34, 7 kilo zulu"). A whole tail said after a complete number ("runway 34, 123AB") is not."""
     if i in rest:
         return True
     k = i - 1
     if k >= 0 and words[k] == STOP_WORD:
         k -= 1
-    return k >= 0 and k in numbers
+    return k >= 0 and k in numbers and sum(c.isdigit() for c in suffix) <= 2
 
 
-AFTER_NUMBER_CONF = 0.45   # a tail's end heard right after an ATC number matches no better than this: its first digit
+AFTER_NUMBER_CONF = 0.35   # a tail's end heard right after an ATC number matches no better than this: its first digit
                            # may be the number's ("runway 34, 7KZ" heard as "runway 347 KZ"), so never a link (>= 0.7)
+                           # nor the pre-alert's aircraft (AtcWatch._who: 0.4)
 _PLAIN_TAIL = re.compile(r"[1-9]\d{0,4}[A-Z]{0,2}")      # an N-number's characters after the N (FAA: 1-5, no leading 0)
 
 
@@ -570,7 +593,7 @@ def find_mentions(text: str, index: TelephonyIndex) -> list[Mention]:
             suf, j = _suffix(words, i, stop=numbers)
         typed = i > 0 and words[i - 1] in TYPE_WORDS
         tail_like = any(c.isalpha() for c in suf) or (typed and words[i - 1] != "november")
-        after = _after_number(i, words, numbers, rest)
+        after = after_number(i, words, numbers, rest, suf)
         if after and not _PLAIN_TAIL.fullmatch(suf):
             tail_like = False      # what is left of an ATC number is a tail's start only when it can be one
         if len(suf) >= 3 and any(c.isdigit() for c in suf) and tail_like and not any(k in covered for k in range(i, j)):

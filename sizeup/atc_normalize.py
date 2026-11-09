@@ -23,8 +23,9 @@ improves old rows too). From shortfinal's tidy() / fix_facilities() (its core/st
     fixes       the approach fixes by ident (TWORF, TAYSH, HAARP ...): every spelling in normalize.json's "fixes"
                 anywhere; "fixes_in_context" (ordinary words: "to do" for TOEDO, "harp") and a close spelling
                 (SequenceMatcher >= FIX_SIMILAR) only right after over / at / from / direct / via / crossing ...
-    numbers     a runway, heading or squawk run into the digits after it, split where it ends ("runway 347 kilo
-                zulu" -> "runway 34, 7 kilo zulu": a runway is two digits, one of the airport's runways).
+    numbers     a runway, heading or squawk run into a tail after it, split where it ends ("runway 347 kilo zulu" ->
+                "runway 34, 7 kilo zulu": a runway is two digits, one of the airport's runways); only when the rest
+                is 1-2 digits that can start a tail, and words follow ("runway 290" stays).
     tails       two or more phonetic letters run together ("Lima X-ray" -> "LX"), joined to the digits before them
                 when they can end a US tail (two letters at most: "568 Lima X-ray" -> "568LX"); "November 1 2 3 Alfa
                 Bravo" -> "N123AB". Not after "taxiway", "via", "runway", "squawk" ... (a route or a number, not a
@@ -216,7 +217,8 @@ def _fixes(t: str) -> str:
     return re.sub(rf"{ctx}(?P<w>[A-Za-z]{{4,7}})\b", close, t, flags=re.I)
 
 
-_MERGED = re.compile(r"\b(?P<w>runway|rwy|heading|squawk)(?P<sp>\s+)(?P<num>\d{3,6})\b", re.I)
+_MERGED = re.compile(r"\b(?P<w>runway|rwy|heading|squawk)(?P<sp>\s+)(?P<num>\d{3,6})\b(?=(?P<after>[\s-]+[A-Za-z0-9]+)?)",
+                     re.I)
 
 
 def _merged(t: str) -> str:
@@ -236,6 +238,12 @@ def _merged(t: str) -> str:
         elif len(num) > width:
             head, tail = num[:width], num[width:]
         else:
+            return m.group(0)
+        # only where the rest can start a tail and the words go on to one ("runway 165 alfa bravo"): "runway 290" and
+        # "squawk 12001" stay as heard; and only a rest of 1 or 2 digits, which the matcher still reads as maybe the
+        # number's (sizeup/atc.py after_number), so a longer one ("runway 34123 alfa bravo") stays run together
+        nxt = (m.group("after") or "").strip(" -").lower()
+        if tail[0] == "0" or len(tail) > 2 or not (nxt.isdigit() or nxt in LETTERS or nxt in DIGIT_WORDS):
             return m.group(0)
         return f"{w}{m.group('sp')}{head}, {tail}"
     return _MERGED.sub(one, t)

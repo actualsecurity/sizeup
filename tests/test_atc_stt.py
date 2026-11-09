@@ -607,13 +607,31 @@ def test_the_airports_runways_come_from_the_airport_data():
     ("runway three four seven kilo zulu", "Runway 34, 7 kilo zulu", [("…7KZ", True)]),
     ("heading 3407 kilo zulu", "Heading 340, 7 kilo zulu", [("…7KZ", True)]),
     ("runway 34 cleared to land", "Runway 34 cleared to land", []),
-    ("runway 1634", "Runway 16, 34", []),
-    ("runway 160 cleared to land", "Runway 16, 0 cleared to land", []),
+    ("runway 1634", "Runway 1634", []),                         # nothing after it: left as heard
+    ("runway 165", "Runway 165", []),
+    ("runway 290", "Runway 290", []),                           # the rest can't start a tail (no leading 0)
+    ("runway 290 alfa bravo", "Runway 290 alfa bravo", []),
+    ("squawk 12001", "Squawk 12001", []),
+    ("runway 160 cleared to land", "Runway 160 cleared to land", []),
+    ("runway 34123 alfa bravo", "Runway 34123 alfa bravo", [("…123AB", True)]),   # a longer rest: kept together, still flagged
+    ("climb and maintain 2000 alfa bravo", "Climb and maintain 2000 alfa bravo", []),
     ("heading 340 November 123AB", "Heading 340 N123AB", [("N123AB", False)]),
     ("November 347KZ", "N347KZ", [("N347KZ", False)]),
     ("November three four seven kilo zulu, runway 34", "N347KZ, runway 34", [("N347KZ", False)]),
     ("7 kilo zulu, runway 34 cleared to land", "7KZ, runway 34 cleared to land", [("…7KZ", False)]),
     ("contact departure 678 alfa bravo", "Contact departure 678AB", [("…678AB", False)]),   # not a frequency
+    # a whole tail after a frequency word or a complete number keeps its normal confidence (not after_number)
+    ("contact departure 123AB", "Contact departure 123AB", [("…123AB", False)]),
+    ("contact departure 1 2 3 alfa bravo", "Contact departure 1 2 3AB", [("…123AB", False)]),
+    ("monitor 123 alfa bravo", "Monitor 123AB", [("…123AB", False)]),
+    ("runway 34, 123AB", "Runway 34, 123AB", [("…123AB", False)]),
+    ("squawk 4521 123AB", "Squawk 4521 123AB", [("…123AB", False)]),
+    # an altitude word takes a whole number, never a lone digit that starts a tail
+    ("leaving 123AB", "Leaving 123AB", [("…123AB", False)]),
+    ("through 118AB", "Through 118AB", [("…118AB", False)]),
+    ("descend and maintain 2000 N123AB", "Descend and maintain 2000 N123AB", [("N123AB", False)]),
+    # a frequency's decimals stop where a tail begins
+    ("121 point 9 1 2 3 alfa bravo", "121 point 9 1 2 3 alfa bravo", [("…123AB", False)]),
 ])
 def test_a_runway_run_into_a_tail_is_split(heard, written, found):
     assert normalize(heard) == written
@@ -623,6 +641,7 @@ def test_a_runway_run_into_a_tail_is_split(heard, written, found):
 
 @pytest.mark.parametrize("heard", [
     "squawk 4521", "squawk 4521 kilo zulu", "contact departure 126.4", "contact new york approach 128.55",
+    "contact departure 118.025", "contact departure one two four point six five", "maintain 3000",
     "one two four point six five", "wind 340 at 12", "wind 340 at 12 gusts 18", "altimeter 30.01",
     "altimeter three zero zero one", "traffic 2 o'clock, 3 miles", "climb and maintain 3,000",
     "descend and maintain 2000", "at 2 thousand 5 hundred", "heading 340", "fly runway heading",
@@ -646,9 +665,13 @@ def test_a_tail_after_a_number_is_matched_low_and_never_snapped():
     assert snap("go ahead runway 347 kilo zulu", [wrong])[1] == []
     # said in full, it is the whole tail, exactly
     assert atc.attribute(normalize("November 347KZ"), IX, [wrong]).confidence == 1.0
-    # the talker record: probable at the lower confidence, shown as heard
+    # the talker record: heard, never picked (no highlight on the map or the chip), even with one aircraft that fits
     rec = T.analyze(T.Tx("t1", CH, T0, T0 + 3, normalize("go ahead runway 347 kilo zulu")), IX, [N687KZ])
-    assert rec["aircraft"]["spoken"] == "…7KZ" and rec["aircraft"]["status"] == "probable"
-    assert rec["aircraft"]["confidence"] == atc.AFTER_NUMBER_CONF and rec["runway"] == "34"
+    assert rec["aircraft"]["spoken"] == "…7KZ" and rec["aircraft"]["status"] == "heard"
+    assert "hex" not in rec["aircraft"] and rec["aircraft"]["confidence"] == 0.0 and rec["runway"] == "34"
+    # a whole tail after a complete number is matched as usual
+    whole = dict(N687KZ, hex="c3", flight="N123AB", reg="N123AB")
+    assert atc.attribute("runway 34, 123AB", IX, [whole]).confidence == 0.6
+    assert T.analyze(T.Tx("t3", CH, T0, T0 + 3, "runway 34, 123AB"), IX, [whole])["aircraft"]["status"] == "probable"
     off = T.analyze(T.Tx("t2", CH, T0, T0 + 3, normalize("go ahead runway 347 kilo zulu")), IX, [])
     assert off["aircraft"]["callsign"] == "…7KZ" and off["aircraft"]["status"] == "heard"
