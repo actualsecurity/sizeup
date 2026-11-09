@@ -31,6 +31,13 @@
 //                heading and speed, eased onto each new fix. Older than the hub's avl.stale_s: hollow, faded, its
 //                age on the chip; older than avl.max_age_s the hub places it by status again (mapview.py).
 //
+// The probable path (#360): a rig going to a call with a route from the hub (state.map.routes, sizeup/cad/routes.py: by
+// road, from its fix or its station, re-routed there as it moves) is drawn dashed in its status colour along that route
+// from where its mark is drawn now (the glided mark), instead of the straight line; the follow chip adds "~3 min ·
+// 1.2 mi". A followed rig with fixes also shows its faint trail (state.map.trails). No route (no graph yet, no road
+// near): the straight line, as before. Redrawn with the call line, on the frames that move a mark: nothing here keeps
+// the frame loop running.
+//
 // Highway layers (cameras, incidents, signs, mileposts, exits) and their Layers button: maplayers.js,
 // attached to every RigMap; the event's "Cameras nearby" row from detail().
 //
@@ -70,6 +77,7 @@ window.CadMap = (() => {
   const STALE_S = 60, MAX_AGE_S = 300, HORIZON_S = 8;   // an older hub: mapview.py's POSITION_STALE_S / _MAX_AGE_S / _HORIZON_S
   const MIN_MS = 2;                    // slower than this a rig is stopped: drawn at its fix, never drawn on
   const HOLD_M = 30;                   // a stopped rig's fix this close to where it is drawn: held there (never eased back)
+  const LINE_MS = 250;                 // the lines from moving marks (to the call, the routes) re-set at most ~4 Hz
   const FRAME_MS = 50, MAX_FRAME_MS = 250, STEP_PX = 0.75;   // as aircraft.js: redrawn as often as the fastest moves STEP_PX
   const AGE_MS = 1000;                 // the chips' ages and the follow chip's words: once a second (a timer, not frames)
   const rigMaps = new Set(), rigLayers = new Set();
@@ -140,9 +148,14 @@ window.CadMap = (() => {
   const wanted = () => visible() && [...rigLayers].some((l) => l.moving());
   function animate() {
     if (!raf && typeof requestAnimationFrame === "function" && wanted()) raf = requestAnimationFrame(frame);
-    const fixes = visible() && [...rigLayers].some((l) => l.hasFix && l.shown());
-    if (fixes && !ageTimer) ageTimer = setInterval(() => { for (const l of rigLayers) if (l.hasFix && l.shown()) l.draw(); }, AGE_MS);
-    else if (!fixes && ageTimer) { clearInterval(ageTimer); ageTimer = 0; }
+    if (fixesShown() && !ageTimer) ageTimer = setInterval(ageTick, AGE_MS);
+    else if (!fixesShown() && ageTimer) { clearInterval(ageTimer); ageTimer = 0; }
+  }
+  const fixesShown = () => visible() && [...rigLayers].some((l) => l.hasFix && l.shown());
+  // the ages, once a second; no live fix on a map on screen any more (the Radio or Settings view): the timer stops itself
+  function ageTick() {
+    if (!fixesShown()) { clearInterval(ageTimer); ageTimer = 0; return; }
+    for (const l of rigLayers) if (l.hasFix && l.shown()) l.draw();
   }
   function frame(ts) {
     raf = 0;
@@ -180,6 +193,39 @@ window.CadMap = (() => {
   const followUnit = (name) => pickUnit(name, true);     // a unit-board or incident row's Follow
   const focusUnit = (name) => pickUnit(name, false);     // a talker chip: centred and ringed, not followed
   function hoverUnits(names) { if (lights && lights.hover(names)) redrawRigs(); }   // a row hovered: its rig ringed wider
+
+  // where a rig's mark is drawn now, for the lines from it (the call line, its route): a live fix where it was last
+  // drawn on (fixWhere, on the frames), else where the hub put it
+  const markAt = (m) => (m.place === "position" ? (drawn.get(m.unit) || [m.lon, m.lat]) : [m.lon, m.lat]);
+  // ---- the probable path (#360) ----------------------------------------------------------------------------------
+  const routeOf = (M, m) => ((M && M.routes) || []).find((r) => r.unit === m.unit && r.incident_id === m.incident_id) || null;
+  // the route's points from the mark on: [mark, ...the rest]. The nearest segment to the mark, looked for near where the
+  // hub last had the rig along it (along_m: from a little behind to ALONG_AHEAD_M ahead, as the mark is drawn on
+  // between fixes), a tie going to the EARLIER segment: a route that doubles back on a street keeps its first leg.
+  const ALONG_BACK_M = 100, ALONG_AHEAD_M = 1000;
+  function routeFrom(coords, at, alongM) {
+    if (!Array.isArray(coords) || coords.length < 2) return null;
+    const kx = Math.cos((at[1] * Math.PI) / 180), M_DEG = 111320;
+    const near = (lo, hi) => {
+      let best = Infinity, bi = -1, run = 0;
+      for (let i = 0; i < coords.length - 1; i++) {
+        const [x1, y1] = coords[i], [x2, y2] = coords[i + 1];
+        const dx = (x2 - x1) * kx, dy = y2 - y1, ll = dx * dx + dy * dy, seg = Math.sqrt(ll) * M_DEG;
+        if (run + seg >= lo && run <= hi) {
+          const t = ll ? Math.max(0, Math.min(1, (((at[0] - x1) * kx) * dx + (at[1] - y1) * dy) / ll)) : 0;
+          const ex = (x1 + (x2 - x1) * t - at[0]) * kx, ey = y1 + (y2 - y1) * t - at[1], d = ex * ex + ey * ey;
+          if (d < best) { best = d; bi = i; }
+        }
+        run += seg;
+      }
+      return bi;
+    };
+    let bi = typeof alongM === "number" ? near(alongM - ALONG_BACK_M, alongM + ALONG_AHEAD_M) : -1;
+    if (bi < 0) bi = near(-Infinity, Infinity);
+    const rest = coords.slice(bi + 1);
+    if (rest.length > 1 && Math.abs(rest[0][0] - at[0]) < 1e-9 && Math.abs(rest[0][1] - at[1]) < 1e-9) rest.shift();
+    return [at, ...rest];
+  }
 
   // ---- the area's frame (#218): what a map with no call open (the Overview, the wall board) looks at ---------------
   // Our area (scene.home.bounds: Port Chester and Rye Brook, roads.AREA_BBOX) and every open call with a real point
@@ -230,6 +276,7 @@ window.CadMap = (() => {
       this.data = null;
       this.focus = null;
       this.lineSig = "";
+      this.routeSig = "";
       this.far = false;
       this.unsetOpen = false;
       this.fol = null;                 // the map's follower (RigMap: mapfollow.js), none on a manual map
@@ -252,6 +299,19 @@ window.CadMap = (() => {
             layout: { "line-cap": "round", "line-join": "round" },
             paint: { "line-color": ["get", "color"], "line-width": ["case", ["get", "home"], 1.6, 2.5],
                      "line-opacity": ["case", ["get", "home"], 0.7, 0.9], "line-dasharray": [1.6, 1.6] },
+          }, map.getLayer("firehouse") ? "firehouse" : undefined);
+        }
+        if (!map.getSource("cm-routes")) {            // the probable paths (#360) and a followed rig's trail
+          map.addSource("cm-routes", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
+          map.addLayer({
+            id: "cm-trail", type: "line", source: "cm-routes", filter: ["==", ["get", "trail"], true],
+            layout: { "line-cap": "round", "line-join": "round" },
+            paint: { "line-color": ["get", "color"], "line-width": 3, "line-opacity": 0.3 },
+          }, map.getLayer("firehouse") ? "firehouse" : undefined);
+          map.addLayer({
+            id: "cm-routes", type: "line", source: "cm-routes", filter: ["!=", ["get", "trail"], true],
+            layout: { "line-cap": "round", "line-join": "round" },
+            paint: { "line-color": ["get", "color"], "line-width": 3, "line-opacity": 0.9, "line-dasharray": [1.4, 1.2] },
           }, map.getLayer("firehouse") ? "firehouse" : undefined);
         }
         this.ready = true;
@@ -311,7 +371,11 @@ window.CadMap = (() => {
     tick() {
       let moved = false;
       for (const rec of this.chips.values()) if (rec.m.place === "position") { rec.marker.setLngLat(this.where(rec.m)); moved = true; }
-      if (moved && this.data && this.data.map) this.drawLines(this.data.map.markers || [], this.data.lists);
+      // the call lines and routes with them, at most LINE_MS apart (setData re-tiles the source; the age timer's
+      // redraw puts them on the settled marks)
+      if (moved && this.data && this.data.map && Date.now() - (this.linesAt || 0) >= LINE_MS) {
+        this.drawLines(this.data.map.markers || [], this.data.lists);
+      }
       this.followTick(false);
     }
     // following: the map kept on the rig, and the chip's words; gone from the map: let go
@@ -324,8 +388,9 @@ window.CadMap = (() => {
       f.pan([ll.lng, ll.lat]);
       if (!force && f.chipShown()) return;
       const m = rec.m, st = statusOf(this.data && this.data.lists, m.status), fx = fixAge(m, this.data && this.data.map);
-      const text = [`Following ${m.unit}`, st.name, fx ? `${agoS(fx.age)} ago` : ""].filter(Boolean).join(" · ");
-      f.chip(text, rec.el.title, { stale: !!(fx && fx.stale) });
+      const r = routeOf(this.data && this.data.map, m);      // by road (#360): "~3 min · 1.2 mi"
+      const text = [`Following ${m.unit}`, st.name, r ? r.text : "", fx ? `${agoS(fx.age)} ago` : ""].filter(Boolean).join(" · ");
+      f.chip(text, r ? `${rec.el.title}, ${r.text} by road (est.)` : rec.el.title, { stale: !!(fx && fx.stale) });
     }
 
     drawPins(incidents, lists) {
@@ -452,10 +517,13 @@ window.CadMap = (() => {
     }
 
     drawLines(markers, lists) {
+      this.linesAt = Date.now();
       const feats = new Map();
+      const M = this.data && this.data.map;
+      this.drawRoutes(markers, lists, M);
       for (const m of markers) {
-        if (!m.line_to) continue;
-        const from = m.place === "position" ? (drawn.get(m.unit) || [m.lon, m.lat]) : [m.lon, m.lat];   // a live fix: from its mark
+        if (!m.line_to || (!m.home_line && routeOf(M, m))) continue;      // its route drawn instead (#360)
+        const from = markAt(m);                                             // a live fix: from its mark
         const k = JSON.stringify([from, m.line_to]);
         const color = m.home_line ? HOME_LINE : statusOf(lists, m.status).bg || LINE;
         if (!feats.has(k)) feats.set(k, { type: "Feature", properties: { color, home: !!m.home_line },
@@ -467,6 +535,30 @@ window.CadMap = (() => {
       this.lineSig = sig;
       const src = this.map.getSource("cm-lines");
       if (src) src.setData(fc);
+    }
+
+    // each route from the rig's mark as drawn now (a live fix: glided) on; the followed rig's trail up to its mark
+    drawRoutes(markers, lists, M) {
+      const src = this.map.getSource("cm-routes");
+      if (!src) return;
+      const feats = [];
+      const trails = (M && M.trails) || {};
+      for (const m of markers) {
+        const color = statusOf(lists, m.status).bg || LINE;
+        const r = m.line_to && !m.home_line ? routeOf(M, m) : null;
+        const here = markAt(m);
+        const path = r ? routeFrom(r.coords, here, r.along_m) : null;
+        if (path && path.length >= 2) feats.push({ type: "Feature", properties: { color, unit: m.unit },
+                                                   geometry: { type: "LineString", coordinates: path } });
+        const t = this.fol && this.fol.id === m.unit ? trails[m.unit] : null;
+        if (Array.isArray(t) && t.length >= 2) feats.push({ type: "Feature", properties: { color, trail: true, unit: m.unit },
+                                                            geometry: { type: "LineString", coordinates: [...t, here] } });
+      }
+      const fc = { type: "FeatureCollection", features: feats };
+      const sig = JSON.stringify(fc);
+      if (sig === this.routeSig) return;
+      this.routeSig = sig;
+      src.setData(fc);
     }
 
     drawUnset(unset) {
@@ -1027,5 +1119,5 @@ window.CadMap = (() => {
 
   const detailMap = () => views.detail;   // the working event's map, for its resize handles (incident-map.js, #210)
   return { RigLayer, RigMap, detail, detailMap, place, overview, goOverview, openBig, closeBig, areaBounds, areaCalls, AREA_KM,
-           followUnit, focusUnit, hoverUnits, onMap, lights };
+           followUnit, focusUnit, hoverUnits, onMap, lights, routeFrom };
 })();

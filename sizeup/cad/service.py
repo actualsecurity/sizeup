@@ -236,6 +236,9 @@ class Cad:
         # it yet (the source isn't chosen); _feed_position() feeds fixes in the ingest shape for tests and dev.
         self.positions: Callable[[], dict[str, dict]] = lambda: {}
         self._fed: dict[str, dict] = {}
+        # The probable path of each responding rig (#360, sizeup/cad/routes.py): the app sets it when the road graph
+        # is on (sizeup/roadgraph.py); None: no routes, the maps draw the straight line and estimates stay straight-line.
+        self.routes = None
         # [cloud] role = "hub" (sizeup/cloud/hub.py): the voice is Amazon Polly's, rendered here
         # (tts_engine "polly"), else the station's: remote_voice(job) -> (WAV bytes, "Voice: ...") or
         # AudioUnavailable, also Polly's fallback; audio_blobs keeps the dispatch audio in SQLite (the
@@ -543,8 +546,14 @@ class Cad:
 
     def map_slice(self, units: list[dict], incs: list[dict], pos: dict, now: float) -> dict:
         tags = {c: j["tag"] for j in self.lists.joint_response.values() for c in j["units"]}
-        return mapview.map_slice(units, incs, self.lists.role, self.firehouses, pos, now, joint=lambda c: tags.get(c, ""),
-                                 clears=self.clears(now), params=self.eta)
+        out = mapview.map_slice(units, incs, self.lists.role, self.firehouses, pos, now, joint=lambda c: tags.get(c, ""),
+                                clears=self.clears(now), params=self.eta)
+        if self.routes is not None:
+            try:
+                out.update(self.routes.for_map(out["markers"], now))     # routes, trails (#360)
+            except Exception as e:  # noqa: BLE001 - routing's trouble never breaks the console
+                self.log(f"CAD: routes: {type(e).__name__}: {e}")
+        return out
 
     def clears(self, now: float) -> dict[int, dict]:
         """Each unit's latest cleared call (a returning rig's start), re-read only when something changed."""
@@ -801,8 +810,9 @@ class Cad:
                     "note": "Non-emergency: no run card, no dispatch. Attach units if needed."}
         typ = _text(body, "type", 24) or inc["type"]
         sub = _text(body, "subtype", 24) if "type" in body else inc["subtype"]
-        r = runcards.recommend(self.store, typ, sub, iid, where=self.locations(), params=self.eta)
-        return dict(r, units=[{k: u[k] for k in ("id", "name", "kind", "spare", "status", "slot", "eta_s", "eta", "reason")}
+        r = runcards.recommend(self.store, typ, sub, iid, where=self.locations(), params=self.eta,
+                               road=self.routes.to_one if self.routes is not None else None)
+        return dict(r, units=[{k: u[k] for k in ("id", "name", "kind", "spare", "status", "slot", "eta_s", "eta", "reason")} | {"how": u.get("how", "")}
                               for u in r["units"]])
 
     def full(self, iid: int) -> dict:

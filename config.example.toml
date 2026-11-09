@@ -385,6 +385,14 @@ heartbeat_stale_min = 90             # no heartbeat (or restart) this long: "Tap
 # tide_station = "8518091"                # CO-OPS predictions: Rye Beach
 # gauge_station = "8516945"               # CO-OPS water-level gauge: Kings Point
 
+# [routing]: the rigs' probable paths on the CAD maps and the arrival estimates by road (sizeup/roadgraph.py, #360):
+# a road graph from OpenStreetMap (one Overpass query, monthly in Settings > Data sources), the firehouses plus
+# ring_km around them, cached under the state dir (roadgraph.json). The hub (or all-in-one) only. Leave it out: on.
+# [routing]
+# enabled = true
+# ring_km = 12
+# overpass_url = "https://overpass-api.de/api/interpreter"
+
 # [gis]: the CAD maps' "County GIS" layers (sizeup/gis.py, docs/cloud.md "County GIS layers"): Westchester
 # County GIS open data (tax parcels, fire and EMS districts, hydrants, buildings, flood plains, rail ...),
 # fetched by the hub (or all-in-one) from the county's ArcGIS REST services on a slow schedule, cached

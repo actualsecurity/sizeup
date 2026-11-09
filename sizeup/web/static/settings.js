@@ -1370,7 +1370,7 @@ function sEta(e) {
   rows.append(line("Recommend", order, e.order, "order", e.order.default === "nearest" ? "nearest first" : "run card order"));
   for (const n of e.numbers) {
     const i = el("input", "s-num");
-    i.type = "number"; i.min = String(n.min); i.max = String(n.max); i.step = n.key === "road_factor" ? "0.05" : "0.5";
+    i.type = "number"; i.min = String(n.min); i.max = String(n.max); i.step = n.unit === "×" ? "0.05" : n.unit === "m" ? "5" : "0.5";
     i.value = String(n.value);
     i.setAttribute("aria-label", n.label);
     i.addEventListener("change", () => sPost("dispatch", { action: "set", key: n.key, value: Number(i.value) }, `${n.label}: ${i.value} ${n.unit}`));

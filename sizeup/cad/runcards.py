@@ -271,26 +271,44 @@ def _kinds_text(slot: dict) -> str:
     return "apparatus" if slot["kind"] == ANY_KIND else slot["kind"].replace("|", "/")
 
 
-def estimates(units: list[dict], where: dict | None, inc: dict | None, params: eta.Params | None = None) -> dict[int, dict]:
-    """unit id -> {eta_s (None: unknown), eta ("~3 min est." or ''), reason} for the given units:
-    from where each is now (mapview.locate) to the event's map point."""
+def estimates(units: list[dict], where: dict | None, inc: dict | None, params: eta.Params | None = None,
+              road=None) -> dict[int, dict]:
+    """unit id -> {eta_s (None: unknown), eta ("~3 min est." or ''), reason, how ("road" | "line" | "")} for the
+    given units: from where each is now (mapview.locate) to the event's map point. road({code: [lon, lat]}, to) ->
+    {code: (drive s, metres)} (sizeup/cad/routes.py Routes.to_one, #360): by road when it has a way for every one of
+    them ("~3 min est. · 1.2 mi · from ..."), plus turnout from quarters; else the straight-line model (eta.py) for
+    all of them (the nearest-first order never compares the two)."""
     p = params or eta.Params()
     to = [inc["lon"], inc["lat"]] if inc and inc.get("lat") is not None and inc.get("lon") is not None else None
+    by_road: dict = {}
+    if road is not None and to is not None:
+        origins = {u["name"]: (where or {})[u["name"]]["ll"] for u in units if (where or {}).get(u["name"])}
+        try:
+            by_road = road(origins, to) or {}
+        except Exception:  # noqa: BLE001 - the straight line then
+            by_road = {}
+        if any(k not in by_road for k in origins):
+            by_road = {}            # one model for all of them: never road times ranked against straight-line ones
     out = {}
     for u in units:
         loc = (where or {}).get(u["name"])
         if loc is None:
-            out[u["id"]] = {"eta_s": None, "eta": "", "reason": "station not set"}
+            out[u["id"]] = {"eta_s": None, "eta": "", "reason": "station not set", "how": ""}
         elif to is None:
-            out[u["id"]] = {"eta_s": None, "eta": "", "reason": loc["label"]}
+            out[u["id"]] = {"eta_s": None, "eta": "", "reason": loc["label"], "how": ""}
+        elif u["name"] in by_road:
+            drive, metres = by_road[u["name"]]
+            s = drive + (0.0 if loc["on_road"] else p.turnout_min * 60.0)
+            out[u["id"]] = {"eta_s": round(s), "eta": eta.text(s), "how": "road",
+                            "reason": f"{eta.text(s)} · {eta.miles(metres)} · {loc['label']}"}
         else:
             s = eta.eta_s(loc["ll"], to, p, from_quarters=not loc["on_road"])
-            out[u["id"]] = {"eta_s": round(s), "eta": eta.text(s), "reason": f"{eta.text(s)} · {loc['label']}"}
+            out[u["id"]] = {"eta_s": round(s), "eta": eta.text(s), "reason": f"{eta.text(s)} · {loc['label']}", "how": "line"}
     return out
 
 
 def recommend(store: Store, typ: str, subtype: str = "", incident_id: int | None = None,
-              where: dict | None = None, params: eta.Params | None = None) -> dict:
+              where: dict | None = None, params: eta.Params | None = None, road=None) -> dict:
     """{"units": [unit + "slot", "eta_s", "eta", "reason"], "unfilled": ["no ladder/tower available"],
     "card": key or None, "order": {by: nearest|card, note}, "others": {unit id: estimate} (the other free
     units with an estimate: hints for adding one by hand), "full": the department a full-department slot
@@ -298,7 +316,8 @@ def recommend(store: Store, typ: str, subtype: str = "", incident_id: int | None
     Units already on this event count toward their slots (a second alarm adds, it doesn't repeat).
     No card for the type: no units and a note, never an error (the operator adds units by hand).
     where: unit code -> mapview.locate() (None: nobody's place is known: board order);
-    params: the ETA settings (eta.Params; its order "card" keeps board order, estimates still shown)."""
+    params: the ETA settings (eta.Params; its order "card" keeps board order, estimates still shown);
+    road: estimates by road where there is a way (estimates(), #360)."""
     L = store.lists
     p = params or eta.Params()
     c = resolve(store, typ, subtype)
@@ -306,7 +325,7 @@ def recommend(store: Store, typ: str, subtype: str = "", incident_id: int | None
     on_here = [u for u in units if incident_id is not None and u["incident_id"] == incident_id]
     inc = store.incident(incident_id) if incident_id is not None else None
     free = [u for u in units if u["status"] in L.free and u["incident_id"] is None]
-    est = estimates(free, where, inc, p)
+    est = estimates(free, where, inc, p, road)
     located = inc is not None and inc.get("lat") is not None and inc.get("lon") is not None
     nearest = p.order == "nearest" and located and where is not None
     order = {"by": "nearest" if nearest else "card",

@@ -2122,7 +2122,8 @@ function etaHint(u) {
   const span = el("span", "eta" + (/^returning|^near/.test(why || "") ? " ret" : "") + (u.eta ? "" : " unk"));
   if (t) span.append(el("b", "", t), document.createTextNode(why ? ` ${why}` : ""));
   else span.textContent = why || "";
-  span.title = u.eta ? "Estimate: straight line × road factor at average speed, plus turnout" : "No estimate";
+  span.title = !u.eta ? "No estimate" : u.how === "road" ? "Estimate: by road (OSM), road speeds × emergency factor, plus turnout"
+    : "Estimate: straight line × road factor at average speed, plus turnout";
   return span;
 }
 

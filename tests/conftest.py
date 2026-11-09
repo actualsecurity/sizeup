@@ -108,6 +108,22 @@ def _gis_stays_local(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _roadgraph_stays_local(monkeypatch):
+    """The road graph (sizeup/roadgraph.py, #360) never asks Overpass from a test: the real fetch only to this
+    machine (tests build graphs from synthetic ways or tests/fixtures/osm/)."""
+    from urllib.parse import urlsplit
+
+    import sizeup.roadgraph as rg
+    real = rg.urlopen
+
+    def local_only(req, *a, **kw):
+        host = urlsplit(req.full_url if hasattr(req, "full_url") else str(req)).hostname
+        assert host in ("127.0.0.1", "localhost", "::1"), f"a test tried to reach {host} (roadgraph: fixtures only)"
+        return real(req, *a, **kw)
+    monkeypatch.setattr(rg, "urlopen", local_only)
+
+
+@pytest.fixture(autouse=True)
 def _trains_stay_local(monkeypatch):
     """Metro-North's trains (sizeup/trains.py) never reach the MTA from a test: its default addresses are
     off (a Trains built with none says not configured), no key from the environment, and the real fetch

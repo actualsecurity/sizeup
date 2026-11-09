@@ -279,6 +279,11 @@ class Config:
     gis_enabled: bool = True
     gis_bbox: tuple[float, float, float, float] = (-73.80, 40.92, -73.56, 41.10)
     gis_layers: tuple = ()            # sizeup.gis.Layer, in panel order
+    # [routing] (sizeup/roadgraph.py, #360): the road graph from OpenStreetMap for the rigs' probable paths and the
+    # estimates by road; the hub (or all-in-one) only. load() turns it on; built directly (tests): off (no fetching).
+    routing_enabled: bool = False
+    routing_ring_km: float = 12.0     # around the firehouses (data/firehouses.json)
+    routing_overpass_url: str = ""    # "" = overpass-api.de (sizeup/roadgraph.py OVERPASS_URL)
     # [trains] (sizeup/trains.py, #131): Metro-North's New Haven Line from the MTA's public feeds (no key
     # today; one, should the MTA bring keys back: env SIZEUP_MTA_KEY, the hub: SSM /sizeup-hub/mta-key).
     # The feed addresses: "" = the MTA's (sizeup/trains.py RT_URL, GTFS_URL).
@@ -1094,6 +1099,19 @@ def _gis(data: dict) -> dict:
     return dict(gis_enabled=enabled, gis_bbox=bbox, gis_layers=tuple(l for l in layers.values() if l.enabled))
 
 
+def _routing(data: dict) -> dict:
+    """[routing] -> Config fields (sizeup/roadgraph.py, #360). No section: on, a 12 km ring, overpass-api.de."""
+    r = _take(data.get("routing", {}), "routing", {"enabled", "ring_km", "overpass_url"})
+    enabled, ring, url = r.get("enabled", True), r.get("ring_km", 12.0), r.get("overpass_url", "")
+    if not isinstance(enabled, bool):
+        raise ConfigError("routing.enabled: true or false")
+    if isinstance(ring, bool) or not isinstance(ring, (int, float)) or not 2 <= ring <= 40:
+        raise ConfigError("routing.ring_km: 2 to 40 (km around the firehouses)")
+    if not isinstance(url, str) or (url and not url.startswith("https://")):
+        raise ConfigError("routing.overpass_url: an https:// address (or leave it out)")
+    return dict(routing_enabled=enabled, routing_ring_km=float(ring), routing_overpass_url=url)
+
+
 def _stt_aws(stt: dict) -> dict:
     """[stt] aws*: Amazon Transcribe (sizeup/transcribe.py). aws_channels: labels or talkgroup numbers. Also
     record_only (labels or talkgroups): recorded, not transcribed unless Settings > Radios says so (#201)."""
@@ -1147,7 +1165,7 @@ def load(path: str | Path) -> Config:
         raise ConfigError(f"{path}: {e}") from e
     _take(data, "config", {"station", "web", "radio", "tones", "stt", "p25", "mdc", "units", "storage", "map",
                            "cad", "dispatch", "cloud", "prealert", "roads", "roadwork", "gis", "trains", "weather", "alerts",
-                           "aircraft", "geo", "atc", "adapter"})
+                           "aircraft", "geo", "atc", "adapter", "routing"})
     adapter_env = _adapter(data)
     st = _take(data.get("station", {}), "station", {"id", "name", "auto_update", "lat", "lon"})
     if not isinstance(st.get("auto_update", True), bool):
@@ -1386,5 +1404,5 @@ def load(path: str | Path) -> Config:
         cloud_state="" if cloud.get("cloud_role") == "hub" else rel_state("state/cloud.json"),
         **_geo(data),
         **_atc(data, base),
-        **pa, **_alerts(data, pa), **_roads(data), **_roadwork(data), **_gis(data), **_trains(data), **_weather(data), **aircraft,
+        **pa, **_alerts(data, pa), **_roads(data), **_roadwork(data), **_gis(data), **_routing(data), **_trains(data), **_weather(data), **aircraft,
     )

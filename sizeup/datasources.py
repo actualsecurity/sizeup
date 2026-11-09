@@ -506,6 +506,25 @@ def roadwork_source(rw) -> Source:
                   builtin=f"{every}, while viewed (layer or incident)", blocked=blocked)
 
 
+def roadgraph_source(rg) -> Source:
+    """The road graph for the rigs' probable paths (sizeup/roadgraph.py, #360): one Overpass query for the area's
+    roads, built into the graph and cached; monthly in the quiet hours (OSM's roads change slowly), Refresh now at
+    most hourly (a 30 MB answer from a volunteer-run service)."""
+    from sizeup import roadgraph as r
+
+    def status() -> dict:
+        if not rg.configured:
+            return {"on": False, "why": "Routing off ([routing])"}
+        st = rg.status
+        note = f"{st['nodes']} nodes · {st['edges']} edges" if st["nodes"] else "not built yet"
+        if st["build_s"] is not None:
+            note += f" · built in {st['build_s']:.1f} s"
+        return {"at": st["at"], "error": st["error"], "n": st["edges"], "bytes": st["bytes"], "note": note}
+    return Source("roadgraph", "Road graph (routes)", "Map layers", r.SOURCE, r.LINK, r.ATTRIBUTION, status,
+                  refresh=rg.refresh, every="monthly", hold=_hold(rg.status), quiet=True, min_gap_s=HEAVY_GAP_S,
+                  blocked=rg.blocked, note="OSM roads · the rigs' paths and estimates by road")
+
+
 def trains_sources(trains) -> list[Source]:
     """Metro-North (sizeup/trains.py): the static GTFS (stations, line; the MTA updates it about weekly) daily in the
     quiet hours, on the registry's schedule; the realtime positions on the provider's own while someone looks."""
@@ -708,6 +727,7 @@ def build(app, log: Callable[[str], None] = print, choices: Callable[[], dict] |
         lambda: [gazetteer_source(getattr(app, "gaz", None))],
         lambda: roads_sources(app.roads),
         lambda: [roadwork_source(app.roadwork)] if getattr(app, "roadwork", None) is not None else [],
+        lambda: [roadgraph_source(app.roadgraph)] if getattr(app, "roadgraph", None) is not None else [],
         lambda: trains_sources(app.trains),
         lambda: weather_sources(app.weather),
         lambda: aircraft_sources(app.aircraft),

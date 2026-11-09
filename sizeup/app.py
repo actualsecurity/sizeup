@@ -163,6 +163,7 @@ def make_providers(cfg: Config, gaz) -> dict:
     from the state dir. The county GIS layers' own cache (~50 MB) is read later, in the background (_load_layers)."""
     from sizeup.aircraft import AircraftLayer
     from sizeup.gis import Gis
+    from sizeup.roadgraph import RoadGraph
     from sizeup.roadprojects import RoadProjects
     from sizeup.roads import Roads
     from sizeup.trains import Trains
@@ -172,7 +173,8 @@ def make_providers(cfg: Config, gaz) -> dict:
             "roadwork": RoadProjects.from_config(cfg, roads=roads, gaz=gaz, log=log),
             "trains": Trains.from_config(cfg, log=log),
             "aircraft": AircraftLayer.from_config(cfg, log=log, devices=lambda: sdr_lookup.devices(cfg.rtl_fm)),
-            "weather": Weather.from_config(cfg, log=log), "_gaz": gaz}
+            "weather": Weather.from_config(cfg, log=log), "_gaz": gaz,
+            "roadgraph": RoadGraph.from_config(cfg, log=log)}      # its graph read later, in the background
 
 
 def _load_atc_rules(cfg: Config):
@@ -198,6 +200,8 @@ def prewarm(cfg: Config, phases=None) -> None:
         mark("gazetteer")
         _WARM["providers"] = make_providers(cfg, gaz)
         mark("providers")
+        _WARM["providers"]["roadgraph"].load_cache()        # the road graph (#360): a second of CPU, here while we wait
+        mark("road graph")
         if cfg.atc_enabled and any(c.kind == "airband" for c in cfg.channels):
             _WARM["atc_rules"] = (cfg.atc_rules, _load_atc_rules(cfg))
             mark("atc rules")
@@ -617,6 +621,17 @@ class App:
         # Road projects & closures (sizeup/roadprojects.py, #185): the Thruway's and 511NY's roadwork through roads,
         # the villages' road notices (placed by the gazetteer, or listed), any WZDx feed configured; read while someone looks.
         self.roadwork = prov["roadwork"]
+        # The road graph and the rigs' probable paths (#360, sizeup/roadgraph.py, sizeup/cad/routes.py): the graph is
+        # read in the background (the standby's prewarm, or _load_layers), fetched on Settings > Data sources' schedule;
+        # until it is there the maps draw straight lines and the estimates are straight-line ones.
+        self.roadgraph = prov.get("roadgraph")
+        if self.roadgraph is None:
+            from sizeup.roadgraph import RoadGraph
+            self.roadgraph = RoadGraph.from_config(cfg, log=log)
+        if self.roadgraph.configured:
+            from sizeup.cad.routes import Routes
+            self.cad.routes = Routes(self.roadgraph.ready, lambda: self.cad.eta, self._route_closures,
+                                     lambda: self.cad.firehouses, log=log)
         # Metro-North's trains (sizeup/trains.py, #131): the MTA's feeds, read by the CAD of record while
         # someone looks at the Trains layer or an event near the tracks.
         self.trains = prov["trains"]
@@ -3097,6 +3112,9 @@ class App:
                 restored = self.cache_mirror.restore()
             if restored:
                 self._reread_caches()
+            if self.roadgraph.graph is None:
+                self.roadgraph.cache_loaded = False        # (cachesync may have just put it back)
+            self.roadgraph.load_cache()
             self.gis.load_cache()
         except Exception as e:  # never in the way of the layers starting: they fetch from their sources
             log(f"layers: map caches not all read ({type(e).__name__}: {e}); fetched from their sources")
@@ -3108,6 +3126,12 @@ class App:
                 + (f" ({restored} restored from S3)" if restored else "") + ("" if on else "; layers stopped meanwhile"))
             if on:
                 self._start_providers()
+
+    def _route_closures(self) -> list[dict]:
+        """The road closures and roadwork the routes avoid (#360): asked for only while a rig is going to a call, so
+        the sources are read then too (RoadProjects reads them while someone looks)."""
+        self.roadwork.ask()
+        return self.roadwork.items()
 
     def _reread_caches(self) -> None:
         """The small providers read their caches when they were made, before cachesync put a new task's back: again."""
