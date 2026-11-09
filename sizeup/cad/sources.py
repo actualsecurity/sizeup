@@ -369,6 +369,9 @@ class Sources:
         # trigger(reason): tell the station's adapters "poll now" (the app sets it: the runner here, or a job to the
         # station from the hub); None: nothing to tell
         self.trigger: Callable[[str], None] | None = None
+        # on_possibly(new_id, other_id): told when two incidents are noted "possibly the same" (#311: the dispatch mode
+        # leaves such an incident for a person); None: nobody listens
+        self.on_possibly: Callable[[int, int], None] | None = None
         self._stop = threading.Event()
         with self.store.lock:
             self.store.db.executescript(SCHEMA)
@@ -542,6 +545,8 @@ class Sources:
             self.store._event(db, other["id"], "feed", f"Possibly the same as {_ref(new)}: {new['address'] or '(no location)'}",
                               at=now)
         self.log(f"incident sources: event {new_id} possibly the same as event {other['id']}")
+        if self.on_possibly is not None:
+            self.on_possibly(new_id, other["id"])
 
     # -- manual edits ---------------------------------------------------------------------------------------------------
 

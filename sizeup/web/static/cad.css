@@ -867,4 +867,17 @@
     .alarm-card { padding: var(--s-3); }
     .alarm-btns button { flex: 1 1 auto; min-inline-size: 0; }
   }
+
+  /* ---- dispatch modes (#311, dispatchmode.js): the header's switch, an automatic step's source and undo ---- */
+  .dmode button { min-block-size: var(--ctl-sm); padding-inline: var(--s-2); }
+  .auto-step { display: inline-flex; align-items: center; gap: var(--s-1); }
+  .auto-src {
+    display: inline-flex; align-items: center; block-size: var(--tag-h); padding-inline: var(--s-1);
+    font: 700 var(--fs-2xs)/1 var(--font); letter-spacing: 0.02em; white-space: nowrap;
+    border: var(--bw) dashed currentColor; border-radius: var(--radius-s); color: var(--info);
+  }
+  .auto-src.radio { color: var(--ok-text); }
+  .auto-src.undone { color: var(--dim); text-decoration: line-through; }
+  .auto-undo { color: var(--dim); }
+  .auto-close { display: flex; align-items: center; gap: var(--s-2); }
 }

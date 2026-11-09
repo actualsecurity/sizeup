@@ -3197,7 +3197,10 @@ class App:
     def apply_source(self, kind: str, data: dict) -> None:
         """A "source_event" / "source_health" / "source_seen" on the CAD of record (the hub applies the station's the
         same way)."""
-        self.cad.sources.apply(kind, data)
+        if kind == "source_event":
+            self.cad.source_event(data)              # the incident sources (#297), then the dispatch mode (#311)
+        else:
+            self.cad.sources.apply(kind, data)
 
     def forwarding(self) -> bool:
         """This app sends what it hears to a hub, which is then the CAD of record."""

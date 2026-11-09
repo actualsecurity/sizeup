@@ -538,6 +538,8 @@ function fillQueueItem(li, inc) {
   li.replaceChildren(head, type, addr);
   const ap = airportLine(inc);
   if (ap) li.append(el("div", "qs ap-line", ap));       // the tower's facts on an airport event (#105)
+  const ask = globalThis.DispatchMode && isOpen(inc) && DispatchMode.closeRow(inc, autoDeps());   // County in service: close? (#311)
+  if (ask) li.append(ask);
   if (inc.status === "queued") {
     if (inc.type_note) li.append(el("div", "qs warn", inc.type_note));
     if (unconfirmed(inc)) li.append(el("div", "qs warn", "Location unconfirmed: pick it on the event"));   // (#176; #278: an instruction, on screen)
@@ -593,6 +595,8 @@ function renderPrealert() {
     Incoming.column($(BOARD ? "#b-incoming" : "#q-incoming"), src, deps);
     Incoming.notify(src);
   }
+  if (window.DispatchMode && !BOARD) DispatchMode.header($("#dmode"), cad.state && cad.state.dispatch_mode, autoDeps());
+  if (window.DispatchMode && BOARD) DispatchMode.pill($("#dmode-pill"), cad.state && cad.state.dispatch_mode);   // the wall board
   // airport pre-alerts (airport-alerts.js, #233): HPN ATC; accept makes a pending event (never a dispatch)
   const aa = cad.state && cad.state.airport_alerts;
   if (window.AirportAlerts) {
@@ -603,7 +607,8 @@ function renderPrealert() {
 }
 function queueExtra(i) {              // what the queue card shows from the call's summary (#217), for its signature
   const o = isOpen(i) ? callSummary(i.id) : null;
-  return o ? [o.radio, o.note, callLive(o).map((e) => [e.key, e.rig, e.channel, e.alias])] : null;
+  const ask = i.auto && i.auto.close_pending ? i.auto.close_pending.id : null;    // County in service: close? (#311)
+  return o ? [o.radio, o.note, callLive(o).map((e) => [e.key, e.rig, e.channel, e.alias]), ask] : ask;
 }
 function renderQueue() {
   const all = incidents();
@@ -862,7 +867,12 @@ async function rereadTones(t) {
 // ID named in the registry), and 60 Control's turns answering those units in the same P25 call. A radio with no
 // ID never goes on an incident by itself (#163): it stays in the Radio view, saying why there is no ID.
 
-const RADIO_WHY = { unit: "Unit", dispatcher: "60 Control", manual: "Added", page: "Page", airport: "Airport TG" };
+const RADIO_WHY = { unit: "Unit", dispatcher: "60 Control", manual: "Added", page: "Page", airport: "Airport TG", mention: "Named",
+                    fireground: "Fireground" };
+// The dispatch mode's chips and undo (dispatchmode.js, #311)
+function autoDeps() {
+  return { api, operator, canDo, toast: UI.toast, confirm: UI.confirm, time: (t) => fmtTime(t, true), readonly: BOARD };
+}
 // An FG1 key-up with no radio ID (comms.py id_note, #163): what was found, never who it might be.
 const NO_ID = {
   none: ["No ID sent", "No MDC-1200 or FleetSync burst at the key-up or the release, on a strong carrier: this radio didn't send an ID (PTT ID off, or a radio from elsewhere)"],
@@ -1096,8 +1106,25 @@ function radioRow(t, ctx = {}) {
     w.title = t.why === "unit" ? `${t.link_unit || t.rig} was on this incident` : t.why === "manual"
       ? `Added${t.link_unit ? ` by ${t.link_unit}` : " by hand"}` : t.why === "page" ? "The 60 Control page for this event"
       : t.why === "airport" ? "On the Airport Incident talkgroup while this was the open airport event"
+      : t.why === "mention" || t.why === "fireground" ? `Auto: ${whyText(t.why, t.link_unit)}`
       : `60 Control answering ${t.link_unit || "a unit on it"}`;
     meta.append(w);
+    if (ctx.scope === "inc" && ctx.current && !BOARD && canDo("dispatch")) {   // one click off this incident (#311)
+      const x = el("button", "mini auto-undo", "✕");
+      x.type = "button";
+      x.title = "Remove from this incident";
+      x.setAttribute("aria-label", "Remove from this incident");
+      x.addEventListener("click", () => unlinkTx(t, { id: ctx.current, number: (incidents().find((i) => i.id === ctx.current) || {}).number || "" }));
+      if (t.why === "mention" || t.why === "fireground") {   // auto from words: its recording kept only when confirmed
+        const k = el("button", "mini", t.link_kept ? "Kept" : "Keep");
+        k.type = "button";
+        k.setAttribute("aria-pressed", String(!!t.link_kept));
+        k.title = t.link_kept ? "Kept with this incident: click to stop keeping it" : "Keep its recording with this incident";
+        k.addEventListener("click", () => keepTx(t, ctx.current, !!t.link_kept));
+        meta.append(k);
+      }
+      meta.append(x);
+    }
   }
   if (t.end > t.start) meta.append(el("span", "dim", `${Math.round(t.end - t.start)} s`));
   const busy = rerunWaiting(t);
@@ -1377,7 +1404,9 @@ function evChip(e) {
 function whyText(why, unit) {
   return why === "unit" ? `${unit || "its unit"} assigned`
     : why === "dispatcher" ? `60 Control answering ${unit || "a unit on it"}` : why === "page" ? "the 60 Control page"
-    : why === "airport" ? "Airport Incident talkgroup, the open airport event" : why;
+    : why === "airport" ? "Airport Incident talkgroup, the open airport event"
+    : why === "mention" ? (unit === "address" || unit === "place" ? `names its ${unit}` : `names ${unit || "a unit on it"}`)
+    : why === "fireground" ? `its fireground channel ${unit || ""}`.trim() : why;
 }
 
 // ---- a transmission's "⋯" menu (ui.js UI.menu): Add to event ▸, Remove from <each>, Re-transcribe, Copy text ----
@@ -1440,6 +1469,15 @@ async function unlinkTx(t, e) {
     UI.toast(`Removed from ${n}`, "ok", r && r.excluded ? "It won't be added back on its own" : "");
   } catch (err) {
     UI.toast(`Remove failed: ${err.message}`, "err");
+  }
+  txChanged();
+}
+async function keepTx(t, iid, undo = false) {
+  try {
+    await api("POST", `/api/cad/incident/${iid}/keep`, { traffic_id: t.id, undo, operator: operator() });
+    UI.toast(undo ? "No longer kept" : "Kept", "ok");
+  } catch (err) {
+    UI.toast(`Keep failed: ${err.message}`, "err");
   }
   txChanged();
 }
@@ -1563,7 +1601,7 @@ function renderRadio(inc) {
   }
   const one = {
     key: (x) => x.key,
-    sig: (x) => x.kind === "radio" ? JSON.stringify([x.t.text, x.t.atc_text, x.t.atc_weak, x.t.atc_snaps, x.t.status, x.t.rig, x.t.why, x.t.has_audio, talkSig(x.t.rig),
+    sig: (x) => x.kind === "radio" ? JSON.stringify([x.t.text, x.t.atc_text, x.t.atc_weak, x.t.atc_snaps, x.t.status, x.t.rig, x.t.why, x.t.link_kept, x.t.has_audio, talkSig(x.t.rig),
                                                      x.t.alt_text, x.t.rerun_at, (x.t.events || []).map((e) => [e.id, e.why]), cad.txRev,
                                                      emSig(x.t), atcSig(x.t)])
       : JSON.stringify([x.e.text, x.e.units]),
@@ -1721,7 +1759,7 @@ function renderOnUnits(inc) {
   syncList($("#d-units"), rows, {
     key: (a) => String(a.id),
     sig: (a) => JSON.stringify([a.status, a.dispatched_at, a.enroute_at, a.onscene_at, a.cleared_at, cad.listSig.length, cmd,
-      (a.next || []).join(), (a.return || []).join(), talkSig(a.name),
+      (a.next || []).join(), (a.return || []).join(), talkSig(a.name), window.DispatchMode ? DispatchMode.sig(inc, a) : "",
       cad.ask && cad.ask.uid === a.unit_id && cad.ask.where === "inc" ? cad.ask.status : null]),
     make: () => el("li", "ou"),
     fill: (li, a) => {
@@ -1729,6 +1767,8 @@ function renderOnUnits(inc) {
       const head = el("div", "ouh");
       head.append(el("b", "", a.name));
       if (!a.cleared_at) head.append(statusChip(a.status, agencySet(a) ? statusLabel(a, a.status) : undefined));
+      const ac = window.DispatchMode && DispatchMode.unitChip(inc, a, autoDeps());      // set automatically (#311)
+      if (ac) head.append(ac);
       const times = el("span", "dim small times");
       times.append(...[["Disp", a.dispatched_at], ["Resp", a.enroute_at], ["OnLoc", a.onscene_at], ["Clr", a.cleared_at]]
         .filter(([, t]) => t).map(([k, t]) => el("span", "", `${k} ${fmtTime(t, true)}`)));
@@ -1751,7 +1791,7 @@ function playForEvent(inc, e) {
   const d = (inc.dispatches || []).find((x) => Math.abs(x.at - e.at) < 0.001);
   return d && d.has_audio ? d.id : null;
 }
-const EVENT_KINDS = { note: "comment", status: "status", system: "system", attach: "attached", prealert: "pre-alert", feed: "CAD feed", reopened: "reopened", alarm: "EMERGENCY" };
+const EVENT_KINDS = { note: "comment", status: "status", system: "system", attach: "attached", prealert: "pre-alert", feed: "CAD feed", reopened: "reopened", alarm: "EMERGENCY", auto: "auto" };
 // The latest entry, one line, for the folded Timeline's header: "19:34:21 status · 2392 on location"
 function eventLine(e) {
   const text = e.kind === "note" && e.units ? noteText(e) : e.text;
@@ -1793,12 +1833,14 @@ function renderEvents(inc) {
   show($("#d-events"), open);
   syncList($("#d-events"), events.slice().reverse(), {
     key: (e) => String(e.id),
-    sig: (e) => `${e.id}|${e.units || ""}`,
+    sig: (e) => `${e.id}|${e.units || ""}|${window.DispatchMode ? DispatchMode.sig(inc, e.id) : ""}`,
     make: () => el("li", "ev"),
     fill: (li, e) => {
       const meta = el("div", "meta");
       meta.append(el("span", "t", fmtTime(e.at, true)), el("span", `ek ${e.kind}`, EVENT_KINDS[e.kind] || e.kind));
       if (e.operator) meta.append(opSpan(e.operator));
+      const ac = window.DispatchMode && DispatchMode.eventChip(inc, e, autoDeps());    // automatic: its source, undo (#311)
+      if (ac) meta.append(ac);
       li.replaceChildren(meta, eventTxt(inc, e));
     },
     empty: "None",

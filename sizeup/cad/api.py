@@ -100,6 +100,12 @@ POST /api/cad/incident/<id>/note          {text, units?: ["E63"], places?: [{lab
 GET  /api/cad/incident/<id>/units?q=e6    unit autocomplete: on the event first, then fire units, then the rest
 POST /api/cad/incident/<id>/recommend     {type?, subtype?}      -> {units, unfilled, already, card, note}
 POST /api/cad/incident/<id>/feed-use      {field: type|location} -> the event: the CAD feed's value over a person's (#297)
+POST /api/cad/incident/<id>/auto-undo     {step, operator?}  an automatic step (60 Control dispatching, #311; the event's
+                                          auto.steps) taken back: the unit (or the close) is then a person's
+POST /api/cad/incident/<id>/keep          {traffic_id, undo?, operator?}  an automatic radio-log link (mention / fireground,
+                                          #311) confirmed: its audio and row are kept like any on the event
+POST /api/cad/dispatch-mode               {mode: 60control | pcfd, operator?}  the header's switch (#311,
+                                          sizeup/cad/automode.py); dispatchers and admins; in the Settings audit log
 POST /api/cad/incident/<id>/preview       {unit_ids, full?, remarks?} -> {text, kind, audio_url, audio_note, remarks,
                                                                     tones, tone_warnings}
 POST /api/cad/incident/<id>/dispatch      {unit_ids, operator, channel?, full?, remarks?} -> {dispatch_id, text, ...}
@@ -212,7 +218,7 @@ from sizeup.datasources import TooSoon
 
 JSON = "application/json"
 MAX_BODY = 65536
-INCIDENT = re.compile(r"/api/cad/incident/(\d{1,9})(?:/(accept|dismiss|close|reopen|note|recommend|preview|dispatch|upgrade|attach|link|unlink|return|feed-use))?")
+INCIDENT = re.compile(r"/api/cad/incident/(\d{1,9})(?:/(accept|dismiss|close|reopen|note|recommend|preview|dispatch|upgrade|attach|link|unlink|keep|return|feed-use|auto-undo))?")
 SUGGEST = re.compile(r"/api/cad/incident/(\d{1,9})/units")
 EXPORT = re.compile(r"/api/cad/export/([a-z-]{1,20}\.csv)")
 UNIT = re.compile(r"/api/cad/unit/(\d{1,9})/status")
@@ -225,6 +231,7 @@ AIRPORT_ALERT = re.compile(r"/api/cad/airport-alert/(\d{1,9})/(accept|dismiss)")
 HINT = re.compile(r"/api/cad/hint/(\d{1,9})/(accept|dismiss)")
 ALARM_ACK = re.compile(r"/api/cad/alarm/(\d{1,9})/ack")
 ALARM_CLEAR = re.compile(r"/api/cad/alarm/(\d{1,9})/clear")
+DISPATCH_MODE = re.compile(r"/api/cad/dispatch-mode")
 DATASOURCE = re.compile(r"/api/cad/datasources/([A-Za-z0-9_.:%-]{1,200})/refresh")
 DVR_PIN = re.compile(r"/api/cad/cameras/([A-Za-z0-9_.:-]{1,64})/dvr/pin")      # keep recording a camera (#277)
 DVR_CLIP = re.compile(r"/api/cad/cameras/([A-Za-z0-9_.:-]{1,64})/dvr/clip")    # a camera clip on an event (#323)
@@ -243,7 +250,8 @@ ADMIN_READS = {
 # anyone signed in (a POST that changes nothing). First match wins; a path not here is "admin".
 WRITES = (
     (re.compile(r"/api/cad/incident(?:/\d{1,9}(?:/(?:accept|dismiss|close|reopen|note|recommend|preview|dispatch|upgrade"
-                r"|attach|link|unlink|return|feed-use))?)?"), "dispatch"),                # events, notes, dispatches, radio links
+                r"|attach|link|unlink|keep|return|feed-use|auto-undo))?)?"), "dispatch"),      # events, notes, dispatches, radio links
+    (DISPATCH_MODE, "dispatch"),                                            # 60 Control / PCFD dispatching (#311)
     (UNIT, "dispatch"),                                                     # unit status on the board
     (PREALERT, "dispatch"),                                                 # a phone pre-alert that is nothing
     (AIRPORT_ALERT, "dispatch"),                                            # an airport pre-alert: an event, or nothing
@@ -340,6 +348,10 @@ def _on_incident(m, b, o, c):
         return f"Linked a transmission to {ev}", n
     if act == "unlink":
         return f"Removed a transmission from {ev}", n
+    if act == "keep":
+        return f"{'Stopped keeping' if b.get('undo') else 'Kept'} a transmission on {ev}", n
+    if act == "auto-undo":
+        return f"Undid an automatic step on {ev}", n
     if act == "return":
         return f"Returned {_units(c, [b.get('unit_id')])} to {ev} ({b.get('status', '')})", n
     return f"{act.capitalize()} {ev}", n
@@ -402,6 +414,7 @@ DOES = (
     (re.compile(r"/api/cad/incident"), _created),
     (INCIDENT, _on_incident),
     (UNIT, _unit_status),
+    (DISPATCH_MODE, lambda m, b, o, c: (f"Dispatch mode: {o.get('label') or _clip(b.get('mode'), 20)}", "")),
     (PREALERT, lambda m, b, o, c: (f"Dismissed the phone pre-alert of {_prealert_at(o)}"
                                    + (f": {_clip(b.get('reason'))}" if b.get("reason") else ""), "")),
     (AIRPORT_ALERT, lambda m, b, o, c: (
@@ -731,11 +744,13 @@ class CadApi:
             iid, action = int(m.group(1)), m.group(2)
             fn = {None: c.update, "accept": c.accept, "dismiss": c.dismiss, "close": c.close, "reopen": c.reopen, "note": c.note,
                   "recommend": c.recommend, "preview": c.preview, "dispatch": c.dispatch, "upgrade": c.upgrade,
-                  "attach": c.attach, "link": c.link_traffic, "unlink": c.unlink_traffic,
-                  "return": c.return_unit, "feed-use": c.feed_use}[action]
+                  "attach": c.attach, "link": c.link_traffic, "unlink": c.unlink_traffic, "keep": c.keep_traffic,
+                  "return": c.return_unit, "feed-use": c.feed_use, "auto-undo": c.auto_undo}[action]
             return fn(iid, body)
         if m := UNIT.fullmatch(path):
             return c.unit_status(int(m.group(1)), body)
+        if path == "/api/cad/dispatch-mode":
+            return c.dispatch_mode(body)
         if m := PREALERT.fullmatch(path):
             return c.prealert_dismiss(int(m.group(1)), body)
         if m := AIRPORT_ALERT.fullmatch(path):
