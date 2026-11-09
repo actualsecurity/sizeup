@@ -104,6 +104,23 @@ are referenced from there. M1 is built.
     - **Red Alert (Alpine Software, RedNMX):** ask Alpine for API access to member/apparatus location, and a CAD link so closed events pre-fill Red Alert incident reports.
     - **An apparatus iPad web app** (ours, no vendor approval): shows the assigned event; GPS every few seconds while open; one-tap status (en route, on scene, available). Needs data access on the iPads and secure remote access to sizeup (VPN such as Tailscale, not exposed to the internet). Background tracking would need a native app.
   - the user's request (2026-10-07): "could we also pull from RedAlert... to pull location information live of where they are? or maybe we could run an app on the ipads for that... would be nice to use IAR or RedAlert though that already has that info"
+  - **The map side is ready (#358); no provider is built until the source is chosen.** `Cad.positions` is the single
+    input (`sizeup/cad/mapview.py`). Whichever source we pick hands in one fix per unit in this shape
+    (`mapview.ingest()` checks it):
+
+    | field | | |
+    |---|---|---|
+    | `unit` | required | the unit's code (`E60`, `L31`, `2392`) |
+    | `lat`, `lon` | required | WGS84 degrees |
+    | `at` | required | epoch seconds when the fix was true (not when it arrived) |
+    | `heading` | optional | degrees true, 0-360 |
+    | `speed` | optional | metres per second over the ground |
+    | `source` | required | a short name for where it came from (shown in the rig's tooltip) |
+
+    A fix up to 60 s old (`POSITION_STALE_S`) is live: the rig is drawn there and moved on between fixes along its
+    heading and speed (glide.js, as aircraft are). Up to 300 s (`POSITION_MAX_AGE_S`) it is stale: hollow, faded, its
+    age on the chip. Older, the rig is placed by its status again. Follow and the rings work the same with or without
+    a fix. `Cad._feed_position(fix)` feeds one in for tests and local dev only.
 
 ## Open questions for the department
 

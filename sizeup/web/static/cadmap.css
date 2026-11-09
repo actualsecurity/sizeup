@@ -41,6 +41,17 @@
   .cm-rig.talking { outline: 2px solid var(--ok); outline-offset: 1px; animation: cmtalk var(--pulse) ease-in-out infinite; }
   .cm-rig.talked { outline: 1px dashed var(--ok); outline-offset: 1px; }
   @keyframes cmtalk { 50% { outline-color: transparent; } }
+  /* #358: lit up. Followed: a plain ring; picked (a row's Follow, a talker chip): a ring and a halo for a while; its
+     row hovered: wider; transmitting: the ring in --ok with a halo, over whichever of those it has */
+  .cm-rig.followed { z-index: 4; outline: 2px solid var(--text); outline-offset: 2px; }
+  .cm-rig.hl { z-index: 5; outline: 3px solid var(--text); outline-offset: 3px; box-shadow: 0 0 12px 5px color-mix(in srgb, var(--text) 35%, transparent); }
+  .cm-rig.hot { z-index: 5; outline: 4px solid var(--text); outline-offset: 5px; box-shadow: 0 0 18px 8px color-mix(in srgb, var(--text) 45%, transparent); }
+  .cm-rig.talking { z-index: 5; box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 35%, transparent), 0 0 14px 5px color-mix(in srgb, var(--ok) 45%, transparent); }
+  .cm-rig.talking:is(.followed, .hl, .hot) { outline-color: var(--ok); }
+  /* a live fix older than the hub's avl.stale_s: hollow, faded (opacity set by cadmap.js), its age after the name */
+  .cm-rig.at-position.stale { background: color-mix(in srgb, var(--bg) 85%, transparent); color: color-mix(in srgb, var(--c) 60%, var(--text)); border: 2px solid var(--c); }
+  .cm-rig .age { margin-inline-start: var(--s-0); font-size: calc(var(--fs-2xs) - 3px); font-weight: 400; vertical-align: 1px; }
+  .talk-chip[data-rig] { cursor: pointer; }
   .cm-far .cm-rig { font-size: calc(var(--fs-2xs) - 2px); padding: 0 var(--s-0); }
   .cm-rig.look-unset { --c: var(--line-strong); position: static; }
 
@@ -243,6 +254,9 @@
   .ac-follow.alerted { border-color: var(--accent-text); }
   .ac-follow.alerted .ico { color: var(--accent-text); }
   .ac-follow-t { min-inline-size: 0; overflow: hidden; text-overflow: ellipsis; }
+  /* following one of our rigs (#358, cadmap.js): the same chip; amber while its live fix is stale */
+  .cm-follow .ico { color: var(--text); }
+  .cm-follow.stale { border-color: var(--warn); }
   /* an aircraft's transmissions on HPN Tower in its box (#252, aircraft.js heardLines): ▶, time, who, the words */
   .ac-heard-head { margin-block-start: var(--s-2); color: var(--dim); font-size: var(--fs-xs); line-height: var(--lh-xs); }
   .ac-tx { display: flex; align-items: baseline; gap: var(--s-2); min-block-size: var(--ctl-sm); }
