@@ -623,7 +623,7 @@ const next = { ...m0, lon: m0.lon + 0.0004, at: m0.at + 5 };
 rm.update({ map: { ...IN.map, markers: IN.map.markers.map((m) => (m.unit === "E61" ? next : m)) }, lists: IN.lists }, null, "");
 out.pairs = [];
 for (let i = 0; i < 6; i++) {
-  spin(30); L.tick();
+  spin(260); L.tick();
   const f = rm.map.getSource("cm-routes").data.features.find((x) => x.properties.unit === "E61" && !x.properties.trail);
   const ll = chip("E61").marker.getLngLat();
   out.pairs.push([f.geometry.coordinates[0], [ll.lng, ll.lat]]);
@@ -639,3 +639,51 @@ out.routes = rm.map.getSource("cm-routes").data.features.length;
         assert start == pytest.approx(mark, abs=1e-9)                            # the route starts at the mark, every frame
     assert len({tuple(p[1]) for p in o["pairs"]}) > 1                            # (and the mark did move)
     assert o["moving"] is False and o["routes"] >= 1
+
+
+@pytest.mark.skipif(__import__("shutil").which("node") is None and not Path("/opt/homebrew/bin/node").exists(), reason="node not installed")
+def test_moving_lines_are_set_at_most_about_4_hz_and_the_age_timer_stops_itself(tmp_path):
+    from tests.test_unit_follow import run
+    data, *_ = _page_with_route()
+    o = run(tmp_path, r"""
+const m0 = IN.map.markers.find((m) => m.unit === "E61");
+const next = { ...m0, lon: m0.lon + 0.004, at: m0.at + 10, speed: 15, heading: 90 };
+rm.update({ map: { ...IN.map, markers: IN.map.markers.map((m) => (m.unit === "E61" ? next : m)) }, lists: IN.lists }, null, "");
+const sets = { "cm-lines": 0, "cm-routes": 0 };
+for (const id of Object.keys(sets)) { const s = rm.map.getSource(id), f = s.setData; s.setData = (d) => { sets[id] += 1; f(d); }; }
+const marks = new Set();
+const t0 = Date.now();
+while (Date.now() - t0 < 1000) { spin(16); L.tick(); const ll = chip("E61").marker.getLngLat(); marks.add(ll.lng); }
+out.sets = sets; out.marks = marks.size;
+// the age timer: made while a fix is on screen; the map hidden (another view), its next beat clears it
+const timers = [], cleared = [];
+global.setInterval = (f, ms) => { timers.push([f, ms]); return 4242; };
+global.clearInterval = (id) => { cleared.push(id); };
+rm.canvas.offsetParent = null; L.draw();               // hidden: the real one (from loading) is cleared
+rm.canvas.offsetParent = {}; L.draw();                 // shown again: a new one
+out.made = timers.map((t) => t[1]);
+rm.canvas.offsetParent = null;                         // gone from screen, no redraw: only the timer's own beat
+timers[timers.length - 1][0]();
+out.cleared = cleared.map((x) => (typeof x === "number" ? x : "real"));
+""", data)
+    assert o["marks"] > 20                                                    # the mark moved on most frames
+    assert 2 <= o["sets"]["cm-routes"] <= 6 and o["sets"]["cm-lines"] <= 6, o["sets"]   # ~4 Hz over the second, not 60
+    assert o["made"] == [1000] and o["cleared"][-1] == 4242
+
+
+@pytest.mark.skipif(__import__("shutil").which("node") is None and not Path("/opt/homebrew/bin/node").exists(), reason="node not installed")
+def test_the_call_line_from_a_moving_mark_is_set_at_most_about_4_hz(tmp_path):
+    from tests.test_unit_follow import run
+    data, *_ = _page_with_route()
+    data["map"]["routes"] = []                                               # no graph: the straight call line
+    o = run(tmp_path, r"""
+const m0 = IN.map.markers.find((m) => m.unit === "E61");
+const next = { ...m0, lon: m0.lon + 0.004, at: m0.at + 10, speed: 15, heading: 90 };
+rm.update({ map: { ...IN.map, markers: IN.map.markers.map((m) => (m.unit === "E61" ? next : m)) }, lists: IN.lists }, null, "");
+const s = rm.map.getSource("cm-lines"), f = s.setData;
+let n = 0; s.setData = (d) => { n += 1; f(d); };
+const t0 = Date.now();
+while (Date.now() - t0 < 1000) { spin(16); L.tick(); }
+out.n = n;
+""", data)
+    assert 2 <= o["n"] <= 6

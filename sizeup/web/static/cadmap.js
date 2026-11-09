@@ -77,6 +77,7 @@ window.CadMap = (() => {
   const STALE_S = 60, MAX_AGE_S = 300, HORIZON_S = 8;   // an older hub: mapview.py's POSITION_STALE_S / _MAX_AGE_S / _HORIZON_S
   const MIN_MS = 2;                    // slower than this a rig is stopped: drawn at its fix, never drawn on
   const HOLD_M = 30;                   // a stopped rig's fix this close to where it is drawn: held there (never eased back)
+  const LINE_MS = 250;                 // the lines from moving marks (to the call, the routes) re-set at most ~4 Hz
   const FRAME_MS = 50, MAX_FRAME_MS = 250, STEP_PX = 0.75;   // as aircraft.js: redrawn as often as the fastest moves STEP_PX
   const AGE_MS = 1000;                 // the chips' ages and the follow chip's words: once a second (a timer, not frames)
   const rigMaps = new Set(), rigLayers = new Set();
@@ -147,9 +148,14 @@ window.CadMap = (() => {
   const wanted = () => visible() && [...rigLayers].some((l) => l.moving());
   function animate() {
     if (!raf && typeof requestAnimationFrame === "function" && wanted()) raf = requestAnimationFrame(frame);
-    const fixes = visible() && [...rigLayers].some((l) => l.hasFix && l.shown());
-    if (fixes && !ageTimer) ageTimer = setInterval(() => { for (const l of rigLayers) if (l.hasFix && l.shown()) l.draw(); }, AGE_MS);
-    else if (!fixes && ageTimer) { clearInterval(ageTimer); ageTimer = 0; }
+    if (fixesShown() && !ageTimer) ageTimer = setInterval(ageTick, AGE_MS);
+    else if (!fixesShown() && ageTimer) { clearInterval(ageTimer); ageTimer = 0; }
+  }
+  const fixesShown = () => visible() && [...rigLayers].some((l) => l.hasFix && l.shown());
+  // the ages, once a second; no live fix on a map on screen any more (the Radio or Settings view): the timer stops itself
+  function ageTick() {
+    if (!fixesShown()) { clearInterval(ageTimer); ageTimer = 0; return; }
+    for (const l of rigLayers) if (l.hasFix && l.shown()) l.draw();
   }
   function frame(ts) {
     raf = 0;
@@ -352,7 +358,11 @@ window.CadMap = (() => {
     tick() {
       let moved = false;
       for (const rec of this.chips.values()) if (rec.m.place === "position") { rec.marker.setLngLat(this.where(rec.m)); moved = true; }
-      if (moved && this.data && this.data.map) this.drawLines(this.data.map.markers || [], this.data.lists);
+      // the call lines and routes with them, at most LINE_MS apart (setData re-tiles the source; the age timer's
+      // redraw puts them on the settled marks)
+      if (moved && this.data && this.data.map && Date.now() - (this.linesAt || 0) >= LINE_MS) {
+        this.drawLines(this.data.map.markers || [], this.data.lists);
+      }
       this.followTick(false);
     }
     // following: the map kept on the rig, and the chip's words; gone from the map: let go
@@ -494,6 +504,7 @@ window.CadMap = (() => {
     }
 
     drawLines(markers, lists) {
+      this.linesAt = Date.now();
       const feats = new Map();
       const M = this.data && this.data.map;
       this.drawRoutes(markers, lists, M);
