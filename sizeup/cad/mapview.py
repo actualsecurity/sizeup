@@ -40,9 +40,9 @@ The ingest shape a future provider hands in, one fix per unit (ingest() checks i
 
     {"unit": "E60",              the unit's code (Store.units() name)
      "lat": 41.0, "lon": -73.6,  WGS84 degrees
-     "at": 1791400000.0,         epoch seconds when the fix was true (not when it arrived)
+     "at": 1791400000.0,         epoch seconds when the fix was true (not when it arrived; never milliseconds)
      "heading": 270.0,           optional: degrees true, 0-360 (the page moves it on along it between fixes)
-     "speed": 12.5,              optional: metres per second over the ground
+     "speed": 12.5,              optional: metres per second over the ground, 0-100
      "source": "avl-vendor"}     a short name for where it came from (shown in the chip's tooltip)
 
 Cad._feed_position(fix) feeds one in for tests and local dev only.
@@ -76,6 +76,10 @@ FIREHOUSES = ROOT / "data" / "firehouses.json"
 FIRE_KINDS = ("chief", "engine", "ladder", "tower", "rescue", "utility", "marine")
 POSITION_MAX_AGE_S = 300.0      # an AVL fix older than this is ignored (the unit is drawn by status)
 POSITION_STALE_S = 60.0         # ... older than this: still drawn at the fix, but stale (hollow, faded, its age)
+POSITION_HORIZON_S = 8.0        # the page draws a moving rig on from its fix this long at most (about the AVL interval)
+POSITION_FUTURE_S = 60.0        # a fix this far ahead of our clock is wrong (skew is taken up to this)
+MAX_SPEED_MS = 100.0            # m/s; faster is no fire apparatus (360 km/h): ingest refuses it, fresh_position drops it
+EPOCH_MIN, EPOCH_MAX = 1e9, 1e10   # plausible epoch seconds (2001-2286): milliseconds (1.7e12) are refused
 RECENT_S = 6 * 3600.0           # cleared calls looked at for a return trip (the longest window allowed)
 AT_HOME_KM = 0.15               # an AVL fix this close to its station: in quarters (turnout counts)
 LOOK = {"free": "available", "oos": "oos", "dispatched": "dispatched", "": "dispatched", "enroute": "responding",
@@ -109,20 +113,21 @@ def _num(v) -> bool:
 
 def fresh_position(pos, now: float) -> dict | None:
     """A live position {lat, lon, at, heading?, speed?, source?} that can be drawn: numbers in range and
-    no older than POSITION_MAX_AGE_S (an `at` in the future is clock skew: taken). heading, speed and
+    no older than POSITION_MAX_AGE_S (an `at` up to POSITION_FUTURE_S ahead is clock skew: taken; further ahead
+    is a wrong clock or milliseconds: refused). heading, speed and
     source are kept only when they are good (a bad one is dropped, not the fix)."""
     if not isinstance(pos, dict):
         return None
     lat, lon, at = pos.get("lat"), pos.get("lon"), pos.get("at")
     if not all(_num(v) for v in (lat, lon, at)):
         return None
-    if not (-90 <= lat <= 90 and -180 <= lon <= 180) or now - at > POSITION_MAX_AGE_S:
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180) or now - at > POSITION_MAX_AGE_S or at - now > POSITION_FUTURE_S:
         return None
     out = {"lat": float(lat), "lon": float(lon), "at": float(at)}
     hd, sp, src = pos.get("heading"), pos.get("speed"), pos.get("source")
     if _num(hd) and 0 <= hd <= 360:
         out["heading"] = float(hd) % 360
-    if _num(sp) and 0 <= sp < 100:            # m/s; 100 m/s (360 km/h) is no fire apparatus
+    if _num(sp) and 0 <= sp <= MAX_SPEED_MS:
         out["speed"] = float(sp)
     if isinstance(src, str) and src.strip():
         out["source"] = src.strip()[:40]
@@ -148,7 +153,9 @@ def ingest(fix) -> tuple[str, dict]:
             raise ValueError(f"{k}: a number")
     if not (-90 <= fix["lat"] <= 90 and -180 <= fix["lon"] <= 180):
         raise ValueError("lat, lon: out of range")
-    for k, lo, hi in (("heading", 0, 360), ("speed", 0, 100)):
+    if not EPOCH_MIN < fix["at"] < EPOCH_MAX:
+        raise ValueError("at: epoch seconds (not milliseconds)")
+    for k, lo, hi in (("heading", 0, 360), ("speed", 0, MAX_SPEED_MS)):
         if fix.get(k) is not None and not (_num(fix[k]) and lo <= fix[k] <= hi):
             raise ValueError(f"{k}: {lo}-{hi}")
     src = fix.get("source")
@@ -311,7 +318,7 @@ def map_slice(units: list[dict], incidents: list[dict], role, firehouses: list[d
              "lat": i["lat"], "lon": i["lon"]}
             for i in open_incs.values() if i.get("lat") is not None and i.get("lon") is not None]
     return {"stations": firehouses, "markers": markers, "unset": unset, "incidents": pins,
-            "avl": {"stale_s": POSITION_STALE_S, "max_age_s": POSITION_MAX_AGE_S}}
+            "avl": {"stale_s": POSITION_STALE_S, "max_age_s": POSITION_MAX_AGE_S, "horizon_s": POSITION_HORIZON_S}}
 
 
 def locations(units: list[dict], incidents: list[dict], role, firehouses: list[dict], positions: dict | None = None,

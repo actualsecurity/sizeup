@@ -6,7 +6,8 @@
 //                        centred (eased over PAN_MS, at most every PAN_MS, only once it is a pixel off, never over a
 //                        zoom: a moveend at most 4 times a second), chip(text, tip, flags) the "Following ..." chip at
 //                        the foot of the map with ✕. A drag (not a pinch), Recenter (sizeup:recenter), ✕ or stop()
-//                        lets go; zooming is round the centre (the mark) meanwhile.
+//                        lets go; zooming is round the centre (the mark) meanwhile. takeMap(map): a pick or a focus
+//                        (centred and ringed, not followed) lets every follower on that map go.
 //   MapFollow.Lights     one per layer: the mark picked from a list or a chip (pick: ringed for HIGHLIGHT_MS once
 //                        centred) and the ones whose row or card is hovered (hover: a wider ring).
 //   MapFollow.shownMap   the first of a layer's maps on screen.
@@ -49,6 +50,7 @@ window.MapFollow = (() => {
       });
       map.on("sizeup:recenter", () => this.stop());
       map.on("sizeup:follow", (e) => { if (e && e.follower && e.follower !== this) this.stop(); });   // one at a time
+      map.on("sizeup:takemap", () => this.stop());   // a pick or a focus (centred, ringed) takes the map from any follower
     }
     // follow id: centred at `at` ({lon, lat}, if known), zoomed in to at least `zoom`
     start(id, at, zoom = FOLLOW_ZOOM) {
@@ -142,5 +144,7 @@ window.MapFollow = (() => {
     return [...maps].find((m) => { try { return !!m.map.getContainer().offsetParent; } catch (_) { return false; } }) || null;
   }
 
-  return { Follower, Lights, shownMap, ago, FOLLOW_ZOOM, PAN_MS, EASE_MS, HIGHLIGHT_MS };
+  const takeMap = (map) => { try { map.fire("sizeup:takemap"); } catch (_) { /* */ } };
+
+  return { Follower, Lights, shownMap, takeMap, ago, FOLLOW_ZOOM, PAN_MS, EASE_MS, HIGHLIGHT_MS };
 })();

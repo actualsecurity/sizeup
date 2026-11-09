@@ -1748,20 +1748,39 @@ function statusChoices(u, where) {
   return next.map((c) => all.find((s) => s.code === c)).filter(Boolean);
 }
 // Follow a rig on the map (#358, cadmap.js): its unit-board row and its row on an incident, while it is on the map;
-// hovering either row rings it wider there
+// hovering (or focusing) either row rings it wider there. Only on a map already on screen: never a view switch (a new
+// call's draft, an edit form); no map showing it: the button flashes instead.
 const onMap = (name) => !!(window.CadMap && CadMap.onMap && CadMap.onMap(name));
+const FLASH_MS = 1200;
 function followBtn(name) {
   const b = el("button", "mini quiet u-follow");
   b.type = "button";
   b.title = `Follow ${name} on the map`;
   b.setAttribute("aria-label", b.title);
   b.append(Icon("locate"));
-  b.addEventListener("click", (e) => { e.stopPropagation(); CadMap.followUnit(name); });
+  b.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (CadMap.followUnit(name)) return;
+    b.classList.add("nomap");
+    b.title = "No map on screen";
+    setTimeout(() => { b.classList.remove("nomap"); b.title = `Follow ${name} on the map`; }, FLASH_MS);
+  });
   return b;
 }
+let hoveredRow = null;                 // the row whose rig is ringed wider (cleared when that row goes)
 function hoverRig(li) {
-  li.addEventListener("mouseenter", () => { if (li._rig && window.CadMap && CadMap.hoverUnits) CadMap.hoverUnits([li._rig]); });
-  li.addEventListener("mouseleave", () => { if (window.CadMap && CadMap.hoverUnits) CadMap.hoverUnits([]); });
+  const on = () => { if (li._rig && window.CadMap && CadMap.hoverUnits) { hoveredRow = li; CadMap.hoverUnits([li._rig]); } };
+  const off = () => { if (hoveredRow === li) hoveredRow = null; if (window.CadMap && CadMap.hoverUnits) CadMap.hoverUnits([]); };
+  li.addEventListener("mouseenter", on);
+  li.addEventListener("mouseleave", off);
+  li.addEventListener("focusin", on);
+  li.addEventListener("focusout", (e) => { if (!e.relatedTarget || !li.contains(e.relatedTarget)) off(); });
+}
+function dropGoneHover() {             // after a redraw: the hovered row removed (or its rig off it): no ring left behind
+  if (hoveredRow && (!hoveredRow.isConnected || !hoveredRow._rig)) {
+    hoveredRow = null;
+    if (window.CadMap && CadMap.hoverUnits) CadMap.hoverUnits([]);
+  }
 }
 function talkSig(name) {
   const t = Radio.talkingFor(name);
@@ -1802,6 +1821,7 @@ function renderOnUnits(inc) {
     },
     empty: "None",
   });
+  dropGoneHover();
 }
 
 function playForEvent(inc, e) {
@@ -3284,6 +3304,7 @@ function renderUnits() {
       empty: "None",
     });
   });
+  dropGoneHover();
 }
 
 function renderUnitLog() {
