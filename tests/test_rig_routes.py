@@ -611,3 +611,31 @@ def test_the_wrong_way_stretch_never_uses_a_closed_block():
     assert len(pen) == 1 and g.name(next(iter(pen))) == "Oak Street"          # the closed block only, not its neighbour
     r = g.route(at(4, 0), to, P, pen, wrongway_m=60)
     assert r is not None and "West Street" in names(g, r)
+
+
+@pytest.mark.skipif(__import__("shutil").which("node") is None and not Path("/opt/homebrew/bin/node").exists(), reason="node not installed")
+def test_the_route_moves_with_the_glided_mark_and_keeps_no_frames_of_its_own(tmp_path):
+    from tests.test_unit_follow import run
+    data, e61, mid, to = _page_with_route()
+    o = run(tmp_path, r"""
+const m0 = IN.map.markers.find((m) => m.unit === "E61");
+const next = { ...m0, lon: m0.lon + 0.0004, at: m0.at + 5 };
+rm.update({ map: { ...IN.map, markers: IN.map.markers.map((m) => (m.unit === "E61" ? next : m)) }, lists: IN.lists }, null, "");
+out.pairs = [];
+for (let i = 0; i < 6; i++) {
+  spin(30); L.tick();
+  const f = rm.map.getSource("cm-routes").data.features.find((x) => x.properties.unit === "E61" && !x.properties.trail);
+  const ll = chip("E61").marker.getLngLat();
+  out.pairs.push([f.geometry.coordinates[0], [ll.lng, ll.lat]]);
+}
+// no live fix anywhere and nothing followed: the routes alone never ask for frames
+const still = IN.map.markers.map((m) => (m.unit === "E61" ? { ...m, place: "station", at: undefined } : m));
+rm.update({ map: { ...IN.map, markers: still }, lists: IN.lists }, null, "");
+for (let i = 0; i < 4; i++) { spin(20); L.tick(); }
+out.moving = L.moving();
+out.routes = rm.map.getSource("cm-routes").data.features.length;
+""", data)
+    for start, mark in o["pairs"]:
+        assert start == pytest.approx(mark, abs=1e-9)                            # the route starts at the mark, every frame
+    assert len({tuple(p[1]) for p in o["pairs"]}) > 1                            # (and the mark did move)
+    assert o["moving"] is False and o["routes"] >= 1
