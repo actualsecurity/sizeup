@@ -44,6 +44,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
+from functools import lru_cache
 from pathlib import Path
 from typing import Callable, Iterable, Sequence
 
@@ -52,6 +53,7 @@ from sizeup.cad.airport_alerts import AirportAlert
 ROOT = Path(__file__).resolve().parent.parent
 RULES_FILE = ROOT / "data" / "atc" / "rules.json"
 VOCABULARY_FILE = ROOT / "data" / "atc" / "vocabulary.json"
+SURFACE_FILE = ROOT / "data" / "airport" / "khpn_surface.geojson"     # the map's airport layer (its runways' refs)
 OPERATORS_FILE = ROOT / "data" / "atc" / "khpn_operators.csv"
 AIRLINES_FILE = ROOT / "data" / "airport" / "airlines.csv"
 VOCABULARY = "sizeup-atc"          # Amazon Transcribe custom vocabulary for the airband channels
@@ -113,12 +115,52 @@ def _digit(w: str) -> str:
     return w if w.isdigit() else str(_N.get(w, ""))
 
 
+@lru_cache(maxsize=1)
+def runway_designators() -> frozenset[str]:
+    """The airport's runway ends as said ("16", "34", "11", "29"): the runways' refs on the map's airport layer
+    (data/airport/khpn_surface.geojson: "16/34", "11/29"), else RUNWAY_ENDS. 01-09 also without the zero ("runway 1")."""
+    out: set[str] = set()
+    try:
+        for f in json.loads(SURFACE_FILE.read_text()).get("features", []):
+            p = f.get("properties") or {}
+            if p.get("kind") == "runway" or p.get("aeroway") == "runway":
+                out |= {x.strip().upper() for x in str(p.get("ref") or "").split("/")}
+    except (OSError, ValueError, AttributeError):
+        pass
+    out = {r for r in out if re.fullmatch(r"(?:0[1-9]|[12]\d|3[0-6])[LCR]?", r)} or set(RUNWAY_ENDS)
+    return frozenset(out | {r[1:] for r in out if r.startswith("0")})
+
+
+def split_runway(num: str) -> tuple[str, str] | None:
+    """A runway number run into the digits after it ("runway 345 charlie echo": speech-to-text wrote "runway 34, 5
+    charlie echo" as one number): (the runway, the rest), the longest start that is one of the airport's runways
+    ("345" -> ("34", "5"), "1634" -> ("16", "34")). None when it is a runway alone or doesn't start with one."""
+    rws = runway_designators()
+    if not num.isdigit() or num in rws:
+        return None
+    for n in (2, 1):
+        if len(num) > n and num[:n] in rws:
+            return num[:n], num[n:]
+    return None
+
+
+_RUNWAY_RUN = re.compile(r"\b(?:runway|rwy)\s+(?P<num>\d{3,4})\b")
+
+
 def runways(norm: str) -> list[str]:
-    """HPN runways said ("runway one six", "runway 16", "runway 1 6"), in order, each once."""
-    out = []
+    """HPN runways said ("runway one six", "runway 16", "runway 1 6", "runway 345" run into the next words), in order,
+    each once."""
+    found = []
     for m in _RUNWAY.finditer(norm):
         rw = (_digit(m.group("a")) + _digit(m.group("b"))) if m.group("a") else \
             {"sixteen": "16", "eleven": "11"}.get(m.group("n"), m.group("n"))
+        found.append((m.start(), rw))
+    for m in _RUNWAY_RUN.finditer(norm):
+        sp = split_runway(m.group("num"))
+        if sp:
+            found.append((m.start(), sp[0]))
+    out = []
+    for _, rw in sorted(found):
         if rw in RUNWAY_ENDS and rw not in out:
             out.append(rw)
     return out
@@ -268,6 +310,7 @@ class Mention:
     end: int
     abbrev: bool = False
     phrase_end: int = -1
+    after_number: bool = False   # a tail's end heard right after an ATC number ("runway 345 charlie echo"): maybe its digits
 
     @property
     def text(self) -> str:
@@ -325,9 +368,11 @@ def _char(w: str) -> str:
     return ""
 
 
-def _suffix(words: Sequence[str], i: int, limit: int = 6) -> tuple[str, int]:
-    out, j = "", i
-    while j < len(words) and j - i < limit:
+def _suffix(words: Sequence[str], i: int, limit: int = 6, stop: Iterable[int] = (), lead: str = "") -> tuple[str, int]:
+    """The callsign characters from words[i] on ("1 2 3 alfa bravo" -> "123AB"), up to the first word that isn't one,
+    or one of an ATC number's (stop). lead: characters already read (the rest of a number run into them)."""
+    out, j = lead, i
+    while j < len(words) and j - i < limit and j not in stop:
         w = words[j]
         c = _char(w)
         if not c and w in HOMOPHONES and j > i and j + 1 < len(words) and _char(words[j + 1]):
@@ -349,26 +394,162 @@ def _suffix(words: Sequence[str], i: int, limit: int = 6) -> tuple[str, int]:
     return out, j
 
 
+STOP_WORD = "xstopx"     # a comma or a full stop kept as a word (sizeup/atc_talkers.py clauses)
+_UNITS = {"mile", "miles", "nm", "knot", "knots", "kts", "degrees", "oclock"}
+_ALT_UNITS = {"thousand", "hundred", "feet", "foot", "ft"}
+_ALT_WORDS = {"maintain", "climb", "climbing", "descend", "descending", "altitude", "level", "leaving", "through"}
+_FREQ_WORDS = {"contact", "monitor", "frequency", "freq"}
+_FREQ_SKIP = {"departure", "approach", "center", "centre", "tower", "ground", "clearance", "delivery", "new", "york", "ny",
+              "westchester", "on", "the", "at", "radio", "unicom", "ctaf", "now", "please", "and"}
+_POINT = {"point", "decimal"}
+FREQ_MHZ = (118, 137)    # the VHF airband: a number after "contact" outside it is not a frequency
+
+
+def _dig(w: str) -> str:
+    """A word's digits when it is a number ("340", "four", "twelve"), else ''."""
+    return w if w.isdigit() else DIGITS.get(w) or TEENS.get(w, "")
+
+
+def number_words(words: Sequence[str]) -> tuple[set[int], dict[int, str]]:
+    """The words that are an ATC number, never a callsign's: a runway ("runway 34"), a heading ("heading 340"), an
+    altitude ("climb and maintain 3,000", "at 2 thousand"), a squawk, a frequency ("contact departure 126.4", "one two
+    four point six five"), the wind ("wind 340 at 12"), the altimeter, a clock position ("2 o'clock") and a distance or
+    speed ("3 miles"). And, for a number speech-to-text ran into the digits after it ("runway 345 charlie echo"), the
+    rest ({index: "5"}): the start of the next words, which may be a tail's ("5CE")."""
+    covered: set[int] = set()
+    rest: dict[int, str] = {}
+    n = len(words)
+
+    def take(i: int, width: int) -> int:
+        """Cover the number of `width` digits from words[i]; a word running past it leaves the rest. The next index."""
+        got = 0
+        while i < n and got < width:
+            d = _dig(words[i])
+            if not d:
+                break
+            covered.add(i)
+            if words[i].isdigit() and got + len(d) > width:
+                rest[i] = d[width - got:]      # "heading 3405": 340, then "5"
+                return i + 1
+            got += len(d)
+            i += 1
+        return i
+
+    def runway(i: int) -> None:
+        run, k = "", i
+        ends = []                      # (characters so far, index of the word) at each word boundary
+        while k < n and len(run) < 4 and _dig(words[k]):
+            run += _dig(words[k])
+            ends.append((len(run), k))
+            k += 1
+        if not run:
+            return
+        rws = runway_designators()
+        for size in (2, 1):
+            if len(run) < size or run[:size] not in rws:
+                continue
+            for length, k in ends:
+                covered.add(k)
+                if length >= size:
+                    if length > size:
+                        rest[k] = run[size:length]
+                    return
+        covered.add(i)                 # not one of this airport's runways: still a runway's number, never a tail's
+
+    for i, w in enumerate(words):
+        nxt = words[i + 1] if i + 1 < n else ""
+        if w in ("runway", "rwy"):
+            if nxt == "heading":
+                continue
+            runway(i + 1)
+        elif w == "heading":
+            take(i + 1, 3)
+        elif w == "squawk":
+            take(i + 1, 4)
+        elif w == "altimeter":
+            take(i + 1, 4)
+        elif w == "wind":
+            k = take(i + 1, 3)
+            while k + 1 < n and words[k] in ("at", "gust", "gusts", "gusting"):
+                k = take(k + 1, 2)
+        elif w in _ALT_WORDS:
+            k = i + 1
+            while k < n and words[k] in ("to", "and", "maintain", "at", "flight", "level"):
+                k += 1
+            if k < n and words[k].isdigit():
+                covered.add(k)
+                while k + 1 < n and words[k + 1].isdigit() and len(words[k + 1]) == 3:   # "3,000": "3", "000"
+                    k += 1
+                    covered.add(k)
+        elif w in _FREQ_WORDS:
+            k = i + 1
+            while k < n and k - i <= 4 and words[k] in _FREQ_SKIP:
+                k += 1
+            lead, m = "", k
+            while m < n and len(lead) < 3 and _dig(words[m]):
+                lead += _dig(words[m])
+                m += 1
+            if len(lead) >= 3 and FREQ_MHZ[0] <= int(lead[:3]) <= FREQ_MHZ[1]:   # "contact departure 678AB": a tail
+                k = take(k, 3)
+                if k < n and words[k] in _POINT:
+                    covered.add(k)
+                    take(k + 1, 3)
+                elif k < n and words[k].isdigit() and len(words[k]) <= 3 and len(words[k - 1]) == 3:   # "126.4"
+                    covered.add(k)
+        elif w in _POINT and i > 0 and _dig(words[i - 1]) and _dig(nxt):
+            k, got = i - 1, 0                                     # "one two four point six five"
+            while k >= 0 and _dig(words[k]) and got < 3:
+                got += len(_dig(words[k]))
+                covered.add(k)
+                k -= 1
+            covered.add(i)
+            take(i + 1, 3)
+        elif w in _UNITS or w in _ALT_UNITS or (w == "clock" and i > 0 and words[i - 1] == "o"):
+            k = i - (2 if w == "clock" else 1)
+            got = 0
+            while k >= 0 and _dig(words[k]) and got < 3 and (got == 0 or w in _ALT_UNITS or len(words[k]) == 1):
+                got += len(_dig(words[k]))
+                covered.add(k)
+                k -= 1
+    return covered, rest
+
+
+def _after_number(i: int, words: Sequence[str], numbers: set[int], rest: dict[int, str]) -> bool:
+    """Whether words[i] comes right after an ATC number (a comma between at most), or is the rest of one."""
+    if i in rest:
+        return True
+    k = i - 1
+    if k >= 0 and words[k] == STOP_WORD:
+        k -= 1
+    return k >= 0 and k in numbers
+
+
+AFTER_NUMBER_CONF = 0.45   # a tail's end heard right after an ATC number matches no better than this: its first digit
+                           # may be the number's ("runway 34, 5CE" heard as "runway 345 CE"), so never a link (>= 0.7)
+_PLAIN_TAIL = re.compile(r"[1-9]\d{0,4}[A-Z]{0,2}")      # an N-number's characters after the N (FAA: 1-5, no leading 0)
+
+
 def find_mentions(text: str, index: TelephonyIndex) -> list[Mention]:
     words = words_of(text)
+    numbers, rest = number_words(words)
     found: list[Mention] = []
     i = 0
     while i < len(words):
         hit = None
         w = words[i]
         if w.startswith(ICAO) and len(w) == len(ICAO) + 3 and w[len(ICAO):].upper() in index.telephony:
-            suf, j = _suffix(words, i + 1)            # a flight written by its designator ("MXY283")
+            suf, j = _suffix(words, i + 1, stop=numbers)   # a flight written by its designator ("MXY283")
             if suf and suf[0].isdigit():
                 hit = Mention((w[len(ICAO):].upper(),), suf, i, j, phrase_end=i + 1)
         elif words[i] == "november" and not (i > 0 and words[i - 1] in LETTERS):
-            suf, j = _suffix(words, i + 1)
+            suf, j = _suffix(words, i + 1, stop=numbers)
             if len(suf) >= 2 and any(c.isdigit() for c in suf):
                 hit = Mention((), suf, i, j)
         else:
             for n in range(min(index.max_len, len(words) - i), 0, -1):
                 codes = index.phrases.get(tuple(words[i:i + n]))
                 if codes:
-                    suf, j = _suffix(words, i + n)
+                    suf, j = _suffix(words, i + n, stop=numbers)
                     if suf and suf[0].isdigit():     # an airline flight number starts with a digit
                         hit = Mention(tuple(codes), suf, i, j, phrase_end=i + n)
                     break
@@ -380,14 +561,20 @@ def find_mentions(text: str, index: TelephonyIndex) -> list[Mention]:
     covered = {k for m in found for k in range(m.start, m.end)}
     i = 0
     while i < len(words):
-        if i in covered:
+        if i in covered or (i in numbers and i not in rest):
             i += 1
             continue
-        suf, j = _suffix(words, i)
+        if i in rest:              # the rest of a number run into the next words: "runway 345 charlie echo" -> "5CE"
+            suf, j = _suffix(words, i + 1, stop=numbers, lead=rest[i])
+        else:
+            suf, j = _suffix(words, i, stop=numbers)
         typed = i > 0 and words[i - 1] in TYPE_WORDS
         tail_like = any(c.isalpha() for c in suf) or (typed and words[i - 1] != "november")
+        after = _after_number(i, words, numbers, rest)
+        if after and not _PLAIN_TAIL.fullmatch(suf):
+            tail_like = False      # what is left of an ATC number is a tail's start only when it can be one
         if len(suf) >= 3 and any(c.isdigit() for c in suf) and tail_like and not any(k in covered for k in range(i, j)):
-            found.append(Mention((), suf, i - 1 if typed else i, j, abbrev=True))
+            found.append(Mention((), suf, i - 1 if typed else i, j, abbrev=True, after_number=after))
             i = j
         else:
             i += 1
@@ -502,6 +689,8 @@ def attribute(text: str, index: TelephonyIndex, aircraft: Sequence[dict]) -> Att
                 scored = _same_number_other_airline(m, words, index, aircraft) or scored
         elif m.abbrev:
             scored = _match_tail(m.suffix, aircraft, digits_ok=True)
+            if m.after_number:
+                scored = [(min(c, AFTER_NUMBER_CONF), a) for c, a in scored]
         else:
             scored = []
             for a in aircraft:

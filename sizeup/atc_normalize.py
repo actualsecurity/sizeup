@@ -23,10 +23,13 @@ improves old rows too). From shortfinal's tidy() / fix_facilities() (its core/st
     fixes       the approach fixes by ident (TWORF, TAYSH, HAARP ...): every spelling in normalize.json's "fixes"
                 anywhere; "fixes_in_context" (ordinary words: "to do" for TOEDO, "harp") and a close spelling
                 (SequenceMatcher >= FIX_SIMILAR) only right after over / at / from / direct / via / crossing ...
+    numbers     a runway, heading or squawk run into the digits after it, split where it ends ("runway 345 charlie
+                echo" -> "runway 34, 5 charlie echo": a runway is two digits, one of the airport's runways).
     tails       two or more phonetic letters run together ("Lima X-ray" -> "LX"), joined to the digits before them
                 when they can end a US tail (two letters at most: "568 Lima X-ray" -> "568LX"); "November 1 2 3 Alfa
-                Bravo" -> "N123AB". Not after "taxiway", "via", "runway" ... (a route, not a tail). sizeup/atc.py's words_of()
-                reads "568LX" back as five characters, so the matcher sees the same tail.
+                Bravo" -> "N123AB". Not after "taxiway", "via", "runway", "squawk" ... (a route or a number, not a
+                tail). sizeup/atc.py's words_of() reads "568LX" back as five characters, so the matcher sees the same
+                tail.
     telephony   misheard airline / operator telephony ("Moxie" -> "Moxy", "jet speed" -> "Jet Speed"); a number said in
                 groups right after a telephony or a type word, joined ("JetBlue 12 34" -> "JetBlue 1234").
 
@@ -56,8 +59,10 @@ LETTERS = {"alfa": "A", "alpha": "A", "bravo": "B", "charlie": "C", "delta": "D"
            "uniform": "U", "victor": "V", "whiskey": "W", "whisky": "W", "x-ray": "X", "xray": "X", "yankee": "Y",
            "zulu": "Z"}
 # A letter run is a taxiway or a route after these, not a tail ("taxi via Alfa Bravo")
+# ... and the digits of an ATC number are never a tail's: "squawk 4521 charlie echo" stays as said
 NOT_TAIL_AFTER = {"taxiway", "taxiways", "via", "taxi", "on", "cross", "crossing", "and", "ramp", "spot", "information",
-                  "runway", "heading"}
+                  "runway", "rwy", "heading", "squawk", "altimeter", "wind", "maintain", "point", "decimal"}
+NUMBER_WIDTH = {"heading": 3, "squawk": 4}    # an ATC number this many digits long: "heading 3405" is 340, then 5
 FIX_CONTEXT = {"over", "at", "from", "direct", "to", "via", "crossing", "cross", "past", "inbound", "outside", "outbound",
                "until", "before", "after", "reaching", "reach", "abeam", "fix", "of", "passing", "hold", "holding"}
 _W = r"[A-Za-z][A-Za-z'-]*"
@@ -211,6 +216,31 @@ def _fixes(t: str) -> str:
     return re.sub(rf"{ctx}(?P<w>[A-Za-z]{{4,7}})\b", close, t, flags=re.I)
 
 
+_MERGED = re.compile(r"\b(?P<w>runway|rwy|heading|squawk)(?P<sp>\s+)(?P<num>\d{3,6})\b", re.I)
+
+
+def _merged(t: str) -> str:
+    """An ATC number speech-to-text ran into the digits after it, split where the number ends: "runway 345 charlie
+    echo" -> "runway 34, 5 charlie echo" (the airport's runways: sizeup/atc.py runway_designators), "heading 3405" ->
+    "heading 340, 5". Only where it can't be one number: a runway is two digits, a heading three, a squawk four."""
+    from sizeup.atc import split_runway
+
+    def one(m: re.Match) -> str:
+        w, num = m.group("w"), m.group("num")
+        width = NUMBER_WIDTH.get(w.lower())
+        if width is None:
+            sp = split_runway(num)
+            if not sp:
+                return m.group(0)
+            head, tail = sp
+        elif len(num) > width:
+            head, tail = num[:width], num[width:]
+        else:
+            return m.group(0)
+        return f"{w}{m.group('sp')}{head}, {tail}"
+    return _MERGED.sub(one, t)
+
+
 _LETTER_WORD = r"(?:" + "|".join(sorted((k for k in LETTERS if k != "november"), key=len, reverse=True)) + r")"
 _TAIL = re.compile(rf"(?P<num>\b\d{{1,5}}[\s-]+)?(?P<run>\b{_LETTER_WORD}(?:[\s-]+{_LETTER_WORD})+)\b", re.I)
 _NOVEMBER = re.compile(r"\bnovember[\s-]+(?P<num>\d{1,5})(?P<l>[A-Z]{0,2})\b", re.I)
@@ -286,6 +316,7 @@ def normalize(text: str) -> str:
     t = _facility(t)
     t = _approaches(t)
     t = _fixes(t)
+    t = _merged(t)
     t = _tails(t)
     t = _telephony(t)
     t = _groups(t)

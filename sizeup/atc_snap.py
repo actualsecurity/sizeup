@@ -14,7 +14,8 @@ says them, and a stretch of the transcript that clearly sounds like one of them 
                 NUMBER_ONLY, so only with no other aircraft near carrying that number, never after "runway", "heading",
                 "maintain" ... or before "feet", "knots" (always probable at most: atc_talkers SNAP_EXACT).
     tail        an N-number's characters (digits, then phonetic letters): the whole tail, its last three or more
-                (a shortened tail, "34 Charlie" for N534C), or one character off with four or more.
+                (a shortened tail, "34 Charlie" for N534C), or one character off with four or more. Never one that
+                starts on or right after a runway, heading, altitude ... number ("runway 34, 5 charlie echo").
 
 A stretch is snapped only when its best aircraft scores SNAP_MIN or more and every other aircraft scores at least
 MARGIN under it; nothing is snapped with no aircraft near, or two close. Each snap is kept ({from, to, hex, score})
@@ -177,9 +178,13 @@ def snap(text: str, planes: Iterable[dict], tel: dict | None = None) -> tuple[st
     # digits, among the departing ones only
     handoff = bool(re.search(r"\bdeparture\b", text, re.I))
     spans: list[tuple[float, int, int, Cand, float]] = []     # (score, first char, past last char, cand, runner-up)
+    numbers, _rest = atc.number_words([t.group(0).lower() for t in toks])
     for i0, j0, chars in _runs(toks, text):
         if not any(c.isdigit() for c in chars):
             continue
+        # a run that starts on an ATC number or right after one ("runway 34, 5 charlie echo", "runway 345 charlie
+        # echo"): its first digits may be the number's, so it is never snapped to a tail (sizeup/atc.py number_words)
+        after_number = i0 in numbers or (i0 - 1) in numbers
         scored: list[tuple[float, int, Cand]] = []
         for c in cands:
             if c.tels:
@@ -212,7 +217,7 @@ def snap(text: str, planes: Iterable[dict], tel: dict | None = None) -> tuple[st
                             first = k - 1          # the word just before: what was left of the name
                         scored.append((NUMBER_ONLY, first, c))
                         break
-            else:
+            elif not after_number:
                 start = i0 - 1 if i0 > 0 and toks[i0 - 1].group(0).lower() == "november" else i0
                 ts = _tail_score(chars, c.number, november=start < i0)
                 if ts:
