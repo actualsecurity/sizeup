@@ -834,6 +834,7 @@ window.AircraftLayer = (() => {
     }
     if (!a || !m.added) { setTimeout(tryFocus, 400); return; }
     talk.pending = null;
+    MapFollow.takeMap(m.map);                // centred here: no follower (a rig's either) pulls it back
     lights.pick(a.hex, HIGHLIGHT_MS);
     const at = (glide && glide.where(a.hex, Date.now())) || a;
     try { m.map.easeTo({ center: [at.lon, at.lat], zoom: Math.max(m.map.getZoom(), 12), duration: 600 }); } catch (_) { /* */ }

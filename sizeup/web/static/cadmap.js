@@ -35,7 +35,8 @@
 // road, from its fix or its station, re-routed there as it moves) is drawn dashed in its status colour along that route
 // from where its mark is drawn now (the glided mark), instead of the straight line; the follow chip adds "~3 min ·
 // 1.2 mi". A followed rig with fixes also shows its faint trail (state.map.trails). No route (no graph yet, no road
-// near): the straight line, as before. Drawn with the chips once a second: nothing here keeps the frame loop running.
+// near): the straight line, as before. Redrawn with the call line, on the frames that move a mark: nothing here keeps
+// the frame loop running.
 //
 // Highway layers (cameras, incidents, signs, mileposts, exits) and their Layers button: maplayers.js,
 // attached to every RigMap; the event's "Cameras nearby" row from detail().
@@ -73,49 +74,90 @@ window.CadMap = (() => {
   // ---- our units followed and lit up (#358): one state for every map ----------------------------------------------
   const UNIT_ZOOM = 15;                // a rig followed or picked: centred at least this close
   const KT_MS = 1852 / 3600;           // m/s in a knot (glide.js reads kt; the ingest shape's speed is m/s)
-  const FOCUS_WAIT_MS = 5000;          // a pick waits this long for a map to show the rig (the Overview opening)
-  const STALE_S = 60, MAX_AGE_S = 300; // an older hub: mapview.py's POSITION_STALE_S / POSITION_MAX_AGE_S
+  const STALE_S = 60, MAX_AGE_S = 300, HORIZON_S = 8;   // an older hub: mapview.py's POSITION_STALE_S / _MAX_AGE_S / _HORIZON_S
+  const MIN_MS = 2;                    // slower than this a rig is stopped: drawn at its fix, never drawn on
+  const HOLD_M = 30;                   // a stopped rig's fix this close to where it is drawn: held there (never eased back)
+  const FRAME_MS = 50, MAX_FRAME_MS = 250, STEP_PX = 0.75;   // as aircraft.js: redrawn as often as the fastest moves STEP_PX
+  const AGE_MS = 1000;                 // the chips' ages and the follow chip's words: once a second (a timer, not frames)
   const rigMaps = new Set(), rigLayers = new Set();
   const lights = window.MapFollow ? new MapFollow.Lights(() => redrawRigs()) : null;
-  const glide = window.Glide && window.Motion ? Glide.follower(Motion.arc, { horizonS: 10, staleS: STALE_S }) : null;
   const skew = () => (typeof cad !== "undefined" && cad && cad.skew) || 0;
   const nowS = () => Date.now() / 1000 + skew();
   const agoS = (s) => (window.MapFollow ? MapFollow.ago(s * 1000) : `${Math.round(s)} s`);
   function redrawRigs() { for (const l of rigLayers) l.draw(); }
-  const avlOf = (M) => ({ stale_s: (M && M.avl && M.avl.stale_s) || STALE_S, max_age_s: (M && M.avl && M.avl.max_age_s) || MAX_AGE_S });
+  const avlOf = (M) => ({ stale_s: (M && M.avl && M.avl.stale_s) || STALE_S, max_age_s: (M && M.avl && M.avl.max_age_s) || MAX_AGE_S,
+                          horizon_s: (M && M.avl && M.avl.horizon_s) || HORIZON_S });
   // a live fix: how old (s), stale, and how faded (full until stale, down to 0.35 by the time the hub drops it)
   function fixAge(m, M) {
     if (m.place !== "position" || typeof m.at !== "number") return null;
     const a = avlOf(M), age = Math.max(0, nowS() - m.at), stale = age > a.stale_s;
     return { age, stale, fade: stale ? Math.max(0.35, 1 - 0.65 * (age - a.stale_s) / Math.max(1, a.max_age_s - a.stale_s)) : 1 };
   }
+  // A rig between fixes (not Motion.arc: that is aircraft's, still below 30 kt): on in a straight line along its heading
+  // at the fix's speed; slower than MIN_MS, or no heading: stopped, at its fix. glide.js holds it at horizon_s.
+  function straight(fix, dt) {
+    const v = (fix.gs || 0) * KT_MS;
+    if (!(v >= MIN_MS) || typeof fix.trk !== "number") return null;
+    const d = v * dt, h = fix.trk * Math.PI / 180, R = 6371008.8;
+    return { lon: fix.lon + (d * Math.sin(h)) / (R * Math.cos(fix.lat * Math.PI / 180)) * 180 / Math.PI,
+             lat: fix.lat + (d * Math.cos(h)) / R * 180 / Math.PI, rot: fix.trk };
+  }
+  // SNAP_S 10: a miss up to 10 s of its travel is closed by slowing or speeding it, not jumped (a rig's fixes are sparse)
+  const glide = window.Glide ? Glide.follower(straight, { horizonS: HORIZON_S, staleS: STALE_S, SNAP_S: 10 }) : null;
+  const drawn = new Map();             // unit -> [lon, lat] where its live fix was last drawn (held when stale or stopped)
+  let fastest = 0;                     // m/s, the fastest moving rig (as it may be drawn catching up: x1.5)
+  let fresh = 0;                       // frames still owed after a new state (a fix set this millisecond reads as settled)
   // each live fix handed to the follower once a state (the fix as it was when it was true, on this browser's clock)
   let fedFor = null;
   function feedGlide(M) {
     if (!glide || !M || M === fedFor) return;
     fedFor = M;
-    glide.staleS = avlOf(M).stale_s;
+    const a = avlOf(M);
+    glide.staleS = a.stale_s;
+    glide.horizonS = a.horizon_s;
     const keep = new Set();
+    fastest = 0;
     for (const m of M.markers || []) {
       if (m.place !== "position" || typeof m.at !== "number") continue;
       keep.add(m.unit);
-      const hd = typeof m.heading === "number" ? m.heading : null;
-      glide.set(m.unit, { lon: m.lon, lat: m.lat, rot: hd || 0, at: (m.at - skew()) * 1000, trk: hd,
-                          gs: typeof m.speed === "number" ? m.speed / KT_MS : null });
+      const hd = typeof m.heading === "number" ? m.heading : null, v = typeof m.speed === "number" ? m.speed : 0;
+      if (v >= MIN_MS) fastest = Math.max(fastest, v * 1.5);
+      glide.set(m.unit, { lon: m.lon, lat: m.lat, rot: hd || 0, at: (m.at - skew()) * 1000, trk: hd, gs: v / KT_MS });
     }
     glide.forget(keep);
+    for (const k of [...drawn.keys()]) if (!keep.has(k)) drawn.delete(k);
+    fresh = 2;
   }
-  // frames while a map on screen has a live fix or follows a rig: the fixes drawn on, the follow kept centred, and
-  // once a second the chips (a fix's age, stale) and the follow chip's words
-  let raf = 0, slowAt = 0;
-  const wanted = () => (typeof document === "undefined" || document.visibilityState !== "hidden") && [...rigLayers].some((l) => l.moving());
-  function animate() { if (!raf && typeof requestAnimationFrame === "function" && wanted()) raf = requestAnimationFrame(frame); }
+  // where a live fix's rig is drawn now: drawn on by the follower; never stepped back for going stale (held where it
+  // was drawn, hollow) or for a stopped fix just behind where it was drawn (held, < HOLD_M)
+  function fixWhere(m, M) {
+    const fx = fixAge(m, M), last = drawn.get(m.unit);
+    const g = glide ? glide.where(m.unit, Date.now()) : null;
+    let at = g ? [g.lon, g.lat] : [m.lon, m.lat];
+    if (last && fx && fx.stale) at = last;
+    else if (last && !((m.speed || 0) >= MIN_MS) && Glide.metres({ lon: last[0], lat: last[1] }, { lon: m.lon, lat: m.lat }) < HOLD_M) at = last;
+    drawn.set(m.unit, at);
+    return at;
+  }
+  // Frames only while something moves on a map on screen: a rig drawn on or catching up (glide.busy: parked and stale
+  // ones settle and stop), a rig followed, or the frames owed after a new state; each map redrawn once its fastest rig
+  // has moved STEP_PX there. The ages tick on a one-second timer while any live fix is drawn.
+  let raf = 0, ageTimer = 0;
+  const visible = () => typeof document === "undefined" || document.visibilityState !== "hidden";
+  const wanted = () => visible() && [...rigLayers].some((l) => l.moving());
+  function animate() {
+    if (!raf && typeof requestAnimationFrame === "function" && wanted()) raf = requestAnimationFrame(frame);
+    const fixes = visible() && [...rigLayers].some((l) => l.hasFix && l.shown());
+    if (fixes && !ageTimer) ageTimer = setInterval(() => { for (const l of rigLayers) if (l.hasFix && l.shown()) l.draw(); }, AGE_MS);
+    else if (!fixes && ageTimer) { clearInterval(ageTimer); ageTimer = 0; }
+  }
   function frame(ts) {
     raf = 0;
     if (!wanted()) return;
-    const slow = ts - slowAt >= 1000;
-    if (slow) slowAt = ts;
-    for (const l of rigLayers) if (l.moving()) l.tick(slow);
+    for (const l of rigLayers) {
+      if (l.moving() && ts - (l.tickedAt || 0) >= l.frameMs() - 2) { l.tickedAt = ts; l.tick(); }
+    }
+    if (fresh > 0) fresh -= 1;
     raf = requestAnimationFrame(frame);
   }
   if (typeof document !== "undefined" && document.addEventListener) {
@@ -128,32 +170,27 @@ window.CadMap = (() => {
   }
   const onMap = (name) => !!(typeof cad !== "undefined" && cad && cad.state && cad.state.map
                              && (cad.state.map.markers || []).some((m) => m.unit === name));
-  // the map to show a rig on: the large one if open, else the first on screen (never the new call's)
+  // the map to show a rig on: the large one if open, else the first on screen that follows (never the new call's or
+  // the wall board's)
   function shownRigMap() {
     if (views.bigOpen && views.big) return views.big;
     return window.MapFollow ? MapFollow.shownMap([...rigMaps].filter((r) => r.fol)) : null;
   }
-  let pending = null;
+  // A row's Follow or a talker chip: only on a map already on screen that shows the rig. Never a view switch (a new
+  // call's draft, an edit form, an incident with no map shown stay as they are): false, and the caller flashes its row.
   function pickUnit(name, follow) {
     if (!name || !onMap(name)) return false;
-    pending = { name, follow, until: Date.now() + FOCUS_WAIT_MS };
-    if (!shownRigMap()) { const b = document.getElementById("overview-open"); if (b) b.click(); }
-    tryPick();
-    return true;
-  }
-  function tryPick() {
-    const p = pending;
-    if (!p || Date.now() > p.until) { pending = null; return; }
     const rm = shownRigMap();
-    if (!rm || !rm.layer.chips.has(p.name)) { setTimeout(tryPick, 300); return; }
-    pending = null;
-    try { rm.host.scrollIntoView({ block: "nearest" }); } catch (_) { /* */ }
-    if (p.follow) rm.followUnit(p.name); else rm.focusUnit(p.name);
+    if (!rm || !rm.layer.chips.has(name)) return false;
+    return follow ? rm.followUnit(name) : rm.focusUnit(name);
   }
   const followUnit = (name) => pickUnit(name, true);     // a unit-board or incident row's Follow
   const focusUnit = (name) => pickUnit(name, false);     // a talker chip: centred and ringed, not followed
   function hoverUnits(names) { if (lights && lights.hover(names)) redrawRigs(); }   // a row hovered: its rig ringed wider
 
+  // where a rig's mark is drawn now, for the lines from it (the call line, its route): a live fix where it was last
+  // drawn on (fixWhere, on the frames), else where the hub put it
+  const markAt = (m) => (m.place === "position" ? (drawn.get(m.unit) || [m.lon, m.lat]) : [m.lon, m.lat]);
   // ---- the probable path (#360) ----------------------------------------------------------------------------------
   const routeOf = (M, m) => ((M && M.routes) || []).find((r) => r.unit === m.unit && r.incident_id === m.incident_id) || null;
   // the route's points from the one nearest the mark on: [mark, ...the rest] (a rig behind its route's start: all of it)
@@ -224,7 +261,7 @@ window.CadMap = (() => {
       this.far = false;
       this.unsetOpen = false;
       this.fol = null;                 // the map's follower (RigMap: mapfollow.js), none on a manual map
-      this.onChip = null;              // RigMap: a rig clicked (follow it)
+      this.onFollow = null;            // RigMap: follow a rig (the picker's or the box's Follow)
       rigLayers.add(this);
       if (opts.unset) {
         this.unsetBox = h("div", "cm-unset");
@@ -293,18 +330,29 @@ window.CadMap = (() => {
       animate();
     }
 
-    // where a rig's chip goes now: a live fix drawn on by the follower, else where the hub put it
+    // where a rig's chip goes now: a live fix drawn on by the follower (fixWhere), else where the hub put it
     where(m) {
-      const at = glide && m.place === "position" ? glide.where(m.unit, Date.now()) : null;
-      return at ? [at.lon, at.lat] : [m.lon, m.lat];
+      return m.place === "position" && typeof m.at === "number" ? fixWhere(m, this.data && this.data.map) : [m.lon, m.lat];
     }
     shown() { try { return !!this.map.getContainer().offsetParent; } catch (_) { return false; } }
-    // anything to animate here: a live fix, or a rig followed
-    moving() { return !!(this.ready && this.shown() && ((this.fol && this.fol.id) || this.hasFix)); }
-    tick(slow) {
-      if (slow) { this.draw(); return; }
-      // (every frame, not only while glide.busy(): a fix set in the same millisecond as the last draw reads as settled)
-      for (const rec of this.chips.values()) if (rec.m.place === "position") rec.marker.setLngLat(this.where(rec.m));
+    // anything to animate here: a live fix moving or catching up (not a parked or a stale one: they settle), a rig
+    // followed, or the frames owed after a new state
+    moving() {
+      return !!(this.ready && this.shown() && ((this.fol && this.fol.id) || (this.hasFix && (fresh > 0 || (glide && glide.busy())))));
+    }
+    // how often to tick this map: each time the fastest rig has moved STEP_PX on it at its zoom (aircraft.js frameMs)
+    frameMs() {
+      try {
+        const metresPerPx = 40075016.686 * Math.cos(this.map.getCenter().lat * Math.PI / 180) / (512 * 2 ** this.map.getZoom());
+        const pxPerS = fastest / metresPerPx;
+        return Math.max(FRAME_MS, Math.min(MAX_FRAME_MS, pxPerS > 0 ? 1000 * STEP_PX / pxPerS : MAX_FRAME_MS));
+      } catch (_) { return FRAME_MS; }
+    }
+    // a frame: the live fixes moved on, their lines to the call with them, the follow kept centred
+    tick() {
+      let moved = false;
+      for (const rec of this.chips.values()) if (rec.m.place === "position") { rec.marker.setLngLat(this.where(rec.m)); moved = true; }
+      if (moved && this.data && this.data.map) this.drawLines(this.data.map.markers || [], this.data.lists);
       this.followTick(false);
     }
     // following: the map kept on the rig, and the chip's words; gone from the map: let go
@@ -451,10 +499,11 @@ window.CadMap = (() => {
       this.drawRoutes(markers, lists, M);
       for (const m of markers) {
         if (!m.line_to || (!m.home_line && routeOf(M, m))) continue;      // its route drawn instead (#360)
-        const k = JSON.stringify([m.lon, m.lat, m.line_to]);
+        const from = markAt(m);                                             // a live fix: from its mark
+        const k = JSON.stringify([from, m.line_to]);
         const color = m.home_line ? HOME_LINE : statusOf(lists, m.status).bg || LINE;
         if (!feats.has(k)) feats.set(k, { type: "Feature", properties: { color, home: !!m.home_line },
-          geometry: { type: "LineString", coordinates: [[m.lon, m.lat], m.line_to] } });
+          geometry: { type: "LineString", coordinates: [from, m.line_to] } });
       }
       const fc = { type: "FeatureCollection", features: [...feats.values()] };
       const sig = JSON.stringify(fc);
@@ -473,7 +522,7 @@ window.CadMap = (() => {
       for (const m of markers) {
         const color = statusOf(lists, m.status).bg || LINE;
         const r = m.line_to && !m.home_line ? routeOf(M, m) : null;
-        const here = this.where(m);
+        const here = markAt(m);
         const path = r ? routeFrom(r.coords, here) : null;
         if (path && path.length >= 2) feats.push({ type: "Feature", properties: { color, unit: m.unit },
                                                    geometry: { type: "LineString", coordinates: path } });
@@ -527,31 +576,35 @@ window.CadMap = (() => {
 
     // a rig clicked: followed (#358), and its home-station picker (an admin) or its box (its call one click away);
     // a map that follows nothing (the new call's): its call opened, as before
+    // a rig clicked: as before #358 (an admin: its home-station picker; else its call opened). Following starts from a
+    // row's ⌖, the picker's Follow, or (a rig on no call, where a click did nothing) its box's Follow.
     chipClick(m) {
-      if (this.onChip) this.onChip(m);
       if (this.editable() && m.fire && m.id != null) return this.openPicker(m.id, m.unit, m.station, m);
-      if (this.onChip) return this.openInfo(m);
-      if (m.incident_id && this.opts.onPick) this.opts.onPick(m.incident_id);
+      if (m.incident_id && this.opts.onPick) return this.opts.onPick(m.incident_id);
+      if (this.onFollow) this.openInfo(m);
+    }
+    followButton(m) {
+      const f = h("button", "mini", "Follow");
+      f.type = "button";
+      f.title = `Follow ${m.unit} on the map`;
+      f.addEventListener("click", (e) => { e.stopPropagation(); this.closePicker(); this.onFollow(m.unit); });
+      return f;
     }
 
     openInfo(m) {
       const st = statusOf(this.data && this.data.lists, m.status);
       const head = h("div", "cm-pop-head");
       head.append(h("b", "", m.unit));
-      const line = h("div", "dim small", [st.name, m.incident_number ? `on ${m.incident_number}` : ""].filter(Boolean).join(" "));
+      const line = h("div", "dim small", st.name);
       const row = h("div", "row");
-      if (m.incident_id && this.opts.onPick && (!this.focus || this.focus.id !== m.incident_id)) {
-        const go = h("button", "mini", `Open ${m.incident_number || "call"}`);
-        go.type = "button";
-        go.addEventListener("click", () => { this.closePicker(); this.opts.onPick(m.incident_id); });
-        row.append(go);
-      }
+      const f = this.followButton(m);
       const x = h("button", "mini quiet", "Close");
       x.type = "button";
       x.addEventListener("click", (e) => { e.stopPropagation(); this.closePicker(); });
-      row.append(x);
+      row.append(f, x);
       this.pop.replaceChildren(head, line, row);
       this.pop.hidden = false;
+      f.focus();                                       // Escape closes it (the pop's keydown)
     }
 
     openPicker(id, name, current, m) {
@@ -579,6 +632,7 @@ window.CadMap = (() => {
           go.addEventListener("click", () => { this.closePicker(); this.opts.onPick(m.incident_id); });
           line.append(" ", go);
         }
+        if (this.onFollow && this.chips.has(m.unit)) line.append(" ", this.followButton(m));   // #358
       }
       const row = h("div", "row");
       row.append(sel, save, cancel);
@@ -620,6 +674,14 @@ window.CadMap = (() => {
       for (const m of M.markers || []) if (m.incident_id === f.id && m.place !== "incident" && goodLL(m.lon, m.lat)) pts.push([m.lon, m.lat]);
       if (!pts.length) for (const s of M.stations || []) pts.push(s.ll);
       return pts;
+    }
+    // what decides a refit: focusPoints, with a rig on a live fix by name, not where it is (#358: not on every fix)
+    focusKey() {
+      const M = (this.data && this.data.map) || {};
+      const live = new Set((M.markers || []).filter((m) => m.place === "position" && this.focus && m.incident_id === this.focus.id)
+        .map((m) => JSON.stringify([m.lon, m.lat])));
+      return [...this.focusPoints().map((p) => (live.has(JSON.stringify(p)) ? "live" : p)),
+              ...(M.markers || []).filter((m) => m.place === "position" && this.focus && m.incident_id === this.focus.id).map((m) => `rig:${m.unit}`)];
     }
   }
 
@@ -672,13 +734,13 @@ window.CadMap = (() => {
       this.map.on("movestart", (e) => { if (e.originalEvent) this.userMoved = true; });
       this.map.on("sizeup:follow", () => { this.userMoved = true; });   // following an aircraft: no refit until Recenter
       this.layer = new RigLayer(this.map, { ...opts, host });
-      // following a rig (#358, mapfollow.js): not on the new call's map, which its owner moves
-      this.fol = !opts.manual && window.MapFollow
+      // following a rig (#358, mapfollow.js): not on the new call's map (its owner moves it), nor the wall board's
+      this.fol = !opts.manual && opts.follow !== false && window.MapFollow
         ? new MapFollow.Follower(this.map, host, { cls: "ac-follow cm-follow", textCls: "ac-follow-t", icon: "locate",
                                                    onStop: () => this.layer.draw() })
         : null;
       this.layer.fol = this.fol;
-      if (this.fol) this.layer.onChip = (m) => this.followUnit(m.unit);
+      if (this.fol) this.layer.onFollow = (name) => this.followUnit(name);
       rigMaps.add(this);
       // Cameras, incidents, roadwork, signs, mileposts, exits and their Layers button (maplayers.js, #73)
       this.roads = window.MapLayers ? MapLayers.attach(this.map, host, ctrls, { layers: opts.layers }) : null;   // its set: "overview" | "incident" (#111)
@@ -709,7 +771,7 @@ window.CadMap = (() => {
         this.layer.closePicker();
         this.clearPlace();
       }
-      const key = JSON.stringify(this.framePoints());
+      const key = JSON.stringify(this.focus ? this.layer.focusKey() : this.framePoints());
       if (!this.focus) {                              // no call open: the calls changed, so all of them again, as
         if (this.callsKey !== undefined && key !== this.callsKey) this.userMoved = false;   // Recenter does (#218)
         this.callsKey = key;                          // (a view switch or a resize leaves a map the viewer moved)
@@ -717,7 +779,8 @@ window.CadMap = (() => {
       if (key !== this.fitKey && this.canvas.clientWidth) {
         const first = this.fitKey === null;
         this.fitKey = key;
-        if (!this.userMoved && !this.opts.manual) this.fit(!first);
+        const following = !!(this.fol && this.fol.id);   // #358: never refit under a follow
+        if (!following) { if (!this.userMoved && !this.opts.manual) this.fit(!first); }
       }
     }
 
@@ -734,7 +797,7 @@ window.CadMap = (() => {
     focusUnit(name) {
       const rec = this.layer.chips.get(name);
       if (!rec) return false;
-      if (this.fol && this.fol.id && this.fol.id !== name) this.fol.stop();
+      if (window.MapFollow) MapFollow.takeMap(this.map);   // a rig's follower or an aircraft's: let go (#358)
       const ll = rec.marker.getLngLat();
       this.userMoved = true;                           // stay on it until Recenter
       try { this.map.easeTo({ center: [ll.lng, ll.lat], zoom: Math.max(this.map.getZoom(), UNIT_ZOOM), duration: 600 }); } catch (_) { /* */ }
@@ -1006,7 +1069,7 @@ window.CadMap = (() => {
     if (mapsOk()) {
       if (!views.overview) {
         views.overview = new RigMap($("#ov-map"), { scene: cad.scene, pins: true, unset: !BOARD, editable: () => canDo("admin") && !BOARD, operator,
-                                                    onPick: (id) => selectIncident(id), layers: "overview" });
+                                                    onPick: (id) => selectIncident(id), layers: "overview", follow: !BOARD });
       }
       views.overview.update(mapData(), null, "");
     } else setText($("#ov-map"), "No map");
