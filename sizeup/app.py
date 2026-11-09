@@ -80,7 +80,7 @@ from sizeup.radio.livepage import HOLD_S, LivePaging
 from sizeup.radio import sdr as sdr_lookup
 from sizeup.radio import adsbd
 from sizeup.radio import recorder as trunk_recorder
-from sizeup.radio.page import Page, PageHold, assemble, decode_tones, page_from_dict, read_twice, recording_note
+from sizeup.radio.page import Page, PageHold, assemble, decode_tones, page_from_dict, recording_note
 from sizeup.radio.tap import LiveTap
 from sizeup.cad import tonelist
 from sizeup.radio.tones import ToneEvent, TonePlan, base_name
@@ -813,7 +813,7 @@ class App:
                  history=getattr(page, "history", None) or [], rerun_at=getattr(page, "rerun_at", None),
                  rerun_result=getattr(page, "rerun_result", ""),
                  model=getattr(page, "model", ""), stt=getattr(page, "stt", ""),
-                 read_twice=getattr(page, "read_twice", None))
+                 read_twice=page.read_twice)
         if getattr(page, "alt_model", ""):
             d.update(alt_text=getattr(page, "alt_text", ""), alt_model=page.alt_model)  # type: ignore[attr-defined]
         return d
@@ -1491,13 +1491,11 @@ class App:
         page.model = getattr(page, "model", "") or Path(self.cfg.stt_model).name  # type: ignore[attr-defined]
         d = self._dispatch(page.raw)
         page.dispatch = d.as_dict() if d else None  # type: ignore[attr-defined]
-        if page.kind == "page":
-            page.read_twice = read_twice(page.raw)  # type: ignore[attr-defined]   (a confirming signal, #183)
         self._save_page(page)
         self._page_to_cad(page)                     # its text in the log (before an event links it)
         self._emit("page_text", self._page_doc(page))
         log(f"{page.label} {page.kind}: {page.raw or '(' + page.status + ')'}"
-            + {True: " [read twice]", False: " [not read twice]"}.get(getattr(page, "read_twice", None), ""))
+            + {True: " [read twice]", False: " [not read twice]"}.get(page.read_twice, ""))
         if d is None:
             return
         # Ours by this page's own tones (#183): the group its message answers, never a page's before it

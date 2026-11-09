@@ -121,6 +121,13 @@ class Page:
         return list(dict.fromkeys(n for t in self.message_tones for n in t.names))
 
     @property
+    def read_twice(self) -> bool | None:
+        """The message read twice (#183, read_twice): a confirming signal, from the transcript itself, so it is there
+        as soon as the text is (never behind the "done" status) and follows a re-run or Amazon Transcribe's text.
+        None for a voice-only page."""
+        return read_twice(self.raw) if self.kind == "page" else None
+
+    @property
     def voice(self) -> np.ndarray | None:
         if self.audio is None:
             return None
@@ -150,7 +157,6 @@ def page_from_dict(d: dict) -> Page:
     p.rerun_at = d.get("rerun_at")  # type: ignore[attr-defined]
     p.model = d.get("model", "")  # type: ignore[attr-defined]
     p.stt = d.get("stt", "")  # type: ignore[attr-defined]   (aws | both: Amazon Transcribe on the hub)
-    p.read_twice = d.get("read_twice")  # type: ignore[attr-defined]
     if d.get("alt_model"):
         p.alt_text, p.alt_model = d.get("alt_text", ""), d["alt_model"]  # type: ignore[attr-defined]
     return p
