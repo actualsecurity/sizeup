@@ -23,10 +23,14 @@ improves old rows too). From shortfinal's tidy() / fix_facilities() (its core/st
     fixes       the approach fixes by ident (TWORF, TAYSH, HAARP ...): every spelling in normalize.json's "fixes"
                 anywhere; "fixes_in_context" (ordinary words: "to do" for TOEDO, "harp") and a close spelling
                 (SequenceMatcher >= FIX_SIMILAR) only right after over / at / from / direct / via / crossing ...
+    numbers     a runway, heading or squawk run into a tail after it, split where it ends ("runway 347 kilo zulu" ->
+                "runway 34, 7 kilo zulu": a runway is two digits, one of the airport's runways); only when the rest
+                is 1-2 digits that can start a tail, and words follow ("runway 290" stays).
     tails       two or more phonetic letters run together ("Lima X-ray" -> "LX"), joined to the digits before them
                 when they can end a US tail (two letters at most: "568 Lima X-ray" -> "568LX"); "November 1 2 3 Alfa
-                Bravo" -> "N123AB". Not after "taxiway", "via", "runway" ... (a route, not a tail). sizeup/atc.py's words_of()
-                reads "568LX" back as five characters, so the matcher sees the same tail.
+                Bravo" -> "N123AB". Not after "taxiway", "via", "runway", "squawk" ... (a route or a number, not a
+                tail). sizeup/atc.py's words_of() reads "568LX" back as five characters, so the matcher sees the same
+                tail.
     telephony   misheard airline / operator telephony ("Moxie" -> "Moxy", "jet speed" -> "Jet Speed"); a number said in
                 groups right after a telephony or a type word, joined ("JetBlue 12 34" -> "JetBlue 1234").
 
@@ -57,7 +61,11 @@ LETTERS = {"alfa": "A", "alpha": "A", "bravo": "B", "charlie": "C", "delta": "D"
            "zulu": "Z"}
 # A letter run is a taxiway or a route after these, not a tail ("taxi via Alfa Bravo")
 NOT_TAIL_AFTER = {"taxiway", "taxiways", "via", "taxi", "on", "cross", "crossing", "and", "ramp", "spot", "information",
-                  "runway", "heading"}
+                  "runway", "rwy", "heading"}
+# ... and the number right after these is an ATC number, never a tail's digits: "squawk 4521 kilo zulu" stays as said
+# ("maintain 3000 123 alfa bravo" is still 123AB: the number after the altitude)
+NUMBER_AFTER = re.compile(r"\b(?:squawk|altimeter|wind|maintain|point|decimal)[\s,-]+$", re.I)
+NUMBER_WIDTH = {"heading": 3, "squawk": 4}    # an ATC number this many digits long: "heading 3407" is 340, then 7
 FIX_CONTEXT = {"over", "at", "from", "direct", "to", "via", "crossing", "cross", "past", "inbound", "outside", "outbound",
                "until", "before", "after", "reaching", "reach", "abeam", "fix", "of", "passing", "hold", "holding"}
 _W = r"[A-Za-z][A-Za-z'-]*"
@@ -211,6 +219,38 @@ def _fixes(t: str) -> str:
     return re.sub(rf"{ctx}(?P<w>[A-Za-z]{{4,7}})\b", close, t, flags=re.I)
 
 
+_MERGED = re.compile(r"\b(?P<w>runway|rwy|heading|squawk)(?P<sp>\s+)(?P<num>\d{3,6})\b(?=(?P<after>[\s-]+[A-Za-z0-9]+)?)",
+                     re.I)
+
+
+def _merged(t: str) -> str:
+    """An ATC number speech-to-text ran into the digits after it, split where the number ends: "runway 347 kilo
+    zulu" -> "runway 34, 7 kilo zulu" (the airport's runways: sizeup/atc.py runway_designators), "heading 3407" ->
+    "heading 340, 7". Only where it can't be one number: a runway is two digits, a heading three, a squawk four."""
+    from sizeup.atc import split_runway
+
+    def one(m: re.Match) -> str:
+        w, num = m.group("w"), m.group("num")
+        width = NUMBER_WIDTH.get(w.lower())
+        if width is None:
+            sp = split_runway(num)
+            if not sp:
+                return m.group(0)
+            head, tail = sp
+        elif len(num) > width:
+            head, tail = num[:width], num[width:]
+        else:
+            return m.group(0)
+        # only where the rest can start a tail and the words go on to one ("runway 165 alfa bravo"): "runway 290" and
+        # "squawk 12001" stay as heard; and only a rest of 1 or 2 digits, which the matcher still reads as maybe the
+        # number's (sizeup/atc.py after_number), so a longer one ("runway 34123 alfa bravo") stays run together
+        nxt = (m.group("after") or "").strip(" -").lower()
+        if tail[0] == "0" or len(tail) > 2 or not (nxt.isdigit() or nxt in LETTERS or nxt in DIGIT_WORDS):
+            return m.group(0)
+        return f"{w}{m.group('sp')}{head}, {tail}"
+    return _MERGED.sub(one, t)
+
+
 _LETTER_WORD = r"(?:" + "|".join(sorted((k for k in LETTERS if k != "november"), key=len, reverse=True)) + r")"
 _TAIL = re.compile(rf"(?P<num>\b\d{{1,5}}[\s-]+)?(?P<run>\b{_LETTER_WORD}(?:[\s-]+{_LETTER_WORD})+)\b", re.I)
 _NOVEMBER = re.compile(r"\bnovember[\s-]+(?P<num>\d{1,5})(?P<l>[A-Z]{0,2})\b", re.I)
@@ -221,7 +261,7 @@ def _tails(t: str) -> str:
     '568LX'); 'November 123AB' -> 'N123AB'."""
     def run(m: re.Match) -> str:
         before = re.findall(r"[A-Za-z]+", t[max(0, m.start() - 20):m.start()])
-        if before and before[-1].lower() in NOT_TAIL_AFTER:
+        if before and before[-1].lower() in NOT_TAIL_AFTER or (m.group("num") and NUMBER_AFTER.search(t[:m.start()])):
             return m.group(0)
         letters = "".join(LETTERS[w.lower()] for w in re.findall(_LETTER_WORD, m.group("run"), re.I))
         if m.group("num") and len(letters) > 2:
@@ -286,6 +326,7 @@ def normalize(text: str) -> str:
     t = _facility(t)
     t = _approaches(t)
     t = _fixes(t)
+    t = _merged(t)
     t = _tails(t)
     t = _telephony(t)
     t = _groups(t)

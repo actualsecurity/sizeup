@@ -581,3 +581,116 @@ def test_a_two_digit_number_alone_is_only_a_departure_handed_off():
     arriving = [dict(MXY, flight="UAL51", phase="arriving", hex="u5")]
     assert snap("Departure xy 51.", arriving)[1] == []                 # not departing
     assert snap("Tower xy 51.", [dict(arriving[0], phase="departing")])[1] == []   # no hand-off
+
+
+# -- a runway, heading ... number run into the tail after it (speech-to-text merging "runway 34, 7KZ") ----------------
+# Invented wording and tails only.
+
+N687KZ = {"hex": "c1", "flight": "N687KZ", "reg": "N687KZ", "phase": "arriving", "dist": 3.0}
+
+
+def mentions(text: str) -> list[tuple[str, bool]]:
+    return [(m.text, m.after_number) for m in atc.find_mentions(T.clauses(normalize(text)), IX)]
+
+
+def test_the_airports_runways_come_from_the_airport_data():
+    assert {"16", "34", "11", "29"} <= atc.runway_designators()
+    assert atc.split_runway("347") == ("34", "7") and atc.split_runway("165") == ("16", "5")
+    assert atc.split_runway("1634") == ("16", "34") and atc.split_runway("34") is None
+    assert atc.split_runway("785") is None                       # not one of this airport's runways
+    assert atc.runways("go ahead runway 347 kilo zulu") == ["34"]
+
+
+@pytest.mark.parametrize("heard, written, found", [
+    ("go ahead runway 347 kilo zulu", "Go ahead runway 34, 7 kilo zulu", [("…7KZ", True)]),
+    ("runway 165 alfa bravo", "Runway 16, 5 alfa bravo", [("…5AB", True)]),
+    ("runway three four seven kilo zulu", "Runway 34, 7 kilo zulu", [("…7KZ", True)]),
+    ("heading 3407 kilo zulu", "Heading 340, 7 kilo zulu", [("…7KZ", True)]),
+    ("runway 34 cleared to land", "Runway 34 cleared to land", []),
+    ("runway 1634", "Runway 1634", []),                         # nothing after it: left as heard
+    ("runway 165", "Runway 165", []),
+    ("runway 290", "Runway 290", []),                           # the rest can't start a tail (no leading 0)
+    ("runway 290 alfa bravo", "Runway 290 alfa bravo", []),
+    ("squawk 12001", "Squawk 12001", []),
+    ("runway 160 cleared to land", "Runway 160 cleared to land", []),
+    ("runway 34123 alfa bravo", "Runway 34123 alfa bravo", [("…123AB", True)]),   # a longer rest: kept together, still flagged
+    ("climb and maintain 2000 alfa bravo", "Climb and maintain 2000 alfa bravo", []),
+    # a tail right after an altitude, no comma: the altitude ends at its own number
+    ("climb and maintain 3000 123 alfa bravo", "Climb and maintain 3000 123AB", [("…123AB", False)]),
+    ("climb and maintain 2000 1 2 3 alfa bravo", "Climb and maintain 2000 1 2 3AB", [("…123AB", False)]),
+    ("squawk 4521 123 alfa bravo", "Squawk 4521 123AB", [("…123AB", False)]),
+    ("maintain 3,000 123 alfa bravo", "Maintain 3,000 123AB", [("…123AB", False)]),
+    ("maintain 3,500, 123 alfa bravo", "Maintain 3,500, 123AB", [("…123AB", False)]),
+    ("heading 340 November 123AB", "Heading 340 N123AB", [("N123AB", False)]),
+    ("November 347KZ", "N347KZ", [("N347KZ", False)]),
+    ("November three four seven kilo zulu, runway 34", "N347KZ, runway 34", [("N347KZ", False)]),
+    ("7 kilo zulu, runway 34 cleared to land", "7KZ, runway 34 cleared to land", [("…7KZ", False)]),
+    ("contact departure 678 alfa bravo", "Contact departure 678AB", [("…678AB", False)]),   # not a frequency
+    # a whole tail after a frequency word or a complete number keeps its normal confidence (not after_number)
+    ("contact departure 123AB", "Contact departure 123AB", [("…123AB", False)]),
+    ("contact departure 1 2 3 alfa bravo", "Contact departure 1 2 3AB", [("…123AB", False)]),
+    ("monitor 123 alfa bravo", "Monitor 123AB", [("…123AB", False)]),
+    ("runway 34, 123AB", "Runway 34, 123AB", [("…123AB", False)]),
+    ("squawk 4521 123AB", "Squawk 4521 123AB", [("…123AB", False)]),
+    # an altitude word takes a whole number, never a lone digit that starts a tail
+    ("leaving 123AB", "Leaving 123AB", [("…123AB", False)]),
+    ("through 118AB", "Through 118AB", [("…118AB", False)]),
+    ("descend and maintain 2000 N123AB", "Descend and maintain 2000 N123AB", [("N123AB", False)]),
+    # a frequency's decimals stop where a tail begins
+    ("121 point 9 1 2 3 alfa bravo", "121 point 9 1 2 3AB", [("…123AB", False)]),
+])
+def test_a_runway_run_into_a_tail_is_split(heard, written, found):
+    assert normalize(heard) == written
+    assert normalize(written) == written                         # idempotent
+    assert mentions(heard) == found
+
+
+@pytest.mark.parametrize("heard", [
+    "squawk 4521", "squawk 4521 kilo zulu", "contact departure 126.4", "contact new york approach 128.55",
+    "contact departure 118.025", "contact departure one two four point six five", "maintain 3000",
+    "one two four point six five", "wind 340 at 12", "wind 340 at 12 gusts 18", "altimeter 30.01",
+    "altimeter three zero zero one", "traffic 2 o'clock, 3 miles", "climb and maintain 3,000",
+    "descend and maintain 2000", "at 2 thousand 5 hundred", "heading 340", "fly runway heading",
+    "runway 34 kilo zulu",
+])
+def test_an_atc_number_never_feeds_a_tail(heard):
+    assert mentions(heard) == []
+    assert atc.find_mentions(heard, IX) == []                    # the raw words too
+
+
+def test_a_tail_after_a_number_is_matched_low_and_never_snapped():
+    # the real tail ends 7KZ: matched, but no better than AFTER_NUMBER_CONF (under a link's 0.7)
+    a = atc.attribute(normalize("go ahead runway 347 kilo zulu"), IX, [N687KZ])
+    assert a.spoken == "…7KZ" and a.hex == "c1" and a.confidence == atc.AFTER_NUMBER_CONF < atc.ADSB_MATCH
+    assert atc.attribute("go ahead runway 34, 7 kilo zulu", IX, [N687KZ]).confidence == atc.AFTER_NUMBER_CONF
+    # a plane whose tail is the merged number is never matched to the whole "347KZ": its end only, as low
+    wrong = dict(N687KZ, hex="c2", flight="N347KZ", reg="N347KZ")
+    assert atc.attribute(normalize("go ahead runway 347 kilo zulu"), IX, [wrong]).confidence == atc.AFTER_NUMBER_CONF
+    assert atc.attribute(normalize("go ahead runway 347 kilo zulu"), IX, [N687KZ, wrong]).hex is None   # two: none
+    assert snap(normalize("go ahead runway 347 kilo zulu"), [N687KZ, wrong])[1] == []
+    assert snap("go ahead runway 347 kilo zulu", [wrong])[1] == []
+    # said in full, it is the whole tail, exactly
+    assert atc.attribute(normalize("November 347KZ"), IX, [wrong]).confidence == 1.0
+    # the talker record: heard, never picked (no highlight on the map or the chip), even with one aircraft that fits
+    rec = T.analyze(T.Tx("t1", CH, T0, T0 + 3, normalize("go ahead runway 347 kilo zulu")), IX, [N687KZ])
+    assert rec["aircraft"]["spoken"] == "…7KZ" and rec["aircraft"]["status"] == "heard"
+    assert "hex" not in rec["aircraft"] and rec["aircraft"]["confidence"] == 0.0 and rec["runway"] == "34"
+    # a whole tail after a complete number is matched as usual
+    whole = dict(N687KZ, hex="c3", flight="N123AB", reg="N123AB")
+    assert atc.attribute("runway 34, 123AB", IX, [whole]).confidence == 0.6
+    assert T.analyze(T.Tx("t3", CH, T0, T0 + 3, "runway 34, 123AB"), IX, [whole])["aircraft"]["status"] == "probable"
+    off = T.analyze(T.Tx("t2", CH, T0, T0 + 3, normalize("go ahead runway 347 kilo zulu")), IX, [])
+    assert off["aircraft"]["callsign"] == "…7KZ" and off["aircraft"]["status"] == "heard"
+
+
+def test_a_pre_alert_never_names_an_earlier_aircraft_for_a_tail_after_a_number():
+    """The newest callsign is a tail that may hold a runway's digits: heard only, not the aircraft of an earlier
+    transmission."""
+    other = {"hex": "o1", "flight": "N123AB", "reg": "N123AB", "phase": "arriving", "dist": 2.0}
+    w = atc.AtcWatch(None, [CH], index=IX, aircraft=lambda: [N687KZ, other], log=lambda m: None)
+    before = atc.Heard("h1", T0, CH, "November 123AB, number two", "", [])
+    me = atc.Heard("h2", T0 + 5, CH, "go ahead runway 347 kilo zulu", "", [])
+    who = w._who(me, [before], [N687KZ, other])
+    assert who == {"callsign": "…7KZ", "hex": None, "spoken": "…7KZ", "match": 0.0}
+    # without it, the earlier transmission's aircraft is named as before
+    assert w._who(atc.Heard("h3", T0 + 5, CH, "cleared to land", "", []), [before], [N687KZ, other])["hex"] == "o1"

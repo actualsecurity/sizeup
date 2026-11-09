@@ -217,7 +217,7 @@ def phrases(norm: str) -> list[str]:
     return out[:6]
 
 
-STOP = "xstopx"            # a comma or a full stop, kept as a word: a flight number never runs on across it
+STOP = atc.STOP_WORD       # a comma or a full stop, kept as a word: a flight number never runs on across it
 _PUNCT = re.compile(r"[,.;:?!]+")
 
 
@@ -354,6 +354,9 @@ def match(m, words: Sequence[str], index: atc.TelephonyIndex, planes: Sequence[d
             if tail and len(m.suffix) >= 3 and tail[1:].endswith(m.suffix):
                 near.append(a)
         conf, how = 0.6, "the end of its tail"
+        if m.after_number and near:   # right after a runway / heading ...: its digits may be the number's: never picked
+            return Match("heard", 0.0, None, "heard right after a runway, heading ... number: its digits may be the "
+                                             "number's, not picked")
     elif m.designators:
         for a in planes:
             fl = (a.get("flight") or "").strip().upper()
