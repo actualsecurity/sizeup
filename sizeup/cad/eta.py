@@ -13,6 +13,10 @@ every console and tested exactly:
               = drive                                             when it is already on the road
                                                                   (returning, or a live AVL fix)
 
+By road (#360): where the road graph is built (sizeup/roadgraph.py), the drive is the route's time instead: OSM
+roads, speeds by road class (highway / main / local) x the emergency factor, one-ways honoured, closures in effect
+avoided (sizeup/cad/routes.py). This straight-line model stays the fallback (no graph yet, no road near a point).
+
 A rig that cleared a call is on its way home for drive(call -> station) + the return margin
 (paperwork, picking up hose); its estimated place moves from the call to the station over that
 window at a steady pace (sizeup/cad/mapview.py locate()).
@@ -35,6 +39,13 @@ NUMBERS = {
     "speed_mph": (25.0, 5.0, 75.0, "Average emergency speed", "mph"),   # US units (user, 2026-10-08)
     "turnout_min": (2.0, 0.0, 15.0, "Turnout time from quarters", "min"),
     "return_margin_min": (3.0, 0.0, 60.0, "Return margin after clearing (paperwork, pickup)", "min"),
+    # by road (sizeup/roadgraph.py, #360): class speeds x the emergency factor; the probable path's rules
+    "highway_mph": (50.0, 10.0, 75.0, "Road speed: highways (I-95, I-287, Hutch)", "mph"),
+    "arterial_mph": (28.0, 5.0, 60.0, "Road speed: main roads", "mph"),
+    "local_mph": (20.0, 5.0, 50.0, "Road speed: local streets", "mph"),
+    "emergency_factor": (1.1, 0.5, 2.0, "Emergency factor (× road speeds)", "×"),
+    "wrongway_m": (60.0, 0.0, 300.0, "Wrong-way final stretch allowed", "m"),
+    "reroute_m": (50.0, 15.0, 500.0, "Re-route when off the path by", "m"),
 }
 ORDERS = ("nearest", "card")          # recommend: nearest first within a slot | the run card / board order
 KEYS = (*NUMBERS, "order", "quarters_status")
@@ -46,6 +57,12 @@ class Params:
     speed_mph: float = NUMBERS["speed_mph"][0]
     turnout_min: float = NUMBERS["turnout_min"][0]
     return_margin_min: float = NUMBERS["return_margin_min"][0]
+    highway_mph: float = NUMBERS["highway_mph"][0]
+    arterial_mph: float = NUMBERS["arterial_mph"][0]
+    local_mph: float = NUMBERS["local_mph"][0]
+    emergency_factor: float = NUMBERS["emergency_factor"][0]
+    wrongway_m: float = NUMBERS["wrongway_m"][0]
+    reroute_m: float = NUMBERS["reroute_m"][0]
     order: str = "nearest"
     quarters_status: str = "AQ"      # the free status that means "back in quarters" (ends a return early)
 
@@ -107,6 +124,11 @@ def along(a: list | tuple, b: list | tuple, frac: float) -> list[float]:
     """The point frac (0..1) of the way from a to b (straight: an estimate, at village scale)."""
     f = min(1.0, max(0.0, frac))
     return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f]
+
+
+def miles(metres: float) -> str:
+    """'1.2 mi' (a tenth; under a tenth: '0.1 mi')."""
+    return f"{max(0.1, round(metres / 1000.0 / KM_PER_MILE, 1)):.1f} mi"
 
 
 def text(seconds: float) -> str:

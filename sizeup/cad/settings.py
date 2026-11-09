@@ -717,8 +717,9 @@ class Editor:
                 "quarters_status": {"value": cur["quarters_status"], "default": dflt["quarters_status"],
                                     "edited": "quarters_status" in d,
                                     "choices": [{"code": c, "name": L.name("unit_statuses", c)} for c in L.free]},
-                "note": "Estimates only: straight-line distance × road factor at an average speed, plus turnout "
-                        "from quarters. No road network or traffic. Shown as “~3 min est.”."}
+                "note": "Estimates only: by road where the road graph has a way (OSM roads, road speeds × emergency "
+                        "factor, closures in effect avoided), else straight-line distance × road factor at an average "
+                        "speed; plus turnout from quarters. No traffic. Shown as “~3 min est.”."}
 
     def _system(self, ov: dict) -> dict:
         try:
