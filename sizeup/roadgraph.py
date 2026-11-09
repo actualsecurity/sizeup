@@ -55,7 +55,7 @@ SOURCE = "OpenStreetMap (Overpass)"
 LINK = "https://www.openstreetmap.org/copyright"
 ATTRIBUTION = "© OpenStreetMap contributors (ODbL)"
 CACHE_NAME = "roadgraph.json"         # in the state dir (sizeup/cachesync.py FILES)
-VERSION = 1
+VERSION = 2                           # 2: the roundabout flag in the one-way field (#361)
 RING_KM = 12.0                        # around the firehouses: the mutual-aid ring
 TIMEOUT_S = 240.0                     # the Overpass request (its own [timeout:] is 30 s less)
 TOTAL_S = 600.0                       # the whole build (fetch, parse, build, write) in its own process, at most
@@ -82,7 +82,8 @@ CELL_M = 200.0
 CLOSURE_M = 25.0                      # an edge this close to a closure's line is on it
 END_BLOCKED = 8.0                     # a closed block the rig or the call is on: this much slower (never shut)
 UNNAMED_SLOW = 1.5                    # a closure naming no road: slowed, never shut
-HIGHWAY_CLOSED = 3.0                  # a highway edge under a full closure: slowed, never shut
+HIGHWAY_CLOSED = 3.0                  # a motorway / trunk mainline edge under a full closure: slowed, never shut
+MAINLINE = {0, 1}                     # (its ramps are short: a closed ramp stays shut)
 PARALLEL_DEG = 35.0                   # an edge this close to the closure line's bearing runs along it
 SLOW = {"lanes": 1.5, "alternating": 1.6, "detour": 1.3}   # a partial closure: the edge this much slower
 # Measured 2026-11-09 (12 km ring, bbox -73.819 40.888 -73.517 41.144, an M-series Mac): Overpass answered 28 MB in
@@ -386,7 +387,8 @@ class Graph:
         closure: the point) running roughly the same way (PARALLEL_DEG), and, when the closure names its road, the
         edge is on that road (street_key of its name or ref). A closure naming no road only slows (UNNAMED_SLOW):
         nothing says which of two roads side by side it is. A highway edge (often kilometres long, one carriageway)
-        is slowed (HIGHWAY_CLOSED), never shut: the closure may be a few hundred metres of it."""
+        is slowed (HIGHWAY_CLOSED), never shut: the closure may be a few hundred metres of it. Its ramps (short)
+        are shut like any other road."""
         from sizeup import roadprojects as rp
         out: dict[int, float] = {}
         for r in items or ():
@@ -424,7 +426,7 @@ class Graph:
                         hits[e] = hits.get(e, 0) + 1
             for e, k in hits.items():
                 if k >= need and (not road or road in self.street_keys(e)):
-                    f = HIGHWAY_CLOSED if factor == math.inf and self.ecls[e] in HIGHWAY else factor
+                    f = HIGHWAY_CLOSED if factor == math.inf and self.ecls[e] in MAINLINE else factor
                     out[e] = max(out.get(e, 1.0), f)
         return out
 
@@ -772,6 +774,7 @@ def fetch_build(bbox, url: str, out: Path, post: Callable = None, src: str | Pat
     process runs this (build_in_child). Raises with what went wrong."""
     import resource
     t0 = time.monotonic()
+    Path(out).with_suffix(".tmp").unlink(missing_ok=True)      # a build killed half-way (TOTAL_S) left this
     if src:
         body = Path(src).read_bytes()
     else:

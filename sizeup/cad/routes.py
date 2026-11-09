@@ -71,6 +71,7 @@ class Routes:
         self.failed: dict[tuple[str, int], tuple] = {}   # no way found: (to, sig, from, when): tried again after RETRY_S
         self._pen: dict | None = None           # {key: (graph, closures list), pen, sig, until}: the closures as penalties
         self._pen_busy = False
+        self._pen_lock = threading.Lock()
         self._lock = threading.Lock()
         self.stats = {"routed": 0, "last_ms": None, "why": {}}
 
@@ -88,8 +89,11 @@ class Routes:
             items = []
         key = (id(g), id(items), len(items))
         got = self._pen                      # (one read: to_one runs on request threads beside the state build)
-        if (got is None or got["key"] != key or now >= got["until"]) and not self._pen_busy:
-            self._pen_busy = True
+        with self._pen_lock:                 # (the state build and request threads: one job at a time)
+            start = (got is None or got["key"] != key or now >= got["until"]) and not self._pen_busy
+            if start:
+                self._pen_busy = True
+        if start:
 
             def work(items=items, key=key):
                 try:
@@ -99,8 +103,9 @@ class Routes:
                     self.log(f"routes: closures not applied ({type(e).__name__}: {e})")
                     pen, until = {}, now + PEN_S
                 sig = tuple(sorted(pen.items()))
-                self._pen = {"key": key, "g": id(g), "pen": pen, "sig": hash(sig) if sig else 0, "until": until}
-                self._pen_busy = False
+                with self._pen_lock:
+                    self._pen = {"key": key, "g": id(g), "pen": pen, "sig": hash(sig) if sig else 0, "until": until}
+                    self._pen_busy = False
             self.spawn(work)
             got = self._pen
         if got is None or got["g"] != id(g):

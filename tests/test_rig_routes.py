@@ -866,3 +866,41 @@ out.back = CadMap.routeFrom(coords, mark, 380);          // ~380 m along: on its
     assert o["first"] == [[x + 0.001, y], [x + 0.003, y], [x + 0.0005, y], [x + 0.0005, y + 0.002]]
     assert o["none"] == o["first"]
     assert o["back"] == [[x + 0.001, y], [x + 0.0005, y], [x + 0.0005, y + 0.002]]
+
+
+
+def test_a_closed_ramp_stays_shut_while_the_mainline_is_only_slowed():
+    w = Ways()
+    w.add([at(0, 0), at(3, 0)], hw="motorway", name="New England Thruway", ref="I 95")
+    w.add([at(1, 0), at(1.6, -1)], hw="motorway_link", name="Exit 21", ref="I 95")       # an I-95-style off-ramp
+    g = w.graph()
+    ramp = next(e for e in range(g.m) if g.cls(e) == "motorway_link")
+    main = [e for e in range(g.m) if g.cls(e) == "motorway"]
+    on_ramp = dict(closure(how="ramp", road="I-95"), geometry={"type": "LineString", "coordinates": [at(1.1, -0.15), at(1.5, -0.8)]})
+    assert g.penalties([on_ramp], NOW) == {ramp: math.inf}
+    full_ramp = dict(on_ramp, closure="full")
+    assert g.penalties([full_ramp], NOW) == {ramp: math.inf}
+    on_main = dict(closure(road="I-95"), geometry={"type": "LineString", "coordinates": [at(1.8, 0), at(2.6, 0)]})
+    pen = g.penalties([on_main], NOW)
+    assert pen and set(pen) <= set(main) and set(pen.values()) == {rg.HIGHWAY_CLOSED}
+
+
+def test_an_older_cache_is_not_read_and_a_leftover_temp_file_is_cleared(tmp_path):
+    old = build(json.loads(OSM.read_text()))
+    old["v"] = 1
+    with pytest.raises(ValueError):
+        Graph(old)
+    (tmp_path / rg.CACHE_NAME).write_text(json.dumps(old))
+    p = rg.RoadGraph(tmp_path, bbox=BOX, log=lambda m: None)
+    p.load_cache()
+    assert p.graph is None and rg.VERSION == 2
+    out = tmp_path / "roadgraph.new"
+    stale = out.with_suffix(".tmp")
+    stale.write_text("half a graph from a build that was killed")
+    calls = []
+
+    def post(url, data, timeout, limit):
+        calls.append(stale.exists())
+        return 200, OSM.read_bytes()
+    rg.fetch_build(BOX, "", out, post=post)
+    assert calls == [False] and out.is_file() and not stale.exists()
