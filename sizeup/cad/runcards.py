@@ -275,8 +275,9 @@ def estimates(units: list[dict], where: dict | None, inc: dict | None, params: e
               road=None) -> dict[int, dict]:
     """unit id -> {eta_s (None: unknown), eta ("~3 min est." or ''), reason, how ("road" | "line" | "")} for the
     given units: from where each is now (mapview.locate) to the event's map point. road({code: [lon, lat]}, to) ->
-    {code: (drive s, metres)} (sizeup/cad/routes.py Routes.to_one, #360): by road where it has a way ("~3 min est.
-    · 1.2 mi · from ..."), plus turnout from quarters; else the straight-line model (eta.py)."""
+    {code: (drive s, metres)} (sizeup/cad/routes.py Routes.to_one, #360): by road when it has a way for every one of
+    them ("~3 min est. · 1.2 mi · from ..."), plus turnout from quarters; else the straight-line model (eta.py) for
+    all of them (the nearest-first order never compares the two)."""
     p = params or eta.Params()
     to = [inc["lon"], inc["lat"]] if inc and inc.get("lat") is not None and inc.get("lon") is not None else None
     by_road: dict = {}
@@ -286,6 +287,8 @@ def estimates(units: list[dict], where: dict | None, inc: dict | None, params: e
             by_road = road(origins, to) or {}
         except Exception:  # noqa: BLE001 - the straight line then
             by_road = {}
+        if any(k not in by_road for k in origins):
+            by_road = {}            # one model for all of them: never road times ranked against straight-line ones
     out = {}
     for u in units:
         loc = (where or {}).get(u["name"])

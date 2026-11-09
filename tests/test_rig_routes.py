@@ -199,7 +199,7 @@ def grid():
 
 def routes_on(g, params=P, items=()):
     log = []
-    return Routes(lambda: g, lambda: params, lambda: list(items), log=log.append), log
+    return Routes(lambda: g, lambda: params, lambda: list(items), log=log.append, spawn=lambda fn: fn()), log
 
 
 def test_a_route_is_cached_and_moved_along_by_fixes_on_it():
@@ -305,8 +305,11 @@ def test_a_few_hundred_routes_are_quick():
     t0 = time.monotonic()
     got = [g.route(pts[k], pts[(k + 150) % 300], P) for k in range(300)]
     took = time.monotonic() - t0
-    assert all(got) and built < 5.0
-    assert took < 15.0, f"300 routes on a {g.n}-node grid took {took:.1f} s"
+    assert all(got) and built < 1.0
+    # 0.3 s here (~1 ms a route, every node settled at worst); a bound with room for a slow CI runner, still well
+    # under one state build's routing budget per route
+    assert took < 2.0, f"300 routes on a {g.n}-node grid took {took:.2f} s"
+    assert max(r["pops"] for r in got) <= g.max_pops
 
 
 # ---- the estimate: by road, else the straight line ------------------------------------------------------------------
@@ -317,11 +320,14 @@ def test_estimates_by_road_with_turnout_else_the_straight_line():
     where = {"E60": {"ll": at(0, 0), "on_road": False, "label": "from HQ"},
              "E61": {"ll": at(1, 1), "on_road": True, "label": "live position"}}
     inc = {"lat": at(3, 3)[1], "lon": at(3, 3)[0]}
-    road = lambda origins, to: {"E60": (120.0, 1609.0)}                      # E61: no way by road
+    road = lambda origins, to: {"E60": (120.0, 1609.0), "E61": (60.0, 800.0)}
     est = runcards.estimates(units, where, inc, P, road)
     assert est[1] == {"eta_s": 240, "eta": "~4 min est.", "how": "road", "reason": "~4 min est. · 1.0 mi · from HQ"}
+    assert est[2]["how"] == "road" and est[2]["eta_s"] == 60                  # on the road: no turnout
+    # one without a way by road: the straight line for ALL of them, never a mix
+    mixed = runcards.estimates(units, where, inc, P, lambda origins, to: {"E60": (120.0, 1609.0)})
     straight = eta.eta_s(at(1, 1), at(3, 3), P, from_quarters=False)
-    assert est[2]["how"] == "line" and est[2]["eta_s"] == round(straight)
+    assert {e["how"] for e in mixed.values()} == {"line"} and mixed[2]["eta_s"] == round(straight)
     assert runcards.estimates(units, where, inc, P)[1]["how"] == "line"     # no graph: the model, as before
     broken = runcards.estimates(units, where, inc, P, lambda o, t: 1 / 0)
     assert broken[1]["how"] == "line"
@@ -341,24 +347,70 @@ def test_the_settings_numbers_are_editable_and_checked():
 # ---- the provider, the config, the cache, the data source -----------------------------------------------------------
 
 
-def test_refresh_builds_saves_and_a_bad_answer_keeps_the_graph(tmp_path):
-    body = OSM.read_bytes()
-    calls = []
+BOX = (-73.68, 40.99, -73.65, 41.01)
 
+
+def in_process(answer: bytes, code: int = 200, calls: list | None = None):
+    """A builder running fetch_build here, with a stand-in Overpass."""
     def post(url, data, timeout, limit):
-        calls.append(data.decode())
-        return 200, body
-    p = rg.RoadGraph(tmp_path, bbox=(-73.68, 40.99, -73.65, 41.01), post=post, log=lambda m: None)
+        if calls is not None:
+            calls.append(data.decode())
+        return code, answer
+    return lambda bbox, url, out: rg.fetch_build(bbox, url, out, post=post)
+
+
+def test_refresh_builds_saves_and_a_bad_answer_keeps_the_graph(tmp_path):
+    calls = []
+    p = rg.RoadGraph(tmp_path, bbox=BOX, builder=in_process(OSM.read_bytes(), calls=calls), log=lambda m: None)
     assert p.refresh() and p.graph is not None and (tmp_path / rg.CACHE_NAME).is_file()
-    assert "highway" in calls[0] and "bbox" in calls[0]
+    assert "highway" in calls[0] and "bbox" in calls[0] and not list(tmp_path.glob("*.new"))
     g = p.graph
-    p.post = lambda *a: (429, b"slow down")
+    p.builder = in_process(b"slow down", code=429)
     assert not p.refresh() and p.graph is g and "rate limited" in p.status["error"] and p.blocked()
-    p.post = lambda *a: (200, b'{"elements": []}')
+    p.builder = in_process(b'{"elements": []}')
     assert not p.refresh() and p.graph is g                                  # an empty answer never replaces it
-    q = rg.RoadGraph(tmp_path, bbox=(-73.68, 40.99, -73.65, 41.01), log=lambda m: None)
+    q = rg.RoadGraph(tmp_path, bbox=BOX, log=lambda m: None)
     q.load_cache()
     assert q.graph is not None and q.graph.m == g.m and q.status["nodes"] == g.n
+
+
+def test_an_overpass_error_remark_a_shrunken_graph_or_any_exception_keeps_the_graph(tmp_path):
+    doc = json.loads(OSM.read_text())
+    p = rg.RoadGraph(tmp_path, bbox=BOX, builder=in_process(OSM.read_bytes()), log=lambda m: None)
+    assert p.refresh()
+    g = p.graph
+    bad = dict(doc, remark="runtime error: Query timed out in \"query\" at line 1 after 210 seconds.")
+    p.builder = in_process(json.dumps(bad).encode())
+    assert not p.refresh() and p.graph is g and "Overpass: runtime error" in p.status["error"]
+    half = dict(doc, elements=doc["elements"][: len(doc["elements"]) * 6 // 10])     # 60 % of the roads
+    p.builder = in_process(json.dumps(half).encode())
+    assert not p.refresh() and p.graph is g and "not replacing" in p.status["error"]
+    p.builder = lambda *a: {}["boom"]                                                 # anything at all
+    assert not p.refresh() and p.graph is g and p.status["error"].startswith("KeyError")
+    assert rg.MAX_BYTES <= 64 * 2 ** 20
+
+
+def test_the_build_runs_in_its_own_process(tmp_path):
+    """The hub's refresh: `python -m sizeup.roadgraph build` (here from the saved extract, no network); only the
+    compact file comes back, and a failure comes back as its error."""
+    out = tmp_path / "g.json"
+    said = rg.build_in_child(BOX, "", out, src=OSM)
+    assert said["edges"] > 50 and said["peak_mb"] > 0 and out.is_file()
+    assert Graph(json.loads(out.read_text())).m == said["edges"]
+    with pytest.raises(RuntimeError, match="FileNotFoundError"):
+        rg.build_in_child(BOX, "", tmp_path / "x.json", src=tmp_path / "missing.json")
+    with pytest.raises(RuntimeError, match="over"):
+        rg.build_in_child(BOX, "", tmp_path / "y.json", src=OSM, timeout=0.01)
+    p = rg.RoadGraph(tmp_path, bbox=BOX, builder=lambda b, u, o: rg.build_in_child(b, u, o, src=OSM), log=lambda m: None)
+    assert p.refresh() and p.graph.m == said["edges"]
+
+
+def test_the_answer_is_trimmed_to_the_tags_used():
+    t = rg.trim({"elements": [{"type": "way", "id": 1, "nodes": [1, 2], "geometry": [], "tags": {
+        "highway": "residential", "name": "Example Street", "surface": "asphalt", "lit": "yes", "oneway": "yes"}},
+        {"type": "node", "id": 5}], "remark": ""})
+    assert t["elements"] == [{"type": "way", "nodes": [1, 2], "geometry": [], "tags": {"highway": "residential",
+                                                                                         "name": "Example Street", "oneway": "yes"}}]
 
 
 def test_the_user_agent_names_the_project():
@@ -527,7 +579,7 @@ def _page_with_route():
     e61 = next(m for m in data["map"]["markers"] if m["unit"] == "E61")
     e61.update(incident_id=7, incident_number="26-000007", line_to=[e61["lon"] + 0.01, e61["lat"] - 0.01])   # a made-up call
     to = e61["line_to"]
-    mid = [e61["lon"], to[1]]
+    mid = [e61["lon"] + 0.004, e61["lat"]]                                  # on east, the way it heads
     data["map"]["routes"] = [{"unit": "E61", "incident_id": e61["incident_id"], "coords": [[e61["lon"] - 0.002, e61["lat"]], [e61["lon"], e61["lat"]], mid, to],
                               "m": 1900, "s": 170, "along_m": 160, "remain_m": 1750, "remain_s": 160, "eta_s": 160,
                               "text": "~3 min · 1.1 mi", "from": "fix", "at": e61["at"], "why": "new"}]
@@ -687,3 +739,130 @@ while (Date.now() - t0 < 1000) { spin(16); L.tick(); }
 out.n = n;
 """, data)
     assert 2 <= o["n"] <= 6
+
+
+
+# ---- the review's items (#361) --------------------------------------------------------------------------------------
+
+
+def island_grid():
+    """The 6x6 grid, and a separate parking-lot loop ~170 m east of it with no way onto it."""
+    w = Ways()
+    for j in range(6):
+        w.add([at(i, j) for i in range(6)], name=f"Row {j}")
+    for i in range(6):
+        w.add([at(i, j) for j in range(6)], name=f"Col {i}")
+    w.add([at(7, 2), at(8, 2), at(8, 3), at(7, 3), at(7, 2)], hw="service", name="Lot")
+    return w.graph()
+
+
+def test_islands_are_never_starts_or_calls_and_no_way_is_quick():
+    g = island_grid()
+    assert g.components == 2 and sum(g.main) == 36
+    lot = [LON0 + 7.5 * DX, LAT0 + 2.5 * DY]
+    s = g.snap(*lot)
+    assert s is not None and g.name(s["edge"]) == "Col 5"                     # onto the grid (~210 m), never the lot
+    far = [LON0 + 9.5 * DX, LAT0 + 2.5 * DY]                                   # beside the lot: no grid road within 300 m
+    t0 = time.monotonic()
+    assert g.route(at(0, 0), far, P) is None and g.to_one({"E61": at(0, 0)}, far, P) == {}
+    assert time.monotonic() - t0 < 0.05
+    # walled in by closures: the search ends after at most every node once
+    pen = {e: math.inf for e in range(g.m) if g.name(e) in ("Row 1", "Col 1") or g.name(e) == "Row 0"}
+    r = g.route(at(0, 0), at(5, 5), P, pen)
+    assert g.max_pops <= g.n + 16 and (r is None or r["pops"] <= g.max_pops)
+
+
+def test_no_wrong_way_on_highways_or_roundabouts():
+    w = Ways()
+    w.add([at(i, 0) for i in range(5)], name="Main Street")
+    w.add([at(i, 1) for i in range(5)], hw="motorway_link", name="Exit 2")    # one-way by its class
+    w.add([at(0, 0), at(0, 1)], name="West Street")
+    w.add([at(4, 0), at(4, 1)], name="East Street")
+    g = w.graph()
+    to = [LON0 + 3.3 * DX, LAT0 + DY]                                          # 59 m short of East St, on the ramp
+    r = g.route(at(4, 0), to, P, wrongway_m=60)
+    assert g.cls(g.snap(*to)["edge"]) == "motorway_link" and r["m"] > 300     # round, never backwards up a ramp
+    w2 = ladder()
+    w2.els[1]["tags"] = {"highway": "residential", "name": "Oak Street", "junction": "roundabout"}
+    g2 = w2.graph()
+    assert g2.route(at(4, 0), to, P, wrongway_m=60)["m"] > 300
+    assert ladder().graph().route(at(4, 0), to, P, wrongway_m=60)["m"] < 150   # a plain one-way street: allowed
+
+
+def test_a_closure_naming_no_road_only_slows_and_only_along_its_line():
+    g = two_ways()
+    main = next(e for e in range(g.m) if g.name(e) == "Main Street")
+    assert g.penalties([closure(road="")], NOW) == {main: rg.UNNAMED_SLOW}
+    across = dict(closure(road=""), geometry={"type": "LineString", "coordinates": [
+        [LON0 + 1.5 * DX, LAT0 - 0.0003], [LON0 + 1.5 * DX, LAT0 + 0.0003]]})        # a line across Main St
+    assert g.penalties([across], NOW) == {}
+
+
+def test_a_full_closure_on_a_highway_edge_slows_it_rather_than_shutting_it():
+    w = Ways()
+    w.add([at(0, 0), at(3, 0)], hw="motorway", name="New England Thruway", ref="I 95")
+    w.add([at(3, 0), at(0, 0)], hw="motorway", name="New England Thruway", ref="I 95")
+    g = w.graph()
+    pen = g.penalties([closure(road="I-95")], NOW)
+    assert pen and set(pen.values()) == {rg.HIGHWAY_CLOSED}
+
+
+def test_the_closures_are_worked_out_again_only_on_a_change_and_off_the_state_build():
+    calls, jobs = [], []
+    items = [closure(start=NOW - 60, end=NOW + 600)]
+    g = two_ways()
+    real = g.penalties
+    g.penalties = lambda its, now: calls.append(now) or real(its, now)
+    r = Routes(lambda: g, lambda: P, lambda: items, log=lambda m: None, spawn=lambda fn: fn())
+    for t in (0, 60, 120, 590):
+        r.penalties(g, NOW + t)
+    assert calls == [NOW]                                                     # the minute no longer counts
+    r.penalties(g, NOW + 601)                                                 # the closure's window closed
+    assert calls[-1] == NOW + 601 and r.penalties(g, NOW + 602)[0] == {}
+    items = [closure(start=NOW + 900, end=NOW + 1800)]                        # a new list: again
+    r.penalties(g, NOW + 610)
+    assert len(calls) == 3
+    lazy = Routes(lambda: g, lambda: P, lambda: items, log=lambda m: None, spawn=jobs.append)
+    assert lazy.penalties(g, NOW) == ({}, 0) and len(jobs) == 1 and len(calls) == 3   # not on the state build
+    jobs[0]()
+    assert len(calls) == 4 and lazy.penalties(g, NOW)[1] == 0                 # (none in effect yet)
+
+
+def test_a_rig_off_the_road_is_not_re_routed_on_every_fix():
+    r, _ = routes_on(grid())
+    yard = [LON0 + 2.5 * DX, LAT0 - 0.0009]                                   # ~100 m south of Row 0, in a yard
+    r.for_map([marker(*yard)], NOW)
+    for k in range(1, 6):
+        assert r.for_map([marker(yard[0] + 0.00001 * k, yard[1], at_=NOW + k)], NOW + k)["routes"][0]["why"] == "new"
+    assert r.stats["routed"] == 1
+    gone = r.for_map([marker(LON0 + 5 * DX, LAT0 - 0.0012, at_=NOW + 9)], NOW + 9)["routes"][0]
+    assert gone["why"] == "off"
+
+
+def test_the_routing_budget_spreads_many_units_over_builds(monkeypatch):
+    import sizeup.cad.routes as routes_mod
+    monkeypatch.setattr(routes_mod, "BUDGET_S", 0.0)                          # one route a build, at least
+    r, _ = routes_on(grid())
+    ms = [dict(marker(*at(k % 6, k // 6)), unit=f"U{k}") for k in range(30)]
+    counts = [len(r.for_map(ms, NOW + k)["routes"]) for k in range(30)]
+    assert counts[0] == 1 and counts == list(range(1, 31))
+    monkeypatch.setattr(routes_mod, "BUDGET_S", 10.0)
+    r2, _ = routes_on(grid())
+    assert len(r2.for_map(ms, NOW)["routes"]) == 30
+
+
+@pytest.mark.skipif(__import__("shutil").which("node") is None and not Path("/opt/homebrew/bin/node").exists(), reason="node not installed")
+def test_a_route_that_doubles_back_keeps_its_first_leg(tmp_path):
+    from tests.test_unit_follow import page_state, run
+    o = run(tmp_path, r"""
+const x = -73.67, y = 41.0;
+const coords = [[x, y], [x + 0.003, y], [x + 0.0005, y], [x + 0.0005, y + 0.002]];   // out east, back west, then north
+const mark = [x + 0.001, y];                                                          // on the street both legs use
+out.first = CadMap.routeFrom(coords, mark, 80);          // the hub had it ~80 m along: the first leg
+out.none = CadMap.routeFrom(coords, mark);               // no along: a tie goes to the earlier segment
+out.back = CadMap.routeFrom(coords, mark, 380);          // ~380 m along: on its way back
+""", {**page_state(), "map": {"markers": [], "routes": []}})
+    x, y = -73.67, 41.0
+    assert o["first"] == [[x + 0.001, y], [x + 0.003, y], [x + 0.0005, y], [x + 0.0005, y + 0.002]]
+    assert o["none"] == o["first"]
+    assert o["back"] == [[x + 0.001, y], [x + 0.0005, y], [x + 0.0005, y + 0.002]]

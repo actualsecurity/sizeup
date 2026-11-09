@@ -199,19 +199,32 @@ window.CadMap = (() => {
   const markAt = (m) => (m.place === "position" ? (drawn.get(m.unit) || [m.lon, m.lat]) : [m.lon, m.lat]);
   // ---- the probable path (#360) ----------------------------------------------------------------------------------
   const routeOf = (M, m) => ((M && M.routes) || []).find((r) => r.unit === m.unit && r.incident_id === m.incident_id) || null;
-  // the route's points from the one nearest the mark on: [mark, ...the rest] (a rig behind its route's start: all of it)
-  function routeFrom(coords, at) {
+  // the route's points from the mark on: [mark, ...the rest]. The nearest segment to the mark, looked for near where the
+  // hub last had the rig along it (along_m: from a little behind to ALONG_AHEAD_M ahead, as the mark is drawn on
+  // between fixes), a tie going to the EARLIER segment: a route that doubles back on a street keeps its first leg.
+  const ALONG_BACK_M = 100, ALONG_AHEAD_M = 1000;
+  function routeFrom(coords, at, alongM) {
     if (!Array.isArray(coords) || coords.length < 2) return null;
-    const kx = Math.cos((at[1] * Math.PI) / 180);
-    let best = Infinity, bi = 0;
-    for (let i = 0; i < coords.length - 1; i++) {
-      const [x1, y1] = coords[i], [x2, y2] = coords[i + 1];
-      const dx = (x2 - x1) * kx, dy = y2 - y1, ll = dx * dx + dy * dy;
-      const t = ll ? Math.max(0, Math.min(1, (((at[0] - x1) * kx) * dx + (at[1] - y1) * dy) / ll)) : 0;
-      const ex = (x1 + (x2 - x1) * t - at[0]) * kx, ey = y1 + (y2 - y1) * t - at[1], d = ex * ex + ey * ey;
-      if (d <= best + 1e-14) { best = Math.min(best, d); bi = i; }     // (a tie: the later segment)
-    }
-    return [at, ...coords.slice(bi + 1)];
+    const kx = Math.cos((at[1] * Math.PI) / 180), M_DEG = 111320;
+    const near = (lo, hi) => {
+      let best = Infinity, bi = -1, run = 0;
+      for (let i = 0; i < coords.length - 1; i++) {
+        const [x1, y1] = coords[i], [x2, y2] = coords[i + 1];
+        const dx = (x2 - x1) * kx, dy = y2 - y1, ll = dx * dx + dy * dy, seg = Math.sqrt(ll) * M_DEG;
+        if (run + seg >= lo && run <= hi) {
+          const t = ll ? Math.max(0, Math.min(1, (((at[0] - x1) * kx) * dx + (at[1] - y1) * dy) / ll)) : 0;
+          const ex = (x1 + (x2 - x1) * t - at[0]) * kx, ey = y1 + (y2 - y1) * t - at[1], d = ex * ex + ey * ey;
+          if (d < best) { best = d; bi = i; }
+        }
+        run += seg;
+      }
+      return bi;
+    };
+    let bi = typeof alongM === "number" ? near(alongM - ALONG_BACK_M, alongM + ALONG_AHEAD_M) : -1;
+    if (bi < 0) bi = near(-Infinity, Infinity);
+    const rest = coords.slice(bi + 1);
+    if (rest.length > 1 && Math.abs(rest[0][0] - at[0]) < 1e-9 && Math.abs(rest[0][1] - at[1]) < 1e-9) rest.shift();
+    return [at, ...rest];
   }
 
   // ---- the area's frame (#218): what a map with no call open (the Overview, the wall board) looks at ---------------
@@ -534,7 +547,7 @@ window.CadMap = (() => {
         const color = statusOf(lists, m.status).bg || LINE;
         const r = m.line_to && !m.home_line ? routeOf(M, m) : null;
         const here = markAt(m);
-        const path = r ? routeFrom(r.coords, here) : null;
+        const path = r ? routeFrom(r.coords, here, r.along_m) : null;
         if (path && path.length >= 2) feats.push({ type: "Feature", properties: { color, unit: m.unit },
                                                    geometry: { type: "LineString", coordinates: path } });
         const t = this.fol && this.fol.id === m.unit ? trails[m.unit] : null;
@@ -1106,5 +1119,5 @@ window.CadMap = (() => {
 
   const detailMap = () => views.detail;   // the working event's map, for its resize handles (incident-map.js, #210)
   return { RigLayer, RigMap, detail, detailMap, place, overview, goOverview, openBig, closeBig, areaBounds, areaCalls, AREA_KM,
-           followUnit, focusUnit, hoverUnits, onMap, lights };
+           followUnit, focusUnit, hoverUnits, onMap, lights, routeFrom };
 })();

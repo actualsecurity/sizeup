@@ -22,7 +22,8 @@ Graph: the cache file read into flat arrays (no per-edge objects), a 200 m grid 
     penalties(items, now) the edges near road closures in effect now: blocked (a full or ramp closure) or slowed
 
 Rules: one-ways are honoured, except a wrong-way final stretch of at most wrongway_m (Settings > Dispatch) on the
-last block, at WRONGWAY_MPH, when it saves a loop around the block. Speeds by road class (highway / arterial / local,
+last block, at WRONGWAY_MPH, when it saves a loop around the block (never on a highway, its ramps or a roundabout).
+Starts and calls are snapped onto the largest connected part of the graph (an island has no way in or out). Speeds by road class (highway / arterial / local,
 Settings > Dispatch) times the emergency factor; the partial edges at either end are never blocked (the rig is
 there, the call is there). A rig with a heading pays UTURN_S to start the other way along its street.
 
@@ -36,6 +37,9 @@ import heapq
 import json
 import math
 import re
+import subprocess
+import sys
+import tempfile
 import threading
 import time
 from array import array
@@ -53,8 +57,11 @@ ATTRIBUTION = "© OpenStreetMap contributors (ODbL)"
 CACHE_NAME = "roadgraph.json"         # in the state dir (sizeup/cachesync.py FILES)
 VERSION = 1
 RING_KM = 12.0                        # around the firehouses: the mutual-aid ring
-TIMEOUT_S = 240.0
-MAX_BYTES = 200 * 1024 * 1024
+TIMEOUT_S = 240.0                     # the Overpass request (its own [timeout:] is 30 s less)
+TOTAL_S = 600.0                       # the whole build (fetch, parse, build, write) in its own process, at most
+MAX_BYTES = 60 * 1024 * 1024          # the answer (28 MB for the 12 km ring)
+KEEP_TAGS = ("highway", "oneway", "name", "ref", "junction", "access", "service")
+SHRINK = 0.7                          # a new graph with fewer edges than this share of the one in use: refused
 BACKOFF_S = (900.0, 6 * 3600.0)
 # OSM highway values kept, in class order (an edge's class is its index here)
 CLASSES = ("motorway", "trunk", "primary", "secondary", "tertiary", "unclassified", "residential",
@@ -72,14 +79,18 @@ UTURN_S = 20.0                        # starting against the rig's heading
 SNAP_M = 300.0                        # a point farther than this from every road: no route
 MOTORWAY_SNAP_M = 40.0                # a motorway / trunk must be this much nearer than another road to be snapped to
 CELL_M = 200.0
-MAX_POPS = 600_000                    # A* gives up (a broken graph never hangs the worker)
 CLOSURE_M = 25.0                      # an edge this close to a closure's line is on it
 END_BLOCKED = 8.0                     # a closed block the rig or the call is on: this much slower (never shut)
+UNNAMED_SLOW = 1.5                    # a closure naming no road: slowed, never shut
+HIGHWAY_CLOSED = 3.0                  # a highway edge under a full closure: slowed, never shut
+PARALLEL_DEG = 35.0                   # an edge this close to the closure line's bearing runs along it
 SLOW = {"lanes": 1.5, "alternating": 1.6, "detour": 1.3}   # a partial closure: the edge this much slower
 # Measured 2026-11-09 (12 km ring, bbox -73.819 40.888 -73.517 41.144, an M-series Mac): Overpass answered 28 MB in
 # 56 s; built into 41,623 nodes and 52,744 edges in 0.5 s, a 5.6 MB file (1.7 MB gzipped in S3); read into a Graph in
 # 0.4 s, ~20 MB held (45 MB peak while reading). A route (a firehouse to a point within ~6 km): median 2 ms, p95 6 ms,
-# max 50 ms; the closures in effect as penalties: ~5 ms.
+# max 50 ms; the closures in effect as penalties: ~5 ms. A refresh builds in its own process (build_in_child): 275 MB
+# peak there, gone when it exits; the hub's own peak RSS grew 61 MB reading the 5.6 MB result (1.1 s in all, from a
+# saved answer).
 
 
 def area_bbox(points: list, ring_km: float = RING_KM) -> tuple[float, float, float, float]:
@@ -109,7 +120,7 @@ def oneway_of(tags: dict, cls: str) -> int:
         return -1
     if ow in ("no", "false", "0", "reversible", "alternating"):
         return 0
-    if cls == "motorway" or tags.get("junction") in ("roundabout", "circular"):
+    if cls in ("motorway", "motorway_link") or tags.get("junction") in ("roundabout", "circular"):
         return 1
     return 0
 
@@ -123,8 +134,11 @@ def build(doc: dict, bbox=None, at: float | None = None) -> dict:
 
         {v, source, at, osm_base, bbox, classes, names: [...],
          nodes: [lon e6, lat e6, ...]                   one pair per junction / end
-         edges: [a, b, class, oneway (1: a -> b only), name index, ...]   five ints per edge
+         edges: [a, b, class, oneway (1: a -> b only; | 2: a roundabout), name index, ...]   five ints per edge
          shape: [[lon e6, lat e6, ...] | [], ...]       each edge's points between a and b}"""
+    remark = str(doc.get("remark") or "")
+    if "error" in remark.lower():
+        raise ValueError(f"Overpass: {remark[:160]}")       # a timeout or a memory limit: a partial answer
     ways = []
     uses: dict[int, int] = {}
     for el in doc.get("elements") or []:
@@ -145,7 +159,8 @@ def build(doc: dict, bbox=None, at: float | None = None) -> dict:
             pts.append((_e6(g["lon"]), _e6(g["lat"])))
         if not pts:
             continue
-        ways.append((ids, pts, CLASSES.index(cls), oneway_of(tags, cls), "; ".join(str(tags[k]) for k in ("name", "ref") if tags.get(k))[:80]))
+        ring = 2 if str(tags.get("junction", "")) in ("roundabout", "circular") else 0
+        ways.append((ids, pts, CLASSES.index(cls), oneway_of(tags, cls), "; ".join(str(tags[k]) for k in ("name", "ref") if tags.get(k))[:80], ring))
         for k, nid in enumerate(ids):
             uses[nid] = uses.get(nid, 0) + (2 if k in (0, len(ids) - 1) else 1)
     node_ix: dict[int, int] = {}
@@ -161,7 +176,7 @@ def build(doc: dict, bbox=None, at: float | None = None) -> dict:
             i = node_ix[nid] = len(nodes) // 2
             nodes.extend(p)
         return i
-    for ids, pts, cls, ow, name in ways:
+    for ids, pts, cls, ow, name, ring in ways:
         ni = name_ix.get(name)
         if ni is None:
             ni = name_ix[name] = len(names)
@@ -179,7 +194,7 @@ def build(doc: dict, bbox=None, at: float | None = None) -> dict:
             if ow == -1:                                     # normalised: a -> b is the way it goes
                 a, b = b, a
                 sh = [v for j in range(len(mid) - 2, -1, -2) for v in mid[j:j + 2]]
-            edges.extend((a, b, cls, 1 if ow else 0, ni))
+            edges.extend((a, b, cls, (1 | ring) if ow else 0, ni))
             shape.append(sh)
             start, mid = k, []
     osm = doc.get("osm3s") or {}
@@ -231,6 +246,27 @@ class Graph:
         for e in range(m):
             self.adj[self.ea[e]].append(e * 2)                # a -> b, from a
             self.adj[self.eb[e]].append(e * 2 + 1)            # b -> a, from b (legal when two-way)
+        # connected components (one-ways as two-way): starts and calls are snapped onto the largest, so a parking lot or
+        # a clipped road at the area's edge is never a start or a goal with no way out (an island: no search at all)
+        parent = list(range(n))
+
+        def root(i: int) -> int:
+            while parent[i] != i:
+                parent[i] = parent[parent[i]]
+                i = parent[i]
+            return i
+        for e in range(m):
+            ra, rb = root(self.ea[e]), root(self.eb[e])
+            if ra != rb:
+                parent[ra] = rb
+        roots = [root(i) for i in range(n)]
+        sizes: dict[int, int] = {}
+        for r in roots:
+            sizes[r] = sizes.get(r, 0) + 1
+        big = max(sizes, key=sizes.get) if sizes else -1
+        self.main = bytes(1 if r == big else 0 for r in roots)       # node -> on the largest component
+        self.components = len(sizes)
+        self.max_pops = n + 16                                        # a settled node is never popped twice
         self.grid: dict[tuple[int, int], list[int]] = {}
         for e in range(m):
             cells = set()
@@ -296,11 +332,14 @@ class Graph:
 
     def snap(self, lon: float, lat: float, max_m: float = SNAP_M) -> dict | None:
         """The nearest point on a road: {edge, off (m from a), d (m away), len, lon, lat}; None when none within
-        max_m. A motorway or trunk (or its ramps) only when it is MOTORWAY_SNAP_M nearer than any other road."""
+        max_m. A motorway or trunk (or its ramps) only when it is MOTORWAY_SNAP_M nearer than any other road. Only
+        roads on the largest connected component (self.main)."""
         x, y = self.to_xy(lon, lat)
         best = None
         for r in (CELL_M / 2, max_m):
             for e in self.near_edges(x, y, r):
+                if not self.main[self.ea[e]]:
+                    continue                                          # an island: never a start or a call
                 pts = self.xy(e)
                 d, off, i, t = self._onto(pts, x, y)
                 if d > max_m:
@@ -341,9 +380,13 @@ class Graph:
     def penalties(self, items: list[dict], now: float) -> dict[int, float]:
         """edge -> factor (inf: blocked) for the road closures and roadwork in effect now (sizeup/roadprojects.py
         records): a full closure blocks the edges along it (a ramp closure, the ramps); a lane or alternating
-        closure, or a detour, slows them (SLOW). Only dated items in effect now (roadprojects.in_effect). An edge
-        is along a closure when its road is the closure's road (street_key) and it is within CLOSURE_M of its line,
-        or, the closure naming no road, when two of the line's points 15 m apart are that close to it."""
+        closure, or a detour, slows them (SLOW). Only dated items in effect now (roadprojects.in_effect).
+
+        An edge is along a closure when two of the line's points 15 m apart are within CLOSURE_M of it (a point
+        closure: the point) running roughly the same way (PARALLEL_DEG), and, when the closure names its road, the
+        edge is on that road (street_key of its name or ref). A closure naming no road only slows (UNNAMED_SLOW):
+        nothing says which of two roads side by side it is. A highway edge (often kilometres long, one carriageway)
+        is slowed (HIGHWAY_CLOSED), never shut: the closure may be a few hundred metres of it."""
         from sizeup import roadprojects as rp
         out: dict[int, float] = {}
         for r in items or ():
@@ -359,31 +402,45 @@ class Graph:
             except Exception:  # noqa: BLE001 - a record we can't read is not a closure
                 continue
             road = street_key(r.get("road") or "")
+            if not road:
+                factor = min(factor, UNNAMED_SLOW)
             hits: dict[int, int] = {}
             lines = rp._lines(r.get("geometry"))
             need = 1 if all(len(ln) == 1 for ln in lines) else 2     # a line: along it, not only touching its end
             for line in lines:
-                for px, py in self._sample([self.to_xy(lo, la) for lo, la in line], 15.0):
+                for px, py, brg in self._sample([self.to_xy(lo, la) for lo, la in line], 15.0):
                     for e in self.near_edges(px, py, CLOSURE_M):
                         if how == "ramp" and self.ecls[e] not in (7, 8, 9, 10, 11):
                             continue
-                        if self._onto(self.xy(e), px, py)[0] <= CLOSURE_M:
-                            hits[e] = hits.get(e, 0) + 1
+                        xy = self.xy(e)
+                        d, _, i, _ = self._onto(xy, px, py)
+                        if d > CLOSURE_M:
+                            continue
+                        if brg is not None:
+                            (x1, y1), (x2, y2) = xy[i], xy[i + 1]
+                            eb = math.degrees(math.atan2(x2 - x1, y2 - y1))
+                            if abs((eb - brg + 90) % 180 - 90) > PARALLEL_DEG:
+                                continue                              # a cross street, not the closed road
+                        hits[e] = hits.get(e, 0) + 1
             for e, k in hits.items():
-                ok = k >= need and (road in self.street_keys(e) if road else k >= 2)
-                if ok:
-                    out[e] = max(out.get(e, 1.0), factor)
+                if k >= need and (not road or road in self.street_keys(e)):
+                    f = HIGHWAY_CLOSED if factor == math.inf and self.ecls[e] in HIGHWAY else factor
+                    out[e] = max(out.get(e, 1.0), f)
         return out
 
     @staticmethod
     def _sample(pts: list, step: float) -> list:
+        """Points every `step` metres along a line, each with the line's bearing there (None: a lone point)."""
         if len(pts) < 2:
-            return list(pts)
-        out = [pts[0]]
+            return [(x, y, None) for x, y in pts]
+        out = []
         for (x1, y1), (x2, y2) in zip(pts, pts[1:]):
             d = math.hypot(x2 - x1, y2 - y1)
+            brg = math.degrees(math.atan2(x2 - x1, y2 - y1)) if d > 0 else None
+            if not out:
+                out.append((x1, y1, brg))
             k = max(1, int(d // step))
-            out.extend((x1 + (x2 - x1) * j / k, y1 + (y2 - y1) * j / k) for j in range(1, k + 1))
+            out.extend((x1 + (x2 - x1) * j / k, y1 + (y2 - y1) * j / k, brg) for j in range(1, k + 1))
         return out
 
     # -- routing -------------------------------------------------------------------------------------------
@@ -418,7 +475,7 @@ class Graph:
         put(self.ea[e], off * k, off, [(e, 0)], 0.0)                  # a -> along the edge (always legal)
         if not self.eow[e]:
             put(self.eb[e], (L - off) * k, L - off, [(e, 1)], 0.0)
-        elif L - off <= wrongway_m:
+        elif L - off <= wrongway_m and self.wrong_ok(e):
             put(self.eb[e], (L - off) * ww, L - off, [(e, 1)], L - off)
         # a wrong-way stretch on: nodes whose one-way edge leads into a goal node, driven backwards
         q = [(v[0], n) for n, v in goals.items()]
@@ -430,7 +487,7 @@ class Graph:
             _, m, way, w = goals[n]
             for code in self.adj[n]:
                 f = code >> 1
-                if code & 1 or not self.eow[f] or f == e or pen.get(f, 1.0) == math.inf:
+                if code & 1 or not self.eow[f] or f == e or pen.get(f, 1.0) == math.inf or not self.wrong_ok(f):
                     continue                                          # only one-way edges leaving n (a = n), not closed
                 w2 = w + self.elen[f]
                 if w2 > wrongway_m:
@@ -442,6 +499,11 @@ class Graph:
                     heapq.heappush(q, (s2, o))
         return {n: (v[0], v[1], v[2]) for n, v in goals.items()}
 
+    def wrong_ok(self, e: int) -> bool:
+        """A one-way edge that may be driven wrong-way for the final stretch: never a highway, its ramps or a
+        roundabout."""
+        return self.ecls[e] not in HIGHWAY and not self.eow[e] & 2
+
     def _direct(self, s: dict, t: dict, spm: list, pen: dict, wrongway_m: float) -> tuple[float, float, int] | None:
         """Both on one edge: along it, if that way is legal (or wrong-way, short enough). (s, m, direction)."""
         if s["edge"] != t["edge"]:
@@ -451,7 +513,7 @@ class Graph:
         k = spm[self.ecls[e]] * _end(pen.get(e, 1.0))
         if d >= 0 or not self.eow[e]:
             return abs(d) * k, abs(d), 0 if d >= 0 else 1
-        if -d <= wrongway_m:
+        if -d <= wrongway_m and self.wrong_ok(e):
             return -d / (WRONGWAY_MPH * MPS_PER_MPH), -d, 1
         return None
 
@@ -489,7 +551,7 @@ class Graph:
             if g > dist.get(n, math.inf):
                 continue
             pops += 1
-            if pops > MAX_POPS:
+            if pops > self.max_pops:
                 break
             gv = goals.get(n)
             if gv is not None and g + gv[0] < best_s:
@@ -694,18 +756,89 @@ def http_post(url: str, body: bytes, timeout: float, limit: int) -> tuple[int, b
         return e.code, e.read(4096)
 
 
+MIN_EDGES = 100                       # fewer: not our area's roads (an empty or broken answer)
+
+
+def trim(doc: dict) -> dict:
+    """The Overpass answer with only what build() reads: ways, their nodes, geometry and KEEP_TAGS."""
+    return {"osm3s": doc.get("osm3s") or {}, "remark": doc.get("remark") or "",
+            "elements": [{"type": "way", "nodes": el.get("nodes"), "geometry": el.get("geometry"),
+                          "tags": {k: v for k, v in (el.get("tags") or {}).items() if k in KEEP_TAGS}}
+                         for el in doc.get("elements") or () if el.get("type") == "way"]}
+
+
+def fetch_build(bbox, url: str, out: Path, post: Callable = None, src: str | Path | None = None) -> dict:
+    """Fetch (or read src: a saved Overpass answer), trim, build, write the compact graph to out. The build's own
+    process runs this (build_in_child). Raises with what went wrong."""
+    import resource
+    t0 = time.monotonic()
+    if src:
+        body = Path(src).read_bytes()
+    else:
+        from urllib.parse import urlencode
+        code, body = (post or http_post)(url or OVERPASS_URL, urlencode({"data": overpass_query(bbox)}).encode(),
+                                         TIMEOUT_S, MAX_BYTES)
+        if code != 200:
+            raise RuntimeError(f"HTTP {code}" + (" (rate limited)" if code == 429 else ""))
+    if len(body) > MAX_BYTES:
+        raise RuntimeError(f"answer over {MAX_BYTES // 2 ** 20} MB")
+    fetched = time.monotonic() - t0
+    doc = trim(json.loads(body))
+    del body
+    g = build(doc, bbox, at=time.time())
+    del doc
+    if len(g["edges"]) // 5 < MIN_EDGES:
+        raise RuntimeError(f"only {len(g['edges']) // 5} edges")
+    raw = json.dumps(g, separators=(",", ":")).encode()
+    tmp = Path(out).with_suffix(".tmp")
+    tmp.write_bytes(raw)
+    tmp.replace(out)
+    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    peak = rss / 1e6 if sys.platform == "darwin" else rss / 1e3          # bytes on macOS, KB on Linux
+    return {"nodes": len(g["nodes"]) // 2, "edges": len(g["edges"]) // 5, "bytes": len(raw), "osm_base": g["osm_base"],
+            "fetch_s": round(fetched, 1), "build_s": round(time.monotonic() - t0 - fetched, 1), "peak_mb": round(peak)}
+
+
+def build_in_child(bbox, url: str, out: Path, src: str | Path | None = None, timeout: float = TOTAL_S) -> dict:
+    """fetch_build() in a process of its own (`python -m sizeup.roadgraph build`), at most `timeout` s in all: its
+    heap goes when it exits. Returns its summary; raises RuntimeError with its error."""
+    cmd = [sys.executable, "-m", "sizeup.roadgraph", "build", "--bbox", ",".join(str(v) for v in bbox), "--out", str(out)]
+    if url:
+        cmd += ["--url", url]
+    if src:
+        cmd += ["--from", str(src)]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=str(Path(__file__).resolve().parent.parent))
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"the build took over {timeout:.0f} s") from None
+    last = (r.stdout.strip().splitlines() or ["{}"])[-1]
+    try:
+        said = json.loads(last)
+    except ValueError:
+        said = {"error": (r.stderr.strip().splitlines() or [last])[-1]}
+    if r.returncode != 0 or said.get("error"):
+        raise RuntimeError(str(said.get("error") or f"exit {r.returncode}")[:200])
+    return said
+
+
 class RoadGraph:
     """The road graph for the CAD maps' routes and the recommendation's estimates. Built from the cache file in the
     background (load_cache: the standby's prewarm, or the app's layer loader), fetched afresh by Settings > Data
     sources (refresh(): on its schedule, or Refresh now). The graph in use is swapped whole: a route already being
-    worked out finishes on the one it started with."""
+    worked out finishes on the one it started with.
+
+    The fetch and the build run in a process of their own (build_in_child: `python -m sizeup.roadgraph build`, at
+    most TOTAL_S): parsing Overpass's 28 MB answer takes a few hundred MB of Python heap, which a long-running hub
+    would keep. Only the compact file it writes (5.6 MB) is read here."""
 
     def __init__(self, cache_dir: str | Path | None = None, bbox=None, enabled: bool = True, url: str = OVERPASS_URL,
-                 post: Callable[[str, bytes, float, int], tuple[int, bytes]] = http_post,
-                 log: Callable[[str], None] = print, clock: Callable[[], float] = time.time):
+                 builder: Callable | None = None, log: Callable[[str], None] = print,
+                 clock: Callable[[], float] = time.time):
+        """builder(bbox, url, out_path) -> its summary: writes the compact graph to out_path (build_in_child)."""
         self.cache = (Path(cache_dir) / CACHE_NAME) if cache_dir else None
         self.bbox = tuple(bbox) if bbox else None
-        self.enabled, self.url, self.post, self.log, self.clock = enabled, url, post, log, clock
+        self.enabled, self.url, self.log, self.clock = enabled, url, log, clock
+        self.builder = builder or build_in_child
         self.graph: Graph | None = None
         self.status = {"at": None, "error": "", "n": 0, "bytes": 0, "next": 0.0, "fails": 0, "build_s": None,
                        "nodes": 0, "edges": 0, "osm_base": ""}
@@ -760,41 +893,45 @@ class RoadGraph:
                                osm_base=doc.get("osm_base") or "", error="")
 
     def refresh(self) -> bool:
-        """Fetch the area's roads from Overpass, build, save, swap in. Never raises; a failure keeps the graph."""
+        """Fetch the area's roads, build (in a process of its own), check, save, swap in. Never raises; a failure,
+        or a graph much smaller than the one in use (SHRINK), keeps the graph."""
         if not self.configured:
             return False
         now = self.clock()
+        out = (self.cache.with_suffix(".new") if self.cache else Path(tempfile.gettempdir()) / f"sizeup-{CACHE_NAME}.new")
         try:
-            from urllib.parse import urlencode
+            out.parent.mkdir(parents=True, exist_ok=True)
             t0 = time.monotonic()
-            code, body = self.post(self.url, urlencode({"data": overpass_query(self.bbox)}).encode(), TIMEOUT_S, MAX_BYTES)
-            if code != 200:
-                raise RuntimeError(f"HTTP {code}" + (" (rate limited)" if code == 429 else ""))
-            if len(body) > MAX_BYTES:
-                raise RuntimeError("answer too big")
-            fetched = time.monotonic() - t0
-            doc = build(json.loads(body), self.bbox, at=now)
-            if len(doc["edges"]) < 5 * 100:
-                raise RuntimeError(f"only {len(doc['edges']) // 5} edges: not replacing the graph")
-            raw = json.dumps(doc, separators=(",", ":")).encode()
+            summary = self.builder(self.bbox, self.url, out) or {}
+            raw = out.read_bytes()
+            doc = json.loads(raw)
+            edges = len(doc.get("edges") or []) // 5
+            cur = self.graph.m if self.graph is not None else 0
+            if edges < MIN_EDGES or (cur and edges < SHRINK * cur):
+                raise RuntimeError(f"{edges} edges (in use: {cur}): not replacing the graph")
+            t1 = time.monotonic()
             g = Graph(doc)
-            took = time.monotonic() - t0
+            took = time.monotonic() - t1
+            del doc
             if self.cache:
-                self.cache.parent.mkdir(parents=True, exist_ok=True)
-                tmp = self.cache.with_suffix(".tmp")
-                tmp.write_bytes(raw)
-                tmp.replace(self.cache)
-            self._use(g, doc, len(raw), took - fetched)
+                out.replace(self.cache)
+            self._use(g, {"at": now, "osm_base": summary.get("osm_base", "")}, len(raw), took)
             self.status.update(fails=0, next=0.0)
-            self.log(f"roadgraph: {g.n} nodes, {g.m} edges ({len(raw) / 1e6:.1f} MB) fetched in {fetched:.1f} s, "
-                     f"built in {took - fetched:.1f} s")
+            self.log(f"roadgraph: {g.n} nodes, {g.m} edges ({len(raw) / 1e6:.1f} MB) in {time.monotonic() - t0:.1f} s "
+                     f"(fetched in {summary.get('fetch_s', '?')} s, built in {summary.get('build_s', '?')} s, "
+                     f"{summary.get('peak_mb', '?')} MB in its own process; read here in {took:.1f} s)")
             return True
-        except (OSError, URLError, ValueError, RuntimeError, KeyError, TypeError) as e:
+        except Exception as e:  # noqa: BLE001 - whatever went wrong: said on the row, the graph kept
             fails = self.status["fails"] + 1
             wait = min(BACKOFF_S[0] * 2 ** (fails - 1), BACKOFF_S[1])
             self.status.update(error=f"{type(e).__name__}: {e}"[:200], fails=fails, next=now + wait)
             self.log(f"roadgraph: not refreshed ({self.status['error']})")
             return False
+        finally:
+            try:
+                out.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def blocked(self) -> str:
         err, nxt = self.status["error"], self.status["next"]
@@ -804,8 +941,26 @@ class RoadGraph:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """python -m sizeup.roadgraph [--ring KM] [--out FILE] [--from FILE]: fetch (or read an Overpass answer), build,
+    """python -m sizeup.roadgraph build --bbox W,S,E,N --out FILE [--url URL] [--from FILE]: the hub's refresh, in its
+    own process (fetch_build): one JSON line, its summary or {"error"}.
+    python -m sizeup.roadgraph [--ring KM] [--out FILE] [--from FILE]: fetch (or read an Overpass answer), build,
     and print the graph's size, build time, memory and a few timed routes (the PR's numbers)."""
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] == ["build"]:
+        import argparse
+        ap = argparse.ArgumentParser(prog="sizeup.roadgraph build")
+        ap.add_argument("--bbox", required=True)
+        ap.add_argument("--out", required=True)
+        ap.add_argument("--url", default="")
+        ap.add_argument("--from", dest="src", default="")
+        a = ap.parse_args(argv[1:])
+        try:
+            bbox = tuple(float(v) for v in a.bbox.split(","))
+            print(json.dumps(fetch_build(bbox, a.url, Path(a.out), src=a.src or None)))
+            return 0
+        except Exception as e:  # noqa: BLE001 - said to the hub, which logs it and keeps its graph
+            print(json.dumps({"error": f"{type(e).__name__}: {e}"[:200]}))
+            return 1
     import argparse
     import random
     import tracemalloc

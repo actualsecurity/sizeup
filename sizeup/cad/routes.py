@@ -16,9 +16,13 @@ Cached per (unit, incident). A route is worked out again only when:
 
     new          no route yet, the call's point moved, the graph or the closures in effect changed, the settings
     moved        placed by status: its start (station, or returning position) moved more than MOVED_M
-    off          a new fix more than reroute_m (Settings > Dispatch, 50 m) from the path
+    off          a new fix more than reroute_m (Settings > Dispatch, 50 m) from the path (and from where it was
+                 routed from: a rig in a yard off the road, its path starting at the road, stays put)
     away         AWAY_FIXES (3) new fixes in a row heading away: the distance left along the path grew by more
                  than AWAY_M, or (a fix with heading and speed) the heading is more than AWAY_DEG off the path's
+
+The closures in effect (penalties()) are worked out off the state build, again only when RoadProjects' list
+changes, the graph changes, or an item's time window opens or closes.
 
 A fix that is on the path only moves the rig along it: remain_m / remain_s are what is left from its point on the
 path (the time in proportion), eta_s adds turnout for a rig still in quarters. Routing is pure Python and quick
@@ -44,7 +48,8 @@ AWAY_DEG = 110.0
 AWAY_FIXES = 3
 AWAY_MIN_MPS = 2.0            # a heading counts only at this speed or more
 BUDGET_S = 0.15               # routing per state build (at least one route is always worked out)
-PEN_S = 60.0
+PEN_S = 60.0                  # closures that couldn't be read: tried again after this
+PEN_MAX_S = 3600.0            # ... and the penalties looked at again at least this often
 RETRY_S = 30.0                # no way found (no road near, closed in): tried again after this, or once it moves                  # the closures in effect looked at again this often
 TRAIL_N = 30
 TRAIL_S = 900.0
@@ -55,36 +60,52 @@ AT_HOME_KM = 0.15             # mapview.AT_HOME_KM: a fix this close to its stat
 class Routes:
     def __init__(self, graph: Callable[[], object | None], params: Callable[[], eta.Params],
                  closures: Callable[[], list[dict]] = lambda: [], firehouses: Callable[[], list[dict]] = lambda: [],
-                 clock: Callable[[], float] = time.time, log: Callable[[str], None] = print):
+                 clock: Callable[[], float] = time.time, log: Callable[[str], None] = print,
+                 spawn: Callable[[Callable[[], None]], None] | None = None):
+        """spawn(fn): runs the closures' penalties off the state build (a thread; tests: at once)."""
         self.graph, self.params, self.closures, self.firehouses = graph, params, closures, firehouses
+        self.spawn = spawn or (lambda fn: threading.Thread(target=fn, name="route-closures", daemon=True).start())
         self.clock, self.log = clock, log
         self.cache: dict[tuple[str, int], dict] = {}
         self.trails: dict[str, deque] = {}
         self.failed: dict[tuple[str, int], tuple] = {}   # no way found: (to, sig, from, when): tried again after RETRY_S
-        self._pen: tuple | None = None          # (graph, closures list, minute) -> penalties
+        self._pen: dict | None = None           # {key: (graph, closures list), pen, sig, until}: the closures as penalties
+        self._pen_busy = False
         self._lock = threading.Lock()
         self.stats = {"routed": 0, "last_ms": None, "why": {}}
 
     # -- inputs -----------------------------------------------------------------------------------------------
 
     def penalties(self, g, now: float) -> tuple[dict, object]:
-        """The closures in effect now as edge penalties, worked out at most once per PEN_S (or a new graph / list)."""
+        """The closures in effect now as edge penalties, and their signature (0: none). Worked out again only when
+        the closures list changes (RoadProjects.items() hands back a new list when anything in it does), the graph
+        changes, or an item's time window opens or closes (`until`); and then off the state build (spawn): until it
+        is done the last penalties for this graph stay in use (none for a new graph)."""
         try:
             items = self.closures() or []
         except Exception as e:  # noqa: BLE001 - roadwork's trouble never stops routing
             self.log(f"routes: closures not read ({type(e).__name__}: {e})")
             items = []
-        key = (id(g), id(items), len(items), int(now // PEN_S))
-        if self._pen is None or self._pen[0] != key:
-            try:
-                pen = g.penalties(items, now)
-            except Exception as e:  # noqa: BLE001
-                self.log(f"routes: closures not applied ({type(e).__name__}: {e})")
-                pen = {}
-            sig = tuple(sorted((e, v) for e, v in pen.items()))
-            self._pen = (key, pen, hash(sig))
+        key = (id(g), id(items), len(items))
         got = self._pen                      # (one read: to_one runs on request threads beside the state build)
-        return got[1], got[2]
+        if (got is None or got["key"] != key or now >= got["until"]) and not self._pen_busy:
+            self._pen_busy = True
+
+            def work(items=items, key=key):
+                try:
+                    pen = g.penalties(items, now)
+                    until = _next_change(items, now)
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"routes: closures not applied ({type(e).__name__}: {e})")
+                    pen, until = {}, now + PEN_S
+                sig = tuple(sorted(pen.items()))
+                self._pen = {"key": key, "g": id(g), "pen": pen, "sig": hash(sig) if sig else 0, "until": until}
+                self._pen_busy = False
+            self.spawn(work)
+            got = self._pen
+        if got is None or got["g"] != id(g):
+            return {}, 0
+        return got["pen"], got["sig"]
 
     def _home(self, station: str):
         for f in self.firehouses() or ():
@@ -145,6 +166,9 @@ class Routes:
             return ""
         off, along, brg = _project(ent["coords"], ent["cum"], here)
         if off > p.reroute_m:
+            if _m(here, ent["origin"]) <= p.reroute_m:
+                ent["fix_at"] = at           # still where it was routed from (a rig off the road: the path starts at it)
+                return ""
             return "off"                     # (nothing kept: asked again next build until it is routed)
         remain = ent["m"] - along
         hd, sp = m.get("heading"), m.get("speed")
@@ -230,6 +254,23 @@ class Routes:
         except Exception as e:  # noqa: BLE001 - the straight-line estimate then
             self.log(f"routes: estimates by road: {type(e).__name__}: {e}")
             return {}
+
+
+def _next_change(items: list[dict], now: float) -> float:
+    """When the next dated item's time window opens or closes (roadprojects.windows), at most PEN_MAX_S on."""
+    from sizeup import roadprojects as rp
+    nxt = now + PEN_MAX_S
+    for r in items or ():
+        if not rp.dated(r):
+            continue
+        try:
+            for a, b in rp.windows(r, now):
+                for t in (a, b):
+                    if t is not None and t > now:
+                        nxt = min(nxt, t)
+        except Exception:  # noqa: BLE001 - one record we can't read
+            continue
+    return nxt
 
 
 def _m(a, b) -> float:
