@@ -48,6 +48,7 @@ from sizeup import tz
 from sizeup.cad import dispatcher
 from sizeup.cad.dispatcher import AudioUnavailable
 from sizeup.cloud.aircraftlink import AircraftForwarder
+from sizeup.cloud.adapters import request_reset
 from sizeup.cloud.autoupdate import Watch
 from sizeup.cloud.client import Backoff, HubClient, HubError
 from sizeup.cloud.health import Metrics, station_metrics
@@ -85,6 +86,19 @@ def clip_8k(wav: bytes | None) -> bytes | None:
         out.setframerate(8000)
         out.writeframes(np.ascontiguousarray(pcm[::2]).tobytes())
     return buf.getvalue()
+
+
+def source_rows(runner) -> list[dict]:
+    """Each incident source's own health from #297's SourceRunner (its runs: the adapter, and (state, reason) as its
+    runner last sent it; none yet: "starting"). [] without a runner."""
+    if runner is None:
+        return []
+    out = []
+    for r in runner.runs:
+        a, h = r.a, r.health
+        out.append({"source": a.source, "label": a.label, "state": h[0] if h else "starting",
+                    "reason": (h[1] if h else "") or ""})
+    return out
 
 
 class StationLink:
@@ -195,10 +209,42 @@ class StationLink:
             detail += f" · {self.outbox.dropped_audio} clip(s) dropped to keep the outbox under its limit"
         v = self.updates.status()
         detail += f" · version: {v['text']}"
+        ad = self.adapter(v)
+        if ad.get("text"):
+            detail += f" · adapter: {ad['text']}"
         if not word and v["state"] in ("updating", "failed"):
             word = "updating" if v["state"] == "updating" else "update failed"
         return {"label": "Hub", "mhz": None, "state": state, "word": word, "detail": detail, "open": False,
                 "quieting_db": None, "restarts": 0, "last_heard": None}
+
+    def adapter(self, v: dict | None = None) -> dict:
+        """The incident-source adapter (#301): what the release has installed, the updater's last word, and each
+        source's own health from the runner (#297, when there is one). Names and states only, never a credential."""
+        ad = dict((v or self.updates.status()).get("adapter") or {})
+        runner = getattr(self.app, "sources_runner", None)
+        try:
+            rows = source_rows(runner)
+        except Exception as e:  # noqa: BLE001 - a report: never in the way of the status (but said, by type)
+            rows = []
+            if getattr(self, "_rows_said", "") != type(e).__name__:
+                self._rows_said = type(e).__name__
+                self.log(f"hub link: incident sources' health not read: {type(e).__name__}")
+        ad["health"] = [{k: str(r.get(k) or "")[:120] for k in ("source", "label", "state", "reason")}
+                        for r in rows if isinstance(r, dict)][:10]
+        if ad["health"] and ad.get("text"):
+            ad["text"] += " · " + ", ".join(f"{h['label'] or h['source']} {h['state'] or '?'}"
+                                            + (f" ({h['reason']})" if h["reason"] and h["state"] != "ok" else "")
+                                            for h in ad["health"])
+        said = [h for h in ad["health"] if h["state"] != "starting"]        # (not polled yet: no word either way)
+        if ad.get("state") == "installed" and said:              # installed, and the runner says how it runs
+            ad["state"] = "running" if all(h["state"] == "ok" for h in said) else "failing"
+        return ad
+
+    def version(self) -> dict:
+        """The updater's status for the hub, the adapter's with its runtime health."""
+        v = self.updates.status()
+        v["adapter"] = self.adapter(v)
+        return v
 
     def cad_cloud(self) -> dict:
         """The station's console header: the CAD of record is the hub's."""
@@ -242,7 +288,7 @@ class StationLink:
                "sdr": app.sdr(), "rerun": dict(app.rerun, pending=len(app._rerun_ids)),
                "channels": app.channels_applied(),
                "outbox": {"pending": n, "oldest": oldest, "dropped_audio": self.outbox.dropped_audio},
-               "version": self.updates.status()}
+               "version": self.version()}
         try:
             out["health"] = station_metrics(app, self.metrics)
         except Exception as e:  # health is a report: never in the way of the status itself
@@ -309,6 +355,10 @@ class StationLink:
                 res = self._tts(job.get("args") or {})
             elif kind == "call":
                 res = self._call(job.get("args") or {})
+            elif kind == "sources_reset":               # an admin on the hub: an incident source's reset() (#301)
+                a = job.get("args") if isinstance(job.get("args"), dict) else {}
+                res = request_reset(getattr(self.app, "sources_runner", None), str(a.get("source") or ""),
+                                    f"{a.get('by') or 'an admin'} on the hub", self.log)
             else:
                 res = {"ok": False, "error": f"this station doesn't know job {kind!r}"}
         except Exception as e:  # a bad job must never take the station down

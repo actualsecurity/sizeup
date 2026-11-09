@@ -410,7 +410,7 @@ def test_the_installer_runs_it_with_the_system_python_at_the_switch(tmp_path, mo
     assert body.index("configupdate.py") < body.index('swap_link "releases/$name" "$CURRENT"')   # before the restart
     src = (ROOT / "sizeup" / "cloud" / "configupdate.py").read_text()
     imports = {m.split(".")[0] for m in re.findall(r"^(?:from|import) ([\w.]+)", src, re.M)}
-    assert imports <= {"__future__", "os", "re", "sys", "tomllib", "pathlib"}             # stdlib only
+    assert imports <= {"__future__", "json", "os", "re", "sys", "tomllib", "pathlib"}     # stdlib only
     conf = installed(tmp_path, monkeypatch, old_template())
     r = subprocess.run([sys.executable, "-I", str(ROOT / "sizeup" / "cloud" / "configupdate.py"), str(conf),
                         str(tmp_path / "etc" / "config-updates")], capture_output=True, text=True, timeout=30)

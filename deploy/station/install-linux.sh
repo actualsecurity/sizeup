@@ -26,7 +26,7 @@
 # trunk-recorder and readsb are services of their own: a switch restarts each only when what it runs changed.
 #
 # Everything it says goes to /var/log/sizeup-install.log too. Secrets are read with hidden input,
-# written only to /etc/sizeup/station.env (root:sizeup 0640) and never printed or logged.
+# written only to /etc/sizeup/station.env (root 0600) and never printed or logged.
 set -euo pipefail
 set +x
 umask 022
@@ -307,13 +307,18 @@ ask_secrets() {
   fi
   install -d -m 0750 -o root -g "$SVC_USER" "$ETC"
   envtmp=$(mktemp "$ETC/.station.env.XXXXXX")
-  chown root:"$SVC_USER" "$envtmp"
-  chmod 0640 "$envtmp"
-  echo "# sizeup station secrets (install-linux.sh / sizeup-station secrets). root:sizeup 0640." >> "$envtmp"
+  chown root:root "$envtmp"
+  chmod 0600 "$envtmp"
+  echo "# sizeup station secrets (install-linux.sh / sizeup-station secrets / adapter setup). root 0600." >> "$envtmp"
   printf 'SIZEUP_STATION_TOKEN=%s\n' "$secret_token" >> "$envtmp"
   if [ -n "$secret_id" ]; then
     printf 'SIZEUP_ACCESS_CLIENT_ID=%s\n' "$secret_id" >> "$envtmp"
     printf 'SIZEUP_ACCESS_CLIENT_SECRET=%s\n' "$secret_key" >> "$envtmp"
+  fi
+  # everything else in it stays (the incident-source adapter's credentials, #301)
+  if [ -f "$ENVFILE" ]; then
+    grep -vE '^(SIZEUP_STATION_TOKEN|SIZEUP_ACCESS_CLIENT_ID|SIZEUP_ACCESS_CLIENT_SECRET)=|^# sizeup station secrets' \
+      "$ENVFILE" >> "$envtmp" || true
   fi
   mv -f "$envtmp" "$ENVFILE"
   secret_token="" secret_id="" secret_key=""
@@ -629,7 +634,9 @@ model() {
 
 # -- a release: the code at one commit and its venv, beside the running one ------------------------
 reqs_key() { { cat "$1/pyproject.toml"; python3 --version; } | sha256sum | cut -c1-16; }
-venv_ok() { [ -x "$1/venv/bin/python" ] && "$1/venv/bin/python" -c 'import numpy' >/dev/null 2>&1; }
+# (as the sizeup user: a release's venv may have the incident-source adapter in it (#301), and root never starts an
+# interpreter that reads that site-packages)
+venv_ok() { [ -x "$1/venv/bin/python" ] && as_user "$1/venv/bin/python" -c 'import numpy' >/dev/null 2>&1; }
 
 # make_release NAME SHA [VENV_DONOR]: /opt/sizeup/releases/NAME, made once (a finished one is reused).
 make_release() {
@@ -669,12 +676,15 @@ make_release() {
     python3 -m venv "$tmp/venv"
     tmpsrc=$(mktemp -d)
     cp -a "$tmp/pyproject.toml" "$tmp/sizeup" "$tmpsrc/"
-    "$tmp/venv/bin/python" -m pip install -q --disable-pip-version-check --no-cache-dir --upgrade "$tmpsrc"
+    # (a venv made just now: nothing in its site-packages but pip, never an adapter's)
+    "$tmp/venv/bin/python" -I -m pip install -q --disable-pip-version-check --no-cache-dir --upgrade "$tmpsrc"
     rm -rf "$tmpsrc"
   fi
   echo "$reqs" > "$tmp/REQS"
   # bytecode now, not at every start (the service runs with PYTHONDONTWRITEBYTECODE)
-  "$tmp/venv/bin/python" -m compileall -q -j 0 "$tmp/sizeup" >/dev/null || warn "compileall complained"
+  # -I -S: compileall is the standard library's; the venv's site-packages (linked from a release that may have the
+  # incident-source adapter, #301) is never read by this root interpreter
+  "$tmp/venv/bin/python" -I -S -m compileall -q -j 0 "$tmp/sizeup" >/dev/null || warn "compileall complained"
   # the builds it runs with: this installer's pins (an older release keeps the ones it had)
   printf 'rtl-sdr=%s\ntrunk-recorder=%s\nwhisper=%s\nreadsb=%s\n' "$RTLSDR_B" "$TR_B" "$WHISPER_B" "$READSB_B" > "$tmp/BUILDS"
   chown -R root:root "$tmp"
@@ -1062,6 +1072,17 @@ fi
 # (a new box: the talkgroups the config names, before the preflight loads it)
 [ -f "$TR_DIR/talkgroups.csv" ] || as_user install -m 0644 "$REL/deploy/trunk-recorder/talkgroups.csv" "$TR_DIR/talkgroups.csv"
 preflight "$REL"
+# The station's incident-source adapter (#301), when its key is set up: into a copy of this release (side by side,
+# sizeup/cloud/autoupdate.py, the same as an automatic update). Never fatal here: without it, the release runs as is.
+if [ "$SIZEUP_SOURCE" = git ] && [ -f "$ETC/adapter-deploy-key" ] && [ -f "$REL/sizeup/cloud/autoupdate.py" ]; then
+  if out=$(python3 -I "$REL/sizeup/cloud/autoupdate.py" adapter stage "$NAME" 2>&1); then
+    NAME=$(printf '%s\n' "$out" | tail -n 1)
+    REL="$RELEASES/$NAME"
+    say "incident-source adapter: in release $NAME"
+  else
+    warn "incident-source adapter: not installed ($(printf '%s' "$out" | tail -n 1)): the release runs without it"
+  fi
+fi
 
 ask_secrets 0
 

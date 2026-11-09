@@ -7,6 +7,9 @@
 #      trunk-recorder's own service (#71) is left running through both switches (Python only: same PID)
 #   D  fails its preflight (an import): never switched to, B keeps running
 #   then sizeup-station rollback by hand: back to A (never to the failed C)
+#   E  an incident-source adapter (#301) from a local repo standing in for the private one: set up, installed into a
+#      copy of A's release, a new adapter commit alone rebuilds, a broken one is never switched to, a rollback brings
+#      the previous adapter back, removed: A without it
 set -euo pipefail
 
 WORK=/srv/sizeup-ci
@@ -130,4 +133,111 @@ sizeup-station rollback
 test "$(current)" = "$A"
 wait_for 60 is_build "$A"
 sizeup-station autoupdate status
+
+say "E: an incident-source adapter (#301): installed side by side, a new commit, a broken one, rollback, removed"
+AD=$WORK/adapter
+ADB=$WORK/adapter.git
+release() { basename "$(readlink -f /opt/sizeup/current)"; }
+release_is() { [ "$(release)" = "$1" ]; }
+idle() { case "$(systemctl show -p ActiveState --value sizeup-update.service)" in inactive|failed) ;; *) return 1 ;; esac; }   # (a oneshot running is "activating")
+in_venv() { find "$1/venv" -path '*site-packages/ci_feed' -print -quit; }
+adapter_commit() { python3 -c 'import json; print(json.load(open("/opt/sizeup/current/ADAPTER.json"))["commit"])'; }
+gita() { git -C "$AD" -c user.name=ci -c user.email=ci@example.invalid "$@"; }
+pusha() { gita commit -q -am "$1"; gita push -q --force "$ADB" main; gita rev-parse HEAD; }
+# the stand-in for the private repo is a local path: allowed only with SIZEUP_ADAPTER_ALLOW_LOCAL=1 (here, and for the
+# updater's service)
+export SIZEUP_ADAPTER_ALLOW_LOCAL=1
+mkdir -p /etc/systemd/system/sizeup-update.service.d
+printf '[Service]\nEnvironment=SIZEUP_ADAPTER_ALLOW_LOCAL=1\n' > /etc/systemd/system/sizeup-update.service.d/ci-local-adapter.conf
+systemctl daemon-reload
+mkdir -p "$AD/ci_feed"
+cat > "$AD/pyproject.toml" <<'TOML'
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ci-feed"
+version = "0.1"
+
+[project.entry-points."sizeup.incident_sources"]
+feed = "ci_feed:make"
+
+[tool.setuptools]
+packages = ["ci_feed"]
+TOML
+printf 'def make(ctx):\n    return []\n\n\ndef self_check():\n    return ""\n' > "$AD/ci_feed/__init__.py"
+gita init -q -b main
+gita add -A
+gita commit -q -m one
+git clone -q --bare "$AD" "$ADB"
+A1=$(gita rev-parse HEAD)
+wait_for 600 idle
+printf 'ci-user\n' | sizeup-station adapter setup --repo "$ADB" --ref main --env CI_FEED_USER --no-check
+test "$(stat -c '%U %a' /etc/sizeup/adapter-deploy-key)" = "root 600"
+CRED=/etc/credstore/sizeup-adapter.CI_FEED_USER
+test "$(stat -c '%U %a' "$CRED")" = "root 600"                            # systemd's credstore, never the environment
+test "$(cat "$CRED")" = ci-user
+grep -qx 'ImportCredential=sizeup-adapter.\*' /etc/systemd/system/sizeup-station.service.d/adapter-credentials.conf
+test -z "$(grep '^CI_FEED_USER=' /etc/sizeup/station.env 2>/dev/null || true)"
+python3 -c 'import tomllib; a = tomllib.load(open("/etc/sizeup/config.toml", "rb"))["adapter"]; assert a["ref"] == "main", a'
+wait_for 600 release_is "$A-a${A1:0:12}"
+wait_for 300 idle                                          # (its /healthz check and prune, then done)
+wait_for 120 is_build "$A"
+test "$(adapter_commit)" = "$A1"
+# the credential reaches the service as a file under $CREDENTIALS_DIRECTORY (systemd 255), not in its environment
+spid=$(systemctl show -p MainPID --value sizeup-station.service)
+test "$(cat /run/credentials/sizeup-station.service/sizeup-adapter.CI_FEED_USER)" = ci-user
+test -z "$(tr '\0' '\n' < "/proc/$spid/environ" | grep '^CI_FEED_USER=' || true)"
+test -n "$(ls /opt/sizeup/adapter-wheels/)"                                   # its wheels, built once, root's
+test "$(stat -c %U "$(ls -d /opt/sizeup/adapter-wheels/"$A1"-*)")" = root
+/opt/sizeup/current/venv/bin/python -c 'import importlib.metadata as m; assert [e.name for e in m.entry_points(group="sizeup.incident_sources")] == ["feed"]'
+test -n "$(in_venv /opt/sizeup/current)" && test -z "$(in_venv "/opt/sizeup/releases/$A")"   # only in the copy
+# unpacked by the updater itself (no pip, no interpreter as root), nothing that runs at an interpreter's start
+test "$(cat /opt/sizeup/current/venv/lib/python3*/site-packages/ci_feed-0.1.dist-info/INSTALLER)" = sizeup
+test -z "$(find /opt/sizeup/current/venv -newer "$CRED" \( -name '*.pth' -o -name 'sitecustomize.py' -o -name 'usercustomize.py' \) -print -quit)"
+
+say "a credential deleted by hand: the station still starts; the adapter says it's missing"
+rm "$CRED"
+systemctl restart sizeup-station.service
+wait_for 120 is_build "$A"
+sizeup-station status > "$WORK/status.txt"
+grep -q "^adapter:   .*CI_FEED_USER missing" "$WORK/status.txt"
+printf 'ci-user' > "$CRED" && chmod 600 "$CRED"
+sizeup-station status > "$WORK/status.txt"
+grep "^adapter:" "$WORK/status.txt"
+grep -q "^adapter:   adapter ${A1:0:7} installed" "$WORK/status.txt"
+sizeup-station adapter status
+wait_for 600 idle
+
+echo "# two" >> "$AD/ci_feed/__init__.py"
+A2=$(pusha two)
+systemctl start sizeup-update.service
+release_is "$A-a${A2:0:12}"
+wait_for 120 is_build "$A"
+test "$(adapter_commit)" = "$A2"
+
+printf 'def make(ctx):\n    return []\n\n\ndef self_check():\n    return "ci: broken"\n' > "$AD/ci_feed/__init__.py"
+A3=$(pusha three)
+systemctl start sizeup-update.service || true            # (the unit fails: that adapter commit failed its preflight)
+wait_for 300 idle
+release_is "$A-a${A2:0:12}"                               # never switched to
+test ! -e "/opt/sizeup/releases/$A-a${A3:0:12}"
+[[ "$(field 'd["adapter"]["failed"]["'"$A3"'"]["why"]')" == *"ci: broken"* ]]
+test "$(field 'd["last"]["result"]')" = "adapter not built"
+doc=$(sizeup-station doctor 2>&1 || true)                 # (no dongles, no token here: it fails anyway)
+grep -q "FAIL  adapter adapter ${A2:0:7} installed · ${A3:0:7} failed" <<<"$doc"
+
+sizeup-station rollback                                   # the previous adapter comes back with its release
+release_is "$A-a${A1:0:12}"
+wait_for 60 is_build "$A"
+test "$(adapter_commit)" = "$A1"
+
+sizeup-station adapter remove --yes
+test ! -e /etc/sizeup/adapter-deploy-key && test ! -e /etc/credstore/sizeup-adapter.CI_FEED_USER
+test ! -e /etc/systemd/system/sizeup-station.service.d/adapter-credentials.conf
+wait_for 600 release_is "$A"
+wait_for 300 idle
+wait_for 60 is_build "$A"
+test ! -e /opt/sizeup/current/ADAPTER.json && test -z "$(in_venv /opt/sizeup/current)"
 say "ok"

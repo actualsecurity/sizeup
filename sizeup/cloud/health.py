@@ -111,7 +111,7 @@ from pathlib import Path
 from typing import Callable
 
 from sizeup import tz
-from sizeup.cloud.autoupdate import same_build, short
+from sizeup.cloud.autoupdate import public, same_build, short
 
 TICK_S = 5.0
 JOB_GRACE_S = 60.0          # a dongle's job may be down this long (a restart, a switch) before it is an alert
@@ -205,6 +205,17 @@ def _read(path: str) -> str:
         return Path(path).read_text()
     except OSError:
         return ""
+
+
+def station_adapter(a) -> dict | None:
+    """The station's incident-source adapter as it reported it (#301): state, short repo name, commit, text, and each
+    source's health. Only these keys pass (the station sends no URL or credential; nothing else is shown either)."""
+    if not isinstance(a, dict) or a.get("state") in (None, "", "off"):
+        return None
+    health = [{k: str(h.get(k) or "")[:120] for k in ("source", "label", "state", "reason")}
+              for h in (a.get("health") if isinstance(a.get("health"), list) else []) if isinstance(h, dict)][:10]
+    return {"state": str(a.get("state"))[:20], "repo": str(a.get("repo") or "")[:40],
+            "commit": str(a.get("commit") or "")[:12], "text": str(a.get("text") or "")[:400], "health": health}
 
 
 class Metrics:
@@ -542,7 +553,7 @@ class StationHealth:
                         "update": {k: upd.get(k) for k in ("state", "since", "to", "from", "paused") if k in upd},
                         "last": upd.get("last") if isinstance(upd.get("last"), dict) else None,
                         "failed": upd.get("failed") if isinstance(upd.get("failed"), dict) else {},
-                        "behind_since": self._first.get("behind")}
+                        "behind_since": self._first.get("behind"), "adapter": station_adapter(v.get("adapter"))}
         ob = st.get("outbox") if isinstance(st.get("outbox"), dict) else {}
         oldest = ob.get("oldest") if isinstance(ob.get("oldest"), (int, float)) else None
         out["outbox"] = {"pending": int(ob.get("pending") or 0), "oldest": oldest + hub.skew if oldest else None,
@@ -1190,7 +1201,10 @@ class StationHealth:
                                "hint": {"factor": HINT_FACTOR, "min_min": HINT_MIN_S / 60}}}
 
     def status(self) -> dict:
-        """GET /api/station/status: what the deploy check needs, nothing else (no names of people, no audio)."""
+        """GET /api/station/status: what the deploy check needs, nothing else (no names of people, no audio). The deploy
+        check prints it into the PUBLIC GitHub Actions log: never the incident-source adapter (#301): no "adapter"
+        record, no last.adapter_why, and no adapter commit in a release name (public()). The station keeps the
+        adapter's reason, repo and commit out of last.line / last.why / its failures; they are on the Health page only."""
         now = self.clock()
         m = self.model(now)
         b = m["build"]
@@ -1198,10 +1212,11 @@ class StationHealth:
         return {"ok": True, "at": now, "hub_build": self.hub.build,
                 "station": {"reported": m["reported"], "connected": m["station"]["connected"],
                             "last_state": m["station"]["last_state"], "silent": m["station"]["silent"],
-                            "build": b["station"], "state": b["state"], "text": b["text"],
-                            "update": b["update"],
-                            "last": {k: last.get(k) for k in ("at", "from", "to", "result", "why", "seconds", "staged_s",
-                                                              "waited_s", "up_s", "radios_s", "line")} if last else None},
+                            "build": b["station"], "state": b["state"], "text": public(b["text"]),
+                            "update": {k: public(v) if isinstance(v, str) else v for k, v in b["update"].items()},
+                            "last": {k: public(v) if k in ("why", "line") and v else v
+                                     for k in ("at", "from", "to", "result", "why", "seconds", "staged_s", "waited_s",
+                                               "up_s", "radios_s", "line") for v in (last.get(k),)} if last else None},
                 "alerts": self.alerts()}
 
 
