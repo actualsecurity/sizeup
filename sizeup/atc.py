@@ -325,6 +325,7 @@ class Attribution:
     callsign: str | None
     confidence: float          # 1.0 exact, 0.7 one off, 0.4 the only plausible one of that airline, 0.45-0.6 a tail piece
     spoken: str = ""
+    after_number: bool = False  # a tail heard right after an ATC number (Mention.after_number): never names an aircraft
 
 
 class TelephonyIndex:
@@ -436,8 +437,8 @@ def number_words(words: Sequence[str]) -> tuple[set[int], dict[int, str]]:
         return i
 
     def decimals(i: int) -> None:
-        """A frequency's decimals from words[i]: 1 or 2 digits (3 in the 8.33 kHz style, "118.025"), never into a tail:
-        before letters ("121 point 9 1 2 3 alfa bravo") only the first digit."""
+        """A frequency's decimals from words[i]: 1 to 3 digits ("126.4", "128.55", "118.025"), never into a tail: before
+        letters ("121 point 9 1 2 3 alfa bravo") only the first digit."""
         run, k = [], i
         while k < n and _dig(words[k]) and len(run) < 6:
             run.append(k)
@@ -488,13 +489,15 @@ def number_words(words: Sequence[str]) -> tuple[set[int], dict[int, str]]:
             k = i + 1
             while k < n and words[k] in ("to", "and", "maintain", "at", "flight", "level"):
                 k += 1
-            group = k + 1 < n and words[k + 1].isdigit() and len(words[k + 1]) == 3          # "3,000": "3", "000"
-            # a whole number word ("3000", "3,000", "12"), never a lone digit that starts a tail ("leaving 123AB")
+            # a whole number word ("3000", "12", "3,000": "3", "000" or "3", STOP, "000" after clauses), never a lone
+            # digit that starts a tail ("leaving 123AB"), nor a tail after it ("maintain 3000 123 alfa bravo")
+            g = k + 2 if k + 2 < n and k + 1 < n and words[k + 1] == STOP_WORD else k + 1
+            group = k < n and words[k].isdigit() and len(words[k]) <= 2 and g < n and words[g].isdigit() \
+                and len(words[g]) == 3 and words[g].endswith("00")
             if k < n and words[k].isdigit() and (len(words[k]) >= 2 or group):
                 covered.add(k)
-                while k + 1 < n and words[k + 1].isdigit() and len(words[k + 1]) == 3:
-                    k += 1
-                    covered.add(k)
+                if group:
+                    covered.update(range(k + 1, g + 1))
         elif w in _FREQ_WORDS:
             k = i + 1
             while k < n and k - i <= 4 and words[k] in _FREQ_SKIP:
@@ -730,9 +733,9 @@ def attribute(text: str, index: TelephonyIndex, aircraft: Sequence[dict]) -> Att
                     scored.append((0.5, a))
         if scored:
             conf, a = max(scored, key=lambda s: (s[0], _p(s[1])))
-            att = Attribution(a.get("hex"), a.get("flight") or a.get("reg"), conf, m.text)
+            att = Attribution(a.get("hex"), a.get("flight") or a.get("reg"), conf, m.text, m.after_number)
         else:
-            att = Attribution(None, m.text, 0.0, m.text)
+            att = Attribution(None, m.text, 0.0, m.text, m.after_number)
         if best is None or att.confidence > best.confidence:
             best = att
     return best
@@ -1228,6 +1231,10 @@ class AtcWatch:
             att = attribute(h.text, self.index, planes)
             if att is None:
                 continue
+            if att.after_number and att.confidence < 0.4:
+                # the newest callsign is a tail that may hold a runway's / heading's digits: heard only, and never an
+                # earlier transmission's aircraft in its place
+                return heard_only or {"callsign": att.spoken, "hex": None, "spoken": att.spoken, "match": 0.0}
             if att.hex is not None and att.confidence >= 0.4:
                 a = next((p for p in planes if p.get("hex") == att.hex), {})
                 return {"callsign": att.callsign, "hex": att.hex, "spoken": att.spoken, "match": att.confidence,

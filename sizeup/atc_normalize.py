@@ -60,9 +60,11 @@ LETTERS = {"alfa": "A", "alpha": "A", "bravo": "B", "charlie": "C", "delta": "D"
            "uniform": "U", "victor": "V", "whiskey": "W", "whisky": "W", "x-ray": "X", "xray": "X", "yankee": "Y",
            "zulu": "Z"}
 # A letter run is a taxiway or a route after these, not a tail ("taxi via Alfa Bravo")
-# ... and the digits of an ATC number are never a tail's: "squawk 4521 kilo zulu" stays as said
 NOT_TAIL_AFTER = {"taxiway", "taxiways", "via", "taxi", "on", "cross", "crossing", "and", "ramp", "spot", "information",
-                  "runway", "rwy", "heading", "squawk", "altimeter", "wind", "maintain", "point", "decimal"}
+                  "runway", "rwy", "heading"}
+# ... and the number right after these is an ATC number, never a tail's digits: "squawk 4521 kilo zulu" stays as said
+# ("maintain 3000 123 alfa bravo" is still 123AB: the number after the altitude)
+NUMBER_AFTER = re.compile(r"\b(?:squawk|altimeter|wind|maintain|point|decimal)[\s,-]+$", re.I)
 NUMBER_WIDTH = {"heading": 3, "squawk": 4}    # an ATC number this many digits long: "heading 3407" is 340, then 7
 FIX_CONTEXT = {"over", "at", "from", "direct", "to", "via", "crossing", "cross", "past", "inbound", "outside", "outbound",
                "until", "before", "after", "reaching", "reach", "abeam", "fix", "of", "passing", "hold", "holding"}
@@ -259,7 +261,7 @@ def _tails(t: str) -> str:
     '568LX'); 'November 123AB' -> 'N123AB'."""
     def run(m: re.Match) -> str:
         before = re.findall(r"[A-Za-z]+", t[max(0, m.start() - 20):m.start()])
-        if before and before[-1].lower() in NOT_TAIL_AFTER:
+        if before and before[-1].lower() in NOT_TAIL_AFTER or (m.group("num") and NUMBER_AFTER.search(t[:m.start()])):
             return m.group(0)
         letters = "".join(LETTERS[w.lower()] for w in re.findall(_LETTER_WORD, m.group("run"), re.I))
         if m.group("num") and len(letters) > 2:

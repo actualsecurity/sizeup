@@ -615,6 +615,12 @@ def test_the_airports_runways_come_from_the_airport_data():
     ("runway 160 cleared to land", "Runway 160 cleared to land", []),
     ("runway 34123 alfa bravo", "Runway 34123 alfa bravo", [("…123AB", True)]),   # a longer rest: kept together, still flagged
     ("climb and maintain 2000 alfa bravo", "Climb and maintain 2000 alfa bravo", []),
+    # a tail right after an altitude, no comma: the altitude ends at its own number
+    ("climb and maintain 3000 123 alfa bravo", "Climb and maintain 3000 123AB", [("…123AB", False)]),
+    ("climb and maintain 2000 1 2 3 alfa bravo", "Climb and maintain 2000 1 2 3AB", [("…123AB", False)]),
+    ("squawk 4521 123 alfa bravo", "Squawk 4521 123AB", [("…123AB", False)]),
+    ("maintain 3,000 123 alfa bravo", "Maintain 3,000 123AB", [("…123AB", False)]),
+    ("maintain 3,500, 123 alfa bravo", "Maintain 3,500, 123AB", [("…123AB", False)]),
     ("heading 340 November 123AB", "Heading 340 N123AB", [("N123AB", False)]),
     ("November 347KZ", "N347KZ", [("N347KZ", False)]),
     ("November three four seven kilo zulu, runway 34", "N347KZ, runway 34", [("N347KZ", False)]),
@@ -631,7 +637,7 @@ def test_the_airports_runways_come_from_the_airport_data():
     ("through 118AB", "Through 118AB", [("…118AB", False)]),
     ("descend and maintain 2000 N123AB", "Descend and maintain 2000 N123AB", [("N123AB", False)]),
     # a frequency's decimals stop where a tail begins
-    ("121 point 9 1 2 3 alfa bravo", "121 point 9 1 2 3 alfa bravo", [("…123AB", False)]),
+    ("121 point 9 1 2 3 alfa bravo", "121 point 9 1 2 3AB", [("…123AB", False)]),
 ])
 def test_a_runway_run_into_a_tail_is_split(heard, written, found):
     assert normalize(heard) == written
@@ -675,3 +681,16 @@ def test_a_tail_after_a_number_is_matched_low_and_never_snapped():
     assert T.analyze(T.Tx("t3", CH, T0, T0 + 3, "runway 34, 123AB"), IX, [whole])["aircraft"]["status"] == "probable"
     off = T.analyze(T.Tx("t2", CH, T0, T0 + 3, normalize("go ahead runway 347 kilo zulu")), IX, [])
     assert off["aircraft"]["callsign"] == "…7KZ" and off["aircraft"]["status"] == "heard"
+
+
+def test_a_pre_alert_never_names_an_earlier_aircraft_for_a_tail_after_a_number():
+    """The newest callsign is a tail that may hold a runway's digits: heard only, not the aircraft of an earlier
+    transmission."""
+    other = {"hex": "o1", "flight": "N123AB", "reg": "N123AB", "phase": "arriving", "dist": 2.0}
+    w = atc.AtcWatch(None, [CH], index=IX, aircraft=lambda: [N687KZ, other], log=lambda m: None)
+    before = atc.Heard("h1", T0, CH, "November 123AB, number two", "", [])
+    me = atc.Heard("h2", T0 + 5, CH, "go ahead runway 347 kilo zulu", "", [])
+    who = w._who(me, [before], [N687KZ, other])
+    assert who == {"callsign": "…7KZ", "hex": None, "spoken": "…7KZ", "match": 0.0}
+    # without it, the earlier transmission's aircraft is named as before
+    assert w._who(atc.Heard("h3", T0 + 5, CH, "cleared to land", "", []), [before], [N687KZ, other])["hex"] == "o1"
