@@ -15,7 +15,7 @@ says them, and a stretch of the transcript that clearly sounds like one of them 
                 "maintain" ... or before "feet", "knots" (always probable at most: atc_talkers SNAP_EXACT).
     tail        an N-number's characters (digits, then phonetic letters): the whole tail, its last three or more
                 (a shortened tail, "34 Charlie" for N534C), or one character off with four or more. Never one that
-                starts on or right after a runway, heading, altitude ... number ("runway 34, 5 charlie echo").
+                starts on or right after a runway, heading, altitude ... number ("runway 34, 7 kilo zulu").
 
 A stretch is snapped only when its best aircraft scores SNAP_MIN or more and every other aircraft scores at least
 MARGIN under it; nothing is snapped with no aircraft near, or two close. Each snap is kept ({from, to, hex, score})
@@ -182,8 +182,8 @@ def snap(text: str, planes: Iterable[dict], tel: dict | None = None) -> tuple[st
     for i0, j0, chars in _runs(toks, text):
         if not any(c.isdigit() for c in chars):
             continue
-        # a run that starts on an ATC number or right after one ("runway 34, 5 charlie echo", "runway 345 charlie
-        # echo"): its first digits may be the number's, so it is never snapped to a tail (sizeup/atc.py number_words)
+        # a run that starts on an ATC number or right after one ("runway 34, 7 kilo zulu", "runway 347 kilo
+        # zulu"): its first digits may be the number's, so it is never snapped to a tail (sizeup/atc.py number_words)
         after_number = i0 in numbers or (i0 - 1) in numbers
         scored: list[tuple[float, int, Cand]] = []
         for c in cands:

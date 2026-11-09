@@ -583,10 +583,10 @@ def test_a_two_digit_number_alone_is_only_a_departure_handed_off():
     assert snap("Tower xy 51.", [dict(arriving[0], phase="departing")])[1] == []   # no hand-off
 
 
-# -- a runway, heading ... number run into the tail after it (speech-to-text merging "runway 34, 5CE") ----------------
+# -- a runway, heading ... number run into the tail after it (speech-to-text merging "runway 34, 7KZ") ----------------
 # Invented wording and tails only.
 
-N675CE = {"hex": "c1", "flight": "N675CE", "reg": "N675CE", "phase": "arriving", "dist": 3.0}
+N687KZ = {"hex": "c1", "flight": "N687KZ", "reg": "N687KZ", "phase": "arriving", "dist": 3.0}
 
 
 def mentions(text: str) -> list[tuple[str, bool]]:
@@ -595,24 +595,24 @@ def mentions(text: str) -> list[tuple[str, bool]]:
 
 def test_the_airports_runways_come_from_the_airport_data():
     assert {"16", "34", "11", "29"} <= atc.runway_designators()
-    assert atc.split_runway("345") == ("34", "5") and atc.split_runway("165") == ("16", "5")
+    assert atc.split_runway("347") == ("34", "7") and atc.split_runway("165") == ("16", "5")
     assert atc.split_runway("1634") == ("16", "34") and atc.split_runway("34") is None
     assert atc.split_runway("785") is None                       # not one of this airport's runways
-    assert atc.runways("go ahead runway 345 charlie echo") == ["34"]
+    assert atc.runways("go ahead runway 347 kilo zulu") == ["34"]
 
 
 @pytest.mark.parametrize("heard, written, found", [
-    ("go ahead runway 345 charlie echo", "Go ahead runway 34, 5 charlie echo", [("…5CE", True)]),
+    ("go ahead runway 347 kilo zulu", "Go ahead runway 34, 7 kilo zulu", [("…7KZ", True)]),
     ("runway 165 alfa bravo", "Runway 16, 5 alfa bravo", [("…5AB", True)]),
-    ("runway three four five charlie echo", "Runway 34, 5 charlie echo", [("…5CE", True)]),
-    ("heading 3405 charlie echo", "Heading 340, 5 charlie echo", [("…5CE", True)]),
+    ("runway three four seven kilo zulu", "Runway 34, 7 kilo zulu", [("…7KZ", True)]),
+    ("heading 3407 kilo zulu", "Heading 340, 7 kilo zulu", [("…7KZ", True)]),
     ("runway 34 cleared to land", "Runway 34 cleared to land", []),
     ("runway 1634", "Runway 16, 34", []),
     ("runway 160 cleared to land", "Runway 16, 0 cleared to land", []),
     ("heading 340 November 123AB", "Heading 340 N123AB", [("N123AB", False)]),
-    ("November 345CE", "N345CE", [("N345CE", False)]),
-    ("November three four five charlie echo, runway 34", "N345CE, runway 34", [("N345CE", False)]),
-    ("5 charlie echo, runway 34 cleared to land", "5CE, runway 34 cleared to land", [("…5CE", False)]),
+    ("November 347KZ", "N347KZ", [("N347KZ", False)]),
+    ("November three four seven kilo zulu, runway 34", "N347KZ, runway 34", [("N347KZ", False)]),
+    ("7 kilo zulu, runway 34 cleared to land", "7KZ, runway 34 cleared to land", [("…7KZ", False)]),
     ("contact departure 678 alfa bravo", "Contact departure 678AB", [("…678AB", False)]),   # not a frequency
 ])
 def test_a_runway_run_into_a_tail_is_split(heard, written, found):
@@ -622,11 +622,11 @@ def test_a_runway_run_into_a_tail_is_split(heard, written, found):
 
 
 @pytest.mark.parametrize("heard", [
-    "squawk 4521", "squawk 4521 charlie echo", "contact departure 126.4", "contact new york approach 128.55",
+    "squawk 4521", "squawk 4521 kilo zulu", "contact departure 126.4", "contact new york approach 128.55",
     "one two four point six five", "wind 340 at 12", "wind 340 at 12 gusts 18", "altimeter 30.01",
     "altimeter three zero zero one", "traffic 2 o'clock, 3 miles", "climb and maintain 3,000",
     "descend and maintain 2000", "at 2 thousand 5 hundred", "heading 340", "fly runway heading",
-    "runway 34 charlie echo",
+    "runway 34 kilo zulu",
 ])
 def test_an_atc_number_never_feeds_a_tail(heard):
     assert mentions(heard) == []
@@ -634,21 +634,21 @@ def test_an_atc_number_never_feeds_a_tail(heard):
 
 
 def test_a_tail_after_a_number_is_matched_low_and_never_snapped():
-    # the real tail ends 5CE: matched, but no better than AFTER_NUMBER_CONF (under a link's 0.7)
-    a = atc.attribute(normalize("go ahead runway 345 charlie echo"), IX, [N675CE])
-    assert a.spoken == "…5CE" and a.hex == "c1" and a.confidence == atc.AFTER_NUMBER_CONF < atc.ADSB_MATCH
-    assert atc.attribute("go ahead runway 34, 5 charlie echo", IX, [N675CE]).confidence == atc.AFTER_NUMBER_CONF
-    # a plane whose tail is the merged number is never matched to the whole "345CE": its end only, as low
-    wrong = dict(N675CE, hex="c2", flight="N345CE", reg="N345CE")
-    assert atc.attribute(normalize("go ahead runway 345 charlie echo"), IX, [wrong]).confidence == atc.AFTER_NUMBER_CONF
-    assert atc.attribute(normalize("go ahead runway 345 charlie echo"), IX, [N675CE, wrong]).hex is None   # two: none
-    assert snap(normalize("go ahead runway 345 charlie echo"), [N675CE, wrong])[1] == []
-    assert snap("go ahead runway 345 charlie echo", [wrong])[1] == []
+    # the real tail ends 7KZ: matched, but no better than AFTER_NUMBER_CONF (under a link's 0.7)
+    a = atc.attribute(normalize("go ahead runway 347 kilo zulu"), IX, [N687KZ])
+    assert a.spoken == "…7KZ" and a.hex == "c1" and a.confidence == atc.AFTER_NUMBER_CONF < atc.ADSB_MATCH
+    assert atc.attribute("go ahead runway 34, 7 kilo zulu", IX, [N687KZ]).confidence == atc.AFTER_NUMBER_CONF
+    # a plane whose tail is the merged number is never matched to the whole "347KZ": its end only, as low
+    wrong = dict(N687KZ, hex="c2", flight="N347KZ", reg="N347KZ")
+    assert atc.attribute(normalize("go ahead runway 347 kilo zulu"), IX, [wrong]).confidence == atc.AFTER_NUMBER_CONF
+    assert atc.attribute(normalize("go ahead runway 347 kilo zulu"), IX, [N687KZ, wrong]).hex is None   # two: none
+    assert snap(normalize("go ahead runway 347 kilo zulu"), [N687KZ, wrong])[1] == []
+    assert snap("go ahead runway 347 kilo zulu", [wrong])[1] == []
     # said in full, it is the whole tail, exactly
-    assert atc.attribute(normalize("November 345CE"), IX, [wrong]).confidence == 1.0
+    assert atc.attribute(normalize("November 347KZ"), IX, [wrong]).confidence == 1.0
     # the talker record: probable at the lower confidence, shown as heard
-    rec = T.analyze(T.Tx("t1", CH, T0, T0 + 3, normalize("go ahead runway 345 charlie echo")), IX, [N675CE])
-    assert rec["aircraft"]["spoken"] == "…5CE" and rec["aircraft"]["status"] == "probable"
+    rec = T.analyze(T.Tx("t1", CH, T0, T0 + 3, normalize("go ahead runway 347 kilo zulu")), IX, [N687KZ])
+    assert rec["aircraft"]["spoken"] == "…7KZ" and rec["aircraft"]["status"] == "probable"
     assert rec["aircraft"]["confidence"] == atc.AFTER_NUMBER_CONF and rec["runway"] == "34"
-    off = T.analyze(T.Tx("t2", CH, T0, T0 + 3, normalize("go ahead runway 345 charlie echo")), IX, [])
-    assert off["aircraft"]["callsign"] == "…5CE" and off["aircraft"]["status"] == "heard"
+    off = T.analyze(T.Tx("t2", CH, T0, T0 + 3, normalize("go ahead runway 347 kilo zulu")), IX, [])
+    assert off["aircraft"]["callsign"] == "…7KZ" and off["aircraft"]["status"] == "heard"

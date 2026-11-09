@@ -23,8 +23,8 @@ improves old rows too). From shortfinal's tidy() / fix_facilities() (its core/st
     fixes       the approach fixes by ident (TWORF, TAYSH, HAARP ...): every spelling in normalize.json's "fixes"
                 anywhere; "fixes_in_context" (ordinary words: "to do" for TOEDO, "harp") and a close spelling
                 (SequenceMatcher >= FIX_SIMILAR) only right after over / at / from / direct / via / crossing ...
-    numbers     a runway, heading or squawk run into the digits after it, split where it ends ("runway 345 charlie
-                echo" -> "runway 34, 5 charlie echo": a runway is two digits, one of the airport's runways).
+    numbers     a runway, heading or squawk run into the digits after it, split where it ends ("runway 347 kilo
+                zulu" -> "runway 34, 7 kilo zulu": a runway is two digits, one of the airport's runways).
     tails       two or more phonetic letters run together ("Lima X-ray" -> "LX"), joined to the digits before them
                 when they can end a US tail (two letters at most: "568 Lima X-ray" -> "568LX"); "November 1 2 3 Alfa
                 Bravo" -> "N123AB". Not after "taxiway", "via", "runway", "squawk" ... (a route or a number, not a
@@ -59,10 +59,10 @@ LETTERS = {"alfa": "A", "alpha": "A", "bravo": "B", "charlie": "C", "delta": "D"
            "uniform": "U", "victor": "V", "whiskey": "W", "whisky": "W", "x-ray": "X", "xray": "X", "yankee": "Y",
            "zulu": "Z"}
 # A letter run is a taxiway or a route after these, not a tail ("taxi via Alfa Bravo")
-# ... and the digits of an ATC number are never a tail's: "squawk 4521 charlie echo" stays as said
+# ... and the digits of an ATC number are never a tail's: "squawk 4521 kilo zulu" stays as said
 NOT_TAIL_AFTER = {"taxiway", "taxiways", "via", "taxi", "on", "cross", "crossing", "and", "ramp", "spot", "information",
                   "runway", "rwy", "heading", "squawk", "altimeter", "wind", "maintain", "point", "decimal"}
-NUMBER_WIDTH = {"heading": 3, "squawk": 4}    # an ATC number this many digits long: "heading 3405" is 340, then 5
+NUMBER_WIDTH = {"heading": 3, "squawk": 4}    # an ATC number this many digits long: "heading 3407" is 340, then 7
 FIX_CONTEXT = {"over", "at", "from", "direct", "to", "via", "crossing", "cross", "past", "inbound", "outside", "outbound",
                "until", "before", "after", "reaching", "reach", "abeam", "fix", "of", "passing", "hold", "holding"}
 _W = r"[A-Za-z][A-Za-z'-]*"
@@ -220,9 +220,9 @@ _MERGED = re.compile(r"\b(?P<w>runway|rwy|heading|squawk)(?P<sp>\s+)(?P<num>\d{3
 
 
 def _merged(t: str) -> str:
-    """An ATC number speech-to-text ran into the digits after it, split where the number ends: "runway 345 charlie
-    echo" -> "runway 34, 5 charlie echo" (the airport's runways: sizeup/atc.py runway_designators), "heading 3405" ->
-    "heading 340, 5". Only where it can't be one number: a runway is two digits, a heading three, a squawk four."""
+    """An ATC number speech-to-text ran into the digits after it, split where the number ends: "runway 347 kilo
+    zulu" -> "runway 34, 7 kilo zulu" (the airport's runways: sizeup/atc.py runway_designators), "heading 3407" ->
+    "heading 340, 7". Only where it can't be one number: a runway is two digits, a heading three, a squawk four."""
     from sizeup.atc import split_runway
 
     def one(m: re.Match) -> str:

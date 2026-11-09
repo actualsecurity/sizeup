@@ -132,9 +132,9 @@ def runway_designators() -> frozenset[str]:
 
 
 def split_runway(num: str) -> tuple[str, str] | None:
-    """A runway number run into the digits after it ("runway 345 charlie echo": speech-to-text wrote "runway 34, 5
-    charlie echo" as one number): (the runway, the rest), the longest start that is one of the airport's runways
-    ("345" -> ("34", "5"), "1634" -> ("16", "34")). None when it is a runway alone or doesn't start with one."""
+    """A runway number run into the digits after it ("runway 347 kilo zulu": speech-to-text wrote "runway 34, 7
+    kilo zulu" as one number): (the runway, the rest), the longest start that is one of the airport's runways
+    ("347" -> ("34", "7"), "1634" -> ("16", "34")). None when it is a runway alone or doesn't start with one."""
     rws = runway_designators()
     if not num.isdigit() or num in rws:
         return None
@@ -148,7 +148,7 @@ _RUNWAY_RUN = re.compile(r"\b(?:runway|rwy)\s+(?P<num>\d{3,4})\b")
 
 
 def runways(norm: str) -> list[str]:
-    """HPN runways said ("runway one six", "runway 16", "runway 1 6", "runway 345" run into the next words), in order,
+    """HPN runways said ("runway one six", "runway 16", "runway 1 6", "runway 347" run into the next words), in order,
     each once."""
     found = []
     for m in _RUNWAY.finditer(norm):
@@ -310,7 +310,7 @@ class Mention:
     end: int
     abbrev: bool = False
     phrase_end: int = -1
-    after_number: bool = False   # a tail's end heard right after an ATC number ("runway 345 charlie echo"): maybe its digits
+    after_number: bool = False   # a tail's end heard right after an ATC number ("runway 347 kilo zulu"): maybe its digits
 
     @property
     def text(self) -> str:
@@ -414,8 +414,8 @@ def number_words(words: Sequence[str]) -> tuple[set[int], dict[int, str]]:
     """The words that are an ATC number, never a callsign's: a runway ("runway 34"), a heading ("heading 340"), an
     altitude ("climb and maintain 3,000", "at 2 thousand"), a squawk, a frequency ("contact departure 126.4", "one two
     four point six five"), the wind ("wind 340 at 12"), the altimeter, a clock position ("2 o'clock") and a distance or
-    speed ("3 miles"). And, for a number speech-to-text ran into the digits after it ("runway 345 charlie echo"), the
-    rest ({index: "5"}): the start of the next words, which may be a tail's ("5CE")."""
+    speed ("3 miles"). And, for a number speech-to-text ran into the digits after it ("runway 347 kilo zulu"), the
+    rest ({index: "7"}): the start of the next words, which may be a tail's ("7KZ")."""
     covered: set[int] = set()
     rest: dict[int, str] = {}
     n = len(words)
@@ -429,7 +429,7 @@ def number_words(words: Sequence[str]) -> tuple[set[int], dict[int, str]]:
                 break
             covered.add(i)
             if words[i].isdigit() and got + len(d) > width:
-                rest[i] = d[width - got:]      # "heading 3405": 340, then "5"
+                rest[i] = d[width - got:]      # "heading 3407": 340, then "7"
                 return i + 1
             got += len(d)
             i += 1
@@ -525,7 +525,7 @@ def _after_number(i: int, words: Sequence[str], numbers: set[int], rest: dict[in
 
 
 AFTER_NUMBER_CONF = 0.45   # a tail's end heard right after an ATC number matches no better than this: its first digit
-                           # may be the number's ("runway 34, 5CE" heard as "runway 345 CE"), so never a link (>= 0.7)
+                           # may be the number's ("runway 34, 7KZ" heard as "runway 347 KZ"), so never a link (>= 0.7)
 _PLAIN_TAIL = re.compile(r"[1-9]\d{0,4}[A-Z]{0,2}")      # an N-number's characters after the N (FAA: 1-5, no leading 0)
 
 
@@ -564,7 +564,7 @@ def find_mentions(text: str, index: TelephonyIndex) -> list[Mention]:
         if i in covered or (i in numbers and i not in rest):
             i += 1
             continue
-        if i in rest:              # the rest of a number run into the next words: "runway 345 charlie echo" -> "5CE"
+        if i in rest:              # the rest of a number run into the next words: "runway 347 kilo zulu" -> "7KZ"
             suf, j = _suffix(words, i + 1, stop=numbers, lead=rest[i])
         else:
             suf, j = _suffix(words, i, stop=numbers)
