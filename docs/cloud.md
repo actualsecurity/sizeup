@@ -766,6 +766,87 @@ expire_min = 5
 heartbeat_stale_min = 90
 ```
 
+## Incident sources: external CAD feeds, paging as the backup (#297)
+
+Incidents come in from ranked sources. The interface is in `sizeup/sources/__init__.py`, the station's runner in
+`sizeup/sources/runner.py` and the rules in `sizeup/cad/sources.py`.
+
+- **External CAD feeds** are the primary (rank 1, then 2, 3 ...). They are read-only adapters in a private package
+  installed on the station, outside this repo. The station finds them by the entry point group
+  `sizeup.incident_sources`, or by `SIZEUP_INCIDENT_SOURCES="pkg.mod:factory"` plus `SIZEUP_INCIDENT_SOURCES_PATH` in
+  `/etc/sizeup/station.env`. A directory on that path outlives a release's venv being rebuilt, and nothing goes in
+  `config.toml`, so switching back to an older release stays safe. Their events and health go to the hub through the
+  outbox as `source_event` / `source_health` / `source_seen`.
+- **Adapter rules** (the source is someone else's system): read only (never acknowledge, write or mark anything there;
+  closure comes from the feed's own in-service or cleared time), gentle (poll every 30 to 60 s; `poll_now` never
+  bypasses that), honest (the client's real name as its user agent; no spoofing or anti-detection), and the feed's
+  data stays in the department (never in logs beyond receipt, pushes, issues, PRs or CI output).
+- **Nothing waits.** A page for us makes its incident at once, whatever the feeds' health. An occasional duplicate
+  is acceptable; a delay is not. A feed's new event does the same unless it attaches. An event already closed (or in
+  service) when first seen is recorded and never makes an incident. One first seen more than 20 min after its dispatch
+  but still open (an outage, a first run) makes its incident, noted "first seen N after its dispatch".
+- **Health:** a feed reports `ok`, `backing_off`, `failing` or `stale`, and a feed with no report for 3 min counts as
+  stale (by the hub's clock). Paging is healthy while the station is connected. The first healthy tier is the acting primary. The console
+  pill shows it (`County feed · backing off · Paging primary`), and so does Settings > Health.
+- **Matching:** only an open incident (queued, pending or active) created within 20 min, with nothing on it from the
+  same source.
+  - Locations are first cut to their street part. A named place after `:` or `@`, `;…`, `(…)`, `[…]`, the town after a
+    comma or after the street's suffix, `UPPER_SNAKE` town tokens, floors and units are dropped, and a range becomes
+    its first number (`12-14 EXAMPLE AVE 3RD FL` becomes `12 EXAMPLE AVE`). The console shows, and the voice says,
+    that street part (or `@ <place>`), never the feed's whole string.
+  - When both sides have a location, they must be the same place: house number and street, direction and suffix. An
+    intersection never matches a numbered address. Shared units never override two different places.
+  - One building can hold two calls (an apartment, a school): when both sides name units, they must share at least one;
+    otherwise (unless the types agree within 5 min) "Possibly the same as #N". A same-place incident the source already has is noted
+    the same way, never skipped silently. A feed's unit codes go through the data file's `feed_unit_aliases` first (read again when the file changes; the
+    dispatch mode reads them from the same place).
+  - The same place is not enough: it must be the same call. A page joins a feed's incident only when the feed's dispatch
+    is within 5 min of the page (the same type is not enough), and never one the feed has in service. A feed event
+    never joins an incident made after it ended, nor one made more than 5 min after its dispatch (an earlier call, open
+    or not). One first seen closed joins only an incident made at most 1 min after and 5 min before its dispatch; one
+    first seen open but late (an outage) one within 5 min either way. Candidates rank by time first, shared units second; with
+    two at the place, the nearest must be within 5 min.
+  - A named place with no street (`@SAMPLE SCHOOL`) has its own key: it matches the same place name and never an
+    address. A direction after the suffix (`12 Main St W`) and `EXT` are part of the street. A name made only of
+    suffix words is the name (`12 Court St`). Only known towns (the lists' `geo_town_order` and aliases, reloaded when
+    Settings > Lists change) are dropped from the end, an `UPPER_SNAKE` token included (`EXAMPLE_TOWN`), and two different
+    known towns are two places. Place names use Saint/Mount for `ST`/`MT`.
+  - A unit in common (cleared assignments don't count) never joins two reports on its own, with or without locations.
+  - Two incidents in the window that share units but may not be joined are noted "Possibly the same as #N" on both,
+    so a duplicate is never silent.
+- **Attaching:** a page attaches only to an incident a feed has. A feed event attaches to any open incident at the same
+  place, accepted or not, so a page that beat the feed gets the feed's report rather than a duplicate. An incident a
+  person made keeps their type and location. Any other near match makes its own incident, noted "Possibly the same
+  as #N" on both.
+- **Authority:** the best-ranked feed's type and location apply to a field no person has edited, whatever the
+  incident's status. Otherwise there is a timeline note, and the incident view offers "Use County feed's type / location"
+  (`POST /api/cad/incident/<id>/feed-use`). A pin a person set is never cleared. Accepting with the type the console
+  shows is not an edit; only a changed type or subtype is. Every change and comment from a feed goes on the timeline
+  (kind `feed`).
+- **Closure and gone events:** when a feed closes an event, a queued incident that only that event made, and that
+  nobody touched, is dismissed. Any other gets a "closed" line. Every 2 min the station sends the ids still in each
+  feed's snapshot (`source_seen`); an open report the feed no longer lists gets one "no longer listed" line and is
+  flagged in Settings > Health.
+- **Pushes:** an address a feed put on an incident is recorded (`feed_addresses`), and an alarm push names only the
+  incident number for it. Logs name our incident id and the source's label only, and exceptions by type.
+- **Merges and extras:**
+  - When a feed says event B is now part of A (`aliases`), B is retired, with a note on both incidents and in the log.
+    B's incident is dismissed only if it is still queued and the same source made it. Otherwise it keeps B's report
+    and gets a note.
+  - An adapter's `extra` fields go on the timeline. The incident shows the jurisdiction, run numbers and each
+    group's units.
+- **Poll now and reset:** paging tones of ours, a radio pre-alert or the phone ring wakes each adapter. The adapter's
+  own thread then calls its optional `poll_now(reason)` and polls; `trigger()` never runs adapter code. Triggers stay
+  gentle: at most one per max(`poll_s`, 30 s), at most 4 in 10 min, never sooner than 30 s after the last poll, and none
+  while an adapter is failing or its health isn't `ok`. A remote reset
+  (#305) is queued in the runner's `Resets` (`sizeup/sources/resets.py`) and runs `reset()` on the adapter's own thread before its next poll.
+- **Station only:** the hub refuses to load or run adapters (`HubRefused`). It only applies the station's forwarded
+  events. The hub only ever sees an exception's type, never its text.
+- **Measurement:** each source's first-seen time per incident, and its lead over paging. Settings > Health shows both.
+- **Pre-alerts never make an incident.** These include a dispatcher on the feed's talkgroups opening a call to us,
+  "incoming additional alarm" or "stand by for a page" naming us, and the phone ring. They show as "Possible incoming"
+  at the top of the 60 Control column.
+
 ## Highway layers: cameras, incidents, signs, mileposts (the Thruway, 511NY)
 
 > "it looks like this has location data of all the highway things, including cameras, that would be

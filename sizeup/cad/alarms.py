@@ -921,6 +921,17 @@ class Alarms:
 
     # -- the push (sizeup/notify.py) --------------------------------------------------------------------------
 
+    def push_address(self, a: dict, address: str) -> str:
+        """The incident's address as a push may carry it: '' when an external CAD feed set it (#297: the county's data
+        never leaves the department; the push names the incident number only). '' too when that can't be told."""
+        if not address or not a.get("incident_id"):
+            return address
+        try:
+            return "" if self.cad.sources.feed_address(int(a["incident_id"]), address) else address
+        except Exception as e:  # noqa: BLE001 - when in doubt, no address
+            self.log(f"alarms: push address: {type(e).__name__}")
+            return ""
+
     def _push(self, a: dict, ack: bool = False, ended: str = "", who=None) -> None:
         """Title: what, then who / where (notify.compose: "MAYDAY · E64 P1 (Engine 64) on FG1 · 26-000015 100 S Ridge St");
         body: when, what was heard, the units it names, who acknowledged. An aircraft (source "adsb"): its line
@@ -950,7 +961,9 @@ class Alarms:
             tags = ["airplane", *tags]
         click = f"{self.public_url.rstrip('/')}/cad" if self.public_url else ""
         try:
-            n.send(title, " · ".join(body), prio, tags, click, who=who if who is not None else self.who_of(a))
+            who = dict(who if who is not None else self.who_of(a))
+            who["address"] = self.push_address(a, who.get("address") or "")
+            n.send(title, " · ".join(body), prio, tags, click, who=who)
         except Exception as e:  # noqa: BLE001 - a push never stands in the way of the alarm
             self.log(f"alarms: push not sent: {type(e).__name__}: {e}")
 
