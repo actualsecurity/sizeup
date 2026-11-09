@@ -83,7 +83,8 @@ class Routes:
                 pen = {}
             sig = tuple(sorted((e, v) for e, v in pen.items()))
             self._pen = (key, pen, hash(sig))
-        return self._pen[1], self._pen[2]
+        got = self._pen                      # (one read: to_one runs on request threads beside the state build)
+        return got[1], got[2]
 
     def _home(self, station: str):
         for f in self.firehouses() or ():
@@ -142,19 +143,19 @@ class Routes:
         at = m.get("at")
         if at == ent.get("fix_at"):
             return ""
-        ent["fix_at"] = at
         off, along, brg = _project(ent["coords"], ent["cum"], here)
         if off > p.reroute_m:
-            return "off"
+            return "off"                     # (nothing kept: asked again next build until it is routed)
         remain = ent["m"] - along
         hd, sp = m.get("heading"), m.get("speed")
         away = remain > ent["remain"] + AWAY_M
         if isinstance(hd, (int, float)) and isinstance(sp, (int, float)) and sp >= AWAY_MIN_MPS and brg is not None:
             away = away or abs((hd - brg + 180) % 360 - 180) > AWAY_DEG
-        ent["away"] = ent["away"] + 1 if away else 0
-        ent["along"], ent["remain"] = along, min(remain, ent["remain"]) if not away else remain
-        if ent["away"] >= AWAY_FIXES:
+        n = ent["away"] + 1 if away else 0
+        if n >= AWAY_FIXES:
             return "away"
+        # on its path: this fix moves it along (a route made from its station too, once fixes come)
+        ent.update(fix_at=at, away=n, along=along, remain=remain if away else min(remain, ent["remain"]))
         return ""
 
     def _route(self, g, m: dict, sig: tuple, pen: dict, p: eta.Params, why: str, now: float) -> dict | None:
@@ -186,7 +187,7 @@ class Routes:
         return ent
 
     def _public(self, ent: dict, m: dict, now: float, p: eta.Params) -> dict:
-        along = ent["along"] if ent["from"] == "fix" else 0.0
+        along = ent["along"] if m.get("place") == "position" else 0.0
         remain = max(0.0, ent["m"] - along)
         remain_s = ent["s"] * remain / ent["m"] if ent["m"] > 0 else 0.0
         quarters = m.get("place") == "station"

@@ -567,3 +567,47 @@ out.after = [routes().length, lines().length];
 def test_the_estimate_tooltip_names_the_road_model():
     js = (ROOT / "sizeup" / "web" / "static" / "cad.js").read_text()
     assert 'u.how === "road"' in js and "by road (OSM)" in js
+
+
+def test_a_route_from_quarters_is_moved_along_by_the_fixes_that_follow():
+    r, _ = routes_on(grid())
+    a = r.for_map([marker(*at(0, 0), place="station", look="responding", at_=None)], NOW)["routes"][0]
+    path = r.cache[("E61", 7)]["coords"]
+    for k in (1, 2, 3):
+        b = r.for_map([marker(*_point_along(path, 100.0 * k), at_=NOW + k)], NOW + k)["routes"][0]
+        assert b["remain_m"] == pytest.approx(a["m"] - 100 * k, abs=3) and b["along_m"] == pytest.approx(100 * k, abs=3)
+    assert r.stats["routed"] == 1
+
+
+def test_an_off_path_fix_not_routed_at_once_is_still_re_routed_later(monkeypatch):
+    import sizeup.cad.routes as routes_mod
+    r, _ = routes_on(grid())
+    r.for_map([marker(*at(0, 0))], NOW)
+    path = r.cache[("E61", 7)]["coords"]
+    away = marker(*_offset(path[0], 150), at_=NOW + 5)
+    real = r._route
+    monkeypatch.setattr(r, "_route", lambda *a: None)                       # (a build that couldn't route it)
+    r.for_map([away], NOW + 5)
+    monkeypatch.setattr(r, "_route", real)
+    assert r.for_map([away], NOW + 6)["routes"][0]["why"] == "off"           # the same fix, the next build
+    assert routes_mod.BUDGET_S > 0
+
+
+def test_the_wrong_way_stretch_never_uses_a_closed_block():
+    """Oak St split at 3.5 by a stub: the call at 3.3 is reached wrong-way from East St over both blocks (59 m) when
+    open; with the block 3.5-4 closed, the right way round."""
+    w = ladder()
+    w.els[1]["nodes"].insert(4, 999)
+    w.els[1]["geometry"].insert(4, {"lon": LON0 + 3.5 * DX, "lat": LAT0 + DY})
+    w.add([[LON0 + 3.5 * DX, LAT0 + DY], [LON0 + 3.5 * DX, LAT0 + 2 * DY]], name="Stub Lane")
+    w.els[-1]["nodes"][0] = 999
+    g = w.graph()
+    to = [LON0 + 3.3 * DX, LAT0 + DY]
+    assert names(g, g.route(at(4, 0), to, P, wrongway_m=60))[-2:] == ["Oak Street", "Oak Street"]
+    item = {"id": "t:2", "source": "Port Chester", "kind": "closure", "closure": "full", "road": "Oak St",
+            "geometry": {"type": "LineString", "coordinates": [[LON0 + 3.75 * DX, LAT0 + DY], [LON0 + 3.95 * DX, LAT0 + DY]]},
+            "start": NOW - 60, "end": NOW + 600, "hours": []}
+    pen = g.penalties([item], NOW)
+    assert len(pen) == 1 and g.name(next(iter(pen))) == "Oak Street"          # the closed block only, not its neighbour
+    r = g.route(at(4, 0), to, P, pen, wrongway_m=60)
+    assert r is not None and "West Street" in names(g, r)

@@ -360,7 +360,9 @@ class Graph:
                 continue
             road = street_key(r.get("road") or "")
             hits: dict[int, int] = {}
-            for line in rp._lines(r.get("geometry")):
+            lines = rp._lines(r.get("geometry"))
+            need = 1 if all(len(ln) == 1 for ln in lines) else 2     # a line: along it, not only touching its end
+            for line in lines:
                 for px, py in self._sample([self.to_xy(lo, la) for lo, la in line], 15.0):
                     for e in self.near_edges(px, py, CLOSURE_M):
                         if how == "ramp" and self.ecls[e] not in (7, 8, 9, 10, 11):
@@ -368,7 +370,7 @@ class Graph:
                         if self._onto(self.xy(e), px, py)[0] <= CLOSURE_M:
                             hits[e] = hits.get(e, 0) + 1
             for e, k in hits.items():
-                ok = (road and road in self.street_keys(e)) or (not road and k >= 2)
+                ok = k >= need and (road in self.street_keys(e) if road else k >= 2)
                 if ok:
                     out[e] = max(out.get(e, 1.0), factor)
         return out
@@ -428,8 +430,8 @@ class Graph:
             _, m, way, w = goals[n]
             for code in self.adj[n]:
                 f = code >> 1
-                if code & 1 or not self.eow[f] or f == e:
-                    continue                                          # only one-way edges leaving n (a = n)
+                if code & 1 or not self.eow[f] or f == e or pen.get(f, 1.0) == math.inf:
+                    continue                                          # only one-way edges leaving n (a = n), not closed
                 w2 = w + self.elen[f]
                 if w2 > wrongway_m:
                     continue
