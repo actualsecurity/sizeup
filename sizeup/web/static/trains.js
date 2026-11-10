@@ -34,6 +34,13 @@
 //                station (or the event's point on the tracks): minutes away, stops or passes, delay, track;
 //                times the MTA predicts, or ours (a pass between stations: "estimated"). Every 30 s while
 //                the event is open and the panel on screen; hidden for any other event.
+//   Tracks       (#371) a train the hub puts on a numbered track ("trk": from the track posted or planned at the stop
+//                it left or the one it is going to, MTA TrainTime) lies along that track (the hub's "tracks": the
+//                line's four tracks, Metro-North's GIS); "Trk 2" in its box. Otherwise its direction's outer track.
+//   Poles · MP   (#371) a second box in the group, "Poles · mileposts" (key "railref", off by default): the catenary
+//                structures' numbers from street zoom, the mileposts (whole miles from zoom 12, tenths from 15), from
+//                GET /api/cad/trains/railref once while on. A train's box and the event's panel say "near pole 249 ·
+//                MP 25.3" when the hub knows them (within 150 m of the line).
 //   Data         only ever from the hub: GET /api/cad/trains and /api/cad/trains/near (sizeup/trains.py). The
 //                browser never talks to the MTA. The MTA's terms: we say where the data is from, that times
 //                may not be real time, and the feed's time.
@@ -43,13 +50,14 @@ window.TrainLayer = (() => {
   const URL = "/api/cad/trains", NEAR = "/api/cad/trains/near";
   const ROUTE = "/api/cad/trains/route", DEPS = "/api/cad/trains/departures";   // MTA TrainTime (#362)
   const DEP_STATIONS = ["2PC", "2RY"];        // Port Chester, Rye: their next departures in the station's box
-  const KEY = "trains";
+  const KEY = "trains", REF_KEY = "railref", RAILREF = "/api/cad/trains/railref";   // poles and mileposts (#371)
   const POLL_MS = 5000, PANEL_MS = 30000;
   const ANIMATE_MS = 100;                    // ~10 redraws a second while a train moves (motion.js)
   const PREDICTED_M = 5;                     // drawn this far ahead of the MTA's report: "predicted"
   const STALE_OPACITY = 0.45;                // a train frozen on an old feed: faded
   const BACKOFF_MS = [10000, 60000];         // a failed poll: 10 s doubling to a minute
   const SRC_LINE = "tr-line", SRC_ST = "tr-stations", SRC_TR = "tr-trains", SRC_CARS = "tr-cars", SRC_ROUTE = "tr-route";
+  const SRC_REF = "tr-railref", REF_IDS = ["tr-pole", "tr-pole-label", "tr-mp", "tr-mp-label"];
   const CAR_IDS = ["tr-car-case", "tr-cab-case", "tr-car", "tr-cab", "tr-gap"];
   const IDS = ["tr-line", "tr-route", "tr-station", "tr-station-label", ...CAR_IDS, "tr-train", "tr-train-label"];
   const MAX_CARS = 16;
@@ -98,7 +106,7 @@ window.TrainLayer = (() => {
         const r = await fetch(URL + have, { credentials: "same-origin" });
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const d = await r.json();
-        if (d.static_same && had) { d.line = had.line; d.stations = had.stations; d.lanes = had.lanes; }
+        if (d.static_same && had) { d.line = had.line; d.stations = had.stations; d.lanes = had.lanes; d.tracks = had.tracks; }
         store.data = d;
         store.at = Date.now();
         store.fails = 0;
@@ -293,8 +301,10 @@ window.TrainLayer = (() => {
   }
   // where the train's front is on which track, and which way its cars lie: its own lane at its s; else the nearest
   // point of the line, the cars back the way its bearing says it came
-  function frontOf(t, line, lanes) {
-    const lane = lanes && (t.d > 0 ? lanes.outbound : t.d < 0 ? lanes.inbound : null);
+  function frontOf(t, line, lanes, tracks) {
+    const own = tracks && t.trk ? tracks[t.trk] : null;            // its numbered track (#371)
+    const lane = own && own.length > 1 && typeof t.s === "number" && t.s >= own[0][2] && t.s <= own[own.length - 1][2] ? own
+      : lanes && (t.d > 0 ? lanes.outbound : t.d < 0 ? lanes.inbound : null);
     const tr = trackOf(lane);
     if (tr.xy && typeof t.s === "number" && t.s >= tr.at[0] && t.s <= tr.at[tr.at.length - 1]) return { tr, s: t.s, back: -Math.sign(t.d) };
     const lt = trackOf(line);
@@ -313,8 +323,8 @@ window.TrainLayer = (() => {
     return { tr: lt, s: best.s + (t.ds || 0), back };         // (ds: carried on along the line since the hub's s)
   }
   // {cars: [features], mid: [lon, lat]} for a train on a track, or null
-  function onTrack(t, line, lanes) {
-    const f = frontOf(t, line, lanes);
+  function onTrack(t, line, lanes, tracks) {
+    const f = frontOf(t, line, lanes, tracks);
     if (!f) return null;
     const { tr, s, back } = f, n = carsOf(t), len = n * M_PER_CAR;
     const part = (a, b, kind) => ({ type: "Feature", geometry: { type: "LineString", coordinates: piece(tr, Math.min(a, b), Math.max(a, b)) },
@@ -338,8 +348,34 @@ window.TrainLayer = (() => {
     const nx = tt.next;
     const trk = nx && nx.track ? ` trk\u00a0${nx.track}${nx.posted ? "" : " planned"}` : "";
     return [[tt.branch, dir].filter(Boolean).join(" "), cars, late(tt.late_s != null ? tt.late_s : t.delay_s),
-            typeof t.mp === "number" ? `MP\u00a0${t.mp.toFixed(1)}` : "", nx ? `next ${nx.name}${trk}` : t.next_stop ? `next ${t.next_stop}` : ""]
+            nx ? `next ${nx.name}${trk}` : t.next_stop ? `next ${t.next_stop}` : ""]
       .filter(Boolean).join(" · ");
+  }
+  // where it is (#371): "Trk 2 · near pole 249 · MP 25.3", what the hub knows of it; how the track is known on hover
+  const TRK_HOW = { posted: "posted at", planned: "planned at", mta: "the MTA's track at" };
+  function placeLine(t) {
+    const txt = [t.trk ? `Trk\u00a0${t.trk}` : "", t.pole ? `near pole ${t.pole}` : "",
+                 typeof t.mp === "number" ? `MP\u00a0${t.mp.toFixed(1)}` : ""].filter(Boolean).join(" · ");
+    if (!txt) return null;
+    const n = h("div", "", txt);
+    const tt = t.tt || {}, stops = [tt.prev, tt.next].filter((x) => x && x.track === t.trk).map((x) => x.name || x.code);
+    n.title = [t.trk ? (t.trk_src === "nearest" ? `Track ${t.trk}: the nearest to its GPS position`
+                        : `Track ${t.trk}: ${TRK_HOW[t.trk_src] || "at"} ${stops[0] || "its stops"}`) : "",
+               t.pole ? "Pole: the nearest catenary structure (Metro-North GIS)" : "",
+               typeof t.mp === "number" ? "Milepost from Grand Central" : ""].filter(Boolean).join("\n");
+    return n;
+  }
+  function refText(ref) {                     // the event's panel (#371): "pole 249 · MP 25.3"
+    return [ref.pole ? `pole ${ref.pole}` : "", typeof ref.mp === "number" ? `MP ${ref.mp.toFixed(1)}` : ""].filter(Boolean).join(" · ");
+  }
+  const refStore = { data: null, loading: null, at: 0 };
+  function loadRef() {                        // the poles and mileposts: once while the box is on (they change monthly)
+    if (refStore.loading || (refStore.data && Date.now() - refStore.at < 6 * 3600e3)) return refStore.loading || Promise.resolve();
+    refStore.loading = fetch(RAILREF, { credentials: "same-origin" }).then((r) => (r.ok ? r.json() : null))
+      .then((j) => { if (j) { refStore.data = j; refStore.at = Date.now(); } })
+      .catch(() => { /* the hub is away: the box asks again when turned on */ })
+      .finally(() => { refStore.loading = null; for (const m of maps) m.sync(); });
+    return refStore.loading;
   }
   function carBars(tt) {
     const cars = tt.car_loads || [];
@@ -367,9 +403,11 @@ window.TrainLayer = (() => {
       store.subs.add(() => this.sync());
       this.map.on("click", (e) => this.clicked(e));
       if (this.isOn()) kick();
+      else if (this.isRefOn()) this.sync();     // the poles and mileposts alone (#371)
     }
     isOn() { return this.control.on(KEY, false); }
-    keys() { return [[KEY, false]]; }
+    isRefOn() { return this.control.on(REF_KEY, false); }
+    keys() { return [[KEY, false], [REF_KEY, false]]; }
     refresh() { this.sync(); kick(); }
     ready() { try { return this.added || this.map.isStyleLoaded() || this.map.loaded(); } catch (_) { return false; } }
 
@@ -438,6 +476,20 @@ window.TrainLayer = (() => {
                                                                   SCALE_FROM, ["array", "number", 2, ["get", "off_lo"]],
                                                                   SCALE_TO, ["array", "number", 2, ["get", "off_hi"]]] }) },
                      paint: { "text-color": ["case", ["get", "estimated"], text, warn], "text-halo-color": HALO, "text-halo-width": 1.6, "text-opacity": fade } }, before);
+      // the catenary structures' numbers and the mileposts (#371): poles from street zoom, whole miles from 12, tenths from 15
+      map.addSource(SRC_REF, { type: "geojson", data: fc([]), attribution: "Metro-North GIS" });
+      const isMp = ["==", ["get", "kind"], "mp"], isPole = ["==", ["get", "kind"], "pole"];
+      const mpZoom = ["any", ["get", "whole"], [">=", ["zoom"], 15]];
+      map.addLayer({ id: "tr-pole", type: "circle", source: SRC_REF, filter: isPole, minzoom: 15, layout: vis,
+                     paint: { "circle-radius": 2.5, "circle-color": line, "circle-stroke-color": HALO, "circle-stroke-width": 1 } }, before);
+      map.addLayer({ id: "tr-pole-label", type: "symbol", source: SRC_REF, filter: isPole, minzoom: 16,
+                     layout: { ...vis, ...label(["get", "id"], 10, { "text-anchor": "left", "text-offset": [0.5, 0] }) },
+                     paint: { "text-color": line, "text-halo-color": HALO, "text-halo-width": 1.4 } }, before);
+      map.addLayer({ id: "tr-mp", type: "circle", source: SRC_REF, filter: ["all", isMp, ["get", "whole"]], minzoom: 12, layout: vis,
+                     paint: { "circle-radius": 3, "circle-color": warn, "circle-stroke-color": HALO, "circle-stroke-width": 1 } }, before);
+      map.addLayer({ id: "tr-mp-label", type: "symbol", source: SRC_REF, filter: ["all", isMp, mpZoom], minzoom: 12,
+                     layout: { ...vis, ...label(["get", "label"], 10, { "text-anchor": "right", "text-offset": [-0.6, 0] }) },
+                     paint: { "text-color": warn, "text-halo-color": HALO, "text-halo-width": 1.4 } }, before);
       for (const id of CLICKABLE) {
         map.on("mouseenter", id, () => { map.getCanvas().style.cursor = "pointer"; });
         map.on("mouseleave", id, () => { map.getCanvas().style.cursor = ""; });
@@ -446,18 +498,22 @@ window.TrainLayer = (() => {
     }
 
     sync() {
-      if (!this.isOn() && !this.added) { this.panelChanged(); return; }
+      if (!this.isOn() && !this.isRefOn() && !this.added) { this.panelChanged(); return; }
       if (!this.ready()) { this.map.once("idle", () => this.sync()); return; }
       try { this.add(); } catch (e) { console.error("trains layer", e); return; }
-      const d = store.data, on = this.isOn();
+      const d = store.data, on = this.isOn(), refOn = this.isRefOn();
       for (const id of IDS) if (this.map.getLayer(id)) this.map.setLayoutProperty(id, "visibility", on ? "visible" : "none");
+      for (const id of REF_IDS) if (this.map.getLayer(id)) this.map.setLayoutProperty(id, "visibility", refOn ? "visible" : "none");
+      if (refOn) this.syncRef();
       if (on && d) {
         if (d.line !== this.line) {             // the line and stations: only when the hub sent new ones
           this.line = d.line;
           this.lanes = d.lanes && d.lanes.outbound && d.lanes.inbound ? d.lanes : null;
+          this.tracks = d.tracks && Object.keys(d.tracks).length ? d.tracks : null;   // the numbered tracks (#371)
           this.sig = "";                        // the cars lie along it: lay them again
           const ln = (coords, dir) => ({ type: "Feature", geometry: { type: "LineString", coordinates: coords.map((c) => [c[0], c[1]]) }, properties: { dir } });
-          const drawn = this.lanes ? [ln(this.lanes.outbound, "outbound"), ln(this.lanes.inbound, "inbound")]   // each way's own track
+          const drawn = this.tracks ? Object.entries(this.tracks).map(([k, c]) => ln(c, k))          // every numbered track
+            : this.lanes ? [ln(this.lanes.outbound, "outbound"), ln(this.lanes.inbound, "inbound")]   // each way's own track
             : d.line && d.line.length > 1 ? [ln(d.line, "")] : [];
           this.map.getSource(SRC_LINE).setData(fc(drawn));
           this.map.getSource(SRC_ST).setData(fc((d.stations || []).map((s) => pt(s.lon, s.lat, { id: s.id, name: s.name }))));
@@ -466,6 +522,15 @@ window.TrainLayer = (() => {
         this.draw(true, Date.now());
       }
       this.panelChanged();
+    }
+    syncRef() {                                 // the poles and mileposts (#371): set once a copy is here
+      const r = refStore.data;
+      if (!r) { loadRef(); return; }
+      if (this.refShown === r) return;
+      this.refShown = r;
+      this.map.getSource(SRC_REF).setData(fc([
+        ...(r.poles || []).map((p) => pt(p.lon, p.lat, { kind: "pole", id: p.id })),
+        ...(r.mileposts || []).map((m) => pt(m.lon, m.lat, { kind: "mp", whole: !!m.whole, label: m.whole ? `MP ${m.mp}` : m.mp.toFixed(1) }))]));
     }
     // The trains where motion.js has them now (each answer, then every ANIMATE_MS while one moves): each train's
     // cars rebuilt along its track at the drawn s; its label and click target with it. One setData for the cars and
@@ -492,7 +557,7 @@ window.TrainLayer = (() => {
       const cars = [];
       this.map.getSource(SRC_TR).setData(fc((d.trains || []).map((x) => {
         const w = drawn.get(x.id), t = { ...x, s: w.s, ds: typeof x.s === "number" ? w.s - x.s : 0, stale: w.stale };
-        const on = onTrack(t, this.line, this.lanes);
+        const on = onTrack(t, this.line, this.lanes, this.tracks);
         if (on) cars.push(...on.cars);
         const half = on ? (z) => trackHalf(t, z) : (z) => iconHalf(t, z === SCALE_TO ? sizeAt(SCALE_TO) : MIN_SIZE);
         const [anchor, off_lo] = labelPlace(t.bearing, ...half(SCALE_FROM)), off_hi = labelPlace(t.bearing, ...half(SCALE_TO))[1];
@@ -546,12 +611,15 @@ window.TrainLayer = (() => {
         const pos = this.where(t, d);
         if (pos.stale) lines.push(h("div", "warn", pos.stale));      // #278: up top, in the warning colour
         if (t.tt) return this.showTT(t, d, pos, icon, credit);       // MTA TrainTime's facts (#362)
-        lines.push([t.dir_label, t.next_stop ? `Next ${t.next_stop}${t.next_time ? ` ${hm(t.next_time)}` : ""}` : "", t.track ? `Trk ${t.track}` : ""]
+        lines.push([t.dir_label, t.next_stop ? `Next ${t.next_stop}${t.next_time ? ` ${hm(t.next_time)}` : ""}` : "",
+                    t.track && t.track !== t.trk ? `Trk ${t.track}` : ""]
           .filter(Boolean).join(" · "));
         const said = (t.status || "").toLowerCase();         // the MTA's word, unless the delay already says it
         const status = [late(t.delay_s), said && said !== "on-time" && !(said === "late" && t.delay_s > 0) ? t.status : "",
                         pos.say, t.cars ? `${t.cars} car${t.cars === 1 ? "" : "s"}` : ""].filter(Boolean).join(" · ");
         if (status) lines.push(status);
+        const place = placeLine(t);
+        if (place) lines.push(place);
         lines.push(d.catenary);
         const tip = [pos.why, t.cars ? "Cars: from the MTA" : `Cars: not given by the MTA (drawn as ${LOOK_CARS})`, credit].join("\n");
         this.control.showInfo(`Train ${t.train}`, `${t.line ? `${t.line} Line` : "Metro-North"} → ${t.headsign}`, lines, foot, "", icon, tip);
@@ -579,6 +647,8 @@ window.TrainLayer = (() => {
       if (tt.next && tt.next.track) head.title = `Track ${tt.next.track} at ${tt.next.name}: ${tt.next.posted ? "posted" : "planned, not posted yet"}`
         + (tt.next.track_change ? " (track change)" : "");
       lines.push(head);
+      const place = placeLine(t);
+      if (place) lines.push(place);
       const spd = typeof tt.speed_mph === "number" && t.pos_src === "traintime" ? `${Math.round(tt.speed_mph)} mph` : "";
       lines.push([pos.say.replace(/ (by )?\d\d:\d\d(:\d\d)?/, ""), spd].filter(Boolean).join(" · "));   // its time: in the footer
       const bars = carBars(tt);
@@ -671,6 +741,16 @@ window.TrainLayer = (() => {
       lab.append(cb, ...(mark ? [mark] : []), h("span", "", "Metro-North"));
       lab.title = "New Haven Line";
       box.append(lab);
+      const rlab = h("label", "check"), rcb = h("input");          // the poles and mileposts (#371)
+      rcb.type = "checkbox";
+      rcb.checked = this.isRefOn();
+      rcb.dataset.key = REF_KEY;
+      rcb.addEventListener("change", () => { this.control.setLayer(REF_KEY, rcb.checked); this.sync(); });
+      rlab.append(rcb, h("span", "", "Poles · mileposts"));
+      const r = refStore.data;
+      rlab.title = ["Catenary structure numbers and mileposts", r ? `${(r.poles || []).length} poles · ${(r.mileposts || []).length} mileposts` : "",
+                    r && r.error ? r.error : "", "Metro-North GIS"].filter(Boolean).join("\n");
+      box.append(rlab);
       if (!this.isOn()) return box;
       if (!d) { box.append(h("div", "ml-note", "Loading…")); return box; }
       if (!d.configured || d.note) { box.append(h("div", "ml-note", cap(d.note) || "Not configured")); return box; }
@@ -745,7 +825,7 @@ window.TrainLayer = (() => {
     head.type = "button";
     head.setAttribute("aria-expanded", String(st.open));
     if (window.Icon) head.append(Icon("gis-train"));
-    head.append(h("b", "", "Trains approaching"), h("span", "dim small", where(d.ref)));
+    head.append(h("b", "", "Trains approaching"), h("span", "dim small", [where(d.ref), refText(d.ref)].filter(Boolean).join(" · ")));
     head.append(h("span", "spacer"), h("span", "dim small", "MTA"), h("span", "car dim", st.open ? "▾" : "▸"));
     head.addEventListener("click", () => { st.open = !st.open; draw(st, host); });
     host.replaceChildren(head);

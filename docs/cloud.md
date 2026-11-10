@@ -1822,6 +1822,39 @@ Tests: `tests/test_traintime.py` on a **synthetic** fixture with the API's shape
 parse, validation, the merge, fallback, a change of shape, back-off, route lines and departures. No test
 reaches the MTA (`tests/conftest.py`).
 
+### Numbered tracks, catenary poles, mileposts (#371)
+
+> "Snap each train to its numbered track ... Show the track in the popup ('Trk 2') ... catenary structure (pole)
+> numbers and mileposts ... An incident near the tracks shows the nearest pole and milepost: useful for telling
+> Metro-North where crews are." (GitHub #371)
+
+`sizeup/railassets.py`. **Source:** Metro-North's own GIS, a public ArcGIS Online feature service of the MTA's
+(`ROWAccessPoints/FeatureServer`, no key): layer 6 *MNR Railroad Track* (`TrkName` 1..4 on the main line here),
+7 *Catenary Bridge* (`CB_ID`, e.g. `CB-249`), 2 *Milepost* and 3 *Tenth Milepost*. Coverage checked 2026-11-09,
+Rye station to just past Greenwich: 4 main tracks, 149 catenary structures (CB-185..CB-317), 8 whole and 65
+tenth mileposts; over the layer's area 9 numbered tracks, 453 structures, 224 mileposts. OpenStreetMap has the
+four tracks (`railway:track_ref`) but **no catenary numbers** and mileposts only every few miles, so it isn't
+used. Fetched **monthly** by the Data sources registry (*Metro-North tracks, poles, mileposts (MTA GIS)*), one
+layer at a time, an envelope query for the area only (the tracks thinned server-side to ~0.5 m: ~340 KB in
+all), kept in `trains/rail_assets.json` and S3.
+
+**Track:** each track is measured along the static feed's line (its `s`), so the motion code keeps one
+distance and only the drawing changes. A train's track is the one at the stop it last left or the one it is
+going to, whichever is nearer along the line: TrainTime's posted track (`sign_track`), else its planned one
+(`t2s_track`), else GTFS-realtime's track for the stop; with none, a TrainTime GPS fix within 15 m of a
+numbered track. A track we have no line for (Stamford's 5) is ignored. No track known, or no data: the
+direction's outer track, as before. The box: *Trk 2 · near pole 249 · MP 25.3* (how the track is known on
+hover).
+
+**Poles and mileposts:** the nearest structure along the line (within 150 m), and the milepost read off the
+two either side (straight between; a milepost out of order along the line is left out). A train's box, and
+the event's *Trains approaching* panel for an incident within 150 m of the line, say them. *Poles ·
+mileposts* in the Trains group of the Layers box draws them (`GET /api/cad/trains/railref`): pole numbers from
+zoom 15 (labels from 16), whole mileposts from 12, tenths from 15.
+
+Tests: `tests/test_rail_assets.py`, synthetic geometry (four parallel tracks, a portal every 100 m, a
+milepost every tenth) and a few real features by Port Chester (`tests/fixtures/mta/railassets/`).
+
 ## Aircraft near HPN (shortfinal's picture)
 
 > "can we pull in the shortfinal components into this as additional layers? the way we implemented the data
@@ -2248,6 +2281,7 @@ kept gzipped in the same bucket, `s3://$LITESTREAM_BUCKET/$LITESTREAM_PATH/cache
 | `roadprojects.json` | road projects & closures | at most hourly |
 | `trains/static.json`, `trains/points.json` | Metro-North's stations and line; the reporting points learned | at once; at most hourly |
 | `trains/traintime_routes.json` | Metro-North route lines from MTA TrainTime, clipped to the area (#362) | at once |
+| `trains/rail_assets.json` | Metro-North's numbered tracks, catenary poles and mileposts in the area (#371) | at once |
 | `aircraft/faa_registry.sqlite` | the FAA registry as built (~weekly) | at once |
 
 On start (in the background after the CAD serves, #251: `App.start_layers` → `_load_layers`, before the

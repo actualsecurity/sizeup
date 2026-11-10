@@ -654,9 +654,9 @@ def test_a_train_on_the_line_is_its_cars_along_the_track_to_scale():
     front, thin gaps across it at the cars' ends from street zoom, every outline under every body."""
     js = (STATIC / "trains.js").read_text()
     assert "const M_PER_CAR = 25.9" in js and "NEAR_M = 100" in js
-    assert "function onTrack(t, line, lanes)" in js and "if (!best || best.d > NEAR_M) return null;" in js
+    assert "function onTrack(t, line, lanes, tracks)" in js and "if (!best || best.d > NEAR_M) return null;" in js
     assert "piece(tr, Math.min(a, b), Math.max(a, b))" in js and "const back = Math.cos(segB - b) >= 0 ? -1 : 1;" in js
-    assert "const lane = lanes && (t.d > 0 ? lanes.outbound : t.d < 0 ? lanes.inbound : null);" in js
+    assert ": lanes && (t.d > 0 ? lanes.outbound : t.d < 0 ? lanes.inbound : null);" in js     # (its numbered track first, #371)
     assert "return { tr, s: t.s, back: -Math.sign(t.d) };" in js and "if (coords[0].length > 2) at = coords.map((c) => c[2]);" in js
     assert 'const cars = [part(s, s + back * len, "body"), part(s, s + back * M_PER_CAR, "cab")];' in js
     assert 'filter: part("gap"), minzoom: GAP_ZOOM' in js and "GAP_ZOOM = 16" in js

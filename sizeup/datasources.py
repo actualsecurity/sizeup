@@ -559,6 +559,10 @@ def trains_sources(trains) -> list[Source]:
         if not trains.tt.enabled:
             return off() or {"on": False, "why": "off ([trains] traintime = false)"}
         return {"at": trains.tt.geo["at"], "error": trains.tt.geo["error"], "n": len(trains.tt.routes)}
+    from sizeup import railassets as ra
+
+    def assets() -> dict:
+        return off() or trains.assets.status()
     return [
         Source("trains:static", "Metro-North stations and line (GTFS)", "Transit", t.SOURCE, t.LINK_URL, f"Data: {t.SOURCE}",
                static, trains.refresh_static, every="daily", hold=_hold(trains.st), quiet=True, min_gap_s=600.0,
@@ -574,6 +578,9 @@ def trains_sources(trains) -> list[Source]:
         Source("trains:traintime-routes", "Metro-North route lines (MTA TrainTime)", "Transit", tt.SOURCE, tt.BASE_URL,
                f"Data: {t.SOURCE}", routes, trains.tt.refresh_routes, builtin="daily, or when a route is missing",
                min_gap_s=600.0, blocked=lambda: _resting(trains.tt.geo, trains.clock)),
+        Source("trains:railassets", "Metro-North tracks, poles, mileposts (MTA GIS)", "Transit", ra.SOURCE, ra.LINK,
+               ra.ATTRIBUTION, assets, trains.refresh_assets, every="monthly", hold=_hold(trains.assets.st), quiet=True,
+               min_gap_s=600.0, blocked=lambda: _resting(trains.assets.st, trains.clock)),
     ]
 
 
