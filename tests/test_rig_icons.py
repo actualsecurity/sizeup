@@ -213,6 +213,26 @@ clickHouse("Brooksville Engine & Hose #5"); out.none = [L.pop.find("cm-pop-head"
 
 
 @needs_node
+def test_the_open_list_keeps_to_the_state(tmp_path):
+    """A new state that changes a row (E60 dispatched) lays the list out again, with no focus taken; one that changes
+    nothing leaves it be; once the box is another's (a rig's), the list is not put back."""
+    o = run(tmp_path, SNAP + r"""
+zoomTo(13); clickHouse(IN.hq);
+const first = L.pop.children[1];
+setMap({ ...IN.map }); out.same = L.pop.children[1] === first;
+const moved = IN.map.markers.map((m) => (m.unit === "E60" ? { ...m, status: "DP", look: "dispatched" } : m));
+focused = null; setMap({ ...IN.map, markers: moved });
+out.changed = [L.pop.children[1] === first, rows().map((r) => r.dataset.unit).slice(0, 3), rowOf("E60").children[2].textContent, focused];
+L.openInfo(cad.state.map.markers.find((m) => m.unit === "E61"));
+setMap({ ...IN.map }); out.info = [L.stationOpen, rows().length];
+""", page_state())
+    assert o["same"] is True
+    assert o["changed"][0] is False and o["changed"][1] == ["E60", "E63", "L31"] and o["changed"][2] == "Dispatched"
+    assert o["changed"][3] is None
+    assert o["info"] == [None, 0]
+
+
+@needs_node
 def test_a_rig_in_the_list_is_followed_or_lit_up(tmp_path):
     o = run(tmp_path, SNAP + r"""
 zoomTo(13);

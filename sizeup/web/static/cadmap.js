@@ -633,6 +633,9 @@ window.CadMap = (() => {
       }
       for (const [name, rec] of this.chips) if (!seen.has(name)) { rec.marker.remove(); this.chips.delete(name); }
       this.drawBadges(sizes.badges, M, lists);
+      if (this.stationOpen && !this.pop.hidden) {          // #384: the open list kept to the state (a status, a call)
+        if (this.listSig(this.stationRigs(this.stationOpen)) !== this.stationSig) this.openStation(this.stationOpen, true);
+      }
     }
 
     // #376: a firehouse's idle rigs below detail_zoom as one count chip (#384: on top of its icon, "6", the size of
@@ -687,12 +690,16 @@ window.CadMap = (() => {
         .sort((a, b) => CLASS_ORDER[rigClass(a[0])] - CLASS_ORDER[rigClass(b[0])] || a[1] - b[1]).map(([m]) => m);
     }
 
+    listSig(rigs) { return JSON.stringify(rigs.map((m) => [m.unit, m.status, m.icon, m.incident_number, this.chips.has(m.unit)])); }
+
     // #384: a firehouse clicked (its icon or its count chip): its rigs in the map's box, each with its type and status;
     // a click on one follows it (#358) or, where the map follows nothing, centres and rings it; hovered: ringed wider.
     // Zoom to: the firehouse at detail_zoom (its rigs drawn one by one).
-    openStation(name) {
+    // refresh: the list open, laid out again on a new state that changes its rows (the focus left where it is)
+    openStation(name, refresh) {
       if (!this.data || !this.data.map) return;
       const lists = this.data.lists, rigs = this.stationRigs(name);
+      this.stationSig = this.listSig(rigs);
       const go = this.onFollow || this.onFocus;
       const head = h("div", "cm-pop-head");
       head.append(h("b", "", name), " ", h("span", "dim small", rigs.length ? `${rigs.length} rig${rigs.length === 1 ? "" : "s"}` : "No rigs"));
@@ -725,6 +732,7 @@ window.CadMap = (() => {
       this.pop.replaceChildren(head, list, row);
       this.pop.hidden = false;
       this.stationOpen = name;
+      if (refresh) return;
       this.pop.tabIndex = -1;
       this.pop.focus({ preventScroll: true });          // Escape closes it (the pop's keydown); Tab: its rows
     }
@@ -843,6 +851,7 @@ window.CadMap = (() => {
     }
 
     openInfo(m) {
+      this.stationOpen = null;                         // the box is this rig's now (#384)
       const st = statusOf(this.data && this.data.lists, m.status);
       const head = h("div", "cm-pop-head");
       head.append(h("b", "", m.unit));
@@ -859,6 +868,7 @@ window.CadMap = (() => {
     }
 
     openPicker(id, name, current, m) {
+      this.stationOpen = null;                         // the box is the picker's now (#384)
       const stations = (this.data && this.data.map && this.data.map.stations) || [];
       const pop = this.pop;
       const sel = h("select");
