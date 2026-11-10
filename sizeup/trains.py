@@ -106,8 +106,9 @@ HTTP (sizeup/web/server.py; any signed-in person, GET only):
     GET /api/cad/trains/departures?station=2PC   a station's next departures from MTA TrainTime /countdown (#362)
     GET /api/cad/trains/railref         the poles and mileposts layer (#371, sizeup/railassets.py): {source, at, error,
                                         poles: [{id, lon, lat}], mileposts: [{mp, lon, lat, whole}]}
-  A train also carries lane (the numbered track it is drawn on), trk / trk_src / trk_at (its track and who said it,
-  posted | planned | mta, at which stop; only within TRACK_NEAR_M of that stop), pole and mp (#371); the layer
+  A train also carries lane (the numbered track it is drawn on) and lane_how (said | held | outer: how sure), trk /
+  trk_src / trk_at (its track and who said it, posted | planned | mta, at which stop; only within TRACK_NEAR_M of that
+  stop), lane_at (held: the stop whose word it is), pole and mp (#371); the layer
   "tracks": {"1": [[[lon, lat, s]...] run...]} beside the lanes and "railref": {poles: [[s, id]], mps: [[s, mp]]};
   the event's ref pole / mp.
 
@@ -217,6 +218,7 @@ TRACKS_FILE = ROOT / "data" / "mnr_tracks.json"       # each direction's own tra
 LANE_OFF_M = 40.0                # a lane's point further than this from the line: not measured on this line
 LANE_SLIP_M = 30.0               # nor one whose s is this far from where it projects
 TRACK_NEAR_M = 1500.0            # a stop's track says which track a train is on only this close to the stop (#371)
+TRACK_HOLD_M = 4000.0            # a stop's track held no further than this from the stop (an express may cross over beyond)
 TRACK_RANK = {"posted": 3, "planned": 2, "mta": 1}  # whose word for a stop's track wins: TrainTime's posted, planned, GTFS-rt
 OUTER_TRACK = {1: "4", -1: "3"}  # the direction's outer track: where the MTA's stops put trains here (fetch_train_tracks.py)
 TRACK_MEM_S = 3600.0             # a train's remembered track forgotten this long after it was last drawn
@@ -791,26 +793,36 @@ class Model:
         return {"trk": trk, "src": src, "ch": ch, "name": name}
 
     def which_track(self, t: dict, anchors: list, p: int | None, n: int | None, s: float, d: int,
-                    mem: dict | None = None) -> tuple[str, dict | None]:
-        """(the numbered track the train is drawn on, the evidence shown for it or None) (#371). mem: what we remember
-        of this train (Tracker.trk_mem): its track changes only on new stop-track evidence (another stop's, or a
-        better word for the same stop: posted over planned over GTFS-realtime), so a merge flipping between
-        TrainTime and GTFS-realtime, or a stretch between stations, doesn't move it. Never any evidence: the
-        direction's outer track (3 inbound, 4 outbound), so it lies on a drawn track. "Trk N" (the evidence) only
-        within TRACK_NEAR_M of the stop that said it. ("", None) with no numbered track here."""
+                    mem: dict | None = None) -> tuple[str, dict | None, str]:
+        """(the numbered track the train is drawn on, the evidence it is drawn by or None, how sure: "said" | "held" |
+        "outer") (#371). "said": within TRACK_NEAR_M of the stop that said it; "held": the last stop's word, kept up to
+        TRACK_HOLD_M from that stop (beyond, an express may have crossed over: not held); "outer": nothing says, so the
+        direction's outer track (3 inbound, 4 outbound), only so it lies on a drawn track (an express may well be on
+        an inner one): not known. mem: what we remember of this train (Tracker.trk_mem): its track changes only on
+        better stop-track evidence (_better), so a merge flipping between TrainTime and GTFS-realtime doesn't move it.
+        ("", None, "") with no numbered track here."""
         if not self.track_lanes:
-            return "", None
+            return "", None, ""
         ev = self.track_evidence(t, anchors, p, n, s)
         if mem is not None:
             old = mem.get("ev")
-            if ev is not None and (old is None or round(ev["ch"]) != round(old["ch"]) or ev["trk"] == old["trk"]
-                                   or TRACK_RANK[ev["src"]] >= TRACK_RANK[old["src"]]):
+            if ev is not None and (old is None or self._better(ev, old, d)):
                 mem["ev"] = ev
             ev = mem.get("ev")
-        if ev is not None and self.track_at(ev["trk"], s) is not None:
-            return ev["trk"], (ev if abs(ev["ch"] - s) <= TRACK_NEAR_M else None)
+        if ev is not None and abs(ev["ch"] - s) <= TRACK_HOLD_M and self.track_at(ev["trk"], s) is not None:
+            return ev["trk"], ev, "said" if abs(ev["ch"] - s) <= TRACK_NEAR_M else "held"
         outer = OUTER_TRACK.get(d, "")
-        return (outer if self.track_at(outer, s) is not None else ""), None
+        return (outer, None, "outer") if self.track_at(outer, s) is not None else ("", None, "")
+
+    @staticmethod
+    def _better(ev: dict, old: dict, d: int) -> bool:
+        """New stop-track evidence replaces what a train's track was drawn by (#371): for the same stop, only an equal or
+        better word (posted over planned over GTFS-realtime; the same track from a weaker source keeps the stronger
+        one); another stop's, only when that stop is ahead of the old one in the direction of travel (a merge
+        alternating TrainTime's next stop with GTFS-realtime's last one would flip it back and forth)."""
+        if round(ev["ch"]) == round(old["ch"]):
+            return TRACK_RANK[ev["src"]] >= TRACK_RANK[old["src"]]
+        return (ev["ch"] - old["ch"]) * d > 0 if d in (1, -1) else True
 
     @staticmethod
     def _interp(x: float, xs: list[float], ys: list[float]) -> float:
@@ -938,7 +950,7 @@ class Model:
                 s, mode = nxt[1], "stopped"              # at its first stop, or the feed says it is at the next
             else:
                 s, mode = prev[1], "stopped"             # the feed hasn't said it left
-        lane, ev = self.which_track(t, anchors, p, n, s, d, mem)
+        lane, ev, how = self.which_track(t, anchors, p, n, s, d, mem)
         lat, lon = self.where(d, s, lane)                # on its own numbered track, else its direction's
         hold_s, kind = s, "stop"
         if mode != "stopped":
@@ -967,7 +979,9 @@ class Model:
                 "hold_kind": kind, "predict_until": (fix["fix_at"] + (TT_HORIZON_S if fix.get("src") == "traintime" else PREDICT_S)
                                                      if fix is not None else None),
                 "segment": seg, "lag_s": round(lag, 1) if lag is not None else None,
-                **({"lane": lane} if lane else {}), **({"trk": ev["trk"], "trk_src": ev["src"], "trk_at": ev["name"]} if ev else {}),
+                **({"lane": lane, "lane_how": how} if lane else {}),
+                **({"trk": ev["trk"], "trk_src": ev["src"], "trk_at": ev["name"]} if ev and how == "said" else {}),
+                **({"lane_at": ev["name"]} if ev and how == "held" else {}),
                 **self.ref.at_s(s),
                 **({"v_fix": fix["v"]} if fix is not None and fix.get("v") is not None else {})}
 

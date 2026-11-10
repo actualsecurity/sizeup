@@ -12,6 +12,8 @@ from __future__ import annotations
 import json
 import math
 import re
+import shutil
+import subprocess
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
@@ -152,6 +154,24 @@ def test_a_track_with_a_gap_is_two_runs_and_nothing_is_drawn_across_it():
     assert [(round(l.s[0]), round(l.s[-1])) for l in m.track_lanes["4"]] == [(0, 3750), (4250, 8000)] and m.track_at("4", 4000) is None
 
 
+def test_a_track_whose_s_jumps_more_than_its_step_is_two_runs():
+    """A run is broken where its s jumps by more than the step itself plus TRACK_GAP_M (railassets.RailRef): here the
+    line runs east 4 km, turns and comes back west 60 m to the north, and a track between the two legs projects onto
+    the first leg and then the second. Its points are all by the line; one run would be a chord 4 km long."""
+    line = T.Line([(round(east(x), 7), LAT) for x in range(0, 4001, 500)]
+                  + [(round(east(x), 7), LAT + 60 * DLAT) for x in range(4000, -1, -500)])
+    run = [[east(x), LAT + 25 * DLAT] for x in range(0, 2000, 100)] + [[east(x), LAT + 35 * DLAT] for x in range(2000, 3601, 100)]
+    ref = R.RailRef({"tracks": {"1": [run]}}, line)
+    runs = ref.tracks["1"]
+    assert len(runs) == 2
+    assert (round(runs[0][0][2]), round(runs[0][-1][2])) == (0, 1900)                  # the first leg
+    first_leg_end = 4000 + 60
+    assert all(c[2] > first_leg_end for c in runs[1]) and len(runs[1]) == 17          # the way back
+    assert [c[2] for r in runs for c in r] == sorted(c[2] for r in runs for c in r)
+    whole = R.RailRef({"tracks": {"1": [[[east(x), LAT + 25 * DLAT] for x in range(0, 3601, 100)]]}}, line)
+    assert len(whole.tracks["1"]) == 1                                                  # (all on one leg: one run)
+
+
 # ---- the train on its numbered track ----------------------------------------------------------------------------
 
 
@@ -164,8 +184,15 @@ def anchors(ta="", tb=""):
 
 
 def track(model, t, s, a=None, d=1, mem=None):
-    lane, ev = model.which_track(t, a or anchors(), 0, 1, s, d, mem)
-    return lane, (ev["trk"], ev["src"], ev["name"]) if ev else None
+    """(the track drawn, the evidence shown: only near the stop that said it)."""
+    lane, ev, how = model.which_track(t, a or anchors(), 0, 1, s, d, mem)
+    return lane, (ev["trk"], ev["src"], ev["name"]) if ev and how == "said" else None
+
+
+def how(model, t, s, a=None, d=1, mem=None):
+    """(the track drawn, how sure: said | held | outer)."""
+    lane, _, sure = model.which_track(t, a or anchors(), 0, 1, s, d, mem)
+    return lane, sure
 
 
 def test_the_track_comes_from_the_stop_either_side_within_a_mile(model):
@@ -205,6 +232,51 @@ def test_a_trains_track_holds_until_a_stop_says_otherwise(model):
     assert track(model, {}, 5300, anchors("", "1"), mem=mem) == ("3", ("3", "posted", "2PC"))
 
 
+def test_the_same_track_from_a_weaker_source_keeps_the_stronger_one(model):
+    """#371 review: posted 2, then GTFS-realtime 2, then GTFS-realtime 3, all for the same stop: still 2 (the GTFS word
+    for 2 doesn't stand in for the posted one, so its 3 can't then replace it)."""
+    mem = {}
+    assert track(model, {"tt": {"next": stop("2PC", "2")}}, 5000, mem=mem) == ("2", ("2", "posted", "2PC"))
+    assert track(model, {}, 5000, anchors("", "2"), mem=mem) == ("2", ("2", "posted", "2PC"))
+    assert track(model, {}, 5000, anchors("", "3"), mem=mem) == ("2", ("2", "posted", "2PC"))
+    assert mem["ev"]["src"] == "posted"
+    assert track(model, {"tt": {"next": stop("2PC", "1", posted=False)}}, 5000, mem=mem) == ("2", ("2", "posted", "2PC"))
+    assert track(model, {"tt": {"next": stop("2PC", "4")}}, 5000, mem=mem) == ("4", ("4", "posted", "2PC"))   # a posted change
+
+
+def test_a_merge_alternating_sources_between_close_stations_doesnt_flip_the_track(doc):
+    """#371 review: stations 2.6 km apart, the train between them within TRACK_NEAR_M of both; the merge alternates
+    TrainTime (next stop Port Chester, posted 2) with GTFS-realtime only (it last left Rye, on 4). Only a stop ahead of
+    the one it is drawn by moves it: going east, 2 throughout once Port Chester has said; going west, Rye is ahead."""
+    st = static()
+    st["stations"]["B"] |= {"ch": 4600.0, "lon": east(4600)}
+    m = Model(st, BBOX, None, doc)
+    tt = {"tt": {"next": stop("2PC", "2")}}
+    gtfs = [({"stop_id": "A", "track": "4", "status": "Departed"}, A_CH), ({"stop_id": "B", "track": "", "status": ""}, 4600.0)]
+    mem, drawn = {}, []
+    for k in range(10):
+        s = 3100 + 40 * k
+        drawn.append(track(m, {}, s, gtfs, mem=mem)[0] if k % 2 == 0 else track(m, tt, s, mem=mem)[0])
+    assert drawn == ["4"] + ["2"] * 9                                   # Rye's 4 until Port Chester (ahead) said 2
+    west = {}
+    assert track(m, tt, 3300, d=-1, mem=west)[0] == "2"
+    assert track(m, {}, 3250, gtfs, d=-1, mem=west) == ("4", ("4", "mta", "Rye"))   # Rye: ahead going west
+    assert track(m, tt, 3200, d=-1, mem=west)[0] == "4"                 # and Port Chester, behind now, doesn't move it back
+
+
+def test_a_held_track_is_marked_held_and_dropped_beyond_4_km(model):
+    """#371 review: between stations the last-said track is held (shown as held, not as said), only up to TRACK_HOLD_M
+    from its stop; beyond (an express may cross over), and with nothing ever said, the outer track: not known."""
+    mem = {}
+    assert how(model, {"tt": {"prev": stop("2RY", "2")}}, 2500, mem=mem) == ("2", "said")
+    assert how(model, {}, A_CH + T.TRACK_NEAR_M + 100, mem=mem) == ("2", "held")
+    assert how(model, {}, A_CH + T.TRACK_HOLD_M - 10, mem=mem) == ("2", "held")
+    assert how(model, {}, A_CH + T.TRACK_HOLD_M + 10, mem=mem) == ("4", "outer")
+    assert mem["ev"]["name"] == "2RY"                                   # (kept: a stop behind it still can't move it)
+    assert how(model, {}, 3000, anchors("1", ""), mem=mem) == ("2", "said")
+    assert how(model, {}, 4000) == ("4", "outer") and how(model, {}, 4000, d=-1) == ("3", "outer")
+
+
 def test_a_train_is_drawn_on_its_numbered_track_with_its_pole_and_milepost(model):
     feed = {"timestamp": NOW, "trains": {"1234": {
         "id": "1234", "train": "1234", "trip_id": "x", "route_id": "", "start_date": "", "delay": None, "vstatus": "IN_TRANSIT_TO",
@@ -215,6 +287,7 @@ def test_a_train_is_drawn_on_its_numbered_track_with_its_pole_and_milepost(model
     tracker.update(model, feed, NOW)
     (x,) = model.trains(feed, NOW, tracker)
     assert x["lane"] == "2" and (x["trk"], x["trk_src"], x["trk_at"]) == ("2", "mta", "Port Chester") and x["d"] == 1
+    assert x["lane_how"] == "said" and "lane_at" not in x
     assert x["lat"] == pytest.approx(LAT + OFF["2"] * DLAT, abs=6e-6)   # on track 2, not the line (to the page's 5 decimals)
     assert x["pole"] == str(200 + round(x["s"] / 100)) and x["mp"] == pytest.approx(MP0 + (x["s"] - MP0_CH) / T.MILE_M, abs=0.051)
     assert tracker.trk_mem["1234"]["ev"]["trk"] == "2"
@@ -223,8 +296,17 @@ def test_a_train_is_drawn_on_its_numbered_track_with_its_pole_and_milepost(model
         st["track"] = ""
     (y,) = model.trains(fresh, NOW)
     assert y["lane"] == "4" and "trk" not in y and y["lat"] == pytest.approx(LAT + OFF["4"] * DLAT, abs=6e-6)
+    assert y["lane_how"] == "outer"
     (z,) = model.trains(fresh, NOW, tracker)                            # remembered: still on 2
     assert z["lane"] == "2"
+    # forgotten TRACK_MEM_S after it was last drawn: this train's and any other's
+    tracker.trk_mem["9999"] = {"ev": dict(tracker.trk_mem["1234"]["ev"]), "seen": NOW - T.TRACK_MEM_S - 1}
+    tracker.trk_mem["1234"]["seen"] = NOW - T.TRACK_MEM_S + 1
+    (z,) = model.trains(fresh, NOW, tracker)
+    assert z["lane"] == "2" and "9999" not in tracker.trk_mem
+    tracker.trk_mem["1234"]["seen"] = NOW - T.TRACK_MEM_S - 1
+    (z,) = model.trains(fresh, NOW, tracker)
+    assert z["lane"] == "4" and z["lane_how"] == "outer" and "ev" not in tracker.trk_mem["1234"]
 
 
 # ---- the nearest pole and milepost ------------------------------------------------------------------------------
@@ -257,7 +339,7 @@ def test_a_stray_milepost_is_left_out(doc):
 def test_with_no_assets_trains_are_drawn_as_before_and_nothing_says_a_pole():
     m = Model(static(), BBOX)
     assert m.track_lanes == {} and not m.ref and m.ref.at(LAT, east(3000)) == {}
-    assert m.which_track({"tt": {"next": stop("2PC", "2")}}, anchors(), 0, 1, 5000, 1, {}) == ("", None)
+    assert m.which_track({"tt": {"next": stop("2PC", "2")}}, anchors(), 0, 1, 5000, 1, {}) == ("", None, "")
     assert m.where(1, 3000, "2") == pytest.approx(m.line.at(3000)[:2])
     assert "pole" not in m.near(LAT + 30 * DLAT, east(3000)) and R.label({}) == ""
     assert R.RailRef(None, None).at(LAT, LON0) == {} and R.RailRef({"tracks": {"1": []}}, m.line).tracks == {}
@@ -312,7 +394,8 @@ def test_the_provider_reads_each_layer_in_our_area_pages_and_keeps_a_copy(tmp_pa
     assert all(u.startswith(R.LINK + "/") and "f=geojson" in u and "outSR=4326" in u and "geometryType=esriGeometryEnvelope" in u for u in urls)
     assert sum("/7/query" in u for u in urls) == 3                      # 82 poles, 30 a page
     assert all(("maxAllowableOffset" in u) == ("/6/query" in u) for u in urls)   # only the tracks thinned
-    assert all("Port Chester Fire Department" in h["User-Agent"] for _, h in f.calls)
+    ua = "Port Chester Fire Department - sizeup emergency situational awareness application (github.com/actualsecurity/sizeup)"
+    assert f.calls and all(h["User-Agent"] == ua for _, h in f.calls)  # exactly ours
     assert a.counts() == {"tracks": 4, "poles": 82, "mileposts": 41}
     lay = a.layer()
     assert len(lay["poles"]) == 82 and set(lay["poles"][0]) == {"id", "lon", "lat"}
@@ -409,3 +492,73 @@ def test_the_page_draws_the_numbered_track_and_the_poles_box():
     assert 'id: "tr-line-label", type: "symbol", source: SRC_LINE, filter: ["has", "trk"]' in js         # each track numbered
     assert "if (!key || this.tracks) { src.setData(fc([])); return; }" in js                       # no route line posing as a track
     assert "`Trk\\u00a0${t.trk}`" in js and "`near pole ${at.pole}`" in js and "refText(d.ref)" in js
+
+
+# ---- the page: the box's place row and the train's style (trains.js in node) ---------------------------------------
+
+NODE = shutil.which("node") or shutil.which("node", path="/opt/homebrew/bin:/usr/local/bin")
+PAGE = r"""
+const fs = require("fs");
+global.window = global;
+global.document = { visibilityState: "visible", addEventListener() {}, documentElement: {},
+                    createElement: () => ({ getContext: () => null, append() {} }) };
+global.getComputedStyle = () => ({ getPropertyValue: () => "" });
+eval(fs.readFileSync(process.argv[2], "utf8"));
+const IN = JSON.parse(fs.readFileSync(process.argv[3], "utf8"));
+const out = {};
+"""
+
+
+def page(tmp_path, body: str, data) -> dict:
+    h, d = tmp_path / "page.js", tmp_path / "in.json"
+    h.write_text(PAGE + body + "\nconsole.log(JSON.stringify(out));\n")
+    d.write_text(json.dumps(data))
+    r = subprocess.run([NODE, str(h), str(Path(__file__).resolve().parent.parent / "sizeup" / "web" / "static" / "trains.js"),
+                        str(d)], capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+    return json.loads(r.stdout)
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_box_reads_the_pole_and_milepost_at_the_drawn_s_and_falls_back_with_no_rail_data(tmp_path, model):
+    """The place row reads the hub's railref at the train's drawn s (not the hub's last s); with no rail data on the
+    hub (railref {poles: [], mps: []}) or none sent, the train's own milepost (TrainTime's) still shows (#371 review)."""
+    rr = {"poles": [[round(s, 1), i] for s, i in model.ref.poles], "mps": [[round(s, 1), v] for s, v in model.ref.mps]}
+    t = {"s": 3000.0, "trk": "2", "trk_src": "posted", "trk_at": "Rye", "lane": "2", "lane_how": "said", "pole": "230", "mp": 21.2}
+    out = page(tmp_path, """
+const P = TrainLayer.placeRow;
+out.drawn = P(IN.t, 3420, IN.rr);
+out.hub = P(IN.t, IN.t.s, IN.rr);
+out.empty = P(IN.t, 3420, { poles: [], mps: [] });
+out.none = P(IN.t, 3420, undefined);
+out.ttOnly = P({ s: 3000, mp: 27.3 }, 3420, { poles: [], mps: [] });
+out.held = P({ ...IN.t, trk: undefined, lane_how: "held", lane_at: "Rye" }, 3420, IN.rr);
+out.outer = P({ s: 3000, lane: "4", lane_how: "outer" }, 3420, IN.rr);
+out.nothing = P({ s: 3000 }, 3420, { poles: [], mps: [] });
+""", {"t": t, "rr": rr})
+    at = model.ref.at_s(3420)
+    assert out["drawn"]["text"] == f"Trk 2 · near pole {at['pole']} · MP {at['mp']:.1f}" and at["pole"] == "234"
+    assert out["hub"]["text"] == "Trk 2 · near pole 230 · MP 21.2"
+    assert out["drawn"]["title"].startswith("Track 2: posted for Rye\nPole: CB 234")
+    assert out["empty"]["text"] == out["none"]["text"] == "Trk 2 · near pole 230 · MP 21.2"   # the hub's own
+    assert out["ttOnly"] == {"k": "place", "text": "MP 27.3", "title": "Milepost from Grand Central"}
+    assert out["held"]["text"].startswith("Trk 2? · ") and out["held"]["title"].startswith("Track: last said for Rye\n")
+    assert "Trk" not in out["outer"]["text"] and out["outer"]["title"].startswith("Track not known; drawn on outer track\n")
+    assert out["nothing"] is None
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_train_on_a_held_or_default_track_is_drawn_fainter(tmp_path, model):
+    tracks = {k: [[[round(a, 7), round(b, 7), round(c, 1)] for a, b, c in lane.coords] for lane in lanes]
+              for k, lanes in model.track_lanes.items()}
+    out = page(tmp_path, """
+const run = (how) => TrainLayer.onTrack({ id: "x", s: 3000, d: 1, lane: "2", lane_how: how, lat: 41, lon: -73.7, bearing: 90 },
+                                          null, null, IN.tracks).cars.map((f) => f.properties.unsure);
+out.said = run("said"); out.held = run("held"); out.outer = run("outer");
+""", {"tracks": tracks})
+    assert not any(out["said"]) and all(out["held"]) and all(out["outer"])
+    js = (Path(__file__).resolve().parent.parent / "sizeup" / "web" / "static" / "trains.js").read_text()
+    assert '["==", ["get", "unsure"], true], UNSURE_OPACITY' in js   # (the icon's features have none)
+    # the GTFS-only box: the next stop's track said as the next stop's, never as the drawn one
+    assert "`Next ${t.next_stop}${t.next_time ? ` ${hm(t.next_time)}` : \"\"}${t.track ? ` trk\\u00a0${t.track}` : \"\"}`" in js
+    assert "`Trk ${t.track}`" not in js

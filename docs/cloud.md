@@ -1844,12 +1844,16 @@ distance and only the drawing changes. Each feature (and each part of one) is it
 leaves the line: nothing is drawn across a gap. A train's track is the one said for the stop it last left or
 the one it is going to, whichever is nearer, and only within 1.5 km of that stop: TrainTime's posted track
 (`sign_track`) over its planned one (`t2s_track`) over GTFS-realtime's. The hub remembers it per train
-(by number, so a merge flipping between TrainTime and GTFS-realtime doesn't move it) and changes it only on
-new stop-track evidence (another stop's, or a better word for the same stop). Never any: the direction's
-outer track (4 outbound, 3 inbound), so the train always lies on a drawn track. No GPS guess: the tracks are
-4 m apart, closer than a phone-grade fix can tell. A track we have no line for (Stamford's 5) is ignored.
-The box: *Trk 2 · near pole 249 · MP 25.3*, "Trk" only within 1.5 km of the stop that said it (who said it, for
-which stop, on hover).
+(by number, forgotten an hour after it was last drawn, so a merge flipping between TrainTime and GTFS-realtime
+doesn't move it) and changes it only on better stop-track evidence: for the same stop an equal or better word
+(the same track from a weaker source keeps the stronger one), for another stop only one ahead of the old one in
+the direction of travel. Between stations it is held, up to 4 km from the stop that said it (beyond, an express
+may have crossed over). Nothing says: the direction's outer track (4 outbound, 3 inbound), only so the train
+lies on a drawn track; not known. No GPS guess: the tracks are 4 m apart, closer than a phone-grade fix can
+tell. A track we have no line for (Stamford's 5) is ignored. The box: *Trk 2 · near pole 249 · MP 25.3* within
+1.5 km of the stop that said it (who said it, for which stop, on hover); *Trk 2?* held ("Track: last said for
+<stop>"); no number on the outer default ("Track not known; drawn on outer track"). A held or default train is
+drawn fainter. No GIS milepost where it is drawn: the train's own (TrainTime's, or the line's).
 
 **Poles and mileposts:** the nearest structure along the line (within 150 m), and the milepost read off the
 two either side (straight between; a milepost out of order along the line is left out). A train's box, and
