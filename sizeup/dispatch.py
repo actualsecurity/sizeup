@@ -30,6 +30,10 @@ INCIDENT_TYPES: list[tuple[str, str, tuple[str, ...]]] = [
     ("Car fire", "fire", ("car fire", "vehicle fire", "auto fire", "truck fire")),
     ("Brush fire", "fire", ("brush fire", "grass fire", "mulch fire", "outside fire", "dumpster fire",
                             "rubbish fire", "garbage fire")),
+    # A CO detector said with the words of a fire alarm's ("carbon monoxide smoke detector activation", #365): before
+    # "Fire alarm". A plural ("smoke and carbon monoxide detectors sounding") is still a fire alarm's
+    ("CO alarm", "hazard", ("carbon monoxide smoke detector", "carbon monoxide detector", "co detector activation",
+                            "c o detector activation")),
     ("Fire alarm", "fire", ("activated fire alarm", "fire alarm", "automatic alarm", "alarm activation",
                             "commercial alarm", "residential alarm", "commercial line",  # ASR of "commercial alarm"
                             "smoke detector", "smoke alarm", "pull station", "water flow alarm", "waterflow")),
@@ -108,6 +112,7 @@ class Dispatch:
 
 def _norm(text: str) -> str:
     t = text.lower().replace("-", " ")
+    t = re.sub(r"\bc\.\s?o\.", " co ", t)                  # "C.O. detector": AWS's spelling of the acronym
     t = re.sub(r"[^a-z0-9:.,; ]+", " ", t)
     return re.sub(r"\s+", " ", t).strip()
 
@@ -125,6 +130,27 @@ def _clean_street(s: str) -> str:
     while words and words[0] in STOP_WORDS:
         words.pop(0)
     return " ".join(words)
+
+
+# The stop words that end whatever came before a road's name (#365): "co alarm between sample avenue" is Sample Avenue.
+# "old" is often a road's own first word (and "year" / "male" / "female" never come before one)
+ROAD_CUT = STOP_WORDS - {"old", "year", "female", "male"}
+
+
+def _road(s: str, type_phrase: str = "") -> str:
+    """A road as the pattern caught it, without the words before it that aren't its name: everything up to the last
+    stop word, or to the end of this page's own type phrase where it stands whole ("co alarm example terrace"). Never
+    a word of a road's own name that only looks like a call type ("Gas House Lane", "Smoke Rise Road"). '' when only
+    the suffix is left."""
+    words = s.split()
+    cut = max((i for i, w in enumerate(words[:-1]) if w in ROAD_CUT), default=-1)
+    tp = type_phrase.split()
+    if tp:
+        for i in range(len(words) - len(tp)):
+            if words[i:i + len(tp)] == tp:
+                cut = max(cut, i + len(tp) - 1)
+    rest = words[cut + 1:]
+    return " ".join(rest) if len(rest) >= 2 else ""
 
 
 def parse(text: str) -> Dispatch:
@@ -147,9 +173,11 @@ def parse(text: str) -> Dispatch:
             d.incident_type, d.category, d.type_phrase = MPDS[proto], "ems", e.group(0)
         elif 50 <= proto <= 85:  # fire priority dispatch protocols: shown by code until mapped
             d.incident_type, d.category, d.type_phrase = f"Fire call {d.code}", "fire", e.group(0)
+    # "carbon dioxide": STT's reading of "carbon monoxide" (#365), unless a CO2 system is meant
+    tt = t if re.search(r"\b(?:system|discharge|suppression)\b", t) else re.sub(r"\bcarbon dioxide\b", "carbon monoxide", t)
     if d.incident_type == "Unknown" or d.category == "fire" and d.incident_type.startswith("Fire call"):
         for label, cat, phrases in INCIDENT_TYPES:
-            hit = next((p for p in phrases if re.search(rf"\b{re.escape(p)}\b", t)), None)
+            hit = next((p for p in phrases if re.search(rf"\b{re.escape(p)}\b", tt)), None)
             if hit:
                 d.incident_type, d.category, d.type_phrase = label, cat, hit
                 break
@@ -166,6 +194,7 @@ def parse(text: str) -> Dispatch:
             hh, mm = int(tail.group(1)[:2]), int(tail.group(1)[2:])
             if hh < 24 and mm < 60:
                 d.time_out = f"{hh:02d}:{mm:02d}"
+    tw = d.type_phrase
     # Address: the first "number + street" that isn't a unit number, code or time.
     masked = UNIT.sub(" , ", t)
     masked = EMD.sub(" , ", masked)
@@ -182,18 +211,17 @@ def parse(text: str) -> Dispatch:
         after = masked[a.end():]
         crosses = []
         for sm in STREET.finditer(after[:160]):
-            name = _clean_street(sm.group(1))
+            name = _road(sm.group(1), tw)
             if name and name not in crosses and name != _clean_street(a.group(2)):
                 crosses.append(name)
             if len(crosses) == 2:
                 break
         d.cross_street = " and ".join(crosses)
-    elif (roads := [_clean_street(m.group(1)) for m in STREET.finditer(masked)]):
+    elif (roads := [r for r in dict.fromkeys(_road(m.group(1), tw) for m in STREET.finditer(masked)) if r]):
         # No house number (highways, intersections): the first named road, the next one as the cross.
         # "Sprain Brook Parkway southbound at the Bronx River Parkway interchange"
-        roads = [r for i, r in enumerate(roads) if r and r not in roads[:i]]
         d.location = roads[0]
-        d.cross_street = roads[1] if len(roads) > 1 else ""
+        d.cross_street = " and ".join(roads[1:3])          # "between Sample Avenue and Specimen Street": both
     else:
         # No street address heard: the clause after the type / "respond to" (place names, intersections).
         start = 0

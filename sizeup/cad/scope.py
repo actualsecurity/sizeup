@@ -85,26 +85,51 @@ def from_units(units, departments: dict[str, str]) -> tuple[str, list[str]] | No
     return None
 
 
+def page_line(departments, units, tone_departments, incident_type: str, feed: str = "") -> str:
+    """One timeline line for who a page paged (#370, with #365's page on a feed's incident): "Page: all PCFD",
+    "Page: PCFD · units Engine 60, Ladder 31", "Page: tones PCFD" (no call type), and " · feed: units" when the
+    feed's label says otherwise. "" when it named nobody."""
+    got = from_page(tone_departments, units, incident_type)
+    names = ", ".join(abbrev(base_name(d)) for d in dict.fromkeys(departments or ()) if d)
+    if got is not None and got[0] == FULL:
+        said = _said(*got)
+    elif units:
+        said = (f"{names} · " if names else "") + f"units {', '.join(units)}"
+    elif names:
+        said = f"tones {names}"
+    else:
+        return ""
+    return f"Page: {said}" + (f" · feed: {feed}" if feed else "")
+
+
 class Scope:
     def __init__(self, cad):
         self.cad, self.store = cad, cad.store
         with self.store.lock:
             self.store.db.executescript(SCHEMA)
 
-    def on_page(self, iid: int | None, inc) -> None:
-        """A page (the monitor's incident: its tones, the apparatus it named, its type) made or reached this incident."""
+    def on_page(self, iid: int | None, inc, note: bool = True) -> tuple[str, bool]:
+        """A page (the monitor's incident: its tones, the apparatus it named, its type) made or reached this incident.
+        (the feed's label as the timeline says it ("units") when it says otherwise than the page, else ""; whether this
+        reading is new here). note: that disagreement is its own timeline line (once per reading; a page on a feed's
+        incident says it in its one line instead: page_line)."""
         if not iid:
-            return
+            return "", False
         got = from_page(getattr(inc, "tone_departments", ()), getattr(inc, "units", ()), getattr(inc, "incident_type", ""))
         if got is None:
-            return
-        kind, depts = got
+            return "", True                              # nothing to keep: the line says what it heard
+        return self._reading(iid, *got, note=note)
+
+    def _reading(self, iid: int, kind: str, depts: list[str], note: bool = True) -> tuple[str, bool]:
         reading = json.dumps([kind, depts])
         now = self.store.clock()
         with self.store.tx() as db:
             r = db.execute("SELECT * FROM dispatch_scope WHERE incident_id = ?", (iid,)).fetchone()
+            differs = (r is not None and r["source"] == "feed"
+                       and (kind, depts) != (r["kind"], json.loads(r["departments"])))
+            feed = _said(r["kind"], json.loads(r["departments"])) if differs else ""
             if r is not None and r["page"] == reading:
-                return
+                return feed, False
             # the page's reading, and its label unless the feed's stands (one upsert: never two rows, never a race)
             db.execute("INSERT INTO dispatch_scope (incident_id, kind, departments, source, at, page) VALUES (?, ?, ?, 'page', ?, ?) "
                        "ON CONFLICT(incident_id) DO UPDATE SET page = excluded.page, "
@@ -112,9 +137,18 @@ class Scope:
                        "departments = CASE WHEN source = 'feed' THEN departments ELSE excluded.departments END, "
                        "at = CASE WHEN source = 'feed' THEN at ELSE excluded.at END",
                        (iid, kind, json.dumps(depts), now, reading))
-            if r is not None and r["source"] == "feed" and (kind, depts) != (r["kind"], json.loads(r["departments"])):
-                self.store._event(db, iid, "feed", f"Page: {_said(kind, depts)} · feed: "
-                                  f"{_said(r['kind'], json.loads(r['departments']))}", at=now)
+            if differs and note:
+                self.store._event(db, iid, "feed", f"Page: {_said(kind, depts)} · feed: {feed}", at=now)
+        return feed, True
+
+    def move(self, src: int, dst: int) -> None:
+        """A page's card moved onto another incident (Sources.rematch_page, _sweep_pages): its page's reading goes
+        with it (the feed's label there stands; a disagreement noted)."""
+        r = self.store.one("SELECT page FROM dispatch_scope WHERE incident_id = ?", (src,))
+        if r is None or not r["page"]:
+            return
+        kind, depts = json.loads(r["page"])
+        self._reading(dst, kind, list(depts))
 
     def on_feed(self, iid: int | None) -> None:
         """A feed's report applied to this incident: its unit list confirms or overrides the label."""

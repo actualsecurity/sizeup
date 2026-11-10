@@ -1,0 +1,843 @@
+[
+ {
+  "train_id": "MNR_2026-10-14_9901",
+  "railroad": "MNR",
+  "run_date": "2026-10-14",
+  "train_num": "9901",
+  "realtime": true,
+  "details": {
+   "headsign": "2SM > 0NY",
+   "summary": "MNR_2026-10-14_9901",
+   "peak_code": "O",
+   "branch": "New Haven",
+   "branch_id": "NH",
+   "stops": [
+    {
+     "code": "2SM",
+     "sched_time": 1791990507,
+     "sign_track": "4",
+     "posted": false,
+     "t2s_track": "4",
+     "stop_status": "DEPARTED",
+     "stop_type": "STOP",
+     "track_change": false,
+     "local_cancel": false,
+     "bus": false,
+     "occupancy": "NO_DATA",
+     "act_arrive_time": 1791990567,
+     "act_depart_time": 1791990597,
+     "act_time": 1791990567
+    },
+    {
+     "code": "2GN",
+     "sched_time": 1791991107,
+     "sign_track": "4",
+     "posted": false,
+     "t2s_track": "4",
+     "stop_status": "DEPARTED",
+     "stop_type": "STOP",
+     "track_change": false,
+     "local_cancel": false,
+     "bus": false,
+     "occupancy": "NO_DATA",
+     "act_arrive_time": 1791991767,
+     "act_depart_time": 1791991797,
+     "act_time": 1791991767
+    },
+    {
+     "code": "2PC",
+     "sched_time": 1791991407,
+     "sign_track": "4",
+     "posted": false,
+     "t2s_track": "4",
+     "stop_status": "DEPARTED",
+     "stop_type": "STOP",
+     "track_change": false,
+     "local_cancel": false,
+     "bus": false,
+     "occupancy": "NO_DATA",
+     "act_arrive_time": 1791991947,
+     "act_depart_time": 1791991977,
+     "act_time": 1791991947
+    },
+    {
+     "code": "2RY",
+     "sched_time": 1791991587,
+     "sign_track": "3",
+     "posted": true,
+     "t2s_track": "3",
+     "stop_status": "EN_ROUTE",
+     "stop_type": "STOP",
+     "track_change": false,
+     "local_cancel": false,
+     "bus": false,
+     "occupancy": "NO_DATA"
+    },
+    {
+     "code": "2HS",
+     "sched_time": 1791991767,
+     "sign_track": "3",
+     "posted": false,
+     "t2s_track": "3",
+     "stop_status": "EN_ROUTE",
+     "stop_type": "STOP",
+     "track_change": false,
+     "local_cancel": false,
+     "bus": false,
+     "occupancy": "NO_DATA"
+    },
+    {
+     "code": "0NY",
+     "sched_time": 1791993807,
+     "sign_track": "",
+     "posted": false,
+     "t2s_track": "21",
+     "stop_status": "EN_ROUTE",
+     "stop_type": "STOP",
+     "track_change": false,
+     "local_cancel": false,
+     "bus": false,
+     "occupancy": "NO_DATA"
+    }
+   ],
+   "events": [],
+   "direction": "W",
+   "bike_rule": "PERMITTED",
+   "turf": {
+    "length": 33.0,
+    "location_mp": 10.0
+   }
+  },
+  "consist": {
+   "fleet": "M8",
+   "cars": [
+    {
+     "type": "M8",
+     "number": 9000,
+     "loading": "EMPTY",
+     "restroom": false,
+     "revenue": true,
+     "locomotive": false,
+     "passengers": 4
+    },
+    {
+     "type": "M8",
+     "number": 9001,
+     "loading": "MANY_SEATS",
+     "restroom": false,
+     "revenue": true,
+     "locomotive": false,
+     "passengers": 21
+    },
+    {
+     "type": "M8",
+     "number": 9002,
+     "loading": "FEW_SEATS",
+     "restroom": false,
+     "revenue": true,
+     "locomotive": false,
+     "passengers": 48
+    },
+    {
+     "type": "M8",
+     "number": 9003,
+     "loading": "SRO",
+     "restroom": false,
+     "revenue": true,
+     "locomotive": false,
+     "passengers": 95
+    },
+    {
+     "type": "M8",
+     "number": 9004,
+     "loading": "NO_DATA",
+     "restroom": false,
+     "revenue": true,
+     "locomotive": false
+    },
+    {
+     "type": "M8",
+     "number": 9005,
+     "loading": "MANY_SEATS",
+     "restroom": false,
+     "revenue": true,
+     "locomotive": false,
+     "passengers": 17
+    }
+   ],
+   "actual_len": 6,
+   "sched_len": 6,
+   "occupancy": "FEW_SEATS",
+   "occupancy_timestamp": 1791991977
+  },
+  "location": {
+   "longitude": -73.669266,
+   "latitude": 40.995117,
+   "nearby": "XXX",
+   "source": "GPS",
+   "timestamp": 1791991997,
+   "extra_info": "",
+   "speed": 52.3,
+   "heading": 225.5
+  },
+  "status": {
+   "otp": -660,
+   "otp_location": "XXX",
+   "held": false,
+   "canceled": false
+  },
+  "alerts": [
+   {
+    "header": "Example: some delays on the New Haven Line (synthetic)",
+    "text": "Synthetic alert text.",
+    "status": "Some Delays",
+    "status_level": 2,
+    "priority": 1,
+    "railroad": "MNR",
+    "branches": [
+     "NH"
+    ],
+    "is_planned": false,
+    "start_time": 1791991407
+   },
+   {
+    "header": "Example: a LIRR notice (synthetic)",
+    "text": "Synthetic alert text.",
+    "status": "Special Notice",
+    "status_level": 2,
+    "priority": 1,
+    "railroad": "LIRR",
+    "branches": [
+     "BY"
+    ],
+    "is_planned": false,
+    "start_time": 1791991407
+   }
+  ]
+ },
+ {
+  "train_id": "MNR_2026-10-14_9902",
+  "railroad": "MNR",
+  "run_date": "2026-10-14",
+  "train_num": "9902",
+  "realtime": true,
+  "details": {
+   "headsign": "0NY > 2NH",
+   "summary": "MNR_2026-10-14_9902",
+   "peak_code": "O",
+   "branch": "New Haven",
+   "branch_id": "NH",
+   "stops": [
+    {
+     "code": "0NY",
+     "sched_time": 1791989607,
+     "sign_track": "",
+     "posted": false,
+     "t2s_track": "15",
+     "stop_status": "DEPARTED",
+     "stop_type": "STOP",
+     "track_change": false,
+     "local_cancel": false,
+     "bus": false,
+     "occupancy": "NO_DATA",
+     "act_arrive_time": 1791989637,
+     "act_depart_time": 1791989667,
+     "act_time": 1791989637
+    },
+    {
+     "code": "2RY",
+     "sched_time": 1791991857,
+     "sign_track": "4",
+     "posted": false,
+     "t2s_track": "4",
+     "stop_status": "DEPARTED",
+     "stop_type": "STOP",
+     "track_change": false,
+     "local_cancel": false,
+     "bus": false,
+     "occupancy": "NO_DATA",
+     "act_arrive_time": 1791991977,
+     "act_depart_time": 1791992007,
+     "act_time": 1791991977
+    },
+    {
+     "code": "2PC",
+     "sched_time": 1791992097,
+     "sign_track": "2",
+     "posted": true,
+     "t2s_track": "2",
+     "stop_status": "ARRIVING",
+     "stop_type": "STOP",
+     "track_change": false,
+     "local_cancel": false,
+     "bus": false,
+     "occupancy": "NO_DATA"
+    },
+    {
+     "code": "2GN",
+     "sched_time": 1791992407,
+     "sign_track": "4",
+     "posted": false,
+     "t2s_track": "4",
+     "stop_status": "EN_ROUTE",
+     "stop_type": "STOP",
+     "track_change": false,
+     "local_cancel": false,
+     "bus": false,
+     "occupancy": "NO_DATA"
+    },
+    {
+     "code": "2SM",
+     "sched_time": 1791992807,
+     "sign_track": "4",
+     "posted": false,
+     "t2s_track": "4",
+     "stop_status": "EN_ROUTE",
+     "stop_type": "STOP",
+     "track_change": false,
+     "local_cancel": false,
+     "bus": false,
+     "occupancy": "NO_DATA"
+    },
+    {
+     "code": "2NH",
+     "sched_time": 1791995007,
+     "sign_track": "",
+     "posted": false,
+     "t2s_track": "",
+     "stop_status": "EN_ROUTE",
+     "stop_type": "STOP",
+     "track_change": false,
+     "local_cancel": false,
+     "bus": false,
+     "occupancy": "NO_DATA"
+    }
+   ],
+   "events": [],
+   "direction": "E",
+   "bike_rule": "PERMITTED",
+   "turf": {
+    "length": 72.2,
+    "location_mp": 24.7
+   }
+  },
+  "consist": {
+   "fleet": "M8",
+   "cars": [
+    {
+     "type": "M8",
+     "number": 9000,
+     "loading": "EMPTY",
+     "restroom": false,
+     "revenue": true,
+     "locomotive": false,
+     "passengers": 2
+    },
+    {
+     "type": "M8",
+     "number": 9001,
+     "loading": "EMPTY",
+     "restroom": false,
+     "revenue": true,
+     "locomotive": false,
+     "passengers": 2
+    },
+    {
+     "type": "M8",
+     "number": 9002,
+     "loading": "EMPTY",
+     "restroom": false,
+     "revenue": true,
+     "locomotive": false,
+     "passengers": 2
+    },
+    {
+     "type": "M8",
+     "number": 9003,
+     "loading": "EMPTY",
+     "restroom": false,
+     "revenue": true,
+     "locomotive": false,
+     "passengers": 2
+    },
+    {
+     "type": "M8",
+     "number": 9004,
+     "loading": "EMPTY",
+     "restroom": false,
+     "revenue": true,
+     "locomotive": false,
+     "passengers": 2
+    },
+    {
+     "type": "M8",
+     "number": 9005,
+     "loading": "EMPTY",
+     "restroom": false,
+     "revenue": true,
+     "locomotive": false,
+     "passengers": 2
+    },
+    {
+     "type": "M8",
+     "number": 9006,
+     "loading": "EMPTY",
+     "restroom": false,
+     "revenue": true,
+     "locomotive": false,
+     "passengers": 2
+    },
+    {
+     "type": "M8",
+     "number": 9007,
+     "loading": "EMPTY",
+     "restroom": false,
+     "revenue": true,
+     "locomotive": false,
+     "passengers": 2
+    }
+   ],
+   "actual_len": 8,
+   "sched_len": 10,
+   "occupancy": "MANY_SEATS",
+   "occupancy_timestamp": 1791991977
+  },
+  "location": {
+   "longitude": -73.671806,
+   "latitude": 40.992057,
+   "nearby": "XXX",
+   "source": "SIGNAL",
+   "timestamp": 1791991997,
+   "extra_info": "",
+   "heading": 0.0
+  },
+  "status": {
+   "otp": 30,
+   "otp_location": "XXX",
+   "held": false,
+   "canceled": false
+  },
+  "alerts": [
+   {
+    "header": "Example: some delays on the New Haven Line (synthetic)",
+    "text": "Synthetic alert text.",
+    "status": "Some Delays",
+    "status_level": 2,
+    "priority": 1,
+    "railroad": "MNR",
+    "branches": [
+     "NH"
+    ],
+    "is_planned": false,
+    "start_time": 1791991407
+   }
+  ]
+ },
+ {
+  "train_id": "MNR_2026-10-14_9903",
+  "railroad": "MNR",
+  "run_date": "2026-10-14",
+  "train_num": "9903",
+  "realtime": true,
+  "details": {
+   "headsign": "0NY > 2NC",
+   "summary": "MNR_2026-10-14_9903",
+   "peak_code": "O",
+   "branch": "New Canaan",
+   "branch_id": "NC",
+   "stops": [
+    {
+     "code": "0NY",
+     "sched_time": 1791989607,
+     "sign_track": "",
+     "posted": false,
+     "t2s_track": "17",
+     "stop_status": "DEPARTED",
+     "stop_type": "STOP",
+     "track_change": false,
+     "local_cancel": false,
+     "bus": false,
+     "occupancy": "NO_DATA",
+     "act_arrive_time": 1791989607,
+     "act_depart_time": 1791989637,
+     "act_time": 1791989607
+    },
+    {
+     "code": "2PC",
+     "sched_time": 1791991907,
+     "sign_track": "4",
+     "posted": false,
+     "t2s_track": "4",
+     "stop_status": "DEPARTED",
+     "stop_type": "STOP",
+     "track_change": false,
+     "local_cancel": false,
+     "bus": false,
+     "occupancy": "NO_DATA",
+     "act_arrive_time": 1791991917,
+     "act_depart_time": 1791991947,
+     "act_time": 1791991917
+    },
+    {
+     "code": "2SM",
+     "sched_time": 1791992507,
+     "sign_track": "4",
+     "posted": false,
+     "t2s_track": "4",
+     "stop_status": "EN_ROUTE",
+     "stop_type": "STOP",
+     "track_change": false,
+     "local_cancel": false,
+     "bus": false,
+     "occupancy": "NO_DATA"
+    },
+    {
+     "code": "2NC",
+     "sched_time": 1791993507,
+     "sign_track": "",
+     "posted": false,
+     "t2s_track": "",
+     "stop_status": "EN_ROUTE",
+     "stop_type": "STOP",
+     "track_change": false,
+     "local_cancel": false,
+     "bus": false,
+     "occupancy": "NO_DATA"
+    }
+   ],
+   "events": [],
+   "direction": "E",
+   "bike_rule": "PERMITTED",
+   "turf": {
+    "length": 41.0,
+    "location_mp": 26.0
+   }
+  },
+  "consist": {
+   "fleet": "M8",
+   "cars": [],
+   "actual_len": 4,
+   "sched_len": 4,
+   "occupancy": "NO_DATA"
+  },
+  "location": {
+   "longitude": -73.654642,
+   "latitude": 41.005659,
+   "nearby": "XXX",
+   "source": "GPS",
+   "timestamp": 1791991997,
+   "extra_info": "",
+   "speed": 61.0,
+   "heading": 61.4
+  },
+  "status": {
+   "otp": 0,
+   "otp_location": "XXX",
+   "held": false,
+   "canceled": false
+  }
+ },
+ {
+  "train_id": "MNR_2026-10-14_9904",
+  "railroad": "MNR",
+  "run_date": "2026-10-14",
+  "train_num": "9904",
+  "realtime": true,
+  "details": {
+   "headsign": "1PK > 0NY",
+   "summary": "MNR_2026-10-14_9904",
+   "peak_code": "O",
+   "branch": "Hudson",
+   "branch_id": "HU",
+   "stops": [
+    {
+     "code": "1PK",
+     "sched_time": 1791991407,
+     "sign_track": "1",
+     "posted": false,
+     "t2s_track": "1",
+     "stop_status": "DEPARTED",
+     "stop_type": "STOP",
+     "track_change": false,
+     "local_cancel": false,
+     "bus": false,
+     "occupancy": "NO_DATA",
+     "act_arrive_time": 1791991407,
+     "act_depart_time": 1791991437,
+     "act_time": 1791991407
+    },
+    {
+     "code": "0NY",
+     "sched_time": 1791993807,
+     "sign_track": "",
+     "posted": false,
+     "t2s_track": "",
+     "stop_status": "EN_ROUTE",
+     "stop_type": "STOP",
+     "track_change": false,
+     "local_cancel": false,
+     "bus": false,
+     "occupancy": "NO_DATA"
+    }
+   ],
+   "events": [],
+   "direction": "W",
+   "bike_rule": "PERMITTED",
+   "turf": {
+    "length": 30.0,
+    "location_mp": 5.0
+   }
+  },
+  "consist": {
+   "fleet": "M7A",
+   "cars": [
+    {
+     "type": "M7A",
+     "number": 8001,
+     "loading": "EMPTY",
+     "restroom": false,
+     "revenue": true,
+     "locomotive": false,
+     "passengers": 3
+    }
+   ],
+   "actual_len": 1,
+   "sched_len": 1,
+   "occupancy": "EMPTY"
+  },
+  "location": {
+   "longitude": -73.9,
+   "latitude": 41.2,
+   "nearby": "XXX",
+   "source": "GPS",
+   "timestamp": 1791991997,
+   "extra_info": "",
+   "speed": 40.0,
+   "heading": 180.0
+  },
+  "status": {
+   "otp": 0,
+   "otp_location": "XXX",
+   "held": false,
+   "canceled": false
+  }
+ },
+ {
+  "train_id": "LIRR_2026-10-14_1905",
+  "railroad": "LIRR",
+  "run_date": "2026-10-14",
+  "train_num": "1905",
+  "realtime": true,
+  "details": {
+   "headsign": "NYK > BAB",
+   "summary": "LIRR_2026-10-14_1905",
+   "peak_code": "O",
+   "branch": "Babylon",
+   "branch_id": "BY",
+   "stops": [
+    {
+     "code": "NYK",
+     "sched_time": 1791991407,
+     "sign_track": "17",
+     "posted": false,
+     "t2s_track": "17",
+     "stop_status": "DEPARTED",
+     "stop_type": "STOP",
+     "track_change": false,
+     "local_cancel": false,
+     "bus": false,
+     "occupancy": "NO_DATA",
+     "act_arrive_time": 1791991407,
+     "act_depart_time": 1791991437,
+     "act_time": 1791991407
+    },
+    {
+     "code": "BAB",
+     "sched_time": 1791993807,
+     "sign_track": "",
+     "posted": false,
+     "t2s_track": "",
+     "stop_status": "EN_ROUTE",
+     "stop_type": "STOP",
+     "track_change": false,
+     "local_cancel": false,
+     "bus": false,
+     "occupancy": "NO_DATA"
+    }
+   ],
+   "events": [],
+   "direction": "E",
+   "bike_rule": "PERMITTED",
+   "turf": {
+    "length": 37.0,
+    "location_mp": 10.0
+   }
+  },
+  "consist": {
+   "fleet": "M7",
+   "cars": [
+    {
+     "type": "M7",
+     "number": 7001,
+     "loading": "EMPTY",
+     "restroom": false,
+     "revenue": true,
+     "locomotive": false,
+     "passengers": 3
+    }
+   ],
+   "actual_len": 1,
+   "sched_len": 1,
+   "occupancy": "EMPTY"
+  },
+  "location": {
+   "longitude": -73.5,
+   "latitude": 40.7,
+   "nearby": "XXX",
+   "source": "GPS",
+   "timestamp": 1791991997,
+   "extra_info": "",
+   "speed": 55.0,
+   "heading": 90.0
+  },
+  "status": {
+   "otp": 0,
+   "otp_location": "XXX",
+   "held": false,
+   "canceled": false
+  },
+  "alerts": [
+   {
+    "header": "Example: a LIRR notice (synthetic)",
+    "text": "Synthetic alert text.",
+    "status": "Special Notice",
+    "status_level": 2,
+    "priority": 1,
+    "railroad": "LIRR",
+    "branches": [
+     "BY"
+    ],
+    "is_planned": false,
+    "start_time": 1791991407
+   }
+  ]
+ },
+ {
+  "train_id": "MNR_2026-10-14_9906",
+  "railroad": "MNR",
+  "run_date": "2026-10-14",
+  "train_num": "9906",
+  "realtime": true,
+  "details": {
+   "headsign": "2NH > 0NY",
+   "summary": "MNR_2026-10-14_9906",
+   "peak_code": "O",
+   "branch": "New Haven",
+   "branch_id": "NH",
+   "stops": [
+    {
+     "code": "2NH",
+     "sched_time": 1791990007,
+     "sign_track": "",
+     "posted": false,
+     "t2s_track": "",
+     "stop_status": "DEPARTED",
+     "stop_type": "STOP",
+     "track_change": false,
+     "local_cancel": false,
+     "bus": false,
+     "occupancy": "NO_DATA",
+     "act_arrive_time": 1791990007,
+     "act_depart_time": 1791990037,
+     "act_time": 1791990007
+    },
+    {
+     "code": "2GN",
+     "sched_time": 1791992067,
+     "sign_track": "3",
+     "posted": false,
+     "t2s_track": "3",
+     "stop_status": "EN_ROUTE",
+     "stop_type": "STOP",
+     "track_change": false,
+     "local_cancel": false,
+     "bus": false,
+     "occupancy": "NO_DATA"
+    },
+    {
+     "code": "0NY",
+     "sched_time": 1791994407,
+     "sign_track": "",
+     "posted": false,
+     "t2s_track": "",
+     "stop_status": "EN_ROUTE",
+     "stop_type": "STOP",
+     "track_change": false,
+     "local_cancel": false,
+     "bus": false,
+     "occupancy": "NO_DATA"
+    }
+   ],
+   "events": [],
+   "direction": "W",
+   "bike_rule": "PERMITTED",
+   "turf": {
+    "length": 72.2,
+    "location_mp": 46.0
+   }
+  },
+  "consist": {
+   "fleet": "MNR_DIESEL",
+   "cars": [
+    {
+     "type": "P32",
+     "number": 4001,
+     "loading": "NO_DATA",
+     "restroom": false,
+     "revenue": false,
+     "locomotive": true
+    },
+    {
+     "type": "SC",
+     "number": 6001,
+     "loading": "MANY_SEATS",
+     "restroom": false,
+     "revenue": true,
+     "locomotive": false,
+     "passengers": 30
+    }
+   ],
+   "actual_len": 2,
+   "sched_len": 2,
+   "occupancy": "MANY_SEATS"
+  },
+  "location": {
+   "longitude": -73.610299,
+   "latitude": 41.025888,
+   "nearby": "XXX",
+   "source": "SCHED",
+   "timestamp": 1791991997,
+   "extra_info": ""
+  },
+  "status": {
+   "otp": -120,
+   "otp_location": "XXX",
+   "held": false,
+   "canceled": false
+  }
+ },
+ {
+  "train_id": "MNR_2026-10-14_9907",
+  "railroad": "MNR",
+  "run_date": "2026-10-14",
+  "train_num": "9907",
+  "realtime": true,
+  "details": {
+   "direction": "E",
+   "branch_id": "NH",
+   "stops": []
+  },
+  "consist": {},
+  "status": {}
+ }
+]

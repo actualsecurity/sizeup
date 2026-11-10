@@ -390,3 +390,64 @@ def test_the_one_unit_rule_counts_apparatus_only(rig):
     rig.at(60)
     rig.change(times={"dispatched": T0, "responding": T0 + 55})
     assert rig.status("E60") == "RS"
+
+
+# -- with #365's street-only pages ------------------------------------------------------------------------------------
+
+
+def test_a_street_only_page_attaching_to_a_feed_incident_gets_its_label_in_one_line(tmp_path):
+    from tests.test_street_only import PAGE_NO_UNITS, feed_event, lines
+    rig = AutoRig(tmp_path)
+    rig.mode("pcfd")
+    a = feed_event(rig, units=("E60",))                                # the feed: specific units
+    rig.at(40)
+    assert rig.page("p1", PAGE_NO_UNITS)["id"] == a                    # street only: joins it
+    s = rig.cad.full(a)["scope"]
+    assert (s["short"], s["source"]) == ("Units", "feed")              # the feed's stands
+    tones = lines(rig, a, "tones")
+    assert "Page: all PCFD · feed: units" in tones                     # one line for who the page paged
+    assert not any(x.startswith(("Tones:", "Units named")) for x in tones)
+    assert not any("· feed:" in e or "· page:" in e for e in events(rig, a) if e not in tones)
+    rig.at(70)
+    rig.page("p2", PAGE_NO_UNITS)                                      # a repeat: nothing new
+    assert sum(x.startswith("Page: ") for x in lines(rig, a, "tones")) == 1
+
+
+def test_department_entries_never_block_a_street_only_join(tmp_path):
+    from tests.test_street_only import PAGE_ST, feed_event, open_incidents
+    rig = AutoRig(tmp_path)
+    rig.mode("pcfd")
+    depts(rig, DPTA="Port Chester FD")
+    a = feed_event(rig, units=("DPTA",))                               # only the department entry listed
+    rig.at(30)
+    assert rig.page("p1", PAGE_ST)["id"] == a and len(open_incidents(rig)) == 1   # the page names Engine 60, Ladder 31
+    assert rig.cad.full(a)["scope"]["short"] == "All PCFD"             # the feed's department entry stands
+
+
+def test_a_page_card_moved_onto_the_feeds_incident_takes_its_reading(tmp_path):
+    from tests.test_street_only import PAGE_NO_UNITS, feed_event
+    rig = AutoRig(tmp_path)
+    rig.mode("pcfd")
+    a = feed_event(rig, units=())                                      # the feed lists nobody yet: no label
+    rig.at(20)
+    first = rig.page("p1", "Port Chester Fire Department, respond to a CO alarm. Time out 1432.")["id"]
+    assert first != a and rig.cad.full(first)["scope"]["short"] == "All PCFD"
+    rig.at(50)
+    assert rig.page("p2", PAGE_NO_UNITS)["id"] == a                    # rematch_page: the card moves onto it
+    assert rig.cad.full(a)["scope"]["short"] == "All PCFD"
+
+
+def test_a_swept_page_card_takes_its_reading_along(tmp_path):
+    from tests.test_incident_sources import Rig
+    from tests.test_street_only import feed_event
+    rig = Rig(tmp_path)
+    a = feed_event(rig, location="17 EXAMPLE LN", units=(), typ="ALARM/RESD")
+    p = rig.cad.store.create_incident(type="ALARM", address="1717 Example Lane", source="60 Control page",
+                                      source_ref="monitor:old", status="queued")
+    rig.cad.sources._put("paging", "old", 1000, "Paging", T0 + 30, {"location": "1717 Example Lane"}, incident_id=p)
+    rig.cad.scope._reading(p, "full", ["Port Chester FD"])
+    rig.at(600)
+    rig.feed.change("A1", times={"in_service": T0 + 590}, closed=True)
+    rig.poll()
+    assert rig.cad.store.incident(p)["status"] == "dismissed"
+    assert rig.cad.full(a)["scope"]["short"] == "All PCFD"

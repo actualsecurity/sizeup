@@ -34,6 +34,7 @@ from sizeup.cad.newids import NewIds
 from sizeup.cad.statushints import StatusHints
 from sizeup.cad.sources import PAGING_RANK, Sources
 from sizeup.cad.radiolog import RadioLog
+from sizeup.cad import scope as scope_mod
 from sizeup.cad.scope import Scope
 from sizeup.cad.radios import Registry, RadioError, is_pcfd
 from sizeup.cad import settings as settings_mod
@@ -226,6 +227,7 @@ class Cad:
         self.store.on_unassigned = self.radiolog.units_soon     # ... taken off before it went: its mentions there go
         # Full department or specific units (#370, sizeup/cad/scope.py): from the page, then the feed
         self.scope = Scope(self)
+        self.sources.on_page_moved = self.scope.move
         # FG1 radio IDs nobody has named yet (#163): "Radio 1234 (MDC) on FG1: who is this?" on the console.
         self.newids = NewIds(self)
         # The emergency button and a mayday heard on our fire channels (sizeup/cad/alarms.py, #128): the app feeds it
@@ -293,6 +295,8 @@ class Cad:
         # Settings > Data sources (#186): the hub's data pulls (sizeup/datasources.py DataSources); the app sets it.
         # None: no data sources here (GET /api/cad/datasources says so).
         self.datasources = None
+        # Metro-North's trains (#362): a counter that moves with each new read; the page reloads the layer when it does
+        self.trains_rev: Callable[[], int | None] = lambda: None
         # GET /api/cad/tones (#80): the pairs named from the console and the names to pick from; the app sets it.
         self.tone_names: Callable[[], dict] = lambda: {"named": self.settings.tone_rows(), "names": list(s.monitor_departments),
                                                         "ours": list(s.monitor_departments)}
@@ -360,7 +364,13 @@ class Cad:
                     talking=self.live(), paging=self.paging(), cloud=self.cloud(), prealert=self.prealert_state(now),
                     airport_alerts=self.airport_alerts_state(now),
                     status_hints=self.status_hints(), alarms=self.alarms_state(now), radio_ids=self.radio_ids(now),
-                    sources=self.sources_state(now))
+                    sources=self.sources_state(now), trains_rev=self._trains_rev())
+
+    def _trains_rev(self) -> int | None:
+        try:
+            return self.trains_rev()
+        except Exception:  # noqa: BLE001 - never breaks the console
+            return None
 
     def sources_state(self, now: float | None = None) -> dict | None:
         """The incident sources (#297): the tiers, the acting primary, the possible-incoming notices (never breaks the
@@ -1733,8 +1743,10 @@ class Cad:
         if typ == airport.TYPE:                        # the tower's facts as the page says them (#105)
             f.update(airport.fields(" ".join(inc.page_text)))
         old = self.store.by_source_ref(ref)
-        if old is None and (got := self.sources.paging_incident(str(inc.id))):
-            old = self.store.incident(got)             # attached to an incident a higher tier made (#297)
+        got = self.sources.paging_incident(str(inc.id))
+        if got and (old is None or (old["status"] == "dismissed" and got != old["id"])):
+            old = self.store.incident(got)             # attached to an incident a higher tier made (#297), or moved there
+                                                       # from its own card (#365: rematch_page)
         if old is None:
             # The paging decoder is the backup (#297, sizeup/cad/sources.py): it attaches to the incident a feed has
             # for it, else makes its own at once (never held), noted "possibly the same as" a near one it may not join.
@@ -1742,15 +1754,29 @@ class Cad:
             at = (inc.page_starts or [inc.opened])[0]
             how, got = self.sources.page(str(inc.id), at, f["address"] or heard, list(inc.units or []), data)
             if how == "attached":
-                self._page_scope(got, inc)
-                self.auto.on_page(got)                 # 60 Control mode: "paged" on a tracked incident (#311)
+                self._page_enrich(got, inc, f, lines)         # its scope too (#370)
+                self.auto.on_page(got, list(inc.units or []), at)   # 60 Control mode: "paged", its units (#311, #365)
                 return self.store.incident(got)
             iid = self._create_from_page(data)
             self.sources.created_by_page(str(inc.id), iid, got)
             self._page_scope(iid, inc)
             return self.store.incident(iid)
         self.comms.link_pages(old["id"], getattr(inc, "pages", []))  # a repeat of the page: on it too, accepted or not
-        self._page_scope(old["id"], inc)
+        at = (inc.page_starts or [inc.opened])[0]
+        if old["source_ref"] == ref and old["status"] == "queued" and not self.sources._has_feed(old["id"]):
+            # its own card, made from less than it says now (the tones half, a first reading): matched again (#365)
+            data = {"f": f, "ref": ref, "pages": list(getattr(inc, "pages", []) or []), "type_heard": inc.incident_type}
+            how, got = self.sources.rematch_page(str(inc.id), old["id"], at, f["address"] or heard,
+                                                 list(inc.units or []), data)
+            if how == "attached":
+                self._page_enrich(got, inc, f, lines)     # its scope too (#370)
+                self.auto.on_page(got, list(inc.units or []), at)
+                return self.store.incident(got)
+        if self.sources._has_feed(old["id"]):          # a feed's incident: the repeat enriches it (#365), its scope (#370)
+            self._page_enrich(old["id"], inc, f, lines)
+            self.auto.on_page(old["id"], list(inc.units or []), at)
+        else:
+            self._page_scope(old["id"], inc)
         if old["status"] != "queued":
             return old
         auth = self.sources.authority(old["id"])
@@ -1767,12 +1793,44 @@ class Cad:
             fill.update(type=typ, subtype=sub, type_note=note)
         return self.store.update_incident(old["id"], fill, log=False)
 
-    def _page_scope(self, iid: int, inc) -> None:
-        """Full department or specific units, as the page says it (#370; a feed's stands)."""
+    def _page_scope(self, iid: int, inc, note: bool = True) -> tuple[str, bool]:
+        """Full department or specific units, as the page says it (#370; a feed's stands): (the feed's own label when
+        it says otherwise ("units"), else ""; whether the page's reading is new there). note: that disagreement is a
+        timeline line of its own."""
         try:
-            self.scope.on_page(iid, inc)
+            return self.scope.on_page(iid, inc, note=note)
         except Exception as e:  # noqa: BLE001 - the page stands whatever this does
             self.log(f"CAD: dispatch scope: {type(e).__name__}")
+            return "", True
+
+    def _page_enrich(self, iid: int, inc, f: dict, lines: list[str]) -> None:
+        """A page on an incident a feed has (#365): never a card of its own, it enriches that one. Its clip is on it
+        (Sources._page_attached, comms.link_pages); on the timeline (kind "tones"), once each: its transcript lines
+        ("60 Control page 14:31: ...") and one line for who it paged (#370, scope.page_line: "Page: all PCFD", "Page:
+        PCFD · units Engine 60, Ladder 31", with " · feed: units" when the feed's label says otherwise). In 60
+        Control mode AutoDispatch.on_page dispatches the units it named that are on our boards; in PCFD mode they stay
+        that line for a person. Its cross streets fill the incident's when it has none and no person set its
+        location. The feed's type and location stand: the page's are only noted (Sources._page_attached)."""
+        cur = self.store.incident(iid)
+        have = {e["text"] for e in self.store.q("SELECT text FROM events WHERE incident_id = ? AND kind = 'tones'", (iid,))}
+        depts = list(dict.fromkeys([*(getattr(inc, "tone_departments", None) or []), *(getattr(inc, "departments", None) or [])]))
+        feed, fresh = self._page_scope(iid, inc, note=False)
+        texts = [x[:2000] for x in lines]
+        said = scope_mod.page_line(depts, list(inc.units or []), getattr(inc, "tone_departments", ()), inc.incident_type, feed)
+        if said and fresh:                             # once per reading (a repeat of it: said already)
+            texts.append(said)
+        new = [x for x in dict.fromkeys(texts) if x not in have]
+        if new:
+            with self.store.tx() as db:
+                for x in new:
+                    self.store._event(db, iid, "tones", x, "Paging", at=self.clock())
+        cross = (f.get("cross_street") or "").strip()
+        if (cross and not (cur["cross_street"] or "").strip() and cur["status"] in ("queued", "pending", "active")
+                and "location" not in self.sources.manual(iid)):          # a person's location: theirs, cross too
+            try:
+                self.store.update_incident(iid, {"cross_street": cross}, operator="Paging", log=False)
+            except CadError:
+                pass
 
     def _create_from_page(self, data: dict) -> int:
         """A page's queued event (from_monitor's fields)."""
@@ -1794,7 +1852,7 @@ class Cad:
         raw = (raw or "").strip()
         if not raw:
             return "", "", ""
-        typ, _, sub = raw.upper().partition("/")
+        typ, _, sub = re.sub(r"\s*,\s*", "/", raw.upper(), count=1).partition("/")   # "TYPE,SUBTYPE" too (#365)
         try:
             self.lists.check_type(typ.strip(), sub.strip(), required=True)
             return typ.strip(), sub.strip(), ""
@@ -1802,7 +1860,7 @@ class Cad:
             pass
         from sizeup.dispatch import parse
         d = parse(f"respond to {raw}")
-        typ, sub, note = runcards.from_page(d.incident_type, d.category, raw)
+        typ, sub, note = runcards.from_page(d.incident_type, d.category, re.sub(r"[/,]", " ", raw))
         for t, s in ((typ, sub), (typ, "")):
             try:
                 self.lists.check_type(t, s, required=False)

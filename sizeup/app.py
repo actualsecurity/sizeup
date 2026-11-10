@@ -93,6 +93,10 @@ from sizeup.web.server import WebServer
 from sizeup.procenv import child_env
 
 ROOT = Path(__file__).resolve().parent.parent
+# MTA TrainTime's fast rate (#362): emergency incidents, active or pending, created or changed (anything logged) since ?
+HOT_INCIDENTS_SQL = ("SELECT i.lat, i.lon FROM incidents i WHERE i.status IN ('active', 'pending') AND i.emergency = 1 "
+                     "AND i.lat IS NOT NULL AND i.lon IS NOT NULL AND MAX(i.created_at, COALESCE((SELECT MAX(e.at) FROM events e "
+                     "WHERE e.incident_id = i.id), 0)) >= ?")
 HUB_SWITCH_S = 0.001     # the hub's GIL switch interval (sys.setswitchinterval; Python's default 0.005), start_app() (#284)
 SPLIT_PAGE_S = 30.0      # voice this soon after a tones-only page for us = that page's voice
 # The gazetteer names a town only from this confidence up (#80: "34 Longdale Avenue" read as Port Chester at
@@ -637,6 +641,11 @@ class App:
         self.trains = prov["trains"]
         # one station, one mark (#162): the county's Train stations leave out the ones the Trains layer draws
         self.gis.train_stations = self.trains.stations
+        # TrainTime's fast rate for an active incident near the line (#362); each new read pushed (trains_rev)
+        from sizeup.traintime import HOT_AGE_S
+        self.trains.hot_points = lambda: [(r["lat"], r["lon"]) for r in self.cad.store.q(HOT_INCIDENTS_SQL,
+                                                                                            (time.time() - HOT_AGE_S,))]
+        self.cad.trains_rev = lambda: self.trains.rev
         # Aircraft near HPN (sizeup/aircraft.py, #155): shortfinal's PCFD-focused picture, read by the CAD of record
         # while someone looks at the Aircraft layer. It never opens a dongle: a receiver's aircraft.json is only read.
         self.aircraft = prov["aircraft"]
@@ -3136,7 +3145,7 @@ class App:
     def _reread_caches(self) -> None:
         """The small providers read their caches when they were made, before cachesync put a new task's back: again."""
         for name, fn in (("roads", lambda: self.roads._load()), ("roadwork", lambda: self.roadwork._load()),
-                         ("trains", lambda: (self.trains._load(), self.trains._load_points(None))),
+                         ("trains", lambda: (self.trains._load(), self.trains._load_points(None), self.trains.tt._load_routes())),
                          ("weather", lambda: self.weather._load()),
                          ("aircraft", lambda: self.aircraft.registry.con is None and self.aircraft.registry._open())):
             try:
@@ -3360,6 +3369,7 @@ def make_server(app: App, fence=None, listener=None) -> WebServer:
         app.prealert.on_change = server.poke             # so is the phone ringing
     app.cad.alarms.on_change = server.poke               # and an emergency alarm (#128)
     app.cad.airport_alerts.on_change = server.poke       # and an airport pre-alert (#233)
+    app.trains.on_change = server.poke                   # and Metro-North's trains, each TrainTime read (#362)
     return server
 
 

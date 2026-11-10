@@ -436,6 +436,11 @@ heartbeat_stale_min = 90             # no heartbeat (or restart) this long: "Tap
 # rt_url = ""                                  # "" = the MTA's (sizeup/trains.py RT_URL); a test feed's address
 # gtfs_url = ""                                # "" = the MTA's (GTFS_URL)
 # rt_every_s = 5                               # the realtime feed this often while someone looks (5 to 300 s)
+# traintime = true                             # MTA TrainTime (undocumented; sizeup/traintime.py, #362): GPS, cars,
+#                                              # load, milepost, track; GTFS-realtime the fallback when it fails
+# traintime_url = ""                           # "" = the MTA's (traintime.py BASE_URL); a test server's address
+# traintime_every_s = 5                        # TrainTime this often while the layer is on or an active incident is
+#                                              # within 1 km of the line (5 to 60 s); otherwise every 30 s
 
 # [aircraft]: aircraft near HPN on the CAD maps (sizeup/aircraft.py, docs/cloud.md "Aircraft near HPN", #155):
 # shortfinal's PCFD-focused picture (arrivals, departures, ground traffic at HPN, low traffic in the area,

@@ -19,6 +19,17 @@ sizeup/sources/runner.py (they come here as "source_event" / "source_health" thr
                data file's "feed_unit_aliases" first. A unit in common (assignments not cleared, and
                the reports' units) never joins two reports on its own, with or without locations. Two incidents sharing units in the
                window that may not be joined are noted "possibly the same as #N" on both: a duplicate is never silent
+    street only  (#365) a report with a street and no house number ("Example Terrace") and an open incident with a
+               numbered address on that street ("9 EXAMPLE TER"), or the other way round (a feed's numbered event and a
+               page's street-only incident), created within SAME_CALL_S of each other: the same street strictly (name,
+               directions before and after, suffix and EXT; a street with no suffix never), no two different known
+               towns. It joins when that incident is the only open one on that street in SAME_CALL_S, unless both
+               types are known and differ, or both name units, none in common and the types differ (noted). Two or more open on that street: never joined,
+               "possibly the same" on every one. The rest of "match" (same call, attach, the source's own) still holds
+    doubled    (#365) a house number a page's speech-to-text heard doubled ("17, 17 Example Lane" read as "1717 Example
+               Lane"; two digits a half at least, 11 is never 1) against its half on that street: joins under the same
+               terms as "street only" (within SAME_CALL_S, types not different, units not disjoint), never while an
+               incident at the number as written is open (then noted). A feed's typed number is never halved
     same call  a match must also be the same call (SAME_CALL_S): a page joins a feed's incident only when the feed's
                dispatch is within 5 min of it (the same type is not enough), and never one the feed has in service. A
                feed event never joins an incident made after it ended, nor one made more than SAME_CALL_S after its
@@ -35,12 +46,16 @@ sizeup/sources/runner.py (they come here as "source_event" / "source_health" thr
                status (manual_edits: type, location, pin); otherwise a timeline note, and the incident view
                offers "Use <feed>'s <field>" (feed_use). A pin a person set is never cleared
     timeline   every change a feed reports is an entry on the incident (kind "feed"): type, location, units, each time
-               (per unit too), each new comment at its own time, closed or reopened, each extra
+               (per unit too), each new comment at its own time (not an empty one, nor the same words within
+               COMMENT_REPEAT_S), closed
+               or reopened, each extra
     merge      a feed's event naming other ids of the same source in its aliases: each alias's report is retired
                (merged_into) with a note on both incidents and in the log. The alias's incident is dismissed only when
                it is still queued AND that same source made it (its report then moves onto the event); otherwise a note
     closed     the feed closed an event (its in-service or cleared time): a queued incident only that event made, and
-               nobody touched, is dismissed; any other gets the timeline line
+               nobody touched, is dismissed; any other gets the timeline line. A page's own card still queued for that
+               call moves onto it and is dismissed (#365, _sweepable): untouched, no "possibly the same" note on
+               another open incident, and its page matched again now takes this incident, for the same call
     stale      the station sends the ids still in each feed's snapshot ("source_seen"): an open report the feed no
                longer lists is noted once on its incident and flagged in Settings > Health
     address    a feed's location is shown (and said) as its street part (shown_location); the addresses a feed put on
@@ -79,6 +94,7 @@ SAME_CALL_BEFORE_S = 60.0              # ... and an event first seen closed or o
 REPORT_STALE_S = 180.0
 FORGET_S = 24 * 3600.0                 # a feed silent this long is off the tiers (taken off the station)
 INCOMING_S = 300.0
+COMMENT_REPEAT_S = 600.0               # a feed's comment with the same words this soon after: not a new line
 TICK_S = 5.0
 PANEL_MAX = 50
 MANUAL_FIELDS = ("type", "location", "pin")
@@ -359,6 +375,44 @@ def same_place(a: str, b: str) -> bool:
     return _same_street(ka[2:], kb[2:])
 
 
+def street_of(s: str) -> tuple[bool, tuple] | None:
+    """(has a house number, (pre, suffix, name, post)) for a street address with a suffix ('9 Example Ter', 'Example
+    Terrace'); None for anything else (an intersection, a named place, a street with no suffix: too loose)."""
+    k = place_key(s)
+    if k is None or k[0] != "addr" or not k[3]:
+        return None
+    return bool(k[1]), k[2:]
+
+
+def halved(s: str) -> str | None:
+    """A house number heard doubled ("17, 17 Example Lane" read as "1717 Example Lane"): the location with its half
+    ("17 Example Lane"); None when the number isn't an exact doubling (abab -> ab) of at least two digits each (11 is
+    never 1). Only ever for a page's (speech-to-text) location, never a feed's typed one (same_place_halved)."""
+    part = street_part(s)
+    m = re.match(r"(\d+)(\s.*)$", part)
+    if not m:
+        return None
+    n = m.group(1)
+    h = len(n) // 2
+    if len(n) < 4 or len(n) % 2 or n[:h] != n[h:] or n[0] == "0":
+        return None
+    return n[:h] + m.group(2)
+
+
+def same_place_halved(a: str, b: str, heard_a: bool = True, heard_b: bool = True) -> bool:
+    """Not the same place as written, but the same once one side's doubled house number is halved (#365). heard_x: that
+    location came from a page (speech-to-text); a feed's typed number is never halved."""
+    if same_place(a, b):
+        return False
+    ha, hb = halved(a) if heard_a else None, halved(b) if heard_b else None
+    return bool((ha and same_place(ha, b)) or (hb and same_place(a, hb)))
+
+
+def _towns_agree(a: str, b: str) -> bool:
+    ta, tb = _town(a), _town(b)
+    return not (ta and tb and ta != tb)
+
+
 def _shown(v) -> str:
     """An extra's value for people: {"Fire": "26-0012"} -> "Fire 26-0012"; [a, b] -> "a, b"; None -> "(none)"."""
     if v is None or v == "" or v == [] or v == {}:
@@ -395,6 +449,9 @@ class Sources:
         # on_possibly(new_id, other_id): told when two incidents are noted "possibly the same" (#311: the dispatch mode
         # leaves such an incident for a person); None: nobody listens
         self.on_possibly: Callable[[int, int], None] | None = None
+        # on_page_moved(card id, incident id): a page's card moved onto another incident (rematch_page, _sweep_pages;
+        # #370: its full department / specific units reading goes with it); None: nobody listens
+        self.on_page_moved: Callable[[int, int], None] | None = None
         self._stop = threading.Event()
         with self.store.lock:
             self.store.db.executescript(SCHEMA)
@@ -541,26 +598,58 @@ class Sources:
                               "LIMIT 1", (iid, PAGING)) is not None
 
     def match(self, source: str, at: float, location: str, units, typ: str = "") -> tuple[dict | None, dict | None]:
-        """(the open incident this report may attach to, else the one it is possibly the same as): see the module's
-        "match". Whether it may attach there is also the caller's (see "attach")."""
+        """(the open incident this report may attach to, else the nearest one it is possibly the same as): match_all."""
+        best, nears = self.match_all(source, at, location, units, typ)
+        return best, (nears[0] if nears else None)
+
+    def match_all(self, source: str, at: float, location: str, units, typ: str = "",
+                  exclude: int | None = None) -> tuple[dict | None, list[dict]]:
+        """(the open incident this report may attach to, else every one it is possibly the same as, nearest first): see
+        the module's "match" and "street only". Whether it may attach there is also the caller's (see "attach")."""
         self._towns()
         units = drop_departments(units)                      # a department entry says nothing about which call (#370)
         taken = {r["incident_id"] for r in self.store.q(
             "SELECT incident_id FROM source_reports WHERE source = ? AND incident_id IS NOT NULL", (source,))}
         here = place_key(location) is not None
-        best = near = None
-        bkey = nkey = None
+        rows = self.store.q(f"SELECT * FROM incidents WHERE created_at BETWEEN ? AND ? AND status IN "
+                            f"({','.join('?' * len(OPEN))})", (at - MATCH_WINDOW_S, at + MATCH_WINDOW_S, *OPEN))
+        rows = [r for r in rows if r["id"] != exclude]       # the report's own incident (rematch_page)
+        street = self._on_street(location, at, rows)
+        exact = here and any(inc["id"] not in taken and any(same_place(location, x) for x in
+                             (inc["address"], inc["place_address"], inc["geo_label"]) if place_key(x) is not None)
+                             for inc in rows)
+        best = None
+        bkey = None
+        nears: list[tuple[tuple, dict]] = []
         places = 0
-        for inc in self.store.q(f"SELECT * FROM incidents WHERE created_at BETWEEN ? AND ? AND status IN "
-                                f"({','.join('?' * len(OPEN))})", (at - MATCH_WINDOW_S, at + MATCH_WINDOW_S, *OPEN)):
+        for inc in rows:
             on = drop_departments(self._units_of(inc["id"]))
             common = units_match(units, on)
             theirs = [x for x in (inc["address"], inc["place_address"], inc["geo_label"]) if place_key(x) is not None]
             same = here and bool(theirs) and any(same_place(location, x) for x in theirs)
+            heard = inc["source"] == PAGE_SOURCE and not self._has_feed(inc["id"])   # its location is a page's
+            half = here and not same and any(same_place_halved(location, x, source == PAGING, heard) for x in theirs)
             if inc["id"] in taken:                           # this source has it already: another call there, noted
                 if not same:
                     continue
                 score = -1
+            elif half:                                       # a doubled house number against its half (#365)
+                if exact or abs(inc["created_at"] - at) > SAME_CALL_S or (typ and inc["type"] and typ != inc["type"]):
+                    score = -1                               # that number exists too, too far apart, another type
+                elif units and on and not common and not (typ and typ == inc["type"]):
+                    score = -1                               # other units: maybe another call there, noted
+                else:
+                    score = 5 + len(common)
+            elif not same and street.get(inc["id"]):         # street only against a numbered address on it (#365)
+                if len(street) > 1:
+                    score = -1                               # two or more calls on that street: a person picks, noted
+                elif typ and inc["type"] and typ != inc["type"]:
+                    score = -1                               # another kind of call on that street, whatever the units
+                elif units and on and not common and not (
+                        typ and typ == inc["type"] and abs(inc["created_at"] - at) <= SAME_CALL_S):
+                    score = -1                               # other units: maybe another call there, noted
+                else:
+                    score = 5 + len(common)
             elif here and theirs:
                 if same and units and on and not common and not (
                         typ and typ == inc["type"] and abs(inc["created_at"] - at) <= SAME_CALL_S):
@@ -578,13 +667,46 @@ class Sources:
             k = (abs(inc["created_at"] - at), -abs(score))   # the nearest in time first; shared units break ties
             if score > 0:
                 places += 1
-            if score > 0 and (bkey is None or k < bkey):
-                best, bkey = inc, k
-            elif score < 0 and (nkey is None or k < nkey):
-                near, nkey = inc, k
+                if bkey is None or k < bkey:
+                    if best is not None:
+                        nears.append((bkey, best))
+                    best, bkey = inc, k
+                else:
+                    nears.append((k, inc))
+            else:
+                nears.append((k, inc))
         if best is not None and places > 1 and bkey[0] > SAME_CALL_S:
-            best, near = None, best                          # two calls at the place, neither near in time: a person picks
-        return best, (None if best is not None else near)
+            nears.append((bkey, best))                       # two calls at the place, neither near in time: a person picks
+            best = None
+        if best is not None:
+            return best, []
+        if len(street) > 1 and any(street.values()):         # street only, two or more on it: each one noted (#365)
+            nears += [((abs(i["created_at"] - at), 0), i) for i in rows if i["id"] in street]
+        out, seen = [], set()
+        for _, inc in sorted(nears, key=lambda p: p[0]):
+            if inc["id"] not in seen:
+                seen.add(inc["id"])
+                out.append(inc)
+        return None, out
+
+    @staticmethod
+    def _on_street(location: str, at: float, rows) -> dict[int, bool]:
+        """Street only (#365): when one side has a street and no house number and the other a numbered address on that
+        street. {incident id: it pairs with this report} for every open incident on the report's street (strictly: the
+        same name, directions and suffix, no two different known towns) created within SAME_CALL_S of it; it pairs when
+        one side is numbered and the other not. Empty when the report has no such street."""
+        mine = street_of(location)
+        out: dict[int, bool] = {}
+        if mine is None:
+            return out
+        for inc in rows:
+            if abs(inc["created_at"] - at) > SAME_CALL_S:
+                continue
+            for x in (inc["address"], inc["place_address"], inc["geo_label"]):
+                s = street_of(x)
+                if s is not None and s[1] == mine[1] and _towns_agree(location, x):
+                    out[inc["id"]] = out.get(inc["id"], False) or s[0] != mine[0]
+        return out
 
     def authority(self, iid: int) -> int | None:
         r = self.store.one("SELECT MIN(rank) AS r FROM source_reports WHERE incident_id = ? AND merged_into = ''", (iid,))
@@ -702,6 +824,8 @@ class Sources:
                 return into["incident_id"] if into else None
             prev = json.loads(rep["data"]) if rep else None
             if rep and rep["incident_id"]:
+                closing = data["closed"] and not (prev or {}).get("closed")
+                cards = self._sweepable(rep["incident_id"]) if closing else []   # while the call is still open here
                 self._put(ev.source, ev.event_id, rank, label, seen, data)
                 if rep["gone_at"] is not None:                # listed again
                     with self.store.tx() as db:
@@ -711,17 +835,18 @@ class Sources:
                 self._merge(ev.source, ev.event_id, rep["incident_id"], data, label)
                 if data["closed"] and not (prev or {}).get("closed"):
                     self._feed_closed(rep["incident_id"], ev.source, ev.event_id, label)
+                    self._sweep_pages(rep["incident_id"], cards)
                 return rep["incident_id"]
             at = min(data["times"].values()) if data["times"] else seen
             inc = self._alias_incident(ev.source, data)
-            similar = None
+            similar: list[dict] = []
             if inc is None:
                 # a match is always the same place (match): attach, whoever made the incident and whatever its status
                 # (open), so a page that beat the feed gets the feed's report, not a duplicate
                 typ = self.cad.map_type(data["type"], label)[0] if data["type"] else ""
-                inc, similar = self.match(ev.source, at, data["location"], data["units"], typ)
+                inc, similar = self.match_all(ev.source, at, data["location"], data["units"], typ)
                 if inc is not None and not self._same_call(inc, data, now):
-                    inc, similar = None, inc                 # another call there (one that ended before, an old one)
+                    inc, similar = None, [inc]               # another call there (one that ended before, an old one)
             if inc is not None:
                 if inc["source"] == "manual":                # a person typed its type and location: theirs stand
                     self.mark_manual(inc["id"], [f for f, k in (("type", "type"), ("location", "address")) if inc[k]])
@@ -741,8 +866,8 @@ class Sources:
             if disp is not None and now - disp > MATCH_WINDOW_S:  # still open, first seen late (an outage, a first run)
                 with self.store.tx() as db:
                     self.store._event(db, iid, "feed", f"{label}: first seen {_dur(now - disp)} after its dispatch", at=now)
-            if similar is not None:
-                self._possibly(iid, similar)
+            for other in similar:
+                self._possibly(iid, other)
             self._merge(ev.source, ev.event_id, iid, data, label)
             return iid
 
@@ -899,9 +1024,20 @@ class Sources:
                 if t is not None and t != was.get(k):
                     notes.append((t, f"{pre}: {u} {TIME_WORDS[k]} {_hm(t)}"))
         had = {(float(a), b) for a, b in old["comments"]}
+        said: dict[str, float] = {}                          # the words -> when last shown (the old ones replayed)
+        for a, b in sorted(old["comments"], key=lambda c: float(c[0])):
+            w = " ".join(str(b).split())
+            if w not in said or abs(float(a) - said[w]) > COMMENT_REPEAT_S:
+                said[w] = float(a)
         for a, text in new["comments"]:
-            if (float(a), text) not in had:
-                notes.append((float(a), f"{label} comment: {text}"))
+            if (float(a), text) in had:
+                continue
+            words = " ".join(str(text).split())
+            last = said.get(words)
+            if not re.sub(r"[\W_]+", "", words) or (last is not None and abs(float(a) - last) <= COMMENT_REPEAT_S):
+                continue                                     # nothing said, or the same words again soon: one line (#365)
+            said[words] = float(a)
+            notes.append((float(a), f"{label} comment: {text}"))
         was_x, now_x = old.get("extra") or {}, new.get("extra") or {}
         for k in sorted(set(was_x) | set(now_x)):
             if was_x.get(k) != now_x.get(k):
@@ -976,9 +1112,10 @@ class Sources:
         r = self._report(PAGING, ref)
         return r["incident_id"] if r else None
 
-    def page(self, ref: str, at: float, location: str, units, data: dict) -> tuple[str, dict | int | None]:
+    def page(self, ref: str, at: float, location: str, units, data: dict) -> tuple[str, list[dict] | int]:
         """A page for us that made no incident yet: ("attached", id) to the incident a feed has for it, else
-        ("create", the incident it may be the same as, or None): the caller makes it now, then created_by_page()."""
+        ("create", the incidents it may be the same as, nearest first): the caller makes it now, then
+        created_by_page()."""
         units = list(units or [])
         rec = dict(data, location=location, units=units, at=at)
         with self._lock:
@@ -986,15 +1123,15 @@ class Sources:
             if rep and rep["incident_id"]:
                 return "attached", rep["incident_id"]
             typ = str((data.get("f") or {}).get("type") or "")
-            inc, similar = self.match(PAGING, at, location, units, typ)
+            inc, similar = self.match_all(PAGING, at, location, units, typ)
             if inc is not None and self._has_feed(inc["id"]) and not self._page_same_call(inc, at, typ):
-                inc, similar = None, inc                     # another call there: the page's own incident, noted
+                inc, similar = None, [inc]                   # another call there: the page's own incident, noted
             if inc is not None and self._has_feed(inc["id"]):
                 self._put(PAGING, ref, PAGING_RANK, PAGING_LABEL, at, rec, incident_id=inc["id"])
                 self._page_attached(inc, rec)
                 return "attached", inc["id"]
             self._put(PAGING, ref, PAGING_RANK, PAGING_LABEL, at, rec)
-            return "create", inc or similar
+            return "create", ([inc] if inc is not None else similar)
 
     def _page_same_call(self, inc: dict, at: float, typ: str) -> bool:
         """A page joins a feed's incident only for the same call: the feed's dispatch within SAME_CALL_S of the page (the
@@ -1007,11 +1144,114 @@ class Sources:
         disp = self._disp(d) or (r["first_seen"] if r else None)
         return disp is not None and abs(at - disp) <= SAME_CALL_S
 
-    def created_by_page(self, ref: str, iid: int, similar: dict | None = None) -> None:
+    def created_by_page(self, ref: str, iid: int, similar: dict | list | None = None) -> None:
+        """The page made its own incident: on its report, and noted "possibly the same" as each near one (page())."""
         with self.store.tx() as db:
             db.execute("UPDATE source_reports SET incident_id = ? WHERE source = ? AND ref = ?", (iid, PAGING, ref))
-        if similar is not None:
-            self._possibly(iid, similar)
+        for other in ([similar] if isinstance(similar, dict) else similar or []):
+            self._possibly(iid, other)
+
+    def rematch_page(self, ref: str, iid: int, at: float, location: str, units, data: dict) -> tuple[str, int | None]:
+        """A repeat of a page that made its own incident (iid) with less than it says now (#365: the tones half, a
+        first reading with no location or units): matched again. When it now joins an incident a feed has (the same
+        call) and its own is still queued, made by it and untouched by anyone, its report moves there and its own is
+        dismissed: one card ("attached", that id). Otherwise each one it may be the same as is noted, once
+        ("possibly", n noted)."""
+        units = list(units or [])
+        rec = dict(data, location=location, units=units, at=at)
+        with self._lock:
+            rep = self._report(PAGING, ref)
+            own = self.store.incident(iid)
+            if rep is None or rep["incident_id"] != iid or own["status"] != "queued" or self._has_feed(iid):
+                return "own", None
+            typ = str((data.get("f") or {}).get("type") or "")
+            inc, similar = self.match_all(PAGING, at, location, units, typ, exclude=iid)
+            if inc is not None and self._has_feed(inc["id"]) and not self._page_same_call(inc, at, typ):
+                inc, similar = None, [inc]
+            if inc is not None and self._has_feed(inc["id"]) and not self._touched_page(iid, data.get("ref") or ""):
+                self._put(PAGING, ref, PAGING_RANK, PAGING_LABEL, at, rec)
+                with self.store.tx() as db:
+                    db.execute("UPDATE source_reports SET incident_id = ? WHERE source = ? AND ref = ?", (inc["id"], PAGING, ref))
+                    self.store._event(db, iid, "feed", f"Page attached to {_ref(inc)}", at=self.clock())
+                self._page_attached(inc, rec)
+                self._moved(iid, inc["id"])
+                self.store.dismiss(iid, operator=PAGING_LABEL, reason=f"attached to {_ref(inc)}")
+                self.log(f"incident sources: page event {iid} attached to event {inc['id']}, dismissed")
+                return "attached", inc["id"]
+            n = 0
+            for other in ([inc] if inc is not None else similar):
+                if not self._noted(iid, other):
+                    self._possibly(iid, other)
+                    n += 1
+            return "possibly", n
+
+    def _sweepable(self, iid: int) -> list[dict]:
+        """A feed is closing the event on this incident (still open here): the page cards left queued for that call
+        (#365: they never joined). Only a page's own card, untouched by anyone (_touched_page), with no "possibly the
+        same" note on another open incident, whose page matched again now (match_all, its own card left out) takes
+        THIS incident as the one to attach to, for the same call (_page_same_call)."""
+        inc = self.store.incident(iid)
+        out = []
+        with self._lock:
+            for p in self.store.q("SELECT * FROM incidents WHERE status = 'queued' AND source = ? AND id != ? AND "
+                                  "created_at BETWEEN ? AND ?", (PAGE_SOURCE, iid, inc["created_at"] - MATCH_WINDOW_S,
+                                                                 inc["created_at"] + MATCH_WINDOW_S)):
+                rep = self.store.one("SELECT * FROM source_reports WHERE source = ? AND incident_id = ?", (PAGING, p["id"]))
+                if rep is None or self._has_feed(p["id"]) or self._touched_page(p["id"], p["source_ref"]):
+                    continue
+                others = self.store.q(f"SELECT * FROM incidents WHERE id NOT IN (?, ?) AND status IN "
+                                      f"({','.join('?' * len(OPEN))})", (iid, p["id"], *OPEN))
+                if any(self._noted(p["id"], o) for o in others):
+                    continue                                 # possibly another open call: a person decides
+                d = json.loads(rep["data"] or "{}")
+                typ = str((d.get("f") or {}).get("type") or p["type"] or "")
+                best, _ = self.match_all(PAGING, rep["first_seen"], d.get("location") or p["address"],
+                                         d.get("units") or [], typ, exclude=p["id"])
+                if best is not None and best["id"] == iid and self._page_same_call(best, rep["first_seen"], typ):
+                    out.append(p)
+        return out
+
+    def _sweep_pages(self, iid: int, cards: list[dict]) -> int:
+        """The feed closed the event on this incident: each card _sweepable() found before the close moves onto it and
+        is dismissed, when still queued and untouched. How many."""
+        inc = self.store.incident(iid)
+        n = 0
+        with self._lock:
+            for p in cards:
+                p = self.store.incident(p["id"])
+                rep = self.store.one("SELECT * FROM source_reports WHERE source = ? AND incident_id = ?", (PAGING, p["id"]))
+                if p["status"] != "queued" or rep is None or self._touched_page(p["id"], p["source_ref"]):
+                    continue
+                with self.store.tx() as db:
+                    db.execute("UPDATE source_reports SET incident_id = ? WHERE source = ? AND ref = ?", (iid, PAGING, rep["ref"]))
+                    self.store._event(db, p["id"], "feed", f"Page attached to {_ref(inc)} (closed there)", at=self.clock())
+                self._page_attached(inc, dict(json.loads(rep["data"] or "{}"), at=rep["first_seen"]))
+                self._moved(p["id"], iid)
+                self.store.dismiss(p["id"], operator=PAGING_LABEL, reason=f"the same call as {_ref(inc)}, closed")
+                self.log(f"incident sources: page event {p['id']} attached to closed event {iid}, dismissed")
+                n += 1
+        return n
+
+    def _moved(self, card: int, iid: int) -> None:
+        if self.on_page_moved is not None:
+            try:
+                self.on_page_moved(card, iid)
+            except Exception as e:  # noqa: BLE001 - the move stands whatever a listener does
+                self.log(f"incident sources: page moved: {type(e).__name__}")
+
+    def _noted(self, iid: int, other: dict) -> bool:
+        return self.store.one("SELECT 1 AS x FROM events WHERE incident_id = ? AND kind = 'feed' AND text LIKE ? LIMIT 1",
+                              (iid, f"Possibly the same as {_ref(other)}:%")) is not None
+
+    def _touched_page(self, iid: int, source_ref: str) -> bool:
+        """A page's own queued incident someone (or something but its page) has worked on: never dismissed for a match."""
+        inc = self.store.incident(iid)
+        return bool(inc["source_ref"] != source_ref or self.manual(iid)
+                    or self.store.one("SELECT 1 AS x FROM assignments WHERE incident_id = ? LIMIT 1", (iid,))
+                    or self.store.one("SELECT 1 AS x FROM events WHERE incident_id = ? AND kind IN ('note', 'dispatch', "
+                                      "'remarks', 'attach', 'status', 'edit', 'alarm', 'upgrade') LIMIT 1", (iid,))
+                    or self.store.one("SELECT 1 AS x FROM alarms WHERE incident_id = ? LIMIT 1", (iid,))
+                    or self.store.one("SELECT 1 AS x FROM radio_links WHERE incident_id = ? AND why != 'page' LIMIT 1", (iid,)))
 
     def _page_attached(self, inc: dict, rec: dict) -> None:
         self.cad.comms.link_pages(inc["id"], rec.get("pages") or [])

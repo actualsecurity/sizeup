@@ -125,6 +125,12 @@ const StationHealth = (() => {
           i.seen.map((x) => `${x.label} ${when(x.first_seen)}` + (x.gone_at ? " · no longer listed" : "")).join(" · "),
           i.seen.filter((x) => x.lead_s !== null && x.lead_s !== undefined).map((x) => `${x.label} ${lead(x.lead_s)}`).join(" · ")]), ""));
     }
+    if ((d.feeds || []).length) {   // map feeds with a fallback (#362: MTA TrainTime, else GTFS-realtime)
+      const feedCls = (s) => (s === "ok" ? "hl-ok" : s === "fallback" || s === "error" ? "hl-bad" : "dim");
+      kids.push(el("h3", "hl-sub", "Map feeds"), table(["Feed", "State", "Reason", "Last read", "Fallback"],
+        d.feeds.map((f) => [f.label, [f.state, feedCls(f.state)], f.why || "",
+          f.at ? `${when(f.at)} (${longDur(serverNow() - f.at)} ago)` : "never", f.fallback || ""]), ""));
+    }
     kids.push(el("h3", "hl-sub", "Station"), dl([
       ["Station", st.name || st.id],
       ["Connection", st.connected ? "Connected" : st.last_state ? `Offline · ${longDur(serverNow() - st.last_state)}` : "Offline",
