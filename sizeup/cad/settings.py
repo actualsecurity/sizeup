@@ -44,6 +44,9 @@ Reset to default = drop the override (one item, or a whole section).
     hub_errors                     key "on" -> true | false (default true), "per_signature" / "total" -> a count: the hub's
                                    own error spikes pushed to the status topic (#285, sizeup/errwatch.py; Settings >
                                    System > Hub error alerts, admins)
+    map_display                    key "detail_zoom" | "active_zoom" | "board_detail_zoom" | "board_active_zoom" -> a zoom:
+                                   below it an idle / active rig is drawn small on the console's maps / the wall board's
+                                   (#376, sizeup/cad/mapview.py DISPLAY_DEFAULTS; Settings > System > Map display, admins)
     alert_mutes                    key an alert kind (sizeup/cloud/health.py MUTE_KINDS: adsb, whisper, job, trunk,
                                    silent, hub_errors ...) -> {"until": epoch | null (until unmuted)}: shown on Settings >
                                    Health, not pushed (#340; Settings > System > Push notifications, admins)
@@ -73,7 +76,7 @@ from pathlib import Path
 
 from sizeup import channels as channels_mod
 from sizeup.cad import alarms as alarms_mod
-from sizeup.cad import dispatcher, eta, runcards, tonelist
+from sizeup.cad import dispatcher, eta, mapview, runcards, tonelist
 from sizeup.cad import lists as lists_mod
 from sizeup.cad.lists import CLASSES, CODE, COLOR, LIST_SECTIONS, LONG_CODE, RESPONSES, ROLES, ListsError
 from sizeup.cad.store import OPERATOR_MAX, SCHEMA_VERSION, TZ, CadError
@@ -118,6 +121,9 @@ PAGE_SECTION[ERR_SECTION] = "system"
 MUTE_SECTION = health_mod.MUTE_SECTION
 PAGE_SECTION[MUTE_SECTION] = "system"
 MUTE_HOURS_MAX = 24 * 30
+# The rigs' zooms on the maps (#376, sizeup/cad/mapview.py): Settings > System > Map display, audited as System.
+MAPD_SECTION = mapview.DISPLAY_SECTION
+PAGE_SECTION[MAPD_SECTION] = "system"
 WALL_ID = re.compile(r"[A-Za-z0-9_.:-]{1,64}")      # sizeup/roads.py CAMERA_ID
 MAX_WALL_IDS = 200
 AUDIT_SECTIONS = ("lists", "run cards", "units", "dispatch", "users", "system", "radios")
@@ -376,6 +382,7 @@ class Editor:
         self.cad.atc_identify = bool(a.get("identify", True))           # sizeup/atc_talkers.py (#252): on by default
         self.cad.atc_map = bool(a.get("map", True))
         self.cad.atc_vocab_refresh = bool(a.get("vocab", True))
+        self.cad.map_display = mapview.display_zooms(ov.get(MAPD_SECTION))     # the maps' rigs by zoom (#376)
         self.cad._state = None
 
     def _commit(self, changes: list[tuple[str, str, object]], operator: str, audit: list[tuple[str, str, object, object]],
@@ -526,6 +533,7 @@ class Editor:
         out["camera_wall"] = self.wall_page()
         out["atc"] = self.atc_page(ov)
         out["hub_errors"] = self.errors_page(ov)
+        out["map_display"] = self.mapd_page(ov)
         out["alert_mutes"] = self.mutes_page(ov)
         return out
 
@@ -623,6 +631,34 @@ class Editor:
         out = self._commit([(ERR_SECTION, key, REMOVE if v == d and type(v) is type(d) else v)], op,
                            [("system", f"{ERR_SECTION}/{key}", shown(cur), shown(v))])
         return {**out, "hub_errors": self.errors_page()}
+
+    def mapd_page(self, ov: dict | None = None) -> dict:
+        """Settings > System > Map display (#376): each zoom, its default and whether it is edited."""
+        e = ((self.overrides() if ov is None else ov).get(MAPD_SECTION) or {})
+        z = mapview.display_zooms(e)
+        lo, hi = mapview.DISPLAY_LIMITS
+        return {k: {"label": mapview.DISPLAY_LABELS[k], "value": z[k], "default": d, "edited": k in e, "min": lo, "max": hi}
+                for k, d in mapview.DISPLAY_DEFAULTS.items()}
+
+    def _mapd_op(self, action: str, body: dict, op: str) -> dict:
+        """set {key: detail_zoom | active_zoom | board_detail_zoom | board_active_zoom, value} | reset {key}: admins."""
+        key = body.get("key")
+        if key not in mapview.DISPLAY_DEFAULTS:
+            raise CadError(f"key: {', '.join(mapview.DISPLAY_DEFAULTS)}")
+        d = mapview.DISPLAY_DEFAULTS[key]
+        cur = mapview.display_zooms(self.overrides().get(MAPD_SECTION))[key]
+        if action == "reset":
+            v = d
+        elif action == "set":
+            try:
+                v = mapview.display_value(key, body.get("value"))
+            except ValueError as e:
+                raise CadError(str(e)) from None
+        else:
+            raise CadError("action: set or reset")
+        out = self._commit([(MAPD_SECTION, key, REMOVE if v == d else v)], op,
+                           [("system", f"{MAPD_SECTION}/{key}", f"{cur:g}", f"{v:g}")])
+        return {**out, "map_display": self.mapd_page()}
 
     def atc_page(self, ov: dict | None = None) -> dict:
         """Settings > System > ATC talkers (#252): each switch, its default (on) and whether it is edited."""
@@ -745,7 +781,7 @@ class Editor:
               "dispatch": self._dispatch_op, "users": self._users_op, "runcards": self._cards_op,
               "import": self._import_op, "channels": self._channels_op, "stt": self._stt_op,
               "places": self._places_op, TONES_SECTION: self._tones_op, WALL_SECTION: self._wall_op, DS_SECTION: self._ds_op,
-              NOTIFY_SECTION: self._notify_op, ATC_SECTION: self._atc_op, ERR_SECTION: self._errors_op, MUTE_SECTION: self._mutes_op, "alarms": lambda a, b, o: self.cad.alarms.settings_op(a, b, o)}.get(section)
+              NOTIFY_SECTION: self._notify_op, ATC_SECTION: self._atc_op, ERR_SECTION: self._errors_op, MAPD_SECTION: self._mapd_op, MUTE_SECTION: self._mutes_op, "alarms": lambda a, b, o: self.cad.alarms.settings_op(a, b, o)}.get(section)
         if fn is None:
             raise CadError(f"no settings section {section!r}")
         if section in ("users", "import"):
@@ -2258,6 +2294,11 @@ class Editor:
                 self._errors_value(k, v)
             except CadError as e:
                 raise CadError(f"overrides.{ERR_SECTION}.{e}") from None
+        for k, v in (ov.get(MAPD_SECTION) or {}).items():     # sizeup/cad/mapview.py (#376)
+            try:
+                mapview.display_value(k, v)
+            except ValueError as e:
+                raise CadError(f"overrides.{MAPD_SECTION}: {e}") from None
         for k, v in list((ov.get(MUTE_SECTION) or {}).items()):     # sizeup/cloud/health.py (#340)
             if k not in health_mod.MUTE_KINDS:
                 raise CadError(f"overrides.{MUTE_SECTION}: {', '.join(health_mod.MUTE_KINDS)} only")

@@ -177,6 +177,7 @@ class Cad:
         self._state: tuple[int, dict] | None = None
         self.firehouses = mapview.load_firehouses()          # the maps' stations (a unit's home station is one)
         self.eta = eta.Params()                              # the ETA estimates' settings (Settings > Dispatch)
+        self.map_display = mapview.display_zooms()           # the rigs' zooms on the maps (Settings > System, #376)
         self._clears: tuple[int, dict] | None = None         # (rev, Store.recent_clears): returning rigs
         self.settings = settings_mod.Editor(self)           # the Settings page's edits over the data file
         # Per-person activity on the hub (sizeup/cad/activity.py): who signed in, did and was refused what.
@@ -555,7 +556,7 @@ class Cad:
     def map_slice(self, units: list[dict], incs: list[dict], pos: dict, now: float) -> dict:
         tags = {c: j["tag"] for j in self.lists.joint_response.values() for c in j["units"]}
         out = mapview.map_slice(units, incs, self.lists.role, self.firehouses, pos, now, joint=lambda c: tags.get(c, ""),
-                                clears=self.clears(now), params=self.eta)
+                                clears=self.clears(now), params=self.eta, display=self.map_display)
         if self.routes is not None:
             try:
                 out.update(self.routes.for_map(out["markers"], now))     # routes, trails (#360)
