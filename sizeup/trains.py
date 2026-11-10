@@ -131,6 +131,7 @@ from urllib.parse import parse_qs
 from urllib.request import Request, urlopen
 
 from sizeup import USER_AGENT as UA
+from sizeup import traintime
 
 SOURCE = "MTA"
 LABEL = "MTA Metro-North Railroad"
@@ -937,13 +938,13 @@ class Model:
             x = (self.facts(t, now) | p | {"id": t["id"], "dir": key, "dir_label": label, "d": d, "lat": round(p["lat"], DP),
                                             "lon": round(p["lon"], DP), "vehicle_status": t.get("vstatus") or "",
                                             "vehicle_stop_id": t.get("vstop") or ""}
-                 | ({"cars": t["cars"]} if t.get("cars") else {}) | self.tt_facts(t, p))
+                 | ({"cars": t["cars"]} if t.get("cars") else {}) | self.tt_facts(t, p, now))
             other = out.get(x["train"])                  # one train drawn once: a reported one over an estimate of it
             if other is None or other["fix_at"] is None and x["fix_at"] is not None:
                 out[x["train"]] = x
         return sorted(out.values(), key=lambda x: (x["dir"], x["train"]))
 
-    def tt_facts(self, t: dict, p: dict) -> dict:
+    def tt_facts(self, t: dict, p: dict, now: float | None = None) -> dict:
         """What MTA TrainTime adds to a train (#362): "tt" (sizeup/traintime.py facts), its car count as "cars", and
         "mp": the railroad milepost from TrainTime's turf, else from where we place it on the line (miles from Grand
         Central); "pos_src": whose position it is drawn at."""
@@ -956,6 +957,8 @@ class Model:
                "mp": mp if mp is not None else (round(p["s"] / MILE_M, 1) if fix else None)}
         if tt.get("cars"):
             out["cars"] = min(int(tt["cars"]), MAX_CARS)
+        if fix and now is not None:
+            out["stale"] = now - p["fix_at"] > STALE_S   # by its own fix, not the GTFS-realtime feed's age
         rec_v = p.get("v_fix")
         if fix and isinstance(rec_v, (int, float)):
             out["v"] = round(rec_v, 2)                   # m/s, filtered (along_filter): the page carries it on at this
@@ -1127,7 +1130,9 @@ def along_filter(last: dict | None, s: float, d: int, t: float, v_feed: float | 
     late fix), never a negative speed; stopped (the feed's speed under STOP_MPS): put, unless the fix is more than
     STOP_JITTER_M ahead."""
     vf = v_feed if isinstance(v_feed, (int, float)) and v_feed >= 0 else None
-    if last is None or last.get("v") is None or not 0 < t - last["fix_at"] <= RESET_S:
+    if last is not None and last.get("v") is not None and t <= last["fix_at"]:
+        return last["s"], last["v"]                      # not newer than the last: no change
+    if last is None or last.get("v") is None or t - last["fix_at"] > RESET_S:
         return s, (0.0 if vf is not None and vf < STOP_MPS else (vf or 0.0))
     dt = t - last["fix_at"]
     u_last, u_meas = last["s"] * d, s * d
@@ -1190,8 +1195,9 @@ class Tracker:
                 continue                                 # none this read: its last good fix stands a while (fix)
             raw = (p["lat"], p["lon"])
             src = p.get("src") or "gtfs"                 # "traintime": a GPS fix with its own time (#362)
-            if rec is not None and rec["raw"] == raw and rec["ok"] and rec.get("src", "gtfs") == src:
-                rec["present"] = True                    # where it was: its fix_at stays
+            if (rec is not None and rec["raw"] == raw and rec["ok"] and rec.get("src", "gtfs") == src
+                    and not (src == "traintime" and (p.get("ts") or 0) > rec.get("fix_at", 0))):
+                rec["present"] = True                    # where it was: its fix_at stays (a GPS fix: unless it is newer)
                 continue
             anchors = model.anchors(t)
             d = model.direction(t, anchors)
@@ -1201,6 +1207,9 @@ class Tracker:
             # a fix from the other source (TrainTime came or went) isn't judged against this one's
             last = rec if rec is not None and rec.get("s") is not None and rec.get("src", "gtfs") == src else None
             fix_at = min(now, p["ts"]) if src == "traintime" and p.get("ts") else at     # a GPS fix: its own time
+            if last is not None and fix_at <= last["fix_at"]:
+                rec["present"] = True                    # not newer than its last good fix: no change
+                continue
             why = model.judge(t, anchors, d, now, dist, s, last, fix_at)
             if why:
                 if rec is None or rec["raw"] != raw:     # each refused position counted once, however long it stays
@@ -1261,8 +1270,7 @@ class Trains:
                  cache_dir: str | Path | None = None, fetch: Callable | None = None,
                  log: Callable[[str], None] = print, clock: Callable[[], float] = time.time, every_s: float = RT_EVERY_S,
                  seed: str | Path | None = SEED_POINTS, tracks: str | Path | None = TRACKS_FILE,
-                 traintime: bool = True, tt_url: str = "", tt_every_s: float = 5.0, tt_fetch: Callable | None = None,
-                 crossings: tuple = ()):
+                 traintime: bool = True, tt_url: str = "", tt_every_s: float = 5.0, tt_fetch: Callable | None = None):
         from sizeup import traintime as tt
         self.enabled = bool(enabled)
         self.every_s = max(RT_EVERY_RANGE_S[0], min(RT_EVERY_RANGE_S[1], float(every_s)))
@@ -1284,13 +1292,16 @@ class Trains:
         self.view: dict = self.feed                       # the feed with MTA TrainTime merged in (#362), or the feed
         self.asked = 0.0                                  # the last time a viewer asked (the realtime feed's demand)
         self.viewed = 0.0                                 # the last time a page asked for the layer (TrainTime's fast rate)
-        # the active incidents' (lat, lon) (the app sets it: sizeup/app.py); one within traintime.NEAR_LINE_M of the line
-        # or of a grade crossing (crossings: [(lat, lon)]; none known on our stretch) puts TrainTime on its fast rate
+        # the emergency incidents' (lat, lon), active or pending and changed within traintime.HOT_AGE_S (the app sets
+        # it: sizeup/app.py); one within traintime.NEAR_LINE_M of the line puts TrainTime on its fast rate. (No grade
+        # crossing on our stretch of the New Haven Line, and no crossing data: the line itself is the test.)
         self.hot_points: Callable[[], list] = lambda: []
-        self.crossings = tuple(crossings)
         self._hot = (-1e18, False)
         self.on_change: Callable[[], None] | None = None   # the view changed: push it (the app: the state stream's poke)
         self.rev = 0                                      # bumped with each new view (the state's trains_rev)
+        self._tt_missed: set = set()
+        self._gtfs_pos: dict[str, tuple] = {}            # train id -> (its GTFS-realtime position, when first seen)
+        self._gtfs_pos_init = False
         self.rt = {"at": None, "error": "", "next": 0.0, "fails": 0, "n": 0}
         self.st = {"at": None, "error": "", "next": 0.0, "fails": 0, "modified": ""}
         self.points = Points()
@@ -1436,9 +1447,25 @@ class Trains:
             except Exception as e:  # noqa: BLE001
                 self.log(f"trains: push: {type(e).__name__}: {e}")
 
+    def _gtfs_first_seen(self) -> dict[str, float]:
+        """{train id: when its current GTFS-realtime position first appeared (the feed's time)}: how new it is."""
+        ts = self.feed.get("timestamp") or self.clock()
+        first = not self._gtfs_pos_init                  # at our first read a position's age is unknown: 0 (any newer wins)
+        self._gtfs_pos_init = True
+        seen = {}
+        for k, t in self.feed.get("trains", {}).items():
+            p = t.get("pos")
+            if not p:
+                continue
+            raw = (p["lat"], p["lon"])
+            old = self._gtfs_pos.get(k)
+            seen[k] = old[1] if old is not None and old[0] == raw else (0.0 if first else ts)
+        self._gtfs_pos = {k: ((t["pos"]["lat"], t["pos"]["lon"]), seen[k]) for k, t in self.feed.get("trains", {}).items() if k in seen}
+        return seen
+
     def tt_fast(self) -> bool:
-        """TrainTime's fast rate: a page has the layer on (asked within VIEW_S), or an active incident is within
-        NEAR_LINE_M of the line or a grade crossing (looked at every HOT_CHECK_S)."""
+        """TrainTime's fast rate: a page has the layer on (asked within VIEW_S), or a recent emergency incident
+        (hot_points) is within NEAR_LINE_M of the line (looked at every HOT_CHECK_S)."""
         from sizeup import traintime as tt
         now = self.clock()
         if now - self.viewed <= tt.VIEW_S:
@@ -1457,10 +1484,11 @@ class Trains:
                 lat, lon = float(p[0]), float(p[1])
             except (TypeError, ValueError, IndexError):
                 continue
-            if any(metres(lat, lon, a, b) <= tt.NEAR_LINE_M for a, b in self.crossings) or (
-                    m is not None and m.line.project(lat, lon)[0] <= tt.NEAR_LINE_M and m.in_area(m.line.project(lat, lon)[1], 5000.0)):
-                hot = True
-                break
+            if m is not None:
+                dist, ch = m.line.project(lat, lon)
+                if dist <= tt.NEAR_LINE_M and m.in_area(ch, 5000.0):
+                    hot = True
+                    break
         self._hot = (now, hot)
         return hot
 
@@ -1471,7 +1499,11 @@ class Trains:
         recs = self.tt.current()
         if recs:
             codes = {s["code"]: s["name"] for s in self.model.stations.values() if s.get("code")} if self.model is not None else {}
-            self.view = tt.merge(self.feed, recs, now, self.tt.st["at"], codes)
+            self.view = tt.merge(self.feed, recs, now, self.tt.st["at"], codes, self._gtfs_first_seen())
+            for num, day, days in self.view.get("tt_misses") or []:
+                if (num, day) not in self._tt_missed:    # once each: a run date that doesn't line up (midnight, #362)
+                    self._tt_missed.add((num, day))
+                    self.log(f"trains: train {num}: GTFS-realtime run date {day}, TrainTime has {', '.join(days)}; not merged")
         else:
             self.view = self.feed
         self.rev += 1
@@ -1593,7 +1625,8 @@ class Trains:
     def public(self, have: float | None = None) -> dict:
         """The layer: the line and stations in our area, the trains on it now. have: the static_at the page
         already holds the line and stations of: then only the trains (the line doesn't change between them)."""
-        out = self._base() | {"line": [], "stations": [], "lanes": {}, "trains": [], "catenary": CATENARY, "bbox": list(self.bbox)}
+        out = self._base() | {"line": [], "stations": [], "lanes": {}, "trains": [], "catenary": CATENARY, "bbox": list(self.bbox),
+                              "now": self.clock()}
         m = self.model
         if m is None:
             return out
@@ -1647,7 +1680,7 @@ class Trains:
         q = parse_qs(query or "")
         one = lambda k: (q.get(k) or [""])[0].strip()
         if path == "/api/cad/trains":
-            if self.clock() - self.viewed > __import__("sizeup.traintime", fromlist=["VIEW_S"]).VIEW_S:
+            if self.clock() - self.viewed > traintime.VIEW_S:
                 self.tt.wake()                           # the layer just came on: TrainTime's fast rate now
             self.viewed = self.clock()                   # the layer is on in a page: TrainTime fast (#362)
             self.ask()

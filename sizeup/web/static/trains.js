@@ -133,9 +133,14 @@ window.TrainLayer = (() => {
   // (least delayed) of the last few answers' Date.now() - (at + age), so a browser clock that is off moves nothing.
   const motion = window.Motion && Motion.railTracker ? Motion.railTracker() : null;
   const skews = [];
-  function fixOf(t, d, at) {
+  function fixOf(t, d, at, got) {
     if (typeof t.s !== "number" || !(t.d === 1 || t.d === -1)) return null;
     const prof = d.profile || {};
+    if (t.pos_src === "traintime" && typeof t.fix_at === "number" && typeof d.now === "number") {
+      // a TrainTime fix keeps its own time (#362): fresh while GTFS-realtime is stale, stale on its own
+      at = got - (d.now - t.fix_at) * 1000;
+      d = { ...d, at: t.fix_at };
+    }
     return { s: t.s, d: t.d, train: t.train, mode: t.mode || (t.estimated ? "estimated" : "reported"), t0: d.at, at,
              fixAt: t.fix_at != null ? t.fix_at : null, hold: t.hold_s, stop: t.next && typeof t.next.s === "number" ? t.next.s : null,
              until: typeof t.predict_until === "number" ? t.predict_until : d.at + (prof.predict_s || 120),
@@ -155,7 +160,7 @@ window.TrainLayer = (() => {
     if (!motion) return;
     const keep = new Set();
     for (const t of d.trains || []) {
-      const f = fixOf(t, d, at);
+      const f = fixOf(t, d, at, got);
       if (!f) continue;
       keep.add(t.id);
       motion.set(t.id, f, got);
@@ -473,7 +478,8 @@ window.TrainLayer = (() => {
       const old = !!d.stale || (typeof store.feedAt === "number"                            // the feed's age
                                 && !((now - store.feedAt) / 1000 <= ((d.profile && d.profile.stale_s) || 60)));
       for (const t of d.trains || []) {
-        const p = pos.get(t.id), stale = motion && pos.has(t.id) ? motion.stale(t.id) : old;
+        const own = t.pos_src === "traintime" ? !!t.stale : old;              // each train by its own freshest source (#362)
+        const p = pos.get(t.id), stale = motion && pos.has(t.id) ? motion.stale(t.id) : own;
         const s = p ? Math.round(p.s * 10) / 10 : t.s;
         // ahead of the MTA's report while on its way (a stopped train held at its station's mark isn't a prediction)
         drawn.set(t.id, { s, stale, ahead: !t.estimated && t.mode !== "stopped" && typeof t.s === "number" && (s - t.s) * t.d > PREDICTED_M });
@@ -574,7 +580,7 @@ window.TrainLayer = (() => {
         + (tt.next.track_change ? " (track change)" : "");
       lines.push(head);
       const spd = typeof tt.speed_mph === "number" && t.pos_src === "traintime" ? `${Math.round(tt.speed_mph)} mph` : "";
-      lines.push([pos.say, spd].filter(Boolean).join(" · "));
+      lines.push([pos.say.replace(/ (by )?\d\d:\d\d(:\d\d)?/, ""), spd].filter(Boolean).join(" · "));   // its time: in the footer
       const bars = carBars(tt);
       if (bars) lines.push(bars);
       const al = d.alerts || [];

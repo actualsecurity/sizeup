@@ -38,9 +38,10 @@ Which trains: Metro-North's New Haven Line (branch_id NH) and any other train in
 or Danbury train on the main line). Matched to a GTFS-realtime train by train number and run date.
 
 Schedule (adaptive, like the aircraft layer): FAST_S (5 s; [trains] traintime_every_s, 5 to 60) while a page has
-the Trains layer on (it asked within VIEW_S) or an active incident is within NEAR_LINE_M (1 km) of the line, else
-IDLE_S (30 s). Only with the small answer: should the poll ever come back bigger than SMALL_MAX_BYTES (the
-polylines back in it), fast is no faster than BIG_FAST_S (10 s). One request at a time on one thread (the polls,
+the Trains layer on (it asked within VIEW_S) or an emergency incident (active or pending, changed within HOT_AGE_S)
+is within NEAR_LINE_M (1 km) of the line; IDLE_S (30 s) while someone looks otherwise (the GTFS-realtime feed's
+demand, trains.DEMAND_S); nothing with nobody looking and no such incident. Only with the small answer: should
+the poll ever come back bigger than SMALL_MAX_BYTES (the polylines back in it), never faster than IDLE_S. One request at a time on one thread (the polls,
 the route lines and the countdowns all go through it, and a lock covers a manual Refresh now). A failure backs
 off (20 s doubling to 10 min; a 429 5 min; 401 / 403 30 min), whatever the rate. Each good poll is pushed to the
 pages at once (Trains.on_change: the state stream's trains_rev). The User-Agent (UA) says who we are and why.
@@ -60,7 +61,6 @@ from typing import Callable
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from sizeup import __version__
 
 SOURCE = "MTA TrainTime"
 BASE_URL = "https://backend-unified.mylirr.org"
@@ -73,14 +73,14 @@ FAST_S = 5.0                    # a page has the layer on, or an active incident
 EVERY_RANGE_S = (5.0, 60.0)
 IDLE_S = 30.0                   # otherwise
 VIEW_S = 15.0                   # a page that asked for the layer this recently has it on (it asks every 5 s)
-NEAR_LINE_M = 1000.0            # an active incident this close to the line (or a grade crossing): fast
+NEAR_LINE_M = 1000.0            # an emergency incident this close to the line: fast
+HOT_AGE_S = 2 * 3600.0          # ... active or pending, and changed (created, or anything logged) within this
 HOT_CHECK_S = 15.0              # the incidents looked at this often
 SMALL_MAX_BYTES = 2 * 1024 * 1024   # the poll's answer, unpacked: TRACK_TURF is ~330 KB; the polylines make it ~5.5 MB
-BIG_FAST_S = 10.0               # fast no faster than this when the answer is big
 EVERY_S = FAST_S
 FALLBACK_AFTER = 3              # bad polls in a row (failed, or the shape changed): GTFS-realtime alone
 MAX_AGE_S = 90.0                # a good read older than this is not merged
-POS_MAX_AGE_S = 120.0           # a train's location older than this: its GTFS-realtime position instead
+POS_MAX_AGE_S = 40.0            # a train's location older than this: its GTFS-realtime position instead
 POS_SOURCES = ("GPS", "SIGNAL") # locations good enough to draw (OPER, SCHED: an operator's or the timetable's)
 BACKOFF_S = (20.0, 600.0)
 RATE_LIMITED_S = 300.0
@@ -301,7 +301,7 @@ def _gdate(s: str) -> str:
     return f"{s[:4]}-{s[4:6]}-{s[6:8]}" if isinstance(s, str) and re.fullmatch(r"\d{8}", s) else ""
 
 
-def match(t: dict, by_num: dict[str, list[dict]]) -> dict | None:
+def match(t: dict, by_num: dict[str, list[dict]], misses: list | None = None) -> dict | None:
     """The record for a GTFS-realtime train: its number and run date; with no start date, the only one of that number
     (or the latest run date)."""
     cands = by_num.get(str(t.get("train") or ""), [])
@@ -309,7 +309,10 @@ def match(t: dict, by_num: dict[str, list[dict]]) -> dict | None:
         return None
     day = _gdate(t.get("start_date") or "")
     if day:
-        return next((r for r in cands if r["run_date"] == day), None)
+        r = next((r for r in cands if r["run_date"] == day), None)
+        if r is None and misses is not None:             # the number, not the date: logged by the hub (once)
+            misses.append((str(t.get("train")), day, sorted({c["run_date"] for c in cands})))
+        return r
     return max(cands, key=lambda r: r["run_date"])
 
 
@@ -317,35 +320,39 @@ def usable_position(rec: dict, now: float) -> bool:
     return rec["loc_src"] in POS_SOURCES and now - rec["loc_at"] <= POS_MAX_AGE_S
 
 
-def merge(feed: dict, records: list[dict], now: float, at: float | None = None, stations: dict[str, str] | None = None) -> dict:
+def merge(feed: dict, records: list[dict], now: float, at: float | None = None, stations: dict[str, str] | None = None,
+          gtfs_seen: dict[str, float] | None = None) -> dict:
     """feed (trains.parse_feed's) with each matched train's position replaced by this source's (when usable) and its
     facts added as "tt". The feed's own dicts are not changed. Trains this source has and GTFS-realtime hasn't
-    are added (position and facts only). at: when the records were read ("tt_at": a new read for the Tracker)."""
+    are added (position and facts only). at: when the records were read ("tt_at": a new read for the Tracker).
+    gtfs_seen: {train id: when its current GTFS-realtime position first appeared} (the feed's own vehicle timestamp is
+    always its header's, so a position's age is ours to keep); a TrainTime position replaces it only when as new."""
     by_num: dict[str, list[dict]] = {}
     for r in records:
         by_num.setdefault(r["train"], []).append(r)
-    trains, used = {}, set()
+    trains, used, misses = {}, set(), []
     for k, t in feed.get("trains", {}).items():
-        r = match(t, by_num)
+        r = match(t, by_num, misses)
         if r is None:
             trains[k] = t
             continue
         used.add(id(r))
-        trains[k] = _with(t, r, now, stations)
+        trains[k] = _with(t, r, now, stations, (gtfs_seen or {}).get(k))
     for r in records:
         if id(r) in used or not usable_position(r, now):
             continue
         key = f"tt:{r['train']}:{r['run_date']}"
         trains[key] = _with({"id": key, "train": r["train"], "trip_id": "", "route_id": "", "start_date": r["run_date"].replace("-", ""),
                              "stops": [], "delay": None, "pos": None, "vstatus": "", "vstop": ""}, r, now, stations)
-    return {"timestamp": feed.get("timestamp"), "tt_at": at, "trains": trains}
+    return {"timestamp": feed.get("timestamp"), "tt_at": at, "trains": trains, "tt_misses": misses}
 
 
-def _with(t: dict, r: dict, now: float, stations) -> dict:
+def _with(t: dict, r: dict, now: float, stations, gtfs_at: float | None = None) -> dict:
     t = dict(t)
     t["tt"] = facts(r, stations)
     t["dir_hint"] = 1 if r["dir"] == "E" else -1
-    if usable_position(r, now):
+    gtfs_ts = (gtfs_at if gtfs_at is not None else (t.get("pos") or {}).get("ts") or 0) if t.get("pos") else 0
+    if usable_position(r, now) and r["loc_at"] >= gtfs_ts:          # only a position at least as new as GTFS-realtime's
         t["pos"] = {"lat": r["lat"], "lon": r["lon"], "bearing": r["heading"], "ts": r["loc_at"], "src": "traintime",
                     "speed": r["speed_mph"] * 1609.344 / 3600 if r["speed_mph"] is not None else None}
     return t
@@ -474,13 +481,15 @@ class TrainTime:
         return self.enabled and at is not None and self.st["bad"] < self.fallback_after and self.clock() - at <= MAX_AGE_S
 
     def state(self) -> tuple[str, str]:
-        """(state, why): off | idle (nobody looking) | starting | ok | fallback."""
+        """(state, why): off | idle (nobody looking, no emergency near the line) | starting | ok | fallback."""
         if not self.enabled:
             return "off", "off ([trains] traintime = false)"
         if self.active():
             return "ok", ""
         if self.st["bad"] >= self.fallback_after:
             return "fallback", f"GTFS-realtime only: {self.st['bad']} bad polls ({self.st['error'] or 'no answer'})"
+        if not self.wanted():
+            return "idle", "read only while someone looks, or an emergency is near the line"
         if self.st["at"] is not None and self.clock() - self.st["at"] > MAX_AGE_S:
             return "fallback", f"GTFS-realtime only: last good read {round(self.clock() - self.st['at'])} s ago"
         return "starting", self.st["error"] or "first read"
@@ -492,9 +501,20 @@ class TrainTime:
             hot = bool(self.fast())
         except Exception:  # noqa: BLE001 - a fault in the check never stops the polls
             hot = False
-        if not hot:
+        if not hot or self.big():
             return max(IDLE_S, self.every_s)
-        return max(self.every_s, BIG_FAST_S) if self.st["bytes"] > SMALL_MAX_BYTES else self.every_s
+        return self.every_s
+
+    def big(self) -> bool:
+        """The last answer was over SMALL_MAX_BYTES (the polylines back in it): never faster than IDLE_S."""
+        return self.st["bytes"] > SMALL_MAX_BYTES
+
+    def wanted(self) -> bool:
+        """Poll at all: someone looks (the GTFS-realtime feed's demand), or the fast rate's reasons hold."""
+        try:
+            return bool(self.demand()) or bool(self.fast())
+        except Exception:  # noqa: BLE001
+            return False
 
     def due_at(self) -> float:
         """The next poll: the rate's turn, never before a back-off ends."""
@@ -511,7 +531,8 @@ class TrainTime:
                 "fallback_after": self.fallback_after, "n": self.st["n"], "dropped": self.st["dropped"],
                 "dropped_total": self.st["dropped_total"], "bytes": self.st["bytes"], "every_s": self.every_s,
                 "routes": len(self.routes), "routes_at": self.geo["at"], "routes_error": self.geo["error"],
-                "rate": "off" if not self.enabled else "fast" if self.interval() < IDLE_S else "idle",
+                "rate": "off" if not self.enabled else "none" if not self.wanted() else "fast" if self.interval() < IDLE_S else "idle",
+                "big": self.big(),
                 "interval_s": self.interval(), "next": self.due_at() if self.enabled else None}
 
     # -- the schedule ----------------------------------------------------------------------------------------------
@@ -549,13 +570,14 @@ class TrainTime:
             return
         now = self.clock()
         looking = self.demand()
-        if now >= self.due_at():
+        if self.wanted() and now >= self.due_at():
             self.poll()
+        resting = self.clock() < self.st["next"]        # the poll's back-off holds the other requests too
         for code in [c for c, v in list(self.countdowns.items()) if self.clock() - v["asked"] <= COUNTDOWN_DEMAND_S
-                     and self.clock() >= v["next"]]:
+                     and self.clock() >= v["next"]] if not resting else []:
             self.fetch_countdown(code)
         now = self.clock()
-        if looking and now >= self.geo["next"] and (self.geo["at"] is None or now - self.geo["at"] >= GEOMETRY_EVERY_S
+        if looking and not resting and now >= self.geo["next"] and (self.geo["at"] is None or now - self.geo["at"] >= GEOMETRY_EVERY_S
                                                     or self._missing(now)):
             self.refresh_routes()
 

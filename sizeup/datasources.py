@@ -531,8 +531,10 @@ def trains_sources(trains) -> list[Source]:
             return off() or {"on": False, "why": "off ([trains] traintime = false)"}
         s = trains.tt.status()
         note = f"{s['dropped']} records dropped (shape)" if s["dropped"] else ""
-        return {"at": s["at"], "n": s["n"], "bytes": s["bytes"] or None, "next": s["next"], "note": note,
-                "error": s["why"] if s["state"] == "fallback" else s["error"]}
+        err = s["why"] if s["state"] == "fallback" else s["error"]
+        if s["big"]:                                     # the size guard (#362): the polylines came back
+            err = (err + "; " if err else "") + f"answer over {tt.SMALL_MAX_BYTES // (1024 * 1024)} MB: every {tt.IDLE_S:g} s only"
+        return {"at": s["at"], "n": s["n"], "bytes": s["bytes"] or None, "next": s["next"], "note": note, "error": err}
 
     def routes() -> dict:
         if not trains.tt.enabled:
@@ -547,7 +549,8 @@ def trains_sources(trains) -> list[Source]:
                blocked=lambda: _resting(trains.rt, trains.clock)),
         Source("trains:traintime", "Metro-North GPS, cars, load (MTA TrainTime)", "Transit", tt.SOURCE, tt.BASE_URL,
                f"Data: {t.SOURCE}", traintime, trains.tt.poll,
-               builtin=f"{trains.tt.every_s:g} s while viewed; undocumented API, GTFS-realtime the fallback",
+               builtin=f"{trains.tt.every_s:g} s with the layer on or an emergency near the line, {tt.IDLE_S:g} s while "
+                       f"viewed otherwise; undocumented API, GTFS-realtime the fallback",
                blocked=lambda: _resting(trains.tt.st, trains.clock)),
         Source("trains:traintime-routes", "Metro-North route lines (MTA TrainTime)", "Transit", tt.SOURCE, tt.BASE_URL,
                f"Data: {t.SOURCE}", routes, trains.tt.refresh_routes, builtin="daily, or when a route is missing",

@@ -20,7 +20,7 @@ import pytest
 from sizeup import datasources
 from sizeup import traintime as TT
 from sizeup.config import ConfigError, load
-from sizeup.trains import Model, Trains, parse_feed, parse_static
+from sizeup.trains import DEMAND_S, Model, Trains, parse_feed, parse_static
 from tests.test_trains import GTFS, NOW, Clock, msg
 
 FIX = Path(__file__).parent / "fixtures" / "mta"
@@ -199,7 +199,7 @@ def encode(pts, precision=6):
 
 def test_the_merge_matches_train_number_and_run_date(model):
     feed = parse_feed(gtfs_rt())
-    m = TT.merge(feed, kept(), NOW, NOW, {"2RY": "Rye", "2PC": "Port Chester"})
+    m = TT.merge(feed, kept(), NOW, NOW, {"2RY": "Rye", "2PC": "Port Chester"}, {"9901": NOW - 60})   # GTFS's: a minute old
     a, b, c = m["trains"]["9901"], m["trains"]["9902"], m["trains"]["9908"]
     assert a["pos"]["src"] == "traintime" and a["pos"]["bearing"] == 225.5 and a["pos"]["ts"] == NOW - 10
     assert a["tt"]["next"] == {"code": "2RY", "name": "Rye", "track": "3", "posted": True, "track_change": False,
@@ -211,6 +211,7 @@ def test_the_merge_matches_train_number_and_run_date(model):
     added = {k for k in m["trains"] if k.startswith("tt:")}
     assert added == {"tt:9903:2026-10-14"}                                        # SCHED (9906) not drawn on its own
     other_day = TT.merge(parse_feed(gtfs_rt(start_date="20261013")), kept(), NOW)
+    assert other_day["tt_misses"] == [("9901", "2026-10-13", ["2026-10-14"]), ("9902", "2026-10-13", ["2026-10-14"])]
     assert "tt" not in other_day["trains"]["9901"]                                # another run date: not the same train
     no_date = TT.merge(parse_feed(gtfs_rt(start_date="")), kept(), NOW)
     assert no_date["trains"]["9901"]["tt"]["cars"] == 6                           # no start date: by number
@@ -333,56 +334,78 @@ def view(tr, clock):
     tr.get("/api/cad/trains", "")
 
 
-def test_fast_while_the_layer_is_on_idle_otherwise(tmp_path):
+def test_fast_while_the_layer_is_on_idle_while_viewed_none_with_nobody_looking(tmp_path):
     tr, clock, fetch = provider(tmp_path, tt_every_s=1)
     assert tr.tt.every_s == 5.0                                                    # 5 to 60 s
     assert Trains(tt_every_s=600, log=lambda m: None).tt.every_s == 60.0
     tr.tick()
     tr.tt.tick()
-    assert fetch.n(TT.LOCATIONS) == 1 and tr.tt.interval() == TT.IDLE_S           # nobody looks: still read, every 30 s
-    clock.t += 10
+    clock.t += 60
     tr.tt.tick()
-    assert fetch.n(TT.LOCATIONS) == 1
+    assert fetch.n(TT.LOCATIONS) == 0 and tr.tt.state()[0] == "idle"             # nobody looks, no emergency: nothing
+    assert tr.tt.status()["rate"] == "none"
     view(tr, clock)                                                                # the layer comes on: fast at once
     assert tr.tt.interval() == 5.0 and tr.tt.status()["rate"] == "fast"
     tr.tt.tick()
-    assert fetch.n(TT.LOCATIONS) == 2
+    assert fetch.n(TT.LOCATIONS) == 1
     for _ in range(3):
         clock.t += 5
         view(tr, clock)
         tr.tt.tick()
-    assert fetch.n(TT.LOCATIONS) == 5                                              # every 5 s while it is on
-    clock.t += TT.VIEW_S + 1                                                        # the page closed the layer
+    assert fetch.n(TT.LOCATIONS) == 4                                              # every 5 s while it is on
+    clock.t += TT.VIEW_S + 1                                                        # the layer is off; an event panel still asks
+    looking(tr, clock)
     assert tr.tt.interval() == TT.IDLE_S and tr.tt.status()["rate"] == "idle"
     n = fetch.n(TT.LOCATIONS)
     tr.tt.tick()
     assert fetch.n(TT.LOCATIONS) == n                                               # 16 s since the last: not yet
     clock.t += 14
     tr.tt.tick()
-    assert fetch.n(TT.LOCATIONS) == n + 1                                           # then every 30 s
+    assert fetch.n(TT.LOCATIONS) == n + 1                                           # then every 30 s while viewed
     clock.t += 30
+    tr.tt.tick()
+    assert fetch.n(TT.LOCATIONS) == n + 2
+    clock.t += DEMAND_S + 30                                                        # nobody since: no more reads
     tr.tt.tick()
     assert fetch.n(TT.LOCATIONS) == n + 2
 
 
-def test_fast_while_an_active_incident_is_near_the_line(tmp_path):
+def test_fast_while_an_emergency_is_near_the_line(tmp_path):
     tr, clock, fetch = provider(tmp_path)
     tr.tick()
     far = (41.06, -73.70)                                                           # ~7 km north of the line
     near = (40.9990, -73.6650)                                                      # beside Port Chester station
     tr.hot_points = lambda: [far]
-    assert not tr.tt_fast() and tr.tt.interval() == TT.IDLE_S
+    assert not tr.tt_fast() and not tr.tt.wanted()
     tr.hot_points = lambda: [far, near]
     assert not tr.tt_fast()                                                         # looked at every 15 s ...
     clock.t += TT.HOT_CHECK_S
-    assert tr.tt_fast() and tr.tt.interval() == TT.FAST_S                          # ... then fast
-    tr.crossings = ((41.06, -73.70),)                                               # a grade crossing: 1 km of it counts too
-    tr.hot_points = lambda: [(41.065, -73.70)]
-    clock.t += TT.HOT_CHECK_S
-    assert tr.tt_fast()
-    tr.hot_points = lambda: (_ for _ in ()).throw(RuntimeError("db"))              # the CAD's trouble: idle, never a crash
+    assert tr.tt_fast() and tr.tt.interval() == TT.FAST_S and tr.tt.wanted()       # ... then fast, nobody looking or not
+    tr.tt.tick()
+    assert fetch.n(TT.LOCATIONS) == 1
+    tr.hot_points = lambda: (_ for _ in ()).throw(RuntimeError("db"))              # the CAD's trouble: not fast, never a crash
     clock.t += TT.HOT_CHECK_S
     assert not tr.tt_fast()
+
+
+def test_only_a_recent_emergency_incident_counts(tmp_path):
+    """The app's hot_points: emergency incidents, active or pending, created or changed in the last HOT_AGE_S."""
+    from sizeup.cad.store import Store
+    import sizeup.app as A
+    import time as _t
+    from sizeup.traintime import HOT_AGE_S
+    db = Store(str(tmp_path / "cad.db"))
+    now = _t.time()
+    for i, (status, emergency, created, logged) in enumerate([("active", 1, now - 600, None), ("pending", 1, now - 3 * HOT_AGE_S, now - 60),
+                                                             ("active", 1, now - 3 * HOT_AGE_S, None), ("active", 0, now - 60, None),
+                                                             ("closed", 1, now - 60, None)]):
+        db.db.execute("INSERT INTO incidents (id, status, emergency, lat, lon, created_at, address, source) VALUES (?, ?, ?, ?, ?, ?, '', 'manual')",
+                      (i + 1, status, emergency, 41.0 + i / 1000, -73.66, created))
+        if logged:
+            db.db.execute("INSERT INTO events (incident_id, at, kind, text) VALUES (?, ?, 'note', 'x')", (i + 1, logged))
+    db.db.commit()
+    rows = db.q(A.HOT_INCIDENTS_SQL, (now - HOT_AGE_S,))
+    assert sorted(round((r["lat"] - 41.0) * 1000) + 1 for r in rows) == [1, 2]     # new; old but touched; not stale / non-emergency / closed
 
 
 def test_the_size_guard_and_back_off_override_the_fast_rate(tmp_path):
@@ -397,12 +420,17 @@ def test_the_size_guard_and_back_off_override_the_fast_rate(tmp_path):
     clock.t += 5
     view(tr, clock)
     tr.tt.tick()
-    assert tr.tt.st["bytes"] > TT.SMALL_MAX_BYTES and tr.tt.interval() == TT.BIG_FAST_S
-    clock.t += 5
-    view(tr, clock)
+    assert tr.tt.st["bytes"] > TT.SMALL_MAX_BYTES and tr.tt.interval() == TT.IDLE_S and tr.tt.status()["big"]
+    reg = datasources.DataSources(log=lambda m: None, clock=clock, spawn=lambda fn, name: fn())
+    for src in datasources.trains_sources(tr):
+        reg.register(src)
+    assert "every 30 s only" in reg.row("trains:traintime")["error"]
     n = fetch.n(TT.LOCATIONS)
-    tr.tt.tick()
-    assert fetch.n(TT.LOCATIONS) == n                                               # not 5 s: 10
+    for _ in range(5):
+        clock.t += 5
+        view(tr, clock)
+        tr.tt.tick()
+    assert fetch.n(TT.LOCATIONS) == n                                               # not 5 s: 30
     fetch.loc = LOC
     fetch.fail[TT.LOCATIONS] = 429
     clock.t += 5
@@ -415,12 +443,30 @@ def test_the_size_guard_and_back_off_override_the_fast_rate(tmp_path):
     assert fetch.n(TT.LOCATIONS) == n + 1 and tr.tt.due_at() - clock.t > 200
 
 
+def test_the_back_off_holds_the_route_lines_and_countdowns_too(tmp_path, model):
+    tr, clock, fetch = provider(tmp_path)
+    fetch.geometry = geometry_body(model)
+    tr.tick()
+    tr.get("/api/cad/trains/departures", "station=2PC")
+    fetch.fail[TT.LOCATIONS] = 429
+    view(tr, clock)
+    tr.tt.tick()
+    assert fetch.n(TT.LOCATIONS) == 1 and fetch.n(TT.GEOMETRY) == 0 and fetch.n("/countdown/") == 0
+    clock.t += TT.RATE_LIMITED_S + 1
+    del fetch.fail[TT.LOCATIONS]
+    view(tr, clock)
+    tr.get("/api/cad/trains/departures", "station=2PC")
+    tr.tt.tick()
+    assert fetch.n(TT.GEOMETRY) == 1 and fetch.n("/countdown/") == 1
+
+
 def test_each_read_is_pushed_through_the_state_stream(tmp_path):
     tr, clock, fetch = provider(tmp_path)
     pokes = []
     tr.on_change = lambda: pokes.append(tr.rev)
     tr.tick()
     rev = tr.rev
+    looking(tr, clock)
     tr.tt.tick()
     assert pokes and tr.rev > rev                                                   # the read landed: a new rev, a poke
 
@@ -634,3 +680,79 @@ def test_the_along_track_filter():
     assert along_filter(last, 990.0, 1, NOW + 1, 20.0)[0] >= 1000.0                 # a miss behind: held, never back
     s, v = along_filter({"s": 5000.0, "v": 10.0, "fix_at": NOW}, 4950.0, -1, NOW + 5, 10.0)
     assert s == pytest.approx(4950.0) and v == pytest.approx(10.0)                  # westbound: s falls as it goes
+
+
+# ---- review (#366): newer positions only, old fixes, midnight, staleness per train ---------------------------------
+
+
+def test_a_newer_gtfs_position_is_kept():
+    feed = parse_feed(gtfs_rt())
+    m = TT.merge(feed, kept(), NOW + 5, NOW + 5, None, {"9901": NOW - 5})            # GTFS's appeared after TrainTime's fix
+    assert m["trains"]["9901"]["pos"] == feed["trains"]["9901"]["pos"] and m["trains"]["9901"]["tt"]["cars"] == 6
+    m = TT.merge(feed, kept(), NOW + 5, NOW + 5, None, {"9901": NOW - 10})           # as new: TrainTime's
+    assert m["trains"]["9901"]["pos"]["src"] == "traintime"
+    assert TT.POS_MAX_AGE_S <= 45
+    m = TT.merge(feed, kept(), NOW - 10 + TT.POS_MAX_AGE_S + 1, None, None, {"9901": 0.0})
+    assert m["trains"]["9901"]["pos"] == feed["trains"]["9901"]["pos"]              # too old, however old GTFS's is
+
+
+def test_an_equal_or_older_gps_fix_changes_nothing(tmp_path):
+    from sizeup.trains import along_filter
+    last = {"s": 1000.0, "v": 20.0, "fix_at": NOW}
+    assert along_filter(last, 1200.0, 1, NOW, 20.0) == (1000.0, 20.0)                # the same time
+    assert along_filter(last, 900.0, 1, NOW - 5, 20.0) == (1000.0, 20.0)             # older
+    tr, clock, fetch = provider(tmp_path)
+    tr.tick()
+    looking(tr, clock)
+    tr.refresh_rt()
+    tr.tt.tick()
+    first = dict(tr.track.fixes["9901"])
+    doc = json.loads(LOC)
+    doc[0]["location"].update(latitude=doc[0]["location"]["latitude"] + 0.002, timestamp=doc[0]["location"]["timestamp"] - 3)
+    fetch.loc = json.dumps(doc).encode()                                             # an older fix, somewhere else
+    clock.t += 5
+    view(tr, clock)
+    tr.tt.tick()
+    assert tr.track.fixes["9901"]["s"] == first["s"] and tr.track.fixes["9901"]["fix_at"] == first["fix_at"]
+
+
+def test_just_after_midnight_the_service_date_matches(tmp_path):
+    """A train that left at 23:50 runs on past midnight: GTFS-realtime's start_date and TrainTime's run_date are both
+    the service date (the day before), so it still merges; a date that doesn't line up is logged once."""
+    doc = json.loads(LOC)
+    for x in doc:
+        if isinstance(x.get("run_date"), str):
+            x["run_date"] = "2026-10-13"
+    rs = [r for r in TT.parse_locations(json.dumps(doc).encode())["records"] if TT.ours(r, BBOX)]
+    m = TT.merge(parse_feed(gtfs_rt(start_date="20261013")), rs, NOW)
+    assert m["trains"]["9901"]["tt"]["cars"] == 6 and not m["tt_misses"]
+    logs = []
+    tr = Trains(rt_url=RT_URL, gtfs_url=GTFS_URL, cache_dir=tmp_path / "t", fetch=Fetch(rt=gtfs_rt(start_date="20261015")),
+                tt_fetch=Fetch(), tt_url=TT_URL, log=logs.append, clock=Clock(NOW + 5))
+    tr.tick()
+    tr.asked = tr.clock()
+    tr.refresh_rt()
+    tr.tt.tick()
+    tr.refresh_rt()
+    miss = [m for m in logs if "run date" in m]
+    assert len(miss) == 2 and "train 9901: GTFS-realtime run date 2026-10-15, TrainTime has 2026-10-14" in miss[0]
+
+
+def test_staleness_is_each_trains_own(tmp_path):
+    tr, clock, fetch = provider(tmp_path)
+    tr.tick()
+    looking(tr, clock)
+    tr.refresh_rt()
+    tr.tt.tick()
+    clock.t += 90                                                                    # GTFS-realtime not read since: stale
+    fresh = json.loads(LOC)
+    for x in fresh:
+        if x.get("location"):
+            x["location"]["timestamp"] = int(clock.t) - 3
+    fetch.loc = json.dumps(fresh).encode()
+    view(tr, clock)
+    tr.tt.poll()
+    d = tr.public()
+    t = {x["train"]: x for x in d["trains"]}
+    assert d["stale"] and t["9901"]["pos_src"] == "traintime" and t["9901"]["stale"] is False
+    assert isinstance(d["now"], float)

@@ -93,6 +93,10 @@ from sizeup.web.server import WebServer
 from sizeup.procenv import child_env
 
 ROOT = Path(__file__).resolve().parent.parent
+# MTA TrainTime's fast rate (#362): emergency incidents, active or pending, created or changed (anything logged) since ?
+HOT_INCIDENTS_SQL = ("SELECT i.lat, i.lon FROM incidents i WHERE i.status IN ('active', 'pending') AND i.emergency = 1 "
+                     "AND i.lat IS NOT NULL AND i.lon IS NOT NULL AND MAX(i.created_at, COALESCE((SELECT MAX(e.at) FROM events e "
+                     "WHERE e.incident_id = i.id), 0)) >= ?")
 HUB_SWITCH_S = 0.001     # the hub's GIL switch interval (sys.setswitchinterval; Python's default 0.005), start_app() (#284)
 SPLIT_PAGE_S = 30.0      # voice this soon after a tones-only page for us = that page's voice
 # The gazetteer names a town only from this confidence up (#80: "34 Longdale Avenue" read as Port Chester at
@@ -623,8 +627,9 @@ class App:
         # one station, one mark (#162): the county's Train stations leave out the ones the Trains layer draws
         self.gis.train_stations = self.trains.stations
         # TrainTime's fast rate for an active incident near the line (#362); each new read pushed (trains_rev)
-        self.trains.hot_points = lambda: [(r["lat"], r["lon"]) for r in self.cad.store.q(
-            "SELECT lat, lon FROM incidents WHERE status = 'active' AND lat IS NOT NULL AND lon IS NOT NULL")]
+        from sizeup.traintime import HOT_AGE_S
+        self.trains.hot_points = lambda: [(r["lat"], r["lon"]) for r in self.cad.store.q(HOT_INCIDENTS_SQL,
+                                                                                            (time.time() - HOT_AGE_S,))]
         self.cad.trains_rev = lambda: self.trains.rev
         # Aircraft near HPN (sizeup/aircraft.py, #155): shortfinal's PCFD-focused picture, read by the CAD of record
         # while someone looks at the Aircraft layer. It never opens a dongle: a receiver's aircraft.json is only read.

@@ -1767,10 +1767,11 @@ westbound to it) and `alerts` (with `branches`, e.g. `NH`). Speed units: 2,900 c
 capture, reported speed / (distance / time) = 2.236 (mph is 2.237, km/h 3.6).
 
 **How it is used.** Adaptive, like the aircraft layer: **every 5 s** (`[trains] traintime_every_s`, 5 to 60)
-while a page has the Trains layer on or an active incident is within 1 km of the line (or of a grade crossing:
-none is known on our stretch, the list is empty), **every 30 s** otherwise. Fast polling is only with the small
-answer (TRACK_TURF, ~30 KB on the wire): should the poll ever come back over 2 MB unpacked (the polylines back in
-it), fast is capped at 10 s. Back-off and a 429 override the rate. One request at a time on its own thread
+while a page has the Trains layer on, or an emergency incident (active or pending, created or changed in the
+last 2 h) is within 1 km of the line (our stretch has no grade crossings); **every 30 s** while someone looks
+otherwise (the GTFS-realtime feed's rule: a page asked within 2 min); **not at all** with nobody looking and no
+such incident. Fast polling is only with the small answer (TRACK_TURF, ~30 KB on the wire): should the poll ever
+come back over 2 MB unpacked (the polylines back in it), it drops to every 30 s and the Data sources row says why. Back-off and a 429 override the rate. One request at a time on its own thread
 (polls, route lines and countdowns alike, and a manual Refresh now), the User-Agent
 `Port Chester Fire Department - sizeup emergency situational awareness application (github.com/actualsecurity/sizeup)`.
 Each read is pushed at once: the CAD state stream carries `trains_rev`, and a page with the layer on fetches
@@ -1782,10 +1783,14 @@ drawn on its own direction's track at that distance, so never off it) and filter
 in): never backwards (a miss behind holds the train), a smooth speed. Under about 1 mph it is stopped and stays
 put through GPS jitter. The page carries a fix on along the track at that speed for at most 10 s
 (`TT_HORIZON_S`, about two fast polls), never past the next stop, and meets the next fix forward only or by
-holding (motion.js `Motion.rail` / `railFollow`, the same tracker as before). The distance along the line comes
-from the projection, not `turf.location_mp`: the projection is in the same geometry the train is drawn on, while
-turf counts along each train's own route (see above) and would have to be calibrated to it; the milepost shown
-is turf's.
+holding (motion.js `Motion.rail` / `railFollow`, the same tracker as before). A fix no newer than the last one
+changes nothing. The distance along the line comes from the projection, not `turf.location_mp`: the projection
+is in the same geometry the train is drawn on, while turf counts along each train's own route (see above) and
+would have to be calibrated to it. The milepost shown is turf's when the train's route starts (eastbound) or
+ends (westbound) at Grand Central; otherwise, for a train drawn at TrainTime's position, the distance along our
+line from Grand Central in miles; else none. A TrainTime position replaces GTFS-realtime's only when it is at
+least as new and under 40 s old. Each train is shown stale by its own freshest source, so a stale GTFS-realtime
+feed doesn't freeze trains TrainTime still reports.
 Kept: Metro-North's New Haven Line (`branch_id` NH) and any other Metro-North train inside the map's area.
 Merged into the GTFS-realtime trains by **train number and run date**: the position (GPS or SIGNAL, under
 2 min old) replaces the GTFS one (judged like any fix, but it teaches no reporting points), and the train
@@ -1809,7 +1814,7 @@ show it. A failure backs off (20 s doubling to 10 min; a 429 5 min; 401 / 403 30
 [trains]
 traintime = true                 # false: GTFS-realtime only
 traintime_url = ""               # "" = https://backend-unified.mylirr.org; a test server's address
-traintime_every_s = 20           # while someone looks, 15 to 60 s
+traintime_every_s = 5            # the fast rate (layer on, or an emergency near the line), 5 to 60 s; else 30 s while viewed
 ```
 
 Tests: `tests/test_traintime.py` on a **synthetic** fixture with the API's shape
