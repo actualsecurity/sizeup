@@ -1760,7 +1760,7 @@ class Cad:
         (Sources._page_attached, comms.link_pages); on the timeline (kind "tones"), once each: its transcript lines
         ("60 Control page 14:31: ..."), the departments its tones named and the units it named (in 60 Control mode
         AutoDispatch.on_page dispatches those on our boards; in PCFD mode they stay a line for a person). Its cross
-        streets fill the incident's when it has none. The feed's type and location stand: the page's are only noted
+        streets fill the incident's when it has none and no person set its location. The feed's type and location stand: the page's are only noted
         (Sources._page_attached)."""
         cur = self.store.incident(iid)
         have = {e["text"] for e in self.store.q("SELECT text FROM events WHERE incident_id = ? AND kind = 'tones'", (iid,))}
@@ -1776,7 +1776,8 @@ class Cad:
                 for x in new:
                     self.store._event(db, iid, "tones", x, "Paging", at=self.clock())
         cross = (f.get("cross_street") or "").strip()
-        if cross and not (cur["cross_street"] or "").strip() and cur["status"] in ("queued", "pending", "active"):
+        if (cross and not (cur["cross_street"] or "").strip() and cur["status"] in ("queued", "pending", "active")
+                and "location" not in self.sources.manual(iid)):          # a person's location: theirs, cross too
             try:
                 self.store.update_incident(iid, {"cross_street": cross}, operator="Paging", log=False)
             except CadError:
@@ -1802,7 +1803,7 @@ class Cad:
         raw = (raw or "").strip()
         if not raw:
             return "", "", ""
-        typ, _, sub = re.sub(r"\s*,\s*", "/", raw.upper(), count=1).partition("/")   # "ALARM,CO-RESD" too (#365)
+        typ, _, sub = re.sub(r"\s*,\s*", "/", raw.upper(), count=1).partition("/")   # "TYPE,SUBTYPE" too (#365)
         try:
             self.lists.check_type(typ.strip(), sub.strip(), required=True)
             return typ.strip(), sub.strip(), ""

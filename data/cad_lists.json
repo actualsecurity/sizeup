@@ -141,7 +141,7 @@
     "given": ["ALARM", "ALS", "BLS", "BRUSH", "DRILL", "HAZARD", "INVEST", "MA", "MVA"],
     "confirm": {
       "AIRPORT": "not given: proposed (#87, #105) the FAA alerts 1 / 2 / 3, accident off airport, aircraft in the water, fuel spill / hazmat, aircraft fire, structure fire on the airport, disabled aircraft, bomb threat / security, hijack, other",
-      "MA": "STANDBY added (#365): the county feed's Mutual Aid / Standby",
+      "MA": "STANDBY proposed (#365): a mutual aid standby or cover assignment",
       "MVA": "NOINJ added: next in the department's subtype list after MULTINJU",
       "MVF": "not given: the AIR .. TRUCK block of the department's subtype list",
       "NOTIF": "not given: the CAD .. WATER block of the department's subtype list",

@@ -1,6 +1,6 @@
 """#365: a page with a street and no house number joins the feed's incident on that street, and a page on a feed's incident
-enriches it (its clip, transcript, tones, units and cross streets) instead of making a card of its own. Also the feed's
-"TYPE,SUBTYPE" types, Mutual aid / Standby, the cross-street parser, "carbon dioxide" as CO and the feed's comments.
+enriches it (its clip, transcript, tones, units and cross streets) instead of making a card of its own. Also types
+written "TYPE,SUBTYPE", Mutual aid / Standby, the cross-street parser, "carbon dioxide" as CO and the feed's comments.
 Synthetic only: made-up streets, units' words, times and comment text (FakeFeed, tests/fake_feed.py)."""
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ PAGE_NO_UNITS = ("Port Chester Fire Department, respond to a carbon monoxide ala
                  "Avenue and Specimen Street. Time out 1432.")
 
 
-def feed_event(rig, eid="A1", location="9 EXAMPLE TER", units=("E60", "L31"), typ="ALARM,CO-RESD", dt=0.0):
+def feed_event(rig, eid="A1", location="9 EXAMPLE TER", units=("E60", "L31"), typ="ALARM/RESD", dt=0.0):
     rig.feed.put(eid, type=typ, location=location, units=units, times={"dispatched": T0 + dt})
     rig.poll()
     return rig.cad.store.one("SELECT incident_id FROM source_reports WHERE source = 'county' AND ref = ?",
@@ -69,7 +69,7 @@ def test_the_feed_first_then_the_street_only_page_attaches_and_enriches_it(tmp_p
     assert got["id"] == a and len(open_incidents(rig)) == 1                     # no second card
     inc = rig.cad.store.incident(a)
     assert inc["address"] == "9 EXAMPLE TER"                                     # the feed's location stands
-    assert (inc["type"], inc["subtype"]) == ("ALARM", "CO-RESD")                 # "ALARM,CO-RESD" mapped
+    assert (inc["type"], inc["subtype"]) == ("ALARM", "RESD")                    # the feed's type stands
     assert inc["cross_street"] == "Sample Avenue And Specimen Street"              # the page's, the incident had none
     assert any(x.startswith("Page ") and "attached" in x for x in rig.feed_lines(a))
     tones = lines(rig, a, "tones")
@@ -237,10 +237,10 @@ def test_page_named_units_never_move_a_unit_off_another_call(tmp_path):
 
 
 def test_a_comma_type_is_mapped_and_60_control_takes_the_call_and_the_rigs_added_later(tmp_path):
-    """Seen live: "TYPE,SUBTYPE" left the type unset, so the call waited for a person and the rigs the feed listed as
+    """A type written "TYPE,SUBTYPE" left the type unset: the call waited for a person, and the rigs the feed listed as
     they responded were never put on it."""
     rig = AutoRig(tmp_path)
-    a = feed_event(rig, location="12 EXAMPLE AVE", units=("E64", "TL2"))
+    a = feed_event(rig, location="12 EXAMPLE AVE", units=("E64", "TL2"), typ="ALARM,COMM")
     assert rig.cad.full(a)["status"] == "active"
     rig.at(90)
     rig.change(units=("E64", "TL2", "R41"))
@@ -250,14 +250,13 @@ def test_a_comma_type_is_mapped_and_60_control_takes_the_call_and_the_rigs_added
 
 
 @pytest.mark.parametrize("raw,want", [
-    ("ALARM,CO-RESD", ("ALARM", "CO-RESD")),
-    ("ALARM, CO-COMM", ("ALARM", "CO-COMM")),
-    ("MA,STANDBY", ("MA", "STANDBY")),
-    ("MUTUAL AID,STANDBY", ("MA", "STANDBY")),
-    ("MUTUAL AID/STANDBY", ("MA", "STANDBY")),
+    ("ALARM,COMM", ("ALARM", "COMM")),
+    ("ALARM , RESD", ("ALARM", "RESD")),
     ("ALARM/COMM", ("ALARM", "COMM")),
+    ("MA,STANDBY", ("MA", "STANDBY")),
+    ("TYPEA,SUBB", ("", "")),                                                     # nobody's code: left to a person
 ])
-def test_feed_types(tmp_path, raw, want):
+def test_type_separators(tmp_path, raw, want):
     rig = Rig(tmp_path)
     assert rig.cad.map_type(raw, "County feed")[:2] == want
 
@@ -313,14 +312,15 @@ def test_the_vocabulary_hints_carbon_monoxide():
 def test_empty_and_repeated_feed_comments_add_no_lines(tmp_path):
     rig = Rig(tmp_path)
     a = feed_event(rig, location="12 EXAMPLE AVE")
-    for i, text in enumerate(["** status check by 101", "", "   ", "** status check by 101", "caller reports smoke",
-                              "** status check by 101", "** status check by 202"]):
-        rig.at(10 + i)
-        rig.feed.comment("A1", T0 + 10 + i, text)
+    for dt, text in [(10, "checking the second floor"), (11, ""), (12, "   "), (13, "checking the second floor"),
+                     (14, "caller reports smoke"), (15, "checking the second floor"), (16, "checking the basement"),
+                     (700, "checking the second floor")]:                         # over 10 min after: a line again
+        rig.at(dt)
+        rig.feed.comment("A1", T0 + dt, text)
         rig.poll()
     got = [x for x in rig.feed_lines(a) if " comment:" in x]
-    assert got == ["County feed comment: ** status check by 101", "County feed comment: caller reports smoke",
-                   "County feed comment: ** status check by 202"]
+    assert got == ["County feed comment: checking the second floor", "County feed comment: caller reports smoke",
+                   "County feed comment: checking the basement", "County feed comment: checking the second floor"]
 
 
 def test_numbered_addresses_on_one_street_are_not_the_street_rule(tmp_path):
@@ -332,3 +332,161 @@ def test_numbered_addresses_on_one_street_are_not_the_street_rule(tmp_path):
     rig.at(30)
     p = rig.page("p1", PAGE_ST.replace("Example Terrace", "14 Example Terrace"))["id"]
     assert p not in (a, b) and not possibly(rig, p, a) and not possibly(rig, p, b)
+
+
+# -- review of #367 ---------------------------------------------------------------------------------------------------
+
+CAR_FIRE = ("Port Chester Fire Department, Engine 61, respond to a car fire, Example Terrace, between Sample Avenue and "
+            "Specimen Street. Time out 1432.")
+
+
+def test_another_type_on_the_street_never_joins_the_feed_first(tmp_path):
+    """A car fire paged 90 s after a CO alarm on the same street (no units listed): two calls, noted, and E61 is never
+    dispatched to the alarm."""
+    rig = AutoRig(tmp_path)
+    a = feed_event(rig, units=(), typ="ALARM/RESD")
+    rig.at(90)
+    p = rig.page("p1", CAR_FIRE)["id"]
+    assert p != a and len(open_incidents(rig)) == 2
+    assert possibly(rig, p, a) and possibly(rig, a, p)
+    assert not [x for x in rig.cad.full(a)["assignments"] if x["name"] == "E61"]
+
+
+def test_another_type_on_the_street_never_joins_the_page_first(tmp_path):
+    rig = Rig(tmp_path)
+    p = rig.page("p1", CAR_FIRE)["id"]
+    rig.at(60)
+    a = feed_event(rig, units=(), typ="ALARM/RESD", dt=50)
+    assert a != p and len(open_incidents(rig)) == 2 and possibly(rig, a, p)
+
+
+def test_the_live_shape_still_joins_a_co_page_and_a_residential_alarm(tmp_path):
+    """The page's CO alarm (ALARM, no subtype) and the feed's residential alarm (ALARM/RESD): one top-level type."""
+    rig = Rig(tmp_path)
+    a = feed_event(rig, typ="ALARM/RESD")
+    rig.at(28)
+    assert rig.page("p1", PAGE_ST)["id"] == a and len(open_incidents(rig)) == 1
+
+
+@pytest.mark.parametrize("text,location,cross", [
+    ("Port Chester Fire Department, respond to Gas House Lane for an odor of gas. Time out 1432.", "gas house lane", ""),
+    ("Port Chester respond to Smoke Rise Road for a smoke detector activation. Time out 1432.", "smoke rise road", ""),
+    ("Port Chester respond to Fire House Lane for a fire alarm. Time out 1432.", "fire house lane", ""),
+    ("Port Chester respond to 12 Example Avenue for a fire alarm, cross Commercial Avenue and Fire House Lane. "
+     "Time out 1432.", "12 example avenue", "commercial avenue and fire house lane"),
+    ("Port Chester Fire Department, respond to Example Terrace, co alarm between Sample Avenue and Specimen Street. "
+     "Time out 1432.", "example terrace", "sample avenue and specimen street"),
+])
+def test_road_names_that_look_like_call_types_are_kept(text, location, cross):
+    d = parse(text)
+    assert (d.location, d.cross_street) == (location, cross)
+
+
+@pytest.mark.parametrize("text,want", [
+    ("Port Chester respond to 12 Example Avenue for a fire alarm, carbon dioxide system discharge. Time out 1432.",
+     "Fire alarm"),
+    ("Port Chester respond to 12 Example Avenue for a fire alarm, smoke and carbon monoxide detectors sounding. "
+     "Time out 1432.", "Fire alarm"),
+    ("Port Chester respond to 12 Example Avenue for a carbon monoxide smoke detector activation. Time out 1432.",
+     "CO alarm"),
+    ("Port Chester respond to 12 Example Avenue for a CO detector activation. Time out 1432.", "CO alarm"),
+    ("Port Chester respond to 12 Example Avenue for a carbon monoxide detector. Time out 1432.", "CO alarm"),
+])
+def test_co_against_fire_alarm(text, want):
+    assert parse(text).incident_type == want
+
+
+def test_a_repeat_never_dismisses_an_upgraded_card(tmp_path):
+    rig = Rig(tmp_path)
+    a = feed_event(rig, units=("E62",))
+    rig.at(20)
+    first = rig.page("p1", "Port Chester Fire Department, respond to a CO alarm. Time out 1432.")["id"]
+    with rig.cad.store.tx() as db:
+        rig.cad.store._event(db, first, "upgrade", "Upgraded", "Lt. Test")
+    rig.at(50)
+    assert rig.page("p2", PAGE_NO_UNITS)["id"] == first
+    assert rig.cad.store.incident(first)["status"] == "queued" and possibly(rig, first, a)
+
+
+def test_the_page_never_sets_cross_streets_on_a_location_a_person_set(tmp_path):
+    rig = Rig(tmp_path)
+    a = feed_event(rig)
+    rig.cad.sources.mark_manual(a, ["location"], "Lt. Test")
+    rig.at(28)
+    assert rig.page("p1", PAGE_ST)["id"] == a
+    assert not rig.cad.store.incident(a)["cross_street"]
+
+
+# -- a doubled house number ("17, 17 Example Lane" read as "1717") ------------------------------------------------------
+
+DOUBLED = ("Port Chester Fire Department, Engine 60, respond to 1717 Example Lane between Sample Road and the dead end, a "
+           "residential alarm. Time out 1432.")
+
+
+def test_halved():
+    from sizeup.cad.sources import halved, same_place_halved
+    assert halved("1717 Example Lane") == "17 Example Lane" and halved("4545 EXAMPLE LN") == "45 EXAMPLE LN"
+    assert halved("1212 Example Ln Apt 3") == "12 Example Ln"
+    assert halved("1718 Example Lane") is None and halved("17 Example Lane") is None and halved("0101 Example Ln") is None
+    assert same_place_halved("1717 Example Lane", "17 EXAMPLE LN") and same_place_halved("17 EXAMPLE LN", "1717 Example Lane")
+    assert not same_place_halved("1717 Example Lane", "17 SAMPLE LN") and not same_place_halved("17 Example Ln", "17 Example Ln")
+
+
+def test_a_doubled_number_page_joins_the_feed_incident(tmp_path):
+    rig = AutoRig(tmp_path)
+    a = feed_event(rig, location="17 EXAMPLE LN", units=("E60",), typ="ALARM/RESD")
+    rig.at(30)
+    assert rig.page("p1", DOUBLED)["id"] == a and len(open_incidents(rig)) == 1
+    assert rig.cad.store.incident(a)["address"] == "17 EXAMPLE LN"
+
+
+def test_a_doubled_number_page_first_then_the_feed_joins_it(tmp_path):
+    rig = Rig(tmp_path)
+    p = rig.page("p1", DOUBLED)["id"]
+    rig.at(40)
+    assert feed_event(rig, location="17 EXAMPLE LN", units=("E60",), typ="ALARM/RESD", dt=20) == p
+
+
+def test_a_real_1717_is_guarded_by_type_and_window(tmp_path):
+    """Both 17 and 1717 exist on the street: another type, or over 5 min apart, is a note, never a join; an open
+    incident at 1717 as written takes the page, never the half."""
+    rig = Rig(tmp_path)
+    a = feed_event(rig, location="17 EXAMPLE LN", units=("E60",), typ="MVA")
+    rig.at(30)
+    p = rig.page("p1", DOUBLED)["id"]
+    assert p != a and possibly(rig, p, a) and possibly(rig, a, p)
+
+    rig2 = Rig(tmp_path / "late")
+    b = feed_event(rig2, location="17 EXAMPLE LN", units=("E60",), typ="ALARM/RESD")
+    rig2.at(6 * 60)
+    q = rig2.page("p1", DOUBLED)["id"]
+    assert q != b and possibly(rig2, q, b)
+
+    rig3 = Rig(tmp_path / "both")
+    c17 = feed_event(rig3, "A1", "17 EXAMPLE LN", ("E60",), typ="ALARM/RESD")
+    c1717 = feed_event(rig3, "A2", "1717 EXAMPLE LN", ("E60",), typ="ALARM/RESD", dt=10)
+    rig3.at(30)
+    assert rig3.page("p1", DOUBLED)["id"] == c1717 != c17
+
+
+@pytest.mark.parametrize("accepted", [True, False])
+def test_an_untouched_page_card_left_queued_is_swept_when_the_feed_closes_the_call(tmp_path, accepted):
+    rig = Rig(tmp_path)
+    a = feed_event(rig, location="17 EXAMPLE LN", units=("E60",), typ="ALARM/RESD")
+    if accepted:
+        rig.cad.store.accept(a, "Lt. Test")
+    # a card the page made before the rule (or that never joined): queued, untouched
+    p = rig.cad.store.create_incident(type="ALARM", address="1717 Example Lane", source="60 Control page",
+                                      source_ref="monitor:old", status="queued")
+    rig.cad.sources._put("paging", "old", 1000, "Paging", T0 + 30, {"location": "1717 Example Lane"}, incident_id=p)
+    worked = rig.cad.store.create_incident(type="ALARM", address="1717 Example Lane", source="60 Control page",
+                                           source_ref="monitor:worked", status="queued")
+    rig.cad.sources._put("paging", "worked", 1000, "Paging", T0 + 40, {"location": "1717 Example Lane"}, incident_id=worked)
+    with rig.cad.store.tx() as db:
+        rig.cad.store._event(db, worked, "note", "caller called back", "Lt. Test")
+    rig.at(600)
+    rig.feed.change("A1", times={"in_service": T0 + 590}, closed=True)
+    rig.poll()
+    assert rig.cad.store.incident(p)["status"] == "dismissed"
+    assert rig.cad.store.one("SELECT incident_id FROM source_reports WHERE source = 'paging' AND ref = 'old'")["incident_id"] == a
+    assert rig.cad.store.incident(worked)["status"] == "queued"                  # a card a person worked: left alone
