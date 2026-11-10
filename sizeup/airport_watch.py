@@ -260,23 +260,27 @@ GROUND_CUE = re.compile(r"\b(?:taxi\w*|ramp|gate|parking|hold(?:ing)? short|on t
 
 # A controller's words TO an aircraft about another one (aimed_elsewhere): a traffic advisory or a hold-short to it
 # ("hold short, emergency aircraft on final", "traffic for you, an aircraft with a gear problem on final"), or words
-# about another aircraft (THIRD_PARTY). A pilot's "traffic permitting" is its own phrase, never one; "be advised" is
-# one only with another aircraft or "traffic" in it (a pilot's "be advised, hydraulic failure, request ..." is its own).
+# about another aircraft (OTHER_MARK, CRAFT_WITH). A pilot's "traffic permitting" is its own phrase, never one; neither
+# is "be advised" (#380: a pilot's "be advised, hydraulic failure, request ..." is its own).
 ADVISORY = re.compile(r"\b(?:traffic|caution|hold(?:ing)? short|for you|emergency (?:aircraft|traffic|in progress)|"
                       r"(?:an|the|another) (?:aircraft|airplane|jet) (?:with|declaring|on (?:a )?(?:\w+ )?(?:mile )?final)|"
                       r"(?:equipment|trucks?|crash crew) (?:rolling|on|crossing|responding))\b")
 _TYPE = airport._TYPES.pattern.replace("(?P<t>", "(?:")                 # "king air", "citation", "gulfstream g 450" ...
 _CRAFT = rf"(?:aircraft|airplane|plane|jet|traffic|helicopter|{_TYPE})"
-# words about another aircraft (#380): "the aircraft ahead", "in front of you", "following a King Air with ...", "a
-# Citation with a gear problem", "he's / they have ...", "the Citation has ..."
-THIRD_PARTY = re.compile(rf"\b(?:the (?:\w+ )?(?:aircraft|airplane|plane|jet|traffic|{_TYPE}) (?:\w+ )?(?:ahead|in front)\b|"
-                         rf"in front of you|following (?:a|an|the) (?:\w+ ){{0,3}}?with\b|"
-                         rf"(?:a|an|the|another) (?:\w+ )?{_CRAFT} with (?:a|an|some|the|no|low)\b|"
-                         r"(?:he|she) ?s\b|(?:he|she) has\b|they ?ve\b|they have\b|they ?re\b|they are\b|"
-                         rf"the {_CRAFT} (?:has|had|is reporting|reports|reported|declared)\b)")
-# a pilot's "be advised" with a plain problem and a request of its own: its trouble (unless another aircraft is in it)
-BE_ADVISED = re.compile(r"\bbe advised\b")
-PILOT_ASKS = re.compile(r"\b(?:request\w*|we d like|we would like|we ll need|we need|unable)\b")
+# words about another aircraft, said outright (#380): "traffic", "the aircraft ahead", "in front of you", "following a
+# King Air", "a Citation on a two mile final", "emergency aircraft", "hold short", "the Citation has ...". A pronoun alone
+# ("he's", "they're reporting smoke in the cabin": a pilot's own crew) never is
+OTHER_MARK = re.compile(rf"\b(?:traffic|in front of you|following (?:a|an|the)|hold(?:ing)? short|"
+                        rf"emergency (?:aircraft|traffic|in progress)|"
+                        rf"the (?:\w+ )?(?:aircraft|airplane|plane|jet|traffic|{_TYPE}) (?:\w+ )?(?:ahead|in front)|"
+                        rf"(?:{_CRAFT}|is) on (?:a )?(?:\w+ )?(?:mile )?final|"     # "... is on a three mile final"
+                        rf"the {_CRAFT} (?:has|had|is reporting|reports|reported|declared))\b")
+# ... and "a Citation with a gear problem": another aircraft's, unless the pilot asks for something (PILOT_ASKS)
+CRAFT_WITH = re.compile(rf"\b(?:a|an|the|another) (?:\w+ )?{_CRAFT} with (?:a|an|some|the|no|low)\b")
+# a pilot asking for something ("request the long runway", "we'd like to hold", "unable"): with no other aircraft said
+# outright (OTHER_MARK), the trouble in it is its own ("be advised, hydraulic failure, request ..."; "a Citation with a
+# gear problem, request ..."); a controller's "request you ..." is not one
+PILOT_ASKS = re.compile(r"\b(?:request(?:ing)?(?! you\b)|we ?d like|we would like|we ?ll need|we need|we want|unable)\b")
 NOT_ADVISORY = re.compile(r"\btraffic permitting\b")
 # Whose trouble it is: an emergency of its own (#353: never silenced), the controller's words about it ("your left
 # brake is smoking"), or a first-person trouble phrase next to the abnormal words (own_trouble). A bare "we" is
@@ -311,19 +315,21 @@ def aimed_elsewhere(norm: str, called_first: bool, plane: dict | None, hits: Seq
     """A controller's words TO the named aircraft whose abnormal phrases are not its own: called first (a controller
     calls the aircraft; a pilot ends with its callsign, or starts with the facility), none of its own trouble in it
     (OWN_EMERGENCY, YOURS, own_trouble), and an advisory in it (ADVISORY: "traffic", "emergency aircraft", "caution",
-    "hold short", "for you"; THIRD_PARTY: "the aircraft ahead", "following a King Air with ...", "he's"), or the
-    aircraft on the ground on ADS-B. "Be advised" with a request ("request the long runway", "we'd like", "unable") and
-    no other aircraft in it is the pilot's own. One rule, whoever says "we": "N123AB, we've lost an engine, request
+    "hold short", "for you"; OTHER_MARK: "the aircraft ahead", "following a King Air"; CRAFT_WITH: "a Citation with a
+    gear problem"), or the aircraft on the ground on ADS-B. A request ("request the long runway", "we'd like",
+    "unable") with no other aircraft said outright (OTHER_MARK) is the pilot's own, "be advised" or not. One rule, whoever says "we": "N123AB, we've lost an engine, request
     emergency equipment" is its own; "N456CD, we have traffic for you, emergency aircraft on final" is not."""
     if not called_first:                                # the aircraft's own transmission, or unknown
         return False
     if OWN_EMERGENCY.search(norm) or YOURS.search(norm) or own_trouble(norm, hits):
         return False
+    # (the controller's words about it win over another aircraft's in one sentence: "your brake is smoking, the
+    # traffic ahead ..." is its own; YOURS above)
     said = NOT_ADVISORY.sub(" ", norm)
-    others = bool(THIRD_PARTY.search(said) or re.search(r"\btraffic\b", said))
-    if BE_ADVISED.search(said) and PILOT_ASKS.search(said) and not others:
+    marked = OTHER_MARK.search(said)
+    if PILOT_ASKS.search(said) and not marked:
         return False                                    # "be advised, hydraulic failure, request the long runway"
-    return bool(others or ADVISORY.search(said) or airborne(plane) is False)
+    return bool(marked or CRAFT_WITH.search(said) or ADVISORY.search(said) or airborne(plane) is False)
 
 
 def go_around(norm: str) -> str:
@@ -517,28 +523,53 @@ def type_fits(said: str, code: str) -> bool | None:
     return None
 
 
-def _family(said: str) -> tuple[str, ...]:
-    return tuple(c for k, codes in TYPE_CODES.items() if re.search(rf"\b{k}\b", said) for c in codes)
+# (family, its names said, its ICAO type codes' starts): a type said or an ADS-B code resolved to who makes it, so a
+# code and a name for one aircraft ("C68A", "Citation"; "G450", "Gulfstream"; "BE20", "King Air") are never two (#380)
+FAMILIES = [(f, re.compile(rf"\b(?:{n})\b"), re.compile(rf"(?:{c})[a-z0-9]*$")) for f, n, c in (
+    ("cessna", r"cessna|citation|caravan|skyhawk|skylane|mustang|cj ?\d|latitude|longitude|sovereign", r"c\d"),
+    ("beech", r"beech\w*|king ?air|bonanza|baron|premier|hawker", r"be\d|b35|h25|ha4|prm"),
+    ("gulfstream", r"gulfstream|g ?[1-8]\d0|g ?[ivx]+", r"glf|g15|g28|g[1-8]\d0|ga\dc"),
+    ("bombardier", r"bombardier|challenger|global(?: express)?|crj ?\d*|learjet|lear", r"cl\d|glex|gl\d|crj|lj"),
+    ("embraer", r"embraer|phenom|praetor|legacy|erj ?\d*|e ?1[79]\d", r"e5[05]|e54|e35|e1[3-9]|e75|e29"),
+    ("pilatus", r"pilatus|pc ?(?:6|12|24)", r"pc\d"),
+    ("dassault", r"dassault|falcon", r"fa\d|f2th|f900"),
+    ("cirrus", r"cirrus|sr ?2[02]|vision jet", r"sr2|sf5"),
+    ("piper", r"piper|cherokee|archer|arrow|saratoga|malibu|meridian|seneca|navajo|cheyenne|cub", r"pa\d|p28|p32|p46"),
+    ("boeing", r"boeing|b ?7[0-9]7|7[0-9]7", r"b7\d"),
+    ("airbus", r"airbus|a ?3[0-8]0|a ?2[12]\d", r"a3\d|a2\d"),
+    ("mooney", r"mooney", r"m20"),
+    ("diamond", r"diamond|da ?[0-9]{2}", r"da\d|dv2"),
+    ("robinson", r"robinson|r ?(?:22|44|66)", r"r22|r44|r66"),
+    ("sikorsky", r"sikorsky|black hawk|s ?76|s ?92", r"s76|s92|h60"),
+    ("bell", r"bell", r"b06|b4\d"),
+)]
+
+
+def family(said: str) -> frozenset[str]:
+    """Who makes the aircraft a name or an ADS-B type code says: {"cessna"} for "Citation" and "C68A"; empty when unknown
+    (a generic "business jet", a make not in FAMILIES)."""
+    t = airport._TAIL.sub(" ", airport._norm(said or ""))
+    out = {f for f, names, _c in FAMILIES if names.search(t)}
+    if not out:                                         # an ICAO type code ("c68a", "glf4", "be20", "pc12")
+        for tok in [t.replace(" ", "")] + t.split():
+            if 2 <= len(tok) <= 4 and tok.isalnum():
+                out |= {f for f, _n, codes in FAMILIES if codes.match(tok)}
+    return frozenset(out)
 
 
 def other_aircraft(a: str, b: str) -> bool:
-    """Two reports name different aircraft (#380: never one call): both say a tail ("N123AB") and it differs, or both say
-    a type ("King Air", "Citation") of no common family (TYPE_CODES; else the make, the first word). Either unknown, a
-    generic one ("business jet"), or one inside the other ("Citation", "Cessna Citation X"): not known to differ."""
-    a, b = (airport._norm(x or "") for x in (a, b))
+    """Two reports name different aircraft (#380: never one call): both say a tail ("N123AB") and it differs, or both
+    resolve to a known maker (family: a name or an ADS-B code) and they share none ("King Air" and "Citation"). Either
+    unknown, generic or of an unknown maker: not known to differ (they may join). "C68A" and "Citation", "G450" and
+    "Gulfstream", "Global" and "Bombardier": one aircraft."""
+    a, b = airport._norm(a or ""), airport._norm(b or "")
     if not a or not b:
         return False
-    ta, tb = (airport._TAIL.search(x) for x in (a, b))
+    ta, tb = airport._TAIL.search(a), airport._TAIL.search(b)
     if ta and tb:
         return ta.group(0) != tb.group(0)
-    ya, yb = (airport._TAIL.sub(" ", x).split() for x in (a, b))
-    ya, yb = " ".join(ya), " ".join(yb)
-    if not ya or not yb or ya in airport._GENERIC or yb in airport._GENERIC or ya in yb or yb in ya:
-        return False
-    fa, fb = _family(ya), _family(yb)
-    if fa and fb:
-        return not any(x.startswith(y) or y.startswith(x) for x in fa for y in fb)
-    return ya.split()[0] != yb.split()[0]
+    fa, fb = family(a), family(b)
+    return bool(fa and fb and not fa & fb)
 
 
 # -- the watch ----------------------------------------------------------------------------------------------------------
