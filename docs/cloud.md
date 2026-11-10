@@ -1741,6 +1741,87 @@ bbox = [-73.845, 40.900, -73.530, 41.060]   # the stretch of line the map shows 
 Tests: `tests/test_trains.py` on fixtures recorded 2026-10-14 11:33 EDT (`tests/fixtures/mta/`, trimmed
 by `tools/record_trains_fixtures.py`; run it to re-record).
 
+### MTA TrainTime: GPS, cars, load, milepost, track (#362)
+
+> "MTA's public train map (radar.mta.info, no login) uses the TrainTime backend ... keyless, takes the header
+> `Accept-Version: 3.0`, allows CORS from any origin, and is undocumented." (GitHub #362)
+
+**Undocumented API: it may change or go away without notice.** sizeup treats it as a bonus on top of
+GTFS-realtime, never as the source the layer depends on (`sizeup/traintime.py`).
+
+| Endpoint (`https://backend-unified.mylirr.org`, header `Accept-Version: 3.0`) | Use |
+|---|---|
+| `/locations?geometry=TRACK_TURF&railroad=MNR` | **The poll.** Every live Metro-North train (85), no polylines, with `details.turf` (measured 2026-11-09: 29,190 bytes gzip on the wire, 330,976 unpacked). `geometry=NONE` drops `turf` and saves ~1 KB; `geometry=TRACK` (or none given) adds each train's route polyline (~1 MB gzip, 5.5 MB); `railroad=BOTH` adds the LIRR. |
+| `/locations?geometry=TRACK&railroad=MNR` | Route lines: `details.polyline`, Google encoded polyline at **precision 6**, the train's whole route. Daily, or at most hourly while a train in our area runs a route we have no line for; clipped to the area and cached (`trains/traintime_routes.json`). |
+| `/countdown/<code>?include_passed=false&hours=1.0` | A station's next hour (code = the GTFS `stop_code`: `2PC` Port Chester, `2RY` Rye). Only while that station's box is open on a page (the page asks every 30 s; the hub reads it when asked and older than 30 s). |
+| `/health` | `{<feed>: {healthy, age}}`. Not read: an answer in the known shape is the health that matters. |
+
+What a train record gives (checked against a capture of radar.mta.info and three single requests, 2026-11-09):
+`location` (lat / lon, `timestamp`, `source` GPS / SIGNAL / OPER / SCHED / WMDS, `speed` in **mph**, `heading` in
+degrees true, where **0.0 also means "not given"**), `consist` (fleet, `actual_len` / `sched_len`, occupancy,
+per car: number, type, `loading` EMPTY / MANY_SEATS / FEW_SEATS / SRO / NO_DATA, `passengers`), `status` (`otp` in
+seconds, **negative = late**; held; canceled), `details.stops` (code, scheduled and actual times, `stop_status`,
+`sign_track` / `t2s_track`, `posted`), `details.turf.location_mp` (miles along **the train's own route** from
+its first stop: a railroad milepost only for a train from Grand Central eastbound, or `length - location_mp`
+westbound to it) and `alerts` (with `branches`, e.g. `NH`). Speed units: 2,900 consecutive GPS pairs in the
+capture, reported speed / (distance / time) = 2.236 (mph is 2.237, km/h 3.6).
+
+**How it is used.** Adaptive, like the aircraft layer: **every 5 s** (`[trains] traintime_every_s`, 5 to 60)
+while a page has the Trains layer on, or an emergency incident (active or pending, created or changed in the
+last 2 h) is within 1 km of the line (our stretch has no grade crossings); **every 30 s** while someone looks
+otherwise (the GTFS-realtime feed's rule: a page asked within 2 min); **not at all** with nobody looking and no
+such incident. Fast polling is only with the small answer (TRACK_TURF, ~30 KB on the wire): should the poll ever
+come back over 2 MB unpacked (the polylines back in it), it drops to every 30 s and the Data sources row says why. Back-off and a 429 override the rate. One request at a time on its own thread
+(polls, route lines and countdowns alike, and a manual Refresh now), the User-Agent
+`Port Chester Fire Department - sizeup emergency situational awareness application (github.com/actualsecurity/sizeup)`.
+Each read is pushed at once: the CAD state stream carries `trains_rev`, and a page with the layer on fetches
+the trains when it moves.
+
+**Along the track, never jumping.** A GPS fix is projected onto the line (cross-track error dropped; the train is
+drawn on its own direction's track at that distance, so never off it) and filtered along it
+(`trains.along_filter`: an alpha-beta filter on distance against the fix's own time, the feed's speed blended
+in): never backwards (a miss behind holds the train), a smooth speed. Under about 1 mph it is stopped and stays
+put through GPS jitter. The page carries a fix on along the track at that speed for at most 10 s
+(`TT_HORIZON_S`, about two fast polls), never past the next stop, and meets the next fix forward only or by
+holding (motion.js `Motion.rail` / `railFollow`, the same tracker as before). A fix no newer than the last one
+changes nothing. The distance along the line comes from the projection, not `turf.location_mp`: the projection
+is in the same geometry the train is drawn on, while turf counts along each train's own route (see above) and
+would have to be calibrated to it. The milepost shown is turf's when the train's route starts (eastbound) or
+ends (westbound) at Grand Central; otherwise, for a train drawn at TrainTime's position, the distance along our
+line from Grand Central in miles; else none. A TrainTime position replaces GTFS-realtime's only when it is at
+least as new and under 40 s old. Each train is shown stale by its own freshest source, so a stale GTFS-realtime
+feed doesn't freeze trains TrainTime still reports.
+Kept: Metro-North's New Haven Line (`branch_id` NH) and any other Metro-North train inside the map's area.
+Merged into the GTFS-realtime trains by **train number and run date**: the position (GPS or SIGNAL, under
+2 min old) replaces the GTFS one (judged like any fix, but it teaches no reporting points), and the train
+gains its cars (actual / scheduled, fleet), occupancy and per-car load and passengers, speed, heading,
+milepost, next stop and its track (posted or planned), OTP, held / cancelled; the branch's alerts go with
+the layer. A train TrainTime has and GTFS-realtime hasn't is drawn from TrainTime alone when its position
+is good. The train's box: one data line (e.g. *NH west · 6 cars (M8) · 11 min late · MP 23.0 · next Rye trk
+3*), the cars as load bars (each car on hover), source and time in the footer; its route line is drawn
+while the box is open. Port Chester's and Rye's boxes list their next departures.
+
+**Validation and fallback.** Each record is checked field by field; one missing a required field (train
+number, run date, railroad, lat / lon / timestamp, direction) or with the wrong type is dropped, and an odd
+optional value is ignored. An answer that isn't a list of records, or in which more than half the records
+fail, is a **change of shape** and counts as a bad poll, like an HTTP error or a timeout. The last good read
+stays merged for up to 90 s; after **3 bad polls in a row** (`FALLBACK_AFTER`) the layer is GTFS-realtime
+alone, exactly as before #362, until a poll reads again. Settings > Data sources (*Metro-North GPS, cars,
+load (MTA TrainTime)*: the reason as its error) and Settings > Health (*Map feeds*: ok / fallback and why)
+show it. A failure backs off (20 s doubling to 10 min; a 429 5 min; 401 / 403 30 min).
+
+```toml
+[trains]
+traintime = true                 # false: GTFS-realtime only
+traintime_url = ""               # "" = https://backend-unified.mylirr.org; a test server's address
+traintime_every_s = 5            # the fast rate (layer on, or an emergency near the line), 5 to 60 s; else 30 s while viewed
+```
+
+Tests: `tests/test_traintime.py` on a **synthetic** fixture with the API's shape
+(`tests/fixtures/mta/traintime-locations.json`: made-up train and car numbers placed on the recorded line):
+parse, validation, the merge, fallback, a change of shape, back-off, route lines and departures. No test
+reaches the MTA (`tests/conftest.py`).
+
 ## Aircraft near HPN (shortfinal's picture)
 
 > "can we pull in the shortfinal components into this as additional layers? the way we implemented the data
@@ -2166,6 +2247,7 @@ kept gzipped in the same bucket, `s3://$LITESTREAM_BUCKET/$LITESTREAM_PATH/cache
 | `roads511.json` | each highway provider's camera list, incidents and signs | at most hourly (it is saved on every events read) |
 | `roadprojects.json` | road projects & closures | at most hourly |
 | `trains/static.json`, `trains/points.json` | Metro-North's stations and line; the reporting points learned | at once; at most hourly |
+| `trains/traintime_routes.json` | Metro-North route lines from MTA TrainTime, clipped to the area (#362) | at once |
 | `aircraft/faa_registry.sqlite` | the FAA registry as built (~weekly) | at once |
 
 On start (in the background after the CAD serves, #251: `App.start_layers` → `_load_layers`, before the

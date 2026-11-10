@@ -293,6 +293,9 @@ class Config:
     trains_gtfs_url: str = ""
     trains_bbox: tuple[float, float, float, float] = (-73.845, 40.900, -73.530, 41.060)
     trains_rt_every_s: float = 5.0          # the realtime feed this often while someone looks (5 to 300 s)
+    trains_traintime: bool = True           # MTA TrainTime merged in (sizeup/traintime.py, #362); GTFS-realtime the fallback
+    trains_traintime_url: str = ""          # "" = the MTA's (sizeup/traintime.py BASE_URL)
+    trains_traintime_every_s: float = 5.0   # TrainTime this often while the layer is on / an incident is near (5 to 60 s)
     # [weather] (sizeup/weather.py, #132): NWS alerts, conditions and radar, NOAA tides, fetched by the hub.
     weather_enabled: bool = True
     weather_radar: bool = True
@@ -884,7 +887,8 @@ def _geo(data: dict) -> dict:
 
 def _trains(data: dict) -> dict:
     """[trains] -> Config fields. No section: on, the MTA's feeds, our stretch of the line (Mount Vernon East to Stamford)."""
-    tr = _take(data.get("trains", {}), "trains", {"enabled", "key", "rt_url", "gtfs_url", "bbox", "rt_every_s"})
+    tr = _take(data.get("trains", {}), "trains", {"enabled", "key", "rt_url", "gtfs_url", "bbox", "rt_every_s",
+                                                        "traintime", "traintime_url", "traintime_every_s"})
     enabled = tr.get("enabled", True)
     if not isinstance(enabled, bool):
         raise ConfigError("trains.enabled: true or false")
@@ -892,7 +896,7 @@ def _trains(data: dict) -> dict:
     if key and not re.fullmatch(r"[!-~]{8,256}", key):
         raise ConfigError("trains.key / SIZEUP_MTA_KEY: the MTA developer key (8 or more characters, no spaces)")
     urls = {}
-    for k in ("rt_url", "gtfs_url"):
+    for k in ("rt_url", "gtfs_url", "traintime_url"):
         u = str(tr.get(k, "")).strip()
         m = re.fullmatch(r"(https?)://([^/:?#\s]+)(:\d+)?([^\s]*)", u) if u else None
         if u and (not m or (m.group(1) == "http" and m.group(2) not in ("127.0.0.1", "localhost", "::1"))):
@@ -902,7 +906,15 @@ def _trains(data: dict) -> dict:
     every = tr.get("rt_every_s", 5.0)
     if isinstance(every, bool) or not isinstance(every, (int, float)) or not 5 <= every <= 300:
         raise ConfigError("trains.rt_every_s: seconds between reads of the MTA's realtime feed while someone looks, 5 to 300")
-    return dict(trains_enabled=enabled, trains_key=key, trains_bbox=bbox, trains_rt_every_s=float(every), **urls)
+    tt = tr.get("traintime", True)
+    if not isinstance(tt, bool):
+        raise ConfigError("trains.traintime: true or false")
+    tt_every = tr.get("traintime_every_s", 5.0)
+    if isinstance(tt_every, bool) or not isinstance(tt_every, (int, float)) or not 5 <= tt_every <= 60:
+        raise ConfigError("trains.traintime_every_s: seconds between reads of MTA TrainTime while the layer is on or an "
+                          "incident is near the line, 5 to 60")
+    return dict(trains_enabled=enabled, trains_key=key, trains_bbox=bbox, trains_rt_every_s=float(every),
+                trains_traintime=tt, trains_traintime_every_s=float(tt_every), **urls)
 
 
 def _bbox(v, what: str, max_deg: float = 3.0) -> tuple[float, float, float, float]:
