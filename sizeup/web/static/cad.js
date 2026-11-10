@@ -536,7 +536,7 @@ function fillQueueItem(li, inc) {
   if (inc.joint_call) type.append(el("span", "chip joint", inc.joint_call));
   if (inc.scope) {                    // full department or specific units (#370)
     const sc = el("span", "chip scope", inc.scope.short);
-    sc.title = `${inc.scope.label}\nFrom ${inc.scope.source === "feed" ? "the county feed" : "the page"}`;
+    sc.title = `${inc.scope.paged}\nFrom ${inc.scope.source === "feed" ? "the county feed" : "the page"}`;
     type.append(sc);
   }
   const addr = el("div", "qa" + (inc.address ? "" : " dim"), inc.address || "No location");
@@ -707,7 +707,7 @@ function renderDetail() {
   show(scope, !!inc.scope);
   if (inc.scope) {                    // full department or specific units (#370, sizeup/cad/scope.py)
     stBadge(scope, inc.scope.short, "#9AA3AD");
-    scope.title = `${inc.scope.label}\nFrom ${inc.scope.source === "feed" ? "the county feed" : "the page"}`;
+    scope.title = `${inc.scope.paged}\nFrom ${inc.scope.source === "feed" ? "the county feed" : "the page"}`;
   }
   setText($("#d-source"), inc.source === "manual" ? "Manual" : inc.feed && inc.source === "CAD feed" ? inc.feed.label : inc.source);
   show($("#d-accept"), inc.status === "queued");

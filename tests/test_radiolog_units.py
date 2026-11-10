@@ -108,16 +108,16 @@ def test_the_dispatch_time_is_the_feeds_else_the_page_else_made(rig):
 def test_full_department_from_the_page_tones(rig):
     inc = rig.page(text=FULL_PAGE)
     assert rig.cad.full(inc["id"])["scope"] == {"kind": "full", "departments": ["Port Chester FD"],
-                                                 "short": "All PCFD", "label": "Full department (Port Chester FD)",
-                                                 "source": "page"}
+                                                 "short": "Full dept", "label": "Full department (Port Chester FD)",
+                                                 "paged": "Paged: full department (Port Chester FD)", "source": "page"}
     rig.at(600)                                                        # two departments' tones on one page
     m = rig.monitor.on_page("p2", ["Port Chester FD", "Rye Brook FD (est.)"],
                             parse(FULL_PAGE.replace("12 Example Avenue", "400 Sample Street")), at=rig.clock.t)
     two = rig.cad.from_monitor(m)
     s = rig.cad.full(two["id"])["scope"]
-    assert (s["short"], s["label"]) == ("All PCFD, RBFD", "Full department (Port Chester FD, Rye Brook FD)")
+    assert (s["short"], s["label"]) == ("Full dept", "Full department (Port Chester FD, Rye Brook FD)")
     queued = {i["id"]: i for i in rig.cad.state()["incidents"]}
-    assert queued[inc["id"]]["scope"]["short"] == "All PCFD"          # on the queue card too
+    assert queued[inc["id"]]["scope"]["short"] == "Full dept"          # on the queue card too
 
 
 def test_no_label_from_tones_without_a_call_type(rig):
@@ -127,7 +127,7 @@ def test_no_label_from_tones_without_a_call_type(rig):
 
 def test_specific_units_from_a_page_naming_apparatus(rig):
     inc = rig.page(text=PAGE)                                          # Engine 60, Ladder 31
-    assert rig.cad.full(inc["id"])["scope"]["short"] == "Units"
+    assert rig.cad.full(inc["id"])["scope"]["short"] == "Specific units"
 
 
 def test_the_feed_overrides_the_page_and_the_disagreement_is_noted(rig):
@@ -143,7 +143,12 @@ def test_the_feed_overrides_the_page_and_the_disagreement_is_noted(rig):
     rig.at(60)
     rig.page(pid="p2", text=FULL_PAGE)                                 # the page again: the feed's stands
     assert rig.cad.full(inc["id"])["scope"]["label"] == "Specific units"
-    assert sum("page: all PCFD" in e or "Page: all PCFD" in e for e in events(rig, inc["id"])) == 1
+    tones = [e["text"] for e in rig.cad.store.q("SELECT text FROM events WHERE incident_id = ? AND kind = 'tones'",
+                                                (inc["id"],))]
+    assert tones.count("Page: all PCFD · feed: units") == 1            # the repeat on the feed's call: its one line
+    rig.at(90)
+    rig.page(pid="p3", text=FULL_PAGE)                                 # and once only
+    assert sum(e.startswith("Page: ") for e in events(rig, inc["id"])) == 1
 
 
 def test_a_feed_department_entry_confirms_the_page(rig):
@@ -403,7 +408,7 @@ def test_a_street_only_page_attaching_to_a_feed_incident_gets_its_label_in_one_l
     rig.at(40)
     assert rig.page("p1", PAGE_NO_UNITS)["id"] == a                    # street only: joins it
     s = rig.cad.full(a)["scope"]
-    assert (s["short"], s["source"]) == ("Units", "feed")              # the feed's stands
+    assert (s["short"], s["source"]) == ("Specific units", "feed")              # the feed's stands
     tones = lines(rig, a, "tones")
     assert "Page: all PCFD · feed: units" in tones                     # one line for who the page paged
     assert not any(x.startswith(("Tones:", "Units named")) for x in tones)
@@ -421,7 +426,7 @@ def test_department_entries_never_block_a_street_only_join(tmp_path):
     a = feed_event(rig, units=("DPTA",))                               # only the department entry listed
     rig.at(30)
     assert rig.page("p1", PAGE_ST)["id"] == a and len(open_incidents(rig)) == 1   # the page names Engine 60, Ladder 31
-    assert rig.cad.full(a)["scope"]["short"] == "All PCFD"             # the feed's department entry stands
+    assert rig.cad.full(a)["scope"]["short"] == "Full dept"             # the feed's department entry stands
 
 
 def test_a_page_card_moved_onto_the_feeds_incident_takes_its_reading(tmp_path):
@@ -431,10 +436,10 @@ def test_a_page_card_moved_onto_the_feeds_incident_takes_its_reading(tmp_path):
     a = feed_event(rig, units=())                                      # the feed lists nobody yet: no label
     rig.at(20)
     first = rig.page("p1", "Port Chester Fire Department, respond to a CO alarm. Time out 1432.")["id"]
-    assert first != a and rig.cad.full(first)["scope"]["short"] == "All PCFD"
+    assert first != a and rig.cad.full(first)["scope"]["short"] == "Full dept"
     rig.at(50)
     assert rig.page("p2", PAGE_NO_UNITS)["id"] == a                    # rematch_page: the card moves onto it
-    assert rig.cad.full(a)["scope"]["short"] == "All PCFD"
+    assert rig.cad.full(a)["scope"]["short"] == "Full dept"
 
 
 def test_a_swept_page_card_takes_its_reading_along(tmp_path):
@@ -445,9 +450,45 @@ def test_a_swept_page_card_takes_its_reading_along(tmp_path):
     p = rig.cad.store.create_incident(type="ALARM", address="1717 Example Lane", source="60 Control page",
                                       source_ref="monitor:old", status="queued")
     rig.cad.sources._put("paging", "old", 1000, "Paging", T0 + 30, {"location": "1717 Example Lane"}, incident_id=p)
-    rig.cad.scope._reading(p, "full", ["Port Chester FD"])
+    rig.cad.scope._reading(p, "full", ["Port Chester FD"], line="Page: all PCFD")
     rig.at(600)
     rig.feed.change("A1", times={"in_service": T0 + 590}, closed=True)
     rig.poll()
     assert rig.cad.store.incident(p)["status"] == "dismissed"
-    assert rig.cad.full(a)["scope"]["short"] == "All PCFD"
+    assert rig.cad.full(a)["scope"]["short"] == "Full dept"
+    assert tone_lines(rig, a).count("Page: all PCFD") == 1             # its line moved along, kind tones
+
+
+def tone_lines(rig, iid: int) -> list[str]:
+    return [e["text"] for e in rig.cad.store.q("SELECT text FROM events WHERE incident_id = ? AND kind = 'tones' ORDER BY id",
+                                               (iid,))]
+
+
+def test_a_page_card_moved_onto_the_feeds_call_writes_its_one_line(tmp_path):
+    from tests.test_street_only import PAGE_ST, feed_event
+    rig = AutoRig(tmp_path)
+    rig.mode("pcfd")
+    a = feed_event(rig, units=("E62",))                                # 9 Example Ter, E62
+    rig.at(20)
+    first = rig.page("p1", "Port Chester Fire Department, Engine 60, Ladder 31, respond to a CO alarm. Time out 1432.")["id"]
+    assert first != a                                                  # no street: its own card
+    rig.at(50)
+    assert rig.page("p2", PAGE_ST)["id"] == a                          # the repeat names the street: moved on
+    page = [x for x in tone_lines(rig, a) if x.startswith("Page: ")]
+    assert page == ["Page: PCFD · units Engine 60, Ladder 31"]         # exactly one, kind tones (the feed agrees)
+    assert not any(e.startswith("Page: ") for e in events(rig, a) if e not in tone_lines(rig, a))
+    rig.at(70)
+    rig.page("p3", PAGE_ST)                                            # a repeat: no second line
+    assert sum(x.startswith("Page: ") for x in tone_lines(rig, a)) == 1
+
+
+def test_the_attach_path_writes_exactly_one_line(tmp_path):
+    from tests.test_street_only import PAGE_ST, feed_event
+    rig = AutoRig(tmp_path)
+    rig.mode("pcfd")
+    a = feed_event(rig, units=("E60", "L31"))
+    rig.at(30)
+    assert rig.page("p1", PAGE_ST)["id"] == a
+    rig.at(60)
+    rig.page("p2", PAGE_ST)
+    assert [x for x in tone_lines(rig, a) if x.startswith("Page: ")] == ["Page: PCFD · units Engine 60, Ladder 31"]

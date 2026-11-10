@@ -1814,10 +1814,10 @@ class Cad:
         cur = self.store.incident(iid)
         have = {e["text"] for e in self.store.q("SELECT text FROM events WHERE incident_id = ? AND kind = 'tones'", (iid,))}
         depts = list(dict.fromkeys([*(getattr(inc, "tone_departments", None) or []), *(getattr(inc, "departments", None) or [])]))
-        feed, fresh = self._page_scope(iid, inc, note=False)
+        feed, _ = self._page_scope(iid, inc, note=False)
         texts = [x[:2000] for x in lines]
         said = scope_mod.page_line(depts, list(inc.units or []), getattr(inc, "tone_departments", ()), inc.incident_type, feed)
-        if said and fresh:                             # once per reading (a repeat of it: said already)
+        if said:                                       # once: deduped on its text below
             texts.append(said)
         new = [x for x in dict.fromkeys(texts) if x not in have]
         if new:
