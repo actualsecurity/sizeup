@@ -46,6 +46,7 @@
 //                Recenter (cadmap.js fires sizeup:recenter), ✕, the layer going off, or LOST_MS with no fix and no
 //                alert naming it stops it.
 //                Hovering a mark: its tail, type, altitude, speed and phase as the canvas's title.
+//                The follow, its chip, the picked ring and the hovered one: mapfollow.js (shared with our units, #358).
 //   Alerts       (#352) an open airport pre-alert naming aircraft (airport-alerts.js calls alerts(items); its data's
 //                aircraft by hex, sizeup/cad/airport_alerts.py): each one ringed and haloed in its alert's colour (high
 //                --accent-text, medium --warn, low --text-2), drawn above the other aircraft (its own source, ac-hl:
@@ -76,11 +77,10 @@ window.AircraftLayer = (() => {
   const MARKS = ["ac-hl-mark", "ac-mark"];  // what a click or a hover finds
   const TWR_SRC = "ac-tower";               // the tower's mark (#257): its own source, never one of the aircraft
   const PING_MS = 1400;                     // one "talking" ring pulse (shortfinal's)
-  const HIGHLIGHT_MS = 12000;               // a chip's aircraft, ringed this long once centred
+  const HIGHLIGHT_MS = MapFollow.HIGHLIGHT_MS;   // a chip's aircraft, ringed this long once centred (mapfollow.js)
   const FOCUS_WAIT_MS = 20000;              // ... waited for this long (the layer just turned on, the data coming)
   const HALO = "#15181B";
-  const FOLLOW_ZOOM = 12;                   // a click centres the aircraft at least this close
-  const PAN_MS = 250;                       // following: the map eased onto the aircraft at most this often (moveend 4/s)
+  const FOLLOW_ZOOM = MapFollow.FOLLOW_ZOOM;   // a click centres the aircraft at least this close (12)
   const LOST_MS = 600e3;                    // ... and let go once it has had no fix this long, no alert naming it
   const NARROW_PX = 520;                    // a map this narrow: following from a card opens no box over the aircraft
   const SEEN_KEEP_MS = 3600e3;              // each aircraft's last fix here, kept this long (an alert's lost one)
@@ -193,7 +193,8 @@ window.AircraftLayer = (() => {
   }
 
   // ---- who is talking (#252): the hub's "atc" (talking, tx by hex), what plays here, a chip's aircraft ---------------
-  const talk = { playing: "", highlight: null, pending: null };
+  const talk = { playing: "", pending: null };
+  const lights = new MapFollow.Lights();    // a chip's aircraft (picked) and an alert card's (hovered); the frames redraw
   const nowS = () => Date.now() / 1000 + ((window.cad && cad.skew) || 0);
   const atcOf = (d) => (d && d.atc && !(window.cad && cad.state && cad.state.atc && cad.state.atc.map === false) ? d.atc : null);
   window.addEventListener("sizeup:playing", (e) => {
@@ -212,12 +213,12 @@ window.AircraftLayer = (() => {
       const live = (a.talking || []).find((x) => x.hex === hex && x.until > nowS());
       if (live) return live.role === "speaking" ? "talking" : "called";
     }
-    return talk.highlight && talk.highlight.hex === hex && Date.now() < talk.highlight.until ? "selected" : "";
+    return lights.isPicked(hex) ? "selected" : "";
   }
   function ringsOn(d) {
     const a = atcOf(d);
     return !!((a && ((a.talking || []).some((x) => x.until > nowS()) || talk.playing || towerLit(d)))
-              || (talk.highlight && Date.now() < talk.highlight.until));
+              || lights.anyPicked());
   }
   // the tower (#257): lit while it transmits (its last transmission in within the hub's hold) or one of its plays here
   function towerLit(d) {
@@ -236,7 +237,7 @@ window.AircraftLayer = (() => {
   }
 
   // ---- the open pre-alerts' aircraft (airport-alerts.js), and each one's last fix here --------------------------------
-  const alerted = { by: new Map(), sig: "", key: "", hover: "" };   // sig: what is drawn; key: which alerts and aircraft   // hex -> {level, ids, cs, type, lon, lat, at (ms), alt}
+  const alerted = { by: new Map(), sig: "", key: "" };   // sig: what is drawn; key: which alerts and aircraft   // hex -> {level, ids, cs, type, lon, lat, at (ms), alt}
   const seen = new Map();                   // hex -> its last fix this page saw {lon, lat, at (ms), rot, kind, cs, type, alt}
   function alerts(items) {
     const by = new Map();
@@ -256,18 +257,16 @@ window.AircraftLayer = (() => {
     alerted.sig = sig;
     // an ADS-B emergency's alert has its aircraft rewritten every 15 s: unticking holds until another alert or aircraft
     alerted.key = JSON.stringify([...by].map(([k, v]) => [k, v.ids]));
-    if (alerted.hover && !alerted.hover.split(" ").some((x) => by.has(x))) alerted.hover = "";
+    if (lights.hot && !lights.hoveredIds().some((x) => by.has(x))) lights.hover([]);
     for (const m of maps) m.sync();
     kick();
   }
   // a card hovered (its aircraft, or none): ringed wider
   function hover(hexes) {
-    const k = (hexes || []).filter(Boolean).join(" ");
-    if (k === alerted.hover) return;
-    alerted.hover = k;
+    if (!lights.hover(hexes)) return;
     for (const m of maps) m.draw(true);
   }
-  const hovered = (hex) => !!alerted.hover && alerted.hover.split(" ").includes(hex);
+  const hovered = (hex) => lights.hovered(hex);
   function alertColour(hex) {
     const v = alerted.by.get(hex);
     return v ? token(...ALERT_TOKEN[v.level]) : "";
@@ -279,12 +278,7 @@ window.AircraftLayer = (() => {
     if (s && (!al || s.at >= al.at)) return s;
     return al;
   }
-  function ago(ms) {
-    const s = Math.max(0, Math.round(ms / 1000));
-    if (s < 60) return `${s} s`;
-    const m = Math.round(s / 60);
-    return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${m % 60} min`;
-  }
+  const ago = MapFollow.ago;
   // the terse facts (a mark's hover, the follow chip's): tail · type · altitude · speed · phase
   function brief(a) {
     const ph = a.phase === "arriving" ? `arriving${a.rwy ? ` ${a.rwy}` : ""}` : a.phase === "departing" ? "departing"
@@ -418,20 +412,16 @@ window.AircraftLayer = (() => {
       this.control = control;
       this.map = control.map;
       this.added = false;
-      this.following = "";                  // the aircraft this map keeps centred (its hex), or ""
       this.offSig = null;                   // the alerts this viewer unticked the layer under
       maps.add(this);
       store.subs.add(() => this.sync());
       this.map.on("click", (e) => this.clicked(e));
-      // a drag, or Recenter (cadmap.js), takes the map back from the aircraft
-      // (a pinch is two fingers: a zoom round the aircraft, still following)
-      this.map.on("dragstart", (e) => {
-        const t = e && e.originalEvent && e.originalEvent.touches;
-        if (!(t && t.length > 1) && !this.map.isZooming()) this.unfollow();
-      });
-      this.map.on("sizeup:recenter", () => this.unfollow());
+      // following (mapfollow.js): a drag (not a pinch), Recenter (cadmap.js), ✕ or a unit followed lets it go
+      this.fol = new MapFollow.Follower(this.map, control.host, { cls: "ac-follow", textCls: "ac-follow-t", icon: "aircraft",
+                                                                 onStop: () => this.draw(true) });
       if (this.isOn()) kick();
     }
+    get following() { return this.fol.id; }   // the aircraft this map keeps centred (its hex), or ""
     // on: the viewer's (or the event's) set; on the Overview's maps also while an open pre-alert names an aircraft
     isOn() { return this.control.on(KEY, false) || this.alertOn(); }
     alertOn() { return this.control.profile !== "incident" && alerted.by.size > 0 && this.offSig !== alerted.key; }
@@ -614,67 +604,23 @@ window.AircraftLayer = (() => {
     // follow an aircraft: centred (zoomed in), kept centred on the frames that move it, the chip at the foot
     follow(hex) {
       if (!hex) return;
-      this.following = hex;
-      for (const z of [this.map.scrollZoom, this.map.touchZoomRotate]) {     // zoom round the centre (the aircraft) meanwhile
-        try { if (z.isEnabled()) z.enable({ around: "center" }); } catch (_) { /* an older MapLibre */ }
-      }
-      this.map.fire("sizeup:follow");                                       // cadmap.js: no refitting while it follows
       const a = store.data && (store.data.aircraft || []).find((x) => x.hex === hex);
       const at = (a && ((glide && glide.where(hex, Date.now())) || a)) || lastFix(hex);
-      if (at) {
-        try { this.map.easeTo({ center: [at.lon, at.lat], zoom: Math.max(this.map.getZoom(), FOLLOW_ZOOM), duration: 600 }); } catch (_) { /* */ }
-        this.panAt = performance.now() + 600 - PAN_MS;                      // its first pan after that ease
-      }
+      this.fol.start(hex, at, FOLLOW_ZOOM);   // fires sizeup:follow (cadmap.js: no refitting while it follows)
       this.draw(true);
       animate();
     }
-    unfollow() {
-      if (!this.following) return;
-      this.following = "";
-      for (const z of [this.map.scrollZoom, this.map.touchZoomRotate]) {
-        try { if (z.isEnabled()) z.enable(); } catch (_) { /* */ }
-      }
-      if (this.chipEl) this.chipEl.hidden = true;
-      this.draw(true);
-    }
-    // each frame while following: the map moved under the mark (never while it is moving otherwise: an ease, a zoom),
-    // and the chip
-    // eased over PAN_MS to where it is now, at most every PAN_MS and only once it is a pixel off centre: smooth, and
-    // a moveend at most 4 times a second (gislayers.js fetches only once the view leaves what it has)
+    unfollow() { this.fol.stop(); }           // (redrawn by its onStop)
+    // each frame while following: the map moved under the mark (mapfollow.js pan: eased over PAN_MS, at most every
+    // PAN_MS and only once it is a pixel off centre; never while it is moving otherwise: an ease, a zoom), and the chip
     track(f, force) {
-      const now = performance.now();
-      const ours = now < (this.panAt || 0) + PAN_MS + 60;                    // moving: our last pan, finishing
-      if (f && now - (this.panAt || 0) >= PAN_MS && !this.map.isZooming() && (!this.map.isMoving() || ours)) {
-        const [lon, lat] = f.geometry.coordinates, p = this.map.project([lon, lat]), c = this.map.project(this.map.getCenter());
-        if (Math.hypot(p.x - c.x, p.y - c.y) >= 1) {
-          this.panAt = now;
-          this.map.easeTo({ center: [lon, lat], duration: PAN_MS, easing: (t) => t });
-        }
-      }
+      if (f) this.fol.pan(f.geometry.coordinates);
       const hex = this.following, a = store.data && (store.data.aircraft || []).find((x) => x.hex === hex), lf = !a && lastFix(hex);
       if (!a && !alerted.by.has(hex) && (!lf || Date.now() - lf.at > LOST_MS)) { this.unfollow(); return; }   // gone for good
-      if (!force && this.chipEl && !this.chipEl.hidden) return;              // the chip's words change with an answer, not a frame
+      if (!force && this.fol.chipShown()) return;                            // the chip's words change with an answer, not a frame
       const name = a ? callsign(a) : (lf && lf.cs) || callsign({ hex });
-      if (!this.chipEl) {
-        const c = h("div", "ac-follow");
-        c.setAttribute("role", "status");
-        c.addEventListener("click", (e) => e.stopPropagation());
-        const x = h("button", "mini quiet", "✕");
-        x.type = "button";
-        x.title = "Stop following";
-        x.setAttribute("aria-label", "Stop following");
-        x.addEventListener("click", (e) => { e.stopPropagation(); this.unfollow(); });
-        this.chipText = h("span", "ac-follow-t");
-        c.append(...(window.Icon ? [Icon("aircraft")] : []), this.chipText, x);
-        this.control.host.append(c);
-        this.chipEl = c;
-      }
       const text = `Following ${name}` + (a ? "" : lf ? ` · last fix ${ago(Date.now() - lf.at)}` : " · lost");
-      if (this.chipText.textContent !== text) this.chipText.textContent = text;
-      const tip = a ? brief(a) : lf ? brief(lf) : "";
-      if (this.chipEl.title !== tip) this.chipEl.title = tip + (tip ? "\n" : "") + "A drag or Recenter stops following";
-      this.chipEl.classList.toggle("alerted", alerted.by.has(hex));
-      this.chipEl.hidden = false;
+      this.fol.chip(text, a ? brief(a) : lf ? brief(lf) : "", { alerted: alerted.by.has(hex) });
     }
     // how often to redraw this map: each time the fastest mark has moved STEP_PX on it, at its zoom
     frameMs() {
@@ -865,7 +811,7 @@ window.AircraftLayer = (() => {
 
   // A Radio row's aircraft chip (#252): that aircraft on a map on screen (else the Overview's), the layer turned on,
   // centred, ringed for HIGHLIGHT_MS, its box open. Waits FOCUS_WAIT_MS for the layer's data; gone by then: nothing.
-  const shownMap = () => [...maps].find((m) => { try { return !!m.map.getContainer().offsetParent; } catch (_) { return false; } });
+  const shownMap = () => MapFollow.shownMap(maps);
   function focus(hex, opts) {
     if (!hex) return;
     talk.pending = { hex, until: Date.now() + FOCUS_WAIT_MS, follow: !!(opts && opts.follow) };
@@ -888,7 +834,8 @@ window.AircraftLayer = (() => {
     }
     if (!a || !m.added) { setTimeout(tryFocus, 400); return; }
     talk.pending = null;
-    talk.highlight = { hex: a.hex, until: Date.now() + HIGHLIGHT_MS };
+    MapFollow.takeMap(m.map);                // centred here: no follower (a rig's either) pulls it back
+    lights.pick(a.hex, HIGHLIGHT_MS);
     const at = (glide && glide.where(a.hex, Date.now())) || a;
     try { m.map.easeTo({ center: [at.lon, at.lat], zoom: Math.max(m.map.getZoom(), 12), duration: 600 }); } catch (_) { /* */ }
     m.draw(true);

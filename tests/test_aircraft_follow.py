@@ -259,7 +259,7 @@ def map_input(d, **kw):
 def test_an_alerts_aircraft_is_ringed_above_the_rest_in_its_colour_and_cleared_with_it(tmp_path, monkeypatch):
     d, items = open_alerts(monkeypatch, tmp_path)
     atc_hex = hexes(items[0])[0]
-    o = run_node(tmp_path, ["motion.js", "glide.js", "aircraft.js"], LOADED + r"""
+    o = run_node(tmp_path, ["motion.js", "glide.js", "mapfollow.js", "aircraft.js"], LOADED + r"""
 (async () => {
   out.onBefore = m.isOn();                                   // the viewer has the layer off
   await AircraftLayer.load();
@@ -296,7 +296,7 @@ def test_an_alerts_aircraft_is_ringed_above_the_rest_in_its_colour_and_cleared_w
 def test_a_clicked_aircraft_is_followed_until_a_drag_or_recenter(tmp_path):
     d, ly, clock = hub_answer()
     moving = next(a for a in d["aircraft"] if a["alt"] != "ground" and (a["gs"] or 0) > 60 and a["age"] < 5)   # moving on screen
-    o = run_node(tmp_path, ["motion.js", "glide.js", "aircraft.js"], LOADED + r"""
+    o = run_node(tmp_path, ["motion.js", "glide.js", "mapfollow.js", "aircraft.js"], LOADED + r"""
 (async () => {
   await AircraftLayer.load();
   await flush();
@@ -354,7 +354,7 @@ def test_a_clicked_aircraft_is_followed_until_a_drag_or_recenter(tmp_path):
 @needs_node
 def test_following_an_alerts_aircraft_from_its_card_with_only_its_last_fix(tmp_path, monkeypatch):
     d, items = open_alerts(monkeypatch, tmp_path)
-    o = run_node(tmp_path, ["motion.js", "glide.js", "aircraft.js"], LOADED + r"""
+    o = run_node(tmp_path, ["motion.js", "glide.js", "mapfollow.js", "aircraft.js"], LOADED + r"""
 (async () => {
   await AircraftLayer.load();
   AircraftLayer.alerts(IN.items);
@@ -384,7 +384,7 @@ def test_following_an_alerts_aircraft_from_its_card_with_only_its_last_fix(tmp_p
 @needs_node
 def test_an_events_map_rings_alerted_aircraft_only_with_the_layer_on(tmp_path, monkeypatch):
     d, items = open_alerts(monkeypatch, tmp_path)
-    o = run_node(tmp_path, ["motion.js", "glide.js", "aircraft.js"], LOADED + r"""
+    o = run_node(tmp_path, ["motion.js", "glide.js", "mapfollow.js", "aircraft.js"], LOADED + r"""
 (async () => {
   AircraftLayer.alerts(IN.items);
   out.off = m.isOn();                                       // an event's map: the alert doesn't turn it on
@@ -401,7 +401,7 @@ def test_recenter_and_a_new_frame_let_a_followed_aircraft_go():
     js = (STATIC / "cadmap.js").read_text()
     assert 'this.map.fire("sizeup:recenter")' in js and js.count('"sizeup:recenter"') == 2
     assert 'this.map.on("sizeup:follow", () => { this.userMoved = true; })' in js
-    ac = (STATIC / "aircraft.js").read_text()
+    ac = (STATIC / "aircraft.js").read_text() + (STATIC / "mapfollow.js").read_text()     # the follow, shared (#358)
     # following moves the map on the frames that already move the marks: no timer, no fetch of its own
     assert "this.map.easeTo({ center: [lon, lat], duration: PAN_MS" in ac and "PAN_MS = 250" in ac and "!this.map.isMoving()" in ac
     css = (STATIC / "cadmap.css").read_text() + (STATIC / "cad.css").read_text()
@@ -435,7 +435,7 @@ out.keyboard = calls.slice();
 @needs_node
 def test_unticking_the_layer_under_an_alert_holds_while_its_aircraft_moves(tmp_path, monkeypatch):
     d, items = open_alerts(monkeypatch, tmp_path)
-    o = run_node(tmp_path, ["motion.js", "glide.js", "aircraft.js"], LOADED + r"""
+    o = run_node(tmp_path, ["motion.js", "glide.js", "mapfollow.js", "aircraft.js"], LOADED + r"""
 (async () => {
   await AircraftLayer.load();
   AircraftLayer.alerts(IN.items);
@@ -458,7 +458,7 @@ def test_unticking_the_layer_under_an_alert_holds_while_its_aircraft_moves(tmp_p
 @needs_node
 def test_following_stops_with_the_layer_and_for_an_aircraft_long_gone(tmp_path, monkeypatch):
     d, items = open_alerts(monkeypatch, tmp_path)
-    o = run_node(tmp_path, ["motion.js", "glide.js", "aircraft.js"], LOADED + r"""
+    o = run_node(tmp_path, ["motion.js", "glide.js", "mapfollow.js", "aircraft.js"], LOADED + r"""
 (async () => {
   await AircraftLayer.load();
   AircraftLayer.alerts(IN.items);

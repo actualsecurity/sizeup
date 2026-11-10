@@ -134,6 +134,7 @@ window.Radio = (() => {
       c.title = [e.radio_id ? `radio ${e.radio_id}` : "", e.alias && e.alias !== e.rig ? `alias ${e.alias}` : "",
                  e.label && e.label !== e.alias ? e.label : "", e.tg ? `TG ${e.tg}` : ""].filter(Boolean).join(", ")
         || "Transmitting now";
+      if (e.rig) { c.dataset.rig = e.rig.split(/,\s*/)[0]; c.title += "\nClick: show on map"; }   // cadmap.js (#358): centred, ringed
       return c;
     }));
     box.hidden = !items.length && !st.paging.length;
